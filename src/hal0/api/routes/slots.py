@@ -44,7 +44,7 @@ from hal0.slot_view import (
     config_enrichment,
     container_enrichment,
     loaded_model_names_from_slots,
-    resolve_ctx_max,
+    resolve_ctx_effective,
     serialize_slot,
     synthesize_upstream_entries,
 )
@@ -539,7 +539,7 @@ def _reject_unknown_config_keys(payload: dict[str, Any]) -> None:
     legacy aliases like ``[model].ctx_size`` and the string ``image``
     override) and rejects unknown keys with the paths listed.
 
-    Called AFTER :func:`_reject_model_owned_config_keys` at every call site —
+    Called AFTER :func:`_reject_slot_tuning_keys` at every call site —
     ``mtp``/``enable_thinking``/``vision`` would otherwise just fall out as
     generic "unknown slot config key(s)" here instead of the more actionable
     "belongs on the model" message.
@@ -566,19 +566,17 @@ def _reject_unknown_config_keys(payload: dict[str, Any]) -> None:
         )
 
 
-def _reject_model_owned_config_keys(payload: dict[str, Any]) -> None:
-    """400 when a slot-config write body carries a MODEL-owned key.
+def _reject_slot_tuning_keys(payload: dict[str, Any]) -> None:
+    """400 when a slot-config write body carries a tuning key (ADR-0029).
 
-    Thin route-layer wrapper over
-    :func:`hal0.slot_config.reject_model_owned_slot_keys` — ``mtp`` /
-    ``enable_thinking`` / ``vision`` moved to ``ModelDefaults`` (spec-hw-
-    slot-ownership §1); called BEFORE :func:`_reject_unknown_config_keys` at
-    every slot-config write boundary so the operator gets the specific
-    "belongs on the model" message instead of a generic unknown-key 400.
+    Thin route-layer wrapper over :func:`hal0.slot_config.reject_slot_tuning_keys`,
+    called BEFORE :func:`_reject_unknown_config_keys` at every slot-config
+    write boundary so the operator gets the specific "belongs on a profile"
+    message instead of a generic unknown-key 400.
     """
-    from hal0.slot_config import reject_model_owned_slot_keys
+    from hal0.slot_config import reject_slot_tuning_keys
 
-    reject_model_owned_slot_keys(payload)
+    reject_slot_tuning_keys(payload)
 
 
 def _device_backend(device: str | None) -> str:
@@ -740,7 +738,7 @@ async def create_slot(request: Request, background_tasks: BackgroundTasks) -> di
     body.setdefault("autoload", False)
     if isinstance(body.get("port"), int):
         _reject_port_conflict(int(body["port"]), name, runtime_ports)
-    _reject_model_owned_config_keys(body)
+    _reject_slot_tuning_keys(body)
     _reject_unknown_config_keys(body)
     _validate_autoload_priority(body)
     async with record_action(
@@ -1060,24 +1058,19 @@ async def get_slot(name: str, request: Request) -> dict[str, object]:
             for k, v in c_extra.items():
                 out.setdefault(k, v)
 
-        # #1835: config_enrichment above lifts ctx_max verbatim off the slot
-        # TOML (the raw hardware ceiling) — #1788/#1802 re-resolved this to
-        # the EFFECTIVE window on the list route only, leaving this detail
-        # route to advertise a number that can contradict its own
-        # ``resolved_command``. Mirror the list route's re-resolution here.
-        raw_ctx_max = out.get("ctx_max")
-        model_id = str(out.get("model_default") or "")
-        # #1859: mirror the list route's llm-only gate (slot_view.snapshot) —
-        # a non-llm slot (embedding/reranking/transcription/tts/image) has no
-        # context window to resolve; see the comment there for the full
-        # rationale.
-        if out.get("type") == "llm" and (model_id or isinstance(raw_ctx_max, int)):
-            out["ctx_max"] = resolve_ctx_max(
-                raw_ctx_max if isinstance(raw_ctx_max, int) else None,
-                getattr(request.app.state, "model_registry", None),
-                model_id,
-                name,
-            )
+        # ADR-0029: the effective window comes from the slot's profile — the
+        # same resolver the list route and the launch path use.
+        if out.get("type", "llm") in ("llm", "embedding", "reranking"):
+            try:
+                cfg = await sm._load_slot_config(name)
+            except Exception:
+                cfg = None
+            if isinstance(cfg, dict):
+                ctx, source = resolve_ctx_effective(
+                    cfg, getattr(request.app.state, "model_registry", None)
+                )
+                out["ctx_effective"] = ctx
+                out["ctx_source"] = source
         return out
     except Exception:
         # Fall through to synthetic lookup before re-raising — a remote
@@ -1233,7 +1226,7 @@ async def update_slot_config(name: str, request: Request) -> dict[str, object]:
         ) from exc
     if not isinstance(body, dict):
         raise BadRequest("request body must be a JSON object", code="request.not_an_object")
-    _reject_model_owned_config_keys(body)
+    _reject_slot_tuning_keys(body)
     _reject_unknown_config_keys(body)
     _validate_autoload_priority(body)
     # Port moves go through the registry so an edit can't land on a port
@@ -1295,13 +1288,12 @@ async def update_slot_config(name: str, request: Request) -> dict[str, object]:
 @router.patch("/{name}/defaults")
 @_invalidates_snapshot
 async def update_slot_defaults(name: str, request: Request) -> dict[str, object]:
-    """Update slot defaults (ctx_size / context_size, n_gpu_layers, …).
+    """Rebind the slot's model (``{"default": "<model id>"}``).
 
-    Convenience wrapper over update_config — body keys merge into the
-    slot's [model] sub-table rather than the top level. Keys are validated
-    against the ModelConfig schema (plus the documented ``ctx_size``
-    alias); unknown keys 400 with ``validation.unknown_keys``. Provider-
-    specific params belong under ``extra`` (passed through verbatim).
+    Convenience wrapper over update_config — body keys merge into the slot's
+    [model] sub-table. ADR-0029: the table holds only ``default``; a context
+    window or any other tune is refused (``slot.tuning_key_denied``) — it
+    belongs on the slot's profile.
     """
     sm = _get_slot_manager(request)
     try:
@@ -1314,15 +1306,11 @@ async def update_slot_defaults(name: str, request: Request) -> dict[str, object]
         ) from exc
     if not isinstance(body, dict):
         raise BadRequest("request body must be a JSON object", code="request.not_an_object")
-    # Model-owned keys FIRST, on the UNWRAPPED body: ``mtp``/``enable_thinking``
-    # /``vision`` are top-level slot-adjacent keys, so a stray one here is the
-    # operator reaching for a model capability through the wrong endpoint. Left
-    # to the wrapped unknown-key check below it still 400s — but as
-    # ``validation.unknown_keys`` naming ``model.mtp``, which reads like a typo
-    # and sends the operator hunting for a misspelling that doesn't exist.
-    # Same ordering, same ``slot.model_owned_key_denied`` code as the sibling
-    # PUT /config and POST /api/slots boundaries.
-    _reject_model_owned_config_keys(body)
+    # Tuning keys FIRST (both as the top-level keys an operator reaches for and
+    # as [model] keys), so the answer is "belongs on a profile", not a
+    # generic unknown-key 400.
+    _reject_slot_tuning_keys(body)
+    _reject_slot_tuning_keys({"model": body})
     # Defaults merge into [model] — validate the wrapped shape so unknown
     # keys surface as their real destination path (``model.<key>``).
     _reject_unknown_config_keys({"model": body})

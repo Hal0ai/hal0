@@ -384,12 +384,23 @@ def test_seed_context_envelope_no_slots_passes(tmp_path) -> None:  # type: ignor
     assert c.status == "pass"
 
 
-def test_seed_context_envelope_flags_an_oversized_ceiling(
-    monkeypatch: pytest.MonkeyPatch, tmp_path
+def _profile_with_window(home: str, name: str, ctx_size: int) -> None:
+    """Add a custom profile (ADR-0029: the window is the profile's) to the tmp catalog."""
+    from pathlib import Path
+
+    path = Path(home) / "etc" / "hal0" / "profiles.toml"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as fh:
+        fh.write(f"[profile.{name}]\nctx_size = {ctx_size}\n\n")
+
+
+def test_seed_context_envelope_flags_an_oversized_profile_window(
+    monkeypatch: pytest.MonkeyPatch, tmp_path, tmp_hal0_home: str
 ) -> None:  # type: ignore[no-untyped-def]
     from hal0.config.schema import HardwareInfo
 
-    (tmp_path / "brain.toml").write_text("[model]\ncontext_size = 999999999\n", encoding="utf-8")
+    _profile_with_window(tmp_hal0_home, "huge-window", 16_000_000)
+    (tmp_path / "brain.toml").write_text('profile = "huge-window"\n', encoding="utf-8")
     cpu_only = HardwareInfo(platform="bare-metal-cpu-only", ram_mb=4096, gpus=[])
     monkeypatch.setattr(
         "hal0.hardware.freshness.resolve_fresh_hardware_info", lambda: (cpu_only, None)
@@ -397,14 +408,34 @@ def test_seed_context_envelope_flags_an_oversized_ceiling(
     c = da.check_seed_context_envelope(slots_dir=tmp_path)
     assert c.status == "warn"
     assert "brain" in c.detail
+    assert "profile ctx_size" in c.detail
+    assert "[model]" not in c.detail
+
+
+def test_seed_context_envelope_ignores_a_stale_slot_level_window(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:  # type: ignore[no-untyped-def]
+    """A leftover ``[model].context_size`` is no window any more (ADR-0029): only
+    the slot profile's ``ctx_size`` is checked against the envelope."""
+    from hal0.config.schema import HardwareInfo
+
+    (tmp_path / "brain.toml").write_text(
+        'profile = "brain"\n[model]\ncontext_size = 999999999\n', encoding="utf-8"
+    )
+    cpu_only = HardwareInfo(platform="bare-metal-cpu-only", ram_mb=4096, gpus=[])
+    monkeypatch.setattr(
+        "hal0.hardware.freshness.resolve_fresh_hardware_info", lambda: (cpu_only, None)
+    )
+    assert da.check_seed_context_envelope(slots_dir=tmp_path).status == "pass"
 
 
 def test_seed_context_envelope_passes_when_within_budget(
-    monkeypatch: pytest.MonkeyPatch, tmp_path
+    monkeypatch: pytest.MonkeyPatch, tmp_path, tmp_hal0_home: str
 ) -> None:  # type: ignore[no-untyped-def]
     from hal0.config.schema import GPUInfo, HardwareInfo
 
-    (tmp_path / "brain.toml").write_text("[model]\ncontext_size = 8192\n", encoding="utf-8")
+    _profile_with_window(tmp_hal0_home, "eight-k", 8192)
+    (tmp_path / "brain.toml").write_text('profile = "eight-k"\n', encoding="utf-8")
     big_box = HardwareInfo(
         platform="strix-halo",
         ram_mb=131072,
@@ -1056,13 +1087,15 @@ def test_anchor_window_passes_when_hermes_is_not_provisioned(tmp_path) -> None: 
     assert "not provisioned" in c.detail
 
 
-def test_anchor_window_fails_on_the_ct152_shape(tmp_path) -> None:  # type: ignore[no-untyped-def]
+def test_anchor_window_fails_on_the_ct152_shape(tmp_path, tmp_hal0_home: str) -> None:  # type: ignore[no-untyped-def]
     """The demonstrated false negative, as an operator would meet it on an
-    upgraded box: `hal0 doctor` must name the real serving slot and the fix."""
+    upgraded box: `hal0 doctor` must name the real serving slot, its profile
+    and the fix."""
+    _profile_with_window(tmp_hal0_home, "brain-window", 32768)
     slots = tmp_path / "slots"
     slots.mkdir()
-    (slots / "brain.toml").write_text("[model]\ncontext_size = 32768\n")
-    (slots / "agent.toml").write_text("[model]\ncontext_size = 65536\n")
+    (slots / "brain.toml").write_text('profile = "brain-window"\n')
+    (slots / "agent.toml").write_text('profile = "agent"\n')
     c = da.check_hermes_anchor_window(
         config_path=_hermes_config(tmp_path),
         fetch=lambda *_a: (_CT152_BY_ID, _CT152_CATALOG),
@@ -1071,7 +1104,8 @@ def test_anchor_window_fails_on_the_ct152_shape(tmp_path) -> None:  # type: igno
     )
     assert c.status == "fail"
     assert "32,768" in c.detail and "64,000" in c.detail
-    assert "hal0 slot edit brain --ctx-size 65536" in c.detail
+    assert "raise ctx_size to 65536 on profile 'brain-window'" in c.detail
+    assert "hal0 slot restart brain" in c.detail
     assert "agent.toml" not in c.detail
 
 

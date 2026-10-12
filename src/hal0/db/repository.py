@@ -51,19 +51,6 @@ _MODALITIES_OVERRIDE_EXTRA_KEY = "_modalities_override"
 #: when set (None means "derive"), mirroring _DEFAULT_EXTRA_KEY's rule.
 _PROVIDER_EXTRA_KEY = "_provider"
 
-#: spec-hw-slot-ownership §1: ``ModelDefaults.enable_thinking`` / ``.vision``
-#: are tri-state (None/False/True) reasoning + vision-projector owners, moved
-#: onto the model from the slot. Like ``capability_flags`` /
-#: ``modalities_override`` above, they have no dedicated column yet, so they
-#: ride the catch-all ``extra`` JSON blob under these reserved keys — a
-#: pydantic tri-state can't distinguish "column NULL" from "False" the way a
-#: dedicated INTEGER column can without a migration, but the extra blob keys
-#: are only written when non-None (mirrors ``_DEFAULT_EXTRA_KEY``'s "only
-#: stamped when set" rule), so absence reads back as None (AUTO) with no
-#: schema migration.
-_ENABLE_THINKING_EXTRA_KEY = "_enable_thinking"
-_VISION_EXTRA_KEY = "_vision"
-
 #: Per-type default marker (:attr:`hal0.registry.model.Model.default`) also
 #: rides the ``extra`` blob under a reserved key rather than getting its own
 #: column — the single-holder invariant is enforced in Python (the
@@ -71,6 +58,9 @@ _VISION_EXTRA_KEY = "_vision"
 #: written when True; a missing key reads back as False, so pre-existing rows
 #: round-trip as non-default with no migration.
 _DEFAULT_EXTRA_KEY = "_default"
+#: ``ModelDefaults.tokenizer_repo`` (a file fact: the HF repo whose tokenizer
+#: matches this model). It has no column, so it rides in ``extra``.
+_TOKENIZER_REPO_EXTRA_KEY = "_tokenizer_repo"
 
 #: Columns of the `model` table, in the order INSERT/UPDATE statements bind
 #: them. Kept as a tuple (not re-derived from a dict each call) so
@@ -90,11 +80,7 @@ MODEL_COLUMNS: tuple[str, ...] = (
     "quant",
     "license",
     "hf_filename",
-    "profile",
-    "extra_args",
     "chat_template",
-    "context_size",
-    "rope_freq_base",
     "capabilities",
     "tags",
     "sha256",
@@ -104,22 +90,21 @@ MODEL_COLUMNS: tuple[str, ...] = (
     "extra",
 )
 
-#: ModelDefaults columns folded onto the `model` row. `defaults` reconstructs
-#: iff at least one of these is non-NULL. ``mtp``/``jinja`` (§7.1a / ML-5)
-#: are tri-state (NULL/0/1 -> None/False/True) — pydantic's lax bool
-#: validator coerces the raw sqlite int back to bool on reconstruction.
-# NOTE (spec-hw-slot-ownership §6): ``n_gpu_layers`` is NO LONGER a
-# ModelDefaults field (NGL is slot-owned now). Its SQL column is KEPT (nulled by
-# current code; the deploy-window fold reads it, and the physical DROP is
-# deferred post-1.0 to avoid a same-release fold-vs-drop hazard) — it is neither
-# written from the model nor folded back into ModelDefaults on read, hence its
-# absence here.
+#: ModelDefaults (file facts) columns on the `model` row. ``defaults``
+#: reconstructs iff at least one is non-NULL. ``mtp``/``jinja`` are tri-state
+#: (NULL/0/1 -> None/False/True). The tuning columns this row used to carry
+#: moved to profiles (ADR-0029; SQL migration 012 copies them to a holding
+#: table for the conversion).
+#
+# HAL0-SUNSET: v1.7.0 — the table still has the tuning columns (profile,
+# extra_args, n_gpu_layers, context_size, rope_freq_base, preferred_runner)
+# and ``extra`` may still hold ``_enable_thinking``/``_vision``. Nothing here
+# reads or writes them; they stay so a rollback to a release before ADR-0029
+# finds the schema it expects. Drop them with a new migration once the
+# upgrade floor is past the release that shipped migration 012.
+_RETIRED_TUNING_EXTRA_KEYS: tuple[str, ...] = ("_enable_thinking", "_vision")
 _DEFAULTS_COLUMNS: tuple[str, ...] = (
-    "profile",
-    "extra_args",
     "chat_template",
-    "context_size",
-    "rope_freq_base",
     "mtp",
     "jinja",
 )
@@ -149,9 +134,6 @@ def model_to_row(
     NULL/0/1 in the INTEGER columns; ``defaults.mtp``/``.jinja`` pass
     straight through since sqlite3 adapts a Python ``bool`` to 0/1
     natively, same as any other int).
-    ``preferred_runner`` / ``n_gpu_layers`` are gone from the model (hardware is
-    slot-owned now); their SQL columns are KEPT-but-unbound (nulled; physical
-    DROP deferred post-1.0 — the deploy-window fold reads them first).
     ``capability_flags``/``modalities_override`` have no reserved column
     yet, so they fold into the ``extra`` JSON blob under the reserved keys
     above instead of a schema migration.
@@ -174,13 +156,8 @@ def model_to_row(
     # Per-type default marker — only stamped when set (see _DEFAULT_EXTRA_KEY).
     if model.default:
         metadata[_DEFAULT_EXTRA_KEY] = True
-    # spec-hw-slot-ownership §1: enable_thinking/vision — only stamped when
-    # the curator has an explicit opinion (tri-state None = AUTO, the common
-    # case, costs nothing on disk).
-    if defaults.enable_thinking is not None:
-        metadata[_ENABLE_THINKING_EXTRA_KEY] = defaults.enable_thinking
-    if defaults.vision is not None:
-        metadata[_VISION_EXTRA_KEY] = defaults.vision
+    if defaults.tokenizer_repo:
+        metadata[_TOKENIZER_REPO_EXTRA_KEY] = defaults.tokenizer_repo
     extra_json = json.dumps(metadata, separators=(",", ":")) if metadata else None
 
     ts = updated_at or now_iso()
@@ -189,9 +166,6 @@ def model_to_row(
         "source_repo": model.hf_repo or None,
         "revision": None,
         "path": model.path,
-        # spec-hw-slot-ownership §6: the runner is slot-owned (SlotConfig.binary)
-        # now — the model carries no preferred_runner, so this KEPT-but-unbound
-        # SQL column is no longer written (stays NULL; drop deferred post-1.0).
         "mmproj": model.mmproj,
         "architecture": model.architecture,
         "context_length": context_length,
@@ -202,14 +176,7 @@ def model_to_row(
         "quant": model.quant,
         "license": model.license,
         "hf_filename": model.hf_filename,
-        "profile": defaults.profile,
-        "extra_args": defaults.extra_args,
-        # NGL is slot-owned now (spec-hw-slot-ownership §6); this KEPT-but-unbound
-        # SQL column is no longer written (stays NULL). The deploy-window fold
-        # reads any prior value onto each referencing slot; drop deferred post-1.0.
         "chat_template": defaults.chat_template,
-        "context_size": defaults.context_size,
-        "rope_freq_base": defaults.rope_freq_base,
         "capabilities": json.dumps(list(model.capabilities), separators=(",", ":")),
         "tags": json.dumps(list(model.tags), separators=(",", ":")),
         "sha256": None,
@@ -420,17 +387,13 @@ def row_to_model(row: sqlite3.Row, *, backends: list[str] | None = None) -> Mode
     raw_provider = metadata.pop(_PROVIDER_EXTRA_KEY, None)
     provider = raw_provider if isinstance(raw_provider, str) else None
     default = bool(metadata.pop(_DEFAULT_EXTRA_KEY, False))
-    raw_enable_thinking = metadata.pop(_ENABLE_THINKING_EXTRA_KEY, None)
-    enable_thinking = raw_enable_thinking if isinstance(raw_enable_thinking, bool) else None
-    raw_vision = metadata.pop(_VISION_EXTRA_KEY, None)
-    vision = raw_vision if isinstance(raw_vision, bool) else None
+    raw_tokenizer_repo = metadata.pop(_TOKENIZER_REPO_EXTRA_KEY, None)
+    for key in _RETIRED_TUNING_EXTRA_KEYS:
+        metadata.pop(key, None)
 
     defaults_kwargs: dict[str, Any] = {col: row[col] for col in _DEFAULTS_COLUMNS}
-    defaults_kwargs["enable_thinking"] = enable_thinking
-    defaults_kwargs["vision"] = vision
-    # NOTE: `n_gpu_layers`/`context_size` can legitimately be 0, which is
-    # falsy — must check `is not None`, not truthiness, or a real all-
-    # zero-but-set ModelDefaults would collapse to None on read.
+    if isinstance(raw_tokenizer_repo, str) and raw_tokenizer_repo:
+        defaults_kwargs["tokenizer_repo"] = raw_tokenizer_repo
     has_defaults = any(v is not None for v in defaults_kwargs.values())
     defaults = ModelDefaults(**defaults_kwargs) if has_defaults else None
 
@@ -448,9 +411,6 @@ def row_to_model(row: sqlite3.Row, *, backends: list[str] | None = None) -> Mode
         backends=list(backends) if backends else [],
         mmproj=row["mmproj"],
         architecture=row["architecture"],
-        # preferred_runner / n_gpu_layers are NOT read into Model — the fields are
-        # gone (hardware is slot-owned). The columns are KEPT-but-unbound (nulled;
-        # drop deferred post-1.0); the deploy-window fold reads them directly.
         capability_flags=capability_flags,
         modalities_override=modalities_override,
         provider=provider,

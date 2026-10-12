@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import shlex
 
-from hal0.config.schema import ProfileConfig, resolve_profile_flags
+from hal0.config.schema import ProfileConfig
 from hal0.providers._gpu import resolve_gpu_device_paths, resolve_gpu_group_ids
 from hal0.providers.base import HealthCheck, Mount, RuntimeLaunchPlan
 from hal0.providers.comfyui import ComfyUIProvider
@@ -49,21 +49,17 @@ def _render_llama(
     publish_host="127.0.0.1",
 ):
     devices = device_paths if device_paths is not None else resolve_gpu_device_paths()
-    # FLAGS-own: profile flags / slot extra_args are inert at launch — route the
-    # tune through the model's materialized defaults.extra_args (simulate a
-    # stamped model), which is the one segment that still reaches the argv.
+    # ADR-0029: the profile is the whole tune — the flags ride the profile layer.
     merged_tune = " ".join(p for p in ((flags_str or "").strip(), (extra_args or "").strip()) if p)
     plan = _llama_launch_plan(
         image=image,
         port=port,
         model_path=model_path,
-        flags_str="",
         devices=list(devices),
         group_ids=[str(g) for g in resolve_gpu_group_ids()],
-        context_size=context_size,
-        extra_args=None,
+        context_size=context_size if context_size is not None else 8192,
         model_alias=model_alias,
-        model_defaults={"extra_args": merged_tune} if merged_tune else None,
+        profile_flags=merged_tune,
     )
     return _render_quadlet_from_plan(token, plan, publish_host=publish_host)
 
@@ -164,8 +160,8 @@ def test_render_llama_shim_matches_equivalent_plan(monkeypatch) -> None:
     equivalent RuntimeLaunchPlan and rendering it — proving the legacy llama
     path is now just the spec path with a thin adapter."""
     monkeypatch.setenv("HAL0_MODEL_STORE", _MODEL_STORE_MOUNT)  # pin the default
-    profile = ProfileConfig(flags="-fa on --no-mmap", mtp=False)
-    flags = resolve_profile_flags(profile)
+    profile = ProfileConfig(flags="-fa on --no-mmap", mtp="off")
+    flags = profile.flags
 
     shim_unit = _render_llama(
         "chat",

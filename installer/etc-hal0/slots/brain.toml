@@ -56,7 +56,8 @@
 # MiniCPM5 specialized parser. Reasoning: LFM2.5 emits <think>
 # from weights; profile.brain leaves reasoning-format at the runner
 # default so think text extracts into reasoning_content instead of leaking
-# into message.content (see seed_profiles.toml). The `[brain_chat]
+# into message.content (see seed_profiles.toml; the profile also carries the
+# slot's 65536-token window as `ctx_size`). The `[brain_chat]
 # tool_model` reroute (default `hal0/agent`, ADR-0023) remains as the
 # FALLBACK: it catches artefact rounds and covers older runner images or
 # off-dialect models, and the tool-capable model still owns a chain's
@@ -87,6 +88,3 @@ profile = "brain"
 port = 8089
 n_gpu_layers = -1
 threads = 0
-
-[model]
-context_size = 65536

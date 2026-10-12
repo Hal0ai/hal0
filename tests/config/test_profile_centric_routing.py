@@ -8,7 +8,6 @@ is either a reported launch change or a blocked slot, never silent.
 from __future__ import annotations
 
 import json
-import sqlite3
 from pathlib import Path
 from typing import Any
 
@@ -17,8 +16,7 @@ from typer.testing import CliRunner
 
 from hal0.config import paths
 from hal0.config.migrations import profile_centric as pc
-from hal0.db.repository import model_to_row
-from hal0.registry.model import Model, ModelDefaults
+from tests.config.profile_centric_fixtures import old_model, write_db
 
 
 def _write(path: Path, data: dict[str, Any]) -> None:
@@ -26,42 +24,12 @@ def _write(path: Path, data: dict[str, Any]) -> None:
     path.write_bytes(tomli_w.dumps(data).encode())
 
 
-def _db(models: list[Model], holding: list[dict[str, Any]] | None = None) -> None:
-    rows = [model_to_row(m) for m in models]
-    target = paths.db_path()
-    target.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(target)
-    cols = list(rows[0])
-    conn.execute(f"CREATE TABLE model ({', '.join(cols)})")
-    for row in rows:
-        conn.execute(
-            f"INSERT INTO model ({', '.join(cols)}) VALUES ({', '.join('?' for _ in cols)})",
-            [row[c] for c in cols],
-        )
-    if holding is not None:
-        conn.execute(
-            f"CREATE TABLE {pc.HOLDING_TABLE} (id, profile, extra_args, n_gpu_layers, "
-            "context_size, rope_freq_base, preferred_runner, enable_thinking, vision)"
-        )
-        for h in holding:
-            keys = list(h)
-            conn.execute(
-                f"INSERT INTO {pc.HOLDING_TABLE} ({', '.join(keys)}) "
-                f"VALUES ({', '.join('?' for _ in keys)})",
-                [h[k] for k in keys],
-            )
-    conn.commit()
-    conn.close()
+def _db(models: list[dict[str, Any]], *, upgraded: bool = False) -> None:
+    write_db(models, upgraded=upgraded)
 
 
-def _model(model_id: str = "m", **kw: Any) -> Model:
-    defaults = kw.pop("defaults", None)
-    return Model(
-        id=model_id,
-        path=kw.pop("path", f"/models/{model_id}.gguf"),
-        defaults=ModelDefaults(**defaults) if defaults else None,
-        **kw,
-    )
+def _model(model_id: str = "m", **kw: Any) -> dict[str, Any]:
+    return old_model(model_id, path=kw.pop("path", f"/models/{model_id}.gguf"), **kw)
 
 
 def _slot(stem: str = "1", **kw: Any) -> None:
@@ -265,7 +233,8 @@ def test_settled_deleted_demoted_name_is_not_resurrected() -> None:
     assert _one(plan).profile_after != "dense"
 
 
-def test_markers_stay_while_any_slot_is_blocked() -> None:
+def test_markers_move_to_the_ledger_even_while_a_slot_is_blocked() -> None:
+    """profiles.toml must load in the new shape whatever is blocked."""
     _write(
         paths.profiles_toml(),
         {"legacy_seeds_migrated": True, "legacy_seeds_adopted": [], "profile": {}},
@@ -273,19 +242,42 @@ def test_markers_stay_while_any_slot_is_blocked() -> None:
     _slot(profile="chat")
     _db([_model(defaults={"extra_args": "--mmproj /x"})])
     plan = pc.plan_conversion()
-    assert plan.blocked and "(profiles.toml)" not in plan.profile_rewrites
-    assert any("markers" in w for w in plan.warnings)
+    assert plan.blocked
+    assert all(pc.LEDGER_FILE in n for n in plan.profile_rewrites["(profiles.toml)"])
+
+
+def test_ledger_feeds_the_frozen_resolver_once_markers_left_profiles_toml() -> None:
+    """A demoted seed the ledger settled stays deleted after the move."""
+    _write(paths.profiles_toml(), {"profile": {}})
+    ledger = paths.var_lib() / pc.LEDGER_FILE
+    ledger.parent.mkdir(parents=True, exist_ok=True)
+    ledger.write_text(json.dumps({"legacy_seeds_migrated": True}))
+    _slot(profile="dense")
+    _db([_model()])
+    sp = _one(pc.plan_conversion())
+    assert "does not exist" in " ".join(sp.notes)  # settled: not re-adopted
 
 
 # ── engines ──────────────────────────────────────────────────────────────────
 
 
 def test_flm_ctx_is_always_explicit() -> None:
+    """An older FLM slot with no window ran FLM's 8192; the flm seed is 16384,
+    so the slot gets a profile carrying 8192 explicitly."""
+    assert pc.target_seeds()["flm"]["ctx_size"] == 16384
     _slot(device="npu", profile="flm", model={"default": "npu-m"})
     _db([_model("npu-m")])
     plan = pc.plan_conversion()
     sp = _one(plan)
     assert plan.profiles[sp.profile_after]["ctx_size"] == 8192
+
+
+def test_flm_slot_window_is_kept_in_its_own_profile() -> None:
+    _slot(device="npu", profile="flm", model={"default": "npu-m", "context_size": 12000})
+    _db([_model("npu-m")])
+    plan = pc.plan_conversion()
+    sp = _one(plan)
+    assert plan.profiles[sp.profile_after]["ctx_size"] == 12000
 
 
 def test_self_managed_engine_keeps_its_bundle_path_in_the_profile() -> None:
@@ -320,8 +312,13 @@ def test_only_the_file_the_loader_uses_is_planned() -> None:
 def test_holding_table_supplies_model_tuning() -> None:
     _slot(profile="chat")
     _db(
-        [_model(metadata={"context_length": 262144})],
-        holding=[{"id": "m", "context_size": 50000, "enable_thinking": 1}],
+        [
+            _model(
+                metadata={"context_length": 262144},
+                defaults={"context_size": 50000, "enable_thinking": True},
+            )
+        ],
+        upgraded=True,
     )
     plan = pc.plan_conversion()
     sp = _one(plan)

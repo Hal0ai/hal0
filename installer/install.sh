@@ -2994,46 +2994,6 @@ else:
 PYEOF
 fi
 
-# ── convergence verdict ───────────────────────────────────────────────────────
-# Same report `hal0 update` prints, from the same code, so both entry points
-# tell an operator the same story about the same box.
-#
-# The three spec-hw-slot-ownership / spec-flags-ownership folds are deliberately
-# NOT run here. `hal0 slot migrate-hw --apply` refuses outright while hal0-api
-# or any hal0-slot@* unit is active, because rewriting slot TOMLs under a live
-# runtime split-brains it — and on an upgrade the old hal0-api is still serving
-# at this point in the script. slot_flags_fold can also legitimately REFUSE a
-# model when two slots disagree, which needs a human. So: detect (write-free
-# planners), name what is outstanding, print the exact command, and let the
-# operator run it in a real window.
-if [[ "${DEV_MODE}" -eq 0 ]]; then
-    hal0_migration_step "convergence check" <<'PYEOF'
-from hal0.updater.updater import convergence_report
-
-report = convergence_report()
-pending = report["ownership_migrations"]["pending"]
-if report["converged"]:
-    print("  on-disk config is fully converged to the v1.0 shape")
-else:
-    if pending:
-        print("  ! this box is still on the pre-v1.0 slot/model shape. hal0 works, but the")
-        print("    per-slot launch tune, NGL/runner pins and mtp/vision/reasoning settings")
-        print("    below are still where the OLD schema put them and are no longer read at")
-        print("    launch. Stop hal0 (systemctl stop 'hal0-slot@*' hal0-api), then run:")
-        for key in pending:
-            entry = report["ownership_migrations"]["detail"][key]
-            print(f"      {entry['command']}")
-            if entry.get("error"):
-                print(f"        needs manual resolution first: {entry['error']}")
-            for line in entry["lines"][:5]:
-                print(f"        {line}")
-            if len(entry["lines"]) > 5:
-                print(f"        … and {len(entry['lines']) - 5} more")
-        print("    Each is dry-run without --apply, and backs up the slot config + registry")
-        print("    DB before any write.")
-PYEOF
-fi
-
 # ── ComfyUI model share ───────────────────────────────────────────────────────
 # The docker comfy-up/down/logs/postinstall.sh scripts have been retired; the
 # podman img slot (hal0-slot@img.service) is the sole lifecycle owner of :8188

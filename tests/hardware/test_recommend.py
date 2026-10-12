@@ -138,21 +138,31 @@ def test_mtp_primary_gets_its_shipped_ctx() -> None:
     rec = recommend_primary_slot(_amd_uma_host(96))
     assert rec["model"]["default"] == "qwen3.8-27b"
     # MTP-tagged primary: the curated window (96K shipped default).
-    assert rec["model"]["context_size"] == 98304
+    assert rec["_meta"]["ctx_size"] == 98304
+
+
+def test_window_is_reported_not_written_into_the_slot() -> None:
+    """ADR-0029: the window is a profile tune; the slot dict carries no tuning key."""
+    from hal0.config.schema import slot_tuning_keys
+
+    rec = recommend_primary_slot(_amd_uma_host(96))
+    assert "context_size" not in rec["model"]
+    assert slot_tuning_keys(rec) == []
+    assert rec["profile"]
 
 
 def test_9b_primary_gets_capped_ctx() -> None:
     rec = recommend_primary_slot(_amd_uma_host(24))
     assert rec["model"]["default"] == "qwen3.5-9b"
     # Dense 9B: cap below the arch max to keep the KV cache predictable.
-    ctx = rec["model"]["context_size"]
+    ctx = rec["_meta"]["ctx_size"]
     assert 0 < ctx <= 131072
     assert ctx <= 32768  # conservative cap for a dense mid-tier on a small box
 
 
 def test_no_hardcoded_8192_for_moe() -> None:
     rec = recommend_primary_slot(_amd_uma_host(96))
-    assert rec["model"]["context_size"] != 8192
+    assert rec["_meta"]["ctx_size"] != 8192
 
 
 def test_cpu_host_gets_small_conservative_model() -> None:

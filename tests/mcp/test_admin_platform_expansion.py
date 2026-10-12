@@ -487,14 +487,60 @@ def test_slot_edit_and_slot_create_hints_document_autoload_and_priority() -> Non
         assert schema["properties"]["priority"]["type"] == "integer"
 
 
-def test_slot_set_defaults_hint_documents_model_subtable_fields() -> None:
-    schema = admin.tool_param_schema("slot_set_defaults")
-    assert "context_size" in schema["properties"]
-    assert "n_gpu_layers" in schema["properties"]
-    # slot_set_defaults merges into [model], not top-level SlotConfig —
-    # autoload/priority belong to slot_create/slot_edit, not here.
-    assert "autoload" not in schema["properties"]
-    assert "priority" not in schema["properties"]
+def test_slot_edit_hint_points_tuning_at_the_profile() -> None:
+    """ADR-0029: tuning is not a slot field. ``slot_edit`` documents the
+    ``profile`` pointer and no longer advertises a context ceiling."""
+    schema = admin.tool_param_schema("slot_edit")
+    assert "profile" in schema["properties"]
+    model_desc = schema["properties"]["model"]["description"]
+    assert "context_size" not in model_desc
+    assert "profile" in model_desc
+    desc = admin.TOOL_DESCRIPTIONS["slot_edit"]
+    assert "profile_update" in desc
+    assert "ctx-size" not in desc
+
+
+def test_slot_create_hint_documents_the_profile() -> None:
+    schema = admin.tool_param_schema("slot_create")
+    assert "profile" in schema["properties"]
+    assert "context_size" not in admin.TOOL_DESCRIPTIONS["slot_create"]
+
+
+def test_model_edit_hint_documents_facts_only_defaults() -> None:
+    schema = admin.tool_param_schema("model_edit")
+    assert schema["required"] == ["model_id"]
+    desc = schema["properties"]["defaults"]["description"]
+    for fact in ("chat_template", "tokenizer_repo", "mtp", "jinja"):
+        assert fact in desc
+    assert "422" in desc
+    assert "profile" in desc
+
+
+@pytest.mark.parametrize("tool", ["profile_create", "profile_update"])
+def test_profile_write_hints_carry_the_profile_tune(tool: str) -> None:
+    """The profile owns every tune: ctx_size, thinking, vision/mtp (auto|off)
+    and the runner — and no longer device_class / backend / quant / image."""
+    props = admin.tool_param_schema(tool)["properties"]
+    for field in ("flags", "ctx_size", "enable_thinking", "vision", "mtp", "runner"):
+        assert field in props, field
+    assert props["vision"]["enum"] == ["auto", "off"]
+    assert props["mtp"]["enum"] == ["auto", "off"]
+    for gone in ("device_class", "backend", "quant", "image"):
+        assert gone not in props, gone
+    desc = admin.TOOL_DESCRIPTIONS[tool]
+    assert "device class" not in desc
+    assert "image" not in desc
+
+
+def test_profile_create_requires_a_name() -> None:
+    assert admin.tool_param_schema("profile_create")["required"] == ["name"]
+    assert admin.tool_param_schema("profile_update")["required"] == ["name"]
+
+
+def test_profile_generate_description_names_the_new_fields() -> None:
+    desc = admin.TOOL_DESCRIPTIONS["profile_generate"]
+    for field in ("ctx_size", "enable_thinking", "vision", "mtp"):
+        assert field in desc
 
 
 def test_mcp_server_action_and_service_action_hints_reach_schema() -> None:

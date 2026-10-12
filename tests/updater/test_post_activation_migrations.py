@@ -10,6 +10,7 @@ from typing import Any
 
 import pytest
 
+from hal0.config.migrations.profile_centric_apply import ConversionReport
 from hal0.config.migrations.runner_system import RunnerMigrationReport
 from hal0.errors import Hal0Error
 from hal0.updater.updater import check_outstanding_migrations, run_post_activation_migrations
@@ -21,12 +22,10 @@ def _stub_every_pass(monkeypatch: pytest.MonkeyPatch) -> dict[str, list[Any]]:
     order/count without touching real config/registry state."""
     calls: dict[str, list[Any]] = {
         "runner_system": [],
+        "profile_centric": [],
         "config_migrations": [],
         "registry_toml": [],
-        "mtp": [],
         "vulkan_migration": [],
-        "extra_args": [],
-        "reasoning_format_none": [],
         "hermes_venv": [],
         "converge_components": [],
     }
@@ -36,6 +35,11 @@ def _stub_every_pass(monkeypatch: pytest.MonkeyPatch) -> dict[str, list[Any]]:
         calls.setdefault("restore_marker", []).append(honour_restore_marker)
         return RunnerMigrationReport(dry_run=dry_run)
 
+    def _profile_centric(*, dry_run=False, job_id=None, honour_restore_marker=False, verify=True):
+        calls["profile_centric"].append(job_id)
+        calls.setdefault("profile_restore_marker", []).append(honour_restore_marker)
+        return ConversionReport(dry_run=dry_run)
+
     def _config_migrations(min_data_version, *, job_id=None, ceiling=None):
         calls["config_migrations"].append((min_data_version, job_id))
         return (1, 2)
@@ -44,21 +48,9 @@ def _stub_every_pass(monkeypatch: pytest.MonkeyPatch) -> dict[str, list[Any]]:
         calls["registry_toml"].append(job_id)
         return {"outcome": "absent"}
 
-    def _mtp(*, job_id=None, registry=None):
-        calls["mtp"].append(job_id)
-        return 0
-
     def _vulkan_migration(*, job_id=None, rocm_lane=None, amd_host=None):
         calls["vulkan_migration"].append(job_id)
         return 0
-
-    def _extra_args(*, job_id=None, registry=None):
-        calls["extra_args"].append(job_id)
-        return 0
-
-    def _reasoning_format_none(*, registry=None):
-        calls["reasoning_format_none"].append(registry)
-        return {"profiles": [], "slots": [], "models": []}
 
     def _hermes_venv(*, job_id=None, install=True, venv=None, restart_gateway=True):
         calls["hermes_venv"].append((job_id, install))
@@ -81,14 +73,12 @@ def _stub_every_pass(monkeypatch: pytest.MonkeyPatch) -> dict[str, list[Any]]:
     monkeypatch.setattr(
         "hal0.config.migrations.runner_system.migrate_runner_system", _runner_system
     )
+    monkeypatch.setattr(
+        "hal0.config.migrations.profile_centric_apply.migrate_profile_centric", _profile_centric
+    )
     monkeypatch.setattr("hal0.updater.updater._maybe_run_config_migrations", _config_migrations)
     monkeypatch.setattr("hal0.registry.toml_retirement.retire_registry_toml", _registry_toml)
-    monkeypatch.setattr("hal0.updater.updater.clear_stale_mtp_overrides", _mtp)
     monkeypatch.setattr("hal0.updater.updater.relabel_stale_vulkan_slots", _vulkan_migration)
-    monkeypatch.setattr("hal0.updater.updater.sanitize_model_extra_args", _extra_args)
-    monkeypatch.setattr(
-        "hal0.config.migrations.reasoning_format_none.run_migration", _reasoning_format_none
-    )
     monkeypatch.setattr("hal0.updater.updater.repair_hermes_mcp_client", _hermes_venv)
     monkeypatch.setattr("hal0.components.runner.converge_components", _converge_components)
     return calls
@@ -108,6 +98,10 @@ def test_runner_conversion_runs_before_schema_and_registry_retirement(
         ),
     )
     monkeypatch.setattr(
+        "hal0.config.migrations.profile_centric_apply.migrate_profile_centric",
+        lambda **_kw: order.append("profile_centric") or ConversionReport(dry_run=False),
+    )
+    monkeypatch.setattr(
         "hal0.updater.updater._maybe_run_config_migrations",
         lambda min_data_version, *, job_id=None, ceiling=None: order.append("schema") or (1, 2),
     )
@@ -116,7 +110,7 @@ def test_runner_conversion_runs_before_schema_and_registry_retirement(
         lambda *, job_id=None: order.append("registry_toml") or {"outcome": "absent"},
     )
     run_post_activation_migrations(job_id="j0")
-    assert order == ["runner_system", "schema", "registry_toml"]
+    assert order == ["runner_system", "profile_centric", "schema", "registry_toml"]
 
 
 @pytest.mark.parametrize(
@@ -149,23 +143,46 @@ def test_a_boot_conversion_rerenders_the_slot_units(
     assert len(calls) == rerendered
 
 
+@pytest.mark.parametrize(("applied", "rerendered"), [(True, 1), (False, 0)])
+def test_a_boot_profile_conversion_rerenders_the_slot_units(
+    monkeypatch: pytest.MonkeyPatch,
+    _stub_every_pass: dict[str, list[Any]],
+    applied: bool,
+    rerendered: int,
+) -> None:
+    """ADR-0029 §7: a profile-centric conversion the boot safety net applies
+    (it backed up and wrote) re-renders the units even when the runner-system
+    conversion had nothing to do."""
+    report = ConversionReport(dry_run=False, backup="/p.tar.gz" if applied else None)
+    monkeypatch.setattr(
+        "hal0.config.migrations.profile_centric_apply.migrate_profile_centric",
+        lambda **_kw: report,
+    )
+    calls: list[str | None] = []
+    monkeypatch.setattr(
+        "hal0.updater.updater.rerender_slot_units", lambda *, job_id=None: calls.append(job_id)
+    )
+    run_post_activation_migrations(job_id="j", rerender_after_runner_conversion=True)
+    assert len(calls) == rerendered
+
+
 def test_an_update_converts_even_after_a_restore(_stub_every_pass: dict[str, list[Any]]) -> None:
     """An actual update ignores the restore marker; only boot honours it."""
     run_post_activation_migrations(job_id="j1")
     run_post_activation_migrations(job_id="j2", honour_restore_marker=True)
     assert _stub_every_pass["restore_marker"] == [False, True]
+    assert _stub_every_pass["profile_restore_marker"] == [False, True]
 
 
 def test_runs_every_pass(_stub_every_pass: dict[str, list[Any]]) -> None:
     result = run_post_activation_migrations(job_id="j1")
     assert result == (1, 2)
     assert _stub_every_pass["runner_system"] == ["j1"]
+    assert _stub_every_pass["profile_centric"] == ["j1"]
     assert _stub_every_pass["config_migrations"] == [(1, "j1")]
     assert _stub_every_pass["registry_toml"] == ["j1"]
-    assert _stub_every_pass["mtp"] == ["j1"]
     assert _stub_every_pass["vulkan_migration"] == ["j1"]
-    assert _stub_every_pass["extra_args"] == ["j1"]
-    assert _stub_every_pass["reasoning_format_none"] == [None]
+    assert _stub_every_pass["hermes_venv"] == [("j1", True)]
     assert _stub_every_pass["converge_components"] == [
         {
             "job_id": "j1",
@@ -184,9 +201,10 @@ def test_skip_catalogue_sync_omits_only_that_pass(_stub_every_pass: dict[str, li
     still run unaffected."""
     result = run_post_activation_migrations(job_id="j1", skip_catalogue_sync=True)
     assert result == (1, 2)
-    assert _stub_every_pass["mtp"] == ["j1"]
+    assert _stub_every_pass["profile_centric"] == ["j1"]
+    assert _stub_every_pass["registry_toml"] == ["j1"]
     assert _stub_every_pass["vulkan_migration"] == ["j1"]
-    assert _stub_every_pass["extra_args"] == ["j1"]
+    assert _stub_every_pass["hermes_venv"] == [("j1", True)]
     assert _stub_every_pass["converge_components"] == [
         {
             "job_id": "j1",
@@ -215,8 +233,12 @@ def test_runner_system_conversion_runs_before_the_schema_migration(
         "hal0.updater.updater._maybe_run_config_migrations",
         lambda min_data_version, *, job_id=None, ceiling=None: order.append("schema") or (1, 2),
     )
+    monkeypatch.setattr(
+        "hal0.config.migrations.profile_centric_apply.migrate_profile_centric",
+        lambda **_kw: order.append("profile_centric") or ConversionReport(dry_run=False),
+    )
     run_post_activation_migrations(job_id="j1")
-    assert order == ["runner_system", "schema"]
+    assert order == ["runner_system", "profile_centric", "schema"]
 
 
 def test_runner_system_failure_is_fatal(
@@ -233,6 +255,29 @@ def test_runner_system_failure_is_fatal(
     with pytest.raises(Hal0Error):
         run_post_activation_migrations(job_id="j9")
 
+    assert _stub_every_pass["profile_centric"] == []
+    assert _stub_every_pass["config_migrations"] == []
+    assert _stub_every_pass["registry_toml"] == []
+    assert _stub_every_pass["converge_components"] == []
+
+
+def test_profile_centric_failure_is_fatal(
+    monkeypatch: pytest.MonkeyPatch, _stub_every_pass: dict[str, list[Any]]
+) -> None:
+    """ADR-0029 §7: the profile-centric conversion rolls back its own writes
+    and raises; the schema migration and every later pass must not run."""
+
+    def _boom(**_kw):
+        raise Hal0Error("profile conversion failed", code="test.boom")
+
+    monkeypatch.setattr(
+        "hal0.config.migrations.profile_centric_apply.migrate_profile_centric", _boom
+    )
+
+    with pytest.raises(Hal0Error):
+        run_post_activation_migrations(job_id="j10")
+
+    assert _stub_every_pass["runner_system"] == ["j10"]
     assert _stub_every_pass["config_migrations"] == []
     assert _stub_every_pass["registry_toml"] == []
     assert _stub_every_pass["converge_components"] == []
@@ -250,19 +295,18 @@ def test_min_data_version_defaults_to_1(_stub_every_pass: dict[str, list[Any]]) 
 def test_a_failing_non_fatal_pass_does_not_block_the_others(
     monkeypatch: pytest.MonkeyPatch, _stub_every_pass: dict[str, list[Any]]
 ) -> None:
-    def _boom(*, job_id=None, registry=None):
-        raise RuntimeError("registry read failed")
+    def _boom(*, job_id=None, rocm_lane=None, amd_host=None):
+        raise RuntimeError("slot scan failed")
 
-    monkeypatch.setattr("hal0.updater.updater.clear_stale_mtp_overrides", _boom)
+    monkeypatch.setattr("hal0.updater.updater.relabel_stale_vulkan_slots", _boom)
 
     result = run_post_activation_migrations(job_id="j2")
 
     assert result == (1, 2)  # schema migration still reported
-    assert _stub_every_pass["vulkan_migration"] == ["j2"]  # ran despite mtp's failure
-    assert _stub_every_pass["extra_args"] == ["j2"]
+    assert _stub_every_pass["hermes_venv"] == [("j2", True)]  # ran before it
     assert [c["job_id"] for c in _stub_every_pass["converge_components"]] == [
         "j2"
-    ]  # ran despite mtp's failure
+    ]  # ran despite the vulkan relabel's failure
 
 
 def test_schema_migration_failure_propagates(
@@ -282,9 +326,9 @@ def test_schema_migration_failure_propagates(
         run_post_activation_migrations(job_id="j3")
 
     # None of the data-cleanup passes ran — the schema must land first.
-    assert _stub_every_pass["mtp"] == []
+    assert _stub_every_pass["registry_toml"] == []
     assert _stub_every_pass["vulkan_migration"] == []
-    assert _stub_every_pass["extra_args"] == []
+    assert _stub_every_pass["hermes_venv"] == []
     assert _stub_every_pass["converge_components"] == []
 
 
@@ -308,8 +352,8 @@ def test_registry_toml_retirement_failure_never_blocks(
 
     assert run_post_activation_migrations(job_id="j4") == (1, 2)
 
-    assert _stub_every_pass["mtp"] == ["j4"]
-    assert _stub_every_pass["extra_args"] == ["j4"]
+    assert _stub_every_pass["vulkan_migration"] == ["j4"]
+    assert _stub_every_pass["hermes_venv"] == [("j4", True)]
     assert [c["job_id"] for c in _stub_every_pass["converge_components"]] == ["j4"]
 
 
@@ -375,3 +419,48 @@ def test_converge_companions_flag_gates_the_apply_kwarg(
             "hermes_install": True,
         }
     ]
+
+
+def test_conversion_blockers_are_returned_with_their_reasons(
+    monkeypatch: pytest.MonkeyPatch, _stub_every_pass: dict[str, list[Any]]
+) -> None:
+    """ADR-0029: every slot, profile and stack the profile-centric conversion
+    left blocked comes back on the result, with its reason, while the result
+    still unpacks as the ``(source, target)`` pair install.sh and the
+    post-swap child script rely on."""
+    from hal0.config.migrations import profile_centric as pc
+
+    plan = pc.ConversionPlan(
+        slots=[
+            pc.SlotPlan(file="chat.toml", name="chat"),
+            pc.SlotPlan(
+                file="agent.toml",
+                name="agent",
+                status="blocked",
+                error="--chat-template-file has no profile home",
+            ),
+        ],
+        blocked_profiles={"fast": ["--mmproj has no profile home", "-dev has no profile home"]},
+        stacks=[pc.StackPlan(stack="saber", errors=["row agent: --jinja in an embedded profile"])],
+    )
+    monkeypatch.setattr(
+        "hal0.config.migrations.profile_centric_apply.migrate_profile_centric",
+        lambda **_kw: ConversionReport(dry_run=False, plan=plan),
+    )
+
+    result = run_post_activation_migrations()
+
+    source, target = result
+    assert (source, target) == (1, 2)
+    assert result.conversion_blockers == [
+        {"target": "agent.toml", "reason": "--chat-template-file has no profile home"},
+        {
+            "target": "profile:fast",
+            "reason": "--mmproj has no profile home; -dev has no profile home",
+        },
+        {"target": "stack:saber", "reason": "row agent: --jinja in an embedded profile"},
+    ]
+
+
+def test_a_converged_install_has_no_blockers(_stub_every_pass: dict[str, list[Any]]) -> None:
+    assert run_post_activation_migrations().conversion_blockers == []

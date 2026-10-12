@@ -13,17 +13,14 @@ class _FakeSlotManager:
         return self._cfgs
 
 
-class _FakeDefaults:
-    def __init__(self, context_size):
-        self.context_size = context_size
-
-
 class _FakeModel:
-    def __init__(self, context_size=None):
-        self.defaults = _FakeDefaults(context_size)
+    """A registry row whose file declares ``native_ctx`` tokens of context."""
+
+    def __init__(self, native_ctx=None):
+        self.native_ctx = native_ctx
 
     def model_dump(self):
-        return {"defaults": {"context_size": self.defaults.context_size}, "metadata": {}}
+        return {"metadata": {"context_length": self.native_ctx} if self.native_ctx else {}}
 
 
 class _FakeModelRegistry:
@@ -43,26 +40,25 @@ async def test_llm_slot_views_filters_and_projects():
             "name": "primary",
             "type": "llm",
             "device": "gpu-vulkan",
-            # slot ceiling (65536) is larger than what the model declares —
-            # #1788: the model wins, so the stale larger ceiling must not
-            # be echoed back.
-            "model": {"default": "big", "context_size": 65536},
+            # No profile → the ``chat`` seed (no window) → the model's
+            # native window (ADR-0029).
+            "model": {"default": "big"},
         },
         {
             "name": "utility",
             "type": "llm",
             "device": "gpu-vulkan",
-            # slot ceiling (4096) is smaller than the model's declared
-            # window — a genuine hardware clamp, so it wins.
-            "model": {"default": "tiny", "context_size": 4096},
+            # The profile's ctx_size wins over the model's native window.
+            "profile": "agent",
+            "model": {"default": "tiny"},
         },
         {
             "name": "agent",
             "type": "llm",
             "device": "npu",
-            # ctx_size key (not context_size) must also be read correctly;
-            # model isn't registered, so resolution falls to the safe floor.
-            "model": {"default": "flm", "ctx_size": 32768},
+            # FLM: the profile's ctx_size, else 8192 (the ``chat`` seed
+            # sets none).
+            "model": {"default": "flm"},
         },
         {"name": "embed", "type": "embedding", "model": {"default": "e5"}},
         # #1369: model-presence is the sole filter, so BOTH "off" shapes are
@@ -72,8 +68,8 @@ async def test_llm_slot_views_filters_and_projects():
     ]
     registry = _FakeModelRegistry(
         {
-            "big": _FakeModel(context_size=8000),
-            "tiny": _FakeModel(context_size=16384),
+            "big": _FakeModel(native_ctx=8000),
+            "tiny": _FakeModel(native_ctx=16384),
             # "flm" intentionally absent — unregistered model.
         }
     )
@@ -81,11 +77,10 @@ async def test_llm_slot_views_filters_and_projects():
     by_name = {v["name"]: v for v in views}
     assert set(by_name) == {"primary", "utility", "agent"}
     assert by_name["primary"]["device"] == "gpu-vulkan"
-    # #1788: EFFECTIVE context, not the raw slot ceiling.
-    assert by_name["primary"]["context_length"] == 8000
-    assert by_name["utility"]["context_length"] == 4096
-    # unregistered model + slot ceiling above the safe floor → safe floor.
-    assert by_name["agent"]["context_length"] == 8192
+    # The EFFECTIVE window, from the one resolver the launch path uses.
+    assert by_name["primary"]["context_length"] == 8000  # native
+    assert by_name["utility"]["context_length"] == 65536  # agent seed ctx_size
+    assert by_name["agent"]["context_length"] == 8192  # FLM fallback
 
 
 @pytest.mark.asyncio
@@ -102,7 +97,7 @@ async def test_llm_slot_views_translates_flm_id_to_colon_tag():
             "name": "npu",
             "type": "llm",
             "device": "npu",
-            "model": {"default": "gemma4-it-e2b-FLM", "context_size": 18000},
+            "model": {"default": "gemma4-it-e2b-FLM"},
         },
     ]
     fake_catalog = [{"tag": "gemma4-it:e2b", "installed": True, "capabilities": ["chat"]}]

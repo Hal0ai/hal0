@@ -155,7 +155,8 @@ def test_generate_hf_repo_happy_path(client: TestClient, monkeypatch: pytest.Mon
     r = client.post("/api/profiles/generate", json={"hf_repo": "unsloth/Qwen3-8B-GGUF"})
     assert r.status_code == 200, r.text
     data = r.json()
-    assert data["profile"]["profile"]["quant"] == "Q4_K_M"
+    assert "quant" not in data["profile"]["profile"]
+    assert data["profile"]["schema_version"] == 2
     assert "huggingface:unsloth/Qwen3-8B-GGUF" in data["sources"]
 
 

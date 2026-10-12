@@ -1,16 +1,17 @@
 """ProfileCatalog — deep module for runtime profile lookup and mutation.
 
-A profile is no longer just an image string plus flags. It describes a
-runtime template that affects whether a slot/model/device combination is
-runnable. This module concentrates the profile interface:
+ADR-0029: a profile is the whole tune a slot launches with — free flags, the
+context window, the reasoning default, vision, MTP and an optional runner.
+This module concentrates the profile interface:
 
 * seed/custom catalog reads and full-catalog atomic writes;
 * seed immutability and duplicate-name checks;
 * in-use scans before delete;
-* resolved flags, runtime family, and supported slot types.
+* the flag screen every write goes through;
+* runtime family and supported slot types.
 
-Routes are adapters over this module; providers and fit checks should
-consume :class:`ResolvedProfile` instead of re-parsing profiles.toml.
+Routes are adapters over this module; providers and fit checks consume
+:class:`ResolvedProfile` instead of re-parsing profiles.toml.
 """
 
 from __future__ import annotations
@@ -19,9 +20,9 @@ import logging
 import re
 import shlex
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 from hal0.config import paths
 from hal0.config.loader import (
@@ -34,7 +35,6 @@ from hal0.config.schema import (
     PROFILE_BENCH,
     SEED_PROFILES,
     ProfileConfig,
-    resolve_profile_flags,
 )
 from hal0.errors import Conflict, NotFound, UnprocessableEntity
 
@@ -45,6 +45,9 @@ SlotType = Literal["llm", "embedding", "reranking", "transcription", "tts", "ima
 
 _PROFILE_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,31}$")
 
+#: Marks a :class:`ProfilePatch` field the caller left out (``None`` clears).
+UNSET: Any = object()
+
 
 @dataclass(frozen=True, slots=True)
 class ResolvedProfile:
@@ -52,39 +55,42 @@ class ResolvedProfile:
 
     name: str
     flags: str
-    mtp: bool
-    device_class: str
-    resolved_flags: str
     seed: bool
     runtime_family: RuntimeFamily
     supported_slot_types: tuple[SlotType, ...]
-    backend: str | None = None
+    ctx_size: int | None = None
+    enable_thinking: bool | None = None
+    vision: str = "auto"
+    mtp: str = "auto"
     runner: str | None = None
     cloned_from: str | None = None
-    #: Card display facts (profiles overhaul). The bench metrics are static
-    #: for seeds and ``None`` for custom; ``used_by`` is the set of slots
-    #: that reference this profile.
+    #: Card display facts. The bench metrics are static for seeds and ``None``
+    #: for custom; ``used_by`` is the set of slots that reference this profile.
     intent: str = ""
-    quant: str = ""
     tps: float | None = None
     rtf: float | None = None
     used_by: tuple[str, ...] = ()
+
+    @property
+    def resolved_flags(self) -> str:
+        """The flag text the launch path uses (the profile's own flags)."""
+        return self.flags
 
     def to_dict(self) -> dict[str, object]:
         return {
             "name": self.name,
             "flags": self.flags,
+            "resolved_flags": self.flags,
+            "ctx_size": self.ctx_size,
+            "enable_thinking": self.enable_thinking,
+            "vision": self.vision,
             "mtp": self.mtp,
-            "device_class": self.device_class,
-            "backend": self.backend,
             "runner": self.runner,
-            "resolved_flags": self.resolved_flags,
             "seed": self.seed,
             "runtime_family": self.runtime_family,
             "supported_slot_types": list(self.supported_slot_types),
             "cloned_from": self.cloned_from,
             "intent": self.intent,
-            "quant": self.quant,
             "tps": self.tps,
             "rtf": self.rtf,
             "used_by": list(self.used_by),
@@ -93,52 +99,30 @@ class ResolvedProfile:
 
 @dataclass(frozen=True, slots=True)
 class ProfilePatch:
-    """Partial profile update input."""
+    """Partial profile update input.
+
+    A field left at :data:`UNSET` keeps the stored value. ``ctx_size=None`` /
+    ``enable_thinking=None`` clear the stored value; ``runner=""`` clears the
+    runtime back to the slot's own runner (#2186).
+    """
 
     flags: str | None = None
-    mtp: bool | None = None
-    device_class: Literal["gpu", "cpu", "npu", "img"] | None = None
-    #: Mirrors ProfileConfig.backend, which accepts "cuda" too. Omitting it here
-    #: made a CUDA profile un-patchable through this seam.
-    backend: Literal["rocm", "vulkan", "cuda"] | None = None
-    #: None = leave unchanged (as everywhere else on this class); ``""`` =
-    #: CLEAR the stored runtime back to Auto (#2186). ``runner`` is the one
-    #: field here with a natural empty value — "no runtime pinned" is a real,
-    #: reachable state (every seed is in it), unlike ``backend``/``device_class``
-    #: whose None already means "unset" — so a clear needs a wire value that is
-    #: not None, and the empty string is the one the select control already
-    #: produces. Without it the drawer's "— Auto —" option sent None and the
-    #: stored runtime silently survived the save.
+    ctx_size: Any = field(default=UNSET)
+    enable_thinking: Any = field(default=UNSET)
+    vision: Literal["auto", "off"] | None = None
+    mtp: Literal["auto", "off"] | None = None
     runner: str | None = None
     intent: str | None = None
-    quant: str | None = None
 
 
 def _runtime_family(name: str, profile: ProfileConfig) -> RuntimeFamily:
-    """Classify a profile's runtime family from its TYPED fields, in the
-    precedence ``runner`` > ``device_class`` > profile ``name`` — never an
-    image string.
+    """A profile's runtime family: its ``runner``'s, else the seed slug's.
 
-    ``profile.runner`` (runtime-cascade D4) is the structural signal: a
-    registry key names exactly one runtime, so its ``Runner.runtime_family``
-    is the answer whenever one is stored. That makes the family a property of
-    the runtime the profile selects rather than of the slug it happens to
-    carry, so a custom profile can be any family — the single-purpose runtimes
-    are no longer seed-only.
-
-    Everything below the runner check is the PRE-runner fallback, kept for the
-    (still-common) runner-less profile and for a stored key that is no longer
-    in the registry. spec-hw-slot-ownership §3: profiles carry no ``image``
-    anymore, so the old exact-image→``RUNNER_IMAGES`` lookup and the
-    image-substring sniffs are gone. ``device_class`` pins the single-purpose
-    runtimes (``img`` → comfyui, ``npu`` → flm), and the name-keyed CPU
-    engines — the two TTS engines (kokoro / qwen3tts) plus the moonshine STT
-    engine, which share a ``cpu`` device_class with a plain llama-server CPU
-    profile and so can only be told apart by name — key off their seed slug.
-    Mirrors the model-side backends-driven classification in
-    :func:`hal0.model_meta.modality.derive_modalities` (a structural signal, not
-    a substring guess). A runner-less custom (cloned) profile has no
-    special-runtime signal and resolves to ``llama-server``.
+    ``profile.runner`` is the structural signal (a registry key names exactly
+    one runtime). A runner-less profile named after a single-purpose engine's
+    seed (flm, kokoro, moonshine, qwen3-tts, comfyui) is that engine; any
+    other runner-less profile is llama-server. Converted clones of those
+    seeds carry an explicit runner.
     """
     if profile.runner:
         from hal0.runners import RUNNER_IMAGES  # lazy: runners must not import profiles
@@ -146,7 +130,7 @@ def _runtime_family(name: str, profile: ProfileConfig) -> RuntimeFamily:
         runner = RUNNER_IMAGES.get(profile.runner)
         if runner is not None:
             return runner.runtime_family
-    if name == "flm" or profile.device_class == "npu":
+    if name == "flm":
         return "flm"
     if name == "qwen3-tts":
         return "qwen3tts"
@@ -154,7 +138,7 @@ def _runtime_family(name: str, profile: ProfileConfig) -> RuntimeFamily:
         return "kokoro"
     if name == "moonshine":
         return "moonshine"
-    if name == "comfyui" or profile.device_class == "img":
+    if name == "comfyui":
         return "comfyui"
     return "llama-server"
 
@@ -192,8 +176,14 @@ class ProfileCatalog:
     def resolve(self, name: str) -> ResolvedProfile:
         cfg = load_profiles_config(self._path)
         profile = cfg.profile.get(name)
-        if profile is None:
-            profile = self._materialize_legacy(name)
+        if profile is None and name in cfg.quarantined:
+            raise UnprocessableEntity(
+                f"profile {name!r} is invalid as stored and was set aside: "
+                f"{cfg.quarantined[name]['reason']}; fix or recreate it "
+                "(hal0 profile edit / the Profiles page)",
+                code="profiles.invalid",
+                details={"profile": name, "reason": cfg.quarantined[name]["reason"]},
+            )
         if profile is None:
             raise NotFound(
                 f"profile {name!r} not found",
@@ -202,63 +192,8 @@ class ProfileCatalog:
             )
         return self._resolve_item(name, profile)
 
-    def _materialize_legacy(self, name: str) -> ProfileConfig | None:
-        """Adopt a demoted (ex-seed) definition on first reference, or None.
-
-        Installs upgraded through 1.2.0-1.3.x already had the demoted names
-        written into profiles.toml by the retired bulk demotion. This covers a
-        FRESH install, where there is no file at all, yet the shipped
-        configuration still names demoted profiles — install.sh copies
-        ``installer/etc-hal0/slots/agent.toml`` (``dense``) and
-        ``coder.toml`` (``coding``) verbatim, and the ``saber`` seed stack's
-        agent slot asks for ``moe``. Without this the curated slots on a
-        brand-new box would reference nothing.
-
-        The gate is load-bearing, not an optimisation: a demoted name the
-        install has already settled and that is now missing from the catalog
-        was DELETED, and re-materializing it would resurrect it on the next
-        read — precisely the virtual-seed behaviour the demotion exists to
-        escape. But "settled" is a fact about a NAME, not about the install:
-        the gate used to be ``profiles.toml exists``, which the first adoption
-        itself makes true, so whichever of the shipped references resolved
-        first won and every other one fell back to the device default. A fresh
-        box ships three (agent.toml → dense, coder.toml → coding, the
-        saber stack → moe), so the outcome depended on launch order.
-
-        ``ProfilesConfig.adopted_legacy_names`` is the real question: empty on
-        a fresh install (adopt freely, once each), every demoted name on a file
-        the retired bulk demotion settled (adopt nothing — absence is a
-        deletion), and
-        growing by one on each adoption here.
-
-        Materializing (rather than answering read-only) is what leaves the
-        entry editable and deletable afterwards, exactly like a demoted one. A
-        write failure is not fatal: the caller still gets the definition and
-        the next reference retries.
-        """
-        from hal0.config.schema import LEGACY_SEED_PROFILES
-
-        entry = LEGACY_SEED_PROFILES.get(name)
-        if entry is None:
-            return None
-        profile = ProfileConfig.model_validate(entry)
-        with self._lock:
-            catalog = load_profiles_config(self._path)
-            adopted = catalog.adopted_legacy_names()
-            if name in adopted:
-                return None
-            catalog.profile[name] = profile
-            catalog.legacy_seeds_adopted = sorted(adopted | {name})
-            try:
-                save_profiles_config(catalog, self._path)
-            except OSError as exc:
-                log.warning("profiles.legacy_materialize_write_failed name=%s error=%s", name, exc)
-        return profile
-
     def create(self, name: str, profile: ProfileConfig) -> ResolvedProfile:
         self._validate_name(name)
-        # A create has no stored baseline, so §5/§21.7 stay a hard reject here —
-        # only `update` grandfathers (see screen_profile_flags).
         screen_profile_flags(profile.flags)
         profile = profile.model_copy(update={"runner": screen_profile_runner(profile.runner)})
         with self._lock:
@@ -275,6 +210,8 @@ class ProfileCatalog:
 
     def update(self, name: str, patch: ProfilePatch) -> ResolvedProfile:
         self._guard_custom(name)
+        if patch.flags is not None:
+            screen_profile_flags(patch.flags)
         with self._lock:
             catalog = load_profiles_config(self._path)
             existing = catalog.profile.get(name)
@@ -284,23 +221,19 @@ class ProfileCatalog:
                     code="profiles.not_found",
                     details={"profile": name},
                 )
-            # #1411: screened INSIDE the lock, after `existing` is loaded, so the
-            # profile's own stored hardware flags can be grandfathered. Screening
-            # before the read (as this did) had no baseline to compare against,
-            # which is what made every pre-guard profile un-editable.
-            if patch.flags is not None:
-                screen_profile_flags(patch.flags, grandfathered=existing.flags)
             updated = ProfileConfig(
                 flags=patch.flags if patch.flags is not None else existing.flags,
-                mtp=patch.mtp if patch.mtp is not None else existing.mtp,
-                device_class=(
-                    patch.device_class if patch.device_class is not None else existing.device_class
+                ctx_size=existing.ctx_size if patch.ctx_size is UNSET else patch.ctx_size,
+                enable_thinking=(
+                    existing.enable_thinking
+                    if patch.enable_thinking is UNSET
+                    else patch.enable_thinking
                 ),
-                backend=patch.backend if patch.backend is not None else existing.backend,
+                vision=patch.vision if patch.vision is not None else existing.vision,
+                mtp=patch.mtp if patch.mtp is not None else existing.mtp,
                 runner=_merge_runner(patch.runner, existing.runner),
                 cloned_from=existing.cloned_from,
                 intent=patch.intent if patch.intent is not None else existing.intent,
-                quant=patch.quant if patch.quant is not None else existing.quant,
             )
             catalog.profile[name] = updated
             save_profiles_config(catalog, self._path)
@@ -317,66 +250,25 @@ class ProfileCatalog:
                     details={"profile": name},
                 )
             in_use_slots = self.slots_using(name)
-            in_use_models = self.models_using(name)
-            if in_use_slots or in_use_models:
-                clauses = []
-                if in_use_slots:
-                    clauses.append(f"slot(s): {', '.join(in_use_slots)}")
-                if in_use_models:
-                    clauses.append(f"model(s): {', '.join(in_use_models)}")
+            if in_use_slots:
                 raise Conflict(
-                    f"profile {name!r} is in use by " + " and ".join(clauses),
+                    f"profile {name!r} is in use by slot(s): {', '.join(in_use_slots)}",
                     code="profiles.in_use",
-                    details={"slots": in_use_slots, "models": in_use_models},
+                    details={"slots": in_use_slots},
                 )
             del catalog.profile[name]
-            # A deleted demoted name is settled whether or not it was ever
-            # adopted here — otherwise deleting one the operator had created
-            # themselves (under a demoted name, on a fresh install) would leave
-            # it eligible for adoption and the next resolve would hand back the
-            # shipped definition in its place.
-            from hal0.config.schema import LEGACY_SEED_PROFILES
-
-            if name in LEGACY_SEED_PROFILES:
-                catalog.legacy_seeds_adopted = sorted(catalog.adopted_legacy_names() | {name})
             save_profiles_config(catalog, self._path)
 
     def slots_using(self, name: str) -> list[str]:
         """Return slot names whose TOML references ``name``."""
         return [slot for slot, profile in self._slot_profiles() if profile == name]
 
-    def models_using(self, name: str) -> list[str]:
-        """Return model ids whose ``defaults.profile`` references ``name``.
-
-        HAL0-41 / GH #1437: ``slots_using`` alone missed a model that
-        prefers a profile via ``defaults.profile`` but isn't (yet) bound to
-        any slot — deleting the profile out from under it left a dangling
-        reference. Errors reading the registry are logged and treated as
-        "no models found" so a registry hiccup never blocks a slot-only
-        delete, mirroring ``_slot_profiles``'s per-slot error tolerance.
-        """
-        from hal0.registry.store import ModelRegistry
-
-        try:
-            models = ModelRegistry().list()
-        except Exception as exc:
-            log.warning("profiles.in_use_model_scan_error error=%s", exc)
-            return []
-        return [model.id for model in models if model.defaults and model.defaults.profile == name]
-
     def _slot_profiles(self) -> list[tuple[str, str | None]]:
         """Return ``(slot_name, profile_name)`` for every slot, in one pass.
 
-        Malformed slot TOMLs are logged and skipped so a single bad slot
-        never breaks the whole profile listing.
-
-        id-aware (P3-runtime-db inc4): ``list_slots()`` enumerates on-disk
-        *stems*, which on an id-keyed box are digit ids, not display names.
-        ``load_slot_config`` still needs the raw stem to find the file, but
-        the reported slot identity is always ``cfg.name`` — the real display
-        name a bilingual TOML embeds regardless of which stem it lives under
-        (a name-keyed TOML's stem already IS its name, so this is a no-op
-        there).
+        Malformed slot TOMLs are logged and skipped so a single bad slot never
+        breaks the whole profile listing. The reported identity is always the
+        display name the TOML embeds, whichever stem (name or id) it lives under.
         """
         out: list[tuple[str, str | None]] = []
         for slot_name in list_slots():
@@ -408,14 +300,12 @@ class ProfileCatalog:
     def _guard_custom(self, name: str) -> None:
         if name in SEED_PROFILES:
             # Seed profiles are VIRTUAL — overlaid from SEED_PROFILES in code on
-            # every load (see loader.load_profiles_config), so there is nowhere on
-            # disk to record a deletion: a force-delete would reappear on the next
-            # load. There is deliberately no --force here; clone to customise, or
-            # disable the slot that uses it via capabilities.toml.
+            # every load, so there is nowhere on disk to record an edit or a
+            # deletion. Clone to customise.
             raise Conflict(
                 f"profile {name!r} is a seed profile — seeds are virtual (re-applied "
                 "from code on every load) and cannot be deleted or edited; clone it "
-                "under a new name to customise, or disable the slot in capabilities.toml.",
+                "under a new name to customise.",
                 code="profiles.seed_immutable",
                 details={"profile": name},
             )
@@ -430,6 +320,7 @@ class ProfileCatalog:
 
 
 __all__ = [
+    "UNSET",
     "ProfileCatalog",
     "ProfilePatch",
     "ResolvedProfile",
@@ -445,29 +336,22 @@ __all__ = [
 def resolve_loaded_profile(
     name: str, profile: ProfileConfig, *, used_by: tuple[str, ...] = ()
 ) -> ResolvedProfile:
-    """Resolve a profile definition the caller already holds, with no I/O.
-
-    :meth:`ProfileCatalog.resolve` looks the name up on disk and can adopt a
-    shipped, demoted seed by WRITING profiles.toml. A dry run (the updater's
-    convergence probe) must not write, so it resolves the definitions it has
-    already loaded through this seam instead.
-    """
+    """Resolve a profile definition the caller already holds, with no I/O."""
     runtime = _runtime_family(name, profile)
     bench = PROFILE_BENCH.get(name, {})
     return ResolvedProfile(
         name=name,
         flags=profile.flags,
+        ctx_size=profile.ctx_size,
+        enable_thinking=profile.enable_thinking,
+        vision=profile.vision,
         mtp=profile.mtp,
-        device_class=profile.device_class,
-        backend=profile.backend,
         runner=profile.runner,
-        resolved_flags=resolve_profile_flags(profile),
         seed=name in SEED_PROFILES,
         runtime_family=runtime,
         supported_slot_types=_supported_slot_types(runtime),
         cloned_from=profile.cloned_from,
         intent=profile.intent,
-        quant=profile.quant,
         tps=bench.get("tps"),
         rtf=bench.get("rtf"),
         used_by=used_by,
@@ -475,69 +359,31 @@ def resolve_loaded_profile(
 
 
 def runtime_family_of(name: str, profile: ProfileConfig) -> RuntimeFamily:
-    """Public seam for :func:`_runtime_family` — the runtime family a profile
-    resolves to, for callers that hold a ProfileConfig that is not (yet) in
-    the catalog. The import dry run reports it for an envelope that has not
-    been created.
-    """
+    """Public seam for :func:`_runtime_family` (a profile not yet in the catalog)."""
     return _runtime_family(name, profile)
 
 
 def _merge_runner(patched: str | None, stored: str | None) -> str | None:
     """Resolve an update's ``runner`` against the profile's stored value.
 
-    The three wire cases (#2186), in order:
-
-    * ``None`` — the field was omitted: leave the stored runtime alone.
-    * ``""`` — the explicit CLEAR sentinel: back to Auto (no runtime pinned).
-      Never screened: dropping a runtime is always a legal state, and this is
-      the only in-product way off a key the registry no longer carries.
-    * the value already stored — grandfathered through unscreened (#2183).
-    * anything else — a real key, screened and canonicalized as on create.
-
-    The grandfather clause mirrors ``screen_profile_flags``' (#1411): a runner
-    key can leave ``RUNNER_IMAGES`` under the profile that stores it — a runtime
-    renamed or dropped by a build, or a downgrade — and the drawer re-sends the
-    stored runner verbatim on every save, so screening an UNCHANGED value 422'd
-    a write that changes nothing and made the profile un-editable in EVERY
-    field. The screen judges what an update INTRODUCES, not what it inherits;
-    any actual change (including one unknown key for another) is still fully
-    screened, and `create` stays strict — it has no stored baseline.
+    ``None`` keeps the stored runtime; ``""`` clears it (#2186); the stored
+    value passes unscreened (a key may leave the registry under the profile
+    that stores it, #2183); anything else is screened as on create.
     """
     if patched is None:
         return stored
     if not patched.strip():
         return None
     if patched == stored:
-        from hal0.runners import RUNNER_IMAGES  # lazy: runners must not import profiles
-
-        if patched not in RUNNER_IMAGES:
-            # Logged, not silently ignored — mirrors the flags grandfathering.
-            # An unchanged key that IS in the registry is the ordinary save and
-            # says nothing worth a line.
-            log.info(
-                "profile carries a runner key this box's registry no longer "
-                "offers; grandfathered on update",
-                extra={"event": "profile.runner_grandfathered", "runner": patched},
-            )
         return stored
     return screen_profile_runner(patched)
 
 
 def screen_profile_runner(runner: str | None) -> str | None:
-    """Validate + canonicalize a profile's runner key (D4). None/blank passes.
+    """Validate + canonicalize a profile's runner key. None/blank passes.
 
-    A blank string is treated as None — "no runtime pinned" — rather than
-    looked up as a key: it is what the drawer's Auto option puts on the wire,
-    and an empty key names nothing in any registry. (On an update the blank is
-    already resolved by :func:`_merge_runner` as the clear sentinel; this is
-    the create/import side of the same reading.)
-
-    ``runner`` is a RUNNER_IMAGES registry key, never an image ref — keys
-    survive image/tag updates (the same rot that got ``image`` removed from
-    profiles, spec-hw-slot-ownership §3). Shared by the profile
-    catalog write seam (create/update) and the portable import path so both
-    apply the identical check.
+    ``runner`` is a RUNNER_IMAGES registry key, never an image ref. Shared by
+    the catalog write seam and the portable import path.
     """
     if runner is None or not runner.strip():
         return None
@@ -553,111 +399,35 @@ def screen_profile_runner(runner: str | None) -> str | None:
     return key
 
 
-def screen_profile_flags(flags: str | None, *, grandfathered: str | None = None) -> None:
-    """Reject physical slot flags and hal0-managed flags before a profile is persisted.
+def screen_profile_flags(flags: str | None) -> None:
+    """Reject every flag a profile may not carry, before it is persisted.
 
-    The catalog is the actual write seam — routes, import and CLI paths all
-    funnel through :meth:`ProfileCatalog.create` / :meth:`ProfileCatalog.update`
-    — so the guard lives here and the HTTP layer delegates to it rather than
-    keeping a second copy. Enforces the model/profile ownership partition
-    (§5 hardware flags + §21.7 managed args). Empty/unset ``flags`` is a no-op.
-
-    ``grandfathered`` is the profile's CURRENTLY STORED flag text on an update
-    (#1411). The §5 screen shipped with no data migration, so every custom
-    profile authored before it carried ``-dev``/``--threads`` and failed its own
-    round-trip: loading it in the drawer and pressing Save — which re-sends the
-    stored text verbatim — 400'd on the profile's own data. On lxc105 that was
-    10 of 10 pre-existing custom profiles, five of them bound to live slots, so
-    the Profiles page saved nothing at all.
-
-    The screen therefore judges what an update INTRODUCES, not what it inherits:
-    a slot-hardware flag already present in ``grandfathered`` passes (logged, not
-    silently ignored), while adding a new one still hard-rejects. That keeps the
-    policy intact going forward, keeps the migration path open (dropping the
-    inherited flag is a normal save, after which re-adding it is a new reach), and —
-    unlike stripping the flags on read — never silently rewrites an operator's
-    working device selection out from under a live slot. Grandfathering covers
-    the §5 hardware set ONLY: #1404's load-path sanitizer already strips the
-    §21.7 managed args from stored profiles, so a managed flag can never be
-    inherited in the first place.
-
-    ``flags`` itself must be valid shell text (#1730). #1639 added a
-    launch-time guard (``providers.container``, ``slot.profile_flags_malformed``)
-    so a divergent profile with unmatched quoting no longer 500s the
-    launch/preview path — but that only covers a profile that ALREADY made it
-    onto disk. This screen is the actual write seam (routes/import/CLI all
-    funnel through it), and until now it silently returned on a
-    ``shlex.split`` failure instead of rejecting it, so bad quoting sailed
-    straight through to persistence — the root cause #1639 patched around
-    rather than fixed. Reject it here instead, with the same error family the
-    launch-time guard uses, so the operator sees the problem at save time
-    instead of the next launch.
-
-    Malformed-quoting rejection is ALSO grandfathered (mirroring the §5
-    hardware-flag grandfathering above): a profile persisted before #1737
-    added this check can already carry bad quoting on disk. Routes forward
-    ``body.flags`` on every PUT and the UI drawer resends the stored flags
-    text verbatim, so without grandfathering, a save that only changes e.g.
-    ``device_class`` would re-screen the SAME already-broken flags and 422 —
-    making the profile un-editable for any field, the exact #1411 round-trip
-    trap recreated for quoting instead of hardware flags. The screen only
-    rejects a NEWLY-introduced or CHANGED malformed value; an unchanged
-    inherited one passes through (logged, not silently ignored).
+    The catalog is the write seam (routes, import, CLI). A profile may not set
+    hardware flags (the slot's typed fields), hal0-managed flags (including
+    ``--ctx-size``: use ``ctx_size``), model-fact flags (``--jinja``,
+    ``--chat-template*``, ``--mmproj*``, ``--no-mmproj*``),
+    ``--spec-draft-device`` (the slot's device decides it) or
+    ``--reasoning-format none`` (#2545). The text must be valid shell text.
     """
     if not flags or not flags.strip():
         return
     try:
         tokens = shlex.split(flags)
     except ValueError as exc:
-        if grandfathered is not None and flags == grandfathered:
-            log.info(
-                "profile flags carry pre-existing malformed quoting; grandfathered on update",
-                extra={"event": "profile.malformed_flags_grandfathered", "flags": flags},
-            )
-            return
         raise UnprocessableEntity(
             f"profile flags are not valid shell text: {exc}",
             code="profiles.flags_malformed",
             details={"flags": flags},
         ) from exc
     from hal0.slots.argv import (
-        SLOT_HARDWARE_FLAGS,
-        _canon,
         _deny_managed_flags,
+        _deny_profile_owned_elsewhere,
         _deny_slot_hardware_flags,
         deny_reasoning_format_none,
-        strip_managed_flags,
     )
 
-    inherited: list[str] = []
-    prior_tokens: list[str] | None = None
-    if grandfathered and grandfathered.strip():
-        try:
-            prior_tokens = shlex.split(grandfathered)
-        except ValueError:
-            prior_tokens = []
-        # `strip_managed_flags` doubles as the finder here: its `removed` list is
-        # exactly "which flags from this denylist are present", canonicalised and
-        # in original spelling. Reusing it keeps ONE token-matching implementation.
-        _, inherited = strip_managed_flags(prior_tokens, denylist=SLOT_HARDWARE_FLAGS)
-    if inherited:
-        # Drop the inherited flags (and their values) from what gets screened, so
-        # only the genuinely NEW reaches reach the deny helpers — which keeps
-        # their message and `details.flags` naming exactly the offending subset.
-        tokens, _ = strip_managed_flags(tokens, denylist=frozenset(_canon(f) for f in inherited))
-        log.info(
-            "profile flags carry pre-existing slot-hardware flag(s); grandfathered on update",
-            extra={"event": "profile.hardware_flags_grandfathered", "flags": inherited},
-        )
-
-    # Hardware first so -ngl (in both sets) gets the "belongs on the slot"
-    # message — mirrors the route/screen_model_write ordering.
+    # Hardware first so -ngl (in both sets) gets the "belongs on the slot" message.
     _deny_slot_hardware_flags(tokens, segment="profile flags")
     _deny_managed_flags(tokens, segment="profile flags")
-    # #2545: reject a save that INTRODUCES `--reasoning-format none` (an
-    # inherited one passes; resolve_argv strips it at launch).
-    deny_reasoning_format_none(
-        tokens,
-        segment="profile flags",
-        grandfathered=prior_tokens,
-    )
+    deny_reasoning_format_none(tokens, segment="profile flags")
+    _deny_profile_owned_elsewhere(tokens, segment="profile flags")

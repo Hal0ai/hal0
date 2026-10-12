@@ -1325,6 +1325,51 @@ def test_commit_convergence_is_durable_before_the_restart_that_can_kill_us(
     )
 
 
+def test_commit_job_carries_the_profile_conversion_blockers(
+    isolated_client: TestClient, tmp_hal0_home: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ADR-0029: the commit job surfaces the profile-centric conversion's
+    blockers (inside its ``convergence`` dict), so the dashboard can list
+    them as ``hal0 update`` does."""
+    from hal0.api.routes import updater as u_mod
+
+    blockers = [{"target": "agent.toml", "reason": "--chat-template-file has no profile home"}]
+    convergence_payload = {
+        "converged": False,
+        "post_activation_migrations": {
+            "ok": True,
+            "from": 1,
+            "to": 1,
+            "error": None,
+            "pass_warnings": [],
+            "conversion_blockers": blockers,
+        },
+    }
+
+    async def fake_commit(self: object, version: str) -> dict:
+        return {"version": "0.0.9", "installed_at": time.time(), "convergence": convergence_payload}
+
+    class _R:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    monkeypatch.setattr(u_mod.Updater, "commit", fake_commit)
+    monkeypatch.setattr(u_mod.subprocess, "run", lambda *a, **k: _R())
+
+    job_id = isolated_client.post("/api/updates/commit", json={"version": "0.0.9"}).json()["id"]
+    deadline = time.monotonic() + 6.0
+    final: dict = {}
+    while time.monotonic() < deadline:
+        final = isolated_client.get(f"/api/updates/status/{job_id}").json()
+        if final.get("convergence") is not None or final["state"] == "failed":
+            break
+        time.sleep(0.05)
+
+    assert final["convergence"]["converged"] is False
+    assert final["convergence"]["post_activation_migrations"]["conversion_blockers"] == blockers
+
+
 # ── /components (Task 8) ─────────────────────────────────────────────────────
 
 

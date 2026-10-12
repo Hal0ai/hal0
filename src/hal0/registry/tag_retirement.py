@@ -18,7 +18,7 @@ drove behaviour into their typed homes and strips all six:
 * ``coder`` → KEPT — the bench roster selector matches it as a descriptive
   label (tags are inert for routing either way).
 * ``tool-calling``/``reasoning`` → dropped; ``capability_flags.
-  tool_calling`` and ``defaults.enable_thinking`` own those behaviours.
+  tool_calling`` and the slot profile's ``enable_thinking`` own those behaviours.
 
 Curated CATALOGUE entries (registry/curated.py) keep their descriptive tags —
 this sweep touches only registry rows. Idempotent and best-effort: a store

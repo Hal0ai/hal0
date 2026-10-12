@@ -135,7 +135,9 @@ GPU-free and ignored by exclusivity either way.
 Tier B: the server-only levers `llama-bench` can't see — MTP draft depth
 (`--spec-draft-n-max`), `--cache-reuse` on a shared-prefix trace, poll, and the
 embed/rerank endpoints. Talks to `hal0-api` + the slot port as the `hal0` user (no
-sudo), always restores the slot's original `extra_args`, and writes JSON to
+sudo). Each arm runs under a temporary custom profile (cloned from the slot's
+current one, with the arm's flags / `ctx_size` / `mtp`); the original profile is always
+restored and the temporary ones deleted, even on Ctrl-C. Writes JSON to
 `/var/lib/hal0/benchmarks/server-ab/`. Supersedes the ad-hoc `/root/bench_mtp.py`.
 
 ## Scope & roadmap

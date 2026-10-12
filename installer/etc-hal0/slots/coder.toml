@@ -3,11 +3,13 @@
 # agent slot (8081); used by the codegen virtual model hal0/code
 # (per brain.toml docstring: "hal0/code (27B coder, lighter)").
 #
-# profile = coding (new in 1.0; per spec §4.2): workload-level code-gen
-# tune — higher temp for code-gen creativity, no reasoning (coders are
-# non-reasoning), specific sampler (--temp 0.7 --top-p 0.95 --top-k 40).
-# Family-specific overrides go in profile.<family>-coding for specific
-# coder model families (e.g. profile.qwopus-coding) — out of scope for 1.0.
+# profile = coding (ADR-0029 seed): workload-level code-gen tune — higher
+# temp for code-gen creativity, no reasoning (coders are non-reasoning),
+# specific sampler (--temp 0.7 --top-p 0.95 --top-k 40), vision off. The
+# context window is the profile's `ctx_size`; the seed sets none, so the
+# slot runs the model's native window capped at 32768. For a different
+# window or a family-specific tune, clone the profile and point the slot at
+# the clone.
 #
 # Clean seed (WS-E, #1107): no `[model].default` pin, so a model-less box
 # boots a GREY tile. The operator assigns a coder model later; filling in
@@ -37,6 +39,3 @@ profile = "coding"
 port = 8082
 n_gpu_layers = -1
 threads = 0
-
-[model]
-context_size = 32768

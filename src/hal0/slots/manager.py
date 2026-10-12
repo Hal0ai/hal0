@@ -39,7 +39,6 @@ from hal0.config import paths
 from hal0.errors import Hal0Error
 from hal0.registry import fallback as _registry_fallback
 from hal0.slot_config import (
-    fold_ctx_size_alias,
     slot_write_lock,
     write_slot_toml,
 )
@@ -52,8 +51,8 @@ from hal0.slots._cfg_helpers import (
     heal_missing_llm_type,
 )
 from hal0.slots.config_write import (
-    _base_profile_for_backend,
     _cfg_effective_backend,
+    _cfg_effective_provider,
     _iter_peer_configs,
     _reconcile_device_profile,
     check_default_uniqueness,
@@ -69,15 +68,6 @@ from hal0.slots.npu.trio import is_npu_trio_shadow
 from hal0.slots.npu.trio import reconcile_trio_slots as _npu_reconcile_trio_slots
 from hal0.slots.preload_evict import _DEFAULT_HEADROOM_MB
 from hal0.slots.preload_evict import admit as _preload_admit
-from hal0.slots.profile_adopt import (
-    apply_preferred_profile as _profile_adopt_apply_preferred_profile,
-)
-from hal0.slots.profile_adopt import (
-    defuse_stale_mtp_on_swap as _profile_adopt_defuse_stale_mtp_on_swap,
-)
-from hal0.slots.profile_adopt import (
-    preferred_profile_for as _profile_adopt_preferred_profile_for,
-)
 from hal0.slots.profile_adopt import profile_fits_slot as _profile_adopt_profile_fits_slot
 from hal0.slots.profile_adopt import type_implied_profile
 from hal0.slots.reaper import _EVICT_AFTER_S, _IDLE_AFTER_S, _IDLE_MONITOR_INTERVAL_S, SlotReaper
@@ -2111,35 +2101,8 @@ class SlotManager:
             raise SlotConfigError("swap requires a non-empty model id")
         slot_name = self._resolve_alias(slot_name)
         self._ensure_known(slot_name)
-        # Q1 (model profiles): adopt the new model's preferred profile — when it
-        # fits the slot — BEFORE the reload, so the container comes up on the
-        # right image. A no-op when the model has no preference or it doesn't
-        # fit; a write failure must not block the swap, so it soft-fails.
-        try:
-            await self._apply_preferred_profile(slot_name, new_model_id)
-        except SlotConfigError as exc:
-            log.warning(
-                "slot.preferred_profile_swap_failed",
-                extra={"slot": slot_name, "model_id": new_model_id, "error": str(exc)},
-            )
-        # spec-hw-slot-ownership §2/§3: no model-driven runner adoption on swap
-        # anymore — the runner is the slot's own ``binary`` field, and the image
-        # resolves from ``slot.image_pin or RUNNER_IMAGES[slot.binary]`` (or the
-        # HW-gated default when binary is unset) at launch. Swapping the model
-        # never re-points the slot's hardware.
-        # MTP defuse: a forced mtp=true pointing at a model with no MTP heads
-        # makes llama-server exit at load ("model doesn't contain MTP layers"),
-        # so a swap onto an ineligible model clears exactly that override
-        # (→ AUTO). Force-off and force-on-for-eligible survive swaps; an
-        # unresolvable model is left alone (can't judge). Soft-fails like the
-        # preferred-profile hook — a write failure must not block the swap.
-        try:
-            await self._defuse_stale_mtp_on_swap(slot_name, new_model_id)
-        except Exception as exc:
-            log.warning(
-                "slot.mtp_defuse_swap_failed",
-                extra={"slot": slot_name, "model_id": new_model_id, "error": str(exc)},
-            )
+        # ADR-0029: a swap keeps the slot's profile; the model no longer picks
+        # one, and the runner stays the slot's own ``binary``.
         # SWAP ATOMICITY (#1791): make the requested model DURABLE before any
         # teardown, instead of only after a successful load.
         #
@@ -2255,7 +2218,7 @@ class SlotManager:
                     port=int(cfg.get("port") or 0) if cfg else 0,
                     backend=eff_backend,
                     metadata={
-                        "provider": cfg.get("provider"),
+                        "provider": _cfg_effective_provider(cfg),
                         "backend": eff_backend,
                     }
                     if cfg
@@ -2309,7 +2272,7 @@ class SlotManager:
         elif observed == SlotState.ERROR and not active:
             # #2130 second half: a cached ERROR must converge once the unit's
             # own properties show a deliberate, non-crash end — a clean
-            # SIGTERM stop (`migrate-flags --stop-services`, a bare
+            # SIGTERM stop (a bare
             # `systemctl stop`) or an operator's `systemctl reset-failed`.
             # Without this the display stayed red until a full `slot load`,
             # telling an operator mid-upgrade that the obvious systemd
@@ -2361,6 +2324,13 @@ class SlotManager:
         }
         if backend:
             meta["backend"] = backend
+        # Same truth rule for the provider: re-derive it from the TOML's
+        # profile (the launch dispatch) on every read, so a state record
+        # seeded with a stale provider (``llama-server`` on a Kokoro slot)
+        # never reaches the dashboard or the model-required checks.
+        provider = _cfg_effective_provider(cfg) if cfg else None
+        if provider:
+            meta["provider"] = provider
         breaker = self._breaker_snapshot(slot_name)
         if breaker:
             meta["breaker"] = breaker
@@ -2700,40 +2670,12 @@ class SlotManager:
         slots/*.toml write path (issue #697).
         """
         cfg_dict = _cfg_to_dict(slot_cfg)
-        # #585: canonicalize a ctx_size alias from the create modal too —
-        # same single fold (:func:`hal0.slot_config.fold_ctx_size_alias`)
-        # the merge/update path uses.
-        fold_ctx_size_alias(cfg_dict)
-        # v1.0: do NOT backfill [model].context_size here. The MODEL owns the
-        # context window (providers.container._resolve_context_size) and a
-        # slot-level value is now only a hardware CEILING. Stamping the model's
-        # current window onto the new slot would freeze that ceiling at
-        # create-time: raising the model's context size later would be silently
-        # clamped back down by a number the operator never chose. Leaving it
-        # unset means the slot follows the model, which is the whole point of the
-        # partition — and the launch path still guarantees a concrete window
-        # (never llama-server's silent 4096, chat@4096 incident).
-        model_tbl = cfg_dict.get("model")
-        # Q1 (model profiles): a new slot bound to a model but with NO explicit
-        # profile adopts the model's preferred profile when it fits the slot's
-        # device/type. An operator's explicit create-time profile is left
-        # untouched (only an empty profile is filled) — the reconcile below then
-        # validates device/profile coherence as usual.
-        if isinstance(model_tbl, dict) and model_tbl.get("default") and not cfg_dict.get("profile"):
-            preferred = await self._preferred_profile_for(model_tbl.get("default"))
-            if preferred and self._profile_fits_slot(preferred, cfg_dict):
-                cfg_dict["profile"] = preferred
-        # #1830: the model preference above was the ONLY create-time profile
-        # source, and auto-scan / ``model add`` / pull / the curated catalog all
-        # register models with ``defaults: null`` — so an embedding/reranking
-        # slot from ``hal0 slot create``, the New-slot modal, a stack apply or
-        # the capability orchestrator landed on disk with NO ``profile`` key.
-        # For those types the profile is not a tune, it is the mode flag
-        # (``--embedding`` / ``--reranking``) or the runtime engine; without it
-        # the slot loads to ``state=ready`` and 501s its own endpoint. Fall back
-        # to the profile the slot's TYPE implies (vetoed by the same fit check;
-        # ``llm`` slots infer nothing). An explicit profile still wins, and so
-        # does the model's stamped preference above.
+        # #1830: for an embedding/reranking/TTS/STT/image slot the profile is
+        # not only a tune, it is the mode flag (``--embedding`` /
+        # ``--reranking``) or the runtime engine; without it the slot loads to
+        # ``state=ready`` and 501s its own endpoint. A slot created with no
+        # profile gets the one its TYPE implies (vetoed by the fit check;
+        # ``llm`` slots infer nothing and launch with ``chat``).
         if not cfg_dict.get("profile"):
             implied = type_implied_profile(cfg_dict)
             if implied:
@@ -2858,7 +2800,9 @@ class SlotManager:
                     # every read, so this is only a fallback, but keeping it
                     # honest avoids a transient lie before the first status call.
                     "backend": _cfg_effective_backend(cfg_dict) or "vulkan",
-                    "provider": cfg_dict.get("provider", "llama-server"),
+                    # The provider the launch dispatch picks (the profile's
+                    # runtime family), not a hard-coded llama-server.
+                    "provider": _cfg_effective_provider(cfg_dict),
                 },
                 force=True,
             )
@@ -3226,24 +3170,9 @@ class SlotManager:
                 ) from exc
             self._invalidate_cfg_cache(slot_name)
 
-    # ── model preferred profile (Q1: profile loads with the model) ────────────
-    #
-    # P3-slots §1g: logic lives in hal0.slots.profile_adopt; every method
-    # below is a thin delegator.
-
-    async def _preferred_profile_for(self, model_id: str | None) -> str | None:
-        """See :func:`hal0.slots.profile_adopt.preferred_profile_for`."""
-        return await _profile_adopt_preferred_profile_for(self, model_id)
+    # ── profile fit (hal0.slots.profile_adopt) ───────────────────────────────
 
     _profile_fits_slot = staticmethod(_profile_adopt_profile_fits_slot)
-
-    async def _apply_preferred_profile(self, slot_name: str, model_id: str) -> bool:
-        """See :func:`hal0.slots.profile_adopt.apply_preferred_profile`."""
-        return await _profile_adopt_apply_preferred_profile(self, slot_name, model_id)
-
-    async def _defuse_stale_mtp_on_swap(self, slot_name: str, model_id: str) -> bool:
-        """See :func:`hal0.slots.profile_adopt.defuse_stale_mtp_on_swap`."""
-        return await _profile_adopt_defuse_stale_mtp_on_swap(self, slot_name, model_id)
 
     # NOTE (spec-hw-slot-ownership §2/§3): the model-preferred-runner adoption
     # (``_preferred_runner_for`` / ``_apply_preferred_runner`` / the
@@ -3867,8 +3796,8 @@ class SlotManager:
         """Drop the parsed-TOML cache entry for *slot_name* (post-write hook).
 
         Called by every in-process slot-TOML writer (create / update_config /
-        _persist_model_default / _apply_preferred_profile / delete) right
-        after the write lands.  Belt to the (mtime_ns, size) suspenders in
+        _persist_model_default / delete) right after
+        the write lands.  Belt to the (mtime_ns, size) suspenders in
         :meth:`_load_slot_config` — guarantees our own writes are never
         masked even on a filesystem with coarse mtime resolution.
         """
@@ -4226,7 +4155,7 @@ class SlotManager:
             # legacy ``backend`` field, folded by _cfg_effective_backend)
             # is what is actually running.
             "backend": _cfg_effective_backend(cfg) or cfg.get("backend"),
-            "provider": cfg.get("provider", "llama-server"),
+            "provider": _cfg_effective_provider(cfg),
             "adopted": True,
             # Record the probe result so /api/health + hal0_slot_up can fold
             # in real readiness rather than trusting FSM state alone (#791).
@@ -4414,7 +4343,7 @@ class SlotManager:
 # (P3-slots §1c — investigated + KEPT, not deleted; see that module's
 # docstring). Imported + re-exported above.
 
-# NOTE: _cfg_effective_backend / _base_profile_for_backend /
+# NOTE: _cfg_effective_backend /
 # _reconcile_device_profile / _read_slot_toml_dict / _iter_peer_configs /
 # check_npu_exclusivity / check_default_uniqueness / reconcile_slot_updates /
 # reconcile_and_guard_slot_config / guard_slot_write_payload moved to
@@ -4438,8 +4367,8 @@ __all__ = [
     "Slot",
     "SlotManager",
     "_argv_values",
-    "_base_profile_for_backend",
     "_cfg_effective_backend",
+    "_cfg_effective_provider",
     "_cfg_port",
     "_cfg_provider",
     "_model_default",

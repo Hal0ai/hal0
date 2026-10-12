@@ -80,12 +80,12 @@ async def test_unrelated_update_preserves_coherent_pair(tmp_hal0_home: str) -> N
     sm = SlotManager()
     await sm.create("util", _gpu_cfg("util", device="gpu-rocm", profile="chat"))
 
-    await sm.update_config("util", {"model": {"context_size": 32768}})
+    await sm.update_config("util", {"idle_timeout_s": 600})
 
     cfg = await sm.get_config("util")
     assert cfg["device"] == "gpu-rocm"
     assert cfg["profile"] == "chat"
-    assert cfg["model"]["context_size"] == 32768
+    assert cfg["idle_timeout_s"] == 600
 
 
 async def test_explicit_contradiction_rejected(tmp_hal0_home: str) -> None:
@@ -135,7 +135,7 @@ async def test_non_gpu_profile_untouched(tmp_hal0_home: str) -> None:
         },
     )
 
-    await sm.update_config("voice", {"model": {"context_size": 2048}})
+    await sm.update_config("voice", {"idle_timeout_s": 120})
 
     cfg = await sm.get_config("voice")
     assert cfg["device"] == "cpu"

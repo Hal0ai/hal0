@@ -409,8 +409,8 @@ class ExtractionWindow(AnchorWindow):
     fail") — fed the extraction floor it would tell an operator debugging a
     failed memory write that their agent runtime is broken, against a
     threshold that contradicts the real Hermes check. Same resolved facts
-    (slot, effective window, binding ceiling, fix command), memory-extraction
-    words.
+    (slot, profile, effective window, binding ctx_size, fix command),
+    memory-extraction words.
     """
 
     def message(self) -> str:
@@ -450,26 +450,26 @@ class ExtractionWindow(AnchorWindow):
         if self.slot is None:
             return (
                 f"{head} hal0 could not prove which slot is serving it, so it cannot "
-                f"name the ceiling to raise — run `hal0 slot list` and raise the "
-                f"window of the slot behind {self.model!r} to at least {self.floor:,}."
+                f"name the profile to raise — run `hal0 slot list` and raise the profile "
+                f"ctx_size of the slot behind {self.model!r} to at least {self.floor:,}."
             )
         if self.ceiling_is_binding:
             return (
-                f"{head} The limit is this slot's own configured ceiling: "
-                f"[model].context_size = {self.ceiling:,} in {self.slot_path}. "
-                f"Fix: {self.fix_command}"
+                f"{head} The limit is the slot profile's own window: "
+                f"{self._profile_note} sets ctx_size = {self.ceiling:,} "
+                f"(slot file {self.slot_path}). Fix: {self.fix_command}"
             )
         ceiling_note = (
-            f"the slot ceiling ({self.ceiling:,} in {self.slot_path}) is not the limit; "
+            f"{self._profile_note} sets ctx_size = {self.ceiling:,}, which is not the limit; "
             if self.ceiling is not None
-            else f"no ceiling is set in {self.slot_path}; "
+            else f"{self._profile_note} sets no ctx_size; "
         )
         return (
             f"{head} The limit is the model behind the slot — {ceiling_note}"
-            f"the model itself only advertises {self.effective:,}. Point slot "
-            f"{self.slot!r} at a model whose window is at least {self.floor:,} "
-            f"(`hal0 slot edit {self.slot} --model <model-id>`), or set "
-            f"defaults.context_size on the current model if it really supports more."
+            f"the window comes from the model, which only advertises {self.effective:,}. "
+            f"Raise the slot profile's ctx_size to at least {self.floor:,} "
+            f"({self.fix_command}), or point slot {self.slot!r} at a model whose window "
+            f"is at least {self.floor:,} (`hal0 slot edit {self.slot} --model <model-id>`)."
         )
 
 
@@ -522,6 +522,7 @@ def resolve_extraction_window(
         floor_source=window.floor_source,
         slots_dir=window.slots_dir,
         endpoint=window.endpoint,
+        profile=window.profile,
     )
 
 

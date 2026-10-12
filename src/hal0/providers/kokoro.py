@@ -43,7 +43,7 @@ from hal0.errors import Hal0Error
 from hal0.providers.base import ContainerSpec, Provider
 
 # Default profile name if the slot TOML omits one.
-_DEFAULT_PROFILE = "tts"
+_DEFAULT_PROFILE = "kokoro"
 
 # Model store is mounted identical-path so the profile-baked
 # ``--model_path <store>/local/kokoro-v1/kokoro-onnx`` resolves inside the

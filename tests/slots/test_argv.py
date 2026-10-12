@@ -251,54 +251,91 @@ def test_empty_is_noop() -> None:
     assert res.winners == {}
 
 
-# ── resolve_argv: provenance over labelled segments ───────────────────────────
+# ── resolve_argv: provenance over the four ADR-0029 layers ────────────────────
 
 
 def test_resolve_argv_attributes_winning_source() -> None:
     res = resolve_argv(
         [
             ("base", ["--host", "0.0.0.0"]),
-            ("profile", ["-b", "512", "--jinja"]),
-            ("extra_args", ["-b", "8192"]),  # overrides the profile's -b
+            ("model", ["--jinja"]),
+            ("profile", ["-b", "512", "-fa", "auto"]),
+            ("slot", ["--threads", "8", "--metrics"]),
         ]
     )
-    assert res.argv == ["--host", "0.0.0.0", "--jinja", "-b", "8192"]
+    assert res.argv == [
+        "--host",
+        "0.0.0.0",
+        "--jinja",
+        "-b",
+        "512",
+        "-fa",
+        "auto",
+        "--threads",
+        "8",
+        "--metrics",
+    ]
     prov = {p.flag: p for p in res.provenance}
-    # -b was set last by extra_args -> that segment is credited, value preserved
-    assert prov["-b"].source == "extra_args"
-    assert prov["-b"].value == "8192"
-    # --jinja only came from the profile
-    assert prov["--jinja"].source == "profile"
-    assert prov["--jinja"].value is None
-    # --host from base
     assert prov["--host"].source == "base"
+    assert prov["--jinja"].source == "model"
+    assert prov["--jinja"].value is None
+    assert prov["-b"].source == "profile"
+    assert prov["-b"].value == "512"
+    assert prov["--threads"].source == "slot"
+    assert res.removed == 0
+
+
+def test_resolve_argv_later_layer_wins_and_is_credited() -> None:
+    """A profile ``--spec-draft-*`` value follows the MTP bundle in the same
+    layer and wins; the slot layer follows the profile."""
+    res = resolve_argv(
+        [
+            ("base", ["--ctx-size", "4096"]),
+            ("profile", ["--spec-draft-n-max", "4", "-b", "512", "--spec-draft-n-max", "8"]),
+            ("slot", ["--spec-draft-device", "Vulkan0"]),
+        ]
+    )
+    assert _value_after(res.argv, "--spec-draft-n-max") == "8"
     assert res.removed == 1
+    prov = {p.flag: p for p in res.provenance}
+    assert prov["--spec-draft-n-max"].source == "profile"
+    assert prov["--spec-draft-device"].source == "slot"
 
 
 def test_resolve_argv_equivalent_argv_to_normalize() -> None:
     # Same tokens, segmented vs flat, produce the same deduped argv.
-    flat = ["--host", "0.0.0.0", "-b", "512", "--jinja", "-b", "8192"]
-    seg = resolve_argv([("base", flat[:2]), ("profile", flat[2:5]), ("extra_args", flat[5:])])
+    flat = ["--host", "0.0.0.0", "--jinja", "-b", "512", "-b", "8192", "--metrics"]
+    seg = resolve_argv(
+        [("base", flat[:2]), ("model", flat[2:3]), ("profile", flat[3:7]), ("slot", flat[7:])]
+    )
     assert seg.argv == normalize_argv(flat).argv
 
 
 def test_resolve_argv_omits_append_flags_from_provenance() -> None:
-    res = resolve_argv([("profile", ["--lora", "a", "--lora", "b"]), ("extra_args", ["--jinja"])])
+    res = resolve_argv([("model", ["--jinja"]), ("profile", ["--lora", "a", "--lora", "b"])])
     flags = {p.flag for p in res.provenance}
     assert "--lora" not in flags  # append flags aren't deduped -> no single "winner"
     assert "--jinja" in flags
+    assert res.argv.count("--lora") == 2
 
 
-# ── §21.7: managed-args denylist ──────────────────────────────────────────────
+def test_profile_is_the_only_untrusted_layer() -> None:
+    from hal0.slots.argv import PROFILE_SEGMENT_LABELS, UNTRUSTED_SEGMENT_LABELS
+
+    assert frozenset({"profile"}) == UNTRUSTED_SEGMENT_LABELS
+    assert frozenset({"profile"}) == PROFILE_SEGMENT_LABELS
+
+
+# ── §21.7 / ADR-0029: the profile layer is screened at launch ─────────────────
 #
-# ``[server].extra_args`` is free-form and is the LAST segment ``container.py``
-# passes to ``resolve_argv`` — these pin that it can't smuggle a flag hal0
-# itself owns (model path, listen address/port, context size, GPU-layer
-# override, advertised alias) past the merge.
+# A profile file is operator-editable on disk, so the launch re-screens what
+# the profile write path already rejects: a managed flag (model path, listen
+# address/port, context size, advertised alias), a hardware flag (the slot's
+# typed fields), a model-fact flag or the MTP draft device.
 
 _BASE_SEGMENTS = [
     ("base", ["--host", "0.0.0.0", "--port", "8101", "--model", "/models/m.gguf"]),
-    ("profile", ["-fa", "on", "--threads", "16"]),
+    ("model", ["--jinja"]),
 ]
 
 
@@ -310,51 +347,78 @@ _BASE_SEGMENTS = [
         ["--host", "0.0.0.0"],
         ["--ctx-size", "8192"],
         ["-c", "8192"],
-        ["-ngl", "0"],
-        ["--n-gpu-layers", "0"],
         ["--alias", "not-the-real-model"],
     ],
 )
-def test_resolve_argv_rejects_managed_flag_in_extra_args(denied_tokens: list[str]) -> None:
-    segments = [*_BASE_SEGMENTS, ("extra_args", ["--flash-attn", "on", *denied_tokens])]
+def test_resolve_argv_rejects_managed_flag_in_profile(denied_tokens: list[str]) -> None:
+    segments = [*_BASE_SEGMENTS, ("profile", ["--flash-attn", "on", *denied_tokens])]
     with pytest.raises(BadRequest) as exc_info:
         resolve_argv(segments)
     assert exc_info.value.code == "slot.managed_arg_denied"
     assert denied_tokens[0] in exc_info.value.message
 
 
-def test_resolve_argv_rejects_multiple_managed_flags_in_one_extra_args() -> None:
-    segments = [*_BASE_SEGMENTS, ("extra_args", ["--model", "/tmp/evil.gguf", "--port", "1"])]
+@pytest.mark.parametrize(
+    "denied_tokens",
+    [["-ngl", "0"], ["--n-gpu-layers", "0"], ["--threads", "8"], ["-t", "8"], ["-dev", "ROCm0"]],
+)
+def test_resolve_argv_rejects_hardware_flag_in_profile(denied_tokens: list[str]) -> None:
+    """``-ngl`` is both managed and hardware: the "belongs on the slot" code wins."""
+    segments = [*_BASE_SEGMENTS, ("profile", ["--flash-attn", "on", *denied_tokens])]
+    with pytest.raises(BadRequest) as exc_info:
+        resolve_argv(segments)
+    assert exc_info.value.code == "slot.hardware_flag_denied"
+    assert exc_info.value.details["flags"] == [denied_tokens[0]]
+
+
+@pytest.mark.parametrize(
+    "denied_tokens",
+    [
+        ["--jinja"],
+        ["--chat-template", "chatml"],
+        ["--chat-template-file", "/t.jinja"],
+        ["--mmproj", "/m.gguf"],
+        ["--no-mmproj"],
+        ["--mmproj-auto"],
+        ["--no-mmproj-auto"],
+        ["--spec-draft-device", "ROCm0"],
+    ],
+)
+def test_resolve_argv_rejects_model_fact_and_draft_device_in_profile(
+    denied_tokens: list[str],
+) -> None:
+    segments = [*_BASE_SEGMENTS, ("profile", ["-b", "512", *denied_tokens])]
+    with pytest.raises(BadRequest) as exc_info:
+        resolve_argv(segments)
+    assert exc_info.value.code == "profiles.model_fact_flag_denied"
+    assert exc_info.value.details["flags"] == [denied_tokens[0]]
+
+
+def test_resolve_argv_rejects_multiple_managed_flags_in_one_profile() -> None:
+    segments = [*_BASE_SEGMENTS, ("profile", ["--model", "/tmp/evil.gguf", "--port", "1"])]
     with pytest.raises(BadRequest) as exc_info:
         resolve_argv(segments)
     assert exc_info.value.details["flags"] == ["--model", "--port"]
 
 
-def test_resolve_argv_rejects_managed_flag_equals_form_in_extra_args() -> None:
-    """GNU ``--flag=value`` join form must canonicalize the same as the
-    two-token form — a caller can't bypass the §21.7 denylist just by using
-    ``=`` instead of a space."""
-    segments = [*_BASE_SEGMENTS, ("extra_args", ["--host=0.0.0.0"])]
+@pytest.mark.parametrize("token", ["--host=0.0.0.0", "--model=/etc/passwd"])
+def test_resolve_argv_rejects_managed_flag_equals_form_in_profile(token: str) -> None:
+    """GNU ``--flag=value`` join form canonicalizes the same as the two-token
+    form — the ``=`` spelling cannot bypass the screen."""
+    segments = [*_BASE_SEGMENTS, ("profile", [token])]
     with pytest.raises(BadRequest) as exc_info:
         resolve_argv(segments)
     assert exc_info.value.code == "slot.managed_arg_denied"
 
 
-def test_resolve_argv_rejects_managed_flag_equals_form_in_slot_profile() -> None:
-    """The #1636 ``slot_profile`` untrusted segment is equally exposed to the
-    ``=`` join-form bypass."""
-    segments = [*_BASE_SEGMENTS, ("slot_profile", ["--model=/etc/passwd"])]
-    with pytest.raises(BadRequest) as exc_info:
-        resolve_argv(segments)
-    assert exc_info.value.code == "slot.managed_arg_denied"
-
-
-def test_resolve_argv_allows_clean_extra_args() -> None:
-    """A slot's real extra_args (bench tuning, no managed flags) passes through."""
-    segments = [*_BASE_SEGMENTS, ("extra_args", ["--flash-attn", "on", "--threads", "8"])]
+def test_resolve_argv_allows_clean_profile() -> None:
+    """A real profile tune (no managed/hardware/model-fact flags) passes."""
+    segments = [
+        *_BASE_SEGMENTS,
+        ("profile", ["-fa", "auto", "-ctk", "q8_0", "--parallel", "2"]),
+        ("slot", ["-ngl", "999", "--threads", "8"]),
+    ]
     res = resolve_argv(segments)
-    # extra_args wins the -fa/--flash-attn and --threads collisions (last-wins,
-    # winning spelling kept) — no managed flag present, so nothing is raised.
     assert res.argv == [
         "--host",
         "0.0.0.0",
@@ -362,45 +426,29 @@ def test_resolve_argv_allows_clean_extra_args() -> None:
         "8101",
         "--model",
         "/models/m.gguf",
-        "--flash-attn",
-        "on",
+        "--jinja",
+        "-fa",
+        "auto",
+        "-ctk",
+        "q8_0",
+        "--parallel",
+        "2",
+        "-ngl",
+        "999",
         "--threads",
         "8",
     ]
 
 
-def test_resolve_argv_only_screens_untrusted_labels() -> None:
-    """A managed flag in a non-``extra_args`` (trusted) segment is not screened.
-
-    ``base``/``profile``/``model_defaults``/``slot_overrides`` are hal0-computed,
-    not caller-supplied — only labels in ``UNTRUSTED_SEGMENT_LABELS`` are
-    screened, so legitimate managed-layer flags (e.g. ``-ngl`` set from
-    ``[model].n_gpu_layers`` in the ``slot_overrides`` segment) never trip it.
-    """
-    segments = [*_BASE_SEGMENTS, ("slot_overrides", ["-ngl", "40"])]
-    res = resolve_argv(segments)  # must not raise
-    assert "-ngl" in res.argv
-
-
-def test_resolve_argv_screens_model_extra_args_segment() -> None:
-    """A model's free-form ``defaults.extra_args`` (the ``model_extra_args``
-    segment) is caller-supplied, so a managed flag smuggled through it must be
-    rejected at launch — the gap where an ``extra_args`` with ``--port`` reached
-    the container only because the model-defaults segment wasn't screened."""
-    segments = [*_BASE_SEGMENTS, ("model_extra_args", ["--flash-attn", "on", "--port", "9999"])]
-    with pytest.raises(BadRequest) as exc_info:
-        resolve_argv(segments)
-    assert exc_info.value.code == "slot.managed_arg_denied"
-    assert "--port" in exc_info.value.message
-
-
-def test_resolve_argv_does_not_screen_trusted_model_defaults_ngl() -> None:
-    """The ``-ngl`` hal0 computes from the schema field ``defaults.n_gpu_layers``
-    rides the trusted ``model_defaults`` segment and must NOT be rejected, even
-    though ``--n-gpu-layers`` is a managed flag."""
-    segments = [*_BASE_SEGMENTS, ("model_defaults", ["-ngl", "20"])]
-    res = resolve_argv(segments)  # must not raise
-    assert "-ngl" in res.argv
+@pytest.mark.parametrize("label", ["base", "model", "slot"])
+def test_resolve_argv_only_screens_the_profile_layer(label: str) -> None:
+    """The hal0-computed layers are trusted: the slot layer's ``-ngl`` /
+    ``--threads`` / ``--spec-draft-device`` and the model layer's ``--jinja`` /
+    ``--mmproj`` never trip the screen."""
+    tokens = ["-ngl", "40", "--threads", "8", "--spec-draft-device", "ROCm0", "--mmproj", "/p.gguf"]
+    res = resolve_argv([*_BASE_SEGMENTS, (label, tokens)])  # must not raise
+    for flag in ("-ngl", "--threads", "--spec-draft-device", "--mmproj"):
+        assert flag in res.argv
 
 
 def test_managed_args_denylist_covers_expected_flags() -> None:
@@ -434,7 +482,7 @@ def test_deny_slot_hardware_flags_rejects_both_spellings(denied_tokens: list[str
     (either spelling) is hard-rejected with the "belongs on the slot" envelope."""
     tokens = ["--flash-attn", "on", *denied_tokens]
     with pytest.raises(BadRequest) as exc_info:
-        _deny_slot_hardware_flags(tokens, segment="model defaults.extra_args")
+        _deny_slot_hardware_flags(tokens, segment="profile flags")
     assert exc_info.value.code == "slot.hardware_flag_denied"
     assert denied_tokens[0] in exc_info.value.message
     assert "slot" in exc_info.value.message.lower()
@@ -452,7 +500,7 @@ def test_deny_slot_hardware_flags_allows_clean_tune() -> None:
     """A real device-agnostic tune (batch/flash-attn/KV-quant/rope) has no
     hardware flags, so the guard is a no-op."""
     tokens = ["-b", "2048", "-ub", "512", "-fa", "on", "-ctk", "q8_0", "--no-mmap"]
-    _deny_slot_hardware_flags(tokens, segment="model defaults.extra_args")  # must not raise
+    _deny_slot_hardware_flags(tokens, segment="profile flags")  # must not raise
 
 
 # ── strip_managed_flags: the healing counterpart of the deny guards ───────────
@@ -546,15 +594,15 @@ def test_strip_reasoning_format_none_leaves_everything_else(tokens):
 def test_resolve_argv_strips_reasoning_format_none_from_every_segment() -> None:
     """Launch backstop (#2545): whichever segment carries it, it never reaches the
     argv, and a stripped `none` does not shadow a lower-precedence `deepseek`."""
-    for label in ("slot_profile", "model_extra_args", "extra_args"):
+    for label in ("profile", "slot"):
         out = resolve_argv(
             [
-                ("slot_profile", ["--jinja", "--reasoning-format", "deepseek"]),
+                ("model", ["--jinja", "--reasoning-format", "deepseek"]),
                 (label, ["--reasoning-format", "none", "-b", "2048"]),
             ]
         )
         assert "none" not in out.argv
         assert _value_after(out.argv, "--reasoning-format") == "deepseek"
         assert _value_after(out.argv, "-b") == "2048"
-    only = resolve_argv([("model_extra_args", ["--reasoning-format=none", "--jinja"])])
-    assert only.argv == ["--jinja"]
+    only = resolve_argv([("profile", ["--reasoning-format=none", "-b", "2048"])])
+    assert only.argv == ["-b", "2048"]

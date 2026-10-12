@@ -30,8 +30,7 @@ tags = ["agentic", "moe", "fast"]
 slot = "agent"
 model = "Qwen3.6-35B-A3B-MTP-GGUF"
 device = "gpu-rocm"
-profile = "moe"
-mtp = true
+profile = "agent"
 capabilities = "@embed_rerank"
 
 [[stack.saber.slots]]
@@ -53,7 +52,6 @@ slot = "agent"
 model = "qwopus3-6-27b-coder-mtp-q6-k"
 device = "gpu-rocm"
 profile = "chat"
-mtp = true
 capabilities = "@embed_rerank"
 
 [[stack.forge.slots]]
@@ -61,7 +59,6 @@ slot = "utility"
 model = "qwopus3-5-4b-coder-mtp-q6-k"
 device = "gpu-rocm"
 profile = "chat"
-mtp = true
 
 # pi -- always-on support: faithful compaction, memory recall (quality > speed).
 [stack.pi]
@@ -76,7 +73,6 @@ slot = "utility"
 model = "qwen3.8-27b"
 device = "gpu-rocm"
 profile = "chat"
-mtp = true
 capabilities = "@embed_rerank"
 
 [[stack.pi.slots]]

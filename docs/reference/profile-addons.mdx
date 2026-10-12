@@ -20,9 +20,9 @@ An addon is **a portable profile envelope and nothing else**:
 
 - **A profile, not an image.** Profiles carry no image reference at all —
   hardware and image are [slot-owned](/docs/concepts/slots), not profile-owned.
-  `ProfileConfig` is a flag bundle plus display
-  facts — `flags`, `mtp`, `device_class`, `backend`, `runner`, `intent`,
-  `quant`, `cloned_from` (`src/hal0/config/schema.py`, `ProfileConfig`).
+  `ProfileConfig` is a complete tune — `flags`, `ctx_size`, `enable_thinking`,
+  `vision`, `mtp`, `runner`, `intent`, `cloned_from` (`src/hal0/config/schema.py`,
+  `ProfileConfig`).
 - **No secrets, no host paths.** `export_envelope` serializes the profile
   template only (`src/hal0/profiles/portable.py`).
 - **No models and no slots.** Unlike a stack, a profile references neither, so
@@ -111,7 +111,7 @@ downloading** whether it can install a row.
 | `addons[].name` | The profile name, and the index's sort key — rows are sorted by it. |
 | `addons[].title` | The `intent` headline: everything before the first `·` or `(`. |
 | `addons[].description` | The full `intent` string. |
-| `addons[].runtime_family` | From `hal0.profiles._runtime_family` — the same classification the API reports, derived from `runner` > `device_class` > name, never from an image string. |
+| `addons[].runtime_family` | From `hal0.profiles._runtime_family` — the same classification the API reports, derived from `runner` > name, never from an image string. |
 | `addons[].runner` | The envelope's `runner` key, or `null` when unset. |
 | `addons[].checksum` | Copied from the envelope. Must match byte-for-byte. |
 | `addons[].file` | Envelope filename, relative to the index. |
@@ -145,7 +145,7 @@ Two rules make that safe to cache:
 
 For the catalog hal0 publishes, both rules are mechanical:
 `scripts/export_addons.py` is the only author of `community/addons/`. It
-derives every envelope from `LEGACY_SEED_PROFILES` with a frozen `exported_at`
+derives every envelope from its `ADDON_PROFILES` table with a frozen `exported_at`
 constant (so output is reproducible byte-for-byte), writes the index, and
 deletes orphans. `scripts/export_addons.py --check` exits non-zero when the
 committed catalog is stale, and `tests/community/test_addon_envelopes.py`

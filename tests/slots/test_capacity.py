@@ -488,3 +488,96 @@ class TestGttFeasibilityVerdict:
             "gtt_free_mb": 69632.0,
             "gtt_total_mb": 98304.0,
         }
+
+
+# ── KV estimate follows the slot profile's window (ADR-0029) ─────────────
+
+
+def _write_profile(home: str, name: str, ctx_size: int) -> None:
+    from pathlib import Path
+
+    path = Path(home) / "etc" / "hal0" / "profiles.toml"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(f'[profile.{name}]\nflags = ""\nctx_size = {ctx_size}\n', encoding="utf-8")
+
+
+def _write_slot_toml(home: str, name: str, *, profile: str | None) -> None:
+    from pathlib import Path
+
+    slots = Path(home) / "etc" / "hal0" / "slots"
+    slots.mkdir(parents=True, exist_ok=True)
+    lines = [f'name = "{name}"', "port = 8081", 'backend = "vulkan"', 'provider = "llama-server"']
+    if profile:
+        lines.append(f'profile = "{profile}"')
+    lines += ["[model]", 'default = "mymodel"', ""]
+    (slots / f"{name}.toml").write_text("\n".join(lines), encoding="utf-8")
+
+
+class _BigWindowRegistry:
+    """One model: 1000 MiB of weights, a 131072-token native window."""
+
+    class _Row:
+        size_bytes = 1000 * 1024 * 1024
+
+        def model_dump(self):
+            return {"id": "mymodel", "defaults": None, "metadata": {"context_length": 131072}}
+
+    def get(self, model_id):
+        return self._Row()
+
+
+class TestKvEstimateFollowsTheSlotProfileWindow:
+    @pytest.mark.asyncio
+    async def test_profile_ctx_size_shrinks_the_kv_share(self, tmp_hal0_home):
+        """A 4096-token profile over a 131072-token model books ~2 MiB of KV,
+        not the 32768-token native-capped ~16 MiB."""
+        _write_profile(tmp_hal0_home, "tiny-ctx", 4096)
+        _write_slot_toml(tmp_hal0_home, "brain", profile="tiny-ctx")
+        slot = _make_slot("brain", model_id="mymodel")
+
+        with patch(
+            "hal0.slots.capacity._container_cgroup_mem_bytes",
+            new_callable=AsyncMock,
+            return_value=0,
+        ):
+            result = await build_per_slot([slot], registry=_BigWindowRegistry(), gpu_capable=True)
+
+        assert result["brain"]["mem_mb"] == pytest.approx(1000.0 + 4096 / 1000 * 0.5, abs=0.1)
+
+    @pytest.mark.asyncio
+    async def test_no_profile_ctx_size_uses_the_native_window_capped(self, tmp_hal0_home):
+        """The ``chat`` seed sets no ``ctx_size``: the window is the model's
+        native one dense-capped at 32768."""
+        _write_slot_toml(tmp_hal0_home, "brain", profile=None)
+        slot = _make_slot("brain", model_id="mymodel")
+
+        with patch(
+            "hal0.slots.capacity._container_cgroup_mem_bytes",
+            new_callable=AsyncMock,
+            return_value=0,
+        ):
+            result = await build_per_slot([slot], registry=_BigWindowRegistry(), gpu_capable=True)
+
+        assert result["brain"]["mem_mb"] == pytest.approx(1000.0 + 32768 / 1000 * 0.5, abs=0.1)
+
+    @pytest.mark.asyncio
+    async def test_slot_without_a_readable_toml_falls_back_to_the_model_window(self, tmp_hal0_home):
+        """No slot file: no profile window, so the estimate sizes the model's
+        own ``metadata.context_length`` exactly as before."""
+        slot = _make_slot("ghost", model_id="mymodel")
+
+        with patch(
+            "hal0.slots.capacity._container_cgroup_mem_bytes",
+            new_callable=AsyncMock,
+            return_value=0,
+        ):
+            result = await build_per_slot([slot], registry=_BigWindowRegistry(), gpu_capable=True)
+
+        assert result["ghost"]["mem_mb"] == pytest.approx(1000.0 + 131072 / 1000 * 0.5, abs=0.1)
+
+    def test_ctx_tokens_for_prefers_an_explicit_window_over_the_model_metadata(self):
+        from hal0.slots.capacity import _ctx_tokens_for
+
+        meta = {"metadata": {"context_length": 131072}, "defaults": {"context_size": 8192}}
+        assert _ctx_tokens_for({**meta, "ctx_tokens": 4096}) == 4096
+        assert _ctx_tokens_for(meta) == 131072  # a stray defaults key is never read

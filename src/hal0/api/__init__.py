@@ -319,72 +319,22 @@ def _slot_model_id(cfg: dict[str, Any]) -> str:
     return model_id if isinstance(model_id, str) else ""
 
 
-def _coerce_ctx(raw: Any) -> int | None:
-    """Coerce a context-size value to a positive int, or ``None``."""
-    if raw is None:
-        return None
-    try:
-        ctx = int(raw)
-    except (TypeError, ValueError):
-        return None
-    return ctx if ctx > 0 else None
-
-
-def _raw_slot_ctx_ceiling(cfg: dict[str, Any]) -> int | None:
-    """Read the slot TOML's on-disk context-size ceiling, verbatim.
-
-    The on-disk slot TOMLs are inconsistent about the key name:
-    ``agent.toml`` uses ``[model] ctx_size`` while ``utility.toml``
-    uses ``[model] context_size`` and ``chat.toml`` pins neither. Read
-    BOTH keys (plus a couple of flat shapes seen in live /api/slots
-    payloads). Returns ``None`` only when no source yields a positive
-    value — this is a hardware CEILING, not the effective window (see
-    :func:`_slot_ctx_size`).
-    """
-    model_section = cfg.get("model") or {}
-    defaults = cfg.get("defaults") or {}
-
-    # Probe order: nested [model] ctx_size / context_size, then flat keys,
-    # then a nested defaults table (live payload shape).
-    for source, keys in (
-        (model_section, ("ctx_size", "context_size")),
-        (cfg, ("ctx_size", "context_size")),
-        (defaults, ("ctx_size", "context_size")),
-    ):
-        if not isinstance(source, dict):
-            continue
-        for key in keys:
-            ctx = _coerce_ctx(source.get(key))
-            if ctx is not None:
-                return ctx
-    return None
-
-
 def _slot_ctx_size(
     cfg: dict[str, Any],
     model_registry: ModelRegistry | None = None,
     model_id: str = "",
 ) -> int | None:
-    """Resolve a slot's EFFECTIVE context length — what llama-server actually
-    runs with, not the raw slot-TOML ceiling (#1788).
+    """The context window a slot runs with: its profile's (ADR-0029).
 
-    The on-disk ``[model] ctx_size``/``context_size`` (:func:`_raw_slot_ctx_ceiling`)
-    is a hardware CEILING under the v1.0 ownership split: the MODEL owns
-    context size, and the slot value can only clamp it down, never raise it
-    above what the model declares. Delegates the actual precedence to
-    :func:`hal0.providers.container.resolve_effective_context_size` — the
-    SAME resolver the launch path uses — so this serializer can never drift
-    from the number llama-server was actually started with. Always returns a
-    positive int (the resolver's safe floor applies even when there is no
-    slot ceiling and no model info at all).
+    Delegates to :func:`hal0.providers.container.slot_effective_context`, the
+    same resolver the launch path uses, so ``/v1/models`` never advertises a
+    number llama-server was not started with.
     """
-    from hal0.providers.container import resolve_effective_context_size
+    from hal0.providers.container import slot_effective_context
 
-    slot_ceiling = _raw_slot_ctx_ceiling(cfg)
-    slot_name = str(cfg.get("name") or "")
-    return resolve_effective_context_size(
-        slot_ceiling, model_registry, model_id, slot_name=slot_name
-    )
+    del model_id  # the slot's own [model].default names it
+    ctx, _source = slot_effective_context(cfg, model_registry)
+    return ctx
 
 
 def _model_recipe(entry: Any) -> str | None:
@@ -462,14 +412,8 @@ async def hal0_slot_alias_models(
       pulled from the model registry when the slot's model id is
       registered, falling back to the bare model id otherwise.
     * ``context_length`` / ``max_context_window`` — the slot's EFFECTIVE
-      context window: what llama-server actually runs with, not the raw
-      slot-TOML ceiling (``ctx_size``/``context_size``). The MODEL owns
-      context size (v1.0 ownership split); the slot value only clamps it
-      down. See :func:`_slot_ctx_size` /
-      :func:`hal0.providers.container.resolve_effective_context_size`
-      (#1788 — this used to advertise the raw ceiling, which could be
-      larger than what the model was actually launched with, so clients
-      sizing requests off it could overrun the real window). Both keys
+      context window, from its profile (ADR-0029; see :func:`_slot_ctx_size`,
+      #1788). Both keys
       carry the same value — some OpenAI-compat clients probe
       ``max_context_window`` instead of the canonical ``context_length``.
     * ``owned_by`` — ``"hal0"``.
@@ -804,7 +748,13 @@ def _flm_multiplex_tags(cfg: dict[str, Any]) -> list[str]:
     """
     if not cfg.get("name"):
         return []
-    if "flm" not in (cfg.get("provider", ""), cfg.get("backend", "")):
+    # An FLM slot is named by its NPU device (the launch dispatch's signal and
+    # the only one a converted slot keeps: ADR-0029's conversion drops the
+    # ``backend`` key) or by an explicit ``provider``/``backend`` of ``flm``.
+    if cfg.get("device") != "npu" and "flm" not in (
+        cfg.get("provider", ""),
+        cfg.get("backend", ""),
+    ):
         return []
     npu_table = cfg.get("npu") or {}
     defaults = cfg.get("defaults") or {}

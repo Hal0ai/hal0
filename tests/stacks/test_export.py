@@ -84,22 +84,32 @@ class TestEmbedReferences:
     def test_embeds_referenced_profile(self, reg: ModelRegistry, tmp_hal0_home: str) -> None:
         # A stack embeds the CUSTOM (non-seed) profiles its slots reference so an
         # importer that lacks them can still apply. Seed profiles are virtual —
-        # resolved from code on import — so they need no embedding and a seed
-        # name can't carry a custom image (the overlay always wins).
-        save_profiles_config(ProfilesConfig(profile={"custom-moe": ProfileConfig(quant="FP4")}))
+        # resolved from code on import — so they need no embedding (the overlay
+        # always wins). Embedded profiles are the full ADR-0029 tune.
+        save_profiles_config(
+            ProfilesConfig(
+                profile={
+                    "custom-moe": ProfileConfig(
+                        flags="-fa on", ctx_size=32768, vision="off", mtp="off"
+                    )
+                }
+            )
+        )
         stack = StackConfig(
             name="Saber",
             slots=[StackSlotEntry(slot="agent", model="ace-saber", profile="custom-moe")],
         )
         out = embed_references(stack, registry=reg)
         assert "custom-moe" in out.profiles
-        assert out.profiles["custom-moe"].quant == "FP4"
+        embedded = out.profiles["custom-moe"]
+        assert (embedded.flags, embedded.ctx_size) == ("-fa on", 32768)
+        assert (embedded.vision, embedded.mtp) == ("off", "off")
 
     def test_embeds_derived_provider_from_backends(
         self, reg: ModelRegistry, tmp_hal0_home: str
     ) -> None:
         """Task 3: an exported model with no explicit ``provider`` carries
-        one derived from its legacy backends tag — ``rocm`` is a hardware
+        one derived from its backends tag — ``rocm`` is a hardware
         lane, not an engine, so it derives to the ``llama-server`` default."""
         out = embed_references(_stack(), registry=reg)
         assert out.models["ace-saber"].provider == "llama-server"
@@ -182,17 +192,25 @@ class TestExportEnvelope:
         assert env["checksum"].startswith("sha256:")
         assert env["stack"]["models"]["ace-saber"]["hf_repo"] == "jcbtc/ace"
 
-    def test_export_stamps_current_schema_version_2(
+    def test_export_stamps_current_schema_version_3(
         self, reg: ModelRegistry, tmp_hal0_home: str
     ) -> None:
-        """Model.provider landed on StackModelMeta this branch (extra="forbid"),
-        so a stack exported by this build must stamp schema_version 2 — a
-        pre-PR-1 importer must hit the designed envelope_too_new gate rather
-        than fail raw pydantic validation on the unknown ``provider`` field."""
+        """Schema 3 dropped the per-row vision/mtp/enable_thinking/server_extra_args
+        keys (ADR-0029), so a stack exported by this build stamps 3 — an older
+        importer hits the designed envelope_too_new gate rather than failing
+        raw validation on a missing field."""
         env = export_envelope(_stack(), exported_at="2026-06-20T00:00:00Z", registry=reg)
-        assert STACK_SCHEMA_VERSION_CURRENT == 2
-        assert env["schema_version"] == 2
-        assert env["stack"]["schema_version"] == 2
+        assert STACK_SCHEMA_VERSION_CURRENT == 3
+        assert env["schema_version"] == 3
+        assert env["stack"]["schema_version"] == 3
+
+    def test_exported_rows_carry_placement_only(
+        self, reg: ModelRegistry, tmp_hal0_home: str
+    ) -> None:
+        env = export_envelope(_stack(), exported_at="2026-06-20T00:00:00Z", registry=reg)
+        retired = {"vision", "mtp", "enable_thinking", "server_extra_args"}
+        for row in env["stack"]["slots"]:
+            assert not retired & set(row)
 
     def test_checksum_is_deterministic_and_ignores_exported_at(
         self, reg: ModelRegistry, tmp_hal0_home: str

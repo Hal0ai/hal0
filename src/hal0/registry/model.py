@@ -52,111 +52,45 @@ class ModelCapabilities(BaseModel):
 
 
 class ModelDefaults(BaseModel):
-    """Per-model default knobs surfaced as launcher defaults.
+    """Facts about the model file that the launch path reads (ADR-0029).
 
-    All fields optional. ``extra_args`` is appended to the launcher arg
-    list; cross-source duplicates (profile flags, slot ``[server].extra_args``)
-    are collapsed last-wins by :func:`hal0.slots.argv.normalize_argv` at launch.
+    Only facts live here — every tune (context window, flags, reasoning,
+    vision, MTP on/off) lives on the profile of the slot that runs the model.
+    ``extra="forbid"``: a write carrying a tuning key is rejected, not
+    silently dropped.
     """
 
-    model_config = {"populate_by_name": True, "str_strip_whitespace": True}
+    model_config = {"populate_by_name": True, "str_strip_whitespace": True, "extra": "forbid"}
 
-    context_size: int | None = Field(
-        default=None,
-        description="Default n_ctx the launcher should use when this model is bound.",
-    )
-    rope_freq_base: float | None = Field(
-        default=None,
-        description=(
-            "DEPRECATED: parsed and persisted but never emitted by the "
-            "container launch path — put --rope-freq-base in extra_args "
-            "or the profile flags instead."
-        ),
-    )
-    extra_args: str | None = Field(
-        default=None,
-        description="Freeform CLI flag string appended after merge with slot extra_args.",
-    )
     chat_template: str | None = Field(
         default=None,
-        description="Chat template id from /api/chat-templates, or 'auto'/None for the GGUF-embedded template.",
+        description=(
+            "Chat template id from /api/chat-templates this file needs, or "
+            "'auto'/None for the template embedded in the GGUF."
+        ),
     )
     tokenizer_repo: str | None = Field(
         default=None,
         description=(
-            "HF repo id (e.g. 'Qwen/Qwen3-4B-GGUF') a load-gen tool can resolve a "
-            "tokenizer from for THIS model — issue #1773: a local-only model id "
-            "(e.g. a GGUF slot name) is not itself a HF repo, so GuideLLM's "
-            "'--tokenizer kind=huggingface_auto,model=<id>' fails hard without one. "
-            "The pull path (registry/pull.py _register_pulled) defaults this from "
-            "Model.hf_repo when the model was pulled from HF and no value is set "
-            "yet; an operator may always override it (e.g. when the tokenizer lives "
-            "in a different repo than the GGUF weights). None = not resolvable — "
-            "hal0.bench.planner falls back to Model.hf_repo directly, and rejects a "
-            "'chat' cell for this model at plan time if neither is set."
-        ),
-    )
-    profile: str | None = Field(
-        default=None,
-        description=(
-            "Preferred runtime profile name (from the profiles catalog) this "
-            "model wants loaded with it. Applied to a slot on create and on "
-            "every model swap when it is compatible with the slot's device; the "
-            "device-default profile is used as the fallback. None = no "
-            "preference (slot keeps the device default)."
+            "HF repo id a load-gen tool can resolve a tokenizer from for THIS "
+            "model (#1773). The pull path defaults it from Model.hf_repo; an "
+            "operator may override it. None = not resolvable."
         ),
     )
     mtp: bool | None = Field(
         default=None,
         description=(
-            "§7.1a / ML-5: tri-state MTP speculative-decoding capability. "
-            "True/False is an explicit, unconditional curator override — it "
-            "wins in EITHER direction over the registry 'mtp' tag (see "
-            "hal0.model_meta.model_is_mtp_eligible / "
-            "providers.container._effective_mtp). None = no explicit "
-            "opinion; eligibility falls back to the registry 'mtp' tag, "
-            "auto-gated by whether the launching runner supports MTP "
-            "drafting (hal0.runners.RunnerSupports.mtp). Replaces the old "
-            "filename/GGUF-name 'MTP' marker sniff, which is removed."
+            "Whether the file has MTP draft heads. None = the registry 'mtp' tag "
+            "decides. Whether a slot drafts with them is its profile's `mtp` "
+            "('auto' drafts when the heads are there and the runner supports it)."
         ),
     )
     jinja: bool | None = Field(
         default=None,
         description=(
-            "§7.1a / ML-5: tri-state --jinja capability. False explicitly "
-            "suppresses --jinja (there is no --no-jinja negation flag, so "
-            "this must be evaluated BEFORE argv assembly, not stripped "
-            "after). None/True both mean 'use --jinja' when the launching "
-            "runner supports it (hal0.runners.RunnerSupports.jinja is True "
-            "for every current llama-server runner) — see "
-            "providers.container._resolve_llama_scalars."
-        ),
-    )
-    enable_thinking: bool | None = Field(
-        default=None,
-        description=(
-            "spec-hw-slot-ownership §1: tri-state reasoning default — the MODEL "
-            "is the single owner (a slot-level ``enable_thinking`` override no "
-            "longer exists; SlotConfig rejects the key). True → requests routed "
-            "to a slot bound to this model default to thinking ON; False → OFF; "
-            "None → global suppression. Always overridable per request via the "
-            "top-level ``enable_thinking`` / ``chat_template_kwargs`` — see "
-            "normalize/thinking.py and api.routes.v1._slot_thinking_default."
-        ),
-    )
-    vision: bool | None = Field(
-        default=None,
-        description=(
-            "spec-hw-slot-ownership §1: tri-state vision-projector override — "
-            "the MODEL is the single owner now (the former per-slot ``vision`` "
-            "toggle (#901) is gone; SlotConfig rejects the key). None (default) "
-            "= AUTO: the mmproj sidecar loads whenever the model carries one "
-            "(registry ``Model.mmproj`` presence). False force-suppresses it "
-            "(no --mmproj) even when the model ships a sidecar, e.g. to save "
-            "the ~0.9 GB resident projector on a memory-tight host. True is an "
-            "explicit no-op affirmation (mmproj already loads under AUTO when "
-            "present) kept for symmetry with mtp/jinja/enable_thinking. See "
-            "providers.container._resolve_llama_scalars."
+            "False when this file's chat template does not work with --jinja; "
+            "None/True = hal0 adds --jinja when the runner supports it (outside "
+            "embedding/reranking mode)."
         ),
     )
 
@@ -257,7 +191,7 @@ class Model(BaseModel):
     defaults: ModelDefaults | None = Field(
         default=None,
         description=(
-            "Optional per-model launcher defaults. None means the slot config is used as-is."
+            "Facts about the model file the launch path reads (chat template, MTP heads, jinja). None = no facts recorded."
         ),
     )
 

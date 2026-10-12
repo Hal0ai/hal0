@@ -30,6 +30,9 @@ _DEVICE_TO_PROFILE_CLASS: dict[str, str] = {
     "cpu": "cpu",
     "npu": "npu",
 }
+#: Device class a single-purpose runtime family requires (llama-server runs
+#: on any of them).
+_FAMILY_CLASS: dict[str, str] = {"flm": "npu"}
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,28 +90,22 @@ def evaluate_model_fit(
             )
 
         expected_profile_class = _DEVICE_TO_PROFILE_CLASS.get(device)
+        family_class = _FAMILY_CLASS.get(str(profile.runtime_family))
         if (
             expected_profile_class is not None
-            and profile.device_class is not None
-            and profile.device_class != expected_profile_class
+            and family_class is not None
+            and family_class != expected_profile_class
         ):
-            # NPU/img mismatches are hard failures: they route to different
-            # runtime families. GPU/CPU mismatches are degraded because a
-            # custom llama-server image may still run, but operator attention
-            # is needed before launch.
-            if (
-                "npu" in {expected_profile_class, profile.device_class}
-                or profile.device_class == "img"
-            ):
-                return ModelFit(
-                    "blocked",
-                    (
-                        "profile.device_class_mismatch",
-                        f"device={device}",
-                        f"profile_device_class={profile.device_class}",
-                    ),
-                )
-            reasons.append("profile.device_class_mismatch")
+            # A single-purpose engine (FLM on the NPU, ComfyUI on img) on the
+            # wrong device routes to a different runtime family.
+            return ModelFit(
+                "blocked",
+                (
+                    "profile.device_class_mismatch",
+                    f"device={device}",
+                    f"runtime_family={profile.runtime_family}",
+                ),
+            )
 
     if reasons:
         return ModelFit("degraded", tuple(reasons))

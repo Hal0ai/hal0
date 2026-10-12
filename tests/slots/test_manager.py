@@ -828,9 +828,9 @@ async def test_update_config_rewrites_toml(
     from hal0.slots.state import SlotState as _S
 
     await sm._transition("chat", _S.OFFLINE, force=True)
-    await sm.update_config("chat", {"workers": 4})
+    await sm.update_config("chat", {"idle_timeout_s": 120})
     cfg_text = (slot_root / "chat.toml").read_text(encoding="utf-8")
-    assert "workers = 4" in cfg_text
+    assert "idle_timeout_s = 120" in cfg_text
 
 
 async def test_update_config_backend_invalidates_state_extras(
@@ -980,58 +980,20 @@ async def test_hal0_backend_env_var_is_ignored(
     assert snap.state == SlotState.READY
 
 
-async def test_update_config_preserves_sibling_model_keys(
+async def test_update_config_preserves_sibling_table_keys(
     slot_root: Path, container_stub: FakeContainerProvider
 ) -> None:
-    """Regression: a partial ``{"model": {...}}`` update must not clobber siblings.
+    """Regression: a partial nested-table update must not clobber siblings.
 
-    ``PATCH /api/slots/{name}/defaults`` sends only the model sub-keys it
-    is changing (e.g. ``ctx_size``/``n_gpu_layers``). The shallow merge
-    used to replace the whole ``[model]`` table, silently dropping
-    ``[model].default`` (the model name). After a restart the slot could
-    no longer resolve a model and the dashboard Start button became a
-    silent no-op. update_config must merge nested tables, not clobber.
+    The shallow merge used to replace a whole sub-table, so a partial update
+    silently dropped its sibling keys (once ``[model].default`` — after a
+    restart the slot could no longer resolve a model). update_config merges
+    nested tables one level deep.
     """
+    import tomllib
+
     from hal0.slots.state import SlotState as _S
 
-    sm = SlotManager()
-    await sm._transition("chat", _S.OFFLINE, force=True)
-    # Seeded chat.toml carries [model] default = "qwen3-4b-q4_k_m".
-    await sm.update_config("chat", {"model": {"ctx_size": 8192}})
-    cfg_text = (slot_root / "chat.toml").read_text(encoding="utf-8")
-    # ctx_size is normalized to the canonical context_size (#585) but the
-    # value lands either way.
-    assert "8192" in cfg_text
-    # The pre-existing model default MUST survive the partial update.
-    assert '"qwen3-4b-q4_k_m"' in cfg_text
-
-
-async def test_update_config_normalizes_ctx_size_to_context_size(
-    slot_root: Path, container_stub: FakeContainerProvider
-) -> None:
-    """#585: the dashboard writes the legacy ``ctx_size`` alias; persist it as
-    the canonical ``context_size`` so the two keys never diverge on disk.
-    """
-    from hal0.slots.state import SlotState as _S
-
-    sm = SlotManager()
-    await sm._transition("chat", _S.OFFLINE, force=True)
-    await sm.update_config("chat", {"model": {"ctx_size": 32768}})
-    cfg_text = (slot_root / "chat.toml").read_text(encoding="utf-8")
-    assert "context_size = 32768" in cfg_text
-    # The legacy alias must NOT linger alongside the canonical key.
-    assert "ctx_size = " not in cfg_text
-
-
-async def test_update_config_ctx_size_alias_wins_over_stale_context_size(
-    slot_root: Path, container_stub: FakeContainerProvider
-) -> None:
-    """A fresh dashboard write (``ctx_size``) must override a stale
-    ``context_size`` seed, then collapse to the single canonical key.
-    """
-    from hal0.slots.state import SlotState as _S
-
-    # Seed a context_size so the merge sees both keys.
     (slot_root / "chat.toml").write_text(
         "\n".join(
             [
@@ -1040,7 +1002,9 @@ async def test_update_config_ctx_size_alias_wins_over_stale_context_size(
                 'provider = "llama-server"',
                 "[model]",
                 'default = "qwen3-4b-q4_k_m"',
-                "context_size = 4096",
+                "[image]",
+                "idle_restore_minutes = 30",
+                'default_size = "512x512"',
                 "",
             ]
         ),
@@ -1048,76 +1012,112 @@ async def test_update_config_ctx_size_alias_wins_over_stale_context_size(
     )
     sm = SlotManager()
     await sm._transition("chat", _S.OFFLINE, force=True)
-    await sm.update_config("chat", {"model": {"ctx_size": 32768}})
-    cfg_text = (slot_root / "chat.toml").read_text(encoding="utf-8")
-    assert "context_size = 32768" in cfg_text
-    assert "4096" not in cfg_text
-    assert "ctx_size = " not in cfg_text
+    await sm.update_config("chat", {"image": {"default_steps": 8}})
+    on_disk = tomllib.loads((slot_root / "chat.toml").read_text(encoding="utf-8"))
+    assert on_disk["image"] == {
+        "idle_restore_minutes": 30,
+        "default_size": "512x512",
+        "default_steps": 8,
+    }
+    # The model binding MUST survive an unrelated partial update.
+    assert on_disk["model"] == {"default": "qwen3-4b-q4_k_m"}
 
 
 @pytest.mark.parametrize(
-    ("seed_model_lines", "updates", "expected_model"),
+    ("updates", "offender"),
     [
-        # Partial ctx-only update keeps the seeded [model].default sibling.
+        ({"model": {"ctx_size": 32768}}, "[model].ctx_size"),
+        ({"model": {"context_size": 32768}}, "[model].context_size"),
+        ({"model": {"n_gpu_layers": 40}}, "[model].n_gpu_layers"),
+        ({"server": {"extra_args": "-ctk q8_0"}}, "[server].extra_args"),
+        ({"parallel": 2}, "parallel"),
+        ({"chat_template": "chatml"}, "chat_template"),
+        ({"mtp": True}, "mtp"),
+        ({"enable_thinking": False}, "enable_thinking"),
+        ({"vision": False}, "vision"),
+    ],
+)
+async def test_update_config_refuses_tuning_keys(
+    slot_root: Path,
+    container_stub: FakeContainerProvider,
+    updates: dict[str, object],
+    offender: str,
+) -> None:
+    """ADR-0029 §5: every tune lives on the slot's profile. The in-process
+    write path refuses a tuning key (``slot.tuning_key_denied``) and leaves the
+    file untouched, so it can never persist a slot that then fails to load as
+    ``slot.unconverted``."""
+    from hal0.errors import BadRequest
+    from hal0.slots.state import SlotState as _S
+
+    before = (slot_root / "chat.toml").read_text(encoding="utf-8")
+    sm = SlotManager()
+    await sm._transition("chat", _S.OFFLINE, force=True)
+    with pytest.raises(BadRequest) as exc_info:
+        await sm.update_config("chat", updates)
+    assert exc_info.value.code == "slot.tuning_key_denied"
+    assert offender in exc_info.value.details["keys"]
+    assert (slot_root / "chat.toml").read_text(encoding="utf-8") == before
+
+
+@pytest.mark.parametrize(
+    ("seed_lines", "updates", "expected"),
+    [
+        # A model swap replaces [model].default.
         (
-            ['default = "seed-model"'],
-            {"model": {"ctx_size": 2048}},
-            {"default": "seed-model", "context_size": 2048},
-        ),
-        # A fresh ctx_size wins over a stale context_size seed, alias dropped.
-        (
-            ['default = "seed-model"', "context_size = 4096"],
-            {"model": {"ctx_size": 32768}},
-            {"default": "seed-model", "context_size": 32768},
-        ),
-        # A model default swap merges, leaving the seeded context_size intact.
-        (
-            ['default = "seed-model"', "context_size = 8192"],
+            ["[model]", 'default = "seed-model"'],
             {"model": {"default": "new-model"}},
-            {"default": "new-model", "context_size": 8192},
+            {"model": {"default": "new-model"}},
+        ),
+        # A partial [image] update keeps the seeded sibling.
+        (
+            ["[model]", 'default = "seed-model"', "[image]", "idle_restore_minutes = 30"],
+            {"image": {"default_steps": 4}},
+            {
+                "model": {"default": "seed-model"},
+                "image": {"idle_restore_minutes": 30, "default_steps": 4},
+            },
+        ),
+        # An explicit None deletes the key (TOML has no null).
+        (
+            ["[model]", 'default = "seed-model"', "[npu]", "asr = true", "embed = true"],
+            {"npu": {"asr": None}},
+            {"model": {"default": "seed-model"}, "npu": {"embed": True}},
         ),
     ],
 )
-async def test_update_config_model_merge_matches_shared_helper(
+async def test_update_config_table_merge_matches_shared_helper(
     slot_root: Path,
     container_stub: FakeContainerProvider,
-    seed_model_lines: list[str],
+    seed_lines: list[str],
     updates: dict[str, object],
-    expected_model: dict[str, object],
+    expected: dict[str, object],
 ) -> None:
     """SC-11: ``update_config`` and the shared ``merge_slot_config`` primitive
-    must project the same (base, updates) pair onto the same ``[model]`` — the
-    manager routes through the helper, so the on-disk table equals what the
-    helper computes (sibling keys survive, ctx_size folds)."""
+    must project the same (base, updates) pair onto the same nested tables —
+    the manager routes through the helper, so the on-disk tables equal what
+    the helper computes."""
     import tomllib
 
     from hal0.slot_config import merge_slot_config
     from hal0.slots.state import SlotState as _S
 
     (slot_root / "chat.toml").write_text(
-        "\n".join(
-            [
-                'name = "chat"',
-                "port = 8081",
-                'provider = "llama-server"',
-                "[model]",
-                *seed_model_lines,
-                "",
-            ]
-        ),
+        "\n".join(['name = "chat"', "port = 8081", 'provider = "llama-server"', *seed_lines, ""]),
         encoding="utf-8",
     )
-    # The shared helper's projection of the same base + updates.
     base = tomllib.loads((slot_root / "chat.toml").read_text(encoding="utf-8"))
     helper_after = merge_slot_config(base, updates)
-    assert helper_after["model"] == expected_model
+    for table, value in expected.items():
+        assert helper_after[table] == value
 
     sm = SlotManager()
     await sm._transition("chat", _S.OFFLINE, force=True)
     await sm.update_config("chat", updates)
     on_disk = tomllib.loads((slot_root / "chat.toml").read_text(encoding="utf-8"))
-    assert on_disk["model"] == expected_model
-    assert on_disk["model"] == helper_after["model"]
+    for table, value in expected.items():
+        assert on_disk[table] == value
+        assert on_disk[table] == helper_after[table]
 
 
 # ── #599 follow-up: [image].idle_restore_minutes hot-reload into the arbiter ──

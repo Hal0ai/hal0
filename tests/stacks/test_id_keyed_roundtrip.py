@@ -62,11 +62,10 @@ def write_id_keyed_slot(
         f'device = "{device}"',
         'provider = "llama-server"',
         "port = 8087",
-        "vision = false",
         *(extra or []),
     ]
     if model is not None:
-        lines += ["[model]", f'default = "{model}"', "context_size = 8192"]
+        lines += ["[model]", f'default = "{model}"']
     path = _slots_dir(home) / f"{stem}.toml"
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return path

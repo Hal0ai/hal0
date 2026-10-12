@@ -187,38 +187,45 @@ class TestNestedTableMerge:
             _model(
                 "a",
                 defaults=ModelDefaults(
-                    context_size=8192,
+                    tokenizer_repo="Qwen/Qwen3-4B",
                     chat_template="minicpm5-1b",
                     mtp=True,
                     jinja=False,
                 ),
             )
         )
-        new = reg.update("a", {"defaults": {"extra_args": "--temp 0.5"}})
+        new = reg.update("a", {"defaults": {"jinja": True}})
         assert new.defaults is not None
-        assert new.defaults.extra_args == "--temp 0.5"
-        assert new.defaults.context_size == 8192
+        assert new.defaults.jinja is True
+        assert new.defaults.tokenizer_repo == "Qwen/Qwen3-4B"
         assert new.defaults.chat_template == "minicpm5-1b"
         assert new.defaults.mtp is True
-        assert new.defaults.jinja is False
 
     def test_explicit_none_sub_key_clears_only_that_key(self, reg: ModelRegistry) -> None:
-        reg.add(_model("a", defaults=ModelDefaults(context_size=8192, extra_args="-b 512")))
-        new = reg.update("a", {"defaults": {"context_size": None}})
+        reg.add(_model("a", defaults=ModelDefaults(chat_template="minicpm5-1b", mtp=True)))
+        new = reg.update("a", {"defaults": {"chat_template": None}})
         assert new.defaults is not None
-        assert new.defaults.context_size is None
-        assert new.defaults.extra_args == "-b 512"
+        assert new.defaults.chat_template is None
+        assert new.defaults.mtp is True
 
     def test_defaults_none_drops_the_whole_table(self, reg: ModelRegistry) -> None:
-        reg.add(_model("a", defaults=ModelDefaults(context_size=8192, extra_args="-b 512")))
+        reg.add(_model("a", defaults=ModelDefaults(chat_template="minicpm5-1b", mtp=True)))
         new = reg.update("a", {"defaults": None})
         assert new.defaults is None
 
     def test_empty_defaults_patch_is_a_no_op(self, reg: ModelRegistry) -> None:
-        reg.add(_model("a", defaults=ModelDefaults(context_size=8192)))
+        reg.add(_model("a", defaults=ModelDefaults(chat_template="minicpm5-1b")))
         new = reg.update("a", {"defaults": {}})
         assert new.defaults is not None
-        assert new.defaults.context_size == 8192
+        assert new.defaults.chat_template == "minicpm5-1b"
+
+    def test_a_tuning_key_in_a_defaults_patch_is_refused(self, reg: ModelRegistry) -> None:
+        """ADR-0029: ModelDefaults is facts only; the merge re-validates through
+        it, so a tuning key can never be stored by a sparse patch."""
+        reg.add(_model("a", defaults=ModelDefaults(chat_template="minicpm5-1b")))
+        with pytest.raises(RegistryError):
+            reg.update("a", {"defaults": {"extra_args": "--temp 0.5"}})
+        assert reg.get("a").defaults.chat_template == "minicpm5-1b"
 
     def test_capability_flags_merge_one_level(self, reg: ModelRegistry) -> None:
         reg.add(_model("a", capability_flags=ModelCapabilities(tool_calling=True)))
@@ -228,11 +235,11 @@ class TestNestedTableMerge:
         assert cleared.capability_flags.tool_calling is None
 
     def test_defaults_patch_does_not_disturb_top_level_fields(self, reg: ModelRegistry) -> None:
-        reg.add(_model("a", name="A", defaults=ModelDefaults(context_size=4096)))
+        reg.add(_model("a", name="A", defaults=ModelDefaults(chat_template="minicpm5-1b")))
         new = reg.update("a", {"defaults": {"jinja": True}})
         assert new.name == "A"
         assert new.defaults is not None
-        assert new.defaults.context_size == 4096
+        assert new.defaults.chat_template == "minicpm5-1b"
         assert new.defaults.jinja is True
 
 
@@ -315,23 +322,23 @@ class TestReloadAndOnChange:
 
 class TestModelDefaultsRoundTrip:
     def test_full_defaults_round_trip(self, reg: ModelRegistry) -> None:
-        # NGL is slot-owned now (spec-hw-slot-ownership) — no longer a
-        # ModelDefaults field; the model tune is the logical flags only.
         reg.add(
             _model(
                 "a",
                 defaults=ModelDefaults(
-                    context_size=8192,
-                    rope_freq_base=1000000.0,
-                    extra_args="-b 8192",
+                    chat_template="minicpm5-1b",
+                    tokenizer_repo="Qwen/Qwen3-4B",
+                    mtp=True,
+                    jinja=False,
                 ),
             )
         )
         got = reg.get("a")
         assert got.defaults is not None
-        assert got.defaults.context_size == 8192
-        assert got.defaults.rope_freq_base == 1000000.0
-        assert got.defaults.extra_args == "-b 8192"
+        assert got.defaults.chat_template == "minicpm5-1b"
+        assert got.defaults.tokenizer_repo == "Qwen/Qwen3-4B"
+        assert got.defaults.mtp is True
+        assert got.defaults.jinja is False
 
     def test_defaults_none_stays_none(self, reg: ModelRegistry) -> None:
         reg.add(_model("a", defaults=None))
@@ -344,56 +351,59 @@ class TestModelDefaultsRoundTrip:
         reg.add(_model("a", defaults=ModelDefaults()))
         assert reg.get("a").defaults is None
 
-    def test_falsy_but_set_context_size_is_not_dropped(self, reg: ModelRegistry) -> None:
-        """Regression: a falsy-but-set default (here rope_freq_base=0.0 paired
-        with a real context_size) must not be treated as 'unset' by the
-        has-any-default check. (NGL, the original example, is slot-owned now.)"""
-        reg.add(_model("a", defaults=ModelDefaults(context_size=2048, rope_freq_base=0.0)))
+    def test_falsy_but_set_facts_are_not_dropped(self, reg: ModelRegistry) -> None:
+        """Regression: a falsy-but-set fact (mtp=False, jinja=False) is a real
+        value, not 'unset' — the has-any-default check must keep it."""
+        reg.add(_model("a", defaults=ModelDefaults(mtp=False, jinja=False)))
         got = reg.get("a")
         assert got.defaults is not None
-        assert got.defaults.context_size == 2048
-
-    def test_enable_thinking_and_vision_round_trip_via_extra_blob(self, reg: ModelRegistry) -> None:
-        """spec-hw-slot-ownership §1: enable_thinking/vision are model-owned
-        tri-state caps with no dedicated SQL column — they ride the catch-all
-        ``extra`` JSON blob (mirrors capability_flags/modalities_override),
-        alongside the column-backed mtp/jinja on the same row."""
-        reg.add(
-            _model(
-                "a",
-                defaults=ModelDefaults(mtp=True, jinja=False, enable_thinking=True, vision=False),
-            )
-        )
-        got = reg.get("a")
-        assert got.defaults is not None
-        assert got.defaults.mtp is True
+        assert got.defaults.mtp is False
         assert got.defaults.jinja is False
-        assert got.defaults.enable_thinking is True
-        assert got.defaults.vision is False
 
-    def test_enable_thinking_and_vision_absent_read_back_as_none(self, reg: ModelRegistry) -> None:
-        """Tri-state AUTO (None) costs nothing on disk — never stamped into
-        the extra blob, and reads back as None (not False)."""
-        reg.add(_model("a", defaults=ModelDefaults(context_size=4096)))
-        got = reg.get("a")
-        assert got.defaults is not None
-        assert got.defaults.enable_thinking is None
-        assert got.defaults.vision is None
-
-    def test_enable_thinking_and_vision_do_not_leak_into_metadata(self, reg: ModelRegistry) -> None:
-        """The reserved extra-blob keys are popped on read — they must never
-        surface on Model.metadata (same contract as capability_flags/default)."""
+    def test_tokenizer_repo_round_trips_add_get_update(self, reg: ModelRegistry) -> None:
+        """tokenizer_repo has no column: it rides the ``extra`` blob. It must
+        survive add -> get, a sparse update of a sibling fact, an overwrite,
+        and an explicit clear — without leaking into Model.metadata."""
         reg.add(
             _model(
                 "a",
-                defaults=ModelDefaults(enable_thinking=True, vision=True),
+                defaults=ModelDefaults(tokenizer_repo="Qwen/Qwen3-4B"),
                 metadata={"discovered": True},
             )
         )
         got = reg.get("a")
-        assert "_enable_thinking" not in got.metadata
-        assert "_vision" not in got.metadata
+        assert got.defaults is not None
+        assert got.defaults.tokenizer_repo == "Qwen/Qwen3-4B"
+        assert "_tokenizer_repo" not in got.metadata
         assert got.metadata.get("discovered") is True
+
+        # A sibling-only patch keeps it (and it persists across instances).
+        reg.update("a", {"defaults": {"jinja": False}})
+        again = reg.get("a")
+        assert again.defaults is not None
+        assert again.defaults.tokenizer_repo == "Qwen/Qwen3-4B"
+        assert again.defaults.jinja is False
+
+        reg.update("a", {"defaults": {"tokenizer_repo": "meta-llama/Llama-3.1-8B"}})
+        assert reg.get("a").defaults.tokenizer_repo == "meta-llama/Llama-3.1-8B"
+
+        cleared = reg.update("a", {"defaults": {"tokenizer_repo": None}})
+        assert cleared.defaults is not None
+        assert cleared.defaults.tokenizer_repo is None
+        assert cleared.defaults.jinja is False
+        assert "_tokenizer_repo" not in cleared.metadata
+
+    def test_tokenizer_repo_alone_is_not_collapsed_to_none(self, reg: ModelRegistry) -> None:
+        reg.add(_model("a", defaults=ModelDefaults(tokenizer_repo="Qwen/Qwen3-4B")))
+        got = reg.get("a")
+        assert got.defaults is not None
+        assert got.defaults.tokenizer_repo == "Qwen/Qwen3-4B"
+
+    def test_unset_tokenizer_repo_stamps_nothing(self, reg: ModelRegistry) -> None:
+        reg.add(_model("a", defaults=ModelDefaults(mtp=True)))
+        got = reg.get("a")
+        assert got.defaults is not None
+        assert got.defaults.tokenizer_repo is None
 
 
 # ── concurrency (adversarial per the ML-1 spec's explicit call-out) ─────────

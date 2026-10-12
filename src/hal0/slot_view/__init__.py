@@ -64,14 +64,16 @@ from hal0.slots.reaper import is_pinned as reaper_is_pinned
 log = logging.getLogger(__name__)
 
 __all__ = [
+    "CONVERSION_FIX",
     "SlotMetricsView",
     "SlotView",
     "SlotViewAggregator",
     "config_enrichment",
     "container_enrichment",
+    "conversion_blocked",
     "image_status_for",
     "loaded_model_names_from_slots",
-    "resolve_ctx_max",
+    "resolve_ctx_effective",
     "serialize_slot",
     "synthesize_upstream_entries",
 ]
@@ -290,46 +292,16 @@ def config_enrichment(configs: list[dict[str, Any]]) -> dict[str, dict[str, Any]
         # asks, so this is the one place the operator re-points it.
         entry["default"] = cfg.get("default") is True
 
-        # ctx_max: the configured context window. The canonical TOML key is
-        # ``[model].context_size`` (the dashboard's ``ctx_size`` alias is
-        # folded to it on write — see slots.manager). Surfaced so the
-        # Inference engine pane can render "ctx used / max" without a
-        # per-slot /config fetch. Absent → key omitted; the UI shows an
-        # em-dash rather than a fabricated number.
-        if isinstance(model_section, dict):
-            ctx_max = model_section.get("context_size")
-            if ctx_max is None:
-                ctx_max = model_section.get("ctx_size")
-            if isinstance(ctx_max, int):
-                entry["ctx_max"] = ctx_max
-
         # Spec 1 / Component 1: surface the edit-panel config fields so the
         # card + drawer seed their controls without a per-slot /config fetch.
         # ``n_gpu_layers`` falls back to the ModelConfig default sentinel
         # (-1 = all layers) when unset.
         #
-        # spec-hw-slot-ownership §1: ``enable_thinking`` and ``mtp`` are no
-        # longer slot facts — they moved to ``ModelDefaults.enable_thinking``
-        # / ``.mtp`` (the model drawer reads/writes them via /api/models).
-        # This lift is deliberately dropped (was ``entry["enable_thinking"] =
-        # cfg.get("enable_thinking")`` / ``entry["mtp"] = cfg.get("mtp")``).
-        #
-        # Per-slot chat_template override (tri-valued: string/None/absent → null).
-        # Surfaced so the edit-drawer Template row seeds its override select
-        # from disk instead of defaulting to "auto" on every reopen.
-        entry["chat_template"] = cfg.get("chat_template")
-        # NGL — spec-hw-slot-ownership §2: NGL is now a TOP-LEVEL slot-owned
-        # hardware field. Prefer the top-level value; fall back to the prior
-        # nested [model].n_gpu_layers for pre-migration slots (the §6 migration
-        # folds it up), then the -1 "all layers" sentinel.
+        # ADR-0029: every tune (context window, reasoning, MTP, vision, flags)
+        # lives on the slot's profile; the slot payload carries placement.
+        # NGL — a top-level placement field; absent = -1 (all layers).
         top_ngl = cfg.get("n_gpu_layers")
-        nested_ngl = model_section.get("n_gpu_layers") if isinstance(model_section, dict) else None
-        if isinstance(top_ngl, int):
-            entry["n_gpu_layers"] = top_ngl
-        elif isinstance(nested_ngl, int):
-            entry["n_gpu_layers"] = nested_ngl
-        else:
-            entry["n_gpu_layers"] = -1
+        entry["n_gpu_layers"] = top_ngl if isinstance(top_ngl, int) else -1
         # THREADS / BINARY / image_pin — the rest of the slot HW grid
         # (spec-hw-slot-ownership §2/§3), all top-level. Surfaced verbatim
         # (absent → null) so the edit-drawer dirty-tracks real on-disk state:
@@ -358,41 +330,7 @@ def config_enrichment(configs: list[dict[str, Any]]) -> dict[str, dict[str, Any]
         # default), same fallback the argv-emission side uses.
         metrics_val = cfg.get("metrics")
         entry["metrics"] = True if metrics_val is None else bool(metrics_val)
-        # Issue #548: expose rope_freq_base so the Edit drawer can dirty-track
-        # it and avoid clobbering the on-disk value on unrelated saves.
-        # Absent (None) is surfaced as-is — frontend treats null as "use
-        # model default" (0.0 sentinel) and only writes back when changed.
-        rope = model_section.get("rope_freq_base") if isinstance(model_section, dict) else None
-        entry["rope_freq_base"] = rope if isinstance(rope, (int, float)) else None
-
-        # Spec 1 / Component 2 (issue #587): surface idle_timeout_s,
-        # workers, and the slot's freeform llamacpp_args so the Edit
-        # drawer can seed from real on-disk values. The on-disk field
-        # for the freeform overlay is ``[server].extra_args``
-        # (ServerConfig); the dashboard's wire key is ``llamacpp_args``
-        # (the dashboard's historical wire key), so we map at this
-        # boundary. Defaults are NOT applied here — the wire payload is
-        # the truth source the dashboard uses to dirty-track changes,
-        # so an absent on-disk field surfaces as null/None, not the
-        # schema default.
-        # (former #901 per-slot vision toggle lift removed — spec-hw-slot-
-        # ownership §1: vision is now ``ModelDefaults.vision``, read from
-        # /api/models by the model drawer, not lifted onto the slot payload.)
         entry["idle_timeout_s"] = cfg.get("idle_timeout_s")
-        entry["workers"] = cfg.get("workers")
-        # Continuous batching: --parallel sequence slots (absent → null so the
-        # drawer dirty-tracks "inherit the profile" vs an explicit override).
-        entry["parallel"] = cfg.get("parallel")
-        server_cfg = cfg.get("server")
-        if server_cfg is None:
-            extra_args: Any = None
-        elif isinstance(server_cfg, dict):
-            extra_args = server_cfg.get("extra_args")
-        else:
-            # ServerConfig pydantic model — read via attribute to stay
-            # consistent with the .get() pattern above.
-            extra_args = getattr(server_cfg, "extra_args", None)
-        entry["llamacpp_args"] = extra_args
 
         # [npu] table: expose asr/embed toggles so the dashboard can seed
         # its NPU modality controls. effective_npu_table() also folds in the
@@ -441,39 +379,56 @@ def config_enrichment(configs: list[dict[str, Any]]) -> dict[str, dict[str, Any]
     return out
 
 
-def resolve_ctx_max(
-    raw_ctx_max: int | None,
-    model_registry: Any,
-    model_id: str,
-    slot_name: str,
-) -> int | None:
-    """Best-effort EFFECTIVE context resolution for the dashboard's ``ctx_max``.
+def _has_context_window(cfg: Any) -> bool:
+    """llm / embedding / reranking slots (llama-server or FLM) have a window."""
+    return str(cfg.get("type") or "llm") in ("llm", "embedding", "reranking")
 
-    #1788: ``config_enrichment`` lifts ``ctx_max`` straight off the slot
-    TOML — the raw hardware ceiling, not what llama-server actually runs
-    with now that the MODEL owns context size (v1.0 ownership split; see
-    :func:`hal0.providers.container._resolve_context_size`). The aggregator
-    (and, per #1835, the ``GET /api/slots/{name}`` detail route) calls this
-    after merging ``config_enrichment``'s output so the "ctx used / max"
-    pane and the per-slot detail body both report the same number the
-    launch path resolved, using the model registry the caller already
-    carries.
 
-    Imported lazily (heavy neighbour, see module docstring) and never
-    raises: a resolution failure degrades to the raw TOML ceiling — the
-    pre-fix behavior — rather than breaking the caller.
+#: How an operator fixes a slot the profile-centric conversion blocked.
+CONVERSION_FIX = (
+    "run `hal0 profile migrate` to see why, edit the slot file, then run "
+    "`sudo -u hal0 hal0 profile migrate --apply`"
+)
+
+
+def conversion_blocked(cfg: Any) -> dict[str, Any] | None:
+    """``{"reason", "fix", "running_pre_conversion"}`` for a slot the
+    profile-centric conversion could not convert (ADR-0029), else ``None``.
+
+    ``running_pre_conversion`` says the slot still launches the command it ran
+    before the conversion (the conversion's pin), so it keeps working until
+    it is fixed.
     """
     try:
-        from hal0.providers.container import resolve_effective_context_size
+        from hal0.config.schema import slot_tuning_keys
+        from hal0.providers.container import blocked_slot_pin
 
-        return resolve_effective_context_size(
-            raw_ctx_max,
-            model_registry,
-            model_id,
-            slot_name=slot_name,
-        )
+        if not slot_tuning_keys(cfg):
+            return None
+        pin = blocked_slot_pin(cfg)
     except Exception:
-        return raw_ctx_max
+        return None
+    reason = str(pin.get("reason") or "") if pin else ""
+    return {
+        "reason": reason or "this slot file still carries tuning keys (not converted)",
+        "fix": CONVERSION_FIX,
+        "running_pre_conversion": bool(pin and isinstance(pin.get("argv"), list)),
+    }
+
+
+def resolve_ctx_effective(cfg: Any, model_registry: Any) -> tuple[int | None, str | None]:
+    """``(ctx, source)`` a slot runs with: its profile's window (ADR-0029).
+
+    Delegates to :func:`hal0.providers.container.slot_effective_context`, the
+    one resolver every surface shares; a failure degrades to ``(None, None)``
+    rather than breaking the caller.
+    """
+    try:
+        from hal0.providers.container import slot_effective_context
+
+        return slot_effective_context(cfg, model_registry)
+    except Exception:
+        return None, None
 
 
 # ── concern 3: container probe ───────────────────────────────────────────────
@@ -740,14 +695,6 @@ async def container_enrichment(
 
                 image = _resolve_image_ref(cfg, prof)
                 entry["image"] = image
-                # Lift device_class + backend from the resolved profile so the
-                # UI groups by silicon class and colours by GPU runtime without
-                # re-deriving. backend is None for non-GPU profiles (the card
-                # then falls back to device_class). Merged via setdefault, so a
-                # backend already lifted from slot metadata still wins.
-                if prof is not None:
-                    entry["device_class"] = prof.device_class
-                    entry["backend"] = prof.backend
                 # resolved_command = llama-server argv starting from the image.
                 # Off the event loop: it re-reads config + resolves the runner
                 # image, which is filesystem work, not a pure function.
@@ -1075,6 +1022,7 @@ class SlotViewAggregator:
         configs = await self._safe_configs()
 
         enrichment = config_enrichment(configs)
+        cfg_by_name = {str(c.get("name")): c for c in configs if isinstance(c, dict)}
         # #1427: the container probe, the capacity probe and the metrics
         # fan-out are three independent IO waits over the same slot set —
         # there is no data dependency between them, so awaiting them one
@@ -1100,26 +1048,17 @@ class SlotViewAggregator:
                 for k, v in c_extra.items():
                     payload.setdefault(k, v)
 
-            # #1788: re-resolve ctx_max to the EFFECTIVE window (only when
-            # there's a model bound, or an explicit raw ceiling was lifted —
-            # a model-less slot with neither has nothing to resolve).
-            raw_ctx_max = payload.get("ctx_max")
-            model_id = str(payload.get("model_default") or "")
-            # #1859: only an "llm" slot runs llama-server with a resolvable
-            # context window. Every other kind (embedding/reranking/
-            # transcription/tts/image — FLM, Kokoro, Moonshine, Qwen3-TTS,
-            # ComfyUI) has no such concept; calling the llama-only resolver
-            # for them fabricated an 8192 "window" (resolve_effective_
-            # context_size's safe fallback for an unrecognised model) that
-            # slot never runs with. Non-llm slots keep whatever raw ctx_max
-            # config_enrichment lifted (usually absent — key stays omitted).
-            if payload.get("type") == "llm" and (model_id or isinstance(raw_ctx_max, int)):
-                payload["ctx_max"] = resolve_ctx_max(
-                    raw_ctx_max if isinstance(raw_ctx_max, int) else None,
-                    self._registry,
-                    model_id,
-                    slot_name,
-                )
+            # ADR-0029: the window comes from the slot's profile (FLM: its
+            # profile, else 8192); a TTS/STT/image slot has none.
+            cfg = cfg_by_name.get(slot_name)
+            if isinstance(cfg, dict) and _has_context_window(cfg):
+                ctx, source = resolve_ctx_effective(cfg, self._registry)
+                payload["ctx_effective"] = ctx
+                payload["ctx_source"] = source
+            if isinstance(cfg, dict):
+                blocked = conversion_blocked(cfg)
+                if blocked is not None:
+                    payload["conversion_blocked"] = blocked
 
         # Per-slot resident memory (model weights + KV-cache estimate) so the
         # dashboard memory map (W4) attributes a real footprint per slot. Only

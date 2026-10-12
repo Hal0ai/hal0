@@ -146,7 +146,7 @@ def test_scan_with_rows_persists_user_overrides(
                     "name": "User Chosen Name",
                     "backends": ["vulkan"],
                     "capabilities": ["embed"],
-                    "defaults": {"context_size": 8192},
+                    "defaults": {"chat_template": "minicpm5-1b"},
                 }
             ]
         },
@@ -161,7 +161,7 @@ def test_scan_with_rows_persists_user_overrides(
     assert entry["name"] == "User Chosen Name"
     assert entry["backends"] == ["vulkan"]
     assert entry["capabilities"] == ["embed"]
-    assert entry["defaults"]["context_size"] == 8192
+    assert entry["defaults"]["chat_template"] == "minicpm5-1b"
 
     # model.registered fired with source=scan.
     events = _events_since(crud_client, pre, "model.registered")
@@ -169,6 +169,35 @@ def test_scan_with_rows_persists_user_overrides(
         ev["data"].get("id") == "user-chosen-id" and ev["data"].get("source") == "scan"
         for ev in events
     ), events
+
+
+def test_scan_with_rows_skips_a_row_carrying_a_tuning_default(
+    crud_client: TestClient,
+    crud_models_root: Path,
+) -> None:
+    """A scan row's ``defaults`` holds file facts only (ADR-0029): a tuning key
+    skips that row with a named reason instead of being silently dropped."""
+    fpath = crud_models_root / "tuned-row.gguf"
+    fpath.write_bytes(b"\x00" * 64)
+    r = crud_client.post(
+        "/api/models/scan",
+        json={
+            "rows": [
+                {
+                    "path": str(fpath),
+                    "id": "tuned-row",
+                    "defaults": {"context_size": 8192, "extra_args": "-b 512"},
+                }
+            ]
+        },
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert "tuned-row" not in body["added"]
+    assert any(
+        sk["reason"] == "defaults_key_removed:context_size,extra_args" for sk in body["skipped"]
+    ), body["skipped"]
+    assert crud_client.get("/api/models/tuned-row").status_code == 404
 
 
 def test_scan_with_rows_falls_back_to_detection_for_missing_fields(
@@ -312,7 +341,7 @@ def test_update_accepts_new_editable_fields_and_emits(
             "name": "Updated Name",
             "capabilities": ["chat", "embed"],
             "backends": ["vulkan", "rocm"],
-            "defaults": {"context_size": 4096, "n_gpu_layers": 99},
+            "defaults": {"chat_template": "minicpm5-1b", "jinja": False},
         },
     )
     assert r.status_code == 200, r.text
@@ -320,7 +349,8 @@ def test_update_accepts_new_editable_fields_and_emits(
     assert body["name"] == "Updated Name"
     assert set(body["capabilities"]) == {"chat", "embed"}
     assert body["backends"] == []  # never had any; the PUT's backends is dead
-    assert body["defaults"]["context_size"] == 4096
+    assert body["defaults"]["chat_template"] == "minicpm5-1b"
+    assert body["defaults"]["jinja"] is False
 
     events = _events_since(crud_client, pre, "model.updated")
     assert events, "expected model.updated event"
@@ -349,91 +379,70 @@ def test_update_changed_fields_only_lists_actual_changes(
     )
 
 
-# ── Deliverable 1: stamp semantics — a profile change must NOT re-materialize ──
+# ── ADR-0029: ``defaults`` holds file facts only ───────────────────────────────
+
+#: Every key that used to live in ``defaults`` and is now a profile tune (or gone).
+_REMOVED_DEFAULTS_KEYS = [
+    ("extra_args", "-b 1024 -fa on"),
+    ("context_size", 8192),
+    ("profile", "agent"),
+    ("enable_thinking", True),
+    ("vision", False),
+    ("rope_freq_base", 10000.0),
+]
 
 
-def test_put_profile_change_does_not_rematerialize_extra_args(
+@pytest.mark.parametrize(("key", "value"), _REMOVED_DEFAULTS_KEYS)
+def test_put_removed_defaults_key_is_422_and_writes_nothing(
     crud_client: TestClient,
     crud_models_root: Path,
+    key: str,
+    value: object,
 ) -> None:
-    """spec-flags-ownership §3: the server never re-materializes flags from a
-    profile on save — the client copies explicitly. A PUT that changes
-    ``defaults.profile`` while re-sending the SAME ``extra_args`` must leave
-    that text verbatim (proof the server did not resolve the profile and
-    overwrite the tune)."""
-    fpath = crud_models_root / "stamp.gguf"
+    """A tune no longer lives on the model: PUT with a removed ``defaults`` key
+    is a 422 that names the key, and the stored row is untouched."""
+    fpath = crud_models_root / f"rm-{key}.gguf"
     fpath.write_bytes(b"\x00" * 16)
     crud_client.post(
         "/api/models",
-        json={
-            "id": "stamp",
-            "path": str(fpath),
-            "defaults": {"profile": "old-profile", "extra_args": "-b 1024 -fa on"},
-        },
+        json={"id": f"rm-{key}", "path": str(fpath), "defaults": {"chat_template": "minicpm5-1b"}},
     )
-    # Point the pointer at a DIFFERENT profile name but keep the same text.
-    # A re-materializing server would try to resolve 'ghost-profile' and either
-    # error or replace extra_args; the correct server keeps the text as sent.
-    r = crud_client.put(
-        "/api/models/stamp",
-        json={"defaults": {"profile": "ghost-profile", "extra_args": "-b 1024 -fa on"}},
-    )
-    assert r.status_code == 200, r.text
-    body = r.json()
-    assert body["defaults"]["profile"] == "ghost-profile"
-    assert body["defaults"]["extra_args"] == "-b 1024 -fa on"
+    r = crud_client.put(f"/api/models/rm-{key}", json={"defaults": {key: value}})
+    assert r.status_code == 422, r.text
+    err = r.json()["error"]
+    assert err["code"] == "model.defaults_key_removed"
+    assert key in err["message"]
+    assert err["details"]["keys"] == [key]
+    assert crud_client.get(f"/api/models/rm-{key}").json()["defaults"] == {
+        "chat_template": "minicpm5-1b",
+        "tokenizer_repo": None,
+        "mtp": None,
+        "jinja": None,
+    }
 
 
-# ── Deliverable 2 (REMOVED): preferred_runner was a model field, now slot-owned
-# (spec-hw-slot-ownership §2/§3 — SlotConfig.binary). The model write path no
-# longer validates or persists it; the former put/clear/reject tests are gone.
-
-
-# ── Deliverable 4: O10 guard — bare double-quoted JSON eaten by the shell ──────
-
-
-def test_put_bare_double_quoted_json_extra_args_rejected(
+def test_put_removed_key_alongside_a_fact_writes_neither(
     crud_client: TestClient,
     crud_models_root: Path,
 ) -> None:
-    """A JSON value whose double quotes the shell would strip is rejected with
-    the actionable single-quote message (spec §3 JSON-token integrity)."""
-    fpath = crud_models_root / "o10a.gguf"
+    """The screen runs before the write: a body mixing a valid fact with a
+    removed tuning key is refused whole — the fact is not half-applied."""
+    fpath = crud_models_root / "rm-mixed.gguf"
     fpath.write_bytes(b"\x00" * 16)
-    crud_client.post("/api/models", json={"id": "o10a", "path": str(fpath)})
+    crud_client.post("/api/models", json={"id": "rm-mixed", "path": str(fpath)})
     r = crud_client.put(
-        "/api/models/o10a",
-        json={"defaults": {"extra_args": '--chat-template-kwargs {"enable_thinking":false}'}},
+        "/api/models/rm-mixed",
+        json={"defaults": {"jinja": False, "extra_args": "-b 1024"}},
     )
-    assert r.status_code == 400, r.text
-    assert r.json()["error"]["code"] == "model.extra_args_json_quoting"
+    assert r.status_code == 422, r.text
+    assert crud_client.get("/api/models/rm-mixed").json()["defaults"] is None
 
 
-def test_put_single_quoted_json_extra_args_accepted(
+def test_create_with_removed_defaults_key_is_422_and_writes_nothing(
     crud_client: TestClient,
     crud_models_root: Path,
 ) -> None:
-    """The correctly single-quoted JSON value survives shlex-splitting and is
-    accepted unchanged."""
-    fpath = crud_models_root / "o10b.gguf"
-    fpath.write_bytes(b"\x00" * 16)
-    crud_client.post("/api/models", json={"id": "o10b", "path": str(fpath)})
-    good = "--chat-template-kwargs '{\"enable_thinking\":false}'"
-    r = crud_client.put("/api/models/o10b", json={"defaults": {"extra_args": good}})
-    assert r.status_code == 200, r.text
-    assert r.json()["defaults"]["extra_args"] == good
-
-
-# ── Deliverable 1: create screens too, + dry-run /validate ────────────────────
-
-
-def test_create_screens_managed_extra_args(
-    crud_client: TestClient,
-    crud_models_root: Path,
-) -> None:
-    """POST create screens defaults.extra_args like PUT does — a smuggled
-    managed flag fails the write instead of persisting a row that rebinds a
-    slot at launch."""
+    """POST create screens ``defaults`` like PUT does — one screen, three paths."""
     fpath = crud_models_root / "cs1.gguf"
     fpath.write_bytes(b"\x00" * 16)
     r = crud_client.post(
@@ -441,99 +450,59 @@ def test_create_screens_managed_extra_args(
         json={
             "id": "cs1",
             "path": str(fpath),
-            "defaults": {"extra_args": "--flash-attn on --port 9"},
+            "defaults": {"extra_args": "--flash-attn on", "context_size": 8192},
         },
     )
-    assert r.status_code == 400, r.text
-    assert r.json()["error"]["code"] == "slot.managed_arg_denied"
-    # And nothing was written.
+    assert r.status_code == 422, r.text
+    err = r.json()["error"]
+    assert err["code"] == "model.defaults_key_removed"
+    assert err["details"]["keys"] == ["context_size", "extra_args"]
     assert crud_client.get("/api/models/cs1").status_code == 404
 
 
-def test_validate_accepts_clean_body(crud_client: TestClient) -> None:
+def test_validate_accepts_facts_only_body(crud_client: TestClient) -> None:
     r = crud_client.post(
         "/api/models/validate",
-        json={"defaults": {"extra_args": "-b 8192 --flash-attn on"}},
+        json={
+            "defaults": {
+                "chat_template": "minicpm5-1b",
+                "tokenizer_repo": "Qwen/Qwen3-4B",
+                "mtp": True,
+                "jinja": False,
+            }
+        },
     )
     assert r.status_code == 200, r.text
     assert r.json()["ok"] is True
 
 
-def test_validate_rejects_managed_extra_args_without_writing(crud_client: TestClient) -> None:
+def test_validate_rejects_removed_defaults_key_without_writing(crud_client: TestClient) -> None:
     """/validate is a dry run: it screens with the same envelope as create/PUT
     and never touches the registry (no id required, nothing persisted)."""
     r = crud_client.post(
         "/api/models/validate",
         json={"id": "should-not-persist", "defaults": {"extra_args": "--model /etc/passwd"}},
     )
-    assert r.status_code == 400, r.text
-    assert r.json()["error"]["code"] == "slot.managed_arg_denied"
+    assert r.status_code == 422, r.text
+    assert r.json()["error"]["code"] == "model.defaults_key_removed"
     assert crud_client.get("/api/models/should-not-persist").status_code == 404
 
 
-# ── spec-hw-slot-ownership §5: model rejects slot-hardware flags ───────────────
+def test_validate_reports_removed_context_size_inline(crud_client: TestClient) -> None:
+    r = crud_client.post("/api/models/validate", json={"defaults": {"context_size": 8192}})
+    assert r.status_code == 422, r.text
+    assert r.json()["error"]["code"] == "model.defaults_key_removed"
 
 
-def test_create_rejects_slot_hardware_threads(
-    crud_client: TestClient,
-    crud_models_root: Path,
-) -> None:
-    """POST create rejects a grid-owned hardware flag (--threads) in
-    defaults.extra_args — it belongs on the slot, not the device-agnostic
-    model (spec-hw-slot-ownership §5). Nothing is persisted."""
-    fpath = crud_models_root / "hw1.gguf"
+def test_seed_profile_route_is_gone(crud_client: TestClient, crud_models_root: Path) -> None:
+    """``POST /api/models/{id}/seed-profile`` was deleted with the copy-on-stamp
+    machinery: a model no longer takes a profile's flags."""
+    fpath = crud_models_root / "seedgone.gguf"
     fpath.write_bytes(b"\x00" * 16)
-    r = crud_client.post(
-        "/api/models",
-        json={
-            "id": "hw1",
-            "path": str(fpath),
-            "defaults": {"extra_args": "--flash-attn on --threads 8"},
-        },
-    )
-    assert r.status_code == 400, r.text
-    assert r.json()["error"]["code"] == "slot.hardware_flag_denied"
-    assert "slot" in r.json()["error"]["message"].lower()
-    assert crud_client.get("/api/models/hw1").status_code == 404
-
-
-def test_put_rejects_slot_hardware_ngl(
-    crud_client: TestClient,
-    crud_models_root: Path,
-) -> None:
-    """PUT rejects -ngl in defaults.extra_args with the slot-hardware envelope
-    (not the generic managed-arg one), even though -ngl is in both sets — the
-    more specific "belongs on the slot" message is checked first."""
-    fpath = crud_models_root / "hw2.gguf"
-    fpath.write_bytes(b"\x00" * 16)
-    crud_client.post("/api/models", json={"id": "hw2", "path": str(fpath)})
-    r = crud_client.put(
-        "/api/models/hw2",
-        json={"defaults": {"extra_args": "-b 2048 -ngl 99"}},
-    )
-    assert r.status_code == 400, r.text
-    assert r.json()["error"]["code"] == "slot.hardware_flag_denied"
-
-
-def test_validate_rejects_slot_hardware_device(crud_client: TestClient) -> None:
-    """/validate dry-run screens slot-hardware flags too, without writing."""
-    r = crud_client.post(
-        "/api/models/validate",
-        json={"defaults": {"extra_args": "-fa on --device ROCm0"}},
-    )
-    assert r.status_code == 400, r.text
-    assert r.json()["error"]["code"] == "slot.hardware_flag_denied"
-
-
-def test_validate_accepts_device_agnostic_tune(crud_client: TestClient) -> None:
-    """A real device-agnostic tune (batch/flash-attn/KV-quant) with no hardware
-    flags passes the §5 partition guard."""
-    r = crud_client.post(
-        "/api/models/validate",
-        json={"defaults": {"extra_args": "-b 2048 -ub 512 -fa on -ctk q8_0"}},
-    )
-    assert r.status_code == 200, r.text
-    assert r.json()["ok"] is True
+    crud_client.post("/api/models", json={"id": "seedgone", "path": str(fpath)})
+    r = crud_client.post("/api/models/seedgone/seed-profile", json={"profile": "chat"})
+    assert r.status_code in (404, 405), r.text
+    assert crud_client.get("/api/models/seedgone").json()["defaults"] is None
 
 
 # ── #1413: PUT merges `defaults` one level deep, not wholesale ────────────────
@@ -544,8 +513,7 @@ def test_put_partial_defaults_preserves_unsent_siblings(
     crud_models_root: Path,
 ) -> None:
     """The route documents `defaults` as a partial patch, so a body naming only
-    ``extra_args`` must not reset ``context_size``/``chat_template``/the
-    tri-states the client never sent (#1413)."""
+    ``jinja`` must not reset the facts the client never sent (#1413)."""
     fpath = crud_models_root / "m1413.gguf"
     fpath.write_bytes(b"\x00" * 16)
     crud_client.post("/api/models", json={"id": "m1413", "path": str(fpath)})
@@ -553,7 +521,6 @@ def test_put_partial_defaults_preserves_unsent_siblings(
         "/api/models/m1413",
         json={
             "defaults": {
-                "context_size": 8192,
                 "chat_template": "minicpm5-1b",
                 "mtp": True,
                 "jinja": False,
@@ -562,16 +529,17 @@ def test_put_partial_defaults_preserves_unsent_siblings(
     )
     assert seed.status_code == 200, seed.text
 
-    r = crud_client.put("/api/models/m1413", json={"defaults": {"extra_args": "--temp 0.5"}})
+    r = crud_client.put("/api/models/m1413", json={"defaults": {"jinja": True}})
     assert r.status_code == 200, r.text
     got = r.json()["defaults"]
-    assert got["extra_args"] == "--temp 0.5"
-    assert got["context_size"] == 8192
+    assert got["jinja"] is True
     assert got["chat_template"] == "minicpm5-1b"
     assert got["mtp"] is True
-    assert got["jinja"] is False
-    # And the persisted row agrees (not just the response echo).
-    assert crud_client.get("/api/models/m1413").json()["defaults"]["context_size"] == 8192
+    # And the persisted row agrees (not just the response echo), and carries
+    # no tuning key a sparse merge could have resurrected.
+    stored = crud_client.get("/api/models/m1413").json()["defaults"]
+    assert (stored["chat_template"], stored["mtp"], stored["jinja"]) == ("minicpm5-1b", True, True)
+    assert set(stored) == {"chat_template", "tokenizer_repo", "mtp", "jinja"}
 
 
 def test_put_explicit_null_sub_key_still_clears(
@@ -579,100 +547,43 @@ def test_put_explicit_null_sub_key_still_clears(
     crud_models_root: Path,
 ) -> None:
     """`null` remains the DELETE verb for one sub-key — the tri-state contract
-    the drawer relies on to clear an override (#1413)."""
+    the drawer relies on to clear a fact (#1413)."""
     fpath = crud_models_root / "m1413b.gguf"
     fpath.write_bytes(b"\x00" * 16)
     crud_client.post("/api/models", json={"id": "m1413b", "path": str(fpath)})
     crud_client.put(
         "/api/models/m1413b",
-        json={"defaults": {"context_size": 8192, "extra_args": "-b 512"}},
+        json={"defaults": {"chat_template": "minicpm5-1b", "mtp": True}},
     )
-    r = crud_client.put("/api/models/m1413b", json={"defaults": {"context_size": None}})
+    r = crud_client.put("/api/models/m1413b", json={"defaults": {"mtp": None}})
     assert r.status_code == 200, r.text
     got = r.json()["defaults"]
-    assert got["context_size"] is None
-    assert got["extra_args"] == "-b 512"
+    assert got["mtp"] is None
+    assert got["chat_template"] == "minicpm5-1b"
 
 
-# ── #1414: typed context_size validation (server half of #1378) ────────────────
+# ── #1414: a malformed fact is a 400, never a 500 ─────────────────────────────
 
 
-@pytest.mark.parametrize("bad", ["abc", "32k", "", "8192.5", [], {}])
-def test_put_unparseable_context_size_is_400_not_500(
+@pytest.mark.parametrize("bad", ["abc", "", [], {}])
+def test_put_unparseable_fact_is_400_not_500(
     crud_client: TestClient,
     crud_models_root: Path,
     bad: object,
 ) -> None:
-    """Client garbage must never escape as a 5xx with a raw pydantic traceback
-    (#1414a)."""
-    fpath = crud_models_root / "ctx-bad.gguf"
+    """Client garbage in a fact must never escape as a 5xx with a raw pydantic
+    traceback (#1414a)."""
+    fpath = crud_models_root / "fact-bad.gguf"
     fpath.write_bytes(b"\x00" * 16)
-    crud_client.post("/api/models", json={"id": "ctxbad", "path": str(fpath)})
-    r = crud_client.put("/api/models/ctxbad", json={"defaults": {"context_size": bad}})
+    crud_client.post("/api/models", json={"id": "factbad", "path": str(fpath)})
+    r = crud_client.put("/api/models/factbad", json={"defaults": {"mtp": bad}})
     assert r.status_code == 400, r.text
     assert r.json()["error"]["code"] == "model.defaults_invalid"
+    assert crud_client.get("/api/models/factbad").json()["defaults"] is None
 
 
-@pytest.mark.parametrize("bad", [0, -1, 127, 99999999])
-def test_put_out_of_range_context_size_rejected(
-    crud_client: TestClient,
-    crud_models_root: Path,
-    bad: int,
-) -> None:
-    """A context size that cannot launch is rejected at SAVE, not accepted with
-    a 200 and discovered at slot start (#1414b). Floor mirrors the drawer's
-    ≥ 128 (#1378/#1386); the ceiling is an absurdity screen."""
-    fpath = crud_models_root / "ctx-range.gguf"
-    fpath.write_bytes(b"\x00" * 16)
-    crud_client.post("/api/models", json={"id": "ctxrange", "path": str(fpath)})
-    r = crud_client.put("/api/models/ctxrange", json={"defaults": {"context_size": bad}})
-    assert r.status_code == 400, r.text
-    assert r.json()["error"]["code"] == "model.context_size_out_of_range"
-    # Nothing persisted — the stored row keeps its (absent) override.
-    assert crud_client.get("/api/models/ctxrange").json()["defaults"] is None
-
-
-@pytest.mark.parametrize("good", [128, 4096, 262144])
-def test_put_in_range_context_size_accepted(
-    crud_client: TestClient,
-    crud_models_root: Path,
-    good: int,
-) -> None:
-    fpath = crud_models_root / "ctx-ok.gguf"
-    fpath.write_bytes(b"\x00" * 16)
-    crud_client.post("/api/models", json={"id": "ctxok", "path": str(fpath)})
-    r = crud_client.put("/api/models/ctxok", json={"defaults": {"context_size": good}})
-    assert r.status_code == 200, r.text
-    assert r.json()["defaults"]["context_size"] == good
-
-
-def test_create_rejects_out_of_range_context_size(
-    crud_client: TestClient,
-    crud_models_root: Path,
-) -> None:
-    """POST create screens context_size like PUT does — one screen, three paths
-    (#1414)."""
-    fpath = crud_models_root / "ctx-create.gguf"
-    fpath.write_bytes(b"\x00" * 16)
-    r = crud_client.post(
-        "/api/models",
-        json={"id": "ctxcreate", "path": str(fpath), "defaults": {"context_size": 0}},
-    )
-    assert r.status_code == 400, r.text
-    assert r.json()["error"]["code"] == "model.context_size_out_of_range"
-    assert crud_client.get("/api/models/ctxcreate").status_code == 404
-
-
-def test_validate_reports_bad_context_size_inline(crud_client: TestClient) -> None:
-    """The drawer's dry-run screen surfaces the range violation inline instead
-    of returning {"ok": true} (#1414)."""
-    r = crud_client.post("/api/models/validate", json={"defaults": {"context_size": -1}})
-    assert r.status_code == 400, r.text
-    assert r.json()["error"]["code"] == "model.context_size_out_of_range"
-
-
-def test_validate_reports_unparseable_context_size_inline(crud_client: TestClient) -> None:
-    r = crud_client.post("/api/models/validate", json={"defaults": {"context_size": "abc"}})
+def test_validate_reports_unparseable_fact_inline(crud_client: TestClient) -> None:
+    r = crud_client.post("/api/models/validate", json={"defaults": {"jinja": "abc"}})
     assert r.status_code == 400, r.text
     assert r.json()["error"]["code"] == "model.defaults_invalid"
 
@@ -1014,7 +925,7 @@ def test_put_defaults_only_save_on_valid_vision_row_accepted(
             "mmproj": str(mm),
         },
     )
-    r = crud_client.put("/api/models/vis6", json={"defaults": {"extra_args": "-b 2048"}})
+    r = crud_client.put("/api/models/vis6", json={"defaults": {"jinja": False}})
     assert r.status_code == 200, r.text
 
 

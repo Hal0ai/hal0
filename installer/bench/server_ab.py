@@ -18,18 +18,25 @@ levers GuideLLM has no vocabulary for, so this script is NOT retired — ``ab``
 mode itself is kept working (manual/direct invocation), just no longer reached
 by the automated planner/runner for the ``chat`` kind.
 
-Runs as the unprivileged hal0/agent user — no sudo, no seam: it only PUTs slot
-config through hal0-api (same surface the dashboard uses) and always restores
-the slot's original extra_args afterwards (try/finally).
+Runs as the unprivileged hal0/agent user — no sudo, no seam: it only talks to
+hal0-api (same surface the dashboard uses). A tune lives on a PROFILE (ADR-0029),
+never on the slot, so each arm gets a TEMPORARY custom profile cloned from the
+slot's current profile (``POST /api/profiles``), the slot is pointed at it
+(``PUT /api/slots/<slot>/config {"profile": ...}``) and restarted, and a
+``finally`` block always points the slot back at its original profile and
+deletes every temporary profile, on failure and on Ctrl-C too.
 
 Modes
 -----
-  ab      Apply each --variant "label:<extra llama-server args>" to the slot's
-          [server].extra_args (appended after the originals, so last-wins dedup
-          lets the variant override profile/bundle flags), restart, wait ready,
+  ab      Apply each --variant "label:<extra llama-server args>" as a temporary
+          profile (the slot's profile flags first, the variant's after them, so
+          last-wins dedup lets the variant override), restart, wait ready,
           run N timed /completion calls. Reports prefill+decode t/s medians and
           draft-acceptance when the server exposes it in timings. One variant =
           a plain labelled measurement; two or more = a side-by-side A/B.
+          A label may carry profile settings: "label;ctx=8192;mtp=off:<flags>"
+          (ctx = the profile's ctx_size, mtp = auto|off). --ctx-size / --mtp
+          set the same for every arm.
   reuse   Built-in A/B of --cache-reuse 256 vs 0 on a shared-prefix trace:
           per variant, two /completion calls with the same long prefix and
           different suffixes; the second call's prompt timings show the reuse
@@ -38,11 +45,11 @@ Modes
           input; sanity-checks vector dims + reports latency.
   rerank  No config change: N timed POST /v1/rerank calls (query + docs);
           sanity-checks score spread + reports latency.
-  batch   Continuous-batching sweep: for each --np value, set the slot's
-          `parallel` field (PUT /config {parallel}), restart, drive
+  batch   Continuous-batching sweep: for each --np value, apply a temporary
+          profile whose flags end in `--parallel <np>`, restart, drive
           --concurrency simultaneous /completion streams, and report aggregate
           t/s, per-stream median, and p95 TTFT. The Tier C measurement behind
-          the concurrency-batching plan. Restores the original `parallel`.
+          the concurrency-batching plan. Restores the original profile.
   mtp     MTP draft-param sweep over --spec-nmax x --spec-pmin at --depth
           (2k/32k/128k) and a chosen sampler (--temp/--top-p/--top-k: greedy vs
           production). Relaunches per cell so the draft params take effect —
@@ -336,50 +343,233 @@ def _summarize_runs(runs: list[dict]) -> dict:
     return summary
 
 
-def _apply_extra_args(api: str, slot: str, extra_args: str | None) -> None:
-    """PUT [server].extra_args (None deletes the key = back to profile flags)."""
-    _http(
-        "PUT",
-        f"{api}/api/slots/{slot}/config",
-        {"server": {"extra_args": extra_args}},
-        auth="admin",
-    )
+def _apply_profile(api: str, slot: str, profile: str) -> None:
+    """Point the slot at ``profile`` (the config route's ``profile`` key only), restart.
+
+    An empty name restores a slot that named no profile (it then runs its
+    type's seed again)."""
+    _http("PUT", f"{api}/api/slots/{slot}/config", {"profile": profile}, auth="admin")
     _http("POST", f"{api}/api/slots/{slot}/restart", {}, auth="admin")
+
+
+def _resolved_command(api: str, slot: str) -> str | None:
+    """The slot's effective launch command, from ``GET /api/slots/<slot>/resolved``.
+
+    The runner image is dropped (argv[0]); ``None`` for a slot with no llama
+    argv (non-llama engines) or when the route cannot be read."""
+    try:
+        detail = _http("GET", f"{api}/api/slots/{slot}/resolved", auth="client")
+    except (urllib.error.URLError, OSError, ValueError):
+        return None
+    argv = detail.get("argv") if isinstance(detail, dict) else None
+    if not isinstance(argv, list) or len(argv) < 2:
+        return None
+    return " ".join(str(a) for a in argv[1:])
+
+
+#: Marks a profile as one of this script's throwaway arms FOR ONE SLOT. The
+#: intent carries the full slot name: profile names truncate it to 12 chars, so
+#: two slots can share a name prefix, and the sweep must tell their arms apart.
+def _arm_intent(slot_name: str) -> str:
+    return f"temporary server_ab arm for slot {slot_name}"
+
+
+def _arm_prefix(slot_name: str) -> str:
+    return f"tune-{slot_name[:12]}-"
+
+
+#: The seed a slot of this type runs when it names no profile.
+_TYPE_SEED = {"embedding": "embedding", "reranking": "reranking"}
+
+
+class _ProfileArms:
+    """Temporary custom profiles for the arms of one measurement, always unwound.
+
+    ``apply`` clones the slot's current profile with the arm's flags / ctx_size /
+    mtp (POST /api/profiles), points the slot at the clone and restarts it.
+    ``restore`` (call it from ``finally``) points the slot back at its original
+    profile, restarts, then deletes every temporary profile. Each restore step
+    is attempted even if an earlier one failed, and failures are reported
+    loudly rather than swallowed."""
+
+    def __init__(self, api: str, slot_name: str, slot: dict) -> None:
+        self.api = api
+        self.slot_name = slot_name
+        self.original = str(slot.get("profile") or "")
+        seed = self.original or _TYPE_SEED.get(str(slot.get("type") or ""), "chat")
+        self.base: dict = _http("GET", f"{api}/api/profiles/{seed}", auth="client")
+        self.created: list[str] = []
+        self._applied = False
+
+    def _next_name(self) -> str:
+        # kebab-case, <=32 chars, leading alphanumeric (the profile name rule).
+        return f"{_arm_prefix(self.slot_name)}{os.getpid() % 100000}-{len(self.created) + 1}"
+
+    def apply(
+        self,
+        extra_flags: str = "",
+        *,
+        ctx_size: int | None = None,
+        mtp: str | None = None,
+    ) -> dict:
+        """Create the arm's profile, point the slot at it and restart. Returns its body."""
+        base_flags = str(self.base.get("flags") or "")
+        body: dict[str, Any] = {
+            "name": self._next_name(),
+            # Appended after the originals: last-wins dedup lets the arm override.
+            "flags": f"{base_flags} {extra_flags}".strip(),
+            "vision": self.base.get("vision") or "auto",
+            "mtp": mtp or self.base.get("mtp") or "auto",
+            "cloned_from": self.base.get("name") or None,
+            "intent": _arm_intent(self.slot_name),
+        }
+        window = ctx_size if ctx_size is not None else self.base.get("ctx_size")
+        if window is not None:
+            body["ctx_size"] = int(window)
+        if self.base.get("enable_thinking") is not None:
+            body["enable_thinking"] = self.base["enable_thinking"]
+        if self.base.get("runner"):
+            body["runner"] = self.base["runner"]
+        _http("POST", f"{self.api}/api/profiles", body, auth="admin")
+        self.created.append(body["name"])
+        self._applied = True
+        _apply_profile(self.api, self.slot_name, body["name"])
+        return body
+
+    def restore(self) -> None:
+        problems: list[str] = []
+        if self._applied:
+            print(f"[tune] restoring slot profile = {self.original!r}", flush=True)
+            try:
+                _apply_profile(self.api, self.slot_name, self.original)
+            except Exception as exc:  # keep going: the temp profiles must still go
+                problems.append(f"could not restore profile {self.original!r}: {exc}")
+        for name in self.created:
+            try:
+                _http("DELETE", f"{self.api}/api/profiles/{name}", auth="admin")
+            except Exception as exc:
+                problems.append(f"could not delete temporary profile {name!r}: {exc}")
+        if problems:
+            print(
+                "[tune] WARNING — cleanup incomplete, fix by hand: " + "; ".join(problems),
+                file=sys.stderr,
+                flush=True,
+            )
+
+
+def sweep_stale_arm_profiles(api: str, slot_name: str) -> list[str]:
+    """Delete leftover ``tune-<slot>-*`` arm profiles from a run that was killed hard.
+
+    A ``finally`` cannot run on SIGKILL, so the next start for the slot cleans up.
+    Only a profile named for this slot whose intent is EXACTLY this slot's arm marker
+    (full slot name, not the truncated name prefix) is a candidate. One that a slot (or the API's own ``used_by``) still points at is
+    NEVER deleted — it is warned about instead, since removing it would break that
+    slot. Returns the deleted names; each deletion is logged."""
+    deleted: list[str] = []
+    try:
+        profiles = _http("GET", f"{api}/api/profiles", auth="client")
+        slots = _http("GET", f"{api}/api/slots", auth="client")
+    except (urllib.error.URLError, OSError, ValueError) as exc:
+        print(f"[tune] WARNING — stale-profile sweep skipped: {exc}", file=sys.stderr, flush=True)
+        return deleted
+    slot_rows = slots if isinstance(slots, list) else slots.get("slots", slots.get("data", []))
+    pointed_at = {str(row.get("profile") or ""): row.get("name") for row in slot_rows}
+    prefix = _arm_prefix(slot_name)
+    intent = _arm_intent(slot_name)
+    for item in profiles if isinstance(profiles, list) else []:
+        name = str(item.get("name") or "")
+        # Exact intent match: the name prefix alone is truncated and ambiguous.
+        if not name.startswith(prefix) or str(item.get("intent") or "") != intent:
+            continue
+        users = sorted(
+            {str(u) for u in item.get("used_by") or []}
+            | ({str(pointed_at[name])} if name in pointed_at else set())
+        )
+        if users:
+            print(
+                f"[tune] WARNING — leftover arm profile {name!r} is still used by slot(s) "
+                f"{', '.join(users)}; not deleting it. Point the slot back at its real profile "
+                f"(`hal0 slot edit <slot> --profile <name>`), then delete {name!r}.",
+                file=sys.stderr,
+                flush=True,
+            )
+            continue
+        try:
+            _http("DELETE", f"{api}/api/profiles/{name}", auth="admin")
+        except Exception as exc:
+            print(
+                f"[tune] WARNING — could not delete stale profile {name!r}: {exc}",
+                file=sys.stderr,
+                flush=True,
+            )
+            continue
+        print(f"[tune] removed stale temporary profile {name!r}", flush=True)
+        deleted.append(name)
+    return deleted
+
+
+def _parse_variant(raw: str) -> tuple[str, str, int | None, str | None]:
+    """``"label[;ctx=N][;mtp=auto|off]:<flags>"`` -> (label, flags, ctx_size, mtp)."""
+    head, _, flags = raw.partition(":")
+    label, *opts = [part.strip() for part in head.split(";")]
+    ctx_size: int | None = None
+    mtp: str | None = None
+    for opt in opts:
+        key, _, value = opt.partition("=")
+        if key == "ctx" and value.strip().isdigit():
+            ctx_size = int(value)
+        elif key == "mtp" and value.strip() in ("auto", "off"):
+            mtp = value.strip()
+        else:
+            sys.exit(f"bad variant option {opt!r} in {raw!r} (use ctx=N or mtp=auto|off)")
+    flags = flags.strip()
+    return (label or flags or "variant", flags, ctx_size, mtp)
+
+
+def _arm_settings(args: argparse.Namespace) -> tuple[int | None, str | None]:
+    """The run-wide --ctx-size / --mtp (a variant's own settings win over them)."""
+    return getattr(args, "ctx_size", None), getattr(args, "mtp", None)
 
 
 def mode_ab(args: argparse.Namespace) -> dict:
     slot = _get_slot(args.api, args.slot)
     port = int(slot["port"])
-    original = slot.get("llamacpp_args") or None  # current [server].extra_args
-
-    variants: list[tuple[str, str]] = []
-    for v in args.variant:
-        label, _, flags = v.partition(":")
-        variants.append((label.strip() or flags.strip() or "variant", flags.strip()))
+    arms = _ProfileArms(args.api, args.slot, slot)
+    run_ctx, run_mtp = _arm_settings(args)
+    variants = [_parse_variant(v) for v in args.variant]
 
     results: dict[str, Any] = {}
     try:
-        for label, flags in variants:
-            merged = f"{original} {flags}".strip() if original else flags
-            print(f"[ab] {label}: extra_args = {merged!r}", flush=True)
-            _apply_extra_args(args.api, args.slot, merged or None)
+        for label, flags, v_ctx, v_mtp in variants:
+            arm = arms.apply(
+                flags,
+                ctx_size=v_ctx if v_ctx is not None else run_ctx,
+                mtp=v_mtp or run_mtp,
+            )
+            print(f"[ab] {label}: profile {arm['name']} flags = {arm['flags']!r}", flush=True)
             _wait_ready(port)
             runs = []
             for i in range(args.n):
                 t = _completion(port, LONG_PROMPT, args.max_tokens, cache_prompt=False)
                 print(f"  run {i + 1}/{args.n}: {t}", flush=True)
                 runs.append(t)
-            results[label] = {"extra_args": merged, "runs": runs, "median": _summarize_runs(runs)}
+            results[label] = {
+                "extra_args": arm["flags"],
+                "ctx_size": arm.get("ctx_size"),
+                "mtp": arm["mtp"],
+                "runs": runs,
+                "median": _summarize_runs(runs),
+            }
     finally:
-        print(f"[ab] restoring original extra_args = {original!r}", flush=True)
-        _apply_extra_args(args.api, args.slot, original)
+        arms.restore()
     return results
 
 
 def mode_reuse(args: argparse.Namespace) -> dict:
     slot = _get_slot(args.api, args.slot)
     port = int(slot["port"])
-    original = slot.get("llamacpp_args") or None
+    arms = _ProfileArms(args.api, args.slot, slot)
+    run_ctx, run_mtp = _arm_settings(args)
 
     results: dict[str, Any] = {}
     try:
@@ -387,9 +577,9 @@ def mode_reuse(args: argparse.Namespace) -> dict:
             ("cache-reuse-256", "--cache-reuse 256"),
             ("cache-reuse-0", "--cache-reuse 0"),
         ):
-            merged = f"{original} {flags}".strip() if original else flags
-            print(f"[reuse] {label}: extra_args = {merged!r}", flush=True)
-            _apply_extra_args(args.api, args.slot, merged or None)
+            arm = arms.apply(flags, ctx_size=run_ctx, mtp=run_mtp)
+            merged = arm["flags"]
+            print(f"[reuse] {label}: profile {arm['name']} flags = {merged!r}", flush=True)
             _wait_ready(port)
             # Call 1 warms the cache with prefix+A; call 2 (prefix+B) is the
             # measurement — with reuse the shared prefix is KV-shifted, without
@@ -411,8 +601,7 @@ def mode_reuse(args: argparse.Namespace) -> dict:
             print(f"  second-call timings: {second}", flush=True)
             results[label] = {"extra_args": merged, "second_call": second}
     finally:
-        print(f"[reuse] restoring original extra_args = {original!r}", flush=True)
-        _apply_extra_args(args.api, args.slot, original)
+        arms.restore()
     return results
 
 
@@ -472,19 +661,20 @@ def _one_stream(port: int, prompt: str, n_predict: int) -> dict:
 
 
 def mode_batch(args: argparse.Namespace) -> dict:
-    """Continuous-batching sweep: for each --np value, set the slot's `parallel`
-    field (PUT /config {parallel}), restart, then drive C concurrent
+    """Continuous-batching sweep: for each --np value, apply a temporary profile
+    whose flags end in `--parallel <np>`, restart, then drive C concurrent
     /completion streams and report AGGREGATE t/s, per-stream median, and TTFT
     spread — the numbers that decide whether a slot class should batch (plan
     Tier C). Streams share a long common prefix with distinct suffixes to
-    exercise slot routing + prompt cache. Restores the original `parallel` at
+    exercise slot routing + prompt cache. Restores the original profile at
     the end.
     """
     import concurrent.futures as cf
 
     slot = _get_slot(args.api, args.slot)
     port = int(slot["port"])
-    original = slot.get("parallel")  # None = inherit profile
+    arms = _ProfileArms(args.api, args.slot, slot)
+    run_ctx, run_mtp = _arm_settings(args)
     np_values = [int(x) for x in str(args.np).split(",") if x.strip()]
 
     results: dict[str, Any] = {}
@@ -492,8 +682,7 @@ def mode_batch(args: argparse.Namespace) -> dict:
         for np in np_values:
             conc = args.concurrency or np  # default: saturate the slots
             print(f"[batch] parallel={np}, concurrency={conc}", flush=True)
-            _http("PUT", f"{args.api}/api/slots/{args.slot}/config", {"parallel": np}, auth="admin")
-            _http("POST", f"{args.api}/api/slots/{args.slot}/restart", {}, auth="admin")
+            arms.apply(f"--parallel {np}", ctx_size=run_ctx, mtp=run_mtp)
             _wait_ready(port)
             rounds: list[dict] = []
             for r in range(args.n):
@@ -537,14 +726,7 @@ def mode_batch(args: argparse.Namespace) -> dict:
                 },
             }
     finally:
-        print(f"[batch] restoring parallel = {original!r}", flush=True)
-        _http(
-            "PUT",
-            f"{args.api}/api/slots/{args.slot}/config",
-            {"parallel": original},
-            auth="admin",
-        )
-        _http("POST", f"{args.api}/api/slots/{args.slot}/restart", {}, auth="admin")
+        arms.restore()
     return results
 
 
@@ -562,8 +744,8 @@ def mode_mtp(args: argparse.Namespace) -> dict:
     winner is picked on NET decode (greedy acceptance is a ceiling, not a ship
     metric). Draft-KV quant is NOT swept here (use --mode ab).
 
-    Default is RELAUNCH-PER-VALUE: each cell writes `--spec-draft-n-max/-n-min/
-    -p-min` into [server].extra_args and restarts (like mode_ab). The
+    Default is RELAUNCH-PER-VALUE: each cell applies a temporary profile whose
+    flags carry `--spec-draft-n-max/-n-min/-p-min` and restarts (like mode_ab). The
     per-request `speculative.*` JSON override was tried first (it would let the
     whole grid run against one warm server) but the ROCmFPX runner at 7aa484a
     SILENTLY IGNORES it — every cell then reads the launch-time config and the
@@ -571,7 +753,8 @@ def mode_mtp(args: argparse.Namespace) -> dict:
     runner build that honors it (with a loud caveat)."""
     slot = _get_slot(args.api, args.slot)
     port = int(slot["port"])
-    original = slot.get("llamacpp_args") or None
+    arms = _ProfileArms(args.api, args.slot, slot)
+    run_ctx, run_mtp = _arm_settings(args)
     prompt = _build_prompt(args.depth)
     sampler = _sampler_body(args)
     n_maxes = _csv_ints(args.spec_nmax)
@@ -600,8 +783,7 @@ def mode_mtp(args: argparse.Namespace) -> dict:
                         f"--spec-draft-n-max {n_max} --spec-draft-n-min {n_min} "
                         f"--spec-draft-p-min {p_min}"
                     )
-                    merged = f"{original} {flags}".strip() if original else flags
-                    _apply_extra_args(args.api, args.slot, merged)
+                    arms.apply(flags, ctx_size=run_ctx, mtp=run_mtp)
                     _wait_ready(port)
                     spec = None
                 print(
@@ -629,9 +811,7 @@ def mode_mtp(args: argparse.Namespace) -> dict:
                     "median": _summarize_runs(runs),
                 }
     finally:
-        if not args.per_request:
-            print(f"[mtp] restoring original extra_args = {original!r}", flush=True)
-            _apply_extra_args(args.api, args.slot, original)
+        arms.restore()
     return results
 
 
@@ -649,7 +829,8 @@ def _provenance(args: argparse.Namespace, slot: dict | None) -> dict:
     prov["depth_tokens"] = args.depth
     prov["sampler"] = _sampler_body(args)
     if slot is not None:
-        prov["slot_resolved_args"] = slot.get("llamacpp_args")
+        prov["slot_resolved_args"] = _resolved_command(args.api, args.slot)
+        prov["slot_profile"] = slot.get("profile") or None
         prov["slot_env"] = slot.get("env") or (slot.get("server") or {}).get("env")
     return prov
 
@@ -667,18 +848,31 @@ def main() -> None:
         "--variant",
         action="append",
         default=[],
-        help='ab mode: "label:<extra llama-server args>" (repeatable)',
+        help='ab mode: "label[;ctx=N][;mtp=auto|off]:<extra llama-server args>" (repeatable)',
     )
     ap.add_argument(
         "--np",
         default="1,2,4,8",
-        help="batch mode: comma list of --parallel values to sweep (default 1,2,4,8)",
+        help="batch mode: comma list of `--parallel` values to sweep (default 1,2,4,8)",
     )
     ap.add_argument(
         "--concurrency",
         type=int,
         default=0,
         help="batch mode: simultaneous streams per np (default 0 = match np)",
+    )
+    ap.add_argument(
+        "--ctx-size",
+        dest="ctx_size",
+        type=int,
+        default=None,
+        help="every arm's profile ctx_size (default: the slot's current profile window)",
+    )
+    ap.add_argument(
+        "--mtp",
+        choices=["auto", "off"],
+        default=None,
+        help="every arm's profile mtp (default: the slot's current profile setting)",
     )
     ap.add_argument("--n", type=int, default=3, help="timed runs/rounds (default 3)")
     ap.add_argument("--max-tokens", type=int, default=256, help="decode length per run")
@@ -731,6 +925,8 @@ def main() -> None:
     # is an A/B comparison. Zero would measure nothing.
     if args.mode == "ab" and not args.variant:
         ap.error("--mode ab needs at least one --variant entry")
+
+    sweep_stale_arm_profiles(args.api, args.slot)
 
     fn = {
         "ab": mode_ab,

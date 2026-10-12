@@ -639,7 +639,6 @@ def test_print_convergence_reports_a_failed_post_swap_migration(
     False so the caller's exit code reflects it."""
     converged = uc._print_convergence(
         {
-            "ownership_migrations": {"pending": []},
             "post_activation_migrations": {
                 "ok": False,
                 "from": 1,
@@ -662,7 +661,6 @@ def test_print_convergence_shows_the_migrated_schema_range_on_success(
 ) -> None:
     converged = uc._print_convergence(
         {
-            "ownership_migrations": {"pending": []},
             "post_activation_migrations": {
                 "ok": True,
                 "from": 1,
@@ -687,7 +685,6 @@ def test_print_convergence_says_nothing_extra_when_schema_unchanged(
     """No migration ran (already-converged box) — no spurious 'v1 -> v1' line."""
     uc._print_convergence(
         {
-            "ownership_migrations": {"pending": []},
             "post_activation_migrations": {
                 "ok": True,
                 "from": 1,
@@ -710,20 +707,19 @@ def test_print_convergence_reports_a_nonfatal_pass_warning(
     operator, distinct from the red 'Migration incomplete' panel."""
     converged = uc._print_convergence(
         {
-            "ownership_migrations": {"pending": []},
             "post_activation_migrations": {
                 "ok": True,
                 "from": 1,
                 "to": 1,
                 "error": None,
-                "pass_warnings": ["updater.mtp_migration_failed"],
+                "pass_warnings": ["updater.vulkan_migration_failed"],
             },
             "converged": True,
         }
     )
     out = capsys.readouterr().out
     assert converged is True
-    assert "mtp override cleanup" in out
+    assert "gpu-vulkan slot relabel" in out
     assert "Migration incomplete" not in out
 
 
@@ -1235,3 +1231,97 @@ def test_cli_banner_reports_server_side_restart_and_does_not_double_restart(
     assert result.exit_code == 0, result.output
     assert posts == []
     assert "restarted 1 slot" in result.output and "brain" in result.output
+
+
+# ── ADR-0029: profile-conversion blockers after an update ──────────────────────
+
+
+def _run_update_with_convergence(monkeypatch: pytest.MonkeyPatch, convergence: dict) -> object:
+    monkeypatch.setattr(uc, "_api_unreachable", lambda url: False)
+    monkeypatch.setattr(uc, "_interactive", lambda: False)
+    monkeypatch.setattr("hal0.updater.updater._is_editable_install", lambda: False)
+
+    def fake_get(path: str, **kwargs: object) -> dict:
+        if path == "/api/updates/slot-drift":
+            return {"count": 0, "slots": []}
+        if path == "/api/updates/components":
+            return {"components": [], "pending": 0}
+        return {
+            "current": "0.0.0",
+            "latest": "9.9.9",
+            "channel": "stable",
+            "update_available": True,
+            "manifest": {},
+        }
+
+    def fake_post(path: str, *, json: object = None, **kwargs: object) -> dict:
+        if path == "/api/updates/prepare":
+            return {"id": "p1", "state": "queued"}
+        if path == "/api/updates/commit":
+            return {"id": "c1", "state": "queued"}
+        return {}
+
+    def fake_poll(
+        job_id: str, *, terminal: tuple = ("applied", "failed"), **kwargs: object
+    ) -> dict:
+        if "prepared" in terminal:
+            return {"id": job_id, "state": "prepared", "resolved_version": "9.9.9", "notes": {}}
+        return {"id": job_id, "state": "applied", "convergence": convergence}
+
+    monkeypatch.setattr(uc, "api_get", fake_get)
+    monkeypatch.setattr(uc, "api_post", fake_post)
+    monkeypatch.setattr(uc, "_poll_job", fake_poll)
+    return runner.invoke(app, ["update"])
+
+
+def _convergence(blockers: list[dict]) -> dict:
+    return {
+        "post_activation_migrations": {
+            "ok": True,
+            "from": 1,
+            "to": 1,
+            "error": None,
+            "pass_warnings": [],
+            "conversion_blockers": blockers,
+        },
+        "converged": not blockers,
+    }
+
+
+def test_update_with_a_blocked_slot_prints_the_blocker_and_exits_2(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    blockers = [
+        {"target": "agent.toml", "reason": "--chat-template-file has no profile home"},
+        {"target": "profile:fast", "reason": "--mmproj has no profile home"},
+    ]
+    result = _run_update_with_convergence(monkeypatch, _convergence(blockers))
+    assert result.exit_code == 2, result.output
+    out = " ".join(result.output.split())
+    assert (
+        "profile conversion blocked: agent.toml — --chat-template-file has no profile home" in out
+    )
+    assert "profile conversion blocked: profile:fast — --mmproj has no profile home" in out
+    assert "fix: run `hal0 profile migrate` to see the plan" in out
+    assert "`sudo -u hal0 hal0 profile migrate --apply`" in out
+    assert "update applied." not in out
+
+
+def test_update_without_blockers_exits_0(monkeypatch: pytest.MonkeyPatch) -> None:
+    result = _run_update_with_convergence(monkeypatch, _convergence([]))
+    assert result.exit_code == 0, result.output
+    assert "profile conversion blocked" not in result.output
+    assert "update applied." in result.output
+
+
+def test_print_convergence_blockers_alone_mean_not_converged(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Even a convergence dict claiming ``converged`` (an API predating the
+    blocker check) is not converged while a blocker is listed."""
+    convergence = _convergence([{"target": "stack:saber", "reason": "row agent: --jinja"}])
+    convergence["converged"] = True
+    assert uc._print_convergence(convergence) is False
+    out = " ".join(capsys.readouterr().out.split())
+    assert "profile conversion blocked: stack:saber — row agent: --jinja" in out
+    assert "fully converged" not in out

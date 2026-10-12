@@ -16,7 +16,7 @@ import pytest
 from hal0.agents.anchor_window import HERMES_MINIMUM_CONTEXT_LENGTH
 from hal0.install.brain_model import BRAIN_MODEL_IDS
 from hal0.install.static_seeds import STATIC_SEED_SLOTS, seed_static_slots
-from hal0.providers.container import _resolve_context_size
+from hal0.providers.container import profile_context
 
 
 def _fake_installer_root(tmp_path: Path, names: tuple[str, ...] = STATIC_SEED_SLOTS) -> Path:
@@ -124,18 +124,16 @@ def test_seed_static_slots_default_args_seed_real_tree(tmp_path: Path) -> None:
     assert set(seeded) == set(STATIC_SEED_SLOTS)
 
 
-# ── #1827: a shipped seed must actually deliver the window it asks for ────────
+# ── ADR-0029: the shipped seeds carry placement, the window is the profile's ──
 #
-# The seed TOML is only half the contract — providers.container._resolve_context_size
-# decides what a slot LAUNCHES with. rc.5 shipped three seeds asking for 65536
-# that all launched at 32768, because the derived-window path applied a blanket
-# dense cap underneath the seeded ceiling. 32768 is below Hermes' hard 64,000
-# floor, so the bundled agent could not start on a fresh install at all.
-#
-# This walks the real shipped TOMLs through the real resolver with the model
-# shape a fresh install actually produces (an installer-pulled brain model: a
-# native window off the curated catalogue, no explicit defaults.context_size),
-# so either half drifting back down fails here instead of on a box.
+# The seed TOML names a profile; the profile's ``ctx_size`` is what the slot
+# launches with (``providers.container.profile_context``). #1827 shipped three
+# seeds asking for 65536 that launched at 32768 — below Hermes' hard 64,000
+# floor, so the bundled agent could not start on a fresh install. This walks the
+# real shipped TOMLs through the real resolver with the model shape a fresh
+# install actually produces (an installer-pulled brain model: a native window
+# off the curated catalogue), so the seed, the profile, or the resolver drifting
+# back down fails here instead of on a box.
 
 #: ``agent/model_metadata.py::MINIMUM_CONTEXT_LENGTH`` in the bundled Hermes.
 #: Imported, not re-typed: hal0 keeps exactly one copy of this number (#1867).
@@ -146,28 +144,56 @@ _HERMES_MIN_CONTEXT = HERMES_MINIMUM_CONTEXT_LENGTH
 #: ``hal0/utility`` — the three chat surfaces an operator is told to try.
 _HERMES_REACHABLE_SEEDS = ("agent", "brain", "utility")
 
+_SEED_SRC_DIR = Path(__file__).resolve().parents[2] / "installer" / "etc-hal0" / "slots"
 
-def _seed_ceiling(name: str) -> int | None:
-    repo_root = Path(__file__).resolve().parents[2]
-    raw = (repo_root / "installer" / "etc-hal0" / "slots" / f"{name}.toml").read_bytes()
-    return tomllib.loads(raw.decode("utf-8")).get("model", {}).get("context_size")
+
+def _seed_toml(name: str) -> dict:
+    return tomllib.loads((_SEED_SRC_DIR / f"{name}.toml").read_bytes().decode("utf-8"))
+
+
+@pytest.mark.parametrize("slot_name", STATIC_SEED_SLOTS)
+def test_shipped_seed_carries_no_tuning_key_and_names_a_seed_profile(slot_name: str) -> None:
+    """No seed ships a slot-level window / flags (ADR-0029); every LLM-ish seed
+    names a code-shipped seed profile, so it resolves on a fresh install."""
+    from hal0.config.schema import SEED_PROFILES, slot_tuning_keys
+
+    cfg = _seed_toml(slot_name)
+    assert slot_tuning_keys(cfg) == [], f"{slot_name}.toml carries a tuning key"
+    assert cfg.get("profile") in SEED_PROFILES, f"{slot_name}.toml names a non-seed profile"
+
+
+@pytest.mark.parametrize(
+    ("slot_name", "profile"),
+    [
+        ("agent", "agent"),
+        ("coder", "coding"),
+        ("utility", "utility"),
+        ("brain", "brain"),
+        ("embed", "embedding"),
+        ("rerank", "reranking"),
+        ("flm", "flm"),
+    ],
+)
+def test_shipped_seed_points_at_its_profile(slot_name: str, profile: str) -> None:
+    assert _seed_toml(slot_name)["profile"] == profile
 
 
 @pytest.mark.parametrize("slot_name", _HERMES_REACHABLE_SEEDS)
 @pytest.mark.parametrize("model_id", BRAIN_MODEL_IDS)
-def test_shipped_seed_resolves_above_the_hermes_floor(slot_name: str, model_id: str) -> None:
-    ceiling = _seed_ceiling(slot_name)
-    assert ceiling is not None, f"{slot_name}.toml lost its [model].context_size"
-    assert ceiling >= _HERMES_MIN_CONTEXT, (
-        f"{slot_name}.toml asks for {ceiling}, below Hermes' {_HERMES_MIN_CONTEXT} floor"
-    )
+def test_shipped_seed_resolves_above_the_hermes_floor(
+    slot_name: str, model_id: str, tmp_path: Path
+) -> None:
+    from hal0.config.loader import load_profiles_config
+
+    profile = load_profiles_config(tmp_path / "profiles.toml").profile[
+        _seed_toml(slot_name)["profile"]
+    ]
     # A freshly pulled row: the curated catalogue supplies the native window
-    # (directly, or via the #1617 backfill while metadata is still empty), and
-    # nothing on the install path stamps a model-level context size.
-    model_info = {"_model_key": model_id, "metadata": {}, "defaults": {"context_size": None}}
-    effective = _resolve_context_size(ceiling, model_info, slot_name=slot_name)
+    # (via the #1617 backfill while metadata is still empty).
+    model_info = {"_model_key": model_id, "metadata": {}}
+    effective, source = profile_context(profile, model_info)
+    assert source == "profile", f"{slot_name}'s profile lost its ctx_size"
     assert effective >= _HERMES_MIN_CONTEXT, (
-        f"{slot_name} seed asks for {ceiling} but resolves to {effective} "
-        f"with model {model_id} — below Hermes' floor, so `hermes -z` cannot start"
+        f"{slot_name} seed resolves to {effective} with model {model_id} — below "
+        f"Hermes' {_HERMES_MIN_CONTEXT} floor, so `hermes -z` cannot start"
     )
-    assert effective == ceiling

@@ -324,7 +324,7 @@ CURATED_MODEL_TAGS: tuple[str, ...] = (
     # fields: ``defaults.mtp`` (model_is_mtp_eligible prefers it; the tag is
     # the pre-1.0 source a boot migration folds forward), Model.architecture
     # (moe — the "moe" tag was removed in §7.1d), ``capability_flags.
-    # tool_calling`` (the §7.3 master gate), ``defaults.enable_thinking``
+    # tool_calling`` (the §7.3 master gate), the profile's ``enable_thinking``
     # (reasoning), the capabilities list + mmproj sidecar (vision, surfaced
     # via LoadedSlot.modalities). They remain in this tuple only because the
     # curated catalogue still stamps them as display tags.

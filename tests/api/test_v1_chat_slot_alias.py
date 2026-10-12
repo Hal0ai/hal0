@@ -42,13 +42,13 @@ def _three_chat_slots() -> list[dict[str, Any]]:
             "name": "agent-hermes",
             "type": "llm",
             "port": 8001,
-            "model": {"default": "hermes-4-14b-q5km", "ctx_size": 65536},
+            "model": {"default": "hermes-4-14b-q5km"},
         },
         {
             "name": "utility",
             "type": "llm",
             "port": 8081,
-            "model": {"default": "qwen3-zero-coder-v2-0.8b-f16", "context_size": 32768},
+            "model": {"default": "qwen3-zero-coder-v2-0.8b-f16"},
         },
         # Non-chat slot — never an alias.
         {
@@ -173,7 +173,7 @@ def _npu_flm_slot() -> list[dict[str, Any]]:
             "name": "npu",
             "type": "llm",
             "port": 8088,
-            "model": {"default": "gemma4-it-e2b-FLM", "context_size": 75000},
+            "model": {"default": "gemma4-it-e2b-FLM"},
         },
     ]
 

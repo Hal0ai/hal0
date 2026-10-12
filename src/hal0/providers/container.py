@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import dataclasses
 import json
 import logging
 import os
@@ -65,10 +66,12 @@ from hal0.config.paths import (
     model_store_root,
 )
 from hal0.config.schema import (
-    build_mtp_flag_bundle,
-    family_flags,
+    MTP_DRAFT_BUNDLE,
+    mtp_draft_device,
     resolve_chat_template,
-    resolve_profile_flags,
+)
+from hal0.config.schema import (
+    family_flags as _family_flags,
 )
 from hal0.errors import Hal0Error, UnprocessableEntity
 from hal0.http_client import async_client
@@ -154,49 +157,39 @@ def _artefact_token(slot: Mapping[str, Any] | str) -> str:
 def _resolve_profile(name: str) -> Any:
     """Resolve a profile name to a :class:`~hal0.profiles.ResolvedProfile`.
 
-    Kept as a module-level indirection so it stays the single patch point
-    for tests (``hal0.providers.container._resolve_profile``).  The default
-    implementation goes through :class:`~hal0.profiles.ProfileCatalog`, so
-    providers consume one profile interface instead of re-parsing
-    profiles.toml — :func:`_profile_image_and_flags` accepts either a
-    ``ResolvedProfile`` or a bare ``ProfileConfig`` (what tests inject).
+    Kept as a module-level indirection so it stays the single patch point for
+    tests (``hal0.providers.container._resolve_profile``).
     """
     return ProfileCatalog().resolve(name)
 
 
-def _resolve_profile_or_base(profile_name: str, slot_cfg: dict[str, Any]) -> Any:
-    """Resolve a slot's profile, falling back to the backend's basic seed
-    profile (``rocm`` / ``vulkan``) when the pinned profile no longer exists.
+#: The profile a slot that names none launches with: its type's seed (the one
+#: carrying the mode flag), else ``chat``.
+TYPE_DEFAULT_PROFILE: dict[str, str] = {"embedding": "embedding", "reranking": "reranking"}
 
-    A seed cleanup (or a renamed seed) can leave an existing slot pinned to a
-    profile name that is gone from the catalog — e.g. the retired
-    ``rocm-dnse`` / ``rocm-moe``. Rather than hard-fail the launch, fall back to
-    the simple profile named after the slot's backend so the slot stays
-    launchable across an update. MTP-tuning is lost in the fallback (the base
-    profiles are non-MTP); operators re-pin an explicit profile if they want it.
+
+def resolve_slot_profile(slot_cfg: Mapping[str, Any]) -> Any:
+    """The profile a slot launches with (ADR-0029: the whole tune).
+
+    A slot that names no profile gets its type's seed (``embedding`` /
+    ``reranking``), else ``chat``. A slot that names a profile the catalog
+    does not have refuses to launch (``slot.profile_missing``) — there is no
+    silent fallback to some other tune.
     """
     from hal0.errors import NotFound
 
+    name = str(slot_cfg.get("profile") or "")
+    if not name:
+        name = TYPE_DEFAULT_PROFILE.get(str(slot_cfg.get("type") or ""), "chat")
     try:
-        return _resolve_profile(profile_name)
-    except NotFound:
-        from hal0.config.loader import load_profiles_config
-
-        backend = str(slot_cfg.get("backend") or "")
-        catalog = load_profiles_config().profile
-        base = "chat" if "chat" in catalog else (backend if backend in catalog else "rocm")
-        # An empty profile is a legitimate "no profile declared" slot running
-        # on the default toolbox — not a stale/renamed profile. Falling back is
-        # expected, so don't warn on every health probe (#1226); reserve the
-        # warning for a NON-empty name the catalog no longer knows.
-        if profile_name:
-            log.warning(
-                "profile %r not found; falling back to base profile %r",
-                profile_name,
-                base,
-                extra={"event": "profile.fallback", "missing": profile_name, "base": base},
-            )
-        return _resolve_profile(base)
+        return _resolve_profile(name)
+    except NotFound as exc:
+        raise UnprocessableEntity(
+            f"slot {slot_cfg.get('name')!r} names profile {name!r}, which does not exist; "
+            "pick another profile for the slot",
+            code="slot.profile_missing",
+            details={"slot": str(slot_cfg.get("name") or ""), "profile": name},
+        ) from exc
 
 
 def _effective_backend_and_device_class(
@@ -394,124 +387,45 @@ def _fixed_family_provider(slot_cfg: Mapping[str, Any] | None, profile: Any) -> 
     return _provider_for_family(cfg, family)
 
 
-def _profile_image_and_flags(
-    profile: Any,
-    mtp_override: bool | None = None,
-    slot_cfg: Mapping[str, Any] | None = None,
-    *,
-    model_info: Mapping[str, Any] | None = None,
-) -> tuple[str, str]:
-    """Extract ``(image, resolved_flags)`` for a slot launch.
+def model_has_mtp_heads(model_info: Mapping[str, Any]) -> bool:
+    """The model fact: does the file carry MTP draft heads?
 
-    Image resolution walks the chain in :func:`_resolve_image_ref`
-    (spec-hw-slot-ownership §3): ``slot.image_pin`` escape hatch → the
-    ``slot.binary``-resolved image (or the HW-gated default).
-
-    Works for both :class:`~hal0.profiles.ResolvedProfile` (whose
-    ``resolved_flags`` is already MTP-expanded) and a plain ``ProfileConfig``
-    (resolve the flags here).  This is what lets the default profile
-    interface be ProfileCatalog while test-injected ``ProfileConfig`` objects
-    keep working.
-
-    When ``mtp_override`` is not None (i.e. a slot-level MTP override is set),
-    the flags are always recomputed from the profile's raw ``.flags`` and
-    ``.mtp`` so that the override wins over any pre-expanded ``resolved_flags``
-    baked into a :class:`~hal0.profiles.ResolvedProfile`.  Both
-    ``ResolvedProfile`` and ``ProfileConfig`` expose ``.flags`` and ``.mtp``,
-    so this path works for both types.
-
-    ``model_info`` is retained for call-site compatibility (threaded through
-    from :func:`_resolve_llama_scalars`) but is no longer read by image
-    resolution — the image is a slot-owned physical fact now (BINARY /
-    image_pin), not a model one.
+    An explicit ``defaults.mtp`` wins; otherwise the registry ``mtp`` tag.
     """
-    if mtp_override is not None:
-        # Slot override wins over any pre-expanded resolved_flags: recompute
-        # from the profile's raw flags (both ResolvedProfile and ProfileConfig
-        # expose .flags and .mtp).
-        flags = resolve_profile_flags(profile, mtp_override)
-    else:
-        flags = getattr(profile, "resolved_flags", None)
-        if flags is None:
-            flags = resolve_profile_flags(profile)
-    return _resolve_image_ref(slot_cfg, profile, model_info=model_info), str(flags)
+    defaults = model_info.get("defaults")
+    explicit = defaults.get("mtp") if isinstance(defaults, Mapping) else None
+    if explicit is not None:
+        return bool(explicit)
+    return model_is_mtp_eligible(model_info)
 
 
 def _effective_mtp(
     model_info: Mapping[str, Any],
     runner: Any,
+    profile: Any,
     *,
+    embed_mode: bool = False,
     log_ineligible: bool = False,
 ) -> bool:
-    """Resolve whether MTP speculative decoding is on for this slot launch.
+    """Whether the launch drafts with MTP (ADR-0029).
 
-    spec-hw-slot-ownership §1: MTP is a MODEL property — the MODEL is the
-    single authority; there is no slot-level override anymore (SlotConfig
-    carries no ``mtp`` field; a write to that key is hard-rejected at the API
-    boundary). ``profile.mtp`` is also not consulted (§7.1a / ML-5).
-    Precedence:
-
-    * **model** decides first — an explicit ``ModelDefaults.mtp`` tri-state
-      (``True``/``False``) wins in EITHER direction over the registry
-      ``mtp`` tag (a curator who explicitly tagged the model's launcher
-      defaults knows what they're doing) — the unconditional operator
-      escape hatch.
-    * **AUTO** (``ModelDefaults.mtp`` is ``None``) enables MTP only when the
-      model carries the registry ``mtp`` tag (:func:`hal0.model_meta.
-      model_is_mtp_eligible` — no filename/GGUF-name sniffing anymore)
-      AND the resolved :class:`~hal0.runners.Runner` actually supports MTP
-      drafting (``runner.supports.mtp`` — off for the cuda/cpu llama-server
-      lanes).
-
-    This is what stops a non-MTP model / a non-drafting runner lane from
-    launching with dead ``--spec-draft-*`` flags, without any per-slot
-    wiring for the common case.
-
-    ``log_ineligible`` gates the auto-off breadcrumb to the LAUNCH path only.
-    This function sits inside the shared launch/preview scalar resolver
-    (:func:`_resolve_llama_scalars`), and the preview path is hit by every
-    dashboard ``GET /api/slots`` poll — logging unconditionally here turned a
-    once-per-launch hint into a ~0.4/s stream per polling client for every
-    AUTO slot on an untagged model.
+    The profile decides (``mtp = "auto"`` / ``"off"``); ``auto`` drafts when the
+    model has MTP heads and the launching runner supports drafting, outside
+    embedding/reranking mode.
     """
-    defaults = model_info.get("defaults")
-    model_mtp = defaults.get("mtp") if isinstance(defaults, Mapping) else None
-    if model_mtp is not None:
-        return bool(model_mtp)
-    eligible = model_is_mtp_eligible(model_info)
-    if log_ineligible and not eligible:
-        # Visible breadcrumb for the silent-auto-off case: a model tagged
-        # neither via defaults.mtp nor the registry 'mtp' tag stops
-        # speculating under auto. The fix is tagging the model (or an
-        # explicit slot/model mtp=true); this log is how an operator finds
-        # that out.
-        log.info(
-            "mtp.auto_off_model_ineligible",
-            extra={
-                "model": str(model_info.get("_model_key") or model_info.get("path") or ""),
-                "hint": "tag the model 'mtp' (or set defaults.mtp / slot mtp=true) to speculate",
-            },
-        )
-    return eligible and bool(getattr(getattr(runner, "supports", None), "mtp", False))
-
-
-def _effective_parallel(slot_cfg: Mapping[str, Any]) -> int | None:
-    """Resolve the slot's ``--parallel`` (sequence-slot) override, or None.
-
-    A slot's ``parallel`` field carries continuous-batching intent (concurrent
-    requests share the once-loaded weights instead of serializing through one
-    sequence). ``None`` / absent / <1 means "inherit the profile flags" (today
-    every seed profile pins ``--parallel 1``); a value ≥1 is emitted as a slot
-    override that beats the profile but loses to hand-authored ``extra_args``.
-    """
-    raw = slot_cfg.get("parallel")
-    if raw is None:
-        return None
-    try:
-        n = int(raw)
-    except (TypeError, ValueError):
-        return None
-    return n if n >= 1 else None
+    if str(getattr(profile, "mtp", "auto") or "auto") == "off" or embed_mode:
+        return False
+    if not model_has_mtp_heads(model_info):
+        if log_ineligible:
+            log.info(
+                "mtp.auto_off_model_ineligible",
+                extra={
+                    "model": str(model_info.get("_model_key") or model_info.get("path") or ""),
+                    "hint": "tag the model 'mtp' (or set its MTP heads fact) to draft",
+                },
+            )
+        return False
+    return bool(getattr(getattr(runner, "supports", None), "mtp", False))
 
 
 log = logging.getLogger(__name__)
@@ -1056,7 +970,7 @@ def _render_quadlet_from_plan(
             # without this, systemd records `status=143 … Failed with result
             # 'exit-code'` and parks every deliberately-stopped slot in
             # `failed`, which the slot-state probe then paints as a red ERROR
-            # (the v1.0.0 migrate-flags --stop-services shape). Declaring 143 a
+            # (a deliberate stop of every slot). Declaring 143 a
             # success makes a stop end `inactive`/`Result=success`. Restart
             # semantics are untouched: Restart=always restarts on success and
             # failure alike (never during a requested stop job), and the
@@ -1080,34 +994,21 @@ def _render_quadlet_from_plan(
 
 
 def _profile_flag_tokens(flags: str) -> list[str]:
-    """Tokenize a slot profile's flag text for the argv chain (shared screen).
+    """Tokenize a profile's flag text for the argv chain.
 
-    Used by BOTH profile-sourced segments — the divergence overlay
-    (``slot_profile``, #1636) and the unstamped-model template
-    (``slot_profile_template``, #1787) — so they can never drift on quoting or
-    on the jinja rule.
-
-    ``--jinja`` is dropped: jinja is a runner+model CAPABILITY resolved once as
-    ``effective_jinja`` and injected/suppressed through
-    ``model_defaults.extra_args``. llama-server has no ``--no-jinja`` negation,
-    so a legacy or hand-authored profile's own ``--jinja`` token would otherwise
-    permanently defeat an explicit ``defaults.jinja=false``.
+    A profile's flags are free text in an operator-editable file; malformed
+    quoting surfaces here as a controlled config error instead of a 500.
     """
     if not flags or not flags.strip():
         return []
     try:
-        tokens = shlex.split(flags)
+        return shlex.split(flags)
     except ValueError as exc:
-        # A profile's flags string is free text (operator-editable on disk) and
-        # the create/edit path has no quoting validator — unmatched quotes only
-        # surface here, where an unhandled ValueError would otherwise 500 the
-        # launch/preview. Fail with a controlled config error instead.
         raise UnprocessableEntity(
             f"slot profile flags are not valid shell text: {exc}",
             code="slot.profile_flags_malformed",
             details={"flags": flags},
         ) from exc
-    return [t for t in tokens if t != "--jinja"]
 
 
 def _llama_argv_segments(
@@ -1115,81 +1016,35 @@ def _llama_argv_segments(
     port: int,
     model_path: str,
     model_alias: str | None = None,
-    context_size: int | None = None,
-    profile_flags: str = "",
-    model_defaults: dict[str, Any] | None = None,
+    context_size: int,
+    family_flags: str = "",
+    jinja: bool = False,
     chat_template_path: str | None = None,
     mmproj: str | None = None,
+    mtp: bool = False,
+    profile_flags: str = "",
     slot_n_gpu_layers: int | None = None,
     slot_threads: int | None = None,
-    slot_parallel: int | None = None,
     slot_metrics: bool = True,
-    extra_args: str | None = None,
-    slot_profile_flags: str = "",
-    slot_profile_template_flags: str = "",
+    draft_device: str | None = None,
 ) -> list[tuple[str, list[str]]]:
-    """Build the ordered, labelled llama-server argv segments (SINGLE SOURCE).
+    """The labelled llama-server argv segments (SINGLE SOURCE, ADR-0029).
 
-    Both the launch path (:func:`_llama_launch_plan` → :func:`normalize_argv`)
-    and the preview path (:func:`_resolve_slot_argv` → :func:`resolve_argv`
-    provenance) consume THESE segments, so what an operator previews via
-    ``GET /api/slots`` / ``.../resolved`` is exactly what launches.
+    Both the launch path (:func:`_llama_launch_plan`) and the preview path
+    (:func:`_resolve_slot_argv`) consume THESE segments, so what an operator
+    previews is exactly what launches. Four layers, lowest precedence first
+    (``resolve_argv`` keeps the LAST occurrence of each flag)::
 
-    Ownership split (spec-hw-slot-ownership §2, reversing spec-flags-ownership
-    §5): the SLOT owns the physical hardware grid (NGL → ``-ngl``, THREADS →
-    ``--threads``, METRICS → ``--metrics``; ``-dev`` rides the
-    GPU-visibility path, not here) as typed fields, emitted in a TRUSTED
-    ``slot_hardware`` segment. The MODEL still owns
-    the logical, device-agnostic tune — free-form ``defaults.extra_args``
-    (``model_extra_args`` segment, still screened against the §21.7 managed-arg
-    denylist by :func:`~hal0.slots.argv.resolve_argv`). The old ``profile``
-    segment stays removed — a profile is a copy-on-stamp template, read at
-    stamp time, not at launch, whenever the slot's profile matches the model's
-    stamped provenance (``defaults.profile``).
+        base     --host --port --model --alias --ctx-size   (hal0-managed)
+        model    family quirks, --jinja, --chat-template-file, --mmproj
+                 (model facts; quirks from family_defaults.toml)
+        profile  the MTP draft bundle, then the profile's flags
+        slot     -ngl, --threads, --metrics, --spec-draft-device (placement)
 
-    Divergence overlay (#1636): when the slot's profile DIFFERS from the
-    model's provenance, ``slot_profile_flags`` carries that profile's resolved
-    flag text and is emitted as an UNTRUSTED ``slot_profile`` segment layered
-    over the model tune — the per-slot flag-divergence path that replaced the
-    retired duplicate-for-device model flow (PR #1635). The caller
-    (:func:`_resolve_llama_scalars`) computes it divergence-gated; aligned and
-    already-stamped slots pass ``""`` and launch byte-identical to the stamped
-    tune.
-
-    Unstamped-model template (#1787): copy-on-stamp only works once something
-    stamps. Auto-scan / pull / capability-apply register models with NO
-    ``defaults`` at all, so on a fresh box the model carries neither a
-    provenance nor a materialized tune, and BOTH the retired ``profile``
-    segment and the divergence overlay stay silent — an ``embedding``/``rerank``
-    slot then launches without ``--embedding`` / ``--reranking`` and serves 501s
-    for its only purpose. ``slot_profile_template_flags`` carries the slot
-    profile's flags for exactly that case: the model has no tune of its own, so
-    the profile template IS the tune until a stamp materializes it. It rides its
-    own UNTRUSTED ``slot_profile_template`` segment BELOW ``model_extra_args``
-    (a template is a floor, never an override) and the caller emits it only when
-    the model's ``defaults`` carry no ``extra_args`` — a hand-authored tune keeps
-    launching with no live profile read (golden #5).
-
-    Precedence (lowest → highest; ``resolve_argv``/``normalize_argv`` keeps the
-    LAST occurrence of each canonical flag)::
-
-        base < slot_profile_template < model_extra_args < slot_profile
-              < slot_hardware < chat_template < mmproj
-
-    The slot hardware segment sits AFTER ``model_extra_args`` and
-    ``slot_profile`` so the slot's typed ``-ngl``/``--threads`` win over any
-    collision a model tune or divergent profile smuggled in (defense in depth
-    — the model/profile flag save also hard-rejects hardware flags, spec §5).
-
-    ``profile_flags`` / ``slot_parallel`` / ``extra_args`` are accepted-and-
-    ignored (kept for call-site compat until the sunset ratchet drops the
-    plumbing).
+    The profile's own ``--spec-draft-*`` values follow the bundle and win.
+    ``resolve_argv`` screens the profile segment (managed, hardware and
+    model-fact flags refuse to launch).
     """
-    # HAL0-SUNSET: v2.0.0 — profile flags + slot parallel/extra_args lost their
-    # launch surface (spec-flags-ownership §2/§4). These params are inert; drop
-    # them (and the callers threading them) once the sunset ratchet lands.
-    del profile_flags, slot_parallel, extra_args
-
     base: list[str] = ["--host", "0.0.0.0", "--port", str(port)]
     if model_path:
         base += ["--model", model_path]
@@ -1197,69 +1052,32 @@ def _llama_argv_segments(
     # GGUF basename, which the dispatcher can't match to hal0/* virtual names).
     if model_alias:
         base += ["--alias", str(model_alias)]
-    # Slot context window (always resolved by _resolve_context_size — never let
-    # a slot silently inherit llama-server's 4096 default).
-    if context_size is not None:
-        base += ["--ctx-size", str(context_size)]
+    base += ["--ctx-size", str(context_size)]
 
-    # Model logical tune: the free-form ``defaults.extra_args``. It is
-    # caller-supplied, so it rides its own ``model_extra_args`` segment which
-    # ``resolve_argv`` screens against the managed-arg denylist
-    # (argv.UNTRUSTED_SEGMENT_LABELS) — a model whose extra_args smuggles
-    # ``--port``/``--model``/… fails loudly at launch, not silently redirected.
-    # rope_freq_base is intentionally NOT emitted (reachable via extra_args
-    # only — see ModelDefaults deprecation note). ``-ngl`` NO LONGER comes from
-    # the model (defaults.n_gpu_layers is deleted); it is a slot-owned field.
-    md_extra_tokens: list[str] = []
-    if model_defaults:
-        md_extra = model_defaults.get("extra_args")
-        if md_extra and str(md_extra).strip():
-            md_extra_tokens += shlex.split(str(md_extra))
+    model: list[str] = shlex.split(family_flags) if family_flags.strip() else []
+    if jinja:
+        model += ["--jinja"]
+    if chat_template_path:
+        model += ["--chat-template-file", chat_template_path]
+    if mmproj:
+        model += ["--mmproj", mmproj]
 
-    # Slot hardware grid (spec-hw-slot-ownership §2): the slot owns the physical
-    # knobs as typed fields — NGL → ``-ngl``, THREADS → ``--threads``. These are
-    # hal0-computed from typed SlotConfig fields, so they ride a TRUSTED segment
-    # (not screened against the managed-arg denylist). ``-ngl -1`` (all layers)
-    # is a legitimate explicit value. ``--threads`` is omitted when unset (0) so
-    # the runtime picks its own default. ``-dev`` is emitted from the device
-    # enum on the GPU-visibility path (gpu_visibility_env), not in this segment.
-    slot_hw_tokens: list[str] = []
+    profile: list[str] = shlex.split(MTP_DRAFT_BUNDLE) if mtp else []
+    profile += _profile_flag_tokens(profile_flags)
+
+    slot: list[str] = []
     if slot_n_gpu_layers is not None:
-        slot_hw_tokens += ["-ngl", str(int(slot_n_gpu_layers))]
+        slot += ["-ngl", str(int(slot_n_gpu_layers))]
     if slot_threads is not None and int(slot_threads) > 0:
-        slot_hw_tokens += ["--threads", str(int(slot_threads))]
-    # METRICS (#1810): enables llama-server's ``/metrics`` endpoint, which
-    # hal0.slots.metrics_collect.llama_metrics() scrapes for tok/s + request
-    # counts. Loopback-only and never proxied by the gateway, so on-by-default
-    # is safe; SlotConfig.metrics lets an operator turn it off.
+        slot += ["--threads", str(int(slot_threads))]
+    # METRICS (#1810): llama-server's ``/metrics`` endpoint, which
+    # hal0.slots.metrics_collect scrapes. Loopback-only, so on by default.
     if slot_metrics:
-        slot_hw_tokens += ["--metrics"]
+        slot += ["--metrics"]
+    if mtp and draft_device:
+        slot += ["--spec-draft-device", draft_device]
 
-    chat_tokens = ["--chat-template-file", chat_template_path] if chat_template_path else []
-    mmproj_tokens = ["--mmproj", mmproj] if mmproj else []
-
-    # Divergent slot-profile overlay (#1636): free-form/operator-editable, so it
-    # rides an UNTRUSTED label (managed-arg screen in resolve_argv). Sits above
-    # the model tune (the divergence wins collisions) but below slot_hardware
-    # (typed slot fields stay authoritative). The segment appears ONLY when a
-    # divergence produced flags — the aligned case keeps the exact golden #5
-    # segment shape (tests/golden_paths/test_gp05_stamped_launch_layering.py).
-    segments: list[tuple[str, list[str]]] = [("base", base)]
-    # Unstamped-model profile template (#1787), BELOW the model tune: a template
-    # is the floor a model's own defaults refine, never an override.
-    _template_tokens = _profile_flag_tokens(slot_profile_template_flags)
-    if _template_tokens:
-        segments.append(("slot_profile_template", _template_tokens))
-    segments.append(("model_extra_args", md_extra_tokens))
-    _profile_tokens = _profile_flag_tokens(slot_profile_flags)
-    if _profile_tokens:
-        segments.append(("slot_profile", _profile_tokens))
-    segments += [
-        ("slot_hardware", slot_hw_tokens),
-        ("chat_template", chat_tokens),
-        ("mmproj", mmproj_tokens),
-    ]
-    return segments
+    return [("base", base), ("model", model), ("profile", profile), ("slot", slot)]
 
 
 def _llama_launch_plan(
@@ -1267,78 +1085,57 @@ def _llama_launch_plan(
     image: str,
     port: int,
     model_path: str,
-    flags_str: str,
     devices: list[str],
     group_ids: list[str],
-    context_size: int | None = None,
-    extra_args: str | None = None,
+    context_size: int,
     model_alias: str | None = None,
+    family_flags: str = "",
+    jinja: bool = False,
     chat_template_path: str | None = None,
     mmproj: str | None = None,
-    model_defaults: dict[str, Any] | None = None,
+    mtp: bool = False,
+    profile_flags: str = "",
     slot_n_gpu_layers: int | None = None,
     slot_threads: int | None = None,
-    slot_parallel: int | None = None,
     slot_metrics: bool = True,
+    draft_device: str | None = None,
     env: dict[str, str] | None = None,
-    slot_profile_flags: str = "",
-    slot_profile_template_flags: str = "",
 ) -> RuntimeLaunchPlan:
     """Build the GPU/llama-server :class:`RuntimeLaunchPlan`.
 
-    Single source of the llama-server launch shape — used by
-    :meth:`ContainerProvider.container_spec` (the load path).  The in-container
-    argv is assembled from
-    :func:`_llama_argv_segments` and collapsed by :func:`normalize_argv`
-    (last-wins, effective-value-preserving) so cross-segment duplicates become
-    one auditable source of truth.  llama-server takes space-separated args
-    (``--host HOST``), so they go in ``command`` after the image.
+    The in-container argv is :func:`_llama_argv_segments` resolved by
+    :func:`~hal0.slots.argv.resolve_argv` (last-wins, screened), so launch
+    and preview render byte-identical commands.
     """
     segments = _llama_argv_segments(
         port=port,
         model_path=model_path,
         model_alias=model_alias,
         context_size=context_size,
-        profile_flags=flags_str,
-        model_defaults=model_defaults,
+        family_flags=family_flags,
+        jinja=jinja,
         chat_template_path=chat_template_path,
         mmproj=mmproj,
+        mtp=mtp,
+        profile_flags=profile_flags,
         slot_n_gpu_layers=slot_n_gpu_layers,
         slot_threads=slot_threads,
-        slot_parallel=slot_parallel,
         slot_metrics=slot_metrics,
-        extra_args=extra_args,
-        slot_profile_flags=slot_profile_flags,
-        slot_profile_template_flags=slot_profile_template_flags,
+        draft_device=draft_device,
     )
-    # resolve_argv over the labelled segments is argv-equivalent to
-    # normalize_argv over the flat concatenation (pinned by tests/slots/
-    # test_argv.py::test_resolve_argv_equivalent_argv_to_normalize), so launch
-    # and preview render byte-identical commands.
     command = resolve_argv(segments).argv
 
     # Model-store roots (honours [models].store / HAL0_MODEL_STORE AND
-    # [models].pull_root — the external tree registry paths point at, e.g.
-    # /mnt/ai-models). Mounting ONLY the effective store left model files under
-    # pull_root unreachable → llama exits ~90ms after start → slot flaps
-    # error↔warming (rework O25). Each root is mounted identical-path,
-    # read-only, via the shared `mount_for` factory (ML-3) — which omits the
-    # SELinux relabel on NFS (chcon ENOTSUP there) instead of unconditionally
-    # appending ``:z``. `model_mount_roots()` dedups equal/nested roots so
-    # store==pull_root renders exactly ONE Volume.
+    # [models].pull_root). Each root is mounted identical-path, read-only, via
+    # the shared `mount_for` factory; `model_mount_roots()` dedups equal/nested
+    # roots so store==pull_root renders exactly ONE Volume.
     model_stores = model_mount_roots()
 
     # Defensive reachability (rework O25 follow-up): a slot's resolved model
-    # file can live OUTSIDE every *configured* model root (store/pull_root) —
-    # e.g. a registry path under /mnt/ai-models after [models].store was moved
-    # to /var/lib/hal0/models. `assert_under_store(severity="warn")` +
-    # `doctor models HAL0-MODEL-STORE-UNMOUNTED` DETECT this but don't heal it,
-    # so the container still can't read the file → llama exits at load → the
-    # slot crashes/flaps warming↔error (live-proven on Strix Halo 150: 6 models
-    # under /mnt/ai-models flagged, store pointed at /var/lib/hal0/models).
-    # Mount the model file's own directory (identical-path, read-only) whenever
-    # no configured root already covers it, so the slot loads regardless of the
-    # store-config drift (the guard still surfaces the misconfig to fix).
+    # file can live OUTSIDE every configured model root. Mount the model file's
+    # own directory (identical-path, read-only) whenever no configured root
+    # already covers it, so the slot loads regardless of store-config drift
+    # (`doctor models HAL0-MODEL-STORE-UNMOUNTED` still surfaces the misconfig).
     if model_path:
         mp = os.path.normpath(model_path)
         if not any(_covers(root, mp) for root in model_stores):
@@ -1445,107 +1242,28 @@ def _profile_runtime_family(slot_cfg: dict[str, Any]) -> str | None:
         return None
 
 
-# Context-window resolution (chat@4096 incident, 2026-06-15).
+# Context-window resolution (ADR-0029: the profile owns it).
 #
-# A slot must NEVER fall through to llama-server's silent 4096 default. When
-# the model declares no window of its own we derive it from the registry's
-# GGUF arch max, cap dense models so an unconfigured slot can't request an
-# impractically large KV cache, and otherwise use a safe floor. Mirrors
-# hal0.hardware.recommend's installer-side policy.
-#
-# _CTX_DENSE_CAP is an UNCONFIGURED-slot guard, not a hardware fact — see
-# _dense_cap_for. A slot that pins its own [model].context_size is by
-# definition configured, and applying this blanket constant *underneath* that
-# number is what shipped every fresh install at 32768 despite three seeds
-# asking for 65536 (#1827).
+# A slot must NEVER fall through to llama-server's silent 4096 default
+# (chat@4096 incident, 2026-06-15). The profile's ``ctx_size`` is the window;
+# a profile without one gets the model's native window capped at
+# _CTX_DENSE_CAP (an unconfigured window must not request an impractically
+# large KV cache off a 262144-token arch max), else _CTX_SAFE_FALLBACK.
 _CTX_SAFE_FALLBACK = 8192
 _CTX_DENSE_CAP = 32768
-
-#: Plausibility bounds for an EXPLICIT ``defaults.context_size`` on the launch
-#: path (#1414). Mirrors the write-boundary range check so the two agree; kept
-#: as a separate launch-side guard on purpose, because the write boundary can
-#: only screen NEW writes — rows persisted before that screen existed (0, -1,
-#: 99999999 all returned HTTP 200) are deliberately left readable so they stay
-#: fixable, which means they are still on disk and still reach this function.
-#:
-#: Before the v1.0 ownership flip the damage was masked: the slot's
-#: ``[model].context_size`` won outright, so a slot with a sane value covered
-#: for a garbage model row. Now the MODEL is authoritative and a bad value goes
-#: straight to ``--ctx-size``, where -1 or 99999999 is a slot that never warms.
-#: Making the model the owner without this guard would have ENTRENCHED #1414.
-_CTX_MIN_PLAUSIBLE = 128
-_CTX_MAX_PLAUSIBLE = 2**24
+#: FLM's window when its profile names none (``providers.flm`` build_env).
+_FLM_DEFAULT_CTX = 8192
 
 
-def _model_declared_ctx(model_info: dict[str, Any]) -> int | None:
-    """The MODEL's own explicit context window (``defaults.context_size``).
-
-    This is the authoritative value under the v1.0 ownership split — an
-    operator's deliberate, model-scoped choice made in the model drawer. It is
-    NOT dense-capped: an explicit number means what it says.
-
-    An unparseable or implausible value (outside
-    ``[_CTX_MIN_PLAUSIBLE, _CTX_MAX_PLAUSIBLE]``) is treated as ABSENT, not
-    clamped — a half-applied garbage number is harder to diagnose than falling
-    through to the native window or the safe floor, and the operator's stated
-    intent is unrecoverable either way. Logged at warning so the bad row is
-    visible in ``journalctl -u hal0-api`` instead of surfacing as a slot that
-    silently never warms.
-    """
-    defaults = model_info.get("defaults")
-    if not isinstance(defaults, dict) or not defaults.get("context_size"):
-        return None
-    raw = defaults["context_size"]
-    try:
-        value = int(raw)
-    except (TypeError, ValueError):
-        log.warning(
-            "slot.context_size_unparseable",
-            extra={
-                "raw": repr(raw),
-                "hint": "model defaults.context_size is not a number; ignoring it and "
-                "falling back to the model's native window. Fix it in the model drawer.",
-            },
-        )
-        return None
-    if not (_CTX_MIN_PLAUSIBLE <= value <= _CTX_MAX_PLAUSIBLE):
-        log.warning(
-            "slot.context_size_implausible",
-            extra={
-                "value": value,
-                "min": _CTX_MIN_PLAUSIBLE,
-                "max": _CTX_MAX_PLAUSIBLE,
-                "hint": "model defaults.context_size is outside the plausible range; "
-                "ignoring it and falling back to the model's native window. Fix it in "
-                "the model drawer.",
-            },
-        )
-        return None
-    return value
-
-
-def _native_ctx(model_info: dict[str, Any]) -> int | None:
-    """The model's INTRINSIC native window (registry ``metadata.context_length``).
-
-    Read straight off the GGUF arch max at import time — still a MODEL fact, but
-    a derived one, so it only applies when nobody made an explicit choice, and it
-    is dense-capped by the caller.
+def _native_ctx(model_info: Mapping[str, Any]) -> int | None:
+    """The model's native window (registry ``metadata.context_length``).
 
     Falls back to the curated catalogue's ``context_length`` (#1617) when the
-    registry row itself carries no metadata at all. ``registry.pull._register``
-    only started stamping ``metadata.context_length`` on a completed pull as of
-    #1657/#1707 — a row created before that fix landed (e.g. the seeded brain
-    model on a box provisioned with an older build, or any curated pick that
-    predates the stamp) has an empty ``metadata`` dict forever, since nothing
-    re-runs detection on already-downloaded bytes. Without this, such a row
-    falls all the way through to :data:`_CTX_SAFE_FALLBACK` (8192) regardless
-    of how new the code is — the fix only helps FUTURE pulls, not boxes that
-    already have the file. Consulting the catalogue here means the resolver
-    self-heals on every launch, fresh install or upgrade alike, with no
-    migration step required.
+    registry row carries no metadata at all (a row registered before the pull
+    path stamped it).
     """
     md = model_info.get("metadata")
-    if isinstance(md, dict) and md.get("context_length"):
+    if isinstance(md, Mapping) and md.get("context_length"):
         try:
             return int(md["context_length"])
         except (TypeError, ValueError):
@@ -1563,202 +1281,83 @@ def _native_ctx(model_info: dict[str, Any]) -> int | None:
     return None
 
 
-def _slot_ceiling_int(slot_ceiling: Any) -> int | None:
-    """The slot's ``[model].context_size`` as an int, or None when unusable.
+def profile_context(profile: Any, model_info: Mapping[str, Any]) -> tuple[int, str]:
+    """The window a slot launches with, and where it came from.
 
-    The slot table reaches :func:`_resolve_context_size` as a raw dict straight
-    off the TOML — no schema validation between disk and here — so a
-    hand-edited ``context_size = "64k"`` used to take the launch path out with a
-    ``ValueError``. Unusable means ABSENT: the slot simply expresses no ceiling,
-    exactly like a slot that never wrote one.
-
-    Implausible means unusable too, on the same
-    ``[_CTX_MIN_PLAUSIBLE, _CTX_MAX_PLAUSIBLE]`` range the MODEL path screens
-    against (:func:`_model_declared_ctx`). This matters more now than it did
-    when the ceiling could only clamp down: under #1827 the ceiling REPLACES
-    the dense cap on the derived path, so a hand-written ``context_size =
-    99999999`` (or a row persisted before the API's
-    ``model.context_size_out_of_range`` screen existed) would hand a 262144-
-    native model the very impractically-large KV cache :data:`_CTX_DENSE_CAP`
-    exists to prevent — #1108's first-warm OOM. ``0`` and ``-1`` are screened
-    here for the same reason: they are not a ceiling of zero, they are a slot
-    that never wrote one, and passing them through to ``--ctx-size`` is a slot
-    that never warms.
+    ``(ctx, "profile")`` when the profile sets ``ctx_size``; else
+    ``(min(native, 32768), "native")``; else ``(8192, "fallback")``.
     """
-    if slot_ceiling is None:
-        return None
+    ctx_size = getattr(profile, "ctx_size", None)
+    if ctx_size:
+        return int(ctx_size), "profile"
+    native = _native_ctx(model_info)
+    if native:
+        return min(native, _CTX_DENSE_CAP), "native"
+    return _CTX_SAFE_FALLBACK, "fallback"
+
+
+def slot_effective_context(
+    slot_cfg: Mapping[str, Any],
+    model_registry: Any = None,
+) -> tuple[int | None, str | None]:
+    """``(ctx, source)`` the slot runs with, for read-only surfaces.
+
+    The ONE resolver views (``slot_view``, ``/v1/models``, the agent anchor
+    window, capacity) use, so no surface re-implements the rule. A slot whose
+    profile does not resolve yields ``(None, None)``. FLM slots report their
+    profile's window, else 8192. An FLM trio shadow (``served_by`` its anchor)
+    runs no process of its own: it reports its anchor's window.
+    """
+    if str(slot_cfg.get("device") or "") == "npu" and slot_cfg.get("type") in (
+        "transcription",
+        "embedding",
+    ):
+        extra = slot_cfg.get("extra") if isinstance(slot_cfg.get("extra"), Mapping) else {}
+        anchor = str(slot_cfg.get("served_by") or extra.get("served_by") or "flm")
+        anchor_cfg = _served_by_anchor_cfg(anchor)
+        if anchor_cfg is not None:
+            return slot_effective_context(anchor_cfg, model_registry)
     try:
-        value = int(slot_ceiling)
-    except (TypeError, ValueError):
-        log.warning(
-            "slot.context_size_unparseable_ceiling",
-            extra={
-                "raw": repr(slot_ceiling),
-                "hint": "the slot's [model].context_size is not a number; ignoring it "
-                "and letting the model's own window decide. Fix it in the slot drawer.",
-            },
-        )
+        profile = resolve_slot_profile(slot_cfg)
+    except Hal0Error:
+        return None, None
+    if str(slot_cfg.get("device") or "") == "npu":
+        ctx_size = getattr(profile, "ctx_size", None)
+        return (int(ctx_size), "profile") if ctx_size else (_FLM_DEFAULT_CTX, "fallback")
+    model_table = slot_cfg.get("model") if isinstance(slot_cfg.get("model"), Mapping) else {}
+    model_id = str(model_table.get("default") or "")
+    model_info: dict[str, Any] = {}
+    if model_registry is not None and model_id:
+        try:
+            entry = model_registry.get(model_id)
+            model_info = entry.model_dump() if hasattr(entry, "model_dump") else dict(entry)
+        except Exception:
+            model_info = {}
+    if model_id:
+        # ``Model.model_dump()`` carries no ``_model_key``; the curated
+        # backfill in :func:`_native_ctx` needs it (#1617).
+        model_info.setdefault("_model_key", model_id)
+    return profile_context(profile, model_info)
+
+
+def _served_by_anchor_cfg(name: str) -> dict[str, Any] | None:
+    """The flattened config of the slot named ``name`` when it is an anchor
+    (serves itself), else ``None``."""
+    from hal0.config import paths
+    from hal0.config.loader import _flatten_slot_toml, _read_toml
+    from hal0.slots.layout import resolve_slot_stem
+
+    try:
+        slots_dir = paths.slots_config_dir()
+        stem = resolve_slot_stem(slots_dir, name)
+        if stem is None:
+            return None
+        cfg = _flatten_slot_toml(_read_toml(slots_dir / f"{stem}.toml"), slot_name=name)
+    except Exception:
         return None
-    if not (_CTX_MIN_PLAUSIBLE <= value <= _CTX_MAX_PLAUSIBLE):
-        log.warning(
-            "slot.context_size_implausible_ceiling",
-            extra={
-                "value": value,
-                "min": _CTX_MIN_PLAUSIBLE,
-                "max": _CTX_MAX_PLAUSIBLE,
-                "hint": "the slot's [model].context_size is outside the plausible range; "
-                "ignoring it and letting the model's own window decide. Fix it in the "
-                "slot drawer.",
-            },
-        )
+    if cfg.get("device") != "npu" or cfg.get("type") in ("transcription", "embedding"):
         return None
-    return value
-
-
-def _dense_cap_for(slot_ceiling: int | None) -> int:
-    """The cap to apply to a DERIVED (native/curated) window for this slot.
-
-    :data:`_CTX_DENSE_CAP` exists so an **unconfigured** slot cannot ask for an
-    impractically large KV cache off the back of a 131072/262144-token arch max.
-    It is a blanket constant: hardware-independent, box-independent and —
-    the bug — configuration-independent.
-
-    #1827: a slot with an on-disk ``[model].context_size`` is *configured*. That
-    number was written either by the installer as a hardware budget
-    (:func:`hal0.install.orchestrate._clamp_context_size`), by a shipped seed, or
-    by an operator in the slot drawer. Applying the 32768 constant underneath it
-    meant a fresh install resolved every installer-pulled model to 32768 no
-    matter what the slot asked for — ``installer/etc-hal0/slots/{agent,brain,
-    utility}.toml`` all ask for 65536, and all three silently launched (and,
-    post-#1802, honestly advertised) 32768. That is below the bundled Hermes
-    agent's hard 64,000 floor, so ``hermes -z`` could not start on a box
-    straight out of ``install.sh``.
-
-    So: when a ceiling is on disk, it *is* the cap. The result stays bounded
-    twice over — never above the model's own native window, and never above the
-    ceiling itself (the caller's clamp) — so a slot can only reach a window that
-    BOTH the model supports and the box was explicitly configured for. With no
-    ceiling on disk nothing is configured and the blanket cap still applies,
-    which keeps :data:`hal0.slots.capacity._DEFAULT_CTX_TOKENS` (the
-    unpinned-slot budget estimate) correct as written.
-    """
-    if slot_ceiling is None:
-        return _CTX_DENSE_CAP
-    return max(_CTX_DENSE_CAP, slot_ceiling)
-
-
-def _resolve_context_size(
-    slot_ceiling: int | None,
-    model_info: dict[str, Any],
-    *,
-    slot_name: str = "",
-) -> int:
-    """The slot's effective context window — the MODEL is authoritative.
-
-    v1.0 ownership split: **the MODEL owns context size.** Before this, a slot's
-    ``[model].context_size`` won OUTRIGHT over everything, so two drawers
-    (model + slot) each exposed a "Context size" control with no indication that
-    the slot silently overrode the model. Precedence is now, highest first:
-
-    1. ``model_info["defaults"]["context_size"]`` — the model's own explicit
-       window (:func:`_model_declared_ctx`). Authoritative, NOT dense-capped —
-       but an unparseable or implausible value is ignored rather than launched
-       (#1414; see :data:`_CTX_MIN_PLAUSIBLE`).
-    2. ``model_info["metadata"]["context_length"]`` — the GGUF-derived native
-       window (:func:`_native_ctx`), dense-capped at :func:`_dense_cap_for`
-       (:data:`_CTX_DENSE_CAP`, or the slot's own configured ceiling when that
-       is higher — #1827). Still a model fact, but a *derived* one, so an
-       explicit choice outranks it — the reverse of the pre-1.0 order, which let
-       a 262144-token arch max shadow a deliberate ``defaults.context_size``.
-    3. :data:`_CTX_SAFE_FALLBACK` (8192) — never llama-server's silent 4096.
-
-    ``slot_ceiling`` (the on-disk ``[model].context_size``) is NO LONGER an
-    override. It is honored only as a **hardware CEILING**: the slot owns
-    hardware, and a slot-level window written by
-    :func:`hal0.hardware.recommend.recommend_primary_slot` /
-    :mod:`hal0.install.orchestrate` is a VRAM-budget clamp computed for this
-    box's memory (#1108). Dropping it outright would let a model's own larger
-    window reopen the first-warm OOM those clamps exist to prevent. So the
-    resolved value is capped at the slot ceiling but can never be RAISED by it:
-
-        effective = min(model_authoritative, slot_ceiling)
-
-    Net effect on a box that already has a slot-level ``context_size`` on disk:
-    where the clamp was below the model's window (the installer's case) the
-    effective context is UNCHANGED; where the slot was silently inflating a
-    model's EXPLICIT window (the dual-ownership bug) it drops to what the model
-    asked for. The one case where the ceiling can RAISE the answer is the
-    *derived* window (path 2): there the ceiling replaces the blanket dense cap
-    instead of being applied under it (:func:`_dense_cap_for`, #1827), so the
-    slot gets the window its own config asked for — still bounded by the
-    model's native window, still never above the ceiling, and never reached at
-    all on a slot with no ceiling written. Every case where the ceiling changes
-    the answer is logged, so the change is visible in ``journalctl -u hal0-api``
-    rather than silent.
-
-    Guarantees a non-None int.
-    """
-    ceiling = _slot_ceiling_int(slot_ceiling)
-
-    declared = _model_declared_ctx(model_info)
-    if declared is not None:
-        resolved, source = declared, "model.defaults.context_size"
-    else:
-        native = _native_ctx(model_info)
-        if native:
-            resolved, source = (
-                min(native, _dense_cap_for(ceiling)),
-                "model.metadata.context_length",
-            )
-        else:
-            resolved, source = _CTX_SAFE_FALLBACK, "safe_fallback"
-
-    if ceiling is None:
-        return resolved
-
-    if ceiling < resolved:
-        log.info(
-            "slot.context_size_clamped_by_slot",
-            extra={
-                "slot": slot_name,
-                "model_ctx": resolved,
-                "model_ctx_source": source,
-                "slot_ceiling": ceiling,
-                "effective": ceiling,
-                "hint": "the slot's [model].context_size is a hardware ceiling now, "
-                "not an override; raise it (or lower the model's context size) to change "
-                "the effective window",
-            },
-        )
-        return ceiling
-    if ceiling > resolved:
-        # Two different situations share this branch, and the hint has to say
-        # which one it is. On the DERIVED path the ceiling already won as far
-        # as it can (#1827) and the remaining limit is the model's real native
-        # window — telling that operator to "set the window on the model" would
-        # invite them to write a defaults.context_size ABOVE what the GGUF
-        # actually supports, which is not dense-capped.
-        derived = source == "model.metadata.context_length"
-        log.warning(
-            "slot.context_size_no_longer_overrides",
-            extra={
-                "slot": slot_name,
-                "model_ctx": resolved,
-                "model_ctx_source": source,
-                "slot_context_size": ceiling,
-                "effective": resolved,
-                "hint": (
-                    "clamped to the model's native window; this slot's larger "
-                    "[model].context_size cannot conjure context the model does not "
-                    "support."
-                    if derived
-                    else "the MODEL owns context size in 1.0; this slot's larger "
-                    "[model].context_size no longer wins. Set the window on the model to "
-                    "restore it."
-                ),
-            },
-        )
-    return resolved
+    return cfg
 
 
 def _guard_unsupported_quant(
@@ -1818,65 +1417,183 @@ def _guard_unsupported_quant(
     )
 
 
-def resolve_effective_context_size(
-    slot_ceiling: int | None,
-    model_registry: Any = None,
-    model_id: str = "",
-    *,
-    slot_name: str = "",
-) -> int:
-    """Public read-only-surface wrapper around :func:`_resolve_context_size`.
+def _refuse_unconverted(slot_cfg: Mapping[str, Any]) -> None:
+    """A slot file still carrying tuning keys was not converted; refuse it."""
+    from hal0.config.schema import slot_tuning_keys
 
-    #1788: ``ctx_max``/``context_length``/``max_context_window`` on the slots
-    dashboard, ``/v1/models`` and the SlotView aggregator used to echo the
-    raw slot-TOML ceiling verbatim — the number llama-server was launched
-    with under the pre-1.0 "slot overrides model" rule, not the number it
-    actually runs with now that the MODEL owns context size (see
-    :func:`_resolve_context_size`'s docstring for the full precedence).
-    Clients that sized requests off the advertised (stale, larger) number
-    could overrun the real window and get truncated/rejected completions.
+    found = slot_tuning_keys(slot_cfg)
+    if found:
+        pin = blocked_slot_pin(slot_cfg)
+        why = f" The conversion blocked it: {pin['reason']}." if pin else ""
+        raise UnprocessableEntity(
+            f"slot {slot_cfg.get('name')!r} still carries {', '.join(found)}, which belong "
+            f"on a profile now (ADR-0029).{why} See `hal0 profile migrate`, fix the slot "
+            "file, then run `sudo -u hal0 hal0 profile migrate --apply`",
+            code="slot.unconverted",
+            details={
+                "slot": str(slot_cfg.get("name") or ""),
+                "keys": found,
+                "blocked": pin["reason"] if pin else None,
+            },
+        )
 
-    This wrapper is the ONE place read-only surfaces look up the model
-    registry entry and hand off to the shared resolver, so the ``min()``
-    clamp itself is never re-implemented in a view/serializer — any future
-    change to the precedence rule only has to happen in
-    :func:`_resolve_context_size`.
 
-    ``model_registry`` / ``model_id`` are best-effort: a ``None`` registry,
-    an empty ``model_id``, or a registry miss (hand-staged model, not-yet
-    -imported row) all degrade to an empty ``model_info``, which resolves
-    the same way an unregistered model does at launch time — dense-capped
-    native window if metadata happens to be present, else the safe 8192
-    floor, still clamped by ``slot_ceiling`` if that is smaller. A
-    model-less slot (no ``model_id`` at all) resolves the same way: there is
-    no model fact to be authoritative, so the safe floor (or the slot
-    ceiling, if lower) is reported rather than inventing a number.
+def _has_tuning_keys(slot_cfg: Mapping[str, Any]) -> bool:
+    from hal0.config.schema import slot_tuning_keys
+
+    return bool(slot_tuning_keys(slot_cfg))
+
+
+# HAL0-SUNSET: v1.7.0 — the blocked-slot pin (this function, _pinned_segments,
+# _placement_only and their launch/preview branches) goes with the
+# profile-centric conversion (config.migrations.profile_centric_apply).
+def blocked_slot_pin(slot_cfg: Mapping[str, Any]) -> dict[str, Any] | None:
+    """The profile-centric conversion's record for a slot it blocked, while the
+    slot file is still exactly the one it blocked (else ``None``).
+
+    The record keeps the slot's pre-conversion launch argv, so a converter
+    problem never takes a working slot down: it keeps launching as it did
+    until the operator fixes it.
     """
-    model_info: dict[str, Any] = {}
-    if model_registry is not None and model_id:
+    import hashlib
+    import json
+
+    from hal0.config import paths
+    from hal0.config.migrations.profile_centric import LEDGER_FILE
+    from hal0.slots.layout import resolve_slot_stem
+
+    name = str(slot_cfg.get("name") or "")
+    if not name:
+        return None
+    try:
+        doc = json.loads((paths.var_lib() / LEDGER_FILE).read_text(encoding="utf-8") or "{}")
+        slots_dir = paths.slots_config_dir()
+        stem = resolve_slot_stem(slots_dir, name)
+        if stem is None:
+            return None
+        current = hashlib.sha256((slots_dir / f"{stem}.toml").read_bytes()).hexdigest()
+    except (OSError, ValueError):
+        return None
+    blocked = doc.get("blocked") if isinstance(doc, dict) else None
+    pin = blocked.get(f"{stem}.toml") if isinstance(blocked, dict) else None
+    if not isinstance(pin, dict) or pin.get("file") != current:
+        return None
+    return pin
+
+
+def _pinned_segments(
+    pin: Mapping[str, Any],
+    placement: Mapping[str, Any],
+    port: int,
+    model_path: str,
+    scalars: Mapping[str, Any],
+) -> list[tuple[str, list[str]]]:
+    """The launch segments for a slot the conversion blocked.
+
+    Only the recorded tune is taken from the ledger, and it is screened like a
+    profile (managed, hardware and model-fact flags refuse; the #2545 strip
+    applies). The base (host, port, model, alias), the model facts (template,
+    projector) and the placement are rebuilt from today's slot and model, so a
+    moved model file or an edited ledger can neither stale nor redirect the
+    launch. Raises ``slot.unconverted`` when the record is not a list of
+    strings.
+    """
+    from hal0.slots.argv import _split_pairs
+
+    argv = pin.get("argv")
+    if not isinstance(argv, list) or not all(isinstance(t, str) for t in argv):
+        raise UnprocessableEntity(
+            f"slot {placement.get('name')!r} was blocked by the profile-centric conversion and "
+            "its recorded pre-conversion launch is unreadable; fix the slot file, then run "
+            "`sudo -u hal0 hal0 profile migrate --apply`",
+            code="slot.unconverted",
+            details={"slot": str(placement.get("name") or ""), "blocked": pin.get("reason")},
+        )
+
+    def _value(pair: Any) -> str | None:
+        if pair.values:
+            return str(pair.values[0])
+        flag = str(pair.flag or "")
+        return flag.split("=", 1)[1] if "=" in flag else None
+
+    def _int(raw: str | None) -> int | None:
         try:
-            entry = model_registry.get(model_id)
-        except Exception:
-            entry = None
-        if entry is not None:
-            try:
-                model_info = entry.model_dump() if hasattr(entry, "model_dump") else dict(entry)
-            except Exception:
-                model_info = {}
-    # The launch path stamps ``_model_key`` onto the info dict it builds
-    # (:mod:`hal0.slots.manager`, :func:`_best_effort_model_info`);
-    # ``Model.model_dump()`` does NOT — it is not a
-    # field on :class:`hal0.registry.model.Model` and pydantic would not accept
-    # a leading-underscore one. Without this line the read-only surfaces reach
-    # :func:`_native_ctx` with no model id, so the #1617 curated backfill can
-    # never fire here and an empty-``metadata`` registry row advertises the
-    # 8192 safe floor while llama-server is launched with the real window.
-    # That is the Hermes-visible number (``/v1/models``,
-    # ``api.__init__._slot_ctx_size``, the SlotView aggregator), so the gate it
-    # refuses on was the advertised one, not the served one.
-    if model_id:
-        model_info.setdefault("_model_key", model_id)
-    return _resolve_context_size(slot_ceiling, model_info, slot_name=slot_name)
+            return int(raw) if raw is not None else None
+        except ValueError:
+            return None
+
+    ctx = ngl = threads = None
+    jinja = template = projector = no_projector = draft = False
+    tune: list[str] = []
+    for pair in _split_pairs(list(argv)):
+        canon = pair.canon
+        if canon in ("--host", "--port", "--model", "--alias", "--device", "--metrics"):
+            continue  # rebuilt from today's slot and model
+        if canon == "--ctx-size":
+            ctx = _int(_value(pair))
+        elif canon == "--jinja":
+            jinja = True
+        elif canon in ("--chat-template", "--chat-template-file"):
+            template = True
+        elif canon == "--mmproj":
+            projector = True
+        elif canon in ("--no-mmproj", "--no-mmproj-auto"):
+            no_projector = True
+        elif canon == "--mmproj-auto":
+            continue
+        elif canon == "--n-gpu-layers":
+            ngl = _int(_value(pair))
+        elif canon == "--threads":
+            threads = _int(_value(pair))
+        elif canon == "--spec-draft-device":
+            draft = True
+        else:
+            tune += [str(pair.flag), *pair.values] if pair.flag else list(pair.values)
+
+    base = ["--host", "0.0.0.0", "--port", str(port)]
+    if model_path:
+        base += ["--model", model_path]
+    if scalars.get("model_alias"):
+        base += ["--alias", str(scalars["model_alias"])]
+    base += ["--ctx-size", str(ctx or scalars["context_size"])]
+    model: list[str] = ["--jinja"] if jinja else []
+    if template and scalars.get("chat_template_path"):
+        model += ["--chat-template-file", str(scalars["chat_template_path"])]
+    if projector and not no_projector and scalars.get("mmproj"):
+        model += ["--mmproj", str(scalars["mmproj"])]
+    slot: list[str] = []
+    slot_ngl = scalars.get("slot_n_gpu_layers")
+    if slot_ngl is not None or ngl is not None:
+        slot += ["-ngl", str(int(slot_ngl if slot_ngl is not None else ngl))]
+    slot_threads = scalars.get("slot_threads") or threads
+    if slot_threads:
+        slot += ["--threads", str(int(slot_threads))]
+    if scalars.get("slot_metrics", True):
+        slot += ["--metrics"]
+    if draft and scalars.get("backend"):
+        slot += ["--spec-draft-device", mtp_draft_device(scalars["backend"])]
+    return [("base", base), ("model", model), ("profile", tune), ("slot", slot)]
+
+
+def _placement_only(slot_cfg: Mapping[str, Any]) -> dict[str, Any]:
+    """The slot without its tuning keys, on its type's seed: what a blocked
+    slot's runner image, devices and environment are resolved from."""
+    from hal0.config.schema import (
+        SLOT_TUNING_MODEL_KEYS,
+        SLOT_TUNING_SERVER_KEYS,
+        SLOT_TUNING_TOP_KEYS,
+    )
+
+    out = {k: v for k, v in slot_cfg.items() if k not in SLOT_TUNING_TOP_KEYS}
+    out.pop("defaults", None)
+    out["profile"] = TYPE_DEFAULT_PROFILE.get(str(slot_cfg.get("type") or ""), "chat")
+    if isinstance(out.get("model"), Mapping):
+        out["model"] = {k: v for k, v in out["model"].items() if k not in SLOT_TUNING_MODEL_KEYS}
+    if isinstance(out.get("server"), Mapping):
+        out["server"] = {k: v for k, v in out["server"].items() if k not in SLOT_TUNING_SERVER_KEYS}
+    if isinstance(out.get("slot"), Mapping):
+        out["slot"] = {k: v for k, v in out["slot"].items() if k not in SLOT_TUNING_TOP_KEYS}
+    return out
 
 
 def _resolve_llama_scalars(
@@ -1886,293 +1603,65 @@ def _resolve_llama_scalars(
     *,
     for_launch: bool = False,
 ) -> dict[str, Any]:
-    """Resolve every llama-server launch scalar for a slot+model+profile.
+    """Every llama-server launch scalar for a slot + model + profile.
 
     SINGLE SOURCE for both the launch path (:meth:`ContainerProvider.container_spec`)
-    and the preview path (:func:`_resolve_slot_argv`): profile flags (MTP-expanded
-    via the slot ``mtp`` override), the always-resolved context size, the
-    registry model alias, the resolved chat-template file path, the vision-gated
-    mmproj sidecar, the per-model registry ``defaults`` bundle, the slot-level
-    ``[model].n_gpu_layers`` override, and the ``[server]`` env / extra_args.
-    Returning one dict means the two paths can never drift.
+    and the preview path (:func:`_resolve_slot_argv`), so the two can never
+    drift. ADR-0029: the profile is the whole tune (flags, window, vision,
+    MTP), the model contributes facts (path, alias, chat template, mmproj,
+    jinja, MTP heads) and the slot contributes placement.
 
-    ``for_launch`` marks the real launch call (vs a status/preview render) —
-    it only gates side-effects like the MTP auto-off breadcrumb; the RESOLVED
-    VALUES are identical on both paths, preserving launch/preview parity.
+    ``for_launch`` marks the real launch call; it only gates side effects
+    (logs, the unsupported-quant guard), never the resolved values.
     """
-    # SINGLE SOURCE for "which runner's capabilities gate this launch" — the
-    # same runner backs the image resolution (:func:`_resolve_image_ref`) and
-    # the mtp/jinja capability gates below, so they can never drift onto two
-    # different runners (§7.1a / ML-5).
-    runner = _effective_runner(slot_cfg, profile, model_info)
-    # SINGLE SOURCE for "what hardware class is this launch" — the same helper
-    # ``_effective_runner`` uses, so the image and the device-node passthrough
-    # gate in ``container_spec`` can never drift onto two different hardware
-    # classes. Slot-derived; the profile contributes nothing on a real box.
+    _refuse_unconverted(slot_cfg)
+    runner = _effective_runner(slot_cfg, profile)
     effective_backend, effective_device_class = _effective_backend_and_device_class(
         slot_cfg, profile
     )
     if for_launch:
         _guard_unsupported_quant(slot_cfg, model_info)
-    effective_mtp = _effective_mtp(model_info, runner, log_ineligible=for_launch)
-    # FLAGS-own (spec-flags-ownership §2, golden #5): resolve the image WITHOUT
-    # resolving the profile's flags — the profile flag resolver
-    # (:func:`resolve_profile_flags`) is NOT consulted at launch. The model's
-    # materialized ``defaults`` is the whole tune; a profile is a copy-on-stamp
-    # template read only in the drawer, never on the launch/preview path.
     image = _resolve_image_ref(slot_cfg, profile, model_info=model_info)
-    # ``flags_str`` retained (empty) for dict-shape/caller compat; profile flags
-    # no longer enter the argv chain (see _llama_argv_segments).
-    flags_str = ""
 
-    # Divergent slot-profile overlay (#1636): a slot whose ``profile`` differs
-    # from the model's stamped provenance (``defaults.profile``) launches with
-    # that profile's flags layered over the model tune (the ``slot_profile``
-    # segment) — the per-slot flag-divergence path replacing the retired
-    # duplicate-for-device model flow. Gated three ways so the common case
-    # stays byte-identical to golden #5:
-    #   * the slot names a profile AND the model records a provenance — a
-    #     provenance-less (hand-authored) tune has made no profile choice, so
-    #     there is nothing to diverge from;
-    #   * the names differ;
-    #   * the resolved profile IS the slot's named one — a missing-profile
-    #     fallback to the backend base (``_resolve_profile_or_base``) must not
-    #     inject flags the operator never picked;
-    #   * the profile actually FITS the slot (``profile_fits_slot`` — same
-    #     supported_slot_types + device_class/backend predicate the drawer's
-    #     cross-device picker and Q1 adoption already gate on). A profile
-    #     assigned out-of-band (API, hand-edited TOML) that names a wrong-type
-    #     profile (e.g. ``embedding``/``kokoro`` on an LLM slot) must not
-    #     inject mode-changing flags (``--embedding``, ``--model_path``) that
-    #     were inert before this overlay existed.
-    # No MTP expansion here (``resolve_profile_flags`` with no override): the
-    # ``--spec-draft-*`` bundle stays model-driven (see _effective_mtp).
-    def _profile_flags_text(prof: Any) -> str:
-        """``resolve_profile_flags`` for a profile that may be a plain Mapping.
+    profile_flags = str(getattr(profile, "flags", "") or "")
+    profile_tokens = set(_profile_flag_tokens(profile_flags))
+    embed_mode = bool(profile_tokens & {"--embedding", "--reranking"})
 
-        ``_resolve_profile_or_base`` normally hands back a validated
-        ``ProfileConfig``, but the seam also accepts a raw profile Mapping (a
-        registry row read straight off disk, and the shape callers construct in
-        tests). ``resolve_profile_flags`` reaches for ``profile.flags`` and would
-        ``AttributeError`` on the Mapping — mirroring the ``getattr(profile,
-        "name", None)`` tolerance already used for the resolved-name check.
-        """
-        if isinstance(prof, Mapping):
-            return str(prof.get("flags") or "").strip()
-        return str(resolve_profile_flags(prof) or "").strip()
-
-    slot_profile_flags = ""
-    _cfg_profile = str(slot_cfg.get("profile") or "")
-    _mi_defaults = model_info.get("defaults")
-    _provenance = _mi_defaults.get("profile") if isinstance(_mi_defaults, Mapping) else None
-    _resolved_name = getattr(profile, "name", None)
-    if (
-        _cfg_profile
-        and isinstance(_provenance, str)
-        and _provenance
-        and _cfg_profile != _provenance
-        and (_resolved_name is None or _resolved_name == _cfg_profile)
-    ):
-        from hal0.slots.profile_adopt import profile_fits_slot
-
-        if profile_fits_slot(_cfg_profile, slot_cfg):
-            slot_profile_flags = _profile_flags_text(profile)
-        if slot_profile_flags and for_launch:
-            log.info(
-                "slot.profile_divergence_applied",
-                extra={
-                    "slot": str(slot_cfg.get("name") or ""),
-                    "profile": _cfg_profile,
-                    "model_profile": _provenance,
-                },
-            )
-
-    # Unstamped-model profile template (#1787). Copy-on-stamp presumes SOMETHING
-    # stamped: the model's materialized ``defaults`` is the whole tune, and the
-    # profile is only read in the drawer. But auto-scan, pull and
-    # capability-apply all register models with no ``defaults`` at all, so on a
-    # fresh box neither the (retired) profile segment nor the divergence overlay
-    # above contributes anything — an ``embedding``/``rerank`` slot launches
-    # without ``--embedding``/``--reranking`` and every /v1/embeddings and
-    # /v1/rerank call 501s while the slot reports ready.
-    #
-    # For exactly that case the slot's profile supplies the tune as a template
-    # (``slot_profile_template``, layered BELOW the model tune). Gated so a
-    # stamped or hand-tuned model is untouched:
-    #   * the model records NO tune text (``defaults.extra_args`` empty/absent)
-    #     — a hand-authored tune is the operator's word and still launches with
-    #     no live profile read (golden #5 §8);
-    #   * the model records NO profile provenance — a stamped model is already
-    #     materialized, and its divergence case is the overlay above;
-    #   * the slot NAMES a profile and it is the one that resolved — a
-    #     missing-profile fallback to the backend base must not inject flags the
-    #     operator never picked (same rule as the overlay);
-    #   * the profile FITS the slot (``profile_fits_slot``) — a wrong-type
-    #     profile must not inject mode-changing flags.
-    slot_profile_template_flags = ""
-    _md_extra = _mi_defaults.get("extra_args") if isinstance(_mi_defaults, Mapping) else None
-    _has_model_tune = bool(_md_extra and str(_md_extra).strip())
-    if (
-        _cfg_profile
-        and not _has_model_tune
-        and not (isinstance(_provenance, str) and _provenance)
-        and (_resolved_name is None or _resolved_name == _cfg_profile)
-    ):
-        from hal0.slots.profile_adopt import profile_fits_slot
-
-        if profile_fits_slot(_cfg_profile, slot_cfg):
-            slot_profile_template_flags = _profile_flags_text(profile)
-        if slot_profile_template_flags and for_launch:
-            log.info(
-                "slot.profile_template_applied",
-                extra={
-                    "slot": str(slot_cfg.get("name") or ""),
-                    "profile": _cfg_profile,
-                    "model": str(model_info.get("_model_key") or ""),
-                    "hint": (
-                        "model carries no stamped tune; launching with the slot "
-                        "profile's flags as the template (#1787)"
-                    ),
-                },
-            )
-
-    if for_launch:
-        workers = slot_cfg.get("workers")
-        if workers is not None and int(workers or 1) != 1:
-            log.warning(
-                "slot.workers_deprecated_inert",
-                extra={
-                    "slot": str(slot_cfg.get("name") or ""),
-                    "workers": workers,
-                    "hint": "the 'workers' field is inert (never emitted to argv); "
-                    "use the 'parallel' field for continuous batching",
-                },
-            )
-
-    model_table = slot_cfg.get("model") or {}
-    if not isinstance(model_table, dict):
-        model_table = {}
-    # MODEL-authoritative context window; the slot's on-disk [model].context_size
-    # is a hardware ceiling only, never an override (see _resolve_context_size).
-    context_size = _resolve_context_size(
-        model_table.get("context_size"),
-        model_info,
-        slot_name=str(slot_cfg.get("name") or ""),
-    )
+    context_size, _ctx_source = profile_context(profile, model_info)
 
     server_table = slot_cfg.get("server") or {}
-    if not isinstance(server_table, dict):
-        server_table = {}
-    extra_args = server_table.get("extra_args")
-    server_env = server_table.get("env")
+    server_env = server_table.get("env") if isinstance(server_table, dict) else None
     if not isinstance(server_env, dict):
         server_env = None
 
+    model_table = slot_cfg.get("model") if isinstance(slot_cfg.get("model"), dict) else {}
     # Registry model id → llama-server --alias so the container advertises the
     # hal0 id (not the raw GGUF basename) for dispatcher matching.
     model_alias = model_info.get("_model_key") or model_table.get("default") or None
 
-    # Resolve chat template: slot override > model defaults.chat_template > None.
-    # None/'auto' = GGUF-embedded template (no --chat-template-file flag).
-    tmpl_id = resolve_chat_template(slot_cfg, model_info)
+    tmpl_id = resolve_chat_template(model_info)
     chat_template_path = (
         str(Path(model_store_root()) / "chat-templates" / f"{tmpl_id}.jinja") if tmpl_id else None
     )
 
-    defaults = model_info.get("defaults")
-    model_defaults = dict(defaults) if isinstance(defaults, dict) else None
-
-    # Vision projector sidecar (spec-hw-slot-ownership §1): the MODEL is the
-    # single authority now via the tri-state ``ModelDefaults.vision`` (the
-    # former per-slot ``vision`` toggle (#901) is gone — SlotConfig carries
-    # no such field; a write to that key is hard-rejected at the API
-    # boundary). None/True = AUTO/affirm — mmproj loads whenever the model
-    # carries one; False force-suppresses it even when present (e.g. to save
-    # the ~0.9 GB resident projector on a memory-tight host).
+    defaults = model_info.get("defaults") if isinstance(model_info.get("defaults"), Mapping) else {}
+    # The projector follows the model's mmproj and the profile's vision.
     mmproj = model_info.get("mmproj")
-    model_vision = defaults.get("vision") if isinstance(defaults, dict) else None
-    if model_vision is False:
+    if str(getattr(profile, "vision", "auto") or "auto") == "off":
         mmproj = None
 
-    # Family-architecture overrides (e.g. gemma → f16 KV): the middle layer
-    # between the profile's generic flags and the slot's own [model].defaults.
-    # Prepended INSIDE defaults.extra_args (the model_extra_args segment) so a
-    # per-slot extra_args still wins over the family default (last-wins). §7.1a /
-    # ML-5:
-    # re-keyed off the registry's authoritative Model.architecture first
-    # (model_family/family_flags fall back to the filename/id token scan
-    # only when architecture is unset — see hal0.config.schema.model_family).
-    fam = family_flags(
-        model_info.get("_model_key"),
-        model_table.get("default"),
-        model_info.get("path"),
-        architecture=model_info.get("architecture"),
-    )
-    if fam:
-        if model_defaults is None:
-            model_defaults = {}
-        existing = model_defaults.get("extra_args") or ""
-        model_defaults["extra_args"] = f"{fam} {existing}".strip()
-
-    # --jinja capability injection (§7.1a / ML-5): jinja is a RUNNER
-    # capability, not a profile tune anymore (seed profiles no longer carry
-    # --jinja in their flags — there is no --no-jinja negation, so this must
-    # be injected conditionally, never removed post-hoc). Default true for
-    # a runner that supports it, suppressible per-model via
-    # defaults.jinja=false; appended to defaults.extra_args (the
-    # model_extra_args segment), so a hand-authored extra_args flag later in
-    # that string still wins (last-wins).
-    #
-    # Never injected for an --embedding/--reranking model: jinja chat-
-    # template rendering is meaningless there (llama-server's --jinja is a
-    # chat-completions feature). FLAGS-own: the mode marker now rides the
-    # model's materialized tune (``defaults.extra_args``, family-merged above),
-    # NOT a live profile flag string — so read it from there.
-    mode_tune = (model_defaults or {}).get("extra_args") or ""
-    mode_tokens = set(shlex.split(mode_tune)) if mode_tune.strip() else set()
-    is_embed_or_rerank_mode = bool(mode_tokens & {"--embedding", "--reranking"})
-    model_jinja = defaults.get("jinja") if isinstance(defaults, dict) else None
-    effective_jinja = (
+    # --jinja: a runner capability, suppressible per model file
+    # (``defaults.jinja = false``); meaningless in embedding/reranking mode.
+    jinja = (
         bool(getattr(runner.supports, "jinja", False))
-        and model_jinja is not False
-        and not is_embed_or_rerank_mode
+        and defaults.get("jinja") is not False
+        and not embed_mode
     )
-    if effective_jinja:
-        if model_defaults is None:
-            model_defaults = {}
-        existing = model_defaults.get("extra_args") or ""
-        model_defaults["extra_args"] = f"{existing} --jinja".strip()
+    mtp = _effective_mtp(
+        model_info, runner, profile, embed_mode=embed_mode, log_ineligible=for_launch
+    )
 
-    # MTP draft-speculation bundle (§7.1a / ML-5, FLAGS-own): MTP is a MODEL
-    # capability (``defaults.mtp`` / the registry ``mtp`` tag) gated by the
-    # launching runner — the profile no longer carries it. Previously the
-    # ``--spec-draft-*`` bundle was appended inside ``resolve_profile_flags``
-    # (the now-severed profile-flag path); inject it here instead, computed
-    # from the model-resolved ``effective_mtp`` + the backend's draft device.
-    # PREPENDED so a model's own ``defaults.extra_args`` spec-draft overrides
-    # still win (last-wins). Draft device tracks the profile backend (device
-    # axis, unchanged). Never for an embed/rerank mode (no chat drafting).
-    if effective_mtp and not is_embed_or_rerank_mode:
-        bundle = build_mtp_flag_bundle(getattr(profile, "backend", None))
-        if model_defaults is None:
-            model_defaults = {}
-        existing = model_defaults.get("extra_args") or ""
-        model_defaults["extra_args"] = f"{bundle} {existing}".strip()
-
-    # Slot hardware grid (spec-hw-slot-ownership §2): NGL + THREADS are now
-    # authoritative slot-TOP-LEVEL typed fields (SlotConfig.n_gpu_layers /
-    # .threads), NOT the sunset nested [model].n_gpu_layers. The emission lane
-    # (_llama_argv_segments' slot_hardware segment) renders -ngl / --threads.
-    slot_n_gpu_layers = slot_cfg.get("n_gpu_layers")
-    slot_threads = slot_cfg.get("threads")
-    # METRICS (#1810, spec-hw-slot-ownership §2/§4): typed slot field, default
-    # on. ``slot_cfg`` may be a hand-built dict/pre-migration TOML predating
-    # the field, so default to True (not to a falsy .get() miss) when absent.
     slot_metrics_raw = slot_cfg.get("metrics")
-    slot_metrics = True if slot_metrics_raw is None else bool(slot_metrics_raw)
-
-    # Multi-GPU pinning (SlotConfig.gpu_index): affects env/devices only —
-    # never argv — so launch/preview argv parity is untouched.
     gpu_index = slot_cfg.get("gpu_index")
     try:
         gpu_index = int(gpu_index) if gpu_index is not None else None
@@ -2181,41 +1670,58 @@ def _resolve_llama_scalars(
     if gpu_index is not None and gpu_index < 0:
         gpu_index = None
 
+    # Family quirks (ADR-0029 model layer): keyed by the model's architecture,
+    # else its id/path. ``family_defaults.toml`` ships empty today.
+    quirks = _family_flags(
+        str(model_info.get("_model_key") or ""),
+        str(model_info.get("path") or ""),
+        architecture=model_info.get("architecture"),
+    )
+
     return {
         "image": str(image),
-        "flags_str": str(flags_str),
-        "slot_profile_flags": str(slot_profile_flags),
-        "slot_profile_template_flags": str(slot_profile_template_flags),
+        "profile_flags": profile_flags,
+        "family_flags": quirks,
         "context_size": context_size,
-        "extra_args": extra_args,
         "server_env": server_env,
         "model_alias": model_alias,
+        "jinja": jinja,
         "chat_template_path": chat_template_path,
         "mmproj": str(mmproj) if mmproj else None,
-        "model_defaults": model_defaults,
-        # Slot-owned hardware grid (spec-hw-slot-ownership §2): NGL + THREADS
-        # reach the argv chain via _llama_argv_segments' slot_hardware segment.
-        "slot_n_gpu_layers": slot_n_gpu_layers,
-        "slot_threads": slot_threads,
-        "slot_metrics": slot_metrics,
-        # slot_parallel stays inert (spec-flags-ownership §2 — sunset).
-        "slot_parallel": None,
-        # HARDWARE CLASS + GPU-vendor discriminator (spec-hw-slot-ownership §2):
-        # derived from the SLOT's ``device`` enum via the one shared helper, NOT
-        # read off the profile. A profile is a model-tuning bundle and selects no
-        # hardware; before this, a ``cpu-chat`` profile with device_class unset
-        # still fell through ``or "gpu"`` and requested /dev/kfd + /dev/dri on a
-        # ``device="cpu"`` slot. The ``or "gpu"`` floor is retained ONLY for a
-        # slot_cfg that declares no device at all (hand-built dict / pre-pivot
-        # TOML) so an old GPU slot is never stranded on CPU.
+        "mtp": mtp,
+        "draft_device": mtp_draft_device(effective_backend) if mtp else None,
+        "slot_n_gpu_layers": slot_cfg.get("n_gpu_layers"),
+        "slot_threads": slot_cfg.get("threads"),
+        "slot_metrics": True if slot_metrics_raw is None else bool(slot_metrics_raw),
+        # Hardware class + GPU-vendor discriminator, derived from the SLOT's
+        # ``device`` enum (a profile selects no hardware). The ``or "gpu"``
+        # floor is only for a slot dict that declares no device at all.
         "device_class": str(effective_device_class or "gpu"),
         "backend": effective_backend,
-        # Back-compat mirror of ``backend`` under its former name; some callers
-        # (and the ``is_nvidia_gpu_device`` parameter) still say "profile".
-        "profile_backend": effective_backend,
         "device": str(slot_cfg.get("device") or ""),
         "gpu_index": gpu_index,
     }
+
+
+def _segments_from_scalars(
+    port: int, model_path: str, sc: Mapping[str, Any]
+) -> list[tuple[str, list[str]]]:
+    return _llama_argv_segments(
+        port=port,
+        model_path=model_path,
+        model_alias=sc["model_alias"],
+        context_size=sc["context_size"],
+        family_flags=sc["family_flags"],
+        jinja=sc["jinja"],
+        chat_template_path=sc["chat_template_path"],
+        mmproj=sc["mmproj"],
+        mtp=sc["mtp"],
+        profile_flags=sc["profile_flags"],
+        slot_n_gpu_layers=sc["slot_n_gpu_layers"],
+        slot_threads=sc["slot_threads"],
+        slot_metrics=sc["slot_metrics"],
+        draft_device=sc["draft_device"],
+    )
 
 
 class ContainerProvider(Provider):
@@ -2269,10 +1775,10 @@ class ContainerProvider(Provider):
 
         This is the load path for GPU slots: :meth:`load_sync` resolves the
         provider, calls ``container_spec``, and hands the plan to the single
-        renderer.  The plan is complete — registry alias, model-registry
-        ``defaults``, slot ``context_size``, chat-template, mmproj,
-        ``[server].env``/``extra_args``, the read-only model-store mount, and
-        the health-check override are all included, so what loads matches what
+        renderer.  The plan is complete — registry alias, the profile's window
+        and flags, the model's chat-template and mmproj, the slot's placement
+        and ``[server].env``, the read-only model-store mount, and the
+        health-check override are all included, so what loads matches what
         the plan describes (no GPU-special argv assembly elsewhere).
 
         GPU passthrough branches by VENDOR, decided from the SLOT's declared
@@ -2291,8 +1797,19 @@ class ContainerProvider(Provider):
           existence filter and no GID ``--group-add`` (the CDI spec injects
           nodes + permissions itself).
         """
-        profile_name = slot_cfg.get("profile") or ""
-        profile = _resolve_profile_or_base(profile_name, slot_cfg)
+        # A slot the profile-centric conversion blocked keeps launching with
+        # its pre-conversion argv while its file is unchanged (ADR-0029 §7).
+        pin = blocked_slot_pin(slot_cfg) if _has_tuning_keys(slot_cfg) else None
+        if pin is not None and pin.get("argv") is None:
+            pin = None
+        if pin is not None:
+            slot_cfg = _placement_only(slot_cfg)
+            log.warning(
+                "slot.launch_pinned_pre_conversion slot=%s reason=%s",
+                slot_cfg.get("name"),
+                pin.get("reason"),
+            )
+        profile = resolve_slot_profile(slot_cfg)
         # for_launch: this is the real container-spec build — side-effect logs
         # (MTP auto-off breadcrumb) fire here, never on preview/status renders.
         scalars = _resolve_llama_scalars(slot_cfg, model_info, profile, for_launch=True)
@@ -2325,27 +1842,30 @@ class ContainerProvider(Provider):
         server_env = scalars["server_env"] or {}
         merged_env = {**vis_env, **server_env}
 
-        return _llama_launch_plan(
+        plan = _llama_launch_plan(
             image=scalars["image"],
             port=port,
             model_path=model_path,
-            flags_str=scalars["flags_str"],
             devices=devices,
             group_ids=group_ids,
             context_size=scalars["context_size"],
-            extra_args=scalars["extra_args"],
             model_alias=scalars["model_alias"],
+            family_flags=scalars["family_flags"],
+            jinja=scalars["jinja"],
             chat_template_path=scalars["chat_template_path"],
             mmproj=scalars["mmproj"],
-            model_defaults=scalars["model_defaults"],
+            mtp=scalars["mtp"],
+            profile_flags=scalars["profile_flags"],
             slot_n_gpu_layers=scalars["slot_n_gpu_layers"],
             slot_threads=scalars["slot_threads"],
-            slot_parallel=scalars["slot_parallel"],
             slot_metrics=scalars["slot_metrics"],
+            draft_device=scalars["draft_device"],
             env=merged_env or None,
-            slot_profile_flags=scalars["slot_profile_flags"],
-            slot_profile_template_flags=scalars["slot_profile_template_flags"],
         )
+        if pin is not None:
+            pinned = _pinned_segments(pin, slot_cfg, port, model_path, scalars)
+            return dataclasses.replace(plan, command=resolve_argv(pinned).argv)
+        return plan
 
     # ── ContainerProvider-specific control plane ──────────────────────────────
 
@@ -2739,8 +2259,8 @@ class ContainerProvider(Provider):
 
         This is the command portion passed to the container image, not the
         podman/systemd preamble. It goes through the same provider plan path as
-        ``load_sync`` so derived context size, profile flags, model alias, and
-        slot ``[server].extra_args`` match what a restart would render now.
+        ``load_sync`` so the window, profile flags, model alias and slot
+        placement match what a restart would render now.
         """
         try:
             provider = _spec_provider_for(slot_cfg) or self
@@ -2887,7 +2407,7 @@ class ContainerProvider(Provider):
                 # `SuccessExitStatus=143` parks it in `failed` with a plain
                 # SIGTERM exit. The service was ASKED to die and did so
                 # cleanly — reporting it as a failure painted every slot
-                # stopped by `migrate-flags --stop-services` (or a bare
+                # stopped deliberately (a bare
                 # systemctl stop) as a red ERROR on a healthy box.
                 return ""
             if result == "start-limit-hit":
@@ -3266,8 +2786,8 @@ def resolved_command_for_slot(
       a) it requires root to read GIDs (``resolve_gpu_group_ids``), and
       b) it is not useful for debugging inference behaviour.
 
-    Returns ``None`` when the slot has no profile (not a container slot)
-    or the profile lookup fails.
+    Returns ``None`` when the slot cannot launch (its named profile is
+    missing, or the slot is unconverted).
     """
     resolved = _resolve_slot_argv(slot_cfg, model_path)
     if resolved is None:
@@ -3331,20 +2851,45 @@ def _resolve_preview_bundle(
     identically — there is no second call site to silently drift out of
     parity.
 
-    Returns ``None`` for a slot with no profile, or on ANY resolution
-    failure — best-effort, fail-open, the contract every caller already
-    relies on.
+    Returns ``None`` on ANY resolution failure (a missing profile, an
+    unconverted slot) — best-effort, fail-open, the contract every caller
+    already relies on.
     """
-    profile_name = str(slot_cfg.get("profile") or "")
-    if not profile_name:
-        return None
     try:
-        profile = _resolve_profile_or_base(profile_name, slot_cfg)
+        profile = resolve_slot_profile(slot_cfg)
         model_info = _best_effort_model_info(slot_cfg, model_path)
         scalars = _resolve_llama_scalars(slot_cfg, model_info, profile)
     except Exception:
         return None
     return model_info, scalars
+
+
+def strict_slot_argv(slot_cfg: dict[str, Any]) -> ResolvedArgv:
+    """The argv a llama slot launches with, raising on any failure.
+
+    The profile-centric conversion verifies with this, not the fail-open
+    preview: a registry or catalog error must abort (and roll back) the run,
+    never pass for an argv mismatch. Only a model with no registry row falls
+    back, exactly as the launch does, to ``--model <model id>``.
+    """
+    from hal0.registry.store import ModelNotFound, ModelRegistry
+
+    profile = resolve_slot_profile(slot_cfg)
+    model_table = slot_cfg.get("model") if isinstance(slot_cfg.get("model"), dict) else {}
+    model_id = str(model_table.get("default") or "")
+    model_info: dict[str, Any] = {}
+    if model_id:
+        model_info["_model_key"] = model_id
+        try:
+            model = ModelRegistry().get(model_id)
+        except ModelNotFound:
+            model = None
+        if model is not None:
+            model_info.update(model.model_dump())
+        model_info["path"] = str(model_info.get("path") or model_id)
+    scalars = _resolve_llama_scalars(slot_cfg, model_info, profile)
+    port = int(slot_cfg.get("port") or slot_cfg.get("slot", {}).get("port") or 0)
+    return resolve_argv(_segments_from_scalars(port, str(model_info.get("path") or ""), scalars))
 
 
 def _resolve_slot_argv(
@@ -3354,8 +2899,8 @@ def _resolve_slot_argv(
     """Build the labelled argv segments for a slot and resolve them.
 
     Returns ``(image, ResolvedArgv)`` — the deduped flag portion (image
-    excluded) plus per-flag provenance — or ``None`` when the slot has no
-    profile / the profile lookup fails. Consumes the SAME
+    excluded) plus per-flag provenance — or ``None`` when the slot cannot
+    launch (a missing profile, an unconverted slot). Consumes the SAME
     :func:`_llama_argv_segments` builder and :func:`_resolve_llama_scalars`
     resolver (via :func:`_resolve_preview_bundle`) the launch path uses, so
     the previewed argv (including the mtp override, model-registry defaults,
@@ -3363,6 +2908,21 @@ def _resolve_slot_argv(
     ctx-size) is byte-identical to what :meth:`ContainerProvider.container_spec`
     would launch.
     """
+    pin = blocked_slot_pin(slot_cfg) if _has_tuning_keys(slot_cfg) else None
+    if pin is not None and pin.get("argv") is not None:
+        # A slot the conversion blocked launches its pre-conversion tune, on
+        # today's base and placement — exactly as container_spec builds it.
+        placement = _placement_only(slot_cfg)
+        placed = _resolve_preview_bundle(placement, model_path)
+        if placed is None:
+            return None
+        info, sc = placed
+        port = int(placement.get("port") or placement.get("slot", {}).get("port") or 0)
+        try:
+            segments = _pinned_segments(pin, placement, port, str(info.get("path") or ""), sc)
+            return str(sc["image"]), resolve_argv(segments)
+        except Hal0Error:
+            return None
     resolved = _resolve_preview_bundle(slot_cfg, model_path)
     if resolved is None:
         return None
@@ -3371,23 +2931,7 @@ def _resolve_slot_argv(
     # port: may be at top-level or nested under [slot]
     port = int(slot_cfg.get("port") or slot_cfg.get("slot", {}).get("port") or 0)
 
-    segments = _llama_argv_segments(
-        port=port,
-        model_path=str(model_info.get("path") or ""),
-        model_alias=scalars["model_alias"],
-        context_size=scalars["context_size"],
-        profile_flags=scalars["flags_str"],
-        model_defaults=scalars["model_defaults"],
-        chat_template_path=scalars["chat_template_path"],
-        mmproj=scalars["mmproj"],
-        slot_n_gpu_layers=scalars["slot_n_gpu_layers"],
-        slot_threads=scalars["slot_threads"],
-        slot_parallel=scalars["slot_parallel"],
-        slot_metrics=scalars["slot_metrics"],
-        extra_args=scalars["extra_args"],
-        slot_profile_flags=scalars["slot_profile_flags"],
-        slot_profile_template_flags=scalars["slot_profile_template_flags"],
-    )
+    segments = _segments_from_scalars(port, str(model_info.get("path") or ""), scalars)
     return str(scalars["image"]), resolve_argv(segments)
 
 
@@ -3398,11 +2942,11 @@ def resolved_argv_detail_for_slot(
     """Structured resolution for the dashboard's "resolved command" drawer.
 
     Returns ``{"argv", "provenance", "removed"}`` where ``provenance`` lists each
-    surviving flag with the segment that set its final value (``base`` /
-    ``model_extra_args`` / ``slot_hardware`` / ``chat_template`` / ``mmproj``) —
+    surviving flag with the layer that set its final value (``base`` /
+    ``model`` / ``profile`` / ``slot``) —
     so an operator can see exactly which
     source won each flag and how many duplicates were collapsed. The UI renders
-    these labels generically. ``None`` for a slot with no profile.
+    these labels generically. ``None`` for a slot that cannot launch.
     """
     resolved = _resolve_slot_argv(slot_cfg, model_path)
     if resolved is None:

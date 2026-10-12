@@ -130,11 +130,54 @@ def test_generate_from_model_id_chat_gpu_clones_chat_seed(
     assert result.profile["name"] == "qwen3-4b-q4_k_m"
     body = result.profile["profile"]
     assert body["cloned_from"] == "chat"
-    assert body.get("device_class") is None  # seed "chat" is device-agnostic; excluded when None
-    assert body["quant"] == "Q4_K_M"
+    # ADR-0029: a profile is a tune, not a model description — the quant lives on
+    # the model row, and the retired hint fields never reach the draft.
+    assert not {"quant", "device_class", "backend"} & set(body)
+    assert body["vision"] == "auto"
+    assert body["mtp"] == "auto"
     assert "Qwen3 4B" in body["intent"]
     assert "registry:qwen3-4b-q4_k_m" in result.sources
     assert result.warnings == ()
+
+
+def test_generate_with_model_defaults_set_uses_only_the_native_window(
+    tmp_hal0_home: str, rocm_nodes: None
+) -> None:
+    """ADR-0029: ``Model.defaults`` holds file facts (chat_template, mtp, ...),
+    never a window. A row with defaults set must not raise, and the draft's
+    context comes from the file's native ``metadata.context_length`` or nothing."""
+    import asyncio
+
+    reg = ModelRegistry(registry_dir=tmp_hal0_home + "/registry")
+    reg.add(
+        Model(
+            id="with-defaults",
+            path="/models/wd.gguf",
+            capabilities=["chat"],
+            defaults=ModelDefaults(chat_template="chatml", mtp=True),
+            metadata={"context_length": 16384},
+        )
+    )
+    reg.add(
+        Model(
+            id="defaults-no-window",
+            path="/models/dnw.gguf",
+            capabilities=["chat"],
+            defaults=ModelDefaults(chat_template="chatml", mtp=True),
+        )
+    )
+
+    def draft(model_id: str):
+        return asyncio.run(
+            generate_draft_profile(
+                model_id=model_id, exported_at=_EXPORTED_AT, hw=_hw_rocm(), registry=reg
+            )
+        )
+
+    assert "16K ctx" in draft("with-defaults").profile["profile"]["intent"]
+    bare = draft("defaults-no-window").profile["profile"]
+    assert "ctx" not in bare["intent"]
+    assert not {"quant", "device_class", "backend"} & set(bare)
 
 
 def test_generate_from_model_id_not_found_raises(tmp_hal0_home: str) -> None:
@@ -153,53 +196,10 @@ def test_generate_from_model_id_not_found_raises(tmp_hal0_home: str) -> None:
         )
 
 
-def test_generate_moe_architecture_upgrades_to_moe_seed(
+def test_generate_moe_architecture_clones_the_generic_chat_seed(
     tmp_hal0_home: str, rocm_nodes: None
 ) -> None:
-    reg = ModelRegistry(registry_dir=tmp_hal0_home + "/registry")
-    reg.add(
-        Model(
-            id="chadrock-moe",
-            path="/models/chadrock.gguf",
-            capabilities=["chat"],
-            architecture="qwen3next",  # in hardware.recommend._MOE_ARCHITECTURES
-        )
-    )
-
-    import asyncio
-
-    result = asyncio.run(
-        generate_draft_profile(
-            model_id="chadrock-moe",
-            exported_at=_EXPORTED_AT,
-            hw=_hw_rocm(),
-            registry=reg,
-        )
-    )
-
-    assert result.profile["profile"]["cloned_from"] == "moe"
-
-
-def test_generate_moe_falls_back_to_chat_when_moe_was_deleted(
-    tmp_hal0_home: str, rocm_nodes: None
-) -> None:
-    """A DELETED demoted profile must degrade, not 500.
-
-    "moe" is an ordinary custom profile since the demotion, so deleting it is a
-    first-class operator action. The MoE upgrade above still names it, and
-    ProfileCatalog.resolve rightly refuses to resurrect a deleted entry — so the
-    draft path has to absorb the NotFound and fall back to "chat" with a
-    warning, which is the contract the pre-demotion seed-membership guard had.
-    """
-    import asyncio
-    from pathlib import Path as _Path
-
-    # A migrated catalog with no "moe": the marker stops the demotion from
-    # re-injecting it, and the file existing stops resolve from materializing it.
-    etc = _Path(tmp_hal0_home) / "etc" / "hal0"
-    etc.mkdir(parents=True, exist_ok=True)
-    (etc / "profiles.toml").write_text("legacy_seeds_migrated = true\n", encoding="utf-8")
-
+    """There is no MoE-specific seed any more: a MoE file runs the chat tune."""
     reg = ModelRegistry(registry_dir=tmp_hal0_home + "/registry")
     reg.add(
         Model(
@@ -209,6 +209,8 @@ def test_generate_moe_falls_back_to_chat_when_moe_was_deleted(
             architecture="qwen3next",
         )
     )
+
+    import asyncio
 
     result = asyncio.run(
         generate_draft_profile(
@@ -220,7 +222,7 @@ def test_generate_moe_falls_back_to_chat_when_moe_was_deleted(
     )
 
     assert result.profile["profile"]["cloned_from"] == "chat"
-    assert any("moe" in w and "chat" in w for w in result.warnings), result.warnings
+    assert result.warnings == ()
 
 
 def test_generate_embed_capability_clones_embedding_seed(tmp_hal0_home: str) -> None:
@@ -263,33 +265,6 @@ def test_generate_cpu_only_host_clones_cpu_chat_seed(tmp_hal0_home: str) -> None
     )
 
     assert result.profile["profile"]["cloned_from"] == "cpu-chat"
-
-
-def test_generate_carries_context_size_default_when_no_metadata_context(
-    tmp_hal0_home: str,
-) -> None:
-    reg = ModelRegistry(registry_dir=tmp_hal0_home + "/registry")
-    reg.add(
-        Model(
-            id="ctx-fallback",
-            path="/models/x.gguf",
-            capabilities=["chat"],
-            defaults=ModelDefaults(context_size=16384),
-        )
-    )
-
-    import asyncio
-
-    result = asyncio.run(
-        generate_draft_profile(
-            model_id="ctx-fallback",
-            exported_at=_EXPORTED_AT,
-            hw=_hw_cpu(),
-            registry=reg,
-        )
-    )
-
-    assert "16K ctx" in result.profile["profile"]["intent"]
 
 
 # ── validation ───────────────────────────────────────────────────────────────
@@ -362,7 +337,7 @@ def test_generate_from_hf_repo_happy_path(
 
     body = result.profile["profile"]
     assert body["cloned_from"] == "chat"
-    assert body["quant"] == "Q4_K_M"
+    assert "quant" not in body
     assert "qwen3" in body["intent"]
     assert "40K ctx" in body["intent"]
     assert "huggingface:unsloth/Qwen3-8B-GGUF" in result.sources
@@ -425,7 +400,7 @@ def test_generate_from_hf_repo_no_gguf_metadata_warns_and_falls_back(
     )
 
     assert any("did not report parsed GGUF metadata" in w for w in result.warnings)
-    assert result.profile["profile"]["quant"] == "Q4_K_M"  # filename fallback
+    assert "quant" not in result.profile["profile"]
 
 
 # ── use_llm path ─────────────────────────────────────────────────────────────

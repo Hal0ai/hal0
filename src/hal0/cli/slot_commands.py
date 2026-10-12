@@ -589,12 +589,13 @@ def slot_create(
         min=1024,
         max=65535,
     ),
-    ctx_size: int = typer.Option(4096, "--ctx-size", min=128),
     profile: str | None = typer.Option(
         None,
         "--profile",
         help=(
-            "Runtime profile (flag bundle + engine). Default: inferred from "
+            "Profile (the tune: flags, context window, reasoning, vision, MTP). "
+            "The context window is a profile setting — see `hal0 profile create "
+            "--ctx-size`. Default: inferred from "
             "--type/--hardware — embedding → embedding (--embedding), "
             "reranking → reranking (--reranking), tts/transcription → the "
             "engine hal0 ships for that device (none is inferred where it "
@@ -616,7 +617,7 @@ def slot_create(
         "type": type_.value,
         "device": device,
         "provider": str(provider),
-        "model": {"default": model, "context_size": ctx_size},
+        "model": {"default": model},
     }
     # Absent = let the create chokepoint infer the capability profile from
     # type/device (#1830); an explicit name always wins. Never send an empty
@@ -652,7 +653,6 @@ def slot_edit(
     name: str = typer.Argument(..., help="Slot name to edit"),
     model: str | None = typer.Option(None, "--model", "-m"),
     port: int | None = typer.Option(None, "--port", "-p", min=1024, max=65535),
-    ctx_size: int | None = typer.Option(None, "--ctx-size", min=128),
     provider: SlotProvider | None = typer.Option(
         None, "--provider", case_sensitive=False, help="Change the slot's inference provider."
     ),
@@ -677,17 +677,10 @@ def slot_edit(
     if _api_unreachable(url):
         raise typer.Exit(1)
 
-    if (
-        model is None
-        and port is None
-        and ctx_size is None
-        and provider is None
-        and hardware is None
-        and profile is None
-    ):
+    if model is None and port is None and provider is None and hardware is None and profile is None:
         console.print(
             "[bold yellow]No fields provided.[/bold yellow]  "
-            "Pass at least one of --model, --port, --ctx-size, --provider, "
+            "Pass at least one of --model, --port, --provider, "
             "--hardware, --profile."
         )
         raise typer.Exit(code=2)
@@ -701,17 +694,14 @@ def slot_edit(
         payload["profile"] = profile
     if hardware is not None:
         payload["device"] = _HARDWARE_TO_DEVICE.get(hardware.value, hardware.value)
-    if model is not None or ctx_size is not None:
+    if model is not None:
         try:
             cfg = api_get(f"/api/slots/{name}/config")
         except CliApiError as exc:
             die(str(exc))
             return
         model_block = dict(cfg.get("model") or {})
-        if model is not None:
-            model_block["default"] = model
-        if ctx_size is not None:
-            model_block["context_size"] = ctx_size
+        model_block["default"] = model
         payload["model"] = model_block
 
     try:
@@ -1137,8 +1127,7 @@ def slot_migrate_id_keying(
     RUN ONLY — never wired into any automatic boot/update path.
 
     DRY-RUN by default — prints the computed name->id plan and exits. Pass
-    ``--apply`` to write (GH #1474: matches the sibling migrate-hw/
-    migrate-caps/migrate-flags contract instead of
+    ``--apply`` to write (GH #1474: dry-run by default instead of
     inverting it — a bare invocation never surprises with a real migration).
 
     Downtime window required for ``--apply``: stop ``hal0-api`` and every
@@ -1222,346 +1211,3 @@ def slot_migrate_id_keying(
     console.print(
         "\n[yellow]Restart hal0-api (and daemon-reload) to pick up the id-keyed layout.[/yellow]"
     )
-
-
-# ── migrate-hw (spec-hw-slot-ownership §6 — hardware sticks to slots) ─────────
-#
-# Deploy-window manual trigger for the standalone one-shot fold in
-# hal0.config.migrations.hw_slot_ownership (mirrors how slot_flags_fold would be
-# run). NOT wired into any automatic boot/update path — the fold is an
-# irreversible physical re-partition and must be operator-run inside a window.
-
-
-@app.command("migrate-hw")
-def slot_migrate_hw(
-    apply: bool = typer.Option(
-        False,
-        "--apply",
-        help="Actually write the fold. Without it the command is a DRY-RUN preview only.",
-    ),
-    yes: bool = typer.Option(
-        False, "--yes", "-y", help="Skip the confirmation prompt (for scripted use)."
-    ),
-    stop_services: bool = typer.Option(
-        False,
-        "--stop-services",
-        help=(
-            "Stop hal0-api and every active hal0-slot@* unit first (systemctl stop), "
-            "then proceed. They are started again if the run refuses or fails; after a "
-            "successful run they stay stopped until you restart hal0. Without this flag "
-            "--apply only WARNS and refuses to run while any of those units is active."
-        ),
-    ),
-) -> None:
-    """One-shot: unwind the flags-fold — hardware sticks to SLOTS (spec-hw-slot-ownership §6).
-
-    Folds each slot's/model's physical facts onto the slot's typed hardware grid:
-    model ``n_gpu_layers`` + a slot's nested ``[model].n_gpu_layers`` -> slot
-    ``n_gpu_layers`` (NGL); model ``preferred_runner`` -> slot ``binary``;
-    ``profile.image`` / ``slot.image`` deliberate pins -> slot ``image_pin``
-    (former-default debris dropped). Then NULLs the folded-out model columns.
-    Idempotent + re-runnable.
-
-    DRY-RUN by default — prints the computed plan and exits. Pass ``--apply`` to
-    write. DESTRUCTIVE + OPERATOR-RUN ONLY (deploy window): a timestamped backup
-    of the slot config/state + registry DB is written BEFORE anything changes;
-    it is never wired into any automatic boot/update path.
-    """
-    from hal0.config import paths
-    from hal0.config.migrations.hw_slot_ownership import run_migration
-
-    if not apply:
-        lines = run_migration(deploy_window=False, dry_run=True)
-        console.print("[bold]Dry run — no files written, no columns nulled.[/bold]")
-        if not lines:
-            console.print("  [dim](nothing to fold)[/dim]")
-        for line in lines:
-            console.print(f"  {line}")
-        console.print("\n[dim]Re-run with --apply to write (stop hal0 first).[/dim]")
-        return
-
-    # --apply: a real deploy-window write. Guard against a live runtime — the
-    # fold rewrites slot TOMLs the running process still resolves.
-    refusal = (
-        "[red]✗[/red]  refusing to fold while hal0 is live — rewriting slot TOMLs "
-        "under a running runtime split-brains it.\n"
-        "        Stop hal0-api and every hal0-slot@* unit first, or re-run with "
-        "--stop-services."
-    )
-    active = active_hal0_units()
-    _refuse_if_live(active, stop_services=stop_services, refusal=refusal)
-
-    if not yes:
-        typer.confirm(
-            "This rewrites slot TOMLs + profiles.toml and NULLs the model HW columns "
-            "(a backup is taken first). Proceed?",
-            abort=True,
-        )
-
-    with _stopped_units(active, refusal=refusal) as window:
-        backup_path = _backup_slot_state(
-            config_dir=paths.slots_config_dir(),
-            data_dir=paths.var_lib() / "slots",
-            db_file=paths.db_path(),
-            backup_root=paths.var_lib() / "backups",
-        )
-        console.print(f"[green]✓[/green]  backup written to {backup_path}")
-
-        lines = run_migration(deploy_window=True, dry_run=False)
-        console.print("\n[bold]Applied hardware-ownership fold:[/bold]")
-        if not lines:
-            console.print("  [dim](nothing to fold)[/dim]")
-        for line in lines:
-            console.print(f"  {line}")
-        console.print(
-            "\n[yellow]Restart hal0-api (and daemon-reload) to pick up the slot HW grid.[/yellow]"
-        )
-        window.keep_stopped()
-
-
-# ── migrate-caps (spec-hw-slot-ownership §1 — mtp/reasoning/vision stick to models) ──
-#
-# Deploy-window manual trigger for the standalone one-shot fold in
-# hal0.config.migrations.model_owned_caps (mirrors migrate-hw's shape, reversed
-# direction: slot debris -> model defaults). NOT wired into any automatic
-# boot/update path.
-
-
-@app.command("migrate-caps")
-def slot_migrate_caps(
-    apply: bool = typer.Option(
-        False,
-        "--apply",
-        help="Actually write the fold. Without it the command is a DRY-RUN preview only.",
-    ),
-    yes: bool = typer.Option(
-        False, "--yes", "-y", help="Skip the confirmation prompt (for scripted use)."
-    ),
-    stop_services: bool = typer.Option(
-        False,
-        "--stop-services",
-        help=(
-            "Stop hal0-api and every active hal0-slot@* unit first (systemctl stop), "
-            "then proceed. They are started again if the run refuses or fails; after a "
-            "successful run they stay stopped until you restart hal0. Without this flag "
-            "--apply only WARNS and refuses to run while any of those units is active."
-        ),
-    ),
-) -> None:
-    """One-shot: mtp/enable_thinking/vision stick to MODELS (spec-hw-slot-ownership §1).
-
-    Folds each slot's ``mtp`` / ``enable_thinking`` / ``vision`` tri-state override
-    into its bound model's ``defaults`` (only when the model has no opinion yet —
-    an existing curator-set default always wins); two slots bound to the same
-    model that disagree report the conflict (first slot, stable file order, wins)
-    rather than silently dropping it. Either way, the slot's own keys are then
-    dropped (SlotConfig no longer declares them; the API rejects new writes of
-    them). Idempotent + re-runnable.
-
-    DRY-RUN by default — prints the computed plan and exits. Pass ``--apply`` to
-    write. DESTRUCTIVE + OPERATOR-RUN ONLY (deploy window): a timestamped backup
-    of the slot config/state + registry DB is written BEFORE anything changes;
-    it is never wired into any automatic boot/update path.
-    """
-    from hal0.config import paths
-    from hal0.config.migrations.model_owned_caps import run_migration
-
-    if not apply:
-        lines = run_migration(deploy_window=False, dry_run=True)
-        console.print("[bold]Dry run — no files written, no model rows changed.[/bold]")
-        if not lines:
-            console.print("  [dim](nothing to fold)[/dim]")
-        for line in lines:
-            console.print(f"  {line}")
-        console.print("\n[dim]Re-run with --apply to write (stop hal0 first).[/dim]")
-        return
-
-    # --apply: a real deploy-window write. Guard against a live runtime — the
-    # fold rewrites slot TOMLs the running process still resolves.
-    refusal = (
-        "[red]✗[/red]  refusing to fold while hal0 is live — rewriting slot TOMLs "
-        "under a running runtime split-brains it.\n"
-        "        Stop hal0-api and every hal0-slot@* unit first, or re-run with "
-        "--stop-services."
-    )
-    active = active_hal0_units()
-    _refuse_if_live(active, stop_services=stop_services, refusal=refusal)
-
-    if not yes:
-        typer.confirm(
-            "This rewrites slot TOMLs and model defaults rows (a backup is taken first). Proceed?",
-            abort=True,
-        )
-
-    with _stopped_units(active, refusal=refusal) as window:
-        backup_path = _backup_slot_state(
-            config_dir=paths.slots_config_dir(),
-            data_dir=paths.var_lib() / "slots",
-            db_file=paths.db_path(),
-            backup_root=paths.var_lib() / "backups",
-        )
-        console.print(f"[green]✓[/green]  backup written to {backup_path}")
-
-        lines = run_migration(deploy_window=True, dry_run=False)
-        console.print("\n[bold]Applied model-ownership fold:[/bold]")
-        if not lines:
-            console.print("  [dim](nothing to fold)[/dim]")
-        for line in lines:
-            console.print(f"  {line}")
-        console.print(
-            "\n[yellow]Restart hal0-api to pick up the model-owned "
-            "mtp/reasoning/vision defaults.[/yellow]"
-        )
-        window.keep_stopped()
-
-
-# ── migrate-flags (spec-flags-ownership §5 — launch flags stick to models) ────
-#
-# Deploy-window manual trigger for the standalone one-shot fold in
-# hal0.config.migrations.slot_flags_fold. NOT wired into any automatic
-# boot/update path.
-#
-# #1396: the fold module has existed since the flags-ownership lane, but nothing
-# ever exposed it — no CLI, no installer hook, only tests. Meanwhile the launch
-# readers were already deleted (providers.container drops profile_flags /
-# slot_parallel / extra_args; resolve_chat_template no longer consults the
-# slot), so an upgraded box with a tuned slot silently launched WITHOUT that
-# tune and had no supported way to recover it. This is that entry point.
-
-
-@app.command("migrate-flags")
-def slot_migrate_flags(
-    apply: bool = typer.Option(
-        False,
-        "--apply",
-        help="Actually write the fold. Without it the command is a DRY-RUN preview only.",
-    ),
-    yes: bool = typer.Option(
-        False, "--yes", "-y", help="Skip the confirmation prompt (for scripted use)."
-    ),
-    stop_services: bool = typer.Option(
-        False,
-        "--stop-services",
-        help=(
-            "Stop hal0-api and every active hal0-slot@* unit first (systemctl stop), "
-            "then proceed. They are started again if the run refuses or fails; after a "
-            "successful run they stay stopped until you restart hal0. Without this flag "
-            "--apply only WARNS and refuses to run while any of those units is active."
-        ),
-    ),
-) -> None:
-    """One-shot: fold each slot's flag/tune surface onto its bound MODEL.
-
-    Materializes the effective per-slot tune — ``[server].extra_args``, the
-    ``parallel`` sequence-slot count, and the per-slot ``chat_template``
-    override, layered over the slot's profile flags — into the bound model's
-    ``defaults``, which is the only tier the launch path still reads
-    (spec-flags-ownership §1-§5). Idempotent + re-runnable.
-
-    Two or more slots that fold DIVERGENT tunes onto one model are refused as a
-    group: the command reports every conflict and writes nothing, so the
-    operator resolves them (pick one tune, or split the model row) and re-runs.
-
-    DRY-RUN by default — prints the computed plan and exits. Pass ``--apply`` to
-    write. DESTRUCTIVE + OPERATOR-RUN ONLY (deploy window): a timestamped backup
-    of the slot config/state + registry DB is written BEFORE anything changes;
-    it is never wired into any automatic boot/update path.
-    """
-    from hal0.config import paths
-    from hal0.config.migrations.slot_flags_fold import FoldPartiallyApplied, run_migration
-
-    def _report_refusal(exc: Exception) -> None:
-        # apply_fold_plan raises on divergent shares for BOTH dry-run and
-        # apply, so both paths funnel here — an operator previewing a
-        # conflicted box must get the conflict list, not a traceback.
-        console.print("[red]✗[/red]  refusing to fold — divergent slot tunes share a model:")
-        for part in str(exc).split(" | "):
-            part = part.strip()
-            if part:
-                console.print(f"  {part}")
-        console.print(
-            "\n[dim]Resolve each conflict (pick one tune, or split the model row) and re-run.[/dim]"
-        )
-
-    if not apply:
-        try:
-            lines = run_migration(deploy_window=False, dry_run=True)
-        except RuntimeError as exc:
-            _report_refusal(exc)
-            raise typer.Exit(1) from None
-        console.print("[bold]Dry run — no files written, no registry rows updated.[/bold]")
-        if not lines:
-            console.print("  [dim](nothing to fold)[/dim]")
-        for line in lines:
-            console.print(f"  {line}")
-        console.print("\n[dim]Re-run with --apply to write (stop hal0 first).[/dim]")
-        return
-
-    # --apply: a real deploy-window write. Guard against a live runtime — the
-    # fold rewrites registry rows the running process still resolves.
-    # Surface a divergent-share refusal BEFORE stopping any unit, the confirm
-    # prompt and the backup — there is nothing to stop or confirm if the run
-    # cannot proceed (#2325). The planner is write-free, the same pass the
-    # bare dry-run and `hal0 update` run against a live box.
-    try:
-        run_migration(deploy_window=False, dry_run=True)
-    except RuntimeError as exc:
-        _report_refusal(exc)
-        raise typer.Exit(1) from None
-
-    refusal = (
-        "[red]✗[/red]  refusing to fold while hal0 is live — rewriting model "
-        "defaults under a running runtime split-brains it.\n"
-        "        Stop hal0-api and every hal0-slot@* unit first, or re-run with "
-        "--stop-services."
-    )
-    active = active_hal0_units()
-    _refuse_if_live(active, stop_services=stop_services, refusal=refusal)
-
-    if not yes:
-        typer.confirm(
-            "This rewrites the bound models' defaults from each slot's effective tune "
-            "(a backup is taken first). Proceed?",
-            abort=True,
-        )
-
-    with _stopped_units(active, refusal=refusal) as window:
-        backup_path = _backup_slot_state(
-            config_dir=paths.slots_config_dir(),
-            data_dir=paths.var_lib() / "slots",
-            db_file=paths.db_path(),
-            backup_root=paths.var_lib() / "backups",
-        )
-        console.print(f"[green]✓[/green]  backup written to {backup_path}")
-
-        partial: FoldPartiallyApplied | None = None
-        try:
-            lines = run_migration(deploy_window=True, dry_run=False)
-        except FoldPartiallyApplied as exc:
-            partial, lines = exc, exc.lines
-        console.print("\n[bold]Applied flags-ownership fold:[/bold]")
-        if not lines:
-            console.print("  [dim](nothing to fold)[/dim]")
-        for line in lines:
-            console.print(f"  {line}")
-        console.print("\n[yellow]Restart hal0-api to pick up the model-owned launch tune.[/yellow]")
-        if partial is None:
-            window.keep_stopped()
-    if partial is not None:
-        # #2180: the other folds landed; name what did not. Exit 2 = applied,
-        # work outstanding — the same split `hal0 update` draws against 1.
-        # The per-model "skip" lines above are the report; this is the summary.
-        console.print(
-            f"\n[yellow]![/yellow]  summary — {len(partial.skipped)} model(s) skipped, "
-            "not in the registry:"
-        )
-        for skip in partial.skipped:
-            console.print(f"  slots {', '.join(skip.slot_names)} → model {skip.model_id!r}")
-        # Only llama-server slots land here: a provider-lane miss (e.g. the
-        # qwen3-tts slot) never reads the folded tune, so the fold reports it
-        # as an informational "skip" line and it does not make this partial.
-        console.print(
-            "[dim]Register the model or rebind the slot, then re-run; already-folded "
-            "models are a no-op. (exit 2 = applied, some slots skipped)[/dim]"
-        )
-        raise typer.Exit(2)

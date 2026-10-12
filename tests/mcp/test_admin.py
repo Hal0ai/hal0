@@ -1108,26 +1108,29 @@ async def test_slot_resolved_and_state_dispatch_get(
 
 
 @pytest.mark.asyncio
-async def test_slot_set_defaults_dispatches_patch_autonomously(
+async def test_slot_set_defaults_tool_is_gone(
     queue: ApprovalQueue, mock_transport: dict[str, Any]
 ) -> None:
-    """PATCH .../defaults is autonomous-write, same blast radius class as
-    slot_edit's PUT — and exercises the generic PATCH verb support that
-    landed in Phase 0 (_REST_VERB_PAYLOAD_KWARG)."""
+    """ADR-0029: ``slot_set_defaults`` was deleted (the route now only rebinds
+    ``default``; a model swap is ``model_swap`` / ``slot_edit``). The name no
+    longer dispatches and is in no classification set, alias map or schema."""
+    assert "slot_set_defaults" not in admin.AUTONOMOUS_WRITE_TOOLS
+    assert "slot_set_defaults" not in admin.TOOL_DESCRIPTIONS
+    assert "slot_set_defaults" not in admin.TOOL_PARAM_HINTS
+    assert "PATCH:/api/slots/{name}/defaults" not in admin.TOOL_NAME_ALIASES
+    assert all("slot_set_defaults" not in names for names in admin.TOOL_NAME_ALIASES.values())
+
     result = await admin.dispatch(
         tool="slot_set_defaults",
-        args={"name": "agent", "ctx_size": 8192},
+        args={"name": "agent", "default": "m1"},
         client_id="pi",
         bearer="t",
         base_url="http://t",
         approval_queue=queue,
     )
-    assert result == {"ok": "patch"}
+    assert result["error"]["code"] == "mcp.unknown_tool"
     assert queue.list_pending() == []
-    method, url, payload, _ = mock_transport["calls"][-1]
-    assert method == "PATCH"
-    assert url == "http://t/api/slots/agent/defaults"
-    assert payload == {"ctx_size": 8192}
+    assert not mock_transport["calls"]
 
 
 @pytest.mark.asyncio

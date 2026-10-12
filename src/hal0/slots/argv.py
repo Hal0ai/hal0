@@ -34,13 +34,9 @@ without restructuring how they build the list.
 
 from __future__ import annotations
 
-import logging
-import shlex
 from dataclasses import dataclass
 
 from hal0.errors import BadRequest
-
-log = logging.getLogger(__name__)
 
 # Short→long canonicalisation. Used ONLY to compute the dedup key; the emitted
 # token keeps its original spelling. Seeded from the flags hal0 profiles +
@@ -122,36 +118,33 @@ SLOT_HARDWARE_FLAGS: frozenset[str] = frozenset(
     }
 )
 
-# Segment labels whose tokens are free-form / caller-supplied rather than
-# hal0-computed, and therefore must be screened against
-# ``MANAGED_ARGS_DENYLIST`` before they're merged in:
-#   * ``extra_args``       — a slot's ``[server].extra_args``.
-#   * ``model_extra_args`` — a model's ``defaults.extra_args`` (the registry
-#     row's free-form launcher flags; NOT the schema-computed ``-ngl`` from
-#     ``defaults.n_gpu_layers``, which rides the trusted ``model_defaults``
-#     segment — see ``container._llama_argv_segments``).
-#   * ``slot_profile``     — a DIVERGENT slot profile's flag text (#1636):
-#     emitted only when ``slot.profile`` differs from the model's stamped
-#     provenance (``defaults.profile``). Profile saves already screen these
-#     flags, but the profile file is operator-editable on disk, so the launch
-#     merge re-screens them like any other free-form source.
-#   * ``slot_profile_template`` — the slot profile's flag text used as the tune
-#     TEMPLATE for a model that carries no stamped tune at all (#1787: auto-scan
-#     / pull / capability-apply never stamp ``defaults``). Same free-form source
-#     as ``slot_profile``, one tier LOWER (below ``model_extra_args``), so it
-#     rides the same managed-arg screen and the same hardware-flag strip.
-# A future request-level ``llamacpp_args`` segment (§7.1a 5-tier precedence
-# rewrite) adds its own label here so it rides the same guard.
-UNTRUSTED_SEGMENT_LABELS: frozenset[str] = frozenset(
-    {"extra_args", "model_extra_args", "slot_profile", "slot_profile_template"}
-)
+# Segment labels whose tokens are free-form operator text rather than
+# hal0-computed (ADR-0029: only the profile layer). They are screened against
+# ``MANAGED_ARGS_DENYLIST`` before they are merged in.
+UNTRUSTED_SEGMENT_LABELS: frozenset[str] = frozenset({"profile"})
 
-# Profile-sourced segment labels: free-form flag text copied off a profile
-# (divergence overlay + unstamped-model template). On top of the managed-arg
-# screen every untrusted label gets, these additionally have their SLOT-owned
-# hardware flags silently STRIPPED rather than hard-rejected — see
-# :func:`resolve_argv`.
-PROFILE_SEGMENT_LABELS: frozenset[str] = frozenset({"slot_profile", "slot_profile_template"})
+# The profile layer additionally refuses hardware flags (the slot's typed
+# fields), model-fact flags and the MTP draft device: a profile file is
+# operator-editable on disk, so the launch re-screens what the write path
+# already rejects.
+PROFILE_SEGMENT_LABELS: frozenset[str] = frozenset({"profile"})
+
+#: Flags that are facts about the model file (ADR-0029): hal0 adds ``--jinja``
+#: and ``--chat-template-file`` from the model, the projector follows the
+#: model's mmproj and the profile's ``vision``.
+MODEL_FACT_FLAGS: frozenset[str] = frozenset(
+    {
+        "--jinja",
+        "--chat-template",
+        "--chat-template-file",
+        "--mmproj",
+        "--no-mmproj",
+        "--mmproj-auto",
+        "--no-mmproj-auto",
+    }
+)
+#: Placement the slot layer derives itself (from the slot's device).
+DERIVED_PLACEMENT_FLAGS: frozenset[str] = frozenset({"--spec-draft-device"})
 
 
 @dataclass(frozen=True)
@@ -266,8 +259,8 @@ def strip_managed_flags(
 
     The healing counterpart of :func:`_deny_managed_flags`: instead of
     rejecting, it removes each offending flag together with its value so
-    already-persisted state (custom profiles / model ``defaults.extra_args``
-    stamped before the guards existed) can be sanitized in place. Matching is
+    already-persisted state (custom profiles stamped before the guards
+    existed) can be sanitized in place. Matching is
     token-exact via ``_canon()`` — ``-c`` maps onto ``--ctx-size`` but
     ``--threads-batch``/``--model_path`` never collide with ``--threads``/
     ``--model``. Pass ``denylist`` to screen a different flag set (e.g.
@@ -297,8 +290,7 @@ def strip_reasoning_format_none(tokens: list[str]) -> tuple[list[str], int]:
     ``response_format`` (json_object / json_schema) request when the server runs
     with ``--reasoning-format none`` (#2545), so hal0 must never launch with it.
     This is the one owner of that rule: the migration that heals
-    already-persisted profiles / slot flags / model ``defaults.extra_args``
-    and the ``slot_flags_fold`` fold path both call it.
+    already-persisted profiles and the profile-centric converter both call it.
 
     Only the value ``none`` is removed. ``--reasoning-format deepseek`` / ``auto``
     / any other value is a deliberate choice and is kept untouched.
@@ -389,6 +381,22 @@ def _deny_slot_hardware_flags(tokens: list[str], *, segment: str) -> None:
         )
 
 
+def _deny_profile_owned_elsewhere(tokens: list[str], *, segment: str) -> None:
+    """Raise when profile flags carry a model fact or derived placement flag."""
+    offenders = [
+        str(p.flag)
+        for p in _split_pairs(tokens)
+        if p.canon is not None and p.canon in (MODEL_FACT_FLAGS | DERIVED_PLACEMENT_FLAGS)
+    ]
+    if offenders:
+        raise BadRequest(
+            f"{segment} may not set {', '.join(map(repr, offenders))}: hal0 derives "
+            "these from the model file and the slot's device (ADR-0029)",
+            code="profiles.model_fact_flag_denied",
+            details={"segment": segment, "flags": offenders},
+        )
+
+
 def _dedup(pairs: list[_Pair]) -> tuple[list[str], int, dict[str, _Pair]]:
     """Last-wins dedup over ``pairs``. Shared core of the two public entrypoints.
 
@@ -463,39 +471,24 @@ def resolve_argv(segments: list[tuple[str, list[str]]]) -> ResolvedArgv:
     """Resolve ordered ``(source_label, tokens)`` segments into one deduped argv.
 
     Same last-wins semantics as :func:`normalize_argv`, but each segment's
-    tokens carry its label, so the result records which source set each flag's
-    final value (e.g. ``-b`` from ``profile`` vs ``--jinja`` from
-    ``extra_args``). Segments are concatenated in order before dedup, so a later
-    segment overrides an earlier one — pass them lowest-precedence first.
+    tokens carry its label, so the result records which layer set each flag's
+    final value (``base`` / ``model`` / ``profile`` / ``slot``, ADR-0029).
+    Segments are concatenated in order before dedup, so a later segment
+    overrides an earlier one — pass them lowest-precedence first.
 
-    Before merging, any segment labelled in :data:`UNTRUSTED_SEGMENT_LABELS`
-    (i.e. ``extra_args``) is screened against :data:`MANAGED_ARGS_DENYLIST`
-    (§21.7) — this is the one path free-form ``[server].extra_args`` actually
-    takes into the launched command (``container._llama_launch_plan``), so
-    it's where a slot config trying to clobber ``--model``/``--host``/
-    ``--port``/``--ctx-size``/``-ngl``/``--alias`` must fail loudly instead of
-    launching a silently-redirected slot.
+    The ``profile`` segment is operator text (a profile file is editable on
+    disk), so it is screened before merging: a managed flag
+    (:data:`MANAGED_ARGS_DENYLIST`), a hardware flag
+    (:data:`SLOT_HARDWARE_FLAGS`), a model-fact flag (:data:`MODEL_FACT_FLAGS`)
+    or ``--spec-draft-device`` refuses to launch, the same rules the profile
+    write path enforces.
 
     Raises:
-        hal0.errors.BadRequest: an untrusted segment sets a managed flag.
+        hal0.errors.BadRequest: the profile segment sets a flag it may not.
 
     Every segment also has ``--reasoning-format none`` silently stripped
     (:func:`strip_reasoning_format_none`, #2545): saves that introduce it are
-    rejected (:func:`deny_reasoning_format_none`), and this is the backstop for
-    anything already persisted.
-
-    The profile-sourced segments (``slot_profile`` #1636, ``slot_profile_template``
-    #1787) first get their hardware flags
-    (``SLOT_HARDWARE_FLAGS``) silently stripped rather than hard-rejected: the
-    profile save path only started enforcing the §5 partition guard after
-    grandfathered/hand-edited profiles could already carry ``-dev``/
-    ``--threads``. Before the divergence overlay existed, those flags were
-    never read at launch at all (live profile flags were inert); stripping
-    here preserves that "ignored" behaviour instead of failing the launch,
-    while still guaranteeing the slot's typed hardware fields are the only
-    source for those flags — even when the typed field is unset and would
-    otherwise leave nothing to out-rank the profile's stale value in the
-    last-wins dedup.
+    rejected (:func:`deny_reasoning_format_none`), and this is the backstop.
     """
     tokens: list[str] = []
     sources: list[str] = []
@@ -505,7 +498,8 @@ def resolve_argv(segments: list[tuple[str, list[str]]]) -> ResolvedArgv:
         # not "fail the launch". Denying first would hard-reject every
         # grandfathered profile that still carries ``-ngl 999``.
         if label in PROFILE_SEGMENT_LABELS:
-            seg, _stripped = strip_managed_flags(seg, denylist=SLOT_HARDWARE_FLAGS)
+            _deny_slot_hardware_flags(seg, segment=label)
+            _deny_profile_owned_elsewhere(seg, segment=label)
         if label in UNTRUSTED_SEGMENT_LABELS:
             _deny_managed_flags(seg, segment=label)
         # Backstop for #2545: whatever a segment carries (a row persisted
@@ -529,72 +523,6 @@ def resolve_argv(segments: list[tuple[str, list[str]]]) -> ResolvedArgv:
     return ResolvedArgv(argv=out, provenance=provenance, removed=removed)
 
 
-# ── merge_flags: string ⊕ string, last-wins per-flag ─────────────────────────
-#
-# Folded in from the retired ``hal0.slots.flag_merge`` module so it shares this
-# module's tokenizer + short/long alias table (``-b`` now dedups against
-# ``--batch-size``, which the old ``--``-only tokenizer could not do). Combines
-#
-#     model_defaults (registry Model.defaults.extra_args)
-#     slot_extra     (SlotConfig.server.extra_args)
-#
-# into one argv-ready string: the slot string wins on any colliding flag, and
-# APPEND_FLAGS (--lora / --draft-model / --override-kv) are kept additively.
-
-
-def merge_flags(model_defaults: str | None, slot_extra: str | None) -> str:
-    """Combine model-default and slot-override CLI flag strings (last-wins).
-
-    Args:
-        model_defaults: ``Model.defaults.extra_args`` from the registry, or
-            ``None`` if the model has no defaults.
-        slot_extra: ``SlotConfig.server.extra_args``, or ``None``.
-
-    Returns:
-        A single trimmed string with the slot's flags winning any collision
-        with a model default (short/long aliases collapse against each other;
-        APPEND_FLAGS are kept). Empty inputs collapse to ``""``.
-
-        On malformed input (unbalanced quotes that ``shlex.split`` rejects)
-        this falls back to a whitespace concat with a structured warning, so
-        the launcher still gets *something* runnable instead of crashing.
-
-    Note:
-        This does **not** screen against :data:`MANAGED_ARGS_DENYLIST`. Its
-        one live caller (``config.schema.resolve_profile_flags``) merges the
-        MTP flag bundle with a profile's own ``flags`` — and every seed
-        profile's ``flags`` hardcodes ``-ngl 999`` on the ``slot_extra``
-        (winning) side, which would trip the denylist despite ``-ngl`` there
-        being an ordinary bench tune, not a slot's ``[server].extra_args``
-        escape hatch. The actual ``[server].extra_args`` path is
-        :func:`resolve_argv`'s ``extra_args``-labelled segment (see
-        :data:`UNTRUSTED_SEGMENT_LABELS`), which does enforce the denylist.
-        A future caller merging real request-level free-form args through
-        this function should screen the untrusted side with
-        :func:`_deny_managed_flags` itself before calling in.
-    """
-    left = model_defaults if (model_defaults and model_defaults.strip()) else ""
-    right = slot_extra if (slot_extra and slot_extra.strip()) else ""
-    if not left and not right:
-        return ""
-
-    try:
-        left_tokens = shlex.split(left) if left else []
-        right_tokens = shlex.split(right) if right else []
-    except ValueError as exc:
-        log.warning(
-            "flag_merge: unbalanced quotes; falling back to dumb concat",
-            extra={"event": "flag_merge.malformed_input", "reason": str(exc)},
-        )
-        return " ".join(p.strip() for p in (left, right) if p.strip())
-
-    # model defaults first, slot override last → resolve keeps the slot's value
-    # on any collision (last-wins). Re-quote each surviving token so a value
-    # with embedded spaces survives the launcher's re-``shlex.split``.
-    merged = normalize_argv(left_tokens + right_tokens).argv
-    return " ".join(shlex.quote(tok) for tok in merged)
-
-
 __all__ = [
     "APPEND_FLAGS",
     "FLAG_ALIASES",
@@ -606,7 +534,6 @@ __all__ = [
     "NormalizedArgv",
     "ResolvedArgv",
     "deny_reasoning_format_none",
-    "merge_flags",
     "normalize_argv",
     "resolve_argv",
     "strip_managed_flags",

@@ -52,7 +52,7 @@ _PRIMARY = [
         "type": "llm",
         "device": "gpu-vulkan",
         "role": None,
-        "model": {"default": "big", "context_size": 4096},
+        "model": {"default": "big"},
     }
 ]
 
@@ -93,10 +93,9 @@ async def test_caller_top_level_thinking_translated_to_kwarg():
     assert "enable_thinking" not in out
 
 
-class _ThinkingRegistry:
-    """Registry stub: model 'big' carries defaults.enable_thinking=True
-    (spec-hw-slot-ownership §1 — reasoning is MODEL-owned tuning; the former
-    per-slot enable_thinking override is gone from SlotConfig)."""
+class _ModelThinkingRegistry:
+    """Registry stub whose row still claims a thinking default. ADR-0029
+    moved the reasoning default to the profile, so this is never read."""
 
     def get(self, model_id):
         if model_id != "big":
@@ -104,18 +103,49 @@ class _ThinkingRegistry:
         return SimpleNamespace(defaults=SimpleNamespace(enable_thinking=True))
 
 
+def _thinker_slot() -> list[dict]:
+    return [{**_PRIMARY[0], "profile": "thinker"}]
+
+
+@pytest.fixture
+def thinker_profile(monkeypatch):
+    """A ``thinker`` profile with ``enable_thinking = true``."""
+    from hal0.config.schema import ProfileConfig
+    from hal0.profiles import resolve_loaded_profile
+    from hal0.providers import container
+
+    real = container._resolve_profile
+
+    def _resolve(name):
+        if name == "thinker":
+            return resolve_loaded_profile(name, ProfileConfig(enable_thinking=True))
+        return real(name)
+
+    monkeypatch.setattr("hal0.providers.container._resolve_profile", _resolve)
+
+
 @pytest.mark.asyncio
-async def test_model_enable_thinking_default_applied():
-    # Model defaults enable_thinking=true → requests to it default to ON.
-    req = _make_request(cfgs=_PRIMARY, loaded={"big"}, registry=_ThinkingRegistry())
+async def test_profile_enable_thinking_default_applied(thinker_profile):
+    """The serving slot's profile ``enable_thinking = true`` → requests to it
+    default to ON (ADR-0029)."""
+    req = _make_request(cfgs=_thinker_slot(), loaded={"big"})
     out = await v1._normalize_chat_body(req, {"model": "big", "messages": []})
     assert out["chat_template_kwargs"]["enable_thinking"] is True
 
 
 @pytest.mark.asyncio
-async def test_model_default_overridden_by_request():
-    req = _make_request(cfgs=_PRIMARY, loaded={"big"}, registry=_ThinkingRegistry())
+async def test_profile_default_overridden_by_request(thinker_profile):
+    req = _make_request(cfgs=_thinker_slot(), loaded={"big"})
     out = await v1._normalize_chat_body(req, {"model": "big", "enable_thinking": False})
+    assert out["chat_template_kwargs"]["enable_thinking"] is False
+
+
+@pytest.mark.asyncio
+async def test_the_model_no_longer_picks_the_thinking_default():
+    """A model row's old ``enable_thinking`` is not consulted: the slot runs
+    the ``chat`` seed (no reasoning default), so the request defaults to OFF."""
+    req = _make_request(cfgs=_PRIMARY, loaded={"big"}, registry=_ModelThinkingRegistry())
+    out = await v1._normalize_chat_body(req, {"model": "big", "messages": []})
     assert out["chat_template_kwargs"]["enable_thinking"] is False
 
 
@@ -483,7 +513,7 @@ async def test_hal0_brain_alias_resolves_via_kind_slot_upstream_o21():
             "type": "llm",
             "device": "gpu-rocm",
             "role": None,
-            "model": {"default": "hal0-brain-fpx8-agent", "context_size": 16384},
+            "model": {"default": "hal0-brain-fpx8-agent"},
         }
     ]
     req = _make_request(

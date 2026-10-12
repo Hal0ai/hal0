@@ -78,6 +78,52 @@ class TestParseEnvelope:
             )
 
 
+class TestSchemaGate:
+    """Schema 3 is the oldest readable stack envelope (ADR-0029)."""
+
+    def _old_envelope(self, reg: ModelRegistry) -> dict:
+        env = export_envelope(_stack(), exported_at="t", registry=reg)
+        env["schema_version"] = 2
+        env["stack"]["schema_version"] = 2
+        # The shape a 1.4 export carried on every row.
+        env["stack"]["slots"][0].update(vision=False, mtp=True, server_extra_args="-ctk q8_0")
+        return env
+
+    def test_schema_2_envelope_refused_with_a_clear_message(
+        self, reg: ModelRegistry, tmp_hal0_home: str
+    ) -> None:
+        catalog = StacksCatalog(path=Path(tmp_hal0_home) / "etc/hal0/stacks.toml")
+        with pytest.raises(BadRequest) as exc:
+            import_stack(self._old_envelope(reg), "old", catalog, registry=reg)
+        assert exc.value.code == "stacks.envelope_schema_unsupported"
+        assert "v2" in str(exc.value) and "re-export" in str(exc.value)
+        assert not any(r.slug == "old" for r in catalog.list())
+
+    def test_parse_refuses_it_too_so_dry_run_agrees(
+        self, reg: ModelRegistry, tmp_hal0_home: str
+    ) -> None:
+        with pytest.raises(BadRequest) as exc:
+            parse_envelope(self._old_envelope(reg))
+        assert exc.value.code == "stacks.envelope_schema_unsupported"
+
+    def test_schema_1_envelope_refused(self, reg: ModelRegistry, tmp_hal0_home: str) -> None:
+        env = export_envelope(_stack(), exported_at="t", registry=reg)
+        env["schema_version"] = 1
+        env["stack"]["schema_version"] = 1
+        with pytest.raises(BadRequest) as exc:
+            parse_envelope(env)
+        assert exc.value.code == "stacks.envelope_schema_unsupported"
+
+    def test_nothing_is_stripped_silently(self, reg: ModelRegistry, tmp_hal0_home: str) -> None:
+        """A schema-3 envelope that still carries a retired row key is invalid,
+        not quietly cleaned up."""
+        env = export_envelope(_stack(), exported_at="t", registry=reg)
+        env["stack"]["slots"][0]["mtp"] = True
+        with pytest.raises(BadRequest) as exc:
+            parse_envelope(env)
+        assert exc.value.code == "stacks.bad_envelope"
+
+
 class TestVerifyChecksum:
     def test_intact_checksum_verifies(self, reg: ModelRegistry, tmp_hal0_home: str) -> None:
         env = export_envelope(_stack(), exported_at="t", registry=reg)
@@ -129,3 +175,20 @@ class TestImportStack:
         assert "custom-x" in load_profiles_config().profile, (
             "embedded profile must be reconciled into profiles.toml"
         )
+
+    def test_import_screens_embedded_profile_flags_before_writing(
+        self, reg: ModelRegistry, tmp_hal0_home: str
+    ) -> None:
+        """An embedded profile carrying a flag the profile routes refuse (here a
+        model-fact flag) blocks the whole import: no profile, no stack."""
+        from hal0.config.loader import load_profiles_config
+
+        env = export_envelope(_stack(), exported_at="t", registry=reg)
+        env["stack"]["profiles"] = {"custom-bad": {"flags": "--jinja -fa on"}}
+        env["stack"]["slots"][0]["profile"] = "custom-bad"
+        catalog = StacksCatalog(path=Path(tmp_hal0_home) / "etc/hal0/stacks.toml")
+        with pytest.raises(BadRequest) as exc:
+            import_stack(env, "s3", catalog, registry=reg)
+        assert exc.value.code == "profiles.model_fact_flag_denied"
+        assert "custom-bad" not in load_profiles_config().profile
+        assert not any(r.slug == "s3" for r in catalog.list())

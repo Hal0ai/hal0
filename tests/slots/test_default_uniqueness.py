@@ -168,7 +168,7 @@ async def test_update_config_sole_default_does_not_self_conflict(slot_root: Path
     """
     _write_slot(slot_root, "a", slot_type="llm", default=True)
     sm = SlotManager()
-    await sm.update_config("a", {"model": {"context_size": 4096}})
+    await sm.update_config("a", {"idle_timeout_s": 120})
 
 
 # ── First-of-type auto-default (create modal no longer asks) ───────────────

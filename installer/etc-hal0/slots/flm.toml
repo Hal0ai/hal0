@@ -5,6 +5,9 @@
 # a grey tile (no surprise FLM download, no crash-loop). The operator assigns an
 # FLM model later; filling in `[model].default` activates it (#1369).
 #
+# The FLM window is the profile's `ctx_size` (the `flm` seed sets 16384); FLM
+# reads it as its real window, not a ceiling.
+#
 # Chat is on by default (NpuConfig.chat defaults true), so this is a
 # chat-ready NPU slot out of the box. To flip the rest of the trio on,
 # drop a `[npu]` table next to [model] with `asr = true` and/or
@@ -20,6 +23,3 @@ device = "npu"
 runtime = "container"
 profile = "flm"
 type = "llm"
-
-[model]
-context_size = 16384

@@ -249,24 +249,27 @@ class TestSlotConfig:
 
 
 class TestModelConfig:
+    """ADR-0029: a slot's ``[model]`` table names the model and nothing else."""
+
     def test_defaults(self) -> None:
-        m = ModelConfig()
-        assert m.default == ""
-        # Unset is None (NOT 4096): the load path derives the model's native
-        # window or a safe 8192 floor (chat@4096 incident, 2026-06-15).
-        assert m.context_size is None
-        assert m.n_gpu_layers == -1
+        assert ModelConfig().default == ""
+        assert ModelConfig(default="qwen3-4b").default == "qwen3-4b"
 
-    def test_context_size_below_minimum_raises(self) -> None:
-        with pytest.raises(ValidationError):
-            ModelConfig(context_size=0)
-
-    def test_context_size_minimum_ok(self) -> None:
-        ModelConfig(context_size=128)
-
-    def test_negative_rope_freq_base_raises(self) -> None:
-        with pytest.raises(ValidationError):
-            ModelConfig(rope_freq_base=-1.0)
+    @pytest.mark.parametrize(
+        ("key", "value"),
+        [
+            ("context_size", 8192),
+            ("ctx_size", 8192),
+            ("n_gpu_layers", 99),
+            ("rope_freq_base", 500000.0),
+            ("extra", {"x": 1}),
+        ],
+    )
+    def test_tuning_keys_are_forbidden(self, key: str, value: object) -> None:
+        """The window is the profile's ``ctx_size`` and layers are the slot's
+        ``n_gpu_layers``; the old ``[model]`` tuning keys fail loudly."""
+        with pytest.raises(ValidationError, match=key):
+            ModelConfig.model_validate({key: value})
 
 
 # ── ProviderEntry / ProvidersConfig ──────────────────────────────────────────
@@ -577,33 +580,43 @@ class TestSeededSlotTomls:
         ids=lambda p: p.name,
     )
     def test_seeded_slot_profile_resolves_to_live_seed(
-        self, toml_path: Path, tmp_path: Path
+        self, toml_path: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Every shipped seed slot's `profile` must resolve through the catalog.
+        """Every shipped seed slot's `profile` must be a live seed (ADR-0029 §4).
 
         SlotConfig does NOT validate profile existence, so a rename/removal of a
-        profile (the 0.9.5 2x2-grid consolidation retired rocmfpx-rocm/vkfpx-*)
-        or a plain typo in a slot TOML (profile="vulcan") would otherwise ship
-        green and only break at container launch on a real box.
-
-        The accepted set is SEED_PROFILES + LEGACY_SEED_PROFILES: ``agent`` and
-        ``coder`` name demoted definitions (``chadrock-moe`` / ``coding``), and
-        those are exactly the references ``ProfileCatalog._materialize_legacy``
-        exists to keep resolvable on a fresh install. Resolving through a
-        catalog with NO on-disk overlay is what proves that end of it — a
-        genuinely dangling ref still raises NotFound here.
+        profile or a plain typo in a slot TOML (profile="vulcan") would otherwise
+        ship green and only break at container launch on a real box — where a
+        missing profile now refuses to launch (``slot.profile_missing``) instead
+        of silently falling back. Slots are built around the seeds hal0 ships:
+        the demoted-seed adoption path is gone, so only ``SEED_PROFILES`` counts.
+        A slot naming no profile launches with its type's seed, else ``chat``.
         """
-        from hal0.config.schema import LEGACY_SEED_PROFILES, SEED_PROFILES
-        from hal0.profiles import ProfileCatalog
+        from hal0.config.schema import SEED_PROFILES
+        from hal0.providers.container import resolve_slot_profile
 
         raw = tomllib.loads(toml_path.read_text())
         slot = raw.get("slot") if isinstance(raw.get("slot"), dict) else raw
         profile = slot.get("profile")
-        if profile is None:
-            pytest.skip(f"{toml_path.name} declares no profile")
-        assert profile in SEED_PROFILES or profile in LEGACY_SEED_PROFILES, (
-            f"{toml_path.name} references profile {profile!r} which is neither a live "
-            f"SEED_PROFILES key nor a shipped legacy definition (renamed/removed/typo?)"
-        )
-        # Resolve through the real path too — raises NotFound on a dangling ref.
-        ProfileCatalog(path=tmp_path / "nonexistent.toml").resolve(profile)
+        if profile is not None:
+            assert profile in SEED_PROFILES, (
+                f"{toml_path.name} references profile {profile!r}, which is not a live "
+                "SEED_PROFILES key (renamed/removed/typo?)"
+            )
+        monkeypatch.setenv("HAL0_HOME", str(tmp_path))  # no profiles.toml: seeds only
+        resolved = resolve_slot_profile({**slot, "name": slot.get("name") or toml_path.stem})
+        assert resolved.seed is True
+
+    @pytest.mark.parametrize(
+        "toml_path",
+        sorted(_SEEDED_SLOTS_DIR.glob("*.toml")),
+        ids=lambda p: p.name,
+    )
+    def test_seeded_slot_carries_no_tuning_key(self, toml_path: Path) -> None:
+        """ADR-0029: a shipped slot holds placement only — every tune is on its
+        profile — so it loads without tripping ``slot.unconverted``."""
+        from hal0.config.schema import slot_tuning_keys
+
+        raw = tomllib.loads(toml_path.read_text())
+        assert slot_tuning_keys(raw) == []
+        SlotConfig.model_validate(raw)

@@ -11,7 +11,6 @@ has no registry row, and stack rows carrying tuning keys.
 from __future__ import annotations
 
 import json
-import sqlite3
 from pathlib import Path
 from typing import Any
 
@@ -21,14 +20,11 @@ from typer.testing import CliRunner
 
 from hal0.config import paths
 from hal0.config.migrations import profile_centric as pc
-from hal0.db.repository import model_to_row
-from hal0.registry.model import Model, ModelDefaults
-
-THINKING = (
-    "--jinja -fa auto -b 2048 -ub 512 --reasoning on --reasoning-format deepseek "
-    "--temp 1.0 --top-p 0.95 --no-mmproj"
+from tests.config.profile_centric_fixtures import (
+    old_model,
+    production_install,
+    write_db,
 )
-CODING_TUNE = "--jinja -fa auto -b 2048 -ub 512 --reasoning off --temp 0.7 --top-k 40 --no-mmproj"
 
 
 def _write(path: Path, data: dict[str, Any]) -> None:
@@ -36,30 +32,11 @@ def _write(path: Path, data: dict[str, Any]) -> None:
     path.write_bytes(tomli_w.dumps(data).encode())
 
 
-def _db(models: list[Model]) -> None:
-    rows = [model_to_row(m) for m in models]
-    target = paths.db_path()
-    target.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(target)
-    cols = list(rows[0])
-    conn.execute(f"CREATE TABLE model ({', '.join(cols)})")
-    for row in rows:
-        conn.execute(
-            f"INSERT INTO model ({', '.join(cols)}) VALUES ({', '.join('?' for _ in cols)})",
-            [row[c] for c in cols],
-        )
-    conn.commit()
-    conn.close()
+def _db(models: list[dict[str, Any]]) -> None:
+    write_db(models)
 
 
-def _model(model_id: str, **kw: Any) -> Model:
-    defaults = kw.pop("defaults", None)
-    return Model(
-        id=model_id,
-        path=kw.pop("path", f"/models/{model_id}/model.gguf"),
-        defaults=ModelDefaults(**defaults) if defaults else None,
-        **kw,
-    )
+_model = old_model
 
 
 def _slot(stem: str, data: dict[str, Any]) -> None:
@@ -68,166 +45,7 @@ def _slot(stem: str, data: dict[str, Any]) -> None:
 
 @pytest.fixture
 def install() -> None:
-    _write(
-        paths.profiles_toml(),
-        {
-            "legacy_seeds_migrated": True,
-            "legacy_seeds_adopted": ["coding", "thinking"],
-            "profile": {
-                "thinking": {"flags": THINKING, "mtp": False, "quant": ""},
-                "coding": {"flags": CODING_TUNE, "mtp": False, "quant": ""},
-            },
-        },
-    )
-    _slot(
-        "1",
-        {
-            "id": 1,
-            "name": "agent",
-            "type": "llm",
-            "device": "gpu-vulkan",
-            "backend": "vulkan",
-            "profile": "thinking",
-            "port": 8082,
-            "parallel": 1,
-            "threads": 16,
-            "model": {"default": "big-chat", "context_size": 96000},
-            "server": {"extra_args": "-ctk q8_0 -ctv q8_0"},
-        },
-    )
-    _slot(
-        "2",
-        {
-            "id": 2,
-            "name": "brain",
-            "type": "llm",
-            "device": "gpu-vulkan",
-            "profile": "brain",
-            "port": 8087,
-            "chat_template": "auto",
-            "model": {"default": "small-chat", "context_size": 66000},
-        },
-    )
-    _slot(
-        "3",
-        {
-            "id": 3,
-            "name": "code",
-            "type": "llm",
-            "device": "gpu-rocm",
-            "profile": "rocm-dense-gone",
-            "port": 8085,
-            "model": {"default": "", "context_size": 96000},
-        },
-    )
-    _slot(
-        "5",
-        {
-            "id": 5,
-            "name": "embed",
-            "type": "embedding",
-            "device": "gpu-rocm",
-            "port": 8089,
-            "model": {"default": "embedder", "context_size": 8192},
-        },
-    )
-    _slot(
-        "8",
-        {
-            "id": 8,
-            "name": "flm",
-            "type": "llm",
-            "device": "npu",
-            "profile": "flm",
-            "port": 8088,
-            "model": {"default": "npu-chat"},
-            "npu": {"chat": True, "asr": True, "embed": False},
-        },
-    )
-    _slot(
-        "15",
-        {
-            "id": 15,
-            "name": "utility",
-            "type": "llm",
-            "device": "gpu-vulkan",
-            "profile": "chat",
-            "port": 8081,
-            "model": {"default": "no-native", "context_size": 98304},
-        },
-    )
-    _slot(
-        "14",
-        {
-            "id": 14,
-            "name": "tts",
-            "type": "tts",
-            "device": "gpu-rocm",
-            "profile": "qwen3-tts",
-            "port": 8084,
-            "model": {"default": "qwen3-tts", "context_size": 16000},
-        },
-    )
-    _slot(
-        "coder",
-        {
-            "name": "coder",
-            "type": "llm",
-            "device": "gpu-vulkan",
-            "profile": "coding",
-            "port": 8083,
-            "model": {"context_size": 32768},
-        },
-    )
-    _slot(
-        "16",
-        {
-            "id": 16,
-            "name": "clean",
-            "type": "llm",
-            "device": "gpu-rocm",
-            "profile": "chat",
-            "port": 8090,
-            "model": {"default": "untuned"},
-        },
-    )
-    _write(
-        paths.stacks_toml(),
-        {
-            "stack": {
-                "s1": {
-                    "slots": [
-                        {
-                            "slot": "agent",
-                            "model": "big-chat",
-                            "profile": "chat",
-                            "vision": False,
-                            "mtp": True,
-                        },
-                        {"slot": "brain", "profile": "brain", "server_extra_args": "-b 64"},
-                    ]
-                }
-            }
-        },
-    )
-    _db(
-        [
-            _model(
-                "big-chat", mmproj="/models/big-chat/mm.gguf", metadata={"context_length": 262144}
-            ),
-            _model(
-                "small-chat",
-                metadata={"context_length": 131072},
-                defaults={"profile": "coding", "extra_args": CODING_TUNE},
-            ),
-            _model("embedder"),
-            _model("npu-chat", defaults={"enable_thinking": True}),
-            _model("no-native"),
-            _model("untuned", metadata={"context_length": 32768}),
-            _model("unbound", defaults={"context_size": 98304}),
-            _model("mtp-only", tags=["mtp"], defaults={"mtp": True}),
-        ]
-    )
+    production_install()
 
 
 def _ctx(argv: tuple[str, ...]) -> int:

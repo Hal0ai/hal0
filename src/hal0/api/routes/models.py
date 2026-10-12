@@ -24,7 +24,6 @@ from hal0.api._audit import record_action
 from hal0.api.middleware.error_codes import BadRequest, NotFound
 from hal0.config.loader import load_hal0_config
 from hal0.model_meta import derive_model_provider
-from hal0.profiles import ProfileCatalog
 from hal0.registry import pull_jobs as _pull_jobs
 from hal0.registry.curated import CURATED_MODELS
 from hal0.registry.pull import PullInvalidSource
@@ -115,7 +114,7 @@ _start_flm_pull = _pull_jobs.start_flm_pull
 #     is the pydantic schema of record for a model row).
 #   - update_model  — ``registry.update()`` re-validates through the same
 #     ``Model`` schema; ``_svc.screen_model_write`` additionally screens the
-#     launch-affecting fields (preferred_runner / extra_args) before that.
+#     ``defaults`` facts (a tuning key is a 422) and the vision↔mmproj pairing.
 #   - add-from-path / inspect / validate — thin route shells whose body
 #     shape is screened inside ``hal0.services.models_service``
 #     (``add_from_path`` / ``inspect_hf_repo`` / ``screen_model_write``).
@@ -405,10 +404,9 @@ async def create_model(request: Request) -> dict[str, Any]:
     provider = body.get("provider")
     if not isinstance(provider, str) or not provider.strip():
         body["provider"] = derive_model_provider(body.get("backends"))
-    # Screen launch-affecting fields at CREATE time too (UI-API-1 item 1): PUT
-    # already screened, but create wrote straight to the registry, so a row
-    # born with an extra_args that smuggles --port/--model/… would only fail at
-    # launch (or silently rebind the slot). Same helper the PUT/validate paths use.
+    # Screen at CREATE time too, with the same helper the PUT/validate paths
+    # use: a body carrying a removed ``defaults`` tuning key is a 422 here
+    # instead of a generic "invalid Model payload".
     _svc.screen_model_write(body, runner_images=_RUNNER_IMAGES)
     try:
         model = Model(**body)
@@ -437,16 +435,13 @@ async def create_model(request: Request) -> dict[str, Any]:
 async def validate_model_write(request: Request) -> dict[str, Any]:
     """Dry-run screen of a model create/edit body — no registry write (UI-API-1).
 
-    The dashboard's Model drawer POSTs a candidate ``{defaults, preferred_runner}``
-    here before saving, so a managed-arg smuggle (e.g. ``--port`` in
-    ``defaults.extra_args``) or an unknown ``preferred_runner`` is surfaced inline
-    instead of only at the eventual save (or, worse, at launch). Returns
+    The dashboard's Model drawer POSTs a candidate body here before saving so a
+    violation is surfaced inline instead of only at the eventual save. Returns
     ``{"ok": true}`` on a clean body; a violation raises the SAME typed envelope
-    (``slot.managed_arg_denied`` / ``model.extra_args_unparseable`` /
-    ``model.extra_args_json_quoting`` / ``model.unknown_runner`` /
-    ``model.defaults_invalid`` / ``model.context_size_out_of_range`` /
-    ``model.vision_requires_mmproj`` / ``model.mmproj_not_found``) the create and
-    PUT paths raise, so the drawer renders one error path.
+    (``422 model.defaults_key_removed`` / ``model.defaults_invalid`` /
+    ``model.provider_invalid`` / ``model.vision_requires_mmproj`` /
+    ``model.mmproj_not_found``) the create and PUT paths raise, so the drawer
+    renders one error path.
     """
     try:
         body = await request.json()
@@ -456,7 +451,7 @@ async def validate_model_write(request: Request) -> dict[str, Any]:
         raise BadRequest("body must be a JSON object")
     # A dry run of a sparse EDIT needs the stored row for the same reason the PUT
     # does (#1393) — the drawer sends only changed keys, so a body that adds
-    # ``vision`` must be screened against the persisted ``mmproj``. ``id`` is
+    # the ``vision`` capability must be screened against the persisted ``mmproj``. ``id`` is
     # optional and unknown ids fall back to a create-shaped screen; the registry
     # is only READ here (this route never writes).
     existing: dict[str, Any] | None = None
@@ -661,11 +656,10 @@ async def models_feasibility(request: Request) -> dict[str, Any]:
             model_mb = float(model.size_bytes or 0) / (1024 * 1024)
             ctx_meta = model.model_dump(mode="json")
             ctx = item.get("ctx")
-            if isinstance(ctx, int) and ctx > 0:
-                ctx_meta["defaults"] = {
-                    **(ctx_meta.get("defaults") or {}),
-                    "context_size": ctx,
-                }
+            if isinstance(ctx, int) and not isinstance(ctx, bool) and ctx > 0:
+                # The window to test comes from the request row (a model holds
+                # no context tune any more); the KV estimate reads ``ctx_tokens``.
+                ctx_meta["ctx_tokens"] = ctx
             needed = estimate_file_size_kv_mb(model_mb, ctx_meta)
             verdict = gtt_feasibility_verdict(needed, gtt_free_mb=free, gtt_total_mb=total)
         except Exception:
@@ -721,7 +715,7 @@ async def update_model(model_id: str, request: Request) -> dict[str, Any]:
     """Apply partial updates to a registered model's metadata.
 
     Body accepts any subset of: ``name``, ``capabilities``, ``provider``,
-    ``defaults`` (nested ``ModelDefaults``), plus the legacy fields
+    ``defaults`` (nested ``ModelDefaults``), plus the other fields
     (``license``, ``tags``, ``metadata`` …). Emits ``model.updated`` with
     ``changed_fields`` so the footer ticker can render a "you edited X" chip.
 
@@ -742,13 +736,15 @@ async def update_model(model_id: str, request: Request) -> dict[str, Any]:
     including ``metadata`` and the list-valued ``capabilities``/``tags`` —
     is a flat replace. See :func:`hal0.registry.store.merge_update`.
 
+    ``defaults`` holds file facts only (``chat_template``, ``tokenizer_repo``,
+    ``mtp``, ``jinja``); tunes live on profiles (ADR-0029).
+
     Errors:
-      * ``400 model.defaults_invalid`` — a ``defaults`` value that isn't
+      * ``422 model.defaults_key_removed`` — ``defaults`` carries a key the
+        model no longer owns (``extra_args``, ``context_size``, ``profile``,
+        ``enable_thinking``, ``vision``, …).
+      * ``400 model.defaults_invalid`` — a ``defaults`` fact whose value isn't
         parseable as its ``ModelDefaults`` type (#1414).
-      * ``400 model.context_size_out_of_range`` — ``defaults.context_size``
-        outside the launchable range (#1414).
-      * ``400 slot.hardware_flag_denied`` / ``400 slot.managed_arg_denied`` —
-        ``defaults.extra_args`` reaching for slot- or authority-owned flags.
       * ``400 model.provider_invalid`` — ``provider`` not a
         ``hal0.model_meta.RUNTIME_FAMILIES`` member.
       * ``404 model.not_found`` — ``model_id`` not registered.
@@ -793,8 +789,8 @@ async def update_model(model_id: str, request: Request) -> dict[str, Any]:
         if not isinstance(provider, str) or not provider.strip():
             body["provider"] = derive_model_provider(before.get("backends"))
 
-    # Validate the launch-affecting fields (defaults.extra_args + the
-    # vision↔mmproj pairing) at SAVE time (UI-API-1 items 1/2, #1393). Shared
+    # Validate the ``defaults`` facts + the vision↔mmproj pairing at SAVE
+    # time (UI-API-1 items 1/2, #1393). Shared
     # with create + /validate so the three paths never drift; fails the write
     # with the same envelope the launch path raises.
     _svc.screen_model_write(body, runner_images=_RUNNER_IMAGES, existing=before)
@@ -817,64 +813,6 @@ async def update_model(model_id: str, request: Request) -> dict[str, Any]:
             f"model:{model.id}",
             f"{model.id}: updated ({', '.join(changed) or 'no-op'})",
             data={"id": model.id, "changed_fields": changed},
-        )
-    return _model_to_dict(model)
-
-
-@router.post("/{model_id}/seed-profile")
-async def seed_model_profile(model_id: str, request: Request) -> dict[str, Any]:
-    """Stamp a profile's flags onto a model's tune.
-
-    Body: ``{"profile": "<name>"}``. Resolves the named profile and writes
-    ``defaults.extra_args``/``defaults.profile`` from it — the server-side
-    twin of the old model-drawer template select. The stamp is re-screened
-    through :func:`hal0.services.models_service.screen_model_write` exactly
-    like :func:`update_model`, so a stale or hand-edited profile can never
-    smuggle a slot- or authority-owned flag into the write.
-
-    Emits ``model.updated`` with
-    ``changed_fields=["defaults.extra_args", "defaults.profile"]``.
-
-    Errors:
-      * ``400 profiles.name_required`` — body missing/blank ``profile``.
-      * ``400 slot.managed_arg_denied`` — the profile's flags reach for a
-        managed arg.
-      * ``404 model.not_found`` — ``model_id`` not registered.
-      * ``404 profiles.not_found`` — ``profile`` not in the catalog.
-    """
-    try:
-        body = await request.json()
-    except Exception as exc:
-        raise BadRequest("body must be valid JSON", details={"error": str(exc)}) from exc
-    if not isinstance(body, dict):
-        raise BadRequest("body must be a JSON object")
-    name = body.get("profile")
-    if not isinstance(name, str) or not name.strip():
-        raise BadRequest("body must carry {'profile': <name>}", code="profiles.name_required")
-
-    profile = ProfileCatalog().resolve(name.strip())  # unknown profile → 404
-
-    registry = request.app.state.model_registry
-    # Fail-fast here (unlike update_model's try/except-to-{}): this route has
-    # nothing sparse to resolve a body against, so an unknown model_id should
-    # 404 immediately rather than silently screen against an empty ``before``.
-    before = registry.get(model_id).model_dump(mode="python")  # unknown model → 404
-
-    updates = {"defaults": {"extra_args": profile.flags or "", "profile": profile.name}}
-    _svc.screen_model_write(updates, runner_images=_RUNNER_IMAGES, existing=before)
-    model = registry.update(model_id, updates)
-
-    event_bus = getattr(request.app.state, "events", None)
-    if event_bus is not None:
-        await event_bus.emit(
-            "model.updated",
-            "info",
-            f"model:{model.id}",
-            f"{model.id}: seeded from profile {profile.name!r}",
-            data={
-                "id": model.id,
-                "changed_fields": ["defaults.extra_args", "defaults.profile"],
-            },
         )
     return _model_to_dict(model)
 

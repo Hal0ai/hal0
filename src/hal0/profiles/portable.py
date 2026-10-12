@@ -1,6 +1,6 @@
 """Portable profiles — export/import (mirrors stacks/portable.py, simpler).
 
-Export serializes a single profile (image + flag bundle + display facts; never
+Export serializes a single profile (flag bundle + ctx/thinking/vision/mtp tune + runner; never
 secrets, never host paths) into a self-contained ``.hal0profile.json`` envelope
 with a content checksum. Import validates the envelope and creates the profile.
 Pure functions — the caller stamps ``exported_at``, so there is no clock or
@@ -68,6 +68,14 @@ class ProfileEnvelope(BaseModel):
     profile: ProfileConfig
 
 
+#: Oldest envelope schema this release reads. Schema 2 is the profile-centric
+#: shape (ADR-0029): ``ctx_size`` / ``enable_thinking`` / ``vision`` / ``mtp``
+#: ("auto"/"off") / ``runner``; schema 1 carried ``device_class`` / ``backend`` /
+#: ``quant`` and a boolean ``mtp``. A schema-1 envelope is refused whole rather
+#: than having fields silently stripped.
+ENVELOPE_SCHEMA_MIN = 2
+
+
 def parse_envelope(data: Any) -> ProfileEnvelope:
     """Validate the wire shape. Raises BadRequest on a non-envelope/invalid input."""
     if not isinstance(data, dict) or data.get("kind") != ENVELOPE_KIND:
@@ -75,6 +83,18 @@ def parse_envelope(data: Any) -> ProfileEnvelope:
             "not a hal0.profile envelope",
             code="profiles.bad_envelope",
             details={"kind": (data.get("kind") if isinstance(data, dict) else None)},
+        )
+    declared = data.get("schema_version", ENVELOPE_SCHEMA_MIN)
+    if (
+        isinstance(declared, int)
+        and not isinstance(declared, bool)
+        and declared < ENVELOPE_SCHEMA_MIN
+    ):
+        raise BadRequest(
+            f"profile envelope schema v{declared} is no longer supported "
+            f"(need v{ENVELOPE_SCHEMA_MIN}); re-export from hal0 1.5",
+            code="profiles.envelope_schema_unsupported",
+            details={"got": declared, "supported_min": ENVELOPE_SCHEMA_MIN},
         )
     try:
         return ProfileEnvelope.model_validate(data)
@@ -99,7 +119,7 @@ def envelope_runner_status(profile: ProfileConfig) -> tuple[str | None, bool]:
     envelope's own key had to be dropped to get there.
 
     Import is PORTABLE: a profile authored on a box with more runtimes still
-    has to land here — its flags and quant are the whole point — so a runner
+    has to land here — its flags are the whole point — so a runner
     key absent from ``RUNNER_IMAGES`` is stripped to ``None`` (Auto) instead
     of failing the import. ``screen_profile_runner`` stays strict on the
     create/update seams: only import substitutes, and it reports the
@@ -163,6 +183,5 @@ def import_profile(
                 "actual": _checksum(data.get("profile") or {}),
             },
         )
-    # (forward-compat seam: older schema_version would migrate here; only v1 exists.)
     kept, _stripped = envelope_runner_status(env.profile)
     return catalog.create(name, env.profile.model_copy(update={"runner": kept}))

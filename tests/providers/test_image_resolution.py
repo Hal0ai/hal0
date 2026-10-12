@@ -16,9 +16,10 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import hal0.runners.pins as pins_mod
+from hal0.config.schema import ProfileConfig
 from hal0.providers.container import (
-    _profile_image_and_flags,
     _resolve_image_ref,
+    _resolve_llama_scalars,
 )
 from hal0.runners import RUNNER_IMAGES, cpu_lane_has_runner_image, get_runner, resolve_runner_image
 from hal0.runners.pins import RunnerPin
@@ -41,10 +42,10 @@ def _cpu_image() -> str:
 
 
 def _profile(image: str | None = None, *, backend: str = "vulkan") -> SimpleNamespace:
-    """A device-agnostic profile stand-in. ``image`` is set only to prove it is
-    IGNORED — real profiles no longer carry one. ``flags``/``mtp`` are present so
-    _profile_image_and_flags can resolve its (unused-here) flag string."""
-    return SimpleNamespace(image=image, backend=backend, device_class="gpu", flags="", mtp=False)
+    """A profile stand-in carrying hints real profiles no longer have. ``image``
+    is set only to prove it is IGNORED; ``backend``/``device_class`` are the
+    last-resort lane hint for a slot dict that declares no device."""
+    return SimpleNamespace(image=image, backend=backend, device_class="gpu", flags="", mtp="auto")
 
 
 # --- image_pin escape hatch (tier 1) --------------------------------------- #
@@ -184,23 +185,26 @@ def test_default_images_config_load_failure_fails_soft(monkeypatch) -> None:
     assert _resolve_image_ref({"binary": "cpu"}, _profile()) == _cpu_image()
 
 
-# --- _profile_image_and_flags integration ---------------------------------- #
+# --- launch scalars integration -------------------------------------------- #
 
 
-def test_profile_image_and_flags_honours_image_pin() -> None:
-    """The launch renderer's (image, flags) tuple uses the slot image_pin."""
-    slot_cfg = {"image_pin": "ghcr.io/hal0ai/hal0-runner-standard:debug-build"}
-    image, _flags = _profile_image_and_flags(_profile(), slot_cfg=slot_cfg)
-    assert image == "ghcr.io/hal0ai/hal0-runner-standard:debug-build"
+def test_launch_scalars_honour_image_pin() -> None:
+    """The launch path's resolved image (``_resolve_llama_scalars``, shared by
+    launch and preview) uses the slot image_pin."""
+    slot_cfg = {
+        "name": "chat",
+        "device": "gpu-rocm",
+        "image_pin": "ghcr.io/hal0ai/hal0-runner-standard:debug-build",
+    }
+    sc = _resolve_llama_scalars(slot_cfg, {"path": "/m.gguf"}, ProfileConfig())
+    assert sc["image"] == "ghcr.io/hal0ai/hal0-runner-standard:debug-build"
 
 
-def test_profile_image_and_flags_default_when_nothing_set() -> None:
-    """No image_pin, no binary → the HW-gated ``standard`` default."""
-    profile = SimpleNamespace(
-        image=None, flags="-ngl 999", mtp=False, backend="rocm", device_class="gpu"
-    )
-    image, _flags = _profile_image_and_flags(profile)
-    assert image == _standard_image()
+def test_launch_scalars_default_when_nothing_set() -> None:
+    """No image_pin, no binary, a GPU slot → the HW-gated ``standard`` default."""
+    slot_cfg = {"name": "chat", "device": "gpu-rocm"}
+    sc = _resolve_llama_scalars(slot_cfg, {"path": "/m.gguf"}, ProfileConfig(flags="-fa on"))
+    assert sc["image"] == _standard_image()
 
 
 # --- the CPU lane resolves to the cpu runner (#2126) ------------------------ #

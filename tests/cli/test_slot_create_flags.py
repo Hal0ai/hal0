@@ -14,6 +14,7 @@ read the host's real ``/etc/hal0/hardware.json``.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -418,3 +419,70 @@ def test_edit_profile_flag_is_forwarded(monkeypatch: pytest.MonkeyPatch) -> None
     assert result.exit_code == 0, result.output
     assert captured["path"] == "/api/slots/rr/config"
     assert captured["payload"] == {"profile": "reranking"}
+
+
+# ── ADR-0029: the context window is a profile setting, not a slot flag ───────
+
+
+def test_slot_create_writes_no_tuning_key(captured_post: dict[str, Any]) -> None:
+    """The create body names the model and nothing else about it: no
+    ``context_size`` (the write boundary refuses it with slot.tuning_key_denied)."""
+    result = runner.invoke(
+        slot_commands.app,
+        ["create", "primary", "--provider", "llama-server", "--model", "demo"],
+    )
+    assert result.exit_code == 0, result.output
+    assert captured_post["body"]["model"] == {"default": "demo"}
+
+
+def test_slot_create_rejects_ctx_size_flag(captured_post: dict[str, Any]) -> None:
+    result = runner.invoke(
+        slot_commands.app,
+        ["create", "primary", "--model", "demo", "--ctx-size", "8192"],
+    )
+    assert result.exit_code == 2, result.output  # typer/click usage error
+    assert "No such option" in result.output
+    assert "--ctx-size" in re.sub(r"\x1b\[[0-9;]*m", "", result.output)
+    assert "body" not in captured_post  # nothing was POSTed
+
+
+def test_slot_edit_rejects_ctx_size_flag(monkeypatch: pytest.MonkeyPatch) -> None:
+    puts: list[Any] = []
+    monkeypatch.setattr(slot_commands, "_api_unreachable", lambda _u: False)
+    monkeypatch.setattr(slot_commands, "api_put", lambda *a, **k: puts.append((a, k)) or {})
+
+    result = runner.invoke(slot_commands.app, ["edit", "primary", "--ctx-size", "8192"])
+
+    assert result.exit_code == 2, result.output
+    assert "No such option" in result.output
+    assert puts == []
+
+
+def test_slot_edit_model_swap_sends_only_the_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    sent: dict[str, Any] = {}
+    monkeypatch.setattr(slot_commands, "_api_unreachable", lambda _u: False)
+    monkeypatch.setattr(
+        slot_commands, "api_get", lambda *a, **k: {"model": {"default": "old"}, "port": 8081}
+    )
+
+    def fake_put(path: str, *, json: dict[str, Any] | None = None, **_kw: Any) -> dict[str, Any]:
+        sent["path"], sent["body"] = path, json
+        return {"state": "offline"}
+
+    monkeypatch.setattr(slot_commands, "api_put", fake_put)
+
+    result = runner.invoke(slot_commands.app, ["edit", "primary", "--model", "new"])
+
+    assert result.exit_code == 0, result.output
+    assert sent["body"] == {"model": {"default": "new"}}
+
+
+def test_slot_edit_with_no_fields_does_not_mention_ctx_size(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(slot_commands, "_api_unreachable", lambda _u: False)
+
+    result = runner.invoke(slot_commands.app, ["edit", "primary"])
+
+    assert result.exit_code == 2
+    assert "--ctx-size" not in result.output

@@ -31,8 +31,6 @@ import sqlite3
 import tomllib
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field
-from functools import lru_cache
-from importlib.resources import files
 from pathlib import Path
 from typing import Any, Literal
 
@@ -40,6 +38,17 @@ from hal0.config.migrations import profile_centric_frozen as frozen
 from hal0.errors import Hal0Error
 
 # ── constants of the conversion ──────────────────────────────────────────────
+
+#: Slot keys valid in both shapes: dropped from a converted slot, but their
+#: presence does not make a slot old.
+SHAPE_NEUTRAL_KEYS: frozenset[str] = frozenset({"runtime"})
+
+
+def drops_slot_key(key: str, value: Any) -> bool:
+    """Whether a top-level slot key leaves the slot. ``image`` leaves only as
+    the old image pin (a string); the ``[image]`` settings table stays."""
+    return not (key == "image" and isinstance(value, Mapping))
+
 
 #: Top-level slot keys that leave the slot.
 SLOT_DROP_KEYS: tuple[str, ...] = (
@@ -75,6 +84,13 @@ MODEL_TUNING_COLUMNS: tuple[str, ...] = (
 MODEL_TUNING_EXTRA_KEYS: tuple[str, ...] = ("_enable_thinking", "_vision")
 #: The table SQL migration 012 moves the model tuning columns into.
 HOLDING_TABLE = "legacy_model_tuning"
+#: The SQL migration that copies the model tuning into :data:`HOLDING_TABLE`.
+HOLDING_MIGRATION = 12
+#: Where the demoted-seed adoption markers live once they leave profiles.toml
+#: (under ``/var/lib/hal0``). Only the frozen resolver reads them: they say
+#: which demoted seeds an older release already settled.
+LEDGER_FILE = "profile-centric-ledger.json"
+MARKER_KEYS: tuple[str, ...] = ("legacy_seeds_migrated", "legacy_seeds_adopted")
 #: Audit record under ``/var/lib/hal0`` of what the last conversion run did
 #: (written by the apply step). It is a report and is never consulted: what
 #: still needs converting is read from the content itself (:func:`profile_shape`,
@@ -107,11 +123,6 @@ ENGINE_SEED: dict[str, str] = {
 #: Slot type -> the seed that carries its mode flag.
 TYPE_SEED: dict[str, str] = {"embedding": "embedding", "reranking": "reranking"}
 
-#: The MTP draft defaults the new launch path adds in the profile layer; the
-#: draft device is placement and comes from the slot.
-MTP_DRAFT_BUNDLE = "--spec-type draft-mtp" + frozen._MTP_BUNDLE_TAIL
-MTP_DRAFT_DEVICE: dict[str, str] = {"rocm": "ROCm0", "vulkan": "Vulkan0", "cuda": "CUDA0"}
-
 _BASE = frozenset({"--host", "--port", "--model", "--alias", "--ctx-size"})
 _VISION_OFF = frozenset({"--no-mmproj", "--no-mmproj-auto"})
 #: Flags whose combined effect is "is the projector loaded" (llama.cpp clears
@@ -131,15 +142,11 @@ class ProfileMigrationError(Hal0Error):
     code = "profiles.migration_failed"
 
 
-@lru_cache(maxsize=1)
 def target_seeds() -> dict[str, dict[str, Any]]:
-    """The seed catalog the conversion targets (new profile shape)."""
-    text = (
-        files("hal0.config.data")
-        .joinpath("profile_centric_seeds_after.toml")
-        .read_text(encoding="utf-8")
-    )
-    return {k: dict(v) for k, v in tomllib.loads(text).get("profile", {}).items()}
+    """The seed catalog the conversion targets: the shipped seeds."""
+    from hal0.config.schema import SEED_PROFILES
+
+    return {k: dict(v) for k, v in SEED_PROFILES.items()}
 
 
 # ── plan data ────────────────────────────────────────────────────────────────
@@ -188,8 +195,11 @@ class ModelPlan:
 @dataclass
 class StackPlan:
     stack: str
+    #: ``{"index", "slot", "change", "drop": [keys], "profile": new name | None}``
     rows: list[dict[str, Any]] = field(default_factory=list)
     profile_rewrites: dict[str, list[str]] = field(default_factory=dict)
+    #: embedded profiles in the new shape, by name
+    profiles: dict[str, dict[str, Any]] = field(default_factory=dict)
     errors: list[str] = field(default_factory=list)
 
 
@@ -206,6 +216,8 @@ class ConversionPlan:
     #: Stored profiles that cannot be converted as they are: name -> reasons.
     #: Reported (and counted as blocking) whether or not any slot uses them.
     blocked_profiles: dict[str, list[str]] = field(default_factory=dict)
+    #: every custom profile after conversion (new shape): what profiles.toml holds
+    custom_profiles: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     @property
     def blocked(self) -> list[SlotPlan]:
@@ -465,7 +477,16 @@ def new_launch(
     jinja = (
         bool(getattr(supports, "jinja", False)) and defaults.get("jinja") is not False and not embed
     )
-    model_layer = ["--jinja"] if jinja else []
+    from hal0.config.schema import family_flags
+
+    quirks = family_flags(
+        str(model.get("_model_key") or ""),
+        str(model.get("path") or ""),
+        architecture=model.get("architecture"),
+    )
+    model_layer = shlex.split(quirks) if quirks.strip() else []
+    if jinja:
+        model_layer += ["--jinja"]
     tmpl = defaults.get("chat_template")
     if tmpl and tmpl != "auto":
         model_layer += ["--chat-template-file", f"{chat_template_root}/chat-templates/{tmpl}.jinja"]
@@ -479,6 +500,8 @@ def new_launch(
         and bool(getattr(supports, "mtp", False))
         and not embed
     )
+    from hal0.config.schema import MTP_DRAFT_BUNDLE, mtp_draft_device
+
     profile_layer = (shlex.split(MTP_DRAFT_BUNDLE) if mtp else []) + flags
 
     slot_layer: list[str] = []
@@ -493,7 +516,7 @@ def new_launch(
         backend = frozen._backend_and_class(slot, frozen.Profile(name=""))[0]
         slot_layer += [
             "--spec-draft-device",
-            MTP_DRAFT_DEVICE.get((backend or "").lower(), "ROCm0"),
+            mtp_draft_device(backend),
         ]
 
     from hal0.slots.argv import _dedup, _split_pairs
@@ -547,6 +570,8 @@ class Inputs:
     profiles_raw: dict[str, Any] | None
     stacks_raw: dict[str, Any] | None
     models: dict[str, dict[str, Any]]
+    #: demoted-seed markers still in profiles.toml (moved to :data:`LEDGER_FILE`)
+    markers_in_file: dict[str, Any] = field(default_factory=dict)
 
 
 def _read_toml(path: Path) -> dict[str, Any] | None:
@@ -562,8 +587,14 @@ def read_inputs(
     profiles_toml: Path | None = None,
     stacks_toml: Path | None = None,
     db_path: Path | None = None,
+    live_columns: bool = False,
 ) -> Inputs:
-    """Read raw slot/profile/stack TOML and the model rows. Never validates."""
+    """Read raw slot/profile/stack TOML and the model rows. Never validates.
+
+    ``live_columns`` reads the model tuning from the ``model`` columns even
+    after SQL migration 012 (a preview after a restore: the holding table may
+    be stale).
+    """
     from hal0.config import paths
 
     slots_dir = slots_dir or paths.slots_config_dir()
@@ -585,12 +616,42 @@ def read_inputs(
         stacks_raw = _read_toml(stacks_toml)
     except (OSError, tomllib.TOMLDecodeError) as exc:
         raise ProfileMigrationError(f"cannot read profile/stack config: {exc}") from exc
-    return Inputs(slots, profiles_raw, stacks_raw, read_model_rows(db_path))
+    in_file = {k: profiles_raw[k] for k in MARKER_KEYS if profiles_raw and k in profiles_raw}
+    if not in_file:
+        # Markers an earlier run moved out: the frozen resolver still needs
+        # them to know which demoted seeds were settled.
+        ledger = read_ledger(paths.var_lib() / LEDGER_FILE)
+        if ledger:
+            profiles_raw = {**(profiles_raw or {}), **ledger}
+    rows = read_model_rows(db_path, live_columns=live_columns)
+    return Inputs(slots, profiles_raw, stacks_raw, rows, in_file)
 
 
-def read_model_rows(db_path: Path) -> dict[str, dict[str, Any]]:
-    """Every ``model`` row as a plain dict, read-only, with the tuning columns
-    filled from the holding table when SQL migration 012 has moved them."""
+def read_ledger(path: Path) -> dict[str, Any]:
+    """The demoted-seed markers saved in :data:`LEDGER_FILE` (empty if none)."""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return {}
+    except OSError as exc:
+        raise ProfileMigrationError(f"cannot read {path}: {exc}") from exc
+    if not text.strip():
+        return {}
+    try:
+        data = json.loads(text)
+    except ValueError as exc:
+        raise ProfileMigrationError(f"cannot read {path}: {exc}") from exc
+    return {k: data[k] for k in MARKER_KEYS if isinstance(data, dict) and k in data}
+
+
+def read_model_rows(db_path: Path, *, live_columns: bool = False) -> dict[str, dict[str, Any]]:
+    """Every ``model`` row as a plain dict, read-only, with its tuning.
+
+    Before SQL migration 012 the tuning is the row's own columns (and two
+    ``extra`` keys). Once 012 has run, the holding table is the only source:
+    the columns stay in the table for a rollback but are never read again, so
+    a converted install (holding table dropped) reads as untuned.
+    """
     if not db_path.exists():
         return {}
     conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
@@ -600,6 +661,22 @@ def read_model_rows(db_path: Path) -> dict[str, dict[str, Any]]:
         if "model" not in tables:
             return {}
         rows = {str(r["id"]): dict(r) for r in conn.execute("SELECT * FROM model")}
+        applied = set()
+        if "schema_migrations" in tables:
+            applied = {int(r[0]) for r in conn.execute("SELECT version FROM schema_migrations")}
+        if live_columns or (HOLDING_MIGRATION not in applied and HOLDING_TABLE not in tables):
+            return rows
+        for row in rows.values():
+            for col in MODEL_TUNING_COLUMNS:
+                row[col] = None
+            try:
+                extra = json.loads(row.get("extra") or "{}")
+            except ValueError:
+                extra = {}
+            if isinstance(extra, dict):
+                for key in MODEL_TUNING_EXTRA_KEYS:
+                    extra.pop(key, None)
+                row["extra"] = json.dumps(extra)
         if HOLDING_TABLE in tables:
             for held in conn.execute(f"SELECT * FROM {HOLDING_TABLE}"):
                 row = rows.get(str(held["id"]))
@@ -785,12 +862,18 @@ class _Planner:
         # profiles: a new-shape one means something else to it.
         self.old = frozen.Catalog(None if raw is None else {**raw, "profile": old_entries})
         self.bound: set[str] = set()
+        #: slot file -> the model it names (to keep a blocked slot's tuning).
+        self.model_of: dict[str, str] = {}
         #: new-shape catalog after conversion: target seeds + converted customs.
         self.catalog: dict[str, dict[str, Any]] = {k: dict(v) for k, v in target_seeds().items()}
         #: names no converted or generated profile may take.
         self.reserved: set[str] = {str(n) for n in entries}
         #: old profile name -> its name after conversion.
         self.name_map: dict[str, str] = {}
+        from hal0.config.paths import model_store_root
+
+        #: where chat-template files live, as the launch path renders them
+        self.ct_root = str(Path(model_store_root()))
 
     # -- profiles --------------------------------------------------------
 
@@ -859,10 +942,10 @@ class _Planner:
             assert resolved is not None
             conv = convert_profile(self.old.custom[name], frozen.runtime_family(resolved))
             self.name_map[name] = self._place(name, conv, new=False, stored=self.old.custom[name])
-        raw = self.inputs.profiles_raw or {}
-        markers = [m for m in ("legacy_seeds_migrated", "legacy_seeds_adopted") if m in raw]
-        if markers:
-            self.plan.profile_rewrites["(profiles.toml)"] = [f"{m} removed" for m in markers]
+        if self.inputs.markers_in_file:
+            self.plan.profile_rewrites["(profiles.toml)"] = [
+                f"{m} moved to /var/lib/hal0/{LEDGER_FILE}" for m in self.inputs.markers_in_file
+            ]
 
     def new_name(self, old_name: str) -> str | None:
         """The profile an old name resolves to after conversion (None: nothing)."""
@@ -969,7 +1052,9 @@ class _Planner:
             )
         probe = SlotPlan(file=sp.file, name=sp.name, engine=frozen.engine_for(slot, self.old))
         self._shape_keys(raw, slot, probe)
-        old_keys = [*probe.drop_keys, *probe.set_keys]
+        # ``runtime`` is still a valid slot key in the new shape (the shipped
+        # slot files carry it), so it says nothing about the file's shape.
+        old_keys = [k for k in [*probe.drop_keys, *probe.set_keys] if k not in SHAPE_NEUTRAL_KEYS]
         file_old = bool(old_keys or probe.inert)
         table = slot.get("model") if isinstance(slot.get("model"), Mapping) else {}
         model_id = str(table.get("default") or "")
@@ -995,7 +1080,7 @@ class _Planner:
 
     def _shape_keys(self, raw: Mapping[str, Any], slot: Mapping[str, Any], sp: SlotPlan) -> None:
         for key in SLOT_DROP_KEYS:
-            if key in slot:
+            if key in slot and drops_slot_key(key, slot[key]):
                 sp.drop_keys.append(key)
         if "backend" in slot and not slot.get("device"):
             from hal0.model_meta import map_backend_to_device
@@ -1037,6 +1122,7 @@ class _Planner:
         row = self.inputs.models.get(model_id) if model_id else None
         if model_id:
             self.bound.add(model_id)
+            self.model_of[sp.file] = model_id
         if sp.engine != frozen.LLAMA:
             self._plan_other_engine(slot, sp, model_id, row)
         elif not model_id:
@@ -1075,7 +1161,7 @@ class _Planner:
     ) -> None:
         model = _launch_model_info(row, model_id)
         model_after = _launch_model_info(_row_after(row) if row else None, model_id)
-        old = frozen.evaluate(slot, model, self.old)
+        old = frozen.evaluate(slot, model, self.old, chat_template_root=self.ct_root)
         sp.argv_today = old.argv
         base = self._base_for(slot, sp, old.profile_launched)
         fixed_profile = False
@@ -1084,7 +1170,9 @@ class _Planner:
             # gets the seed that carries it.
             fixed_profile = base != old.profile_launched
             if fixed_profile:
-                old = frozen.evaluate({**slot, "profile": base}, model, self.old)
+                old = frozen.evaluate(
+                    {**slot, "profile": base}, model, self.old, chat_template_root=self.ct_root
+                )
                 sp.launch_changes.append(
                     f"launches with the {base!r} profile (its type's mode flag) instead of "
                     f"{sp.profile_before or 'no profile'!r}"
@@ -1151,7 +1239,12 @@ class _Planner:
             sp.profile_after = self._generate(base, model_id, want)
             sp.generated = sp.profile_after in self.plan.profiles
 
-        after = new_launch(slot_after, model_after, self.catalog[sp.profile_after])
+        after = new_launch(
+            slot_after,
+            model_after,
+            self.catalog[sp.profile_after],
+            chat_template_root=self.ct_root,
+        )
         sp.argv_after = after.argv
         self._diff(sp, old, after, fixed_profile)
 
@@ -1292,9 +1385,24 @@ class _Planner:
     # -- models and stacks -----------------------------------------------
 
     def plan_models(self) -> None:
+        held = {
+            self.model_of[s.file]: s.file
+            for s in self.plan.slots
+            if s.status == "blocked" and s.file in self.model_of
+        }
         for model_id, row in sorted(self.inputs.models.items()):
             tuning = _model_tuning(row)
             if not tuning:
+                continue
+            if model_id in held:
+                # A blocked slot still launches from this tuning; it stays
+                # until that slot converts.
+                self.plan.models.append(
+                    ModelPlan(
+                        model_id=model_id,
+                        notes=[f"tuning kept: blocked slot {held[model_id]} still uses it"],
+                    )
+                )
                 continue
             mp = ModelPlan(model_id=model_id, clear=tuning)
             if model_id not in self.bound:
@@ -1352,13 +1460,16 @@ class _Planner:
                     st.errors.append(f"embedded profile {pname!r}: " + "; ".join(conv.errors))
                 if conv.notes or _tidy(conv.content) != dict(entry):
                     st.profile_rewrites[str(pname)] = conv.notes or ["rewritten in the new shape"]
+                st.profiles[str(pname)] = _tidy(conv.content)
             rows = stack.get("slots") if isinstance(stack.get("slots"), list) else []
-            for row in rows:
+            for index, row in enumerate(rows):
                 if not isinstance(row, Mapping):
                     continue
-                change = self._plan_stack_row(row, embedded, by_slot, stack=st.stack)
-                if change:
-                    st.rows.append({"slot": str(row.get("slot") or ""), "change": change})
+                edit = self._plan_stack_row(row, embedded, by_slot, stack=st.stack)
+                if edit["change"]:
+                    st.rows.append({"index": index, "slot": str(row.get("slot") or ""), **edit})
+            # Only a stack with something to write is planned: one already in
+            # the new shape (or broken only by a missing profile) is not.
             if st.rows or st.profile_rewrites or st.errors:
                 self.plan.stacks.append(st)
 
@@ -1369,8 +1480,9 @@ class _Planner:
         by_slot: Mapping[str, SlotPlan],
         *,
         stack: str,
-    ) -> str:
+    ) -> dict[str, Any]:
         parts: list[str] = []
+        new_profile: str | None = None
         present = [k for k in STACK_ROW_TUNING_KEYS if k in row]
         if present:
             shown = [
@@ -1392,6 +1504,7 @@ class _Planner:
                 and sp.profile_after != pname
             ):
                 parts.append(f"profile {pname!r} -> {sp.profile_after!r} (the converted slot's)")
+                new_profile = sp.profile_after
             else:
                 new = self.new_name(pname)
                 if new is None:
@@ -1403,7 +1516,8 @@ class _Planner:
                     )
                 elif new != pname:
                     parts.append(f"profile {pname!r} -> {new!r}")
-        return "; ".join(parts)
+                    new_profile = new
+        return {"change": "; ".join(parts), "drop": present, "profile": new_profile}
 
 
 def plan_conversion(inputs: Inputs | None = None) -> ConversionPlan:
@@ -1415,17 +1529,14 @@ def plan_conversion(inputs: Inputs | None = None) -> ConversionPlan:
     planner.plan_models()
     planner.plan_stacks()
     plan = planner.plan
-    if plan.blockers and "(profiles.toml)" in plan.profile_rewrites:
-        plan.profile_rewrites.pop("(profiles.toml)")
-        plan.warnings.append(
-            "the demoted-seed markers in profiles.toml stay until nothing is blocked"
-        )
+    plan.custom_profiles = {
+        name: content for name, content in planner.catalog.items() if name not in target_seeds()
+    }
     return plan
 
 
 __all__ = [
     "HOLDING_TABLE",
-    "MTP_DRAFT_BUNDLE",
     "STATE_FILE",
     "ConversionPlan",
     "FlagConversion",

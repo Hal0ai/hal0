@@ -354,17 +354,16 @@ def test_apply_commit_creates_missing_slot(app: FastAPI, tmp_hal0_home: str) -> 
         assert isinstance(created_body.get("port"), int) and created_body["port"] > 0
 
 
-# ── the write boundary: stack apply may not cross the slot/model partition ─────
+# ── the write boundary: a stack row is placement only (ADR-0029) ──────────────
 #
 # ``POST /{slug}/apply`` (non-dry-run) reaches slot TOML through
 # ``StackApplyEngine`` → ``reconcile_and_guard_slot_config``, entirely
-# in-process: it never passes the ``routes/slots`` handlers where
-# ``reject_model_owned_slot_keys`` lives. Before the fix that pipeline checked
-# only NPU-exclusivity and default-uniqueness, so — ``SlotConfig`` being
-# ``extra="allow"`` — an apply silently persisted ``mtp``/``vision``/
-# ``enable_thinking`` onto an EXISTING slot's TOML that
-# ``PUT /api/slots/{name}/config`` 400s on, reintroducing the pre-partition
-# on-disk shape (spec-hw-slot-ownership §1). Nothing anywhere covered this.
+# in-process. A stack row carries placement (slot, model, device, provider,
+# profile, capabilities); every tune lives on the profile it names. Schema 3
+# dropped the per-row ``vision`` / ``mtp`` / ``enable_thinking`` /
+# ``server_extra_args`` keys, so there is nothing tuning-shaped left to project.
+
+_RETIRED_ROW_KEYS = ("vision", "mtp", "enable_thinking", "server_extra_args")
 
 
 def _apply_with_fakes(app: FastAPI, c: TestClient, slug: str) -> dict:
@@ -382,7 +381,7 @@ def _read_slot_toml(home: str, name: str) -> dict:
     """Parse a slot's on-disk TOML.
 
     Parsed, not substring-matched: several real model ids contain ``mtp`` in
-    their own name (``…-ace-saber-mtp-f16-…``), so a text search for the KEY
+    their own name (``…-ace-saber-mtp-f16-…``), so a text search for a KEY
     reports a false positive on the VALUE.
     """
     import tomllib
@@ -396,70 +395,58 @@ def _read_slot_toml(home: str, name: str) -> dict:
     return data
 
 
-@pytest.mark.parametrize(
-    ("field", "value"),
-    [("vision", True), ("mtp", True), ("enable_thinking", True)],
-)
-def test_apply_never_lands_model_owned_keys_on_an_existing_slot(
-    app: FastAPI, tmp_hal0_home: str, field: str, value: bool
-) -> None:
-    """A stack row's model-owned capability must not reach the slot's TOML.
+@pytest.mark.parametrize("field", _RETIRED_ROW_KEYS)
+def test_stack_rows_refuse_the_retired_tuning_keys(client: TestClient, field: str) -> None:
+    """A row naming a retired key is rejected on create, not silently stripped."""
+    value: object = "-fa on" if field == "server_extra_args" else True
+    r = client.post(
+        "/api/stacks",
+        json={
+            "slug": "coding",
+            "stack": _stack_body(slots=[{"slot": "agent", "model": "m", field: value}]),
+        },
+    )
+    assert r.status_code == 422, r.text
+    assert client.get("/api/stacks/coding").status_code == 404
 
-    This is the regression test for the stacks-apply bypass. The row still
-    CARRIES the field (``StackSlotEntry`` keeps all three for back-compat —
-    seed stacks declare ``mtp = true``), and the apply still succeeds and still
-    swaps the model; the capability simply never projects onto the slot.
-    """
+
+def test_apply_lands_placement_only_on_an_existing_slot(app: FastAPI, tmp_hal0_home: str) -> None:
+    """The apply swaps the model and re-points the profile; it writes no tune."""
     _seed_slot_toml(tmp_hal0_home, "agent", model="old-model")
     with TestClient(app) as c:
         c.post(
             "/api/stacks",
             json={
                 "slug": "coding",
-                "stack": _stack_body(slots=[{"slot": "agent", "model": "new-model", field: value}]),
+                "stack": _stack_body(
+                    slots=[{"slot": "agent", "model": "new-model", "profile": "coding"}]
+                ),
             },
         )
         body = _apply_with_fakes(app, c, "coding")
 
-        # The apply did its real work...
         assert body["dry_run"] is False
         on_disk = _read_slot_toml(tmp_hal0_home, "agent")
         assert on_disk["model"]["default"] == "new-model", "the model swap must still land"
-        # ...but the model-owned key is nowhere on disk.
-        assert field not in on_disk, (
-            f"stack apply persisted model-owned {field!r} to slot TOML: {on_disk}"
-        )
-        # And the same key is still refused at the HTTP slot-config boundary, so
-        # the two write surfaces now agree instead of one being a back door.
-        r = c.put("/api/slots/agent/config", json={field: value})
-        assert r.status_code == 400, r.text
-        assert r.json()["error"]["code"] == "slot.model_owned_key_denied"
+        assert on_disk["profile"] == "coding"
+        assert schema.slot_tuning_keys(on_disk) == [], on_disk
+        # The tuning keys are refused at the HTTP slot-config boundary too, so
+        # the two write surfaces agree: a tune belongs on a profile.
+        for field in ("mtp", "vision", "enable_thinking"):
+            r = c.put("/api/slots/agent/config", json={field: True})
+            assert r.status_code == 400, r.text
+            assert r.json()["error"]["code"] == "slot.tuning_key_denied"
 
 
-def test_apply_dry_run_never_projects_model_owned_keys(
-    client: TestClient, tmp_hal0_home: str
-) -> None:
-    """The dry-run preview must not PROMISE a write the commit won't make.
-
-    ``plan()`` is the same code path apply commits, so a dry-run that showed
-    ``vision`` in its after-state would either be lying or the guard would only
-    be half-applied.
-    """
+def test_apply_dry_run_previews_the_profile_repoint(client: TestClient, tmp_hal0_home: str) -> None:
+    """The dry-run is the same plan the commit applies: model + profile only."""
     _seed_slot_toml(tmp_hal0_home, "agent", model="old-model")
     client.post(
         "/api/stacks",
         json={
             "slug": "coding",
             "stack": _stack_body(
-                slots=[
-                    {
-                        "slot": "agent",
-                        "model": "new-model",
-                        "vision": True,
-                        "mtp": True,
-                        "enable_thinking": True,
-                    }
-                ]
+                slots=[{"slot": "agent", "model": "new-model", "profile": "coding"}]
             ),
         },
     )
@@ -469,131 +456,37 @@ def test_apply_dry_run_never_projects_model_owned_keys(
     row = next(x for x in body["changes"] if x["slot"] == "agent")
     assert row["after_model"] == "new-model"
     assert row["changed"] is True
-    # Nothing was rejected — the keys are simply not projected, so a legitimate
-    # stack that declares them still applies cleanly.
     assert not any("rejected" in line for line in body["summary"]), body["summary"]
 
 
-def test_seed_stacks_declaring_mtp_still_apply_cleanly(app: FastAPI, tmp_hal0_home: str) -> None:
-    """The shipped seed stacks carry ``mtp = true`` — they must not self-reject.
+def test_seed_stacks_apply_cleanly_and_carry_placement_only(
+    app: FastAPI, tmp_hal0_home: str
+) -> None:
+    """The shipped seed stacks name a profile per row and nothing else tuning-shaped.
 
-    ``config/data/seed_stacks.toml`` declares ``mtp = true`` on the saber /
-    forge / pi agent rows. Had the fix kept projecting the key and merely added
-    the guard, applying any shipped seed stack would fail its own guard on every
-    box. Uses ``saber``'s real slot names via the seed catalog.
-    """
+    Uses ``saber``'s real slot names via the seed catalog: the agent row names
+    the ``agent`` seed profile (which carries the 64K window), and applying it
+    lands model + profile without a tuning key."""
     _seed_slot_toml(tmp_hal0_home, "agent", model="old-model")
     with TestClient(app) as c:
         saber = c.get("/api/stacks/saber")
         assert saber.status_code == 200, saber.text
         agent_row = next(e for e in saber.json()["slots"] if e["slot"] == "agent")
-        assert agent_row["mtp"] is True, "fixture assumption: seed saber declares mtp"
+        assert not set(_RETIRED_ROW_KEYS) & set(agent_row), agent_row
+        assert agent_row["profile"] == "agent"
         body = _apply_with_fakes(app, c, "saber")
     assert not any("rejected" in line for line in body["summary"]), body["summary"]
     on_disk = _read_slot_toml(tmp_hal0_home, "agent")
-    assert "mtp" not in on_disk, on_disk
     assert on_disk["model"]["default"] == "Qwen3.6-35B-A3B-MTP-GGUF", "the seed model still landed"
+    assert on_disk["profile"] == "agent"
+    assert schema.slot_tuning_keys(on_disk) == [], on_disk
 
 
-# ── the write boundary: freeform [server].extra_args is screened ───────────────
+def test_create_on_apply_writes_no_tuning_key(app: FastAPI, tmp_hal0_home: str) -> None:
+    """A slot born from an apply carries placement + profile and no tune.
 
-
-def test_apply_rejects_hardware_flags_in_server_extra_args(
-    app: FastAPI, tmp_hal0_home: str
-) -> None:
-    """``-ngl`` in a stack row's extra_args is refused per-slot, not persisted.
-
-    The slot surface had no freeform-flag screen on ANY in-process writer: the
-    model and profile surfaces screen at their HTTP routes, ``SlotManager``
-    screens nowhere, and the launch path only screens against
-    MANAGED_ARGS_DENYLIST at load time. A stack could therefore park a
-    grid-owned hardware flag in slot TOML permanently.
-
-    Report-don't-raise: the offending slot keeps ``after == before`` and the
-    reason lands in ``summary`` — one bad row must not 400 a multi-slot apply.
-    """
-    slot_path = _seed_slot_toml(tmp_hal0_home, "agent", model="old-model")
-    before = slot_path.read_text(encoding="utf-8")
-    with TestClient(app) as c:
-        c.post(
-            "/api/stacks",
-            json={
-                "slug": "coding",
-                "stack": _stack_body(
-                    slots=[
-                        {
-                            "slot": "agent",
-                            "model": "new-model",
-                            "server_extra_args": "-ngl 99 --jinja",
-                        }
-                    ]
-                ),
-            },
-        )
-        body = _apply_with_fakes(app, c, "coding")
-
-    assert any("rejected" in line for line in body["summary"]), body["summary"]
-    assert any("-ngl" in line for line in body["summary"]), body["summary"]
-    assert slot_path.read_text(encoding="utf-8") == before, "the rejected slot is untouched"
-
-
-def test_apply_rejects_managed_flags_in_server_extra_args(app: FastAPI, tmp_hal0_home: str) -> None:
-    """``--port`` in extra_args would rebind the slot's listener — refused."""
-    slot_path = _seed_slot_toml(tmp_hal0_home, "agent", model="old-model")
-    with TestClient(app) as c:
-        c.post(
-            "/api/stacks",
-            json={
-                "slug": "coding",
-                "stack": _stack_body(
-                    slots=[
-                        {
-                            "slot": "agent",
-                            "model": "new-model",
-                            "server_extra_args": "--port 9999",
-                        }
-                    ]
-                ),
-            },
-        )
-        body = _apply_with_fakes(app, c, "coding")
-
-    assert any("rejected" in line for line in body["summary"]), body["summary"]
-    assert "9999" not in slot_path.read_text(encoding="utf-8")
-
-
-def test_apply_keeps_clean_server_extra_args(app: FastAPI, tmp_hal0_home: str) -> None:
-    """Sanity floor: a legitimate tuning flag still persists."""
-    slot_path = _seed_slot_toml(tmp_hal0_home, "agent", model="old-model")
-    with TestClient(app) as c:
-        c.post(
-            "/api/stacks",
-            json={
-                "slug": "coding",
-                "stack": _stack_body(
-                    slots=[
-                        {
-                            "slot": "agent",
-                            "model": "new-model",
-                            "server_extra_args": "--jinja -fa on",
-                        }
-                    ]
-                ),
-            },
-        )
-        body = _apply_with_fakes(app, c, "coding")
-
-    assert not any("rejected" in line for line in body["summary"]), body["summary"]
-    assert "--jinja" in slot_path.read_text(encoding="utf-8")
-
-
-def test_create_on_apply_screens_server_extra_args(app: FastAPI, tmp_hal0_home: str) -> None:
-    """The sibling CREATE path is screened too, and reports per-slot.
-
-    ``_create_missing_slots`` calls ``SlotManager.create()`` in-process, which
-    has no screen of its own — so the guard has to run at the stacks call site
-    for a slot born from an apply.
-    """
+    ``_create_missing_slots`` calls ``SlotManager.create()`` in-process, so the
+    body it builds is the whole contract: no ``server`` table, no window."""
     with TestClient(app) as c:
         c.post(
             "/api/stacks",
@@ -605,8 +498,7 @@ def test_create_on_apply_screens_server_extra_args(app: FastAPI, tmp_hal0_home: 
                             "slot": "quick",
                             "model": "m",
                             "device": "gpu-vulkan",
-                            "profile": "vulkan",
-                            "server_extra_args": "--threads 8",
+                            "profile": "utility",
                         }
                     ]
                 ),
@@ -620,10 +512,54 @@ def test_create_on_apply_screens_server_extra_args(app: FastAPI, tmp_hal0_home: 
         assert r.status_code == 200, r.text
         body = r.json()
 
-    assert body["created"] == [], "a screened-out slot must not be reported created"
-    fake_sm.create.assert_not_awaited()
-    errors = body["converged"]["errors"]
-    assert any(e["target"] == "quick" and "--threads" in e["error"] for e in errors), errors
+    assert body["created"] == ["quick"]
+    created_body = fake_sm.create.await_args.args[1]
+    assert created_body["profile"] == "utility"
+    assert "server" not in created_body
+    assert schema.slot_tuning_keys(created_body) == [], created_body
+
+
+def test_import_screens_an_embedded_profile_with_hardware_flags(client: TestClient) -> None:
+    """A stack envelope cannot back-door a flag the profile routes refuse: the
+    embedded profile is screened before anything is written."""
+    env = client.post(
+        "/api/stacks/import",
+        json={
+            "dry_run": True,
+            "envelope": {
+                "kind": "hal0.stack",
+                "schema_version": 3,
+                "stack": {
+                    "name": "S",
+                    "schema_version": 3,
+                    "slots": [{"slot": "agent", "model": "m", "profile": "bad-prof"}],
+                    "profiles": {"bad-prof": {"flags": "-fa on -ngl 99"}},
+                },
+            },
+        },
+    )
+    assert env.status_code == 200, env.text  # a dry run validates shape only
+
+    r = client.post(
+        "/api/stacks/import",
+        json={
+            "slug": "from-env",
+            "envelope": {
+                "kind": "hal0.stack",
+                "schema_version": 3,
+                "stack": {
+                    "name": "S",
+                    "schema_version": 3,
+                    "slots": [{"slot": "agent", "model": "m", "profile": "bad-prof"}],
+                    "profiles": {"bad-prof": {"flags": "-fa on -ngl 99"}},
+                },
+            },
+        },
+    )
+    assert r.status_code == 400, r.text
+    assert r.json()["error"]["code"] == "slot.hardware_flag_denied"
+    assert client.get("/api/stacks/from-env").status_code == 404
+    assert client.get("/api/profiles/bad-prof").status_code == 404
 
 
 # ── export / import round-trip ─────────────────────────────────────────────────
@@ -654,6 +590,30 @@ def test_import_commit_without_slug_400(client: TestClient) -> None:
     r = client.post("/api/stacks/import", json={"envelope": env})
     assert r.status_code == 400
     assert r.json()["error"]["code"] == "stacks.import_no_slug"
+
+
+@pytest.mark.parametrize("dry_run", [True, False])
+def test_import_schema_2_envelope_refused_400(client: TestClient, dry_run: bool) -> None:
+    """A 1.4-era stack envelope (schema 2, per-row vision/mtp/...) is refused
+    with a clear message — dry run and commit agree, nothing is created."""
+    env = {
+        "kind": "hal0.stack",
+        "schema_version": 2,
+        "stack": {
+            "name": "Old",
+            "schema_version": 2,
+            "slots": [{"slot": "agent", "model": "m", "mtp": True, "vision": False}],
+        },
+    }
+    body: dict = {"envelope": env, "dry_run": dry_run}
+    if not dry_run:
+        body["slug"] = "old"
+    r = client.post("/api/stacks/import", json=body)
+    assert r.status_code == 400, r.text
+    err = r.json()["error"]
+    assert err["code"] == "stacks.envelope_schema_unsupported"
+    assert "re-export" in err["message"]
+    assert client.get("/api/stacks/old").status_code == 404
 
 
 def test_import_bad_envelope_400(client: TestClient) -> None:

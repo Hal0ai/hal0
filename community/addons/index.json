@@ -8,19 +8,9 @@
       "description": "Long-context chat · tuned for 128K ctx",
       "runtime_family": "llama-server",
       "runner": null,
-      "checksum": "sha256:068eaf3fd98f11933640bd85270f6b63a7b5817f07297da1f74b68fd7389642a",
+      "checksum": "sha256:0e9ac389e9bc238971e5a479b72b1f577b69e2257811ad06d706e1b1068f3985",
       "file": "chat-long-context.hal0profile.json",
-      "min_hal0_version": "1.2.0"
-    },
-    {
-      "name": "coding",
-      "title": "Code-gen workload",
-      "description": "Code-gen workload (coder slot, qwen3-coder, qwopus-coder) · 32K ctx",
-      "runtime_family": "llama-server",
-      "runner": null,
-      "checksum": "sha256:291988b6402f6bbbdbbc951b7f87e0d2c6ff3e386e94f5e008a1506bf9cf88dd",
-      "file": "coding.hal0profile.json",
-      "min_hal0_version": "1.2.0"
+      "min_hal0_version": "1.5.0"
     },
     {
       "name": "dense",
@@ -28,9 +18,9 @@
       "description": "Generic dense workload · tuned for 128K ctx",
       "runtime_family": "llama-server",
       "runner": null,
-      "checksum": "sha256:342918f13268bcac35f6d609cf95b6ecff5ed7eb35d74a07d071f52a0bd7e98d",
+      "checksum": "sha256:11944623612f84aaa4f2a4d13f6425f385df1bf5818160a53f78d8ddd2ac8916",
       "file": "dense.hal0profile.json",
-      "min_hal0_version": "1.2.0"
+      "min_hal0_version": "1.5.0"
     },
     {
       "name": "moe",
@@ -38,9 +28,9 @@
       "description": "Generic MoE workload · tuned for 32K ctx",
       "runtime_family": "llama-server",
       "runner": null,
-      "checksum": "sha256:a5a8fa871d7306111d86d22da75f31d98af8441440e39aa2cc0ccada4804cf4c",
+      "checksum": "sha256:7ac4f0f09c20e7f5febd4210732d3f67fc3ef2f81e3993611d9a5ac48863663c",
       "file": "moe.hal0profile.json",
-      "min_hal0_version": "1.2.0"
+      "min_hal0_version": "1.5.0"
     },
     {
       "name": "thinking",
@@ -48,9 +38,9 @@
       "description": "Reasoning-ON workload (qwen3-deepseek, ace-saber thinking) · 32K ctx",
       "runtime_family": "llama-server",
       "runner": null,
-      "checksum": "sha256:ea7dcba67830d1b0d1d47ef2c2ea4e3d303eb688c678d21f15403daa5a7bbc99",
+      "checksum": "sha256:c6268cee22b1e0470e64378874ebbf719201fb393c869e1ab5d5184f06735585",
       "file": "thinking.hal0profile.json",
-      "min_hal0_version": "1.2.0"
+      "min_hal0_version": "1.5.0"
     }
   ]
 }

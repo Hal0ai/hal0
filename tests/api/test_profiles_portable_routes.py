@@ -42,11 +42,11 @@ def _create_custom(client: TestClient, name: str = "my-custom") -> None:
         json={
             "name": name,
             "flags": "-fa on",
-            "mtp": True,
-            "device_class": "gpu",
-            "backend": "rocm",
+            "ctx_size": 49152,
+            "enable_thinking": True,
+            "vision": "off",
+            "mtp": "off",
             "intent": "My workload",
-            "quant": "Q5_K_M",
         },
     )
     assert r.status_code == 201
@@ -73,8 +73,14 @@ class TestExportRoute:
         env = r.json()
         assert env["kind"] == "hal0.profile"
         assert env["name"] == "my-custom"
-        assert env["profile"]["flags"] == "-fa on"
-        assert env["profile"]["backend"] == "rocm"
+        assert env["schema_version"] == 2
+        body = env["profile"]
+        assert body["flags"] == "-fa on"
+        assert body["ctx_size"] == 49152
+        assert body["enable_thinking"] is True
+        assert body["vision"] == "off"
+        assert body["mtp"] == "off"
+        assert not {"device_class", "backend", "quant"} & set(body)
 
     def test_export_unknown_404(self, client: TestClient) -> None:
         r = client.post("/api/profiles/does-not-exist/export")
@@ -229,6 +235,26 @@ class TestImportCommit:
         assert r.status_code == 400
         assert r.json()["error"]["code"] == "profiles.envelope_too_new"
 
+    def test_commit_and_dry_run_refuse_a_schema_1_envelope(self, client: TestClient) -> None:
+        """A 1.4-era envelope (bool mtp, device_class, quant) is refused whole —
+        never silently stripped — with a pointer to re-export."""
+        env = {
+            "kind": "hal0.profile",
+            "schema_version": 1,
+            "name": "old",
+            "profile": {"flags": "--jinja -fa on", "mtp": False, "device_class": "gpu"},
+        }
+        for body in (
+            {"envelope": env, "name": "old-import"},
+            {"envelope": env, "name": "old-import", "dry_run": True},
+        ):
+            r = client.post("/api/profiles/import", json=body)
+            assert r.status_code == 400, r.text
+            err = r.json()["error"]
+            assert err["code"] == "profiles.envelope_schema_unsupported"
+            assert "re-export from hal0 1.5" in err["message"]
+        assert client.get("/api/profiles/old-import").status_code == 404
+
     def test_commit_tampered_checksum_400(self, client: TestClient) -> None:
         """#1416 — the exact envelope ``dry_run`` reports ``checksum_ok: false``
         for used to commit anyway. Same input, both calls, asserted together so
@@ -309,6 +335,21 @@ class TestImportCommitIntegrity:
         assert r.json()["error"]["code"] == "slot.hardware_flag_denied"
         assert client.get("/api/profiles/hw-import").status_code == 404
 
+    def test_commit_screens_model_fact_flags(self, client: TestClient) -> None:
+        """--jinja / --no-mmproj are the model's and the ``vision`` switch's —
+        an envelope may not carry them in, not even with `force`."""
+        _create_custom(client, name="mf-src")
+        env = client.post("/api/profiles/mf-src/export").json()
+        for flags in ("--jinja -fa on", "-fa on --no-mmproj"):
+            env["profile"]["flags"] = flags
+            r = client.post(
+                "/api/profiles/import",
+                json={"envelope": env, "name": "mf-import", "force": True},
+            )
+            assert r.status_code == 400, r.text
+            assert r.json()["error"]["code"] == "profiles.model_fact_flag_denied"
+            assert client.get("/api/profiles/mf-import").status_code == 404
+
     def test_commit_screens_managed_flags(self, client: TestClient) -> None:
         _create_custom(client, name="mg-src")
         env = client.post("/api/profiles/mg-src/export").json()
@@ -346,5 +387,7 @@ class TestRoundTripHttp:
         imported = client.get("/api/profiles/round-tripped").json()
         assert imported["flags"] == "-fa on"
         assert imported["intent"] == "My workload"
-        assert imported["quant"] == "Q5_K_M"
-        assert imported["backend"] == "rocm"
+        assert imported["ctx_size"] == 49152
+        assert imported["enable_thinking"] is True
+        assert imported["vision"] == "off"
+        assert imported["mtp"] == "off"

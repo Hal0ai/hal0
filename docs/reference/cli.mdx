@@ -95,8 +95,7 @@ hal0 update owui [--check] [--target DIGEST] [--clear-override] [--yes|-y]
 | `--restart-slots` | Bounce every drifted slot (image and argv drift) and stop. |
 | `--no-restart-slots` | Skip the automatic restart of slots whose runner image changed; the CLI leaves them on the old image (the `hal0-api` start-up pass is controlled by `[updates].auto_restart_image_drift`). Cannot be combined with `--restart-slots`. |
 
-An apply that leaves any operator-facing convergence outstanding (the
-one-shot v1.0 profile-catalog reset, or a component below still `pending`)
+An apply that leaves any component below still `pending`
 exits **2** rather than reporting a clean success — distinct from a failed
 update (`die()` → exit 1).
 
@@ -124,14 +123,6 @@ instead, which persists across future converges until cleared;
 `--check` prints the status row only; `--yes`/`-y` skips the confirmation
 prompt.
 
-<Aside type="caution">
-On a v1.0 update, the profile catalog is reset once (gated on a schema-version
-watermark) — custom profiles are backed up and the seed catalog is reapplied.
-`hal0 update` prints a convergence report before applying. See
-[Config schema](/docs/reference/config-schema/) and the update guide for
-what gets backed up and how to recover a custom profile afterward.
-</Aside>
-
 ## `hal0 slot` — manage inference slots
 
 Enums: `--type` = `llm|embedding|reranking|transcription|tts|image`; `--provider` =
@@ -147,16 +138,13 @@ Enums: `--type` = `llm|embedding|reranking|transcription|tts|image`; `--provider
 | `slot rename <name> <new_name>` | `name`, `new_name` | — |
 | `slot swap <name>` | `name` | `--model`/`-m` (required), `--no-persist`, `--json` |
 | `slot logs <name>` | `name` | `--follow`/`-f`, `--lines`/`-n` (default 200, 1-5000) |
-| `slot create <name>` | `name` | `--type`/`-t` (default `llm`), `--provider` (default `llama-server`), `--hardware` (default: auto-detect), `--model`/`-m` (required), `--port`/`-p` (default: auto-assign, 1024-65535), `--ctx-size` (default `4096`, min `128`), `--profile` (default: inferred from `--type`/`--hardware`) |
-| `slot edit <name>` | `name` | `--model`/`-m`, `--port`/`-p`, `--ctx-size`, `--provider`, `--hardware`, `--profile` |
+| `slot create <name>` | `name` | `--type`/`-t` (default `llm`), `--provider` (default `llama-server`), `--hardware` (default: auto-detect), `--model`/`-m` (required), `--port`/`-p` (default: auto-assign, 1024-65535), `--profile` (default: inferred from `--type`/`--hardware`) |
+| `slot edit <name>` | `name` | `--model`/`-m`, `--port`/`-p`, `--provider`, `--hardware`, `--profile` |
 | `slot delete <name>` | `name` | `--force`/`-f` |
 | `slot show <name>` | `name` | `--json` |
 | `slot metrics [name]` | optional `name` | `--json` |
 | `slot capacity` | — | `--json` |
 | `slot migrate-id-keying` | — | `--apply` (default: dry-run), `--yes`/`-y`, `--stop-services` |
-| `slot migrate-hw` | — | `--apply`, `--yes`/`-y`, `--stop-services` |
-| `slot migrate-caps` | — | `--apply`, `--yes`/`-y`, `--stop-services` |
-| `slot migrate-flags` | — | `--apply`, `--yes`/`-y`, `--stop-services` |
 
 <Aside type="note">
 `--provider` on `slot create`/`slot edit` selects the inference engine binary, **not** the
@@ -362,27 +350,47 @@ runs it, backing up every file it changes to
 `/var/lib/hal0/backups/runners-<ts>.tar.gz` first, and `--restore <archive>`
 puts such a backup back.
 
-## `hal0 profile` — inspect launch-flag profiles
+## `hal0 profile` — inspect and edit profiles
 
-Read-only: full CRUD (create/update/delete/generate/import/export) is
-dashboard/API-only (`/api/profiles`).
+A profile is the tune a slot launches a model with: flags, context window, reasoning
+default, vision and MTP ([ADR-0029](/docs/adr/0029-profile-centric-config)). The
+context window is a profile setting, not a slot one: `slot create` / `slot edit` have no
+`--ctx-size`; use `profile create --ctx-size` / `profile edit --ctx-size`, then point the
+slot at the profile with `slot edit <slot> --profile <name>`. Delete, generate, import
+and export stay dashboard/API-only (`/api/profiles`).
 
 | Command | Args | Flags |
 |---|---|---|
 | `profile list` | — | `--json` |
 | `profile show <name>` | `name` | `--json` |
-| `profile migrate` | — | `--json` |
+| `profile create <name>` | `name` | `--from <profile>` (duplicate a seed or custom profile first), `--flags`, `--ctx-size` (128-16777216), `--thinking`/`--no-thinking`, `--vision` (`auto`\|`off`), `--mtp` (`auto`\|`off`), `--runner`, `--intent`, `--json` |
+| `profile edit <name>` | `name` | `--flags`, `--ctx-size`, `--clear-ctx-size`, `--thinking`/`--no-thinking`, `--clear-thinking`, `--vision`, `--mtp`, `--runner` (`''` clears), `--intent`, `--json` |
+| `profile migrate` | — | `--apply`, `--restore <archive>`, `--json` |
 
-`profile migrate` previews the move to profile-centric config
+Seed profiles are read-only: `profile edit` on one is refused with the duplicate-first hint (`profile create <new> --from <seed>`). Edits reach a running slot at its next restart.
+
+`profile migrate` moves this box to profile-centric config
 ([ADR-0029](/docs/adr/0029-profile-centric-config)).
 It reads this box's slot, profile and stack files and the model registry, and
 prints the profiles it would generate, the slots it would re-point, the keys it
 would drop, and every configured value that does not reach the launch today.
 Those values are dropped, never applied: the conversion keeps what each slot
-launches. It writes nothing. It exits 2 when anything cannot be converted: a
-slot, a stored profile (even one no slot uses), or a stack. `--json` lists
-those under `blocked`. What still needs converting is read from each file's
-content, so running it again after a conversion shows nothing to do.
+launches. Without flags it writes nothing.
+
+- `--apply` converts. `hal0 update` and `hal0 serve` do this automatically.
+  Run it as the service user, `sudo -u hal0 hal0 profile migrate --apply`
+  (it refuses to run as root, which would leave a backup hal0 cannot read).
+  It writes `/var/lib/hal0/backups/profiles-<ts>.tar.gz` first and checks each
+  converted slot's launch against the plan. A slot that does not match is put
+  back and reported as blocked.
+- `--restore <archive>` puts that backup back for a downgrade: the files and
+  the model columns. Stop `hal0-api` first. Until you run `--apply` again,
+  the automatic conversion stands down on that release.
+
+It exits 2 when anything cannot be converted: a slot, a stored profile (even
+one no slot uses), or a stack. `--json` lists those under `blocked`. What still
+needs converting is read from each file's content, so running it again after a
+conversion shows nothing to do.
 
 ## `hal0 mcp` — manage MCP servers
 

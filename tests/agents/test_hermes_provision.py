@@ -968,6 +968,31 @@ def test_resolve_primary_slot_picks_named_primary_slot() -> None:
     assert out["context_length"] == 16384
 
 
+def test_resolve_primary_slot_reads_the_slot_views_effective_window() -> None:
+    """ADR-0029: ``/api/slots`` carries ``ctx_effective`` (the profile's window,
+    else the model's native one) — it wins over any other key."""
+    fake = lambda: [  # noqa: E731
+        {
+            "name": "primary",
+            "type": "llm",
+            "state": "ready",
+            "model_id": "qwen3:8b",
+            "backend_url": "http://127.0.0.1:8001/v1",
+            "ctx_effective": 65536,
+            "ctx_source": "profile",
+            "context_length": 16384,
+        }
+    ]
+    out = hp._resolve_primary_slot(slots_fetcher=fake)
+    assert out["context_length"] == 65536
+
+
+def test_slot_context_length_prefers_ctx_effective() -> None:
+    assert hp._slot_context_length({"ctx_effective": 65536, "context_length": 8192}) == 65536
+    assert hp._slot_context_length({"context_length": 8192}) == 8192
+    assert hp._slot_context_length({"name": "x"}) is None
+
+
 def test_resolve_primary_slot_fallback_when_no_slots() -> None:
     out = hp._resolve_primary_slot(slots_fetcher=lambda: [])
     assert out["model"] == "primary"
@@ -2950,10 +2975,10 @@ class TestAnchorContextWindowPreflight:
     """#1867 — the anchor's window is checked before Hermes ever sees it.
 
     Reproduces the ct150 box exactly: the model behind the agent slot declares
-    96000, but the slot's own ``[model].context_size`` ceiling is still the 4096
-    an older release seeded, so ``min()`` hands Hermes 4,096 and Hermes — which
-    raises below ``MINIMUM_CONTEXT_LENGTH`` rather than degrading — refuses
-    every turn. Before this preflight nothing named the slot or the ceiling; the
+    96000, but the slot runs a profile whose ``ctx_size`` is 4096 (ADR-0029: the
+    window is the profile's, not a slot key), so Hermes is handed 4,096 and —
+    raising below ``MINIMUM_CONTEXT_LENGTH`` rather than degrading — refuses
+    every turn. Before this preflight nothing named the slot or the profile; the
     operator saw only an opaque upstream error ~1.6 s into the first turn.
 
     Production wiring only: the real ``_phase_smoke_tests``, the real
@@ -2964,6 +2989,7 @@ class TestAnchorContextWindowPreflight:
     def _ct150_box(
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
+        tmp_hal0_home: str,
         *,
         slot_ceiling: int,
         advertised: int,
@@ -2975,8 +3001,11 @@ class TestAnchorContextWindowPreflight:
         )
         etc = tmp_path / "etc-hal0"
         (etc / "slots").mkdir(parents=True)
+        profiles = Path(tmp_hal0_home) / "etc" / "hal0" / "profiles.toml"
+        profiles.parent.mkdir(parents=True, exist_ok=True)
+        profiles.write_text(f"[profile.agent-window]\nctx_size = {slot_ceiling}\n")
         (etc / "slots" / "agent.toml").write_text(
-            f'[model]\ndefault = "hal0-brain-sft-q8-rocmfpx"\ncontext_size = {slot_ceiling}\n'
+            'profile = "agent-window"\n[model]\ndefault = "hal0-brain-sft-q8-rocmfpx"\n'
         )
         monkeypatch.setattr(hp, "ETC_HAL0_DIR", etc)
         # The by-id row is the RESOLVED slot's catalog row with ``id`` rewritten
@@ -2995,7 +3024,7 @@ class TestAnchorContextWindowPreflight:
             {
                 # The anchor routes fine — this box is not broken in the way the
                 # #1831 routability preflight looks for. What it hands Hermes is
-                # min(96000 model window, the slot's own ceiling).
+                # min(96000 model window, the profile's own window).
                 "http://127.0.0.1:8080/v1/models/hal0/agent": {**agent_row, "id": "hal0/agent"},
                 "http://127.0.0.1:8080/v1/models": {
                     "data": [
@@ -3011,10 +3040,12 @@ class TestAnchorContextWindowPreflight:
         # hal0's pinned copy of MINIMUM_CONTEXT_LENGTH.
         return hp.BootstrapState(hermes_home=str(hh), venv=str(tmp_path / "no-venv"))
 
-    def test_a_slot_ceiling_under_the_floor_fails_loudly_with_the_fix(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    def test_a_profile_window_under_the_floor_fails_loudly_with_the_fix(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, tmp_hal0_home: str
     ) -> None:
-        state = self._ct150_box(tmp_path, monkeypatch, slot_ceiling=4096, advertised=4096)
+        state = self._ct150_box(
+            tmp_path, monkeypatch, tmp_hal0_home, slot_ceiling=4096, advertised=4096
+        )
         out = hp._phase_smoke_tests(hp._StepCtx(state=state))
 
         result = out.details["results"]["anchor_context_window"]
@@ -3026,13 +3057,17 @@ class TestAnchorContextWindowPreflight:
         assert "4,096" in detail
         assert "64,000" in detail
         assert "agent.toml" in detail
-        assert "hal0 slot edit agent --ctx-size 65536" in detail
+        assert "profile 'agent-window' sets ctx_size = 4,096" in detail
+        assert "raise ctx_size to 65536 on profile 'agent-window'" in detail
+        assert "hal0 slot restart agent" in detail
         assert any("anchor_context_window" in f for f in out.details["failures"])
 
-    def test_a_ceiling_above_the_floor_passes(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    def test_a_profile_window_above_the_floor_passes(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, tmp_hal0_home: str
     ) -> None:
-        state = self._ct150_box(tmp_path, monkeypatch, slot_ceiling=65536, advertised=65536)
+        state = self._ct150_box(
+            tmp_path, monkeypatch, tmp_hal0_home, slot_ceiling=65536, advertised=65536
+        )
         out = hp._phase_smoke_tests(hp._StepCtx(state=state))
         assert out.details["results"]["anchor_context_window"]["passed"] is True
         assert out.status == hp.PhaseStatus.OK
@@ -3059,7 +3094,7 @@ class TestAnchorContextWindowPreflight:
         assert out.status == hp.PhaseStatus.OK
 
     def test_ct152_the_anchor_falls_back_to_another_slot_and_must_not_pass(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, tmp_hal0_home: str
     ) -> None:
         """THE false negative, off the live ct152 box (rc.5).
 
@@ -3082,9 +3117,12 @@ class TestAnchorContextWindowPreflight:
         etc = tmp_path / "etc-hal0"
         (etc / "slots").mkdir(parents=True)
         # The agent slot's TOML still exists on that box; it is simply not what
-        # the anchor resolves to, so its ceiling must not be blamed.
-        (etc / "slots" / "agent.toml").write_text("[model]\ncontext_size = 65536\n")
-        (etc / "slots" / "brain.toml").write_text("[model]\ncontext_size = 32768\n")
+        # the anchor resolves to, so its profile must not be blamed.
+        profiles = Path(tmp_hal0_home) / "etc" / "hal0" / "profiles.toml"
+        profiles.parent.mkdir(parents=True, exist_ok=True)
+        profiles.write_text("[profile.brain-window]\nctx_size = 32768\n")
+        (etc / "slots" / "agent.toml").write_text('profile = "agent"\n')
+        (etc / "slots" / "brain.toml").write_text('profile = "brain-window"\n')
         monkeypatch.setattr(hp, "ETC_HAL0_DIR", etc)
         _fake_http(
             monkeypatch,
@@ -3106,7 +3144,8 @@ class TestAnchorContextWindowPreflight:
         assert "64,000" in detail
         # The serving slot is brain, not the alias the anchor is spelled with.
         assert "'brain'" in detail
-        assert "hal0 slot edit brain --ctx-size 65536" in detail
+        assert "raise ctx_size to 65536 on profile 'brain-window'" in detail
+        assert "hal0 slot restart brain" in detail
         assert "agent.toml" not in detail
 
     def test_an_unreadable_window_skips_rather_than_passing(

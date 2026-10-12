@@ -86,11 +86,14 @@ LLAMA_SEED_CAPABILITIES: dict[str, str] = {
 #: slot-level field.
 _DEVICE_LINE = re.compile(r'(?m)^(device[ \t]*=[ \t]*)"[^"]*"')
 
-#: The ``[model].context_size`` assignment. Every llama.cpp seed carries
-#: exactly one such line (verified against every file under
-#: ``installer/etc-hal0/slots/``), so a plain top-of-line match is enough —
-#: same posture as :data:`_DEVICE_LINE`.
-_CONTEXT_SIZE_LINE = re.compile(r"(?m)^context_size[ \t]*=[ \t]*(\d+)")
+#: The top-level ``profile = "..."`` assignment in a seed TOML (the seeds keep
+#: it above any table, like :data:`_DEVICE_LINE`).
+_PROFILE_LINE = re.compile(r'(?m)^(profile[ \t]*=[ \t]*)"([^"]*)"')
+
+#: The window a profile without ``ctx_size`` runs a model at: the model's
+#: native window capped here. Seed time has no model to read, so a profile
+#: that sets no ``ctx_size`` is clamped as if the cap were its window.
+_DEFAULT_WINDOW_CAP = 32768
 
 #: Seed names whose capability can serve as Hermes' anchor (``hal0/agent``
 #: resolves through the routing fallback chain to one of these —
@@ -210,23 +213,84 @@ def apply_derived_seed_devices(
     return rewritten
 
 
+def clamped_profile_name(base: str, ctx: int) -> str:
+    """The deterministic name of ``base`` clamped to ``ctx`` tokens: ``<base>-ctx<N>``."""
+    suffix = f"-ctx{ctx}"
+    return base[: 32 - len(suffix)] + suffix
+
+
+def ensure_clamped_profile(base: str, ctx: int, *, profiles_path: Path | None = None) -> str:
+    """Name of a custom profile that is ``base`` with ``ctx_size = ctx``, creating it.
+
+    ADR-0029: a slot's window is its profile's ``ctx_size``, so the installer
+    clamps a window for a small box by pointing the slot at a clone of the
+    seed rather than by writing a per-slot ceiling. The clone carries the
+    seed's flags / vision / mtp / enable_thinking / runner verbatim,
+    ``cloned_from = <base>`` and an intent saying where it came from. Seeds
+    are virtual (never persisted), so only the clone is written to
+    ``profiles.toml``. An existing profile of the same name with the same tune
+    is reused; one an operator has since edited is left alone and the clone
+    takes a numeric suffix.
+
+    Raises ``KeyError`` when ``base`` is not in the catalog.
+    """
+    from hal0.config.loader import load_profiles_config
+    from hal0.errors import Conflict
+    from hal0.profiles import ProfileCatalog
+
+    catalog_cfg = load_profiles_config(profiles_path)
+    base_cfg = catalog_cfg.profile.get(base)
+    if base_cfg is None:
+        raise KeyError(base)
+    clone = base_cfg.model_copy(
+        update={
+            "ctx_size": ctx,
+            "cloned_from": base,
+            "intent": f"Installer: {base} clamped to {ctx} for this box",
+        }
+    )
+    stem = clamped_profile_name(base, ctx)
+    catalog = ProfileCatalog(path=profiles_path)
+    for attempt in range(1, 100):
+        name = stem if attempt == 1 else f"{stem[: 32 - len(str(attempt)) - 1]}-{attempt}"
+        existing = catalog_cfg.profile.get(name)
+        if existing is None:
+            try:
+                catalog.create(name, clone)
+            except Conflict:
+                catalog_cfg = load_profiles_config(profiles_path)
+                continue
+            return name
+        if existing.model_copy(update={"intent": ""}) == clone.model_copy(update={"intent": ""}):
+            return name
+    raise RuntimeError(f"no free profile name for {stem!r}")
+
+
 def apply_context_size_envelope(
     names: Collection[str],
     *,
     slots_dir: Path | None = None,
     hw: HardwareInfo | None = None,
+    profiles_path: Path | None = None,
 ) -> dict[str, int]:
-    """Clamp freshly-seeded llama.cpp slots' ``context_size`` to this box's
+    """Clamp freshly-seeded llama.cpp slots' context window to this box's
     memory envelope (#1868).
 
-    Every curated seed ships ``context_size = 65536`` (or a smaller
-    workload-appropriate value) verbatim, sized for the reference platform —
-    a copy-if-absent install onto a small CPU-only box warms the brain slot
-    at 65536 with nothing budgeting for the KV cache that costs. This is the
-    same single pass ``apply_derived_seed_devices`` runs for the device
-    field: :func:`seed_static_slots` calls it after its copy loop, and
+    Every curated seed names a profile whose ``ctx_size`` (65536 for the
+    agent / utility / brain seeds) is sized for the reference platform — a
+    copy-if-absent install onto a small CPU-only box warms the brain slot at
+    65536 with nothing budgeting for the KV cache that costs. This is the same
+    single pass ``apply_derived_seed_devices`` runs for the device field:
+    :func:`seed_static_slots` calls it after its copy loop, and
     ``install.sh``'s bash seed loop calls it via ``python -m
     hal0.install.static_seeds`` over the names it just copied.
+
+    The window lives on the profile (ADR-0029), never on the slot: when the
+    envelope cannot afford the seed profile's window this writes a custom
+    profile ``<seed>-ctx<N>`` (see :func:`ensure_clamped_profile`) and points
+    the slot's ``profile`` at it. A profile that sets no ``ctx_size`` runs the
+    model's native window capped at 32768, so it is clamped as if that cap
+    were its window.
 
     Uses :func:`hal0.hardware.memory_envelope.clamp_context_size` — the
     single-owner memory-budget function also read by the capacity ruler and
@@ -240,10 +304,11 @@ def apply_context_size_envelope(
     ``<name>.toml`` are considered, mirroring
     :func:`apply_derived_seed_devices`'s contract exactly (only names
     copied THIS call — an operator's existing file must never reach this
-    function). Returns ``{name: new_context_size}`` for the files actually
-    rewritten.
+    function). Returns ``{name: new_ctx_size}`` for the slots actually
+    repointed at a clamped profile.
     """
     from hal0.agents.anchor_window import HERMES_MINIMUM_CONTEXT_LENGTH
+    from hal0.config.loader import load_profiles_config
     from hal0.hardware.memory_envelope import clamp_context_size
 
     dest_dir = slots_dir if slots_dir is not None else paths.slots_config_dir()
@@ -257,19 +322,24 @@ def apply_context_size_envelope(
             text = dest.read_text(encoding="utf-8")
         except OSError:
             continue
-        match = _CONTEXT_SIZE_LINE.search(text)
+        match = _PROFILE_LINE.search(text)
         if match is None:
             continue
+        base = match.group(2)
         try:
-            current = int(match.group(1))
-        except ValueError:
+            base_cfg = load_profiles_config(profiles_path).profile.get(base)
+        except Exception as exc:
+            log.warning("install.seed_context_envelope_skipped", slot=name, error=str(exc))
             continue
+        if base_cfg is None:
+            continue
+        current = base_cfg.ctx_size or _DEFAULT_WINDOW_CAP
         if resolved is None:
             resolved = _resolve_hardware_info()
             if resolved is None:
                 log.warning(
                     "install.seed_context_envelope_skipped",
-                    detail="hardware unresolvable — seeded slots keep their shipped context_size",
+                    detail="hardware unresolvable — seeded slots keep their shipped profile",
                 )
                 return rewritten
         floor = HERMES_MINIMUM_CONTEXT_LENGTH if name in _HERMES_ANCHOR_SEEDS else 0
@@ -279,7 +349,12 @@ def apply_context_size_envelope(
         )
         if new_value == current:
             continue
-        new_text, n = _CONTEXT_SIZE_LINE.subn(f"context_size = {new_value}", text, count=1)
+        try:
+            clamped = ensure_clamped_profile(base, new_value, profiles_path=profiles_path)
+        except Exception as exc:
+            log.warning("install.seed_context_clamp_failed", slot=name, error=str(exc))
+            continue
+        new_text, n = _PROFILE_LINE.subn(rf'\g<1>"{clamped}"', text, count=1)
         if n == 0 or new_text == text:
             continue
         dest.write_text(new_text, encoding="utf-8")
@@ -287,6 +362,7 @@ def apply_context_size_envelope(
         log.warning(
             "install.seed_context_size_clamped",
             slot=name,
+            profile=clamped,
             requested=current,
             clamped=new_value,
             detail=warning,
@@ -367,9 +443,9 @@ def seed_static_slots(
         # names copied THIS call are touched; existing/operator files above
         # were skipped and stay untouched.
         apply_derived_seed_devices(seeded, slots_dir=dest_dir, hw=hw)
-        # #1868: the same seeds carry a flat context_size sized for the
-        # reference platform — clamp it to what THIS box's memory envelope
-        # can afford.
+        # #1868: the same seeds name profiles whose window is sized for the
+        # reference platform — repoint them at a clamped clone when THIS box's
+        # memory envelope cannot afford it.
         apply_context_size_envelope(seeded, slots_dir=dest_dir, hw=hw)
     return seeded
 
@@ -479,8 +555,8 @@ def _main(argv: list[str] | None = None) -> int:
         print("seeded slot devices already match this host — nothing rewritten")
 
     clamped = apply_context_size_envelope(args.names, slots_dir=args.slots_dir, hw=hw)
-    for name, context_size in sorted(clamped.items()):
-        print(f"seeded {name} slot: context_size clamped -> {context_size}")
+    for name, ctx_size in sorted(clamped.items()):
+        print(f"seeded {name} slot: profile ctx_size clamped -> {ctx_size}")
     return 0
 
 
@@ -496,8 +572,10 @@ __all__ = [
     "add_seed_tombstone",
     "apply_context_size_envelope",
     "apply_derived_seed_devices",
+    "clamped_profile_name",
     "clear_seed_tombstone",
     "derive_seed_device",
+    "ensure_clamped_profile",
     "read_seed_tombstones",
     "seed_static_slots",
 ]

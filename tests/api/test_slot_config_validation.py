@@ -71,47 +71,52 @@ def test_put_config_unknown_model_key_400_with_path(slot_toml: Path, client: Tes
 def test_put_config_valid_keys_and_dynamic_server_fields_pass(
     slot_toml: Path, client: TestClient
 ) -> None:
-    """[server].env (schema-derived, not hardcoded) + extra_args pass."""
-    r = client.put(
-        "/api/slots/chat/config",
-        json={"server": {"extra_args": "-b 2048", "env": {"HSA_XNACK": "1"}}},
-    )
+    """[server].env (schema-derived, not hardcoded) passes."""
+    r = client.put("/api/slots/chat/config", json={"server": {"env": {"HSA_XNACK": "1"}}})
+    assert r.status_code == 200, r.text
+    assert _read(slot_toml)["server"] == {"env": {"HSA_XNACK": "1"}}
+
+
+def test_put_config_null_deletes_a_key(slot_toml: Path, client: TestClient) -> None:
+    """``null`` REMOVES a persisted key (#1372): ``reconcile_slot_updates``
+    implements None-means-delete, so the drawer's "Clear" really unsets it."""
+    r = client.put("/api/slots/chat/config", json={"image_pin": "ghcr.io/x/y:z"})
+    assert r.status_code == 200, r.text
+    assert _read(slot_toml)["image_pin"] == "ghcr.io/x/y:z"
+
+    r = client.put("/api/slots/chat/config", json={"image_pin": None})
     assert r.status_code == 200, r.text
     on_disk = _read(slot_toml)
-    assert on_disk["server"]["extra_args"] == "-b 2048"
-    assert on_disk["server"]["env"] == {"HSA_XNACK": "1"}
-
-
-def test_put_config_null_deletes_chat_template(slot_toml: Path, client: TestClient) -> None:
-    """``chat_template: null`` REMOVES a persisted per-slot override (#1372).
-
-    The drawer's "Clear override" needs a wire value that actually unsets the
-    key. ``reconcile_slot_updates`` implements None-means-delete, so ``null``
-    drops it from the TOML entirely — whereas ``""`` (see the companion test
-    below) persists an empty-string override, which is a different thing and
-    would still emit ``--chat-template ''`` on the launch line.
-    """
-    r = client.put("/api/slots/chat/config", json={"chat_template": "chatml"})
-    assert r.status_code == 200, r.text
-    assert _read(slot_toml)["chat_template"] == "chatml"
-
-    r = client.put("/api/slots/chat/config", json={"chat_template": None})
-    assert r.status_code == 200, r.text
-    on_disk = _read(slot_toml)
-    assert "chat_template" not in on_disk
+    assert "image_pin" not in on_disk
     # Siblings survive the removal — it is a targeted delete, not a rewrite.
     assert on_disk["model"]["default"] == "qwen3-4b"
     assert on_disk["port"] == 8081
 
 
-def test_put_config_empty_string_chat_template_is_not_a_removal(
-    slot_toml: Path, client: TestClient
+@pytest.mark.parametrize("value", ["chatml", "", None])
+def test_put_config_refuses_a_slot_chat_template(
+    value: object, slot_toml: Path, client: TestClient
 ) -> None:
-    """``""`` persists an empty override — the reason #1372 clears with null."""
-    client.put("/api/slots/chat/config", json={"chat_template": "chatml"})
-    r = client.put("/api/slots/chat/config", json={"chat_template": ""})
-    assert r.status_code == 200, r.text
-    assert _read(slot_toml)["chat_template"] == ""
+    """ADR-0029: the chat template is a fact about the model file; the slot
+    has no ``chat_template`` key to set or clear, whatever the value."""
+    before = slot_toml.read_text(encoding="utf-8")
+    r = client.put("/api/slots/chat/config", json={"chat_template": value})
+    assert r.status_code == 400, r.text
+    assert r.json()["error"]["code"] == "slot.tuning_key_denied"
+    assert slot_toml.read_text(encoding="utf-8") == before
+
+
+def test_put_config_refuses_server_extra_args(slot_toml: Path, client: TestClient) -> None:
+    """Launch flags live on the slot's profile, never in ``[server]``."""
+    r = client.put(
+        "/api/slots/chat/config",
+        json={"server": {"extra_args": "-b 2048", "env": {"HSA_XNACK": "1"}}},
+    )
+    assert r.status_code == 400, r.text
+    err = r.json()["error"]
+    assert err["code"] == "slot.tuning_key_denied"
+    assert err["details"]["keys"] == ["[server].extra_args"]
+    assert "server" not in _read(slot_toml)
 
 
 def test_put_config_tolerated_extras_pass(slot_toml: Path, client: TestClient) -> None:
@@ -128,14 +133,15 @@ def test_put_config_tolerated_extras_pass(slot_toml: Path, client: TestClient) -
 # ── PATCH /defaults ──────────────────────────────────────────────────────────
 
 
-def test_patch_defaults_ctx_size_alias_still_accepted(slot_toml: Path, client: TestClient) -> None:
-    r = client.patch("/api/slots/chat/defaults", json={"ctx_size": 32768})
-    assert r.status_code == 200, r.text
-    model = _read(slot_toml)["model"]
-    # Folded to the canonical key; exactly one survives on disk (#585).
-    assert model["context_size"] == 32768
-    assert "ctx_size" not in model
-    assert model["default"] == "qwen3-4b", "sibling [model] keys must survive"
+def test_patch_defaults_refuses_a_context_window(slot_toml: Path, client: TestClient) -> None:
+    """The ``ctx_size`` alias fold is gone (ADR-0029): the window is the slot
+    profile's ``ctx_size``, so PATCH /defaults refuses it and writes nothing."""
+    before = slot_toml.read_text(encoding="utf-8")
+    for body in ({"ctx_size": 32768}, {"context_size": 32768}):
+        r = client.patch("/api/slots/chat/defaults", json=body)
+        assert r.status_code == 400, r.text
+        assert r.json()["error"]["code"] == "slot.tuning_key_denied"
+    assert slot_toml.read_text(encoding="utf-8") == before
 
 
 def test_patch_defaults_unknown_key_400(slot_toml: Path, client: TestClient) -> None:

@@ -24,9 +24,9 @@ def _plan(model_path: str):
         image="img",
         port=8090,
         model_path=model_path,
-        flags_str="",
         devices=[],
         group_ids=[],
+        context_size=8192,
     )
 
 

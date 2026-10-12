@@ -1732,7 +1732,49 @@ def test_commit_runs_post_activation_migrations_after_the_swap(
         "to": 2,
         "error": None,
         "pass_warnings": [],
+        "conversion_blockers": [],
     }
+    assert result["convergence"]["converged"] is True
+
+
+def test_commit_profile_conversion_blockers_mean_not_converged(
+    synthetic_release: dict[str, Any], cosign_skip: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ADR-0029: a slot the profile-centric conversion left blocked is
+    relayed from the post-swap child into the convergence dict (which the
+    commit job carries for the CLI and the dashboard), and the install is
+    applied but not converged."""
+    blocker = {"target": "agent.toml", "reason": "--chat-template-file has no profile home"}
+
+    class _Completed:
+        def __init__(self, returncode: int = 0, stdout: str = "", stderr: str = "") -> None:
+            self.returncode = returncode
+            self.stdout = stdout
+            self.stderr = stderr
+
+    def _fake_run(cmd, *a, **k):
+        if any("run_post_activation_migrations" in part for part in list(cmd)):
+            envelope = json.dumps(
+                {
+                    updater_module._MIGRATION_RESULT_KEY: {
+                        "from": 1,
+                        "to": 1,
+                        "conversion_blockers": [blocker],
+                    }
+                }
+            )
+            return _Completed(stdout=envelope)
+        return _Completed()
+
+    monkeypatch.setattr(updater_module, "_is_editable_install", lambda: False)
+    monkeypatch.setattr("hal0.updater.updater.subprocess.run", _fake_run)
+
+    result = asyncio.run(Updater().apply())
+
+    post = result["convergence"]["post_activation_migrations"]
+    assert post["ok"] is True
+    assert post["conversion_blockers"] == [blocker]
+    assert result["convergence"]["converged"] is False
 
 
 def test_commit_post_activation_migration_failure_is_non_fatal_but_loud(

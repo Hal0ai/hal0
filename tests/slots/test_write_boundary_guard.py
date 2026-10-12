@@ -1,16 +1,15 @@
 """Unit tests for the in-process slot-write boundary (`guard_slot_write_payload`).
 
-The HTTP slot-config routes have always enforced the slot/model key partition
-(``routes/slots._reject_model_owned_config_keys`` +
-``_reject_unknown_config_keys``). Nothing enforced it for a writer that reaches
-slot TOML IN-PROCESS without passing a FastAPI handler — which is exactly what
-the stacks apply engine does. ``reconcile_and_guard_slot_config`` was named
-"…and_guard…" but checked only two cross-slot invariants (NPU exclusivity,
-default uniqueness), so ``POST /api/stacks/{slug}/apply`` could persist keys
-``PUT /api/slots/{name}/config`` 400s on.
+The HTTP slot-config routes enforce the slot key partition
+(``routes/slots._reject_slot_tuning_keys`` + ``_reject_unknown_config_keys``).
+A writer that reaches slot TOML IN-PROCESS without passing a FastAPI handler —
+the stacks apply engine, ``SlotManager.update_config`` — is held to the same
+contract through ``reconcile_and_guard_slot_config`` / ``reconcile_slot_updates``.
 
-These pin the guard at that shared seam. The end-to-end proof that a stack apply
-can no longer land them lives in ``tests/api/test_stacks_routes.py``.
+ADR-0029 §5: every tune lives on the slot's profile, so a write carrying
+``[model].context_size`` / ``ctx_size``, ``[server].extra_args``, ``parallel``,
+``chat_template``, ``mtp``, ``enable_thinking``, ``vision`` or ``workers`` is
+refused with ``slot.tuning_key_denied``.
 
 Targeted file run:
     uv run pytest tests/slots/test_write_boundary_guard.py -q
@@ -23,10 +22,10 @@ from pathlib import Path
 import pytest
 
 from hal0.errors import BadRequest
-from hal0.slot_config import MODEL_OWNED_SLOT_KEYS
 from hal0.slots.config_write import (
     guard_slot_write_payload,
     reconcile_and_guard_slot_config,
+    reconcile_slot_updates,
 )
 
 
@@ -38,19 +37,49 @@ def _slots_dir(home: str) -> Path:
 
 # ── the partition itself ─────────────────────────────────────────────────────
 
+_TUNING_PAYLOADS = [
+    ({"mtp": True}, "mtp"),
+    ({"enable_thinking": False}, "enable_thinking"),
+    ({"vision": True}, "vision"),
+    ({"parallel": 2}, "parallel"),
+    ({"chat_template": "chatml"}, "chat_template"),
+    ({"workers": 4}, "workers"),
+    ({"ctx_size": 8192}, "ctx_size"),
+    ({"model": {"default": "m", "context_size": 8192}}, "[model].context_size"),
+    ({"model": {"default": "m", "ctx_size": 8192}}, "[model].ctx_size"),
+    ({"model": {"default": "m", "n_gpu_layers": 40}}, "[model].n_gpu_layers"),
+    ({"model": {"default": "m", "rope_freq_base": 1e6}}, "[model].rope_freq_base"),
+    ({"server": {"extra_args": "-ctk q8_0"}}, "[server].extra_args"),
+]
 
-@pytest.mark.parametrize("key", sorted(MODEL_OWNED_SLOT_KEYS))
-def test_guard_rejects_every_model_owned_key(key: str) -> None:
-    """All three of ``mtp`` / ``enable_thinking`` / ``vision`` are refused.
 
-    Parametrized off ``MODEL_OWNED_SLOT_KEYS`` rather than a hand-written list,
-    so a fourth key added to the partition is covered without touching this
-    test.
-    """
+@pytest.mark.parametrize(("payload", "key"), _TUNING_PAYLOADS)
+def test_guard_rejects_every_tuning_key(payload: dict, key: str) -> None:
     with pytest.raises(BadRequest) as exc:
-        guard_slot_write_payload({key: True})
-    assert exc.value.code == "slot.model_owned_key_denied"
+        guard_slot_write_payload(payload)
+    assert exc.value.code == "slot.tuning_key_denied"
     assert exc.value.details["keys"] == [key]
+    assert "profile" in exc.value.message
+
+
+@pytest.mark.parametrize(("payload", "key"), _TUNING_PAYLOADS)
+def test_reconcile_slot_updates_rejects_every_tuning_key(payload: dict, key: str) -> None:
+    """``SlotManager.update_config``'s merge refuses the same keys, so an
+    in-process writer can never persist a file that then fails to load as
+    ``slot.unconverted``."""
+    with pytest.raises(BadRequest) as exc:
+        reconcile_slot_updates({"name": "agent", "port": 8087}, payload)
+    assert exc.value.code == "slot.tuning_key_denied"
+    assert key in exc.value.details["keys"]
+
+
+@pytest.mark.parametrize("flags", ["", "-fa auto", "-ngl 99", "--port 9999"])
+def test_any_server_extra_args_is_a_tuning_key(flags: str) -> None:
+    """Launch flags are profile-owned: ``[server].extra_args`` is refused
+    whatever it carries (clean, blank, hardware or managed)."""
+    with pytest.raises(BadRequest) as exc:
+        guard_slot_write_payload({"server": {"extra_args": flags}})
+    assert exc.value.code == "slot.tuning_key_denied"
 
 
 def test_guard_rejects_a_removed_key() -> None:
@@ -60,104 +89,45 @@ def test_guard_rejects_a_removed_key() -> None:
     assert exc.value.code == "slot.removed_key_denied"
 
 
-def test_guard_reports_model_owned_before_removed() -> None:
+def test_guard_reports_tuning_before_removed() -> None:
     """Ordering matches the routes: the partition message wins."""
     with pytest.raises(BadRequest) as exc:
         guard_slot_write_payload({"enabled": False, "mtp": True})
-    assert exc.value.code == "slot.model_owned_key_denied"
+    assert exc.value.code == "slot.tuning_key_denied"
 
 
 def test_guard_allows_a_legitimate_payload() -> None:
     """The guard must not become a general-purpose schema check.
 
-    It owns three partitions and nothing else — an ordinary device/profile/model
-    write passes untouched, and so does an unrecognised key (that is
-    ``unknown_slot_config_keys``' job at the HTTP boundary).
+    An ordinary placement/profile/model write passes untouched, and so does
+    an unrecognised key (that is ``unknown_slot_config_keys``' job at the HTTP
+    boundary).
     """
     guard_slot_write_payload(
         {
             "device": "gpu-rocm",
-            "profile": "moe",
-            "model": {"default": "m", "context_size": 8192},
-            "server": {"extra_args": "--jinja -fa on"},
+            "profile": "agent",
+            "n_gpu_layers": 99,
+            "threads": 8,
+            "model": {"default": "m"},
+            "server": {"env": {"HSA_OVERRIDE_GFX_VERSION": "11.5.1"}},
+            "some_future_key": 1,
         }
     )
-
-
-def test_guard_ignores_a_nested_model_owned_lookalike() -> None:
-    """The partition is TOP-LEVEL only.
-
-    ``[model].vision`` is the model's own field — rejecting it here would refuse
-    the very location the error message tells the operator to use.
-    """
-    guard_slot_write_payload({"model": {"default": "m", "vision": True}})
-
-
-# ── freeform [server].extra_args screen ──────────────────────────────────────
-
-
-@pytest.mark.parametrize(
-    "flags", ["-ngl 99", "--n-gpu-layers 99", "--threads 8", "-t 8", "-dev cpu"]
-)
-def test_guard_rejects_hardware_flags_in_extra_args(flags: str) -> None:
-    """Grid-owned hardware flags get the "belongs on the slot" message.
-
-    Both spellings are caught: ``_split_pairs`` canonicalises the short forms
-    onto their long partners.
-    """
-    with pytest.raises(BadRequest) as exc:
-        guard_slot_write_payload({"server": {"extra_args": flags}})
-    assert exc.value.code == "slot.hardware_flag_denied"
-
-
-@pytest.mark.parametrize("flags", ["--port 9999", "--model /tmp/x.gguf", "--host 0.0.0.0"])
-def test_guard_rejects_managed_flags_in_extra_args(flags: str) -> None:
-    """hal0-computed structural flags can't be smuggled through extra_args."""
-    with pytest.raises(BadRequest) as exc:
-        guard_slot_write_payload({"server": {"extra_args": flags}})
-    assert exc.value.code == "slot.managed_arg_denied"
-
-
-def test_hardware_flags_are_reported_before_managed_ones() -> None:
-    """``-ngl`` is in BOTH denylists — the actionable message must win.
-
-    Mirrors the ordering in ``models_service.screen_model_write`` and
-    ``routes/profiles._screen_profile_flags``, so all three surfaces render one
-    story for the same flag.
-    """
-    with pytest.raises(BadRequest) as exc:
-        guard_slot_write_payload({"server": {"extra_args": "-ngl 99 --port 1"}})
-    assert exc.value.code == "slot.hardware_flag_denied"
-
-
-@pytest.mark.parametrize("value", ["", "   ", None, 42, ["-ngl", "99"]])
-def test_extra_args_screen_no_ops_on_non_string_or_blank(value: object) -> None:
-    """Blank / absent / non-string extra_args is not this guard's error to raise.
-
-    ``ServerConfig.extra_args`` is typed ``str | None``; a wrong type is the
-    schema layer's 422. A list is deliberately NOT screened here so the guard
-    can never half-inspect a shape it doesn't own.
-    """
-    guard_slot_write_payload({"server": {"extra_args": value}})
-
-
-def test_unparseable_quoting_defers_to_the_schema_layer() -> None:
-    """A malformed flag string is not masked with a partition message."""
-    guard_slot_write_payload({"server": {"extra_args": '--jinja "unclosed'}})
 
 
 # ── placement: the guard sees the PAYLOAD, never the merged result ────────────
 
 
-def test_legacy_key_already_on_disk_does_not_block_an_unrelated_write(
+def test_unconverted_key_in_the_base_does_not_trip_the_payload_guard(
     tmp_hal0_home: str,
 ) -> None:
-    """A pre-partition slot TOML stays writable.
+    """The guard screens the PAYLOAD, never the merged result.
 
-    Guarding the MERGED config instead of the payload would brick every legacy
-    box: a slot carrying ``mtp = true`` from before the partition would refuse
-    every subsequent edit, including the model swap that is the whole point.
-    Converging the old shape is ``config.migrations.model_owned_caps``' job.
+    Converting an unconverted slot is the one-shot converter's job
+    (``hal0 profile migrate``); the write guard only answers "does this write
+    introduce a tuning key", so a model swap carries no blame for a key that
+    was already in the base dict.
     """
     slots = _slots_dir(tmp_hal0_home)
     (slots / "agent.toml").write_text(
@@ -173,7 +143,7 @@ def test_legacy_key_already_on_disk_does_not_block_an_unrelated_write(
     assert merged["mtp"] is True, "the legacy value survives; the guard didn't fire"
 
 
-def test_reconcile_and_guard_refuses_a_model_owned_write(tmp_hal0_home: str) -> None:
+def test_reconcile_and_guard_refuses_a_tuning_write(tmp_hal0_home: str) -> None:
     """The shared pipeline is where the guard lives, not the stacks call site.
 
     Placing it here means every future in-process writer that routes through
@@ -187,7 +157,7 @@ def test_reconcile_and_guard_refuses_a_model_owned_write(tmp_hal0_home: str) -> 
         reconcile_and_guard_slot_config(
             "agent", {"name": "agent", "port": 8087}, {"mtp": True}, slots_dir=slots
         )
-    assert exc.value.code == "slot.model_owned_key_denied"
+    assert exc.value.code == "slot.tuning_key_denied"
 
 
 def test_guard_runs_before_the_merge(tmp_hal0_home: str) -> None:

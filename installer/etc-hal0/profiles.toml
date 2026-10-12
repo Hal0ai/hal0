@@ -1,13 +1,12 @@
 # hal0 profile catalog — OPERATOR CUSTOM PROFILES ONLY.
 #
-# Seed profiles are VIRTUAL: the built-in catalog (chat / cpu-chat /
-# embedding / reranking / brain / flm / kokoro / moonshine / qwen3-tts /
-# comfyui) lives in code
-# (SEED_PROFILES in hal0.config.schema) and is overlaid on every
-# load. It is intentionally NOT materialised here so that a re-tuned seed — new
-# flags, a bumped toolbox image — reaches every install on upgrade instead of
-# being frozen by a stale on-disk copy. hal0-api serves the seeds from code
-# whether or not this file exists.
+# Seed profiles are VIRTUAL: the built-in catalog (chat / agent / utility /
+# coding / brain / cpu-chat / embedding / reranking / flm / kokoro / moonshine
+# / qwen3-tts / comfyui) lives in code (config/data/seed_profiles.toml) and is
+# overlaid on every load. It is intentionally NOT materialised here so that a
+# re-tuned seed — new flags, a bumped toolbox image — reaches every install on
+# upgrade instead of being frozen by a stale on-disk copy. hal0-api serves the
+# seeds from code whether or not this file exists.
 #
 # What this file is for: your OWN profiles. Add `[profile.<name>]` tables below
 # (or clone a seed from the dashboard, which writes here). Seed profiles are
@@ -15,17 +14,33 @@
 # non-seed profiles to /etc/hal0/profiles.toml; any seed key written here is
 # ignored in favour of the code definition and pruned on the next save/upgrade.
 #
-# A profile = (flags, mtp, runtime-family metadata). Slots reference a
-# profile by name; the slot supplies hardware, runner binary, and image. See
-# the container-runtime design
-# doc (§1) for the layering rationale. NOTE (§7.1a / ML-5): `mtp` here is
-# informational only — MTP and --jinja are now MODEL/runner capabilities, not
-# profile tunes; see ModelDefaults.mtp / .jinja in hal0.registry.model.
+# A profile is a complete tune (ADR-0029). The model holds facts about its
+# file, the slot holds placement (device, layers, threads, port), and the
+# profile holds everything else the slot launches with:
+#
+#   flags           free llama-server flags (KV cache types, batch sizes,
+#                   sampling, reasoning, --parallel). Never hardware flags
+#                   (-ngl, --device, --threads), hal0-managed flags
+#                   (--model, --host, --port, --alias, --ctx-size) or
+#                   model-fact flags (--jinja, --chat-template*, --mmproj*,
+#                   --no-mmproj).
+#   ctx_size        context window (128..16777216). Unset = the model's native
+#                   window capped at 32768, or 8192 when unknown.
+#   enable_thinking request-time reasoning default for slots on this profile.
+#   vision          "auto" (load the model's mmproj when it has one) | "off"
+#   mtp             "auto" (draft with the model's MTP heads when it has them
+#                   and the runner supports it) | "off"
+#   runner          optional runtime key; applying the profile sets the slot's
+#                   runner (and device for a single-backend runtime)
+#   cloned_from, intent   informational
+#
+# Slots reference a profile by name; two slots that want different tunes for
+# one model file name two profiles.
 #
 # Example — a custom workload profile cloned from `chat`:
 #
 #   [profile.my-moe]
-#   flags        = "-fa on -ctk q8_0 -ctv q8_0 -b 8192 -ub 2048 --parallel 1 --no-mmap"
-#   mtp          = false
-#   device_class = "gpu"
-#   cloned_from  = "chat"
+#   flags       = "-fa on -ctk q8_0 -ctv q8_0 -b 8192 -ub 2048 --parallel 1 --no-mmap"
+#   ctx_size    = 32768
+#   vision      = "off"
+#   cloned_from = "chat"

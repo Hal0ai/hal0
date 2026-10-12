@@ -100,7 +100,8 @@ Priors from the production `hal0-slot@agent` config: `-b 8192 -ub 2048 -ctk q8_0
 
 Out of llama-bench scope (server-level, tune separately): **draft/MTP speculative decode**
 (`--spec-draft-*`) and `--parallel`/slots — `installer/bench/server_ab.py` (Tier B) covers
-that, talking to `hal0-api` + the slot port directly, no sudo.
+that, talking to `hal0-api` + the slot port directly, no sudo. Its arms run under temporary
+profiles (`--variant "label[;ctx=N][;mtp=off]:<flags>"`, `--ctx-size`, `--mtp`).
 
 ## External research (then verify locally)
 
@@ -129,20 +130,45 @@ quality; if quality drops, the config is not a win.
 
 ## Applying a winning config to a slot
 
-Slot configs live in `/etc/hal0/slots/<slot>.toml` (`hal0:hal0` — agent-editable). To persist
-tuned flags:
+A tune lives on a **profile**, not on the slot or the model (ADR-0029). The slot names
+its model and its profile; the profile holds the flags (`-b`, `-ub`, `-ctk`, `-ctv`,
+`-fa`, `--parallel`, sampling, ...), the context window (`ctx_size`), the thinking
+default, `vision` and `mtp` (`auto`/`off`). Never put flags in `/etc/hal0/slots/<slot>.toml`
+— a write carrying a tuning key is refused (`slot.tuning_key_denied`). To persist a
+validated winner:
 
-1. **Back up** the toml. Change **one** thing (the validated winner).
-2. Reload via the hal0 CLI (`hal0 slot ...` — check `hal0 slot --help`; it regenerates the
-   unit through the `hal0-slotctl` seam). Do **not** hand-edit `/etc/systemd/system/hal0-slot@*`
-   (regenerated).
-3. **Verify health** (`hal0 slot status`, the slot's `/health`) and confirm live tok/s improved.
-4. Keep the rollback ready. This changes **production serving** — treat as Tier-2: only when
-   safe, verify after, revert on regression.
+1. **Find the slot's profile**: `hal0 slot show <slot>` (or `GET /api/slots/<slot>`) names
+   it; `hal0 profile show <profile>` prints its flags and window. Note it down for rollback.
+2. **Put the winner on a profile.**
+   - Custom profile used only by this slot: `hal0 profile edit <profile> --flags "<flags>"
+     [--ctx-size N] [--mtp auto|off]`. The dashboard's Profiles page does the same.
+   - Seed profile (`chat`, `agent`, `utility`, `coding`, ... — read-only) or one other slots
+     share: duplicate it, then edit the copy:
+     `hal0 profile create <new-name> --from <profile> --flags "<flags>" [--ctx-size N]`,
+     then `hal0 slot edit <slot> --profile <new-name>`.
+   Flags the profile refuses are the ones another layer owns: hardware (`-ngl`, `-dev`,
+   `-t` — slot fields), managed (`--model`, `--host`, `--port`, `--alias`, `--ctx-size` — use
+   `ctx_size`) and model facts (`--jinja`, `--chat-template*`, `--mmproj`, `--no-mmproj`),
+   plus `--spec-draft-device` and `--reasoning-format none`.
+3. **Restart the slot** to pick it up (`hal0 slot restart <slot>`); do **not** hand-edit
+   `/etc/systemd/system/hal0-slot@*` (regenerated). Check the effective command with
+   `GET /api/slots/<slot>/resolved` — every flag is labelled `base`/`model`/`profile`/`slot`.
+4. **Verify health** (`hal0 slot status`, the slot's `/health`) and confirm live tok/s improved.
+5. Keep the rollback ready: pointing the slot back at its old profile
+   (`hal0 slot edit <slot> --profile <old>`) or `hal0 profile edit` with the old values.
+   This changes **production serving** — treat as Tier-2: only when safe, verify after,
+   revert on regression.
+
+`installer/bench/server_ab.py` applies its arms the same way, temporarily: each arm is a
+throwaway profile cloned from the slot's, the slot is pointed at it, and the original
+profile is restored and the throwaway ones deleted when the run ends (also on failure and
+Ctrl-C). If a run is killed hard (SIGKILL), the next `server_ab` start for that slot deletes
+the leftover `tune-<slot>-*` arm profiles nothing references, logging each one; one a slot
+still points at is never deleted, only warned about.
 
 ## Output
 
 A short tuning report: target metric, baseline vs best (pp/tg per backend), the winning flags
 with the measured delta and the rationale/source for each, any quality check, and the exact
-`hal0 slot` change to apply it. Raw evidence is in the v2 store (`hal0 bench results` /
+profile change (and `hal0 slot edit --profile` if the slot must be re-pointed) to apply it. Raw evidence is in the v2 store (`hal0 bench results` /
 `hal0 bench history`, backed by `records.jsonl` + `bench.db` under `/var/lib/hal0-bench/`).

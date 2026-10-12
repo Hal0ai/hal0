@@ -293,7 +293,7 @@ def test_server_ab_slot_lookup_uses_the_client_key(api_env, stub, server_ab) -> 
 
 
 def test_server_ab_slot_config_and_restart_use_the_admin_key(api_env, stub, server_ab) -> None:
-    server_ab._apply_extra_args(stub.url, "gpu-a", "--cache-reuse 256")
+    server_ab._apply_profile(stub.url, "gpu-a", "tune-gpu-a-1")
 
     assert stub.seen == [
         ("PUT", "/api/slots/gpu-a/config", f"Bearer {ADMIN_KEY}"),
@@ -476,7 +476,7 @@ def test_non_loopback_api_gets_no_key_from_server_ab(api_env, remote_calls, serv
     with pytest.raises(urllib.error.URLError):
         server_ab._get_slot(REMOTE_API, "gpu-a")
     with pytest.raises(urllib.error.URLError):
-        server_ab._apply_extra_args(REMOTE_API, "gpu-a", "--cache-reuse 256")
+        server_ab._apply_profile(REMOTE_API, "gpu-a", "tune-gpu-a-1")
 
     assert [url for url, _ in remote_calls] == [
         f"{REMOTE_API}/api/slots",
@@ -611,7 +611,7 @@ def test_server_ab_loopback_requests_bypass_the_proxy(api_env, stub, proxied, se
     _, proxy = proxied
 
     assert server_ab._get_slot(stub.url, "gpu-a") == SLOTS[0]
-    server_ab._apply_extra_args(stub.url, "gpu-a", "--cache-reuse 256")
+    server_ab._apply_profile(stub.url, "gpu-a", "tune-gpu-a-1")
     server_ab._http("POST", f"{stub.url}/completion", {"prompt": "x"})
 
     assert proxy.seen == []

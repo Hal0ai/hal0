@@ -86,50 +86,49 @@ Verify which one a given feature actually reads before documenting behavior.
 ## Profiles
 
 `hal0.profiles` + `ProfileConfig` — a profile is a reusable, device-agnostic backend
-tuning template: a bench-tuned flag bundle plus a few classification hints, **not** a
-runtime image reference.
+tune: the free llama-server flags, the context window, the reasoning default, whether
+the model's mmproj loads and whether MTP drafts — **not** a runtime image reference. The
+model row holds only file facts (ADR-0029); a model runs differently by running under a
+different profile.
 
 | Field | Purpose |
 |---|---|
 | `flags` | Bench-tuned llama-server CLI flags. |
-| `mtp` | **Informational only** — MTP is model-owned, not profile-owned (see [Model roster & benchmarks](/docs/reference/model-roster-benchmark/)). |
-| `device_class` | `gpu \| cpu \| npu \| img \| null`. |
-| `backend` | `rocm \| vulkan \| cuda \| null`. |
+| `ctx_size` | Context window (128–16777216), or unset: the model's native window dense-capped at 32768, else 8192. |
+| `enable_thinking` | Request-time reasoning default for slots running this profile (`true`/`false`/unset). |
+| `vision` | `auto` (default; loads the model's mmproj when it has one) or `off`. |
+| `mtp` | `auto` (default; drafts when the model has MTP heads and the runner supports it) or `off`. Whether the file *has* heads is a model fact (`defaults.mtp` / the `mtp` tag). |
 | `runner` | Optional `RUNNER_IMAGES` registry key (str \| null, default null). Applying this profile to a slot sets the slot's `binary` to this runner key, and — only for a single-backend runner — derives the slot's `device` too (the profile wins over the slot's prior device within a device class). `null` (the default; every seed profile) means a flags-only tune that never touches the slot's runtime/device. |
 | `cloned_from` | Provenance — set when a profile was cloned from a seed. |
 | `intent` | Dashboard card headline. |
-| `quant` | Display chip only — the runtime reads quant from the model, not the profile. |
 
-Setting `runner` on a profile via `POST`/`PUT /api/profiles` is validated against the registry: an unknown key 422s with `profiles.unknown_runner` (`hal0.profiles.screen_profile_runner`). Applying a runner-carrying profile to a slot is a server-side reconcile (`hal0.slots.config_write._reconcile_device_profile`): it rewrites the slot's `binary` and, when the runner declares exactly one `supported_backends` lane, the slot's `device` too. If the runner's lane is physically infeasible on this host — e.g. a ROCm-only runtime (like `qwen3tts`) on a host with no `/dev/kfd` — the apply is refused with a 400 `slot.config_error` (`SlotConfigError`) naming the runtime and the missing device node, rather than writing a config that would crash-loop. Model-swap adoption of a model's preferred profile (`hal0.slots.profile_adopt`) follows the same device-class check before adopting a `runner`-carrying profile.
+Setting `runner` on a profile via `POST`/`PUT /api/profiles` is validated against the registry: an unknown key 422s with `profiles.unknown_runner` (`hal0.profiles.screen_profile_runner`). Applying a runner-carrying profile to a slot is a server-side reconcile (`hal0.slots.config_write._reconcile_device_profile`): it rewrites the slot's `binary` and, when the runner declares exactly one `supported_backends` lane, the slot's `device` too. If the runner's lane is physically infeasible on this host — e.g. a ROCm-only runtime (like `qwen3tts`) on a host with no `/dev/kfd` — the apply is refused with a 400 `slot.config_error` (`SlotConfigError`) naming the runtime and the missing device node, rather than writing a config that would crash-loop.
 
-<Aside type="note">
-As of v1.0, `device_class`/`backend` are **inert match-only fit hints**. The
-slot's own `device` field (see the device taxonomy below) is the single
-authoritative hardware fact; the profile hints are retained on-disk only
-because published `.hal0profile.json` export artifacts carry them and their
-checksums cover the field.
-</Aside>
+A profile carries no hardware placement: the slot's own `device` field (see the device
+taxonomy below) is the single authoritative hardware fact. `flags` may not set what another
+layer owns — hardware flags (`-ngl`, `-dev`, `-t`), managed flags (`--model`, `--host`,
+`--port`, `--alias`, `--ctx-size`), model-fact flags (`--jinja`, `--chat-template*`,
+`--mmproj`, `--no-mmproj`) and `--spec-draft-device` are rejected when the profile is saved.
 
 Profiles carry **no `image` field** — image resolution is slot-owned
 (`slot.image_pin` or `RUNNER_IMAGES[slot.binary]`).
 
 `ProfileCatalog` provides CRUD over `/etc/hal0/profiles.toml`: `list()`, `resolve(name)`,
 `create()`, `update()` (via a `ProfilePatch`), `delete()` (blocked if the profile is
-still referenced by a slot or by a model's `defaults.profile`). Seed profiles are
+still referenced by a slot). Seed profiles are
 **virtual** — reapplied from code on every load, so they can't be deleted or edited,
 only cloned.
 
 A resolved profile (`ResolvedProfile`) adds derived fields: `runtime_family`
 (`llama-server, flm, kokoro, qwen3tts, moonshine, comfyui` — classified structurally off
-name and `device_class`, not by sniffing an image string), `supported_slot_types` (e.g.
+name, not by sniffing an image string), `supported_slot_types` (e.g.
 `flm` → `llm, embedding, transcription`; `kokoro`/`qwen3tts` → `tts`; `moonshine` →
 `transcription`; `comfyui` → `image`; everything else → `llm, embedding, reranking`),
 `used_by` (slot names referencing the profile), and static `tps`/`rtf` numbers from the
 bench table.
 
-The seeded `moonshine` profile sets no `device_class` at all (neither does the
-seeded `kokoro` profile) — both are classified into their runtime family by
-name, not by device. It's the STT sibling of the seeded `kokoro`
+The seeded `moonshine` and `kokoro` profiles are classified into their runtime family by
+name. `moonshine` is the STT sibling of the seeded `kokoro`
 profile: `runtime_family = "moonshine"`, `supported_slot_types = ("transcription",)`,
 image `ghcr.io/hal0ai/hal0-runner-moonshine` (resolved via `RUNNER_IMAGES["moonshine"]`,
 tag and digest pinned in `manifest.json`), and self-managed (operator-staged) weights — see
@@ -174,5 +173,5 @@ slot.
 See [Hardware matrix](/docs/reference/hardware-matrix/) for
 the full table. In short: `hal0.model_meta.CANONICAL_DEVICES` is the single source of
 truth for the 5 valid device ids (`gpu-rocm`, `gpu-vulkan`, `gpu-cuda`, `cpu`, `npu`),
-consumed by `SlotConfig.device`, a profile's (now inert) `device_class`, and every
+consumed by `SlotConfig.device` and every
 other call site that used to duplicate this list.

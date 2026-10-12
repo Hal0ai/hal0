@@ -121,7 +121,7 @@ class SetupResult:
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
 
-def _build_slot_cfg(*, slot, model_id, device, profile, port, context_size=4096):
+def _build_slot_cfg(*, slot, model_id, device, profile, port):
     """Podman-aware slot config dict (device+profile, NOT backend — #807).
 
     Born MODEL-LESS (WS-E, #1108): callers pass ``model_id=""`` for the guided
@@ -130,14 +130,16 @@ def _build_slot_cfg(*, slot, model_id, device, profile, port, context_size=4096)
     (:func:`run_pull_and_activate`). Because model-presence is the activation
     signal (#1369), stamping the id up front is exactly what would let the slot
     start before its model exists on disk — there is no separate flag left to
-    hold it back. ``context_size`` is a tuning default and lands immediately.
+    hold it back. The context window is the profile's ``ctx_size`` (ADR-0029),
+    never a slot key; :func:`_budgeted_profile` swaps in a clamped clone of the
+    profile when the box cannot afford its window.
     """
     return {
         "name": slot,
         "port": port,
         "device": device,
         "profile": profile,
-        "model": {"default": model_id, "context_size": context_size},
+        "model": {"default": model_id},
     }
 
 
@@ -211,6 +213,51 @@ def _clamp_context_size(requested: int, hw: HardwareInfo, *, weights_gb: float =
     if not requested or requested <= 0:
         return budget_tokens
     return max(min(int(requested), budget_tokens), _MIN_CONTEXT)
+
+
+#: The window a profile without ``ctx_size`` runs: the model's native window
+#: capped here, or ``_UNKNOWN_NATIVE_WINDOW`` when the native window is unknown.
+_DENSE_WINDOW_CAP = 32768
+_UNKNOWN_NATIVE_WINDOW = 8192
+
+
+def _budgeted_profile(
+    profile: str, *, native_ctx: int, hardware: HardwareInfo, weights_gb: float
+) -> str:
+    """The profile a freshly provisioned slot should run, given this box's memory.
+
+    ADR-0029: a slot's window is its profile's ``ctx_size``. When the memory
+    budget (:func:`_clamp_context_size`) cannot fund that window, return the
+    name of a custom clone ``<profile>-ctx<N>`` with ``ctx_size`` lowered to
+    what fits (created on demand, see
+    :func:`hal0.install.static_seeds.ensure_clamped_profile`); otherwise return
+    ``profile`` unchanged. The clamp only ever lowers a window, and it never
+    raises or aborts provisioning: an unreadable catalog keeps the profile.
+    """
+    from hal0.config.loader import load_profiles_config
+    from hal0.install.static_seeds import ensure_clamped_profile
+
+    try:
+        cfg = load_profiles_config().profile.get(profile)
+    except Exception as exc:
+        log.warning("install.profile_catalog_unreadable profile=%s error=%s", profile, exc)
+        return profile
+    if cfg is None:
+        return profile
+    if cfg.ctx_size:
+        window = cfg.ctx_size
+    elif native_ctx > 0:
+        window = min(native_ctx, _DENSE_WINDOW_CAP)
+    else:
+        window = _UNKNOWN_NATIVE_WINDOW
+    clamped = _clamp_context_size(window, hardware, weights_gb=weights_gb)
+    if clamped >= window:
+        return profile
+    try:
+        return ensure_clamped_profile(profile, clamped)
+    except Exception as exc:
+        log.warning("install.context_clamp_profile_failed profile=%s error=%s", profile, exc)
+        return profile
 
 
 # ── Activate-on-pull-success (WS-E / #1108) ─────────────────────────────────────
@@ -586,15 +633,20 @@ async def apply_setup(
             continue
 
         _ensure_registry_entry(registry, s.model_id)
-        # WS-E (#1108): clamp the native curated window to a VRAM/RAM-aware
-        # budget derived from hardware.json (#1097), not the raw
-        # curated.context_length that produced the first-warm ``oom``. Model
-        # weights come off the budget first; the remainder funds the KV cache.
-        ctx = _clamp_context_size(
-            int(curated.context_length or 0),
-            hardware,
+        # WS-E (#1108): clamp the window to a VRAM/RAM-aware budget derived
+        # from hardware.json (#1097), not the raw curated.context_length that
+        # produced the first-warm ``oom``. Model weights come off the budget
+        # first; the remainder funds the KV cache. The window is the profile's
+        # ``ctx_size``, so a box that cannot afford it gets a clamped clone of
+        # the profile (ADR-0029), never a per-slot ceiling.
+        profile = await asyncio.to_thread(
+            _budgeted_profile,
+            profile,
+            native_ctx=int(curated.context_length or 0),
+            hardware=hardware,
             weights_gb=float(getattr(curated, "size_gb", 0.0) or 0.0),
         )
+        rec.profile = profile
         # Born MODEL-LESS — the id is stamped only after the pull completes
         # (#1369: the withheld model.default IS the start gate). The plan below
         # carries ``s.model_id`` forward to the activation write.
@@ -604,7 +656,6 @@ async def apply_setup(
             device=device,
             profile=profile,
             port=s.port,
-            context_size=ctx,
         )
         try:
             await slot_manager.create(s.slot_name, cfg)

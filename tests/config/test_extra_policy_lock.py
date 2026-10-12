@@ -53,7 +53,6 @@ _EXPECTED_EXTRA_POLICY: dict[str, str] = {
     # Escape-hatch / forward-compat containers -> allow
     "Hal0Config": "allow",
     "SlotConfig": "allow",
-    "ModelConfig": "allow",
     "HardwareInfo": "allow",
     "GPUInfo": "allow",
     "NPUInfo": "allow",
@@ -65,7 +64,10 @@ _EXPECTED_EXTRA_POLICY: dict[str, str] = {
     "AgentMetadataConfig": "allow",
     "AgentMCPConfig": "allow",
     "MCPServerConfig": "allow",
-    # ServerConfig: forbid + declared-field escape hatch (extra_args/env)
+    # [model] / [server] slot tables (ADR-0029): the slot names its model
+    # (``default``) and its container env and nothing else; a tuning key fails
+    # loudly at load instead of riding along unread.
+    "ModelConfig": "forbid",
     "ServerConfig": "forbid",
     # Deliberate silent-drop of retired keys -> ignore
     "MemoryGraphConfig": "ignore",

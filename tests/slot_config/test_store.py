@@ -159,18 +159,19 @@ def test_apply_reconciles_slot_fields_for_gpu_rocm(tmp_hal0_home: str) -> None:
     assert after["model"]["default"] == "new-model"
 
 
-def test_apply_preserves_model_siblings_and_folds_ctx_alias(tmp_hal0_home: str) -> None:
-    """[model] sibling keys survive; the legacy ctx_size alias folds (#585)."""
-    slot_path = _write_embed_slot(tmp_hal0_home, extra_lines=["ctx_size = 4096"])
+def test_apply_preserves_sibling_tables(tmp_hal0_home: str) -> None:
+    """A model swap through the store keeps the slot's other tables, and the
+    projection adds nothing to ``[model]`` beyond ``default`` (ADR-0029: no
+    ctx_size alias fold; the window is the profile's)."""
+    slot_path = _write_embed_slot(tmp_hal0_home, extra_lines=["[server.env]", 'A = "1"'])
     _write_caps(tmp_hal0_home)
 
     cs = SlotConfigStore().apply(_selection(model="new-model"))
 
     after = {fs.path: fs.data for fs in cs.after}[slot_path]
     assert after is not None
-    assert after["model"]["default"] == "new-model"
-    assert after["model"]["context_size"] == 4096
-    assert "ctx_size" not in after["model"]
+    assert after["model"] == {"default": "new-model"}
+    assert after["server"] == {"env": {"A": "1"}}
 
 
 def test_apply_updates_capabilities_selection(tmp_hal0_home: str) -> None:

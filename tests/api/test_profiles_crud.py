@@ -14,7 +14,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from hal0.api import create_app
-from hal0.config.schema import MTP_FLAG_BUNDLE, SEED_PROFILES
+from hal0.config.schema import SEED_PROFILES
 
 # ── helpers ────────────────────────────────────────────────────────────────────
 
@@ -46,9 +46,9 @@ def _seed_flat_slot_toml(home: str, name: str, profile: str, port: int = 8090) -
 def _seed_profiles_toml(home: str, name: str, flags: str, **fields: str) -> Path:
     """Write a custom profile straight into profiles.toml, bypassing the API.
 
-    The only way to stage state the write-path screens would refuse — i.e. the
-    pre-guard profiles #1411 is about, authored before spec-hw-slot-ownership §5
-    shipped. Mirrors the ``[profile.<name>]`` table shape the loader reads.
+    The only way to stage state the write-path screens would refuse (a stale
+    hardware flag, an out-of-vocabulary runner). Mirrors the
+    ``[profile.<name>]`` table shape the loader reads.
     """
     root = Path(home) / "etc" / "hal0"
     root.mkdir(parents=True, exist_ok=True)
@@ -91,27 +91,41 @@ def test_create_profile_201_and_listed(client: TestClient) -> None:
         json={
             "name": "my-vulkan",
             "flags": "-fa on",
-            "mtp": False,
-            "device_class": "gpu",
+            "ctx_size": 32768,
+            "enable_thinking": False,
+            "vision": "off",
+            "mtp": "off",
         },
     )
     assert r.status_code == 201
     body = r.json()
     assert body["name"] == "my-vulkan"
     assert body["flags"] == "-fa on"
-    assert body["mtp"] is False
-    assert body["device_class"] == "gpu"
+    assert body["ctx_size"] == 32768
+    assert body["enable_thinking"] is False
+    assert body["vision"] == "off"
+    assert body["mtp"] == "off"
     assert "resolved_flags" in body
     assert body["seed"] is False
+    assert not {"device_class", "backend", "quant"} & set(body)
     listed = client.get("/api/profiles").json()
     assert any(p["name"] == "my-vulkan" for p in listed)
+
+
+def test_create_defaults_are_auto_and_unset(client: TestClient) -> None:
+    body = client.post("/api/profiles", json={"name": "bare"}).json()
+    assert body["ctx_size"] is None
+    assert body["enable_thinking"] is None
+    assert body["vision"] == "auto"
+    assert body["mtp"] == "auto"
+    assert body["runner"] is None
 
 
 # ── spec-hw-slot-ownership §5: profile flags reject slot-hardware flags ────────
 
 
 def test_create_profile_rejects_slot_hardware_flag(client: TestClient) -> None:
-    """A profile is a device-agnostic tune template — its flags must not carry a
+    """A profile is a device-agnostic tune — its flags must not carry a
     grid-owned hardware flag (--threads/-ngl/--device). The create hard-rejects
     with the "belongs on the slot" envelope and persists nothing."""
     r = client.post(
@@ -119,7 +133,6 @@ def test_create_profile_rejects_slot_hardware_flag(client: TestClient) -> None:
         json={
             "name": "hw-profile",
             "flags": "-fa on --threads 8",
-            "device_class": "gpu",
         },
     )
     assert r.status_code == 400, r.text
@@ -208,75 +221,51 @@ def test_update_profile_rejects_managed_flag(client: TestClient) -> None:
     assert r.json()["error"]["code"] == "slot.managed_arg_denied"
 
 
-# ── #1411: the §5 screen must not brick profiles authored before it ────────────
-
-
-def test_update_grandfathers_stored_hardware_flag_on_rename_only_put(
-    tmp_hal0_home: str,
-) -> None:
-    """A profile authored before §5 shipped must stay editable (#1411).
-
-    Saving it back verbatim — exactly what the drawer does, since it round-trips
-    the flag text from GET — used to 400 on the profile's OWN stored flags, so
-    every pre-guard custom profile was read-only through the API. The screen
-    now looks at what the PUT *introduces*, not what it inherits.
-    """
-    _seed_profiles_toml(
-        tmp_hal0_home,
-        "legacy",
-        "-fa on -dev ROCm0 -ctk q8_0 -ctv q8_0 -b 2048 --threads 8",
-        intent="pre-guard tune",
-    )
-    with TestClient(create_app()) as client:
-        stored = client.get("/api/profiles/legacy")
-        assert stored.status_code == 200, stored.text
-        flags = stored.json()["flags"]
-        assert "-dev" in flags and "--threads" in flags
-
-        # Rename-only intent change, re-sending the stored flags verbatim.
-        r = client.put("/api/profiles/legacy", json={"flags": flags, "intent": "retuned"})
-        assert r.status_code == 200, r.text
-        assert r.json()["intent"] == "retuned"
-        assert r.json()["flags"] == flags
+# ── ADR-0029: there is no grandfathering of stored hardware flags ──────────────
+#
+# The #1411 exemption (a profile authored before the screen shipped stayed
+# editable) is gone: the profile-centric converter rewrites stored profiles
+# once, so a PUT that SENDS flags is always screened.
 
 
 def test_update_without_flags_key_never_screens(tmp_hal0_home: str) -> None:
     """A patch that doesn't name `flags` at all must not be screened against the
-    stored ones (#1411)."""
-    _seed_profiles_toml(tmp_hal0_home, "legacy2", "-fa on -dev ROCm0")
+    stored ones: a profile holding a stale hardware flag can still be edited
+    in its other fields."""
     with TestClient(create_app()) as client:
-        r = client.put("/api/profiles/legacy2", json={"intent": "still editable"})
+        _seed_profiles_toml(tmp_hal0_home, "stale2", "-fa on -dev ROCm0")
+        r = client.put("/api/profiles/stale2", json={"intent": "still editable"})
         assert r.status_code == 200, r.text
         assert r.json()["intent"] == "still editable"
+        assert r.json()["flags"] == "-fa on -dev ROCm0"
 
 
-def test_update_still_rejects_a_newly_added_hardware_flag(tmp_hal0_home: str) -> None:
-    """Grandfathering is per-flag, not a blanket amnesty: a legacy `-dev` does
-    not buy the right to ALSO add `--threads` (#1411)."""
-    _seed_profiles_toml(tmp_hal0_home, "legacy3", "-fa on -dev ROCm0")
+def test_update_resending_a_stored_hardware_flag_is_rejected(tmp_hal0_home: str) -> None:
+    """Saving a stored hardware flag back verbatim is a hard 400 now."""
     with TestClient(create_app()) as client:
-        r = client.put("/api/profiles/legacy3", json={"flags": "-fa on -dev ROCm0 --threads 8"})
+        _seed_profiles_toml(tmp_hal0_home, "stale", "-fa on -dev ROCm0 --threads 8")
+        stored = client.get("/api/profiles/stale").json()["flags"]
+        r = client.put("/api/profiles/stale", json={"flags": stored, "intent": "retuned"})
         assert r.status_code == 400, r.text
         assert r.json()["error"]["code"] == "slot.hardware_flag_denied"
-        assert r.json()["error"]["details"]["flags"] == ["--threads"]
+        # Nothing was written.
+        assert client.get("/api/profiles/stale").json()["intent"] == ""
 
 
-def test_update_can_drop_the_legacy_hardware_flag(tmp_hal0_home: str) -> None:
-    """The migration path stays open — removing the legacy flag is accepted and
-    the grandfather no longer applies afterwards (#1411)."""
-    _seed_profiles_toml(tmp_hal0_home, "legacy4", "-fa on -dev ROCm0")
+def test_update_can_clean_up_the_stored_hardware_flag(tmp_hal0_home: str) -> None:
+    """The way off a stale flag is to replace the flag text."""
     with TestClient(create_app()) as client:
-        cleaned = client.put("/api/profiles/legacy4", json={"flags": "-fa on"})
+        _seed_profiles_toml(tmp_hal0_home, "stale4", "-fa on -dev ROCm0")
+        cleaned = client.put("/api/profiles/stale4", json={"flags": "-fa on"})
         assert cleaned.status_code == 200, cleaned.text
         assert cleaned.json()["flags"] == "-fa on"
-        # Now that the stored text is clean, re-adding -dev is a NEW reach.
-        r = client.put("/api/profiles/legacy4", json={"flags": "-fa on -dev ROCm0"})
+        r = client.put("/api/profiles/stale4", json={"flags": "-fa on -dev ROCm0"})
         assert r.status_code == 400, r.text
         assert r.json()["error"]["code"] == "slot.hardware_flag_denied"
 
 
-def test_create_is_never_grandfathered(client: TestClient) -> None:
-    """POST has no stored baseline, so §5 stays a hard reject there (#1411)."""
+def test_create_screens_hardware_flags(client: TestClient) -> None:
+    """POST rejects hardware flags outright."""
     r = client.post("/api/profiles", json={"name": "fresh", "flags": "-fa on -dev ROCm0"})
     assert r.status_code == 400, r.text
     assert r.json()["error"]["code"] == "slot.hardware_flag_denied"
@@ -337,42 +326,101 @@ def test_create_seed_name_409(client: TestClient) -> None:
     assert r.json()["error"]["code"] == "profiles.exists"
 
 
-def test_create_mtp_false_resolved_flags_equals_flags(client: TestClient) -> None:
-    """Custom profile with mtp=False: resolved_flags == flags (stripped)."""
+def test_create_resolved_flags_equals_flags(client: TestClient) -> None:
+    """resolved_flags is the profile's own flags: the MTP draft bundle is
+    composed at launch from the model + runner, never shown here."""
+    for mtp in ("auto", "off"):
+        r = client.post(
+            "/api/profiles",
+            json={"name": f"mtp-{mtp}", "flags": "-fa on", "mtp": mtp},
+        )
+        assert r.status_code == 201
+        body = r.json()
+        assert body["resolved_flags"] == body["flags"] == "-fa on"
+        assert "--spec-type" not in body["resolved_flags"]
+
+
+@pytest.mark.parametrize("field", ["vision", "mtp"])
+@pytest.mark.parametrize("value", [True, False, "on", "yes", ""])
+def test_create_vision_and_mtp_accept_only_auto_or_off(
+    client: TestClient, field: str, value: object
+) -> None:
+    """``mtp`` used to be a bool; a schema-1 style ``true`` is a 422, not coerced."""
+    r = client.post("/api/profiles", json={"name": "bad-switch", field: value})
+    assert r.status_code == 422, r.text
+
+
+def test_create_rejects_the_retired_fields_silently_ignored_never(client: TestClient) -> None:
+    """device_class / backend / quant are gone from the body. FastAPI ignores
+    unknown JSON keys, so they must simply not appear on the stored profile."""
     r = client.post(
         "/api/profiles",
-        json={"name": "no-mtp", "flags": "-fa on", "mtp": False},
+        json={"name": "no-hints", "flags": "-fa on", "device_class": "gpu", "quant": "Q4"},
     )
-    assert r.status_code == 201
-    body = r.json()
-    assert body["resolved_flags"] == body["flags"].strip()
-    assert "--spec-type" not in body["resolved_flags"]
+    assert r.status_code == 201, r.text
+    assert not {"device_class", "backend", "quant"} & set(r.json())
 
 
-def test_create_mtp_true_resolved_flags_no_longer_injects_bundle(client: TestClient) -> None:
-    """Custom profile with mtp=True: since ML-5, ``profile.mtp`` is informational
-    only — MTP is a per-MODEL capability gated by ``runner.supports.mtp`` and
-    injected at launch (in ``_resolve_llama_scalars``), NOT by
-    ``resolve_profile_flags`` from the profile. So the profile-CRUD preview's
-    ``resolved_flags`` no longer carries the bundle purely from ``profile.mtp``
-    (showing it here would mislead — launch won't add it unless the model+runner
-    support it)."""
-    r = client.post(
-        "/api/profiles",
-        json={"name": "with-mtp", "flags": "-fa on", "mtp": True},
+@pytest.mark.parametrize("ctx", [0, 64, 127, 16_777_217, -1])
+def test_create_ctx_size_out_of_range_400(client: TestClient, ctx: int) -> None:
+    r = client.post("/api/profiles", json={"name": "bad-ctx", "ctx_size": ctx})
+    assert r.status_code == 400, r.text
+    assert r.json()["error"]["code"] == "profiles.ctx_size_out_of_range"
+    assert not any(p["name"] == "bad-ctx" for p in client.get("/api/profiles").json())
+
+
+@pytest.mark.parametrize("ctx", [128, 4096, 16_777_216])
+def test_create_ctx_size_bounds_are_inclusive(client: TestClient, ctx: int) -> None:
+    r = client.post("/api/profiles", json={"name": f"ctx-{ctx}", "ctx_size": ctx})
+    assert r.status_code == 201, r.text
+    assert r.json()["ctx_size"] == ctx
+
+
+@pytest.mark.parametrize(
+    ("flags", "code"),
+    [
+        ("--jinja -fa on", "profiles.model_fact_flag_denied"),
+        ("-fa on --no-mmproj", "profiles.model_fact_flag_denied"),
+        ("--mmproj /x/m.gguf", "profiles.model_fact_flag_denied"),
+        ("--mmproj-auto", "profiles.model_fact_flag_denied"),
+        ("--chat-template chatml", "profiles.model_fact_flag_denied"),
+        ("--chat-template-file t.jinja", "profiles.model_fact_flag_denied"),
+        ("-fa on --spec-draft-device ROCm0", "profiles.model_fact_flag_denied"),
+        ("--reasoning-format none", "slot.reasoning_format_none_denied"),
+        ("--ctx-size 4096", "slot.managed_arg_denied"),
+        ("-c 4096", "slot.managed_arg_denied"),
+        ("-t 8", "slot.hardware_flag_denied"),
+        ("--n-gpu-layers 10", "slot.hardware_flag_denied"),
+    ],
+)
+def test_create_and_update_screen_every_flag_a_profile_may_not_carry(
+    client: TestClient, flags: str, code: str
+) -> None:
+    r = client.post("/api/profiles", json={"name": "screened", "flags": flags})
+    assert r.status_code == 400, r.text
+    assert r.json()["error"]["code"] == code
+    assert not any(p["name"] == "screened" for p in client.get("/api/profiles").json())
+
+    assert (
+        client.post("/api/profiles", json={"name": "to-edit", "flags": "-fa on"}).status_code == 201
     )
-    assert r.status_code == 201
-    body = r.json()
-    assert MTP_FLAG_BUNDLE not in body["resolved_flags"]
-    # the profile's own flags are still resolved verbatim.
-    assert body["resolved_flags"] == body["flags"].strip()
-    assert "-fa on" in body["resolved_flags"]
+    r = client.put("/api/profiles/to-edit", json={"flags": flags})
+    assert r.status_code == 400, r.text
+    assert r.json()["error"]["code"] == code
+    assert client.get("/api/profiles/to-edit").json()["flags"] == "-fa on"
 
 
-def test_create_invalid_bad_device_class_422(client: TestClient) -> None:
+def test_reasoning_format_other_than_none_is_allowed(client: TestClient) -> None:
+    r = client.post(
+        "/api/profiles", json={"name": "rf", "flags": "--reasoning-format deepseek -fa on"}
+    )
+    assert r.status_code == 201, r.text
+
+
+def test_create_invalid_bad_vision_422(client: TestClient) -> None:
     r = client.post(
         "/api/profiles",
-        json={"name": "valid-name", "device_class": "badvalue"},
+        json={"name": "valid-name", "vision": "badvalue"},
     )
     assert r.status_code == 422
 
@@ -416,29 +464,70 @@ def test_update_custom_profile_200(tmp_hal0_home: str) -> None:
     assert updated["flags"] == "-fa off"
 
 
-def test_update_only_device_class_preserves_other_fields(client: TestClient) -> None:
-    """PUT with ONLY device_class set updates it and preserves the rest."""
+def test_update_sparse_preserves_other_fields(client: TestClient) -> None:
+    """PUT with ONLY one field set updates it and preserves the rest."""
     client.post(
         "/api/profiles",
         json={
             "name": "my-vulkan",
             "flags": "-fa on",
-            "mtp": True,
-            "device_class": "gpu",
+            "ctx_size": 16384,
+            "enable_thinking": True,
+            "vision": "off",
+            "mtp": "off",
         },
     )
-    r = client.put("/api/profiles/my-vulkan", json={"device_class": "cpu"})
+    r = client.put("/api/profiles/my-vulkan", json={"vision": "auto"})
     assert r.status_code == 200
     body = r.json()
-    assert body["device_class"] == "cpu"
+    assert body["vision"] == "auto"
     assert body["flags"] == "-fa on"
-    assert body["mtp"] is True
+    assert body["ctx_size"] == 16384
+    assert body["enable_thinking"] is True
+    assert body["mtp"] == "off"
     # Persisted view agrees.
-    listed = client.get("/api/profiles").json()
-    item = next(p for p in listed if p["name"] == "my-vulkan")
-    assert item["device_class"] == "cpu"
-    assert item["flags"] == "-fa on"
-    assert item["mtp"] is True
+    item = next(p for p in client.get("/api/profiles").json() if p["name"] == "my-vulkan")
+    assert (item["vision"], item["ctx_size"], item["mtp"]) == ("auto", 16384, "off")
+
+
+def test_update_ctx_size_null_clears_but_omitting_leaves_alone(client: TestClient) -> None:
+    client.post(
+        "/api/profiles",
+        json={"name": "ctx-edit", "ctx_size": 16384, "enable_thinking": True},
+    )
+    left = client.put("/api/profiles/ctx-edit", json={"intent": "x"})
+    assert left.status_code == 200, left.text
+    assert left.json()["ctx_size"] == 16384
+    assert left.json()["enable_thinking"] is True
+
+    changed = client.put("/api/profiles/ctx-edit", json={"ctx_size": 8192})
+    assert changed.json()["ctx_size"] == 8192
+
+    cleared = client.put("/api/profiles/ctx-edit", json={"ctx_size": None})
+    assert cleared.status_code == 200, cleared.text
+    assert cleared.json()["ctx_size"] is None
+    assert cleared.json()["enable_thinking"] is True
+
+    both = client.put("/api/profiles/ctx-edit", json={"enable_thinking": None})
+    assert both.json()["enable_thinking"] is None
+    assert client.get("/api/profiles/ctx-edit").json()["enable_thinking"] is None
+
+
+@pytest.mark.parametrize("ctx", [0, 127, 16_777_217])
+def test_update_ctx_size_out_of_range_400(client: TestClient, ctx: int) -> None:
+    client.post("/api/profiles", json={"name": "ctx-bad", "ctx_size": 4096})
+    r = client.put("/api/profiles/ctx-bad", json={"ctx_size": ctx})
+    assert r.status_code == 400, r.text
+    assert r.json()["error"]["code"] == "profiles.ctx_size_out_of_range"
+    assert client.get("/api/profiles/ctx-bad").json()["ctx_size"] == 4096
+
+
+@pytest.mark.parametrize("field", ["vision", "mtp"])
+def test_update_vision_and_mtp_reject_non_switch_values(client: TestClient, field: str) -> None:
+    client.post("/api/profiles", json={"name": "sw-edit"})
+    for value in (True, "on", ""):
+        r = client.put("/api/profiles/sw-edit", json={field: value})
+        assert r.status_code == 422, (value, r.text)
 
 
 def test_update_missing_404(client: TestClient) -> None:
@@ -487,17 +576,16 @@ def test_seed_immutable_delete_409(client: TestClient) -> None:
 
 def test_delete_in_use_409(tmp_hal0_home: str) -> None:
     """DELETE a profile that a slot TOML references → 409 profiles.in_use."""
-    # Seed slot TOML referencing my-vulkan BEFORE building the app so
-    # the slot is on-disk when the route scans list_slots().
-    _seed_slot_toml(tmp_hal0_home, "gpu-slot", "my-vulkan")
-
     app = create_app()
     with TestClient(app) as c:
-        # Create the custom profile (seeds are the starting catalog).
+        # Create the custom profile (seeds are the starting catalog), then
+        # point a slot at it. The slot is written AFTER boot: the boot-time
+        # conversion re-points a slot naming a profile that does not exist yet.
         c.post(
             "/api/profiles",
             json={"name": "my-vulkan"},
         )
+        _seed_slot_toml(tmp_hal0_home, "gpu-slot", "my-vulkan")
         r = c.delete("/api/profiles/my-vulkan")
     assert r.status_code == 409
     err = r.json()["error"]
@@ -512,14 +600,13 @@ def test_delete_in_use_409_flat_slot_toml(tmp_hal0_home: str) -> None:
     (no [slot] table), not just the legacy nested shape, so the in-use guard
     still fires and no profiles.in_use_scan_error is logged.
     """
-    _seed_flat_slot_toml(tmp_hal0_home, "gpu-slot", "my-vulkan")
-
     app = create_app()
     with TestClient(app) as c:
         c.post(
             "/api/profiles",
             json={"name": "my-vulkan"},
         )
+        _seed_flat_slot_toml(tmp_hal0_home, "gpu-slot", "my-vulkan")
         listed = c.get("/api/profiles").json()
         r = c.delete("/api/profiles/my-vulkan")
     # In-use guard fires for the flat slot.
@@ -534,15 +621,14 @@ def test_delete_in_use_409_flat_slot_toml(tmp_hal0_home: str) -> None:
 
 def test_delete_in_use_409_despite_corrupt_sibling_toml(tmp_hal0_home: str) -> None:
     """Corrupt slot TOML next to a valid referencing slot: DELETE still 409."""
-    _seed_corrupt_slot_toml(tmp_hal0_home, "broken-slot")
-    _seed_slot_toml(tmp_hal0_home, "gpu-slot", "my-vulkan", port=8091)
-
     app = create_app()
     with TestClient(app) as c:
         c.post(
             "/api/profiles",
             json={"name": "my-vulkan"},
         )
+        _seed_corrupt_slot_toml(tmp_hal0_home, "broken-slot")
+        _seed_slot_toml(tmp_hal0_home, "gpu-slot", "my-vulkan", port=8091)
         r = c.delete("/api/profiles/my-vulkan")
     assert r.status_code == 409
     err = r.json()["error"]
@@ -605,157 +691,84 @@ def test_seed_profiles_have_null_cloned_from(client: TestClient) -> None:
     assert listed and all(p["cloned_from"] is None for p in listed)
 
 
-# ── 1c: the inert fit hints are not stamped with a hardware claim ─────────────
+# ── a stored profile still carrying stale hardware flags ──────────────────────
 
 
-def test_create_without_device_class_leaves_it_unset(client: TestClient) -> None:
-    """`ProfileBody.device_class` defaulted to `"gpu"`, so every profile created
-    without one silently acquired a hardware claim it never asked for — on a
-    field that (before 81e1e206) gated real /dev/kfd passthrough. A tuning-only
-    profile is device-AGNOSTIC; the default is now None, matching ProfileConfig
-    and all 16 seeds."""
-    r = client.post("/api/profiles", json={"name": "agnostic", "flags": "-fa on"})
-    assert r.status_code == 201, r.text
-    assert r.json()["device_class"] is None
-    # and it survives the round-trip through the on-disk catalog
-    listed = client.get("/api/profiles").json()
-    entry = next(p for p in listed if p["name"] == "agnostic")
-    assert entry["device_class"] is None
+def _seed_stale_profiles_toml(home: str, name: str, flags: str) -> Path:
+    """Write a custom profile carrying flags today's screen rejects.
 
-
-def test_create_with_explicit_device_class_still_honored(client: TestClient) -> None:
-    """The hint is inert, not forbidden — an operator may still declare a fit
-    hint, and the published chat-long-context artifact carries one."""
-    r = client.post(
-        "/api/profiles",
-        json={"name": "gpu-hinted", "flags": "-fa on", "device_class": "gpu"},
-    )
-    assert r.status_code == 201, r.text
-    assert r.json()["device_class"] == "gpu"
-
-
-def test_cuda_backend_accepted_on_create_and_update(client: TestClient) -> None:
-    """`ProfileConfig.backend` accepts rocm|vulkan|cuda but the route DTOs only
-    accepted rocm|vulkan, so a CUDA profile could be imported yet 422'd on every
-    subsequent PUT — un-editable through the API that created it."""
-    r = client.post(
-        "/api/profiles",
-        json={"name": "cuda-tune", "flags": "-fa on", "device_class": "gpu", "backend": "cuda"},
-    )
-    assert r.status_code == 201, r.text
-    assert r.json()["backend"] == "cuda"
-    r2 = client.put("/api/profiles/cuda-tune", json={"backend": "cuda", "intent": "NVIDIA"})
-    assert r2.status_code == 200, r2.text
-    assert r2.json()["backend"] == "cuda"
-    assert r2.json()["intent"] == "NVIDIA"
-
-
-# ── #1411: a pre-1.0 custom profile must stay editable ────────────────────────
-
-
-def _seed_legacy_profiles_toml(home: str, name: str, flags: str) -> Path:
-    """Write a custom profile carrying flags that today's §5 screen rejects.
-
-    This is what a 0.9.8 box has on disk: `-dev`/`--threads` were legal on a
-    profile before spec-hw-slot-ownership §5. It must be written directly —
-    the API (correctly) refuses to create one.
+    The API (correctly) refuses to create one; the profile-centric converter
+    rewrites these once at boot, but a hand-edited file can still hold one.
     """
     root = Path(home) / "etc" / "hal0"
     root.mkdir(parents=True, exist_ok=True)
     path = root / "profiles.toml"
     path.write_text(
-        f'[profile.{name}]\nflags = "{flags}"\nmtp = false\nintent = "Legacy"\nquant = ""\n',
+        f'[profile.{name}]\nflags = "{flags}"\nmtp = "auto"\nintent = "Stale"\n',
         encoding="utf-8",
     )
     return path
 
 
 @pytest.fixture
-def legacy_client(tmp_hal0_home: str) -> Iterator[TestClient]:
-    """Client over a box that already has a pre-1.0 custom profile on disk."""
-    _seed_legacy_profiles_toml(tmp_hal0_home, "old-custom", "-fa on -dev Vulkan0 --threads 8")
+def stale_client(tmp_hal0_home: str) -> Iterator[TestClient]:
+    """Client over a box that already has a stale custom profile on disk."""
     with TestClient(create_app()) as c:
+        # Seeded AFTER boot: the boot-time conversion rewrites stale flags once.
+        _seed_stale_profiles_toml(tmp_hal0_home, "old-custom", "-fa on -dev Vulkan0 --threads 8")
         yield c
 
 
-def test_legacy_profile_is_visible(legacy_client: TestClient) -> None:
-    listed = legacy_client.get("/api/profiles").json()
+def test_stale_profile_is_visible(stale_client: TestClient) -> None:
+    listed = stale_client.get("/api/profiles").json()
     entry = next(p for p in listed if p["name"] == "old-custom")
     assert "-dev Vulkan0" in entry["flags"]
 
 
-def test_legacy_profile_metadata_edit_is_not_blocked_by_its_stored_flags(
-    legacy_client: TestClient,
-) -> None:
-    """#1411 — THE HEADLINE CASE. The dashboard round-trips the whole profile on
-    save, so editing `intent` resubmits the stored `-dev`/`--threads` flags
-    verbatim. Screening an UNCHANGED value rejected a write that changes
-    nothing, making every pre-existing custom profile permanently un-editable
-    after upgrade, with no in-product way to fix it."""
-    r = legacy_client.put(
+def test_stale_profile_metadata_edit_without_flags_works(stale_client: TestClient) -> None:
+    """A client that sends only the field it changed is never blocked by the
+    profile's stored flags."""
+    r = stale_client.put("/api/profiles/old-custom", json={"intent": "Renamed"})
+    assert r.status_code == 200, r.text
+    assert r.json()["intent"] == "Renamed"
+
+
+def test_stale_profile_resending_its_flags_is_rejected(stale_client: TestClient) -> None:
+    """No grandfathering: resending the stored text is screened like new text."""
+    r = stale_client.put(
         "/api/profiles/old-custom",
         json={"flags": "-fa on -dev Vulkan0 --threads 8", "intent": "Renamed"},
     )
-    assert r.status_code == 200, r.text
-    assert r.json()["intent"] == "Renamed"
-    assert r.json()["flags"] == "-fa on -dev Vulkan0 --threads 8"
+    assert r.status_code == 400, r.text
+    assert r.json()["error"]["code"] == "slot.hardware_flag_denied"
 
 
-def test_legacy_profile_edit_omitting_flags_also_works(legacy_client: TestClient) -> None:
-    """A client that PATCHes only the field it changed was never broken; pinned
-    so the delta rule does not regress it."""
-    r = legacy_client.put("/api/profiles/old-custom", json={"intent": "Renamed"})
-    assert r.status_code == 200, r.text
-    assert r.json()["intent"] == "Renamed"
-
-
-def test_legacy_profile_cleaning_its_flags_is_allowed(legacy_client: TestClient) -> None:
+def test_stale_profile_cleaning_its_flags_is_allowed(stale_client: TestClient) -> None:
     """The migration path: an operator CAN fix the offending flags."""
-    r = legacy_client.put("/api/profiles/old-custom", json={"flags": "-fa on -b 512"})
+    r = stale_client.put("/api/profiles/old-custom", json={"flags": "-fa on -b 512"})
     assert r.status_code == 200, r.text
     assert r.json()["flags"] == "-fa on -b 512"
 
 
-def test_legacy_profile_cannot_gain_a_new_hardware_flag(legacy_client: TestClient) -> None:
-    """The partition is still fully enforced on any ACTUAL change — the
-    exemption is for byte-identical resubmission only, not a general amnesty."""
-    r = legacy_client.put(
-        "/api/profiles/old-custom",
-        json={"flags": "-fa on -dev Vulkan0 --threads 8 -ngl 999"},
-    )
-    assert r.status_code == 400, r.text
-    assert r.json()["error"]["code"] == "slot.hardware_flag_denied"
-
-
-def test_legacy_profile_cannot_gain_a_managed_flag(legacy_client: TestClient) -> None:
-    """Cleaning the legacy hardware flags but smuggling in a managed arg is
-    still rejected — and by the MANAGED screen, since no hardware flag remains
-    to trip the hardware screen that runs first."""
-    r = legacy_client.put("/api/profiles/old-custom", json={"flags": "-fa on --ctx-size 4096"})
+def test_stale_profile_cannot_gain_a_managed_flag(stale_client: TestClient) -> None:
+    r = stale_client.put("/api/profiles/old-custom", json={"flags": "-fa on --ctx-size 4096"})
     assert r.status_code == 400, r.text
     assert r.json()["error"]["code"] == "slot.managed_arg_denied"
 
 
-def test_legacy_profile_edit_keeping_hardware_flags_reports_the_hardware_denial(
-    legacy_client: TestClient,
-) -> None:
-    """Ordering guarantee: when a changed flag string introduces BOTH a new
-    hardware flag and a new managed flag, the operator is told about the
-    hardware flag (the thing that belongs on the slot), not whatever else is
-    wrong. ``-dev`` is already inherited from the legacy value (#1411
-    grandfathering), so this uses ``-ngl`` — a hardware flag with no prior
-    value to inherit — to keep the hardware screen live in this update."""
-    r = legacy_client.put(
+def test_hardware_denial_is_reported_before_the_managed_denial(stale_client: TestClient) -> None:
+    """When flags introduce BOTH a hardware flag and a managed flag, the operator
+    is told about the hardware flag (the thing that belongs on the slot) first."""
+    r = stale_client.put(
         "/api/profiles/old-custom",
-        json={"flags": "-fa on -dev Vulkan0 --threads 8 -ngl 999 --ctx-size 4096"},
+        json={"flags": "-fa on -ngl 999 --ctx-size 4096"},
     )
     assert r.status_code == 400, r.text
     assert r.json()["error"]["code"] == "slot.hardware_flag_denied"
 
 
-def test_create_is_still_fully_screened(legacy_client: TestClient) -> None:
-    """A NEW profile gets no exemption — there is no legacy value to preserve."""
-    r = legacy_client.post(
+def test_create_is_fully_screened(stale_client: TestClient) -> None:
+    r = stale_client.post(
         "/api/profiles", json={"name": "brand-new", "flags": "-fa on --threads 8"}
     )
     assert r.status_code == 400, r.text

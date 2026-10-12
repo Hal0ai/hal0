@@ -48,7 +48,6 @@ def test_build_slot_cfg_sets_device_profile_model():
         device="gpu-rocm",
         profile="rocm",
         port=8081,
-        context_size=32768,
     )
     assert cfg["name"] == "chat"
     assert cfg["device"] == "gpu-rocm"
@@ -58,7 +57,8 @@ def test_build_slot_cfg_sets_device_profile_model():
     # model-presence IS activation, withholding it is the start gate itself.
     assert "enabled" not in cfg
     assert cfg["model"]["default"] == "qwen3.8-27b"
-    assert cfg["model"]["context_size"] == 32768
+    # ADR-0029: the window is the profile's ctx_size, never a slot key.
+    assert "context_size" not in cfg["model"]
     # v2 sets device+profile, NOT the legacy `backend` field.
     assert "backend" not in cfg
 
