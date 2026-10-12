@@ -325,8 +325,16 @@ exactly once. It follows ADR-0028's contract:
   live, and that is safe because for every slot not on the launch-change list
   the result is effective-argv-equivalent. After writing, it re-renders units
   as `migrate_runner_system` does (`rerender_slot_units`) and compares each
-  slot's newly rendered argv with the frozen evaluation. Any difference
-  outside the planned launch changes rolls back every write and fails loudly. The
+  slot's newly rendered argv with the plan. Each slot file is separate, so a
+  difference blocks only that slot. Its original file is put back, and any
+  profile generated for it alone stays in `profiles.toml` but unreferenced.
+  The difference is reported as BLOCKED, and the rest of the install
+  converts. The model tuning that slot still launches from is kept.
+  A failure writing a shared file (`profiles.toml`, `stacks.toml`) or the
+  registry rolls back every write and fails loudly.
+  The plan renders a model with no registry row (never pulled, or deleted)
+  as the launch path does: `--model <model id>`
+  (`_best_effort_model_info`), so a stale slot converts like any other. The
   previously rendered `Exec=` line is also compared. A difference there is
   pre-existing drift and is reported only. Running containers keep running;
   launch-change slots show the existing config-drift badge until they are

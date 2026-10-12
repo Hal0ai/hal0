@@ -694,6 +694,20 @@ def convert_profile(entry: Mapping[str, Any], family: str) -> ProfileConversion:
     return ProfileConversion(content, notes, conv.errors)
 
 
+def _launch_model_info(row: Mapping[str, Any] | None, model_id: str) -> dict[str, Any]:
+    """The model info the launch path renders a slot with.
+
+    Same fallback as ``providers.container._best_effort_model_info``: a model
+    with no registry row (unregistered or deleted), or a row with no path,
+    launches with ``--model <model id>``.
+    """
+    info = frozen.model_info_from_row(row) if row else {}
+    info.setdefault("_model_key", model_id)
+    if not info.get("path"):
+        info["path"] = model_id
+    return info
+
+
 def _tidy(content: Mapping[str, Any]) -> dict[str, Any]:
     out = {k: v for k, v in content.items() if v not in (None, "")}
     if out.get("vision") == "auto":
@@ -1048,8 +1062,8 @@ class _Planner:
     def _plan_llama(
         self, slot: dict[str, Any], sp: SlotPlan, model_id: str, row: Mapping[str, Any] | None
     ) -> None:
-        model = frozen.model_info_from_row(row) if row else {"_model_key": model_id}
-        model_after = frozen.model_info_from_row(_row_after(row)) if row else model
+        model = _launch_model_info(row, model_id)
+        model_after = _launch_model_info(_row_after(row) if row else None, model_id)
         old = frozen.evaluate(slot, model, self.old)
         sp.argv_today = old.argv
         base = self._base_for(slot, sp, old.profile_launched)

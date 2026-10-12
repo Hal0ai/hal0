@@ -469,3 +469,29 @@ def test_model_info_from_row_round_trips_defaults(tmp_path: Path) -> None:
     assert info["metadata"]["context_length"] == 131072
     assert info["tags"] == ["mtp", "chat"]
     assert info["mmproj"] == "/m/mm.gguf"
+
+
+@pytest.mark.parametrize("profile", ["chat", "thinking"])
+def test_unregistered_model_plans_the_live_fallback(profile: str) -> None:
+    """A slot naming a model with no registry row (never pulled, or deleted)
+    launches ``--model <model id>`` today (``_best_effort_model_info``); the
+    plan's view of today's launch, and of the launch after, must say so too."""
+    from hal0.config.migrations import profile_centric as pc
+
+    _write_profiles(CUSTOM_PROFILES)
+    slot = _slot(profile=profile, model={"default": "gone-model"}, workers=1)
+    path = paths.slots_config_dir() / "1.toml"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(tomli_w.dumps({**slot, "id": 1}).encode())
+
+    resolved = C._resolve_slot_argv(frozen.hoist_slot(slot, "s"))
+    assert resolved is not None
+    live = list(resolved[1].argv)
+    assert live[live.index("--model") + 1] == "gone-model"
+
+    plan = pc.plan_conversion()
+    (sp,) = plan.slots
+    assert sp.status != "blocked", sp.error
+    assert pc.effective_map(sp.argv_today) == pc.effective_map(live)
+    after = list(sp.argv_after)
+    assert after[after.index("--model") + 1] == "gone-model"
