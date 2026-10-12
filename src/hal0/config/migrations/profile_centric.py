@@ -1,23 +1,23 @@
 """Plan the move of an install onto profile-centric config (ADR-0029).
 
 Model rows keep file facts, profiles hold every tune, slots hold placement.
-This module plans that move for one install: for every slot it works out what
-the slot launches today (:mod:`hal0.config.migrations.profile_centric_frozen`)
-and which profile reproduces it under the new rules, then lists the profiles
-to generate, the slot re-points, the keys to drop, the model tuning to clear
-and every value that changes nothing today ("inert").
-
-This first phase only PLANS. It writes nothing; ``hal0 profile migrate``
-prints the plan. The writer, the backup and the restore arrive with the launch
-path that reads the new shape, so no install can hold half of it.
+This module plans that move for one install. For EVERY slot it computes what
+the slot launches today (:mod:`hal0.config.migrations.profile_centric_frozen`),
+picks or generates the profile that holds that tune, computes what the slot
+will launch under the new rules (:func:`new_launch`) and diffs the two. A
+difference is either one of the few reported launch changes (a slot with no
+or a missing profile getting the profile its type needs, the MTP draft
+device following the slot's device, ``--jinja`` no longer added in
+embedding/reranking mode, a forced MTP on a runner without MTP support) or a
+reason to block that slot loudly.
 
 Inert values (slot ``[server].extra_args``, ``parallel``, ``chat_template``, a
 context ceiling that never took effect, stack-row tuning, non-llama model
-``extra_args``) are never applied: the conversion preserves what launches
-and reports every one of them (operator decision, ADR-0029).
+``extra_args``) are never applied: the conversion keeps what launches and
+reports every one of them (operator decision, ADR-0029).
 
-Every rule is "old shape? convert : leave", so an install already in the new
-shape plans nothing.
+This module only PLANS; it writes nothing. ``hal0 profile migrate`` prints
+the plan.
 """
 
 from __future__ import annotations
@@ -29,12 +29,117 @@ import shlex
 import sqlite3
 import tomllib
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
+from functools import lru_cache
+from importlib.resources import files
 from pathlib import Path
 from typing import Any, Literal
 
 from hal0.config.migrations import profile_centric_frozen as frozen
 from hal0.errors import Hal0Error
+
+# ── constants of the conversion ──────────────────────────────────────────────
+
+#: Top-level slot keys that leave the slot.
+SLOT_DROP_KEYS: tuple[str, ...] = (
+    "parallel",
+    "chat_template",
+    "workers",
+    "runtime",
+    "enabled",
+    "backend",
+    "ctx_size",
+    "mtp",
+    "enable_thinking",
+    "vision",
+    "image",
+)
+#: ``[model]`` keys that leave the slot (only ``default`` stays).
+MODEL_TABLE_DROP: tuple[str, ...] = (
+    "context_size",
+    "ctx_size",
+    "n_gpu_layers",
+    "rope_freq_base",
+    "extra",
+)
+#: Model row columns that hold tuning, and tuning keys in the row's ``extra``.
+MODEL_TUNING_COLUMNS: tuple[str, ...] = (
+    "profile",
+    "extra_args",
+    "context_size",
+    "rope_freq_base",
+    "n_gpu_layers",
+    "preferred_runner",
+)
+MODEL_TUNING_EXTRA_KEYS: tuple[str, ...] = ("_enable_thinking", "_vision")
+#: The table SQL migration 012 moves the model tuning columns into.
+HOLDING_TABLE = "legacy_model_tuning"
+#: Conversion state under ``/var/lib/hal0``: the slot files already converted
+#: and whether the whole install is. A converted slot is never re-evaluated
+#: (its new-shape profile means nothing to the frozen resolver), which is what
+#: makes a rerun a no-op.
+STATE_FILE = "profile-centric.json"
+#: Profile keys that leave every profile.
+PROFILE_DROP_KEYS: tuple[str, ...] = ("mtp", "device_class", "backend", "quant", "image")
+#: Stack-row keys that leave every row (inert today: stack apply never used them).
+STACK_ROW_TUNING_KEYS: tuple[str, ...] = ("vision", "mtp", "enable_thinking", "server_extra_args")
+#: Runner key a converted profile names for a non-llama engine.
+ENGINE_RUNNER: dict[str, str] = {
+    "flm": "flm",
+    "kokoro": "kokoro",
+    "moonshine": "moonshine",
+    "qwen3tts": "qwen3tts",
+    "comfyui": "comfyui",
+}
+#: Seed profile per non-llama engine (for a slot whose profile resolves to nothing).
+ENGINE_SEED: dict[str, str] = {
+    "flm": "flm",
+    "kokoro": "kokoro",
+    "moonshine": "moonshine",
+    "qwen3tts": "qwen3-tts",
+    "comfyui": "comfyui",
+}
+#: Engines whose model file path moves from the profile (``--model_path``) to the model row.
+MODEL_PATH_ENGINES: frozenset[str] = frozenset({"kokoro", "moonshine", "qwen3tts"})
+#: Slot type -> the seed that carries its mode flag.
+TYPE_SEED: dict[str, str] = {"embedding": "embedding", "reranking": "reranking"}
+
+#: The MTP draft defaults the new launch path adds in the profile layer; the
+#: draft device is placement and comes from the slot.
+MTP_DRAFT_BUNDLE = "--spec-type draft-mtp" + frozen._MTP_BUNDLE_TAIL
+MTP_DRAFT_DEVICE: dict[str, str] = {"rocm": "ROCm0", "vulkan": "Vulkan0", "cuda": "CUDA0"}
+
+_BASE = frozenset({"--host", "--port", "--model", "--alias", "--ctx-size"})
+_VISION_OFF = frozenset({"--no-mmproj", "--no-mmproj-auto"})
+#: Flags whose combined effect is "is the projector loaded" (llama.cpp clears
+#: --mmproj whenever --no-mmproj is set, whatever the order).
+_PROJECTOR_FLAGS = frozenset({"--mmproj", "--no-mmproj", "--no-mmproj-auto", "--mmproj-auto"})
+#: Model-fact flags that have no profile home: a tune carrying one blocks its slot.
+_BLOCKING = frozenset({"--chat-template", "--chat-template-file", "--mmproj"})
+#: Segments of today's launch that hold the tune (everything else is base,
+#: placement or a model fact hal0 computes).
+_TUNE_SEGMENTS = frozenset({"slot_profile_template", "model_extra_args", "slot_profile"})
+_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,31}$")
+
+
+class ProfileMigrationError(Hal0Error):
+    """The plan could not be built at all (an input that cannot be read)."""
+
+    code = "profiles.migration_failed"
+
+
+@lru_cache(maxsize=1)
+def target_seeds() -> dict[str, dict[str, Any]]:
+    """The seed catalog the conversion targets (new profile shape)."""
+    text = (
+        files("hal0.config.data")
+        .joinpath("profile_centric_seeds_after.toml")
+        .read_text(encoding="utf-8")
+    )
+    return {k: dict(v) for k, v in tomllib.loads(text).get("profile", {}).items()}
+
+
+# ── plan data ────────────────────────────────────────────────────────────────
 
 
 @dataclass(frozen=True)
@@ -44,15 +149,6 @@ class InertValue:
     where: str
     key: str
     value: Any
-
-
-# ── plan data ────────────────────────────────────────────────────────────────
-
-
-class ProfileMigrationError(Hal0Error):
-    """The plan could not be built at all (an input that cannot be read)."""
-
-    code = "profiles.migration_failed"
 
 
 SlotStatus = Literal["unchanged", "convert", "blocked"]
@@ -74,6 +170,7 @@ class SlotPlan:
     notes: list[str] = field(default_factory=list)
     error: str | None = None
     argv_today: tuple[str, ...] = ()
+    argv_after: tuple[str, ...] = ()
 
 
 @dataclass
@@ -86,21 +183,27 @@ class ModelPlan:
 
 
 @dataclass
-class StackRowPlan:
+class StackPlan:
     stack: str
-    slot: str
-    drop_keys: list[str] = field(default_factory=list)
-    inert: list[InertValue] = field(default_factory=list)
+    rows: list[dict[str, Any]] = field(default_factory=list)
+    profile_rewrites: dict[str, list[str]] = field(default_factory=dict)
+    errors: list[str] = field(default_factory=list)
 
 
 @dataclass
 class ConversionPlan:
     slots: list[SlotPlan] = field(default_factory=list)
+    shadowed: list[str] = field(default_factory=list)
     profiles: dict[str, dict[str, Any]] = field(default_factory=dict)
     profile_rewrites: dict[str, list[str]] = field(default_factory=dict)
+    renames: dict[str, str] = field(default_factory=dict)
     models: list[ModelPlan] = field(default_factory=list)
-    stacks: list[StackRowPlan] = field(default_factory=list)
+    stacks: list[StackPlan] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+
+    @property
+    def blocked(self) -> list[SlotPlan]:
+        return [s for s in self.slots if s.status == "blocked"]
 
     @property
     def changed(self) -> bool:
@@ -108,30 +211,33 @@ class ConversionPlan:
             any(s.status != "unchanged" for s in self.slots)
             or self.profiles
             or self.profile_rewrites
+            or self.renames
             or any(m.clear or m.register_path for m in self.models)
             or self.stacks
         )
 
-    @property
-    def blocked(self) -> list[SlotPlan]:
-        return [s for s in self.slots if s.status == "blocked"]
+    def to_dict(self) -> dict[str, Any]:
+        out = asdict(self)
+        out["changed"] = self.changed
+        out["blocked"] = [s.file for s in self.blocked]
+        return out
 
     def lines(self) -> list[str]:
         """Human report, one line per finding."""
         out: list[str] = []
         for s in self.slots:
+            head = f"slot {s.name} ({s.file})"
             if s.status == "unchanged":
-                out.append(f"slot {s.name} ({s.file}): unchanged, profile {s.profile_before!r}")
-                continue
-            if s.status == "blocked":
-                out.append(f"slot {s.name} ({s.file}): BLOCKED: {s.error}")
-                continue
-            how = "generated" if s.generated else "existing"
-            out.append(
-                f"slot {s.name} ({s.file}): profile {s.profile_before or '(none)'!r} -> "
-                f"{s.profile_after!r} ({how})"
-            )
-            if s.drop_keys:
+                out.append(f"{head}: unchanged, profile {s.profile_before!r}")
+            elif s.status == "blocked":
+                out.append(f"{head}: BLOCKED: {s.error}")
+            else:
+                how = "generated" if s.generated else "existing"
+                out.append(
+                    f"{head}: profile {s.profile_before or '(none)'!r} -> "
+                    f"{s.profile_after!r} ({how})"
+                )
+            if s.drop_keys and s.status != "blocked":
                 out.append(f"  drop keys: {', '.join(s.drop_keys)}")
             for k, v in s.set_keys.items():
                 out.append(f"  set {k} = {v!r}")
@@ -140,10 +246,13 @@ class ConversionPlan:
             for item in s.inert:
                 out.append(f"  {item.where} {item.key} = {item.value!r}: inert today, dropped")
             out.extend(f"  note: {n}" for n in s.notes)
+        out.extend(f"file {f}: not loaded today (shadowed); left as is" for f in self.shadowed)
+        for old, new in self.renames.items():
+            out.append(f"custom profile {old!r} renamed to {new!r} (a seed now has that name)")
         for name, content in self.profiles.items():
             out.append(f"new profile {name}: {json.dumps(content, sort_keys=True)}")
-        for name, dropped in self.profile_rewrites.items():
-            out.append(f"profile {name}: rewrite ({'; '.join(dropped)})")
+        for name, notes in self.profile_rewrites.items():
+            out.append(f"profile {name}: rewrite ({'; '.join(notes)})")
         for m in self.models:
             if m.clear:
                 out.append(
@@ -154,75 +263,19 @@ class ConversionPlan:
             if m.register_path:
                 out.append(f"model {m.model_id}: register (path {m.register_path})")
             out.extend(f"  note: {n}" for n in m.notes)
-        for r in self.stacks:
-            out.append(f"stack {r.stack} row {r.slot}: drop {', '.join(r.drop_keys)}")
-            for item in r.inert:
-                out.append(f"  {item.key} = {item.value!r}: inert today, dropped")
+        for st in self.stacks:
+            for row in st.rows:
+                out.append(f"stack {st.stack} row {row['slot']}: {row['change']}")
+            for name, notes in st.profile_rewrites.items():
+                out.append(f"stack {st.stack} profile {name}: rewrite ({'; '.join(notes)})")
+            out.extend(f"stack {st.stack}: BLOCKED: {e}" for e in st.errors)
         out.extend(f"warning: {w}" for w in self.warnings)
         if not self.changed:
             out.append("nothing to convert")
         return out
 
 
-# ── constants of the new shape ───────────────────────────────────────────────
-
-#: Slot keys that leave the slot (ADR-0029 decision 3).
-SLOT_TUNING_KEYS: tuple[str, ...] = (
-    "parallel",
-    "chat_template",
-    "workers",
-    "runtime",
-    "enabled",
-    "backend",
-    "ctx_size",
-    "mtp",
-    "enable_thinking",
-    "vision",
-)
-MODEL_TABLE_DROP: tuple[str, ...] = ("context_size", "n_gpu_layers", "rope_freq_base", "extra")
-#: Model row columns that hold tuning (ADR-0029 decision 3).
-MODEL_TUNING_COLUMNS: tuple[str, ...] = (
-    "profile",
-    "extra_args",
-    "context_size",
-    "rope_freq_base",
-    "n_gpu_layers",
-    "preferred_runner",
-)
-MODEL_TUNING_EXTRA_KEYS: tuple[str, ...] = ("_enable_thinking", "_vision")
-#: Profile keys that leave the profile.
-PROFILE_DROP_KEYS: tuple[str, ...] = ("mtp", "device_class", "backend", "quant", "image")
-STACK_ROW_TUNING_KEYS: tuple[str, ...] = ("vision", "mtp", "enable_thinking", "server_extra_args")
-
-#: Engines whose runner key a converted profile names explicitly.
-ENGINE_RUNNER: dict[str, str] = {
-    "flm": "flm",
-    "kokoro": "kokoro",
-    "moonshine": "moonshine",
-    "qwen3tts": "qwen3tts",
-    "comfyui": "comfyui",
-}
-#: Seed profile per non-llama engine (for a profile-less slot).
-ENGINE_SEED: dict[str, str] = {
-    "flm": "flm",
-    "kokoro": "kokoro",
-    "moonshine": "moonshine",
-    "qwen3tts": "qwen3-tts",
-    "comfyui": "comfyui",
-}
-#: Engines whose profile flags carry the model file (``--model_path``).
-MODEL_PATH_ENGINES: frozenset[str] = frozenset({"kokoro", "moonshine", "qwen3tts"})
-#: Slot type -> seed profile that carries its mode flag.
-TYPE_SEED: dict[str, str] = {"embedding": "embedding", "reranking": "reranking"}
-FLM_DEFAULT_CTX = 8192
-
-_BASE_CANON = frozenset({"--host", "--port", "--model", "--alias", "--ctx-size"})
-_PLACEMENT_CANON = frozenset({"--n-gpu-layers", "--metrics"})
-_MODEL_FACT_CANON = frozenset({"--chat-template-file", "--mmproj", "--jinja"})
-_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,31}$")
-
-
-# ── flag helpers ─────────────────────────────────────────────────────────────
+# ── flags ────────────────────────────────────────────────────────────────────
 
 
 def _pairs(tokens: list[str] | tuple[str, ...]) -> list[tuple[str, str, tuple[str, ...]]]:
@@ -248,12 +301,207 @@ def effective_map(tokens: list[str] | tuple[str, ...]) -> dict[str, Any]:
     return out
 
 
-def _join(pairs: list[tuple[str, str, tuple[str, ...]]]) -> str:
-    tokens: list[str] = []
-    for _canon, flag, values in pairs:
-        tokens.append(flag)
-        tokens.extend(values)
+def _join(tokens: list[str]) -> str:
     return " ".join(shlex.quote(t) for t in tokens)
+
+
+@dataclass
+class FlagConversion:
+    """Free flag text under the new rules."""
+
+    tokens: list[str] = field(default_factory=list)
+    vision_off: bool = False
+    threads: int | None = None
+    notes: list[str] = field(default_factory=list)
+    errors: list[str] = field(default_factory=list)
+
+
+def convert_flags(text: str | list[str], *, source: Literal["profile", "tune"]) -> FlagConversion:
+    """Route every flag a profile may no longer carry to its new home.
+
+    ``source="profile"``: a stored profile's text (hardware and managed flags
+    were stripped from profile segments at launch today, so they are
+    dropped here and reported). ``source="tune"``: the flags a slot launched
+    with today (``--threads`` moves to the slot, ``-dev`` blocks).
+    """
+    out = FlagConversion()
+    if isinstance(text, str):
+        try:
+            tokens = shlex.split(text) if text.strip() else []
+        except ValueError as exc:
+            out.errors.append(f"flags do not shell-split: {exc}")
+            return out
+    else:
+        tokens = list(text)
+    from hal0.slots.argv import _split_pairs
+
+    for pair in _split_pairs(tokens):
+        if pair.canon is None:
+            out.tokens.extend(pair.values)
+            continue
+        canon, flag, values = pair.canon, str(pair.flag), list(pair.values)
+        if canon == "--reasoning-format":
+            joined = flag.startswith("--reasoning-format=")
+            value = flag.split("=", 1)[1] if joined else (values or [""])[0]
+            if value.strip().lower() == "none":
+                out.notes.append(
+                    "--reasoning-format none dropped (#2545; stripped at launch today)"
+                )
+                if joined:
+                    out.tokens.extend(values)
+                continue
+        if canon == "--jinja":
+            if source == "profile":
+                out.notes.append("--jinja dropped (hal0 adds it from the runner and the model)")
+            continue
+        if canon in _VISION_OFF:
+            out.vision_off = True
+            out.notes.append(f'{flag} -> vision = "off"')
+            continue
+        if canon == "--mmproj-auto":
+            out.notes.append('--mmproj-auto dropped (vision = "auto" is the default)')
+            continue
+        if canon in _BLOCKING:
+            out.errors.append(f"{flag} is a model fact with no profile home; move it to the model")
+            continue
+        if canon == "--spec-draft-device":
+            out.notes.append(f"{flag} {' '.join(values)} dropped (the slot's device decides it)")
+            continue
+        if canon in frozen.HARDWARE_FLAGS:
+            if canon == "--threads" and source == "tune" and values:
+                try:
+                    out.threads = int(values[0])
+                except ValueError:
+                    out.errors.append(f"{flag} {values[0]} is not a thread count")
+                continue
+            if canon == "--device" and source == "tune":
+                out.errors.append(f"{flag} reached the launch; the slot's device must say it")
+                continue
+            out.notes.append(f"{flag} dropped (placement belongs on the slot)")
+            continue
+        if canon in frozen.MANAGED_FLAGS:
+            out.notes.append(f"{flag} dropped (hal0 sets it)")
+            continue
+        out.tokens.append(flag)
+        out.tokens.extend(values)
+    return out
+
+
+# ── the new launch rules ─────────────────────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class LaunchAfter:
+    argv: tuple[str, ...]
+    ctx: int
+    mtp: bool
+    jinja: bool
+    vision_loaded: bool
+    enable_thinking: bool | None
+
+
+def default_ctx(model: Mapping[str, Any]) -> int:
+    """The window for a profile with no ``ctx_size``: native capped, else 8192."""
+    native = frozen.native_ctx(model)
+    return min(native, frozen.CTX_DENSE_CAP) if native else frozen.CTX_SAFE_FALLBACK
+
+
+def has_mtp_heads(model: Mapping[str, Any]) -> bool:
+    """The model fact: explicit ``defaults.mtp`` when set, else the ``mtp`` tag."""
+    defaults = model.get("defaults") if isinstance(model.get("defaults"), Mapping) else {}
+    explicit = defaults.get("mtp")
+    if explicit is not None:
+        return bool(explicit)
+    return any(str(t).strip().lower() == "mtp" for t in model.get("tags") or ())
+
+
+def new_launch(
+    slot: Mapping[str, Any],
+    model: Mapping[str, Any],
+    profile: Mapping[str, Any],
+    *,
+    chat_template_root: str = "",
+) -> LaunchAfter:
+    """What a llama-server slot launches under ADR-0029: base, model, profile, slot.
+
+    ``profile`` is new-shape content (flags, ctx_size, enable_thinking,
+    vision, mtp). The launch-path change implements exactly this order and is
+    pinned to this function by its parity test.
+    """
+    runner = frozen.effective_runner(slot, frozen.Profile(name=""))
+    flags = shlex.split(str(profile.get("flags") or ""))
+    embed = bool({"--embedding", "--reranking"} & set(flags))
+    ctx_size = profile.get("ctx_size")
+    ctx = int(ctx_size) if ctx_size else default_ctx(model)
+    defaults = model.get("defaults") if isinstance(model.get("defaults"), Mapping) else {}
+
+    base = ["--host", "0.0.0.0", "--port", str(int(slot.get("port") or 0))]
+    if model.get("path"):
+        base += ["--model", str(model["path"])]
+    alias = model.get("_model_key") or (slot.get("model") or {}).get("default")
+    if alias:
+        base += ["--alias", str(alias)]
+    base += ["--ctx-size", str(ctx)]
+
+    supports = getattr(runner, "supports", None)
+    jinja = (
+        bool(getattr(supports, "jinja", False)) and defaults.get("jinja") is not False and not embed
+    )
+    model_layer = ["--jinja"] if jinja else []
+    tmpl = defaults.get("chat_template")
+    if tmpl and tmpl != "auto":
+        model_layer += ["--chat-template-file", f"{chat_template_root}/chat-templates/{tmpl}.jinja"]
+    mmproj = model.get("mmproj") if profile.get("vision", "auto") != "off" else None
+    if mmproj:
+        model_layer += ["--mmproj", str(mmproj)]
+
+    mtp = (
+        profile.get("mtp", "auto") != "off"
+        and has_mtp_heads(model)
+        and bool(getattr(supports, "mtp", False))
+        and not embed
+    )
+    profile_layer = (shlex.split(MTP_DRAFT_BUNDLE) if mtp else []) + flags
+
+    slot_layer: list[str] = []
+    if slot.get("n_gpu_layers") is not None:
+        slot_layer += ["-ngl", str(int(slot["n_gpu_layers"]))]
+    threads = slot.get("threads")
+    if threads is not None and int(threads) > 0:
+        slot_layer += ["--threads", str(int(threads))]
+    if slot.get("metrics") is None or bool(slot.get("metrics")):
+        slot_layer += ["--metrics"]
+    if mtp:
+        backend = frozen._backend_and_class(slot, frozen.Profile(name=""))[0]
+        slot_layer += [
+            "--spec-draft-device",
+            MTP_DRAFT_DEVICE.get((backend or "").lower(), "ROCm0"),
+        ]
+
+    from hal0.slots.argv import _dedup, _split_pairs
+
+    argv, _removed, _w = _dedup(_split_pairs(base + model_layer + profile_layer + slot_layer))
+    thinking = profile.get("enable_thinking")
+    return LaunchAfter(
+        argv=tuple(argv),
+        ctx=ctx,
+        mtp=mtp,
+        jinja=jinja,
+        vision_loaded=bool(mmproj),
+        enable_thinking=thinking if isinstance(thinking, bool) else None,
+    )
+
+
+# ── names ────────────────────────────────────────────────────────────────────
+
+
+def _identity(content: Mapping[str, Any]) -> dict[str, Any]:
+    """A profile's tune: what launches, without informational fields."""
+    out = {k: v for k, v in content.items() if k not in ("intent", "cloned_from")}
+    out.setdefault("vision", "auto")
+    out.setdefault("mtp", "auto")
+    out["flags"] = effective_map(shlex.split(str(out.get("flags") or "")))
+    return {k: v for k, v in out.items() if v not in (None, "")}
 
 
 def slug_name(*parts: str, content: Mapping[str, Any], taken: Mapping[str, Any]) -> str:
@@ -261,92 +509,15 @@ def slug_name(*parts: str, content: Mapping[str, Any], taken: Mapping[str, Any])
 
     The short form (first 26 characters, ``-``, 5 hex of the content hash) is
     used when the slug is over 32 characters, invalid, or already names a
-    profile with different content.
+    profile with a different tune.
     """
     raw = re.sub(r"[^a-z0-9_-]+", "-", "-".join(p for p in parts if p).lower())
     raw = re.sub(r"-{2,}", "-", raw).strip("-_") or "profile"
-    digest = hashlib.sha256(json.dumps(content, sort_keys=True).encode()).hexdigest()[:5]
-    if _NAME_RE.match(raw) and (raw not in taken or taken[raw] == content):
+    ident = _identity(content)
+    digest = hashlib.sha256(json.dumps(ident, sort_keys=True, default=str).encode()).hexdigest()[:5]
+    if _NAME_RE.match(raw) and (raw not in taken or _identity(taken[raw]) == ident):
         return raw
     return f"{raw[:26].rstrip('-_')}-{digest}"
-
-
-# ── what a profile gives under the new rules ─────────────────────────────────
-
-
-@dataclass(frozen=True)
-class NewRuleView:
-    """A profile read the way the new launch path reads it."""
-
-    flags: tuple[str, ...]
-    vision_off: bool
-    ctx_size: int | None
-    enable_thinking: bool | None
-
-
-def new_rule_view(profile: frozen.Profile | None) -> NewRuleView:
-    """Profile flags minus what the new rules compute elsewhere.
-
-    ``--jinja`` is a model fact, hardware and managed flags belong to the
-    slot and base layers, and ``--no-mmproj`` becomes ``vision = "off"``.
-    """
-    if profile is None:
-        return NewRuleView((), False, None, None)
-    tokens = shlex.split(profile.flags) if profile.flags.strip() else []
-    tokens = [t for t in tokens if t != "--jinja"]
-    tokens, _ = frozen._strip(tokens, frozen.HARDWARE_FLAGS | frozen.MANAGED_FLAGS)
-    vision_off = "--no-mmproj" in tokens
-    tokens = [t for t in tokens if t != "--no-mmproj"]
-    raw = profile.raw
-    ctx = raw.get("ctx_size") if isinstance(raw.get("ctx_size"), int) else None
-    thinking = raw.get("enable_thinking") if isinstance(raw.get("enable_thinking"), bool) else None
-    if raw.get("vision") == "off":
-        vision_off = True
-    return NewRuleView(tuple(tokens), vision_off, ctx, thinking)
-
-
-def new_rule_flags(text: str) -> tuple[str, bool]:
-    """Free flag text under the new rules: ``(flags, vision_off)``."""
-    view = new_rule_view(frozen.Profile(name="", flags=text))
-    return " ".join(shlex.quote(t) for t in view.flags), view.vision_off
-
-
-def _tune_key(content: Mapping[str, Any]) -> dict[str, Any]:
-    """A generated profile's identity: everything but the informational intent."""
-    return {k: v for k, v in content.items() if k != "intent"}
-
-
-def _existing_content(profile: frozen.Profile | None) -> dict[str, Any] | None:
-    """An operator profile's tune in generated-profile form, for dedupe."""
-    if profile is None:
-        return None
-    view = new_rule_view(profile)
-    content = {
-        "flags": " ".join(shlex.quote(t) for t in view.flags),
-        "ctx_size": view.ctx_size,
-        "enable_thinking": view.enable_thinking,
-        "vision": "off" if view.vision_off else None,
-        "runner": profile.runner,
-    }
-    return {k: v for k, v in content.items() if v not in (None, "", ())}
-
-
-def _clone_content(profile: frozen.Profile | None) -> dict[str, Any]:
-    """The new-shape content of an existing profile, for a generated clone."""
-    if profile is None:
-        return {"flags": ""}
-    flags, vision_off = new_rule_flags(profile.flags)
-    return {
-        "flags": flags,
-        "vision": "off" if vision_off else None,
-        "runner": profile.runner,
-    }
-
-
-def default_ctx(model: Mapping[str, Any]) -> int:
-    """The new rules' window for a profile with no ``ctx_size``."""
-    native = frozen.native_ctx(model)
-    return min(native, frozen.CTX_DENSE_CAP) if native else frozen.CTX_SAFE_FALLBACK
 
 
 # ── inputs ───────────────────────────────────────────────────────────────────
@@ -358,6 +529,8 @@ class Inputs:
     profiles_raw: dict[str, Any] | None
     stacks_raw: dict[str, Any] | None
     models: dict[str, dict[str, Any]]
+    #: ``{"complete": bool, "slots": [file names]}`` from :data:`STATE_FILE`.
+    state: dict[str, Any] = field(default_factory=dict)
 
 
 def _read_toml(path: Path) -> dict[str, Any] | None:
@@ -373,10 +546,20 @@ def read_inputs(
     profiles_toml: Path | None = None,
     stacks_toml: Path | None = None,
     db_path: Path | None = None,
+    state_file: Path | None = None,
 ) -> Inputs:
-    """Read raw slot/profile/stack TOML and the model rows. Never validates."""
+    """Read raw slot/profile/stack TOML, the model rows and the conversion
+    state. Never validates."""
     from hal0.config import paths
 
+    state_file = state_file or paths.var_lib() / STATE_FILE
+    state: dict[str, Any] = {}
+    if state_file.exists():
+        try:
+            loaded = json.loads(state_file.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            raise ProfileMigrationError(f"cannot read {state_file}: {exc}") from exc
+        state = loaded if isinstance(loaded, dict) else {}
     slots_dir = slots_dir or paths.slots_config_dir()
     profiles_toml = profiles_toml or paths.profiles_toml()
     stacks_toml = stacks_toml or paths.stacks_toml()
@@ -385,6 +568,8 @@ def read_inputs(
     slots: list[tuple[str, dict[str, Any] | None, str | None]] = []
     if slots_dir.is_dir():
         for path in sorted(slots_dir.glob("*.toml")):
+            if path.name.startswith("."):
+                continue
             try:
                 slots.append((path.name, _read_toml(path), None))
             except (OSError, tomllib.TOMLDecodeError) as exc:
@@ -394,136 +579,255 @@ def read_inputs(
         stacks_raw = _read_toml(stacks_toml)
     except (OSError, tomllib.TOMLDecodeError) as exc:
         raise ProfileMigrationError(f"cannot read profile/stack config: {exc}") from exc
-    return Inputs(slots, profiles_raw, stacks_raw, read_model_rows(db_path))
+    return Inputs(slots, profiles_raw, stacks_raw, read_model_rows(db_path), state)
 
 
 def read_model_rows(db_path: Path) -> dict[str, dict[str, Any]]:
-    """Every ``model`` row as a plain dict, read-only. Missing DB -> empty."""
+    """Every ``model`` row as a plain dict, read-only, with the tuning columns
+    filled from the holding table when SQL migration 012 has moved them."""
     if not db_path.exists():
         return {}
     conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     try:
         conn.row_factory = sqlite3.Row
-        has_table = conn.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='model'"
-        ).fetchone()
-        if not has_table:
+        tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        if "model" not in tables:
             return {}
-        return {str(r["id"]): dict(r) for r in conn.execute("SELECT * FROM model")}
+        rows = {str(r["id"]): dict(r) for r in conn.execute("SELECT * FROM model")}
+        if HOLDING_TABLE in tables:
+            for held in conn.execute(f"SELECT * FROM {HOLDING_TABLE}"):
+                row = rows.get(str(held["id"]))
+                if row is None:
+                    continue
+                data = dict(held)
+                for col in MODEL_TUNING_COLUMNS:
+                    if data.get(col) is not None:
+                        row[col] = data[col]
+                extra = json.loads(row.get("extra") or "{}")
+                for key in MODEL_TUNING_EXTRA_KEYS:
+                    if data.get(key.lstrip("_")) is not None:
+                        extra[key] = bool(data[key.lstrip("_")])
+                row["extra"] = json.dumps(extra)
+        return rows
     finally:
         conn.close()
 
 
-# ── planning ─────────────────────────────────────────────────────────────────
-
-
 def _model_tuning(row: Mapping[str, Any] | None) -> dict[str, Any]:
+    """The tuning a model row carries (what the conversion clears)."""
     if not row:
         return {}
-    out = {
-        c: row[c] for c in MODEL_TUNING_COLUMNS if c in row and row[c] is not None and row[c] != ""
-    }
+    out = {c: row[c] for c in MODEL_TUNING_COLUMNS if c in row and row[c] not in (None, "")}
     try:
         extra = json.loads(row.get("extra") or "{}")
     except ValueError:
         extra = {}
     if isinstance(extra, dict):
         out.update({k: extra[k] for k in MODEL_TUNING_EXTRA_KEYS if k in extra})
+    if row.get("mtp") is not None and not row["mtp"]:
+        # Operator decision: an explicit "no MTP" is tuning (the profile's
+        # mtp = "off"); the model keeps only the "has MTP heads" fact.
+        out["mtp"] = False
+    return out
+
+
+def _row_after(row: Mapping[str, Any]) -> dict[str, Any]:
+    """The model row once its tuning is cleared."""
+    after = dict(row)
+    for col in MODEL_TUNING_COLUMNS:
+        if col in after:
+            after[col] = None
+    try:
+        extra = json.loads(after.get("extra") or "{}")
+    except ValueError:
+        extra = {}
+    if isinstance(extra, dict):
+        for key in MODEL_TUNING_EXTRA_KEYS:
+            extra.pop(key, None)
+        after["extra"] = json.dumps(extra)
+    if after.get("mtp") is not None and not after["mtp"]:
+        after["mtp"] = None
+    return after
+
+
+# ── planning ─────────────────────────────────────────────────────────────────
+
+
+@dataclass
+class ProfileConversion:
+    content: dict[str, Any]
+    notes: list[str]
+    errors: list[str]
+
+
+def convert_profile(entry: Mapping[str, Any], family: str) -> ProfileConversion:
+    """One stored profile (any shape) in the ADR-0029 shape."""
+    notes: list[str] = []
+    for key in PROFILE_DROP_KEYS:
+        if key in entry:
+            value = entry[key]
+            if key in ("device_class", "backend") and value:
+                notes.append(f"{key} = {value!r} dropped (fit hint; the slot decides)")
+            elif key not in ("mtp", "quant") or value:
+                notes.append(f"{key} dropped")
+    conv = convert_flags(str(entry.get("flags") or ""), source="profile")
+    notes += conv.notes
+    content: dict[str, Any] = {"flags": _join(conv.tokens)}
+    for key in ("ctx_size", "enable_thinking", "intent", "cloned_from"):
+        if entry.get(key) not in (None, ""):
+            content[key] = entry[key]
+    vision = entry.get("vision")
+    content["vision"] = "off" if conv.vision_off or vision == "off" else "auto"
+    content["mtp"] = "off" if entry.get("mtp") == "off" else "auto"
+    runner = entry.get("runner")
+    if isinstance(runner, str) and runner.strip():
+        content["runner"] = runner
+    elif family != frozen.LLAMA and family in ENGINE_RUNNER:
+        content["runner"] = ENGINE_RUNNER[family]
+        notes.append(f"runner = {ENGINE_RUNNER[family]!r} made explicit")
+    return ProfileConversion(content, notes, conv.errors)
+
+
+def _tidy(content: Mapping[str, Any]) -> dict[str, Any]:
+    out = {k: v for k, v in content.items() if v not in (None, "")}
+    if out.get("vision") == "auto":
+        out.pop("vision")
+    if out.get("mtp") == "auto":
+        out.pop("mtp")
     return out
 
 
 class _Planner:
     def __init__(self, inputs: Inputs) -> None:
         self.inputs = inputs
-        self.catalog = frozen.Catalog(inputs.profiles_raw)
+        self.old = frozen.Catalog(inputs.profiles_raw)
         self.plan = ConversionPlan()
         self.bound: set[str] = set()
-        # every profile name a generated one must not collide with
-        self.taken: dict[str, Any] = {
-            n: None for n in self.catalog.names() | set(self.catalog.demoted)
-        }
+        #: new-shape catalog after conversion: target seeds + converted customs.
+        self.catalog: dict[str, dict[str, Any]] = {k: dict(v) for k, v in target_seeds().items()}
+        #: old profile name -> its name after conversion.
+        self.name_map: dict[str, str] = {}
+        self.blocked_profiles: dict[str, list[str]] = {}
 
     # -- profiles --------------------------------------------------------
 
-    def _generate(self, base: str, suffix: str, content: dict[str, Any]) -> str:
-        """Name and record a generated profile; identical tunes share one.
+    def _place(self, name: str, conv: ProfileConversion, *, new: bool) -> str:
+        """Put a converted custom/demoted profile in the new catalog.
 
-        Identity is the tune itself: ``intent`` (which names the slot or model
-        it came from) is informational and kept from the first occurrence.
+        A name a target seed now owns is kept only when the tune is the
+        seed's; otherwise the custom moves to ``<name>-custom``.
         """
-        content = {k: v for k, v in content.items() if v not in (None, "", ())}
-        tune = _tune_key(content)
-        for name, existing in self.plan.profiles.items():
-            if _tune_key(existing) == tune:
+        content = _tidy(conv.content)
+        if conv.errors:
+            # Written without the offending flag; every slot still running it is blocked.
+            self.blocked_profiles[name] = conv.errors
+        if name in target_seeds():
+            if _identity(content) == _identity(target_seeds()[name]):
+                if not new:
+                    self.plan.profile_rewrites[name] = [
+                        "identical to the new seed of that name; the custom entry is removed"
+                    ]
                 return name
-        bare = {k: v for k, v in tune.items() if k != "cloned_from"}
-        for name in sorted(self.catalog.custom):
-            if _existing_content(self.catalog.resolve(name)) == bare:
+            renamed = slug_name(name, "custom", content=content, taken=self.catalog)
+            if name in self.blocked_profiles:
+                self.blocked_profiles[renamed] = self.blocked_profiles.pop(name)
+            self.plan.renames[name] = renamed
+            self.catalog[renamed] = content
+            self.plan.profiles[renamed] = content
+            return renamed
+        self.catalog[name] = content
+        if new:
+            self.plan.profiles[name] = content
+        elif conv.notes:
+            self.plan.profile_rewrites[name] = conv.notes
+        return name
+
+    def plan_profiles(self) -> None:
+        for name in sorted(self.old.custom):
+            resolved = self.old.resolve(name)
+            assert resolved is not None
+            conv = convert_profile(self.old.custom[name], frozen.runtime_family(resolved))
+            self.name_map[name] = self._place(name, conv, new=False)
+        raw = self.inputs.profiles_raw or {}
+        markers = [m for m in ("legacy_seeds_migrated", "legacy_seeds_adopted") if m in raw]
+        if markers:
+            self.plan.profile_rewrites["(profiles.toml)"] = [f"{m} removed" for m in markers]
+
+    def new_name(self, old_name: str) -> str | None:
+        """The profile an old name resolves to after conversion (None: nothing)."""
+        if not old_name:
+            return None
+        if old_name in self.name_map:
+            return self.name_map[old_name]
+        if old_name in self.old.seeds:
+            return old_name if old_name in self.catalog else None
+        if old_name in self.old.demoted and old_name not in self.old.settled:
+            entry = self.old.demoted[old_name]
+            conv = convert_profile(entry, frozen.LLAMA)
+            new = self._place(old_name, conv, new=True)
+            self.name_map[old_name] = new
+            return new
+        return None
+
+    def _generate(self, base: str, suffix: str, content: dict[str, Any]) -> str:
+        """A profile holding ``content``; reuses any profile with the same tune."""
+        content = _tidy(content)
+        ident = _identity(content)
+        for name in sorted(self.catalog):
+            if _identity(self.catalog[name]) == ident:
                 return name
-        name = slug_name(base, suffix, content=tune, taken=self.taken)
-        self.taken[name] = tune
+        name = slug_name(base, suffix, content=content, taken=self.catalog)
+        self.catalog[name] = content
         self.plan.profiles[name] = content
         return name
 
-    def _adopt_demoted(self, name: str) -> None:
-        """A slot names a demoted seed the old catalog adopted on demand."""
-        if name in self.plan.profiles:
-            return
-        entry = dict(self.catalog.demoted[name])
-        content = {k: v for k, v in entry.items() if k not in PROFILE_DROP_KEYS}
-        self.plan.profiles[name] = content
-        self.taken[name] = content
-
-    def plan_profile_rewrites(self) -> None:
-        for name, entry in self.catalog.custom.items():
-            dropped = [k for k in PROFILE_DROP_KEYS if k in entry]
-            flags = str(entry.get("flags") or "")
-            try:
-                tokens = shlex.split(flags) if flags.strip() else []
-            except ValueError:
-                self.plan.warnings.append(f"profile {name}: flags do not shell-split")
-                continue
-            if "--jinja" in tokens:
-                dropped.append("--jinja (a model fact)")
-            if "--no-mmproj" in tokens:
-                dropped.append('--no-mmproj -> vision = "off"')
-            _, hw = frozen._strip(tokens, frozen.HARDWARE_FLAGS | frozen.MANAGED_FLAGS)
-            if hw:
-                dropped.append(f"{' '.join(hw)} (slot/base flags, stripped at launch today)")
-            if dropped:
-                self.plan.profile_rewrites[name] = dropped
-        raw = self.inputs.profiles_raw or {}
-        for marker in ("legacy_seeds_migrated", "legacy_seeds_adopted"):
-            if marker in raw:
-                self.plan.profile_rewrites.setdefault("(profiles.toml)", []).append(marker)
-
     # -- slots -----------------------------------------------------------
 
+    def _select_files(self) -> list[tuple[str, dict[str, Any] | None, str | None]]:
+        """One file per slot: the id-keyed file wins over a same-named
+        name-keyed one (``SlotManager._config_file_for``)."""
+        by_name: dict[str, list[tuple[str, dict[str, Any] | None, str | None]]] = {}
+        out: list[tuple[str, dict[str, Any] | None, str | None]] = []
+        for fname, raw, err in self.inputs.slots:
+            if raw is None:
+                out.append((fname, raw, err))
+                continue
+            slot = frozen.hoist_slot(raw, fname[:-5])
+            by_name.setdefault(str(slot.get("name")), []).append((fname, raw, err))
+        for _name, files_ in sorted(by_name.items()):
+            files_.sort(key=lambda f: (not f[0][:-5].isdigit(), f[0]))
+            out.append(files_[0])
+            self.plan.shadowed += [f[0] for f in files_[1:]]
+        return sorted(out, key=lambda f: f[0])
+
     def plan_slots(self) -> None:
-        for fname, raw, error in self.inputs.slots:
+        done = set(self.inputs.state.get("slots") or ())
+        for fname, raw, error in self._select_files():
             stem = fname[:-5]
+            if fname in done:
+                name = str(frozen.hoist_slot(raw, stem).get("name")) if raw else stem
+                sp = SlotPlan(
+                    file=fname, name=name, profile_before=str((raw or {}).get("profile") or "")
+                )
+                sp.profile_after = sp.profile_before
+                sp.notes.append("converted by an earlier run")
+                self.plan.slots.append(sp)
+                continue
             if raw is None:
                 self.plan.slots.append(
                     SlotPlan(file=fname, name=stem, status="blocked", error=f"unreadable: {error}")
                 )
                 continue
             slot = frozen.hoist_slot(raw, stem)
+            sp = SlotPlan(file=fname, name=str(slot.get("name") or stem))
             try:
-                self.plan.slots.append(self._plan_slot(fname, raw, slot))
+                self._plan_slot(raw, slot, sp)
             except (ValueError, Hal0Error) as exc:
-                self.plan.slots.append(
-                    SlotPlan(
-                        file=fname,
-                        name=str(slot.get("name") or stem),
-                        status="blocked",
-                        profile_before=str(slot.get("profile") or ""),
-                        error=str(exc),
-                    )
-                )
+                sp.status, sp.error = "blocked", str(exc)
+            self.plan.slots.append(sp)
 
     def _shape_keys(self, raw: Mapping[str, Any], slot: Mapping[str, Any], sp: SlotPlan) -> None:
-        """Keys that leave the slot, and inert values they carried."""
-        for key in SLOT_TUNING_KEYS:
+        for key in SLOT_DROP_KEYS:
             if key in slot:
                 sp.drop_keys.append(key)
         if "backend" in slot and not slot.get("device"):
@@ -531,9 +835,7 @@ class _Planner:
 
             sp.set_keys["device"] = map_backend_to_device(str(slot["backend"]))
         table = slot.get("model") if isinstance(slot.get("model"), Mapping) else {}
-        for key in MODEL_TABLE_DROP:
-            if key in table:
-                sp.drop_keys.append(f"[model].{key}")
+        sp.drop_keys += [f"[model].{k}" for k in MODEL_TABLE_DROP if k in table]
         server = raw.get("server") if isinstance(raw.get("server"), Mapping) else {}
         if "extra_args" in server:
             sp.drop_keys.append("[server].extra_args")
@@ -557,138 +859,176 @@ class _Planner:
                 sp.set_keys["image_pin"] = image
             else:
                 sp.inert.append(InertValue("slot", "image", image))
-            sp.drop_keys.append("image")
 
-    def _plan_slot(self, fname: str, raw: Mapping[str, Any], slot: dict[str, Any]) -> SlotPlan:
-        name = str(slot.get("name") or fname[:-5])
-        engine = frozen.engine_for(slot, self.catalog)
+    def _plan_slot(self, raw: Mapping[str, Any], slot: dict[str, Any], sp: SlotPlan) -> None:
+        sp.engine = frozen.engine_for(slot, self.old)
         named = str(slot.get("profile") or "")
-        sp = SlotPlan(file=fname, name=name, engine=engine, profile_before=named)
-        sp.profile_after = named
+        sp.profile_before = sp.profile_after = named
         self._shape_keys(raw, slot, sp)
         table = slot.get("model") if isinstance(slot.get("model"), Mapping) else {}
         model_id = str(table.get("default") or "")
         row = self.inputs.models.get(model_id) if model_id else None
         if model_id:
             self.bound.add(model_id)
-        model = (
-            frozen.model_info_from_row(row)
-            if row
-            else ({"_model_key": model_id} if model_id else {})
-        )
-        model_tuning = _model_tuning(row)
-        resolved = self.catalog.resolve(named) if named else None
-        demoted_ref = bool(named) and named not in self.catalog.names() and resolved is not None
-        if demoted_ref:
-            self._adopt_demoted(named)
-            sp.notes.append(f"profile {named!r} exists only as a demoted seed; adopted as custom")
-
-        # Old shape? convert : leave. A slot with no tuning keys, an existing
-        # profile and an untuned model already launches what the new rules
-        # give it, so it is left alone (this is what makes a rerun a no-op).
-        old_shape = bool(sp.drop_keys or sp.set_keys or model_tuning or resolved is None)
-        if not old_shape:
-            return sp
-
-        if engine != frozen.LLAMA:
-            self._plan_other_engine(slot, sp, model, model_tuning, row)
+        if sp.engine != frozen.LLAMA:
+            self._plan_other_engine(slot, sp, model_id, row)
         elif not model_id:
             self._plan_modelless(slot, sp)
         else:
-            self._plan_llama(slot, sp, model)
-        if sp.status != "blocked":
-            sp.status = "convert"
-        return sp
-
-    def _plan_llama(self, slot: dict[str, Any], sp: SlotPlan, model: Mapping[str, Any]) -> None:
-        launch = frozen.evaluate(slot, model, self.catalog)
-        sp.argv_today = launch.argv
-        named = sp.profile_before
-        launched = launch.profile_launched
-        if launch.profile_missing or not named:
-            implied = TYPE_SEED.get(str(slot.get("type") or ""), "")
-            why = (
-                f"profile {named!r} does not exist (launches {launched!r})"
-                if named
-                else f"no profile (launches {launched!r})"
+            self._plan_llama(slot, sp, model_id, row)
+        if named and sp.profile_after in self.blocked_profiles:
+            raise ValueError(
+                f"profile {named!r} cannot be converted: "
+                + "; ".join(self.blocked_profiles[sp.profile_after])
             )
-            if implied and implied != launched:
-                sp.launch_changes.append(f"{why}; now {implied!r}, which carries the mode flag")
-                launch = frozen.evaluate({**slot, "profile": implied}, model, self.catalog)
-                launched = implied
-            else:
-                sp.notes.append(f"{why}; re-pointed to what launches")
+        if (
+            sp.profile_after != sp.profile_before
+            or sp.drop_keys
+            or sp.set_keys
+            or sp.launch_changes
+        ):
+            sp.status = "convert"
 
-        bundle = _pairs(shlex.split(frozen.mtp_bundle(launch.mtp_backend)))
-        bundle_values = {canon: values for canon, _flag, values in bundle}
-        tune: list[tuple[str, str, tuple[str, ...]]] = []
-        for canon, flag, values in _pairs(launch.argv):
-            if canon in _BASE_CANON or canon in _PLACEMENT_CANON or canon in _MODEL_FACT_CANON:
-                continue
-            if canon == "--threads":
-                # A thread count that reached the argv from free text moves to
-                # the slot's placement field when the slot sets none itself.
-                own = slot.get("threads")
-                if not (own is not None and int(own) > 0) and values:
-                    sp.set_keys["threads"] = int(values[0])
-                continue
-            if canon == "--device":
-                raise ValueError(f"{flag} in the launch tune cannot move to a profile")
-            # The new launch path adds the MTP bundle itself (and the draft
-            # device from the slot); keep only bundle values the tune overrode.
+    def _base_for(self, slot: Mapping[str, Any], sp: SlotPlan, launched: str) -> str:
+        """The profile name the slot runs after conversion, before tuning."""
+        named = sp.profile_before
+        new = self.new_name(named) if named else None
+        if new is not None:
+            if new != named:
+                sp.notes.append(f"profile {named!r} is now {new!r}")
+            return new
+        implied = TYPE_SEED.get(str(slot.get("type") or ""), "")
+        target = implied or self.new_name(launched) or "chat"
+        why = f"profile {named!r} does not exist" if named else "no profile"
+        sp.notes.append(f"{why}; today it launches {launched!r}; now {target!r}")
+        return target
+
+    def _plan_llama(
+        self, slot: dict[str, Any], sp: SlotPlan, model_id: str, row: Mapping[str, Any] | None
+    ) -> None:
+        model = frozen.model_info_from_row(row) if row else {"_model_key": model_id}
+        model_after = frozen.model_info_from_row(_row_after(row)) if row else model
+        old = frozen.evaluate(slot, model, self.old)
+        sp.argv_today = old.argv
+        base = self._base_for(slot, sp, old.profile_launched)
+        fixed_profile = False
+        if (old.profile_missing or not sp.profile_before) and base in TYPE_SEED.values():
+            # Today the slot launches without its type's mode flag; it now
+            # gets the seed that carries it.
+            fixed_profile = base != old.profile_launched
+            if fixed_profile:
+                old = frozen.evaluate({**slot, "profile": base}, model, self.old)
+                sp.launch_changes.append(
+                    f"launches with the {base!r} profile (its type's mode flag) instead of "
+                    f"{sp.profile_before or 'no profile'!r}"
+                )
+
+        tune = [
+            (canon, flag, values)
+            for canon, flag, values in _pairs(old.argv)
+            if old.sources.get(canon) in _TUNE_SEGMENTS
+        ]
+        bundle = {c: v for c, _f, v in _pairs(shlex.split(frozen.mtp_bundle(old.mtp_backend)))}
+        tokens: list[str] = []
+        for canon, flag, values in tune:
             if (
-                launch.mtp
-                and canon in bundle_values
-                and (canon == "--spec-draft-device" or bundle_values[canon] == values)
+                old.mtp
+                and canon in bundle
+                and bundle[canon] == values
+                and canon != "--spec-draft-device"
             ):
                 continue
-            tune.append((canon, flag, values))
-        if launch.mtp:
-            backend = frozen._backend_and_class(slot, frozen.Profile(name=""))[0]
-            if (backend or "rocm") != "rocm":
-                sp.launch_changes.append(f"MTP draft device ROCm0 -> the {backend} device")
+            if old.mtp and canon == "--spec-draft-device" and bundle.get(canon) == values:
+                continue
+            tokens += [flag, *values]
+        conv = convert_flags(tokens, source="tune")
+        if conv.errors:
+            raise ValueError("; ".join(conv.errors))
+        sp.notes += [n for n in conv.notes if not n.startswith("--jinja")]
+        if conv.threads is not None:
+            own = slot.get("threads")
+            if not (own is not None and int(own) > 0):
+                sp.set_keys["threads"] = conv.threads
+        slot_after = {**slot, **sp.set_keys}
+        self._note_unhonoured_ceiling(slot, old, sp)
 
-        tokens = shlex.split(_join(tune))
-        vision_off = "--no-mmproj" in tokens
-        tokens = [t for t in tokens if t != "--no-mmproj"]
-        if vision_off and model.get("mmproj") and launch.mmproj:
+        vision_off = conv.vision_off or (bool(model.get("mmproj")) and not old.vision_loaded)
+        if vision_off and model.get("mmproj") and old.mmproj:
             sp.notes.append(
-                "--no-mmproj and --mmproj were both emitted; llama.cpp drops the "
-                'projector when --no-mmproj is set, so vision was off: vision = "off"'
+                "--no-mmproj overrode --mmproj today (no projector loaded): vision = off"
             )
-        defaults = model.get("defaults") if isinstance(model.get("defaults"), Mapping) else {}
-        if defaults.get("vision") is False:
-            vision_off = True
-
-        self._note_unhonoured_ceiling(slot, launch, sp)
-        ctx = launch.ctx
-        thinking = launch.enable_thinking
-        target = {
-            "flags": " ".join(shlex.quote(t) for t in tokens),
-            "ctx_size": ctx if ctx != default_ctx(model) else None,
-            "enable_thinking": thinking,
-            "vision": "off" if vision_off else None,
-        }
-        base_profile = self.catalog.resolve(launched)
-        view = new_rule_view(base_profile)
-        same = (
-            effective_map(view.flags) == effective_map(tokens)
-            and view.vision_off == vision_off
-            and (view.ctx_size or default_ctx(model)) == ctx
-            and view.enable_thinking == thinking
+        runner = frozen.effective_runner(slot_after, frozen.Profile(name=""))
+        embed = bool({"--embedding", "--reranking"} & set(conv.tokens))
+        auto_drafts = (
+            has_mtp_heads(model_after)
+            and bool(getattr(getattr(runner, "supports", None), "mtp", False))
+            and not embed
         )
-        if same and (launched in self.catalog.names() or launched in self.plan.profiles):
-            sp.profile_after = launched
-            return
-        runner = base_profile.runner if base_profile is not None else None
-        content = {
-            **target,
-            "runner": runner,
-            "cloned_from": launched,
-            "intent": f"Converted: slot {sp.name}, model {model.get('_model_key')}",
+        base_content = self.catalog.get(base, {"flags": ""})
+        if base_content.get("ctx_size") == old.ctx or old.ctx != default_ctx(model_after):
+            ctx_size: int | None = old.ctx
+        else:
+            ctx_size = None
+        target: dict[str, Any] = {
+            "flags": _join(conv.tokens),
+            "ctx_size": ctx_size,
+            "enable_thinking": old.enable_thinking,
+            "vision": "off" if vision_off else "auto",
+            "mtp": "off" if (auto_drafts and not old.mtp) else "auto",
         }
-        sp.profile_after = self._generate(launched, str(model.get("_model_key") or ""), content)
-        sp.generated = sp.profile_after in self.plan.profiles
+        want = {**target, "runner": base_content.get("runner")}
+        if _identity(_tidy(want)) == _identity(base_content):
+            sp.profile_after = base
+        else:
+            want.update(cloned_from=base, intent=f"Converted: slot {sp.name}, model {model_id}")
+            sp.profile_after = self._generate(base, model_id, want)
+            sp.generated = sp.profile_after in self.plan.profiles
+
+        after = new_launch(slot_after, model_after, self.catalog[sp.profile_after])
+        sp.argv_after = after.argv
+        self._diff(sp, old, after, fixed_profile)
+
+    def _diff(self, sp: SlotPlan, old: frozen.LaunchToday, after: LaunchAfter, fixed: bool) -> None:
+        """Every difference is a reported launch change or blocks the slot."""
+        before = effective_map(old.argv)
+        now = effective_map(after.argv)
+        unexplained: list[str] = []
+        for key in sorted(set(before) | set(now)):
+            if before.get(key) == now.get(key):
+                continue
+            if key in _PROJECTOR_FLAGS:
+                continue  # compared as "projector loaded" below
+
+            if key == "--spec-draft-device" and old.mtp and after.mtp:
+                sp.launch_changes.append(
+                    f"MTP draft device {before.get(key)} -> {now.get(key)} (from the slot's device)"
+                )
+                continue
+            if (
+                key == "--jinja"
+                and old.jinja
+                and not after.jinja
+                and {"--embedding", "--reranking"} & set(after.argv)
+            ):
+                sp.launch_changes.append("--jinja no longer added in embedding/reranking mode")
+                continue
+            if old.mtp and not after.mtp and key.startswith("--spec-"):
+                continue  # reported once below
+            unexplained.append(f"{key}: {before.get(key)} -> {now.get(key)}")
+        if old.mtp and not after.mtp:
+            sp.launch_changes.append(
+                "MTP drafting stops: the model forced it on a runner without MTP support"
+            )
+        if old.enable_thinking != after.enable_thinking:
+            unexplained.append(
+                f"thinking default: {old.enable_thinking} -> {after.enable_thinking}"
+            )
+        if old.vision_loaded != after.vision_loaded:
+            unexplained.append(f"projector loaded: {old.vision_loaded} -> {after.vision_loaded}")
+        if unexplained and not fixed:
+            raise ValueError("the converted launch differs: " + "; ".join(unexplained))
+        if unexplained:
+            sp.launch_changes.append("with its type's profile: " + "; ".join(unexplained))
 
     @staticmethod
     def _note_unhonoured_ceiling(
@@ -700,34 +1040,33 @@ class _Planner:
         try:
             value = int(ceiling) if ceiling is not None else None
         except (TypeError, ValueError):
-            value = None
+            sp.inert.append(InertValue("slot", "context_size", ceiling))
+            return
         if value is None or value <= launch.ctx:
             return
         sp.inert.append(InertValue("slot", "context_size", value))
         sp.notes.append(f"ceiling {value} is not honoured today (launches {launch.ctx})")
 
     def _plan_modelless(self, slot: Mapping[str, Any], sp: SlotPlan) -> None:
-        named = sp.profile_before
-        resolved = self.catalog.resolve(named) if named else None
-        base = named
-        if resolved is None:
-            base = TYPE_SEED.get(str(slot.get("type") or ""), "chat")
-            sp.notes.append(
-                f"profile {named!r} does not exist; re-pointed to {base!r}"
-                if named
-                else f"no profile; assigned {base!r}"
-            )
+        base = self._base_for(slot, sp, "chat")
         sp.profile_after = base
         table = slot.get("model") if isinstance(slot.get("model"), Mapping) else {}
-        try:
-            ceiling = int(table["context_size"]) if table.get("context_size") is not None else None
-        except (TypeError, ValueError):
-            ceiling = None
-        if ceiling is None or ceiling == frozen.CTX_DENSE_CAP:
+        raw_ceiling = table.get("context_size")
+        if raw_ceiling is None:
             return
-        base_profile = self.catalog.resolve(base)
+        try:
+            ceiling = int(raw_ceiling)
+        except (TypeError, ValueError):
+            sp.inert.append(InertValue("slot", "context_size", raw_ceiling))
+            return
+        if not (frozen.CTX_MIN_PLAUSIBLE <= ceiling <= frozen.CTX_MAX_PLAUSIBLE):
+            sp.inert.append(InertValue("slot", "context_size", raw_ceiling))
+            return
+        base_ctx = self.catalog.get(base, {}).get("ctx_size")
+        if ceiling == (base_ctx or frozen.CTX_DENSE_CAP):
+            return
         content = {
-            **_clone_content(base_profile),
+            **self.catalog.get(base, {"flags": ""}),
             "ctx_size": ceiling,
             "cloned_from": base,
             "intent": f"Converted: slot {sp.name} context {ceiling}",
@@ -736,89 +1075,82 @@ class _Planner:
         sp.generated = sp.profile_after in self.plan.profiles
 
     def _plan_other_engine(
-        self,
-        slot: Mapping[str, Any],
-        sp: SlotPlan,
-        model: Mapping[str, Any],
-        model_tuning: Mapping[str, Any],
-        row: Mapping[str, Any] | None,
+        self, slot: Mapping[str, Any], sp: SlotPlan, model_id: str, row: Mapping[str, Any] | None
     ) -> None:
         engine = sp.engine
-        named = sp.profile_before
-        resolved = self.catalog.resolve(named) if named else None
-        base = named
-        if resolved is None:
-            base = ENGINE_SEED.get(engine, named)
-            sp.launch_changes.append(
-                f"profile {named or '(none)'!r} resolves to nothing; now {base!r}"
-            )
-            resolved = self.catalog.resolve(base)
-        sp.profile_after = base
-        if model_tuning.get("extra_args"):
-            sp.inert.append(InertValue("model", "extra_args", model_tuning["extra_args"]))
+        tuning = _model_tuning(row)
+        if tuning.get("extra_args"):
+            sp.inert.append(InertValue("model", "extra_args", tuning["extra_args"]))
+        old_flags = frozen.engine_flags(slot, self.old, engine)
+        base = self.new_name(sp.profile_before) if sp.profile_before else None
+        if base is None:
+            base = ENGINE_SEED.get(engine, "chat")
+            if old_flags is None:
+                sp.launch_changes.append(
+                    f"profile {sp.profile_before or '(none)'!r} resolves to nothing, so it "
+                    f"fails to launch today; now {base!r}"
+                )
+            else:
+                sp.notes.append(f"profile {sp.profile_before or '(none)'!r} -> {base!r}")
+        base_content = self.catalog.get(base, {"flags": ""})
+        flags_now = old_flags if old_flags is not None else str(base_content.get("flags") or "")
+        tokens = shlex.split(flags_now) if flags_now.strip() else []
+        if engine in MODEL_PATH_ENGINES:
+            tokens = self._move_model_path(sp, tokens, model_id, row)
+        target: dict[str, Any] = {
+            "flags": _join(tokens),
+            "runner": ENGINE_RUNNER.get(engine),
+            "vision": base_content.get("vision"),
+            "mtp": base_content.get("mtp"),
+            "ctx_size": base_content.get("ctx_size"),
+        }
         table = slot.get("model") if isinstance(slot.get("model"), Mapping) else {}
-        live: dict[str, Any] = {}
-        thinking = model_tuning.get("_enable_thinking")
-        if isinstance(thinking, bool):
-            live["enable_thinking"] = thinking
         if engine == "flm":
-            # providers.flm.build_env: the slot ctx is FLM's real window, and a
-            # pre-container ``[defaults]`` table still supplies it and load_*.
-            old_defaults = slot.get("defaults") if isinstance(slot.get("defaults"), Mapping) else {}
-            ctx = (
-                table.get("context_size")
-                or slot.get("ctx_size")
-                or old_defaults.get("context_size")
-            )
-            if ctx and int(ctx) != FLM_DEFAULT_CTX:
-                live["ctx_size"] = int(ctx)
-            if slot.get("npu") is None and old_defaults:
-                sp.set_keys["npu"] = {
-                    "asr": bool(old_defaults.get("load_asr")),
-                    "embed": bool(old_defaults.get("load_embed")),
-                    "chat": True,
-                }
+            # FLM's window is always explicit after conversion: today it is the
+            # slot ctx or 8192 (providers/flm.py build_env).
+            target["ctx_size"] = int(frozen.flm_ctx(slot))
         elif table.get("context_size") is not None:
             sp.inert.append(InertValue("slot", "context_size", table["context_size"]))
-        if engine in MODEL_PATH_ENGINES and resolved is not None:
-            self._check_model_path(sp, resolved, model, row)
-        if live:
-            content = {
-                **_clone_content(resolved),
-                "runner": ENGINE_RUNNER.get(engine),
-                "cloned_from": base,
-                "intent": f"Converted: slot {sp.name}, model {model.get('_model_key')}",
-                **live,
-            }
-            sp.profile_after = self._generate(base, str(model.get("_model_key") or ""), content)
-            sp.generated = sp.profile_after in self.plan.profiles
+        if isinstance(tuning.get("_enable_thinking"), bool):
+            target["enable_thinking"] = tuning["_enable_thinking"]
+        if engine == "comfyui" and not target["flags"]:
+            target["flags"] = frozen.COMFYUI_DEFAULT_FLAGS
+        if _identity(_tidy(target)) == _identity(
+            _tidy({**base_content, "runner": ENGINE_RUNNER.get(engine)})
+        ):
+            sp.profile_after = base
+            return
+        target.update(cloned_from=base, intent=f"Converted: slot {sp.name}, model {model_id}")
+        sp.profile_after = self._generate(base, model_id or engine, target)
+        sp.generated = sp.profile_after in self.plan.profiles
 
-    def _check_model_path(
-        self,
-        sp: SlotPlan,
-        profile: frozen.Profile,
-        model: Mapping[str, Any],
-        row: Mapping[str, Any] | None,
-    ) -> None:
-        try:
-            tokens = shlex.split(profile.flags)
-        except ValueError:
-            return
-        if "--model_path" not in tokens or tokens.index("--model_path") + 1 >= len(tokens):
-            return
-        ppath = tokens[tokens.index("--model_path") + 1]
-        model_id = str(model.get("_model_key") or "")
-        if row is None:
-            if model_id:
-                self.plan.models.append(ModelPlan(model_id=model_id, register_path=ppath))
-                sp.notes.append(f"model {model_id!r} has no row; registered from {ppath}")
-            return
-        if row.get("path") != ppath:
-            sp.status = "blocked"
-            sp.error = (
-                f"profile {profile.name!r} --model_path {ppath} differs from model "
-                f"{model_id!r} path {row.get('path')}"
+    def _move_model_path(
+        self, sp: SlotPlan, tokens: list[str], model_id: str, row: Mapping[str, Any] | None
+    ) -> list[str]:
+        """``--model_path`` leaves the profile; the model row holds the path."""
+        if "--model_path" not in tokens:
+            return tokens
+        i = tokens.index("--model_path")
+        if i + 1 >= len(tokens):
+            raise ValueError("--model_path without a value in the profile")
+        ppath = tokens[i + 1]
+        rest = tokens[:i] + tokens[i + 2 :]
+        if not model_id:
+            raise ValueError(
+                f"the profile names {ppath} but the slot names no model; the path "
+                "moves to a model row, so the slot must name one"
             )
+        if row is None:
+            if not any(m.model_id == model_id and m.register_path for m in self.plan.models):
+                self.plan.models.append(ModelPlan(model_id=model_id, register_path=ppath))
+            sp.notes.append(f"model {model_id!r} has no row; registered from {ppath}")
+            return rest
+        if row.get("path") != ppath:
+            raise ValueError(
+                f"profile --model_path {ppath} differs from model {model_id!r} path "
+                f"{row.get('path')}; fix one of them"
+            )
+        return rest
 
     # -- models and stacks -----------------------------------------------
 
@@ -829,89 +1161,140 @@ class _Planner:
                 continue
             mp = ModelPlan(model_id=model_id, clear=tuning)
             if model_id not in self.bound:
-                live = {
-                    "flags": tuning.get("extra_args"),
-                    "ctx_size": tuning.get("context_size"),
-                    "enable_thinking": tuning.get("_enable_thinking"),
-                    "vision": "off" if tuning.get("_vision") is False else None,
-                }
-                if any(v not in (None, "") for v in live.values()):
-                    base = str(tuning.get("profile") or "")
-                    base_profile = self.catalog.resolve(base) if base else None
-                    if base_profile is None:
-                        if base:
-                            mp.notes.append(f"preferred profile {base!r} does not exist")
-                        base = "chat"
-                        base_profile = self.catalog.resolve(base)
-                    if live["flags"]:
-                        flags, vision_off = new_rule_flags(str(live["flags"]))
-                        live["flags"] = flags
-                        if vision_off:
-                            live["vision"] = "off"
-                    else:
-                        # An untuned model launched with its slot profile's flags.
-                        cloned = _clone_content(base_profile)
-                        live["flags"] = cloned.get("flags", "")
-                        live["vision"] = live["vision"] or cloned.get("vision")
-                    content = {
-                        **live,
-                        "cloned_from": base,
-                        "intent": f"Converted: model {model_id} (not bound to a slot)",
-                    }
-                    mp.generated_profile = self._generate(base, model_id, content)
+                self._plan_unbound(mp, tuning)
             self.plan.models.append(mp)
+
+    def _plan_unbound(self, mp: ModelPlan, tuning: Mapping[str, Any]) -> None:
+        conv = convert_flags(str(tuning.get("extra_args") or ""), source="profile")
+        live = {
+            "flags": _join(conv.tokens) if tuning.get("extra_args") else None,
+            "ctx_size": tuning.get("context_size"),
+            "enable_thinking": tuning.get("_enable_thinking"),
+            "vision": "off" if tuning.get("_vision") is False or conv.vision_off else None,
+            "mtp": "off" if tuning.get("mtp") is False else None,
+        }
+        if all(v in (None, "") for v in live.values()):
+            return
+        if conv.errors:
+            mp.notes.append("extra_args not kept: " + "; ".join(conv.errors))
+            live["flags"] = None
+        base = self.new_name(str(tuning.get("profile") or "")) or "chat"
+        if tuning.get("profile") and base == "chat" and tuning["profile"] != "chat":
+            mp.notes.append(f"preferred profile {tuning['profile']!r} does not exist")
+        content = {**self.catalog.get(base, {"flags": ""})}
+        content.update({k: v for k, v in live.items() if v not in (None, "")})
+        content.update(
+            cloned_from=base, intent=f"Converted: model {mp.model_id} (not bound to a slot)"
+        )
+        mp.generated_profile = self._generate(base, mp.model_id, content)
 
     def plan_stacks(self) -> None:
         stacks = (self.inputs.stacks_raw or {}).get("stack")
         if not isinstance(stacks, Mapping):
             return
+        by_slot = {s.name: s for s in self.plan.slots}
         for stack_name, stack in sorted(stacks.items()):
-            rows = stack.get("slots") if isinstance(stack, Mapping) else None
-            for row in rows if isinstance(rows, list) else []:
+            if not isinstance(stack, Mapping):
+                continue
+            st = StackPlan(stack=str(stack_name))
+            embedded = stack.get("profiles") if isinstance(stack.get("profiles"), Mapping) else {}
+            for pname, entry in sorted(embedded.items()):
+                if not isinstance(entry, Mapping):
+                    continue
+                conv = convert_profile(entry, frozen.LLAMA)
+                if conv.errors:
+                    st.errors.append(f"embedded profile {pname!r}: " + "; ".join(conv.errors))
+                if conv.notes:
+                    st.profile_rewrites[str(pname)] = conv.notes
+            rows = stack.get("slots") if isinstance(stack.get("slots"), list) else []
+            for row in rows:
                 if not isinstance(row, Mapping):
                     continue
-                present = [k for k in STACK_ROW_TUNING_KEYS if k in row]
-                if not present:
-                    continue
-                rp = StackRowPlan(stack=str(stack_name), slot=str(row.get("slot") or ""))
-                rp.drop_keys = present
-                # ``vision = false`` is the StackSlotEntry default every saved row
-                # carries, not a choice: the key is dropped without a report line.
-                items = [
-                    InertValue("stack", k, row[k])
-                    for k in present
-                    if row[k] not in (None, "") and not (k == "vision" and row[k] is False)
-                ]
-                rp.inert = items
-                self.plan.stacks.append(rp)
+                change = self._plan_stack_row(row, embedded, by_slot)
+                if change:
+                    st.rows.append({"slot": str(row.get("slot") or ""), "change": change})
+            if st.rows or st.profile_rewrites or st.errors:
+                self.plan.stacks.append(st)
+
+    def _plan_stack_row(
+        self,
+        row: Mapping[str, Any],
+        embedded: Mapping[str, Any],
+        by_slot: Mapping[str, SlotPlan],
+    ) -> str:
+        parts: list[str] = []
+        present = [k for k in STACK_ROW_TUNING_KEYS if k in row]
+        if present:
+            shown = [
+                f"{k}={row[k]!r}"
+                for k in present
+                if row[k] not in (None, "") and not (k == "vision" and row[k] is False)
+            ]
+            parts.append(
+                f"drop {', '.join(present)}"
+                + (f" (inert today: {', '.join(shown)})" if shown else "")
+            )
+        pname = str(row.get("profile") or "")
+        if pname and pname not in embedded:
+            sp = by_slot.get(str(row.get("slot") or ""))
+            if (
+                sp is not None
+                and sp.status != "blocked"
+                and sp.profile_before == pname
+                and sp.profile_after != pname
+            ):
+                parts.append(f"profile {pname!r} -> {sp.profile_after!r} (the converted slot's)")
+            else:
+                new = self.new_name(pname)
+                if new is None:
+                    parts.append(f"profile {pname!r} does not exist; applying it fails")
+                elif new != pname:
+                    parts.append(f"profile {pname!r} -> {new!r}")
+        return "; ".join(parts)
 
 
-def plan_conversion(
-    inputs: Inputs | None = None,
-) -> ConversionPlan:
+def plan_conversion(inputs: Inputs | None = None) -> ConversionPlan:
     """Plan the conversion of this install (or of ``inputs``). Writes nothing."""
-    planner = _Planner(inputs or read_inputs())
-    planner.plan_profile_rewrites()
+    inputs = inputs or read_inputs()
+    if inputs.state.get("complete"):
+        return ConversionPlan()
+    planner = _Planner(inputs)
+    planner.plan_profiles()
     planner.plan_slots()
     planner.plan_models()
     planner.plan_stacks()
-    return planner.plan
+    plan = planner.plan
+    if plan.blocked and "(profiles.toml)" in plan.profile_rewrites:
+        plan.profile_rewrites.pop("(profiles.toml)")
+        plan.warnings.append(
+            "the demoted-seed markers in profiles.toml stay until every slot converts"
+        )
+    return plan
 
 
 __all__ = [
+    "HOLDING_TABLE",
+    "MTP_DRAFT_BUNDLE",
+    "STATE_FILE",
     "ConversionPlan",
+    "FlagConversion",
     "InertValue",
     "Inputs",
+    "LaunchAfter",
     "ModelPlan",
-    "NewRuleView",
+    "ProfileConversion",
     "ProfileMigrationError",
     "SlotPlan",
-    "StackRowPlan",
+    "StackPlan",
+    "convert_flags",
+    "convert_profile",
     "default_ctx",
     "effective_map",
-    "new_rule_view",
+    "has_mtp_heads",
+    "new_launch",
     "plan_conversion",
     "read_inputs",
     "read_model_rows",
     "slug_name",
+    "target_seeds",
 ]

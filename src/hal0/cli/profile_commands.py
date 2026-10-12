@@ -131,10 +131,9 @@ def profile_migrate(
     Reads the slot, profile and stack files and the model registry on this
     box, and prints which profiles would be generated, which slots re-point,
     which keys leave the slots, and every value that is inert today (those
-    are dropped, never applied: the conversion keeps what launches).
+    are dropped, never applied: the conversion keeps what launches). Exits 2
+    when any slot cannot be converted.
     """
-    import dataclasses
-
     from hal0.config.migrations.profile_centric import ProfileMigrationError, plan_conversion
 
     try:
@@ -143,12 +142,14 @@ def profile_migrate(
         die(str(exc))
         return
     if json_out:
-        typer.echo(jsonlib.dumps(dataclasses.asdict(plan), indent=2, default=str))
-        return
-    for line in plan.lines():
-        typer.echo(line)
+        typer.echo(jsonlib.dumps(plan.to_dict(), indent=2, default=str))
+    else:
+        for line in plan.lines():
+            typer.echo(line)
+        if plan.blocked:
+            typer.echo(f"{len(plan.blocked)} slot(s) cannot be converted; see BLOCKED above")
     if plan.blocked:
-        typer.echo(f"{len(plan.blocked)} slot(s) cannot be converted; see BLOCKED above")
+        raise typer.Exit(2)
 
 
 __all__ = ["app"]

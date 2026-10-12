@@ -44,6 +44,8 @@ CUSTOM_PROFILES: dict[str, Any] = {
         "gpu-only": {"flags": "-fa on", "device_class": "gpu", "mtp": False},
         "cpu-only": {"flags": "-b 64", "device_class": "cpu", "mtp": False},
         "on-flm": {"flags": "", "runner": "flm", "mtp": False},
+        "vk-hint": {"flags": "-b 77", "backend": "vulkan", "mtp": False},
+        "fmt-none-joined": {"flags": "-fa auto --reasoning-format=none --temp 0.2", "mtp": False},
     },
 }
 
@@ -227,6 +229,22 @@ CASES: list[tuple[str, dict[str, Any], dict[str, Any]]] = [
         {"defaults": {"enable_thinking": True}},
     ),
     (
+        "fit_backend_hint_without_runner",
+        _slot(profile="vk-hint"),
+        {"defaults": {"profile": "chat", "extra_args": "-b 32"}},
+    ),
+    (
+        "profile_backend_drives_mtp_device",
+        _slot(profile="vk-hint", device="gpu-vulkan"),
+        {"tags": ["mtp"]},
+    ),
+    ("reasoning_format_none_joined", _slot(profile="fmt-none-joined"), {}),
+    (
+        "unparseable_ceiling",
+        _slot(profile="chat", model={"context_size": "64k"}),
+        {"metadata": {"context_length": 262144}},
+    ),
+    (
         "nested_slot_table",
         {
             "slot": {
@@ -254,6 +272,12 @@ def test_frozen_launch_matches_live(
     got = _frozen(slot, model, CUSTOM_PROFILES)
     assert list(got.argv) == live_argv, case
     assert got.ctx == live_ctx, case
+    info: dict[str, Any] = {"_model_key": model.id, **model.model_dump()}
+    profile = C._resolve_profile_or_base(str(hoisted.get("profile") or ""), hoisted)
+    sc = C._resolve_llama_scalars(hoisted, info, profile)
+    assert got.mmproj == sc["mmproj"], case
+    defaults = model.defaults.model_dump() if model.defaults else {}
+    assert got.enable_thinking == defaults.get("enable_thinking"), case
 
 
 def test_case_matrix_exercises_every_branch() -> None:
@@ -278,6 +302,67 @@ def test_case_matrix_exercises_every_branch() -> None:
     assert results["custom_hw_flags_overlay"].overlay_applied
     assert "999" not in results["custom_hw_flags_overlay"].argv  # profile -ngl stripped
     assert results["thinking_default_rides_along"].enable_thinking is True
+
+
+def test_profiles_toml_without_ledger_or_marker_adopts_demoted() -> None:
+    """A file with neither the ledger nor the marker has settled nothing."""
+    raw: dict[str, Any] = {"profile": {"mine": {"flags": "-b 1", "mtp": False}}}
+    _write_profiles(raw)
+    slot = _slot(profile="moe")
+    model = _model()
+    got = _frozen(slot, model, raw)
+    assert got.profile_launched == "moe" and not got.profile_missing
+    live_argv, _ = _live(frozen.hoist_slot(slot, "s"), model)
+    assert list(got.argv) == live_argv
+
+
+@pytest.mark.parametrize(
+    ("slot", "expected"),
+    [
+        ({"name": "f", "device": "npu", "model": {"default": "m", "context_size": 16384}}, "16384"),
+        ({"name": "f", "device": "npu", "model": {"default": "m"}}, "8192"),
+        ({"name": "f", "device": "npu", "ctx_size": 4096, "model": {"default": "m"}}, "4096"),
+        ({"name": "f", "device": "npu", "defaults": {"context_size": 2048}, "model": {}}, "2048"),
+    ],
+)
+def test_flm_ctx_matches_build_env(slot: dict[str, Any], expected: str) -> None:
+    from hal0.providers.flm import FLMProvider
+
+    env = FLMProvider().build_env(slot, {"_model_key": "m"})
+    assert env["HAL0_FLM_CTX"] == frozen.flm_ctx(slot) == expected
+
+
+def test_engine_flags_match_providers() -> None:
+    from hal0.providers.comfyui import ComfyUIProvider
+    from hal0.providers.kokoro import KokoroProvider
+    from hal0.providers.qwen3tts import Qwen3TTSProvider
+
+    raw = {"profile": {"my-tts": {"flags": "--model_path /x --speed 2", "mtp": False}}}
+    _write_profiles(raw)
+    catalog = frozen.Catalog(raw)
+    for slot in (
+        {"name": "i", "type": "image", "profile": "comfyui"},
+        {"name": "i", "type": "image"},
+    ):
+        assert frozen.engine_flags(slot, catalog, "comfyui") == ComfyUIProvider()._profile_flags(
+            slot
+        )
+    for provider, engine, slot in (
+        (KokoroProvider(), "kokoro", {"name": "t", "type": "tts", "profile": "my-tts", "port": 9}),
+        (KokoroProvider(), "kokoro", {"name": "t", "type": "tts", "profile": "kokoro", "port": 9}),
+        (
+            Qwen3TTSProvider(),
+            "qwen3tts",
+            {"name": "q", "type": "tts", "profile": "qwen3-tts", "port": 9},
+        ),
+    ):
+        flags = frozen.engine_flags(slot, catalog, engine)
+        assert flags is not None
+        command = provider.container_spec(slot, {}).command
+        tokens = flags.split()
+        assert command[: len(tokens)] == tokens, (engine, command)
+    # Kokoro's default profile name is not a seed: a profile-less slot cannot launch.
+    assert frozen.engine_flags({"name": "t", "type": "tts"}, catalog, "kokoro") is None
 
 
 def test_fresh_install_adopts_demoted_seed() -> None:

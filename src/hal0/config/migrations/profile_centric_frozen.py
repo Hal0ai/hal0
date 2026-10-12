@@ -377,6 +377,51 @@ def engine_for(slot: Mapping[str, Any], catalog: Catalog) -> str:
     return LLAMA
 
 
+# ── the non-llama engines ────────────────────────────────────────────────────
+
+#: Profile a provider resolved when the slot named none (``_DEFAULT_PROFILE``
+#: in providers/kokoro.py, moonshine.py, qwen3tts.py). Kokoro's ``tts`` is not
+#: a seed, so a profile-less Kokoro slot failed to launch.
+ENGINE_DEFAULT_PROFILE: dict[str, str] = {
+    "kokoro": "tts",
+    "moonshine": "moonshine",
+    "qwen3tts": "qwen3-tts",
+}
+#: ``providers/comfyui.py`` ``_DEFAULT_PROFILE_FLAGS``.
+COMFYUI_DEFAULT_FLAGS = "--disable-mmap --bf16-vae --cache-none"
+#: ``providers/flm.py`` ``build_env`` default window.
+FLM_DEFAULT_CTX = 8192
+
+
+def engine_flags(slot: Mapping[str, Any], catalog: Catalog, engine: str) -> str | None:
+    """The profile flag text a non-llama provider launched with.
+
+    ``None`` when the provider could not resolve a profile (the launch
+    failed). FLM reads no profile flags (``""``).
+    """
+    if engine == "flm":
+        return ""
+    name = str(slot.get("profile") or "")
+    if engine == "comfyui":
+        resolved = catalog.resolve(name) if name else None
+        flags = resolved.flags.strip() if resolved is not None else ""
+        return flags or COMFYUI_DEFAULT_FLAGS
+    resolved = catalog.resolve(name or ENGINE_DEFAULT_PROFILE.get(engine, ""))
+    return resolved.flags if resolved is not None else None
+
+
+def flm_ctx(slot: Mapping[str, Any]) -> str:
+    """``providers.flm.FLMProvider.build_env``'s ``HAL0_FLM_CTX``."""
+    model = slot.get("model") if isinstance(slot.get("model"), Mapping) else {}
+    old = slot.get("defaults") if isinstance(slot.get("defaults"), Mapping) else {}
+    ctx = (
+        model.get("context_size")
+        or slot.get("ctx_size")
+        or old.get("context_size", FLM_DEFAULT_CTX)
+    )
+    return str(ctx)
+
+
 # ── runner, MTP, context ─────────────────────────────────────────────────────
 
 
@@ -519,9 +564,17 @@ def _strip_reasoning_format_none(tokens: list[str]) -> list[str]:
 
 def merge_segments(segments: list[tuple[str, list[str]]]) -> list[str]:
     """Screen, strip and last-wins-dedup labelled segments into one argv."""
+    return merge_segments_with_sources(segments)[0]
+
+
+def merge_segments_with_sources(
+    segments: list[tuple[str, list[str]]],
+) -> tuple[list[str], dict[str, str]]:
+    """:func:`merge_segments` plus, per surviving flag, the segment that set it."""
     from hal0.slots.argv import _dedup, _split_pairs
 
     tokens: list[str] = []
+    sources: list[str] = []
     for label, seg in segments:
         if label in PROFILE_SEGMENTS:
             seg, _ = _strip(seg, HARDWARE_FLAGS)
@@ -533,9 +586,11 @@ def merge_segments(segments: list[tuple[str, list[str]]]) -> list[str]:
                     code="slot.managed_arg_denied",
                     details={"segment": label, "flags": offenders},
                 )
-        tokens.extend(_strip_reasoning_format_none(seg))
-    out, _removed, _winners = _dedup(_split_pairs(tokens))
-    return out
+        clean = _strip_reasoning_format_none(seg)
+        tokens.extend(clean)
+        sources.extend([label] * len(clean))
+    out, _removed, winners = _dedup(_split_pairs(tokens, sources))
+    return out, {canon: pair.source for canon, pair in winners.items()}
 
 
 # ── the evaluation ───────────────────────────────────────────────────────────
@@ -547,6 +602,8 @@ class LaunchToday:
 
     argv: tuple[str, ...]
     segments: tuple[tuple[str, tuple[str, ...]], ...]
+    #: Surviving flag (canonical spelling) -> the segment that set it.
+    sources: Mapping[str, str]
     profile_named: str
     profile_launched: str
     profile_missing: bool
@@ -560,6 +617,16 @@ class LaunchToday:
     enable_thinking: bool | None
     overlay_applied: bool
     template_applied: bool
+
+    @property
+    def vision_loaded(self) -> bool:
+        """Whether llama.cpp actually loaded the projector.
+
+        ``common_params_handle_models`` clears ``mmproj`` whenever
+        ``--no-mmproj`` (alias ``--no-mmproj-auto``) is set, whatever the
+        order, so an emitted ``--mmproj`` is not enough.
+        """
+        return bool(self.mmproj) and not ({"--no-mmproj", "--no-mmproj-auto"} & set(self.argv))
 
 
 def _flags_tokens(flags: str) -> list[str]:
@@ -676,10 +743,11 @@ def evaluate(
         ),
         ("mmproj", ["--mmproj", str(mmproj)] if mmproj else []),
     ]
-    argv = merge_segments(segments)
+    argv, sources = merge_segments_with_sources(segments)
     thinking = md.get("enable_thinking") if md else None
     return LaunchToday(
         argv=tuple(argv),
+        sources=dict(sources),
         segments=tuple((label, tuple(toks)) for label, toks in segments),
         profile_named=named,
         profile_launched=profile.name,
@@ -705,11 +773,14 @@ __all__ = [
     "LaunchToday",
     "Profile",
     "effective_runner",
+    "engine_flags",
     "engine_for",
     "evaluate",
+    "flm_ctx",
     "frozen_seeds",
     "hoist_slot",
     "merge_segments",
+    "merge_segments_with_sources",
     "model_info_from_row",
     "mtp_bundle",
     "native_ctx",

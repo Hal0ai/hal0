@@ -230,6 +230,10 @@ def install() -> None:
     )
 
 
+def _ctx(argv: tuple[str, ...]) -> int:
+    return int(argv[argv.index("--ctx-size") + 1])
+
+
 def _by_name(plan: pc.ConversionPlan) -> dict[str, pc.SlotPlan]:
     return {s.name: s for s in plan.slots}
 
@@ -263,21 +267,34 @@ def test_plan_preserves_what_launches(install: None) -> None:
 
     assert slots["code"].profile_after == "chat-ctx96000"
     embed = slots["embed"]
-    assert embed.launch_changes and "embedding" in embed.launch_changes[0]
-    # ceiling 8192 == the 8192 fallback of a model with no native window: the
-    # seed reproduces it, so no profile is generated.
-    assert embed.profile_after == "embedding" and not embed.generated
+    assert any("'embedding' profile" in c for c in embed.launch_changes)
+    assert any("--jinja" in c for c in embed.launch_changes)
+    # the new embedding seed has ctx 4096; today the slot launches 8192 (the
+    # fallback for a model with no native window), so its profile keeps that
+    assert embed.generated and "ctx_size" not in plan.profiles[embed.profile_after]
+    assert _ctx(embed.argv_after) == 8192
 
-    assert slots["flm"].profile_after == "flm-npu-chat"
-    assert plan.profiles["flm-npu-chat"]["enable_thinking"] is True
-    assert plan.profiles["flm-npu-chat"]["runner"] == "flm"
+    flm = slots["flm"]
+    assert flm.profile_after == "flm-npu-chat"
+    assert plan.profiles["flm-npu-chat"] == {
+        "ctx_size": 8192,  # FLM's window is always explicit after conversion
+        "enable_thinking": True,
+        "runner": "flm",
+        "cloned_from": "flm",
+        "intent": "Converted: slot flm, model npu-chat",
+    }
 
     utility = slots["utility"]
     assert utility.profile_after == "chat" and not utility.generated
     assert [(i.key, i.value) for i in utility.inert] == [("context_size", 98304)]
 
-    assert slots["coder"].profile_after == "coding"  # ceiling == dense cap
+    # The fixture's custom `coding` differs from the new `coding` seed.
+    assert plan.renames == {"coding": "coding-custom"}
+    assert slots["coder"].profile_after == "coding-custom"
     assert slots["clean"].status == "unchanged"
+    for s in plan.slots:
+        if s.argv_today and s.status == "convert":
+            assert s.argv_after, s.name
 
     tts = slots["tts"]
     assert any(m.model_id == "qwen3-tts" and m.register_path for m in plan.models)
@@ -286,16 +303,16 @@ def test_plan_preserves_what_launches(install: None) -> None:
     models = {m.model_id: m for m in plan.models}
     assert models["unbound"].generated_profile == "chat-unbound"
     assert plan.profiles["chat-unbound"]["ctx_size"] == 98304
-    assert "mtp-only" not in models  # mtp is a model fact
+    assert "mtp-only" not in models  # "has MTP heads" stays a model fact
 
-    assert set(plan.profile_rewrites) >= {"thinking", "coding", "(profiles.toml)"}
-    rows = {r.slot: r for r in plan.stacks}
-    assert rows["agent"].drop_keys == ["vision", "mtp"]
-    assert [(i.key, i.value) for i in rows["brain"].inert] == [("server_extra_args", "-b 64")]
+    assert set(plan.profile_rewrites) >= {"thinking", "(profiles.toml)"}
+    rows = {r["slot"]: r["change"] for st in plan.stacks for r in st.rows}
+    assert rows["agent"].startswith("drop vision, mtp (inert today: mtp=True)")
+    assert "server_extra_args='-b 64'" in rows["brain"]
     assert "-b 64" not in json.dumps(plan.profiles)
 
 
-def test_converted_install_plans_nothing() -> None:
+def _converted_install() -> None:
     _write(
         paths.profiles_toml(),
         {
@@ -317,9 +334,48 @@ def test_converted_install_plans_nothing() -> None:
         },
     )
     _db([_model("big-chat", metadata={"context_length": 262144}, tags=["mtp"])])
+
+
+def test_converted_install_plans_nothing() -> None:
+    _converted_install()
+    state = paths.var_lib() / pc.STATE_FILE
+    state.parent.mkdir(parents=True, exist_ok=True)
+    state.write_text(json.dumps({"complete": True, "slots": ["1.toml"]}))
     plan = pc.plan_conversion()
     assert not plan.changed, plan.lines()
     assert plan.lines()[-1] == "nothing to convert"
+
+
+def test_slots_an_earlier_run_converted_are_not_reevaluated() -> None:
+    _converted_install()
+    state = paths.var_lib() / pc.STATE_FILE
+    state.parent.mkdir(parents=True, exist_ok=True)
+    state.write_text(json.dumps({"complete": False, "slots": ["1.toml"]}))
+    plan = pc.plan_conversion()
+    assert _by_name(plan)["agent"].status == "unchanged"
+    assert not plan.profiles
+
+
+def test_every_slot_is_evaluated_without_state() -> None:
+    """No shortcut: an untuned slot on a seed whose meaning changes is caught."""
+    _slot(
+        "5",
+        {
+            "id": 5,
+            "name": "embed",
+            "type": "embedding",
+            "device": "gpu-rocm",
+            "profile": "embedding",
+            "port": 8089,
+            "model": {"default": "e"},
+        },
+    )
+    _db([_model("e", metadata={"context_length": 32768})])
+    plan = pc.plan_conversion()
+    embed = _by_name(plan)["embed"]
+    # old: 32768 (native, dense-capped); the new seed says 4096 -> keep 32768
+    assert embed.generated and _ctx(embed.argv_after) == 32768
+    assert any("--jinja" in c for c in embed.launch_changes)
 
 
 def test_unparseable_slot_is_blocked_and_others_still_plan(install: None) -> None:
@@ -418,3 +474,22 @@ def test_cli_preview_writes_nothing(install: None) -> None:
     result = CliRunner().invoke(app, ["profile", "migrate", "--json"])
     assert result.exit_code == 0, result.output
     assert "thinking-big-chat" in json.loads(result.output)["profiles"]
+
+
+def test_target_seeds_are_in_the_new_shape() -> None:
+    allowed = {
+        "flags",
+        "ctx_size",
+        "enable_thinking",
+        "vision",
+        "mtp",
+        "runner",
+        "intent",
+        "cloned_from",
+    }
+    for name, seed in pc.target_seeds().items():
+        assert set(seed) <= allowed, name
+        conv = pc.convert_flags(seed.get("flags", ""), source="profile")
+        assert not conv.notes and not conv.errors, (name, conv.notes, conv.errors)
+        assert "--model_path" not in seed.get("flags", ""), name
+    assert pc.target_seeds()["agent"]["ctx_size"] >= 64000

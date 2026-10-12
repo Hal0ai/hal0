@@ -77,7 +77,7 @@ shapes has to stay.
 | mmproj path | **Model** | file fact; whether it loads is the profile's `vision` |
 | chat template id (`auto` = GGUF-embedded) | **Model** | which template this file needs |
 | `jinja` (tri-state) | **Model** | whether this file's template works with `--jinja`; hal0 injects `--jinja` when the runner supports it, unless this is `false` or the profile is in embedding/reranking mode |
-| `mtp` (tri-state) | **Model** | **means "the file has MTP heads"**; `None` falls back to the `mtp` tag. It is no longer a switch |
+| `mtp` (tri-state) | **Model** | **means "the file has MTP heads"**; `None` falls back to the `mtp` tag. It is no longer a switch: turning MTP off is the profile's `mtp = "off"` |
 | tokenizer repo, capabilities/modalities, `tool_calling`, per-type default marker, provider, tags | **Model** | unchanged |
 | family quirks | **Model family** | `config/data/family_defaults.toml`, keyed by architecture; ships empty today |
 | `flags` (free text: KV cache types, batch/ubatch, sampling, reasoning flags, `--parallel`, everything else) | **Profile** | screened at write and again at launch (see 2) |
@@ -136,15 +136,16 @@ four layers as provenance labels: `base`, `model`, `profile`, `slot`.
 | model `defaults.context_size` | profile `ctx_size` |
 | model `defaults.enable_thinking`, `defaults.vision` | profile `enable_thinking`, `vision` |
 | model `defaults.profile` (provenance / preferred profile) | consumed by the converter, then deleted; a model no longer picks a profile. A swap keeps the slot's profile. Type-implied profiles (`slots/profile_adopt.py:175`) still apply at create |
-| model `defaults.mtp` | model fact "has MTP heads" (same column, same tri-state) |
+| model `defaults.mtp` | `true` stays as the model fact "has MTP heads"; an explicit `false` is operator tuning and becomes the slot profile's `mtp = "off"` (the model's value is cleared, so the `mtp` tag decides the fact) |
 | model `defaults.jinja`, `chat_template`, `tokenizer_repo` | model facts; lifted out of `defaults` (see 6) |
 | model `defaults.rope_freq_base`, DB `n_gpu_layers`, `preferred_runner` | deleted (never emitted: `container.py:1210`; NGL is slot-owned; runner is `slot.binary`) |
-| slot `[model].context_size` | profile `ctx_size` where it changed what launched (a ceiling below the model window, or one that replaced the dense cap); FLM's real window; otherwise dropped and reported |
+| slot `[model].context_size` (and the old `[model].ctx_size` / top-level `ctx_size`) | profile `ctx_size` where it changed what launched (a ceiling below the model window, or one that replaced the dense cap); FLM's real window; otherwise dropped and reported |
 | slot `[server].extra_args`, `parallel`, `chat_template`, `workers` | inert today: dropped and reported (see 7, "inert values") |
 | slot `[model].n_gpu_layers`, `[model].rope_freq_base`, `[model].extra` | dropped (inert) |
 | slot `backend`, `runtime`, `enabled` | normalized by the converter (`backend` becomes `device` when `device` is absent; the others are stripped), so `SlotConfig` can forbid unknown keys |
 | slot bare `image` | `image_pin` on a comfyui slot, where it is honoured (`providers/comfyui.py:195`); dropped and reported on a llama slot, where `_resolve_image_ref` reads only `image_pin` (`container.py:302-358`) |
-| stack rows' `mtp`, `vision`, `enable_thinking`, `server_extra_args` | a generated profile in the stack's own `profiles` table; the row's `profile` points to it |
+| stack rows' `mtp`, `vision`, `enable_thinking`, `server_extra_args` | inert today (stack apply never used them): dropped and reported. A row naming the profile its slot ran before conversion is re-pointed to the slot's converted profile, so re-applying the stack does not revert the slot |
+| a stack's embedded `profiles` | converted like any custom profile; a model-fact flag blocks the stack |
 | profile `mtp` (bool, informational), `device_class`, `backend`, `quant` | deleted; profile `mtp` returns as `auto`/`off` |
 | `profiles.toml` `legacy_seeds_migrated`, `legacy_seeds_adopted` | deleted together with `config/data/legacy_seed_profiles.toml` |
 | seed profiles' `--model_path` (kokoro, moonshine, qwen3-tts) | removed from the seeds; the provider reads the model row's path (see 7 for unregistered models) |
@@ -157,10 +158,20 @@ cover every slot hal0 ships. The shipped `agent` and `coder` slot seeds name
 `dense` and `coding` (`installer/etc-hal0/slots/agent.toml:44`,
 `coder.toml:36`), which exist only as demoted seeds that a fresh install adopts
 on first reference (`profiles/__init__.py` `ProfileCatalog._materialize_legacy`).
-That adoption path is deleted with this ADR. This ADR promotes a long-context
-agent seed and a `coding` seed, with explicit `ctx_size`, and points the
-shipped slots at them. The agent seed must meet the bundled Hermes agent's
-64,000-token floor. Slots are built around the seeds hal0 ships, never the other way round.
+That adoption path is deleted with this ADR. This ADR promotes seeds with
+canonical names: `agent` (long context, `ctx_size = 65536`; the bundled
+Hermes agent's floor is 64,000), `utility` (`ctx_size = 65536`) and `coding`,
+and points the shipped slots at them. Slots are built around the seeds hal0
+ships, never the other way round.
+
+Seeds keep their canonical names. When an install already has a custom
+profile with a seed's name (a `coding` adopted on 1.2–1.3), the conversion
+compares the two tunes: an identical custom is removed and its slots simply
+run the seed; a different one is renamed to `<name>-custom` and every slot and
+stack row naming it is re-pointed, reported. A demoted seed a fresh install
+would have adopted on first reference is written as a custom profile in the
+new shape (no `--jinja`, `--no-mmproj` becomes `vision = "off"`), unless the
+install's adoption ledger says it was deleted.
 
 The installer's VRAM clamp (`install/static_seeds.py:213-288`,
 `install/orchestrate.py:194-215,593-607`) stops writing the slot's
@@ -236,45 +247,72 @@ exactly once. It follows ADR-0028's contract:
   (`hal0_config_file_lock`, `slot_write_lock`) and also honours its own restore
   marker. `hal0 profile migrate` previews it, `--apply` runs it, and
   `--restore <archive>` reverses it.
-- **Inputs.** Raw TOML for every slot file in both layouts (id-keyed and
-  name-keyed; installs carry both), `profiles.toml` and `stacks.toml`, the model
-  rows, and the code-shipped seeds. Nothing is validated through the new
-  pydantic models first.
-- **How each slot is converted.** A frozen copy of today's resolution, the
-  *legacy evaluator*, computes what the slot launches now: the effective flag
-  map after last-wins, the context window, the thinking default, and whether
-  mmproj loads. It is a pure function over raw rows, kept inside the converter
-  module and deleted with it. The converter then removes the layers the new
-  composition computes itself (base, model facts, slot placement, the
-  automatic MTP bundle) and asks whether the slot's own profile reproduces the
-  rest under the new rules. A trailing `--no-mmproj` becomes `vision = "off"`.
-  If the profile reproduces it, the slot keeps its profile. If not, the
-  converter writes a custom profile holding exactly that tune, with
-  `cloned_from = <profile that launched>` and an `intent` naming the slot and
-  model it came from, and points the slot at it.
+- **Inputs.** Raw TOML for every slot file, `profiles.toml` and `stacks.toml`,
+  the model rows (with the tuning columns read back from the holding table
+  once migration 012 has moved them), the target seed catalog and the
+  conversion state file. Nothing is validated through the new pydantic models
+  first. When an id-keyed and a name-keyed file carry the same slot, only the
+  one the loader uses (the id-keyed file, `SlotManager._config_file_for`) is
+  converted; the other is reported as shadowed and left alone.
+- **Every slot is evaluated, and both launches are compared.** A frozen copy
+  of today's resolution (`profile_centric_frozen`) computes what each slot
+  launches now: the argv after last-wins with the segment that set each flag,
+  the context window, the thinking default and whether the projector actually
+  loads. The tune is the part set by the profile and model-tune segments. Each
+  flag in it is routed to its new home:
+  - `--jinja` is dropped (hal0 adds it);
+  - `--no-mmproj` / `--no-mmproj-auto` become `vision = "off"`;
+  - `--mmproj-auto` is dropped;
+  - `--threads` moves to the slot when the slot sets none;
+  - `--spec-draft-device` is dropped (the slot's device decides it);
+  - `--reasoning-format none` is dropped;
+  - a hardware flag the profile path stripped at launch is dropped;
+  - `--chat-template*`, `--mmproj <path>` and `-dev` have no profile home and
+    block the slot.
+
+  The slot keeps its profile when that profile, in the new shape, holds the
+  same tune; otherwise the converter generates one with
+  `cloned_from = <the profile it ran>`. An explicit model `mtp = false`
+  becomes the profile's `mtp = "off"`. The new rules are then applied to the
+  converted slot, model and profile (`profile_centric.new_launch`, which the
+  launch-path change implements and is pinned to), and the two launches are
+  compared flag by flag, plus the context window, the thinking default and
+  whether the projector loads. Every difference is either one of the launch
+  changes below or blocks the slot.
 - **Naming and dedupe.** The name is `slug(<profile that launched>-<model id>)`.
   For a model-less slot that has a ceiling, it is
   `slug(<profile>-ctx<N>)`. When the slug is longer than 32 characters, or
-  is already taken by a profile with different content, the name becomes the
-  first 26 characters plus `-` plus 5 hex characters of the content hash.
-  Identical content produces one profile, deduplicated against every profile
-  already in the catalog as well as against profiles generated in the same
-  run. The same input always produces the same name.
-- **Model-less slots.** A ceiling equal to the dense cap is dropped, because
-  it means the same thing. Any other ceiling becomes `<profile>-ctx<N>`.
+  is already taken by a profile with a different tune, the name becomes the
+  first 26 characters plus `-` plus 5 hex characters of the tune's hash.
+  Identical tunes produce one profile, deduplicated against every profile in
+  the new catalog (seeds, converted customs and profiles generated in the same
+  run). The same input always produces the same name.
+- **Model-less slots.** A ceiling equal to the profile's window (its
+  `ctx_size`, else the 32768 cap) is dropped, because it means the same
+  thing. Any other ceiling becomes `<profile>-ctx<N>`. An unparsable ceiling
+  is inert today and is reported.
+- **FLM.** `providers/flm.py` `build_env` uses the slot's context, else 8192.
+  After conversion the window is always explicit: every FLM slot's profile
+  carries `ctx_size` equal to what it runs today, and the launch path reads
+  only that.
 - **Unbound models.** A model that has tuning but is bound to no slot gets a
   generated profile that nothing is assigned to, so operator data is never
-  silently lost. MTP-only rows need nothing: `mtp` stays on the model.
+  silently lost. Rows whose only setting is `mtp = true` need nothing.
 - **Launch changes are reported, never hidden.** The converter preserves what
-  launches, with two exceptions where today's state is broken:
-  - A typed slot with no profile gets its type-implied seed. `embed` gains
-    `--embedding` and loses `--jinja`.
-  - A slot that names a profile which does not exist is pointed at what it
-    actually launches: its type-implied seed, else `chat`.
-  - An MTP slot on a Vulkan or CUDA device gets that device's draft device
-    instead of `ROCm0` (decision 2, layer 4).
+  launches, except in these four cases, where today's state is broken or
+  cannot be expressed:
+  - A typed slot with no profile, or naming one that does not exist, gets its
+    type's seed (`embedding`, `reranking`). `embed` gains `--embedding`.
+  - `--jinja` is no longer added in embedding or reranking mode.
+  - An MTP slot gets its own device's draft device, where today the profile's
+    `backend` hint (`ROCm0` when unset) decided it, including an explicit
+    `--spec-draft-device` in a model tune.
+  - A model that forced MTP on (`mtp = true`) on a runner without MTP support
+    stops drafting.
 
-  Each such slot is listed as "changes at next restart".
+  A non-llama slot whose profile resolves to nothing (a profile-less Kokoro
+  slot asks for the non-seed `tts` and fails to launch today) gets its
+  engine's seed. Each such slot is listed as "changes at next restart".
 - **Inert values are never applied.** The conversion preserves what launches
   (operator decision, 2026-10-12). Slot `extra_args`, `parallel` and
   `chat_template`, a ceiling that never took effect, stack-row tuning and
@@ -285,25 +323,32 @@ exactly once. It follows ADR-0028's contract:
   live, and that is safe because for every slot not on the launch-change list
   the result is effective-argv-equivalent. After writing, it re-renders units
   as `migrate_runner_system` does (`rerender_slot_units`) and compares each
-  slot's new effective flag map with the legacy evaluator's. Any difference
-  outside the launch-change list rolls back every write and fails loudly. The
+  slot's newly rendered argv with the frozen evaluation. Any difference
+  outside the planned launch changes rolls back every write and fails loudly. The
   previously rendered `Exec=` line is also compared. A difference there is
   pre-existing drift and is reported only. Running containers keep running;
   launch-change slots show the existing config-drift badge until they are
   restarted.
-- **Non-llama model paths.** When a kokoro, moonshine or qwen3tts slot's
-  profile `--model_path` equals its model row's path, it is stripped. When
-  the model id has no row, a row is registered from that path (a production
-  install's `qwen3-tts` slot has no model row). When the two paths differ, the slot fails loudly.
+- **Non-llama model paths.** Checked for every kokoro, moonshine and
+  qwen3tts slot, tuned or not. When the profile's `--model_path` equals the
+  slot model's row path, it is stripped. When the model id has no row, a row
+  is registered from that path (a production install's `qwen3-tts` slot has
+  no model row). When the two paths differ, or the slot names no model, the
+  slot is blocked.
 - **Fail loudly.** These cases leave that slot's file untouched and name it in
   the report; every other slot still converts:
   - the slot's TOML does not parse;
   - flag text does not `shlex`-split;
   - an untrusted segment carries a managed flag (today's launch already
     refuses this);
-  - the non-llama path disagreement above.
+  - its tune, or the profile it keeps, carries a flag with no profile home
+    (`--chat-template*`, `--mmproj <path>`, `-dev`);
+  - the converted launch differs from today's outside the four launch changes;
+  - the non-llama path problems above.
 
-  A failed write rolls back every write.
+  `hal0 profile migrate` exits 2 while any slot is blocked. The demoted-seed
+  markers in `profiles.toml` stay until every slot converts, so a deleted
+  demoted profile is never re-adopted. A failed write rolls back every write.
 - **Database.** SQL migration `012_model_tuning_holding.sql` copies `profile`,
   `extra_args`, `n_gpu_layers`, `context_size`, `rope_freq_base`,
   `preferred_runner`, and the `_enable_thinking` / `_vision` keys of `extra`
@@ -315,8 +360,11 @@ exactly once. It follows ADR-0028's contract:
   `/var/lib/hal0/backups/profiles-<ts>.tar.gz` (mode 0600). It holds every file
   the converter changes, plus a JSON dump of the holding table. There is no
   backup without a write and no write without a backup.
-- **Idempotent.** A converted install has no slot tuning keys, no holding
-  table and no stack-row tuning, so a second run plans nothing.
+- **Idempotent.** The converter records its progress in
+  `/var/lib/hal0/profile-centric.json`: the slot files it converted and
+  whether the whole install is done. A converted slot is never evaluated
+  again (its new-shape profile means nothing to the frozen resolver), and a
+  finished install plans nothing.
 - **Restore** (for a downgrade below the release that ships this, with
   `hal0-api` stopped). It writes back the files the converter owns. It re-adds
   the dropped columns, refills them from the archive, and removes migration
