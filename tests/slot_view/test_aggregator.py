@@ -17,6 +17,7 @@ which stay UNMODIFIED as the parity oracle.
 
 from __future__ import annotations
 
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -1080,6 +1081,93 @@ class TestCtxEffectiveResolution:
         d = await _ctx_view(cfg, 8000)
         assert "ctx_effective" not in d
         assert "ctx_source" not in d
+
+
+def _write_slot_toml(home: str, name: str, lines: list[str]) -> None:
+    slots = Path(home) / "etc" / "hal0" / "slots"
+    slots.mkdir(parents=True, exist_ok=True)
+    (slots / f"{name}.toml").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _write_profiles(home: str, body: str) -> None:
+    etc = Path(home) / "etc" / "hal0"
+    etc.mkdir(parents=True, exist_ok=True)
+    (etc / "profiles.toml").write_text(body, encoding="utf-8")
+
+
+def _npu_anchor(home: str, name: str, profile: str) -> None:
+    _write_slot_toml(
+        home,
+        name,
+        [
+            f'name = "{name}"',
+            "port = 8088",
+            'device = "npu"',
+            'type = "llm"',
+            f'profile = "{profile}"',
+        ],
+    )
+
+
+def _shadow(name: str, slot_type: str, served_by: str | None = None) -> dict[str, Any]:
+    cfg: dict[str, Any] = {
+        "name": name,
+        "port": 0,
+        "type": slot_type,
+        "device": "npu",
+        "model": {"default": ""},
+    }
+    if served_by is not None:
+        cfg["served_by"] = served_by
+    return cfg
+
+
+class TestFlmTrioShadowWindow:
+    """An FLM trio shadow (an NPU embedding / transcription slot) runs no
+    process of its own: it reports its anchor's window — the slot named by
+    ``served_by``, else the ``flm`` anchor (``container._served_by_anchor_cfg``)."""
+
+    async def test_shadow_with_served_by_reports_its_anchors_window(
+        self, no_mem: None, tmp_hal0_home: str
+    ) -> None:
+        # Two NPU anchors with different windows, so the assertion proves the
+        # shadow followed ``served_by`` rather than the ``flm`` fallback.
+        _write_profiles(tmp_hal0_home, '[profile.npu-32k]\nctx_size = 32768\nrunner = "flm"\n')
+        _npu_anchor(tmp_hal0_home, "npu-main", "npu-32k")
+        _npu_anchor(tmp_hal0_home, "flm", "flm")
+        from hal0.providers.container import slot_effective_context
+
+        embed = _shadow("embed-npu", "embedding", served_by="npu-main")
+        d = await _ctx_view(embed, None)
+        assert (d["ctx_effective"], d["ctx_source"]) == (32768, "profile")
+        stt = _shadow("stt-npu", "transcription", served_by="npu-main")
+        assert slot_effective_context(stt) == (32768, "profile")
+
+    async def test_shadow_without_served_by_falls_back_to_the_flm_anchor(
+        self, no_mem: None, tmp_hal0_home: str
+    ) -> None:
+        _npu_anchor(tmp_hal0_home, "flm", "flm")  # the flm seed: 16384
+        from hal0.providers.container import slot_effective_context
+
+        d = await _ctx_view(_shadow("embed-npu", "embedding"), None)
+        assert (d["ctx_effective"], d["ctx_source"]) == (16384, "profile")
+        assert slot_effective_context(_shadow("stt-npu", "transcription")) == (16384, "profile")
+
+    async def test_an_8192_anchor_gives_both_shadows_8192(
+        self, no_mem: None, tmp_hal0_home: str
+    ) -> None:
+        """The CT105 shape: the FLM anchor runs an 8192 window (a converted
+        profile), and its embedding and transcription shadows report 8192,
+        not the ``flm`` seed's 16384."""
+        _write_profiles(tmp_hal0_home, '[profile.flm-ctx8192]\nctx_size = 8192\nrunner = "flm"\n')
+        _npu_anchor(tmp_hal0_home, "flm", "flm-ctx8192")
+        from hal0.providers.container import slot_effective_context
+
+        d = await _ctx_view(_shadow("embed-npu", "embedding"), None)
+        assert (d["ctx_effective"], d["ctx_source"]) == (8192, "profile")
+        assert slot_effective_context(_shadow("stt-npu", "transcription")) == (8192, "profile")
+        served = _shadow("embed-npu", "embedding", served_by="flm")
+        assert slot_effective_context(served) == (8192, "profile")
 
 
 # ── concern 5: metric injection ─────────────────────────────────────────────
