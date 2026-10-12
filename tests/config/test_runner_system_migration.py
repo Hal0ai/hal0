@@ -365,6 +365,47 @@ def test_migration_unassigns_a_renamed_fork_build_by_its_contents(
     assert any("103" in w and "unassigned" in w for w in report.warnings)
 
 
+def _set_shards(model_id: str, shards: list[Path]) -> None:
+    """Record a split model's further files the way the registry does."""
+    conn = sqlite3.connect(str(paths.db_path()))
+    conn.execute("ALTER TABLE model ADD COLUMN extra TEXT")
+    conn.execute(
+        "UPDATE model SET extra = ? WHERE id = ?",
+        (json.dumps({"shards": [str(p) for p in shards]}), model_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+def test_migration_checks_every_shard_of_a_split_model(tmp_hal0_home: str, tmp_path: Path) -> None:
+    first = tmp_path / "m-00001-of-00002.gguf"
+    first.write_bytes(_gguf([0, 12]))
+    second = tmp_path / "m-00002-of-00002.gguf"
+    second.write_bytes(_gguf([0, 103]))
+    _seed_slot_on("split", first, paths.slots_config_dir())
+    _set_shards("split", [second])
+
+    report = migrate_runner_system()
+
+    assert _read_toml(paths.slots_config_dir() / "brain.toml")["model"]["default"] == ""
+    assert any("103" in w and "unassigned" in w for w in report.warnings)
+
+
+def test_migration_keeps_a_split_model_whose_shards_are_stock_or_missing(
+    tmp_hal0_home: str, tmp_path: Path
+) -> None:
+    first = tmp_path / "m-00001-of-00003.gguf"
+    first.write_bytes(_gguf([0, 12]))
+    second = tmp_path / "m-00002-of-00003.gguf"
+    second.write_bytes(_gguf([0, 14]))
+    _seed_slot_on("split", first, paths.slots_config_dir())
+    _set_shards("split", [second, tmp_path / "m-00003-of-00003.gguf"])
+
+    migrate_runner_system()
+
+    assert _read_toml(paths.slots_config_dir() / "brain.toml")["model"]["default"] == "split"
+
+
 def test_migration_keeps_a_stock_gguf(tmp_hal0_home: str, tmp_path: Path) -> None:
     model = tmp_path / "model.gguf"
     model.write_bytes(_gguf([0, 12, 14, 39]))

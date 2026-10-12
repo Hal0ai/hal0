@@ -610,11 +610,25 @@ def _db_columns(conn: sqlite3.Connection, table: str) -> set[str]:
     return {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
 
 
+def _shards_of(extra: object) -> tuple[str, ...]:
+    """The further files of a split model, from the registry ``extra`` JSON blob."""
+    if not isinstance(extra, str) or not extra:
+        return ()
+    try:
+        meta = json.loads(extra)
+    except ValueError:
+        return ()
+    shards = meta.get("shards") if isinstance(meta, dict) else None
+    if not isinstance(shards, list):
+        return ()
+    return tuple(str(p) for p in shards if p)
+
+
 def _fork_quant_lookup(db_path: Path) -> Callable[[str], str | None]:
     """``model id -> fork-only quant label | None``, read-only against the DB."""
     from hal0.registry.detect import unsupported_gguf_contents, unsupported_quant
 
-    rows: dict[str, tuple[str, str, str]] = {}
+    rows: dict[str, tuple[str, str, str, tuple[str, ...]]] = {}
     if db_path.is_file():
         try:
             conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
@@ -623,10 +637,18 @@ def _fork_quant_lookup(db_path: Path) -> Callable[[str], str | None]:
                 if {"id", "path"} <= cols:
                     quant_col = "quant" if "quant" in cols else "NULL"
                     hf_col = "hf_filename" if "hf_filename" in cols else "NULL"
-                    for mid, path, quant, hf in conn.execute(
-                        f"SELECT id, path, {quant_col}, {hf_col} FROM model"
+                    # ``extra`` is the metadata JSON blob; split models list
+                    # their further files under ``shards``.
+                    extra_col = "extra" if "extra" in cols else "NULL"
+                    for mid, path, quant, hf, extra in conn.execute(
+                        f"SELECT id, path, {quant_col}, {hf_col}, {extra_col} FROM model"
                     ):
-                        rows[str(mid)] = (str(path or ""), str(quant or ""), str(hf or ""))
+                        rows[str(mid)] = (
+                            str(path or ""),
+                            str(quant or ""),
+                            str(hf or ""),
+                            _shards_of(extra),
+                        )
             finally:
                 conn.close()
         except sqlite3.Error as exc:
@@ -638,18 +660,23 @@ def _fork_quant_lookup(db_path: Path) -> Callable[[str], str | None]:
     def lookup(model_id: str) -> str | None:
         # File and quant evidence only: the registry id is the operator's
         # free choice and can name a fork family while the file is plain.
-        path, quant, hf = rows.get(model_id, ("", "", ""))
+        path, quant, hf, shards = rows.get(model_id, ("", "", "", ()))
         by_name = unsupported_quant(quant, Path(path).name, hf)
         if by_name or not path:
             return by_name
         # A fork build renamed to an innocuous name still declares tensor
         # types only a fork can read. The launch guard refuses it, so the
-        # slot must not keep it. A missing, unreadable or truncated file is
-        # simply not refused by content: the migration never fails on it.
-        try:
-            return unsupported_gguf_contents(path)
-        except Exception:  # a bad file must not fail the migration
-            return None
+        # slot must not keep it, and it checks every shard of a split model
+        # too. A missing, unreadable or truncated file is simply not refused
+        # by content: the migration never fails on it.
+        for candidate in (path, *shards):
+            try:
+                found = unsupported_gguf_contents(candidate)
+            except Exception:  # a bad file must not fail the migration
+                continue
+            if found:
+                return found
+        return None
 
     return lookup
 
