@@ -441,23 +441,42 @@ def _is_remote_model(request: Request, model_id: str) -> bool:
     return False
 
 
-async def _slot_thinking_default(request: Request, model_id: str) -> bool:
-    """Per-model reasoning default: ``ModelDefaults.enable_thinking`` of
-    ``model_id`` (spec-hw-slot-ownership §1 — reasoning is MODEL-owned tuning,
-    not a slot fact; the former per-slot ``enable_thinking`` override is gone).
-    Falls back to False (global suppression) when the model has no explicit
-    opinion (tri-state None) or is unregistered. Always overridable per
-    request via top-level ``enable_thinking`` / ``chat_template_kwargs``."""
-    registry = getattr(request.app.state, "model_registry", None)
-    if registry is None:
+async def _slot_thinking_default(
+    request: Request, model_id: str, slot_name: str | None = None
+) -> bool:
+    """The reasoning default for a request: the serving slot's profile (ADR-0029).
+
+    The slot is the lane the request pinned (``hal0/<slot>``), else the first
+    llm slot bound to ``model_id`` (default slot first). Its profile's
+    ``enable_thinking`` decides; unset, no slot, or an unresolvable profile
+    means off. Always overridable per request via top-level
+    ``enable_thinking`` / ``chat_template_kwargs``.
+    """
+    from hal0.errors import Hal0Error
+    from hal0.providers.container import resolve_slot_profile
+
+    sm = getattr(request.app.state, "slot_manager", None)
+    if sm is None:
         return False
     try:
-        model = registry.get(model_id)
+        cfgs = list(await sm.iter_configs())
     except Exception:
         return False
-    defaults = getattr(model, "defaults", None)
-    want = getattr(defaults, "enable_thinking", None) if defaults is not None else None
-    return bool(want) if want is not None else False
+    llm = [c for c in cfgs if isinstance(c, dict) and str(c.get("type") or "llm") == "llm"]
+    chosen = None
+    if slot_name:
+        chosen = next((c for c in llm if c.get("name") == slot_name), None)
+    if chosen is None:
+        bound = [c for c in llm if str((c.get("model") or {}).get("default") or "") == model_id]
+        bound.sort(key=lambda c: c.get("default") is not True)
+        chosen = bound[0] if bound else None
+    if chosen is None:
+        return False
+    try:
+        profile = resolve_slot_profile(chosen)
+    except Hal0Error:
+        return False
+    return bool(getattr(profile, "enable_thinking", None))
 
 
 async def _normalize_chat_body(request: Request, body: dict[str, Any]) -> dict[str, Any]:
@@ -499,6 +518,7 @@ async def _normalize_chat_body(request: Request, body: dict[str, Any]) -> dict[s
         loaded_models_provider=lambda: _normalize_loaded_models(request),
     )
     raw_model = body.get("model")
+    pinned: str | None = None
     if isinstance(raw_model, str) and raw_model:
         res = await resolver.resolve(raw_model)
         if res is not None and res.model_id:
@@ -514,10 +534,11 @@ async def _normalize_chat_body(request: Request, body: dict[str, Any]) -> dict[s
             # pin never points at a slot that cannot serve.
             if res.matched_name and not res.fallback:
                 set_lane_pin(request, res.matched_name)
+                pinned = res.matched_name
 
     model_id = body.get("model")
     if isinstance(model_id, str) and not _is_remote_model(request, model_id):
-        default_thinking = await _slot_thinking_default(request, model_id)
+        default_thinking = await _slot_thinking_default(request, model_id, pinned)
         body = apply_thinking_policy(body, default_thinking=default_thinking)
 
     import contextlib

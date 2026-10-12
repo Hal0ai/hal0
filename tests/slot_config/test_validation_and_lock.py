@@ -1,7 +1,7 @@
-"""Unit tests for the slot-config write helpers added in the guarded-writes
-wave: ``unknown_slot_config_keys`` (boundary validation),
-``fold_ctx_size_alias`` (the ONE #585 fold), and ``slot_write_lock``
-(coarse cross-process lock for all slots/*.toml writes).
+"""Unit tests for the slot-config write helpers: ``unknown_slot_config_keys``
+(boundary validation), ``reject_slot_tuning_keys`` (the ADR-0029 partition)
+and ``slot_write_lock`` (coarse cross-process lock for all slots/*.toml
+writes).
 """
 
 from __future__ import annotations
@@ -13,9 +13,7 @@ import pytest
 from hal0.config.locking import lock_path_for
 from hal0.errors import BadRequest
 from hal0.slot_config import (
-    MODEL_OWNED_SLOT_KEYS,
-    fold_ctx_size_alias,
-    reject_model_owned_slot_keys,
+    reject_slot_tuning_keys,
     slot_write_lock,
     unknown_slot_config_keys,
 )
@@ -34,9 +32,9 @@ class TestUnknownKeys:
             "runtime": "container",
             "default": True,
             "lru": True,
-            "profile": "vulkan",
-            "model": {"default": "m", "context_size": 8192, "extra": {"anything": 1}},
-            "server": {"extra_args": "-b 2048"},
+            "profile": "agent",
+            "model": {"default": "m"},
+            "server": {"env": {"HSA_OVERRIDE_GFX_VERSION": "11.5.1"}},
             "npu": {"asr": True, "embed": False},
             "image": {"default_steps": 20},
         }
@@ -64,8 +62,12 @@ class TestUnknownKeys:
             "server.extra_argz",
         ]
 
-    def test_legacy_ctx_size_alias_tolerated(self) -> None:
-        assert unknown_slot_config_keys({"model": {"ctx_size": 8192}}) == []
+    def test_model_table_knows_only_default(self) -> None:
+        """ADR-0029: ``[model]`` names the model and nothing else, so even a
+        provider ``extra`` table under it is unknown."""
+        assert unknown_slot_config_keys({"model": {"default": "m", "extra": {"a": 1}}}) == [
+            "model.extra"
+        ]
 
     def test_string_image_override_tolerated(self) -> None:
         assert unknown_slot_config_keys({"image": "ghcr.io/x/y:z"}) == []
@@ -84,81 +86,83 @@ class TestUnknownKeys:
         payload = {"server": dict.fromkeys(ServerConfig.model_fields, None)}
         assert unknown_slot_config_keys(payload) == []
 
-    def test_model_owned_keys_are_unknown_at_the_generic_boundary(self) -> None:
-        """mtp/enable_thinking/vision are no longer declared SlotConfig
-        fields (spec-hw-slot-ownership §1) — the generic boundary alone
-        would just flag them as typos. The specific
-        ``reject_model_owned_slot_keys`` check (below) runs first at the
-        route layer so the operator gets the actionable message instead."""
-        assert unknown_slot_config_keys({"mtp": True}) == ["mtp"]
-        assert unknown_slot_config_keys({"enable_thinking": False}) == ["enable_thinking"]
-        assert unknown_slot_config_keys({"vision": False}) == ["vision"]
+    def test_tuning_keys_are_unknown_at_the_generic_boundary(self) -> None:
+        """No tuning key is a declared slot field any more (ADR-0029), so the
+        generic boundary alone flags them as typos. The specific
+        ``reject_slot_tuning_keys`` check (below) runs first at the route
+        layer so the operator gets the "belongs on a profile" message."""
+        payload = {
+            "model": {"ctx_size": 1, "context_size": 2},
+            "server": {"extra_args": ""},
+            "mtp": True,
+            "parallel": 2,
+            "workers": 1,
+            "chat_template": "chatml",
+        }
+        assert unknown_slot_config_keys(payload) == [
+            "chat_template",
+            "model.context_size",
+            "model.ctx_size",
+            "mtp",
+            "parallel",
+            "server.extra_args",
+            "workers",
+        ]
 
 
-# ── reject_model_owned_slot_keys (spec-hw-slot-ownership §1) ────────────────
+# ── reject_slot_tuning_keys (ADR-0029 §5) ────────────────────────────────────
 
 
-class TestRejectModelOwnedSlotKeys:
+class TestRejectSlotTuningKeys:
     def test_clean_payload_passes(self) -> None:
-        reject_model_owned_slot_keys({"name": "chat", "port": 8081, "device": "gpu-rocm"})
+        reject_slot_tuning_keys(
+            {
+                "name": "chat",
+                "port": 8081,
+                "device": "gpu-rocm",
+                "profile": "agent",
+                "model": {"default": "m"},
+                "server": {"env": {"A": "1"}},
+            }
+        )
 
-    def test_every_declared_key_is_covered(self) -> None:
-        assert frozenset({"mtp", "enable_thinking", "vision"}) == MODEL_OWNED_SLOT_KEYS
-
-    def test_mtp_rejected(self) -> None:
+    @pytest.mark.parametrize(
+        ("payload", "key"),
+        [
+            ({"mtp": True}, "mtp"),
+            ({"enable_thinking": False}, "enable_thinking"),
+            ({"vision": False}, "vision"),
+            ({"parallel": 4}, "parallel"),
+            ({"chat_template": "chatml"}, "chat_template"),
+            ({"workers": 2}, "workers"),
+            ({"ctx_size": 8192}, "ctx_size"),
+            ({"model": {"context_size": 8192}}, "[model].context_size"),
+            ({"model": {"ctx_size": 8192}}, "[model].ctx_size"),
+            ({"model": {"n_gpu_layers": 40}}, "[model].n_gpu_layers"),
+            ({"model": {"rope_freq_base": 1e6}}, "[model].rope_freq_base"),
+            ({"server": {"extra_args": "-b 2048"}}, "[server].extra_args"),
+            ({"slot": {"parallel": 2}}, "parallel"),
+        ],
+    )
+    def test_each_tuning_key_is_rejected(self, payload: dict, key: str) -> None:
         with pytest.raises(BadRequest) as exc:
-            reject_model_owned_slot_keys({"mtp": True})
-        assert exc.value.code == "slot.model_owned_key_denied"
-        assert exc.value.details["keys"] == ["mtp"]
+            reject_slot_tuning_keys(payload)
+        assert exc.value.code == "slot.tuning_key_denied"
+        assert exc.value.details["keys"] == [key]
+        assert "profile" in exc.value.message
 
-    def test_enable_thinking_rejected(self) -> None:
+    def test_multiple_offenders_all_listed(self) -> None:
         with pytest.raises(BadRequest) as exc:
-            reject_model_owned_slot_keys({"enable_thinking": False})
-        assert exc.value.details["keys"] == ["enable_thinking"]
-
-    def test_vision_rejected(self) -> None:
-        with pytest.raises(BadRequest) as exc:
-            reject_model_owned_slot_keys({"vision": False})
-        assert exc.value.details["keys"] == ["vision"]
-
-    def test_multiple_offenders_all_listed_sorted(self) -> None:
-        with pytest.raises(BadRequest) as exc:
-            reject_model_owned_slot_keys({"vision": True, "mtp": None, "enable_thinking": True})
-        assert exc.value.details["keys"] == ["enable_thinking", "mtp", "vision"]
+            reject_slot_tuning_keys(
+                {"vision": True, "mtp": None, "model": {"default": "m", "context_size": 1}}
+            )
+        assert set(exc.value.details["keys"]) == {"vision", "mtp", "[model].context_size"}
 
     def test_null_value_still_rejected(self) -> None:
-        """Even an explicit null (the tri-state 'reset to Auto' shape used
-        when the field DID live on the slot) is rejected — the key itself
-        is the violation, not its value."""
+        """The key itself is the violation, not its value: an explicit null
+        (the old "reset to Auto" shape) is refused too."""
         with pytest.raises(BadRequest):
-            reject_model_owned_slot_keys({"mtp": None})
-
-    def test_unrelated_keys_untouched(self) -> None:
-        reject_model_owned_slot_keys({"model": {"default": "m"}, "server": {"extra_args": ""}})
-
-
-# ── fold_ctx_size_alias ──────────────────────────────────────────────────────
-
-
-class TestFoldCtxSizeAlias:
-    def test_folds_and_drops_alias(self) -> None:
-        cfg = {"model": {"ctx_size": 4096, "context_size": 2048, "default": "m"}}
-        fold_ctx_size_alias(cfg)
-        assert cfg["model"] == {"context_size": 4096, "default": "m"}
-
-    def test_noop_without_alias(self) -> None:
-        cfg = {"model": {"context_size": 2048}}
-        fold_ctx_size_alias(cfg)
-        assert cfg == {"model": {"context_size": 2048}}
-
-    def test_copy_safe_on_shared_model_subdict(self) -> None:
-        """The 'before' snapshot sharing the [model] object is never mutated."""
-        shared = {"ctx_size": 4096}
-        before = {"model": shared}
-        cfg = {"model": shared}
-        fold_ctx_size_alias(cfg)
-        assert before["model"] == {"ctx_size": 4096}, "shared sub-dict must not mutate"
-        assert cfg["model"] == {"context_size": 4096}
+            reject_slot_tuning_keys({"mtp": None})
 
 
 # ── slot_write_lock ──────────────────────────────────────────────────────────

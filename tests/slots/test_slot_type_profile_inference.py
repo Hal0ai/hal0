@@ -4,9 +4,9 @@ For an ``embedding`` / ``reranking`` slot the profile is not a tuning choice:
 it carries the llama-server MODE FLAG (``--embedding`` / ``--reranking``) that
 makes the slot serve ``/v1/embeddings`` / ``/v1/rerank`` at all. Before this
 fix, the only create-time profile source was the model's stamped
-``defaults.profile`` (the Q1 adoption in ``SlotManager.create``) — and
-auto-scan, ``model add``, pull and the curated catalog all register models
-with ``defaults: null``. So every explicit creation path (``hal0 slot create``,
+``defaults.profile`` (deleted by ADR-0029: a model no longer picks a
+profile) — and auto-scan, ``model add``, pull and the curated catalog all
+register models with ``defaults: null``. So every explicit creation path (``hal0 slot create``,
 the dashboard New-slot modal, a raw ``POST /api/slots``, a stack apply, the
 capability orchestrator's auto-create) wrote a slot TOML with NO ``profile``
 key, the #1787 profile-template gate had nothing to apply, and the slot loaded
@@ -26,14 +26,9 @@ from hal0.slots.manager import SlotManager
 from hal0.slots.profile_adopt import type_implied_profile
 
 
-def _register(model_id: str, *, profile: str | None = None) -> None:
+def _register(model_id: str) -> None:
     ModelRegistry().add(
-        Model(
-            id=model_id,
-            path=f"/tmp/{model_id}.gguf",
-            capabilities=["chat"],
-            defaults=ModelDefaults(profile=profile) if profile else None,
-        )
+        Model(id=model_id, path=f"/tmp/{model_id}.gguf", capabilities=["chat"], defaults=None)
     )
 
 
@@ -203,12 +198,22 @@ async def test_create_keeps_an_explicit_profile(tmp_hal0_home: str) -> None:
     assert (await sm.get_config("zz")).get("profile") == "cpu-chat"
 
 
-async def test_create_keeps_the_models_stamped_profile(tmp_hal0_home: str) -> None:
-    """The Q1 model preference still wins over the type-implied fallback."""
-    _register("stamped", profile="cpu-chat")
+def test_a_model_no_longer_carries_a_preferred_profile() -> None:
+    """ADR-0029 §3: ``defaults.profile`` is gone — a model never picks a
+    profile. ``ModelDefaults`` forbids the key outright."""
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        ModelDefaults.model_validate({"profile": "cpu-chat"})
+
+
+async def test_create_uses_the_type_seed_whatever_the_model(tmp_hal0_home: str) -> None:
+    """With no model preference, the type-implied seed is the create-time
+    profile for a capability slot."""
+    _register("any-model")
     sm = SlotManager()
-    await sm.create("zz", _cfg("zz", "embedding", "cpu", model="stamped"))
-    assert (await sm.get_config("zz")).get("profile") == "cpu-chat"
+    await sm.create("zz", _cfg("zz", "embedding", "cpu", model="any-model"))
+    assert (await sm.get_config("zz")).get("profile") == "embedding"
 
 
 async def test_create_leaves_llm_slots_profileless(tmp_hal0_home: str) -> None:

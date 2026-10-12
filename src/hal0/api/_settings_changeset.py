@@ -9,9 +9,9 @@ a "what changed" diff computed twice, by two call sites that can drift.
   * #2195 — the stack-apply preview bills added/changed flags but not
     removed ones, because the preview's copy-scope was hand-picked rather
     than derived from the one diff the apply itself uses.
-  * #2203 — ``POST /api/models/{id}/seed-profile`` emits a hardcoded
-    ``changed_fields`` list instead of comparing before/after, so a no-op
-    re-stamp still claims two fields changed.
+  * #2203 — a write route emitted a hardcoded ``changed_fields`` list
+    instead of comparing before/after, so a no-op write still claimed
+    fields changed.
   * #1511 — the stack Load dialog previews what will be loaded but never
     what converge will silently unload, because the preview and the apply
     read different projections of the same operation.

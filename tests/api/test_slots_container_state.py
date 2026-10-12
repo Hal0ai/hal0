@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -233,8 +234,8 @@ def test_container_slot_has_runtime_profile_image_fields(
     from hal0.config.schema import ProfileConfig
 
     fake_profile = ProfileConfig(
-        flags="--flash-attn on -ngl 999",
-        mtp=False,
+        flags="--flash-attn on",
+        mtp="off",
     )
     fake_catalog = MagicMock(profile={"vulkan-radv": fake_profile})
     with (
@@ -279,24 +280,10 @@ def test_container_slot_has_runtime_profile_image_fields(
     )
 
 
-def test_container_slot_resolved_command_uses_profile_as_template_when_unstamped(
-    client_with_container_slot: TestClient,
-) -> None:
-    """FLAGS-own (spec-flags-ownership §2) makes a profile a copy-on-stamp
-    template — but ``llama-3b`` here is UNSTAMPED (no registry row, so no
-    materialized ``defaults`` tune at all). #1787: for that case the slot
-    profile supplies the tune as the ``slot_profile_template`` segment, so its
-    ``--flash-attn`` DOES reach the preview — otherwise an embedding/rerank slot
-    launches without ``--embedding``/``--reranking``. The slot-owned hardware
-    flags stay partitioned off: the profile's ``-ngl 999`` is still stripped.
-    """
+def _resolved_command_with_profile_flags(client: TestClient, flags: str) -> Any:
     from hal0.config.schema import ProfileConfig
 
-    fake_profile = ProfileConfig(
-        flags="--flash-attn on -ngl 999",
-        mtp=False,
-    )
-    fake_catalog = MagicMock(profile={"vulkan-radv": fake_profile})
+    fake_catalog = MagicMock(profile={"vulkan-radv": ProfileConfig(flags=flags, mtp="off")})
     with (
         patch(
             "hal0.providers.container.ContainerProvider.is_active",
@@ -315,19 +302,34 @@ def test_container_slot_resolved_command_uses_profile_as_template_when_unstamped
             return_value=fake_catalog,
         ),
     ):
-        r = client_with_container_slot.get("/api/slots")
+        r = client.get("/api/slots")
     assert r.status_code == 200, r.text
-    by_name = {e["name"]: e for e in r.json()}
-    slot = by_name["gpu-chat"]
-    rc = slot.get("resolved_command")
+    return {e["name"]: e for e in r.json()}["gpu-chat"].get("resolved_command")
+
+
+def test_container_slot_resolved_command_reads_the_profile_live(
+    client_with_container_slot: TestClient,
+) -> None:
+    """ADR-0029: the slot's profile is the whole tune and is read live at every
+    launch and preview — there is no copy-on-stamp, so its flags reach the
+    resolved command whether or not the model has a registry row."""
+    rc = _resolved_command_with_profile_flags(client_with_container_slot, "--flash-attn on")
     assert isinstance(rc, list)
     joined = " ".join(rc)
     # Structural base flags are always present (resolved, not profile-sourced).
     assert "--model" in joined and "--port" in joined
-    # #1787: the unstamped model takes the profile's tune as its template.
-    assert "--flash-attn" in joined, "an unstamped model must take the profile template"
-    # ...but the slot owns the hardware grid — the profile's -ngl never rides along.
-    assert "-ngl" not in joined, "profile hardware flags must NOT reach resolved_command"
+    assert "--flash-attn on" in joined
+
+
+def test_container_slot_profile_carrying_a_hardware_flag_does_not_resolve(
+    client_with_container_slot: TestClient,
+) -> None:
+    """A hand-edited profile carrying ``-ngl`` (slot-owned placement) refuses to
+    launch rather than being silently stripped, so the preview has no command."""
+    rc = _resolved_command_with_profile_flags(
+        client_with_container_slot, "--flash-attn on -ngl 999"
+    )
+    assert rc is None
 
 
 def test_profileless_slot_has_null_image_and_command(
@@ -371,7 +373,7 @@ def _fake_vulkan_catalog() -> MagicMock:
     """Fake profiles catalog whose 'vulkan-radv' profile declares _VULKAN_IMG."""
     from hal0.config.schema import ProfileConfig
 
-    prof = ProfileConfig(flags="--flash-attn on", mtp=False)
+    prof = ProfileConfig(flags="--flash-attn on", mtp="off")
     return MagicMock(profile={"vulkan-radv": prof})
 
 

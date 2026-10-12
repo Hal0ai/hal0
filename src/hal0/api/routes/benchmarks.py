@@ -35,6 +35,7 @@ from hal0.bench.planner import (
     DEFAULT_API,
     _is_tier_a_incompatible,
     _model_caps,
+    attach_slot_profiles,
     fetch_registry_models,
     plan,
 )
@@ -195,7 +196,7 @@ def get_plan(suite: str | None = None) -> dict[str, Any]:
 
     registry_error: str | None = None
     try:
-        models = fetch_registry_models(api)
+        models = attach_slot_profiles(fetch_registry_models(api))
     except (URLError, OSError, ValueError) as exc:
         models = []
         registry_error = str(exc)

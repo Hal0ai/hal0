@@ -110,33 +110,6 @@ def slot_write_lock(slots_dir: Path | str | None = None) -> Iterator[None]:
         yield
 
 
-def fold_ctx_size_alias(cfg_dict: dict[str, Any]) -> None:
-    """Fold the legacy ``[model].ctx_size`` alias into the canonical
-    ``context_size`` (#585) — THE single normalization point.
-
-    The dashboard slot-edit panel writes ``ctx_size``; the load path reads
-    ``context_size``. Persisting both lets them silently diverge. A fresh
-    ``ctx_size`` (the operator's latest write) wins over any stale
-    ``context_size``, then the alias is dropped so exactly one key survives
-    on disk. No-op when ``ctx_size`` is absent.
-
-    Copy-safe on the nested table: the ``[model]`` sub-dict is copied
-    before mutation and rebound onto ``cfg_dict``, so callers that share
-    the sub-dict with a "before" snapshot (the store's ChangeSet) are
-    never corrupted. ``cfg_dict`` itself is mutated in place.
-
-    Used by :func:`merge_slot_config` (which covers
-    ``SlotManager.update_config`` and the store) and by
-    ``SlotManager.create`` — previously three separate copies of this fold
-    existed and could drift.
-    """
-    model = cfg_dict.get("model")
-    if isinstance(model, dict) and "ctx_size" in model:
-        model = dict(model)
-        model["context_size"] = model.pop("ctx_size")
-        cfg_dict["model"] = model
-
-
 # ── the shared slot-projection merge primitive (SC-11) ───────────────────────
 
 
@@ -181,8 +154,8 @@ def merge_slot_config(base: dict[str, Any], updates: dict[str, Any]) -> dict[str
         see below) so the caller's dict is never mutated,
       - runs a ONE-level-deep merge: for a key present as a dict on both
         sides the sub-tables are merged key-by-key (``{**existing, **value}``,
-        so sibling ``[model]`` keys like ``default``/``context_size``
-        survive); every other key (scalars, lists, dict-vs-scalar) replaces
+        so sibling keys of a table like ``[image]`` or ``[npu]`` survive);
+        every other key (scalars, lists, dict-vs-scalar) replaces
         wholesale — value wins. A DICT-valued update (a sibling table like
         ``model``/``server``/``npu``) always lands at the ROOT; a
         SCALAR-valued update lands in :func:`slot_scalar_table` — ``[slot]``
@@ -194,19 +167,20 @@ def merge_slot_config(base: dict[str, Any], updates: dict[str, Any]) -> dict[str
         (top level and one level deep). TOML has no null — ``tomli_w`` raises
         ``TypeError`` on a ``None`` value, so "set to null" could never be
         persisted anyway; absent IS null on this surface. This is what lets
-        ``PUT /config {"mtp": null}`` return a slot to MTP AUTO (the tri-state
-        default) instead of 500ing in the TOML writer,
-      - folds the legacy ``[model].ctx_size`` alias into the canonical
-        ``context_size`` (#585): a fresh ``ctx_size`` wins over any stale
-        ``context_size``, then the alias is dropped so exactly one key
-        survives on disk.
+        ``PUT /config {"image_pin": null}`` clear a key instead of 500ing in
+        the TOML writer.
+
+    There is no context-size handling here: slot tuning keys
+    (``[model].context_size`` / ``ctx_size``, ``[server].extra_args``, …) are
+    refused before any merge with ``slot.tuning_key_denied``
+    (:func:`reject_slot_tuning_keys`, ADR-0029).
 
     Copy-safety is load-bearing: the store diffs ``before`` against ``after``
     and rolls back to ``before`` on a failed commit, so the returned dict must
     never share the ``[model]`` sub-dict (or, on a nested-shape base, the
     ``[slot]`` sub-dict) with ``base``. The merge path (which builds a fresh
-    ``{**existing, **value}``) and the fold path (which copies the sub-dict
-    before ``pop``) both honour that.
+    ``{**existing, **value}``) and the ``[slot]`` copy above both honour
+    that.
     """
     after = dict(base)
     nested = isinstance(base.get("slot"), dict)
@@ -231,17 +205,11 @@ def merge_slot_config(base: dict[str, Any], updates: dict[str, Any]) -> dict[str
             target.pop(key, None)
         elif isinstance(existing, dict) and isinstance(value, dict):
             sub = {**existing, **value}
-            # Same None-deletes rule one level deep ({"server": {"extra_args": null}}).
+            # Same None-deletes rule one level deep ({"npu": {"asr": null}}).
             target[key] = {k: v for k, v in sub.items() if v is not None}
         else:
             target[key] = value
 
-    # #585: fold the legacy [model].ctx_size alias into the canonical
-    # context_size via the ONE shared fold (:func:`fold_ctx_size_alias`).
-    # The fold copies the sub-dict before mutating so ``base`` (the store's
-    # ``before`` snapshot) is never touched even when ``updates`` carried no
-    # [model] and ``after["model"]`` is still ``base``'s object.
-    fold_ctx_size_alias(after)
     return after
 
 
@@ -282,39 +250,31 @@ TOLERATED_SLOT_CONFIG_KEYS: frozenset[str] = frozenset(
     }
 )
 
-# ── model-owned slot-write partition (spec-hw-slot-ownership §1) ─────────────
-#
-# The tri-state capability keys the MODEL now exclusively owns: mtp (already
-# established), plus enable_thinking (reasoning) and vision (mmproj gate),
-# moved off the slot in this pass. None of the three is a declared SlotConfig
-# field anymore, so an un-partitioned boundary would just report them as
-# generic "unknown slot config key(s)" — this dedicated check runs FIRST so
-# the operator gets the actionable "belongs on the model" message instead,
-# symmetric to the model-side SLOT_HARDWARE_FLAGS hard-reject
-# (hal0.slots.argv._deny_slot_hardware_flags).
-MODEL_OWNED_SLOT_KEYS: frozenset[str] = frozenset({"mtp", "enable_thinking", "vision"})
+# ── slot-write tuning partition (ADR-0029) ───────────────────────────────────
 
 
-def reject_model_owned_slot_keys(payload: dict[str, Any]) -> None:
-    """400 when a slot-config write body carries a MODEL-owned key.
+def reject_slot_tuning_keys(payload: dict[str, Any]) -> None:
+    """400 when a slot-config write body carries a tuning key.
 
-    ``mtp`` / ``enable_thinking`` / ``vision`` are typed model tuning (spec-
-    hw-slot-ownership §1) — ``SlotConfig`` declares none of them, so a write
-    trying to set one on the slot is refused loudly instead of silently
-    round-tripping through ``extra="allow"`` as inert debris. Checked at the
-    TOP level only (these are top-level SlotConfig-adjacent keys, never
-    nested under ``[model]``/``[server]``).
+    ADR-0029: every tune (context window, launch flags, ``--parallel``, the
+    reasoning default, vision, MTP) lives on the slot's profile; the slot
+    holds placement and names its model and profile. A write carrying
+    ``[model].context_size`` / ``ctx_size``, ``[server].extra_args``,
+    ``parallel``, ``chat_template``, ``mtp``, ``enable_thinking``, ``vision``
+    or ``workers`` is refused loudly instead of landing on disk as a value
+    nothing reads.
     """
+    from hal0.config.schema import slot_tuning_keys
     from hal0.errors import BadRequest
 
-    offenders = sorted(k for k in payload if k in MODEL_OWNED_SLOT_KEYS)
+    offenders = slot_tuning_keys(payload)
     if offenders:
-        flags = ", ".join(repr(k) for k in offenders)
+        keys = ", ".join(repr(k) for k in offenders)
         raise BadRequest(
-            f"key(s) {flags} belong on the model, not the slot (spec-hw-slot-"
-            "ownership §1) — set them via PUT /api/models/{id} defaults instead.",
+            f"key(s) {keys} belong on a profile, not the slot (ADR-0029) — set them on "
+            "the slot's profile (PUT /api/profiles/{name}) or pick another profile.",
             details={"keys": offenders},
-            code="slot.model_owned_key_denied",
+            code="slot.tuning_key_denied",
         )
 
 
@@ -359,11 +319,7 @@ def reject_removed_slot_keys(payload: dict[str, Any]) -> None:
 
 
 #: Extra keys tolerated inside specific sub-tables, keyed by sub-table name.
-#: ``[model].ctx_size`` is the documented legacy alias of ``context_size``
-#: (#585) — accepted on write, folded by :func:`fold_ctx_size_alias`.
-_TOLERATED_SUBTABLE_KEYS: dict[str, frozenset[str]] = {
-    "model": frozenset({"ctx_size"}),
-}
+_TOLERATED_SUBTABLE_KEYS: dict[str, frozenset[str]] = {}
 
 
 def _known_field_names(model_cls: Any) -> set[str]:
@@ -394,8 +350,7 @@ def unknown_slot_config_keys(payload: dict[str, Any]) -> list[str]:
     ``ImageGenConfig`` and returns the paths of unknown keys, sorted.
 
     Tolerated beyond the declared fields:
-      - documented legacy aliases: ``[model].ctx_size``, top-level
-        ``provider`` / ``runtime`` (declared deprecated fields), a
+      - top-level ``provider`` / ``runtime`` (declared fields), a
         *string* ``image`` (per-slot container-image override). NOTE
         (P2-device): ``backend`` is no longer a declared ``SlotConfig``
         field nor tolerated here — a write payload carrying it is now
@@ -708,9 +663,8 @@ class SlotConfigStore:
         the slot changed.
 
         Once the store-specific ``updates`` dict is built, the actual
-        projection — the one-level-deep ``[model]`` merge (so sibling keys
-        like ``context_size`` survive) and the ``ctx_size`` → ``context_size``
-        fold (#585) — is delegated to the shared, copy-safe
+        projection — the one-level-deep table merge (so sibling keys
+        survive) — is delegated to the shared, copy-safe
         :func:`merge_slot_config` (SC-11), the same primitive
         :meth:`SlotManager.update_config` uses. Copy-safety matters here: the
         returned ``after`` must not mutate ``raw_before`` (the ChangeSet's
@@ -760,9 +714,9 @@ class SlotConfigStore:
             if engine_profile is not None:
                 updates["profile"] = engine_profile
 
-        # The one-level [model] merge + #585 ctx_size fold is the shared,
-        # copy-safe primitive (SC-11) — ``raw_before`` (the ChangeSet's
-        # ``before`` snapshot) is never mutated.
+        # The one-level table merge is the shared, copy-safe primitive
+        # (SC-11) — ``raw_before`` (the ChangeSet's ``before`` snapshot) is
+        # never mutated.
         return merge_slot_config(raw_before, updates)
 
     #: Children whose device selection is an engine switch WITHIN one slot
@@ -816,17 +770,15 @@ def _write_state(fs: FileState) -> None:
 
 
 __all__ = [
-    "MODEL_OWNED_SLOT_KEYS",
     "REMOVED_SLOT_KEYS",
     "TOLERATED_SLOT_CONFIG_KEYS",
     "ChangeSet",
     "FileState",
     "SlotConfigStore",
     "SlotSelection",
-    "fold_ctx_size_alias",
     "merge_slot_config",
-    "reject_model_owned_slot_keys",
     "reject_removed_slot_keys",
+    "reject_slot_tuning_keys",
     "slot_scalar_table",
     "slot_write_lock",
     "unknown_slot_config_keys",

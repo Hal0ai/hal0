@@ -150,10 +150,10 @@ async def test_apply_materializes_config_idempotently(slot_root, container_stub)
 
     sm.update_config = _spy  # type: ignore[method-assign]
 
-    desired = DesiredSlotState(loaded=False, config={"model": {"context_size": 4096}})
+    desired = DesiredSlotState(loaded=False, config={"idle_timeout_s": 120})
     await sm.interface.apply(sid, desired)
     snap = await sm.interface.inspect(sid)
-    assert snap.config.get("model", {}).get("context_size") == 4096
+    assert snap.config.get("idle_timeout_s") == 120
     assert len(seen) == 1
 
     # Second apply of the same config is a no-op — update_config is not called.

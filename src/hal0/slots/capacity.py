@@ -230,20 +230,43 @@ def gtt_feasibility_verdict(
     return out
 
 
+def _slot_ctx_tokens(slot: Any, registry: Any) -> int | None:
+    """The window ``slot`` runs with: its profile's (ADR-0029), else ``None``.
+
+    Reads the slot's own TOML (id- or name-keyed) and resolves it through
+    :func:`hal0.providers.container.slot_effective_context`, the resolver the
+    launch path uses, so the KV estimate sizes the context actually served.
+    """
+    try:
+        from hal0.config import paths
+        from hal0.config.loader import _flatten_slot_toml, _read_toml
+        from hal0.providers.container import slot_effective_context
+        from hal0.slots.layout import slot_toml_path
+
+        name = str(getattr(slot, "name", "") or "")
+        key = getattr(slot, "slot_id", None) or name
+        if not key:
+            return None
+        raw = _read_toml(slot_toml_path(paths.slots_config_dir(), key))
+        ctx, _source = slot_effective_context(_flatten_slot_toml(raw, slot_name=name), registry)
+    except Exception:
+        return None
+    return int(ctx) if ctx else None
+
+
 def _ctx_tokens_for(model_meta: dict[str, Any] | None) -> int:
     """Resolve the effective context window (tokens) for a model.
 
-    Reads, in priority order: ``defaults.context_size`` (the launcher's
-    pinned n_ctx), ``metadata.context_length`` (GGUF arch max), falling
-    back to :data:`_DEFAULT_CTX_TOKENS`.
+    Reads, in priority order: ``ctx_tokens`` (a window the caller already
+    resolved — the slot profile's, or a feasibility row's), then
+    ``metadata.context_length`` (GGUF arch max), falling back to
+    :data:`_DEFAULT_CTX_TOKENS`.
     """
     if not isinstance(model_meta, dict):
         return _DEFAULT_CTX_TOKENS
-    defaults = model_meta.get("defaults")
-    if isinstance(defaults, dict):
-        cs = defaults.get("context_size")
-        if isinstance(cs, (int, float)) and cs > 0:
-            return int(cs)
+    explicit = model_meta.get("ctx_tokens")
+    if isinstance(explicit, (int, float)) and explicit > 0:
+        return int(explicit)
     meta = model_meta.get("metadata")
     meta = meta if isinstance(meta, dict) else model_meta
     cl = meta.get("context_length")
@@ -575,6 +598,9 @@ async def build_per_slot(
                 ctx_meta = m.model_dump() if hasattr(m, "model_dump") else None
             except Exception:
                 model_mb = 0.0
+        slot_ctx = _slot_ctx_tokens(s, registry)
+        if slot_ctx:
+            ctx_meta = {**(ctx_meta or {}), "ctx_tokens": slot_ctx}
         estimate_mb = estimate_file_size_kv_mb(model_mb, ctx_meta)
 
         # ── Container cgroup probe (path 2) ────────────────────────────────

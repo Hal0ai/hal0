@@ -104,7 +104,7 @@ def slot_root(tmp_hal0_home: str) -> Path:
                 'device = "gpu-vulkan"',
                 'provider = "llama-server"',
                 'runtime = "container"',
-                'profile = "vulkan-radv"',
+                'profile = "chat"',
                 "[model]",
                 'default = "qwen3-4b-q4_k_m"',
                 "",
@@ -452,7 +452,7 @@ def test_agent_hermes_is_no_longer_an_alias_for_agent(
             'device = "gpu-vulkan"',
             'provider = "llama-server"',
             'runtime = "container"',
-            'profile = "vulkan-radv"',
+            'profile = "chat"',
             "[model]",
             'default = "qwen3-4b-q4_k_m"',
         ],
@@ -583,52 +583,67 @@ def test_config_write_rejects_the_removed_enabled_key(
 # REMOVED_SLOT_KEYS case), which is route-tested and this was not.
 
 
-@pytest.mark.parametrize("key", ["mtp", "enable_thinking", "vision"])
-def test_config_write_rejects_model_owned_keys(
+_TUNING_BODIES = [
+    ({"mtp": True}, "mtp"),
+    ({"enable_thinking": True}, "enable_thinking"),
+    ({"vision": True}, "vision"),
+    ({"parallel": 2}, "parallel"),
+    ({"chat_template": "chatml"}, "chat_template"),
+    ({"model": {"default": "qwen3-4b-q4_k_m", "context_size": 4096}}, "[model].context_size"),
+    ({"model": {"default": "qwen3-4b-q4_k_m", "n_gpu_layers": 40}}, "[model].n_gpu_layers"),
+    ({"model": {"default": "qwen3-4b-q4_k_m", "rope_freq_base": 1e6}}, "[model].rope_freq_base"),
+    ({"server": {"extra_args": "-ctk q8_0"}}, "[server].extra_args"),
+]
+
+
+@pytest.mark.parametrize(("body", "key"), _TUNING_BODIES)
+def test_config_write_rejects_tuning_keys(
+    body: dict[str, Any],
     key: str,
     slot_root: Path,
     container_stub: dict[str, Any],
     isolated_client: TestClient,
 ) -> None:
-    """PUT /config 400s a model-owned capability key with the actionable code.
+    """PUT /config 400s a tuning key with the actionable code (ADR-0029 §5).
 
-    ``SlotConfig`` is ``extra="allow"``, so without the guard all three would
-    round-trip to slot TOML as inert debris while the caller believed the
-    capability took effect. The code has to be ``slot.model_owned_key_denied``
-    (not the generic ``validation.unknown_keys``) so the UI can point the
-    operator at the model editor.
+    The code has to be ``slot.tuning_key_denied`` (not the generic
+    ``validation.unknown_keys``) so the UI can point the operator at the
+    slot's profile.
     """
-    r = isolated_client.put("/api/slots/chat/config", json={key: True})
+    before = (slot_root / "chat.toml").read_text(encoding="utf-8")
+    r = isolated_client.put("/api/slots/chat/config", json=body)
     assert r.status_code == 400, r.text
     err = r.json()["error"]
-    assert err["code"] == "slot.model_owned_key_denied", err
-    assert key in err["message"]
+    assert err["code"] == "slot.tuning_key_denied", err
+    assert "profile" in err["message"]
     assert err["details"]["keys"] == [key]
     # The slot's TOML is untouched — the guard runs before any write.
-    cfg = isolated_client.get("/api/slots/chat/config").json()
-    assert key not in cfg
+    assert (slot_root / "chat.toml").read_text(encoding="utf-8") == before
 
 
-@pytest.mark.parametrize("key", ["mtp", "enable_thinking", "vision"])
-def test_create_slot_rejects_model_owned_keys(
+@pytest.mark.parametrize(("body", "key"), _TUNING_BODIES)
+def test_create_slot_rejects_tuning_keys(
+    body: dict[str, Any],
     key: str,
     slot_root: Path,
     container_stub: dict[str, Any],
     isolated_client: TestClient,
 ) -> None:
-    """POST /api/slots refuses to BIRTH a slot carrying a model-owned key."""
-    body = {
+    """POST /api/slots refuses to BIRTH a slot carrying a tuning key."""
+    create = {
         "name": "owned",
         "model": "qwen3-4b-q4_k_m",
         "device": "gpu-vulkan",
-        "profile": "vulkan-radv",
-        key: True,
+        "profile": "chat",
+        **{k: v for k, v in body.items() if k != "model"},
     }
-    r = isolated_client.post("/api/slots", json=body)
+    if "model" in body:
+        create["model"] = body["model"]
+    r = isolated_client.post("/api/slots", json=create)
     assert r.status_code == 400, r.text
     err = r.json()["error"]
-    assert err["code"] == "slot.model_owned_key_denied", err
-    assert err["details"]["keys"] == [key]
+    assert err["code"] == "slot.tuning_key_denied", err
+    assert key in err["details"]["keys"]
     # Nothing was created.
     assert not (slot_root / "owned.toml").exists()
 
@@ -649,7 +664,7 @@ def test_create_slot_without_autoload_persists_explicit_false(
         "name": "fresh",
         "model": "qwen3-4b-q4_k_m",
         "device": "gpu-vulkan",
-        "profile": "vulkan-radv",
+        "profile": "chat",
     }
     r = isolated_client.post("/api/slots", json=body)
     assert r.status_code == 201, r.text
@@ -657,8 +672,24 @@ def test_create_slot_without_autoload_persists_explicit_false(
     assert cfg.get("autoload") is False
 
 
-@pytest.mark.parametrize("key", ["mtp", "enable_thinking", "vision"])
-def test_patch_defaults_rejects_model_owned_keys_with_the_right_message(
+@pytest.mark.parametrize(
+    ("body", "key"),
+    [
+        # Top-level keys an operator reaches for...
+        ({"mtp": True}, "mtp"),
+        ({"enable_thinking": True}, "enable_thinking"),
+        ({"vision": True}, "vision"),
+        ({"parallel": 2}, "parallel"),
+        # ...and the [model] keys this route merges into.
+        # ``ctx_size`` is also a top-level tuning key, so it is named as such.
+        ({"ctx_size": 4096}, "ctx_size"),
+        ({"context_size": 4096}, "[model].context_size"),
+        ({"n_gpu_layers": 40}, "[model].n_gpu_layers"),
+        ({"rope_freq_base": 1e6}, "[model].rope_freq_base"),
+    ],
+)
+def test_patch_defaults_rejects_tuning_keys_with_the_right_message(
+    body: dict[str, Any],
     key: str,
     slot_root: Path,
     container_stub: dict[str, Any],
@@ -666,18 +697,18 @@ def test_patch_defaults_rejects_model_owned_keys_with_the_right_message(
 ) -> None:
     """PATCH /defaults names the PARTITION, not a spelling mistake.
 
-    This path ran only ``_reject_unknown_config_keys({"model": body})``, so a
-    stray model-owned key did 400 — but as ``validation.unknown_keys`` naming
-    ``model.mtp`` with a "check spelling" hint. The key is spelled perfectly;
-    it just belongs on the model, and the message has to say so or the operator
-    hunts for a typo that doesn't exist.
+    The key is spelled perfectly; it just belongs on the slot's profile
+    (ADR-0029), and the message has to say so or the operator hunts for a
+    typo that doesn't exist. The slot file is untouched.
     """
-    r = isolated_client.patch("/api/slots/chat/defaults", json={key: True})
+    before = (slot_root / "chat.toml").read_text(encoding="utf-8")
+    r = isolated_client.patch("/api/slots/chat/defaults", json=body)
     assert r.status_code == 400, r.text
     err = r.json()["error"]
-    assert err["code"] == "slot.model_owned_key_denied", err
-    assert "belong on the model" in err["message"]
-    assert err["details"]["keys"] == [key]
+    assert err["code"] == "slot.tuning_key_denied", err
+    assert "belong on a profile" in err["message"]
+    assert key in err["details"]["keys"]
+    assert (slot_root / "chat.toml").read_text(encoding="utf-8") == before
 
 
 def test_patch_defaults_still_rejects_a_real_typo_as_unknown(
@@ -703,17 +734,13 @@ def test_patch_defaults_accepts_a_real_default(
     container_stub: dict[str, Any],
     isolated_client: TestClient,
 ) -> None:
-    """Sanity floor: the added guard didn't break the happy path.
-
-    ``ctx_size`` is the documented legacy alias and folds to ``context_size``
-    on disk (#585).
-    """
-    r = isolated_client.patch("/api/slots/chat/defaults", json={"ctx_size": 4096})
+    """Sanity floor: the guards didn't break the happy path — rebinding the
+    slot's model is what this route is for, and ``[model]`` holds only it."""
+    r = isolated_client.patch("/api/slots/chat/defaults", json={"default": "qwen3-8b"})
     assert r.status_code == 200, r.text
     cfg = isolated_client.get("/api/slots/chat/config").json()
-    assert cfg["model"]["context_size"] == 4096
-    assert "ctx_size" not in cfg["model"]
-    assert cfg["model"]["default"] == "qwen3-4b-q4_k_m", "sibling [model] keys survive"
+    assert cfg["model"] == {"default": "qwen3-8b"}
+    assert cfg["profile"] == "chat", "a model swap keeps the slot's profile"
 
 
 def test_delete_forwards_force_query_param(
@@ -1116,7 +1143,7 @@ def test_create_slot_priority_out_of_range_rejected(
         "name": "badprio",
         "model": "qwen3-4b-q4_k_m",
         "device": "gpu-vulkan",
-        "profile": "vulkan-radv",
+        "profile": "chat",
         "priority": 101,
     }
     r = isolated_client.post("/api/slots", json=body)
@@ -1710,49 +1737,28 @@ def test_synthetic_composite_slot_serving_when_model_loaded(
     assert by_name["hal0"]["status"] == "serving"
 
 
-def test_patch_defaults_preserves_model_default(
+def test_patch_defaults_preserves_slot_fields(
     slot_root: Path,
     isolated_client: TestClient,
 ) -> None:
     """Regression: the slot-edit Save's ``PATCH /defaults`` must not wipe the
-    model name.
+    rest of the slot.
 
-    The dashboard edit drawer saves ctx_size / n_gpu_layers via
-    ``PATCH /api/slots/{name}/defaults`` with a partial ``[model]`` body.
-    A shallow merge replaced the whole ``[model]`` table, silently dropping
-    ``[model].default`` — so after a restart the slot had no resolvable model
-    and the Start button became a silent no-op. The partial update must touch
-    only the keys it carries.
+    A shallow merge once replaced the whole ``[model]`` table, silently
+    dropping ``[model].default``. The partial update touches only the keys it
+    carries: the model swap lands and every other slot field survives.
     """
-    # Sanity: the seeded slot starts with a model default.
     before = isolated_client.get("/api/slots/chat/config")
     assert before.status_code == 200, before.text
     assert before.json()["model"]["default"] == "qwen3-4b-q4_k_m"
 
-    r = isolated_client.patch("/api/slots/chat/defaults", json={"ctx_size": 8192})
+    r = isolated_client.patch("/api/slots/chat/defaults", json={"default": "qwen3-8b"})
     assert r.status_code == 200, r.text
 
     after = isolated_client.get("/api/slots/chat/config").json()
-    # The ctx value lands; #585 normalizes the alias to canonical context_size.
-    assert after["model"]["context_size"] == 8192
-    # The model name survived the partial defaults write.
-    assert after["model"]["default"] == "qwen3-4b-q4_k_m"
-
-
-def test_patch_defaults_canonicalizes_ctx_size_key(
-    slot_root: Path,
-    isolated_client: TestClient,
-) -> None:
-    """#585: the dashboard writes ``ctx_size``; it must persist as the canonical
-    ``context_size`` with no lingering alias, so the container load path (which
-    reads context_size) actually honors a ctx set from the UI.
-    """
-    r = isolated_client.patch("/api/slots/chat/defaults", json={"ctx_size": 32768})
-    assert r.status_code == 200, r.text
-
-    model = isolated_client.get("/api/slots/chat/config").json()["model"]
-    assert model["context_size"] == 32768
-    assert "ctx_size" not in model
+    assert after["model"]["default"] == "qwen3-8b"
+    for key in ("name", "port", "device", "provider", "profile"):
+        assert after[key] == before.json()[key], key
 
 
 # ── config-field enrichment (ported from the retired enrichment suite) ──────
@@ -1935,7 +1941,8 @@ def test_list_slots_exposes_n_gpu_layers(
     container_stub: dict[str, Any],
     isolated_client: TestClient,
 ) -> None:
-    """A slot's [model].n_gpu_layers rides along in the payload."""
+    """A slot's top-level ``n_gpu_layers`` (placement, ADR-0029) rides along
+    in the payload."""
     _seed_slot_toml(
         tmp_hal0_home,
         "chat",
@@ -1944,9 +1951,9 @@ def test_list_slots_exposes_n_gpu_layers(
             "port = 8081",
             'device = "gpu-rocm"',
             'type = "llm"',
+            "n_gpu_layers = 99",
             "[model]",
             'default = "qwen3"',
-            "n_gpu_layers = 99",
         ],
     )
     r = isolated_client.get("/api/slots")
@@ -1997,21 +2004,15 @@ def test_list_slots_omits_enable_thinking_even_when_pre_migration_debris_present
 # tracking) can leave untouched fields alone.
 
 
-def test_list_slots_exposes_idle_timeout_workers_llamacpp_args(
+def test_list_slots_exposes_idle_timeout_and_no_removed_tuning_fields(
     tmp_hal0_home: str,
     container_stub: dict[str, Any],
     isolated_client: TestClient,
 ) -> None:
-    """idle_timeout_s / workers / llamacpp_args ride along on /api/slots.
-
-    The on-disk shape is:
-      - ``workers`` + ``idle_timeout_s`` are flat top-level SlotConfig
-        fields (hoisted from the [slot] TOML table by the loader).
-      - ``llamacpp_args`` is the dashboard's wire name; the on-disk field
-        lives under ``[server].extra_args`` (ServerConfig). The list
-        payload maps to the dashboard's key so the drawer can seed
-        directly.
-    """
+    """``idle_timeout_s`` rides along on /api/slots; the removed slot tuning
+    fields (ADR-0029 §6: ``workers``, ``llamacpp_args``, ``rope_freq_base``,
+    ``ctx_max``, ``chat_template``, ``parallel``) are gone from the payload —
+    the profile owns the tune."""
     _seed_slot_toml(
         tmp_hal0_home,
         "chat",
@@ -2020,148 +2021,25 @@ def test_list_slots_exposes_idle_timeout_workers_llamacpp_args(
             "port = 8081",
             'device = "gpu-rocm"',
             'type = "llm"',
-            "workers = 4",
+            'profile = "chat"',
             "idle_timeout_s = 1200",
             "[model]",
             'default = "qwen3"',
-            "[server]",
-            'extra_args = "--threads 6 --no-mmap"',
         ],
     )
     r = isolated_client.get("/api/slots")
     assert r.status_code == 200, r.text
-    by_name = {e["name"]: e for e in r.json()}
-    primary = by_name["chat"]
+    primary = {e["name"]: e for e in r.json()}["chat"]
     assert primary["idle_timeout_s"] == 1200
-    assert primary["workers"] == 4
-    assert primary["llamacpp_args"] == "--threads 6 --no-mmap"
-
-
-def test_list_slots_llamacpp_args_none_when_server_table_absent(
-    tmp_hal0_home: str,
-    container_stub: dict[str, Any],
-    isolated_client: TestClient,
-) -> None:
-    """Slot with no [server] table → payload's llamacpp_args is null.
-
-    Mirror the existing enable_thinking behaviour: absent on-disk → null
-    in the wire payload (effective unset), not omitted. The dashboard
-    uses null to skip sending the field on Save.
-    """
-    _seed_slot_toml(
-        tmp_hal0_home,
-        "chat",
-        [
-            'name = "chat"',
-            "port = 8081",
-            'device = "gpu-rocm"',
-            'type = "llm"',
-            "workers = 2",
-            "idle_timeout_s = 600",
-            "[model]",
-            'default = "qwen3"',
-        ],
-    )
-    r = isolated_client.get("/api/slots")
-    by_name = {e["name"]: e for e in r.json()}
-    primary = by_name["chat"]
-    assert primary["idle_timeout_s"] == 600
-    assert primary["workers"] == 2
-    assert primary["llamacpp_args"] is None
-
-
-# ── Issue #548: rope_freq_base ───────────────────────────────────────────────
-#
-# rope_freq_base is a [model] float field. The list payload must expose it so
-# the Edit drawer can dirty-track and avoid clobbering the on-disk value.
-# The PUT round-trip must persist it through update_config's deep merge.
-
-
-def test_list_slots_exposes_rope_freq_base(
-    tmp_hal0_home: str,
-    container_stub: dict[str, Any],
-    isolated_client: TestClient,
-) -> None:
-    """rope_freq_base set on disk → exposed in /api/slots payload."""
-    _seed_slot_toml(
-        tmp_hal0_home,
-        "chat",
-        [
-            'name = "chat"',
-            "port = 8081",
-            'device = "gpu-rocm"',
-            'type = "llm"',
-            "[model]",
-            'default = "qwen3"',
-            "rope_freq_base = 500000.0",
-        ],
-    )
-    r = isolated_client.get("/api/slots")
-    assert r.status_code == 200, r.text
-    by_name = {e["name"]: e for e in r.json()}
-    primary = by_name["chat"]
-    assert primary["rope_freq_base"] == 500000.0
-
-
-def test_list_slots_rope_freq_base_null_when_absent(
-    tmp_hal0_home: str,
-    container_stub: dict[str, Any],
-    isolated_client: TestClient,
-) -> None:
-    """rope_freq_base absent on disk → payload carries null (not 0.0)."""
-    _seed_slot_toml(
-        tmp_hal0_home,
-        "chat",
-        [
-            'name = "chat"',
-            "port = 8081",
-            'device = "gpu-rocm"',
-            'type = "llm"',
-            "[model]",
-            'default = "qwen3"',
-        ],
-    )
-    r = isolated_client.get("/api/slots")
-    by_name = {e["name"]: e for e in r.json()}
-    primary = by_name["chat"]
-    assert primary["rope_freq_base"] is None
-
-
-def test_put_config_rope_freq_base_roundtrip(
-    tmp_hal0_home: str,
-    container_stub: dict[str, Any],
-    isolated_client: TestClient,
-) -> None:
-    """PUT /api/slots/{name}/config with model.rope_freq_base persists the value
-    and leaves the model default key intact (deep-merge, not table replacement).
-    """
-    _seed_slot_toml(
-        tmp_hal0_home,
-        "chat",
-        [
-            'name = "chat"',
-            "port = 8081",
-            'device = "gpu-rocm"',
-            'type = "llm"',
-            "[model]",
-            'default = "qwen3-4b"',
-        ],
-    )
-    r = isolated_client.put(
-        "/api/slots/chat/config",
-        json={"model": {"rope_freq_base": 1000000.0}},
-    )
-    assert r.status_code == 200, r.text
-
-    # The list payload should now reflect the written value.
-    r2 = isolated_client.get("/api/slots")
-    by_name = {e["name"]: e for e in r2.json()}
-    assert by_name["chat"]["rope_freq_base"] == 1000000.0
-
-    # Deep-merge must not have wiped the model default key.
-    cfg = isolated_client.get("/api/slots/chat/config").json()
-    assert cfg["model"]["rope_freq_base"] == 1000000.0
-    assert cfg["model"]["default"] == "qwen3-4b"
+    for removed in (
+        "workers",
+        "llamacpp_args",
+        "rope_freq_base",
+        "ctx_max",
+        "chat_template",
+        "parallel",
+    ):
+        assert removed not in primary, removed
 
 
 # ── Per-slot endpoint enrichment ───────────────────────────────────────────
@@ -2194,17 +2072,15 @@ def test_get_slot_by_name_matches_get_slot(
     assert by_name.json()["coresident_group"] == "npu-flm-trio"
 
 
-class _FakeCtxDefaults:
-    def __init__(self, context_size: int | None) -> None:
-        self.context_size = context_size
-
-
 class _FakeCtxModel:
-    def __init__(self, context_size: int | None) -> None:
-        self.defaults = _FakeCtxDefaults(context_size)
+    """A registry row whose file declares ``native`` tokens of context."""
+
+    def __init__(self, native: int | None) -> None:
+        self._native = native
 
     def model_dump(self) -> dict[str, Any]:
-        return {"defaults": {"context_size": self.defaults.context_size}, "metadata": {}}
+        md = {"context_length": self._native} if self._native else {}
+        return {"metadata": md}
 
 
 class _FakeCtxRegistry:
@@ -2217,19 +2093,14 @@ class _FakeCtxRegistry:
         return self._models[model_id]
 
 
-def test_get_slot_resolves_ctx_max_to_effective_window(
-    tmp_hal0_home: str,
-    container_stub: dict[str, Any],
-    isolated_client: TestClient,
-    isolated_app: FastAPI,
-) -> None:
-    """#1835: GET /api/slots/{name} must re-resolve ``ctx_max`` to the
-    EFFECTIVE window (#1788/#1802's fix), not echo the raw slot-TOML
-    ceiling verbatim. #1802 fixed ``GET /api/slots`` (list) only; this is
-    the detail-route regression that survived it.
-    """
+#: Not in the curated catalogue, so an unknown native window really is unknown
+#: (the resolver backfills a registry row without metadata from the catalogue).
+_CTX_MODEL = "uncatalogued-ctx-test-model"
+
+
+def _seed_ctx_slot(home: str, *, profile: str, slot_type: str = "llm") -> None:
     _seed_slot_toml(
-        tmp_hal0_home,
+        home,
         "chat",
         [
             'name = "chat"',
@@ -2237,37 +2108,73 @@ def test_get_slot_resolves_ctx_max_to_effective_window(
             'device = "gpu-vulkan"',
             'provider = "llama-server"',
             'runtime = "container"',
-            'profile = "vulkan-radv"',
+            f'type = "{slot_type}"',
+            f'profile = "{profile}"',
             "[model]",
-            'default = "qwen3-4b"',
-            "context_size = 65536",
+            f'default = "{_CTX_MODEL}"',
         ],
     )
-    # The registered model's declared window (8000) is smaller than the
-    # slot's raw TOML ceiling (65536) — the EFFECTIVE window must win.
-    isolated_app.state.model_registry = _FakeCtxRegistry({"qwen3-4b": _FakeCtxModel(8000)})
-
-    r = isolated_client.get("/api/slots/chat")
-    assert r.status_code == 200, r.text
-    body = r.json()
-    assert body["ctx_max"] == 8000, (
-        f"detail route must report the effective window, not the raw TOML "
-        f"ceiling; got {body['ctx_max']!r}"
-    )
 
 
-def test_get_slot_skips_ctx_max_resolution_for_non_llm_slot(
+@pytest.mark.parametrize(
+    ("profile", "native", "expected"),
+    [
+        # The profile sets ctx_size: it wins outright.
+        ("agent", 8000, (65536, "profile")),
+        # No profile window: the model's native window...
+        ("chat", 8000, (8000, "native")),
+        # ...dense-capped at 32768...
+        ("chat", 262144, (32768, "native")),
+        # ...else the 8192 fallback when the file declares none.
+        ("chat", None, (8192, "fallback")),
+    ],
+)
+def test_slot_detail_and_list_carry_ctx_effective_and_source(
+    profile: str,
+    native: int | None,
+    expected: tuple[int, str],
     tmp_hal0_home: str,
     container_stub: dict[str, Any],
     isolated_client: TestClient,
     isolated_app: FastAPI,
 ) -> None:
-    """#1859: mirror of the effective-window test above, but for a "tts"
-    slot — a kind with no real context-window concept. The raw TOML
-    ceiling (65536) must pass through untouched, not get re-resolved down
-    to the registry model's declared window (8000) the way an "llm" slot's
-    would — proving the llama-only resolver is skipped, not coincidentally
-    matching."""
+    """ADR-0029 §6: slot responses carry ``ctx_effective`` and ``ctx_source``
+    from the one resolver the launch path uses — on the detail route and the
+    list route alike."""
+    _seed_ctx_slot(tmp_hal0_home, profile=profile)
+    isolated_app.state.model_registry = _FakeCtxRegistry({_CTX_MODEL: _FakeCtxModel(native)})
+
+    detail = isolated_client.get("/api/slots/chat")
+    assert detail.status_code == 200, detail.text
+    body = detail.json()
+    assert (body["ctx_effective"], body["ctx_source"]) == expected
+    assert "ctx_max" not in body
+
+    listed = {e["name"]: e for e in isolated_client.get("/api/slots").json()}["chat"]
+    assert (listed["ctx_effective"], listed["ctx_source"]) == expected
+
+
+def test_slot_naming_a_missing_profile_has_no_effective_window(
+    tmp_hal0_home: str,
+    container_stub: dict[str, Any],
+    isolated_client: TestClient,
+    isolated_app: FastAPI,
+) -> None:
+    """A missing profile refuses to launch, so there is no window to report."""
+    _seed_ctx_slot(tmp_hal0_home, profile="no-such-profile")
+    isolated_app.state.model_registry = _FakeCtxRegistry({_CTX_MODEL: _FakeCtxModel(8000)})
+    body = isolated_client.get("/api/slots/chat").json()
+    assert body["ctx_effective"] is None
+    assert body["ctx_source"] is None
+
+
+def test_non_llm_slot_carries_no_context_window(
+    tmp_hal0_home: str,
+    container_stub: dict[str, Any],
+    isolated_client: TestClient,
+    isolated_app: FastAPI,
+) -> None:
+    """#1859: a TTS slot has no context-window concept — no ctx fields."""
     _seed_slot_toml(
         tmp_hal0_home,
         "voice",
@@ -2278,19 +2185,15 @@ def test_get_slot_skips_ctx_max_resolution_for_non_llm_slot(
             'provider = "kokoro"',
             'runtime = "container"',
             'type = "tts"',
+            'profile = "kokoro"',
             "[model]",
             'default = "kokoro-v1"',
-            "context_size = 65536",
         ],
     )
     isolated_app.state.model_registry = _FakeCtxRegistry({"kokoro-v1": _FakeCtxModel(8000)})
-
-    r = isolated_client.get("/api/slots/voice")
-    assert r.status_code == 200, r.text
-    body = r.json()
-    assert body["ctx_max"] == 65536, (
-        f"a non-llm slot's raw ctx ceiling must not be re-resolved; got {body['ctx_max']!r}"
-    )
+    body = isolated_client.get("/api/slots/voice").json()
+    assert "ctx_effective" not in body
+    assert "ctx_source" not in body
 
 
 def test_get_slot_includes_config_drift_when_requested(

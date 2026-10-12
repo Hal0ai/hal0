@@ -247,8 +247,12 @@ async def _estimate_incoming_footprint_mb(
     model_id: str,
     *,
     model_info: dict[str, Any] | None = None,
+    slot_name: str | None = None,
 ) -> float:
     """Best-effort footprint (MiB) for a model that is NOT yet resident.
+
+    ``slot_name``: the slot about to load it. Its profile sets the context
+    window (ADR-0029), so the KV share is sized from that, not the model.
 
     Reuses :func:`hal0.slots.capacity.estimate_file_size_kv_mb` — registry
     file size plus the coarse KV-cache estimate — the exact formula
@@ -286,7 +290,34 @@ async def _estimate_incoming_footprint_mb(
         model_mb = 0.0
     if model_mb <= 0:
         return 0.0
+    if slot_name:
+        ctx = await _slot_ctx_tokens(host, slot_name, info)
+        if ctx:
+            info = {**info, "ctx_tokens": ctx}
     return estimate_file_size_kv_mb(model_mb, info)
+
+
+class _ResolvedModel:
+    """A one-model registry over an already-resolved ``model_info``."""
+
+    def __init__(self, info: dict[str, Any]) -> None:
+        self._info = info
+
+    def get(self, _model_id: str) -> dict[str, Any]:
+        return self._info
+
+
+async def _slot_ctx_tokens(
+    host: PreloadEvictHost, slot_name: str, info: dict[str, Any]
+) -> int | None:
+    from hal0.providers.container import slot_effective_context
+
+    try:
+        cfg = await host._load_slot_config(slot_name)
+        ctx, _source = slot_effective_context(cfg, _ResolvedModel(info))
+    except Exception:
+        return None
+    return int(ctx) if ctx else None
 
 
 async def _gather_candidates(host: PreloadEvictHost, *, exclude: str) -> list[CandidateSlot]:
@@ -386,7 +417,9 @@ async def admit(
         yield
         return
 
-    needed_mb = await _estimate_incoming_footprint_mb(host, model_id, model_info=model_info)
+    needed_mb = await _estimate_incoming_footprint_mb(
+        host, model_id, model_info=model_info, slot_name=slot_name
+    )
     if needed_mb <= 0:
         log.debug(
             "slot.preload_evict_unknown_footprint",

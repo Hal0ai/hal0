@@ -186,41 +186,48 @@ async def test_extraction_window_helper_no_ops_without_hindsight_client() -> Non
 
 
 class _FakeSlotManager:
-    """One enabled llm slot named ``utility`` with model ``small``."""
+    """One enabled llm slot named ``utility`` with model ``small``.
 
-    def __init__(self, ctx: int) -> None:
-        self._ctx = ctx
+    ADR-0029: the slot carries no window of its own. ``profile`` names the
+    profile whose ``ctx_size`` sets it; with no profile the slot runs the
+    ``chat`` seed (no ``ctx_size``), so the window is the model's native one.
+    """
+
+    def __init__(self, profile: str | None = None) -> None:
+        self._profile = profile
 
     async def iter_configs(self) -> list[dict[str, Any]]:
-        return [
-            {
-                "name": "utility",
-                "type": "llm",
-                "model": {"default": "small"},
-                "ctx_size": self._ctx,
-                "device": "cpu",
-            }
-        ]
+        cfg: dict[str, Any] = {
+            "name": "utility",
+            "type": "llm",
+            "model": {"default": "small"},
+            "device": "cpu",
+        }
+        if self._profile:
+            cfg["profile"] = self._profile
+        return [cfg]
 
 
 class _FakeModelEntry:
-    def __init__(self, model_id: str, ctx: int) -> None:
+    def __init__(self, model_id: str, native_ctx: int) -> None:
         self.name = model_id
-        self._ctx = ctx
+        self._native_ctx = native_ctx
 
     def model_dump(self) -> dict[str, Any]:
-        return {"defaults": {"context_size": self._ctx}, "metadata": {}}
+        return {"defaults": None, "metadata": {"context_length": self._native_ctx}}
 
 
 class _FakeModelRegistry:
-    def __init__(self, ctx: int) -> None:
-        self._ctx = ctx
+    """A registry whose every model has this native window (``metadata.context_length``)."""
+
+    def __init__(self, native_ctx: int) -> None:
+        self._native_ctx = native_ctx
 
     def has(self, model_id: str) -> bool:
         return True
 
     def get(self, model_id: str) -> _FakeModelEntry:
-        return _FakeModelEntry(model_id, self._ctx)
+        return _FakeModelEntry(model_id, self._native_ctx)
 
 
 class _RecordingUpstreams:
@@ -240,11 +247,13 @@ class _RecordingUpstreams:
         return []
 
 
-def _real_seam_app(ctx: int) -> tuple[FastAPI, StubHindsightWrapper, _RecordingUpstreams]:
+def _real_seam_app(
+    native_ctx: int, *, profile: str | None = None
+) -> tuple[FastAPI, StubHindsightWrapper, _RecordingUpstreams]:
     stub = StubHindsightWrapper()
     app = _build_app(stub)
-    app.state.slot_manager = _FakeSlotManager(ctx)
-    app.state.model_registry = _FakeModelRegistry(ctx)
+    app.state.slot_manager = _FakeSlotManager(profile)
+    app.state.model_registry = _FakeModelRegistry(native_ctx)
     upstreams = _RecordingUpstreams()
     app.state.upstreams = upstreams
     app.state.upstream_models = {}
@@ -320,3 +329,64 @@ def test_real_preflight_passes_a_healthy_slot_through_to_the_wrapper() -> None:
     assert r.status_code == 200, r.text
     assert len(stub.add_calls) == 1
     assert upstreams.fetch_calls == []
+
+
+def _write_profile(home: str, name: str, ctx_size: int) -> None:
+    from pathlib import Path
+
+    path = Path(home) / "etc" / "hal0" / "profiles.toml"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(f'[profile.{name}]\nflags = ""\nctx_size = {ctx_size}\n', encoding="utf-8")
+
+
+def test_real_preflight_blocks_when_the_slot_profile_ctx_size_is_below_floor(
+    tmp_hal0_home: str,
+) -> None:
+    """The profile's ``ctx_size`` is the binding window even when the model's
+    native window is large: a 131072-token model under a 4096-token profile
+    resolves to 4096 and the 503 says so."""
+    _write_profile(tmp_hal0_home, "tiny-ctx", 4096)
+    app, stub, _ = _real_seam_app(131072, profile="tiny-ctx")
+
+    with TestClient(app) as c:
+        r = c.post("/api/memory/add", json={"text": "hello"})
+
+    assert r.status_code == 503, r.text
+    message = r.json()["error"]["message"]
+    assert "4,096" in message
+    assert "ctx_size" in message
+    assert "profile" in message
+    assert "[model].context_size" not in message
+    assert "defaults.context_size" not in message
+    assert stub.add_calls == []
+
+
+def test_real_preflight_passes_when_the_profile_ctx_size_clears_a_small_native_window(
+    tmp_hal0_home: str,
+) -> None:
+    """A profile ``ctx_size`` above the floor wins over a small native window."""
+    _write_profile(tmp_hal0_home, "roomy-ctx", 32768)
+    app, stub, _ = _real_seam_app(4096, profile="roomy-ctx")
+
+    with TestClient(app) as c:
+        r = c.post("/api/memory/add", json={"text": "hello"})
+
+    assert r.status_code == 200, r.text
+    assert len(stub.add_calls) == 1
+
+
+def test_real_preflight_names_the_model_window_when_the_profile_sets_none() -> None:
+    """No profile ``ctx_size`` -> the native window binds, and the message
+    points at the model / the profile rather than a slot or model ceiling."""
+    app, stub, _ = _real_seam_app(4096)
+
+    with TestClient(app) as c:
+        r = c.post("/api/memory/add", json={"text": "hello"})
+
+    assert r.status_code == 503, r.text
+    message = r.json()["error"]["message"]
+    assert "4,096" in message
+    assert "sets no ctx_size" in message
+    assert "[model].context_size" not in message
+    assert "defaults.context_size" not in message
+    assert stub.add_calls == []

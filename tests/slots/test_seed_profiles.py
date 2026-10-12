@@ -1,28 +1,31 @@
-"""Seed profile catalog validation.
+"""Seed profile catalog validation (ADR-0029).
 
-Per docs/superpowers/specs/2026-07-20-seeded-profile-rework-design.md:
-- Every profile must have: name (implicit via [profile.<name>]), flags, intent.
-- `device_class` field is REMOVED (slot owns device).
-- `flags` must NOT contain SLOT_HARDWARE_FLAGS or operational flags.
-- Profile names match the catalog: 10 shipped SEEDS (the minimal core, one
-  per runtime family plus the generic llama-server workloads) plus the 5
-  DEMOTED definitions parked in legacy_seed_profiles.toml. Both files ship,
-  both must honour the same flag-ownership invariants, so every check below
-  runs over the union.
+A seed is a complete, code-shipped tune: free ``flags`` plus the typed
+``ctx_size`` / ``enable_thinking`` / ``vision`` / ``mtp`` / ``runner`` fields.
+It never carries placement (the slot's typed fields), hal0-managed flags,
+model-fact flags (``--jinja``, ``--chat-template*``, ``--mmproj*``),
+``--spec-draft-device`` (the slot's device decides it) or the pre-ADR-0029
+hint fields (``device_class``, ``backend``, ``quant``, boolean ``mtp``).
+
+The catalog is one file (``seed_profiles.toml``); the demoted-seed file and
+its first-reference adoption are gone. The seed set covers every slot hal0
+ships, so the ``agent`` / ``utility`` / ``coding`` workloads are seeds.
 """
 
 from __future__ import annotations
 
+import shlex
 import tomllib
 from pathlib import Path
 
 import pytest
 
-_DATA_DIR = Path(__file__).resolve().parents[2] / "src/hal0/config/data"
+_REPO = Path(__file__).resolve().parents[2]
+_DATA_DIR = _REPO / "src/hal0/config/data"
 SEED_PROFILES_PATH = _DATA_DIR / "seed_profiles.toml"
-LEGACY_SEED_PROFILES_PATH = _DATA_DIR / "legacy_seed_profiles.toml"
+INSTALLER_SLOTS_DIR = _REPO / "installer/etc-hal0/slots"
 
-# Per spec §4.1: hardware + operational flags removed from every profile.
+# Placement + operational flags: the slot owns these, never a seed.
 SLOT_HARDWARE_FLAG_FRAGMENTS = (
     "-ngl ",
     "--n-gpu-layers",
@@ -48,120 +51,173 @@ OPERATIONAL_FLAG_FRAGMENTS = (
     "--no-mmap",
 )
 
-CORE_SEED_PROFILES = [
-    "profile.chat",
-    "profile.embedding",
-    "profile.reranking",
-    "profile.cpu-chat",
-    "profile.flm",
-    "profile.kokoro",
-    "profile.qwen3-tts",
-    "profile.moonshine",
-    "profile.comfyui",
-    "profile.brain",
+#: The shipped seed catalogue. Pinned exactly: adding or renaming a seed is a
+#: deliberate change (installer slots and stacks name these).
+SEED_PROFILE_NAMES = [
+    "agent",
+    "brain",
+    "chat",
+    "coding",
+    "comfyui",
+    "cpu-chat",
+    "embedding",
+    "flm",
+    "kokoro",
+    "moonshine",
+    "qwen3-tts",
+    "reranking",
+    "utility",
 ]
 
-#: Demoted out of the seed catalog by the profile-system overhaul; still
-#: shipped (legacy_seed_profiles.toml) and injected once into an existing
-#: install as ordinary custom profiles.
-LEGACY_SEED_PROFILES = [
-    "profile.chat-long-context",
-    "profile.dense",
-    "profile.moe",
-    "profile.thinking",
-    "profile.coding",
-]
-
-ALL_SEED_PROFILES = CORE_SEED_PROFILES + LEGACY_SEED_PROFILES
-
-
-def _load(path: Path) -> dict:
-    raw = tomllib.loads(path.read_text())
-    # TOML dotted keys like [profile.chat] create nested tables:
-    # {"profile": {"chat": {...}, "dense": {...}, ...}}
-    # Prefix keys back so callers can use "profile.chat" consistently.
-    inner = raw.get("profile", {})
-    return {f"profile.{k}": v for k, v in inner.items()}
+#: Keys a seed table may carry — exactly :class:`ProfileConfig`'s fields.
+ALLOWED_KEYS = {
+    "flags",
+    "ctx_size",
+    "enable_thinking",
+    "vision",
+    "mtp",
+    "runner",
+    "cloned_from",
+    "intent",
+}
 
 
-def _load_seed_profiles() -> dict:
-    """Both shipped definition files, merged — the flag invariants apply to
-    every profile hal0 ships, seed or demoted."""
-    return {**_load(SEED_PROFILES_PATH), **_load(LEGACY_SEED_PROFILES_PATH)}
+def _load() -> dict[str, dict]:
+    raw = tomllib.loads(SEED_PROFILES_PATH.read_text())
+    return dict(raw.get("profile", {}))
 
 
-def test_seed_profiles_loads() -> None:
-    """Catalog parses as TOML and contains [profile.*] tables."""
-    profiles = _load(SEED_PROFILES_PATH)
-    assert len(profiles) >= 10, f"expected ≥10 profiles, got {len(profiles)}: {list(profiles)}"
+def _flags(name: str) -> str:
+    return str(_load()[name].get("flags", ""))
 
 
-def test_seed_catalog_is_the_minimal_core() -> None:
-    names = sorted(_load(SEED_PROFILES_PATH))
-    assert names == sorted(CORE_SEED_PROFILES), f"seed catalog drifted: {names}"
+def test_seed_catalog_is_pinned() -> None:
+    assert sorted(_load()) == SEED_PROFILE_NAMES
 
 
-def test_legacy_catalog_holds_the_demoted_five() -> None:
-    names = sorted(_load(LEGACY_SEED_PROFILES_PATH))
-    assert names == sorted(LEGACY_SEED_PROFILES), f"legacy catalog drifted: {names}"
+def test_the_demoted_seed_file_is_gone() -> None:
+    """ADR-0029 §3: ``legacy_seed_profiles.toml`` is deleted with adoption."""
+    assert not (_DATA_DIR / "legacy_seed_profiles.toml").exists()
 
 
-def test_the_two_files_are_disjoint() -> None:
-    assert not set(_load(SEED_PROFILES_PATH)) & set(_load(LEGACY_SEED_PROFILES_PATH))
+def test_runtime_catalogue_matches_the_shipped_file() -> None:
+    from hal0.config.schema import SEED_PROFILES
+
+    assert sorted(SEED_PROFILES) == SEED_PROFILE_NAMES
 
 
-@pytest.mark.parametrize("profile_name", ALL_SEED_PROFILES)
-def test_every_seed_profile_is_device_agnostic(profile_name: str) -> None:
-    profiles = _load_seed_profiles()
-    assert profile_name in profiles, f"missing {profile_name}"
-    assert "device_class" not in profiles[profile_name], (
-        f"{profile_name} should be device-agnostic; the slot owns device "
-        "per seeded-profile-rework §4.1"
-    )
+@pytest.mark.parametrize("name", SEED_PROFILE_NAMES)
+def test_seed_carries_only_profile_fields(name: str) -> None:
+    """No ``device_class`` / ``backend`` / ``quant`` hint, nothing unknown."""
+    keys = set(_load()[name])
+    assert keys <= ALLOWED_KEYS, f"{name} carries non-profile keys {sorted(keys - ALLOWED_KEYS)}"
 
 
-@pytest.mark.parametrize("profile_name", ALL_SEED_PROFILES)
-def test_all_profiles_have_no_hardware_flags(profile_name: str) -> None:
-    profiles = _load_seed_profiles()
-    flags = profiles[profile_name].get("flags", "")
+@pytest.mark.parametrize("name", SEED_PROFILE_NAMES)
+def test_seed_validates_as_profile_config(name: str) -> None:
+    from hal0.config.schema import ProfileConfig
+
+    cfg = ProfileConfig.model_validate(_load()[name])
+    assert cfg.vision in ("auto", "off")
+    assert cfg.mtp in ("auto", "off")
+
+
+@pytest.mark.parametrize("name", SEED_PROFILE_NAMES)
+def test_seed_mtp_is_the_profile_switch_not_a_bool(name: str) -> None:
+    raw = _load()[name]
+    if "mtp" in raw:
+        assert raw["mtp"] in ("auto", "off"), (
+            f"{name}: mtp must be 'auto'/'off', got {raw['mtp']!r}"
+        )
+
+
+@pytest.mark.parametrize("name", SEED_PROFILE_NAMES)
+def test_seed_passes_the_profile_write_screen(name: str) -> None:
+    """A seed would be accepted by the same screen every profile save runs."""
+    from hal0.profiles import screen_profile_flags
+
+    screen_profile_flags(_flags(name))
+
+
+@pytest.mark.parametrize("name", SEED_PROFILE_NAMES)
+def test_seed_has_no_hardware_flags(name: str) -> None:
+    flags = _flags(name)
     for fragment in SLOT_HARDWARE_FLAG_FRAGMENTS:
-        assert fragment not in flags, (
-            f"{profile_name} flags contain SLOT_HARDWARE flag {fragment!r}: {flags}"
-        )
+        assert fragment not in flags, f"{name} flags contain hardware flag {fragment!r}: {flags}"
 
 
-@pytest.mark.parametrize("profile_name", ALL_SEED_PROFILES)
-def test_all_profiles_have_no_operational_flags(profile_name: str) -> None:
-    profiles = _load_seed_profiles()
-    flags = profiles[profile_name].get("flags", "")
+@pytest.mark.parametrize("name", SEED_PROFILE_NAMES)
+def test_seed_has_no_operational_flags(name: str) -> None:
+    flags = _flags(name)
     for fragment in OPERATIONAL_FLAG_FRAGMENTS:
-        assert fragment not in flags, (
-            f"{profile_name} flags contain operational flag {fragment!r}: {flags}"
-        )
+        assert fragment not in flags, f"{name} flags contain operational flag {fragment!r}: {flags}"
 
 
-@pytest.mark.parametrize("profile_name", ALL_SEED_PROFILES)
-def test_all_profiles_have_no_managed_or_hardware_flags(profile_name: str) -> None:
-    """§21.7 regression tripwire: a seed's flags must never carry a flag hal0
-    owns (managed denylist: --model/--ctx-size/-c/--host/--port/-ngl/--alias)
-    or a slot-hardware flag. Token-exact via the argv alias table, so
-    --model_path / --threads-batch never false-positive.
-    """
-    import shlex
-
-    from hal0.slots.argv import MANAGED_ARGS_DENYLIST, SLOT_HARDWARE_FLAGS, strip_managed_flags
-
-    profiles = _load_seed_profiles()
-    flags = str(profiles[profile_name].get("flags", ""))
-    _, removed = strip_managed_flags(
-        shlex.split(flags), denylist=MANAGED_ARGS_DENYLIST | SLOT_HARDWARE_FLAGS
+@pytest.mark.parametrize("name", SEED_PROFILE_NAMES)
+def test_seed_has_no_managed_hardware_or_model_fact_flags(name: str) -> None:
+    """Token-exact via the argv alias table (``--model_path`` / ``--threads-batch``
+    never false-positive)."""
+    from hal0.slots.argv import (
+        DERIVED_PLACEMENT_FLAGS,
+        MANAGED_ARGS_DENYLIST,
+        MODEL_FACT_FLAGS,
+        SLOT_HARDWARE_FLAGS,
+        strip_managed_flags,
     )
-    assert not removed, f"{profile_name} flags carry hal0-owned flag(s) {removed}: {flags}"
+
+    _, removed = strip_managed_flags(
+        shlex.split(_flags(name)),
+        denylist=MANAGED_ARGS_DENYLIST
+        | SLOT_HARDWARE_FLAGS
+        | MODEL_FACT_FLAGS
+        | DERIVED_PLACEMENT_FLAGS,
+    )
+    assert not removed, f"{name} flags carry flag(s) owned elsewhere {removed}"
 
 
-@pytest.mark.parametrize("profile_name", ALL_SEED_PROFILES)
-def test_all_profiles_have_intent(profile_name: str) -> None:
-    profiles = _load_seed_profiles()
-    assert "intent" in profiles[profile_name], f"{profile_name} missing intent"
-    assert isinstance(profiles[profile_name]["intent"], str)
-    assert profiles[profile_name]["intent"].strip(), f"{profile_name} intent is blank"
+@pytest.mark.parametrize("name", SEED_PROFILE_NAMES)
+def test_seed_has_intent(name: str) -> None:
+    intent = _load()[name].get("intent")
+    assert isinstance(intent, str) and intent.strip(), f"{name} missing intent"
+
+
+@pytest.mark.parametrize(
+    ("name", "mode_flag"), [("embedding", "--embedding"), ("reranking", "--reranking")]
+)
+def test_typed_seeds_carry_their_mode_flag(name: str, mode_flag: str) -> None:
+    """A typed slot naming no profile launches with its type's seed, so the
+    seed must put the server in that mode."""
+    assert mode_flag in shlex.split(_flags(name))
+
+
+@pytest.mark.parametrize("name", ["agent", "utility", "brain"])
+def test_long_context_workload_seeds_pin_a_64k_window(name: str) -> None:
+    """The bundled agent needs at least 64,000 tokens (ADR-0029 §4)."""
+    assert _load()[name]["ctx_size"] == 65536
+
+
+def test_flm_seed_carries_an_explicit_window() -> None:
+    """FLM reads its window from the profile's ``ctx_size`` (else 8192)."""
+    assert _load()["flm"]["ctx_size"] == 16384
+
+
+@pytest.mark.parametrize("name", ["agent", "coding", "brain"])
+def test_text_only_seeds_turn_vision_off_with_the_typed_field(name: str) -> None:
+    """``--no-mmproj`` became ``vision = "off"``."""
+    assert _load()[name]["vision"] == "off"
+    assert "--no-mmproj" not in _flags(name)
+
+
+def test_every_shipped_slot_names_a_seed() -> None:
+    """Slots are built around the seeds hal0 ships (ADR-0029 §4)."""
+    seeds = set(_load())
+    named: dict[str, str] = {}
+    for path in sorted(INSTALLER_SLOTS_DIR.glob("*.toml")):
+        raw = tomllib.loads(path.read_text())
+        table = raw.get("slot", raw)
+        profile = table.get("profile")
+        if profile:
+            named[path.name] = str(profile)
+    assert named, "no shipped slot names a profile"
+    missing = {slot: prof for slot, prof in named.items() if prof not in seeds}
+    assert not missing, f"shipped slots name non-seed profiles: {missing}"

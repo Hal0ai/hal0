@@ -891,12 +891,12 @@ def test_disabled_or_filtered_remote_curates_api_models(
     assert "mistral/mistral-large" not in rows  # disabled upstream
 
 
-def test_update_model_rejects_managed_args_in_extra_args(
+def test_update_model_rejects_tuning_keys_in_defaults(
     inspect_client: TestClient, tmp_hal0_home: str
 ) -> None:
-    """Save-time §21.7 screen: a managed flag in defaults.extra_args fails the
-    PUT with the same envelope launch would raise, instead of persisting a
-    tune that can never load."""
+    """ADR-0029: ``defaults`` holds file facts only. A flag string, a context
+    window or any other tune fails the PUT with a 422 naming the key, and a
+    facts-only body still saves."""
     fp = Path(tmp_hal0_home) / "screened.gguf"
     fp.write_bytes(b"\x00" * 8)
     inspect_client.post("/api/models", json={"id": "screened", "path": str(fp)})
@@ -905,15 +905,16 @@ def test_update_model_rejects_managed_args_in_extra_args(
         "/api/models/screened",
         json={"defaults": {"extra_args": "--port 9999 -fa on"}},
     )
-    assert r.status_code == 400, r.text
-    assert r.json()["error"]["code"] == "slot.managed_arg_denied"
+    assert r.status_code == 422, r.text
+    assert r.json()["error"]["code"] == "model.defaults_key_removed"
 
-    # Clean tune still saves.
+    # A facts-only body still saves.
     ok = inspect_client.put(
         "/api/models/screened",
-        json={"defaults": {"extra_args": "-fa on -b 512"}},
+        json={"defaults": {"chat_template": "minicpm5-1b", "jinja": False}},
     )
     assert ok.status_code == 200, ok.text
+    assert ok.json()["defaults"]["jinja"] is False
 
 
 def test_update_model_ignores_backends_writes(
@@ -958,34 +959,28 @@ def test_list_models_self_heals_provider_for_mistagged_comfyui_row(
     assert row["provider"] == "comfyui"
 
 
-# ── O10 guard: screen_extra_args_json (pure) ──────────────────────────────────
+# ── screen_model_write: the facts-only ``defaults`` screen (pure) ─────────────
 
 
-def test_screen_extra_args_json_rejects_shell_stripped_json() -> None:
-    """Bare double-quoted JSON whose quotes shlex strips is rejected with the
-    single-quote guidance (spec §3 JSON-token integrity)."""
+def test_screen_model_write_removed_defaults_key_is_unprocessable() -> None:
+    from hal0.errors import UnprocessableEntity
+    from hal0.services.models_service import screen_model_write
+
+    with pytest.raises(UnprocessableEntity) as exc:
+        screen_model_write({"defaults": {"enable_thinking": True, "vision": False}})
+    assert exc.value.code == "model.defaults_key_removed"
+    assert exc.value.status == 422
+    assert exc.value.details["keys"] == ["enable_thinking", "vision"]
+    assert exc.value.details["allowed"] == ["chat_template", "jinja", "mtp", "tokenizer_repo"]
+
+
+def test_screen_model_write_facts_pass_and_bad_fact_is_bad_request() -> None:
     from hal0.errors import BadRequest
-    from hal0.services.models_service import screen_extra_args_json
+    from hal0.services.models_service import screen_model_write
 
+    screen_model_write({"defaults": {"chat_template": "auto", "mtp": True, "jinja": None}})
+    screen_model_write({"defaults": None})
+    screen_model_write({"name": "no defaults at all"})
     with pytest.raises(BadRequest) as exc:
-        screen_extra_args_json('--chat-template-kwargs {"enable_thinking":false}')
-    assert exc.value.code == "model.extra_args_json_quoting"
-    # The message points at single-quoting.
-    assert "SINGLE" in str(exc.value) or "single" in str(exc.value)
-
-
-def test_screen_extra_args_json_accepts_single_quoted_json() -> None:
-    """Correctly single-quoted JSON survives shlex-splitting and passes."""
-    from hal0.services.models_service import screen_extra_args_json
-
-    # No exception.
-    screen_extra_args_json("--chat-template-kwargs '{\"enable_thinking\":false}'")
-
-
-def test_screen_extra_args_json_ignores_non_json_flags() -> None:
-    """A tune with no JSON object is untouched by the guard."""
-    from hal0.services.models_service import screen_extra_args_json
-
-    screen_extra_args_json("-fa on -b 512 --threads 8")
-    screen_extra_args_json("")
-    screen_extra_args_json("   ")
+        screen_model_write({"defaults": {"mtp": "maybe"}})
+    assert exc.value.code == "model.defaults_invalid"

@@ -72,7 +72,7 @@ Autonomous write::
     model_swap, model_assign, model_edit, model_scan,
     model_pull_cancel, model_pull_delete,
     model_set_default,
-    slot_load, slot_unload, slot_edit, slot_set_defaults,
+    slot_load, slot_unload, slot_edit,
     settings_reload,
     memory_add,
     memory_delete (single id, default/own-namespace dataset only),
@@ -474,9 +474,6 @@ AUTONOMOUS_WRITE_TOOLS: frozenset[str] = frozenset(
         "slot_load",
         "slot_unload",
         "slot_edit",
-        # PATCH convenience wrapper over slot_edit's PUT — same blast
-        # radius, just a narrower [model] sub-table merge.
-        "slot_set_defaults",
         # Settings
         "settings_reload",
         # Memory
@@ -668,7 +665,6 @@ TOOL_NAME_ALIASES: dict[str, tuple[str, ...]] = {
     "GET:/api/slots/{name}/resolved": ("slot_resolved",),
     "GET:/api/slots/{name}/state": ("slot_state",),
     "POST:/api/slots/{name}/rename": ("slot_rename",),
-    "PATCH:/api/slots/{name}/defaults": ("slot_set_defaults",),
     "POST:/api/slots/{name}/load": ("slot_load",),
     "POST:/api/slots/{name}/unload": ("slot_unload",),
     "PUT:/api/slots/{name}/config": (
@@ -1179,6 +1175,13 @@ TOOL_PARAM_HINTS: dict[str, dict[str, Any]] = {
                 "description": "llm|embedding|reranking|transcription|tts|image (default llm)",
             },
             "port": {"type": "integer", "description": "Omit to auto-assign the next free port"},
+            "profile": {
+                "type": "string",
+                "description": (
+                    "Profile name (profile_list) — owns the tune: flags, context window, "
+                    "reasoning, vision, MTP. Omit for the slot type's seed profile."
+                ),
+            },
             "image": {
                 "type": "string",
                 "description": (
@@ -1209,7 +1212,16 @@ TOOL_PARAM_HINTS: dict[str, dict[str, Any]] = {
             "model": {
                 "type": "object",
                 "description": (
-                    "ModelConfig sub-table, e.g. {default: model_id, context_size: int}"
+                    "ModelConfig sub-table, e.g. {default: model_id}. No tuning keys: "
+                    "context window, flags, reasoning, vision and MTP live on the slot's "
+                    "profile (edit it with profile_update)."
+                ),
+            },
+            "profile": {
+                "type": "string",
+                "description": (
+                    "Profile name (profile_list) — the tune this slot launches with; "
+                    "applying it also sets the slot's runner when the profile names one."
                 ),
             },
             "autoload": {
@@ -1230,27 +1242,6 @@ TOOL_PARAM_HINTS: dict[str, dict[str, Any]] = {
             "idle_timeout_s": {
                 "type": "integer",
                 "description": "Seconds idle before auto-unload (0 = never).",
-            },
-        },
-        "required": ["name"],
-    },
-    "slot_set_defaults": {
-        "properties": {
-            "name": {"type": "string", "description": "Slot name to update (path arg)"},
-            "default": {
-                "type": "string",
-                "description": "Default model id from the registry (ModelConfig.default)",
-            },
-            "context_size": {
-                "type": "integer",
-                "description": (
-                    "Hardware ceiling on the model's resolved context window "
-                    "(caps, never raises — ModelConfig.context_size)"
-                ),
-            },
-            "n_gpu_layers": {
-                "type": "integer",
-                "description": "GPU offload layer count, -1 = all (ModelConfig.n_gpu_layers)",
             },
         },
         "required": ["name"],
@@ -1430,6 +1421,132 @@ TOOL_PARAM_HINTS: dict[str, dict[str, Any]] = {
             "suite": {
                 "type": "string",
                 "description": "Suite to enqueue (default 'roster'). Back-compat wrapper over bench_enqueue.",
+            },
+        },
+    },
+    "model_edit": {
+        "properties": {
+            "model_id": {"type": "string", "description": "Registered model id to edit (path arg)"},
+            "name": {"type": "string", "description": "Display name"},
+            "capabilities": {"type": "array", "items": {"type": "string"}},
+            "tags": {"type": "array", "items": {"type": "string"}},
+            "mmproj": {
+                "type": "string",
+                "description": "Absolute path to the vision projector sidecar",
+            },
+            "defaults": {
+                "type": "object",
+                "description": (
+                    "FILE FACTS only, merged one level deep (null clears one): "
+                    "chat_template (template id, 'auto' = GGUF-embedded), tokenizer_repo "
+                    "(HF repo), mtp (true = the file has MTP heads), jinja (false = this "
+                    "file's template breaks --jinja). A tuning key (extra_args, "
+                    "context_size, enable_thinking, vision, profile, …) is a 422 — tuning "
+                    "belongs on a profile (profile_create / profile_update)."
+                ),
+            },
+        },
+    },
+    "profile_create": {
+        "properties": {
+            "name": {"type": "string", "description": "New profile name (kebab-case, <=32 chars)"},
+            "flags": {
+                "type": "string",
+                "description": (
+                    "Free llama-server flags (KV cache types, batch sizes, sampling, "
+                    "--parallel, …). Rejected: hardware flags (-ngl/-dev/-t), managed "
+                    "flags (--model/--host/--port/--alias/--ctx-size), model-fact flags "
+                    "(--jinja/--chat-template*/--mmproj/--no-mmproj), --spec-draft-device, "
+                    "--reasoning-format none."
+                ),
+            },
+            "ctx_size": {
+                "type": ["integer", "null"],
+                "description": (
+                    "Context window, 128..16777216. Omit or null = the model's native "
+                    "window, dense-capped at 32768 (8192 when unknown)."
+                ),
+            },
+            "enable_thinking": {
+                "type": ["boolean", "null"],
+                "description": "Reasoning default for slots running this profile (null = unset).",
+            },
+            "vision": {
+                "type": "string",
+                "enum": ["auto", "off"],
+                "description": "'auto' loads the model's mmproj when it has one; 'off' never does.",
+            },
+            "mtp": {
+                "type": "string",
+                "enum": ["auto", "off"],
+                "description": (
+                    "'auto' drafts with the model's MTP heads when it has them and the "
+                    "runner supports it; 'off' never does."
+                ),
+            },
+            "runner": {
+                "type": "string",
+                "description": (
+                    "Runner key (the profile-carried runtime); applying the profile sets "
+                    "the slot's runner. On update, '' clears it."
+                ),
+            },
+            "intent": {"type": "string", "description": "Human label for what the profile is for"},
+            "cloned_from": {
+                "type": "string",
+                "description": "Provenance: the profile this was cloned from",
+            },
+        },
+        "required": ["name"],
+    },
+    "profile_update": {
+        "properties": {
+            "name": {"type": "string", "description": "Custom profile to update (path arg)"},
+            "flags": {
+                "type": "string",
+                "description": (
+                    "Free llama-server flags (KV cache types, batch sizes, sampling, "
+                    "--parallel, …). Rejected: hardware flags (-ngl/-dev/-t), managed "
+                    "flags (--model/--host/--port/--alias/--ctx-size), model-fact flags "
+                    "(--jinja/--chat-template*/--mmproj/--no-mmproj), --spec-draft-device, "
+                    "--reasoning-format none."
+                ),
+            },
+            "ctx_size": {
+                "type": ["integer", "null"],
+                "description": (
+                    "Context window, 128..16777216. Omit or null = the model's native "
+                    "window, dense-capped at 32768 (8192 when unknown)."
+                ),
+            },
+            "enable_thinking": {
+                "type": ["boolean", "null"],
+                "description": "Reasoning default for slots running this profile (null = unset).",
+            },
+            "vision": {
+                "type": "string",
+                "enum": ["auto", "off"],
+                "description": "'auto' loads the model's mmproj when it has one; 'off' never does.",
+            },
+            "mtp": {
+                "type": "string",
+                "enum": ["auto", "off"],
+                "description": (
+                    "'auto' drafts with the model's MTP heads when it has them and the "
+                    "runner supports it; 'off' never does."
+                ),
+            },
+            "runner": {
+                "type": "string",
+                "description": (
+                    "Runner key (the profile-carried runtime); applying the profile sets "
+                    "the slot's runner. On update, '' clears it."
+                ),
+            },
+            "intent": {"type": "string", "description": "Human label for what the profile is for"},
+            "cloned_from": {
+                "type": "string",
+                "description": "Provenance: the profile this was cloned from",
             },
         },
     },
@@ -2217,11 +2334,6 @@ _ANNOTATIONS: dict[str, ToolAnnotations] = {
     "slot_edit": ToolAnnotations(
         readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=False
     ),
-    # PATCH convenience wrapper over slot_edit's PUT — same "set X to Y"
-    # semantics, same idempotency.
-    "slot_set_defaults": ToolAnnotations(
-        readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=False
-    ),
     "settings_reload": ToolAnnotations(
         readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=False
     ),
@@ -2644,7 +2756,7 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
     "stack_list": "List every stack, with the active stack + drift status.",
     "stack_status": "Get one stack's detail, active flag, and drift status.",
     "profile_list": "List every profile in the catalog (seed + custom).",
-    "profile_status": "Get one profile's resolved detail (image, flags, backend, used-by).",
+    "profile_status": "Get one profile's resolved detail (flags, ctx_size, thinking, vision, mtp, runner, used-by).",
     "profile_export": (
         "Export a profile to a portable .hal0profile.json envelope (no secrets/host-paths)."
     ),
@@ -2669,7 +2781,13 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
         "Assign a model as a slot's default (does not load the slot). "
         "Args: name=SLOT name (not the model!), model=registered model id."
     ),
-    "model_edit": "Update a model's metadata (name, capabilities, tags, mmproj, defaults).",
+    "model_edit": (
+        "Update a model's metadata (name, capabilities, tags, mmproj, provider, defaults). "
+        "`defaults` holds FILE FACTS only — chat_template, tokenizer_repo, mtp "
+        "(the file has MTP heads), jinja (false = this file's template breaks --jinja). "
+        "Any other defaults key (extra_args, context_size, enable_thinking, vision, "
+        "profile, …) is a 422: tuning belongs on a profile (profile_update)."
+    ),
     "model_scan": (
         "Walk the configured model roots + store and register newly-found files. "
         "Pass prune=true to also remove registry rows whose file is missing on disk "
@@ -2689,11 +2807,11 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
     ),
     "slot_unload": "Unload a running slot gracefully.",
     "slot_edit": (
-        "Update one or more slot config fields (model, port, ctx-size, provider, hardware)."
-    ),
-    "slot_set_defaults": (
-        "Update slot defaults (ctx_size/context_size, n_gpu_layers, …) — merges into the "
-        "slot's [model] sub-table. Provider-specific params belong under 'extra'."
+        "Update one or more slot placement fields (model, profile, port, device, "
+        "autoload, priority, pinned, idle_timeout_s). Tuning (context window, flags, "
+        "reasoning, vision, MTP) is NOT a slot field: it lives on the slot's profile — "
+        "edit it with profile_update, or point the slot at another profile "
+        "(a tuning key here is rejected with slot.tuning_key_denied)."
     ),
     "settings_reload": "Ask the running hal0 daemon to reload configs (re-reads TOMLs).",
     "memory_add": "Add an item to long-term memory.",
@@ -2774,7 +2892,7 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
     "slot_create": (
         "Create a new slot config (gated). Args pass through to POST /api/slots "
         "(full SlotConfig schema): name + model required; omit port to auto-assign "
-        "the next free one; optional type/device, model.context_size, and a string "
+        "the next free one; optional type/device/profile (tuning lives on the profile), and a string "
         "image override (debug builds only, with runtime='container'). Writes config "
         "only — follow with slot_load to start it."
     ),
@@ -2799,10 +2917,15 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
     "stack_snapshot": "Build a stack from the current live slot + capability config (gated).",
     "stack_delete": "Delete a custom stack from the catalog (gated).",
     "profile_create": (
-        "Create a custom runtime profile (image, flags, device class) — e.g. authored "
-        "from a model card's requirements (gated)."
+        "Create a custom profile — the tune a slot launches a model with: flags, ctx_size, "
+        "enable_thinking, vision (auto|off), mtp (auto|off), optional runner — e.g. "
+        "authored from a model card's requirements (gated)."
     ),
-    "profile_update": "Update an existing custom profile (shallow merge) (gated).",
+    "profile_update": (
+        "Update an existing custom profile (sparse: omitted fields are kept; ctx_size=null "
+        "clears the window, runner='' clears the runner) (gated). Slots running it pick the "
+        "change up at their next restart."
+    ),
     "profile_import": "Import a profile from a .hal0profile.json envelope (gated).",
     "profile_delete": "Delete a custom profile from the catalog (gated).",
     "bench_enqueue": "Enqueue benchmark cells (model x slot x settings) for the runner (gated).",
@@ -2871,8 +2994,8 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
     "mcp_client_list": "List MCP clients seen in the recent audit window.",
     "mcp_catalog": "The static installable-MCP-servers catalog.",
     "profile_generate": (
-        "Generate a draft runtime profile from a registered model or a HuggingFace repo — "
-        "compute-only, persists nothing. Args: exactly one of model_id / hf_repo (required), "
+        "Generate a draft profile (flags, ctx_size, enable_thinking, vision, mtp, runner) from "
+        "a registered model or a HuggingFace repo — compute-only, persists nothing. Args: exactly one of model_id / hf_repo (required), "
         "optional name, optional use_llm=true to summarize the model card via the platform "
         "utility LLM (degrades to heuristics on failure). Returns {profile, warnings, sources} "
         "— 'profile' is the exact envelope shape profile_export produces, so it can be handed "

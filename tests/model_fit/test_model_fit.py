@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from hal0.config.schema import ProfileConfig
 from hal0.model_fit import evaluate_model_fit
 from hal0.profiles import ProfileCatalog
@@ -60,8 +62,10 @@ def test_blocks_profile_slot_type_mismatch(tmp_hal0_home: str) -> None:
     assert "profile.unsupported_slot_type" in fit.reasons
 
 
-def test_blocks_npu_profile_device_mismatch(tmp_hal0_home: str) -> None:
-    profile = ProfileCatalog().create("custom-flm", ProfileConfig(flags="", device_class="npu"))
+def test_blocks_flm_profile_off_the_npu(tmp_hal0_home: str) -> None:
+    """A profile selects no hardware (ADR-0029); the one device rule left is
+    the runtime family's: FLM runs only on the NPU."""
+    profile = ProfileCatalog().resolve("flm")
 
     fit = evaluate_model_fit(
         model_id="gemma3:1b",
@@ -72,27 +76,35 @@ def test_blocks_npu_profile_device_mismatch(tmp_hal0_home: str) -> None:
     )
 
     assert fit.status == "blocked"
-    assert "profile.device_class_mismatch" in fit.reasons
+    assert fit.reasons[0] == "profile.device_class_mismatch"
+    assert "runtime_family=flm" in fit.reasons
 
 
-def test_degrades_gpu_cpu_profile_mismatch(tmp_hal0_home: str) -> None:
-    catalog = ProfileCatalog()
-    profile = catalog.create(
-        "cpu-llama",
-        ProfileConfig(
-            flags="",
-            device_class="cpu",
-        ),
+def test_allows_flm_profile_on_the_npu(tmp_hal0_home: str) -> None:
+    fit = evaluate_model_fit(
+        model_id="gemma3:1b",
+        slot_type="llm",
+        device="npu",
+        profile=ProfileCatalog().resolve("flm"),
+        capabilities=["chat"],
     )
+
+    assert fit.status == "allowed"
+
+
+@pytest.mark.parametrize("device", ["gpu-rocm", "gpu-vulkan", "cpu"])
+def test_llama_profile_fits_every_llama_device(tmp_hal0_home: str, device: str) -> None:
+    """A llama-server profile is device-agnostic: there is no gpu/cpu
+    "degraded" verdict any more, because a profile carries no device class."""
+    profile = ProfileCatalog().create("tuned", ProfileConfig(flags="-fa auto", ctx_size=8192))
 
     fit = evaluate_model_fit(
         model_id="qwen3-4b",
         slot_type="llm",
-        device="gpu-rocm",
+        device=device,
         profile=profile,
         capabilities=["chat"],
     )
 
-    assert fit.status == "degraded"
-    assert fit.allowed is True
-    assert fit.reasons == ("profile.device_class_mismatch",)
+    assert fit.status == "allowed"
+    assert fit.reasons == ()

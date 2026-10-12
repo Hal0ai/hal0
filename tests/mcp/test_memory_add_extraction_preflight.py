@@ -136,7 +136,7 @@ def _mount_below_floor(monkeypatch: pytest.MonkeyPatch) -> tuple[dict[str, Any],
 
     wrapper = StubHindsightWrapper()
     app = FastAPI()
-    app.state.slot_manager = _FakeSlotManager(4096)
+    app.state.slot_manager = _FakeSlotManager()
     app.state.model_registry = _FakeModelRegistry(4096)
     app.state.upstreams = _RecordingUpstreams()
     app.state.upstream_models = {}

@@ -163,6 +163,101 @@ def fetch_registry_models(api: str = DEFAULT_API, timeout: float = 10.0) -> list
     return data
 
 
+class _ModelDictRegistry:
+    """A registry over the planner's own model dicts, for the native-window lookup."""
+
+    def __init__(self, models: list[dict[str, Any]]) -> None:
+        self._by_id = {str(m["id"]): m for m in models if m.get("id")}
+
+    def get(self, model_id: str) -> dict[str, Any]:
+        return self._by_id[model_id]
+
+
+def _read_slot_cfgs() -> list[dict[str, Any]]:
+    """Every slot's flat config from /etc/hal0/slots, sorted by slot name.
+
+    Read straight from the TOMLs (the bench CLI runs outside the API process)
+    through the loader's own flattening, so the dict is the shape the launch
+    path's resolvers take."""
+    from hal0.config import paths
+    from hal0.config.loader import _flatten_slot_toml, _read_toml
+
+    directory = paths.slots_config_dir()
+    if not directory.exists():
+        return []
+    cfgs: list[dict[str, Any]] = []
+    for toml_path in sorted(directory.glob("*.toml")):
+        try:
+            raw = _read_toml(toml_path)
+            name = str(raw.get("name") or (raw.get("slot") or {}).get("name") or toml_path.stem)
+            cfgs.append(_flatten_slot_toml(raw, slot_name=name))
+        except Exception as exc:  # one unreadable slot file never blinds the planner
+            print(f"[plan] skipping slot file {toml_path}: {exc}", file=sys.stderr)
+    return sorted(cfgs, key=lambda c: str(c.get("name") or ""))
+
+
+def attach_slot_profiles(
+    models: list[dict[str, Any]], slots: list[dict[str, Any]] | None = None
+) -> list[dict[str, Any]]:
+    """Return ``models`` with each served model's slot profile attached (ADR-0029).
+
+    A model row holds file facts only; the tune a cell is measured under is the
+    profile of the slot that runs the model. For every model some slot names
+    (``[model].default``) this sets ``model["profile"]`` from the same
+    resolvers the launch path uses —
+    :func:`hal0.providers.container.resolve_slot_profile` for the tune and
+    :func:`hal0.providers.container.slot_effective_context` for the window
+    (``ctx_size`` is the EFFECTIVE window, not just the profile's raw value).
+    When several slots serve one model the first by slot name whose profile
+    resolves wins. A model no slot serves, a profile that does not resolve, or
+    an entry that already carries its own ``profile`` is left as it was (the
+    planner then benches the runner's defaults). Never raises: the planner
+    must keep working on a box whose config it cannot read.
+
+    ``slots`` injects the flat slot configs (tests); ``None`` reads them from
+    disk. The input list and its dicts are not mutated.
+    """
+    try:
+        from hal0.providers.container import resolve_slot_profile, slot_effective_context
+
+        slot_cfgs = _read_slot_cfgs() if slots is None else slots
+        registry = _ModelDictRegistry(models)
+        out: list[dict[str, Any]] = []
+        for model in models:
+            attached = model
+            if model.get("id") and not model.get("profile"):
+                mid = str(model["id"])
+                for cfg in slot_cfgs:
+                    table = cfg.get("model")
+                    if not isinstance(table, dict) or str(table.get("default") or "") != mid:
+                        continue
+                    try:
+                        profile = resolve_slot_profile(cfg)
+                    except Exception:
+                        continue  # a slot naming a missing profile cannot be benched as-is
+                    ctx, ctx_source = slot_effective_context(cfg, registry)
+                    attached = {
+                        **model,
+                        "profile": {
+                            "slot": str(cfg.get("name") or ""),
+                            "name": str(getattr(profile, "name", "") or ""),
+                            "flags": str(getattr(profile, "flags", "") or ""),
+                            "ctx_size": ctx,
+                            "ctx_source": ctx_source,
+                            "enable_thinking": getattr(profile, "enable_thinking", None),
+                            "vision": getattr(profile, "vision", "auto"),
+                            "mtp": getattr(profile, "mtp", "auto"),
+                            "runner": getattr(profile, "runner", None),
+                        },
+                    }
+                    break
+            out.append(attached)
+        return out
+    except Exception as exc:
+        print(f"[plan] could not attach slot profiles ({exc}); planning without", file=sys.stderr)
+        return models
+
+
 # hal0 /api/models backend token -> benchlab lane token. The registry reports a
 # model's runner backend as "vulkan"/"rocm"; benchlab's lanes are "vulkan_radv"/
 # "rocm" (the lane names harness.lane_specs() defines).
@@ -228,7 +323,7 @@ def _model_caps(m: dict[str, Any]) -> set[str]:
     ``identity.model.caps`` onto every benchmark record — which is where the
     public leaderboard's capability pills come from (#1823). So the TYPED
     fields are folded in too, following the ``defaults.mtp`` precedent below:
-    they are the surface an operator actually edits (``PATCH /api/models``),
+    they are the surface an operator actually edits (``PUT /api/models``),
     so a typed edit should reach the roster without also hand-editing a
     string list.
 
@@ -246,25 +341,22 @@ def _model_caps(m: dict[str, Any]) -> set[str]:
     if m.get("type"):
         caps.add(m["type"])
     defaults = m.get("defaults") or {}
-    # The type-tag retirement folds the pre-1.0 "mtp" tag into the typed
-    # defaults.mtp field — surface it back into the match set so rosters
-    # keyed on "mtp" keep selecting migrated rows.
+    # defaults.mtp is the model fact "the file has MTP heads" — surface it
+    # into the match set so rosters keyed on "mtp" keep selecting those rows.
     if defaults.get("mtp") is True:
         caps.add("mtp")
-    # Vision is the projector, not the flag: registry/model.py documents
-    # defaults.vision=None as AUTO ("the mmproj sidecar loads whenever the
-    # model carries one") and True as "an explicit no-op affirmation". So the
-    # real signal is carrying an mmproj, and the only thing that revokes it is
-    # an explicit False (force-suppress).
-    if m.get("mmproj") and defaults.get("vision") is not False:
+    # Vision is the projector: a model that carries an mmproj can see. Whether
+    # a slot loads it is its profile's `vision`, a tune — not a model fact.
+    if m.get("mmproj"):
         caps.add("vision")
     # ModelCapabilities.tool_calling — the one typed-bool surface for the
     # omni-router's tool-call gate.
     if (m.get("capability_flags") or {}).get("tool_calling") is True:
         caps.add("tool-calling")
-    # defaults.enable_thinking True = this model defaults to thinking ON, so
-    # it demonstrably supports it. None is global suppression, not incapacity.
-    if defaults.get("enable_thinking") is True:
+    # The profile that tunes this model (attached by the caller, see
+    # ``_resolve_profile``) with enable_thinking True runs it thinking ON, so
+    # it demonstrably supports it. None is "unset", not incapacity.
+    if (m.get("profile") or {}).get("enable_thinking") is True:
         caps.add("reasoning")
     return caps
 
@@ -435,36 +527,42 @@ def _sampler_block(sampler: str) -> dict[str, Any]:
 def _resolve_profile(model: dict[str, Any], depth: int) -> Config:
     """Resolve the plan-time config block from a registry entry (DESIGN §3 config).
 
-    Two shapes are accepted: the synthetic unit-test entry (``profile`` = {argv,
-    env, kv, spec, ctx}) and hal0's real ``/api/models`` entry (``defaults`` =
-    {extra_args (a string), context_size, n_gpu_layers, rope_freq_base}). The
-    real registry hands resolved flags as one ``extra_args`` STRING, so we
-    shlex-split it into an argv list — deterministic, so a merged profile-flag PR
-    that changes ``extra_args`` moves the cell_key and re-benches exactly that
-    cell (DESIGN §6), while an unchanged profile hashes identically run-to-run."""
-    profile = model.get("profile")
-    if profile:  # synthetic/test shape: already-structured profile
-        return Config(
-            argv=list(profile.get("argv") or []),
-            env=dict(profile.get("env") or {}),
-            kv=dict(profile.get("kv") or {}),
-            spec=profile.get("spec"),
-            parallel=int(profile.get("parallel", 1) or 1),
-            ctx=int(profile.get("ctx", depth) or depth),
-        )
-    defaults = model.get("defaults") or {}
-    extra = defaults.get("extra_args") or ""
-    try:
-        argv = shlex.split(extra) if isinstance(extra, str) else list(extra)
-    except ValueError:
-        argv = extra.split() if isinstance(extra, str) else []
+    A model row holds file facts only (ADR-0029); the tune a cell is measured
+    under is the ``profile`` the caller attaches to the entry — the profile of
+    the slot that runs the model. Two shapes are accepted: the synthetic
+    unit-test entry (``profile`` = {argv, env, kv, spec, ctx}) and a hal0
+    profile (``profile`` = {flags (one string), ctx_size, …}). The flags string
+    is shlex-split into an argv list — deterministic, so a merged profile-flag
+    PR that changes ``flags`` moves the cell_key and re-benches exactly that
+    cell (DESIGN §6), while an unchanged profile hashes identically run-to-run.
+    An entry with no profile benches the runner's own defaults."""
+    profile = model.get("profile") or {}
+    if "argv" in profile:  # synthetic/test shape: already-structured profile
+        argv = list(profile.get("argv") or [])
+    else:
+        flags = profile.get("flags") or ""
+        try:
+            argv = shlex.split(flags) if isinstance(flags, str) else list(flags)
+        except ValueError:
+            argv = flags.split() if isinstance(flags, str) else []
+    spec = profile.get("spec")
+    if spec is None:
+        # The launch tunes with no argv spelling: they change what the slot
+        # runs, so they belong in the cell identity (non-defaults only, so a
+        # plain profile hashes the same as one that never named them).
+        tunes = {
+            key: profile[key]
+            for key, default in (("mtp", "auto"), ("vision", "auto"), ("enable_thinking", None))
+            if key in profile and profile[key] != default
+        }
+        spec = {"profile": tunes} if tunes else None
     return Config(
         argv=argv,
-        env={},
-        kv={},
-        spec=None,
-        parallel=1,
-        ctx=int(defaults.get("context_size") or depth),
+        env=dict(profile.get("env") or {}),
+        kv=dict(profile.get("kv") or {}),
+        spec=spec,
+        parallel=int(profile.get("parallel", 1) or 1),
+        ctx=int(profile.get("ctx") or profile.get("ctx_size") or depth),
     )
 
 

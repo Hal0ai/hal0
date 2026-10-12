@@ -2,13 +2,14 @@
 
 Both the store (:meth:`SlotConfigStore._reconciled_slot`) and
 :meth:`SlotManager.update_config` used to hand-roll the same "base dict +
-updates dict → merged dict with the ``ctx_size`` alias folded" mechanic.
-They now share :func:`hal0.slot_config.merge_slot_config`. These tests pin
-the load-bearing nuances of that primitive:
+updates dict → merged dict" mechanic. They now share
+:func:`hal0.slot_config.merge_slot_config`. These tests pin the load-bearing
+nuances of that primitive:
 
-  - the one-level-deep, value-wins merge (sibling ``[model]`` keys survive),
-  - the ``ctx_size`` → ``context_size`` fold (fresh alias wins, alias
-    dropped),
+  - the one-level-deep, value-wins merge (sibling table keys survive),
+  - ``None`` deletes a key (TOML has no null),
+  - it is a pure merge: no context-size alias fold (ADR-0029 refuses slot
+    tuning keys upstream, with ``slot.tuning_key_denied``),
   - COPY-SAFETY: the base dict is never mutated, so it is safe for the
     store's commit diff / rollback (``before`` vs ``after``).
 """
@@ -17,6 +18,8 @@ from __future__ import annotations
 
 import tomllib
 from pathlib import Path
+
+import pytest
 
 from hal0.capabilities.config import CapabilitySelection
 from hal0.config.loader import _flatten_slot_toml
@@ -30,91 +33,89 @@ from hal0.slot_config import (
 # ── merge_slot_config unit behaviour ─────────────────────────────────────────
 
 
-def test_merge_one_level_deep_keeps_model_siblings() -> None:
-    """A partial ``{"model": {...}}`` update merges into the nested table,
-    not clobber it — ``[model].default`` survives a ctx-only write."""
-    base = {"model": {"default": "m", "context_size": 4096}, "workers": 1}
-    after = merge_slot_config(base, {"model": {"context_size": 8192}})
-    assert after["model"] == {"default": "m", "context_size": 8192}
+def test_merge_one_level_deep_keeps_table_siblings() -> None:
+    """A partial table update merges into the nested table instead of
+    clobbering it — sibling keys survive."""
+    base = {"model": {"default": "m"}, "image": {"idle_restore_minutes": 30}, "idle_timeout_s": 1}
+    after = merge_slot_config(base, {"image": {"default_steps": 8}})
+    assert after["image"] == {"idle_restore_minutes": 30, "default_steps": 8}
+    assert after["model"] == {"default": "m"}
 
 
 def test_merge_none_deletes_key() -> None:
     """An explicit ``None`` in updates DELETES the key (TOML has no null).
 
-    This is what lets ``PUT /config {"mtp": null}`` reset a slot to MTP AUTO:
-    the old behaviour merged ``mtp=None`` into the dict and the TOML writer
+    The old behaviour merged ``None`` into the dict and the TOML writer
     (tomli_w) raised ``TypeError: NoneType is not TOML serializable`` → 500,
-    leaving no API path back to Auto once an override existed.
+    leaving no API path to clear a key once it was set.
     """
-    base = {"mtp": True, "workers": 1}
-    after = merge_slot_config(base, {"mtp": None})
-    assert "mtp" not in after
-    assert after["workers"] == 1
+    base = {"image_pin": "ghcr.io/x/y:z", "idle_timeout_s": 1}
+    after = merge_slot_config(base, {"image_pin": None})
+    assert "image_pin" not in after
+    assert after["idle_timeout_s"] == 1
     # base untouched (copy-safety)
-    assert base["mtp"] is True
+    assert base["image_pin"] == "ghcr.io/x/y:z"
 
 
 def test_merge_none_deletes_missing_key_is_noop() -> None:
-    after = merge_slot_config({"workers": 1}, {"mtp": None})
-    assert "mtp" not in after
-    assert after == {"workers": 1}
+    after = merge_slot_config({"idle_timeout_s": 1}, {"image_pin": None})
+    assert after == {"idle_timeout_s": 1}
 
 
 def test_merge_none_deletes_nested_key() -> None:
-    """Same None-deletes rule one level deep: {"server": {"extra_args": null}}
-    removes the sub-key instead of poisoning the TOML writer."""
-    base = {"server": {"extra_args": "-b 512", "env": {"X": "1"}}}
-    after = merge_slot_config(base, {"server": {"extra_args": None}})
-    assert after["server"] == {"env": {"X": "1"}}
+    """Same None-deletes rule one level deep: {"npu": {"asr": null}} removes
+    the sub-key instead of poisoning the TOML writer."""
+    base = {"npu": {"asr": True, "embed": True}}
+    after = merge_slot_config(base, {"npu": {"asr": None}})
+    assert after["npu"] == {"embed": True}
     # base sub-dict untouched (copy-safety)
-    assert base["server"]["extra_args"] == "-b 512"
+    assert base["npu"]["asr"] is True
 
 
 def test_merge_scalars_and_lists_replace_wholesale() -> None:
-    base = {"workers": 1, "labels": ["a"]}
-    after = merge_slot_config(base, {"workers": 4, "labels": ["b"]})
-    assert after["workers"] == 4
+    base = {"idle_timeout_s": 1, "labels": ["a"]}
+    after = merge_slot_config(base, {"idle_timeout_s": 4, "labels": ["b"]})
+    assert after["idle_timeout_s"] == 4
     assert after["labels"] == ["b"]
 
 
-def test_merge_folds_ctx_size_alias() -> None:
-    """Fresh ``ctx_size`` wins over a stale ``context_size`` seed, then the
-    alias is dropped so exactly one key survives (#585)."""
-    base = {"model": {"default": "m", "context_size": 4096}}
-    after = merge_slot_config(base, {"model": {"ctx_size": 32768}})
-    assert after["model"] == {"default": "m", "context_size": 32768}
-    assert "ctx_size" not in after["model"]
-
-
-def test_merge_folds_ctx_size_keeps_default_sibling() -> None:
-    """manager.py dropped-sibling scenario: ``{"model": {"ctx_size": N}}``
-    must keep ``[model].default``."""
-    base = {"model": {"default": "keep-me"}}
+def test_merge_has_no_context_size_alias_fold() -> None:
+    """ADR-0029 removed the #585 ``ctx_size`` → ``context_size`` fold: the
+    merge is a pure projection and never invents a ``context_size``. Slot
+    tuning keys are refused before any merge (``reject_slot_tuning_keys`` /
+    ``reconcile_slot_updates``), so the merge itself leaves them alone."""
+    base = {"model": {"default": "m"}}
     after = merge_slot_config(base, {"model": {"ctx_size": 2048}})
-    assert after["model"]["default"] == "keep-me"
-    assert after["model"]["context_size"] == 2048
+    assert after["model"] == {"default": "m", "ctx_size": 2048}
+    assert "context_size" not in after["model"]
 
 
-def test_merge_is_copy_safe_when_updates_carry_no_model() -> None:
-    """The load-bearing nuance: a pure non-model update (e.g. a disable) that
-    still triggers the ctx_size fold on the inherited base ``[model]`` must
-    NOT mutate the caller's base dict. Proves the fold copies before pop."""
-    base = {"model": {"default": "m", "ctx_size": 4096}, "workers": 1}
-    after = merge_slot_config(base, {"workers": 4})
-    # The returned copy folded the alias …
-    assert after["model"]["context_size"] == 4096
-    assert "ctx_size" not in after["model"]
-    assert after["workers"] == 4
-    # … while the caller's base is untouched (still the legacy alias).
-    assert base["model"] == {"default": "m", "ctx_size": 4096}
-    assert base["workers"] == 1
+def test_tuning_keys_are_refused_before_the_merge() -> None:
+    """The write pipeline that feeds the merge refuses tuning keys."""
+    from hal0.errors import BadRequest
+    from hal0.slots.config_write import reconcile_slot_updates
+
+    with pytest.raises(BadRequest) as exc:
+        reconcile_slot_updates({"model": {"default": "m"}}, {"model": {"ctx_size": 2048}})
+    assert exc.value.code == "slot.tuning_key_denied"
 
 
-def test_merge_does_not_alias_base_model_on_merge_path() -> None:
-    """Even when updates DO carry a model sub-table, the base's model dict
-    must not be mutated (fresh merged dict, not in-place)."""
-    base = {"model": {"default": "m", "context_size": 4096}}
-    after = merge_slot_config(base, {"model": {"context_size": 8192}})
+def test_merge_is_copy_safe_when_updates_carry_no_table() -> None:
+    """A pure scalar update (e.g. a disable's sibling write) must NOT mutate
+    the caller's base dict or its inherited tables."""
+    base = {"model": {"default": "m"}, "npu": {"asr": True}, "idle_timeout_s": 1}
+    snapshot = {"model": {"default": "m"}, "npu": {"asr": True}, "idle_timeout_s": 1}
+    after = merge_slot_config(base, {"idle_timeout_s": 4})
+    assert after["idle_timeout_s"] == 4
+    assert after["model"] == {"default": "m"}
+    assert base == snapshot
+
+
+def test_merge_does_not_alias_base_table_on_merge_path() -> None:
+    """Even when updates DO carry a sub-table, the base's table must not be
+    mutated (fresh merged dict, not in-place)."""
+    base = {"model": {"default": "m"}}
+    after = merge_slot_config(base, {"model": {"default": "n"}})
     after["model"]["default"] = "mutated"
     assert base["model"]["default"] == "m"
 
@@ -245,16 +246,11 @@ def _write_embed_slot(home: str, extra_model_lines: list[str]) -> Path:
 
 
 def test_store_copy_safe_disable_still_writes(tmp_hal0_home: str) -> None:
-    """A pure disable carries NO ``[model]`` update, yet the slot's inherited
-    ``[model]`` still gets its ctx_size folded — via the shared copy-safe
-    helper. The ChangeSet must see ``before != after`` (so commit writes) and
-    the folded ``context_size`` must land on disk. A naive extraction that
-    reused the in-place ``_normalize_ctx_key`` would fold ``before`` too and
-    could break the diff — this pins that it does not.
-
-    Post-#1369 the disable's own write is ``[model].default = ""``, so the
-    fold has to survive landing in the same sub-table it is clearing."""
-    slot_path = _write_embed_slot(tmp_hal0_home, ["ctx_size = 4096"])
+    """A disable clears ``[model].default`` through the shared copy-safe merge.
+    The ChangeSet must see ``before != after`` (so commit writes), and the
+    ``before`` snapshot must still hold the old model (proof the helper did
+    not mutate the base, which would break the diff and the rollback)."""
+    slot_path = _write_embed_slot(tmp_hal0_home, [])
     _write_caps_disabled_embed(tmp_hal0_home)
 
     store = SlotConfigStore()
@@ -273,23 +269,16 @@ def test_store_copy_safe_disable_still_writes(tmp_hal0_home: str) -> None:
     slot_change = next(fs for fs in cs.after if fs.path == slot_path)
     before_change = next(fs for fs in cs.before if fs.path == slot_path)
     assert slot_change.data is not None
-    # Disable clears the model and folds the inherited ctx_size alias.
-    assert slot_change.data["model"]["default"] == ""
-    assert slot_change.data["model"]["context_size"] == 4096
-    assert "ctx_size" not in slot_change.data["model"]
-    # The before snapshot must remain the un-folded legacy shape (proof the
-    # shared helper did not mutate the base), so before != after → commit writes.
+    assert slot_change.data["model"] == {"default": ""}
     assert before_change.data is not None
-    assert before_change.data["model"].get("ctx_size") == 4096
+    assert before_change.data["model"] == {"default": "old-model"}
     assert before_change.data != slot_change.data
     assert cs.changed
 
     store.commit(cs)
     with open(slot_path, "rb") as f:
         on_disk = tomllib.load(f)
-    assert on_disk["model"]["default"] == ""
-    assert on_disk["model"]["context_size"] == 4096
-    assert "ctx_size" not in on_disk["model"]
+    assert on_disk["model"] == {"default": ""}
 
 
 def test_store_disable_does_not_rewrite_backend_device_model(tmp_hal0_home: str) -> None:

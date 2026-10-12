@@ -44,7 +44,7 @@ def _fake_profile_catalog():
 
     fake_profile = ProfileConfig(
         flags="--flash-attn on",
-        mtp=False,
+        mtp="off",
     )
     return MagicMock(profile={"vulkan-radv": fake_profile}), fake_profile
 

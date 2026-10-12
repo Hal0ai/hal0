@@ -364,7 +364,7 @@ async def commit_scan_rows(
 
     Each row is a dict with at least ``path``. Optional fields override
     detection: ``id``, ``name``, ``backends``, ``capabilities``, ``provider``,
-    ``defaults`` (nested ``ModelDefaults`` shape). Missing fields are
+    ``defaults`` (file facts only — a tuning key skips the row). Missing fields are
     backfilled by re-running ``detect()`` on the path so the operator can
     edit only what matters and still get high-confidence defaults for the
     rest. ``provider`` defaults to ``derive_model_provider(backends)`` when
@@ -423,6 +423,15 @@ async def commit_scan_rows(
         defaults_payload = row.get("defaults")
         defaults_obj: ModelDefaults | None = None
         if isinstance(defaults_payload, dict) and defaults_payload:
+            # Facts only (ADR-0029): a tuning key belongs on a profile.
+            removed = sorted(
+                str(k) for k in defaults_payload if k not in ModelDefaults.model_fields
+            )
+            if removed:
+                skipped.append(
+                    {"path": str(resolved), "reason": f"defaults_key_removed:{','.join(removed)}"}
+                )
+                continue
             try:
                 defaults_obj = ModelDefaults.model_validate(defaults_payload)
             except Exception as exc:
@@ -2014,129 +2023,44 @@ async def inspect_hf_repo(body: dict[str, Any]) -> dict[str, Any]:
     return {"repo": repo, "cached": False, **result}
 
 
-# ── O10 guard: bare double-quoted JSON eaten by shell semantics ───────────────
+# ── the facts-only ``defaults`` screen (ADR-0029) ─────────────────────────────
 #
-# spec-flags-ownership §3 "JSON-token integrity": editable flag text carrying a
-# JSON value (e.g. ``--chat-template-kwargs '{"enable_thinking":false}'``) must
-# survive shlex-splitting intact to reach the runner. A common operator mistake
-# is to omit the surrounding SINGLE quotes:
-#
-#     --chat-template-kwargs {"enable_thinking":false}     # WRONG
-#
-# ``shlex.split`` then treats the double quotes as shell quoting and strips them,
-# yielding the token ``{enable_thinking:false}`` — no longer valid JSON, and the
-# runner rejects it (or worse, silently mis-parses). This guard catches exactly
-# that shape at SAVE time (model PUT + any slot-config writer that opts in) and
-# tells the operator to single-quote the JSON value, rather than letting a tune
-# that can never load through to launch. It runs BEFORE the managed-arg denylist
-# so the more actionable quoting message wins.
-
-
-def screen_extra_args_json(raw: str, *, segment: str = "extra_args") -> None:
-    """Reject ``raw`` when a bare double-quoted JSON value was eaten by the shell.
-
-    Detection (deliberately narrow — warning-level UX, one precise cause):
-    a ``shlex``-split token that *starts with* ``{`` but is NOT valid JSON,
-    while the RAW string contains the substring ``{"`` (proof a
-    double-quoted JSON object was typed). That combination only arises when
-    shell quote-stripping removed the JSON's own double quotes — a correctly
-    single-quoted ``'{"…":…}'`` survives as a token that IS valid JSON and is
-    never flagged.
-
-    Raises :class:`~hal0.errors.BadRequest` (``model.extra_args_json_quoting``)
-    with a message telling the operator to single-quote the value. A ``raw``
-    that does not shlex-parse at all is left for the caller's own
-    unparseable-string handling (this guard only inspects a clean token
-    list).
-    """
-    import json
-    import shlex
-
-    from hal0.errors import BadRequest
-
-    if not raw or not raw.strip():
-        return
-    if '{"' not in raw:
-        # No double-quoted JSON object present at all — nothing this guard
-        # is responsible for. (A single-quoted JSON value shlex-splits to a
-        # token that still literally contains ``{"``, so the correctly
-        # quoted case is NOT short-circuited here — it is passed through and
-        # accepted below because its token parses as valid JSON.)
-        return
-    try:
-        tokens = shlex.split(raw)
-    except ValueError:
-        # Unparseable as a whole — the caller (model PUT) raises its own
-        # ``model.extra_args_unparseable``; don't double-report.
-        return
-    for tok in tokens:
-        if not tok.startswith("{"):
-            continue
-        try:
-            json.loads(tok)
-        except ValueError:
-            raise BadRequest(
-                f"{segment} contains a JSON value whose double quotes were "
-                f"stripped by shell parsing (got token {tok!r}). Wrap the "
-                "JSON in SINGLE quotes so it survives intact, e.g. "
-                "--chat-template-kwargs '{\"enable_thinking\":false}'",
-                code="model.extra_args_json_quoting",
-                details={"segment": segment, "token": tok},
-            ) from None
-
-
-# #1414 / #1378: the launchable range for ``defaults.context_size``.
-#
-# FLOOR mirrors the model drawer's client-side reject (#1378, hardened in #1386)
-# and the slot drawer's own ≥ 128 gate, so the three surfaces agree on one
-# number. 0 / negative are the shapes the live box happily persisted before the
-# screen existed; both are unlaunchable — llama-server refuses a non-positive
-# --ctx-size, so the row could only ever fail at slot start.
-#
-# CEILING is an absurdity screen, not a capability claim: 2**24 tokens is ~16x
-# the largest advertised window on any shipping model (Llama 4 Scout's 10M) and
-# ~64x the biggest GGUF ``context_length`` seen in the wild catalog (262144).
-# It exists so a fat-fingered 99999999 fails at SAVE with an actionable message
-# instead of reserving a KV cache no host can allocate. Deliberately NOT
-# cross-checked against the row's own GGUF ``metadata.context_length``:
-# over-riding the header upward is legitimate (RoPE scaling), so that stays a
-# warning-shaped concern for a later pass.
-CONTEXT_SIZE_MIN = 128
-CONTEXT_SIZE_MAX = 2**24
+# ``ModelDefaults`` holds file facts only (chat template, tokenizer repo, MTP
+# heads, jinja). Every tune lives on the profile of the slot that runs the
+# model, so a write that still carries a tuning key is refused rather than
+# silently dropped.
 
 
 def _screen_model_defaults(defaults: dict[str, Any]) -> None:
-    """Typed screen for the incoming ``defaults`` patch (#1414).
+    """Typed screen for the incoming ``defaults`` patch.
 
     Two jobs, in order:
 
-    1. Parse the patch through ``ModelDefaults`` so client garbage
-       (``{"context_size": "abc"}``) fails as ``400 model.defaults_invalid``.
-       Before this, an unparseable value escaped all the way to
-       ``Model.model_validate`` inside :func:`hal0.registry.store.merge_update`,
-       which wraps EVERY failure in ``RegistryError`` — a 500 with a raw
-       pydantic traceback in ``details.reason`` for a plain bad body.
-    2. Range-check ``context_size`` against
-       ``[CONTEXT_SIZE_MIN, CONTEXT_SIZE_MAX]`` → ``400
-       model.context_size_out_of_range``.
-
-    Lives here rather than as a ``Field(ge=…, le=…)`` constraint on
-    ``ModelDefaults.context_size`` on purpose: a model-level constraint also
-    applies on the READ path, so any already-persisted row carrying an
-    out-of-range value would stop loading — the exact "policy applied to data
-    that predates it" trap #1411 documents on the profile side. Screening at
-    the write boundary rejects new garbage while leaving existing rows
-    readable (and therefore fixable through the drawer).
+    1. A key outside :class:`~hal0.registry.model.ModelDefaults` (``extra_args``,
+       ``context_size``, ``profile``, ``enable_thinking``, ``vision``, …) is a
+       ``422 model.defaults_key_removed`` pointing the client at the profile.
+    2. A fact with a value of the wrong type (``{"mtp": "maybe"}``) fails as
+       ``400 model.defaults_invalid`` instead of escaping to
+       :func:`hal0.registry.store.merge_update`, which wraps every failure in a
+       500 with a raw pydantic traceback.
     """
     from pydantic import ValidationError
 
-    from hal0.errors import BadRequest
+    from hal0.errors import BadRequest, UnprocessableEntity
     from hal0.registry.model import ModelDefaults
 
-    # Only the keys the client actually sent — `merge_update` keeps the rest, and
-    # a stored value that predates this screen must not fail someone else's patch.
+    removed = sorted(str(k) for k in defaults if k not in ModelDefaults.model_fields)
+    if removed:
+        raise UnprocessableEntity(
+            f"defaults carries key(s) the model no longer owns: {', '.join(removed)}. "
+            "A model row holds file facts only (chat_template, tokenizer_repo, mtp, "
+            "jinja); every tune belongs on the profile of the slot that runs it.",
+            code="model.defaults_key_removed",
+            details={"keys": removed, "allowed": sorted(ModelDefaults.model_fields)},
+        )
+
     try:
-        parsed = ModelDefaults.model_validate(defaults)
+        ModelDefaults.model_validate(defaults)
     except ValidationError as exc:
         first = exc.errors()[0] if exc.errors() else {}
         loc = ".".join(str(p) for p in first.get("loc", ())) or "defaults"
@@ -2145,21 +2069,6 @@ def _screen_model_defaults(defaults: dict[str, Any]) -> None:
             code="model.defaults_invalid",
             details={"field": f"defaults.{loc}", "reason": first.get("msg")},
         ) from exc
-
-    ctx = parsed.context_size
-    if ctx is not None and not (CONTEXT_SIZE_MIN <= ctx <= CONTEXT_SIZE_MAX):
-        raise BadRequest(
-            f"defaults.context_size must be between {CONTEXT_SIZE_MIN} and "
-            f"{CONTEXT_SIZE_MAX} tokens (got {ctx}) — a context size outside "
-            "that range cannot launch",
-            code="model.context_size_out_of_range",
-            details={
-                "field": "defaults.context_size",
-                "value": ctx,
-                "min": CONTEXT_SIZE_MIN,
-                "max": CONTEXT_SIZE_MAX,
-            },
-        )
 
 
 # ── the vision↔mmproj invariant (#1380 → #1393) ───────────────────────────────
@@ -2235,24 +2144,16 @@ def screen_model_write(
     runner_images: Any = None,
     existing: dict[str, Any] | None = None,
 ) -> None:
-    """Validate the launch-affecting fields of a model create/update/validate body.
+    """Validate a model create/update/validate body.
 
-    Raises :class:`~hal0.errors.BadRequest` on the first violation, with the same
-    envelope the launch path and the dashboard key on. Shared by
-    ``POST /api/models``, ``PUT /api/models/{id}`` and ``POST /api/models/validate``
-    so the three can never drift (UI-API-1 item 1). Screens:
+    Raises :class:`~hal0.errors.BadRequest` (or :class:`~hal0.errors.UnprocessableEntity`
+    for a removed ``defaults`` key) on the first violation, with the same envelope
+    the dashboard keys on. Shared by ``POST /api/models``, ``PUT /api/models/{id}``
+    and ``POST /api/models/validate`` so the three can never drift. Screens:
 
-    * ``defaults`` as a whole — parses against ``ModelDefaults`` so a malformed
-      value is ``400 model.defaults_invalid`` instead of a 500 leaking a pydantic
-      traceback, then range-checks ``context_size`` (``400
-      model.context_size_out_of_range``). See :func:`_screen_model_defaults` (#1414).
-    * ``defaults.extra_args`` — shell-quoting integrity (O10), then the slot-
-      hardware partition guard (spec-hw-slot-ownership §5: ``-ngl``/``-dev``/
-      ``--threads`` belong on the slot, not the device-agnostic model — raised as
-      ``slot.hardware_flag_denied``), then the managed-arg denylist (§21.7), so a
-      smuggled ``--model``/``--host``/``--port``/``--ctx-size``/``--alias`` fails
-      at SAVE with the same ``slot.managed_arg_denied`` code the launcher raises,
-      instead of persisting a row that can never load (or silently rebinds a slot).
+    * ``defaults`` as a whole — facts only (ADR-0029). A tuning key is ``422
+      model.defaults_key_removed``; a malformed fact value is ``400
+      model.defaults_invalid``. See :func:`_screen_model_defaults`.
     * ``capabilities`` + ``mmproj`` — the vision↔mmproj invariant (#1393), via
       :func:`screen_vision_mmproj`. ``existing`` is the stored row (``None`` on
       create) and the two fields are read body-over-stored, because PUT bodies
@@ -2268,12 +2169,9 @@ def screen_model_write(
       present, else ``400 model.provider_invalid``. ``None``/absent means
       "derive" and is never screened here.
 
-    spec-hw-slot-ownership: ``preferred_runner`` is no longer a model field (the
-    runner is slot-owned via ``SlotConfig.binary``) — it is neither validated nor
-    persisted here; a stray key in the body is silently ignored. ``runner_images``
-    is retained (accepted, unused) so the three call sites need no change.
+    ``runner_images`` is accepted and unused so the call sites need no change.
     """
-    del runner_images  # preferred_runner is gone from the model — nothing to screen
+    del runner_images
     from hal0.errors import BadRequest
 
     if "capabilities" in body or "mmproj" in body:
@@ -2286,48 +2184,6 @@ def screen_model_write(
     defaults = body.get("defaults")
     if isinstance(defaults, dict):
         _screen_model_defaults(defaults)
-    if isinstance(defaults, dict) and isinstance(defaults.get("extra_args"), str):
-        import shlex
-
-        from hal0.slots.argv import (
-            _deny_managed_flags,
-            _deny_slot_hardware_flags,
-            deny_reasoning_format_none,
-        )
-
-        seg = "model defaults.extra_args"
-        raw = defaults["extra_args"]
-        # Strip trailing backslash that would otherwise make shlex.split()
-        # raise "No escaped character" (a common copy-paste artefact).
-        stripped = raw.rstrip().rstrip("\\")
-        # O10 guard (spec §3): catch a bare double-quoted JSON value the shell
-        # would eat BEFORE the denylist/parse checks so the operator gets the
-        # actionable "single-quote it" message.
-        screen_extra_args_json(stripped, segment=seg)
-        try:
-            tokens = shlex.split(stripped)
-        except ValueError as exc:
-            raise BadRequest(
-                f"defaults.extra_args is not parseable as a flag string: {exc}",
-                code="model.extra_args_unparseable",
-            ) from exc
-        # spec-hw-slot-ownership §5: reject the grid-owned hardware flags FIRST so
-        # ``-ngl``/``-dev``/``--threads`` get the "belongs on the slot" message
-        # (mirrors the client-side model-drawer reject) rather than the generic
-        # managed-arg one — ``-ngl`` is in both sets.
-        _deny_slot_hardware_flags(tokens, segment=seg)
-        _deny_managed_flags(tokens, segment=seg)
-        # #2545: reject a save that INTRODUCES `--reasoning-format none`; a row
-        # that already carries it stays editable (resolve_argv strips it at launch).
-        prior_defaults = (existing or {}).get("defaults")
-        prior_extra = prior_defaults.get("extra_args") if isinstance(prior_defaults, dict) else None
-        prior_tokens: list[str] | None = None
-        if isinstance(prior_extra, str):
-            try:
-                prior_tokens = shlex.split(prior_extra.rstrip().rstrip("\\"))
-            except ValueError:
-                prior_tokens = []
-        deny_reasoning_format_none(tokens, segment=seg, grandfathered=prior_tokens)
 
     provider = body.get("provider")
     if provider is not None:
@@ -2342,7 +2198,6 @@ def screen_model_write(
 
 # (The duplicate-model service — ``POST /api/models/{id}/duplicate`` — was
 # removed 2026-08: duplicate registry rows for "same weights, different
-# settings" confused which row was the original. Per-slot runtime divergence
-# is ``SlotConfig.profile`` (runner family + image); a per-slot *flag* tune
-# has no path today — the model's ``defaults`` is the whole tune and is
-# shared by every slot bound to it (spec-flags-ownership §2).)
+# settings" confused which row was the original. Running one file two ways is
+# two profiles: a model holds file facts, the profile of the slot that runs it
+# holds the tune.)

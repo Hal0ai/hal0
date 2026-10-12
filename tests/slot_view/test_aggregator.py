@@ -426,41 +426,42 @@ class TestConfigEnrichment:
         assert "npu" not in out["chat"]
 
     def test_config_fields_surfaced(self) -> None:
-        # spec-hw-slot-ownership §1: enable_thinking/mtp/vision are no longer
-        # slot facts (they moved to ModelDefaults) — a stray raw TOML key
-        # (pre-migration debris, still tolerated by SlotConfig's
-        # extra="allow") must NOT be lifted onto the enrichment payload.
+        # ADR-0029: the slot payload carries placement and lifecycle; every
+        # tune lives on the slot's profile. Stray tuning keys in a raw dict
+        # (an unconverted file) are never lifted onto the payload.
         cfg = _llm_cfg(
             idle_timeout_s=900,
-            workers=2,
-            server={"extra_args": "--flash-attn on"},
+            n_gpu_layers=24,
             npu={"asr": True, "embed": False},
         )
-        cfg["model"]["n_gpu_layers"] = 24
-        cfg["model"]["rope_freq_base"] = 10000.0
-        cfg["model"]["labels"] = ["tool-calling"]
-        cfg["enable_thinking"] = True  # pre-migration debris — must be ignored
-        cfg["mtp"] = True  # pre-migration debris — must be ignored
-        cfg["vision"] = False  # pre-migration debris — must be ignored
+        cfg["enable_thinking"] = True
+        cfg["mtp"] = True
+        cfg["vision"] = False
         cfg["chat_template"] = "chatml"
-        out = config_enrichment([cfg])
-        e = out["chat"]
+        cfg["workers"] = 2
+        cfg["server"] = {"extra_args": "--flash-attn on"}
+        cfg["model"]["rope_freq_base"] = 10000.0
+        cfg["model"]["context_size"] = 32768
+        e = config_enrichment([cfg])["chat"]
         assert e["type"] == "llm"
         assert e["model_default"] == "qwen3-4b"
-        assert e["labels"] == ["tool-calling"]
         # #1369: no ``enabled`` key is lifted — ``model_default`` IS the
         # activation signal the dashboard reads.
         assert "enabled" not in e
-        assert "enable_thinking" not in e
-        assert "mtp" not in e
-        assert "vision" not in e
-        assert e["chat_template"] == "chatml"
         assert e["n_gpu_layers"] == 24
-        assert e["rope_freq_base"] == 10000.0
         assert e["idle_timeout_s"] == 900
-        assert e["workers"] == 2
-        assert e["llamacpp_args"] == "--flash-attn on"
         assert e["npu"] == {"asr": True, "embed": False, "chat": True}
+        for removed in (
+            "enable_thinking",
+            "mtp",
+            "vision",
+            "chat_template",
+            "workers",
+            "llamacpp_args",
+            "rope_freq_base",
+            "ctx_max",
+        ):
+            assert removed not in e, removed
 
     def test_hw_grid_fields_surfaced_top_level(self) -> None:
         # spec-hw-slot-ownership §2/§3: NGL / THREADS / BINARY / image_pin are
@@ -507,52 +508,26 @@ class TestConfigEnrichment:
         e = config_enrichment([cfg])["chat"]
         assert e["binary"] == "ghost"
 
-    def test_ngl_prefers_top_level_over_nested(self) -> None:
-        # Migration compat: a slot with BOTH the legacy nested
-        # [model].n_gpu_layers and the new top-level field surfaces the
-        # top-level value (the §6 migration folds nested → top-level).
+    def test_ngl_is_read_only_from_the_top_level(self) -> None:
+        # NGL is slot placement (a top-level field). A nested
+        # [model].n_gpu_layers is an unconverted tuning key: never read.
         cfg = _llm_cfg(n_gpu_layers=40)
         cfg["model"]["n_gpu_layers"] = 12
         assert config_enrichment([cfg])["chat"]["n_gpu_layers"] == 40
-
-    def test_ngl_falls_back_to_nested_when_no_top_level(self) -> None:
-        # Pre-migration slot: only the legacy nested value exists → surface it.
-        cfg = _llm_cfg()
-        cfg["model"]["n_gpu_layers"] = 12
-        assert config_enrichment([cfg])["chat"]["n_gpu_layers"] == 12
-
-    def test_ctx_max_from_context_size(self) -> None:
-        # The Inference engine pane reads ctx_max to render "ctx used / max".
-        # Canonical key is [model].context_size.
-        cfg = _llm_cfg()
-        cfg["model"]["context_size"] = 32768
-        out = config_enrichment([cfg])
-        assert out["chat"]["ctx_max"] == 32768
-
-    def test_ctx_max_from_ctx_size_alias(self) -> None:
-        # The dashboard write-path alias ``ctx_size`` is honoured as a
-        # fallback (it is folded to context_size on disk, but tolerate both).
-        cfg = _llm_cfg()
-        cfg["model"]["ctx_size"] = 16384
-        out = config_enrichment([cfg])
-        assert out["chat"]["ctx_max"] == 16384
+        nested_only = _llm_cfg()
+        nested_only["model"]["n_gpu_layers"] = 12
+        assert config_enrichment([nested_only])["chat"]["n_gpu_layers"] == -1
 
     def test_absent_config_fields_surface_as_defaults(self) -> None:
-        out = config_enrichment([_llm_cfg()])
-        e = out["chat"]
-        # spec-hw-slot-ownership §1: no longer lifted at all (model-owned).
-        assert "enable_thinking" not in e
-        assert "mtp" not in e
-        assert "vision" not in e
-        assert e["chat_template"] is None
+        e = config_enrichment([_llm_cfg()])["chat"]
         assert e["n_gpu_layers"] == -1
-        assert e["rope_freq_base"] is None
         assert e["idle_timeout_s"] is None
-        assert e["workers"] is None
-        assert e["llamacpp_args"] is None
+        assert e["metrics"] is True
         assert "npu" not in e
-        # ctx_max is omitted when the slot configures no context window.
+        # The window is not a config-field lift: ``ctx_effective`` /
+        # ``ctx_source`` come from the profile resolver at snapshot time.
         assert "ctx_max" not in e
+        assert "ctx_effective" not in e
 
 
 # ── loaded-model derivation from slot snapshots ──────────────────────────────
@@ -617,31 +592,20 @@ class TestContainerEnrichment:
         assert e["image"] is None
         assert e["resolved_command"] is None
 
-    async def test_device_class_lifted_from_profile(self, tmp_hal0_home: str) -> None:
-        # A custom profile with explicit device_class surfaces that metadata so
-        # the UI can group logical workload families. Backend remains slot
-        # hardware state, not a profile-derived selector.
-        ProfileCatalog().create("explicit-gpu", ProfileConfig(flags="", device_class="gpu"))
+    async def test_a_profile_contributes_no_hardware_class(self, tmp_hal0_home: str) -> None:
+        # ADR-0029: a profile selects no hardware (``device_class`` /
+        # ``backend`` are gone from it), so the container enrichment lifts
+        # neither from the slot's profile; the slot's device is the hardware.
+        ProfileCatalog().create("explicit", ProfileConfig(flags="-fa auto", ctx_size=8192))
         out = await container_enrichment(
-            [_container_cfg(profile="explicit-gpu")],
+            [_container_cfg(profile="explicit")],
             pull_jobs={},
             provider=FakeContainerProvider(active=True, healthy=True),
         )
         e = out["gpu-chat"]
-        assert e["device_class"] == "gpu"
-        assert e["backend"] is None
-
-    async def test_device_class_for_non_gpu_profile(self, tmp_hal0_home: str) -> None:
-        # Non-GPU custom profile: device_class drives display; backend is None.
-        ProfileCatalog().create("explicit-cpu", ProfileConfig(flags="", device_class="cpu"))
-        out = await container_enrichment(
-            [_container_cfg(name="tts-slot", profile="explicit-cpu")],
-            pull_jobs={},
-            provider=FakeContainerProvider(active=True, healthy=True),
-        )
-        e = out["tts-slot"]
-        assert e["device_class"] == "cpu"
-        assert e["backend"] is None
+        assert e["profile"] == "explicit"
+        assert "device_class" not in e
+        assert "backend" not in e
 
     async def test_active_but_unhealthy_is_starting(self) -> None:
         out = await container_enrichment(
@@ -1026,17 +990,14 @@ class TestMemoryAttribution:
 # ── concern 4.5: ctx_max EFFECTIVE-window re-resolution (#1788) ─────────────
 
 
-class _FakeCtxDefaults:
-    def __init__(self, context_size: int | None) -> None:
-        self.context_size = context_size
-
-
 class _FakeCtxModel:
-    def __init__(self, context_size: int | None) -> None:
-        self.defaults = _FakeCtxDefaults(context_size)
+    """A registry row whose file declares ``native`` tokens of context."""
+
+    def __init__(self, native: int | None) -> None:
+        self._native = native
 
     def model_dump(self) -> dict[str, Any]:
-        return {"defaults": {"context_size": self.defaults.context_size}, "metadata": {}}
+        return {"metadata": {"context_length": self._native} if self._native else {}}
 
 
 class _FakeCtxRegistry:
@@ -1049,68 +1010,76 @@ class _FakeCtxRegistry:
         return self._models[model_id]
 
 
-class TestCtxMaxEffectiveResolution:
-    async def test_ctx_max_downgraded_to_model_window(self, no_mem: None) -> None:
-        # #1788: the slot TOML ceiling (65536) is stale/larger than what the
-        # model actually declares (8000) — the dashboard must surface the
-        # EFFECTIVE window, not the raw ceiling.
-        cfg = _llm_cfg(model={"default": "qwen3-4b", "context_size": 65536})
-        registry = _FakeCtxRegistry({"qwen3-4b": _FakeCtxModel(8000)})
-        agg = _agg(
-            FakeSlotManager(slots=[_slot(model_id="qwen3-4b")], configs=[cfg]),
-            registry=registry,
-        )
-        views = await agg.snapshot()
-        assert views[0].to_dict()["ctx_max"] == 8000
+#: Not in the curated catalogue, so an unknown native window stays unknown.
+_CTX_MODEL = "uncatalogued-ctx-test-model"
 
-    async def test_ctx_max_kept_at_hardware_ceiling_when_smaller(self, no_mem: None) -> None:
-        # A genuinely smaller slot ceiling (VRAM clamp) still wins over a
-        # larger model-declared window.
-        cfg = _llm_cfg(model={"default": "qwen3-4b", "context_size": 16384})
-        registry = _FakeCtxRegistry({"qwen3-4b": _FakeCtxModel(65536)})
-        agg = _agg(
-            FakeSlotManager(slots=[_slot(model_id="qwen3-4b")], configs=[cfg]),
-            registry=registry,
-        )
-        views = await agg.snapshot()
-        assert views[0].to_dict()["ctx_max"] == 16384
 
-    async def test_ctx_max_resolution_failure_degrades_to_raw_ceiling(
-        self, no_mem: None, monkeypatch: pytest.MonkeyPatch
+async def _ctx_view(cfg: dict[str, Any], native: int | None) -> dict[str, Any]:
+    model_id = cfg["model"]["default"]
+    agg = _agg(
+        FakeSlotManager(slots=[_slot(name=cfg["name"], model_id=model_id)], configs=[cfg]),
+        registry=_FakeCtxRegistry({model_id: _FakeCtxModel(native)}),
+    )
+    views = await agg.snapshot()
+    return views[0].to_dict()
+
+
+class TestCtxEffectiveResolution:
+    """ADR-0029: ``ctx_effective`` / ``ctx_source`` come from the one resolver
+    the launch path uses (the slot profile's ``ctx_size``, else the model's
+    native window capped at 32768, else 8192). There is no slot ceiling."""
+
+    @pytest.mark.parametrize(
+        ("profile", "native", "expected"),
+        [
+            ("agent", 8000, (65536, "profile")),
+            ("chat", 8000, (8000, "native")),
+            ("chat", 262144, (32768, "native")),
+            ("chat", None, (8192, "fallback")),
+        ],
+    )
+    async def test_window_and_source(
+        self,
+        no_mem: None,
+        tmp_hal0_home: str,
+        profile: str,
+        native: int | None,
+        expected: tuple[int, str],
     ) -> None:
-        # A broken resolver must never take down the whole slots list — fall
-        # back to the pre-fix (raw ceiling) value instead of raising.
-        def boom(*_a: Any, **_kw: Any) -> int:
+        cfg = _llm_cfg(profile=profile, model={"default": _CTX_MODEL})
+        d = await _ctx_view(cfg, native)
+        assert (d["ctx_effective"], d["ctx_source"]) == expected
+        assert "ctx_max" not in d
+
+    async def test_flm_slot_reports_its_profile_window(
+        self, no_mem: None, tmp_hal0_home: str
+    ) -> None:
+        cfg = _llm_cfg(device="npu", profile="flm", model={"default": "gemma3:1b"})
+        d = await _ctx_view(cfg, None)
+        assert (d["ctx_effective"], d["ctx_source"]) == (16384, "profile")
+
+    async def test_resolution_failure_degrades_to_none(
+        self, no_mem: None, tmp_hal0_home: str, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A broken resolver must never take down the whole slots list.
+        def boom(*_a: Any, **_kw: Any) -> Any:
             raise RuntimeError("resolver exploded")
 
-        monkeypatch.setattr("hal0.providers.container.resolve_effective_context_size", boom)
-        cfg = _llm_cfg(model={"default": "qwen3-4b", "context_size": 65536})
-        agg = _agg(
-            FakeSlotManager(slots=[_slot(model_id="qwen3-4b")], configs=[cfg]),
-            registry=_FakeCtxRegistry({}),
-        )
-        views = await agg.snapshot()
-        assert views[0].to_dict()["ctx_max"] == 65536
+        monkeypatch.setattr("hal0.providers.container.slot_effective_context", boom)
+        d = await _ctx_view(_llm_cfg(profile="chat", model={"default": _CTX_MODEL}), 8000)
+        assert d["ctx_effective"] is None
+        assert d["ctx_source"] is None
 
-    async def test_ctx_max_resolution_skipped_for_non_llm_slot_kind(self, no_mem: None) -> None:
-        """#1859: only an "llm" slot runs llama-server with a resolvable
-        context window. A tts/transcription/embedding/image slot's raw
-        ``[model].context_size`` (a legacy/misconfigured value — these kinds
-        have no real notion of one) must pass through UNTOUCHED, never
-        re-resolved through the llama-only resolver. Same numbers as
-        ``test_ctx_max_downgraded_to_model_window`` above — where the "llm"
-        case DOES resolve down to 8000 — so an unchanged 65536 here proves
-        this is a skip, not a coincidental match."""
-        cfg = _llm_cfg(
-            name="voice", type="tts", model={"default": "kokoro-v1", "context_size": 65536}
-        )
-        registry = _FakeCtxRegistry({"kokoro-v1": _FakeCtxModel(8000)})
-        agg = _agg(
-            FakeSlotManager(slots=[_slot(name="voice", model_id="kokoro-v1")], configs=[cfg]),
-            registry=registry,
-        )
-        views = await agg.snapshot()
-        assert views[0].to_dict()["ctx_max"] == 65536
+    async def test_missing_profile_has_no_window(self, no_mem: None, tmp_hal0_home: str) -> None:
+        d = await _ctx_view(_llm_cfg(profile="no-such", model={"default": _CTX_MODEL}), 8000)
+        assert (d["ctx_effective"], d["ctx_source"]) == (None, None)
+
+    async def test_non_llm_slot_kind_has_no_window(self, no_mem: None, tmp_hal0_home: str) -> None:
+        """#1859: a tts slot has no context-window concept — no ctx fields."""
+        cfg = _llm_cfg(name="voice", type="tts", profile="kokoro", model={"default": "kokoro-v1"})
+        d = await _ctx_view(cfg, 8000)
+        assert "ctx_effective" not in d
+        assert "ctx_source" not in d
 
 
 # ── concern 5: metric injection ─────────────────────────────────────────────

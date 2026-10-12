@@ -29,9 +29,10 @@ from fastapi import APIRouter, Request, Response
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from hal0.api._audit import record_action
-from hal0.config.schema import ProfileConfig
+from hal0.config.schema import CTX_SIZE_MAX, CTX_SIZE_MIN, ProfileConfig
 from hal0.errors import BadRequest
 from hal0.profiles import (
+    UNSET,
     ProfileCatalog,
     ProfilePatch,
     runtime_family_of,
@@ -59,29 +60,35 @@ _PROFILE_NAME_RE = r"^[a-z0-9][a-z0-9_-]{0,31}$"
 
 
 class ProfileBody(BaseModel):
-    """Body for POST /api/profiles and PUT /api/profiles/{name}."""
+    """Body for POST /api/profiles (ADR-0029: a profile is a complete tune)."""
 
     name: str = Field(
         ...,
         description="Profile key (kebab-case, ≤32 chars, leading alphanumeric).",
     )
-    flags: str = Field(default="", description="Bench-tuned llama-server CLI flags.")
-    mtp: bool = Field(default=False, description="Append MTP bundle to flags when True.")
-    device_class: Literal["gpu", "cpu", "npu", "img"] | None = Field(
-        default=None,
+    flags: str = Field(
+        default="",
         description=(
-            "INERT match-only fit hint — selects no hardware. None (the default) "
-            "means device-agnostic, which is what every shipped seed is and what "
-            "a tuning-only profile should be. Was `'gpu'`, which silently "
-            "stamped a hardware claim onto every profile created without one."
+            "Free llama-server flags (KV cache types, batch sizes, sampling, "
+            "--parallel, ...). Hardware, managed and model-fact flags are refused."
         ),
     )
-    backend: Literal["rocm", "vulkan", "cuda"] | None = Field(
+    ctx_size: int | None = Field(
         default=None,
         description=(
-            "INERT match-only fit hint (rocm|vulkan|cuda); None for non-GPU "
-            "profiles. Selects no runtime — the slot's `device` does."
+            f"Context window, {CTX_SIZE_MIN}..{CTX_SIZE_MAX}. Omit/null = the model's "
+            "native window capped at 32768 (8192 when unknown)."
         ),
+    )
+    enable_thinking: bool | None = Field(
+        default=None,
+        description="Request-time reasoning default for slots running this profile.",
+    )
+    vision: Literal["auto", "off"] = Field(
+        default="auto", description="'auto' loads the model's mmproj when it has one."
+    )
+    mtp: Literal["auto", "off"] = Field(
+        default="auto", description="'auto' drafts with the model's MTP heads when it has them."
     )
     runner: str | None = Field(
         default=None,
@@ -92,7 +99,6 @@ class ProfileBody(BaseModel):
         description="Provenance: profile this one was cloned from (informational).",
     )
     intent: str = Field(default="", description="Human label for the card headline.")
-    quant: str = Field(default="", description="Weight quant shown as a card chip.")
 
     @field_validator("name")
     @classmethod
@@ -138,21 +144,30 @@ class ProfileGenerateBody(BaseModel):
 
 
 class ProfileUpdateBody(BaseModel):
-    """Body for PUT /api/profiles/{name} — name is taken from the URL."""
+    """Body for PUT /api/profiles/{name} — name is taken from the URL.
 
-    flags: str | None = Field(default=None, description="Bench-tuned llama-server CLI flags.")
-    mtp: bool | None = Field(default=None, description="MTP toggle.")
-    device_class: Literal["gpu", "cpu", "npu", "img"] | None = Field(
-        default=None,
-        description="INERT match-only fit hint; None leaves the stored value unchanged.",
-    )
-    backend: Literal["rocm", "vulkan", "cuda"] | None = Field(
+    Sparse: an omitted field keeps its stored value. ``ctx_size`` and
+    ``enable_thinking`` additionally take an explicit ``null`` to CLEAR the
+    stored value (omitted ≠ null, told apart through ``model_fields_set``).
+    """
+
+    flags: str | None = Field(default=None, description="Free llama-server CLI flags.")
+    ctx_size: int | None = Field(
         default=None,
         description=(
-            "INERT match-only fit hint (rocm|vulkan|cuda); None leaves the "
-            "stored value unchanged. `cuda` was missing here while ProfileConfig "
-            "accepted it, so a CUDA profile 422'd on every PUT — un-editable."
+            f"Context window, {CTX_SIZE_MIN}..{CTX_SIZE_MAX}. Omit to leave alone; "
+            "null clears it back to the model's native window."
         ),
+    )
+    enable_thinking: bool | None = Field(
+        default=None,
+        description="Reasoning default. Omit to leave alone; null clears it.",
+    )
+    vision: Literal["auto", "off"] | None = Field(
+        default=None, description="'auto' | 'off'. Omit to leave alone."
+    )
+    mtp: Literal["auto", "off"] | None = Field(
+        default=None, description="'auto' | 'off'. Omit to leave alone."
     )
     runner: str | None = Field(
         default=None,
@@ -165,7 +180,17 @@ class ProfileUpdateBody(BaseModel):
         ),
     )
     intent: str | None = Field(default=None, description="Human label for the card headline.")
-    quant: str | None = Field(default=None, description="Weight quant shown as a card chip.")
+
+
+def _check_ctx_size(ctx_size: int | None) -> None:
+    """400 ``profiles.ctx_size_out_of_range`` for a window outside the schema bounds."""
+    if ctx_size is None or CTX_SIZE_MIN <= ctx_size <= CTX_SIZE_MAX:
+        return
+    raise BadRequest(
+        f"ctx_size {ctx_size} is out of range ({CTX_SIZE_MIN}..{CTX_SIZE_MAX})",
+        code="profiles.ctx_size_out_of_range",
+        details={"ctx_size": ctx_size, "min": CTX_SIZE_MIN, "max": CTX_SIZE_MAX},
+    )
 
 
 # ── routes ────────────────────────────────────────────────────────────────────
@@ -178,17 +203,22 @@ def list_profiles() -> list[dict[str, Any]]:
     Each item shape::
 
         {
-            "name":           "rocm",
-            "flags":          "-fa on ...",
-            "mtp":            false,
-            "device_class":   "gpu",          # gpu | cpu | npu | img
-            "backend":        "rocm",         # rocm | vulkan | null (non-GPU)
-            "resolved_flags": "-fa on ...",   # flags + MTP bundle when mtp=true
-            "intent":         "MoE agents",   # card headline label
-            "quant":          "FP4",          # weight quant chip
-            "tps":            52.8,           # bench tok/s (null when un-benched)
-            "rtf":            null,           # real-time factor for synth slots
-            "used_by":        ["primary"]     # slots bound to this profile
+            "name":                 "agent",
+            "flags":                "-fa on -ctk q8_0 ...",
+            "resolved_flags":       "-fa on -ctk q8_0 ...",  # == flags
+            "ctx_size":             65536,       # int | null (null = model native, capped)
+            "enable_thinking":      null,        # bool | null
+            "vision":               "auto",      # auto | off
+            "mtp":                  "auto",      # auto | off
+            "runner":               null,        # RUNNER_IMAGES key | null
+            "seed":                 true,
+            "runtime_family":       "llama-server",
+            "supported_slot_types": ["llm", "embedding", "reranking"],
+            "cloned_from":          null,
+            "intent":               "Long-context agent",
+            "tps":                  52.8,        # bench tok/s (null when un-benched)
+            "rtf":                  null,        # real-time factor for synth slots
+            "used_by":              ["agent"]    # slots bound to this profile
         }
 
     Raises:
@@ -197,19 +227,14 @@ def list_profiles() -> list[dict[str, Any]]:
     return [profile.to_dict() for profile in ProfileCatalog().list()]
 
 
-# `screen_profile_flags` (hal0.profiles) rejects hal0-owned flags in a profile's
-# freeform `flags` text — spec-hw-slot-ownership §5 (-ngl/--device/--threads
-# belong on the slot's hardware grid) and §21.7 (--model/--host/--port/
-# --ctx-size/--alias are hal0-computed). Symmetric to the model
-# `defaults.extra_args` guard in `models_service.screen_model_write`, raising the
-# same slot.hardware_flag_denied / slot.managed_arg_denied envelope so both
-# surfaces render one path.
-#
-# This file used to carry a route-local `_screen_profile_flags` duplicating the
-# catalog's screen token-for-token. #1411 needed the UPDATE path to grandfather a
-# profile's own stored hardware flags, and a screen in two places would have had
-# to learn that in two places — so the route delegates to the catalog's one
-# screen, which is also the seam the import and CLI paths hit.
+# `screen_profile_flags` (hal0.profiles) is the one flag screen for every write
+# seam (this route, import, CLI). A profile may not carry hardware flags
+# (-ngl/--device/--threads: the slot's typed fields), hal0-managed flags
+# (--model/--host/--port/--alias/--ctx-size: use `ctx_size`), model-fact flags
+# (--jinja, --chat-template*, --mmproj*, --no-mmproj*), --spec-draft-device or
+# --reasoning-format none. Hardware/managed denials raise
+# slot.hardware_flag_denied / slot.managed_arg_denied, model-fact flags
+# profiles.model_fact_flag_denied, reasoning-format slot.reasoning_format_none_denied.
 
 
 @router.post("", status_code=201)
@@ -220,12 +245,13 @@ async def create_profile(body: ProfileBody, request: Request) -> dict[str, Any]:
 
     Raises:
         409 profiles.exists: name already exists (seed or custom).
-        422: pydantic validation failure (bad name, …).
+        422: pydantic validation failure (bad name, vision/mtp not auto|off, …).
+        400 profiles.ctx_size_out_of_range: ctx_size outside 128..16777216.
         400 slot.hardware_flag_denied: flags carry a slot-owned hardware flag.
         400 slot.managed_arg_denied: flags carry a hal0-managed flag.
+        400 profiles.model_fact_flag_denied: flags carry a model-fact flag.
     """
-    # spec-hw-slot-ownership §5 + §21.7: reject slot-hardware and managed flags
-    # before persisting. A create has no stored baseline, so no grandfathering.
+    _check_ctx_size(body.ctx_size)
     screen_profile_flags(body.flags)
     async with record_action(
         request, category="profile", action="profile.create", target=body.name
@@ -234,19 +260,21 @@ async def create_profile(body: ProfileBody, request: Request) -> dict[str, Any]:
             body.name,
             ProfileConfig(
                 flags=body.flags,
+                ctx_size=body.ctx_size,
+                enable_thinking=body.enable_thinking,
+                vision=body.vision,
                 mtp=body.mtp,
-                device_class=body.device_class,
-                backend=body.backend,
                 runner=body.runner,
                 cloned_from=body.cloned_from,
                 intent=body.intent,
-                quant=body.quant,
             ),
         )
         rec.after = {
             "name": body.name,
-            "device_class": body.device_class,
-            "backend": body.backend,
+            "ctx_size": body.ctx_size,
+            "enable_thinking": body.enable_thinking,
+            "vision": body.vision,
+            "mtp": body.mtp,
         }
     return profile.to_dict()
 
@@ -342,12 +370,14 @@ async def import_profile_route(request: Request, response: Response) -> dict[str
 
     A runtime this box does not have is STRIPPED, never a block: import stays
     portable, so a profile authored on a richer box still lands (flags and
-    quant intact) — it just lands with no runtime pinned. Both the dry run
+    tune intact) — it just lands with no runtime pinned. Both the dry run
     and the commit response report it as ``runner_stripped``, alongside the
     envelope's own ``runner`` and the profile's ``runtime_family``.
 
     Raises:
         400 profiles.bad_envelope: not a valid hal0.profile envelope.
+        400 profiles.envelope_schema_unsupported: a schema-1 envelope (re-export
+            from hal0 1.5).
         400 profiles.checksum_mismatch: checksum does not cover the body (#1416).
         400 profiles.import_no_name: commit requested without a name.
         400 slot.hardware_flag_denied / slot.managed_arg_denied: the envelope's
@@ -473,16 +503,16 @@ def export_profile(name: str) -> dict[str, Any]:
     resolved = ProfileCatalog().resolve(name)
     cfg = ProfileConfig(
         flags=resolved.flags,
-        mtp=resolved.mtp,
-        device_class=resolved.device_class,
-        backend=resolved.backend,
+        ctx_size=resolved.ctx_size,
+        enable_thinking=resolved.enable_thinking,
+        vision=resolved.vision,  # type: ignore[arg-type]  # ResolvedProfile carries the validated literal
+        mtp=resolved.mtp,  # type: ignore[arg-type]
         # The envelope is the import preview's only source of runtime truth,
         # so the export has to actually carry `runner` — it was omitted here
         # while every other ProfileConfig field was copied across.
         runner=resolved.runner,
         cloned_from=resolved.cloned_from,
         intent=resolved.intent,
-        quant=resolved.quant,
     )
     return export_envelope(name, cfg, exported_at=datetime.now(UTC).isoformat())
 
@@ -493,35 +523,36 @@ async def update_profile(name: str, body: ProfileUpdateBody, request: Request) -
 
     Returns the updated profile item.
 
-    Every field omitted (or sent as null) keeps its stored value. ``runner``
-    additionally takes ``""`` as an explicit clear (#2186): the stored runtime
-    is unpinned back to Auto. There is no other way to reach Auto — null is
-    "leave alone", so without the sentinel the drawer's Auto option silently
-    no-op'd.
+    Every field omitted keeps its stored value. ``ctx_size`` and
+    ``enable_thinking`` take an explicit ``null`` to clear the stored value.
+    ``runner`` additionally takes ``""`` as an explicit clear (#2186): the stored
+    runtime is unpinned back to Auto. null is "leave alone" for ``runner``, so
+    without the sentinel the drawer's Auto option silently no-op'd.
 
     Raises:
         409 profiles.seed_immutable: name is a seed profile.
         404 profiles.not_found: custom profile not found.
-        422: pydantic validation failure.
+        422: pydantic validation failure (vision/mtp not auto|off).
+        400 profiles.ctx_size_out_of_range: ctx_size outside 128..16777216.
         422 profiles.unknown_runner: `runner` CHANGES to a key this box's
             registry does not carry. Re-sending the profile's own stored key is
-            grandfathered (#2183, mirroring the flags rule below) so a runtime
-            that left the registry never makes the profile un-editable.
-        400 slot.hardware_flag_denied: flags NEWLY introduce a slot-owned
-            hardware flag. Ones the profile already stores are grandfathered
-            (#1411) — see :func:`hal0.profiles.screen_profile_flags`.
-        400 slot.managed_arg_denied: flags carry a hal0-managed flag.
+            grandfathered (#2183) so a runtime that left the registry never
+            makes the profile un-editable.
+        400 slot.hardware_flag_denied / slot.managed_arg_denied /
+            profiles.model_fact_flag_denied / slot.reasoning_format_none_denied:
+            the flags carry a flag a profile may not hold.
     """
     catalog = ProfileCatalog()
     before = None
     existing = next((p for p in catalog.list() if p.name == name), None)
     if existing is not None:
         before = existing.to_dict()
-    # spec-hw-slot-ownership §5 + §21.7: reject slot-hardware and managed flags
-    # before persisting. Screened AFTER the read (#1411) so the profile's own
-    # stored flags are the grandfather baseline — a pre-guard profile has to stay
-    # editable, and the drawer re-sends its stored flag text verbatim on save.
-    screen_profile_flags(body.flags, grandfathered=existing.flags if existing else None)
+    sent = body.model_fields_set
+    ctx_size = body.ctx_size if "ctx_size" in sent else UNSET
+    enable_thinking = body.enable_thinking if "enable_thinking" in sent else UNSET
+    if ctx_size is not UNSET:
+        _check_ctx_size(ctx_size)
+    screen_profile_flags(body.flags)
     async with record_action(
         request,
         category="profile",
@@ -533,12 +564,12 @@ async def update_profile(name: str, body: ProfileUpdateBody, request: Request) -
             name,
             ProfilePatch(
                 flags=body.flags,
+                ctx_size=ctx_size,
+                enable_thinking=enable_thinking,
+                vision=body.vision,
                 mtp=body.mtp,
-                device_class=body.device_class,
-                backend=body.backend,
                 runner=body.runner,
                 intent=body.intent,
-                quant=body.quant,
             ),
         )
         rec.after = profile.to_dict()

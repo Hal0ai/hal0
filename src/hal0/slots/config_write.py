@@ -64,43 +64,45 @@ def _cfg_effective_backend(cfg: Any) -> str | None:
     return llamacpp_backend or (recipe if recipe == "flm" else None)
 
 
-def _base_profile_for_backend(catalog: Any, backend: str) -> str:
-    """Pick the canonical (non-MTP) seed profile name for a GPU backend.
+def _cfg_effective_provider(cfg: Any) -> str | None:
+    """The provider that actually launches a slot, from its profile (ADR-0029).
 
-    Prefers the seed profile named after the backend (``rocm`` / ``vulkan``);
-    falls back to any non-MTP then any profile that declares ``backend``.
+    A slot's runtime comes from its profile's runtime family, else the
+    launch dispatch's device/type fallbacks (:func:`hal0.providers.container.
+    _spec_provider_for` — the exact function the launch uses), so the
+    reported provider can never disagree with what runs. ``llama-server``
+    is the dispatch's own answer when no single-purpose engine claims the
+    slot, never a default stamped over a Kokoro/Moonshine/ComfyUI slot.
 
-    This is the deliberate *non-MTP* counterpart of
-    :func:`hal0.install.profile_derive.derive_profile`'s ``rocm-dnse``
-    preference: it answers backend→base-profile from the live catalog so a
-    drawer device-flip re-derives a plain base image (``rocm``/``vulkan``) and
-    never silently switches a slot onto the MTP ``rocm-dnse`` image. Do NOT
-    fold it into the device→profile helper (finding PS-4).
+    An explicit ``provider`` key is consulted only when the dispatch itself
+    fails (it never raises for a missing profile); ``None`` when nothing is
+    known, so ``provider_requires_model`` stays permissive.
     """
-    if "chat" in catalog.profile:
-        return "chat"
-    for name, prof in catalog.profile.items():
-        if getattr(prof, "backend", None) == backend and not getattr(prof, "mtp", False):
-            return str(name)
-    for name, prof in catalog.profile.items():
-        if getattr(prof, "backend", None) == backend:
-            return str(name)
-    return backend
+    d = _cfg_to_dict(cfg)
+    flat = dict(d)
+    nested = d.get("slot")
+    if isinstance(nested, dict):
+        # Nested on-disk shape: [slot] is authoritative for slot scalars.
+        flat.update(nested)
+    try:
+        from hal0.providers.container import _spec_provider_for
+
+        provider = _spec_provider_for(flat)
+    except Exception:
+        explicit = flat.get("provider")
+        return str(explicit) if isinstance(explicit, str) and explicit else None
+    return str(provider.name) if provider is not None else "llama-server"
 
 
 def _reconcile_device_profile(cfg_dict: dict[str, Any], changed: set[str]) -> None:
-    """Keep a GPU slot's ``device`` and ``profile.backend`` coherent in place.
+    """Apply a runner-carrying profile's runtime to the slot (profile-carried runtime).
 
-    A GPU slot implies its backend twice: ``device`` (``gpu-rocm`` /
-    ``gpu-vulkan``) drives the llama-server backend, while ``profile`` selects
-    the container image + flags. They must agree — a vulkan device under a
-    rocm-dnse profile launches a Vulkan binary with ROCm-only MTP draft flags
-    (issue: utility slot). The field the operator changed wins; the stale side
-    is re-derived. Both changed to conflicting backends → operator error.
-
-    No-ops for slots without a GPU profile (npu/cpu/img profiles declare
-    ``backend=None``) and for ``auto`` device (empty) unless the profile
-    itself changed. Mutates ``cfg_dict`` in place — through
+    When the operator (re)selects a profile that names a ``runner``, the slot's
+    ``binary`` becomes that runner and, for a single-backend runner, its
+    ``device`` follows (a ROCm-only runner on a host with no ROCm lane is
+    refused before any write). A profile without a runner selects no
+    hardware (ADR-0029) and leaves the slot alone. Mutates ``cfg_dict`` in
+    place — through
     :func:`hal0.slot_config.slot_scalar_table` (#1685), since ``device``/
     ``profile`` are scalar fields that live under ``[slot]`` on a
     nested-shape config, not at ``cfg_dict``'s root.
@@ -161,51 +163,7 @@ def _reconcile_device_profile(cfg_dict: dict[str, Any], changed: set[str]) -> No
         scalars["binary"] = key
         if new_device is not None:
             scalars["device"] = new_device
-        return  # runner adoption supersedes the backend-hint reconcile
-
-    prof_backend = getattr(prof, "backend", None) if prof is not None else None
-    if not prof_backend:
-        # Non-GPU profile (or unknown profile with no backend) — leave alone.
         return
-
-    from hal0.model_meta import device_to_backend
-
-    device = scalars.get("device")
-    dev_backend = device_to_backend(str(device))[1] if device else None
-    if dev_backend == prof_backend:
-        return  # already coherent
-
-    prof_changed = "profile" in changed
-    dev_changed = "device" in changed
-
-    if not device:
-        # ``auto``/unset device: only adopt the profile's backend when the
-        # operator explicitly (re)selected the profile; otherwise leave auto.
-        if prof_changed:
-            scalars["device"] = map_backend_to_device(prof_backend)
-        return
-
-    if prof_changed and not dev_changed:
-        scalars["device"] = map_backend_to_device(prof_backend)
-    elif dev_changed and not prof_changed and dev_backend is not None:
-        catalog = load_profiles_config()
-        scalars["profile"] = _base_profile_for_backend(catalog, dev_backend)
-    elif prof_changed and dev_changed:
-        raise SlotConfigError(
-            f"slot device {device!r} (backend {dev_backend!r}) conflicts with "
-            f"profile {profile_name!r} (backend {prof_backend!r}); "
-            "pick a device and profile with the same backend",
-            details={
-                "device": device,
-                "profile": profile_name,
-                "device_backend": dev_backend,
-                "profile_backend": prof_backend,
-            },
-        )
-    # neither changed (pre-existing on-disk drift surfaced by an unrelated
-    # update): leave both fields untouched so the unrelated edit doesn't
-    # silently mutate hardware intent. Drift heals on the next device/profile
-    # edit.
 
 
 # ── guard/merge pipeline (shared with stacks/apply.py) ──────────────────────
@@ -347,102 +305,59 @@ def check_default_uniqueness(
         )
 
 
-def _screen_slot_extra_args(updates: dict[str, Any]) -> None:
-    """Reject hal0-owned flags in a slot write's ``[server].extra_args``.
-
-    The slot counterpart of the model
-    (:func:`hal0.services.models_service.screen_model_write`) and profile
-    (``api.routes.profiles._screen_profile_flags``) freeform-flag screens. Those
-    two live at their HTTP route layers, so the slot surface had NO screen at
-    all on any in-process writer: the stacks apply engine (and stack
-    create-on-apply) hand ``[server].extra_args`` straight to slot TOML, and
-    ``SlotManager.create`` never screened either. The launch path only screens
-    against :data:`~hal0.slots.argv.MANAGED_ARGS_DENYLIST` — and only at load
-    time, inside :func:`hal0.slots.argv.resolve_argv` — so a hardware flag
-    persisted here was never caught at all.
-
-    Hardware flags are checked FIRST so ``-ngl``/``-dev``/``--threads`` get the
-    actionable "belongs on the slot's hardware grid" message rather than the
-    generic managed-arg one (``-ngl`` is in both sets) — the same ordering
-    ``screen_model_write`` and ``_screen_profile_flags`` use.
-
-    No-op when the payload carries no ``[server].extra_args`` or it is blank.
-    Unparseable quoting is deferred to the schema/TOML layer rather than masked
-    with a partition message (mirrors ``_screen_profile_flags``).
-
-    Raises:
-        hal0.errors.BadRequest: ``slot.hardware_flag_denied`` /
-            ``slot.managed_arg_denied``.
-    """
-    server = updates.get("server")
-    if not isinstance(server, dict):
-        return
-    raw = server.get("extra_args")
-    if not isinstance(raw, str) or not raw.strip():
-        return
-
-    import shlex
-
-    from hal0.slots.argv import _deny_managed_flags, _deny_slot_hardware_flags
-
-    segment = "slot [server].extra_args"
-    try:
-        # Strip a trailing backslash that would make shlex.split() raise
-        # "No escaped character" (a common copy-paste artefact), same as
-        # models_service.screen_model_write.
-        tokens = shlex.split(raw.rstrip().rstrip("\\"))
-    except ValueError:
-        return
-    _deny_slot_hardware_flags(tokens, segment=segment)
-    _deny_managed_flags(tokens, segment=segment)
-
-
 def guard_slot_write_payload(updates: dict[str, Any]) -> None:
     """Run the slot-write PARTITION boundary over an in-process write payload.
 
-    The three key-space partitions the HTTP slot-config routes enforce
-    (``api.routes.slots._reject_model_owned_config_keys`` +
-    ``_reject_unknown_config_keys`` → ``reject_removed_slot_keys``), plus the
-    freeform-flag screen, applied to a raw ``updates`` dict so an IN-PROCESS
-    writer that never passes through a FastAPI handler is held to the same
-    contract:
+    The key-space partitions the HTTP slot-config routes enforce
+    (``api.routes.slots._reject_slot_tuning_keys`` +
+    ``_reject_unknown_config_keys`` → ``reject_removed_slot_keys``), applied
+    to a raw ``updates`` dict so an IN-PROCESS writer that never passes
+    through a FastAPI handler is held to the same contract:
 
-      - :func:`~hal0.slot_config.reject_model_owned_slot_keys` —
-        ``mtp``/``enable_thinking``/``vision`` belong on the MODEL
-        (spec-hw-slot-ownership §1). ``SlotConfig`` is ``extra="allow"``, so
-        without this an in-process writer silently persists the pre-partition
-        on-disk shape that ``PUT /api/slots/{name}/config`` 400s on.
+      - :func:`~hal0.slot_config.reject_slot_tuning_keys` — every tune
+        (context window, ``[server].extra_args``, ``parallel``,
+        ``chat_template``, ``mtp``, ``enable_thinking``, ``vision``,
+        ``workers``) belongs on the slot's profile (ADR-0029 §5).
+        ``SlotConfig`` is ``extra="allow"``, so without this an in-process
+        writer would persist a file that then fails to load as
+        ``slot.unconverted``.
       - :func:`~hal0.slot_config.reject_removed_slot_keys` — ``enabled`` and
         friends (#1369) round-trip as inert debris while the caller believes
         the setting took.
-      - :func:`_screen_slot_extra_args` — hardware / hal0-managed flags in
-        freeform ``[server].extra_args``.
 
     Checked against ``updates`` (the write payload), NEVER the merged result:
-    an old pre-partition key already sitting on disk must not block an
-    unrelated legitimate edit to that slot. Converging the old shape is the
-    migration's job
-    (``config.migrations.model_owned_caps``), not this guard's.
+    converting a slot file is the one-shot converter's job
+    (``hal0 profile migrate``), not this guard's.
 
     Raises:
         hal0.errors.BadRequest: the payload crosses a partition.
     """
-    from hal0.slot_config import reject_model_owned_slot_keys, reject_removed_slot_keys
+    from hal0.slot_config import reject_removed_slot_keys, reject_slot_tuning_keys
 
-    reject_model_owned_slot_keys(updates)
+    reject_slot_tuning_keys(updates)
     reject_removed_slot_keys(updates)
-    _screen_slot_extra_args(updates)
 
 
 def reconcile_slot_updates(base: dict[str, Any], updates: dict[str, Any]) -> dict[str, Any]:
     """Normalize + merge ``updates`` onto ``base`` and keep device/profile coherent.
 
     The write-side projection shared by ``SlotManager.update_config`` and the
-    stacks apply engine: the copy-safe one-level merge + #585 ctx_size fold
+    stacks apply engine: the copy-safe one-level merge
     (:func:`hal0.slot_config.merge_slot_config`) followed by
     :func:`_reconcile_device_profile` driven by exactly the keys the caller
     changed. Returns a fresh dict; ``base`` is never mutated.
+
+    ADR-0029 §5: a tuning key in ``updates`` is refused here
+    (``slot.tuning_key_denied``), so no in-process writer — including
+    ``SlotManager.update_config`` — can persist a slot file that would then
+    fail to load as ``slot.unconverted``.
+
+    Raises:
+        hal0.errors.BadRequest: ``updates`` carries a tuning key.
     """
+    from hal0.slot_config import reject_slot_tuning_keys
+
+    reject_slot_tuning_keys(updates)
     merged = merge_slot_config(base, updates)
     _reconcile_device_profile(merged, set(updates.keys()))
     return merged
@@ -466,7 +381,7 @@ def reconcile_and_guard_slot_config(
     Runs :func:`guard_slot_write_payload` FIRST so the key-space partition is
     enforced before any merge work: previously this pipeline checked only the
     two cross-slot invariants, so ``POST /api/stacks/{slug}/apply`` could land
-    model-owned ``mtp``/``enable_thinking``/``vision`` (and unscreened
+    profile-owned ``mtp``/``enable_thinking``/``vision`` (and unscreened
     ``[server].extra_args``) on an existing slot's TOML that
     ``PUT /api/slots/{name}/config`` 400s on. The guard lives HERE, at the one
     shared in-process guarded write path, rather than at the stacks call site,
@@ -474,7 +389,7 @@ def reconcile_and_guard_slot_config(
     is "a writer can no longer persist what ``update_config`` would refuse".
 
     Raises:
-        hal0.errors.BadRequest: ``updates`` crosses the slot/model partition.
+        hal0.errors.BadRequest: ``updates`` carries a key the slot does not own.
     """
     guard_slot_write_payload(updates)
     merged = reconcile_slot_updates(base, updates)
@@ -492,12 +407,11 @@ def reconcile_and_guard_slot_config(
 
 
 __all__ = [
-    "_base_profile_for_backend",
     "_cfg_effective_backend",
+    "_cfg_effective_provider",
     "_iter_peer_configs",
     "_read_slot_toml_dict",
     "_reconcile_device_profile",
-    "_screen_slot_extra_args",
     "check_default_uniqueness",
     "check_npu_exclusivity",
     "guard_slot_write_payload",

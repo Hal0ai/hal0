@@ -213,22 +213,23 @@ def check_hardware_freshness() -> Check:
 
 
 def check_seed_context_envelope(*, slots_dir: Path | None = None) -> Check:
-    """A slot's on-disk ``[model].context_size`` must fit this box's memory
-    envelope (#1868).
+    """A slot profile's ``ctx_size`` must fit this box's memory envelope (#1868).
 
     ``static_seeds``/``hal0 setup --auto`` clamp freshly-seeded slots at
-    install time, but an operator-edited ceiling, or a box downgraded in RAM
-    since install (a VM resize, a moved LXC), is never revisited. Flags any
-    slot whose configured ceiling exceeds what :func:`hal0.hardware.
-    memory_envelope.max_affordable_context_tokens` says this box can spend on
-    a model + KV cache — advisory (the slot may still run fine if the model
-    itself is small), never a fail.
+    install time (by pointing them at a clamped profile clone), but an
+    operator-edited profile window, or a box downgraded in RAM since install
+    (a VM resize, a moved LXC), is never revisited. Reads each slot's window
+    through its profile (ADR-0029, :func:`hal0.agents.anchor_window.
+    read_slot_ceiling`) and flags any slot whose window exceeds what
+    :func:`hal0.hardware.memory_envelope.max_affordable_context_tokens` says
+    this box can spend on a model + KV cache — advisory (the slot may still
+    run fine if the model itself is small), never a fail.
     """
     from hal0.agents.anchor_window import SLOTS_DIR, read_slot_ceiling
     from hal0.hardware.freshness import resolve_fresh_hardware_info
     from hal0.hardware.memory_envelope import max_affordable_context_tokens
 
-    name, title = "seed_context_envelope", "Seed context_size vs. memory envelope"
+    name, title = "seed_context_envelope", "Slot profile ctx_size vs. memory envelope"
     directory = slots_dir if slots_dir is not None else SLOTS_DIR
     try:
         names = sorted(p.stem for p in directory.glob("*.toml"))
@@ -253,12 +254,13 @@ def check_seed_context_envelope(*, slots_dir: Path | None = None) -> Check:
             name,
             title,
             _WARN,
-            "context_size above this box's memory envelope: "
+            "profile ctx_size above this box's memory envelope: "
             + ", ".join(offenders)
-            + " — `hal0 slot edit <name> --ctx-size <n>` to lower it, or add memory",
+            + " — lower the slot profile's ctx_size (duplicate a seed profile and point "
+            "the slot at the copy), or add memory",
         )
     return Check(
-        name, title, _PASS, f"every seeded context_size fits the {affordable:,}-token envelope"
+        name, title, _PASS, f"every slot profile ctx_size fits the {affordable:,}-token envelope"
     )
 
 
@@ -1379,17 +1381,17 @@ def check_hermes_anchor_window(
     Hermes raises below ``agent/model_metadata.py::MINIMUM_CONTEXT_LENGTH``
     instead of degrading, so a box whose anchor resolves under it refuses EVERY
     turn with an opaque upstream error that names neither the slot nor the
-    ceiling behind it.
+    profile window behind it.
 
     This row exists because the smoke probe alone cannot cover the shape the
     defect actually lives in: ``installer/install.sh`` calls
     ``install_hermes`` only when the hermes venv is ABSENT ("covers the upgrade
     path where no provision ran"), so on an in-place upgrade — the one case
-    where a stale ``[model].context_size`` seeded by an older release survives —
-    no smoke test ever runs. ``hal0 doctor`` is what an operator runs when the
+    where a slot profile with a small ``ctx_size`` survives — no smoke test
+    ever runs. ``hal0 doctor`` is what an operator runs when the
     agent misbehaves, so the check has to be here too.
 
-    Verdicts: below the floor is a ``fail`` with the repair command; a window
+    Verdicts: below the floor is a ``fail`` with the repair; a window
     that cannot be read is a ``warn`` (never a pass — see #1831); an
     unprovisioned Hermes passes with nothing to check.
     """

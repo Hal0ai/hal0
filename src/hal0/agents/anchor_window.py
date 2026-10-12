@@ -6,18 +6,17 @@ context window below ``agent/model_metadata.py::MINIMUM_CONTEXT_LENGTH``
 that contract is the EFFECTIVE window of the slot behind the anchor
 (``hal0/agent`` by default), which is::
 
-    effective = min(model's native/declared window, slot's [model].context_size)
+    effective = the slot profile's ctx_size,
+                else min(model's native window, 32768), else 8192
 
-so either half can put the box under the floor:
+(ADR-0029: the window is a profile tune, resolved by
+:func:`hal0.providers.container.slot_effective_context`), so either half can
+put the box under the floor:
 
-* the MODEL side — a registry row with no ``defaults.context_size`` resolving
-  to a small derived window (#1827's fresh-install half, fixed by #1852), and
-* the SLOT side — a configured ceiling that is itself below the floor. An
-  in-place upgrade never revisits an existing ``/etc/hal0/slots/<slot>.toml``,
-  so a box seeded by an older release keeps e.g. ``context_size = 4096``
-  forever even though its model happily declares 96000. #1852's "the ceiling
-  wins over the blanket dense cap" change cannot help there: a ceiling only
-  ever clamps DOWN.
+* the MODEL side — a profile with no ``ctx_size`` over a model whose native
+  window resolves small or unknown (#1827's fresh-install half), and
+* the PROFILE side — a ``ctx_size`` that is itself below the floor, e.g. a
+  custom profile cloned for a small box.
 
 Nothing used to check this before handing the anchor to Hermes, so the second
 shape surfaced ~1.6s into the first turn as an opaque upstream agent error that
@@ -25,8 +24,8 @@ named neither the slot nor the ceiling behind it. This module is the check: it
 resolves the anchor's effective window, compares it against Hermes' own floor
 (read FROM the installed Hermes when possible, see
 :func:`read_hermes_minimum_context`), and renders a message an operator can act
-on without reading any source — which slot, that slot's configured ceiling, the
-required floor, and the exact command that repairs it.
+on without reading any source — which slot, its profile and that profile's
+``ctx_size``, the required floor, and what repairs it.
 
 Two rules keep the answer honest, both bought the hard way:
 
@@ -42,11 +41,11 @@ Two rules keep the answer honest, both bought the hard way:
   called it unknown and passed, which is how a box that refuses every turn read
   green (the #1831 defect, on the detector for #1827).
 
-Deliberately read-only. Rewriting an operator's slot ceiling during an update is
-a config mutation nobody has approved yet and is tracked as the other half of
+Deliberately read-only. Rewriting an operator's profile window during an update
+is a config mutation nobody has approved yet and is tracked as the other half of
 #1867; :func:`resolve_anchor_window` is the resolver that repair would be built
-on when it is decided (it already names the slot, its ceiling, and the target
-value the repair would need to write).
+on when it is decided (it already names the slot, its profile, the profile's
+window, and the target value the repair would need to write).
 """
 
 from __future__ import annotations
@@ -72,7 +71,7 @@ log = structlog.get_logger(__name__)
 #: the real Hermes constant whenever a Hermes install is reachable.
 HERMES_MINIMUM_CONTEXT_LENGTH = 64_000
 
-#: Where the slot TOMLs an operator (or the installer) writes ceilings into live.
+#: Where the slot TOMLs an operator (or the installer) writes live; each names its profile.
 SLOTS_DIR = Path("/etc/hal0/slots")
 
 #: Prefix hal0's virtual model ids carry (``hal0/agent`` → slot ``agent``).
@@ -200,15 +199,7 @@ def _row_identity(row: Mapping[str, Any]) -> tuple[tuple[str, str], ...]:
     return tuple(sorted((str(k), repr(v)) for k, v in row.items() if k not in _VOLATILE_ROW_FIELDS))
 
 
-def read_slot_ceiling(slot: str, *, slots_dir: Path = SLOTS_DIR) -> int | None:
-    """The slot's on-disk ``[model].context_size`` ceiling, or ``None``.
-
-    ``None`` covers every "no usable ceiling" case alike — no TOML, no
-    ``[model]`` table, no key, and a hand-edited garbage value (``"64k"``) —
-    matching how :func:`hal0.providers.container._resolve_context_size` treats
-    an unparsable ceiling. ``ctx_size`` is accepted as the dashboard's alias for
-    the same key.
-    """
+def _read_slot_raw(slot: str, slots_dir: Path) -> dict[str, Any] | None:
     if not slot:
         return None
     path = Path(slots_dir) / f"{slot}.toml"
@@ -216,16 +207,41 @@ def read_slot_ceiling(slot: str, *, slots_dir: Path = SLOTS_DIR) -> int | None:
         raw = tomllib.loads(path.read_bytes().decode("utf-8"))
     except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
         return None
-    model = raw.get("model")
-    if not isinstance(model, Mapping):
+    # The nested ``[slot]`` shape is read the way the loader reads it: its keys
+    # are hoisted to the top level.
+    nested = raw.pop("slot", None)
+    if isinstance(nested, Mapping):
+        raw = {**nested, **raw}
+    return raw
+
+
+def read_slot_profile(slot: str, *, slots_dir: Path = SLOTS_DIR) -> str | None:
+    """The profile name the slot's on-disk TOML points at, or ``None``."""
+    raw = _read_slot_raw(slot, slots_dir)
+    if raw is None:
         return None
-    for key in ("context_size", "ctx_size"):
-        value = model.get(key)
-        if isinstance(value, bool):
-            continue
-        if isinstance(value, int) and value > 0:
-            return value
-    return None
+    name = raw.get("profile")
+    return name if isinstance(name, str) and name else None
+
+
+def read_slot_ceiling(
+    slot: str, *, slots_dir: Path = SLOTS_DIR, model_registry: Any = None
+) -> int | None:
+    """The ``ctx_size`` of the slot's profile, or ``None`` when it sets none.
+
+    ADR-0029: the window a slot launches with is its profile's ``ctx_size``;
+    :func:`hal0.providers.container.slot_effective_context` is the one
+    resolver. ``None`` covers every "no explicit window" case alike — no TOML,
+    a profile that does not resolve, and a profile that sets no ``ctx_size``
+    (the window then comes from the model, so the model is the limit).
+    """
+    raw = _read_slot_raw(slot, slots_dir)
+    if raw is None:
+        return None
+    from hal0.providers.container import slot_effective_context
+
+    ctx, source = slot_effective_context(raw, model_registry)
+    return ctx if source == "profile" and ctx else None
 
 
 def recommended_ceiling(floor: int) -> int:
@@ -255,7 +271,7 @@ class AnchorWindow:
     """Effective window as advertised to Hermes; ``None`` when unknown."""
 
     ceiling: int | None
-    """The slot's configured ``[model].context_size``; ``None`` when unset."""
+    """The ``ctx_size`` of the slot's profile; ``None`` when the profile sets none."""
 
     floor: int
     """Hermes' ``MINIMUM_CONTEXT_LENGTH``."""
@@ -267,6 +283,9 @@ class AnchorWindow:
 
     endpoint: str = ""
     """Where the window was asked for — named in the ``unknown`` message."""
+
+    profile: str | None = None
+    """The profile the serving slot runs; ``None`` when it could not be read."""
 
     @property
     def slot_path(self) -> Path | None:
@@ -289,7 +308,7 @@ class AnchorWindow:
 
     @property
     def ceiling_is_binding(self) -> bool:
-        """Is the SLOT ceiling what holds the window down (vs the model)?"""
+        """Is the PROFILE's ctx_size what holds the window down (vs the model)?"""
         return (
             self.ceiling is not None
             and self.effective is not None
@@ -298,21 +317,30 @@ class AnchorWindow:
 
     @property
     def fix_command(self) -> str:
-        """The exact command that repairs a ceiling-bound anchor.
+        """What repairs a profile-bound anchor.
 
         Empty when the serving slot could not be proven — a command naming a
-        slot that may not exist is worse than no command.
+        slot that may not exist is worse than no command. The window is a
+        profile tune (ADR-0029), so the repair edits the profile (a seed
+        profile is read-only: duplicate it and point the slot at the copy),
+        then restarts the slot.
         """
         if not self.slot:
             return ""
         target = recommended_ceiling(self.floor)
-        return f"hal0 slot edit {self.slot} --ctx-size {target} && hal0 slot restart {self.slot}"
+        which = f"profile {self.profile!r}" if self.profile else "the slot's profile"
+        return (
+            f"raise ctx_size to {target} on {which} (Profiles page, or "
+            f'PUT /api/profiles/<name> with {{"ctx_size": {target}}}; duplicate a seed '
+            f"profile first and point the slot at the copy), then "
+            f"`hal0 slot restart {self.slot}`"
+        )
 
     def message(self) -> str:
         """One operator-facing line: both numbers, the slot, and what to run.
 
         Written to be actionable with no source reading: which slot, its
-        configured ceiling, the floor it is under, and the command to run.
+        profile and its ctx_size, the floor it is under, and what to run.
         """
         where = f" at {self.endpoint}" if self.endpoint else ""
         if self.verdict == "unknown":
@@ -336,27 +364,31 @@ class AnchorWindow:
         if self.slot is None:
             return (
                 f"{head} hal0 could not prove which slot is serving it, so it cannot name "
-                f"the ceiling to raise — run `hal0 slot list` and raise the window of the "
-                f"slot behind {self.model!r} to at least {self.floor:,}."
+                f"the profile to raise — run `hal0 slot list` and raise the profile "
+                f"ctx_size of the slot behind {self.model!r} to at least {self.floor:,}."
             )
         if self.ceiling_is_binding:
             return (
-                f"{head} The limit is this slot's own configured ceiling: "
-                f"[model].context_size = {self.ceiling:,} in {self.slot_path}. "
-                f"Fix: {self.fix_command}"
+                f"{head} The limit is the slot profile's own window: "
+                f"{self._profile_note} sets ctx_size = {self.ceiling:,} "
+                f"(slot file {self.slot_path}). Fix: {self.fix_command}"
             )
         ceiling_note = (
-            f"the slot ceiling ({self.ceiling:,} in {self.slot_path}) is not the limit; "
+            f"{self._profile_note} sets ctx_size = {self.ceiling:,}, which is not the limit; "
             if self.ceiling is not None
-            else f"no ceiling is set in {self.slot_path}; "
+            else f"{self._profile_note} sets no ctx_size; "
         )
         return (
             f"{head} The limit is the model behind the slot — {ceiling_note}"
-            f"the model itself only advertises {self.effective:,}. Point slot "
-            f"{self.slot!r} at a model whose window is at least {self.floor:,} "
-            f"(`hal0 slot edit {self.slot} --model <model-id>`), or set "
-            f"defaults.context_size on the current model if it really supports more."
+            f"the window comes from the model, which only advertises {self.effective:,}. "
+            f"Raise the slot profile's ctx_size to at least {self.floor:,} "
+            f"({self.fix_command}), or point slot {self.slot!r} at a model whose window is "
+            f"at least {self.floor:,} (`hal0 slot edit {self.slot} --model <model-id>`)."
         )
+
+    @property
+    def _profile_note(self) -> str:
+        return f"profile {self.profile!r}" if self.profile else "the slot's profile"
 
     @property
     def _slot_note(self) -> str:
@@ -400,6 +432,7 @@ def resolve_anchor_window(
     if effective is None and contexts:
         effective = _positive_int(contexts.get(model_name))
     ceiling = read_slot_ceiling(slot, slots_dir=slots_dir) if slot else None
+    profile = read_slot_profile(slot, slots_dir=slots_dir) if slot else None
     return AnchorWindow(
         model=model_name,
         slot=slot,
@@ -409,6 +442,7 @@ def resolve_anchor_window(
         floor_source=floor_source,
         slots_dir=Path(slots_dir),
         endpoint=endpoint,
+        profile=profile,
     )
 
 

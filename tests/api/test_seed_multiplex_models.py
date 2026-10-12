@@ -68,6 +68,25 @@ class TestNpuTableSchema:
         assert CANONICAL_EMBED not in cache["hal0"]
 
 
+class TestConvertedSchema:
+    async def test_npu_device_alone_seeds_canonical_tags(self) -> None:
+        """ADR-0029: the profile-centric conversion drops ``backend``, and the
+        shipped ``flm.toml`` never set it; the NPU device alone names an FLM
+        slot, so its multiplex tags must still be seeded."""
+        cfg = _npu_cfg()
+        del cfg["backend"]
+        cache = await _seed([cfg])
+        assert CANONICAL_EMBED in cache["hal0"]
+        assert CANONICAL_ASR in cache["hal0"]
+
+    async def test_a_gpu_slot_with_an_npu_table_seeds_nothing(self) -> None:
+        cfg = _npu_cfg(device="gpu-rocm")
+        del cfg["backend"]
+        cache = await _seed([cfg])
+        assert CANONICAL_EMBED not in cache.get("hal0", [])
+        assert CANONICAL_ASR not in cache.get("hal0", [])
+
+
 class TestLegacyDefaultsSchema:
     async def test_provider_flm_with_defaults_still_seeds(self) -> None:
         cache = await _seed(

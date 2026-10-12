@@ -502,16 +502,45 @@ def test_below_floor_message_names_memory_extraction_not_hermes(tmp_path: Path):
     assert "slot 'utility'" in msg
 
 
-def test_below_floor_message_includes_the_fix_command_for_a_binding_ceiling(tmp_path: Path):
-    (tmp_path / "utility.toml").write_text("[model]\ncontext_size = 4096\n")
+def test_below_floor_message_includes_the_fix_command_for_a_binding_profile_window(
+    tmp_path: Path, tmp_hal0_home: str
+):
+    """The window is the slot profile's ``ctx_size`` (ADR-0029): the message
+    names the profile and its ``ctx_size`` and the fix edits the profile."""
+    profiles = Path(tmp_hal0_home) / "etc" / "hal0" / "profiles.toml"
+    profiles.parent.mkdir(parents=True, exist_ok=True)
+    profiles.write_text('[profile.tiny-ctx]\nflags = ""\nctx_size = 4096\n', encoding="utf-8")
+    (tmp_path / "utility.toml").write_text('name = "utility"\nprofile = "tiny-ctx"\n')
     entry = {"id": "hal0/utility", "context_length": 4096}
     catalog = [{"id": "utility", "context_length": 4096}]
 
     window = resolve_extraction_window("utility", entry=entry, catalog=catalog, slots_dir=tmp_path)
     msg = window.message()
 
-    assert "context_size = 4,096" in msg
-    assert "hal0 slot edit utility --ctx-size 8192" in msg
+    assert window.profile == "tiny-ctx"
+    assert window.ceiling == 4096
+    assert window.ceiling_is_binding
+    assert "profile 'tiny-ctx' sets ctx_size = 4,096" in msg
+    assert "raise ctx_size to 8192 on profile 'tiny-ctx'" in msg
+    assert "hal0 slot restart utility" in msg
+    assert "[model].context_size" not in msg
+    assert "hal0 slot edit utility --ctx-size" not in msg
+
+
+def test_below_floor_message_blames_the_model_when_the_profile_sets_no_ctx_size(tmp_path: Path):
+    (tmp_path / "utility.toml").write_text('name = "utility"\nprofile = "chat"\n')
+    entry = {"id": "hal0/utility", "context_length": 4096}
+    catalog = [{"id": "utility", "context_length": 4096}]
+
+    window = resolve_extraction_window("utility", entry=entry, catalog=catalog, slots_dir=tmp_path)
+    msg = window.message()
+
+    assert window.profile == "chat"
+    assert window.ceiling is None
+    assert "profile 'chat' sets no ctx_size" in msg
+    assert "only advertises 4,096" in msg
+    assert "defaults.context_size" not in msg
+    assert "hal0 slot edit utility --model <model-id>" in msg
 
 
 def test_unknown_and_ok_messages_are_extraction_specific(tmp_path: Path):

@@ -34,7 +34,7 @@ from typing import TYPE_CHECKING
 
 import hal0
 
-from .planner import fetch_registry_models, plan
+from .planner import attach_slot_profiles, fetch_registry_models, plan
 from .publish import build_roster, emit_site_ts, write_roster
 from .regress import check as regress_check
 from .regress import journal_flags as regress_journal
@@ -148,7 +148,7 @@ def _fetch_models(args: argparse.Namespace) -> list:
     if args.no_registry:
         return []
     try:
-        return fetch_registry_models(args.api)
+        return attach_slot_profiles(fetch_registry_models(args.api))
     except (urllib.error.URLError, OSError) as exc:
         sys.exit(
             f"cannot reach the hal0-api registry at {args.api}/api/models ({exc}). "
@@ -419,7 +419,7 @@ def cmd_worker(args: argparse.Namespace) -> int:
         item = queue[0]
         ctrl = control.read_control()
         try:
-            models = fetch_registry_models(args.api)
+            models = attach_slot_profiles(fetch_registry_models(args.api))
             if item.get("kind") == "eval" and item.get("model"):
                 # Eval drives tool-eval-bench against the LIVE endpoint by registry
                 # model id, and its records join the dashboard by that id, so a

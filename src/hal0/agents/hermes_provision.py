@@ -1444,7 +1444,15 @@ def _resolve_primary_slot(
     # the legacy daemon's native prefix was dropped at the wrapper layer).
     if not base_url or "127.0.0.1:8001" in base_url:
         base_url = f"{HAL0_API_URL}/v1"
-    ctx = primary.get("context_length") or primary.get("ctx_size") or fallback["context_length"]
+    # ``ctx_effective`` is the slot view's window from the one resolver
+    # (providers.container.slot_effective_context: the slot profile's ctx_size,
+    # else the model's native window capped at 32768, else 8192).
+    ctx = (
+        primary.get("ctx_effective")
+        or primary.get("context_length")
+        or primary.get("ctx_size")
+        or fallback["context_length"]
+    )
     try:
         ctx = int(ctx)
     except (TypeError, ValueError):
@@ -4434,9 +4442,8 @@ def _fetch_slots() -> list[dict[str, Any]]:
 def _fetch_model_contexts() -> dict[str, int]:
     """Map gateway model id -> context_length from ``/v1/models``.
 
-    ``/api/slots`` carries no context field, so the slot dict can't supply
-    one. The gateway's ``/v1/models`` is the authoritative source (it
-    resolves ctx_size/context_size + the model-registry ``defaults``), keyed
+    The gateway's ``/v1/models`` is the authoritative source (it resolves
+    the slot profile's ``ctx_size``, else the model's native window), keyed
     by the slot ALIAS (== the ``/v1/models`` ``id``). Returns ``{}`` when the
     daemon is unreachable or no chat slot is loaded.
     """
@@ -4689,11 +4696,12 @@ def _slot_context_length(slot: dict[str, Any]) -> int | None:
     """Resolve a slot's effective context length (the value /v1/models
     advertises), or ``None`` when the slot reports none.
 
-    Reads ``context_length`` then ``ctx_size`` — the same precedence
+    Reads ``ctx_effective`` (the slot view's resolved window), then
+    ``context_length`` then ``ctx_size`` — the same precedence
     :func:`_resolve_primary_slot` uses — so the per-model entry in
     ``custom_providers`` matches what the gateway serves.
     """
-    raw = slot.get("context_length") or slot.get("ctx_size")
+    raw = slot.get("ctx_effective") or slot.get("context_length") or slot.get("ctx_size")
     if raw is None:
         return None
     try:
@@ -6073,7 +6081,7 @@ def _anchor_window(state: BootstrapState, io: InstallIO) -> AnchorWindow | str:
     Reads ``model.default`` from the live config.yaml (the id Hermes actually
     dispatches with), asks the installed Hermes for its own
     ``MINIMUM_CONTEXT_LENGTH`` rather than trusting a second hardcoded 64,000,
-    and pairs the gateway's advertised window with the slot's on-disk ceiling.
+    and pairs the gateway's advertised window with the slot profile's ``ctx_size``.
 
     Returns a plain string when the question could not even be asked (no
     config.yaml, no ``model.default``) — that is a config problem, not a window
@@ -6115,12 +6123,12 @@ def _smoke_anchor_context_window(state: BootstrapState, io: InstallIO) -> tuple[
     Hermes raises below ``MINIMUM_CONTEXT_LENGTH`` instead of degrading, so a
     box whose anchor slot resolves under it refuses EVERY turn — and used to do
     so as an opaque upstream error ~1.6s in, naming neither the slot nor the
-    ceiling that caused it. The classic shape is an upgraded box: the model
-    declares 96000, the agent slot's own ``[model].context_size`` is still the
-    4096 an older release seeded, and ``min()`` of the two is what Hermes sees.
+    profile window that caused it. The classic shape is a box whose agent slot
+    runs a profile with a small ``ctx_size`` (or none, over a model with a small
+    native window), so the window Hermes sees is under its floor.
 
-    Fails with both numbers, the slot, its ceiling, and the exact repair
-    command. An anchor whose window cannot be read (nothing loaded, endpoint
+    Fails with both numbers, the slot, its profile's window, and the repair.
+    An anchor whose window cannot be read (nothing loaded, endpoint
     unreachable, a backend that advertises no ``context_length``) is
     ``unknown`` — reported as ``None``/SKIPPED, never as a pass. A preflight
     that cannot see the value has to say so: passing on no evidence is how a
@@ -6139,7 +6147,8 @@ def _smoke_anchor_context_window(state: BootstrapState, io: InstallIO) -> tuple[
                 "model": window.model,
                 "slot": window.slot,
                 "effective": window.effective,
-                "slot_ceiling": window.ceiling,
+                "slot_profile": window.profile,
+                "profile_ctx_size": window.ceiling,
                 "floor": window.floor,
                 "floor_source": window.floor_source,
                 "fix": window.fix_command,

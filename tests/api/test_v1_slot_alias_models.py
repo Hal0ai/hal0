@@ -27,29 +27,22 @@ class _FakeSlotManager:
         return list(self._configs)
 
 
-class _FakeDefaults:
-    def __init__(self, context_size: int | None):
-        self.context_size = context_size
-
-
 class _FakeModel:
-    def __init__(self, name: str, context_size: int | None = None):
+    def __init__(self, name: str, native_ctx: int | None = None):
         self.name = name
-        self.defaults = _FakeDefaults(context_size) if context_size is not None else None
+        self.native_ctx = native_ctx
 
     def model_dump(self) -> dict[str, Any]:
-        # #1788: resolve_effective_context_size converts a registry entry via
-        # model_dump() (mirrors the real pydantic Model), so the fake needs
-        # to produce the same {"defaults": {"context_size": ...}} shape.
-        return {
-            "defaults": {"context_size": self.defaults.context_size} if self.defaults else {},
-            "metadata": {},
-        }
+        # The window resolver converts a registry entry via model_dump()
+        # (mirrors the real pydantic Model); the file's native window lives in
+        # ``metadata.context_length``.
+        md = {"context_length": self.native_ctx} if self.native_ctx else {}
+        return {"metadata": md}
 
 
 class _FakeModelRegistry:
     def __init__(self, models: dict[str, tuple[str, int | None]]):
-        # model_id -> (display_name, defaults.context_size | None)
+        # model_id -> (display_name, native context window | None)
         self._models = models
 
     def get(self, model_id: str) -> _FakeModel:
@@ -60,9 +53,11 @@ class _FakeModelRegistry:
 
 
 def _three_chat_slots() -> list[dict[str, Any]]:
-    """Mirror the live TOML ctx-key inconsistency:
-    primary pins NO ctx (→ registry fallback), agent-hermes uses
-    ``ctx_size``, utility uses ``context_size``.
+    """Three chat slots covering the three window sources (ADR-0029):
+    primary names no profile (the ``chat`` seed, no window → the model's
+    native window, dense-capped); agent-hermes runs the ``agent`` seed (its
+    ``ctx_size``); utility names no profile and its model is unknown (the
+    8192 fallback).
     """
     return [
         {
@@ -75,13 +70,14 @@ def _three_chat_slots() -> list[dict[str, Any]]:
             "name": "agent-hermes",
             "type": "llm",
             "port": 8001,
-            "model": {"default": "hermes-4-14b-q5km", "ctx_size": 65536},
+            "profile": "agent",
+            "model": {"default": "hermes-4-14b-q5km"},
         },
         {
             "name": "utility",
             "type": "llm",
             "port": 8081,
-            "model": {"default": "qwen3-zero-coder-v2-0.8b-f16", "context_size": 32768},
+            "model": {"default": "qwen3-zero-coder-v2-0.8b-f16"},
         },
         # Non-chat slot — never surfaces as a chat alias.
         {
@@ -96,9 +92,8 @@ def _three_chat_slots() -> list[dict[str, Any]]:
 def _registry() -> _FakeModelRegistry:
     return _FakeModelRegistry(
         {
-            # primary's model has a registry defaults.context_size that the
-            # alias builder falls back to (the slot TOML pins no ctx key).
-            "qwen3-coder-next-reap-40b-a3b-q4kxl": ("Qwen3-Coder-Next", 65536),
+            # primary's file declares a 262144-token native window.
+            "qwen3-coder-next-reap-40b-a3b-q4kxl": ("Qwen3-Coder-Next", 262144),
             "hermes-4-14b-q5km": ("Hermes 4 14B", None),
             # utility's model intentionally absent → display falls back to id.
         }
@@ -129,16 +124,12 @@ async def test_all_model_bound_llm_slots_emit_alias_entries() -> None:
     # utility's model isn't in the registry → falls back to the model id.
     assert by_id["utility"]["name"] == "utility · qwen3-zero-coder-v2-0.8b-f16"
 
-    # context_length is the EFFECTIVE window (#1788), not the raw slot-TOML
-    # ceiling: primary's model declares 65536 with no slot ceiling, so it
-    # passes through unchanged. agent-hermes and utility both pin a slot
-    # ceiling (``ctx_size`` / ``context_size``) but their models declare no
-    # context_size of their own, so resolution falls to the safe 8192 floor
-    # (well below either TOML ceiling) rather than echoing the stale,
-    # larger slot number.
-    assert by_id["agent-hermes"]["context_length"] == 8192
-    assert by_id["utility"]["context_length"] == 8192
-    assert by_id["primary"]["context_length"] == 65536
+    # context_length is the EFFECTIVE window — the same resolver the launch
+    # path uses (ADR-0029): the profile's ctx_size, else the model's native
+    # window capped at 32768, else 8192.
+    assert by_id["agent-hermes"]["context_length"] == 65536  # agent seed ctx_size
+    assert by_id["primary"]["context_length"] == 32768  # native 262144, dense cap
+    assert by_id["utility"]["context_length"] == 8192  # unknown native window
 
     # §21.5: max_context_window aliases context_length (same value, for
     # OpenAI-compat clients that probe the alternate key name).
@@ -160,12 +151,12 @@ async def test_registry_detail_folds_into_alias_entries() -> None:
         def __init__(
             self,
             name: str,
-            context_size: int | None = None,
+            native_ctx: int | None = None,
             capabilities: list[str] | None = None,
             quant: str | None = None,
             path: str = "",
         ) -> None:
-            super().__init__(name, context_size)
+            super().__init__(name, native_ctx)
             self.capabilities = capabilities or []
             self.quant = quant
             self.path = path

@@ -13,7 +13,14 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from hal0.bench.planner import NO_GPU_LANE, _lane_is_plannable, _model_caps, _resolve_lane, plan
+from hal0.bench.planner import (
+    NO_GPU_LANE,
+    _lane_is_plannable,
+    _model_caps,
+    _resolve_lane,
+    _resolve_profile,
+    plan,
+)
 from hal0.bench.schema import Host, Outcome, Record
 from hal0.bench.store import Store
 from hal0.bench.suites import suite_from_dict
@@ -277,32 +284,36 @@ class TestModelCapsTypedFields:
         assert _model_caps({"capabilities": ["chat"], "tags": ["coder"]}) == {"chat", "coder"}
 
     def test_mmproj_presence_is_the_vision_signal(self):
-        # registry/model.py: defaults.vision=None is AUTO — the projector loads
-        # whenever the model carries one — and True is an explicit no-op.
+        # The projector is a model fact: carrying one means the model can see.
+        # Whether a slot loads it is its profile's `vision` — a tune, not a cap.
         assert "vision" in _model_caps({"mmproj": "/models/x/mmproj.gguf"})
-        assert "vision" in _model_caps(
-            {"mmproj": "/models/x/mmproj.gguf", "defaults": {"vision": True}}
-        )
 
-    def test_explicit_vision_false_suppresses_a_present_projector(self):
-        caps = _model_caps({"mmproj": "/models/x/mmproj.gguf", "defaults": {"vision": False}})
-        assert "vision" not in caps
+    def test_a_profile_vision_off_does_not_revoke_the_model_fact(self):
+        caps = _model_caps({"mmproj": "/models/x/mmproj.gguf", "profile": {"vision": "off"}})
+        assert "vision" in caps
 
-    def test_no_projector_means_no_vision_however_the_flag_reads(self):
-        assert "vision" not in _model_caps({"defaults": {"vision": True}})
+    def test_no_projector_means_no_vision(self):
+        assert "vision" not in _model_caps({"defaults": {}})
+        assert "vision" not in _model_caps({"profile": {"vision": "auto"}})
 
     def test_tool_calling_flag_folds_in(self):
         assert "tool-calling" in _model_caps({"capability_flags": {"tool_calling": True}})
 
-    def test_enable_thinking_true_implies_reasoning(self):
-        assert "reasoning" in _model_caps({"defaults": {"enable_thinking": True}})
+    def test_profile_enable_thinking_true_implies_reasoning(self):
+        # The thinking default is a profile tune; the planner reads it from the
+        # profile the caller attached to the registry entry.
+        assert "reasoning" in _model_caps({"profile": {"enable_thinking": True}})
+
+    def test_model_defaults_no_longer_carry_a_reasoning_signal(self):
+        assert "reasoning" not in _model_caps({"defaults": {"enable_thinking": True}})
 
     @pytest.mark.parametrize("value", [None, False])
     def test_tri_state_none_and_false_assert_nothing(self, value):
         caps = _model_caps(
             {
                 "capability_flags": {"tool_calling": value},
-                "defaults": {"enable_thinking": value, "mtp": value},
+                "defaults": {"mtp": value},
+                "profile": {"enable_thinking": value},
             }
         )
         assert caps == set()
@@ -318,7 +329,8 @@ class TestModelCapsTypedFields:
                 "tags": ["coder"],
                 "mmproj": "/m/mmproj.gguf",
                 "capability_flags": {"tool_calling": True},
-                "defaults": {"mtp": True, "enable_thinking": True},
+                "defaults": {"mtp": True},
+                "profile": {"enable_thinking": True},
             }
         )
         assert caps == {"chat", "coder", "vision", "tool-calling", "mtp", "reasoning"}
@@ -329,6 +341,52 @@ class TestModelCapsTypedFields:
         narrow = _model_caps({"capabilities": ["chat"]})
         wide = _model_caps({"capabilities": ["chat"], "capability_flags": {"tool_calling": True}})
         assert narrow <= wide
+
+
+class TestResolveProfile:
+    """The tune a cell is measured under comes from the attached profile (ADR-0029),
+    never from the model row: a model holds file facts only."""
+
+    def test_profile_flags_string_becomes_argv_and_ctx_size_the_window(self):
+        cfg = _resolve_profile(
+            {"id": "m", "profile": {"flags": "-b 1024 -ctk q8_0 -fa on", "ctx_size": 65536}}, 4096
+        )
+        assert cfg.argv == ["-b", "1024", "-ctk", "q8_0", "-fa", "on"]
+        assert cfg.ctx == 65536
+
+    def test_structured_synthetic_profile_still_wins_its_argv(self):
+        cfg = _resolve_profile({"id": "m", "profile": {"argv": ["-b", "512"], "ctx": 8192}}, 4096)
+        assert cfg.argv == ["-b", "512"]
+        assert cfg.ctx == 8192
+
+    def test_no_profile_benches_runner_defaults_at_the_cell_depth(self):
+        cfg = _resolve_profile({"id": "m"}, 4096)
+        assert cfg.argv == []
+        assert cfg.ctx == 4096
+
+    def test_model_defaults_tune_is_ignored(self):
+        cfg = _resolve_profile(
+            {"id": "m", "defaults": {"extra_args": "-b 9999", "context_size": 99999}}, 4096
+        )
+        assert cfg.argv == []
+        assert cfg.ctx == 4096
+
+    def test_unbalanced_quote_in_flags_degrades_to_whitespace_split(self):
+        cfg = _resolve_profile({"id": "m", "profile": {"flags": "-b 512 --x 'oops"}}, 2048)
+        assert cfg.argv[:2] == ["-b", "512"]
+
+    def test_a_changed_profile_flag_moves_the_cell_key(self, tmp_path):
+        """DESIGN §6: a merged profile-flag change re-benches exactly that cell."""
+        from hal0.bench.planner import _build_identity
+        from hal0.bench.schema import cell_key
+
+        base = {"id": "m", "default_lane": "rocm", "profile": {"flags": "-b 512"}}
+        tuned = {"id": "m", "default_lane": "rocm", "profile": {"flags": "-b 1024"}}
+        a = cell_key(_build_identity(base, "rocm", "tg", 2048, "greedy"))
+        b = cell_key(_build_identity(tuned, "rocm", "tg", 2048, "greedy"))
+        again = cell_key(_build_identity(base, "rocm", "tg", 2048, "greedy"))
+        assert a == again
+        assert a != b
 
 
 class TestResolveLaneWithoutRocm:

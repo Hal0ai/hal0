@@ -287,3 +287,95 @@ async def test_load_skips_gate_when_disabled(
     # rerank was never touched by pre-load eviction (gate disabled).
     assert (await sm.status("rerank")).state in (SlotState.READY, SlotState.IDLE)
     assert not any(c.get("name") == "rerank" for c in container_stub.unload_calls)
+
+
+# ── incoming footprint sizes KV from the slot's profile window (ADR-0029) ────
+
+
+class _FootprintHost:
+    """The two host reads ``_estimate_incoming_footprint_mb`` makes."""
+
+    def __init__(self, slot_cfg: dict[str, Any], info: dict[str, Any]) -> None:
+        self._slot_cfg = slot_cfg
+        self._info = info
+        self.loaded: list[str] = []
+
+    async def _load_slot_config(self, name: str) -> dict[str, Any]:
+        self.loaded.append(name)
+        return self._slot_cfg
+
+    async def _resolve_model_info(self, model_id: str | None) -> dict[str, Any]:
+        return self._info
+
+
+def _big_window_model() -> dict[str, Any]:
+    """1000 MiB of weights under a 131072-token native window."""
+    return {
+        "size_bytes": 1000 * 1024 * 1024,
+        "metadata": {"context_length": 131072},
+        "defaults": None,
+    }
+
+
+def _write_profile(home: str, name: str, ctx_size: int) -> None:
+    path = Path(home) / "etc" / "hal0" / "profiles.toml"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(f'[profile.{name}]\nflags = ""\nctx_size = {ctx_size}\n', encoding="utf-8")
+
+
+async def test_incoming_footprint_uses_the_slot_profile_window(tmp_hal0_home: str) -> None:
+    """A 4096-token profile over a 131072-token model books ~2 MiB of KV for
+    the incoming load, not the native-capped 32768-token share."""
+    from hal0.slots.preload_evict import _estimate_incoming_footprint_mb
+
+    _write_profile(tmp_hal0_home, "tiny-ctx", 4096)
+    host = _FootprintHost(
+        {"name": "chat", "type": "llm", "model": {"default": "m"}, "profile": "tiny-ctx"},
+        _big_window_model(),
+    )
+
+    mb = await _estimate_incoming_footprint_mb(host, "m", slot_name="chat")  # type: ignore[arg-type]
+
+    assert host.loaded == ["chat"]
+    assert mb == pytest.approx(1000.0 + 4096 / 1000 * 0.5, abs=0.1)
+
+
+async def test_incoming_footprint_without_a_profile_window_uses_native_capped(
+    tmp_hal0_home: str,
+) -> None:
+    from hal0.slots.preload_evict import _estimate_incoming_footprint_mb
+
+    host = _FootprintHost(
+        {"name": "chat", "type": "llm", "model": {"default": "m"}}, _big_window_model()
+    )
+
+    mb = await _estimate_incoming_footprint_mb(host, "m", slot_name="chat")  # type: ignore[arg-type]
+
+    assert mb == pytest.approx(1000.0 + 32768 / 1000 * 0.5, abs=0.1)
+
+
+async def test_incoming_footprint_without_a_slot_name_sizes_the_model_window() -> None:
+    """The slot-less call (no slot config to read) keeps sizing the model's own window."""
+    from hal0.slots.preload_evict import _estimate_incoming_footprint_mb
+
+    host = _FootprintHost({}, _big_window_model())
+
+    mb = await _estimate_incoming_footprint_mb(host, "m")  # type: ignore[arg-type]
+
+    assert host.loaded == []
+    assert mb == pytest.approx(1000.0 + 131072 / 1000 * 0.5, abs=0.1)
+
+
+async def test_incoming_footprint_survives_an_unreadable_slot_config() -> None:
+    """A slot config that cannot be read degrades to the model window, never raises."""
+    from hal0.slots.preload_evict import _estimate_incoming_footprint_mb
+
+    class _Broken(_FootprintHost):
+        async def _load_slot_config(self, name: str) -> dict[str, Any]:
+            raise RuntimeError("no such slot")
+
+    host = _Broken({}, _big_window_model())
+
+    mb = await _estimate_incoming_footprint_mb(host, "m", slot_name="ghost")  # type: ignore[arg-type]
+
+    assert mb == pytest.approx(1000.0 + 131072 / 1000 * 0.5, abs=0.1)

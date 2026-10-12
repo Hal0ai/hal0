@@ -1,9 +1,10 @@
 """Unit tests for :mod:`hal0.agents.anchor_window` — #1867's window preflight.
 
-Covers the ct150 repro shape (a model declaring 96000 behind a slot whose own
-``[model].context_size`` ceiling is 4096), the model-side shape it must not be
-confused with, the "no evidence yet" case, and the drift guard tying hal0's
-copy of Hermes' ``MINIMUM_CONTEXT_LENGTH`` to the real constant.
+Covers the ct150 repro shape (a model declaring 96000 behind a slot whose
+profile sets ``ctx_size = 4096`` — ADR-0029: the window is the profile's, not
+a slot key), the model-side shape it must not be confused with, the "no
+evidence yet" case, and the drift guard tying hal0's copy of Hermes'
+``MINIMUM_CONTEXT_LENGTH`` to the real constant.
 """
 
 from __future__ import annotations
@@ -22,6 +23,17 @@ from hal0.agents import anchor_window as aw
 def _write_slot(slots_dir: Path, name: str, body: str) -> None:
     slots_dir.mkdir(parents=True, exist_ok=True)
     (slots_dir / f"{name}.toml").write_text(body, encoding="utf-8")
+
+
+def _write_profile(home: str, name: str, ctx_size: int | None) -> None:
+    """Add a custom profile to the (tmp) profiles.toml the resolver reads."""
+    path = Path(home) / "etc" / "hal0" / "profiles.toml"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    body = f"[profile.{name}]\n"
+    if ctx_size is not None:
+        body += f"ctx_size = {ctx_size}\n"
+    with path.open("a", encoding="utf-8") as fh:
+        fh.write(body + "\n")
 
 
 #: Verbatim ``GET /v1/models`` off ct152 (rc.5) — the box whose
@@ -98,11 +110,12 @@ class TestCt152FalseNegative:
         assert window.verdict != "ok"
 
     def test_the_by_id_route_resolves_the_chain_and_names_the_serving_slot(
-        self, tmp_path: Path
+        self, tmp_path: Path, tmp_hal0_home: str
     ) -> None:
         """The authoritative surface sees exactly what Hermes will be handed."""
-        _write_slot(tmp_path, "agent", "[model]\ncontext_size = 65536\n")
-        _write_slot(tmp_path, "brain", "[model]\ncontext_size = 32768\n")
+        _write_profile(tmp_hal0_home, "small-win", 32768)
+        _write_slot(tmp_path, "agent", 'profile = "agent"\n')
+        _write_slot(tmp_path, "brain", 'profile = "small-win"\n')
         window = aw.resolve_anchor_window(
             "hal0/agent",
             entry=CT152_BY_ID,
@@ -114,22 +127,27 @@ class TestCt152FalseNegative:
         assert window.effective == 32768
         assert window.verdict == "below_floor"
         # The slot behind the anchor is brain — NOT the alias it is spelled
-        # with, whose own ceiling (65,536) is fine and must not be blamed.
+        # with, whose own profile window (65,536) is fine and must not be blamed.
         assert window.slot == "brain"
+        assert window.profile == "small-win"
         assert window.ceiling == 32768
         message = window.message()
-        assert "hal0 slot edit brain --ctx-size 65536" in message
+        assert "raise ctx_size to 65536 on profile 'small-win'" in message
+        assert "hal0 slot restart brain" in message
         assert "agent.toml" not in message
 
-    def test_a_created_skew_still_names_the_serving_slot(self, tmp_path: Path) -> None:
+    def test_a_created_skew_still_names_the_serving_slot(
+        self, tmp_path: Path, tmp_hal0_home: str
+    ) -> None:
         """The gateway stamps ``created`` per request, and the by-id read and
         the catalog read are two separate requests. A pair that straddles a
         second boundary must still match, or the serving slot comes back
         unnamed and the operator loses the repair command -- which is the whole
         deliverable of #1867. Measured at ~2.5% on an idle ct152.
         """
-        _write_slot(tmp_path, "agent", "[model]\ncontext_size = 65536\n")
-        _write_slot(tmp_path, "brain", "[model]\ncontext_size = 32768\n")
+        _write_profile(tmp_hal0_home, "small-win", 32768)
+        _write_slot(tmp_path, "agent", 'profile = "agent"\n')
+        _write_slot(tmp_path, "brain", 'profile = "small-win"\n')
         entry = dict(CT152_BY_ID)
         entry["created"] = int(entry.get("created", 0)) + 1
         window = aw.resolve_anchor_window(
@@ -142,13 +160,13 @@ class TestCt152FalseNegative:
         )
         assert window.verdict == "below_floor"
         assert window.slot == "brain", "a one-second created skew lost the serving slot"
-        assert "hal0 slot edit brain --ctx-size 65536" in window.message()
+        assert "raise ctx_size to 65536 on profile 'small-win'" in window.message()
 
     def test_a_virtual_is_never_named_from_its_spelling(self, tmp_path: Path) -> None:
         """Even with an ``agent.toml`` on disk, ``hal0/agent`` is only ever the
         slot the CATALOG says answered — the ct152 box has both, and the
         spelled one is the wrong answer."""
-        _write_slot(tmp_path, "agent", "[model]\ncontext_size = 65536\n")
+        _write_slot(tmp_path, "agent", 'profile = "agent"\n')
         window = aw.resolve_anchor_window(
             "hal0/agent",
             entry={"id": "hal0/agent", "context_length": 32768},
@@ -158,6 +176,7 @@ class TestCt152FalseNegative:
         )
         assert window.slot is None
         assert window.ceiling is None
+        assert window.profile is None
 
     def test_two_identical_rows_are_ambiguous_not_a_coin_flip(self, tmp_path: Path) -> None:
         """Byte-identical rows under two aliases: the catalog cannot say which
@@ -177,19 +196,21 @@ class TestCt152FalseNegative:
 class TestResolveAnchorWindow:
     """The ct150 shape and its neighbours, resolved from injected facts only."""
 
-    def test_slot_ceiling_below_floor_is_named_with_both_numbers_and_a_fix(
-        self, tmp_path: Path
+    def test_profile_window_below_floor_is_named_with_both_numbers_and_a_fix(
+        self, tmp_path: Path, tmp_hal0_home: str
     ) -> None:
-        """THE repro: model declares 96000, slot ceiling is 4096, Hermes refuses.
+        """THE repro: model declares 96000, the slot's profile sets ctx_size 4096,
+        Hermes refuses.
 
         The operator must be able to act off this message alone — it has to
-        carry the slot, that slot's configured ceiling, the required floor, and
-        the command that repairs it.
+        carry the slot, its profile and that profile's window, the required
+        floor, and what repairs it.
         """
+        _write_profile(tmp_hal0_home, "tiny-win", 4096)
         slots = tmp_path / "slots"
-        _write_slot(slots, "agent", '[model]\ndefault = "brain-sft"\ncontext_size = 4096\n')
+        _write_slot(slots, "agent", 'profile = "tiny-win"\n[model]\ndefault = "brain-sft"\n')
         # What the gateway advertises for the agent slot on that box —
-        # min(96000 model window, 4096 slot ceiling).
+        # min(96000 model window, 4096 profile window).
         catalog = _catalog(agent=4096, brain=96000)
         window = aw.resolve_anchor_window(
             "hal0/agent",
@@ -200,6 +221,7 @@ class TestResolveAnchorWindow:
             slots_dir=slots,
         )
         assert window.slot == "agent"
+        assert window.profile == "tiny-win"
         assert window.effective == 4096
         assert window.ceiling == 4096
         assert window.verdict == "below_floor"
@@ -209,22 +231,25 @@ class TestResolveAnchorWindow:
         assert "4,096" in message  # the window Hermes sees
         assert "64,000" in message  # the floor it needs
         assert "agent" in message  # which slot
-        assert str(slots / "agent.toml") in message  # where the ceiling lives
-        assert "hal0 slot edit agent --ctx-size 65536" in message
+        assert "profile 'tiny-win' sets ctx_size = 4,096" in message
+        assert "raise ctx_size to 65536 on profile 'tiny-win'" in message
         assert "hal0 slot restart agent" in message
         assert window.fix_command in message
+        # The slot file no longer holds the window: it is not named as the cause.
+        assert "[model].context_size" not in message
+        assert "hal0 slot edit agent --ctx-size" not in message
 
-    def test_a_ceiling_above_the_floor_with_a_small_model_blames_the_model(
+    def test_a_profile_window_above_the_floor_with_a_small_model_blames_the_model(
         self, tmp_path: Path
     ) -> None:
-        """The other way under the floor: the ceiling is fine, the model is not.
+        """The other way under the floor: the profile's window is fine, the model is not.
 
-        Telling this operator to raise a 65536 ceiling would be useless advice,
+        Telling this operator to raise a 65536 window would be useless advice,
         so the message must point at the model instead and must NOT hand them
-        the ``--ctx-size`` command.
+        the ``raise ctx_size to`` repair for the profile as the cause.
         """
         slots = tmp_path / "slots"
-        _write_slot(slots, "agent", "[model]\ncontext_size = 65536\n")
+        _write_slot(slots, "agent", 'profile = "agent"\n')
         catalog = _catalog(agent=32768)
         window = aw.resolve_anchor_window(
             "hal0/agent",
@@ -239,12 +264,31 @@ class TestResolveAnchorWindow:
         message = window.message()
         assert "32,768" in message
         assert "65,536" in message
-        assert "--ctx-size" not in message
+        assert "which is not the limit" in message
         assert "hal0 slot edit agent --model" in message
+
+    def test_a_profile_without_a_window_says_the_model_decides(self, tmp_path: Path) -> None:
+        """No ``ctx_size`` on the profile: the window comes from the model, and
+        the message says to set one on the profile."""
+        slots = tmp_path / "slots"
+        _write_slot(slots, "agent", 'profile = "chat"\n')
+        catalog = _catalog(agent=32768)
+        window = aw.resolve_anchor_window(
+            "hal0/agent",
+            entry=_by_id("hal0/agent", catalog[0]),
+            catalog=catalog,
+            floor=64_000,
+            slots_dir=slots,
+        )
+        assert window.ceiling is None
+        assert window.ceiling_is_binding is False
+        message = window.message()
+        assert "profile 'chat' sets no ctx_size" in message
+        assert "raise ctx_size to 65536 on profile 'chat'" in message
 
     def test_window_at_or_above_the_floor_is_ok(self, tmp_path: Path) -> None:
         slots = tmp_path / "slots"
-        _write_slot(slots, "agent", "[model]\ncontext_size = 65536\n")
+        _write_slot(slots, "agent", 'profile = "agent"\n')
         catalog = _catalog(agent=65536)
         window = aw.resolve_anchor_window(
             "hal0/agent",
@@ -269,10 +313,13 @@ class TestResolveAnchorWindow:
         assert "cannot check" in window.message()
         assert "NOT a pass" in window.message()
 
-    def test_a_bare_pinned_slot_id_resolves_the_same_slot(self, tmp_path: Path) -> None:
+    def test_a_bare_pinned_slot_id_resolves_the_same_slot(
+        self, tmp_path: Path, tmp_hal0_home: str
+    ) -> None:
         """``HAL0_HERMES_LIVE_RESOLVE=0`` pins the raw slot alias, not the virtual."""
+        _write_profile(tmp_hal0_home, "tiny-win", 4096)
         slots = tmp_path / "slots"
-        _write_slot(slots, "agent", "[model]\ncontext_size = 4096\n")
+        _write_slot(slots, "agent", 'profile = "tiny-win"\n')
         window = aw.resolve_anchor_window(
             "agent",
             entry={"id": "agent", "context_length": 4096},
@@ -281,13 +328,14 @@ class TestResolveAnchorWindow:
             slots_dir=slots,
         )
         assert window.slot == "agent"
+        assert window.profile == "tiny-win"
         assert window.verdict == "below_floor"
 
     def test_a_raw_physical_model_id_never_invents_a_slot(self, tmp_path: Path) -> None:
         """Codex's P1: under ``HAL0_HERMES_LIVE_RESOLVE=0`` the anchor is a raw
         physical model id served by a slot-local llama-server. There is no
-        ``/etc/hal0/slots/<that id>.toml`` and never was, so no slot, no ceiling
-        and no ``--ctx-size`` command may be manufactured for it."""
+        ``/etc/hal0/slots/<that id>.toml`` and never was, so no slot, no window
+        and no repair command may be manufactured for it."""
         window = aw.resolve_anchor_window(
             "qwen3-30b-a3b-instruct",
             entry={"id": "qwen3-30b-a3b-instruct", "context_length": 8192},
@@ -301,7 +349,7 @@ class TestResolveAnchorWindow:
         assert window.verdict == "below_floor"
         message = window.message()
         assert ".toml" not in message
-        assert "--ctx-size" not in message
+        assert "raise ctx_size" not in message
         assert "8,192" in message
 
     def test_an_exact_id_in_the_list_route_still_counts(self, tmp_path: Path) -> None:
@@ -313,8 +361,11 @@ class TestResolveAnchorWindow:
         assert window.effective == 65536
         assert window.verdict == "ok"
 
-    def test_fallback_floor_says_so_in_the_message(self, tmp_path: Path) -> None:
-        _write_slot(tmp_path, "agent", "[model]\ncontext_size = 4096\n")
+    def test_fallback_floor_says_so_in_the_message(
+        self, tmp_path: Path, tmp_hal0_home: str
+    ) -> None:
+        _write_profile(tmp_hal0_home, "tiny-win", 4096)
+        _write_slot(tmp_path, "agent", 'profile = "tiny-win"\n')
         catalog = _catalog(agent=4096)
         window = aw.resolve_anchor_window(
             "hal0/agent",
@@ -328,22 +379,46 @@ class TestResolveAnchorWindow:
 
 
 class TestReadSlotCeiling:
+    """The slot's window is its profile's ``ctx_size`` (ADR-0029)."""
+
     def test_missing_file_has_no_ceiling(self, tmp_path: Path) -> None:
         assert aw.read_slot_ceiling("agent", slots_dir=tmp_path) is None
+        assert aw.read_slot_profile("agent", slots_dir=tmp_path) is None
 
-    def test_garbage_ceiling_reads_as_absent(self, tmp_path: Path) -> None:
-        """A hand-edited ``"64k"`` is treated as no ceiling — same posture as
-        :func:`hal0.providers.container._resolve_context_size` (#1852)."""
-        _write_slot(tmp_path, "agent", '[model]\ncontext_size = "64k"\n')
-        assert aw.read_slot_ceiling("agent", slots_dir=tmp_path) is None
+    def test_a_seed_profile_window_is_read(self, tmp_path: Path) -> None:
+        _write_slot(tmp_path, "agent", 'profile = "agent"\n')
+        assert aw.read_slot_profile("agent", slots_dir=tmp_path) == "agent"
+        assert aw.read_slot_ceiling("agent", slots_dir=tmp_path) == 65536
 
-    def test_ctx_size_alias_is_accepted(self, tmp_path: Path) -> None:
-        _write_slot(tmp_path, "agent", "[model]\nctx_size = 8192\n")
+    def test_a_custom_profile_window_is_read(self, tmp_path: Path, tmp_hal0_home: str) -> None:
+        _write_profile(tmp_hal0_home, "eight-k", 8192)
+        _write_slot(tmp_path, "agent", 'profile = "eight-k"\n')
         assert aw.read_slot_ceiling("agent", slots_dir=tmp_path) == 8192
 
-    def test_unparsable_toml_reads_as_absent(self, tmp_path: Path) -> None:
-        _write_slot(tmp_path, "agent", "[model\ncontext_size = 4096\n")
+    def test_the_nested_slot_table_shape_is_read(self, tmp_path: Path) -> None:
+        _write_slot(tmp_path, "agent", '[slot]\nname = "agent"\nprofile = "agent"\n')
+        assert aw.read_slot_profile("agent", slots_dir=tmp_path) == "agent"
+        assert aw.read_slot_ceiling("agent", slots_dir=tmp_path) == 65536
+
+    def test_a_profile_without_ctx_size_has_no_ceiling(self, tmp_path: Path) -> None:
+        """The window then comes from the model, so the profile is not a limit."""
+        _write_slot(tmp_path, "agent", 'profile = "chat"\n')
         assert aw.read_slot_ceiling("agent", slots_dir=tmp_path) is None
+
+    def test_an_unresolvable_profile_reads_as_absent(self, tmp_path: Path) -> None:
+        _write_slot(tmp_path, "agent", 'profile = "no-such-profile"\n')
+        assert aw.read_slot_profile("agent", slots_dir=tmp_path) == "no-such-profile"
+        assert aw.read_slot_ceiling("agent", slots_dir=tmp_path) is None
+
+    def test_a_stale_slot_window_key_is_not_a_ceiling(self, tmp_path: Path) -> None:
+        """A leftover ``[model].context_size`` no longer means anything."""
+        _write_slot(tmp_path, "agent", "[model]\ncontext_size = 8192\n")
+        assert aw.read_slot_ceiling("agent", slots_dir=tmp_path) is None
+
+    def test_unparsable_toml_reads_as_absent(self, tmp_path: Path) -> None:
+        _write_slot(tmp_path, "agent", '[model\nprofile = "agent"\n')
+        assert aw.read_slot_ceiling("agent", slots_dir=tmp_path) is None
+        assert aw.read_slot_profile("agent", slots_dir=tmp_path) is None
 
 
 class TestRecommendedCeiling:

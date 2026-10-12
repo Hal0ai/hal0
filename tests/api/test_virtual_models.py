@@ -26,7 +26,8 @@ class _FakeSlotManager:
                 "name": "agent",
                 "type": "llm",
                 "model": {"default": "big"},
-                "ctx_size": 65536,
+                # ADR-0029: the window is the profile's (the agent seed: 65536).
+                "profile": "agent",
                 "device": "gpu-vulkan",
             }
         ]
@@ -42,12 +43,11 @@ class _FakeModelRegistry:
 class _FakeModelEntry:
     def __init__(self, model_id):
         self.name = model_id
-        self.defaults = type("_", (), {"context_size": 65536})()
 
     def model_dump(self):
-        # #1788: resolve_effective_context_size converts a registry entry via
-        # model_dump() (mirrors the real pydantic Model).
-        return {"defaults": {"context_size": self.defaults.context_size}, "metadata": {}}
+        # The window resolver converts a registry entry via model_dump()
+        # (mirrors the real pydantic Model); the native window is 262144.
+        return {"metadata": {"context_length": 262144}}
 
 
 @pytest.fixture

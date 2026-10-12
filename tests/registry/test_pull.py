@@ -197,7 +197,10 @@ async def test_run_pull_keeps_operator_chat_template(tmp_hal0_home: str) -> None
 async def test_run_pull_uncurated_model_gets_no_template_default(
     tmp_hal0_home: str,
 ) -> None:
-    """A non-curated pull (custom HF coords) leaves defaults untouched."""
+    """A non-curated pull (custom HF coords) stamps no chat-template default.
+
+    The only fact it records is the tokenizer repo, which the pull path
+    defaults from the source HF repo (#1773)."""
     body = _payload(4096)
     job = make_job("some-random-gguf")
     registry = ModelRegistry()
@@ -214,7 +217,10 @@ async def test_run_pull_uncurated_model_gets_no_template_default(
         await client.aclose()
 
     assert job.state == "completed", f"got {job.state}: {job.error}"
-    assert registry.get("some-random-gguf").defaults is None
+    defaults = registry.get("some-random-gguf").defaults
+    assert defaults is not None
+    assert defaults.chat_template is None
+    assert defaults.tokenizer_repo == "org/random-GGUF"
 
 
 # ── context-length + capability stamping at pull time ────────────────────────

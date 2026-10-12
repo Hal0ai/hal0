@@ -161,7 +161,8 @@ def test_install_slot_model_updates_model_default(
                 'profile = "flm"',
                 "[model]",
                 'default = "gemma4-it-e2b-FLM"',
-                "context_size = 16384",
+                "[npu]",
+                "asr = true",
                 "",
             ]
         ),
@@ -181,8 +182,9 @@ def test_install_slot_model_updates_model_default(
 
     # model.default updated
     assert cfg["model"]["default"] == "lfm2-1-2b-FLM"
-    # sibling key preserved
-    assert cfg["model"]["context_size"] == 16384
+    # [model] holds only the binding (ADR-0029); sibling tables are preserved
+    assert cfg["model"] == {"default": "lfm2-1-2b-FLM"}
+    assert cfg["npu"] == {"asr": True}
     # canonical fields untouched
     assert cfg["device"] == "npu"
     assert cfg["type"] == "llm"
@@ -205,10 +207,11 @@ def test_install_slot_model_preserves_all_existing_top_level_fields(
                 'type = "llm"',
                 'device = "gpu-vulkan"',
                 'runtime = "container"',
-                'profile = "vulkan"',
+                'profile = "chat"',
                 "[model]",
                 'default = "qwen3.5-9b"',
-                "context_size = 65536",
+                "[server.env]",
+                'HSA_XNACK = "1"',
                 "",
             ]
         ),
@@ -224,11 +227,12 @@ def test_install_slot_model_preserves_all_existing_top_level_fields(
         cfg = tomllib.load(fh)
 
     assert cfg["model"]["default"] == "qwen3.6-27b"
-    assert cfg["model"]["context_size"] == 65536
+    assert cfg["model"] == {"default": "qwen3.6-27b"}
+    assert cfg["server"] == {"env": {"HSA_XNACK": "1"}}
     assert cfg["port"] == 8081
     assert cfg["device"] == "gpu-vulkan"
     assert cfg["runtime"] == "container"
-    assert cfg["profile"] == "vulkan"
+    assert cfg["profile"] == "chat"
     assert cfg["type"] == "llm"
     # #1369: no ``enabled`` key to preserve — activation IS ``[model].default``,
     # which this update deliberately rewrites (asserted above).
@@ -301,7 +305,8 @@ def test_seeded_npu_toml_fields_survive_model_update(
                 'role = "utility"',
                 "[model]",
                 'default = "gemma4-it-e2b-FLM"',
-                "context_size = 16384",
+                "[npu]",
+                "asr = true",
                 "",
             ]
         ),
@@ -317,8 +322,8 @@ def test_seeded_npu_toml_fields_survive_model_update(
         cfg = tomllib.load(fh)
 
     # Only model.default changed
-    assert cfg["model"]["default"] == "lfm2-1-2b-FLM"
-    assert cfg["model"]["context_size"] == 16384
+    assert cfg["model"] == {"default": "lfm2-1-2b-FLM"}
+    assert cfg["npu"] == {"asr": True}
     # All other canonical fields intact
     assert cfg["name"] == "npu"
     assert cfg["port"] == 8088
