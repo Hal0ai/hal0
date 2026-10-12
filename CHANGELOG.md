@@ -344,6 +344,16 @@ applying. Add those subsections to a version's section to surface them; see
   it removed the size "from /var/lib/hal0/models", whatever the model's
   actual location.
 
+### Added
+
+- `hal0 profile migrate` previews the move to profile-centric config
+  (ADR-0029: the model keeps file facts, a profile holds every tune, a slot
+  holds placement). It reads this box's slots, profiles, stacks and model
+  registry and prints the profiles it would generate, the slots it would
+  re-point and every configured value that does not reach the launch today,
+  such as a slot's `[server].extra_args`. It writes nothing; the conversion
+  itself ships with the launch-path change in a later release step.
+
 ### Changed
 
 - ADR-0027: `Runner.tier` (`default` / `optional` / `frozen`) replaces
