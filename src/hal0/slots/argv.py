@@ -38,10 +38,13 @@ from dataclasses import dataclass
 
 from hal0.errors import BadRequest
 
-# Short→long canonicalisation. Used ONLY to compute the dedup key; the emitted
-# token keeps its original spelling. Seeded from the flags hal0 profiles +
-# slots actually use on llama-server; unknown flags fall through unaliased and
-# dedup against their own literal spelling (still correct, just less aggressive).
+# Short/alternative → primary long canonicalisation. Used to compute the dedup
+# key and to match the deny sets; the emitted token keeps its original
+# spelling. The spellings come from llama.cpp's own option table
+# (``common/arg.cpp`` at the runner pin, b11574): every alternative spelling
+# of a flag hal0 manages or screens must be here, or the screen misses it
+# (``-m /etc/shadow`` once redirected the model past a ``--model`` check).
+# Unknown flags fall through unaliased and dedup against their own spelling.
 FLAG_ALIASES: dict[str, str] = {
     "-b": "--batch-size",
     "-ub": "--ubatch-size",
@@ -59,6 +62,44 @@ FLAG_ALIASES: dict[str, str] = {
     "-np": "--parallel",
     "-kvu": "--kv-unified",
     "-ngld": "--n-gpu-layers-draft",
+    # Managed flags (base layer).
+    "-m": "--model",
+    "-a": "--alias",
+    "--gpu-layers": "--n-gpu-layers",
+    # Model facts (model layer).
+    "-mm": "--mmproj",
+    # Derived placement (slot layer).
+    "-devd": "--spec-draft-device",
+    "--device-draft": "--spec-draft-device",
+    "-mmdev": "--mmproj-device",
+    # Remote model fetches.
+    "-mu": "--model-url",
+    "-mmu": "--mmproj-url",
+    "-hf": "--hf-repo",
+    "-hfr": "--hf-repo",
+    "-hff": "--hf-file",
+    "-hft": "--hf-token",
+    "-dr": "--docker-repo",
+    "-hfd": "--spec-draft-hf",
+    "-hfrd": "--spec-draft-hf",
+    "--hf-repo-draft": "--spec-draft-hf",
+    # Host file reads and writes.
+    "-md": "--spec-draft-model",
+    "--model-draft": "--spec-draft-model",
+    "-f": "--file",
+    "-sysf": "--system-prompt-file",
+    "-jf": "--json-schema-file",
+    "-bf": "--binary-file",
+    "-lcs": "--lookup-cache-static",
+    "-lcd": "--lookup-cache-dynamic",
+    "-o": "--output-file",
+    "--output": "--output-file",
+    "--kl-divergence-base": "--save-all-logits",
+    "--audio": "--image",
+    "--video": "--image",
+    "--ui-config-file": "--webui-config-file",
+    # Listener / network policy.
+    "--ui-mcp-proxy": "--webui-mcp-proxy",
 }
 
 # Flags whose semantics are "may be repeated" — never deduped. Keyed by the
@@ -111,10 +152,86 @@ SLOT_HARDWARE_FLAGS: frozenset[str] = frozenset(
     {
         "--n-gpu-layers",
         "-ngl",
+        "--gpu-layers",
         "--device",
         "-dev",
         "--threads",
         "-t",
+    }
+)
+
+# ── Host-owned flags ──────────────────────────────────────────────────────────
+#
+# llama-server flags that reach outside the slot's own tune: fetching a model
+# from the network, reading or writing an arbitrary host file, opening or
+# shaping a listener, or setting auth/TLS. hal0 manages all of these (the
+# model file, the loopback listener, the API gateway's auth), so a profile —
+# or a blocked slot's recorded tune — may never set them. Canonical (long)
+# spellings from llama.cpp's ``common/arg.cpp`` at the runner pin (b11574);
+# :data:`FLAG_ALIASES` maps every short/alternative spelling onto them.
+HOST_OWNED_FLAGS: frozenset[str] = frozenset(
+    {
+        # Remote model fetches.
+        "--model-url",
+        "--mmproj-url",
+        "--hf-repo",
+        "--hf-file",
+        "--hf-token",
+        "--docker-repo",
+        "--spec-draft-hf",
+        "--server-base",
+        # Host file reads and writes.
+        "--spec-draft-model",
+        "--file",
+        "--system-prompt-file",
+        "--in-file",
+        "--binary-file",
+        "--prompt-cache",
+        "--grammar-file",
+        "--json-schema-file",
+        "--lora",
+        "--lora-scaled",
+        "--control-vector",
+        "--control-vector-scaled",
+        "--lookup-cache-static",
+        "--lookup-cache-dynamic",
+        "--context-file",
+        "--output-file",
+        "--save-all-logits",
+        "--logits-output-dir",
+        "--log-file",
+        "--log-prompts-dir",
+        "--slot-save-path",
+        "--media-path",
+        "--path",
+        "--image",
+        "--video-ffmpeg-dir",
+        "--positive-file",
+        "--negative-file",
+        "--tts-speaker-file",
+        "--webui-config-file",
+        "--mcp-servers-config",
+        "--models-dir",
+        "--models-preset",
+        # Listener / network policy (and the router mode that spawns servers).
+        "--rpc",
+        "--reuse-port",
+        "--api-prefix",
+        "--cors-origins",
+        "--cors-methods",
+        "--cors-headers",
+        "--cors-credentials",
+        "--webui-mcp-proxy",
+        "--tools",
+        "--tools-runtime",
+        "--mcp-servers-json",
+        "--models-max",
+        "--models-autoload",
+        # Auth / TLS.
+        "--api-key",
+        "--api-key-file",
+        "--ssl-key-file",
+        "--ssl-cert-file",
     }
 )
 
@@ -135,6 +252,7 @@ PROFILE_SEGMENT_LABELS: frozenset[str] = frozenset({"profile"})
 MODEL_FACT_FLAGS: frozenset[str] = frozenset(
     {
         "--jinja",
+        "--no-jinja",
         "--chat-template",
         "--chat-template-file",
         "--mmproj",
@@ -144,7 +262,7 @@ MODEL_FACT_FLAGS: frozenset[str] = frozenset(
     }
 )
 #: Placement the slot layer derives itself (from the slot's device).
-DERIVED_PLACEMENT_FLAGS: frozenset[str] = frozenset({"--spec-draft-device"})
+DERIVED_PLACEMENT_FLAGS: frozenset[str] = frozenset({"--spec-draft-device", "--mmproj-device"})
 
 
 @dataclass(frozen=True)
@@ -176,16 +294,19 @@ def _is_flag(tok: str) -> bool:
 def _canon(flag: str) -> str:
     """Canonicalize a flag token for dedup/denylist matching.
 
-    Handles the GNU ``--long=value`` join form by splitting off the ``=value``
-    suffix before the alias lookup — otherwise ``--model=/etc/passwd`` never
-    equals ``--model`` and sails past every exact-string denylist check
-    (``MANAGED_ARGS_DENYLIST``/``SLOT_HARDWARE_FLAGS``) despite being
-    equivalent to the two-token form. Only ``--long`` flags use this form;
-    short flags (``-b``) don't take an ``=`` join in practice, so they're left
-    alone.
+    * The ``flag=value`` join form (``--model=/etc/passwd``, ``-m=/etc/passwd``)
+      is split before the lookup, so it can never sail past an exact-string
+      deny check the two-token form would hit.
+    * In a ``--long`` flag, ``_`` reads as ``-``: llama.cpp rewrites it the
+      same way before matching (``common/arg.cpp``), so ``--api_key`` *is*
+      ``--api-key``.
+    * Every short/alternative spelling folds onto its primary long flag
+      through :data:`FLAG_ALIASES`.
     """
-    if flag.startswith("--") and "=" in flag:
+    if "=" in flag:
         flag = flag.split("=", 1)[0]
+    if flag.startswith("--"):
+        flag = flag.replace("_", "-")
     return FLAG_ALIASES.get(flag, flag)
 
 
@@ -303,7 +424,7 @@ def strip_reasoning_format_none(tokens: list[str]) -> tuple[list[str], int]:
     removed = 0
     for pair in _split_pairs(tokens):
         if pair.canon == "--reasoning-format" and pair.flag is not None:
-            joined = pair.flag.startswith("--reasoning-format=")
+            joined = "=" in pair.flag
             value = pair.flag.split("=", 1)[1] if joined else (pair.values or ("",))[0]
             if value.strip().lower() == "none":
                 removed += 1
@@ -397,6 +518,51 @@ def _deny_profile_owned_elsewhere(tokens: list[str], *, segment: str) -> None:
         )
 
 
+def _deny_host_owned_flags(tokens: list[str], *, segment: str) -> None:
+    """Raise when ``tokens`` set a flag that reaches outside the slot's tune
+    (:data:`HOST_OWNED_FLAGS`: remote model fetches, host file reads/writes,
+    listener or auth/TLS settings), in any spelling."""
+    offenders = [
+        str(p.flag)
+        for p in _split_pairs(tokens)
+        if p.canon is not None and p.canon in HOST_OWNED_FLAGS
+    ]
+    if offenders:
+        raise BadRequest(
+            f"{segment} may not set {', '.join(map(repr, offenders))}: these fetch a "
+            "model, read or write a host file, open or shape a listener, or set "
+            "auth/TLS, and hal0 manages all of that for the slot",
+            code="slot.host_owned_flag_denied",
+            details={"segment": segment, "flags": offenders},
+        )
+
+
+def _deny_positional_args(tokens: list[str], *, segment: str) -> None:
+    """Raise when ``tokens`` carry a bare positional (a value with no flag)."""
+    offenders = [str(p.values[0]) for p in _split_pairs(tokens) if p.canon is None]
+    if offenders:
+        raise BadRequest(
+            f"{segment} may not carry bare arguments {', '.join(map(repr, offenders))}: "
+            "every value must follow its flag",
+            code="slot.positional_arg_denied",
+            details={"segment": segment, "args": offenders},
+        )
+
+
+def screen_profile_segment(tokens: list[str], *, segment: str) -> None:
+    """Every launch-time refusal for profile-layer tokens, in reporting order.
+
+    Hardware first (``-ngl`` is also managed; the "belongs on the slot"
+    message is the actionable one), then managed, model-fact / derived
+    placement, host-owned flags and bare positionals.
+    """
+    _deny_slot_hardware_flags(tokens, segment=segment)
+    _deny_managed_flags(tokens, segment=segment)
+    _deny_profile_owned_elsewhere(tokens, segment=segment)
+    _deny_host_owned_flags(tokens, segment=segment)
+    _deny_positional_args(tokens, segment=segment)
+
+
 def _dedup(pairs: list[_Pair]) -> tuple[list[str], int, dict[str, _Pair]]:
     """Last-wins dedup over ``pairs``. Shared core of the two public entrypoints.
 
@@ -477,11 +643,12 @@ def resolve_argv(segments: list[tuple[str, list[str]]]) -> ResolvedArgv:
     overrides an earlier one — pass them lowest-precedence first.
 
     The ``profile`` segment is operator text (a profile file is editable on
-    disk), so it is screened before merging: a managed flag
-    (:data:`MANAGED_ARGS_DENYLIST`), a hardware flag
-    (:data:`SLOT_HARDWARE_FLAGS`), a model-fact flag (:data:`MODEL_FACT_FLAGS`)
-    or ``--spec-draft-device`` refuses to launch, the same rules the profile
-    write path enforces.
+    disk), so it is screened before merging (:func:`screen_profile_segment`):
+    a managed flag (:data:`MANAGED_ARGS_DENYLIST`), a hardware flag
+    (:data:`SLOT_HARDWARE_FLAGS`), a model-fact flag (:data:`MODEL_FACT_FLAGS`),
+    derived placement (``--spec-draft-device``, ``--mmproj-device``), a
+    host-owned flag (:data:`HOST_OWNED_FLAGS`) or a bare positional refuses to
+    launch, in any spelling — the same rules the profile write path enforces.
 
     Raises:
         hal0.errors.BadRequest: the profile segment sets a flag it may not.
@@ -498,9 +665,8 @@ def resolve_argv(segments: list[tuple[str, list[str]]]) -> ResolvedArgv:
         # not "fail the launch". Denying first would hard-reject every
         # grandfathered profile that still carries ``-ngl 999``.
         if label in PROFILE_SEGMENT_LABELS:
-            _deny_slot_hardware_flags(seg, segment=label)
-            _deny_profile_owned_elsewhere(seg, segment=label)
-        if label in UNTRUSTED_SEGMENT_LABELS:
+            screen_profile_segment(seg, segment=label)
+        elif label in UNTRUSTED_SEGMENT_LABELS:
             _deny_managed_flags(seg, segment=label)
         # Backstop for #2545: whatever a segment carries (a row persisted
         # before the write-side screen, a hand-edited TOML), the launched
@@ -526,6 +692,7 @@ def resolve_argv(segments: list[tuple[str, list[str]]]) -> ResolvedArgv:
 __all__ = [
     "APPEND_FLAGS",
     "FLAG_ALIASES",
+    "HOST_OWNED_FLAGS",
     "MANAGED_ARGS_DENYLIST",
     "PROFILE_SEGMENT_LABELS",
     "SLOT_HARDWARE_FLAGS",
@@ -536,6 +703,7 @@ __all__ = [
     "deny_reasoning_format_none",
     "normalize_argv",
     "resolve_argv",
+    "screen_profile_segment",
     "strip_managed_flags",
     "strip_reasoning_format_none",
 ]

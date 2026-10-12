@@ -40,6 +40,7 @@ const MANAGED_SET = new Set([...MANAGED_FLAGS, ...Object.keys(MANAGED_SHORT)]);
 export const SLOT_HARDWARE_FLAGS = [
   "-ngl",
   "--n-gpu-layers",
+  "--gpu-layers",
   "-dev",
   "--device",
   "--threads",
@@ -68,6 +69,7 @@ export function findSlotHardwareFlags(text) {
 // Mirrors the server's profiles.model_fact_flag_denied screen.
 export const MODEL_FACT_FLAGS = [
   "--jinja",
+  "--no-jinja",
   "--chat-template",
   "--chat-template-file",
   "--mmproj",
@@ -80,6 +82,7 @@ const MODEL_FACT_SET = new Set(MODEL_FACT_FLAGS);
 // copy.
 export const MODEL_FACT_FLAG_SOURCE = {
   "--jinja": "the model's Jinja fact",
+  "--no-jinja": "the model's Jinja fact",
   "--chat-template": "the model's Chat template",
   "--chat-template-file": "the model's Chat template",
   "--mmproj": "the model's mmproj path (Source)",
@@ -197,7 +200,39 @@ export const FLAG_ALIASES = {
   "-mg": "--main-gpu",
   "-np": "--parallel",
   "-kvu": "--kv-unified",
-  "-ngld": "--n-gpu-layers-draft"
+  "-ngld": "--n-gpu-layers-draft",
+  "-m": "--model",
+  "-a": "--alias",
+  "--gpu-layers": "--n-gpu-layers",
+  "-mm": "--mmproj",
+  "-devd": "--spec-draft-device",
+  "--device-draft": "--spec-draft-device",
+  "-mmdev": "--mmproj-device",
+  "-mu": "--model-url",
+  "-mmu": "--mmproj-url",
+  "-hf": "--hf-repo",
+  "-hfr": "--hf-repo",
+  "-hff": "--hf-file",
+  "-hft": "--hf-token",
+  "-dr": "--docker-repo",
+  "-hfd": "--spec-draft-hf",
+  "-hfrd": "--spec-draft-hf",
+  "--hf-repo-draft": "--spec-draft-hf",
+  "-md": "--spec-draft-model",
+  "--model-draft": "--spec-draft-model",
+  "-f": "--file",
+  "-sysf": "--system-prompt-file",
+  "-jf": "--json-schema-file",
+  "-bf": "--binary-file",
+  "-lcs": "--lookup-cache-static",
+  "-lcd": "--lookup-cache-dynamic",
+  "-o": "--output-file",
+  "--output": "--output-file",
+  "--kl-divergence-base": "--save-all-logits",
+  "--audio": "--image",
+  "--video": "--image",
+  "--ui-config-file": "--webui-config-file",
+  "--ui-mcp-proxy": "--webui-mcp-proxy"
 };
 
 // Fold a flag spelling onto its canonical long form via FLAG_ALIASES, or
