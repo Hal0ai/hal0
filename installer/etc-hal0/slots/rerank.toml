@@ -35,6 +35,3 @@ profile = "reranking"
 port = 8086
 n_gpu_layers = -1
 threads = 0
-
-[model]
-context_size = 4096

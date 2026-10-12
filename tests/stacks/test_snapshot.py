@@ -74,8 +74,7 @@ class TestSnapshot:
             'device = "gpu-rocm"\n'
             'backend = "rocm"\n'
             'profile = "rocm"\n'
-            "port = 8082\n"
-            "mtp = true\n\n"
+            "port = 8082\n\n"
             "[model]\n"
             'default = "ace-saber"\n',
             encoding="utf-8",
@@ -85,10 +84,46 @@ class TestSnapshot:
         assert agent.model == "ace-saber"
         assert agent.device == "gpu-rocm"
         assert agent.profile == "rocm"
-        assert agent.mtp is True
+        # ADR-0029: a snapshot row is placement only; tunes travel in the
+        # embedded profile.
+        assert not {"vision", "mtp", "enable_thinking", "server_extra_args"} & set(
+            agent.model_dump()
+        )
 
-    def test_legacy_backend_device_dropped(self, reg: ModelRegistry, tmp_hal0_home: str) -> None:
-        # A non-canonical device (legacy "rocm" backend) would fail
+    def test_snapshot_ignores_stale_tuning_keys_on_a_slot_file(
+        self, reg: ModelRegistry, tmp_hal0_home: str
+    ) -> None:
+        """A slot file still carrying a retired tuning key must not break the
+        snapshot or leak into the row."""
+        _write_slot(
+            tmp_hal0_home,
+            "stale",
+            [
+                'name = "stale"',
+                "port = 8089",
+                "mtp = true",
+                "vision = true",
+                "[server]",
+                'extra_args = "-ctk q8_0"',
+                "[model]",
+                'default = "m"',
+                "context_size = 4096",
+            ],
+        )
+        stack = snapshot_live_stack(registry=reg)
+        entry = next(e for e in stack.slots if e.slot == "stale")
+        assert entry.model == "m"
+        assert set(entry.model_dump(exclude_none=True)) <= {
+            "slot",
+            "model",
+            "device",
+            "provider",
+            "profile",
+            "capabilities",
+        }
+
+    def test_bare_backend_device_dropped(self, reg: ModelRegistry, tmp_hal0_home: str) -> None:
+        # A non-canonical device (a bare "rocm" backend) would fail
         # StackSlotEntry validation → it's read as None, not raised.
         _write_slot(
             tmp_hal0_home,

@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from hal0.config.schema import GPUInfo, HardwareInfo, NPUInfo
+from hal0.config.schema import GPUInfo, HardwareInfo, NPUInfo, slot_tuning_keys
 from hal0.install.orchestrate import (
     Selections,
     SetupResult,
@@ -488,7 +488,7 @@ class _Job:
         self.state = "queued"
 
 
-async def test_apply_setup_creates_slot_model_less_and_plan_carries_slot():
+async def test_apply_setup_creates_slot_model_less_and_plan_carries_slot(tmp_hal0_home):
     """The guided path seeds the slot with NO model and the plan remembers which
     slot to activate once the pull lands (no start-before-model race).
 
@@ -515,12 +515,102 @@ async def test_apply_setup_creates_slot_model_less_and_plan_carries_slot():
     )
     assert sm.created["chat"]["model"]["default"] == ""
     assert "enabled" not in sm.created["chat"]
-    # The context budget is still computed and persisted at create time — only
-    # the model id waits for the pull.
-    assert sm.created["chat"]["model"]["context_size"] > 0
+    # ADR-0029: the window is the profile's ctx_size, never a slot key. A box
+    # that can afford it keeps the derived profile untouched...
+    assert "context_size" not in sm.created["chat"]["model"]
+    assert slot_tuning_keys(sm.created["chat"]) == []
+    assert res.slots[0].profile == sm.created["chat"]["profile"]
+    assert "-ctx" not in sm.created["chat"]["profile"]
     # The plan carries the slot AND the model id to stamp on success.
     assert res.pulls[0].slot_names == ["chat"]
     assert res.pulls[0].model_id == "qwen3-4b"
+
+
+def _tiny_hw():
+    return HardwareInfo(platform="bare-metal-cpu-only", ram_mb=3000, ram_available_mb=3000, gpus=[])
+
+
+async def test_apply_setup_clamps_the_window_by_pointing_the_slot_at_a_clamped_profile(
+    tmp_hal0_home,
+):
+    """A box that cannot afford the profile's window gets a custom profile
+    ``<profile>-ctx<N>`` (ADR-0029), not a per-slot ceiling."""
+    from hal0.config.loader import load_profiles_config
+    from hal0.install import orchestrate
+
+    sm = _RecordingSlotManager()
+    sel = Selections(
+        storage_dir="",
+        slots=[
+            SlotSelection(
+                capability="chat",
+                slot_name="chat",
+                port=8081,
+                model_id="qwen3-4b",
+                device="cpu",
+                profile="chat",
+            )
+        ],
+        extensions={},
+        npu_opt_in=False,
+    )
+    res = await orchestrate.apply_setup(
+        sel,
+        hardware=_tiny_hw(),
+        slot_manager=sm,
+        registry={},
+        jobs={},
+        write_sentinel=False,
+    )
+    cfg = sm.created["chat"]
+    clamped = cfg["profile"]
+    assert clamped.startswith("chat-ctx"), clamped
+    assert res.slots[0].profile == clamped
+    assert "context_size" not in cfg["model"]
+    assert slot_tuning_keys(cfg) == []
+
+    catalog = load_profiles_config().profile
+    clone, seed = catalog[clamped], catalog["chat"]
+    assert clone.ctx_size == int(clamped.removeprefix("chat-ctx"))
+    assert clone.ctx_size < 32768
+    assert clone.cloned_from == "chat"
+    assert clone.intent == f"Installer: chat clamped to {clone.ctx_size} for this box"
+    assert (clone.flags, clone.vision, clone.mtp) == (seed.flags, seed.vision, seed.mtp)
+
+
+async def test_apply_setup_keeps_the_profile_when_the_budget_fits(tmp_hal0_home):
+    """The clamp only ever lowers a window: on a roomy box the slot keeps its
+    named profile and nothing is written to profiles.toml."""
+    from hal0.install import orchestrate
+
+    sm = _RecordingSlotManager()
+    sel = Selections(
+        storage_dir="",
+        slots=[
+            SlotSelection(
+                capability="chat",
+                slot_name="chat",
+                port=8081,
+                model_id="qwen3-4b",
+                device="gpu-rocm",
+                profile="utility",
+            )
+        ],
+        extensions={},
+        npu_opt_in=False,
+    )
+    await orchestrate.apply_setup(
+        sel,
+        hardware=_strix_hw(),
+        slot_manager=sm,
+        registry={},
+        jobs={},
+        write_sentinel=False,
+    )
+    assert sm.created["chat"]["profile"] == "utility"
+    from hal0.config import paths
+
+    assert not paths.profiles_toml().exists()
 
 
 async def test_apply_setup_shared_model_activates_both_slots():

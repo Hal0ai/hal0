@@ -281,18 +281,15 @@ class StackApplyEngine:
     ) -> dict[str, Any] | None:
         """Project a stack slot entry onto the existing slot TOML dict.
 
-        Builds the update set (both the v0.2 ``device`` and the
-        one-release-legacy ``backend`` alias via :mod:`hal0.model_meta` —
-        the SAME dual write ``SlotConfigStore._reconciled_slot`` performs)
-        and then routes it through the shared guarded pipeline
+        Builds the placement update set (model, device, provider, profile)
+        and routes it through the shared guarded pipeline
         :func:`hal0.slots.manager.reconcile_and_guard_slot_config`: the
-        slot/model key-space partition + freeform-flag screen, the
-        copy-safe one-level ``[model]``/``[server]`` merge, the #585
-        ``ctx_size``→``context_size`` fold, device↔profile backend
-        coherence, and the NPU-exclusivity / default-uniqueness guards.
-        A stack can therefore no longer persist what ``update_config``
-        would refuse (e.g. a vulkan device under a rocm profile, or a
-        model-owned ``mtp``/``vision``/``enable_thinking``) — guard
+        slot key-space partition, the copy-safe one-level ``[model]``/
+        ``[server]`` merge, device↔profile backend coherence, and the
+        NPU-exclusivity / default-uniqueness guards. A stack row carries
+        placement only (ADR-0029); every tune lives on the profile it names.
+        A stack can therefore not persist what ``update_config`` would
+        refuse (e.g. a vulkan device under a rocm profile) — guard
         violations raise and :meth:`plan` records them per-slot. Returns
         ``before`` unchanged when the slot file is absent (creation is out
         of 2a scope).
@@ -318,17 +315,6 @@ class StackApplyEngine:
             updates["provider"] = entry.provider
         if entry.profile is not None:
             updates["profile"] = entry.profile
-        # spec-hw-slot-ownership §1: ``vision`` / ``mtp`` / ``enable_thinking``
-        # are MODEL-owned typed capabilities and are deliberately NOT projected
-        # onto the slot. They remain on ``StackSlotEntry`` (back-compat: seed
-        # stacks still declare ``mtp = true``, and ``snapshot_live_stack`` still
-        # reads them off pre-partition slot TOMLs) but a stack apply must not re-land
-        # the pre-partition on-disk shape that ``PUT /api/slots/{name}/config``
-        # 400s on. This is the same exclusion the sibling create path
-        # (``api.routes.stacks._create_missing_slots``) makes; the two agree
-        # again. ``reconcile_and_guard_slot_config`` now enforces it for real.
-        if entry.server_extra_args is not None:
-            updates["server"] = {"extra_args": entry.server_extra_args}
 
         return reconcile_and_guard_slot_config(
             stem or entry.slot, before, updates, slots_dir=self._slots_dir

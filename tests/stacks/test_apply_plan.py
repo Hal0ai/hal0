@@ -9,7 +9,10 @@ from __future__ import annotations
 import tomllib
 from pathlib import Path
 
-from hal0.config.schema import StackConfig, StackSlotEntry
+import pytest
+from pydantic import ValidationError
+
+from hal0.config.schema import StackConfig, StackSlotEntry, slot_tuning_keys
 from hal0.slot_config import ChangeSet
 from hal0.stacks.apply import StackApplyEngine, StackChangePlan
 
@@ -29,10 +32,10 @@ def _write_agent_slot(home: str) -> Path:
                 "port = 8087",
                 'device = "gpu-vulkan"',
                 'provider = "llama-server"',
-                "vision = false",
+                'profile = "agent"',
+                "threads = 6",
                 "[model]",
                 'default = "old-model"',
-                "context_size = 8192",
                 "",
             ]
         ),
@@ -54,7 +57,6 @@ def _stack() -> StackConfig:
                 slot="agent",
                 model="chadrock-35b-ace-saber",
                 device="gpu-rocm",
-                vision=True,
             )
         ],
     )
@@ -83,18 +85,15 @@ class TestReconciliation:
         plan = StackApplyEngine().plan("saber", _stack())
         after = {fs.path: fs.data for fs in plan.change_set.after}[slot_path]
         assert after["model"]["default"] == "chadrock-35b-ace-saber"
-        assert after["model"]["context_size"] == 8192, (
-            "sibling [model] keys must survive deep-merge"
-        )
-        # P2-device: device is the sole persisted truth — the legacy
-        # ``backend`` mirror is no longer written.
+        assert after["threads"] == 6, "sibling slot keys must survive the merge"
+        # P2-device: device is the sole persisted truth — no ``backend`` mirror.
         assert after["device"] == "gpu-rocm"
         assert "backend" not in after
-        # spec-hw-slot-ownership §1: the stack entry's ``vision=True`` is a
-        # MODEL-owned capability and must NOT project onto the slot. The
-        # on-disk ``vision = false`` this fixture seeds is legacy debris the
-        # migration owns; the stack leaves it exactly as found.
-        assert after["vision"] is False, "stack apply must not write model-owned vision"
+        # ADR-0029: a stack row carries placement only (model, device, provider,
+        # profile). The slot keeps the profile it named; nothing tuning-shaped
+        # is written.
+        assert after["profile"] == "agent"
+        assert slot_tuning_keys(after) == []
 
     def test_changed_true_when_model_differs(self, tmp_hal0_home: str) -> None:
         _write_agent_slot(tmp_hal0_home)
@@ -112,30 +111,24 @@ class TestReconciliation:
         plan = StackApplyEngine().plan("saber", _stack())
         assert any("agent" in line for line in plan.summary)
 
-    def test_legacy_on_disk_vision_is_left_alone(self, tmp_hal0_home: str) -> None:
-        """A pre-partition ``vision`` already on disk is neither honoured nor swept.
-
-        The stack no longer projects ``vision`` at all (spec-hw-slot-ownership
-        §1), so a slot TOML that predates the partition keeps its stale value
-        until ``hal0 slot migrate-caps`` sweeps it. Deliberate: clearing it here
-        would need a ``{"vision": None}`` delete, which the write-boundary
-        partition guard refuses — and quietly rewriting hardware/capability
-        intent as a side effect of an unrelated model swap is exactly what the
-        guard exists to stop.
-        """
-        slot_path = _slots_dir(tmp_hal0_home) / "agent.toml"
-        slot_path.write_text(
-            "\n".join(
-                ['name = "agent"', "port = 8087", "vision = true", "[model]", 'default = "old"', ""]
-            ),
-            encoding="utf-8",
+    def test_stack_row_repoints_the_slot_profile(self, tmp_hal0_home: str) -> None:
+        """The profile is the stack's tune lever: a row naming one re-points the slot."""
+        slot_path = _write_agent_slot(tmp_hal0_home)
+        stack = StackConfig(
+            name="S", slots=[StackSlotEntry(slot="agent", model="m", profile="coding")]
         )
-        stack = StackConfig(name="S", slots=[StackSlotEntry(slot="agent", model="m", vision=False)])
         plan = StackApplyEngine().plan("s", stack)
+        assert plan.errors == []
         after = {fs.path: fs.data for fs in plan.change_set.after}[slot_path]
-        assert after["vision"] is True, "legacy on-disk value survives untouched"
-        assert plan.errors == [], "an unrelated model swap must still succeed"
-        assert after["model"]["default"] == "m"
+        assert after["profile"] == "coding"
+        assert slot_tuning_keys(after) == []
+
+    @pytest.mark.parametrize("key", ["vision", "mtp", "enable_thinking", "server_extra_args"])
+    def test_stack_rows_no_longer_carry_tuning_keys(self, key: str) -> None:
+        """Schema 3 dropped the per-row tuning keys: a row naming one is refused
+        outright, never silently dropped."""
+        with pytest.raises(ValidationError):
+            StackSlotEntry.model_validate({"slot": "agent", "model": "m", key: True})
 
 
 class TestGuardedReconcile:
@@ -200,23 +193,25 @@ class TestGuardedReconcile:
         # 1.0: profile stays the workload name; device flip doesn't repoint it.
         assert after["profile"] == "chat"
 
-    def test_ctx_size_alias_folded_by_stack_write(self, tmp_hal0_home: str) -> None:
+    def test_apply_never_writes_a_window_onto_the_slot(self, tmp_hal0_home: str) -> None:
+        """The window is the profile's ``ctx_size`` (ADR-0029); a stack apply
+        writes no ``[model].context_size`` / ``ctx_size`` key."""
         slot_path = self._write_slot(
             tmp_hal0_home,
             "agent",
             [
                 'name = "agent"',
                 "port = 8087",
+                'profile = "agent"',
                 "[model]",
                 'default = "old"',
-                "ctx_size = 4096",
             ],
         )
         stack = StackConfig(name="S", slots=[StackSlotEntry(slot="agent", model="m")])
         plan = StackApplyEngine().plan("s", stack)
         after = {fs.path: fs.data for fs in plan.change_set.after}[slot_path]
-        assert after["model"]["context_size"] == 4096
-        assert "ctx_size" not in after["model"]
+        assert after["model"] == {"default": "m"}
+        assert slot_tuning_keys(after) == []
 
     def test_second_npu_anchor_is_flagged(self, tmp_hal0_home: str) -> None:
         self._write_slot(

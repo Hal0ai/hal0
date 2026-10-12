@@ -167,6 +167,32 @@ class StackEnvelope(BaseModel):
     stack: StackConfig
 
 
+#: Oldest stack envelope schema hal0 still reads. Schema 3 dropped the per-row
+#: ``vision`` / ``mtp`` / ``enable_thinking`` / ``server_extra_args`` keys and
+#: moved the embedded profiles to the profile-centric shape (ADR-0029); an older
+#: envelope is refused whole rather than having fields silently stripped.
+STACK_ENVELOPE_SCHEMA_MIN = 3
+
+
+def _refuse_old_schema(data: dict[str, Any]) -> None:
+    """Raise BadRequest when the envelope predates the profile-centric stack shape."""
+    inner = data.get("stack")
+    versions = [data.get("schema_version")]
+    if isinstance(inner, dict):
+        versions.append(inner.get("schema_version"))
+    found = [v for v in versions if isinstance(v, int)]
+    if not found:
+        return  # unstamped hand-written envelope: StackConfig stamps the current schema
+    got = min(found)
+    if got < STACK_ENVELOPE_SCHEMA_MIN:
+        raise BadRequest(
+            f"stack envelope schema v{got} is no longer supported "
+            f"(need v{STACK_ENVELOPE_SCHEMA_MIN}); re-export the stack from hal0 1.5 or newer",
+            code="stacks.envelope_schema_unsupported",
+            details={"got": got, "supported_min": STACK_ENVELOPE_SCHEMA_MIN},
+        )
+
+
 def parse_envelope(data: Any) -> StackEnvelope:
     """Validate the wire shape. Raises BadRequest on a non-envelope/invalid input."""
     if not isinstance(data, dict) or data.get("kind") != ENVELOPE_KIND:
@@ -175,6 +201,7 @@ def parse_envelope(data: Any) -> StackEnvelope:
             code="stacks.bad_envelope",
             details={"kind": (data.get("kind") if isinstance(data, dict) else None)},
         )
+    _refuse_old_schema(data)
     try:
         return StackEnvelope.model_validate(data)
     except Exception as exc:
@@ -241,16 +268,23 @@ def _reconcile_profiles(stack: StackConfig, profiles_path: Path | None = None) -
     """Add the stack's embedded profiles that don't already exist locally.
 
     Name collisions keep the LOCAL profile (the importer never silently
-    overwrites a profile the user already tuned).
+    overwrites a profile the user already tuned). A profile that would be added
+    goes through the same flag screen as a profile import (hardware, managed and
+    model-fact flags are refused), BEFORE anything is written, so a stack cannot
+    back-door a flag the profile routes refuse.
     """
     if not stack.profiles:
         return
+    from hal0.profiles import screen_profile_flags
+
     pcfg = load_profiles_config(profiles_path)
     changed = False
-    for name, profile in stack.profiles.items():
-        if name not in pcfg.profile:
-            pcfg.profile[name] = profile
-            changed = True
+    incoming = {n: p for n, p in stack.profiles.items() if n not in pcfg.profile}
+    for profile in incoming.values():
+        screen_profile_flags(profile.flags)
+    for name, profile in incoming.items():
+        pcfg.profile[name] = profile
+        changed = True
     if changed:
         save_profiles_config(pcfg, profiles_path)
 
@@ -277,9 +311,6 @@ def import_stack(
             code="stacks.envelope_too_new",
             details={"got": env.stack.schema_version, "supported": STACK_SCHEMA_VERSION_CURRENT},
         )
-    # (forward-compat seam: older schema_version would migrate here; v1 and v2
-    # both import cleanly today — v2 only added StackModelMeta.provider, which
-    # v1 importers never wrote and v2 readers treat as optional.)
     _reconcile_profiles(env.stack, profiles_path)
     resolved = catalog.create(slug, env.stack)
     report = resolve_models(env.stack, registry)
@@ -293,10 +324,11 @@ def _read_slot_raw(slot_name: str) -> dict[str, Any] | None:
     """Tolerantly read a slot TOML into the fields a snapshot needs.
 
     Deliberately does NOT go through :func:`load_slot_config` /
-    ``SlotConfig`` validation: the strict loader assumes the legacy nested
+    ``SlotConfig`` validation: the strict loader assumes the nested
     ``[slot]`` shape and rejects the live flat shape the runtime writes (it
     drops ``port`` and raises) — which silently emptied every snapshot. A
-    snapshot only needs the inference-surface fields, so we read the raw dict
+    snapshot only needs the placement fields (ADR-0029: tunes live on the
+    profile the slot names, which the snapshot embeds), so we read the raw dict
     and accept BOTH shapes: top-level keys (flat) and a ``[slot]`` section
     (nested). ``[model]`` is a top-level section in both. Returns ``None`` only
     when the file is absent or unparseable.
@@ -318,7 +350,6 @@ def _read_slot_raw(slot_name: str) -> dict[str, Any] | None:
         model_tbl = slot_sec.get("model") if isinstance(slot_sec.get("model"), dict) else {}
     model = (model_tbl.get("default") if isinstance(model_tbl, dict) else None) or None
 
-    server = raw.get("server") if isinstance(raw.get("server"), dict) else {}
     device = g("device")
     return {
         # id-aware (P3-runtime-db inc4): on an id-keyed box *slot_name* is the
@@ -328,15 +359,11 @@ def _read_slot_raw(slot_name: str) -> dict[str, Any] | None:
         # identical anyway.
         "name": g("name", slot_name),
         "model": model,
-        # device must be a canonical _VALID_DEVICES value or None — a legacy
+        # device must be a canonical _VALID_DEVICES value or None — a bare
         # backend string (e.g. "rocm") would fail StackSlotEntry validation.
         "device": device if device in _VALID_DEVICES else None,
         "provider": g("provider"),
         "profile": g("profile"),
-        "vision": bool(g("vision", False)),
-        "mtp": g("mtp"),
-        "enable_thinking": g("enable_thinking"),
-        "server_extra_args": server.get("extra_args"),
     }
 
 
@@ -394,10 +421,6 @@ def snapshot_live_stack(
                 model=model,
                 device=sc["device"],
                 provider=sc["provider"],
-                vision=sc["vision"],
-                mtp=sc["mtp"],
-                enable_thinking=sc["enable_thinking"],
-                server_extra_args=sc["server_extra_args"],
                 profile=sc["profile"],
                 capabilities=rows,
             )

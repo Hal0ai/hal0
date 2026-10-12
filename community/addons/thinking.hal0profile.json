@@ -1,14 +1,16 @@
 {
-  "checksum": "sha256:ea7dcba67830d1b0d1d47ef2c2ea4e3d303eb688c678d21f15403daa5a7bbc99",
+  "checksum": "sha256:c6268cee22b1e0470e64378874ebbf719201fb393c869e1ab5d5184f06735585",
   "exported_at": "2026-09-01T00:00:00Z",
-  "hal0_version": "1.1.0",
+  "hal0_version": "1.4.0",
   "kind": "hal0.profile",
   "name": "thinking",
   "profile": {
-    "flags": "--jinja -fa auto -b 2048 -ub 512 --reasoning on --reasoning-format deepseek --reasoning-budget -1 --no-context-shift --temp 1.0 --top-p 0.95 --top-k 20 --min-p 0 --presence-penalty 0 --no-mmproj",
+    "ctx_size": 32768,
+    "enable_thinking": true,
+    "flags": "-fa auto -b 2048 -ub 512 --reasoning on --reasoning-format deepseek --reasoning-budget -1 --no-context-shift --temp 1.0 --top-p 0.95 --top-k 20 --min-p 0 --presence-penalty 0",
     "intent": "Reasoning-ON workload (qwen3-deepseek, ace-saber thinking) · 32K ctx",
-    "mtp": false,
-    "quant": ""
+    "mtp": "auto",
+    "vision": "off"
   },
-  "schema_version": 1
+  "schema_version": 2
 }

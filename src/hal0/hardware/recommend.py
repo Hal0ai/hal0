@@ -256,6 +256,10 @@ def recommend_primary_slot(hw: HardwareInfo) -> dict[str, Any]:
 
           name, port, backend, device, runtime, profile, provider,
           enabled, [model], [meta]
+
+        ``_meta["ctx_size"]`` is the recommended context window for the
+        picked model. It is a profile tune (ADR-0029), so it is reported
+        beside the slot dict rather than written into it.
     """
     backend, backend_why = _backend_for(hw)
     # RAM-gate the GPU pick on total/unified host RAM (the same signal the
@@ -297,15 +301,17 @@ def recommend_primary_slot(hw: HardwareInfo) -> dict[str, Any]:
         "profile": profile,
         "provider": "llama-server",
         "enabled": False,  # operator runs `hal0 model pull <id>` first
-        "model": {
-            "default": model_id,
-            "context_size": context_size,
-        },
+        # ADR-0029: the window is a profile tune, not a slot key. The
+        # recommender names the device's default profile and reports the
+        # window it would pick for this model in ``_meta`` (advisory — apply
+        # it by cloning the profile with that ``ctx_size``).
+        "model": {"default": model_id},
         "_meta": {
+            "ctx_size": context_size,
             "rationale_backend": backend_why,
             "rationale_device": f"{device} (mapped from backend={backend!r})",
             "rationale_model": model_why,
-            "rationale_ctx": f"context_size={context_size} (from curated arch max)",
+            "rationale_ctx": f"ctx_size={context_size} (from curated arch max)",
             "host_ram_gb": round(ram_gb, 1),
             "vram_budget_gb": round(budget_gb, 1),
         },

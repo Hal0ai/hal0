@@ -3,15 +3,16 @@
 ``installer/install.sh`` has two writers for ``/etc/hal0/slots/``:
 
 * the **curated static seed** loop, which copies ``installer/etc-hal0/slots/*.toml``
-  verbatim (hand-tuned: ``agent`` gets ``profile = "dense"``, ``brain``
-  gets ``profile = "brain"`` + ``runtime = "container"`` + a 64K window), and
+  verbatim (hand-tuned: ``agent`` gets ``profile = "agent"``, ``brain``
+  gets ``profile = "brain"`` + ``runtime = "container"``; the 64K window is the
+  profile's ``ctx_size``), and
 * the **first-run scaffold** pass (``hal0 setup --auto``), which writes a
   generically-derived config for any capability slot it doesn't already see.
 
 They used to run in the wrong order: the scaffold went first, and then the seed
 loop's ``[[ -f ]]`` guard said "exists — left alone" and silently discarded the
 curated files. Every fresh box therefore got ``profile = "chat"`` on both slots
-and a 4096-token window — the curated recipes never landed at all.
+and a small window — the curated recipes never landed at all.
 
 These tests run the REAL scaffold pass (``apply_setup``, offline, no network)
 against a temp ``HAL0_HOME`` in both orderings, so they demonstrate the
@@ -35,7 +36,7 @@ _SEEDS_DIR = _REPO_ROOT / "installer" / "etc-hal0" / "slots"
 #: The two curated seeds the ordering bug destroyed, and the values that prove
 #: the curated file (not a derived scaffold) is what's on disk.
 _CURATED_EXPECTATIONS = {
-    "agent": {"profile": "dense", "runtime": "container", "port": 8081},
+    "agent": {"profile": "agent", "runtime": "container", "port": 8081},
     "brain": {"profile": "brain", "runtime": "container", "port": 8089},
 }
 

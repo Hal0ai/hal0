@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
 """Regenerate the committed addon catalog under ``community/addons/``.
 
-The 10-profile seed core is deliberately small; the eight tunes pruned out of
-it live on as ``LEGACY_SEED_PROFILES`` and are published here as portable
-``.hal0profile.json`` envelopes — the same wire shape the dashboard's profile
-Import accepts. A site (hal0.dev) can serve this directory statically and an
-operator installs one with a paste or an upload.
+The seed set is deliberately small; further tunes are published here as
+portable ``.hal0profile.json`` envelopes (schema 2, the profile-centric shape
+of ADR-0029) — the same wire shape the dashboard's profile Import accepts. A
+site (hal0.dev) can serve this directory statically and an operator installs
+one with a paste or an upload.
 
-Everything in ``community/addons/`` is GENERATED. Edit
-:data:`hal0.config.schema.LEGACY_SEED_PROFILES` (via
-``src/hal0/config/_seeds_data.py``), rerun this script, commit the result;
+Everything in ``community/addons/`` is GENERATED. Edit :data:`ADDON_PROFILES`
+below, rerun this script, commit the result;
 ``tests/community/test_addon_envelopes.py`` fails if the two ever disagree.
+A name that is also a code-shipped seed (``agent``, ``coding``, ...) does not
+belong here: importing it would collide with the seed.
 
 Usage:
   python scripts/export_addons.py            # rewrite community/addons/
@@ -28,15 +29,55 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 
-from hal0.config.schema import LEGACY_SEED_PROFILES, ProfileConfig  # noqa: E402
+from hal0.config.schema import ProfileConfig  # noqa: E402
 from hal0.profiles import _runtime_family  # noqa: E402
 from hal0.profiles.portable import export_envelope  # noqa: E402
+
+#: The published community tunes, as profile definitions. Flags carry only
+#: what a profile may hold: no hardware / managed / model-fact flags (hal0
+#: adds ``--jinja`` itself; ``vision = "off"`` replaces ``--no-mmproj``).
+ADDON_PROFILES: dict[str, dict[str, object]] = {
+    "chat-long-context": {
+        "flags": "-fa auto -ctk q8_0 -ctv q8_0 -b 2048 -ub 512 --no-context-shift",
+        "ctx_size": 131072,
+        "intent": "Long-context chat · tuned for 128K ctx",
+    },
+    "dense": {
+        "flags": (
+            "-fa auto -b 2048 -ub 512 --reasoning off --reasoning-budget -1 "
+            "--no-context-shift --temp 0 --top-p 0.95 --top-k 20 --seed 123"
+        ),
+        "ctx_size": 131072,
+        "vision": "off",
+        "intent": "Generic dense workload · tuned for 128K ctx",
+    },
+    "moe": {
+        "flags": (
+            "-fa auto -b 2048 -ub 512 --reasoning off --reasoning-budget -1 "
+            "--no-context-shift --temp 0 --top-p 0.95 --top-k 20 --seed 123"
+        ),
+        "ctx_size": 32768,
+        "vision": "off",
+        "intent": "Generic MoE workload · tuned for 32K ctx",
+    },
+    "thinking": {
+        "flags": (
+            "-fa auto -b 2048 -ub 512 --reasoning on --reasoning-format deepseek "
+            "--reasoning-budget -1 --no-context-shift --temp 1.0 --top-p 0.95 "
+            "--top-k 20 --min-p 0 --presence-penalty 0"
+        ),
+        "ctx_size": 32768,
+        "enable_thinking": True,
+        "vision": "off",
+        "intent": "Reasoning-ON workload (qwen3-deepseek, ace-saber thinking) · 32K ctx",
+    },
+}
 
 ADDONS_DIR = ROOT / "community" / "addons"
 INDEX_PATH = ADDONS_DIR / "index.json"
 
 #: Frozen, NOT a live clock. These envelopes are committed artifacts: a
-#: wall-clock stamp would rewrite all eight files on every run and make the
+#: wall-clock stamp would rewrite all every file on every run and make the
 #: checksum-stable output look churned. The checksum covers the profile body
 #: only, so this value never affects integrity — it is a provenance note.
 EXPORTED_AT = "2026-09-01T00:00:00Z"
@@ -46,14 +87,10 @@ INDEX_SCHEMA_VERSION = 1
 
 #: The oldest release that can install a row from this index.
 #:
-#: 1.1.0 shipped portable profiles but not the import-side ``runner``
-#: handling, so an envelope naming a runner key that release does not know
-#: had no defined behaviour there. The strip-to-Auto import (unknown key →
-#: ``runner`` cleared, warned in the dry-run preview) lands in 1.2.0, in the
-#: same release as this catalog. Every envelope here currently ships
-#: ``runner`` unset, but the floor is a property of the CONTRACT, not of
-#: today's rows.
-MIN_HAL0_VERSION = "1.2.0"
+#: Profile envelope schema 2 (ctx_size / enable_thinking / vision / mtp
+#: "auto"|"off", ADR-0029) is read from 1.5.0; schema-1 envelopes are refused
+#: there. The floor is a property of the CONTRACT, not of today's rows.
+MIN_HAL0_VERSION = "1.5.0"
 
 #: First separator in an ``intent`` string: a middot clause (`` · 32K ctx``)
 #: or an opening parenthetical. Everything before it is the headline.
@@ -70,14 +107,14 @@ def _title(intent: str) -> str:
 
 
 def build_envelopes() -> dict[str, dict]:
-    """Envelope-per-legacy-seed, keyed by profile name."""
+    """One envelope per published profile, keyed by profile name."""
     return {
         name: export_envelope(
             name,
             ProfileConfig.model_validate(entry),
             exported_at=EXPORTED_AT,
         )
-        for name, entry in LEGACY_SEED_PROFILES.items()
+        for name, entry in ADDON_PROFILES.items()
     }
 
 
@@ -87,7 +124,7 @@ def build_index(envelopes: dict[str, dict]) -> dict:
     for name in sorted(envelopes):
         envelope = envelopes[name]
         body = envelope["profile"]
-        profile = ProfileConfig.model_validate(LEGACY_SEED_PROFILES[name])
+        profile = ProfileConfig.model_validate(ADDON_PROFILES[name])
         intent = body.get("intent", "")
         rows.append(
             {
@@ -125,7 +162,7 @@ def is_stale(path: Path, body: str) -> bool:
     ``hal0.__version__``, which resolves from INSTALLED package metadata
     (``src/hal0/__init__.py``) — so it differs between a release checkout, a
     tree mid-version-bump, and one where hal0 is not pip-installed at all
-    (``0.0.0+source``). A raw-text comparison calls all eight envelopes stale
+    (``0.0.0+source``). A raw-text comparison calls every envelope stale
     in every one of those and points the reader at the wrong problem; the
     stamp records WHICH RELEASE wrote the file, not what the file says.
 
@@ -173,7 +210,7 @@ def main(argv: list[str]) -> int:
     ADDONS_DIR.mkdir(parents=True, exist_ok=True)
     # Write only what `is_stale` flags, for the same reason it ignores the
     # stamp: an unconditional rewrite in a checkout whose ambient
-    # `hal0.__version__` differs would restamp all eight files and produce a
+    # `hal0.__version__` differs would restamp all every file and produce a
     # diff of pure provenance churn. Regenerating is then idempotent.
     for path in sorted(stale):
         path.write_text(files[path], encoding="utf-8")

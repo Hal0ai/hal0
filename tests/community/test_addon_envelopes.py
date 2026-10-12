@@ -2,7 +2,7 @@
 artifact — ``scripts/export_addons.py`` is its only author.
 
 These tests are the staleness alarm: they re-derive every envelope from
-:data:`hal0.config.schema.LEGACY_SEED_PROFILES` and compare it against what is
+:data:`scripts/export_addons.ADDON_PROFILES` and compare it against what is
 on disk, so a change to a legacy definition that nobody regenerated fails here
 instead of shipping a catalog that disagrees with the code.
 """
@@ -16,13 +16,17 @@ from types import ModuleType
 
 import pytest
 
-from hal0.config.schema import LEGACY_SEED_PROFILES, ProfileConfig
+from hal0.config.schema import SEED_PROFILES, ProfileConfig
 from hal0.profiles import ProfileCatalog, _runtime_family
 from hal0.profiles.portable import export_envelope, import_profile
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 ADDONS_DIR = REPO_ROOT / "community" / "addons"
 INDEX = ADDONS_DIR / "index.json"
+
+
+def _addon_profiles() -> dict[str, dict]:
+    return _generator().ADDON_PROFILES
 
 
 def _envelope_files() -> list[Path]:
@@ -42,9 +46,9 @@ def _staleness_view(envelope: dict) -> dict:
     return {k: v for k, v in envelope.items() if k != "hal0_version"}
 
 
-def test_committed_envelopes_match_legacy_definitions() -> None:
-    """Every legacy seed has an envelope, and it matches its definition."""
-    for name, entry in LEGACY_SEED_PROFILES.items():
+def test_committed_envelopes_match_definitions() -> None:
+    """Every published addon has an envelope, and it matches its definition."""
+    for name, entry in _addon_profiles().items():
         path = ADDONS_DIR / f"{name}.hal0profile.json"
         assert path.exists(), f"missing envelope for {name} — run scripts/export_addons.py"
         on_disk = json.loads(path.read_text(encoding="utf-8"))
@@ -60,10 +64,10 @@ def test_committed_envelopes_match_legacy_definitions() -> None:
 
 
 def test_no_orphan_envelopes() -> None:
-    """No envelope file survives the pruning of its legacy definition."""
+    """No envelope file survives the removal of its definition."""
     on_disk = {p.name.removesuffix(".hal0profile.json") for p in _envelope_files()}
-    assert on_disk == set(LEGACY_SEED_PROFILES), (
-        "community/addons/ disagrees with LEGACY_SEED_PROFILES — "
+    assert on_disk == set(_addon_profiles()), (
+        "community/addons/ disagrees with ADDON_PROFILES — "
         "rerun scripts/export_addons.py and delete any orphan file"
     )
 
@@ -117,19 +121,32 @@ def test_index_rows_agree_with_their_envelopes() -> None:
 
 def test_index_runtime_family_matches_classification() -> None:
     for row in _index()["addons"]:
-        profile = ProfileConfig.model_validate(LEGACY_SEED_PROFILES[row["name"]])
+        profile = ProfileConfig.model_validate(_addon_profiles()[row["name"]])
         assert row["runtime_family"] == _runtime_family(row["name"], profile)
 
 
-def test_index_declares_the_runner_tolerant_release() -> None:
-    """`min_hal0_version` is the release that can import these envelopes.
-
-    1.1.0 shipped without the import-side `runner` handling, so an envelope
-    naming an unknown runner key had no defined behaviour there; the
-    strip-to-Auto import lands in 1.2.0 alongside this catalog.
-    """
+def test_index_declares_the_schema_2_release() -> None:
+    """`min_hal0_version` is the first release that reads schema-2 envelopes."""
     for row in _index()["addons"]:
-        assert row["min_hal0_version"] == "1.2.0"
+        assert row["min_hal0_version"] == "1.5.0"
+
+
+def test_envelopes_are_schema_2_in_the_profile_centric_shape() -> None:
+    """Schema 2 bodies: no retired keys, no model-fact flags, a screened tune."""
+    retired = {"device_class", "backend", "quant"}
+    for path in _envelope_files():
+        env = json.loads(path.read_text(encoding="utf-8"))
+        assert env["schema_version"] == 2
+        body = env["profile"]
+        assert not retired & set(body)
+        assert body["mtp"] in {"auto", "off"}
+        for model_fact in ("--jinja", "--no-mmproj", "--mmproj", "--chat-template"):
+            assert model_fact not in body["flags"].split()
+
+
+def test_no_envelope_shadows_a_seed_profile() -> None:
+    """An addon named like a code-shipped seed could never be imported (409)."""
+    assert not set(_addon_profiles()) & set(SEED_PROFILES)
 
 
 # ── scripts/export_addons.py --check ─────────────────────────────────────────
