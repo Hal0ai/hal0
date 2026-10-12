@@ -101,6 +101,24 @@ class ComfyUIInferError(Hal0Error):
 # ── The provider ──────────────────────────────────────────────────────────────
 
 
+def _slot_backend(slot_cfg: dict[str, Any]) -> str:
+    """The GPU backend token for a ComfyUI slot, from its ``device``.
+
+    The slot's ``device`` is the hardware truth (a converted slot file has no
+    ``backend`` key, ADR-0029); a hand-built dict with only ``backend`` keeps
+    it, and ComfyUI's one supported backend (ROCm) is the floor.
+    """
+    from hal0.model_meta import device_to_backend
+
+    nested = slot_cfg.get("slot") if isinstance(slot_cfg.get("slot"), dict) else {}
+    device = slot_cfg.get("device") or nested.get("device")
+    if isinstance(device, str) and device:
+        _recipe, backend = device_to_backend(device)
+        if backend:
+            return backend
+    return str(slot_cfg.get("backend") or nested.get("backend") or "rocm")
+
+
 class ComfyUIProvider(Provider):
     """Provider for ComfyUI (Stable Diffusion family) image generation.
 
@@ -129,7 +147,7 @@ class ComfyUIProvider(Provider):
         model_info: dict[str, Any],
     ) -> dict[str, str]:
         port = slot_cfg.get("port") or slot_cfg.get("slot", {}).get("port") or _DEFAULT_PORT
-        backend = slot_cfg.get("backend") or slot_cfg.get("slot", {}).get("backend") or "rocm"
+        backend = _slot_backend(slot_cfg)
         # model_info["path"] is the on-disk checkpoint path. The actual
         # filename gets picked up by the workflow translator (see
         # comfyui_workflows.build_workflow's ckpt_filename arg). We pass

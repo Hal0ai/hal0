@@ -1,22 +1,24 @@
-"""Single-assembler tests: launch/preview parity, model-default precedence,
-GPU gating for cpu profiles, and [server].env rendering.
+"""Single-assembler tests: launch/preview parity, layer precedence, GPU
+gating for cpu slots, and [server].env rendering.
 
 These pin the refactor that makes the launch path
 (``ContainerProvider.container_spec`` → ``_llama_launch_plan``) and the preview
 path (``resolved_command_for_slot`` / ``_resolve_slot_argv``) share ONE labelled
 segment builder (``_llama_argv_segments``), so an operator's previewed command
-is byte-identical to what launches.
+is byte-identical to what launches. ADR-0029: four layers, base → model →
+profile → slot.
 """
 
 from __future__ import annotations
 
+import shlex
 from typing import Any
 from unittest.mock import patch
 
 import pytest
 
-from hal0.config.schema import ProfileConfig
-from hal0.errors import BadRequest
+from hal0.config.schema import MTP_DRAFT_BUNDLE, ProfileConfig
+from hal0.errors import BadRequest, UnprocessableEntity
 from hal0.providers.container import (
     ContainerProvider,
     _llama_argv_segments,
@@ -34,24 +36,18 @@ def _render_from_plan(token, plan, *, runtime_bin=None, publish_host="127.0.0.1"
 
 
 def _gpu_profile(**overrides: Any) -> ProfileConfig:
-    base: dict[str, Any] = dict(
-        flags="-fa on -ctk q8_0 -b 512 --parallel 1",
-        mtp=False,
-        device_class="gpu",
-        backend="rocm",
-    )
+    base: dict[str, Any] = dict(flags="-fa on -ctk q8_0 -b 512 --parallel 1", mtp="off")
     base.update(overrides)
     return ProfileConfig(**base)
 
 
-# ── 1. preview == launch parity (mtp + chat_template + mmproj + extra_args) ────
+# ── 1. preview == launch parity (mtp + chat_template + mmproj + slot grid) ────
 
 
 def test_preview_equals_launch_full_slot() -> None:
     """resolved_command_for_slot renders the exact argv container_spec launches
-    for a slot exercising the mtp override, model-registry defaults, a
-    chat-template, an mmproj sidecar, the slot HW grid (NGL + threads), and
-    extra_args."""
+    for a slot exercising MTP drafting, a chat template, an mmproj sidecar, the
+    profile's window and flags, and the slot HW grid (NGL + threads)."""
     cfg = {
         "name": "agent",
         "port": 8101,
@@ -60,25 +56,17 @@ def test_preview_equals_launch_full_slot() -> None:
         # spec-hw-slot-ownership §2: NGL + threads are slot-top-level fields.
         "n_gpu_layers": 88,
         "threads": 8,
-        # mtp/vision here are inert legacy keys (spec-hw-slot-ownership §1:
-        # both are model-owned now, SlotConfig declares neither) — kept in
-        # the fixture to prove preview/launch parity is unaffected by their
-        # presence, not because they do anything.
-        "mtp": True,
-        "chat_template": "chatml",
-        "vision": True,
-        "model": {"default": "my-model", "context_size": 40000},
-        "server": {"extra_args": "-b 8192 --jinja"},
+        "model": {"default": "my-model"},
     }
     model_info = {
         "_model_key": "my-model",
         "path": "/mnt/ai-models/my-model.gguf",
         "mmproj": "/mnt/ai-models/my-model/mmproj-f16.gguf",
-        "defaults": {"extra_args": "--rope-scaling linear"},
+        "defaults": {"chat_template": "chatml", "mtp": True},
         "metadata": {"context_length": 262144},
     }
 
-    profile = _gpu_profile(mtp=False)
+    profile = _gpu_profile(mtp="auto", ctx_size=40000)
 
     with (
         patch("hal0.providers.container._resolve_profile", return_value=profile),
@@ -91,73 +79,65 @@ def test_preview_equals_launch_full_slot() -> None:
         launch_plan = ContainerProvider().container_spec(cfg, model_info)
 
     assert preview is not None
-    # preview = [image, *argv]; launch command excludes the image. Image is the
-    # HW-gated default now (profile.image is ignored — spec §3), so assert
-    # parity against the launch plan's own image rather than profile.image.
+    # preview = [image, *argv]; launch command excludes the image.
     assert preview[0] == launch_plan.image
     assert preview[1:] == launch_plan.command
+    command = launch_plan.command
+    assert command[command.index("--ctx-size") + 1] == "40000"
+    assert command[command.index("--chat-template-file") + 1].endswith("chatml.jinja")
+    assert "--mmproj" in command
+    assert "--spec-type" in command
+    assert command[command.index("--spec-draft-device") + 1] == "ROCm0"
     # The slot HW grid reached launch: -ngl 88 --threads 8.
-    assert _ngl(launch_plan.command) == "88"
-    assert "--threads" in launch_plan.command
-    assert launch_plan.command[launch_plan.command.index("--threads") + 1] == "8"
+    assert _ngl(command) == "88"
+    assert command[command.index("--threads") + 1] == "8"
 
 
-# ── 2. model-default / ngl precedence ─────────────────────────────────────────
+def test_preview_and_launch_both_refuse_an_unconverted_slot() -> None:
+    cfg = {
+        "name": "agent",
+        "port": 8101,
+        "profile": "rocm",
+        "device": "gpu-rocm",
+        "parallel": 4,
+        "model": {"default": "my-model"},
+    }
+    model_info = {"_model_key": "my-model", "path": "/mnt/ai-models/my-model.gguf"}
+    with (
+        patch("hal0.providers.container._resolve_profile", return_value=_gpu_profile()),
+        patch("hal0.providers.container._best_effort_model_info", return_value=model_info),
+    ):
+        assert resolved_command_for_slot(cfg) is None
+        with pytest.raises(UnprocessableEntity) as excinfo:
+            ContainerProvider().container_spec(cfg, model_info)
+    assert excinfo.value.code == "slot.unconverted"
+
+
+# ── 2. ngl / parallel / model-tune precedence ────────────────────────────────
 
 
 def _ngl(command: list[str]) -> str | None:
     return command[command.index("-ngl") + 1] if "-ngl" in command else None
 
 
-def test_ngl_in_model_extra_args_is_denied() -> None:
-    """§21.7 (FLAGS-own): the managed-arg denylist is PRESERVED on the model's
-    materialized tune. ``-ngl`` is managed (the typed ``defaults.n_gpu_layers``
-    is the sanctioned channel) — a model's free-form ``defaults.extra_args`` may
-    not smuggle it, so the screened ``model_extra_args`` segment raises."""
+def _plan(**kw: Any):
+    kw.setdefault("context_size", 8192)
+    return _llama_launch_plan(
+        image="i:1", port=8095, model_path="/m.gguf", devices=[], group_ids=[], **kw
+    )
+
+
+def test_ngl_in_profile_flags_is_denied() -> None:
+    """A profile may not set ``-ngl``: the slot's typed NGL owns it, and the
+    launch re-screens what the profile write path rejects."""
     with pytest.raises(BadRequest) as exc_info:
-        _llama_launch_plan(
-            image="i:1",
-            port=8095,
-            model_path="/m.gguf",
-            flags_str="",
-            devices=[],
-            group_ids=[],
-            model_defaults={"extra_args": "-ngl 40"},
-        )
-    assert exc_info.value.code == "slot.managed_arg_denied"
+        _plan(profile_flags="-fa on -ngl 40", slot_n_gpu_layers=30)
+    assert exc_info.value.code == "slot.hardware_flag_denied"
 
 
-def test_slot_ngl_wins_and_model_ngl_key_ignored() -> None:
-    """spec-hw-slot-ownership §2 (reverses the §5 fold): the slot owns NGL. The
-    slot's ``-ngl`` reaches launch; a stray ``defaults.n_gpu_layers`` key on the
-    model is ignored (that field was deleted) and never emits ``-ngl``."""
-    plan = _llama_launch_plan(
-        image="i:1",
-        port=8095,
-        model_path="/m.gguf",
-        flags_str="-ngl 10",  # inert profile flag (profile flags don't launch)
-        devices=[],
-        group_ids=[],
-        model_defaults={"n_gpu_layers": 20},  # deleted field's key — ignored
-        slot_n_gpu_layers=30,  # authoritative slot NGL
-    )
-    assert _ngl(plan.command) == "30"  # slot wins; not model 20, not profile 10
-
-
-def test_model_defaults_ngl_key_never_emits_without_slot_ngl() -> None:
-    """With no slot NGL supplied, a leftover ``defaults.n_gpu_layers`` key does
-    NOT resurrect a model ``-ngl`` — model NGL ownership is gone entirely."""
-    plan = _llama_launch_plan(
-        image="i:1",
-        port=8095,
-        model_path="/m.gguf",
-        flags_str="-ngl 10",
-        devices=[],
-        group_ids=[],
-        model_defaults={"n_gpu_layers": 20},
-        slot_n_gpu_layers=None,  # no slot NGL → no -ngl at all
-    )
-    assert _ngl(plan.command) is None
+def test_slot_ngl_is_the_only_ngl() -> None:
+    assert _ngl(_plan(slot_n_gpu_layers=30).command) == "30"
+    assert _ngl(_plan(slot_n_gpu_layers=None).command) is None
 
 
 def _parval(command: list[str]) -> str | None:
@@ -167,63 +147,44 @@ def _parval(command: list[str]) -> str | None:
     return None
 
 
-def test_slot_parallel_is_inert() -> None:
-    """FLAGS-own: the slot ``parallel`` knob no longer reaches launch. A model
-    that wants continuous batching carries ``--parallel N`` (+ ``--kv-unified``)
-    in its own ``defaults.extra_args`` (the migrator folds it there)."""
-    plan = _llama_launch_plan(
-        image="i:1",
-        port=8095,
-        model_path="/m.gguf",
-        flags_str="-fa on --parallel 1",  # inert profile flag
-        devices=[],
-        group_ids=[],
-        slot_parallel=8,  # inert slot override
-    )
-    assert _parval(plan.command) is None  # neither profile's 1 nor slot's 8
-    assert "--kv-unified" not in plan.command
-
-
-def test_parallel_from_model_extra_args_emits_kv_unified() -> None:
-    """The model's OWN tune drives batching now: a folded ``--parallel N`` in
-    ``defaults.extra_args`` reaches launch (and its authored ``--kv-unified``)."""
-    plan = _llama_launch_plan(
-        image="i:1",
-        port=8095,
-        model_path="/m.gguf",
-        flags_str="",
-        devices=[],
-        group_ids=[],
-        model_defaults={"extra_args": "-fa on --parallel 8 --kv-unified"},
-    )
+def test_parallel_from_profile_flags_emits_kv_unified() -> None:
+    """Continuous batching is profile tuning: ``--parallel N`` (and its
+    authored ``--kv-unified``) in the profile's flags reach launch."""
+    plan = _plan(profile_flags="-fa on --parallel 8 --kv-unified")
     assert _parval(plan.command) == "8"
     assert "--kv-unified" in plan.command
 
 
-def test_model_default_extra_args_emitted_slot_extra_args_inert() -> None:
-    """The model's ``defaults.extra_args`` reaches launch (screened
-    model_extra_args segment). FLAGS-own: a slot ``[server].extra_args`` is
-    inert and can NOT override a model default anymore."""
-    plan = _llama_launch_plan(
-        image="i:1",
-        port=8095,
-        model_path="/m.gguf",
-        flags_str="",
-        devices=[],
-        group_ids=[],
-        model_defaults={"extra_args": "--rope-scaling linear --foo 1"},
-        extra_args="--foo 2",  # inert slot extra_args — does NOT win
-    )
-    assert "--rope-scaling" in plan.command
-    assert plan.command[plan.command.index("--rope-scaling") + 1] == "linear"
-    assert plan.command.count("--foo") == 1
-    assert plan.command[plan.command.index("--foo") + 1] == "1"  # model's, slot inert
+def test_model_defaults_extra_args_never_reach_launch() -> None:
+    """The model row holds facts only: a stray ``defaults.extra_args`` on a
+    model_info dict contributes nothing to the argv."""
+    cfg = {
+        "name": "gpu-slot",
+        "port": 8095,
+        "profile": "rocm",
+        "device": "gpu-rocm",
+        "model": {"default": "m"},
+    }
+    model_info = {
+        "_model_key": "m",
+        "path": "/mnt/ai-models/m.gguf",
+        "defaults": {"extra_args": "--rope-scaling linear --foo 1"},
+    }
+    with (
+        patch("hal0.providers.container._resolve_profile", return_value=_gpu_profile()),
+        patch("hal0.providers.container.resolve_gpu_device_paths", return_value=[]),
+        patch("hal0.providers.container.resolve_gpu_group_ids", return_value=[]),
+    ):
+        spec = ContainerProvider().container_spec(cfg, model_info)
+    assert "--rope-scaling" not in spec.command
+    assert "--foo" not in spec.command
+    assert spec.command[spec.command.index("-ctk") + 1] == "q8_0"  # the profile's tune
 
 
-# ── 3. cpu profile gets no GPU devices / GIDs ─────────────────────────────────
+# ── 3. cpu slot gets no GPU devices / GIDs ─────────────────────────────────
 
 
-def test_cpu_profile_gets_no_gpu_plumbing() -> None:
+def test_cpu_slot_gets_no_gpu_plumbing() -> None:
     cfg = {
         "name": "cpu-slot",
         "port": 8095,
@@ -231,7 +192,7 @@ def test_cpu_profile_gets_no_gpu_plumbing() -> None:
         "device": "cpu",
         "model": {"default": "m"},
     }
-    cpu_profile = _gpu_profile(device_class="cpu", backend=None)
+    cpu_profile = _gpu_profile()
     with (
         patch("hal0.providers.container._resolve_profile", return_value=cpu_profile),
         patch(
@@ -248,7 +209,7 @@ def test_cpu_profile_gets_no_gpu_plumbing() -> None:
     assert spec.group_add == []
 
 
-def test_gpu_profile_existence_filters_devices() -> None:
+def test_gpu_slot_existence_filters_devices() -> None:
     cfg = {
         "name": "gpu-slot",
         "port": 8095,
@@ -302,77 +263,80 @@ def test_server_env_threads_into_plan_and_unit() -> None:
 
 
 def test_env_empty_when_no_server_env() -> None:
-    plan = _llama_launch_plan(
-        image="i:1", port=8095, model_path="/m.gguf", flags_str="", devices=[], group_ids=[]
-    )
-    assert plan.env == {}
+    assert _plan().env == {}
 
 
 # ── 6. GOLDEN: the full ordered launch argv, pinned literally ────────────────
 #
-# Everything above (and every other argv test in the tree) asserts SEGMENT
-# MEMBERSHIP — `"-ngl" in command`, `command[command.index("--threads") + 1]`,
-# `set(labels) == {...}`. Membership and index-relative lookups are invariant
-# under a REORDER of `_llama_argv_segments`' return list, so today the entire
-# suite passes if someone swaps `chat_template` and `mmproj`, or hoists
-# `slot_hardware` above `model_extra_args`. That last one silently inverts the
-# documented precedence chain
+# Membership and index-relative lookups are invariant under a REORDER of
+# `_llama_argv_segments`' return list. A reorder silently inverts the
+# documented precedence chain (ADR-0029 decision 2)
 #
-#     base < model_extra_args < slot_hardware < chat_template < mmproj
+#     base < model < profile < slot
 #
-# and hands a model's `defaults.extra_args` the power to override the slot's
-# typed hardware grid — the exact ownership inversion spec-hw-slot-ownership §2
-# exists to prevent.
-#
-# These tests pin the literal, fully-ordered argv. Any reorder, insertion,
-# removal, or renaming of a segment fails them with a readable diff.
+# — e.g. hoisting `profile` above `slot` hands a profile file the power to
+# override the slot's typed hardware grid. These tests pin the literal,
+# fully-ordered argv. Any reorder, insertion, removal, or renaming of a
+# segment fails them with a readable diff.
 
+_BUNDLE = shlex.split(MTP_DRAFT_BUNDLE)
 
-#: Every segment populated, with a deliberate cross-segment `--threads`
-#: collision (model says 3, slot says 16). Update this literal ONLY together
-#: with a deliberate, documented change to the launch shape.
+#: Every layer populated, with a deliberate profile-over-bundle collision
+#: (`--spec-draft-n-max`: bundle 4, profile 8). Update this literal ONLY
+#: together with a deliberate, documented change to the launch shape.
 GOLDEN_MAXIMAL_ARGV: list[str] = [
-    # base
+    # base (hal0-managed)
     "--host", "0.0.0.0",
     "--port", "8081",
     "--model", "/var/lib/hal0/models/qwen3-4b/model.gguf",
     "--alias", "hal0/qwen3-4b",
     "--ctx-size", "32768",
-    # model_extra_args (the model's logical tune; its --threads 3 lost)
+    # model (facts)
+    "--jinja",
+    "--chat-template-file", "/etc/hal0/templates/qwen3.jinja",
+    "--mmproj", "/var/lib/hal0/models/qwen3-4b/mmproj.gguf",
+    # profile: the MTP bundle (its --spec-draft-n-max 4 lost) ...
+    "--spec-type", "draft-mtp",
+    "--spec-draft-ngl", "all",
+    "--spec-draft-n-min", "0",
+    "--spec-draft-p-min", "0.0",
+    "--spec-draft-p-split", "0.10",
+    "--spec-draft-type-k", "q8_0",
+    "--spec-draft-type-v", "q8_0",
+    "--spec-draft-threads", "16",
+    "--spec-draft-threads-batch", "32",
+    "--spec-draft-poll", "1",
+    "--spec-draft-poll-batch", "1",
+    # ... then the profile's own flags
     "-fa", "on",
     "-b", "2048",
     "-ub", "512",
-    "--jinja",
-    # slot_hardware (the slot's typed physical grid — wins the collision)
+    "--spec-draft-n-max", "8",
+    # slot (placement)
     "-ngl", "99",
     "--threads", "16",
     "--metrics",
-    # chat_template
-    "--chat-template-file", "/etc/hal0/templates/qwen3.jinja",
-    # mmproj
-    "--mmproj", "/var/lib/hal0/models/qwen3-4b/mmproj.gguf",
+    "--spec-draft-device", "Vulkan0",
 ]  # fmt: skip
+
+_MAXIMAL_KW: dict[str, Any] = dict(
+    port=8081,
+    model_path="/var/lib/hal0/models/qwen3-4b/model.gguf",
+    model_alias="hal0/qwen3-4b",
+    context_size=32768,
+    jinja=True,
+    chat_template_path="/etc/hal0/templates/qwen3.jinja",
+    mmproj="/var/lib/hal0/models/qwen3-4b/mmproj.gguf",
+    mtp=True,
+    profile_flags="-fa on -b 2048 -ub 512 --spec-draft-n-max 8",
+    slot_n_gpu_layers=99,
+    slot_threads=16,
+    draft_device="Vulkan0",
+)
 
 
 def _maximal_segments() -> list[tuple[str, list[str]]]:
-    """Every segment populated. `profile_flags`, `slot_parallel` and
-    `extra_args` are threaded in deliberately: they are inert (deleted at the
-    top of the builder) and must contribute NOTHING to the golden argv."""
-    return _llama_argv_segments(
-        port=8081,
-        model_path="/var/lib/hal0/models/qwen3-4b/model.gguf",
-        model_alias="hal0/qwen3-4b",
-        context_size=32768,
-        model_defaults={"extra_args": "-fa on -b 2048 -ub 512 --threads 3 --jinja"},
-        slot_n_gpu_layers=99,
-        slot_threads=16,
-        chat_template_path="/etc/hal0/templates/qwen3.jinja",
-        mmproj="/var/lib/hal0/models/qwen3-4b/mmproj.gguf",
-        # inert — must not appear anywhere in GOLDEN_MAXIMAL_ARGV
-        profile_flags="-ctk q8_0 -ctv q8_0",
-        slot_parallel=4,
-        extra_args="--no-webui",
-    )
+    return _llama_argv_segments(**_MAXIMAL_KW)
 
 
 def test_golden_full_ordered_launch_argv() -> None:
@@ -384,116 +348,119 @@ def test_golden_segment_order_is_the_documented_precedence_chain() -> None:
     """The labels, in order. `set()` comparisons elsewhere cannot catch a swap;
     this is a list comparison."""
     labels = [label for label, _tokens in _maximal_segments()]
-    assert labels == [
-        "base",
-        "model_extra_args",
-        "slot_hardware",
-        "chat_template",
-        "mmproj",
-    ]
+    assert labels == ["base", "model", "profile", "slot"]
 
 
 def test_golden_provenance_pins_which_segment_won_each_flag() -> None:
-    """The other half of the pin: not just the token order, but WHICH source
-    won every surviving flag. A reorder that happened to preserve token order
-    would still move a winner."""
+    """The other half of the pin: not just the token order, but WHICH layer
+    won every surviving flag."""
     resolved = resolve_argv(_maximal_segments())
+    bundle_pairs = [
+        (_BUNDLE[i], _BUNDLE[i + 1], "profile")
+        for i in range(0, len(_BUNDLE), 2)
+        if _BUNDLE[i] != "--spec-draft-n-max"
+    ]
     assert [(p.flag, p.value, p.source) for p in resolved.provenance] == [
         ("--host", "0.0.0.0", "base"),
         ("--port", "8081", "base"),
         ("--model", "/var/lib/hal0/models/qwen3-4b/model.gguf", "base"),
         ("--alias", "hal0/qwen3-4b", "base"),
         ("--ctx-size", "32768", "base"),
-        ("-fa", "on", "model_extra_args"),
-        ("-b", "2048", "model_extra_args"),
-        ("-ub", "512", "model_extra_args"),
-        ("--jinja", None, "model_extra_args"),
-        ("-ngl", "99", "slot_hardware"),
-        ("--threads", "16", "slot_hardware"),
-        ("--metrics", None, "slot_hardware"),
-        ("--chat-template-file", "/etc/hal0/templates/qwen3.jinja", "chat_template"),
-        ("--mmproj", "/var/lib/hal0/models/qwen3-4b/mmproj.gguf", "mmproj"),
+        ("--jinja", None, "model"),
+        ("--chat-template-file", "/etc/hal0/templates/qwen3.jinja", "model"),
+        ("--mmproj", "/var/lib/hal0/models/qwen3-4b/mmproj.gguf", "model"),
+        *bundle_pairs,
+        ("-fa", "on", "profile"),
+        ("-b", "2048", "profile"),
+        ("-ub", "512", "profile"),
+        ("--spec-draft-n-max", "8", "profile"),
+        ("-ngl", "99", "slot"),
+        ("--threads", "16", "slot"),
+        ("--metrics", None, "slot"),
+        ("--spec-draft-device", "Vulkan0", "slot"),
     ]
-    # exactly one token pair was dropped: the model's losing `--threads 3`
+    # exactly one token pair was dropped: the bundle's losing --spec-draft-n-max 4
     assert resolved.removed == 1
 
 
 def test_golden_launch_plan_command_equals_the_golden_argv() -> None:
     """The plan the load path actually renders — `_llama_launch_plan` collapses
-    the same segments — carries the identical argv. Pins the plan level too, so
-    a change to how the plan assembles the command cannot drift from the
-    builder."""
+    the same segments — carries the identical argv."""
     plan = _llama_launch_plan(
-        image="ghcr.io/hal0ai/hal0-rocmfpx:test",
-        port=8081,
-        model_path="/var/lib/hal0/models/qwen3-4b/model.gguf",
-        flags_str="-ctk q8_0 -ctv q8_0",
+        image="ghcr.io/hal0ai/hal0-runner-standard:test",
         devices=[],
         group_ids=[],
-        context_size=32768,
-        extra_args="--no-webui",
-        model_alias="hal0/qwen3-4b",
-        chat_template_path="/etc/hal0/templates/qwen3.jinja",
-        mmproj="/var/lib/hal0/models/qwen3-4b/mmproj.gguf",
-        model_defaults={"extra_args": "-fa on -b 2048 -ub 512 --threads 3 --jinja"},
-        slot_n_gpu_layers=99,
-        slot_threads=16,
-        slot_parallel=4,
+        **_MAXIMAL_KW,
     )
     assert plan.command == GOLDEN_MAXIMAL_ARGV
 
 
 def test_golden_minimal_argv() -> None:
-    """The floor: nothing but a port and a model path. Pins that no segment
+    """The floor: a port, a model path and the window. Pins that no layer
     leaks a default token in when its input is absent. ``slot_metrics``
-    defaults True (#1810 — metrics-on is the safe default), so it is
-    explicitly disabled here to keep this the true zero-hardware-grid floor;
-    see ``test_golden_minimal_argv_defaults_metrics_on`` for the real default."""
+    defaults True (#1810), so it is explicitly disabled here; see
+    ``test_golden_minimal_argv_defaults_metrics_on`` for the real default."""
     argv = resolve_argv(
-        _llama_argv_segments(port=8081, model_path="/m.gguf", slot_metrics=False)
+        _llama_argv_segments(port=8081, model_path="/m.gguf", context_size=4096, slot_metrics=False)
     ).argv
-    assert argv == ["--host", "0.0.0.0", "--port", "8081", "--model", "/m.gguf"]
+    assert argv == [
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "8081",
+        "--model",
+        "/m.gguf",
+        "--ctx-size",
+        "4096",
+    ]
 
 
 def test_golden_minimal_argv_defaults_metrics_on() -> None:
-    """#1810: with no explicit ``slot_metrics``, the slot_hardware segment
-    still emits ``--metrics`` — the default is ON, not "absent"."""
-    argv = resolve_argv(_llama_argv_segments(port=8081, model_path="/m.gguf")).argv
-    assert argv == ["--host", "0.0.0.0", "--port", "8081", "--model", "/m.gguf", "--metrics"]
-
-
-def test_golden_later_segments_beat_a_model_tune_claiming_their_flags() -> None:
-    """Adversarial ordering proof. `--chat-template-file` and `--mmproj` are NOT
-    in `MANAGED_ARGS_DENYLIST`, so a model's `defaults.extra_args` can smuggle
-    them through the screen. They must still lose to the real `chat_template` /
-    `mmproj` segments — which is true only because those segments come LAST.
-    Hoist `model_extra_args` and hal0 loads the wrong projector."""
+    """#1810: with no explicit ``slot_metrics``, the slot layer still emits
+    ``--metrics`` — the default is ON, not "absent"."""
     argv = resolve_argv(
-        _llama_argv_segments(
-            port=8081,
-            model_path="/m.gguf",
-            context_size=4096,
-            model_defaults={
-                "extra_args": (
-                    "--chat-template-file /tmp/evil.jinja --mmproj /tmp/evil.gguf --threads 1"
-                )
-            },
-            slot_threads=16,
-            slot_n_gpu_layers=0,
-            chat_template_path="/etc/hal0/templates/real.jinja",
-            mmproj="/models/real-mmproj.gguf",
-        )
+        _llama_argv_segments(port=8081, model_path="/m.gguf", context_size=4096)
     ).argv
     assert argv == [
         "--host", "0.0.0.0",
         "--port", "8081",
         "--model", "/m.gguf",
         "--ctx-size", "4096",
-        "-ngl", "0",
-        "--threads", "16",
         "--metrics",
-        "--chat-template-file", "/etc/hal0/templates/real.jinja",
-        "--mmproj", "/models/real-mmproj.gguf",
     ]  # fmt: skip
-    assert "/tmp/evil.jinja" not in argv
-    assert "/tmp/evil.gguf" not in argv
+
+
+@pytest.mark.parametrize(
+    ("flags", "code"),
+    [
+        ("--chat-template-file /tmp/evil.jinja", "profiles.model_fact_flag_denied"),
+        ("--mmproj /tmp/evil.gguf", "profiles.model_fact_flag_denied"),
+        ("--no-mmproj", "profiles.model_fact_flag_denied"),
+        ("--jinja", "profiles.model_fact_flag_denied"),
+        ("--spec-draft-device CUDA0", "profiles.model_fact_flag_denied"),
+        ("--threads 1", "slot.hardware_flag_denied"),
+        ("-ngl 0", "slot.hardware_flag_denied"),
+        ("--ctx-size 4096", "slot.managed_arg_denied"),
+        ("--model /tmp/evil.gguf", "slot.managed_arg_denied"),
+    ],
+)
+def test_golden_profile_cannot_claim_another_layers_flags(flags: str, code: str) -> None:
+    """Adversarial ordering proof. The profile layer sits between the model
+    and slot layers, so a profile carrying a model-fact, managed or hardware
+    flag could otherwise silently replace the real projector, template, window
+    or placement. The launch refuses it instead (a profile file is editable on
+    disk, so the save-time screen is repeated)."""
+    with pytest.raises(BadRequest) as excinfo:
+        resolve_argv(
+            _llama_argv_segments(
+                port=8081,
+                model_path="/m.gguf",
+                context_size=4096,
+                profile_flags=f"-fa on {flags}",
+                slot_threads=16,
+                slot_n_gpu_layers=0,
+                chat_template_path="/etc/hal0/templates/real.jinja",
+                mmproj="/models/real-mmproj.gguf",
+            )
+        )
+    assert excinfo.value.code == code

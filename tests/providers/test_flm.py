@@ -24,6 +24,7 @@ from unittest.mock import MagicMock, patch
 import httpx
 import pytest
 
+from hal0.config.schema import SEED_PROFILES, ProfileConfig
 from hal0.providers.flm import (
     FLMInferError,
     FLMProvider,
@@ -40,7 +41,9 @@ def provider() -> FLMProvider:
 
 @pytest.fixture
 def slot_cfg() -> dict[str, Any]:
-    return {"port": 8086, "ctx_size": 65536, "_paths": {}}
+    # ADR-0029: FLM's window is its profile's ``ctx_size`` (the ``flm`` seed
+    # ships 16384); the slot carries no window.
+    return {"port": 8086, "device": "npu", "profile": "flm", "_paths": {}}
 
 
 @pytest.fixture
@@ -58,14 +61,32 @@ def test_build_env_renames_to_hal0_namespace(
     assert all(k.startswith("HAL0_") for k in env)
     assert env["HAL0_FLM_TAG"] == "qwen3.5:0.8b"
     assert env["HAL0_PORT"] == "8086"
-    assert env["HAL0_FLM_CTX"] == "65536"
+    assert env["HAL0_FLM_CTX"] == str(SEED_PROFILES["flm"]["ctx_size"]) == "16384"
+
+
+def test_build_env_ctx_follows_the_slot_profile(
+    provider: FLMProvider, slot_cfg: dict[str, Any], model_info: dict[str, Any]
+) -> None:
+    with patch(
+        "hal0.providers.container._resolve_profile",
+        return_value=ProfileConfig(ctx_size=65536),
+    ):
+        assert provider.build_env(slot_cfg, model_info)["HAL0_FLM_CTX"] == "65536"
+
+
+def test_build_env_ctx_falls_back_to_8192_without_a_profile_window(
+    provider: FLMProvider, slot_cfg: dict[str, Any], model_info: dict[str, Any]
+) -> None:
+    with patch("hal0.providers.container._resolve_profile", return_value=ProfileConfig()):
+        assert provider.build_env(slot_cfg, model_info)["HAL0_FLM_CTX"] == "8192"
 
 
 def test_build_env_multiplex_flags(provider: FLMProvider, model_info: dict[str, Any]) -> None:
-    """FLM multiplexes ASR + embed on the same NPU via defaults flags."""
+    """FLM multiplexes ASR + embed on the same NPU via the [npu] table."""
     slot_cfg = {
         "port": 8086,
-        "defaults": {"load_asr": True, "load_embed": True},
+        "profile": "flm",
+        "npu": {"asr": True, "embed": True},
         "_paths": {},
     }
     env = provider.build_env(slot_cfg, model_info)
@@ -173,7 +194,8 @@ def test_container_spec_passes_multiplex_flags_in_command(
 ) -> None:
     cfg = {
         "port": 8086,
-        "defaults": {"load_embed": True, "load_asr": True, "context_size": 2048},
+        "profile": "flm",
+        "npu": {"embed": True, "asr": True},
         "_paths": {},
     }
     spec = provider.container_spec(cfg, model_info)

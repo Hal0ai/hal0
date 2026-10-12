@@ -36,7 +36,7 @@ def _pin_model_store(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.fixture
 def slot_cfg() -> dict[str, Any]:
-    return {"port": 8186, "backend": "rocm", "_paths": {}}
+    return {"port": 8186, "device": "gpu-rocm", "_paths": {}}
 
 
 @pytest.fixture
@@ -59,6 +59,28 @@ def test_build_env_uses_hal0_namespace(
     assert env["HAL0_BACKEND"] == "rocm"
     assert env["HAL0_COMFYUI_MODEL_PATH"] == model_info["path"]
     assert env["HAL0_COMFYUI_BASE_DIR"] == "/var/lib/hal0/comfyui"
+
+
+@pytest.mark.parametrize(
+    ("cfg", "expected"),
+    [
+        # A converted slot file carries only ``device`` (ADR-0029).
+        ({"device": "gpu-rocm"}, "rocm"),
+        ({"slot": {"device": "gpu-vulkan"}}, "vulkan"),
+        # ``device`` outranks a stale ``backend`` key.
+        ({"device": "gpu-rocm", "backend": "vulkan"}, "rocm"),
+        # A hand-built dict with only ``backend``, then the ROCm floor.
+        ({"backend": "vulkan"}, "vulkan"),
+        ({}, "rocm"),
+    ],
+)
+def test_build_env_backend_follows_the_slot_device(
+    provider: ComfyUIProvider,
+    model_info: dict[str, Any],
+    cfg: dict[str, Any],
+    expected: str,
+) -> None:
+    assert provider.build_env(cfg, model_info)["HAL0_BACKEND"] == expected
 
 
 def test_build_env_default_port(

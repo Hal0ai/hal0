@@ -6,7 +6,7 @@ Covers:
   * _render_quadlet_from_plan produces the expected Quadlet .container keys +
     Exec= argv (flags merged from profile, identical-path /mnt/ai-models:ro,z
     mount, loopback PublishPort, numeric GroupAdd, apparmor/seccomp unconfined)
-  * resolve_profile_flags MTP expansion
+  * the MTP draft bundle (profile layer) and draft device (slot layer)
   * ContainerProvider.container_spec returns a ContainerSpec with correct
     image, command, mounts, and security opts
   * load_sync / unload_sync call the right systemctl commands (mocked)
@@ -25,13 +25,14 @@ import pytest
 from hal0.agents.anchor_window import HERMES_MINIMUM_CONTEXT_LENGTH
 from hal0.config.schema import (
     FAMILY_DEFAULTS,
-    MTP_FLAG_BUNDLE,
+    MTP_DRAFT_BUNDLE,
     SEED_PROFILES,
     ProfileConfig,
     family_flags,
     model_family,
-    resolve_profile_flags,
+    mtp_draft_device,
 )
+from hal0.errors import BadRequest, UnprocessableEntity
 from hal0.providers import container as _container_mod
 from hal0.providers._gpu import resolve_gpu_group_ids
 from hal0.providers.base import RuntimeLaunchPlan
@@ -49,10 +50,10 @@ from hal0.providers.container import (
     _llama_launch_plan,
     _loopback_fence_command,
     _render_quadlet_from_plan,
-    _resolve_context_size,
     _resolve_model_path,
-    resolve_effective_context_size,
+    profile_context,
     resolved_command_for_slot,
+    slot_effective_context,
 )
 from hal0.registry.model import Model
 from hal0.slots.argv import resolve_argv
@@ -84,20 +85,17 @@ def _render_llama(
     model_alias=None,
     publish_host="127.0.0.1",
     autoload=True,
+    mtp=False,
+    draft_device=None,
 ):
-    """Test shim mirroring the deleted ``_render_unit`` scalar shim, producing
-    Quadlet text: build the llama launch plan, then render it.
+    """Test shim: build the llama launch plan, then render it to Quadlet text.
 
-    FLAGS-own: the profile ``flags_str`` and slot ``extra_args`` no longer reach
-    launch — a model owns its tune. So this shim now routes both into the
-    model's materialized ``defaults.extra_args`` (the surviving ``model_extra_args``
-    launch segment), i.e. it simulates a STAMPED model. That keeps these render
-    tests exercising the exact tune-emission + Exec= quoting path they always
-    did, just through the one channel that survives.
+    ADR-0029: the profile is the whole tune, so ``flags_str`` (and any
+    ``extra_args`` a test appends) ride the profile layer of the argv. An
+    unset ``context_size`` stands for an unconfigured window (the 8192 floor).
     """
     # Resolve through the container module so tests patching
-    # ``hal0.providers.container.resolve_gpu_device_paths`` take effect (mirrors
-    # the deleted ``_render_unit`` shim, which resolved it there).
+    # ``hal0.providers.container.resolve_gpu_device_paths`` take effect.
     devices = (
         device_paths if device_paths is not None else _container_mod.resolve_gpu_device_paths()
     )
@@ -106,13 +104,13 @@ def _render_llama(
         image=image,
         port=port,
         model_path=model_path,
-        flags_str="",  # inert now
         devices=list(devices),
         group_ids=[str(g) for g in resolve_gpu_group_ids()],
-        context_size=context_size,
-        extra_args=None,  # inert now
+        context_size=context_size if context_size is not None else _CTX_SAFE_FALLBACK,
         model_alias=model_alias,
-        model_defaults={"extra_args": merged_tune} if merged_tune else None,
+        mtp=mtp,
+        profile_flags=merged_tune,
+        draft_device=draft_device,
     )
     return _render_quadlet_from_plan(token, plan, publish_host=publish_host, autoload=autoload)
 
@@ -130,15 +128,15 @@ def _exec_line(unit_text: str) -> str:
 
 def _moe_profile() -> ProfileConfig:
     return ProfileConfig(
-        flags="-fa on -ctk q8_0 -ctv q8_0 -b 512 -ub 512 --parallel 1 --threads 8 --no-mmap",
-        mtp=False,
+        flags="-fa on -ctk q8_0 -ctv q8_0 -b 512 -ub 512 --parallel 1 --no-mmap",
+        mtp="off",
     )
 
 
 def _mtp_profile() -> ProfileConfig:
     return ProfileConfig(
-        flags="-fa on -ctk q8_0 -ctv q8_0 -b 512 -ub 512 --parallel 1 --threads 8 --no-mmap",
-        mtp=True,
+        flags="-fa on -ctk q8_0 -ctv q8_0 -b 512 -ub 512 --parallel 1 --no-mmap",
+        mtp="auto",
     )
 
 
@@ -164,40 +162,68 @@ def _model_info(**overrides: Any) -> dict[str, Any]:
     return base
 
 
-# ── Profile flag resolution ───────────────────────────────────────────────────
+# ── MTP draft bundle (ADR-0029: profile layer + slot-layer draft device) ─────
 
 
-class TestResolveProfileFlags:
-    def test_moe_profile_no_mtp(self) -> None:
-        profile = _moe_profile()
-        flags = resolve_profile_flags(profile)
-        assert "-fa on" in flags
-        assert "-ctk q8_0" in flags
-        assert "--no-mmap" in flags
-        # MTP bundle must NOT be present
-        assert "--spec-type" not in flags
+class TestMtpDraftBundle:
+    def test_bundle_constant_is_the_draft_mtp_tune_without_a_device(self) -> None:
+        assert "--spec-type draft-mtp" in MTP_DRAFT_BUNDLE
+        # The draft device is placement: the slot layer derives it.
+        assert "--spec-draft-device" not in MTP_DRAFT_BUNDLE
 
-    def test_mtp_profile_expands_bundle(self) -> None:
-        """§7.1a / ML-5: profile.mtp is informational only now — the caller
-        must pass an explicit mtp_override=True (the real decision lives in
-        providers.container._effective_mtp, driven by the model + runner,
-        not the profile)."""
-        profile = _mtp_profile()
-        flags = resolve_profile_flags(profile, mtp_override=True)
-        assert "--spec-type draft-mtp" in flags
-        assert "--spec-draft-device ROCm0" in flags
-        # Base flags are also present
-        assert "-fa on" in flags
+    @pytest.mark.parametrize(
+        ("backend", "device"),
+        [("rocm", "ROCm0"), ("vulkan", "Vulkan0"), ("cuda", "CUDA0"), ("ROCM", "ROCm0")],
+    )
+    def test_draft_device_follows_the_slot_backend(self, backend: str, device: str) -> None:
+        assert mtp_draft_device(backend) == device
 
-    def test_mtp_profile_no_override_no_longer_expands(self) -> None:
-        """profile.mtp=True with NO explicit override no longer expands the
-        bundle — MTP moved to a model capability (see the handback)."""
-        profile = _mtp_profile()
-        flags = resolve_profile_flags(profile)
-        assert "--spec-type" not in flags
+    def test_draft_device_defaults_to_rocm0_for_an_unknown_backend(self) -> None:
+        assert mtp_draft_device(None) == "ROCm0"
+        assert mtp_draft_device("cpu") == "ROCm0"
 
-    def test_mtp_flag_bundle_constant_nonempty(self) -> None:
-        assert "--spec-type draft-mtp" in MTP_FLAG_BUNDLE
+    def test_no_mtp_means_no_bundle_and_no_draft_device(self) -> None:
+        segs = dict(
+            _llama_argv_segments(
+                port=8081,
+                model_path="/m.gguf",
+                context_size=8192,
+                profile_flags=_moe_profile().flags,
+                draft_device="ROCm0",
+            )
+        )
+        assert "--spec-type" not in segs["profile"]
+        assert "--spec-draft-device" not in segs["slot"]
+
+    def test_bundle_rides_the_profile_layer_before_the_profile_flags(self) -> None:
+        segs = dict(
+            _llama_argv_segments(
+                port=8081,
+                model_path="/m.gguf",
+                context_size=8192,
+                mtp=True,
+                profile_flags="-fa on",
+                draft_device="Vulkan0",
+            )
+        )
+        profile = segs["profile"]
+        assert profile[: len(shlex.split(MTP_DRAFT_BUNDLE))] == shlex.split(MTP_DRAFT_BUNDLE)
+        assert profile[-2:] == ["-fa", "on"]
+        assert segs["slot"][-2:] == ["--spec-draft-device", "Vulkan0"]
+
+    def test_profile_spec_draft_value_wins_over_the_bundle_default(self) -> None:
+        argv = resolve_argv(
+            _llama_argv_segments(
+                port=8081,
+                model_path="/m.gguf",
+                context_size=8192,
+                mtp=True,
+                profile_flags="--spec-draft-n-max 8",
+                draft_device="ROCm0",
+            )
+        ).argv
+        assert argv.count("--spec-draft-n-max") == 1
+        assert argv[argv.index("--spec-draft-n-max") + 1] == "8"
 
 
 # ── Runtime probe (_container_runtime) ─────────────────────────────────────────
@@ -273,14 +299,14 @@ class TestRenderUnit:
 
     def test_image_and_exec_present(self) -> None:
         profile = _moe_profile()
-        flags = resolve_profile_flags(profile)
+        flags = profile.flags
         unit = _render_llama("test-slot", _TEST_IMAGE, 8095, "/mnt/ai-models/model.gguf", flags)
         assert f"Image={_TEST_IMAGE}" in unit.splitlines()
         assert "--port 8095" in _exec_line(unit)
 
     def test_container_name_key(self) -> None:
         profile = _moe_profile()
-        flags = resolve_profile_flags(profile)
+        flags = profile.flags
         unit = _render_llama("test-slot", _TEST_IMAGE, 8095, "/mnt/ai-models/model.gguf", flags)
         assert "ContainerName=hal0-slot-test-slot" in unit.splitlines()
 
@@ -288,7 +314,7 @@ class TestRenderUnit:
         """Model store mounted identical-path, read-only, SELinux-relabelled."""
         monkeypatch.setenv("HAL0_MODEL_STORE", _MODEL_STORE_MOUNT)  # pin the default
         profile = _moe_profile()
-        flags = resolve_profile_flags(profile)
+        flags = profile.flags
         unit = _render_llama("test-slot", _TEST_IMAGE, 8095, "/mnt/ai-models/model.gguf", flags)
         assert any(
             ln
@@ -306,7 +332,7 @@ class TestRenderUnit:
         custom = "/srv/models"
         monkeypatch.setenv("HAL0_MODEL_STORE", custom)
         profile = _moe_profile()
-        flags = resolve_profile_flags(profile)
+        flags = profile.flags
         unit = _render_llama("agent0", _TEST_IMAGE, 8095, f"{custom}/Qwen3.6-35B.gguf", flags)
         assert f"Volume={custom}:{custom}:ro,z" in unit.splitlines()
         assert not any(ln.startswith("Volume=/mnt/ai-models") for ln in unit.splitlines())
@@ -320,7 +346,7 @@ class TestRenderUnit:
             lambda: ["/var/lib/hal0/models", "/mnt/ai-models"],
         )
         profile = _moe_profile()
-        flags = resolve_profile_flags(profile)
+        flags = profile.flags
         unit = _render_llama("brain", _TEST_IMAGE, 8095, "/mnt/ai-models/model.gguf", flags)
         vols = [ln for ln in unit.splitlines() if ln.startswith("Volume=")]
         assert any(
@@ -341,7 +367,7 @@ class TestRenderUnit:
             lambda: ["/mnt/ai-models"],
         )
         profile = _moe_profile()
-        flags = resolve_profile_flags(profile)
+        flags = profile.flags
         unit = _render_llama("brain", _TEST_IMAGE, 8095, "/mnt/ai-models/model.gguf", flags)
         vols = [ln for ln in unit.splitlines() if ln.startswith("Volume=")]
         assert vols in (
@@ -352,7 +378,7 @@ class TestRenderUnit:
     def test_loopback_port_publish(self) -> None:
         """Port must be published on 127.0.0.1 only (not LAN-exposed)."""
         profile = _moe_profile()
-        flags = resolve_profile_flags(profile)
+        flags = profile.flags
         unit = _render_llama("test-slot", _TEST_IMAGE, 8095, "/mnt/ai-models/model.gguf", flags)
         assert "PublishPort=127.0.0.1:8095:8095" in unit.splitlines()
 
@@ -362,7 +388,7 @@ class TestRenderUnit:
         HealthCmd= to probe the real port (else `podman ps` shows a permanent
         false (unhealthy))."""
         profile = _moe_profile()
-        flags = resolve_profile_flags(profile)
+        flags = profile.flags
         unit = _render_llama("test-slot", _TEST_IMAGE, 8095, "/mnt/ai-models/model.gguf", flags)
         lines = unit.splitlines()
         health_cmd = [ln for ln in lines if ln.startswith("HealthCmd=")]
@@ -375,7 +401,7 @@ class TestRenderUnit:
         """Default device source is resolve_gpu_device_paths(); each node is
         passed explicitly via AddDevice=, never the bare /dev/dri directory."""
         profile = _moe_profile()
-        flags = resolve_profile_flags(profile)
+        flags = profile.flags
         with patch(
             "hal0.providers.container.resolve_gpu_device_paths",
             return_value=["/dev/kfd", "/dev/dri/renderD128"],
@@ -390,7 +416,7 @@ class TestRenderUnit:
         """With explicit device_paths, the unit passes each node verbatim and
         never the bare /dev/dri directory (which podman cannot recurse)."""
         profile = _moe_profile()
-        flags = resolve_profile_flags(profile)
+        flags = profile.flags
         unit = _render_llama(
             "test-slot",
             _TEST_IMAGE,
@@ -408,7 +434,7 @@ class TestRenderUnit:
         """The container must advertise the hal0 registry model id via --alias,
         else the dispatcher can't match hal0/* names."""
         profile = _moe_profile()
-        flags = resolve_profile_flags(profile)
+        flags = profile.flags
         unit = _render_llama(
             "test-slot",
             _TEST_IMAGE,
@@ -426,7 +452,7 @@ class TestRenderUnit:
         """The slot's context_size must reach the container as --ctx-size,
         else llama-server boots at its 4096 default (severe ctx regression)."""
         profile = _moe_profile()
-        flags = resolve_profile_flags(profile)
+        flags = profile.flags
         unit = _render_llama(
             "test-slot",
             _TEST_IMAGE,
@@ -440,11 +466,11 @@ class TestRenderUnit:
         assert "--ctx-size" in tokens
         assert tokens[tokens.index("--ctx-size") + 1] == "131072"
 
-    def test_server_extra_args_appended(self) -> None:
-        """[server].extra_args is honored on the container path, appended after
-        profile flags so slot-level flags win."""
+    def test_append_list_profile_flag_reaches_exec(self) -> None:
+        """An append-list profile flag (``--override-kv``) reaches the Exec=
+        argv verbatim, value and all."""
         profile = _moe_profile()
-        flags = resolve_profile_flags(profile)
+        flags = profile.flags
         unit = _render_llama(
             "test-slot",
             _TEST_IMAGE,
@@ -459,7 +485,7 @@ class TestRenderUnit:
         assert "tokenizer.ggml.add_bos=bool:false" in tokens
 
     def test_json_extra_arg_preserves_quoting(self) -> None:
-        """A space-less JSON extra-arg value must survive systemd's Exec= parser
+        """A space-less JSON profile-flag value must survive systemd's Exec= parser
         intact (rework board bug).  ``--chat-template-kwargs
         '{"enable_thinking":false}'`` shlex-splits into a bare, space-less
         ``{"enable_thinking":false}`` token; the old emitter only quoted tokens
@@ -468,7 +494,7 @@ class TestRenderUnit:
         parse error → the slot never starts.  The Quadlet Exec= emitter must
         ``shlex.quote`` every token so the JSON reaches the process byte-for-byte."""
         profile = _moe_profile()
-        flags = resolve_profile_flags(profile)
+        flags = profile.flags
         json_kwargs = '{"enable_thinking":false}'
         unit = _render_llama(
             "test-slot",
@@ -491,7 +517,7 @@ class TestRenderUnit:
 
     def test_security_opts(self) -> None:
         profile = _moe_profile()
-        flags = resolve_profile_flags(profile)
+        flags = profile.flags
         unit = _render_llama("test-slot", _TEST_IMAGE, 8095, "/mnt/ai-models/model.gguf", flags)
         # Uniform render (O8+O11): security opts ride PodmanArgs= on every
         # substrate — native SecurityOpt= keys are deliberately not emitted.
@@ -501,7 +527,7 @@ class TestRenderUnit:
 
     def test_model_arg_in_exec(self) -> None:
         profile = _moe_profile()
-        flags = resolve_profile_flags(profile)
+        flags = profile.flags
         model_path = "/mnt/ai-models/model.gguf"
         unit = _render_llama("test-slot", _TEST_IMAGE, 8095, model_path, flags)
         # llama-server uses space-separated --model PATH (not --model=PATH)
@@ -510,7 +536,7 @@ class TestRenderUnit:
     def test_profile_flags_in_exec(self) -> None:
         """Bench-tuned profile flags must appear in the Exec= argv."""
         profile = _moe_profile()
-        flags = resolve_profile_flags(profile)
+        flags = profile.flags
         unit = _render_llama("test-slot", _TEST_IMAGE, 8095, "/mnt/ai-models/model.gguf", flags)
         exec_line = _exec_line(unit)
         assert "-fa" in exec_line
@@ -519,13 +545,22 @@ class TestRenderUnit:
 
     def test_mtp_flags_in_exec_when_mtp_true(self) -> None:
         profile = _mtp_profile()
-        flags = resolve_profile_flags(profile, mtp_override=True)
-        unit = _render_llama("test-slot", _TEST_IMAGE, 8095, "/mnt/ai-models/model.gguf", flags)
-        assert "--spec-type" in _exec_line(unit)
+        unit = _render_llama(
+            "test-slot",
+            _TEST_IMAGE,
+            8095,
+            "/mnt/ai-models/model.gguf",
+            profile.flags,
+            mtp=True,
+            draft_device="ROCm0",
+        )
+        exec_line = _exec_line(unit)
+        assert "--spec-type draft-mtp" in exec_line
+        assert "--spec-draft-device ROCm0" in exec_line
 
     def test_unit_has_expected_sections(self) -> None:
         profile = _moe_profile()
-        flags = resolve_profile_flags(profile)
+        flags = profile.flags
         unit = _render_llama("test-slot", _TEST_IMAGE, 8095, "/mnt/ai-models/model.gguf", flags)
         assert "[Unit]" in unit
         assert "[Container]" in unit
@@ -536,7 +571,7 @@ class TestRenderUnit:
 
     def test_install_stanza_present_by_default(self) -> None:
         profile = _moe_profile()
-        flags = resolve_profile_flags(profile)
+        flags = profile.flags
         unit = _render_llama("test-slot", _TEST_IMAGE, 8095, "/mnt/ai-models/model.gguf", flags)
         assert "[Install]" in unit
         assert "WantedBy=hal0.target" in unit.splitlines()
@@ -547,7 +582,7 @@ class TestRenderUnit:
         The unit must remain manually startable: [Service]/Restart survive.
         """
         profile = _moe_profile()
-        flags = resolve_profile_flags(profile)
+        flags = profile.flags
         unit = _render_llama(
             "test-slot",
             _TEST_IMAGE,
@@ -570,7 +605,7 @@ class TestRenderUnit:
         the [Unit] block and never leak into [Service].
         """
         profile = _moe_profile()
-        flags = resolve_profile_flags(profile)
+        flags = profile.flags
         unit = _render_llama("test-slot", _TEST_IMAGE, 8095, "/mnt/ai-models/model.gguf", flags)
         unit_section, _, remainder = unit.partition("[Container]")
         service_section = remainder.partition("[Service]")[2].partition("[Install]")[0]
@@ -586,7 +621,7 @@ class TestRenderUnit:
         64, so the directive is inert against them — safe version skew.
         """
         profile = _moe_profile()
-        flags = resolve_profile_flags(profile)
+        flags = profile.flags
         unit = _render_llama("test-slot", _TEST_IMAGE, 8095, "/mnt/ai-models/model.gguf", flags)
         service_section = unit.partition("[Service]")[2].partition("[Install]")[0]
         assert "RestartPreventExitStatus=64 132" in service_section
@@ -600,7 +635,7 @@ class TestRenderUnit:
         which `hal0 slot list` painted as a red ERROR on a healthy box.
         """
         profile = _moe_profile()
-        flags = resolve_profile_flags(profile)
+        flags = profile.flags
         unit = _render_llama("test-slot", _TEST_IMAGE, 8095, "/mnt/ai-models/model.gguf", flags)
         service_section = unit.partition("[Service]")[2].partition("[Install]")[0]
         assert "SuccessExitStatus=143" in service_section.splitlines()
@@ -614,7 +649,7 @@ class TestRenderUnit:
         crash-looped instead of parking.
         """
         profile = _moe_profile()
-        flags = resolve_profile_flags(profile)
+        flags = profile.flags
         unit = _render_llama("test-slot", _TEST_IMAGE, 8095, "/mnt/ai-models/model.gguf", flags)
         service_section = unit.partition("[Service]")[2].partition("[Install]")[0]
         statuses = [
@@ -633,7 +668,7 @@ class TestRenderUnit:
         load-phase (deterministic) case is handled in the runner entrypoint.
         """
         profile = _moe_profile()
-        flags = resolve_profile_flags(profile)
+        flags = profile.flags
         unit = _render_llama("test-slot", _TEST_IMAGE, 8095, "/mnt/ai-models/model.gguf", flags)
         service_section = unit.partition("[Service]")[2].partition("[Install]")[0]
         line = next(
@@ -648,7 +683,7 @@ class TestRenderUnit:
         from hal0.providers._gpu import resolve_gpu_group_ids
 
         profile = _moe_profile()
-        flags = resolve_profile_flags(profile)
+        flags = profile.flags
         unit = _render_llama("test-slot", _TEST_IMAGE, 8095, "/mnt/ai-models/model.gguf", flags)
         # Uniform render: numeric GIDs ride PodmanArgs=--group-add (O8+O11).
         for gid in resolve_gpu_group_ids():
@@ -765,16 +800,15 @@ class TestContainerSpec:
 
     def test_expected_argv_emits_config_drift_watched_flag_spellings(self) -> None:
         """#863: drift watches exact argv spellings, so renderer renames must fail.
-        FLAGS-own: -b/-ub now ride the model's materialized defaults.extra_args
-        (the profile flag segment is gone), so the model carries them here."""
+        ADR-0029: -b/-ub ride the profile's flags."""
         provider = self._provider()
         with patch(
             "hal0.providers.container._resolve_profile",
             return_value=_moe_profile(),
         ):
             argv = provider.expected_argv(
-                _slot_cfg(model={"default": "chadrock-35b-ace-saber", "context_size": 131072}),
-                _model_info(defaults={"extra_args": "-b 512 -ub 512"}),
+                _slot_cfg(model={"default": "chadrock-35b-ace-saber"}),
+                _model_info(),
             )
 
         assert argv is not None
@@ -889,17 +923,11 @@ class TestLoadSync:
         assert excinfo.value.code == "slot.seam_timeout"
         assert "activating" in str(excinfo.value)
 
-    def test_load_sync_threads_ctx_size_and_model_tune(self, tmp_path: Path) -> None:
-        """load_sync bakes the resolved context window (base --ctx-size) AND the
-        MODEL's materialized ``defaults.extra_args`` into the rendered unit.
-        FLAGS-own: a slot ``[server].extra_args`` is inert — the model owns the
-        tune, so the override-kv rides ``model_info.defaults``.
-
-        CTX-own (v1.0): the window comes from the MODEL's
-        ``defaults.context_size``. The slot's ``[model].context_size`` is a
-        ceiling only, and here it sits ABOVE the model's window, so it does not
-        move the answer."""
-        profile = _moe_profile()
+    def test_load_sync_threads_ctx_size_and_profile_tune(self, tmp_path: Path) -> None:
+        """load_sync bakes the profile's window (base --ctx-size) AND the
+        profile's flags into the rendered unit (ADR-0029: the profile is the
+        whole tune)."""
+        profile = ProfileConfig(flags="--override-kv k=bool:false -b 512", ctx_size=131072)
         provider = ContainerProvider()
         unit_file = tmp_path / "test.service"
 
@@ -922,23 +950,45 @@ class TestLoadSync:
                     "name": "test-container",
                     "port": 8095,
                     "profile": "rocm",
-                    "model": {"default": "model", "context_size": 131072},
-                    "server": {"extra_args": "--override-kv IGNORED=bool:true"},  # inert
+                    "model": {"default": "model"},
                 },
                 {
                     "path": "/mnt/ai-models/model.gguf",
                     "_model_key": "model",
-                    "defaults": {
-                        "extra_args": "--override-kv k=bool:false",
-                        "context_size": 131072,
-                    },
+                    "metadata": {"context_length": 32768},
                 },
             )
 
         unit = unit_file.read_text()
-        assert "--ctx-size 131072" in unit  # the MODEL's window reaches base
-        assert "--override-kv k=bool:false" in unit  # model tune reaches launch
-        assert "IGNORED=bool:true" not in unit  # slot extra_args inert
+        # The profile's window reaches base, past the model's native window.
+        assert "--ctx-size 131072" in unit
+        assert "--override-kv k=bool:false" in unit  # profile tune reaches launch
+        assert "-b 512" in unit
+
+    def test_load_sync_refuses_an_unconverted_slot(self, tmp_path: Path) -> None:
+        """A slot file still carrying a tuning key launches nothing: it fails
+        with ``slot.unconverted`` instead of silently dropping the value."""
+        provider = ContainerProvider()
+        with (
+            patch("hal0.providers.container._resolve_profile", return_value=_moe_profile()),
+            patch.object(provider, "_run") as run,
+            patch.object(provider, "_unit_path", return_value=tmp_path / "test.service"),
+            pytest.raises(UnprocessableEntity) as excinfo,
+        ):
+            provider.load_sync(
+                {
+                    "name": "test-container",
+                    "port": 8095,
+                    "profile": "rocm",
+                    "model": {"default": "model"},
+                    "server": {"extra_args": "-ctk q8_0"},
+                },
+                {"path": "/mnt/ai-models/model.gguf", "_model_key": "model"},
+            )
+        assert excinfo.value.code == "slot.unconverted"
+        assert "[server].extra_args" in excinfo.value.details["keys"]
+        run.assert_not_called()
+        assert not (tmp_path / "test.service").exists()
 
     def test_load_sync_advertises_model_id_alias(self, tmp_path: Path) -> None:
         """load_sync must pass the registry model id (model_info._model_key)
@@ -985,13 +1035,12 @@ class TestLoadSync:
         loopback — so a fresh box and an updated box ended up with different
         units for the same slot.
         """
-        profile = _moe_profile()
+        profile = ProfileConfig(flags="--override-kv k=bool:false", ctx_size=131072)
         slot_cfg = {
             "name": "test-container",
             "port": 8095,
             "profile": "rocm",
-            "model": {"default": "m", "context_size": 131072},
-            "server": {"extra_args": "--override-kv k=bool:false"},
+            "model": {"default": "m"},
         }
         model_info = {"path": "/mnt/ai-models/model.gguf", "_model_key": "m"}
 
@@ -1041,19 +1090,14 @@ class TestLoadSync:
 
     def test_resolved_command_includes_ctx_size(self) -> None:
         """The displayed resolved_command must show --ctx-size so it matches
-        what actually launches — including the v1.0 ownership rule.
+        what actually launches.
 
-        ``m`` is a registry miss, so the model declares no window and the
-        resolver lands on the 8192 safe floor. The slot's ``context_size``
-        131072 is a CEILING above that floor, so it cannot raise it. Preview and
-        launch share ``_resolve_context_size``, so what an operator sees here is
-        exactly what the unit gets."""
+        ``m`` is a registry miss and the profile sets no window, so the
+        resolver lands on the 8192 safe floor. Preview and launch share
+        ``profile_context``, so what an operator sees here is exactly what the
+        unit gets."""
         profile = _moe_profile()
-        cfg = {
-            "profile": "rocm",
-            "port": 8095,
-            "model": {"default": "m", "context_size": 131072},
-        }
+        cfg = {"profile": "rocm", "port": 8095, "model": {"default": "m"}}
         with patch("hal0.providers.container._resolve_profile", return_value=profile):
             argv = resolved_command_for_slot(cfg, model_path="/mnt/ai-models/m.gguf")
         assert argv is not None
@@ -1061,13 +1105,26 @@ class TestLoadSync:
         assert argv[argv.index("--ctx-size") + 1] == "8192"
         assert argv[argv.index("--ctx-size") + 1] != "4096"  # chat@4096 incident
 
+    def test_resolved_command_shows_the_profile_window(self) -> None:
+        profile = ProfileConfig(flags="-fa on", ctx_size=65536)
+        cfg = {"profile": "rocm", "port": 8095, "model": {"default": "m"}}
+        with patch("hal0.providers.container._resolve_profile", return_value=profile):
+            argv = resolved_command_for_slot(cfg, model_path="/mnt/ai-models/m.gguf")
+        assert argv is not None
+        assert argv[argv.index("--ctx-size") + 1] == "65536"
+
+    def test_resolved_command_is_none_for_an_unconverted_slot(self) -> None:
+        cfg = {"profile": "rocm", "port": 8095, "model": {"default": "m", "context_size": 4096}}
+        with patch("hal0.providers.container._resolve_profile", return_value=_moe_profile()):
+            assert resolved_command_for_slot(cfg, model_path="/mnt/ai-models/m.gguf") is None
+
     def test_resolved_command_includes_model_alias(self) -> None:
         """resolved_command shows --alias <model id> so it matches the unit."""
         profile = _moe_profile()
         cfg = {
             "profile": "rocm",
             "port": 8095,
-            "model": {"default": "chadrock-35b-ace-saber", "context_size": 131072},
+            "model": {"default": "chadrock-35b-ace-saber"},
         }
         with patch("hal0.providers.container._resolve_profile", return_value=profile):
             argv = resolved_command_for_slot(cfg)
@@ -1240,15 +1297,26 @@ class TestGpuPassthroughGate:
     decided by the SLOT's ``device`` enum, NEVER by the profile.
 
     Before the 1.0 fix, ``_resolve_llama_scalars`` read ``profile.device_class``
-    and defaulted it to ``"gpu"`` when unset, so a ``cpu-chat`` profile (all 16
-    seeds leave ``device_class`` unset) on a ``device="cpu"`` slot still
-    requested real GPU device nodes. Both directions are asserted: a cpu/npu
-    slot must get NOTHING, and a gpu slot must NOT be stranded on CPU.
+    and defaulted it to ``"gpu"`` when unset, so a ``cpu-chat`` profile on a
+    ``device="cpu"`` slot still requested real GPU device nodes. ADR-0029
+    deleted the profile's ``device_class`` / ``backend`` hints; a profile
+    object that still carries one (a stand-in below) must not move the gate.
+    Both directions are asserted: a cpu/npu slot must get NOTHING, and a gpu
+    slot must NOT be stranded on CPU.
     """
 
     _NODES: ClassVar[list[str]] = ["/dev/kfd", "/dev/dri/renderD128"]
 
-    def _spec(self, cfg: dict[str, Any], profile: ProfileConfig):
+    @staticmethod
+    def _hinted(**hints: str) -> Any:
+        """A profile object that still carries a hardware hint."""
+        from types import SimpleNamespace
+
+        return SimpleNamespace(
+            flags="-fa on", ctx_size=None, vision="auto", mtp="auto", runner=None, **hints
+        )
+
+    def _spec(self, cfg: dict[str, Any], profile: Any):
         provider = ContainerProvider()
         with (
             patch("hal0.providers.container._resolve_profile", return_value=profile),
@@ -1266,11 +1334,11 @@ class TestGpuPassthroughGate:
     # ── the headline bug: cpu-chat on a device="cpu" slot ────────────────────
 
     def test_cpu_slot_with_device_agnostic_profile_gets_no_gpu_nodes(self) -> None:
-        """The exact shipped shape: the ``cpu-chat`` seed leaves ``device_class``
-        unset, so the old ``or "gpu"`` floor mounted /dev/kfd + /dev/dri into a
-        CPU slot's container."""
-        cpu_chat = ProfileConfig(flags="--threads-batch 8 --jinja -b 256 -ub 256")
-        assert cpu_chat.device_class is None, "the cpu-chat seed is device-agnostic"
+        """The exact shipped shape: the ``cpu-chat`` seed names no hardware,
+        so the old ``or "gpu"`` floor mounted /dev/kfd + /dev/dri into a CPU
+        slot's container."""
+        cpu_chat = ProfileConfig.model_validate(SEED_PROFILES["cpu-chat"])
+        assert "device_class" not in ProfileConfig.model_fields, "profiles name no hardware"
         spec = self._spec(_slot_cfg(device="cpu", profile="cpu-chat"), cpu_chat)
         assert spec.devices == []
         assert spec.group_add == []
@@ -1279,30 +1347,26 @@ class TestGpuPassthroughGate:
         """A legacy/imported profile carrying ``device_class="gpu"`` (e.g. the
         published ``chat-long-context`` artifact) must NOT drag GPU nodes onto a
         ``device="cpu"`` slot — the hint is inert."""
-        spec = self._spec(
-            _slot_cfg(device="cpu"), ProfileConfig(flags="-fa on", device_class="gpu")
-        )
+        spec = self._spec(_slot_cfg(device="cpu"), self._hinted(device_class="gpu"))
         assert spec.devices == []
         assert spec.group_add == []
 
     def test_npu_slot_gets_no_gpu_nodes(self) -> None:
-        spec = self._spec(_slot_cfg(device="npu"), ProfileConfig(flags="", device_class="gpu"))
+        spec = self._spec(_slot_cfg(device="npu"), self._hinted(device_class="gpu"))
         assert spec.devices == []
         assert spec.group_add == []
 
     # ── the other direction: never strand a real GPU slot on CPU ────────────
 
     def test_gpu_slot_with_device_agnostic_profile_still_gets_nodes(self) -> None:
-        """All 16 seeds leave ``device_class`` unset — a gpu-rocm slot bound to
-        one must still get real passthrough."""
+        """No seed names hardware — a gpu-rocm slot bound to one must still get
+        real passthrough."""
         spec = self._spec(_slot_cfg(device="gpu-rocm"), _moe_profile())
         assert spec.devices == self._NODES
         assert spec.group_add == ["993", "44"]
 
     def test_gpu_slot_ignores_a_profile_that_claims_cpu(self) -> None:
-        spec = self._spec(
-            _slot_cfg(device="gpu-vulkan"), ProfileConfig(flags="-fa on", device_class="cpu")
-        )
+        spec = self._spec(_slot_cfg(device="gpu-vulkan"), self._hinted(device_class="cpu"))
         assert spec.devices == self._NODES
 
     def test_cuda_slot_uses_cdi_from_the_slot_device_not_profile_backend(self) -> None:
@@ -1315,9 +1379,7 @@ class TestGpuPassthroughGate:
     def test_rocm_slot_does_not_take_cdi_from_a_profile_backend_cuda(self) -> None:
         """A profile claiming ``backend="cuda"`` must not flip a gpu-rocm slot
         onto the CDI path — the vendor comes from the slot's device."""
-        spec = self._spec(
-            _slot_cfg(device="gpu-rocm"), ProfileConfig(flags="-fa on", backend="cuda")
-        )
+        spec = self._spec(_slot_cfg(device="gpu-rocm"), self._hinted(backend="cuda"))
         assert spec.devices == self._NODES
         assert "nvidia.com/gpu=all" not in spec.devices
 
@@ -1334,15 +1396,21 @@ class TestGpuPassthroughGate:
 
 class TestContextSizeDerive:
     """Regression guard for the 2026-06-15 chat@4096 incident: a slot whose
-    TOML pins no context_size must NEVER silently inherit llama-server's 4096
-    default. container_spec derives the model's native window (dense-capped),
-    or falls back to a safe 8192 when the native window is unknown."""
+    profile pins no ``ctx_size`` must NEVER silently inherit llama-server's
+    4096 default. container_spec derives the model's native window
+    (dense-capped), or falls back to a safe 8192 when the native window is
+    unknown."""
 
-    def _spec(self, cfg: dict[str, Any], model_info: dict[str, Any]):
+    def _spec(
+        self,
+        cfg: dict[str, Any],
+        model_info: dict[str, Any],
+        profile: ProfileConfig | None = None,
+    ):
         provider = ContainerProvider()
         with patch(
             "hal0.providers.container._resolve_profile",
-            return_value=_moe_profile(),
+            return_value=profile or _moe_profile(),
         ):
             return provider.container_spec(cfg, model_info)
 
@@ -1351,193 +1419,78 @@ class TestContextSizeDerive:
         return command[command.index("--ctx-size") + 1] if "--ctx-size" in command else None
 
     def test_unset_ctx_derives_native_dense_capped(self) -> None:
-        cfg = _slot_cfg()  # [model] has no context_size
+        cfg = _slot_cfg()
         mi = _model_info(metadata={"context_length": 131072})
         assert self._ctx(self._spec(cfg, mi).command) == "32768"
 
     def test_unset_ctx_unknown_native_falls_back_8192_not_4096(self) -> None:
         cfg = _slot_cfg()
-        mi = _model_info()  # no metadata.context_length, no defaults.context_size
+        mi = _model_info()  # no metadata.context_length
         ctx = self._ctx(self._spec(cfg, mi).command)
         assert ctx == "8192"
         assert ctx != "4096"
 
-    def test_unset_ctx_uses_model_defaults_when_no_metadata(self) -> None:
+    def test_profile_ctx_size_is_the_window(self) -> None:
+        cfg = _slot_cfg()
+        mi = _model_info(metadata={"context_length": 131072})
+        profile = ProfileConfig(flags="-fa on", ctx_size=16384)
+        assert self._ctx(self._spec(cfg, mi, profile).command) == "16384"
+
+    def test_model_defaults_window_is_not_read(self) -> None:
+        """The model holds no tune: a window on the model row is ignored."""
         cfg = _slot_cfg()
         mi = _model_info(defaults={"context_size": 16384})
-        assert self._ctx(self._spec(cfg, mi).command) == "16384"
+        assert self._ctx(self._spec(cfg, mi).command) == str(_CTX_SAFE_FALLBACK)
 
 
-class TestContextSizeOwnership:
-    """v1.0 ownership split — the MODEL owns the context window; the slot's
-    ``[model].context_size`` is a hardware CEILING, never an override.
+class TestProfileContext:
+    """``profile_context`` — the one window rule (ADR-0029 decision 1).
 
-    Before this, ``_resolve_context_size`` returned the slot value OUTRIGHT
-    whenever it was set, so the model drawer's "Context size" and the slot
-    drawer's "Context size" both claimed the same field and the slot silently
-    won. The invariant now: the effective window can only STAY THE SAME or
-    SHRINK relative to what the model asks for — never grow.
+    ``(ctx_size, "profile")`` when the profile sets one; else
+    ``(min(native, 32768), "native")``; else ``(8192, "fallback")``.
     """
 
-    def _spec(self, cfg: dict[str, Any], model_info: dict[str, Any]):
-        provider = ContainerProvider()
-        with patch(
-            "hal0.providers.container._resolve_profile",
-            return_value=_moe_profile(),
-        ):
-            return provider.container_spec(cfg, model_info)
+    def test_profile_ctx_size_wins_outright(self) -> None:
+        profile = ProfileConfig(ctx_size=65536)
+        mi = _model_info(metadata={"context_length": 32768})
+        # Not capped by the native window or the dense cap: an explicit choice.
+        assert profile_context(profile, mi) == (65536, "profile")
 
-    @staticmethod
-    def _ctx(command: list[str]) -> str | None:
-        return command[command.index("--ctx-size") + 1] if "--ctx-size" in command else None
-
-    # ── the model is authoritative ───────────────────────────────────────────
-
-    def test_model_declared_ctx_outranks_gguf_native(self) -> None:
-        """An explicit ``defaults.context_size`` is a deliberate operator choice
-        and is NOT dense-capped — the reverse of the pre-1.0 order, which let a
-        262144 arch max shadow it."""
-        cfg = _slot_cfg()
-        mi = _model_info(metadata={"context_length": 262144}, defaults={"context_size": 131072})
-        assert self._ctx(self._spec(cfg, mi).command) == "131072"
-
-    def test_slot_ctx_no_longer_raises_the_model_window(self) -> None:
-        """THE HEADLINE FIX. Slot asks for 131072, model says 16384 → the model
-        wins. Pre-1.0 this returned 131072."""
-        cfg = _slot_cfg(model={"default": "m.gguf", "context_size": 131072})
-        mi = _model_info(defaults={"context_size": 16384})
-        assert self._ctx(self._spec(cfg, mi).command) == "16384"
-
-    def test_slot_ctx_cannot_inflate_the_safe_fallback(self) -> None:
-        """A slot ceiling above a model with NO declared window resolves to the
-        8192 floor, not the slot's number."""
-        cfg = _slot_cfg(model={"default": "m.gguf", "context_size": 131072})
-        mi = _model_info()
-        assert self._ctx(self._spec(cfg, mi).command) == "8192"
-
-    # ── but the slot ceiling still clamps (the installer's VRAM budget) ──────
-
-    def test_slot_ceiling_below_model_window_still_clamps(self) -> None:
-        """#1108: ``hardware.recommend`` writes a VRAM-budget clamp into the
-        slot. Dropping it outright would reopen the first-warm OOM it exists to
-        prevent, so a ceiling BELOW the model's window is still honored."""
-        cfg = _slot_cfg(model={"default": "m.gguf", "context_size": 8192})
-        mi = _model_info(defaults={"context_size": 131072})
-        assert self._ctx(self._spec(cfg, mi).command) == "8192"
-
-    def test_slot_ceiling_clamps_the_gguf_native_window_too(self) -> None:
-        cfg = _slot_cfg(model={"default": "m.gguf", "context_size": 4096})
+    def test_profile_ctx_size_below_native_shrinks_the_window(self) -> None:
+        profile = ProfileConfig(ctx_size=4096)
         mi = _model_info(metadata={"context_length": 131072})
-        assert self._ctx(self._spec(cfg, mi).command) == "4096"
+        assert profile_context(profile, mi) == (4096, "profile")
 
-    def test_equal_ceiling_and_model_window_is_a_no_op(self) -> None:
-        cfg = _slot_cfg(model={"default": "m.gguf", "context_size": 16384})
-        mi = _model_info(defaults={"context_size": 16384})
-        assert self._ctx(self._spec(cfg, mi).command) == "16384"
+    def test_unset_profile_follows_the_native_window(self) -> None:
+        mi = _model_info(metadata={"context_length": 16384})
+        assert profile_context(ProfileConfig(), mi) == (16384, "native")
 
-    # ── the monotonic guarantee, stated directly on the resolver ────────────
+    def test_native_window_is_dense_capped(self) -> None:
+        mi = _model_info(metadata={"context_length": 262144})
+        assert profile_context(ProfileConfig(), mi) == (_CTX_DENSE_CAP, "native")
 
-    def test_effective_window_never_exceeds_the_model_window(self) -> None:
-        """Property: for any slot ceiling, effective <= what the model asked
-        for. This is what makes the change safe to ship onto existing boxes —
-        no box can gain a KV cache it could not previously hold."""
-        mi = _model_info(defaults={"context_size": 16384})
-        model_window = _resolve_context_size(None, mi)
-        assert model_window == 16384
-        for ceiling in (None, 1024, 8192, 16384, 32768, 131072):
-            assert _resolve_context_size(ceiling, mi) <= model_window
+    def test_unknown_native_window_is_the_safe_fallback(self) -> None:
+        mi = {"path": "/mnt/ai-models/x.gguf", "_model_key": "not-a-curated-model"}
+        assert profile_context(ProfileConfig(), mi) == (_CTX_SAFE_FALLBACK, "fallback")
 
-    def test_unset_ceiling_means_follow_the_model(self) -> None:
-        mi = _model_info(defaults={"context_size": 16384})
-        assert _resolve_context_size(None, mi) == 16384
+    @pytest.mark.parametrize("bad", ["abc", "8k", None, 0])
+    def test_unparseable_native_window_falls_back(self, bad: Any) -> None:
+        mi = {
+            "path": "/x.gguf",
+            "_model_key": "not-a-curated-model",
+            "metadata": {"context_length": bad},
+        }
+        assert profile_context(ProfileConfig(), mi) == (_CTX_SAFE_FALLBACK, "fallback")
 
-    # ── #1414: making the model authoritative must not entrench a bad row ────
-    #
-    # `PUT /api/models/{id}` accepted 0 / -1 / 99999999 with a 200 and 500'd on
-    # an unparseable value. The write boundary is being tightened separately
-    # (#1432) — but deliberately only for NEW writes, so rows already persisted
-    # stay readable and therefore fixable. Those rows are still on disk and
-    # still reach this resolver.
-    #
-    # Before the ownership flip the damage was masked: the slot's
-    # `[model].context_size` won outright, so a sane slot covered for a garbage
-    # model row. Now the model is authoritative and the value goes straight to
-    # `--ctx-size`. Making the model the owner WITHOUT this guard would have
-    # turned a bad-but-survivable row into a slot that never warms.
+    def test_model_defaults_window_is_ignored(self) -> None:
+        mi = {"_model_key": "not-a-curated-model", "defaults": {"context_size": 65536}}
+        assert profile_context(ProfileConfig(), mi) == (_CTX_SAFE_FALLBACK, "fallback")
 
-    @pytest.mark.parametrize("bad", ["abc", "8k", "", [1], {}, 1.5])
-    def test_unparseable_model_ctx_falls_back_instead_of_launching(self, bad: Any) -> None:
-        """An int() failure yields the native window / safe floor, never a
-        crash and never a garbage `--ctx-size`."""
-        mi = _model_info(defaults={"context_size": bad})
-        assert _resolve_context_size(None, mi) == _CTX_SAFE_FALLBACK
-
-    @pytest.mark.parametrize("bad", [-1, -8192, 1, 127, 2**24 + 1, 99999999])
-    def test_implausible_model_ctx_falls_back_instead_of_launching(self, bad: int) -> None:
-        """Outside [128, 2**24] is ignored, NOT clamped — a half-applied garbage
-        number is harder to diagnose than falling through, and the operator's
-        intent is unrecoverable either way."""
-        mi = _model_info(defaults={"context_size": bad})
-        assert _resolve_context_size(None, mi) == _CTX_SAFE_FALLBACK
-
-    def test_implausible_model_ctx_still_defers_to_the_native_window(self) -> None:
-        """Falling back means falling through the NORMAL chain, so a model with
-        a real GGUF window still gets it rather than the bare floor."""
-        mi = _model_info(metadata={"context_length": 131072}, defaults={"context_size": -1})
-        assert _resolve_context_size(None, mi) == _CTX_DENSE_CAP
-
-    def test_zero_model_ctx_is_treated_as_unset(self) -> None:
-        """0 was already falsy-skipped; pinned so the new range check does not
-        change that path's answer."""
-        mi = _model_info(metadata={"context_length": 16384}, defaults={"context_size": 0})
-        assert _resolve_context_size(None, mi) == 16384
-
-    @pytest.mark.parametrize("ok", [128, 4096, 131072, 2**24])
-    def test_plausible_boundary_values_are_honored(self, ok: int) -> None:
-        """The guard must not reject legitimate windows, including both bounds."""
-        mi = _model_info(defaults={"context_size": ok})
-        assert _resolve_context_size(None, mi) == ok
-
-    # ── #1617: a stale/upgraded registry row must not stick at 8192 ─────────
-    #
-    # A row created before registry/pull.py started stamping
-    # ``metadata.context_length`` (#1657/#1707) has empty metadata FOREVER —
-    # nothing re-runs GGUF detection on bytes already on disk. The seeded
-    # brain model is the box-breaking case: its system prompt alone is
-    # ~14k tokens, so an 8192 fallback fails every hal0-brain turn AND every
-    # Hindsight extraction retain out of the box.
-
-    def test_curated_model_with_no_registry_metadata_does_not_fall_to_safe_floor(self) -> None:
-        """A curated id (the seeded brain model) with an empty ``metadata``
-        dict — the exact shape of a pre-#1657 registry row on an upgraded or
-        pre-fix-built box — must resolve from the curated catalogue's
-        ``context_length`` instead of the bare 8192 safe fallback."""
-        mi = _model_info(_model_key="lfm2.5-2.6b", metadata={})
-        assert _resolve_context_size(None, mi) != _CTX_SAFE_FALLBACK
-        assert _resolve_context_size(None, mi) == _CTX_DENSE_CAP
-
-    def test_curated_backfill_is_dense_capped_like_any_native_window(self) -> None:
-        """The curated catalogue's raw 131072 for the brain model must still
-        go through the same dense cap as a GGUF-detected native window — this
-        is a derived fact, not an operator's explicit choice, so an
-        unconfigured slot can't request an impractical KV cache."""
-        mi = _model_info(_model_key="lfm2.5-2.6b")
-        mi.pop("metadata", None)
-        assert _resolve_context_size(None, mi) == _CTX_DENSE_CAP
-
-    def test_unknown_model_with_no_metadata_still_falls_to_safe_floor(self) -> None:
-        """Non-curated ids have nothing to backfill from — the safe floor is
-        still correct there. Pins the existing behaviour so the curated
-        backfill doesn't quietly widen to every model."""
-        mi = _model_info(_model_key="some-operator-pulled-custom-model", metadata={})
-        assert _resolve_context_size(None, mi) == _CTX_SAFE_FALLBACK
-
-    def test_bad_model_ctx_reaches_the_launch_command_as_the_fallback(self) -> None:
-        """End-to-end through `container_spec`: the emitted `--ctx-size` is a
-        usable number, not `-1`."""
-        cfg = _slot_cfg()
-        mi = _model_info(defaults={"context_size": -1})
-        assert self._ctx(self._spec(cfg, mi).command) == str(_CTX_SAFE_FALLBACK)
+    def test_curated_model_with_no_registry_metadata_uses_the_catalogue(self) -> None:
+        """#1617: a curated pick registered before the pull path stamped
+        ``metadata`` still gets its catalogue window (dense-capped)."""
+        mi = {"path": "/mnt/ai-models/brain.gguf", "_model_key": _CURATED_BRAIN_ID}
+        assert profile_context(ProfileConfig(), mi) == (_CTX_DENSE_CAP, "native")
 
 
 #: Hermes' hard gate — ``agent/model_metadata.py::MINIMUM_CONTEXT_LENGTH`` in the
@@ -1548,151 +1501,50 @@ _HERMES_MIN_CONTEXT = HERMES_MINIMUM_CONTEXT_LENGTH
 
 #: A curated brain pick whose catalogue row carries a ``context_length`` but
 #: whose registry row on an older-build box carries no ``metadata`` at all
-#: (#1617). This is the shape the curated backfill exists for.
+#: (#1617).
 _CURATED_BRAIN_ID = "lfm2.5-2.6b"
 
 
-class TestDenseCapDoesNotUndercutAConfiguredSlot:
-    """#1827 — the dense cap is an UNCONFIGURED-slot guard, not a hardware fact.
+class TestAgentWindowClearsTheHermesFloor:
+    """#1827 — the dense cap must not undercut the window the agent needs.
 
-    A fresh 1.0.0-rc.5 install could not run the bundled Hermes agent at all.
-    The installer-pulled brain model carries no ``defaults.context_size``, so
-    its window came from the DERIVED native path — where the blanket 32768
-    dense cap was applied *underneath* the shipped seed's ``context_size =
-    65536``. Every seeded chat slot therefore launched (and, post-#1802,
-    honestly advertised) 32768 no matter what the seed asked for and no matter
-    how much memory the box had. 32768 < 64000, so ``hermes -z`` hard-errored.
-
-    The seed ceiling is by definition *configured* state: written either by the
-    installer's hardware budget (:func:`hal0.install.orchestrate._clamp_context_size`)
-    or by an operator. Honoring it as the cap for the derived window restores
-    the pre-1.0 effective window for exactly these slots, while every other
-    guarantee holds: never above the model's native window, never above the
-    ceiling, and unchanged for a slot with no ceiling on disk.
+    ADR-0029: the window the agent-facing slots run is their profile's
+    ``ctx_size``, so the shipped ``agent``, ``utility`` and ``brain`` seeds
+    carry one above Hermes' floor, and it reaches the launch command past the
+    32768 dense cap even on a model whose native window is larger.
     """
 
-    def _spec(self, cfg: dict[str, Any], model_info: dict[str, Any]):
-        provider = ContainerProvider()
-        with patch(
-            "hal0.providers.container._resolve_profile",
-            return_value=_moe_profile(),
-        ):
-            return provider.container_spec(cfg, model_info)
+    @pytest.mark.parametrize("seed", ["agent", "utility", "brain"])
+    def test_agent_facing_seeds_clear_the_floor(self, seed: str) -> None:
+        ctx = SEED_PROFILES[seed]["ctx_size"]
+        assert isinstance(ctx, int)
+        assert ctx > _CTX_DENSE_CAP
+        assert ctx >= _HERMES_MIN_CONTEXT
 
-    @staticmethod
-    def _ctx(command: list[str]) -> str | None:
-        return command[command.index("--ctx-size") + 1] if "--ctx-size" in command else None
+    def test_seed_window_reaches_the_launch_command(self) -> None:
+        profile = ProfileConfig.model_validate(SEED_PROFILES["brain"])
+        cfg = _slot_cfg(name="brain", profile="brain", model={"default": "hal0-brain-sft-f16"})
+        mi = _model_info(_model_key="hal0-brain-sft-f16", metadata={"context_length": 131072})
+        with patch("hal0.providers.container._resolve_profile", return_value=profile):
+            command = ContainerProvider().container_spec(cfg, mi).command
+        served = int(command[command.index("--ctx-size") + 1])
+        assert served == 65536
+        assert served >= _HERMES_MIN_CONTEXT
 
-    def test_fresh_install_brain_slot_clears_the_hermes_floor(self) -> None:
-        """THE REGRESSION: shipped seed ceiling 65536 + an installer-pulled
-        model with a 131072 native window and no explicit context size."""
-        mi = _model_info(
-            _model_key="hal0-brain-sft-f16",
-            metadata={"context_length": 131072},
-            defaults={"context_size": None},
-        )
-        resolved = _resolve_context_size(65536, mi, slot_name="brain")
-        assert resolved == 65536
-        assert resolved >= _HERMES_MIN_CONTEXT
-
-    def test_configured_ceiling_reaches_the_launch_command(self) -> None:
-        """End-to-end through ``container_spec``: ``--ctx-size 65536`` is what
-        llama-server actually serves, so #1802's honest ``/v1/models``
-        advertising reports the same number Hermes gates on."""
-        cfg = _slot_cfg(model={"default": "m.gguf", "context_size": 65536})
+    def test_unset_profile_window_is_still_dense_capped(self) -> None:
         mi = _model_info(metadata={"context_length": 131072})
-        assert self._ctx(self._spec(cfg, mi).command) == "65536"
-
-    def test_curated_backfill_path_also_clears_the_floor(self) -> None:
-        """The #1617 self-heal shape (registry row with empty ``metadata``,
-        window recovered from the curated catalogue) is what a box pulled by an
-        older build actually has, so it must clear the floor too.
-
-        Deliberately built from a REAL :class:`hal0.registry.model.Model` dump
-        rather than a hand-written dict: the only thing this shape has to
-        identify the model by is whatever ``model_dump()`` actually emits.
-        """
-        mi = dict(Model(id=_CURATED_BRAIN_ID, path="/mnt/ai-models/brain.gguf").model_dump())
-        mi["_model_key"] = _CURATED_BRAIN_ID  # what slots/manager stamps at launch
-        assert mi.get("metadata") in ({}, None)
-        assert _resolve_context_size(65536, mi, slot_name="brain") >= _HERMES_MIN_CONTEXT
-
-    def test_unpinned_slot_is_still_dense_capped(self) -> None:
-        """No ceiling on disk means nothing is configured, so the blanket cap
-        still applies — the invariant :data:`hal0.slots.capacity._DEFAULT_CTX_TOKENS`
-        budgets against."""
-        mi = _model_info(metadata={"context_length": 131072})
-        assert _resolve_context_size(None, mi) == _CTX_DENSE_CAP
-
-    @pytest.mark.parametrize("ceiling", [4096, 8192, 16384, 32768])
-    def test_ceiling_below_the_dense_cap_is_unchanged(self, ceiling: int) -> None:
-        """The installer's VRAM-budget clamp (#1108) is untouched: a ceiling at
-        or below the dense cap still wins outright."""
-        mi = _model_info(metadata={"context_length": 131072})
-        assert _resolve_context_size(ceiling, mi) == ceiling
-
-    def test_never_exceeds_the_models_native_window(self) -> None:
-        """A generous ceiling cannot conjure context the model does not have."""
-        mi = _model_info(metadata={"context_length": 40960})
-        assert _resolve_context_size(131072, mi) == 40960
-
-    @pytest.mark.parametrize("ceiling", [128, 4096, 32768, 65536, 131072, 262144])
-    def test_never_exceeds_the_configured_ceiling(self, ceiling: int) -> None:
-        """Property: for a derived window, effective <= ceiling always, so a
-        slot can only reach a window the box was explicitly configured for."""
-        mi = _model_info(metadata={"context_length": 262144})
-        assert _resolve_context_size(ceiling, mi) <= ceiling
-
-    def test_explicit_model_window_still_outranks_the_ceiling(self) -> None:
-        """Unchanged: the ceiling replaces the dense cap only on the DERIVED
-        path. An explicit model window is authoritative and is still only
-        clamped down by the ceiling, never raised by it."""
-        mi = _model_info(metadata={"context_length": 131072}, defaults={"context_size": 16384})
-        assert _resolve_context_size(65536, mi) == 16384
-
-    def test_no_model_window_at_all_still_uses_the_safe_floor(self) -> None:
-        """A slot ceiling is not evidence about the model, so it cannot inflate
-        the 8192 safe fallback either."""
-        mi = _model_info(_model_key="some-operator-pulled-custom-model", metadata={})
-        assert _resolve_context_size(65536, mi) == _CTX_SAFE_FALLBACK
-
-    @pytest.mark.parametrize("bad", ["nonsense", "", [65536], {}])
-    def test_unparseable_ceiling_falls_back_to_the_blanket_cap(self, bad: Any) -> None:
-        """A garbage hand-edited ``[model].context_size`` is not a configuration
-        signal — the slot table reaches this resolver unvalidated, so the
-        derived window falls back to the blanket cap instead of the launch path
-        dying on an ``int()`` of ``"64k"``."""
-        mi = _model_info(metadata={"context_length": 131072})
-        assert _resolve_context_size(bad, mi) == _CTX_DENSE_CAP
-
-    @pytest.mark.parametrize("bad", [0, -1, 99999999, 2**24 + 1, 127])
-    def test_implausible_ceiling_falls_back_to_the_blanket_cap(self, bad: int) -> None:
-        """Now that the ceiling REPLACES the dense cap on the derived path, an
-        implausible one has to be screened on the same
-        ``[_CTX_MIN_PLAUSIBLE, _CTX_MAX_PLAUSIBLE]`` range the model path uses.
-        ``ModelConfig.context_size`` has ``ge=128`` and no upper bound, and rows
-        written before the API's ``model.context_size_out_of_range`` screen are
-        still readable — so ``99999999`` really is on disk somewhere, and it
-        would hand a 262144-native model exactly the impractical KV cache
-        :data:`_CTX_DENSE_CAP` exists to prevent (#1108's first-warm OOM).
-        ``0``/``-1`` are a slot that never warms rather than a ceiling."""
-        mi = _model_info(metadata={"context_length": 262144})
-        assert _resolve_context_size(bad, mi) == _CTX_DENSE_CAP
-
-
-class _FakeCtxDefaults:
-    def __init__(self, context_size: int | None) -> None:
-        self.context_size = context_size
+        assert profile_context(ProfileConfig(), mi)[0] == _CTX_DENSE_CAP
 
 
 class _FakeCtxModel:
     """Duck-typed registry entry — mirrors the real pydantic ``Model``."""
 
-    def __init__(self, context_size: int | None) -> None:
-        self.defaults = _FakeCtxDefaults(context_size)
+    def __init__(self, native: int | None) -> None:
+        self.native = native
 
     def model_dump(self) -> dict[str, Any]:
-        return {"defaults": {"context_size": self.defaults.context_size}, "metadata": {}}
+        metadata = {"context_length": self.native} if self.native else {}
+        return {"metadata": metadata}
 
 
 class _FakeCtxRegistry:
@@ -1705,64 +1557,83 @@ class _FakeCtxRegistry:
         return self._models[model_id]
 
 
-class TestResolveEffectiveContextSize:
-    """#1788 — the read-only-surface wrapper read-only views (ctx_max,
-    /v1/models context_length/max_context_window) call instead of
-    re-implementing the model/slot precedence themselves."""
+def _effective(
+    cfg: dict[str, Any], registry: Any, profile: Any = None
+) -> tuple[int | None, str | None]:
+    with patch(
+        "hal0.providers.container._resolve_profile",
+        return_value=profile or ProfileConfig(),
+    ):
+        return slot_effective_context(cfg, registry)
 
-    def test_matches_resolve_context_size_for_a_registered_model(self) -> None:
+
+class TestSlotEffectiveContext:
+    """#1788 — the read-only surfaces (slot views, /v1/models, the agent anchor
+    window, capacity) call ``slot_effective_context`` instead of
+    re-implementing the window rule; it reports the source too."""
+
+    @staticmethod
+    def _cfg(model_id: str = "m", **overrides: Any) -> dict[str, Any]:
+        cfg = {"name": "chat", "profile": "chat", "model": {"default": model_id}}
+        cfg.update(overrides)
+        return cfg
+
+    def test_registered_model_reports_its_native_window(self) -> None:
         registry = _FakeCtxRegistry({"m": _FakeCtxModel(8000)})
-        assert resolve_effective_context_size(65536, registry, "m") == 8000
+        assert _effective(self._cfg(), registry) == (8000, "native")
 
-    def test_slot_ceiling_still_clamps_down(self) -> None:
-        registry = _FakeCtxRegistry({"m": _FakeCtxModel(65536)})
-        assert resolve_effective_context_size(16384, registry, "m") == 16384
+    def test_profile_window_wins(self) -> None:
+        registry = _FakeCtxRegistry({"m": _FakeCtxModel(8000)})
+        profile = ProfileConfig(ctx_size=16384)
+        assert _effective(self._cfg(), registry, profile) == (16384, "profile")
 
     def test_none_registry_degrades_to_safe_floor(self) -> None:
-        assert resolve_effective_context_size(65536, None, "m") == _CTX_SAFE_FALLBACK
+        assert _effective(self._cfg(), None) == (_CTX_SAFE_FALLBACK, "fallback")
 
     def test_empty_model_id_degrades_to_safe_floor(self) -> None:
         registry = _FakeCtxRegistry({"m": _FakeCtxModel(8000)})
-        assert resolve_effective_context_size(65536, registry, "") == _CTX_SAFE_FALLBACK
+        assert _effective(self._cfg(""), registry) == (_CTX_SAFE_FALLBACK, "fallback")
 
     def test_registry_miss_degrades_to_safe_floor(self) -> None:
-        registry = _FakeCtxRegistry({})
-        assert resolve_effective_context_size(65536, registry, "unregistered") == _CTX_SAFE_FALLBACK
+        registry = _FakeCtxRegistry({"m": _FakeCtxModel(8000)})
+        assert _effective(self._cfg("unregistered"), registry) == (_CTX_SAFE_FALLBACK, "fallback")
 
     def test_registry_get_raising_is_swallowed(self) -> None:
         class _BoomRegistry:
             def get(self, model_id: str) -> Any:
-                raise RuntimeError("registry exploded")
+                raise RuntimeError("db down")
 
-        assert resolve_effective_context_size(65536, _BoomRegistry(), "m") == _CTX_SAFE_FALLBACK
+        assert _effective(self._cfg(), _BoomRegistry()) == (_CTX_SAFE_FALLBACK, "fallback")
 
-    def test_model_less_slot_with_no_ceiling_reports_the_safe_floor(self) -> None:
-        """A model-less slot (no id at all, no TOML ceiling) has no model fact
-        to be authoritative — the safe floor is reported rather than
-        inventing a number."""
-        assert resolve_effective_context_size(None, None, "") == _CTX_SAFE_FALLBACK
+    def test_missing_profile_reports_nothing(self) -> None:
+        from hal0.errors import NotFound
 
-    def test_always_returns_a_positive_int(self) -> None:
-        assert isinstance(resolve_effective_context_size(None, None, ""), int)
+        with patch(
+            "hal0.providers.container._resolve_profile",
+            side_effect=NotFound("gone", code="profiles.not_found"),
+        ):
+            assert slot_effective_context(self._cfg(), None) == (None, None)
+
+    def test_npu_slot_reports_its_profile_window(self) -> None:
+        profile = ProfileConfig(ctx_size=16384)
+        cfg = self._cfg(device="npu", profile="flm")
+        assert _effective(cfg, None, profile) == (16384, "profile")
+
+    def test_npu_slot_without_a_profile_window_reports_flm_default(self) -> None:
+        cfg = self._cfg(device="npu", profile="flm")
+        assert _effective(cfg, None) == (8192, "fallback")
 
 
 class TestAdvertisedWindowMatchesTheServedWindow:
     """#1827 — the number Hermes gates on is the ADVERTISED one.
 
-    Hermes reads ``/v1/models``, which (like ``api.__init__._slot_ctx_size``
-    and the SlotView aggregator) goes through
-    :func:`resolve_effective_context_size`, NOT through the launch path. That
-    wrapper builds its ``model_info`` from ``Model.model_dump()`` — and
+    Hermes reads ``/v1/models``, which goes through
+    :func:`slot_effective_context`, NOT through the launch path. That
+    resolver builds its ``model_info`` from ``Model.model_dump()`` — and
     ``_model_key`` is not a field on :class:`hal0.registry.model.Model`; only
-    the launch path stamps it. So the #1617 curated backfill was unreachable
-    from the read-only side: an empty-``metadata`` registry row (every box
-    provisioned before #1657/#1707 stamped ``metadata.context_length``)
-    advertised the 8192 safe floor while llama-server was launched with the
-    real window. Hermes still refused, just with a different number.
-
-    These tests must use a REAL pydantic ``Model``. Hand-stamping
-    ``_model_key`` onto a literal dict tests a shape the read-only path can
-    never produce, and passes with or without the fix.
+    the launch path stamps it. These tests use a REAL pydantic ``Model``, so
+    the curated backfill (#1617) is exercised through the shape the read-only
+    path really sees.
     """
 
     @staticmethod
@@ -1780,43 +1651,40 @@ class TestAdvertisedWindowMatchesTheServedWindow:
         return command[command.index("--ctx-size") + 1] if "--ctx-size" in command else None
 
     def test_curated_backfill_is_reachable_from_the_read_only_surface(self) -> None:
-        """THE REGRESSION: registry row with no metadata, seed ceiling 65536.
-        Without the fix this returns 8192 and Hermes refuses."""
+        """Registry row with no metadata: the advertised window is the curated
+        catalogue's (dense-capped), not the 8192 safe floor."""
         model = Model(id=_CURATED_BRAIN_ID, path="/mnt/ai-models/brain.gguf")
         assert not model.model_dump().get("metadata")
-        advertised = resolve_effective_context_size(
-            65536, self._registry(model), _CURATED_BRAIN_ID, slot_name="brain"
-        )
-        assert advertised == 65536
-        assert advertised >= _HERMES_MIN_CONTEXT
+        cfg = _slot_cfg(name="brain", model={"default": _CURATED_BRAIN_ID})
+        assert _effective(cfg, self._registry(model)) == (_CTX_DENSE_CAP, "native")
 
-    def test_advertised_equals_what_llama_server_is_launched_with(self) -> None:
+    @pytest.mark.parametrize("ctx_size", [None, 65536])
+    def test_advertised_equals_what_llama_server_is_launched_with(
+        self, ctx_size: int | None
+    ) -> None:
         """The two halves of #1802's honest-advertising contract, both driven
-        off the same registry entry through their own real code paths."""
+        off the same registry entry and profile through their own code paths."""
         model = Model(id=_CURATED_BRAIN_ID, path="/mnt/ai-models/brain.gguf")
-        cfg = _slot_cfg(model={"default": _CURATED_BRAIN_ID, "context_size": 65536})
+        cfg = _slot_cfg(name="brain", model={"default": _CURATED_BRAIN_ID})
         registry = self._registry(model)
+        profile = ProfileConfig(flags="-fa on", ctx_size=ctx_size)
 
-        advertised = resolve_effective_context_size(
-            65536, registry, _CURATED_BRAIN_ID, slot_name="brain"
-        )
+        advertised, _source = _effective(cfg, registry, profile)
         with (
             patch("hal0.registry.store.ModelRegistry", lambda *a, **k: registry),
-            patch(
-                "hal0.providers.container._resolve_profile",
-                return_value=_moe_profile(),
-            ),
+            patch("hal0.providers.container._resolve_profile", return_value=profile),
         ):
             served = self._ctx(
                 ContainerProvider().container_spec(cfg, _best_effort_model_info(cfg)).command
             )
-        assert served == str(advertised) == "65536"
+        assert served == str(advertised)
 
     def test_registry_entry_without_an_id_key_still_degrades_safely(self) -> None:
         """A duck-typed entry whose ``model_dump()`` omits both ``id`` and
         ``metadata`` has nothing to look up — the safe floor, not a crash."""
         registry = _FakeCtxRegistry({"m": _FakeCtxModel(None)})
-        assert resolve_effective_context_size(65536, registry, "m") == _CTX_SAFE_FALLBACK
+        cfg = {"name": "chat", "profile": "chat", "model": {"default": "m"}}
+        assert _effective(cfg, registry) == (_CTX_SAFE_FALLBACK, "fallback")
 
 
 class TestFamilyDefaults:
@@ -1838,59 +1706,46 @@ class TestFamilyDefaults:
         assert family_flags("qwen3-27b") == ""  # no qwen entry
         assert family_flags(None) == ""
 
-    def test_gemma_on_q8_profile_pins_f16_kv(self) -> None:
-        """Per spec-flags-ownership §2 + spec §1.2:
-        - profile.flags are NOT in argv (FLAGS-own); only model defaults.extra_args
-          + family_defaults + slot extras contribute.
-        - family_defaults cleared for 1.0 (no gemma f16 KV override).
-        With no model defaults set for this test path, argv has no -ctk from
-        the profile (inert) or from a family override (none)."""
-        profile = _moe_profile()  # ships -ctk q8_0 -ctv q8_0 (inert at launch)
+    def test_gemma_profile_kv_reaches_argv_with_no_family_override(self) -> None:
+        """ADR-0029: the profile's flags are the tune, so its ``-ctk q8_0``
+        reaches the argv. ``family_defaults`` ships empty for 1.0, so no gemma
+        f16 KV override lands on top of it."""
+        profile = _moe_profile()  # ships -ctk q8_0 -ctv q8_0
         cfg = {"profile": "rocm", "port": 8095, "model": {"default": "gemma-4-12b-it"}}
         with patch("hal0.providers.container._resolve_profile", return_value=profile):
             argv = resolved_command_for_slot(cfg, model_path="/mnt/ai-models/gemma-4-12b-it.gguf")
         assert argv is not None
-        # Profile's q8_0 KV is INERT (spec-flags-ownership §2): no -ctk in argv.
-        # The model has no defaults.extra_args set in this test path.
-        # family_defaults is empty for 1.0 — no family override.
-        # Result: no -ctk at all.
-        assert "-ctk" not in argv
-        assert "--cache-reuse" not in argv  # gemma family override gone
+        assert argv[argv.index("-ctk") + 1] == "q8_0"
+        assert argv[argv.index("-ctv") + 1] == "q8_0"
+        assert "f16" not in argv  # no gemma family override
+        assert "--cache-reuse" not in argv
 
     def test_non_gemma_gets_no_family_kv_leak(self) -> None:
-        """A qwen model has no FAMILY_DEFAULTS entry, so no family KV is forced.
-        FLAGS-own: the profile's -ctk q8_0 is inert (the model owns its tune),
-        and this registry-miss model carries none — so no -ctk leaks in, and
-        crucially the gemma family f16 does NOT leak onto a non-family model."""
+        """A qwen model has no FAMILY_DEFAULTS entry: the profile's KV types
+        are what launch, and no gemma f16 leaks onto a non-family model."""
         profile = _moe_profile()
         cfg = {"profile": "rocm", "port": 8095, "model": {"default": "qwen3-27b"}}
         with patch("hal0.providers.container._resolve_profile", return_value=profile):
             argv = resolved_command_for_slot(cfg, model_path="/mnt/ai-models/qwen3-27b.gguf")
         assert argv is not None
-        assert "-ctk" not in argv  # profile q8_0 inert; no model/family KV here
-        assert "f16" not in argv  # no gemma family leak
+        assert argv.count("-ctk") == 1
+        assert argv[argv.index("-ctk") + 1] == "q8_0"
+        assert "f16" not in argv
 
-    def test_slot_extra_args_is_inert_family_wins(self) -> None:
-        """FLAGS-own: a slot [server].extra_args is INERT at launch
-        (per spec-flags-ownership §4 + spec §3.2). With family_defaults
-        cleared (spec §1.2) and profile.flags inert (spec-flags-ownership §2),
-        only the model's defaults.extra_args carries KV tuning.
-        Slot's q4_0 is ignored (inert); profile q8_0 is also inert.
-        Result: no q4_0 in argv."""
+    def test_slot_extra_args_refuses_the_preview(self) -> None:
+        """A slot still carrying ``[server].extra_args`` was never converted:
+        the preview (like the launch) resolves nothing rather than showing an
+        argv the slot does not run."""
         profile = _moe_profile()
         cfg = {
             "profile": "rocm",
             "port": 8095,
             "model": {"default": "gemma-4-12b-it"},
-            "server": {"extra_args": "-ctk q4_0 -ctv q4_0"},  # inert at launch
+            "server": {"extra_args": "-ctk q4_0 -ctv q4_0"},
         }
         with patch("hal0.providers.container._resolve_profile", return_value=profile):
             argv = resolved_command_for_slot(cfg, model_path="/mnt/ai-models/gemma-4-12b-it.gguf")
-        assert argv is not None
-        assert "q4_0" not in argv  # slot extra_args inert
-        assert (
-            "-ctk" not in argv
-        )  # profile flags inert; no family override; no model defaults in test path
+        assert argv is None
 
     def test_vulkan_seed_is_basic_no_forced_kv_quant(self) -> None:
         """The vulkan seed ships minimal flags with NO forced KV quant.
@@ -1898,8 +1753,8 @@ class TestFamilyDefaults:
         The 2026-07-05 seed cleanup reduced the plain ``vulkan`` seed to basic
         flags, so f16 (the llama-server default) applies universally — it is
         gemma-safe without relying on a family guard against a q8 vulkan seed,
-        and per-model KV tuning now lives in the model's ``defaults.extra_args``.
-        A slot on the basic vulkan seed therefore never gets a forced q8 KV.
+        and KV tuning lives on the profile a slot runs (ADR-0029). A slot on
+        the basic seed therefore never gets a forced q8 KV.
         """
         vseed = SEED_PROFILES["chat"]
         assert "-ctk" not in vseed["flags"] and "q8_0" not in vseed["flags"]
@@ -1908,7 +1763,7 @@ class TestFamilyDefaults:
         # the backend lacks the kernel.
         assert "-fa auto" in vseed["flags"]
 
-        profile = ProfileConfig(flags=vseed["flags"], mtp=False)
+        profile = ProfileConfig(flags=vseed["flags"], mtp="off")
         cfg = {"profile": "chat", "port": 8096, "model": {"default": "qwen3-27b"}}
         with patch("hal0.providers.container._resolve_profile", return_value=profile):
             argv = resolved_command_for_slot(cfg, model_path="/mnt/ai-models/qwen3-27b.gguf")
@@ -2052,13 +1907,17 @@ class TestLoopbackFenceCommand:
 
 
 class TestSlotHardwareSegment:
-    """spec-hw-slot-ownership §2: the slot owns NGL + THREADS; the model no
-    longer emits -ngl. Covers _llama_argv_segments' slot_hardware segment."""
+    """spec-hw-slot-ownership §2 / ADR-0029: the slot owns NGL + THREADS +
+    METRICS, emitted in the ``slot`` layer of ``_llama_argv_segments``; a
+    profile may not set them."""
 
     @staticmethod
-    def _argv(**kw: Any) -> list[str]:
-        segs = _llama_argv_segments(port=8081, model_path="/m.gguf", **kw)
-        return resolve_argv(segs).argv
+    def _segments(**kw: Any) -> list[tuple[str, list[str]]]:
+        kw.setdefault("context_size", 8192)
+        return _llama_argv_segments(port=8081, model_path="/m.gguf", **kw)
+
+    def _argv(self, **kw: Any) -> list[str]:
+        return resolve_argv(self._segments(**kw)).argv
 
     def test_slot_ngl_emits_ngl(self) -> None:
         argv = self._argv(slot_n_gpu_layers=99)
@@ -2078,25 +1937,17 @@ class TestSlotHardwareSegment:
         argv = self._argv(slot_threads=0, slot_n_gpu_layers=-1)
         assert "--threads" not in argv
 
-    def test_model_defaults_n_gpu_layers_does_not_emit_ngl(self) -> None:
-        # defaults.n_gpu_layers is deleted; a stray key must NOT reach the argv.
-        argv = self._argv(model_defaults={"n_gpu_layers": 77, "extra_args": "-fa on"})
-        assert "-ngl" not in argv
-        assert "-fa" in argv
+    @pytest.mark.parametrize("flags", ["-ngl 77", "--threads 3", "-t 3", "-dev Vulkan0"])
+    def test_profile_hardware_flag_refuses_to_launch(self, flags: str) -> None:
+        """A profile file is operator-editable on disk: a hardware flag in it
+        is refused at launch, as at save."""
+        with pytest.raises(BadRequest) as excinfo:
+            self._argv(slot_threads=8, profile_flags=f"-fa on {flags}")
+        assert excinfo.value.code == "slot.hardware_flag_denied"
 
-    def test_slot_threads_wins_over_model_extra_args_collision(self) -> None:
-        # slot_hardware sits after model_extra_args → the slot's --threads wins
-        # last. (-ngl can't be tested this way: it is in MANAGED_ARGS_DENYLIST,
-        # so a model extra_args -ngl is hard-rejected before it can collide.
-        # --threads is not yet denylisted — Lane C adds SLOT_HARDWARE_FLAGS.)
-        argv = self._argv(slot_threads=8, model_defaults={"extra_args": "--threads 3"})
-        assert argv.count("--threads") == 1
-        assert argv[argv.index("--threads") + 1] == "8"
-
-    def test_segment_labels_include_slot_hardware_not_model_defaults(self) -> None:
-        labels = [lbl for lbl, _toks in _llama_argv_segments(port=8081, model_path="/m.gguf")]
-        assert "slot_hardware" in labels
-        assert "model_defaults" not in labels
+    def test_segment_labels_are_the_four_adr_0029_layers(self) -> None:
+        labels = [lbl for lbl, _toks in self._segments()]
+        assert labels == ["base", "model", "profile", "slot"]
 
     def test_metrics_defaults_on(self) -> None:
         # #1810: no slot_metrics kwarg → the safe default (loopback-only,
@@ -2113,12 +1964,12 @@ class TestSlotHardwareSegment:
         argv = self._argv(slot_metrics=False)
         assert "--metrics" not in argv
 
-    def test_metrics_rides_the_trusted_slot_hardware_segment(self) -> None:
+    def test_metrics_rides_the_trusted_slot_segment(self) -> None:
         # --metrics must come from the SAME trusted, hal0-computed segment as
-        # -ngl/--threads — not a free-form/untrusted one — so it can never be
-        # smuggled or stripped by a model/profile flag save.
-        segs = dict(_llama_argv_segments(port=8081, model_path="/m.gguf", slot_metrics=True))
-        assert "--metrics" in segs["slot_hardware"]
+        # -ngl/--threads — not the operator-editable profile layer.
+        segs = dict(self._segments(slot_metrics=True))
+        assert "--metrics" in segs["slot"]
+        assert "--metrics" not in segs["profile"]
 
 
 class TestUnsupportedQuantGuard:
@@ -2152,7 +2003,7 @@ class TestUnsupportedQuantGuard:
     def test_rocmfpx_quant_on_cpu_slot_is_refused(self) -> None:
         """The exact hal0#1790 shape: a ROCmFP8 build on a device='cpu' slot
         must raise instead of spawning."""
-        cpu_chat = ProfileConfig(flags="--threads-batch 8 --jinja -b 256 -ub 256")
+        cpu_chat = ProfileConfig(flags="--threads-batch 8 -b 256 -ub 256")
         cfg = _slot_cfg(device="cpu", profile="cpu-chat", name="brain")
         model_info = _model_info(quant="ROCmFP8", _model_key="hal0-brain-sft-q8-rocmfpx")
         with pytest.raises(_container_mod.UnprocessableEntity) as exc_info:
@@ -2166,7 +2017,7 @@ class TestUnsupportedQuantGuard:
 
     @pytest.mark.parametrize("quant", ["ROCmFP3", "ROCmFP4", "ROCmFP6", "ROCmFP8", "ROCmFPX"])
     def test_every_fpx_family_label_is_refused_on_cpu(self, quant: str) -> None:
-        cpu_chat = ProfileConfig(flags="--threads-batch 8 --jinja -b 256 -ub 256")
+        cpu_chat = ProfileConfig(flags="--threads-batch 8 -b 256 -ub 256")
         cfg = _slot_cfg(device="cpu", profile="cpu-chat")
         model_info = _model_info(quant=quant)
         with pytest.raises(_container_mod.UnprocessableEntity) as exc_info:
@@ -2175,7 +2026,7 @@ class TestUnsupportedQuantGuard:
 
     def test_rocmfpx_quant_on_gpu_rocm_slot_is_refused(self) -> None:
         """No runner accepts the fork family any more, the rocm lane included."""
-        rocm = SEED_PROFILES["chat"]
+        rocm = ProfileConfig.model_validate(SEED_PROFILES["chat"])
         cfg = _slot_cfg(device="gpu-rocm", profile="chat")
         model_info = _model_info(quant="ROCmFP8", _model_key="some-model")
         with pytest.raises(_container_mod.UnprocessableEntity) as exc_info:
@@ -2183,7 +2034,7 @@ class TestUnsupportedQuantGuard:
         assert exc_info.value.code == "slot.unsupported_quant"
 
     def test_rocmfpx_quant_on_gpu_vulkan_slot_is_refused(self) -> None:
-        vulkan = ProfileConfig(flags="-fa on", backend="vulkan")
+        vulkan = ProfileConfig(flags="-fa on")
         cfg = _slot_cfg(device="gpu-vulkan", profile="vulkan-chat")
         model_info = _model_info(quant="ROCmFP4")
         with pytest.raises(_container_mod.UnprocessableEntity) as exc_info:
@@ -2201,7 +2052,7 @@ class TestUnsupportedQuantGuard:
     def test_a_fork_family_filename_is_refused_without_a_quant_label(self, path: str) -> None:
         """A registry row that never got a ``quant`` label is still caught by
         the file name."""
-        cpu_chat = ProfileConfig(flags="--threads-batch 8 --jinja -b 256 -ub 256")
+        cpu_chat = ProfileConfig(flags="--threads-batch 8 -b 256 -ub 256")
         cfg = _slot_cfg(device="cpu", profile="cpu-chat")
         model_info = _model_info(path=path)
         with pytest.raises(_container_mod.UnprocessableEntity) as exc_info:
@@ -2210,14 +2061,14 @@ class TestUnsupportedQuantGuard:
 
     def test_plain_quant_on_cpu_slot_is_unaffected(self) -> None:
         """A normal quant (no ROCmFP* marker) must never trip the guard."""
-        cpu_chat = ProfileConfig(flags="--threads-batch 8 --jinja -b 256 -ub 256")
+        cpu_chat = ProfileConfig(flags="--threads-batch 8 -b 256 -ub 256")
         cfg = _slot_cfg(device="cpu", profile="cpu-chat")
         model_info = _model_info(quant="Q4_K_M")
         spec = self._spec(cfg, model_info, cpu_chat)
         assert spec is not None
 
     def test_no_quant_on_cpu_slot_is_unaffected(self) -> None:
-        cpu_chat = ProfileConfig(flags="--threads-batch 8 --jinja -b 256 -ub 256")
+        cpu_chat = ProfileConfig(flags="--threads-batch 8 -b 256 -ub 256")
         cfg = _slot_cfg(device="cpu", profile="cpu-chat")
         model_info = _model_info()  # no "quant" key at all
         spec = self._spec(cfg, model_info, cpu_chat)

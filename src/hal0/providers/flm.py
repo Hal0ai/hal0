@@ -737,33 +737,24 @@ class FLMProvider(Provider):
         separate from container_spec so non-container callers (tests,
         debug shells, native systemd fallback) can use them too.
         """
+        # ADR-0029: a slot dict still carrying tuning keys was not converted;
+        # refuse it (``slot.unconverted``) exactly as the llama launch path
+        # does, instead of silently ignoring the keys. ``container_spec``
+        # builds its env here, so this covers every FLM entry point.
+        from hal0.providers.container import _refuse_unconverted, resolve_slot_profile
+
+        _refuse_unconverted(slot_cfg)
         port = slot_cfg.get("port") or slot_cfg.get("slot", {}).get("port", 8086)
-        # [model].context_size is the SlotConfig shape (container slots);
-        # ctx_size / defaults.context_size are legacy (pre-container) shapes.
-        ctx = (
-            (slot_cfg.get("model") or {}).get("context_size")
-            or slot_cfg.get("ctx_size")
-            or slot_cfg.get("defaults", {}).get("context_size", 8192)
-        )
+        # ADR-0029: FLM's window is the slot profile's ``ctx_size`` (the
+        # conversion writes it explicitly for every FLM slot), else 8192.
+
+        ctx = getattr(resolve_slot_profile(slot_cfg), "ctx_size", None) or 8192
         flm_tag = model_info.get("flm_tag") or model_info.get("_model_key") or "qwen3:0.6b"
 
         npu_table = slot_cfg.get("npu") or {}
-        defaults = slot_cfg.get("defaults") or {}
-        if slot_cfg.get("npu") is not None:
-            # [npu] table is PRIMARY when present — explicit asr=false must
-            # win even if stale legacy defaults say otherwise.
-            load_asr = "1" if npu_table.get("asr") else "0"
-            load_embed = "1" if npu_table.get("embed") else "0"
-            load_chat = "1" if npu_table.get("chat", True) not in (False, "0", 0) else "0"
-        else:
-            # Legacy (pre-container) fallback — still reachable from legacy
-            # TOMLs without an [npu] table (api/__init__.py reads the same
-            # ``defaults.load_*`` shape): truthy check, same semantics as
-            # before the [npu] table existed.
-            load_asr = "1" if defaults.get("load_asr") else "0"
-            load_embed = "1" if defaults.get("load_embed") else "0"
-            # chat defaults on (NpuConfig.chat=True); always enabled here.
-            load_chat = "1"
+        load_asr = "1" if npu_table.get("asr") else "0"
+        load_embed = "1" if npu_table.get("embed") else "0"
+        load_chat = "1" if npu_table.get("chat", True) not in (False, "0", 0) else "0"
 
         return {
             "HAL0_FLM_TAG": str(flm_tag),

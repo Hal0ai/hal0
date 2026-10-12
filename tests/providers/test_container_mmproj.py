@@ -8,8 +8,8 @@ hack that previously lived in the live chat.toml.
 
 Covers:
   * ``_llama_launch_plan`` appends ``--mmproj <path>`` when given, omits it when None.
-  * A manual ``--mmproj`` in ``extra_args`` overrides the sidecar; normalize_argv
-    dedups to one flag (last-wins) so there's no duplicate in the command.
+  * A profile carrying ``--mmproj`` refuses to launch (the projector is the
+    model's fact; whether it loads is the profile's ``vision``).
   * ``container_spec`` reads ``model_info["mmproj"]`` and emits the flag.
   * No flag when the model carries no sidecar (no regression for text-only slots).
   * ``load_sync`` writes a unit file containing the flag when a sidecar is present.
@@ -20,7 +20,10 @@ from __future__ import annotations
 from typing import Any
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from hal0.config.schema import ProfileConfig
+from hal0.errors import BadRequest
 from hal0.providers.container import ContainerProvider, _llama_launch_plan
 
 _SIDECAR = "/mnt/ai-models/qwopus3.6-27b-v2/mmproj-F32.mmproj"
@@ -31,8 +34,8 @@ _SIDECAR = "/mnt/ai-models/qwopus3.6-27b-v2/mmproj-F32.mmproj"
 
 def _moe_profile() -> ProfileConfig:
     return ProfileConfig(
-        flags="-fa on -ctk q8_0 -ctv q8_0 -b 512 -ub 512 --parallel 1 --threads 8 --no-mmap",
-        mtp=False,
+        flags="-fa on -ctk q8_0 -ctv q8_0 -b 512 -ub 512 --parallel 1 --no-mmap",
+        mtp="off",
     )
 
 
@@ -80,9 +83,9 @@ class TestLlamaLaunchPlanMmproj:
             image="img:latest",
             port=8095,
             model_path="/mnt/ai-models/m.gguf",
-            flags_str="",
             devices=[],
             group_ids=[],
+            context_size=8192,
             mmproj=_SIDECAR,
         )
         assert "--mmproj" in plan.command
@@ -94,33 +97,33 @@ class TestLlamaLaunchPlanMmproj:
             image="img:latest",
             port=8095,
             model_path="/mnt/ai-models/m.gguf",
-            flags_str="",
             devices=[],
             group_ids=[],
+            context_size=8192,
             mmproj=None,
         )
         assert "--mmproj" not in plan.command
 
-    def test_mmproj_sidecar_wins_over_tune_duplicate(self) -> None:
-        """FLAGS-own: the mmproj sidecar rides the typed ``mmproj`` segment,
-        which sits AFTER ``model_extra_args``. So a redundant ``--mmproj``
-        smuggled into the model's freeform ``defaults.extra_args`` is deduped
-        away and the resolved sidecar wins (the sidecar is model-intrinsic)."""
-        smuggled = "/mnt/ai-models/override/mmproj.gguf"
-        plan = _llama_launch_plan(
-            image="img:latest",
-            port=8095,
-            model_path="/mnt/ai-models/m.gguf",
-            flags_str="",
-            devices=[],
-            group_ids=[],
-            model_defaults={"extra_args": f"--mmproj {smuggled}"},
-            mmproj=_SIDECAR,
-        )
-        cmd = plan.command
-        assert cmd.count("--mmproj") == 1
-        idx = cmd.index("--mmproj")
-        assert cmd[idx + 1] == _SIDECAR  # resolved sidecar wins, smuggled deduped
+    @pytest.mark.parametrize(
+        "flags", ["--mmproj /mnt/ai-models/override/mmproj.gguf", "--no-mmproj"]
+    )
+    def test_profile_mmproj_flag_refuses_to_launch(self, flags: str) -> None:
+        """The sidecar is the model's fact (model layer). A profile that
+        smuggles ``--mmproj`` / ``--no-mmproj`` would land after it and win
+        (the production ``--no-mmproj`` + ``--mmproj`` clash), so the launch
+        refuses the profile instead; ``vision = "off"`` is the switch."""
+        with pytest.raises(BadRequest) as excinfo:
+            _llama_launch_plan(
+                image="img:latest",
+                port=8095,
+                model_path="/mnt/ai-models/m.gguf",
+                devices=[],
+                group_ids=[],
+                context_size=8192,
+                profile_flags=flags,
+                mmproj=_SIDECAR,
+            )
+        assert excinfo.value.code == "profiles.model_fact_flag_denied"
 
 
 # ── container_spec integration tests ─────────────────────────────────────────

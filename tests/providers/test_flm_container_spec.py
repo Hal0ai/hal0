@@ -1,8 +1,13 @@
 """FLM container_spec: [npu] toggles + model-cache default (Phase A)."""
 
 from typing import Any
+from unittest.mock import patch
+
+import pytest
 
 from hal0.config import paths as cfg_paths
+from hal0.config.schema import ProfileConfig
+from hal0.errors import UnprocessableEntity
 from hal0.providers.flm import FLMProvider
 
 
@@ -13,7 +18,7 @@ def _slot_cfg(**overrides: Any) -> dict[str, Any]:
         "device": "npu",
         "runtime": "container",
         "profile": "flm",
-        "model": {"default": "gemma3:4b", "context_size": 16384},
+        "model": {"default": "gemma3:4b"},
     }
     base.update(overrides)
     return base
@@ -33,20 +38,6 @@ def test_npu_table_off_means_chat_only() -> None:
         _slot_cfg(npu={"asr": False, "embed": False}), _model_info()
     )
     assert "--asr" not in spec.command and "--embed" not in spec.command
-
-
-def test_legacy_defaults_load_asr_still_honoured() -> None:
-    # Back-compat: legacy defaults-table shape still honoured.
-    spec = FLMProvider().container_spec(_slot_cfg(defaults={"load_asr": "1"}), _model_info())
-    assert "--asr" in spec.command
-
-
-def test_npu_table_overrides_legacy_defaults() -> None:
-    spec = FLMProvider().container_spec(
-        _slot_cfg(npu={"asr": False, "embed": False}, defaults={"load_asr": "1"}),
-        _model_info(),
-    )
-    assert "--asr" not in spec.command
 
 
 def test_chat_off_drops_positional_tag() -> None:
@@ -151,21 +142,44 @@ def test_spec_build_creates_missing_store_dir(monkeypatch, tmp_path) -> None:
     assert custom.is_dir()
 
 
-def test_model_table_context_size_drives_ctx_len() -> None:
-    """[model].context_size (SlotConfig shape) must reach --ctx-len.
-
-    Regression: build_env read only the legacy ctx_size/defaults shapes
-    and silently fell back to 8192 for container slots (live repro on CT105,
-    Phase A deploy).
-    """
-    spec = FLMProvider().container_spec(_slot_cfg(), _model_info())
-    idx = spec.command.index("--ctx-len")
-    assert spec.command[idx + 1] == "16384"
-
-
-def test_legacy_ctx_size_still_wins_when_model_table_absent() -> None:
-    cfg = _slot_cfg(ctx_size=4096)
-    cfg["model"] = {"default": "gemma3:4b"}  # no context_size
+def _ctx_len(cfg: dict[str, Any]) -> str:
     spec = FLMProvider().container_spec(cfg, _model_info())
-    idx = spec.command.index("--ctx-len")
-    assert spec.command[idx + 1] == "4096"
+    return spec.command[spec.command.index("--ctx-len") + 1]
+
+
+def test_profile_ctx_size_drives_ctx_len() -> None:
+    """ADR-0029: FLM's window is the slot profile's ``ctx_size`` (the ``flm``
+    seed ships 16384) and reaches --ctx-len."""
+    assert _ctx_len(_slot_cfg()) == "16384"
+    with patch(
+        "hal0.providers.container._resolve_profile",
+        return_value=ProfileConfig(ctx_size=4096),
+    ):
+        assert _ctx_len(_slot_cfg()) == "4096"
+
+
+def test_profile_without_a_window_falls_back_to_8192() -> None:
+    with patch("hal0.providers.container._resolve_profile", return_value=ProfileConfig()):
+        assert _ctx_len(_slot_cfg()) == "8192"
+
+
+@pytest.mark.parametrize(
+    ("overrides", "key"),
+    [
+        ({"model": {"default": "gemma3:4b", "context_size": 4096}}, "[model].context_size"),
+        ({"model": {"default": "gemma3:4b", "ctx_size": 4096}}, "[model].ctx_size"),
+        ({"ctx_size": 4096}, "ctx_size"),
+        ({"server": {"extra_args": "--foo"}}, "[server].extra_args"),
+        ({"parallel": 2}, "parallel"),
+    ],
+)
+def test_unconverted_slot_dict_is_refused(overrides: dict[str, Any], key: str) -> None:
+    """ADR-0029: FLM refuses an unconverted raw slot dict (``slot.unconverted``)
+    like the llama launch path, instead of silently ignoring the tuning key —
+    through both ``build_env`` and ``container_spec``."""
+    cfg = _slot_cfg(**overrides)
+    for build in (FLMProvider().build_env, FLMProvider().container_spec):
+        with pytest.raises(UnprocessableEntity) as exc:
+            build(cfg, _model_info())
+        assert exc.value.code == "slot.unconverted"
+        assert key in exc.value.details["keys"]

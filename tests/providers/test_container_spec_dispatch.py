@@ -241,7 +241,7 @@ def test_gpu_slot_unaffected_still_takes_llama_path(tmp_path: Any) -> None:
     provider = ContainerProvider()
     profile = ProfileConfig(
         flags="-fa on",
-        mtp=False,
+        mtp="off",
     )
     unit_file = tmp_path / "hal0-slot@chat.service"
 
