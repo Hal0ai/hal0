@@ -248,15 +248,18 @@ New in v1.0 (Stream F, `fix/write-boundary-enforcement`). Before this change,
 in-process **without** ever routing through the HTTP-layer's model-owned-key
 guard or the `[server].extra_args` hardware-flag screen — a real bypass of the
 model/slot key-ownership split described in the [Config schema](/docs/reference/config-schema)
-reference.
+reference. Since ADR-0029 the split is model = file facts, profile = every tune, slot =
+placement.
 </Aside>
 
 `guard_slot_write_payload` (`hal0.slots.config_write`) is now the single shared
 in-process gate every writer of slot TOML must pass through — API routes, stacks-apply,
-and `SlotManager` alike. It partitions model-owned vs. slot-owned keys and screens
-`extra_args` for hardware flags, so a stack-apply or in-process create can no longer
-silently write a key the model is supposed to own. `PATCH /slots/{name}/defaults`
-correctly reports model-owned keys as such after this change.
+and `SlotManager` alike. It rejects every tuning key (context window, `[server].extra_args`,
+`parallel`, `chat_template`, `mtp`, `enable_thinking`, `vision`) with
+`slot.tuning_key_denied` ("belongs on a profile"), so a stack-apply or in-process create
+can no longer silently write a tune the slot's profile is supposed to own.
+`PATCH /slots/{name}/defaults` now only rebinds `default` (the model id) and rejects
+tuning keys the same way.
 
 For the CLI surface that drives slot lifecycle transitions directly, see the
 [CLI reference](/docs/reference/cli), `hal0 slot`.

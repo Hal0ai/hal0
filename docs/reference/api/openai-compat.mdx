@@ -82,7 +82,7 @@ behaviors:
   dispatch, and a "lane pin" records which specific slot the caller meant when
   multiple slots share one model id.
 - **`enable_thinking` / `chat_template_kwargs`** — a thinking-policy override; if
-  omitted, defaulted server-side from the model registry's `ModelDefaults.enable_thinking`.
+  omitted, defaulted server-side from `enable_thinking` on the profile of the slot that serves the request.
 - Multiple `role: system` messages are collapsed into one and hoisted to position 0
   before dispatch.
 

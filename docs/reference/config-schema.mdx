@@ -318,25 +318,22 @@ field: `false` exempts this one slot from the output-sanity gate — see
 [Slot lifecycle](/docs/reference/slot-lifecycle/).
 
 <Aside type="note">
-A legacy `backend` key on a slot is silently promoted to `device` and dropped on load
-— it is never a schema field itself. On the v1.0 branch (Stream C,
-`fix/profile-tuning-only`, not yet merged to `main` at time of writing), profile-level
-`device_class`/`backend` become **inert match-only hints** — the slot's `device` is the
-single authoritative hardware fact. See
+The slot's `device` is the single authoritative hardware fact; a profile carries no
+hardware placement. See
 [Providers, profiles & devices](/docs/reference/providers-profiles-devices/).
 </Aside>
 
 ### `[model]` (nested under a slot)
 
-`extra="allow"`.
+`extra="forbid"`.
 
 | Key | Type | Default | Constraints |
 |---|---|---|---|
 | `default` | str | `""` | model id from the registry |
-| `context_size` | int \| null | `null` | `>= 128`. On the v1.0 branch this is a **ceiling only** — the model's own context window is authoritative; `effective = min(model_window, slot_value)`, this value never raises it. |
-| `n_gpu_layers` | int | `-1` | **inert** (sunset) |
-| `rope_freq_base` | float | `0.0` | `>= 0.0`; **deprecated**, ignored |
-| `extra` | dict | `{}` | — |
+
+The slot names its model and nothing else about it. The context window, flags and every
+other tune live on the slot's profile (ADR-0029); a write carrying one is rejected with
+`slot.tuning_key_denied`.
 
 ### `[server]` (nested under a slot)
 
@@ -344,7 +341,6 @@ single authoritative hardware fact. See
 
 | Key | Type | Default | Constraints |
 |---|---|---|---|
-| `extra_args` | str \| null | `null` | **inert** (sunset) |
 | `env` | dict[str,str] \| null | `null` | keys must match `^[A-Za-z_][A-Za-z0-9_]*$`; values must not contain `\n`/`\r` |
 
 ### `[npu]` (nested under a slot)
@@ -439,23 +435,21 @@ copy — they can't be edited or deleted, only cloned.
 | Key | Type | Default | Constraints |
 |---|---|---|---|
 | `flags` | str | `""` | bench-tuned llama-server CLI flags |
-| `mtp` | bool | `false` | **informational only** — MTP is model-owned, not profile-owned |
-| `device_class` | `"gpu"\|"cpu"\|"npu"\|"img"` \| null | `null` | `null` = device-agnostic |
-| `backend` | `"rocm"\|"vulkan"\|"cuda"` \| null | `null` | |
+| `ctx_size` | int \| null | `null` | `128`–`16777216`. `null` = the model's native window, dense-capped at 32768, else 8192. |
+| `enable_thinking` | bool \| null | `null` | request-time reasoning default for slots running this profile |
+| `vision` | `"auto"\|"off"` | `"auto"` | `auto` loads the model's mmproj when it has one |
+| `mtp` | `"auto"\|"off"` | `"auto"` | `auto` drafts when the model has MTP heads and the runner supports it |
 | `runner` | str \| null | `null` | optional `RUNNER_IMAGES` registry key; applying the profile sets the slot's `binary` to this key and, for a single-backend runner, also derives the slot's `device` (profile wins). Validated on write — an unknown key 422s `profiles.unknown_runner`. `null` = flags-only tune (every seed profile). |
 | `cloned_from` | str \| null | `null` | provenance |
 | `intent` | str | `""` | dashboard card headline |
-| `quant` | str | `""` | display chip only — runtime reads quant from the model, not the profile |
 
 <Aside type="note">
-`device_class`/`backend` are **inert match-only fit hints**, retained on-disk only
-because published `.hal0profile.json` export artifacts carry them and their checksums
-cover the field. The slot's own `device` enum is the single authoritative hardware
+The slot's own `device` enum is the single authoritative hardware
 fact — except that a `runner`-carrying profile CAN flip a GPU slot's `device` at write
 time (the profile wins within a device class): see
 [Providers, profiles & devices](/docs/reference/providers-profiles-devices/).
-An older `.hal0profile.json` envelope exported before the `runner` field existed
-imports with `runner: null` (flags-only), same as every seed profile.
+The `.hal0profile.json` export envelope is schema 2; a schema-1 envelope is refused
+(`profiles.envelope_schema_unsupported`) — re-export it.
 </Aside>
 
 Profiles no longer carry an `image` field — image resolution is slot-owned
@@ -494,10 +488,6 @@ slug. `STACK_SCHEMA_VERSION_CURRENT = 1`.
 | `model` | str \| null | `null` | — | — |
 | `device` | str \| null | `null` | — | must be a valid device id if set |
 | `provider` | str \| null | `null` | — | — |
-| `vision` | bool | `false` | — | — |
-| `mtp` | bool \| null | `null` | — | — |
-| `enable_thinking` | bool \| null | `null` | — | — |
-| `server_extra_args` | str \| null | `null` | — | — |
 | `capabilities` | list[table] | `[]` | — | see `StackCapabilityRow` below |
 
 ### `StackCapabilityRow`

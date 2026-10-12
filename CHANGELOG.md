@@ -131,8 +131,66 @@ applying. Add those subsections to a version's section to surface them; see
   with vision, 96K default context). A fresh install seeds it as the primary
   chat model on a box with a 32 GB or larger memory pool (smaller boxes keep
   `qwen3.5-9b` / `qwen3-4b`), and the install-time agent offer is that model.
+- **Profile-centric config (ADR-0029).** A model row holds facts about its
+  file only (path, architecture, native context, chat template, projector,
+  whether it has MTP heads). A profile holds every tune: free flags,
+  `ctx_size`, `enable_thinking`, `vision` (`auto`/`off`) and `mtp`
+  (`auto`/`off`). A slot holds placement only: device, layers, threads, port,
+  runner, and which model and profile it runs. The launch is composed in that
+  order (base, model, profile, slot), so the effective command is predictable
+  and shown layer by layer. Existing installs are converted automatically
+  (see Migrations). What changed for operators and integrations:
+  - The model API and the MCP `model_*` tools no longer accept
+    or return the model tunes `defaults.profile`, `extra_args`,
+    `context_size`, `n_gpu_layers`, `rope_freq_base`, `enable_thinking`,
+    `vision` or a preferred profile. Setting one is refused; put it on a
+    profile instead.
+  - Slot config refuses tuning keys with `slot.tuning_key_denied`: the
+    context window (`[model].context_size` / `ctx_size`), `parallel`,
+    `chat_template`, `workers`, `mtp`, `enable_thinking`, `vision`,
+    `[model].n_gpu_layers`, `rope_freq_base` and `[server].extra_args`.
+    `PATCH /api/slots/{name}/defaults` takes none of them. A slot file that
+    still carries one fails to load with `slot.unconverted` (the conversion
+    removes them first).
+  - The slot views drop `ctx_max`, `chat_template`, `rope_freq_base`,
+    `workers`, `parallel` and `llamacpp_args`, and add `ctx_effective` and
+    `ctx_source` (`profile`, `native` or `fallback`).
+  - `hal0 slot create` and `hal0 slot edit` lose `--ctx-size`; set the
+    window with `hal0 profile create|edit --ctx-size` and point the slot at
+    that profile.
+  - The MCP tool `slot_set_defaults` is removed.
+  - `hal0 slot migrate-flags`, `migrate-caps` and `migrate-hw` are removed
+    with the fold modules behind them, and so is the ownership convergence
+    panel in `hal0 update` and the installer.
+  - A slot with no profile runs its type's seed (`embedding` and
+    `reranking` carry their mode flag); a profile naming nothing fails with
+    `slot.profile_missing` instead of silently falling back.
+  - The seeds now include `agent` (64K context), `utility` (64K) and
+    `coding`, and the shipped slots use them.
 
 ### Migrations
+
+- **Profile-centric conversion** (`hal0.config.migrations.profile_centric_apply`,
+  ADR-0029). It runs automatically on `hal0 update` after the runner-system
+  conversion, and when `hal0 serve` starts `hal0-api`, before config is
+  validated. SQL migration 012 first moves the model tunes into a holding
+  table. The conversion then gives every slot the profile that keeps what it
+  launches today, generating one where needed, and reports every value that
+  never reached the launch (dropped, never applied). It backs up every file
+  it changes, plus the model tunes, to
+  `/var/lib/hal0/backups/profiles-<ts>.tar.gz` before writing, and checks
+  each converted slot's launch against the plan. A slot that does not match
+  is put back and reported as blocked, while the rest converts. A failure
+  writing a shared file restores everything. Four launch changes are
+  reported, never silent:
+  - a slot without a usable profile gets its type's seed;
+  - `--jinja` is no longer added in embedding or reranking mode;
+  - the MTP draft device follows the slot's device;
+  - forced MTP stops on a runner without MTP support.
+
+  Preview it with `hal0 profile migrate`. `--restore <archive>` (with
+  `hal0-api` stopped) puts the files and the model columns back for a
+  downgrade. A rerun converts nothing that is already in the new shape.
 
 - **Runner-system conversion** (`hal0.config.migrations.runner_system`). Runs
   automatically on `hal0 update`, on an `install.sh` re-run and when
@@ -357,9 +415,13 @@ applying. Add those subsections to a version's section to surface them; see
   registry and prints the profiles it would generate, the slots it would
   re-point and every configured value that does not reach the launch today,
   such as a slot's `[server].extra_args`. Those inert values are dropped and
-  reported, never applied: the conversion keeps what each slot launches. It
-  writes nothing; the conversion itself ships with the launch-path change in a
-  later release step.
+  reported, never applied: the conversion keeps what each slot launches.
+  `--apply` converts (it also runs by itself, see Migrations) and
+  `--restore <archive>` puts a conversion backup back for a downgrade.
+- `hal0 profile create` and `hal0 profile edit` manage custom profiles from
+  the CLI. They set `--flags`, `--ctx-size`, `--thinking`, `--vision`,
+  `--mtp`, `--runner` and `--intent`, and `--from` duplicates a seed or a
+  custom profile first. Seeds stay read-only.
 
 ### Changed
 

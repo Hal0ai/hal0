@@ -25,7 +25,7 @@ atomic TOML file per model under `/var/lib/hal0/registry/`.
 | `hf_repo` / `hf_filename` | — |
 | `backends` | Which slot backends can run this model: GGUF → `vulkan, rocm, cuda, cpu`; moonshine → `moonshine`; kokoro → `kokoro`. |
 | `mmproj` | Optional vision-projector sidecar path. |
-| `defaults` | Tri-state launcher knobs the **model** now owns: `context_size`, `extra_args`, `chat_template`, `profile`, `mtp`, `jinja`, `enable_thinking`, `vision`. |
+| `defaults` | File facts only: `chat_template` (which template this file needs), `tokenizer_repo`, `mtp` (the file has MTP heads; `null` falls back to the `mtp` tag) and `jinja` (`false` = this file's template does not work with `--jinja`). A tuning key (`context_size`, `extra_args`, `profile`, `enable_thinking`, `vision`, …) is a 422 — tunes live on the profile of the slot that runs the model. |
 | `default` | Per-dispatch-type default marker. |
 | `architecture` | e.g. `llama`, `qwen2`, `gemma3`, `gpt-oss`, `qwen3next`, `mamba` — drives MoE/context sizing. |
 | `capability_flags.tool_calling` | Typed tri-state flag. |
@@ -35,10 +35,11 @@ Registered models split into two buckets for the dashboard UI: **blessed** (path
 hand-registered outside that layout).
 
 <Aside type="note">
-As of the v1.0 slot/hardware-ownership rework, the **model**, not the slot, owns
-tuning knobs like `context_size` and MTP. A slot's `[model].context_size` is now a
-ceiling only — see the "Model nested under a slot" section of
-[Config schema](/docs/reference/config-schema/).
+Since ADR-0029 the **model** holds file facts only. Every tune — context window, flags,
+reasoning default, whether the mmproj loads, whether MTP drafts — lives on the profile of
+the slot that runs it, so one file can run two ways under two profiles. See
+[Providers, profiles & devices](/docs/reference/providers-profiles-devices/) and the
+`[profile.<name>]` section of [Config schema](/docs/reference/config-schema/).
 </Aside>
 
 ## Curated catalogue
