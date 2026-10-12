@@ -105,9 +105,9 @@ deduplicated last-wins by `slots/argv.py` (`resolve_argv`):
    `--ctx-size` comes from the profile's `ctx_size` rule.
 2. **model**: family quirks, `--jinja`, `--chat-template-file`, and `--mmproj`
    (only when `vision` is `auto`).
-3. **profile**: `flags`, then the MTP draft bundle
-   (`config/schema.py:960` `build_mtp_flag_bundle`) when the profile's MTP is
-   in effect.
+3. **profile**: the MTP draft bundle (`config/schema.py:960`
+   `build_mtp_flag_bundle`) when the profile's MTP is in effect, then `flags`,
+   so a profile's own `--spec-draft-*` values win over the bundle defaults.
 4. **slot**: `-ngl`, `--threads`, `--metrics`, and the MTP
    `--spec-draft-device` derived from the slot's device. Today that device is
    derived from the profile's inert `backend` hint (`container.py`
@@ -155,11 +155,12 @@ Seeds stay virtual and read-only (code-shipped, `config/data/seed_profiles.toml`
 Operator and converter profiles live in `profiles.toml`. The seed set must
 cover every slot hal0 ships. The shipped `agent` and `coder` slot seeds name
 `dense` and `coding` (`installer/etc-hal0/slots/agent.toml:44`,
-`coder.toml:36`), which exist only as demoted legacy seeds. A fresh install
-therefore falls back to `chat` and loses the long context the bundled Hermes
-agent needs (its floor is 64,000). This ADR promotes a long-context agent seed
-and a `coding` seed, with explicit `ctx_size`, and points the shipped slots at
-them. Slots are built around the seeds hal0 ships, never the other way round.
+`coder.toml:36`), which exist only as demoted seeds that a fresh install adopts
+on first reference (`profiles/__init__.py` `ProfileCatalog._materialize_legacy`).
+That adoption path is deleted with this ADR. This ADR promotes a long-context
+agent seed and a `coding` seed, with explicit `ctx_size`, and points the
+shipped slots at them. The agent seed must meet the bundled Hermes agent's
+64,000-token floor. Slots are built around the seeds hal0 ships, never the other way round.
 
 The installer's VRAM clamp (`install/static_seeds.py:213-288`,
 `install/orchestrate.py:194-215,593-607`) stops writing the slot's
@@ -233,7 +234,7 @@ exactly once. It follows ADR-0028's contract:
   keys are already current. It also runs in `hal0 serve` before the API module
   is imported (`cli/main.py:245`), never on import. It takes the same locks
   (`hal0_config_file_lock`, `slot_write_lock`) and also honours its own restore
-  marker. `hal0 profiles migrate` previews it, `--apply` runs it, and
+  marker. `hal0 profile migrate` previews it, `--apply` runs it, and
   `--restore <archive>` reverses it.
 - **Inputs.** Raw TOML for every slot file in both layouts (id-keyed and
   name-keyed; installs carry both), `profiles.toml` and `stacks.toml`, the model
@@ -274,10 +275,15 @@ exactly once. It follows ADR-0028's contract:
     instead of `ROCm0` (decision 2, layer 4).
 
   Each such slot is listed as "changes at next restart".
-- **Inert values are not applied.** Slot `extra_args`, `parallel` and
-  `chat_template`, a ceiling that never took effect, and non-llama model
-  `extra_args` are dropped. Each value is recorded verbatim in the report and
-  the backup.
+- **Inert values are not applied (by default).** Slot `extra_args`,
+  `parallel` and `chat_template`, a ceiling that never took effect, stack-row
+  tuning and non-llama model `extra_args` are dropped. Each value is recorded
+  verbatim in the report and the backup. One switch,
+  `profile_centric.DEFAULT_INERT_POLICY` (read only by `inert_additions`),
+  selects this `preserve_launch` behaviour; its alternative, `apply_intent`,
+  folds slot `extra_args`, `parallel`, an unhonoured ceiling and stack-row
+  `vision`/`enable_thinking`/`server_extra_args` into the generated profile
+  instead. `hal0 profile migrate --inert apply_intent` previews it.
 - **Running units.** The converter does not refuse to run while units are
   live, and that is safe because for every slot not on the launch-change list
   the result is effective-argv-equivalent. After writing, it re-renders units
@@ -373,7 +379,7 @@ exactly once. It follows ADR-0028's contract:
   deleting the shims listed in legacy-inventory row 4.
 - 1.x clients that write `defaults`, `PATCH /defaults` or `seed-profile`
   break. The dashboard and the bundled agents ship in the same change.
-- `hal0 update rollback` across this release needs `hal0 profiles migrate
+- `hal0 update rollback` across this release needs `hal0 profile migrate
   --restore`, like the runner conversion.
 
 ## Open question
