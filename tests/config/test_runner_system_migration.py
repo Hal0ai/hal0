@@ -581,6 +581,29 @@ def test_backup_is_private(old_box: dict[str, Path]) -> None:
     assert stat.S_IMODE(backup.parent.stat().st_mode) == 0o700
 
 
+def test_existing_backups_dir_is_left_as_the_operator_set_it(old_box: dict[str, Path]) -> None:
+    """A packaged box has a root-owned, group-writable backups dir that the
+    hal0 service user cannot chmod (EPERM); the migration must not try."""
+    backups = paths.var_lib() / "backups"
+    backups.mkdir(parents=True)
+    backups.chmod(0o2775)
+    report = migrate_runner_system()
+    assert report.backup
+    assert stat.S_IMODE(backups.stat().st_mode) == 0o2775
+    assert stat.S_IMODE(Path(report.backup).stat().st_mode) == 0o600
+
+
+def test_backups_dir_symlink_is_refused(old_box: dict[str, Path], tmp_path: Path) -> None:
+    backups = paths.var_lib() / "backups"
+    real = tmp_path / "elsewhere"
+    real.mkdir()
+    backups.parent.mkdir(parents=True, exist_ok=True)
+    backups.symlink_to(real)
+    with pytest.raises(RunnerMigrationError):
+        migrate_runner_system()
+    assert not any(real.iterdir())
+
+
 def test_converted_config_validates(old_box: dict[str, Path]) -> None:
     """The point of running before validation: the old default_images key
     fails config load, the converted file loads."""

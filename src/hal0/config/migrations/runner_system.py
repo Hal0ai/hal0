@@ -773,12 +773,23 @@ def _replace_file(path: Path, data: bytes, *, default_mode: int = 0o640) -> None
 
 
 def _backups_dir() -> Path:
+    """The shared backups directory, ``0700`` only when this call creates it.
+
+    The directory is shared with root-run tools (root-owned, group ``hal0``,
+    setgid on a packaged install), so an existing one is left as the operator
+    set it: hal0-api cannot chmod a directory it does not own, and tightening
+    it as root would lock the service user out. Each archive is ``0600``.
+    """
     from hal0.config import paths
 
     backup_dir = paths.var_lib() / "backups"
-    backup_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
-    _refuse_symlink_dir(backup_dir)
-    os.chmod(backup_dir, 0o700)
+    backup_dir.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        backup_dir.mkdir(mode=0o700)
+    except FileExistsError:
+        _refuse_symlink_dir(backup_dir)
+    else:
+        os.chmod(backup_dir, 0o700)  # mkdir's mode is masked by the umask
     return backup_dir
 
 
