@@ -296,7 +296,10 @@ exactly once. It follows ADR-0028's contract:
 - **FLM.** `providers/flm.py` `build_env` uses the slot's context, else 8192.
   After conversion the window is always explicit: every FLM slot's profile
   carries `ctx_size` equal to what it runs today, and the launch path reads
-  only that.
+  only that. The FLM trio shadows (`flm-stt`, `flm-embed`) run no process of
+  their own; their window is their anchor's, so they keep the window they
+  had through the anchor's conversion and are not converted themselves. The
+  `flm` seed (16384) is what a fresh install runs.
 - **Unbound models.** A model that has tuning but is bound to no slot gets a
   generated profile that nothing is assigned to, so operator data is never
   silently lost. Rows whose only setting is `mtp = true` need nothing.
@@ -325,13 +328,18 @@ exactly once. It follows ADR-0028's contract:
   live, and that is safe because for every slot not on the launch-change list
   the result is effective-argv-equivalent. After writing, it re-renders units
   as `migrate_runner_system` does (`rerender_slot_units`) and compares each
-  slot's newly rendered argv with the plan. Each slot file is separate, so a
-  difference blocks only that slot. Its original file is put back, and any
-  profile generated for it alone stays in `profiles.toml` but unreferenced.
-  The difference is reported as BLOCKED, and the rest of the install
-  converts. The model tuning that slot still launches from is kept.
-  A failure writing a shared file (`profiles.toml`, `stacks.toml`) or the
-  registry rolls back every write and fails loudly.
+  slot's newly rendered argv with the plan. The check uses a strict render
+  (`providers.container.strict_slot_argv`), not the fail-open preview.
+  - A rendered argv that differs blocks only that slot. Each slot file is
+    separate, so its original goes back, a stack row re-pointed to follow it
+    is put back, and any profile generated for it alone stays in
+    `profiles.toml`, unreferenced. The difference is reported as BLOCKED,
+    and the rest of the install converts. The model tuning that slot still
+    launches from is kept.
+  - Any error while rendering (a registry or catalog error, a file that does
+    not read) is not a mismatch. It rolls back every write, as does a failure
+    writing a shared file (`profiles.toml`, `stacks.toml`) or the registry.
+    The next start or update tries again.
   The plan renders a model with no registry row (never pulled, or deleted)
   as the launch path does: `--model <model id>`
   (`_best_effort_model_info`), so a stale slot converts like any other. The
@@ -353,16 +361,31 @@ exactly once. It follows ADR-0028's contract:
   mixed shapes) is reported as blocked even when no slot uses it, and so is a
   stack whose embedded profile cannot be. `hal0 profile migrate` exits 2 while
   anything is blocked, and `--json` lists every blocker (`<slot file>`,
-  `profile:<name>`, `stack:<name>`). The demoted-seed markers in
-  `profiles.toml` stay until nothing is blocked, so a deleted demoted profile
-  is never re-adopted. A failed write rolls back every write.
+  `profile:<name>`, `stack:<name>`). `hal0 update` prints each blocker with
+  its reason and the fix, and exits 2 (applied, not converged).
+
+  A blocker never takes the rest of the box down:
+  - The demoted-seed markers (`legacy_seeds_migrated` / `legacy_seeds_adopted`)
+    move out of `profiles.toml` into `/var/lib/hal0/profile-centric-ledger.json`
+    on the first run, whatever is blocked, so `profiles.toml` is always in the
+    strict new shape. Only the frozen resolver reads the ledger, so a deleted
+    demoted profile is never re-adopted.
+  - The profile loader quarantines a single invalid entry, such as a
+    mixed-shape profile left as it is: it is logged, kept verbatim on disk,
+    and resolves to `profiles.invalid` for the slots that name it. The rest of
+    the catalog loads.
 - **Database.** SQL migration `012_model_tuning_holding.sql` copies `profile`,
   `extra_args`, `n_gpu_layers`, `context_size`, `rope_freq_base`,
   `preferred_runner`, and the `_enable_thinking` / `_vision` keys of `extra`
-  into `legacy_model_tuning`. It then drops those columns and keys from
-  `model`. The converter reads the holding table and drops it once every slot
-  has converted. Because of this, the order of "DB opened" and "converter ran"
-  cannot lose data.
+  into `legacy_model_tuning`. It leaves the `model` columns in place.
+  - Once 012 has run, the converter reads only the holding table, and drops
+    it once nothing is blocked. Because of this, the order of "DB opened" and
+    "converter ran" cannot lose data.
+  - Nothing new reads or writes the old columns. They stay so that a rollback
+    to an older release finds the schema it expects, even while that
+    release's `hal0-api` is still running during the update.
+  - A later release drops them with its own migration, once the upgrade floor
+    is past this release (HAL0-SUNSET v1.7.0 in `db/repository.py`).
 - **Backup.** Before the first write, the converter writes
   `/var/lib/hal0/backups/profiles-<ts>.tar.gz` (mode 0600). It holds every file
   the converter changes, plus a JSON dump of the holding table. There is no
@@ -396,14 +419,28 @@ exactly once. It follows ADR-0028's contract:
   - **Known limit.** A hand-written old slot file with no old-shape key that
     names a seed, over a model with no tuning, reads as converted and runs the
     new seed. Every slot file an older hal0 wrote carries one: its writer
-    stamped `workers`, and the shipped files carry `runtime`.
+    stamped `workers`, and the shipped llama slots carried a
+    `[model].context_size`.
+    `runtime` is still a valid slot key, so it marks nothing; an `[image]`
+    settings table is not the old image pin and stays.
   - `/var/lib/hal0/profile-centric.json` is only an audit record of the last
     run (written 0640). It is never consulted.
-- **Restore** (for a downgrade below the release that ships this, with
-  `hal0-api` stopped). It writes back the files the converter owns. It re-adds
-  the dropped columns, refills them from the archive, and removes migration
-  012's row. It then leaves a version-keyed marker so the boot-time conversion
-  stands down, as `runner_system.restore_backup` does.
+- **Restore** (for a downgrade below the release that ships this).
+  - `hal0 update --rollback` does it in one command. When the target release
+    predates the conversion (its tree has no `profile_centric_apply.py`),
+    `Updater.rollback` restores every conversion backup the audit record
+    lists, newest first, before the swap. It runs inside `hal0-api`, which
+    is the service user the conversion ran as, under the config locks.
+  - The restore writes back the files the converter owns, puts the held
+    tuning back into the `model` columns, drops the holding table, and
+    removes migration 012's row.
+  - When a backup is missing or unreadable, the rollback refuses and prints
+    the manual steps: stop `hal0-api`, run
+    `hal0 profile migrate --restore <backup>` for each backup newest first,
+    start `hal0-api` again (the restore marker keeps it from converting), then
+    roll back again.
+  - Afterwards a version-keyed marker makes the boot-time conversion stand
+    down, as `runner_system.restore_backup` does.
 
 ### 8. What is deleted
 

@@ -312,7 +312,37 @@ If no previous-version record exists, there's nothing to roll back to.
 
 As covered above, **rollback never restores `profiles.toml`** — that's a
 config-state change, not a code-tree change, and the two are deliberately
-decoupled.
+decoupled. The one exception is the profile-centric conversion below.
+
+### Rolling back past the profile-centric conversion
+
+The release that moves to profile-centric config
+([ADR-0029](/docs/adr/0029-profile-centric-config)) converts the slot,
+profile and stack files on its first start. An older release cannot read the
+converted files. So when `hal0 update --rollback` targets a release from before
+the conversion, it puts every conversion backup back first
+(`/var/lib/hal0/backups/profiles-<ts>.tar.gz`, newest first) and then swaps:
+
+- the slot files, `profiles.toml` and `stacks.toml` return to the state the
+  older release left them in;
+- the model tuning returns to the `model` columns, which the conversion left
+  in place;
+- the conversion's database bookkeeping (migration 012) is forgotten.
+
+The rollback response lists what was restored under
+`profile_conversion_restored`. Restart `hal0-api` as usual.
+
+If a backup is missing, the rollback refuses before it changes anything and
+prints the steps to do it by hand:
+
+```sh
+sudo systemctl stop hal0-api
+sudo -u hal0 hal0 profile migrate --restore /var/lib/hal0/backups/profiles-<ts>.tar.gz   # each backup, newest first
+sudo systemctl start hal0-api   # the restore marker keeps it from converting again
+hal0 update --rollback
+```
+
+Updating forward again converts the files again.
 
 ## Repin the OpenWebUI companion container
 

@@ -173,24 +173,38 @@ applying. Add those subsections to a version's section to surface them; see
 - **Profile-centric conversion** (`hal0.config.migrations.profile_centric_apply`,
   ADR-0029). It runs automatically on `hal0 update` after the runner-system
   conversion, and when `hal0 serve` starts `hal0-api`, before config is
-  validated. SQL migration 012 first moves the model tunes into a holding
-  table. The conversion then gives every slot the profile that keeps what it
-  launches today, generating one where needed, and reports every value that
-  never reached the launch (dropped, never applied). It backs up every file
-  it changes, plus the model tunes, to
-  `/var/lib/hal0/backups/profiles-<ts>.tar.gz` before writing, and checks
-  each converted slot's launch against the plan. A slot that does not match
-  is put back and reported as blocked, while the rest converts. A failure
-  writing a shared file restores everything. Four launch changes are
-  reported, never silent:
+  validated.
+  - SQL migration 012 copies the model tunes into a holding table and leaves
+    the old `model` columns in place for a rollback; a later release drops
+    them.
+  - The conversion gives every slot the profile that keeps what it launches
+    today, generating one where needed, and reports every value that never
+    reached the launch (dropped, never applied).
+  - It backs up every file it changes, plus the model tunes, to
+    `/var/lib/hal0/backups/profiles-<ts>.tar.gz` before writing.
+  - It checks each converted slot's launch against the plan with a strict
+    render. A slot that does not match is put back and reported as blocked,
+    and the rest converts. Any error while checking, or while writing a
+    shared file, restores everything and is retried at the next start.
+  - The demoted-seed markers move from `profiles.toml` to
+    `/var/lib/hal0/profile-centric-ledger.json`. A profile entry that is
+    still invalid is set aside (`profiles.invalid` for the slots that name
+    it) instead of failing the whole catalog.
+  - `hal0 update` lists every blocker with its fix and exits 2.
+
+  Four launch changes are reported, never silent:
   - a slot without a usable profile gets its type's seed;
   - `--jinja` is no longer added in embedding or reranking mode;
   - the MTP draft device follows the slot's device;
   - forced MTP stops on a runner without MTP support.
 
-  Preview it with `hal0 profile migrate`. `--restore <archive>` (with
-  `hal0-api` stopped) puts the files and the model columns back for a
-  downgrade. A rerun converts nothing that is already in the new shape.
+  Preview it with `hal0 profile migrate`. A rerun converts nothing that is
+  already in the new shape. **Downgrading:** `hal0 update --rollback` to a
+  release before this one puts every conversion backup back before the swap
+  (the files, the model columns and migration 012's bookkeeping), in one
+  command; see "Rolling back past the profile-centric conversion" in
+  `docs/guides/update-and-rollback.mdx`. `hal0 profile migrate --restore
+  <archive>` (with `hal0-api` stopped) does it by hand.
 
 - **Runner-system conversion** (`hal0.config.migrations.runner_system`). Runs
   automatically on `hal0 update`, on an `install.sh` re-run and when
