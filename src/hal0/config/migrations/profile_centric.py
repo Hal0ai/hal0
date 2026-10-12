@@ -924,20 +924,21 @@ class _Planner:
             self.plan.slots.append(sp)
 
     def _profile_is_current(self, named: str) -> bool:
-        """Does ``named`` mean the same profile in the new catalog as it does
-        to a converted slot (so a slot naming it needs no conversion)?"""
-        if not named:
-            return False  # a converted slot always names its profile
-        shape = self.shapes.get(named)
-        if shape == "new":
-            return True
-        if shape == "either":
-            # Valid in both shapes, unless a new seed now owns the name (the
-            # entry is renamed and the slot re-pointed).
-            return named not in target_seeds()
+        """Can a slot naming ``named`` be in the new shape?
+
+        Only a stored old-shape profile, or a shape-neutral one a new seed now
+        shadows (renamed, so its slots re-point), says the slot is old. No
+        profile (the slot type's default), a seed name, a new-shape profile and
+        a name nothing defines (``slot.profile_missing`` at launch, for the
+        operator) are all valid new-shape references: a slot with no other
+        old-shape content is left alone rather than re-pointed on every boot.
+        """
+        shape = self.shapes.get(named) if named else None
         if shape == "old":
             return False
-        return named in target_seeds()
+        if shape == "either":
+            return named not in target_seeds()
+        return True
 
     def _already_converted(
         self, raw: Mapping[str, Any], slot: Mapping[str, Any], sp: SlotPlan

@@ -381,8 +381,11 @@ exactly once. It follows ADR-0028's contract:
     shapes.
   - A profile mixing old and new keys blocks, and is left as it is.
   - A **slot** is already converted when its file carries no old-shape key,
-    its profile means the same in the new catalog (a new-shape or neutral
-    custom, or a seed name), and its model row carries no tuning. Anything
+    its model row carries no tuning, and it names no stored old-shape profile
+    (nor a neutral one a new seed now shadows). No profile at all, a seed
+    name, a new-shape profile, or a name nothing defines all count as new
+    shape. The last one fails at launch with `slot.profile_missing` for the
+    operator to fix, rather than being re-pointed on every boot. Anything
     else is evaluated, whatever an earlier run did. That includes an
     old-shape slot file added after a conversion.
   - Old-shape slot keys next to an already-converted profile cannot be

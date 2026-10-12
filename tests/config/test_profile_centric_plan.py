@@ -472,6 +472,26 @@ def test_stack_errors_count_as_blocked() -> None:
     assert plan.to_dict()["blocked"] == ["stack:st"]
 
 
+@pytest.mark.parametrize("profile", [None, "chat", "deleted-profile"])
+def test_clean_slot_is_left_alone(profile: str | None) -> None:
+    """No profile (the type default), a seed, or a name nothing defines: a
+    slot with no old-shape content is never re-pointed on boot."""
+    slot: dict[str, Any] = {
+        "id": 1,
+        "name": "plain",
+        "type": "llm",
+        "device": "gpu-rocm",
+        "port": 8082,
+        "model": {"default": "big-chat"},
+    }
+    if profile:
+        slot["profile"] = profile
+    _slot("1", slot)
+    _db([_model("big-chat", metadata={"context_length": 262144})])
+    plan = pc.plan_conversion()
+    assert not plan.changed, plan.lines()
+
+
 def test_old_slot_keys_next_to_a_converted_profile_block() -> None:
     _converted_install()
     _slot(
