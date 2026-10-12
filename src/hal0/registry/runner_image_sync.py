@@ -654,6 +654,11 @@ async def _probe_all(
     _done, pending = await asyncio.wait(tasks.values(), timeout=SYNC_PROBE_DEADLINE_S)
     for task in pending:
         task.cancel()
+    # Settle every task before looking at any outcome: a cancelled task has to
+    # be awaited, and every finished one has to have its exception retrieved,
+    # or an unexpected error re-raised below leaves them to be garbage
+    # collected with "Task was destroyed but it is pending" noise.
+    await asyncio.gather(*tasks.values(), return_exceptions=True)
     out: dict[str, RunnerImage | BaseException | None] = {}
     for key, task in tasks.items():
         if task in pending:
@@ -664,7 +669,6 @@ async def _probe_all(
             raise exc
         out[key] = exc if exc is not None else task.result()
     if pending:
-        await asyncio.gather(*pending, return_exceptions=True)
         log.warning("runner_images.probe_deadline runners=%d", len(pending))
     return out
 
