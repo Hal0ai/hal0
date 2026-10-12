@@ -14,58 +14,62 @@ import pytest
 
 from hal0.config.loader import ConfigParseError, load_profiles_config
 from hal0.config.schema import (
-    MTP_FLAG_BUNDLE,
+    MTP_DRAFT_BUNDLE,
     SEED_PROFILES,
     ProfileConfig,
     ProfilesConfig,
-    resolve_profile_flags,
+    mtp_draft_device,
 )
 
-# ── ProfileConfig validation ──────────────────────────────────────────────────
+# ── ProfileConfig validation (ADR-0029: the profile is the whole tune) ────────
 
 
 class TestProfileConfigValidation:
     def test_valid_profile(self) -> None:
-        p = ProfileConfig(flags="-fa on", mtp=False)
+        p = ProfileConfig(flags="-fa on", mtp="off", ctx_size=16384, vision="off")
         assert p.flags == "-fa on"
-        assert p.mtp is False
+        assert p.mtp == "off"
+        assert p.ctx_size == 16384
+        assert p.vision == "off"
 
-    def test_mtp_default_false(self) -> None:
-        p = ProfileConfig()
-        assert p.mtp is False
-
-    def test_flags_default_empty(self) -> None:
+    def test_defaults(self) -> None:
         p = ProfileConfig()
         assert p.flags == ""
+        assert p.mtp == "auto"
+        assert p.vision == "auto"
+        assert p.ctx_size is None
+        assert p.enable_thinking is None
+        assert p.runner is None
+        assert p.cloned_from is None
+        assert p.intent == ""
 
-    def test_backend_default_none(self) -> None:
-        p = ProfileConfig()
-        assert p.backend is None
+    @pytest.mark.parametrize("field", ["mtp", "vision"])
+    def test_tri_state_switches_reject_bools_and_unknowns(self, field: str) -> None:
+        """``mtp``/``vision`` are ``auto``/``off``; the pre-ADR-0029 bool is refused."""
+        from pydantic import ValidationError
 
-    def test_backend_accepts_rocm_and_vulkan(self) -> None:
-        assert ProfileConfig(backend="rocm").backend == "rocm"
-        assert ProfileConfig(backend="vulkan").backend == "vulkan"
-        # cuda joined the valid set with the gpu-cuda device (GPU generalization).
-        assert ProfileConfig(backend="cuda").backend == "cuda"
+        for bad in (True, False, "on"):
+            with pytest.raises(ValidationError):
+                ProfileConfig.model_validate({field: bad})
 
-    def test_backend_rejects_unknown(self) -> None:
+    @pytest.mark.parametrize("ctx", [127, 2**24 + 1])
+    def test_ctx_size_out_of_range_rejected(self, ctx: int) -> None:
         from pydantic import ValidationError
 
         with pytest.raises(ValidationError):
-            ProfileConfig(backend="metal")
+            ProfileConfig(ctx_size=ctx)
 
-    def test_image_is_not_a_profile_field(self) -> None:
+    @pytest.mark.parametrize("ctx", [128, 65536, 2**24])
+    def test_ctx_size_bounds_accepted(self, ctx: int) -> None:
+        assert ProfileConfig(ctx_size=ctx).ctx_size == ctx
+
+    @pytest.mark.parametrize("key", ["device_class", "backend", "quant", "image", "unknown_key"])
+    def test_removed_and_unknown_fields_forbidden(self, key: str) -> None:
+        """extra='forbid': the deleted hardware hints and typos fail loudly."""
         from pydantic import ValidationError
 
-        with pytest.raises(ValidationError, match="image"):
-            ProfileConfig(image="ghcr.io/hal0ai/foo:bar")
-
-    def test_extra_fields_forbidden(self) -> None:
-        """extra='forbid' catches typos in profile toml keys."""
-        from pydantic import ValidationError
-
-        with pytest.raises(ValidationError):
-            ProfileConfig.model_validate({"unknown_key": "bad"})
+        with pytest.raises(ValidationError, match=key):
+            ProfileConfig.model_validate({key: "x"})
 
 
 # ── ProfilesConfig ────────────────────────────────────────────────────────────
@@ -78,98 +82,52 @@ class TestProfilesConfig:
 
     def test_parse_from_dict(self) -> None:
         cfg = ProfilesConfig.model_validate(
-            {
-                "profile": {
-                    "test": {
-                        "flags": "-fa on",
-                        "mtp": False,
-                    }
-                }
-            }
+            {"profile": {"test": {"flags": "-fa on", "mtp": "off", "ctx_size": 8192}}}
         )
-        assert "test" in cfg.profile
         assert cfg.profile["test"].flags == "-fa on"
+        assert cfg.profile["test"].ctx_size == 8192
+
+    @pytest.mark.parametrize("marker", ["legacy_seeds_migrated", "legacy_seeds_adopted"])
+    def test_demoted_seed_markers_are_gone(self, marker: str) -> None:
+        """ADR-0029 §3 deleted the demoted-seed markers with the adoption path."""
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError):
+            ProfilesConfig.model_validate({marker: True})
 
 
-# ── resolve_profile_flags ─────────────────────────────────────────────────────
+# ── MTP draft bundle + draft device ───────────────────────────────────────────
 
 
-class TestResolveProfileFlags:
-    def test_mtp_false_returns_base_flags(self) -> None:
-        p = ProfileConfig(flags="-fa on -b 512", mtp=False)
-        result = resolve_profile_flags(p)
-        assert result == "-fa on -b 512"
-        assert "--spec-type" not in result
+class TestMtpDraftBundle:
+    def test_bundle_carries_the_draft_tuning(self) -> None:
+        tokens = shlex.split(MTP_DRAFT_BUNDLE)
+        for flag, value in (
+            ("--spec-type", "draft-mtp"),
+            ("--spec-draft-ngl", "all"),
+            ("--spec-draft-n-max", "4"),
+            ("--spec-draft-type-k", "q8_0"),
+            ("--spec-draft-type-v", "q8_0"),
+            ("--spec-draft-threads", "16"),
+            ("--spec-draft-poll", "1"),
+        ):
+            assert tokens[tokens.index(flag) + 1] == value
 
-    def test_mtp_true_appends_bundle(self) -> None:
-        """§7.1a / ML-5: profile.mtp is informational only — resolve_profile_flags
-        needs an explicit mtp_override=True now (the real decision lives in
-        providers.container._effective_mtp, driven by the model + runner)."""
-        p = ProfileConfig(flags="-fa on -b 512", mtp=True)
-        result = resolve_profile_flags(p, mtp_override=True)
-        # base flags are preserved verbatim and the MTP bundle is present. The
-        # bundle now leads (it supplies defaults the profile's explicit flags
-        # override); a profile with no --spec flags keeps the bundle intact.
-        assert "-fa on -b 512" in result
-        assert "--spec-type draft-mtp" in result
+    def test_bundle_names_no_draft_device(self) -> None:
+        """The draft device is placement: the slot layer derives it from the
+        slot's device, so the profile-layer bundle never carries it."""
+        assert "--spec-draft-device" not in shlex.split(MTP_DRAFT_BUNDLE)
 
-    def test_mtp_true_profile_but_no_override_no_longer_expands(self) -> None:
-        """profile.mtp=True alone (no explicit mtp_override) no longer
-        expands the bundle — MTP moved off the profile entirely."""
-        p = ProfileConfig(flags="-fa on -b 512", mtp=True)
-        result = resolve_profile_flags(p)
-        assert result == "-fa on -b 512"
-        assert "--spec-type" not in result
+    @pytest.mark.parametrize(
+        ("backend", "device"),
+        [("rocm", "ROCm0"), ("vulkan", "Vulkan0"), ("cuda", "CUDA0"), ("CUDA", "CUDA0")],
+    )
+    def test_draft_device_follows_the_slot_backend(self, backend: str, device: str) -> None:
+        assert mtp_draft_device(backend) == device
 
-    def test_explicit_profile_spec_flags_win_over_bundle(self) -> None:
-        """A profile that pins its own --spec-draft-* values keeps them; the MTP
-        bundle only fills the gaps. Regression: the bundle used to be appended
-        verbatim and silently clobbered explicit profile spec flags."""
-        p = ProfileConfig(
-            flags="-fa on --spec-draft-type-k f16 --spec-draft-type-v f16 --spec-draft-p-min 0.25",
-            mtp=True,
-        )
-        result = resolve_profile_flags(p, mtp_override=True)
-        # explicit values survive, exactly once, with no clobber/duplication
-        assert "--spec-draft-type-k f16" in result
-        assert "--spec-draft-p-min 0.25" in result
-        assert "--spec-draft-type-k q8_0" not in result
-        assert "--spec-draft-p-min 0.0" not in result
-        assert result.split().count("--spec-draft-type-k") == 1
-        assert result.split().count("--spec-draft-p-min") == 1
-        # gap-filling: bundle flags the profile did not set are still supplied
-        assert "--spec-type draft-mtp" in result
-        assert "--spec-draft-n-max 4" in result
-
-    def test_mtp_true_contains_all_key_flags(self) -> None:
-        p = ProfileConfig(flags="-fa on", mtp=True)
-        result = resolve_profile_flags(p, mtp_override=True)
-        assert "--spec-draft-device ROCm0" in result
-        assert "--spec-draft-ngl all" in result
-        assert "--spec-draft-n-max 4" in result
-        assert "--spec-draft-type-k q8_0" in result
-        assert "--spec-draft-type-v q8_0" in result
-        assert "--spec-draft-threads 16" in result
-        assert "--spec-draft-poll 1" in result
-
-    def test_mtp_bundle_literal_match(self) -> None:
-        """MTP_FLAG_BUNDLE constant is verbatim in the resolved string."""
-        p = ProfileConfig(flags="-fa on", mtp=True)
-        result = resolve_profile_flags(p, mtp_override=True)
-        assert MTP_FLAG_BUNDLE in result
-
-    def test_empty_flags_mtp_false_returns_empty(self) -> None:
-        p = ProfileConfig(flags="", mtp=False)
-        assert resolve_profile_flags(p) == ""
-
-    def test_empty_flags_mtp_true_returns_bundle(self) -> None:
-        p = ProfileConfig(flags="", mtp=True)
-        result = resolve_profile_flags(p, mtp_override=True)
-        assert result == MTP_FLAG_BUNDLE
-
-    def test_flags_stripped(self) -> None:
-        p = ProfileConfig(flags="  -fa on  ", mtp=False)
-        assert resolve_profile_flags(p) == "-fa on"
+    def test_unknown_backend_drafts_on_rocm0(self) -> None:
+        assert mtp_draft_device(None) == "ROCm0"
+        assert mtp_draft_device("") == "ROCm0"
 
 
 # ── load_profiles_config ──────────────────────────────────────────────────────
@@ -181,65 +139,34 @@ class TestLoadProfilesConfig:
         cfg = load_profiles_config(path=tmp_path / "nonexistent.toml")
         assert set(cfg.profile.keys()) == set(SEED_PROFILES.keys())
 
-    def test_seed_count(self, tmp_path: Path) -> None:
-        cfg = load_profiles_config(path=tmp_path / "nonexistent.toml")
-        # rocm, rocm-dense, rocm-moe, vulkan, vulkan-dense, vulkan-moe, cuda,
-        # embed, rerank, flm, tts, tts-qwen3, cpu-llm, comfyui
-        assert len(cfg.profile) == len(SEED_PROFILES)
-
     def test_seed_profiles_have_correct_names(self, tmp_path: Path) -> None:
         cfg = load_profiles_config(path=tmp_path / "nonexistent.toml")
-        for name in ("chat", "cpu-chat", "embedding", "reranking"):
+        for name in ("chat", "agent", "utility", "coding", "cpu-chat", "embedding", "reranking"):
             assert name in cfg.profile
 
-    def test_seed_rocm_mtp_false(self, tmp_path: Path) -> None:
+    def test_every_seed_drafts_mtp_when_the_model_can(self, tmp_path: Path) -> None:
+        """No seed turns MTP off: ``auto`` drafts when the model has heads and
+        the runner supports it."""
         cfg = load_profiles_config(path=tmp_path / "nonexistent.toml")
-        assert cfg.profile["chat"].mtp is False
+        assert {name: cfg.profile[name].mtp for name in SEED_PROFILES} == dict.fromkeys(
+            SEED_PROFILES, "auto"
+        )
 
-    def test_seed_rocmfpx_grid_mtp_true(self, tmp_path: Path) -> None:
-        """Non-MTP profiles stay False; MTP-capable family profiles are True.
-
-        The three mtp=true recipes (chadrock-dense / chadrock-moe /
-        promptforge) were demoted out of the seed catalog, so the seed set is
-        now uniformly mtp=false — the set below is deliberately empty rather
-        than deleted, so re-introducing an MTP seed has to name itself here.
-        """
+    def test_seeds_name_no_runner(self, tmp_path: Path) -> None:
+        """Seeds are device-agnostic: none pins a runner (the slot's binary decides)."""
         cfg = load_profiles_config(path=tmp_path / "nonexistent.toml")
-        _MTP_TRUE_PROFILES: set[str] = set()
-        for name in SEED_PROFILES:
-            expected_mtp = name in _MTP_TRUE_PROFILES
-            assert cfg.profile[name].mtp is expected_mtp, (
-                f"profile {name}: expected mtp={expected_mtp}, got mtp={cfg.profile[name].mtp}"
-            )
-
-    def test_seed_vulkan_uses_rocmfpx_default(self, tmp_path: Path) -> None:
-        """Canonical GPU seeds do not pin a backend or runner image."""
-        cfg = load_profiles_config(path=tmp_path / "nonexistent.toml")
-        assert cfg.profile["chat"].backend is None
-
-    def test_seed_gpu_profiles_have_backend(self, tmp_path: Path) -> None:
-        cfg = load_profiles_config(path=tmp_path / "nonexistent.toml")
-        assert all(profile.backend is None for profile in cfg.profile.values())
+        assert all(profile.runner is None for profile in cfg.profile.values())
 
     def test_load_valid_file(self, tmp_path: Path) -> None:
-        toml_content = (
-            '[profile.custom]\nimage = "ghcr.io/hal0ai/test:v1"\nflags = "-fa on"\nmtp   = false\n'
+        p = tmp_path / "profiles.toml"
+        p.write_text(
+            '[profile.custom]\nflags = "-fa on"\nctx_size = 16384\nvision = "off"\n',
+            encoding="utf-8",
         )
-        p = tmp_path / "profiles.toml"
-        p.write_bytes(toml_content.encode())
         cfg = load_profiles_config(path=p)
-        assert "custom" in cfg.profile
         assert cfg.profile["custom"].flags == "-fa on"
-
-    def test_missing_image_loads_with_empty_default(self, tmp_path: Path) -> None:
-        """spec-hw-slot-ownership §3: ``image`` is optional/inert now — a profile
-        without it loads (default "") rather than raising, so a migration that
-        deleted a folded image pin doesn't break config load."""
-        toml_content = '[profile.ok]\nflags = "-fa on"\nmtp = false\n'
-        p = tmp_path / "profiles.toml"
-        p.write_bytes(toml_content.encode())
-        cfg = load_profiles_config(path=p)
-        assert cfg.profile["ok"].flags == "-fa on"
+        assert cfg.profile["custom"].ctx_size == 16384
+        assert cfg.profile["custom"].vision == "off"
 
     def test_invalid_toml_raises_config_parse_error(self, tmp_path: Path) -> None:
         p = tmp_path / "profiles.toml"
@@ -249,13 +176,25 @@ class TestLoadProfilesConfig:
 
     def test_unknown_field_raises_config_parse_error(self, tmp_path: Path) -> None:
         """extra='forbid' on ProfileConfig: typos in profile keys raise at load."""
-        toml_content = (
-            "[profile.bad]\n"
-            'image = "ghcr.io/hal0ai/test:v1"\n'
-            'not_a_field = "surprise"\n'  # unknown key
-        )
         p = tmp_path / "profiles.toml"
-        p.write_bytes(toml_content.encode())
+        p.write_text('[profile.bad]\nnot_a_field = "surprise"\n', encoding="utf-8")
+        with pytest.raises(ConfigParseError):
+            load_profiles_config(path=p)
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            '[profile.old]\nflags = "-fa on"\nmtp = false\n',
+            '[profile.old]\nflags = "-fa on"\ndevice_class = "gpu"\n',
+            '[profile.old]\nflags = "-fa on"\nbackend = "rocm"\n',
+            'legacy_seeds_migrated = true\n[profile.old]\nflags = "-fa on"\n',
+        ],
+    )
+    def test_unconverted_shape_fails_to_load(self, tmp_path: Path, body: str) -> None:
+        """A file still in the pre-ADR-0029 shape fails validation; ``hal0
+        profile migrate`` converts it."""
+        p = tmp_path / "profiles.toml"
+        p.write_text(body, encoding="utf-8")
         with pytest.raises(ConfigParseError):
             load_profiles_config(path=p)
 
@@ -263,23 +202,11 @@ class TestLoadProfilesConfig:
 
     def test_partial_file_gets_missing_seeds_merged_in(self, tmp_path: Path) -> None:
         """A profiles.toml with only one profile still exposes every seed."""
-        # Write a file with just the 'rocm' seed — everything else is missing.
-        toml_content = (
-            "[profile.chat]\n"
-            'image = "ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server"\n'
-            'flags = "-fa on -ctk q8_0 -ctv q8_0 -b 512 -ub 512 --parallel 1 --threads 8 --no-mmap"\n'
-            "mtp = false\n"
-            'device_class = "gpu"\n'
-            'backend = "rocm"\n'
-            'intent = "MoE agents"\n'
-            'quant = "FP4"\n'
-        )
         p = tmp_path / "profiles.toml"
-        p.write_bytes(toml_content.encode())
+        p.write_text('[profile.chat]\nflags = "-fa on -b 512"\n', encoding="utf-8")
 
         cfg = load_profiles_config(path=p)
 
-        # All SEED_PROFILES keys must be present (overlaid from code).
         assert set(SEED_PROFILES.keys()) <= set(cfg.profile.keys()), (
             f"missing seeds after overlay: {set(SEED_PROFILES.keys()) - set(cfg.profile.keys())}"
         )
@@ -292,99 +219,70 @@ class TestLoadProfilesConfig:
         Seed profiles are immutable via the catalog API (operators clone to
         customise), so a seed key on disk is never a legitimate operator edit.
         """
-        stale_image = "ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-OLD-STALE-server"
-        toml_content = (
-            "[profile.rocm]\n"
-            f'image = "{stale_image}"\n'
-            'flags = "-fa on --stale-flag"\n'
-            "mtp = false\n"
-            'device_class = "gpu"\n'
-            'backend = "rocm"\n'
-        )
         p = tmp_path / "profiles.toml"
-        p.write_bytes(toml_content.encode())
+        p.write_text(
+            '[profile.chat]\nflags = "-fa on --stale-flag"\nctx_size = 1024\n', encoding="utf-8"
+        )
 
         cfg = load_profiles_config(path=p)
 
-        # The code seed wins — the stale on-disk copy is discarded.
-        assert cfg.profile["chat"].backend == SEED_PROFILES["chat"].get("backend")
         assert cfg.profile["chat"].flags == SEED_PROFILES["chat"]["flags"]
+        assert cfg.profile["chat"].ctx_size == SEED_PROFILES["chat"].get("ctx_size")
 
     def test_partial_file_custom_profile_preserved(self, tmp_path: Path) -> None:
         """A non-seed (operator-created) profile survives the additive merge."""
-        toml_content = (
-            "[profile.my-special]\n"
-            'image = "ghcr.io/my-org/special:v42"\n'
-            'flags = "--special-flag"\n'
-            "mtp = false\n"
-            'device_class = "gpu"\n'
-        )
         p = tmp_path / "profiles.toml"
-        p.write_bytes(toml_content.encode())
+        p.write_text(
+            '[profile.my-special]\nflags = "--special-flag"\ncloned_from = "chat"\n',
+            encoding="utf-8",
+        )
 
         cfg = load_profiles_config(path=p)
 
-        # Operator's custom profile survives.
-        assert "my-special" in cfg.profile
         assert cfg.profile["my-special"].flags == "--special-flag"
-        # Seeds are also present.
+        assert cfg.profile["my-special"].cloned_from == "chat"
         assert set(SEED_PROFILES.keys()) <= set(cfg.profile.keys())
 
-    # ── managed-flag sanitization of persisted custom profiles (§21.7) ────────
-
-    def test_custom_profile_managed_flags_stripped_and_persisted(self, tmp_path: Path) -> None:
-        """A custom profile carrying managed flags (a pre-guard clone of a
-        -c-carrying seed, or a hand-edit) is healed at load: the denylisted
-        tokens (+ values) are stripped in-memory AND written back to disk."""
-        toml_content = (
-            "[profile.old-clone]\n"
-            'flags = "--jinja -fa on -b 2048 -c 131072 --no-context-shift"\n'
-            "mtp = false\n"
-        )
+    def test_load_is_read_only(self, tmp_path: Path) -> None:
+        """A load never rewrites the file: custom profiles come back as written
+        (the write seam and the launch screen their flags, not the loader)."""
         p = tmp_path / "profiles.toml"
-        p.write_bytes(toml_content.encode())
-
-        cfg = load_profiles_config(path=p)
-
-        assert cfg.profile["old-clone"].flags == "--jinja -fa on -b 2048 --no-context-shift"
-        # Disk self-healed: a re-load finds nothing left to strip.
-        raw = tomllib.loads(p.read_text(encoding="utf-8"))
-        assert raw["profile"]["old-clone"]["flags"] == "--jinja -fa on -b 2048 --no-context-shift"
-
-    def test_custom_profile_lookalike_flags_survive_sanitize(self, tmp_path: Path) -> None:
-        """Token-exact stripping: --model_path / --threads-batch are NOT the
-        managed --model / slot --threads — they must survive untouched."""
-        toml_content = (
-            "[profile.tts-clone]\n"
-            'flags = "--model_path /models/kokoro --threads-batch 8"\n'
-            "mtp = false\n"
-        )
-        p = tmp_path / "profiles.toml"
-        p.write_bytes(toml_content.encode())
+        body = '[profile.tts-clone]\nflags = "--model_path /models/kokoro --threads-batch 8"\n'
+        p.write_text(body, encoding="utf-8")
 
         cfg = load_profiles_config(path=p)
 
         assert cfg.profile["tts-clone"].flags == "--model_path /models/kokoro --threads-batch 8"
+        assert p.read_text(encoding="utf-8") == body
 
     def test_complete_seed_file_no_extras_added(self, tmp_path: Path) -> None:
         """A file that already contains all seeds gets no duplicates."""
         import tomli_w
 
-        # Write a file with all seeds present. Marked migrated so the load is
-        # a pure seed overlay — the legacy demotion is exercised separately in
-        # TestLegacySeedDemotion.
-        raw = {
-            "legacy_seeds_migrated": True,
-            "profile": {k: dict(v) for k, v in SEED_PROFILES.items()},
-        }
+        raw = {"profile": {k: dict(v) for k, v in SEED_PROFILES.items()}}
         p = tmp_path / "profiles.toml"
         with open(p, "wb") as f:
             tomli_w.dump(raw, f)
 
         cfg = load_profiles_config(path=p)
 
-        # Exactly the seed keys — no extras injected.
         assert set(cfg.profile.keys()) == set(SEED_PROFILES.keys())
+
+    def test_save_drops_seeds_and_round_trips_custom_fields(self, tmp_path: Path) -> None:
+        from hal0.config.loader import save_profiles_config
+
+        p = tmp_path / "profiles.toml"
+        cfg = load_profiles_config(path=p)
+        cfg.profile["mine"] = ProfileConfig(
+            flags="-fa auto", ctx_size=32768, enable_thinking=False, vision="off", mtp="off"
+        )
+        save_profiles_config(cfg, path=p)
+
+        raw = tomllib.loads(p.read_text(encoding="utf-8"))
+        assert set(raw["profile"]) == {"mine"}
+        reloaded = load_profiles_config(path=p)
+        assert reloaded.profile["mine"] == cfg.profile["mine"]
+        assert set(reloaded.profile) == set(SEED_PROFILES) | {"mine"}
 
 
 # ── seed file: virtual-seed invariant ─────────────────────────────────────────
@@ -421,27 +319,20 @@ class TestSeedFileParity:
 
 
 def test_kokoro_seed_profile() -> None:
+    """The self-managed engines' bundle has no model row, so its path stays
+    in the profile (ADR-0029 decision 2)."""
     prof = SEED_PROFILES["kokoro"]
-    assert "image" not in prof
+    assert set(prof) <= {"flags", "intent"}
     assert "--model_path" in prof["flags"]
-    assert prof["mtp"] is False
 
 
-# ── device_class + backend + DEVICE_DEFAULT_PROFILES ──────────────────────────
+# ── seeds carry no hardware hints; DEVICE_DEFAULT_PROFILES ─────────────────────
 
 
-def test_profile_device_class_defaults_none() -> None:
-    """Per spec §4.1: device_class defaults to None (device-agnostic)."""
-    assert ProfileConfig().device_class is None
-
-
-def test_seed_device_classes() -> None:
-    """Every 1.0 seed is device-agnostic; the slot owns the device."""
-    assert all("device_class" not in profile for profile in SEED_PROFILES.values())
-
-
-def test_seed_backends() -> None:
-    assert all(profile.get("backend") is None for profile in SEED_PROFILES.values())
+@pytest.mark.parametrize("key", ["device_class", "backend", "quant", "image"])
+def test_no_seed_carries_a_deleted_field(key: str) -> None:
+    """Every seed is device-agnostic; the slot owns the device."""
+    assert all(key not in profile for profile in SEED_PROFILES.values())
 
 
 def test_device_default_profiles_map() -> None:
@@ -470,22 +361,17 @@ def test_cpu_default_profile_supports_llm(tmp_path: Path) -> None:
 # ── seeds must survive the screens the API enforces on custom profiles ───────
 
 
-def test_every_seed_profile_passes_the_hardware_and_managed_flag_screens() -> None:
-    """Deliverable 3 — the seeds stay tuning-only, enforced not asserted.
+def test_every_seed_profile_passes_the_profile_flag_screen() -> None:
+    """The seeds are held to the identical standard as user input.
 
-    ``test_seed_device_classes`` / ``test_seed_backends`` pin the typed hardware
-    fields, but nothing pinned the freeform ``flags`` string. Seeds are VIRTUAL:
-    ``load_profiles_config`` overlays ``SEED_PROFILES`` over whatever is on disk,
-    so a seed never passes through ``ProfileCatalog.create`` and never meets
-    ``screen_profile_flags``. A seed could therefore acquire ``-ngl`` or
-    ``--ctx-size`` and ship, while a user typing the same flag into the profile
-    editor gets a 400 — the exact inconsistency spec-hw-slot-ownership §5 and
-    §21.7 exist to prevent.
-
-    This runs the real screen (the one the create/update/import seam calls) over
-    every seed, so the seeds are held to the identical standard as user input.
+    Seeds are VIRTUAL: ``load_profiles_config`` overlays ``SEED_PROFILES`` over
+    whatever is on disk, so a seed never passes through
+    ``ProfileCatalog.create`` and never meets ``screen_profile_flags``. A seed
+    could therefore acquire ``-ngl``, ``--ctx-size``, ``--jinja`` or
+    ``--no-mmproj`` and ship, while a user typing the same flag into the
+    profile editor gets a 400 — and the launch would refuse it. This runs the
+    real screen over every seed.
     """
-    from hal0.config.schema import SEED_PROFILES
     from hal0.profiles import screen_profile_flags
 
     for name, profile in SEED_PROFILES.items():
@@ -494,81 +380,38 @@ def test_every_seed_profile_passes_the_hardware_and_managed_flag_screens() -> No
             screen_profile_flags(flags)
         except Exception as exc:  # pragma: no cover - only on a regression
             raise AssertionError(
-                f"seed profile {name!r} carries a slot-hardware or hal0-managed "
-                f"flag and would be rejected by the API: {flags!r} → {exc}"
+                f"seed profile {name!r} carries a flag a profile may not set and "
+                f"would be rejected by the API: {flags!r} → {exc}"
             ) from exc
 
 
-def test_no_seed_profile_carries_a_context_or_layer_flag() -> None:
-    """Belt-and-braces on the two that actually corrupt a launch.
-
-    ``-c``/``--ctx-size`` on a profile would fight the model-owned context
-    window (``_resolve_context_size``); ``-ngl``/``--n-gpu-layers`` would fight
-    the slot-owned hardware grid. Spelled out literally so the intent survives a
-    future refactor of the screen internals.
-    """
-    from hal0.config.schema import SEED_PROFILES
-
-    banned = ("-c", "--ctx-size", "-ngl", "--n-gpu-layers", "--device", "-dev", "--threads")
+def test_no_seed_profile_carries_a_flag_another_layer_owns() -> None:
+    """Belt-and-braces, spelled out literally so the intent survives a future
+    refactor of the screen internals: the window is ``ctx_size``, layers and
+    threads are the slot's, ``--jinja``/``--mmproj`` are model facts and the
+    projector switch is ``vision``."""
+    banned = (
+        "-c",
+        "--ctx-size",
+        "-ngl",
+        "--n-gpu-layers",
+        "--device",
+        "-dev",
+        "--threads",
+        "--jinja",
+        "--mmproj",
+        "--no-mmproj",
+        "--chat-template-file",
+        "--spec-draft-device",
+    )
     for name, profile in SEED_PROFILES.items():
         tokens = shlex.split(profile.get("flags", ""))
         for bad in banned:
             assert bad not in tokens, f"seed {name!r} carries {bad!r}: {profile.get('flags')!r}"
 
 
-# ── legacy seeds on load ──────────────────────────────────────────────────────
+def test_demoted_seed_catalog_is_gone() -> None:
+    """ADR-0029 §3 deleted ``LEGACY_SEED_PROFILES`` and its adoption path."""
+    import hal0.config.schema as schema
 
-
-class TestLegacySeedDemotion:
-    """Loading never injects the 8 pruned seeds into an existing file.
-
-    The one-time bulk demotion (1.2.0-1.3.x) is retired behind the 1.3.0
-    upgrade floor; every supported file has already been through it. A load is
-    therefore read-only with respect to the demoted names (#2489).
-    """
-
-    def test_load_does_not_inject_or_rewrite_an_unmarked_file(self, tmp_path: Path) -> None:
-        from hal0.config.schema import LEGACY_SEED_PROFILES
-
-        p = tmp_path / "profiles.toml"
-        body = '[profile.mine]\nflags = "-fa auto"\nmtp = false\n'
-        p.write_text(body, encoding="utf-8")
-
-        cfg = load_profiles_config(path=p)
-        assert not set(LEGACY_SEED_PROFILES) & set(cfg.profile)
-        assert cfg.profile["mine"].flags == "-fa auto"
-        assert p.read_text(encoding="utf-8") == body
-
-    def test_migration_never_overwrites_an_operator_entry(self, tmp_path: Path) -> None:
-        p = tmp_path / "profiles.toml"
-        p.write_text('[profile.coding]\nflags = "-fa off"\nmtp = false\n', encoding="utf-8")
-
-        cfg = load_profiles_config(path=p)
-        assert cfg.profile["coding"].flags == "-fa off"
-
-    def test_already_migrated_file_is_left_alone(self, tmp_path: Path) -> None:
-        p = tmp_path / "profiles.toml"
-        p.write_text("legacy_seeds_migrated = true\n", encoding="utf-8")
-
-        cfg = load_profiles_config(path=p)
-        assert set(cfg.profile) == set(SEED_PROFILES)
-
-    def test_fresh_install_has_only_core_seeds(self, tmp_path: Path) -> None:
-        cfg = load_profiles_config(path=tmp_path / "absent.toml")
-        assert set(cfg.profile) == set(SEED_PROFILES)
-        # Marked migrated so the FIRST save of a fresh install does not write a
-        # file that the next load would then treat as an un-migrated upgrade.
-        assert cfg.legacy_seeds_migrated is True
-
-    def test_fresh_install_first_save_does_not_arm_the_migration(self, tmp_path: Path) -> None:
-        from hal0.config.loader import save_profiles_config
-        from hal0.config.schema import LEGACY_SEED_PROFILES
-
-        p = tmp_path / "profiles.toml"
-        cfg = load_profiles_config(path=p)
-        cfg.profile["mine"] = ProfileConfig(flags="-fa auto")
-        save_profiles_config(cfg, path=p)
-
-        reloaded = load_profiles_config(path=p)
-        assert set(reloaded.profile) == set(SEED_PROFILES) | {"mine"}
-        assert not set(LEGACY_SEED_PROFILES) & set(reloaded.profile)
+    assert not hasattr(schema, "LEGACY_SEED_PROFILES")

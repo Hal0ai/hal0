@@ -56,8 +56,22 @@ class TestStackSlotEntry:
     def test_minimal_requires_slot(self) -> None:
         e = StackSlotEntry(slot="agent")
         assert e.slot == "agent"
-        assert e.vision is False
+        assert e.profile is None
         assert e.capabilities == []
+
+    @pytest.mark.parametrize(
+        ("key", "value"),
+        [
+            ("vision", True),
+            ("mtp", True),
+            ("enable_thinking", False),
+            ("server_extra_args", "-ctk q8_0"),
+        ],
+    )
+    def test_tuning_keys_are_refused(self, key: str, value: object) -> None:
+        """ADR-0029 §6: a stack row carries no tuning — it lives on the profile."""
+        with pytest.raises(ValidationError):
+            StackSlotEntry.model_validate({"slot": "agent", key: value})
 
     def test_bad_slot_name_raises(self) -> None:
         with pytest.raises(ValidationError):

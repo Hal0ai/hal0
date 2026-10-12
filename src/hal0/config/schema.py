@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import logging
 import re
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Literal
 
@@ -113,62 +114,17 @@ CAPABILITIES_SCHEMA_VERSION_CURRENT = 2
 
 
 class ModelConfig(BaseModel):
-    """[model] section in a slot TOML.
+    """[model] section in a slot TOML: which model the slot loads.
 
-    Specifies which model the slot loads by default and any inference
-    parameters that override the global defaults.
+    ADR-0029: the slot names its model and nothing else about it. Context
+    size, layers and every other tune live on the slot's profile.
     """
 
-    model_config = {"populate_by_name": True, "extra": "allow"}
+    model_config = {"populate_by_name": True, "extra": "forbid"}
 
     default: str = Field(
         default="",
-        description="Default model id from the registry.  Must exist in /var/lib/hal0/registry/.",
-    )
-    context_size: int | None = Field(
-        default=None,
-        ge=128,
-        description=(
-            "HARDWARE CEILING ONLY — no longer an override. v1.0 ownership "
-            "split: the MODEL owns context size (its "
-            "``defaults.context_size``, else the GGUF-derived native window "
-            "dense-capped, else a safe 8192 floor — never llama-server's "
-            "silent 4096, chat@4096 incident 2026-06-15). This slot-level "
-            "value is honored only as a cap on that resolved window "
-            "(``effective = min(model_window, this)``) because a slot owns "
-            "hardware and the installer writes a VRAM-budget clamp here "
-            "(hal0.hardware.recommend / hal0.install.orchestrate, #1108). It "
-            "can never RAISE the effective window. Unset (None) — the default, "
-            "and what a new slot gets — means 'follow the model'. See "
-            "hal0.providers.container._resolve_context_size."
-        ),
-    )
-    # HAL0-SUNSET: v2.0.0 — flags own by models (spec-flags-ownership §2/§4).
-    # This slot [model].n_gpu_layers no longer reaches the launch argv; the
-    # migrator folds a slot's effective -ngl into its model's
-    # ``defaults.n_gpu_layers`` (trusted, managed-flag) field. Field stays for
-    # round-trip until the sunset ratchet drops it.
-    n_gpu_layers: int = Field(
-        default=-1,
-        description=(
-            "Number of layers to offload to GPU.  -1 means all. INERT at launch "
-            "(flags own by models): the migrator folds this into the model's "
-            "defaults.n_gpu_layers; it no longer reaches the argv chain."
-        ),
-    )
-    rope_freq_base: float = Field(
-        default=0.0,
-        ge=0.0,
-        description=(
-            "DEPRECATED (accepted, ignored): the launch path no longer emits "
-            "--rope-freq-base from this field. To override RoPE base, pass "
-            "``--rope-freq-base <n>`` via [server].extra_args instead. Retained "
-            "so existing TOMLs round-trip; 0.0 means use the model default."
-        ),
-    )
-    extra: dict[str, Any] = Field(
-        default_factory=dict,
-        description="Provider-specific model params passed verbatim to the backend.",
+        description="Model id from the registry this slot loads.",
     )
 
 
@@ -236,41 +192,16 @@ class ImageGenConfig(BaseModel):
 
 
 class ServerConfig(BaseModel):
-    """[server] section in a slot TOML.
+    """[server] section in a slot TOML: container environment.
 
-    Currently carries only ``extra_args`` — a freeform CLI-flag string
-    appended after model defaults at launcher arg-build time.  Future
-    server-side knobs (idle-eviction policy, request quotas, …) land
-    here too rather than at top-level so the surface stays grouped.
-
-    See docs/internal/models-slots-impl-plan.md §A3 and the ``flag_merge`` util.
-
-    ``extra="forbid"`` (P3-schema Part C): there is no legitimate unknown
-    ``[server]`` key — a typo (e.g. ``extraargs``) should fail loudly at load
-    time rather than silently vanish. The escape hatch for anything not
-    modeled here is ``extra_args`` itself (a freeform CLI passthrough string)
-    plus ``env`` (an arbitrary env-var dict) — both are already declared
-    fields, so this is additive hardening, not a behavior change for any
-    TOML that only sets ``extra_args``/``env``.
+    Carries ``env`` (variables injected into the slot container, e.g.
+    ``HSA_OVERRIDE_GFX_VERSION``). Launch flags are not slot config: they
+    live on the slot's profile (ADR-0029). ``extra="forbid"``: an unknown key
+    fails loudly at load time.
     """
 
     model_config = {"populate_by_name": True, "extra": "forbid"}
 
-    # HAL0-SUNSET: v2.0.0 — flags own by models (spec-flags-ownership §2/§4).
-    # This slot [server].extra_args no longer reaches the launch argv chain;
-    # the migrator folds a slot's effective tune into its model's
-    # ``defaults.extra_args`` (the screened ``model_extra_args`` segment). Kept
-    # for round-trip until the sunset ratchet drops it.
-    extra_args: str | None = Field(
-        default=None,
-        description=(
-            "Freeform llama-server CLI passthrough. INERT at launch (flags own "
-            "by models): no longer tokenised into the argv chain. The migrator "
-            "folds a slot's effective tune into the bound model's "
-            "defaults.extra_args, where hal0.slots.argv still screens it against "
-            "the §21.7 managed-arg denylist. Retained for TOML round-trip."
-        ),
-    )
     env: dict[str, str] | None = Field(
         default=None,
         description=(
@@ -305,6 +236,49 @@ class ServerConfig(BaseModel):
                 raise ValueError(f"[server].env value for {key!r} must not contain newlines")
             cleaned[str(key)] = sval
         return cleaned
+
+
+#: Slot keys that carried tuning before ADR-0029. Top level and ``[model]``
+#: / ``[server]`` tables; see :func:`slot_tuning_keys`.
+SLOT_TUNING_TOP_KEYS: tuple[str, ...] = (
+    "parallel",
+    "chat_template",
+    "workers",
+    "ctx_size",
+    "mtp",
+    "enable_thinking",
+    "vision",
+)
+SLOT_TUNING_MODEL_KEYS: tuple[str, ...] = (
+    "context_size",
+    "ctx_size",
+    "n_gpu_layers",
+    "rope_freq_base",
+    "extra",
+)
+SLOT_TUNING_SERVER_KEYS: tuple[str, ...] = ("extra_args",)
+
+
+def slot_tuning_keys(data: Any) -> list[str]:
+    """Tuning keys a raw (flat or ``[slot]``-nested) slot dict still carries."""
+    if not isinstance(data, Mapping):
+        return []
+    found: list[str] = []
+    tables: list[Mapping[str, Any]] = [data]
+    if isinstance(data.get("slot"), Mapping):
+        tables.append(data["slot"])
+    for table in tables:
+        found += [k for k in SLOT_TUNING_TOP_KEYS if k in table and k not in found]
+    model = data.get("model")
+    if isinstance(model, Mapping):
+        found += [f"[model].{k}" for k in SLOT_TUNING_MODEL_KEYS if k in model]
+    extra = data.get("extra") if isinstance(data.get("extra"), Mapping) else {}
+    for server in (data.get("server"), extra.get("server")):
+        if isinstance(server, Mapping):
+            found += [f"[server].{k}" for k in SLOT_TUNING_SERVER_KEYS if k in server]
+    if isinstance(extra.get("defaults"), Mapping) or isinstance(data.get("defaults"), Mapping):
+        found.append("[defaults]")
+    return found
 
 
 class SlotConfig(BaseModel):
@@ -363,22 +337,13 @@ class SlotConfig(BaseModel):
             "unchanged behaviour."
         ),
     )
-    # ── Hardware grid (spec-hw-slot-ownership §2) ────────────────────────
-    # The slot owns the physical/placement layer as typed fields:
-    # ``device`` (class+backend enum, above) · ``n_gpu_layers`` (NGL) ·
-    # ``threads`` · ``binary`` (runner image ref). Plus an optional
-    # ``image_pin`` escape hatch. Reverses the spec-flags-ownership §5 fold
-    # that moved NGL into ``model.defaults.n_gpu_layers``: hardware is
-    # single-owner on the slot, the model stays logical/device-agnostic.
+    # ── Placement (ADR-0029) ─────────────────────────────────────────────
+    # The slot owns placement as typed fields: ``device`` (above) ·
+    # ``n_gpu_layers`` (NGL) · ``threads`` · ``binary`` (runner key), plus the
+    # ``image_pin`` escape hatch. Every tune lives on the slot's profile.
     n_gpu_layers: int = Field(
         default=-1,
-        description=(
-            "NGL — layers to offload to GPU; emits ``-ngl``. Authoritative on "
-            "the slot (spec-hw-slot-ownership §2, reversing the §5 fold into "
-            "model.defaults.n_gpu_layers). -1 = all layers, 0 = CPU only. "
-            "Distinct from the nested [model].n_gpu_layers (ModelConfig), which "
-            "the one-shot migration folds into this field and then sunsets."
-        ),
+        description="NGL — layers to offload to GPU; emits ``-ngl``. -1 = all, 0 = CPU only.",
     )
     threads: int = Field(
         default=0,
@@ -454,59 +419,11 @@ class SlotConfig(BaseModel):
     profile: str | None = Field(
         default=None,
         description=(
-            "Profile name from /etc/hal0/profiles.toml. The profile supplies "
-            "the container image + bench-tuned flags; the slot supplies "
-            "model, context_size, and port. See ProfileConfig and the "
-            "container-runtime design doc §1."
+            "Profile name (a seed or a profile in profiles.toml). The profile "
+            "is the whole tune: flags, context window, reasoning default, "
+            "vision and MTP (ADR-0029). The slot supplies placement and the model."
         ),
     )
-    # NOTE (spec-hw-slot-ownership §1): ``enable_thinking``, ``mtp``, and
-    # ``vision`` are no longer SlotConfig fields — they are MODEL-owned tuning
-    # (ModelDefaults.enable_thinking / .mtp / .vision). A write carrying one of
-    # these keys is hard-rejected at the API boundary (see
-    # hal0.slot_config.MODEL_OWNED_SLOT_KEYS / _reject_model_owned_config_keys)
-    # with a "belongs on the model" message, symmetric to the model-side
-    # SLOT_HARDWARE_FLAGS reject. ``model_config`` stays ``extra="allow"`` so a
-    # pre-migration TOML still carrying the keys loads without error; the
-    # one-shot migrator (hal0.config.migrations.model_owned_caps) folds any
-    # such value into the bound model's defaults and drops the slot key.
-    # HAL0-SUNSET: v2.0.0 — flags own by models (spec-flags-ownership §2/§4).
-    # This slot-level parallelism knob no longer reaches the launch argv; the
-    # migrator folds an effective ``--parallel N`` (plus ``--kv-unified`` when
-    # N>1) into the bound model's ``defaults.extra_args``. Kept for round-trip
-    # until the sunset ratchet drops it.
-    parallel: int | None = Field(
-        default=None,
-        ge=1,
-        description=(
-            "Per-slot llama-server sequence slots (--parallel / -np) for continuous "
-            "batching. INERT at launch (flags own by models): no longer emitted to "
-            "the argv chain. The migrator folds an effective --parallel N (and "
-            "--kv-unified when N>1) into the bound model's defaults.extra_args. "
-            "Retained for TOML round-trip."
-        ),
-    )
-    # HAL0-SUNSET: v2.0.0 — chat_template is model-intrinsic and folds into the
-    # model (spec-flags-ownership §7 slot-purity). INERT at launch: the slot
-    # tier was removed from resolve_chat_template, so model.defaults.chat_template
-    # is the single source. The one-shot migrator folds each slot's effective
-    # template into its bound model (divergent-share refusal). Retained for TOML
-    # round-trip until the sunset ratchet drops it.
-    chat_template: str | None = Field(
-        default=None,
-        description=(
-            "SUNSET (spec-flags-ownership §7): per-slot chat-template override "
-            "(id from /api/chat-templates, or 'auto'/None for the GGUF-embedded "
-            "template). INERT at launch — the chat template is now model-intrinsic "
-            "and read only from model.defaults.chat_template; the migrator folds "
-            "this into the bound model. Round-trips for one release. See "
-            "resolve_chat_template and slot_flags_fold."
-        ),
-    )
-    # (former per-slot ``vision`` toggle (#901) removed — see the
-    # spec-hw-slot-ownership §1 NOTE above the ``profile`` field; it is now
-    # ModelDefaults.vision.)
-
     # ── TTS request defaults (Settings → Voice) ─────────────────────────
     # Read by /v1/audio/speech at request time: when the body omits the
     # matching param, the serving tts slot's persisted default is injected
@@ -543,24 +460,8 @@ class SlotConfig(BaseModel):
     # [model] section (nested)
     model: ModelConfig = Field(default_factory=ModelConfig)
 
-    # [server] section
-    # NOTE: ``workers`` and ``idle_timeout_s`` are flat top-level fields
-    # for haloai-era round-trip compatibility (the loader hoists [slot]
-    # keys, not [server] keys, into the validated SlotConfig).  The new
-    # nested ``server`` model below holds fields that are authored under
-    # [server] in TOML — keep additions there.
-    # HAL0-SUNSET: v2.0.0 — workers is inert; a non-default value only logs a warning.
-    workers: int = Field(
-        default=1,
-        ge=1,
-        description=(
-            "DEPRECATED / inert — a haloai-era field that was never emitted to "
-            "llama-server argv (it did not mean sequence slots). Round-tripped for "
-            "one release; a non-default value logs a warning at launch and does "
-            "nothing. For continuous batching use the `parallel` field, which maps "
-            "to llama-server --parallel."
-        ),
-    )
+    # ``idle_timeout_s`` is a flat top-level field (the loader hoists [slot]
+    # keys, not [server] keys); [server] holds only ``env``.
     idle_timeout_s: int = Field(
         default=300,
         ge=0,
@@ -648,6 +549,24 @@ class SlotConfig(BaseModel):
         default_factory=dict,
         description="Provider-specific slot params passed verbatim.",
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _refuse_tuning_keys(cls, data: Any) -> Any:
+        """A slot file still carrying tuning keys has not been converted.
+
+        ADR-0029 moved every tune onto the slot's profile; the one-shot
+        conversion (``hal0 profile migrate``) removes these keys. A file that
+        still has one fails to load with ``slot.unconverted`` rather than
+        launching with a value nothing reads.
+        """
+        found = slot_tuning_keys(data)
+        if found:
+            raise ValueError(
+                f"slot.unconverted: {', '.join(found)} belong(s) on a profile now "
+                "(ADR-0029); run `hal0 profile migrate` to convert this slot"
+            )
+        return data
 
     @model_validator(mode="before")
     @classmethod
@@ -950,50 +869,37 @@ class ProvidersConfig(BaseModel):
 
 # ── ProfileConfig + ProfilesConfig ────────────────────────────────────────────
 
-#: MTP draft-speculation draft device, per profile backend.  The old bundle
-#: hardcoded ``ROCm0``, so a Vulkan/CUDA profile with MTP on drafted on a ROCm
-#: device.  Unknown / non-GPU / ``None`` backends keep the historical ``ROCm0``
-#: default (byte-identical to the old constant).
+#: MTP draft-speculation draft device, per slot backend (the slot's device).
+#: Placement, so it is emitted in the slot layer of the launch argv.
 _MTP_DRAFT_DEVICE: dict[str, str] = {"rocm": "ROCm0", "vulkan": "Vulkan0", "cuda": "CUDA0"}
 
-
-def build_mtp_flag_bundle(backend: str | None) -> str:
-    """Bench-tuned MTP draft-speculation flag bundle, with the draft device
-    derived from *backend*.
-
-    Appended after ``profile.flags`` when MTP is effective (see
-    :func:`resolve_profile_flags`).  Every ``--spec-draft-*`` value here is a
-    DEFAULT — a model may override any of them via its registry
-    ``defaults.extra_args`` (``merge_flags`` precedence).  Keep the values in
-    sync with the bench doc (hal0-container-bench-2026-06-08.md).
-    """
-    device = _MTP_DRAFT_DEVICE.get((backend or "").lower(), "ROCm0")
-    return (
-        "--spec-type draft-mtp"
-        f" --spec-draft-device {device}"
-        " --spec-draft-ngl all"
-        " --spec-draft-n-max 4"
-        " --spec-draft-n-min 0"
-        " --spec-draft-p-min 0.0"
-        " --spec-draft-p-split 0.10"
-        " --spec-draft-type-k q8_0"
-        " --spec-draft-type-v q8_0"
-        " --spec-draft-threads 16"
-        " --spec-draft-threads-batch 32"
-        " --spec-draft-poll 1"
-        " --spec-draft-poll-batch 1"
-    )
+#: Bench-tuned MTP draft-speculation defaults (profile layer; the draft device
+#: is placement and comes from the slot). A profile may override any of them
+#: in its own ``flags``, which follow the bundle and so win (last-wins).
+MTP_DRAFT_BUNDLE: str = (
+    "--spec-type draft-mtp"
+    " --spec-draft-ngl all"
+    " --spec-draft-n-max 4"
+    " --spec-draft-n-min 0"
+    " --spec-draft-p-min 0.0"
+    " --spec-draft-p-split 0.10"
+    " --spec-draft-type-k q8_0"
+    " --spec-draft-type-v q8_0"
+    " --spec-draft-threads 16"
+    " --spec-draft-threads-batch 32"
+    " --spec-draft-poll 1"
+    " --spec-draft-poll-batch 1"
+)
 
 
-#: Back-compat: the ROCm-flavoured bundle (the seed MTP profiles are all ROCm).
-#: Prefer :func:`build_mtp_flag_bundle` so the draft device tracks the backend.
-MTP_FLAG_BUNDLE = build_mtp_flag_bundle("rocm")
+def mtp_draft_device(backend: str | None) -> str:
+    """The ``--spec-draft-device`` for a slot whose device maps to *backend*."""
+    return _MTP_DRAFT_DEVICE.get((backend or "").lower(), "ROCm0")
+
 
 #: Seed profile catalog — externalized to shipped TOML (P3-schema, spec
-#: Part A). See ``hal0/config/data/seed_profiles.toml`` for the 10 seed
-#: entries (with their per-profile rationale comments; the 5 workload
-#: variants pruned off the seed list live in
-#: ``hal0/config/data/legacy_seed_profiles.toml`` instead) and
+#: Part A). See ``hal0/config/data/seed_profiles.toml`` for the seed
+#: entries (with their per-profile rationale comments) and
 #: ``hal0.config.seeds.seed_profiles()`` for the loader. ``SEED_PROFILES``
 #: is (re)assigned at the bottom of this module, once every model above
 #: exists, as a module-scope re-export so every existing
@@ -1060,167 +966,93 @@ def family_flags(*hints: str | None, architecture: str | None = None) -> str:
 DEVICE_DEFAULT_PROFILES: dict[str, str] = DEVICE_TO_DEFAULT_PROFILE
 
 
+#: Plausible context window range for a profile's ``ctx_size`` (the launch
+#: path's ``--ctx-size``). Below 128 llama-server cannot run; above 2**24 is
+#: never a real window.
+CTX_SIZE_MIN = 128
+CTX_SIZE_MAX = 2**24
+
+
 class ProfileConfig(BaseModel):
-    """One ``[profile.<name>]`` entry in profiles.toml.
+    """One ``[profile.<name>]`` entry in profiles.toml: a complete tune.
 
-    A profile is a reusable, device-agnostic tune template — bench-tuned
-    flag bundle + optional MTP toggle, and (as of v1.0) no image. Slots
-    reference a profile by name; the profile supplies everything except
-    the image, model path, context size, and port (which belong to the
-    slot).
+    ADR-0029: the profile holds every tune a slot launches with — the free
+    llama-server flags, the context window, the reasoning default, whether
+    the model's mmproj loads and whether MTP drafts. The model holds only
+    facts about its file; the slot holds placement (device, layers, threads,
+    runner, port) plus which model and which profile. A model runs
+    differently by running under a different profile.
 
-    See the hal0 container-runtime design doc (§1) and bench doc for the
-    rationale behind each seed profile.
+    ``runner`` is the profile-carried runtime: applying the profile to a slot
+    sets the slot's ``binary`` (and its device, for a single-backend runner).
     """
 
     model_config = {"populate_by_name": True, "extra": "forbid"}
 
-    # spec-hw-slot-ownership §3: ``image`` is GONE from profiles — a profile is a
-    # device-agnostic tune template. The image is slot-owned
-    # (``slot.image_pin or RUNNER_IMAGES[slot.binary]``); the deploy-window
-    # migration (hal0.config.migrations.hw_slot_ownership) folds any prior
-    # profile.image onto its slots and strips the key, and
-    # ``loader.load_profiles_config`` drops a stray ``image`` key from an
-    # un-migrated profiles.toml so the field's removal is load-safe.
     flags: str = Field(
         default="",
-        description="Bench-tuned llama-server CLI flags (no model/port/ctx args).",
-    )
-    mtp: bool = Field(
-        default=False,
         description=(
-            "INFORMATIONAL ONLY (§7.1a / ML-5) — no longer read by "
-            "resolve_profile_flags() or the launch path. MTP is a MODEL "
-            "capability now (ModelDefaults.mtp / the registry 'mtp' tag), gated "
-            "by the launching runner's supports.mtp; see "
-            "providers.container._effective_mtp. Kept on this class for "
-            "on-disk/API back-compat until P3-schema externalizes profiles."
+            "Free llama-server flags (KV cache types, batch sizes, sampling, "
+            "reasoning, --parallel, ...). Never hardware (slot), managed "
+            "(--model/--port/--ctx-size/...) or model-fact flags (--jinja, "
+            "--chat-template*, --mmproj, --no-mmproj)."
         ),
     )
-    device_class: Literal["gpu", "cpu", "npu", "img"] | None = Field(
+    ctx_size: int | None = Field(
         default=None,
+        ge=CTX_SIZE_MIN,
+        le=CTX_SIZE_MAX,
         description=(
-            "INERT MATCH-ONLY FIT HINT — selects no hardware (v1.0, "
-            "spec-hw-slot-ownership §2/§4.1). A profile is a bundle of "
-            "model-tuning flags and carries no hardware placement; the SLOT's "
-            "``device`` enum is the single authoritative hardware fact. This "
-            "field is read ONLY by ``hal0.model_fit.profile_fits_slot`` (does "
-            "this profile suit this slot?), by the display/runtime-family "
-            "classification in ``hal0.profiles._runtime_family``, and as a "
-            "last-resort fallback in "
-            "``providers.container._effective_backend_and_device_class`` for a "
-            "hand-built slot dict that declares no ``device`` at all. It no "
-            "longer gates real ``/dev/kfd`` + ``/dev/dri`` passthrough — it "
-            "did until 1.0, which let a ``cpu-chat`` profile request GPU device "
-            "nodes on a ``device='cpu'`` slot. None (the default, and what "
-            "every shipped seed uses) means device-agnostic: "
-            "``profile_fits_slot`` skips the device-class gate entirely. "
-            "RETAINED on this class rather than removed because published "
-            "``.hal0profile.json`` artifacts carry it and their checksums cover "
-            "it — dropping it would break import round-trip."
+            "Context window (--ctx-size). None = the model's native window "
+            "capped at 32768, or 8192 when the native window is unknown."
         ),
     )
-    backend: Literal["rocm", "vulkan", "cuda"] | None = Field(
+    enable_thinking: bool | None = Field(
         default=None,
         description=(
-            "INERT MATCH-ONLY FIT HINT — selects no runtime (v1.0, "
-            "spec-hw-slot-ownership §2). NOT the source of the "
-            "ROCm-vs-Vulkan-vs-CUDA choice: that is derived from the SLOT's "
-            "``device`` enum by ``hal0.model_meta.device_to_backend`` via "
-            "``providers.container._effective_backend_and_device_class``, which "
-            "feeds BOTH the image/capability resolution and the device-node "
-            "passthrough gate so the two can never drift. Read here only as the "
-            "last-resort fallback for a slot dict with no ``device``. ``None`` "
-            "for non-GPU profiles (npu/cpu/img). RETAINED for on-disk and "
-            "envelope-checksum back-compat (see ``device_class``)."
+            "Request-time reasoning default for slots running this profile. "
+            "None = off unless the request asks; always overridable per request."
+        ),
+    )
+    vision: Literal["auto", "off"] = Field(
+        default="auto",
+        description="'auto' loads the model's mmproj when it has one; 'off' never does.",
+    )
+    mtp: Literal["auto", "off"] = Field(
+        default="auto",
+        description=(
+            "'auto' drafts with the model's MTP heads when it has them and the "
+            "runner supports it; 'off' never does."
         ),
     )
     runner: str | None = Field(
         default=None,
         description=(
-            "Optional RUNNER_IMAGES key (runtime-cascade spec D4). Applying "
-            "this profile sets the slot's binary to this runtime and — for a "
-            "single-backend runtime — derives the device (profile wins). A "
-            "registry KEY, never an image ref: keys survive image/tag updates, "
-            "which is exactly the rot that got `image` removed from profiles "
-            "(spec-hw-slot-ownership §3). None = flags-only tune (all seeds)."
+            "Optional RUNNER_IMAGES key (the profile-carried runtime). Applying "
+            "this profile sets the slot's binary to this runtime and, for a "
+            "single-backend runtime, derives the device. None = the slot's own runner."
         ),
     )
     cloned_from: str | None = Field(
         default=None,
-        description=(
-            "Provenance: name of the profile this one was cloned from "
-            "(set by the dashboard clone / edit-a-copy flow).  Informational "
-            "only — never resolved or validated against the catalog."
-        ),
+        description="Provenance: the profile this one was cloned or converted from. Informational.",
     )
     intent: str = Field(
         default="",
-        description=(
-            "Human label for what this profile is for, shown as the card "
-            "headline in the dashboard (e.g. 'MoE agents · long-ctx').  "
-            "Informational only."
-        ),
-    )
-    quant: str = Field(
-        default="",
-        description=(
-            "Weight quantization format shown as a card chip (e.g. 'FP4', "
-            "'Q4_K_M', 'W4ABF16').  Informational only — the runtime reads "
-            "the quant from the model, not this field."
-        ),
+        description="Human label for what this profile is for (the dashboard card headline).",
     )
 
 
 class ProfilesConfig(BaseModel):
-    """Parsed profiles.toml — top-level ``[profile]`` table.
+    """Parsed profiles.toml — top-level ``[profile]`` table of custom profiles.
 
-    Each key under ``[profile]`` becomes an entry in ``profile``:
-
-        [profile.rocm]
-        image = "ghcr.io/..."
-        flags = "-fa on ..."
-        mtp   = false
+    Seed profiles are not stored here; they are overlaid from code on every
+    load (``hal0.config.loader.load_profiles_config``).
     """
 
     model_config = {"populate_by_name": True, "extra": "forbid"}
 
     profile: dict[str, ProfileConfig] = Field(default_factory=dict)
-    legacy_seeds_migrated: bool = Field(
-        default=False,
-        description=(
-            "Write-once marker of the retired one-time demotion of the 8 pruned "
-            "seeds (:data:`LEGACY_SEED_PROFILES`) into ordinary custom profiles "
-            "(1.2.0-1.3.x). Read only by :meth:`adopted_legacy_names` for a file "
-            "that predates the adoption ledger."
-        ),
-    )
-    legacy_seeds_adopted: list[str] | None = Field(
-        default=None,
-        description=(
-            "Per-name ledger of the demoted seeds this install has already "
-            "settled — injected by the bulk demotion, adopted on first "
-            "reference by ``ProfileCatalog._materialize_legacy``, or deleted. "
-            "A demoted name listed here and absent from ``profile`` was DELETED "
-            "and must never be re-materialized; a demoted name not listed has "
-            "simply never been referenced yet. ``None`` means the file predates "
-            "the ledger — see :meth:`adopted_legacy_names`."
-        ),
-    )
-
-    def adopted_legacy_names(self) -> frozenset[str]:
-        """Demoted seed names this install has already settled.
-
-        The ledger is the authority when present. When it is absent (``None``
-        — a profiles.toml written before the ledger existed) the migration
-        marker is the only signal left, and it answers the question exactly:
-        a True marker means the bulk demotion already passed over every demoted
-        name, so absence from ``profile`` is a deletion; a False marker means
-        the demotion has not run, so nothing is settled yet.
-        """
-        if self.legacy_seeds_adopted is not None:
-            return frozenset(self.legacy_seeds_adopted)
-        return frozenset(LEGACY_SEED_PROFILES) if self.legacy_seeds_migrated else frozenset()
 
 
 # ── Stacks ────────────────────────────────────────────────────────────────────
@@ -1230,11 +1062,11 @@ class ProfilesConfig(BaseModel):
 
 # Stacks carry their own schema version (independent of hal0.toml meta.schema_version),
 # stamped on every StackConfig and on the export envelope (PR-3).
-STACK_SCHEMA_VERSION_CURRENT = 2
+STACK_SCHEMA_VERSION_CURRENT = 3
 
 #: Profile export envelopes carry their own schema version (independent of
 #: hal0.toml meta.schema_version), stamped on every ``.hal0profile.json`` export.
-PROFILE_SCHEMA_VERSION_CURRENT = 1
+PROFILE_SCHEMA_VERSION_CURRENT = 2
 
 _STACK_NAME_RE = r"^[a-z0-9][a-z0-9_-]{0,31}$"
 
@@ -1336,16 +1168,6 @@ class StackSlotEntry(BaseModel):
     )
     device: str | None = Field(default=None, description="Device override for the slot.")
     provider: str | None = Field(default=None, description="Provider override for the slot.")
-    vision: bool = Field(
-        default=False, description="Enable the mmproj vision sidecar for this slot."
-    )
-    mtp: bool | None = Field(
-        default=None, description="Per-slot MTP override (inherits profile default when None)."
-    )
-    enable_thinking: bool | None = Field(default=None, description="Per-slot reasoning override.")
-    server_extra_args: str | None = Field(
-        default=None, description="Freeform llama-server CLI flags for this slot."
-    )
     capabilities: list[StackCapabilityRow] = Field(
         default_factory=list, description="Capability child selections."
     )
@@ -1427,77 +1249,12 @@ class StacksConfig(BaseModel):
 # call site keeps working unchanged.
 
 
-def resolve_profile_flags(profile: ProfileConfig, mtp_override: bool | None = None) -> str:
-    """Return the full flag string for *profile*, expanding MTP when set.
+def resolve_chat_template(model_info: Mapping[str, Any]) -> str | None:
+    """The model's chat-template id, or None for the GGUF-embedded template.
 
-    When the effective MTP setting is ``True``, ``MTP_FLAG_BUNDLE`` is
-    appended after ``profile.flags`` (separated by a single space).  The
-    model path, port, and context size are the slot's concern — they are
-    NOT included here.
-
-    §7.1a / ML-5: ``profile.mtp`` is NO LONGER consulted here — MTP is a
-    MODEL capability now (``ModelDefaults.mtp`` / the registry ``mtp``
-    tag), gated by the launching runner's ``supports.mtp``. This function
-    only expands the bundle when the CALLER explicitly says so:
-
-      - ``mtp_override=True``  → append the bundle.
-      - ``mtp_override=False`` / ``None`` → do not append it.
-
-    :func:`hal0.providers.container._resolve_llama_scalars` is the single
-    caller that computes a real decision (via ``_effective_mtp``, which
-    folds in defaults.mtp / the tag+runner-support AUTO tier — spec-hw-
-    slot-ownership §1: the model is the sole authority, no slot override)
-    and always passes an explicit bool; every other caller (e.g.
-    ``ResolvedProfile.resolved_flags``, computed with no override for
-    profile-catalog listings/cards) now correctly renders MTP-free, since a
-    profile alone — without a model bound to it — has no opinion on MTP.
-
-    Args:
-        profile: A validated :class:`ProfileConfig`.
-        mtp_override: Explicit True/False decision from the caller.
-            ``None`` behaves the same as ``False`` (no bundle).
-
-    Returns:
-        The complete flag string ready to pass to llama-server.
-    """
-    base = profile.flags.strip()
-    if mtp_override:
-        # MTP_FLAG_BUNDLE is a set of DEFAULTS. A profile may pin its own
-        # ``--spec-draft-*`` values (a hand-tuned draft KV type, p-min, …); those
-        # must WIN, with the bundle only supplying the flags the profile left
-        # unset. ``merge_flags(defaults, override)`` gives exactly that
-        # precedence — the override (here ``base``) strips any matching flag from
-        # the defaults. Appending the bundle verbatim (the old behaviour) let it
-        # silently clobber a profile's explicit spec flags, e.g. a profile
-        # asking for ``--spec-draft-type-k f16`` still launched with q8_0.
-        #
-        # Local import: ``hal0.config`` is imported before ``hal0.slots``, so a
-        # module-level import would create a cycle. ``merge_flags`` now lives in
-        # hal0.slots.argv (folded from the retired flag_merge module) so it
-        # shares argv's tokenizer + short/long alias table.
-        from hal0.slots.argv import merge_flags
-
-        bundle = build_mtp_flag_bundle(getattr(profile, "backend", None))
-        return merge_flags(bundle, base)
-    return base
-
-
-def resolve_chat_template(slot_cfg: dict, model_info: dict) -> str | None:
-    """Effective chat-template id: model default > None (auto).
-
-    FLAGS-own §7 (slot-purity fold): the chat template is model-intrinsic — it
-    is a property of the artifact, not the slot — so the model's
-    ``defaults.chat_template`` is now the single launch source. The per-slot
-    ``chat_template`` override is sunset (inert at launch); the one-shot
-    migrator (:mod:`hal0.config.migrations.slot_flags_fold`) folds each slot's
-    effective template into its bound model, refusing any model whose slots
-    carry divergent templates. ``slot_cfg`` is retained in the signature for
-    the container provider's call-site shape (and so a future reader can key
-    other model-vs-slot resolution here) but its ``chat_template`` key is no
-    longer consulted.
-
-    'auto' (or empty/None) means use the GGUF-embedded template (no
-    ``--chat-template-file``). Returns the template id string otherwise.
+    ADR-0029: the chat template is a fact about the model file
+    (``defaults.chat_template``). ``'auto'`` (or empty/None) means the
+    template embedded in the GGUF (no ``--chat-template-file``).
     """
     val = (model_info.get("defaults") or {}).get("chat_template")
     if val and val != "auto":
@@ -3431,10 +3188,6 @@ class Hal0Config(BaseModel):
 from hal0.config import seeds as _seeds  # noqa: E402
 
 SEED_PROFILES: dict[str, dict[str, object]] = _seeds.seed_profiles()
-#: The 5 demoted (ex-seed) definitions — shipped data, NOT part of the seed
-#: catalog. Injected once into an existing install's profiles.toml as ordinary
-#: custom profiles by ``loader.load_profiles_config``.
-LEGACY_SEED_PROFILES: dict[str, dict[str, object]] = _seeds.legacy_seed_profiles()
 SEED_STACKS: dict[str, StackConfig] = _seeds.seed_stacks()
 PROFILE_BENCH: dict[str, dict[str, float]] = _seeds.profile_bench()
 FAMILY_DEFAULTS: dict[str, str] = _seeds.family_defaults()
@@ -3448,8 +3201,7 @@ __all__ = [
     "DEFAULT_DEVICE",
     "DEVICE_DEFAULT_PROFILES",
     "FAMILY_DEFAULTS",
-    "LEGACY_SEED_PROFILES",
-    "MTP_FLAG_BUNDLE",
+    "MTP_DRAFT_BUNDLE",
     "PROFILE_BENCH",
     "PROFILE_SCHEMA_VERSION_CURRENT",
     "SEED_PROFILES",
@@ -3491,5 +3243,6 @@ __all__ = [
     "family_flags",
     "map_backend_to_device",
     "model_family",
-    "resolve_profile_flags",
+    "mtp_draft_device",
+    "resolve_chat_template",
 ]

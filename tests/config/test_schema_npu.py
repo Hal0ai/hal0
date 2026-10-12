@@ -75,9 +75,12 @@ def test_npu_chat_default_on() -> None:
 
 
 def test_flm_npu_seed_profile() -> None:
+    """ADR-0029: the FLM window is explicit on its profile; FLM takes no
+    llama-server flags and the seed carries no MTP switch."""
     prof = SEED_PROFILES["flm"]
-    assert prof["flags"] == ""
-    assert prof["mtp"] is False
+    assert prof.get("flags", "") == ""
+    assert prof["ctx_size"] == 16384
+    assert "mtp" not in prof
 
 
 def test_seed_flm_toml_validates() -> None:
@@ -93,9 +96,11 @@ def test_seed_flm_toml_validates() -> None:
     # flipped per-slot via the dashboard's NPU drawer)
     assert slot.npu is None
     # Clean seed (WS-E, #1107): no FLM model pin — boots grey, no surprise
-    # download, no crash-loop. context_size is a tuning default for later.
+    # download, no crash-loop. The window is the profile's (ADR-0029), so the
+    # slot file carries no context key at all.
     assert slot.model is not None and slot.model.default == ""
-    assert slot.model.context_size == 16384
+    assert "model" not in raw or "context_size" not in raw["model"]
+    assert SEED_PROFILES[slot.profile]["ctx_size"] == 16384
 
 
 def test_seed_tts_toml_validates() -> None:

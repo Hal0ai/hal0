@@ -5,9 +5,9 @@ from pathlib import Path
 import pytest
 
 from hal0.config.loader import load_profiles_config, save_profiles_config
-from hal0.config.schema import MTP_FLAG_BUNDLE, ProfileConfig
-from hal0.errors import Conflict, NotFound, UnprocessableEntity
-from hal0.profiles import ProfileCatalog, ProfilePatch, _runtime_family
+from hal0.config.schema import ProfileConfig
+from hal0.errors import BadRequest, Conflict, NotFound, UnprocessableEntity
+from hal0.profiles import UNSET, ProfileCatalog, ProfilePatch, _runtime_family
 
 
 def test_resolve_seed_profile_includes_runtime_facts(tmp_hal0_home: str) -> None:
@@ -25,14 +25,25 @@ def test_resolve_qwen3tts_seed_is_gpu_tts_family(tmp_hal0_home: str) -> None:
     assert profile.runtime_family == "qwen3tts"
     # Qwen3-TTS is a TTS-only runtime family; seeded profiles are device-agnostic.
     assert profile.supported_slot_types == ("tts",)
-    assert profile.device_class is None
-    assert profile.backend is None
     assert profile.rtf == 0.48
 
 
-def test_seed_profiles_do_not_select_backend(tmp_hal0_home: str) -> None:
-    catalog = ProfileCatalog()
-    assert all(profile.backend is None for profile in catalog.list())
+def test_resolved_profile_items_carry_the_profile_centric_fields(tmp_hal0_home: str) -> None:
+    """ADR-0029: items expose the tune; device_class/backend/quant are gone."""
+    item = ProfileCatalog().resolve("agent").to_dict()
+    assert item["ctx_size"] == 65536
+    assert item["vision"] == "off"
+    assert item["mtp"] == "auto"
+    assert item["enable_thinking"] is None
+    assert item["resolved_flags"] == item["flags"]
+    assert not {"device_class", "backend", "quant"} & set(item)
+
+
+def test_shipped_slot_seeds_name_seed_profiles(tmp_hal0_home: str) -> None:
+    """Slots are built around the seeds hal0 ships (ADR-0029 decision 4)."""
+    by_name = {p.name: p for p in ProfileCatalog().list()}
+    for name in ("agent", "utility", "coding", "brain", "embedding", "reranking", "flm"):
+        assert by_name[name].seed is True
 
 
 def test_create_update_delete_profile(tmp_hal0_home: str) -> None:
@@ -40,26 +51,71 @@ def test_create_update_delete_profile(tmp_hal0_home: str) -> None:
 
     created = catalog.create(
         "my-rocm",
-        ProfileConfig(
-            flags="-fa on",
-            mtp=True,
-            device_class="gpu",
-        ),
+        ProfileConfig(flags="-fa on", ctx_size=32768, enable_thinking=False, mtp="off"),
     )
     assert created.seed is False
     assert created.runtime_family == "llama-server"
-    # §7.1a / ML-5: profile.mtp is informational only now — the catalog's
-    # resolved_flags (no model bound at this level) never MTP-expands, even
-    # for an mtp=true profile. See providers.container._effective_mtp for
-    # where the real, model-aware decision now lives.
-    assert MTP_FLAG_BUNDLE not in created.resolved_flags
+    # A profile's flags are exactly what the operator wrote: the MTP draft
+    # bundle is composed at launch from the model + runner, never stored here.
+    assert created.resolved_flags == "-fa on"
+    assert created.ctx_size == 32768
+    assert created.enable_thinking is False
+    assert created.mtp == "off"
 
-    updated = catalog.update("my-rocm", ProfilePatch(flags="-fa off", mtp=False))
+    updated = catalog.update("my-rocm", ProfilePatch(flags="-fa off", mtp="auto"))
     assert updated.flags == "-fa off"
     assert updated.resolved_flags == "-fa off"
+    assert updated.mtp == "auto"
+    # Unpatched tune fields keep their stored value.
+    assert updated.ctx_size == 32768
+    assert updated.enable_thinking is False
 
     catalog.delete("my-rocm")
     assert all(profile.name != "my-rocm" for profile in catalog.list())
+
+
+def test_update_ctx_size_and_enable_thinking_distinguish_unset_from_none(
+    tmp_hal0_home: str,
+) -> None:
+    """UNSET leaves a stored value alone; None clears it."""
+    catalog = ProfileCatalog()
+    catalog.create("tuned", ProfileConfig(ctx_size=16384, enable_thinking=True, vision="off"))
+
+    left = catalog.update("tuned", ProfilePatch(intent="renamed"))
+    assert (left.ctx_size, left.enable_thinking, left.vision) == (16384, True, "off")
+    assert ProfilePatch().ctx_size is UNSET
+
+    changed = catalog.update("tuned", ProfilePatch(ctx_size=8192, vision="auto"))
+    assert (changed.ctx_size, changed.enable_thinking, changed.vision) == (8192, True, "auto")
+
+    cleared = catalog.update("tuned", ProfilePatch(ctx_size=None, enable_thinking=None))
+    assert cleared.ctx_size is None
+    assert cleared.enable_thinking is None
+    assert catalog.resolve("tuned").ctx_size is None
+
+
+@pytest.mark.parametrize(
+    ("flags", "code"),
+    [
+        ("--jinja -fa on", "profiles.model_fact_flag_denied"),
+        ("--no-mmproj", "profiles.model_fact_flag_denied"),
+        ("--mmproj /x/mmproj.gguf", "profiles.model_fact_flag_denied"),
+        ("--chat-template-file t.jinja", "profiles.model_fact_flag_denied"),
+        ("-fa on --spec-draft-device ROCm0", "profiles.model_fact_flag_denied"),
+        ("--reasoning-format none", "slot.reasoning_format_none_denied"),
+        ("-fa on --ctx-size 4096", "slot.managed_arg_denied"),
+        ("-ngl 99", "slot.hardware_flag_denied"),
+    ],
+)
+def test_create_screens_every_flag_a_profile_may_not_carry(
+    tmp_hal0_home: str, flags: str, code: str
+) -> None:
+    """Model-fact, managed, hardware and --spec-draft-device flags never persist."""
+    catalog = ProfileCatalog()
+    with pytest.raises(BadRequest) as exc:
+        catalog.create("screened", ProfileConfig(flags=flags))
+    assert exc.value.code == code
+    assert all(profile.name != "screened" for profile in catalog.list())
 
 
 # ── #1730: malformed shell quoting must never reach disk ─────────────────
@@ -92,38 +148,20 @@ def test_update_rejects_unmatched_quoting(tmp_hal0_home: str) -> None:
     assert catalog.resolve("good-profile").flags == "-fa on"
 
 
-def _persist_grandfathered_malformed_profile(name: str, flags: str) -> None:
-    """Write a profile with malformed flag quoting straight to disk, bypassing
-    ``screen_profile_flags`` — simulating a profile that was persisted before
-    #1737 started rejecting bad quoting at save time (the old code silently
-    swallowed the ``shlex.split`` ``ValueError``)."""
+def test_update_rechecks_flags_even_when_a_stored_profile_is_malformed(
+    tmp_hal0_home: str,
+) -> None:
+    """There is no grandfathering (ADR-0029): the converter fixes stored flags
+    once, so a save that sends flags is always screened."""
     cfg = load_profiles_config()
-    cfg.profile[name] = ProfileConfig(flags=flags)
+    cfg.profile["stored-bad"] = ProfileConfig(flags='-fa on "unterminated')
     save_profiles_config(cfg)
-
-
-def test_update_allows_unchanged_grandfathered_malformed_flags(tmp_hal0_home: str) -> None:
-    """A profile persisted pre-#1737 with malformed quoting must stay editable
-    for OTHER fields: a save that resends the same (still-malformed) flags text
-    unchanged must not 422, mirroring the §5 hardware-flag grandfathering."""
-    _persist_grandfathered_malformed_profile("grandfathered-quotes", '-fa on "unterminated')
-    catalog = ProfileCatalog()
-    updated = catalog.update(
-        "grandfathered-quotes",
-        ProfilePatch(flags='-fa on "unterminated', device_class="cpu"),
-    )
-    assert updated.device_class == "cpu"
-    assert updated.flags == '-fa on "unterminated'
-
-
-def test_update_rejects_new_malformed_flags_even_when_grandfathered(tmp_hal0_home: str) -> None:
-    """Grandfathering only covers the UNCHANGED inherited text — changing the
-    flags to a DIFFERENT malformed value must still 422."""
-    _persist_grandfathered_malformed_profile("grandfathered-quotes-2", '-fa on "unterminated')
     catalog = ProfileCatalog()
     with pytest.raises(UnprocessableEntity) as exc_info:
-        catalog.update("grandfathered-quotes-2", ProfilePatch(flags="-fa on 'also-bad"))
+        catalog.update("stored-bad", ProfilePatch(flags='-fa on "unterminated'))
     assert exc_info.value.code == "profiles.flags_malformed"
+    # A patch that leaves flags alone still goes through.
+    assert catalog.update("stored-bad", ProfilePatch(intent="fixed later")).intent == "fixed later"
 
 
 def test_delete_profile_in_use_raises_conflict(tmp_hal0_home: str) -> None:
@@ -149,35 +187,6 @@ def test_delete_profile_in_use_raises_conflict(tmp_hal0_home: str) -> None:
 
     assert exc.value.code == "profiles.in_use"
     assert exc.value.details["slots"] == ["chat"]
-
-
-def test_delete_profile_in_use_by_model_defaults_raises_conflict(tmp_hal0_home: str) -> None:
-    """HAL0-41 / GH #1437: a model's ``defaults.profile`` is a live reference too.
-
-    ``slots_using`` only scans slot TOMLs; a model that prefers a profile via
-    ``defaults.profile`` but isn't bound to any slot yet was able to slip past
-    the in-use guard entirely, leaving the model with a dangling reference
-    after delete.
-    """
-    from hal0.registry.model import Model, ModelDefaults
-    from hal0.registry.store import ModelRegistry
-
-    ModelRegistry().add(
-        Model(
-            id="my-model",
-            path="/tmp/my-model.gguf",
-            defaults=ModelDefaults(profile="my-rocm"),
-        )
-    )
-    catalog = ProfileCatalog()
-    catalog.create("my-rocm", ProfileConfig())
-
-    with pytest.raises(Conflict) as exc:
-        catalog.delete("my-rocm")
-
-    assert exc.value.code == "profiles.in_use"
-    assert exc.value.details["models"] == ["my-model"]
-    assert exc.value.details["slots"] == []
 
 
 def test_cloned_from_persists_and_round_trips(tmp_hal0_home: str) -> None:
@@ -206,7 +215,7 @@ def test_cloned_from_defaults_to_none_and_survives_update(tmp_hal0_home: str) ->
     assert updated.cloned_from == "my-rocm"
 
 
-# ── profiles overhaul: bench / quant / intent / used_by ─────────────────────────
+# ── profiles overhaul: bench / intent / used_by ─────────────────────────
 
 
 def test_seed_bench_metrics_exposed(tmp_hal0_home: str) -> None:
@@ -217,32 +226,27 @@ def test_seed_bench_metrics_exposed(tmp_hal0_home: str) -> None:
     assert by_name["kokoro"].rtf == 0.18
 
 
-def test_seed_intent_and_quant_exposed(tmp_hal0_home: str) -> None:
+def test_seed_intent_exposed(tmp_hal0_home: str) -> None:
     by_name = {p.name: p for p in ProfileCatalog().list()}
     assert by_name["chat"].intent == "Generic chat (fallback for unknown models)"
-    # Seeds that carry no quant hint report it as the empty string, and a
-    # runtime-family seed carries its own (the FLM NPU quant here). The
-    # ROCmFP4 family hints moved out with the chadrock-* demotion.
-    assert by_name["chat"].quant == ""
-    assert by_name["flm"].quant == "W4ABF16"
+    assert "64K ctx" in by_name["agent"].intent
 
 
-def test_custom_profile_has_no_bench_and_round_trips_intent_quant(
+def test_custom_profile_has_no_bench_and_round_trips_intent(
     tmp_hal0_home: str,
 ) -> None:
     catalog = ProfileCatalog()
     created = catalog.create(
         "my-tuned",
-        ProfileConfig(intent="My workload", quant="Q5_K_M"),
+        ProfileConfig(intent="My workload", ctx_size=24576),
     )
     assert created.intent == "My workload"
-    assert created.quant == "Q5_K_M"
     assert created.tps is None
     assert created.rtf is None
 
     reloaded = ProfileCatalog().resolve("my-tuned")
     assert reloaded.intent == "My workload"
-    assert reloaded.quant == "Q5_K_M"
+    assert reloaded.ctx_size == 24576
 
 
 def test_used_by_lists_bound_slots(tmp_hal0_home: str) -> None:
@@ -391,31 +395,26 @@ def test_update_can_clear_an_out_of_vocab_runner(tmp_hal0_home: str) -> None:
     assert ProfileCatalog().update("ghosted", ProfilePatch(runner="")).runner is None
 
 
-# ── runtime_family precedence: runner > device_class > legacy name ────────
+# ── runtime_family precedence: runner > seed slug ───────────────────────────
 
 
 def test_runtime_family_prefers_runner_key() -> None:
-    profile = ProfileConfig(flags="", mtp=False, runner="kokoro")
+    profile = ProfileConfig(flags="", runner="kokoro")
     assert _runtime_family("my-custom", profile) == "kokoro"
 
 
-def test_runtime_family_runner_beats_legacy_name() -> None:
+def test_runtime_family_runner_beats_the_seed_slug() -> None:
     # a kokoro-NAMED profile pointing at the comfyui runner is comfyui-family
-    profile = ProfileConfig(flags="", mtp=False, runner="comfyui")
+    profile = ProfileConfig(flags="", runner="comfyui")
     assert _runtime_family("kokoro", profile) == "comfyui"
 
 
-def test_runtime_family_runner_beats_device_class() -> None:
-    profile = ProfileConfig(flags="", mtp=False, device_class="npu", runner="standard")
-    assert _runtime_family("custom", profile) == "llama-server"
+def test_runtime_family_unknown_runner_falls_back_to_the_slug() -> None:
+    profile = ProfileConfig(flags="", runner="ghost-runner")
+    assert _runtime_family("kokoro", profile) == "kokoro"
 
 
-def test_runtime_family_unknown_runner_falls_back() -> None:
-    profile = ProfileConfig(flags="", mtp=False, runner="ghost-runner")
-    assert _runtime_family("kokoro", profile) == "kokoro"  # legacy name rule still fires
-
-
-def test_runtime_family_no_runner_unchanged() -> None:
+def test_runtime_family_no_runner_follows_the_slug() -> None:
     cases = [
         ("flm", "flm"),
         ("qwen3-tts", "qwen3tts"),
@@ -425,97 +424,40 @@ def test_runtime_family_no_runner_unchanged() -> None:
         ("anything", "llama-server"),
     ]
     for name, expected in cases:
-        assert _runtime_family(name, ProfileConfig(flags="", mtp=False)) == expected
-    # device_class rules unchanged too
-    assert _runtime_family("x", ProfileConfig(flags="", mtp=False, device_class="npu")) == "flm"
-    assert _runtime_family("x", ProfileConfig(flags="", mtp=False, device_class="img")) == "comfyui"
+        assert _runtime_family(name, ProfileConfig(flags="")) == expected
 
 
-# ── demoted (ex-seed) profiles ────────────────────────────────────────────
+# ── seeds are the only source of the canonical names ────────────────────────
 
 
-def test_demoted_seed_is_editable_and_deletable(tmp_path: Path) -> None:
-    """'coding' is no longer in SEED_PROFILES, so _guard_custom lets it through."""
-    from hal0.config.loader import save_profiles_config
-    from hal0.config.schema import LEGACY_SEED_PROFILES, ProfilesConfig
-
-    # The shape a 1.3.x box carries: the demoted names written into the file
-    # by the retired bulk demotion, with the ledger settled.
-    p = tmp_path / "profiles.toml"
-    save_profiles_config(
-        ProfilesConfig.model_validate(
-            {
-                "profile": {"coding": LEGACY_SEED_PROFILES["coding"]},
-                "legacy_seeds_migrated": True,
-                "legacy_seeds_adopted": sorted(LEGACY_SEED_PROFILES),
-            }
-        ),
-        path=p,
-    )
-    catalog = ProfileCatalog(path=p)
-
-    updated = catalog.update("coding", ProfilePatch(intent="mine now"))
-    assert updated.intent == "mine now"
-    assert updated.seed is False
-
-    catalog.delete("coding")
-    assert all(profile.name != "coding" for profile in catalog.list())
-    # The delete sticks — the settled ledger stops a re-adoption.
-    assert "coding" not in load_profiles_config(p).profile
-
-
-def test_resolve_does_not_resurrect_a_deleted_legacy_profile(tmp_path: Path) -> None:
-    p = tmp_path / "profiles.toml"
-    p.write_text("legacy_seeds_migrated = true\n", encoding="utf-8")
-    catalog = ProfileCatalog(path=p)
-
-    with pytest.raises(NotFound):
-        catalog.resolve("coding")
-
-
-def test_resolve_materializes_a_legacy_profile_on_a_fresh_install(tmp_path: Path) -> None:
-    """No profiles.toml at all: the curated agent/coder slots still resolve."""
+def test_canonical_seeds_resolve_without_adoption(tmp_path: Path) -> None:
+    """agent/coding/utility are promoted seeds: they resolve on a fresh install
+    with no profiles.toml and nothing is persisted by resolving them."""
     p = tmp_path / "profiles.toml"
     catalog = ProfileCatalog(path=p)
 
-    resolved = catalog.resolve("dense")
-    assert resolved.name == "dense"
-    assert resolved.seed is False
-    # Persisted as a custom entry, so it is editable/deletable from here on.
-    assert "dense" in load_profiles_config(p).profile
+    for name in ("agent", "coding", "utility"):
+        resolved = catalog.resolve(name)
+        assert resolved.seed is True
+    assert not p.exists()
 
 
-def test_resolve_materializes_every_legacy_name_on_a_fresh_install(tmp_path: Path) -> None:
-    """Adoption is once-per-NAME, not once-per-install.
-
-    A fresh box ships three references to demoted profiles across different
-    files (agent.toml → dense, coder.toml → coding, the saber seed
-    stack → moe). The first resolve creates profiles.toml; if that alone shut
-    adoption off, whichever slot happened to launch first would win and the
-    rest would silently fall back to the device default.
-    """
-    p = tmp_path / "profiles.toml"
-    catalog = ProfileCatalog(path=p)
-
-    for name in ("dense", "coding", "moe"):
-        assert catalog.resolve(name).name == name
-
-    stored = load_profiles_config(p).profile
-    assert {"dense", "coding", "moe"} <= set(stored)
+def test_seeds_are_immutable_and_undeletable(tmp_path: Path) -> None:
+    catalog = ProfileCatalog(path=tmp_path / "profiles.toml")
+    with pytest.raises(Conflict) as exc:
+        catalog.update("coding", ProfilePatch(intent="mine now"))
+    assert exc.value.code == "profiles.seed_immutable"
+    with pytest.raises(Conflict) as exc:
+        catalog.delete("agent")
+    assert exc.value.code == "profiles.seed_immutable"
 
 
-def test_materialized_legacy_profile_stays_deleted(tmp_path: Path) -> None:
-    """Adopting a name settles it: a later delete is not undone by a resolve."""
-    p = tmp_path / "profiles.toml"
-    catalog = ProfileCatalog(path=p)
-
-    catalog.resolve("coding")
-    catalog.delete("coding")
-
-    with pytest.raises(NotFound):
-        catalog.resolve("coding")
-    # ...and it does not take its unadopted siblings down with it.
-    assert catalog.resolve("moe").name == "moe"
+def test_demoted_names_are_not_resurrected(tmp_path: Path) -> None:
+    """The retired demoted-seed names (``dense``, ``moe``) are plain unknowns now."""
+    catalog = ProfileCatalog(path=tmp_path / "profiles.toml")
+    for name in ("dense", "moe", "thinking"):
+        with pytest.raises(NotFound):
+            catalog.resolve(name)
 
 
 def test_resolve_still_raises_for_an_unknown_name(tmp_path: Path) -> None:

@@ -23,10 +23,8 @@ body has reached its own bottom-of-file import of ``seeds`` -- see spec risk
 R2 and ``tests/config/test_seeds_data.py`` for the cold-import regression
 test).
 
-spec-hw-slot-ownership §3: profiles no longer carry an ``image`` — the image
-is slot-owned (``slot.image_pin or RUNNER_IMAGES[slot.binary]``). ``seed_profiles()``
-drops any ``image`` key still present in the bundled ``seed_profiles.toml`` so
-each seed validates against the image-less ``ProfileConfig``.
+Seed profiles use the ADR-0029 profile shape (flags, ctx_size,
+enable_thinking, vision, mtp, runner, intent).
 """
 
 from __future__ import annotations
@@ -83,7 +81,7 @@ def _embed_rerank_rows(device: str = "gpu-rocm") -> list[dict[str, Any]]:
 
 @lru_cache(maxsize=1)
 def seed_profiles() -> dict[str, dict[str, Any]]:
-    """Raw seed-profile dicts (image sentinels resolved), keyed by slug.
+    """Raw seed-profile dicts, keyed by slug.
 
     Same shape as the old module-level ``SEED_PROFILES`` dict this replaces:
     ``ProfileConfig.model_validate`` is called by callers (the loader, the
@@ -98,33 +96,7 @@ def seed_profiles() -> dict[str, dict[str, Any]]:
     profiles = raw.get("profile", {})
     out: dict[str, dict[str, Any]] = {}
     for name, entry in profiles.items():
-        entry = dict(entry)
-        # spec-hw-slot-ownership §3: profiles carry no image — drop any that a
-        # (bundled or hand-edited) seed_profiles.toml still lists, so the seed
-        # validates against the image-less ProfileConfig.
-        entry.pop("image", None)
-        out[name] = entry
-    return out
-
-
-@lru_cache(maxsize=1)
-def legacy_seed_profiles() -> dict[str, dict[str, Any]]:
-    """The 5 demoted profile definitions, keyed by slug — same shape as
-    :func:`seed_profiles`, but NOT part of the shipped seed catalog.
-
-    These used to be seeds; the catalog was pruned to the minimal core and
-    these workload variants became operator-owned data. They stay shipped
-    (rather than deleted) so an upgrade can inject them once as ordinary
-    custom profiles — see ``legacy_seed_profiles.toml``'s header and
-    ``loader.load_profiles_config``.
-    """
-    raw = _read_toml("legacy_seed_profiles.toml")
-    profiles = raw.get("profile", {})
-    out: dict[str, dict[str, Any]] = {}
-    for name, entry in profiles.items():
-        entry = dict(entry)
-        entry.pop("image", None)
-        out[name] = entry
+        out[name] = dict(entry)
     return out
 
 
@@ -171,7 +143,6 @@ def reset_cache() -> None:
     should call this after making their change.
     """
     seed_profiles.cache_clear()
-    legacy_seed_profiles.cache_clear()
     seed_stacks.cache_clear()
     profile_bench.cache_clear()
     family_defaults.cache_clear()

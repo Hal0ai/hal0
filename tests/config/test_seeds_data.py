@@ -1,9 +1,9 @@
 """Tests for hal0.config.seeds — the shipped-TOML seed-data loader (P3-schema).
 
-Covers spec-p3-schema.final.md Part A: the four data files under
+Covers spec-p3-schema.final.md Part A: the data files under
 ``hal0/config/data/`` load and validate correctly, and the schema.py
-backward-compat shims (``SEED_PROFILES`` etc.) still expose the same shape
-every existing caller expects.
+module-level names (``SEED_PROFILES`` etc.) expose exactly what the loader
+returns.
 
 Targeted file run:
     uv run python -m pytest tests/config/test_seeds_data.py -q
@@ -14,7 +14,6 @@ from __future__ import annotations
 from hal0.config import seeds
 from hal0.config.schema import (
     FAMILY_DEFAULTS,
-    LEGACY_SEED_PROFILES,
     PROFILE_BENCH,
     SEED_PROFILES,
     SEED_STACKS,
@@ -22,13 +21,16 @@ from hal0.config.schema import (
     StackConfig,
 )
 
-# The seeded catalog is the operator-approved minimal core: one profile per
-# runtime family plus the generic llama-server workloads. The five workload
-# variants it used to carry are parked in ``legacy_seed_profiles.toml`` and
-# demoted to ordinary custom profiles on existing installs (see
-# ``loader.load_profiles_config``).
+# The seeded catalog (ADR-0029 decision 4): one profile per runtime family, the
+# generic llama-server workloads, and the canonical seeds the shipped slots
+# name (agent / utility / coding / brain). There are no demoted seeds: the
+# retired ``dense`` / ``moe`` / ``thinking`` / ``chat-long-context`` tunes
+# are published as community addon envelopes instead.
 KEEP_NAMES = {
     "chat",
+    "agent",
+    "utility",
+    "coding",
     "cpu-chat",
     "embedding",
     "reranking",
@@ -38,13 +40,6 @@ KEEP_NAMES = {
     "moonshine",
     "qwen3-tts",
     "comfyui",
-}
-LEGACY_NAMES = {
-    "chat-long-context",
-    "dense",
-    "moe",
-    "thinking",
-    "coding",
 }
 _EXPECTED_PROFILE_COUNT = len(KEEP_NAMES)
 _EXPECTED_STACK_SLUGS = {"saber", "forge", "pi"}
@@ -63,24 +58,41 @@ class TestSeedProfilesToml:
             ProfileConfig.model_validate(raw), name  # raises on failure
 
 
-class TestLegacySeedProfilesToml:
-    def test_legacy_seeds_hold_the_pruned_five(self) -> None:
-        assert set(LEGACY_SEED_PROFILES) == LEGACY_NAMES
+class TestSeedProfilesAreProfileCentric:
+    """ADR-0029: a seed is a complete tune in the new shape."""
 
-    def test_every_legacy_entry_validates(self) -> None:
-        for name, raw in LEGACY_SEED_PROFILES.items():
-            ProfileConfig.model_validate(raw), name  # raises on failure
+    def test_no_seed_carries_a_retired_field(self) -> None:
+        retired = {"device_class", "backend", "quant", "image"}
+        for name, raw in seeds.seed_profiles().items():
+            assert not retired & set(raw), name
 
-    def test_legacy_entries_carry_no_image(self) -> None:
-        # Same image-less contract as the seed set (spec-hw-slot-ownership §3).
-        for name, raw in LEGACY_SEED_PROFILES.items():
-            assert "image" not in raw, name
+    def test_no_seed_carries_a_model_fact_flag(self) -> None:
+        for name, raw in seeds.seed_profiles().items():
+            tokens = str(raw.get("flags", "")).split()
+            assert "--jinja" not in tokens, name
+            assert "--no-mmproj" not in tokens, name
+            assert not any(t.startswith("--chat-template") for t in tokens), name
 
-    def test_legacy_shim_matches_loader(self) -> None:
-        assert seeds.legacy_seed_profiles() == LEGACY_SEED_PROFILES
+    def test_shipped_slot_seeds_carry_their_windows(self) -> None:
+        profiles = seeds.seed_profiles()
+        assert profiles["agent"]["ctx_size"] == 65536
+        assert profiles["utility"]["ctx_size"] == 65536
+        assert profiles["brain"]["ctx_size"] == 65536
+        assert profiles["embedding"]["ctx_size"] == 4096
+        assert profiles["reranking"]["ctx_size"] == 4096
+        assert profiles["flm"]["ctx_size"] == 16384
+        assert "ctx_size" not in profiles["coding"]
 
-    def test_the_two_sets_are_disjoint(self) -> None:
-        assert not set(SEED_PROFILES) & set(LEGACY_SEED_PROFILES)
+    def test_vision_off_where_the_old_tune_said_no_mmproj(self) -> None:
+        profiles = seeds.seed_profiles()
+        for name in ("agent", "coding", "brain"):
+            assert profiles[name]["vision"] == "off", name
+
+    def test_demoted_seed_set_is_gone(self) -> None:
+        import hal0.config.schema as schema_mod
+
+        assert not hasattr(schema_mod, "LEGACY_SEED_PROFILES")
+        assert not hasattr(seeds, "legacy_seed_profiles")
 
 
 class TestPruneLeavesInfrastructureResolvable:

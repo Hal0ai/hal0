@@ -256,21 +256,16 @@ class TestSlotConfigRoundTrip:
         """Unknown top-level sections round-trip via `extra` so hand-edits survive."""
         paths.slots_config_dir().mkdir(parents=True, exist_ok=True)
         (paths.slots_config_dir() / "primary.toml").write_text(
-            "[slot]\n"
-            'name = "primary"\n'
-            "port = 8081\n"
-            "[defaults]\n"
-            "threads = 12\n"
-            'extra_args = "--foo"\n'
+            '[slot]\nname = "primary"\nport = 8081\n[custom]\nthreads = 12\nnote = "hand edit"\n'
         )
         cfg = load_slot_config("primary")
-        assert cfg.extra.get("defaults", {}).get("threads") == 12
+        assert cfg.extra.get("custom", {}).get("threads") == 12
 
-        # Round-trip preserves the [defaults] section.
+        # Round-trip preserves the [custom] section.
         save_slot_config(cfg)
         with open(paths.slots_config_dir() / "primary.toml", "rb") as f:
             data = tomllib.load(f)
-        assert data["defaults"]["threads"] == 12
+        assert data["custom"] == {"threads": 12, "note": "hand edit"}
 
     # ── flat vs nested slot TOML shape (#1087) ───────────────────────────
 
@@ -301,15 +296,15 @@ class TestSlotConfigRoundTrip:
             'name = "primary"\n'
             "port = 8081\n"
             'profile = "chat-gpu"\n'
-            "[server]\n"
-            'extra_args = "--foo"\n'
-            "[defaults]\n"
+            "[server.env]\n"
+            'HSA_OVERRIDE_GFX_VERSION = "11.5.1"\n'
+            "[custom]\n"
             "threads = 12\n"
         )
         cfg = load_slot_config("primary")
         assert cfg.profile == "chat-gpu"
-        assert cfg.server.extra_args == "--foo"
-        assert cfg.extra.get("defaults", {}).get("threads") == 12
+        assert cfg.server.env == {"HSA_OVERRIDE_GFX_VERSION": "11.5.1"}
+        assert cfg.extra.get("custom", {}).get("threads") == 12
 
     def test_load_flat_slot_toml_infers_name_from_filename(self, tmp_hal0_home: str) -> None:
         """A flat TOML omitting `name` still names the slot from its stem."""
@@ -320,43 +315,52 @@ class TestSlotConfigRoundTrip:
         assert cfg.port == 8082
         assert cfg.profile == "embed-cpu"
 
-    # ── Phase 1 A3: [server].extra_args ──────────────────────────────────
+    # ── [server]: container env only; tuning keys are unconverted (ADR-0029) ──
 
-    def test_server_extra_args_missing_defaults_to_none(self, tmp_hal0_home: str) -> None:
-        """A slot TOML without a [server] table loads with server.extra_args = None."""
+    def test_server_env_missing_defaults_to_none(self, tmp_hal0_home: str) -> None:
+        """A slot TOML without a [server] table loads with server.env = None."""
         paths.slots_config_dir().mkdir(parents=True, exist_ok=True)
         (paths.slots_config_dir() / "primary.toml").write_text(
             '[slot]\nname = "primary"\nport = 8081\n'
         )
         cfg = load_slot_config("primary")
-        assert cfg.server.extra_args is None
+        assert cfg.server.env is None
 
-    def test_server_extra_args_loads_from_toml(self, tmp_hal0_home: str) -> None:
-        """`[server].extra_args = "..."` populates the typed ServerConfig field."""
-        paths.slots_config_dir().mkdir(parents=True, exist_ok=True)
-        (paths.slots_config_dir() / "primary.toml").write_text(
-            "[slot]\n"
-            'name = "primary"\n'
-            "port = 8081\n"
-            "[server]\n"
-            'extra_args = "--lora /tmp/lora.gguf"\n'
-        )
-        cfg = load_slot_config("primary")
-        assert cfg.server.extra_args == "--lora /tmp/lora.gguf"
-
-    def test_server_extra_args_round_trips(self, tmp_hal0_home: str) -> None:
-        """save → load → save preserves [server].extra_args on disk."""
+    def test_server_env_round_trips(self, tmp_hal0_home: str) -> None:
+        """save → load → save preserves [server].env on disk as a proper table."""
         cfg = SlotConfig(name="primary", port=8081)
-        cfg.server.extra_args = "--rope-freq-base 500000"
+        cfg.server.env = {"HSA_OVERRIDE_GFX_VERSION": "11.5.1"}
         save_slot_config(cfg)
 
         loaded = load_slot_config("primary")
-        assert loaded.server.extra_args == "--rope-freq-base 500000"
+        assert loaded.server.env == {"HSA_OVERRIDE_GFX_VERSION": "11.5.1"}
 
-        # Disk shape is a proper [server] table.
         with open(paths.slots_config_dir() / "primary.toml", "rb") as f:
             data = tomllib.load(f)
-        assert data["server"]["extra_args"] == "--rope-freq-base 500000"
+        assert data["server"]["env"] == {"HSA_OVERRIDE_GFX_VERSION": "11.5.1"}
+
+    @pytest.mark.parametrize(
+        ("body", "key"),
+        [
+            ('[server]\nextra_args = "--lora /tmp/lora.gguf"\n', "[server].extra_args"),
+            ("[model]\ncontext_size = 8192\n", "[model].context_size"),
+            ("parallel = 2\n", "parallel"),
+            ("[defaults]\nthreads = 12\n", "[defaults]"),
+        ],
+    )
+    def test_unconverted_tuning_key_fails_to_load(
+        self, tmp_hal0_home: str, body: str, key: str
+    ) -> None:
+        """A slot file still carrying a tuning key was not converted: it fails
+        to load with ``slot.unconverted`` naming the key, rather than launching
+        with a value nothing reads."""
+        paths.slots_config_dir().mkdir(parents=True, exist_ok=True)
+        (paths.slots_config_dir() / "primary.toml").write_text(
+            'name = "primary"\nport = 8081\n' + body
+        )
+        with pytest.raises(ConfigParseError, match=r"slot\.unconverted") as excinfo:
+            load_slot_config("primary")
+        assert key in str(excinfo.value)
 
     def test_unset_server_extra_args_does_not_write_empty_table(self, tmp_hal0_home: str) -> None:
         """A default ServerConfig (all None) elides the [server] table on disk."""

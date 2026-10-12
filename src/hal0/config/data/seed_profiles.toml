@@ -1,130 +1,121 @@
-# hal0 seeded profile catalog — the minimal core (10 profiles total).
+# hal0 seeded profile catalog (ADR-0029: the profile is the whole tune).
 #
-# One profile per runtime family (flm, kokoro, moonshine, qwen3-tts,
-# comfyui) plus the generic llama-server workloads (chat, cpu-chat,
-# embedding, reranking, brain). The 5 workload VARIANTS this file used to
-# carry live in legacy_seed_profiles.toml now — see that file's header for
-# what happens to them on upgrade.
+# A profile holds every tune a slot launches with: free llama-server `flags`
+# (KV cache types, batch sizes, sampling, reasoning, --parallel, ...),
+# `ctx_size` (the context window), `enable_thinking` (the request-time
+# reasoning default), `vision` ("auto" loads the model's mmproj when it has
+# one, "off" never does), `mtp` ("auto" drafts with the model's MTP heads
+# when it has them and the runner supports it, "off" never does) and an
+# optional `runner` (the profile-carried runtime).
 #
-# Per docs/superpowers/specs/2026-07-20-seeded-profile-rework-design.md §4:
-# Profiles are device-agnostic logical-tune TEMPLATES — they carry only
-# model-behavior flags (chat template, sampler, reasoning, KV type, batch
-# sizes, capability toggles). Hardware/operational flags (NGL, threads,
-# --parallel, --metrics, --no-webui, --no-mmap, --poll, --slot-prompt-
-# similarity, --main-gpu, --tensor-split, --split-mode, --ngld) live on
-# the slot. Images and runners live on the slot (via binary / image_pin).
-# Context is slot-owned too (context_size → the launch prefix's --ctx-size):
-# `-c`/`--ctx-size` is on the managed-args denylist (§21.7) and must never
-# appear in a profile's flags — record the intended window in `intent`.
+# What a profile never carries:
+#   * placement — `-ngl`, `-dev`, `--threads`: the slot's typed fields;
+#   * hal0-managed flags — `--model`, `--host`, `--port`, `--alias`,
+#     `--ctx-size` (use `ctx_size`);
+#   * model facts — `--jinja` (hal0 adds it when the runner and the model's
+#     template support it), `--chat-template*`, `--mmproj` / `--no-mmproj`
+#     (use `vision`).
 #
-# `mtp` remains informational for 1.0 (per spec-hw-slot-ownership.md §10)
-# — launch reads MTP from model capability plus the selected slot runner.
+# The self-managed engines (kokoro, moonshine, qwen3-tts) have no model row
+# for their bundle, so its `--model_path` stays in their profile.
 #
-# Flash Attention is `-fa auto`, never `-fa on`. Seeds are generic templates
-# that land on every model/backend/KV-type combination on the box, so they
-# must not force a kernel the backend may not have. In llama.cpp (b10297+)
-# `auto` runs a startup support probe (`resolve_fused_ops`) and falls back to
-# non-FA attention when the FA node cannot be scheduled on the layer's own
-# device; `on` skips that probe entirely and silently leaves FA scheduled
-# off-device. Where FA is genuinely required (quantized V cache, tensor
-# split) llama.cpp promotes `auto` to enabled by itself, so `auto` never
-# costs FA where `on` would have had it. A model that has measured a win
-# from forcing it can still set `-fa on` in `defaults.extra_args`.
+# Seeds are virtual and read-only: they are overlaid from this file on every
+# load and cannot be edited; clone one to customise it. Slots hal0 ships
+# name these seeds (installer/etc-hal0/slots/*.toml).
 #
-# Each profile is a complete recipe for a (workload × model-family) cell.
-# Slot picks ONE profile; per-slot [model].defaults.extra_args overrides.
-# Family-specific quirks (kv-cache type, mmproj behavior, sampler) live in a
-# family-specific profile, NOT in a separate family_defaults layer.
+# Flash Attention is `-fa auto`, never `-fa on`. Seeds land on every
+# model/backend/KV-type combination, so they must not force a kernel the
+# backend may not have. In llama.cpp (b10297+) `auto` runs a startup support
+# probe and falls back to non-FA attention when the FA node cannot be
+# scheduled on the layer's own device; where FA is genuinely required
+# (quantized V cache, tensor split) llama.cpp promotes `auto` by itself.
+#
+# `ctx_size` unset means the model's native window capped at 32768 (8192
+# when the native window is unknown).
 
 [profile.chat]
 # Minimal generic chat — fallback for unknown models.
-flags = "-fa auto --jinja -b 2048 -ub 512"
-mtp = false
+flags = "-fa auto -b 2048 -ub 512"
 intent = "Generic chat (fallback for unknown models)"
-quant = ""
+
+[profile.agent]
+# The agent workload (ADR-0023 `agent` role; the bundled Hermes agent needs
+# at least 64,000 tokens of context). Deterministic sampling, reasoning off.
+flags = "-fa auto -b 2048 -ub 512 --reasoning off --reasoning-budget -1 --no-context-shift --temp 0 --top-p 0.95 --top-k 20 --seed 123"
+ctx_size = 65536
+vision = "off"
+intent = "Agent workload (bundled agent) · 64K ctx"
+
+[profile.utility]
+# The utility workload (ADR-0023 `utility` role): generic chat flags with the
+# 64K window hal0 ships for the utility slot.
+flags = "-fa auto -b 2048 -ub 512"
+ctx_size = 65536
+intent = "Utility workload · 64K ctx"
+
+[profile.coding]
+# Code generation: higher temperature, no reasoning (coders are
+# non-reasoning), sampler --temp 0.7 --top-p 0.95 --top-k 40.
+flags = "-fa auto -b 2048 -ub 512 --reasoning off --reasoning-budget -1 --no-context-shift --temp 0.7 --top-p 0.95 --top-k 40 --seed 123"
+vision = "off"
+intent = "Code generation · 32K ctx"
 
 [profile.embedding]
+# A pooled embedding pass runs the whole input in one physical micro-batch,
+# so -ub matches -b.
 flags = "--embedding -fa auto -b 8192 -ub 8192"
-mtp = false
+ctx_size = 4096
 intent = "Pooled embeddings"
-quant = ""
 
 [profile.reranking]
 flags = "--reranking -fa auto -b 8192 -ub 8192"
-mtp = false
+ctx_size = 4096
 intent = "Reranking"
-quant = ""
 
 [profile.cpu-chat]
-# CPU-safe chat. --threads-batch is llama-server specific (sets the number
-# of threads to use for batch processing; distinct from --threads which
-# sets total CPU threads). --threads stays on the slot.
-flags = "--threads-batch 8 --jinja -b 256 -ub 256"
-mtp = false
+# CPU-safe chat. --threads-batch is llama-server specific (threads for batch
+# processing; distinct from --threads, which stays on the slot).
+flags = "--threads-batch 8 -b 256 -ub 256"
 intent = "CPU-safe chat"
-quant = ""
 
 [profile.flm]
-flags = ""
-mtp = false
+ctx_size = 16384
 intent = "FLM NPU (chat/embed/STT)"
-quant = "W4ABF16"
 
 [profile.kokoro]
 flags = "--model_path /mnt/ai-models/local/kokoro-v1/kokoro-onnx"
-mtp = false
 intent = "Kokoro TTS"
-quant = ""
 
 [profile.moonshine]
 # Moonshine STT (CPU ONNX). Weights are operator-staged under the model
-# store (SELF_MANAGED_PROVIDERS — multi-file ONNX bundle, not registry-
-# pulled). --model_arch picks the checkpoint family the server loads;
-# --model_path points at the staged bundle root (the server resolves the
-# quantized/<variant> leaf itself).
+# store (multi-file ONNX bundle, not registry-pulled). --model_arch picks the
+# checkpoint family the server loads; --model_path points at the staged
+# bundle root (the server resolves the quantized/<variant> leaf itself).
 flags = "--model_path /mnt/ai-models/local/moonshine --model_arch base"
-mtp = false
 intent = "Moonshine STT (CPU)"
-quant = ""
 
 [profile.qwen3-tts]
 flags = "--model_path /mnt/ai-models/local/qwen3-tts/Qwen3-TTS-12Hz-1.7B-CustomVoice --default_voice Ryan --default_language Auto"
-mtp = false
 intent = "Qwen3-TTS"
-quant = "BF16"
 
 [profile.comfyui]
 flags = "--disable-mmap --bf16-vae --cache-none"
-mtp = false
 intent = "ComfyUI"
-quant = ""
 
 [profile.brain]
-# Brain steward workload + LFM2.5-family quirks (per
-# spec-p3-brain.final.md §5a). Brain is 1:1 with its model (LFM2.5-2.6B
-# Q8_0, curated id lfm2.5-2.6b — see installer/etc-hal0/slots/brain.toml),
-# so a single combined profile is cleaner than overlay.
+# Brain steward workload + LFM2.5-family quirks. Brain is 1:1 with its model
+# (LFM2.5-2.6B Q8_0, curated id lfm2.5-2.6b), so one combined profile.
 #
-# Reasoning: LFM2.5 is an RL-trained thinker — it emits <think> from
-# weights, and `chat_template_kwargs enable_thinking=false` does NOT
-# suppress it. The old `--reasoning off --reasoning-format none` pair
-# therefore LEAKED raw think prose into message.content; leaving
-# reasoning-format at the runner default extracts it cleanly into
-# reasoning_content instead (verified on hal0-combined:0826, ct150).
-# Cost note: structured-output/extraction calls still pay the think
-# tokens (~100-300/call at ct150-class 66-76 tok/s) before the
-# grammar-constrained JSON starts — that is the model's contract, not a
-# profile bug. Native tool calls (<|tool_call_start|> dialect) parse
-# cleanly on the :0826+ runner; artefact rounds still reroute per turn to
-# `[brain_chat] tool_model` (ADR-0023 fallback).
+# Reasoning: LFM2.5 is an RL-trained thinker — it emits <think> from weights,
+# and `chat_template_kwargs enable_thinking=false` does NOT suppress it.
+# Leaving reasoning-format at the runner default extracts it cleanly into
+# reasoning_content. Structured-output calls still pay the think tokens
+# (~100-300/call) before the grammar-constrained JSON starts — that is the
+# model's contract, not a profile bug.
 #
-# Sampler: temp 0.7 / top_p 0.95 carried over unchanged from the prior
-# brain profile — the rc.9 validation matrix (canary, json_object,
-# json_schema, tool_calls) ran green with these values on :0826. Batch is
-# llama.cpp's default 2048/512, matching every other seeded profile
-# (#1811).
-flags = "--jinja -fa auto -b 2048 -ub 512 --reasoning-budget -1 --no-context-shift --temp 0.7 --top-p 0.95 --no-mmproj"
-mtp = false
+# Sampler: temp 0.7 / top_p 0.95 (the rc.9 validation matrix ran green with
+# these). Batch is llama.cpp's default 2048/512.
+flags = "-fa auto -b 2048 -ub 512 --reasoning-budget -1 --no-context-shift --temp 0.7 --top-p 0.95"
+ctx_size = 65536
+vision = "off"
 intent = "Brain steward (LFM2.5-2.6B + persona + tool-call routing) · 64K ctx"
-quant = "Q8_0"
-

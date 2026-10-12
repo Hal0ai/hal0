@@ -171,18 +171,6 @@ def test_fit_helper_is_non_mtp_on_rocm() -> None:
     assert profile_name_for_fit("chat", "gpu-vulkan") == "chat"
 
 
-def test_base_profile_for_backend_is_non_mtp(tmp_hal0_home: str) -> None:
-    """_base_profile_for_backend answers the backend→base question using the
-    1.0 canonical workload names (all GPU backends point to 'chat')."""
-    from hal0.config.loader import load_profiles_config
-    from hal0.slots.config_write import _base_profile_for_backend
-
-    catalog = load_profiles_config()
-    assert _base_profile_for_backend(catalog, "rocm") == "chat"
-    assert _base_profile_for_backend(catalog, "vulkan") == "chat"
-    assert _base_profile_for_backend(catalog, "cuda") == "chat"
-
-
 def test_reconcile_device_flip_stays_non_mtp(tmp_hal0_home: str) -> None:
     """Flipping a GPU slot's device keeps the profile — device-only change
     triggers _reconcile_device_profile, which preserves the slot's working
@@ -204,29 +192,40 @@ def test_reconcile_device_flip_stays_non_mtp(tmp_hal0_home: str) -> None:
 def test_reconcile_device_profile_writes_into_nested_slot_table(
     tmp_hal0_home: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """#1685: _reconcile_device_profile must read/write device+profile
-    through slot_scalar_table, not the dict root — on a nested-shape
-    cfg_dict (scalars under [slot]) it used to always no-op (profile_name
-    read from the root came back None) and, worse, a write would have
-    landed on a root key _flatten_slot_toml discards."""
+    """#1685: _reconcile_device_profile must read/write the slot scalars
+    through slot_scalar_table, not the dict root — on a nested-shape cfg_dict
+    (scalars under [slot]) a root read always no-opped, and a root write
+    landed on a key _flatten_slot_toml discards.
+
+    ADR-0029: the only write left is the profile-carried runtime — selecting
+    a runner-carrying profile sets the slot's ``binary`` and, for a
+    single-backend runner, its ``device``.
+    """
     from hal0.config.schema import ProfileConfig, ProfilesConfig
     from hal0.slots.config_write import _reconcile_device_profile
 
-    # Deliberately NOT named "chat" -- _base_profile_for_backend prefers a
-    # literal "chat" profile over any backend match, which would mask the
-    # thing this test is pinning.
-    catalog = ProfilesConfig(
-        profile={
-            "gpu-rocm-base": ProfileConfig(backend="rocm"),
-            "gpu-vulkan-base": ProfileConfig(backend="vulkan"),
-        }
-    )
+    catalog = ProfilesConfig(profile={"cuda-chat": ProfileConfig(runner="cuda")})
     monkeypatch.setattr("hal0.config.loader.load_profiles_config", lambda: catalog)
 
-    # A conflicting-backend flip (device -> vulkan, profile stayed the
-    # rocm-backed profile) must derive a coherent vulkan profile -- and land
-    # it in [slot], not the root, on a nested-shape cfg_dict.
-    cfg_dict: dict[str, object] = {"slot": {"device": "gpu-vulkan", "profile": "gpu-rocm-base"}}
-    _reconcile_device_profile(cfg_dict, changed={"device"})
-    assert cfg_dict["slot"]["profile"] == "gpu-vulkan-base"
-    assert "profile" not in cfg_dict
+    cfg_dict: dict[str, object] = {"slot": {"device": "gpu-vulkan", "profile": "cuda-chat"}}
+    _reconcile_device_profile(cfg_dict, changed={"profile"})
+    assert cfg_dict["slot"] == {"device": "gpu-cuda", "profile": "cuda-chat", "binary": "cuda"}
+    assert "binary" not in cfg_dict
+    assert "device" not in cfg_dict
+
+
+def test_runnerless_profile_selects_no_hardware(
+    tmp_hal0_home: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ADR-0029: a profile without a runner selects no hardware, so a device
+    flip or profile pick leaves the slot's placement exactly as it was."""
+    from hal0.config.schema import ProfileConfig, ProfilesConfig
+    from hal0.slots.config_write import _reconcile_device_profile
+
+    catalog = ProfilesConfig(profile={"tuned": ProfileConfig(flags="-fa auto")})
+    monkeypatch.setattr("hal0.config.loader.load_profiles_config", lambda: catalog)
+
+    for changed in ({"device"}, {"profile"}, {"device", "profile"}):
+        cfg_dict: dict[str, object] = {"slot": {"device": "gpu-vulkan", "profile": "tuned"}}
+        _reconcile_device_profile(cfg_dict, changed=changed)
+        assert cfg_dict == {"slot": {"device": "gpu-vulkan", "profile": "tuned"}}

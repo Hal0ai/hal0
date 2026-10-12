@@ -6,11 +6,15 @@ from pathlib import Path
 
 import pytest
 
-from hal0.config.schema import MemoryEmbeddingConfig, SlotConfig
+from hal0.config.schema import SEED_PROFILES, MemoryEmbeddingConfig, SlotConfig
 from hal0.install.static_seeds import STATIC_SEED_SLOTS
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _SEEDED_SLOTS_DIR = _REPO_ROOT / "installer" / "etc-hal0" / "slots"
+
+
+def slot_profile_flags(name: str) -> str:
+    return str(SEED_PROFILES[name].get("flags", ""))
 
 
 def test_seed_rerank_toml_validates() -> None:
@@ -22,12 +26,11 @@ def test_seed_rerank_toml_validates() -> None:
     assert (
         slot.port == 8086
     )  # drifted from 8083 per spec §5.4 (port fix for _SETUP_SLOTS[embed] conflict)
-    # Per spec §4.3 / spec-hw-slot-ownership §10: --reranking is a
-    # profile-owned capability toggle (profile.reranking.flags), NOT a
-    # slot [server].extra_args (the extra_args slot field is
-    # HAL0-SUNSET and inert at launch).  SlotConfig.server validates
-    # that extra_args is None (clean seed — no stale slot overrides).
-    assert slot.server.extra_args is None
+    # --reranking is a profile-owned mode flag (profile.reranking.flags):
+    # ADR-0029 leaves the slot no launch-flag field at all, so the seed's
+    # [server] table carries nothing but container env.
+    assert set(type(slot.server).model_fields) == {"env"}
+    assert "--reranking" in str(slot_profile_flags("reranking")).split()
     # Clean seed (WS-E, #1107): no model pin — boots grey, no surprise download.
     assert slot.model.default == ""
 
@@ -36,16 +39,19 @@ def test_seed_utility_toml_validates() -> None:
     raw = tomllib.loads((_SEEDED_SLOTS_DIR / "utility.toml").read_text(encoding="utf-8"))
     slot = SlotConfig.model_validate(raw)
     assert slot.runtime == "container"
-    assert slot.profile == "chat"
+    # ADR-0029: the utility workload seed (64K window) — no longer `chat`
+    # plus a slot-side context ceiling.
+    assert slot.profile == "utility"
     assert slot.device == "gpu-rocm"  # #1888
     # 8090: 8081 was reclaimed as the `agent` seed's canonical primary port
     # (ADR-0023 LLM anchor); utility moved off it on new installs.
     assert slot.port == 8090
     # Clean seed (WS-E, #1107): the ghost id `gemma-4-12b-it` pin is gone — the
-    # slot boots grey (no crash-loop, no surprise download). context_size is a
-    # tuning default that applies once the operator assigns a model.
+    # slot boots grey (no crash-loop, no surprise download). The 64K window is
+    # the profile's ctx_size, applied once the operator assigns a model.
     assert slot.model.default == ""
-    assert slot.model.context_size == 65536
+    assert set(type(slot.model).model_fields) == {"default"}
+    assert SEED_PROFILES["utility"]["ctx_size"] == 65536
 
 
 def test_rerank_defaults_are_hindsight_era() -> None:

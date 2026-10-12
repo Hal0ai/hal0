@@ -9,6 +9,7 @@ Targeted file run only (full suite hangs):
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -30,12 +31,12 @@ def _profile() -> ProfileConfig:
     """A custom (non-seed) profile with a representative mix of fields."""
     return ProfileConfig(
         flags="-fa on",
-        mtp=True,
-        device_class="gpu",
-        backend="rocm",
-        cloned_from="vulkan",
+        ctx_size=65536,
+        enable_thinking=True,
+        vision="off",
+        mtp="off",
+        cloned_from="chat",
         intent="My workload",
-        quant="Q5_K_M",
     )
 
 
@@ -66,12 +67,12 @@ class TestRoundTrip:
         imported = dst.resolve("copied")
         original = _profile()
         assert imported.flags == original.flags
-        assert imported.mtp == original.mtp
-        assert imported.device_class == original.device_class
-        assert imported.backend == original.backend
+        assert imported.ctx_size == original.ctx_size == 65536
+        assert imported.enable_thinking is True
+        assert imported.vision == "off"
+        assert imported.mtp == "off"
         assert imported.cloned_from == original.cloned_from
         assert imported.intent == original.intent
-        assert imported.quant == original.quant
 
     def test_export_import_round_trips_runner(self, tmp_hal0_home: str) -> None:
         env = export_envelope(
@@ -92,7 +93,7 @@ class TestExportEnvelope:
         env = export_envelope("orig", _profile(), exported_at="2026-06-20T00:00:00Z")
         assert env["kind"] == ENVELOPE_KIND
         assert env["kind"] == "hal0.profile"
-        assert env["schema_version"] == PROFILE_SCHEMA_VERSION_CURRENT
+        assert env["schema_version"] == PROFILE_SCHEMA_VERSION_CURRENT == 2
         assert env["name"] == "orig"
         assert env["exported_at"] == "2026-06-20T00:00:00Z"
         assert env["checksum"].startswith("sha256:")
@@ -101,17 +102,27 @@ class TestExportEnvelope:
         env = export_envelope("orig", _profile(), exported_at="t")
         body = env["profile"]
         assert body["flags"] == "-fa on"
-        assert body["mtp"] is True
-        assert body["device_class"] == "gpu"
-        assert body["backend"] == "rocm"
+        assert body["ctx_size"] == 65536
+        assert body["enable_thinking"] is True
+        assert body["vision"] == "off"
+        assert body["mtp"] == "off"
+        assert body["cloned_from"] == "chat"
+
+    def test_body_carries_none_of_the_retired_fields(self, tmp_hal0_home: str) -> None:
+        body = export_envelope("orig", _profile(), exported_at="t")["profile"]
+        assert not {"device_class", "backend", "quant"} & set(body)
 
     def test_exclude_none_drops_unset_optional_fields(self, tmp_hal0_home: str) -> None:
-        # A bare profile leaves backend/cloned_from None → exclude_none drops them.
+        # A bare profile leaves ctx_size/enable_thinking/runner/cloned_from None
+        # → exclude_none drops them; the auto/auto switches stay.
         env = export_envelope("bare", ProfileConfig(), exported_at="t")
         body = env["profile"]
         assert None not in body.values()
-        assert "backend" not in body
+        assert "ctx_size" not in body
+        assert "enable_thinking" not in body
         assert "cloned_from" not in body
+        assert body["vision"] == "auto"
+        assert body["mtp"] == "auto"
 
 
 # ── checksum ─────────────────────────────────────────────────────────────────
@@ -151,6 +162,7 @@ class TestParseEnvelope:
         parsed = parse_envelope(env)
         assert parsed.kind == "hal0.profile"
         assert parsed.profile.flags == "-fa on"
+        assert parsed.profile.ctx_size == 65536
 
     def test_non_dict_rejected(self, tmp_hal0_home: str) -> None:
         with pytest.raises(BadRequest) as exc:
@@ -166,6 +178,58 @@ class TestParseEnvelope:
         with pytest.raises(BadRequest) as exc:
             parse_envelope({"kind": ENVELOPE_KIND})
         assert exc.value.code == "profiles.bad_envelope"
+
+    def test_out_of_range_ctx_size_rejected(self, tmp_hal0_home: str) -> None:
+        env = export_envelope("orig", _profile(), exported_at="t")
+        env["profile"]["ctx_size"] = 64
+        with pytest.raises(BadRequest) as exc:
+            parse_envelope(env)
+        assert exc.value.code == "profiles.bad_envelope"
+
+
+# ── schema 1 is refused (ADR-0029) ───────────────────────────────────────────
+
+#: A schema-1 envelope as 1.4 exported it (boolean ``mtp``, ``device_class``,
+#: ``backend``, ``quant``).
+_SCHEMA_1_ENVELOPE: dict = {
+    "kind": "hal0.profile",
+    "schema_version": 1,
+    "hal0_version": "1.4.0",
+    "name": "old-tune",
+    "checksum": "sha256:241af4cd2636ac1da32a8a7ca0d856724445242cfcde88a208b702b155bdee47",
+    "profile": {
+        "flags": "--jinja -fa on -ctk q8_0 -ctv q8_0 --no-mmproj",
+        "mtp": False,
+        "device_class": "gpu",
+        "intent": "Long-context chat",
+        "quant": "",
+    },
+}
+
+
+class TestSchema1Refused:
+    def test_parse_refuses_a_schema_1_envelope(self) -> None:
+        with pytest.raises(BadRequest) as exc:
+            parse_envelope(_SCHEMA_1_ENVELOPE)
+        assert exc.value.code == "profiles.envelope_schema_unsupported"
+        assert "re-export from hal0 1.5" in str(exc.value)
+        assert exc.value.details["got"] == 1
+
+    def test_import_refuses_a_schema_1_envelope_and_writes_nothing(
+        self, tmp_hal0_home: str
+    ) -> None:
+        catalog = _catalog(tmp_hal0_home)
+        with pytest.raises(BadRequest) as exc:
+            import_profile(_SCHEMA_1_ENVELOPE, "old-tune", catalog)
+        assert exc.value.code == "profiles.envelope_schema_unsupported"
+        assert not any(p.name == "old-tune" for p in catalog.list())
+
+    def test_a_schema_1_envelope_is_refused_before_its_body_is_validated(self) -> None:
+        """The refusal names the schema, not a pydantic complaint about
+        ``device_class`` — and the body is never silently stripped."""
+        with pytest.raises(BadRequest) as exc:
+            parse_envelope({**_SCHEMA_1_ENVELOPE, "profile": {"flags": "", "quant": "Q4"}})
+        assert exc.value.code == "profiles.envelope_schema_unsupported"
 
 
 # ── import_profile ───────────────────────────────────────────────────────────
@@ -207,23 +271,32 @@ class TestImportProfile:
             import_profile(env, "copied", _catalog(tmp_hal0_home))
         assert exc.value.code == "slot.hardware_flag_denied"
 
+    def test_model_fact_flag_rejected(self, tmp_hal0_home: str) -> None:
+        """ADR-0029: --jinja / --no-mmproj are the model's and the ``vision``
+        switch's; an envelope carrying them is refused, not stripped."""
+        for flags in ("--jinja -fa on", "--no-mmproj", "--chat-template-file x.jinja"):
+            env = export_envelope("orig", ProfileConfig(flags=flags), exported_at="t")
+            with pytest.raises(BadRequest) as exc:
+                import_profile(env, "copied", _catalog(tmp_hal0_home))
+            assert exc.value.code == "profiles.model_fact_flag_denied", flags
+
     def test_unknown_runner_is_stripped_not_rejected(self, tmp_hal0_home: str) -> None:
         """Import STRIPS a runtime this box does not have, it does not block.
 
         A portable profile authored on a richer box must still land — its
-        flags and quant are the point — but it lands as Auto rather than
+        flags and tune are the point — but it lands as Auto rather than
         carrying a key this box cannot honour. ``screen_profile_runner``
         stays strict for create/update; only import substitutes.
         """
         env = export_envelope(
-            "orig", ProfileConfig(flags="-fa on", quant="Q6_K", runner="nope"), exported_at="t"
+            "orig", ProfileConfig(flags="-fa on", ctx_size=32768, runner="nope"), exported_at="t"
         )
         assert verify_checksum(env) is True
         resolved = import_profile(env, "copied", _catalog(tmp_hal0_home))
         assert resolved.runner is None
         # Everything else crosses unchanged.
         assert resolved.flags == "-fa on"
-        assert resolved.quant == "Q6_K"
+        assert resolved.ctx_size == 32768
 
     def test_known_runner_survives_import(self, tmp_hal0_home: str) -> None:
         env = export_envelope("orig", ProfileConfig(flags="", runner="standard"), exported_at="t")
@@ -295,136 +368,80 @@ class TestImportVerifiesChecksum:
         resolved = import_profile(env, "copied", _catalog(tmp_hal0_home))
         assert resolved.name == "copied"
 
-    def test_published_artifact_still_imports_with_its_real_checksum(
-        self, tmp_hal0_home: str
-    ) -> None:
-        """The whole point of 1a: the shipped brain profile carries a real
-        checksum, so tightening import must NOT reject it."""
-        resolved = import_profile(
-            _PUBLISHED_CHAT_LONG_CONTEXT, "brain-long-ctx", _catalog(tmp_hal0_home)
-        )
-        assert resolved.name == "brain-long-ctx"
+
+# ── the SHIPPED artifacts: exact-checksum round-trip guarantee ───────────────
+
+_ADDONS = Path(__file__).resolve().parents[2] / "community" / "addons"
 
 
-# ── the SHIPPED artifact: exact-checksum round-trip guarantee ────────────────
-
-#: The published brain profile, byte-for-byte as it ships in
-#: ``Hal0ai/hal0-brain-sft-ROCmFPX-GGUF/chat-long-context.hal0profile.json``.
-#: Its ``device_class: "gpu"`` is exactly the field the v1.0 tuning-only rule
-#: neutralised, so this artifact is the canary for that change.
-_PUBLISHED_CHAT_LONG_CONTEXT: dict = {
-    "kind": "hal0.profile",
-    "schema_version": 1,
-    "hal0_version": "1.0.0a1",
-    "name": "chat-long-context",
-    "checksum": "sha256:241af4cd2636ac1da32a8a7ca0d856724445242cfcde88a208b702b155bdee47",
-    "profile": {
-        "flags": (
-            "-fa on -ctk q8_0 -ctv q8_0 -b 2048 -ub 512 --parallel 1 --no-mmap "
-            "--no-context-shift --poll 100 --poll-batch 1 --metrics --no-webui"
-        ),
-        "mtp": False,
-        "device_class": "gpu",
-        "intent": "Long-context chat",
-        "quant": "",
-    },
-}
+def _published(name: str) -> dict:
+    return json.loads((_ADDONS / f"{name}.hal0profile.json").read_text(encoding="utf-8"))
 
 
-class TestPublishedBrainProfileRoundTrip:
-    """The shipped ``chat-long-context`` artifact must import and round-trip
-    with a STABLE checksum (SHARED-BRIEF §"The shipped brain profile").
-
-    This is the hard constraint on the v1.0 tuning-only rule. ``device_class``
-    and ``backend`` were neutralised to inert match-only hints, but they could
-    NOT be removed from :class:`ProfileConfig`: ``export_envelope`` checksums
-    ``model_dump(exclude_none=True)``, so deleting a field the artifact carries
-    — or changing which fields serialize — silently changes the checksum and
-    breaks every published profile in the wild. These tests fail loudly if
-    anyone later "cleans up" those fields.
-    """
+class TestPublishedAddonRoundTrip:
+    """The shipped ``community/addons`` envelopes must import and round-trip
+    with a STABLE checksum: ``export_envelope`` checksums
+    ``model_dump(exclude_none=True)``, so changing which fields serialize
+    silently changes the checksum and breaks every published profile in the
+    wild. These tests fail loudly if a schema change is made without
+    regenerating the catalog (``scripts/export_addons.py``)."""
 
     def test_published_checksum_verifies(self) -> None:
-        assert verify_checksum(_PUBLISHED_CHAT_LONG_CONTEXT) is True
+        assert verify_checksum(_published("chat-long-context")) is True
 
     def test_reexport_reproduces_the_published_checksum_exactly(self) -> None:
         """Parse → re-export must land on the same sha256. ``exported_at`` is
         excluded from the checksum, so a different clock cannot move it."""
-        env = parse_envelope(_PUBLISHED_CHAT_LONG_CONTEXT)
+        published = _published("chat-long-context")
+        env = parse_envelope(published)
         again = export_envelope(env.name, env.profile, exported_at="2099-01-01T00:00:00Z")
-        assert again["checksum"] == _PUBLISHED_CHAT_LONG_CONTEXT["checksum"]
-        assert again["profile"] == _PUBLISHED_CHAT_LONG_CONTEXT["profile"]
-
-    def test_device_class_gpu_survives_the_round_trip(self) -> None:
-        """The inert hint is PRESERVED, not stripped — stripping it would change
-        the checksum."""
-        env = parse_envelope(_PUBLISHED_CHAT_LONG_CONTEXT)
-        assert env.profile.device_class == "gpu"
-        body = export_envelope(env.name, env.profile, exported_at="t")["profile"]
-        assert body["device_class"] == "gpu"
+        assert again["checksum"] == published["checksum"]
+        assert again["profile"] == published["profile"]
 
     def test_published_artifact_imports_and_is_resolvable(self, tmp_hal0_home: str) -> None:
-        """A real commit-path import: its flags are all genuine model-tuning
-        flags, so it passes the §5 hardware / §21.7 managed screens.
-
-        Imported under a NON-seed name — see
-        ``test_cannot_import_under_its_own_name_because_a_seed_owns_it``."""
+        """A real commit-path import: its flags are all genuine tuning flags,
+        so it passes the hardware / managed / model-fact screens."""
         catalog = _catalog(tmp_hal0_home)
-        resolved = import_profile(_PUBLISHED_CHAT_LONG_CONTEXT, "brain-long-ctx", catalog)
-        assert resolved.name == "brain-long-ctx"
-        assert resolved.device_class == "gpu"
-        assert "--no-webui" in resolved.flags
+        resolved = import_profile(_published("chat-long-context"), "long-ctx", catalog)
+        assert resolved.name == "long-ctx"
+        assert resolved.ctx_size == 131072
+        assert "--no-context-shift" in resolved.flags
 
-    def test_can_now_import_under_its_own_name(self, tmp_hal0_home: str) -> None:
-        """The known limitation this used to pin is GONE.
-
-        ``chat-long-context`` was a SEED, and a different profile from the
-        published one (the seed's flags were the short
-        ``-fa on -ctk q8_0 -ctv q8_0 -b 2048 -ub 512 --no-context-shift`` with
-        ``device_class`` unset), so importing the published artifact under its
-        own name 409'd — and ``save_profiles_config`` stripped seed-named keys
-        anyway, so it could never have persisted. It is a demoted definition
-        now, so the name is the operator's to take.
-        """
+    def test_can_import_under_its_own_name(self, tmp_hal0_home: str) -> None:
+        """Addons are not seeds, so the published name is the operator's to take."""
         catalog = _catalog(tmp_hal0_home)
-        resolved = import_profile(_PUBLISHED_CHAT_LONG_CONTEXT, "chat-long-context", catalog)
-        assert resolved.name == "chat-long-context"
+        resolved = import_profile(_published("dense"), "dense", catalog)
+        assert resolved.name == "dense"
         assert resolved.seed is False
-        assert "--no-webui" in catalog.resolve("chat-long-context").flags
+        assert resolved.vision == "off"
 
     def test_import_still_409s_against_a_seed_name(self, tmp_hal0_home: str) -> None:
         """The seed-owns-the-name conflict itself is unchanged."""
         catalog = _catalog(tmp_hal0_home)
         with pytest.raises(Conflict) as exc:
-            import_profile(_PUBLISHED_CHAT_LONG_CONTEXT, "chat", catalog)
+            import_profile(_published("dense"), "chat", catalog)
         assert exc.value.code == "profiles.exists"
 
     def test_imported_then_exported_still_matches_published(self, tmp_hal0_home: str) -> None:
         """Full loop through the on-disk catalog: import → persist → resolve →
         export reproduces the published checksum. Catches a catalog write that
         drops or coerces a field."""
+        published = _published("thinking")
         catalog = _catalog(tmp_hal0_home)
-        import_profile(_PUBLISHED_CHAT_LONG_CONTEXT, "brain-long-ctx", catalog)
-        r = catalog.resolve("brain-long-ctx")
+        import_profile(published, "thinking-copy", catalog)
+        r = catalog.resolve("thinking-copy")
         again = export_envelope(
-            "brain-long-ctx",
+            "thinking-copy",
             ProfileConfig(
                 flags=r.flags,
-                mtp=r.mtp,
-                device_class=r.device_class,
-                backend=r.backend,
+                ctx_size=r.ctx_size,
+                enable_thinking=r.enable_thinking,
+                vision=r.vision,  # type: ignore[arg-type]
+                mtp=r.mtp,  # type: ignore[arg-type]
+                runner=r.runner,
                 cloned_from=r.cloned_from,
                 intent=r.intent,
-                quant=r.quant,
             ),
             exported_at="t",
         )
-        assert again["checksum"] == _PUBLISHED_CHAT_LONG_CONTEXT["checksum"]
-
-    def test_published_flags_carry_no_hardware_or_managed_flag(self) -> None:
-        """Why the artifact survives the tuning-only rule at all: every entry in
-        its ``flags`` is a model-tuning flag. Guards against a future seed/screen
-        widening that would strand the shipped profile."""
-        flags = _PUBLISHED_CHAT_LONG_CONTEXT["profile"]["flags"]
-        for banned in ("-ngl", "--device", "--threads", "-dev", "-c ", "--ctx-size", "--port"):
-            assert banned not in flags
+        assert again["checksum"] == published["checksum"]

@@ -660,7 +660,6 @@ def _unflatten_slot_toml(cfg: SlotConfig) -> dict[str, Any]:
         "port": data["port"],
         "device": data["device"],
         "provider": data["provider"],
-        "workers": data["workers"],
         "idle_timeout_s": data["idle_timeout_s"],
     }
     # Bilingual self-description (P3-runtime-db): stamp the stable ``id`` into
@@ -673,7 +672,6 @@ def _unflatten_slot_toml(cfg: SlotConfig) -> dict[str, Any]:
         "slot": slot_tbl,
         "model": data["model"],
     }
-    # context_size is Optional (unset → derived at load by the provider);
     # None has no TOML representation, so elide any None in the model table.
     model_tbl = out.get("model")
     if isinstance(model_tbl, dict):
@@ -757,50 +755,23 @@ def save_upstreams_config(cfg: UpstreamsConfig, path: Path | None = None) -> Non
 
 
 def load_profiles_config(path: Path | None = None) -> ProfilesConfig:
-    """Load and validate /etc/hal0/profiles.toml.
+    """Load and validate /etc/hal0/profiles.toml, with the seeds overlaid.
 
-    Returns a :class:`ProfilesConfig` seeded with the built-in bench
-    profiles when the file is absent so ``GET /api/profiles`` is always
-    populated on a fresh install.  Seed profiles are **virtual**: when the
-    file *is* present, every seed key is overlaid from code (SEED_PROFILES),
-    overwriting any on-disk copy, so a re-tuned seed always reaches the
-    install; operator (non-seed) profiles on disk are returned unchanged.
+    Seed profiles are **virtual**: they come from code (``SEED_PROFILES``) on
+    every load and win over a same-named disk entry; operator profiles on disk
+    are returned as written. No file means a fresh install: the seeds alone.
 
-    Args:
-        path: Override path.  If None, uses
-              :func:`hal0.config.paths.profiles_toml`.
-
-    Returns:
-        A validated :class:`ProfilesConfig`.
+    A file still in the pre-ADR-0029 shape (``mtp`` as a bool,
+    ``device_class``/``backend``/``quant``, the demoted-seed markers) fails
+    validation: ``hal0 profile migrate`` converts it.
 
     Raises:
-        ConfigParseError: If the TOML is malformed or fails pydantic
-                          validation (e.g. missing ``image`` field).
+        ConfigParseError: If the TOML is malformed or fails validation.
     """
     target = path if path is not None else paths.profiles_toml()
     if not Path(target).exists():
-        # No file = fresh install. The adoption ledger starts EMPTY and
-        # explicitly so (not None): adopting a demoted name on first reference
-        # applies — the curated slots this install ships still name three of
-        # them. An empty ledger is the whole difference between "fresh, nothing
-        # referenced yet" and "settled, anything missing was deleted", which
-        # file existence alone cannot tell apart once the first adoption has
-        # written the file.
-        return ProfilesConfig.model_validate(
-            {"profile": SEED_PROFILES, "legacy_seeds_migrated": True, "legacy_seeds_adopted": []}
-        )
+        return ProfilesConfig.model_validate({"profile": SEED_PROFILES})
     raw = _read_toml(Path(target))
-    # spec-hw-slot-ownership §3: ``image`` was removed from ProfileConfig. Drop a
-    # stray ``image`` key an un-migrated (or hand-edited) profiles.toml still
-    # carries, BEFORE validation — ProfileConfig is ``extra="forbid"``, so an
-    # unknown ``image`` would otherwise hard-fail load on a box that hasn't run
-    # `hal0 slot migrate-hw` yet. Only ``image`` is dropped; every other typo
-    # still raises. The deploy-window migration removes the key permanently.
-    profiles_raw = raw.get("profile")
-    if isinstance(profiles_raw, dict):
-        for entry in profiles_raw.values():
-            if isinstance(entry, dict):
-                entry.pop("image", None)
     try:
         cfg = ProfilesConfig.model_validate(raw)
     except Exception as exc:
@@ -808,65 +779,9 @@ def load_profiles_config(path: Path | None = None) -> ProfilesConfig:
             f"failed to validate profiles.toml at {target}: {exc}",
             details={"path": str(target), "reason": str(exc)},
         ) from exc
-    # Seeds are VIRTUAL: seed profiles are always overlaid from code
-    # (``SEED_PROFILES``) and never trusted from disk.  Older installers
-    # materialised every seed into profiles.toml, so the previous "inject only
-    # missing keys" merge left stale seed definitions frozen on disk — a
-    # re-tuned seed (new flags / bumped image) in a release never reached an
-    # existing install.  Because seed profiles are immutable through the
-    # catalog API (operators clone to customise — see
-    # ``ProfileCatalog._guard_custom``), a seed key on disk is never a
-    # legitimate operator edit, so overwriting it with the code definition
-    # loses nothing.  Non-seed (operator) profiles are left exactly as written.
     for key, seed_raw in SEED_PROFILES.items():
         cfg.profile[key] = ProfileConfig.model_validate(seed_raw)
-    _sanitize_custom_profile_flags(cfg, Path(target))
     return cfg
-
-
-def _sanitize_custom_profile_flags(cfg: ProfilesConfig, target: Path) -> None:
-    """Strip hal0-managed flags (§21.7) from non-seed profiles, healing disk.
-
-    Older releases let custom profiles persist managed flags — clones of the
-    ``-c``-carrying seeds, hand-edited TOML, pre-guard POST/PUT bodies. Such a
-    profile only explodes later, when its flags are stamped onto a model
-    (``slot.managed_arg_denied`` at save and launch). Strip exactly the
-    denylisted tokens (+ their values) from every non-seed profile so the
-    catalog never serves an unstampable template, and best-effort persist the
-    cleaned text so the on-disk TOML self-heals too (a read-only /etc still
-    gets the sanitized in-memory catalog). Seed keys are code-owned (overlaid
-    above) and never touched.
-    """
-    import shlex
-
-    # Lazy import: hal0.slots pulls in the manager stack, which imports config.
-    from hal0.slots.argv import strip_managed_flags
-
-    sanitized: dict[str, list[str]] = {}
-    for key, profile in cfg.profile.items():
-        if key in SEED_PROFILES or not profile.flags.strip():
-            continue
-        try:
-            tokens = shlex.split(profile.flags)
-        except ValueError:
-            continue  # malformed quoting — leave for the write-path screens
-        clean, removed = strip_managed_flags(tokens)
-        if removed:
-            profile.flags = " ".join(shlex.quote(tok) for tok in clean)
-            sanitized[key] = removed
-    if not sanitized:
-        return
-    log.warning(
-        "custom profile flags carried hal0-managed flag(s); stripped",
-        extra={"event": "profile.flags_sanitized", "profiles": sanitized},
-    )
-    try:
-        save_profiles_config(cfg, path=target)
-    except OSError as exc:
-        log.warning(
-            "could not persist sanitized profiles.toml; serving cleaned catalog in-memory",
-            extra={"event": "profile.flags_sanitize_write_failed", "error": str(exc)},
-        )
 
 
 def save_profiles_config(cfg: ProfilesConfig, path: Path | None = None) -> None:

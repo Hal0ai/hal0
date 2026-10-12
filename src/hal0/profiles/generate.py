@@ -21,8 +21,6 @@ Reuses rather than re-derives:
   apply-time (capability, device) → seed profile name; falls back to
   :func:`hal0.install.profile_derive.derive_profile` when it has no opinion
   (mirrors how the install path itself falls back — see that module).
-* :data:`hal0.hardware.recommend._MOE_ARCHITECTURES` — so a MoE chat model
-  clones ``profile.moe`` instead of the flat ``profile.chat`` fallback.
 * :mod:`hal0.upstreams.huggingface` — the shared HF transport (repo tree +
   metadata fetch, auth headers, error envelopes). This module only adds the
   ``?expand[]=gguf`` call for architecture/context-length, which the shared
@@ -41,13 +39,11 @@ import httpx
 from hal0.capabilities.profile_fit import profile_name_for_fit
 from hal0.config.loader import load_hardware_info
 from hal0.config.schema import (
-    LEGACY_SEED_PROFILES,
     SEED_PROFILES,
     HardwareInfo,
     ProfileConfig,
 )
 from hal0.errors import BadRequest, NotFound
-from hal0.hardware.recommend import _MOE_ARCHITECTURES
 from hal0.install.profile_derive import derive_device, derive_profile
 from hal0.model_meta import classify, model_is_mtp_eligible
 from hal0.profiles import ProfileCatalog, ResolvedProfile
@@ -181,8 +177,8 @@ async def _facts_from_model_id(
         raw_ctx = model.metadata.get("context_length")
         if isinstance(raw_ctx, int) and raw_ctx > 0:
             context_length = raw_ctx
-    if context_length is None and model.defaults and model.defaults.context_size:
-        context_length = model.defaults.context_size
+    # ADR-0029: the model row holds file facts only. The draft's context comes
+    # from the file's native window (metadata), or is left unset.
 
     card_text = ""
     if model.hf_repo:
@@ -338,22 +334,6 @@ async def _facts_from_hf_repo(
 # ── device + seed-profile fit ────────────────────────────────────────────────
 
 
-def _looks_moe(facts: _ModelFacts) -> bool:
-    """True when the model's own facts say MoE, mirroring hardware.recommend.
-
-    Same precedence as :func:`hal0.hardware.recommend._resolve_primary_ctx`'s
-    is_moe check: a backfilled ``architecture`` wins; otherwise fall back to
-    the ``mtp``/``a3b`` tag-or-id heuristic every curated row without an
-    ``architecture`` still relies on.
-    """
-    if facts.architecture and facts.architecture.strip().lower() in _MOE_ARCHITECTURES:
-        return True
-    lowered = {t.strip().lower() for t in facts.tags}
-    if "moe" in lowered or "a3b" in lowered or "mtp" in lowered:
-        return True
-    return "a3b" in facts.id_for_moe.lower()
-
-
 def _fit_seed_profile(facts: _ModelFacts, hw: HardwareInfo) -> tuple[str, str, list[str]]:
     """Return ``(device, seed_profile_name, warnings)`` for this host."""
     warnings: list[str] = []
@@ -378,15 +358,7 @@ def _fit_seed_profile(facts: _ModelFacts, hw: HardwareInfo) -> tuple[str, str, l
         # heuristic, which always returns a name.
         seed_name = derive_profile(facts.capability, device)
 
-    if seed_name == "chat" and _looks_moe(facts):
-        # "chat" is the flat, model-agnostic fallback; "moe" is the workload
-        # profile tuned for hybrid-KV MoE models (f16 KV, no context shift).
-        # "moe" is a DEMOTED definition now, not a seed — ProfileCatalog.resolve
-        # serves it wherever the install still has it, which is why the guard
-        # below accepts the demoted set rather than seeds alone.
-        seed_name = "moe"
-
-    if seed_name not in SEED_PROFILES and seed_name not in LEGACY_SEED_PROFILES:
+    if seed_name not in SEED_PROFILES:
         # Defensive only — profile_name_for_fit/derive_profile are expected
         # to always name a catalog-resolvable profile; guards against future
         # catalog drift rather than a case reachable today.
@@ -401,14 +373,7 @@ def _fit_seed_profile(facts: _ModelFacts, hw: HardwareInfo) -> tuple[str, str, l
 def _resolve_seed_or_fall_back(seed_name: str, warnings: list[str]) -> ResolvedProfile:
     """Resolve the derived profile, degrading to ``chat`` if it is gone.
 
-    Membership in ``SEED_PROFILES``/``LEGACY_SEED_PROFILES`` is a STATIC fact
-    about shipped data; whether the catalog can actually serve a name is a
-    runtime one, and since the demotion the two can disagree. A demoted name is
-    an ordinary custom profile now, so deleting it is a first-class operator
-    action — and :meth:`ProfileCatalog.resolve` deliberately does not resurrect
-    a deleted entry. The MoE upgrade above still asks for ``moe``, so without
-    this a draft request for a MoE-shaped model on an install that deleted it
-    would surface a raw NotFound.
+    Seeds are always served, so this only guards against catalog drift.
 
     ``chat`` is a seed, so it cannot be deleted and this cannot recurse.
     """
@@ -580,12 +545,13 @@ async def generate_draft_profile(
 
     draft = ProfileConfig(
         flags=seed.flags,
-        mtp=bool(seed.mtp or facts.mtp_eligible),
-        device_class=seed.device_class,
-        backend=seed.backend,
+        ctx_size=seed.ctx_size,
+        enable_thinking=seed.enable_thinking,
+        vision=seed.vision,
+        mtp=seed.mtp,
+        runner=seed.runner,
         cloned_from=seed.name,
         intent=intent,
-        quant=facts.quant or seed.quant or "",
     )
 
     profile_name = _resolve_name(name, fallback_name_source, warnings)
