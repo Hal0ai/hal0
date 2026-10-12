@@ -330,16 +330,28 @@ exactly once. It follows ADR-0028's contract:
   as `migrate_runner_system` does (`rerender_slot_units`) and compares each
   slot's newly rendered argv with the plan. The check uses a strict render
   (`providers.container.strict_slot_argv`), not the fail-open preview.
-  - A rendered argv that differs blocks only that slot. Each slot file is
-    separate, so its original goes back, a stack row re-pointed to follow it
-    is put back, and any profile generated for it alone stays in
-    `profiles.toml`, unreferenced. The difference is reported as BLOCKED,
-    and the rest of the install converts. The model tuning that slot still
-    launches from is kept.
-  - Any error while rendering (a registry or catalog error, a file that does
-    not read) is not a mismatch. It rolls back every write, as does a failure
-    writing a shared file (`profiles.toml`, `stacks.toml`) or the registry.
-    The next start or update tries again.
+  - A rendered argv that differs, or a slot that does not render for a
+    reason of its own (its profile does not resolve), blocks only that slot.
+    Each slot file is separate, so its original goes back, its stack rows stay
+    whole, and any profile generated for it alone stays in `profiles.toml`,
+    unreferenced. It is reported as BLOCKED, the rest of the install converts,
+    and the model tuning that slot still launches from is kept.
+  - An infrastructure error while rendering (the registry database, a file
+    that cannot be read, a timeout) is not a slot's fault. It rolls back
+    every write, as does a failure writing a shared file (`profiles.toml`,
+    `stacks.toml`) or the registry. The next start or update tries again.
+  - **A blocked slot keeps working.** The ledger records each blocked slot
+    with its reason, a hash of its file, and the argv it launched with before
+    the conversion. While the file is unchanged, the launch path
+    (`blocked_slot_pin`) launches that pre-conversion argv, with the runner
+    image and devices resolved from its placement, so a converter problem
+    never takes a working slot down. Once the operator edits the file, the
+    pin no longer applies, and the slot converts or refuses with
+    `slot.unconverted` and the reason.
+  - **Steady state writes nothing.** A run with nothing to write and no model
+    tuning to clear returns its report only: no backup, no audit entry, no
+    unit re-render. A slot that failed its launch check stays blocked
+    without another attempt while its file and its plan are unchanged.
   The plan renders a model with no registry row (never pulled, or deleted)
   as the launch path does: `--model <model id>`
   (`_best_effort_model_info`), so a stale slot converts like any other. The
@@ -379,7 +391,10 @@ exactly once. It follows ADR-0028's contract:
   `preferred_runner`, and the `_enable_thinking` / `_vision` keys of `extra`
   into `legacy_model_tuning`. It leaves the `model` columns in place.
   - Once 012 has run, the converter reads only the holding table, and drops
-    it once nothing is blocked. Because of this, the order of "DB opened" and
+    it once nothing is blocked. After a restore (the restore marker), the
+    holding table is re-snapshotted from the live columns before planning:
+    the older release may have edited them, and a newer process may have
+    re-applied 012 in between. Because of this, the order of "DB opened" and
     "converter ran" cannot lose data.
   - Nothing new reads or writes the old columns. They stay so that a rollback
     to an older release finds the schema it expects, even while that

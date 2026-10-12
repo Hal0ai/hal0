@@ -190,7 +190,11 @@ applying. Add those subsections to a version's section to surface them; see
     `/var/lib/hal0/profile-centric-ledger.json`. A profile entry that is
     still invalid is set aside (`profiles.invalid` for the slots that name
     it) instead of failing the whole catalog.
-  - `hal0 update` lists every blocker with its fix and exits 2.
+  - `hal0 update` lists every blocker with its fix and exits 2. A blocked
+    slot keeps launching the command it ran before the conversion until its
+    file is edited, and a run with nothing to write makes no backup. Run a
+    manual conversion as the service user:
+    `sudo -u hal0 hal0 profile migrate --apply`.
 
   Four launch changes are reported, never silent:
   - a slot without a usable profile gets its type's seed;

@@ -378,6 +378,8 @@ Those values are dropped, never applied: the conversion keeps what each slot
 launches. Without flags it writes nothing.
 
 - `--apply` converts. `hal0 update` and `hal0 serve` do this automatically.
+  Run it as the service user, `sudo -u hal0 hal0 profile migrate --apply`
+  (it refuses to run as root, which would leave a backup hal0 cannot read).
   It writes `/var/lib/hal0/backups/profiles-<ts>.tar.gz` first and checks each
   converted slot's launch against the plan. A slot that does not match is put
   back and reported as blocked.
