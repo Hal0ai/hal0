@@ -132,7 +132,7 @@ def profile_migrate(
     box, and prints which profiles would be generated, which slots re-point,
     which keys leave the slots, and every value that is inert today (those
     are dropped, never applied: the conversion keeps what launches). Exits 2
-    when any slot cannot be converted.
+    when anything cannot be converted (a slot, a stored profile or a stack).
     """
     from hal0.config.migrations.profile_centric import ProfileMigrationError, plan_conversion
 
@@ -146,9 +146,12 @@ def profile_migrate(
     else:
         for line in plan.lines():
             typer.echo(line)
-        if plan.blocked:
-            typer.echo(f"{len(plan.blocked)} slot(s) cannot be converted; see BLOCKED above")
-    if plan.blocked:
+        if plan.blockers:
+            typer.echo(
+                f"{len(plan.blockers)} item(s) cannot be converted "
+                f"({', '.join(plan.blockers)}); see BLOCKED above"
+            )
+    if plan.blockers:
         raise typer.Exit(2)
 
 

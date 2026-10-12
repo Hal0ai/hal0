@@ -336,28 +336,184 @@ def _converted_install() -> None:
     _db([_model("big-chat", metadata={"context_length": 262144}, tags=["mtp"])])
 
 
-def test_converted_install_plans_nothing() -> None:
+def test_converted_install_plans_nothing_without_any_state_file() -> None:
+    """Shape is read from content: no state file, still nothing to convert."""
+    _converted_install()
+    assert not (paths.var_lib() / pc.STATE_FILE).exists()
+    plan = pc.plan_conversion()
+    assert not plan.changed, plan.lines()
+    assert plan.lines()[-1] == "nothing to convert"
+    assert _by_name(plan)["agent"].notes == ["already in the new shape"]
+
+
+def test_state_file_is_never_consulted() -> None:
+    """A stale "complete" record does not hide an old-shape slot file."""
     _converted_install()
     state = paths.var_lib() / pc.STATE_FILE
     state.parent.mkdir(parents=True, exist_ok=True)
     state.write_text(json.dumps({"complete": True, "slots": ["1.toml"]}))
+    _slot(
+        "2",
+        {
+            "id": 2,
+            "name": "late",
+            "type": "llm",
+            "device": "gpu-rocm",
+            "profile": "chat",
+            "port": 8083,
+            "workers": 1,
+            "model": {"default": "big-chat", "context_size": 50000},
+        },
+    )
+    plan = pc.plan_conversion()
+    late = _by_name(plan)["late"]
+    assert late.status == "convert" and late.profile_after != "chat"
+    assert _ctx(late.argv_after) == 50000
+    assert _by_name(plan)["agent"].status == "unchanged"
+
+
+def test_lost_state_after_conversion_regenerates_nothing() -> None:
+    """New-shape profiles (mtp="off", ctx_size, enable_thinking) are never
+    re-read through the frozen resolver."""
+    _write(
+        paths.profiles_toml(),
+        {
+            "profile": {
+                "thinking-big": {
+                    "flags": "-fa auto --reasoning on",
+                    "ctx_size": 96000,
+                    "enable_thinking": True,
+                    "mtp": "off",
+                    "cloned_from": "chat",
+                }
+            }
+        },
+    )
+    _slot(
+        "1",
+        {
+            "id": 1,
+            "name": "agent",
+            "type": "llm",
+            "device": "gpu-rocm",
+            "profile": "thinking-big",
+            "port": 8082,
+            "model": {"default": "big-chat"},
+        },
+    )
+    _db([_model("big-chat", metadata={"context_length": 262144}, tags=["mtp"])])
     plan = pc.plan_conversion()
     assert not plan.changed, plan.lines()
-    assert plan.lines()[-1] == "nothing to convert"
+    assert not plan.profiles and not plan.profile_rewrites
 
 
-def test_slots_an_earlier_run_converted_are_not_reevaluated() -> None:
+def test_mixed_shapes_block() -> None:
+    _write(
+        paths.profiles_toml(),
+        {"profile": {"half": {"flags": "-fa auto", "quant": "Q4", "ctx_size": 8192}}},
+    )
+    _slot(
+        "1",
+        {
+            "id": 1,
+            "name": "agent",
+            "type": "llm",
+            "device": "gpu-rocm",
+            "profile": "half",
+            "port": 8082,
+            "workers": 1,
+            "model": {"default": "big-chat"},
+        },
+    )
+    _db([_model("big-chat", metadata={"context_length": 262144})])
+    plan = pc.plan_conversion()
+    assert plan.blocked_profiles["half"] and "mixes" in plan.blocked_profiles["half"][0]
+    assert _by_name(plan)["agent"].status == "blocked"
+    assert plan.blockers == ["1.toml", "profile:half"]
+
+
+def test_seed_rename_never_overwrites_an_existing_custom() -> None:
+    """`agent` moves aside for the new seed; `agent-custom` is already taken."""
+    _write(
+        paths.profiles_toml(),
+        {
+            "profile": {
+                "agent": {"flags": "-fa auto -b 64", "mtp": False},
+                "agent-custom": {"flags": "-fa auto -b 32", "mtp": False},
+            }
+        },
+    )
+    plan = pc.plan_conversion()
+    assert plan.renames == {"agent": "agent-custom-2"}
+    assert "-b 32" in str(plan.profiles.get("agent-custom", {}).get("flags", "")) or (
+        "agent-custom" not in plan.profiles
+    )
+    assert "-b 64" in plan.profiles["agent-custom-2"]["flags"]
+
+
+def test_blocked_profile_no_slot_uses_is_reported() -> None:
+    _write(
+        paths.profiles_toml(),
+        {"profile": {"orphan": {"flags": "-fa auto --mmproj /p.gguf", "mtp": False}}},
+    )
+    plan = pc.plan_conversion()
+    assert "orphan" in plan.blocked_profiles
+    assert plan.blockers == ["profile:orphan"]
+    assert any(line.startswith("profile orphan: BLOCKED") for line in plan.lines())
+
+
+def test_stack_errors_count_as_blocked() -> None:
+    _write(
+        paths.stacks_toml(),
+        {"stack": {"st": {"slots": [], "profiles": {"emb": {"flags": "--mmproj /p"}}}}},
+    )
+    plan = pc.plan_conversion()
+    assert plan.blockers == ["stack:st"]
+    assert plan.to_dict()["blocked"] == ["stack:st"]
+
+
+def test_old_slot_keys_next_to_a_converted_profile_block() -> None:
     _converted_install()
-    state = paths.var_lib() / pc.STATE_FILE
-    state.parent.mkdir(parents=True, exist_ok=True)
-    state.write_text(json.dumps({"complete": False, "slots": ["1.toml"]}))
+    _slot(
+        "1",
+        {
+            "id": 1,
+            "name": "agent",
+            "type": "llm",
+            "device": "gpu-rocm",
+            "profile": "agent-tune",
+            "port": 8082,
+            "workers": 1,
+            "model": {"default": "big-chat", "context_size": 50000},
+        },
+    )
+    plan = pc.plan_conversion()
+    agent = _by_name(plan)["agent"]
+    assert agent.status == "blocked" and "already converted" in str(agent.error)
+
+
+def test_model_tuning_behind_a_converted_slot_is_kept_as_its_own_profile() -> None:
+    _converted_install()
+    paths.db_path().unlink()
+    _db(
+        [
+            _model(
+                "big-chat",
+                metadata={"context_length": 262144},
+                tags=["mtp"],
+                defaults={"extra_args": "--temp 0.3"},
+            )
+        ]
+    )
     plan = pc.plan_conversion()
     assert _by_name(plan)["agent"].status == "unchanged"
-    assert not plan.profiles
+    (mp,) = plan.models
+    assert mp.clear == {"extra_args": "--temp 0.3"}
+    assert "--temp 0.3" in plan.profiles[str(mp.generated_profile)]["flags"]
 
 
-def test_every_slot_is_evaluated_without_state() -> None:
-    """No shortcut: an untuned slot on a seed whose meaning changes is caught."""
+def test_every_old_slot_is_evaluated() -> None:
+    """An untuned slot on a seed whose meaning changes is caught."""
     _slot(
         "5",
         {
@@ -367,6 +523,7 @@ def test_every_slot_is_evaluated_without_state() -> None:
             "device": "gpu-rocm",
             "profile": "embedding",
             "port": 8089,
+            "workers": 1,
             "model": {"default": "e"},
         },
     )

@@ -65,12 +65,15 @@ def _model(model_id: str = "m", **kw: Any) -> Model:
 
 
 def _slot(stem: str = "1", **kw: Any) -> None:
+    """A slot file as an older hal0 wrote it (its writer always stamped
+    ``workers``, an old-shape key)."""
     data: dict[str, Any] = {
         "id": int(stem) if stem.isdigit() else None,
         "name": kw.pop("name", "s"),
         "type": "llm",
         "device": "gpu-rocm",
         "port": 8081,
+        "workers": 1,
         "model": {"default": "m"},
     }
     data.update(kw)

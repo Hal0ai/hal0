@@ -23,6 +23,7 @@ the plan.
 from __future__ import annotations
 
 import hashlib
+import itertools
 import json
 import re
 import shlex
@@ -74,13 +75,17 @@ MODEL_TUNING_COLUMNS: tuple[str, ...] = (
 MODEL_TUNING_EXTRA_KEYS: tuple[str, ...] = ("_enable_thinking", "_vision")
 #: The table SQL migration 012 moves the model tuning columns into.
 HOLDING_TABLE = "legacy_model_tuning"
-#: Conversion state under ``/var/lib/hal0``: the slot files already converted
-#: and whether the whole install is. A converted slot is never re-evaluated
-#: (its new-shape profile means nothing to the frozen resolver), which is what
-#: makes a rerun a no-op.
+#: Audit record under ``/var/lib/hal0`` of what the last conversion run did
+#: (written by the apply step). It is a report and is never consulted: what
+#: still needs converting is read from the content itself (:func:`profile_shape`,
+#: :meth:`_Planner.slot_is_old`).
 STATE_FILE = "profile-centric.json"
 #: Profile keys that leave every profile.
 PROFILE_DROP_KEYS: tuple[str, ...] = ("mtp", "device_class", "backend", "quant", "image")
+#: Keys only an old-shape profile carries (as does a boolean ``mtp``).
+OLD_PROFILE_KEYS: tuple[str, ...] = ("device_class", "backend", "quant", "image")
+#: Keys only a new-shape profile carries (as does a string ``mtp``).
+NEW_PROFILE_KEYS: tuple[str, ...] = ("ctx_size", "enable_thinking", "vision")
 #: Stack-row keys that leave every row (inert today: stack apply never used them).
 STACK_ROW_TUNING_KEYS: tuple[str, ...] = ("vision", "mtp", "enable_thinking", "server_extra_args")
 #: Runner key a converted profile names for a non-llama engine.
@@ -198,10 +203,22 @@ class ConversionPlan:
     models: list[ModelPlan] = field(default_factory=list)
     stacks: list[StackPlan] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+    #: Stored profiles that cannot be converted as they are: name -> reasons.
+    #: Reported (and counted as blocking) whether or not any slot uses them.
+    blocked_profiles: dict[str, list[str]] = field(default_factory=dict)
 
     @property
     def blocked(self) -> list[SlotPlan]:
         return [s for s in self.slots if s.status == "blocked"]
+
+    @property
+    def blockers(self) -> list[str]:
+        """Everything that needs an operator: blocked slots (by file), profiles
+        (``profile:<name>``) and stacks (``stack:<name>``)."""
+        out = [s.file for s in self.blocked]
+        out += [f"profile:{name}" for name in sorted(self.blocked_profiles)]
+        out += [f"stack:{st.stack}" for st in self.stacks if st.errors]
+        return out
 
     @property
     def changed(self) -> bool:
@@ -212,12 +229,13 @@ class ConversionPlan:
             or self.renames
             or any(m.clear or m.register_path for m in self.models)
             or self.stacks
+            or self.blocked_profiles
         )
 
     def to_dict(self) -> dict[str, Any]:
         out = asdict(self)
         out["changed"] = self.changed
-        out["blocked"] = [s.file for s in self.blocked]
+        out["blocked"] = self.blockers
         return out
 
     def lines(self) -> list[str]:
@@ -251,6 +269,8 @@ class ConversionPlan:
             out.append(f"new profile {name}: {json.dumps(content, sort_keys=True)}")
         for name, notes in self.profile_rewrites.items():
             out.append(f"profile {name}: rewrite ({'; '.join(notes)})")
+        for name, reasons in sorted(self.blocked_profiles.items()):
+            out.append(f"profile {name}: BLOCKED: {'; '.join(reasons)}")
         for m in self.models:
             if m.clear:
                 out.append(
@@ -527,8 +547,6 @@ class Inputs:
     profiles_raw: dict[str, Any] | None
     stacks_raw: dict[str, Any] | None
     models: dict[str, dict[str, Any]]
-    #: ``{"complete": bool, "slots": [file names]}`` from :data:`STATE_FILE`.
-    state: dict[str, Any] = field(default_factory=dict)
 
 
 def _read_toml(path: Path) -> dict[str, Any] | None:
@@ -544,20 +562,10 @@ def read_inputs(
     profiles_toml: Path | None = None,
     stacks_toml: Path | None = None,
     db_path: Path | None = None,
-    state_file: Path | None = None,
 ) -> Inputs:
-    """Read raw slot/profile/stack TOML, the model rows and the conversion
-    state. Never validates."""
+    """Read raw slot/profile/stack TOML and the model rows. Never validates."""
     from hal0.config import paths
 
-    state_file = state_file or paths.var_lib() / STATE_FILE
-    state: dict[str, Any] = {}
-    if state_file.exists():
-        try:
-            loaded = json.loads(state_file.read_text(encoding="utf-8"))
-        except (OSError, ValueError) as exc:
-            raise ProfileMigrationError(f"cannot read {state_file}: {exc}") from exc
-        state = loaded if isinstance(loaded, dict) else {}
     slots_dir = slots_dir or paths.slots_config_dir()
     profiles_toml = profiles_toml or paths.profiles_toml()
     stacks_toml = stacks_toml or paths.stacks_toml()
@@ -577,7 +585,7 @@ def read_inputs(
         stacks_raw = _read_toml(stacks_toml)
     except (OSError, tomllib.TOMLDecodeError) as exc:
         raise ProfileMigrationError(f"cannot read profile/stack config: {exc}") from exc
-    return Inputs(slots, profiles_raw, stacks_raw, read_model_rows(db_path), state)
+    return Inputs(slots, profiles_raw, stacks_raw, read_model_rows(db_path))
 
 
 def read_model_rows(db_path: Path) -> dict[str, dict[str, Any]]:
@@ -695,17 +703,80 @@ def _tidy(content: Mapping[str, Any]) -> dict[str, Any]:
     return out
 
 
+ProfileShape = Literal["old", "new", "either", "mixed"]
+
+
+def profile_shape(entry: Mapping[str, Any]) -> tuple[ProfileShape, list[str]]:
+    """Which shape a stored profile is in, read from its content alone.
+
+    ``old``: it carries a key only the old shape has (a boolean ``mtp``,
+    ``device_class``, ``backend``, ``quant``, ``image``) or flags the new
+    shape does not accept. ``new``: it carries a key only the new shape has
+    (``ctx_size``, ``enable_thinking``, ``vision``, a string ``mtp``).
+    ``either``: only the keys both shapes share, with flags already in the
+    new form, so converting it changes nothing. ``mixed``: old and new keys
+    together, which blocks. The list names the keys that decided it.
+    """
+    old = [k for k in OLD_PROFILE_KEYS if k in entry]
+    new = [k for k in NEW_PROFILE_KEYS if k in entry]
+    mtp = entry.get("mtp")
+    if isinstance(mtp, bool):
+        old.append("mtp")
+    elif isinstance(mtp, str):
+        new.append("mtp")
+    if old and new:
+        return "mixed", old + new
+    if new:
+        return "new", new
+    if old:
+        return "old", old
+    flags = str(entry.get("flags") or "")
+    try:
+        as_is = shlex.split(flags) if flags.strip() else []
+    except ValueError:
+        return "old", ["flags"]
+    conv = convert_flags(as_is, source="profile")
+    if conv.errors or conv.notes or conv.vision_off or conv.tokens != as_is:
+        return "old", ["flags"]
+    return "either", []
+
+
 class _Planner:
     def __init__(self, inputs: Inputs) -> None:
         self.inputs = inputs
-        self.old = frozen.Catalog(inputs.profiles_raw)
         self.plan = ConversionPlan()
+        raw = inputs.profiles_raw
+        entries = (raw or {}).get("profile")
+        entries = entries if isinstance(entries, Mapping) else {}
+        #: every stored custom profile's shape (see :func:`profile_shape`).
+        self.shapes: dict[str, ProfileShape] = {}
+        #: stored profiles already in the new shape: kept exactly as they are.
+        self.current: dict[str, dict[str, Any]] = {}
+        old_entries: dict[str, Any] = {}
+        for name, entry in entries.items():
+            if not isinstance(entry, Mapping):
+                continue
+            shape, evidence = profile_shape(entry)
+            self.shapes[str(name)] = shape
+            if shape == "mixed":
+                self.plan.blocked_profiles[str(name)] = [
+                    f"mixes old-shape and new-shape keys ({', '.join(evidence)}); "
+                    "it is left as is and must be fixed by hand"
+                ]
+            elif shape == "new":
+                self.current[str(name)] = dict(entry)
+            else:
+                old_entries[str(name)] = entry
+        # The frozen resolver only ever sees old-shape (or shape-neutral)
+        # profiles: a new-shape one means something else to it.
+        self.old = frozen.Catalog(None if raw is None else {**raw, "profile": old_entries})
         self.bound: set[str] = set()
         #: new-shape catalog after conversion: target seeds + converted customs.
         self.catalog: dict[str, dict[str, Any]] = {k: dict(v) for k, v in target_seeds().items()}
+        #: names no converted or generated profile may take.
+        self.reserved: set[str] = {str(n) for n in entries}
         #: old profile name -> its name after conversion.
         self.name_map: dict[str, str] = {}
-        self.blocked_profiles: dict[str, list[str]] = {}
 
     # -- profiles --------------------------------------------------------
 
@@ -717,8 +788,9 @@ class _Planner:
         """
         content = _tidy(conv.content)
         if conv.errors:
-            # Written without the offending flag; every slot still running it is blocked.
-            self.blocked_profiles[name] = conv.errors
+            # Written without the offending flag; every slot still running it
+            # is blocked, and the profile itself is reported as blocked.
+            self.plan.blocked_profiles[name] = conv.errors
         if name in target_seeds():
             if _identity(content) == _identity(target_seeds()[name]):
                 if not new:
@@ -726,9 +798,9 @@ class _Planner:
                         "identical to the new seed of that name; the custom entry is removed"
                     ]
                 return name
-            renamed = slug_name(name, "custom", content=content, taken=self.catalog)
-            if name in self.blocked_profiles:
-                self.blocked_profiles[renamed] = self.blocked_profiles.pop(name)
+            renamed = self._free_name(name, "custom")
+            if name in self.plan.blocked_profiles:
+                self.plan.blocked_profiles[renamed] = self.plan.blocked_profiles.pop(name)
             self.plan.renames[name] = renamed
             self.catalog[renamed] = content
             self.plan.profiles[renamed] = content
@@ -740,7 +812,24 @@ class _Planner:
             self.plan.profile_rewrites[name] = conv.notes
         return name
 
+    def _free_name(self, name: str, suffix: str) -> str:
+        """``<name>-<suffix>``, else ``-<suffix>-2``, ``-3``…: the first name no
+        stored, converted or generated profile holds (never overwrites one)."""
+        taken = set(self.catalog) | self.reserved | set(self.name_map.values())
+        for n in itertools.count(1):
+            tail = f"-{suffix}" if n == 1 else f"-{suffix}-{n}"
+            candidate = name[: 32 - len(tail)].rstrip("-_") + tail
+            if candidate not in taken and _NAME_RE.match(candidate):
+                return candidate
+        raise AssertionError("unreachable")
+
     def plan_profiles(self) -> None:
+        # Profiles already in the new shape stay exactly as they are. One a new
+        # seed shadows (same name) never launched; it is left for the operator.
+        for name, content in sorted(self.current.items()):
+            if name not in target_seeds():
+                self.catalog[name] = content
+                self.name_map[name] = name
         for name in sorted(self.old.custom):
             resolved = self.old.resolve(name)
             assert resolved is not None
@@ -765,6 +854,8 @@ class _Planner:
             new = self._place(old_name, conv, new=True)
             self.name_map[old_name] = new
             return new
+        if old_name in target_seeds():
+            return old_name  # a new seed (agent, utility, …) names itself
         return None
 
     def _generate(self, base: str, suffix: str, content: dict[str, Any]) -> str:
@@ -774,7 +865,10 @@ class _Planner:
         for name in sorted(self.catalog):
             if _identity(self.catalog[name]) == ident:
                 return name
-        name = slug_name(base, suffix, content=content, taken=self.catalog)
+        taken = {**{n: {} for n in self.reserved}, **self.catalog}
+        name = slug_name(base, suffix, content=content, taken=taken)
+        if name in self.reserved and name not in self.catalog:
+            name = self._free_name(name, "converted")
         self.catalog[name] = content
         self.plan.profiles[name] = content
         return name
@@ -799,18 +893,8 @@ class _Planner:
         return sorted(out, key=lambda f: f[0])
 
     def plan_slots(self) -> None:
-        done = set(self.inputs.state.get("slots") or ())
         for fname, raw, error in self._select_files():
             stem = fname[:-5]
-            if fname in done:
-                name = str(frozen.hoist_slot(raw, stem).get("name")) if raw else stem
-                sp = SlotPlan(
-                    file=fname, name=name, profile_before=str((raw or {}).get("profile") or "")
-                )
-                sp.profile_after = sp.profile_before
-                sp.notes.append("converted by an earlier run")
-                self.plan.slots.append(sp)
-                continue
             if raw is None:
                 self.plan.slots.append(
                     SlotPlan(file=fname, name=stem, status="blocked", error=f"unreadable: {error}")
@@ -819,10 +903,70 @@ class _Planner:
             slot = frozen.hoist_slot(raw, stem)
             sp = SlotPlan(file=fname, name=str(slot.get("name") or stem))
             try:
-                self._plan_slot(raw, slot, sp)
+                if not self._already_converted(raw, slot, sp):
+                    self._plan_slot(raw, slot, sp)
             except (ValueError, Hal0Error) as exc:
                 sp.status, sp.error = "blocked", str(exc)
             self.plan.slots.append(sp)
+
+    def _profile_is_current(self, named: str) -> bool:
+        """Does ``named`` mean the same profile in the new catalog as it does
+        to a converted slot (so a slot naming it needs no conversion)?"""
+        if not named:
+            return False  # a converted slot always names its profile
+        shape = self.shapes.get(named)
+        if shape == "new":
+            return True
+        if shape == "either":
+            # Valid in both shapes, unless a new seed now owns the name (the
+            # entry is renamed and the slot re-pointed).
+            return named not in target_seeds()
+        if shape == "old":
+            return False
+        return named in target_seeds()
+
+    def _already_converted(
+        self, raw: Mapping[str, Any], slot: Mapping[str, Any], sp: SlotPlan
+    ) -> bool:
+        """Read the slot's shape from its content (ADR-0029 §7).
+
+        A slot whose file carries no old-shape key, whose profile means the
+        same in the new catalog and whose model row carries no tuning is
+        already converted: it is never handed to the frozen resolver. Any
+        old-shape content is converted, whatever an earlier run recorded.
+        Old-shape slot content next to an already-converted profile cannot be
+        evaluated, so it blocks.
+        """
+        named = str(slot.get("profile") or "")
+        if self.shapes.get(named) == "mixed":
+            raise ValueError(
+                f"profile {named!r} mixes old-shape and new-shape keys; fix it by hand first"
+            )
+        probe = SlotPlan(file=sp.file, name=sp.name, engine=frozen.engine_for(slot, self.old))
+        self._shape_keys(raw, slot, probe)
+        old_keys = [*probe.drop_keys, *probe.set_keys]
+        file_old = bool(old_keys or probe.inert)
+        table = slot.get("model") if isinstance(slot.get("model"), Mapping) else {}
+        model_id = str(table.get("default") or "")
+        model_old = bool(_model_tuning(self.inputs.models.get(model_id) if model_id else None))
+        current = self._profile_is_current(named)
+        if current and not file_old and not model_old:
+            sp.profile_before = sp.profile_after = named
+            sp.notes.append("already in the new shape")
+            return True
+        if self.shapes.get(named) != "new":
+            return False
+        if file_old:
+            raise ValueError(
+                f"carries old-shape keys ({', '.join(old_keys) or 'inert tuning'}) but its "
+                f"profile {named!r} is already converted; remove the keys by hand"
+            )
+        # A converted slot whose model row still carries tuning: the tuning
+        # no longer reaches this slot. It is kept as a profile of its own
+        # (planned as unbound) and cleared from the model.
+        sp.profile_before = sp.profile_after = named
+        sp.notes.append(f"already in the new shape; model {model_id!r} tuning is not applied to it")
+        return True
 
     def _shape_keys(self, raw: Mapping[str, Any], slot: Mapping[str, Any], sp: SlotPlan) -> None:
         for key in SLOT_DROP_KEYS:
@@ -874,10 +1018,10 @@ class _Planner:
             self._plan_modelless(slot, sp)
         else:
             self._plan_llama(slot, sp, model_id, row)
-        if named and sp.profile_after in self.blocked_profiles:
+        if named and sp.profile_after in self.plan.blocked_profiles:
             raise ValueError(
                 f"profile {named!r} cannot be converted: "
-                + "; ".join(self.blocked_profiles[sp.profile_after])
+                + "; ".join(self.plan.blocked_profiles[sp.profile_after])
             )
         if (
             sp.profile_after != sp.profile_before
@@ -1169,6 +1313,15 @@ class _Planner:
             for pname, entry in sorted(embedded.items()):
                 if not isinstance(entry, Mapping):
                     continue
+                shape, evidence = profile_shape(entry)
+                if shape == "new":
+                    continue  # already converted
+                if shape == "mixed":
+                    st.errors.append(
+                        f"embedded profile {pname!r} mixes old-shape and new-shape keys "
+                        f"({', '.join(evidence)}); fix it by hand"
+                    )
+                    continue
                 conv = convert_profile(entry, frozen.LLAMA)
                 if conv.errors:
                     st.errors.append(f"embedded profile {pname!r}: " + "; ".join(conv.errors))
@@ -1224,18 +1377,16 @@ class _Planner:
 def plan_conversion(inputs: Inputs | None = None) -> ConversionPlan:
     """Plan the conversion of this install (or of ``inputs``). Writes nothing."""
     inputs = inputs or read_inputs()
-    if inputs.state.get("complete"):
-        return ConversionPlan()
     planner = _Planner(inputs)
     planner.plan_profiles()
     planner.plan_slots()
     planner.plan_models()
     planner.plan_stacks()
     plan = planner.plan
-    if plan.blocked and "(profiles.toml)" in plan.profile_rewrites:
+    if plan.blockers and "(profiles.toml)" in plan.profile_rewrites:
         plan.profile_rewrites.pop("(profiles.toml)")
         plan.warnings.append(
-            "the demoted-seed markers in profiles.toml stay until every slot converts"
+            "the demoted-seed markers in profiles.toml stay until nothing is blocked"
         )
     return plan
 

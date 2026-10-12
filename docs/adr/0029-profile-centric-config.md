@@ -169,8 +169,9 @@ ships, never the other way round.
 Seeds keep their canonical names. When an install already has a custom
 profile with a seed's name (a `coding` adopted on 1.2–1.3), the conversion
 compares the two tunes: an identical custom is removed and its slots simply
-run the seed; a different one is renamed to `<name>-custom` and every slot and
-stack row naming it is re-pointed, reported. A demoted seed a fresh install
+run the seed; a different one is renamed to `<name>-custom` (or `-custom-2`,
+`-custom-3`… when that name is already taken, so no stored profile is ever
+overwritten) and every slot and stack row naming it is re-pointed, reported. A demoted seed a fresh install
 would have adopted on first reference is written as a custom profile in the
 new shape (no `--jinja`, `--no-mmproj` becomes `vision = "off"`), unless the
 install's adoption ledger says it was deleted.
@@ -251,9 +252,8 @@ exactly once. It follows ADR-0028's contract:
   `--restore <archive>` reverses it.
 - **Inputs.** Raw TOML for every slot file, `profiles.toml` and `stacks.toml`,
   the model rows (with the tuning columns read back from the holding table
-  once migration 012 has moved them), the target seed catalog and the
-  conversion state file. Nothing is validated through the new pydantic models
-  first. When an id-keyed and a name-keyed file carry the same slot, only the
+  once migration 012 has moved them), and the target seed catalog. Nothing is
+  validated through the new pydantic models first. When an id-keyed and a name-keyed file carry the same slot, only the
   one the loader uses (the id-keyed file, `SlotManager._config_file_for`) is
   converted; the other is reported as shadowed and left alone.
 - **Every slot is evaluated, and both launches are compared.** A frozen copy
@@ -341,9 +341,13 @@ exactly once. It follows ADR-0028's contract:
     (`--chat-template*`, `--mmproj <path>`, `-dev`);
   - the converted launch differs from today's outside the four launch changes;
 
-  `hal0 profile migrate` exits 2 while any slot is blocked. The demoted-seed
-  markers in `profiles.toml` stay until every slot converts, so a deleted
-  demoted profile is never re-adopted. A failed write rolls back every write.
+  A stored profile that cannot be converted (a flag with no profile home, or
+  mixed shapes) is reported as blocked even when no slot uses it, and so is a
+  stack whose embedded profile cannot be. `hal0 profile migrate` exits 2 while
+  anything is blocked, and `--json` lists every blocker (`<slot file>`,
+  `profile:<name>`, `stack:<name>`). The demoted-seed markers in
+  `profiles.toml` stay until nothing is blocked, so a deleted demoted profile
+  is never re-adopted. A failed write rolls back every write.
 - **Database.** SQL migration `012_model_tuning_holding.sql` copies `profile`,
   `extra_args`, `n_gpu_layers`, `context_size`, `rope_freq_base`,
   `preferred_runner`, and the `_enable_thinking` / `_vision` keys of `extra`
@@ -355,11 +359,35 @@ exactly once. It follows ADR-0028's contract:
   `/var/lib/hal0/backups/profiles-<ts>.tar.gz` (mode 0600). It holds every file
   the converter changes, plus a JSON dump of the holding table. There is no
   backup without a write and no write without a backup.
-- **Idempotent.** The converter records its progress in
-  `/var/lib/hal0/profile-centric.json`: the slot files it converted and
-  whether the whole install is done. A converted slot is never evaluated
-  again (its new-shape profile means nothing to the frozen resolver), and a
-  finished install plans nothing.
+- **Shape is read from content, which makes it idempotent.** Nothing records
+  what has been converted; each object says it.
+  - A **profile** carrying a key only the new shape has (`ctx_size`,
+    `enable_thinking`, `vision`, a string `mtp`) is already converted. It is
+    kept exactly as it is and never handed to the frozen resolver, where
+    `mtp = "off"` or `ctx_size` would mean something else.
+  - A profile carrying a key only the old shape has (a boolean `mtp`,
+    `device_class`, `backend`, `quant`, `image`), or flags the new shape
+    refuses, is converted.
+  - A profile with only the shared keys (`flags`, `runner`, `intent`,
+    `cloned_from`) and flags already in the new form reads the same in both
+    shapes.
+  - A profile mixing old and new keys blocks, and is left as it is.
+  - A **slot** is already converted when its file carries no old-shape key,
+    its profile means the same in the new catalog (a new-shape or neutral
+    custom, or a seed name), and its model row carries no tuning. Anything
+    else is evaluated, whatever an earlier run did. That includes an
+    old-shape slot file added after a conversion.
+  - Old-shape slot keys next to an already-converted profile cannot be
+    evaluated, so that slot blocks.
+  - A converted slot whose model row still carries tuning keeps the slot as
+    it is. The tuning no longer reaches the slot, so it is kept as a profile
+    of its own and cleared from the model, as for a model no slot uses.
+  - **Known limit.** A hand-written old slot file with no old-shape key that
+    names a seed, over a model with no tuning, reads as converted and runs the
+    new seed. Every slot file an older hal0 wrote carries one: its writer
+    stamped `workers`, and the shipped files carry `runtime`.
+  - `/var/lib/hal0/profile-centric.json` is only an audit record of the last
+    run (written 0640). It is never consulted.
 - **Restore** (for a downgrade below the release that ships this, with
   `hal0-api` stopped). It writes back the files the converter owns. It re-adds
   the dropped columns, refills them from the archive, and removes migration
