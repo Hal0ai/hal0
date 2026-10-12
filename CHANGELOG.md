@@ -154,7 +154,8 @@ applying. Add those subsections to a version's section to surface them; see
     removes them first).
   - The slot views drop `ctx_max`, `chat_template`, `rope_freq_base`,
     `workers`, `parallel` and `llamacpp_args`, and add `ctx_effective` and
-    `ctx_source` (`profile`, `native` or `fallback`).
+    `ctx_source` (`profile`, `native` or `fallback`), plus
+    `conversion_blocked` (reason and fix) for a slot the conversion blocked.
   - `hal0 slot create` and `hal0 slot edit` lose `--ctx-size`; set the
     window with `hal0 profile create|edit --ctx-size` and point the slot at
     that profile.

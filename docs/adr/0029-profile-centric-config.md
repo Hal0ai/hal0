@@ -342,12 +342,20 @@ exactly once. It follows ADR-0028's contract:
     `stacks.toml`) or the registry. The next start or update tries again.
   - **A blocked slot keeps working.** The ledger records each blocked slot
     with its reason, a hash of its file, and the argv it launched with before
-    the conversion. While the file is unchanged, the launch path
-    (`blocked_slot_pin`) launches that pre-conversion argv, with the runner
-    image and devices resolved from its placement, so a converter problem
-    never takes a working slot down. Once the operator edits the file, the
-    pin no longer applies, and the slot converts or refuses with
-    `slot.unconverted` and the reason.
+    the conversion. While the file is unchanged, the launch path and the
+    preview (`blocked_slot_pin`) launch that slot with its recorded tune, on a
+    base, model facts and placement rebuilt from today's slot and model: host,
+    port, model path, alias, chat template and projector are never taken from
+    the record. The recorded tune is screened like a profile (managed,
+    hardware and model-fact flags refuse; the #2545 strip applies), and a
+    record that is not a list of strings refuses with `slot.unconverted`. So
+    a converter problem never takes a working slot down, a moved model file
+    cannot stale it, and an edited ledger cannot redirect it. Once the
+    operator edits the slot file the pin no longer applies. `/api/slots`
+    reports such a slot as `conversion_blocked` (reason, fix, and whether it
+    still runs its pre-conversion tune), and the dashboard badges it.
+    `blocked_slot_pin` and its launch branch are deleted together with the
+    converter (HAL0-SUNSET v1.7.0).
   - **Steady state writes nothing.** A run with nothing to write and no model
     tuning to clear returns its report only: no backup, no audit entry, no
     unit re-render. A slot that failed its launch check stays blocked
