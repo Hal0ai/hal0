@@ -264,6 +264,11 @@ applying. Add those subsections to a version's section to surface them; see
   is root-owned and group-writable, so the `hal0` service user could not
   change it. An existing directory is now left as the operator set it; the
   archive itself is still `0600`.
+- The runner-image catalogue sync now reads the `runners` array that
+  hal0-runner-images publishes in `images.json` (schema
+  `hal0.runner-images.v2`). It looked for an `images` array, so every sync
+  failed with "images.json has no 'images' array" and the catalogue never
+  refreshed.
 - The demoted workload profiles (`dense`, `moe`, `coding`, `chadrock-dense`,
   `chadrock-moe`) no longer pass `--reasoning-format none`. Upstream llama.cpp
   answers HTTP 400 "Failed to initialize samplers" to every `response_format`

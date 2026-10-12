@@ -1,0 +1,165 @@
+{
+  "schema": "hal0.runner-images.v2",
+  "runners": [
+    {
+      "id": "standard",
+      "title": "Standard",
+      "summary": "llama.cpp for AMD GPUs, ROCm or Vulkan, built from the official upstream release.",
+      "image": "ghcr.io/hal0ai/hal0-runner-standard",
+      "tag": "b11552-re14329d",
+      "digest": "sha256:2626239586c1c8fcf1ab310000f9d19b26b3a4fa5230f608e65cc9ef2252c462",
+      "candidate": null,
+      "gate_report": "https://github.com/Hal0ai/hal0-runner-images/releases/download/gate-llama.cpp-b11552/gate-llama.cpp-b11552-20261011T093626Z.json",
+      "lanes_gated": [
+        "rocm",
+        "vulkan"
+      ],
+      "backends": [
+        "rocm",
+        "vulkan"
+      ],
+      "family": "llama-server",
+      "tier": "default",
+      "recipe": "runners/standard",
+      "maintainer_notes": "Pristine ggml-org llama.cpp release, one patch (grammar repetition threshold). Gate: runners/standard/manifest.toml [verification]. The b11510 build of this recipe (as runners/upstream, PR #14) passed the gate on both lanes; b11552 needs a fresh gate. Qwen3.8-Flash-Next is not gated and ships unsupported."
+    },
+    {
+      "id": "cpu",
+      "title": "CPU",
+      "summary": "llama.cpp on the processor, no GPU needed. A slow fallback for boxes without a supported GPU.",
+      "image": "ghcr.io/hal0ai/hal0-runner-cpu",
+      "tag": "b11552-re14329d",
+      "digest": "sha256:d8e1cfa2066f6ab3124dd185decd15771c4cdf058ed9c0cee49f62e7f02afd77",
+      "candidate": null,
+      "gate_report": "https://github.com/Hal0ai/hal0-runner-images/releases/download/gate-llama.cpp-b11552/gate-llama.cpp-b11552-20261011T093626Z.json",
+      "lanes_gated": [
+        "cpu"
+      ],
+      "backends": [
+        "cpu"
+      ],
+      "family": "llama-server",
+      "tier": "default",
+      "recipe": "runners/cpu",
+      "maintainer_notes": "Same llama.cpp release as standard, CPU-only, all x86_64 CPU variants as loadable backends (portable; no SIGILL on hosts without AVX-512, hal0 #2126)."
+    },
+    {
+      "id": "flm",
+      "title": "NPU (FastFlowLM)",
+      "summary": "Runs supported models on the AMD XDNA 2 NPU, leaving the GPU free.",
+      "image": "ghcr.io/hal0ai/hal0-runner-flm",
+      "tag": "0.9.44-re14329d",
+      "digest": "sha256:ba7f7edafc07ae2bb96eb94b519b8ab46a8564cdfb9d77372bef611811aa8643",
+      "candidate": null,
+      "gate_report": "https://github.com/Hal0ai/hal0-runner-images/releases/download/gate-flm-0.9.44-re14329d/gate-flm-0.9.44-re14329d-20261011T085233Z.json",
+      "lanes_gated": [
+        "npu"
+      ],
+      "backends": [
+        "npu"
+      ],
+      "family": "flm",
+      "tier": "default",
+      "recipe": "runners/flm",
+      "maintainer_notes": "FastFlowLM v0.9.44 with XRT/xdna-driver 2.21.75. Needs the amdxdna driver and /dev/accel on the host."
+    },
+    {
+      "id": "kokoro",
+      "title": "Kokoro speech",
+      "summary": "Text-to-speech on the CPU. Works on any box, no GPU needed.",
+      "image": "ghcr.io/hal0ai/hal0-runner-kokoro",
+      "tag": "0.4.9-re14329d",
+      "digest": "sha256:0df4b132be5a5be04f4481940db36365bb95b50aaa0940af0b6f1f5792428325",
+      "candidate": null,
+      "gate_report": "https://github.com/Hal0ai/hal0-runner-images/releases/download/gate-kokoro-0.4.9-re14329d/gate-kokoro-0.4.9-re14329d-20261011T085319Z.json",
+      "lanes_gated": [
+        "cpu"
+      ],
+      "backends": [
+        "cpu"
+      ],
+      "family": "kokoro",
+      "tier": "default",
+      "recipe": "runners/kokoro",
+      "maintainer_notes": "Kokoro-82M via kokoro-onnx 0.4.9; requirements.txt pins the full dependency set of the previously shipped image."
+    },
+    {
+      "id": "moonshine",
+      "title": "Moonshine transcription",
+      "summary": "Speech-to-text on the CPU. Works on any box, no GPU or NPU needed.",
+      "image": "ghcr.io/hal0ai/hal0-runner-moonshine",
+      "tag": "20251121-re14329d",
+      "digest": "sha256:341b64a5c60496c57407a75077a746ff40bbc2eedbc8ddba1e661094d6818766",
+      "candidate": null,
+      "gate_report": "https://github.com/Hal0ai/hal0-runner-images/releases/download/gate-moonshine-20251121-re14329d/gate-moonshine-20251121-re14329d-20261011T085357Z.json",
+      "lanes_gated": [
+        "cpu"
+      ],
+      "backends": [
+        "cpu"
+      ],
+      "family": "moonshine",
+      "tier": "default",
+      "recipe": "runners/moonshine",
+      "maintainer_notes": "Moonshine via useful-moonshine-onnx 20251121; requirements.txt pins the full dependency set of the previously shipped image."
+    },
+    {
+      "id": "comfyui",
+      "title": "ComfyUI",
+      "summary": "Image and video generation on the GPU (ROCm).",
+      "image": "ghcr.io/hal0ai/hal0-runner-comfyui",
+      "tag": "0.28.0-r6996d85",
+      "digest": "sha256:8c1dd5d7586893a8e27ec2f9fd11623a750b6a4c2ab098e62f9dcd32ec49cfa2",
+      "candidate": null,
+      "gate_report": "https://github.com/Hal0ai/hal0-runner-images/releases/download/gate-comfyui-0.28.0-r6996d85/gate-comfyui-0.28.0-r6996d85-20261011T094928Z.json",
+      "lanes_gated": [
+        "rocm"
+      ],
+      "backends": [
+        "rocm"
+      ],
+      "family": "comfyui",
+      "tier": "default",
+      "recipe": "runners/comfyui",
+      "maintainer_notes": "ComfyUI c9602625 (reports 0.28.0) with TheRock nightly torch 2.9.1 for gfx1151; constraints.txt pins every package of the previously shipped image."
+    },
+    {
+      "id": "qwen3tts",
+      "title": "Qwen3 TTS",
+      "summary": "Higher-quality multilingual text-to-speech on the GPU (ROCm). Opt-in; a large download (about 10 GB).",
+      "image": "ghcr.io/hal0ai/hal0-runner-qwen3tts",
+      "tag": "0.1.1-re14329d",
+      "digest": "sha256:81a914c9622fe35d11d8c0d2f81eee5a882faaad1556ac42a8db6856ad225698",
+      "candidate": null,
+      "gate_report": "https://github.com/Hal0ai/hal0-runner-images/releases/download/gate-qwen3tts-0.1.1-re14329d/gate-qwen3tts-0.1.1-re14329d-20261011T085418Z.json",
+      "lanes_gated": [
+        "rocm"
+      ],
+      "backends": [
+        "rocm"
+      ],
+      "family": "qwen3tts",
+      "tier": "optional",
+      "recipe": "runners/qwen3tts",
+      "maintainer_notes": "qwen-tts 0.1.1 on rocm/pytorch (ROCm 7.2.4, PyTorch 2.10), base pinned by digest."
+    },
+    {
+      "id": "cuda",
+      "title": "NVIDIA CUDA",
+      "summary": "llama.cpp for NVIDIA GPUs. Pick it on a box with an NVIDIA card.",
+      "image": "ghcr.io/ggml-org/llama.cpp",
+      "tag": "server-cuda-b11541",
+      "digest": "sha256:f88fa8d94d872312a4ad117acd490fa997bef81f03f161f0cfe0d74272e5b5bb",
+      "candidate": null,
+      "gate_report": null,
+      "lanes_gated": [],
+      "backends": [
+        "cuda"
+      ],
+      "family": "llama-server",
+      "tier": "optional",
+      "recipe": null,
+      "maintainer_notes": "External: ggml-org's official CUDA server image, not built here. ggml-org does not publish a server-cuda image for every llama.cpp release, so cuda pins the newest server-cuda-b<N> tag with N <= the release in runners/llama.cpp.toml (b11541 for b11552). Not hardware-gated (lanes_gated stays []): the CUDA lane is hidden in hal0 (hal0 #2362)."
+    }
+  ]
+}

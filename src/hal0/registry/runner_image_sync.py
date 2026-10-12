@@ -194,7 +194,7 @@ async def fetch_images_json(client: httpx.AsyncClient) -> tuple[list[Any], str |
 
     Returns ``(entries, error)`` — ``entries`` is ``[]`` and ``error`` is a
     human-readable string on any failure (network, non-200, bad JSON, a schema
-    other than ``hal0.runner-images.v2``, non-list ``images``). A failed fetch
+    other than ``hal0.runner-images.v2``, non-list ``runners``). A failed fetch
     never prunes anything.
     """
     try:
@@ -208,9 +208,9 @@ async def fetch_images_json(client: httpx.AsyncClient) -> tuple[list[Any], str |
     schema = payload.get("schema")
     if schema != _EXPECTED_SCHEMA:
         return [], f"images.json schema {schema!r} is not {_EXPECTED_SCHEMA!r}"
-    entries = payload.get("images")
+    entries = payload.get("runners")
     if not isinstance(entries, list):
-        return [], "images.json has no 'images' array"
+        return [], "images.json has no 'runners' array"
     # Non-object entries are passed through: the sync counts them as
     # unreadable, which keeps a partial catalogue from pruning rows.
     return list(entries), None

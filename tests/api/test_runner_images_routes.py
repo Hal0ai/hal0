@@ -120,7 +120,7 @@ def test_sync_route_populates_catalogue(
 ) -> None:
     images_json = {
         "schema": "hal0.runner-images.v2",
-        "images": [
+        "runners": [
             _CPU_ENTRY,
             # Not a runner this hal0 ships: reported under ``skipped``.
             {"id": "rocmfpx", "image": "ghcr.io/hal0ai/hal0-rocmfpx", "tag": "c077206"},
@@ -1136,7 +1136,7 @@ class TestStoreStateEnrichment:
     ) -> None:
         monkeypatch.setattr("hal0.api.routes.runner_images.images_digests", lambda: None)
         _mock_sync_transport(
-            monkeypatch, {"schema": "hal0.runner-images.v2", "images": [_CPU_ENTRY]}
+            monkeypatch, {"schema": "hal0.runner-images.v2", "runners": [_CPU_ENTRY]}
         )
 
         resp = client.post("/api/runner-images/sync")
