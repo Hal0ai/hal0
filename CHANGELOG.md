@@ -258,6 +258,11 @@ applying. Add those subsections to a version's section to surface them; see
 
 ### Fixed
 
+- The bundled agent's STATE.md capability summary now lists speech-to-text
+  and reranking slots. It matched slot types `stt` and `rerank`, but slots
+  are typed `transcription` and `reranking`, so a Moonshine STT slot or a
+  rerank slot never appeared in it. Every slot type other than `llm` now has
+  a label, and a test fails if a new type is added without one.
 - The runner-system migration no longer fails on a packaged install with
   "could not write the runner-migration backup ([Errno 1] Operation not
   permitted)". It tried to `chmod 0700` the shared `backups` directory, which

@@ -4702,14 +4702,16 @@ def _slot_context_length(slot: dict[str, Any]) -> int | None:
         return None
 
 
-# capability slot `type` (from /api/slots) -> STATE.md rollup label.
+# capability slot `type` (from /api/slots) -> STATE.md rollup label. Keyed by
+# the canonical slot types (hal0.model_meta.SLOT_TYPES): every type except
+# ``llm`` (handled by the primary/chat path) must have a label, or its slots
+# silently drop out of STATE.md.
 _CAPABILITY_TYPE_LABELS = {
     "embedding": "embed",
-    "stt": "voice-stt",
+    "reranking": "rerank",
+    "transcription": "voice-stt",
     "tts": "voice-tts",
     "image": "img",
-    "img": "img",
-    "rerank": "rerank",
 }
 
 
