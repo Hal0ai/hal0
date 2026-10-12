@@ -60,7 +60,7 @@ _FLM_ENTRY: dict[str, Any] = {
 
 _IMAGES_JSON = {
     "schema": "hal0.runner-images.v2",
-    "images": [_CPU_ENTRY, _FLM_ENTRY],
+    "runners": [_CPU_ENTRY, _FLM_ENTRY],
 }
 
 #: config 345 + layers 6000 + 6000 — what a size probe should sum to.
@@ -221,9 +221,10 @@ async def test_fetch_images_json_rejects_v1_schema() -> None:
     "payload",
     [
         ["not", "an", "object"],
-        {"images": [_CPU_ENTRY]},  # no schema
-        {"schema": "hal0.runner-images.v2"},  # no images array
-        {"schema": "hal0.runner-images.v2", "images": {"cpu": _CPU_ENTRY}},  # images not a list
+        {"runners": [_CPU_ENTRY]},  # no schema
+        {"schema": "hal0.runner-images.v2"},  # no runners array
+        {"schema": "hal0.runner-images.v2", "images": [_CPU_ENTRY]},  # pre-release key
+        {"schema": "hal0.runner-images.v2", "runners": {"cpu": _CPU_ENTRY}},  # not a list
     ],
 )
 async def test_fetch_images_json_rejects_wrong_shapes(payload: object) -> None:
@@ -243,7 +244,7 @@ async def test_fetch_images_json_rejects_wrong_shapes(payload: object) -> None:
 async def test_fetch_images_json_passes_non_object_entries_through() -> None:
     """The sync, not the fetch, decides: a non-object entry makes the
     catalogue partial, so it must reach the sync to block the prune."""
-    payload = {"schema": "hal0.runner-images.v2", "images": [_CPU_ENTRY, "junk", 7, None]}
+    payload = {"schema": "hal0.runner-images.v2", "runners": [_CPU_ENTRY, "junk", 7, None]}
     client = _client(_route_handler(images_json=payload))
     try:
         entries, err = await fetch_images_json(client)
@@ -257,7 +258,7 @@ async def test_fetch_images_json_passes_non_object_entries_through() -> None:
 async def test_a_non_object_entry_blocks_the_prune(tmp_path: Path) -> None:
     store = _store(tmp_path)
     store.upsert(RunnerImage(id="flm", image="ghcr.io/hal0ai/hal0-runner-flm", tag="v0"))
-    payload = {"schema": "hal0.runner-images.v2", "images": [_CPU_ENTRY, "junk"]}
+    payload = {"schema": "hal0.runner-images.v2", "runners": [_CPU_ENTRY, "junk"]}
     result = await _sync(store, _route_handler(images_json=payload))
 
     assert result.prune_skipped is True
@@ -282,7 +283,7 @@ async def test_a_runner_moved_to_another_repo_drops_its_old_tags(
         raise RuntimeError("ghcr down")
 
     monkeypatch.setattr(sync_mod, "probe_ghcr_package", _fail)
-    payload = {"schema": "hal0.runner-images.v2", "images": [_CPU_ENTRY]}
+    payload = {"schema": "hal0.runner-images.v2", "runners": [_CPU_ENTRY]}
     await _sync(store, _route_handler(images_json=payload))
 
     cpu = store.get("cpu")
@@ -436,7 +437,7 @@ async def test_matching_registry_digest_logs_no_mismatch(
 ) -> None:
     images_json = {
         "schema": "hal0.runner-images.v2",
-        "images": [{**_CPU_ENTRY, "digest": "sha256:hal0ai-hal0-runner-cpu-b11552-r1"}],
+        "runners": [{**_CPU_ENTRY, "digest": "sha256:hal0ai-hal0-runner-cpu-b11552-r1"}],
     }
     with caplog.at_level(logging.WARNING, logger="hal0.registry.runner_image_sync"):
         await _sync(_store(tmp_path), _route_handler(images_json=images_json))
@@ -449,7 +450,7 @@ async def test_malformed_list_metadata_degrades_to_not_declared(tmp_path: Path) 
     to ``[]``; junk members are filtered, order kept."""
     images_json = {
         "schema": "hal0.runner-images.v2",
-        "images": [
+        "runners": [
             {**_CPU_ENTRY, "backends": "rocm,vulkan", "lanes_gated": 42, "family": 7},
             {**_FLM_ENTRY, "backends": [None, "", "  ", "npu"]},
         ],
@@ -516,7 +517,7 @@ async def test_failed_images_json_never_prunes(tmp_path: Path) -> None:
 async def test_unknown_runner_id_is_skipped_not_stored(tmp_path: Path) -> None:
     images_json = {
         "schema": "hal0.runner-images.v2",
-        "images": [
+        "runners": [
             _CPU_ENTRY,
             {**_CPU_ENTRY, "id": "rocmfpx", "image": "ghcr.io/hal0ai/hal0-rocmfpx"},
             {**_CPU_ENTRY, "id": "hal0ai/hal0-toolbox-flm"},
@@ -535,7 +536,7 @@ async def test_unknown_runner_id_is_skipped_not_stored(tmp_path: Path) -> None:
 async def test_entry_without_id_is_skipped(tmp_path: Path) -> None:
     images_json = {
         "schema": "hal0.runner-images.v2",
-        "images": [_CPU_ENTRY, {"image": "ghcr.io/hal0ai/hal0-runner-flm", "tag": "v1"}],
+        "runners": [_CPU_ENTRY, {"image": "ghcr.io/hal0ai/hal0-runner-flm", "tag": "v1"}],
     }
     store = _store(tmp_path)
     result = await _sync(store, _route_handler(images_json=images_json))
@@ -549,7 +550,7 @@ async def test_invalid_image_with_tag_is_skipped(tmp_path: Path) -> None:
     """``image`` must be a bare repo: tag and digest are separate fields."""
     images_json = {
         "schema": "hal0.runner-images.v2",
-        "images": [
+        "runners": [
             _CPU_ENTRY,
             {**_FLM_ENTRY, "image": "ghcr.io/hal0ai/hal0-runner-flm:v0.9.1"},
         ],
@@ -567,7 +568,7 @@ async def test_invalid_image_with_tag_is_skipped(tmp_path: Path) -> None:
 async def test_entry_missing_tag_is_skipped(tmp_path: Path) -> None:
     """v2 always carries a tag; there is no newest-tag fallback."""
     entry = {k: v for k, v in _FLM_ENTRY.items() if k != "tag"}
-    images_json = {"schema": "hal0.runner-images.v2", "images": [_CPU_ENTRY, entry]}
+    images_json = {"schema": "hal0.runner-images.v2", "runners": [_CPU_ENTRY, entry]}
     store = _store(tmp_path)
     result = await _sync(store, _route_handler(images_json=images_json, tags=["0824"]))
 
@@ -702,7 +703,7 @@ async def test_a_skipped_entry_stops_the_prune(tmp_path: Path) -> None:
     store.upsert(RunnerImage(id="rocmfpx", image="ghcr.io/hal0ai/hal0-rocmfpx", tag="c077206"))
     images_json = {
         "schema": "hal0.runner-images.v2",
-        "images": [_CPU_ENTRY, {**_FLM_ENTRY, "image": "ghcr.io/hal0ai/hal0-runner-flm:bad"}],
+        "runners": [_CPU_ENTRY, {**_FLM_ENTRY, "image": "ghcr.io/hal0ai/hal0-runner-flm:bad"}],
     }
     result = await _sync(store, _route_handler(images_json=images_json))
 
@@ -720,7 +721,7 @@ async def test_an_unknown_runner_from_a_newer_catalogue_does_not_block_the_prune
     store.upsert(RunnerImage(id="rocmfpx", image="ghcr.io/hal0ai/hal0-rocmfpx", tag="c077206"))
     images_json = {
         "schema": "hal0.runner-images.v2",
-        "images": [_CPU_ENTRY, {**_CPU_ENTRY, "id": "npu2", "image": "ghcr.io/hal0ai/x"}],
+        "runners": [_CPU_ENTRY, {**_CPU_ENTRY, "id": "npu2", "image": "ghcr.io/hal0ai/x"}],
     }
     result = await _sync(store, _route_handler(images_json=images_json))
 
@@ -762,7 +763,7 @@ async def test_an_empty_catalogue_prunes_nothing(tmp_path: Path) -> None:
     store = _store(tmp_path)
     store.upsert(_cpu_row())
     result = await _sync(
-        store, _route_handler(images_json={"schema": "hal0.runner-images.v2", "images": []})
+        store, _route_handler(images_json={"schema": "hal0.runner-images.v2", "runners": []})
     )
 
     assert result.images_json_ok is True
@@ -1214,3 +1215,30 @@ async def test_unlabelled_config_blob_reads_as_none_provenance(tmp_path: Path) -
     cpu = store.get("cpu")
     assert cpu is not None
     assert all(t.provenance is None for t in cpu.tags)
+
+
+# ── contract with the published catalogue ─────────────────────────────────────
+
+#: A snapshot of hal0-runner-images' ``images.json`` as published. The fixtures
+#: above are written by hand; this one is the producer's real shape, so a key
+#: or field the two repos disagree on fails here rather than on a live box.
+_PUBLISHED_CATALOGUE = Path(__file__).parent.parent / "fixtures" / "runner_images_catalogue.json"
+
+
+@pytest.mark.asyncio
+async def test_published_catalogue_parses_into_a_row_per_runner() -> None:
+    import json
+
+    from hal0.runners import RUNNER_IMAGES
+
+    payload = json.loads(_PUBLISHED_CATALOGUE.read_text())
+    client = _client(_route_handler(images_json=payload))
+    try:
+        entries, err = await fetch_images_json(client)
+    finally:
+        await client.aclose()
+    assert err is None
+    assert entries
+    rows = [catalogue_row(e) for e in entries]
+    assert [reason for _, reason in rows if reason] == []
+    assert {row.id for row, _ in rows if row} <= set(RUNNER_IMAGES)
