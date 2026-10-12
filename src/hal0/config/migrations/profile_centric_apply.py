@@ -40,6 +40,7 @@ Contract, as for the runner-system conversion (ADR-0028):
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import io
 import json
 import os
@@ -223,7 +224,9 @@ def _plan_writes(inputs: pc.Inputs, plan: pc.ConversionPlan) -> list[_FileWrite]
 
     profiles_path = paths.profiles_toml()
     original = profiles_path.read_bytes() if profiles_path.exists() else b""
-    if plan.custom_profiles or inputs.profiles_raw is not None:
+    # Only a plan that changes the catalog rewrites the file (a rewrite drops
+    # its comments, so an unchanged catalog is never re-serialised).
+    if plan.profiles or plan.profile_rewrites or plan.renames:
         new = _dump(_profiles_file(inputs.profiles_raw, plan))
         if new != original:
             writes.append(_FileWrite(profiles_path, _BACKUP_PROFILES, original, new))
@@ -238,7 +241,8 @@ def _plan_writes(inputs: pc.Inputs, plan: pc.ConversionPlan) -> list[_FileWrite]
     if inputs.markers_in_file:
         ledger_path = _ledger_path()
         original = ledger_path.read_bytes() if ledger_path.exists() else b""
-        new = json.dumps(inputs.markers_in_file, indent=2, sort_keys=True).encode()
+        doc = {**_read_ledger_doc(), **inputs.markers_in_file}
+        new = json.dumps(doc, indent=2, sort_keys=True).encode()
         if new != original:
             writes.append(_FileWrite(ledger_path, _BACKUP_LEDGER, original, new))
     return writes
@@ -248,6 +252,109 @@ def _ledger_path() -> Path:
     from hal0.config import paths
 
     return paths.var_lib() / pc.LEDGER_FILE
+
+
+def _read_ledger_doc() -> dict[str, Any]:
+    try:
+        data = json.loads(_ledger_path().read_text(encoding="utf-8") or "{}")
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _file_hash(path: Path) -> str:
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError:
+        return ""
+
+
+def _plan_hash(sp: pc.SlotPlan, plan: pc.ConversionPlan, file_hash: str) -> str:
+    """What the conversion would do to this slot: if none of it changes, a slot
+    blocked last run is not attempted again."""
+    doc = {
+        "file": file_hash,
+        "profile": sp.profile_after,
+        "content": plan.custom_profiles.get(sp.profile_after)
+        or pc.target_seeds().get(sp.profile_after),
+        "argv": list(sp.argv_after),
+        "set": sp.set_keys,
+        "drop": sp.drop_keys,
+    }
+    return hashlib.sha256(json.dumps(doc, sort_keys=True, default=str).encode()).hexdigest()
+
+
+def _revert_stack_rows(plan: pc.ConversionPlan, names: set[str]) -> bool:
+    """A blocked slot keeps its file, so a stack row that followed it keeps its
+    whole original row: no re-point, no dropped keys."""
+    reverted = False
+    for st in plan.stacks:
+        for row in st.rows:
+            if row.get("slot") in names and (row.get("profile") or row.get("drop")):
+                row["profile"] = None
+                row["drop"] = []
+                reverted = True
+    return reverted
+
+
+def _apply_known_blocks(plan: pc.ConversionPlan, pins: dict[str, Any]) -> None:
+    """Hold every blocked slot where it is.
+
+    A slot whose launch check failed last run stays blocked, with that reason,
+    while its file is unchanged and its plan has not changed: no new attempt,
+    no write, no backup. And every blocked slot's stack rows stay whole.
+    """
+    from hal0.config import paths
+
+    for sp in plan.slots:
+        pin = pins.get(sp.file)
+        if not isinstance(pin, dict) or pin.get("kind") != "verify":
+            continue
+        file_hash = _file_hash(paths.slots_config_dir() / sp.file)
+        if pin.get("file") != file_hash:
+            continue  # the operator edited the file: plan it afresh
+        if sp.status == "convert" and pin.get("plan") != _plan_hash(sp, plan, file_hash):
+            continue  # the conversion would now do something else: try it
+        sp.status = "blocked"
+        sp.error = f"{pin.get('reason')} (unchanged since then, so not retried)"
+        if not sp.argv_today and pin.get("argv"):
+            sp.argv_today = tuple(pin["argv"])
+    _revert_stack_rows(plan, {sp.name for sp in plan.blocked})
+
+
+def _save_pins(plan: pc.ConversionPlan, old: dict[str, Any], *, verify_blocked: set[str]) -> None:
+    """Record every blocked slot: its reason, the launch it keeps running
+    (pre-conversion argv) while its file is unchanged, and for a launch-check
+    block the plan it failed with."""
+    from hal0.config import paths
+
+    pins: dict[str, Any] = {}
+    for sp in plan.blocked:
+        file_hash = _file_hash(paths.slots_config_dir() / sp.file)
+        prior = old.get(sp.file) if isinstance(old.get(sp.file), dict) else {}
+        kind = "verify" if sp.file in verify_blocked else prior.get("kind", "plan")
+        pin: dict[str, Any] = {
+            "name": sp.name,
+            "kind": kind,
+            "reason": str(sp.error or ""),
+            "file": file_hash,
+            "argv": list(sp.argv_today) or prior.get("argv") or None,
+        }
+        if kind == "verify":
+            pin["plan"] = (
+                _plan_hash(sp, plan, file_hash) if sp.file in verify_blocked else prior.get("plan")
+            )
+        pins[sp.file] = pin
+    if pins == old:
+        return
+    doc = _read_ledger_doc()
+    if pins:
+        doc["blocked"] = pins
+    else:
+        doc.pop("blocked", None)
+    path = _ledger_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _replace_file(path, json.dumps(doc, indent=2, sort_keys=True).encode(), default_mode=0o640)
 
 
 # ── registry ─────────────────────────────────────────────────────────────────
@@ -260,6 +367,32 @@ def _ensure_db_migrated(db_path: Path) -> None:
 
     with connect(db_path) as conn:
         migrate(conn)
+
+
+def _refresh_holding(db_path: Path) -> None:
+    """Re-snapshot the holding table from the live ``model`` columns.
+
+    After a restore the older release owned the columns: its tuning edits and
+    new models live there, while a holding table a newer process re-created
+    meanwhile is stale. The columns are the truth until this run converts.
+    """
+    from importlib.resources import files
+
+    sql = files("hal0.db.migrations").joinpath("012_model_tuning_holding.sql").read_text()
+    insert = sql[sql.index("INSERT INTO") :]
+    conn = sqlite3.connect(db_path)
+    try:
+        with conn:
+            tables = {
+                r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+            }
+            if pc.HOLDING_TABLE in tables:
+                conn.execute(f"DELETE FROM {pc.HOLDING_TABLE}")
+            else:
+                conn.execute(sql[sql.index("CREATE TABLE") : sql.index("INSERT INTO")])
+            conn.execute(insert)
+    finally:
+        conn.close()
 
 
 def _model_snapshot(db_path: Path) -> list[dict[str, Any]]:
@@ -365,10 +498,10 @@ def _verify(plan: pc.ConversionPlan) -> dict[str, str]:
     """Render every converted llama slot through the real launch path and
     compare it with the plan's launch. Returns ``{slot file: difference}``.
 
-    Strict: any failure to render (a registry or catalog error, a file that
-    does not read) raises, so the caller rolls the whole run back and the next
-    boot or update retries. Only a rendered argv that differs from the plan
-    blocks its one slot.
+    Strict render. An infrastructure error (the registry database, a file
+    that cannot be read, a timeout) raises, so the caller rolls the whole run
+    back and the next start or update retries. Anything about the slot itself
+    (its profile does not resolve, the argv differs) blocks only that slot.
     """
     from hal0.config import paths
     from hal0.config.migrations import profile_centric_frozen as frozen
@@ -379,14 +512,17 @@ def _verify(plan: pc.ConversionPlan) -> dict[str, str]:
         if sp.status != "convert" or sp.engine != frozen.LLAMA or not sp.argv_after:
             continue
         path = paths.slots_config_dir() / sp.file
-        slot = frozen.hoist_slot(tomllib.loads(path.read_text(encoding="utf-8")), sp.file[:-5])
         try:
+            slot = frozen.hoist_slot(tomllib.loads(path.read_text(encoding="utf-8")), sp.file[:-5])
             resolved = strict_slot_argv(slot)
         except Exception as exc:
-            raise ProfileConversionError(
-                f"cannot verify {sp.file} after conversion ({exc}); nothing is kept, "
-                "the conversion runs again at the next start or update"
-            ) from exc
+            if _is_transient(exc):
+                raise ProfileConversionError(
+                    f"cannot verify {sp.file} after conversion ({exc}); nothing is kept, "
+                    "the conversion runs again at the next start or update"
+                ) from exc
+            problems[sp.file] = f"does not render after conversion ({exc})"
+            continue
         live = pc.effective_map(resolved.argv)
         want = pc.effective_map(sp.argv_after)
         if live != want:
@@ -397,6 +533,19 @@ def _verify(plan: pc.ConversionPlan) -> dict[str, str]:
             ]
             problems[sp.file] = "launch differs from the plan on " + "; ".join(diff)
     return problems
+
+
+def _is_transient(exc: BaseException) -> bool:
+    """An infrastructure error (database, file system, timeout), anywhere in
+    the exception's cause chain."""
+    seen: set[int] = set()
+    cur: BaseException | None = exc
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        if isinstance(cur, (sqlite3.DatabaseError, OSError, TimeoutError)):
+            return True
+        cur = cur.__cause__ or cur.__context__
+    return False
 
 
 def _slot_model(raw: Mapping[str, Any] | None) -> str:
@@ -544,15 +693,7 @@ def _block_mismatched_slots(
             "migrate.profile_centric.slot_blocked", job_id=job_id, slot=sp.file, error=sp.error
         )
     blocked_names = {sp.name for sp in plan.slots if sp.file in problems}
-    reverted = False
-    for st in plan.stacks:
-        for row in st.rows:
-            if row.get("slot") in blocked_names and row.get("profile"):
-                # The row followed the slot's new profile; the slot kept its
-                # old one, so the row keeps its old reference too.
-                row["profile"] = None
-                reverted = True
-    if reverted and inputs.stacks_raw is not None:
+    if _revert_stack_rows(plan, blocked_names) and inputs.stacks_raw is not None:
         stacks_path = paths.stacks_toml()
         for w in done:
             if w.path == stacks_path:
@@ -566,15 +707,35 @@ def _migrate(*, dry_run: bool, job_id: str | None, verify: bool) -> ConversionRe
     db_path = paths.db_path()
     if not dry_run and db_path.exists():
         _ensure_db_migrated(db_path)
+        if restore_marker().exists():
+            # Back from a release before this one: its edits are in the columns.
+            _refresh_holding(db_path)
     inputs = pc.read_inputs()
     plan = pc.plan_conversion(inputs)
+    pins = _read_ledger_doc().get("blocked") or {}
+    pins = pins if isinstance(pins, dict) else {}
+    _apply_known_blocks(plan, pins)
     report = ConversionReport(dry_run=dry_run, plan=plan)
-    if dry_run or not plan.changed:
-        if not dry_run:
-            _clear_restore_marker()
+    if dry_run:
         return report
 
     writes = _plan_writes(inputs, plan)
+    keep = {
+        _slot_model(raw)
+        for fname, raw, _err in inputs.slots
+        if fname in {s.file for s in plan.blocked}
+    } - {""}
+    to_clear = [m for m in plan.models if m.clear and m.model_id not in keep]
+    held = _held_rows(db_path)
+    if held == 0 and not plan.blockers and db_path.exists():
+        _drop_holding(db_path)  # an empty holding table holds nothing to back up
+    if not writes and not to_clear and not (held and not plan.blockers):
+        # Nothing to write: report only. No backup, no audit entry, no rerender.
+        _save_pins(plan, pins, verify_blocked=set())
+        if not plan.blockers:
+            _clear_restore_marker()
+        return report
+
     models = _model_snapshot(db_path)
     state_path = _state_path()
     state_original = state_path.read_bytes() if state_path.exists() else None
@@ -589,11 +750,13 @@ def _migrate(*, dry_run: bool, job_id: str | None, verify: bool) -> ConversionRe
     done: list[_FileWrite] = []
     db_touched = False
     try:
+        problems: dict[str, str] = {}
         for w in writes:
             _replace_file(w.path, w.new)
             done.append(w)
         if verify:
-            _block_mismatched_slots(inputs, plan, done, _verify(plan), job_id=job_id)
+            problems = _verify(plan)
+            _block_mismatched_slots(inputs, plan, done, problems, job_id=job_id)
         if db_path.exists():
             db_touched = True
             keep = {
@@ -602,6 +765,7 @@ def _migrate(*, dry_run: bool, job_id: str | None, verify: bool) -> ConversionRe
                 if fname in {s.file for s in plan.blocked}
             }
             _clear_model_tuning(db_path, plan, drop_holding=not plan.blockers, keep=keep - {""})
+        _save_pins(plan, pins, verify_blocked=set(problems))
         audit = {
             "complete": not plan.blockers,
             "converted": sorted(s.file for s in plan.slots if s.status == "convert"),
@@ -646,6 +810,29 @@ def _migrate(*, dry_run: bool, job_id: str | None, verify: bool) -> ConversionRe
     for line in report.lines():
         log.warning("migrate.profile_centric.applied", job_id=job_id, line=line)
     return report
+
+
+def _held_rows(db_path: Path) -> int | None:
+    """Rows in the holding table; ``None`` when there is no table (or registry)."""
+    if not db_path.exists():
+        return None
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    try:
+        tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        if pc.HOLDING_TABLE not in tables:
+            return None
+        return int(conn.execute(f"SELECT COUNT(*) FROM {pc.HOLDING_TABLE}").fetchone()[0])
+    finally:
+        conn.close()
+
+
+def _drop_holding(db_path: Path) -> None:
+    conn = sqlite3.connect(db_path)
+    try:
+        with conn:
+            conn.execute(f"DROP TABLE IF EXISTS {pc.HOLDING_TABLE}")
+    finally:
+        conn.close()
 
 
 def _owned_path(member: str) -> Path | None:

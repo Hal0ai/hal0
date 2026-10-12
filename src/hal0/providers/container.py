@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import dataclasses
 import json
 import logging
 import os
@@ -1422,12 +1423,80 @@ def _refuse_unconverted(slot_cfg: Mapping[str, Any]) -> None:
 
     found = slot_tuning_keys(slot_cfg)
     if found:
+        pin = blocked_slot_pin(slot_cfg)
+        why = f" The conversion blocked it: {pin['reason']}." if pin else ""
         raise UnprocessableEntity(
             f"slot {slot_cfg.get('name')!r} still carries {', '.join(found)}, which belong "
-            "on a profile now (ADR-0029); run `hal0 profile migrate` to convert it",
+            f"on a profile now (ADR-0029).{why} See `hal0 profile migrate`, fix the slot "
+            "file, then run `sudo -u hal0 hal0 profile migrate --apply`",
             code="slot.unconverted",
-            details={"slot": str(slot_cfg.get("name") or ""), "keys": found},
+            details={
+                "slot": str(slot_cfg.get("name") or ""),
+                "keys": found,
+                "blocked": pin["reason"] if pin else None,
+            },
         )
+
+
+def _has_tuning_keys(slot_cfg: Mapping[str, Any]) -> bool:
+    from hal0.config.schema import slot_tuning_keys
+
+    return bool(slot_tuning_keys(slot_cfg))
+
+
+def blocked_slot_pin(slot_cfg: Mapping[str, Any]) -> dict[str, Any] | None:
+    """The profile-centric conversion's record for a slot it blocked, while the
+    slot file is still exactly the one it blocked (else ``None``).
+
+    The record keeps the slot's pre-conversion launch argv, so a converter
+    problem never takes a working slot down: it keeps launching as it did
+    until the operator fixes it.
+    """
+    import hashlib
+    import json
+
+    from hal0.config import paths
+    from hal0.config.migrations.profile_centric import LEDGER_FILE
+    from hal0.slots.layout import resolve_slot_stem
+
+    name = str(slot_cfg.get("name") or "")
+    if not name:
+        return None
+    try:
+        doc = json.loads((paths.var_lib() / LEDGER_FILE).read_text(encoding="utf-8") or "{}")
+        slots_dir = paths.slots_config_dir()
+        stem = resolve_slot_stem(slots_dir, name)
+        if stem is None:
+            return None
+        current = hashlib.sha256((slots_dir / f"{stem}.toml").read_bytes()).hexdigest()
+    except (OSError, ValueError):
+        return None
+    blocked = doc.get("blocked") if isinstance(doc, dict) else None
+    pin = blocked.get(f"{stem}.toml") if isinstance(blocked, dict) else None
+    if not isinstance(pin, dict) or pin.get("file") != current:
+        return None
+    return pin
+
+
+def _placement_only(slot_cfg: Mapping[str, Any]) -> dict[str, Any]:
+    """The slot without its tuning keys, on its type's seed: what a blocked
+    slot's runner image, devices and environment are resolved from."""
+    from hal0.config.schema import (
+        SLOT_TUNING_MODEL_KEYS,
+        SLOT_TUNING_SERVER_KEYS,
+        SLOT_TUNING_TOP_KEYS,
+    )
+
+    out = {k: v for k, v in slot_cfg.items() if k not in SLOT_TUNING_TOP_KEYS}
+    out.pop("defaults", None)
+    out["profile"] = TYPE_DEFAULT_PROFILE.get(str(slot_cfg.get("type") or ""), "chat")
+    if isinstance(out.get("model"), Mapping):
+        out["model"] = {k: v for k, v in out["model"].items() if k not in SLOT_TUNING_MODEL_KEYS}
+    if isinstance(out.get("server"), Mapping):
+        out["server"] = {k: v for k, v in out["server"].items() if k not in SLOT_TUNING_SERVER_KEYS}
+    if isinstance(out.get("slot"), Mapping):
+        out["slot"] = {k: v for k, v in out["slot"].items() if k not in SLOT_TUNING_TOP_KEYS}
+    return out
 
 
 def _resolve_llama_scalars(
@@ -1631,6 +1700,17 @@ class ContainerProvider(Provider):
           existence filter and no GID ``--group-add`` (the CDI spec injects
           nodes + permissions itself).
         """
+        # A slot the profile-centric conversion blocked keeps launching with
+        # its pre-conversion argv while its file is unchanged (ADR-0029 §7).
+        pin = blocked_slot_pin(slot_cfg) if _has_tuning_keys(slot_cfg) else None
+        pinned_argv = list(pin["argv"]) if pin and pin.get("argv") else None
+        if pinned_argv is not None:
+            slot_cfg = _placement_only(slot_cfg)
+            log.warning(
+                "slot.launch_pinned_pre_conversion slot=%s reason=%s",
+                slot_cfg.get("name"),
+                pin.get("reason") if pin else "",
+            )
         profile = resolve_slot_profile(slot_cfg)
         # for_launch: this is the real container-spec build — side-effect logs
         # (MTP auto-off breadcrumb) fire here, never on preview/status renders.
@@ -1664,7 +1744,7 @@ class ContainerProvider(Provider):
         server_env = scalars["server_env"] or {}
         merged_env = {**vis_env, **server_env}
 
-        return _llama_launch_plan(
+        plan = _llama_launch_plan(
             image=scalars["image"],
             port=port,
             model_path=model_path,
@@ -1684,6 +1764,9 @@ class ContainerProvider(Provider):
             draft_device=scalars["draft_device"],
             env=merged_env or None,
         )
+        if pinned_argv is not None:
+            return dataclasses.replace(plan, command=pinned_argv)
+        return plan
 
     # ── ContainerProvider-specific control plane ──────────────────────────────
 
@@ -2726,6 +2809,13 @@ def _resolve_slot_argv(
     ctx-size) is byte-identical to what :meth:`ContainerProvider.container_spec`
     would launch.
     """
+    pin = blocked_slot_pin(slot_cfg) if _has_tuning_keys(slot_cfg) else None
+    if pin and pin.get("argv"):
+        # A slot the conversion blocked launches its pre-conversion argv.
+        placed = _resolve_preview_bundle(_placement_only(slot_cfg), model_path)
+        if placed is None:
+            return None
+        return str(placed[1]["image"]), resolve_argv([("base", list(pin["argv"]))])
     resolved = _resolve_preview_bundle(slot_cfg, model_path)
     if resolved is None:
         return None
