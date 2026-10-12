@@ -6,6 +6,7 @@ import io
 import json
 import sqlite3
 import stat
+import struct
 import tarfile
 import tomllib
 from pathlib import Path
@@ -323,6 +324,95 @@ def test_migration_never_judges_the_operator_model_id(old_box: dict[str, Path]) 
     )
     migrate_runner_system()
     assert _read_toml(old_box["slots"] / "brain.toml")["model"]["default"] == "my-ROCmFPX"
+
+
+def _gguf(tensor_types: list[int]) -> bytes:
+    """A minimal GGUF v3: one string KV, then one tensor info per type."""
+
+    def _s(text: str) -> bytes:
+        raw = text.encode()
+        return struct.pack("<Q", len(raw)) + raw
+
+    out = b"GGUF" + struct.pack("<I", 3)
+    out += struct.pack("<Q", len(tensor_types)) + struct.pack("<Q", 1)
+    out += _s("general.architecture") + struct.pack("<I", 8) + _s("llama")
+    for i, ttype in enumerate(tensor_types):
+        out += _s(f"blk.{i}.weight") + struct.pack("<I", 2)
+        out += struct.pack("<QQ", 64, 64) + struct.pack("<I", ttype) + struct.pack("<Q", 0)
+    return out + b"\x00" * 64
+
+
+def _seed_slot_on(model_id: str, path: Path | str, tmp_hal0_home_slots: Path):
+    _seed_db([(model_id, str(path), "Q8_0", None)])
+    _write_toml(
+        tmp_hal0_home_slots / "brain.toml",
+        {"name": "brain", "port": 8090, "binary": "standard", "model": {"default": model_id}},
+    )
+
+
+def test_migration_unassigns_a_renamed_fork_build_by_its_contents(
+    tmp_hal0_home: str, tmp_path: Path
+) -> None:
+    """A fork file with an innocuous name is caught by its tensor types."""
+    model = tmp_path / "hal0-brain-sft-q8-rocmfpx" / "model.gguf"
+    model.parent.mkdir()
+    model.write_bytes(_gguf([0, 12, 103]))
+    _seed_slot_on("brain-sft", model, paths.slots_config_dir())
+
+    report = migrate_runner_system()
+
+    assert _read_toml(paths.slots_config_dir() / "brain.toml")["model"]["default"] == ""
+    assert any("103" in w and "unassigned" in w for w in report.warnings)
+
+
+def test_migration_keeps_a_stock_gguf(tmp_hal0_home: str, tmp_path: Path) -> None:
+    model = tmp_path / "model.gguf"
+    model.write_bytes(_gguf([0, 12, 14, 39]))
+    _seed_slot_on("brain-sft", model, paths.slots_config_dir())
+
+    migrate_runner_system()
+
+    assert _read_toml(paths.slots_config_dir() / "brain.toml")["model"]["default"] == "brain-sft"
+
+
+@pytest.mark.parametrize("kind", ["missing", "truncated", "not_gguf", "directory"])
+def test_migration_survives_an_unreadable_model_file(
+    tmp_hal0_home: str, tmp_path: Path, kind: str
+) -> None:
+    """Content is judged only when readable; the name check still applies."""
+    model = tmp_path / "model.gguf"
+    if kind == "truncated":
+        model.write_bytes(_gguf([0, 12])[:30])
+    elif kind == "not_gguf":
+        model.write_bytes(b"not a gguf at all" * 4)
+    elif kind == "directory":
+        model.mkdir()
+    _seed_slot_on("brain-sft", model, paths.slots_config_dir())
+
+    migrate_runner_system()
+
+    assert _read_toml(paths.slots_config_dir() / "brain.toml")["model"]["default"] == "brain-sft"
+
+
+def test_content_check_failure_never_fails_the_migration(
+    tmp_hal0_home: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import importlib
+
+    # ``hal0.registry.detect`` is also a re-exported function name.
+    detect = importlib.import_module("hal0.registry.detect")
+
+    def _boom(_path: object) -> str | None:
+        raise RuntimeError("unexpected")
+
+    monkeypatch.setattr(detect, "unsupported_gguf_contents", _boom)
+    model = tmp_path / "model.gguf"
+    model.write_bytes(_gguf([0, 103]))
+    _seed_slot_on("brain-sft", model, paths.slots_config_dir())
+
+    migrate_runner_system()
+
+    assert _read_toml(paths.slots_config_dir() / "brain.toml")["model"]["default"] == "brain-sft"
 
 
 def test_current_key_wins_over_a_renamed_one() -> None:

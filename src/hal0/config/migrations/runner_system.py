@@ -612,7 +612,7 @@ def _db_columns(conn: sqlite3.Connection, table: str) -> set[str]:
 
 def _fork_quant_lookup(db_path: Path) -> Callable[[str], str | None]:
     """``model id -> fork-only quant label | None``, read-only against the DB."""
-    from hal0.registry.detect import unsupported_quant
+    from hal0.registry.detect import unsupported_gguf_contents, unsupported_quant
 
     rows: dict[str, tuple[str, str, str]] = {}
     if db_path.is_file():
@@ -639,7 +639,17 @@ def _fork_quant_lookup(db_path: Path) -> Callable[[str], str | None]:
         # File and quant evidence only: the registry id is the operator's
         # free choice and can name a fork family while the file is plain.
         path, quant, hf = rows.get(model_id, ("", "", ""))
-        return unsupported_quant(quant, Path(path).name, hf)
+        by_name = unsupported_quant(quant, Path(path).name, hf)
+        if by_name or not path:
+            return by_name
+        # A fork build renamed to an innocuous name still declares tensor
+        # types only a fork can read. The launch guard refuses it, so the
+        # slot must not keep it. A missing, unreadable or truncated file is
+        # simply not refused by content: the migration never fails on it.
+        try:
+            return unsupported_gguf_contents(path)
+        except Exception:  # a bad file must not fail the migration
+            return None
 
     return lookup
 
