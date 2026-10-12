@@ -229,7 +229,7 @@ class TestRequireKfdForGpuSlot:
         msg = str(exc.value)
         assert "agent" in msg
         assert "1888" in msg
-        assert "not validated for the Vulkan lane" in msg
+        assert "has not passed the hardware gate's Vulkan lane" in msg
 
     def test_passes_when_kfd_is_present(self, tmp_path) -> None:
         node = tmp_path / "kfd"

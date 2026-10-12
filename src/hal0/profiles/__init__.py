@@ -209,7 +209,7 @@ class ProfileCatalog:
         written into profiles.toml by the retired bulk demotion. This covers a
         FRESH install, where there is no file at all, yet the shipped
         configuration still names demoted profiles — install.sh copies
-        ``installer/etc-hal0/slots/agent.toml`` (``chadrock-moe``) and
+        ``installer/etc-hal0/slots/agent.toml`` (``dense``) and
         ``coder.toml`` (``coding``) verbatim, and the ``saber`` seed stack's
         agent slot asks for ``moe``. Without this the curated slots on a
         brand-new box would reference nothing.
@@ -222,7 +222,7 @@ class ProfileCatalog:
         the gate used to be ``profiles.toml exists``, which the first adoption
         itself makes true, so whichever of the shipped references resolved
         first won and every other one fell back to the device default. A fresh
-        box ships three (agent.toml → chadrock-moe, coder.toml → coding, the
+        box ships three (agent.toml → dense, coder.toml → coding, the
         saber stack → moe), so the outcome depended on launch order.
 
         ``ProfilesConfig.adopted_legacy_names`` is the real question: empty on
@@ -535,17 +535,15 @@ def screen_profile_runner(runner: str | None) -> str | None:
 
     ``runner`` is a RUNNER_IMAGES registry key, never an image ref — keys
     survive image/tag updates (the same rot that got ``image`` removed from
-    profiles, spec-hw-slot-ownership §3). A superseded alias (e.g.
-    ``vulkanfpx``) is folded to its canonical key before persisting, so the
-    stored value is always the canonical registry key. Shared by the profile
+    profiles, spec-hw-slot-ownership §3). Shared by the profile
     catalog write seam (create/update) and the portable import path so both
     apply the identical check.
     """
     if runner is None or not runner.strip():
         return None
-    from hal0.runners import RUNNER_IMAGES, canonical_runner_key
+    from hal0.runners import RUNNER_IMAGES
 
-    key = canonical_runner_key(runner)
+    key = runner.strip()
     if key not in RUNNER_IMAGES:
         raise UnprocessableEntity(
             f"unknown runtime {runner!r}",

@@ -102,7 +102,7 @@ def test_present_in_root_store_advertises_npu_without_touching_rootless_store(
     _install_seam(monkeypatch, seam)
 
     assert _ids()[0] == "npu"
-    assert seam.calls == [catalog._FLM_TOOLBOX_IMAGE]
+    assert seam.calls == [catalog._flm_toolbox_image()]
     assert no_rootless == []
 
 
@@ -209,7 +209,7 @@ def test_dev_box_uses_image_exists_not_inspect(monkeypatch: pytest.MonkeyPatch) 
     calls = _dev_box(monkeypatch, 0)
 
     assert _ids()[0] == "npu"
-    assert calls == [["podman", "image", "exists", catalog._FLM_TOOLBOX_IMAGE]]
+    assert calls == [["podman", "image", "exists", catalog._flm_toolbox_image()]]
 
 
 def test_dev_box_absent_is_cached(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -296,7 +296,7 @@ def test_end_to_end_seam_failure_then_recovery_through_real_seam_client(
                 "-n",
                 container_mod.podman_introspect.SEAM_BIN,
                 "image-exists",
-                catalog._FLM_TOOLBOX_IMAGE,
+                catalog._flm_toolbox_image(),
             ]
         ]
         * 2

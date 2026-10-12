@@ -44,7 +44,7 @@ def test_legacy_profiles_keep_reasoning_off_and_thinking_keeps_deepseek() -> Non
     """The goal is "no thinking, structured output works": `--reasoning off`
     stays on the non-thinking profiles; the thinking profile's deliberate
     `--reasoning-format deepseek` is not a `none` and is untouched."""
-    for name in ("dense", "moe", "chadrock-dense", "chadrock-moe", "coding"):
+    for name in ("dense", "moe", "coding"):
         assert "--reasoning off" in LEGACY_SEED_PROFILES[name]["flags"], name
     assert "--reasoning-format deepseek" in LEGACY_SEED_PROFILES["thinking"]["flags"]
 

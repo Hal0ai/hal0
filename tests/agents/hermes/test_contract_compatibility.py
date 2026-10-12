@@ -337,7 +337,7 @@ def test_api_server_refuses_placeholder_or_weak_key() -> None:
         "needed to change it. None is viable here: a containerised shell cannot "
         "reach the host filesystem or 127.0.0.1:8080, which would break the "
         "bundled host-management skills (hal0-service-management, hal0-bench, "
-        "hal0-tune, hal0-quantize). The 'by default' half is now answered "
+        "hal0-tune). The 'by default' half is now answered "
         "(#1863): hal0 ships the terminal tool OFF and subtracts the `terminal`, "
         "`code_execution` and `delegation` toolsets via agent.disabled_toolsets "
         "unless the operator explicitly opts in, in which case 'local' is what "

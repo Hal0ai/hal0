@@ -2,7 +2,7 @@
 #
 # One profile per runtime family (flm, kokoro, moonshine, qwen3-tts,
 # comfyui) plus the generic llama-server workloads (chat, cpu-chat,
-# embedding, reranking, brain). The 8 workload VARIANTS this file used to
+# embedding, reranking, brain). The 5 workload VARIANTS this file used to
 # carry live in legacy_seed_profiles.toml now — see that file's header for
 # what happens to them on upgrade.
 #
@@ -33,9 +33,8 @@
 #
 # Each profile is a complete recipe for a (workload × model-family) cell.
 # Slot picks ONE profile; per-slot [model].defaults.extra_args overrides.
-# Family-specific quirks (kv-cache type, mmproj behavior, sampler) live in
-# the family-specific profile (e.g. profile.chadrock-moe, now in
-# legacy_seed_profiles.toml), NOT in a separate family_defaults layer.
+# Family-specific quirks (kv-cache type, mmproj behavior, sampler) live in a
+# family-specific profile, NOT in a separate family_defaults layer.
 
 [profile.chat]
 # Minimal generic chat — fallback for unknown models.

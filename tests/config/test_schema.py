@@ -489,8 +489,17 @@ class TestHal0Config:
         assert SlotsConfig().default_images == {}
 
     def test_slots_default_images_accepts_known_family(self) -> None:
-        cfg = SlotsConfig(default_images={"rocmfpx": "ghcr.io/hal0ai/hal0-combined:0824"})
-        assert cfg.default_images == {"rocmfpx": "ghcr.io/hal0ai/hal0-combined:0824"}
+        cfg = SlotsConfig(default_images={"standard": "ghcr.io/hal0ai/hal0-runner-standard:test"})
+        assert cfg.default_images == {"standard": "ghcr.io/hal0ai/hal0-runner-standard:test"}
+
+    @pytest.mark.parametrize("retired", ["rocmfpx", "vulkanfpx", "strix", "promptforge"])
+    def test_slots_default_images_rejects_a_retired_runner_key(self, retired: str) -> None:
+        """Only ``RUNNER_IMAGES`` keys are accepted (ADR-0028): the retired
+        families and the ``vulkanfpx`` alias are unknown, not folded."""
+        with pytest.raises(ValidationError) as ei:
+            SlotsConfig(default_images={retired: "ghcr.io/x/y:z"})
+        assert retired in str(ei.value)
+        assert "not a known runner family" in str(ei.value)
 
     def test_slots_default_images_rejects_unknown_family(self) -> None:
         with pytest.raises(ValidationError) as ei:
@@ -498,17 +507,17 @@ class TestHal0Config:
         msg = str(ei.value)
         assert "warpdrive" in msg
         assert "not a known runner family" in msg
-        assert "rocmfpx" in msg  # the error names the valid keys
+        assert "standard" in msg  # the error names the valid keys
 
     def test_slots_default_images_rejects_empty_ref(self) -> None:
         with pytest.raises(ValidationError) as ei:
-            SlotsConfig(default_images={"rocmfpx": ""})
+            SlotsConfig(default_images={"standard": ""})
         assert "non-empty image ref" in str(ei.value)
 
     def test_slots_default_images_null_value_clears_the_key(self) -> None:
         """The settings PUT deep-merge has no delete idiom, so an explicit
         null value IS the documented clear: the validator drops the key."""
-        cfg = SlotsConfig(default_images={"rocmfpx": None})
+        cfg = SlotsConfig(default_images={"standard": None})
         assert cfg.default_images == {}
 
     def test_extra_allow_keeps_unknown_keys(self) -> None:

@@ -3,7 +3,7 @@
 ``installer/install.sh`` has two writers for ``/etc/hal0/slots/``:
 
 * the **curated static seed** loop, which copies ``installer/etc-hal0/slots/*.toml``
-  verbatim (hand-tuned: ``agent`` gets ``profile = "chadrock-moe"``, ``brain``
+  verbatim (hand-tuned: ``agent`` gets ``profile = "dense"``, ``brain``
   gets ``profile = "brain"`` + ``runtime = "container"`` + a 64K window), and
 * the **first-run scaffold** pass (``hal0 setup --auto``), which writes a
   generically-derived config for any capability slot it doesn't already see.
@@ -35,7 +35,7 @@ _SEEDS_DIR = _REPO_ROOT / "installer" / "etc-hal0" / "slots"
 #: The two curated seeds the ordering bug destroyed, and the values that prove
 #: the curated file (not a derived scaffold) is what's on disk.
 _CURATED_EXPECTATIONS = {
-    "agent": {"profile": "chadrock-moe", "runtime": "container", "port": 8081},
+    "agent": {"profile": "dense", "runtime": "container", "port": 8081},
     "brain": {"profile": "brain", "runtime": "container", "port": 8089},
 }
 

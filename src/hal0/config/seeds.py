@@ -109,7 +109,7 @@ def seed_profiles() -> dict[str, dict[str, Any]]:
 
 @lru_cache(maxsize=1)
 def legacy_seed_profiles() -> dict[str, dict[str, Any]]:
-    """The 8 demoted profile definitions, keyed by slug — same shape as
+    """The 5 demoted profile definitions, keyed by slug — same shape as
     :func:`seed_profiles`, but NOT part of the shipped seed catalog.
 
     These used to be seeds; the catalog was pruned to the minimal core and

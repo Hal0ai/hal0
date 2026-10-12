@@ -118,20 +118,6 @@ export interface Slot {
     breaker?: SlotBreaker
     [key: string]: unknown
   }
-  /** Specialty-guard verdict (spec 2026-08-29 #1946) — top-level, same
-   *  detail-route-only enrichment gate as `config_drift` (SlotManager.
-   *  status()'s `include_config_drift` branch, lifted by serialize_slot).
-   *  `null` when the slot has no profile, the bound model carries no
-   *  specialty, or resolution fails (fail-open). Only GET /api/slots/{name}
-   *  (and the by-name/by-id detail routes) populate it — the hot GET
-   *  /api/slots list poll never does, so read it off `useSlotDetail`, not
-   *  the list-backed `useSlots()` rows. */
-  specialty_degraded?: {
-    code: string
-    specialty: string
-    runner: string
-    detail: string
-  } | null
   /** Wall-clock epoch (seconds) of the most recent request served by
    *  this slot. ``null``/undefined means hal0-api has not seen a request
    *  for this slot since startup. Used by the slots view to render the
@@ -163,7 +149,7 @@ export interface Slot {
    *  profile to supply the container image + bench-tuned flags. */
   profile?: string | null
   /** Container image ref (from the resolved profile). E.g.
-   *  "ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server". */
+   *  "ghcr.io/hal0ai/hal0-runner-standard:<tag>". */
   image?: string | null
   /** Container image availability. Populated by the backend when image_status
    *  is tracked.
@@ -180,7 +166,7 @@ export interface Slot {
    *                    (see imageStatusChip in dash/slot-status.js), never as
    *                    a fault and never as `missing`.
    *    not-configured  no profile/image declared — the slot runs on the
-   *                    default toolbox (#1226)
+   *                    default runner image (#1226)
    */
   image_status?: 'present' | 'pulling' | 'missing' | 'unknown' | 'not-configured' | null
   /** ACTUAL running container image ref, read from ``podman inspect`` by

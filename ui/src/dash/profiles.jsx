@@ -201,9 +201,9 @@ function runtimeLine(p, backends) {
 // chip) instead of failing at spawn, through the SAME seam the Runner Images
 // page uses: useRunnerImagePullJob → POST /api/runner-images/{id}/pull.
 // system-info names a runtime's resolved image REF; that route addresses a
-// catalogue ROW id, which images.json may supply independently of the repo
-// path (registry/runner_image_sync.py:475), so the row is matched by repo
-// rather than derived from the ref.
+// catalogue ROW id, and catalogue rows are one per runner (the row id IS the
+// runner key), so the row is looked up by runner key. The ref only
+// contributes the tag.
 function splitImageRef(ref) {
   const s = String(ref || '');
   const at = s.indexOf('@');
@@ -215,11 +215,11 @@ function splitImageRef(ref) {
   return { repo: body.slice(0, lastSlash + 1) + tail.slice(0, colon), tag: tail.slice(colon + 1) };
 }
 
-export function pullTargetFor(runnerRow, images) {
-  const { repo, tag } = splitImageRef(runnerRow?.image);
-  if (!repo) return null;
-  const row = (images || []).find((i) => i?.image === repo);
+export function pullTargetFor(runnerKey, runnerRow, images) {
+  if (!runnerKey) return null;
+  const row = (images || []).find((i) => i?.id === runnerKey);
   if (!row) return null;
+  const { tag } = splitImageRef(runnerRow?.image);
   // Only name a tag the catalogue actually knows — the route 404s on any
   // other, and the row's headline tag is the honest fallback.
   const known = tag && (row.tag === tag || (row.available_tags || []).includes(tag));
@@ -233,13 +233,13 @@ export function pullTargetFor(runnerRow, images) {
 export function useRunnerPull(runnerKey, backends) {
   const imagesQuery = useRunnerImages();
   const job = useRunnerImagePullJob();
-  const target = pullTargetFor(backends?.[runnerKey], imagesQuery.data?.images);
+  const target = pullTargetFor(runnerKey, backends?.[runnerKey], imagesQuery.data?.images);
   return {
     target,
     inFlight: !!job.inFlight,
     // A failed pull is reported inline and nothing else — it never gates the
     // profile save (the profile is a template; the image is a separate fact).
-    error: job.error?.message || (target ? null : 'no catalogue entry for this runtime image'),
+    error: job.error?.message || (target ? null : 'no catalogue entry for this runtime'),
     start: () => { if (target) job.start(target.id, target.tag).catch(() => {}); },
   };
 }

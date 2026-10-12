@@ -1750,6 +1750,31 @@ async def list_all(
 # ── add-by-path (POST /api/models/add-from-path) ──────────────────────────────
 
 
+def refuse_unsupported_quant(
+    model: str, quant: str | None, *names: str | None, contents: str | None = None
+) -> None:
+    """Raise 422 ``models.unsupported_quant`` for a fork-only quant.
+
+    ROCmFPX-family, IU4 and ActiveFPX GGUFs need a llama.cpp fork hal0 no
+    longer ships (ADR-0028), so model add and pull refuse them up front
+    instead of registering a model no slot can load. Pass file names only —
+    never an HF repo id or an operator-chosen model id, which can name a fork
+    family while the file is plain (``Hal0ai/hal0-brain-sft-ROCmFPX-GGUF``
+    carries a plain F16).
+    """
+    from hal0.errors import UnprocessableEntity
+    from hal0.registry.detect import unsupported_quant, unsupported_quant_message
+
+    found = unsupported_quant(quant, *names) or contents
+    if found is None:
+        return
+    raise UnprocessableEntity(
+        unsupported_quant_message(model, found),
+        code="models.unsupported_quant",
+        details={"model": model, "quant": found},
+    )
+
+
 async def add_from_path(body: dict[str, Any], *, registry: Any, event_bus: Any) -> dict[str, Any]:
     """Register a single already-downloaded model file by absolute path.
 
@@ -1762,6 +1787,8 @@ async def add_from_path(body: dict[str, Any], *, registry: Any, event_bus: Any) 
       * ``BadRequest`` ``model.path_relative`` — path not absolute.
       * ``BadRequest`` ``model.path_missing`` — file absent / unreadable.
       * ``BadRequest`` ``model.unsupported_format`` — extension not allowed.
+      * ``UnprocessableEntity`` ``models.unsupported_quant`` — a fork-only
+        quant (ROCmFPX family, IU4, ActiveFPX) no hal0 runner can load.
       * ``ModelAlreadyExists`` (409) — id registered and ``overwrite=false``.
 
     Returns the serialised model dict (:func:`model_to_dict`).
@@ -1823,6 +1850,12 @@ async def add_from_path(body: dict[str, Any], *, registry: Any, event_bus: Any) 
     # name carries no signal at all, which would otherwise silently hide a
     # real filename token like "jina-reranker-*.gguf" from detect().
     detection = detect(resolved, filename_hint=path.name)
+    refuse_unsupported_quant(path.name, detection.quant, path.name)
+    # A fork build renamed to a generic name still declares its own tensor
+    # types; check the file, not only its name.
+    from hal0.registry.detect import unsupported_gguf_contents
+
+    refuse_unsupported_quant(path.name, None, contents=unsupported_gguf_contents(resolved))
     raw_labels = body.get("labels")
     if isinstance(raw_labels, list) and raw_labels:
         capabilities = [str(c) for c in raw_labels if isinstance(c, str) and c.strip()]

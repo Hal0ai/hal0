@@ -48,16 +48,15 @@ const {
   // so vi.hoisted mock factories can close over it.
   deleteOutcome: { current: 'removed' as 'removed' | 'missing' | 'tag_in_use' | 'rm_unavailable' },
   PULL_ROW: {
-    id: 'rocmfpx-combined',
-    image: 'ghcr.io/hal0ai/hal0-combined',
+    id: 'standard',
+    image: 'ghcr.io/hal0ai/hal0-runner-standard',
     tag: '0826',
     digest: null,
     size_bytes: 7_340_032_000,
-    manifest_key: null,
-    ownership: 'owned',
-    publish: 'external',
-    notes: null,
-    build: null,
+    title: 'Standard',
+    blurb: 'llama.cpp for AMD GPUs.',
+    runner: 'standard',
+    tier: 'default',
     local_path: null,
     downloaded_at: null,
     discovered_at: null,
@@ -155,6 +154,7 @@ const {
   newerTagCandidate,
   newestComparableTag,
   tagLanes,
+  RELEASE_TAG_RE,
   MUTABLE_TAGS,
   RunnerImagesView,
   provenanceRepoName,
@@ -165,11 +165,11 @@ const {
 // Minimal contract-shaped row; overrides per case.
 function row(overrides: Record<string, unknown> = {}) {
   return {
-    id: 'rocmfpx-combined',
-    image: 'ghcr.io/hal0ai/hal0-combined',
+    id: 'standard',
+    image: 'ghcr.io/hal0ai/hal0-runner-standard',
     tag: '0824',
     available_tags: ['0824', '0822'],
-    is_default: { family: 'rocmfpx', source: 'release' },
+    is_default: { family: 'standard', source: 'release' },
     in_use_by: ['agent', 'utility'],
     ...overrides,
   }
@@ -179,26 +179,30 @@ describe('groupRows (ADR-0027: grouped by runtime tier)', () => {
   const ids = (list: Array<{ id: string }>) => list.map(r => r.id)
 
   it('groups rows by their registry tier, not by the launch-image marker', () => {
-    // The live-box bug: every family has its own launch image, so grouping
-    // by `is_default` put Qwen3 TTS and Strix Halo Vulkan under "Default".
+    // The live-box bug: every runner has its own launch image, so grouping
+    // by `is_default` put Qwen3 TTS under "Default".
     const rows = [
-      { id: 'combined', tier: 'default', title: 'ROCmFPX', is_default: { family: 'rocmfpx', source: 'release' } },
-      { id: 'qwen3tts', tier: 'optional', title: 'Qwen3 TTS', is_default: { family: 'qwen3tts', source: 'release' } },
-      { id: 'strix', tier: 'optional', title: 'Strix Halo Vulkan', is_default: { family: 'strix', source: 'release' } },
-      { id: 'old-fpx', tier: 'frozen', title: 'Old FPX', is_default: null },
-      { id: 'rocm', tier: null, is_default: null },
+      { id: 'standard', runner: 'standard', tier: 'default', title: 'Standard', is_default: { family: 'standard', source: 'release' } },
+      { id: 'qwen3tts', runner: 'qwen3tts', tier: 'optional', title: 'Qwen3 TTS', is_default: { family: 'qwen3tts', source: 'release' } },
+      { id: 'cuda', runner: 'cuda', tier: 'optional', title: 'NVIDIA CUDA', is_default: { family: 'cuda', source: 'release' } },
+      { id: 'ghost', runner: null, tier: null, is_default: null },
     ]
     const g = groupRows(rows)
-    expect(ids(g.defaults)).toEqual(['combined'])
-    expect(ids(g.optional)).toEqual(['qwen3tts', 'strix'])
-    expect(ids(g.frozen)).toEqual(['old-fpx'])
-    expect(ids(g.other)).toEqual(['rocm'])
+    expect(ids(g.defaults)).toEqual(['standard'])
+    expect(ids(g.optional)).toEqual(['cuda', 'qwen3tts'])
+    expect(ids(g.other)).toEqual(['ghost'])
+  })
+
+  it('has no "frozen" section: tiers are only default | optional', () => {
+    const g = groupRows([{ id: 'old', runner: 'old', tier: 'frozen', title: 'Old' }])
+    expect(Object.keys(g)).toEqual(['defaults', 'optional', 'other'])
+    expect(ids(g.other)).toEqual(['old'])
   })
 
   it('sorts each section by display title, falling back to the catalogue id', () => {
     const rows = [
       { id: 'z-untitled', tier: 'optional' },
-      { id: 'b', tier: 'optional', title: 'Strix Halo Vulkan' },
+      { id: 'b', tier: 'optional', title: 'Qwen3 TTS' },
       { id: 'c', tier: 'optional', title: 'NVIDIA CUDA' },
     ]
     expect(ids(groupRows(rows).optional)).toEqual(['c', 'b', 'z-untitled'])
@@ -206,7 +210,7 @@ describe('groupRows (ADR-0027: grouped by runtime tier)', () => {
 
   it('an untiered or unknown-tier row is "other", never optional', () => {
     const rows = [
-      { id: 'legacy', is_default: null, specialties: ['promptforge'] },
+      { id: 'legacy', is_default: null },
       { id: 'weird', tier: 'experimental' },
     ]
     const g = groupRows(rows)
@@ -215,7 +219,7 @@ describe('groupRows (ADR-0027: grouped by runtime tier)', () => {
   })
 
   it('tolerates empty/absent input', () => {
-    const empty = { defaults: [], optional: [], frozen: [], other: [] }
+    const empty = { defaults: [], optional: [], other: [] }
     expect(groupRows([])).toEqual(empty)
     expect(groupRows(undefined)).toEqual(empty)
   })
@@ -230,10 +234,10 @@ describe('launchImageLabel', () => {
 
   it('names the runtime when an override points it at another runtime\'s repo', () => {
     const label = launchImageLabel(
-      { runner: 'strix', is_default: { family: 'rocmfpx', source: 'override' } },
-      familyTitleMap([{ family: 'rocmfpx', title: 'ROCmFPX' }]),
+      { runner: 'cuda', is_default: { family: 'standard', source: 'override' } },
+      familyTitleMap([{ family: 'standard', title: 'Standard' }]),
     )
-    expect(label).toBe('ROCmFPX launch image · override')
+    expect(label).toBe('Standard launch image · override')
   })
 
   it('is null when the row is no runtime\'s launch image', () => {
@@ -244,9 +248,9 @@ describe('launchImageLabel', () => {
 describe('Runner Images list sections (render)', () => {
   it('renders Default / Optional / Other headings from row tiers and shows registry titles', () => {
     imagesOverride.current = [
-      { ...PULL_ROW, id: 'rocmfpx-combined', runner: 'rocmfpx', title: 'ROCmFPX', blurb: 'AMD GPU llama.cpp.', tier: 'default' },
-      { ...PULL_ROW, id: 'qwen3tts', image: 'ghcr.io/hal0ai/hal0-toolbox-qwen3tts', runner: 'qwen3tts', title: 'Qwen3 TTS', blurb: 'GPU TTS.', tier: 'optional', is_default: { family: 'qwen3tts', source: 'release' } },
-      { ...PULL_ROW, id: 'rocm', image: 'ghcr.io/hal0ai/hal0-toolbox-rocm', runner: null, title: null, blurb: null, tier: null, is_default: null, notes: 'Legacy per-backend toolbox. NO LIVE BUILDER.' },
+      { ...PULL_ROW, id: 'standard', runner: 'standard', title: 'Standard', blurb: 'AMD GPU llama.cpp.', tier: 'default' },
+      { ...PULL_ROW, id: 'qwen3tts', image: 'ghcr.io/hal0ai/hal0-runner-qwen3tts', runner: 'qwen3tts', title: 'Qwen3 TTS', blurb: 'GPU TTS.', tier: 'optional', is_default: { family: 'qwen3tts', source: 'release' } },
+      { ...PULL_ROW, id: 'ghost', image: 'ghcr.io/example/ghost', runner: null, title: 'Ghost', blurb: null, tier: null, is_default: null },
     ]
     familiesOverride.current = []
     const host = document.createElement('div')
@@ -266,8 +270,16 @@ describe('Runner Images list sections (render)', () => {
     expect(sectionOf('frozen')).toBeNull()
     // Rows read by registry title; the vague catalogue id is not the name.
     expect(host.textContent).toContain('Qwen3 TTS')
-    // Maintainer notes never render as the description.
     expect(host.querySelector('[data-testid="ri-card-blurb"]')?.textContent).toBe('AMD GPU llama.cpp.')
+    // Raw refs / tags / runner keys live ONLY inside the collapsed
+    // "Image details" area of the selected row's card.
+    const details = host.querySelector('[data-testid="ri-image-details"]') as HTMLDetailsElement
+    expect(details).toBeTruthy()
+    expect(details.hasAttribute('open')).toBe(false)
+    expect(details.textContent).toContain('ghcr.io/hal0ai/hal0-runner-standard')
+    const outside = (host.textContent || '').replace(details.textContent || '', '')
+    expect(outside).not.toContain('ghcr.io/hal0ai/hal0-runner-standard')
+    expect(outside).not.toContain('0826')
 
     act(() => {
       root.unmount()
@@ -282,8 +294,8 @@ describe('Runner Images list sections (render)', () => {
 // per-runner entries). Absent/empty provenance must format to null so
 // callers render EXACTLY what they render today — no placeholder text.
 describe('provenance formatters', () => {
-  const ROCMFPX = {
-    source_repo: 'https://github.com/hal0ai/ROCmFPX.git',
+  const FORK = {
+    source_repo: 'https://github.com/example/llama-fork.git',
     revision: '0a59adde1c5b2f3a4d6e7f8091a2b3c4d5e6f708',
     patch_count: 4,
   }
@@ -294,7 +306,7 @@ describe('provenance formatters', () => {
   }
 
   it('provenanceRepoName strips .git but keeps llama.cpp as-is', () => {
-    expect(provenanceRepoName(ROCMFPX.source_repo)).toBe('ROCmFPX')
+    expect(provenanceRepoName(FORK.source_repo)).toBe('llama-fork')
     expect(provenanceRepoName(UPSTREAM.source_repo)).toBe('llama.cpp')
     expect(provenanceRepoName('https://example.com/x/fork')).toBe('fork')
     expect(provenanceRepoName(null)).toBeNull()
@@ -302,7 +314,7 @@ describe('provenance formatters', () => {
   })
 
   it('formatProvenanceShort: fork with patches', () => {
-    expect(formatProvenanceShort(ROCMFPX)).toBe('ROCmFPX @0a59add (+4 patches)')
+    expect(formatProvenanceShort(FORK)).toBe('llama-fork @0a59add (+4 patches)')
   })
 
   it('formatProvenanceShort: pristine upstream omits the patch suffix', () => {
@@ -310,13 +322,13 @@ describe('provenance formatters', () => {
   })
 
   it('formatProvenanceShort: singular patch reads "+1 patch"', () => {
-    expect(formatProvenanceShort({ ...ROCMFPX, patch_count: 1 }))
-      .toBe('ROCmFPX @0a59add (+1 patch)')
+    expect(formatProvenanceShort({ ...FORK, patch_count: 1 }))
+      .toBe('llama-fork @0a59add (+1 patch)')
   })
 
   it('formatProvenanceShort: partial labels degrade to what exists', () => {
-    expect(formatProvenanceShort({ source_repo: ROCMFPX.source_repo, revision: null, patch_count: null }))
-      .toBe('ROCmFPX')
+    expect(formatProvenanceShort({ source_repo: FORK.source_repo, revision: null, patch_count: null }))
+      .toBe('llama-fork')
     expect(formatProvenanceShort({ source_repo: null, revision: 'abc1234def', patch_count: null }))
       .toBe('@abc1234')
   })
@@ -328,8 +340,8 @@ describe('provenance formatters', () => {
   })
 
   it('formatProvenanceFull keeps the full source URL', () => {
-    expect(formatProvenanceFull(ROCMFPX))
-      .toBe('https://github.com/hal0ai/ROCmFPX.git @0a59add (+4 patches)')
+    expect(formatProvenanceFull(FORK))
+      .toBe('https://github.com/example/llama-fork.git @0a59add (+4 patches)')
     expect(formatProvenanceFull(UPSTREAM))
       .toBe('https://github.com/ggml-org/llama.cpp.git @c841aee')
     expect(formatProvenanceFull(null)).toBeNull()
@@ -368,7 +380,8 @@ describe('FamilyStrip (Task 10)', () => {
   it('shows launch truth — effective ref, source chip, and the newer chip', () => {
     familiesOverride.current = [
       {
-        family: 'rocmfpx',
+        family: 'standard',
+        title: 'Standard',
         effective_ref: 'ghcr.io/x/a:0824',
         source: 'override',
         store_state: 'present',
@@ -380,28 +393,35 @@ describe('FamilyStrip (Task 10)', () => {
     ]
     const { host, root } = mount()
 
-    const rowEl = host.querySelector('[data-testid="ri-family-rocmfpx"]') as HTMLElement
+    const rowEl = host.querySelector('[data-testid="ri-family-standard"]') as HTMLElement
     expect(rowEl).toBeTruthy()
-    expect(rowEl.textContent).toContain('ghcr.io/x/a:0824')
+    expect(rowEl.textContent).toContain('Standard')
     expect(rowEl.textContent).toContain('override')
-    expect(rowEl.textContent).toContain('newer: 0826')
+    expect(rowEl.textContent).toContain('update available')
     expect(rowEl.textContent).toContain('via slots: brain')
+    // The raw ref + pin tag are reachable only inside the collapsed details.
+    const details = host.querySelector('[data-testid="ri-family-details-standard"]') as HTMLDetailsElement
+    expect(details.hasAttribute('open')).toBe(false)
+    expect(host.querySelector('[data-testid="ri-family-ref-standard"]')?.textContent).toContain('ghcr.io/x/a:0824')
+    const visible = (rowEl.textContent || '').replace(details.textContent || '', '')
+    expect(visible).not.toContain('ghcr.io/x/a')
+    expect(visible).not.toContain('0826')
 
     act(() => {
       root.unmount()
     })
   })
 
-  it('renders env/manifest as plain chips and release as "release"', () => {
+  it('renders env as a plain chip and release as "release"', () => {
     familiesOverride.current = [
       { family: 'a', effective_ref: 'ghcr.io/x/a:1', source: 'env', store_state: 'missing', slots: [], pinned_slots: [], newest_release: null, update_available: false },
-      { family: 'b', effective_ref: 'ghcr.io/x/b:1', source: 'manifest', store_state: 'unknown', slots: [], pinned_slots: [], newest_release: null, update_available: false },
+      { family: 'b', effective_ref: 'ghcr.io/x/b:1', source: 'override', store_state: 'unknown', slots: [], pinned_slots: [], newest_release: null, update_available: false },
       { family: 'c', effective_ref: 'ghcr.io/x/c:1', source: 'release', store_state: 'present', slots: [], pinned_slots: ['agent'], newest_release: null, update_available: false },
     ]
     const { host, root } = mount()
 
     expect(host.querySelector('[data-testid="ri-family-a"]')?.textContent).toContain('env')
-    expect(host.querySelector('[data-testid="ri-family-b"]')?.textContent).toContain('manifest')
+    expect(host.querySelector('[data-testid="ri-family-b"]')?.textContent).toContain('override')
     const releaseRow = host.querySelector('[data-testid="ri-family-c"]') as HTMLElement
     expect(releaseRow.textContent).toContain('release')
     expect(releaseRow.textContent).not.toContain('default')
@@ -431,7 +451,7 @@ describe('newerTagAvailable', () => {
 
   // Bug 2 — live dashboard observed the "newer" chip firing on mutable
   // branch/floating tags: comfyui headlined `latest` but showed
-  // `newer: main` (a CI branch tag re-pushed every build); rocmfpx
+  // `newer: main` (a CI branch tag re-pushed every build); standard
   // headlined a pinned tag but showed `newer: server` (an old floating
   // dev tag). `main`/`server` sort ahead of the real headline only
   // because they're first in GHCR's registry-order "rest" bucket — never
@@ -489,7 +509,7 @@ const V3_IMG = {
     { tag: 'latest', digest: 'sha256:a', downloaded: false },
     { tag: 'main', digest: 'sha256:c', downloaded: false },
   ],
-  badges: { '0826': 'validated' },
+  badges: { '0826': 'pinned' },
 }
 
 describe('tagLanes', () => {
@@ -502,6 +522,53 @@ describe('tagLanes', () => {
   it('collapses digest aliases', () => {
     const lanes = tagLanes(V3_IMG) as any
     expect(lanes.other.find((t: any) => t.tag === 'latest')?.aliasOf).toBe('0826')
+  })
+})
+
+describe('runner release tags (ADR-0028)', () => {
+  const RUNNER_IMG = {
+    id: 'standard',
+    image: 'ghcr.io/hal0ai/hal0-runner-standard',
+    tag: 'b11552-re14329d',
+    tags: [
+      { tag: 'b11600-r1234abc', digest: 'sha256:n', downloaded: false },
+      { tag: 'b11552-re14329d', digest: 'sha256:h', downloaded: true },
+      { tag: 'latest', digest: 'sha256:n', downloaded: false },
+    ],
+  }
+
+  it.each([
+    'b11552-re14329d',
+    '0.9.44-re14329d',
+    '20251121-re14329d',
+    '0.28.0-r6996d85',
+    'server-cuda-b11541',
+    '0826',
+    'v1.2.3',
+  ])('%s is a release tag', (tag) => {
+    expect(RELEASE_TAG_RE.test(tag)).toBe(true)
+  })
+
+  it.each(['latest', 'main', 'server-cuda', 'b11552-rnothex', 'sha-1234567'])(
+    '%s is not a release tag',
+    (tag) => {
+      expect(RELEASE_TAG_RE.test(tag)).toBe(false)
+    },
+  )
+
+  it('buckets runner tags as releases and finds the newer build', () => {
+    const lanes = tagLanes(RUNNER_IMG)
+    expect(lanes.releases.map((t: { tag: string }) => t.tag)).toEqual([
+      'b11600-r1234abc',
+      'b11552-re14329d',
+    ])
+    expect(newerTagCandidate(RUNNER_IMG)).toBe('b11600-r1234abc')
+    expect(newerTagAvailable(RUNNER_IMG)).toBe(true)
+  })
+
+  it('has no newer candidate when the headline is the newest build', () => {
+    const current = { ...RUNNER_IMG, tags: RUNNER_IMG.tags.slice(1) }
+    expect(newerTagCandidate(current)).toBeUndefined()
   })
 })
 
@@ -584,11 +651,6 @@ describe('RunnerCard tag picker + store-truth chips (Task 8)', () => {
         ...V3_IMG,
         digest: 'sha256:b',
         size_bytes: 1000,
-        manifest_key: null,
-        ownership: 'owned',
-        publish: 'external',
-        notes: null,
-        build: null,
         local_path: null,
         downloaded_at: null,
         discovered_at: null,
@@ -653,11 +715,6 @@ describe('RunnerCard tag picker + store-truth chips (Task 8)', () => {
         ...V3_IMG,
         digest: 'sha256:b',
         size_bytes: 1000,
-        manifest_key: null,
-        ownership: 'owned',
-        publish: 'external',
-        notes: null,
-        build: null,
         local_path: null,
         downloaded_at: null,
         discovered_at: null,
@@ -800,6 +857,9 @@ describe('RunnerImagesView restart-affected-slots (Task 12)', () => {
     act(() => { btn.click() })
     expect(host.querySelector('.modal-backdrop')).toBeTruthy()
     expect(host.textContent).toContain('brain, ops')
+    // The dialog names the runtime by title, not by image ref.
+    expect((host.querySelector('.modal-backdrop')!.textContent || '')).toContain('Standard')
+    expect((host.querySelector('.modal-backdrop')!.textContent || '')).not.toContain('ghcr.io')
 
     const confirmBtn = Array.from(host.querySelectorAll('button')).find(
       (b) => b.textContent === 'Restart',
@@ -814,7 +874,7 @@ describe('RunnerImagesView restart-affected-slots (Task 12)', () => {
 
     expect(apiPostCalls[apiPostCalls.length - 1]).toBe('/api/runner-images/restart-affected')
     expect(apiPostBodies[apiPostBodies.length - 1]).toEqual({
-      ref: 'ghcr.io/hal0ai/hal0-combined:0826',
+      ref: 'ghcr.io/hal0ai/hal0-runner-standard:0826',
     })
     expect(host.querySelector('.modal-backdrop')).toBeNull()
 
@@ -888,7 +948,12 @@ describe('RunnerImagesView per-tag delete (Task 5)', () => {
 
     act(() => { btn.click() })
     expect(host.querySelector('.modal-backdrop')).toBeTruthy()
-    expect(host.textContent).toContain(PULL_ROW.tag)
+    // The confirm dialog speaks in titles; the picked tag is visible next to
+    // the Delete button inside "Image details", not in the message.
+    const dialogText = host.querySelector('.modal-backdrop')!.textContent || ''
+    expect(dialogText).toContain('Standard')
+    expect(dialogText).not.toContain(PULL_ROW.tag)
+    expect(dialogText).not.toContain('ghcr.io')
 
     const confirmBtn = Array.from(host.querySelectorAll('button')).find(
       (b) => b.textContent === 'Delete',

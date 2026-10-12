@@ -64,15 +64,14 @@ from hal0.bench.harness import (
     run_cell,
     telemetry_argv,
 )
-from hal0.config.schema import (
-    DEFAULT_PROMPTFORGE_IMAGE,
-    DEFAULT_ROCMFPX_IMAGE,
-    FALLBACK_VULKAN_IMAGE,
-)
+from hal0.runners import RUNNER_IMAGES, resolve_runner_image
 
-CPU_BENCH_BIN = "/usr/local/bin/llama-bench"
-ROCMFPX_BENCH_BIN = "/opt/rocmfpx/bin/llama-bench"
-PROMPTFORGE_BENCH_BIN = "/opt/promptforge/bin/llama-bench"
+#: The lane images are the runner registry's resolved refs (manifest.json pin,
+#: or the ``HAL0_RUNNER_IMAGE_<KEY>`` override). Both llama.cpp runners install
+#: the bench binary at the same path.
+STANDARD_IMAGE = resolve_runner_image(RUNNER_IMAGES["standard"])
+CPU_IMAGE = resolve_runner_image(RUNNER_IMAGES["cpu"])
+BENCH_BIN = "/opt/hal0/bin/llama-bench"
 COMMON_ARGS = [("-fa", "1"), ("-mmp", "0")]
 
 #: One llama-bench ``-o json`` row, the same shape
@@ -98,28 +97,39 @@ _FAKE_BENCH_JSON = json.dumps([_FAKE_BENCH_ROW])
 
 
 class TestLaneSpecs:
-    """``lane_specs()`` must carry Phase 1's 3-lane ``BACKENDS`` matrix
-    (``installer/bench/config.sh``) plus the opt-in ``promptforge`` lane
-    (the M5 follow-up; never in a default sweep)."""
+    """``lane_specs()`` carries the 3-lane ``BACKENDS`` matrix
+    (``installer/bench/config.sh``); images come from the runner registry."""
 
-    def test_the_lane_matrix_is_exactly_the_four_known_lanes(self) -> None:
+    def test_the_lane_matrix_is_exactly_the_three_known_lanes(self) -> None:
         specs = lane_specs()
 
-        assert set(specs) == {"rocm", "vulkan_radv", "cpu", "promptforge"}
+        assert set(specs) == {"rocm", "vulkan_radv", "cpu"}
 
-    def test_cpu_lane_uses_the_fallback_vulkan_image(self) -> None:
-        """Regression guard for #1516-class bugs: the CPU lane must resolve
-        the LEAN toolbox image, never the 7.5 GB rocmfpx one."""
+    def test_cpu_lane_uses_the_cpu_runner_image(self) -> None:
+        """Regression guard for #1516-class bugs: the CPU lane must resolve the
+        lean ``cpu`` runner image, never the big GPU ``standard`` one."""
         spec = lane_specs()["cpu"]
 
-        # Identity with the schema constant, not a string literal — a
-        # hand-copied literal silently drifts when the constant is bumped.
-        assert spec.image is FALLBACK_VULKAN_IMAGE
+        # Equality with the registry's resolution, not a string literal — a
+        # hand-copied literal silently drifts when the pin is bumped.
+        assert spec.image == CPU_IMAGE
+        assert spec.image != STANDARD_IMAGE
 
-    def test_cpu_lane_uses_the_lean_toolbox_bench_binary(self) -> None:
+    def test_cpu_lane_uses_the_runner_bench_binary(self) -> None:
         spec = lane_specs()["cpu"]
 
-        assert spec.bench_bin == CPU_BENCH_BIN
+        assert spec.bench_bin == BENCH_BIN
+
+    def test_lane_images_follow_the_env_override(self, monkeypatch) -> None:
+        """``HAL0_RUNNER_IMAGE_<KEY>`` moves a lane exactly as it moves a slot:
+        a bench measures what an unpinned slot launches."""
+        monkeypatch.setenv("HAL0_RUNNER_IMAGE_STANDARD", "ghcr.io/me/standard:test")
+        monkeypatch.setenv("HAL0_RUNNER_IMAGE_CPU", "ghcr.io/me/cpu:test")
+        specs = lane_specs()
+
+        assert specs["rocm"].image == "ghcr.io/me/standard:test"
+        assert specs["vulkan_radv"].image == "ghcr.io/me/standard:test"
+        assert specs["cpu"].image == "ghcr.io/me/cpu:test"
 
     def test_cpu_lane_pins_zero_gpu_layers_and_no_device(self) -> None:
         spec = lane_specs()["cpu"]
@@ -136,11 +146,11 @@ class TestLaneSpecs:
         ("lane", "dev"),
         [("rocm", "ROCm0"), ("vulkan_radv", "Vulkan0")],
     )
-    def test_gpu_lanes_use_the_default_rocmfpx_image(self, lane, dev) -> None:
+    def test_gpu_lanes_use_the_standard_runner_image(self, lane, dev) -> None:
         spec = lane_specs()[lane]
 
-        assert spec.image is DEFAULT_ROCMFPX_IMAGE
-        assert spec.bench_bin == ROCMFPX_BENCH_BIN
+        assert spec.image == STANDARD_IMAGE
+        assert spec.bench_bin == BENCH_BIN
         assert spec.dev_args == (("-ngl", "99"), ("-dev", dev))
 
     def test_rocm_lane_env(self) -> None:
@@ -149,7 +159,7 @@ class TestLaneSpecs:
         assert spec.env == ("GGML_HIP_ENABLE_UNIFIED_MEMORY=1",)
 
     def test_vulkan_lane_has_no_env(self) -> None:
-        """``vulkan_radv`` shares the rocm image but is a distinct lane: no
+        """``vulkan_radv`` shares the standard image but is a distinct lane: no
         HIP unified-memory env (that flag is ROCm-specific). Neither lane
         carries a ``ubatch`` field (finding 6): the harness never emits
         ``-ub``, so both lanes run at llama-bench's own internal default."""
@@ -163,39 +173,6 @@ class TestLaneSpecs:
 
         for key, spec in specs.items():
             assert spec.lane == key
-
-    def test_promptforge_lane_uses_its_own_image_and_binary(self) -> None:
-        """The PromptForge runner is a separate image lineage installing under
-        ``/opt/promptforge/`` — the M5 follow-up: before this lane existed,
-        bench cells for that image had no LaneSpec to run through (the GPU
-        lanes' ``/opt/rocmfpx/bin/llama-bench`` does not exist in it)."""
-        spec = lane_specs()["promptforge"]
-
-        assert spec.image is DEFAULT_PROMPTFORGE_IMAGE
-        assert spec.bench_bin == PROMPTFORGE_BENCH_BIN
-
-    def test_promptforge_lane_pins_the_rocm_device(self) -> None:
-        """HIP-only image (GGML_VULKAN=OFF): ROCm0 is the only valid device."""
-        spec = lane_specs()["promptforge"]
-
-        assert spec.dev_args == (("-ngl", "99"), ("-dev", "ROCm0"))
-
-    def test_promptforge_lane_env_matches_the_rocm_lane(self) -> None:
-        """Same HIP unified-memory env as ``rocm``, and ONLY that: the card's
-        ``PROMPTFORGE_*`` mode envs stay out until the ct150 gate (#1891)
-        validates them — and llama-bench cells measure the plain GGUF path
-        anyway, not the sidecar-accelerated one."""
-        spec = lane_specs()["promptforge"]
-
-        assert spec.env == ("GGML_HIP_ENABLE_UNIFIED_MEMORY=1",)
-
-    def test_promptforge_is_never_a_default_lane(self) -> None:
-        """``DEFAULT_PROMPTFORGE_IMAGE`` is a CANDIDATE pin until #1891
-        passes, and the image serves exactly one model family either way — a
-        routine sweep must never pull it in. The lane runs only when a suite
-        names it explicitly (``--backends promptforge``)."""
-        for tier in (TIER_CPU, TIER_AMD, TIER_NVIDIA):
-            assert "promptforge" not in default_lanes(tier)
 
 
 # ── default_lanes ────────────────────────────────────────────────────────────
@@ -484,8 +461,8 @@ class TestComposePodmanArgv:
             "seccomp=unconfined",
             "--volume=/models:/models:ro,z",
             "--entrypoint",
-            CPU_BENCH_BIN,
-            FALLBACK_VULKAN_IMAGE,
+            BENCH_BIN,
+            CPU_IMAGE,
             "-m",
             "/models/tiny.gguf",
             "-fa",
@@ -576,7 +553,7 @@ class _ScriptedRunner:
 
 class TestRunCell:
     """``run_cell`` composes one argv and drives the Phase-1 retry ladder:
-    rc>=128 retries (rocmfpx init-segfault), rc==0 with empty stdout
+    rc>=128 retries (llama-bench init-segfault), rc==0 with empty stdout
     normalises to 139 and retries (the ``podman --rm`` reap race), rc<128
     real failures never retry, and a timed-out attempt (rc 124, or 137 past
     the wall-clock cap) never crash-retries either."""
@@ -657,7 +634,7 @@ class TestRunCell:
         """Ported from ``test_harness_impl.py`` (finding 9): rc 137 delivered
         AFTER the per-attempt wall-clock cap has elapsed is the shim's own
         ``--kill-after=30`` escalation from TERM to KILL, not a plain
-        rocmfpx crash — it must never crash-retry."""
+        llama-bench crash — it must never crash-retry."""
         times = iter([0.0, 100.0])
         monkeypatch.setattr(_harness_mod.time, "monotonic", lambda: next(times))
         runner = _ScriptedRunner([(137, "", "killed")])
@@ -738,7 +715,7 @@ class TestRunCell:
         # test_meta_provenance_keys_match_legacy_exactly both asserted).
         assert set(result.meta) == legacy_keys
         assert result.meta["backend"] == "cpu"
-        assert result.meta["image"] == FALLBACK_VULKAN_IMAGE
+        assert result.meta["image"] == CPU_IMAGE
         # finding 6: the harness never emits -ub — the key stays for legacy
         # readers, but its value is always None for a v2-composed cell.
         assert result.meta["ubatch"] is None

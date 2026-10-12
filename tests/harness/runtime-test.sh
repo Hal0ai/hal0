@@ -78,11 +78,11 @@ start=$(start_ms)
 IMG="$(python3 -c "
 import json
 m = json.load(open('${REPO_ROOT}/manifest.json'))
-e = m['toolbox_images']['vulkan']
-print(e['tag'])
+e = m['runners']['standard']
+print(e['image'] + ':' + e['tag'] if e.get('tag') else '')
 " 2>/dev/null || true)"
 if [[ -z "${IMG}" ]]; then
-    add_row "runtime-image-check" "fail" "$(since_ms "${start}")" "manifest.json missing toolbox_images.vulkan.tag"
+    add_row "runtime-image-check" "fail" "$(since_ms "${start}")" "manifest.json runners.standard has no published tag"
 elif docker image inspect "${IMG}" >/dev/null 2>&1; then
     add_row "runtime-image-check" "pass" "$(since_ms "${start}")" "${IMG} present locally"
 else

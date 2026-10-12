@@ -6,7 +6,7 @@ Covers every fold + edge the spec §9 verification line calls out:
     already-set slot NGL is left alone; the -1 sentinel is "unset").
   * BINARY fold (model.preferred_runner → slot.binary; already-set left alone).
   * profile.image DELIBERATE pin → image_pin of every referencing slot.
-  * profile.image former-default DEBRIS (STALE_RUNNER_IMAGE_REFS) → dropped,
+  * profile.image former-default DEBRIS (the caller's ``stale_refs``) → dropped,
     never folded.
   * zero-slot profile → "lost" pin logged, still deleted.
   * slot.image / [slot].image → image_pin (slot's own image wins over profile's).

@@ -145,7 +145,7 @@ async def test_non_gpu_profile_untouched(tmp_hal0_home: str) -> None:
 # ── Task 5: profile apply flips runtime + device (profile wins, D4) ────────
 
 
-def _catalog_with_runner(tmp_path, monkeypatch, runner="promptforge"):
+def _catalog_with_runner(tmp_path, monkeypatch, runner="qwen3tts"):
     """Point ``load_profiles_config`` at a profiles.toml whose "pf" profile
     carries ``runner``. Mirrors the ``HAL0_HOME``-env idiom the rest of this
     file uses (via ``tmp_hal0_home``) — these sync tests call
@@ -164,7 +164,7 @@ def test_profile_with_runner_sets_binary_and_device(tmp_path, monkeypatch):
     monkeypatch.setattr("hal0.providers._gpu.render_node_present", lambda *a, **k: True)
     cfg = {"profile": "pf", "device": "gpu-vulkan", "binary": ""}
     _reconcile_device_profile(cfg, changed={"profile"})
-    assert cfg["binary"] == "promptforge"
+    assert cfg["binary"] == "qwen3tts"
     assert cfg["device"] == "gpu-rocm"  # derived from the single backend
 
 
@@ -197,10 +197,10 @@ def test_profile_runner_infeasible_rocm_without_both_nodes_raises(
 
 
 def test_profile_runner_multi_backend_keeps_lane(tmp_path, monkeypatch):
-    _catalog_with_runner(tmp_path, monkeypatch, runner="rocmfpx")
-    cfg = {"profile": "pf", "device": "gpu-vulkan", "binary": "promptforge"}
+    _catalog_with_runner(tmp_path, monkeypatch, runner="standard")
+    cfg = {"profile": "pf", "device": "gpu-vulkan", "binary": "qwen3tts"}
     _reconcile_device_profile(cfg, changed={"profile"})
-    assert cfg["binary"] == "rocmfpx"
+    assert cfg["binary"] == "standard"
     assert cfg["device"] == "gpu-vulkan"  # combined default: lane untouched
 
 

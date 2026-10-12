@@ -38,6 +38,16 @@ applying. Add those subsections to a version's section to surface them; see
   `packaging/runner/` and their tests) is gone. The workflow had re-run on a
   dependency bump and moved the published
   `hal0-toolbox-qwen3tts:v1` tag to an image that had not passed the gate.
+### Highlights
+
+- **A fresh runner system (ADR-0028).** Every runner has one name, used for
+  its registry key, its pin, its catalogue row and its package
+  (`ghcr.io/hal0ai/hal0-runner-<key>`). The AMD llama.cpp runner is now
+  **Standard** (`standard`), built from pristine upstream llama.cpp for ROCm
+  and Vulkan. Every runner image is pinned in one table, `manifest.json`
+  `runners`; the installer, the Vulkan-lane gate, the bench harness and
+  `hal0 doctor toolbox-pull` all read it. The runner-image catalogue now syncs
+  by itself at startup and during `hal0 update`.
 
 ### Breaking
 
@@ -80,6 +90,92 @@ applying. Add those subsections to a version's section to surface them; see
   - install.sh no longer warns about a pre-FHS `/opt/hal0`, deletes stale
     `hal0-agent@` drop-ins (Hermes provisioning still does), or removes
     retired bench scripts.
+- **Runners.** The `rocmfpx` runner (and its `vulkanfpx` alias), the `strix`
+  runner and the `promptforge` runner are removed, with no alias. Runners are
+  `standard`, `cpu`, `flm`, `kokoro`, `moonshine` and `comfyui` (default) plus
+  `qwen3tts` and `cuda` (optional). The `frozen` tier is gone. Existing
+  installs are converted automatically (see Migrations).
+- **ROCmFPX, ROCmFP4, IU4 and ActiveFPX GGUFs are no longer supported.** No
+  shipped runner can load them. Adding, pulling or scanning one is refused
+  (`models.unsupported_quant`) and launching one is refused
+  (`slot.unsupported_quant`). Use a plain GGUF build of the same model. The
+  curated ROCmFP4 rows, the `hal0-brain-sft` Q8/Q4 ROCmFPX variants and the
+  `hal0-quantize` agent skill are removed. The PromptForge specialty support
+  (companion sidecars, `specialty_degraded` on slots) and the `promptforge`
+  legacy seed profile are removed with them.
+- **Env overrides** are renamed from `HAL0_TOOLBOX_IMAGE_<KEY>` to
+  `HAL0_RUNNER_IMAGE_<KEY>`. The old names are no longer read.
+- `GET /api/system-info` no longer returns `backends[].is_default`,
+  `backends[].unsupported_archs` or `backends[].supports.specialties`; use
+  `backends[].tier`. The slot routes no longer return `model_fit_warning`.
+- `/api/runner-images` rows are keyed by runner key (`standard`, `cpu`, ...)
+  instead of package path, carry `title`, `summary`, `family`, `tier`,
+  `backends` and `lanes_gated` instead of `manifest_key`, `ownership`,
+  `publish`, `notes`, `build`, `runtime_family` and `supported_backends`, and
+  their only badge is `pinned`. The catalogue reads `images.json` schema
+  `hal0.runner-images.v2` only, and a sync prunes every row the catalogue no
+  longer lists, downloaded or not, unless the catalogue is empty or holds an
+  entry this hal0 cannot read.
+- The privileged bench seam (`hal0-benchctl`) runs only an image the
+  installed release pins in `manifest.json` `runners`, matched exactly, with
+  the `/opt/hal0/bin/llama-bench` entrypoint. A `HAL0_RUNNER_IMAGE_<KEY>`
+  override image cannot be benchmarked through it.
+- `manifest.json` replaces `toolbox_images` and `_legacy_toolboxes` with the
+  `runners` pin table (`_schema` `hal0.manifest.v2`). Its first pins are the
+  hardware-gated `hal0-runner-*` images: `standard` and `cpu` on llama.cpp
+  b11552 (`standard` gated for ROCm and Vulkan), `flm` 0.9.44 (NPU), `kokoro`
+  0.4.9 and `moonshine` 20251121 (CPU), `qwen3tts` 0.1.1 and `comfyui`
+  0.28.0 (ROCm), plus the upstream `server-cuda-b11541` image for `cuda`,
+  which hal0 does not gate.
+- The default curated chat model is `qwen3.8-27b` (Qwen3.8 27B, UD-Q4_K_XL
+  with vision, 96K default context). A fresh install seeds it as the primary
+  chat model on a box with a 32 GB or larger memory pool (smaller boxes keep
+  `qwen3.5-9b` / `qwen3-4b`), and the install-time agent offer is that model.
+
+### Migrations
+
+- **Runner-system conversion** (`hal0.config.migrations.runner_system`). Runs
+  automatically on `hal0 update`, on an `install.sh` re-run and when
+  `hal0 serve` starts `hal0-api`, before config is validated. It never runs on
+  import or from a read-only command. It rewrites slot runtimes, profile
+  runtimes and model `preferred_runner` values from the old default keys
+  (`rocmfpx`, `vulkanfpx`, `vulkan`, `rocm`) to `standard`. Image overrides
+  (`[slots].default_images`, `HAL0_TOOLBOX_IMAGE_*`) carry over to
+  `standard` only from `rocmfpx` and `vulkanfpx`; `vulkan` and `rocm`
+  overrides were already inert and are dropped with a warning. Settings for
+  the removed optional runners (`strix`, `promptforge`, `upstream`) are
+  dropped with a warning, never moved onto `standard`. Slots that name a
+  removed profile move to its replacement (`chadrock-moe` to `moe`,
+  `chadrock-dense` and `promptforge` to `dense`), and those definitions are
+  dropped from `profiles.toml`. It removes image pins that name an image hal0 shipped and
+  retired (`ghcr.io/hal0ai/` `hal0-combined*`, `hal0-rocmfpx` (and `localhost/hal0-rocmfpx`), `hal0-strix-vulkan`, `hal0-promptforge`, `hal0-toolbox-*`, `hal0-comfyui` and `amd-strix-halo-toolboxes`, the two kyuz0 Strix Halo images (`amd-strix-halo-toolboxes`, `amd-strix-halo-comfyui`), and the floating `ghcr.io/ggml-org/llama.cpp:server-cuda` tag) and keeps and reports pins to any other image, such
+  as your own build. It renames `HAL0_TOOLBOX_IMAGE_*` lines in `api.env`,
+  keeping each value's quoting, without duplicating a `HAL0_RUNNER_IMAGE_*`
+  line already there. For a slot
+  whose model is a ROCmFPX/IU4/ActiveFPX build, it keeps the slot's settings
+  but unassigns the model. Every change and every dropped pin is logged. A
+  file that does not parse is skipped with a warning and the rest still
+  converts. Before writing, it saves each file it changes, plus the old
+  `preferred_runner` values, to `/var/lib/hal0/backups/runners-<timestamp>.tar.gz`
+  (mode 0600; the database itself is never copied). If a write fails it rolls
+  back every write except `hal0.toml`, which stays converted so `hal0-api`
+  can start, and `hal0 update` reports the failure; a file it could not put
+  back is named in the error, with the backup to restore from. When it
+  converts at `hal0-api` startup it also re-renders the slot units, so
+  restarted slots run the converted image. Preview it with
+  `hal0 runner-images migrate` and run it with `--apply`. To downgrade, stop
+  `hal0-api` and run `hal0 runner-images migrate --restore <backup>`. The
+  restore leaves a marker that keeps this release's `hal0-api` from
+  converting again on boot; it holds only while the same hal0 version runs,
+  and the next `hal0 update` converts again.
+- Bundled agent skills hal0 no longer ships (`hal0-quantize`) are removed
+  from `/usr/share/hal0/skills` by `install.sh` and unlinked from
+  `/etc/hal0/agent-skills` on update. Only names on hal0's retired-skills list
+  are touched; your own skills are not.
+- The runner-image catalogue table is recreated (database migration 011) and
+  refilled by the next sync. Images already pulled into podman are not
+  touched; old packages stay in podman's store until you remove them.
+
 - `DELETE /api/models/{id}` now deletes the model's files by default:
   the model file, any shards, the `mmproj` sidecar, and a pulled model's
   file set. Pass `delete_files=false` to remove only the registry entry,

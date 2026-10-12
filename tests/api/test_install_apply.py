@@ -44,7 +44,7 @@ def test_resolve_tier_rejects_unknown():
 def test_build_slot_cfg_sets_device_profile_model():
     cfg = _build_slot_cfg(
         slot="chat",
-        model_id="qwen3.6-27b",
+        model_id="qwen3.8-27b",
         device="gpu-rocm",
         profile="rocm",
         port=8081,
@@ -57,7 +57,7 @@ def test_build_slot_cfg_sets_device_profile_model():
     # the guided path; the id is stamped only once the pull lands, and since
     # model-presence IS activation, withholding it is the start gate itself.
     assert "enabled" not in cfg
-    assert cfg["model"]["default"] == "qwen3.6-27b"
+    assert cfg["model"]["default"] == "qwen3.8-27b"
     assert cfg["model"]["context_size"] == 32768
     # v2 sets device+profile, NOT the legacy `backend` field.
     assert "backend" not in cfg
@@ -86,6 +86,17 @@ def _gpu_hardware():
 class _FakeProbe:
     def probe(self):
         return _gpu_hardware()
+
+
+@pytest.fixture(autouse=True)
+def _rocm_lane_present(monkeypatch):
+    """The fake box really has the ROCm lane (``/dev/kfd`` plus a render node).
+
+    ``derive_device`` decides ROCm from the device nodes (#2452), not from the
+    probe's ``compute_capable`` flag, so a CI VM with no GPU would otherwise
+    derive ``cpu``.
+    """
+    monkeypatch.setattr("hal0.install.profile_derive.rocm_lane_present", lambda *a, **k: True)
 
 
 def test_apply_seeds_jobs_and_creates_slots(isolated_app_client, tmp_hal0_home, monkeypatch):
@@ -151,20 +162,20 @@ def test_apply_honors_per_slot_override(isolated_app_client, tmp_hal0_home, monk
             # curated model + the vulkan profile/device (coherent pair)
             # instead of the auto-derived rocm.
             "overrides": {
-                "agent": {"model_id": "qwen3.6-27b", "profile": "vulkan", "device": "gpu-vulkan"}
+                "agent": {"model_id": "qwen3.8-27b", "profile": "vulkan", "device": "gpu-vulkan"}
             },
         },
     )
     assert r.status_code == 200, r.text
     body = r.json()
     chat = next(s for s in body["slots"] if s["slot"] == "agent")
-    assert chat["model_id"] == "qwen3.6-27b"
+    assert chat["model_id"] == "qwen3.8-27b"
     assert chat["profile"] == "vulkan"
     assert chat["device"] == "gpu-vulkan"
-    assert "qwen3.6-27b" in body["model_ids"]
+    assert "qwen3.8-27b" in body["model_ids"]
 
     cfg = tomllib.loads((Path(tmp_hal0_home) / "etc" / "hal0" / "slots" / "agent.toml").read_text())
-    assert cfg["model"]["default"] == "qwen3.6-27b"
+    assert cfg["model"]["default"] == "qwen3.8-27b"
     assert cfg["profile"] == "vulkan"
     assert cfg["device"] == "gpu-vulkan"
 

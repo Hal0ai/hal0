@@ -28,7 +28,7 @@ tags = ["agentic", "moe", "fast"]
 
 [[stack.saber.slots]]
 slot = "agent"
-model = "qwen3-6-35b-a3b-nsc-ace-saber-mtp-f16-to-rocmfp4-strix-lean"
+model = "Qwen3.6-35B-A3B-MTP-GGUF"
 device = "gpu-rocm"
 profile = "moe"
 mtp = true
@@ -73,7 +73,7 @@ tags = ["support", "memory", "compaction"]
 
 [[stack.pi.slots]]
 slot = "utility"
-model = "chadrock3-6-27b-pi-agent-mtp-rocmfp4-strix-lean"
+model = "qwen3.8-27b"
 device = "gpu-rocm"
 profile = "chat"
 mtp = true

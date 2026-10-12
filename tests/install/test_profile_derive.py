@@ -282,11 +282,46 @@ def test_kfd_present_wins_rocm_on_a_container_lxc_platform(monkeypatch):
     assert derive_device("chat", hw, npu_opt_in=False) == "gpu-rocm"
 
 
+def _gate_standard_pin(monkeypatch, *, vulkan: bool) -> None:
+    """Pin ``standard`` to a published image, Vulkan-gated or not.
+
+    ``gpu-vulkan`` is derived only when the default runner image serves the
+    Vulkan lane (``manifest.json`` ``runners.standard.lanes_gated``); the
+    shipped placeholder pin gates nothing.
+    """
+    import hal0.runners.pins as pins_mod
+    from hal0.runners import RUNNER_IMAGES
+    from hal0.runners.pins import RunnerPin
+
+    table = {
+        key: RunnerPin(key=key, image=f"ghcr.io/hal0ai/hal0-runner-{key}") for key in RUNNER_IMAGES
+    }
+    table["standard"] = RunnerPin(
+        key="standard",
+        image="ghcr.io/hal0ai/hal0-runner-standard",
+        tag="b1-r1",
+        digest="sha256:" + "a" * 64,
+        lanes_gated=("rocm", "vulkan") if vulkan else ("rocm",),
+    )
+    monkeypatch.setattr(pins_mod, "runner_pins", lambda: table)
+
+
 def test_neither_kfd_nor_compute_capable_still_declines_rocm(monkeypatch):
     """The other half of #2216: no real signal must still decline ROCm."""
     monkeypatch.setattr("hal0.install.profile_derive.rocm_lane_present", lambda *a, **k: False)
+    _gate_standard_pin(monkeypatch, vulkan=True)
     hw = _hw(platform="lxc", compute=False, vulkan=True)
     assert derive_device("chat", hw, npu_opt_in=False) == "gpu-vulkan"
+
+
+def test_vulkan_is_declined_while_the_standard_pin_has_not_passed_the_vulkan_gate(monkeypatch):
+    """No ROCm signal and a Vulkan-capable GPU still derives ``cpu`` when the
+    default runner image has not passed the hardware gate's Vulkan lane —
+    handing out ``gpu-vulkan`` there would create slots the load guard refuses."""
+    monkeypatch.setattr("hal0.install.profile_derive.rocm_lane_present", lambda *a, **k: False)
+    _gate_standard_pin(monkeypatch, vulkan=False)
+    hw = _hw(platform="lxc", compute=False, vulkan=True)
+    assert derive_device("chat", hw, npu_opt_in=False) == "cpu"
 
 
 # ── the ROCm lane needs a render node too, not /dev/kfd alone (#2313) ──────────

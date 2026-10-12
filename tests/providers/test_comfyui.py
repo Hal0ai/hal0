@@ -15,10 +15,10 @@ import httpx
 import pytest
 
 from hal0.providers.comfyui import (
-    _HAL0_COMFYUI_IMAGE,
     ComfyUIInferError,
     ComfyUIProvider,
 )
+from hal0.runners import RUNNER_IMAGES
 
 
 @pytest.fixture
@@ -85,21 +85,14 @@ def test_start_cmd_emits_required_flags(
     assert "--base-directory" in cmd
 
 
-def test_image_ref_follows_manifest_pin_or_fallback(provider: ComfyUIProvider) -> None:
-    # manifest.json pins comfyui to hal0's own published Strix Halo build
-    # (ghcr.io/hal0ai/hal0-comfyui; flipped from the kyuz0 image it mirrors).
-    # With the repo manifest visible (HAL0_HOME unset), image_ref returns
-    # that digest pin; without a manifest it falls back to
-    # _HAL0_COMFYUI_IMAGE.
+def test_image_ref_follows_the_comfyui_runner_pin(provider: ComfyUIProvider) -> None:
+    # The ref is the ``comfyui`` row of manifest.json ``runners`` (ADR-0028):
+    # the pin ref once published, the bare repo while the row is a placeholder.
+    from hal0.runners import resolve_runner_image
+
     ref = provider.image_ref({})
-    assert (
-        ref
-        == (
-            "ghcr.io/hal0ai/hal0-comfyui"
-            "@sha256:fd8c89309ed69e26d0f7ca1483a5775ab0ef336d12f3d62f9a20c7dd0b5d478b"
-        )
-        or ref == _HAL0_COMFYUI_IMAGE
-    )
+    assert ref == resolve_runner_image(RUNNER_IMAGES["comfyui"])
+    assert ref.startswith("ghcr.io/hal0ai/hal0-runner-comfyui")
 
 
 def test_image_ref_slot_cfg_override_wins(provider: ComfyUIProvider) -> None:
@@ -133,7 +126,7 @@ def test_image_ref_empty_or_non_string_pin_falls_through(provider: ComfyUIProvid
     assert provider.image_ref({"image_pin": "", "image": "x:dev"}) == "x:dev"
     ref = provider.image_ref({"image_pin": {"oops": 1}})
     assert isinstance(ref, str)
-    assert "hal0ai/hal0-comfyui" in ref  # manifest pin or fallback tag
+    assert "hal0ai/hal0-runner-comfyui" in ref  # the runner pin
 
 
 # ─── container_spec ──────────────────────────────────────────────────────────

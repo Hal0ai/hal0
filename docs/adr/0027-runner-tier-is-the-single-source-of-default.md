@@ -2,7 +2,11 @@
 
 ## Status
 
-Accepted (2026-10-11). Amends the ADR-0006 consequence that grouped the
+Accepted (2026-10-11). Amended by ADR-0028 the same day: the tiers are
+`default` and `optional` only (`frozen` is removed), `/api/system-info` no
+longer carries `backends[].is_default`, catalogue rows map to runners by key,
+and the default set is `standard`, `cpu`, `flm`, `kokoro`, `moonshine` and
+`comfyui`. Amends the ADR-0006 consequence that grouped the
 Runner Images list by "whether a family currently resolves to that image as
 its default". Records the operator's answer to ADR-0025 open question 1 and
 the naming rule ADR-0025 decision 1 depends on; the rest of ADR-0025 stays

@@ -30,12 +30,12 @@ const CONTAINER_SLOT = {
   port: 8096,
   runtime: 'container',
   profile: 'rocm',
-  image: 'ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server',
+  image: 'ghcr.io/hal0ai/hal0-runner-standard:2026.10.11',
   image_status: 'present',
   container_status: 'running',
   container_health: true,
   resolved_command: [
-    'ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server',
+    'ghcr.io/hal0ai/hal0-runner-standard:2026.10.11',
     '--host', '0.0.0.0', '--port', '8096',
     '--model', '/mnt/ai-models/qwen3.6-35b-a3b-q4_k_m.gguf',
     '--flash-attn', 'on', '-ngl', '999',
@@ -120,7 +120,7 @@ test.describe('Profiles page (#658)', () => {
     await expect(firstCard.locator('.pf-state')).toContainText('not pinned')
     // Flags are shown; the image tag is slot-owned and must not appear.
     await expect(firstCard).toContainText('--flash-attn')
-    await expect(firstCard).not.toContainText('rocmfp4-server')
+    await expect(firstCard).not.toContainText('hal0-runner-standard')
   })
 
   test('vulkan profile shows fallback intent label', async ({ page }) => {
@@ -197,7 +197,7 @@ test.describe('Container slot edit drawer (#658)', () => {
   test('resolved_command is an array on container slot payload', async ({ page }) => {
     const rc = await page.evaluate((slot) => slot.resolved_command, CONTAINER_SLOT)
     expect(Array.isArray(rc)).toBe(true)
-    expect(rc[0]).toContain('rocm-7.2.4-rocmfp4-server')
+    expect(rc[0]).toContain('hal0-runner-standard:2026.10.11')
     expect(rc.join(' ')).toContain('--model')
     // Model value must not be a dict repr
     const joined = rc.join(' ')

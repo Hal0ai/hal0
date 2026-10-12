@@ -360,6 +360,69 @@ def read_gguf_header(path: str | Path) -> dict[str, Any] | None:
             f.close()
 
 
+#: How far into a file :func:`read_gguf_tensor_types` reads. The tensor-info
+#: block follows the KV block (which carries the tokenizer, a few MB at most);
+#: 64 MiB covers both for every model hal0 has seen.
+_TENSOR_INFO_WINDOW_BYTES = 64 * 1024 * 1024
+
+
+def read_gguf_tensor_types(path: str | Path) -> frozenset[int] | None:
+    """The ggml tensor type ids a GGUF's tensor-info block declares.
+
+    Walks past every KV pair, then reads each tensor's ``type`` field (no
+    tensor data). Returns ``None`` when the file is not GGUF or the block
+    cannot be reached; a block cut off by the read window returns the types
+    seen so far.
+    """
+    p = Path(path)
+    try:
+        size = p.stat().st_size
+        f = open(p, "rb")  # noqa: SIM115 - closed below
+    except OSError:
+        return None
+    try:
+        window = min(size, _TENSOR_INFO_WINDOW_BYTES)
+        if window < 24:
+            return None
+        try:
+            mm: mmap.mmap | None = mmap.mmap(f.fileno(), window, access=mmap.ACCESS_READ)
+            buf: bytes | mmap.mmap = mm  # type: ignore[assignment]
+        except (OSError, ValueError):
+            mm = None
+            buf = f.read(window)
+        try:
+            r = _Reader(buf, window)
+            if r.read(4) != _GGUF_MAGIC:
+                return None
+            r.u32()  # version
+            tensor_count = r.u64()
+            kv_count = r.u64()
+            types: set[int] = set()
+            try:
+                for _ in range(kv_count):
+                    r.gguf_string()
+                    _skip_value(r, r.u32())
+                for _ in range(tensor_count):
+                    r.gguf_string()  # name
+                    n_dims = r.u32()
+                    if n_dims > 8:
+                        raise GGUFParseError(f"implausible n_dims {n_dims}")
+                    r.skip(8 * n_dims)
+                    types.add(r.u32())
+                    r.skip(8)  # data offset
+            except GGUFParseError:
+                if not types:
+                    return None
+            return frozenset(types)
+        finally:
+            if mm is not None:
+                with _suppress_close():
+                    mm.close()
+    finally:
+        with _suppress_close():
+            f.close()
+
+
 # ── tiny helper ───────────────────────────────────────────────────────────
 
 
@@ -376,4 +439,5 @@ class _suppress_close:
 __all__ = [
     "GGUFParseError",
     "read_gguf_header",
+    "read_gguf_tensor_types",
 ]

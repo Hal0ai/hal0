@@ -382,13 +382,8 @@ def _slot_ctx_size(
 
     slot_ceiling = _raw_slot_ctx_ceiling(cfg)
     slot_name = str(cfg.get("name") or "")
-    # #1946/I2: ``cfg`` is this slot's own TOML, so pass it — a DEGRADED
-    # specialty slot must advertise the plain-model window it launches with,
-    # not the card's 262144. Per-request surface (``/v1/models`` and friends),
-    # not the ~2s slot poll, so the guard resolution it triggers for a
-    # specialty model is affordable here.
     return resolve_effective_context_size(
-        slot_ceiling, model_registry, model_id, slot_name=slot_name, slot_cfg=cfg
+        slot_ceiling, model_registry, model_id, slot_name=slot_name
     )
 
 
@@ -1198,6 +1193,18 @@ def _pending_pull_model_ids() -> set[str]:
         return set()
 
 
+async def _boot_background_catalogue_sync(app: FastAPI) -> None:
+    """Refresh the runner-image catalogue once at boot, off the startup path."""
+    try:
+        from hal0.registry.runner_image_sync import sync_runner_images
+
+        result = await sync_runner_images(app.state.runner_image_registry)
+        if result.images_json_error:
+            log.warning("runner_images.boot_sync_failed", error=result.images_json_error)
+    except Exception as exc:  # pragma: no cover — defensive, never fails boot
+        log.warning("runner_images.boot_sync_failed", error=str(exc))
+
+
 async def _boot_registries(app: FastAPI, ctx: BootState) -> None:
     """Phase — core registries + hardware probe + parsed config + model auto-scan."""
     ctx.upstreams = UpstreamRegistry()
@@ -1978,6 +1985,15 @@ async def _boot_background_tasks(app: FastAPI, ctx: BootState) -> None:
                 await ctx.image_drift_task
 
     ctx.stop_image_drift_task = _stop_image_drift_task
+
+    # Runner-image catalogue refresh (ADR-0028): one sync per boot, scheduled
+    # (not awaited) so startup never waits on the network. Best-effort; the
+    # dashboard's Sync button and `hal0 update` sync too.
+    # HAL0_RUNNER_CATALOGUE_SYNC=0 turns it off (the unit-test suite does).
+    if os.environ.get("HAL0_RUNNER_CATALOGUE_SYNC", "1").strip() not in ("0", "false", "no"):
+        app.state.runner_catalogue_sync_task = asyncio.create_task(
+            _boot_background_catalogue_sync(app)
+        )
 
     # Memory provider self-heal loop (#1613). Armed only when create_app
     # wrapped a boot-degraded provider in SelfHealingMemoryProvider; polls

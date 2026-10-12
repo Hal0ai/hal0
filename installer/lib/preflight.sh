@@ -1231,196 +1231,126 @@ preflight_gpu() {
     return 0
 }
 
+# -- Runner pin reader (shell side of hal0.runners.pins) ----------------------
+# preflight runs in Stage 1, BEFORE hal0 is pip-installed, so the Python
+# predicates are not importable yet. The pin table they read IS on disk:
+# manifest.json at the root of the tree this installer is about to install.
+# Both gates below read that JSON with the system python3 (json module only;
+# preflight_python has already vetted the interpreter) -- never by parsing
+# Python source. tests/installer/test_preflight_gpu_gate.py pins agreement with
+# hal0.providers._gpu.default_image_serves_vulkan_lane and
+# hal0.runners.cpu_lane_has_runner_image.
+#
+# Prints one word for the runner named in $1:
+#   vulkan-gated  the pin is published and its lanes_gated includes vulkan
+#   published     the pin names a tag
+#   unpublished   tag is null (no image built yet)
+# and fails (non-zero, no output) when the manifest is missing or malformed.
+#
+# Test seam: HAL0_MANIFEST_JSON_OVERRIDE (path to the manifest.json to read).
+_hal0_runner_pin_state() {
+    local key="$1"
+    local manifest="${HAL0_MANIFEST_JSON_OVERRIDE:-}"
+    if [[ -z "${manifest}" ]]; then
+        local here
+        here="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)" || return 1
+        manifest="${here}/../../manifest.json"
+    fi
+    [[ -r "${manifest}" ]] || return 1
+    local py="${HAL0_PY:-${HAL0_PYTHON:-python3}}"
+    "${py}" - "${manifest}" "${key}" <<'PY' 2>/dev/null
+import json, sys
+path, key = sys.argv[1], sys.argv[2]
+row = json.load(open(path, encoding="utf-8"))["runners"][key]
+if not row.get("tag"):
+    print("unpublished")
+elif "vulkan" in (row.get("lanes_gated") or []):
+    print("vulkan-gated")
+else:
+    print("published")
+PY
+}
+
 # -- Vulkan-lane image gate (shell mirror of providers/_gpu, #1948) ---------
 # Answers the SAME question `default_image_serves_vulkan_lane()` answers in
 # Python: can this install's default runner image serve the Vulkan LLM lane?
+# True when the `standard` pin is published, the hardware gate passed its
+# Vulkan lane for that digest (manifest.json runners.standard.lanes_gated),
+# and HAL0_RUNNER_IMAGE_STANDARD does not replace the pinned image (an
+# operator's own build has passed no gate).
 #
-# Why a mirror and not a call: preflight_gpu runs in Stage 1, BEFORE hal0 is
-# pip-installed, so `python3 -c "from hal0.config.schema import ..."` is not
-# available yet -- but the source tree it is about to install IS on disk next
-# to this script. So the two literals are read straight out of schema.py.
+# Errs toward "no", like the load-time guard it mirrors: a false "no" costs an
+# operator a CPU-only install they could have avoided; a false "yes" would ship
+# a box that serves invalid tokens (#1888).
 #
-# CONSERVATIVE BY CONSTRUCTION, and blind in three specific ways. It reads the
-# two literals out of schema.py, so it sees neither the HAL0_TOOLBOX_IMAGE_*
-# env overrides nor the release manifest's digest pin that
-# resolve_runner_image() consults ahead of them, and it has no notion of the
-# runner IDENTITY that render_node_present() now evaluates (#1981) -- it only
-# asks whether a render node exists at all. Every one of those blindnesses
-# errs the same way: toward answering "no" or toward accepting a box the
-# load-time guard will re-examine anyway with better information. A false "no"
-# costs an operator a CPU-only install they could have avoided; a false "yes"
-# would ship a box that serves invalid tokens (#1888), and the real gate still
-# stands behind this one. That asymmetry is why the mirror is allowed to be
-# this crude rather than growing a uid model in bash -- the least testable
-# layer in the system is the wrong place to re-derive logic that already has a
-# tested implementation twenty seconds later in the install.
-#
-# GENERAL CASE (VULKAN_CAPABLE_IMAGE_REFS may hold any number of members):
-# read the ``VULKAN_CAPABLE_IMAGE_REFS = frozenset({A, B, ...})`` literal,
-# resolve each element NAME to its own ``NAME = "ref"`` assignment earlier in
-# the file, and test whether DEFAULT_ROCMFPX_IMAGE's literal matches ANY of
-# them -- not just VULKAN_FIXED_IMAGE. A frozenset element that is itself a
-# quoted string literal (rather than a NAME) is also accepted, unresolved.
-# Answers "no" on anything it cannot parse, same as before. #2118 (the strix
-# runner) is what grew the set past one member and is the reason this mirror
-# had to stop assuming a single fixed pin.
-# tests/installer/test_preflight_gpu_gate.py pins agreement with the Python
-# predicate for whatever this checkout's set currently contains.
-#
-# Test seams: HAL0_GPU_VULKAN_LANE_OVERRIDE (1/0, decides outright),
-# HAL0_SCHEMA_PY_OVERRIDE (path to the schema.py to read).
+# Test seam: HAL0_GPU_VULKAN_LANE_OVERRIDE (1/0, decides outright).
 _hal0_vulkan_lane_serves_default_image() {
     local override="${HAL0_GPU_VULKAN_LANE_OVERRIDE:-}"
     if [[ -n "${override}" ]]; then
         [[ "${override}" != "0" ]]
         return
     fi
-
-    local schema="${HAL0_SCHEMA_PY_OVERRIDE:-}"
-    if [[ -z "${schema}" ]]; then
-        local here
-        here="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)" || return 1
-        schema="${here}/../../src/hal0/config/schema.py"
-    fi
-    [[ -r "${schema}" ]] || return 1
-
-    local default_ref
-    default_ref="$(sed -n 's/^DEFAULT_ROCMFPX_IMAGE = "\(.*\)"$/\1/p' "${schema}" | head -n1)"
-    [[ -n "${default_ref}" ]] || return 1
-
-    # Pull the frozenset's element list, e.g. "VULKAN_FIXED_IMAGE,
-    # DEFAULT_STRIX_IMAGE" out of "VULKAN_CAPABLE_IMAGE_REFS = frozenset({...})".
-    local refs_line
-    refs_line="$(sed -n 's/^VULKAN_CAPABLE_IMAGE_REFS = frozenset(\(.*\))$/\1/p' "${schema}" | head -n1)"
-    [[ -n "${refs_line}" ]] || return 1
-    refs_line="${refs_line#\{}"
-    refs_line="${refs_line%\}}"
-    [[ -n "${refs_line}" ]] || return 1
-
-    local member member_ref
-    local IFS=','
-    for member in ${refs_line}; do
-        member="${member//[[:space:]]/}"
-        [[ -z "${member}" ]] && continue
-        if [[ "${member}" == \"*\" ]]; then
-            # A quoted literal in the set, not a NAME -- use it as-is.
-            member_ref="${member#\"}"
-            member_ref="${member_ref%\"}"
-        else
-            member_ref="$(sed -n "s/^${member} = \"\\(.*\\)\"\$/\\1/p" "${schema}" | head -n1)"
-        fi
-        [[ -n "${member_ref}" && "${member_ref}" == "${default_ref}" ]] && return 0
-    done
-    return 1
+    [[ -z "${HAL0_RUNNER_IMAGE_STANDARD:-}" ]] || return 1
+    local state
+    state="$(_hal0_runner_pin_state standard)" || return 1
+    [[ "${state}" == "vulkan-gated" ]]
 }
 
 # -- CPU-lane runner-image gate (shell mirror of hal0.runners, #2126) --------
 # Answers the SAME question `cpu_lane_has_runner_image()` answers in Python:
-# does the `cpu` runner resolve to an image that can actually serve CPU
-# inference, or is it still carrying the Vulkan GPU toolbox as a placeholder?
+# can the `cpu` runner launch anything on this build? True when
+# HAL0_RUNNER_IMAGE_CPU names an image or manifest.json's `cpu` pin is
+# published.
 #
 # This is the gate behind HAL0_ALLOW_CPU_ONLY. That flag selects
-# `device = "cpu"` on every seeded slot; it does NOT conjure a CPU image. On
-# #2126's box the two combined produced an install that completed, reported
-# ready, and crash-looped the brain slot with SIGILL forever — the whole
-# hardware class broken on first run, visible only in the slot journal.
+# `device = "cpu"` on every seeded slot; it does NOT conjure a CPU image. An
+# install with no CPU image completes, reports ready, and then cannot serve a
+# token (#2126). FAILS CLOSED: anything it cannot read answers "no", and the
+# refusal names the override that reopens the path.
 #
-# Same mirror posture as _hal0_vulkan_lane_serves_default_image above (and for
-# the same reason: preflight runs in Stage 1, before hal0 is pip-installed).
-# It reads the `cpu` Runner's image literal straight out of the source tree it
-# is about to install, so it sees neither the release manifest -- irrelevant
-# here, the `cpu` entry carries manifest_key=None and can never take a pin --
-# nor any config-level default_images override, which does not exist yet on a
-# fresh box. It DOES honour HAL0_TOOLBOX_IMAGE_CPU, because that is the tier
-# an operator who has built their own CPU llama-server would use, and it is
-# the one escape hatch this gate must not close.
-#
-# FAILS CLOSED, and the asymmetry is the opposite of the Vulkan mirror's: a
-# false "yes" ships the broken box #2126 reported, while a false "no" refuses
-# an install with a message naming the exact override that reopens it. So
-# anything it cannot parse answers "no".
-#
-# Test seams: HAL0_CPU_RUNNER_IMAGE_OVERRIDE (1/0, decides outright),
-# HAL0_RUNNERS_PY_OVERRIDE (path to the runners/__init__.py to read).
+# Test seam: HAL0_CPU_RUNNER_IMAGE_OVERRIDE (1/0, decides outright).
 _hal0_cpu_lane_has_runner_image() {
     local override="${HAL0_CPU_RUNNER_IMAGE_OVERRIDE:-}"
     if [[ -n "${override}" ]]; then
         [[ "${override}" != "0" ]]
         return
     fi
-
-    # Tier 1 of resolve_runner_image(): the env override wins outright.
-    [[ -n "${HAL0_TOOLBOX_IMAGE_CPU:-}" ]] && return 0
-
-    local runners="${HAL0_RUNNERS_PY_OVERRIDE:-}"
-    if [[ -z "${runners}" ]]; then
-        local here
-        here="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)" || return 1
-        runners="${here}/../../src/hal0/runners/__init__.py"
-    fi
-    [[ -r "${runners}" ]] || return 1
-
-    # The `cpu` entry's second positional argument is its image. The registry
-    # is one-argument-per-line, so: find `"cpu": Runner(`, skip the key
-    # positional, take the next non-comment line and strip the trailing comma.
-    local image_arg
-    image_arg="$(awk '
-        /^[[:space:]]*"cpu"[[:space:]]*:[[:space:]]*Runner\(/ { seen = 1; next }
-        seen && /^[[:space:]]*#/ { next }
-        seen == 1 { seen = 2; next }
-        seen == 2 {
-            sub(/^[[:space:]]+/, "", $0)
-            sub(/[[:space:]]*,[[:space:]]*$/, "", $0)
-            print
-            exit
-        }
-    ' "${runners}")"
-
-    [[ -n "${image_arg}" && "${image_arg}" != "FALLBACK_VULKAN_IMAGE" ]]
+    [[ -n "${HAL0_RUNNER_IMAGE_CPU:-}" ]] && return 0
+    local state
+    state="$(_hal0_runner_pin_state cpu)" || return 1
+    [[ "${state}" == "published" || "${state}" == "vulkan-gated" ]]
 }
 
 # Called at the TOP of every CPU-only branch in install.sh's Stage-1 GPU gate,
 # BEFORE anything tells the operator the install is proceeding.
 # HAL0_ALLOW_CPU_ONLY=1 (and the TTY confirm) chooses `device = "cpu"` for
-# every seeded slot — it does not choose a CPU IMAGE, and this build does not
-# have one. On a GPU-less box that combination installs cleanly, reports
-# itself ready, and then crash-loops the brain slot with SIGILL forever
-# (#2126).
-#
-# So: refuse, rather than complete an install that cannot serve a token. The
-# refusal names the one thing that actually reopens the path —
-# HAL0_TOOLBOX_IMAGE_CPU pointing at a CPU-built llama-server — and the gate
-# stands aside on its own the day the `cpu` runner is wired to a published CPU
-# toolbox, with no edit here.
+# every seeded slot — it does not choose a CPU IMAGE. So: refuse, rather than
+# complete an install that cannot serve a token. The gate stands aside on its
+# own once manifest.json pins a published `cpu` image, with no edit here.
 _cpu_only_image_gate() {
     _hal0_cpu_lane_has_runner_image && return 0
     err "This build has no CPU runner image — a CPU-only install cannot serve a model."
-    err "  The 'cpu' runner still resolves to the Vulkan GPU toolbox, so a device=cpu slot"
-    err "  launches a GPU llama-server build. On a box with no GPU that dies with SIGILL"
-    err "  (systemd status=132) about a second into model load and crash-loops, while"
-    err "  'hal0 slot list' keeps reporting the slot as 'warming'. See hal0 issue #2126."
+    err "  manifest.json pins no published image for the 'cpu' runner yet, so a device=cpu"
+    err "  slot has nothing to launch. See hal0 issue #2126."
     err "  HAL0_ALLOW_CPU_ONLY=1 cannot change this: it selects device=cpu, not a CPU image."
     err "Your options:"
     err "  * forward a GPU into this container (the remedy printed above) — the supported path;"
     err "  * if you have a CPU-built llama-server image, name it and re-run:"
-    err "      HAL0_TOOLBOX_IMAGE_CPU=<image-ref> HAL0_ALLOW_CPU_ONLY=1 bash install.sh"
+    err "      HAL0_RUNNER_IMAGE_CPU=<image-ref> HAL0_ALLOW_CPU_ONLY=1 bash install.sh"
     return 1
 }
 
-# The CPU-only remedy the GPU-gate refusals print. Honest in both worlds: it
-# only offers HAL0_ALLOW_CPU_ONLY=1 on its own when that flag can actually
-# produce a working box (#2126). The old unconditional
-# "To install CPU-only anyway, re-run with HAL0_ALLOW_CPU_ONLY=1." was the
-# installer's own printed remedy for a GPU-less box, and following it is
-# exactly how #2126's reporter got a crash-looping brain slot.
+# The CPU-only remedy the GPU-gate refusals print. It only offers
+# HAL0_ALLOW_CPU_ONLY=1 on its own when that flag can actually produce a
+# working box (#2126).
 _cpu_only_remedy_lines() {
     if _hal0_cpu_lane_has_runner_image; then
         err "To install CPU-only anyway, re-run with HAL0_ALLOW_CPU_ONLY=1."
     else
-        err "There is no working CPU-only path in this build: the 'cpu' runner has no CPU image,"
-        err "  so HAL0_ALLOW_CPU_ONLY=1 on its own would install a box that crash-loops (#2126)."
+        err "There is no working CPU-only path in this build: the 'cpu' runner has no image,"
+        err "  so HAL0_ALLOW_CPU_ONLY=1 on its own would install a box that cannot serve (#2126)."
         err "  With your own CPU-built llama-server image:"
-        err "      HAL0_TOOLBOX_IMAGE_CPU=<image-ref> HAL0_ALLOW_CPU_ONLY=1 bash install.sh"
+        err "      HAL0_RUNNER_IMAGE_CPU=<image-ref> HAL0_ALLOW_CPU_ONLY=1 bash install.sh"
     fi
 }
 

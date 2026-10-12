@@ -145,7 +145,7 @@ describe('useRunnerImagePullJob — stream-close reconciliation (#2120)', () => 
     const probe = mountProbe()
 
     await act(async () => {
-      await probe.get().start('rocmfpx-combined')
+      await probe.get().start('standard')
     })
 
     // The pull kicked off and attached a (fake) SSE stream; nothing terminal
@@ -190,7 +190,7 @@ describe('useRunnerImagePullJob — stream-close reconciliation (#2120)', () => 
     apiGetImpl.current = () => late.promise
 
     await act(async () => {
-      await probe.get().start('rocmfpx-combined')
+      await probe.get().start('standard')
     })
     expect(probe.get().state).toBe('queued')
 

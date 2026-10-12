@@ -484,14 +484,11 @@ def stacks_state_path() -> Path:
 def manifest_json() -> Path:
     """Return the release manifest path.
 
-    The manifest pins toolbox image digests per hal0 release;
-    `scripts/update-toolbox-digests.sh` refreshes them from ghcr.io
-    before a release (see PLAN.md §12). At runtime we prefer the
-    installed copy under /etc, falling back to the in-tree manifest at
-    the source root for dev installs.
+    The manifest carries the runner-image pin table (``runners``); the
+    reader, :func:`hal0.runners.pins.manifest_path`, prefers the copy that
+    ships with the running code and falls back to this path.
 
     FHS:        /etc/hal0/manifest.json
     HAL0_HOME:  $HAL0_HOME/etc/hal0/manifest.json
-    Source dev: <repo>/manifest.json (looked up by the loader)
     """
     return etc() / "manifest.json"

@@ -42,6 +42,10 @@ def test_system_info_route_folds_hardware_features_backends(
         assert entry["state"] in ("installed", "installable", "unavailable")
         assert entry["image"]
         assert entry["device_class"] == RUNNER_IMAGES[key].device_class
+        # Removed with the fresh runner system: the per-runner default flag
+        # (tier is the one source) and the arch veto list.
+        assert "is_default" not in entry
+        assert "unsupported_archs" not in entry
 
 
 def test_system_info_backends_expose_runner_supports_metadata(
@@ -61,21 +65,16 @@ def test_system_info_backends_expose_runner_supports_metadata(
             "mtp": runner.supports.mtp,
             "jinja": runner.supports.jinja,
             "mmproj": runner.supports.mmproj,
-            "specialties": list(runner.supports.specialties),
         }
 
 
-def test_system_info_backends_expose_specialties(
+def test_system_info_backends_have_no_specialties(
     isolated_client: TestClient,
 ) -> None:
-    """Spec 2026-08-29 (#1946): the runner registry's per-runner
-    ``supports.specialties`` tuple is surfaced on the wire so the model
-    drawer / dashboard can tell which runner images serve which specialty
-    distributions (e.g. promptforge) accelerated vs. degraded GGUF-only."""
+    """``supports.specialties`` left the wire with the promptforge runner."""
     body = isolated_client.get("/api/system-info").json()
-    backends = body["backends"]
-    assert backends["promptforge"]["supports"]["specialties"] == ["promptforge"]
-    assert backends["rocmfpx"]["supports"]["specialties"] == []
+    for key, entry in body["backends"].items():
+        assert "specialties" not in entry["supports"], key
 
 
 def test_system_info_backends_expose_fit_check_metadata(
@@ -107,16 +106,78 @@ def test_system_info_backend_display_metadata(
     from hal0.runners import RUNNER_IMAGES
 
     payload = isolated_client.get("/api/system-info").json()
-    rocmfpx = payload["backends"]["rocmfpx"]
-    assert rocmfpx["title"] == "ROCmFPX"
-    assert rocmfpx["blurb"]
-    assert rocmfpx["tier"] == "default"
-    assert payload["backends"]["promptforge"]["tier"] == "optional"
-    # The payload is a projection of the registry, never its own opinion;
-    # the pre-tier `is_default` flag survives only as a projection of tier.
+    standard = payload["backends"]["standard"]
+    assert standard["title"] == "Standard"
+    assert standard["blurb"]
+    assert standard["tier"] == "default"
+    assert payload["backends"]["qwen3tts"]["tier"] == "optional"
+    assert payload["backends"]["cuda"]["tier"] == "optional"
+    # The payload is a projection of the registry, never its own opinion.
     for key, runner in RUNNER_IMAGES.items():
         assert payload["backends"][key]["tier"] == runner.tier, key
-        assert payload["backends"][key]["is_default"] is (runner.tier == "default"), key
+        assert payload["backends"][key]["title"] == runner.title, key
+        assert payload["backends"][key]["blurb"] == runner.blurb, key
+
+
+def test_system_info_backend_image_is_the_runner_pin_ref(
+    isolated_client: TestClient, monkeypatch
+) -> None:
+    """``image`` is ``resolve_runner_image``: the release pin ref, or the
+    ``HAL0_RUNNER_IMAGE_<KEY>`` env override when one is set."""
+    from hal0.runners.pins import RunnerPin, load_runner_pins
+
+    digest = "sha256:" + "d" * 64
+    table = dict(load_runner_pins())
+    table["standard"] = RunnerPin(
+        key="standard",
+        image="ghcr.io/hal0ai/hal0-runner-standard",
+        tag="b2-r1",
+        digest=digest,
+    )
+    table["flm"] = RunnerPin(key="flm", image="ghcr.io/hal0ai/hal0-runner-flm")
+    monkeypatch.setattr("hal0.runners.pins.runner_pins", lambda: table)
+    monkeypatch.setenv("HAL0_RUNNER_IMAGE_CPU", "ghcr.io/me/my-cpu:dev")
+
+    backends = isolated_client.get("/api/system-info").json()["backends"]
+    assert backends["standard"]["image"] == f"ghcr.io/hal0ai/hal0-runner-standard:b2-r1@{digest}"
+    assert backends["cpu"]["image"] == "ghcr.io/me/my-cpu:dev"
+    # An unpublished pin (tag null) has no image, never the bare repo.
+    assert backends["flm"]["image"] is None
+
+
+def test_system_info_unresolvable_pin_reports_no_image_and_unavailable(
+    isolated_client: TestClient, monkeypatch
+) -> None:
+    """A runner whose pin cannot be resolved reports ``image: null`` and state
+    ``"unavailable"`` — never a 500, and never "installed" off a guessed ref —
+    while the other runners are unaffected."""
+    import hal0.api.routes.hardware as hw_mod
+    import hal0.runners as runners_mod
+
+    real_resolve = runners_mod.resolve_runner_image
+
+    def _resolve(runner):
+        if runner.key == "cuda":
+            raise RuntimeError("manifest.json runners table has no row for runner 'cuda'")
+        return real_resolve(runner)
+
+    monkeypatch.setattr(runners_mod, "resolve_runner_image", _resolve)
+    # Every shipped repo is "on disk": a resolvable runner reads installed.
+    all_repos = {hw_mod._image_repo(real_resolve(r)) for r in runners_mod.RUNNER_IMAGES.values()}
+    monkeypatch.setattr(
+        hw_mod,
+        "_local_image_repos",
+        lambda: PodmanImagesResult(repos=all_repos, context="rootful"),
+    )
+
+    resp = isolated_client.get("/api/system-info")
+    assert resp.status_code == 200
+    backends = resp.json()["backends"]
+    assert backends["cuda"]["image"] is None
+    assert backends["cuda"]["state"] == "unavailable"
+    assert backends["cuda"]["provenance"] is None
+    assert backends["standard"]["image"]
+    assert backends["standard"]["state"] == "installed"
 
 
 def test_system_info_matches_hardware_and_features_endpoints(

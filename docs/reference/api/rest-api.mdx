@@ -82,7 +82,7 @@ silently paper over.
 | `/api/settings/proxmox` | ADMIN | Proxmox integration config (host/token) + live cluster status. See "Proxmox integration" below — no dedicated exposure rule; it inherits ADMIN from the generic `/api/settings` prefix. |
 | `/api/slots` | CLIENT (list) / ADMIN (else) | Slot lifecycle — list, create, delete, restart, model swap, resolved-argv provenance, metrics, capacity. See [Slot lifecycle](/docs/reference/slot-lifecycle/). |
 | `/api/models` | CLIENT (GET) / ADMIN (mutations) | Model registry — list, pull, delete, inspect, scan, catalogue, update checks. `GET /api/models/health` is registered by `hardware.router`, not `models.router` — it's mounted ahead of `/api/models` so the literal path wins over the `{model_id}` catch-all. See [Model roster & benchmarks](/docs/reference/model-roster-benchmark/). |
-| `/api/runner-images` | CLIENT (list/detail) / ADMIN (sync/pull) | Runner Image catalogue — discovery + pull-job orchestration for GHCR-hosted runner images. |
+| `/api/runner-images` | CLIENT (list/detail) / ADMIN (sync/pull) | Runner Image catalogue — sync from `images.json`, pull-job orchestration, tag removal and restart-affected-slots for GHCR-hosted runner images. |
 | `/api/ports` | CLIENT (GET) / ADMIN (else) | Port allocation view. |
 | `/api/hardware` | CLIENT (GET) / ADMIN (`/probe`) | Hardware probe read + on-demand re-probe. |
 | `/api/stats/hardware` | CLIENT | Live hardware probe/stats. See [Hardware matrix](/docs/reference/hardware-matrix/). |

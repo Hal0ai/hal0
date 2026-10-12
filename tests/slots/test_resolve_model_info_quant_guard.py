@@ -1,25 +1,27 @@
-"""hal0#1890: the FPX-on-wrong-runner guard (hal0#1790) through the REAL
+"""hal0#1890: the fork-only-quant guard (hal0#1790) through the REAL
 launch/preview path, not a hand-built ``model_info`` dict.
 
-``tests/providers/test_container.py::TestFPXQuantRunnerGuard`` proves
-``_guard_fpx_quant_runner`` itself is correct — but every one of those tests
+``tests/providers/test_container.py::TestUnsupportedQuantGuard`` proves
+``_guard_unsupported_quant`` itself is correct — but every one of those tests
 hand-builds ``model_info`` with ``quant="ROCmFP8"`` set directly, which is
 exactly why the guard's suite kept passing while it was inert in production:
 a pull-registered model (the installer-seeded FPX brain model included)
 never got ``quant`` on the actual registry row, only lazily at API-serializer
 time. This file drives the real chain instead: ``run_pull`` registers the
-model the way hal0 installs it, ``SlotManager._resolve_model_info`` resolves
-it the way ``load()``/preview do, and the guard is fed exactly that dict.
+model, ``SlotManager._resolve_model_info`` resolves it the way
+``load()``/preview do, and the guard is fed exactly that dict.
+
+Pull enqueue and model add now refuse fork-only quants up front (ADR-0028);
+``run_pull`` is driven directly here because the guard is the backstop for a
+row registered BEFORE that refusal existed.
 """
 
 from __future__ import annotations
 
-from types import SimpleNamespace
-
 import httpx
 import pytest
 
-from hal0.providers.container import UnprocessableEntity, _guard_fpx_quant_runner
+from hal0.providers.container import UnprocessableEntity, _guard_unsupported_quant
 from hal0.registry.pull import make_job, run_pull
 from hal0.registry.store import ModelRegistry
 from hal0.slots.manager import SlotManager
@@ -64,30 +66,23 @@ async def test_resolve_model_info_surfaces_quant_for_pull_registered_model(
     assert info.get("quant") == "ROCmFP8"
 
 
-async def test_guard_refuses_pull_registered_fpx_model_on_cpu_runner(
-    tmp_hal0_home: str,
-) -> None:
-    """End-to-end hal0#1790 shape via the real pull → resolve chain: loading
-    a pull-installed FPX model on a non-FPX runner must 422, not silently
-    pass the guard because ``quant`` was never stored."""
+async def test_guard_refuses_pull_registered_fpx_model(tmp_hal0_home: str) -> None:
+    """End-to-end hal0#1790 shape via the real pull → resolve chain: loading a
+    pull-installed fork-only model must 422 ``slot.unsupported_quant``, not
+    silently pass the guard because ``quant`` was never stored."""
     info = await _pull_registered_model_info(
         "hal0-brain-sft-q8-rocmfpx", "hal0-brain-sft-Q8_0_ROCMFPX_AGENT.gguf"
     )
-    cpu_runner = SimpleNamespace(key="cpu")
     with pytest.raises(UnprocessableEntity) as exc_info:
-        _guard_fpx_quant_runner({"name": "brain"}, info, cpu_runner)
-    assert exc_info.value.code == "slot.unsupported_quant_for_runner"
+        _guard_unsupported_quant({"name": "brain"}, info)
+    assert exc_info.value.code == "slot.unsupported_quant"
     assert exc_info.value.details["quant"] == "ROCmFP8"
+    assert exc_info.value.details["slot"] == "brain"
 
 
-async def test_guard_allows_pull_registered_fpx_model_on_fpx_runner(
-    tmp_hal0_home: str,
-) -> None:
-    """Sanity: the same pull-registered model on its own runner family
-    still launches — the guard is quant/runner-pair specific, not a
-    blanket refusal."""
-    info = await _pull_registered_model_info(
-        "hal0-brain-sft-q8-rocmfpx", "hal0-brain-sft-Q8_0_ROCMFPX_AGENT.gguf"
-    )
-    rocmfpx_runner = SimpleNamespace(key="rocmfpx")
-    _guard_fpx_quant_runner({"name": "brain"}, info, rocmfpx_runner)  # no raise
+async def test_guard_allows_a_pull_registered_plain_model(tmp_hal0_home: str) -> None:
+    """Sanity: a plain GGUF through the same chain launches — the guard keys on
+    the fork-only quant, not on the pull path."""
+    info = await _pull_registered_model_info("plain-model", "plain-model-Q4_K_M.gguf")
+    assert info.get("quant") != "ROCmFP8"
+    _guard_unsupported_quant({"name": "brain"}, info)  # no raise

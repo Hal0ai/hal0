@@ -132,14 +132,22 @@ def test_type_implied_profile_vetoes_a_runtime_family_the_device_cannot_run(
     assert type_implied_profile({"type": "tts", "device": "gpu-rocm"}) == "qwen3-tts"
 
 
-def test_runner_fits_slot_honors_the_legacy_vulkanfpx_alias() -> None:
-    """Coverage lock: the permanent ``vulkanfpx`` alias must reach the
-    fit-check, not just ``get_runner`` in isolation — ``runner_fits_slot``
-    resolves the alias key to ``rocmfpx`` and then matches it against the
-    slot's device/backend exactly like the canonical spelling would."""
+def test_runner_fits_slot_accepts_standard_on_both_amd_lanes() -> None:
+    """``standard`` is the one llama.cpp runner for ROCm and Vulkan (ADR-0028):
+    the fit-check matches it against the slot's backend through
+    ``supported_backends`` — no alias spelling is involved."""
     from hal0.slots.profile_adopt import runner_fits_slot
 
-    assert runner_fits_slot("vulkanfpx", {"device": "gpu-vulkan"}) is True
+    assert runner_fits_slot("standard", {"device": "gpu-vulkan"}) is True
+    assert runner_fits_slot("standard", {"device": "gpu-rocm"}) is True
+
+
+def test_runner_fits_slot_rejects_a_retired_runner_key() -> None:
+    """The retired ``vulkanfpx`` alias names no runner any more: unknown means
+    never adopt, and the predicate must not raise."""
+    from hal0.slots.profile_adopt import runner_fits_slot
+
+    assert runner_fits_slot("vulkanfpx", {"device": "gpu-vulkan"}) is False
 
 
 def test_type_implied_profile_ignores_the_cli_legacy_provider_default(

@@ -131,6 +131,25 @@ def test_state_returns_shape_expected_by_dashboard(
     assert body["autoCheck"] is True
 
 
+@pytest.mark.parametrize(
+    ("ref", "version"),
+    [
+        ("ghcr.io/hal0ai/hal0-runner-flm:0.9.44-re14329d@sha256:" + "a" * 64, "0.9.44"),
+        ("ghcr.io/hal0ai/hal0-runner-flm:0.9.44-re14329d", "0.9.44"),
+        ("ghcr.io/hal0ai/hal0-toolbox-flm:0.9.44", "0.9.44"),
+        ("localhost:5000/flm:0.9.45", "0.9.45"),
+        ("localhost:5000/flm", None),
+        ("ghcr.io/hal0ai/hal0-runner-flm@sha256:" + "b" * 64, None),
+        ("", None),
+    ],
+)
+def test_parse_flm_version_from_image(ref: str, version: str | None) -> None:
+    """The digest is never mistaken for the tag, and the build suffix goes."""
+    from hal0.api.routes.updater import _parse_flm_version_from_image
+
+    assert _parse_flm_version_from_image(ref) == version
+
+
 def test_state_flm_version_from_image_tag(
     isolated_client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:

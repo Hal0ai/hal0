@@ -15,7 +15,7 @@
 #   1.  Backend tests green (pytest)
 #   2.  UI build clean (npm run build)
 #   3.  Lint clean (ruff + shellcheck if present)
-#   4.  Toolbox image manifest pinned (manifest.json digests non-empty)
+#   4.  Runner image pins release-ready (manifest.json runners: tag + digest)
 #   5.  Release-gate report present, fresh (≤24h), coherent, no failures
 #   6.  Working tree clean, proposed tag doesn't exist
 #   7.  pyproject.toml version matches the proposed tag
@@ -210,30 +210,19 @@ else
 	warn "shellcheck not installed — skipping shell lint"
 fi
 
-# ── 4. Toolbox image manifest ─────────────────────────────────────────────────
-step "4. Toolbox image manifest"
+# ── 4. Runner image pins ──────────────────────────────────────────────────────
+step "4. Runner image pins"
 
-# Authoritative manifest is repo-root manifest.json. Its toolbox image
-# digests are pinned from images built in Hal0ai/hal0-runner-images.  The legacy src/hal0/manifest.json shape is checked as
-# a soft warning.
+# manifest.json `runners` is the one runner-image pin table. Every default-tier
+# runner must name a tag and a digest before a release ships, and the llama.cpp
+# runners must name one release (hal0.runners.pins.release_gate_problems).
 MANIFEST="${REPO_ROOT}/manifest.json"
 if [[ -f "${MANIFEST}" ]]; then
 	info "manifest.json found at repo root"
-	# Every entry under toolbox_images must have a non-null `digest`.
-	if python3 - "${MANIFEST}" <<'PY'; then
-import json, sys
-m = json.loads(open(sys.argv[1]).read())
-images = m.get("toolbox_images", {})
-if not images:
-    sys.exit("manifest.json has no toolbox_images entry")
-missing = [name for name, e in images.items() if not e.get("digest")]
-if missing:
-    sys.exit("missing digests for: " + ", ".join(missing))
-print("all", len(images), "toolbox images pinned")
-PY
-		info "all toolbox image digests pinned"
+	if python3 "${REPO_ROOT}/scripts/check_runner_pins.py"; then
+		info "runner image pins release-ready"
 	else
-		fail "manifest.json has unpinned toolbox image(s) — pin the digests from Hal0ai/hal0-runner-images"
+		fail "manifest.json runner pins are not release-ready — land the promote PR from hal0-runner-images first"
 	fi
 else
 	fail "manifest.json not found at repo root"

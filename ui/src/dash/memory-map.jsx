@@ -397,7 +397,7 @@ function HostBar({ model }) {
 // Un-enriched slots: keep the device token (rocm/vulkan/cpu/npu) as before.
 function slotLegendSub(slot) {
   if (slot.isContainer) {
-    // Prefer image tag (e.g. "ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-server")
+    // Prefer image tag (e.g. "ghcr.io/hal0ai/hal0-runner-standard:2026.10.11")
     // Truncate to last 32 chars so very long registry paths stay readable.
     if (slot.image) {
       const img = String(slot.image)

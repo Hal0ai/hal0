@@ -138,14 +138,14 @@ async def test_run_pull_stamps_curated_chat_template(tmp_hal0_home: str) -> None
     trusting the embedded one.
     """
     body = _payload(4096)
-    job = make_job("hal0-brain-sft-q8-rocmfpx")
+    job = make_job("hal0-brain-sft-f16")
     registry = ModelRegistry()
     client = httpx.AsyncClient(transport=_ok_handler(body))
     try:
         await run_pull(
             job,
             hf_repo="Hal0ai/hal0-brain-sft-ROCmFPX-GGUF",
-            hf_file="hal0-brain-sft-Q8_0_ROCMFPX_AGENT.gguf",
+            hf_file="hal0-brain-sft-F16.gguf",
             registry=registry,
             client=client,
         )
@@ -153,7 +153,7 @@ async def test_run_pull_stamps_curated_chat_template(tmp_hal0_home: str) -> None
         await client.aclose()
 
     assert job.state == "completed", f"got {job.state}: {job.error}"
-    entry = registry.get("hal0-brain-sft-q8-rocmfpx")
+    entry = registry.get("hal0-brain-sft-f16")
     assert entry.defaults is not None
     assert entry.defaults.chat_template == "hal0-brain-sft"
 
@@ -167,20 +167,20 @@ async def test_run_pull_keeps_operator_chat_template(tmp_hal0_home: str) -> None
     registry = ModelRegistry()
     registry.add(
         Model(
-            id="hal0-brain-sft-q8-rocmfpx",
-            name="hal0-brain-sft-q8-rocmfpx",
+            id="hal0-brain-sft-f16",
+            name="hal0-brain-sft-f16",
             path="/nonexistent/model.gguf",
             size_bytes=1,
             defaults=ModelDefaults(chat_template="operator-own"),
         )
     )
-    job = make_job("hal0-brain-sft-q8-rocmfpx")
+    job = make_job("hal0-brain-sft-f16")
     client = httpx.AsyncClient(transport=_ok_handler(body))
     try:
         await run_pull(
             job,
             hf_repo="Hal0ai/hal0-brain-sft-ROCmFPX-GGUF",
-            hf_file="hal0-brain-sft-Q8_0_ROCMFPX_AGENT.gguf",
+            hf_file="hal0-brain-sft-F16.gguf",
             registry=registry,
             client=client,
         )
@@ -188,7 +188,7 @@ async def test_run_pull_keeps_operator_chat_template(tmp_hal0_home: str) -> None
         await client.aclose()
 
     assert job.state == "completed", f"got {job.state}: {job.error}"
-    entry = registry.get("hal0-brain-sft-q8-rocmfpx")
+    entry = registry.get("hal0-brain-sft-f16")
     assert entry.defaults is not None
     assert entry.defaults.chat_template == "operator-own"
 
@@ -273,20 +273,19 @@ async def test_run_pull_curated_context_length_backfills_unreadable_gguf(
 ) -> None:
     """When the header can't be read, the curated catalogue window is stamped.
 
-    The FPX brain artifacts carry custom tensor types; if a future layout ever
-    defeats the header parser, the curated context_length (the same value the
+    If a future GGUF layout ever defeats the header parser, the curated context_length (the same value the
     wizard card shows) must still reach the registry row — 8192-fallback on
     the steward's slot is the failure this exists to prevent.
     """
     body = _payload(4096)  # not a GGUF — detection yields nothing
-    job = make_job("hal0-brain-sft-q8-rocmfpx")
+    job = make_job("hal0-brain-sft-f16")
     registry = ModelRegistry()
     client = httpx.AsyncClient(transport=_ok_handler(body))
     try:
         await run_pull(
             job,
             hf_repo="Hal0ai/hal0-brain-sft-ROCmFPX-GGUF",
-            hf_file="hal0-brain-sft-Q8_0_ROCMFPX_AGENT.gguf",
+            hf_file="hal0-brain-sft-F16.gguf",
             registry=registry,
             client=client,
         )
@@ -294,7 +293,7 @@ async def test_run_pull_curated_context_length_backfills_unreadable_gguf(
         await client.aclose()
 
     assert job.state == "completed", f"got {job.state}: {job.error}"
-    assert registry.get("hal0-brain-sft-q8-rocmfpx").metadata.get("context_length") == 131072
+    assert registry.get("hal0-brain-sft-f16").metadata.get("context_length") == 131072
 
 
 @pytest.mark.asyncio
@@ -366,14 +365,14 @@ async def test_run_pull_keeps_operator_context_length(tmp_hal0_home: str) -> Non
 async def test_run_pull_stamps_curated_tool_calling(tmp_hal0_home: str) -> None:
     """A curated native tool-caller lands with capability_flags.tool_calling=True."""
     body = _payload(4096)
-    job = make_job("hal0-brain-sft-q8-rocmfpx")
+    job = make_job("lfm2.5-2.6b")
     registry = ModelRegistry()
     client = httpx.AsyncClient(transport=_ok_handler(body))
     try:
         await run_pull(
             job,
-            hf_repo="Hal0ai/hal0-brain-sft-ROCmFPX-GGUF",
-            hf_file="hal0-brain-sft-Q8_0_ROCMFPX_AGENT.gguf",
+            hf_repo="LiquidAI/LFM2.5-2.6B-GGUF",
+            hf_file="LFM2.5-2.6B-Q8_0.gguf",
             registry=registry,
             client=client,
         )
@@ -381,7 +380,7 @@ async def test_run_pull_stamps_curated_tool_calling(tmp_hal0_home: str) -> None:
         await client.aclose()
 
     assert job.state == "completed", f"got {job.state}: {job.error}"
-    assert registry.get("hal0-brain-sft-q8-rocmfpx").capability_flags.tool_calling is True
+    assert registry.get("lfm2.5-2.6b").capability_flags.tool_calling is True
 
 
 @pytest.mark.asyncio
@@ -392,20 +391,20 @@ async def test_run_pull_keeps_operator_tool_calling(tmp_hal0_home: str) -> None:
     registry = ModelRegistry()
     registry.add(
         Model(
-            id="hal0-brain-sft-q8-rocmfpx",
-            name="hal0-brain-sft-q8-rocmfpx",
+            id="lfm2.5-2.6b",
+            name="lfm2.5-2.6b",
             path="/nonexistent/pre-pull.gguf",
             capability_flags=ModelCapabilities(tool_calling=False),
         )
     )
     body = _payload(4096)
-    job = make_job("hal0-brain-sft-q8-rocmfpx")
+    job = make_job("lfm2.5-2.6b")
     client = httpx.AsyncClient(transport=_ok_handler(body))
     try:
         await run_pull(
             job,
-            hf_repo="Hal0ai/hal0-brain-sft-ROCmFPX-GGUF",
-            hf_file="hal0-brain-sft-Q8_0_ROCMFPX_AGENT.gguf",
+            hf_repo="LiquidAI/LFM2.5-2.6B-GGUF",
+            hf_file="LFM2.5-2.6B-Q8_0.gguf",
             registry=registry,
             client=client,
         )
@@ -413,7 +412,7 @@ async def test_run_pull_keeps_operator_tool_calling(tmp_hal0_home: str) -> None:
         await client.aclose()
 
     assert job.state == "completed", f"got {job.state}: {job.error}"
-    assert registry.get("hal0-brain-sft-q8-rocmfpx").capability_flags.tool_calling is False
+    assert registry.get("lfm2.5-2.6b").capability_flags.tool_calling is False
 
 
 # ── quant stamping at pull time (#1890) ───────────────────────────────────────

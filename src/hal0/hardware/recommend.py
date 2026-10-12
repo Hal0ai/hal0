@@ -43,7 +43,11 @@ _PRIMARY_TIERS: list[tuple[str, float, str]] = [
     # signal the bundle picker gates tiers on (bundles/eligibility.py),
     # not a half-of-VRAM budget. Largest-that-fits wins, so keep the GPU
     # rows sorted descending by ram_gb_min.
-    ("Qwen3.6-35B-A3B-MTP-GGUF", 48.0, "gpu"),  # hybrid MoE, ~45 tok/s, tiny KV
+    # Qwen3.8 27B dense with vision + MTP: the operator's pick for the
+    # primary and agent lanes (ADR-0025 decision 4, ADR-0027 decision 6).
+    # ~18.5 GB on disk, ~25 GB resident at its 96K default context, so it
+    # needs a 32 GB pool to leave room for the brain and voice slots.
+    ("qwen3.8-27b", 32.0, "gpu"),
     ("qwen3.5-9b", 16.0, "gpu"),  # dense 9B, comfortable mid-tier
     ("qwen3-4b", 0.0, "gpu"),  # smallest GPU pick — always downloadable
     # CPU/MIT fallbacks for hosts with no usable GPU.
@@ -119,7 +123,8 @@ _MOE_ARCHITECTURES: frozenset[str] = frozenset({"qwen3next", "mixtral", "deepsee
 def _resolve_primary_ctx(model_id: str) -> int:
     """Resolve the primary slot's context window from the curated arch max.
 
-    MoE/MTP primaries (tiny hybrid KV) get the full window; dense models
+    MoE/MTP primaries get the full curated window (an MTP row's
+    ``context_length`` is its measured shipped default); other dense models
     are capped at ``_DENSE_CTX_CAP``; unknown models fall back to
     ``_CTX_FALLBACK``. Replaces the old flat hard-coded 8192 (#513).
 
@@ -136,7 +141,9 @@ def _resolve_primary_ctx(model_id: str) -> int:
         is_moe = curated.architecture.strip().lower() in _MOE_ARCHITECTURES
     else:
         is_moe = bool(curated) and ("mtp" in curated.tags or "a3b" in curated.id.lower())
-    if is_moe:
+    # An MTP model ships its context_length as a measured default (qwen3.8-27b:
+    # 96K, ADR-0025), not a native maximum, so it is not dense-capped either.
+    if is_moe or (curated is not None and "mtp" in curated.tags):
         return arch_max
     return min(arch_max, _DENSE_CTX_CAP)
 

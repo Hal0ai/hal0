@@ -23,7 +23,7 @@ from hal0.config.schema import (
 )
 
 # The seeded catalog is the operator-approved minimal core: one profile per
-# runtime family plus the generic llama-server workloads. The eight workload
+# runtime family plus the generic llama-server workloads. The five workload
 # variants it used to carry are parked in ``legacy_seed_profiles.toml`` and
 # demoted to ordinary custom profiles on existing installs (see
 # ``loader.load_profiles_config``).
@@ -45,9 +45,6 @@ LEGACY_NAMES = {
     "moe",
     "thinking",
     "coding",
-    "chadrock-dense",
-    "chadrock-moe",
-    "promptforge",
 }
 _EXPECTED_PROFILE_COUNT = len(KEEP_NAMES)
 _EXPECTED_STACK_SLUGS = {"saber", "forge", "pi"}
@@ -67,7 +64,7 @@ class TestSeedProfilesToml:
 
 
 class TestLegacySeedProfilesToml:
-    def test_legacy_seeds_hold_the_pruned_eight(self) -> None:
+    def test_legacy_seeds_hold_the_pruned_five(self) -> None:
         assert set(LEGACY_SEED_PROFILES) == LEGACY_NAMES
 
     def test_every_legacy_entry_validates(self) -> None:

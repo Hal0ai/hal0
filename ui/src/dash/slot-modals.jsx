@@ -13,7 +13,6 @@ import {
 	useSlotLoad,
 	useSlotSwap,
 	useSlotResolved,
-	useSlotDetail,
 	useSlots,
 	useSlotRename,
 } from "@/api/hooks/useSlots";
@@ -28,7 +27,6 @@ import { useProfiles } from "@/api/hooks/useProfiles";
 import { useSystemInfo, deviceBackend } from "@/api/hooks/useRuntimes";
 import {
 	applyRunnerChoice,
-	archFitWarning,
 	hostHwFlags,
 	laneValues,
 	runnerOptions,
@@ -104,27 +102,17 @@ function stateChipClass(stateOrSlot) {
 // rejects them against the real registry.
 
 // One shared compatible-models filter for all three slot surfaces (create
-// modal, edit drawer, swap popover). Takes the raw /api/models list, normalizes
-// it, and filters to the requested `type`, hiding ROCmFP4-quantized models
-// whenever the target backend isn't rocm (those weights only run on the rocm
-// fork binary). Previously the create modal filtered on type ALONE and could
-// offer rocmfp4 models that the backend then rejects — this closes that gap.
-function compatibleModels(models, { type, backend }) {
+// modal, edit drawer, swap popover): the raw /api/models list, normalized and
+// filtered to the requested `type`. Every model the registry holds loads on
+// every llama.cpp runner (fork-only quants are refused at add/pull), so the
+// backend no longer narrows the list.
+function compatibleModels(models, { type }) {
 	// Upstream-advertised rows are excluded outright: a slot binds a local
 	// file path, and these rows have none (they'd render as "will pull" and
 	// then 422 — there is no HF source to pull them from).
 	return (models ?? [])
 		.map(normalizeApiModel)
-		.filter(
-			(m) =>
-				m.type === type &&
-				!isUpstreamModel(m) &&
-				!(
-					Array.isArray(m.tags) &&
-					m.tags.includes("rocmfp4") &&
-					backend !== "rocm"
-				),
-		);
+		.filter((m) => m.type === type && !isUpstreamModel(m));
 }
 
 // Device-class token for profile/runner fit filters — mirrors the backend
@@ -393,7 +381,7 @@ function profileRichOptions({ none, outOfVocab, fit, crossFit, backends, BACKEND
 // (the §4 fit-check list), falling back to its single declared `backend` on an
 // older system-info payload. Empty = backend-agnostic, i.e. never a veto. ONE
 // helper so the Runner select's option filter and the fit-check warning right
-// below it can't disagree (rocmfpx serves rocm AND vulkan).
+// below it can't disagree (standard serves rocm AND vulkan).
 function runnerBackends(runner) {
 	const sup = runner?.supported_backends;
 	if (Array.isArray(sup) && sup.length > 0) return sup;
@@ -771,14 +759,6 @@ function EditSlotDrawer({ open, slot, onClose }) {
 	// Falls back gracefully when null (non-llama slots) or on error.
 	const resolvedQuery = useSlotResolved(slot?.name, { enabled: !!open });
 
-	// Slot DETAIL payload (spec 2026-08-29 #1946) — GET /api/slots/{name}
-	// enriches with `specialty_degraded` (config_drift's sibling key, same
-	// detail-route-only gate), which the list poll backing `slot` never
-	// carries. Only fetched while the drawer is open, mirroring
-	// resolvedQuery above; null/absent renders nothing (additive, absent-safe).
-	const slotDetailQuery = useSlotDetail(open ? slot?.name : null);
-	const specialtyDegraded = slotDetailQuery.data?.specialty_degraded ?? null;
-
 	// Seed the form AND snapshot the baseline — deliberately the same effect, so
 	// the two can never come from different payloads (which is the #1398 class).
 	// Runs on slot identity change only; a degraded payload is skipped outright
@@ -955,15 +935,6 @@ function EditSlotDrawer({ open, slot, onClose }) {
 		// guarded a value the launch path ignores, and #1389 was that gate vetoing
 		// unrelated saves from an unmounted subtree — a whole failure mode that
 		// removing the control makes unrepresentable.)
-		// Codex P1 (#1636 fallout): a pending cross-backend profile switch that
-		// would strand the currently-bound model — block Save until the
-		// operator swaps to a compatible model or reverts the profile pick.
-		if (strandsBoundModel) {
-			const msg =
-				"This switches the slot to a device that can't run the bound model — swap to a compatible model first, or keep the current backend.";
-			if (changes.device) errs.device = msg;
-			else errs.profile = msg;
-		}
 		// Device and profile edited to CONFLICTING backends in one Save — the
 		// server hard-rejects that pair (_reconcile_device_profile's operator
 		// error). Surface it inline instead of as a failed submit.
@@ -1082,8 +1053,8 @@ function EditSlotDrawer({ open, slot, onClose }) {
 	// device this slot will actually launch on AFTER Save is the profile's
 	// backend device, not the still-persisted `device` state — the drawer
 	// has no direct device control, so `device` never moves on its own.
-	// Every dependent filter below (the Backend cascade, the Model swap
-	// picker's rocmfp4 gate) reads `pendingDevice` instead of `device` so
+	// Every dependent filter below (the Backend cascade) reads
+	// `pendingDevice` instead of `device` so
 	// they preview the POST-save world rather than hiding the very
 	// runner/model the operator is being told to pick.
 	const pendingDevice = (() => {
@@ -1119,29 +1090,6 @@ function EditSlotDrawer({ open, slot, onClose }) {
 	// Compared against the FROZEN baseline (#1398), not the live-polled slot
 	// prop, so background drift can never read as an operator edit.
 	const deviceIsLiveEdit = baseline ? device !== baseline.device : false;
-	// The device this slot will actually launch on after Save, when that
-	// differs from the persisted one — from either switching control.
-	const pendingTargetDevice =
-		pendingCrossDevice || (deviceIsLiveEdit ? device : null);
-	// Codex P1: a Save that switches the slot's device — via a cross-backend
-	// profile (server-side _reconcile_device_profile) or the Device select
-	// directly — leaves the currently BOUND model riding along untouched. If
-	// that model doesn't fit the new backend (e.g. a rocmfp4 model on a
-	// ROCm→Vulkan switch), Save would strand it: a live container restarts
-	// onto a runner that can't load its own bound model. Block Save in that
-	// case (see onSaveClick) rather than let the restart fail after the fact.
-	// Judge the RESOLVED bound-model row (curModelRow), not the bare bound id:
-	// an id that doesn't resolve against /api/models (catalog still loading,
-	// legacy alias, HAL0_DATA seed) gives no honest compatibility answer, and
-	// blocking on "not found" would veto every switch in that window.
-	const strandsBoundModel =
-		!!pendingTargetDevice &&
-		!!curModelRow &&
-		!compatibleModels(modelsQuery.data, {
-			type: slot.type,
-			backend: deviceBackend(pendingTargetDevice),
-		}).some((m) => m.id === curModelRow.id);
-
 	// Instant-apply pin/unpin for the drawer header toggle (§21.10, #1367).
 	// Fires the PUT, toasts the result, and lets the slots poll re-render from
 	// server truth. `slot.pinned` is the *effective* pin lifted by slot_view
@@ -1665,7 +1613,7 @@ function EditSlotDrawer({ open, slot, onClose }) {
 	// Runtime cascade (hw-cascade.js, D3) — hoisted out of the old Hardware
 	// FieldGroup's render-local IIFE (Task 11a regroup) so BOTH the "How it
 	// runs" Runtime/Lane rows and the consolidated Advanced disclosure's
-	// Image/Debug-pin/Supersession rows (which used to sit in that same
+	// Image/Debug-pin rows (which used to sit in that same
 	// IIFE) can read the same computation — the split moved Threads/NGL/
 	// Advanced out of the Hardware group without duplicating this cascade.
 	// Reads `pendingDevice` (#1636 Codex fix) so a pending cross-backend
@@ -1757,7 +1705,7 @@ function EditSlotDrawer({ open, slot, onClose }) {
 					<>
 						{/* Identity + state facts (Task 11a): the two ReadOnlyStrip
 						    fact strips this used to be are gone — everything they
-						    carried either moved here (state/breaker/specialty chips,
+						    carried either moved here (state/breaker chips,
 						    the #id·:port chip), onto the title (type), or into
 						    Advanced (image status). "runner · binary" was dropped
 						    outright: the Runtime select below already names it. */}
@@ -1773,20 +1721,6 @@ function EditSlotDrawer({ open, slot, onClose }) {
 								{slot.state}
 							</span>
 							<SlotBreakerChip s={slot} />
-							{specialtyDegraded && (
-								<span
-									className="tag-chip"
-									data-testid="slot-specialty-degraded"
-									title={specialtyDegraded.detail || "Specialty distribution degraded to GGUF-only"}
-									style={{
-										color: "var(--warn)",
-										borderColor: "var(--warn-line)",
-										background: "var(--warn-soft)",
-									}}
-								>
-									⚠ {specialtyDegraded.specialty || "specialty"} degraded
-								</span>
-							)}
 							<span className="chip mono">
 								<span data-testid="slot-id-readonly">
 									{(slot.id != null ? slot.id : slot.slot_id) != null
@@ -1875,7 +1809,7 @@ function EditSlotDrawer({ open, slot, onClose }) {
 			>
 				{/* Task 11a: both ReadOnlyStrip fact strips (slot_id/port/state and
 				    runner·binary/type/image-status) are gone. state/breaker/
-				    specialty chips and the #id·:port chip moved into the drawer
+				    the #id·:port chip moved into the drawer
 				    header row above; type became a title chip; "runner · binary"
 				    was dropped outright (the Runtime select below already names
 				    it); image status now lives in Advanced only (see below). The
@@ -1896,28 +1830,17 @@ function EditSlotDrawer({ open, slot, onClose }) {
 					) : (
 						<>
 							{/* Task 1: live model swap — mirrors the card's ModelPicker but with the
-          full type+rocmfp4 compatibility filter (same as InlineSwapPopover).
+          same type compatibility filter as InlineSwapPopover.
           Swap is its own POST /slots/{name}/swap (not part of the batched
           Save); container slots cold-restart to load, so we toast like the
           popover does. */}
 							{(() => {
 								const isContainer = slot.runtime === "container";
-								// Derive the backend from the SELECTED device (reactive) so the rocmfp4
-								// filter re-evaluates immediately when the operator switches the HW-grid
-								// device — before Save is clicked. (Device is the single owner of the
-								// rocm/vulkan axis now — spec-hw-slot-ownership §2.)
-								//
-								// Codex P1: deliberately `device` here, NOT `pendingDevice`. Swap fires
-								// its own immediate POST /slots/{name}/swap, independent of the batched
-								// Save — a pending cross-backend profile pick hasn't reached the server
-								// yet, so previewing the post-Save backend here would offer a model the
-								// CURRENTLY persisted runner can't load (the live swap has no idea a
-								// device switch is staged). Gate the whole control instead (below) while
-								// a switch is pending, and keep this list honest about the real device.
-								const selBackend = deviceBackend(device) || slot.backend;
+								// Swap fires its own immediate POST /slots/{name}/swap, independent
+								// of the batched Save; the control is gated (below) while a device
+								// switch is pending.
 								const compatible = compatibleModels(modelsQuery.data, {
 									type: slot.type,
-									backend: selBackend,
 								});
 								const cur = slot.model_id || slot.model || "";
 								const has = compatible.some((m) => m.id === cur);
@@ -2015,40 +1938,6 @@ function EditSlotDrawer({ open, slot, onClose }) {
 													that change (or revert the profile) before swapping.
 												</div>
 											)}
-											{(() => {
-												// Model↔runner GGUF-arch fit-check (hal0#2118) — warn,
-												// never block, same idiom as the HW-grid fit warning
-												// below the Backend select. Reads the bound model's
-												// detected `architecture` against the effective
-												// runner's `unsupported_archs` denylist (system-info);
-												// an image_pin disarms it (the pin IS the escape
-												// hatch). Previews the post-save device/binary/pin so
-												// a live HW edit updates the verdict before Save.
-												const archWarn = archFitWarning({
-													arch: curModelRow?.architecture,
-													device: pendingDevice,
-													binary,
-													imagePin,
-													backends: systemInfoQuery.data?.backends ?? {},
-												});
-												if (!archWarn) return null;
-												return (
-													<div
-														className="hint"
-														data-testid="slot-model-arch-fit-warning"
-														style={{
-															marginTop: 6,
-															padding: "6px 10px",
-															borderRadius: "var(--rad-sm)",
-															color: "var(--warn)",
-															border: "1px solid var(--warn-line)",
-															background: "var(--warn-soft)",
-														}}
-													>
-														{archWarn}
-													</div>
-												);
-											})()}
 										</div>
 									</div>
 								);
@@ -2082,7 +1971,7 @@ function EditSlotDrawer({ open, slot, onClose }) {
 				    model whose window it clamps. Threads/NGL and the image-facing
 				    disclosure move OUT, into the single consolidated Advanced
 				    section further down (threads, NGL, image block, debug pin,
-				    supersession banner, resolved command all live there now). */}
+				    resolved command all live there now). */}
 				<FieldGroup label="How it runs" hint="this slot's hardware">
 					{/* Device select removed: `device` is now DERIVED from the
 					    Runtime pick below (a single-lane runner's lane rides the
@@ -2548,10 +2437,10 @@ function EditSlotDrawer({ open, slot, onClose }) {
 					})()}
 
 				{/* Task 11a: the two Advanced surfaces this used to be (a controlled
-				    slot-hw-advanced disclosure for image/debug-pin/supersession, and
+				    slot-hw-advanced disclosure for image/debug-pin, and
 				    a separate native <details> for priority/resolved-command) are
 				    consolidated into ONE disclosure — threads, NGL, image block,
-				    debug pin, supersession banner and resolved command all live
+				    debug pin and resolved command all live
 				    here now (mockup panel 03's "▸ Advanced — threads, layers,
 				    image, command"). Controlled (not native <details>) so the
 				    "▸"/"▾" glyph and label stay ours to own, same reasoning Task 9
@@ -2646,20 +2535,6 @@ function EditSlotDrawer({ open, slot, onClose }) {
 								hwBackends[binary]?.image ||
 								"resolved at launch";
 							const pinActive = !!imagePin.trim();
-							const supersededByCombinedUpstream = imagePin.includes(
-								"hal0-combined-upstream",
-							);
-							// The one-click fix commits binary="strix" — only offer
-							// it when "strix" is actually a live pick in the SAME
-							// `runtimeOptions` list the Runtime select above renders
-							// (already filtered by device_class/slotType/hw
-							// feasibility). Firing setBinary("strix") when it isn't
-							// would land the operator on an unresolvable "strix ·
-							// not in this catalog" pick — worse than the pin they
-							// started with.
-							const strixAvailable = runtimeOptions.some(
-								(o) => o.key === "strix",
-							);
 							return (
 								<>
 									<div className="form-row">
@@ -2813,45 +2688,6 @@ function EditSlotDrawer({ open, slot, onClose }) {
 											)}
 										</div>
 									</div>
-
-									{supersededByCombinedUpstream && (
-										<div
-											data-testid="slot-hw-supersession-banner"
-											style={{
-												marginTop: 6,
-												padding: "6px 10px",
-												borderRadius: "var(--rad-sm)",
-												color: "var(--warn)",
-												border: "1px solid var(--warn-line)",
-												background: "var(--warn-soft)",
-												display: "flex",
-												alignItems: "center",
-												justifyContent: "space-between",
-												gap: 8,
-											}}
-										>
-											<span>
-												⚠{" "}
-												{strixAvailable
-													? "Superseded by the Strix runtime"
-													: "Superseded by the Strix runtime — available after the next update"}
-											</span>
-											{strixAvailable && (
-												<button
-													type="button"
-													className="btn ghost sm"
-													data-testid="slot-hw-supersession-fix"
-													onClick={() => {
-														setBinary("strix");
-														setDevice("gpu-vulkan");
-														setImagePin("");
-													}}
-												>
-													Switch to Strix
-												</button>
-											)}
-										</div>
-									)}
 								</>
 							);
 						})()}
@@ -3159,11 +2995,8 @@ function InlineSwapPopover({ slot, open, onClose, onPick }) {
 
 	const isContainer = slot.runtime === "container";
 	const ramFreeGb = hwQuery.data?.ram?.free ?? 0;
-	// ROCmFP4-quantized models only run on the custom rocm fork binary — don't
-	// offer them when swapping a non-rocm slot (shared compatibleModels filter).
 	const compatible = compatibleModels(modelsQuery.data, {
 		type: slot.type,
-		backend: slot.backend,
 	});
 
 	// N2: container swap = cold systemctl restart (not a hot in-place swap).

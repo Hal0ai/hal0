@@ -30,6 +30,7 @@ import asyncio
 import contextlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -446,36 +447,41 @@ def _probe_version(candidates: tuple[str, ...]) -> str | None:
 
 
 def _flm_toolbox_image() -> str:
-    """Return the bundled FLM toolbox image reference (source of truth post-PR #822).
+    """Return the FLM runner's image reference (``manifest.json`` ``runners.flm``).
 
-    Delegates to ``providers.flm._DEFAULT_FLM_IMAGE`` so the version is
-    never duplicated — updating the image constant updates the updater
-    surface automatically. Returns an empty string on import failure so
-    callers can degrade gracefully.
+    Returns an empty string when the pin cannot be read so callers can
+    degrade gracefully.
     """
     try:
-        from hal0.providers.flm import _DEFAULT_FLM_IMAGE
+        from hal0.runners import RUNNER_IMAGES, resolve_runner_image
 
-        return _DEFAULT_FLM_IMAGE
+        return resolve_runner_image(RUNNER_IMAGES["flm"])
     except Exception:  # pragma: no cover
         return ""
 
 
-def _parse_flm_version_from_image(image_ref: str | None) -> str | None:
-    """``ghcr.io/hal0ai/hal0-toolbox-flm:0.9.44`` → ``0.9.44``.
+#: The runner-images build suffix on a tag: ``-r`` plus the short revision of
+#: the recipe (``0.9.44-re14329d`` is FLM 0.9.44 built from recipe e14329d).
+_RUNNER_BUILD_SUFFIX_RE = re.compile(r"-r[0-9a-f]{7,40}$")
 
-    Parses the tag off an OCI image reference (everything after the last
-    ``:``) and returns it, or ``None`` if the ref is empty / has no tag.
+
+def _parse_flm_version_from_image(image_ref: str | None) -> str | None:
+    """``ghcr.io/hal0ai/hal0-runner-flm:0.9.44-r1a2b3c4@sha256:…`` → ``0.9.44``.
+
+    Drops any ``@digest``, takes the tag (the part after the last ``:`` of the
+    final path component, so a registry port is never mistaken for one), and
+    strips the runner-images build suffix (``-r<revision>``). Returns ``None``
+    when the ref is empty or has no tag.
     """
     if not image_ref:
         return None
-    # image_ref may be "repo/image:tag" or "registry/repo/image:tag".
-    # The tag is always the fragment after the last colon, provided it
-    # exists and is non-empty.
-    if ":" not in image_ref:
+    body = image_ref.strip().split("@", 1)[0]
+    last = body.rsplit("/", 1)[-1]
+    if ":" not in last:
         return None
-    tag = image_ref.rsplit(":", 1)[-1].strip()
-    return tag if tag else None
+    tag = last.rsplit(":", 1)[-1].strip()
+    tag = _RUNNER_BUILD_SUFFIX_RE.sub("", tag)
+    return tag or None
 
 
 @router.get("/state")
@@ -499,8 +505,7 @@ async def update_state(request: Request) -> dict[str, Any]:
         }
 
     The ``flm.current`` version is derived from the bundled toolbox image
-    tag (``providers.flm._DEFAULT_FLM_IMAGE``) — the single source of truth
-    post PR #822. Failures in any single probe degrade gracefully — the
+    tag (``manifest.json`` ``runners.flm``). Failures in any single probe degrade gracefully — the
     corresponding field comes back as ``None`` rather than 5xx'ing the whole
     response.
     """
@@ -1016,7 +1021,7 @@ async def converge_component_route(component_id: str, request: Request) -> dict[
     # job_id is dropped from the base mapping and passed explicitly by
     # ``_run_component_job`` once the job id is known.
     arm_kwargs: dict[str, Any] = _arm_kwargs(
-        comp, job_id=None, apply=True, image_retag=True, engine=True, hermes_install=True
+        comp, job_id=None, apply=True, catalogue_sync=True, engine=True, hermes_install=True
     )
     arm_kwargs.pop("job_id", None)
     if component_id == "openwebui" and isinstance(body, dict):

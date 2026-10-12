@@ -2314,49 +2314,6 @@ def test_get_slot_includes_config_drift_when_requested(
     ]
 
 
-def test_get_slot_specialty_degraded_null_when_absent(
-    slot_root: Path,
-    container_stub: dict[str, Any],
-    isolated_client: TestClient,
-) -> None:
-    """Spec 2026-08-29 (#1946): a slot whose model carries no specialty
-    surfaces ``specialty_degraded: null`` on the same detail payload that
-    carries ``config_drift`` — additive, absent-safe key."""
-    isolated_client.post("/api/slots/chat/load")
-
-    r = isolated_client.get("/api/slots/chat")
-
-    assert r.status_code == 200, r.text
-    assert r.json()["specialty_degraded"] is None
-
-
-def test_get_slot_specialty_degraded_passes_through(
-    slot_root: Path,
-    container_stub: dict[str, Any],
-    isolated_client: TestClient,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The guard's structured degraded reason (Task 6's
-    ``_guard_specialty_runner`` shape) rides through to the slot-status
-    payload verbatim when the guard flags the slot's model."""
-    reason = {
-        "code": "slot.specialty_degraded",
-        "specialty": "promptforge",
-        "runner": "rocmfpx",
-        "detail": "runner 'rocmfpx' does not list specialty 'promptforge'; launching GGUF-only",
-    }
-    monkeypatch.setattr(
-        "hal0.providers.container.specialty_degraded_for_slot",
-        lambda cfg, model_path=None: reason,
-    )
-    isolated_client.post("/api/slots/chat/load")
-
-    r = isolated_client.get("/api/slots/chat")
-
-    assert r.status_code == 200, r.text
-    assert r.json()["specialty_degraded"] == reason
-
-
 # ── Backwards compatibility ────────────────────────────────────────────────
 
 
@@ -2623,7 +2580,7 @@ def test_put_config_round_trips_hw_grid_fields(
     body = {
         "n_gpu_layers": 99,
         "threads": 8,
-        "binary": "rocmfpx",
+        "binary": "standard",
         "image_pin": "ghcr.io/owner/repo:dbg",
     }
     r = isolated_client.put("/api/slots/hw/config", json=body)
@@ -2633,7 +2590,7 @@ def test_put_config_round_trips_hw_grid_fields(
     cfg = isolated_client.get("/api/slots/hw/config").json()
     assert cfg["n_gpu_layers"] == 99
     assert cfg["threads"] == 8
-    assert cfg["binary"] == "rocmfpx"
+    assert cfg["binary"] == "standard"
     assert cfg["image_pin"] == "ghcr.io/owner/repo:dbg"
 
     # The serialized slot read (config_enrichment lift) surfaces them too, so
@@ -2641,7 +2598,7 @@ def test_put_config_round_trips_hw_grid_fields(
     view = isolated_client.get("/api/slots/hw").json()
     assert view["n_gpu_layers"] == 99
     assert view["threads"] == 8
-    assert view["binary"] == "rocmfpx"
+    assert view["binary"] == "standard"
     assert view["image_pin"] == "ghcr.io/owner/repo:dbg"
 
 
@@ -2692,8 +2649,8 @@ def test_put_config_no_fit_warning_when_compatible(
             'default = "m"',
         ],
     )
-    # rocmfpx supports ("rocm", "vulkan") → gpu-rocm fits.
-    r = isolated_client.put("/api/slots/ok/config", json={"binary": "rocmfpx"})
+    # standard supports ("rocm", "vulkan") → gpu-rocm fits.
+    r = isolated_client.put("/api/slots/ok/config", json={"binary": "standard"})
     assert r.status_code == 200, r.text
     assert "fit_warning" not in r.json()
 
@@ -2716,10 +2673,10 @@ def test_device_backend_strips_gpu_prefix() -> None:
 def test_fit_check_warning_paths() -> None:
     from hal0.api.routes.slots import _fit_check_warning
 
-    # rocmfpx supports rocm+vulkan → gpu-rocm/gpu-vulkan fit, cpu does not.
-    assert _fit_check_warning("gpu-rocm", "rocmfpx") is None
-    assert _fit_check_warning("gpu-vulkan", "rocmfpx") is None
-    warn = _fit_check_warning("cpu", "rocmfpx")
+    # standard supports rocm+vulkan → gpu-rocm/gpu-vulkan fit, cpu does not.
+    assert _fit_check_warning("gpu-rocm", "standard") is None
+    assert _fit_check_warning("gpu-vulkan", "standard") is None
+    warn = _fit_check_warning("cpu", "standard")
     assert warn is not None and "cpu" in warn
     # Empty BINARY = HW-gated default from device → no check.
     assert _fit_check_warning("gpu-rocm", "") is None
@@ -2728,172 +2685,30 @@ def test_fit_check_warning_paths() -> None:
     assert _fit_check_warning("gpu-rocm", "does-not-exist") is None
 
 
-def test_fit_check_refuses_promptforge_on_a_vulkan_device() -> None:
-    """Spec 2026-08-29 (#1946) testing list, M4: the promptforge runner is a
-    HIP-only build (``supported_backends == ("rocm",)``, GGML_VULKAN=OFF), so
-    the EXISTING fit-check must warn on a ``gpu-vulkan`` slot with no new code.
-    The runner registry test asserts the tuple's value; nothing exercised the
-    check itself, so the "no new code needed" claim was unpinned."""
+def test_fit_check_refuses_a_rocm_only_runner_on_a_vulkan_device() -> None:
+    """A ROCm-only runner (``qwen3tts``: ``supported_backends == ("rocm",)``)
+    on a ``gpu-vulkan`` slot trips the EXISTING fit-check with no extra code."""
     from hal0.api.routes.slots import _fit_check_warning
     from hal0.runners import RUNNER_IMAGES
 
-    assert RUNNER_IMAGES["promptforge"].supported_backends == ("rocm",)
+    assert RUNNER_IMAGES["qwen3tts"].supported_backends == ("rocm",)
 
-    warn = _fit_check_warning("gpu-vulkan", "promptforge")
+    warn = _fit_check_warning("gpu-vulkan", "qwen3tts")
     assert warn is not None
     assert "vulkan" in warn
-    assert "promptforge" in warn
+    assert "qwen3tts" in warn
     assert "rocm" in warn  # names the backend it DOES support
 
     # the sibling half: its own backend fits, and cpu is refused too
-    assert _fit_check_warning("gpu-rocm", "promptforge") is None
-    assert _fit_check_warning("cpu", "promptforge") is not None
+    assert _fit_check_warning("gpu-rocm", "qwen3tts") is None
+    assert _fit_check_warning("cpu", "qwen3tts") is not None
 
 
-# ── model↔runner arch fit-check (hal0#2118) ──────────────────────────────────
+def test_fit_check_does_not_resolve_retired_runner_keys() -> None:
+    """The alias keys are gone from the registry (ADR-0028): ``vulkanfpx`` /
+    ``rocmfpx`` are unknown BINARY keys, which the fit-check leaves to the
+    launch path to report rather than folding them onto ``standard``."""
+    from hal0.api.routes.slots import _fit_check_warning
 
-
-def test_arch_fit_warning_paths() -> None:
-    from hal0.api.routes.slots import _arch_fit_warning
-
-    # The #2118 shape: qwen4exp on the default rocmfpx build → warn.
-    warn = _arch_fit_warning("qwen4exp", "gpu-rocm", "rocmfpx", None)
-    assert warn is not None
-    assert "qwen4exp" in warn
-    assert "rocmfpx" in warn
-    assert "crash-loop" in warn
-    # No BINARY = the HW-gated default derived from the device — a GPU lane
-    # resolves to rocmfpx, so the SAME model still warns (this is exactly how
-    # the #2118 slot was configured: no explicit binary).
-    assert _arch_fit_warning("qwen4exp", "gpu-vulkan", "", None) is not None
-    assert _arch_fit_warning("qwen4exp", "gpu-vulkan", None, None) is not None
-    # An image_pin disarms the check — the pin IS the documented escape hatch.
-    pinned = _arch_fit_warning(
-        "qwen4exp", "gpu-rocm", "rocmfpx", "ghcr.io/hal0ai/hal0-combined-upstream:0829"
-    )
-    assert pinned is None
-    # Arch not on the denylist / unknown arch → silent.
-    assert _arch_fit_warning("llama", "gpu-rocm", "rocmfpx", None) is None
-    assert _arch_fit_warning(None, "gpu-rocm", "rocmfpx", None) is None
-    # Stock-build runners denylist nothing today.
-    assert _arch_fit_warning("qwen4exp", "cpu", "cpu", None) is None
-    # Non-GGUF runtime lane (format_arch != "gguf") has no opinion.
-    assert _arch_fit_warning("qwen4exp", "npu", "flm", None) is None
-    # Unknown BINARY key → the launch path reports its own error.
-    assert _arch_fit_warning("qwen4exp", "gpu-rocm", "does-not-exist", None) is None
-    # The vulkanfpx alias folds to rocmfpx before lookup.
-    assert _arch_fit_warning("qwen4exp", "gpu-vulkan", "vulkanfpx", None) is not None
-
-
-def test_arch_fit_warning_names_the_catalogued_alternative() -> None:
-    from hal0.api.routes.slots import _arch_fit_warning
-
-    # A ref with no matching RUNNER_IMAGES entry (the retired combined-upstream
-    # pin-only lineage, ADR-0006) falls back to naming the bare ref.
-    ref = "ghcr.io/hal0ai/hal0-combined-upstream:0829"
-    warn = _arch_fit_warning("qwen4exp", "gpu-rocm", "rocmfpx", None, alternative_ref=ref)
-    assert warn is not None
-    assert ref in warn
-    assert "Runtime" in warn
-    assert "image_pin" not in warn
-
-
-def test_arch_fit_warning_names_the_runtime_title_when_catalogued() -> None:
-    from hal0.api.routes.slots import _arch_fit_warning
-
-    # The real #2118 shape (ADR-0006): the alternative ref IS a RUNNER_IMAGES
-    # entry (strix), so the hint names its title instead of the bare ref.
-    ref = "ghcr.io/hal0ai/hal0-strix-vulkan:0831"
-    warn = _arch_fit_warning("qwen4exp", "gpu-rocm", "rocmfpx", None, alternative_ref=ref)
-    assert warn is not None
-    assert "Strix" in warn
-    assert "Runtime" in warn
-    assert ref not in warn
-
-
-def test_merged_model_default_shapes() -> None:
-    from hal0.api.routes.slots import _merged_model_default
-
-    # Write wins over disk, both sub-table and flat-string shapes fold.
-    assert _merged_model_default({"model": {"default": "a"}}, {"model": {"default": "b"}}) == "a"
-    assert _merged_model_default({"model": "a"}, {}) == "a"
-    # A write that omits `model` falls back to the persisted section.
-    assert _merged_model_default({}, {"model": {"default": "b"}}) == "b"
-    # A write that explicitly clears the binding resolves to None.
-    assert _merged_model_default({"model": {"default": ""}}, {"model": {"default": "b"}}) is None
-    assert _merged_model_default({}, {}) is None
-
-
-def test_put_config_warns_on_denylisted_model_arch(
-    tmp_hal0_home: str,
-    isolated_client: TestClient,
-) -> None:
-    """hal0#2118: binding a model whose detected GGUF arch the effective
-    runner denylists WARNS (non-blocking) — the write succeeds (200) and the
-    response carries ``model_fit_warning`` naming the arch."""
-    from hal0.registry.model import Model
-
-    _seed_slot_toml(
-        tmp_hal0_home,
-        "flashnext",
-        [
-            'name = "flashnext"',
-            "port = 8081",
-            'device = "gpu-vulkan"',
-            'provider = "llama-server"',
-            'runtime = "container"',
-            "[model]",
-            'default = "qwen3.8-flash-next-ud-q2-k-xl"',
-        ],
-    )
-    isolated_client.app.state.model_registry.add(
-        Model(
-            id="qwen3.8-flash-next-ud-q2-k-xl",
-            path="/models/qwen3.8-flash-next-ud-q2-k-xl.gguf",
-            architecture="qwen4exp",
-        )
-    )
-    # Touching only the binary still checks against the PERSISTED model.
-    r = isolated_client.put("/api/slots/flashnext/config", json={"binary": "rocmfpx"})
-    assert r.status_code == 200, r.text
-    out = r.json()
-    assert "model_fit_warning" in out
-    assert "qwen4exp" in out["model_fit_warning"]
-    assert "rocmfpx" in out["model_fit_warning"]
-
-    # Pinning an image (THE #2118 escape hatch) disarms the warning.
-    r = isolated_client.put(
-        "/api/slots/flashnext/config",
-        json={"image_pin": "ghcr.io/hal0ai/hal0-combined-upstream:0829"},
-    )
-    assert r.status_code == 200, r.text
-    assert "model_fit_warning" not in r.json()
-
-
-def test_put_config_no_arch_warning_for_supported_arch(
-    tmp_hal0_home: str,
-    isolated_client: TestClient,
-) -> None:
-    """A bound model with a supported (or unknown) arch carries no
-    ``model_fit_warning`` key."""
-    from hal0.registry.model import Model
-
-    _seed_slot_toml(
-        tmp_hal0_home,
-        "plain",
-        [
-            'name = "plain"',
-            "port = 8081",
-            'device = "gpu-vulkan"',
-            'provider = "llama-server"',
-            'runtime = "container"',
-            "[model]",
-            'default = "llama-model"',
-        ],
-    )
-    isolated_client.app.state.model_registry.add(
-        Model(id="llama-model", path="/models/llama.gguf", architecture="llama")
-    )
-    r = isolated_client.put("/api/slots/plain/config", json={"binary": "rocmfpx"})
-    assert r.status_code == 200, r.text
-    assert "model_fit_warning" not in r.json()
+    for retired in ("vulkanfpx", "rocmfpx", "strix", "promptforge"):
+        assert _fit_check_warning("cpu", retired) is None

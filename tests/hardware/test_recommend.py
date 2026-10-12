@@ -2,7 +2,7 @@
 
 Covers:
   * ``recommend_primary_slot`` selects the largest-that-fits curated chat
-    model by *unified RAM* (35B-A3B ≥48 GB, 9B 16-48 GB, 4B <16 GB), the
+    model by *unified RAM* (Qwen3.8 27B ≥32 GB, 9B 16-32 GB, 4B <16 GB), the
     same RAM signal the bundle picker gates on.
   * The primary slot ctx is resolved from the curated model's GGUF arch
     max (capped per tier), not a flat hard-coded 8192. The MoE/MTP
@@ -11,6 +11,9 @@ Covers:
 
 from __future__ import annotations
 
+import pytest
+
+import hal0.runners.pins as pins_mod
 from hal0.config.schema import GPUInfo, HardwareInfo
 from hal0.hardware.recommend import (
     _PRIMARY_TIERS,
@@ -18,6 +21,31 @@ from hal0.hardware.recommend import (
     recommend_primary_slot,
 )
 from hal0.registry.curated import CURATED_BY_ID
+from hal0.runners import RUNNER_IMAGES
+from hal0.runners.pins import RunnerPin
+
+
+@pytest.fixture(autouse=True)
+def _vulkan_gated_standard_pin(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Give ``standard`` a Vulkan-gated pin, as a promoted release has.
+
+    The shipped manifest.json carries placeholder pins that gate no lane, under
+    which an AMD box with no ROCm derives ``cpu``. The RAM-gating tests below
+    are about which model a GPU box gets, so they run against a pin whose
+    digest passed the hardware gate's Vulkan lane. Tests of the gate itself
+    patch ``default_image_serves_vulkan_lane`` explicitly.
+    """
+    table = {
+        key: RunnerPin(key=key, image=f"ghcr.io/hal0ai/hal0-runner-{key}") for key in RUNNER_IMAGES
+    }
+    table["standard"] = RunnerPin(
+        key="standard",
+        image="ghcr.io/hal0ai/hal0-runner-standard",
+        tag="b1-r1",
+        digest="sha256:" + "a" * 64,
+        lanes_gated=("rocm", "vulkan"),
+    )
+    monkeypatch.setattr(pins_mod, "runner_pins", lambda: table)
 
 
 def _amd_uma_host(unified_gb: int, *, compute_capable: bool = True) -> HardwareInfo:
@@ -61,7 +89,7 @@ def test_all_primary_tier_ids_are_curated() -> None:
 def test_default_tier_set_matches_brief() -> None:
     ids = [cid for cid, *_ in _PRIMARY_TIERS]
     # The three RAM-gated GPU picks must be present and canonical.
-    assert "Qwen3.6-35B-A3B-MTP-GGUF" in ids
+    assert ids[0] == "qwen3.8-27b"
     assert "qwen3.5-9b" in ids
     assert "qwen3-4b" in ids
     # CPU/MIT fallbacks retained.
@@ -72,20 +100,18 @@ def test_default_tier_set_matches_brief() -> None:
 # ── #512: RAM-gated selection ────────────────────────────────────────────────
 
 
-def test_96gb_strix_halo_seeds_35b_a3b() -> None:
+def test_96gb_strix_halo_seeds_qwen38_27b() -> None:
     hw = _amd_uma_host(96)
     rec = recommend_primary_slot(hw)
-    assert rec["model"]["default"] == "Qwen3.6-35B-A3B-MTP-GGUF"
+    assert rec["model"]["default"] == "qwen3.8-27b"
 
 
-def test_48gb_seeds_35b_a3b() -> None:
-    assert recommend_primary_slot(_amd_uma_host(48))["model"]["default"] == (
-        "Qwen3.6-35B-A3B-MTP-GGUF"
-    )
+def test_32gb_seeds_qwen38_27b() -> None:
+    assert recommend_primary_slot(_amd_uma_host(32))["model"]["default"] == "qwen3.8-27b"
 
 
-def test_32gb_seeds_9b() -> None:
-    assert recommend_primary_slot(_amd_uma_host(32))["model"]["default"] == "qwen3.5-9b"
+def test_24gb_seeds_9b() -> None:
+    assert recommend_primary_slot(_amd_uma_host(24))["model"]["default"] == "qwen3.5-9b"
 
 
 def test_16gb_seeds_9b() -> None:
@@ -97,8 +123,9 @@ def test_8gb_seeds_4b() -> None:
 
 
 def test_pick_chat_model_thresholds() -> None:
-    assert _pick_chat_model(48) == "Qwen3.6-35B-A3B-MTP-GGUF"
-    assert _pick_chat_model(47) == "qwen3.5-9b"
+    assert _pick_chat_model(48) == "qwen3.8-27b"
+    assert _pick_chat_model(32) == "qwen3.8-27b"
+    assert _pick_chat_model(31) == "qwen3.5-9b"
     assert _pick_chat_model(16) == "qwen3.5-9b"
     assert _pick_chat_model(15) == "qwen3-4b"
     assert _pick_chat_model(8) == "qwen3-4b"
@@ -107,15 +134,15 @@ def test_pick_chat_model_thresholds() -> None:
 # ── #513: ctx resolved from curated arch max, not hard-coded 8192 ────────────
 
 
-def test_moe_primary_gets_large_ctx() -> None:
+def test_mtp_primary_gets_its_shipped_ctx() -> None:
     rec = recommend_primary_slot(_amd_uma_host(96))
-    assert rec["model"]["default"] == "Qwen3.6-35B-A3B-MTP-GGUF"
-    # Hybrid SSM+attn KV is tiny - default to the full 131072 window.
-    assert rec["model"]["context_size"] == 131072
+    assert rec["model"]["default"] == "qwen3.8-27b"
+    # MTP-tagged primary: the curated window (96K shipped default).
+    assert rec["model"]["context_size"] == 98304
 
 
 def test_9b_primary_gets_capped_ctx() -> None:
-    rec = recommend_primary_slot(_amd_uma_host(32))
+    rec = recommend_primary_slot(_amd_uma_host(24))
     assert rec["model"]["default"] == "qwen3.5-9b"
     # Dense 9B: cap below the arch max to keep the KV cache predictable.
     ctx = rec["model"]["context_size"]
@@ -129,9 +156,9 @@ def test_no_hardcoded_8192_for_moe() -> None:
 
 
 def test_cpu_host_gets_small_conservative_model() -> None:
-    # No GPU → fall back to a small CPU-friendly pick, never the 35B MoE.
+    # No GPU → fall back to a small CPU-friendly pick, never the 27B.
     rec = recommend_primary_slot(_cpu_only_host(64))
-    assert rec["model"]["default"] != "Qwen3.6-35B-A3B-MTP-GGUF"
+    assert rec["model"]["default"] != "qwen3.8-27b"
     assert rec["backend"] == "cpu"
 
 

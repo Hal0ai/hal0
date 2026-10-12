@@ -24,7 +24,7 @@ const CONTAINER_SLOT_RUNNING = {
   port: 8096,
   runtime: 'container',
   profile: 'rocm-mtp',
-  image: 'ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server',
+  image: 'ghcr.io/hal0ai/hal0-runner-standard:2026.10.11',
   image_status: 'present',
   container_status: 'running',
   container_health: true,
@@ -47,7 +47,7 @@ const CONTAINER_SLOT_STARTING = {
   port: 8097,
   runtime: 'container',
   profile: 'rocm-mtp',
-  image: 'ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server',
+  image: 'ghcr.io/hal0ai/hal0-runner-standard:2026.10.11',
   image_status: 'present',
   container_status: 'starting',
   container_health: false,
@@ -255,7 +255,7 @@ test.describe('SlotCard container variant (#657)', () => {
       if (!imgFull) return null
       return imgFull.split('/').pop() // last path segment
     }, CONTAINER_SLOT_RUNNING)
-    expect(imgChipText).toContain('rocm-7.2.4-rocmfp4-server')
+    expect(imgChipText).toContain('hal0-runner-standard:2026.10.11')
   })
 
   test('container card shows "container" runtime micro-tag — slotIndicator branches correctly', async ({ page }) => {

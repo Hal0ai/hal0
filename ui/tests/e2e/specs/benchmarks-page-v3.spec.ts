@@ -29,7 +29,7 @@ const ROSTER = {
       size_gb: 21.3,
       detail: {
         run_id: '2026-08-01T10:00:00Z-abc123', measured: '2026-08-01',
-        lane: 'rocm', image: 'ghcr.io/hal0ai/toolboxes:rocm-7.2.4',
+        lane: 'rocm', image: 'ghcr.io/hal0ai/hal0-runner-standard:2026.10.11',
         llamacpp_build: 'b9219-1faa48eef', depth: 2048, sampler: 'greedy',
         reps: 5, stddev: 1.2, ttft_ms_p50: 220,
       },
@@ -115,7 +115,7 @@ const RUN_RECORD = {
   identity: {
     lane: 'rocm',
     model: { id: 'qwen3.6-35b-a3b', sha256: 'a1b2c3d4e5f6a7b8c9d0e1f2' },
-    engine: { kind: 'llama-server', image: 'ghcr.io/hal0ai/toolboxes:rocm-7.2.4', llamacpp_build: 'b9219-1faa48eef' },
+    engine: { kind: 'llama-server', image: 'ghcr.io/hal0ai/hal0-runner-standard:2026.10.11', llamacpp_build: 'b9219-1faa48eef' },
     config: { argv: ['llama-server', '-m', '/mnt/ai-models/qwen3.6-35b-a3b-q4_k_m.gguf', '-ngl', '99', '-c', '2048', '-fa', '1'], ctx: 2048, parallel: 1 },
     workload: { depth: 2048, sampler: { mode: 'greedy' } },
   },

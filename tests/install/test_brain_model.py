@@ -2,9 +2,9 @@
 
 Covers the three things that can silently break the platform steward:
 
-* the quant choice — a Q8/Q4 build carries custom GGML tensor type ids that
-  stock llama.cpp REJECTS, so pulling one onto a CPU-only box means a gigabyte
-  downloaded for a container that can never start;
+* the quant choice — the ROCmFPX sft quants carry custom GGML tensor type ids
+  that stock llama.cpp REJECTS and no hal0 runner ships the fork that loads
+  them (ADR-0028), so only plain GGUF builds may ever be chosen;
 * the pullability of whatever id gets chosen. (The old ``brain.toml`` pinned
   ``MiniCPM5-1B-Agentic-Tooluse`` — a real, anonymously-pullable model, but one
   the SHIPPED curated catalogue does not define, so a fresh box could not
@@ -32,18 +32,16 @@ from hal0.install.brain_model import (
     BRAIN_MODEL_DEFAULT,
     BRAIN_MODEL_IDS,
     BRAIN_MODEL_PORTABLE,
-    BRAIN_MODEL_ROCMFPX,
-    BRAIN_MODEL_SMALL,
     BRAIN_SLOT_NAME,
     already_pulled,
     bind_brain_model,
     brain_model_for_hardware,
     check_binding,
     current_brain_binding,
+    gpu_capable,
     main,
     provision_brain_model,
     remediation_command,
-    rocmfpx_capable,
 )
 from hal0.registry.curated import get_curated
 
@@ -58,17 +56,16 @@ def _hw(*, platform: str = "generic", gpus: list[GPUInfo] | None = None) -> Hard
 
 def test_cpu_only_box_gets_the_default_lfm_build() -> None:
     """No GPU → still the LFM default: plain Q8_0 GGUF, no custom tensor
-    types, so a stock llama.cpp image loads it fine. (Under the sft lineage
-    this box HAD to divert to F16 — that split is now override-only.)
+    types, so every llama.cpp runner loads it.
     """
     hw = _hw()
-    assert rocmfpx_capable(hw) is False
+    assert gpu_capable(hw) is False
     assert brain_model_for_hardware(hw) == BRAIN_MODEL_DEFAULT
 
 
 def test_strix_halo_box_gets_the_default_lfm_build() -> None:
     hw = _hw(platform="strix-halo")
-    assert rocmfpx_capable(hw) is True
+    assert gpu_capable(hw) is True
     assert brain_model_for_hardware(hw) == BRAIN_MODEL_DEFAULT
 
 
@@ -84,34 +81,50 @@ def test_vulkan_only_gpu_box_gets_the_default_lfm_build() -> None:
 
 def test_override_selects_a_known_variant() -> None:
     hw = _hw(platform="strix-halo")
-    assert brain_model_for_hardware(hw, override=BRAIN_MODEL_SMALL) == BRAIN_MODEL_SMALL
+    assert brain_model_for_hardware(hw, override=BRAIN_MODEL_PORTABLE) == BRAIN_MODEL_PORTABLE
     # Whitespace from an env var is tolerated.
     assert brain_model_for_hardware(hw, override=f"  {BRAIN_MODEL_PORTABLE} ") == (
         BRAIN_MODEL_PORTABLE
     )
 
 
+def test_the_variants_are_the_two_plain_gguf_builds() -> None:
+    """The ROCmFPX quants (sft Q8 / Q4) are gone: ``BRAIN_MODEL_IDS`` carries
+    only the LFM default and the plain F16 sft build."""
+    assert BRAIN_MODEL_IDS == (BRAIN_MODEL_DEFAULT, BRAIN_MODEL_PORTABLE)
+
+
+@pytest.mark.parametrize("retired", ["hal0-brain-sft-q8-rocmfpx", "hal0-brain-sft-q4-rocmfp4"])
+def test_a_retired_fpx_variant_is_not_an_override(retired: str) -> None:
+    """A fork-only sft quant named in ``HAL0_BRAIN_MODEL`` falls back to the
+    default rather than becoming a pull of a model no runner can load."""
+    assert get_curated(retired) is None
+    assert brain_model_for_hardware(_hw(platform="strix-halo"), override=retired) == (
+        BRAIN_MODEL_DEFAULT
+    )
+
+
 class TestHardwareDecisionMatrix:
     """The selection matrix from hal0#1790, updated for the LFM default:
     gpu-rocm / gpu-vulkan / cpu-only all land on ``BRAIN_MODEL_DEFAULT`` —
-    plain Q8_0 GGUF loads on the FPX runner and stock llama.cpp alike, so
-    hardware no longer forks the pick. ``rocmfpx_capable`` assertions stay:
+    plain Q8_0 GGUF loads on every llama.cpp runner, so
+    hardware no longer forks the pick. ``gpu_capable`` assertions stay:
     other callers (``install.agent_model``) still fork on it.
     """
 
     def test_gpu_rocm_box_selects_the_default(self) -> None:
         hw = _hw(gpus=[GPUInfo(vendor="amd", compute_capable=True, vulkan_capable=False)])
-        assert rocmfpx_capable(hw) is True
+        assert gpu_capable(hw) is True
         assert brain_model_for_hardware(hw) == BRAIN_MODEL_DEFAULT
 
     def test_gpu_vulkan_box_selects_the_default(self) -> None:
         hw = _hw(gpus=[GPUInfo(vendor="amd", compute_capable=False, vulkan_capable=True)])
-        assert rocmfpx_capable(hw) is True
+        assert gpu_capable(hw) is True
         assert brain_model_for_hardware(hw) == BRAIN_MODEL_DEFAULT
 
     def test_cpu_only_box_selects_the_default(self) -> None:
         hw = _hw(gpus=[])
-        assert rocmfpx_capable(hw) is False
+        assert gpu_capable(hw) is False
         assert brain_model_for_hardware(hw) == BRAIN_MODEL_DEFAULT
 
     def test_gpu_present_but_neither_compute_nor_vulkan_capable_selects_the_default(
@@ -128,7 +141,7 @@ class TestHardwareDecisionMatrix:
             platform="lxc",
             gpus=[GPUInfo(vendor="amd", compute_capable=False, vulkan_capable=False)],
         )
-        assert rocmfpx_capable(hw) is False
+        assert gpu_capable(hw) is False
         assert brain_model_for_hardware(hw) == BRAIN_MODEL_DEFAULT
 
 
@@ -375,13 +388,13 @@ def test_an_unknown_id_is_never_already_pulled(store) -> None:
 def test_a_variant_on_disk_does_not_satisfy_a_sibling(store) -> None:
     """Documented limit: the store is id-addressed, not content-addressed.
 
-    A box carrying the F16 build does NOT satisfy a Q8 pull — different id,
-    different directory, genuinely different bytes. The same mechanic is why a
-    pre-existing `hal0-brain-sft` row does not satisfy `hal0-brain-sft-f16`
-    even though the artefacts are the same size.
+    A box carrying the F16 build does NOT satisfy a pull of the LFM default —
+    different id, different directory, genuinely different bytes. The same
+    mechanic is why a pre-existing `hal0-brain-sft` row does not satisfy
+    `hal0-brain-sft-f16` even though the artefacts are the same size.
     """
     _place(store, BRAIN_MODEL_PORTABLE)
-    assert already_pulled(BRAIN_MODEL_ROCMFPX) is None
+    assert already_pulled(BRAIN_MODEL_DEFAULT) is None
 
 
 def test_provisioning_reuses_an_existing_pull_without_downloading(
@@ -616,8 +629,8 @@ def test_bind_does_not_restamp_an_unreadable_slot_the_gate_already_stamped() -> 
 
 
 def test_remediation_command_names_the_id_that_was_pulled() -> None:
-    assert remediation_command(BRAIN_MODEL_ROCMFPX).startswith(
-        f"hal0 slot edit {BRAIN_SLOT_NAME} --model {BRAIN_MODEL_ROCMFPX}"
+    assert remediation_command(BRAIN_MODEL_PORTABLE).startswith(
+        f"hal0 slot edit {BRAIN_SLOT_NAME} --model {BRAIN_MODEL_PORTABLE}"
     )
 
 

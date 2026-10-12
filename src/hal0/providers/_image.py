@@ -43,17 +43,9 @@ def slot_default_images() -> Mapping[str, str]:
 
 
 def operator_default_image(runner_key: str) -> str | None:
-    """The ``[slots].default_images`` ref for ``runner_key``'s family, if set.
-
-    Exact key first (an existing alias-keyed override such as ``vulkanfpx``
-    keeps working during deprecation), then the canonical family — so an
-    override set under ``rocmfpx`` also applies when the effective runner is
-    the ``vulkanfpx`` alias.
-    """
-    from hal0.runners import canonical_family
-
+    """The ``[slots].default_images`` ref for ``runner_key``, if set."""
     defaults_map = slot_default_images()
-    override = defaults_map.get(runner_key) or defaults_map.get(canonical_family(runner_key))
+    override = defaults_map.get(runner_key)
     return override if isinstance(override, str) and override else None
 
 
@@ -72,8 +64,7 @@ def resolve_family_image(slot_cfg: Any, family: str) -> str:
     """Resolve a fixed-family provider's image through the shared tier order.
 
     ``image_pin`` (honored verbatim) → ``[slots].default_images[family]`` →
-    :func:`hal0.runners.resolve_runner_image` (env override → manifest pin →
-    bundled default).
+    :func:`hal0.runners.resolve_runner_image` (env override → manifest pin).
     """
     pin = slot_image_pin(slot_cfg)
     if pin is not None:

@@ -1,4 +1,4 @@
-"""CLI implementation for ``hal0 runner-images ls|sync|pull`` (#2106).
+"""CLI implementation for ``hal0 runner-images ls|sync|pull|rm|migrate`` (#2106).
 
 Closes the CLI-absence gap on the runner-image catalogue: the catalogue
 has had a full API surface (``hal0.api.routes.runner_images``) and a
@@ -17,6 +17,9 @@ store writes) is identical either way.
 ``rm`` mirrors ``DELETE /api/runner-images/{id}/tags/{tag}`` (spec D2):
 same store, same seam, same guard order — see the ``rm`` command below for
 the one guard the CLI cannot offer (pull-in-progress).
+
+``migrate`` previews, applies or undoes the one-shot conversion onto the
+fresh runner system (ADR-0028, :mod:`hal0.config.migrations.runner_system`).
 """
 
 from __future__ import annotations
@@ -91,11 +94,10 @@ _STATE_BADGE = {
 
 
 def _headline_badge(image: RunnerImage) -> str:
-    """The headline tag's badge value (validated / candidate / the
-    retired-pin marker), or ``""`` — reuses
-    ``hal0.api.routes.runner_images._tag_badges`` (same frozen
-    ``hal0.config.schema`` image-ref sets the API's catalogue rows read) so
-    the CLI never re-derives its own copy of the badge rule. Import stays
+    """The headline tag's badge value (``pinned`` when it is this release's
+    pin), or ``""`` — reuses ``hal0.api.routes.runner_images._tag_badges``
+    (the same rule the API's catalogue rows read) so the CLI never re-derives
+    its own copy of the badge rule. Import stays
     fail-soft: a future rename/removal of that helper degrades the CLI's
     ``Badges`` column to always-empty rather than crashing ``ls``.
     """
@@ -142,7 +144,7 @@ def ls() -> None:
 
 @app.command("sync")
 def sync() -> None:
-    """Run one discovery pass now (GHCR probe + images.json merge)."""
+    """Sync the runner-image catalogue now (images.json v2 + GHCR probe)."""
     from hal0.registry.runner_image_sync import sync_runner_images
 
     store = RunnerImageStore()
@@ -153,6 +155,8 @@ def sync() -> None:
     if result.probe_errors:
         for image_id, err in result.probe_errors.items():
             console.print(f"[yellow]![/yellow]  {image_id}: {err}")
+    for entry_id, reason in sorted(result.skipped.items()):
+        console.print(f"[yellow]![/yellow]  skipped catalogue entry {entry_id}: {reason}")
     if not result.images and result.images_json_error:
         raise typer.Exit(1)
 
@@ -209,7 +213,7 @@ async def _drive_pull(job: RunnerPullJob, *, store: RunnerImageStore, provider: 
 
 @app.command("pull")
 def pull(
-    image_id: str = typer.Argument(..., help="Catalogue id, e.g. hal0ai/hal0-toolbox-cpu."),
+    image_id: str = typer.Argument(..., help="Runner key, e.g. cpu."),
     tag: str | None = typer.Option(
         None, "--tag", help="Tag to pull (default: the row's headline tag)."
     ),
@@ -243,7 +247,7 @@ def pull(
 
 @app.command("rm")
 def rm(
-    image_id: str = typer.Argument(..., help="Catalogue id, e.g. hal0ai/hal0-toolbox-cpu."),
+    image_id: str = typer.Argument(..., help="Runner key, e.g. cpu."),
     tag: str = typer.Option(
         ...,
         "--tag",
@@ -347,6 +351,67 @@ def rm(
         console.print(f"[green]✓[/green]  removed {ref}")
     else:  # "missing"
         console.print(f"[green]✓[/green]  {ref} was not on disk — catalogue entry cleared")
+
+
+# ── hal0 runner-images migrate (ADR-0028) ──────────────────────────────────────
+
+
+@app.command("migrate")
+def migrate(
+    apply: bool = typer.Option(
+        False,
+        "--apply",
+        help="Apply the conversion. Without this, the command is a dry run.",
+    ),
+    restore: Path | None = typer.Option(
+        None,
+        "--restore",
+        help=(
+            "For a downgrade: put back the files and model runner choices a "
+            "runners-<ts>.tar.gz backup holds, then exit. Stop hal0-api first."
+        ),
+    ),
+) -> None:
+    """Convert this install onto the fresh runner system (ADR-0028).
+
+    Rewrites slot runtimes, image pins, ``[slots].default_images``, profile
+    runtimes, leftover model ``preferred_runner`` values and
+    ``HAL0_TOOLBOX_IMAGE_*`` env overrides to the new runner keys, and
+    unassigns models no runner can load (ROCmFPX family, IU4, ActiveFPX).
+    ``hal0 update`` runs this automatically; run it by hand to preview the
+    plan (default) or to retry after fixing a file it named. ``--apply``
+    backs up every file it changes under ``/var/lib/hal0/backups/`` first and
+    restores them itself if any write fails.
+    """
+    from hal0.config.migrations.runner_system import (
+        RunnerMigrationError,
+        migrate_runner_system,
+        restore_backup,
+    )
+
+    if restore is not None:
+        try:
+            restored = restore_backup(restore)
+        except RunnerMigrationError as exc:
+            console.print(f"[red]✗[/red] {exc}")
+            raise typer.Exit(1) from exc
+        for path in restored:
+            console.print(f"restored {path}")
+        console.print(f"[green]✓[/green] restored {len(restored)} item(s) from {restore}")
+        console.print(
+            "The API will not convert again on boot. Install the older release now; "
+            "`hal0 update` or `hal0 runner-images migrate --apply` converts again."
+        )
+        return
+    try:
+        report = migrate_runner_system(dry_run=not apply)
+    except RunnerMigrationError as exc:
+        console.print(f"[red]✗[/red] {exc}")
+        raise typer.Exit(1) from exc
+    for line in report.lines():
+        console.print(line, markup=False, highlight=False)
+    if report.changed and not apply:
+        console.print("Re-run with --apply to convert.")
 
 
 __all__ = ["app"]

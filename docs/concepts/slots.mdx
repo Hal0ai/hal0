@@ -61,11 +61,10 @@ rather than just documenting it:
   `vision`, `jinja`, `chat_template`, and freeform tuning flags. These are set
   on the model's registry entry (`defaults`), not on the slot.
 
-Every image hal0 ships is a `RUNNER_IMAGES` registry entry — the default,
-dual-lane build (`rocmfpx`, titled **ROCmFPX**, the only entry allowed both
-a ROCm and a Vulkan lane) plus optional single-lane runtimes such as
-`promptforge` (ROCm) and `strix` (Vulkan, built for `qwen4exp`-class models).
-Pin-only images — catalogued but reachable only by a raw ref — are retired;
+Every image hal0 ships is a `RUNNER_IMAGES` registry entry — the default
+AMD GPU runtime (`standard`, titled **Standard**, the only entry allowed both
+a ROCm and a Vulkan lane) plus the CPU, NPU, CUDA and single-purpose speech
+and image runtimes, each pinned in `manifest.json`.
 `image_pin` is a debug-only override (a custom build, an A/B test, a
 rollback) and never appears as a pickable Runtime option. See [Capabilities
 & profiles](/docs/concepts/capabilities-and-profiles) for the full Runtime

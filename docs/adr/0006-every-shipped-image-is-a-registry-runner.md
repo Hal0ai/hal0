@@ -2,7 +2,10 @@
 
 ## Status
 
-Accepted. Decision 3 is amended by ADR-0025 (proposed): the two-backend
+Accepted. ADR-0028 (2026-10-11) rebuilt the runner system: decision 3 now
+reads "only the `standard` runner declares two backends", and the
+`rocmfpx`, `strix` and `promptforge` runners named below no longer exist.
+Decision 3 was earlier amended by ADR-0025 (proposed): the two-backend
 shape belongs to the default runner and to the frozen `rocmfpx` loader.
 The Runner Images grouping consequence below is amended by ADR-0027: the
 list groups by each runner's `tier`, not by which family resolves to an

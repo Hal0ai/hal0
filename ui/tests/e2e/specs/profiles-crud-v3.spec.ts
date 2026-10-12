@@ -22,7 +22,7 @@ import { MOCK_DATA } from '../fixtures/mock-data'
 // A custom (non-seed) profile for delete/edit tests.
 const CUSTOM_PROFILE = {
   name: 'my-custom',
-  image: 'ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server',
+  image: 'ghcr.io/hal0ai/hal0-runner-standard:2026.10.11',
   flags: '--flash-attn on',
   mtp: false,
   resolved_flags: '--flash-attn on',
@@ -84,7 +84,7 @@ test.describe('Profiles CRUD — Phase C6', () => {
     const posts: any[] = []
     const NEW_PROFILE = {
       name: 'test-profile',
-      image: 'ghcr.io/hal0ai/amd-strix-halo-toolboxes:vulkan-radv-server',
+      image: 'ghcr.io/hal0ai/hal0-runner-standard:2026.10.11',
       flags: '',
       mtp: false,
       resolved_flags: '',

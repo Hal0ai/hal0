@@ -5,7 +5,7 @@ the 1B brain model does not emit tool calls, so tool turns route to
 ``[brain_chat] tool_model`` (default ``hal0/agent``) — and ``agent.toml`` ships
 model-less, so that target is empty on a fresh box.
 
-The properties under test are the ones that would turn a 15-31 GB download into
+The properties under test are the ones that would turn an ~18.5 GB download into
 an incident:
 
 * it is never pulled without consent, and the consent prompt states the size;
@@ -31,8 +31,6 @@ from hal0.config.schema import GPUInfo, HardwareInfo
 from hal0.install.agent_model import (
     AGENT_MODEL_ANCHOR,
     AGENT_MODEL_IDS,
-    AGENT_MODEL_LEAN,
-    AGENT_MODEL_QUALITY,
     AGENT_SLOT_NAME,
     SKIP_NOTICE,
     agent_model_for_hardware,
@@ -66,59 +64,69 @@ def _strix(unified_mb: int) -> HardwareInfo:
 
 
 def test_no_gpu_box_is_offered_nothing() -> None:
-    """Every rung is a ROCmFPX/MTP repack.
+    """The single rung is a 27B dense model.
 
-    Offering a 15 GB download to a CPU-only box that would then refuse to load
-    it is strictly worse than offering nothing — same reasoning as the brain
-    module's Q8-vs-F16 split, inverted: there is no portable agent build to
-    fall back to, so the correct answer is "no offer".
+    On the CPU lane it is too slow to anchor tool calls, and offering an 18 GB
+    download that then crawls is worse than offering nothing — so the correct
+    answer for a box without a ROCm/Vulkan device is "no offer".
     """
     assert agent_model_for_hardware(_hw(ram_mb=128 * 1024)) is None
     assert describe_offer(_hw(ram_mb=128 * 1024)) is None
 
 
-def test_full_pool_gets_the_quality_rung() -> None:
-    assert agent_model_for_hardware(_strix(128 * 1024)) == AGENT_MODEL_QUALITY
+def test_the_ladder_is_the_one_qwen38_rung() -> None:
+    """ADR-0027 decision 6: one agent anchor, Qwen3.8 27B on the Standard runner."""
+    assert AGENT_MODEL_ANCHOR == "qwen3.8-27b"
+    assert AGENT_MODEL_IDS == (AGENT_MODEL_ANCHOR,)
 
 
-def test_mid_pool_gets_the_lean_35b_rung() -> None:
-    """~24 GB fits the 19.05 GB STRIX_LEAN build but not the 31.41 GB one."""
-    assert agent_model_for_hardware(_strix(24 * 1024)) == AGENT_MODEL_ANCHOR
+def test_full_pool_gets_the_anchor() -> None:
+    assert agent_model_for_hardware(_strix(128 * 1024)) == AGENT_MODEL_ANCHOR
 
 
-def test_small_pool_gets_the_27b_rung() -> None:
-    assert agent_model_for_hardware(_strix(16 * 1024)) == AGENT_MODEL_LEAN
+def test_a_pool_that_fits_the_rung_gets_the_anchor() -> None:
+    """The rung's ``vram_gb_min`` is 25: a 32 GB pool clears it."""
+    assert agent_model_for_hardware(_strix(32 * 1024)) == AGENT_MODEL_ANCHOR
 
 
-def test_pool_below_the_smallest_rung_is_offered_nothing() -> None:
-    """A box that cannot serve even the 27B must not be asked to download it."""
-    assert agent_model_for_hardware(_strix(8 * 1024)) is None
+def test_pool_below_the_rung_is_offered_nothing() -> None:
+    """A box that cannot serve the 27B must not be asked to download it."""
+    assert agent_model_for_hardware(_strix(16 * 1024)) is None
+    assert agent_model_for_hardware(_strix(24 * 1024)) is None
     assert describe_offer(_strix(8 * 1024)) is None
 
 
 def test_vulkan_only_gpu_counts_as_capable() -> None:
     hw = _hw(gpus=[GPUInfo(vendor="amd", vulkan_capable=True)], ram_mb=64 * 1024)
-    assert agent_model_for_hardware(hw) == AGENT_MODEL_QUALITY
+    assert agent_model_for_hardware(hw) == AGENT_MODEL_ANCHOR
 
 
 def test_ram_is_used_when_there_is_no_unified_pool() -> None:
-    hw = _hw(platform="strix-halo", unified_mb=0, ram_mb=24 * 1024)
+    hw = _hw(platform="strix-halo", unified_mb=0, ram_mb=32 * 1024)
     assert agent_model_for_hardware(hw) == AGENT_MODEL_ANCHOR
 
 
 def test_override_selects_a_known_rung_even_on_a_small_box() -> None:
-    assert agent_model_for_hardware(_strix(8 * 1024), override=AGENT_MODEL_QUALITY) == (
-        AGENT_MODEL_QUALITY
+    assert agent_model_for_hardware(_strix(8 * 1024), override=AGENT_MODEL_ANCHOR) == (
+        AGENT_MODEL_ANCHOR
     )
-    assert agent_model_for_hardware(_strix(8 * 1024), override=f" {AGENT_MODEL_LEAN}  ") == (
-        AGENT_MODEL_LEAN
+    assert agent_model_for_hardware(_strix(8 * 1024), override=f" {AGENT_MODEL_ANCHOR}  ") == (
+        AGENT_MODEL_ANCHOR
     )
 
 
 def test_unknown_override_falls_back_instead_of_404ing() -> None:
     assert agent_model_for_hardware(_strix(128 * 1024), override="chadrock-9000") == (
-        AGENT_MODEL_QUALITY
+        AGENT_MODEL_ANCHOR
     )
+
+
+def test_a_retired_rocmfpx_id_is_not_an_override() -> None:
+    """The old chadrock/ROCmFP4 ladder ids are gone from the catalogue; naming one
+    must fall back to the anchor, never produce an unresolvable pull."""
+    retired = "chadrock-35b-ace-saber-moequality-7bpw"
+    assert get_curated(retired) is None
+    assert agent_model_for_hardware(_strix(128 * 1024), override=retired) == AGENT_MODEL_ANCHOR
 
 
 # ── the consent prompt states a REAL size ───────────────────────────────────
@@ -150,7 +158,7 @@ def test_offer_line_is_id_tab_sentence_and_carries_the_curated_size() -> None:
     offer = describe_offer(_strix(128 * 1024))
     assert offer is not None
     model_id, _, sentence = offer.partition("\t")
-    assert model_id == AGENT_MODEL_QUALITY
+    assert model_id == AGENT_MODEL_ANCHOR
     curated = get_curated(model_id)
     assert curated is not None
     assert f"{curated.size_gb:.2f} GB" in sentence
@@ -159,13 +167,9 @@ def test_offer_line_is_id_tab_sentence_and_carries_the_curated_size() -> None:
 
 
 def test_offer_sizes_match_the_measured_hf_blob_sizes() -> None:
-    """Exact bytes/1e9 from the HF API, 2026-07-30. These are printed to the
+    """UD-Q4_K_XL (17.56 GB) + mmproj-F16 (0.93 GB). The figure is printed to the
     operator as the download size, so a drifted figure is a lie, not a nit."""
-    expected = {
-        AGENT_MODEL_QUALITY: 31.41,  # 31,410,670,848 B
-        AGENT_MODEL_ANCHOR: 19.05,  # 19,046,929,664 B
-        AGENT_MODEL_LEAN: 14.82,  # 14,817,251,520 B
-    }
+    expected = {AGENT_MODEL_ANCHOR: 18.49}
     for model_id, size in expected.items():
         curated = get_curated(model_id)
         assert curated is not None
@@ -218,9 +222,9 @@ def test_successful_pull_binds_the_model_to_the_agent_slot(
     landed = asyncio.run(
         provision_agent_model(hw=_strix(128 * 1024), slot_manager=sm, registry=reg)
     )
-    assert landed == AGENT_MODEL_QUALITY
-    assert reg.ensured == [AGENT_MODEL_QUALITY]
-    assert sm.updates == [(AGENT_SLOT_NAME, {"model": {"default": AGENT_MODEL_QUALITY}})]
+    assert landed == AGENT_MODEL_ANCHOR
+    assert reg.ensured == [AGENT_MODEL_ANCHOR]
+    assert sm.updates == [(AGENT_SLOT_NAME, {"model": {"default": AGENT_MODEL_ANCHOR}})]
 
 
 def test_failed_pull_leaves_the_agent_slot_model_less(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -269,7 +273,7 @@ def test_plan_prints_one_line_when_there_is_an_offer(
     assert main(["--plan"]) == 0
     out = capsys.readouterr().out
     assert out.count("\n") == 1
-    assert out.split("\t")[0] == AGENT_MODEL_QUALITY
+    assert out.split("\t")[0] == AGENT_MODEL_ANCHOR
 
 
 def test_plan_never_pulls(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -361,7 +365,7 @@ def test_main_returns_zero_on_a_successful_pull(monkeypatch: pytest.MonkeyPatch)
 
 # ── re-run idempotence ──────────────────────────────────────────────────────
 # Shares brain_model.already_pulled. It matters MORE here: re-downloading
-# 15-31 GB because an operator re-ran install.sh and said yes twice is not a
+# ~18.5 GB because an operator re-ran install.sh and said yes twice is not a
 # small mistake.
 
 
@@ -399,11 +403,11 @@ def _place(model_id: str) -> None:
 def test_the_offer_stops_quoting_a_download_once_the_bytes_are_there(store) -> None:
     """Quoting "31.41 GB download" for a file already on disk would scare an
     operator out of a free, instant bind."""
-    _place(AGENT_MODEL_QUALITY)
+    _place(AGENT_MODEL_ANCHOR)
     offer = describe_offer(_strix(128 * 1024))
     assert offer is not None
     model_id, _, sentence = offer.partition("\t")
-    assert model_id == AGENT_MODEL_QUALITY
+    assert model_id == AGENT_MODEL_ANCHOR
     assert "already downloaded" in sentence
     assert "GB download" not in sentence
 
@@ -422,10 +426,10 @@ def test_provisioning_reuses_an_existing_pull_without_downloading(
         raise AssertionError("run_pull must not be called when the file is already on disk")
 
     monkeypatch.setattr(pull_mod, "run_pull", _explode)
-    _place(AGENT_MODEL_QUALITY)
+    _place(AGENT_MODEL_ANCHOR)
     sm, reg = _FakeSlotManager(), _FakeRegistry()
     landed = asyncio.run(
         provision_agent_model(hw=_strix(128 * 1024), slot_manager=sm, registry=reg)
     )
-    assert landed == AGENT_MODEL_QUALITY
-    assert sm.updates == [(AGENT_SLOT_NAME, {"model": {"default": AGENT_MODEL_QUALITY}})]
+    assert landed == AGENT_MODEL_ANCHOR
+    assert sm.updates == [(AGENT_SLOT_NAME, {"model": {"default": AGENT_MODEL_ANCHOR}})]

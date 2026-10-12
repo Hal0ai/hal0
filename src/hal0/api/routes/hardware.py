@@ -848,7 +848,7 @@ def _local_image_repos() -> PodmanImagesResult | None:
     return podman_introspect.images()
 
 
-def _backend_state(image: str, local_repos: set[str] | None) -> str:
+def _backend_state(image: str | None, local_repos: set[str] | None) -> str:
     """``"installed"`` / ``"installable"`` / ``"unavailable"`` for one runner.
 
     Local-only: this endpoint reports what's already on disk, not remote
@@ -859,7 +859,7 @@ def _backend_state(image: str, local_repos: set[str] | None) -> str:
     ``update_required`` (the plan's §21.6 SHOULD-tier states) are therefore
     NOT surfaced here — a deliberate, documented scope trim.
     """
-    if local_repos is None:
+    if local_repos is None or not image:
         return "unavailable"
     return "installed" if _image_repo(image) in local_repos else "installable"
 
@@ -885,7 +885,7 @@ async def system_info_endpoint(request: Request) -> dict[str, Any]:
     means neither context could reach podman at all.
     """
     from hal0.api.routes.health import list_features
-    from hal0.runners import RUNNER_IMAGES, canonical_family, resolve_runner_image
+    from hal0.runners import RUNNER_IMAGES, resolve_runner_image
 
     hardware = await get_hardware(request)
     features = await list_features(request)
@@ -913,15 +913,17 @@ async def system_info_endpoint(request: Request) -> dict[str, Any]:
     backends: dict[str, Any] = {}
     for key, runner in RUNNER_IMAGES.items():
         try:
-            image = resolve_runner_image(runner)
+            image: str | None = resolve_runner_image(runner)
         except Exception:
-            image = runner.image
+            log.warning("system_info.runner_image_unresolved", key=key, exc_info=True)
+            image = None
         provenance = None
         try:
             from hal0.api.routes.runner_images import provenance_for_ref
 
-            eff = effective_defaults.get(canonical_family(key))
-            provenance = provenance_for_ref(eff[0] if eff else image, catalogue)
+            eff = effective_defaults.get(key)
+            ref = eff[0] if eff else image
+            provenance = provenance_for_ref(ref, catalogue) if ref else None
         except Exception:
             log.warning("system_info.provenance_lookup_failed", key=key, exc_info=True)
         backends[key] = {
@@ -931,27 +933,16 @@ async def system_info_endpoint(request: Request) -> dict[str, Any]:
             "backend": runner.backend,
             "title": runner.title,
             "blurb": runner.blurb,
-            # ADR-0027: the runtime tier ("default" | "optional" | "frozen"),
-            # read straight off the registry — the one owner the Runner
-            # Images page grouping reads too. Pickers sort by it.
+            # ADR-0027: the runtime tier ("default" | "optional"), read
+            # straight off the registry — the one owner the Runner Images
+            # page grouping reads too. Pickers sort by it.
             "tier": runner.tier,
-            # HAL0-SUNSET: v2.0.0 — `is_default` predates `tier`; kept for
-            # API/MCP readers of this payload (semver: no field removal in
-            # a minor). A projection of `tier`, never its own fact.
-            "is_default": runner.tier == "default",
             # Fit-check metadata (spec-hw-slot-ownership §4): the backends this
-            # runner image can serve + the GGUF/format arch it accepts (the
-            # lxc105 "forks reject newer GGUFs" finding). RUNNER_IMAGES now
-            # carries both — surface them so the UI slot-HW-grid fit-check
-            # (device.backend ∈ supported_backends) and the Runtimes panel can
-            # read the registry truth instead of assuming a single backend.
+            # runner image can serve + the model format it accepts, so the UI
+            # slot-HW-grid fit-check (device.backend ∈ supported_backends) and
+            # the Runtimes panel read the registry truth.
             "supported_backends": list(runner.supported_backends),
             "format_arch": runner.format_arch,
-            # format_arch's §4 refinement (hal0#2118): GGUF general.architecture
-            # ids this runner's llama.cpp build is KNOWN to reject at load —
-            # the slot drawer's model↔runner arch fit-check reads this next to
-            # the model row's detected `architecture`.
-            "unsupported_archs": list(runner.unsupported_archs),
             # Per-runner capability metadata (UI-API-1 item 2 / spec §7): expose
             # what the runner registry actually knows so the model drawer can
             # filter its runner-override dropdown to COMPATIBLE runners. Only
@@ -961,13 +952,6 @@ async def system_info_endpoint(request: Request) -> dict[str, Any]:
                 "mtp": runner.supports.mtp,
                 "jinja": runner.supports.jinja,
                 "mmproj": runner.supports.mmproj,
-                # Spec 2026-08-29 (#1946): which specialty-distribution kinds
-                # (e.g. "promptforge") this runner image serves ACCELERATED —
-                # see hal0.runners.RunnerSupports.specialties. The model
-                # drawer's runner-override picker uses this to warn before an
-                # operator pins a specialty model onto a runner that would
-                # degrade it to GGUF-only.
-                "specialties": list(runner.supports.specialties),
             },
             # llama.cpp build provenance of the runner's effective image
             # ({"source_repo", "revision", "patch_count"} | null) — see the

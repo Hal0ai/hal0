@@ -31,10 +31,11 @@ hal0 bench <verb> [flags]
 - **Results** (yours to read): the v2 store under `/var/lib/hal0-bench/` —
   `records.jsonl` (source of truth, append-only) + `bench.db` (derived SQLite index) —
   and the API (`/api/benchmarks/...`, including `/api/benchmarks/regressions`).
-- **Backends (lanes):** `rocm` and `vulkan_radv` share the rocmfpx runner image
-  (`ghcr.io/hal0ai/...`, `/opt/rocmfpx/bin/llama-bench`); `cpu` runs the lean
-  Vulkan/CPU toolbox image — the matrix is `hal0.bench.harness.lane_specs()`, not a
-  shell config file.
+- **Backends (lanes):** `rocm` and `vulkan_radv` share the `standard` runner image
+  (`ghcr.io/hal0ai/hal0-runner-standard`); `cpu` runs the `cpu` runner image
+  (`ghcr.io/hal0ai/hal0-runner-cpu`). Both use `/opt/hal0/bin/llama-bench`, and each image
+  is the `manifest.json` pin (or its `HAL0_RUNNER_IMAGE_<KEY>` override) — the matrix is
+  `hal0.bench.harness.lane_specs()`, not a shell config file.
 
 ## When to use this skill
 

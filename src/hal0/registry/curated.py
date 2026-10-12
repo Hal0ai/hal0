@@ -237,21 +237,31 @@ CURATED_MODELS: list[CuratedModel] = [
         notes="Unsloth's Q4_K_XL quant. Needs ~56 GB unified RAM headroom.",
     ),
     CuratedModel(
-        id="qwen3.6-27b",
-        display_name="Qwen3.6 27B (MTP ROCmFP4)",
-        description="General-purpose chat with built-in MTP and vision support for Strix Halo.",
+        id="qwen3.8-27b",
+        display_name="Qwen3.8 27B",
+        description="General-purpose chat with vision, tool calling and built-in MTP. The default pick.",
         family="qwen",
-        size_gb=16.9,
-        vram_gb_min=22.0,
-        license="other",
-        license_url="https://huggingface.co/plunderstruck/Qwen3.6-27B-MTP-ROCmFP4-GGUF",
-        hf_repo="plunderstruck/Qwen3.6-27B-MTP-ROCmFP4-GGUF",
-        hf_file="Qwen3.6-27B-MTP-ROCmFP4-STRIX-imatrix-embF16-headQ6.gguf",
-        mmproj_file="mmproj-F32.gguf",
-        context_length=262144,
+        size_gb=18.49,
+        vram_gb_min=25.0,
+        license="Apache-2.0",
+        license_url="https://huggingface.co/unsloth/Qwen3.8-27B-GGUF",
+        hf_repo="unsloth/Qwen3.8-27B-GGUF",
+        hf_file="Qwen3.8-27B-UD-Q4_K_XL.gguf",
+        mmproj_file="mmproj-F16.gguf",
+        # The shipped default window (ADR-0025 open question 2: 96K), not the
+        # model's 262K ceiling: setup clamps this to the box's memory budget.
+        context_length=98304,
+        tool_calling=True,
         recommended_slot="chat",
-        tags=["chat", "reasoning", "multilingual", "default", "vision", "mtp", "rocmfp4"],
-        notes="ROCmFP4 build from plunderstruck; needs the bundled chat template + mmproj sidecar.",
+        tags=["chat", "vision", "tool-calling", "mtp", "default"],
+        notes=(
+            "Unsloth UD-Q4_K_XL (17.56 GB) + mmproj-F16 (0.93 GB). The MTP head "
+            "is in the GGUF, so speculative decoding needs no draft file. Native "
+            "window 262,144 tokens; hal0 ships 98,304 as the default context."
+        ),
+        capability="chat",
+        architecture="qwen35",
+        backend="llamacpp",
     ),
     CuratedModel(
         id="gpt-oss-20b",
@@ -306,83 +316,15 @@ CURATED_MODELS: list[CuratedModel] = [
         notes="Sub-second cold start. Lite-bundle primary; also verifies the slot lifecycle before downloading a 20+ GB pick.",
     ),
     # ── hal0 brain (the platform steward) ─────────────────────────────────
-    # ~1.08B Llama-arch GGUF, SFT'd for the dashboard sidebar steward. All
-    # three variants live in ONE public repo: Hal0ai/hal0-brain-sft-ROCmFPX-GGUF
-    # (anonymous read; the `Hal0ai/hal0-brain-sft` BASE repo is private and
-    # safetensors-only — never pull that one, no chat runner consumes
-    # safetensors).
-    #
-    # RUNNER CONSTRAINT — read before changing which variant is the default.
-    # The Q8/Q4 files carry CUSTOM GGML tensor type ids (100 / 103) that
-    # STOCK llama.cpp REJECTS at load. They only run on the ROCmFPX runner
-    # (``DEFAULT_ROCMFPX_IMAGE``, config/schema.py), which is what the
-    # ``rocmfpx`` runner row resolves to (vulkan served via
-    # supported_backends) and which carries the MiniCPM5 pre-tokenizer this
-    # model needs. The F16 file is plain GGUF and is therefore the portable
-    # fallback for a box with no ROCm/Vulkan device
-    # (the ``cpu`` runner row uses a stock llama.cpp image).
-    # ``hal0.install.brain_model`` picks between them from hardware.json;
-    # don't hardcode a variant in a slot seed.
-    #
-    # Tool calling is the attribute-XML dialect (`<function name="..">
-    # <param name="..">..</param></function>`). As of runner ade07ba
-    # (DEFAULT_ROCMFPX_IMAGE) that dialect parses NATIVELY: llama.cpp's
-    # MiniCPM5 specialized parser preserves the vocab's tool-syntax control
-    # tokens and grammar-locks the call shape, so the ROCmFPX variants are
-    # verified native tool-callers (tool_calling=True below). The steward's
-    # ``[brain_chat] tool_model`` reroute (default ``hal0/agent``) remains as
-    # the fallback for older runners / artefact rounds. The F16 variant runs
-    # on stock llama.cpp images whose parser vintage we don't pin, so it
-    # carries no curated tool_calling opinion. See
+    # ~1.08B Llama-arch GGUF, SFT'd for the dashboard sidebar steward. The
+    # plain F16 file lives in the public Hal0ai/hal0-brain-sft-ROCmFPX-GGUF
+    # repo (anonymous read; the ``Hal0ai/hal0-brain-sft`` BASE repo is private
+    # and safetensors-only — never pull that one). The repo's ROCmFPX/ROCmFP4
+    # quants need a llama.cpp fork hal0 no longer ships (ADR-0028), so only
+    # the F16 file is catalogued. It is an override (``HAL0_BRAIN_MODEL``);
+    # the default brain is LFM2.5 below. Tool calling is the attribute-XML
+    # dialect, parsed by llama.cpp's MiniCPM5 specialized parser. See
     # installer/etc-hal0/slots/brain.toml.
-    CuratedModel(
-        id="hal0-brain-sft-q8-rocmfpx",
-        display_name="hal0 brain (Q8_0 ROCmFPX, agent preset)",
-        description="The hal0 platform steward. Tool-use preset — the default brain pick on a ROCm/Vulkan box.",
-        family="hal0-brain",
-        size_gb=1.1,
-        vram_gb_min=3.0,
-        license="Apache-2.0",
-        license_url="https://www.apache.org/licenses/LICENSE-2.0",
-        hf_repo="Hal0ai/hal0-brain-sft-ROCmFPX-GGUF",
-        hf_file="hal0-brain-sft-Q8_0_ROCMFPX_AGENT.gguf",
-        context_length=131072,
-        chat_template="hal0-brain-sft",
-        tool_calling=True,
-        recommended_slot="chat",
-        tags=["chat", "brain", "steward", "tool-use", "tiny", "rocmfpx"],
-        notes=(
-            "REQUIRES the ROCmFPX runner — custom GGML tensor type 103, which stock "
-            "llama.cpp rejects. Use hal0-brain-sft-f16 on a box with no ROCm/Vulkan device."
-        ),
-        capability="chat",
-        architecture="llama",
-        backend="llamacpp",
-    ),
-    CuratedModel(
-        id="hal0-brain-sft-q4-rocmfp4",
-        display_name="hal0 brain (Q4_0 ROCmFP4, coherent)",
-        description="Smallest hal0 steward build — for a tight memory budget on a ROCm/Vulkan box.",
-        family="hal0-brain",
-        size_gb=0.65,
-        vram_gb_min=2.0,
-        license="Apache-2.0",
-        license_url="https://www.apache.org/licenses/LICENSE-2.0",
-        hf_repo="Hal0ai/hal0-brain-sft-ROCmFPX-GGUF",
-        hf_file="hal0-brain-sft-Q4_0_ROCMFP4_COHERENT.gguf",
-        context_length=131072,
-        chat_template="hal0-brain-sft",
-        tool_calling=True,
-        recommended_slot="chat",
-        tags=["chat", "brain", "steward", "tool-use", "tiny", "rocmfp4"],
-        notes=(
-            "REQUIRES the ROCmFPX runner — custom GGML tensor type 100, which stock "
-            "llama.cpp rejects. Not auto-selected; switch to it by hand when memory is tight."
-        ),
-        capability="chat",
-        architecture="llama",
-        backend="llamacpp",
-    ),
     CuratedModel(
         id="hal0-brain-sft-f16",
         display_name="hal0 brain (F16, portable)",
@@ -398,20 +340,15 @@ CURATED_MODELS: list[CuratedModel] = [
         chat_template="hal0-brain-sft",
         recommended_slot="chat",
         tags=["chat", "brain", "steward", "tool-use", "tiny", "portable"],
-        notes=(
-            "No custom tensor types — the only brain variant a stock llama.cpp image can "
-            "load, so it is the pick on a box with no ROCm/Vulkan device. Biggest of the three."
-        ),
+        notes=("Plain F16 GGUF, no custom tensor types; loads on every llama.cpp runner."),
         capability="chat",
         architecture="llama",
         backend="llamacpp",
     ),
-    # ── LFM2.5 — the default brain pick (rc.10) ────────────────────────────
-    # Replaces hal0-brain-sft-q8-rocmfpx as the id ``install.brain_model``
-    # pulls by default. Plain Q8_0 GGUF (no custom tensor types), so ONE
-    # variant loads on the FPX runner and stock llama.cpp alike — the
-    # hardware split above no longer applies to the default; the sft
-    # variants stay as explicit HAL0_BRAIN_MODEL overrides.
+    # ── LFM2.5 — the default brain pick ────────────────────────────────────
+    # The id ``install.brain_model`` pulls by default. Plain Q8_0 GGUF, so it
+    # loads on every llama.cpp runner; the sft F16 above stays as an explicit
+    # HAL0_BRAIN_MODEL override.
     CuratedModel(
         id="lfm2.5-2.6b",
         display_name="LFM2.5 2.6B",
@@ -435,9 +372,7 @@ CURATED_MODELS: list[CuratedModel] = [
             "<think> from weights (enable_thinking=false does NOT suppress "
             "it); profile.brain leaves reasoning-format at the runner default "
             "so think text extracts into reasoning_content. Native tool "
-            "calls (<|tool_call_start|> dialect) verified on the "
-            "hal0-combined:0826 runner — do not flip the brain default to "
-            "this id on images older than that pin (#2073)."
+            "calls use the <|tool_call_start|> dialect (llama.cpp LFM2 parser)."
         ),
         capability="chat",
         architecture="lfm2",
@@ -502,149 +437,9 @@ CURATED_MODELS: list[CuratedModel] = [
     # These ids are referenced by exported stacks but were originally
     # auto-scanned into the registry with EMPTY hf_repo/hf_file. Registering
     # their HF coordinates here makes pull-by-id, scan-backfill, and stack
-    # export all resolve (fix/stack-model-pull-coords). The jcbtc builds are
-    # Strix-Halo ROCmFP4/MTP repacks; the Jackrong/unsloth ones are GGUF MTP
-    # builds. ``id`` matches the existing registry id EXACTLY so a coord-less
-    # registry row pulls via get_curated() fallback.
-    #
-    # THREE OF THESE ARE THE `agent` ANCHOR LADDER — read before editing sizes.
-    # ``hal0.install.agent_model`` offers one of them as the install-time
-    # opt-in agent-slot pull, largest-that-fits-first by ``vram_gb_min``:
-    #
-    #   chadrock-35b-ace-saber-moequality-7bpw                       31.41 GB
-    #   qwen3-6-35b-a3b-nsc-ace-saber-mtp-f16-to-rocmfp4-strix-lean  19.05 GB
-    #   chadrock3-6-27b-pi-agent-mtp-rocmfp4-strix-lean              14.82 GB
-    #
-    # The installer PRINTS ``size_gb`` in the consent prompt, so these are
-    # exact HF blob sizes (bytes/1e9), verified against the HF API — not
-    # rounded marketing figures. Keep them exact.
-    #
-    # ``jcbtc/chadrock-35b-ace-saber-rocmfp4-mtp`` also ships
-    # ``mmproj-CHADROCK-35B-Ace-Saber-F32.mmproj`` (902,821,824 B = 0.90 GB).
-    # It is deliberately NOT wired as ``mmproj_file`` on either 35B row:
-    # attaching it would make the seeded `agent` anchor multimodal on every
-    # fresh box, which is a behaviour change the model-owned vision caps
-    # partition has to sign off on first. Recorded here so the coordinate
-    # isn't lost.
-    CuratedModel(
-        id="chadrock-35b-ace-saber-moequality-7bpw",
-        display_name="CHADROCK 35B Ace Saber (MoE Quality 7.07 BPW)",
-        description="Highest-fidelity Ace Saber repack — the agent anchor on a full 128 GB pool.",
-        family="qwen",
-        size_gb=31.41,
-        vram_gb_min=34.0,
-        license="apache-2.0",
-        license_url="https://huggingface.co/jcbtc/chadrock-35b-ace-saber-rocmfp4-mtp",
-        hf_repo="jcbtc/chadrock-35b-ace-saber-rocmfp4-mtp",
-        hf_file="CHADROCK-35B-Ace-Saber-MTP-ROCmFPX-MoEQuality-7.07BPW.gguf",
-        context_length=65536,
-        recommended_slot="chat",
-        tags=["chat", "agent", "tool-use", "mtp", "rocmfp4"],
-        notes=(
-            "Strix-Halo ROCmFPX/MTP build at 7.07 BPW — same weights as the "
-            "STRIX_LEAN row, less quantisation damage, ~12 GB more on disk. "
-            "Top rung of the `agent` anchor ladder (hal0.install.agent_model)."
-        ),
-        capability="chat",
-        backend="llamacpp",
-    ),
-    CuratedModel(
-        id="qwen3-6-35b-a3b-nsc-ace-saber-mtp-f16-to-rocmfp4-strix-lean",
-        display_name="Qwen3.6 35B-A3B NSC ACE SABER (ROCmFP4 STRIX)",
-        description="35B-A3B ACE SABER chat build with MTP, packed for Strix Halo.",
-        family="qwen",
-        size_gb=19.05,
-        vram_gb_min=20.0,
-        license="apache-2.0",
-        license_url="https://huggingface.co/jcbtc/chadrock-35b-ace-saber-rocmfp4-mtp",
-        hf_repo="jcbtc/chadrock-35b-ace-saber-rocmfp4-mtp",
-        hf_file="Qwen3.6-35B-A3B-NSC-ACE-SABER-MTP-F16-to-ROCmFP4-STRIX_LEAN.gguf",
-        context_length=65536,
-        recommended_slot="chat",
-        tags=["chat", "agent", "tool-use", "mtp", "rocmfp4"],
-        notes=(
-            "Strix-Halo ROCmFP4/MTP build (F16-to-ROCmFP4 STRIX_LEAN). Middle "
-            "rung of the `agent` anchor ladder (hal0.install.agent_model)."
-        ),
-        capability="chat",
-        backend="llamacpp",
-    ),
-    CuratedModel(
-        id="chadrock3-6-27b-pi-agent-mtp-rocmfp4-strix-lean",
-        display_name="CHADROCK3.6 27B Pi-Agent (ROCmFP4 STRIX)",
-        description="27B Pi-Agent chat build with MTP, packed for Strix Halo.",
-        family="qwen",
-        size_gb=14.82,
-        vram_gb_min=15.0,
-        license="apache-2.0",
-        license_url="https://huggingface.co/jcbtc/chadrock3.6-27b-pi-agent-rocmfp4-mtp",
-        hf_repo="jcbtc/chadrock3.6-27b-pi-agent-rocmfp4-mtp",
-        hf_file="CHADROCK3.6-27B-Pi-Agent-MTP-ROCmFP4-STRIX_LEAN.gguf",
-        context_length=65536,
-        recommended_slot="chat",
-        tags=["chat", "agent", "tool-use", "mtp", "rocmfp4"],
-        notes=(
-            "Strix-Halo ROCmFP4/MTP build (Pi-Agent STRIX_LEAN). Bottom rung of "
-            "the `agent` anchor ladder (hal0.install.agent_model); also the "
-            "`hal0/code` override brain.toml documents for tool routing."
-        ),
-        capability="chat",
-        backend="llamacpp",
-    ),
-    CuratedModel(
-        id="chadrock3-6-35b-uncensored-mtp-strix-lean",
-        display_name="CHADROCK3.6 35B Uncensored (MTP STRIX)",
-        description="35B uncensored chat build with MTP, packed for Strix Halo.",
-        family="qwen",
-        size_gb=19.0,
-        vram_gb_min=20.0,
-        license="apache-2.0",
-        license_url="https://huggingface.co/jcbtc/CHADROCK3.6-35B-UNCENSORED-MTP-STRIX-LEAN",
-        hf_repo="jcbtc/CHADROCK3.6-35B-UNCENSORED-MTP-STRIX-LEAN",
-        hf_file="CHADROCK3.6-35B-UNCENSORED-MTP-STRIX-LEAN.gguf",
-        context_length=65536,
-        recommended_slot="chat",
-        tags=["chat", "mtp", "rocmfp4"],
-        notes="Strix-Halo ROCmFP4/MTP build (35B uncensored STRIX-LEAN).",
-        capability="chat",
-        backend="llamacpp",
-    ),
-    CuratedModel(
-        id="qwen3-6-35b-a3b-halostrix-dyn-mtp-v7",
-        display_name="Qwen3.6 35B-A3B HaloStrix Dyn (MTP v7)",
-        description="35B-A3B HaloStrix dynamic-quant chat build with MTP.",
-        family="qwen",
-        size_gb=22.6,
-        vram_gb_min=23.0,
-        license="apache-2.0",
-        license_url="https://huggingface.co/jcbtc/qwen3.6-35b-a3b-crown-halo-mtp-dynamic",
-        hf_repo="jcbtc/qwen3.6-35b-a3b-crown-halo-mtp-dynamic",
-        hf_file="Qwen3.6-35B-A3B-HaloStrix-Dyn-MTP-v7.gguf",
-        context_length=65536,
-        recommended_slot="chat",
-        tags=["chat", "mtp", "rocmfp4"],
-        notes="Strix-Halo ROCmFP4/MTP build (HaloStrix dynamic v7).",
-        capability="chat",
-        backend="llamacpp",
-    ),
-    CuratedModel(
-        id="qwopus3-6-27b-v2-mtp-bf16-to-rocmfp4-strix-lean",
-        display_name="Qwopus3.6 27B v2 (ROCmFP4 STRIX)",
-        description="27B Qwopus v2 chat build with MTP, packed for Strix Halo.",
-        family="qwen",
-        size_gb=14.8,
-        vram_gb_min=15.0,
-        license="apache-2.0",
-        license_url="https://huggingface.co/jcbtc/qwopus3.6-27b-v2-chadrock-rocmfp4-mtp",
-        hf_repo="jcbtc/qwopus3.6-27b-v2-chadrock-rocmfp4-mtp",
-        hf_file="Qwopus3.6-27B-v2-MTP-BF16-to-ROCmFP4-STRIX_LEAN.gguf",
-        context_length=65536,
-        recommended_slot="chat",
-        tags=["chat", "mtp", "rocmfp4"],
-        notes="Strix-Halo ROCmFP4/MTP build (Qwopus v2 BF16-to-ROCmFP4 STRIX_LEAN).",
-        capability="chat",
-        backend="llamacpp",
-    ),
+    # export all resolve (fix/stack-model-pull-coords). ``id`` matches the
+    # existing registry id EXACTLY so a coord-less registry row pulls via
+    # get_curated() fallback.
     CuratedModel(
         id="qwopus3-6-27b-coder-mtp-q6-k",
         display_name="Qwopus3.6 27B Coder (MTP Q6_K)",
@@ -1007,7 +802,7 @@ CURATED_MODELS: list[CuratedModel] = [
         context_length=131072,
         recommended_slot="chat",
         tags=["chat", "vision", "tool-calling", "mtp"],
-        notes="Stock catalogue key. Vision-capable. MTP head needs the rocmfp4 fork to speculate.",
+        notes="Stock catalogue key. Vision-capable, with an MTP head.",
         capability="chat",
         backend="llamacpp",
         bundle_only=True,

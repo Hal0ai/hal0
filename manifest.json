@@ -1,86 +1,58 @@
 {
-  "_schema": "hal0.manifest.v1",
-  "_comment": "Toolbox image registry pins per hal0 release. Each entry under `toolbox_images` is keyed by short image name (vulkan, rocm, cpu, flm, moonshine, kokoro, comfyui) and carries the canonical ghcr.io ref plus a sha256 digest. Empty/null digest means the image hasn't been published yet for this release — the runtime then pulls by tag and emits a warning. Run `scripts/update-toolbox-digests.sh` on main before cutting a release: it queries ghcr.io for each image's published content digest and patches this file in place so the pinned digests track the published images. Schema versioned via `_schema`; bump it when the shape changes. Toolbox images are public on `ghcr.io/hal0ai/`; the installer pulls them anonymously and `hal0 doctor toolbox-pull` asserts that contract holds. See docs/.devdocs/PLAN.md §12 and §17 (maintainer-local).",
+  "_schema": "hal0.manifest.v2",
+  "_comment": "Release manifest. `runners` is the ONE table of runner-image pins: key = hal0 runner key (src/hal0/runners/__init__.py RUNNER_IMAGES), `image` = registry repo, `tag` = immutable tag, `digest` = sha256 content digest, `lanes_gated` = backends that passed the hardware gate for this digest. Every other runner-image fact in hal0 (Runner.image, the Vulkan-capable set, exports/runner-image-pins.json, the bench harness, `hal0 doctor toolbox-pull`, installer/lib/preflight.sh) is derived from this table. `tag: null` marks an image that is not published yet; `digest: null` pulls by tag. scripts/release-check.sh refuses a release while any default-tier runner has a null tag or digest (hal0.runners.pins.release_gate_problems). Bump pins by editing this table only.",
   "version": "1.4.0",
   "channel": "stable",
   "_upgrade_from_notes": "PEP 440 specifier for the versions this release upgrades from. release.yml copies it into every channel manifest, where the updater enforces it (updater._enforce_upgrade_floor); installer/install.sh enforces it on a re-run over an existing install. A box below it must step through a release inside the window or reinstall.",
   "upgrade_from": ">=1.3.0",
-  "toolbox_images": {
-    "vulkan": {
-      "tag": "ghcr.io/hal0ai/hal0-toolbox-vulkan:v1",
-      "digest": "sha256:a970d47c864b4bc83e34a1ebf11216353efc1b3a2340f4dd436086ce454ac856",
-      "_notes": "llama.cpp Vulkan backend; default for Strix Halo iGPU"
-    },
-    "rocm": {
-      "tag": "ghcr.io/hal0ai/hal0-toolbox-rocm:v1",
-      "digest": "sha256:a47ca05ea08bc895e355d28153aa60873f1a13919eb40b16876bf9f2827499fd",
-      "_notes": "llama.cpp ROCm backend; multi-arch (gfx1030..gfx1151)"
+  "runners": {
+    "standard": {
+      "image": "ghcr.io/hal0ai/hal0-runner-standard",
+      "tag": "b11552-re14329d",
+      "digest": "sha256:2626239586c1c8fcf1ab310000f9d19b26b3a4fa5230f608e65cc9ef2252c462",
+      "lanes_gated": ["rocm", "vulkan"]
     },
     "cpu": {
-      "tag": "ghcr.io/hal0ai/hal0-toolbox-cpu:v1",
-      "digest": "sha256:eab70d0355981c08133a6fff28e472690c7091f6e968da1a2f269bdfa29311a1",
-      "_notes": "llama.cpp CPU-only backend (GGML_VULKAN/CUDA/HIP=OFF), built GGML_NATIVE=OFF so the binary is portable across x86_64 rather than tuned to the builder — that portability is the point: the `cpu` runner previously carried the Vulkan GPU toolbox and SIGILLed at model load on GPU-less boxes (#2126). Built from packaging/toolbox/cpu.Dockerfile by the `cpu` row of .github/workflows/toolbox.yml; linux/amd64 only. Digest is the GHCR registry content digest for :v1 (confirmed 2026-08-31 via scripts/update-toolbox-digests.sh). The pinned image was pulled and exercised at that digest: `llama-server --version` reports llama.cpp 571d0d5 built with GNU 13.3.0 for Linux x86_64, `--list-devices` is empty (no GPU backend registered), ENTRYPOINT is /opt/llama-vulkan/llama-server and USER is hal0. cpu.Dockerfile's LLAMA_CPP_REF is unpinned (master), so this digest is what makes the shipped build reproducible."
+      "image": "ghcr.io/hal0ai/hal0-runner-cpu",
+      "tag": "b11552-re14329d",
+      "digest": "sha256:d8e1cfa2066f6ab3124dd185decd15771c4cdf058ed9c0cee49f62e7f02afd77",
+      "lanes_gated": ["cpu"]
     },
     "flm": {
-      "tag": "ghcr.io/hal0ai/hal0-toolbox-flm:0.9.44",
-      "digest": "sha256:49c175ce799061b07d3c84b1bdece9d8dcb74be5f9717f95fb52f51bd5020fc9",
-      "_notes": "FastFlowLM v0.9.44 on AMD XDNA2 NPU (toolbox rebuilt from packaging/toolbox/flm.Dockerfile FLM_REF=v0.9.44 — `flm version` inside reports v0.9.44). Requires amdxdna driver on the host (kernel >= 6.14 in-tree, or >= 6.10 via amdxdna-dkms) + NPU firmware >= 1.1.0.0. Digest is the GHCR registry digest via scripts/update-toolbox-digests.sh accept-set (confirmed post-push 2026-07-10)."
-    },
-    "moonshine": {
-      "tag": "ghcr.io/hal0ai/hal0-toolbox-moonshine:v1",
-      "digest": "sha256:bf07e3d5640fc1d009298be0600b62ec24185f80d7c8bed47321742fce17aa31",
-      "_notes": "Moonshine STT (CPU/Vulkan); OpenAI-compat /v1/audio/transcriptions + WS"
+      "image": "ghcr.io/hal0ai/hal0-runner-flm",
+      "tag": "0.9.44-re14329d",
+      "digest": "sha256:ba7f7edafc07ae2bb96eb94b519b8ab46a8564cdfb9d77372bef611811aa8643",
+      "lanes_gated": ["npu"]
     },
     "kokoro": {
-      "tag": "ghcr.io/hal0ai/hal0-toolbox-kokoro:v1",
-      "digest": "sha256:1ac80acc00a2e9d578b077fa0a3f2c3e3f32f4f3da5080f346838e1c5a540456",
-      "_notes": "Kokoro-82M TTS (CPU ONNX); OpenAI-compat /v1/audio/speech",
-      "_upstream_reference": "https://github.com/thewh1teagle/kokoro-onnx"
+      "image": "ghcr.io/hal0ai/hal0-runner-kokoro",
+      "tag": "0.4.9-re14329d",
+      "digest": "sha256:0df4b132be5a5be04f4481940db36365bb95b50aaa0940af0b6f1f5792428325",
+      "lanes_gated": ["cpu"]
+    },
+    "moonshine": {
+      "image": "ghcr.io/hal0ai/hal0-runner-moonshine",
+      "tag": "20251121-re14329d",
+      "digest": "sha256:341b64a5c60496c57407a75077a746ff40bbc2eedbc8ddba1e661094d6818766",
+      "lanes_gated": ["cpu"]
     },
     "comfyui": {
-      "tag": "ghcr.io/hal0ai/hal0-comfyui:latest",
-      "digest": "sha256:fd8c89309ed69e26d0f7ca1483a5775ab0ef336d12f3d62f9a20c7dd0b5d478b",
-      "_notes": "hal0-owned image (published 2026-07-19, digest-pinned in this change; same digest as Hal0ai/hal0-runner-images images.json). Layout mirrors the previously-pinned kyuz0 Strix Halo build by construction (ComfyUI at /opt/ComfyUI, venv at /opt/venv). Prior kyuz0 validation history (CT105 2026-06-11, Wan2.2/Qwen-Image/Flux/SDXL on gfx1151; Phase D repin) preserved in git.",
-      "_upstream_reference": "https://github.com/comfyanonymous/ComfyUI"
+      "image": "ghcr.io/hal0ai/hal0-runner-comfyui",
+      "tag": "0.28.0-r6996d85",
+      "digest": "sha256:8c1dd5d7586893a8e27ec2f9fd11623a750b6a4c2ab098e62f9dcd32ec49cfa2",
+      "lanes_gated": ["rocm"]
     },
     "qwen3tts": {
-      "tag": "ghcr.io/hal0ai/hal0-toolbox-qwen3tts:v1",
-      "digest": "sha256:b412d26fe3af480d47c57d79f770a0a7a4e66eaa394409e48fc3d9aee8c48f60",
-      "_notes": "Qwen3-TTS-12Hz-1.7B-CustomVoice multilingual GPU TTS (ROCm); OpenAI-compat /v1/audio/speech. Digest pinned from the CI push via .github/workflows/toolbox.yml; refresh with scripts/update-toolbox-digests.sh."
+      "image": "ghcr.io/hal0ai/hal0-runner-qwen3tts",
+      "tag": "0.1.1-re14329d",
+      "digest": "sha256:81a914c9622fe35d11d8c0d2f81eee5a882faaad1556ac42a8db6856ad225698",
+      "lanes_gated": ["rocm"]
     },
-    "promptforge": {
-      "tag": "ghcr.io/hal0ai/hal0-promptforge:v2.3-qwen38",
-      "digest": "sha256:370af6e9717e8c96742198a4b920888e6a248d447e21e3432de4d2c913703aea",
-      "_notes": "PromptForge/ActiveFPX runner (HIP-only, GGML_VULKAN=OFF) for jcbtc Qwen3.8 CIRU distributions — OPTIONAL runner, never the AMD default. Digest is the exact image the #1891 ct150 gate validated 2026-08-30 (Paris + HumanEval+ 0.939/0.909 + MTP depth-4 ~86% acceptance; gate report in the operator artefact store). Tracked recipe: packaging/runner/promptforge/. Same digest pinned in Hal0ai/hal0-runner-images images.json."
-    },
-    "strix": {
-      "tag": "ghcr.io/hal0ai/hal0-strix-vulkan:0831",
-      "digest": "sha256:b50a73487d05bcae146aa54170cec981c7c6a158cc5cd1fa45a6096dfc5fe107",
-      "_notes": "Strix runner (Vulkan-only, GGML_HIP=OFF): Qwen3.8-Flash-Next qwen4exp + NextN/MTP (--spec-type draft-mtp, adaptive) + --tensor-read-lazy, built from the published r/StrixHalo production snapshot (myhacsint/llama.cpp @ 5d43efe26) — OPTIONAL runner, never the AMD default; successor to the hal0-combined-upstream:0829 pin (#2118). Digest is the exact image the 2026-08-31 §3-C gate validated on ct150 (kfd-present) AND ct151 (kfd-absent): Vulkan0 offload confirmed, temp-0 Paris, 256-token clean tail byte-identical across both boxes, json_schema constrained output, #1936 device-less diagnostic exit 78; gate report in the operator artefact store. Tracked recipe: packaging/runner/strix/."
-    }
-  },
-  "_legacy_toolboxes": {
-    "_comment": "Old key shape (pre-2026-05-15). Kept for one release cycle so any out-of-tree readers don't break. Will be removed after Phase 5 ships.",
-    "vulkan": {
-      "image": "ghcr.io/hal0ai/hal0-toolbox-vulkan:v1",
-      "digest": "placeholder"
-    },
-    "rocm": {
-      "image": "ghcr.io/hal0ai/hal0-toolbox-rocm:v1",
-      "digest": "placeholder"
-    },
-    "flm": {
-      "image": "ghcr.io/hal0ai/hal0-toolbox-flm:v1",
-      "digest": "placeholder"
-    },
-    "moonshine": {
-      "image": "ghcr.io/hal0ai/hal0-toolbox-moonshine:v1",
-      "digest": "placeholder"
-    },
-    "kokoro": {
-      "image": "ghcr.io/hal0ai/hal0-toolbox-kokoro:v1",
-      "digest": "placeholder",
-      "_upstream_reference": "ghcr.io/remsky/kokoro-fastapi-cpu:latest"
+    "cuda": {
+      "image": "ghcr.io/ggml-org/llama.cpp",
+      "tag": "server-cuda-b11541",
+      "digest": "sha256:f88fa8d94d872312a4ad117acd490fa997bef81f03f161f0cfe0d74272e5b5bb",
+      "lanes_gated": []
     }
   }
 }

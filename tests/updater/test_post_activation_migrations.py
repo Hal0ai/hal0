@@ -10,6 +10,7 @@ from typing import Any
 
 import pytest
 
+from hal0.config.migrations.runner_system import RunnerMigrationReport
 from hal0.errors import Hal0Error
 from hal0.updater.updater import check_outstanding_migrations, run_post_activation_migrations
 
@@ -19,6 +20,7 @@ def _stub_every_pass(monkeypatch: pytest.MonkeyPatch) -> dict[str, list[Any]]:
     """Replace every pass with recording stubs so tests assert call
     order/count without touching real config/registry state."""
     calls: dict[str, list[Any]] = {
+        "runner_system": [],
         "config_migrations": [],
         "registry_toml": [],
         "mtp": [],
@@ -28,6 +30,11 @@ def _stub_every_pass(monkeypatch: pytest.MonkeyPatch) -> dict[str, list[Any]]:
         "hermes_venv": [],
         "converge_components": [],
     }
+
+    def _runner_system(*, dry_run=False, job_id=None, honour_restore_marker=False):
+        calls["runner_system"].append(job_id)
+        calls.setdefault("restore_marker", []).append(honour_restore_marker)
+        return RunnerMigrationReport(dry_run=dry_run)
 
     def _config_migrations(min_data_version, *, job_id=None, ceiling=None):
         calls["config_migrations"].append((min_data_version, job_id))
@@ -58,19 +65,22 @@ def _stub_every_pass(monkeypatch: pytest.MonkeyPatch) -> dict[str, list[Any]]:
         return False
 
     def _converge_components(
-        *, job_id=None, apply=True, image_retag=True, engine=True, hermes_install=True
+        *, job_id=None, apply=True, catalogue_sync=True, engine=True, hermes_install=True
     ):
         calls["converge_components"].append(
             {
                 "job_id": job_id,
                 "apply": apply,
-                "image_retag": image_retag,
+                "catalogue_sync": catalogue_sync,
                 "engine": engine,
                 "hermes_install": hermes_install,
             }
         )
         return {}
 
+    monkeypatch.setattr(
+        "hal0.config.migrations.runner_system.migrate_runner_system", _runner_system
+    )
     monkeypatch.setattr("hal0.updater.updater._maybe_run_config_migrations", _config_migrations)
     monkeypatch.setattr("hal0.registry.toml_retirement.retire_registry_toml", _registry_toml)
     monkeypatch.setattr("hal0.updater.updater.clear_stale_mtp_overrides", _mtp)
@@ -84,9 +94,72 @@ def _stub_every_pass(monkeypatch: pytest.MonkeyPatch) -> dict[str, list[Any]]:
     return calls
 
 
+def test_runner_conversion_runs_before_schema_and_registry_retirement(
+    monkeypatch: pytest.MonkeyPatch, _stub_every_pass: dict[str, list[Any]]
+) -> None:
+    """ADR-0028: the runner conversion rewrites raw TOML that config
+    validation would reject, so it must run before the schema migration and
+    before the registry.toml retirement (both load config)."""
+    order: list[str] = []
+    monkeypatch.setattr(
+        "hal0.config.migrations.runner_system.migrate_runner_system",
+        lambda *, dry_run=False, job_id=None, honour_restore_marker=False: (
+            order.append("runner_system") or RunnerMigrationReport(dry_run=False)
+        ),
+    )
+    monkeypatch.setattr(
+        "hal0.updater.updater._maybe_run_config_migrations",
+        lambda min_data_version, *, job_id=None, ceiling=None: order.append("schema") or (1, 2),
+    )
+    monkeypatch.setattr(
+        "hal0.registry.toml_retirement.retire_registry_toml",
+        lambda *, job_id=None: order.append("registry_toml") or {"outcome": "absent"},
+    )
+    run_post_activation_migrations(job_id="j0")
+    assert order == ["runner_system", "schema", "registry_toml"]
+
+
+@pytest.mark.parametrize(
+    ("flag", "applied", "rerendered"),
+    [
+        (True, True, 1),
+        (True, False, 0),
+        (False, True, 0),
+    ],
+)
+def test_a_boot_conversion_rerenders_the_slot_units(
+    monkeypatch: pytest.MonkeyPatch,
+    _stub_every_pass: dict[str, list[Any]],
+    flag: bool,
+    applied: bool,
+    rerendered: int,
+) -> None:
+    """A conversion the boot safety net applies must reach the units systemd
+    restarts slots from; an update re-renders every unit itself."""
+    report = RunnerMigrationReport(dry_run=False, backup="/b.tar.gz" if applied else None)
+    monkeypatch.setattr(
+        "hal0.config.migrations.runner_system.migrate_runner_system",
+        lambda **_kw: report,
+    )
+    calls: list[str | None] = []
+    monkeypatch.setattr(
+        "hal0.updater.updater.rerender_slot_units", lambda *, job_id=None: calls.append(job_id)
+    )
+    run_post_activation_migrations(job_id="j", rerender_after_runner_conversion=flag)
+    assert len(calls) == rerendered
+
+
+def test_an_update_converts_even_after_a_restore(_stub_every_pass: dict[str, list[Any]]) -> None:
+    """An actual update ignores the restore marker; only boot honours it."""
+    run_post_activation_migrations(job_id="j1")
+    run_post_activation_migrations(job_id="j2", honour_restore_marker=True)
+    assert _stub_every_pass["restore_marker"] == [False, True]
+
+
 def test_runs_every_pass(_stub_every_pass: dict[str, list[Any]]) -> None:
     result = run_post_activation_migrations(job_id="j1")
     assert result == (1, 2)
+    assert _stub_every_pass["runner_system"] == ["j1"]
     assert _stub_every_pass["config_migrations"] == [(1, "j1")]
     assert _stub_every_pass["registry_toml"] == ["j1"]
     assert _stub_every_pass["mtp"] == ["j1"]
@@ -97,19 +170,19 @@ def test_runs_every_pass(_stub_every_pass: dict[str, list[Any]]) -> None:
         {
             "job_id": "j1",
             "apply": True,
-            "image_retag": True,
+            "catalogue_sync": True,
             "engine": True,
             "hermes_install": True,
         }
     ]
 
 
-def test_skip_image_retag_omits_only_that_pass(_stub_every_pass: dict[str, list[Any]]) -> None:
-    """#1960 N2: check_outstanding_migrations passes skip_image_retag=True
-    so the boot-time safety net never runs retag_stale_slot_images (now the
+def test_skip_catalogue_sync_omits_only_that_pass(_stub_every_pass: dict[str, list[Any]]) -> None:
+    """check_outstanding_migrations passes skip_catalogue_sync=True so the
+    boot-time safety net never runs the runner-image catalogue sync (the
     runner-images arm inside converge_components) — every OTHER pass must
     still run unaffected."""
-    result = run_post_activation_migrations(job_id="j1", skip_image_retag=True)
+    result = run_post_activation_migrations(job_id="j1", skip_catalogue_sync=True)
     assert result == (1, 2)
     assert _stub_every_pass["mtp"] == ["j1"]
     assert _stub_every_pass["vulkan_migration"] == ["j1"]
@@ -118,11 +191,51 @@ def test_skip_image_retag_omits_only_that_pass(_stub_every_pass: dict[str, list[
         {
             "job_id": "j1",
             "apply": True,
-            "image_retag": False,
+            "catalogue_sync": False,
             "engine": True,
             "hermes_install": True,
         }
     ]
+
+
+def test_runner_system_conversion_runs_before_the_schema_migration(
+    monkeypatch: pytest.MonkeyPatch, _stub_every_pass: dict[str, list[Any]]
+) -> None:
+    """ADR-0028: the runner-system conversion rewrites raw TOML before config
+    is validated (a removed runner key fails config load), so it is the first
+    pass, ahead of the schema migration."""
+    order: list[str] = []
+    monkeypatch.setattr(
+        "hal0.config.migrations.runner_system.migrate_runner_system",
+        lambda *, dry_run=False, job_id=None, honour_restore_marker=False: order.append(
+            "runner_system"
+        ),
+    )
+    monkeypatch.setattr(
+        "hal0.updater.updater._maybe_run_config_migrations",
+        lambda min_data_version, *, job_id=None, ceiling=None: order.append("schema") or (1, 2),
+    )
+    run_post_activation_migrations(job_id="j1")
+    assert order == ["runner_system", "schema"]
+
+
+def test_runner_system_failure_is_fatal(
+    monkeypatch: pytest.MonkeyPatch, _stub_every_pass: dict[str, list[Any]]
+) -> None:
+    """The conversion restores its own writes before raising; the update must
+    see the failure and nothing after it may run on a half-converted box."""
+
+    def _boom(*, dry_run=False, job_id=None, honour_restore_marker=False):
+        raise Hal0Error("runner conversion failed", code="test.boom")
+
+    monkeypatch.setattr("hal0.config.migrations.runner_system.migrate_runner_system", _boom)
+
+    with pytest.raises(Hal0Error):
+        run_post_activation_migrations(job_id="j9")
+
+    assert _stub_every_pass["config_migrations"] == []
+    assert _stub_every_pass["registry_toml"] == []
+    assert _stub_every_pass["converge_components"] == []
 
 
 def test_min_data_version_defaults_to_1(_stub_every_pass: dict[str, list[Any]]) -> None:
@@ -238,7 +351,7 @@ def test_boot_safety_net_diagnoses_the_venv_without_installing(
         {
             "job_id": "boot",
             "apply": False,
-            "image_retag": False,
+            "catalogue_sync": False,
             "engine": False,
             "hermes_install": False,
         }
@@ -257,7 +370,7 @@ def test_converge_companions_flag_gates_the_apply_kwarg(
         {
             "job_id": "j4",
             "apply": False,
-            "image_retag": True,
+            "catalogue_sync": True,
             "engine": True,
             "hermes_install": True,
         }

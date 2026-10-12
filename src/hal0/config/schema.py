@@ -50,24 +50,6 @@ from hal0.release.policy import ReleaseKind
 
 log = logging.getLogger(__name__)
 
-#: Dedup set for the runner-key alias warnings below — config loads
-#: live per request (settings PUT, slot reads, …), so without this a
-#: pre-collapse box logs the same warning continuously until the operator hits
-#: Save once. Keyed ``(surface, key)`` so the two call sites (slot
-#: ``binary`` alias fold, ``[slots].default_images`` alias fold) each warn
-#: once per distinct offending key per process. Tests that assert on this
-#: warning must clear it in their setup — see ``tests/config/
-#: test_runner_key_aliases.py``.
-_warned: set[tuple[str, str]] = set()
-
-
-def _warn_once(surface: str, key: str, message: str, *args: object) -> None:
-    dedup_key = (surface, key)
-    if dedup_key in _warned:
-        return
-    _warned.add(dedup_key)
-    log.warning(message, *args)
-
 
 # ── Shared constants ───────────────────────────────────────────────────────────
 #
@@ -886,31 +868,6 @@ class SlotConfig(BaseModel):
             data["extra"] = extra
         return data
 
-    @field_validator("binary", mode="before")
-    @classmethod
-    def _binary_alias_fold(cls, v: Any) -> Any:
-        """Heal superseded runner keys (collapse spec §2) — read-side only.
-
-        Disk TOML is never rewritten; the canonical key is what the rest of
-        the system (fit-check, launch, UI payload) sees, and the next
-        operator Save persists it naturally. Unknown keys pass through —
-        the drawer's out-of-vocab option owns that surface.
-        """
-        if not isinstance(v, str) or not v:
-            return v
-        from hal0.runners import canonical_runner_key
-
-        canon = canonical_runner_key(v)
-        if canon != v:
-            _warn_once(
-                "slot_config.binary_alias",
-                v,
-                "slot_config.binary_alias key=%s canonical=%s",
-                v,
-                canon,
-            )
-        return canon
-
     @field_validator("name")
     @classmethod
     def name_valid(cls, v: str) -> str:
@@ -1032,286 +989,9 @@ def build_mtp_flag_bundle(backend: str | None) -> str:
 #: Prefer :func:`build_mtp_flag_bundle` so the draft device tracks the backend.
 MTP_FLAG_BUNDLE = build_mtp_flag_bundle("rocm")
 
-#: Seed profiles shipped with hal0.  Returned by ``load_profiles_config()``
-#: when ``/etc/hal0/profiles.toml`` is absent so ``GET /api/profiles`` is
-#: always populated on a fresh install.
-#:
-#: ``DEFAULT_ROCMFPX_IMAGE`` is the canonical ROCmFPX runner tag. It backs the
-#: ``rocmfpx-rocm`` / ``vkfpx-moe`` / ``vkfpx-dense`` seed profiles and is the
-#: fallback used by :func:`hal0.providers.container._resolve_image_ref` when
-#: neither a slot-level override nor a profile-level ``image`` is present.
-#: Bumping this constant in a release rolls the default runner for every
-#: fresh install and every slot that hasn't pinned an image explicitly —
-#: the slot-level ``image`` override is the lever for per-slot opt-outs
-#: (debug builds, A/B tests, etc.).  See #__hal0_image_control__ for the
-#: phasing: 0.9.5 wires slot.image + DEFAULT_ROCMFPX_IMAGE; 0.9.6 will
-#: drop ``image`` from SEED_PROFILES entirely.
-#: 0826 lineage (2026-08-26): the 0824 recipe — same pinned ROCmFPX source
-#: ref, same base digest, same #2037 fail-fast entrypoint — rebuilt via
-#: packaging/runner/rocmfpx/build.sh for two chat-parser deltas (#2056):
-#: patch 0002's reasoning branch now consumes an optional closed <think>
-#: block even with reasoning extraction off (without it, the brain-sft
-#: template's pre-closed think block in the generation prompt made
-#: common_sampler_init's non-lazy grammar prefill throw, hard-400ing EVERY
-#: structured-output request against the seeded model — which took all
-#: Hindsight fact extraction down with it on fresh installs); and new patch
-#: 0004 fixes the LFM2.5 parser's response_format grammar (it was built
-#: lazy with no trigger rules — an empty root — so generation ran
-#: unconstrained and every JSON-mode request 500'd at the parse; reproduced
-#: on prod's live LFM slot).
-#: Exported (with :data:`DEFAULT_PROMPTFORGE_IMAGE` and
-#: :data:`VULKAN_CAPABLE_IMAGE_REFS`) via ``exports/runner-image-pins.json``,
-#: which the hal0-runner-images retention automation fetches as its
-#: never-delete allowlist — ``tests/config/test_runner_image_pins_export.py``
-#: keeps the export in lockstep with these constants.
-#: 0824 lineage (2026-08-24): byte-for-byte the 0822 recipe rebuilt for the
-#: #2037 fail-fast entrypoint (supervises llama-server, translates a
-#: non-signal death before /health ever answered 200 into exit 64 so the
-#: template's RestartPreventExitStatus= can park a doomed model; #2126 widened
-#: both halves — the entrypoint also translates a load-phase SIGILL/SIGABRT/
-#: SIGSEGV, and the template names 132 directly for images that predate it).
-DEFAULT_ROCMFPX_IMAGE = "ghcr.io/hal0ai/hal0-combined:0826"
-
-#: ``DEFAULT_PROMPTFORGE_IMAGE`` — the PromptForge-flavor runner (HIP-only
-#: build of ciru-ai/ROCmFPX v2.3 + the card's runtime patch; GGML_VULKAN=OFF,
-#: so it can never be the same image as DEFAULT_ROCMFPX_IMAGE — see #1946
-#: item 4 and spec 2026-08-29).
-#:
-#: GATE PASSED: the #1891 ct150 validation ran 2026-08-30 (gate report
-#: 2026-08-30 (operator artefact store), results on #1946) — Paris probe, HumanEval+ 0.939/0.909 with the card's
-#: disclosed task-130 regression reproducing exactly, MTP depth-4 at ~86%
-#: acceptance (+75% decode vs MTP-off). ``manifest.json``'s
-#: ``toolbox_images.promptforge`` now carries the gate-validated digest
-#: (sha256:370af6e9…) and the promptforge Runner's ``manifest_key`` points
-#: at it, so installs resolve the digest pin; this tag constant is the
-#: bundled fallback and stays in lockstep with the manifest entry (pinned by
-#: tests/runners/test_registry.py). promptforge is an OPTIONAL runner by
-#: operator decision — never the AMD default; DEFAULT_ROCMFPX_IMAGE above
-#: is untouched by any of this.
-DEFAULT_PROMPTFORGE_IMAGE = "ghcr.io/hal0ai/hal0-promptforge:v2.3-qwen38"
-
-#: ``DEFAULT_STRIX_IMAGE`` — the strix-flavor runner: Vulkan-only build of
-#: the published production tree behind the 2026-08-31 r/StrixHalo field
-#: report (myhacsint/llama.cpp ``production/strix-halo-qwen4exp-b10669`` —
-#: upstream + the Nathanw1014 strix-halo Vulkan line + the apepojken
-#: qwen4exp optimizations + adaptive MTP; recipe at
-#: ``packaging/runner/strix/``; GGML_HIP=OFF because that tree's own scope
-#: statement and every lineage feeding it validate Vulkan only — mirror of
-#: the promptforge single-backend rule, opposite lane). What it adds over
-#: the upstream
-#: variant it supersedes for qwen4exp work (#2118): NextN/MTP speculative
-#: decode (``--spec-type draft-mtp``), ``--tensor-read-lazy`` PLE gathers,
-#: and the gfx1151 Vulkan FA/MoE kernels. Like promptforge, an OPTIONAL
-#: runner — never the AMD default; DEFAULT_ROCMFPX_IMAGE above is untouched.
-#: No FPX-family quant support: FPX GGUFs on this image are the #1790
-#: SIGSEGV class, and the launch-time guard keys off FPX_RUNNER_KEYS
-#: excluding it. GATE PASSED 2026-08-31: §3-C on ct150 (kfd-present) and
-#: ct151 (kfd-absent) — see the membership note on
-#: :data:`VULKAN_CAPABLE_IMAGE_REFS` below, which this ref joined on that
-#: evidence (Vulkan is its ONLY lane, so membership is what makes the
-#: runner launchable at all). manifest.json's ``toolbox_images.strix``
-#: carries the gate-validated digest and the strix Runner's ``manifest_key``
-#: points at it; this tag constant is the bundled fallback and stays in
-#: lockstep with the manifest entry (pinned by
-#: tests/packaging/test_strix_recipe.py).
-DEFAULT_STRIX_IMAGE = "ghcr.io/hal0ai/hal0-strix-vulkan:0831"
-
-#: Historical DEFAULT_ROCMFPX_IMAGE values (and their pre-consolidation
-#: equivalents). A slot-level ``image`` pin equal to one of these is a STALE
-#: FORMER DEFAULT — debris from slot creation under an older release — not a
-#: deliberate operator opt-out, so the updater retags it to the current
-#: default (:func:`hal0.updater.updater.retag_stale_slot_images`). A pin to
-#: any ref NOT in this set is treated as intentional and never touched.
-#:
-#: ade07ba lineage (2026-08-08, alias ``b10297-hal0.1``): llama.cpp upstream
-#: b10297 via ciru/main's FPX-preserving sync (native MiniCPM5 tool-call
-#: parser with preserved control tokens + lazy grammar, vulkan submission
-#: batching fix, gfx1151 fixes, MTP-layer alloc fix, spec-decode /metrics)
-#: + two hal0 patches: multi-token preserved-marker control tokens
-#: (server-schema) and the restored vulkan ROCmFPX dmmv registrations the
-#: sync dropped. Source: Hal0ai/Hal0_ROCmFPX branch hal0/build-20260808.
-#: This runner is what makes the brain model's attribute-XML tool dialect
-#: parse NATIVELY — brain rounds carry OpenAI ``tools`` again from this
-#: release (see hal0.brain.chat).
-#:
-#: c077206 lineage (2026-07-10): charlie ROCmFPX main @5b39566 (FP6 CPU
-#: decode fix, MTP partial-draft-state fix, vecdotq pack window) + the
-#: minicpm5 pre-tokenizer vocab mapping (ac0137d) + TurboQuant turbo3/turbo4
-#: KV-cache types; image assembly drops the base toolbox's stale
-#: /usr/local llama.cpp (the old mixed install ABI-segfaulted llama-bench).
-#: Superseded by ade07ba — every tools-attached completion against a
-#: MiniCPM5-vocab model on c077206 500s with "peg-native format" (the
-#: control-token pieces are stripped before the parser sees them).
-STALE_ROCMFPX_IMAGE_REFS = frozenset(
-    {
-        # Former default (rc.9). Same lineage as the current 0826 pin but
-        # with the pre-#2056 parser, so every response_format request against
-        # the seeded brain model 400s at sampler init — creation-time debris,
-        # retag.
-        "ghcr.io/hal0ai/hal0-combined:0824",
-        # Former default (rc.7). Pre-#2037 exec-only entrypoint (never
-        # fail-fasts a doomed model) and pre-#2056 parser — retag.
-        "ghcr.io/hal0ai/hal0-combined:0822",
-        # Former default (rc.6). Its Vulkan backend emits invalid tokens for
-        # every model (#1888) — a slot still pinned here is debris from an
-        # older release, not an opt-out, and must be retagged.
-        "ghcr.io/hal0ai/hal0-rocmfpx:ade07ba",
-        "ghcr.io/hal0ai/hal0-rocmfpx:c077206",
-        "ghcr.io/hal0ai/hal0-rocmfpx:vulkan-minicpm5",
-        "localhost/hal0-rocmfpx:vulkan-minicpm5",
-        "ghcr.io/hal0ai/hal0-rocmfpx:server",
-        "ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocmfpx-7aa484a",
-        # Former basic-lane seed defaults (pre HW-gated default). A slot pinned to
-        # one of these is materialised-default debris — the updater re-resolves it
-        # through the HW gate (:func:`resolve_default_image`): GPU boxes migrate to
-        # the rocmfpx runner, and since #2126 a `device = "cpu"` slot migrates to
-        # the CPU toolbox rather than resolving back to this GPU image (which is
-        # what left an already-installed CPU-only box crash-looping on SIGILL
-        # across an upgrade).
-        "ghcr.io/hal0ai/amd-strix-halo-toolboxes:vulkan-radv-server",
-        "ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server",
-    }
-)
-
-#: The runner image whose Vulkan backend was proven CORRECT (#1948 §3-C).
-#:
-#: ``:0822`` is built from ``charlie12345/ROCmFPX`` main — the only ROCmFPX
-#: tree with a demonstrated-correct Vulkan backend — with the MiniCPM5 XML
-#: tool-call parser restored, so it is a superset of the ade07ba lineage:
-#: correct Vulkan output AND native brain tool calls. Validated on ct150
-#: (kfd present) and on ct151 (kfd ABSENT — the box #1888 was reproduced on,
-#: where Vulkan is the ONLY lane): temp-0 Paris probe on both lanes, FPX and
-#: plain non-FPX ggufs, a ≥256-token generation with a clean tail, native
-#: ``tool_calls`` on the shipped brain, and a readable diagnostic instead of
-#: a SIGSEGV with zero devices mapped (#1936).
-#:
-#: ``:0826`` re-earned membership per the rule below rather than inheriting
-#: it (the builder stage's dnf toolchain is unpinned, so "same recipe" does
-#: not prove same binaries): probed 2026-08-26 on ct150 (kfd present) and
-#: ct151 (kfd ABSENT) — temp-0 Paris probe, ≥256-token clean tail, the #1936
-#: device-less diagnostic, and (new with #2056) response_format json_object
-#: and json_schema returning 200 on the seeded brain model with the thinking
-#: kwarg absent, true, and false. The structured-output rows exist because
-#: ``:0822``/``:0824`` passed every earlier probe while 400-ing every
-#: structured-output request against the seeded model — the exact class the
-#: old matrix could not see.
-VULKAN_FIXED_IMAGE = "ghcr.io/hal0ai/hal0-combined:0826"
-
-#: Runner images allowed to serve the ``gpu-vulkan`` llama.cpp lane on an AMD
-#: host. Consulted by :func:`hal0.providers._gpu.image_serves_vulkan_lane`,
-#: which the slot-load preflight uses to refuse the lane on any other image.
-#:
-#: WHY AN EXPLICIT SET AND NOT "the pin or later".
-#: An ordering comparison over these refs cannot be written honestly. The tags
-#: are not versions: ``ade07ba`` and ``c077206`` are git shortrefs, ``0822`` is
-#: a date stamp, ``server`` and ``vulkan-minicpm5`` are names — there is no
-#: total order to compare against, and inventing one (lexical, date-shaped,
-#: "newer digest") would silently admit the next tag that happens to sort
-#: high. Worse, Vulkan correctness here is not monotonic in build recency: the
-#: #1948 bisect found the OLDER charlie tree correct and the NEWER ciru tree
-#: broken, so "later than the fixed pin" is not even a proxy for "fixed".
-#:
-#: So membership is earned by evidence, one ref at a time: an image joins this
-#: set only after it passes the §3-C matrix on a kfd-present AND a kfd-absent
-#: box. The cost is that a new runner pin must ALSO be added here or the Vulkan
-#: lane refuses it — that failure is loud, static, and correct-by-default,
-#: which is exactly the trade #1888 argues for.
-#:
-#: Deliberately disjoint from :data:`STALE_ROCMFPX_IMAGE_REFS`, and note that
-#: :data:`DEFAULT_ROCMFPX_IMAGE` is NOT a member while the default pin is still
-#: the ade07ba lineage — which is the whole reason the gate cannot key off the
-#: default.
-#:
-#: ``DEFAULT_STRIX_IMAGE`` earned membership 2026-08-31 (§3-C run on ct150,
-#: kfd PRESENT, and ct151, kfd ABSENT — the renderD128-only #1888 box shape;
-#: gate report 2026-08-31 (operator artefact store)): Vulkan0
-#: (RADV GFX1151) offload confirmed on both boxes, temp-0 Paris probe,
-#: 256-token clean tail BYTE-IDENTICAL across the two boxes, json_schema
-#: returning grammar-constrained output with 200s across the thinking-kwarg
-#: matrix, and the #1936 device-less diagnostic (exit 78). The image is
-#: Vulkan-ONLY (GGML_HIP=OFF), so this lane is its only lane — membership
-#: here is what makes the runner launchable at all. The gate digest is
-#: pinned in manifest.json's ``toolbox_images.strix``.
-VULKAN_CAPABLE_IMAGE_REFS = frozenset({VULKAN_FIXED_IMAGE, DEFAULT_STRIX_IMAGE})
-
-#: Lean fallback toolbox images for the two non-rocmfpx lanes. The rocmfpx
-#: runner is Vulkan-portable — its Mesa/RADV Vulkan backend runs on any AMD GPU
-#: (the gfx1151 HIP kernels are a bonus on Strix Halo, not a requirement) — so
-#: it serves every AMD GPU lane. Only a CUDA host and a CPU-only host want a
-#: different/leaner image (the 7.5 GB ROCm-based rocmfpx image is pointless for
-#: CPU-only inference).
-FALLBACK_VULKAN_IMAGE = "ghcr.io/hal0ai/amd-strix-halo-toolboxes:vulkan-radv-server"
-FALLBACK_CUDA_IMAGE = "ghcr.io/ggml-org/llama.cpp:server-cuda"
-
-#: Runner images KNOWN to reject a ``tools``-attached completion outright — the
-#: pre-ade07ba ROCmFPX lineage, where llama-server strips the MiniCPM5 vocab's
-#: tool-syntax control tokens before its template-derived parser sees them and
-#: 500s the WHOLE request with "The model produced output that does not match
-#: the expected peg-native format" (#1626).
-#:
-#: This is a DENY list, deliberately, and it is the inverse of the #1655 gate it
-#: replaces. That gate asked "is this image exactly ``DEFAULT_ROCMFPX_IMAGE``?"
-#: and therefore answered "no native tools" for every runner that simply is not
-#: the current default — including plain upstream llama.cpp toolboxes that parse
-#: OpenAI ``tools`` perfectly well. On a CPU-only or CUDA box (whose HW-gated
-#: default is :data:`FALLBACK_VULKAN_IMAGE` / :data:`FALLBACK_CUDA_IMAGE`) that
-#: false negative silently stripped ``tools`` from every brain round, so the
-#: steward answered platform questions from imagination (#1789).
-#:
-#: A ref that is not listed here is assumed CAPABLE; if it turns out not to be,
-#: :func:`hal0.brain.chat._image_native_tools` learns that at runtime from the
-#: first tool-format failure (see ``_TOOL_FORMAT_FAILURE_MARKERS``) and the
-#: round is retried tools-less, so an unknown-bad runner degrades exactly like a
-#: listed one instead of 500ing the turn.
-#:
-#: Note this is a SUBSET of :data:`STALE_ROCMFPX_IMAGE_REFS`: that set also
-#: carries the two former basic-lane toolbox defaults, which are ordinary
-#: llama.cpp builds with no MiniCPM5 parser and no peg-format failure mode.
-NATIVE_TOOL_INCOMPATIBLE_IMAGE_REFS = frozenset(
-    {
-        "ghcr.io/hal0ai/hal0-rocmfpx:c077206",
-        "ghcr.io/hal0ai/hal0-rocmfpx:vulkan-minicpm5",
-        "localhost/hal0-rocmfpx:vulkan-minicpm5",
-        "ghcr.io/hal0ai/hal0-rocmfpx:server",
-        "ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocmfpx-7aa484a",
-    }
-)
-
-
-def resolve_default_image(backend: str | None, device_class: str | None = None) -> str:
-    """Default container image for a slot lane with no explicit image pin.
-
-    Precedence is handled by the caller (slot ``image`` override → profile
-    ``image`` → *this*). ``hal0-rocmfpx`` is the universal AMD-GPU default —
-    its Vulkan/RADV backend is GPU-agnostic, so it is not gated on Strix-Halo —
-    with two carve-outs:
-
-    * CUDA lanes → the upstream llama.cpp CUDA image.
-    * CPU-only lanes → the lean Vulkan toolbox (llama-server runs CPU-only when
-      no GPU devices are passed; the big rocmfpx image is wasteful for CPU).
-    * Every other (AMD GPU: ``rocm`` / ``vulkan``) lane → :data:`DEFAULT_ROCMFPX_IMAGE`
-      (the unified ROCmFPX runner; serves chat + ``--embedding`` + ``--reranking``).
-
-    Deterministic and probe-free — no hardware read on the hot render path.
-
-    §7.1b / ML-4: this is now a thin back-compat SHIM over the runner-image
-    registry (:mod:`hal0.runners`) — ``hal0.runners.runner_for_backend`` owns
-    the HW-gate logic above (verbatim) and ``resolve_runner_image`` adds the
-    env-var / manifest-digest tiers this function never had. The name +
-    signature stay put because a wide set of imports/tests depend on them
-    (updater, tests/config/test_default_image_gate.py, …). The import is
-    LOCAL (not at module top) to avoid a cycle: ``hal0.runners`` imports the
-    image constants from THIS module at its own top level, so this module
-    can't import ``hal0.runners`` back until this function actually runs.
-    """
-    from hal0.runners import resolve_runner_image, runner_for_backend
-
-    return resolve_runner_image(runner_for_backend(backend, device_class))
-
-
 #: Seed profile catalog — externalized to shipped TOML (P3-schema, spec
 #: Part A). See ``hal0/config/data/seed_profiles.toml`` for the 10 seed
-#: entries (with their per-profile rationale comments; the 8 workload
+#: entries (with their per-profile rationale comments; the 5 workload
 #: variants pruned off the seed list live in
 #: ``hal0/config/data/legacy_seed_profiles.toml`` instead) and
 #: ``hal0.config.seeds.seed_profiles()`` for the loader. ``SEED_PROFILES``
@@ -2363,9 +2043,9 @@ class SlotsConfig(BaseModel):
         description=(
             "Per-runner-family operator default-image overrides "
             "(runner-image-catalogue v2). Keys are hal0.runners.RUNNER_IMAGES "
-            "family keys (rocmfpx, cuda, cpu, flm, kokoro, "
+            "family keys (standard, cpu, cuda, flm, kokoro, "
             "moonshine, qwen3tts, comfyui); values are full image refs "
-            "(e.g. 'ghcr.io/hal0ai/hal0-combined:0824'). A family listed "
+            "(e.g. 'ghcr.io/hal0ai/hal0-runner-standard:<tag>'). A family listed "
             "here launches that ref instead of the release-baked default "
             "wherever no per-slot image_pin applies "
             "(hal0.providers.container._resolve_image_ref). CLEAR SEMANTICS: "
@@ -2383,63 +2063,24 @@ class SlotsConfig(BaseModel):
 
         A ``None`` VALUE is the documented way to clear one family's
         override (the settings PUT deep-merge replaces scalars and has no
-        delete idiom, so ``{"rocmfpx": null}`` must mean "remove the key"
+        delete idiom, so ``{"standard": null}`` must mean "remove the key"
         rather than fail validation). Unknown family keys and empty/
         non-string refs are rejected with the offending key named — the
         family vocabulary is ``hal0.runners.RUNNER_IMAGES`` (imported
-        lazily: hal0.runners imports THIS module at import time, so a
-        module-level import here would be a cycle).
-
-        Keys are canonicalized BEFORE the null check: a null on either
-        spelling (``vulkanfpx`` or ``rocmfpx``) clears the same canonical
-        family, order-independent. A merged request like
-        ``{"vulkanfpx": "x", "rocmfpx": null}`` (or the reverse order)
-        must clear the family rather than let the alias-origin write
-        silently resurrect it — every null-cleared canonical family is
-        tracked and refuses any later value write into it, regardless of
-        which spelling carried the value and regardless of iteration order.
+        lazily). Keys a removed runner left behind are rewritten by the
+        one-shot runner-system migration before config is ever validated
+        (``hal0.config.migrations.runner_system``).
         """
         if v is None:
             return {}
         if not isinstance(v, dict):
             return v  # let pydantic's dict[str, str] coercion produce the error
-        from hal0.runners import RUNNER_IMAGES, canonical_runner_key
+        from hal0.runners import RUNNER_IMAGES
 
-        # Pass 1: canonicalize every key up front (so a null clear and a
-        # value write for the same family are recognized as the same
-        # family no matter which spelling carried which, and no matter
-        # which one appears first in the source dict).
-        entries: list[tuple[str, bool, Any]] = []  # (canon, aliased, ref)
-        cleared: set[str] = set()
-        for key, ref in v.items():
-            canon = canonical_runner_key(key)
-            aliased = canon != key
-            if aliased:
-                _warn_once(
-                    "slots.default_images_alias",
-                    key,
-                    "slots.default_images_alias key=%s canonical=%s",
-                    key,
-                    canon,
-                )
-            if ref is None:
-                cleared.add(canon)  # explicit null = clear this family's override
-                continue
-            entries.append((canon, aliased, ref))
-
-        # Pass 2: apply value writes, refusing any family a null cleared.
         cleaned: dict[str, Any] = {}
-        canonical_origin: set[str] = set()  # keys in `cleaned` written by a canonical key
-        for canon, aliased, ref in entries:
-            if canon in cleared:
-                # A null clear (either spelling, either order) always wins
-                # over a value write to the same family.
-                continue
-            key = canon
-            if key in cleaned and (aliased or key in canonical_origin):
-                # A canonical-origin entry always wins over an alias-origin
-                # one, regardless of which key appeared first in the TOML.
-                continue
+        for key, ref in v.items():
+            if ref is None:
+                continue  # explicit null = clear this family's override
             if key not in RUNNER_IMAGES:
                 raise ValueError(
                     f"[slots].default_images key {key!r} is not a known runner "
@@ -2451,8 +2092,6 @@ class SlotsConfig(BaseModel):
                     "ref (send null to clear the override)"
                 )
             cleaned[key] = ref.strip()
-            if not aliased:
-                canonical_origin.add(key)
         return cleaned
 
     @field_validator("publish_host")
@@ -3792,7 +3431,7 @@ class Hal0Config(BaseModel):
 from hal0.config import seeds as _seeds  # noqa: E402
 
 SEED_PROFILES: dict[str, dict[str, object]] = _seeds.seed_profiles()
-#: The 8 demoted (ex-seed) definitions — shipped data, NOT part of the seed
+#: The 5 demoted (ex-seed) definitions — shipped data, NOT part of the seed
 #: catalog. Injected once into an existing install's profiles.toml as ordinary
 #: custom profiles by ``loader.load_profiles_config``.
 LEGACY_SEED_PROFILES: dict[str, dict[str, object]] = _seeds.legacy_seed_profiles()

@@ -53,7 +53,7 @@ exclusive = true
 
 [selector]
 include_only = true
-include = ["qwen3.6-27b"]              # registry id, not the gguf path
+include = ["qwen3.8-27b"]              # registry id, not the gguf path
 
 [matrix]
 lanes   = ["rocm", "vulkan_radv"]
@@ -75,7 +75,7 @@ max_age_days = 0        # always (re)measure — this is a one-off tuning run
 ```bash
 hal0 bench plan --suite /tmp/tune-qwen.toml         # sanity-check the worklist first
 hal0 bench run  --suite /tmp/tune-qwen.toml
-hal0 bench results --model qwen3.6-27b --json       # then compare configs
+hal0 bench results --model qwen3.8-27b --json       # then compare configs
 ```
 
 Allowed tuning flags (seam whitelist, enforced on the argv `hal0.bench.harness` composes

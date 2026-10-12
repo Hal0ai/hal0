@@ -1749,9 +1749,9 @@ _AUDIO_DECODER_LEAK_MARKERS = (b"CalledProcessError", b"ffmpeg", b"FFmpeg", b"FF
 def _scrub_audio_decoder_leakage(response: Response) -> Response:
     """Replace a leaky upstream STT error with a clean hal0 415 envelope.
 
-    The moonshine container in this repo already converts ffmpeg decode
-    failures to a 415 with the ``audio.unsupported_format`` envelope and
-    no ``ffmpeg`` substring (see ``packaging/toolbox/moonshine/moonshine_server.py``).
+    The moonshine runner image already converts ffmpeg decode failures to a
+    415 with the ``audio.unsupported_format`` envelope and no ``ffmpeg``
+    substring (its server lives in the hal0-runner-images repo).
     But the proxy can't assume every reachable upstream is on that build
     — older deployed images, third-party STT containers, or operator-side
     decoders may still surface a ``CalledProcessError`` repr that includes

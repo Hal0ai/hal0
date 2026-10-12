@@ -22,19 +22,19 @@ import { profileApplyPreview } from '../profile-apply-preview.js'
 // "device follows the runner" and "runner has a lane choice" branches are
 // reachable.
 const backends = {
-  rocmfpx: {
+  standard: {
     title: 'Standard', blurb: 'Runs everything.', tier: 'default',
     supported_backends: ['rocm', 'vulkan'], device_class: 'gpu',
     runtime_family: 'llama-server', state: 'installed',
   },
-  promptforge: {
-    title: 'PromptForge', blurb: 'Accelerated PF.', tier: 'optional',
+  qwen3tts: {
+    title: 'Qwen3 TTS', blurb: 'Higher-quality TTS.', tier: 'optional',
     supported_backends: ['rocm'], device_class: 'gpu',
     runtime_family: 'llama-server', state: 'installed',
   },
-  strix: {
-    title: 'Strix', blurb: 'Qwen4 + MTP.', tier: 'optional',
-    supported_backends: ['vulkan'], device_class: 'gpu',
+  cuda: {
+    title: 'NVIDIA CUDA', blurb: 'llama.cpp for NVIDIA.', tier: 'optional',
+    supported_backends: ['cuda'], device_class: 'gpu',
     runtime_family: 'llama-server', state: 'installed',
   },
 }
@@ -71,21 +71,21 @@ const preview = (args: PreviewArgs): Preview | null =>
 describe('profileApplyPreview — runtime flip', () => {
   it('a runner-carrying profile names the runtime it pins and the lanes it serves', () => {
     const p = preview({
-      profile: { name: 'pf-tune', runner: 'promptforge', flags: '-fa on -b 512' },
-      baselineRunner: 'strix',
+      profile: { name: 'q3-tune', runner: 'qwen3tts', flags: '-fa on -b 512' },
+      baselineRunner: 'standard',
       currentDevice: 'gpu-vulkan',
       modelFlags: '',
       currentProfileFlags: '',
     })
     expect(p).not.toBeNull()
-    expect(p!.runtime).toEqual({ unchanged: false, title: 'PromptForge', lanes: ['rocm'] })
+    expect(p!.runtime).toEqual({ unchanged: false, title: 'Qwen3 TTS', lanes: ['rocm'] })
     expect(p!.restart).toBe(true)
   })
 
   it('a single-lane runner moves the slot off its current lane (applyRunnerChoice truth)', () => {
     const p = preview({
-      profile: { name: 'pf-tune', runner: 'promptforge', flags: '' },
-      baselineRunner: 'strix',
+      profile: { name: 'q3-tune', runner: 'qwen3tts', flags: '' },
+      baselineRunner: 'standard',
       currentDevice: 'gpu-vulkan',
     })
     expect(p!.lane).toEqual({ unchanged: false, from: 'Vulkan', to: 'ROCm' })
@@ -93,11 +93,11 @@ describe('profileApplyPreview — runtime flip', () => {
 
   it('an out-of-catalog runner key still names itself and never invents a lane', () => {
     const p = preview({
-      profile: { name: 'ghost', runner: 'strix-next', flags: '' },
+      profile: { name: 'ghost', runner: 'ghost-next', flags: '' },
       baselineRunner: '',
       currentDevice: 'gpu-rocm',
     })
-    expect(p!.runtime).toEqual({ unchanged: false, title: 'strix-next', lanes: [] })
+    expect(p!.runtime).toEqual({ unchanged: false, title: 'ghost-next', lanes: [] })
     // No lane claim can be derived, and the device cannot follow an unknown
     // key — the lane line says "unchanged" rather than inventing a move.
     expect(p!.lane).toEqual({ unchanged: true, from: 'ROCm', to: 'ROCm' })
@@ -107,17 +107,17 @@ describe('profileApplyPreview — runtime flip', () => {
 describe('profileApplyPreview — same runtime', () => {
   it('a profile pinning the runtime the slot already runs says so instead of faking a flip', () => {
     const p = preview({
-      profile: { name: 'pf-tune', runner: 'promptforge', flags: '' },
-      baselineRunner: 'promptforge',
+      profile: { name: 'q3-tune', runner: 'qwen3tts', flags: '' },
+      baselineRunner: 'qwen3tts',
       currentDevice: 'gpu-rocm',
     })
-    expect(p!.runtime).toEqual({ unchanged: true, title: 'PromptForge', lanes: ['rocm'] })
+    expect(p!.runtime).toEqual({ unchanged: true, title: 'Qwen3 TTS', lanes: ['rocm'] })
   })
 
   it('omits the lane line entirely when a single-lane runtime is already on its lane', () => {
     const p = preview({
-      profile: { name: 'pf-tune', runner: 'promptforge', flags: '' },
-      baselineRunner: 'promptforge',
+      profile: { name: 'q3-tune', runner: 'qwen3tts', flags: '' },
+      baselineRunner: 'qwen3tts',
       currentDevice: 'gpu-rocm',
     })
     expect(p!.lane).toBeNull()
@@ -125,8 +125,8 @@ describe('profileApplyPreview — same runtime', () => {
 
   it('a multi-lane runtime keeps its lane line — the lane is a live choice that is not moving', () => {
     const p = preview({
-      profile: { name: 'std-tune', runner: 'rocmfpx', flags: '' },
-      baselineRunner: 'strix',
+      profile: { name: 'std-tune', runner: 'standard', flags: '' },
+      baselineRunner: 'standard',
       currentDevice: 'gpu-rocm',
     })
     expect(p!.runtime.lanes).toEqual(['rocm', 'vulkan'])
@@ -138,7 +138,7 @@ describe('profileApplyPreview — Auto profile (no runtime opinion)', () => {
   it('says "unchanged" for runtime and lane rather than dropping the lines', () => {
     const p = preview({
       profile: { name: 'chat', runner: null, flags: '-fa on' },
-      baselineRunner: 'promptforge',
+      baselineRunner: 'qwen3tts',
       currentDevice: 'gpu-rocm',
     })
     expect(p!.runtime).toEqual({ unchanged: true, title: null, lanes: [] })

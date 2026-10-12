@@ -63,7 +63,7 @@ async function mockDrawerLookups(page: import('@playwright/test').Page) {
       contentType: 'application/json',
       body: JSON.stringify([{
         name: 'rocm-save',
-        image: 'ghcr.io/hal0ai/hal0-rocmfp4',
+        image: 'ghcr.io/hal0ai/hal0-runner-standard',
         flags: PROFILE_FLAGS,
         resolved_flags: PROFILE_FLAGS,
         mtp: true,

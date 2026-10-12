@@ -46,15 +46,14 @@
 #     fresh box has no coordinates for it until something scans or adds it —
 #     it resolves on boxes whose registry already carries the row, not on a
 #     box straight out of install.sh;
-#   * it is F16-only, so a ROCmFPX box gets no benefit from the quants.
+#   * it is F16-only.
 #
 # Port 8089: 8088 belongs to the flm seed.
 #
-# Tool calling: the LFM2.5 default is a NATIVE tool-caller on the
-# hal0-combined:0826+ runner — its LFM2.5 parser detects the template and
-# grammar-locks the <|tool_call_start|> dialect (verified on ct150, rc.9
-# validation). The sft override variants parse natively via the MiniCPM5
-# specialized parser as of runner ade07ba. Reasoning: LFM2.5 emits <think>
+# Tool calling: the LFM2.5 default is a NATIVE tool-caller on the Standard
+# runner — llama.cpp's LFM2 parser detects the template and grammar-locks the
+# <|tool_call_start|> dialect. The sft F16 override parses natively via the
+# MiniCPM5 specialized parser. Reasoning: LFM2.5 emits <think>
 # from weights; profile.brain leaves reasoning-format at the runner
 # default so think text extracts into reasoning_content instead of leaking
 # into message.content (see seed_profiles.toml). The `[brain_chat]

@@ -3522,8 +3522,12 @@ def _mirror_bundled_skills(src_root: Path, dst_root: Path) -> SkillMirror:
 
     Missing src is a warning, not a failure — bundled skills are optional in a
     dev install. A skill that IS present and fails to link is a failure and is
-    reported as one (see :class:`SkillMirror`).
+    reported as one (see :class:`SkillMirror`). A retired skill
+    (:data:`hal0.agents.bundled_skills.RETIRED_BUNDLED_SKILLS`) still on disk
+    from an older release is never linked, and its stale link is removed.
     """
+    from hal0.agents.bundled_skills import RETIRED_BUNDLED_SKILLS, prune_retired_skills
+
     linked: list[str] = []
     warnings: list[str] = []
     failed: list[str] = []
@@ -3531,7 +3535,12 @@ def _mirror_bundled_skills(src_root: Path, dst_root: Path) -> SkillMirror:
         warnings.append(f"hal0-bundled skills source {src_root} not present; nothing to mirror")
         return SkillMirror(linked, warnings, failed)
     dst_root.mkdir(parents=True, exist_ok=True)
+    # Unlink only: the copies under src_root are root-owned and install.sh
+    # removes them.
+    prune_retired_skills(ship_root=None, mirror=dst_root)
     for entry in sorted(src_root.iterdir()):
+        if entry.name in RETIRED_BUNDLED_SKILLS:
+            continue
         link = dst_root / entry.name
         try:
             if _safe_symlink(entry, link):

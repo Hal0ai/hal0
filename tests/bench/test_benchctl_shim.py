@@ -38,6 +38,17 @@ from pathlib import Path
 import pytest
 
 _REPO = Path(__file__).resolve().parents[2]
+_MANIFEST = _REPO / "manifest.json"
+
+
+def _pinned(key: str) -> str:
+    """The release's pinned ref for runner ``key`` (repo:tag@digest)."""
+    from hal0.runners.pins import load_runner_pins
+
+    return load_runner_pins(_MANIFEST)[key].ref
+
+
+_BENCH_BIN = "/opt/hal0/bin/llama-bench"
 BENCHCTL = _REPO / "installer" / "wrappers" / "hal0-benchctl"
 
 
@@ -138,6 +149,7 @@ def _env(
         # both this and the python3 stub exist.
         "HAL0_MODEL_STORE": str(model_root),
         "HAL0_BENCH_PYTHON": str(bindir / "python3"),
+        "HAL0_BENCHCTL_MANIFEST": str(_MANIFEST),
     }
     if (bindir / "podman").exists():
         env["HAL0_BENCHCTL_PODMAN"] = str(bindir / "podman")
@@ -177,8 +189,8 @@ def _rocm_argv(model_root: Path, model_abs: Path, kfd: str, dri_render: str) -> 
         "-e",
         "GGML_HIP_ENABLE_UNIFIED_MEMORY=1",
         "--entrypoint",
-        "/opt/rocmfpx/bin/llama-bench",
-        "ghcr.io/hal0ai/hal0-rocmfpx:ade07ba",
+        _BENCH_BIN,
+        _pinned("standard"),
         "-m",
         str(model_abs),
         "-fa",
@@ -205,8 +217,8 @@ def _cpu_argv(model_root: Path, model_abs: Path) -> list[str]:
         "seccomp=unconfined",
         f"--volume={model_root}:{model_root}:ro,z",
         "--entrypoint",
-        "/usr/local/bin/llama-bench",
-        "ghcr.io/hal0ai/amd-strix-halo-toolboxes:vulkan-radv-server",
+        _BENCH_BIN,
+        _pinned("cpu"),
         "-m",
         str(model_abs),
         "-fa",
@@ -224,6 +236,26 @@ def _cpu_argv(model_root: Path, model_abs: Path) -> list[str]:
 
 
 class TestExecAccepts:
+    @pytest.mark.parametrize("lane", ["rocm", "vulkan_radv", "cpu"])
+    def test_accepts_every_shipped_lane_image(self, tmp_path, lane: str) -> None:
+        """The harness and this seam agree: every lane the bench composes from
+        the pin table is an image and entrypoint the seam lets through."""
+        from hal0.bench.harness import lane_specs
+
+        spec = lane_specs()[lane]
+        model_root = _model_root(tmp_path)
+        model_abs = _write_model(model_root)
+        bindir = _stub_bin(tmp_path, model_root, argv_log=tmp_path / "podman-argv.log")
+        env = _env(tmp_path, bindir, model_root)
+        argv = _cpu_argv(model_root, model_abs)
+        i = argv.index("--entrypoint")
+        argv[i + 1] = spec.bench_bin
+        argv[i + 2] = spec.image
+
+        proc = _run(["exec", "--", *argv], env)
+
+        assert proc.returncode == 0, proc.stderr
+
     def test_accepts_a_canonical_rocm_argv(self, tmp_path) -> None:
         model_root = _model_root(tmp_path)
         model_abs = _write_model(model_root)
@@ -344,6 +376,39 @@ class TestExecRejects:
 
         assert proc.returncode != 0
 
+    @pytest.mark.parametrize(
+        "image",
+        [
+            # A hal0 image the release does not pin, and the retired ones.
+            "ghcr.io/hal0ai/hal0-runner-standard:b1-r0000000",
+            "ghcr.io/hal0ai/hal0-rocmfpx:ade07ba",
+            "ghcr.io/hal0ai/amd-strix-halo-toolboxes:vulkan-radv-server",
+            # The bare repo would pull latest.
+            "ghcr.io/hal0ai/hal0-runner-cpu",
+        ],
+    )
+    def test_rejects_an_image_the_release_does_not_pin(self, tmp_path, image: str) -> None:
+        model_root, model_abs, env = self._base(tmp_path)
+        argv = _cpu_argv(model_root, model_abs)
+        argv[argv.index("--entrypoint") + 2] = image
+
+        proc = _run(["exec", "--", *argv], env)
+
+        assert proc.returncode != 0
+        assert "image not allowed" in proc.stderr
+
+    @pytest.mark.parametrize(
+        "entrypoint", ["/opt/rocmfpx/bin/llama-bench", "/usr/local/bin/llama-bench"]
+    )
+    def test_rejects_the_retired_entrypoints(self, tmp_path, entrypoint: str) -> None:
+        model_root, model_abs, env = self._base(tmp_path)
+        argv = _cpu_argv(model_root, model_abs)
+        argv[argv.index("--entrypoint") + 1] = entrypoint
+
+        proc = _run(["exec", "--", *argv], env)
+
+        assert proc.returncode != 0
+
     def test_rejects_a_bad_entrypoint(self, tmp_path) -> None:
         model_root, model_abs, env = self._base(tmp_path)
         argv = _cpu_argv(model_root, model_abs)
@@ -431,7 +496,7 @@ class TestExecRejects:
         model_root, model_abs, env = self._base(tmp_path)
         argv = _cpu_argv(model_root, model_abs)
         i = argv.index("--entrypoint")
-        argv[i:i] = ["--entrypoint", "/usr/local/bin/llama-bench"]
+        argv[i:i] = ["--entrypoint", _BENCH_BIN]
 
         proc = _run(["exec", "--", *argv], env)
 

@@ -379,6 +379,26 @@ def _install_mock_httpx(
     monkeypatch.setattr(mod.httpx, "Client", _client_factory)
 
 
+def _pin_row(
+    key: str = "standard",
+    *,
+    tag: str | None = "b1-r1",
+    digest: str | None = None,
+    image: str | None = None,
+) -> dict:
+    """One ``runners`` row of manifest.json (``tag: null`` = not published yet)."""
+    return {
+        "image": image or f"ghcr.io/hal0ai/hal0-runner-{key}",
+        "tag": tag,
+        "digest": digest,
+        "lanes_gated": [],
+    }
+
+
+def _runners_manifest(tmp_path: Path, runners: dict[str, dict]) -> Path:
+    return _write_manifest(tmp_path, {"version": "1.0.0", "runners": runners})
+
+
 def test_toolbox_pull_reports_ok_when_all_images_reachable(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -386,24 +406,15 @@ def test_toolbox_pull_reports_ok_when_all_images_reachable(
 ) -> None:
     """Happy path: every probe HEAD returns the pinned digest → exit 0."""
     pinned = "sha256:" + "a" * 64
-    manifest_path = _write_manifest(
-        tmp_path,
-        {
-            "_schema": "hal0.manifest.v1",
-            "version": "1.0.0",
-            "toolbox_images": {
-                "vulkan": {
-                    "tag": "ghcr.io/hal0ai/hal0-toolbox-vulkan:v1",
-                    "digest": pinned,
-                },
-            },
-        },
+    manifest_path = _runners_manifest(
+        tmp_path, {"standard": _pin_row("standard", tag="b1-r1", digest=pinned)}
     )
 
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/token":
+            assert request.url.params["scope"] == "repository:hal0ai/hal0-runner-standard:pull"
             return httpx.Response(200, json={"token": "anon-bearer"})
-        if request.url.path.endswith("/manifests/v1"):
+        if request.url.path.endswith("/manifests/b1-r1"):
             assert request.method == "HEAD"
             assert request.headers["Authorization"] == "Bearer anon-bearer"
             return httpx.Response(200, headers={"Docker-Content-Digest": pinned})
@@ -416,6 +427,7 @@ def test_toolbox_pull_reports_ok_when_all_images_reachable(
     assert _exit_code(exc) == 0
     out = capsys.readouterr().out
     rows = jsonlib.loads(out)
+    assert rows[0]["name"] == "standard"
     assert rows[0]["ok"] is True
     assert rows[0]["digest"] == pinned
     assert rows[0]["matches_pin"] is True
@@ -429,17 +441,8 @@ def test_toolbox_pull_surfaces_digest_drift_without_failing(
     """Digest drift is reported in ``matches_pin`` but does NOT exit non-zero."""
     pinned = "sha256:" + "a" * 64
     actual = "sha256:" + "b" * 64
-    manifest_path = _write_manifest(
-        tmp_path,
-        {
-            "_schema": "hal0.manifest.v1",
-            "toolbox_images": {
-                "vulkan": {
-                    "tag": "ghcr.io/hal0ai/hal0-toolbox-vulkan:v1",
-                    "digest": pinned,
-                },
-            },
-        },
+    manifest_path = _runners_manifest(
+        tmp_path, {"standard": _pin_row("standard", tag="b1-r1", digest=pinned)}
     )
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -464,18 +467,7 @@ def test_toolbox_pull_exits_nonzero_when_image_unreachable(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """A 404 on the manifest URL surfaces as ok=False and exit code 1."""
-    manifest_path = _write_manifest(
-        tmp_path,
-        {
-            "_schema": "hal0.manifest.v1",
-            "toolbox_images": {
-                "vulkan": {
-                    "tag": "ghcr.io/hal0ai/hal0-toolbox-vulkan:v1",
-                    "digest": None,
-                },
-            },
-        },
-    )
+    manifest_path = _runners_manifest(tmp_path, {"standard": _pin_row("standard", tag="b1-r1")})
 
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/token":
@@ -492,22 +484,92 @@ def test_toolbox_pull_exits_nonzero_when_image_unreachable(
     assert "404" in (rows[0]["error"] or "")
 
 
-def test_toolbox_pull_exits_2_when_manifest_empty(
+def test_toolbox_pull_fails_unpublished_rows_without_touching_the_network(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """No toolbox_images block → exit 2 (preserved diagnostic semantics)."""
-    manifest_path = _write_manifest(
+    """A ``tag: null`` row has no image to pull: it fails with "not published
+    yet" and the probe never goes to the registry for it."""
+    manifest_path = _runners_manifest(tmp_path, {"cpu": _pin_row("cpu", tag=None)})
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        raise AssertionError("an unpublished runner must not trigger a network call")
+
+    _install_mock_httpx(monkeypatch, handler)
+
+    with pytest.raises(typer.Exit) as exc:
+        toolbox_pull(json_output=True, manifest_path=manifest_path)
+    assert _exit_code(exc) == 1
+    rows = jsonlib.loads(capsys.readouterr().out)
+    assert rows[0]["name"] == "cpu"
+    assert rows[0]["ok"] is False
+    assert "not published yet" in (rows[0]["error"] or "")
+
+
+def test_toolbox_pull_probes_every_runner_and_fails_if_any_is_unpublished(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """One reachable pin plus one placeholder: both rows are reported (sorted by
+    runner key) and the exit code is 1."""
+    pinned = "sha256:" + "a" * 64
+    manifest_path = _runners_manifest(
         tmp_path,
-        {"_schema": "hal0.manifest.v1", "toolbox_images": {}},
+        {
+            "standard": _pin_row("standard", tag="b1-r1", digest=pinned),
+            "cpu": _pin_row("cpu", tag=None),
+        },
     )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/token":
+            return httpx.Response(200, json={"token": "anon"})
+        return httpx.Response(200, headers={"Docker-Content-Digest": pinned})
+
+    _install_mock_httpx(monkeypatch, handler)
+
+    with pytest.raises(typer.Exit) as exc:
+        toolbox_pull(json_output=True, manifest_path=manifest_path)
+    assert _exit_code(exc) == 1
+    rows = jsonlib.loads(capsys.readouterr().out)
+    assert [(r["name"], r["ok"]) for r in rows] == [("cpu", False), ("standard", True)]
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"_schema": "hal0.manifest.v1", "runners": {}},
+        {"_schema": "hal0.manifest.v1", "toolbox_images": {"vulkan": {"tag": "x", "digest": None}}},
+    ],
+    ids=["empty-runners", "legacy-toolbox-images-only"],
+)
+def test_toolbox_pull_exits_2_when_the_pin_table_is_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, body: dict
+) -> None:
+    """No ``runners`` table → exit 2 (preserved diagnostic semantics). The old
+    ``toolbox_images`` block is not read any more."""
+    manifest_path = _write_manifest(tmp_path, body)
 
     # No network should be touched in this path; install a handler that
     # blows up loudly if it is.
     def handler(_request: httpx.Request) -> httpx.Response:
-        raise AssertionError("network should not be hit when manifest is empty")
+        raise AssertionError("network should not be hit when the pin table is missing")
 
     _install_mock_httpx(monkeypatch, handler)
+
+    with pytest.raises(typer.Exit) as exc:
+        toolbox_pull(json_output=False, manifest_path=manifest_path)
+    assert _exit_code(exc) == 2
+
+
+def test_toolbox_pull_exits_2_when_the_manifest_is_malformed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text("{not json")
+    _install_mock_httpx(monkeypatch, lambda _r: pytest.fail("no network expected"))
 
     with pytest.raises(typer.Exit) as exc:
         toolbox_pull(json_output=False, manifest_path=manifest_path)
@@ -519,22 +581,18 @@ def test_toolbox_pull_skips_non_ghcr_refs_with_clear_error(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """A non-ghcr.io tag is reported as failed without any network calls."""
-    manifest_path = _write_manifest(
+    """A non-ghcr.io image is reported as failed without any network calls."""
+    manifest_path = _runners_manifest(
         tmp_path,
         {
-            "_schema": "hal0.manifest.v1",
-            "toolbox_images": {
-                "vulkan": {
-                    "tag": "docker.io/hal0ai/hal0-toolbox-vulkan:v1",
-                    "digest": None,
-                },
-            },
+            "standard": _pin_row(
+                "standard", tag="b1-r1", image="docker.io/hal0ai/hal0-runner-standard"
+            )
         },
     )
 
     def handler(_request: httpx.Request) -> httpx.Response:
-        raise AssertionError("non-ghcr tag should not trigger a network call")
+        raise AssertionError("non-ghcr image should not trigger a network call")
 
     _install_mock_httpx(monkeypatch, handler)
 
@@ -578,17 +636,8 @@ def test_toolbox_pull_json_output_is_plain_not_ansi_colorized(
     corrupting the bytes a machine consumer parses.
     """
     pinned = "sha256:" + "a" * 64
-    manifest_path = _write_manifest(
-        tmp_path,
-        {
-            "_schema": "hal0.manifest.v1",
-            "toolbox_images": {
-                "vulkan": {
-                    "tag": "ghcr.io/hal0ai/hal0-toolbox-vulkan:v1",
-                    "digest": pinned,
-                },
-            },
-        },
+    manifest_path = _runners_manifest(
+        tmp_path, {"standard": _pin_row("standard", tag="b1-r1", digest=pinned)}
     )
 
     def handler(request: httpx.Request) -> httpx.Response:

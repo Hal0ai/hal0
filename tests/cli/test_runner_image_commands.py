@@ -21,8 +21,13 @@ from hal0.providers import podman_mutate
 from hal0.providers.podman_introspect import LocalImagesDigests
 from hal0.registry.runner_image import RunnerImage, RunnerImageTag
 from hal0.registry.runner_image_store import RunnerImageStore
+from hal0.registry.runner_image_sync import SyncResult
+from hal0.runners.pins import RunnerPin, load_runner_pins
 
 runner = CliRunner()
+
+STD_REPO = "ghcr.io/hal0ai/hal0-runner-standard"
+_DIGEST = "sha256:" + "d" * 64
 
 
 @pytest.fixture
@@ -40,10 +45,10 @@ def store(hal0_home: Path) -> RunnerImageStore:
 
 def _image(**kw: object) -> RunnerImage:
     defaults: dict[str, object] = {
-        "id": "x/a",
-        "image": "ghcr.io/x/a",
-        "tag": "0826",
-        "available_tags": ["0826"],
+        "id": "standard",
+        "image": STD_REPO,
+        "tag": "b2",
+        "available_tags": ["b2"],
     }
     defaults.update(kw)
     return RunnerImage(**defaults)  # type: ignore[arg-type]
@@ -56,8 +61,8 @@ class TestLs:
         result = runner.invoke(runner_images_app, ["ls"])
 
         assert result.exit_code == 0, result.output
-        assert "ghcr.io/x/a:0826" in result.output
-        assert "x/a" in result.output
+        assert f"{STD_REPO}:b2" in result.output
+        assert "standard" in result.output
 
     def test_empty_catalogue_still_exits_zero(self, store: RunnerImageStore) -> None:
         result = runner.invoke(runner_images_app, ["ls"])
@@ -77,11 +82,11 @@ class TestLs:
         CLI behaviour, keyed off ``image.digest`` alone) would miss and
         wrongly report "missing"."""
         store.upsert(_image())
-        store.set_tags("x/a", [RunnerImageTag(tag="0826", digest="sha256:" + "a" * 64)])
+        store.set_tags("standard", [RunnerImageTag(tag="b2", digest="sha256:" + "a" * 64)])
         monkeypatch.setattr(
             "hal0.providers.podman_introspect.images_digests",
             lambda: LocalImagesDigests(
-                refs={"ghcr.io/x/a:renamed": "sha256:" + "a" * 64}, context="rootful"
+                refs={f"{STD_REPO}:renamed": "sha256:" + "a" * 64}, context="rootful"
             ),
         )
 
@@ -91,20 +96,115 @@ class TestLs:
         assert "present" in result.output.lower()
         assert "missing" not in result.output.lower()
 
-    def test_badges_column_shown_when_any_row_has_a_badge(self, store: RunnerImageStore) -> None:
-        """A ``Badges`` column appears (reusing the same schema constants
-        the API's ``_tag_badges`` reads) when at least one catalogued row's
-        headline tag matches one — here the promptforge candidate ref."""
-        from hal0.config.schema import DEFAULT_PROMPTFORGE_IMAGE
-
-        image_repo, _, tag = DEFAULT_PROMPTFORGE_IMAGE.rpartition(":")
-        store.upsert(_image(id="pf", image=image_repo, tag=tag, available_tags=[tag]))
+    def test_badges_column_shown_when_the_headline_is_the_pinned_tag(
+        self, store: RunnerImageStore, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A ``Badges`` column appears (reusing the API's ``_tag_badges``)
+        when at least one catalogued row's headline tag is its runner's
+        release pin."""
+        table = dict(load_runner_pins())
+        table["standard"] = RunnerPin(key="standard", image=STD_REPO, tag="b2", digest=_DIGEST)
+        monkeypatch.setattr("hal0.runners.pins.runner_pins", lambda: table)
+        store.upsert(_image())
 
         result = runner.invoke(runner_images_app, ["ls"])
 
         assert result.exit_code == 0, result.output
         assert "badges" in result.output.lower()
-        assert "candidate" in result.output.lower()
+        assert "pinned" in result.output.lower()
+
+    def test_no_badges_column_when_no_headline_is_pinned(
+        self, store: RunnerImageStore, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        table = dict(load_runner_pins())
+        table["standard"] = RunnerPin(key="standard", image=STD_REPO, tag="b1", digest=_DIGEST)
+        monkeypatch.setattr("hal0.runners.pins.runner_pins", lambda: table)
+        store.upsert(_image())  # headline b2, the pin names b1
+
+        result = runner.invoke(runner_images_app, ["ls"])
+
+        assert result.exit_code == 0, result.output
+        assert "badges" not in result.output.lower()
+        assert "pinned" not in result.output.lower()
+
+    def test_rows_are_listed_by_runner_key(self, store: RunnerImageStore) -> None:
+        store.upsert(_image())
+        store.upsert(_image(id="cpu", image="ghcr.io/hal0ai/hal0-runner-cpu", tag="b1"))
+
+        result = runner.invoke(runner_images_app, ["ls"])
+
+        assert result.exit_code == 0, result.output
+        out = result.output
+        assert out.index("cpu") < out.index("standard")  # store.list() sorts by id
+        assert "ghcr.io/hal0ai/hal0-runner-cpu:b1" in out
+
+
+class TestSync:
+    @staticmethod
+    def _stub(monkeypatch: pytest.MonkeyPatch, result: SyncResult) -> None:
+        async def _fake(store: RunnerImageStore, **kw: object) -> SyncResult:
+            return result
+
+        monkeypatch.setattr("hal0.registry.runner_image_sync.sync_runner_images", _fake)
+
+    def test_reports_the_synced_count(
+        self, store: RunnerImageStore, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._stub(monkeypatch, SyncResult(images=[_image()], images_json_ok=True))
+
+        result = runner.invoke(runner_images_app, ["sync"])
+
+        assert result.exit_code == 0, result.output
+        assert "synced 1 runner image" in result.output
+
+    def test_probe_errors_are_listed_by_runner_key_but_do_not_fail(
+        self, store: RunnerImageStore, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._stub(
+            monkeypatch,
+            SyncResult(images=[_image()], images_json_ok=True, probe_errors={"flm": "HTTP 500"}),
+        )
+
+        result = runner.invoke(runner_images_app, ["sync"])
+
+        assert result.exit_code == 0, result.output
+        assert "flm" in result.output
+        assert "HTTP 500" in result.output
+
+    def test_skipped_catalogue_entries_are_listed_with_reasons(
+        self, store: RunnerImageStore, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._stub(
+            monkeypatch,
+            SyncResult(
+                images=[_image()],
+                images_json_ok=True,
+                skipped={"strix": "'strix' is not a runner this hal0 ships"},
+            ),
+        )
+
+        result = runner.invoke(runner_images_app, ["sync"])
+
+        assert result.exit_code == 0, result.output
+        out = " ".join(result.output.split())
+        assert "skipped catalogue entry strix" in out
+        assert "is not a runner this hal0 ships" in out
+
+    def test_failed_catalogue_fetch_exits_nonzero(
+        self, store: RunnerImageStore, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._stub(
+            monkeypatch,
+            SyncResult(
+                images_json_ok=False,
+                images_json_error="images.json schema 'hal0.runner-images.v1' is not 'hal0.runner-images.v2'",
+            ),
+        )
+
+        result = runner.invoke(runner_images_app, ["sync"])
+
+        assert result.exit_code != 0
+        assert "hal0.runner-images.v2" in result.output
 
 
 class TestPull:
@@ -117,7 +217,7 @@ class TestPull:
     def test_invalid_tag_errors_readably(self, store: RunnerImageStore) -> None:
         store.upsert(_image())
 
-        result = runner.invoke(runner_images_app, ["pull", "x/a", "--tag", "does-not-exist"])
+        result = runner.invoke(runner_images_app, ["pull", "standard", "--tag", "does-not-exist"])
 
         assert result.exit_code != 0
         assert "does-not-exist" in result.output
@@ -130,7 +230,7 @@ class TestPull:
         at all), but still a readable non-zero exit."""
         store.upsert(_image())
 
-        result = runner.invoke(runner_images_app, ["pull", "x/a", "--tag", "../escape"])
+        result = runner.invoke(runner_images_app, ["pull", "standard", "--tag", "../escape"])
 
         assert result.exit_code != 0
         assert result.output.strip()
@@ -147,7 +247,7 @@ class TestRm:
     """
 
     def test_unknown_id_errors(self, store: RunnerImageStore) -> None:
-        result = runner.invoke(runner_images_app, ["rm", "nope", "--tag", "0826"])
+        result = runner.invoke(runner_images_app, ["rm", "nope", "--tag", "b2"])
 
         assert result.exit_code != 0
         assert "not in catalogue" in result.output
@@ -155,14 +255,14 @@ class TestRm:
     def test_missing_tag_option_errors(self, store: RunnerImageStore) -> None:
         store.upsert(_image())
 
-        result = runner.invoke(runner_images_app, ["rm", "x/a"])
+        result = runner.invoke(runner_images_app, ["rm", "standard"])
 
         assert result.exit_code != 0
 
     def test_unknown_tag_errors(self, store: RunnerImageStore) -> None:
         store.upsert(_image())
 
-        result = runner.invoke(runner_images_app, ["rm", "x/a", "--tag", "does-not-exist"])
+        result = runner.invoke(runner_images_app, ["rm", "standard", "--tag", "does-not-exist"])
 
         assert result.exit_code != 0
         assert "not catalogued" in result.output
@@ -173,11 +273,13 @@ class TestRm:
         store.upsert(_image())
         monkeypatch.setattr(podman_mutate, "remove_image", lambda ref, **kw: ("removed", None))
 
-        result = runner.invoke(runner_images_app, ["rm", "x/a", "--tag", "0826"])
+        result = runner.invoke(runner_images_app, ["rm", "standard", "--tag", "b2"])
 
         assert result.exit_code == 0, result.output
-        assert "removed ghcr.io/x/a:0826" in result.output
-        assert store.get("x/a") is None or "0826" not in [t.tag for t in store.get("x/a").tags]
+        assert f"removed {STD_REPO}:b2" in result.output
+        assert store.get("standard") is None or "b2" not in [
+            t.tag for t in store.get("standard").tags
+        ]
 
     def test_missing_outcome_still_exits_zero_and_clears_catalogue(
         self, store: RunnerImageStore, monkeypatch: pytest.MonkeyPatch
@@ -185,11 +287,12 @@ class TestRm:
         store.upsert(_image())
         monkeypatch.setattr(podman_mutate, "remove_image", lambda ref, **kw: ("missing", None))
 
-        result = runner.invoke(runner_images_app, ["rm", "x/a", "--tag", "0826"])
+        result = runner.invoke(runner_images_app, ["rm", "standard", "--tag", "b2"])
 
         assert result.exit_code == 0, result.output
         assert "not on disk" in result.output.lower()
-        assert "catalogue entry cleared" in result.output.lower()
+        # rich wraps long refs at the terminal width: compare unwrapped.
+        assert "catalogue entry cleared" in " ".join(result.output.lower().split())
 
     def test_seam_in_use_refuses(
         self, store: RunnerImageStore, monkeypatch: pytest.MonkeyPatch
@@ -197,7 +300,7 @@ class TestRm:
         store.upsert(_image())
         monkeypatch.setattr(podman_mutate, "remove_image", lambda ref, **kw: ("in-use", None))
 
-        result = runner.invoke(runner_images_app, ["rm", "x/a", "--tag", "0826"])
+        result = runner.invoke(runner_images_app, ["rm", "standard", "--tag", "b2"])
 
         assert result.exit_code != 0
         assert "in use" in result.output.lower()
@@ -208,7 +311,7 @@ class TestRm:
         store.upsert(_image())
         monkeypatch.setattr(
             "hal0.api.routes.runner_images._slot_image_usage",
-            lambda: {"brain": "ghcr.io/x/a:0826"},
+            lambda: {"brain": f"{STD_REPO}:b2"},
         )
 
         def _boom(ref: str, **kw: object) -> tuple[str, None]:
@@ -216,7 +319,7 @@ class TestRm:
 
         monkeypatch.setattr(podman_mutate, "remove_image", _boom)
 
-        result = runner.invoke(runner_images_app, ["rm", "x/a", "--tag", "0826"])
+        result = runner.invoke(runner_images_app, ["rm", "standard", "--tag", "b2"])
 
         assert result.exit_code != 0
         assert "brain" in result.output
@@ -230,7 +333,7 @@ class TestRm:
             podman_mutate, "remove_image", lambda ref, **kw: ("unknown", "grant-denied")
         )
 
-        result = runner.invoke(runner_images_app, ["rm", "x/a", "--tag", "0826"])
+        result = runner.invoke(runner_images_app, ["rm", "standard", "--tag", "b2"])
 
         assert result.exit_code != 0
         assert "grant-denied" in result.output
@@ -247,7 +350,7 @@ class TestRm:
             podman_mutate, "remove_image", lambda ref, **kw: ("unknown", "not-service-user")
         )
 
-        result = runner.invoke(runner_images_app, ["rm", "x/a", "--tag", "0826"])
+        result = runner.invoke(runner_images_app, ["rm", "standard", "--tag", "b2"])
 
         assert result.exit_code != 0
         assert "not-service-user" in result.output

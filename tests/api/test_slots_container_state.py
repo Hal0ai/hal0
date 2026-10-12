@@ -361,8 +361,10 @@ def test_profileless_slot_has_null_image_and_command(
 
 # ── #663: actual_image + image_mismatch via running_image (podman inspect) ──────
 
-_VULKAN_IMG = "ghcr.io/hal0ai/amd-strix-halo-toolboxes:vulkan-radv-server"
-_ROCM_IMG = "ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server"
+# Pins naming a current runner package (``hal0-runner-<key>``): the runner-system
+# conversion that runs at app boot keeps these and drops pins naming retired images.
+_VULKAN_IMG = "ghcr.io/hal0ai/hal0-runner-standard:b11552-r2"
+_ROCM_IMG = "ghcr.io/hal0ai/hal0-runner-standard:b11500-r1"  # an older build of the same runner
 
 
 def _fake_vulkan_catalog() -> MagicMock:
@@ -413,7 +415,7 @@ def test_container_image_mismatch_when_running_differs_from_profile(
         patch("hal0.config.loader.load_profiles_config", return_value=cat),
         patch(
             "hal0.providers.container.ContainerProvider.running_image",
-            return_value=_ROCM_IMG,  # stale: still running the old rocm image
+            return_value=_ROCM_IMG,  # stale: still running the older build
         ),
     ):
         r = client_with_container_slot.get("/api/slots")

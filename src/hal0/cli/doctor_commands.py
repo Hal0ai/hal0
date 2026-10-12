@@ -28,9 +28,8 @@ shell tooling (``hal0 doctor && hal0 status``).
 
 Sub-commands:
 
-* ``hal0 doctor toolbox-pull`` — assert that every image pinned in
-  ``manifest.json.toolbox_images`` is anonymously reachable on ghcr.io
-  (issue tracker: task #25 / harness FINDINGS §8).
+* ``hal0 doctor toolbox-pull`` — assert that every runner image pinned in
+  ``manifest.json`` ``runners`` is anonymously reachable on ghcr.io.
 """
 
 from __future__ import annotations
@@ -55,7 +54,6 @@ from rich.table import Table
 
 import hal0
 from hal0.cli.doctor_diagnosis import Diagnosis, Evidence, NextStep, render_json
-from hal0.config.loader import load_manifest
 
 app = typer.Typer(
     name="doctor",
@@ -373,46 +371,39 @@ def _ghcr_manifest_digest(
     return digest
 
 
-def _probe_one(
-    name: str,
-    entry: dict[str, Any],
-    *,
-    client: httpx.Client,
-) -> dict[str, Any]:
-    """Probe one ``toolbox_images`` entry; never raises — returns a row dict.
+def _probe_one(pin: Any, *, client: httpx.Client) -> dict[str, Any]:
+    """Probe one ``manifest.json`` runner pin; never raises — returns a row dict.
 
     Row shape:
         {"name", "tag", "ok": bool, "digest": str | None,
          "pinned_digest": str | None, "matches_pin": bool | None,
          "error": str | None}
 
-    Digest mismatch is surfaced via ``matches_pin``; it doesn't flip
-    ``ok`` to False because reconciling drift is a separate step
-    (scripts/update-toolbox-digests.sh, run before a release). The
-    probe's job is just "reachable yes/no" + "here's what's actually
-    there".
+    Digest drift is surfaced via ``matches_pin``; it doesn't flip ``ok`` to
+    False. The probe's job is "reachable yes/no" plus "here's what's actually
+    there". A row with ``tag: null`` is reported as not published.
     """
+    ref = f"{pin.image}:{pin.tag}" if pin.tag else pin.image
     row: dict[str, Any] = {
-        "name": name,
-        "tag": entry.get("tag") or "",
+        "name": pin.key,
+        "tag": ref,
         "ok": False,
         "digest": None,
-        "pinned_digest": entry.get("digest") or None,
+        "pinned_digest": pin.digest,
         "matches_pin": None,
         "error": None,
     }
-    tag = entry.get("tag")
-    if not isinstance(tag, str) or not tag:
-        row["error"] = "manifest entry missing 'tag'"
+    if not pin.tag:
+        row["error"] = "not published yet (manifest.json runners tag is null)"
         return row
-    parsed = _parse_image_ref(tag)
+    parsed = _parse_image_ref(ref)
     if parsed is None:
-        row["error"] = f"unsupported registry in tag {tag!r} (only ghcr.io is probed)"
+        row["error"] = f"unsupported registry in {ref!r} (only ghcr.io is probed)"
         return row
-    _, repo, ref = parsed
+    _, repo, tag = parsed
     try:
         token = _ghcr_anon_token(repo, client=client)
-        digest = _ghcr_manifest_digest(repo, ref, token=token, client=client)
+        digest = _ghcr_manifest_digest(repo, tag, token=token, client=client)
     except (httpx.HTTPError, RuntimeError, ValueError) as exc:
         row["error"] = f"{type(exc).__name__}: {exc}"
         return row
@@ -433,56 +424,43 @@ def toolbox_pull(
     manifest_path: Path | None = typer.Option(
         None,
         "--manifest",
-        help="Override manifest.json location (defaults to the loader's FHS-aware resolver).",
+        help="Override manifest.json location (defaults to the one shipped with this build).",
     ),
 ) -> None:
-    """Verify each pinned toolbox image is anonymously pullable from ghcr.io.
+    """Verify each pinned runner image is anonymously pullable from ghcr.io.
 
-    Walks ``manifest.json.toolbox_images`` and exercises the anonymous
-    OCI v2 token-exchange + HEAD-manifest flow per image. Reports each
-    image's reachable status and the actual ghcr.io digest seen
-    alongside the pinned digest from the manifest.
+    Walks ``manifest.json`` ``runners`` and exercises the anonymous OCI v2
+    token-exchange + HEAD-manifest flow per image. Reports each image's
+    reachable status and the actual ghcr.io digest seen alongside the pinned
+    digest.
 
     Exit codes:
-      0 — every entry was reachable (digest drift is reported but does
-          NOT fail; that's the manifest job's problem).
-      1 — at least one image could not be reached.
-      2 — manifest.json is empty or has no toolbox_images entries.
+      0 — every runner image was reachable (digest drift is reported but does
+          NOT fail).
+      1 — at least one image could not be reached or is not published.
+      2 — the runner pin table is missing or malformed.
     """
-    manifest = load_manifest(manifest_path) if manifest_path else load_manifest()
-    images = manifest.get("toolbox_images") or {}
-    if not isinstance(images, dict) or not images:
-        console.print("[yellow]![/yellow]  manifest.json has no toolbox_images entries to probe.")
-        raise typer.Exit(2)
+    from hal0.runners.pins import RunnerPinsError, load_runner_pins
+
+    try:
+        pins = load_runner_pins(manifest_path)
+    except RunnerPinsError as exc:
+        console.print(f"[yellow]![/yellow]  {exc}")
+        raise typer.Exit(2) from exc
 
     rows: list[dict[str, Any]] = []
     with httpx.Client(follow_redirects=True) as client:
-        for name in sorted(images.keys()):
-            entry = images[name]
-            if not isinstance(entry, dict):
-                rows.append(
-                    {
-                        "name": name,
-                        "tag": "",
-                        "ok": False,
-                        "digest": None,
-                        "pinned_digest": None,
-                        "matches_pin": None,
-                        "error": "manifest entry is not a dict",
-                    }
-                )
-                continue
-            rows.append(_probe_one(name, entry, client=client))
+        for key in sorted(pins):
+            rows.append(_probe_one(pins[key], client=client))
 
     if json_output:
         # Emit raw, plain JSON — `console.print_json` re-highlights with ANSI
         # escapes (rich reports is_terminal=True even when stdout is a pipe), so
-        # `toolbox-pull --json | jq` would choke on colour codes. The --json
-        # contract must be deterministic parseable JSON regardless of tty.
+        # `toolbox-pull --json | jq` would choke on colour codes.
         print(jsonlib.dumps(rows, indent=2))
     else:
-        table = Table(title="ghcr.io toolbox-image pull probe (anonymous)")
-        table.add_column("Image", style="bold")
+        table = Table(title="ghcr.io runner-image pull probe (anonymous)")
+        table.add_column("Runner", style="bold")
         table.add_column("Status")
         table.add_column("Digest (actual)")
         table.add_column("Pin")

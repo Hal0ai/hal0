@@ -2,7 +2,7 @@
 
 Phase D task D2. The spec must replicate what `docker inspect comfyui`
 showed working on CT105: the kyuz0 image layout that hal0's own
-ghcr.io/hal0ai/hal0-comfyui mirrors (ComfyUI at /opt/ComfyUI, venv at
+ghcr.io/hal0ai/hal0-runner-comfyui mirrors (ComfyUI at /opt/ComfyUI, venv at
 /opt/venv), bash -lc cd+exec argv, /mnt/ai-models/comfyui data mounts,
 --ipc=host (host /dev/shm serves Wan/Hunyuan video; podman rejects
 --shm-size with host IPC, unlike docker), host networking,
@@ -16,7 +16,7 @@ from typing import Any
 
 import pytest
 
-from hal0.providers.comfyui import _HAL0_COMFYUI_IMAGE, ComfyUIProvider
+from hal0.providers.comfyui import ComfyUIProvider
 from hal0.providers.container import _render_quadlet_from_plan, _spec_provider_for
 
 _GPU_NODES = ["/dev/kfd", "/dev/dri/card1", "/dev/dri/renderD128"]
@@ -140,13 +140,11 @@ def test_comfyui_slot_port_override_flows_into_argv() -> None:
     assert "--port 8189" in spec.command[2]
 
 
-def test_comfyui_fallback_image_is_hal0_published() -> None:
-    """D1 review: the last-resort fallback must not point at an unpublished image.
-
-    ghcr.io/hal0ai/hal0-comfyui:latest is live (anonymous registry v2 HEAD
-    200, digest sha256:fd8c8930...) — pull-evidence in the flip commit.
-    """
-    assert _HAL0_COMFYUI_IMAGE == "ghcr.io/hal0ai/hal0-comfyui:latest"
+def test_comfyui_image_is_the_hal0_runner_repo() -> None:
+    """The ComfyUI image is the ``comfyui`` runner's pin (manifest.json supplies
+    the tag/digest), never a third-party image."""
+    ref = ComfyUIProvider().image_ref({})
+    assert ref.startswith("ghcr.io/hal0ai/hal0-runner-comfyui")
 
 
 # ── renderer integration ──────────────────────────────────────────────────────
@@ -198,7 +196,7 @@ def test_image_section_dict_is_not_an_image_override(monkeypatch) -> None:
     ref = ComfyUIProvider().image_ref(cfg)
     assert isinstance(ref, str)
     assert "idle_restore_minutes" not in ref
-    assert "hal0ai/hal0-comfyui" in ref  # manifest pin or fallback tag
+    assert "hal0ai/hal0-runner-comfyui" in ref  # the runner pin
 
 
 def test_comfyui_container_spec_provisions_data_dirs(

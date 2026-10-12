@@ -34,17 +34,25 @@ test.describe('Runner Images under Slots (/slots/runner-images)', () => {
     // Task 10 — served by the `families` payload, not derived from rows).
     const strip = page.getByTestId('ri-family-strip')
     await expect(strip).toBeVisible()
-    const familyRow = strip.getByTestId('ri-family-rocmfpx')
-    // ADR-0026: the strip names the runtime by its registry title.
-    await expect(familyRow).toContainText('ROCmFPX')
-    await expect(familyRow).toContainText('ghcr.io/hal0ai/hal0-combined:0822')
+    const familyRow = strip.getByTestId('ri-family-standard')
+    // ADR-0026: the strip names the runtime by its registry title; the raw
+    // ref sits inside the collapsed "Image details" until opened.
+    await expect(familyRow).toContainText('Standard')
+    await expect(page.getByTestId('ri-family-ref-standard')).toBeHidden()
+    await familyRow.getByText('Image details').click()
+    await expect(page.getByTestId('ri-family-ref-standard')).toContainText(
+      'ghcr.io/hal0ai/hal0-runner-standard:2026.10.04',
+    )
     // The list groups by runtime tier, and the row reads as the runtime's
     // launch image — never as "<family> default".
     await expect(page.getByTestId('ri-section-defaults')).toContainText('Default runtimes')
     await expect(page.getByTestId('ri-launch-image').first()).toHaveText('launch image')
-    await expect(page.getByTestId('ri-card-title')).toHaveText('ROCmFPX')
-    // Row card: pull CTA present; tag picker renders when several tags exist.
+    await expect(page.getByTestId('ri-card-title')).toHaveText('Standard')
+    // Row card: pull CTA present; the tag picker + set-as-launch-image live
+    // inside the collapsed "Image details" area.
     await expect(page.getByTestId('ri-pull')).toBeVisible()
+    await expect(page.getByTestId('ri-tag-pick')).toBeHidden()
+    await page.getByTestId('ri-image-details').getByText('Image details').click()
     await expect(page.getByTestId('ri-tag-pick')).toBeVisible()
     await expect(page.getByTestId('ri-set-default')).toBeVisible()
   })

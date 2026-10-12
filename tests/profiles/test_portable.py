@@ -75,13 +75,13 @@ class TestRoundTrip:
 
     def test_export_import_round_trips_runner(self, tmp_hal0_home: str) -> None:
         env = export_envelope(
-            "pf-port", ProfileConfig(flags="-fa on", runner="promptforge"), exported_at="t"
+            "pf-port", ProfileConfig(flags="-fa on", runner="cuda"), exported_at="t"
         )
-        assert env["profile"]["runner"] == "promptforge"
+        assert env["profile"]["runner"] == "cuda"
 
         dst = _catalog(tmp_hal0_home, "dst-runner.toml")
         resolved = import_profile(env, "pf-port-copy", dst)
-        assert dst.resolve(resolved.name).runner == "promptforge"
+        assert dst.resolve(resolved.name).runner == "cuda"
 
 
 # ── export envelope shape ────────────────────────────────────────────────────
@@ -226,13 +226,13 @@ class TestImportProfile:
         assert resolved.quant == "Q6_K"
 
     def test_known_runner_survives_import(self, tmp_hal0_home: str) -> None:
-        env = export_envelope("orig", ProfileConfig(flags="", runner="strix"), exported_at="t")
+        env = export_envelope("orig", ProfileConfig(flags="", runner="standard"), exported_at="t")
         resolved = import_profile(env, "copied", _catalog(tmp_hal0_home))
-        assert resolved.runner == "strix"
+        assert resolved.runner == "standard"
 
     def test_envelope_runner_status_reports_the_substitution(self) -> None:
         assert envelope_runner_status(ProfileConfig()) == (None, False)
-        assert envelope_runner_status(ProfileConfig(runner="strix")) == ("strix", False)
+        assert envelope_runner_status(ProfileConfig(runner="standard")) == ("standard", False)
         assert envelope_runner_status(ProfileConfig(runner="nope")) == (None, True)
 
 

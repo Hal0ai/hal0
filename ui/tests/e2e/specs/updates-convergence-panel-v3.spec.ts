@@ -72,7 +72,7 @@ test.describe('Updates page — ownership-migration panel (#1845/H8)', () => {
         detail: {
           hw: {
             command: 'hal0 slot migrate-hw --apply --stop-services',
-            lines: ["would fold slot 'chat': ngl=99 binary='rocmfpx'"],
+            lines: ["would fold slot 'chat': ngl=99 binary='standard'"],
             error: null,
           },
         },
@@ -97,7 +97,7 @@ test.describe('Updates page — ownership-migration panel (#1845/H8)', () => {
         detail: {
           hw: {
             command: 'hal0 slot migrate-hw --apply',
-            lines: ["would fold slot 'chat': ngl=99 binary='rocmfpx'"],
+            lines: ["would fold slot 'chat': ngl=99 binary='standard'"],
             error: null,
           },
         },

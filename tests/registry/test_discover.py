@@ -344,8 +344,8 @@ def test_scan_and_register_missing_root_is_silent(tmp_path: Path, registry: Mode
 def test_backfill_coordless_fills_from_curated(registry: ModelRegistry) -> None:
     """An existing registry row with empty coords whose on-disk filename matches
     a curated entry is repaired in place; the id is unchanged."""
-    mid = "qwen3-6-35b-a3b-nsc-ace-saber-mtp-f16-to-rocmfp4-strix-lean"
-    fname = "Qwen3.6-35B-A3B-NSC-ACE-SABER-MTP-F16-to-ROCmFP4-STRIX_LEAN.gguf"
+    mid = "Qwen3.6-35B-A3B-MTP-GGUF"
+    fname = "Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf"
     registry.add(
         Model(
             id=mid,
@@ -360,9 +360,25 @@ def test_backfill_coordless_fills_from_curated(registry: ModelRegistry) -> None:
     assert repaired == [mid]
     row = registry.get(mid)
     assert row.id == mid  # id never changes
-    assert row.hf_repo == "jcbtc/chadrock-35b-ace-saber-rocmfp4-mtp"
+    assert row.hf_repo == "unsloth/Qwen3.6-35B-A3B-MTP-GGUF"
     assert row.hf_filename == fname
     assert row.name  # display name filled
+
+
+def test_scan_skips_fork_only_quants(tmp_path: Path, registry: ModelRegistry) -> None:
+    """ROCmFPX-family / IU4 / ActiveFPX files are never registered by a scan:
+    no hal0 runner can load them (ADR-0028), so the skip reason names the quant."""
+    root = tmp_path / "models"
+    root.mkdir()
+    (root / "Some-Model-ROCmFP4.gguf").write_bytes(b"x" * 64)
+    (root / "Plain-Model-Q4_K_M.gguf").write_bytes(b"x" * 64)
+    result = scan_and_register(registry, ModelsConfig(roots=[str(root)]))
+
+    reasons = {Path(e["path"]).name: e["reason"] for e in result["skipped"]}
+    assert reasons["Some-Model-ROCmFP4.gguf"] == "unsupported_quant:ROCmFP4"
+    assert "Plain-Model-Q4_K_M.gguf" not in reasons
+    assert not any("rocmfp4" in mid.lower() for mid in result["added"])
+    assert len(result["added"]) == 1
 
 
 def test_backfill_coordless_is_idempotent(registry: ModelRegistry) -> None:

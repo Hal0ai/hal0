@@ -130,7 +130,7 @@ class TestEmbedReferences:
         """A model that IS in the registry but with EMPTY coords, yet present in
         the curated catalogue, exports with the curated hf_repo/hf_file so the
         importer can pull it (fix/stack-model-pull-coords)."""
-        mid = "qwen3-6-35b-a3b-nsc-ace-saber-mtp-f16-to-rocmfp4-strix-lean"
+        mid = "Qwen3.6-35B-A3B-MTP-GGUF"
         r = ModelRegistry(registry_dir=tmp_path / "registry")
         r.add(
             Model(
@@ -148,10 +148,8 @@ class TestEmbedReferences:
         )
         out = embed_references(stack, registry=r)
         meta = out.models[mid]
-        assert meta.hf_repo == "jcbtc/chadrock-35b-ace-saber-rocmfp4-mtp"
-        assert (
-            meta.hf_filename == "Qwen3.6-35B-A3B-NSC-ACE-SABER-MTP-F16-to-ROCmFP4-STRIX_LEAN.gguf"
-        )
+        assert meta.hf_repo == "unsloth/Qwen3.6-35B-A3B-MTP-GGUF"
+        assert meta.hf_filename == "Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf"
 
     def test_coordless_row_without_curated_stays_empty(self, tmp_path: Path) -> None:
         """A coord-less registry row with no curated match exports empty coords

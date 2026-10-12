@@ -297,10 +297,12 @@ def test_never_raises_on_internal_failure(monkeypatch: pytest.MonkeyPatch) -> No
         *,
         job_id=None,
         ceiling=None,
-        skip_image_retag=False,
+        skip_catalogue_sync=False,
         repair_hermes_venv=True,
         upgrade_memory_engine_venv=True,
         converge_companions=True,
+        honour_restore_marker=False,
+        rerender_after_runner_conversion=False,
     ):
         raise RuntimeError("disk full")
 
@@ -313,7 +315,7 @@ def test_forwards_the_real_migration_result_on_success(monkeypatch: pytest.Monke
     monkeypatch.setattr(
         updater_module,
         "run_post_activation_migrations",
-        lambda *, job_id=None, ceiling=None, skip_image_retag=False, repair_hermes_venv=True, upgrade_memory_engine_venv=True, converge_companions=True: (
+        lambda *, job_id=None, ceiling=None, skip_catalogue_sync=False, repair_hermes_venv=True, upgrade_memory_engine_venv=True, converge_companions=True, honour_restore_marker=False, rerender_after_runner_conversion=False: (
             1,
             2,
         ),
@@ -322,26 +324,32 @@ def test_forwards_the_real_migration_result_on_success(monkeypatch: pytest.Monke
     assert check_outstanding_migrations(job_id="boot") == (1, 2)
 
 
-def test_skips_the_image_retag_pass(monkeypatch: pytest.MonkeyPatch) -> None:
-    """#1960 N2: retag_stale_slot_images must not run on every boot — see
-    run_post_activation_migrations's own docstring for the operator-state
-    risk (#1867-class). check_outstanding_migrations must pass
-    skip_image_retag=True."""
+def test_skips_the_catalogue_sync_pass(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The boot-time safety net must not block startup on the runner-image
+    catalogue's network fetch: hal0-api runs its own background sync.
+    check_outstanding_migrations must pass skip_catalogue_sync=True."""
     seen: dict[str, Any] = {}
 
     def _fake_migrations(
         *,
         job_id=None,
         ceiling=None,
-        skip_image_retag=False,
+        skip_catalogue_sync=False,
         repair_hermes_venv=True,
         upgrade_memory_engine_venv=True,
         converge_companions=True,
+        honour_restore_marker=False,
+        rerender_after_runner_conversion=False,
     ):
-        seen["skip_image_retag"] = skip_image_retag
+        seen["skip_catalogue_sync"] = skip_catalogue_sync
+        seen["honour_restore_marker"] = honour_restore_marker
+        seen["rerender"] = rerender_after_runner_conversion
         return (1, 1)
 
     monkeypatch.setattr(updater_module, "run_post_activation_migrations", _fake_migrations)
 
     check_outstanding_migrations()
-    assert seen["skip_image_retag"] is True
+    assert seen["skip_catalogue_sync"] is True
+    # The boot-time safety net stands down after a restore (a downgrade).
+    assert seen["honour_restore_marker"] is True
+    assert seen["rerender"] is True

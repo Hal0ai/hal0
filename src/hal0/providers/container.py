@@ -324,8 +324,8 @@ def _resolve_image_ref(
          override (runner-image-catalogue v2), keyed by the effective
          runner's :data:`~hal0.runners.RUNNER_IMAGES` key and read live via
          :func:`hal0.providers._image.operator_default_image`. Sits ABOVE the whole
-         :func:`hal0.runners.resolve_runner_image` chain (env var / manifest
-         pin / baked default): a default the operator set in the UI is
+         :func:`hal0.runners.resolve_runner_image` chain (env var, then the
+         ``manifest.json`` pin): a default the operator set in the UI is
          box-wide intent, only the per-slot ``image_pin`` outranks it.
       3. ``image_default`` — :func:`hal0.runners.resolve_runner_image` of the
          :func:`_effective_runner` (the slot's ``binary`` when set, else the
@@ -372,9 +372,7 @@ def _resolve_image_ref(
     from hal0.runners import resolve_runner_image
 
     runner = _effective_runner(slot_cfg, profile)
-    # Exact key first (an existing ``vulkanfpx`` override keeps working
-    # during deprecation), then the canonical family (runner-image-catalogue
-    # v3, task 11). Shared with the non-llama providers (#2234).
+    # Shared with the non-llama providers (#2234).
     override = operator_default_image(runner.key)
     if override is not None:
         return override  # [slots].default_images — operator family default
@@ -1033,8 +1031,8 @@ def _render_quadlet_from_plan(
             # #2126 adds 132 (128+SIGILL) as a SECOND terminal status, and it
             # is deliberately the only signal death here. The entrypoint's
             # exit-64 translation only exists inside images that SHIP that
-            # entrypoint; a slot launched from a foreign or older image (the
-            # `cpu` runner still resolves to the Vulkan toolbox — #2126) has
+            # entrypoint; a slot launched from a foreign or older image (an
+            # operator image_pin, or a GPU build on a CPU box — #2126) has
             # nothing in the container to translate anything, so podman
             # propagates 128+signal and systemd sees a plain `status=132`.
             # This host-side directive is the version-skew-proof half.
@@ -1049,8 +1047,8 @@ def _render_quadlet_from_plan(
             # allocator abort can all recover on restart), and SIGKILL (137)
             # is the OOM-killer, which is transient by definition. Those keep
             # the backoff runway here and are handled load-phase-only, where
-            # "before /health ever answered" makes them deterministic, in
-            # packaging/runner/rocmfpx/entrypoint.sh.
+            # "before /health ever answered" makes them deterministic, in the
+            # runner images' shared entrypoint (hal0-runner-images repo).
             "RestartPreventExitStatus=64 132",
             # #2130: a requested stop is not a failure. `systemctl stop` sends
             # SIGTERM; podman propagates the container's graceful SIGTERM exit
@@ -1649,41 +1647,11 @@ def _dense_cap_for(slot_ceiling: int | None) -> int:
     return max(_CTX_DENSE_CAP, slot_ceiling)
 
 
-def _specialty_default_ctx(model_info: dict[str, Any]) -> int | None:
-    """The specialty kind's card-intended window (spec 2026-08-29, #1946).
-
-    A specialty distribution (e.g. CIRU ActiveFPX + PromptForge) ships a
-    launch card that specifies its own intended context window
-    (:data:`hal0.registry.specialty.SpecialtyKind.default_ctx`) — a MODEL
-    fact, same standing as an explicit ``defaults.context_size``, just
-    sourced from the registry's specialty entry instead of the model row.
-    Slots into the precedence chain below the model's own explicit choice
-    and above the GGUF-arch derived fallback: an operator who sets
-    ``defaults.context_size`` still outranks the card, but an unset model
-    gets the card's window instead of falling all the way to the generic
-    arch-max/safe-fallback path. Never raises — an unknown or absent
-    specialty key returns ``None`` and the caller falls through unchanged.
-
-    Unaware of runner/guard state by design — the DEGRADED gate (fix round
-    1, #1946: a card window is only safe to apply on the accelerated path)
-    lives in the caller, :func:`_resolve_context_size`, via its
-    ``specialty_degraded`` parameter.
-    """
-    from hal0.registry.specialty import SPECIALTY_KINDS
-
-    meta = (model_info or {}).get("metadata") or {}
-    kind = SPECIALTY_KINDS.get(meta.get("specialty") or "")
-    if kind is not None and kind.default_ctx:
-        return kind.default_ctx
-    return None
-
-
 def _resolve_context_size(
     slot_ceiling: int | None,
     model_info: dict[str, Any],
     *,
     slot_name: str = "",
-    specialty_degraded: dict[str, Any] | None = None,
 ) -> int:
     """The slot's effective context window — the MODEL is authoritative.
 
@@ -1696,26 +1664,13 @@ def _resolve_context_size(
        window (:func:`_model_declared_ctx`). Authoritative, NOT dense-capped —
        but an unparseable or implausible value is ignored rather than launched
        (#1414; see :data:`_CTX_MIN_PLAUSIBLE`).
-    2. ``SPECIALTY_KINDS[metadata.specialty].default_ctx`` — a specialty
-       distribution's card-intended window (:func:`_specialty_default_ctx`,
-       spec 2026-08-29 / #1946). Also authoritative and NOT dense-capped
-       (same standing as an explicit choice), but only reached when the model
-       declares no ``defaults.context_size`` of its own, AND only when
-       ``specialty_degraded is None`` (fix round 1, #1946): the card's window
-       assumes the accelerated kernel path; a DEGRADED launch (unsupported
-       runner / missing companion) resolves context exactly like a plain
-       model — path 3/4 below — never the card's number. Callers that don't
-       know the guard's verdict (``specialty_degraded`` defaults to ``None``,
-       the guard's own "accelerated" sentinel) get the accelerated behavior;
-       :func:`_resolve_llama_scalars` passes its already-computed
-       ``specialty_degraded`` scalar through.
-    3. ``model_info["metadata"]["context_length"]`` — the GGUF-derived native
+    2. ``model_info["metadata"]["context_length"]`` — the GGUF-derived native
        window (:func:`_native_ctx`), dense-capped at :func:`_dense_cap_for`
        (:data:`_CTX_DENSE_CAP`, or the slot's own configured ceiling when that
        is higher — #1827). Still a model fact, but a *derived* one, so an
        explicit choice outranks it — the reverse of the pre-1.0 order, which let
        a 262144-token arch max shadow a deliberate ``defaults.context_size``.
-    4. :data:`_CTX_SAFE_FALLBACK` (8192) — never llama-server's silent 4096.
+    3. :data:`_CTX_SAFE_FALLBACK` (8192) — never llama-server's silent 4096.
 
     ``slot_ceiling`` (the on-disk ``[model].context_size``) is NO LONGER an
     override. It is honored only as a **hardware CEILING**: the slot owns
@@ -1749,18 +1704,14 @@ def _resolve_context_size(
     if declared is not None:
         resolved, source = declared, "model.defaults.context_size"
     else:
-        specialty_ctx = _specialty_default_ctx(model_info) if specialty_degraded is None else None
-        if specialty_ctx is not None:
-            resolved, source = specialty_ctx, "specialty.default_ctx"
+        native = _native_ctx(model_info)
+        if native:
+            resolved, source = (
+                min(native, _dense_cap_for(ceiling)),
+                "model.metadata.context_length",
+            )
         else:
-            native = _native_ctx(model_info)
-            if native:
-                resolved, source = (
-                    min(native, _dense_cap_for(ceiling)),
-                    "model.metadata.context_length",
-                )
-            else:
-                resolved, source = _CTX_SAFE_FALLBACK, "safe_fallback"
+            resolved, source = _CTX_SAFE_FALLBACK, "safe_fallback"
 
     if ceiling is None:
         return resolved
@@ -1810,177 +1761,61 @@ def _resolve_context_size(
     return resolved
 
 
-#: ROCmFPX-family quant labels (:func:`hal0.registry.detect.quant_from_rocmfpx_filename`)
-#: all share this prefix — ``ROCmFP3``/``ROCmFP4``/``ROCmFP6``/``ROCmFP8``/``ROCmFPX``.
-#: Exact marker, not a heuristic: these are custom GGML tensor type ids (100 /
-#: 103) that a stock llama.cpp header parse can't map to a known quant, so the
-#: filename token is the only source and it is unambiguous — a false positive
-#: here would need a model file to literally carry one of these tokens without
-#: actually being a ROCmFPX repack.
-_FPX_QUANT_PREFIX = "ROCmFP"
-
-
-def _guard_fpx_quant_runner(
+def _guard_unsupported_quant(
     slot_cfg: dict[str, Any] | Mapping[str, Any] | None,
     model_info: dict[str, Any],
-    runner: Any,
 ) -> None:
-    """Refuse to launch a ROCmFPX-family quant on a non-ROCmFPX runner.
+    """Refuse to launch a fork-only quant (ROCmFPX family, IU4, ActiveFPX).
 
-    hal0#1790: a GPU-less LXC (CT151, ``HAL0_ALLOW_CPU_ONLY=1``) had its
-    ``vulkan_capable`` probe fact mis-derived True from host sysfs visible
-    without a passed-through render node, so ``rocmfpx_capable()`` picked
-    ``hal0-brain-sft-q8-rocmfpx`` for a box that could never load it — the
-    ``cpu`` runner's stock llama.cpp SIGSEGVs (exit 139) on the custom GGML
-    tensor type ids (100 / 103) those quants carry. The probe fix
-    (``hal0.hardware.probe._amd_gpu_info``) stops the installer from making
-    this pick going forward; this is the belt-and-suspenders backstop for
-    every OTHER way a bad pairing could still reach a launch — a stale slot
-    TOML from before the probe fix, a manual ``HAL0_BRAIN_MODEL`` override,
-    or an operator hand-swapping a model onto a ``cpu`` slot. Checked at the
-    single point (:func:`_resolve_llama_scalars`) both the real launch and
-    the preview path share, right after the runner is resolved, so it can
-    never be bypassed by a route that skips some other layer.
+    No runner hal0 ships can load these (ADR-0028): stock llama.cpp rejects
+    their custom GGML tensor types or SIGSEGVs on them (#1790), so a launch
+    would crash-loop. Model add and pull refuse them too; this is the backstop
+    for a model registered before that refusal existed. Checked at the single
+    point (:func:`_resolve_llama_scalars`) both the real launch and the preview
+    path share.
 
-    Raises :class:`UnprocessableEntity` (422) with the exact quant/runner
-    facts in ``details`` rather than letting the container crash-loop.
+    Raises :class:`UnprocessableEntity` (422) ``slot.unsupported_quant``.
     """
-    quant = str((model_info or {}).get("quant") or "")
-    if not quant.startswith(_FPX_QUANT_PREFIX):
-        return
-    from hal0.runners import FPX_RUNNER_KEYS
+    from hal0.registry.detect import (
+        unsupported_gguf_contents,
+        unsupported_quant,
+        unsupported_quant_message,
+    )
 
-    if getattr(runner, "key", None) in FPX_RUNNER_KEYS:
+    info = model_info or {}
+    # File names only: a directory can be named for a fork family while
+    # holding a plain GGUF (the brain sft repo dir carries a plain F16), and
+    # the model id is the operator's free choice.
+    model_path = Path(str(info.get("path") or ""))
+    quant = unsupported_quant(
+        str(info.get("quant") or ""),
+        model_path.name,
+        str(info.get("hf_filename") or ""),
+    )
+    if quant is None:
+        # A fork build renamed to a generic name (or stored as a hash-named
+        # HF cache blob): its tensor types tell. The reader checks the GGUF
+        # magic itself, and every shard of a split model is checked.
+        metadata = info.get("metadata")
+        shards = metadata.get("shards") if isinstance(metadata, Mapping) else None
+        candidates = [model_path] + [Path(str(p)) for p in (shards or []) if p]
+        for candidate in candidates:
+            if candidate.is_file():
+                quant = unsupported_gguf_contents(candidate)
+                if quant is not None:
+                    break
+    if quant is None:
         return
     slot_name = ""
     if isinstance(slot_cfg, Mapping):
         raw_name = slot_cfg.get("name")
         slot_name = raw_name if isinstance(raw_name, str) else ""
-    model_key = str((model_info or {}).get("_model_key") or (model_info or {}).get("id") or "?")
+    model_key = str(info.get("_model_key") or info.get("id") or "?")
     raise UnprocessableEntity(
-        f"model {model_key!r} is a {quant} build (custom GGML tensor types 100/103) that "
-        f"only the ROCmFPX runner can load; the resolved runner here is "
-        f"{getattr(runner, 'key', '?')!r} — loading it would SIGSEGV the container. "
-        "Pick a non-ROCmFPX build (e.g. hal0-brain-sft-f16) or move this slot to a "
-        "gpu-rocm/gpu-vulkan device.",
-        code="slot.unsupported_quant_for_runner",
-        details={
-            "slot": slot_name,
-            "model": model_key,
-            "quant": quant,
-            "runner": getattr(runner, "key", None),
-        },
+        unsupported_quant_message(model_key, quant),
+        code="slot.unsupported_quant",
+        details={"slot": slot_name, "model": model_key, "quant": quant},
     )
-
-
-def _guard_specialty_runner(
-    model_info: dict[str, Any],
-    runner: Any,
-    *,
-    log_degraded: bool = False,
-) -> dict[str, Any] | None:
-    """Gate a specialty-distribution model against the resolved runner.
-
-    Spec 2026-08-29 / #1946: a specialty model (e.g. CIRU ActiveFPX +
-    PromptForge) runs ACCELERATED only on a runner image that lists the
-    kind in ``RunnerSupports.specialties`` AND has every required
-    companion installed. Anything else is the card-blessed GGUF-only mode
-    — legitimate, but NEVER silent (#1888): this returns a structured
-    degraded reason the launch path stamps on the slot, shows in the
-    drawer/health, and logs. Kinds that declare ``degraded_ok=False``
-    hard-refuse (422) exactly like :func:`_guard_fpx_quant_runner`.
-
-    Returns ``None`` when the accelerated path is clear, else the reason
-    dict — this is returned IDENTICALLY on the launch path, the preview
-    path, AND the slot-status route (parity), regardless of
-    ``log_degraded``. ``log_degraded`` only gates the ``log.warning``
-    side-effect: the preview path (:func:`_resolve_slot_argv`, via
-    :func:`_resolve_preview_bundle`, default ``for_launch=False``) backs the
-    dashboard's ~2s slot-poll, and the status route
-    (:func:`specialty_degraded_for_slot`, same ``for_launch=False`` bundle)
-    backs a detail-route GET — logging unconditionally on either turns a
-    once-per-launch hint into a per-poll/per-request stream (the same bug
-    :func:`_effective_mtp` guards against three lines below via
-    ``log_ineligible=for_launch``). Called from the single choke point
-    (:func:`_resolve_llama_scalars`) launch, preview, AND the status route
-    all share — no other call site is permitted to re-derive the runner and
-    call this directly; go through ``_resolve_llama_scalars`` (or
-    ``_resolve_preview_bundle`` off the launch path) instead.
-    """
-    from hal0.registry.specialty import SPECIALTY_KINDS
-
-    meta = (model_info or {}).get("metadata") or {}
-    key = meta.get("specialty")
-    if not key:
-        return None
-    model_key = str(model_info.get("_model_key") or model_info.get("id") or "?")
-    kind = SPECIALTY_KINDS.get(key)
-    if kind is None:
-        # Row stamped by a newer hal0 than this one — degrade, don't crash.
-        if log_degraded:
-            log.warning("slot launch degraded: model %s unknown specialty %r", model_key, key)
-        return {
-            "code": "slot.specialty_degraded",
-            "specialty": str(key),
-            "runner": getattr(runner, "key", None),
-            "detail": f"unknown specialty kind {key!r} (newer registry?)",
-        }
-
-    def _degrade_or_raise(detail: str) -> dict[str, Any]:
-        if not kind.degraded_ok:
-            raise UnprocessableEntity(
-                f"model {model_key!r} is a {key!r} specialty distribution with no "
-                f"legitimate fallback mode; the resolved runner "
-                f"{getattr(runner, 'key', '?')!r} cannot serve it — {detail}",
-                code="slot.unsupported_specialty_for_runner",
-                details={
-                    "model": model_key,
-                    "specialty": key,
-                    "runner": getattr(runner, "key", None),
-                },
-            )
-        if log_degraded:
-            log.warning("slot launch degraded: model %s specialty %s — %s", model_key, key, detail)
-        return {
-            "code": "slot.specialty_degraded",
-            "specialty": key,
-            "runner": getattr(runner, "key", None),
-            "detail": detail,
-        }
-
-    if key not in getattr(runner.supports, "specialties", ()):
-        return _degrade_or_raise(
-            f"runner {getattr(runner, 'key', '?')!r} does not list specialty "
-            f"{key!r}; launching GGUF-only"
-        )
-    companions = meta.get("companions") or {}
-
-    def _usable(role: str) -> bool:
-        """A companion counts as present only with a non-empty ``str`` path.
-
-        Fix wave, M2: the check used to be ``role not in companions``, so a row
-        whose path was ``""`` passed as ACCELERATED — while
-        :func:`hal0.registry.specialty.specialty_env_for` skips values that
-        aren't non-empty strings and silently drops the env var. That is the
-        #1888 class in miniature: a degrade with no reason attached. Pull never
-        writes an empty string today, but the guard is the one place that is
-        supposed to be paranoid, and it must agree with the env synthesizer
-        about what "present" means.
-        """
-        path = companions.get(role)
-        return isinstance(path, str) and bool(path.strip())
-
-    missing = [
-        spec.role
-        for spec in kind.companions
-        if spec.required and spec.env is not None and not _usable(spec.role)
-    ]
-    if missing:
-        return _degrade_or_raise(
-            f"required companion files missing from the store: {missing}; "
-            "re-pull the model to install them"
-        )
-    return None
 
 
 def resolve_effective_context_size(
@@ -1989,7 +1824,6 @@ def resolve_effective_context_size(
     model_id: str = "",
     *,
     slot_name: str = "",
-    slot_cfg: dict[str, Any] | None = None,
 ) -> int:
     """Public read-only-surface wrapper around :func:`_resolve_context_size`.
 
@@ -2017,12 +1851,6 @@ def resolve_effective_context_size(
     model-less slot (no ``model_id`` at all) resolves the same way: there is
     no model fact to be authoritative, so the safe floor (or the slot
     ceiling, if lower) is reported rather than inventing a number.
-
-    ``slot_cfg`` (the slot's TOML dict, which every caller already has in
-    hand) is what lets this wrapper answer for a SPECIALTY model: without it
-    the specialty guard's verdict is unknowable here and the accelerated
-    branch is assumed — see the gate below. Omit it and the pre-fix behavior
-    is preserved exactly.
     """
     model_info: dict[str, Any] = {}
     if model_registry is not None and model_id:
@@ -2048,31 +1876,7 @@ def resolve_effective_context_size(
     # refuses on was the advertised one, not the served one.
     if model_id:
         model_info.setdefault("_model_key", model_id)
-    # Specialty degraded parity (fix wave, I2). ``_resolve_context_size``'s
-    # path 2 only applies the specialty card's window on the ACCELERATED path;
-    # this wrapper used to take the parameter's ``None`` default = "accelerated"
-    # unconditionally, so a PromptForge model on a ``rocmfpx`` slot LAUNCHED at
-    # 8192 while ``ctx_max`` on the wire (the drawer's "ctx used / max" and the
-    # per-slot detail body) reported 262144 — the exact launch-vs-surface
-    # disagreement this wrapper's own docstring, and slot_view's, promise
-    # against. Resolved through :func:`specialty_degraded_for_slot`, i.e. the
-    # SAME ``_resolve_llama_scalars`` choke point the launch path uses, never a
-    # re-derived runner + direct guard call.
-    #
-    # Gated on the model actually carrying ``metadata.specialty``: for every
-    # plain model (which is every model on a normal box) this costs one dict
-    # lookup and the read-only surfaces stay byte-identical, so the ~2s slot
-    # poll never pays for a preview-bundle resolution it doesn't need.
-    specialty_degraded = None
-    if slot_cfg is not None and ((model_info.get("metadata") or {}).get("specialty")):
-        with contextlib.suppress(Exception):
-            specialty_degraded = specialty_degraded_for_slot(slot_cfg)
-    return _resolve_context_size(
-        slot_ceiling,
-        model_info,
-        slot_name=slot_name,
-        specialty_degraded=specialty_degraded,
-    )
+    return _resolve_context_size(slot_ceiling, model_info, slot_name=slot_name)
 
 
 def _resolve_llama_scalars(
@@ -2109,8 +1913,7 @@ def _resolve_llama_scalars(
         slot_cfg, profile
     )
     if for_launch:
-        _guard_fpx_quant_runner(slot_cfg, model_info, runner)
-    specialty_degraded = _guard_specialty_runner(model_info, runner, log_degraded=for_launch)
+        _guard_unsupported_quant(slot_cfg, model_info)
     effective_mtp = _effective_mtp(model_info, runner, log_ineligible=for_launch)
     # FLAGS-own (spec-flags-ownership §2, golden #5): resolve the image WITHOUT
     # resolving the profile's flags — the profile flag resolver
@@ -2206,13 +2009,6 @@ def _resolve_llama_scalars(
     #     operator never picked (same rule as the overlay);
     #   * the profile FITS the slot (``profile_fits_slot``) — a wrong-type
     #     profile must not inject mode-changing flags.
-    # specialty_degraded gate (spec 2026-08-29, #1946 fix round 1): a
-    # specialty model's card profile (e.g. promptforge) carries argv the card
-    # requires for its accelerated kernel path (``-fa on`` et al) — safe only
-    # on a runner that actually serves the accelerated path. A DEGRADED
-    # launch (unsupported runner / missing companion) must behave exactly
-    # like a plain GGUF load, mirroring the ``specialty_env`` gate below: no
-    # template-injected profile flags either, degraded or not.
     slot_profile_template_flags = ""
     _md_extra = _mi_defaults.get("extra_args") if isinstance(_mi_defaults, Mapping) else None
     _has_model_tune = bool(_md_extra and str(_md_extra).strip())
@@ -2221,7 +2017,6 @@ def _resolve_llama_scalars(
         and not _has_model_tune
         and not (isinstance(_provenance, str) and _provenance)
         and (_resolved_name is None or _resolved_name == _cfg_profile)
-        and specialty_degraded is None
     ):
         from hal0.slots.profile_adopt import profile_fits_slot
 
@@ -2263,7 +2058,6 @@ def _resolve_llama_scalars(
         model_table.get("context_size"),
         model_info,
         slot_name=str(slot_cfg.get("name") or ""),
-        specialty_degraded=specialty_degraded,
     )
 
     server_table = slot_cfg.get("server") or {}
@@ -2273,16 +2067,6 @@ def _resolve_llama_scalars(
     server_env = server_table.get("env")
     if not isinstance(server_env, dict):
         server_env = None
-
-    # ── specialty env (spec 2026-08-29, #1946) — synthesized only on the
-    # accelerated path; a degraded launch gets NO specialty env so the
-    # runner behaves exactly like a plain GGUF load.
-    if specialty_degraded is None:
-        from hal0.registry.specialty import specialty_env_for
-
-        specialty_env = specialty_env_for((model_info or {}).get("metadata") or {})
-    else:
-        specialty_env = {}
 
     # Registry model id → llama-server --alias so the container advertises the
     # hal0 id (not the raw GGUF basename) for dispatcher matching.
@@ -2405,12 +2189,10 @@ def _resolve_llama_scalars(
         "context_size": context_size,
         "extra_args": extra_args,
         "server_env": server_env,
-        "specialty_env": specialty_env,
         "model_alias": model_alias,
         "chat_template_path": chat_template_path,
         "mmproj": str(mmproj) if mmproj else None,
         "model_defaults": model_defaults,
-        "specialty_degraded": specialty_degraded,
         # Slot-owned hardware grid (spec-hw-slot-ownership §2): NGL + THREADS
         # reach the argv chain via _llama_argv_segments' slot_hardware segment.
         "slot_n_gpu_layers": slot_n_gpu_layers,
@@ -2452,7 +2234,7 @@ class ContainerProvider(Provider):
 
     name = "container"
 
-    #: The unified ROCmFPX runner: HIP first, poisoned Vulkan fallback second
+    #: The Standard runner: HIP first, Vulkan fallback second
     #: (#1888). ``runtime_lane_for_provider`` never actually sees this class —
     #: ``_spec_provider_for`` returns ``None`` for the llama-server default and
     #: that maps to the richer ``"llama"`` lane — but declaring it keeps every
@@ -2541,7 +2323,7 @@ class ContainerProvider(Provider):
         # slot's [server].env so an operator's explicit key always wins.
         vis_env = gpu_visibility_env(scalars["device"], scalars["gpu_index"])
         server_env = scalars["server_env"] or {}
-        merged_env = {**vis_env, **scalars["specialty_env"], **server_env}
+        merged_env = {**vis_env, **server_env}
 
         return _llama_launch_plan(
             image=scalars["image"],
@@ -2848,9 +2630,9 @@ class ContainerProvider(Provider):
         spec_provider = _spec_provider_for(slot_cfg)
 
         # Loud-fail for AMD-GPU slots with no /dev/kfd whose runtime needs it:
-        # the ROCmFPX runner would silently fall back to its Vulkan backend,
-        # which emits invalid tokens for every model while every health
-        # surface reads green (#1888). Enforced HERE (the load path) rather
+        # the Standard runner would silently fall back to its Vulkan backend,
+        # which must not serve unless its digest passed the Vulkan gate
+        # (#1888). Enforced HERE (the load path) rather
         # than in ``container_spec`` so unit rendering, previews and status
         # renders stay host-independent.
         #
@@ -3539,16 +3321,15 @@ def _resolve_preview_bundle(
 
     SINGLE SOURCE for every preview- or status-side consumer that needs
     scalar-derived facts without a live model download: :func:`_resolve_slot_argv`
-    (the "resolved command" drawer) and :func:`specialty_degraded_for_slot`
-    (the slot-status ``specialty_degraded`` key) both call THIS instead of
-    each re-deriving profile / model info / runner themselves — the actual
+    (the "resolved command" drawer) calls THIS instead of re-deriving
+    profile / model info / runner itself — the actual
     scalar resolution is :func:`_resolve_llama_scalars` (``for_launch=False``,
     the preview/status contract, never the launch one), the SAME function
     :meth:`ContainerProvider.container_spec` calls for a real launch. A
     future change inside ``_resolve_llama_scalars`` (how model_info/runner
     resolve, a new capability gate, …) therefore reaches every consumer
     identically — there is no second call site to silently drift out of
-    parity (see :func:`_guard_specialty_runner`'s single-choke-point note).
+    parity.
 
     Returns ``None`` for a slot with no profile, or on ANY resolution
     failure — best-effort, fail-open, the contract every caller already
@@ -3636,46 +3417,6 @@ def resolved_argv_detail_for_slot(
     }
 
 
-def specialty_degraded_for_slot(
-    slot_cfg: dict[str, Any],
-    model_path: str | None = None,
-) -> dict[str, Any] | None:
-    """The specialty guard's verdict for a slot, for the status route.
-
-    Task 10 (spec 2026-08-29 / #1946): the slot-status payload (``GET
-    /api/slots/{name}`` and friends, the same detail route that already
-    carries the config-drift comparator's output) needs to surface whether
-    the slot's model is a specialty distribution running degraded on its
-    resolved runner.
-
-    Fix round 1: this used to re-derive profile/model info and call
-    :func:`_effective_runner` + :func:`_guard_specialty_runner` directly —
-    a THIRD call site outside :func:`_resolve_llama_scalars`, the documented
-    single choke point launch and preview share. That was the exact
-    parity-drift class this codebase's SINGLE SOURCE comments forbid: a
-    future change to how ``_resolve_llama_scalars`` resolves model_info/
-    runner would silently not apply here. Now it goes through
-    :func:`_resolve_preview_bundle` — the SAME helper :func:`_resolve_slot_argv`
-    uses — and just reads ``scalars["specialty_degraded"]`` back out; the
-    guard call inside ``_resolve_llama_scalars`` runs with ``for_launch=False``
-    (the preview/status contract, not the launch one), so ``log_degraded``
-    stays ``False`` — a ~2s status poll must never re-log the once-per-launch
-    degraded warning, exactly the parity :func:`_guard_specialty_runner`'s
-    docstring already documents for the preview path.
-
-    Returns ``None`` — never raises — for a slot with no profile, a model
-    with no specialty, or any resolution failure (best-effort, same
-    fail-open contract :func:`_resolve_preview_bundle` already guarantees);
-    the status route treats that as "no degraded reason" (``null`` on the
-    wire).
-    """
-    resolved = _resolve_preview_bundle(slot_cfg, model_path)
-    if resolved is None:
-        return None
-    _, scalars = resolved
-    return scalars["specialty_degraded"]
-
-
 __all__ = [
     "ContainerProvider",
     "_loopback_fence_command",
@@ -3684,7 +3425,6 @@ __all__ = [
     "container_provider",
     "resolved_argv_detail_for_slot",
     "resolved_command_for_slot",
-    "specialty_degraded_for_slot",
 ]
 
 

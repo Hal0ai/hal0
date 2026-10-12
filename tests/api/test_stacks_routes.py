@@ -492,7 +492,7 @@ def test_seed_stacks_declaring_mtp_still_apply_cleanly(app: FastAPI, tmp_hal0_ho
     assert not any("rejected" in line for line in body["summary"]), body["summary"]
     on_disk = _read_slot_toml(tmp_hal0_home, "agent")
     assert "mtp" not in on_disk, on_disk
-    assert on_disk["model"]["default"].startswith("qwen3-6-35b"), "the seed model still landed"
+    assert on_disk["model"]["default"] == "Qwen3.6-35B-A3B-MTP-GGUF", "the seed model still landed"
 
 
 # ── the write boundary: freeform [server].extra_args is screened ───────────────

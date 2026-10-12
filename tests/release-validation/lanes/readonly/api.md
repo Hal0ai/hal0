@@ -61,8 +61,8 @@ Probe the REST surface from the workstation with curl against `$API` (from `CONT
      against `/api/hardware`'s `vulkan_capable` flag for the same box. This is confirmed
      offer-not-promise, by source (`capabilities/catalog.py`'s llama.cpp fan-out): the picker
      offers `gpu-vulkan` whenever the host advertises that backend at all (a usable render node
-     exists), with NO dependency on which runner image is installed. So a box that lacks the
-     signed `:0822`-or-later image (`VULKAN_CAPABLE_IMAGE_REFS` in `config/schema.py`) still
+     exists), with NO dependency on which runner image is installed. So a box whose Standard
+     runner pin is not Vulkan-gated (`manifest.json` `runners.standard.lanes_gated`) still
      shows the row — the load-time gate (`slots.md` 8d) is what refuses, not the catalog. That
      split (offered-but-refusable) is the shipped design, not a bug; only flag it if the
      capability is offered nowhere at all on a box that should support it, or if it silently

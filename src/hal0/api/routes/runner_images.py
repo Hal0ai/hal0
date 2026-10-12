@@ -4,9 +4,9 @@ Mirrors ``hal0.api.routes.models``'s pattern: request→service→envelope
 shells over ``hal0.registry.runner_image_sync`` (discovery) and
 ``hal0.registry.runner_pull_jobs`` (download orchestration).
 
-Catalogue ids contain a ``/`` (the GHCR repo path, e.g.
-``hal0ai/hal0-toolbox-cpu``), so every id-taking route uses the ``:path``
-converter rather than a plain string segment.
+Catalogue ids are runner keys (``standard``, ``cpu``, …). Id-taking routes
+keep the ``:path`` converter, so literal-suffix routes must still be declared
+before the catch-alls.
 """
 
 from __future__ import annotations
@@ -16,7 +16,7 @@ import contextlib
 import logging
 from collections.abc import Mapping
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from fastapi import APIRouter, Request
 from fastapi.responses import StreamingResponse
@@ -27,9 +27,6 @@ from hal0.registry import runner_pull_jobs as _pull_jobs
 from hal0.registry.runner_image import RunnerImage, RunnerImageTag
 from hal0.registry.runner_image_sync import sync_runner_images
 from hal0.registry.runner_pull import RunnerPullJob
-
-if TYPE_CHECKING:
-    from hal0.runners import Runner
 
 log = logging.getLogger(__name__)
 
@@ -55,12 +52,11 @@ def _image_to_dict(image: RunnerImage) -> dict[str, Any]:
     return image.model_dump()
 
 
-# ── row enrichment (runner-image-catalogue v2) ───────────────────────────────
+# ── row enrichment ───────────────────────────────────────────────────────────
 #
-# The frozen cross-task contract (spec
-# docs/superpowers/specs/2026-08-24-runner-image-catalogue-v2-design.md):
-# list/sync rows gain ``available_tags`` (stored on the model),
-# ``is_default`` and ``in_use_by`` (derived here, response-side only).
+# List/sync rows carry the stored catalogue facts plus response-side derived
+# fields: the registry runner's title/blurb/tier, ``is_default`` (launch
+# image marker), ``in_use_by``, store state and badges.
 
 
 def _repo_of(ref: str) -> str:
@@ -82,38 +78,18 @@ def _local_store() -> LocalImagesDigests | None:
 
 
 def _tag_badges(image: RunnerImage) -> dict[str, str]:
-    """Tag -> badge value (``"validated"``, ``"candidate"``, or stale-pin value)
-    from frozen ``hal0.config.schema`` image-ref sets (VULKAN_CAPABLE, PROMPTFORGE
-    candidate, STALE_ROCMFPX respectively).
+    """Tag -> badge. ``"pinned"`` marks the tag this hal0 release pins for the
+    row's runner (``manifest.json`` ``runners.<key>.tag``)."""
+    from hal0.runners.pins import runner_pins
 
-    ``VULKAN_CAPABLE_IMAGE_REFS`` wins ties over the candidate set (a
-    validated image should never read as merely "candidate"); the candidate
-    set itself is fail-soft: ``DEFAULT_PROMPTFORGE_IMAGE`` landed with
-    #2129/#1946, but the import stays guarded so a future rename or removal
-    of the constant degrades to an empty candidate set rather than 500ing
-    the catalogue routes.
-    """
-    from hal0.config.schema import STALE_ROCMFPX_IMAGE_REFS, VULKAN_CAPABLE_IMAGE_REFS
-
-    candidates: set[str] = set()
-    try:  # fail-soft — enrichment must not hard-depend on this constant
-        from hal0.config.schema import DEFAULT_PROMPTFORGE_IMAGE
-
-        candidates.add(DEFAULT_PROMPTFORGE_IMAGE)
-    except ImportError:
-        pass
-    out: dict[str, str] = {}
-    for t in image.tags or [RunnerImageTag(tag=image.tag)]:
-        ref = f"{image.image}:{t.tag}"
-        if ref in VULKAN_CAPABLE_IMAGE_REFS:
-            out[t.tag] = "validated"
-        elif ref in candidates:
-            out[t.tag] = "candidate"
-        elif ref in STALE_ROCMFPX_IMAGE_REFS:
-            # The stale/retired-pin badge value from STALE_ROCMFPX_IMAGE_REFS
-            # (API contract, counted in scripts/scar_baseline.txt).
-            out[t.tag] = "deprecated"
-    return out
+    try:
+        pin = runner_pins().get(image.id)
+    except Exception:
+        log.warning("runner_images.pins_unreadable", exc_info=True)
+        return {}
+    if pin is None or pin.image != image.image or not pin.tag:
+        return {}
+    return {pin.tag: "pinned"}
 
 
 def enrich_row(
@@ -122,71 +98,42 @@ def enrich_row(
     defaults: Mapping[str, tuple[str, str]],
     slot_usage: Mapping[str, str],
     local: LocalImagesDigests | None,
-    specialties: Mapping[str, list[str]] = {},
 ) -> dict[str, Any]:
-    """One catalogue row + the derived catalogue-v2/v3 contract fields. Pure.
+    """One catalogue row + the derived contract fields. Pure.
 
-    ``defaults`` maps runner-family key -> ``(effective image ref, source)``
-    where source is ``"override"`` ([slots].default_images) or ``"release"``
-    (the baked RUNNER_IMAGES constant); ``slot_usage`` maps slot name -> the
-    image ref that slot's rendered unit / resolved config launches.
+    ``defaults`` maps runner key -> ``(effective image ref, source)`` (see
+    :func:`_effective_defaults`); ``slot_usage`` maps slot name -> the image
+    ref that slot launches.
 
-    ``is_default`` matches on the default ref's REPO against ``image.image``
-    (contract: "any tag"), first matching family in ``defaults`` order wins
-    (RUNNER_IMAGES insertion order — deterministic). Note ``defaults`` only
-    ever carries ONE entry per image lineage BY CONSTRUCTION: the
-    ``vulkanfpx`` runner key was collapsed into ``rocmfpx`` (permanent
-    alias — hal0.runners.RUNNER_ALIASES), alias override keys are folded
-    to the canonical spelling at config load, and :func:`_effective_defaults`
-    folds again as belt-and-braces, so no alias family can appear here to
-    race its canonical for the match. ``in_use_by`` matches the exact
-    ``image:tag`` ref.
+    ``runner``/``title``/``blurb``/``tier`` come from the
+    :data:`hal0.runners.RUNNER_IMAGES` entry whose key is the row id — the
+    registry owns the operator-facing name, the catalogue's own ``title`` and
+    ``summary`` stay on the row as published metadata.
+
+    ``is_default`` is the LAUNCH IMAGE marker: ``{"family", "source"}`` when
+    the row's runner launches an image from this row's repo right now.
+    ``in_use_by`` matches the exact ``image:tag`` ref.
 
     ``local`` is one request's ``podman_introspect.images_digests()`` read
-    (``None`` when neither store answered) — store-truth (v3): ``store_state``
-    ("present"/"missing"/"unknown"), per-tag ``downloaded`` (``None`` when
-    the store is unknown), ``store_context``, and ``badges``.
+    (``None`` when neither store answered): ``store_state``
+    ("present"/"missing"/"unknown"), per-tag ``downloaded`` (``None`` when the
+    store is unknown), ``store_context``, and ``badges``.
 
-    ``specialties`` maps repo (``_repo_of`` shape) -> the sorted union of
-    every :data:`hal0.runners.RUNNER_IMAGES` entry's
-    ``supports.specialties`` whose image resolves to that repo (see
-    :func:`_repo_specialties`, hoisted once per request beside ``defaults``).
-    ``[]`` for a repo no specialty runner claims — every plain toolbox image
-    included. The UI no longer groups by it: ``groupRows``
-    (``runner-images.jsx``) groups by ``tier`` (ADR-0027).
-
-    ``runner``/``title``/``blurb``/``tier`` (ADR-0027) come from the
-    :data:`hal0.runners.RUNNER_IMAGES` entry whose bundled image lives in
-    this row's repo (:func:`_runner_for_repo`), all ``None`` when no entry
-    does. They replace ``images.json``'s ``notes`` as the operator-facing
-    copy; ``notes`` stays on the row as maintainer detail.
-
-    Build provenance (h0/runner-provenance): every ``tags[]`` entry carries
-    ``provenance`` (``{"source_repo", "revision", "patch_count"}`` | null —
-    :class:`hal0.registry.runner_image.RunnerImageTag`, populated by the
-    sync's config-blob label probe), and the HEADLINE tag's provenance is
-    hoisted to ``row["provenance"]`` (null when the headline has no tag row
-    or its probe failed).
+    Every ``tags[]`` entry carries its sync-probed ``provenance``; the
+    headline tag's is hoisted to ``row["provenance"]``.
     """
+    from hal0.runners import RUNNER_IMAGES
+
     row = _image_to_dict(image)
-    row["specialties"] = list(specialties.get(image.image, []))
-    # ADR-0027: the registry runner this image lineage belongs to, and that
-    # runner's own title/blurb/tier — the page's grouping and display copy.
-    # ``None`` for a catalogued image no RUNNER_IMAGES entry ships (an old
-    # per-backend toolbox, a pin-only variant): it is not a runtime, so it
-    # has no tier.
-    runner = _runner_for_repo(image.image)
+    runner = RUNNER_IMAGES.get(image.id)
     row["runner"] = runner.key if runner else None
-    row["title"] = runner.title if runner else None
-    row["blurb"] = runner.blurb if runner else None
-    row["tier"] = runner.tier if runner else None
-    # ``is_default`` is the per-family LAUNCH IMAGE marker (which repo a
-    # family's unpinned slots launch right now), not the runtime tier above.
+    row["title"] = runner.title if runner else image.title
+    row["blurb"] = runner.blurb if runner else image.summary
+    row["tier"] = runner.tier if runner else image.tier
     is_default: dict[str, str] | None = None
-    for family, (ref, source) in defaults.items():
-        if _repo_of(ref) == image.image:
-            is_default = {"family": family, "source": source}
-            break
+    launch = defaults.get(image.id)
+    if launch is not None and _repo_of(launch[0]) == image.image:
+        is_default = {"family": image.id, "source": launch[1]}
     row["is_default"] = is_default
     row_ref = f"{image.image}:{image.tag}"
     row["in_use_by"] = sorted(name for name, ref in slot_usage.items() if ref == row_ref)
@@ -204,10 +151,6 @@ def enrich_row(
     tag_list = image.tags or []
     row["tags"] = [{**t.model_dump(), "downloaded": _tag_state(t)} for t in tag_list]
     headline = next((t for t in tag_list if t.tag == image.tag), None)
-    # Build provenance (h0/runner-provenance): every ``tags[]`` entry carries
-    # its own sync-probed ``provenance`` via ``model_dump()`` above; the
-    # HEADLINE tag's is additionally hoisted to the row so list/card readers
-    # don't re-scan the tag list. None when the probe failed/hasn't run.
     row["provenance"] = headline.provenance if headline is not None else None
     if local is None:
         row["store_state"] = "unknown"
@@ -231,99 +174,40 @@ def provenance_for_ref(ref: str, images: list[RunnerImage]) -> dict[str, Any] | 
 
     Resolves ``ref`` against the already-read catalogue rows only — the
     slot-drawer request path (``GET /api/system-info``) must never make a
-    live registry call, so a tag the sync hasn't probed simply answers
-    ``None``. A ``repo:tag`` ref matches a row of that repo carrying a tag
-    row of that name (bare-repo refs read as ``latest``, podman's own
-    default); a digest-pinned ``repo@sha256:...`` ref matches by the tag
-    row's resolved digest instead — the ref shape ``manifest_image_ref``
-    produces (see :func:`_families_payload`'s digest-pin note).
+    live registry call. A ``repo:tag`` ref matches a row of that repo carrying
+    a tag row of that name; a ``repo:tag@sha256:…`` or ``repo@sha256:…`` ref
+    matches by the tag row's digest.
     """
     repo = _repo_of(ref)
     body, _, digest = ref.partition("@")
     tag: str | None = None
-    if not digest:
-        _head, sep, tail = body.rpartition(":")
-        tag = tail if sep and "/" not in tail else "latest"
+    _head, sep, tail = body.rpartition(":")
+    if sep and "/" not in tail:
+        tag = tail
+    elif not digest:
+        tag = "latest"
     for image in images:
         if image.image != repo:
             continue
         for t in image.tags:
-            if (digest and t.digest == digest) or (tag is not None and t.tag == tag):
+            if (digest and t.digest == digest) or (not digest and tag is not None and t.tag == tag):
                 return t.provenance
     return None
 
 
-def _runner_for_repo(repo: str) -> Runner | None:
-    """The :data:`hal0.runners.RUNNER_IMAGES` entry whose bundled image lives
-    in ``repo`` (``_repo_of`` shape), or ``None``. Pure fold over the code
-    registry; first entry in registry order wins, and every shipped image has
-    its own repo today, so there is no tie to break.
-
-    Matches the BUNDLED image, not the effective (override/env/manifest)
-    ref: a runner's identity is its image lineage, so pinning ROCmFPX's
-    family to some other repo does not make that repo's row "ROCmFPX".
-    """
-    from hal0.runners import RUNNER_IMAGES
-
-    for runner in RUNNER_IMAGES.values():
-        if _repo_of(runner.image) == repo:
-            return runner
-    return None
-
-
-def _repo_specialties() -> dict[str, list[str]]:
-    """Repo (``_repo_of`` shape) -> sorted union of every
-    :data:`hal0.runners.RUNNER_IMAGES` entry's ``supports.specialties``
-    whose ``runner.image`` resolves to that repo.
-
-    Computed ONCE per request (hoisted beside ``defaults``/``slot_usage`` in
-    :func:`_request_context`) — this is a pure fold over the in-process
-    ``RUNNER_IMAGES`` registry, no I/O, but the union-per-repo shape is worth
-    computing once rather than per row. A repo shared by more than one
-    runner key (e.g. ``rocmfpx``/``vulkanfpx`` both resolving to
-    ``DEFAULT_ROCMFPX_IMAGE``, neither of which carries a specialty today)
-    unions cleanly to the same result either way.
-    """
-    from hal0.runners import RUNNER_IMAGES
-
-    out: dict[str, set[str]] = {}
-    for runner in RUNNER_IMAGES.values():
-        specialties = runner.supports.specialties
-        if not specialties:
-            continue
-        out.setdefault(_repo_of(runner.image), set()).update(specialties)
-    return {repo: sorted(vals) for repo, vals in out.items()}
-
-
 def _effective_defaults() -> dict[str, tuple[str, str]]:
-    """Family key -> ``(effective default ref, source)`` for every runner family.
+    """Runner key -> ``(effective launch ref, source)`` for every runner.
 
-    Full source vocabulary, mirroring :func:`hal0.runners.resolve_runner_image`'s
-    tiers WITHOUT calling it (that function only knows env → manifest →
-    release; the ``[slots].default_images`` override sits ABOVE all three —
-    it's what a slot actually launches with when set, same live-read idiom as
-    ``hal0.providers._image.slot_default_images``, a Settings save lands
-    on the next request):
+    Mirrors what an unpinned slot launches:
 
       1. ``override`` — ``[slots].default_images[key]``.
-      2. ``env`` — ``HAL0_TOOLBOX_IMAGE_<KEY>``.
-      3. ``manifest`` — ``manifest_image_ref(runner.manifest_key)``.
-      4. ``release`` — the baked :data:`hal0.runners.RUNNER_IMAGES` default.
+      2. ``env`` — ``HAL0_RUNNER_IMAGE_<KEY>``.
+      3. ``release`` — the ``manifest.json`` pin.
 
-    Fail-soft throughout: an unreadable config or manifest degrades to the
-    next tier, never a 500.
-
-    Family-key canonicalization (runner-image-catalogue v3, task 11):
-    ``vulkanfpx`` shares ``DEFAULT_ROCMFPX_IMAGE`` with ``rocmfpx`` — one
-    lever per image lineage, so an override written under the alias key
-    folds into the canonical family (``canonical_family`` wins over the
-    alias when both are set — ``folded.setdefault``), and the alias family
-    is skipped entirely from the per-family iteration below so it never
-    emits its own defaults entry (or, downstream, a families row).
+    Fail-soft throughout: an unreadable config degrades to the next tier.
     """
-    import os
-
-    from hal0.runners import RUNNER_IMAGES, canonical_family
+    from hal0.runners import RUNNER_IMAGES
+    from hal0.runners.pins import env_override
 
     overrides: Mapping[str, str] = {}
     try:
@@ -335,47 +219,20 @@ def _effective_defaults() -> dict[str, tuple[str, str]]:
     except Exception:
         log.warning("runner_images.default_images_load_failed", exc_info=True)
 
-    # Two passes so the canonical key always wins regardless of dict/toml
-    # iteration order (fix round 1: a single ``setdefault`` pass let
-    # whichever key happened to iterate first win, not the canonical one —
-    # e.g. ``{"vulkanfpx": ..., "rocmfpx": ...}`` would keep the alias
-    # value). Pass 1 seeds every canonical key present verbatim; pass 2
-    # folds alias keys in with ``setdefault``, so an already-seeded
-    # canonical value can never be overwritten by its alias.
-    folded: dict[str, str] = {}
-    for k, v in overrides.items():
-        if canonical_family(k) == k:
-            folded[k] = v
-    for k, v in overrides.items():
-        canon = canonical_family(k)
-        if canon != k:
-            log.warning("runner_images.default_images_alias_key key=%s canonical=%s", k, canon)
-            folded.setdefault(canon, v)
-    overrides = folded
-
     out: dict[str, tuple[str, str]] = {}
     for key, runner in RUNNER_IMAGES.items():
-        if canonical_family(key) != key:
-            continue  # alias family — folded into its canonical entry above
         ref = overrides.get(key)
         if isinstance(ref, str) and ref:
             out[key] = (ref, "override")
             continue
-        env_val = os.environ.get(f"HAL0_TOOLBOX_IMAGE_{key.upper()}", "").strip()
+        env_val = env_override(key)
         if env_val:
             out[key] = (env_val, "env")
             continue
-        if runner.manifest_key:
-            try:
-                from hal0.config.loader import manifest_image_ref
-
-                pinned = manifest_image_ref(runner.manifest_key)
-            except Exception:
-                pinned = None
-            if pinned:
-                out[key] = (pinned, "manifest")
-                continue
-        out[key] = (runner.image, "release")
+        try:
+            out[key] = (runner.image, "release")
+        except Exception:
+            log.warning("runner_images.pin_unreadable runner=%s", key, exc_info=True)
     return out
 
 
@@ -385,48 +242,33 @@ def _families_payload(
     slot_usage: Mapping[str, str],
     local: LocalImagesDigests | None,
 ) -> list[dict[str, Any]]:
-    """Launch-truth per-family summary (runner-image-catalogue v3, task 9).
+    """Launch-truth per-runner summary.
 
-    For every :data:`hal0.runners.RUNNER_IMAGES` family key: the effective
-    ref + its source tier (see :func:`_effective_defaults`), the store state
-    of that ref, which slots launch it (``slots``) vs. a different tag of
-    the same repo (``pinned_slots``), the newest release-shaped tag
-    catalogued for that repo, and whether that newest tag's digest differs
-    from the effective ref's own digest (``update_available``).
-
-    Pure function like ``enrich_row`` (no request state) — trivially safe
-    to call from both ``list_runner_images`` and ``sync_runner_images_route``
-    off the same ``defaults``/``slot_usage``/``local`` triple.
+    For every :data:`hal0.runners.RUNNER_IMAGES` key: the effective ref + its
+    source tier (see :func:`_effective_defaults`), the store state of that
+    ref, which slots launch it (``slots``) vs. a different tag of the same
+    repo (``pinned_slots``), the catalogue's gated pin for the runner
+    (``newest_release``: the runner-images repo's current ``tag``/``digest``)
+    and whether that differs from what this box launches
+    (``update_available``).
     """
-    import re as _re
-
     from hal0.runners import RUNNER_IMAGES
 
-    release_re = _re.compile(r"^v?\d+(\.\d+)*$")
-    by_repo: dict[str, RunnerImage] = {i.image: i for i in images}
+    by_key: dict[str, RunnerImage] = {i.id: i for i in images}
     out: list[dict[str, Any]] = []
     for family, (ref, source) in defaults.items():
         repo = _repo_of(ref)
-        row = by_repo.get(repo)
+        row = by_key.get(family)
         newest = None
-        if row is not None:
-            cand = next((t for t in row.tags if release_re.match(t.tag) and t.digest), None)
-            if cand is not None:
-                newest = {"tag": cand.tag, "digest": cand.digest}
-        eff_digest = None
-        if row is not None:
-            if "@" in ref:
-                # Digest-pinned ref (``repo@sha256:…`` — what
-                # ``manifest_image_ref`` returns with real digests, and any
-                # digest-form override/env value): the digest IS the ref,
-                # not something to look up by tag — ``ref.rpartition(":")``
-                # would otherwise split inside the digest and produce hex
-                # garbage as a fake "tag".
-                eff_digest = ref.rpartition("@")[2]
-            else:
-                _, _, eff_tag = ref.rpartition(":")
-                eff = next((t for t in row.tags if t.tag == eff_tag), None)
-                eff_digest = eff.digest if eff else None
+        if row is not None and row.image == repo:
+            newest = {"tag": row.tag, "digest": row.digest}
+        eff_digest: str | None = None
+        if "@" in ref:
+            eff_digest = ref.rpartition("@")[2]
+        elif row is not None:
+            _, _, eff_tag = ref.rpartition(":")
+            eff = next((t for t in row.tags if t.tag == eff_tag), None)
+            eff_digest = eff.digest if eff else None
         if local is None:
             store_state = "unknown"
         else:
@@ -440,8 +282,6 @@ def _families_payload(
         out.append(
             {
                 "family": family,
-                # ADR-0027: the runtime's display name and tier, from the
-                # registry (families are runner keys by construction).
                 "title": runner.title if runner else family,
                 "tier": runner.tier if runner else None,
                 "effective_ref": ref,
@@ -450,7 +290,9 @@ def _families_payload(
                 "slots": slots,
                 "pinned_slots": pinned,
                 "newest_release": newest,
-                "update_available": bool(newest and eff_digest and newest["digest"] != eff_digest),
+                "update_available": bool(
+                    newest and newest["digest"] and eff_digest and newest["digest"] != eff_digest
+                ),
             }
         )
     return out
@@ -589,18 +431,11 @@ async def _restart_slot(name: str, request: Request) -> None:
 
 
 def _request_context() -> tuple[
-    dict[str, tuple[str, str]], dict[str, str], LocalImagesDigests | None, dict[str, list[str]]
+    dict[str, tuple[str, str]], dict[str, str], LocalImagesDigests | None
 ]:
-    """One ``defaults``/``slot_usage``/``local``/``specialties`` quadruple,
-    shared by every row AND the families payload for a single request —
-    computed once each (``_local_store`` is explicitly "one store read per
-    request"; ``_repo_specialties`` is a pure in-process fold, hoisted here
-    for the same one-per-request discipline)."""
-    defaults = _effective_defaults()
-    slot_usage = _slot_image_usage()
-    local = _local_store()
-    specialties = _repo_specialties()
-    return defaults, slot_usage, local, specialties
+    """One ``defaults``/``slot_usage``/``local`` triple, shared by every row
+    AND the families payload for a single request — computed once each."""
+    return _effective_defaults(), _slot_image_usage(), _local_store()
 
 
 def _enrich_with(
@@ -608,27 +443,14 @@ def _enrich_with(
     defaults: Mapping[str, tuple[str, str]],
     slot_usage: Mapping[str, str],
     local: LocalImagesDigests | None,
-    specialties: Mapping[str, list[str]] = {},
 ) -> list[dict[str, Any]]:
-    """Enrich every row against one already-computed request context.
-
-    The shared tail of ``_enriched``, ``list_runner_images``, and
-    ``sync_runner_images_route`` — each of the latter two already has its
-    own ``defaults``/``slot_usage``/``local``/``specialties`` on hand (to
-    also feed ``_safe_families_payload``), so this factors out the
-    row-enrichment list comprehension instead of repeating it three ways.
-    """
-    return [
-        enrich_row(
-            i, defaults=defaults, slot_usage=slot_usage, local=local, specialties=specialties
-        )
-        for i in images
-    ]
+    """Enrich every row against one already-computed request context."""
+    return [enrich_row(i, defaults=defaults, slot_usage=slot_usage, local=local) for i in images]
 
 
 def _enriched(images: list[RunnerImage]) -> list[dict[str, Any]]:
-    defaults, slot_usage, local, specialties = _request_context()
-    return _enrich_with(images, defaults, slot_usage, local, specialties)
+    defaults, slot_usage, local = _request_context()
+    return _enrich_with(images, defaults, slot_usage, local)
 
 
 def _safe_families_payload(
@@ -653,8 +475,8 @@ async def list_runner_images(request: Request) -> dict[str, Any]:
     plus the launch-truth ``families`` summary (catalogue v3, task 9)."""
     store = request.app.state.runner_image_registry
     images = store.list()
-    defaults, slot_usage, local, specialties = _request_context()
-    rows = _enrich_with(images, defaults, slot_usage, local, specialties)
+    defaults, slot_usage, local = _request_context()
+    rows = _enrich_with(images, defaults, slot_usage, local)
     return {
         "images": rows,
         "families": _safe_families_payload(images, defaults, slot_usage, local),
@@ -694,23 +516,24 @@ async def list_runner_image_pulls(request: Request) -> list[dict[str, Any]]:
 
 @router.post("/sync", status_code=202)
 async def sync_runner_images_route(request: Request) -> dict[str, Any]:
-    """Run one discovery pass (GHCR anon probe + images.json merge) now.
+    """Run one catalogue sync (``images.json`` v2 + GHCR probe) now.
 
-    Synchronous from the caller's perspective (unlike the pull job, a
-    sync run is bounded by a handful of small HTTP round-trips, not a
-    multi-GB transfer) — the manual "sync now" button and the scheduled
-    poll both call this.
+    Synchronous from the caller's perspective (a sync is a handful of small
+    HTTP round-trips, not a multi-GB transfer). The dashboard's Sync button
+    and ``hal0 runner-images sync`` call this; boot and ``hal0 update`` sync
+    on their own.
     """
     store = request.app.state.runner_image_registry
     result = await sync_runner_images(store)
-    defaults, slot_usage, local, specialties = _request_context()
-    rows = _enrich_with(result.images, defaults, slot_usage, local, specialties)
+    defaults, slot_usage, local = _request_context()
+    rows = _enrich_with(result.images, defaults, slot_usage, local)
     return {
         "images": rows,
         "families": _safe_families_payload(result.images, defaults, slot_usage, local),
         "images_json_ok": result.images_json_ok,
         "images_json_error": result.images_json_error,
         "probe_errors": result.probe_errors,
+        "skipped": result.skipped,
     }
 
 

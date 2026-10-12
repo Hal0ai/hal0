@@ -154,10 +154,16 @@ def tts_profile_for_device(device: str) -> str:
 # ── Backends ──────────────────────────────────────────────────────────────────
 
 
-#: Sourced from the runner-image registry (§7.1b / ML-4) — was the 4th
-#: independent FLM image literal (alongside the seed profile, flm.py, and
-#: manifest.json); now RUNNER_IMAGES["flm"].image is the one source.
-_FLM_TOOLBOX_IMAGE = RUNNER_IMAGES["flm"].image
+def _flm_toolbox_image() -> str:
+    """The FLM runner image, resolved when asked (§7.1b / ML-4).
+
+    The runner registry is the one source (the ``manifest.json`` pin or its
+    ``HAL0_RUNNER_IMAGE_FLM`` override). Resolved lazily, never at import: an
+    unpublished pin raises, and that must not break importing this module.
+    """
+    from hal0.runners import resolve_runner_image
+
+    return resolve_runner_image(RUNNER_IMAGES["flm"])
 
 
 # FLM tags hidden from the dashboard catalog because of upstream FLM
@@ -283,7 +289,7 @@ def _run_flm_probe(generation: int) -> None:
     try:
         from hal0.providers.container import container_provider
 
-        answer = container_provider().image_present(_FLM_TOOLBOX_IMAGE)
+        answer = container_provider().image_present(_flm_toolbox_image())
     except Exception:
         log.warning("capabilities.flm_image_probe_failed", exc_info=True)
         answer = None

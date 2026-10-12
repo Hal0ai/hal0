@@ -152,7 +152,7 @@ A `pass` names the staged path; a `fail` names exactly what is missing.
 ### How the CPU STT path works (Moonshine)
 
 Enabling `voice.stt` with `backend=cpu` spawns the `stt` slot's own
-container from the `hal0-toolbox-moonshine` image (`MoonshineProvider`),
+container from the `moonshine` runner's image (`ghcr.io/hal0ai/hal0-runner-moonshine`, `MoonshineProvider`),
 distinct from the NPU path below — it's a standalone process, not a
 co-loaded FLM role. The container wraps an OpenAI-compatible FastAPI
 server (`POST /v1/audio/transcriptions`, `GET /v1/models`, `GET /health`).

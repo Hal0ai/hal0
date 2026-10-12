@@ -32,27 +32,22 @@ const { mutateSpy, ROWS, FAMILIES } = vi.hoisted(() => ({
   mutateSpy: [] as unknown[],
   ROWS: [
     {
-      id: 'rocmfpx-combined',
-      image: 'ghcr.io/hal0ai/hal0-combined',
+      id: 'standard',
+      image: 'ghcr.io/hal0ai/hal0-runner-standard',
       tag: '0822',
       digest: null,
       size_bytes: 7_340_032_000,
-      manifest_key: null,
-      ownership: 'owned',
-      publish: 'external',
-      notes: null,
-      build: null,
       local_path: null,
       downloaded_at: null,
       discovered_at: null,
       updated_at: null,
       extra: {},
       available_tags: ['0824', '0822'],
-      is_default: { family: 'rocmfpx', source: 'release' },
+      is_default: { family: 'standard', source: 'release' },
       in_use_by: ['agent', 'utility'],
-      runner: 'rocmfpx',
-      title: 'ROCmFPX',
-      blurb: 'llama.cpp build for AMD GPUs.',
+      runner: 'standard',
+      title: 'Standard',
+      blurb: 'llama.cpp for AMD GPUs.',
       tier: 'default',
     },
   ],
@@ -61,10 +56,10 @@ const { mutateSpy, ROWS, FAMILIES } = vi.hoisted(() => ({
   // set-as-default flow (RunnerCard, unrelated to FamilyStrip) exercises.
   FAMILIES: [
     {
-      family: 'rocmfpx',
-      title: 'ROCmFPX',
+      family: 'standard',
+      title: 'Standard',
       tier: 'default',
-      effective_ref: 'ghcr.io/hal0ai/hal0-combined:0822',
+      effective_ref: 'ghcr.io/hal0ai/hal0-runner-standard:0822',
       source: 'release',
       store_state: 'unknown',
       slots: ['agent', 'utility'],
@@ -126,10 +121,10 @@ describe('RunnerImagesView set-as-default confirm flow', () => {
     })
 
     // Contract surfaces are up: family strip row + set-default CTA.
-    expect(host.querySelector('[data-testid="ri-family-rocmfpx"]')).toBeTruthy()
+    expect(host.querySelector('[data-testid="ri-family-standard"]')).toBeTruthy()
     const setBtn = host.querySelector('[data-testid="ri-set-default"]') as HTMLButtonElement
     expect(setBtn).toBeTruthy()
-    // The headline tag already IS the rocmfpx default, so re-pinning it is a
+    // The headline tag already IS the Standard launch image, so re-pinning it is a
     // no-op — the CTA gates until a different tag is picked.
     expect(setBtn.disabled).toBe(true)
     // No dialog yet.
@@ -148,8 +143,12 @@ describe('RunnerImagesView set-as-default confirm flow', () => {
     // that will drift to the new default.
     act(() => { setBtn.click() })
     expect(host.querySelector('.modal-backdrop')).toBeTruthy()
-    expect(host.textContent).toContain('Set ROCmFPX launch image')
-    expect(host.textContent).toContain('ghcr.io/hal0ai/hal0-combined:0824')
+    expect(host.textContent).toContain('Set Standard launch image')
+    // The dialog speaks in titles — the raw ref appears only inside the
+    // collapsed "Image details" area, never in the confirm message.
+    const dialogText = host.querySelector('.modal-backdrop')!.textContent || ''
+    expect(dialogText).not.toContain('ghcr.io/hal0ai/hal0-runner-standard')
+    expect(dialogText).not.toContain('0824')
     expect(host.textContent).toContain('agent, utility')
     // in_use_by can include image_pin slots, which do not follow the change.
     expect(host.textContent).toContain('a slot with its own image pin stays where it is')
@@ -159,7 +158,7 @@ describe('RunnerImagesView set-as-default confirm flow', () => {
     const confirmBtn = textButtons(host).find(b => b.textContent === 'Set launch image')
     expect(confirmBtn).toBeTruthy()
     act(() => { confirmBtn!.click() })
-    expect(mutateSpy).toEqual([{ family: 'rocmfpx', ref: 'ghcr.io/hal0ai/hal0-combined:0824' }])
+    expect(mutateSpy).toEqual([{ family: 'standard', ref: 'ghcr.io/hal0ai/hal0-runner-standard:0824' }])
     expect(host.querySelector('.modal-backdrop')).toBeNull()
 
     act(() => { root.unmount() })

@@ -1082,8 +1082,22 @@ def _scan_and_register_locked(
     # Idempotent (a row with coords is left alone) and never changes the id.
     backfilled.extend(backfill_coordless(registry))
 
+    from hal0.registry.detect import unsupported_gguf_contents, unsupported_quant
+
     for cand in candidates:
         existing_id = cand.curated_match.id if cand.curated_match else cand.suggested_id
+        # Fork-only quants (ROCmFPX family, IU4, ActiveFPX) have no runner to
+        # load them (ADR-0028); a scan never registers one. The resolved path
+        # of an HF cache snapshot is a hash, so the symlink-derived id is
+        # checked too, and the file's own tensor types catch a renamed build.
+        fork_quant = unsupported_quant(None, cand.path.name, cand.suggested_id)
+        for shard in [cand.path, *(cand.shards or [])]:
+            if fork_quant is not None:
+                break
+            fork_quant = unsupported_gguf_contents(shard)
+        if fork_quant is not None:
+            skipped.append({"path": str(cand.path), "reason": f"unsupported_quant:{fork_quant}"})
+            continue
         if registry.has(existing_id):
             existing = registry.get(existing_id)
             if existing.path == str(cand.path):

@@ -142,7 +142,7 @@ def _write_release_manifest(
         "min_data_version": 1,
         "released_at": "2026-05-15T12:00:00Z",
         "notes_url": "https://example.test/notes",
-        "toolbox_images": {},
+        "runners": {},
     }
     if overrides:
         payload.update(overrides)
@@ -368,6 +368,30 @@ def test_manifest_schema_accepts_full_payload(tmp_path: Path) -> None:
     assert m.version == "0.0.1"
     assert m.signer_identity.startswith("^https://github")
     assert len(m.digest_sha256) == 64
+
+
+def test_manifest_schema_carries_the_runner_pin_table(tmp_path: Path) -> None:
+    """The release manifest mirrors manifest.json's ``runners`` table (the
+    ``toolbox_images`` block it replaced is gone)."""
+    tarball = _build_release_tarball(tmp=tmp_path, version="0.0.1")
+    pins = {
+        "standard": {
+            "image": "ghcr.io/hal0ai/hal0-runner-standard",
+            "tag": "b1-r1",
+            "digest": "sha256:" + "a" * 64,
+            "lanes_gated": ["rocm", "vulkan"],
+        }
+    }
+    payload = _write_release_manifest(
+        manifest_path=tmp_path / "latest.json",
+        tarball=tarball,
+        version="0.0.1",
+        overrides={"runners": pins},
+    )
+    m = ReleaseManifest.model_validate(payload)
+    assert m.runners == pins
+    assert not hasattr(m, "toolbox_images")
+    assert ReleaseManifest.model_validate({**VALID_MANIFEST, "version": "0.0.1"}).runners == {}
 
 
 @pytest.mark.parametrize(

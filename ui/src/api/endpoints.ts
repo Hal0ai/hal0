@@ -99,13 +99,10 @@ export const ENDPOINTS = {
   // Mirrors the model-pull surface above: /api/runner-images (list) +
   // /downloaded (locally-pulled only, for the slot edit drawer's Runner
   // Image field — owned by fix/slot-edit-drawer-cleanup) + per-id
-  // pull/status/stream/cancel. Catalogue ids are images.json short names
-  // ("cpu", "rocmfpx-hy3"), falling back to GHCR repo paths
-  // ("hal0ai/hal0-toolbox-cpu") for unmatched rows, so they're NOT
-  // re-encoded per-segment — encodeURIComponent would turn a fallback
-  // id's "/" into "%2F", which the backend's :path route converter
-  // expects decoded, matching how the browser's fetch/EventSource
-  // already send it.
+  // pull/status/stream/cancel. Catalogue ids are runner keys
+  // ("standard", "cpu", "flm", …), so they need no per-segment encoding;
+  // the backend's :path route converter still expects any "/" decoded,
+  // matching how the browser's fetch/EventSource already send it.
   runnerImages: '/api/runner-images',
   runnerImagesDownloaded: '/api/runner-images/downloaded',
   runnerImagesSync: '/api/runner-images/sync',

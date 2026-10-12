@@ -7,9 +7,8 @@ OpenAI-shaped ``POST /v1/images/generations`` request is translated to a
 parametric workflow (see :mod:`hal0.providers.comfyui_workflows`) and the
 result PNG bytes are unwrapped back into the OpenAI response shape.
 
-Toolbox image:    ghcr.io/hal0ai/hal0-comfyui (manifest digest pin is the
-                  primary path; the :latest tag is the last-resort fallback).
-                  The image ships ComfyUI checked out at /opt/ComfyUI with
+Runner image:     ghcr.io/hal0ai/hal0-runner-comfyui, pinned in manifest.json
+                  ``runners.comfyui``. The image ships ComfyUI checked out at /opt/ComfyUI with
                   its venv at /opt/venv — NOT /app (layout mirrors the kyuz0
                   Strix Halo build it replaced, by construction).
 Backend default:  rocm  (Strix Halo iGPU is the v1 first-class target).
@@ -43,19 +42,9 @@ from hal0.errors import Hal0Error
 from hal0.providers._gpu import resolve_gpu_device_paths, resolve_gpu_group_ids
 from hal0.providers.base import ContainerSpec, Mount, Provider
 from hal0.providers.comfyui_workflows import build_workflow
-from hal0.runners import RUNNER_IMAGES
 
 log = logging.getLogger(__name__)
 
-
-# ── Toolbox image ──────────────────────────────────────────────────────────────
-# Last-resort fallback only — the runner registry's manifest digest pin is
-# the primary path (see image_ref / hal0.runners.resolve_runner_image).
-# Sourced from RUNNER_IMAGES["comfyui"].image (§7.1b / ML-4) so the literal
-# tag lives in exactly one place. Points at hal0's own published Strix Halo
-# build (ghcr.io/hal0ai/hal0-comfyui), which mirrors the kyuz0 build the
-# live CT105 deployment validated.
-_HAL0_COMFYUI_IMAGE = RUNNER_IMAGES["comfyui"].image
 
 # In-container app + working-data layout. The image has ComfyUI
 # checked out at /opt/ComfyUI (venv at /opt/venv). Host-side working data
@@ -123,7 +112,7 @@ class ComfyUIProvider(Provider):
 
     name = "comfyui"
 
-    #: The hal0-comfyui Strix Halo image is a PyTorch-**ROCm** build (see the module
+    #: The hal0-runner-comfyui image is a PyTorch-**ROCm** build (see the module
     #: docstring's "Backend default: rocm", ``RUNNER_IMAGES["comfyui"]
     #: .supported_backends == ("rocm",)``, and ``container_spec`` forwarding
     #: ``resolve_gpu_device_paths()`` — which includes ``/dev/kfd``). The
@@ -193,15 +182,9 @@ class ComfyUIProvider(Provider):
              tiers above: a box-wide default never outranks a slot's own
              override.
           4. :func:`hal0.runners.resolve_runner_image` on the ``comfyui``
-             runner: ``HAL0_TOOLBOX_IMAGE_COMFYUI`` env var →
-             ``manifest.json`` digest pin → the fallback tag
-             ``ghcr.io/hal0ai/hal0-comfyui:latest``.
+             runner: ``HAL0_RUNNER_IMAGE_COMFYUI`` env var →
+             the ``manifest.json`` ``runners.comfyui`` pin.
 
-        ComfyUI was previously the ONE provider that read the manifest at
-        all; that behaviour is now unified into the registry resolver
-        every runner shares, so this method's error-swallowing story moves
-        into :func:`~hal0.runners.resolve_runner_image` (best-effort — a
-        missing/stale manifest never breaks the provider).
         """
         from hal0.providers._image import resolve_family_image, slot_image_pin
 
@@ -597,7 +580,6 @@ class ComfyUIProvider(Provider):
 
 
 __all__ = [
-    "_HAL0_COMFYUI_IMAGE",
     "ComfyUIHealthError",
     "ComfyUIInferError",
     "ComfyUIProvider",

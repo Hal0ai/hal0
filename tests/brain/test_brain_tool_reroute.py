@@ -2,7 +2,7 @@
 
 The shipped ~1.1B brain model cannot emit tool calls the local runtime parses.
 Measured on a GPU box against the published
-``hal0-brain-sft-Q8_0_ROCMFPX_AGENT.gguf`` in the pinned ROCmFPX runner:
+``hal0-brain-sft-Q8_0_ROCMFPX_AGENT.gguf`` on the then-pinned ROCmFPX runner:
 
   * WITH ``--jinja`` + native OpenAI ``tools``: HTTP 200, ``finish_reason:
     stop``, ``tool_calls: null``, and ``content`` came back as the literal
@@ -30,10 +30,10 @@ What this file locks down:
   * ``hal0.toolloop.engine.run_tool_loop`` is untouched, so OmniRouter's use of
     it is unchanged;
   * the native-tools preflight is a CAPABILITY question about the resolved
-    runner image, not ``image == DEFAULT_ROCMFPX_IMAGE`` (#1789) — a non-Strix
-    box's fallback toolbox keeps real tool rounds, a runner caught rejecting
-    tools is learned at runtime, and a turn with no tool surface at all admits
-    it instead of fabricating live state.
+    runner image, not image identity (#1789) — every runner hal0 ships keeps
+    real tool rounds, a runner caught rejecting tools is learned at runtime,
+    and a turn with no tool surface at all admits it instead of fabricating
+    live state.
 
 Scripted stub LLM, no network.
 
@@ -49,19 +49,43 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+import pytest
+
 from hal0.api.routes import board_chat as bc
 from hal0.config.schema import (
     BRAIN_TOOL_MODEL_DEFAULT,
     BRAIN_TOOL_MODEL_DISABLED,
-    DEFAULT_ROCMFPX_IMAGE,
-    FALLBACK_CUDA_IMAGE,
-    FALLBACK_VULKAN_IMAGE,
-    NATIVE_TOOL_INCOMPATIBLE_IMAGE_REFS,
-    STALE_ROCMFPX_IMAGE_REFS,
     BrainChatConfig,
     Hal0Config,
 )
 from hal0.mcp.approval_queue import ApprovalQueue
+from hal0.runners import RUNNER_IMAGES, resolve_runner_image
+
+#: The images the runner registry resolves for each lane (pin ref, or the bare
+#: repo while the manifest row is a placeholder).
+_STANDARD_IMAGE = resolve_runner_image(RUNNER_IMAGES["standard"])
+_CPU_IMAGE = resolve_runner_image(RUNNER_IMAGES["cpu"])
+_CUDA_IMAGE = resolve_runner_image(RUNNER_IMAGES["cuda"])
+
+#: An operator ``image_pin`` to an old build that 500s a tools-attached
+#: completion ("peg-native format", #1626). Nothing marks it incapable up
+#: front: the gate learns it at runtime, so tests that need it incapable call
+#: :func:`_learn_incapable` first.
+_STALE_IMAGE = "ghcr.io/example/old-runner:c077206"
+
+
+@pytest.fixture(autouse=True)
+def _reset_learned_tool_verdicts():
+    """The learned-incapable set is process-global: never leak it across tests."""
+    bc._LEARNED_TOOL_INCAPABLE_IMAGES.clear()
+    yield
+    bc._LEARNED_TOOL_INCAPABLE_IMAGES.clear()
+
+
+def _learn_incapable(image: str) -> None:
+    """Record that a live round was caught rejecting tools on ``image``."""
+    bc._LEARNED_TOOL_INCAPABLE_IMAGES.add(image)
+
 
 # ── the two measured failure shapes ─────────────────────────────────────────
 
@@ -374,21 +398,21 @@ def test_replayed_tool_history_does_not_pin_a_turn_to_the_tool_model() -> None:
     assert _tokens(events) == "Nothing else pending."
 
 
-# ── native `tools` ride every round again (runner ade07ba) ──────────────────
+# ── native `tools` ride every round ──────────────────────────────────────────
 #
-# #1626 stripped `tools` from brain rounds because the c077206 runner 500'd
-# every tools-attached completion ("peg-native format"). The real bug was the
-# runtime stripping the vocab's tool-syntax CONTROL tokens at decode; the
-# ade07ba runner preserves them and parses the 1B's attribute-XML natively,
-# so the brain round must get the schemas back — a native `tool_calls` round
-# from the brain is now the EXPECTED fast path, with the reroute as fallback.
+# #1626 stripped `tools` from brain rounds because an old runner 500'd every
+# tools-attached completion ("peg-native format"). The real bug was the
+# runtime stripping the vocab's tool-syntax CONTROL tokens at decode; current
+# runners preserve them and parse the 1B's attribute-XML natively, so the
+# brain round must get the schemas back — a native `tool_calls` round from the
+# brain is the EXPECTED fast path, with the reroute as fallback.
 
 
 def test_brain_rounds_carry_native_tools() -> None:
     """Every round — brain and tool-model alike — goes out with `tools`.
 
-    The ade07ba runner parses the brain's dialect natively; stripping the
-    schemas would forfeit the native fast path this runner exists for.
+    The runner parses the brain's dialect natively; stripping the schemas
+    would forfeit the native fast path.
     """
     stub = _StubLLM(
         [
@@ -641,15 +665,13 @@ def test_unavailable_message_is_actionable() -> None:
 
 # ── #1655: the chat-model round checks its resolved slot's runner first ─────
 #
-# ade07ba is the GA default, but `_chat_stream` permits overrides (a custom
-# `model`, or a rollback via `image_pin`) and `retag_stale_slot_images` only
-# fixes a stale pin on `hal0 update run` — not on every chat call. A brain
-# round whose resolved slot is STILL on an older image (e.g. c077206) 500s on
-# a `tools`-attached completion exactly like #1626 measured. These tests pin
-# that the preflight in `_resolved_slot_native_tools` catches it and
+# The shipped runners parse `tools`, but `_chat_stream` permits overrides (a
+# custom `model`, or a rollback via `image_pin` to an old build). A brain round
+# whose resolved slot runs an image that rejects `tools` 500s on a
+# `tools`-attached completion exactly like #1626 measured, and the gate learns
+# that image the first time it happens. These tests pin that the preflight in
+# `_resolved_slot_native_tools` honours the learned verdict and
 # `_tool_routing_llm` strips `tools` off just the CHAT-model round.
-
-_STALE_IMAGE = "ghcr.io/hal0ai/hal0-rocmfpx:c077206"
 
 
 class _FakeSlotManager:
@@ -667,7 +689,7 @@ def _brain_slot_cfg(*, image_pin: str, device: str = "gpu-rocm") -> dict[str, An
         "name": "brain",
         "type": "llm",
         "device": device,
-        "profile": "rocmfpx-rocm",
+        "profile": "chat",
         "image_pin": image_pin,
         "model": {"default": "hal0-brain-sft-fpx8"},
     }
@@ -691,15 +713,17 @@ def test_resolved_slot_native_tools_true_with_no_slot_manager() -> None:
 
 
 def test_resolved_slot_native_tools_true_on_the_default_image() -> None:
-    """A slot pinned to the current DEFAULT_ROCMFPX_IMAGE (ade07ba) -> True."""
+    """A slot pinned to the current ``standard`` runner image -> True."""
     request = _fake_request_with_slot(
-        _StubLLM([]), _brain_slot_cfg(image_pin=DEFAULT_ROCMFPX_IMAGE), model="hal0/brain"
+        _StubLLM([]), _brain_slot_cfg(image_pin=_STANDARD_IMAGE), model="hal0/brain"
     )
     assert _run(bc._resolved_slot_native_tools(request, "hal0/brain")) is True
 
 
-def test_resolved_slot_native_tools_false_on_a_stale_pin() -> None:
-    """A slot pinned to c077206 (pre-ade07ba) -> False: it 500s on `tools`."""
+def test_resolved_slot_native_tools_false_on_an_image_caught_rejecting_tools() -> None:
+    """A slot pinned to an image a live round was caught rejecting tools on
+    -> False: it 500s on `tools`."""
+    _learn_incapable(_STALE_IMAGE)
     request = _fake_request_with_slot(
         _StubLLM([]), _brain_slot_cfg(image_pin=_STALE_IMAGE), model="hal0/brain"
     )
@@ -707,8 +731,9 @@ def test_resolved_slot_native_tools_false_on_a_stale_pin() -> None:
 
 
 def test_resolved_slot_native_tools_true_for_npu_backed_slots() -> None:
-    """FLM/NPU-backed slots never route through the ROCmFPX runner this check
+    """FLM/NPU-backed slots never route through a llama.cpp runner this check
     exists for — an image_pin field there (if present at all) is noise."""
+    _learn_incapable(_STALE_IMAGE)
     request = _fake_request_with_slot(
         _StubLLM([]),
         _brain_slot_cfg(image_pin=_STALE_IMAGE, device="npu"),
@@ -717,11 +742,12 @@ def test_resolved_slot_native_tools_true_for_npu_backed_slots() -> None:
     assert _run(bc._resolved_slot_native_tools(request, "hal0/brain")) is True
 
 
-def test_stale_pin_strips_tools_from_the_chat_round_only() -> None:
+def test_a_learned_incapable_image_strips_tools_from_the_chat_round_only() -> None:
     """The end-to-end contract: chat round goes out WITHOUT tools when the
     resolved slot 500s on them; the tool-model round still carries them, and
     the reroute still fires — detection reads the reply text, not the
-    request, so a stale pin degrades to the fallback instead of a 500."""
+    request, so such a pin degrades to the fallback instead of a 500."""
+    _learn_incapable(_STALE_IMAGE)
     stub = _StubLLM(
         [
             _leaked(JINJA_LEAK),  # round 0, brain: garbage (as if tools-less)
@@ -736,7 +762,7 @@ def test_stale_pin_strips_tools_from_the_chat_round_only() -> None:
     events = _run(_collect(request))
 
     assert stub.models == ["hal0/brain", "hal0/agent", "hal0/agent"]
-    assert not stub.calls[0].get("tools"), "stale-pinned chat round must NOT carry tools"
+    assert not stub.calls[0].get("tools"), "incapable-image chat round must NOT carry tools"
     assert stub.calls[1].get("tools"), "tool-model round must still carry tools"
     assert stub.calls[2].get("tools"), "tool-model continuation must still carry tools"
     assert _tokens(events) == "You have three slots loaded."
@@ -748,7 +774,7 @@ def test_default_image_pin_keeps_tools_on_the_chat_round() -> None:
     stub = _StubLLM([_tool_call("list_slots", {}, "c1"), _final("done")])
     request = _fake_request_with_slot(
         stub,
-        _brain_slot_cfg(image_pin=DEFAULT_ROCMFPX_IMAGE),
+        _brain_slot_cfg(image_pin=_STANDARD_IMAGE),
         model="hal0/brain",
         tool_model="hal0/agent",
     )
@@ -761,12 +787,11 @@ def test_default_image_pin_keeps_tools_on_the_chat_round() -> None:
 
 # ── #1789: the gate asks about CAPABILITY, not image identity ───────────────
 #
-# The #1655 preflight above shipped as `image == DEFAULT_ROCMFPX_IMAGE`. That
-# is not the question it meant to ask: a CPU-only or CUDA box resolves its
-# runner to FALLBACK_VULKAN_IMAGE / FALLBACK_CUDA_IMAGE — ordinary upstream
-# llama.cpp builds with no MiniCPM5 parser and no peg-format failure mode, so
-# they parse OpenAI `tools` fine — and got `False`, which stripped `tools` from
-# EVERY brain round. Measured on CT151 during rc.4 validation: zero tool
+# The #1655 preflight shipped as an image-identity check. That is not the
+# question it meant to ask: a CPU-only or CUDA box resolves its runner to the
+# `cpu` / `cuda` image — ordinary llama.cpp builds with no peg-format failure
+# mode, so they parse OpenAI `tools` fine — and got `False`, which stripped
+# `tools` from EVERY brain round. Measured on CT151 during rc.4 validation: zero tool
 # frames, zero dispatch, and a confident answer naming slots that do not
 # exist. These tests pin the capability gate and the honesty fallback.
 
@@ -781,34 +806,30 @@ _PEG_FORMAT_ERROR = (
 )
 
 
-def test_image_native_tools_denies_only_the_known_bad_lineage() -> None:
-    """The gate's core table: deny the pre-ade07ba ROCmFPX refs, allow the rest.
+def test_image_native_tools_assumes_capable_unless_learned() -> None:
+    """The gate's core table: every runner is assumed capable until a live round
+    catches it rejecting tools.
 
-    Every ref in NATIVE_TOOL_INCOMPATIBLE_IMAGE_REFS is a runner measured to
-    500 the whole request on a tools-attached completion (#1626). Everything
-    else — today's default, the two HW-gated fallbacks a non-Strix box lands
-    on, an operator's own build — is assumed capable, which is the entire
-    #1789 fix.
+    Today's runners, an operator's own build and an unresolvable image all
+    default to capable — the entire #1789 fix. There is no static deny list:
+    the only way an image becomes incapable is the runtime learning below.
     """
     _clear_learned()
-    for bad in NATIVE_TOOL_INCOMPATIBLE_IMAGE_REFS:
-        assert bc._image_native_tools(bad) is False, bad
     for good in (
-        DEFAULT_ROCMFPX_IMAGE,
-        FALLBACK_VULKAN_IMAGE,  # CPU-only / non-Strix AMD box — the #1789 report
-        FALLBACK_CUDA_IMAGE,
+        _STANDARD_IMAGE,
+        _CPU_IMAGE,  # CPU-only box — the #1789 report
+        _CUDA_IMAGE,
+        _STALE_IMAGE,  # an old pin is capable until a round proves otherwise
         "ghcr.io/example/my-own-llama-server:v9",
     ):
         assert bc._image_native_tools(good) is True, good
     # An unresolvable image is not a verdict — best-effort default (True).
     assert bc._image_native_tools(None) is True
     assert bc._image_native_tools("   ") is True
-    # The former basic-lane toolbox defaults are STALE, not tool-incompatible:
-    # the updater retags them, but they parse `tools` perfectly meanwhile.
-    assert "ghcr.io/hal0ai/amd-strix-halo-toolboxes:vulkan-radv-server" in (
-        STALE_ROCMFPX_IMAGE_REFS
-    )
-    assert NATIVE_TOOL_INCOMPATIBLE_IMAGE_REFS < STALE_ROCMFPX_IMAGE_REFS
+    # A learned verdict is the one thing that flips it.
+    _learn_incapable(_STALE_IMAGE)
+    assert bc._image_native_tools(_STALE_IMAGE) is False
+    assert bc._image_native_tools(_STANDARD_IMAGE) is True
 
 
 def test_resolved_slot_native_tools_true_on_a_non_default_capable_image() -> None:
@@ -817,7 +838,7 @@ def test_resolved_slot_native_tools_true_on_a_non_default_capable_image() -> Non
     _clear_learned()
     request = _fake_request_with_slot(
         _StubLLM([]),
-        _brain_slot_cfg(image_pin=FALLBACK_VULKAN_IMAGE, device="cpu"),
+        _brain_slot_cfg(image_pin=_CPU_IMAGE, device="cpu"),
         model="hal0/brain",
     )
     assert _run(bc._resolved_slot_native_tools(request, "hal0/brain")) is True
@@ -831,7 +852,7 @@ def test_capable_non_default_image_runs_real_tool_rounds() -> None:
     stub = _StubLLM([_tool_call("list_slots", {}, "c1"), _final("Three slots are loaded.")])
     request = _fake_request_with_slot(
         stub,
-        _brain_slot_cfg(image_pin=FALLBACK_VULKAN_IMAGE, device="cpu"),
+        _brain_slot_cfg(image_pin=_CPU_IMAGE, device="cpu"),
         model="hal0/brain",
         tool_model="hal0/agent",
     )
@@ -857,7 +878,7 @@ def test_read_only_refusal_is_reachable_on_a_capable_non_default_image() -> None
     )
     request = _fake_request_with_slot(
         stub,
-        _brain_slot_cfg(image_pin=FALLBACK_VULKAN_IMAGE, device="cpu"),
+        _brain_slot_cfg(image_pin=_CPU_IMAGE, device="cpu"),
         model="hal0/brain",
         tool_model="hal0/agent",
     )
@@ -911,14 +932,14 @@ def test_an_ordinary_dispatch_error_does_not_teach_the_gate() -> None:
     try:
         stub = _StubLLM([{"error": "dispatch.no_route: nothing loaded for hal0/brain"}])
         request = _fake_request_with_slot(
-            stub, _brain_slot_cfg(image_pin=FALLBACK_CUDA_IMAGE), model="hal0/brain"
+            stub, _brain_slot_cfg(image_pin=_CUDA_IMAGE), model="hal0/brain"
         )
 
         events = _run(_collect(request))
 
         assert len(stub.calls) == 1, "a non-tool-format error must not trigger a retry"
         assert any(e["type"] == "error" for e in events)
-        assert bc._image_native_tools(FALLBACK_CUDA_IMAGE) is True
+        assert bc._image_native_tools(_CUDA_IMAGE) is True
     finally:
         _clear_learned()
 
@@ -934,6 +955,7 @@ def test_incapable_runner_with_no_reroute_says_so() -> None:
     admitted gap is the required behaviour.
     """
     _clear_learned()
+    _learn_incapable(_STALE_IMAGE)
     stub = _StubLLM([_final("I can't check live state right now.")])
     request = _fake_request_with_slot(
         stub,
@@ -962,6 +984,7 @@ def test_no_notice_when_a_reroute_can_still_run_tools() -> None:
     is there to run the round — that path already works, so claiming tools are
     unavailable would be its own lie."""
     _clear_learned()
+    _learn_incapable(_STALE_IMAGE)
     stub = _StubLLM(
         [
             _leaked(JINJA_LEAK),

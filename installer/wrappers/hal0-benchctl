@@ -121,20 +121,47 @@ validate_tier() {
   [[ -z "$1" || "$1" =~ ^(amd|nvidia|cpu)$ ]] || die "bad tier: $1 (use amd|nvidia|cpu)"
 }
 
-# The llama-bench binaries the shipped runner images carry. A closed set: the
+# The llama-bench binary the runner images carry (ADR-0028: every hal0 runner
+# image ships its llama.cpp tools under /opt/hal0/bin). A closed set: the
 # entrypoint decides what runs inside the (rootful) container, so it is the
 # one element that must never be caller-shaped.
 validate_entrypoint() {
   case "$1" in
-    /opt/rocmfpx/bin/llama-bench|/usr/local/bin/llama-bench) return 0 ;;
+    /opt/hal0/bin/llama-bench) return 0 ;;
     *) die "entrypoint not allowed: $1" ;;
   esac
 }
 
-# Runner images are pinned to the hal0 GHCR namespace.
+# The installed release's runner pin table (manifest.json `runners`), root-
+# owned under the release tree. HAL0_BENCHCTL_MANIFEST exists for the test
+# suite only; sudo's env_reset strips it before this script runs.
+MANIFEST="${HAL0_BENCHCTL_MANIFEST:-/usr/lib/hal0/current/manifest.json}"
+
+# Every ref the release pins, one per line: repo:tag for each published row,
+# plus repo:tag@digest when the row carries a digest. Read with the system
+# python in isolated mode (no hal0 import, nothing caller-controlled).
+_pinned_refs() {
+  python3 -I - "$MANIFEST" <<'PY'
+import json, sys
+rows = json.load(open(sys.argv[1], encoding="utf-8"))["runners"]
+for row in rows.values():
+    image, tag, digest = row.get("image"), row.get("tag"), row.get("digest")
+    if not (isinstance(image, str) and isinstance(tag, str)):
+        continue
+    print(f"{image}:{tag}")
+    if isinstance(digest, str):
+        print(f"{image}:{tag}@{digest}")
+PY
+}
+
+# Only an image the release pins, matched exactly. An operator's own build
+# (HAL0_RUNNER_IMAGE_<KEY>) is not benchable through this seam: nothing has
+# vetted it, and the container runs as root.
 validate_image() {
-  [[ "$1" =~ ^ghcr\.io/hal0ai/[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*:[A-Za-z0-9._-]+$ ]] \
-    || die "image not allowed: $1"
+  local ref="$1" pinned
+  [[ "$ref" =~ ^[A-Za-z0-9._/:@-]+$ ]] || die "image not allowed: $ref"
+  pinned="$(_pinned_refs)" || die "cannot read the runner pin table at $MANIFEST"
+  grep -qxF -- "$ref" <<<"$pinned" || die "image not allowed (not a pinned runner image): $ref"
 }
 
 cmd="${1:-help}"; shift || true

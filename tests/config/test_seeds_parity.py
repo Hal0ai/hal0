@@ -22,11 +22,8 @@ LEGACY_PROFILES = {
     "chat-long-context",
     "dense",
     "moe",
-    "chadrock-dense",
-    "chadrock-moe",
     "thinking",
     "coding",
-    "promptforge",
 }
 
 
@@ -49,24 +46,19 @@ def test_seed_profiles_are_device_agnostic_and_partition_safe() -> None:
         assert not forbidden.intersection(str(profile.get("flags", "")).split()), name
 
 
-def test_fpx_profiles_keep_logical_tune_and_drop_physical_mtp_flags() -> None:
-    # These four are demoted definitions now; their flag text is what an
-    # upgraded install inherits verbatim, so it stays pinned here.
+def test_workload_profiles_keep_logical_tune_and_drop_physical_mtp_flags() -> None:
+    # Demoted definitions; their flag text is what an upgraded install
+    # inherits verbatim, so it stays pinned here.
     moe = seeds.legacy_seed_profiles()["moe"]["flags"]
     dense = seeds.legacy_seed_profiles()["dense"]["flags"]
     # Generic moe/dense are model-agnostic and carry no family-specific
-    # kv-cache (chadrock-specific -ctk/-ctv moved to chadrock-moe/dense
-    # per spec §4.2). Both still carry batch defaults; context is slot-owned
+    # kv-cache. Both still carry batch defaults; context is slot-owned
     # (context_size → --ctx-size, §21.7), so -c must never appear.
     assert "-b 2048" in moe
     assert "-c" not in moe.split()
     assert "-c" not in dense.split()
-    # Chadrock family profiles own the family-specific KV quirks
-    chadrock_moe = seeds.legacy_seed_profiles()["chadrock-moe"]["flags"]
-    chadrock_dense = seeds.legacy_seed_profiles()["chadrock-dense"]["flags"]
-    assert "-ctk f16" in chadrock_moe
-    assert "-ctk q8_0" in chadrock_dense
-    for flags in (moe, dense, chadrock_moe, chadrock_dense):
+    assert "-ctk" not in moe.split() and "-ctk" not in dense.split()
+    for flags in (moe, dense):
         assert "--spec-type" not in flags
         assert "--spec-draft-device" not in flags
         assert "--spec-draft-ngl" not in flags

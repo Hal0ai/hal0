@@ -5,8 +5,8 @@ The STT sibling of :class:`~hal0.providers.kokoro.KokoroProvider`: a
 same slot on ``device=npu`` runs whisper through the FLM trio — the
 device-keyed engine switch, same shape as the tts kokoro⇄qwen3tts pair.
 
-Image API surface (ghcr.io/hal0ai/hal0-toolbox-moonshine:v1; server source
-packaging/toolbox/moonshine/moonshine_server.py):
+Image API surface (ghcr.io/hal0ai/hal0-runner-moonshine; server source in the
+hal0-runner-images repo, runners/moonshine):
   ENTRYPOINT: the FastAPI server — ``container_spec.command`` carries flags
   only (no binary path or subcommand prefix).
   Flags: ``--model_path <dir> --model_arch <arch> --port N --host H``.
@@ -47,14 +47,9 @@ from hal0.config import store as model_store_module
 from hal0.config.paths import model_store_root
 from hal0.errors import Hal0Error
 from hal0.providers.base import ContainerSpec, Mount, Provider
-from hal0.runners import RUNNER_IMAGES
 
-# Sourced from the runner-image registry (§7.1b / ML-4) so the literal tag
-# lives in exactly one place (hal0.runners.RUNNER_IMAGES["moonshine"].image).
-# Kept as a module attribute for back-compat imports.
 log = logging.getLogger(__name__)
 
-_DEFAULT_MOONSHINE_IMAGE = RUNNER_IMAGES["moonshine"].image
 
 # Default profile name if the slot TOML omits one.
 _DEFAULT_PROFILE = "moonshine"
@@ -289,8 +284,8 @@ class MoonshineProvider(Provider):
         :func:`hal0.providers._image.resolve_family_image`):
         ``slot_cfg["image_pin"]`` (top-level or ``[slot]``-nested, honored
         verbatim) → ``[slots].default_images["moonshine"]`` (operator family
-        default) → the runner registry (``HAL0_TOOLBOX_IMAGE_MOONSHINE`` env
-        override → the manifest digest pin → the bundled default) — see
+        default) → the runner registry (``HAL0_RUNNER_IMAGE_MOONSHINE`` env
+        override → the ``manifest.json`` pin) — see
         :func:`hal0.runners.resolve_runner_image`.
         """
         from hal0.providers._image import resolve_family_image

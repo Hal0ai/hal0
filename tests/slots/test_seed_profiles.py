@@ -2,14 +2,10 @@
 
 Per docs/superpowers/specs/2026-07-20-seeded-profile-rework-design.md:
 - Every profile must have: name (implicit via [profile.<name>]), flags, intent.
-- `device_class` field is REMOVED (slot owns device) — including the
-  `promptforge` specialty seed (spec 2026-08-29, #1946 fix round 1):
-  ROCm-only enforcement lives at the runner/guard layer
-  (`RunnerSupports.supported_backends` + `_guard_specialty_runner`), not on
-  the profile template.
+- `device_class` field is REMOVED (slot owns device).
 - `flags` must NOT contain SLOT_HARDWARE_FLAGS or operational flags.
 - Profile names match the catalog: 10 shipped SEEDS (the minimal core, one
-  per runtime family plus the generic llama-server workloads) plus the 8
+  per runtime family plus the generic llama-server workloads) plus the 5
   DEMOTED definitions parked in legacy_seed_profiles.toml. Both files ship,
   both must honour the same flag-ownership invariants, so every check below
   runs over the union.
@@ -72,11 +68,8 @@ LEGACY_SEED_PROFILES = [
     "profile.chat-long-context",
     "profile.dense",
     "profile.moe",
-    "profile.chadrock-dense",
-    "profile.chadrock-moe",
     "profile.thinking",
     "profile.coding",
-    "profile.promptforge",
 ]
 
 ALL_SEED_PROFILES = CORE_SEED_PROFILES + LEGACY_SEED_PROFILES
@@ -108,7 +101,7 @@ def test_seed_catalog_is_the_minimal_core() -> None:
     assert names == sorted(CORE_SEED_PROFILES), f"seed catalog drifted: {names}"
 
 
-def test_legacy_catalog_holds_the_demoted_eight() -> None:
+def test_legacy_catalog_holds_the_demoted_five() -> None:
     names = sorted(_load(LEGACY_SEED_PROFILES_PATH))
     assert names == sorted(LEGACY_SEED_PROFILES), f"legacy catalog drifted: {names}"
 
