@@ -269,6 +269,17 @@ applying. Add those subsections to a version's section to surface them; see
   `hal0.runner-images.v2`). It looked for an `images` array, so every sync
   failed with "images.json has no 'images' array" and the catalogue never
   refreshed.
+- The runner-system migration now reads a slot's model file, not just its
+  name, before keeping it. A fork build (ROCmFPX and friends) renamed to a
+  plain file name used to keep its slot through the migration and was then
+  refused at launch; it is now unassigned with the same warning as a
+  name-detected one. A missing, unreadable or truncated file is never an
+  error: the name check still applies.
+
+- The runner-image catalogue sync no longer leaves cancelled probe tasks
+  pending when an unexpected error aborts it, which logged "Task was destroyed
+  but it is pending" noise.
+
 - The demoted workload profiles (`dense`, `moe`, `coding`, `chadrock-dense`,
   `chadrock-moe`) no longer pass `--reasoning-format none`. Upstream llama.cpp
   answers HTTP 400 "Failed to initialize samplers" to every `response_format`

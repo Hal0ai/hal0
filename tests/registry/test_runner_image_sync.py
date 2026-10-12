@@ -759,6 +759,38 @@ async def test_the_probe_deadline_keeps_the_last_good_facts(
 
 
 @pytest.mark.asyncio
+async def test_an_unexpected_probe_error_settles_every_task_before_raising(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An error outside the expected set re-raises only after the sibling
+    probes are cancelled and awaited, so none is left pending."""
+    import asyncio
+
+    import hal0.registry.runner_image_sync as sync_mod
+
+    started = asyncio.Event()
+    slow: list[asyncio.Task[Any]] = []
+
+    async def _probe(row: RunnerImage, *, client: Any) -> RunnerImage:
+        if row.id == "cpu":
+            started.set()
+            raise KeyError("boom")  # not an httpx/Runtime/Value error
+        slow.append(asyncio.current_task())  # type: ignore[arg-type]
+        await started.wait()
+        await asyncio.sleep(30)
+        return row
+
+    monkeypatch.setattr(sync_mod, "probe_ghcr_package", _probe)
+    monkeypatch.setattr(sync_mod, "SYNC_PROBE_DEADLINE_S", 0.2)
+    rows = {"cpu": _cpu_row(), "flm": _cpu_row(id="flm")}
+    async with httpx.AsyncClient() as client:
+        with pytest.raises(KeyError):
+            await sync_mod._probe_all(rows, client=client)
+
+    assert slow and all(t.done() for t in slow)
+
+
+@pytest.mark.asyncio
 async def test_an_empty_catalogue_prunes_nothing(tmp_path: Path) -> None:
     store = _store(tmp_path)
     store.upsert(_cpu_row())
