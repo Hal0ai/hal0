@@ -14,6 +14,7 @@ read the host's real ``/etc/hal0/hardware.json``.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -441,7 +442,7 @@ def test_slot_create_rejects_ctx_size_flag(captured_post: dict[str, Any]) -> Non
     )
     assert result.exit_code == 2, result.output  # typer/click usage error
     assert "No such option" in result.output
-    assert "--ctx-size" in result.output
+    assert "--ctx-size" in re.sub(r"\x1b\[[0-9;]*m", "", result.output)
     assert "body" not in captured_post  # nothing was POSTed
 
 

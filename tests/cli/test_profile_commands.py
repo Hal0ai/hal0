@@ -8,8 +8,10 @@ references.
 from __future__ import annotations
 
 import json
+import re
 
 import pytest
+from rich.console import Console
 from typer.testing import CliRunner
 
 from hal0.cli import profile_commands
@@ -58,6 +60,8 @@ def test_list_renders_table_with_names(monkeypatch: pytest.MonkeyPatch) -> None:
     ]
     _stub_reachable(monkeypatch)
     monkeypatch.setattr(profile_commands, "api_get", lambda _p, **_k: payload)
+    # The module console sizes itself once at import; CI has no terminal.
+    monkeypatch.setattr(profile_commands, "console", Console(width=200))
 
     result = runner.invoke(profile_commands.app, ["list"], env={"COLUMNS": "200"})
     assert result.exit_code == 0, result.output
@@ -252,7 +256,8 @@ def test_edit_a_seed_is_refused_with_the_duplicate_hint(api: _Api) -> None:
     result = runner.invoke(profile_commands.app, ["edit", "agent", "--ctx-size", "32768"])
     assert result.exit_code == 1
     assert "read-only" in result.output
-    assert "create <new-name> --from agent" in result.output
+    plain = " ".join(re.sub(r"\x1b\[[0-9;]*m", "", result.output).split())
+    assert "create <new-name> --from agent" in plain
     assert api.puts == []
 
 
