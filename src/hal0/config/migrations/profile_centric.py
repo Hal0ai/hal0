@@ -1346,7 +1346,7 @@ class _Planner:
             for row in rows:
                 if not isinstance(row, Mapping):
                     continue
-                change = self._plan_stack_row(row, embedded, by_slot)
+                change = self._plan_stack_row(row, embedded, by_slot, stack=st.stack)
                 if change:
                     st.rows.append({"slot": str(row.get("slot") or ""), "change": change})
             if st.rows or st.profile_rewrites or st.errors:
@@ -1357,6 +1357,8 @@ class _Planner:
         row: Mapping[str, Any],
         embedded: Mapping[str, Any],
         by_slot: Mapping[str, SlotPlan],
+        *,
+        stack: str,
     ) -> str:
         parts: list[str] = []
         present = [k for k in STACK_ROW_TUNING_KEYS if k in row]
@@ -1383,7 +1385,12 @@ class _Planner:
             else:
                 new = self.new_name(pname)
                 if new is None:
-                    parts.append(f"profile {pname!r} does not exist; applying it fails")
+                    # Broken today and after; nothing to write, so it is a
+                    # warning, not a change (a rerun must plan nothing).
+                    self.plan.warnings.append(
+                        f"stack {stack} row {row.get('slot') or ''}: profile {pname!r} does "
+                        "not exist; applying the stack fails (left as is)"
+                    )
                 elif new != pname:
                     parts.append(f"profile {pname!r} -> {new!r}")
         return "; ".join(parts)

@@ -462,6 +462,17 @@ def test_blocked_profile_no_slot_uses_is_reported() -> None:
     assert any(line.startswith("profile orphan: BLOCKED") for line in plan.lines())
 
 
+def test_stack_row_naming_a_missing_profile_is_a_warning_not_a_change() -> None:
+    """Broken before and after with nothing to write: a rerun plans nothing."""
+    _write(
+        paths.stacks_toml(),
+        {"stack": {"st": {"slots": [{"slot": "agent", "profile": "gone-profile"}]}}},
+    )
+    plan = pc.plan_conversion()
+    assert not plan.changed, plan.lines()
+    assert any("'gone-profile' does not exist" in w for w in plan.warnings)
+
+
 def test_stack_errors_count_as_blocked() -> None:
     _write(
         paths.stacks_toml(),
