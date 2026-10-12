@@ -1303,7 +1303,7 @@ def test_update_with_a_blocked_slot_prints_the_blocker_and_exits_2(
     )
     assert "profile conversion blocked: profile:fast — --mmproj has no profile home" in out
     assert "fix: run `hal0 profile migrate` to see the plan" in out
-    assert "`hal0 profile migrate --apply`" in out
+    assert "`sudo -u hal0 hal0 profile migrate --apply`" in out
     assert "update applied." not in out
 
 

@@ -324,7 +324,7 @@ def _print_convergence(convergence: dict | None) -> bool:
             f"[yellow]![/yellow] profile conversion blocked: {blocker.get('target')} — "
             f"{blocker.get('reason') or 'cannot be converted as it is'} — fix: run "
             "`hal0 profile migrate` to see the plan, edit the named file or profile, "
-            "then run `hal0 profile migrate --apply`",
+            "then run `sudo -u hal0 hal0 profile migrate --apply`",
             soft_wrap=True,
         )
 

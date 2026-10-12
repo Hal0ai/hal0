@@ -324,6 +324,12 @@ def profile_edit(
     )
 
 
+def _running_as_root() -> bool:
+    import os
+
+    return hasattr(os, "geteuid") and os.geteuid() == 0
+
+
 @app.command("migrate")
 def profile_migrate(
     apply: bool = typer.Option(False, "--apply", help="Convert this install (backs up first)."),
@@ -350,6 +356,16 @@ def profile_migrate(
         migrate_profile_centric,
         restore_backup,
     )
+
+    if (apply or restore) and _running_as_root():
+        # Run as root, the backup would be a root-owned 0600 file that hal0-api
+        # (and so `hal0 update --rollback`) cannot read.
+        flag = "--apply" if apply else f"--restore {restore}"
+        die(
+            f"run this as the hal0 service user, not root: `sudo -u hal0 hal0 profile migrate "
+            f"{flag}`"
+        )
+        return
 
     if restore:
         try:
