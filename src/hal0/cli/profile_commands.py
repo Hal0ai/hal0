@@ -122,4 +122,37 @@ def profile_show(
         console.print(f"[bold]flags[/bold]: {flags}")
 
 
+@app.command("migrate")
+def profile_migrate(
+    json_out: bool = typer.Option(False, "--json", help="Emit the plan as JSON."),
+) -> None:
+    """Preview the move to profile-centric config (ADR-0029). Writes nothing.
+
+    Reads the slot, profile and stack files and the model registry on this
+    box, and prints which profiles would be generated, which slots re-point,
+    which keys leave the slots, and every value that is inert today (those
+    are dropped, never applied: the conversion keeps what launches). Exits 2
+    when anything cannot be converted (a slot, a stored profile or a stack).
+    """
+    from hal0.config.migrations.profile_centric import ProfileMigrationError, plan_conversion
+
+    try:
+        plan = plan_conversion()
+    except (ProfileMigrationError, OSError) as exc:
+        die(str(exc))
+        return
+    if json_out:
+        typer.echo(jsonlib.dumps(plan.to_dict(), indent=2, default=str))
+    else:
+        for line in plan.lines():
+            typer.echo(line)
+        if plan.blockers:
+            typer.echo(
+                f"{len(plan.blockers)} item(s) cannot be converted "
+                f"({', '.join(plan.blockers)}); see BLOCKED above"
+            )
+    if plan.blockers:
+        raise typer.Exit(2)
+
+
 __all__ = ["app"]

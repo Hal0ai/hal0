@@ -1,0 +1,99 @@
+# Frozen copy of the seed profiles as they stood before the profile-centric
+# conversion (ADR-0029). Read ONLY by hal0.config.migrations.profile_centric_frozen
+# to work out what a slot launches before the conversion; never by the launch
+# path. The live seeds (seed_profiles.toml) change shape with ADR-0029; this
+# file must not change.
+#
+# [seed.*]    = seed_profiles.toml (virtual, overlaid from code at every load)
+# [demoted.*] = the pruned seeds a profiles.toml may adopt on first reference
+#               (hal0.profiles.ProfileCatalog._materialize_legacy)
+
+[seed.chat]
+flags = "-fa auto --jinja -b 2048 -ub 512"
+mtp = false
+intent = "Generic chat (fallback for unknown models)"
+quant = ""
+
+[seed.embedding]
+flags = "--embedding -fa auto -b 8192 -ub 8192"
+mtp = false
+intent = "Pooled embeddings"
+quant = ""
+
+[seed.reranking]
+flags = "--reranking -fa auto -b 8192 -ub 8192"
+mtp = false
+intent = "Reranking"
+quant = ""
+
+[seed.cpu-chat]
+flags = "--threads-batch 8 --jinja -b 256 -ub 256"
+mtp = false
+intent = "CPU-safe chat"
+quant = ""
+
+[seed.flm]
+flags = ""
+mtp = false
+intent = "FLM NPU (chat/embed/STT)"
+quant = "W4ABF16"
+
+[seed.kokoro]
+flags = "--model_path /mnt/ai-models/local/kokoro-v1/kokoro-onnx"
+mtp = false
+intent = "Kokoro TTS"
+quant = ""
+
+[seed.moonshine]
+flags = "--model_path /mnt/ai-models/local/moonshine --model_arch base"
+mtp = false
+intent = "Moonshine STT (CPU)"
+quant = ""
+
+[seed.qwen3-tts]
+flags = "--model_path /mnt/ai-models/local/qwen3-tts/Qwen3-TTS-12Hz-1.7B-CustomVoice --default_voice Ryan --default_language Auto"
+mtp = false
+intent = "Qwen3-TTS"
+quant = "BF16"
+
+[seed.comfyui]
+flags = "--disable-mmap --bf16-vae --cache-none"
+mtp = false
+intent = "ComfyUI"
+quant = ""
+
+[seed.brain]
+flags = "--jinja -fa auto -b 2048 -ub 512 --reasoning-budget -1 --no-context-shift --temp 0.7 --top-p 0.95 --no-mmproj"
+mtp = false
+intent = "Brain steward (LFM2.5-2.6B + persona + tool-call routing) · 64K ctx"
+quant = "Q8_0"
+
+[demoted.chat-long-context]
+flags = "-fa auto -ctk q8_0 -ctv q8_0 -b 2048 -ub 512 --no-context-shift"
+mtp = false
+intent = "Long-context chat · tuned for 128K ctx"
+quant = ""
+
+[demoted.dense]
+flags = "--jinja -fa auto -b 2048 -ub 512 --reasoning off --reasoning-budget -1 --no-context-shift --temp 0 --top-p 0.95 --top-k 20 --seed 123 --no-mmproj"
+mtp = false
+intent = "Generic dense workload · tuned for 128K ctx"
+quant = ""
+
+[demoted.moe]
+flags = "--jinja -fa auto -b 2048 -ub 512 --reasoning off --reasoning-budget -1 --no-context-shift --temp 0 --top-p 0.95 --top-k 20 --seed 123 --no-mmproj"
+mtp = false
+intent = "Generic MoE workload · tuned for 32K ctx"
+quant = ""
+
+[demoted.thinking]
+flags = "--jinja -fa auto -b 2048 -ub 512 --reasoning on --reasoning-format deepseek --reasoning-budget -1 --no-context-shift --temp 1.0 --top-p 0.95 --top-k 20 --min-p 0 --presence-penalty 0 --no-mmproj"
+mtp = false
+intent = "Reasoning-ON workload (qwen3-deepseek, ace-saber thinking) · 32K ctx"
+quant = ""
+
+[demoted.coding]
+flags = "--jinja -fa auto -b 2048 -ub 512 --reasoning off --reasoning-budget -1 --no-context-shift --temp 0.7 --top-p 0.95 --top-k 40 --seed 123 --no-mmproj"
+mtp = false
+intent = "Code-gen workload (coder slot, qwen3-coder, qwopus-coder) · 32K ctx"
+quant = ""

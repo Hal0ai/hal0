@@ -371,6 +371,18 @@ dashboard/API-only (`/api/profiles`).
 |---|---|---|
 | `profile list` | — | `--json` |
 | `profile show <name>` | `name` | `--json` |
+| `profile migrate` | — | `--json` |
+
+`profile migrate` previews the move to profile-centric config
+([ADR-0029](/docs/adr/0029-profile-centric-config)).
+It reads this box's slot, profile and stack files and the model registry, and
+prints the profiles it would generate, the slots it would re-point, the keys it
+would drop, and every configured value that does not reach the launch today.
+Those values are dropped, never applied: the conversion keeps what each slot
+launches. It writes nothing. It exits 2 when anything cannot be converted: a
+slot, a stored profile (even one no slot uses), or a stack. `--json` lists
+those under `blocked`. What still needs converting is read from each file's
+content, so running it again after a conversion shows nothing to do.
 
 ## `hal0 mcp` — manage MCP servers
 

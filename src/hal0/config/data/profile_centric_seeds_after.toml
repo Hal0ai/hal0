@@ -1,0 +1,126 @@
+# Target seed catalog of the profile-centric conversion (ADR-0029). The
+# conversion planner (hal0.config.migrations.profile_centric) checks every
+# slot against these seeds; the launch-path change makes this file the live
+# seed_profiles.toml and removes this copy.
+#
+# hal0 seeded profile catalog (ADR-0029: the profile is the whole tune).
+#
+# A profile holds every tune a slot launches with: free llama-server `flags`
+# (KV cache types, batch sizes, sampling, reasoning, --parallel, ...),
+# `ctx_size` (the context window), `enable_thinking` (the request-time
+# reasoning default), `vision` ("auto" loads the model's mmproj when it has
+# one, "off" never does), `mtp` ("auto" drafts with the model's MTP heads
+# when it has them and the runner supports it, "off" never does) and an
+# optional `runner` (the profile-carried runtime).
+#
+# What a profile never carries:
+#   * placement — `-ngl`, `-dev`, `--threads`: the slot's typed fields;
+#   * hal0-managed flags — `--model`, `--host`, `--port`, `--alias`,
+#     `--ctx-size` (use `ctx_size`);
+#   * model facts — `--jinja` (hal0 adds it when the runner and the model's
+#     template support it), `--chat-template*`, `--mmproj` / `--no-mmproj`
+#     (use `vision`).
+#
+# The self-managed engines (kokoro, moonshine, qwen3-tts) have no model row
+# for their bundle, so its `--model_path` stays in their profile.
+#
+# Seeds are virtual and read-only: they are overlaid from this file on every
+# load and cannot be edited; clone one to customise it. Slots hal0 ships
+# name these seeds (installer/etc-hal0/slots/*.toml).
+#
+# Flash Attention is `-fa auto`, never `-fa on`. Seeds land on every
+# model/backend/KV-type combination, so they must not force a kernel the
+# backend may not have. In llama.cpp (b10297+) `auto` runs a startup support
+# probe and falls back to non-FA attention when the FA node cannot be
+# scheduled on the layer's own device; where FA is genuinely required
+# (quantized V cache, tensor split) llama.cpp promotes `auto` by itself.
+#
+# `ctx_size` unset means the model's native window capped at 32768 (8192
+# when the native window is unknown).
+
+[profile.chat]
+# Minimal generic chat — fallback for unknown models.
+flags = "-fa auto -b 2048 -ub 512"
+intent = "Generic chat (fallback for unknown models)"
+
+[profile.agent]
+# The agent workload (ADR-0023 `agent` role; the bundled Hermes agent needs
+# at least 64,000 tokens of context). Deterministic sampling, reasoning off.
+flags = "-fa auto -b 2048 -ub 512 --reasoning off --reasoning-budget -1 --no-context-shift --temp 0 --top-p 0.95 --top-k 20 --seed 123"
+ctx_size = 65536
+vision = "off"
+intent = "Agent workload (bundled agent) · 64K ctx"
+
+[profile.utility]
+# The utility workload (ADR-0023 `utility` role): generic chat flags with the
+# 64K window hal0 ships for the utility slot.
+flags = "-fa auto -b 2048 -ub 512"
+ctx_size = 65536
+intent = "Utility workload · 64K ctx"
+
+[profile.coding]
+# Code generation: higher temperature, no reasoning (coders are
+# non-reasoning), sampler --temp 0.7 --top-p 0.95 --top-k 40.
+flags = "-fa auto -b 2048 -ub 512 --reasoning off --reasoning-budget -1 --no-context-shift --temp 0.7 --top-p 0.95 --top-k 40 --seed 123"
+vision = "off"
+intent = "Code generation · 32K ctx"
+
+[profile.embedding]
+# A pooled embedding pass runs the whole input in one physical micro-batch,
+# so -ub matches -b.
+flags = "--embedding -fa auto -b 8192 -ub 8192"
+ctx_size = 4096
+intent = "Pooled embeddings"
+
+[profile.reranking]
+flags = "--reranking -fa auto -b 8192 -ub 8192"
+ctx_size = 4096
+intent = "Reranking"
+
+[profile.cpu-chat]
+# CPU-safe chat. --threads-batch is llama-server specific (threads for batch
+# processing; distinct from --threads, which stays on the slot).
+flags = "--threads-batch 8 -b 256 -ub 256"
+intent = "CPU-safe chat"
+
+[profile.flm]
+ctx_size = 16384
+intent = "FLM NPU (chat/embed/STT)"
+
+[profile.kokoro]
+flags = "--model_path /mnt/ai-models/local/kokoro-v1/kokoro-onnx"
+intent = "Kokoro TTS"
+
+[profile.moonshine]
+# Moonshine STT (CPU ONNX). Weights are operator-staged under the model
+# store (multi-file ONNX bundle, not registry-pulled). --model_arch picks the
+# checkpoint family the server loads; --model_path points at the staged
+# bundle root (the server resolves the quantized/<variant> leaf itself).
+flags = "--model_path /mnt/ai-models/local/moonshine --model_arch base"
+intent = "Moonshine STT (CPU)"
+
+[profile.qwen3-tts]
+flags = "--model_path /mnt/ai-models/local/qwen3-tts/Qwen3-TTS-12Hz-1.7B-CustomVoice --default_voice Ryan --default_language Auto"
+intent = "Qwen3-TTS"
+
+[profile.comfyui]
+flags = "--disable-mmap --bf16-vae --cache-none"
+intent = "ComfyUI"
+
+[profile.brain]
+# Brain steward workload + LFM2.5-family quirks. Brain is 1:1 with its model
+# (LFM2.5-2.6B Q8_0, curated id lfm2.5-2.6b), so one combined profile.
+#
+# Reasoning: LFM2.5 is an RL-trained thinker — it emits <think> from weights,
+# and `chat_template_kwargs enable_thinking=false` does NOT suppress it.
+# Leaving reasoning-format at the runner default extracts it cleanly into
+# reasoning_content. Structured-output calls still pay the think tokens
+# (~100-300/call) before the grammar-constrained JSON starts — that is the
+# model's contract, not a profile bug.
+#
+# Sampler: temp 0.7 / top_p 0.95 (the rc.9 validation matrix ran green with
+# these). Batch is llama.cpp's default 2048/512.
+flags = "-fa auto -b 2048 -ub 512 --reasoning-budget -1 --no-context-shift --temp 0.7 --top-p 0.95"
+ctx_size = 65536
+vision = "off"
+intent = "Brain steward (LFM2.5-2.6B + persona + tool-call routing) · 64K ctx"
