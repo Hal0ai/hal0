@@ -8,14 +8,14 @@
   "runners": {
     "standard": {
       "image": "ghcr.io/hal0ai/hal0-runner-standard",
-      "tag": "b11552-re14329d",
-      "digest": "sha256:2626239586c1c8fcf1ab310000f9d19b26b3a4fa5230f608e65cc9ef2252c462",
+      "tag": "b11574-r25e5d85",
+      "digest": "sha256:20407105fe0edbbcf793140cecee8efd6b182c854c8c871149c92ff3f664d555",
       "lanes_gated": ["rocm", "vulkan"]
     },
     "cpu": {
       "image": "ghcr.io/hal0ai/hal0-runner-cpu",
-      "tag": "b11552-re14329d",
-      "digest": "sha256:d8e1cfa2066f6ab3124dd185decd15771c4cdf058ed9c0cee49f62e7f02afd77",
+      "tag": "b11574-r25e5d85",
+      "digest": "sha256:c67017e69978b08d04fe82fdf57eaa1c678734446ad078e6f4c73c7c63268f9d",
       "lanes_gated": ["cpu"]
     },
     "flm": {
@@ -50,8 +50,8 @@
     },
     "cuda": {
       "image": "ghcr.io/ggml-org/llama.cpp",
-      "tag": "server-cuda-b11541",
-      "digest": "sha256:f88fa8d94d872312a4ad117acd490fa997bef81f03f161f0cfe0d74272e5b5bb",
+      "tag": "server-cuda-b11561",
+      "digest": "sha256:20c6e722e2fcc5ca9c15401d3fd8e35408aaf8f9c54a12f32920f637c57959bb",
       "lanes_gated": []
     }
   }
