@@ -64,7 +64,57 @@ def test_success_parses_the_result_envelope(monkeypatch: pytest.MonkeyPatch) -> 
     monkeypatch.setattr(updater_module.subprocess, "run", _fake_run)
 
     result = asyncio.run(_run_post_activation_migrations_after_swap(2, job_id="j1"))
-    assert result == {"from": 1, "to": 2, "pass_warnings": []}
+    assert result == {"from": 1, "to": 2, "pass_warnings": [], "conversion_blockers": []}
+
+
+def test_conversion_blockers_are_relayed_from_the_envelope(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    blockers = [{"target": "profile:fast", "reason": "--mmproj has no profile home"}]
+
+    def _fake_run(cmd, *a, **k):
+        payload = {"from": 2, "to": 2, "conversion_blockers": blockers}
+        return _Completed(stdout=json.dumps({updater_module._MIGRATION_RESULT_KEY: payload}))
+
+    monkeypatch.setattr(updater_module.subprocess, "run", _fake_run)
+
+    result = asyncio.run(_run_post_activation_migrations_after_swap(2, job_id="j1"))
+    assert result["conversion_blockers"] == blockers
+
+
+def test_child_script_emits_the_blockers(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The child script (an ABI between releases) writes the result's
+    ``conversion_blockers`` into its envelope: execute the exact script the
+    parent sends against a stubbed ``run_post_activation_migrations``."""
+    import structlog
+
+    captured: dict[str, Any] = {}
+
+    def _fake_run(cmd, *a, **k):
+        captured["cmd"] = list(cmd)
+        return _Completed(stdout=_envelope(1, 1))
+
+    monkeypatch.setattr(updater_module.subprocess, "run", _fake_run)
+    asyncio.run(_run_post_activation_migrations_after_swap(1, job_id="j"))
+    script, payload = captured["cmd"][2], captured["cmd"][3]
+
+    blockers = [{"target": "agent.toml", "reason": "why"}]
+    monkeypatch.setattr(
+        updater_module,
+        "run_post_activation_migrations",
+        lambda *_a, **_k: updater_module.PostActivationResult(1, 3, blockers),
+    )
+    monkeypatch.setattr(structlog, "configure", lambda **_k: None)
+    monkeypatch.setattr("sys.argv", ["-c", payload])
+    exec(script, {})  # the script under test is our own literal
+    line = capsys.readouterr().out.strip().splitlines()[-1]
+    assert json.loads(line)[updater_module._MIGRATION_RESULT_KEY] == {
+        "from": 1,
+        "to": 3,
+        "conversion_blockers": blockers,
+    }
 
 
 def test_result_envelope_survives_interleaved_log_noise(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -79,7 +129,7 @@ def test_result_envelope_survives_interleaved_log_noise(monkeypatch: pytest.Monk
     monkeypatch.setattr(updater_module.subprocess, "run", _fake_run)
 
     result = asyncio.run(_run_post_activation_migrations_after_swap(1, job_id=None))
-    assert result == {"from": 1, "to": 2, "pass_warnings": []}
+    assert result == {"from": 1, "to": 2, "pass_warnings": [], "conversion_blockers": []}
 
 
 def test_args_are_passed_through_as_a_single_json_argv_element(

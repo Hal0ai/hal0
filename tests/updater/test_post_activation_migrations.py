@@ -419,3 +419,48 @@ def test_converge_companions_flag_gates_the_apply_kwarg(
             "hermes_install": True,
         }
     ]
+
+
+def test_conversion_blockers_are_returned_with_their_reasons(
+    monkeypatch: pytest.MonkeyPatch, _stub_every_pass: dict[str, list[Any]]
+) -> None:
+    """ADR-0029: every slot, profile and stack the profile-centric conversion
+    left blocked comes back on the result, with its reason, while the result
+    still unpacks as the ``(source, target)`` pair install.sh and the
+    post-swap child script rely on."""
+    from hal0.config.migrations import profile_centric as pc
+
+    plan = pc.ConversionPlan(
+        slots=[
+            pc.SlotPlan(file="chat.toml", name="chat"),
+            pc.SlotPlan(
+                file="agent.toml",
+                name="agent",
+                status="blocked",
+                error="--chat-template-file has no profile home",
+            ),
+        ],
+        blocked_profiles={"fast": ["--mmproj has no profile home", "-dev has no profile home"]},
+        stacks=[pc.StackPlan(stack="saber", errors=["row agent: --jinja in an embedded profile"])],
+    )
+    monkeypatch.setattr(
+        "hal0.config.migrations.profile_centric_apply.migrate_profile_centric",
+        lambda **_kw: ConversionReport(dry_run=False, plan=plan),
+    )
+
+    result = run_post_activation_migrations()
+
+    source, target = result
+    assert (source, target) == (1, 2)
+    assert result.conversion_blockers == [
+        {"target": "agent.toml", "reason": "--chat-template-file has no profile home"},
+        {
+            "target": "profile:fast",
+            "reason": "--mmproj has no profile home; -dev has no profile home",
+        },
+        {"target": "stack:saber", "reason": "row agent: --jinja in an embedded profile"},
+    ]
+
+
+def test_a_converged_install_has_no_blockers(_stub_every_pass: dict[str, list[Any]]) -> None:
+    assert run_post_activation_migrations().conversion_blockers == []

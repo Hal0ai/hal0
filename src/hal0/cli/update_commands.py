@@ -315,9 +315,23 @@ def _print_convergence(convergence: dict | None) -> bool:
             )
         )
 
-    if convergence.get("converged"):
+    # ADR-0029: whatever the profile-centric conversion could not convert.
+    # One line each, no table: the slot file (or ``profile:<name>`` /
+    # ``stack:<name>``), why, and how to fix it.
+    blockers = [b for b in post_migrations.get("conversion_blockers") or [] if isinstance(b, dict)]
+    for blocker in blockers:
+        console.print(
+            f"[yellow]![/yellow] profile conversion blocked: {blocker.get('target')} — "
+            f"{blocker.get('reason') or 'cannot be converted as it is'} — fix: run "
+            "`hal0 profile migrate` to see the plan, edit the named file or profile, "
+            "then run `hal0 profile migrate --apply`",
+            soft_wrap=True,
+        )
+
+    converged = bool(convergence.get("converged")) and not blockers
+    if converged:
         console.print("[dim]on-disk config is fully converged.[/dim]")
-    return bool(convergence.get("converged"))
+    return converged
 
 
 def _fetch_slot_drift() -> dict:

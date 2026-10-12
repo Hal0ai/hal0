@@ -1769,6 +1769,55 @@ def repair_hermes_mcp_client(
     return True
 
 
+class PostActivationResult(tuple):
+    """``(source, target)`` schema versions, plus the conversion blockers.
+
+    Still a 2-tuple, so every caller that unpacks ``source, target =`` (the
+    install.sh re-run path) or indexes ``result[0]`` / ``result[1]`` (the
+    post-swap child script, an ABI between releases) keeps working.
+    ``conversion_blockers`` lists what the profile-centric conversion
+    (ADR-0029) could not convert: ``{"target": ..., "reason": ...}``.
+    """
+
+    conversion_blockers: list[dict[str, str]]
+
+    def __new__(
+        cls,
+        source: int,
+        target: int,
+        conversion_blockers: list[dict[str, str]] | None = None,
+    ) -> PostActivationResult:
+        obj = super().__new__(cls, (source, target))
+        obj.conversion_blockers = list(conversion_blockers or [])
+        return obj
+
+
+def conversion_blockers(report: Any) -> list[dict[str, str]]:
+    """What a profile-centric conversion run left for the operator.
+
+    One ``{"target", "reason"}`` per entry of ``plan.blockers``: a blocked
+    slot (its file, with :attr:`SlotPlan.error`), a profile
+    (``profile:<name>``) or a stack (``stack:<name>``) with its reasons.
+    """
+    plan = getattr(report, "plan", None)
+    if plan is None:
+        return []
+    slot_errors = {s.file: s.error for s in getattr(plan, "blocked", [])}
+    profile_reasons = getattr(plan, "blocked_profiles", {}) or {}
+    stack_errors = {st.stack: st.errors for st in getattr(plan, "stacks", []) if st.errors}
+    out: list[dict[str, str]] = []
+    for target in plan.blockers:
+        if target.startswith("profile:"):
+            reasons = profile_reasons.get(target.removeprefix("profile:")) or []
+            reason = "; ".join(str(r) for r in reasons)
+        elif target.startswith("stack:"):
+            reason = "; ".join(str(e) for e in stack_errors.get(target.removeprefix("stack:"), []))
+        else:
+            reason = str(slot_errors.get(target) or "")
+        out.append({"target": str(target), "reason": reason or "cannot be converted as it is"})
+    return out
+
+
 def run_post_activation_migrations(
     min_data_version: int = 1,
     *,
@@ -1780,7 +1829,7 @@ def run_post_activation_migrations(
     converge_companions: bool = True,
     honour_restore_marker: bool = False,
     rerender_after_runner_conversion: bool = False,
-) -> tuple[int, int]:
+) -> PostActivationResult:
     """Run every post-activation migration pass hal0 ships, in order.
 
     The single sequence both :meth:`Updater.commit` (self-update) and
@@ -1869,7 +1918,10 @@ def run_post_activation_migrations(
     behaviour legible rather than implicit.
 
     Returns the ``(source, target)`` schema-version tuple for breadcrumb
-    logging, the same shape ``commit()`` already returned.
+    logging, the same shape ``commit()`` already returned, as a
+    :class:`PostActivationResult` whose ``conversion_blockers`` lists every
+    slot, profile or stack the profile-centric conversion left blocked
+    (an empty list when the install converged).
     """
     # The runner-system conversion (ADR-0028) runs FIRST and is fatal: it
     # rewrites raw TOML before anything validates config, because a removed
@@ -1955,7 +2007,7 @@ def run_post_activation_migrations(
         # genuine bug, and the box keeps its current working components
         # either way — never a reason to fail an update.
 
-    return migration_info
+    return PostActivationResult(migration_info[0], migration_info[1], conversion_blockers(profiles))
 
 
 def check_outstanding_migrations(*, job_id: str | None = None) -> tuple[int, int] | None:
@@ -3496,7 +3548,9 @@ async def _run_post_activation_migrations_after_swap(
     non-fatal-but-loud containment holds for every failure shape the
     subprocess can produce, not just a non-zero return code.
 
-    Returns ``{"from": int, "to": int, "pass_warnings": list[str]}``.
+    Returns ``{"from": int, "to": int, "pass_warnings": list[str],
+    "conversion_blockers": list[dict]}`` (the blockers are empty when the
+    incoming release predates them).
     """
     payload = json.dumps(
         {
@@ -3507,7 +3561,9 @@ async def _run_post_activation_migrations_after_swap(
     envelope_line = (
         "sys.stdout.write(json.dumps({"
         + repr(_MIGRATION_RESULT_KEY)
-        + ": {'from': result[0], 'to': result[1]}}) + chr(10))\n"
+        + ": {'from': result[0], 'to': result[1],"
+        " 'conversion_blockers': list(getattr(result, 'conversion_blockers', None) or [])}})"
+        " + chr(10))\n"
     )
     script = (
         "import json, sys\n"
@@ -3580,6 +3636,7 @@ async def _run_post_activation_migrations_after_swap(
                     "from": int(result["from"]),
                     "to": int(result["to"]),
                     "pass_warnings": pass_warnings,
+                    "conversion_blockers": list(result.get("conversion_blockers") or []),
                 }
         raise UpdateError(
             "post-activation migrations subprocess exited 0 but produced no result marker",
@@ -3812,6 +3869,7 @@ class Updater:
         # no editable-install branch is needed here.
         migrations_error: str | None = None
         pass_warnings: list[str] = []
+        blockers: list[dict[str, str]] = []
         try:
             migration_result = await _run_post_activation_migrations_after_swap(
                 manifest.min_data_version,
@@ -3819,6 +3877,7 @@ class Updater:
             )
             migration_info = (migration_result["from"], migration_result["to"])
             pass_warnings = list(migration_result.get("pass_warnings") or [])
+            blockers = list(migration_result.get("conversion_blockers") or [])
         except Exception as exc:
             # LOUD, not silent (#1960's failure-mode decision): the tree is
             # already active by this point — the symlink swap and venv re-pip
@@ -3886,8 +3945,12 @@ class Updater:
                 "to": migration_info[1],
                 "error": migrations_error,
                 "pass_warnings": pass_warnings,
+                # ADR-0029: slots/profiles/stacks the profile-centric
+                # conversion left for the operator. The release is applied,
+                # but the install is not converged until they are fixed.
+                "conversion_blockers": blockers,
             },
-            "converged": migrations_error is None,
+            "converged": migrations_error is None and not blockers,
         }
         log.info(
             "updater.convergence",
@@ -3895,6 +3958,7 @@ class Updater:
             converged=convergence["converged"],
             post_activation_migrations_ok=migrations_error is None,
             post_activation_migrations_pass_warnings=pass_warnings,
+            conversion_blockers=[b["target"] for b in blockers],
         )
 
         return {
@@ -3990,11 +4054,26 @@ class Updater:
             )
 
         log.info("updater.rollback_start", job_id=self.job_id, previous=str(prior_path))
+        # ADR-0029: a release before the profile-centric conversion cannot read
+        # the converted config. Undo the conversion first (files, model
+        # columns, migration 012's bookkeeping) or refuse with the manual steps.
+        profile_restore = _restore_profile_conversion_for(prior_path, job_id=self.job_id)
         # Steps 8 + 8b via the same privileged primitive commit() uses: swap the
         # symlink back and re-pip the prior tree so the next hal0-api restart
         # actually serves the rolled-back version. On a pip failure activate
         # swaps *forward* again, so `current` and site-packages stay consistent.
-        activated = await seam.activate(prior_path.name)
+        try:
+            activated = await seam.activate(prior_path.name)
+        except Exception:
+            if profile_restore:
+                # Still on this release: convert again so it keeps running.
+                from hal0.config.migrations.profile_centric_apply import (
+                    migrate_profile_centric,
+                )
+
+                with contextlib.suppress(Exception):
+                    migrate_profile_centric(job_id=self.job_id)
+            raise
         current_str = activated.get("previous")
         current_target = Path(current_str) if current_str else None
 
@@ -4041,7 +4120,43 @@ class Updater:
             "rolled_back_to": str(prior_path),
             "previous_now": str(current_target) if current_target else None,
             "schema_warning": warning,
+            "profile_conversion_restored": profile_restore,
         }
+
+
+#: A release tree that ships the profile-centric conversion (ADR-0029).
+_PROFILE_CENTRIC_MARKER = Path("src/hal0/config/migrations/profile_centric_apply.py")
+
+
+def _restore_profile_conversion_for(prior_path: Path, *, job_id: str | None) -> list[str]:
+    """Undo the profile-centric conversion before rolling back to ``prior_path``
+    when that release predates it. Returns what was restored (empty when the
+    target understands the converted config, or nothing was converted).
+
+    Raises :class:`UpdateRollbackUnavailable` with the manual steps when the
+    conversion backups cannot be restored.
+    """
+    if (prior_path / _PROFILE_CENTRIC_MARKER).is_file():
+        return []
+    from hal0.config.migrations.profile_centric_apply import (
+        ProfileConversionError,
+        conversion_backups,
+        restore_for_rollback,
+    )
+
+    try:
+        return restore_for_rollback(job_id=job_id)
+    except ProfileConversionError as exc:
+        backups = conversion_backups()
+        raise UpdateRollbackUnavailable(
+            f"cannot roll back to {prior_path.name}: it predates the profile-centric "
+            f"config this install was converted to, and the conversion could not be "
+            f"undone ({exc.message}). To roll back by hand: `sudo systemctl stop hal0-api`; "
+            "for each backup, newest first, run "
+            "`sudo -u hal0 hal0 profile migrate --restore <backup>`; "
+            "`sudo systemctl start hal0-api`; then run `hal0 update --rollback` again.",
+            details={"previous": str(prior_path), "backups": backups, "error": exc.message},
+        ) from exc
 
 
 __all__ = [
