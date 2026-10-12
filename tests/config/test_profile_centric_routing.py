@@ -285,18 +285,14 @@ def test_flm_ctx_is_always_explicit() -> None:
     assert plan.profiles[sp.profile_after]["ctx_size"] == 8192
 
 
-def test_tts_slot_model_path_checks_run_even_without_tuning() -> None:
-    _slot(type="tts", profile="kokoro", model={"default": "kok"})
-    _db([_model("kok", path="/elsewhere")])
-    sp = _one(pc.plan_conversion())
-    assert sp.status == "blocked" and "--model_path" in (sp.error or "")
-
-
-def test_tts_slot_without_model_row_registers_it() -> None:
-    _slot(type="tts", profile="qwen3-tts", model={"default": "q3"})
-    _db([_model("other")])
+def test_self_managed_engine_keeps_its_bundle_path_in_the_profile() -> None:
+    """kokoro/moonshine/qwen3-tts have no model row for their bundle."""
+    _slot(type="tts", profile="kokoro", model={"default": ""})
     plan = pc.plan_conversion()
-    assert any(m.model_id == "q3" and m.register_path for m in plan.models)
+    sp = _one(plan)
+    assert sp.status != "blocked" and sp.profile_after == "kokoro"
+    assert not any(m.register_path for m in plan.models)
+    assert "--model_path" in pc.target_seeds()["kokoro"]["flags"]
 
 
 def test_profile_less_kokoro_slot_is_reported_as_failing_today() -> None:

@@ -297,7 +297,7 @@ def test_plan_preserves_what_launches(install: None) -> None:
             assert s.argv_after, s.name
 
     tts = slots["tts"]
-    assert any(m.model_id == "qwen3-tts" and m.register_path for m in plan.models)
+    assert tts.profile_after == "qwen3-tts"
     assert ("context_size", 16000) in [(i.key, i.value) for i in tts.inert]
 
     models = {m.model_id: m for m in plan.models}
@@ -491,5 +491,6 @@ def test_target_seeds_are_in_the_new_shape() -> None:
         assert set(seed) <= allowed, name
         conv = pc.convert_flags(seed.get("flags", ""), source="profile")
         assert not conv.notes and not conv.errors, (name, conv.notes, conv.errors)
-        assert "--model_path" not in seed.get("flags", ""), name
+        if "--model_path" in seed.get("flags", ""):
+            assert name in {"kokoro", "moonshine", "qwen3-tts"}, name
     assert pc.target_seeds()["agent"]["ctx_size"] >= 64000

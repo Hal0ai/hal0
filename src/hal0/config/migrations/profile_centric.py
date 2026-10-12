@@ -99,8 +99,6 @@ ENGINE_SEED: dict[str, str] = {
     "qwen3tts": "qwen3-tts",
     "comfyui": "comfyui",
 }
-#: Engines whose model file path moves from the profile (``--model_path``) to the model row.
-MODEL_PATH_ENGINES: frozenset[str] = frozenset({"kokoro", "moonshine", "qwen3tts"})
 #: Slot type -> the seed that carries its mode flag.
 TYPE_SEED: dict[str, str] = {"embedding": "embedding", "reranking": "reranking"}
 
@@ -1095,8 +1093,6 @@ class _Planner:
         base_content = self.catalog.get(base, {"flags": ""})
         flags_now = old_flags if old_flags is not None else str(base_content.get("flags") or "")
         tokens = shlex.split(flags_now) if flags_now.strip() else []
-        if engine in MODEL_PATH_ENGINES:
-            tokens = self._move_model_path(sp, tokens, model_id, row)
         target: dict[str, Any] = {
             "flags": _join(tokens),
             "runner": ENGINE_RUNNER.get(engine),
@@ -1123,34 +1119,6 @@ class _Planner:
         target.update(cloned_from=base, intent=f"Converted: slot {sp.name}, model {model_id}")
         sp.profile_after = self._generate(base, model_id or engine, target)
         sp.generated = sp.profile_after in self.plan.profiles
-
-    def _move_model_path(
-        self, sp: SlotPlan, tokens: list[str], model_id: str, row: Mapping[str, Any] | None
-    ) -> list[str]:
-        """``--model_path`` leaves the profile; the model row holds the path."""
-        if "--model_path" not in tokens:
-            return tokens
-        i = tokens.index("--model_path")
-        if i + 1 >= len(tokens):
-            raise ValueError("--model_path without a value in the profile")
-        ppath = tokens[i + 1]
-        rest = tokens[:i] + tokens[i + 2 :]
-        if not model_id:
-            raise ValueError(
-                f"the profile names {ppath} but the slot names no model; the path "
-                "moves to a model row, so the slot must name one"
-            )
-        if row is None:
-            if not any(m.model_id == model_id and m.register_path for m in self.plan.models):
-                self.plan.models.append(ModelPlan(model_id=model_id, register_path=ppath))
-            sp.notes.append(f"model {model_id!r} has no row; registered from {ppath}")
-            return rest
-        if row.get("path") != ppath:
-            raise ValueError(
-                f"profile --model_path {ppath} differs from model {model_id!r} path "
-                f"{row.get('path')}; fix one of them"
-            )
-        return rest
 
     # -- models and stacks -----------------------------------------------
 

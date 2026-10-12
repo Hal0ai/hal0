@@ -121,9 +121,11 @@ Profile flags may not set what another layer owns. Hardware flags
 (`--jinja`, `--chat-template*`, `--mmproj`, `--no-mmproj`, `--mmproj-auto`)
 and `--spec-draft-device` are rejected when a profile is saved and refused
 again at launch. `--reasoning-format none` stays rejected (#2545). The
-non-llama providers already read profile flags live; they keep doing so. They
-take the model file's path from the model row, never from a profile
-`--model_path`.
+non-llama providers already read profile flags live; they keep doing so.
+The self-managed engines (kokoro, moonshine, qwen3-tts) are the one place a
+profile names a file: their bundle has no model row (`slots/state.py`
+`SELF_MANAGED_PROVIDERS`; a shipped Kokoro slot names no model), so its
+`--model_path` stays in the engine's profile.
 
 The resolved-argv preview (`GET /api/slots/{name}/resolved`) reports these
 four layers as provenance labels: `base`, `model`, `profile`, `slot`.
@@ -148,7 +150,7 @@ four layers as provenance labels: `base`, `model`, `profile`, `slot`.
 | a stack's embedded `profiles` | converted like any custom profile; a model-fact flag blocks the stack |
 | profile `mtp` (bool, informational), `device_class`, `backend`, `quant` | deleted; profile `mtp` returns as `auto`/`off` |
 | `profiles.toml` `legacy_seeds_migrated`, `legacy_seeds_adopted` | deleted together with `config/data/legacy_seed_profiles.toml` |
-| seed profiles' `--model_path` (kokoro, moonshine, qwen3-tts) | removed from the seeds; the provider reads the model row's path (see 7 for unregistered models) |
+| seed profiles' `--model_path` (kokoro, moonshine, qwen3-tts) | unchanged: the self-managed engines' bundles have no model row (decision 2) |
 
 ### 4. Profiles: seeded and custom
 
@@ -329,12 +331,6 @@ exactly once. It follows ADR-0028's contract:
   pre-existing drift and is reported only. Running containers keep running;
   launch-change slots show the existing config-drift badge until they are
   restarted.
-- **Non-llama model paths.** Checked for every kokoro, moonshine and
-  qwen3tts slot, tuned or not. When the profile's `--model_path` equals the
-  slot model's row path, it is stripped. When the model id has no row, a row
-  is registered from that path (a production install's `qwen3-tts` slot has
-  no model row). When the two paths differ, or the slot names no model, the
-  slot is blocked.
 - **Fail loudly.** These cases leave that slot's file untouched and name it in
   the report; every other slot still converts:
   - the slot's TOML does not parse;
@@ -344,7 +340,6 @@ exactly once. It follows ADR-0028's contract:
   - its tune, or the profile it keeps, carries a flag with no profile home
     (`--chat-template*`, `--mmproj <path>`, `-dev`);
   - the converted launch differs from today's outside the four launch changes;
-  - the non-llama path problems above.
 
   `hal0 profile migrate` exits 2 while any slot is blocked. The demoted-seed
   markers in `profiles.toml` stay until every slot converts, so a deleted

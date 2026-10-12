@@ -19,8 +19,10 @@
 #     `--ctx-size` (use `ctx_size`);
 #   * model facts — `--jinja` (hal0 adds it when the runner and the model's
 #     template support it), `--chat-template*`, `--mmproj` / `--no-mmproj`
-#     (use `vision`), and `--model_path` (the TTS/STT engines read the model
-#     row's path).
+#     (use `vision`).
+#
+# The self-managed engines (kokoro, moonshine, qwen3-tts) have no model row
+# for their bundle, so its `--model_path` stays in their profile.
 #
 # Seeds are virtual and read-only: they are overlaid from this file on every
 # load and cannot be edited; clone one to customise it. Slots hal0 ships
@@ -86,17 +88,19 @@ ctx_size = 16384
 intent = "FLM NPU (chat/embed/STT)"
 
 [profile.kokoro]
+flags = "--model_path /mnt/ai-models/local/kokoro-v1/kokoro-onnx"
 intent = "Kokoro TTS"
 
 [profile.moonshine]
 # Moonshine STT (CPU ONNX). Weights are operator-staged under the model
-# store; the slot's model row holds the bundle path. --model_arch picks the
-# checkpoint family the server loads.
-flags = "--model_arch base"
+# store (multi-file ONNX bundle, not registry-pulled). --model_arch picks the
+# checkpoint family the server loads; --model_path points at the staged
+# bundle root (the server resolves the quantized/<variant> leaf itself).
+flags = "--model_path /mnt/ai-models/local/moonshine --model_arch base"
 intent = "Moonshine STT (CPU)"
 
 [profile.qwen3-tts]
-flags = "--default_voice Ryan --default_language Auto"
+flags = "--model_path /mnt/ai-models/local/qwen3-tts/Qwen3-TTS-12Hz-1.7B-CustomVoice --default_voice Ryan --default_language Auto"
 intent = "Qwen3-TTS"
 
 [profile.comfyui]
