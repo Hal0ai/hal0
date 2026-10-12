@@ -265,9 +265,7 @@ def _render_notes(notes: dict | None) -> None:
 #: hal0.updater.updater._NON_FATAL_MIGRATION_FAILURE_EVENTS exactly.
 _MIGRATION_PASS_LABELS: dict[str, str] = {
     "updater.registry_toml_retire_failed": "registry.toml retirement (see hal0 doctor all)",
-    "updater.mtp_migration_failed": "mtp override cleanup",
     "updater.vulkan_migration_failed": "gpu-vulkan slot relabel",
-    "updater.extra_args_sanitize_failed": "managed extra_args sanitisation",
     "updater.memory_engine_upgrade_failed": "memory engine upgrade",
     "updater.components_converge_failed": "component convergence",
     "updater.retired_skills_prune_failed": "retired bundled-skill cleanup",
@@ -275,7 +273,7 @@ _MIGRATION_PASS_LABELS: dict[str, str] = {
 
 
 def _print_convergence(convergence: dict | None) -> bool:
-    """Report how far the updated box is from the v1.0 on-disk shape.
+    """Report whether the post-update data migrations applied.
 
     Returns True when fully converged. A False return is what makes
     ``hal0 update`` refuse to call the run a clean success — silently handing
@@ -317,42 +315,9 @@ def _print_convergence(convergence: dict | None) -> bool:
             )
         )
 
-    ownership = convergence.get("ownership_migrations") or {}
-    pending = list(ownership.get("pending") or [])
-    if not pending:
-        if convergence.get("converged"):
-            console.print("[dim]on-disk config is fully converged to the v1.0 shape.[/dim]")
-        return bool(convergence.get("converged"))
-
-    detail = ownership.get("detail") or {}
-    lines: list[str] = []
-    for key in pending:
-        entry = detail.get(key) or {}
-        lines.append(f"[bold]{key}[/bold] — [cyan]{entry.get('command')}[/cyan]")
-        if entry.get("error"):
-            lines.append(f"    [red]needs manual resolution:[/red] {entry['error']}")
-        for line in list(entry.get("lines") or [])[:8]:
-            lines.append(f"    [dim]{line}[/dim]")
-        extra = len(entry.get("lines") or []) - 8
-        if extra > 0:
-            lines.append(f"    [dim]… and {extra} more[/dim]")
-    console.print(
-        Panel(
-            "[bold yellow]This box is still on the pre-v1.0 slot/model shape.[/bold yellow]\n"
-            "The new code is installed and running, but the migrations below have NOT been\n"
-            "applied — until they are, per-slot launch tune, NGL/runner pins and\n"
-            "mtp/vision/reasoning capabilities stay where the old schema put them and are\n"
-            "no longer read at launch.\n\n"
-            "They are not auto-run because each one refuses to rewrite slot TOMLs while\n"
-            "hal0 is live — and the updater runs inside hal0-api. Stop hal0, then run:\n\n"
-            + "\n".join(lines)
-            + "\n\n[dim]Each is dry-run by default: drop --apply to preview. A timestamped\n"
-            "backup of the slot config + registry DB is taken before any write.[/dim]",
-            title="Convergence incomplete",
-            border_style="yellow",
-        )
-    )
-    return False
+    if convergence.get("converged"):
+        console.print("[dim]on-disk config is fully converged.[/dim]")
+    return bool(convergence.get("converged"))
 
 
 def _fetch_slot_drift() -> dict:

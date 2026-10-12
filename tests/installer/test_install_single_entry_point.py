@@ -10,7 +10,7 @@ Four invariants are pinned here, each of which regressed at least once:
 1. ``hal0 setup`` is INTERNAL — absent from ``hal0 --help``, absent from the
    install banner's "Next steps", and never offered as a post-install wizard.
 2. The curated static slot seeds are copied BEFORE the first-run scaffold pass,
-   so ``agent.toml``'s ``profile = "dense"`` and ``brain.toml``'s
+   so ``agent.toml``'s ``profile = "agent"`` and ``brain.toml``'s
    ``profile = "brain"`` actually reach a fresh box.
 3. The two operator prompts (model store, HF token) run only on a real
    terminal, so ``curl | bash`` and tty-less ssh installs stay unattended.
@@ -158,7 +158,7 @@ def test_agent_and_brain_seeds_carry_their_curated_profiles() -> None:
     slots_dir = _REPO_ROOT / "installer" / "etc-hal0" / "slots"
     agent = tomllib.loads((slots_dir / "agent.toml").read_text(encoding="utf-8"))
     brain = tomllib.loads((slots_dir / "brain.toml").read_text(encoding="utf-8"))
-    assert agent["profile"] == "dense"
+    assert agent["profile"] == "agent"
     assert brain["profile"] == "brain"
     assert brain["port"] == 8089
 

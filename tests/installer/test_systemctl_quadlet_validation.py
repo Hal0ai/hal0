@@ -284,7 +284,7 @@ def test_live_container_provider_render_is_accepted() -> None:
         "name": "chat",
         "port": 8095,
         "profile": "rocm",
-        "model": {"default": "m", "context_size": 131072},
+        "model": {"default": "m"},
     }
     model_info = {"path": "/mnt/ai-models/model.gguf", "_model_key": "m"}
     with (

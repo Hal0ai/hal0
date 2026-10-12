@@ -136,7 +136,7 @@ def test_migration_heredocs_are_valid_python() -> None:
 
     text = INSTALL_SH.read_text(encoding="utf-8")
     blocks = re.findall(r"<<'PYEOF'\n(.*?)\nPYEOF\n", text, flags=re.S)
-    assert len(blocks) >= 7, "expected the migration heredocs to still be present"
+    assert len(blocks) >= 6, "expected the migration heredocs to still be present"
     for block in blocks:
         ast.parse(block)
 
@@ -144,9 +144,8 @@ def test_migration_heredocs_are_valid_python() -> None:
 def test_installer_runs_the_same_convergence_steps_as_the_updater() -> None:
     """install.sh convergence must not be weaker than `hal0 update` convergence.
 
-    ``clear_stale_mtp_overrides``,
-    and ``sanitize_model_extra_args`` run through
-    the SAME shared ``run_post_activation_migrations`` sequence
+    The one-shot conversions (the runner-system and profile-centric converters)
+    run through the SAME shared ``run_post_activation_migrations`` sequence
     ``Updater.commit()`` calls (GH #1475), rather than being called
     separately here — the two upgrade paths can never drift onto different
     on-disk state, and calling them a second time directly would just re-run
@@ -159,7 +158,6 @@ def test_installer_runs_the_same_convergence_steps_as_the_updater() -> None:
         "run_post_activation_migrations",
         "rerender_slot_units",
         "remove_retired_artifacts",
-        "convergence_report",
     ):
         # Match the name anywhere in an import list, not just directly after
         # `import` — some may be imported alongside a sibling.

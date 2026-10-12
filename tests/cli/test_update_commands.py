@@ -639,7 +639,6 @@ def test_print_convergence_reports_a_failed_post_swap_migration(
     False so the caller's exit code reflects it."""
     converged = uc._print_convergence(
         {
-            "ownership_migrations": {"pending": []},
             "post_activation_migrations": {
                 "ok": False,
                 "from": 1,
@@ -662,7 +661,6 @@ def test_print_convergence_shows_the_migrated_schema_range_on_success(
 ) -> None:
     converged = uc._print_convergence(
         {
-            "ownership_migrations": {"pending": []},
             "post_activation_migrations": {
                 "ok": True,
                 "from": 1,
@@ -687,7 +685,6 @@ def test_print_convergence_says_nothing_extra_when_schema_unchanged(
     """No migration ran (already-converged box) — no spurious 'v1 -> v1' line."""
     uc._print_convergence(
         {
-            "ownership_migrations": {"pending": []},
             "post_activation_migrations": {
                 "ok": True,
                 "from": 1,
@@ -710,20 +707,19 @@ def test_print_convergence_reports_a_nonfatal_pass_warning(
     operator, distinct from the red 'Migration incomplete' panel."""
     converged = uc._print_convergence(
         {
-            "ownership_migrations": {"pending": []},
             "post_activation_migrations": {
                 "ok": True,
                 "from": 1,
                 "to": 1,
                 "error": None,
-                "pass_warnings": ["updater.mtp_migration_failed"],
+                "pass_warnings": ["updater.vulkan_migration_failed"],
             },
             "converged": True,
         }
     )
     out = capsys.readouterr().out
     assert converged is True
-    assert "mtp override cleanup" in out
+    assert "gpu-vulkan slot relabel" in out
     assert "Migration incomplete" not in out
 
 
