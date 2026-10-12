@@ -16,10 +16,10 @@ def test_collect_capability_rollup_filters_and_maps_types():
     slots = [
         _slot("primary", "llm", "qwen3-25b", backend="vulkan"),  # chat -> excluded here
         _slot("embed", "embedding", "bge-m3", backend="vulkan"),
-        _slot("stt", "stt", "moonshine", backend="vulkan"),
+        _slot("stt", "transcription", "moonshine", backend="cpu"),
         _slot("tts", "tts", "kokoro", backend="vulkan"),
         _slot("img", "image", "sdxl", backend="rocm"),
-        _slot("rerank", "rerank", "bge-reranker", backend="vulkan"),
+        _slot("rerank", "reranking", "bge-reranker", backend="vulkan"),
         _slot("cold", "embedding", "unused", state="stopped"),  # not ready -> excluded
     ]
     rollup = hp._collect_capability_rollup(slots)
@@ -28,6 +28,43 @@ def test_collect_capability_rollup_filters_and_maps_types():
     assert caps["img"]["backend"] == "rocm"
     assert caps["embed"]["model_id"] == "bge-m3"
     assert "unused" not in {r.get("model_id") for r in rollup}
+
+
+def test_every_capability_slot_type_has_a_rollup_label():
+    """Every canonical slot type except ``llm`` (the primary/chat path) maps
+    to a STATE.md label, so a new type cannot silently drop out of the
+    rollup. Keyed by the real ``type`` values a slot carries, not aliases."""
+    from hal0.model_meta import SLOT_TYPES
+
+    capability_types = set(SLOT_TYPES) - {"llm"}
+    assert set(hp._CAPABILITY_TYPE_LABELS) == capability_types
+
+
+def test_every_shipped_capability_slot_rolls_up():
+    """Each shipped slot TOML whose type is not ``llm`` is advertised in
+    STATE.md once it is ready (a model-less self-managed engine included)."""
+    import tomllib
+    from pathlib import Path
+
+    shipped = Path(__file__).resolve().parents[2] / "installer" / "etc-hal0" / "slots"
+    types = set()
+    for path in sorted(shipped.glob("*.toml")):
+        raw = tomllib.loads(path.read_text(encoding="utf-8"))
+        table = raw.get("slot", raw)
+        slot_type = str(table.get("type") or "llm")
+        if slot_type == "llm":
+            continue
+        types.add(slot_type)
+        slot = {
+            "name": path.stem,
+            "type": slot_type,
+            "status": "ready",
+            "model_id": "m",
+        }
+        rollup = hp._collect_capability_rollup([slot])
+        assert len(rollup) == 1, f"{path.name} ({slot_type}) missing from the rollup"
+        assert rollup[0]["capability"] == hp._CAPABILITY_TYPE_LABELS[slot_type]
+    assert types, "no shipped capability slot found"
 
 
 def test_collect_capability_rollup_skips_modelless_idle_slot():
