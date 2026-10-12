@@ -34,28 +34,6 @@ export interface UpdateState {
 
 export type UpdateJobState = 'queued' | 'running' | 'applied' | 'failed'
 
-// One of the three deploy-window ownership folds (spec-flags-ownership /
-// spec-hw-slot-ownership) hal0.updater.updater.detect_pending_ownership_migrations
-// reports on. `command` is the EXACT runnable line — it already carries
-// `--stop-services` when the server determined hal0 units are live
-// (#1845/H8) — render it verbatim; never re-derive or append flags here.
-export interface OwnershipMigrationEntry {
-  command: string
-  lines: string[]
-  error: string | null
-}
-
-export interface OwnershipMigrations {
-  pending: string[]
-  detail: Record<string, OwnershipMigrationEntry>
-  commands: string[]
-}
-
-export interface ConvergenceReport {
-  ownership_migrations: OwnershipMigrations
-  converged: boolean
-}
-
 export interface UpdateJob {
   id: string
   state: UpdateJobState
@@ -65,9 +43,6 @@ export interface UpdateJob {
   updated_at: number
   error: string | null
   error_code?: string | null
-  // Attached by /api/updates/status/{id} after a commit — null until the
-  // job reaches a terminal state, or on a daemon too old to send it.
-  convergence?: ConvergenceReport | null
 }
 
 export function useUpdateState() {
@@ -101,12 +76,20 @@ export function useUpdateApply() {
 }
 
 // Rollback to the retained previous version. Synchronous on the backend
-// (no job id) — returns {rolled_back, channel} once the swap completes.
+// (no job id) — returns {rolled_back, channel, profile_conversion_restored}
+// once the swap completes. `profile_conversion_restored` lists what the
+// ADR-0029 profile conversion's backup put back (empty/absent when the
+// rollback did not cross the conversion).
+export interface UpdateRollbackResult {
+  rolled_back: boolean
+  channel: string
+  profile_conversion_restored?: string[]
+}
+
 export function useUpdateRollback() {
   const qc = useQueryClient()
   return useMutation({
-    mutationFn: () =>
-      apiPost<{ rolled_back: boolean; channel: string }>(ENDPOINTS.updateRollback, {}),
+    mutationFn: () => apiPost<UpdateRollbackResult>(ENDPOINTS.updateRollback, {}),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['updates'] }),
   })
 }

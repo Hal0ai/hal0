@@ -45,9 +45,9 @@ function fmtMem(mem_mb) {
   return gb < 10 ? gb.toFixed(1) + 'GB' : Math.round(gb) + 'GB'
 }
 
-// ctx "<used>/<max>k" — never fabricate. Returns null when no ctx_max.
+// ctx "<used>/<max>k" — never fabricate. Returns null when no ctx_effective.
 function fmtCtx(s) {
-  const max = typeof s.ctx_max === 'number' && s.ctx_max > 0 ? s.ctx_max : null
+  const max = typeof s.ctx_effective === 'number' && s.ctx_effective > 0 ? s.ctx_effective : null
   if (!max) return null
   const usedRaw = s.metrics?.ctx
   const used = typeof usedRaw === 'number' && usedRaw > 0

@@ -28,11 +28,6 @@ export interface StackSlotEntry {
   model?: string | null
   device?: string | null
   provider?: string | null
-  role?: string | null
-  vision?: boolean
-  mtp?: boolean | null
-  enable_thinking?: boolean | null
-  server_extra_args?: string | null
   capabilities?: StackCapabilityRow[]
 }
 

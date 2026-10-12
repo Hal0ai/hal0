@@ -75,16 +75,13 @@ async function seedSlots(page: Page, slots: any[]) {
   }, slots)
 }
 
-/** Capture every PUT /api/slots/{name}/config body; stub the sibling writes. */
+/** Capture every PUT /api/slots/{name}/config body. */
 async function captureConfig(page: Page, name: string) {
   const puts: any[] = []
   await page.route(`**/api/slots/${name}/config`, async (route) => {
     if (route.request().method() === 'PUT') puts.push(route.request().postDataJSON())
     await route.fulfill({ status: 200, contentType: 'application/json', body: '{}' })
   })
-  await page.route(`**/api/slots/${name}/defaults`, (route) =>
-    route.fulfill({ status: 200, contentType: 'application/json', body: '{}' }),
-  )
   return puts
 }
 
@@ -171,84 +168,36 @@ test.describe('Slot drawer — model swap wiring', () => {
 
 // ─── GTT feasibility (Task 11d, host-truth signal 993ea3b6) ────────────────
 //
-// Task 12: cascades the drawer's two feasibility call sites into this file
-// (rather than a new spec) since both hang off the same Model group this
-// file already exercises. Mocked at the Playwright layer, following the
-// mockProfiles/mockChatTemplates idiom (page.route per spec, request body
-// captured/echoed rather than a fixed canned response) — the wire contract
-// is `POST /api/models/feasibility {models:[{model_id, ctx?}]}` →
+// The Model picker's per-row fit chips. Mocked at the Playwright layer,
+// following the mockProfiles/mockChatTemplates idiom (page.route per spec,
+// request body captured/echoed rather than a fixed canned response) — the wire
+// contract is `POST /api/models/feasibility {models:[{model_id, ctx?}]}` →
 // `{results: [{model_id, verdict, needed_mb, gtt_free_mb, gtt_total_mb}]}`
 // (`useModelsFeasibility.ts`). warn-never-block: a `fits`/`tight`/`exceeds`/
 // `exceeds_total` verdict maps to `feasibility-copy.ts`'s exact hint text;
 // this file only pins that the right verdict reaches the right surface, not
 // the copy itself (already vitest-pinned in `feasibility-hint.test.ts`).
-test.describe('Slot drawer — GTT feasibility (ceiling hint + model-row fit chips)', () => {
-  /** Echo a per-model-id verdict for every probed model in the request body. */
-  function mockFeasibility(page: Page, verdictById: Record<string, string>) {
-    return page.route('**/api/models/feasibility', async (route) => {
-      const body = route.request().postDataJSON() as { models: { model_id: string; ctx?: number }[] }
-      const results = body.models.map((m) => ({
-        model_id: m.model_id,
-        verdict: verdictById[m.model_id] ?? 'unknown',
-        needed_mb: 14_000,
-        gtt_free_mb: 15_000,
-        gtt_total_mb: 24_000,
-      }))
-      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ results }) })
-    })
-  }
-
-  function ctxCeilingInput(page: Page) {
-    const hwGroup = page.locator('.drawer .field-group').filter({
-      has: page.locator('.field-group-label', { hasText: /^How it runs$/ }),
-    })
-    return hwGroup
-      .locator('.form-row')
-      .filter({ has: page.locator('.form-lbl > span', { hasText: /^Context \(ceiling\)$/ }) })
-      .locator('input')
-  }
-
-  test('the ceiling hint renders per verdict and re-probes (debounced) on a ctx edit', async ({ page }) => {
-    await mockFeasibility(page, { 'qwen3.6-27b-mtp': 'fits' })
+//
+// ADR-0029: the drawer no longer has a Context (ceiling) input or its own
+// ceiling probe — the window is the profile's, so the batch probe asks about
+// the slot's EFFECTIVE context (`ctx_effective`).
+test.describe('Slot drawer — GTT feasibility (model-row fit chips)', () => {
+  test('there is no ceiling input and no ceiling feasibility hint any more', async ({ page }) => {
     await seedSlots(page, [OFFLINE_PRIMARY, EMBED])
     await page.goto('/#slots/primary')
     await expect(page.locator('.drawer')).toBeVisible()
-
-    const hint = page.getByTestId('slot-ctx-feasibility')
-    // Fires on drawer open (400ms debounce) — no keystroke needed yet.
-    await expect(hint).toContainText('fits', { timeout: 2_000 })
-    await expect(hint).toContainText('14 GB')
-
-    // Re-mock to a verdict that maps to the "exceeds" copy, then edit ctx —
-    // the SAME probe re-fires (debounced) for the new ceiling.
-    await mockFeasibility(page, { 'qwen3.6-27b-mtp': 'exceeds' })
-    await ctxCeilingInput(page).fill('32768')
-    await expect(hint).toContainText('exceeds', { timeout: 2_000 })
-  })
-
-  test('an absent/unknown verdict renders no hint at all (warn-never-block)', async ({ page }) => {
-    // No model_id in the map ⇒ every probed row echoes back 'unknown'.
-    await mockFeasibility(page, {})
-    await seedSlots(page, [OFFLINE_PRIMARY, EMBED])
-    await page.goto('/#slots/primary')
-    await expect(page.locator('.drawer')).toBeVisible()
-    await page.waitForTimeout(700) // past the 400ms debounce
+    await expect(
+      page.locator('.drawer .form-lbl > span', { hasText: /^Context \(ceiling\)$/ }),
+    ).toHaveCount(0)
+    await page.waitForTimeout(700)
     await expect(page.getByTestId('slot-ctx-feasibility')).toHaveCount(0)
   })
 
-  test('model dropdown rows carry a per-model fit chip from ONE batch probe fired on open', async ({ page }) => {
+  test('model dropdown rows carry a per-model fit chip from ONE batch probe fired on open, at the effective context', async ({ page }) => {
     const probes: any[] = []
     await page.route('**/api/models/feasibility', async (route) => {
-      const body = route.request().postDataJSON() as { models: { model_id: string }[] }
-      // The 400ms-debounced CEILING probe (fired on drawer open and on ctx
-      // edits — pinned by the ceiling-hint tests above) shares this endpoint
-      // but always carries exactly ONE model: the bound one. Count only
-      // BATCH probes (every compatible model) here — this test pins the
-      // dropdown's own contract (one batch per open, never per keystroke or
-      // per row), not a ban on the ceiling probe's independent traffic.
-      // Counting both made this test a race between the poll assertions and
-      // the ceiling debounce timer.
-      if (body.models.length > 1) probes.push(body)
+      const body = route.request().postDataJSON() as { models: { model_id: string; ctx?: number }[] }
+      probes.push(body)
       const verdictById: Record<string, string> = {
         'qwen3.6-27b-mtp': 'fits',
         [SWAP_TARGET]: 'exceeds',
@@ -262,14 +211,18 @@ test.describe('Slot drawer — GTT feasibility (ceiling hint + model-row fit chi
       }))
       await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ results }) })
     })
-    await seedSlots(page, [OFFLINE_PRIMARY, EMBED])
+    await seedSlots(page, [{ ...OFFLINE_PRIMARY, ctx_effective: 16384, ctx_source: 'profile' }, EMBED])
     await page.goto('/#slots/primary')
     await expect(page.locator('.drawer')).toBeVisible()
+    // Nothing probes on drawer open any more — only the dropdown does.
+    await page.waitForTimeout(700)
+    expect(probes).toEqual([])
 
     const trigger = page.locator('.drawer').getByLabel('Model for primary')
     const listbox = await openRichSelect(trigger)
     // Fired once on the open transition — never per keystroke, never per row.
     await expect.poll(() => probes.length).toBe(1)
+    for (const m of probes[0].models) expect(m.ctx).toBe(16384)
     await expect(listbox.locator('[data-option-id="qwen3.6-27b-mtp"]')).toContainText('● fits · ~14 GB')
     await expect(listbox.locator(`[data-option-id="${SWAP_TARGET}"]`)).toContainText("○ won't fit")
     // Each fresh open→true transition fires exactly one more probe (still
@@ -284,14 +237,11 @@ test.describe('Slot drawer — GTT feasibility (ceiling hint + model-row fit chi
 })
 
 // W3 (Parallel) and W7 (chat-template override) were removed with their
-// controls in #1379. Both wrote slot-tier keys that are INERT at launch
-// (spec-flags-ownership §1/§4), and the template write additionally fired a
-// cold restart to apply nothing. Their replacement is the wire-level guarantee
-// in slot-drawer-sunset-removal-v3: no Save may put `parallel`, `chat_template`
-// or `server.extra_args` on the wire, even when the slot TOML still carries
-// them. The #1372 clear-path contract W7 protected now lives entirely in the
-// backend (tests/api/test_slot_config_validation.py) and in the fold migrator
-// `hal0 slot migrate-flags` (#1396/#1397).
+// controls in #1379, and ADR-0029 made the removal a server rule: a slot write
+// carrying `parallel`, `chat_template`, `extra_args`, a context size, `mtp`,
+// `enable_thinking` or `vision` is a 400 slot.tuning_key_denied ("belongs on a
+// profile"). The wire-level guarantee that no Save puts those keys on the wire
+// lives in slot-drawer-sunset-removal-v3.
 
 test.describe('Slot drawer — NPU modality + chat-model wiring', () => {
   const NPU_SLOT = {
@@ -372,7 +322,7 @@ test.describe('Slot drawer — NPU modality + chat-model wiring', () => {
     await expect.poll(() => puts.length).toBe(1)
     expect(puts[0].npu).toEqual({ chat: true, asr: false, embed: false })
     // The tag is nested under [model] so the backend's one-level merge keeps
-    // sibling keys (context_size, n_gpu_layers) instead of clobbering them.
+    // sibling keys instead of clobbering them.
     expect(puts[0].model).toEqual({ default: 'flm-chat-xl' })
     await expect.poll(() => restarts.length).toBe(1)
   })

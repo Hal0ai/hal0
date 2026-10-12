@@ -1,19 +1,19 @@
-// hal0 dashboard — Profiles view (issue #658; overhaul 2026-06-13).
+// hal0 dashboard — Profiles view (issue #658; ADR-0029 profile-centric config).
 //
-// A profile is a named container image + bench-tuned flag bundle that backs
-// one or more inference slots. This view replaces the flat card grid with a
-// structured surface: a summary strip, seed/custom grouping, richer cards
-// (bench tok/s hero metric, backend-hued accent + chip, quant chip, the
-// "used by" slot binding), a slide-in form drawer, and a styled delete
-// confirm with an in-use guard.
+// A profile is the whole TUNE for a slot: llama-server flags, context window,
+// thinking default, vision, MTP and runtime. The model carries file facts
+// only and the slot carries placement, so "what does this slot launch with"
+// is answered by one profile. This view is a structured surface: a summary
+// strip, seed/custom grouping, cards that show the tune (ctx, thinking,
+// vision, MTP, runtime, flags) and the "used by" slot binding, a slide-in form
+// drawer, and a styled delete confirm with an in-use guard.
 //
-// Data comes from GET /api/profiles (useProfiles). Cards read the explicit
-// `backend` field (#751) plus the overhaul's intent/quant/tps/rtf/used_by.
+// Data comes from GET /api/profiles (useProfiles).
 //
 // Seeds are immutable: Edit becomes "Edit a copy" (forks <seed>-custom with
 // cloned_from set); Delete is disabled. Custom profiles get Clone/Edit/Delete.
 
-import { useState, useEffect, useMemo } from 'react'
+import { useState } from 'react'
 import {
   useProfiles,
   useProfileCreate,
@@ -22,63 +22,46 @@ import {
   useProfileExport,
   useProfileImport,
 } from '@/api/hooks/useProfiles'
-import { useMetaEnums } from '@/api/hooks/useMeta'
 import { useSystemInfo } from '@/api/hooks/useRuntimes'
 import { useRunnerImages, useRunnerImagePullJob } from '@/api/hooks/useRunnerImages'
 import { hostHwFlags, selectedRunnerKey, tierRank } from './hw-cascade.js'
 import { prettyProfile } from './profile-names'
 import {
   findManagedFlags,
-  findNewSlotHardwareFlags,
+  findSlotHardwareFlags,
+  findModelFactFlags,
   tokenizeFlags,
   MANAGED_FLAG_SOURCE,
+  MODEL_FACT_FLAG_SOURCE,
 } from './flags-tune.js'
-
-// Backend runtime hue map — built from meta.devices (GET /api/meta/enums via
-// useMetaEnums, static fallback when absent) instead of the old hardcoded
-// table. Keys stay the display backends shown on the card + drawer (rocm /
-// vulkan / npu / cpu / img); colors reference shared dashboard tokens.
-// `backendField` is the value persisted to ProfileConfig.backend (the GPU
-// devices' legacy_backend; null for non-GPU paths, where device_class carries
-// the hardware intent — see #751). PUT /api/profiles accepts device_class ∈
-// {gpu,cpu,npu,img}, so the img/ComfyUI entry keeps an existing
-// device_class='img' profile from being silently rewritten on edit.
-function buildBackendMeta(enums) {
-  const out = {};
-  for (const d of enums.devices) {
-    const key = d.legacy_backend
-      || (d.device_class && d.device_class !== 'gpu' ? d.device_class : String(d.id).replace(/^gpu-/, ''));
-    if (!key || out[key]) continue;
-    out[key] = {
-      label: d.label || key,
-      color: `var(--dev-${key})`,
-      device_class: d.device_class,
-      backendField: d.legacy_backend || null,
-      recommended: !!d.recommended,
-      description: d.description || '',
-    };
-  }
-  // Defensive floor — bk() falls back to `cpu`, so the key must exist even
-  // against a degenerate enums payload.
-  if (!out.cpu) out.cpu = { label: 'CPU', color: 'var(--dev-cpu)', device_class: 'cpu', backendField: null, recommended: false, description: '' };
-  return out;
-}
-
-function useBackendMeta() {
-  const enums = useMetaEnums();
-  return useMemo(() => buildBackendMeta(enums), [enums]);
-}
 
 // `NAME_RE` (name regex) and `toast` are shared globals from primitives.jsx.
 
-const BLANK = { name: '', intent: '', backend: 'rocm', quant: '', flags: '', mtp: false, runner: '' };
+// Server-enforced ctx_size bounds (400 profiles.ctx_size_out_of_range).
+const PROFILE_CTX_MIN = 128;
+const PROFILE_CTX_MAX = 16777216;
 
-function bk(name, meta) { return meta[name] || meta.cpu; }
+// ctx is held as text in the form ('' = defer to the model's native window);
+// thinking is 'auto' | 'on' | 'off'; vision and mtp are 'auto' | 'off'.
+const BLANK = {
+  name: '', intent: '', flags: '', runner: '',
+  ctx: '', thinking: 'auto', vision: 'auto', mtp: 'auto',
+};
 
-// (backendOf() retired with the card's device-hued chip: a profile's INERT
-// backend/device_class fit hint is not the runtime it carries, and the card
-// now shows the runtime's real lanes instead of a hue derived from a
-// match-only field.)
+// ── typed tune fields ────────────────────────────────────────────────────────
+// enable_thinking on the wire is null (auto) | true | false.
+export function thinkingToForm(v) { return v === true ? 'on' : v === false ? 'off' : 'auto'; }
+export function thinkingFromForm(v) { return v === 'on' ? true : v === 'off' ? false : null; }
+const switchOf = (v) => (v === 'off' ? 'off' : 'auto');
+
+// 32768 → "32K"; non-round values keep the exact count.
+export function ctxLabel(n) {
+  if (n == null || n === '') return 'native';
+  const v = Number(n);
+  if (!Number.isFinite(v)) return String(n);
+  if (v >= 1024 && v % 1024 === 0) return `${v / 1024}K`;
+  return v.toLocaleString('en-US');
+}
 
 // ── runtime vocabulary ───────────────────────────────────────────────────────
 //
@@ -247,9 +230,7 @@ export function useRunnerPull(runnerKey, backends) {
 // Card headline. Prefer the server-authored intent; fall back to a pretty
 // profile name (#751 shared map) so un-labelled custom profiles read well.
 function intentOf(p) {
-  if (p.intent) return p.intent;
-  const base = prettyProfile(p.name);
-  return p.mtp ? `${base} · MTP` : base;
+  return p.intent || prettyProfile(p.name);
 }
 
 // ── slot binding pill ─────────────────────────────────────────────────────────
@@ -342,9 +323,12 @@ export function ProfileCard({ p, index, onEdit, onClone, onDelete, onExport }) {
         </div>
       </div>
 
-      <div className="stk-lib-slotlist">
-        {p.quant && <PfRow label="quant" value={p.quant} />}
-        {p.mtp && <PfRow label="mtp" value="speculative" hue="var(--accent)" />}
+      <div className="stk-lib-slotlist" data-testid={`pf-tune-${p.name}`}>
+        <PfRow label="ctx" value={p.ctx_size != null ? ctxLabel(p.ctx_size) : 'model native'} />
+        <PfRow label="thinking" value={thinkingToForm(p.enable_thinking)} />
+        <PfRow label="vision" value={p.vision === 'off' ? 'off' : 'auto'} />
+        <PfRow label="mtp" value={p.mtp === 'off' ? 'off' : 'auto'} />
+        <PfRow label="runner" value={p.runner ? runnerTitleFor(p.runner, backends) : 'auto'} />
         <PfRow label="flags" value={p.resolved_flags || p.flags || '—'} />
       </div>
 
@@ -398,8 +382,9 @@ function Section({ title, count, hint, children }) {
 // FormRow is a shared primitive (primitives.jsx) — the superset variant this
 // view seeded (error/warn/ok/counter + real <label htmlFor>).
 
-// Managed / slot-hardware rejection copy — mirrors the model drawer's inline
-// messages (model-drawer.jsx) so both flag editors speak with one voice.
+// Managed / slot-hardware / model-fact rejection copy — the inline mirror of
+// the server's 400s (slot.managed_arg_denied, slot.hardware_flag_denied,
+// profiles.model_fact_flag_denied).
 function managedFlagError(offenders) {
   const first = offenders[0];
   const canon = first === '-ngl' ? '--n-gpu-layers' : first === '-c' ? '--ctx-size' : first;
@@ -413,29 +398,56 @@ function hardwareFlagError(offenders) {
   return `${first} is hardware — it belongs on the slot (device · NGL · THREADS grid), not the profile. Remove it.${rest}`;
 }
 
-function validateForm(form, existing, storedFlags = '') {
+function modelFactFlagError(offenders) {
+  const first = offenders[0];
+  const name = first.split(/[ =]/)[0];
+  const where = MODEL_FACT_FLAG_SOURCE[name];
+  const why = where
+    ? `it is a fact about the model file, set on ${where}, not on the profile`
+    : name === '--spec-draft-device'
+      ? 'hal0 derives the draft device from the slot\'s device'
+      : 'it breaks the reasoning split hal0 depends on';
+  const rest = offenders.length > 1 ? ` (also: ${offenders.slice(1).join(', ')})` : '';
+  return `${first} can't be set on a profile — ${why}. Remove it.${rest}`;
+}
+
+// Context window text → error message or null. Empty = defer to the model's
+// native window. Mirrors 400 profiles.ctx_size_out_of_range (128..16777216).
+export function ctxError(text) {
+  const raw = String(text ?? '').trim();
+  if (!raw) return null;
+  if (!/^\d+$/.test(raw)) return 'Must be a whole number of tokens';
+  const n = Number(raw);
+  if (n < PROFILE_CTX_MIN || n > PROFILE_CTX_MAX) {
+    return `Must be between ${PROFILE_CTX_MIN.toLocaleString('en-US')} and ${PROFILE_CTX_MAX.toLocaleString('en-US')}`;
+  }
+  return null;
+}
+
+function validateForm(form, existing) {
   const errs = {};
   const name = (form.name || '').trim();
   if (!name) errs.name = 'Name is required';
   else if (!NAME_RE.test(name)) errs.name = 'lowercase · digits · - · _ · must start alphanumeric';
   else if (existing.includes(name)) errs.name = `“${name}” already exists`;
-  // spec-hw-slot-ownership §3: profiles no longer carry an image — only a name
-  // + device-agnostic tune. Image lives on the runner (RUNNER_IMAGES[binary]).
-  // Flag-ownership screens (§21.7 managed + §5 slot-hardware) — mirror the
-  // server hard-reject inline so the save never surfaces the 400. Hardware
-  // first so -ngl (in both sets) gets the "belongs on the slot" message.
-  //
-  // `storedFlags` is the profile's own persisted flag text when EDITING (empty
-  // for create/clone). Only newly-introduced hardware flags are rejected, which
-  // is exactly the server's rule since #1411 — a profile authored before §5
-  // shipped carries -dev/--threads and must stay editable.
+  const ctxErr = ctxError(form.ctx);
+  if (ctxErr) errs.ctx = ctxErr;
+  // Flag-ownership screens (§21.7 managed + §5 slot-hardware + ADR-0029
+  // model-fact flags) — mirror the server hard-reject inline so the save never
+  // surfaces the 400. Hardware first so -ngl (in both sets) gets the "belongs
+  // on the slot" message. The server screens the WHOLE flag text on every save
+  // (hal0.profiles.screen_profile_flags), with no grandfathering of what a
+  // stored profile already carries, so the client does the same.
   const flagsText = form.flags || '';
   const quoteErr = tokenizeFlags(flagsText).error;
-  const hw = quoteErr ? [] : findNewSlotHardwareFlags(flagsText, storedFlags);
+  const hw = quoteErr ? [] : findSlotHardwareFlags(flagsText);
   const managed = quoteErr ? [] : findManagedFlags(flagsText);
+  // Model-fact flags are refused outright (profiles.model_fact_flag_denied).
+  const facts = quoteErr ? [] : findModelFactFlags(flagsText);
   if (quoteErr) errs.flags = quoteErr;
   else if (hw.length) errs.flags = hardwareFlagError(hw);
   else if (managed.length) errs.flags = managedFlagError(managed);
+  else if (facts.length) errs.flags = modelFactFlagError(facts);
   return errs;
 }
 
@@ -467,11 +479,9 @@ function RunnerPullButton({ runnerKey, backends }) {
 
 export function ProfileDrawer({ mode, source, existing = [], onClose, onSaved }) {
   const isEdit = mode === 'edit';
-  const BACKEND_META = useBackendMeta();
   const systemInfoQuery = useSystemInfo();
   const backends = systemInfoQuery.data?.backends ?? {};
   const runtimeOptions = profileRunnerOptions(backends, hostHwFlags(systemInfoQuery.data?.hardware));
-  const [advOpen, setAdvOpen] = useState(false);
   // Seed profiles render the Runtime select disabled (edit-a-copy forks the
   // seed's runner binding verbatim; a subsequent Edit of that custom copy —
   // which is never itself a seed — unlocks it). `isEdit` never lands on a
@@ -484,9 +494,11 @@ export function ProfileDrawer({ mode, source, existing = [], onClose, onSaved })
     const base = {
       name: source.name,
       intent: source.intent || '',
-      quant: source.quant || '',
       flags: source.flags || '',
-      mtp: !!source.mtp,
+      ctx: source.ctx_size != null ? String(source.ctx_size) : '',
+      thinking: thinkingToForm(source.enable_thinking),
+      vision: switchOf(source.vision),
+      mtp: switchOf(source.mtp),
       runner: source.runner || '',
     };
     if (mode === 'clone') {
@@ -500,14 +512,10 @@ export function ProfileDrawer({ mode, source, existing = [], onClose, onSaved })
   const update = useProfileUpdate();
 
   const taken = existing.filter(n => !(isEdit && n === source.name));
-  // Grandfather baseline (#1411): only an EDIT inherits the profile's stored
-  // flags. A clone is a create — its hardware flags are newly introduced under
-  // the new name, so they stay a hard reject, matching ProfileCatalog.create.
-  const storedFlags = isEdit ? (source.flags || '') : '';
   const f = useForm({
     deriveInitial,
     resetKey: `${mode}:${source?.name ?? ''}`,
-    validate: (v) => validateForm(v, taken, storedFlags),
+    validate: (v) => validateForm(v, taken),
     warn: (v) => warnForm(v),
   });
   const form = f.values;
@@ -516,7 +524,6 @@ export function ProfileDrawer({ mode, source, existing = [], onClose, onSaved })
   const show = f.show;
   const set = f.set;
   const touch = f.touch;
-  const meta = bk('cpu', BACKEND_META);
   const nameValid = !errs.name && (form.name || '').trim().length > 0;
   const nameLen = (form.name || '').length;
   // '' = Auto; a key = that option; null = a stored key this box's registry
@@ -535,12 +542,17 @@ export function ProfileDrawer({ mode, source, existing = [], onClose, onSaved })
       return;
     }
     f.setSubmitting(true);
+    const ctxText = String(form.ctx ?? '').trim();
     const body = {
       name: form.name.trim(),
       flags: form.flags ?? '',
-      mtp: !!form.mtp,
+      // Empty ctx = "defer to the model's native window": null clears it on a
+      // PUT; on a create the key is simply omitted.
+      ...(ctxText ? { ctx_size: Number(ctxText) } : isEdit ? { ctx_size: null } : {}),
+      enable_thinking: thinkingFromForm(form.thinking),
+      vision: switchOf(form.vision),
+      mtp: switchOf(form.mtp),
       intent: form.intent ?? '',
-      quant: form.quant ?? '',
       // '' is the API's CLEAR sentinel for runner (#2186), NOT null: on a PUT
       // null means "leave the stored runtime alone", so sending it for the
       // Auto option made picking Auto a silent no-op. On a create '' reads as
@@ -557,7 +569,7 @@ export function ProfileDrawer({ mode, source, existing = [], onClose, onSaved })
         await create.mutateAsync(body);
         toast(`Profile ${body.name} created`, 'ok');
       }
-      onSaved();
+      onSaved(isEdit ? source.name : body.name);
     } catch (err) {
       const code = err?.code || '';
       if (code === 'profiles.exists') {
@@ -587,8 +599,9 @@ export function ProfileDrawer({ mode, source, existing = [], onClose, onSaved })
       onClose={onClose}
       foot={({ requestClose }) => (
         <>
-          <div className="pf-drawer-preview mono" style={{ '--bk': meta.color }}>
-            <span className="pf-chip-dot" />{meta.label}{form.mtp ? ' · MTP' : ''}
+          <div className="pf-drawer-preview mono" data-testid="pf-drawer-preview">
+            <span className="pf-chip-dot" />
+            ctx {ctxLabel(String(form.ctx ?? '').trim() || null)} · thinking {form.thinking} · vision {form.vision} · mtp {form.mtp}
           </div>
           <span className="pf-grow" />
           {f.submitted && blocking && (
@@ -618,12 +631,7 @@ export function ProfileDrawer({ mode, source, existing = [], onClose, onSaved })
             placeholder="MoE agents · long-ctx" data-testid="pf-input-intent" />
         </FormRow>
 
-        {/* Image field removed (spec-hw-slot-ownership §3): a profile is a
-            device-agnostic tune template only. The container image lives on the
-            runner (RUNNER_IMAGES[slot.binary]); the per-slot escape hatch is
-            slot.image_pin in the slot editor. */}
-
-        <div className="mono pf-hint">Hardware and image are selected on the slot; versions are managed on the Runner Images page.</div>
+        <div className="mono pf-hint">A profile is the whole tune. Hardware and image are selected on the slot; versions are managed on the Runner Images page.</div>
 
         {/* Runtime — same dropdown anatomy as the slot drawer's Runtime
             control (title · lane(s) · install state, blurb underneath), so
@@ -668,38 +676,48 @@ export function ProfileDrawer({ mode, source, existing = [], onClose, onSaved })
           <div className="mono pf-hint">Forked from a seed — its runtime carries over; edit the copy to change it.</div>
         )}
 
+        <FormRow label="Context" sub="tokens · 128–16,777,216 · empty = the model's native window"
+          error={show('ctx') ? errs.ctx : null}>
+          <input className={'pf-input mono' + (show('ctx') && errs.ctx ? ' err' : '')}
+            inputMode="numeric" value={form.ctx || ''}
+            onChange={e => set('ctx', e.target.value)} onBlur={() => touch('ctx')}
+            placeholder="native" aria-invalid={!!(show('ctx') && errs.ctx)}
+            data-testid="pf-input-ctx" />
+        </FormRow>
+
+        <FormRow label="Thinking" sub="reasoning default for requests this profile serves">
+          <select className="pf-input mono" value={form.thinking}
+            onChange={e => set('thinking', e.target.value)} data-testid="pf-select-thinking">
+            <option value="auto">Auto — the model decides</option>
+            <option value="on">On — always reason first</option>
+            <option value="off">Off — never reason</option>
+          </select>
+        </FormRow>
+
+        <FormRow label="Vision" sub="load the model's mmproj projector">
+          <select className="pf-input mono" value={form.vision}
+            onChange={e => set('vision', e.target.value)} data-testid="pf-select-vision">
+            <option value="auto">Auto — load it when the model has one</option>
+            <option value="off">Off — never load it (saves VRAM)</option>
+          </select>
+        </FormRow>
+
+        <FormRow label="MTP" sub="Multi-Token Prediction speculative decode">
+          <select className="pf-input mono" value={form.mtp}
+            onChange={e => set('mtp', e.target.value)} data-testid="pf-select-mtp">
+            <option value="auto">Auto — use the file's MTP heads when it has them</option>
+            <option value="off">Off — never draft</option>
+          </select>
+        </FormRow>
+
         <FormRow label="Flags" sub="appended to the run command"
           error={show('flags') ? errs.flags : null}>
           <textarea className={'pf-input mono pf-textarea' + (show('flags') && errs.flags ? ' err' : '')}
             value={form.flags || ''}
             onChange={e => set('flags', e.target.value)} onBlur={() => touch('flags')}
-            rows={3} placeholder="-fa on --jinja -b 2048 -ub 512"
+            rows={3} placeholder="-fa on -b 2048 -ub 512"
             aria-invalid={!!(show('flags') && errs.flags)} data-testid="pf-input-flags" />
         </FormRow>
-
-        <FormRow label="MTP" sub="Multi-Token Prediction speculative decode">
-          <button type="button" className={'pf-switch' + (form.mtp ? ' on' : '')} onClick={() => set('mtp', !form.mtp)}
-            role="switch" aria-checked={form.mtp} data-testid="pf-check-mtp">
-            <span className="pf-switch-knob" />
-            <span className="pf-switch-lbl mono">{form.mtp ? 'enabled' : 'disabled'}</span>
-          </button>
-        </FormRow>
-
-        {/* Advanced (operator ruling): the main form is name · intent ·
-            runtime · flags · MTP. Quant is a match-only display fact, not
-            something authoring a tune starts from, so it demotes here — same
-            progressive-disclosure idiom as the slot drawer's Advanced
-            section. Still editable, still prefilled on edit/clone/import. */}
-        <button type="button" className="pf-disc" aria-expanded={advOpen}
-          onClick={() => setAdvOpen(o => !o)} data-testid="pf-advanced-toggle">
-          <span className="mono pf-disc-caret">{advOpen ? '▾' : '▸'}</span>Advanced
-        </button>
-        {advOpen && (
-          <FormRow label="Quant" sub="weight format">
-            <input className="pf-input mono" value={form.quant || ''} onChange={e => set('quant', e.target.value)}
-              placeholder="FP4 · Q4_K_M …" data-testid="pf-input-quant" />
-          </FormRow>
-        )}
       </form>
     </FormDrawer>
   );
@@ -779,7 +797,7 @@ export function ImportModal({ existing, onClose, onImported }) {
   // The dry run reports the runtime the envelope AUTHORS (`runner`), the
   // family the profile resolves to, and whether importing has to drop that
   // runtime because this box has no such entry (`runner_stripped`). A dropped
-  // runtime WARNS and proceeds: import stays portable, so the flags and quant
+  // runtime WARNS and proceeds: import stays portable, so the flags and tune
   // still land — the profile just arrives with no runtime pinned, and the
   // commit button says exactly that.
   const renderPreview = (report) => {
@@ -814,7 +832,7 @@ export function ImportModal({ existing, onClose, onImported }) {
         {stripped && (
           <div className="stk-dlg-warn" data-testid="pf-import-runtime-warn">
             {Icons.alert}<b>{key}</b> is not available on this box — the profile
-            imports with runtime Auto. Its flags and quant come across unchanged;
+            imports with runtime Auto. Its flags and tune come across unchanged;
             slots applying it keep their own runtime. Install it from the Runner
             Images page, then set it on the profile.
           </div>
@@ -884,7 +902,7 @@ function ProfilesHeader({ count, onNew, onImport }) {
         <span className="dim">·</span>
         <span className="meta">launch profiles</span>
         <span className="dim">·</span>
-        <span className="meta">bench-tuned flags per workload</span>
+        <span className="meta">the whole tune: flags, context, thinking, vision, MTP, runtime</span>
       </span>
       {count != null && (
         <span className="cpill">
@@ -915,7 +933,6 @@ function ProfilesView() {
   const query = useProfiles();
   const profiles = query.data ?? [];
   const exportMut = useProfileExport();
-  const BACKEND_META = useBackendMeta();
 
   const [drawer, setDrawer] = useState(null);   // {mode, source}
   const [confirm, setConfirm] = useState(null);
@@ -970,12 +987,6 @@ function ProfilesView() {
           <Stat value={custom.length} label="custom" accent="var(--accent)" />
           <span className="pf-stat-div" />
           <Stat value={`${inUseCount}/${profiles.length}`} label="bound to slots" accent="var(--ok)" />
-          <span className="pf-grow" />
-          <div className="pf-legend mono">
-            {Object.entries(BACKEND_META).map(([k, m]) => (
-              <span className="pf-legend-i" key={k} style={{ '--bk': m.color }}><span className="pf-chip-dot" />{m.label}</span>
-            ))}
-          </div>
         </div>
       </div>
 

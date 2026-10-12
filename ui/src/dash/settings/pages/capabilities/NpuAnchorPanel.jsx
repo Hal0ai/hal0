@@ -1,11 +1,14 @@
 // NPU anchor (FLM trio) — advanced panel, collapsed by default. Ported from
 // NpuPage. One FLM process serves chat + embed + ASR on the XDNA2 NPU:
-//   [model].context_size → HAL0_FLM_CTX → --ctx-len
+//   the slot's effective context → HAL0_FLM_CTX → --ctx-len   (read-only here)
 //   [npu].embed → HAL0_FLM_LOAD_EMBED → --embed 1
 //   [npu].asr   → HAL0_FLM_LOAD_ASR   → --asr 1
-// All service-restart (slot bounce). The old hardcoded amber chip is now a
-// real ApplyBadge (closes the NpuPage TODO / spec Risk #2 anti-pattern) —
-// slot.model.context_size / slot.npu.* are classified in RELOAD_CLASS_FALLBACK.
+// ADR-0029: the context window is the slot's PROFILE's ctx_size, not slot
+// config, so it is shown read-only (ctx_effective + ctx_source) and edited on
+// the profile; the server rejects a context key on a slot write.
+// The npu keys are service-restart (slot bounce). The old hardcoded amber chip
+// is now a real ApplyBadge (closes the NpuPage TODO / spec Risk #2 anti-pattern)
+// — slot.npu.* are classified in RELOAD_CLASS_FALLBACK.
 // The [npu].asr/.embed booleans are also written by the NPU pane pills and
 // the slot drawer; this panel is the settings-side writer of the same keys.
 import { useState, useEffect } from 'react'
@@ -14,8 +17,6 @@ import { useNpuOccupancy } from '@/api/hooks/useNpuOccupancy'
 import { SRow } from '../../shared/SRow.jsx'
 import { ApplyBadge } from '../../shared/ApplyBadge.jsx'
 import { PanelHeader, PanelFooter, inputStyle } from './shared.jsx'
-
-const DEF_CTX = "16384"
 
 export function NpuAnchorPanel({ registry }) {
   const [open, setOpen] = useState(false)
@@ -27,30 +28,31 @@ export function NpuAnchorPanel({ registry }) {
   const npuName = npuSlots.length > 0 ? npuSlots[0].name : null
   const cfgQuery = useSlotConfig(npuName)
   const cfg = cfgQuery.data || {}
-  const liveCtx = cfg.model?.context_size
   const liveNpu = cfg.npu || {}
+  const npuSlot = npuSlots.length > 0 ? npuSlots[0] : null
+  const ctxEffective = Number(npuSlot?.ctx_effective) > 0 ? Number(npuSlot.ctx_effective) : null
+  const ctxSource = {
+    profile: npuSlot?.profile ? `set by profile ${npuSlot.profile}` : 'set by the profile',
+    native: "the model's native window",
+    fallback: 'the default window',
+  }[npuSlot?.ctx_source] || null
 
-  const origCtx = liveCtx != null ? String(liveCtx) : DEF_CTX
   const origAsr = !!liveNpu.asr
   const origEmbed = !!liveNpu.embed
 
-  const [ctx, setCtx] = useState(DEF_CTX)
   const [asr, setAsr] = useState(false)
   const [embed, setEmbed] = useState(false)
   useEffect(() => {
-    setCtx(liveCtx != null ? String(liveCtx) : DEF_CTX)
     setAsr(!!liveNpu.asr)
     setEmbed(!!liveNpu.embed)
   }, [cfgQuery.data])
 
-  const ctxNum = parseInt(ctx, 10)
-  const ctxValid = /^\d+$/.test(ctx.trim()) && ctxNum >= 512
-  const dirty = !!npuName && (ctx !== origCtx || asr !== origAsr || embed !== origEmbed)
+  const dirty = !!npuName && (asr !== origAsr || embed !== origEmbed)
 
   const doSave = async () => {
-    if (!npuName || !ctxValid) return
+    if (!npuName) return
     try {
-      await editSlot.mutateAsync({ name: npuName, body: { model: { context_size: ctxNum }, npu: { asr, embed } } })
+      await editSlot.mutateAsync({ name: npuName, body: { npu: { asr, embed } } })
       window.__hal0Toast && window.__hal0Toast("NPU settings saved — restart the slot to apply", "warn")
     } catch (e) {
       window.__hal0Toast && window.__hal0Toast(`Save failed — ${e?.message || "see logs"}`, "err")
@@ -78,11 +80,11 @@ export function NpuAnchorPanel({ registry }) {
       )}
       {open && npuName && (
         <>
-          <SRow k="Context size" sub="FLM --ctx-len (tokens) · larger = more KV cache on the NPU"
-            actions={<ApplyBadge settingsKey="slot.model.context_size" registry={registry} />} v={
-            <input type="number" min={512} step={512} value={ctx}
-              onChange={e => setCtx(e.target.value)} placeholder={DEF_CTX}
-              className="mono" style={{...inputStyle(120), borderColor: ctxValid || !ctx ? "var(--line)" : "var(--err)"}} />
+          <SRow k="Context size" sub="FLM --ctx-len (tokens) · read-only — set ctx_size on the slot's profile (Profiles page)"
+            v={
+            <span className="mono" style={{color: "var(--fg-3)"}} data-testid="npu-anchor-ctx">
+              {ctxEffective ? `${ctxEffective.toLocaleString("en-US")} tokens${ctxSource ? ` · ${ctxSource}` : ""}` : "—"}
+            </span>
           } />
           <SRow k="Load embeddings" sub="Serve /v1/embeddings from the FLM trio (--embed 1) · mirrors device=npu on the Embeddings selection"
             actions={<ApplyBadge settingsKey="slot.npu.embed" registry={registry} />} v={
@@ -115,8 +117,8 @@ export function NpuAnchorPanel({ registry }) {
               ))}
             </>
           )}
-          <PanelFooter dirty={dirty} onReset={() => { setCtx(origCtx); setAsr(origAsr); setEmbed(origEmbed) }}
-            onSave={doSave} disabled={!dirty || !ctxValid || editSlot.isPending}
+          <PanelFooter dirty={dirty} onReset={() => { setAsr(origAsr); setEmbed(origEmbed) }}
+            onSave={doSave} disabled={!dirty || editSlot.isPending}
             saving={editSlot.isPending} label="Save NPU settings" />
         </>
       )}

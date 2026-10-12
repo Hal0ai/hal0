@@ -3,9 +3,8 @@
  *
  * Also covers the container-slot edit drawer changes:
  *   - Profile picker replaces Device/Backend selectors for runtime=container
- *   - Profile-owned knobs (n_gpu_layers, rope_freq_base, extra_args) are
- *     read-only, showing "defined by profile" hint
- *   - Save only sends ctx_size + default (not n_gpu_layers/device/etc.)
+ *   - ADR-0029: the profile owns the whole tune; cards show ctx, thinking,
+ *     vision, MTP, runner and flags
  *   - Resolved command displayed instead of effectiveFlagsFor() preview
  *
  * Routes: /api/profiles fulfilled with MOCK_DATA.profiles via default mock.
@@ -121,6 +120,19 @@ test.describe('Profiles page (#658)', () => {
     // Flags are shown; the image tag is slot-owned and must not appear.
     await expect(firstCard).toContainText('--flash-attn')
     await expect(firstCard).not.toContainText('hal0-runner-standard')
+  })
+
+  test('Profile card shows the whole tune: ctx, thinking, vision, MTP, runner, flags (ADR-0029)', async ({ page }) => {
+    await page.waitForSelector('.stk-lib-card', { timeout: 10_000 })
+    const rows = page.locator('[data-testid="pf-tune-rocm"]')
+    await expect(rows).toContainText('64K')
+    await expect(rows).toContainText('thinking')
+    await expect(rows).toContainText('vision')
+    await expect(rows).toContainText('mtp')
+    await expect(rows).toContainText('runner')
+    await expect(rows).toContainText('--flash-attn')
+    // quant / device class left the profile.
+    await expect(page.locator('.stk-lib-card').first()).not.toContainText('FP4')
   })
 
   test('vulkan profile shows fallback intent label', async ({ page }) => {

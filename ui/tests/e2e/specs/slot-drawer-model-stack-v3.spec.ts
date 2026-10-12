@@ -72,9 +72,6 @@ async function stubWrites(page: Page, name: string) {
   await page.route(`**/api/slots/${name}/config`, (route) =>
     route.fulfill({ status: 200, contentType: 'application/json', body: '{}' }),
   )
-  await page.route(`**/api/slots/${name}/defaults`, (route) =>
-    route.fulfill({ status: 200, contentType: 'application/json', body: '{}' }),
-  )
 }
 
 const slotDrawer = (page: Page) => page.locator('.drawer:not(.drawer--docked)')
@@ -153,21 +150,25 @@ test.describe('Slot drawer — stacked model editor', () => {
     // NGL lives behind the slot drawer's Advanced disclosure (Task 11a).
     await page.getByTestId('slot-hw-advanced').click()
     const ngl = page.getByTestId('slot-hw-ngl')
-    // model-drawer-2 Task 4: the model drawer's tune editor rests on grouped
-    // pills; the flags textarea — the free-text control this case needs, to
-    // prove both drawers accept typing at once — is behind the raw toggle.
-    await modelDrawer(page).getByTestId('model-tune-raw-toggle').click()
-    const flags = modelDrawer(page).getByTestId('model-flags-input')
+    // ADR-0029: the model drawer has no flags editor any more; the free-text
+    // control this case needs, to prove both drawers accept typing at once, is
+    // the inline name editor behind the title's pencil.
+    await modelDrawer(page).getByTestId('model-title-edit').click()
+    const title = modelDrawer(page).getByTestId('model-title-input')
     await expect(ngl).toBeVisible()
-    await expect(flags).toBeVisible()
+    await expect(title).toBeVisible()
 
     // …and both accept input while the other stays put (visible ⇒ hit-testable,
     // which is what the covering stack broke).
-    await flags.fill('-fa on -b 2048')
-    await expect(flags).toHaveValue('-fa on -b 2048')
+    await title.fill('renamed-in-place')
+    await expect(title).toHaveValue('renamed-in-place')
     await ngl.fill('24')
     await expect(ngl).toHaveValue('24')
-    await expect(flags).toHaveValue('-fa on -b 2048')
+    // Focusing the slot's NGL field blurs the title editor, which commits the
+    // draft ("blur commits like Enter") — so the typed name now reads in the
+    // model drawer's header while the NGL edit sits untouched.
+    await expect(modelDrawer(page).locator('.drawer-h h2')).toContainText('renamed-in-place')
+    await expect(ngl).toHaveValue('24')
   })
 
   test('S3 — the docked drawer sits flush against the slot drawer, offset by its width', async ({ page }) => {
@@ -252,6 +253,6 @@ test.describe('Slot drawer — stacked model editor', () => {
     expect(modelBox.x).toBeGreaterThanOrEqual(0)
     expect(Math.round(modelBox.x + modelBox.width)).toBe(1024)
     // Still fully usable at the narrow size.
-    await expect(modelDrawer(page).getByTestId('model-tune-raw-toggle')).toBeVisible()
+    await expect(modelDrawer(page).getByTestId('model-chat-template')).toBeVisible()
   })
 })

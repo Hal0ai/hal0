@@ -43,14 +43,9 @@ export function footSummary(changes, usingSlots) {
     mmproj: 'mmproj',
     hfRepo: 'source',
     hfFilename: 'source',
-    extra: 'flags',
-    profile: 'profile',
-    ctx: 'context',
     chatTemplate: 'template',
     mtp: 'overrides',
-    thinking: 'overrides',
     jinja: 'overrides',
-    vision: 'overrides',
   }
 
   // Collect changed field display names, preserving order and deduping
@@ -62,14 +57,9 @@ export function footSummary(changes, usingSlots) {
     'mmproj',
     'hfRepo',
     'hfFilename',
-    'extra',
-    'profile',
-    'ctx',
     'chatTemplate',
     'mtp',
-    'thinking',
     'jinja',
-    'vision',
   ]
 
   for (const field of fieldOrder) {

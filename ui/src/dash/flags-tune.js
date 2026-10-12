@@ -1,17 +1,22 @@
-// hal0 dashboard — launch-flags tune helpers (D1 model drawer).
+// hal0 dashboard — launch-flags helpers (ADR-0029: the profile owns the tune).
 //
-// Pure, dependency-free helpers for the model drawer's flags editor. The model
-// owns its full launch-flags text (materialized into `model.defaults.extra_args`
-// — the freeform "tune remainder": -fa / -b/-ub / --threads / KV-quant / …).
-// These helpers tokenize that text, flag managed args the server will reject,
-// highlight flag tokens for the editor overlay, and diff the model's text
-// against the profile that seeded it (client-side divergence, per spec §3 —
-// both texts are already on the client, so no diff endpoint is needed for v1).
+// Pure, dependency-free helpers for the profile drawer's flags field. A
+// profile's `flags` text is the freeform llama-server remainder (-fa / -b / -ub
+// / KV-quant / …); context window, thinking, vision, MTP and runner are typed
+// profile fields, and the model carries file facts only. These helpers
+// tokenize the text and screen out the flags the server rejects with a 400, so
+// the drawer can say so inline before the PUT fires:
 //
-// The managed-arg set mirrors hal0.slots.argv.MANAGED_ARGS_DENYLIST (§21.7):
-//   --model  --ctx-size  --host  --port  --n-gpu-layers  --alias
-// plus the short spellings argv._canon() maps into that set (-ngl, -c). hal0
-// computes these from the slot/model config and rejects them in the tune text.
+//   · managed flags      — hal0 computes them (hal0.slots.argv.MANAGED_ARGS_DENYLIST):
+//                          --model --ctx-size/-c --host --port --n-gpu-layers --alias
+//   · slot hardware      — the slot's grid owns them: -ngl -dev/--device -t/--threads
+//   · model-fact flags   — the model row owns them (profiles.model_fact_flag_denied):
+//                          --jinja --chat-template --chat-template-file
+//                          --mmproj --no-mmproj --mmproj-auto
+//   · --spec-draft-device, and --reasoning-format none
+//
+// diffFlags compares two profiles' flag texts (the slot preview counts what a
+// profile swap changes).
 
 // Canonical (long) managed flags + the short spellings the server canonicalises
 // into them. Keep in sync with hal0/slots/argv.py FLAG_ALIASES + the denylist.
@@ -27,10 +32,10 @@ const MANAGED_SHORT = { "-ngl": "--n-gpu-layers", "-c": "--ctx-size" };
 const MANAGED_SET = new Set([...MANAGED_FLAGS, ...Object.keys(MANAGED_SHORT)]);
 
 // Slot-hardware flags (spec-hw-slot-ownership §5): the grid-owned hardware
-// flags a MODEL / PROFILE tune must never carry — they belong on the slot's
-// typed hardware grid (device · NGL · THREADS). Mirrors the server
+// flags a PROFILE tune must never carry — they belong on the slot's typed
+// hardware grid (device · NGL · THREADS). Mirrors the server
 // SLOT_HARDWARE_FLAGS frozenset (hal0.slots.argv), including both long and
-// short spellings. The model/profile flag save HARD-REJECTS any of these; this
+// short spellings. The profile flag save HARD-REJECTS any of these; this
 // client check mirrors that reject inline before the PUT fires.
 export const SLOT_HARDWARE_FLAGS = [
   "-ngl",
@@ -43,8 +48,8 @@ export const SLOT_HARDWARE_FLAGS = [
 const SLOT_HARDWARE_SET = new Set(SLOT_HARDWARE_FLAGS);
 
 // The slot-hardware flags present in `text` (deduped, order-preserved). Empty
-// array = clean. Used by the model + profile flag editors to reject the grid-
-// owned hardware flags with a "these belong on the slot" message.
+// array = clean. Used by the profile flag editor to reject the grid-owned
+// hardware flags with a "these belong on the slot" message.
 export function findSlotHardwareFlags(text) {
   const { tokens } = tokenizeFlags(text);
   const seen = new Set();
@@ -58,45 +63,67 @@ export function findSlotHardwareFlags(text) {
   return offenders;
 }
 
-// Short → long canonicalisation for the hardware set. Mirrors the subset of
-// argv.py's FLAG_ALIASES that covers SLOT_HARDWARE_FLAGS.
-const SLOT_HARDWARE_CANON = {
-  "-ngl": "--n-gpu-layers",
-  "-dev": "--device",
-  "-t": "--threads",
+// Model-fact flags (ADR-0029): the chat template and projector are properties
+// of the FILE, recorded on the model row, so a profile must not carry them.
+// Mirrors the server's profiles.model_fact_flag_denied screen.
+export const MODEL_FACT_FLAGS = [
+  "--jinja",
+  "--chat-template",
+  "--chat-template-file",
+  "--mmproj",
+  "--no-mmproj",
+  "--mmproj-auto",
+];
+const MODEL_FACT_SET = new Set(MODEL_FACT_FLAGS);
+
+// Where each model-fact flag is actually controlled from, for the rejection
+// copy.
+export const MODEL_FACT_FLAG_SOURCE = {
+  "--jinja": "the model's Jinja fact",
+  "--chat-template": "the model's Chat template",
+  "--chat-template-file": "the model's Chat template",
+  "--mmproj": "the model's mmproj path (Source)",
+  "--no-mmproj": "this profile's Vision field (set it to off)",
+  "--mmproj-auto": "this profile's Vision field",
 };
 
-const canonHardware = (flag) => SLOT_HARDWARE_CANON[flag] || flag;
+// Other flags the profile screen refuses outright: the draft-model device is
+// derived from the slot's device, and `--reasoning-format none` would break
+// the reasoning split hal0 relies on.
+const SPEC_DRAFT_DEVICE = "--spec-draft-device";
 
-// The slot-hardware flags `text` INTRODUCES relative to `storedText` (#1411).
-//
-// The §5 screen shipped with no data migration, so a profile authored before it
-// carries -dev/--threads in its own stored flags — and the drawer round-trips
-// that text verbatim, so a plain re-save tripped the guard on the profile's own
-// data. The server now screens what an update ADDS, not what it inherits
-// (hal0.profiles.screen_profile_flags), so this inline mirror has to do the same
-// or the drawer keeps blocking a save the API would accept. Matching is by
-// canonical flag, like the server's, so a stored `-dev` also covers `--device`.
-//
-// `storedText` empty (create/clone) ⇒ nothing inherited ⇒ identical to
-// findSlotHardwareFlags. Models never grandfather; they keep the strict finder.
-export function findNewSlotHardwareFlags(text, storedText = "") {
-  const inherited = new Set(findSlotHardwareFlags(storedText).map(canonHardware));
-  if (!inherited.size) return findSlotHardwareFlags(text);
-  return findSlotHardwareFlags(text).filter((f) => !inherited.has(canonHardware(f)));
+// Offending tokens in `text` for the profile flag screen beyond managed and
+// hardware: model-fact flags, --spec-draft-device and `--reasoning-format
+// none`. Deduped, order-preserved; empty = clean. Tokens are reported as
+// typed. `--flag=value` spellings are matched on the part before the '='.
+export function findModelFactFlags(text) {
+  const { tokens } = tokenizeFlags(text);
+  const seen = new Set();
+  const offenders = [];
+  const add = (t) => { if (!seen.has(t)) { seen.add(t); offenders.push(t); } };
+  for (let i = 0; i < tokens.length; i += 1) {
+    const tok = tokens[i];
+    const name = tok.includes("=") && tok.startsWith("--") ? tok.slice(0, tok.indexOf("=")) : tok;
+    if (MODEL_FACT_SET.has(name) || name === SPEC_DRAFT_DEVICE) {
+      add(name);
+    } else if (name === "--reasoning-format") {
+      const val = tok.includes("=") ? tok.slice(tok.indexOf("=") + 1) : tokens[i + 1];
+      if (val === "none") add(tok.includes("=") ? tok : "--reasoning-format none");
+    }
+  }
+  return offenders;
 }
 
 // Where each managed flag is actually controlled from — surfaced in the inline
 // rejection so the operator knows why it's off-limits and where to set it.
 export const MANAGED_FLAG_SOURCE = {
   "--model": "the model's on-disk path (Source — repo · file · mmproj · paths)",
-  "--ctx-size": "the context_size field",
+  "--ctx-size": "the profile's Context field (ctx_size)",
   "--host": "the server bind host (authority-owned)",
   "--port": "PortAuthority (shown read-only on the slot)",
-  // #2105: NGL is slot-owned hardware (spec-hw-slot-ownership §2) — there is no
-  // model-side n_gpu_layers field to point at any more. The slot-hardware check
-  // normally answers first for this flag; this entry is the profile drawer's
-  // fallback, so it has to name the slot's grid, not a field that was removed.
+  // NGL is slot-owned hardware (spec-hw-slot-ownership §2). The slot-hardware
+  // check normally answers first for this flag; this entry is the profile
+  // drawer's fallback, so it has to name the slot's grid.
   "--n-gpu-layers": "the slot's hardware grid (NGL)",
   "--alias": "the model id / dispatch alias (authority-owned)",
 };
@@ -180,38 +207,6 @@ export function canonFlag(flag) {
   return FLAG_ALIASES[flag] || flag;
 }
 
-// The category a canonical (long) flag belongs to in the model drawer's
-// grouped flags editor. Seeded from the flags the repo's own seed profiles +
-// panel 03 use; anything absent here falls through to "template-misc" in
-// groupFlagPairs. Keyed by canonical long name — callers fold through
-// canonFlag before looking up.
-export const FLAG_CATEGORIES = {
-  "--temp": "sampling",
-  "--top-p": "sampling",
-  "--top-k": "sampling",
-  "--min-p": "sampling",
-  "--repeat-penalty": "sampling",
-  "--presence-penalty": "sampling",
-  "--frequency-penalty": "sampling",
-  "--flash-attn": "cache-kv",
-  "--cache-type-k": "cache-kv",
-  "--cache-type-v": "cache-kv",
-  "--cache-reuse": "cache-kv",
-  "--batch-size": "memory-batch",
-  "--ubatch-size": "memory-batch",
-  "--no-mmap": "memory-batch",
-  "--mlock": "memory-batch",
-  "--parallel": "memory-batch",
-};
-
-// Display order + labels for the model drawer's flag-category sections.
-export const CATEGORY_ORDER = [
-  { id: "sampling", label: "Sampling" },
-  { id: "cache-kv", label: "Cache · KV" },
-  { id: "memory-batch", label: "Memory · batch" },
-  { id: "template-misc", label: "Template · misc" },
-];
-
 // Group a flat token list into { flag, value } pairs (a flag consumes the next
 // token as its value iff that token isn't itself a flag). Bare positionals are
 // dropped from the pair view (they never carry a managed key).
@@ -250,37 +245,20 @@ export function findManagedFlags(text) {
   return offenders;
 }
 
-// Segments for the editor's token-highlight overlay: flags → amber, values →
-// dim. Returns [{ text, kind: "flag"|"value"|"space" }] preserving raw spacing
-// so an overlaid highlight aligns 1:1 with the underlying textarea.
-export function highlightSegments(text) {
-  const s = String(text || "");
-  const segs = [];
-  const re = /(\s+)|(\S+)/g;
-  let m;
-  while ((m = re.exec(s)) !== null) {
-    if (m[1] != null) { segs.push({ text: m[1], kind: "space" }); continue; }
-    const word = m[2];
-    segs.push({ text: word, kind: isFlagToken(word) ? "flag" : "value" });
-  }
-  return segs;
-}
-
-// Client-side divergence: diff the model's tune text against the profile text
-// that seeded it. Keyed by canonical flag so a reordered `-b 2048` isn't a
+// Diff two flag texts. `nextText` is where we are going, `prevText` where we
+// are coming from. Keyed by canonical flag so a reordered `-b 2048` isn't a
 // spurious change. Matching folds through canonFlag (the full FLAG_ALIASES
-// mirror, not just the managed subset) so a model `-b 2048` against a profile
-// `--batch-size 1024` reads as ONE changed pair, not added+removed (#2211) —
-// the same canonicalisation groupFlagPairs and the tune pills use. Reported
-// `flag` spellings stay the operator's own text; only the matching
-// canonicalises. Returns { added, removed, changed, unchanged, diverged }.
-//   added:     [{ flag, value }]  present in model, not in profile
-//   removed:   [{ flag, value }]  present in profile, not in model
+// mirror) so `-b 2048` against `--batch-size 1024` reads as ONE changed pair,
+// not added+removed (#2211). Reported `flag` spellings stay the operator's own
+// text; only the matching canonicalises.
+// Returns { added, removed, changed, unchanged, diverged }.
+//   added:     [{ flag, value }]  present in next, not in prev
+//   removed:   [{ flag, value }]  present in prev, not in next
 //   changed:   [{ flag, from, to }] same flag, different value
 //   unchanged: number             identical pairs
-export function diffFlags(modelText, profileText) {
-  const mp = flagPairs(tokenizeFlags(modelText).tokens);
-  const pp = flagPairs(tokenizeFlags(profileText).tokens);
+export function diffFlags(nextText, prevText) {
+  const mp = flagPairs(tokenizeFlags(nextText).tokens);
+  const pp = flagPairs(tokenizeFlags(prevText).tokens);
   const key = (p) => canonFlag(p.flag);
   const pByFlag = new Map();
   for (const p of pp) pByFlag.set(key(p), p);
@@ -307,158 +285,9 @@ export function diffFlags(modelText, profileText) {
   return { added, removed, changed, unchanged, diverged };
 }
 
-// Whether two flag texts are equivalent modulo whitespace/order (the divergence
-// predicate). Cheaper than a full diff when only the boolean is needed.
+// Whether two flag texts are equivalent modulo whitespace/order. Cheaper than a
+// full diff when only the boolean is needed.
 export function flagsEquivalent(a, b) {
   const d = diffFlags(a, b);
   return !d.diverged;
-}
-
-// Group `text`'s flag pairs by FLAG_CATEGORIES for the model drawer's grouped
-// flags editor. Unknown flags (not in FLAG_CATEGORIES) fall through to
-// "template-misc". Empty groups are omitted; the remaining groups keep
-// CATEGORY_ORDER's order. `error` mirrors tokenizeFlags's — groups are still
-// returned best-effort (from whatever tokens were accumulated before the
-// error) so a mid-edit unbalanced quote doesn't blank the editor.
-export function groupFlagPairs(text) {
-  const { tokens, error } = tokenizeFlags(text);
-  const byCategory = new Map(CATEGORY_ORDER.map((c) => [c.id, []]));
-  for (const p of flagPairs(tokens)) {
-    const canon = canonFlag(p.flag);
-    const catId = FLAG_CATEGORIES[canon] || "template-misc";
-    byCategory.get(catId).push({ flag: p.flag, canon, value: p.value });
-  }
-  const groups = CATEGORY_ORDER
-    .map((c) => ({ id: c.id, label: c.label, pairs: byCategory.get(c.id) }))
-    .filter((g) => g.pairs.length > 0);
-  return { groups, error };
-}
-
-// Split raw flag text into an alternating sequence of whitespace-run and
-// token segments, quote-aware like tokenizeFlags: a `'...'`/`"..."` run keeps
-// its enclosing quotes and any embedded whitespace as ONE segment, so a
-// `--chat-template-kwargs '{"enable_thinking":false}'`- or `--alias "a b"`-
-// style value round-trips as a single unit instead of being torn into
-// fragments that corrupt everything after them. The segment's `text` keeps
-// the raw quote characters verbatim — callers that replace a segment's text
-// (spliceFlagValue) intentionally drop them, since the replacement value is
-// inserted unquoted.
-function rawSegments(text) {
-  const s = String(text || "");
-  const segs = [];
-  const n = s.length;
-  let i = 0;
-  while (i < n) {
-    if (/\s/.test(s[i])) {
-      let j = i;
-      while (j < n && /\s/.test(s[j])) j += 1;
-      segs.push({ text: s.slice(i, j), word: false });
-      i = j;
-      continue;
-    }
-    let j = i;
-    let quote = null;
-    while (j < n) {
-      const ch = s[j];
-      if (quote) {
-        j += 1;
-        if (ch === quote) quote = null;
-        continue;
-      }
-      if (ch === '"' || ch === "'") { quote = ch; j += 1; continue; }
-      if (/\s/.test(ch)) break;
-      j += 1;
-    }
-    segs.push({ text: s.slice(i, j), word: true });
-    i = j;
-  }
-  return segs;
-}
-
-// Locate the { flag, value } pair in `segs` (as produced by rawSegments)
-// whose canonFlag(flag) === canon, returning the segment indices of the flag
-// token and its value token (null when the flag carries no value, i.e. the
-// next word is itself a flag or there is no next word). Returns null when no
-// pair matches.
-//
-// `occurrence` selects WHICH match, counted in text order from 0. Repeating a
-// flag is legitimate llama-server usage — `-ot ffn=CPU -ot attn=GPU`, and the
-// same for --override-kv / --lora — so "the pair for this canon" is not a
-// unique thing, and a caller editing the second one has to be able to say so.
-// The walk enumerates pairs exactly as flagPairs does (a flag consumes the
-// next token iff that token isn't itself a flag), so the n-th pair here is the
-// n-th pair there.
-function findFlagPairSegIndices(segs, canon, occurrence = 0) {
-  const wordIdx = [];
-  segs.forEach((seg, i) => { if (seg.word) wordIdx.push(i); });
-  let seen = 0;
-  for (let k = 0; k < wordIdx.length; k += 1) {
-    const flagIdx = wordIdx[k];
-    const tok = segs[flagIdx].text;
-    if (!isFlagToken(tok) || canonFlag(tok) !== canon) continue;
-    const next = wordIdx[k + 1];
-    const hit =
-      next != null && !isFlagToken(segs[next].text)
-        ? { flagIdx, valueIdx: next }
-        : { flagIdx, valueIdx: null };
-    if (seen === occurrence) return hit;
-    seen += 1;
-  }
-  return null;
-}
-
-// Replace the value token of the pair whose canonFlag(flag) === canon with
-// `nextValue`, preserving the operator's original flag spelling, token order,
-// and every other token's surrounding whitespace verbatim. A no-op (returns
-// `text` unchanged) when no pair matches canon, or the matched flag carries no
-// value token to replace.
-//
-// `occurrence` picks which repetition of `canon` to edit (0 = the first, the
-// default). Anything holding a per-pair identity — the drawer's tune pills —
-// must pass it, or a text carrying the same flag twice edits the wrong one.
-export function spliceFlagValue(text, canon, nextValue, occurrence = 0) {
-  const s = String(text || "");
-  const segs = rawSegments(s);
-  const found = findFlagPairSegIndices(segs, canon, occurrence);
-  if (!found || found.valueIdx == null) return s;
-  segs[found.valueIdx] = { text: String(nextValue), word: true };
-  return segs.map((seg) => seg.text).join("");
-}
-
-// Drop the flag token + its value token (or just the flag, for a boolean
-// flag) for the pair whose canonFlag(flag) === canon, collapsing the
-// resulting double space so the surrounding tokens read as if the pair had
-// never been there. A no-op when no pair matches canon.
-//
-// `occurrence` picks which repetition of `canon` to drop (0 = the first, the
-// default) — see spliceFlagValue.
-export function removeFlagFromText(text, canon, occurrence = 0) {
-  const s = String(text || "");
-  const segs = rawSegments(s);
-  const found = findFlagPairSegIndices(segs, canon, occurrence);
-  if (!found) return s;
-  const { flagIdx, valueIdx } = found;
-  const endIdx = valueIdx != null ? valueIdx : flagIdx;
-  const drop = new Set();
-  for (let i = flagIdx; i <= endIdx; i += 1) drop.add(i);
-  if (flagIdx > 0 && !segs[flagIdx - 1].word) {
-    drop.add(flagIdx - 1);
-  } else if (endIdx + 1 < segs.length && !segs[endIdx + 1].word) {
-    drop.add(endIdx + 1);
-  }
-  return segs.filter((_, i) => !drop.has(i)).map((seg) => seg.text).join("");
-}
-
-// Append `flag` (and `value`, when given) to `text`, space-separated from
-// whatever's already there. A value containing whitespace is wrapped in
-// double quotes so it round-trips through tokenizeFlags as one token; a
-// null/undefined/empty value is omitted entirely (a boolean flag).
-export function addFlagToText(text, flag, value) {
-  const base = String(text || "");
-  let piece = flag;
-  if (value !== null && value !== undefined && value !== "") {
-    const v = String(value);
-    piece += /\s/.test(v) ? ` "${v}"` : ` ${v}`;
-  }
-  return base ? `${base} ${piece}` : piece;
 }

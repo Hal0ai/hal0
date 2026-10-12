@@ -37,6 +37,6 @@ test.describe('Create slot — redirect + simplification', () => {
     await page.locator('.view .vh button:has-text("New slot")').click()
     await page.getByTestId('create-slot-model').selectOption({ index: 1 })
     // Once a model is chosen the teach names the device it runs on.
-    await expect(page.getByTestId('create-slot-device-redirect')).toContainText(/because the model is stamped/i)
+    await expect(page.getByTestId('create-slot-device-redirect')).toContainText(/because that is where the model runs/i)
   })
 })

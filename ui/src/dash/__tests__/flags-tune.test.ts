@@ -1,29 +1,25 @@
-// Unit coverage for the model drawer's launch-flags tune helpers
-// (flags-tune.js) — previously zero direct unit tests despite being pure,
-// dependency-free logic that gates Save on every model/profile flags edit.
+// Unit coverage for the profile drawer's launch-flags helpers (flags-tune.js)
+// — pure, dependency-free logic that gates Save on every profile flags edit.
 //
 // Written as a real vitest spec (not the sibling `__tests__/*.test.mjs`
 // files' plain-node-script style) so it's actually picked up by
-// `vitest run` — vitest.config.ts's `include` is `src/**/*.test.ts` only,
-// which the `.mjs` files under this same directory do NOT match; they run
-// (if at all) via `node <file>.mjs` directly per their own header comments.
+// `vitest run` — vitest.config.ts's `include` is `src/**/*.test.ts` only.
 
 import { describe, expect, it } from 'vitest'
 
 import {
   MANAGED_FLAGS,
+  MODEL_FACT_FLAGS,
   SLOT_HARDWARE_FLAGS,
+  canonFlag,
   diffFlags,
   findManagedFlags,
+  findModelFactFlags,
   findSlotHardwareFlags,
   flagsEquivalent,
-  highlightSegments,
   isFlagToken,
   tokenizeFlags,
-} from '../flags-tune.js'
-import {
-  canonFlag, groupFlagPairs, spliceFlagValue,
-  removeFlagFromText, addFlagToText, FLAG_ALIASES, CATEGORY_ORDER,
+  FLAG_ALIASES,
 } from '../flags-tune.js'
 
 describe("canonFlag", () => {
@@ -34,106 +30,6 @@ describe("canonFlag", () => {
   });
   it("returns unknown flags unchanged", () => {
     expect(canonFlag("--totally-novel")).toBe("--totally-novel");
-  });
-});
-
-describe("groupFlagPairs", () => {
-  it("groups known flags and routes unknown to template-misc", () => {
-    const { groups, error } = groupFlagPairs("--temp 0.4 --cache-type-k q8_0 --wat 1");
-    expect(error).toBeNull();
-    const ids = groups.map((g) => g.id);
-    expect(ids).toContain("sampling");
-    expect(ids).toContain("cache-kv");
-    const misc = groups.find((g) => g.id === "template-misc");
-    expect(misc!.pairs).toEqual([{ flag: "--wat", canon: "--wat", value: "1" }]);
-  });
-  it("omits empty groups and keeps CATEGORY_ORDER order", () => {
-    const { groups } = groupFlagPairs("--temp 0.4");
-    expect(groups).toHaveLength(1);
-    expect(groups[0].id).toBe("sampling");
-    const order = CATEGORY_ORDER.map((c) => c.id);
-    expect(order).toEqual(["sampling", "cache-kv", "memory-batch", "template-misc"]);
-  });
-  it("surfaces tokenizer errors", () => {
-    expect(groupFlagPairs('--temp "0.4').error).toMatch(/unbalanced quote/);
-  });
-});
-
-describe("splice helpers preserve spelling, order, untouched text", () => {
-  const t = "-fa auto --temp 0.4 -b 2048";
-  it("spliceFlagValue replaces one value", () => {
-    expect(spliceFlagValue(t, "--temp", "0.2")).toBe("-fa auto --temp 0.2 -b 2048");
-  });
-  it("removeFlagFromText drops flag+value", () => {
-    expect(removeFlagFromText(t, "--temp")).toBe("-fa auto -b 2048");
-  });
-  it("removeFlagFromText drops a boolean flag alone", () => {
-    expect(removeFlagFromText("--jinja --temp 0.4", "--jinja")).toBe("--temp 0.4");
-  });
-  it("addFlagToText appends, quoting whitespace values", () => {
-    expect(addFlagToText(t, "--override-kv", "a b")).toBe(t + ' --override-kv "a b"');
-    expect(addFlagToText("", "--jinja", null)).toBe("--jinja");
-  });
-  it("splice via a short alias canon hits the long-typed flag and vice versa", () => {
-    expect(spliceFlagValue("--batch-size 2048", canonFlag("-b"), "512"))
-      .toBe("--batch-size 512");
-  });
-  it("spliceFlagValue replaces a double-quoted multi-word value without corrupting the remainder", () => {
-    expect(spliceFlagValue('--foo "a b" --temp 0.4', "--foo", "x"))
-      .toBe("--foo x --temp 0.4");
-  });
-  it("spliceFlagValue replaces a single-quoted multi-word value without corrupting the remainder", () => {
-    expect(spliceFlagValue("--foo 'a b' --temp 0.4", "--foo", "x"))
-      .toBe("--foo x --temp 0.4");
-  });
-  it("removeFlagFromText drops a double-quoted multi-word value without corrupting the remainder", () => {
-    expect(removeFlagFromText('--foo "a b" --temp 0.4', "--foo")).toBe("--temp 0.4");
-  });
-  it("removeFlagFromText drops a single-quoted multi-word value without corrupting the remainder", () => {
-    expect(removeFlagFromText("--foo 'a b' --temp 0.4", "--foo")).toBe("--temp 0.4");
-  });
-});
-
-// Repeating a flag is legitimate llama-server usage (-ot / --override-kv /
-// --lora), so "the pair for this canon" is not unique and the helpers have to
-// be told WHICH one. Without the occurrence index every affordance on the
-// second pill silently acted on the first.
-describe("splice helpers address a specific occurrence of a repeated flag", () => {
-  const rep = "-ot ffn=CPU -ot attn=GPU --temp 0.4";
-
-  it("defaults to the first occurrence (unchanged contract)", () => {
-    expect(removeFlagFromText(rep, "-ot")).toBe("-ot attn=GPU --temp 0.4");
-    expect(spliceFlagValue(rep, "-ot", "x")).toBe("-ot x -ot attn=GPU --temp 0.4");
-  });
-
-  it("removes the second occurrence and leaves the first intact", () => {
-    expect(removeFlagFromText(rep, "-ot", 1)).toBe("-ot ffn=CPU --temp 0.4");
-  });
-
-  it("edits the second occurrence's value only", () => {
-    expect(spliceFlagValue(rep, "-ot", "attn=CPU", 1))
-      .toBe("-ot ffn=CPU -ot attn=CPU --temp 0.4");
-  });
-
-  it("counts occurrences across mixed spellings via canonFlag", () => {
-    const mixed = "-b 512 --batch-size 2048";
-    expect(spliceFlagValue(mixed, "--batch-size", "1024", 1)).toBe("-b 512 --batch-size 1024");
-    expect(removeFlagFromText(mixed, "--batch-size", 1)).toBe("-b 512");
-  });
-
-  it("counts a bare repetition as its own occurrence", () => {
-    // `--temp --temp 0.5`: the first carries no value (the next token is a
-    // flag), so occurrence 0 is the bare one and occurrence 1 is the valued one.
-    const bare = "--temp --temp 0.5";
-    expect(removeFlagFromText(bare, "--temp", 0)).toBe("--temp 0.5");
-    expect(spliceFlagValue(bare, "--temp", "0.9", 1)).toBe("--temp --temp 0.9");
-    // Occurrence 0 has no value token to replace — still a documented no-op.
-    expect(spliceFlagValue(bare, "--temp", "0.9", 0)).toBe(bare);
-  });
-
-  it("an out-of-range occurrence is a no-op, never a wrong-pair edit", () => {
-    expect(removeFlagFromText(rep, "-ot", 5)).toBe(rep);
-    expect(spliceFlagValue(rep, "-ot", "x", 5)).toBe(rep);
   });
 });
 
@@ -225,6 +121,33 @@ describe('findSlotHardwareFlags', () => {
   })
 })
 
+describe('findModelFactFlags (ADR-0029: the model owns the chat template and projector)', () => {
+  it('every entry in MODEL_FACT_FLAGS is independently detected', () => {
+    for (const f of MODEL_FACT_FLAGS) {
+      expect(findModelFactFlags(`${f} x`)).toContain(f)
+    }
+  })
+  it('flags --jinja, --chat-template(-file) and the mmproj family', () => {
+    expect(
+      findModelFactFlags('-fa on --jinja --chat-template chatml --mmproj m.gguf --no-mmproj'),
+    ).toEqual(['--jinja', '--chat-template', '--mmproj', '--no-mmproj'])
+  })
+  it('flags --spec-draft-device', () => {
+    expect(findModelFactFlags('--spec-draft-device ROCm0')).toEqual(['--spec-draft-device'])
+  })
+  it('flags --reasoning-format none but not other formats', () => {
+    expect(findModelFactFlags('--reasoning-format none')).toEqual(['--reasoning-format none'])
+    expect(findModelFactFlags('--reasoning-format=none')).toEqual(['--reasoning-format=none'])
+    expect(findModelFactFlags('--reasoning-format deepseek')).toEqual([])
+  })
+  it('matches the --flag=value spelling on the part before the =', () => {
+    expect(findModelFactFlags('--chat-template-file=/x/y.jinja')).toEqual(['--chat-template-file'])
+  })
+  it('clean tuning text has no offenders', () => {
+    expect(findModelFactFlags('-fa on -ctk q8_0 -ctv q8_0 --no-mmap')).toEqual([])
+  })
+})
+
 describe('diffFlags', () => {
   it('identical text (modulo order) is unchanged, not diverged', () => {
     const d = diffFlags('-fa on -b 2048', '-b 2048 -fa on')
@@ -285,22 +208,4 @@ describe('flagsEquivalent', () => {
   })
 })
 
-describe('highlightSegments', () => {
-  it('classifies flag tokens vs value tokens vs whitespace', () => {
-    const segs = highlightSegments('-fa on')
-    expect(segs.map((s) => [s.text, s.kind])).toEqual([
-      ['-fa', 'flag'],
-      [' ', 'space'],
-      ['on', 'value'],
-    ])
-  })
-  it('a negative-number value is classified as a value, not a flag', () => {
-    const segs = highlightSegments('-ngl -1')
-    expect(segs.find((s) => s.text === '-1')?.kind).toBe('value')
-  })
-  it('round-trips the original text when segments are concatenated', () => {
-    const text = '  -fa  on\t--cache-type-k q8_0  '
-    const segs = highlightSegments(text)
-    expect(segs.map((s) => s.text).join('')).toBe(text)
-  })
-})
+

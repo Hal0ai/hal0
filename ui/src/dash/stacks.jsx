@@ -28,11 +28,10 @@ import { useProfiles } from '@/api/hooks/useProfiles'
 import { useSlots } from '@/api/hooks/useSlots'
 import { useSystemInfo } from '@/api/hooks/useRuntimes'
 import { useMetaEnums } from '@/api/hooks/useMeta'
-import { deviceClassForToken, profileDeviceClass } from '@/lib/deviceMeta'
-import { isMtpEligibleModel } from '@/lib/normalizeApiModel'
 import { api } from '@/api/client'
 import { ENDPOINTS } from '@/api/endpoints'
 import { slotIndicatorFromPhase } from './slot-status.js'
+import { profileFitsSlot } from './profile-apply-preview.js'
 
 // Device hue + label map for the editor selectors — built from meta.devices
 // (GET /api/meta/enums via useMetaEnums, static fallback when the endpoint is
@@ -58,13 +57,12 @@ function buildDeviceMeta(enums) {
 
 // `NAME_RE` (slug regex) and `toast` are shared globals from primitives.jsx.
 
-// mtp defaults to null = AUTO: MTP is derived from model-eligibility × profile
-// opt-in on apply, so a row carries an explicit boolean only when the user
-// forces it — no stale `mtp:false` frozen onto every row.
-// spec-hw-slot-ownership §2: a slot owns its hardware — device + BINARY (runner
-// image ref) live on the slot. `profile` stays as a device-agnostic tune
-// template (§1). `binary` empty = HW-gated default derived from `device`.
-const BLANK_SLOT = { slot: '', model: '', device: 'gpu-rocm', binary: '', profile: '', mtp: null, capabilities: [] };
+// ADR-0029: a stack row is placement + which model + which profile. The tune
+// (MTP, vision, thinking, extra args) lives on the profile, so a row carries
+// none of it. The row schema (config/schema.py StackSlotEntry, extra=forbid)
+// is slot, profile, model, device, provider and capabilities — nothing else,
+// so a `binary` or any tuning key on a row is a 422.
+const BLANK_SLOT = { slot: '', model: '', device: 'gpu-rocm', provider: '', profile: '', capabilities: [] };
 const BLANK = { name: '', description: '', icon: '', tags: '', slots: [{ ...BLANK_SLOT }] };
 
 // Live-slot → dot class, derived from the SHARED slot-status classifier
@@ -491,9 +489,8 @@ function fromStack(s) {
       slot: e.slot || e.name || '',
       model: e.model || '',
       device: e.device || 'gpu-rocm',
-      binary: e.binary || '',
+      provider: e.provider || '', // preserved on edit; no control sets it
       profile: e.profile || '',
-      mtp: e.mtp ?? null, // preserve Auto (null) vs explicit on/off
       capabilities: e.capabilities || [],
     })),
   };
@@ -503,7 +500,7 @@ function fromStack(s) {
 // shared FormRow from primitives.jsx. Named StackDrawer (not Drawer) to avoid
 // shadowing the primitives.jsx Drawer global. Validation rules (slug/slot) and
 // the submit body are preserved verbatim.
-function StackDrawer({ mode, source, existing = [], onClose, onSaved }) {
+export function StackDrawer({ mode, source, existing = [], onClose, onSaved }) {
   const isEdit = mode === 'edit';
   const models = useModels().data || [];
   const profiles = useProfiles().data || [];
@@ -511,9 +508,8 @@ function StackDrawer({ mode, source, existing = [], onClose, onSaved }) {
   const enums = useMetaEnums();
   const deviceMeta = useMemo(() => buildDeviceMeta(enums), [enums]);
   const deviceIds = Object.keys(deviceMeta);
-  // BINARY (runner image ref) options — RUNNER_IMAGES keys via system-info.
+  // Runner catalogue (system-info), for the profile fit filter below.
   const runnerBackends = useSystemInfo().data?.backends ?? {};
-  const binaryKeys = Object.keys(runnerBackends);
 
   const create = useStackCreate();
   const update = useStackUpdate();
@@ -561,9 +557,8 @@ function StackDrawer({ mode, source, existing = [], onClose, onSaved }) {
         slot: s.slot.trim(),
         model: s.model || null,
         device: s.device || null,
-        binary: s.binary || null,
+        provider: s.provider || null,
         profile: s.profile || null,
-        mtp: s.mtp,
         capabilities: s.capabilities || [],
       })),
     };
@@ -637,30 +632,6 @@ function StackDrawer({ mode, source, existing = [], onClose, onSaved }) {
           {v.slots.map((s, i) => {
             const isNew = !!s.slot && !liveSlots.some(ls => ls.name === s.slot);
             const dm = deviceMeta[s.device];
-            // Profile compatibility for this row's device: match the
-            // profile's device_class (explicit, or gpu inferred from its
-            // rocm/vulkan backend — same rule as profiles.jsx backendOf)
-            // against the picked device's class. Unknown class on either
-            // side never filters. Incompatible profiles stay listed as a
-            // disabled escape hatch (and the current pick is never trapped).
-            const rowClass = dm?.device_class ?? deviceClassForToken(s.device, enums);
-            const compatProfiles = [];
-            const incompatProfiles = [];
-            for (const p of profiles) {
-              const pc = profileDeviceClass(p);
-              (!pc || !rowClass || pc === rowClass ? compatProfiles : incompatProfiles).push(p);
-            }
-            // MTP is DERIVED (model-eligibility × profile opt-in) and defaults
-            // to Auto — no stale boolean per row. Surface the tri-state control
-            // whenever EITHER side is MTP-relevant (eligible model OR an
-            // MTP-opting profile) or an explicit override is persisted — the
-            // drawer's always-show rationale, bounded so rows where MTP is
-            // meaningless stay compact.
-            const rowModel = models.find(m => m.id === s.model);
-            // Same eligibility rule as the server: `mtp` tag OR MTP name marker.
-            const modelEligible = isMtpEligibleModel(rowModel);
-            const profileOptsIn = !!profiles.find(p => p.name === s.profile)?.mtp;
-            const showMtp = modelEligible || profileOptsIn || s.mtp != null;
             return (
               <div className="st-slot-card" key={i}>
                 <div className="st-slot-head">
@@ -701,56 +672,15 @@ function StackDrawer({ mode, source, existing = [], onClose, onSaved }) {
                       </span>
                     )}
                   </label>
-                  {/* BINARY — the runner image ref (spec-hw-slot-ownership §2).
-                      Empty = HW-gated default derived from device. */}
-                  <label className="st-fld">
-                    <span className="st-fld-lbl">Binary</span>
-                    <select className="pf-input mono" value={s.binary || ''}
-                      onChange={e => setSlot(i, 'binary', e.target.value)} data-testid={`st-slot-binary-${i}`}>
-                      <option value="">— default (from device) —</option>
-                      {s.binary && !binaryKeys.includes(s.binary) && (
-                        <option value={s.binary}>{s.binary}</option>
-                      )}
-                      {binaryKeys.map(k => (
-                        <option key={k} value={k}>
-                          {k}{runnerBackends[k]?.backend ? ` · ${runnerBackends[k].backend}` : ''}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
                   <label className="st-fld">
                     <span className="st-fld-lbl">Profile</span>
                     <select className="pf-input mono" value={s.profile} onChange={e => setSlot(i, 'profile', e.target.value)} data-testid={`st-slot-profile-${i}`}>
                       <option value="">— profile —</option>
-                      {compatProfiles.map(p => <option key={p.name} value={p.name}>{p.name}</option>)}
-                      {incompatProfiles.length > 0 && (
-                        <optgroup label={`— other device class${rowClass ? ` (not ${rowClass})` : ''} —`}>
-                          {incompatProfiles.map(p => (
-                            /* escape hatch: incompatible profiles are listed but
-                               disabled; the row's CURRENT pick stays enabled so a
-                               pre-existing binding is never trapped. */
-                            <option key={p.name} value={p.name} disabled={p.name !== s.profile}>
-                              {p.name}{profileDeviceClass(p) ? ` · ${profileDeviceClass(p)}` : ''}
-                            </option>
-                          ))}
-                        </optgroup>
-                      )}
+                      {profiles
+                        .filter(p => p.name === s.profile || profileFitsSlot(p, { type: liveSlots.find(ls => ls.name === s.slot)?.type, device: s.device }, runnerBackends))
+                        .map(p => <option key={p.name} value={p.name}>{p.name}</option>)}
                     </select>
                   </label>
-                  {showMtp && (
-                    <div className="st-fld st-fld-mtp" data-testid={`st-slot-mtp-${i}`}>
-                      <span className="st-fld-lbl">Speculative decode (MTP)</span>
-                      <MtpControl
-                        value={s.mtp ?? null}
-                        autoActive={modelEligible && profileOptsIn}
-                        inactiveReason={!modelEligible && !profileOptsIn
-                          ? 'model has no MTP heads and profile doesn\'t enable MTP'
-                          : !modelEligible ? 'model has no MTP heads' : 'profile doesn\'t enable MTP'}
-                        forceOnRisky={!modelEligible}
-                        onChange={(next) => setSlot(i, 'mtp', next)}
-                      />
-                    </div>
-                  )}
                 </div>
               </div>
             );

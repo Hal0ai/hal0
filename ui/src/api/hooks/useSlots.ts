@@ -103,11 +103,24 @@ export interface Slot {
    *  slot_view so the slot list can offer "Set as default" on the slots that
    *  are NOT already the default. */
   default?: boolean
-  /** Configured context window ([model].context_size). Surfaced by
-   *  config_enrichment so the Inference engine pane can render "ctx
-   *  used / max". Absent when the slot configures no context window —
-   *  the UI shows an em-dash, never a fabricated number. */
-  ctx_max?: number
+  /** Effective context window the slot launches with (ADR-0029): the profile's
+   *  ctx_size, else the model's native window, else a fallback. One resolver
+   *  produces it for the launch path and this view. null/absent when no
+   *  window can be resolved (no model bound) — the UI shows an em-dash, never
+   *  a fabricated number. Replaces the removed `ctx_max`. */
+  ctx_effective?: number | null
+  /** Where `ctx_effective` came from: the slot's profile, the model's native
+   *  window, or the built-in fallback. */
+  ctx_source?: 'profile' | 'native' | 'fallback' | null
+  /** Present only on a slot the profile-centric conversion could not convert
+   *  (ADR-0029). The slot keeps launching its pre-conversion command
+   *  (`running_pre_conversion`) until the operator fixes it. `fix` is the
+   *  server's own instruction text. Absent otherwise. */
+  conversion_blocked?: {
+    reason: string
+    fix: string
+    running_pre_conversion: boolean
+  }
   /** Crash-loop breaker view (#2012), stamped into slot metadata by the
    *  manager whenever the breaker is non-closed and ABSENT otherwise —
    *  presence of `metadata.breaker` is the render signal. `retry_after_s`
@@ -214,9 +227,8 @@ export interface Slot {
    *  is the ONLY place `config_enrichment` runs (slot_view/__init__.py).
    *  `routes/health.py` builds the `/api/status` slot entries from
    *  `_slot_to_dict` alone, so a bare union entry carries none of the
-   *  TOML-derived config fields — no `ctx_max`, `chat_template`,
-   *  `llamacpp_args`, `n_gpu_layers`, `threads`, `binary`, `image_pin` or
-   *  `parallel`.
+   *  TOML-derived config fields — no `ctx_effective`, `ctx_source`,
+   *  `n_gpu_layers`, `threads`, `binary` or `image_pin`.
    *
    *  This is deliberately PROVENANCE, not a shape sniff: every one of those
    *  keys is legitimately absent when the slot simply has no override on
@@ -594,11 +606,11 @@ export function useSlotRename() {
 
 /**
  * Edit a slot. PUT /api/slots/{name}/config — body is a partial
- * SlotConfig (shallow merged into the existing TOML). Use
- * `useSlotDefaults` when the caller only needs to update keys inside the
- * `[model]` sub-table (ctx_size, temperature, …). Backend identity is
- * owned by the slot's profile — change it by editing the profile, not via a
- * dedicated switch (the legacy backend-switch surface was removed in WS-5).
+ * SlotConfig (shallow merged into the existing TOML). Placement only
+ * (device, hardware, binary, model, profile, lifecycle): the tune — context
+ * window, flags, chat template, thinking, vision, MTP — lives on the slot's
+ * profile, and the server rejects those keys here with
+ * `slot.tuning_key_denied` (ADR-0029).
  */
 export function useSlotEdit() {
   const qc = useQueryClient()
@@ -614,21 +626,6 @@ export function useSlotEdit() {
       invalidate()
       qc.invalidateQueries({ queryKey: ['slot-config', name] })
     },
-  })
-}
-
-/**
- * PATCH /api/slots/{name}/defaults — body keys merge into the slot's
- * `[model]` sub-table (ctx_size, temperature, …). Backend convenience
- * wrapper over PUT /config so the dashboard doesn't have to assemble a
- * nested envelope for what is conceptually a single field tweak.
- */
-export function useSlotDefaults() {
-  const invalidate = useSlotsInvalidator()
-  return useMutation({
-    mutationFn: ({ name, body }: { name: string; body: Record<string, unknown> }) =>
-      slotPatch(ENDPOINTS.slotDefaults(name), body),
-    onSuccess: invalidate,
   })
 }
 
@@ -677,20 +674,18 @@ export function useSlotConfig(name: string | null | undefined) {
 // ─── useSlotResolved ──────────────────────────────────────────────────────────
 
 /**
- * Source segment that supplied the surviving value for a flag.
- * The labels the argv assembler emits today (providers/container.py):
- * base | model_extra_args | slot_hardware | chat_template | mmproj.
- * There is no 'profile' segment — profile flags are copy-on-stamp into the
- * model tune. Kept open (`string`) — the badge renderer in slot-modals.jsx
+ * Source segment that supplied the surviving value for a flag (ADR-0029):
+ * base | model | profile | slot. `model` is the model's file facts (chat
+ * template, jinja, mmproj), `profile` is the slot profile's tune, `slot` is
+ * placement. Kept open (`string`) — the badge renderer in slot-modals.jsx
  * falls back to a generic style for labels it doesn't recognise, so a new
- * backend segment never breaks the drawer.
+ * segment never breaks the drawer.
  */
 export type ProvenanceSource =
   | 'base'
-  | 'model_extra_args'
-  | 'slot_hardware'
-  | 'chat_template'
-  | 'mmproj'
+  | 'model'
+  | 'profile'
+  | 'slot'
   | (string & {})
 
 /** Per-flag provenance entry returned by GET /api/slots/{name}/resolved. */

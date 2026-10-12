@@ -1,10 +1,9 @@
 // hal0 v3 dashboard — profiles hook (issue #658).
 //
-// Fetches /api/profiles — the list of named, device-agnostic tune templates
-// (bench-tuned flag text only) seeded by profiles.toml. spec-hw-slot-ownership
-// §3/§8: the `image` field is DELETED — a profile no longer carries a container
-// image (the escape hatch moved to `slot.image_pin`); image resolution is
-// RUNNER_IMAGES[slot.binary]. A profile is a device-agnostic tune template.
+// Fetches /api/profiles — the list of named tunes seeded by profiles.toml.
+// ADR-0029: a profile owns EVERY tune — llama-server flags, context window,
+// thinking default, vision, MTP and runner. The model carries file facts only,
+// the slot carries placement. `device_class`, `backend` and `quant` are gone.
 //
 // CRUD mutations (Phase C6): create (POST), update (PUT), delete (DELETE).
 // Seeds are immutable server-side (409 profiles.seed_immutable); the UI
@@ -14,17 +13,25 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { api, apiGet } from '../client'
 import { ENDPOINTS } from '../endpoints'
 
+export type ProfileVision = 'auto' | 'off'
+export type ProfileMtp = 'auto' | 'off'
+
 export interface Profile {
   name: string
   flags: string
-  mtp: boolean
+  /** Context window the profile asks for; null = defer to the model's native
+   *  window (ADR-0029). Server range 128..16777216. */
+  ctx_size?: number | null
+  /** Thinking default: null = auto (model decides), true = on, false = off. */
+  enable_thinking?: boolean | null
+  /** Vision: "auto" loads the model's mmproj when present, "off" never does. */
+  vision?: ProfileVision
+  /** MTP: "auto" uses the file's MTP heads when it has them, "off" never. */
+  mtp?: ProfileMtp
   resolved_flags: string
-  device_class?: string
   /** Emitted by the API: true when the profile is one of the immutable
    *  SEED_PROFILES (server rejects PUT/DELETE with 409 seed_immutable). */
   seed?: boolean
-  /** GPU runtime (rocm|vulkan); null for non-GPU profiles (#751). */
-  backend?: 'rocm' | 'vulkan' | null
   /** Optional runtime binding — a RUNNER_IMAGES key (D4). Saving a slot on
    *  this profile flips its `binary` (+ `device` for a single-lane runner)
    *  via the server's profile-wins reconcile. null/absent = flags-only tune,
@@ -41,8 +48,6 @@ export interface Profile {
   cloned_from?: string | null
   /** Human label shown as the card headline (e.g. "MoE agents"). */
   intent?: string
-  /** Weight quant shown as a card chip (e.g. "FP4", "Q4_K_M"). */
-  quant?: string
   /** Bench tok/s hero metric — null when un-benched (custom profiles). */
   tps?: number | null
   /** Real-time factor for synth slots (e.g. TTS) — null when n/a. */
@@ -54,17 +59,18 @@ export interface Profile {
 export interface ProfileBody {
   name: string
   flags?: string
-  mtp?: boolean
-  device_class?: string
-  backend?: 'rocm' | 'vulkan' | null
-  /** Optional runtime binding — a RUNNER_IMAGES key (D4); null clears it on
-   *  create (PUT leaves a stored runner unchanged when omitted/null — there
-   *  is no clear sentinel, mirroring backend/device_class). */
+  /** 128..16777216, or null to clear on PUT. Omit to leave alone. */
+  ctx_size?: number | null
+  enable_thinking?: boolean | null
+  vision?: ProfileVision
+  mtp?: ProfileMtp
+  /** Optional runtime binding — a RUNNER_IMAGES key (D4). On PUT, "" clears
+   *  it and omitting leaves it alone. */
   runner?: string | null
   cloned_from?: string | null
   intent?: string
-  quant?: string
 }
+
 
 /** Portable profile bundle (.hal0profile.json), mirrors StackEnvelope. */
 export interface ProfileEnvelope {

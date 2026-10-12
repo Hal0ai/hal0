@@ -64,20 +64,23 @@ test.describe('Settings v3 (/settings)', () => {
     await expect(page.locator('.settings-content h2').first()).toHaveText('Model Defaults')
   })
 
-  // #2105 regression: NGL is slot-owned hardware (spec-hw-slot-ownership §2)
-  // and is no longer a ModelDefaults field — the registry drops it on
-  // validation and model-drawer.jsx nulls it on every save. Model Defaults
-  // used to offer a "GPU layers" input anyway, so an operator could set a
-  // value that looked saved and was then silently discarded. The per-model
-  // panels must render (Context size proves that) with no NGL control.
-  test('Model Defaults does not offer the sunset GPU layers field', async ({ page }) => {
+  // #2105 + ADR-0029: Model Defaults edits FILE FACTS only. NGL is slot-owned
+  // hardware (spec-hw-slot-ownership §2) and the context window is a profile
+  // field, so neither "GPU layers" nor "Context size" may be offered here —
+  // an operator could otherwise set a value that looked saved and was then
+  // silently discarded (the server answers a tuning key under `defaults` with
+  // a 422). The per-model panels must render (Chat template proves that), with
+  // the native context window shown read-only.
+  test('Model Defaults offers file facts only — no GPU layers, no Context size', async ({ page }) => {
     await page.goto('/#settings')
     await page.locator('.settings-nav .nav-item', { hasText: 'Model Defaults' }).click()
     const content = page.locator('.settings-content')
-    // Context size proves the per-model panels rendered at all, so the
+    // Chat template proves the per-model panels rendered at all, so the
     // absence below is a real absence and not an empty page.
-    await expect(content.locator('.s-row .k span', { hasText: /^Context size$/ }).first()).toBeVisible()
+    await expect(content.locator('.s-row .k span', { hasText: /^Chat template$/ }).first()).toBeVisible()
+    await expect(content.locator('.s-row .k span', { hasText: /^Native context$/ }).first()).toBeVisible()
     await expect(content.locator('.s-row .k span', { hasText: /^GPU layers$/ })).toHaveCount(0)
+    await expect(content.locator('.s-row .k span', { hasText: /^Context size$/ })).toHaveCount(0)
   })
 
   test('Hardware & Runtimes section mounts', async ({ page }) => {

@@ -1,12 +1,14 @@
 /**
  * slot-drawer-profile-v3 — slot drawer profile/HW ownership spec.
  *
- * The 1.0 hw-slot-ownership pivot moved device/NGL/threads/binary onto the
- * slot HW grid and stripped profile FLAGS out of the launch path (they are
- * copy-on-stamp into the model tune). The slot's `profile` field itself is
- * still slot-owned — it picks the runtime family, device-class gating and the
- * MTP draft backend — so the drawer carries a `slot-profile` selector again
- * (i3). Its save/restart contract lives in slot-drawer-inline-model-v3.
+ * ADR-0029: the PROFILE is the slot's whole tune (flags, context window,
+ * thinking, vision, MTP, runtime). The slot carries placement — device, NGL,
+ * threads, binary — plus which model and which profile. The drawer therefore
+ * shows the effective context and its source read-only next to the Profile
+ * row, offers "Edit profile" (or "Duplicate & edit" for a read-only seed) next
+ * to the picker, and never layers model flags under the profile or announces a
+ * device switch driven by a profile (profiles no longer declare a backend).
+ * Its save/restart contract lives in slot-drawer-inline-model-v3.
  */
 import { test, expect, MOCK_DATA, type Page } from '../fixtures/apiMock'
 import { pickRichOption, richSelectOption } from '../fixtures/richSelect'
@@ -257,95 +259,147 @@ test.describe('C7 — slot-owned hardware grid; no drawer profile selector', () 
   // changed no argv. Template lives on the model drawer now.
 })
 
-// ─── #1636 — per-slot divergence: flag overlay + cross-device transition ────
-//
-// Option (a): a slot profile that DIFFERS from the model's stamped provenance
-// (defaults.profile) overlays its flags on the model tune at launch — the
-// drawer surfaces that divergence. Option (b): the picker offers profiles
-// declaring ANOTHER backend; selecting one flips the slot's device on save
-// (server-side _reconcile_device_profile).
-test.describe('slot profile divergence (#1636)', () => {
-  const CHAT = MOCK_DATA.slots.find(s => s.name === 'chat')!  // gpu-rocm · rocm-mtp
-
-  async function seedSlotsAndModels(page: Page, slots: any[], models: any[]) {
-    await page.addInitScript(({ slots, models }: { slots: any[]; models: any[] }) => {
-      let real: any
-      Object.defineProperty(window, 'HAL0_DATA', {
-        configurable: true, get() { return real },
-        set(v) { real = v; if (v && typeof v === 'object') { v.slots = slots; v.models = models } },
-      })
-    }, { slots, models })
+// ─── ADR-0029 — the profile row: effective context, edit, duplicate ───────
+test.describe('slot drawer profile row (ADR-0029)', () => {
+  const CHAT = {
+    ...(MOCK_DATA.slots.find(s => s.name === 'chat')!),
+    profile: 'my-tune',
+    ctx_effective: 65536,
+    ctx_source: 'profile',
   }
 
-  const CHAT_MODEL = (profile: string) => [{
-    id: 'qwen3.6-35b-a3b', name: 'qwen3.6-35b-a3b', capabilities: ['chat'],
-    defaults: { profile, extra_args: '-b 2048' },
-  }]
+  const MY_TUNE = {
+    name: 'my-tune', flags: '-fa on -b 2048', resolved_flags: '-fa on -b 2048',
+    ctx_size: 65536, enable_thinking: false, vision: 'auto', mtp: 'auto',
+    seed: false, cloned_from: null, intent: 'My tune', tps: null, rtf: null,
+    used_by: ['chat'], supported_slot_types: ['llm'],
+  }
+  const SEED = {
+    name: 'rocm', flags: '-fa on', resolved_flags: '-fa on',
+    ctx_size: 32768, enable_thinking: true, vision: 'auto', mtp: 'auto',
+    seed: true, cloned_from: null, intent: 'MoE agents', tps: null, rtf: null,
+    used_by: [], supported_slot_types: ['llm'],
+  }
 
-  test('divergent slot profile surfaces the flag-overlay hint', async ({ page }) => {
-    // Model provenance says "rocm"; the slot pins "rocm-mtp" → divergence.
-    await seedSlotsAndModels(page, [CHAT], CHAT_MODEL('rocm'))
+  async function mockProfiles(page: Page, rows: any[]) {
+    await page.route('**/api/profiles', (route) =>
+      route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(rows) }),
+    )
+  }
+
+  test('shows the effective context and its source, read-only — no ceiling input', async ({ page }) => {
+    await mockProfiles(page, [MY_TUNE, SEED])
+    await seedSlots(page, [CHAT])
     await page.goto('/#slots/chat')
     await expect(page.locator('.drawer')).toBeVisible()
-    await expect(page.getByTestId('slot-profile-diverges')).toBeVisible()
+
+    const hint = page.getByTestId('slot-ctx-effective')
+    await expect(hint).toContainText('65,536')
+    await expect(hint).toContainText('set by profile my-tune')
+    await expect(page.locator('.drawer .form-lbl > span', { hasText: /^Context \(ceiling\)$/ })).toHaveCount(0)
+    await expect(page.getByTestId('slot-launch-tune-note')).toContainText('profile')
   })
 
-  test('aligned slot profile shows no divergence hint', async ({ page }) => {
-    await seedSlotsAndModels(page, [CHAT], CHAT_MODEL('rocm-mtp'))
+  test('"Edit profile" opens the profiles drawer on the slot\'s profile', async ({ page }) => {
+    await mockProfiles(page, [MY_TUNE, SEED])
+    await seedSlots(page, [CHAT])
     await page.goto('/#slots/chat')
     await expect(page.locator('.drawer')).toBeVisible()
-    await expect(page.getByTestId('slot-profile-diverges')).toHaveCount(0)
+
+    const edit = page.getByTestId('slot-profile-edit')
+    await expect(edit).toContainText('Edit profile')
+    await edit.click()
+
+    await expect(page.locator('.pf-form-panel')).toBeVisible()
+    await expect(page.locator('.pf-form-title')).toHaveText('Edit · my-tune')
+    await expect(page.getByTestId('pf-input-ctx')).toHaveValue('65536')
+    await expect(page.getByTestId('pf-select-thinking')).toHaveValue('off')
+    await expect(page.getByTestId('pf-input-name')).toBeDisabled()
   })
 
-  test('cross-backend profile is offered and saving it PUTs the profile', async ({ page }) => {
-    const configPuts: any[] = []
-    await page.route('**/api/slots/chat/config', async (route) => {
-      if (route.request().method() === 'PUT') {
-        configPuts.push(JSON.parse(route.request().postData() || '{}'))
+  test('a seed offers "Duplicate & edit"; saving the fork points the slot at it', async ({ page }) => {
+    const posts: any[] = []
+    const puts: any[] = []
+    let created = false
+    await page.route('**/api/profiles', async (route) => {
+      if (route.request().method() === 'POST') {
+        posts.push(JSON.parse(route.request().postData() || '{}'))
+        created = true
+        return route.fulfill({ status: 201, contentType: 'application/json', body: '{}' })
       }
+      const fork = { ...SEED, name: 'rocm-custom', seed: false, cloned_from: 'rocm', used_by: [] }
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify(created ? [SEED, fork] : [SEED]),
+      })
+    })
+    await page.route('**/api/slots/chat/config', async (route) => {
+      if (route.request().method() === 'PUT') puts.push(JSON.parse(route.request().postData() || '{}'))
       await route.fulfill({ status: 200, contentType: 'application/json', body: '{}' })
     })
-    await page.route('**/api/slots/chat/defaults', (route) =>
-      route.fulfill({ status: 200, contentType: 'application/json', body: '{}' }),
-    )
     await page.route('**/api/slots/chat/restart', (route) =>
       route.fulfill({ status: 200, contentType: 'application/json', body: '{}' }),
     )
-
-    await seedSlotsAndModels(page, [CHAT], CHAT_MODEL('rocm-mtp'))
+    await seedSlots(page, [{ ...CHAT, profile: 'rocm', ctx_effective: 32768 }])
     await page.goto('/#slots/chat')
     await expect(page.locator('.drawer')).toBeVisible()
 
-    // The gpu-rocm slot is offered the vulkan-backend profile (was filtered
-    // out pre-#1636) under the "Other backend" disabled-marker row (RichSelect
-    // has no <optgroup> — Task 11c's profileRichOptions stands in a disabled
-    // marker option instead; see rich-select.jsx).
-    const sel = page.getByTestId('slot-profile')
-    await expect(await richSelectOption(sel, 'vulkan')).toHaveCount(1)
-    await pickRichOption(sel, 'vulkan')
+    const edit = page.getByTestId('slot-profile-edit')
+    await expect(edit).toContainText('Duplicate & edit')
+    await edit.click()
 
-    // …and selecting it announces the device switch.
-    await expect(page.getByTestId('slot-profile-device-switch')).toBeVisible()
-    await expect(page.getByTestId('slot-profile-device-switch')).toContainText('gpu-vulkan')
+    await expect(page.locator('.pf-form-title')).toHaveText('Edit a copy · rocm')
+    await expect(page.getByTestId('pf-input-name')).toHaveValue('rocm-custom')
+    await page.getByTestId('pf-input-ctx').fill('131072')
+    await page.getByTestId('pf-btn-submit').click()
+    await expect(page.locator('.pf-form-panel')).toHaveCount(0)
 
+    expect(posts).toHaveLength(1)
+    expect(posts[0]).toMatchObject({ name: 'rocm-custom', cloned_from: 'rocm', ctx_size: 131072 })
+
+    // The slot drawer now stages the fork as the slot's profile; Save applies it.
+    await expect(page.getByTestId('slot-profile')).toContainText('rocm-custom')
     await page.locator('.drawer button:has-text("Save")').click()
-    await expect.poll(() => configPuts.length).toBeGreaterThan(0)
-    expect(configPuts[0].profile).toBe('vulkan')
+    await expect.poll(() => puts.length).toBeGreaterThan(0)
+    expect(puts[0].profile).toBe('rocm-custom')
   })
 
-  test('same-backend profiles carry no device-switch hint', async ({ page }) => {
-    await seedSlotsAndModels(page, [CHAT], CHAT_MODEL('rocm-mtp'))
+  test('picking another profile previews the context / thinking / flag changes, with no divergence or device-switch UI', async ({ page }) => {
+    await mockProfiles(page, [MY_TUNE, SEED])
+    await seedSlots(page, [CHAT])
     await page.goto('/#slots/chat')
     await expect(page.locator('.drawer')).toBeVisible()
+
     await pickRichOption(page.getByTestId('slot-profile'), 'rocm')
+
+    const preview = page.getByTestId('slot-profile-preview')
+    await expect(preview).toBeVisible()
+    await expect(page.getByTestId('slot-profile-preview-context')).toContainText('64K')
+    await expect(page.getByTestId('slot-profile-preview-context')).toContainText('32K')
+    await expect(page.getByTestId('slot-profile-preview-thinking')).toContainText('off')
+    await expect(page.getByTestId('slot-profile-preview-thinking')).toContainText('on')
+    await expect(preview).toContainText('differ from the current profile')
+    await expect(preview).toContainText('slot restarts on Save')
+
+    // The model-flag overlay and the profile-driven device switch are gone.
+    await expect(page.getByTestId('slot-profile-diverges')).toHaveCount(0)
     await expect(page.getByTestId('slot-profile-device-switch')).toHaveCount(0)
+  })
+
+  test('the profile picker is flat — no "other backend" group', async ({ page }) => {
+    await mockProfiles(page, [MY_TUNE, SEED])
+    await seedSlots(page, [CHAT])
+    await page.goto('/#slots/chat')
+    await expect(page.locator('.drawer')).toBeVisible()
+    await richSelectOption(page.getByTestId('slot-profile'), 'rocm')
+    await expect(page.locator('[data-option-id="__crossfit_header__"]')).toHaveCount(0)
   })
 })
 
 // ─── Profile apply flow — runner-carrying profile (Task 10 D4) ────────────
 //
-// A profile can pin a `runner` (a RUNNER_IMAGES key, Task 3) independently of
-// its `backend`/`device_class` fit fields. Picking one in the drawer's
+// A profile can pin a `runner` (a RUNNER_IMAGES key, Task 3). Picking one in the drawer's
 // `slot-profile` select mirrors it through the SAME hw-cascade.js
 // runnerOptions/applyRunnerChoice the Hardware group's `slot-hw-runtime`
 // select uses (slot-modals.jsx's `profileRow` IIFE), so `slot-profile-preview`
@@ -365,15 +419,12 @@ test.describe('profile apply flow — runner-carrying profile applies a new runt
     metrics: { toks: 30, ttft: 260, ctx: 8192, kv: null, mem: 4.0 },
   }
 
-  // Carries no device_class/backend of its own (so it always fits the
-  // slot-type/device filters in `profileRow` regardless of the slot's
-  // current device) — isolates the `runner` cascade under test from the
-  // pre-existing #1636 cross-device profile-switch mechanism, which pivots
-  // on `backend`/`device_class` instead.
+  // A profile no longer declares a device_class/backend (ADR-0029), so the
+  // `runner` cascade under test is the only thing that can move the device.
   const RUNNER_PROFILE = {
     name: 'single-lane-apply',
-    image: 'ghcr.io/hal0ai/hal0-runner-qwen3tts:v1',
-    flags: '', mtp: false, resolved_flags: '', seed: false, used_by: [],
+    flags: '', ctx_size: null, enable_thinking: null, vision: 'auto', mtp: 'auto',
+    resolved_flags: '', seed: false, used_by: [],
     intent: 'Qwen3 TTS — single-lane ROCm runtime',
     supported_slot_types: ['llm'],
     runner: 'qwen3tts',

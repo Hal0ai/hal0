@@ -169,7 +169,7 @@ const M3_UPSTREAM = {
 }
 const MODELS = [M1, M2, M3_UPSTREAM]
 
-const SLOT = { name: 'chat', type: 'llm', model_id: '', ctx_max: 32768 }
+const SLOT = { name: 'chat', type: 'llm', model_id: '', ctx_effective: 32768 }
 // slotsUsingModel (model-usage.js) matches on `model`/`model_default`, not
 // `model_id` — the slot roster shape it was written against.
 const ALL_SLOTS = [
@@ -211,7 +211,7 @@ const P_CUR = {
 }
 const P_Q3 = {
   name: 'brainy',
-  flags: '--temp 0.2 --top-p 0.9 --jinja',
+  flags: '--temp 0.2 --top-p 0.9',
   runner: 'qwen3tts',
   intent: 'low-temp reasoning tune',
   supported_slot_types: ['llm'],
@@ -266,7 +266,7 @@ function mountCards(slots: Record<string, unknown>[]) {
       busyName={null}
       handlers={handlers}
       loading={false}
-      modelRows={() => ({ id: 'm1', longName: 'Qwen3.6-8B', defaults: { extra_args: '' } })}
+      modelRows={() => ({ id: 'm1', longName: 'Qwen3.6-8B', defaults: {} })}
     />
   )
   const mounted = mount(el())
@@ -474,9 +474,9 @@ describe('card profile picker + apply confirm (card-dropdowns Task 2)', () => {
     // lane → a single-lane ROCm runtime moves this Vulkan slot's lane.
     expect(text).toContain('Vulkan')
     expect(text).toContain('ROCm')
-    // flags → the 3 pairs in brainy's tune the slot does not already launch
-    // with (its current tune is rocm's `-fa auto`).
-    expect(text).toContain('replaces 3 flags')
+    // flags → the profile IS the tune (ADR-0029): brainy adds 2 pairs and
+    // drops rocm's `-fa auto`, so 3 flags differ from the current profile.
+    expect(text).toContain('3 flags differ')
     // …and the lifecycle line for a RUNNING slot.
     expect(text).toContain('restarts')
     // nothing has been written yet.
@@ -567,5 +567,32 @@ describe('card profile picker + apply confirm (card-dropdowns Task 2)', () => {
     expect(
       openListbox(host, 'primary').querySelector('[data-option-id=""]')!.getAttribute('aria-selected'),
     ).toBe('true')
+  })
+})
+
+describe('conversion-blocked badge on the card (ADR-0029)', () => {
+  const BLOCKED = {
+    ...PROFILE_SLOT,
+    conversion_blocked: {
+      reason: 'slot file has an unparsable [model] table',
+      fix: 'run `hal0 profile migrate` to see why',
+      running_pre_conversion: true,
+    },
+  }
+
+  it('shows the badge with the reason, the pre-conversion note and the fix in its tooltip', () => {
+    const { host } = mountCards([BLOCKED])
+    const chip = q(host, 'slot-conversion-blocked-primary')!
+    expect(chip).not.toBeNull()
+    expect(chip.textContent).toBe('Conversion blocked')
+    const tip = chip.getAttribute('title') || ''
+    expect(tip).toContain('unparsable [model] table')
+    expect(tip).toContain('Still running its pre-conversion tune')
+    expect(tip).toContain('hal0 profile migrate')
+  })
+
+  it('shows no badge on an ordinary slot', () => {
+    const { host } = mountCards([PROFILE_SLOT])
+    expect(q(host, 'slot-conversion-blocked-primary')).toBeNull()
   })
 })

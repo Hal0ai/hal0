@@ -66,9 +66,6 @@ async function captureConfig(page: Page) {
     if (route.request().method() === 'PUT') puts.push(route.request().postDataJSON())
     await route.fulfill({ status: 200, contentType: 'application/json', body: '{}' })
   })
-  await page.route('**/api/slots/npu/defaults', (route) =>
-    route.fulfill({ status: 200, contentType: 'application/json', body: '{}' }),
-  )
   await page.route('**/api/slots/npu/restart', (route) =>
     route.fulfill({ status: 202, contentType: 'application/json', body: '{}' }),
   )
