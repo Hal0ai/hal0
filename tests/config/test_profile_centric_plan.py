@@ -462,6 +462,24 @@ def test_blocked_profile_no_slot_uses_is_reported() -> None:
     assert any(line.startswith("profile orphan: BLOCKED") for line in plan.lines())
 
 
+def test_old_shape_profile_with_nothing_to_report_is_still_rewritten() -> None:
+    """``mtp = false`` / ``quant = ""`` say nothing, but the entry must reach
+    the new shape or the new loader refuses it."""
+    _write(
+        paths.profiles_toml(),
+        {"profile": {"quiet": {"flags": "-fa auto -b 64", "mtp": False, "quant": ""}}},
+    )
+    _write(
+        paths.stacks_toml(),
+        {"stack": {"st": {"slots": [], "profiles": {"emb": {"flags": "-b 2", "mtp": False}}}}},
+    )
+    plan = pc.plan_conversion()
+    assert plan.changed
+    assert plan.profile_rewrites["quiet"] == ["rewritten in the new shape"]
+    (st,) = plan.stacks
+    assert st.profile_rewrites["emb"] == ["rewritten in the new shape"]
+
+
 def test_stack_row_naming_a_missing_profile_is_a_warning_not_a_change() -> None:
     """Broken before and after with nothing to write: a rerun plans nothing."""
     _write(

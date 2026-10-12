@@ -794,7 +794,14 @@ class _Planner:
 
     # -- profiles --------------------------------------------------------
 
-    def _place(self, name: str, conv: ProfileConversion, *, new: bool) -> str:
+    def _place(
+        self,
+        name: str,
+        conv: ProfileConversion,
+        *,
+        new: bool,
+        stored: Mapping[str, Any] | None = None,
+    ) -> str:
         """Put a converted custom/demoted profile in the new catalog.
 
         A name a target seed now owns is kept only when the tune is the
@@ -822,8 +829,11 @@ class _Planner:
         self.catalog[name] = content
         if new:
             self.plan.profiles[name] = content
-        elif conv.notes:
-            self.plan.profile_rewrites[name] = conv.notes
+        elif conv.notes or (stored is not None and dict(stored) != content):
+            # Any change is a rewrite, even one with nothing to say (a boolean
+            # ``mtp = false`` or an empty ``quant``): the stored entry must
+            # reach the new shape.
+            self.plan.profile_rewrites[name] = conv.notes or ["rewritten in the new shape"]
         return name
 
     def _free_name(self, name: str, suffix: str) -> str:
@@ -848,7 +858,7 @@ class _Planner:
             resolved = self.old.resolve(name)
             assert resolved is not None
             conv = convert_profile(self.old.custom[name], frozen.runtime_family(resolved))
-            self.name_map[name] = self._place(name, conv, new=False)
+            self.name_map[name] = self._place(name, conv, new=False, stored=self.old.custom[name])
         raw = self.inputs.profiles_raw or {}
         markers = [m for m in ("legacy_seeds_migrated", "legacy_seeds_adopted") if m in raw]
         if markers:
@@ -1340,8 +1350,8 @@ class _Planner:
                 conv = convert_profile(entry, frozen.LLAMA)
                 if conv.errors:
                     st.errors.append(f"embedded profile {pname!r}: " + "; ".join(conv.errors))
-                if conv.notes:
-                    st.profile_rewrites[str(pname)] = conv.notes
+                if conv.notes or _tidy(conv.content) != dict(entry):
+                    st.profile_rewrites[str(pname)] = conv.notes or ["rewritten in the new shape"]
             rows = stack.get("slots") if isinstance(stack.get("slots"), list) else []
             for row in rows:
                 if not isinstance(row, Mapping):
