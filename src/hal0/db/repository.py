@@ -93,7 +93,16 @@ MODEL_COLUMNS: tuple[str, ...] = (
 #: ModelDefaults (file facts) columns on the `model` row. ``defaults``
 #: reconstructs iff at least one is non-NULL. ``mtp``/``jinja`` are tri-state
 #: (NULL/0/1 -> None/False/True). The tuning columns this row used to carry
-#: moved to profiles (ADR-0029; SQL migration 012).
+#: moved to profiles (ADR-0029; SQL migration 012 copies them to a holding
+#: table for the conversion).
+#
+# HAL0-SUNSET: v1.7.0 — the table still has the tuning columns (profile,
+# extra_args, n_gpu_layers, context_size, rope_freq_base, preferred_runner)
+# and ``extra`` may still hold ``_enable_thinking``/``_vision``. Nothing here
+# reads or writes them; they stay so a rollback to a release before ADR-0029
+# finds the schema it expects. Drop them with a new migration once the
+# upgrade floor is past the release that shipped migration 012.
+_RETIRED_TUNING_EXTRA_KEYS: tuple[str, ...] = ("_enable_thinking", "_vision")
 _DEFAULTS_COLUMNS: tuple[str, ...] = (
     "chat_template",
     "mtp",
@@ -379,6 +388,8 @@ def row_to_model(row: sqlite3.Row, *, backends: list[str] | None = None) -> Mode
     provider = raw_provider if isinstance(raw_provider, str) else None
     default = bool(metadata.pop(_DEFAULT_EXTRA_KEY, False))
     raw_tokenizer_repo = metadata.pop(_TOKENIZER_REPO_EXTRA_KEY, None)
+    for key in _RETIRED_TUNING_EXTRA_KEYS:
+        metadata.pop(key, None)
 
     defaults_kwargs: dict[str, Any] = {col: row[col] for col in _DEFAULTS_COLUMNS}
     if isinstance(raw_tokenizer_repo, str) and raw_tokenizer_repo:

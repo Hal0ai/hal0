@@ -117,37 +117,18 @@ class TestPackagedRegistryMigration:
             migrate(conn)
             assert migrate(conn) == []
 
-    def test_012_moves_model_tuning_columns_off_the_model_table(self, tmp_path: Path) -> None:
-        """ADR-0029: the model row holds file facts only. After the full chain
-        the tuning columns are gone from ``model`` and the holding table
-        exists for the profile-centric conversion."""
-        with connect(tmp_path / "t.db") as conn:
-            applied = migrate(conn)
-            assert 12 in applied
-            cols = {row[1] for row in conn.execute("PRAGMA table_info(model)")}
-            for gone in (
-                "profile",
-                "extra_args",
-                "n_gpu_layers",
-                "context_size",
-                "rope_freq_base",
-                "preferred_runner",
-            ):
-                assert gone not in cols, gone
-            # The facts stay.
-            assert {"path", "chat_template", "mtp", "jinja", "mmproj"} <= cols
-            tables = {
-                row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
-            }
-            assert "legacy_model_tuning" in tables
-            assert migrate(conn) == []
+    _TUNING_COLUMNS = (
+        "profile",
+        "extra_args",
+        "n_gpu_layers",
+        "context_size",
+        "rope_freq_base",
+        "preferred_runner",
+    )
 
-    def test_012_holds_existing_tuning_for_the_conversion(self, tmp_path: Path) -> None:
-        """A row carrying tuning before 012 lands verbatim in
-        ``legacy_model_tuning`` (including the ``_enable_thinking`` / ``_vision``
-        keys of ``extra``, which are removed from the blob); a row with no
-        tuning gets no holding row."""
-        import json
+    @staticmethod
+    def _pre_012(tmp_path: Path) -> Path:
+        """The packaged migrations up to 011, so a test can seed old rows."""
         import shutil
 
         import hal0.db.migrations as packaged
@@ -157,15 +138,40 @@ class TestPackagedRegistryMigration:
         for sql in Path(packaged.__file__).parent.glob("*.sql"):
             if int(sql.name[:3]) < 12:
                 shutil.copy(sql, pre)
+        return pre
 
+    def test_012_keeps_the_tuning_columns_for_a_rollback(self, tmp_path: Path) -> None:
+        """ADR-0029: 012 COPIES the tuning into ``legacy_model_tuning`` and
+        keeps the old columns, so a rollback to the previous release finds the
+        schema it expects. A later release drops them."""
         with connect(tmp_path / "t.db") as conn:
-            migrate(conn, pre)
+            applied = migrate(conn)
+            assert 12 in applied
+            cols = {row[1] for row in conn.execute("PRAGMA table_info(model)")}
+            assert set(self._TUNING_COLUMNS) <= cols
+            assert {"path", "chat_template", "mtp", "jinja", "mmproj"} <= cols
+            tables = {
+                row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+            }
+            assert "legacy_model_tuning" in tables
+            assert migrate(conn) == []
+
+    def test_012_copies_existing_tuning_into_the_holding_table(self, tmp_path: Path) -> None:
+        """A row carrying tuning before 012 is copied verbatim into
+        ``legacy_model_tuning`` (including the ``_enable_thinking`` /
+        ``_vision`` keys of ``extra``); the model row itself is left as it
+        was; a row with no tuning gets no holding row."""
+        import json
+
+        extra = {"_enable_thinking": True, "_vision": False, "keep": 1}
+        with connect(tmp_path / "t.db") as conn:
+            migrate(conn, self._pre_012(tmp_path))
             conn.execute(
                 "INSERT INTO model (id, path, profile, extra_args, n_gpu_layers, context_size,"
                 " rope_freq_base, preferred_runner, extra) VALUES"
                 " ('tuned', '/m/t.gguf', 'agent', '-ctk q8_0', 99, 65536, 1000000.0,"
                 " 'standard', ?)",
-                (json.dumps({"_enable_thinking": True, "_vision": False, "keep": 1}),),
+                (json.dumps(extra),),
             )
             conn.execute("INSERT INTO model (id, path) VALUES ('plain', '/m/p.gguf')")
 
@@ -182,30 +188,53 @@ class TestPackagedRegistryMigration:
             assert row["preferred_runner"] == "standard"
             assert row["enable_thinking"] == 1
             assert row["vision"] == 0
-            extra = conn.execute("SELECT extra FROM model WHERE id='tuned'").fetchone()[0]
-            assert json.loads(extra) == {"keep": 1}
 
-    def test_registry_round_trips_after_012(self, tmp_path: Path) -> None:
-        """A Model adds + reads back through the SqliteModelRegistry with only
-        its file facts (``ModelDefaults`` = chat_template / tokenizer_repo /
-        mtp / jinja)."""
+            model = conn.execute("SELECT * FROM model WHERE id='tuned'").fetchone()
+            assert model["profile"] == "agent"
+            assert model["context_size"] == 65536
+            assert json.loads(model["extra"]) == extra
+
+    def test_new_code_never_reads_the_old_tuning(self, tmp_path: Path) -> None:
+        """The registry reads only file facts: a row whose old tuning columns
+        and ``extra`` keys are still populated reads back with none of them,
+        and a fresh write leaves those columns empty."""
+        import json
+
         from hal0.registry.model import Model, ModelDefaults
         from hal0.registry.sqlite_store import SqliteModelRegistry
 
-        reg = SqliteModelRegistry(db_path=str(tmp_path / "reg.db"))
+        db = tmp_path / "reg.db"
+        reg = SqliteModelRegistry(db_path=str(db))
         reg.add(
             Model(
                 id="m1",
                 path="/models/m1.gguf",
                 defaults=ModelDefaults(chat_template="chatml", mtp=True, jinja=False),
+                metadata={"keep": 1},
             )
         )
+        with connect(db) as conn:
+            fresh = conn.execute("SELECT * FROM model WHERE id='m1'").fetchone()
+            for col in self._TUNING_COLUMNS:
+                assert fresh[col] is None, col
+            conn.execute(
+                "UPDATE model SET profile='agent', extra_args='-ctk q8_0', n_gpu_layers=99,"
+                " context_size=65536, rope_freq_base=1e6, preferred_runner='standard',"
+                " extra=? WHERE id='m1'",
+                (json.dumps({"keep": 1, "_enable_thinking": True, "_vision": False}),),
+            )
+
         got = reg.get("m1")
-        assert got.id == "m1"
         assert got.defaults is not None
-        assert got.defaults.chat_template == "chatml"
-        assert got.defaults.mtp is True
-        assert got.defaults.jinja is False
+        assert got.defaults.model_dump() == {
+            "chat_template": "chatml",
+            "tokenizer_repo": None,
+            "mtp": True,
+            "jinja": False,
+        }
+        assert "_enable_thinking" not in got.metadata
+        assert "_vision" not in got.metadata
+        assert got.metadata.get("keep") == 1
 
 
 class TestPackagedStoreMigration:

@@ -1,13 +1,16 @@
 -- 012_model_tuning_holding.sql  (schema version 12)
 --
 -- ADR-0029 (profile-centric config): a model row holds facts about its file
--- only; every tune lives on a profile. This moves the tuning columns (and the
--- two tuning keys of the `extra` JSON blob) off `model` into a holding table.
--- The profile-centric conversion (hal0.config.migrations.profile_centric)
--- reads the holding table to build each slot's profile and drops it once the
--- whole install has converted. Holding rather than dropping outright means
--- the order of "the database was opened" and "the conversion ran" can never
--- lose an operator's tuning.
+-- only; every tune lives on a profile. This copies the tuning columns (and the
+-- two tuning keys of the `extra` JSON blob) into a holding table. The
+-- profile-centric conversion (hal0.config.migrations.profile_centric) reads
+-- ONLY the holding table once this migration has run, builds each slot's
+-- profile from it, and drops it once the whole install has converted.
+--
+-- The `model` columns themselves are left in place and nothing new reads or
+-- writes them, so a rollback to a release before ADR-0029 still finds the
+-- schema it expects. A later release drops them with its own migration, once
+-- the upgrade floor is past the release that ships this one.
 
 CREATE TABLE legacy_model_tuning (
   id               TEXT PRIMARY KEY,
@@ -37,14 +40,3 @@ WHERE profile IS NOT NULL
    OR preferred_runner IS NOT NULL
    OR (json_valid(extra) AND json_extract(extra, '$._enable_thinking') IS NOT NULL)
    OR (json_valid(extra) AND json_extract(extra, '$._vision') IS NOT NULL);
-
-UPDATE model
-SET extra = json_remove(extra, '$._enable_thinking', '$._vision')
-WHERE json_valid(extra);
-
-ALTER TABLE model DROP COLUMN profile;
-ALTER TABLE model DROP COLUMN extra_args;
-ALTER TABLE model DROP COLUMN n_gpu_layers;
-ALTER TABLE model DROP COLUMN context_size;
-ALTER TABLE model DROP COLUMN rope_freq_base;
-ALTER TABLE model DROP COLUMN preferred_runner;
