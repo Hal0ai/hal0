@@ -64,11 +64,13 @@ from hal0.slots.reaper import is_pinned as reaper_is_pinned
 log = logging.getLogger(__name__)
 
 __all__ = [
+    "CONVERSION_FIX",
     "SlotMetricsView",
     "SlotView",
     "SlotViewAggregator",
     "config_enrichment",
     "container_enrichment",
+    "conversion_blocked",
     "image_status_for",
     "loaded_model_names_from_slots",
     "resolve_ctx_effective",
@@ -380,6 +382,38 @@ def config_enrichment(configs: list[dict[str, Any]]) -> dict[str, dict[str, Any]
 def _has_context_window(cfg: Any) -> bool:
     """llm / embedding / reranking slots (llama-server or FLM) have a window."""
     return str(cfg.get("type") or "llm") in ("llm", "embedding", "reranking")
+
+
+#: How an operator fixes a slot the profile-centric conversion blocked.
+CONVERSION_FIX = (
+    "run `hal0 profile migrate` to see why, edit the slot file, then run "
+    "`sudo -u hal0 hal0 profile migrate --apply`"
+)
+
+
+def conversion_blocked(cfg: Any) -> dict[str, Any] | None:
+    """``{"reason", "fix", "running_pre_conversion"}`` for a slot the
+    profile-centric conversion could not convert (ADR-0029), else ``None``.
+
+    ``running_pre_conversion`` says the slot still launches the command it ran
+    before the conversion (the conversion's pin), so it keeps working until
+    it is fixed.
+    """
+    try:
+        from hal0.config.schema import slot_tuning_keys
+        from hal0.providers.container import blocked_slot_pin
+
+        if not slot_tuning_keys(cfg):
+            return None
+        pin = blocked_slot_pin(cfg)
+    except Exception:
+        return None
+    reason = str(pin.get("reason") or "") if pin else ""
+    return {
+        "reason": reason or "this slot file still carries tuning keys (not converted)",
+        "fix": CONVERSION_FIX,
+        "running_pre_conversion": bool(pin and isinstance(pin.get("argv"), list)),
+    }
 
 
 def resolve_ctx_effective(cfg: Any, model_registry: Any) -> tuple[int | None, str | None]:
@@ -1021,6 +1055,10 @@ class SlotViewAggregator:
                 ctx, source = resolve_ctx_effective(cfg, self._registry)
                 payload["ctx_effective"] = ctx
                 payload["ctx_source"] = source
+            if isinstance(cfg, dict):
+                blocked = conversion_blocked(cfg)
+                if blocked is not None:
+                    payload["conversion_blocked"] = blocked
 
         # Per-slot resident memory (model weights + KV-cache estimate) so the
         # dashboard memory map (W4) attributes a real footprint per slot. Only

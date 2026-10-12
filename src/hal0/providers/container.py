@@ -1444,6 +1444,9 @@ def _has_tuning_keys(slot_cfg: Mapping[str, Any]) -> bool:
     return bool(slot_tuning_keys(slot_cfg))
 
 
+# HAL0-SUNSET: v1.7.0 — the blocked-slot pin (this function, _pinned_segments,
+# _placement_only and their launch/preview branches) goes with the
+# profile-centric conversion (config.migrations.profile_centric_apply).
 def blocked_slot_pin(slot_cfg: Mapping[str, Any]) -> dict[str, Any] | None:
     """The profile-centric conversion's record for a slot it blocked, while the
     slot file is still exactly the one it blocked (else ``None``).
@@ -1476,6 +1479,100 @@ def blocked_slot_pin(slot_cfg: Mapping[str, Any]) -> dict[str, Any] | None:
     if not isinstance(pin, dict) or pin.get("file") != current:
         return None
     return pin
+
+
+def _pinned_segments(
+    pin: Mapping[str, Any],
+    placement: Mapping[str, Any],
+    port: int,
+    model_path: str,
+    scalars: Mapping[str, Any],
+) -> list[tuple[str, list[str]]]:
+    """The launch segments for a slot the conversion blocked.
+
+    Only the recorded tune is taken from the ledger, and it is screened like a
+    profile (managed, hardware and model-fact flags refuse; the #2545 strip
+    applies). The base (host, port, model, alias), the model facts (template,
+    projector) and the placement are rebuilt from today's slot and model, so a
+    moved model file or an edited ledger can neither stale nor redirect the
+    launch. Raises ``slot.unconverted`` when the record is not a list of
+    strings.
+    """
+    from hal0.slots.argv import _split_pairs
+
+    argv = pin.get("argv")
+    if not isinstance(argv, list) or not all(isinstance(t, str) for t in argv):
+        raise UnprocessableEntity(
+            f"slot {placement.get('name')!r} was blocked by the profile-centric conversion and "
+            "its recorded pre-conversion launch is unreadable; fix the slot file, then run "
+            "`sudo -u hal0 hal0 profile migrate --apply`",
+            code="slot.unconverted",
+            details={"slot": str(placement.get("name") or ""), "blocked": pin.get("reason")},
+        )
+
+    def _value(pair: Any) -> str | None:
+        if pair.values:
+            return str(pair.values[0])
+        flag = str(pair.flag or "")
+        return flag.split("=", 1)[1] if "=" in flag else None
+
+    def _int(raw: str | None) -> int | None:
+        try:
+            return int(raw) if raw is not None else None
+        except ValueError:
+            return None
+
+    ctx = ngl = threads = None
+    jinja = template = projector = no_projector = draft = False
+    tune: list[str] = []
+    for pair in _split_pairs(list(argv)):
+        canon = pair.canon
+        if canon in ("--host", "--port", "--model", "--alias", "--device", "--metrics"):
+            continue  # rebuilt from today's slot and model
+        if canon == "--ctx-size":
+            ctx = _int(_value(pair))
+        elif canon == "--jinja":
+            jinja = True
+        elif canon in ("--chat-template", "--chat-template-file"):
+            template = True
+        elif canon == "--mmproj":
+            projector = True
+        elif canon in ("--no-mmproj", "--no-mmproj-auto"):
+            no_projector = True
+        elif canon == "--mmproj-auto":
+            continue
+        elif canon == "--n-gpu-layers":
+            ngl = _int(_value(pair))
+        elif canon == "--threads":
+            threads = _int(_value(pair))
+        elif canon == "--spec-draft-device":
+            draft = True
+        else:
+            tune += [str(pair.flag), *pair.values] if pair.flag else list(pair.values)
+
+    base = ["--host", "0.0.0.0", "--port", str(port)]
+    if model_path:
+        base += ["--model", model_path]
+    if scalars.get("model_alias"):
+        base += ["--alias", str(scalars["model_alias"])]
+    base += ["--ctx-size", str(ctx or scalars["context_size"])]
+    model: list[str] = ["--jinja"] if jinja else []
+    if template and scalars.get("chat_template_path"):
+        model += ["--chat-template-file", str(scalars["chat_template_path"])]
+    if projector and not no_projector and scalars.get("mmproj"):
+        model += ["--mmproj", str(scalars["mmproj"])]
+    slot: list[str] = []
+    slot_ngl = scalars.get("slot_n_gpu_layers")
+    if slot_ngl is not None or ngl is not None:
+        slot += ["-ngl", str(int(slot_ngl if slot_ngl is not None else ngl))]
+    slot_threads = scalars.get("slot_threads") or threads
+    if slot_threads:
+        slot += ["--threads", str(int(slot_threads))]
+    if scalars.get("slot_metrics", True):
+        slot += ["--metrics"]
+    if draft and scalars.get("backend"):
+        slot += ["--spec-draft-device", mtp_draft_device(scalars["backend"])]
+    return [("base", base), ("model", model), ("profile", tune), ("slot", slot)]
 
 
 def _placement_only(slot_cfg: Mapping[str, Any]) -> dict[str, Any]:
@@ -1703,13 +1800,14 @@ class ContainerProvider(Provider):
         # A slot the profile-centric conversion blocked keeps launching with
         # its pre-conversion argv while its file is unchanged (ADR-0029 §7).
         pin = blocked_slot_pin(slot_cfg) if _has_tuning_keys(slot_cfg) else None
-        pinned_argv = list(pin["argv"]) if pin and pin.get("argv") else None
-        if pinned_argv is not None:
+        if pin is not None and pin.get("argv") is None:
+            pin = None
+        if pin is not None:
             slot_cfg = _placement_only(slot_cfg)
             log.warning(
                 "slot.launch_pinned_pre_conversion slot=%s reason=%s",
                 slot_cfg.get("name"),
-                pin.get("reason") if pin else "",
+                pin.get("reason"),
             )
         profile = resolve_slot_profile(slot_cfg)
         # for_launch: this is the real container-spec build — side-effect logs
@@ -1764,8 +1862,9 @@ class ContainerProvider(Provider):
             draft_device=scalars["draft_device"],
             env=merged_env or None,
         )
-        if pinned_argv is not None:
-            return dataclasses.replace(plan, command=pinned_argv)
+        if pin is not None:
+            pinned = _pinned_segments(pin, slot_cfg, port, model_path, scalars)
+            return dataclasses.replace(plan, command=resolve_argv(pinned).argv)
         return plan
 
     # ── ContainerProvider-specific control plane ──────────────────────────────
@@ -2810,12 +2909,20 @@ def _resolve_slot_argv(
     would launch.
     """
     pin = blocked_slot_pin(slot_cfg) if _has_tuning_keys(slot_cfg) else None
-    if pin and pin.get("argv"):
-        # A slot the conversion blocked launches its pre-conversion argv.
-        placed = _resolve_preview_bundle(_placement_only(slot_cfg), model_path)
+    if pin is not None and pin.get("argv") is not None:
+        # A slot the conversion blocked launches its pre-conversion tune, on
+        # today's base and placement — exactly as container_spec builds it.
+        placement = _placement_only(slot_cfg)
+        placed = _resolve_preview_bundle(placement, model_path)
         if placed is None:
             return None
-        return str(placed[1]["image"]), resolve_argv([("base", list(pin["argv"]))])
+        info, sc = placed
+        port = int(placement.get("port") or placement.get("slot", {}).get("port") or 0)
+        try:
+            segments = _pinned_segments(pin, placement, port, str(info.get("path") or ""), sc)
+            return str(sc["image"]), resolve_argv(segments)
+        except Hal0Error:
+            return None
     resolved = _resolve_preview_bundle(slot_cfg, model_path)
     if resolved is None:
         return None
