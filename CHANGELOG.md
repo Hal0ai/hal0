@@ -273,8 +273,9 @@ applying. Add those subsections to a version's section to surface them; see
   name, before keeping it. A fork build (ROCmFPX and friends) renamed to a
   plain file name used to keep its slot through the migration and was then
   refused at launch; it is now unassigned with the same warning as a
-  name-detected one. A missing, unreadable or truncated file is never an
-  error: the name check still applies.
+  name-detected one. Every shard of a split model is read. A missing,
+  unreadable or truncated file is never an error: the name check still
+  applies.
 
 - The runner-image catalogue sync no longer leaves cancelled probe tasks
   pending when an unexpected error aborts it, which logged "Task was destroyed
