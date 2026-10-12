@@ -11,12 +11,10 @@ This first phase only PLANS. It writes nothing; ``hal0 profile migrate``
 prints the plan. The writer, the backup and the restore arrive with the launch
 path that reads the new shape, so no install can hold half of it.
 
-One switch decides what happens to inert values (slot ``[server].extra_args``,
-``parallel``, a context ceiling that never took effect, stack-row tuning):
-:data:`DEFAULT_INERT_POLICY`. ``"preserve_launch"`` (the default) keeps what
-launches and reports every inert value. ``"apply_intent"`` folds them into the
-generated profile instead, which changes those slots at their next restart.
-The policy is read in exactly one place, :func:`inert_additions`.
+Inert values (slot ``[server].extra_args``, ``parallel``, ``chat_template``, a
+context ceiling that never took effect, stack-row tuning, non-llama model
+``extra_args``) are never applied: the conversion preserves what launches
+and reports every one of them (operator decision, ADR-0029).
 
 Every rule is "old shape? convert : leave", so an install already in the new
 shape plans nothing.
@@ -38,77 +36,14 @@ from typing import Any, Literal
 from hal0.config.migrations import profile_centric_frozen as frozen
 from hal0.errors import Hal0Error
 
-# ── the inert-value switch ───────────────────────────────────────────────────
-
-InertPolicy = Literal["preserve_launch", "apply_intent"]
-
-#: ``preserve_launch``: what launches is preserved and inert values are only
-#: reported. ``apply_intent``: inert values are folded into the generated
-#: profile (changes those slots at their next restart).
-DEFAULT_INERT_POLICY: InertPolicy = "preserve_launch"
-INERT_POLICIES: tuple[InertPolicy, ...] = ("preserve_launch", "apply_intent")
-
 
 @dataclass(frozen=True)
 class InertValue:
-    """A configured value that does not reach the launch today."""
+    """A configured value that does not reach the launch today (reported, dropped)."""
 
     where: str
     key: str
     value: Any
-    applied: bool = False
-
-
-@dataclass(frozen=True)
-class InertAdditions:
-    """What the inert-value policy adds to one slot's generated profile."""
-
-    flags: tuple[str, ...] = ()
-    ctx_size: int | None = None
-    vision_off: bool = False
-    enable_thinking: bool | None = None
-
-
-def inert_additions(
-    policy: InertPolicy, inert: list[InertValue]
-) -> tuple[InertAdditions, list[InertValue]]:
-    """THE switch: turn inert values into profile content, or not.
-
-    Returns ``(additions, inert)`` where ``inert`` is the same list with
-    ``applied`` set on every value the policy used. Under ``preserve_launch``
-    nothing is added or applied. Under ``apply_intent`` free flag text is
-    appended last (so it wins), ``parallel`` becomes ``--parallel``, an
-    unhonoured ceiling becomes ``ctx_size``, and ``vision = false`` /
-    ``enable_thinking`` carry over. Nothing else reads the policy.
-    """
-    if policy not in INERT_POLICIES:
-        raise ValueError(f"unknown inert-value policy {policy!r}")
-    if policy == "preserve_launch":
-        return InertAdditions(), list(inert)
-    flags: list[str] = []
-    ctx: int | None = None
-    vision_off = False
-    thinking: bool | None = None
-    marked: list[InertValue] = []
-    for item in inert:
-        used = True
-        if item.key in ("extra_args", "server_extra_args") and str(item.value or "").strip():
-            tokens, _ = frozen._strip(
-                shlex.split(str(item.value)), frozen.MANAGED_FLAGS | frozen.HARDWARE_FLAGS
-            )
-            flags += tokens
-        elif item.key == "parallel" and item.value:
-            flags += ["--parallel", str(int(item.value))]
-        elif item.key == "context_size" and item.value:
-            ctx = int(item.value)
-        elif item.key == "vision" and item.value is False:
-            vision_off = True
-        elif item.key == "enable_thinking" and isinstance(item.value, bool):
-            thinking = item.value
-        else:
-            used = False
-        marked.append(InertValue(item.where, item.key, item.value, applied=used))
-    return InertAdditions(tuple(flags), ctx, vision_off, thinking), marked
 
 
 # ── plan data ────────────────────────────────────────────────────────────────
@@ -156,12 +91,10 @@ class StackRowPlan:
     slot: str
     drop_keys: list[str] = field(default_factory=list)
     inert: list[InertValue] = field(default_factory=list)
-    profile_after: str | None = None
 
 
 @dataclass
 class ConversionPlan:
-    policy: InertPolicy
     slots: list[SlotPlan] = field(default_factory=list)
     profiles: dict[str, dict[str, Any]] = field(default_factory=dict)
     profile_rewrites: dict[str, list[str]] = field(default_factory=dict)
@@ -185,7 +118,7 @@ class ConversionPlan:
 
     def lines(self) -> list[str]:
         """Human report, one line per finding."""
-        out = [f"policy for inert values: {self.policy}"]
+        out: list[str] = []
         for s in self.slots:
             if s.status == "unchanged":
                 out.append(f"slot {s.name} ({s.file}): unchanged, profile {s.profile_before!r}")
@@ -205,8 +138,7 @@ class ConversionPlan:
             for change in s.launch_changes:
                 out.append(f"  LAUNCH CHANGE at next restart: {change}")
             for item in s.inert:
-                verb = "applied" if item.applied else "inert today, not applied"
-                out.append(f"  {item.where} {item.key} = {item.value!r}: {verb}")
+                out.append(f"  {item.where} {item.key} = {item.value!r}: inert today, dropped")
             out.extend(f"  note: {n}" for n in s.notes)
         for name, content in self.profiles.items():
             out.append(f"new profile {name}: {json.dumps(content, sort_keys=True)}")
@@ -225,10 +157,7 @@ class ConversionPlan:
         for r in self.stacks:
             out.append(f"stack {r.stack} row {r.slot}: drop {', '.join(r.drop_keys)}")
             for item in r.inert:
-                verb = "applied" if item.applied else "inert today, not applied"
-                out.append(f"  {item.key} = {item.value!r}: {verb}")
-            if r.profile_after:
-                out.append(f"  profile -> {r.profile_after!r}")
+                out.append(f"  {item.key} = {item.value!r}: inert today, dropped")
         out.extend(f"warning: {w}" for w in self.warnings)
         if not self.changed:
             out.append("nothing to convert")
@@ -504,11 +433,10 @@ def _model_tuning(row: Mapping[str, Any] | None) -> dict[str, Any]:
 
 
 class _Planner:
-    def __init__(self, inputs: Inputs, policy: InertPolicy) -> None:
+    def __init__(self, inputs: Inputs) -> None:
         self.inputs = inputs
-        self.policy = policy
         self.catalog = frozen.Catalog(inputs.profiles_raw)
-        self.plan = ConversionPlan(policy=policy)
+        self.plan = ConversionPlan()
         self.bound: set[str] = set()
         # every profile name a generated one must not collide with
         self.taken: dict[str, Any] = {
@@ -733,13 +661,8 @@ class _Planner:
             vision_off = True
 
         self._note_unhonoured_ceiling(slot, launch, sp)
-        adds, sp.inert = inert_additions(self.policy, sp.inert)
-        tokens += list(adds.flags)
-        vision_off = vision_off or adds.vision_off
-        ctx = adds.ctx_size or launch.ctx
-        thinking = (
-            adds.enable_thinking if adds.enable_thinking is not None else launch.enable_thinking
-        )
+        ctx = launch.ctx
+        thinking = launch.enable_thinking
         target = {
             "flags": " ".join(shlex.quote(t) for t in tokens),
             "ctx_size": ctx if ctx != default_ctx(model) else None,
@@ -959,30 +882,15 @@ class _Planner:
                     for k in present
                     if row[k] not in (None, "") and not (k == "vision" and row[k] is False)
                 ]
-                adds, rp.inert = inert_additions(self.policy, items)
-                if adds.flags or adds.vision_off or adds.enable_thinking is not None:
-                    base = str(row.get("profile") or "chat")
-                    cloned = _clone_content(self.catalog.resolve(base))
-                    extra = " ".join(shlex.quote(t) for t in adds.flags)
-                    content = {
-                        **cloned,
-                        "flags": f"{cloned.get('flags', '')} {extra}".strip(),
-                        "vision": "off" if adds.vision_off else cloned.get("vision"),
-                        "enable_thinking": adds.enable_thinking,
-                        "cloned_from": base,
-                        "intent": f"Converted: stack {stack_name} row {rp.slot}",
-                    }
-                    rp.profile_after = self._generate(base, f"{stack_name}-{rp.slot}", content)
+                rp.inert = items
                 self.plan.stacks.append(rp)
 
 
 def plan_conversion(
     inputs: Inputs | None = None,
-    *,
-    policy: InertPolicy = DEFAULT_INERT_POLICY,
 ) -> ConversionPlan:
     """Plan the conversion of this install (or of ``inputs``). Writes nothing."""
-    planner = _Planner(inputs or read_inputs(), policy)
+    planner = _Planner(inputs or read_inputs())
     planner.plan_profile_rewrites()
     planner.plan_slots()
     planner.plan_models()
@@ -991,11 +899,7 @@ def plan_conversion(
 
 
 __all__ = [
-    "DEFAULT_INERT_POLICY",
-    "INERT_POLICIES",
     "ConversionPlan",
-    "InertAdditions",
-    "InertPolicy",
     "InertValue",
     "Inputs",
     "ModelPlan",
@@ -1005,7 +909,6 @@ __all__ = [
     "StackRowPlan",
     "default_ctx",
     "effective_map",
-    "inert_additions",
     "new_rule_view",
     "plan_conversion",
     "read_inputs",

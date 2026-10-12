@@ -237,7 +237,6 @@ def _by_name(plan: pc.ConversionPlan) -> dict[str, pc.SlotPlan]:
 def test_plan_preserves_what_launches(install: None) -> None:
     plan = pc.plan_conversion()
     slots = _by_name(plan)
-    assert plan.policy == "preserve_launch"
     assert not plan.blocked
 
     agent = slots["agent"]
@@ -246,9 +245,12 @@ def test_plan_preserves_what_launches(install: None) -> None:
     content = plan.profiles["thinking-big-chat"]
     assert content["ctx_size"] == 96000
     assert content["vision"] == "off"  # --no-mmproj beat --mmproj
-    assert "-ctk" not in content["flags"]  # inert, not applied
+    assert "-ctk" not in content["flags"]  # inert today: dropped, never applied
     assert "--jinja" not in content["flags"]
-    assert {(i.key, i.applied) for i in agent.inert} == {("extra_args", False), ("parallel", False)}
+    assert {(i.key, i.value) for i in agent.inert} == {
+        ("extra_args", "-ctk q8_0 -ctv q8_0"),
+        ("parallel", 1),
+    }
     assert {"parallel", "backend", "[model].context_size", "[server].extra_args"} <= set(
         agent.drop_keys
     )
@@ -289,37 +291,8 @@ def test_plan_preserves_what_launches(install: None) -> None:
     assert set(plan.profile_rewrites) >= {"thinking", "coding", "(profiles.toml)"}
     rows = {r.slot: r for r in plan.stacks}
     assert rows["agent"].drop_keys == ["vision", "mtp"]
-    assert [(i.key, i.applied) for i in rows["brain"].inert] == [("server_extra_args", False)]
-
-
-def test_apply_intent_switch_folds_inert_values(install: None) -> None:
-    plan = pc.plan_conversion(policy="apply_intent")
-    slots = _by_name(plan)
-    agent = slots["agent"]
-    flags = plan.profiles[agent.profile_after]["flags"]
-    assert "-ctk q8_0 -ctv q8_0" in flags and "--parallel 1" in flags
-    assert all(i.applied for i in agent.inert)
-    utility = slots["utility"]
-    assert utility.generated
-    assert plan.profiles[utility.profile_after]["ctx_size"] == 98304
-    rows = {r.slot: r for r in plan.stacks}
-    assert rows["brain"].profile_after is not None
-    assert "-b 64" in plan.profiles[rows["brain"].profile_after]["flags"]
-
-
-def test_inert_switch_is_the_only_policy_reader() -> None:
-    items = [
-        pc.InertValue("slot", "extra_args", "-b 1"),
-        pc.InertValue("slot", "chat_template", "x"),
-    ]
-    adds, marked = pc.inert_additions("preserve_launch", items)
-    assert adds == pc.InertAdditions() and not any(i.applied for i in marked)
-    adds, marked = pc.inert_additions("apply_intent", items)
-    assert adds.flags == ("-b", "1")
-    assert [i.applied for i in marked] == [True, False]
-    with pytest.raises(ValueError):
-        pc.inert_additions("whatever", items)  # type: ignore[arg-type]
-    assert pc.DEFAULT_INERT_POLICY == "preserve_launch"
+    assert [(i.key, i.value) for i in rows["brain"].inert] == [("server_extra_args", "-b 64")]
+    assert "-b 64" not in json.dumps(plan.profiles)
 
 
 def test_converted_install_plans_nothing() -> None:
@@ -438,13 +411,10 @@ def test_cli_preview_writes_nothing(install: None) -> None:
     result = CliRunner().invoke(app, ["profile", "migrate"])
     assert result.exit_code == 0, result.output
     assert "thinking-big-chat" in result.output
-    assert "inert today, not applied" in result.output
+    assert "inert today, dropped" in result.output
     after = {p: p.read_bytes() for p in paths.etc().rglob("*") if p.is_file()}
     assert before == after
 
-    result = CliRunner().invoke(app, ["profile", "migrate", "--json", "--inert", "apply_intent"])
+    result = CliRunner().invoke(app, ["profile", "migrate", "--json"])
     assert result.exit_code == 0, result.output
-    assert json.loads(result.output)["policy"] == "apply_intent"
-
-    result = CliRunner().invoke(app, ["profile", "migrate", "--inert", "bogus"])
-    assert result.exit_code != 0
+    assert "thinking-big-chat" in json.loads(result.output)["profiles"]

@@ -124,37 +124,21 @@ def profile_show(
 
 @app.command("migrate")
 def profile_migrate(
-    policy: str = typer.Option(
-        "preserve_launch",
-        "--inert",
-        help=(
-            "What to do with values that do not reach the launch today (slot "
-            "extra_args, parallel, an unhonoured context ceiling, stack-row "
-            "tuning): 'preserve_launch' reports them, 'apply_intent' folds them "
-            "into the generated profile."
-        ),
-    ),
     json_out: bool = typer.Option(False, "--json", help="Emit the plan as JSON."),
 ) -> None:
     """Preview the move to profile-centric config (ADR-0029). Writes nothing.
 
     Reads the slot, profile and stack files and the model registry on this
     box, and prints which profiles would be generated, which slots re-point,
-    which keys leave the slots, and every value that is inert today.
+    which keys leave the slots, and every value that is inert today (those
+    are dropped, never applied: the conversion keeps what launches).
     """
     import dataclasses
 
-    from hal0.config.migrations.profile_centric import (
-        INERT_POLICIES,
-        ProfileMigrationError,
-        plan_conversion,
-    )
+    from hal0.config.migrations.profile_centric import ProfileMigrationError, plan_conversion
 
-    if policy not in INERT_POLICIES:
-        die(f"--inert must be one of {', '.join(INERT_POLICIES)}")
-        return
     try:
-        plan = plan_conversion(policy=policy)  # type: ignore[arg-type]
+        plan = plan_conversion()
     except (ProfileMigrationError, OSError) as exc:
         die(str(exc))
         return

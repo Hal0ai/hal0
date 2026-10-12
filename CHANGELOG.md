@@ -351,8 +351,10 @@ applying. Add those subsections to a version's section to surface them; see
   holds placement). It reads this box's slots, profiles, stacks and model
   registry and prints the profiles it would generate, the slots it would
   re-point and every configured value that does not reach the launch today,
-  such as a slot's `[server].extra_args`. It writes nothing; the conversion
-  itself ships with the launch-path change in a later release step.
+  such as a slot's `[server].extra_args`. Those inert values are dropped and
+  reported, never applied: the conversion keeps what each slot launches. It
+  writes nothing; the conversion itself ships with the launch-path change in a
+  later release step.
 
 ### Changed
 

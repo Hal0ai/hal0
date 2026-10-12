@@ -275,15 +275,12 @@ exactly once. It follows ADR-0028's contract:
     instead of `ROCm0` (decision 2, layer 4).
 
   Each such slot is listed as "changes at next restart".
-- **Inert values are not applied (by default).** Slot `extra_args`,
-  `parallel` and `chat_template`, a ceiling that never took effect, stack-row
-  tuning and non-llama model `extra_args` are dropped. Each value is recorded
-  verbatim in the report and the backup. One switch,
-  `profile_centric.DEFAULT_INERT_POLICY` (read only by `inert_additions`),
-  selects this `preserve_launch` behaviour; its alternative, `apply_intent`,
-  folds slot `extra_args`, `parallel`, an unhonoured ceiling and stack-row
-  `vision`/`enable_thinking`/`server_extra_args` into the generated profile
-  instead. `hal0 profile migrate --inert apply_intent` previews it.
+- **Inert values are never applied.** The conversion preserves what launches
+  (operator decision, 2026-10-12). Slot `extra_args`, `parallel` and
+  `chat_template`, a ceiling that never took effect, stack-row tuning and
+  non-llama model `extra_args` are dropped. Each value is recorded verbatim in
+  the report and the backup, so an operator who wants one can put it on the
+  slot's profile. There is no option to fold them in.
 - **Running units.** The converter does not refuse to run while units are
   live, and that is safe because for every slot not on the launch-change list
   the result is effective-argv-equivalent. After writing, it re-renders units
@@ -361,10 +358,10 @@ exactly once. It follows ADR-0028's contract:
 - **Per-slot overrides on top of a profile** ("profile + slot extra_args").
   Rejected. It recreates two owners for one flag, and the slot's free-text
   `extra_args` is exactly the field that went inert without anyone noticing.
-- **Convert intent instead of effect** (apply every inert slot value). Rejected
-  as the default. It would silently change live slots at their next restart,
-  for example a production `agent` slot would move from an f16 to a q8_0 KV cache. The
-  report lists every such value instead (see the open question below).
+- **Convert intent instead of effect** (apply every inert slot value, or offer
+  it as an option). Rejected by the operator. It would change live slots at
+  their next restart; for example, a production `agent` slot would move from
+  an f16 to a q8_0 KV cache. The report lists every such value instead.
 - **Name generated profiles after slots.** Rejected. A profile shared by two
   slots would carry one slot's name, and slot names are operator labels the
   framework must not design around.
@@ -381,13 +378,6 @@ exactly once. It follows ADR-0028's contract:
   break. The dashboard and the bundled agents ship in the same change.
 - `hal0 update rollback` across this release needs `hal0 profile migrate
   --restore`, like the runner conversion.
-
-## Open question
-
-- Should the converter apply inert slot values, such as a production `agent`
-  slot's `-ctk q8_0 -ctv q8_0`, when it generates that slot's profile? This ADR
-  preserves what launches. The operator may prefer intent for `extra_args`
-  only.
 
 ## References
 
