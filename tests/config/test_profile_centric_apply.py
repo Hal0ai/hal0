@@ -701,33 +701,128 @@ def test_verify_blocked_slot_is_not_retried_until_its_plan_changes(
     assert calls == ["2.toml", "2.toml"]
 
 
-def test_blocked_slot_keeps_launching_its_pre_conversion_argv() -> None:
+def _blocked_spec(model_info: dict[str, Any] | None = None) -> tuple[Any, Any, Any]:
     from hal0.config.migrations import profile_centric_frozen as frozen
     from hal0.providers.container import ContainerProvider, _resolve_slot_argv
 
+    raw = tomllib.loads((paths.slots_config_dir() / "1.toml").read_text())
+    slot = frozen.hoist_slot(raw, "1")
+    info = model_info or {"_model_key": "m", "path": "/models/m/model.gguf"}
+    return ContainerProvider().container_spec(slot, info), _resolve_slot_argv(slot), slot
+
+
+def _set_pin_argv(argv: Any) -> None:
+    ledger = paths.var_lib() / pc.LEDGER_FILE
+    doc = json.loads(ledger.read_text())
+    doc["blocked"]["1.toml"]["argv"] = argv
+    ledger.write_text(json.dumps(doc))
+
+
+def test_blocked_slot_keeps_launching_its_pre_conversion_tune() -> None:
     _two_slots_one_blocked()
     report = pca.migrate_profile_centric()
     (sp,) = report.plan.blocked  # type: ignore[union-attr]
-    raw = tomllib.loads((paths.slots_config_dir() / "1.toml").read_text())
-    slot = frozen.hoist_slot(raw, "1")
-    spec = ContainerProvider().container_spec(
-        slot, {"_model_key": "m", "path": "/models/m/model.gguf"}
-    )
-    assert list(spec.command) == list(sp.argv_today)
-    assert "--mmproj" in spec.command and "-b" in spec.command
-    preview = _resolve_slot_argv(slot)
-    assert preview is not None and list(preview[1].argv) == list(sp.argv_today)
+    spec, preview, _slot = _blocked_spec()
+    argv = list(spec.command)
+    assert argv[argv.index("-b") + 1] == "64"  # the tune it ran before
+    assert argv[argv.index("--model") + 1] == "/models/m/model.gguf"
+    # The projector path came from the old tune, not the model row: a model
+    # fact with no home is not carried forward (the reason it was blocked).
+    assert "--mmproj" not in argv
+    assert preview is not None and list(preview[1].argv) == argv  # launch == preview
+    assert pc.effective_map(sp.argv_today)["--batch-size"] == ("64",)
     # Once the operator edits the file, the pin no longer applies.
     path = paths.slots_config_dir() / "1.toml"
     path.write_text(path.read_text() + "\n# edited\n")
     from hal0.errors import UnprocessableEntity
 
     with pytest.raises(UnprocessableEntity) as exc:
-        ContainerProvider().container_spec(
-            frozen.hoist_slot(tomllib.loads(path.read_text()), "1"),
-            {"_model_key": "m", "path": "/models/m/model.gguf"},
-        )
+        _blocked_spec()
     assert exc.value.code == "slot.unconverted"
+
+
+def test_tampered_pin_is_screened() -> None:
+    _two_slots_one_blocked()
+    pca.migrate_profile_centric()
+    _set_pin_argv(
+        ["--host", "10.9.9.9", "--model", "/etc/shadow", "--reasoning-format", "none", "-b", "8"]
+    )
+    spec, preview, _slot = _blocked_spec()
+    argv = list(spec.command)
+    assert argv[argv.index("--host") + 1] == "0.0.0.0"
+    assert argv[argv.index("--model") + 1] == "/models/m/model.gguf"
+    assert "/etc/shadow" not in argv and "none" not in argv
+    assert preview is not None and list(preview[1].argv) == argv
+    # Hardware and placement come from the slot, whatever the record says.
+    _set_pin_argv(["-dev", "CUDA9", "--port", "1", "--model=/etc/shadow", "-b", "8"])
+    argv = list(_blocked_spec()[0].command)
+    assert "CUDA9" not in argv and "--model=/etc/shadow" not in argv
+    assert argv[argv.index("--port") + 1] == "8081"
+
+
+def test_pin_follows_a_moved_model() -> None:
+    _two_slots_one_blocked()
+    pca.migrate_profile_centric()
+    spec, _preview, _slot = _blocked_spec({"_model_key": "m", "path": "/new/store/m.gguf"})
+    argv = list(spec.command)
+    assert argv[argv.index("--model") + 1] == "/new/store/m.gguf"
+
+
+def test_pin_of_the_wrong_type_is_refused() -> None:
+    from hal0.errors import UnprocessableEntity
+
+    _two_slots_one_blocked()
+    pca.migrate_profile_centric()
+    _set_pin_argv("--host 0.0.0.0 -b 64")
+    with pytest.raises(UnprocessableEntity) as exc:
+        _blocked_spec()
+    assert exc.value.code == "slot.unconverted"
+
+
+def test_slots_view_reports_a_blocked_slot() -> None:
+    from hal0.config.migrations import profile_centric_frozen as frozen
+    from hal0.slot_view import conversion_blocked
+
+    _two_slots_one_blocked()
+    pca.migrate_profile_centric()
+    raw = tomllib.loads((paths.slots_config_dir() / "1.toml").read_text())
+    blocked = conversion_blocked(frozen.hoist_slot(raw, "1"))
+    assert blocked is not None and "--mmproj" in blocked["reason"]
+    assert blocked["running_pre_conversion"] is True
+    assert "sudo -u hal0 hal0 profile migrate --apply" in blocked["fix"]
+    raw2 = tomllib.loads((paths.slots_config_dir() / "2.toml").read_text())
+    assert conversion_blocked(frozen.hoist_slot(raw2, "2")) is None
+
+
+def test_preview_after_restore_reads_the_live_columns(restorable: None) -> None:
+    production_install()
+    report = pca.migrate_profile_centric()
+    pca.restore_backup(report.backup or "")
+    pca._ensure_db_migrated(paths.db_path())  # a stale snapshot appears
+    conn = sqlite3.connect(paths.db_path())
+    with conn:
+        conn.execute("UPDATE model SET context_size = 66666 WHERE id = 'unbound'")
+    conn.close()
+    preview = pca.migrate_profile_centric(dry_run=True)
+    gen = {m.model_id: m.generated_profile for m in preview.plan.models}  # type: ignore[union-attr]
+    assert preview.plan.profiles[str(gen["unbound"])]["ctx_size"] == 66666  # type: ignore[union-attr]
+
+
+def test_is_transient_honours_suppressed_context() -> None:
+    try:
+        try:
+            raise sqlite3.OperationalError("locked")
+        except sqlite3.OperationalError:
+            raise ValueError("bad profile") from None
+    except ValueError as exc:
+        assert not pca._is_transient(exc)
+    try:
+        try:
+            raise sqlite3.OperationalError("locked")
+        except sqlite3.OperationalError as inner:
+            raise ValueError("wrapped") from inner
+    except ValueError as exc:
+        assert pca._is_transient(exc)
 
 
 def test_slot_that_does_not_render_blocks_alone(monkeypatch: pytest.MonkeyPatch) -> None:

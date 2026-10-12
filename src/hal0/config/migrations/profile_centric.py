@@ -587,8 +587,14 @@ def read_inputs(
     profiles_toml: Path | None = None,
     stacks_toml: Path | None = None,
     db_path: Path | None = None,
+    live_columns: bool = False,
 ) -> Inputs:
-    """Read raw slot/profile/stack TOML and the model rows. Never validates."""
+    """Read raw slot/profile/stack TOML and the model rows. Never validates.
+
+    ``live_columns`` reads the model tuning from the ``model`` columns even
+    after SQL migration 012 (a preview after a restore: the holding table may
+    be stale).
+    """
     from hal0.config import paths
 
     slots_dir = slots_dir or paths.slots_config_dir()
@@ -617,7 +623,8 @@ def read_inputs(
         ledger = read_ledger(paths.var_lib() / LEDGER_FILE)
         if ledger:
             profiles_raw = {**(profiles_raw or {}), **ledger}
-    return Inputs(slots, profiles_raw, stacks_raw, read_model_rows(db_path), in_file)
+    rows = read_model_rows(db_path, live_columns=live_columns)
+    return Inputs(slots, profiles_raw, stacks_raw, rows, in_file)
 
 
 def read_ledger(path: Path) -> dict[str, Any]:
@@ -637,7 +644,7 @@ def read_ledger(path: Path) -> dict[str, Any]:
     return {k: data[k] for k in MARKER_KEYS if isinstance(data, dict) and k in data}
 
 
-def read_model_rows(db_path: Path) -> dict[str, dict[str, Any]]:
+def read_model_rows(db_path: Path, *, live_columns: bool = False) -> dict[str, dict[str, Any]]:
     """Every ``model`` row as a plain dict, read-only, with its tuning.
 
     Before SQL migration 012 the tuning is the row's own columns (and two
@@ -657,7 +664,7 @@ def read_model_rows(db_path: Path) -> dict[str, dict[str, Any]]:
         applied = set()
         if "schema_migrations" in tables:
             applied = {int(r[0]) for r in conn.execute("SELECT version FROM schema_migrations")}
-        if HOLDING_MIGRATION not in applied and HOLDING_TABLE not in tables:
+        if live_columns or (HOLDING_MIGRATION not in applied and HOLDING_TABLE not in tables):
             return rows
         for row in rows.values():
             for col in MODEL_TUNING_COLUMNS:

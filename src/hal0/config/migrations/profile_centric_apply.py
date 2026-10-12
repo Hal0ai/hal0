@@ -67,6 +67,11 @@ from hal0.config.migrations.runner_system import (
 )
 from hal0.errors import Hal0Error
 
+# HAL0-SUNSET: v1.7.0 — the whole profile-centric conversion (this module, the
+# planner, the frozen resolver, migration 012's holding table) and the
+# blocked-slot pin it leaves (providers.container.blocked_slot_pin and its
+# launch branch) go together once the upgrade floor is past the release that
+# ships ADR-0029.
 log = structlog.get_logger(__name__)
 
 RESTORE_MARKER_NAME = "profile-centric.restored"
@@ -313,7 +318,9 @@ def _apply_known_blocks(plan: pc.ConversionPlan, pins: dict[str, Any]) -> None:
         file_hash = _file_hash(paths.slots_config_dir() / sp.file)
         if pin.get("file") != file_hash:
             continue  # the operator edited the file: plan it afresh
-        if sp.status == "convert" and pin.get("plan") != _plan_hash(sp, plan, file_hash):
+        if sp.status == "blocked":
+            continue  # a block found while planning says more than an old one
+        if pin.get("plan") != _plan_hash(sp, plan, file_hash):
             continue  # the conversion would now do something else: try it
         sp.status = "blocked"
         sp.error = f"{pin.get('reason')} (unchanged since then, so not retried)"
@@ -544,7 +551,7 @@ def _is_transient(exc: BaseException) -> bool:
         seen.add(id(cur))
         if isinstance(cur, (sqlite3.DatabaseError, OSError, TimeoutError)):
             return True
-        cur = cur.__cause__ or cur.__context__
+        cur = cur.__cause__ or (None if cur.__suppress_context__ else cur.__context__)
     return False
 
 
@@ -710,7 +717,9 @@ def _migrate(*, dry_run: bool, job_id: str | None, verify: bool) -> ConversionRe
         if restore_marker().exists():
             # Back from a release before this one: its edits are in the columns.
             _refresh_holding(db_path)
-    inputs = pc.read_inputs()
+    # A preview cannot re-snapshot the holding table; after a restore it reads
+    # the live columns instead, as the apply would.
+    inputs = pc.read_inputs(live_columns=dry_run and restore_marker().exists())
     plan = pc.plan_conversion(inputs)
     pins = _read_ledger_doc().get("blocked") or {}
     pins = pins if isinstance(pins, dict) else {}
@@ -765,7 +774,6 @@ def _migrate(*, dry_run: bool, job_id: str | None, verify: bool) -> ConversionRe
                 if fname in {s.file for s in plan.blocked}
             }
             _clear_model_tuning(db_path, plan, drop_holding=not plan.blockers, keep=keep - {""})
-        _save_pins(plan, pins, verify_blocked=set(problems))
         audit = {
             "complete": not plan.blockers,
             "converted": sorted(s.file for s in plan.slots if s.status == "convert"),
@@ -776,6 +784,9 @@ def _migrate(*, dry_run: bool, job_id: str | None, verify: bool) -> ConversionRe
         }
         state_path.parent.mkdir(parents=True, exist_ok=True)
         _replace_file(state_path, json.dumps(audit, indent=2).encode(), default_mode=0o640)
+        # Last, so a rollback above never leaves a restored slot without the
+        # pin it launches from.
+        _save_pins(plan, pins, verify_blocked=set(problems))
     except Exception as exc:
         not_restored: list[str] = []
         for w in reversed(done):
@@ -799,7 +810,7 @@ def _migrate(*, dry_run: bool, job_id: str | None, verify: bool) -> ConversionRe
             raise ProfileConversionError(
                 f"profile conversion failed ({exc}) and these could NOT be restored: "
                 f"{', '.join(not_restored)}. Stop hal0-api and run "
-                f"`hal0 profile migrate --restore {backup}`"
+                f"`sudo -u hal0 hal0 profile migrate --restore {backup}`"
             ) from exc
         raise ProfileConversionError(
             f"profile conversion failed and was rolled back: {exc} (backup: {backup})"
