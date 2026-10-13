@@ -17,9 +17,8 @@ Weights:
   ``--model_path`` flag the profile bakes in resolves correctly without
   path translation.
 
-  The mount dst string carries the ``:ro`` suffix directly because
-  the Quadlet renderer emits mounts as ``Volume={src}:{dst}``
-  verbatim — there is no separate read-only flag on RuntimeLaunchPlan.
+  The mount is read-only through :func:`hal0.config.store.mount_for`
+  (``Mount.read_only``); the renderer adds the ``:ro`` option.
 
 No devices / group_add:
   Kokoro runs ONNX inference entirely on CPU (no CUDA, ROCm, or NPU).
