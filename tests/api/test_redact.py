@@ -11,7 +11,9 @@ test_upstream_dedup.py.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Iterator
+from pathlib import Path
 
 import pytest
 from fastapi import FastAPI
@@ -24,6 +26,7 @@ from hal0.api._redact import (
     redact_log_line,
     redact_value,
 )
+from hal0.observability.sentry import SENSITIVE_HEADERS
 from hal0.redaction import MASK, redact_shareable_text
 
 # ── is_sensitive_key ──────────────────────────────────────────────────────
@@ -958,3 +961,63 @@ class TestRedactionTimeIsLinear:
         assert f" {run}{MASK} " in out
         assert out.endswith(f"v={MASK}")
         assert "hunter2" not in out and "s3cr3t" not in out and ":pw@" not in out
+
+
+# ── #2413: the cases shared with the dashboard's browser-side port ─────────
+
+
+class TestSharedFixture:
+    """``tests/fixtures/redaction_shapes.json`` is also read by
+    ``ui/src/sentry.test.ts``, which pins ``redactSecrets`` in
+    ``ui/src/sentry.ts``, the hand-port of :func:`redact_log_line`. A case added
+    there is checked against both implementations."""
+
+    _CASES = json.loads(
+        (Path(__file__).parents[1] / "fixtures" / "redaction_shapes.json").read_text()
+    )
+
+    @pytest.mark.parametrize(("line", "secret"), _CASES["mask"])
+    def test_a_secret_is_masked(self, line: str, secret: str) -> None:
+        out = redact_log_line(line)
+        assert secret not in out, out
+        assert MASK in out
+
+    @pytest.mark.parametrize("line", _CASES["keep"])
+    def test_a_lookalike_is_left_alone(self, line: str) -> None:
+        assert redact_log_line(line) == line
+
+    @pytest.mark.parametrize(("line", "expected"), _CASES["exact"])
+    def test_the_exact_rendering(self, line: str, expected: str) -> None:
+        assert redact_log_line(line) == expected
+        assert redact_log_line(expected) == expected  # idempotent
+
+    @pytest.mark.parametrize("name", _CASES["mask_names"])
+    def test_a_secret_name_is_masked(self, name: str) -> None:
+        out = redact_log_line(f"{name}={self._CASES['value']}")
+        assert self._CASES["value"] not in out, out
+        assert MASK in out
+
+    @pytest.mark.parametrize("name", _CASES["keep_names"])
+    def test_a_count_or_location_name_is_left_alone(self, name: str) -> None:
+        line = f"{name}={self._CASES['value']}"
+        assert redact_log_line(line) == line
+
+    @pytest.mark.parametrize("name", _CASES["mask_hyphen_names"])
+    def test_a_hyphenated_secret_name_is_masked_in_every_form(self, name: str) -> None:
+        v = self._CASES["hyphen_value"]
+        for line in (f"{name}={v}", f"{name}: {v}", f'{{"{name}": "{v}"}}', f"--{name}={v}"):
+            out = redact_log_line(line)
+            assert v not in out, out
+            assert name in out, out
+
+    @pytest.mark.parametrize("key", _CASES["sensitive_keys"])
+    def test_a_secret_key_name_is_sensitive(self, key: str) -> None:
+        assert is_sensitive_key(key)
+
+    @pytest.mark.parametrize("key", _CASES["plain_keys"])
+    def test_a_plain_key_name_is_not_sensitive(self, key: str) -> None:
+        assert not is_sensitive_key(key)
+
+    def test_the_sensitive_headers_are_the_backend_set(self) -> None:
+        # ui/src/sentry.ts masks the same headers whole; its test reads this list.
+        assert set(self._CASES["sensitive_headers"]) == SENSITIVE_HEADERS

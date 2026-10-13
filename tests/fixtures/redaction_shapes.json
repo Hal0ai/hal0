@@ -1,0 +1,450 @@
+{
+  "_comment": "Cases for the shared redaction shape pass, read by tests/api/test_redact.py (hal0.api._redact.redact_log_line) and ui/src/sentry.test.ts (redactSecrets). Change src/hal0/redaction.py and ui/src/sentry.ts together; a case added here is checked by both. mask: [line, secret] - the secret must not survive and the mask must appear. keep: lines that come back unchanged. exact: [line, expected]. mask_names / keep_names: NAME=<value> lines whose value must / must not be masked; mask_hyphen_names additionally in the NAME: v, JSON and --NAME=v forms, with the name kept in the output. sensitive_keys / plain_keys: key names whose value the structured scrubbers (is_sensitive_key in src/hal0/api/_redact.py, isSensitiveKey in ui/src/sentry.ts) must / must not mask whole. sensitive_headers: exactly SENSITIVE_HEADERS in src/hal0/observability/sentry.py, also masked whole by ui/src/sentry.ts.",
+  "value": "Plural_Tok3n_99xyzw",
+  "hyphen_value": "Zq8vR2mW9xK4tL7pQ3",
+  "mask": [
+    [
+      "GET /v1/models Authorization: Bearer sk-or-supersecret-xyz",
+      "sk-or-supersecret-xyz"
+    ],
+    [
+      "env loaded: HAL0_BEARER_TOKEN=hal0_tok_xyz",
+      "hal0_tok_xyz"
+    ],
+    [
+      "raw fallback: Bearer abcDEF123_-.tok still gets masked",
+      "abcDEF123_-.tok"
+    ],
+    [
+      "mcp.tool.invoked client_id=abcdefghijklmnopqrstuvwxyz0123456789 tool=slot_list",
+      "abcdefghijklmnopqrstuvwxyz0123456789"
+    ],
+    [
+      "env dump: HAL0_ADMIN_KEY=abcdef1234567890",
+      "abcdef1234567890"
+    ],
+    [
+      "env dump: SOME_API_KEY=sk-live-abcdef1234567890",
+      "sk-live-abcdef1234567890"
+    ],
+    [
+      "config dump: KEY=abcdef1234567890",
+      "abcdef1234567890"
+    ],
+    [
+      "git clone https://user:urlpw_Rr44Ee55@example.com/r.git",
+      "urlpw_Rr44Ee55"
+    ],
+    [
+      "Authorization: Basic dXNlcjpodW50ZXIy",
+      "dXNlcjpodW50ZXIy"
+    ],
+    [
+      "Authorization: token ghtok_Aa11Bb22Cc33",
+      "ghtok_Aa11Bb22Cc33"
+    ],
+    [
+      "curl -H 'Authorization: Bearer brr_Zz99Yy88Xx77'",
+      "brr_Zz99Yy88Xx77"
+    ],
+    [
+      "hf download --token flagtok_Ww12Qq34 m",
+      "flagtok_Ww12Qq34"
+    ],
+    [
+      "hf download --token=flagtok_Ee56Rr78 m",
+      "flagtok_Ee56Rr78"
+    ],
+    [
+      "loaded hf_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "hf_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    ],
+    [
+      "using sk-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "sk-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    ],
+    [
+      "pat ghp_cccccccccccccccccccccccccccccccccccc",
+      "ghp_cccccccccccccccccccccccccccccccccccc"
+    ],
+    [
+      "jwt eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJoYWwwIn0.c2lnbmF0dXJlMTIzNDU2",
+      "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJoYWwwIn0.c2lnbmF0dXJlMTIzNDU2"
+    ],
+    [
+      "aws AKIAABCDEFGHIJKLMNOP",
+      "AKIAABCDEFGHIJKLMNOP"
+    ],
+    [
+      "{\"token\": \"JsonTok_88bbccdd\"}",
+      "JsonTok_88bbccdd"
+    ],
+    [
+      "registry login password: Colon_Secret_77aa",
+      "Colon_Secret_77aa"
+    ],
+    [
+      "X-Api-Key: HdrK3y_55eeff00",
+      "HdrK3y_55eeff00"
+    ],
+    [
+      "Environment=HAL0_SECRET=sysd_Qq12Ww34Ee56",
+      "sysd_Qq12Ww34Ee56"
+    ],
+    [
+      "HF_TOKEN=hf_short1",
+      "hf_short1"
+    ],
+    [
+      "GET https://x.invalid/v1?apikey=abcd1234efgh&q=1",
+      "abcd1234efgh"
+    ],
+    [
+      "{\"apiKey\": \"abcd1234efgh\"}",
+      "abcd1234efgh"
+    ],
+    [
+      "export HAL0_CLIENT_KEY='h0c_quoted_Kk11'",
+      "h0c_quoted_Kk11"
+    ],
+    [
+      "mcp client_id=abcdefghijklmnopqrstuvwxyz0123",
+      "abcdefghijklmnopqrstuvwxyz0123"
+    ],
+    [
+      "hal0.startup HF_TOKEN=hf_abcdefghijklmnop",
+      "hf_abcdefghijklmnop"
+    ],
+    [
+      "GET /v1?apikey=abcd1234efgh HTTP/1.1",
+      "abcd1234efgh"
+    ],
+    [
+      "{\"event\": \"upstream\", \"apiKey\": \"abcd1234efgh\"}",
+      "abcd1234efgh"
+    ],
+    [
+      "{\"accessToken\": \"abcd1234efgh\"}",
+      "abcd1234efgh"
+    ],
+    [
+      "db password: Colon_Secret_77aa",
+      "Colon_Secret_77aa"
+    ],
+    [
+      "clone https://user:urlpw_Rr44Ee55@example.com/r.git",
+      "urlpw_Rr44Ee55"
+    ],
+    [
+      "clone https://abcdefghijklmnopqrstuvwxyz@example.com/r.git",
+      "abcdefghijklmnopqrstuvwxyz"
+    ],
+    [
+      "Authorization: rawauth_Pl34Ok56Ij78",
+      "rawauth_Pl34Ok56Ij78"
+    ],
+    [
+      "curl -H 'Authorization: rawauth_Pl34Ok56Ij78' https://x.invalid/",
+      "rawauth_Pl34Ok56Ij78"
+    ],
+    [
+      "{\"Authorization\": \"rawauth_Pl34Ok56Ij78\"}",
+      "rawauth_Pl34Ok56Ij78"
+    ],
+    [
+      "proxy-authorization: rawauth_Pl34Ok56Ij78",
+      "rawauth_Pl34Ok56Ij78"
+    ],
+    [
+      "foo=token=Zq8vR2mW9xK4tL7pQ3",
+      "Zq8vR2mW9xK4tL7pQ3"
+    ],
+    [
+      "max_tokens=4096 api_tokens=Zq8vR2mW9xK4tL7pQ3",
+      "Zq8vR2mW9xK4tL7pQ3"
+    ],
+    [
+      "bearer\u001c Sbearer_ctl_4491xyz",
+      "Sbearer_ctl_4491xyz"
+    ],
+    [
+      "X_KEY\u001c=Skey_ctl_133xyzab",
+      "Skey_ctl_133xyzab"
+    ],
+    [
+      "{\"Token\" : \u001f\"Sjson_ctl_1920xyz\"}",
+      "Sjson_ctl_1920xyz"
+    ],
+    [
+      "Authorization:rawauth_nel_7781xyz",
+      "rawauth_nel_7781xyz"
+    ],
+    [
+      "http://u:Spw﻿4460xyzab@h/r",
+      "Spw﻿4460xyzab"
+    ],
+    [
+      "client_id=Sturk2174xBrT7p3XıWCVcXGvnnwSo1",
+      "Sturk2174xBrT7p3XıWCVcXGvnnwSo1"
+    ],
+    [
+      "--passſword Sflag_long_s_16xyzab",
+      "Sflag_long_s_16xyzab"
+    ],
+    [
+      "\"github-token-Kci\" = Skelvin_825xyzabc",
+      "Skelvin_825xyzabc"
+    ],
+    [
+      "HAL0_AéDMIN_KEY=S1_visible_xyzab;Authorization:\"DPoP S2_visible_xyzab",
+      "S1_visible_xyzab"
+    ],
+    [
+      "HAL0_AéDMIN_KEY=S1_visible_xyzab;Authorization:\"DPoP S2_visible_xyzab",
+      "S2_visible_xyzab"
+    ],
+    [
+      "PASSPHRAſE=Sphrase_fold_xyzab",
+      "Sphrase_fold_xyzab"
+    ],
+    [
+      "ſecret=Sfold_s_1234xyz",
+      "Sfold_s_1234xyz"
+    ],
+    [
+      "toKen=Sfold_k_1234xyz",
+      "Sfold_k_1234xyz"
+    ],
+    [
+      "password\u001c=Sws_1c_1234xyz",
+      "Sws_1c_1234xyz"
+    ],
+    [
+      "password\u0085=Sws_85_1234xyz",
+      "Sws_85_1234xyz"
+    ]
+  ],
+  "keep": [
+    "[12:00:00] hal0.api.startup version=0.2.0a2 KEY_ROTATION_DAYS=30",
+    "mcp.tool.invoked client_id=1a2b3c4d5e6f tool=slot_list outcome=ok",
+    "slot flm failed to start on port 8081",
+    "llama: max_tokens=4096 ctx=8192",
+    "{\"max_tokens\": 4096, \"tokenizer\": \"Qwen/Qwen2.5-7B-Instruct\"}",
+    "load tokenizer=Qwen/Qwen2.5-7B-Instruct",
+    "token_count=123456789",
+    "layout keyboard: us",
+    "zoo monkey=bananaphone99",
+    "api_key_env=HF_TOKEN_FILE",
+    "12 tests passed: 0 failed",
+    "KEY_ROTATION_DAYS=30",
+    "mcp client_id=1a2b3c4d5e6f",
+    "llama.request max_tokens=4096 temperature=0.7",
+    "slot.load tokenizer=Qwen/Qwen2.5-7B-Instruct",
+    "{\"usage\": {\"total_tokens\": 1234, \"token_count\": 99}}",
+    "ui.prefs keyboard: us",
+    "pytest: 12 passed: 0 failed",
+    "HF_TOKEN_FILE=/run/secrets/hf",
+    "authorization: denied",
+    "authorization: denied for bob",
+    "see https://example.com/docs and ftp://host/file"
+  ],
+  "exact": [
+    [
+      "Authorization: Bearer abcdef123456",
+      "Authorization: Bearer ***REDACTED***"
+    ],
+    [
+      "Authorization: Basic dXNlcjpwYXNz",
+      "Authorization: Basic ***REDACTED***"
+    ],
+    [
+      "authorization: denied",
+      "authorization: denied"
+    ],
+    [
+      "Authorization: ApiKey ak_live_Zx81Qw45",
+      "Authorization: ApiKey ***REDACTED***"
+    ],
+    [
+      "Authorization: Bot MTk4NjIyNDgzNDcx",
+      "Authorization: Bot ***REDACTED***"
+    ],
+    [
+      "Authorization: SSWS 00aBcD1234efGh",
+      "Authorization: SSWS ***REDACTED***"
+    ],
+    [
+      "Authorization: Negotiate YIIC4wYGKwYB",
+      "Authorization: Negotiate ***REDACTED***"
+    ],
+    [
+      "authorization: denied for bob",
+      "authorization: denied for bob"
+    ],
+    [
+      "Authorization: abcdefghijklmnop qrstuvwxyz",
+      "Authorization: ***REDACTED***"
+    ],
+    [
+      "authorization: required for user",
+      "authorization: ***REDACTED***"
+    ],
+    [
+      "db_password = hunter22222",
+      "db_password = ***REDACTED***"
+    ],
+    [
+      "{\"token\": \"JsonTok_88bbccdd\"}",
+      "{\"token\": \"***REDACTED***\"}"
+    ],
+    [
+      "HF_TOKEN='abc def'",
+      "HF_TOKEN='***REDACTED***'"
+    ],
+    [
+      "hf download --token flagtok_Ww12Qq34 m",
+      "hf download --token ***REDACTED*** m"
+    ],
+    [
+      "clone https://u:pw12345678@h/r",
+      "clone https://u:***REDACTED***@h/r"
+    ],
+    [
+      "foo=token=Zq8vR2mW9xK4tL7pQ3",
+      "foo=token=***REDACTED***"
+    ]
+  ],
+  "mask_names": [
+    "api_tokens",
+    "auth_tokens",
+    "tokens_by_host",
+    "tokens",
+    "authTokens",
+    "API_TOKENS_PER_SERVICE",
+    "API_TOKENS_PER_KEY",
+    "GITHUB_TOKENS_PER_SITE",
+    "HF_TOKENS_PER_SPACE",
+    "github_new_tokens",
+    "oauth_cached_tokens",
+    "mcp_tool_tokens",
+    "api_tokens_per_token",
+    "apiTokenSCount",
+    "cms_draft_tokens",
+    "api_content_tokens",
+    "api_thinking_tokens",
+    "hf_generation_tokens",
+    "mixed_content_tool_tokens",
+    "login_tokens",
+    "max_tokens_secret",
+    "tokens_in_vault",
+    "api_tokens_count_key",
+    "api_tokens_in",
+    "auth_tokens_out",
+    "api_tokens_per_host",
+    "auth_tokens_per_user",
+    "API-TOKENS-PER-SECRET",
+    "HF_TOKEN",
+    "apikey",
+    "password",
+    "client_secret",
+    "HAL0_ADMIN_KEY",
+    "key"
+  ],
+  "keep_names": [
+    "max_tokens",
+    "extraction_max_tokens",
+    "prompt_tokens",
+    "completion_tokens",
+    "total_tokens",
+    "n_prompt_tokens",
+    "max_new_tokens",
+    "max_completion_tokens",
+    "tokens_per_sec",
+    "output_tokens_per_second",
+    "tokens_count",
+    "tokens_in",
+    "tokens_completed",
+    "text_tokens",
+    "image_tokens",
+    "tool_call_tokens",
+    "video_tokens",
+    "tool_response_tokens",
+    "tokens_per_iteration",
+    "cached_tokens",
+    "cache_tokens",
+    "prompt_cached_tokens",
+    "new_tokens",
+    "tokens_predicted",
+    "tokens_evaluated",
+    "accepted_prediction_tokens",
+    "HAL0_MAX_TOKENS",
+    "HINDSIGHT_API_RETAIN_MAX_COMPLETION_TOKENS",
+    "OUTPUT_TOKENS_PER_SECOND",
+    "maxTokens",
+    "totalTokens",
+    "max-tokens",
+    "tokenizer",
+    "token_count",
+    "api-token-file",
+    "api-token-path",
+    "hf-token-env",
+    "client-secret-dir",
+    "max-completion-tokens",
+    "tokens-per-sec",
+    "max-thinking-tokens",
+    "draft_tokens",
+    "content_tokens",
+    "thinking_tokens",
+    "generation_tokens",
+    "max_thinking_tokens",
+    "max_draft_tokens",
+    "n_generation_tokens",
+    "maxThinkingTokens"
+  ],
+  "mask_hyphen_names": [
+    "api-token-prod",
+    "github-token-ci",
+    "auth-tokens-per-user",
+    "x-api-key-v2",
+    "HF-TOKEN-READ",
+    "db-password-primary",
+    "client-secret-staging",
+    "my-key"
+  ],
+  "sensitive_keys": [
+    "password",
+    "HF_TOKEN",
+    "apiKey",
+    "x-api-key",
+    "accessKey",
+    "client_secret",
+    "HAL0_ADMIN_KEY",
+    "KEY",
+    "salt",
+    "max_tokens",
+    "ſecret",
+    "toKen",
+    "HAL0_CLIENT_KEY\n"
+  ],
+  "plain_keys": [
+    "url",
+    "arguments",
+    "status_code",
+    "message",
+    "KEY_ROTATION_DAYS",
+    "KEYBOARD_LAYOUT",
+    "monkey",
+    "keys"
+  ],
+  "sensitive_headers": [
+    "authorization",
+    "proxy-authorization",
+    "cookie",
+    "set-cookie",
+    "x-api-key",
+    "api-key",
+    "x-auth-token",
+    "x-hal0-admin-key",
+    "x-hal0-client-key"
+  ]
+}

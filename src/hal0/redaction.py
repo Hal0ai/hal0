@@ -518,7 +518,13 @@ def redact_audit_row_secret_args(line: str) -> str:
 def redact_secret_shapes(line: str) -> str:
     """Mask secret SHAPES in one line of free text (no literal known in
     advance). Keeps each key's name, quoting and separator so a reader still
-    sees a secret WAS present. Idempotent."""
+    sees a secret WAS present. Idempotent.
+
+    Change together with ``installer/lib/failure-report.sh`` and, for
+    :func:`redact_log_line`, the browser-side port in ``ui/src/sentry.ts``
+    (#2413): the cases in ``tests/fixtures/redaction_shapes.json`` are checked
+    against both, so a rule changed here needs the port and the fixture
+    updated in the same commit."""
     for pattern, repl in _SHAPE_RULES:
         line = pattern.sub(repl, line)
     line = _NAME_VALUE_SHAPE_RE.sub(_mask_name_value, line)

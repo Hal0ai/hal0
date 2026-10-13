@@ -55,8 +55,11 @@ and transaction and:
 If scrubbing itself raises, the event is **dropped**, not sent raw.
 
 The dashboard has a twin of this policy in ``ui/src/sentry.ts``, including a
-hand-port of ``LOG_SECRET_RE``. Changing the pattern list here means changing
-it there too — a browser-side leak is just as bad as a server-side one.
+hand-port of ``LOG_SECRET_RE`` and of the shared shape pass
+(``hal0.redaction.redact_secret_shapes``). Changing the pattern list here means
+changing it there too — a browser-side leak is just as bad as a server-side
+one. ``tests/fixtures/redaction_shapes.json`` holds the cases both test suites
+share.
 
 Prompt/completion content never reaches Sentry unless it appears inside an
 exception message; that residue is what ``redact_log_line`` is for. Do not
@@ -82,6 +85,8 @@ DSN_ENV_VARS: Final[tuple[str, ...]] = ("HAL0_SENTRY_DSN", "SENTRY_DSN")
 # this list still passes through the key-name scrubber below, which
 # catches ``X-Foo-Token``-shaped names generically; this set exists for
 # the names that carry a credential without a matching key-name token.
+# ui/src/sentry.ts masks the same set; ``sensitive_headers`` in
+# tests/fixtures/redaction_shapes.json must equal it, and both suites read it.
 SENSITIVE_HEADERS: Final[frozenset[str]] = frozenset(
     {
         "authorization",

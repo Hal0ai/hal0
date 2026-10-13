@@ -62,6 +62,9 @@ _SENSITIVE_RE: Final[re.Pattern[str]] = re.compile(
     # ``accessKey``, ``x-api-key``) are caught too (#2384), still without
     # a bare ``KEY`` substring. installer/lib/failure-report.sh mirrors
     # this pattern; tests/installer/test_failure_report.py pins the two.
+    # ui/src/sentry.ts mirrors it too (``isSensitiveKey``); the
+    # ``sensitive_keys`` / ``plain_keys`` lists in
+    # tests/fixtures/redaction_shapes.json pin that pair.
     r"(?i)(?:SECRET|TOKEN|PASSWORD|PASS|API[_-]?KEY|ACCESS[_-]?KEY|PRIVATE[_-]?KEY"
     r"|ENCRYPTION[_-]?KEY|SALT|_KEY$|^KEY$)"
 )
