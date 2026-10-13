@@ -1010,6 +1010,7 @@ class _Planner:
             slot = frozen.hoist_slot(raw, stem)
             sp = SlotPlan(file=fname, name=str(slot.get("name") or stem))
             try:
+                self._refuse_llama_env(slot)
                 if not self._already_converted(raw, slot, sp):
                     self._plan_slot(raw, slot, sp)
             except (ValueError, Hal0Error) as exc:
@@ -1112,18 +1113,25 @@ class _Planner:
             else:
                 sp.inert.append(InertValue("slot", "image", image))
 
-    def _plan_slot(self, raw: Mapping[str, Any], slot: dict[str, Any], sp: SlotPlan) -> None:
+    @staticmethod
+    def _refuse_llama_env(slot: Mapping[str, Any]) -> None:
+        """Block a slot whose ``[server].env`` sets a llama-server option.
+
+        The launch refuses these (``slot.llama_env_denied``), so the slot
+        cannot run whatever shape it is in: checked before the current-shape
+        shortcut, so a converted slot carrying one is reported too.
+        """
         from hal0.slots.argv import llama_env_offenders
 
         server = slot.get("server") if isinstance(slot.get("server"), Mapping) else {}
         env_keys = llama_env_offenders(dict(server.get("env") or {}))
         if env_keys:
-            # The new launch refuses these (slot.llama_env_denied): a launch
-            # option belongs on the profile, so the operator moves it there.
             raise ValueError(
                 f"[server].env sets llama-server option(s) {', '.join(env_keys)}; "
                 "move them to the slot's profile flags and remove them from the slot env"
             )
+
+    def _plan_slot(self, raw: Mapping[str, Any], slot: dict[str, Any], sp: SlotPlan) -> None:
         sp.engine = frozen.engine_for(slot, self.old)
         named = str(slot.get("profile") or "")
         sp.profile_before = sp.profile_after = named
