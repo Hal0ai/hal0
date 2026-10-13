@@ -273,6 +273,47 @@ def test_v1_audio_transcriptions_happy_path(client: TestClient) -> None:
     assert b'name="model"' in captured["body"]  # type: ignore[operator]
 
 
+def test_v1_audio_transcriptions_keeps_boundary_and_drops_client_credentials(
+    client: TestClient,
+) -> None:
+    """#2538: the multipart path keeps its boundary but forwards no hal0 credential."""
+    _seed_stt_upstream(client)
+
+    captured: dict[str, httpx.Request] = {}
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        captured["req"] = req
+        return httpx.Response(200, json={"text": "ok"})
+
+    _install_mock_transport(client, handler)
+
+    files = {"file": ("clip.wav", b"RIFF" + b"\x00" * 64, "audio/wav")}
+    data = {"model": "moonshine-small-streaming-en"}
+    r = client.post(
+        "/v1/audio/transcriptions",
+        files=files,
+        data=data,
+        headers={
+            "Cookie": "hal0_session=admin-session-do-not-leak",
+            "X-API-Key": "hal0-api-key-do-not-leak",
+            "X-hal0-Agent": "hermes",
+            "X-hal0-Private": "1",
+        },
+    )
+
+    assert r.status_code == 200, r.text
+    sent = captured["req"]
+    content_type = sent.headers.get("content-type", "")
+    assert content_type.startswith("multipart/form-data; boundary=")
+    boundary = content_type.split("boundary=", 1)[1].encode()
+    assert b"--" + boundary in sent.content
+    assert sent.headers.get_list("content-type") == [content_type]
+    assert [v for v in sent.headers.values() if "do-not-leak" in v] == []
+    assert not any(k.lower().startswith("x-hal0-") for k in sent.headers)
+    assert "cookie" not in sent.headers
+    assert "x-api-key" not in sent.headers
+
+
 def test_v1_audio_speech_happy_path(client: TestClient) -> None:
     """A well-formed TTS request streams the upstream's audio bytes back."""
     _seed_tts_upstream(client)
