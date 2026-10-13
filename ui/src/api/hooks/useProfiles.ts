@@ -22,7 +22,7 @@ export interface Profile {
   /** Context window the profile asks for; null = defer to the model's native
    *  window (ADR-0029). Server range 128..16777216. */
   ctx_size?: number | null
-  /** Thinking default: null = auto (model decides), true = on, false = off. */
+  /** Thinking default: null = off unless the request asks, true = on, false = off. */
   enable_thinking?: boolean | null
   /** Vision: "auto" loads the model's mmproj when present, "off" never does. */
   vision?: ProfileVision

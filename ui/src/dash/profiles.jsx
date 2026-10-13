@@ -52,7 +52,7 @@ const BLANK = {
 };
 
 // ── typed tune fields ────────────────────────────────────────────────────────
-// enable_thinking on the wire is null (auto) | true | false.
+// enable_thinking on the wire is null (unset: off unless the request asks) | true | false.
 export function thinkingToForm(v) { return v === true ? 'on' : v === false ? 'off' : 'auto'; }
 export function thinkingFromForm(v) { return v === 'on' ? true : v === 'off' ? false : null; }
 // Unset (null) reasons only when a request asks — the same as 'off' — so the
