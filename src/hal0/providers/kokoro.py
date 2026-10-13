@@ -142,11 +142,11 @@ class KokoroProvider(Provider):
         Security opts (apparmor/seccomp=unconfined) are required for
         Proxmox LXC deployments (same rationale as FLMProvider).
         """
-        from hal0.profiles import ProfileCatalog
+        from hal0.providers.container import resolve_named_profile
 
         port = int(slot_cfg.get("port") or 8084)
         profile_name: str = str(slot_cfg.get("profile") or _DEFAULT_PROFILE)
-        profile = ProfileCatalog().resolve(profile_name)
+        profile = resolve_named_profile(slot_cfg, profile_name)
         # ``resolved_flags`` is already MTP-expanded; these include --model_path.
         flag_tokens = shlex.split(profile.resolved_flags) if profile.resolved_flags.strip() else []
 

@@ -137,10 +137,7 @@ def test_spec_preflight_names_missing_bundle(tmp_path, monkeypatch) -> None:
     class _Profile:
         resolved_flags = f"--model_path {missing} --model_arch base"
 
-    monkeypatch.setattr(
-        "hal0.profiles.ProfileCatalog",
-        lambda: type("C", (), {"resolve": lambda s, n: _Profile()})(),
-    )
+    monkeypatch.setattr("hal0.providers.container._resolve_profile", lambda _name: _Profile())
 
     with pytest.raises(MoonshineWeightsMissingError) as exc_info:
         ms.MoonshineProvider().container_spec(_slot_cfg(), {})
@@ -211,11 +208,7 @@ def test_profile_baked_path_is_leaf_resolved(tmp_path, monkeypatch) -> None:
     class _Profile:
         resolved_flags = f"--model_path {root} --model_arch base"
 
-    class _Catalog:
-        def resolve(self, _name):
-            return _Profile()
-
-    monkeypatch.setattr("hal0.profiles.ProfileCatalog", lambda: _Catalog())
+    monkeypatch.setattr("hal0.providers.container._resolve_profile", lambda _name: _Profile())
 
     spec = ms.MoonshineProvider().container_spec(_slot_cfg(), {})
     c = spec.command
@@ -240,10 +233,7 @@ def test_weights_outside_store_root_get_their_own_mount(tmp_path, monkeypatch) -
     class _Profile:
         resolved_flags = f"--model_path {tmp_path / 'elsewhere' / 'moonshine'} --model_arch base"
 
-    monkeypatch.setattr(
-        "hal0.profiles.ProfileCatalog",
-        lambda: type("C", (), {"resolve": lambda s, n: _Profile()})(),
-    )
+    monkeypatch.setattr("hal0.providers.container._resolve_profile", lambda _name: _Profile())
     monkeypatch.setattr(ms, "model_store_root", lambda: str(store))
 
     spec = ms.MoonshineProvider().container_spec(_slot_cfg(), {})
@@ -264,10 +254,7 @@ def test_weights_inside_store_root_add_no_extra_mount(tmp_path, monkeypatch) -> 
     class _Profile:
         resolved_flags = f"--model_path {store / 'asr' / 'moonshine'} --model_arch base"
 
-    monkeypatch.setattr(
-        "hal0.profiles.ProfileCatalog",
-        lambda: type("C", (), {"resolve": lambda s, n: _Profile()})(),
-    )
+    monkeypatch.setattr("hal0.providers.container._resolve_profile", lambda _name: _Profile())
     monkeypatch.setattr(ms, "model_store_root", lambda: str(store))
 
     spec = ms.MoonshineProvider().container_spec(_slot_cfg(), {})
@@ -291,10 +278,7 @@ def test_non_bundle_registry_path_falls_back_to_profile(tmp_path, monkeypatch) -
     class _Profile:
         resolved_flags = f"--model_path {staged} --model_arch base"
 
-    monkeypatch.setattr(
-        "hal0.profiles.ProfileCatalog",
-        lambda: type("C", (), {"resolve": lambda s, n: _Profile()})(),
-    )
+    monkeypatch.setattr("hal0.providers.container._resolve_profile", lambda _name: _Profile())
 
     spec = ms.MoonshineProvider().container_spec(_slot_cfg(), {"path": str(stray / "model.gguf")})
     c = spec.command
@@ -304,8 +288,9 @@ def test_non_bundle_registry_path_falls_back_to_profile(tmp_path, monkeypatch) -
 def test_named_missing_profile_refuses_to_launch() -> None:
     """A slot naming a profile the catalog lacks fails closed (ADR-0029); it
     never launches some other tune."""
-    from hal0.errors import NotFound
+    from hal0.errors import UnprocessableEntity
 
-    with pytest.raises(NotFound) as exc_info:
+    with pytest.raises(UnprocessableEntity) as exc_info:
         MoonshineProvider().container_spec(_slot_cfg(profile="no-such-profile"), {})
-    assert exc_info.value.code == "profiles.not_found"
+    assert exc_info.value.code == "slot.profile_missing"
+    assert exc_info.value.details["profile"] == "no-such-profile"

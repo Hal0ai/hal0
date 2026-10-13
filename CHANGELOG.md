@@ -357,7 +357,10 @@ applying. Add those subsections to a version's section to surface them; see
   longer launches silently with the built-in default flags. It now refuses
   to launch with `slot.profile_missing`, as every llama-server slot already
   does, so a typo in a profile name cannot quietly start a different tune.
-  A slot that names no profile still gets the default flags (#2573).
+  A slot that names no profile still gets the default flags. The Kokoro,
+  Moonshine and Qwen3-TTS slots already refused, but with the profile
+  catalog's `profiles.not_found`; they now raise `slot.profile_missing` too,
+  so one condition has one code on the launch path (#2573).
 - A profile, or the recorded tune of a slot the profile conversion blocked,
   can no longer redirect a slot's model or reach outside it through a short
   or alternative llama.cpp flag. The flag screen only knew one spelling of
