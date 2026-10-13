@@ -56,6 +56,7 @@ from hal0.dispatcher._capability_resolve import (
 from hal0.dispatcher.lane_pin import lane_slot_pin, rank_slot_name
 from hal0.dispatcher.single_flight import SingleFlightGroup
 from hal0.errors import Hal0Error
+from hal0.forwarded_headers import forwardable_request_headers
 from hal0.slots.state import SlotCrashLooping, SlotState
 from hal0.upstreams.registry import Upstream, UpstreamRegistry
 
@@ -1643,22 +1644,27 @@ class Dispatcher:
         return out
 
     def _build_headers(self, request: Request, upstream: Upstream) -> dict[str, str]:
-        """Forward client headers minus hop-by-hop, plus upstream auth slot.
+        """Allowlisted client headers, plus the upstream's own auth (#2538).
 
-        # NOTE: auth header materialisation depends on Agent J's
-        # upstreams.auth_headers() helper which isn't shipped yet.  For
-        # now we forward client headers verbatim minus hop-by-hop.
+        Only :data:`hal0.forwarded_headers.FORWARDABLE_REQUEST_HEADERS` are
+        copied from the client. The ``hal0_session`` cookie (an admin login),
+        ``Authorization``, ``X-API-Key`` and ``X-hal0-*`` authenticate the
+        caller to *hal0*; copying them would hand them to whichever upstream
+        the request resolves to, a remote cloud provider included. No slot
+        child reads any of them: the ``X-hal0-*`` headers are consumed by
+        hal0's own routes (memory, MCP, model listing).
+
+        ``accept-encoding`` is pinned to ``identity`` rather than copied:
+        :meth:`_guarded_stream` relays ``aiter_raw()`` bytes and
+        ``_filter_response_headers`` drops the upstream ``content-encoding``,
+        so a compressed stream would reach the client as undeclared gzip.
+        Non-streaming bodies are decoded by httpx either way.
         """
-        out: dict[str, str] = {}
-        for k, v in request.headers.items():
-            lk = k.lower()
-            if lk in _HOP_BY_HOP or lk == "authorization":
-                continue
-            out[k] = v
+        out = forwardable_request_headers(request.headers)
+        out["accept-encoding"] = "identity"
         # Inject upstream auth (bearer/anthropic/header) for remote providers
         # that declare an auth_value_env. Local slot upstreams use auth_style
-        # "none" so this is a no-op for them. (Lights the previously-stubbed
-        # Agent J hook so authed cloud upstreams like MiniMax don't 401.)
+        # "none" so this is a no-op for them.
         out.update(self._upstreams.auth_headers(upstream))
         return out
 
@@ -1718,23 +1724,6 @@ class Dispatcher:
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────
-
-# Hop-by-hop headers never forwarded (RFC 7230 §6.1).
-_HOP_BY_HOP = frozenset(
-    {
-        "transfer-encoding",
-        "connection",
-        "keep-alive",
-        "proxy-authenticate",
-        "proxy-authorization",
-        "te",
-        "trailers",
-        "upgrade",
-        "content-encoding",
-        "content-length",
-        "host",
-    }
-)
 
 
 def _remap_model(body: dict[str, Any], new_model: str) -> bytes:

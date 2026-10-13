@@ -58,6 +58,25 @@ applying. Add those subsections to a version's section to surface them; see
   `hal0 doctor toolbox-pull` all read it. The runner-image catalogue now syncs
   by itself at startup and during `hal0 update`.
 
+### Security
+
+- The `/v1` dispatcher no longer passes the caller's credentials to the
+  upstream it picks (#2538). It used to copy every request header except
+  `Authorization` and the hop-by-hop set, so a dashboard request routed to a
+  remote cloud provider sent that provider the operator's `hal0_session`
+  cookie, which hal0 accepts as an admin login, along with any `X-API-Key`
+  and `X-hal0-*` header. Forwarding is now an allowlist in
+  `hal0.forwarded_headers`: `content-type`, `accept`, `user-agent`,
+  `anthropic-version`, `anthropic-beta`, `openai-organization`,
+  `openai-project` and `openai-beta`. The upstream's own key from its
+  `auth_value_env` is still added, and multipart audio keeps its boundary.
+  The dispatcher now asks upstreams for an unencoded body
+  (`accept-encoding: identity`), because it relays streams byte for byte
+  without a `content-encoding` header. The Hermes dashboard plugin proxy uses
+  the same allowlist, plus `If-None-Match` and `If-Modified-Since`; it
+  already stripped cookies and `Authorization`, and now also drops
+  `X-API-Key` and any client `X-hal0-*` header.
+
 ### Breaking
 
 - Upgrades now start at **1.3.0**. Every release manifest carries
