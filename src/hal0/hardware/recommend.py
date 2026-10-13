@@ -12,10 +12,10 @@ We do NOT invent model names.
 
 Device choice respects the canonical device enum
 (``hal0.model_meta.VALID_DEVICES`` — ``gpu-rocm``, ``gpu-vulkan``,
-``cpu``, ``npu``). The output also emits the legacy
-``backend`` field for one release so a downgrade to v0.1.x reads the
-recommendation file cleanly. Both translations (backend→device, device→
-default profile) come from the canonical maps in :mod:`hal0.model_meta`.
+``cpu``, ``npu``). The output carries ``device`` only: ``backend`` and
+``enabled`` are not slot keys any more, and ``SlotConfig`` forbids unknown
+keys (ADR-0029 §5). Both translations (backend→device, device→default
+profile) come from the canonical maps in :mod:`hal0.model_meta`.
 """
 
 from __future__ import annotations
@@ -239,10 +239,8 @@ def recommend_primary_slot(hw: HardwareInfo) -> dict[str, Any]:
     """Return a slots/primary.toml-shaped dict for ``hw``.
 
     Output is consumable by ``tomli_w.dumps`` and validates against
-    :class:`hal0.config.schema.SlotConfig`. The returned dict carries an
-    extra ``_rationale`` key under ``[meta]`` so the installer can write
-    a leading TOML comment explaining the picks — the SlotConfig model
-    is ``extra="allow"`` so this round-trips cleanly.
+    :class:`hal0.config.schema.SlotConfig` once the advisory ``_meta`` key
+    (the picks' rationale, for a leading TOML comment) is popped.
 
     Parameters
     ----------
@@ -254,8 +252,7 @@ def recommend_primary_slot(hw: HardwareInfo) -> dict[str, Any]:
     dict
         Slot config keyed in TOML order::
 
-          name, port, backend, device, runtime, profile, provider,
-          enabled, [model], [meta]
+          name, port, device, runtime, profile, provider, [model], [_meta]
 
         ``_meta["ctx_size"]`` is the recommended context window for the
         picked model. It is a profile tune (ADR-0029), so it is reported
@@ -279,9 +276,7 @@ def recommend_primary_slot(hw: HardwareInfo) -> dict[str, Any]:
     # more flat hard-coded 8192. (#513)
     context_size = _resolve_primary_ctx(model_id)
 
-    # v0.2: emit ``device`` as the canonical hardware-preference field.
-    # ``backend`` is also emitted so a downgrade to
-    # v0.1.x can still read the file before re-running the recommender.
+    # ``device`` is the canonical hardware-preference field.
     device = map_backend_to_device(backend)
 
     # Container-runtime era: a slot resolves its image + tuned flags from a
@@ -295,12 +290,10 @@ def recommend_primary_slot(hw: HardwareInfo) -> dict[str, Any]:
     return {
         "name": "chat",
         "port": 8081,
-        "backend": backend,
         "device": device,
         "runtime": "container",
         "profile": profile,
         "provider": "llama-server",
-        "enabled": False,  # operator runs `hal0 model pull <id>` first
         # ADR-0029: the window is a profile tune, not a slot key. The
         # recommender names the device's default profile and reports the
         # window it would pick for this model in ``_meta`` (advisory — apply

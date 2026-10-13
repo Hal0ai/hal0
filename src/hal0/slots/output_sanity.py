@@ -116,9 +116,8 @@ EXPECTED_TOKENS: tuple[str, ...] = (
 SANITY_ENV_VAR = "HAL0_SLOT_OUTPUT_SANITY"
 
 #: Per-slot opt-out key in the slot TOML (top level or under ``[slot]``).
-#: Registered in ``hal0.slot_config.TOLERATED_SLOT_CONFIG_KEYS`` so the write
-#: boundary accepts it — an escape hatch that only works via a hand edit is
-#: not an escape hatch.
+#: A declared ``SlotConfig`` field, so the write boundary accepts it — an
+#: escape hatch that only works via a hand edit is not an escape hatch.
 SANITY_CFG_KEY = "output_sanity"
 
 #: Keys a failed verdict stamps on the slot's state record ``extra``.

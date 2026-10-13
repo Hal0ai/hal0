@@ -198,10 +198,6 @@ def loaded_slot_from_config(
 
     raw_prompt = cfg.get("system_prompt")
     system_prompt = raw_prompt if isinstance(raw_prompt, str) else ""
-    if not system_prompt:
-        extra = cfg.get("extra")
-        if isinstance(extra, dict) and isinstance(extra.get("system_prompt"), str):
-            system_prompt = extra["system_prompt"]
 
     profile = cfg.get("profile")
     labels = frozenset(labels_of(cfg))

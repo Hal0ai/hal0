@@ -3006,7 +3006,9 @@ class SlotManager:
         # ``extra`` (adopted flag, modelless_ready_blocked, etc.) alone.
         rec = self._states.get(self._key(slot_name)) or read_state(self._state_file_for(slot_name))
         if rec is not None:
-            mirrored = {"backend", "provider"}
+            # ``backend`` is not a slot key (``device`` is); its mirror is
+            # re-derived from ``device`` / ``profile`` below.
+            mirrored = {"provider"}
             dirty = mirrored & updates.keys()
             new_extra = dict(rec.extra)
             for key in dirty:
@@ -3050,7 +3052,7 @@ class SlotManager:
             from hal0.slots.arbiter import gpu_exclusive_group
 
             if gpu_exclusive_group(cfg_dict) == "img":
-                image = cfg_dict.get("image") or cfg_dict.get("image_gen") or {}
+                image = cfg_dict.get("image") or {}
                 val = image.get("idle_restore_minutes") if isinstance(image, dict) else None
                 if isinstance(val, int) and not isinstance(val, bool) and val >= 0:
                     if val != self._arbiter.idle_restore_minutes:
@@ -3495,7 +3497,7 @@ class SlotManager:
                 continue
             if gpu_exclusive_group(data) != "img":
                 continue
-            image = data.get("image") or data.get("image_gen") or {}
+            image = data.get("image") or {}
             val = image.get("idle_restore_minutes") if isinstance(image, dict) else None
             if isinstance(val, int) and not isinstance(val, bool) and val >= 0:
                 return val
@@ -3937,7 +3939,7 @@ class SlotManager:
             # An embed/STT-primary slot ([npu].chat=false) has no chat model,
             # so the chat completion sentinel would fail and wedge it in
             # WARMING forever. Probe the real role instead.
-            npu_cfg = cfg.get("npu") or (cfg.get("extra") or {}).get("npu") or {}
+            npu_cfg = cfg.get("npu") or {}
             chat_on = npu_cfg.get("chat", True) is not False
             embed_on = bool(npu_cfg.get("embed"))
             if chat_on:

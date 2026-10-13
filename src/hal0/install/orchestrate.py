@@ -99,9 +99,10 @@ class PullPlan:
     bytes land — never before the model exists on disk (the start-before-model
     race). Since model-presence IS activation (#1369), withholding the id is the
     gate itself rather than a flag shadowing it. A FAILED pull leaves the
-    slot(s) model-less and marked (``[meta].pull_failed``), so a
-    half-provisioned box parks the slot instead of crash-looping a container
-    against a missing model.
+    slot(s) model-less (and logs it), so a half-provisioned box parks the slot
+    instead of crash-looping a container against a missing model. The failure
+    is not written into the slot file: a pull outcome is machine state, and
+    ``SlotConfig`` forbids keys nothing reads.
     """
 
     model_id: str
@@ -263,30 +264,26 @@ def _budgeted_profile(
 # ── Activate-on-pull-success (WS-E / #1108) ─────────────────────────────────────
 
 
-async def _activate_slot_model(
-    slot_manager, slot_name: str, model_id: str | None, *, failed: bool
-) -> None:
+async def _activate_slot_model(slot_manager, slot_name: str, model_id: str | None) -> None:
     """Best-effort stamp of a slot's ``model.default`` after its pull settles.
 
     ``model_id`` is the id to bind on success, or ``None`` to leave the slot
     model-less (the failure path) — model-presence is the activation signal
-    (#1369), so writing nothing IS leaving the slot parked.
+    (#1369), so writing nothing IS leaving the slot parked. A failed pull is
+    logged, never written into the slot file (it used to stamp
+    ``[meta].pull_failed``: nothing read it, nothing cleared it, and
+    ``SlotConfig`` forbids keys it does not declare).
 
     Non-aborting by design: a failed config rewrite must not crash the pull
-    driver. On a FAILED pull we also stamp ``[meta].pull_failed`` so the parked
-    slot is clearly marked (the dashboard / ``hal0 doctor`` can surface it).
+    driver.
     """
-    updates: dict[str, Any] = {}
-    if model_id:
-        updates["model"] = {"default": model_id}
-    if failed:
-        updates["meta"] = {"pull_failed": True}
-    if not updates:
+    if not model_id:
+        log.warning("install.slot_left_model_less slot=%s", slot_name)
         return
     # Activation is best-effort — the model still downloaded; the operator can
     # bind it by hand. Never let this abort the pull driver.
     with contextlib.suppress(Exception):
-        await slot_manager.update_config(slot_name, updates)
+        await slot_manager.update_config(slot_name, {"model": {"default": model_id}})
 
 
 async def run_pull_and_activate(plan: PullPlan, *, slot_manager) -> None:
@@ -295,10 +292,10 @@ async def run_pull_and_activate(plan: PullPlan, *, slot_manager) -> None:
     On SUCCESS: stamp ``model.default = plan.model_id`` on every
     ``plan.slot_names`` slot (the model now exists on disk, so a start is
     safe). On FAILURE (``run_pull`` raised, or the job settled
-    ``state == "failed"``): leave the slot(s) model-less and mark them, so
-    nothing crash-loops against a missing model.
+    ``state == "failed"``): leave the slot(s) model-less, so nothing
+    crash-loops against a missing model.
 
-    Re-raises the original exception after marking, so callers that inspect
+    Re-raises the original exception after parking, so callers that inspect
     ``gather(..., return_exceptions=True)`` results still see the failure.
     """
     from hal0.registry.pull import run_pull
@@ -307,14 +304,14 @@ async def run_pull_and_activate(plan: PullPlan, *, slot_manager) -> None:
         await run_pull(plan.job, **plan.kwargs)
     except BaseException:
         for name in plan.slot_names:
-            await _activate_slot_model(slot_manager, name, None, failed=True)
+            await _activate_slot_model(slot_manager, name, None)
         raise
     if getattr(plan.job, "state", None) == "failed":
         for name in plan.slot_names:
-            await _activate_slot_model(slot_manager, name, None, failed=True)
+            await _activate_slot_model(slot_manager, name, None)
         return
     for name in plan.slot_names:
-        await _activate_slot_model(slot_manager, name, plan.model_id, failed=False)
+        await _activate_slot_model(slot_manager, name, plan.model_id)
 
 
 def _ensure_registry_entry(registry, model_id) -> None:

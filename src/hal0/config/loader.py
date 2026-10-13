@@ -32,6 +32,7 @@ from hal0.config import paths
 from hal0.config.locking import PerLoopLock, async_file_lock, file_lock
 from hal0.config.schema import (
     CURRENT_SCHEMA_VERSION,
+    REMOVED_SLOT_KEYS,
     SEED_PROFILES,
     SEED_STACKS,
     AgentConfig,
@@ -443,8 +444,9 @@ def load_slot_config(slot_name: str, path: Path | None = None) -> SlotConfig:
 
     The on-disk shape (per haloai lib/config.py) nests fields under
     [slot], [model], etc.  We normalise that into the flat SlotConfig
-    shape: [slot] keys hoist to the top level, [model] stays nested,
-    everything else lands in ``extra``.
+    shape: [slot] keys hoist to the top level, [model] stays nested, and
+    every other table keeps its own name. A key the schema does not declare
+    fails the load, naming the key and the file (ADR-0029 §5).
 
     Args:
         slot_name: e.g. "primary", "embed", "stt", "tts".
@@ -456,7 +458,8 @@ def load_slot_config(slot_name: str, path: Path | None = None) -> SlotConfig:
 
     Raises:
         ConfigNotFound: If the slot TOML doesn't exist.
-        ConfigParseError: If the TOML is malformed or fails validation.
+        ConfigParseError: If the TOML is malformed, fails validation or
+            carries a key the schema does not declare.
     """
     target = path if path is not None else paths.slots_config_dir() / f"{slot_name}.toml"
     raw = _read_toml(Path(target))
@@ -464,9 +467,15 @@ def load_slot_config(slot_name: str, path: Path | None = None) -> SlotConfig:
     try:
         return SlotConfig.model_validate(flattened)
     except Exception as exc:
+        reason, unknown = _slot_validation_reason(exc)
         raise ConfigParseError(
-            f"failed to validate slot config {slot_name!r} at {target}: {exc}",
-            details={"path": str(target), "slot": slot_name, "reason": str(exc)},
+            f"failed to validate slot config {slot_name!r} at {target}: {reason}",
+            details={
+                "path": str(target),
+                "slot": slot_name,
+                "reason": reason,
+                "unknown_keys": unknown,
+            },
         ) from exc
 
 
@@ -491,9 +500,15 @@ def load_slot_config_by_id(slot_id: int, path: Path | None = None) -> SlotConfig
     try:
         return SlotConfig.model_validate(flattened)
     except Exception as exc:
+        reason, unknown = _slot_validation_reason(exc)
         raise ConfigParseError(
-            f"failed to validate id-keyed slot config {slot_id!r} at {target}: {exc}",
-            details={"path": str(target), "slot_id": slot_id, "reason": str(exc)},
+            f"failed to validate id-keyed slot config {slot_id!r} at {target}: {reason}",
+            details={
+                "path": str(target),
+                "slot_id": slot_id,
+                "reason": reason,
+                "unknown_keys": unknown,
+            },
         ) from exc
 
 
@@ -581,25 +596,67 @@ def list_slot_layout() -> dict[str, str]:
 # ── slot TOML shape helpers ──────────────────────────────────────────────────
 
 
+def _slot_validation_reason(exc: Exception) -> tuple[str, list[str]]:
+    """One readable reason for a failed slot validation, plus the unknown keys.
+
+    A key ``SlotConfig`` does not declare (``extra="forbid"``) is named as
+    ``unknown key 'lru'`` (``'[model].foo'`` inside a table), with what replaced
+    it when it is a key hal0 removed (:data:`REMOVED_SLOT_KEYS`). Every other
+    failure keeps pydantic's own message under its field path, so a slot with
+    one bad value and one stray key reports both. The second element lists the
+    unknown keys for callers that act on them.
+    """
+    errors = getattr(exc, "errors", None)
+    if not callable(errors):
+        return str(exc), []
+    try:
+        entries = list(errors())
+    except Exception:
+        return str(exc), []
+    unknown: list[str] = []
+    parts: list[str] = []
+    for entry in entries:
+        loc = tuple(str(p) for p in entry.get("loc", ()))
+        if entry.get("type") == "extra_forbidden":
+            key = f"[{loc[0]}].{'.'.join(loc[1:])}" if len(loc) > 1 else ".".join(loc)
+            unknown.append(key)
+            hint = REMOVED_SLOT_KEYS.get(key)
+            parts.append(f"unknown key {key!r}" + (f" ({hint})" if hint else ""))
+        elif loc == ("image",) and isinstance(entry.get("input"), str):
+            # A bare ``image = "<ref>"`` is the retired container-image override.
+            unknown.append("image")
+            parts.append(
+                "unknown key 'image' (a bare image ref was renamed 'image_pin'; "
+                "'[image]' is the image-generation settings table)"
+            )
+        else:
+            where = ".".join(loc)
+            msg = str(entry.get("msg", ""))
+            parts.append(f"{where}: {msg}" if where else msg)
+    if unknown:
+        parts.append(
+            "SlotConfig declares every key a slot file may carry (ADR-0029); remove the "
+            "key, or run `hal0 profile migrate` for a file written before ADR-0029"
+        )
+    return "; ".join(parts) or str(exc), unknown
+
+
 def _flatten_slot_toml(raw: dict[str, Any], slot_name: str) -> dict[str, Any]:
     """Normalise both slot-TOML shapes into the flat SlotConfig shape.
 
     Two on-disk shapes exist and must both load:
 
-    Legacy nested (haloai-compatible) — slot fields under a ``[slot]`` table::
+    Nested (haloai-compatible) — slot fields under a ``[slot]`` table::
 
         [slot]
         name = "primary"
         port = 8081
-        backend = "vulkan"
+        device = "gpu-vulkan"
 
         [model]
         default = "qwen3-4b-q4_k_m"
 
-        [defaults]
-        threads = 12
-
-    Current flat — slot fields as top-level scalars alongside sibling tables::
+    Flat — slot fields as top-level scalars alongside sibling tables::
 
         name = "primary"
         port = 8081
@@ -610,31 +667,25 @@ def _flatten_slot_toml(raw: dict[str, Any], slot_name: str) -> dict[str, Any]:
         default = "qwen3-4b-q4_k_m"
 
         [server]
-        extra_args = "--foo"
+        env = { HSA_OVERRIDE_GFX_VERSION = "11.0.0" }
 
     In both shapes, slot fields are *scalars* while sibling sections
-    (``[model]``, ``[server]``, ``[npu]``, ``[image]``, ``[defaults]``, …)
-    are *tables*. We therefore hoist every top-level scalar plus any
-    ``[slot]`` table to the top level, keep ``[model]`` nested, and stash
-    the remaining tables under ``extra`` for lossless round-tripping.
+    (``[model]``, ``[server]``, ``[npu]``, ``[image]``, …) are *tables*. We
+    hoist every top-level scalar plus the ``[slot]`` table to the top level
+    (``[slot]`` wins on a clash, as it does on the launch path) and carry every
+    sibling table through under its own name. Nothing is set aside: a key or a
+    table ``SlotConfig`` does not declare reaches it and fails the load, naming
+    the key (ADR-0029 §5).
     """
     if not isinstance(raw, dict):
         raw = {}
 
+    out: dict[str, Any] = {
+        k: v for k, v in raw.items() if k not in ("slot", "model") and not isinstance(v, dict)
+    }
     slot_section = raw.get("slot")
-    out: dict[str, Any] = {}
     if isinstance(slot_section, dict):
-        # Legacy nested shape: slot fields live under [slot]. Preserve the
-        # original behaviour (every top-level sibling → extra) so stray
-        # top-level scalars still round-trip untouched.
         out.update(slot_section)
-    else:
-        # Flat shape: slot fields are top-level scalars alongside sibling
-        # tables. Hoist the scalars; tables are handled below.
-        for k, v in raw.items():
-            if k in ("slot", "model") or isinstance(v, dict):
-                continue
-            out[k] = v
 
     # Fall back to the on-disk filename for `name` if the TOML omits it.
     out.setdefault("name", slot_name)
@@ -646,24 +697,20 @@ def _flatten_slot_toml(raw: dict[str, Any], slot_name: str) -> dict[str, Any]:
 
     # Heal-on-load (O23): a type-less, llm-shaped slot defaults to type="llm"
     # so hal0/<slot> aliases resolve on boxes whose TOML predates the seeded
-    # type key. Skip when raw carries an [image] table (image-gen slot) — that
-    # table lands in ``extra`` here, so guard on ``raw`` explicitly (the
+    # type key. Skip when raw carries an [image] table (image-gen slot): the
+    # tables are carried over below, so guard on ``raw`` explicitly (the
     # comfyui provider guards it too).
     from hal0.slots._cfg_helpers import heal_missing_llm_type
 
     if not isinstance(raw.get("image"), dict):
         heal_missing_llm_type(out)
 
-    # Anything not already hoisted (sibling tables like [defaults],
-    # [server], [npu], [image]; and, in the legacy shape, stray top-level
-    # scalars) lands in `extra` so we don't lose it on round-trip.
-    extra: dict[str, Any] = {}
+    # Sibling tables ([server], [npu], [image], and any the schema does not
+    # know) keep their own names.
     for k, v in raw.items():
-        if k in ("slot", "model") or k in out:
+        if k in ("slot", "model") or k in out or not isinstance(v, dict):
             continue
-        extra[k] = v
-    if extra:
-        out["extra"] = extra
+        out[k] = v
 
     return out
 
@@ -671,42 +718,16 @@ def _flatten_slot_toml(raw: dict[str, Any], slot_name: str) -> dict[str, Any]:
 def _unflatten_slot_toml(cfg: SlotConfig) -> dict[str, Any]:
     """Inverse of _flatten_slot_toml — produce the on-disk shape.
 
-    Writes only ``device`` (P2-device: the sole persisted truth).
-    ``backend`` is no longer a ``SlotConfig`` field — a legacy on-disk
-    ``backend`` key is promoted to ``device`` and dropped on load (see
-    ``SlotConfig._promote_backend_to_device``), so it never reaches this
-    round-trip.
+    Every declared scalar goes under ``[slot]`` (the stable ``id`` only when one
+    is assigned, so a name-keyed file round-trips without a stray ``id``), the
+    typed tables keep their own names, and a value of ``None`` — which TOML
+    cannot represent — is left out.
     """
-    data = cfg.model_dump(mode="python", exclude_none=False)
-    slot_tbl: dict[str, Any] = {
-        "name": data["name"],
-        "port": data["port"],
-        "device": data["device"],
-        "provider": data["provider"],
-        "idle_timeout_s": data["idle_timeout_s"],
-    }
-    # Bilingual self-description (P3-runtime-db): stamp the stable ``id`` into
-    # the [slot] table whenever one is assigned, so an id-keyed file names its
-    # own row and a name-keyed file (id is None) round-trips byte-identically
-    # to the pre-id shape (no stray ``id`` key).
-    if data.get("id") is not None:
-        slot_tbl["id"] = data["id"]
-    out: dict[str, Any] = {
-        "slot": slot_tbl,
-        "model": data["model"],
-    }
-    # None has no TOML representation, so elide any None in the model table.
-    model_tbl = out.get("model")
-    if isinstance(model_tbl, dict):
-        out["model"] = {k: v for k, v in model_tbl.items() if v is not None}
-    extra = data.get("extra") or {}
-    if isinstance(extra, dict):
-        for k, v in extra.items():
-            # NOTE: keep user-authored sections (`[defaults]`, etc.) at
-            # their original top-level position on round-trip.
-            if k in ("slot", "model"):
-                continue
-            out[k] = v
+    data = cfg.model_dump(mode="python", exclude_none=True)
+    model = data.pop("model", {})
+    tables = {k: data.pop(k) for k in ("server", "npu", "image") if k in data}
+    out: dict[str, Any] = {"slot": data, "model": model}
+    out.update(tables)
     return out
 
 

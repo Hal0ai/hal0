@@ -31,7 +31,6 @@ class TestUnknownKeys:
             "provider": "llama-server",
             "runtime": "container",
             "default": True,
-            "lru": True,
             "profile": "agent",
             "model": {"default": "m"},
             "server": {"env": {"HSA_OVERRIDE_GFX_VERSION": "11.5.1"}},
@@ -69,11 +68,13 @@ class TestUnknownKeys:
             "model.extra"
         ]
 
-    def test_string_image_override_tolerated(self) -> None:
-        assert unknown_slot_config_keys({"image": "ghcr.io/x/y:z"}) == []
+    def test_string_image_override_is_unknown(self) -> None:
+        """The bare container-image override is gone (``image_pin``); ``image``
+        is the image-generation settings table."""
+        assert unknown_slot_config_keys({"image": "ghcr.io/x/y:z"}) == ["image"]
 
-    def test_extra_tables_pass_verbatim(self) -> None:
-        assert unknown_slot_config_keys({"extra": {"whatever": {"nested": 1}}}) == []
+    def test_there_is_no_extra_passthrough(self) -> None:
+        assert unknown_slot_config_keys({"extra": {"whatever": {"nested": 1}}}) == ["extra"]
 
     def test_nested_slot_table_checked_against_top_vocabulary(self) -> None:
         assert unknown_slot_config_keys({"slot": {"port": 8081, "prot": 1}}) == ["slot.prot"]

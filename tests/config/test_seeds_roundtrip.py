@@ -38,37 +38,14 @@ def test_installer_slot_loads_unchanged(slot_path: Path, tmp_hal0_home: str) -> 
 def test_installer_slot_load_save_load_is_stable(
     slot_path: Path, tmp_hal0_home: str, tmp_path: Path
 ) -> None:
-    """load -> save -> load must be a fixed point for the fields
-    ``_unflatten_slot_toml`` actually re-serializes (hoist/tuck round-trip).
-
-    NOTE: this deliberately does NOT assert full ``SlotConfig`` equality.
-    ``_unflatten_slot_toml`` (loader.py) writes an explicit field whitelist
-    (name/port/device/provider/idle_timeout_s + model; P2-device dropped
-    ``backend``, #1369 dropped ``enabled`` and ADR-0029 dropped ``workers``,
-    along with the fields)
-    and silently drops ``profile``/``runtime``/other declared fields plus
-    any pydantic-``extra``-allow attribute not in that whitelist (e.g.
-    a shipped slot's top-level ``type = "llm"``) -- a PRE-EXISTING loader
-    gap, verified present on ``rework/descar`` before this P3-schema change
-    and unrelated to the seed-data externalization this PR makes. Fixing
-    that whitelist further is Part B/D territory (SlotConfig split), explicitly
-    deferred out of this lane's scope -- see the P3-schema spec's Part B/D
-    sequencing. This test locks today's actual contract so a future change
-    to the whitelist (deliberate or not) is visible in the diff.
-    """
+    """load -> save -> load is a fixed point for every field: the slot keeps its
+    profile, type and tables across a save (``_unflatten_slot_toml`` writes every
+    declared field)."""
     first = load_slot_config(slot_path.stem, path=slot_path)
     dest = tmp_path / f"{slot_path.stem}.toml"
     save_slot_config(first, path=dest)
     second = load_slot_config(slot_path.stem, path=dest)
-    for field in (
-        "name",
-        "port",
-        "device",
-        "provider",
-        "idle_timeout_s",
-        "model",
-    ):
-        assert getattr(first, field) == getattr(second, field), field
+    assert second == first
 
 
 def test_installer_profiles_toml_loads_and_carries_no_seeds() -> None:

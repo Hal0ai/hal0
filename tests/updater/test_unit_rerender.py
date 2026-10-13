@@ -84,7 +84,6 @@ async def _mk_slot(name: str, port: int) -> None:
             "profile": "vulkan",
             "provider": "llama-server",
             "runtime": "container",
-            "group": "custom",
             "model": {"default": "some-model"},
         },
     )

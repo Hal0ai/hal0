@@ -1909,7 +1909,7 @@ def test_list_slots_omits_enable_thinking_even_when_pre_migration_debris_present
     isolated_client: TestClient,
 ) -> None:
     """spec-hw-slot-ownership §1: a stray slot-level ``enable_thinking`` (pre-
-    migration debris, still tolerated by SlotConfig's extra="allow" on load)
+    migration debris: the raw listing path ignores a key it does not read)
     must NOT be lifted onto the /api/slots payload — reasoning is model-owned
     now, read from /api/models instead."""
     _seed_slot_toml(

@@ -1647,7 +1647,7 @@ async def images_generations(request: Request, dispatcher: DispatcherDep) -> Res
 
         cfgs = await manager.iter_configs()
         img_cfg = next((c for c in cfgs if gpu_exclusive_group(c) == "img"), None)
-        img_section = (img_cfg or {}).get("image") or (img_cfg or {}).get("image_gen") or {}
+        img_section = (img_cfg or {}).get("image") or {}
         if isinstance(img_section, dict):
             default_size = img_section.get("default_size")
             if not body.get("size") and isinstance(default_size, str) and default_size:

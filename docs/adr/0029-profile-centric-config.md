@@ -197,7 +197,13 @@ apply, `SlotManager.create/update_config`) reject `context_size`/`ctx_size`,
 profile". That code replaces `slot.model_owned_key_denied`. After conversion
 `SlotConfig`, `ModelConfig` and `ServerConfig` forbid unknown keys. A slot
 file the converter could not convert fails to load with `slot.unconverted`,
-which names the converter report.
+which names the converter report. Any other key fails the load too, naming
+the key and the file (`config.parse_error`). There is no catch-all and no
+allow-list: every key a hal0 writer emits is a declared field, the same field
+set gates `POST /api/slots`, `PUT /api/slots/{name}/config` and the in-process
+writers, and the converter strips the retired `lru` with `backend`, `runtime`
+and `enabled`. The typed load is what refuses; the launch path reads the slot
+file as a raw dict and ignores a key it does not read.
 
 ### 6. API, MCP and UI changes (1.x minor, with a CHANGELOG Breaking note)
 

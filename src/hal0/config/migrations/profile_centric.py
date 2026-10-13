@@ -58,6 +58,7 @@ SLOT_DROP_KEYS: tuple[str, ...] = (
     "runtime",
     "enabled",
     "backend",
+    "lru",
     "ctx_size",
     "mtp",
     "enable_thinking",

@@ -246,8 +246,7 @@ def test_failed_pull_leaves_the_slot_model_less_and_marked(
     sm, reg = _FakeSlotManager(), _FakeRegistry()
     with pytest.raises(RuntimeError):
         asyncio.run(provision_brain_model(hw=_hw(), slot_manager=sm, registry=reg))
-    assert sm.updates == [(BRAIN_SLOT_NAME, {"meta": {"pull_failed": True}})]
-    assert all("model" not in upd for _, upd in sm.updates)
+    assert sm.updates == []  # nothing written: model-less IS parked
 
 
 def test_raising_pull_also_leaves_the_slot_model_less(
@@ -257,7 +256,7 @@ def test_raising_pull_also_leaves_the_slot_model_less(
     sm, reg = _FakeSlotManager(), _FakeRegistry()
     with pytest.raises(OSError, match="unreachable"):
         asyncio.run(provision_brain_model(hw=_hw(), slot_manager=sm, registry=reg))
-    assert sm.updates == [(BRAIN_SLOT_NAME, {"meta": {"pull_failed": True}})]
+    assert sm.updates == []
 
 
 # ── the install.sh entry point never raises ─────────────────────────────────

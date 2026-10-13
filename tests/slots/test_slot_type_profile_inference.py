@@ -40,7 +40,6 @@ def _cfg(name: str, slot_type: str, device: str, model: str = "unstamped") -> di
         "type": slot_type,
         "device": device,
         "provider": "llama-server",
-        "group": "custom",
         "model": {"default": model},
     }
 

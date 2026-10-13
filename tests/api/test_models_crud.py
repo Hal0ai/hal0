@@ -1183,7 +1183,7 @@ def _boot_with_ghosts(tmp_hal0_home: str, *, mounted: bool = True) -> tuple[Path
         f'[models]\nroots = ["{root}"]\nauto_scan_on_start = true\n', encoding="utf-8"
     )
     (etc / "slots" / "chat.toml").write_text(
-        'name = "chat"\nport = 8081\nbackend = "vulkan"\nprovider = "llama-server"\n'
+        'name = "chat"\nport = 8081\ndevice = "gpu-vulkan"\nprovider = "llama-server"\n'
         '[model]\ndefault = "ghost-referenced"\n',
         encoding="utf-8",
     )

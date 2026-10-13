@@ -678,10 +678,9 @@ async def test_run_pull_and_activate_leaves_model_empty_on_failed_job(monkeypatc
     await orchestrate.run_pull_and_activate(plan, slot_manager=sm)
 
     assert sm.model_default["chat"] == ""
-    name, updates = sm.updates[-1]
-    assert name == "chat"
-    assert "model" not in updates
-    assert updates["meta"] == {"pull_failed": True}
+    # A failed pull writes nothing into the slot file: model-less IS parked, and
+    # SlotConfig declares no ``meta`` table (nothing ever read ``pull_failed``).
+    assert sm.updates == []
 
 
 async def test_run_pull_and_activate_marks_and_reraises_on_exception(monkeypatch):
@@ -706,4 +705,4 @@ async def test_run_pull_and_activate_marks_and_reraises_on_exception(monkeypatch
         await orchestrate.run_pull_and_activate(plan, slot_manager=sm)
 
     assert sm.model_default["chat"] == ""
-    assert sm.updates[-1][1]["meta"] == {"pull_failed": True}
+    assert sm.updates == []

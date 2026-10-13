@@ -46,9 +46,9 @@ def _cfg_effective_backend(cfg: Any) -> str | None:
     d = _cfg_to_dict(cfg)
     device = d.get("device")
     if not device:
-        # Legacy TOMLs may carry only ``backend``; promote it the same way
-        # SlotConfig._promote_backend_to_device would, so we still emit the
-        # device-derived token rather than the raw legacy string.
+        # An unconverted TOML may carry only ``backend`` (the profile-centric
+        # conversion rewrites it to ``device``); map it so a raw reader still
+        # emits the device-derived token rather than the raw legacy string.
         legacy = d.get("backend")
         if not legacy:
             return None
@@ -317,13 +317,14 @@ def guard_slot_write_payload(updates: dict[str, Any]) -> None:
       - :func:`~hal0.slot_config.reject_slot_tuning_keys` — every tune
         (context window, ``[server].extra_args``, ``parallel``,
         ``chat_template``, ``mtp``, ``enable_thinking``, ``vision``,
-        ``workers``) belongs on the slot's profile (ADR-0029 §5).
-        ``SlotConfig`` is ``extra="allow"``, so without this an in-process
-        writer would persist a file that then fails to load as
-        ``slot.unconverted``.
-      - :func:`~hal0.slot_config.reject_removed_slot_keys` — ``enabled`` and
-        friends (#1369) round-trip as inert debris while the caller believes
-        the setting took.
+        ``workers``) belongs on the slot's profile (ADR-0029 §5). Without
+        this an in-process writer would persist a file that then fails to
+        load as ``slot.unconverted``.
+      - :func:`~hal0.slot_config.reject_unknown_slot_keys` — a key
+        ``SlotConfig`` does not declare (``extra="forbid"``) would fail the
+        slot's next load, and a key hal0 removed (``enabled``, #1369) would
+        be inert debris while the caller believes the setting took. Removed
+        keys are reported with their replacement.
 
     Checked against ``updates`` (the write payload), NEVER the merged result:
     converting a slot file is the one-shot converter's job
@@ -332,10 +333,10 @@ def guard_slot_write_payload(updates: dict[str, Any]) -> None:
     Raises:
         hal0.errors.BadRequest: the payload crosses a partition.
     """
-    from hal0.slot_config import reject_removed_slot_keys, reject_slot_tuning_keys
+    from hal0.slot_config import reject_slot_tuning_keys, reject_unknown_slot_keys
 
     reject_slot_tuning_keys(updates)
-    reject_removed_slot_keys(updates)
+    reject_unknown_slot_keys(updates)
 
 
 def reconcile_slot_updates(base: dict[str, Any], updates: dict[str, Any]) -> dict[str, Any]:
