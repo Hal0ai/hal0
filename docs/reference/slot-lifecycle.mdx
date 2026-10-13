@@ -246,14 +246,13 @@ previously were not.
 
 A slot holds placement (device, layers, threads, runner), its model and its profile. The profile holds every tune; the model row holds facts about its file.
 
-Two entry points enforce the same key-space rule. The slot HTTP routes (`POST /api/slots`, `PUT /api/slots/{name}/config`, `PATCH /api/slots/{name}/defaults`) check the body in `api.routes.slots` before touching disk. Stacks-apply does not pass through those routes; it goes through `guard_slot_write_payload` (`hal0.slots.config_write`, via `reconcile_and_guard_slot_config`). Both refuse:
+Every write of a slot file goes through `guard_slot_write_payload` (`hal0.slots.config_write`): `SlotManager.create()` runs it on the new slot, and `SlotManager.update_config()` and stacks-apply run it through `reconcile_and_guard_slot_config`. The slot HTTP routes (`POST /api/slots`, `PUT /api/slots/{name}/config`, `PATCH /api/slots/{name}/defaults`) also check the body in `api.routes.slots` before anything else, so their "belongs on a profile" answer comes before a generic unknown-key error. They refuse:
 
 - **A tuning key** (`[model].context_size` / `ctx_size`, `[server].extra_args`, `parallel`, `chat_template`, `workers`, `mtp`, `enable_thinking`, `vision`) with a 400 `slot.tuning_key_denied` ("belongs on a profile"). Set it on the slot's profile (`PUT /api/profiles/{name}`) or pick another profile.
 - **A llama-server option in `[server].env`** (`LLAMA_ARG_*`, `LLAMA_API_KEY`, `HF_TOKEN`, `MTMD_BACKEND_DEVICE`) with a 400 `slot.llama_env_denied`. llama-server reads each of them as a launch option: a `LLAMA_ARG_*` tune goes in the profile's `flags` (when that flag is allowed there), and the other three set options hal0 owns (see [Config schema](/docs/reference/config-schema/)).
+- **A key removed from the slot schema** (for example `enabled`) with a 400 `slot.removed_key_denied`.
 
 `PATCH /api/slots/{name}/defaults` only rebinds the slot's model (`{"default": "<model id>"}`) and refuses tuning keys the same way.
-
-Code that calls `SlotManager.create()` or `update_config()` directly, without going through the routes or stacks-apply, is not screened for tuning keys by either entry point; `create()` applies only the `[server].env` check. Such callers must keep tuning keys out of the payload themselves.
 
 A slot file on disk that still carries a tuning key is refused at launch with `slot.unconverted`, and the typed slot-config loader rejects it too, until `hal0 profile migrate --apply` removes the key. The exception is a slot the conversion blocked: while its file is unchanged since, it keeps launching the command it ran before the conversion, and `GET /api/slots` reports it as `conversion_blocked` (`reason`, `fix`, `running_pre_conversion`).
 
