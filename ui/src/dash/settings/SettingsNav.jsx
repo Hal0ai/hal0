@@ -11,6 +11,7 @@ export const NAV_GROUPS = [
     items: [
       { id: "overview", label: "Overview" },
       { id: "security", label: "Security" },
+      { id: "network", label: "Network" },
       { id: "doctor", label: "Doctor" },
     ],
   },

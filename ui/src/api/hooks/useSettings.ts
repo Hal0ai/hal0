@@ -59,6 +59,26 @@ export function useSettingsUpdate() {
   })
 }
 
+// POST /api/settings/network (#2382) — a [network] edit the server applies
+// to the extra_origins list it reads under the config lock, so a stale page
+// can't write back an origin removed elsewhere (a whole-list PUT would).
+export type NetworkEdit = {
+  public_url?: string | null
+  add_origins?: string[]
+  remove_origins?: string[]
+}
+
+export function useSettingsNetworkEdit() {
+  const qc = useQueryClient()
+  return useMutation<Hal0Settings, Hal0Error, NetworkEdit>({
+    mutationFn: (body) => apiPost<Hal0Settings>(ENDPOINTS.settingsNetwork, body),
+    onSuccess: (next) => {
+      qc.setQueryData(SETTINGS_KEY, next)
+      qc.invalidateQueries({ queryKey: SETTINGS_FIELDS_KEY })
+    },
+  })
+}
+
 export function useSettingsReload() {
   const qc = useQueryClient()
   return useMutation<Hal0Settings, Hal0Error, void>({

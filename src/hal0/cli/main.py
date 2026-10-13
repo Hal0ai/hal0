@@ -41,6 +41,7 @@ from hal0.cli.doctor_commands import app as doctor_app
 from hal0.cli.mcp_commands import app as mcp_app
 from hal0.cli.memory_commands import app as memory_app
 from hal0.cli.model_commands import app as model_app
+from hal0.cli.network_commands import app as network_app
 from hal0.cli.oauth_commands import app as oauth_app
 from hal0.cli.ports_command import ports_cmd
 from hal0.cli.profile_commands import app as profile_app
@@ -98,6 +99,9 @@ app.add_typer(mcp_app, name="mcp")
 # `board` is a thin list|show|add|move slice of /api/board.
 app.add_typer(auth_app, name="auth")
 app.add_typer(board_app, name="board")
+# #2382 — ``hal0 network {public-url,origins}``: persisted browser-origin
+# additions in hal0.toml [network], which survive an installer re-run.
+app.add_typer(network_app, name="network")
 # `setup` is an INTERNAL entry point, hidden from `hal0 --help` (v1.0): the
 # installer is the single user-facing way to provision a box, and install.sh
 # drives `hal0 setup --auto` itself (see the "First-run seeding" step there).

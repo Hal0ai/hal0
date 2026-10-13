@@ -366,6 +366,11 @@ no restart. `require_auth`/`trust_forwarded_for` can instead be persisted to
 `hal0.toml`'s `[security]` table (what the Settings page writes); the env
 var, when set, always wins over the persisted value.
 
+`HAL0_ALLOWED_ORIGINS` is the one exception to "the env var wins": the
+installer manages it, and hal0 adds `hal0.toml`'s `[network].public_url`
+origin and `[network].extra_origins` on top of it rather than replacing it.
+See [Allow the public URL](#allow-the-public-url).
+
 ## TLS still needs a proxy
 
 hal0 doesn't terminate TLS or manage certificates — the admin-key/session
@@ -429,6 +434,43 @@ If your proxy forwards `X-Forwarded-For`, set `HAL0_TRUST_FORWARDED_FOR=true`
 (see the Rate limiting section above) once you've confirmed the proxy itself
 strips any client-supplied value — otherwise treat hal0's own admin-key auth
 as the access control and skip proxy-level basic auth entirely.
+
+### Allow the public URL
+
+A browser on `https://hal0.example.com` sends that as its `Origin`, and the
+[origin check](#origin-protection) refuses state-changing requests and
+WebSocket upgrades from an origin it doesn't know. Tell hal0 the URL once:
+
+```sh
+hal0 network public-url set https://hal0.example.com
+```
+
+This writes `public_url` to `hal0.toml`'s `[network]` table (Settings ▸
+Network writes the same key). Its origin joins the allowlist on
+the next request, with no restart. For any other name you reach hal0 by,
+such as a second proxy, a MagicDNS name or `http://box.lan:8080`, add the
+origin itself:
+
+```sh
+hal0 network origins add http://box.lan:8080
+hal0 network origins list
+```
+
+Each entry is `scheme://host[:port]` with no path. Hosts must be a DNS name,
+an IPv4 address or a bracketed IPv6 address; an internationalised name is
+stored in its punycode form, which is what browsers send. hal0 rejects
+anything else when you save it. `hal0 network origins remove <origin>` and
+`hal0 network public-url clear` revoke an origin the same way, on the next
+request.
+
+This is the one way to allow an extra origin. Don't add origins to
+`HAL0_ALLOWED_ORIGINS` in `/etc/hal0/api.env` by hand. That line sits inside
+the installer-managed block, which every installer run rewrites, so a
+hand-added origin disappears on the next re-run. The `[network]` keys sit in
+`hal0.toml` and survive it, because hal0 adds them on top of
+`HAL0_ALLOWED_ORIGINS` at runtime. An installer run with `HAL0_PUBLIC_URL` set
+saves the URL as `public_url` if one isn't set yet. It never replaces one that
+is.
 
 ## The second listener: OpenWebUI on :3001
 

@@ -20,6 +20,11 @@ Endpoints:
                                       ChangeSet computation, writes
                                       nothing — for a confirm-before-apply
                                       drawer (#1967, #2195, #2203, #1511).
+    POST /api/settings/network      — edit ``[network]`` in place: set or
+                                      clear ``public_url``, add or remove
+                                      ``extra_origins`` entries, applied to
+                                      the list on disk inside the config
+                                      transaction (#2382).
     POST /api/settings/reload       — re-read /etc/hal0/hal0.toml from
                                       disk into the running process.
     GET  /api/settings/schema       — pydantic JSON schema of Hal0Config
@@ -60,7 +65,7 @@ from hal0.api._settings_changeset import (
 from hal0.api._settings_fields import build_settings_fields
 from hal0.api.middleware.error_codes import BadRequest, Hal0Error
 from hal0.config.loader import hal0_config_txn, load_hal0_config
-from hal0.config.schema import Hal0Config
+from hal0.config.schema import Hal0Config, normalise_origin
 from hal0.registry.model_store import (
     MigrationPlan,
     build_suggestions,
@@ -287,6 +292,98 @@ async def reload_settings(request: Request) -> dict[str, Any]:
         raise
     request.app.state.hal0_config = cfg
     return _config_to_dict(cfg)
+
+
+_NETWORK_EDIT_KEYS = frozenset({"public_url", "add_origins", "remove_origins"})
+
+
+def _origin_list(body: dict[str, Any], key: str) -> list[str]:
+    """``body[key]`` as a list of canonical origins; any bad entry refuses the call."""
+    value = body.get(key, [])
+    if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
+        raise BadRequest(f'"{key}" must be a list of strings')
+    out: list[str] = []
+    for item in value:
+        try:
+            origin = normalise_origin(item)
+        except ValueError as exc:
+            raise ConfigInvalidError(
+                "hal0 config failed schema validation",
+                details={"network.extra_origins": str(exc)},
+            ) from exc
+        if origin not in out:
+            out.append(origin)
+    return out
+
+
+@router.post("/network")
+async def edit_network(request: Request) -> dict[str, Any]:
+    """Edit ``[network]`` in place, atomically (#2382).
+
+    Body: any of ``{"public_url": str | null, "add_origins": [str],
+    "remove_origins": [str]}``. Every origin is validated before anything is
+    written, so a bad entry changes nothing. The removals and additions are
+    applied to the ``extra_origins`` list read from disk inside
+    :func:`hal0_config_txn`, never to a list the client read earlier, so two
+    clients (``hal0 network origins``, the Settings page, a hand edit) cannot
+    write back an origin the other removed or drop one the other added.
+    ``PUT /api/settings`` with a whole list would. Returns the same shape as
+    ``PUT /api/settings``, so ``_hal0.changeset.changes`` is empty when
+    nothing changed.
+    """
+    try:
+        body = await request.json()
+    except Exception as exc:
+        raise Hal0Error("request body must be valid JSON", details={"error": str(exc)}) from exc
+    if not isinstance(body, dict):
+        raise Hal0Error("request body must be a JSON object")
+    unknown = sorted(set(body) - _NETWORK_EDIT_KEYS)
+    if unknown:
+        raise BadRequest(
+            "unknown key(s) in a [network] edit: " + ", ".join(unknown),
+            details={"allowed": sorted(_NETWORK_EDIT_KEYS)},
+        )
+    if body.get("public_url") is not None and not isinstance(body["public_url"], str):
+        raise BadRequest('"public_url" must be a string or null')
+    add = _origin_list(body, "add_origins")
+    remove = _origin_list(body, "remove_origins")
+
+    async with hal0_config_txn(request) as txn:
+        patch: dict[str, Any] = {}
+        if "public_url" in body:
+            patch["public_url"] = body["public_url"]
+        if add or remove:
+            kept = [o for o in txn.config.network.extra_origins if o not in remove]
+            patch["extra_origins"] = [*kept, *(o for o in add if o not in kept)]
+        try:
+            cs = compute_settings_changeset(txn.config, {"network": patch})
+        except ValidationError as exc:
+            raise ConfigInvalidError(
+                "hal0 config failed schema validation",
+                details=_validation_error_details(exc),
+            ) from exc
+        if cs.changed:
+            try:
+                txn.save(cs.merged)
+            except OSError as exc:
+                raise Hal0Error(
+                    f"could not persist hal0 config: {exc}",
+                    details={"error": str(exc), "errno": getattr(exc, "errno", None)},
+                ) from exc
+
+    event_bus = getattr(request.app.state, "events", None)
+    if event_bus is not None and cs.changed:
+        await event_bus.emit(
+            "system.config_save",
+            "info",
+            "system",
+            "hal0 config saved",
+            data={"keys": ["network"]},
+        )
+
+    config_view = _config_to_dict(cs.merged)
+    config_view["_hal0"] = {"apply_plan": cs.plan, "changeset": changeset_payload(cs)}
+    return config_view
 
 
 @router.get("/schema")

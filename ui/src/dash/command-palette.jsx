@@ -283,6 +283,7 @@ function buildCommandItems(slots, models, activePull, owuiUrl = "") {
   [
     { id: "set-overview",  label: "Overview",             route: "settings/overview", sub: "health, services, hardware, requests · telemetry, version" },
     { id: "set-security",  label: "Security",             route: "settings/security", sub: "auth enforcement, key rotation, route exposure" },
+    { id: "set-network",   label: "Network",              route: "settings/network",  sub: "public URL, extra browser origins · [network]" },
     { id: "set-doctor",    label: "Doctor",               route: "settings/doctor",   sub: "system diagnostics" },
     { id: "set-defaults",  label: "Loaded Models",        route: "settings/slots",    sub: "per-modality default slot · slot pool · library" },
     { id: "set-capabilities", label: "AI Capabilities",  route: "settings/capabilities", sub: "TTS, STT, embeddings, reranking, image gen · NPU anchor" },

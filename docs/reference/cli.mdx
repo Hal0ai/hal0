@@ -427,6 +427,23 @@ route, same behaviour, different vocabulary.
 | `auth require <toggle>` | `toggle` (required) | — |
 | `auth reset-key` | — (run with `sudo`) | `--force`/`-f` |
 
+## `hal0 network` — browser origins hal0 accepts
+
+Edits `hal0.toml` `[network]` through the API, never `api.env`, so the values
+survive an installer re-run. `public-url set|clear` use `PUT /api/settings`.
+`origins add|remove` use `POST /api/settings/network`, which applies the one
+entry to the list on disk, so a concurrent edit elsewhere is never lost.
+Changes apply on the next request, with no restart. See [Allow the public URL](/docs/operate/auth#allow-the-public-url).
+
+| Command | Args | Flags |
+|---|---|---|
+| `network public-url show` | — | — |
+| `network public-url set <url>` | `url`: absolute `http`/`https` URL | — |
+| `network public-url clear` | — | — |
+| `network origins list` | — | — |
+| `network origins add <origin>` | `origin`: `scheme://host[:port]`, no path | — |
+| `network origins remove <origin>` | `origin` | — |
+
 ## `hal0 oauth` — connect OAuth providers for Hermes skills
 
 Consent is a link, not a pasted code: the provider redirects straight back to

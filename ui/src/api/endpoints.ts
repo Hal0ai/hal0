@@ -344,6 +344,10 @@ export const ENDPOINTS = {
   // writes nothing (#1967, #2195, #2203, #1511) — backs a confirm-before-
   // apply preview drawer.
   settingsPreview: '/api/settings/preview',
+  // Edit hal0.toml [network] in place (#2382): public_url plus add/remove
+  // extra_origins entries, applied to the list on disk inside the config
+  // transaction. Same response shape as the PUT.
+  settingsNetwork: '/api/settings/network',
   // Single-source-of-truth model storage (Settings → Storage).
   settingsModelsStore: '/api/settings/models/store',
   settingsModelsStoreMigrate: '/api/settings/models/store/migrate',

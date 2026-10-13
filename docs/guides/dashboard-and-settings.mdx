@@ -150,6 +150,10 @@ one line and a link here rather than a repeat.
   required, whether an admin key is set, and the tier; rotates the admin
   or client key; shows the live route-exposure table. See
   [Auth](/docs/operate/auth).
+- **Network** — the browser origins hal0 accepts on top of the installer's
+  list: the reverse-proxy **Public URL** and **Extra origins**, saved to
+  `hal0.toml` `[network]` and applied on the next request. Same as
+  `hal0 network`. See [Allow the public URL](/docs/operate/auth#allow-the-public-url).
 - **Doctor** — runs and renders `hal0 doctor`'s typed diagnoses (id,
   severity, evidence, next steps) over HTTP. Every fail/warn row carries at
   least one real next step, not just a description of the problem: a

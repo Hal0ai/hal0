@@ -136,16 +136,68 @@ def _b64url_decode(s: str) -> bytes:
 
 
 def allowed_origins() -> tuple[str, ...]:
-    """Effective allowlist, including the env override when set.
+    """Effective allowlist: the env list (or default) plus ``[network]`` origins.
 
-    A misconfigured env (empty string) falls back to the default rather
-    than denying everything — first-run dev convenience.
+    ``HAL0_ALLOWED_ORIGINS`` (installer-managed, replaces the default when
+    set) comes first. A misconfigured env (empty string) falls back to the
+    default rather than denying everything — first-run dev convenience.
+    On top of that, the persisted ``hal0.toml`` ``[network]`` section adds
+    the origin of ``public_url`` and every ``extra_origins`` entry (#2382),
+    deduplicated in order. Those survive an installer re-run, which
+    rewrites the env list.
     """
     raw = os.environ.get("HAL0_ALLOWED_ORIGINS", "").strip()
-    if not raw:
-        return DEFAULT_ALLOWED_ORIGINS
-    parsed = tuple(o.strip() for o in raw.split(",") if o.strip())
-    return parsed or DEFAULT_ALLOWED_ORIGINS
+    parsed = tuple(o.strip() for o in raw.split(",") if o.strip()) if raw else ()
+    base = parsed or DEFAULT_ALLOWED_ORIGINS
+    extra = _config_network_origins()
+    if not extra:
+        return base
+    return tuple(dict.fromkeys((*base, *extra)))
+
+
+# Live read of ``[network]`` for the per-request origin gates, cached on the
+# file's path plus ``(mtime_ns, inode, size)``
+# (:func:`hal0.config.loader.config_file_key`): the common case never
+# re-parses hal0.toml, yet a Settings save, a ``hal0 network`` command or a
+# hand edit takes effect on the very next request, with no restart.
+_network_origins_cache: tuple[str, tuple[int, int, int], tuple[str, ...]] | None = None
+
+
+def _config_network_origins() -> tuple[str, ...]:
+    """Origins persisted in ``[network]``: ``public_url``'s, then ``extra_origins``.
+
+    Best-effort: no file, no ``[network]`` table, or an unloadable config
+    yields ``()``, so a broken hal0.toml never makes the gate raise (the
+    env list still applies).
+    """
+    global _network_origins_cache
+    try:
+        from hal0.config import paths
+        from hal0.config.loader import config_file_key
+
+        target = str(paths.hal0_toml())
+        key = config_file_key(target)
+        if key is None:
+            return ()
+
+        cached = _network_origins_cache
+        if cached is not None and cached[0] == target and cached[1] == key:
+            return cached[2]
+
+        from hal0.config.loader import load_hal0_config
+        from hal0.install.network import _origin_of
+
+        try:
+            network = load_hal0_config().network
+        except Exception:
+            origins: tuple[str, ...] = ()
+        else:
+            public = _origin_of(network.public_url)
+            origins = tuple(dict.fromkeys([*([public] if public else []), *network.extra_origins]))
+        _network_origins_cache = (target, key, origins)
+        return origins
+    except Exception:  # pragma: no cover - defensive; never fail the gate
+        return ()
 
 
 def mint_session_cookie(

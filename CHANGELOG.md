@@ -394,6 +394,20 @@ applying. Add those subsections to a version's section to surface them; see
 
 ### Fixed
 
+- A browser origin you allow now survives an installer re-run. The REST and
+  WebSocket origin checks only read `HAL0_ALLOWED_ORIGINS`, which sits in the
+  installer-managed block of `/etc/hal0/api.env`, so a reverse-proxy origin
+  added there by hand, or derived from an install-time `HAL0_PUBLIC_URL`, was
+  gone after the next run. A new `hal0.toml` `[network]` section holds
+  `public_url` and `extra_origins`. hal0 adds both on top of
+  `HAL0_ALLOWED_ORIGINS` on the next request, with no restart, and removing
+  one revokes it the same way. Set them with `hal0 network public-url
+  set|clear` and `hal0 network origins add|remove|list`, or on the new
+  Settings ▸ Network page. Each origin is validated and stored the way a
+  browser sends it (punycode for an internationalised name, the compressed
+  form of an IPv6 address); anything else is refused. An install-time
+  `HAL0_PUBLIC_URL`, including the bare-host form, is saved to
+  `[network].public_url` once, never over a set value. (#2382)
 - Deleting a custom profile is no longer allowed while a slot file still
   names it but fails to load. A slot that is unconverted (`slot.unconverted`)
   or otherwise invalid was left out of the profile in-use scan, so the delete

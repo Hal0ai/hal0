@@ -76,7 +76,13 @@ class ConfigParseError(ConfigError):
 # ── Atomic TOML write ─────────────────────────────────────────────────────────
 
 
-def write_toml_atomic(path: Path | str, data: dict[str, Any], *, mode: int | None = None) -> None:
+def write_toml_atomic(
+    path: Path | str,
+    data: dict[str, Any],
+    *,
+    mode: int | None = None,
+    owner: tuple[int, int] | None = None,
+) -> None:
     """Write a TOML file atomically.
 
     Mirrors hal0.config.env.write_env_atomic but for TOML payloads:
@@ -92,6 +98,13 @@ def write_toml_atomic(path: Path | str, data: dict[str, Any], *, mode: int | Non
             onto the destination, so a file whose canonical mode is anything
             else drifts on every rewrite until ``doctor perms --fix`` runs.
             Callers with a canonical mode pass it here.
+        owner: Optional ``(uid, gid)`` for the result, set with ``fchown`` on
+            the temp file's descriptor before the rename. A root caller
+            writing into a directory another account can write must use this
+            instead of chowning the destination afterwards: a ``chown`` by
+            name follows a symlink swapped in after the rename. Only root may
+            give a file away, so a non-root caller's ``PermissionError`` is
+            ignored and the file keeps the caller's ownership.
 
     Raises:
         OSError: If the directory cannot be created, disk full, or the
@@ -115,6 +128,9 @@ def write_toml_atomic(path: Path | str, data: dict[str, Any], *, mode: int | Non
                 # already own, before the rename — so there is never a moment
                 # where the destination carries the wrong mode, and no second
                 # path lookup that a swapped tempfile could ride in on.
+                if owner is not None:
+                    with contextlib.suppress(PermissionError):
+                        os.fchown(f.fileno(), owner[0], owner[1])
                 if mode is not None:
                     os.fchmod(f.fileno(), mode)
                 tomli_w.dump(data, f)
@@ -193,6 +209,22 @@ def _drop_dead_keys(raw: dict[str, Any]) -> dict[str, Any]:
             out = dict(raw)
         out[table] = {k: v for k, v in section.items() if k not in keys}
     return out
+
+
+def config_file_key(path: Path | str) -> tuple[int, int, int] | None:
+    """Change key for a config file: ``(mtime_ns, inode, size)``, or None if absent.
+
+    Every writer replaces hal0.toml atomically (a new inode) or rewrites it in
+    place (a new mtime, usually a new size), so a cache keyed on all three sees
+    a Settings save, a CLI write or a hand edit even when two writes land within
+    the filesystem's mtime granularity. Shared by the per-request origin gate
+    (``hal0.api.agents._auth``) and ``GET /api/settings``.
+    """
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    return (st.st_mtime_ns, st.st_ino, st.st_size)
 
 
 def load_hal0_config(path: Path | None = None) -> Hal0Config:
