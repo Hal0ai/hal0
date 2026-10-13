@@ -10,7 +10,7 @@ import { Aside } from '@astrojs/starlight/components';
 The `hal0` CLI is built with [Typer](https://typer.tiangolo.com/). The entry point is
 `hal0 = "hal0.cli.main:app"`. Most subcommands are thin HTTP clients over the `hal0-api`
 daemon; a few (`config show/edit/migrate/validate`, `agent install`,
-`memory migrate`, `capabilities migrate`, the `slot migrate-*` family) read or write
+`memory migrate`, `capabilities migrate`, `slot migrate-id-keying`, `profile migrate`) read or write
 on-disk state directly and work without a running daemon.
 
 ```sh
@@ -89,7 +89,7 @@ hal0 update owui [--check] [--target DIGEST] [--clear-override] [--yes|-y]
 |---|---|
 | `--channel` | Persist the update channel, then check it. |
 | `--check` | Check only; don't apply. |
-| `--rollback` | Roll back to the previous version. |
+| `--rollback` | Roll back to the previous version. When that release predates the profile-centric conversion, every conversion backup is put back first (see [Update and roll back](/docs/guides/update-and-rollback/#rolling-back-past-the-profile-centric-conversion)). |
 | `--target` | Pin an exact version. |
 | `--yes` / `-y` | Skip the confirmation prompt. |
 | `--restart-slots` | Bounce every drifted slot (image and argv drift) and stop. |
@@ -98,6 +98,8 @@ hal0 update owui [--check] [--target DIGEST] [--clear-override] [--yes|-y]
 An apply that leaves any component below still `pending`
 exits **2** rather than reporting a clean success — distinct from a failed
 update (`die()` → exit 1).
+
+It also exits **2** when the profile-centric conversion ([ADR-0029](/docs/adr/0029-profile-centric-config)) left a slot, a stored profile or a stack unconverted. `hal0 update` prints one line per blocker: the target (a slot file, `profile:<name>` or `stack:<name>`), the reason, and the fix. A blocked slot keeps launching the command it ran before the update until its file is edited. See [`hal0 profile`](#hal0-profile--inspect-and-edit-profiles).
 
 `hal0 update status` prints the same hal0 version/channel check plus a
 per-component table (installed / pinned / status) for the four
@@ -138,7 +140,7 @@ Enums: `--type` = `llm|embedding|reranking|transcription|tts|image`; `--provider
 | `slot rename <name> <new_name>` | `name`, `new_name` | — |
 | `slot swap <name>` | `name` | `--model`/`-m` (required), `--no-persist`, `--json` |
 | `slot logs <name>` | `name` | `--follow`/`-f`, `--lines`/`-n` (default 200, 1-5000) |
-| `slot create <name>` | `name` | `--type`/`-t` (default `llm`), `--provider` (default `llama-server`), `--hardware` (default: auto-detect), `--model`/`-m` (required), `--port`/`-p` (default: auto-assign, 1024-65535), `--profile` (default: inferred from `--type`/`--hardware`) |
+| `slot create <name>` | `name` | `--type`/`-t` (default `llm`), `--provider` (default `llama-server`), `--hardware` (default: auto-detect), `--model`/`-m` (required), `--port`/`-p` (default: auto-assign, 1024-65535), `--profile` (the tune; default: inferred from `--type`/`--hardware`, and an `llm` slot with none runs the `chat` seed) |
 | `slot edit <name>` | `name` | `--model`/`-m`, `--port`/`-p`, `--provider`, `--hardware`, `--profile` |
 | `slot delete <name>` | `name` | `--force`/`-f` |
 | `slot show <name>` | `name` | `--json` |
@@ -367,7 +369,7 @@ and export stay dashboard/API-only (`/api/profiles`).
 | `profile edit <name>` | `name` | `--flags`, `--ctx-size`, `--clear-ctx-size`, `--thinking`/`--no-thinking`, `--clear-thinking`, `--vision`, `--mtp`, `--runner` (`''` clears), `--intent`, `--json` |
 | `profile migrate` | — | `--apply`, `--restore <archive>`, `--json` |
 
-Seed profiles are read-only: `profile edit` on one is refused with the duplicate-first hint (`profile create <new> --from <seed>`). Edits reach a running slot at its next restart.
+Seed profiles are read-only: `profile edit` on one is refused with the duplicate-first hint (`profile create <new> --from <seed>`). Edits reach a running slot at its next restart, except `runner`: a launch resolves its image from the slot's `binary`, which is copied from the profile's `runner` only when the profile is applied to the slot (`slot edit <slot> --profile <name>`). After `profile edit --runner`, re-apply the profile to each slot that uses it. A llama-server slot with no profile runs its type's seed (`chat` for an `llm` slot), and one that names a profile that does not exist fails to launch with `slot.profile_missing`.
 
 `profile migrate` moves this box to profile-centric config
 ([ADR-0029](/docs/adr/0029-profile-centric-config)).
@@ -381,8 +383,8 @@ launches. Without flags it writes nothing.
   Run it as the service user, `sudo -u hal0 hal0 profile migrate --apply`
   (it refuses to run as root, which would leave a backup hal0 cannot read).
   It writes `/var/lib/hal0/backups/profiles-<ts>.tar.gz` first and checks each
-  converted slot's launch against the plan. A slot that does not match is put
-  back and reported as blocked.
+  converted llama-server slot's launch against the plan (other engines are not
+  compared). A slot that does not match is put back and reported as blocked.
 - `--restore <archive>` puts that backup back for a downgrade: the files and
   the model columns. Stop `hal0-api` first. Until you run `--apply` again,
   the automatic conversion stands down on that release.

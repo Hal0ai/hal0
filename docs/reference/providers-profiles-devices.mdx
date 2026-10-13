@@ -106,9 +106,14 @@ Setting `runner` on a profile via `POST`/`PUT /api/profiles` is validated agains
 
 A profile carries no hardware placement: the slot's own `device` field (see the device
 taxonomy below) is the single authoritative hardware fact. `flags` may not set what another
-layer owns — hardware flags (`-ngl`, `-dev`, `-t`), managed flags (`--model`, `--host`,
+layer owns: hardware flags (`-ngl`, `-dev`, `-t`), managed flags (`--model`, `--host`,
 `--port`, `--alias`, `--ctx-size`), model-fact flags (`--jinja`, `--chat-template*`,
-`--mmproj`, `--no-mmproj`) and `--spec-draft-device` are rejected when the profile is saved.
+`--mmproj`, `--no-mmproj`, `--mmproj-auto`), derived placement (`--spec-draft-device`,
+`--mmproj-device`), host-owned flags (remote model fetches such as `-hf`, host file reads
+and writes such as `--api-key-file` and `--log-file`, listener and auth/TLS settings,
+llama.cpp's built-in preset switches) and bare positional arguments. They are rejected when the profile is saved and refused again at launch, in every
+spelling llama.cpp accepts. `--reasoning-format none` is rejected on save too, but launch strips it from the command instead of refusing. The error codes are listed in
+[Config schema](/docs/reference/config-schema/#profilestoml).
 
 Profiles carry **no `image` field** — image resolution is slot-owned
 (`slot.image_pin` or `RUNNER_IMAGES[slot.binary]`).
@@ -135,6 +140,23 @@ tag and digest pinned in `manifest.json`), and self-managed (operator-staged) we
 [Voice: STT and TTS](/docs/guides/voice-stt-tts/) and ADR-0001, "Reinstate
 Moonshine as the CPU STT engine" (`docs/adr/0001-moonshine-cpu-stt-reinstatement.md`
 in the repository, not published to these docs).
+
+### How a launch is composed
+
+A llama-server slot's command is built from four layers, lowest precedence first, then deduplicated last-wins:
+
+| Layer | Contributes |
+|---|---|
+| `base` | `--host`, `--port`, `--model`, `--alias`, `--ctx-size` (from the profile's `ctx_size`) |
+| `model` | family quirks, `--jinja`, `--chat-template-file`, and `--mmproj` when the profile's `vision` is `auto` |
+| `profile` | the MTP draft bundle when MTP is in effect, then the profile's `flags` (its own `--spec-draft-*` values win over the bundle) |
+| `slot` | `-ngl`, `--threads`, `--metrics`, and for MTP `--spec-draft-device` taken from the slot's device |
+
+`GET /api/slots/{name}/resolved` returns the deduplicated `argv` and, for each surviving flag, the layer (`base`, `model`, `profile` or `slot`) that set its final value. Repeatable flags (`--override-kv`, `--draft-model`) are kept at every occurrence and have no provenance entry, because no single occurrence wins. A llama-server slot with no profile runs its type's seed (`embedding` or `reranking`), else `chat`; a profileless `tts`, `transcription` or `image` slot uses its engine's default (see [Config schema](/docs/reference/config-schema/#slotsnametoml)). A slot that names a profile the catalog does not have refuses to launch with `slot.profile_missing`.
+
+### Seed profiles
+
+The code-shipped seeds are `chat`, `agent`, `utility`, `coding`, `embedding`, `reranking`, `cpu-chat`, `flm`, `kokoro`, `moonshine`, `qwen3-tts`, `comfyui` and `brain`. `ctx_size` is set by `agent`, `utility` and `brain` (`65536`), `embedding` and `reranking` (`4096`) and `flm` (`16384`). `vision = "off"` is set by `agent`, `coding` and `brain`. No seed sets `mtp`, `enable_thinking` or `runner`. A seed with no `ctx_size` follows the model's native window, capped at 32768 (8192 when the native window is unknown). The shipped slots point at these seeds.
 
 ## Runner images
 

@@ -43,6 +43,10 @@ tool passes through documents its own body/query shape; hand-authored
 overrides for the handful that don't map 1:1 onto their route live in
 `TOOL_PARAM_HINTS` in source.
 
+### Slot, model and profile tools
+
+The tune lives on the profile. `slot_create` and `slot_edit` take a `profile` name, the model and placement; a tuning key is refused with `slot.tuning_key_denied`. `model_edit` takes file facts only: its `defaults` object holds `chat_template`, `tokenizer_repo`, `mtp` (the file has MTP heads) and `jinja`, and a tuning key there is a 422. `profile_create`, `profile_update` and `profile_generate` carry `flags`, `ctx_size`, `enable_thinking`, `vision` (`auto`/`off`), `mtp` (`auto`/`off`) and `runner`. There is no tool that sets a slot's context window or flags.
+
 ### Autonomous — read (no approval)
 
 | Tool | REST route |

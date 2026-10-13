@@ -1,6 +1,6 @@
 ---
 title: Slot lifecycle reference
-description: "The slot state machine — every state, every legal transition, dispatch ranking, typed errors, and the v1.0 write-boundary guard — verified against src/hal0/slots/state.py in the v1.0 tree."
+description: "The slot state machine — every state, every legal transition, dispatch ranking, typed errors, what a slot write may carry, and how a launch is composed — verified against src/hal0/slots/state.py in the v1.0 tree."
 sidebar:
   order: 80
 ---
@@ -85,6 +85,8 @@ Each is an HTTP-status-bearing error under the `slot.*` namespace:
 | `SlotTerminateTimeout` | 504 | Stop didn't return in time — the request unblocks anyway. |
 | `SeamTimeout` (`slot.seam_timeout`) | 504 | A bounded `systemctl`/podman seam call (Quadlet write, `daemon-reload`, `reset-failed`, the spawning `systemctl restart`) did not return within its budget. `details` carries `command`, `budget_s` and `last_state`; the slot lands in `ERROR` with the same message. |
 | `SlotConfigError` | 400 | — |
+| `slot.tuning_key_denied` | 400 | A slot write carried a key that belongs on the profile. |
+| `slot.profile_missing` | 422 | The slot names a profile the catalog does not have; the launch is refused. |
 | `NpuExclusivityViolation` | 409 | Only one `device=npu, type=llm` slot with a bound model is allowed at a time (AMD XDNA hardware context limit). |
 | `SlotPinned` | 409 | A pinned slot needs `?force=true` to unload or delete. |
 
@@ -240,26 +242,25 @@ use `priority`/`pinned` instead. Slots that never set `lru` are now evictable wh
 previously were not.
 </Aside>
 
-## The v1.0 write-boundary guard
+## What a slot write may carry
 
-<Aside type="note">
-New in v1.0 (Stream F, `fix/write-boundary-enforcement`). Before this change,
-`stacks/apply.py` and `SlotManager.create()` could both write slot TOML
-in-process **without** ever routing through the HTTP-layer's model-owned-key
-guard or the `[server].extra_args` hardware-flag screen — a real bypass of the
-model/slot key-ownership split described in the [Config schema](/docs/reference/config-schema)
-reference. Since ADR-0029 the split is model = file facts, profile = every tune, slot =
-placement.
-</Aside>
+A slot holds placement (device, layers, threads, runner), its model and its profile. The profile holds every tune; the model row holds facts about its file.
 
-`guard_slot_write_payload` (`hal0.slots.config_write`) is now the single shared
-in-process gate every writer of slot TOML must pass through — API routes, stacks-apply,
-and `SlotManager` alike. It rejects every tuning key (context window, `[server].extra_args`,
-`parallel`, `chat_template`, `mtp`, `enable_thinking`, `vision`) with
-`slot.tuning_key_denied` ("belongs on a profile"), so a stack-apply or in-process create
-can no longer silently write a tune the slot's profile is supposed to own.
-`PATCH /slots/{name}/defaults` now only rebinds `default` (the model id) and rejects
-tuning keys the same way.
+Every write of a slot file goes through `guard_slot_write_payload` (`hal0.slots.config_write`): `SlotManager.create()` runs it on the new slot, and `SlotManager.update_config()` and stacks-apply run it through `reconcile_and_guard_slot_config`. The slot HTTP routes (`POST /api/slots`, `PUT /api/slots/{name}/config`, `PATCH /api/slots/{name}/defaults`) also check the body in `api.routes.slots` before anything else, so their "belongs on a profile" answer comes before a generic unknown-key error. They refuse:
+
+- **A tuning key** (`[model].context_size` / `ctx_size`, `[server].extra_args`, `parallel`, `chat_template`, `workers`, `mtp`, `enable_thinking`, `vision`) with a 400 `slot.tuning_key_denied` ("belongs on a profile"). Set it on the slot's profile (`PUT /api/profiles/{name}`) or pick another profile.
+- **A llama-server option in `[server].env`** (`LLAMA_ARG_*`, `LLAMA_API_KEY`, `HF_TOKEN`, `MTMD_BACKEND_DEVICE`) with a 400 `slot.llama_env_denied`. llama-server reads each of them as a launch option: a `LLAMA_ARG_*` tune goes in the profile's `flags` (when that flag is allowed there), and the other three set options hal0 owns (see [Config schema](/docs/reference/config-schema/)).
+- **A key removed from the slot schema** (for example `enabled`) with a 400 `slot.removed_key_denied`.
+
+`PATCH /api/slots/{name}/defaults` only rebinds the slot's model (`{"default": "<model id>"}`) and refuses tuning keys the same way.
+
+A slot file on disk that still carries a tuning key is refused at launch with `slot.unconverted`, and the typed slot-config loader rejects it too, until `hal0 profile migrate --apply` removes the key. The exception is a slot the conversion blocked: while its file is unchanged since, it keeps launching the command it ran before the conversion, and `GET /api/slots` reports it as `conversion_blocked` (`reason`, `fix`, `running_pre_conversion`).
+
+## Launch composition and effective context
+
+A llama-server slot's command is built from four layers, lowest precedence first, then deduplicated last-wins: `base` (`--host`, `--port`, `--model`, `--alias`, `--ctx-size`), `model` (family quirks, `--jinja`, `--chat-template-file`, and `--mmproj` when the profile's `vision` is `auto`), `profile` (the MTP draft bundle, then the profile's `flags`) and `slot` (`-ngl`, `--threads`, `--metrics`, and for MTP `--spec-draft-device` from the slot's device). `GET /api/slots/{name}/resolved` returns the deduplicated `argv` and, for each surviving flag, the layer that set it. A slot with no llama-server command (or one that cannot launch) answers `argv: null` with an empty `provenance`.
+
+`GET /api/slots` and `GET /api/slots/{name}` carry `ctx_effective` (tokens) and `ctx_source` (`profile`, `native` or `fallback`) for `llm`, `embedding` and `reranking` slots. Both come from the same resolver the launch path uses. The slot views do not return `ctx_max`, `chat_template`, `rope_freq_base`, `workers`, `parallel` or `llamacpp_args`.
 
 For the CLI surface that drives slot lifecycle transitions directly, see the
 [CLI reference](/docs/reference/cli), `hal0 slot`.
