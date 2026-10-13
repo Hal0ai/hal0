@@ -1,7 +1,7 @@
 // hal0 v3 dashboard — chat-templates hook (Phase 3 Task 4).
 //
 // Fetches /api/chat-templates — the list of available chat template ids
-// (e.g. chatml, llama3) that can be pinned as per-model defaults.
+// (e.g. chatml, llama3) that can be pinned as a model's chat_template.
 // The "auto" sentinel (use the GGUF's embedded template) is added UI-side
 // as the first option; the backend omits it from the catalogue.
 

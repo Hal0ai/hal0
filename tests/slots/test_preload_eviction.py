@@ -313,7 +313,6 @@ def _big_window_model() -> dict[str, Any]:
     return {
         "size_bytes": 1000 * 1024 * 1024,
         "metadata": {"context_length": 131072},
-        "defaults": None,
     }
 
 

@@ -205,3 +205,111 @@ def test_feasibility_non_dict_item_degrades_in_place(crud_client: TestClient) ->
     assert middle["model_id"] == ""
     assert middle["verdict"] == "unknown"
     assert middle["needed_mb"] == 0.0
+
+
+# ── ctx resolution: request > profile > native > fallback (ADR-0029 §6) ─────
+#
+# A model row holds no context tune, so the window a pick is tested at comes
+# from the request's ``ctx``, else from the named profile (resolved by the same
+# launch resolver a slot uses), else from the model's native metadata.
+
+
+class _Gpu:  # duck-type GPUMemorySample
+    gtt_free_mb = 69632.0
+    gtt_total_mb = 98304.0
+    is_uma = True
+
+
+class _Stats:
+    def gpu_sample(self) -> _Gpu:
+        return _Gpu()
+
+
+@pytest.fixture
+def ctx_client(crud_client: TestClient, crud_models_root: Path, monkeypatch: pytest.MonkeyPatch):
+    """A client with a GPU sample, a model with a 131072-token native window, a
+    model with no window metadata, and a stub profile catalog."""
+    from hal0.config.schema import ProfileConfig
+    from hal0.errors import NotFound
+
+    crud_client.app.state.hardware_stats = _Stats()
+    for mid, metadata in (("native-big", {"context_length": 131072}), ("native-none", {})):
+        fpath = crud_models_root / f"{mid}.gguf"
+        fpath.write_bytes(b"\x00" * 64)
+        r = crud_client.post(
+            "/api/models", json={"id": mid, "path": str(fpath), "metadata": metadata}
+        )
+        assert r.status_code == 201, r.text
+
+    catalog = {
+        "with-ctx": ProfileConfig(flags="-fa on", ctx_size=65536),
+        "no-ctx": ProfileConfig(flags="-fa on"),
+    }
+
+    def _resolve(name: str) -> ProfileConfig:
+        try:
+            return catalog[name]
+        except KeyError:
+            raise NotFound(f"profile {name!r} not found", code="profile.not_found") from None
+
+    monkeypatch.setattr("hal0.providers.container._resolve_profile", _resolve)
+    return crud_client
+
+
+def _feasibility_row(client: TestClient, **row: object) -> dict:
+    r = client.post("/api/models/feasibility", json={"models": [row]})
+    assert r.status_code == 200, r.text
+    return r.json()["results"][0]
+
+
+def test_feasibility_request_ctx_is_used_as_given(ctx_client: TestClient) -> None:
+    row = _feasibility_row(ctx_client, model_id="native-big", ctx=16384)
+    assert (row["ctx"], row["ctx_source"]) == (16384, "request")
+
+
+def test_feasibility_profile_ctx_size_is_the_window(ctx_client: TestClient) -> None:
+    row = _feasibility_row(ctx_client, model_id="native-big", profile="with-ctx")
+    assert (row["ctx"], row["ctx_source"]) == (65536, "profile")
+
+
+def test_feasibility_profile_without_ctx_size_uses_the_capped_native_window(
+    ctx_client: TestClient,
+) -> None:
+    row = _feasibility_row(ctx_client, model_id="native-big", profile="no-ctx")
+    assert (row["ctx"], row["ctx_source"]) == (32768, "native")
+
+
+def test_feasibility_no_ctx_no_profile_uses_the_native_window(ctx_client: TestClient) -> None:
+    row = _feasibility_row(ctx_client, model_id="native-big")
+    assert (row["ctx"], row["ctx_source"]) == (32768, "native")
+
+
+def test_feasibility_no_window_anywhere_falls_back_to_8192(ctx_client: TestClient) -> None:
+    row = _feasibility_row(ctx_client, model_id="native-none")
+    assert (row["ctx"], row["ctx_source"]) == (8192, "fallback")
+
+
+def test_feasibility_request_ctx_wins_over_profile(ctx_client: TestClient) -> None:
+    row = _feasibility_row(ctx_client, model_id="native-big", profile="with-ctx", ctx=4096)
+    assert (row["ctx"], row["ctx_source"]) == (4096, "request")
+
+
+def test_feasibility_unknown_profile_degrades_the_row_to_unknown(ctx_client: TestClient) -> None:
+    row = _feasibility_row(ctx_client, model_id="native-big", profile="no-such-profile")
+    assert row["verdict"] == "unknown"
+    assert row["ctx"] is None
+    assert row["ctx_source"] is None
+    assert row["needed_mb"] == 0.0
+
+
+def test_feasibility_bigger_profile_window_needs_more_memory(ctx_client: TestClient) -> None:
+    small = _feasibility_row(ctx_client, model_id="native-big", ctx=4096)
+    big = _feasibility_row(ctx_client, model_id="native-big", profile="with-ctx")
+    assert big["needed_mb"] > small["needed_mb"]
+
+
+def test_feasibility_unknown_model_row_reports_null_ctx(crud_client: TestClient) -> None:
+    row = _feasibility_row(crud_client, model_id="nope", ctx=8192)
+    assert row["verdict"] == "unknown"
+    assert row["ctx"] is None
+    assert row["ctx_source"] is None

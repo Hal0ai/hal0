@@ -520,7 +520,7 @@ class _BigWindowRegistry:
         size_bytes = 1000 * 1024 * 1024
 
         def model_dump(self):
-            return {"id": "mymodel", "defaults": None, "metadata": {"context_length": 131072}}
+            return {"id": "mymodel", "metadata": {"context_length": 131072}}
 
     def get(self, model_id):
         return self._Row()

@@ -200,6 +200,33 @@ applying. Add those subsections to a version's section to surface them; see
     (`slot.removed_key_denied` for a retired one) instead of persisting a file
     that cannot load. A slot with such a key keeps listing and running; it
     shows up in `hal0 doctor profiles` and the typed-load surfaces.
+- **The `Model` object loses `defaults` (ADR-0029 §6).** Its four file facts
+  are now top-level fields: `chat_template`, `tokenizer_repo`, `mtp` (the
+  file has MTP heads) and `jinja`. This applies to every read
+  (`GET /api/models`, `GET /api/models/{id}`, the write responses) and every
+  write (`PUT /api/models/{id}`, `POST /api/models`,
+  `POST /api/models/validate`, the `POST /api/models/scan` commit rows, and
+  the MCP `model_edit`, `model_register` and `model_validate` tools). On a
+  `PUT`, a fact you omit keeps its stored value and `null` clears it. The old
+  shape is refused, not translated:
+  - A write that carries a `defaults` key at all is
+    `422 model.defaults_removed`. A scan commit row that carries one is
+    skipped with that code.
+  - A top-level tuning key (`context_size`, `extra_args`, `profile`,
+    `enable_thinking`, `vision`, `n_gpu_layers`, `rope_freq_base`,
+    `preferred_runner`) is `422 model.tune_key_removed`. Before this change
+    it would have been dropped without an error.
+  - A fact with a value of the wrong type is `400 model.fact_invalid`. This
+    replaces `model.defaults_invalid`, and `model.defaults_removed` replaces
+    `model.defaults_key_removed`.
+
+  `POST /api/models/feasibility` rows take the context to test from the
+  request: `ctx` (a number) or `profile` (a profile name, resolved for that
+  model by the same rule the launch uses). Each result row now reports the
+  `ctx` it tested and its `ctx_source` (`request`, `profile`, `native` or
+  `fallback`). Stored rows need no conversion: the facts already had their own
+  columns (`tokenizer_repo` stays in the row's `extra` blob), and launch
+  commands are unchanged.
 
 ### Migrations
 

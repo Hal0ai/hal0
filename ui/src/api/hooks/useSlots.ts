@@ -80,10 +80,10 @@ export interface Slot {
   // fade, sort last, and hide lifecycle buttons when there is no model.)
   // (former enable_thinking / mtp / vision fields removed — spec-hw-slot-
   // ownership §1: those are model-owned tri-state caps now, read from
-  // /api/models' `defaults` instead of the slot payload.)
+  // /api/models' top-level fields instead of the slot payload.)
   // ── Hardware grid (spec-hw-slot-ownership §2) ───────────────────────
   /** NGL — GPU offload layer count owned by the SLOT (-1 = all, 0 = CPU only).
-   *  Reversed from model.defaults.n_gpu_layers by the §6 migration; seeds the
+   *  Reversed from the old model-level n_gpu_layers by the §6 migration; seeds the
    *  slot editor's HW-grid NGL field and the card's HW chip. */
   n_gpu_layers?: number
   /** THREADS — CPU threads for the runner (0 = unset → runtime default). Emits

@@ -67,13 +67,13 @@ export const RELOAD_CLASS_FALLBACK = {
   'slot.image.default_steps': { apply_class: 'immediate' },
   'slot.image.idle_restore_minutes': { apply_class: 'service-restart', services: [SERVICE_HAL0_API] },
 
-  // ── per-model launch defaults (`/api/models/{id}` → ModelDefaults) ──────
+  // ── per-model file facts (`/api/models/{id}`, top-level on the model) ──
   // A model's stored file facts (chat template / jinja / MTP heads) are baked
   // into a slot's argv at launch (§7.1a resolve_argv). A change is observed
   // only when a slot serving that model is (re)started — the model registry
   // write itself is immediate, but the running slot keeps its argv. (The
   // context window and GPU layers are not model settings any more — ADR-0029.)
-  'model.defaults.chat_template': { apply_class: 'service-restart', services: [SERVICE_SLOTS] },
+  'model.chat_template': { apply_class: 'service-restart', services: [SERVICE_SLOTS] },
 }
 
 /**

@@ -83,6 +83,44 @@ test.describe('Settings v3 (/settings)', () => {
     await expect(content.locator('.s-row .k span', { hasText: /^Context size$/ })).toHaveCount(0)
   })
 
+  // ADR-0029 §6: the chat template is a top-level fact on the model. The save
+  // body carries exactly that key — a `defaults` object is a 422 server-side
+  // (model.defaults_removed) and no other fact or tune rides along.
+  test('Model Defaults saves the chat template as a top-level fact', async ({ page }) => {
+    await page.route('**/api/chat-templates', (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify([
+          { id: 'auto', label: 'Auto (GGUF embedded)' },
+          { id: 'chatml', label: 'ChatML' },
+        ]),
+      }),
+    )
+    const puts: any[] = []
+    await page.route('**/api/models/*', async (route) => {
+      if (route.request().method() === 'PUT') {
+        const body = route.request().postDataJSON()
+        puts.push(body)
+        return route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify({ id: 'm', ...body }),
+        })
+      }
+      return route.fallback()
+    })
+
+    await page.goto('/#settings')
+    await page.locator('.settings-nav .nav-item', { hasText: 'Model Defaults' }).click()
+    const panel = page.locator('.settings-content .s-panel').filter({ has: page.locator('select') }).first()
+    await panel.locator('select').selectOption('chatml')
+    await panel.getByRole('button', { name: 'Save' }).click()
+
+    await expect.poll(() => puts.length).toBe(1)
+    expect(puts[0]).toEqual({ chat_template: 'chatml' })
+  })
+
   test('Hardware & Runtimes section mounts', async ({ page }) => {
     await page.goto('/#settings')
     await page.locator('.settings-nav .nav-item', { hasText: 'Hardware & Runtimes' }).click()

@@ -1,10 +1,10 @@
 """Tests: container emits --chat-template-file from the resolved chat_template.
 
 ADR-0029: the chat template is a fact about the model file, resolved ONLY
-from ``model.defaults.chat_template`` into the model layer of the argv.
+from the model's top-level ``chat_template`` into the model layer of the argv.
 
 Covers:
-  * When model_info carries defaults.chat_template the flag is emitted with
+  * When model_info carries chat_template the flag is emitted with
     ``--chat-template-file <store>/chat-templates/<id>.jinja``.
   * A slot still carrying ``chat_template`` is unconverted and refuses to
     launch; a profile carrying ``--chat-template-file`` refuses too.
@@ -138,14 +138,14 @@ class TestContainerSpecChatTemplate:
         unconverted and refuses to launch rather than silently ignoring it."""
         cfg = _slot_cfg(chat_template="chatml")
         with pytest.raises(UnprocessableEntity) as excinfo:
-            _build_spec(cfg, _model_info(defaults={"chat_template": "llama3"}))
+            _build_spec(cfg, _model_info(chat_template="llama3"))
         assert excinfo.value.code == "slot.unconverted"
         assert "chat_template" in excinfo.value.details["keys"]
 
-    def test_model_defaults_chat_template_emitted_when_no_slot_override(self) -> None:
-        """model_info['defaults']['chat_template'] = 'llama3' → flag emitted."""
+    def test_model_chat_template_emitted_when_no_slot_override(self) -> None:
+        """model_info['chat_template'] = 'llama3' → flag emitted."""
         cfg = _slot_cfg()  # no chat_template in slot
-        mi = _model_info(defaults={"chat_template": "llama3"})
+        mi = _model_info(chat_template="llama3")
         spec = _build_spec(cfg, mi)
         store = model_store_root()
         expected_path = str(store) + "/chat-templates/llama3.jinja"
@@ -165,9 +165,9 @@ class TestContainerSpecChatTemplate:
         )
 
     def test_model_auto_chat_template_treated_as_none(self) -> None:
-        """model defaults.chat_template='auto' is equivalent to no template."""
+        """model chat_template='auto' is equivalent to no template."""
         cfg = _slot_cfg()
-        mi = _model_info(defaults={"chat_template": "auto"})
+        mi = _model_info(chat_template="auto")
         spec = _build_spec(cfg, mi)
         assert "--chat-template-file" not in spec.command
 
@@ -181,7 +181,7 @@ class TestLoadSyncChatTemplate:
     _TEST_RUNTIME = "/usr/bin/docker"
 
     def test_unit_contains_chat_template_file_flag(self, tmp_path) -> None:
-        """The template rides model.defaults (a model fact), and load_sync
+        """The template rides the model's chat_template fact, and load_sync
         writes it into the unit."""
         provider = ContainerProvider()
         profile = _moe_profile()
@@ -225,7 +225,7 @@ class TestLoadSyncChatTemplate:
                 {
                     "path": "/mnt/ai-models/chadrock-35b.gguf",
                     "_model_key": "chadrock-35b",
-                    "defaults": {"chat_template": "chatml"},
+                    "chat_template": "chatml",
                 },
             )
 

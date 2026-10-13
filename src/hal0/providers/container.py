@@ -397,12 +397,9 @@ def _fixed_family_provider(slot_cfg: Mapping[str, Any] | None, profile: Any) -> 
 def model_has_mtp_heads(model_info: Mapping[str, Any]) -> bool:
     """The model fact: does the file carry MTP draft heads?
 
-    An explicit ``defaults.mtp`` wins; otherwise the registry ``mtp`` tag.
+    The registry row's ``mtp`` fact when set; otherwise the registry ``mtp``
+    tag (both via :func:`hal0.model_meta.model_is_mtp_eligible`).
     """
-    defaults = model_info.get("defaults")
-    explicit = defaults.get("mtp") if isinstance(defaults, Mapping) else None
-    if explicit is not None:
-        return bool(explicit)
     return model_is_mtp_eligible(model_info)
 
 
@@ -1663,17 +1660,16 @@ def _resolve_llama_scalars(
         str(Path(model_store_root()) / "chat-templates" / f"{tmpl_id}.jinja") if tmpl_id else None
     )
 
-    defaults = model_info.get("defaults") if isinstance(model_info.get("defaults"), Mapping) else {}
     # The projector follows the model's mmproj and the profile's vision.
     mmproj = model_info.get("mmproj")
     if str(getattr(profile, "vision", "auto") or "auto") == "off":
         mmproj = None
 
     # --jinja: a runner capability, suppressible per model file
-    # (``defaults.jinja = false``); meaningless in embedding/reranking mode.
+    # (the model's ``jinja = false`` fact); meaningless in embedding/reranking mode.
     jinja = (
         bool(getattr(runner.supports, "jinja", False))
-        and defaults.get("jinja") is not False
+        and model_info.get("jinja") is not False
         and not embed_mode
     )
     mtp = _effective_mtp(
@@ -2824,7 +2820,7 @@ def _best_effort_model_info(
     The preview builders (:func:`resolved_command_for_slot` /
     :func:`resolved_argv_detail_for_slot`) run without a live model download and
     are called with only the slot cfg. To render the SAME argv the launch path
-    would (model registry ``defaults``, mmproj sidecar, native context window,
+    would (the model's file facts, mmproj sidecar, native context window,
     chat-template), look the model up in the registry — but never raise: a miss
     or an un-wired registry degrades to a minimal ``{_model_key, path}`` dict,
     exactly the best-effort contract the launch path's ``_resolve_model_path``

@@ -25,10 +25,18 @@ atomic TOML file per model under `/var/lib/hal0/registry/`.
 | `hf_repo` / `hf_filename` | — |
 | `backends` | Which slot backends can run this model: GGUF → `vulkan, rocm, cuda, cpu`; moonshine → `moonshine`; kokoro → `kokoro`. |
 | `mmproj` | Optional vision-projector sidecar path. |
-| `defaults` | File facts only: `chat_template` (which template this file needs), `tokenizer_repo`, `mtp` (the file has MTP heads; `null` falls back to the `mtp` tag) and `jinja` (`false` = this file's template does not work with `--jinja`). A tuning key (`context_size`, `extra_args`, `profile`, `enable_thinking`, `vision`, …) is a 422 — tunes live on the profile of the slot that runs the model. |
+| `chat_template` | File fact: the chat template id this file needs (`auto` or `null` = the template embedded in the GGUF). |
+| `tokenizer_repo` | File fact: the HF repo a load generator resolves the tokenizer from. |
+| `mtp` | File fact: the file has MTP heads (`null` falls back to the `mtp` tag). |
+| `jinja` | File fact: `false` = this file's template does not work with `--jinja`. |
 | `default` | Per-dispatch-type default marker. |
 | `architecture` | e.g. `llama`, `qwen2`, `gemma3`, `gpt-oss`, `qwen3next`, `mamba` — drives MoE/context sizing. |
 | `capability_flags.tool_calling` | Typed tri-state flag. |
+
+A model row holds no tunes. A write that carries a `defaults` object is
+`422 model.defaults_removed`, and a tuning key (`context_size`, `extra_args`,
+`profile`, `enable_thinking`, `vision`, …) is `422 model.tune_key_removed` —
+tunes live on the profile of the slot that runs the model.
 
 Registered models split into two buckets for the dashboard UI: **blessed** (path under
 `/var/lib/hal0/models/<recipe>/<capability>/`) vs **pulled** (anything downloaded or

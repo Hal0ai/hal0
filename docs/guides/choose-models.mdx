@@ -125,9 +125,21 @@ profiles](/docs/concepts/capabilities-and-profiles).
 
 There's no dedicated `hal0 model edit` CLI verb for the facts — set them via
 `PUT /api/models/{model_id}` or, more practically, from the dashboard's model
-drawer. A write that carries a tune (`extra_args`, `context_size`,
+drawer. The facts are top-level fields on the model: `chat_template`,
+`tokenizer_repo`, `mtp` (the file has MTP heads) and `jinja` (`false` when
+the file's template breaks `--jinja`). A fact you leave out keeps its stored
+value, and `null` clears it:
+
+```bash
+curl -X PUT http://localhost:8080/api/models/qwen3-4b \
+  -H 'Content-Type: application/json' \
+  -d '{"chat_template": "chatml", "jinja": false}'
+```
+
+A write that carries a `defaults` object is refused with
+`422 model.defaults_removed`. A tune (`extra_args`, `context_size`,
 `enable_thinking`, `vision`, `profile`, …) is refused with
-`422 model.defaults_key_removed`; put it on a profile instead.
+`422 model.tune_key_removed`; put it on a profile instead.
 
 Curated type-tag chips (mtp / coder / reasoning / vision, ticked on the
 old recipe editor) are retired: behavior comes from typed fields — the

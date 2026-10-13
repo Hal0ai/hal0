@@ -407,28 +407,28 @@ _MTP_ELIGIBILITY_CASES: list[tuple[str, dict[str, Any], bool]] = [
     ),
     (
         "explicit_true_beats_absent_tag",
-        {"_model_key": "plain", "tags": [], "defaults": {"mtp": True}},
+        {"_model_key": "plain", "tags": [], "mtp": True},
         True,
     ),
     (
         "explicit_false_beats_present_tag",
-        {"_model_key": "tagged", "tags": ["mtp"], "defaults": {"mtp": False}},
+        {"_model_key": "tagged", "tags": ["mtp"], "mtp": False},
         False,
     ),
     (
         "explicit_none_falls_back_to_tag_present",
-        {"_model_key": "tagged", "tags": ["mtp"], "defaults": {"mtp": None}},
+        {"_model_key": "tagged", "tags": ["mtp"], "mtp": None},
         True,
     ),
     (
         "explicit_none_falls_back_to_tag_absent",
-        {"_model_key": "plain", "tags": [], "defaults": {"mtp": None}},
+        {"_model_key": "plain", "tags": [], "mtp": None},
         False,
     ),
-    ("no_defaults_key_at_all", {"_model_key": "tagged", "tags": ["mtp"]}, True),
+    ("no_mtp_key_at_all", {"_model_key": "tagged", "tags": ["mtp"]}, True),
     (
-        "defaults_not_a_dict_ignored",
-        {"_model_key": "tagged", "tags": ["mtp"], "defaults": "x"},
+        "stale_defaults_table_is_never_read",
+        {"_model_key": "tagged", "tags": ["mtp"], "defaults": {"mtp": False}},
         True,
     ),
 ]

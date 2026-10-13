@@ -14,8 +14,8 @@ import { describe, expect, it } from 'vitest'
 import { isMoeModel, isMtpModel } from '../model-sort.js'
 
 describe('isMtpModel', () => {
-  it('is true when defaults.mtp is explicitly true', () => {
-    expect(isMtpModel({ id: 'm', defaults: { mtp: true } })).toBe(true)
+  it('is true when mtp is explicitly true', () => {
+    expect(isMtpModel({ id: 'm', mtp: true })).toBe(true)
   })
 
   it('is true when the legacy mtp tag is present', () => {
@@ -25,6 +25,14 @@ describe('isMtpModel', () => {
   it('is false with neither signal', () => {
     expect(isMtpModel({ id: 'm', tags: ['chat'] })).toBe(false)
     expect(isMtpModel({ id: 'm' })).toBe(false)
+  })
+
+  it('honors an explicit mtp=false over the mtp tag (the backend rule: the fact wins either way)', () => {
+    expect(isMtpModel({ id: 'm', mtp: false, tags: ['chat', 'mtp'] })).toBe(false)
+  })
+
+  it('falls back to the tag only when the fact is unset (null)', () => {
+    expect(isMtpModel({ id: 'm', mtp: null, tags: ['mtp'] })).toBe(true)
   })
 })
 

@@ -360,6 +360,28 @@ describe('ModelPicker (card-dropdowns Task 1)', () => {
     expect(feasibilityCalls.length).toBe(1)
   })
 
+  it('sends the slot profile name instead of ctx when the slot has a profile', () => {
+    // ctx_effective is the CURRENT model's window; a candidate must be judged
+    // at the window it would launch with under the slot's profile, which the
+    // server resolves per candidate from the profile name.
+    const { host } = mount(
+      <ModelPicker
+        s={{ ...SLOT, profile: 'rocm' }}
+        models={MODELS}
+        allSlots={ALL_SLOTS}
+        disabled={false}
+        onSwap={() => {}}
+      />,
+    )
+    openMenu(host, 'chat')
+    expect(feasibilityCalls[0]).toEqual({
+      models: [
+        { model_id: 'm1', profile: 'rocm' },
+        { model_id: 'm2', profile: 'rocm' },
+      ],
+    })
+  })
+
   it('verdict chips render per feasibilityHint tone; unknown renders no chip', () => {
     feasibilityHandler.current = () => ({
       results: [

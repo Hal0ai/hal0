@@ -658,6 +658,11 @@ export function ModelPicker({ s, models, allSlots, disabled, onSwap }) {
   )
   const cur = s.model_id || s.model || ''
   const has = opts.some((m) => m.id === cur)
+  // The window each candidate would launch with under this slot's profile —
+  // the server resolves the profile name per candidate (profile ctx_size, else
+  // the candidate's native window). ctx_effective is the CURRENT model's
+  // window, so it is only the fallback for a slot with no profile.
+  const profileName = typeof s.profile === 'string' && s.profile ? s.profile : undefined
   const ctx = typeof s.ctx_effective === 'number' && s.ctx_effective > 0 ? s.ctx_effective : undefined
   const verdictFor = (id) => {
     const row = (feasibility.data?.results || []).find((r) => r.model_id === id)
@@ -679,7 +684,10 @@ export function ModelPicker({ s, models, allSlots, disabled, onSwap }) {
           if (ids.length === 0) return
           firedRef.current = true
           feasibility.mutate({
-            models: ids.map((id) => ({ model_id: id, ...(ctx ? { ctx } : {}) })),
+            models: ids.map((id) => ({
+              model_id: id,
+              ...(profileName ? { profile: profileName } : ctx ? { ctx } : {}),
+            })),
           })
         }}
         onChange={(id) => {

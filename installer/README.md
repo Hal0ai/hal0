@@ -307,14 +307,14 @@ Two things compose to launch a slot, and neither is the other:
   addon profiles instead (`docs/reference/profile-addons.mdx`) — an existing
   install keeps them as ordinary custom profiles.
 
-**MTP is a model property, not a profile tune.** `profile.mtp` in
-`profiles.toml` is informational only and is not consulted at launch
-(`providers.container._effective_mtp`). Precedence: an explicit
-`ModelDefaults.mtp` tri-state wins in either direction; `None` falls back to
-the registry `mtp` tag; and the runner must support drafting either way. When
-MTP resolves on, `MTP_FLAG_BUNDLE` (`--spec-type draft-mtp` and its
-`--spec-draft-*` defaults) is appended after the profile flags, and a model
-can override any of those from its own `defaults.extra_args`.
+**Whether the file has MTP heads is a model fact; whether a slot drafts
+with them is a profile tune** (`providers.container._effective_mtp`). The
+model's `mtp` field wins in either direction when set; `null` falls back to the
+registry `mtp` tag. The profile's `mtp` is `auto` (draft when the model has
+heads and the runner supports drafting) or `off`. When drafting is on,
+`MTP_DRAFT_BUNDLE` (`--spec-type draft-mtp` and its `--spec-draft-*` defaults,
+`config/schema.py`) goes in the profile layer ahead of the profile's own
+`flags`, so a profile can override any of them.
 
 The seed profile catalog is **virtual** — it lives in code (`SEED_PROFILES`,
 sourced from `hal0/config/data/seed_profiles.toml`) and is overlaid on every

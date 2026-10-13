@@ -23,7 +23,7 @@ from __future__ import annotations
 
 from hal0.registry.detect import DetectionResult, detect
 from hal0.registry.gguf_header import GGUFParseError, read_gguf_header
-from hal0.registry.model import Model, ModelDefaults
+from hal0.registry.model import Model
 from hal0.registry.store import (
     ModelAlreadyExists,
     ModelNotFound,
@@ -37,7 +37,6 @@ __all__ = [
     "GGUFParseError",
     "Model",
     "ModelAlreadyExists",
-    "ModelDefaults",
     "ModelNotFound",
     "ModelRegistry",
     "RegistryError",

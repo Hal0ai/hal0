@@ -506,14 +506,21 @@ def test_slot_create_hint_documents_the_profile() -> None:
     assert "context_size" not in admin.TOOL_DESCRIPTIONS["slot_create"]
 
 
-def test_model_edit_hint_documents_facts_only_defaults() -> None:
+def test_model_edit_hint_documents_the_top_level_file_facts() -> None:
     schema = admin.tool_param_schema("model_edit")
     assert schema["required"] == ["model_id"]
-    desc = schema["properties"]["defaults"]["description"]
+    props = schema["properties"]
     for fact in ("chat_template", "tokenizer_repo", "mtp", "jinja"):
-        assert fact in desc
-    assert "422" in desc
-    assert "profile" in desc
+        assert fact in props, fact
+        assert "File fact" in props[fact]["description"], fact
+    assert props["mtp"]["type"] == ["boolean", "null"]
+    assert props["jinja"]["type"] == ["boolean", "null"]
+    assert props["chat_template"]["type"] == ["string", "null"]
+    # The nested table is gone from the hint, and the tool description says so.
+    assert "defaults" not in props
+    desc = admin.TOOL_DESCRIPTIONS["model_edit"]
+    assert "model.defaults_removed" in desc
+    assert "profile_update" in desc
 
 
 @pytest.mark.parametrize("tool", ["profile_create", "profile_update"])

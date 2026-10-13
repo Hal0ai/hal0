@@ -1,8 +1,8 @@
 // @vitest-environment happy-dom
 //
 // Model drawer (ADR-0029, profile-centric config). The model is a FILE: the
-// drawer edits identity, the source coordinates, and three file facts on
-// `defaults` (chat template, jinja, "the file has MTP heads"), and shows the
+// drawer edits identity, the source coordinates, and three file facts
+// (top-level on the model: chat template, jinja, "the file has MTP heads"), and shows the
 // native context window read-only. Every tune lives on a profile, so the flag
 // editor, seed-from-profile, divergence diff, context input and the
 // Thinking/Vision overrides are gone and the save body can never carry them.
@@ -128,7 +128,6 @@ const MODEL = {
     sha256: 'a3f19c2e77bb4a8e9e6d5f4c3b2a19080706050403020100090807060504030',
   },
   capabilities: ['chat'],
-  defaults: {},
 }
 
 function mount(el: React.ReactElement) {
@@ -345,8 +344,9 @@ describe('ModelDrawer chat template (Task 5)', () => {
       await Promise.resolve()
     })
 
-    const call = updateCalls[0] as { id: string; body: { defaults: Record<string, unknown> } }
-    expect(call.body.defaults.chat_template).toBe('broken')
+    const call = updateCalls[0] as { id: string; body: Record<string, unknown> }
+    expect(call.body.chat_template).toBe('broken')
+    expect(call.body).not.toHaveProperty('defaults')
     act(() => root.unmount())
   })
 })
@@ -494,23 +494,14 @@ const TUNING_KEYS = [
   'n_gpu_layers',
   'rope_freq_base',
 ]
-// A row exactly as a pre-ADR-0029 server may still hand it back: tuning keys
-// riding along next to the real facts.
+// A row as the server hands it back (ADR-0029 §6): the four file facts sit
+// TOP-LEVEL on the model; there is no nested `defaults` object.
 const STALE_MODEL = {
   ...MODEL,
-  defaults: {
-    chat_template: 'chatml',
-    mtp: true,
-    jinja: null,
-    tokenizer_repo: 'org/tok',
-    extra_args: '-fa on --temp 0.4',
-    context_size: 8192,
-    profile: 'chat',
-    enable_thinking: false,
-    vision: false,
-    n_gpu_layers: 99,
-    rope_freq_base: 10000,
-  },
+  chat_template: 'chatml',
+  mtp: true,
+  jinja: null,
+  tokenizer_repo: 'org/tok',
 }
 
 describe('ModelDrawer facts only (ADR-0029)', () => {
@@ -558,7 +549,7 @@ describe('ModelDrawer facts only (ADR-0029)', () => {
     act(() => bare.root.unmount())
   })
 
-  it('a clean drawer does not save, even with stale tuning keys on the row', () => {
+  it('a clean drawer does not save, with the facts top-level on the row', () => {
     const { host, root } = mount(
       React.createElement(ModelDrawer, { open: true, onClose: () => {}, model: STALE_MODEL }),
     )
@@ -580,20 +571,35 @@ describe('ModelDrawer facts only (ADR-0029)', () => {
       await Promise.resolve()
       await Promise.resolve()
     })
-    const call = updateCalls[0] as { id: string; body: { defaults: Record<string, unknown> } }
-    // The stored facts round-trip, the edited one changed, and that is all.
-    expect(call.body.defaults).toEqual({
-      chat_template: 'chatml',
-      mtp: true,
-      jinja: false,
-      tokenizer_repo: 'org/tok',
-    })
-    for (const k of TUNING_KEYS) expect(call.body.defaults).not.toHaveProperty(k)
+    const call = updateCalls[0] as { id: string; body: Record<string, unknown> }
+    // Top-level, and ONLY the fact that changed: untouched chat_template / mtp
+    // / tokenizer_repo are not re-sent (absent = keep the stored value).
+    expect(call.body).toEqual({ jinja: false })
+    expect(call.body).not.toHaveProperty('defaults')
+    for (const k of TUNING_KEYS) expect(call.body).not.toHaveProperty(k)
     expect(JSON.stringify(call.body)).not.toMatch(/extra_args|context_size|enable_thinking|rope_freq_base|n_gpu_layers/)
     act(() => root.unmount())
   })
 
-  it('an identity-only edit still ships facts only', async () => {
+  it('clearing a fact sends an explicit null, top-level', async () => {
+    const { host, root } = mount(
+      React.createElement(ModelDrawer, { open: true, onClose: () => {}, model: STALE_MODEL }),
+    )
+    // mtp starts as an explicit override (true); the chip's ✕ returns it to Auto.
+    act(() =>
+      (host.querySelector('[aria-label="Remove MTP heads override"]') as HTMLButtonElement).click(),
+    )
+    await act(async () => {
+      q<HTMLButtonElement>(host, 'model-save').click()
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+    const call = updateCalls[0] as { body: Record<string, unknown> }
+    expect(call.body).toEqual({ mtp: null })
+    act(() => root.unmount())
+  })
+
+  it('an identity-only edit ships no facts', async () => {
     const { host, root } = mount(
       React.createElement(ModelDrawer, { open: true, onClose: () => {}, model: STALE_MODEL }),
     )
@@ -606,9 +612,9 @@ describe('ModelDrawer facts only (ADR-0029)', () => {
       await Promise.resolve()
       await Promise.resolve()
     })
-    const call = updateCalls[0] as { body: { name?: string; defaults: Record<string, unknown> } }
-    expect(call.body.name).toBe('qwen-renamed')
-    expect(Object.keys(call.body.defaults).sort()).toEqual(['chat_template', 'jinja', 'mtp', 'tokenizer_repo'])
+    const call = updateCalls[0] as { body: Record<string, unknown> }
+    // Identity edit only: no fact changed, so none rides along.
+    expect(call.body).toEqual({ name: 'qwen-renamed' })
     act(() => root.unmount())
   })
 })

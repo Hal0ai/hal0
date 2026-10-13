@@ -436,7 +436,7 @@ export const ENDPOINTS = {
 
   // ── Chat templates (per-model default template catalogue) ────────
   // GET /api/chat-templates → [{id, label}] list of known template ids
-  // that can be pinned as model.defaults.chat_template. The "auto"
+  // that can be pinned as the model's top-level chat_template. The "auto"
   // sentinel (use the GGUF's embedded template) is not emitted by the
   // backend — the UI prepends it as the first <option>.
   chatTemplates: '/api/chat-templates',

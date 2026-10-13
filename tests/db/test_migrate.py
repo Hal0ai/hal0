@@ -200,7 +200,7 @@ class TestPackagedRegistryMigration:
         and a fresh write leaves those columns empty."""
         import json
 
-        from hal0.registry.model import Model, ModelDefaults
+        from hal0.registry.model import Model
         from hal0.registry.sqlite_store import SqliteModelRegistry
 
         db = tmp_path / "reg.db"
@@ -209,7 +209,9 @@ class TestPackagedRegistryMigration:
             Model(
                 id="m1",
                 path="/models/m1.gguf",
-                defaults=ModelDefaults(chat_template="chatml", mtp=True, jinja=False),
+                chat_template="chatml",
+                mtp=True,
+                jinja=False,
                 metadata={"keep": 1},
             )
         )
@@ -225,13 +227,12 @@ class TestPackagedRegistryMigration:
             )
 
         got = reg.get("m1")
-        assert got.defaults is not None
-        assert got.defaults.model_dump() == {
-            "chat_template": "chatml",
-            "tokenizer_repo": None,
-            "mtp": True,
-            "jinja": False,
-        }
+        assert (got.chat_template, got.tokenizer_repo, got.mtp, got.jinja) == (
+            "chatml",
+            None,
+            True,
+            False,
+        )
         assert "_enable_thinking" not in got.metadata
         assert "_vision" not in got.metadata
         assert got.metadata.get("keep") == 1

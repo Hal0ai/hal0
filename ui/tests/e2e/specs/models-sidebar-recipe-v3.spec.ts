@@ -23,18 +23,17 @@ const ROW = {
   backends: ['rocm'],
   size_bytes: 4_000_000_000,
   metadata: { context_length: 131072 },
-  defaults: {
-    chat_template: 'chatml',
-    jinja: false,
-    mtp: true,
-    // Tuning keys a pre-ADR-0029 row might still carry on disk — they belong
-    // on a profile and must never render here.
-    profile: 'rocm-moe',
-    context_size: 8192,
-    extra_args: '-fa on -b 2048',
-    n_gpu_layers: 999,
-    rope_freq_base: 10000,
-  },
+  // File facts, top-level on the model (ADR-0029 §6).
+  chat_template: 'chatml',
+  jinja: false,
+  mtp: true,
+  // Stray tuning keys on the row — they belong on a profile and must never
+  // render here.
+  profile: 'rocm-moe',
+  context_size: 8192,
+  extra_args: '-fa on -b 2048',
+  n_gpu_layers: 999,
+  rope_freq_base: 10000,
 }
 
 test.beforeEach(async ({ page }) => {
@@ -85,7 +84,7 @@ test.describe('Models sidebar — file facts', () => {
     await page.goto('/#models')
     // The injected fixture row is installed + prepended, so it — not
     // Qwen3.6-27B-MTP — wins auto-selection here; select explicitly.
-    // Qwen3.6-27B-MTP carries no `defaults` in the base fixture.
+    // Qwen3.6-27B-MTP carries no file facts in the base fixture.
     await page.locator('.mdl-row', { hasText: 'Qwen3.6-27B-MTP' }).click()
     const recipe = page.locator('.mdl-detail-recipe').first()
     await expect(recipe).toContainText('No file facts recorded')

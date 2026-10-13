@@ -22,11 +22,12 @@ from typing import Any
 from hal0.errors import Hal0Error
 from hal0.registry.model import Model
 
-# #1413: the nested `Model` tables `merge_update` merges ONE level deep instead
+# #1413: the nested `Model` table `merge_update` merges ONE level deep instead
 # of replacing wholesale. Deliberately NOT `metadata` — that one is a freeform
 # bag with no schema, so "absent = keep" would leave callers no way to drop a
-# key; it stays replace-only.
-_MERGED_SUBTABLES = frozenset({"defaults", "capability_flags"})
+# key; it stays replace-only. (The file facts are top-level fields since
+# ADR-0029 §6, so a flat replace already gives them absent = keep.)
+_MERGED_SUBTABLES = frozenset({"capability_flags"})
 
 
 # ── Typed errors ──────────────────────────────────────────────────────────────
@@ -62,19 +63,15 @@ def merge_update(existing: Model, model_id: str, updates: dict[str, Any]) -> Mod
     rename). Used by
     :meth:`hal0.registry.sqlite_store.SqliteModelRegistry.update`.
 
-    The two NESTED tables in :data:`_MERGED_SUBTABLES` — ``defaults`` and
-    ``capability_flags`` — merge ONE level deep (#1413). The merge used to
-    be flat everywhere, which made a body that so much as named
-    ``defaults`` replace the whole ``ModelDefaults`` table: every sibling
-    key the client didn't resend (``context_size``, ``chat_template``,
-    ``mtp``/``jinja``/``enable_thinking``/``vision`` …) silently reset to
-    ``None`` behind an HTTP 200, contradicting the route's own documented
-    "body accepts any subset" contract. The sub-key semantics are the
-    tri-state ones the fields already carry:
+    The NESTED table in :data:`_MERGED_SUBTABLES` — ``capability_flags`` —
+    merges ONE level deep (#1413): a flat merge would make a body that so
+    much as named the table reset every sibling key the client didn't
+    resend, contradicting the route's documented "body accepts any subset"
+    contract. The sub-key semantics are the tri-state ones the fields
+    already carry:
 
     * absent sub-key    → keep the stored value
     * ``null`` sub-key  → clear that ONE value (the DELETE verb)
-    * ``{"defaults": null}`` → drop the whole table (unchanged)
 
     Anything that isn't a dict (or a table not in the set — ``metadata``
     stays freeform and replace-only) keeps the flat overwrite.

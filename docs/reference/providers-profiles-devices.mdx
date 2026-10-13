@@ -97,7 +97,7 @@ different profile.
 | `ctx_size` | Context window (128–16777216), or unset: the model's native window dense-capped at 32768, else 8192. |
 | `enable_thinking` | Request-time reasoning default for slots running this profile (`true`/`false`/unset). |
 | `vision` | `auto` (default; loads the model's mmproj when it has one) or `off`. |
-| `mtp` | `auto` (default; drafts when the model has MTP heads and the runner supports it) or `off`. Whether the file *has* heads is a model fact (`defaults.mtp` / the `mtp` tag). |
+| `mtp` | `auto` (default; drafts when the model has MTP heads and the runner supports it) or `off`. Whether the file *has* heads is a model fact (the model's `mtp` field, else the `mtp` tag). |
 | `runner` | Optional `RUNNER_IMAGES` registry key (str \| null, default null). Applying this profile to a slot sets the slot's `binary` to this runner key, and — only for a single-backend runner — derives the slot's `device` too (the profile wins over the slot's prior device within a device class). `null` (the default; every seed profile) means a flags-only tune that never touches the slot's runtime/device. |
 | `cloned_from` | Provenance — set when a profile was cloned from a seed. |
 | `intent` | Dashboard card headline. |

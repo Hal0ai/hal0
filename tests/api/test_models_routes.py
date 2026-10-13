@@ -891,12 +891,13 @@ def test_disabled_or_filtered_remote_curates_api_models(
     assert "mistral/mistral-large" not in rows  # disabled upstream
 
 
-def test_update_model_rejects_tuning_keys_in_defaults(
+def test_update_model_rejects_defaults_and_tuning_keys(
     inspect_client: TestClient, tmp_hal0_home: str
 ) -> None:
-    """ADR-0029: ``defaults`` holds file facts only. A flag string, a context
-    window or any other tune fails the PUT with a 422 naming the key, and a
-    facts-only body still saves."""
+    """ADR-0029 §6: a model row holds file facts only, top-level. A ``defaults``
+    table is a 422 ``model.defaults_removed``; a flag string, a context window
+    or any other tune is a 422 ``model.tune_key_removed``; a facts-only body
+    still saves."""
     fp = Path(tmp_hal0_home) / "screened.gguf"
     fp.write_bytes(b"\x00" * 8)
     inspect_client.post("/api/models", json={"id": "screened", "path": str(fp)})
@@ -906,15 +907,20 @@ def test_update_model_rejects_tuning_keys_in_defaults(
         json={"defaults": {"extra_args": "--port 9999 -fa on"}},
     )
     assert r.status_code == 422, r.text
-    assert r.json()["error"]["code"] == "model.defaults_key_removed"
+    assert r.json()["error"]["code"] == "model.defaults_removed"
+
+    r = inspect_client.put("/api/models/screened", json={"extra_args": "--port 9999 -fa on"})
+    assert r.status_code == 422, r.text
+    assert r.json()["error"]["code"] == "model.tune_key_removed"
 
     # A facts-only body still saves.
     ok = inspect_client.put(
         "/api/models/screened",
-        json={"defaults": {"chat_template": "minicpm5-1b", "jinja": False}},
+        json={"chat_template": "minicpm5-1b", "jinja": False},
     )
     assert ok.status_code == 200, ok.text
-    assert ok.json()["defaults"]["jinja"] is False
+    assert ok.json()["jinja"] is False
+    assert ok.json()["chat_template"] == "minicpm5-1b"
 
 
 def test_update_model_ignores_backends_writes(
@@ -959,28 +965,46 @@ def test_list_models_self_heals_provider_for_mistagged_comfyui_row(
     assert row["provider"] == "comfyui"
 
 
-# ── screen_model_write: the facts-only ``defaults`` screen (pure) ─────────────
+# ── screen_model_write: the model-facts screen (pure) ─────────────────────────
 
 
-def test_screen_model_write_removed_defaults_key_is_unprocessable() -> None:
+@pytest.mark.parametrize(
+    "defaults",
+    [{"enable_thinking": True, "vision": False}, {"chat_template": "chatml"}, None, {}],
+)
+def test_screen_model_write_defaults_key_is_unprocessable(defaults: object) -> None:
     from hal0.errors import UnprocessableEntity
     from hal0.services.models_service import screen_model_write
 
     with pytest.raises(UnprocessableEntity) as exc:
-        screen_model_write({"defaults": {"enable_thinking": True, "vision": False}})
-    assert exc.value.code == "model.defaults_key_removed"
+        screen_model_write({"defaults": defaults})
+    assert exc.value.code == "model.defaults_removed"
     assert exc.value.status == 422
-    assert exc.value.details["keys"] == ["enable_thinking", "vision"]
-    assert exc.value.details["allowed"] == ["chat_template", "jinja", "mtp", "tokenizer_repo"]
+    assert exc.value.details["keys"] == (sorted(defaults) if defaults else [])
+    assert exc.value.details["facts"] == ["chat_template", "tokenizer_repo", "mtp", "jinja"]
+
+
+def test_screen_model_write_top_level_tune_keys_are_unprocessable() -> None:
+    from hal0.errors import UnprocessableEntity
+    from hal0.services.models_service import MODEL_TUNE_KEYS, screen_model_write
+
+    with pytest.raises(UnprocessableEntity) as exc:
+        screen_model_write({"name": "x", "vision": False, "context_size": 4096})
+    assert exc.value.code == "model.tune_key_removed"
+    assert exc.value.status == 422
+    assert exc.value.details["keys"] == ["context_size", "vision"]
+    for key in MODEL_TUNE_KEYS:
+        with pytest.raises(UnprocessableEntity):
+            screen_model_write({key: 1})
 
 
 def test_screen_model_write_facts_pass_and_bad_fact_is_bad_request() -> None:
     from hal0.errors import BadRequest
     from hal0.services.models_service import screen_model_write
 
-    screen_model_write({"defaults": {"chat_template": "auto", "mtp": True, "jinja": None}})
-    screen_model_write({"defaults": None})
-    screen_model_write({"name": "no defaults at all"})
+    screen_model_write({"chat_template": "auto", "mtp": True, "jinja": None})
+    screen_model_write({"name": "no facts at all"})
     with pytest.raises(BadRequest) as exc:
-        screen_model_write({"defaults": {"mtp": "maybe"}})
-    assert exc.value.code == "model.defaults_invalid"
+        screen_model_write({"mtp": "maybe"})
+    assert exc.value.code == "model.fact_invalid"
+    assert exc.value.details["field"] == "mtp"

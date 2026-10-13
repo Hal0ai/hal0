@@ -244,7 +244,7 @@ class TestChatTokenizerGate:
                 "caps": ["chat"],
                 "default_lane": "rocm",
                 "hf_repo": "Qwen/Qwen3-4B-GGUF",
-                "defaults": {"tokenizer_repo": "meta-llama/Llama-3.1-8B"},
+                "tokenizer_repo": "meta-llama/Llama-3.1-8B",
             }
         ]
         cells = plan(_chat_suite(), reg, store)
@@ -329,7 +329,7 @@ class TestModelCapsTypedFields:
                 "tags": ["coder"],
                 "mmproj": "/m/mmproj.gguf",
                 "capability_flags": {"tool_calling": True},
-                "defaults": {"mtp": True},
+                "mtp": True,
                 "profile": {"enable_thinking": True},
             }
         )

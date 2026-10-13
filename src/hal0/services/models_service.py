@@ -364,14 +364,17 @@ async def commit_scan_rows(
 
     Each row is a dict with at least ``path``. Optional fields override
     detection: ``id``, ``name``, ``backends``, ``capabilities``, ``provider``,
-    ``defaults`` (file facts only — a tuning key skips the row). Missing fields are
+    and the file facts ``chat_template`` / ``tokenizer_repo`` / ``mtp`` /
+    ``jinja`` (ADR-0029 §6; a ``defaults`` table, a tuning key or a malformed
+    fact skips the row — see :func:`screen_model_facts`). Missing fields are
     backfilled by re-running ``detect()`` on the path so the operator can
     edit only what matters and still get high-confidence defaults for the
     rest. ``provider`` defaults to ``derive_model_provider(backends)`` when
     not given, so a freshly-committed row always carries an explicit
     provider (Task 3) instead of leaving it for lazy derivation.
     """
-    from hal0.registry.model import Model, ModelDefaults
+    from hal0.errors import Hal0Error
+    from hal0.registry.model import MODEL_FACT_FIELDS, Model
     from hal0.registry.store import ModelAlreadyExists
 
     added: list[str] = []
@@ -420,23 +423,14 @@ async def commit_scan_rows(
         suggested_id = row.get("id") or suggest_id_from_path(resolved)
         name = row.get("name") or resolved.stem
 
-        defaults_payload = row.get("defaults")
-        defaults_obj: ModelDefaults | None = None
-        if isinstance(defaults_payload, dict) and defaults_payload:
-            # Facts only (ADR-0029): a tuning key belongs on a profile.
-            removed = sorted(
-                str(k) for k in defaults_payload if k not in ModelDefaults.model_fields
-            )
-            if removed:
-                skipped.append(
-                    {"path": str(resolved), "reason": f"defaults_key_removed:{','.join(removed)}"}
-                )
-                continue
-            try:
-                defaults_obj = ModelDefaults.model_validate(defaults_payload)
-            except Exception as exc:
-                skipped.append({"path": str(resolved), "reason": f"invalid_defaults:{exc}"})
-                continue
+        # Facts are top-level (ADR-0029 §6); a ``defaults`` table or a tuning
+        # key skips the row with the same code the create/PUT screen raises.
+        try:
+            screen_model_facts(row)
+        except Hal0Error as exc:
+            skipped.append({"path": str(resolved), "reason": exc.code, "message": exc.message})
+            continue
+        facts = {k: row[k] for k in MODEL_FACT_FIELDS if k in row}
 
         size_bytes = 0
         with contextlib.suppress(OSError):
@@ -456,8 +450,8 @@ async def commit_scan_rows(
                 capabilities=[str(c) for c in capabilities],
                 backends=[str(b) for b in backends],
                 provider=provider,
-                defaults=defaults_obj,
                 metadata=metadata,
+                **facts,
                 # GGUF general.architecture from the header read detect()
                 # already performed — persisted so the model↔runner arch
                 # fit-check (hal0#2118) can warn at slot assignment instead
@@ -2023,51 +2017,81 @@ async def inspect_hf_repo(body: dict[str, Any]) -> dict[str, Any]:
     return {"repo": repo, "cached": False, **result}
 
 
-# ── the facts-only ``defaults`` screen (ADR-0029) ─────────────────────────────
+# ── the model-facts screen (ADR-0029 §6) ─────────────────────────────────────
 #
-# ``ModelDefaults`` holds file facts only (chat template, tokenizer repo, MTP
-# heads, jinja). Every tune lives on the profile of the slot that runs the
-# model, so a write that still carries a tuning key is refused rather than
-# silently dropped.
+# A model row holds file facts only — ``chat_template``, ``tokenizer_repo``,
+# ``mtp`` (the file has MTP heads) and ``jinja`` — as top-level fields. Every
+# tune lives on the profile of the slot that runs the model. A write in the
+# old shape is refused rather than silently dropped: ``Model`` ignores unknown
+# keys, so without this screen a ``defaults`` table or a top-level
+# ``context_size`` would vanish behind an HTTP 200.
+
+#: Top-level keys that used to tune a model (under ``defaults``) and now
+#: belong on a profile. Named so a client that flattened its old ``defaults``
+#: body gets a pointed 422 instead of a silent drop.
+MODEL_TUNE_KEYS: tuple[str, ...] = (
+    "context_size",
+    "enable_thinking",
+    "extra_args",
+    "n_gpu_layers",
+    "preferred_runner",
+    "profile",
+    "rope_freq_base",
+    "vision",
+)
 
 
-def _screen_model_defaults(defaults: dict[str, Any]) -> None:
-    """Typed screen for the incoming ``defaults`` patch.
+def screen_model_facts(body: dict[str, Any]) -> None:
+    """Refuse the pre-ADR-0029 write shape and malformed fact values.
 
-    Two jobs, in order:
+    Three checks, in order:
 
-    1. A key outside :class:`~hal0.registry.model.ModelDefaults` (``extra_args``,
-       ``context_size``, ``profile``, ``enable_thinking``, ``vision``, …) is a
-       ``422 model.defaults_key_removed`` pointing the client at the profile.
-    2. A fact with a value of the wrong type (``{"mtp": "maybe"}``) fails as
-       ``400 model.defaults_invalid`` instead of escaping to
+    1. A ``defaults`` key at all (any value, ``null`` included) is ``422
+       model.defaults_removed``: the facts are top-level now.
+    2. A top-level tuning key (:data:`MODEL_TUNE_KEYS`) is ``422
+       model.tune_key_removed``: tunes belong on a profile.
+    3. A fact whose value is the wrong type (``{"mtp": "maybe"}``) is ``400
+       model.fact_invalid`` instead of escaping to
        :func:`hal0.registry.store.merge_update`, which wraps every failure in a
-       500 with a raw pydantic traceback.
+       500.
     """
     from pydantic import ValidationError
 
     from hal0.errors import BadRequest, UnprocessableEntity
-    from hal0.registry.model import ModelDefaults
+    from hal0.registry.model import MODEL_FACT_FIELDS, Model
 
-    removed = sorted(str(k) for k in defaults if k not in ModelDefaults.model_fields)
-    if removed:
+    if "defaults" in body:
+        nested = body.get("defaults")
+        keys = sorted(str(k) for k in nested) if isinstance(nested, dict) else []
         raise UnprocessableEntity(
-            f"defaults carries key(s) the model no longer owns: {', '.join(removed)}. "
-            "A model row holds file facts only (chat_template, tokenizer_repo, mtp, "
-            "jinja); every tune belongs on the profile of the slot that runs it.",
-            code="model.defaults_key_removed",
-            details={"keys": removed, "allowed": sorted(ModelDefaults.model_fields)},
+            "a model write no longer takes a 'defaults' object. Send the file facts "
+            "(chat_template, tokenizer_repo, mtp, jinja) as top-level fields; every "
+            "tune belongs on the profile of the slot that runs the model.",
+            code="model.defaults_removed",
+            details={"keys": keys, "facts": list(MODEL_FACT_FIELDS)},
         )
 
+    tunes = sorted(k for k in MODEL_TUNE_KEYS if k in body)
+    if tunes:
+        raise UnprocessableEntity(
+            f"a model row does not hold tunes: {', '.join(tunes)}. Put them on the "
+            "profile of the slot that runs the model (profile_create / profile_update).",
+            code="model.tune_key_removed",
+            details={"keys": tunes, "facts": list(MODEL_FACT_FIELDS)},
+        )
+
+    facts = {k: body[k] for k in MODEL_FACT_FIELDS if k in body}
+    if not facts:
+        return
     try:
-        ModelDefaults.model_validate(defaults)
+        Model.model_validate({"id": "fact-screen", "path": "fact-screen", **facts})
     except ValidationError as exc:
         first = exc.errors()[0] if exc.errors() else {}
-        loc = ".".join(str(p) for p in first.get("loc", ())) or "defaults"
+        field = ".".join(str(p) for p in first.get("loc", ())) or "facts"
         raise BadRequest(
-            f"defaults.{loc} is not a valid value: {first.get('msg', 'invalid')}",
-            code="model.defaults_invalid",
-            details={"field": f"defaults.{loc}", "reason": first.get("msg")},
+            f"{field} is not a valid value: {first.get('msg', 'invalid')}",
+            code="model.fact_invalid",
+            details={"field": field, "reason": first.get("msg")},
         ) from exc
 
 
@@ -2147,13 +2171,14 @@ def screen_model_write(
     """Validate a model create/update/validate body.
 
     Raises :class:`~hal0.errors.BadRequest` (or :class:`~hal0.errors.UnprocessableEntity`
-    for a removed ``defaults`` key) on the first violation, with the same envelope
+    for the pre-ADR-0029 shape) on the first violation, with the same envelope
     the dashboard keys on. Shared by ``POST /api/models``, ``PUT /api/models/{id}``
     and ``POST /api/models/validate`` so the three can never drift. Screens:
 
-    * ``defaults`` as a whole — facts only (ADR-0029). A tuning key is ``422
-      model.defaults_key_removed``; a malformed fact value is ``400
-      model.defaults_invalid``. See :func:`_screen_model_defaults`.
+    * the file facts (ADR-0029 §6) — a ``defaults`` key is ``422
+      model.defaults_removed``, a top-level tuning key ``422
+      model.tune_key_removed``, a malformed fact value ``400
+      model.fact_invalid``. See :func:`screen_model_facts`.
     * ``capabilities`` + ``mmproj`` — the vision↔mmproj invariant (#1393), via
       :func:`screen_vision_mmproj`. ``existing`` is the stored row (``None`` on
       create) and the two fields are read body-over-stored, because PUT bodies
@@ -2181,9 +2206,7 @@ def screen_model_write(
             body.get("mmproj", prior.get("mmproj")),
         )
 
-    defaults = body.get("defaults")
-    if isinstance(defaults, dict):
-        _screen_model_defaults(defaults)
+    screen_model_facts(body)
 
     provider = body.get("provider")
     if provider is not None:

@@ -6,7 +6,7 @@ by typed fields and nothing routes on ``Model.tags``. Registry rows stamped by
 older releases still carry the tags, so this sweep folds the two that ever
 drove behaviour into their typed homes and strips all six:
 
-* ``mtp`` → ``defaults.mtp = True`` (absent-only — an explicit operator
+* ``mtp`` → ``mtp = True`` (absent-only — an explicit operator
   False stays False; ``model_is_mtp_eligible`` prefers the typed field).
 * ``vision`` → folded into the ``capabilities`` list ONLY when the row
   carries an mmproj sidecar — a vision capability with no projector is a
@@ -44,8 +44,6 @@ CONDITIONAL_TYPE_TAGS: frozenset[str] = frozenset({"moe", "vision"})
 
 def retire_model_type_tags(registry: Any) -> list[str]:
     """Fold + strip retired type tags on every registry row. Returns changed ids."""
-    from hal0.registry.model import ModelDefaults
-
     changed: list[str] = []
     try:
         rows = registry.list()
@@ -72,13 +70,8 @@ def retire_model_type_tags(registry: Any) -> list[str]:
             if new_tags == tags and not (hit & strip):
                 continue  # nothing strippable this pass (e.g. lone un-typed moe)
             updates: dict[str, Any] = {"tags": new_tags}
-            defaults = getattr(row, "defaults", None)
-            if "mtp" in hit and (defaults is None or defaults.mtp is None):
-                updates["defaults"] = (
-                    defaults.model_copy(update={"mtp": True})
-                    if defaults is not None
-                    else ModelDefaults(mtp=True)
-                )
+            if "mtp" in hit and getattr(row, "mtp", None) is None:
+                updates["mtp"] = True
             if "vision" in hit and has_mmproj:
                 caps = list(getattr(row, "capabilities", None) or [])
                 if "vision" not in {str(c).lower() for c in caps}:

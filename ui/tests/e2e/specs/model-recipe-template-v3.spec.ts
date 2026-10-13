@@ -3,7 +3,7 @@
  *
  * Task 4 (Phase 3): the recipe editor gains a <select> populated from
  * GET /api/chat-templates. On Save the selected value is written into
- * PUT /api/models/{id} body as defaults.chat_template.
+ * PUT /api/models/{id} body as the top-level `chat_template` fact (ADR-0029 §6).
  *
  * The HAL0_DATA fixture auto-selects the first installed model
  * (qwen3.6-27b-mtp) and exposes "Edit options" in the detail pane —
@@ -13,7 +13,7 @@ import { test, expect } from '../fixtures/apiMock'
 import { openRichSelect, pickRichOption } from '../fixtures/richSelect'
 
 test.describe('Recipe editor — chat-template field', () => {
-  test('select is populated from /api/chat-templates and Save writes defaults.chat_template', async ({
+  test('select is populated from /api/chat-templates and Save writes chat_template top-level', async ({
     page,
   }) => {
     // ── 1. Mock /api/chat-templates ───────────────────────────────
@@ -39,7 +39,7 @@ test.describe('Recipe editor — chat-template field', () => {
           contentType: 'application/json',
           body: JSON.stringify({
             id: 'qwen3.6-27b-mtp',
-            defaults: putBody.defaults,
+            chat_template: putBody.chat_template,
           }),
         })
       }
@@ -64,11 +64,12 @@ test.describe('Recipe editor — chat-template field', () => {
     await pickRichOption(tmplSelect, 'chatml')
     await page.getByTestId('model-save').click()
 
-    // ── 7. PUT body includes defaults.chat_template === 'chatml' ─
-    await expect.poll(() => putBody?.defaults?.chat_template).toBe('chatml')
+    // ── 7. PUT body carries chat_template === 'chatml' top-level ─
+    await expect.poll(() => putBody?.chat_template).toBe('chatml')
+    expect(putBody).not.toHaveProperty('defaults')
   })
 
-  test('chat_template defaults to "auto" when model has no defaults', async ({ page }) => {
+  test('chat_template defaults to "auto" when the model has no chat_template fact', async ({ page }) => {
     await page.route('**/api/chat-templates', (route) =>
       route.fulfill({
         status: 200,

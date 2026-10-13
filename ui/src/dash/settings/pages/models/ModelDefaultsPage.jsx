@@ -4,16 +4,17 @@
 // GPU layers — lives on a profile (Profiles page) and is picked by the slot,
 // so this page no longer edits a context size or GPU layers.
 //
-// The chat template is stored on the model registry row (ModelDefaults,
-// registry/model.py) — edited via PUT /api/models/{id}, NOT /api/settings. A
+// The chat template is a top-level fact on the model registry row
+// (Model.chat_template, registry/model.py; ADR-0029 §6) — edited via
+// PUT /api/models/{id}, NOT /api/settings. A
 // change is written to the registry immediately but is observed only when a
 // slot serving the model is (re)started (the launch argv is resolved at slot
 // start) — hence the "⟳ restart slots" badge, which resolves through the ONE
-// reload-class source (data/reloadClass.js → `model.defaults.*` fallback),
+// reload-class source (data/reloadClass.js → `model.chat_template` fallback),
 // not a hand-rolled chip.
 //
 // Per-model editing is the SAME contract the model drawer uses
-// (useModelUpdate → PUT /api/models/{id} with a `defaults` object): both
+// (useModelUpdate → PUT /api/models/{id} with top-level fact keys): both
 // surfaces converge on one hook + one backend writer.
 import { useState, useEffect } from 'react'
 import { useModels, useModelUpdate } from '@/api/hooks/useModels'
@@ -23,27 +24,17 @@ import { ApplyBadge } from '../../shared/ApplyBadge.jsx'
 import { SRow } from '../../shared/SRow.jsx'
 import { _advInputStyle } from '../../shared/SchemaRow.jsx'
 
-// The next `defaults` object. Facts only (ADR-0029): the server rejects any
-// tuning key under `defaults` with a 422, so the body starts from the stored
-// FACT keys alone — a stale tuning key on a row can never ride along. Since
-// #1413 the registry merges `defaults` one level deep, so absent means "keep
-// the stored value" and only `null` deletes: 'auto' sends `null`, never an
-// omitted key.
-const FACT_KEYS = ['chat_template', 'mtp', 'jinja', 'tokenizer_repo']
-function buildDefaultsPatch(init, { chatTemplate }) {
-  const defaults = Object.fromEntries(
-    FACT_KEYS.filter(k => init[k] !== undefined).map(k => [k, init[k]]),
-  )
-  // 'auto' = GGUF-embedded template = absence of an override.
-  defaults.chat_template = chatTemplate && chatTemplate !== 'auto' ? chatTemplate : null
-  return defaults
+// The PUT body: the one fact this page edits, top-level (ADR-0029 §6). A
+// `defaults` object or a tuning key is a 422, and an absent fact keeps its
+// stored value, so nothing else rides along. 'auto' (the GGUF-embedded
+// template) sends `null` to clear the pin, never an omitted key.
+function chatTemplatePatch(chatTemplate) {
+  return { chat_template: chatTemplate && chatTemplate !== 'auto' ? chatTemplate : null }
 }
 
 function ModelDefaultsRow({ model, templates }) {
   const update = useModelUpdate()
-  const init = model?.defaults || {}
-
-  const origTpl = init.chat_template ?? 'auto'
+  const origTpl = model?.chat_template ?? 'auto'
 
   const [chatTemplate, setChatTemplate] = useState(origTpl)
   useEffect(() => {
@@ -55,9 +46,8 @@ function ModelDefaultsRow({ model, templates }) {
   const canSave = dirty && !update.isPending
 
   const onSave = async () => {
-    const defaults = buildDefaultsPatch(init, { chatTemplate })
     try {
-      await update.mutateAsync({ id: model.id, body: { defaults } })
+      await update.mutateAsync({ id: model.id, body: chatTemplatePatch(chatTemplate) })
       window.__hal0Toast && window.__hal0Toast(`Defaults saved for ${model.longName || model.id} — restart its slot to apply`, 'warn')
     } catch (e) {
       window.__hal0Toast && window.__hal0Toast(`Save failed — ${e?.message || 'see logs'}`, 'err')
@@ -77,7 +67,7 @@ function ModelDefaultsRow({ model, templates }) {
           />
         </div>
         <div className="ac" style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
-          <ApplyBadge settingsKey="model.defaults.chat_template" />
+          <ApplyBadge settingsKey="model.chat_template" />
           {dirty && (
             <button className="btn ghost sm" disabled={!canSave} onClick={onSave}>
               {update.isPending ? 'Saving…' : 'Save'}

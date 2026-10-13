@@ -114,7 +114,8 @@ _start_flm_pull = _pull_jobs.start_flm_pull
 #     is the pydantic schema of record for a model row).
 #   - update_model  — ``registry.update()`` re-validates through the same
 #     ``Model`` schema; ``_svc.screen_model_write`` additionally screens the
-#     ``defaults`` facts (a tuning key is a 422) and the vision↔mmproj pairing.
+#     file facts (a ``defaults`` table or a tuning key is a 422) and the
+#     vision↔mmproj pairing.
 #   - add-from-path / inspect / validate — thin route shells whose body
 #     shape is screened inside ``hal0.services.models_service``
 #     (``add_from_path`` / ``inspect_hf_repo`` / ``screen_model_write``).
@@ -284,8 +285,10 @@ async def scan_models(request: Request) -> dict[str, Any]:
       ``reconcile_referenced``, kept).
 
     * **``{"rows": [...]}``** — commit pre-vetted preview rows. Each row
-      may carry user-edited ``backends`` / ``capabilities`` / ``defaults``
-      / ``name`` / ``id`` overrides; otherwise we fall back to the
+      may carry user-edited ``backends`` / ``capabilities`` / ``name`` /
+      ``id`` overrides and the top-level file facts (``chat_template`` /
+      ``tokenizer_repo`` / ``mtp`` / ``jinja``; a ``defaults`` table skips
+      the row as ``model.defaults_removed``); otherwise we fall back to the
       detection output for that path. User overrides always win — that's
       the whole point of the preview round-trip.
 
@@ -405,7 +408,7 @@ async def create_model(request: Request) -> dict[str, Any]:
     if not isinstance(provider, str) or not provider.strip():
         body["provider"] = derive_model_provider(body.get("backends"))
     # Screen at CREATE time too, with the same helper the PUT/validate paths
-    # use: a body carrying a removed ``defaults`` tuning key is a 422 here
+    # use: a body carrying a ``defaults`` table or a tuning key is a 422 here
     # instead of a generic "invalid Model payload".
     _svc.screen_model_write(body, runner_images=_RUNNER_IMAGES)
     try:
@@ -438,7 +441,8 @@ async def validate_model_write(request: Request) -> dict[str, Any]:
     The dashboard's Model drawer POSTs a candidate body here before saving so a
     violation is surfaced inline instead of only at the eventual save. Returns
     ``{"ok": true}`` on a clean body; a violation raises the SAME typed envelope
-    (``422 model.defaults_key_removed`` / ``model.defaults_invalid`` /
+    (``422 model.defaults_removed`` / ``model.tune_key_removed`` /
+    ``model.fact_invalid`` /
     ``model.provider_invalid`` / ``model.vision_requires_mmproj`` /
     ``model.mmproj_not_found``) the create and PUT paths raise, so the drawer
     renders one error path.
@@ -603,7 +607,24 @@ async def models_feasibility(request: Request) -> dict[str, Any]:
     being dropped, so the response row count always matches the request
     row count (after the soft cap below). This is a batch advisory
     endpoint for the drawer's model picker, not a gate.
+
+    Each row is ``{"model_id", "ctx"?, "profile"?}`` and names the window to
+    test (ADR-0029 §6 — a model holds no context tune):
+
+    * ``ctx`` — a positive integer, tested as given (``ctx_source:
+      "request"``). Wins over ``profile`` when both are sent.
+    * ``profile`` — a profile name, resolved for THIS model by the launch
+      resolver (:func:`hal0.providers.container.profile_context`): the
+      profile's ``ctx_size``, else the model's native window capped at 32768,
+      else 8192 (``ctx_source`` ``profile`` / ``native`` / ``fallback``). An
+      unknown profile degrades the row to ``"unknown"``.
+    * neither — the window a profile with no ``ctx_size`` would launch.
+
+    Every result row carries ``ctx`` and ``ctx_source`` (both ``null`` on an
+    ``"unknown"`` row).
     """
+    from hal0.providers.container import profile_context, resolve_named_profile
+
     try:
         body = await request.json()
     except Exception as exc:
@@ -642,6 +663,8 @@ async def models_feasibility(request: Request) -> dict[str, Any]:
                     "needed_mb": 0.0,
                     "gtt_free_mb": free,
                     "gtt_total_mb": total,
+                    "ctx": None,
+                    "ctx_source": None,
                 }
             )
             continue
@@ -654,12 +677,20 @@ async def models_feasibility(request: Request) -> dict[str, Any]:
         try:
             model = registry.get(mid)
             model_mb = float(model.size_bytes or 0) / (1024 * 1024)
-            ctx_meta = model.model_dump(mode="json")
-            ctx = item.get("ctx")
-            if isinstance(ctx, int) and not isinstance(ctx, bool) and ctx > 0:
-                # The window to test comes from the request row (a model holds
-                # no context tune any more); the KV estimate reads ``ctx_tokens``.
-                ctx_meta["ctx_tokens"] = ctx
+            ctx_meta = {**model.model_dump(mode="json"), "_model_key": mid}
+            req_ctx = item.get("ctx")
+            profile_name = item.get("profile")
+            if isinstance(req_ctx, int) and not isinstance(req_ctx, bool) and req_ctx > 0:
+                ctx, ctx_source = req_ctx, "request"
+            else:
+                profile = (
+                    resolve_named_profile({}, profile_name)
+                    if isinstance(profile_name, str) and profile_name.strip()
+                    else None
+                )
+                ctx, ctx_source = profile_context(profile, ctx_meta)
+            # The KV estimate reads the resolved window from ``ctx_tokens``.
+            ctx_meta["ctx_tokens"] = ctx
             needed = estimate_file_size_kv_mb(model_mb, ctx_meta)
             verdict = gtt_feasibility_verdict(needed, gtt_free_mb=free, gtt_total_mb=total)
         except Exception:
@@ -671,10 +702,12 @@ async def models_feasibility(request: Request) -> dict[str, Any]:
                     "needed_mb": 0.0,
                     "gtt_free_mb": free,
                     "gtt_total_mb": total,
+                    "ctx": None,
+                    "ctx_source": None,
                 }
             )
             continue
-        results.append({"model_id": mid, **verdict})
+        results.append({"model_id": mid, **verdict, "ctx": ctx, "ctx_source": ctx_source})
     return {"results": results}
 
 
@@ -715,7 +748,8 @@ async def update_model(model_id: str, request: Request) -> dict[str, Any]:
     """Apply partial updates to a registered model's metadata.
 
     Body accepts any subset of: ``name``, ``capabilities``, ``provider``,
-    ``defaults`` (nested ``ModelDefaults``), plus the other fields
+    the file facts ``chat_template`` / ``tokenizer_repo`` / ``mtp`` /
+    ``jinja`` (ADR-0029 §6), plus the other fields
     (``license``, ``tags``, ``metadata`` …). Emits ``model.updated`` with
     ``changed_fields`` so the footer ticker can render a "you edited X" chip.
 
@@ -729,22 +763,21 @@ async def update_model(model_id: str, request: Request) -> dict[str, Any]:
     ``backends`` tags rather than persisting a permanent ``provider=None``
     row — the same "no provider supplied" convergence create applies (#2199).
 
-    ``defaults`` and ``capability_flags`` are the two tables where "any
-    subset" reaches INSIDE the object (#1413): an absent sub-key keeps the
-    stored value, an explicit ``null`` clears that one value, and
-    ``{"defaults": null}`` drops the whole table. Every other field —
+    A fact is a plain top-level field: absent keeps the stored value, an
+    explicit ``null`` clears it. ``capability_flags`` is the one table where
+    "any subset" reaches INSIDE the object (#1413). Every other field —
     including ``metadata`` and the list-valued ``capabilities``/``tags`` —
-    is a flat replace. See :func:`hal0.registry.store.merge_update`.
-
-    ``defaults`` holds file facts only (``chat_template``, ``tokenizer_repo``,
-    ``mtp``, ``jinja``); tunes live on profiles (ADR-0029).
+    is a flat replace. See :func:`hal0.registry.store.merge_update`. Tunes
+    live on profiles (ADR-0029).
 
     Errors:
-      * ``422 model.defaults_key_removed`` — ``defaults`` carries a key the
-        model no longer owns (``extra_args``, ``context_size``, ``profile``,
-        ``enable_thinking``, ``vision``, …).
-      * ``400 model.defaults_invalid`` — a ``defaults`` fact whose value isn't
-        parseable as its ``ModelDefaults`` type (#1414).
+      * ``422 model.defaults_removed`` — the body carries a ``defaults`` key;
+        the facts are top-level fields.
+      * ``422 model.tune_key_removed`` — the body carries a tuning key
+        (``context_size``, ``extra_args``, ``profile``, ``enable_thinking``,
+        ``vision``, …) that belongs on a profile.
+      * ``400 model.fact_invalid`` — a fact whose value isn't parseable as
+        its type (``{"mtp": "maybe"}``, #1414).
       * ``400 model.provider_invalid`` — ``provider`` not a
         ``hal0.model_meta.RUNTIME_FAMILIES`` member.
       * ``404 model.not_found`` — ``model_id`` not registered.
@@ -789,7 +822,7 @@ async def update_model(model_id: str, request: Request) -> dict[str, Any]:
         if not isinstance(provider, str) or not provider.strip():
             body["provider"] = derive_model_provider(before.get("backends"))
 
-    # Validate the ``defaults`` facts + the vision↔mmproj pairing at SAVE
+    # Validate the file facts + the vision↔mmproj pairing at SAVE
     # time (UI-API-1 items 1/2, #1393). Shared
     # with create + /validate so the three paths never drift; fails the write
     # with the same envelope the launch path raises.

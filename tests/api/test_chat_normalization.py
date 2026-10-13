@@ -100,7 +100,7 @@ class _ModelThinkingRegistry:
     def get(self, model_id):
         if model_id != "big":
             raise KeyError(model_id)
-        return SimpleNamespace(defaults=SimpleNamespace(enable_thinking=True))
+        return SimpleNamespace(enable_thinking=True)
 
 
 def _thinker_slot() -> list[dict]:

@@ -136,13 +136,13 @@ def test_pull_body_hf_coords_used_when_id_not_registered(
     assert fake_run_pull[0]["hf_repo"] == "unsloth/Qwen3.6-27B-A3B-MTP-GGUF"
 
 
-def test_pull_body_chat_template_seeds_defaults(
+def test_pull_body_chat_template_seeds_the_fact(
     client_isolated: TestClient,
     app_isolated: FastAPI,
     fake_run_pull: list[dict[str, Any]],
 ) -> None:
     """WS-6 — a chat_template in the pull body is pinned onto the freshly
-    seeded registry row's defaults at pull start (the modal closes on start
+    seeded registry row's chat_template fact at pull start (the modal closes on start
     and can't sequence a later PUT). It only matters at load time, so the
     default persists whether or not the pull ultimately succeeds.
     """
@@ -158,11 +158,10 @@ def test_pull_body_chat_template_seeds_defaults(
     )
     assert r.status_code == 202, r.text
     entry = app_isolated.state.model_registry.get(new_id)
-    assert entry.defaults is not None
-    assert entry.defaults.chat_template == "chatml"
+    assert entry.chat_template == "chatml"
 
 
-def test_pull_body_chat_template_auto_seeds_no_default(
+def test_pull_body_chat_template_auto_seeds_no_fact(
     client_isolated: TestClient,
     app_isolated: FastAPI,
     fake_run_pull: list[dict[str, Any]],
@@ -180,7 +179,7 @@ def test_pull_body_chat_template_auto_seeds_no_default(
     )
     assert r.status_code == 202, r.text
     entry = app_isolated.state.model_registry.get(new_id)
-    assert entry.defaults is None or entry.defaults.chat_template is None
+    assert entry.chat_template is None
 
 
 def test_pull_body_chat_template_patches_existing_row(
@@ -212,8 +211,7 @@ def test_pull_body_chat_template_patches_existing_row(
     assert r.status_code == 202, r.text
     entry = app_isolated.state.model_registry.get("user.RepullTemplate")
     assert entry.hf_filename == "new.gguf"
-    assert entry.defaults is not None
-    assert entry.defaults.chat_template == "llama3"
+    assert entry.chat_template == "llama3"
 
 
 def test_pull_body_hf_coords_override_registry_entry(

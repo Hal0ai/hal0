@@ -1871,7 +1871,7 @@ def test_list_slots_marks_every_sibling_of_a_live_anchor(
 # payload, so the UI doesn't have to fetch /config per slot: ``n_gpu_layers``
 # (from [model]) and ``model_default`` (which is also the activation signal
 # since #1369 — there is no ``enabled`` key to lift). ``enable_thinking`` moved off the slot (spec-hw-slot-ownership
-# §1 — it is ``ModelDefaults.enable_thinking`` now) and is deliberately no
+# §1 — it is the profile's ``enable_thinking`` now) and is deliberately no
 # longer lifted here, even when a pre-migration TOML still carries the key.
 
 

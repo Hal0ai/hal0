@@ -43,7 +43,7 @@ from hal0.install.perms import ensure_shared_dir
 from hal0.model_meta import derive_model_provider
 from hal0.registry import tombstones
 from hal0.registry.fileset import FileSetEntry, FileSetPlan
-from hal0.registry.model import Model, ModelCapabilities, ModelDefaults
+from hal0.registry.model import Model, ModelCapabilities
 from hal0.registry.store import ModelNotFound, ModelRegistry
 
 log = logging.getLogger(__name__)
@@ -1285,8 +1285,8 @@ def _register_pulled(
     fresh_meta = {"sha256": sha256, "pulled_at": int(time.time())}
     # Curated template override: some artifacts ship an embedded chat template
     # the runner's jinja engine can't execute (hal0-brain-sft's ``|min``), so
-    # their catalogue entry names a bundled replacement. Stamped as a defaults
-    # value, never over an operator's own setting.
+    # their catalogue entry names a bundled replacement. Stamped as the model's
+    # chat_template fact, never over an operator's own setting.
     from hal0.registry.curated import get_curated
 
     curated = get_curated(model_id)
@@ -1397,16 +1397,11 @@ def _register_pulled(
         # kind detect() classified (moonshine/kokoro/flm/llama's vulkan-rocm-
         # cuda-cpu quartet/…) was dropped on the floor before this fix.
         backends = ["comfyui"] if is_comfyui else detected_backends
-        # #1773: default defaults.tokenizer_repo from hf_repo when the pull
+        # #1773: default tokenizer_repo from hf_repo when the pull
         # path already knows the source HF repo (the ONLY linkage a chat
         # cell's GuideLLM tokenizer resolution can trust without new pull
         # plumbing) — operator-settable/overridable afterward via the
         # registry edit surface.
-        new_defaults_kwargs: dict[str, Any] = {}
-        if curated_template:
-            new_defaults_kwargs["chat_template"] = curated_template
-        if hf_repo:
-            new_defaults_kwargs["tokenizer_repo"] = hf_repo
         registry.add(
             Model(
                 id=model_id,
@@ -1425,7 +1420,8 @@ def _register_pulled(
                 mmproj=mmproj,
                 metadata=dict(fresh_meta),
                 architecture=detected_arch,
-                defaults=ModelDefaults(**new_defaults_kwargs) if new_defaults_kwargs else None,
+                chat_template=curated_template or None,
+                tokenizer_repo=hf_repo or None,
                 capability_flags=ModelCapabilities(tool_calling=curated_tool_calling)
                 if curated_tool_calling is not None
                 else ModelCapabilities(),
@@ -1460,21 +1456,13 @@ def _register_pulled(
     if detected_backends and not existing.backends:
         updates["backends"] = detected_backends
     # #1773: same "fill only if unset" rule as chat_template — a re-pull
-    # backfills defaults.tokenizer_repo from hf_repo for a row that never
+    # backfills tokenizer_repo from hf_repo for a row that never
     # got one (pre-#1773 registration, or a hand-added row), but never
     # clobbers an operator's own tokenizer_repo override.
-    defaults_delta: dict[str, Any] = {}
-    if curated_template and not (existing.defaults is not None and existing.defaults.chat_template):
-        defaults_delta["chat_template"] = curated_template
-    if hf_repo and not (existing.defaults is not None and existing.defaults.tokenizer_repo):
-        defaults_delta["tokenizer_repo"] = hf_repo
-    if defaults_delta:
-        merged_defaults = (
-            existing.defaults.model_copy(update=defaults_delta)
-            if existing.defaults is not None
-            else ModelDefaults(**defaults_delta)
-        )
-        updates["defaults"] = merged_defaults
+    if curated_template and not existing.chat_template:
+        updates["chat_template"] = curated_template
+    if hf_repo and not existing.tokenizer_repo:
+        updates["tokenizer_repo"] = hf_repo
     if curated_tool_calling is not None and (
         existing.capability_flags is None or existing.capability_flags.tool_calling is None
     ):
