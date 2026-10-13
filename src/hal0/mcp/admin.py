@@ -1434,16 +1434,27 @@ TOOL_PARAM_HINTS: dict[str, dict[str, Any]] = {
                 "type": "string",
                 "description": "Absolute path to the vision projector sidecar",
             },
-            "defaults": {
-                "type": "object",
+            "chat_template": {
+                "type": ["string", "null"],
                 "description": (
-                    "FILE FACTS only, merged one level deep (null clears one): "
-                    "chat_template (template id, 'auto' = GGUF-embedded), tokenizer_repo "
-                    "(HF repo), mtp (true = the file has MTP heads), jinja (false = this "
-                    "file's template breaks --jinja). A tuning key (extra_args, "
-                    "context_size, enable_thinking, vision, profile, …) is a 422 — tuning "
-                    "belongs on a profile (profile_create / profile_update)."
+                    "File fact: chat template id this file needs ('auto' or null = the "
+                    "GGUF-embedded template). Omit to keep, null to clear."
                 ),
+            },
+            "tokenizer_repo": {
+                "type": ["string", "null"],
+                "description": "File fact: HF repo a load-gen tool resolves the tokenizer from.",
+            },
+            "mtp": {
+                "type": ["boolean", "null"],
+                "description": (
+                    "File fact: true = the file has MTP draft heads (null = the 'mtp' tag "
+                    "decides). Whether a slot drafts is its profile's mtp."
+                ),
+            },
+            "jinja": {
+                "type": ["boolean", "null"],
+                "description": "File fact: false = this file's chat template breaks --jinja.",
             },
         },
     },
@@ -2782,11 +2793,12 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
         "Args: name=SLOT name (not the model!), model=registered model id."
     ),
     "model_edit": (
-        "Update a model's metadata (name, capabilities, tags, mmproj, provider, defaults). "
-        "`defaults` holds FILE FACTS only — chat_template, tokenizer_repo, mtp "
-        "(the file has MTP heads), jinja (false = this file's template breaks --jinja). "
-        "Any other defaults key (extra_args, context_size, enable_thinking, vision, "
-        "profile, …) is a 422: tuning belongs on a profile (profile_update)."
+        "Update a model's metadata (name, capabilities, tags, mmproj, provider) and its "
+        "top-level FILE FACTS — chat_template, tokenizer_repo, mtp (the file has MTP "
+        "heads), jinja (false = this file's template breaks --jinja). A `defaults` "
+        "object is a 422 (model.defaults_removed), and so is a tuning key (extra_args, "
+        "context_size, enable_thinking, vision, profile, …): tuning belongs on a "
+        "profile (profile_update)."
     ),
     "model_scan": (
         "Walk the configured model roots + store and register newly-found files. "
@@ -2967,7 +2979,8 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
     "slot_pull_status": "Poll a slot's container-image pull progress. Args: name.",
     "model_validate": (
         "Dry-run screen a candidate model write (create or edit) without persisting anything. "
-        "Same body shape as model_register/model_edit."
+        "Same body shape as model_register/model_edit: file facts top-level, a `defaults` "
+        "object is a 422."
     ),
     "hf_search": "Free-text search the HuggingFace Hub model catalog. Args: q, type, limit (all optional).",
     "model_config_read": "Get the current [models] config section (roots, auto-scan, extensions, pull_root, ...).",

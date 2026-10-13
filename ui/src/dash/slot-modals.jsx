@@ -1642,19 +1642,28 @@ function EditSlotDrawer({ open, slot, onClose }) {
 															verdictChipFor: modelFeasibilityChipFor,
 														})}
 														// Task 11d: one batch feasibility call for every listed
-														// model at the slot's effective context, fired once per
-														// dropdown open — not per keystroke, not per row. `has`
-														// rows with no verdict in the response render no chip
-														// (see modelFeasibilityChipFor above).
+														// model, fired once per dropdown open — not per keystroke,
+														// not per row. `has` rows with no verdict in the response
+														// render no chip (see modelFeasibilityChipFor above).
+														// The window is the one each CANDIDATE would launch with
+														// under this slot's profile, so send the profile NAME and
+														// let the server resolve it per candidate (profile ctx_size,
+														// else the candidate's native window). `slot.ctx_effective`
+														// is the CURRENT model's window — wrong for a candidate — so
+														// it is only the fallback for a slot with no profile.
 														onOpenChange={(isOpen) => {
 															if (!isOpen || compatible.length === 0) return;
+															const profileName = profileSel || slot.profile || "";
 															const ctxNum = Number(slot.ctx_effective);
+															const windowArg = profileName
+																? { profile: profileName }
+																: Number.isFinite(ctxNum) && ctxNum > 0
+																	? { ctx: ctxNum }
+																	: {};
 															modelListFeasibility.mutate({
 																models: compatible.map((m) => ({
 																	model_id: m.id,
-																	...(Number.isFinite(ctxNum) && ctxNum > 0
-																		? { ctx: ctxNum }
-																		: {}),
+																	...windowArg,
 																})),
 															});
 														}}

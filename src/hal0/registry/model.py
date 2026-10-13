@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from hal0.model_meta.modality import Modality, normalize_modalities
 
@@ -30,12 +30,9 @@ class ModelCapabilities(BaseModel):
     :attr:`Model.tags` (inert, freeform, drives nothing). This is the
     ONE typed-bool surface a runner-conditional toggle reads.
 
-    Only ``tool_calling`` is wired up here. ``mtp``/``jinja`` are NOT
-    added on this class yet — the §7.1a/b (ML-5) lane owns those two
-    launch flags and lands them onto this same class (the SQLite
-    ``model.mtp`` / ``model.jinja`` columns are already reserved for
-    exactly this shape); adding them here ahead of that lane would be a
-    double-add per the rework plan's "land ONCE" rule.
+    Only ``tool_calling`` lives here. The file facts ``mtp``/``jinja`` are
+    top-level :class:`Model` fields (ADR-0029 §6), stored in the SQLite
+    ``model.mtp`` / ``model.jinja`` columns.
     """
 
     model_config = {"populate_by_name": True, "extra": "forbid"}
@@ -51,48 +48,9 @@ class ModelCapabilities(BaseModel):
     )
 
 
-class ModelDefaults(BaseModel):
-    """Facts about the model file that the launch path reads (ADR-0029).
-
-    Only facts live here — every tune (context window, flags, reasoning,
-    vision, MTP on/off) lives on the profile of the slot that runs the model.
-    ``extra="forbid"``: a write carrying a tuning key is rejected, not
-    silently dropped.
-    """
-
-    model_config = {"populate_by_name": True, "str_strip_whitespace": True, "extra": "forbid"}
-
-    chat_template: str | None = Field(
-        default=None,
-        description=(
-            "Chat template id from /api/chat-templates this file needs, or "
-            "'auto'/None for the template embedded in the GGUF."
-        ),
-    )
-    tokenizer_repo: str | None = Field(
-        default=None,
-        description=(
-            "HF repo id a load-gen tool can resolve a tokenizer from for THIS "
-            "model (#1773). The pull path defaults it from Model.hf_repo; an "
-            "operator may override it. None = not resolvable."
-        ),
-    )
-    mtp: bool | None = Field(
-        default=None,
-        description=(
-            "Whether the file has MTP draft heads. None = the registry 'mtp' tag "
-            "decides. Whether a slot drafts with them is its profile's `mtp` "
-            "('auto' drafts when the heads are there and the runner supports it)."
-        ),
-    )
-    jinja: bool | None = Field(
-        default=None,
-        description=(
-            "False when this file's chat template does not work with --jinja; "
-            "None/True = hal0 adds --jinja when the runner supports it (outside "
-            "embedding/reranking mode)."
-        ),
-    )
+#: The file facts a model row owns (ADR-0029 §6), top-level on :class:`Model`.
+#: Everything else a launch needs to know about tuning lives on a profile.
+MODEL_FACT_FIELDS: tuple[str, ...] = ("chat_template", "tokenizer_repo", "mtp", "jinja")
 
 
 class Model(BaseModel):
@@ -188,10 +146,43 @@ class Model(BaseModel):
         ),
     )
 
-    defaults: ModelDefaults | None = Field(
+    # ── file facts (ADR-0029 §6) ─────────────────────────────────────────────
+    # Facts about the model FILE that the launch path reads. Every tune
+    # (context window, flags, reasoning, vision, MTP on/off) lives on the
+    # profile of the slot that runs the model, never here.
+
+    chat_template: str | None = Field(
         default=None,
         description=(
-            "Facts about the model file the launch path reads (chat template, MTP heads, jinja). None = no facts recorded."
+            "Chat template id from /api/chat-templates this file needs, or "
+            "'auto'/None for the template embedded in the GGUF."
+        ),
+    )
+
+    tokenizer_repo: str | None = Field(
+        default=None,
+        description=(
+            "HF repo id a load-gen tool can resolve a tokenizer from for THIS "
+            "model (#1773). The pull path defaults it from hf_repo; an "
+            "operator may override it. None = not resolvable."
+        ),
+    )
+
+    mtp: bool | None = Field(
+        default=None,
+        description=(
+            "Whether the file has MTP draft heads. None = the registry 'mtp' tag "
+            "decides. Whether a slot drafts with them is its profile's `mtp` "
+            "('auto' drafts when the heads are there and the runner supports it)."
+        ),
+    )
+
+    jinja: bool | None = Field(
+        default=None,
+        description=(
+            "False when this file's chat template does not work with --jinja; "
+            "None/True = hal0 adds --jinja when the runner supports it (outside "
+            "embedding/reranking mode)."
         ),
     )
 
@@ -282,6 +273,23 @@ class Model(BaseModel):
         place.
         """
         return normalize_modalities(self.capabilities)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _refuse_defaults_table(cls, data: Any) -> Any:
+        """A nested ``defaults`` table is refused, never silently dropped.
+
+        ADR-0029 §6 moved its facts to top-level fields; the API screen
+        (:func:`hal0.services.models_service.screen_model_write`) answers a
+        ``defaults`` key with ``422 model.defaults_removed`` before it gets
+        here. This catches every other path that builds a ``Model``.
+        """
+        if isinstance(data, dict) and "defaults" in data:
+            raise ValueError(
+                "'defaults' is not a Model field: chat_template, tokenizer_repo, "
+                "mtp and jinja are top-level, and tunes belong on a profile"
+            )
+        return data
 
     @field_validator("id")
     @classmethod

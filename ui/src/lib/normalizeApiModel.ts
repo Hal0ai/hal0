@@ -34,17 +34,17 @@ export interface ApiModelRaw {
   quant?: string | null
   /** Freeform registry tags ("mtp", "coder", "user-added", …). */
   tags?: string[]
-  /** File facts about the model (`ModelDefaults` on the backend, ADR-0029):
-   * chat_template, tokenizer_repo, jinja and mtp. `defaults.mtp` says whether
-   * the file has MTP heads; an explicit value wins over the registry `mtp`
-   * tag — see `isMtpEligibleModel`. Every tune lives on a profile. */
-  defaults?: {
-    chat_template?: string | null
-    tokenizer_repo?: string | null
-    mtp?: boolean | null
-    jinja?: boolean | null
-    [k: string]: unknown
-  } | null
+  /** File facts about the model, top-level fields (ADR-0029 §6) — there is no
+   * nested `defaults` object. Every tune lives on a profile.
+   * `chat_template`: template id; 'auto'/null = the GGUF-embedded one. */
+  chat_template?: string | null
+  tokenizer_repo?: string | null
+  /** The file has MTP draft heads. An explicit value wins over the registry
+   * `mtp` tag; null defers to it — see `isMtpEligibleModel`. */
+  mtp?: boolean | null
+  /** false = this file's chat template breaks --jinja; null/true = hal0 adds
+   * --jinja. */
+  jinja?: boolean | null
   /** Unix seconds the row was registered / first seen. */
   created?: number
   /** True when the last HF update check (GET /api/models/updates/check)
@@ -131,14 +131,14 @@ export function formatSize(b: number): string {
 // installed host-side, so the `installed` check keeps them local.
 /** True when a model ships MTP speculative-decoding heads, per the SAME rule
  * the server uses (`model_meta.model_is_mtp_eligible`): an explicit
- * `defaults.mtp` — EITHER direction, true or false — wins over the registry
- * `mtp` tag; only an unset/null `defaults.mtp` falls back to the tag. The
+ * `mtp` — EITHER direction, true or false — wins over the registry
+ * `mtp` tag; only an unset/null `mtp` falls back to the tag. The
  * old filename/GGUF-name `MTP` marker sniff (`_MTP_NAME_RE`) was REMOVED
  * server-side — an uncurated local pull with no tag and no explicit
- * `defaults.mtp` is simply not eligible. */
+ * `mtp` is simply not eligible. */
 export function isMtpEligibleModel(m: ApiModelRaw | null | undefined): boolean {
   if (!m) return false
-  const explicit = m.defaults?.mtp
+  const explicit = m.mtp
   if (explicit != null) return Boolean(explicit)
   return Array.isArray(m.tags) && m.tags.some(t => String(t).trim().toLowerCase() === 'mtp')
 }

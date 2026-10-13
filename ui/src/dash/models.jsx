@@ -3,7 +3,7 @@
 // Phase B2 wireup (#220 brief): the catalog is driven entirely by
 // useModels(); the HAL0_DATA fallback is gone now the backend always
 // emits ``ns`` on every row. The detail pane's Recipe section reads
-// each model's persisted ``defaults`` and writes them back via PUT
+// each model's file facts (top-level fields) and writes them back via PUT
 // /api/models/{id}, and the Downloads pane is a thin shell around
 // per-row usePullJob() instances tracked by model_id.
 
@@ -646,7 +646,6 @@ function ModelDetail({ model, onDelete, onEdit, onPullStarted }) {
       </div>
     );
   }
-  const defaults = model.defaults || {};
   // ADR-0029: a model carries FILE FACTS only — chat template, jinja, whether
   // the file has MTP heads — plus its native context window (read-only, from
   // metadata). The tune (flags, context, thinking, vision, MTP on/off) lives
@@ -658,7 +657,7 @@ function ModelDetail({ model, onDelete, onEdit, onPullStarted }) {
     { key: "mtp", label: "MTP heads", hint: "whether this file carries MTP heads · empty = read the 'mtp' tag" },
   ];
   const recipeRows = [
-    ...RECIPE_FIELDS.map(f => ({ ...f, value: defaults[f.key] })),
+    ...RECIPE_FIELDS.map(f => ({ ...f, value: model[f.key] })),
     { key: "native_context", label: "Native context", hint: "the window this file was trained for · a slot's profile sets the window it launches with", value: nativeCtx ? `${nativeCtx.toLocaleString("en-US")} tokens` : null },
   ].filter(f => f.value !== null && f.value !== undefined && f.value !== "");
 

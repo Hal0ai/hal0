@@ -89,7 +89,7 @@ SANITY_N_PREDICT = 12
 #: NOT solved with ``chat_template_kwargs: {"enable_thinking": false}``, even
 #: though hal0's dispatcher sends that on production traffic
 #: (``hal0.normalize.thinking``): it is a jinja-only lever.  ``jinja`` is a
-#: tri-state model capability here (``registry.model.ModelDefaults.jinja``), so
+#: tri-state model capability here (``registry.model.Model.jinja``), so
 #: some llm slots run a llama-server started WITHOUT ``--jinja``, where a
 #: template kwarg is at best ignored and at worst a 4xx — trading this
 #: false-fail for a different one on a lane we cannot probe from CI.  Reading

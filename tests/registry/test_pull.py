@@ -129,7 +129,7 @@ async def test_run_pull_happy_path_writes_file_and_registers(
 
 @pytest.mark.asyncio
 async def test_run_pull_stamps_curated_chat_template(tmp_hal0_home: str) -> None:
-    """A curated entry naming a bundled template lands in defaults.chat_template.
+    """A curated entry naming a bundled template lands in Model.chat_template.
 
     hal0-brain-sft's GGUF-embedded template uses the ``|min`` filter, which
     llama-server's minja lacks — every tool-bearing request 500s. The curated
@@ -154,14 +154,13 @@ async def test_run_pull_stamps_curated_chat_template(tmp_hal0_home: str) -> None
 
     assert job.state == "completed", f"got {job.state}: {job.error}"
     entry = registry.get("hal0-brain-sft-f16")
-    assert entry.defaults is not None
-    assert entry.defaults.chat_template == "hal0-brain-sft"
+    assert entry.chat_template == "hal0-brain-sft"
 
 
 @pytest.mark.asyncio
 async def test_run_pull_keeps_operator_chat_template(tmp_hal0_home: str) -> None:
     """A re-pull never clobbers a chat_template the operator already set."""
-    from hal0.registry.model import Model, ModelDefaults
+    from hal0.registry.model import Model
 
     body = _payload(4096)
     registry = ModelRegistry()
@@ -171,7 +170,7 @@ async def test_run_pull_keeps_operator_chat_template(tmp_hal0_home: str) -> None
             name="hal0-brain-sft-f16",
             path="/nonexistent/model.gguf",
             size_bytes=1,
-            defaults=ModelDefaults(chat_template="operator-own"),
+            chat_template="operator-own",
         )
     )
     job = make_job("hal0-brain-sft-f16")
@@ -189,8 +188,7 @@ async def test_run_pull_keeps_operator_chat_template(tmp_hal0_home: str) -> None
 
     assert job.state == "completed", f"got {job.state}: {job.error}"
     entry = registry.get("hal0-brain-sft-f16")
-    assert entry.defaults is not None
-    assert entry.defaults.chat_template == "operator-own"
+    assert entry.chat_template == "operator-own"
 
 
 @pytest.mark.asyncio
@@ -217,10 +215,9 @@ async def test_run_pull_uncurated_model_gets_no_template_default(
         await client.aclose()
 
     assert job.state == "completed", f"got {job.state}: {job.error}"
-    defaults = registry.get("some-random-gguf").defaults
-    assert defaults is not None
-    assert defaults.chat_template is None
-    assert defaults.tokenizer_repo == "org/random-GGUF"
+    row = registry.get("some-random-gguf")
+    assert row.chat_template is None
+    assert row.tokenizer_repo == "org/random-GGUF"
 
 
 # ── context-length + capability stamping at pull time ────────────────────────

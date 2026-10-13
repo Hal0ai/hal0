@@ -1,7 +1,7 @@
 // hal0 v3 dashboard — model drawer file-fact overrides ledger.
 //
 // ADR-0029: the model carries FILE FACTS only. Two of them are tri-state
-// (Auto / On / Off) and live on `model.defaults`: whether the file has MTP
+// (Auto / On / Off) and live on the model as top-level fields (`model.mtp`, `model.jinja`): whether the file has MTP
 // heads (`mtp`) and whether its chat template works with --jinja (`jinja`).
 // Thinking and vision are tunes now and live on the profile.
 //
@@ -25,7 +25,7 @@ export interface CapDef {
 }
 
 /** mtp | jinja → null (auto/no opinion) | true (on) | false (off) — the same
- * tri-state `model.defaults.*` shape the drawer's save body writes. */
+ * tri-state `model.mtp` / `model.jinja` shape the drawer's save body writes. */
 export type CapFlags = Record<CapId, boolean | null | undefined>
 
 export interface OverriddenCap {

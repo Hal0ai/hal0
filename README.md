@@ -272,7 +272,7 @@ workflow, with a restored, v1.0-reconciled `getting-started/` section.
   50 ms.
 - **Brain tool calls no longer 500** with `Unknown (built-in) filter 'min'`.
   A corrected `hal0-brain-sft.jinja` ships bundled and the curated catalogue
-  stamps it into the model's `defaults.chat_template` at pull time.
+  stamps it into the model's `chat_template` at pull time.
 - **A drifted hermes venv re-converges on upgrade** instead of staying broken.
 
 ### Quality-of-life

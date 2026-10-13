@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from hal0.registry.model import Model, ModelCapabilities, ModelDefaults
+from hal0.registry.model import Model, ModelCapabilities
 from hal0.registry.sqlite_store import SqliteModelRegistry
 from hal0.registry.store import (
     ModelAlreadyExists,
@@ -174,58 +174,52 @@ class TestUpdate:
         assert created_before == created_after
 
 
-# ── nested-table merge semantics (#1413) ─────────────────────────────────────
+# ── merge semantics (#1413) ──────────────────────────────────────────────────
 #
-# `defaults` / `capability_flags` merge ONE level deep: an absent sub-key keeps
-# the stored value, an explicit ``None`` clears it, and ``{"defaults": None}``
-# still drops the whole table. Every other field stays a flat overwrite.
+# ``capability_flags`` is the one nested table `update()` merges ONE level
+# deep. The file facts (chat_template, tokenizer_repo, mtp, jinja) are plain
+# top-level fields (ADR-0029 §6): an absent key keeps the stored value, an
+# explicit ``None`` clears it. Every other field stays a flat overwrite.
 
 
-class TestNestedTableMerge:
-    def test_partial_defaults_patch_preserves_siblings(self, reg: ModelRegistry) -> None:
+class TestMergeSemantics:
+    def test_patching_one_fact_preserves_the_others(self, reg: ModelRegistry) -> None:
         reg.add(
             _model(
                 "a",
-                defaults=ModelDefaults(
-                    tokenizer_repo="Qwen/Qwen3-4B",
-                    chat_template="minicpm5-1b",
-                    mtp=True,
-                    jinja=False,
-                ),
+                tokenizer_repo="Qwen/Qwen3-4B",
+                chat_template="minicpm5-1b",
+                mtp=True,
+                jinja=False,
             )
         )
-        new = reg.update("a", {"defaults": {"jinja": True}})
-        assert new.defaults is not None
-        assert new.defaults.jinja is True
-        assert new.defaults.tokenizer_repo == "Qwen/Qwen3-4B"
-        assert new.defaults.chat_template == "minicpm5-1b"
-        assert new.defaults.mtp is True
+        new = reg.update("a", {"jinja": True})
+        assert new.jinja is True
+        assert new.tokenizer_repo == "Qwen/Qwen3-4B"
+        assert new.chat_template == "minicpm5-1b"
+        assert new.mtp is True
 
-    def test_explicit_none_sub_key_clears_only_that_key(self, reg: ModelRegistry) -> None:
-        reg.add(_model("a", defaults=ModelDefaults(chat_template="minicpm5-1b", mtp=True)))
-        new = reg.update("a", {"defaults": {"chat_template": None}})
-        assert new.defaults is not None
-        assert new.defaults.chat_template is None
-        assert new.defaults.mtp is True
+    def test_explicit_none_clears_only_that_fact(self, reg: ModelRegistry) -> None:
+        reg.add(_model("a", chat_template="minicpm5-1b", mtp=True))
+        new = reg.update("a", {"chat_template": None})
+        assert new.chat_template is None
+        assert new.mtp is True
 
-    def test_defaults_none_drops_the_whole_table(self, reg: ModelRegistry) -> None:
-        reg.add(_model("a", defaults=ModelDefaults(chat_template="minicpm5-1b", mtp=True)))
-        new = reg.update("a", {"defaults": None})
-        assert new.defaults is None
-
-    def test_empty_defaults_patch_is_a_no_op(self, reg: ModelRegistry) -> None:
-        reg.add(_model("a", defaults=ModelDefaults(chat_template="minicpm5-1b")))
-        new = reg.update("a", {"defaults": {}})
-        assert new.defaults is not None
-        assert new.defaults.chat_template == "minicpm5-1b"
-
-    def test_a_tuning_key_in_a_defaults_patch_is_refused(self, reg: ModelRegistry) -> None:
-        """ADR-0029: ModelDefaults is facts only; the merge re-validates through
-        it, so a tuning key can never be stored by a sparse patch."""
-        reg.add(_model("a", defaults=ModelDefaults(chat_template="minicpm5-1b")))
+    def test_a_defaults_patch_is_refused(self, reg: ModelRegistry) -> None:
+        """ADR-0029 §6: the nested ``defaults`` table is gone; the merge
+        re-validates through ``Model`` so a stale-shape patch never lands."""
+        reg.add(_model("a", chat_template="minicpm5-1b"))
         with pytest.raises(RegistryError):
-            reg.update("a", {"defaults": {"extra_args": "--temp 0.5"}})
-        assert reg.get("a").defaults.chat_template == "minicpm5-1b"
+            reg.update("a", {"defaults": {"chat_template": "chatml"}})
+        with pytest.raises(RegistryError):
+            reg.update("a", {"defaults": None})
+        assert reg.get("a").chat_template == "minicpm5-1b"
+
+    def test_model_validate_refuses_a_defaults_table(self) -> None:
+        with pytest.raises(ValueError, match="defaults"):
+            Model.model_validate({"id": "a", "path": "/m/a.gguf", "defaults": {"mtp": True}})
+        with pytest.raises(ValueError, match="defaults"):
+            Model.model_validate({"id": "a", "path": "/m/a.gguf", "defaults": None})
 
     def test_capability_flags_merge_one_level(self, reg: ModelRegistry) -> None:
         reg.add(_model("a", capability_flags=ModelCapabilities(tool_calling=True)))
@@ -234,13 +228,12 @@ class TestNestedTableMerge:
         cleared = reg.update("a", {"capability_flags": {"tool_calling": None}})
         assert cleared.capability_flags.tool_calling is None
 
-    def test_defaults_patch_does_not_disturb_top_level_fields(self, reg: ModelRegistry) -> None:
-        reg.add(_model("a", name="A", defaults=ModelDefaults(chat_template="minicpm5-1b")))
-        new = reg.update("a", {"defaults": {"jinja": True}})
+    def test_fact_patch_does_not_disturb_top_level_fields(self, reg: ModelRegistry) -> None:
+        reg.add(_model("a", name="A", chat_template="minicpm5-1b"))
+        new = reg.update("a", {"jinja": True})
         assert new.name == "A"
-        assert new.defaults is not None
-        assert new.defaults.chat_template == "minicpm5-1b"
-        assert new.defaults.jinja is True
+        assert new.chat_template == "minicpm5-1b"
+        assert new.jinja is True
 
 
 # ── list ─────────────────────────────────────────────────────────────────────
@@ -317,48 +310,43 @@ class TestReloadAndOnChange:
         assert reg.has("a")
 
 
-# ── ModelDefaults round-trip (mirrors test_schema_migration.py) ─────────────
+# ── file-fact round-trip (mirrors test_schema_migration.py) ─────────────────
 
 
-class TestModelDefaultsRoundTrip:
-    def test_full_defaults_round_trip(self, reg: ModelRegistry) -> None:
+class TestModelFactsRoundTrip:
+    def test_full_facts_round_trip(self, reg: ModelRegistry) -> None:
         reg.add(
             _model(
                 "a",
-                defaults=ModelDefaults(
-                    chat_template="minicpm5-1b",
-                    tokenizer_repo="Qwen/Qwen3-4B",
-                    mtp=True,
-                    jinja=False,
-                ),
+                chat_template="minicpm5-1b",
+                tokenizer_repo="Qwen/Qwen3-4B",
+                mtp=True,
+                jinja=False,
             )
         )
         got = reg.get("a")
-        assert got.defaults is not None
-        assert got.defaults.chat_template == "minicpm5-1b"
-        assert got.defaults.tokenizer_repo == "Qwen/Qwen3-4B"
-        assert got.defaults.mtp is True
-        assert got.defaults.jinja is False
+        assert got.chat_template == "minicpm5-1b"
+        assert got.tokenizer_repo == "Qwen/Qwen3-4B"
+        assert got.mtp is True
+        assert got.jinja is False
 
-    def test_defaults_none_stays_none(self, reg: ModelRegistry) -> None:
-        reg.add(_model("a", defaults=None))
-        assert reg.get("a").defaults is None
-
-    def test_empty_defaults_collapses_to_none(self, reg: ModelRegistry) -> None:
-        """All-None ModelDefaults() must read back as None, not as an
-        object with every field None — mirrors the TOML store's collapse
-        rule (_model_to_toml)."""
-        reg.add(_model("a", defaults=ModelDefaults()))
-        assert reg.get("a").defaults is None
+    def test_unset_facts_stay_none(self, reg: ModelRegistry) -> None:
+        reg.add(_model("a"))
+        got = reg.get("a")
+        assert (got.chat_template, got.tokenizer_repo, got.mtp, got.jinja) == (
+            None,
+            None,
+            None,
+            None,
+        )
 
     def test_falsy_but_set_facts_are_not_dropped(self, reg: ModelRegistry) -> None:
         """Regression: a falsy-but-set fact (mtp=False, jinja=False) is a real
-        value, not 'unset' — the has-any-default check must keep it."""
-        reg.add(_model("a", defaults=ModelDefaults(mtp=False, jinja=False)))
+        value, not 'unset'."""
+        reg.add(_model("a", mtp=False, jinja=False))
         got = reg.get("a")
-        assert got.defaults is not None
-        assert got.defaults.mtp is False
-        assert got.defaults.jinja is False
+        assert got.mtp is False
+        assert got.jinja is False
 
     def test_tokenizer_repo_round_trips_add_get_update(self, reg: ModelRegistry) -> None:
         """tokenizer_repo has no column: it rides the ``extra`` blob. It must
@@ -367,43 +355,34 @@ class TestModelDefaultsRoundTrip:
         reg.add(
             _model(
                 "a",
-                defaults=ModelDefaults(tokenizer_repo="Qwen/Qwen3-4B"),
+                tokenizer_repo="Qwen/Qwen3-4B",
                 metadata={"discovered": True},
             )
         )
         got = reg.get("a")
-        assert got.defaults is not None
-        assert got.defaults.tokenizer_repo == "Qwen/Qwen3-4B"
+        assert got.tokenizer_repo == "Qwen/Qwen3-4B"
         assert "_tokenizer_repo" not in got.metadata
         assert got.metadata.get("discovered") is True
 
         # A sibling-only patch keeps it (and it persists across instances).
-        reg.update("a", {"defaults": {"jinja": False}})
+        reg.update("a", {"jinja": False})
         again = reg.get("a")
-        assert again.defaults is not None
-        assert again.defaults.tokenizer_repo == "Qwen/Qwen3-4B"
-        assert again.defaults.jinja is False
+        assert again.tokenizer_repo == "Qwen/Qwen3-4B"
+        assert again.jinja is False
 
-        reg.update("a", {"defaults": {"tokenizer_repo": "meta-llama/Llama-3.1-8B"}})
-        assert reg.get("a").defaults.tokenizer_repo == "meta-llama/Llama-3.1-8B"
+        reg.update("a", {"tokenizer_repo": "meta-llama/Llama-3.1-8B"})
+        assert reg.get("a").tokenizer_repo == "meta-llama/Llama-3.1-8B"
 
-        cleared = reg.update("a", {"defaults": {"tokenizer_repo": None}})
-        assert cleared.defaults is not None
-        assert cleared.defaults.tokenizer_repo is None
-        assert cleared.defaults.jinja is False
+        cleared = reg.update("a", {"tokenizer_repo": None})
+        assert cleared.tokenizer_repo is None
+        assert cleared.jinja is False
         assert "_tokenizer_repo" not in cleared.metadata
 
-    def test_tokenizer_repo_alone_is_not_collapsed_to_none(self, reg: ModelRegistry) -> None:
-        reg.add(_model("a", defaults=ModelDefaults(tokenizer_repo="Qwen/Qwen3-4B")))
-        got = reg.get("a")
-        assert got.defaults is not None
-        assert got.defaults.tokenizer_repo == "Qwen/Qwen3-4B"
-
     def test_unset_tokenizer_repo_stamps_nothing(self, reg: ModelRegistry) -> None:
-        reg.add(_model("a", defaults=ModelDefaults(mtp=True)))
+        reg.add(_model("a", mtp=True))
         got = reg.get("a")
-        assert got.defaults is not None
-        assert got.defaults.tokenizer_repo is None
+        assert got.mtp is True
+        assert got.tokenizer_repo is None
 
 
 # ── concurrency (adversarial per the ML-1 spec's explicit call-out) ─────────

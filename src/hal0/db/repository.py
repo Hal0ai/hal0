@@ -1,7 +1,7 @@
 """``model`` row ⇄ :class:`hal0.registry.model.Model` mapping — the pydantic seam.
 
 Keeps :class:`hal0.registry.sqlite_store.SqliteModelRegistry` thin: all the
-JSON-encoding, ``ModelDefaults`` fold-down/reconstruction, and
+JSON-encoding, the file-fact columns, and
 ``metadata``/``extra`` splitting lives here. Validation stays exactly where
 it already was — pydantic's :class:`~hal0.registry.model.Model` — this
 module only ever returns/accepts that existing model, never a bespoke row
@@ -19,9 +19,9 @@ Field-mapping rules (must hold for a lossless TOML round-trip, see
    small enough not to need child tables yet.
 3. ``backends`` lives in the separate ``model_backend`` child table, not on
    this row at all — see :meth:`row_to_model`'s ``backends`` parameter.
-4. ``defaults`` is ``None`` when every ``ModelDefaults`` column is NULL;
-   otherwise it is reconstructed from the columns ("collapse to no value
-   when nothing is set").
+4. The file facts (ADR-0029 §6) are top-level ``Model`` fields stored one
+   to one: ``chat_template``/``mtp``/``jinja`` in their own columns,
+   ``tokenizer_repo`` in ``extra`` (it has no column).
 """
 
 from __future__ import annotations
@@ -31,7 +31,7 @@ import sqlite3
 from datetime import UTC, datetime
 from typing import Any
 
-from hal0.registry.model import Model, ModelCapabilities, ModelDefaults
+from hal0.registry.model import Model, ModelCapabilities
 
 _CONTEXT_LENGTH_KEY = "context_length"
 
@@ -58,7 +58,7 @@ _PROVIDER_EXTRA_KEY = "_provider"
 #: written when True; a missing key reads back as False, so pre-existing rows
 #: round-trip as non-default with no migration.
 _DEFAULT_EXTRA_KEY = "_default"
-#: ``ModelDefaults.tokenizer_repo`` (a file fact: the HF repo whose tokenizer
+#: ``Model.tokenizer_repo`` (a file fact: the HF repo whose tokenizer
 #: matches this model). It has no column, so it rides in ``extra``.
 _TOKENIZER_REPO_EXTRA_KEY = "_tokenizer_repo"
 
@@ -90,11 +90,10 @@ MODEL_COLUMNS: tuple[str, ...] = (
     "extra",
 )
 
-#: ModelDefaults (file facts) columns on the `model` row. ``defaults``
-#: reconstructs iff at least one is non-NULL. ``mtp``/``jinja`` are tri-state
-#: (NULL/0/1 -> None/False/True). The tuning columns this row used to carry
-#: moved to profiles (ADR-0029; SQL migration 012 copies them to a holding
-#: table for the conversion).
+#: The tuning columns this row used to carry moved to profiles (ADR-0029; SQL
+#: migration 012 copies them to a holding table for the conversion). The file
+#: facts ``chat_template``/``mtp``/``jinja`` keep their columns; ``mtp``/``jinja``
+#: are tri-state (NULL/0/1 -> None/False/True).
 #
 # HAL0-SUNSET: v1.7.0 — the table still has the tuning columns (profile,
 # extra_args, n_gpu_layers, context_size, rope_freq_base, preferred_runner)
@@ -103,11 +102,6 @@ MODEL_COLUMNS: tuple[str, ...] = (
 # finds the schema it expects. Drop them with a new migration once the
 # upgrade floor is past the release that shipped migration 012.
 _RETIRED_TUNING_EXTRA_KEYS: tuple[str, ...] = ("_enable_thinking", "_vision")
-_DEFAULTS_COLUMNS: tuple[str, ...] = (
-    "chat_template",
-    "mtp",
-    "jinja",
-)
 
 
 def now_iso() -> str:
@@ -128,18 +122,13 @@ def model_to_row(
 
     §7.1 ``revision`` has no ``Model`` field yet — always writes NULL, a
     ready-made landing spot for a future lane. ``architecture`` and
-    ``mtp``/``jinja`` (folded from ``ModelDefaults``) ARE populated here —
-    §7.1d lands ``architecture``, ML-5 lands ``mtp``/``jinja`` (see
-    ``ModelDefaults.mtp``/``.jinja`` — tri-state, sqlite stores them as
-    NULL/0/1 in the INTEGER columns; ``defaults.mtp``/``.jinja`` pass
-    straight through since sqlite3 adapts a Python ``bool`` to 0/1
-    natively, same as any other int).
+    the file facts ``mtp``/``jinja``/``chat_template`` ARE populated here —
+    ``mtp``/``jinja`` are tri-state and sqlite stores them as NULL/0/1 in the
+    INTEGER columns (sqlite3 adapts a Python ``bool`` to 0/1 natively).
     ``capability_flags``/``modalities_override`` have no reserved column
     yet, so they fold into the ``extra`` JSON blob under the reserved keys
     above instead of a schema migration.
     """
-    defaults = model.defaults or ModelDefaults()
-
     # context_length + the §7.1d extras get their own handling; everything
     # else (including the reserved upstream_url) rides inside `extra`
     # verbatim.
@@ -156,8 +145,8 @@ def model_to_row(
     # Per-type default marker — only stamped when set (see _DEFAULT_EXTRA_KEY).
     if model.default:
         metadata[_DEFAULT_EXTRA_KEY] = True
-    if defaults.tokenizer_repo:
-        metadata[_TOKENIZER_REPO_EXTRA_KEY] = defaults.tokenizer_repo
+    if model.tokenizer_repo:
+        metadata[_TOKENIZER_REPO_EXTRA_KEY] = model.tokenizer_repo
     extra_json = json.dumps(metadata, separators=(",", ":")) if metadata else None
 
     ts = updated_at or now_iso()
@@ -169,14 +158,14 @@ def model_to_row(
         "mmproj": model.mmproj,
         "architecture": model.architecture,
         "context_length": context_length,
-        "mtp": defaults.mtp,
-        "jinja": defaults.jinja,
+        "mtp": model.mtp,
+        "jinja": model.jinja,
         "name": model.name,
         "size_bytes": model.size_bytes,
         "quant": model.quant,
         "license": model.license,
         "hf_filename": model.hf_filename,
-        "chat_template": defaults.chat_template,
+        "chat_template": model.chat_template,
         "capabilities": json.dumps(list(model.capabilities), separators=(",", ":")),
         "tags": json.dumps(list(model.tags), separators=(",", ":")),
         "sha256": None,
@@ -391,11 +380,11 @@ def row_to_model(row: sqlite3.Row, *, backends: list[str] | None = None) -> Mode
     for key in _RETIRED_TUNING_EXTRA_KEYS:
         metadata.pop(key, None)
 
-    defaults_kwargs: dict[str, Any] = {col: row[col] for col in _DEFAULTS_COLUMNS}
-    if isinstance(raw_tokenizer_repo, str) and raw_tokenizer_repo:
-        defaults_kwargs["tokenizer_repo"] = raw_tokenizer_repo
-    has_defaults = any(v is not None for v in defaults_kwargs.values())
-    defaults = ModelDefaults(**defaults_kwargs) if has_defaults else None
+    tokenizer_repo = (
+        raw_tokenizer_repo if isinstance(raw_tokenizer_repo, str) and raw_tokenizer_repo else None
+    )
+    mtp = row["mtp"]
+    jinja = row["jinja"]
 
     return Model(
         id=row["id"],
@@ -414,7 +403,10 @@ def row_to_model(row: sqlite3.Row, *, backends: list[str] | None = None) -> Mode
         capability_flags=capability_flags,
         modalities_override=modalities_override,
         provider=provider,
-        defaults=defaults,
+        chat_template=row["chat_template"],
+        tokenizer_repo=tokenizer_repo,
+        mtp=None if mtp is None else bool(mtp),
+        jinja=None if jinja is None else bool(jinja),
         default=default,
         metadata=metadata,
     )

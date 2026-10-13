@@ -18,7 +18,7 @@ import pytest
 from hal0.config.schema import GPUInfo, HardwareInfo
 from hal0.errors import BadRequest
 from hal0.profiles.generate import LlmCallContext, generate_draft_profile
-from hal0.registry.model import Model, ModelDefaults
+from hal0.registry.model import Model
 from hal0.registry.store import ModelNotFound, ModelRegistry
 
 _EXPORTED_AT = "2026-08-07T00:00:00+00:00"
@@ -140,30 +140,32 @@ def test_generate_from_model_id_chat_gpu_clones_chat_seed(
     assert result.warnings == ()
 
 
-def test_generate_with_model_defaults_set_uses_only_the_native_window(
+def test_generate_with_model_facts_set_uses_only_the_native_window(
     tmp_hal0_home: str, rocm_nodes: None
 ) -> None:
-    """ADR-0029: ``Model.defaults`` holds file facts (chat_template, mtp, ...),
-    never a window. A row with defaults set must not raise, and the draft's
+    """ADR-0029: the model's file facts (chat_template, mtp, ...) are never
+    a window. A row with facts set must not raise, and the draft's
     context comes from the file's native ``metadata.context_length`` or nothing."""
     import asyncio
 
     reg = ModelRegistry(registry_dir=tmp_hal0_home + "/registry")
     reg.add(
         Model(
-            id="with-defaults",
+            id="with-facts",
             path="/models/wd.gguf",
             capabilities=["chat"],
-            defaults=ModelDefaults(chat_template="chatml", mtp=True),
+            chat_template="chatml",
+            mtp=True,
             metadata={"context_length": 16384},
         )
     )
     reg.add(
         Model(
-            id="defaults-no-window",
+            id="facts-no-window",
             path="/models/dnw.gguf",
             capabilities=["chat"],
-            defaults=ModelDefaults(chat_template="chatml", mtp=True),
+            chat_template="chatml",
+            mtp=True,
         )
     )
 
@@ -174,8 +176,8 @@ def test_generate_with_model_defaults_set_uses_only_the_native_window(
             )
         )
 
-    assert "16K ctx" in draft("with-defaults").profile["profile"]["intent"]
-    bare = draft("defaults-no-window").profile["profile"]
+    assert "16K ctx" in draft("with-facts").profile["profile"]["intent"]
+    bare = draft("facts-no-window").profile["profile"]
     assert "ctx" not in bare["intent"]
     assert not {"quant", "device_class", "backend"} & set(bare)
 

@@ -146,7 +146,8 @@ def test_scan_with_rows_persists_user_overrides(
                     "name": "User Chosen Name",
                     "backends": ["vulkan"],
                     "capabilities": ["embed"],
-                    "defaults": {"chat_template": "minicpm5-1b"},
+                    "chat_template": "minicpm5-1b",
+                    "jinja": False,
                 }
             ]
         },
@@ -161,7 +162,9 @@ def test_scan_with_rows_persists_user_overrides(
     assert entry["name"] == "User Chosen Name"
     assert entry["backends"] == ["vulkan"]
     assert entry["capabilities"] == ["embed"]
-    assert entry["defaults"]["chat_template"] == "minicpm5-1b"
+    assert entry["chat_template"] == "minicpm5-1b"
+    assert entry["jinja"] is False
+    assert "defaults" not in entry
 
     # model.registered fired with source=scan.
     events = _events_since(crud_client, pre, "model.registered")
@@ -171,12 +174,13 @@ def test_scan_with_rows_persists_user_overrides(
     ), events
 
 
-def test_scan_with_rows_skips_a_row_carrying_a_tuning_default(
+def test_scan_with_rows_skips_a_row_carrying_a_defaults_table(
     crud_client: TestClient,
     crud_models_root: Path,
 ) -> None:
-    """A scan row's ``defaults`` holds file facts only (ADR-0029): a tuning key
-    skips that row with a named reason instead of being silently dropped."""
+    """A scan row's file facts are top-level (ADR-0029 §6): a ``defaults`` table
+    skips that row with the error code as the reason instead of being silently
+    dropped."""
     fpath = crud_models_root / "tuned-row.gguf"
     fpath.write_bytes(b"\x00" * 64)
     r = crud_client.post(
@@ -186,7 +190,7 @@ def test_scan_with_rows_skips_a_row_carrying_a_tuning_default(
                 {
                     "path": str(fpath),
                     "id": "tuned-row",
-                    "defaults": {"context_size": 8192, "extra_args": "-b 512"},
+                    "defaults": {"chat_template": "chatml"},
                 }
             ]
         },
@@ -194,10 +198,42 @@ def test_scan_with_rows_skips_a_row_carrying_a_tuning_default(
     assert r.status_code == 200, r.text
     body = r.json()
     assert "tuned-row" not in body["added"]
-    assert any(
-        sk["reason"] == "defaults_key_removed:context_size,extra_args" for sk in body["skipped"]
-    ), body["skipped"]
+    assert any(sk["reason"] == "model.defaults_removed" for sk in body["skipped"]), body["skipped"]
     assert crud_client.get("/api/models/tuned-row").status_code == 404
+
+
+def test_scan_with_rows_skips_a_row_carrying_a_tune_key(
+    crud_client: TestClient,
+    crud_models_root: Path,
+) -> None:
+    fpath = crud_models_root / "tuned-flat-row.gguf"
+    fpath.write_bytes(b"\x00" * 64)
+    r = crud_client.post(
+        "/api/models/scan",
+        json={"rows": [{"path": str(fpath), "id": "tuned-flat-row", "context_size": 8192}]},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert "tuned-flat-row" not in body["added"]
+    assert any(sk["reason"] == "model.tune_key_removed" for sk in body["skipped"]), body["skipped"]
+    assert crud_client.get("/api/models/tuned-flat-row").status_code == 404
+
+
+def test_scan_with_rows_skips_a_row_carrying_a_bad_fact(
+    crud_client: TestClient,
+    crud_models_root: Path,
+) -> None:
+    fpath = crud_models_root / "bad-fact-row.gguf"
+    fpath.write_bytes(b"\x00" * 64)
+    r = crud_client.post(
+        "/api/models/scan",
+        json={"rows": [{"path": str(fpath), "id": "bad-fact-row", "mtp": "maybe"}]},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert "bad-fact-row" not in body["added"]
+    assert any(sk["reason"] == "model.fact_invalid" for sk in body["skipped"]), body["skipped"]
+    assert crud_client.get("/api/models/bad-fact-row").status_code == 404
 
 
 def test_scan_with_rows_falls_back_to_detection_for_missing_fields(
@@ -328,7 +364,7 @@ def test_update_accepts_new_editable_fields_and_emits(
 ) -> None:
     """Task 3: ``backends`` is retired from the PUT write path — sent
     alongside real editable fields, it is silently ignored (not rejected,
-    not applied) while ``name``/``capabilities``/``defaults`` still save and
+    not applied) while ``name``/``capabilities``/the file facts still save and
     still surface in ``changed_fields``."""
     fpath = crud_models_root / "upd.gguf"
     fpath.write_bytes(b"\x00" * 16)
@@ -341,7 +377,8 @@ def test_update_accepts_new_editable_fields_and_emits(
             "name": "Updated Name",
             "capabilities": ["chat", "embed"],
             "backends": ["vulkan", "rocm"],
-            "defaults": {"chat_template": "minicpm5-1b", "jinja": False},
+            "chat_template": "minicpm5-1b",
+            "jinja": False,
         },
     )
     assert r.status_code == 200, r.text
@@ -349,14 +386,15 @@ def test_update_accepts_new_editable_fields_and_emits(
     assert body["name"] == "Updated Name"
     assert set(body["capabilities"]) == {"chat", "embed"}
     assert body["backends"] == []  # never had any; the PUT's backends is dead
-    assert body["defaults"]["chat_template"] == "minicpm5-1b"
-    assert body["defaults"]["jinja"] is False
+    assert body["chat_template"] == "minicpm5-1b"
+    assert body["jinja"] is False
+    assert "defaults" not in body
 
     events = _events_since(crud_client, pre, "model.updated")
     assert events, "expected model.updated event"
     payload = next(ev for ev in events if ev["data"].get("id") == "upd")
     changed = set(payload["data"]["changed_fields"])
-    assert {"name", "capabilities", "defaults"} <= changed
+    assert {"name", "capabilities", "chat_template", "jinja"} <= changed
     assert "backends" not in changed
 
 
@@ -379,119 +417,224 @@ def test_update_changed_fields_only_lists_actual_changes(
     )
 
 
-# ── ADR-0029: ``defaults`` holds file facts only ───────────────────────────────
+# ── ADR-0029 §6: a model row holds file facts only, top-level ─────────────────
 
-#: Every key that used to live in ``defaults`` and is now a profile tune (or gone).
-_REMOVED_DEFAULTS_KEYS = [
+_FACTS = {
+    "chat_template": "minicpm5-1b",
+    "tokenizer_repo": "Qwen/Qwen3-4B",
+    "mtp": True,
+    "jinja": False,
+}
+
+#: Every key that used to tune a model and is now a profile tune (or gone).
+_TUNE_KEYS = [
     ("extra_args", "-b 1024 -fa on"),
     ("context_size", 8192),
     ("profile", "agent"),
     ("enable_thinking", True),
     ("vision", False),
     ("rope_freq_base", 10000.0),
+    ("n_gpu_layers", 99),
+    ("preferred_runner", "vulkan"),
+]
+
+#: The two spellings of the removed nested table: with content, and a bare null.
+_DEFAULTS_BODIES = [
+    pytest.param({"chat_template": "chatml"}, id="table"),
+    pytest.param(None, id="null"),
 ]
 
 
-@pytest.mark.parametrize(("key", "value"), _REMOVED_DEFAULTS_KEYS)
-def test_put_removed_defaults_key_is_422_and_writes_nothing(
+def test_get_returns_the_facts_top_level_and_no_defaults_key(
+    crud_client: TestClient,
+    crud_models_root: Path,
+) -> None:
+    fpath = crud_models_root / "facts-top.gguf"
+    fpath.write_bytes(b"\x00" * 16)
+    r = crud_client.post("/api/models", json={"id": "facts-top", "path": str(fpath), **_FACTS})
+    assert r.status_code == 201, r.text
+    got = crud_client.get("/api/models/facts-top").json()
+    for key, value in _FACTS.items():
+        assert got[key] == value, key
+    assert "defaults" not in got
+    listed = next(
+        m for m in crud_client.get("/api/models").json()["models"] if m["id"] == "facts-top"
+    )
+    assert listed["chat_template"] == "minicpm5-1b"
+    assert "defaults" not in listed
+
+
+def test_get_unset_facts_are_top_level_nulls(
+    crud_client: TestClient,
+    crud_models_root: Path,
+) -> None:
+    fpath = crud_models_root / "facts-unset.gguf"
+    fpath.write_bytes(b"\x00" * 16)
+    crud_client.post("/api/models", json={"id": "facts-unset", "path": str(fpath)})
+    got = crud_client.get("/api/models/facts-unset").json()
+    assert got["chat_template"] is None
+    assert got["mtp"] is None
+    assert got["jinja"] is None
+    assert "defaults" not in got
+
+
+@pytest.mark.parametrize("defaults", _DEFAULTS_BODIES)
+def test_put_defaults_key_is_422_and_writes_nothing(
+    crud_client: TestClient,
+    crud_models_root: Path,
+    defaults: object,
+) -> None:
+    """The nested ``defaults`` table is gone: any ``defaults`` key (a table or a
+    bare null) on a PUT is a 422 ``model.defaults_removed`` and the stored row
+    is untouched."""
+    fpath = crud_models_root / "rm-defaults.gguf"
+    fpath.write_bytes(b"\x00" * 16)
+    crud_client.post(
+        "/api/models",
+        json={"id": "rm-defaults", "path": str(fpath), "chat_template": "minicpm5-1b"},
+    )
+    r = crud_client.put("/api/models/rm-defaults", json={"defaults": defaults})
+    assert r.status_code == 422, r.text
+    err = r.json()["error"]
+    assert err["code"] == "model.defaults_removed"
+    assert err["details"]["keys"] == (sorted(defaults) if defaults else [])
+    assert err["details"]["facts"] == ["chat_template", "tokenizer_repo", "mtp", "jinja"]
+    got = crud_client.get("/api/models/rm-defaults").json()
+    assert got["chat_template"] == "minicpm5-1b"
+    assert (got["tokenizer_repo"], got["mtp"], got["jinja"]) == (None, None, None)
+
+
+@pytest.mark.parametrize(("key", "value"), _TUNE_KEYS)
+def test_put_top_level_tune_key_is_422_and_writes_nothing(
     crud_client: TestClient,
     crud_models_root: Path,
     key: str,
     value: object,
 ) -> None:
-    """A tune no longer lives on the model: PUT with a removed ``defaults`` key
-    is a 422 that names the key, and the stored row is untouched."""
+    """A tune no longer lives on the model: a top-level tune key on PUT is a 422
+    that names the key, and the stored row is untouched."""
     fpath = crud_models_root / f"rm-{key}.gguf"
     fpath.write_bytes(b"\x00" * 16)
     crud_client.post(
         "/api/models",
-        json={"id": f"rm-{key}", "path": str(fpath), "defaults": {"chat_template": "minicpm5-1b"}},
+        json={"id": f"rm-{key}", "path": str(fpath), "chat_template": "minicpm5-1b"},
     )
-    r = crud_client.put(f"/api/models/rm-{key}", json={"defaults": {key: value}})
+    r = crud_client.put(f"/api/models/rm-{key}", json={key: value})
     assert r.status_code == 422, r.text
     err = r.json()["error"]
-    assert err["code"] == "model.defaults_key_removed"
+    assert err["code"] == "model.tune_key_removed"
     assert key in err["message"]
     assert err["details"]["keys"] == [key]
-    assert crud_client.get(f"/api/models/rm-{key}").json()["defaults"] == {
-        "chat_template": "minicpm5-1b",
-        "tokenizer_repo": None,
-        "mtp": None,
-        "jinja": None,
-    }
+    got = crud_client.get(f"/api/models/rm-{key}").json()
+    assert got["chat_template"] == "minicpm5-1b"
+    assert key not in got or got[key] != value
 
 
-def test_put_removed_key_alongside_a_fact_writes_neither(
+def test_put_tune_key_alongside_a_fact_writes_neither(
     crud_client: TestClient,
     crud_models_root: Path,
 ) -> None:
     """The screen runs before the write: a body mixing a valid fact with a
-    removed tuning key is refused whole — the fact is not half-applied."""
+    tuning key is refused whole — the fact is not half-applied."""
     fpath = crud_models_root / "rm-mixed.gguf"
     fpath.write_bytes(b"\x00" * 16)
     crud_client.post("/api/models", json={"id": "rm-mixed", "path": str(fpath)})
-    r = crud_client.put(
-        "/api/models/rm-mixed",
-        json={"defaults": {"jinja": False, "extra_args": "-b 1024"}},
-    )
+    r = crud_client.put("/api/models/rm-mixed", json={"jinja": False, "extra_args": "-b 1024"})
     assert r.status_code == 422, r.text
-    assert crud_client.get("/api/models/rm-mixed").json()["defaults"] is None
+    assert crud_client.get("/api/models/rm-mixed").json()["jinja"] is None
 
 
-def test_create_with_removed_defaults_key_is_422_and_writes_nothing(
+@pytest.mark.parametrize("defaults", _DEFAULTS_BODIES)
+def test_create_with_defaults_key_is_422_and_writes_nothing(
     crud_client: TestClient,
     crud_models_root: Path,
+    defaults: object,
 ) -> None:
-    """POST create screens ``defaults`` like PUT does — one screen, three paths."""
+    """POST create screens the body like PUT does — one screen, three paths."""
     fpath = crud_models_root / "cs1.gguf"
     fpath.write_bytes(b"\x00" * 16)
     r = crud_client.post(
         "/api/models",
+        json={"id": "cs1", "path": str(fpath), "defaults": defaults},
+    )
+    assert r.status_code == 422, r.text
+    err = r.json()["error"]
+    assert err["code"] == "model.defaults_removed"
+    assert crud_client.get("/api/models/cs1").status_code == 404
+
+
+def test_create_with_defaults_keys_lists_the_nested_keys(
+    crud_client: TestClient,
+    crud_models_root: Path,
+) -> None:
+    fpath = crud_models_root / "cs2.gguf"
+    fpath.write_bytes(b"\x00" * 16)
+    r = crud_client.post(
+        "/api/models",
         json={
-            "id": "cs1",
+            "id": "cs2",
             "path": str(fpath),
             "defaults": {"extra_args": "--flash-attn on", "context_size": 8192},
         },
     )
     assert r.status_code == 422, r.text
     err = r.json()["error"]
-    assert err["code"] == "model.defaults_key_removed"
+    assert err["code"] == "model.defaults_removed"
     assert err["details"]["keys"] == ["context_size", "extra_args"]
-    assert crud_client.get("/api/models/cs1").status_code == 404
+    assert crud_client.get("/api/models/cs2").status_code == 404
+
+
+@pytest.mark.parametrize(("key", "value"), _TUNE_KEYS)
+def test_create_with_top_level_tune_key_is_422_and_writes_nothing(
+    crud_client: TestClient,
+    crud_models_root: Path,
+    key: str,
+    value: object,
+) -> None:
+    fpath = crud_models_root / f"cs-{key}.gguf"
+    fpath.write_bytes(b"\x00" * 16)
+    r = crud_client.post("/api/models", json={"id": f"cs-{key}", "path": str(fpath), key: value})
+    assert r.status_code == 422, r.text
+    assert r.json()["error"]["code"] == "model.tune_key_removed"
+    assert crud_client.get(f"/api/models/cs-{key}").status_code == 404
 
 
 def test_validate_accepts_facts_only_body(crud_client: TestClient) -> None:
-    r = crud_client.post(
-        "/api/models/validate",
-        json={
-            "defaults": {
-                "chat_template": "minicpm5-1b",
-                "tokenizer_repo": "Qwen/Qwen3-4B",
-                "mtp": True,
-                "jinja": False,
-            }
-        },
-    )
+    r = crud_client.post("/api/models/validate", json=dict(_FACTS))
     assert r.status_code == 200, r.text
     assert r.json()["ok"] is True
 
 
-def test_validate_rejects_removed_defaults_key_without_writing(crud_client: TestClient) -> None:
+@pytest.mark.parametrize("defaults", _DEFAULTS_BODIES)
+def test_validate_rejects_defaults_key_without_writing(
+    crud_client: TestClient,
+    defaults: object,
+) -> None:
     """/validate is a dry run: it screens with the same envelope as create/PUT
     and never touches the registry (no id required, nothing persisted)."""
     r = crud_client.post(
         "/api/models/validate",
-        json={"id": "should-not-persist", "defaults": {"extra_args": "--model /etc/passwd"}},
+        json={"id": "should-not-persist", "defaults": defaults},
     )
     assert r.status_code == 422, r.text
-    assert r.json()["error"]["code"] == "model.defaults_key_removed"
+    assert r.json()["error"]["code"] == "model.defaults_removed"
+    assert crud_client.get("/api/models/should-not-persist").status_code == 404
+
+
+def test_validate_rejects_a_tune_key_without_writing(crud_client: TestClient) -> None:
+    r = crud_client.post(
+        "/api/models/validate",
+        json={"id": "should-not-persist", "extra_args": "--model /etc/passwd"},
+    )
+    assert r.status_code == 422, r.text
+    assert r.json()["error"]["code"] == "model.tune_key_removed"
     assert crud_client.get("/api/models/should-not-persist").status_code == 404
 
 
 def test_validate_reports_removed_context_size_inline(crud_client: TestClient) -> None:
-    r = crud_client.post("/api/models/validate", json={"defaults": {"context_size": 8192}})
+    r = crud_client.post("/api/models/validate", json={"context_size": 8192})
     assert r.status_code == 422, r.text
-    assert r.json()["error"]["code"] == "model.defaults_key_removed"
+    assert r.json()["error"]["code"] == "model.tune_key_removed"
 
 
 def test_seed_profile_route_is_gone(crud_client: TestClient, crud_models_root: Path) -> None:
@@ -502,64 +645,60 @@ def test_seed_profile_route_is_gone(crud_client: TestClient, crud_models_root: P
     crud_client.post("/api/models", json={"id": "seedgone", "path": str(fpath)})
     r = crud_client.post("/api/models/seedgone/seed-profile", json={"profile": "chat"})
     assert r.status_code in (404, 405), r.text
-    assert crud_client.get("/api/models/seedgone").json()["defaults"] is None
+    assert crud_client.get("/api/models/seedgone").json()["chat_template"] is None
 
 
-# ── #1413: PUT merges `defaults` one level deep, not wholesale ────────────────
+# ── #1413: PUT keeps the facts it does not name; null clears one ─────────────
 
 
-def test_put_partial_defaults_preserves_unsent_siblings(
+def test_put_single_fact_preserves_the_other_facts(
     crud_client: TestClient,
     crud_models_root: Path,
 ) -> None:
-    """The route documents `defaults` as a partial patch, so a body naming only
-    ``jinja`` must not reset the facts the client never sent (#1413)."""
+    """A body naming only ``jinja`` must not reset the facts the client never
+    sent (#1413)."""
     fpath = crud_models_root / "m1413.gguf"
     fpath.write_bytes(b"\x00" * 16)
     crud_client.post("/api/models", json={"id": "m1413", "path": str(fpath)})
     seed = crud_client.put(
         "/api/models/m1413",
-        json={
-            "defaults": {
-                "chat_template": "minicpm5-1b",
-                "mtp": True,
-                "jinja": False,
-            }
-        },
+        json={"chat_template": "minicpm5-1b", "mtp": True, "jinja": False},
     )
     assert seed.status_code == 200, seed.text
 
-    r = crud_client.put("/api/models/m1413", json={"defaults": {"jinja": True}})
+    r = crud_client.put("/api/models/m1413", json={"jinja": True})
     assert r.status_code == 200, r.text
-    got = r.json()["defaults"]
+    got = r.json()
     assert got["jinja"] is True
     assert got["chat_template"] == "minicpm5-1b"
     assert got["mtp"] is True
-    # And the persisted row agrees (not just the response echo), and carries
-    # no tuning key a sparse merge could have resurrected.
-    stored = crud_client.get("/api/models/m1413").json()["defaults"]
+    # And the persisted row agrees (not just the response echo).
+    stored = crud_client.get("/api/models/m1413").json()
     assert (stored["chat_template"], stored["mtp"], stored["jinja"]) == ("minicpm5-1b", True, True)
-    assert set(stored) == {"chat_template", "tokenizer_repo", "mtp", "jinja"}
+    assert "defaults" not in stored
 
 
-def test_put_explicit_null_sub_key_still_clears(
+def test_put_explicit_null_clears_only_that_fact(
     crud_client: TestClient,
     crud_models_root: Path,
 ) -> None:
-    """`null` remains the DELETE verb for one sub-key — the tri-state contract
-    the drawer relies on to clear a fact (#1413)."""
+    """`null` remains the DELETE verb for one fact — the tri-state contract the
+    drawer relies on to clear it (#1413)."""
     fpath = crud_models_root / "m1413b.gguf"
     fpath.write_bytes(b"\x00" * 16)
     crud_client.post("/api/models", json={"id": "m1413b", "path": str(fpath)})
     crud_client.put(
         "/api/models/m1413b",
-        json={"defaults": {"chat_template": "minicpm5-1b", "mtp": True}},
+        json={"chat_template": "minicpm5-1b", "mtp": True},
     )
-    r = crud_client.put("/api/models/m1413b", json={"defaults": {"mtp": None}})
+    r = crud_client.put("/api/models/m1413b", json={"mtp": None})
     assert r.status_code == 200, r.text
-    got = r.json()["defaults"]
+    got = r.json()
     assert got["mtp"] is None
     assert got["chat_template"] == "minicpm5-1b"
+    stored = crud_client.get("/api/models/m1413b").json()
+    assert stored["mtp"] is None
+    assert stored["chat_template"] == "minicpm5-1b"
 
 
 # ── #1414: a malformed fact is a 400, never a 500 ─────────────────────────────
@@ -576,16 +715,20 @@ def test_put_unparseable_fact_is_400_not_500(
     fpath = crud_models_root / "fact-bad.gguf"
     fpath.write_bytes(b"\x00" * 16)
     crud_client.post("/api/models", json={"id": "factbad", "path": str(fpath)})
-    r = crud_client.put("/api/models/factbad", json={"defaults": {"mtp": bad}})
+    r = crud_client.put("/api/models/factbad", json={"mtp": bad})
     assert r.status_code == 400, r.text
-    assert r.json()["error"]["code"] == "model.defaults_invalid"
-    assert crud_client.get("/api/models/factbad").json()["defaults"] is None
+    err = r.json()["error"]
+    assert err["code"] == "model.fact_invalid"
+    assert err["details"]["field"] == "mtp"
+    assert crud_client.get("/api/models/factbad").json()["mtp"] is None
 
 
 def test_validate_reports_unparseable_fact_inline(crud_client: TestClient) -> None:
-    r = crud_client.post("/api/models/validate", json={"defaults": {"jinja": "abc"}})
+    r = crud_client.post("/api/models/validate", json={"jinja": "abc"})
     assert r.status_code == 400, r.text
-    assert r.json()["error"]["code"] == "model.defaults_invalid"
+    err = r.json()["error"]
+    assert err["code"] == "model.fact_invalid"
+    assert err["details"]["field"] == "jinja"
 
 
 # ── DELETE cascade ─────────────────────────────────────────────────────────
@@ -906,7 +1049,7 @@ def test_put_adding_vision_alongside_mmproj_accepted(
     assert "vision" in r.json()["capabilities"]
 
 
-def test_put_defaults_only_save_on_valid_vision_row_accepted(
+def test_put_facts_only_save_on_valid_vision_row_accepted(
     crud_client: TestClient,
     crud_models_root: Path,
 ) -> None:
@@ -925,7 +1068,7 @@ def test_put_defaults_only_save_on_valid_vision_row_accepted(
             "mmproj": str(mm),
         },
     )
-    r = crud_client.put("/api/models/vis6", json={"defaults": {"jinja": False}})
+    r = crud_client.put("/api/models/vis6", json={"jinja": False})
     assert r.status_code == 200, r.text
 
 

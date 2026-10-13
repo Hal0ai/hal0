@@ -256,7 +256,7 @@ def seed_registry_from_body(
     intentional (rather than silently re-pulling the old variant).
     """
     from hal0.config import paths
-    from hal0.registry.model import Model, ModelDefaults
+    from hal0.registry.model import Model
     from hal0.registry.store import ModelAlreadyExists
 
     registry = request.app.state.model_registry
@@ -267,7 +267,7 @@ def seed_registry_from_body(
     # created — the modal closes on pull start and can't sequence a later PUT.
     # The "auto" sentinel means "use the GGUF-embedded template" → no override.
     ct = (chat_template or "").strip()
-    defaults = ModelDefaults(chat_template=ct) if ct and ct != "auto" else None
+    pinned_template = ct if ct and ct != "auto" else None
     try:
         existing = registry.get(model_id)
     except Exception:
@@ -276,8 +276,8 @@ def seed_registry_from_body(
         # Refresh HF coords so a retry with a different variant lands, and
         # carry a freshly-picked chat template onto the existing row.
         patch: dict[str, Any] = {"hf_repo": hf_repo, "hf_filename": hf_file}
-        if defaults is not None:
-            patch["defaults"] = defaults.model_dump(exclude_none=True)
+        if pinned_template is not None:
+            patch["chat_template"] = pinned_template
         with contextlib.suppress(Exception):
             registry.update(model_id, patch)
         return
@@ -291,7 +291,7 @@ def seed_registry_from_body(
         hf_filename=hf_file,
         tags=["user-added"],
         metadata={"source": "add-by-hf"},
-        defaults=defaults,
+        chat_template=pinned_template,
     )
     # Race with another caller — the existing row already has coords.
     with contextlib.suppress(ModelAlreadyExists):

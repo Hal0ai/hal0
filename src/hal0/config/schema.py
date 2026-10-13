@@ -1139,11 +1139,11 @@ class StacksConfig(BaseModel):
 def resolve_chat_template(model_info: Mapping[str, Any]) -> str | None:
     """The model's chat-template id, or None for the GGUF-embedded template.
 
-    ADR-0029: the chat template is a fact about the model file
-    (``defaults.chat_template``). ``'auto'`` (or empty/None) means the
+    ADR-0029: the chat template is a fact about the model file (the
+    registry row's ``chat_template``). ``'auto'`` (or empty/None) means the
     template embedded in the GGUF (no ``--chat-template-file``).
     """
-    val = (model_info.get("defaults") or {}).get("chat_template")
+    val = model_info.get("chat_template")
     if val and val != "auto":
         return str(val)
     return None

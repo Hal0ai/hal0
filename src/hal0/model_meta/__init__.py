@@ -321,7 +321,7 @@ MODEL_BACKENDS: tuple[str, ...] = (
 CURATED_MODEL_TAGS: tuple[str, ...] = (
     # DESCRIPTIVE ONLY — the curated "type" chips are retired from the model
     # editors and NOTHING routes on these tags. Behaviour is owned by typed
-    # fields: ``defaults.mtp`` (model_is_mtp_eligible prefers it; the tag is
+    # fields: the ``mtp`` fact (model_is_mtp_eligible prefers it; the tag is
     # the pre-1.0 source a boot migration folds forward), Model.architecture
     # (moe — the "moe" tag was removed in §7.1d), ``capability_flags.
     # tool_calling`` (the §7.3 master gate), the profile's ``enable_thinking``
@@ -610,23 +610,21 @@ def model_is_mtp_eligible(model_info: Mapping[str, Any]) -> bool:
     """True when a model should speculate with MTP / NextN draft heads.
 
     §7.1a / ML-5: eligibility is purely MODEL-driven data now — an explicit
-    ``ModelDefaults.mtp`` tri-state wins in EITHER direction over the
+    ``Model.mtp`` tri-state fact wins in EITHER direction over the
     registry ``mtp`` tag; when unset, the tag decides. The old filename/
     GGUF-name ``MTP`` marker sniff (``_MTP_NAME_RE``) is REMOVED — an
-    uncurated local pull with no tag and no explicit ``defaults.mtp`` is
-    simply not eligible; tag the model (or set ``defaults.mtp = true``)
+    uncurated local pull with no tag and no explicit ``mtp`` fact is
+    simply not eligible; tag the model (or set its ``mtp`` fact to true)
     instead.
 
-    Gates **auto** MTP in :func:`hal0.providers.container._effective_mtp`
-    (``SlotConfig.mtp is None`` AND ``ModelDefaults.mtp is None``) and the
+    Gates **auto** MTP in :func:`hal0.providers.container._effective_mtp` and the
     swap-time / upgrade-migration MTP-defuse helpers
     (:mod:`hal0.slots.profile_adopt`, :mod:`hal0.updater.updater`), which
     both call this directly. ``model_info`` is the registry ``model_dump``
     dict (or the ``SlotManager._resolve_model_info`` fold of it) the
     caller already resolves per launch/swap.
     """
-    defaults = model_info.get("defaults")
-    explicit = defaults.get("mtp") if isinstance(defaults, Mapping) else None
+    explicit = model_info.get("mtp")
     if explicit is not None:
         return bool(explicit)
     tags = model_info.get("tags") or ()

@@ -14,8 +14,8 @@ import { describe, expect, it } from 'vitest'
 import { isMoeModel, isMtpModel } from '../model-sort.js'
 
 describe('isMtpModel', () => {
-  it('is true when defaults.mtp is explicitly true', () => {
-    expect(isMtpModel({ id: 'm', defaults: { mtp: true } })).toBe(true)
+  it('is true when mtp is explicitly true', () => {
+    expect(isMtpModel({ id: 'm', mtp: true })).toBe(true)
   })
 
   it('is true when the legacy mtp tag is present', () => {

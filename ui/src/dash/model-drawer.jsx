@@ -6,12 +6,13 @@
 //
 // What the drawer owns:
 //   · identity (name, source coords, mmproj sidecar path, engine/provider);
-//   · file facts on model.defaults — chat_template, jinja, and "this file has
-//     MTP heads" (mtp), plus the native context window shown read-only.
+//   · file facts, top-level on the model — chat_template, jinja, and "this
+//     file has MTP heads" (mtp), plus the native context window shown
+//     read-only.
 //
-// Save writes through useModelUpdate (PUT /api/models/{id}) and sends ONLY
-// those three `defaults` keys (+ tokenizer_repo when the row already has one).
-// Anything else under `defaults` is a 422 server-side, so it never ships.
+// Save writes through useModelUpdate (PUT /api/models/{id}) and sends ONLY the
+// facts that changed, as top-level keys (null clears one). A `defaults` key is
+// refused server-side (422 model.defaults_removed), so it never ships.
 
 import { copyTextToClipboard } from "@/lib/clipboard";
 import {
@@ -38,11 +39,6 @@ const {
 	useMemo: useMemoMD,
 	useRef: useRefMD,
 } = React;
-
-// The only `defaults` keys this drawer ever writes (ADR-0029). Everything else
-// under `defaults` is a 422 after P2, so the save body is built from this list
-// and nothing else.
-export const MODEL_FACT_KEYS = ["chat_template", "mtp", "jinja", "tokenizer_repo"];
 
 // spec-hw-slot-ownership §1/§8: the model is device-agnostic — it carries no
 // device, runner, or image. The former deviceFlavour() chip (and the read-only
@@ -199,7 +195,7 @@ function CapOverrideAdd({ remaining, onPick }) {
 
 // ─── CapOverridesLedger — resting-state chips + the add menu (panel 09 V1) ──
 // Auto (null) is invisible: only overridden caps render, one chip each, ✕
-// returns that cap to Auto via the existing save-gated defaults path.
+// returns that cap to Auto via the existing save-gated path.
 function CapOverridesLedger({ flags, onSet, onClear }) {
 	const overridden = overriddenCaps(flags);
 	const remaining = remainingCaps(flags);
@@ -269,12 +265,11 @@ function CapOverridesLedger({ flags, onSet, onClear }) {
 // So the two sides drifted with nothing the operator did, and the drawer read
 // that drift as an edit:
 //   * a concurrent write (another operator, a slot-drawer save, the CLI) moved
-//     `defaults.chat_template`; the untouched field went dirty and Save wrote
+//     `chat_template`; the untouched field went dirty and Save wrote
 //     the drawer's stale seed back over it — a lost update caused by doing
 //     nothing;
-//   * `onSave` starts from `{ ...init }` so the keys this drawer never renders
-//     ride along; read live, they rode along as a mid-edit poll left them
-//     rather than as the operator saw them.
+//   * the save body was built from the live row, so a mid-edit poll changed
+//     what it carried rather than what the operator saw.
 //
 // Snapshot the model ONCE at open, freeze it, and derive both the dirty
 // aggregate and the save body from it. `caps` is stored already canonicalised
@@ -283,7 +278,7 @@ function CapOverridesLedger({ flags, onSet, onClear }) {
 // against a form seeded with the earlier answer.
 function modelBaseline(model, enums) {
 	if (!model) return null;
-	const init = model.defaults || {};
+	const init = model;
 	return {
 		id: model.id,
 		name: model.name || "",
@@ -300,15 +295,6 @@ function modelBaseline(model, enums) {
 		chatTemplate: init.chat_template ?? "auto",
 		mtp: triFromDefault(init.mtp),
 		jinja: triFromDefault(init.jinja),
-		// The file-fact keys as they stood at open (MODEL_FACT_KEYS only).
-		// `onSave` starts from THIS so a fact this drawer doesn't render
-		// (tokenizer_repo) round-trips as the operator saw it. Reading it live
-		// meant an unrelated save silently shipped a value that landed after
-		// the drawer opened. Tuning keys a stale row might still carry are
-		// dropped here on purpose: the server 422s them.
-		defaults: Object.fromEntries(
-			MODEL_FACT_KEYS.filter((k) => init[k] !== undefined).map((k) => [k, init[k]]),
-		),
 	};
 }
 
@@ -810,21 +796,21 @@ export function ModelDrawer({ open, onClose, model, onOpenSlot = undefined }) {
 		// #1441: nothing changed ⇒ nothing to write. The button is disabled too;
 		// this is the belt.
 		if (!changes || !changes.any) return;
-		// Every fact is sent EXPLICITLY — a value to set, or `null` to clear.
-		// The server merges `defaults` one level deep (#1413), so absent means
-		// "keep the stored value" and only `null` deletes. ADR-0029: the body
-		// carries file facts ONLY (chat_template, mtp, jinja, + tokenizer_repo
-		// when the row has one). Tunes — extra_args, context_size, profile,
-		// enable_thinking, vision, n_gpu_layers, rope_freq_base — belong on a
-		// profile, and sending any of them is a 422.
-		const defaults = { ...baseline.defaults };
-		defaults.chat_template =
-			chatTemplate && chatTemplate !== "auto" ? chatTemplate : null;
+		// ADR-0029 §6: the file facts are TOP-LEVEL keys on the model, and a PUT
+		// is a plain top-level replace — an absent key keeps the stored value,
+		// an explicit `null` clears it. So only the facts that changed ship
+		// (an untouched tokenizer_repo is never re-sent). Tunes — extra_args,
+		// context_size, profile, enable_thinking, vision, n_gpu_layers,
+		// rope_freq_base — belong on a profile, and a `defaults` key at all is
+		// a 422.
+		const body = {};
+		if (changes.chatTemplate)
+			body.chat_template =
+				chatTemplate && chatTemplate !== "auto" ? chatTemplate : null;
 		// Tri-state: auto = null (no opinion), on/off = boolean.
-		defaults.mtp = mtp === "on" ? true : mtp === "off" ? false : null;
-		defaults.jinja = jinja === "on" ? true : jinja === "off" ? false : null;
-
-		const body = { defaults };
+		if (changes.mtp) body.mtp = mtp === "on" ? true : mtp === "off" ? false : null;
+		if (changes.jinja)
+			body.jinja = jinja === "on" ? true : jinja === "off" ? false : null;
 		// Identity fields ship only when they actually changed, each answered by
 		// the one derived comparison above (`changes`) — the same values the
 		// dirty aggregate and the Save gate read.
@@ -848,9 +834,9 @@ export function ModelDrawer({ open, onClose, model, onOpenSlot = undefined }) {
 	const modality = modalityLabel(baseline?.caps || [], model.type);
 
 	// File-fact overrides ledger (cap-overrides.ts): the two tri-state strings
-	// above are the save-body source of truth (defaults.mtp / defaults.jinja) —
+	// above are the save-body source of truth (model.mtp / model.jinja) —
 	// the ledger just reads/writes them through the null|true|false shape those
-	// defaults already use.
+	// facts already use.
 	const capFlags = {
 		mtp: mtp === "on" ? true : mtp === "off" ? false : null,
 		jinja: jinja === "on" ? true : jinja === "off" ? false : null,
@@ -1084,7 +1070,7 @@ export function ModelDrawer({ open, onClose, model, onOpenSlot = undefined }) {
 								onClick={onSave}
 								// #1441: gate on the dirty aggregate, like the slot
 								// drawer. With zero edits there is nothing to persist,
-								// and firing anyway rewrote the whole defaults block.
+								// and firing anyway re-sent every fact.
 								disabled={update.isPending || saveBlocked || !dirty}
 								title={
 									!dirty && !saveBlocked && !update.isPending

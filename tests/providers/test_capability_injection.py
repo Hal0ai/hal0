@@ -5,7 +5,7 @@
 supports it, unless the model file's ``jinja`` is ``False`` or the profile
 runs in embedding/reranking mode. MTP drafting is the profile's ``mtp``
 (``auto``/``off``): ``auto`` drafts when the model has MTP heads (an explicit
-``defaults.mtp`` fact, else the registry ``mtp`` tag) AND the runner supports
+``mtp`` fact, else the registry ``mtp`` tag) AND the runner supports
 drafting. The runner is the slot's (``binary``, else derived from its
 ``device``).
 """
@@ -55,16 +55,25 @@ def test_jinja_default_on_for_llama_server_runner():
     assert "--jinja" in _argv(_ROCM_SLOT, _plain_model(), _profile())
 
 
-def test_jinja_suppressed_by_defaults_jinja_false():
-    model = _plain_model(defaults={"jinja": False})
+def test_jinja_suppressed_by_the_jinja_fact_false():
+    model = _plain_model(jinja=False)
     assert _resolve_llama_scalars(_ROCM_SLOT, model, _profile())["jinja"] is False
     assert "--jinja" not in _argv(_ROCM_SLOT, model, _profile())
 
 
-def test_jinja_defaults_true_and_none_both_mean_on():
+def test_jinja_fact_true_and_none_both_mean_on():
     for jinja_val in (True, None):
-        model = _plain_model(defaults={"jinja": jinja_val})
+        model = _plain_model(jinja=jinja_val)
         assert _resolve_llama_scalars(_ROCM_SLOT, model, _profile())["jinja"] is True, jinja_val
+
+
+def test_a_stale_defaults_table_is_never_read_for_jinja_or_mtp():
+    """ADR-0029 §6: the facts are top-level model_info keys; a leftover
+    ``defaults`` table on the dict contributes nothing."""
+    model = _mtp_tagged_model(defaults={"jinja": False, "mtp": False})
+    scalars = _resolve_llama_scalars(_ROCM_SLOT, model, _profile())
+    assert scalars["jinja"] is True
+    assert scalars["mtp"] is True  # the registry 'mtp' tag still decides
 
 
 @pytest.mark.parametrize("mode", ["--embedding", "--reranking"])
@@ -133,17 +142,17 @@ def test_slot_mtp_key_refuses_to_launch():
     assert excinfo.value.code == "slot.unconverted"
 
 
-def test_defaults_mtp_true_is_the_heads_fact_but_the_runner_still_gates():
-    """ADR-0029: the model's ``defaults.mtp = True`` means "the file has MTP
+def test_mtp_fact_true_is_the_heads_fact_but_the_runner_still_gates():
+    """ADR-0029: the model's ``mtp = True`` means "the file has MTP
     heads" — it no longer forces drafting. It drafts on a runner that
     supports MTP and stops drafting on one that does not."""
-    model = _plain_model(defaults={"mtp": True})
+    model = _plain_model(mtp=True)
     assert _resolve_llama_scalars(_ROCM_SLOT, model, _profile())["mtp"] is True
     assert _resolve_llama_scalars(_CUDA_SLOT, model, _profile())["mtp"] is False
 
 
-def test_defaults_mtp_false_overrides_the_tag():
-    model = _mtp_tagged_model(defaults={"mtp": False})
+def test_mtp_fact_false_overrides_the_tag():
+    model = _mtp_tagged_model(mtp=False)
     assert _resolve_llama_scalars(_ROCM_SLOT, model, _profile())["mtp"] is False
 
 
@@ -152,9 +161,9 @@ def test_defaults_mtp_false_overrides_the_tag():
 
 def test_slot_ngl_is_the_ngl_and_model_ngl_key_is_ignored():
     """spec-hw-slot-ownership §2: the SLOT's top-level ``n_gpu_layers`` owns
-    ``-ngl`` (the trusted ``slot`` layer). A leftover ``defaults.n_gpu_layers``
+    ``-ngl`` (the trusted ``slot`` layer). A leftover ``n_gpu_layers``
     key on a model_info dict emits nothing."""
-    model = _plain_model(defaults={"n_gpu_layers": 20}, architecture="gemma3")
+    model = _plain_model(n_gpu_layers=20, architecture="gemma3")
     slot_cfg = {**_ROCM_SLOT, "n_gpu_layers": 30}
     argv = _argv(slot_cfg, model, _profile())
     assert argv.count("-ngl") == 1

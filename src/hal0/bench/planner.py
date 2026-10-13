@@ -322,7 +322,7 @@ def _model_caps(m: dict[str, Any]) -> set[str]:
     handful carry a semantic label, and this set is what stamps
     ``identity.model.caps`` onto every benchmark record — which is where the
     public leaderboard's capability pills come from (#1823). So the TYPED
-    fields are folded in too, following the ``defaults.mtp`` precedent below:
+    fields are folded in too, following the ``mtp`` fact precedent below:
     they are the surface an operator actually edits (``PUT /api/models``),
     so a typed edit should reach the roster without also hand-editing a
     string list.
@@ -340,10 +340,9 @@ def _model_caps(m: dict[str, Any]) -> set[str]:
         caps.update(m.get(field_name) or [])
     if m.get("type"):
         caps.add(m["type"])
-    defaults = m.get("defaults") or {}
-    # defaults.mtp is the model fact "the file has MTP heads" — surface it
-    # into the match set so rosters keyed on "mtp" keep selecting those rows.
-    if defaults.get("mtp") is True:
+    # ``mtp`` is the model fact "the file has MTP heads" — surface it into
+    # the match set so rosters keyed on "mtp" keep selecting those rows.
+    if m.get("mtp") is True:
         caps.add("mtp")
     # Vision is the projector: a model that carries an mmproj can see. Whether
     # a slot loads it is its profile's `vision`, a tune — not a model fact.
@@ -366,16 +365,15 @@ def _resolve_tokenizer(m: dict[str, Any]) -> str | None:
     ``--tokenizer`` (issue #1773), or ``None`` if this registry entry has
     none.
 
-    Preference order: an explicit/pull-defaulted ``defaults.tokenizer_repo``
-    (registry/model.py's ``ModelDefaults.tokenizer_repo`` — settable by an
+    Preference order: an explicit/pull-defaulted ``tokenizer_repo``
+    (registry/model.py's ``Model.tokenizer_repo`` — settable by an
     operator, defaulted from ``hf_repo`` by the pull path when that linkage
     already exists), falling back to the model's own ``hf_repo`` directly
     (the same repo the GGUF was pulled from, when no override was needed).
     A local-only model id/path is never a trustworthy HF repo id on its
     own — that is exactly the bug this function exists to gate at plan
     time instead of inside a mid-session GuideLLM crash."""
-    defaults = m.get("defaults") or {}
-    tok = str(defaults.get("tokenizer_repo") or "").strip()
+    tok = str(m.get("tokenizer_repo") or "").strip()
     if tok:
         return tok
     hf_repo = str(m.get("hf_repo") or "").strip()
@@ -723,8 +721,8 @@ def plan(
         if no_tokenizer:
             raise ValueError(
                 f"suite {suite.id!r}: 'chat' cell(s) need a resolvable tokenizer — "
-                f"model(s) {no_tokenizer} have no defaults.tokenizer_repo and no "
-                "hf_repo (set Model.defaults.tokenizer_repo to a HF tokenizer repo "
+                f"model(s) {no_tokenizer} have no tokenizer_repo and no "
+                "hf_repo (set the model's tokenizer_repo to a HF tokenizer repo "
                 "id, e.g. 'Qwen/Qwen3-4B-GGUF')"
             )
 

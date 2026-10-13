@@ -88,7 +88,7 @@ class CuratedModel(BaseModel):
             "Optional bundled chat-template id (a ``<id>.jinja`` under the "
             "model-store ``chat-templates/`` dir, seeded from "
             "``hal0.templates``). When set, the pull layer stamps it into the "
-            "registry row's ``defaults.chat_template`` so launches use the "
+            "registry row's ``chat_template`` fact so launches use the "
             "curated template instead of the GGUF-embedded one — the escape "
             "hatch for artifacts whose embedded template trips the runner's "
             "jinja engine (e.g. hal0-brain-sft's ``|min`` filter, which minja "

@@ -214,7 +214,7 @@ class _FakeModelEntry:
         self._native_ctx = native_ctx
 
     def model_dump(self) -> dict[str, Any]:
-        return {"defaults": None, "metadata": {"context_length": self._native_ctx}}
+        return {"metadata": {"context_length": self._native_ctx}}
 
 
 class _FakeModelRegistry:

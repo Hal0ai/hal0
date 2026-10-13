@@ -6,7 +6,7 @@ makes the slot serve ``/v1/embeddings`` / ``/v1/rerank`` at all. Before this
 fix, the only create-time profile source was the model's stamped
 ``defaults.profile`` (deleted by ADR-0029: a model no longer picks a
 profile) — and auto-scan, ``model add``, pull and the curated catalog all
-register models with ``defaults: null``. So every explicit creation path (``hal0 slot create``,
+register models with no profile preference. So every explicit creation path (``hal0 slot create``,
 the dashboard New-slot modal, a raw ``POST /api/slots``, a stack apply, the
 capability orchestrator's auto-create) wrote a slot TOML with NO ``profile``
 key, the #1787 profile-template gate had nothing to apply, and the slot loaded
@@ -20,16 +20,14 @@ from __future__ import annotations
 
 import pytest
 
-from hal0.registry.model import Model, ModelDefaults
+from hal0.registry.model import Model
 from hal0.registry.store import ModelRegistry
 from hal0.slots.manager import SlotManager
 from hal0.slots.profile_adopt import type_implied_profile
 
 
 def _register(model_id: str) -> None:
-    ModelRegistry().add(
-        Model(id=model_id, path=f"/tmp/{model_id}.gguf", capabilities=["chat"], defaults=None)
-    )
+    ModelRegistry().add(Model(id=model_id, path=f"/tmp/{model_id}.gguf", capabilities=["chat"]))
 
 
 def _cfg(name: str, slot_type: str, device: str, model: str = "unstamped") -> dict:
@@ -182,7 +180,7 @@ def test_type_implied_profile_ignores_the_cli_legacy_provider_default(
 async def test_create_infers_capability_profile_for_unstamped_model(
     tmp_hal0_home: str, slot_type: str, device: str, expected: str
 ) -> None:
-    _register("unstamped")  # defaults: null — auto-scan / model add / pull
+    _register("unstamped")  # no profile preference — auto-scan / model add / pull
     sm = SlotManager()
     await sm.create("zz", _cfg("zz", slot_type, device))
     assert (await sm.get_config("zz")).get("profile") == expected
@@ -198,12 +196,13 @@ async def test_create_keeps_an_explicit_profile(tmp_hal0_home: str) -> None:
 
 
 def test_a_model_no_longer_carries_a_preferred_profile() -> None:
-    """ADR-0029 §3: ``defaults.profile`` is gone — a model never picks a
-    profile. ``ModelDefaults`` forbids the key outright."""
-    from pydantic import ValidationError
-
-    with pytest.raises(ValidationError):
-        ModelDefaults.model_validate({"profile": "cpu-chat"})
+    """ADR-0029 §3: a model never picks a profile. There is no ``profile``
+    field, and the retired ``defaults`` table is refused outright."""
+    assert "profile" not in Model.model_fields
+    with pytest.raises(ValueError, match="defaults"):
+        Model.model_validate(
+            {"id": "m", "path": "/tmp/m.gguf", "defaults": {"profile": "cpu-chat"}}
+        )
 
 
 async def test_create_uses_the_type_seed_whatever_the_model(tmp_hal0_home: str) -> None:

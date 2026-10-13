@@ -224,16 +224,18 @@ export function useModelDelete() {
 
 export function useModelUpdate() {
   // Partial update — PUT /api/models/{id} with any subset of
-  // ``name | capabilities | backends | defaults``. The dashboard's
-  // Recipe editor uses this for the per-model defaults section.
+  // ``name | provider | mmproj | hf_repo | hf_filename`` plus the
+  // top-level file facts ``chat_template | tokenizer_repo | mtp | jinja``
+  // (absent = keep, null = clear). A ``defaults`` key is a 422.
   const qc = useQueryClient()
   return useMutation<Model, Hal0Error, { id: string; body: Record<string, unknown> }>({
     mutationFn: ({ id, body }) =>
       apiPut<Model>(ENDPOINTS.model(id), body),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['models'] })
-      // Model defaults feed the slot argv assembly (merge_flags), so any
-      // open slot drawer's resolved command goes stale on a model save —
+      // Model file facts (chat template, jinja, mtp) feed the slot argv
+      // assembly, so any open slot drawer's resolved command goes stale on a
+      // model save —
       // refetch the slot list + every slot-resolved query too.
       qc.invalidateQueries({ queryKey: ['slots'] })
       qc.invalidateQueries({ queryKey: ['slot-resolved'] })

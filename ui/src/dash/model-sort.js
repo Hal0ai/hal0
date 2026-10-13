@@ -15,7 +15,7 @@ export const MODEL_SORT_FIELDS = [
 ];
 
 /**
- * True when a model carries an explicit MTP opt-in (`defaults.mtp === true`)
+ * True when a model carries an explicit MTP opt-in (`mtp === true`)
  * or the legacy registry `mtp` tag. Mirrors
  * `hal0.model_meta.model_is_mtp_eligible`'s tag fallback — see
  * `lib/normalizeApiModel.isMtpEligibleModel` for the full tri-state version
@@ -26,7 +26,7 @@ export const MODEL_SORT_FIELDS = [
  * @returns {boolean}
  */
 export function isMtpModel(m) {
-  return m?.defaults?.mtp === true || (m?.tags || []).some((t) => String(t).toLowerCase() === "mtp");
+  return m?.mtp === true || (m?.tags || []).some((t) => String(t).toLowerCase() === "mtp");
 }
 
 //: Architecture ids the backend already knows are MoE — mirrors

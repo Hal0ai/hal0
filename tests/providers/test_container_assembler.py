@@ -62,7 +62,8 @@ def test_preview_equals_launch_full_slot() -> None:
         "_model_key": "my-model",
         "path": "/mnt/ai-models/my-model.gguf",
         "mmproj": "/mnt/ai-models/my-model/mmproj-f16.gguf",
-        "defaults": {"chat_template": "chatml", "mtp": True},
+        "chat_template": "chatml",
+        "mtp": True,
         "metadata": {"context_length": 262144},
     }
 
@@ -155,9 +156,9 @@ def test_parallel_from_profile_flags_emits_kv_unified() -> None:
     assert "--kv-unified" in plan.command
 
 
-def test_model_defaults_extra_args_never_reach_launch() -> None:
-    """The model row holds facts only: a stray ``defaults.extra_args`` on a
-    model_info dict contributes nothing to the argv."""
+def test_model_extra_args_never_reach_launch() -> None:
+    """The model row holds facts only: a stray ``extra_args`` (or a leftover
+    ``defaults.extra_args``) on a model_info dict contributes nothing to the argv."""
     cfg = {
         "name": "gpu-slot",
         "port": 8095,
@@ -168,6 +169,7 @@ def test_model_defaults_extra_args_never_reach_launch() -> None:
     model_info = {
         "_model_key": "m",
         "path": "/mnt/ai-models/m.gguf",
+        "extra_args": "--rope-scaling linear --foo 1",
         "defaults": {"extra_args": "--rope-scaling linear --foo 1"},
     }
     with (

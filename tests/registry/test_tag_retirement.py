@@ -1,6 +1,6 @@
 """The retired "type" tags fold into typed fields and strip from registry rows.
 
-Pins hal0.registry.tag_retirement: ``mtp`` folds to ``defaults.mtp`` (absent-
+Pins hal0.registry.tag_retirement: ``mtp`` folds to ``Model.mtp`` (absent-
 only), ``vision`` folds into the capabilities list only alongside an mmproj
 sidecar, ``moe`` strips only once ``architecture`` carries the typed signal,
 ``coder`` is kept as a descriptive label (bench roster matcher), and the
@@ -9,7 +9,7 @@ sweep is idempotent.
 
 from __future__ import annotations
 
-from hal0.registry.model import Model, ModelDefaults
+from hal0.registry.model import Model
 from hal0.registry.store import ModelRegistry
 from hal0.registry.tag_retirement import retire_model_type_tags
 
@@ -18,7 +18,7 @@ def _add(registry: ModelRegistry, model_id: str, **kw) -> None:
     registry.add(Model(id=model_id, name=model_id, path=f"/m/{model_id}.gguf", **kw))
 
 
-def test_mtp_tag_folds_to_defaults(tmp_hal0_home: str) -> None:
+def test_mtp_tag_folds_to_the_mtp_fact(tmp_hal0_home: str) -> None:
     registry = ModelRegistry()
     _add(registry, "m1", tags=["curated", "mtp", "chat"])
 
@@ -26,18 +26,18 @@ def test_mtp_tag_folds_to_defaults(tmp_hal0_home: str) -> None:
 
     assert changed == ["m1"]
     row = registry.get("m1")
-    assert row.defaults is not None and row.defaults.mtp is True
+    assert row.mtp is True
     assert row.tags == ["curated", "chat"]
 
 
 def test_operator_mtp_false_survives_the_fold(tmp_hal0_home: str) -> None:
     registry = ModelRegistry()
-    _add(registry, "m1", tags=["mtp"], defaults=ModelDefaults(mtp=False))
+    _add(registry, "m1", tags=["mtp"], mtp=False)
 
     retire_model_type_tags(registry)
 
     row = registry.get("m1")
-    assert row.defaults.mtp is False
+    assert row.mtp is False
     assert row.tags == []
 
 
