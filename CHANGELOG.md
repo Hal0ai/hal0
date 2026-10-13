@@ -352,6 +352,17 @@ applying. Add those subsections to a version's section to surface them; see
   value, such as `--metrics` (`slot.positional_arg_denied`).
   The profile drawer shows the same refusals inline before Save. The seeds
   and the shipped add-ons are unaffected.
+- A slot's `[server].env` can no longer set a llama-server launch option.
+  llama.cpp reads every option from an environment variable as well as from
+  its command line (`LLAMA_ARG_MODEL`, `LLAMA_ARG_AGENT`, `LLAMA_ARG_TOOLS`,
+  `LLAMA_API_KEY`, `HF_TOKEN`, …), so a slot env could redirect the model or
+  turn on the built-in tools past the profile flag screen. Every
+  `LLAMA_ARG_*` name, plus `LLAMA_API_KEY`, `HF_TOKEN` and
+  `MTMD_BACKEND_DEVICE`, is now refused with `slot.llama_env_denied` when a
+  slot is created or edited (API, stacks, in-process writers) and again when
+  it launches; tuning belongs on the slot's profile. The profile conversion
+  blocks a slot that carries one, naming the variable. Runtime variables such
+  as `HSA_OVERRIDE_GFX_VERSION` are unaffected.
 - The bundled agent's STATE.md capability summary now lists speech-to-text
   and reranking slots. It matched slot types `stt` and `rerank`, but slots
   are typed `transcription` and `reranking`, so a Moonshine STT slot or a

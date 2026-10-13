@@ -1113,6 +1113,17 @@ class _Planner:
                 sp.inert.append(InertValue("slot", "image", image))
 
     def _plan_slot(self, raw: Mapping[str, Any], slot: dict[str, Any], sp: SlotPlan) -> None:
+        from hal0.slots.argv import llama_env_offenders
+
+        server = slot.get("server") if isinstance(slot.get("server"), Mapping) else {}
+        env_keys = llama_env_offenders(dict(server.get("env") or {}))
+        if env_keys:
+            # The new launch refuses these (slot.llama_env_denied): a launch
+            # option belongs on the profile, so the operator moves it there.
+            raise ValueError(
+                f"[server].env sets llama-server option(s) {', '.join(env_keys)}; "
+                "move them to the slot's profile flags and remove them from the slot env"
+            )
         sp.engine = frozen.engine_for(slot, self.old)
         named = str(slot.get("profile") or "")
         sp.profile_before = sp.profile_after = named

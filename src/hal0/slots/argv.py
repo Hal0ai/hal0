@@ -463,6 +463,45 @@ MODEL_FACT_FLAGS: frozenset[str] = frozenset(
 DERIVED_PLACEMENT_FLAGS: frozenset[str] = frozenset({"--spec-draft-device", "--mmproj-device"})
 
 
+# ── llama-server options set through the environment ─────────────────────────
+#
+# llama.cpp reads every option from an environment variable as well as from
+# argv (``common_arg::set_env`` in ``common/arg.cpp`` at the runner pin,
+# b11574): 152 ``LLAMA_ARG_*`` names (plus their ``LLAMA_ARG_NO_*`` negations)
+# and three without the prefix — ``LLAMA_API_KEY`` (``--api-key``),
+# ``HF_TOKEN`` (``--hf-token``) and ``MTMD_BACKEND_DEVICE`` (``--mmproj-device``).
+# A slot's ``[server].env`` reaches the llama-server container, so through it a
+# slot could set any flag the profile screen refuses (``LLAMA_ARG_MODEL``,
+# ``LLAMA_ARG_AGENT``, ``LLAMA_ARG_TOOLS`` …). Tuning belongs on the profile,
+# so the slot env carries none of them: every ``LLAMA_ARG_*`` name and the
+# three unprefixed ones are refused.
+LLAMA_ENV_PREFIX = "LLAMA_ARG_"
+LLAMA_ENV_NAMES: frozenset[str] = frozenset({"LLAMA_API_KEY", "HF_TOKEN", "MTMD_BACKEND_DEVICE"})
+
+
+def llama_env_offenders(env: object) -> list[str]:
+    """The names in ``env`` that would set a llama-server option, sorted."""
+    if not isinstance(env, dict):
+        return []
+    return sorted(
+        str(k) for k in env if str(k).startswith(LLAMA_ENV_PREFIX) or str(k) in LLAMA_ENV_NAMES
+    )
+
+
+def deny_llama_env(env: object, *, segment: str) -> None:
+    """Raise :class:`~hal0.errors.BadRequest` if ``env`` sets a llama-server
+    option (``slot.llama_env_denied``)."""
+    offenders = llama_env_offenders(env)
+    if offenders:
+        raise BadRequest(
+            f"{segment} may not set {', '.join(map(repr, offenders))}: llama-server reads "
+            "these as launch options, which belong on the slot's profile (or are hal0's "
+            "to set); remove them from the slot's [server].env",
+            code="slot.llama_env_denied",
+            details={"segment": segment, "keys": offenders},
+        )
+
+
 @dataclass(frozen=True)
 class NormalizedArgv:
     """Result of :func:`normalize_argv`.
@@ -907,6 +946,8 @@ __all__ = [
     "APPEND_FLAGS",
     "FLAG_ALIASES",
     "HOST_OWNED_FLAGS",
+    "LLAMA_ENV_NAMES",
+    "LLAMA_ENV_PREFIX",
     "LLAMA_PRESET_FLAGS",
     "MANAGED_ARGS_DENYLIST",
     "PROFILE_SEGMENT_LABELS",
@@ -916,7 +957,9 @@ __all__ = [
     "FlagProvenance",
     "NormalizedArgv",
     "ResolvedArgv",
+    "deny_llama_env",
     "deny_reasoning_format_none",
+    "llama_env_offenders",
     "normalize_argv",
     "resolve_argv",
     "screen_profile_segment",
