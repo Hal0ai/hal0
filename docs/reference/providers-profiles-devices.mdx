@@ -157,7 +157,7 @@ A llama-server slot's command is built from four layers, lowest precedence first
 
 ### Seed profiles
 
-The code-shipped seeds are `chat`, `agent`, `utility`, `coding`, `embedding`, `reranking`, `cpu-chat`, `flm`, `kokoro`, `moonshine`, `qwen3-tts`, `comfyui` and `brain`. `agent` and `utility` set `ctx_size = 65536`; `agent` and `coding` set `vision = "off"`. A seed with no `ctx_size` follows the model's native window, capped at 32768 (8192 when the native window is unknown). The shipped slots point at these seeds.
+The code-shipped seeds are `chat`, `agent`, `utility`, `coding`, `embedding`, `reranking`, `cpu-chat`, `flm`, `kokoro`, `moonshine`, `qwen3-tts`, `comfyui` and `brain`. `agent` and `utility` set `ctx_size = 65536`, `embedding` and `reranking` set `4096`, and `flm` sets `16384`; `agent` and `coding` set `vision = "off"`. A seed with no `ctx_size` follows the model's native window, capped at 32768 (8192 when the native window is unknown). The shipped slots point at these seeds.
 
 ## Runner images
 
