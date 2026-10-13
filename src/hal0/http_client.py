@@ -111,6 +111,10 @@ def async_client(**kwargs: Any) -> httpx.AsyncClient:
     """
     if "verify" not in kwargs and "cert" not in kwargs:
         kwargs["verify"] = shared_ssl_context(bool(kwargs.get("trust_env", True)))
-    if kwargs.get("trust_env", True) and not kwargs.keys() & {"transport", "mounts", "proxy"}:
+    # Only a real routing option is an override: a forwarded ``proxy=None``
+    # still means "use the proxy environment", so it must keep the mount.
+    if kwargs.get("trust_env", True) and all(
+        kwargs.get(option) is None for option in ("transport", "mounts", "proxy")
+    ):
         kwargs["mounts"] = _loopback_direct_mounts(kwargs)
     return httpx.AsyncClient(**kwargs)

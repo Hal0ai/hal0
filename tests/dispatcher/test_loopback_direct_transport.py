@@ -317,6 +317,19 @@ def test_async_client_trust_env_false_needs_no_mount() -> None:
     assert client._transport_for_url(httpx.URL("http://127.0.0.1:1")) is client._transport
 
 
+@pytest.mark.parametrize("option", ["proxy", "mounts", "transport"])
+async def test_async_client_forwarded_none_routing_keeps_the_mount(net: _Net, option: str) -> None:
+    """A forwarded ``proxy=None`` (or ``mounts``/``transport``) is not an override.
+
+    httpx still reads the proxy environment for it, so the loopback mount must
+    stay and the slot request must go direct.
+    """
+    async with async_client(**{option: None}) as client:
+        await client.get(f"http://127.0.0.1:{net.slot.port}/health")
+    assert net.proxy.request_lines == []
+    assert net.slot.request_lines[0] == "GET /health HTTP/1.1"
+
+
 def test_loopback_patterns_cover_exactly_the_loopback_hosts() -> None:
     """One owner for "loopback": the same hosts ``is_loopback_url`` accepts."""
     patterns = _loopback_mount_patterns()
