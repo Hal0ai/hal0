@@ -361,6 +361,10 @@ applying. Add those subsections to a version's section to surface them; see
   Moonshine and Qwen3-TTS slots already refused, but with the profile
   catalog's `profiles.not_found`; they now raise `slot.profile_missing` too,
   so one condition has one code on the launch path (#2573).
+- The dashboard profile form called an unset Thinking default "Auto — the
+  model decides". hal0 treats it as off unless the request asks, so the
+  option, the profile card and the drawer preview now say "default (off)".
+
 - A profile, or the recorded tune of a slot the profile conversion blocked,
   can no longer redirect a slot's model or reach outside it through a short
   or alternative llama.cpp flag. The flag screen only knew one spelling of

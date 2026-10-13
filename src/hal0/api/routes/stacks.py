@@ -151,7 +151,7 @@ def _registry(request: Request) -> Any:
 # the canonical map (hal0.model_meta.DEVICE_TO_DEFAULT_PROFILE) — this replaced
 # a local copy whose ``cpu`` entry was ``""``, which left a cpu-device stack
 # slot born broken with exactly that "profile '' not found" error; the
-# canonical ``cpu → "cpu-llm"`` seed profile is the deliberate unification.
+# canonical ``cpu → "cpu-chat"`` seed profile is the deliberate unification.
 
 
 def _slot_toml_exists(slot: str) -> bool:

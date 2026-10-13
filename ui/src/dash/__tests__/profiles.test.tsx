@@ -581,6 +581,14 @@ describe('ProfileDrawer tune fields (ADR-0029)', () => {
     act(() => root.unmount())
   })
 
+  it('labels unset thinking as off unless the request asks (the server default)', () => {
+    const { host, root } = drawer('create')
+    const sel = field(host, 'pf-select-thinking') as HTMLSelectElement
+    expect(sel.options[sel.selectedIndex].text).toBe('Default — off unless the request asks')
+    expect(field(host, 'pf-drawer-preview')?.textContent).toContain('thinking default (off)')
+    act(() => root.unmount())
+  })
+
   it('prefills every tune field on edit', () => {
     const { host, root } = drawer('edit', {
       name: 'tuned', flags: '-fa on', ctx_size: 65536, enable_thinking: true, vision: 'off', mtp: 'off',
@@ -779,11 +787,11 @@ describe('ProfileCard tune rows (ADR-0029)', () => {
     act(() => root.unmount())
   })
 
-  it('a profile with no ctx_size says it defers to the model, and auto fields read auto', () => {
+  it('a profile with no ctx_size says it defers to the model, unset thinking reads default (off), other auto fields read auto', () => {
     const { host, root } = card({ name: 'plain', flags: '', ctx_size: null, enable_thinking: null, vision: 'auto', mtp: 'auto' })
     const rows = (host.querySelector('[data-testid="pf-tune-plain"]') as HTMLElement).textContent || ''
     expect(rows).toContain('ctxmodel native')
-    expect(rows).toContain('thinkingauto')
+    expect(rows).toContain('thinkingdefault (off)')
     expect(rows).toContain('runnerauto')
     act(() => root.unmount())
   })
