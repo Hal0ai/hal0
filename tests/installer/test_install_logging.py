@@ -8,8 +8,14 @@ without touching this test process's own stdout.
 
 from __future__ import annotations
 
+import fnmatch
+import os
+import re
 import subprocess
+import uuid
 from pathlib import Path
+
+import pytest
 
 REPO = Path(__file__).resolve().parents[2]
 LOGGING_SH = REPO / "installer" / "lib" / "logging.sh"
@@ -161,9 +167,9 @@ echo "log=$HAL0_INSTALL_LOG"
         finally:
             fallback_path.unlink(missing_ok=True)
 
-    def test_a_preexisting_world_readable_log_is_tightened(self, tmp_path: Path) -> None:
-        """umask only applies at creation; a same-second rerun appending to an
-        existing 0644 log must still end up 0600."""
+    def test_a_preexisting_log_is_never_reused(self, tmp_path: Path) -> None:
+        """#2407: the log is always a brand-new file created 0600, never an
+        existing one reopened (and so never one needing a later chmod)."""
         fake_log_dir = tmp_path / "var-log-hal0"
         fake_log_dir.mkdir()
         existing = fake_log_dir / "install-test.log"
@@ -174,6 +180,310 @@ source "{LOGGING_SH}"
 id() {{ echo 0; }}
 hal0_install_log_path() {{ printf '%s\\n' "{existing}"; }}
 hal0_install_log_init
+echo "log=$HAL0_INSTALL_LOG"
+echo "new run"
 """
-        _run(script)
-        assert (existing.stat().st_mode & 0o777) == 0o600
+        proc = _run(script)
+        log_line = next(line for line in proc.stdout.splitlines() if line.startswith("log="))
+        log_path = Path(log_line.removeprefix("log="))
+        assert log_path != existing
+        assert log_path.parent == fake_log_dir
+        assert (log_path.stat().st_mode & 0o777) == 0o600
+        assert "new run" in log_path.read_text()
+        assert existing.read_text() == "earlier run\n"
+
+
+class TestTmpFallbackIsUnpredictable:
+    """#2407: the /tmp log used to be ``/tmp/hal0-install-<ts>.log`` opened
+    with a plain ``>`` redirect, which follows a symlink a local user planted
+    at that guessable name. It is now created by ``hal0_excl_open`` (O_EXCL, random
+    name), so a planted symlink is never opened and its target is untouched.
+
+    ``date`` is shadowed so the "old-style" name is known in advance and
+    unique to this test run."""
+
+    @staticmethod
+    def _plant(tmp_path: Path) -> tuple[str, Path, Path]:
+        stamp = f"pytest{uuid.uuid4().hex[:12]}"
+        victim = tmp_path / "victim"
+        victim.write_text("precious\n")
+        victim.chmod(0o644)
+        planted = Path(f"/tmp/hal0-install-{stamp}.log")
+        planted.unlink(missing_ok=True)
+        planted.symlink_to(victim)
+        return stamp, victim, planted
+
+    @staticmethod
+    def _init(stamp: str, uid: int, primary: Path | None) -> subprocess.CompletedProcess[str]:
+        override = (
+            f"hal0_install_log_path() {{ printf '%s/install-test.log\\n' \"{primary}\"; }}"
+            if primary is not None
+            else ""
+        )
+        script = f"""
+IFS=$'\\n\\t'
+umask 022
+source "{LOGGING_SH}"
+id() {{ echo {uid}; }}
+date() {{ echo "{stamp}"; }}
+{override}
+hal0_install_log_init
+echo "rc=$?"
+echo "log=$HAL0_INSTALL_LOG"
+echo "line written after init"
+"""
+        return _run(script)
+
+    @staticmethod
+    def _log(proc: subprocess.CompletedProcess[str]) -> Path:
+        line = next(line for line in proc.stdout.splitlines() if line.startswith("log="))
+        return Path(line.removeprefix("log="))
+
+    def _check(self, proc: subprocess.CompletedProcess[str], victim: Path, planted: Path) -> None:
+        log = self._log(proc)
+        try:
+            assert "rc=0" in proc.stdout, proc.stdout + proc.stderr
+            # The symlink's target was neither truncated nor appended to.
+            assert victim.read_text() == "precious\n"
+            assert (victim.stat().st_mode & 0o777) == 0o644
+            # The log is a fresh regular file at a random name, not the plant.
+            assert log != planted
+            assert re.fullmatch(r"/tmp/hal0-install-[0-9a-f]{12}\.log", str(log)), log
+            assert log.is_file() and not log.is_symlink()
+            assert (log.stat().st_mode & 0o777) == 0o600
+            assert "line written after init" in log.read_text()
+        finally:
+            if str(log).startswith("/tmp/hal0-install-") and log != planted:
+                log.unlink(missing_ok=True)
+
+    def test_root_fallback_does_not_follow_a_planted_symlink(self, tmp_path: Path) -> None:
+        stamp, victim, planted = self._plant(tmp_path)
+        try:
+            proc = self._init(stamp, 0, _unwritable_even_for_root(tmp_path))
+            self._check(proc, victim, planted)
+        finally:
+            planted.unlink(missing_ok=True)
+
+    def test_non_root_log_does_not_follow_a_planted_symlink(self, tmp_path: Path) -> None:
+        stamp, victim, planted = self._plant(tmp_path)
+        try:
+            proc = self._init(stamp, 1000, None)
+            self._check(proc, victim, planted)
+        finally:
+            planted.unlink(missing_ok=True)
+
+    def test_a_writable_primary_is_still_preferred(self, tmp_path: Path) -> None:
+        fake_log_dir = tmp_path / "var-log-hal0"
+        proc = self._init("unused", 0, fake_log_dir)
+        log = self._log(proc)
+        assert log.parent == fake_log_dir, proc.stdout
+        assert re.fullmatch(r"install-test-[0-9a-f]{12}\.log", log.name), log
+
+
+class TestRootLogIsUnpredictable:
+    """#2407 review: /var/log/hal0 is hal0:hal0 0755 (src/hal0/install/
+    perms.py), so on a root re-run the hal0 uid can plant a symlink at the
+    timestamped ``install-<ts>.log`` name, and protected_symlinks does not
+    apply (the dir is neither sticky nor world-writable). The root log gets a
+    random suffix and is created with O_EXCL, so the plant is never opened.
+    """
+
+    def test_root_log_does_not_follow_a_symlink_planted_in_the_log_dir(
+        self, tmp_path: Path
+    ) -> None:
+        stamp = "20990101-000000"
+        log_dir = tmp_path / "var-log-hal0"
+        log_dir.mkdir()
+        victim = tmp_path / "victim"
+        victim.write_text("precious\n")
+        victim.chmod(0o644)
+        planted = log_dir / f"install-{stamp}.log"
+        planted.symlink_to(victim)
+        # The pre-fix root name shape, install-<ts>.log, in a test dir
+        # standing in for /var/log/hal0.
+        script = f"""
+IFS=$'\\n\\t'
+source "{LOGGING_SH}"
+id() {{ echo 0; }}
+hal0_install_log_path() {{
+    printf '{log_dir}/install-%s.log\\n' "$(date -u +%Y%m%d-%H%M%S)"
+}}
+date() {{ echo "{stamp}"; }}
+hal0_install_log_init
+echo "log=$HAL0_INSTALL_LOG"
+echo "line written after init"
+"""
+        proc = _run(script)
+        assert victim.read_text() == "precious\n", proc.stdout + proc.stderr
+        assert (victim.stat().st_mode & 0o777) == 0o644
+        assert planted.is_symlink()
+        line = next(line for line in proc.stdout.splitlines() if line.startswith("log="))
+        log = Path(line.removeprefix("log="))
+        assert log.parent == log_dir
+        assert re.fullmatch(rf"install-{stamp}-[0-9a-f]{{12}}\.log", log.name), log
+        assert log.is_file() and not log.is_symlink()
+        assert (log.stat().st_mode & 0o777) == 0o600
+        assert "line written after init" in log.read_text()
+
+    def test_real_root_template_carries_a_random_part(self) -> None:
+        script = f"""
+source "{LOGGING_SH}"
+id() {{ echo 0; }}
+date() {{ echo 20990101-000000; }}
+hal0_install_log_path
+"""
+        proc = _run(script)
+        assert proc.stdout.strip() == "/var/log/hal0/install-20990101-000000-XXXXXX.log"
+
+
+class TestExclOpenRejectsNonRegularTargets:
+    """bash noclobber refuses an existing regular file or a symlink to one,
+    but still opens an existing symlink to a FIFO or a character device.
+    hal0_excl_open must notice (fd not a regular file / not the name's own
+    inode), close it, and move on to another random name.
+
+    ``od`` is shadowed so the first random name is known: the plant sits
+    there, and later calls yield a fresh name."""
+
+    @staticmethod
+    def _script(tmp_path: Path, plant_target: str, pre: str = "", post: str = "") -> str:
+        log_dir = tmp_path / "logdir"
+        log_dir.mkdir()
+        counter = tmp_path / "od-calls"
+        return f"""
+IFS=$'\\n\\t'
+source "{LOGGING_SH}"
+od() {{
+    local n=0
+    [[ -f "{counter}" ]] && n="$(cat "{counter}")"
+    echo $((n + 1)) >"{counter}"
+    if [[ $n -eq 0 ]]; then echo " aa bb cc dd ee ff"; else echo " 01 23 45 67 89 0$n"; fi
+}}
+ln -s "{plant_target}" "{log_dir}/install-test-aabbccddeeff.log"
+{pre}
+hal0_excl_open "{log_dir}/install-test-" .log
+echo "rc=$?"
+echo "path=$HAL0_EXCL_PATH"
+[[ -f "/dev/fd/$HAL0_EXCL_FD" ]] && echo "fd-regular"
+{post}
+"""
+
+    def _check(self, proc: subprocess.CompletedProcess[str], tmp_path: Path) -> None:
+        out = proc.stdout
+        assert "rc=0" in out, out + proc.stderr
+        path_line = next(line for line in out.splitlines() if line.startswith("path="))
+        path = Path(path_line.removeprefix("path="))
+        assert path.name != "install-test-aabbccddeeff.log", out
+        assert path.parent == tmp_path / "logdir"
+        assert path.is_file() and not path.is_symlink()
+        assert (path.stat().st_mode & 0o777) == 0o600
+        assert "fd-regular" in out
+
+    def test_a_symlink_to_a_fifo_is_not_used(self, tmp_path: Path) -> None:
+        fifo = tmp_path / "fifo"
+        os.mkfifo(fifo)
+        drained = tmp_path / "drained"
+        # A reader on the FIFO so the open does not block; whatever reaches
+        # it would be data the installer leaked into someone else's pipe.
+        pre = f'cat "{fifo}" >"{drained}" & reader=$!'
+        post = 'kill "$reader" 2>/dev/null; wait "$reader" 2>/dev/null || true'
+        proc = subprocess.run(
+            ["bash", "-c", self._script(tmp_path, str(fifo), pre, post)],
+            capture_output=True,
+            text=True,
+            check=False,
+            cwd=str(REPO),
+            timeout=30,
+        )
+        self._check(proc, tmp_path)
+
+    def test_a_symlink_to_a_char_device_is_not_used(self, tmp_path: Path) -> None:
+        proc = _run(self._script(tmp_path, "/dev/null"))
+        self._check(proc, tmp_path)
+
+
+class TestDoctorBundleFindsTheNewNames:
+    """``hal0 doctor bundle`` locates the install log and failure report by
+    glob (src/hal0/cli/doctor_bundle.py ``_INSTALL_LOG_GLOBS`` /
+    ``_INSTALL_REPORT_GLOBS``). #2407 added a random part to every name, so
+    pin that the names the installer now produces still match those globs,
+    and that the bundle actually selects such a file."""
+
+    @staticmethod
+    def _pattern(globs: tuple[tuple[str, str], ...], directory: str) -> str:
+        return next(pattern for d, pattern in globs if d == directory)
+
+    def test_root_log_name_matches_the_var_log_glob(self) -> None:
+        from hal0.cli import doctor_bundle
+
+        script = f"""
+source "{LOGGING_SH}"
+id() {{ echo 0; }}
+hal0_install_log_path
+"""
+        tmpl = Path(_run(script).stdout.strip())
+        name = tmpl.name.replace("XXXXXX", "0123456789ab")
+        pattern = self._pattern(doctor_bundle._INSTALL_LOG_GLOBS, str(tmpl.parent))
+        assert fnmatch.fnmatchcase(name, pattern), (name, pattern)
+
+    def test_tmp_log_name_matches_the_tmp_glob(self) -> None:
+        from hal0.cli import doctor_bundle
+
+        script = f"""
+source "{LOGGING_SH}"
+id() {{ echo 1000; }}
+hal0_install_log_init
+echo "log=$HAL0_INSTALL_LOG"
+"""
+        proc = _run(script)
+        line = next(line for line in proc.stdout.splitlines() if line.startswith("log="))
+        log = Path(line.removeprefix("log="))
+        try:
+            assert log.parent == Path("/tmp"), proc.stdout + proc.stderr
+            pattern = self._pattern(doctor_bundle._INSTALL_LOG_GLOBS, "/tmp")
+            assert fnmatch.fnmatchcase(log.name, pattern), (log.name, pattern)
+        finally:
+            if log.name.startswith("hal0-install-") and log.parent == Path("/tmp"):
+                log.unlink(missing_ok=True)
+
+    def test_report_name_matches_the_report_globs(self, tmp_path: Path) -> None:
+        from hal0.cli import doctor_bundle
+
+        failure_report = REPO / "installer" / "lib" / "failure-report.sh"
+        log = tmp_path / "hal0-install-0123456789ab.log"
+        log.write_text("log\n")
+        script = f"""
+IFS=$'\\n\\t'
+source "{failure_report}"
+_hal0_report_redact_file() {{ return 1; }}
+export HAL0_INSTALL_LOG="{log}"
+echo "report=$(hal0_write_failure_report "Pre-flight checks")"
+"""
+        proc = _run(script)
+        line = next(line for line in proc.stdout.splitlines() if line.startswith("report="))
+        report = Path(line.removeprefix("report="))
+        assert report.parent == tmp_path, proc.stdout + proc.stderr
+        for directory in ("/var/log/hal0", "/tmp"):
+            pattern = self._pattern(doctor_bundle._INSTALL_REPORT_GLOBS, directory)
+            assert fnmatch.fnmatchcase(report.name, pattern), (report.name, pattern)
+
+    def test_bundle_selects_a_log_created_with_the_root_naming(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """End to end: hal0_excl_open makes a log the way the root branch of
+        hal0_install_log_init does, in a stand-in for /var/log/hal0, and the
+        bundle's own selection (glob + lstat checks) picks it."""
+        from hal0.cli import doctor_bundle
+
+        pattern = self._pattern(doctor_bundle._INSTALL_LOG_GLOBS, "/var/log/hal0")
+        monkeypatch.setattr(doctor_bundle, "_INSTALL_LOG_GLOBS", ((str(tmp_path), pattern),))
+        script = f"""
+source "{LOGGING_SH}"
+hal0_excl_open "{tmp_path}/install-20990101-000000-" .log
+printf 'line\\n' >&"$HAL0_EXCL_FD"
+echo "path=$HAL0_EXCL_PATH"
+"""
+        proc = _run(script)
+        line = next(line for line in proc.stdout.splitlines() if line.startswith("path="))
+        created = Path(line.removeprefix("path="))
+        assert doctor_bundle._latest_install_log() == created, proc.stdout + proc.stderr

@@ -2,7 +2,7 @@
 # installer/lib/failure-report.sh
 #
 # Purpose: On installer failure, write one bounded, shareable
-#          `hal0-install-report-<ts>.txt` an operator can attach to a bug
+#          `hal0-install-report-<ts>-<random>.txt` an operator can attach to a bug
 #          report — redacted env, `systemctl --failed`, `podman info` /
 #          `podman images`, port owners, hal0 unit status, the redacted
 #          api.env / hal0.toml, the hardware summary, a log tail, and the
@@ -38,6 +38,13 @@
 
 [[ -n "${_HAL0_FAILURE_REPORT_SH_LOADED:-}" ]] && return 0
 _HAL0_FAILURE_REPORT_SH_LOADED=1
+
+# hal0_excl_open (create-and-open with O_EXCL, #2407) lives in logging.sh;
+# sourcing it only defines functions.
+if ! declare -F hal0_excl_open >/dev/null; then
+    # shellcheck source-path=SCRIPTDIR source=logging.sh
+    source "$(dirname "${BASH_SOURCE[0]}")/logging.sh"
+fi
 
 if ! command -v warn >/dev/null 2>&1; then
     warn() { printf 'WARN  %s\n' "$*" >&2; }
@@ -712,7 +719,12 @@ _hal0_report_body() {
     fi
     echo ""
     echo "Install log tail (last 160 lines)"
-    if [[ -n "${HAL0_INSTALL_LOG:-}" && -f "${HAL0_INSTALL_LOG}" ]]; then
+    # Prefer the log's open fd over its name (#2407): the log dir can be
+    # writable by another uid, which could swap the name for a symlink to a
+    # root-only file and have its tail copied into the report.
+    if [[ -n "${HAL0_INSTALL_LOG_FD:-}" && -r "/dev/fd/${HAL0_INSTALL_LOG_FD}" ]]; then
+        tail -n 160 "/dev/fd/${HAL0_INSTALL_LOG_FD}"
+    elif [[ -n "${HAL0_INSTALL_LOG:-}" && -f "${HAL0_INSTALL_LOG}" ]]; then
         tail -n 160 "${HAL0_INSTALL_LOG}"
     else
         echo "install log unavailable"
@@ -765,9 +777,23 @@ hal0_write_failure_report() (
         dir="/tmp"
     fi
     mkdir -p "$dir" 2>/dev/null || dir="/tmp"
-    report="${dir}/hal0-install-report-${stamp}.txt"
+    # Create-and-open once, then never touch the report by name again
+    # (#2407). dir is /tmp after a log fallback, or /var/log/hal0, which the
+    # hal0 service user owns (src/hal0/install/perms.py). Either way another
+    # uid can plant a symlink at a guessable name, or unlink our file and put
+    # a symlink in its place mid-harvest; a later `>"$report"`, `mv` or
+    # `chmod` by name would then follow it as root. hal0_excl_open creates a
+    # random name with O_EXCL at 0600 and every write goes through its fd.
+    hal0_excl_open "${dir}/hal0-install-report-${stamp}-" .txt ||
+        hal0_excl_open "/tmp/hal0-install-report-${stamp}-" .txt ||
+        exit 1
+    report="$HAL0_EXCL_PATH"
+    rfd="$HAL0_EXCL_FD"
 
-    work="$(mktemp -d "${dir}/.hal0-install-report.XXXXXX" 2>/dev/null)" || work=""
+    # Scratch space holds the unredacted body, so it lives in a root-made
+    # 0700 mktemp dir in sticky /tmp, never in the (possibly foreign-owned)
+    # report dir, where its name could be swapped for an attacker's dir.
+    work="$(mktemp -d /tmp/hal0-install-report.XXXXXX 2>/dev/null)" || work=""
     if [[ -n "$work" ]]; then
         trap 'rm -rf "$work"' EXIT
         _hal0_report_body "$phase" "$work" >"${work}/raw" 2>&1 || true
@@ -779,20 +805,24 @@ hal0_write_failure_report() (
         } >"${work}/secrets" 2>/dev/null || ok=1
         _hal0_report_harvest_report_text "${work}/raw" >>"${work}/secrets" 2>/dev/null || ok=1
         if [[ $ok -eq 0 ]] &&
-            _hal0_report_redact_file "${work}/secrets" "${work}/raw" "${work}/out" "$work" 2>/dev/null &&
-            mv -f "${work}/out" "$report" 2>/dev/null; then
-            :
+            _hal0_report_redact_file "${work}/secrets" "${work}/raw" "${work}/out" "$work" 2>/dev/null; then
+            cat "${work}/out" 1>&"$rfd" 2>/dev/null || true
         else
-            _hal0_report_stub "$phase" >"$report" 2>/dev/null || true
+            _hal0_report_stub "$phase" 1>&"$rfd" 2>/dev/null || true
         fi
     else
-        _hal0_report_stub "$phase" >"$report" 2>/dev/null || true
+        _hal0_report_stub "$phase" 1>&"$rfd" 2>/dev/null || true
     fi
 
-    if [[ -s "$report" ]]; then
-        chmod 0600 "$report" 2>/dev/null || true
+    # Only hand the path back if it still names the file we wrote: if the
+    # name was swapped underneath us, printing it would point the operator
+    # at someone else's file.
+    if [[ -s "/dev/fd/${rfd}" ]] &&
+        [[ "$(stat -L -c '%d:%i' "/dev/fd/${rfd}" 2>/dev/null)" == "$(stat -c '%d:%i' "$report" 2>/dev/null)" ]]; then
         printf '%s\n' "$report"
         exit 0
     fi
+    # Nothing written: drop the empty file (rm never follows a symlink).
+    [[ -s "/dev/fd/${rfd}" ]] || rm -f "$report" 2>/dev/null || true
     exit 1
 )

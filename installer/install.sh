@@ -74,7 +74,7 @@ hal0_install_log_init || warn "could not open an install log — continuing with
 
 # Failure report (installer/lib/failure-report.sh) — the ERR trap below
 # calls hal0_write_failure_report to leave a redacted, shareable
-# hal0-install-report-<ts>.txt next to the install log on any abort.
+# hal0-install-report-<ts>-<random>.txt next to the install log on any abort.
 # shellcheck source=lib/failure-report.sh
 source "$(dirname "${BASH_SOURCE[0]}")/lib/failure-report.sh"
 
@@ -248,8 +248,10 @@ fi
 # Failure report for exits that bypass the ERR trap below — die(), explicit
 # `exit 1` (#2438). The ERR trap marks its own report as written, so one
 # failed run leaves exactly one report. Installed before the verification
-# gate so its die() is covered too.
-trap 'hal0_report_on_exit "$?"' EXIT
+# gate so its die() is covered too. The same trap removes every mktemp'd
+# scratch file or dir registered with hal0_tmp_track (lib/logging.sh), so
+# an abort mid-download never leaves root's temp files in /tmp (#2407).
+trap 'hal0_report_on_exit "$?"; hal0_tmp_cleanup' EXIT
 
 # ── Release verification gate ──────────────────────────────────────────────
 # Refuse to run as root against an UNVERIFIED release tree. The signed
@@ -2366,7 +2368,14 @@ if [[ "${DEV_MODE}" -eq 0 && "${NO_START}" -eq 0 ]] && command -v podman >/dev/n
     # off. The hal0-openwebui unit also has ExecStartPre=podman pull
     # (idempotent), so missing this background pull only costs first-boot
     # latency, not correctness.
-    (hal0_pull_with_retry podman "${OPENWEBUI_IMAGE}" >/dev/null 2>&1 || true) &
+    # The disowned pull can outlive the install, so it drops the install
+    # log fd (#2407) and its stdout/stderr (the tee pipes) on the way out.
+    (
+        if [[ -n "${HAL0_INSTALL_LOG_FD:-}" ]]; then
+            exec {HAL0_INSTALL_LOG_FD}>&-
+        fi
+        hal0_pull_with_retry podman "${OPENWEBUI_IMAGE}" || true
+    ) >/dev/null 2>&1 &
     disown
     ui_spinner_run "Pulling ${OPENWEBUI_IMAGE} in background" sleep 3
 fi
@@ -2821,7 +2830,6 @@ else
     # 3. FLM .deb. Fail-soft: if upstream is unreachable or the SHA-256
     #    doesn't match, warn + skip. NPU paths gate on `flm validate`
     #    succeeding later — GPU-only hal0 still ships fine.
-    FLM_DEB_TMP="/tmp/fastflowlm_${FLM_DEB_VERSION}.deb"
     # 0 when the host-FLM gate above found no upstream .deb for this distro —
     # skip download+install entirely (no noisy exit).
     NEED_FLM_INSTALL="${FLM_HOST_LIBS_OK}"
@@ -2831,11 +2839,34 @@ else
         NEED_FLM_INSTALL=0
     fi
 
+    # The .deb lands in a fresh mktemp dir, never a fixed /tmp name (#2407):
+    # root downloads, hashes, then apt-installs this file, so a guessable
+    # path let a local user plant a symlink (clobber any file via curl -o)
+    # or pre-own the file and swap it between the SHA-256 check and apt.
+    # mktemp -d makes it root-owned 0700; it is widened to 0755 (still not
+    # writable by anyone else) only so apt's unprivileged _apt user can read
+    # the public, hash-pinned .deb without a sandbox warning. The EXIT trap
+    # removes it if the install aborts before one of the rm's below.
+    FLM_DEB_DIR=""
+    FLM_DEB_TMP=""
+    if [[ "${NEED_FLM_INSTALL}" -eq 1 ]]; then
+        if FLM_DEB_DIR="$(mktemp -d /tmp/hal0-flm-XXXXXX 2>/dev/null)"; then
+            hal0_tmp_track "${FLM_DEB_DIR}"
+            chmod 0755 "${FLM_DEB_DIR}" 2>/dev/null || true
+            FLM_DEB_TMP="${FLM_DEB_DIR}/fastflowlm_${FLM_DEB_VERSION}.deb"
+        else
+            FLM_DEB_DIR=""
+            warn "could not create a temp dir for the FastFlowLM .deb — skipping FLM install"
+            NEED_FLM_INSTALL=0
+        fi
+    fi
+
     if [[ "${NEED_FLM_INSTALL}" -eq 1 ]]; then
         # `curl -fsSL` — fail on HTTP error, silent, follow redirects.
         # Download to /tmp so a re-run doesn't keep a stale copy in the
-        # install tree. -o to a deterministic path so the SHA-256 check
-        # below can find it.
+        # install tree. Each outcome below (bad hash, failed
+        # download, apt success or failure) removes the whole temp dir, and
+        # the EXIT trap (hal0_tmp_cleanup) covers an abort mid-step.
         if curl -fsSL -o "${FLM_DEB_TMP}" "${FLM_DEB_URL}"; then
             # SHA-256 verify BEFORE dpkg installs it. An all-zeroes
             # placeholder pin means the digest was never looked up;
@@ -2847,19 +2878,20 @@ else
                 warn "  observed: ${ACTUAL_SHA}"
                 if [[ "${HAL0_SKIP_FLM_SHA:-0}" != "1" ]]; then
                     warn "  skipping FLM install (set HAL0_SKIP_FLM_SHA=1 to accept the placeholder)"
-                    rm -f "${FLM_DEB_TMP}"
+                    hal0_tmp_remove "${FLM_DEB_DIR}"
                     NEED_FLM_INSTALL=0
                 fi
             elif [[ "${ACTUAL_SHA}" != "${FLM_DEB_SHA256}" ]]; then
                 warn "FLM .deb SHA-256 mismatch — refusing to install"
                 warn "  expected: ${FLM_DEB_SHA256}"
                 warn "  observed: ${ACTUAL_SHA}"
-                rm -f "${FLM_DEB_TMP}"
+                hal0_tmp_remove "${FLM_DEB_DIR}"
                 NEED_FLM_INSTALL=0
             fi
         else
             warn "FLM .deb download failed (${FLM_DEB_URL})"
             warn "  NPU paths will be unavailable until you install FastFlowLM ${FLM_DEB_VERSION} manually"
+            hal0_tmp_remove "${FLM_DEB_DIR}"
             NEED_FLM_INSTALL=0
         fi
     fi
@@ -2869,7 +2901,7 @@ else
         # apt (cleaner than `dpkg -i` + manual `apt-get -f install`).
         if ui_spinner_run "Installing FastFlowLM ${FLM_DEB_VERSION}" \
             apt-get -o DPkg::Lock::Timeout=120 install -y "${FLM_DEB_TMP}"; then
-            rm -f "${FLM_DEB_TMP}"
+            hal0_tmp_remove "${FLM_DEB_DIR}"
             # Smoke-test the binary. `flm validate` returns 0 when the
             # NPU runtime is reachable AND the binary is wired up — it's
             # the upstream-recommended health check. Soft on failure:
@@ -2887,7 +2919,7 @@ else
             fi
         else
             warn "FastFlowLM ${FLM_DEB_VERSION} install failed — NPU paths will be unavailable"
-            rm -f "${FLM_DEB_TMP}"
+            hal0_tmp_remove "${FLM_DEB_DIR}"
         fi
     fi
 fi
@@ -3109,7 +3141,7 @@ else
                 chown -h hal0:hal0 "${_flm_parent}"
             fi
         done
-        if runuser -u hal0 -- mkdir -p "${VAR_DIR}/.config/flm/models"; then
+        if hal0_run_without_log_fd runuser -u hal0 -- mkdir -p "${VAR_DIR}/.config/flm/models"; then
             info "FLM model cache: ${VAR_DIR}/.config/flm/models (store ownership via doctor perms below)"
         else
             warn "could not create ${VAR_DIR}/.config/flm/models as hal0 — 'hal0 doctor perms' reports why"
@@ -3273,7 +3305,9 @@ fi
 # install.sh against an already-converged box doesn't redo it every time.
 if [[ "${DEV_MODE}" -eq 0 && "${HAL0_SUBUID_JUST_ALLOCATED:-0}" -eq 1 ]] \
     && command -v podman >/dev/null 2>&1; then
-    runuser -u hal0 -- podman system migrate >/dev/null 2>&1 \
+    # hal0_run_without_log_fd: the hal0 child (and any pause process podman
+    # leaves behind) must not inherit the root log's write fd (#2407).
+    hal0_run_without_log_fd runuser -u hal0 -- podman system migrate >/dev/null 2>&1 \
         || warn "podman system migrate (as hal0) failed — run it once as the hal0 user before the first dashboard image pull"
 fi
 
@@ -4014,8 +4048,16 @@ else:
 PYEOF
         )
     fi
-    _summary_brain_model="$(grep -m1 '^  brain model: ' "${HAL0_INSTALL_LOG:-/dev/null}" 2>/dev/null \
-        | sed -E 's/^  brain model: ([^ ]+).*/\1/')"
+    # Read the log through its open fd, not its name: the log dir is
+    # writable by another uid, so the name could now point anywhere (#2407).
+    _summary_log_src="/dev/null"
+    if [[ -n "${HAL0_INSTALL_LOG_FD:-}" ]]; then
+        _summary_log_src="/dev/fd/${HAL0_INSTALL_LOG_FD}"
+    fi
+    # `|| true`: no "brain model" line (or no log) is normal, and under
+    # pipefail grep's exit 1 would otherwise abort the summary.
+    _summary_brain_model="$(grep -m1 '^  brain model: ' "${_summary_log_src}" 2>/dev/null \
+        | sed -E 's/^  brain model: ([^ ]+).*/\1/' || true)"
 
     _summary_steps_blob=""
     for _summary_step_title in "${!UI_STEP_DURATIONS[@]}"; do
