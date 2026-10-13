@@ -36,19 +36,16 @@ def test_slot_config_npu_table_optional() -> None:
     assert slot.npu is None
 
 
-def test_npu_hoisted_from_extra() -> None:
-    slot = SlotConfig.model_validate(
-        {
-            "name": "npu",
-            "port": 8088,
-            "extra": {"npu": {"asr": True, "embed": False}},
-        }
-    )
+def test_npu_table_loads_from_the_loader_shape() -> None:
+    """The loader hands the on-disk ``[npu]`` table over under its own name."""
+    from hal0.config.loader import _flatten_slot_toml
+
+    raw = {"name": "npu", "port": 8088, "npu": {"asr": True, "embed": False}}
+    slot = SlotConfig.model_validate(_flatten_slot_toml(raw, "npu"))
     assert slot.npu is not None and slot.npu.asr is True
-    assert "npu" not in slot.extra
 
 
-def test_npu_tucked_into_extra_on_dump() -> None:
+def test_npu_dumps_under_its_toml_table_name() -> None:
     slot = SlotConfig.model_validate(
         {
             "name": "npu",
@@ -57,9 +54,9 @@ def test_npu_tucked_into_extra_on_dump() -> None:
         }
     )
     data = slot.model_dump()
-    assert "npu" not in data
-    # chat defaults to True (4d7a5745 feat(schema): add chat field to NpuConfig).
-    assert data["extra"]["npu"] == {"asr": True, "embed": False, "chat": True}
+    # chat defaults to True (feat(schema): add chat field to NpuConfig).
+    assert data["npu"] == {"asr": True, "embed": False, "chat": True}
+    assert "extra" not in data
 
 
 def test_npu_chat_default_on() -> None:

@@ -273,25 +273,47 @@ def slot_tuning_keys(data: Any) -> list[str]:
     model = data.get("model")
     if isinstance(model, Mapping):
         found += [f"[model].{k}" for k in SLOT_TUNING_MODEL_KEYS if k in model]
-    extra = data.get("extra") if isinstance(data.get("extra"), Mapping) else {}
-    for server in (data.get("server"), extra.get("server")):
-        if isinstance(server, Mapping):
-            found += [f"[server].{k}" for k in SLOT_TUNING_SERVER_KEYS if k in server]
-    if isinstance(extra.get("defaults"), Mapping) or isinstance(data.get("defaults"), Mapping):
+    server = data.get("server")
+    if isinstance(server, Mapping):
+        found += [f"[server].{k}" for k in SLOT_TUNING_SERVER_KEYS if k in server]
+    if isinstance(data.get("defaults"), Mapping):
         found.append("[defaults]")
     return found
+
+
+#: Keys a slot file used to carry that no longer exist, with what replaced
+#: them. ``SlotConfig`` names the replacement when it refuses one, and the
+#: slot write boundary (:func:`hal0.slot_config.reject_removed_slot_keys`)
+#: refuses it with the same text, so the two surfaces cannot drift. ``enabled``
+#: split into two distinct verbs: bind/clear ``[model].default`` (activation)
+#: and ``POST /unload`` (lifecycle).
+REMOVED_SLOT_KEYS: dict[str, str] = {
+    "enabled": (
+        "activation is now model-presence — bind or clear '[model].default' "
+        "instead; to stop a running slot use POST /api/slots/{name}/unload"
+    ),
+    "backend": "replaced by 'device' (gpu-rocm, gpu-vulkan, gpu-cuda, cpu or npu)",
+    "lru": (
+        "retired — eviction order is 'priority' (0-100, lower first); use 'pinned' to exempt a slot"
+    ),
+}
 
 
 class SlotConfig(BaseModel):
     """Pydantic model for a single slot's TOML config (slots/<name>.toml).
 
-    Fields correspond to the [slot], [model], and [server] sections.
-    See PLAN.md §2 (filesystem layout).
+    Fields correspond to the [slot], [model], [server], [npu] and [image]
+    sections. See PLAN.md §2 (filesystem layout).
+
+    ``extra="forbid"`` (ADR-0029 §5): every key a slot file may carry is a
+    declared field, so a typo, a retired key or a stray table fails the load
+    with the key named (:func:`hal0.config.loader.load_slot_config`) instead of
+    riding along unread. Any key a hal0 writer emits must be declared here;
+    ``tests/config/test_slot_config_strict.py`` runs every writer and loads what
+    it wrote.
     """
 
-    # NOTE: extra="allow" so future fields and provider-specific knobs
-    # round-trip cleanly through load/save without dropping unknown keys.
-    model_config = {"populate_by_name": True, "extra": "allow"}
+    model_config = {"extra": "forbid"}
 
     # [slot] section
     #
@@ -405,8 +427,8 @@ class SlotConfig(BaseModel):
     # ``[model].default`` IS the activation signal — boot autostart is the
     # Quadlet ``[Install] WantedBy=hal0.target`` stanza gated by
     # ``SlotManager.load()``'s empty-model guard, and every routability check
-    # already required a model id. A stray ``enabled`` key round-trips
-    # harmlessly via ``extra="allow"`` and means nothing.
+    # already required a model id. A file still carrying ``enabled`` is refused
+    # (REMOVED_SLOT_KEYS); the profile-centric conversion strips it.
     # HAL0-SUNSET: v2.0.0 — runtime is Literal["container"] only; field is ceremony, drop it.
     runtime: Literal["container"] = Field(
         default="container",
@@ -425,13 +447,53 @@ class SlotConfig(BaseModel):
             "vision and MTP (ADR-0029). The slot supplies placement and the model."
         ),
     )
+    type: str | None = Field(
+        default=None,
+        description=(
+            "Slot kind (a hal0.model_meta.SLOT_TYPES member: llm, embedding, "
+            "reranking, tts, transcription, image, ...). Read by routing, the "
+            "profile-implied defaults and the dashboard grouping. A type-less "
+            "llm-shaped file is healed to 'llm' on load."
+        ),
+    )
+    default: bool | None = Field(
+        default=None,
+        description=(
+            "SC-4 per-type default marker: at most one slot per type is the "
+            "default (hal0.slots.routing.default_slot_for). The first slot of a "
+            "type becomes its default at create."
+        ),
+    )
+    served_by: str | None = Field(
+        default=None,
+        description=(
+            "FLM trio shadows only (stt / embed): the display name of the NPU "
+            "anchor slot whose single flm process serves this slot. A shadow "
+            "has no process of its own."
+        ),
+    )
+    output_sanity: bool | None = Field(
+        default=None,
+        description=(
+            "Per-slot opt-out for the llm output-sanity gate (#1922): false "
+            "skips the post-load completion probe for this slot. None = the "
+            "gate runs. The gate's own failure message tells the operator to "
+            "set it."
+        ),
+    )
+    system_prompt: str | None = Field(
+        default=None,
+        description=(
+            "Persona text for hal0/<slot> delegation (hal0.slots.routing "
+            "LoadedSlot.system_prompt, omni route_to_chat). Empty or absent = "
+            "the delegated request carries no system message."
+        ),
+    )
     # ── TTS request defaults (Settings → Voice) ─────────────────────────
     # Read by /v1/audio/speech at request time: when the body omits the
     # matching param, the serving tts slot's persisted default is injected
     # before dispatch — so changes apply immediately, no container bounce.
-    # default_voice previously round-tripped via extra="allow" only (the
-    # dashboard wrote it, nothing read it); declaring the trio makes the
-    # values validated and schema-visible.
+    # Declared so the values are validated and schema-visible.
     default_voice: str | None = Field(
         default=None,
         description=(
@@ -513,17 +575,11 @@ class SlotConfig(BaseModel):
         ),
     )
 
-    # Typed [server] subsection.  See ServerConfig + the round-trip
-    # validator/serializer below: on load we hoist the [server] table out
-    # of the catch-all ``extra`` dict; on dump we re-tuck it under extra
-    # so loader._unflatten_slot_toml writes a proper [server] table.
+    # Typed sub-tables. ``_flatten_slot_toml`` hands each on-disk table to the
+    # field of the same name; any other table is an unknown key and fails the
+    # load (extra="forbid"). ``image`` is the on-disk name of ``image_gen``.
     server: ServerConfig = Field(default_factory=ServerConfig)
 
-    # Typed [npu] subsection.  Same hoist/tuck round-trip pattern as
-    # [server]: loader._flatten_slot_toml lands [npu] in extra["npu"];
-    # _hoist_npu_from_extra promotes it to the typed field; _tuck_server_into_extra
-    # re-parks it under extra so _unflatten_slot_toml writes a proper [npu]
-    # table on disk.
     npu: NpuConfig | None = Field(
         default=None,
         description=(
@@ -532,11 +588,10 @@ class SlotConfig(BaseModel):
         ),
     )
 
-    # Typed [image] subsection (#599) — persisted image-gen settings for
-    # the img (ComfyUI) slot.  Same hoist/tuck round-trip pattern as
-    # [server]/[npu].  Defaults apply on slots without an [image] table;
-    # the dump serializer elides an all-defaults ImageGenConfig so
-    # non-img slots don't grow a stray [image] table on disk.
+    # Persisted image-gen settings for the img (ComfyUI) slot (#599). Defaults
+    # apply on slots without an [image] table; the dump serializer elides an
+    # all-defaults ImageGenConfig so non-img slots don't grow a stray [image]
+    # table on disk.
     image_gen: ImageGenConfig = Field(
         default_factory=ImageGenConfig,
         alias="image",
@@ -544,11 +599,6 @@ class SlotConfig(BaseModel):
             "[image] table — image-gen settings (idle_restore_minutes, "
             "default_size, default_steps). See ImageGenConfig (#599)."
         ),
-    )
-
-    extra: dict[str, Any] = Field(
-        default_factory=dict,
-        description="Provider-specific slot params passed verbatim.",
     )
 
     @model_validator(mode="before")
@@ -569,161 +619,6 @@ class SlotConfig(BaseModel):
             )
         return data
 
-    @model_validator(mode="before")
-    @classmethod
-    def _hoist_server_from_extra(cls, data: Any) -> Any:
-        """Pull a `[server]` TOML table out of the loader's `extra` catch-all.
-
-        ``hal0.config.loader._flatten_slot_toml`` shoves every unrecognised
-        top-level TOML table (anything that isn't `[slot]` or `[model]`)
-        into ``extra``.  Without this hoist, `[server].extra_args` written
-        on disk would never reach the typed ``ServerConfig`` field; it would
-        just round-trip opaquely through ``extra["server"]``.
-        """
-        if not isinstance(data, dict):
-            return data
-        # Already top-level — nothing to do.
-        if "server" in data and data.get("server") is not None:
-            return data
-        extra = data.get("extra")
-        if not isinstance(extra, dict):
-            return data
-        server = extra.get("server")
-        if isinstance(server, dict):
-            # Copy to avoid mutating the loader's dict in place.
-            new_data = dict(data)
-            new_extra = dict(extra)
-            new_extra.pop("server", None)
-            new_data["server"] = server
-            new_data["extra"] = new_extra
-            return new_data
-        return data
-
-    @model_validator(mode="before")
-    @classmethod
-    def _hoist_npu_from_extra(cls, data: Any) -> Any:
-        """Pull a `[npu]` TOML table out of the loader's `extra` catch-all.
-
-        Mirrors ``_hoist_server_from_extra``: ``_flatten_slot_toml`` stashes
-        every unrecognised top-level table into ``extra``, so an on-disk
-        ``[npu]`` section for an NPU slot would never reach the typed
-        ``NpuConfig`` field without this hoist.
-        """
-        if not isinstance(data, dict):
-            return data
-        # Already top-level (e.g. passed directly in tests) — nothing to do.
-        if "npu" in data and data.get("npu") is not None:
-            return data
-        extra = data.get("extra")
-        if not isinstance(extra, dict):
-            return data
-        npu = extra.get("npu")
-        if isinstance(npu, dict):
-            new_data = dict(data)
-            new_extra = dict(extra)
-            new_extra.pop("npu", None)
-            new_data["npu"] = npu
-            new_data["extra"] = new_extra
-            return new_data
-        return data
-
-    @model_validator(mode="before")
-    @classmethod
-    def _hoist_image_from_extra(cls, data: Any) -> Any:
-        """Pull an `[image]` TOML table out of the loader's `extra` catch-all.
-
-        Mirrors ``_hoist_npu_from_extra`` for the typed ``image_gen`` field
-        (#599): ``_flatten_slot_toml`` stashes the on-disk ``[image]`` table
-        into ``extra["image"]``, so the img slot's persisted image-gen
-        settings would never reach :class:`ImageGenConfig` without this.
-
-        Collision guard: a top-level *string* ``image`` is the documented
-        per-slot container-image override (read by ``llama_server.image_ref``
-        and ``comfyui.image_ref`` from the raw slot dict). It must NOT hit
-        the ``image_gen`` alias — pre-D1 it round-tripped via
-        ``extra="allow"``, so non-dict values are parked under
-        ``extra["image"]`` to preserve that behavior.
-        """
-        if not isinstance(data, dict):
-            return data
-        image = data.get("image")
-        if image is not None and not isinstance(image, dict):
-            # Legacy string container-image override — park under extra so
-            # the ImageGenConfig alias never sees it and providers can keep
-            # reading it from the round-tripped config.
-            new_data = dict(data)
-            new_data.pop("image")
-            old_extra = new_data.get("extra")
-            new_extra = dict(old_extra) if isinstance(old_extra, dict) else {}
-            new_extra["image"] = image
-            new_data["extra"] = new_extra
-            return new_data
-        # Already top-level (direct model_validate of a flat TOML dict,
-        # where the "image" alias applies) — nothing to do.
-        if isinstance(image, dict) or data.get("image_gen") is not None:
-            return data
-        extra = data.get("extra")
-        if not isinstance(extra, dict):
-            return data
-        image = extra.get("image")
-        if isinstance(image, dict):
-            new_data = dict(data)
-            new_extra = dict(extra)
-            new_extra.pop("image", None)
-            new_data["image"] = image
-            new_data["extra"] = new_extra
-            return new_data
-        return data
-
-    @model_validator(mode="before")
-    @classmethod
-    def _promote_backend_to_device(cls, data: Any) -> Any:
-        """Read-only promotion shim: derive ``device`` from a legacy
-        on-disk ``backend`` key, then drop ``backend`` from the dict.
-
-        ``SlotConfig.backend`` no longer exists as a field (P2-device:
-        ``device`` is the sole persisted truth). But there is no on-disk
-        slot-TOML migration for backend→device, so a pre-device slot TOML
-        (``backend`` set, no ``device``) still needs to resolve to the
-        right hardware on load — without this, such a slot would silently
-        regress to :data:`DEFAULT_DEVICE` (gpu-rocm). This validator is
-        the ONLY thing that keeps that promotion alive; do NOT delete it.
-
-        Unlike the old dual-write era, ``backend`` is popped from the
-        dict rather than kept: with ``extra="allow"`` a leftover key
-        would otherwise round-trip forever via ``extra`` once the field
-        is gone, which would defeat "device sole truth". The pop always
-        runs when ``backend`` is present, even if ``device`` was already
-        supplied (e.g. a stale dual-written TOML from before this
-        change) — only the *promotion* is gated on ``device`` being
-        absent.
-        """
-        if not isinstance(data, dict):
-            return data
-        backend_value = data.get("backend")
-        if backend_value is None:
-            return data
-        new_data = dict(data)
-        new_data.pop("backend", None)
-        if not data.get("device"):
-            # Tolerate already-new-namespace values (gpu-rocm etc) — those
-            # round-trip through ``map_backend_to_device`` as identities.
-            mapped = map_backend_to_device(str(backend_value))
-            if backend_value not in _VALID_DEVICES:
-                log.warning(
-                    "config.slot.backend_deprecated",
-                    extra={
-                        "backend": backend_value,
-                        "promoted_device": mapped,
-                        "note": (
-                            "SlotConfig.backend is removed; 'device' is now the "
-                            "sole persisted truth. See ADR-0006 §7."
-                        ),
-                    },
-                )
-            new_data["device"] = mapped
-        return new_data
-
     @model_validator(mode="after")
     def _derive_autoload(self) -> SlotConfig:
         """Resolve the migration shim: absent key → pre-field implicit signal.
@@ -743,49 +638,30 @@ class SlotConfig(BaseModel):
         return self
 
     @model_serializer(mode="wrap")
-    def _tuck_server_into_extra(self, handler: Any) -> dict[str, Any]:
-        """Inverse of `_hoist_server_from_extra` for round-trip dumps.
+    def _dump_as_toml_tables(self, handler: Any) -> dict[str, Any]:
+        """Dump in the on-disk table shape: ``[server]`` / ``[npu]`` / ``[image]``.
 
-        ``hal0.config.loader._unflatten_slot_toml`` rebuilds the on-disk
-        shape by enumerating known top-level keys and then sweeping
-        ``extra.items()`` back to top-level tables.  It does not know about
-        the new ``server`` field, so we re-park its dump under
-        ``extra["server"]`` and drop the duplicate top-level entry.  Empty
-        ServerConfigs (all-None) are elided so we don't write an empty
-        `[server]` table to disk.
-
-        Also handles the typed ``npu`` field the same way: a non-None
-        NpuConfig dump is re-parked under ``extra["npu"]`` so the loader
-        writes a proper `[npu]` table; None (no NPU config) is elided.
+        An all-default ``[server]``, an absent ``[npu]`` and an all-default
+        ``[image]`` are elided, so a slot that never set them doesn't grow an
+        empty table on disk, and the typed ``image_gen`` field dumps under its
+        TOML name ``image``. Readers of a dumped config therefore see the same
+        keys they see in a raw slot dict.
         """
         data: dict[str, Any] = handler(self)
-        server = data.pop("server", None)
+        server = data.get("server")
         if isinstance(server, dict):
-            # Drop None-valued fields so an untouched ServerConfig (all
-            # defaults) doesn't produce a stray `[server]` table on disk.
             cleaned = {k: v for k, v in server.items() if v is not None}
             if cleaned:
-                extra = data.get("extra")
-                extra = dict(extra) if isinstance(extra, dict) else {}
-                extra["server"] = cleaned
-                data["extra"] = extra
-        # Re-park [npu] under extra so _unflatten_slot_toml writes a proper
-        # [npu] TOML table.  None means the slot has no NPU config — elide.
-        npu = data.pop("npu", None)
-        if isinstance(npu, dict):
-            extra = data.get("extra")
-            extra = dict(extra) if isinstance(extra, dict) else {}
-            extra["npu"] = npu
-            data["extra"] = extra
-        # Re-park [image] (typed ``image_gen``, #599) under extra the same
-        # way.  An all-defaults ImageGenConfig is elided so non-img slots
-        # don't grow a stray [image] table on disk.
-        image_gen = data.pop("image_gen", None)
-        if isinstance(image_gen, dict) and image_gen != ImageGenConfig().model_dump():
-            extra = data.get("extra")
-            extra = dict(extra) if isinstance(extra, dict) else {}
-            extra["image"] = image_gen
-            data["extra"] = extra
+                data["server"] = cleaned
+            else:
+                data.pop("server")
+        if data.get("npu") is None:
+            data.pop("npu", None)
+        # ``by_alias`` dumps already say ``image``; either way elide the default.
+        image = data.pop("image_gen", None)
+        image = data.pop("image", None) if image is None else image
+        if isinstance(image, dict) and image != ImageGenConfig().model_dump():
+            data["image"] = image
         return data
 
     @field_validator("name")
@@ -3215,6 +3091,7 @@ __all__ = [
     "MTP_DRAFT_BUNDLE",
     "PROFILE_BENCH",
     "PROFILE_SCHEMA_VERSION_CURRENT",
+    "REMOVED_SLOT_KEYS",
     "SEED_PROFILES",
     "ActivityConfig",
     "AgentAuthConfig",

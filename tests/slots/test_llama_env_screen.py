@@ -91,9 +91,6 @@ def test_the_write_guards_refuse_it(name: str) -> None:
         with pytest.raises(BadRequest) as exc:
             check(_payload({name: "x"}))
         assert exc.value.code == "slot.llama_env_denied"
-    # The loader's ``extra`` catch-all shape too.
-    with pytest.raises(BadRequest):
-        reject_slot_llama_env({"extra": {"server": {"env": {name: "x"}}}})
 
 
 def test_the_write_guards_pass_ordinary_env() -> None:

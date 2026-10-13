@@ -169,7 +169,7 @@ def test_cpu_host_gets_small_conservative_model() -> None:
     # No GPU → fall back to a small CPU-friendly pick, never the 27B.
     rec = recommend_primary_slot(_cpu_only_host(64))
     assert rec["model"]["default"] != "qwen3.8-27b"
-    assert rec["backend"] == "cpu"
+    assert rec["device"] == "cpu"
 
 
 # ── PS-1: GPU-less installs must seed a chat-capable profile, not TTS ─────────

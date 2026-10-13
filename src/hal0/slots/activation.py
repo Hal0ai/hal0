@@ -150,8 +150,6 @@ def effective_npu_table(cfg: dict[str, Any] | None) -> dict[str, Any]:
     if not isinstance(cfg, dict):
         return {}
     table = cfg.get("npu")
-    if not isinstance(table, dict):
-        table = (cfg.get("extra") or {}).get("npu") if isinstance(cfg.get("extra"), dict) else None
     if isinstance(table, dict):
         return table
     if cfg.get("device") != "npu":

@@ -15,10 +15,9 @@ succeeds. This mirrors the absent-``HF_TOKEN`` posture in install.sh: an
 optional model pull must not be able to fail a platform install.
 
 "No worse", not "model-less": a failure only ever *withholds* a binding, it
-never removes one. ``_activate_slot_model``'s failure path writes
-``{"meta": {"pull_failed": True}}`` and no ``model`` key at all, and
-``merge_slot_config`` merges one level deep, so a slot that already carried a
-``[model].default`` keeps it. An already-model-less slot — the fresh-seed and
+never removes one. ``_activate_slot_model``'s failure path writes nothing
+at all, so a slot that already carried a ``[model].default`` keeps it. An
+already-model-less slot — the fresh-seed and
 0.9.8-scaffold case, and the only one this module ever binds into — does stay
 model-less, which is where the shorter phrasing came from.
 
@@ -30,10 +29,10 @@ they are not offered.
 
 **Reuses the existing activation gate.** The pull runs through
 :func:`~hal0.install.orchestrate.run_pull_and_activate`, which stamps
-``[model].default`` on the slot only AFTER the bytes land and marks
-``[meta].pull_failed`` when they don't. Since model-presence is the activation
-signal (#1369), that is exactly the "seed it model-less on failure" behaviour —
-no bespoke rollback needed here.
+``[model].default`` on the slot only AFTER the bytes land and leaves it
+model-less when they don't. Since model-presence is the activation signal
+(#1369), that is exactly the "seed it model-less on failure" behaviour — no
+bespoke rollback needed here.
 
 **Idempotent across install.sh re-runs.** The pull engine has no
 already-on-disk short circuit — ``run_pull``/``_download_one`` stream from HF
@@ -384,14 +383,14 @@ async def provision_brain_model(
             capability="chat",
         ),
         # The activation gate applies to a MODEL-LESS slot: stamp on success,
-        # mark [meta].pull_failed on failure. A slot that already names an
+        # leave it model-less on failure. A slot that already names an
         # operator's model is not in that state machine — it is neither ours
         # to stamp nor parked when the pull fails — so it rides the pull with
         # no slot attached and bind_brain_model below leaves it alone.
         slot_names=[BRAIN_SLOT_NAME] if not pre_existing else [],
     )
-    # run_pull_and_activate stamps [model].default only on success and marks
-    # [meta].pull_failed otherwise — the model-less-on-failure guarantee.
+    # run_pull_and_activate stamps [model].default only on success and writes
+    # nothing otherwise — the model-less-on-failure guarantee.
     await run_pull_and_activate(plan, slot_manager=slot_manager)
     if getattr(plan.job, "state", None) != "completed":
         raise RuntimeError(

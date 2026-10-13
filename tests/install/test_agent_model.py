@@ -232,8 +232,7 @@ def test_failed_pull_leaves_the_agent_slot_model_less(monkeypatch: pytest.Monkey
     sm, reg = _FakeSlotManager(), _FakeRegistry()
     with pytest.raises(RuntimeError):
         asyncio.run(provision_agent_model(hw=_strix(128 * 1024), slot_manager=sm, registry=reg))
-    assert sm.updates == [(AGENT_SLOT_NAME, {"meta": {"pull_failed": True}})]
-    assert all("model" not in upd for _, upd in sm.updates)
+    assert sm.updates == []  # nothing written: model-less IS parked
 
 
 def test_provisioning_an_unfit_box_raises_before_touching_the_network(

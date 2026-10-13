@@ -96,13 +96,18 @@ def test_guard_reports_tuning_before_removed() -> None:
     assert exc.value.code == "slot.tuning_key_denied"
 
 
-def test_guard_allows_a_legitimate_payload() -> None:
-    """The guard must not become a general-purpose schema check.
+def test_guard_rejects_an_unknown_key() -> None:
+    """``SlotConfig`` forbids unknown keys, so an in-process writer may not
+    persist one that would fail the slot's next load (ADR-0029 §5)."""
+    with pytest.raises(BadRequest) as exc:
+        guard_slot_write_payload({"device": "cpu", "some_future_key": 1})
+    assert exc.value.code == "validation.unknown_keys"
+    assert exc.value.details["unknown_keys"] == ["some_future_key"]
 
-    An ordinary placement/profile/model write passes untouched, and so does
-    an unrecognised key (that is ``unknown_slot_config_keys``' job at the HTTP
-    boundary).
-    """
+
+def test_guard_allows_a_legitimate_payload() -> None:
+    """An ordinary placement/profile/model write passes untouched; every key
+    below is a declared ``SlotConfig`` field."""
     guard_slot_write_payload(
         {
             "device": "gpu-rocm",
@@ -111,7 +116,6 @@ def test_guard_allows_a_legitimate_payload() -> None:
             "threads": 8,
             "model": {"default": "m"},
             "server": {"env": {"HSA_OVERRIDE_GFX_VERSION": "11.5.1"}},
-            "some_future_key": 1,
         }
     )
 

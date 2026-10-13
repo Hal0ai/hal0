@@ -398,10 +398,10 @@ def test_model_inspect_schema_names_repo_args() -> None:
     assert "hf_url" in params["properties"]
 
 
-def test_slot_create_schema_covers_fpx_image_path() -> None:
+def test_slot_create_schema_covers_image_pin_path() -> None:
     params = _schema("slot_create")
     assert set(params["required"]) == {"name", "model"}
-    assert "image" in params["properties"]
+    assert "image_pin" in params["properties"]
     assert "runtime" in params["properties"]
     assert "port" in params["properties"]
 

@@ -71,23 +71,13 @@ def _model_of(cfg: dict[str, Any]) -> str:
 def _system_prompt_of(cfg: dict[str, Any]) -> str:
     """Pull a slot's configured system_prompt — empty string if absent.
 
-    The ``system_prompt`` field is not yet a typed SlotConfig field
-    (PR-18 adds the persona dropdown that authors it). For PR-16 we
-    read it permissively from the slot's extra dict — slots without
+    ``system_prompt`` is a declared ``SlotConfig`` field. Slots without
     one delegate with no system message, which matches plan §7.4's
     "persona stays unchanged" semantics for an unconfigured persona.
+    Treat any non-string as absent.
     """
     raw = cfg.get("system_prompt")
-    if isinstance(raw, str):
-        return raw
-    # Fall back to a nested ``extra`` namespace if a future config
-    # surfaces it there. Treat any non-string as absent.
-    extra = cfg.get("extra")
-    if isinstance(extra, dict):
-        raw = extra.get("system_prompt")
-        if isinstance(raw, str):
-            return raw
-    return ""
+    return raw if isinstance(raw, str) else ""
 
 
 def _build_delegation_messages(

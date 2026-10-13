@@ -790,7 +790,7 @@ async def test_create_writes_config_and_state(
     cfg = {
         "name": "extra",
         "port": 8090,
-        "backend": "vulkan",
+        "device": "gpu-vulkan",
         "provider": "llama-server",
         "model": {"default": "tiny-q4"},
     }
@@ -808,7 +808,7 @@ async def test_delete_removes_files_and_protects_seeded(
     cfg = {
         "name": "extra",
         "port": 8090,
-        "backend": "vulkan",
+        "device": "gpu-vulkan",
         "provider": "llama-server",
         "model": {"default": "tiny-q4"},
     }
@@ -838,8 +838,8 @@ async def test_update_config_backend_invalidates_state_extras(
     tmp_hal0_home: str,
     container_stub: FakeContainerProvider,
 ) -> None:
-    """Issue #359: changing ``backend`` via update_config() must clear
-    the stale ``extra.backend`` mirror in state.json.
+    """Issue #359: changing the hardware (``device``) via update_config() must
+    clear the stale ``extra.backend`` mirror in state.json.
 
     Before the fix, ``status()`` short-circuited to the persisted record
     while the unit was active and reported the old backend forever. The
@@ -872,7 +872,7 @@ async def test_update_config_backend_invalidates_state_extras(
     # ``actual_image`` container enrichment.
     assert snap_before.backend == "vulkan"
 
-    snap_after = await sm.update_config("chat", {"backend": "vulkan"})
+    snap_after = await sm.update_config("chat", {"device": "gpu-vulkan"})
     # The snapshot returned from update_config() must reflect the new
     # backend (this is what the API handler returns to the client).
     assert snap_after.backend == "vulkan"

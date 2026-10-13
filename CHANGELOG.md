@@ -182,6 +182,24 @@ applying. Add those subsections to a version's section to surface them; see
     `slot.profile_missing` instead of silently falling back.
   - The seeds now include `agent` (64K context), `utility` (64K) and
     `coding`, and the shipped slots use them.
+  - A slot file with a key the slot schema does not declare now fails its
+    typed load, naming the key and the file (`failed to validate slot config
+    'x' at /etc/hal0/slots/x.toml: unknown key 'lru' ...`). `SlotConfig` was
+    the last of the slot models (`ModelConfig` and `ServerConfig` already did)
+    to accept and round-trip anything; it no longer has a catch-all `extra`
+    table either, so a hand-added table or key is an error rather than kept.
+    Everything hal0 writes is declared (`type`, `default`, `served_by`,
+    `output_sanity` and `system_prompt` are now fields, and a dumped config
+    uses the TOML table names `server`, `npu` and `image`). The retired keys
+    `backend` (now `device`), `enabled`, `lru` (now `priority` / `pinned`) and a
+    bare `image = "<ref>"` (now `image_pin`) are no longer read by the typed
+    loader; the conversion strips or rewrites them, and a file that still
+    carries one is reported with its replacement. `POST /api/slots`,
+    `PUT /api/slots/{name}/config`, `SlotManager.create` / `update_config` and
+    stacks apply refuse an undeclared key with `validation.unknown_keys`
+    (`slot.removed_key_denied` for a retired one) instead of persisting a file
+    that cannot load. A slot with such a key keeps listing and running; it
+    shows up in `hal0 doctor profiles` and the typed-load surfaces.
 
 ### Migrations
 

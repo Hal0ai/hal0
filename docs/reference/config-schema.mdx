@@ -274,13 +274,23 @@ Each key also has a `HAL0_METRICS_*` environment variable that overrides it
 
 ## `slots/<name>.toml`
 
-Root model `SlotConfig`, `extra="allow"`. Both a legacy nested `[slot]` table and flat
-top-level scalars are accepted on load and normalized.
+Root model `SlotConfig`, `extra="forbid"`: every key a slot file may carry is a field
+below, and a key that is not fails the load, naming the key and the file
+(`failed to validate slot config 'x' at /etc/hal0/slots/x.toml: unknown key 'lru' ...`).
+Both a nested `[slot]` table and flat top-level scalars are accepted on load and normalized
+(`[slot]` wins over a root scalar of the same name, as it does on the launch path). The same
+vocabulary gates every write: `POST /api/slots`, `PUT /api/slots/{name}/config` and the
+in-process writers (`SlotManager.create` / `update_config`, stacks apply) refuse an unknown key
+with a 400 `validation.unknown_keys`, and a key hal0 removed (`enabled`, `backend`, `lru`) with
+a 400 `slot.removed_key_denied` that names its replacement.
 
 | Key | Type | Default | Req | Constraints |
 |---|---|---|---|---|
 | `id` | int \| null | `null` | — | `>= 1` |
 | `name` | str | — | **required** | regex `^[a-z0-9][a-z0-9_-]{0,31}$` |
+| `type` | str \| null | `null` | — | slot kind (`llm`, `embedding`, `reranking`, `tts`, `transcription`, `image`, …); a type-less llm-shaped file is healed to `llm` on load |
+| `default` | bool \| null | `null` | — | the slot is its type's default; the first slot of a type becomes it at create, and at most one slot per type may be |
+| `served_by` | str \| null | `null` | — | FLM trio shadows only: the NPU anchor slot whose process serves this one |
 | `port` | int | — | **required** | `8081-8200` |
 | `device` | str | `"gpu-rocm"` | — | one of `gpu-rocm, gpu-vulkan, gpu-cuda, cpu, npu` |
 | `gpu_index` | int \| null | `null` | — | `>= 0` |
@@ -292,6 +302,8 @@ top-level scalars are accepted on load and normalized.
 | `provider` | str | `"llama-server"` | — | one of `llama-server, flm, moonshine, kokoro, qwen3tts, comfyui`; **deprecated**, legacy label only — all slots run as podman containers now |
 | `runtime` | `"container"` | `"container"` | — | only value; deprecated field |
 | `profile` | str \| null | `null` | — | a seed name or a `profiles.toml` entry; the profile is the slot's whole tune (ADR-0029). `null` = the slot type's seed (`embedding`, `reranking`), else `chat`; a profileless `tts`, `transcription` or `image` slot uses its engine's default instead (`kokoro`, or `qwen3-tts` on the Qwen3-TTS engine; `moonshine`; ComfyUI's built-in flag bundle). A name the catalog does not have fails the launch with `slot.profile_missing` |
+| `output_sanity` | bool \| null | `null` | — | `false` exempts this one slot from the output-sanity gate; `null` = the gate runs. See [Slot lifecycle](/docs/reference/slot-lifecycle/) |
+| `system_prompt` | str \| null | `null` | — | persona text for `hal0/<slot>` delegation; absent = no system message |
 | `default_voice` | str \| null | `null` | — | TTS slots |
 | `default_speed` | float \| null | `null` | — | `0.25-4.0` |
 | `default_response_format` | str \| null | `null` | — | one of `mp3, wav, opus, flac, pcm` |
@@ -303,16 +315,14 @@ top-level scalars are accepted on load and normalized.
 | `server` | table | — | — | `[server]`, see below |
 | `npu` | table \| null | `null` | — | `[npu]`, see below |
 | `image` (alias `image_gen`) | table | — | — | `[image]`, see below |
-| `extra` | dict | `{}` | — | catch-all |
 
-There is **no `enabled` field** — a non-empty `model.default` is the activation signal.
-Boot start is separate and explicit (`autoload`); a retired `lru` key is still accepted
-but ignored, with a one-time deprecation warning. See
+There is **no catch-all**: a table or key the schema does not declare is an error, not a place
+to park a hand edit. There is **no `enabled` field** — a non-empty `model.default` is the
+activation signal. Boot start is separate and explicit (`autoload`). `enabled`, `backend` (now
+`device`), `lru` (now `priority` / `pinned`) and a bare `image = "<ref>"` (now `image_pin`) are
+retired; `hal0 profile migrate --apply` strips or rewrites them, and a file that still carries
+one fails the load with the replacement named. See
 [Slot lifecycle](/docs/reference/slot-lifecycle/) for the activation model.
-
-`output_sanity` (bool, default `true`) is accepted here too, though it is not a typed
-field: `false` exempts this one slot from the output-sanity gate — see
-[Slot lifecycle](/docs/reference/slot-lifecycle/).
 
 A slot holds placement (device, layers, threads, runner), its model and its profile, and nothing else about how the model runs. A write that carries a tuning key (`parallel`, `chat_template`, `workers`, `ctx_size`, `mtp`, `enable_thinking`, `vision`, `[model].context_size`, `[model].ctx_size`, `[model].n_gpu_layers`, `[model].rope_freq_base`, `[model].extra` or `[server].extra_args`) is refused with a 400 `slot.tuning_key_denied` ("belongs on a profile"). A slot file on disk that still carries one is refused at launch with `slot.unconverted`, unless the profile-centric conversion blocked it and the file is unchanged since, in which case the slot keeps launching the command it ran before the conversion. `hal0 profile migrate --apply` removes the keys (see the [CLI reference](/docs/reference/cli/)).
 

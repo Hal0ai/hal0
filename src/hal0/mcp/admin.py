@@ -1182,14 +1182,14 @@ TOOL_PARAM_HINTS: dict[str, dict[str, Any]] = {
                     "reasoning, vision, MTP. Omit for the slot type's seed profile."
                 ),
             },
-            "image": {
+            "image_pin": {
                 "type": "string",
                 "description": (
                     "Container image override (debug builds only; the slot's "
-                    "runner image is used when omitted). Requires runtime='container'"
+                    "runner image is used when omitted)."
                 ),
             },
-            "runtime": {"type": "string", "description": "Set 'container' when image is set"},
+            "runtime": {"type": "string", "description": "Always 'container'"},
             "autoload": {
                 "type": "boolean",
                 "description": "Boot-start this slot on hal0 startup (spec 2026-08-02).",

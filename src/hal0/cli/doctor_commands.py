@@ -2001,9 +2001,7 @@ def doctor_profiles(
         try:
             cfg = load_slot_config(slot_name)
         except Exception as exc:
-            console.print(
-                f"[yellow]![/yellow]  slot {slot_name}: unreadable TOML ({exc}) — skipped."
-            )
+            console.print(f"[yellow]![/yellow]  slot {slot_name}: does not load ({exc}) — skipped.")
             continue
         slot_profiles.append((cfg.name, cfg.profile))
         # Type + device feed the profile-less capability check (#1830): the

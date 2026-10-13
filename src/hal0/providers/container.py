@@ -1315,8 +1315,7 @@ def slot_effective_context(
         "transcription",
         "embedding",
     ):
-        extra = slot_cfg.get("extra") if isinstance(slot_cfg.get("extra"), Mapping) else {}
-        anchor = str(slot_cfg.get("served_by") or extra.get("served_by") or "flm")
+        anchor = str(slot_cfg.get("served_by") or "flm")
         anchor_cfg = _served_by_anchor_cfg(anchor)
         if anchor_cfg is not None:
             return slot_effective_context(anchor_cfg, model_registry)

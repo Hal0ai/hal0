@@ -193,7 +193,7 @@ async def provision_agent_model(
         from hal0.install.orchestrate import _activate_slot_model
 
         log.info("install.agent_model_already_present id=%s path=%s", model_id, existing)
-        await _activate_slot_model(slot_manager, AGENT_SLOT_NAME, model_id, failed=False)
+        await _activate_slot_model(slot_manager, AGENT_SLOT_NAME, model_id)
         return model_id
 
     plan = PullPlan(

@@ -128,11 +128,10 @@ def slot_scalar_table(raw: dict[str, Any]) -> dict[str, Any]:
         ``loader.save_slot_config``, and ``migrate_slot_id_keying`` produce.
 
     ``_flatten_slot_toml`` treats ``[slot]`` as AUTHORITATIVE whenever it
-    exists on load: only its keys become the loaded ``SlotConfig``'s scalar
-    fields, and every top-level scalar sibling is stashed into ``extra`` and
-    ignored. A writer that always projects onto the root therefore silently
-    no-ops on a nested file — the write "succeeds", lands on a key nobody
-    reads, and the duplicated root scalar even makes the next drift-check
+    exists on load: its keys override a top-level scalar of the same name. A
+    writer that always projects onto the root therefore silently no-ops on a
+    nested file — the write "succeeds", lands on a key the ``[slot]`` table
+    shadows, and the duplicated root scalar even makes the next drift-check
     look converged. Every scalar read/write in the shared write pipeline
     goes through this one accessor instead of assuming a shape.
     """
@@ -215,41 +214,6 @@ def merge_slot_config(base: dict[str, Any], updates: dict[str, Any]) -> dict[str
 
 # ── boundary validation for slot-config writes ───────────────────────────────
 
-#: Top-level keys that are NOT declared on ``SlotConfig`` (they round-trip
-#: through its ``extra="allow"``) but are documented, actively-read parts of
-#: the slot-TOML surface. The unknown-key validator tolerates exactly these;
-#: anything else at the top level is treated as a typo.
-#:
-#:   - ``type``           — slot kind (llm/embedding/…), read all over manager/routing.
-#:   - ``default``        — SC-4 per-type default flag, read by default_slot_for.
-#:   - ``lru``            — retired eviction opt-in (#903, spec 2026-08-02).
-#:     Tolerated for back-compat only: the key is ignored (every non-pinned
-#:     slot is now a pressure/pre-load eviction candidate, ordered by
-#:     ``priority``), with a one-time deprecation warning.
-#:   - ``default_voice`` / ``default_language`` — TTS engine extras written by
-#:     the dashboard voice settings (PUT /api/slots/tts/config).
-#:   - ``slot``           — the nested on-disk [slot] table shape (hoisted on load).
-#:   - ``output_sanity``  — per-slot opt-out for the llm output-sanity gate
-#:     (#1922, ``hal0.slots.output_sanity.SANITY_CFG_KEY``). The gate's own
-#:     failure message tells the operator to set it, so the write boundary has
-#:     to accept it: an escape hatch reachable only by hand-editing the TOML is
-#:     not one.
-TOLERATED_SLOT_CONFIG_KEYS: frozenset[str] = frozenset(
-    # image_pin and binary are declared SlotConfig fields but the running backend may
-    # predate them — tolerate so the drawer Save always works.
-    {
-        "type",
-        "default",
-        "lru",
-        "default_voice",
-        "default_language",
-        "slot",
-        "image_pin",
-        "binary",
-        "output_sanity",
-    }
-)
-
 # ── slot-write tuning partition (ADR-0029) ───────────────────────────────────
 
 
@@ -286,34 +250,23 @@ def reject_slot_llama_env(payload: dict[str, Any]) -> None:
     ``HF_TOKEN`` / ``MTMD_BACKEND_DEVICE``) environment variable too, so a
     slot env could otherwise set what the profile screen refuses
     (``slot.llama_env_denied``; :func:`hal0.slots.argv.deny_llama_env`).
-    Checked on the ``[server]`` table at the top level and under the loader's
-    ``extra`` catch-all.
+    Checked on the ``[server]`` table.
     """
     from hal0.slots.argv import deny_llama_env
 
     if not isinstance(payload, dict):
         return
-    extra = payload.get("extra") if isinstance(payload.get("extra"), dict) else {}
-    for server in (payload.get("server"), extra.get("server")):
-        if isinstance(server, dict):
-            deny_llama_env(server.get("env"), segment="slot [server].env")
+    server = payload.get("server")
+    if isinstance(server, dict):
+        deny_llama_env(server.get("env"), segment="slot [server].env")
 
 
 # ── removed slot-write keys (#1369) ─────────────────────────────────────────
 #
-# Keys that used to be declared ``SlotConfig`` fields and no longer exist.
-# ``extra="allow"`` means a write carrying one would round-trip to disk as
-# inert debris while the caller believes the setting took — the exact silent
-# failure the unknown-key boundary exists to stop. Reported with the
-# replacement rather than as a generic "unknown key" so an old client can
-# actually be fixed. ``enabled`` split into two distinct verbs: bind/clear
-# ``[model].default`` (activation) and POST /unload (lifecycle).
-REMOVED_SLOT_KEYS: dict[str, str] = {
-    "enabled": (
-        "activation is now model-presence — bind or clear '[model].default' "
-        "instead; to stop a running slot use POST /api/slots/{name}/unload"
-    ),
-}
+# Keys that used to be slot settings and no longer exist
+# (:data:`hal0.config.schema.REMOVED_SLOT_KEYS`, the one list ``SlotConfig``'s
+# load error also reads). A write carrying one is refused with the replacement
+# rather than a generic "unknown key", so an old client can actually be fixed.
 
 
 def reject_removed_slot_keys(payload: dict[str, Any]) -> None:
@@ -324,6 +277,7 @@ def reject_removed_slot_keys(payload: dict[str, Any]) -> None:
     the migration pointer instead of a "check spelling" hint for a key they
     spelled perfectly. Top level only — every removed key was top-level.
     """
+    from hal0.config.schema import REMOVED_SLOT_KEYS
     from hal0.errors import BadRequest
 
     offenders = sorted(k for k in payload if k in REMOVED_SLOT_KEYS)
@@ -339,48 +293,33 @@ def reject_removed_slot_keys(payload: dict[str, Any]) -> None:
         )
 
 
-#: Extra keys tolerated inside specific sub-tables, keyed by sub-table name.
-_TOLERATED_SUBTABLE_KEYS: dict[str, frozenset[str]] = {}
-
-
 def _known_field_names(model_cls: Any) -> set[str]:
-    """Field names + aliases a pydantic model accepts — derived dynamically.
+    """The TOML key names a pydantic model accepts — derived dynamically.
 
     Reading ``model_fields`` (not a hardcoded list) means a field another
     change adds to the schema (e.g. ``ServerConfig.env``) passes validation
-    automatically, with no second list to keep in sync.
+    automatically, with no second list to keep in sync. A field with an alias
+    is spelled by its alias on disk (``image_gen`` is ``[image]``).
     """
-    names: set[str] = set()
-    for name, field in model_cls.model_fields.items():
-        names.add(name)
-        alias = getattr(field, "alias", None)
-        if alias:
-            names.add(alias)
-    return names
+    return {getattr(field, "alias", None) or name for name, field in model_cls.model_fields.items()}
 
 
 def unknown_slot_config_keys(payload: dict[str, Any]) -> list[str]:
-    """Dotted paths of payload keys the slot-config schema does not know.
+    """Dotted paths of payload keys the slot-config schema does not declare.
 
-    ``SlotConfig`` and its sub-models are ``extra="allow"`` so a typo'd key
-    (``ctx_sizee``, ``enabeld``) round-trips to disk silently and the
-    intended setting never takes effect. This walks ``payload`` (a partial
-    slot-config write body: PUT /config, POST create) against the pydantic field sets of
-    ``SlotConfig`` / ``ModelConfig`` / ``ServerConfig`` / ``NpuConfig`` /
-    ``ImageGenConfig`` and returns the paths of unknown keys, sorted.
+    ``SlotConfig`` and its sub-models are ``extra="forbid"``, so a key outside
+    their field sets would fail the slot's next load. This walks ``payload`` (a
+    partial slot-config write body: PUT /config, POST create) against the
+    pydantic field sets of ``SlotConfig`` / ``ModelConfig`` / ``ServerConfig`` /
+    ``NpuConfig`` / ``ImageGenConfig`` and returns the paths of the keys the
+    load would refuse, sorted — so the write is refused instead of persisting a
+    file that cannot load.
 
-    Tolerated beyond the declared fields:
-      - top-level ``provider`` / ``runtime`` (declared fields), a
-        *string* ``image`` (per-slot container-image override). NOTE
-        (P2-device): ``backend`` is no longer a declared ``SlotConfig``
-        field nor tolerated here — a write payload carrying it is now
-        flagged as unknown; ``device`` is the sole persisted truth.
-      - the actively-read extras in :data:`TOLERATED_SLOT_CONFIG_KEYS`,
-      - ``extra`` tables at any level (verbatim provider passthrough by
-        contract — never validated).
-
-    Known fields are derived from ``model_fields`` dynamically, so schema
-    additions (e.g. ``[server].env``) pass without touching this module.
+    The field sets are the only vocabulary: there is no allow-list beyond the
+    declared fields (derived from ``model_fields``, so schema additions need no
+    change here). The one structural allowance is the ``slot`` key, the nested
+    on-disk ``[slot]`` table, whose members are checked against the same
+    top-level vocabulary.
     """
     from hal0.config.schema import (
         ImageGenConfig,
@@ -395,38 +334,62 @@ def unknown_slot_config_keys(payload: dict[str, Any]) -> list[str]:
         "server": ServerConfig,
         "npu": NpuConfig,
         "image": ImageGenConfig,
-        "image_gen": ImageGenConfig,
     }
-    top_known = _known_field_names(SlotConfig) | TOLERATED_SLOT_CONFIG_KEYS
+    top_known = _known_field_names(SlotConfig)
     unknown: list[str] = []
 
-    def _check_subtable(prefix: str, table: dict[str, Any], model_cls: Any, name: str) -> None:
-        known = _known_field_names(model_cls) | _TOLERATED_SUBTABLE_KEYS.get(name, frozenset())
+    def _check_subtable(prefix: str, table: dict[str, Any], model_cls: Any) -> None:
+        known = _known_field_names(model_cls)
         for key in table:
             if key not in known:
                 unknown.append(f"{prefix}{key}")
 
-    def _check_top(prefix: str, mapping: dict[str, Any]) -> None:
-        for key, value in mapping.items():
-            if key not in top_known:
-                unknown.append(f"{prefix}{key}")
-                continue
-            if key == "extra":
-                continue  # verbatim passthrough by contract
-            if key == "slot" and isinstance(value, dict):
-                # Nested on-disk [slot] table — same vocabulary as top level.
-                for sub_key in value:
-                    if sub_key not in top_known or sub_key == "slot":
-                        unknown.append(f"{prefix}slot.{sub_key}")
-                continue
-            model_cls = sub_models.get(key)
-            if model_cls is not None and isinstance(value, dict):
-                _check_subtable(f"{prefix}{key}.", value, model_cls, key)
-            # A non-dict ``image`` is the legacy string container-image
-            # override — tolerated as-is (parked under extra on load).
-
-    _check_top("", payload)
+    for key, value in payload.items():
+        if key == "slot" and isinstance(value, dict):
+            # Nested on-disk [slot] table — same vocabulary as top level.
+            for sub_key in value:
+                if sub_key not in top_known or sub_key in sub_models:
+                    unknown.append(f"slot.{sub_key}")
+            continue
+        if key not in top_known:
+            unknown.append(key)
+            continue
+        model_cls = sub_models.get(key)
+        if model_cls is None:
+            continue
+        if isinstance(value, dict):
+            _check_subtable(f"{key}.", value, model_cls)
+        elif key == "image":
+            # A bare string ``image`` is the removed container-image override
+            # (now ``image_pin``); ``[image]`` is a table.
+            unknown.append(key)
     return sorted(set(unknown))
+
+
+def reject_unknown_slot_keys(payload: dict[str, Any]) -> None:
+    """400 when a slot-config write carries a key ``SlotConfig`` does not declare.
+
+    The write-side twin of ``SlotConfig``'s ``extra="forbid"`` (ADR-0029 §5): a
+    key outside the declared fields would fail the slot's next typed load, so
+    the write is refused with the unknown paths listed instead of persisting a
+    file that cannot load. Keys hal0 removed are split out first
+    (:func:`reject_removed_slot_keys`), so an operator sees the replacement
+    rather than a "check spelling" hint for a key they spelled perfectly.
+    """
+    from hal0.errors import BadRequest
+
+    reject_removed_slot_keys(payload)
+    unknown = unknown_slot_config_keys(payload)
+    if unknown:
+        raise BadRequest(
+            "unknown slot config key(s): " + ", ".join(unknown),
+            details={
+                "unknown_keys": unknown,
+                "hint": "check spelling against the SlotConfig schema "
+                "(known sub-tables: [model], [server], [npu], [image])",
+            },
+            code="validation.unknown_keys",
+        )
 
 
 # ── ChangeSet ────────────────────────────────────────────────────────────────
@@ -790,8 +753,6 @@ def _write_state(fs: FileState) -> None:
 
 
 __all__ = [
-    "REMOVED_SLOT_KEYS",
-    "TOLERATED_SLOT_CONFIG_KEYS",
     "ChangeSet",
     "FileState",
     "SlotConfigStore",
@@ -800,6 +761,7 @@ __all__ = [
     "reject_removed_slot_keys",
     "reject_slot_llama_env",
     "reject_slot_tuning_keys",
+    "reject_unknown_slot_keys",
     "slot_scalar_table",
     "slot_write_lock",
     "unknown_slot_config_keys",

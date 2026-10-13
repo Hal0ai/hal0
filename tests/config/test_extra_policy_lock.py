@@ -15,10 +15,8 @@ Escape-hatch table (why each non-"forbid" entry is intentional):
   - Hal0Config          -- allow: top-level forward-compat (a newer hal0
                            writing a future table must survive an older
                            reader).
-  - SlotConfig          -- allow: ``extra`` + the hoist/tuck round-trip is
-                           THE escape hatch for future fields/provider knobs.
-  - ModelConfig         -- allow: ``[model].extra`` is the documented
-                           provider-passthrough escape hatch.
+  - SlotConfig          -- forbid (ADR-0029 §5): every key a slot file may
+                           carry is a declared field; no catch-all.
   - HardwareInfo/GPUInfo/NPUInfo
                         -- allow: additive probe facts from newer probes
                            must round-trip on older readers.
@@ -52,7 +50,10 @@ from hal0.config import schema
 _EXPECTED_EXTRA_POLICY: dict[str, str] = {
     # Escape-hatch / forward-compat containers -> allow
     "Hal0Config": "allow",
-    "SlotConfig": "allow",
+    # Slot file (ADR-0029 §5): every key a hal0 writer emits is a declared
+    # field (tests/slots/test_slot_writers_load.py), so a stray key fails the
+    # load naming itself.
+    "SlotConfig": "forbid",
     "HardwareInfo": "allow",
     "GPUInfo": "allow",
     "NPUInfo": "allow",

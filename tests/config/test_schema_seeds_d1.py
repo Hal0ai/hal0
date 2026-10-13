@@ -3,7 +3,10 @@
 import tomllib
 from pathlib import Path
 
-from hal0.config.loader import load_slot_config, save_slot_config
+import pytest
+from pydantic import ValidationError
+
+from hal0.config.loader import ConfigParseError, load_slot_config, save_slot_config
 from hal0.config.schema import SEED_PROFILES, ImageGenConfig, SlotConfig
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -55,24 +58,23 @@ def test_image_gen_section_defaults() -> None:
     assert (s.idle_restore_minutes, s.default_size, s.default_steps) == (60, "1024x1024", 0)
 
 
-def test_string_image_override_still_validates_and_round_trips() -> None:
-    # Top-level string `image` is the documented per-slot container-image
-    # override (llama_server.image_ref / comfyui.image_ref read
-    # slot_cfg["image"]). It must not collide with the [image] alias:
-    # pre-D1 it passed via extra="allow"; post-D1 it parks under extra.
-    cfg = SlotConfig.model_validate({"name": "x", "port": 8081, "image": "ghcr.io/foo:v1"})
-    assert cfg.extra["image"] == "ghcr.io/foo:v1"
-    # image_gen stays at defaults — the string never reaches the alias.
-    assert cfg.image_gen == ImageGenConfig()
-    # Round-trip: providers read the override from the dumped config.
-    dumped = cfg.model_dump(mode="python")
-    assert dumped["extra"]["image"] == "ghcr.io/foo:v1"
-    assert "image_gen" not in dumped  # all-defaults ImageGenConfig elided
+def test_bare_string_image_is_refused() -> None:
+    # The top-level string `image` (the old per-slot container-image override)
+    # is gone: `image_pin` replaced it and the profile-centric conversion
+    # rewrites it. `image` is the [image] settings table, so a string fails the
+    # strict schema naming the key (ADR-0029 §5).
+    with pytest.raises(ValidationError) as exc:
+        SlotConfig.model_validate({"name": "x", "port": 8081, "image": "ghcr.io/foo:v1"})
+    assert exc.value.errors()[0]["loc"] == ("image",)
+    # The replacement is a declared field.
+    assert SlotConfig(name="x", port=8081, image_pin="ghcr.io/foo:v1").image_pin == (
+        "ghcr.io/foo:v1"
+    )
 
 
 def test_load_slot_config_populates_image_gen(tmp_path: Path) -> None:
-    # Real loader path: [image] travels via _flatten_slot_toml's extra
-    # catch-all and must be hoisted into the typed field.
+    # Real loader path: _flatten_slot_toml hands the [image] table to the
+    # typed field.
     p = tmp_path / "img.toml"
     p.write_text(
         "[slot]\n"
@@ -105,23 +107,16 @@ def test_save_load_round_trip_preserves_image_gen(tmp_path: Path) -> None:
     assert reloaded.image_gen == cfg.image_gen
 
 
-def test_load_slot_config_string_image_survives_in_extra(tmp_path: Path) -> None:
-    # String `image` key under [slot] via the real loader: _flatten hoists
-    # it to top level, the collision guard parks it under extra["image"]
-    # (no hoist into image_gen, no ValidationError) — and it survives a
-    # save→reload round-trip for providers to read.
+def test_load_slot_config_refuses_a_string_image_naming_image_pin(tmp_path: Path) -> None:
     p = tmp_path / "agent.toml"
     p.write_text(
         '[slot]\nname = "agent"\nport = 8085\nimage = "ghcr.io/foo:v1"\n',
         encoding="utf-8",
     )
-    cfg = load_slot_config("agent", path=p)
-    assert cfg.extra["image"] == "ghcr.io/foo:v1"
-    assert cfg.image_gen == ImageGenConfig()
-    dst = tmp_path / "agent-rt.toml"
-    save_slot_config(cfg, path=dst)
-    reloaded = load_slot_config("agent", path=dst)
-    assert reloaded.extra["image"] == "ghcr.io/foo:v1"
+    with pytest.raises(ConfigParseError) as exc:
+        load_slot_config("agent", path=p)
+    assert "'image'" in str(exc.value)
+    assert "image_pin" in str(exc.value)
 
 
 def test_manifest_comfyui_pin_is_hal0s_own_runner_image() -> None:

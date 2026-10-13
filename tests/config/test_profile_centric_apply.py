@@ -317,6 +317,44 @@ def test_old_shape_slot_added_after_conversion_is_converted() -> None:
     assert late["profile"] != "chat"  # a generated profile keeps its 16000 window
 
 
+def test_retired_slot_keys_are_stripped_so_the_strict_slot_loads() -> None:
+    """``SlotConfig`` forbids unknown keys (ADR-0029 §5), so every key hal0
+    retired from a slot (``backend``, ``enabled``, ``lru``, ``runtime`` and a
+    bare ``image`` ref) must leave with the conversion, and the converted file
+    must pass the strict typed load."""
+    from hal0.config.loader import load_slot_config
+
+    production_install()
+    pca.migrate_profile_centric()
+    write_slot(
+        "31",
+        {
+            "id": 31,
+            "name": "retired",
+            "type": "llm",
+            "backend": "vulkan",
+            "enabled": True,
+            "lru": True,
+            "runtime": "container",
+            "image": "ghcr.io/foo:v1",
+            "profile": "chat",
+            "port": 8098,
+            "model": {"default": "untuned"},
+        },
+    )
+    with pytest.raises(Exception, match="unknown key"):
+        load_slot_config("31")
+    report = pca.migrate_profile_centric()
+    assert report.plan is not None and report.plan.changed, report.lines()
+    retired = tomllib.loads((paths.slots_config_dir() / "31.toml").read_text())
+    for key in ("backend", "enabled", "lru", "runtime", "image"):
+        assert key not in retired, key
+    assert retired["device"] == "gpu-vulkan"  # backend became device
+    assert load_slot_config("31").name == "retired"
+    for stem in (p.stem for p in paths.slots_config_dir().glob("*.toml")):
+        load_slot_config(stem)  # nothing the conversion wrote is rejected
+
+
 def test_mixed_profile_blocks_and_is_kept_verbatim() -> None:
     production_install()
     data = tomllib.loads(paths.profiles_toml().read_text())

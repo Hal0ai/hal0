@@ -221,9 +221,16 @@ class TestSlotConfig:
         SlotConfig(name="my_slot", port=8081)
         SlotConfig(name="slot1", port=8081)
 
-    def test_all_valid_backends(self) -> None:
+    def test_backend_is_not_a_slot_key(self) -> None:
+        """``backend`` was replaced by ``device``; the profile-centric conversion
+        rewrites it, so the strict schema no longer promotes it (ADR-0029 §5)."""
         for b in ("vulkan", "rocm", "flm", "moonshine", "kokoro", "cpu"):
-            SlotConfig(name="x", port=8081, backend=b)
+            with pytest.raises(ValidationError):
+                SlotConfig(name="x", port=8081, backend=b)
+
+    def test_all_valid_devices(self) -> None:
+        for d in ("gpu-rocm", "gpu-vulkan", "gpu-cuda", "cpu", "npu"):
+            assert SlotConfig(name="x", port=8081, device=d).device == d
 
     def test_all_valid_providers(self) -> None:
         for p in ("llama-server", "flm", "moonshine", "kokoro", "comfyui"):
@@ -238,11 +245,11 @@ class TestSlotConfig:
         with pytest.raises(ValidationError):
             SlotConfig(name="x", port=8081, idle_timeout_s=-1)
 
-    def test_extra_allow_keeps_unknown_keys(self) -> None:
-        """extra='allow' on SlotConfig keeps forward-compat keys."""
-        s = SlotConfig.model_validate({"name": "x", "port": 8081, "future_field": "foo"})
-        # Unknown top-level keys are kept on the model when extra="allow".
-        assert s.model_dump().get("future_field") == "foo"
+    def test_extra_forbid_refuses_unknown_keys(self) -> None:
+        """extra='forbid' on SlotConfig (ADR-0029 §5): no forward-compat keys."""
+        with pytest.raises(ValidationError) as ei:
+            SlotConfig.model_validate({"name": "x", "port": 8081, "future_field": "foo"})
+        assert "future_field" in str(ei.value)
 
 
 # ── ModelConfig ───────────────────────────────────────────────────────────────

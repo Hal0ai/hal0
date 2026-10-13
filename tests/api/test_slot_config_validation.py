@@ -1,14 +1,13 @@
 """Boundary validation on slot-config writes (PUT config / PATCH defaults /
 POST create) + configured port-range allocation.
 
-``SlotConfig``/``ModelConfig``/``ServerConfig`` are ``extra="allow"``, so a
-typo'd key used to persist silently and the intended setting never took
-effect. The routes now reject unknown keys with 400
-``validation.unknown_keys`` listing the offending paths, while all
-documented legacy aliases (``[model].ctx_size``, string ``image``, …) and
-actively-read extras (``type``, ``default``, ``lru``, ``default_voice``)
-keep working. Known fields are derived from the pydantic models
-dynamically, so schema additions (e.g. ``[server].env``) pass automatically.
+``SlotConfig``/``ModelConfig``/``ServerConfig`` are ``extra="forbid"``, so a
+typo'd key would persist a slot file that fails its next load. The routes
+reject unknown keys with 400 ``validation.unknown_keys`` listing the
+offending paths; the declared fields (``type``, ``default``,
+``default_voice``, …) are the whole vocabulary. Known fields are derived from
+the pydantic models dynamically, so schema additions (e.g. ``[server].env``)
+pass automatically.
 """
 
 from __future__ import annotations
@@ -119,15 +118,38 @@ def test_put_config_refuses_server_extra_args(slot_toml: Path, client: TestClien
     assert "server" not in _read(slot_toml)
 
 
-def test_put_config_tolerated_extras_pass(slot_toml: Path, client: TestClient) -> None:
-    """default_voice (voice settings) and string image override keep working."""
-    r = client.put("/api/slots/chat/config", json={"default_voice": "Ryan"})
-    assert r.status_code == 200, r.text
-    r = client.put("/api/slots/chat/config", json={"image": "ghcr.io/hal0ai/toolbox:vulkan"})
-    assert r.status_code == 200, r.text
+def test_put_config_declared_fields_pass(slot_toml: Path, client: TestClient) -> None:
+    """Every key the drawer sends is a declared field: voice settings, the
+    per-slot output-sanity opt-out, the type and the image pin."""
+    for body in (
+        {"default_voice": "Ryan"},
+        {"output_sanity": False},
+        {"type": "llm", "default": True},
+        {"image_pin": "ghcr.io/hal0ai/toolbox:vulkan"},
+    ):
+        r = client.put("/api/slots/chat/config", json=body)
+        assert r.status_code == 200, r.text
     on_disk = _read(slot_toml)
     assert on_disk["default_voice"] == "Ryan"
-    assert on_disk["image"] == "ghcr.io/hal0ai/toolbox:vulkan"
+    assert on_disk["output_sanity"] is False
+    assert on_disk["image_pin"] == "ghcr.io/hal0ai/toolbox:vulkan"
+
+
+def test_put_config_refuses_keys_the_old_allow_list_tolerated(
+    slot_toml: Path, client: TestClient
+) -> None:
+    """``lru`` (retired), ``default_language`` (never read) and a bare ``image``
+    ref (now ``image_pin``) would fail the slot's next load: refused."""
+    before = slot_toml.read_text(encoding="utf-8")
+    for body, code in (
+        ({"lru": True}, "slot.removed_key_denied"),
+        ({"default_language": "Auto"}, "validation.unknown_keys"),
+        ({"image": "ghcr.io/hal0ai/toolbox:vulkan"}, "validation.unknown_keys"),
+    ):
+        r = client.put("/api/slots/chat/config", json=body)
+        assert r.status_code == 400, r.text
+        assert r.json()["error"]["code"] == code
+    assert slot_toml.read_text(encoding="utf-8") == before
 
 
 # ── model-table writes through PUT /config ──────────────────────────────────

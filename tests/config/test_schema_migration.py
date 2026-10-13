@@ -60,23 +60,17 @@ class TestSlotConfigDevice:
             ("cpu", "cpu"),
         ],
     )
-    def test_legacy_backend_promotes_to_device(
+    def test_legacy_backend_is_converted_not_promoted(
         self, legacy_backend: str, expected_device: str
     ) -> None:
-        # Construct WITHOUT device — promotion should fill it from backend.
-        # ``backend`` is no longer a model field (P2-device: ``device`` is
-        # the sole persisted truth) — the promote-then-drop shim consumes
-        # it and it does not survive on the model.
-        s = SlotConfig(name="x", port=8081, backend=legacy_backend)
-        assert s.device == expected_device
-        assert "backend" not in s.model_dump()
-
-    def test_explicit_device_wins_over_legacy_backend(self) -> None:
-        # If both are passed, ``device`` is authoritative; ``backend`` is
-        # dropped either way.
-        s = SlotConfig(name="x", port=8081, backend="vulkan", device="cpu")
-        assert s.device == "cpu"
-        assert "backend" not in s.model_dump()
+        # ``backend`` is not a slot key any more (P2-device: ``device`` is the
+        # sole persisted truth) and the strict schema (ADR-0029 §5) no longer
+        # promotes it: the profile-centric conversion rewrites it to ``device``
+        # (the same mapping), and a file still carrying it fails the load.
+        with pytest.raises(ValidationError) as ei:
+            SlotConfig(name="x", port=8081, backend=legacy_backend)
+        assert "backend" in str(ei.value)
+        assert map_backend_to_device(legacy_backend) == expected_device
 
 
 # ── map_backend_to_device ────────────────────────────────────────────────────

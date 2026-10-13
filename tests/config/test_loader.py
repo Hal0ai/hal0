@@ -216,20 +216,18 @@ class TestSlotConfigRoundTrip:
         assert "device" in str(ei.value)
         assert "gpu-rcom" in str(ei.value)
 
-    def test_load_with_legacy_backend_only_promotes_to_device(self, tmp_hal0_home: str) -> None:
-        """A legacy on-disk ``backend``-only slot TOML (no ``device``) must
-        still resolve to the right hardware — the promote-then-drop shim
-        (``SlotConfig._promote_backend_to_device``) is the ONLY thing that
-        keeps a pre-device slot TOML from silently regressing to
-        DEFAULT_DEVICE. There is no on-disk slot-TOML migration for this."""
+    def test_load_with_legacy_backend_is_refused_naming_device(self, tmp_hal0_home: str) -> None:
+        """``backend`` was replaced by ``device``. The profile-centric conversion
+        rewrites it (``backend`` becomes ``device``); the strict schema no longer
+        promotes it, and the load error names the replacement."""
         paths.slots_config_dir().mkdir(parents=True, exist_ok=True)
         (paths.slots_config_dir() / "legacy-cpu.toml").write_text(
             '[slot]\nname = "legacy-cpu"\nport = 8081\nbackend = "cpu"\n'
         )
-        loaded = load_slot_config("legacy-cpu")
-        assert loaded.device == "cpu"
-        # ``backend`` is popped, not round-tripped, on the in-memory model.
-        assert "backend" not in loaded.model_dump()
+        with pytest.raises(ConfigParseError) as ei:
+            load_slot_config("legacy-cpu")
+        assert "'backend'" in str(ei.value)
+        assert "device" in str(ei.value)
 
     def test_list_slots_empty(self, tmp_hal0_home: str) -> None:
         assert list_slots() == []
@@ -252,20 +250,18 @@ class TestSlotConfigRoundTrip:
         assert data["slot"]["port"] == 8081
         assert "model" in data
 
-    def test_load_preserves_extra_sections(self, tmp_hal0_home: str) -> None:
-        """Unknown top-level sections round-trip via `extra` so hand-edits survive."""
+    def test_load_refuses_an_unknown_section(self, tmp_hal0_home: str) -> None:
+        """A table the schema does not declare fails the load, naming it (no
+        catch-all keeps hand-edits alive: ADR-0029 §5)."""
         paths.slots_config_dir().mkdir(parents=True, exist_ok=True)
-        (paths.slots_config_dir() / "primary.toml").write_text(
+        path = paths.slots_config_dir() / "primary.toml"
+        path.write_text(
             '[slot]\nname = "primary"\nport = 8081\n[custom]\nthreads = 12\nnote = "hand edit"\n'
         )
-        cfg = load_slot_config("primary")
-        assert cfg.extra.get("custom", {}).get("threads") == 12
-
-        # Round-trip preserves the [custom] section.
-        save_slot_config(cfg)
-        with open(paths.slots_config_dir() / "primary.toml", "rb") as f:
-            data = tomllib.load(f)
-        assert data["custom"] == {"threads": 12, "note": "hand edit"}
+        with pytest.raises(ConfigParseError) as ei:
+            load_slot_config("primary")
+        assert "'custom'" in str(ei.value)
+        assert str(path) in str(ei.value)
 
     # ── flat vs nested slot TOML shape (#1087) ───────────────────────────
 
@@ -290,7 +286,7 @@ class TestSlotConfigRoundTrip:
         assert cfg.model.default == "qwen3-4b"
 
     def test_load_flat_slot_toml_hoists_sibling_tables(self, tmp_hal0_home: str) -> None:
-        """Flat slot files keep sibling tables typed ([server]) or in extra."""
+        """Flat slot files hand sibling tables to their typed fields ([server])."""
         paths.slots_config_dir().mkdir(parents=True, exist_ok=True)
         (paths.slots_config_dir() / "primary.toml").write_text(
             'name = "primary"\n'
@@ -298,13 +294,10 @@ class TestSlotConfigRoundTrip:
             'profile = "chat-gpu"\n'
             "[server.env]\n"
             'HSA_OVERRIDE_GFX_VERSION = "11.5.1"\n'
-            "[custom]\n"
-            "threads = 12\n"
         )
         cfg = load_slot_config("primary")
         assert cfg.profile == "chat-gpu"
         assert cfg.server.env == {"HSA_OVERRIDE_GFX_VERSION": "11.5.1"}
-        assert cfg.extra.get("custom", {}).get("threads") == 12
 
     def test_load_flat_slot_toml_infers_name_from_filename(self, tmp_hal0_home: str) -> None:
         """A flat TOML omitting `name` still names the slot from its stem."""

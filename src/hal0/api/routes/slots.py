@@ -459,12 +459,12 @@ def _validation_error_details(exc: ValidationError) -> dict[str, str]:
 # site already raises for the equivalent bad-value case today.
 #
 # The SlotConfig config-write pair — create_slot / update_slot_config — is
-# deliberately LEFT LOOSE: those bodies are ``extra="allow"`` and already
-# gated by ``_reject_unknown_config_keys`` (dynamic field-set validation
-# against the SlotConfig/ModelConfig/ServerConfig pydantic schemas). Adding
-# a second, narrower pydantic model in front of that boundary would
-# duplicate it and risk drifting out of sync with the real schema — the
-# existing boundary IS the typed layer for those two.
+# deliberately LEFT LOOSE: those bodies are loose dicts already gated by
+# ``_reject_unknown_config_keys`` (dynamic field-set validation against the
+# SlotConfig/ModelConfig/ServerConfig pydantic schemas). Adding a second,
+# narrower pydantic model in front of that boundary would duplicate it and
+# risk drifting out of sync with the real schema — the existing boundary IS
+# the typed layer for those two.
 
 
 class _RenameSlotBody(BaseModel):
@@ -528,41 +528,25 @@ def _rerender_slot_unit_best_effort(cfg: dict[str, Any]) -> None:
 
 
 def _reject_unknown_config_keys(payload: dict[str, Any]) -> None:
-    """400 when a slot-config write body carries keys the schema doesn't know.
+    """400 when a slot-config write body carries keys the schema doesn't declare.
 
-    ``SlotConfig``/``ModelConfig``/``ServerConfig`` are ``extra="allow"`` so a
-    typo'd key (``ctx_sizee``, ``enabeld``) used to persist to TOML silently
-    and the intended setting never took effect. The boundary now validates
-    against :func:`hal0.slot_config.unknown_slot_config_keys` (field sets
-    derived dynamically from the pydantic models, tolerating the documented
-    legacy aliases like ``[model].ctx_size`` and the string ``image``
-    override) and rejects unknown keys with the paths listed.
+    ``SlotConfig``/``ModelConfig``/``ServerConfig`` are ``extra="forbid"``, so
+    a typo'd key (``ctx_sizee``, ``enabeld``) would persist a slot file that
+    fails its next load. Thin route-layer wrapper over
+    :func:`hal0.slot_config.reject_unknown_slot_keys` (the field sets are derived
+    dynamically from the pydantic models; there is no allow-list beyond them),
+    which the in-process write guard runs too.
 
     Called AFTER :func:`_reject_slot_tuning_keys` at every call site —
     ``mtp``/``enable_thinking``/``vision`` would otherwise just fall out as
     generic "unknown slot config key(s)" here instead of the more actionable
-    "belongs on the model" message.
-
-    Keys REMOVED from the schema (``enabled``, #1369) are split out the same
-    way, but from inside this function rather than at each call site so all
-    three write boundaries stay in sync: they are spelled correctly, so a
-    "check spelling" hint would send the caller hunting for a typo that
-    doesn't exist.
+    "belongs on a profile" message. Keys REMOVED from the schema (``enabled``,
+    #1369) are split out inside the shared function, so all write boundaries
+    stay in sync.
     """
-    from hal0.slot_config import reject_removed_slot_keys, unknown_slot_config_keys
+    from hal0.slot_config import reject_unknown_slot_keys
 
-    reject_removed_slot_keys(payload)
-    unknown = unknown_slot_config_keys(payload)
-    if unknown:
-        raise BadRequest(
-            "unknown slot config key(s): " + ", ".join(unknown),
-            details={
-                "unknown_keys": unknown,
-                "hint": "check spelling against the SlotConfig schema "
-                "(known sub-tables: [model], [server], [npu], [image])",
-            },
-            code="validation.unknown_keys",
-        )
+    reject_unknown_slot_keys(payload)
 
 
 def _reject_slot_tuning_keys(payload: dict[str, Any]) -> None:

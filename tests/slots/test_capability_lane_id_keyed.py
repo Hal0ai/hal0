@@ -360,10 +360,10 @@ async def test_trio_reconcile_normalizes_id_keyed_shadow(tmp_hal0_home: str) -> 
 async def test_trio_reconcile_normalizes_inside_the_nested_slot_table(tmp_hal0_home: str) -> None:
     """A ``[slot]``-nested shadow must be repaired IN its authoritative table.
 
-    ``_flatten_slot_toml`` treats ``[slot]`` as authoritative and drops root
-    scalars into ``extra``, so normalizing at the root of a nested file is
-    invisible to the runtime — and the duplicated root values then make the
-    next pass look converged and suppress the repair forever.
+    ``[slot]`` is authoritative (it wins over a root scalar on every reader),
+    so normalizing at the root of a nested file is invisible to the runtime —
+    and the duplicated root values then make the next pass look converged and
+    suppress the repair forever.
     """
     home = Path(tmp_hal0_home)
     _anchor_toml(home)
@@ -387,7 +387,7 @@ async def test_trio_reconcile_normalizes_inside_the_nested_slot_table(tmp_hal0_h
     assert raw["slot"]["port"] == 8088
     assert raw["slot"]["served_by"] == "flm"
     assert raw["slot"]["profile"] == "flm"
-    # No shadow root scalars — the loader would drop those into ``extra``.
+    # No shadow root scalars — ``[slot]`` would shadow them on every reader.
     assert not [k for k, v in raw.items() if k != "slot" and not isinstance(v, dict)]
     # And the repaired file must load through the real loader as normalized —
     # the assertion that actually catches a root-scalar write on a nested file.
