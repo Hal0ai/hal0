@@ -284,6 +284,21 @@ def test_install_text_redaction_masks_a_learned_value_where_it_reappears() -> No
     assert "reused bare: ***REDACTED*** end" in out
 
 
+def test_install_text_redaction_masks_many_distinct_reappearing_secrets() -> None:
+    """#2533: with thousands of distinct secrets, including ones that are
+    prefixes of each other, every reappearance is masked in the bundle
+    text, wherever it lands on a line."""
+    secrets = [f"Tok{i:05d}xyz" for i in range(3_000)]
+    secrets += [s + "Extra" for s in secrets[::7]]
+    text = "\n".join(
+        f"export API_TOKEN={s}\ncurl https://example.invalid/?t={s}&n=1\nbare {s}, {s}."
+        for s in secrets
+    )
+    out = doctor_bundle._redact_install_text(text)
+    assert not [s for s in secrets if s in out]
+    assert "Tok0" not in out
+
+
 def test_install_text_redaction_leaves_lookalikes_alone() -> None:
     text = "llama: max_tokens=4096\nlayout keyboard: us\nport 14096 budget 4096\n"
     assert doctor_bundle._redact_install_text(text) == text.rstrip("\n")

@@ -788,6 +788,129 @@ class TestHyphenatedSecretNames:
         assert redact_secret_named_values({"max_tokens": 1}) == {"max_tokens": 1}
 
 
+class TestShareableLiteralsSinglePass:
+    """#2533: harvested secrets are masked in one scan, with the same result
+    as one ``str.replace`` per secret, longest first."""
+
+    @staticmethod
+    def _loop(text: str, literals: list[str]) -> str:
+        for literal in literals:
+            text = text.replace(literal, MASK)
+        return text
+
+    @pytest.mark.parametrize(
+        ("text", "literals"),
+        [
+            # A longer literal wins over a shorter one that starts earlier.
+            ("aaaaaaaaBBBBBBBB", ["aaaaaaaBBBBBBBB", "aaaaaaaaB"]),
+            # A substring is masked only where its container is not.
+            ("x=abcdefghij y=cdefghij z", ["abcdefghij", "cdefghij"]),
+            # Overlapping occurrences of one literal: left to right.
+            ("aaaaaaaaaaaaaaaaaaaaa", ["aaaaaaaa"]),
+            # Equal length, overlapping: list order decides.
+            ("xabcdefgh", ["xabcdefg", "abcdefgh"]),
+            ("xabcdefgh", ["abcdefgh", "xabcdefg"]),
+            # A repeated literal masks nothing more.
+            ("s3cr3tvalue s3cr3tvalue", ["s3cr3tvalue", "s3cr3tvalue"]),
+            # Literals that could match a MASK take the loop itself.
+            ("abc***x abc", ["abc*", "abc***x", "***x"]),
+            ("vD***REDACTED***x", ["vD", "D***R"]),
+            ("a\nb.c(d)[e]^$", ["\nb.c(", "(d)[e]^$"]),
+        ],
+    )
+    def test_matches_one_replace_per_literal(self, text: str, literals: list[str]) -> None:
+        from hal0.redaction import _mask_literals
+
+        assert _mask_literals(text, literals) == self._loop(text, literals)
+
+    def test_a_longer_literal_wins_over_an_earlier_shorter_one(self) -> None:
+        from hal0.redaction import _mask_literals
+
+        out = _mask_literals("aaaaaaaaBBBBBBBB", ["aaaaaaaBBBBBBBB", "aaaaaaaaB"])
+        assert out == f"a{MASK}"
+
+    @pytest.mark.parametrize("value", ["val{:07d}", "v*{:07d}"])
+    def test_800kb_of_distinct_secrets_is_fast(self, value: str) -> None:
+        """18 s on main for the plain form; a ``*`` inside a value that
+        cannot touch a MASK keeps the single pass. Each value also appears
+        bare on its own line, which only the harvested-literal pass masks,
+        so the output proves that pass ran over every value."""
+        import time
+
+        text = "\n".join(f"token={value.format(i)}\n{value.format(i)}" for i in range(45_000))
+        assert len(text) > 700_000
+        start = time.perf_counter()
+        out = redact_shareable_text(text)
+        elapsed = time.perf_counter() - start
+        assert elapsed < 5.0, f"{len(text)} chars took {elapsed:.2f}s"
+        assert out == "\n".join([f"token={MASK}\n{MASK}"] * 45_000)
+
+    def test_differential_against_the_loop(self) -> None:
+        """Seeded random literal sets over tiny alphabets (overlaps,
+        substrings, repeats, ties, MASK fragments, regex metacharacters):
+        the single pass equals the loop and leaves no literal behind that
+        the loop would have masked."""
+        import random
+
+        from hal0.redaction import _mask_literals
+
+        rng = random.Random(2533)
+        alphabets = ["ab", "abc", "aB*", "a*RED", "xy\n.", "é€a", "*R", "a(b)[", "\\a"]
+        for _ in range(20_000):
+            alphabet = rng.choice(alphabets)
+            text = "".join(rng.choice(alphabet) for _ in range(rng.randint(0, 50)))
+            literals = []
+            for _ in range(rng.randint(1, 8)):
+                if text and rng.random() < 0.7:
+                    i = rng.randint(0, len(text) - 1)
+                    literals.append(text[i : rng.randint(i + 1, min(len(text), i + 12))])
+                else:
+                    literals.append("".join(rng.choice(alphabet) for _ in range(rng.randint(1, 9))))
+            if rng.random() < 0.5:
+                literals.sort(key=len, reverse=True)
+            assert _mask_literals(text, literals) == self._loop(text, literals), (text, literals)
+
+    @pytest.mark.parametrize(
+        ("setting", "value"),
+        [("_LITERAL_TRIE_MAX_NESTING", 0), ("_LITERAL_OCCURRENCES_PER_CHAR_MAX", 0)],
+    )
+    def test_fallbacks_still_mask_every_secret(
+        self, setting: str, value: int, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Past the nesting or occurrence cap the exact loop runs, so every
+        harvested secret is still masked, including bare reoccurrences."""
+        import hal0.redaction as redaction
+
+        monkeypatch.setattr(redaction, setting, value)
+        secrets = ["hunter2hunter2", "hunter2hunter2xyz", "s3cr3t-value-abc"]
+        text = "\n".join(f"password={s}\nechoed {s} and {s}." for s in secrets)
+        out = redact_shareable_text(text)
+        assert not any(s in out for s in secrets), out
+        assert out == self._loop(text, sorted(secrets, key=len, reverse=True))
+
+    def test_uncompilable_scan_falls_back_to_the_loop(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """If ``re`` cannot compile the trie pattern, the loop masks
+        instead: a compile failure never costs a secret its mask."""
+        import re
+
+        import hal0.redaction as redaction
+
+        real_compile = re.compile
+
+        def failing_compile(pattern: object, *args: object, **kwargs: object) -> object:
+            if isinstance(pattern, str) and pattern.startswith("(?=("):
+                raise RecursionError("maximum recursion depth exceeded")
+            return real_compile(pattern, *args, **kwargs)  # type: ignore[call-overload]
+
+        monkeypatch.setattr(redaction.re, "compile", failing_compile)
+        text = "api_key=abcdefgh12345 then abcdefgh12345 again"
+        out = redact_shareable_text(text)
+        assert "abcdefgh12345" not in out
+        assert out == f"api_key={MASK} then {MASK} again"
+
+
 class TestRedactionTimeIsLinear:
     """#2501: a long run of name characters is redacted in linear time.
 
