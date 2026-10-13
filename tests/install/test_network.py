@@ -8,6 +8,10 @@ operator reaches the dashboard on — and therefore whatever URL
 
 from __future__ import annotations
 
+import os
+import tomllib
+from pathlib import Path
+
 import pytest
 
 from hal0.install import network
@@ -110,3 +114,160 @@ def test_main_emits_env_lines(capsys: pytest.CaptureFixture[str]) -> None:
     out = capsys.readouterr().out
     keys = {line.split("=", 1)[0] for line in out.strip().splitlines()}
     assert keys == {"HAL0_BIND_HOST", "HAL0_HOSTNAME", "HAL0_ALLOWED_ORIGINS"}
+
+
+# ── persisted [network].public_url (#2382) ─────────────────────────────────
+
+
+def _toml(tmp_path: Path, body: str = "[meta]\nschema_version = 1\n") -> Path:
+    target = tmp_path / "hal0.toml"
+    target.write_text(body, encoding="utf-8")
+    return target
+
+
+def _origins(env: dict[str, str]) -> list[str]:
+    return env["HAL0_ALLOWED_ORIGINS"].split(",")
+
+
+def test_network_env_leaves_persisted_public_url_to_the_runtime(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A URL already in hal0.toml stays out of the managed block: hal0-api adds
+    it at runtime, and a copy in api.env would survive `public-url clear`."""
+    target = _toml(tmp_path, '[network]\npublic_url = "https://hal0.example.com"\n')
+    monkeypatch.delenv("HAL0_PUBLIC_URL", raising=False)
+    env = network.network_env(hostname="h", port=8080, lan_ips=[], config_path=target)
+    assert [o for o in _origins(env) if o.startswith("https:")] == []
+    monkeypatch.setenv("HAL0_PUBLIC_URL", "https://HAL0.example.com/")  # same URL, other spelling
+    env = network.network_env(hostname="h", port=8080, lan_ips=[], config_path=target)
+    assert [o for o in _origins(env) if o.startswith("https:")] == []
+
+
+def test_network_env_adds_a_differing_install_time_url(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = _toml(tmp_path, '[network]\npublic_url = "https://persisted.example.com"\n')
+    monkeypatch.setenv("HAL0_PUBLIC_URL", "https://env.example.com:8443/app")
+    env = network.network_env(hostname="h", lan_ips=[], config_path=target)
+    assert [o for o in _origins(env) if o.startswith("https:")] == ["https://env.example.com:8443"]
+    env = network.network_env(
+        hostname="h", lan_ips=[], public_url="answer.example.com", config_path=target
+    )
+    assert [o for o in _origins(env) if o.startswith("https:")] == ["https://answer.example.com"]
+
+
+@pytest.mark.parametrize("bad", ["https://evil.example.com$(id)", "https://a,b.example.com"])
+def test_network_env_drops_an_invalid_install_time_url(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, bad: str
+) -> None:
+    """Nothing that fails the [network] host rules reaches the root-written api.env."""
+    monkeypatch.setenv("HAL0_PUBLIC_URL", bad)
+    env = network.network_env(hostname="h", lan_ips=[], config_path=_toml(tmp_path))
+    assert [o for o in _origins(env) if o.startswith("https:")] == []
+
+
+def test_persisted_public_url_tolerates_missing_or_broken_config(tmp_path: Path) -> None:
+    assert network.persisted_public_url(tmp_path / "absent.toml") is None
+    assert network.persisted_public_url(_toml(tmp_path, "[network\n")) is None
+
+
+def test_persist_public_url_writes_once_when_unset(tmp_path: Path) -> None:
+    target = _toml(tmp_path, '[telemetry]\nchannel = "preview"\n')
+    target.chmod(0o640)
+    msg = network.persist_public_url("https://Hal0.Example.com/", target)
+    assert msg.startswith("persisted HAL0_PUBLIC_URL")
+    raw = tomllib.loads(target.read_text(encoding="utf-8"))
+    assert raw["network"]["public_url"] == "https://hal0.example.com"
+    assert raw["telemetry"]["channel"] == "preview"
+    assert target.stat().st_mode & 0o777 == 0o640
+    assert [p.name for p in tmp_path.iterdir() if p.name.endswith(".tmp")] == []
+
+    again = network.persist_public_url("https://hal0.example.com", target)
+    assert again.startswith("[network].public_url already")
+
+
+def test_persist_public_url_accepts_the_bare_host_form(tmp_path: Path) -> None:
+    """``HAL0_PUBLIC_URL=chat.example.com`` has always meant https; persist it so."""
+    target = _toml(tmp_path)
+    assert network.persist_public_url("chat.example.com", target).startswith("persisted")
+    raw = tomllib.loads(target.read_text(encoding="utf-8"))
+    assert raw["network"]["public_url"] == "https://chat.example.com"
+
+
+def test_persist_public_url_never_overwrites(tmp_path: Path) -> None:
+    target = _toml(tmp_path, '[network]\npublic_url = "https://kept.example.com"\n')
+    before = target.read_text(encoding="utf-8")
+    msg = network.persist_public_url("https://new.example.com", target)
+    assert "left alone" in msg
+    assert target.read_text(encoding="utf-8") == before
+
+
+@pytest.mark.parametrize(
+    "bad", ["ftp://x.example.com", "https://x.example.com/?q=1", "https://x$(id).example.com"]
+)
+def test_persist_public_url_rejects_invalid(tmp_path: Path, bad: str) -> None:
+    target = _toml(tmp_path)
+    before = target.read_text(encoding="utf-8")
+    assert "not persisted" in network.persist_public_url(bad, target)
+    assert target.read_text(encoding="utf-8") == before
+
+
+def test_persist_public_url_refuses_symlink_and_missing(tmp_path: Path) -> None:
+    real = _toml(tmp_path)
+    link = tmp_path / "link.toml"
+    link.symlink_to(real)
+    assert "refusing" in network.persist_public_url("https://x.example.com", link)
+    missing = network.persist_public_url("https://x.example.com", tmp_path / "nope.toml")
+    assert missing.endswith("yet")
+
+
+def test_persist_public_url_never_touches_the_path_after_the_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The write runs as root in a directory the hal0 account can write. A
+    symlink swapped in right after the rename must not receive a chown or a
+    chmod: owner and mode go on the temp file's descriptor before the rename,
+    and nothing resolves the final path by name afterwards."""
+    target = _toml(tmp_path)
+    target.chmod(0o640)
+    victim = tmp_path / "victim"
+    victim.write_text("root-only\n", encoding="utf-8")
+    victim.chmod(0o600)
+
+    real_replace = os.replace
+    calls: list[tuple[str, str]] = []
+
+    def replace_then_swap(src: object, dst: object) -> None:
+        real_replace(src, dst)  # type: ignore[arg-type]
+        if os.fspath(dst) == str(target):  # type: ignore[arg-type]
+            os.unlink(target)
+            os.symlink(victim, target)
+
+    def record(name: str):  # type: ignore[no-untyped-def]
+        def _rec(path: object, *args: object, **kwargs: object) -> None:
+            calls.append((name, os.fspath(path)))  # type: ignore[arg-type]
+
+        return _rec
+
+    monkeypatch.setattr(os, "replace", replace_then_swap)
+    monkeypatch.setattr(os, "chown", record("chown"))
+    monkeypatch.setattr(os, "lchown", record("lchown"))
+    monkeypatch.setattr(os, "chmod", record("chmod"))
+
+    msg = network.persist_public_url("https://hal0.example.com", target)
+    assert msg.startswith("persisted"), msg
+    assert calls == []
+    assert victim.read_text(encoding="utf-8") == "root-only\n"
+    assert victim.stat().st_mode & 0o777 == 0o600
+
+
+def test_persist_public_url_main_is_noop_without_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.delenv("HAL0_PUBLIC_URL", raising=False)
+    target = _toml(tmp_path)
+    assert network.persist_public_url_main([str(target)]) == 0
+    assert capsys.readouterr().out == ""
+    monkeypatch.setenv("HAL0_PUBLIC_URL", "https://hal0.example.com")
+    assert network.persist_public_url_main([str(target)]) == 0
+    assert capsys.readouterr().out.startswith("persisted")

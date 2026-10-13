@@ -22,11 +22,13 @@ See PLAN.md §3, §5 Tier 1 ("pydantic-validated TOML schema at load time").
 
 from __future__ import annotations
 
+import ipaddress
 import logging
 import re
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Literal
+from urllib.parse import SplitResult, urlsplit
 
 from pydantic import (
     BaseModel,
@@ -2906,6 +2908,242 @@ class SecurityConfig(BaseModel):
     )
 
 
+#: Default port per scheme — an Origin a browser sends never carries it.
+_DEFAULT_PORTS: dict[str, int] = {"http": 80, "https": 443}
+
+
+#: One DNS label after IDNA encoding: letters, digits and inner hyphens.
+_DNS_LABEL = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
+#: Characters a stored public_url path may carry (RFC 3986 unreserved plus
+#: "/" and "%"). Nothing a shell or an env file would read specially.
+_URL_PATH = re.compile(r"^[A-Za-z0-9._~/%-]*$")
+
+
+#: Characters IDNA2003 (Python's ``idna`` codec) maps differently from the
+#: UTS #46 processing browsers use: ``faß.de`` encodes to ``fass.de`` here but
+#: to ``xn--fa-hia.de`` in a browser. Storing the codec's answer would allow a
+#: different host than the operator named, so these are refused outright.
+_IDNA_DEVIATIONS = frozenset("\u00df\u03c2\u200c\u200d")
+#: A last label the WHATWG URL parser reads as a number: the browser then
+#: parses the whole host as IPv4 (``0x7f.1`` is ``127.0.0.1``) or rejects it.
+_NUMERIC_LABEL = re.compile(r"^(?:[0-9]+|0x[0-9a-f]*)$")
+
+
+def _ipv6_origin_host(addr: ipaddress.IPv6Address) -> str:
+    """Serialise ``addr`` the way the WHATWG URL standard does, bracketed.
+
+    Lower-case hex pieces with the first longest run of two or more zero
+    pieces compressed to ``::``. Unlike :attr:`IPv6Address.compressed`, an
+    IPv4-mapped address stays in hex (``[::ffff:c000:201]``), which is what a
+    browser puts in ``Origin``.
+    """
+    value = int(addr)
+    pieces = [(value >> (112 - 16 * i)) & 0xFFFF for i in range(8)]
+    best_start, best_len, i = -1, 1, 0
+    while i < 8:
+        if pieces[i] != 0:
+            i += 1
+            continue
+        j = i
+        while j < 8 and pieces[j] == 0:
+            j += 1
+        if j - i > best_len:
+            best_start, best_len = i, j - i
+        i = j
+    if best_start < 0:
+        return "[" + ":".join(f"{p:x}" for p in pieces) + "]"
+    head = ":".join(f"{p:x}" for p in pieces[:best_start])
+    tail = ":".join(f"{p:x}" for p in pieces[best_start + best_len :])
+    return f"[{head}::{tail}]"
+
+
+def _canonical_host(host: str) -> str | None:
+    """Return ``host`` the way a browser serialises it in ``Origin``, or None.
+
+    IPv6 literals use the WHATWG serialisation (``[0:0::1]`` -> ``[::1]``),
+    IPv4 literals must be dotted-quad, and DNS names are IDNA-encoded to
+    punycode (``bücher.example`` -> ``xn--bcher-kva.example``) and then held
+    to a strict letters/digits/hyphen charset. Anything a browser would
+    serialise differently, and anything else (shell metacharacters, quotes,
+    commas, backslashes, NUL, wildcards), is refused: a stored origin must
+    only ever match the host the operator named, and these values reach the
+    root-written api.env through the installer.
+    """
+    if ":" in host:  # urlsplit strips the brackets from an IPv6 literal
+        if "%" in host:  # a zone id is local to this box; browsers never send one
+            return None
+        try:
+            return _ipv6_origin_host(ipaddress.IPv6Address(host))
+        except ValueError:
+            return None
+    if re.fullmatch(r"[0-9.]+", host):
+        try:
+            return str(ipaddress.IPv4Address(host))
+        except ValueError:
+            return None
+    if any(c in _IDNA_DEVIATIONS for c in host):
+        return None
+    try:
+        ascii_host = host.encode("idna").decode("ascii").lower()
+    except UnicodeError:
+        return None
+    # One trailing dot (a fully-qualified name) is kept: browsers send it as is.
+    core = ascii_host[:-1] if ascii_host.endswith(".") else ascii_host
+    labels = core.split(".")
+    if len(core) > 253 or not all(_DNS_LABEL.match(label) for label in labels):
+        return None
+    if _NUMERIC_LABEL.match(labels[-1]):
+        return None
+    return ascii_host
+
+
+def _split_http_url(value: str, *, what: str) -> tuple[str, str, SplitResult]:
+    """Parse ``value`` as an absolute http(s) URL; return ``(scheme, netloc, parts)``.
+
+    ``netloc`` comes back normalised the way a browser serialises an origin:
+    canonical host (see :func:`_canonical_host`) and the scheme's default
+    port dropped (``https://x:443`` is sent as ``Origin: https://x``).
+    Raises ``ValueError`` with an operator-readable message for anything else.
+    """
+    raw = value.strip()
+    if not raw:
+        raise ValueError(f"{what} must not be empty")
+    if "://" not in raw:
+        raise ValueError(f"{what} {raw!r} must start with http:// or https://")
+    try:
+        parts = urlsplit(raw)
+    except ValueError:
+        raise ValueError(f"{what} {raw!r} is not a valid URL") from None
+    scheme = parts.scheme.lower()
+    if scheme not in _DEFAULT_PORTS:
+        raise ValueError(f"{what} {raw!r} must use http or https, not {parts.scheme!r}")
+    if "@" in parts.netloc:
+        raise ValueError(f"{what} {raw!r} must not contain a user name or password")
+    if not parts.hostname:
+        raise ValueError(f"{what} {raw!r} has no host")
+    if any(c.isspace() for c in raw):
+        raise ValueError(f"{what} {raw!r} must not contain whitespace")
+    host = _canonical_host(parts.hostname)
+    if host is None:
+        raise ValueError(
+            f"{what} {raw!r} is not a valid host: use a DNS name, an IPv4 address "
+            "or a bracketed IPv6 address"
+        )
+    try:
+        port = parts.port
+    except ValueError:
+        raise ValueError(f"{what} {raw!r} has an invalid port") from None
+    if port == 0:
+        raise ValueError(f"{what} {raw!r} has an invalid port")
+    netloc = host if port is None or port == _DEFAULT_PORTS[scheme] else f"{host}:{port}"
+    return scheme, netloc, parts
+
+
+def normalise_origin(value: str) -> str:
+    """Validate ``value`` as a browser origin and return its canonical form.
+
+    An origin is ``scheme://host[:port]`` with ``http``/``https``, no path,
+    query or fragment, and no trailing slash (one is tolerated and dropped).
+    Used by :class:`NetworkConfig` and by the origin gates' allowlist merge
+    (:func:`hal0.api.agents._auth.allowed_origins`), so the value compared
+    against the ``Origin`` header is always the spelling a browser sends.
+    """
+    scheme, netloc, parts = _split_http_url(value, what="origin")
+    if parts.path not in ("", "/") or "?" in value or "#" in value:
+        raise ValueError(
+            f"origin {value.strip()!r} must be scheme://host[:port] only, "
+            "with no path, query or fragment"
+        )
+    return f"{scheme}://{netloc}"
+
+
+class NetworkConfig(BaseModel):
+    """``[network]`` — how browsers reach this box, beyond the installer's view (#2382).
+
+    The origin gates (the REST Origin check in ``hal0.api.auth`` and the
+    chat-proxy WebSocket gate in ``hal0.api.agents._auth``) accept the
+    ``HAL0_ALLOWED_ORIGINS`` list the installer derives into the managed
+    ``api.env`` block. That block is rewritten on every installer run, so an
+    origin hand-added there was lost on the next re-run. These keys are the
+    persisted, operator-owned additions: :func:`allowed_origins` merges the
+    origin of ``public_url`` and every ``extra_origins`` entry on top of the
+    env list at runtime. The installer never copies them into the managed
+    block, so removing one here revokes it on the next request.
+
+    Out of scope on purpose: the bind host, port and hostname stay in the
+    managed ``api.env`` block, because the systemd unit and avahi read them
+    before Python runs.
+
+    ``extra="forbid"`` (P3-schema Part C leaf-table policy, same as
+    ``[security]``): a typo'd key must fail loudly, not silently leave an
+    origin out of the allowlist.
+    """
+
+    model_config = {"populate_by_name": True, "extra": "forbid"}
+
+    public_url: str | None = Field(
+        default=None,
+        description=(
+            "The URL users reach hal0 at through a reverse proxy, e.g. "
+            "https://hal0.example.com. Must be an absolute http or https URL. "
+            "Its origin (scheme://host[:port]) is added to the browser-origin "
+            "allowlist on top of HAL0_ALLOWED_ORIGINS. Applies on the next "
+            "request, no restart. Unset = no reverse proxy."
+        ),
+    )
+
+    extra_origins: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Other browser origins allowed to make state-changing requests and "
+            "WebSocket upgrades, on top of HAL0_ALLOWED_ORIGINS: a second proxy, "
+            "a MagicDNS name, http://box.lan:8080. Each entry is "
+            "scheme://host[:port] with http or https and no path, stored without "
+            "a trailing slash and deduplicated. Applies on the next request, no "
+            "restart."
+        ),
+    )
+
+    @field_validator("public_url", mode="before")
+    @classmethod
+    def _check_public_url(cls, value: object) -> str | None:
+        if value is None:
+            return None
+        if not isinstance(value, str):
+            raise ValueError("public_url must be a string")
+        if not value.strip():
+            # An emptied Settings field means "unset", same as the key missing.
+            return None
+        scheme, netloc, parts = _split_http_url(value, what="public_url")
+        if "?" in value or "#" in value:
+            raise ValueError(f"public_url {value.strip()!r} must not carry a query or fragment")
+        path = parts.path.rstrip("/")
+        if not _URL_PATH.match(path):
+            raise ValueError(
+                f"public_url {value.strip()!r} has a path with characters other than "
+                "letters, digits and . _ ~ / % -"
+            )
+        return f"{scheme}://{netloc}{path}"
+
+    @field_validator("extra_origins", mode="before")
+    @classmethod
+    def _check_extra_origins(cls, value: object) -> list[str]:
+        if value is None:
+            return []
+        if isinstance(value, str):
+            raise ValueError("extra_origins must be a list of origins, not a single string")
+        if not isinstance(value, list | tuple):
+            raise ValueError("extra_origins must be a list of origins")
+        out: list[str] = []
+        for item in value:
+            if not isinstance(item, str):
+                raise ValueError(f"extra_origins entry {item!r} must be a string")
+            origin = normalise_origin(item)
+            if origin not in out:
+                out.append(origin)
+        return out
+
+
 class RealtimeConfig(BaseModel):
     """``[realtime]`` — the OpenAI-Realtime WebSocket surface (HP-realtime inc-1).
 
@@ -3051,6 +3289,7 @@ class Hal0Config(BaseModel):
     activity: ActivityConfig = Field(default_factory=ActivityConfig)
     brain_chat: BrainChatConfig = Field(default_factory=BrainChatConfig)
     security: SecurityConfig = Field(default_factory=SecurityConfig)
+    network: NetworkConfig = Field(default_factory=NetworkConfig)
     realtime: RealtimeConfig = Field(default_factory=RealtimeConfig)
 
 
@@ -3114,6 +3353,7 @@ __all__ = [
     "ModelConfig",
     "ModelsConfig",
     "NPUInfo",
+    "NetworkConfig",
     "NpuConfig",
     "ProfileConfig",
     "ProfilesConfig",
@@ -3132,5 +3372,6 @@ __all__ = [
     "map_backend_to_device",
     "model_family",
     "mtp_draft_device",
+    "normalise_origin",
     "resolve_chat_template",
 ]

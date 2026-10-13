@@ -28,7 +28,10 @@ from __future__ import annotations
 
 import os
 import socket
+import stat
+import tomllib
 from collections.abc import Iterable, Sequence
+from pathlib import Path
 
 # mDNS alias every hal0 box answers to (matches the port-less default the
 # WS gate has always shipped and the avahi ``hal0.service`` advertisement).
@@ -142,6 +145,7 @@ def network_env(
     public_url: str | None = None,
     port: int | None = None,
     lan_ips: Sequence[str] | None = None,
+    config_path: Path | None = None,
 ) -> dict[str, str]:
     """Resolve the three coherent network env vars from a bind choice.
 
@@ -150,11 +154,23 @@ def network_env(
     ``HAL0_ALLOWED_ORIGINS`` (comma-joined WS allowlist). Unset args fall
     back to env vars then the shipped defaults, so an all-default call
     still produces a working, coherent triple.
+
+    The reverse-proxy URL (``public_url`` arg, else ``HAL0_PUBLIC_URL``) is
+    validated like ``[network].public_url`` (a bare host means ``https://``);
+    an invalid one is dropped rather than written into api.env. When it
+    equals the ``[network].public_url`` persisted in ``config_path`` (default:
+    the canonical hal0.toml) it is left out of the env list on purpose:
+    hal0-api adds the persisted origin at runtime
+    (:func:`hal0.api.agents._auth.allowed_origins`), and a copy in the
+    managed block would outlive a later ``hal0 network public-url clear``
+    until the next installer run (#2382).
     """
     resolved_bind = (bind_host or os.environ.get("HAL0_BIND_HOST", "")).strip() or DEFAULT_BIND_HOST
     resolved_port = _coerce_port(port if port is not None else os.environ.get("HAL0_PORT"))
     resolved_host = resolve_hostname(hostname)
-    resolved_public = (public_url or os.environ.get("HAL0_PUBLIC_URL", "")).strip() or None
+    resolved_public = _validated_public_url(public_url or os.environ.get("HAL0_PUBLIC_URL", ""))
+    if resolved_public is not None and resolved_public == persisted_public_url(config_path):
+        resolved_public = None
     ips = list(lan_ips) if lan_ips is not None else detect_lan_ips()
 
     origins = derive_allowed_origins(
@@ -170,16 +186,148 @@ def network_env(
     }
 
 
-def main() -> int:
+def main(argv: Sequence[str] | None = None) -> int:
     """Emit ``KEY=value`` env lines for the installer to append to api.env.
 
     Invoked by ``install.sh`` via the freshly-installed venv so the whole
     derivation lives in exactly one place. Reads ``HAL0_BIND_HOST`` /
     ``HAL0_HOSTNAME`` / ``HAL0_PORT`` / ``HAL0_PUBLIC_URL`` / ``HAL0_LAN_IPS``
-    from the environment.
+    from the environment. The optional first argument is the hal0.toml path
+    (``install.sh`` passes ``sys.argv[1:]``) holding ``[network].public_url``;
+    without it the canonical hal0.toml is read.
     """
-    for key, value in network_env().items():
+    args = list(argv or ())
+    config_path = Path(args[0]) if args else None
+    for key, value in network_env(config_path=config_path).items():
         print(f"{key}={value}")
+    return 0
+
+
+# ── persisted public_url (hal0.toml [network], #2382) ──────────────────────
+
+
+def _public_url_or_error(value: str | None) -> tuple[str | None, str | None]:
+    """Validate an install-time public URL: ``(normalised, None)`` or ``(None, reason)``.
+
+    Accepts the documented bare-host form (``chat.example.com`` means
+    ``https://chat.example.com``), then applies the ``[network].public_url``
+    rules, so the installer and the config agree on what is valid.
+    """
+    from hal0.config.schema import NetworkConfig
+
+    raw = (value or "").strip()
+    if not raw:
+        return None, None
+    if "://" not in raw:
+        raw = f"https://{raw}"
+    try:
+        return NetworkConfig(public_url=raw).public_url, None
+    except ValueError as exc:
+        errors = getattr(exc, "errors", None)
+        reason = errors()[0]["msg"] if callable(errors) else str(exc)
+        return None, str(reason).removeprefix("Value error, ")
+
+
+def _validated_public_url(value: str | None) -> str | None:
+    return _public_url_or_error(value)[0]
+
+
+def persisted_public_url(config_path: Path | None = None) -> str | None:
+    """Return hal0.toml's ``[network].public_url``, or None.
+
+    Best-effort: a missing or unloadable config reads as unset.
+    """
+    from hal0.config.loader import load_hal0_config
+
+    try:
+        return load_hal0_config(config_path).network.public_url
+    except Exception:
+        return None
+
+
+def _read_regular_nofollow(target: Path) -> tuple[str, os.stat_result]:
+    """Read ``target`` without following a symlink; return its text and stat."""
+    fd = os.open(target, os.O_RDONLY | os.O_NOFOLLOW)
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            raise OSError(f"{target} is not a regular file")
+        with os.fdopen(fd, "r", encoding="utf-8") as fh:
+            fd = -1
+            return fh.read(), st
+    finally:
+        if fd >= 0:
+            os.close(fd)
+
+
+def persist_public_url(url: str, config_path: Path | None = None) -> str:
+    """Write ``url`` into hal0.toml ``[network].public_url`` unless one is set.
+
+    Migration for the install-time ``HAL0_PUBLIC_URL`` (#2382): before this,
+    the value only reached the managed ``api.env`` block and was lost on the
+    next installer run without the env var. Persisting it once makes
+    ``hal0.toml`` its home. An existing value is never overwritten.
+
+    Returns a one-line, operator-readable outcome. Never raises: the
+    install itself is fine either way. Takes the same ``hal0.toml.lock`` as
+    every other writer (the API may be live) and reads the config with
+    ``O_NOFOLLOW``. This runs as root while ``/etc/hal0`` is writable by the
+    hal0 account, so the write sets owner and mode on the temp file's
+    descriptor (``write_toml_atomic(owner=, mode=)``; ``mkstemp`` opens it
+    ``O_EXCL | O_NOFOLLOW``) and the rename is the last operation on the
+    path: nothing resolves ``hal0.toml`` by name afterwards, so a symlink
+    swapped in then never receives a chown or chmod.
+    """
+    from hal0.config import paths
+    from hal0.config.loader import _drop_dead_keys, hal0_config_file_lock, write_toml_atomic
+    from hal0.config.schema import Hal0Config
+
+    target = Path(config_path) if config_path is not None else paths.hal0_toml()
+    wanted, reason = _public_url_or_error(url)
+    if wanted is None:
+        if reason is None:
+            return "HAL0_PUBLIC_URL is empty; nothing to persist"
+        return f"HAL0_PUBLIC_URL not persisted: {reason}"
+    try:
+        with hal0_config_file_lock(target):
+            try:
+                text, st = _read_regular_nofollow(target)
+            except FileNotFoundError:
+                return f"HAL0_PUBLIC_URL not persisted: no {target} yet"
+            except OSError as exc:
+                return f"HAL0_PUBLIC_URL not persisted: refusing to use {target}: {exc}"
+            cfg = Hal0Config.model_validate(_drop_dead_keys(tomllib.loads(text)))
+            existing = cfg.network.public_url
+            if existing is not None:
+                if existing == wanted:
+                    return f"[network].public_url already {existing}"
+                return (
+                    f"[network].public_url is already {existing}; left alone "
+                    f"(HAL0_PUBLIC_URL={wanted} was not persisted). "
+                    "Change it with: hal0 network public-url set <url>"
+                )
+            cfg.network.public_url = wanted
+            write_toml_atomic(
+                target,
+                cfg.model_dump(mode="python", exclude_none=True),
+                mode=stat.S_IMODE(st.st_mode),
+                owner=(st.st_uid, st.st_gid),
+            )
+    except Exception as exc:
+        return f"HAL0_PUBLIC_URL not persisted: {exc}"
+    return f"persisted HAL0_PUBLIC_URL as [network].public_url = {wanted} in {target}"
+
+
+def persist_public_url_main(argv: Sequence[str] | None = None) -> int:
+    """``install.sh`` entry point: persist ``HAL0_PUBLIC_URL`` (argv[0] = hal0.toml).
+
+    Prints the one-line outcome on stdout and always exits 0.
+    """
+    args = list(argv or ())
+    url = os.environ.get("HAL0_PUBLIC_URL", "").strip()
+    if not url:
+        return 0
+    print(persist_public_url(url, Path(args[0]) if args else None))
     return 0
 
 
@@ -241,5 +389,8 @@ __all__ = [
     "detect_lan_ips",
     "main",
     "network_env",
+    "persist_public_url",
+    "persist_public_url_main",
+    "persisted_public_url",
     "resolve_hostname",
 ]

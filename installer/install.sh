@@ -1432,15 +1432,33 @@ API_ENV="${ETC_DIR}/api.env"
 # mismatch). All derivation lives in src/hal0/install/network.py (single
 # source), invoked via the just-installed venv; a failure degrades to a
 # bare bind var rather than aborting the install.
+#
+# BEGIN hal0-network-derive (#2382)
+# A reverse-proxy URL lives in hal0.toml [network].public_url, not in the
+# managed block below: the block is rewritten on every run, so a URL that
+# only lived there was lost on the next re-run without HAL0_PUBLIC_URL. An
+# install-time HAL0_PUBLIC_URL is persisted there once (never overwriting a
+# set value). hal0-api adds the [network] origins to HAL0_ALLOWED_ORIGINS at
+# runtime, so every re-run keeps them, and the derivation leaves a persisted
+# URL out of the block so `hal0 network public-url clear` really revokes it.
+if [[ -n "${HAL0_PUBLIC_URL:-}" ]]; then
+    PUBLIC_URL_MSG="$(
+        "${VENV_DIR}/bin/python" -c 'import sys; from hal0.install.network import persist_public_url_main; raise SystemExit(persist_public_url_main(sys.argv[1:]))' "${HAL0_TOML}" 2>/dev/null
+    )" || PUBLIC_URL_MSG=""
+    if [[ -n "${PUBLIC_URL_MSG}" ]]; then
+        info "${PUBLIC_URL_MSG}"
+    fi
+fi
 NETWORK_ENV_LINES="$(
     HAL0_BIND_HOST="${API_BIND_HOST}" \
     HAL0_PORT="${HAL0_PORT}" \
     HAL0_LAN_IPS="$(hostname -I 2>/dev/null || true)" \
-    "${VENV_DIR}/bin/python" -c 'from hal0.install.network import main; raise SystemExit(main())' 2>/dev/null
+    "${VENV_DIR}/bin/python" -c 'import sys; from hal0.install.network import main; raise SystemExit(main(sys.argv[1:]))' "${HAL0_TOML}" 2>/dev/null
 )" || NETWORK_ENV_LINES="HAL0_BIND_HOST=${API_BIND_HOST}"
 if [[ -z "${NETWORK_ENV_LINES}" ]]; then
     NETWORK_ENV_LINES="HAL0_BIND_HOST=${API_BIND_HOST}"
 fi
+# END hal0-network-derive
 
 # The network block below is rewritten on EVERY run (not just when api.env is
 # first created) — it used to be write-once (guarded by `[[ ! -f api.env ]]`),
@@ -1462,7 +1480,9 @@ ${NETWORK_BEGIN_MARKER}
 # upgrade. This block is rewritten on every install.sh run — it's the only
 # way an existing install picks up a changed bind host / LAN IP set. Hand
 # edits inside the markers will be overwritten on the next run; edit
-# elsewhere in this file (or hal0.toml) to persist a change.
+# elsewhere in this file (or hal0.toml) to persist a change. To allow
+# another browser origin, use \`hal0 network public-url set <url>\` or
+# \`hal0 network origins add <origin>\` (hal0.toml [network]).
 ${NETWORK_ENV_LINES}
 ${NETWORK_END_MARKER}
 NETBLOCK

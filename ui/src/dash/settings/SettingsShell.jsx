@@ -19,6 +19,7 @@ import { SettingsNav, VALID_IDS } from './SettingsNav.jsx'
 
 import { OverviewPage } from './pages/general/OverviewPage.jsx'
 import { SecurityPage } from './pages/server/SecurityPage.jsx'
+import { NetworkPage } from './pages/server/NetworkPage.jsx'
 import { DoctorPage } from './pages/diagnostics/DoctorPage.jsx'
 import { LoadedModelsPage } from './pages/models/LoadedModelsPage.jsx'
 import { ModelDefaultsPage } from './pages/models/ModelDefaultsPage.jsx'
@@ -44,6 +45,7 @@ export function SettingsShell({ param }) {
     switch (section) {
       case "overview": return <OverviewPage />;
       case "security": return <SecurityPage />;
+      case "network": return <NetworkPage />;
       case "doctor": return <DoctorPage />;
       case "slots": return <LoadedModelsPage />;
       case "modeldefaults": return <ModelDefaultsPage />;

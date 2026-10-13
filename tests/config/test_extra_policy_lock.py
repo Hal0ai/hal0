@@ -101,6 +101,9 @@ _EXPECTED_EXTRA_POLICY: dict[str, str] = {
     # [security] — the auth-enforcement toggle (O19). Forbid: a typo'd key in
     # a SECURITY table must fail loudly, never silently no-op.
     "SecurityConfig": "forbid",
+    # [network] — persisted browser-origin additions (#2382). Forbid: a typo'd
+    # key must fail loudly, never silently leave an origin out of the allowlist.
+    "NetworkConfig": "forbid",
 }
 
 

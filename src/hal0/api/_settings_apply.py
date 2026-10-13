@@ -104,6 +104,11 @@ SERVICE_HAL0_API: str = "hal0-api"
 #                                            save bumps the mtime so the very
 #                                            next request picks it up, no
 #                                            restart needed).
+#   * ``[network].{public_url,              → immediate (allowed_origins() in
+#     extra_origins}``                        api/agents/_auth.py reads both
+#                                            live off hal0.toml, cached on the
+#                                            file's mtime, inode and size,
+#                                            #2382).
 #   * ``[slots].network_mode``              → service-restart[slots] (same
 #                                            "baked into the rendered
 #                                            quadlet unit" pattern as
@@ -244,6 +249,12 @@ _HAL0_REGISTRY: dict[str, ApplyPlanEntry] = {
     # file (bumping mtime), so the very next request observes the change.
     "security.require_auth": {"apply_class": "immediate", "services": []},
     "security.trust_forwarded_for": {"apply_class": "immediate", "services": []},
+    # [network] — merged into the browser-origin allowlist by
+    # api/agents/_auth.allowed_origins(), read live off hal0.toml (cached on
+    # the file's mtime, inode and size), so the next request sees the change
+    # (#2382).
+    "network.public_url": {"apply_class": "immediate", "services": []},
+    "network.extra_origins": {"apply_class": "immediate", "services": []},
     # [slots] — network_mode is baked into each slot's rendered quadlet
     # unit the same way publish_host is; preload_evict_* are SlotManager
     # constructor args fixed at create_app time.

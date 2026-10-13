@@ -11,10 +11,10 @@
  * SECTION_ALIASES. Section list below is sourced from `SettingsNav.jsx`'s
  * NAV_GROUPS — the authoritative IA.
  */
-import { test, expect } from '../fixtures/apiMock'
+import { test, expect, json } from '../fixtures/apiMock'
 
 const SECTIONS = [
-  'Overview', 'Security', 'Doctor',
+  'Overview', 'Security', 'Network', 'Doctor',
   'Loaded Models', 'Model Defaults', 'AI Capabilities',
   'Hardware & Runtimes', 'Storage', 'Memory', 'Updates', 'Advanced',
   'Secrets', 'Connected Accounts', 'Agent Chat', 'Realtime',
@@ -163,5 +163,67 @@ test.describe('Settings v3 (/settings)', () => {
     await expect(page.locator('.settings-content h2').first()).toHaveText('Updates')
     await expect(page.locator('.settings-content')).toContainText('Apache-2.0')
     await expect(page.locator('.settings-content')).toContainText('0.3.0-alpha.1')
+  })
+})
+
+// #2382: Settings ▸ Network is its own page (Security stays input-free) and a
+// save sends the origins as a diff, so an origin added elsewhere since the
+// page loaded is never written over by the page's stale copy of the list.
+test.describe('Settings ▸ Network (#2382)', () => {
+  test('saves origins as a diff through POST /api/settings/network', async ({ page }) => {
+    const network = { public_url: null as string | null, extra_origins: ['http://a.lan:8080', 'http://b.lan:8080'] }
+    let editBody: any = null
+    let putCalled = false
+    await page.route('**/api/settings', (r) => {
+      if (r.request().method() === 'PUT') putCalled = true
+      return json(r, { security: {}, network })
+    })
+    await page.route('**/api/settings/network', async (r) => {
+      editBody = await r.request().postDataJSON()
+      return json(r, {
+        security: {},
+        network: { public_url: 'https://hal0.example.com', extra_origins: ['http://a.lan:8080', 'http://c.lan:8080'] },
+      })
+    })
+
+    await page.goto('/#settings/network')
+    await expect(page.locator('.settings-content h2').first()).toHaveText('Network')
+    const origins = page.getByTestId('network-extra-origins')
+    await expect(origins).toHaveValue('http://a.lan:8080\nhttp://b.lan:8080')
+
+    await page.getByTestId('network-public-url').fill('https://hal0.example.com')
+    await origins.fill('http://a.lan:8080\nhttp://c.lan:8080')
+    await Promise.all([
+      page.waitForResponse((r) => r.url().endsWith('/api/settings/network') && r.request().method() === 'POST'),
+      page.getByTestId('network-save').click(),
+    ])
+    expect(editBody).toEqual({
+      public_url: 'https://hal0.example.com',
+      add_origins: ['http://c.lan:8080'],
+      remove_origins: ['http://b.lan:8080'],
+    })
+    expect(putCalled).toBe(false)
+    await expect(origins).toHaveValue('http://a.lan:8080\nhttp://c.lan:8080')
+  })
+
+  test('a refused origin shows the server reason', async ({ page }) => {
+    await page.route('**/api/settings', (r) => json(r, { security: {}, network: { public_url: null, extra_origins: [] } }))
+    await page.route('**/api/settings/network', (r) =>
+      r.fulfill({
+        status: 400,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          error: {
+            code: 'config.invalid',
+            message: 'hal0 config failed schema validation',
+            details: { 'network.extra_origins': "origin 'https://x.example/app' must be scheme://host[:port] only" },
+          },
+        }),
+      }))
+
+    await page.goto('/#settings/network')
+    await page.getByTestId('network-extra-origins').fill('https://x.example/app')
+    await page.getByTestId('network-save').click()
+    await expect(page.getByTestId('network-error')).toContainText('must be scheme://host[:port] only')
   })
 })
