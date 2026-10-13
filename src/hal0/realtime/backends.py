@@ -28,8 +28,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 
-import httpx
-
+from hal0.http_client import async_client
 from hal0.realtime.audio import looks_like_wav, wav_to_pcm16
 
 #: The sentinel model that routes a session to the server-side steward leg.
@@ -75,7 +74,7 @@ def _auth_headers(auth: str | None) -> dict[str, str]:
 
 async def _default_transcribe(wav: bytes, *, model: str, auth: str | None) -> str:
     url = f"{_self_base_url()}/v1/audio/transcriptions"
-    async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT_S) as client:
+    async with async_client(timeout=_HTTP_TIMEOUT_S) as client:
         resp = await client.post(
             url,
             files={"file": ("audio.wav", wav, "audio/wav")},
@@ -95,7 +94,7 @@ async def _default_synthesize(
     payload: dict[str, Any] = {"model": model, "input": text, "response_format": "pcm"}
     if voice:
         payload["voice"] = voice
-    async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT_S) as client:
+    async with async_client(timeout=_HTTP_TIMEOUT_S) as client:
         resp = await client.post(url, json=payload, headers=_auth_headers(auth))
         resp.raise_for_status()
         blob = resp.content
@@ -134,7 +133,7 @@ async def _default_chat_plain(
     # index -> {"id","name","arguments"} accumulator for streamed tool_calls.
     pending: dict[int, dict[str, str]] = {}
     async with (
-        httpx.AsyncClient(timeout=_HTTP_TIMEOUT_S) as client,
+        async_client(timeout=_HTTP_TIMEOUT_S) as client,
         client.stream("POST", url, json=payload, headers=_auth_headers(auth)) as resp,
     ):
         if resp.status_code >= 400:
@@ -181,7 +180,7 @@ async def _default_chat_steward(
     """Consume the brain SSE (``/api/brain/chat``); ZERO edits to brain/chat.py."""
     url = f"{_self_base_url()}/api/brain/chat"
     async with (
-        httpx.AsyncClient(timeout=_HTTP_TIMEOUT_S) as client,
+        async_client(timeout=_HTTP_TIMEOUT_S) as client,
         client.stream("POST", url, json=payload, headers=_auth_headers(auth)) as resp,
     ):
         if resp.status_code >= 400:

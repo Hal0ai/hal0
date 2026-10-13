@@ -47,7 +47,7 @@ def mock_transport(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
             return self._payload
 
     class _MockClient:
-        def __init__(self, *, base_url: str, timeout: float) -> None:
+        def __init__(self, *, base_url: str, timeout: float, **_: Any) -> None:
             captured["base_url"] = base_url
             captured["timeout"] = timeout
 
@@ -331,7 +331,7 @@ def _comfyui_logs_transport(monkeypatch: pytest.MonkeyPatch) -> None:
             }
 
     class _MockClient:
-        def __init__(self, *, base_url: str, timeout: float) -> None:
+        def __init__(self, *, base_url: str, timeout: float, **_: Any) -> None:
             pass
 
         async def __aenter__(self) -> _MockClient:
@@ -387,7 +387,7 @@ def list_transport(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
             return self._payload
 
     class _MockClient:
-        def __init__(self, *, base_url: str, timeout: float) -> None:
+        def __init__(self, *, base_url: str, timeout: float, **_: Any) -> None:
             pass
 
         async def __aenter__(self) -> _MockClient:

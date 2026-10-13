@@ -62,6 +62,7 @@ from hal0.board import (
     _default_session_token,
 )
 from hal0.board.dispatch import AttemptHandle, register_executor
+from hal0.http_client import loopback_client_kwargs
 
 # ── handle-state vocabulary ──────────────────────────────────────────────────
 
@@ -142,6 +143,7 @@ class _HermesGateway:
         self._http = http_client or httpx.Client(
             base_url=self._base_url,
             timeout=httpx.Timeout(30.0, connect=3.0),
+            **loopback_client_kwargs(self._base_url),
         )
         self._session_token: str | None = None
 

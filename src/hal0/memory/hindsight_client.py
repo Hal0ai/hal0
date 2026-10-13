@@ -14,6 +14,8 @@ from urllib.parse import quote
 
 import httpx
 
+from hal0.http_client import async_client, loopback_client_kwargs
+
 DEFAULT_BASE_URL = "http://127.0.0.1:9177"  # dynamic port — pinned by the unit (P1-6)
 DEFAULT_API_KEY = "hal0-local-noauth"
 
@@ -84,6 +86,7 @@ def probe_health(
             base_url=url,
             timeout=httpx.Timeout(budget, connect=budget),
             transport=transport,
+            **loopback_client_kwargs(url),
         ) as http:
             resp = http.get("/health", headers={"Authorization": f"Bearer {api_key}"})
     except httpx.HTTPError as exc:
@@ -103,7 +106,9 @@ class HindsightRestClient:
         self._base_url = (base_url or DEFAULT_BASE_URL).rstrip("/")
         self._api_key = api_key
         self._owns = http_client is None
-        self._http = http_client or httpx.AsyncClient(
+        # async_client sends the loopback engine direct, never via HTTP_PROXY,
+        # which would see the bearer and memory content in cleartext (#2526).
+        self._http = http_client or async_client(
             base_url=self._base_url, timeout=httpx.Timeout(120.0, connect=3.0)
         )
 

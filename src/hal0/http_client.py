@@ -46,7 +46,7 @@ from typing import Any
 
 import httpx
 
-__all__ = ["async_client", "shared_ssl_context"]
+__all__ = ["async_client", "loopback_client_kwargs", "shared_ssl_context"]
 
 
 @cache
@@ -118,3 +118,28 @@ def async_client(**kwargs: Any) -> httpx.AsyncClient:
     ):
         kwargs["mounts"] = _loopback_direct_mounts(kwargs)
     return httpx.AsyncClient(**kwargs)
+
+
+def loopback_client_kwargs(url: str) -> dict[str, Any]:
+    """httpx client kwargs for a request to ``url`` on this box (#2503, #2526).
+
+    For a loopback target (:func:`hal0.service_identity.is_loopback_url`) the
+    client must not read the proxy environment: with ``HTTP_PROXY`` or
+    ``ALL_PROXY`` set and ``NO_PROXY`` not covering loopback, httpx would hand
+    the request, bearer header and body included, to the proxy in cleartext.
+    So loopback gets ``trust_env=False``. That flag also stops httpx reading
+    ``SSL_CERT_FILE`` / ``SSL_CERT_DIR``, so the CA context is built with the
+    environment honoured and passed as ``verify``: an ``https://localhost``
+    target behind an operator-supplied CA keeps verifying. ``.netrc`` is no
+    longer consulted for loopback.
+
+    A remote target gets ``{}``: it keeps the default ``trust_env=True`` and
+    honours the proxy environment. Spread the result into an ``httpx.Client``.
+    An async client should come from :func:`async_client` instead, whose
+    loopback mount gives the same routing for every host it reaches.
+    """
+    from hal0.service_identity import is_loopback_url
+
+    if not is_loopback_url(url):
+        return {}
+    return {"trust_env": False, "verify": shared_ssl_context(trust_env=True)}

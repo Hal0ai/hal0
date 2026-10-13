@@ -72,6 +72,7 @@ from fastapi import Request
 from fastapi.responses import StreamingResponse
 
 from hal0.api._audit import record_action
+from hal0.http_client import async_client
 from hal0.toolloop.engine import (
     assistant_message as _assistant_message,
 )
@@ -867,7 +868,7 @@ async def _dispatch_platform_tool(
     owns = http is None
     if owns:
         base = getattr(request.app.state, "self_api_base_url", "http://127.0.0.1:8080")
-        http = httpx.AsyncClient(base_url=base.rstrip("/"), timeout=60.0)
+        http = async_client(base_url=base.rstrip("/"), timeout=60.0)
     # O17: the platform surface spans CLIENT reads (list_slots) AND ADMIN ops
     # (get_slot, slot load/unload/restart) — present the admin identity so the
     # whole surface authenticates; the caller's own bearer wins when inbound.
@@ -1124,7 +1125,7 @@ def _resolve_llm(request: Request) -> LlmFn:
             # Nothing to dispatch to — short-circuit before the self-call so an
             # empty resolution doesn't burn a network round trip just to fail.
             return {"error": _unrouteable_model_error(tried_model or "(no model set)")}
-        async with httpx.AsyncClient(timeout=timeout_s) as http:
+        async with async_client(timeout=timeout_s) as http:
             try:
                 resp = await http.post(
                     f"{base_url.rstrip('/')}/v1/chat/completions",

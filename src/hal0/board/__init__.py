@@ -44,6 +44,7 @@ from typing import Any
 import httpx
 
 from hal0.errors import Hal0Error
+from hal0.http_client import async_client
 
 # Hermes injects its per-process session bearer into the dashboard HTML it
 # serves at ``/`` as ``window.__HERMES_SESSION_TOKEN__="<token>"`` (the loopback
@@ -120,7 +121,9 @@ class HermesKanbanClient:
         self._resolve_token = session_token_resolver or _default_session_token
         self._agent_id = agent_id or _default_agent_id()
         self._owns = http_client is None
-        self._http = http_client or httpx.AsyncClient(
+        # async_client keeps the loopback dashboard (and its session bearer)
+        # off the proxy environment (#2526).
+        self._http = http_client or async_client(
             base_url=self._base_url,
             timeout=httpx.Timeout(120.0, connect=3.0),
         )

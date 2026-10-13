@@ -33,7 +33,7 @@ def mock_transport(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
             return {"ok": True}
 
     class _Client:
-        def __init__(self, *, base_url: str, timeout: float) -> None:
+        def __init__(self, *, base_url: str, timeout: float, **_: Any) -> None:
             captured["base_url"] = base_url
 
         async def __aenter__(self) -> _Client:

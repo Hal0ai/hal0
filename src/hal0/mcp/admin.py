@@ -1791,17 +1791,11 @@ async def _call_rest(
     call_kwargs[payload_kwarg] = (payload or None) if payload_kwarg == "params" else (payload or {})
 
     timeout = httpx.Timeout(timeout_s, connect=min(_CONNECT_TIMEOUT_S, timeout_s))
-    # #2506: a loopback base_url must not read the proxy environment, or the
-    # bearer above would reach an HTTP_PROXY/ALL_PROXY in cleartext. Same
-    # kwargs as the CLI's (hal0.cli._shared._client_kwargs, #2503).
-    from hal0.service_identity import is_loopback_url
+    # async_client sends a loopback base_url direct: the proxy environment
+    # would otherwise see the bearer above in cleartext (#2506, #2526).
+    from hal0.http_client import async_client
 
-    client_kwargs: dict[str, Any] = {}
-    if is_loopback_url(base_url):
-        from hal0.http_client import shared_ssl_context
-
-        client_kwargs = {"trust_env": False, "verify": shared_ssl_context(trust_env=True)}
-    async with httpx.AsyncClient(base_url=base_url, timeout=timeout, **client_kwargs) as client:
+    async with async_client(base_url=base_url, timeout=timeout) as client:
         verb = getattr(client, method.lower())
         response = await verb(url, **call_kwargs)
 

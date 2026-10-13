@@ -130,7 +130,7 @@ async def test_brain_gated_platform_tool_queues_and_resumes_on_approve(
             return {"slot": "npu-lfm2-1-2b", "state": "loaded", "created": True}
 
     class _MockClient:
-        def __init__(self, *, base_url: str, timeout: float) -> None:
+        def __init__(self, *, base_url: str, timeout: float, **_: Any) -> None:
             self.base_url = base_url
 
         async def __aenter__(self) -> _MockClient:

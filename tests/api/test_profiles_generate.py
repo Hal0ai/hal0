@@ -50,6 +50,9 @@ def _patch_httpx(monkeypatch: pytest.MonkeyPatch, target: str, handler) -> None:
 
     def factory(*args: Any, **kwargs: Any) -> httpx.AsyncClient:
         kwargs["transport"] = httpx.MockTransport(handler)
+        # async_client mounts a direct transport on loopback hosts (#2585),
+        # which would outrank the mock for a loopback utility-LLM URL.
+        kwargs.pop("mounts", None)
         return real_cls(*args, **kwargs)
 
     monkeypatch.setattr(target, factory)
