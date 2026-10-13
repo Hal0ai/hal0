@@ -297,8 +297,10 @@ Pass any subset of `--model`, `--port`, `--provider`, `--hardware`,
 hardware grid, profile) take effect on the next `restart`. A slot has no
 flags or context size of its own to edit; to change them, edit the profile it
 runs (`hal0 profile edit <name> --ctx-size N`) or point the slot at another
-one. Editing a profile affects every slot that runs it, and each picks the
-change up at its next restart.
+one. Editing a profile affects every slot that runs it, and each picks up
+changed flags, context window, vision or MTP at its next restart. A changed
+profile `runner` does not reach a slot that way: re-apply the profile to each
+slot with `hal0 slot edit <slot> --profile <name>`, then restart it.
 
 ## Switching a slot to the Vulkan lane
 
@@ -450,7 +452,8 @@ Beside the select, **Edit profile** opens the selected custom profile in a
 drawer; on a seed profile, which is read-only, the same button reads
 **Duplicate & edit** and forks a custom copy. When other slots run the same
 profile, a hint names them, because editing the profile changes those slots too (each
-picks the change up at its next restart). Under the select, a read-only line
+picks up the change at its next restart, except a changed runtime, which
+needs the profile re-applied to the slot). Under the select, a read-only line
 shows the **effective context** and where it came from: set by the profile,
 the model's native window, or the default window when the model reports none.
 To change it, edit the profile.
@@ -466,8 +469,12 @@ infeasibility — a ROCm-only runtime profile on a host with no `/dev/kfd`, for
 example — never whether the slot's bound model happens to run well under it.
 
 A slot whose file the profile-centric conversion could not convert shows a
-**conversion blocked** badge with the reason and the fix, and keeps launching
-the command it ran before the conversion until its file is edited; see
+**conversion blocked** badge with the reason and the fix. It launches with
+its recorded pre-conversion tune only while its file is unchanged and still
+carries the old tuning keys (placement and the model come from the current
+slot). Editing the file drops the record: if tuning keys remain, the slot
+refuses to launch (`slot.unconverted`) until the conversion succeeds or you
+remove them. See
 [Update and roll back](/docs/guides/update-and-rollback#profile-centric-config-conversion).
 
 ### Model: swap and the file facts

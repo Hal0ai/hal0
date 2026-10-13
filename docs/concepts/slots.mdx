@@ -143,7 +143,7 @@ reports no native window, it runs 8192. Slot views report the result as
 or `fallback`), and the slot drawer shows both read-only under the Profile
 row. Change the window by editing the profile (`hal0 profile edit <name>
 --ctx-size N`) or by pointing the slot at another profile; slots running the
-same profile pick the change up at their next restart. An FLM (NPU) slot
+same profile pick up a new `ctx_size` at their next restart. An FLM (NPU) slot
 reads the same `ctx_size`; with none set it runs 8192.
 
 The shipped seed profiles set `ctx_size` where a slot needs more than the

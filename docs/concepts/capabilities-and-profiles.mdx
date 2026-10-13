@@ -93,8 +93,13 @@ hal0 slot restart scratch
 profile and applies any other options on top; `hal0 profile edit <name>`
 changes a custom profile (`--flags`, `--ctx-size` / `--clear-ctx-size`,
 `--thinking` / `--no-thinking` / `--clear-thinking`, `--vision`, `--mtp`,
-`--runner`, `--intent`). Slots running an edited profile pick the change up
-at their next restart. A profile that a slot still names can't be deleted
+`--runner`, `--intent`). Slots running an edited profile pick up its flags,
+`ctx_size`, `vision` and `mtp` at their next restart. The one exception is
+`runner`: a slot's runtime is its own `binary` field, which a profile's
+`runner` is copied into only when the profile is selected for that slot. After
+editing `--runner`, re-apply the profile to each slot that runs it
+(`hal0 slot edit <slot> --profile <name>`, or re-pick it in the slot drawer)
+and then restart the slot. A profile that a slot still names can't be deleted
 (`profiles.in_use`); the dashboard's Profiles tab shows which slots use each
 one.
 

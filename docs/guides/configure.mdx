@@ -162,8 +162,21 @@ check refuses, in every spelling llama.cpp accepts:
 
 A slot's `[server].env` is screened the same way: it may not set any
 `LLAMA_ARG_*` variable, nor `LLAMA_API_KEY`, `HF_TOKEN` or
-`MTMD_BACKEND_DEVICE`. Those are llama-server options, so they belong on the
-profile (`slot.llama_env_denied`).
+`MTMD_BACKEND_DEVICE` (`slot.llama_env_denied`), because llama.cpp reads each
+of them as a launch option. Where a setting goes depends on the option:
+
+- A tuning option that a profile may carry (cache types, batch sizes,
+  sampling, reasoning) goes in the profile's `flags` as its command-line flag,
+  not as a `LLAMA_ARG_*` variable.
+- An option the profile screen also refuses has no slot-level home. That
+  covers anything hal0 manages (`--model`, `--ctx-size`, ...), the host-owned
+  flags above, and the placement hal0 derives from the slot's device, such as
+  `--mmproj-device` (`MTMD_BACKEND_DEVICE`).
+- `LLAMA_API_KEY` maps to the host-owned `--api-key`, so slot authentication
+  cannot be set from a slot or a profile.
+- `HF_TOKEN` is not a slot setting. It is a credential `hal0-api` reads for
+  model pulls; set it under Settings → Secrets in the dashboard or as
+  `HF_TOKEN` in `/etc/hal0/api.env`.
 
 ## Atomic writes
 

@@ -197,8 +197,14 @@ Four launch changes are reported rather than applied silently:
 If a slot, stored profile or stack cannot be converted, `hal0 update` prints
 each blocker with its reason and the fix, and exits **2** (applied, not
 converged); `hal0 profile migrate` also exits 2 while anything is blocked. A
-blocked slot keeps launching the command it ran before the conversion until its
-file is edited, and every other slot still converts. To go back, see "Rolling
+blocked slot launches with its recorded pre-conversion tune only while its
+file is unchanged and still carries the old tuning keys; the recorded tune
+covers the launch flags and context window, while host, port, model, chat
+template, projector and placement come from the current slot and model.
+Editing the slot file drops the record. If tuning keys remain, the slot then
+refuses to launch (`slot.unconverted`) until the conversion succeeds or you
+remove them; once they are gone it launches under its profile (or its type's
+seed). Every other slot still converts. To go back, see "Rolling
 back past the profile-centric conversion" below.
 
 ## Upgrading to 1.3.0
