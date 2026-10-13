@@ -48,6 +48,30 @@ class Hal0MemoryClientError(RuntimeError):
         self.status_code = status_code
 
 
+_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
+
+
+def _loopback_client_kwargs(url: str) -> dict[str, Any]:
+    """httpx kwargs that keep a loopback ``url`` off HTTP_PROXY/ALL_PROXY (#2526).
+
+    Defence in depth: this plugin runs inside Hermes and cannot import hal0,
+    so the host check is stdlib-only (a copy of ``hal0.service_identity.
+    is_loopback_url``). A loopback target gets ``trust_env=False`` and a CA
+    context built with the environment honoured, so ``SSL_CERT_FILE`` still
+    applies. Any other target keeps httpx's default environment handling.
+    """
+    from urllib.parse import urlsplit
+
+    try:
+        parts = urlsplit(url)
+        host = parts.hostname
+    except ValueError:
+        return {}
+    if parts.username is not None or host not in _LOOPBACK_HOSTS:
+        return {}
+    return {"trust_env": False, "verify": httpx.create_ssl_context(trust_env=True)}
+
+
 def _resolve_base_url(override: str | None) -> str:
     if override:
         return override.rstrip("/")
@@ -81,7 +105,11 @@ class Hal0MemoryClient:
         self._owns_client = http_client is None
         if http_client is None:
             timeout = httpx.Timeout(read_timeout, connect=connect_timeout)
-            self._client = httpx.Client(base_url=self._base_url, timeout=timeout)
+            self._client = httpx.Client(
+                base_url=self._base_url,
+                timeout=timeout,
+                **_loopback_client_kwargs(self._base_url),
+            )
         else:
             self._client = http_client
 

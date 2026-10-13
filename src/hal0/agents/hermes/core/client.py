@@ -8,6 +8,8 @@ from uuid import uuid4
 
 import httpx
 
+from hal0.http_client import loopback_client_kwargs
+
 from .errors import IncompatibleSchema, MissingResource, Unauthorized, Unavailable
 
 _RETRYABLE_STATUS = frozenset({502, 503, 504})
@@ -29,6 +31,7 @@ class Hal0HermesClient:
         self._client = httpx.Client(
             base_url=f"{base_url.rstrip('/')}/",
             timeout=httpx.Timeout(15.0, connect=2.0),
+            **loopback_client_kwargs(base_url),
         )
 
     def close(self) -> None:

@@ -44,6 +44,7 @@ from hal0.config.schema import (
     ProfileConfig,
 )
 from hal0.errors import BadRequest, NotFound
+from hal0.http_client import async_client
 from hal0.install.profile_derive import derive_device, derive_profile
 from hal0.model_meta import classify, model_is_mtp_eligible
 from hal0.profiles import ProfileCatalog, ResolvedProfile
@@ -446,7 +447,7 @@ async def _llm_headline(facts: _ModelFacts, llm: LlmCallContext) -> tuple[str | 
         "temperature": 0.2,
     }
     try:
-        async with httpx.AsyncClient(timeout=_LLM_TIMEOUT_S) as http:
+        async with async_client(timeout=_LLM_TIMEOUT_S) as http:
             resp = await http.post(
                 f"{llm.base_url.rstrip('/')}/v1/chat/completions",
                 json=body,

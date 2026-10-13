@@ -77,29 +77,13 @@ def _auth_headers(url: str | None = None) -> dict[str, str]:
 def _client_kwargs(url: str | None = None) -> dict[str, Any]:
     """httpx client kwargs for a CLI→API call to ``url`` (#2503).
 
-    ``url`` is the request target; ``None`` means :func:`_api_base`. For a
-    loopback target (:func:`hal0.service_identity.is_loopback_url`) the client
-    must not read the proxy environment: with ``HTTP_PROXY``/``ALL_PROXY`` set
-    and ``NO_PROXY`` not covering loopback, httpx would hand the request —
-    bearer header included — to the proxy in cleartext. So loopback gets
-    ``trust_env=False``. That flag also stops httpx reading ``SSL_CERT_FILE``
-    / ``SSL_CERT_DIR``, so the CA context is built with the environment
-    honoured and passed as ``verify``: an ``https://localhost`` API behind an
-    operator-supplied CA keeps verifying exactly as before. ``.netrc`` is no
-    longer consulted for loopback, which only ever matters for a request the
-    CLI has not already given an ``Authorization`` header.
-
-    Remote targets get ``{}``: they keep the default ``trust_env=True`` and
-    honour the proxy environment.
+    ``url`` is the request target; ``None`` means :func:`_api_base`. Thin
+    wrapper over :func:`hal0.http_client.loopback_client_kwargs`, which holds
+    the loopback no-proxy rules.
     """
-    from hal0.service_identity import is_loopback_url
+    from hal0.http_client import loopback_client_kwargs
 
-    target = _api_base() if url is None else url
-    if not is_loopback_url(target):
-        return {}
-    from hal0.http_client import shared_ssl_context
-
-    return {"trust_env": False, "verify": shared_ssl_context(trust_env=True)}
+    return loopback_client_kwargs(_api_base() if url is None else url)
 
 
 def _discovered_key_withheld(url: str | None = None) -> bool:

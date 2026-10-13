@@ -60,6 +60,13 @@ applying. Add those subsections to a version's section to surface them; see
 
 ### Security
 
+- hal0's own loopback calls (Hindsight memory, the Hermes gateway and kanban,
+  brain and realtime self-calls, MCP admin, profile generation, health
+  probes and the CLI) no longer go through `HTTP_PROXY`/`HTTPS_PROXY`/
+  `ALL_PROXY` when `NO_PROXY` does not cover loopback. Async clients use the
+  shared client's direct loopback route; sync clients turn the proxy
+  environment off for loopback URLs (#2526).
+
 - The `/v1` dispatcher no longer passes the caller's credentials to the
   upstream it picks (#2538). It used to copy every request header except
   `Authorization` and the hop-by-hop set, so a dashboard request routed to a

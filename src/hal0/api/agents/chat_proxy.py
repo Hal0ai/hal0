@@ -64,6 +64,7 @@ from hal0.api.agents._auth import (
     session_cookie_expiry,
     set_session_cookie,
 )
+from hal0.http_client import async_client
 
 log = structlog.get_logger(__name__)
 router = APIRouter()
@@ -472,7 +473,7 @@ async def _hermes_rpc(method: str, params: dict[str, Any], agent_id: str) -> dic
         "params": params,
         "id": int(time.time() * 1000),
     }
-    async with httpx.AsyncClient(timeout=REST_TIMEOUT_SECONDS) as client:
+    async with async_client(timeout=REST_TIMEOUT_SECONDS) as client:
         try:
             resp = await client.post(url, json=envelope, headers=headers)
         except httpx.RequestError as exc:
