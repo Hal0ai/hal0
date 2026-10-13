@@ -71,7 +71,7 @@ import json
 import os
 from dataclasses import dataclass
 from typing import Any, Literal
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs
 
 import structlog
 
@@ -392,9 +392,15 @@ def _origin_allowed(scope: dict[str, Any]) -> bool:
     * ``Origin`` in the shared allowlist (``HAL0_ALLOWED_ORIGINS`` /
       :func:`hal0.api.agents._auth.allowed_origins`) -> allow. One allowlist
       for both this gate and the chat-proxy WS gate.
-    * ``Origin`` whose scheme://host[:port] equals the request ``Host``
-      -> allow (genuine same-origin: the dashboard served from the very host
-      it is calling, regardless of which LAN name/IP that is).
+    * ``Origin`` equal to the request's own origin on an **IP-literal**
+      ``Host`` -> allow (the dashboard reached by a LAN IP the install-time
+      allowlist doesn't know, e.g. after a DHCP change). This is the same
+      check the chat-proxy WS gate uses
+      (:func:`hal0.api.agents._auth._is_same_origin`). A DNS-name ``Host``
+      never takes this path: an attacker page can rebind its own name to
+      the box and send a matching ``Origin``/``Host`` pair (#2327). Named
+      origins (``hal0.local``, the box hostname, a reverse proxy's
+      ``public_url``) reach the box through the allowlist instead.
     * otherwise -> deny.
     """
     headers = _headers_from_scope(scope)
@@ -402,16 +408,12 @@ def _origin_allowed(scope: dict[str, Any]) -> bool:
     if not origin:
         return True
 
-    from hal0.api.agents._auth import allowed_origins
+    from hal0.api.agents._auth import _is_same_origin, allowed_origins
 
     if origin in allowed_origins():
         return True
 
-    # Same-origin: compare the Origin's netloc against the Host header. The
-    # browser always sends both; equality means the request targets its own
-    # origin, which no cross-site attacker page can forge.
-    host = headers.get("host", "")
-    return bool(host) and urlsplit(origin).netloc == host
+    return _is_same_origin(origin, headers.get("host", ""), scope.get("scheme", "http"))
 
 
 # ---------------------------------------------------------------------------
@@ -453,6 +455,16 @@ def _lan_admin_gate(auth_class: AuthClass, scope: dict[str, Any]) -> bool:
 
 # ---------------------------------------------------------------------------
 # Enforcement decision
+
+
+# The 403 body names the remedy rather than echoing the caller's Origin.
+# A named origin (a reverse proxy's domain, a router-assigned DNS name)
+# passes only through the allowlist since #2327; `hal0 network` persists one
+# in hal0.toml's [network] section (#2382).
+_ORIGIN_FORBIDDEN_MSG = (
+    "origin not allowed; to allow a reverse-proxy or other named origin, run "
+    "`hal0 network public-url set <url>` or `hal0 network origins add <origin>`"
+)
 
 
 def _envelope(code: str, message: str) -> dict[str, Any]:
@@ -585,11 +597,15 @@ class AuthEnforcementMiddleware:
                 path=path,
                 method=method,
                 scope_type=scope_type,
+                # Truncated: the header is caller-supplied. Logged so an
+                # operator behind a reverse proxy can see which origin to
+                # allow (#2327).
+                origin=_headers_from_scope(scope).get("origin", "")[:200],
             )
             if scope_type == "websocket":
                 await send({"type": "websocket.close", "code": 4403})
                 return
-            payload = json.dumps(_envelope("auth.origin_forbidden", "origin not allowed")).encode(
+            payload = json.dumps(_envelope("auth.origin_forbidden", _ORIGIN_FORBIDDEN_MSG)).encode(
                 "utf-8"
             )
             await send(
