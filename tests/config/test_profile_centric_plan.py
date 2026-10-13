@@ -309,6 +309,27 @@ def test_stack_row_naming_a_missing_profile_is_a_warning_not_a_change() -> None:
     assert any("'gone-profile' does not exist" in w for w in plan.warnings)
 
 
+def test_stale_seed_stack_on_disk_is_not_planned_or_blocking() -> None:
+    """Seed stacks are virtual: the loader takes the code version, so a stale
+    on-disk copy needs no conversion and cannot block the migration, even with
+    an old-shape embedded profile that would otherwise fail."""
+    _write(
+        paths.stacks_toml(),
+        {
+            "stack": {
+                "forge": {
+                    "slots": [{"slot": "agent", "profile": "rocm", "mtp": True}],
+                    "profiles": {"emb": {"flags": "--mmproj /p"}},
+                },
+                "st": {"slots": [{"slot": "agent", "mtp": True}]},
+            }
+        },
+    )
+    plan = pc.plan_conversion()
+    assert [st.stack for st in plan.stacks] == ["st"]
+    assert plan.blockers == []
+
+
 def test_stack_errors_count_as_blocked() -> None:
     _write(
         paths.stacks_toml(),

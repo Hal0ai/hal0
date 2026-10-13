@@ -42,6 +42,7 @@ from hal0.config.schema import (
     ProfilesConfig,
     ProvidersConfig,
     SlotConfig,
+    StackConfig,
     StacksConfig,
     UpstreamsConfig,
 )
@@ -932,22 +933,26 @@ def save_profiles_config(cfg: ProfilesConfig, path: Path | None = None) -> None:
 
 
 def load_stacks_config(path: Path | None = None) -> StacksConfig:
-    """Load and validate /etc/hal0/stacks.toml.
+    """Load and validate /etc/hal0/stacks.toml, with the seeds overlaid.
 
-    Returns the built-in seed stacks (``SEED_STACKS``, empty until they ship)
-    when the file is absent, so the catalog is always well-formed on a fresh
-    install. When the file is present, only its contents are returned — seeds
-    are NOT merged in (load REPLACES, mirroring ``load_profiles_config``).
+    Seed stacks are **virtual**, exactly like seed profiles: they come from
+    code (``SEED_STACKS``) on every load and win over a same-slug disk entry,
+    which is ignored unvalidated (a stale copy written by an older release can
+    name retired profiles, or fail today's schema, and must never block the
+    catalog or be applied). Operator stacks on disk are returned as written.
+    No file means a fresh install: the seeds alone. Seeds come first, in code
+    order, then the operator stacks in file order.
 
     Raises:
-        ConfigParseError: If the TOML is malformed or fails validation.
+        ConfigParseError: If the TOML is malformed or an operator stack fails
+            validation.
         StacksStateUnreadable: If the file exists but cannot be read
             (permissions) — a root-written 0600 stacks.toml must surface as an
             actionable typed error, not a raw ``PermissionError`` (ct105).
     """
     target = path if path is not None else paths.stacks_toml()
     if not Path(target).exists():
-        return StacksConfig.model_validate({"stack": SEED_STACKS})
+        return _with_seed_stacks({})
     try:
         raw = _read_toml(Path(target))
     except PermissionError as exc:
@@ -959,8 +964,11 @@ def load_stacks_config(path: Path | None = None) -> StacksConfig:
             f"stacks.toml unreadable at {target}: {exc}; fix: chgrp hal0 && chmod 664",
             details={"path": str(target)},
         ) from exc
+    entries = raw.get("stack")
+    if isinstance(entries, dict):
+        raw = {**raw, "stack": {k: v for k, v in entries.items() if k not in SEED_STACKS}}
     try:
-        return StacksConfig.model_validate(raw)
+        return _with_seed_stacks(StacksConfig.model_validate(raw).stack)
     except Exception as exc:
         raise ConfigParseError(
             f"failed to validate stacks.toml at {target}: {exc}",
@@ -968,17 +976,28 @@ def load_stacks_config(path: Path | None = None) -> StacksConfig:
         ) from exc
 
 
-def save_stacks_config(cfg: StacksConfig, path: Path | None = None) -> None:
-    """Atomically write the full stack catalog to stacks.toml.
+def _with_seed_stacks(operator: dict[str, StackConfig]) -> StacksConfig:
+    """The seed stacks (fresh copies) followed by the operator stacks."""
+    seeds = {slug: stack.model_copy(deep=True) for slug, stack in SEED_STACKS.items()}
+    return StacksConfig(stack={**seeds, **operator})
 
-    The written file is the single source of truth; callers must pass the
-    COMPLETE catalog (start from ``load_stacks_config()``, then add/modify)
-    so existing stacks survive the round trip. ``exclude_none=True`` keeps
-    tomli_w from raising on optional None fields, mirroring
-    :func:`save_profiles_config`.
+
+def save_stacks_config(cfg: StacksConfig, path: Path | None = None) -> None:
+    """Atomically write the operator (non-seed) stack catalog to stacks.toml.
+
+    Callers pass the COMPLETE catalog (start from ``load_stacks_config()``,
+    then add/modify) so existing stacks survive the round trip. Seed stacks
+    are dropped: they are virtual (overlaid from :data:`SEED_STACKS` on every
+    load), and writing them would freeze a stale copy on disk, the bug the
+    overlay fixes. The next write of an already-stale file therefore cleans
+    it. ``exclude_none=True`` keeps tomli_w from raising on optional None
+    fields, mirroring :func:`save_profiles_config`.
     """
     target = Path(path) if path is not None else paths.stacks_toml()
-    write_toml_atomic(target, cfg.model_dump(mode="python", exclude_none=True))
+    data = cfg.model_dump(mode="python", exclude_none=True)
+    stacks = data.get("stack") or {}
+    data["stack"] = {slug: entry for slug, entry in stacks.items() if slug not in SEED_STACKS}
+    write_toml_atomic(target, data)
 
 
 def resolve_profile(profile_name: str) -> ProfileConfig:

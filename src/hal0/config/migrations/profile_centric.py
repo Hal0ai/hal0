@@ -1454,12 +1454,20 @@ class _Planner:
         mp.generated_profile = self._generate(base, mp.model_id, content)
 
     def plan_stacks(self) -> None:
+        from hal0.config.schema import SEED_STACKS
+
         stacks = (self.inputs.stacks_raw or {}).get("stack")
         if not isinstance(stacks, Mapping):
             return
         by_slot = {s.name: s for s in self.plan.slots}
         for stack_name, stack in sorted(stacks.items()):
             if not isinstance(stack, Mapping):
+                continue
+            if stack_name in SEED_STACKS:
+                # Seed stacks are virtual: the loader ignores a same-slug disk
+                # entry and takes the code version. A stale copy needs no
+                # conversion, and must not block the migration over its own
+                # old-shape embedded profiles. The next stacks.toml write drops it.
                 continue
             st = StackPlan(stack=str(stack_name))
             embedded = stack.get("profiles") if isinstance(stack.get("profiles"), Mapping) else {}

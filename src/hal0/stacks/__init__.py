@@ -4,7 +4,8 @@ A stack is a named bundle of slots + embedded profiles + embedded model
 metadata. This module concentrates the stack interface, mirroring
 ``hal0.profiles.ProfileCatalog``:
 
-* full-catalog reads and atomic full-catalog writes (single stacks.toml);
+* full-catalog reads and atomic full-catalog writes (single stacks.toml); seed
+  stacks are virtual, overlaid from code on read and never written;
 * seed immutability and duplicate-slug checks;
 * slug validation.
 
