@@ -157,8 +157,15 @@ check refuses, in every spelling llama.cpp accepts:
 - host-owned flags: remote model fetches such as `-hf` and `--model-url`, host
   file reads and writes such as `--api-key-file` and `--log-file`, and
   listener, auth and TLS settings (`slot.host_owned_flag_denied`);
-- bare positional arguments (`slot.positional_arg_denied`);
-- `--reasoning-format none` (`slot.reasoning_format_none_denied`).
+- bare positional arguments (`slot.positional_arg_denied`).
+
+`--reasoning-format none` is handled separately, because upstream llama.cpp
+answers every structured-output request with HTTP 400 when the server runs
+with it. Saving a profile that introduces it is rejected
+(`slot.reasoning_format_none_denied`); a profile that already carries it can
+still be re-saved unchanged. A profile that has it stored on disk is not
+refused at launch: hal0 strips the pair from the command and launches without
+it. To turn thinking off, use `--reasoning off` instead.
 
 A slot's `[server].env` is screened the same way: it may not set any
 `LLAMA_ARG_*` variable, nor `LLAMA_API_KEY`, `HF_TOKEN` or
