@@ -253,9 +253,14 @@ DRIVER_ENV_PATH = Path("/etc/hal0/agents/hermes.env")
 #: Comment lines that open :data:`DRIVER_ENV_PATH`. hal0 rewrites the whole
 #: file on every reprovision and OAuth connect/disconnect, so an operator line
 #: added here is lost (#2373); overrides go in a systemd drop-in instead.
+#:
+#: systemd lets ``EnvironmentFile=`` beat ``Environment=``, so a plain
+#: ``Environment=`` in the drop-in only wins for keys this file does not set.
+#: A key this file does set needs a *later* operator-owned ``EnvironmentFile=``.
 DRIVER_ENV_HEADER: tuple[str, ...] = (
     "# hal0 — Hermes-Agent env (managed by hal0; do not edit — it is rewritten on reprovision)",
-    "# Overrides: `systemctl edit hal0-agent@hermes`, then add Environment=KEY=value under [Service]",
+    "# Overrides: `systemctl edit hal0-agent@hermes`, then add Environment=KEY=value under [Service] (keys not set below)",
+    "# To override a key set below, EnvironmentFile= beats Environment=: add EnvironmentFile=-/etc/hal0/agents/hermes.override.env under [Service] and put KEY=value in that file",
 )
 
 RUNTIME_JSON_NAME = "runtime.json"
@@ -6572,7 +6577,9 @@ def _write_seed_toml(state: BootstrapState, *, repair: bool) -> tuple[Path, bool
     return path, True
 
 
-def _write_driver_env(state: BootstrapState | None = None) -> tuple[Path, bool]:
+def _write_driver_env(
+    state: BootstrapState | None = None, *, env_path: Path | None = None
+) -> tuple[Path, bool]:
     """Write the driver env file at :data:`DRIVER_ENV_PATH`.
 
     The one writer of this file (#2372): the dashboard/API install path
@@ -6613,7 +6620,15 @@ def _write_driver_env(state: BootstrapState | None = None) -> tuple[Path, bool]:
     override location (#2373). Its header says so and names the systemd
     drop-in (``systemctl edit hal0-agent@hermes``), the same place
     ``installer/systemd/hal0-agent@hermes.service.d/override.conf`` points
-    operators to.
+    operators to. A key this file sets cannot be overridden by ``Environment=``
+    there (systemd ranks ``EnvironmentFile=`` higher), so the header also names
+    a later, operator-owned ``EnvironmentFile=`` for those keys.
+
+    ``env_path`` is for a ``$HAL0_HOME`` dev/test sandbox, where the driver's
+    ``_env_file_path()`` is not ``/etc/hal0/agents/hermes.env``. The
+    hal0-agentenv seam only writes the real ``/etc`` path, so a caller-supplied
+    path is a user-owned tree: it is written directly (same renderer, same
+    atomic write, same 0600), never through the seam and never chowned.
     """
     from hal0.oauth.store import driver_env_lines
     from hal0.service_identity import service_key
@@ -6630,7 +6645,10 @@ def _write_driver_env(state: BootstrapState | None = None) -> tuple[Path, bool]:
         lines.append(f"HAL0_MCP_TOKEN={token}")
     lines.extend(driver_env_lines())
     body = "\n".join(lines) + "\n"
-    path = DRIVER_ENV_PATH
+    sandboxed = env_path is not None
+    path = env_path if env_path is not None else DRIVER_ENV_PATH
+    # The seam can only reach the real /etc path; a sandbox is ours to write.
+    direct = sandboxed or os.geteuid() == 0
     if path.exists():
         try:
             unchanged = path.read_text(encoding="utf-8") == body
@@ -6657,7 +6675,7 @@ def _write_driver_env(state: BootstrapState | None = None) -> tuple[Path, bool]:
             # deliberate: it needs no new sudoers surface and it works against
             # the hal0-agentenv wrapper already deployed on the old boxes that
             # carry this defect.
-            if os.geteuid() == 0:
+            if direct:
                 with contextlib.suppress(OSError):
                     path.chmod(0o600)
                 return path, False
@@ -6674,13 +6692,18 @@ def _write_driver_env(state: BootstrapState | None = None) -> tuple[Path, bool]:
             )
             _privileged_env_write("write-driver-env", body)
             return path, False
-    if os.geteuid() == 0:
+    if direct:
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_suffix(".env.tmp")
         tmp.write_text(body, encoding="utf-8")
-        os.replace(tmp, path)
+        # The body can carry a live secret: pin 0600 before it replaces the
+        # old file so there is no window at the umask default.
         with contextlib.suppress(OSError):
-            os.chown(path, 0, 0)
+            tmp.chmod(0o600)
+        os.replace(tmp, path)
+        if not sandboxed:
+            with contextlib.suppress(OSError):
+                os.chown(path, 0, 0)
         with contextlib.suppress(OSError):
             path.chmod(0o600)
     else:
@@ -6691,7 +6714,7 @@ def _write_driver_env(state: BootstrapState | None = None) -> tuple[Path, bool]:
     return path, True
 
 
-def refresh_driver_env() -> tuple[Path, bool]:
+def refresh_driver_env(*, env_path: Path | None = None) -> tuple[Path, bool]:
     """Public entry point: re-render :data:`DRIVER_ENV_PATH` on its own.
 
     For callers outside the bootstrap phase pipeline that need the driver
@@ -6700,8 +6723,9 @@ def refresh_driver_env() -> tuple[Path, bool]:
     for (or risking a side effect from) the full provision run. Idempotent
     and side-effect-scoped like :func:`_write_driver_env` itself, which does
     all the actual work; this just supplies the unused ``state`` argument.
+    ``env_path`` is forwarded as-is (see :func:`_write_driver_env`).
     """
-    return _write_driver_env()
+    return _write_driver_env(env_path=env_path)
 
 
 def _write_runtime_json(state: BootstrapState, *, repair: bool) -> tuple[Path, bool]:

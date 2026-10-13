@@ -250,9 +250,15 @@ class HermesDriver(AgentDriver):
         # process is unprivileged, because the directory is root:root.
         # Imported here, not at module level: the provisioner is a large
         # module and only this path needs it (see the seam note above).
-        from hal0.agents.hermes_provision import refresh_driver_env
+        from hal0.agents import hermes_provision
 
-        refresh_driver_env()
+        # Under a $HAL0_HOME sandbox our resolved path is not the provisioner's
+        # (the real /etc path, the only one the seam can reach): hand it over
+        # so the write neither touches the host's file nor needs privilege.
+        env_path = self._env_file_path()
+        hermes_provision.refresh_driver_env(
+            env_path=None if env_path == hermes_provision.DRIVER_ENV_PATH else env_path
+        )
 
     def uninstall(self) -> None:
         # Stop the running service BEFORE removing files so the agent

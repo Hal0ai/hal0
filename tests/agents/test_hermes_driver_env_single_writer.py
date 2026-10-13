@@ -21,6 +21,7 @@ import pytest
 
 from hal0.agents import hermes_provision as hp
 from hal0.agents.hermes.driver import HermesDriver
+from hal0.config import paths as _paths
 
 _REPO = Path(__file__).resolve().parents[2]
 _OVERRIDE_CONF = _REPO / "installer" / "systemd" / "hal0-agent@hermes.service.d" / "override.conf"
@@ -34,7 +35,9 @@ class _FakeRunner:
 @pytest.fixture
 def driver_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Point the provisioner's driver env at a tmp path with a known key + OAuth line."""
-    target = tmp_path / "etc-agents" / "hermes.env"
+    # The driver and the provisioner agree on one path, as they do on a real
+    # box (both /etc/hal0/agents/hermes.env): the suite's sandboxed $HAL0_HOME.
+    target = _paths.etc() / "agents" / "hermes.env"
     monkeypatch.setattr(hp, "DRIVER_ENV_PATH", target)
     monkeypatch.setattr("hal0.service_identity.service_key", lambda prefer="admin": "svc-key-1")
     monkeypatch.setattr(
@@ -118,6 +121,43 @@ def test_dashboard_install_keeps_mode_and_owner(
     assert (str(driver_env), 0, 0) in chowns
 
 
+# ── $HAL0_HOME sandbox: the install path must not reach for the real /etc ───
+
+
+def test_hal0_home_install_writes_the_sandbox_not_etc(
+    driver_env: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Dev/test installs resolve the env file under $HAL0_HOME, never /etc."""
+    home = tmp_path / "hal0-home"
+    monkeypatch.setenv("HAL0_HOME", str(home))
+    # Unprivileged: the seam would otherwise be the only way to write.
+    monkeypatch.setattr(hp.os, "geteuid", lambda: 1000)
+    chowns: list[object] = []
+    monkeypatch.setattr(hp.os, "chown", lambda *a: chowns.append(a))
+    with patch.object(hp.subprocess, "run") as run:
+        _driver().install(bearer_token=None)
+
+    sandbox = home / "etc" / "hal0" / "agents" / "hermes.env"
+    run.assert_not_called()
+    assert not chowns
+    assert not driver_env.exists()  # the patched "real" path is untouched
+    assert _keys(sandbox.read_text(encoding="utf-8"))["HAL0_MCP_TOKEN"] == "svc-key-1"
+    assert (sandbox.stat().st_mode & 0o777) == 0o600
+
+
+def test_sandbox_rewrite_tightens_a_loose_mode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("hal0.service_identity.service_key", lambda prefer="admin": "k")
+    monkeypatch.setattr("hal0.oauth.store.driver_env_lines", lambda: [])
+    target = tmp_path / "agents" / "hermes.env"
+    hp.refresh_driver_env(env_path=target)
+    target.chmod(0o644)  # same content, loose mode: the no-op branch heals it
+    path, wrote = hp.refresh_driver_env(env_path=target)
+    assert (path, wrote) == (target, False)
+    assert (target.stat().st_mode & 0o777) == 0o600
+
+
 # ── managed keys follow the source of truth on every rewrite ─────────────────
 
 
@@ -151,6 +191,21 @@ def test_header_says_do_not_edit_and_names_the_drop_in(driver_env: Path) -> None
     assert "safe to edit" not in body
     assert "do not edit" in header[0]
     assert any("systemctl edit hal0-agent@hermes" in line for line in header)
+
+
+def test_header_names_the_override_file_for_managed_keys(driver_env: Path) -> None:
+    """systemd ranks EnvironmentFile= above Environment=, so managed keys need
+    a later EnvironmentFile=; header, unit and override.conf must name one file."""
+    hp.refresh_driver_env()
+    header = "\n".join(
+        line for line in driver_env.read_text(encoding="utf-8").splitlines() if line.startswith("#")
+    )
+    assert "EnvironmentFile=-/etc/hal0/agents/hermes.override.env" in header
+    assert "EnvironmentFile= beats Environment=" in header
+    unit = (_REPO / "installer" / "systemd" / "hal0-agent@.service").read_text(encoding="utf-8")
+    assert "EnvironmentFile=-/etc/hal0/agents/%i.override.env" in unit
+    conf = _OVERRIDE_CONF.read_text(encoding="utf-8")
+    assert "EnvironmentFile=-/etc/hal0/agents/hermes.override.env" in conf
 
 
 def test_an_operator_line_in_the_env_file_is_not_kept(driver_env: Path) -> None:
