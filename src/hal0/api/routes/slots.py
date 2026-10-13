@@ -1197,9 +1197,12 @@ async def get_slot_resolved(name: str, request: Request) -> dict[str, object]:
     """Return the resolved llama-server argv with per-flag provenance.
 
     The auditable single-source-of-truth view: the deduped command plus, for
-    each surviving flag, which segment (``base`` / ``profile`` / ``extra_args``)
-    set its final value and how many duplicate flags were collapsed. Non-llama
-    slots (no profile) get ``{"argv": None, ...}`` rather than an error.
+    each surviving flag, the layer that set its final value (``base`` /
+    ``model`` / ``profile`` / ``slot``, ADR-0029) and how many duplicate flags
+    were collapsed. A slot whose launch llama-server does not compose (FLM,
+    Kokoro, Moonshine, Qwen3-TTS, ComfyUI) answers
+    ``{"argv": None, "provenance": [], "removed": 0}`` rather than an error or
+    an invented command, as does a slot that cannot launch.
     """
     from hal0.providers.container import resolved_argv_detail_for_slot
 

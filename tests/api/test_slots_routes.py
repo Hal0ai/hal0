@@ -2615,3 +2615,53 @@ def test_fit_check_does_not_resolve_retired_runner_keys() -> None:
 
     for retired in ("vulkanfpx", "rocmfpx", "strix", "promptforge"):
         assert _fit_check_warning("cpu", retired) is None
+
+
+# ── GET /api/slots/{name}/resolved: dispatch-aware (ADR-0029) ────────────────
+
+
+def test_resolved_is_null_for_a_non_llama_slot(
+    tmp_hal0_home: str,
+    container_stub: dict[str, Any],
+    isolated_client: TestClient,
+) -> None:
+    """A Kokoro slot is not launched by llama-server: no argv is invented."""
+    _seed_slot_toml(
+        tmp_hal0_home,
+        "voice",
+        [
+            'name = "voice"',
+            "port = 8085",
+            'device = "cpu"',
+            'type = "tts"',
+            "[model]",
+            'default = "kokoro-82m"',
+        ],
+    )
+    r = isolated_client.get("/api/slots/voice/resolved")
+    assert r.status_code == 200, r.text
+    assert r.json() == {"name": "voice", "argv": None, "provenance": [], "removed": 0}
+
+
+def test_resolved_is_null_for_an_npu_slot(
+    npu_trio_slot_root: Path,
+    container_stub: dict[str, Any],
+    isolated_client: TestClient,
+) -> None:
+    r = isolated_client.get("/api/slots/agent/resolved")
+    assert r.status_code == 200, r.text
+    assert r.json() == {"name": "agent", "argv": None, "provenance": [], "removed": 0}
+
+
+def test_resolved_for_a_llama_slot_still_returns_argv_and_provenance(
+    slot_root: Path,
+    container_stub: dict[str, Any],
+    isolated_client: TestClient,
+) -> None:
+    r = isolated_client.get("/api/slots/chat/resolved")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["name"] == "chat"
+    assert isinstance(body["argv"], list) and "--model" in body["argv"]
+    assert body["provenance"]
+    assert {"base", "profile"} <= {p["source"] for p in body["provenance"]}
