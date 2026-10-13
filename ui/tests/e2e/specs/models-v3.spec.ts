@@ -7,7 +7,7 @@
  *
  * Wireup (#220 brief): the catalog drives off `useModels()` and the
  * AddByHF modal calls `POST /api/models/inspect` → `usePullJob().start()`.
- * Tests in this file mock the new endpoints (inspect, PUT defaults, DELETE cascade)
+ * Tests in this file mock the new endpoints (inspect, PUT file facts, DELETE cascade)
  * via `page.route`; the listing itself is served by the FORCED VITE_MOCK_HAL0 path.
  */
 import { test, expect } from '../fixtures/apiMock'
@@ -187,7 +187,7 @@ test.describe('Models v3 (/models)', () => {
           contentType: 'application/json',
           body: JSON.stringify({
             id: 'qwen3.6-27b-mtp',
-            defaults: putBody.defaults,
+            jinja: putBody.jinja,
           }),
         })
       }
@@ -202,9 +202,11 @@ test.describe('Models v3 (/models)', () => {
     await page.getByTestId('model-cap-override-add').click()
     await page.getByTestId('model-cap-override-add-jinja-off').click()
     await page.getByTestId('model-save').click()
-    await expect.poll(() => putBody?.defaults?.jinja).toBe(false)
-    expect(putBody.defaults).not.toHaveProperty('context_size')
-    expect(putBody.defaults).not.toHaveProperty('extra_args')
+    await expect.poll(() => putBody?.jinja).toBe(false)
+    // ADR-0029 §6: facts are top-level; a `defaults` object is a 422.
+    expect(putBody).not.toHaveProperty('defaults')
+    expect(putBody).not.toHaveProperty('context_size')
+    expect(putBody).not.toHaveProperty('extra_args')
   })
 
   test('Delete cascade reads affected_slots from DELETE response', async ({ page }) => {

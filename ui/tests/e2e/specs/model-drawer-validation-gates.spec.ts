@@ -26,7 +26,6 @@ const BASE_MODEL = {
   mmproj: '/models/mmproj-Q8.gguf',
   hf_repo: 'org/original-repo',
   hf_filename: 'original.gguf',
-  defaults: {},
 }
 
 async function seedModel(

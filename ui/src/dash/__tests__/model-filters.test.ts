@@ -26,6 +26,14 @@ describe('isMtpModel', () => {
     expect(isMtpModel({ id: 'm', tags: ['chat'] })).toBe(false)
     expect(isMtpModel({ id: 'm' })).toBe(false)
   })
+
+  it('honors an explicit mtp=false over the mtp tag (the backend rule: the fact wins either way)', () => {
+    expect(isMtpModel({ id: 'm', mtp: false, tags: ['chat', 'mtp'] })).toBe(false)
+  })
+
+  it('falls back to the tag only when the fact is unset (null)', () => {
+    expect(isMtpModel({ id: 'm', mtp: null, tags: ['mtp'] })).toBe(true)
+  })
 })
 
 describe('isMoeModel', () => {

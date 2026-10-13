@@ -9,13 +9,14 @@
  * the live row would read background drift as an operator edit. ADR-0029 cut
  * the drawer down to file facts, so the facts are what these tests move:
  *
- *   M1 — a concurrent write (another operator, the CLI) changes
- *        `defaults.chat_template` under the open drawer. The operator touches
+ *   M1 — a concurrent write (another operator, the CLI) changes the model's
+ *        `chat_template` under the open drawer. The operator touches
  *        nothing and clicks Save: nothing may be written.
  *   M2 — Save is gated on `dirty`; a zero-edit Save writes nothing.
- *   M3 — `onSave` starts from the baseline snapshot, so a fact this drawer does
- *        not render (`tokenizer_repo`) rides along as the operator saw it, not
- *        as a mid-edit poll left it.
+ *   M3 — the save body carries only the facts the operator changed (ADR-0029
+ *        §6: facts are top-level, an absent key keeps the stored value), so a
+ *        fact this drawer does not render (`tokenizer_repo`) is never re-sent
+ *        and a concurrent write to it survives the save.
  *   M4 — a real edit enables Save and writes exactly that field, and putting a
  *        staged edit back disarms Save again.
  *
@@ -40,10 +41,8 @@ const SEEDED = {
   mmproj: null,
   hf_repo: 'org/original-repo',
   hf_filename: 'original.gguf',
-  defaults: {
-    // The drawer renders no control for this one; `onSave` carries it through.
-    tokenizer_repo: 'org/original-tok',
-  },
+  // The drawer renders no control for this fact; Save must never re-send it.
+  tokenizer_repo: 'org/original-tok',
 }
 
 async function seedModel(page: Page, overrides: Record<string, unknown> = {}) {
@@ -108,7 +107,7 @@ async function landConcurrentWrite(page: Page, patch: Record<string, unknown>) {
       const target = (window as any).HAL0_DATA?.models?.find(
         (row: any) => row.id === id,
       )
-      if (target) target.defaults = { ...(target.defaults || {}), ...patch }
+      if (target) Object.assign(target, patch)
     },
     { id: MODEL_ID, patch },
   )
@@ -176,14 +175,14 @@ test.describe('Model drawer — frozen baseline + dirty-gated Save', () => {
     const puts = await capturePuts(page)
 
     await openDrawer(page)
-    // Nothing touched — Save must not offer to rewrite the defaults block.
+    // Nothing touched — Save must not offer to rewrite the facts.
     await expect(saveBtn(page)).toBeDisabled()
     await saveBtn(page).click({ force: true })
     await page.waitForTimeout(250)
     expect(puts).toEqual([])
   })
 
-  test('M3 — unrendered facts ride along as the operator saw them, not as a mid-edit poll left them', async ({
+  test('M3 — an unrendered fact is never re-sent, so a mid-edit concurrent write to it survives', async ({
     page,
   }) => {
     await seedModel(page)
@@ -202,17 +201,20 @@ test.describe('Model drawer — frozen baseline + dirty-gated Save', () => {
     await saveBtn(page).click()
 
     await expect.poll(() => puts.length).toBe(1)
-    expect(puts[0].defaults.jinja).toBe(false)
-    // The carried-through fact is the one the drawer opened with. Sending the
-    // mid-edit 'org/other-tok' would be writing a value the operator never saw.
-    expect(puts[0].defaults.tokenizer_repo).toBe('org/original-tok')
-    // And it is facts only: no tuning key ever rides the write (ADR-0029).
-    expect(Object.keys(puts[0].defaults).sort()).toEqual([
-      'chat_template',
-      'jinja',
-      'mtp',
-      'tokenizer_repo',
-    ])
+    expect(puts[0].jinja).toBe(false)
+    // The unrendered fact does not ride the write at all: re-sending the
+    // opened-with 'org/original-tok' would revert the concurrent
+    // 'org/other-tok', and sending 'org/other-tok' would write a value the
+    // operator never saw. Absent keeps the stored value (ADR-0029 §6).
+    expect(puts[0]).not.toHaveProperty('tokenizer_repo')
+    // Exactly the edited fact ships, top-level: no `defaults` object (a 422
+    // server-side) and no tuning key (ADR-0029).
+    expect(puts[0]).not.toHaveProperty('defaults')
+    const factKeys = ['chat_template', 'jinja', 'mtp', 'tokenizer_repo']
+    expect(Object.keys(puts[0]).filter((k) => factKeys.includes(k))).toEqual(['jinja'])
+    for (const tune of ['context_size', 'extra_args', 'profile', 'enable_thinking', 'vision']) {
+      expect(puts[0]).not.toHaveProperty(tune)
+    }
   })
 
   test('M4 — a real edit still enables Save and writes exactly that field', async ({

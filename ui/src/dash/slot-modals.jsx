@@ -1646,14 +1646,16 @@ function EditSlotDrawer({ open, slot, onClose }) {
 														// not per row. `has` rows with no verdict in the response
 														// render no chip (see modelFeasibilityChipFor above).
 														// The window is the one each CANDIDATE would launch with
-														// under this slot's profile, so send the profile NAME and
-														// let the server resolve it per candidate (profile ctx_size,
-														// else the candidate's native window). `slot.ctx_effective`
-														// is the CURRENT model's window — wrong for a candidate — so
-														// it is only the fallback for a slot with no profile.
+														// under the STAGED profile selection (`profileSel`, seeded
+														// from the saved profile), so send that profile NAME and let
+														// the server resolve it per candidate (profile ctx_size, else
+														// the candidate's native window). An empty selection (the
+														// operator cleared it) never falls back to the saved
+														// `slot.profile` — that window is not what the staged config
+														// would run; it sends `slot.ctx_effective` instead.
 														onOpenChange={(isOpen) => {
 															if (!isOpen || compatible.length === 0) return;
-															const profileName = profileSel || slot.profile || "";
+															const profileName = profileSel || "";
 															const ctxNum = Number(slot.ctx_effective);
 															const windowArg = profileName
 																? { profile: profileName }

@@ -2,7 +2,7 @@
  * model-drawer-save-info-v3 — complete model drawer save + compact help.
  *
  * Uses a production-shaped registry row so the PUT contract exercises every
- * field surfaced by ModelDrawer while proving unrelated defaults survive.
+ * field surfaced by ModelDrawer while proving unrelated facts are left alone.
  *
  * ADR-0029 drawer: the model carries FILE FACTS only. The editable "Backends"
  * chip row is retired in favor of an "Engine" select (`model-provider-select`,
@@ -11,8 +11,8 @@
  * `model-cap-override-add-{mtp|jinja}-on|off`), and the native context window is
  * shown read-only. The flag editor, seed-from-profile, context input and the
  * Thinking/Vision overrides moved to the profile, so the PUT body carries ONLY
- * `defaults.{chat_template, mtp, jinja, tokenizer_repo}` — the server answers a
- * tuning key with a 422.
+ * the changed top-level facts (`chat_template`, `mtp`, `jinja`; ADR-0029 §6) —
+ * the server answers a `defaults` object or a tuning key with a 422.
  */
 import { test, expect } from '../fixtures/apiMock'
 import { pickRichOption } from '../fixtures/richSelect'
@@ -27,18 +27,17 @@ const PRODUCTION_MODEL = {
   mmproj: null,
   hf_repo: 'org/original-repo',
   hf_filename: 'original.gguf',
-  defaults: {
-    tokenizer_repo: 'org/original-tok',
-    // Tuning keys a pre-ADR-0029 row may still carry. The drawer must never
-    // echo them back (the server 422s every one).
-    extra_args: '-fa on --temp 0.4',
-    context_size: 8192,
-    profile: 'rocm-save',
-    enable_thinking: true,
-    vision: false,
-    rope_freq_base: 1_000_000,
-    n_gpu_layers: 99,
-  },
+  // A fact the drawer does not render; an untouched fact is never re-sent.
+  tokenizer_repo: 'org/original-tok',
+  // Stray tuning keys on the row. The drawer must never echo them back (the
+  // server 422s every one as model.tune_key_removed).
+  extra_args: '-fa on --temp 0.4',
+  context_size: 8192,
+  profile: 'rocm-save',
+  enable_thinking: true,
+  vision: false,
+  rope_freq_base: 1_000_000,
+  n_gpu_layers: 99,
 }
 
 async function seedProductionModel(page: import('@playwright/test').Page) {
@@ -98,7 +97,7 @@ async function openSource(page: import('@playwright/test').Page) {
 }
 
 test.describe('Model drawer — complete save and compact field help', () => {
-  test('successful PUT carries every surfaced field, preserves unrelated defaults, and closes with feedback', async ({ page }) => {
+  test('successful PUT carries every surfaced field, leaves unrelated facts alone, and closes with feedback', async ({ page }) => {
     await seedProductionModel(page)
     await mockDrawerLookups(page)
 
@@ -167,13 +166,13 @@ test.describe('Model drawer — complete save and compact field help', () => {
     expect(putBody.mmproj).toBe('/models/mmproj-saved.gguf')
     expect(putBody.hf_repo).toBe('org/saved-repo')
     expect(putBody.hf_filename).toBe('saved-q4.gguf')
-    // Facts only: the edited facts plus the one this drawer does not render.
-    expect(putBody.defaults).toEqual({
-      chat_template: 'chatml',
-      mtp: false,
-      jinja: false,
-      tokenizer_repo: 'org/original-tok',
-    })
+    // Facts only, top-level: exactly the edited facts. The unrendered
+    // tokenizer_repo is not re-sent (absent keeps the stored value).
+    expect(putBody.chat_template).toBe('chatml')
+    expect(putBody.mtp).toBe(false)
+    expect(putBody.jinja).toBe(false)
+    expect(putBody).not.toHaveProperty('tokenizer_repo')
+    expect(putBody).not.toHaveProperty('defaults')
     expect(JSON.stringify(putBody)).not.toMatch(
       /extra_args|context_size|enable_thinking|rope_freq_base|n_gpu_layers|"vision"|"profile"/,
     )

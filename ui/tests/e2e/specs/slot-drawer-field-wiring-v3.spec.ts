@@ -171,16 +171,18 @@ test.describe('Slot drawer — model swap wiring', () => {
 // The Model picker's per-row fit chips. Mocked at the Playwright layer,
 // following the mockProfiles/mockChatTemplates idiom (page.route per spec,
 // request body captured/echoed rather than a fixed canned response) — the wire
-// contract is `POST /api/models/feasibility {models:[{model_id, ctx?}]}` →
-// `{results: [{model_id, verdict, needed_mb, gtt_free_mb, gtt_total_mb}]}`
+// contract is `POST /api/models/feasibility {models:[{model_id, ctx?, profile?}]}` →
+// `{results: [{model_id, verdict, needed_mb, gtt_free_mb, gtt_total_mb, ctx, ctx_source}]}`
 // (`useModelsFeasibility.ts`). warn-never-block: a `fits`/`tight`/`exceeds`/
 // `exceeds_total` verdict maps to `feasibility-copy.ts`'s exact hint text;
 // this file only pins that the right verdict reaches the right surface, not
 // the copy itself (already vitest-pinned in `feasibility-hint.test.ts`).
 //
 // ADR-0029: the drawer no longer has a Context (ceiling) input or its own
-// ceiling probe — the window is the profile's, so the batch probe asks about
-// the slot's EFFECTIVE context (`ctx_effective`).
+// ceiling probe — the window is the profile's. ADR-0029 §6: the batch probe
+// sends the staged profile NAME and the server resolves the window per
+// candidate model; a slot with no profile falls back to its EFFECTIVE context
+// (`ctx_effective`).
 test.describe('Slot drawer — GTT feasibility (model-row fit chips)', () => {
   test('there is no ceiling input and no ceiling feasibility hint any more', async ({ page }) => {
     await seedSlots(page, [OFFLINE_PRIMARY, EMBED])
@@ -193,10 +195,12 @@ test.describe('Slot drawer — GTT feasibility (model-row fit chips)', () => {
     await expect(page.getByTestId('slot-ctx-feasibility')).toHaveCount(0)
   })
 
-  test('model dropdown rows carry a per-model fit chip from ONE batch probe fired on open, at the effective context', async ({ page }) => {
+  test('model dropdown rows carry a per-model fit chip from ONE batch probe fired on open, under the slot profile', async ({ page }) => {
     const probes: any[] = []
     await page.route('**/api/models/feasibility', async (route) => {
-      const body = route.request().postDataJSON() as { models: { model_id: string; ctx?: number }[] }
+      const body = route.request().postDataJSON() as {
+        models: { model_id: string; ctx?: number; profile?: string }[]
+      }
       probes.push(body)
       const verdictById: Record<string, string> = {
         'qwen3.6-27b-mtp': 'fits',
@@ -222,7 +226,13 @@ test.describe('Slot drawer — GTT feasibility (model-row fit chips)', () => {
     const listbox = await openRichSelect(trigger)
     // Fired once on the open transition — never per keystroke, never per row.
     await expect.poll(() => probes.length).toBe(1)
-    for (const m of probes[0].models) expect(m.ctx).toBe(16384)
+    // The staged profile goes on the wire, never the CURRENT model's window:
+    // each candidate is sized under the profile it would run with.
+    expect(probes[0].models.length).toBeGreaterThan(0)
+    for (const m of probes[0].models) {
+      expect(m.profile).toBe('rocm')
+      expect(m).not.toHaveProperty('ctx')
+    }
     await expect(listbox.locator('[data-option-id="qwen3.6-27b-mtp"]')).toContainText('● fits · ~14 GB')
     await expect(listbox.locator(`[data-option-id="${SWAP_TARGET}"]`)).toContainText("○ won't fit")
     // Each fresh open→true transition fires exactly one more probe (still
@@ -233,6 +243,38 @@ test.describe('Slot drawer — GTT feasibility (model-row fit chips)', () => {
     await page.locator('.drawer .form-lbl', { hasText: 'Runtime' }).first().click()
     await openRichSelect(trigger)
     await expect.poll(() => probes.length).toBe(2)
+  })
+
+  test('a slot with no profile probes at its effective context instead', async ({ page }) => {
+    const probes: any[] = []
+    await page.route('**/api/models/feasibility', async (route) => {
+      const body = route.request().postDataJSON() as {
+        models: { model_id: string; ctx?: number; profile?: string }[]
+      }
+      probes.push(body)
+      const results = body.models.map((m) => ({
+        model_id: m.model_id,
+        verdict: 'fits',
+        needed_mb: 14_000,
+        gtt_free_mb: 15_000,
+        gtt_total_mb: 24_000,
+      }))
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ results }) })
+    })
+    await seedSlots(page, [
+      { ...OFFLINE_PRIMARY, profile: '', ctx_effective: 16384, ctx_source: 'native' },
+      EMBED,
+    ])
+    await page.goto('/#slots/primary')
+    await expect(page.locator('.drawer')).toBeVisible()
+
+    await openRichSelect(page.locator('.drawer').getByLabel('Model for primary'))
+    await expect.poll(() => probes.length).toBe(1)
+    expect(probes[0].models.length).toBeGreaterThan(0)
+    for (const m of probes[0].models) {
+      expect(m.ctx).toBe(16384)
+      expect(m).not.toHaveProperty('profile')
+    }
   })
 })
 

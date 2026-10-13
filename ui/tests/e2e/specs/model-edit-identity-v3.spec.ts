@@ -8,8 +8,8 @@
  * (`model-name-input`) — retargeted to the inline editor, same contract.
  *
  * The curated "type" toggle row (mtp/moe/tool-calling/reasoning/coder/vision)
- * is RETIRED: behaviour is owned by typed fields (defaults.mtp,
- * defaults.enable_thinking, capability_flags.tool_calling, mmproj-derived
+ * is RETIRED: behaviour is owned by typed fields (the model's `mtp` fact,
+ * the profile's enable_thinking, capability_flags.tool_calling, mmproj-derived
  * vision) and tags are freeform labels the editor no longer touches. These
  * tests pin the retirement (no toggles rendered, PUT never carries `tags`)
  * alongside the surviving display-name contract.
