@@ -18,7 +18,7 @@ export const NOT_LOADED_TEXT = "— not yet available (slot not loaded)";
  *
  * @param {{argv?: string[] | null} | null | undefined} resolvedData  the
  *   /resolved payload, or undefined while it loads / after an error.
- * @param {{resolved_command?: string[] | string | null} | null | undefined} slot
+ * @param {{name?: string, resolved_command?: string[] | string | null} | null | undefined} slot
  *   the slot's list payload.
  */
 export function resolvedCommandText(resolvedData, slot) {
