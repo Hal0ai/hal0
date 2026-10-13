@@ -29,6 +29,14 @@ from . import images, index_topics, links, redirect_map
 from .discourse_client import DiscourseAPIError, DiscourseClient, Topic
 from .discovery import Doc
 
+# Discourse refuses a post body longer than its `max_post_length` site setting
+# (default 32000 characters) with a 422 -- "Body is limited to 32000 characters;
+# you entered N" -- and one such 422 aborts the whole sync run, so every page
+# after it stops syncing too. Docs pages are split before they reach this.
+# `tests/scripts/docs_discourse_sync/test_page_size.py` imports it to fail a
+# docs change that grows a rendered page toward the limit.
+DISCOURSE_MAX_POST_CHARS = 32_000
+
 _DRY_RUN_PENDING_MARKER = "<pending>"
 # upload:// URLs only ever appear as a markdown link/image destination
 # (`![alt](upload://...)`), so stop at the closing ')' as well as

@@ -27,7 +27,7 @@ subprocess/sysfs-based and never raises.
 | Hostname | `/proc/sys/kernel/hostname`. |
 
 The result is validated against the `HardwareInfo` schema — see the
-`hardware.json` section of [Config schema](/docs/reference/config-schema/) for the
+`hardware.json` section of [Config schema](/docs/reference/config-schema-profiles/#hardwarejson) for the
 full field list, including `unified_memory_mb` (the true UMA pool — use this, not
 `ram_mb + vram_mb`, on unified-memory systems like Strix Halo) and `platform`
 (`strix-halo`, `wsl2`, `proxmox-kvm`, `kvm`, `lxc`, `bare-metal-*`, `unknown`).

@@ -1,0 +1,308 @@
+---
+title: "Config schema: providers, profiles, stacks & agents"
+description: "The providers.toml, upstreams.toml, profiles.toml, stacks.toml, agents/<name>.toml, hardware.json and manifest.json keys, types, defaults, and constraints — verified against src/hal0/config/schema.py in the v1.0 tree."
+sidebar:
+  order: 21
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+This is the second half of the config schema reference. The first half,
+[Config schema](/docs/reference/config-schema/), covers the file layout, `hal0.toml`
+and `slots/<name>.toml`. Everything here follows the same conventions: TOML files are
+validated with Pydantic models in `hal0.config.schema`, `hardware.json` and
+`manifest.json` are JSON, and all writes are atomic.
+
+## `providers.toml`
+
+Root model `ProvidersConfig`, `extra="allow"`: `provider: list[ProviderEntry]` (default `[]`).
+
+### `[[provider]]`
+
+`extra="forbid"`.
+
+| Key | Type | Default | Req | Constraints |
+|---|---|---|---|---|
+| `catalog_id` | str | — | **required** | non-empty |
+| `name` | str | `""` | — | display override |
+| `base_url` | str | `""` | — | — |
+| `auth_value_env` | str | `""` | — | name of the env var holding the API key — the key itself is never stored in TOML |
+| `enabled` | bool | `true` | — | — |
+| `models` | list[str] | `[]` | — | — |
+
+## `upstreams.toml`
+
+Root model `UpstreamsConfig`, `extra="allow"`: `upstream: list[UpstreamEntry]`
+(default `[]`); names must be unique.
+
+### `[[upstream]]`
+
+`extra="forbid"`.
+
+| Key | Type | Default | Req | Constraints |
+|---|---|---|---|---|
+| `name` | str | — | **required** | non-empty |
+| `kind` | str | `"remote"` | — | `slot` or `remote` |
+| `url` | str | — | **required** | non-empty |
+| `auth_style` | str | `"bearer"` | — | `bearer, anthropic, header, none` |
+| `auth_header` | str | `""` | — | required if `auth_style = "header"` |
+| `auth_value_env` | str | `""` | — | — |
+| `timeout_seconds` | float | `300.0` | — | `> 0.0` |
+| `slot_name` | str \| null | `null` | — | required if `kind = "slot"` |
+| `warmup_strategy` | str | `"none"` | — | `none, ondemand, always`; aliases `lazy → ondemand`, `eager → always` |
+| `advertise_models` | bool | `true` | — | — |
+| `enabled` | bool | `true` | — | — |
+| `model_filters` | table \| null | `null` | — | see below |
+| `hal0_peer` | bool \| null | `null` | — | `null` auto-derives from the URL host: private/loopback hosts are treated as another hal0's dashboard API (pollable for hardware/slot metrics), public hosts never are. Set `true` to opt a public-hostname hal0 peer in. |
+
+`google_query` was a fifth `auth_style` value with no implementation behind
+it — Google AI Studio calls dispatched unauthenticated while the UI showed
+"key set" (#1513). It is retired from the accepted set; an on-disk
+`auth_style = "google_query"` still loads without error, coerced on read to
+`"bearer"` (the style the endpoint it points at actually accepts), with a
+warning logged.
+
+### `[[upstream]].model_filters`
+
+`extra="forbid"`.
+
+| Key | Type | Default | Notes |
+|---|---|---|---|
+| `models` | list[str] | `[]` | exact id list |
+| `include` | list[str] | `[]` | fnmatch globs |
+| `exclude` | list[str] | `[]` | fnmatch globs; always wins over `include` |
+
+## `profiles.toml`
+
+Root model `ProfilesConfig`, `extra="forbid"`: `profile: dict[str, ProfileConfig]` keyed
+by name. Seed profiles are always reapplied from code on load and overlay any on-disk
+copy — they can't be edited or deleted, only cloned.
+
+### `[profile.<name>]`
+
+`extra="forbid"`.
+
+| Key | Type | Default | Constraints |
+|---|---|---|---|
+| `flags` | str | `""` | free llama-server flags: KV cache types, batch sizes, sampling, reasoning, `--parallel`. Screened on write and again at launch (below). |
+| `ctx_size` | int \| null | `null` | `128`–`16777216`. `null` = the model's native window, dense-capped at 32768, else 8192. |
+| `enable_thinking` | bool \| null | `null` | request-time reasoning default for slots running this profile |
+| `vision` | `"auto"\|"off"` | `"auto"` | `auto` loads the model's mmproj when it has one |
+| `mtp` | `"auto"\|"off"` | `"auto"` | `auto` drafts when the model has MTP heads and the runner supports it |
+| `runner` | str \| null | `null` | optional `RUNNER_IMAGES` registry key; applying the profile sets the slot's `binary` to this key and, for a single-backend runner, also derives the slot's `device` (profile wins). Validated on write — an unknown key 422s `profiles.unknown_runner`. `null` = flags-only tune (every seed profile). |
+| `cloned_from` | str \| null | `null` | provenance |
+| `intent` | str | `""` | dashboard card headline |
+
+`flags` may not set what another layer owns. Every class below except the last is rejected when the profile is saved and refused again at launch, in every spelling llama.cpp accepts (short and alternative forms, `--flag=value`, and `_` for `-`). `--reasoning-format none` is rejected on save, but launch removes it from the command instead of refusing:
+
+| Class | Examples | Error code |
+|---|---|---|
+| Hardware (the slot owns it) | `-ngl`, `-dev`, `-t` | `slot.hardware_flag_denied` |
+| Managed by hal0 | `--model`, `--host`, `--port`, `--alias`, `--ctx-size` | `slot.managed_arg_denied` |
+| Model facts, derived placement | `--jinja`, `--chat-template*`, `--mmproj`, `--no-mmproj`, `--mmproj-auto`, `--spec-draft-device`, `--mmproj-device` | `profiles.model_fact_flag_denied` |
+| Host-owned | remote model fetches (`-hf`, `--model-url`), host file reads and writes (`--api-key-file`, `--log-file`, `--lora`), listener and auth/TLS settings (`--rpc`, `--api-key`), llama.cpp's built-in preset switches (`--gpt-oss-20b-default`, `--spec-default`) | `slot.host_owned_flag_denied` |
+| Bare positional arguments | a value with no flag in front of it | `slot.positional_arg_denied` |
+| `--reasoning-format none` | — | `slot.reasoning_format_none_denied` on save; stripped, not refused, at launch |
+
+<Aside type="note">
+The slot's own `device` enum is the single authoritative hardware
+fact — except that a `runner`-carrying profile CAN flip a GPU slot's `device` at write
+time (the profile wins within a device class): see
+[Providers, profiles & devices](/docs/reference/providers-profiles-devices/).
+The `.hal0profile.json` export envelope is schema 2; a schema-1 envelope is refused
+(`profiles.envelope_schema_unsupported`) — re-export it.
+</Aside>
+
+Profiles no longer carry an `image` field — image resolution is slot-owned
+(`slot.image_pin` or `RUNNER_IMAGES[slot.binary]`).
+
+## `stacks.toml`
+
+Root model `StacksConfig`, `extra="forbid"`: `stack: dict[str, StackConfig]` keyed by
+slug. `STACK_SCHEMA_VERSION_CURRENT = 3`.
+
+### `[stack.<slug>]`
+
+`extra="forbid"`.
+
+| Key | Type | Default |
+|---|---|---|
+| `name` | str | `""` |
+| `description` | str | `""` |
+| `author` | str | `""` |
+| `icon` | str | `""` |
+| `tags` | list[str] | `[]` |
+| `schema_version` | int | `3` |
+| `hal0_version` | str | `""` |
+| `slots` | list[table] | `[]` — see `StackSlotEntry` below |
+| `profiles` | dict[str, table] | `{}` — `ProfileConfig` entries |
+| `models` | dict[str, table] | `{}` — see `StackModelMeta` below |
+
+### `StackSlotEntry`
+
+`extra="forbid"`.
+
+| Key | Type | Default | Req | Constraints |
+|---|---|---|---|---|
+| `slot` | str | — | **required** | regex `^[a-z0-9][a-z0-9_-]{0,31}$` |
+| `profile` | str \| null | `null` | — | — |
+| `model` | str \| null | `null` | — | — |
+| `device` | str \| null | `null` | — | must be a valid device id if set |
+| `provider` | str \| null | `null` | — | — |
+| `capabilities` | list[table] | `[]` | — | see `StackCapabilityRow` below |
+
+A slot entry names a model, a profile and placement. It carries no tuning: the profile owns `vision`, `mtp`, `enable_thinking` and the flags.
+
+### `StackCapabilityRow`
+
+`extra="forbid"`.
+
+| Key | Type | Req | Constraints |
+|---|---|---|---|
+| `child` | str | **required** | e.g. `embed`, `rerank`, `stt`, `tts`, `vision` |
+| `device` | str | **required** | must be a valid device id |
+| `provider` | str | **required** | — |
+| `model` | str | **required** | — |
+| `enabled` | bool | — | default `true` |
+
+### `StackModelMeta`
+
+`extra="forbid"`.
+
+| Key | Type | Default | Req |
+|---|---|---|---|
+| `id` | str | — | **required**, non-empty |
+| `name` | str | `""` | — |
+| `hf_repo` | str | `""` | — |
+| `hf_filename` | str | `""` | — |
+| `size_bytes` | int | `0` | — |
+| `quant` | str | `""` | — |
+| `capabilities` | list[str] | `[]` | — |
+| `backends` | list[str] | `[]` | — |
+| `provider` | str \| null | `null` | — |
+| `mmproj` | str \| null | `null` | — |
+
+## `agents/<name>.toml`
+
+Root model `AgentConfig`, `extra="allow"`. `AGENT_CONFIG_SCHEMA_VERSION = 1`.
+
+| Key | Type | Default | Req | Constraints |
+|---|---|---|---|---|
+| `schema_version` | int | `1` | — | `>= 1`; future versions rejected |
+| `agent` | table | — | **required** | `[agent]`, see below |
+| `mcp` | table | `{}` | — | `[mcp]`, see below |
+
+### `[agent]`
+
+`extra="allow"`.
+
+| Key | Type | Default | Req | Constraints |
+|---|---|---|---|---|
+| `name` | str | — | **required** | regex `^[a-z0-9][a-z0-9-]{0,31}$` |
+| `display` | str | `""` | — | — |
+| `workspace` | str | `""` | — | empty → canonical path |
+
+### `[mcp]`
+
+`extra="allow"`: `servers: dict[str, MCPServerConfig]` (default `{}`).
+
+### `[mcp.servers.<name>]`
+
+`extra="allow"`.
+
+| Key | Type | Default | Constraints |
+|---|---|---|---|
+| `url` | str \| null | `null` | required unless `builtin = true` |
+| `enabled` | bool | `true` | — |
+| `builtin` | bool | `false` | — |
+| `auth` | table | `{}` | see below |
+| `tools` | table | `{}` | see below |
+
+### `[mcp.servers.<name>.auth]`
+
+`extra="forbid"`.
+
+| Key | Type | Default | Constraints |
+|---|---|---|---|
+| `kind` | `"none"\|"bearer-from-env"` | `"none"` | — |
+| `env` | str \| null | `null` | required if `kind = "bearer-from-env"` |
+
+### `[mcp.servers.<name>.tools]`
+
+`extra="forbid"`.
+
+| Key | Type | Default |
+|---|---|---|
+| `allow` | list[str] | `[]` |
+| `gated` | list[str] | `[]` |
+| `blocked` | list[str] | `[]` |
+
+`allow`, `gated`, and `blocked` must be disjoint — validation raises naming the
+overlapping tool names.
+
+## `hardware.json`
+
+Root model `HardwareInfo`, `extra="allow"` (JSON, not TOML). Written by
+`hal0 config hardware --refresh`.
+
+| Key | Type | Default | Constraints |
+|---|---|---|---|
+| `hostname` | str | `""` | — |
+| `uptime_s` | int | `0` | `>= 0` |
+| `kernel` | str | `""` | — |
+| `distro` | str | `""` | — |
+| `cpu_model` | str | `""` | — |
+| `cpu_cores` | int | `0` | `>= 0` |
+| `cpu_threads` | int | `0` | `>= 0` |
+| `ram_mb` | int | `0` | `>= 0` |
+| `ram_available_mb` | int | `0` | `>= 0` |
+| `swap_mb` | int | `0` | `>= 0` |
+| `unified_memory_mb` | int | `0` | `>= 0` — the true UMA pool; use this, not `ram_mb + vram_mb`, on unified-memory systems |
+| `gpus` | list[table] | `[]` | see `GPUInfo` below |
+| `gpu_group_gids` | dict[str,int] | `{}` | resolved render/video group ids |
+| `npu` | table | `{}` | see `NPUInfo` below |
+| `disk_free_mb` | int | `0` | `>= 0` |
+| `cgroup_max_mb` | int \| null | `null` | `>= 0` |
+| `probed_at` | str | `""` | ISO-8601 |
+| `platform` | str | `"unknown"` | one of `strix-halo, wsl2, proxmox-kvm, kvm, lxc, bare-metal-amd-gpu, bare-metal-nvidia-gpu, bare-metal-intel-igpu, bare-metal-cpu-only, unknown` |
+| `extra` | dict | `{}` | — |
+
+### `GPUInfo`
+
+`extra="allow"`.
+
+| Key | Type | Default |
+|---|---|---|
+| `vendor` | str | `""` |
+| `index` | int | `0` |
+| `name` | str | `""` |
+| `vram_mb` | int | `0` |
+| `pci_id` | str | `""` |
+| `driver` | str | `""` |
+| `drm_path` | str | `""` |
+| `compute_capable` | bool | `false` |
+| `vulkan_capable` | bool | `false` |
+
+### `NPUInfo`
+
+`extra="allow"`.
+
+| Key | Type | Default |
+|---|---|---|
+| `present` | bool | `false` |
+| `vendor` | str | `""` |
+| `name` | str | `""` |
+| `driver` | str | `""` |
+| `accel_path` | str | `""` |
+| `render_path` | str | `""` |
+| `aie_columns` | int | `0` |
+| `validated` | bool \| null | `null` |
+
+## `manifest.json` / env files
+
+`manifest.json` carries a `runners` table: one row per runner key with `image` (bare
+repo), `tag`, `digest` and `lanes_gated`. It is the one place a runner image is named — see
+[Manage runner images](/docs/guides/manage-runner-images/#the-pin-table). `api.env`
+and `openwebui.env` are systemd `EnvironmentFile=`-format `KEY=value` files, not part
+of the Pydantic schema — see [Environment variables](/docs/reference/env-vars/) for
+what lives in `api.env` (admin/client bearer keys, etc).
