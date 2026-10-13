@@ -161,9 +161,10 @@ check refuses, in every spelling llama.cpp accepts:
 
 `--reasoning-format none` is handled separately, because upstream llama.cpp
 answers every structured-output request with HTTP 400 when the server runs
-with it. Saving a profile that introduces it is rejected
-(`slot.reasoning_format_none_denied`); a profile that already carries it can
-still be re-saved unchanged. A profile that has it stored on disk is not
+with it. Any profile save whose `flags` contain it is rejected
+(`slot.reasoning_format_none_denied`), even when the profile already stores
+it, so remove it from `flags` to edit such a profile (a save that leaves
+`flags` out still goes through). A profile that has it stored on disk is not
 refused at launch: hal0 strips the pair from the command and launches without
 it. To turn thinking off, use `--reasoning off` instead.
 
