@@ -365,8 +365,7 @@ def unknown_slot_config_keys(payload: dict[str, Any]) -> list[str]:
     ``SlotConfig`` and its sub-models are ``extra="allow"`` so a typo'd key
     (``ctx_sizee``, ``enabeld``) round-trips to disk silently and the
     intended setting never takes effect. This walks ``payload`` (a partial
-    slot-config write body: PUT /config, PATCH /defaults wrapped under
-    ``model``, POST create) against the pydantic field sets of
+    slot-config write body: PUT /config, POST create) against the pydantic field sets of
     ``SlotConfig`` / ``ModelConfig`` / ``ServerConfig`` / ``NpuConfig`` /
     ``ImageGenConfig`` and returns the paths of unknown keys, sorted.
 

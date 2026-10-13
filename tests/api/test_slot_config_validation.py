@@ -130,26 +130,18 @@ def test_put_config_tolerated_extras_pass(slot_toml: Path, client: TestClient) -
     assert on_disk["image"] == "ghcr.io/hal0ai/toolbox:vulkan"
 
 
-# ── PATCH /defaults ──────────────────────────────────────────────────────────
+# ── model-table writes through PUT /config ──────────────────────────────────
 
 
-def test_patch_defaults_refuses_a_context_window(slot_toml: Path, client: TestClient) -> None:
+def test_put_config_refuses_a_model_context_window(slot_toml: Path, client: TestClient) -> None:
     """The ``ctx_size`` alias fold is gone (ADR-0029): the window is the slot
-    profile's ``ctx_size``, so PATCH /defaults refuses it and writes nothing."""
+    profile's ``ctx_size``, so a ``[model]`` write refuses it and writes nothing."""
     before = slot_toml.read_text(encoding="utf-8")
     for body in ({"ctx_size": 32768}, {"context_size": 32768}):
-        r = client.patch("/api/slots/chat/defaults", json=body)
+        r = client.put("/api/slots/chat/config", json={"model": body})
         assert r.status_code == 400, r.text
         assert r.json()["error"]["code"] == "slot.tuning_key_denied"
     assert slot_toml.read_text(encoding="utf-8") == before
-
-
-def test_patch_defaults_unknown_key_400(slot_toml: Path, client: TestClient) -> None:
-    r = client.patch("/api/slots/chat/defaults", json={"contxt_size": 32768})
-    assert r.status_code == 400, r.text
-    body = r.json()["error"]
-    assert body["code"] == "validation.unknown_keys"
-    assert body["details"]["unknown_keys"] == ["model.contxt_size"]
 
 
 # ── POST create ──────────────────────────────────────────────────────────────

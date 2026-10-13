@@ -605,8 +605,9 @@ probe on the slot's loopback port. Slot identity persists in
 has MTP heads). The profile holds every tune. The slot holds placement —
 device, layers, threads, port, runner — and names its model and profile.
 A slot write that carries a tuning key is refused with
-`slot.tuning_key_denied`, and `PATCH /api/slots/{name}/defaults` only
-rebinds the model. `hal0.config.migrations.profile_centric` moves an
+`slot.tuning_key_denied`. A model rebind is `PUT /api/slots/{name}/config`
+with `{"model": {"default": ...}}`; there is no separate defaults route.
+`hal0.config.migrations.profile_centric` moves an
 older install onto this shape: it runs after `hal0 update` activates the
 new tree and when `hal0 serve` starts `hal0-api`, backs up every file it
 changes, and checks each converted llama-server slot's launch against its

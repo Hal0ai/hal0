@@ -2955,7 +2955,7 @@ class SlotManager:
             # stacks apply engine use, so the writers can't silently diverge.
             #
             # A bare shallow ``dict.update`` replaced a sub-table wholesale,
-            # so a partial ``PATCH /defaults`` body like ``{"model":
+            # so a partial ``PUT /config`` body like ``{"model":
             # {"ctx_size": N}}`` silently dropped sibling keys — most
             # damagingly ``[model].default`` (the model name). The merge
             # touches only the fields the update carries; scalars and lists

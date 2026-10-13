@@ -458,14 +458,13 @@ def _validation_error_details(exc: ValidationError) -> dict[str, str]:
 # any ``ValidationError`` into the SAME ``BadRequest`` (status + code) the
 # site already raises for the equivalent bad-value case today.
 #
-# The SlotConfig config-write trio — create_slot / update_slot_config /
-# update_slot_defaults — is deliberately LEFT LOOSE: those bodies are
-# ``extra="allow"`` and already gated by ``_reject_unknown_config_keys``
-# (dynamic field-set validation against the SlotConfig/ModelConfig/
-# ServerConfig pydantic schemas). Adding a second, narrower pydantic model
-# in front of that boundary would duplicate it and risk drifting out of
-# sync with the real schema — the existing boundary IS the typed layer for
-# those three.
+# The SlotConfig config-write pair — create_slot / update_slot_config — is
+# deliberately LEFT LOOSE: those bodies are ``extra="allow"`` and already
+# gated by ``_reject_unknown_config_keys`` (dynamic field-set validation
+# against the SlotConfig/ModelConfig/ServerConfig pydantic schemas). Adding
+# a second, narrower pydantic model in front of that boundary would
+# duplicate it and risk drifting out of sync with the real schema — the
+# existing boundary IS the typed layer for those two.
 
 
 class _RenameSlotBody(BaseModel):
@@ -1286,47 +1285,6 @@ async def update_slot_config(name: str, request: Request) -> dict[str, object]:
     if fit_warn:
         out["fit_warning"] = fit_warn
     return out
-
-
-@router.patch("/{name}/defaults")
-@_invalidates_snapshot
-async def update_slot_defaults(name: str, request: Request) -> dict[str, object]:
-    """Rebind the slot's model (``{"default": "<model id>"}``).
-
-    Convenience wrapper over update_config — body keys merge into the slot's
-    [model] sub-table. ADR-0029: the table holds only ``default``; a context
-    window or any other tune is refused (``slot.tuning_key_denied``) — it
-    belongs on the slot's profile.
-    """
-    sm = _get_slot_manager(request)
-    try:
-        body = await request.json()
-    except Exception as exc:
-        raise BadRequest(
-            "request body must be valid JSON",
-            details={"error": str(exc)},
-            code="request.invalid_json",
-        ) from exc
-    if not isinstance(body, dict):
-        raise BadRequest("request body must be a JSON object", code="request.not_an_object")
-    # Tuning keys FIRST (both as the top-level keys an operator reaches for and
-    # as [model] keys), so the answer is "belongs on a profile", not a
-    # generic unknown-key 400.
-    _reject_slot_tuning_keys(body)
-    _reject_slot_tuning_keys({"model": body})
-    # Defaults merge into [model] — validate the wrapped shape so unknown
-    # keys surface as their real destination path (``model.<key>``).
-    _reject_unknown_config_keys({"model": body})
-    before = await _safe_config(sm, name)
-    async with record_action(
-        request, category="slot", action="slot.edit_defaults", target=name, before=before
-    ) as _rec:
-        snap = await sm.update_config(name, {"model": body})
-        _rec.after = {"model": body}
-    # ``default`` is a ModelConfig field, so this route can rebind the slot's
-    # model id just like PUT /config — same #1837 eviction applies.
-    await _refresh_composite_catalogue(request, before)
-    return _slot_to_dict(snap, request)
 
 
 # ── lifecycle ──────────────────────────────────────────────────────────────

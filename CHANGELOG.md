@@ -158,9 +158,14 @@ applying. Add those subsections to a version's section to surface them; see
     context window (`[model].context_size` / `ctx_size`), `parallel`,
     `chat_template`, `workers`, `mtp`, `enable_thinking`, `vision`,
     `[model].n_gpu_layers`, `rope_freq_base` and `[server].extra_args`.
-    `PATCH /api/slots/{name}/defaults` takes none of them. A slot file that
-    still carries one fails to load with `slot.unconverted` (the conversion
-    removes them first).
+    A slot file that still carries one fails to load with `slot.unconverted`
+    (the conversion removes them first).
+  - `PATCH /api/slots/{name}/defaults` is removed, with no alias, and the
+    `slot.edit_defaults` audit action with it. After the tuning keys left it
+    could only rebind `[model].default`. Rebind a slot's model with
+    `PUT /api/slots/{name}/config` and `{"model": {"default": ...}}`, the MCP
+    `slot_edit` tool, or `model_swap`. A client that still calls the old
+    route gets a 404.
   - The slot views drop `ctx_max`, `chat_template`, `rope_freq_base`,
     `workers`, `parallel` and `llamacpp_args`, and add `ctx_effective` and
     `ctx_source` (`profile`, `native` or `fallback`), plus
