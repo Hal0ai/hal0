@@ -90,7 +90,7 @@ def test_comfyui_legacy_slot_image_still_beats_default_images(
 def test_kokoro_container_spec_launches_the_family_override(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """End to end: the launched ContainerSpec carries the operator default."""
+    """End to end: the launched RuntimeLaunchPlan carries the operator default."""
     monkeypatch.setenv("HAL0_MODEL_STORE", "/mnt/ai-models")
     _set_default_images(monkeypatch, {"kokoro": _OVERRIDE})
     slot_cfg = {"name": "tts", "port": 8084, "type": "tts", "profile": "kokoro"}

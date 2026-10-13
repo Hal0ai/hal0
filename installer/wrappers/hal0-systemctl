@@ -362,9 +362,8 @@ _quadlet_die() { die "quadlet rejected: $1"; }
 #   --ipc <host|none|…>         comfyui (--ipc=host)
 #   --ulimit <name=soft[:hard]> flm/NPU (--ulimit memlock=-1)
 # The exec-family (--runtime/--hooks-dir/…) and everything else is refused. The
-# deprecated free-form `extra_args` escape hatch (which already logs
-# container.extra_args_deprecated) is only honoured insofar as its flags fall in
-# this list; anything outside it is refused at the seam.
+# renderer only emits these from typed RuntimeLaunchPlan fields (group_add,
+# security_opt, ipc, ulimits); this check is the root-side backstop.
 #
 # Both `--flag=value` (one token) and `--flag value` (two tokens) are accepted —
 # comfyui emits the `=` form, the GPU path emits the space form.

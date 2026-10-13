@@ -8,6 +8,7 @@ import pytest
 from hal0.config import paths as cfg_paths
 from hal0.config.schema import ProfileConfig
 from hal0.errors import UnprocessableEntity
+from hal0.providers.base import Mount
 from hal0.providers.flm import FLMProvider
 
 
@@ -98,16 +99,15 @@ def test_default_models_dir_is_flm_cache(tmp_hal0_home: str) -> None:
     # Source follows the resolver default (HAL0_HOME-aware); the target is
     # FLM's hardcoded in-container HOME cache and never moves.
     assert (
-        cfg_paths.default_flm_models_dir(),
-        "/var/lib/hal0/.config/flm/models",
-    ) in spec.mounts
+        Mount(cfg_paths.default_flm_models_dir(), "/var/lib/hal0/.config/flm/models") in spec.mounts
+    )
 
 
 def test_env_var_overrides_flm_models_dir(monkeypatch, tmp_path) -> None:
     custom = str(tmp_path / "flm-store")
     monkeypatch.setenv("HAL0_FLM_MODELS_DIR", custom)
     spec = FLMProvider().container_spec(_slot_cfg(), _model_info())
-    assert (custom, "/var/lib/hal0/.config/flm/models") in spec.mounts
+    assert Mount(custom, "/var/lib/hal0/.config/flm/models") in spec.mounts
 
 
 def test_models_flm_store_config_drives_mount(monkeypatch, tmp_path) -> None:
@@ -131,7 +131,7 @@ def test_models_flm_store_config_drives_mount(monkeypatch, tmp_path) -> None:
 
     monkeypatch.setattr(loader, "load_hal0_config", lambda: _Cfg())
     spec = FLMProvider().container_spec(_slot_cfg(), _model_info())
-    assert (custom, "/var/lib/hal0/.config/flm/models") in spec.mounts
+    assert Mount(custom, "/var/lib/hal0/.config/flm/models") in spec.mounts
 
 
 def test_spec_build_creates_missing_store_dir(monkeypatch, tmp_path) -> None:

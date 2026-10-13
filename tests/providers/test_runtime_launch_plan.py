@@ -77,33 +77,16 @@ def _exec(unit_text: str) -> str:
 
 class TestMount:
     def test_read_write_renders_src_dst(self) -> None:
-        assert Mount("/a", "/b").render() == "/a:/b"
+        assert Mount("/a", "/b").render_quadlet() == "/a:/b"
 
     def test_read_only_appends_ro(self) -> None:
-        assert Mount("/a", "/b", read_only=True).render() == "/a:/b:ro"
+        assert Mount("/a", "/b", read_only=True).render_quadlet() == "/a:/b:ro"
 
-    def test_read_only_does_not_double_ro_on_legacy_target(self) -> None:
-        # A target that already carries ":ro" must not become ":ro:ro".
-        assert Mount("/a", "/b:ro", read_only=True).render() == "/a:/b:ro"
-
-    def test_selinux_relabel_appended(self) -> None:
+    def test_selinux_relabel_appended(self, monkeypatch) -> None:
         # SELinux relabel is a first-class flag (Fedora/enforcing hosts).
-        assert Mount("/a", "/b", read_only=True, selinux="z").render() == "/a:/b:ro,z"
-        assert Mount("/a", "/b", selinux="z").render() == "/a:/b:z"
-        assert Mount("/a", "/b:ro", read_only=True, selinux="z").render() == "/a:/b:ro,z"
-
-    def test_coerce_passes_mount_through(self) -> None:
-        m = Mount("/a", "/b", read_only=True)
-        assert Mount.coerce(m) is m
-
-    def test_coerce_plain_tuple_is_read_write(self) -> None:
-        m = Mount.coerce(("/a", "/b"))
-        assert (m.source, m.target, m.read_only) == ("/a", "/b", False)
-
-    def test_coerce_ro_suffixed_tuple_becomes_read_only(self) -> None:
-        # Legacy callers smuggled ":ro" into the target — coercion recovers it.
-        m = Mount.coerce(("/a", "/b:ro"))
-        assert (m.source, m.target, m.read_only) == ("/a", "/b", True)
+        monkeypatch.setattr("hal0.config.paths.is_nfs", lambda path: False)
+        assert Mount("/a", "/b", read_only=True, selinux="z").render_quadlet() == "/a:/b:ro,z"
+        assert Mount("/a", "/b", selinux="z").render_quadlet() == "/a:/b:z"
 
 
 # ── HealthCheck ────────────────────────────────────────────────────────────────
@@ -139,17 +122,11 @@ class TestRenderUnitFromPlan:
         plan = RuntimeLaunchPlan(image="img", command=["x"], port=8080, network_mode="")
         assert "HealthCmd=" not in _render_from_plan("s", plan)
 
-    def test_mount_and_legacy_tuple_render_identically(self) -> None:
-        # The renderer coerces a legacy (src, dst:ro) tuple to the same Volume
-        # value a first-class read-only Mount produces.
-        as_mount = RuntimeLaunchPlan(
+    def test_read_only_mount_renders_volume_ro(self) -> None:
+        plan = RuntimeLaunchPlan(
             image="img", command=["x"], mounts=[Mount("/m", "/m", read_only=True)]
         )
-        as_tuple = RuntimeLaunchPlan(image="img", command=["x"], mounts=[("/m", "/m:ro")])
-        m_unit = _render_from_plan("s", as_mount)
-        t_unit = _render_from_plan("s", as_tuple)
-        assert "Volume=/m:/m:ro" in m_unit.splitlines()
-        assert m_unit == t_unit
+        assert "Volume=/m:/m:ro" in _render_from_plan("s", plan).splitlines()
 
 
 # ── legacy shim folds into the single builder ──────────────────────────────────

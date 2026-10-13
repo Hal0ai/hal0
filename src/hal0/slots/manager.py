@@ -69,7 +69,6 @@ from hal0.slots.npu.trio import is_npu_trio_shadow
 from hal0.slots.npu.trio import reconcile_trio_slots as _npu_reconcile_trio_slots
 from hal0.slots.preload_evict import _DEFAULT_HEADROOM_MB
 from hal0.slots.preload_evict import admit as _preload_admit
-from hal0.slots.profile_adopt import profile_fits_slot as _profile_adopt_profile_fits_slot
 from hal0.slots.profile_adopt import type_implied_profile
 from hal0.slots.reaper import _EVICT_AFTER_S, _IDLE_AFTER_S, _IDLE_MONITOR_INTERVAL_S, SlotReaper
 from hal0.slots.reaper import is_pinned as _reaper_is_pinned
@@ -3173,15 +3172,6 @@ class SlotManager:
                     details={"slot": slot_name, "model_id": model_id},
                 ) from exc
             self._invalidate_cfg_cache(slot_name)
-
-    # ── profile fit (hal0.slots.profile_adopt) ───────────────────────────────
-
-    _profile_fits_slot = staticmethod(_profile_adopt_profile_fits_slot)
-
-    # NOTE (spec-hw-slot-ownership §2/§3): the model-preferred-runner adoption
-    # (``_preferred_runner_for`` / ``_apply_preferred_runner`` / the
-    # ``_runner_fits_slot`` gate) was RETIRED — the runner is the slot's own
-    # ``binary`` field now, never derived from the model. No delegators remain.
 
     async def _check_npu_exclusivity(
         self,

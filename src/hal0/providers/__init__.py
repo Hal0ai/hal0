@@ -1,7 +1,7 @@
 """hal0.providers — Inference backend abstraction layer.
 
 Each Provider is a stateless class that knows how to build the launch plan
-(:class:`RuntimeLaunchPlan` / ``ContainerSpec``) for one backend type.  The
+(:class:`RuntimeLaunchPlan`) for one backend type.  The
 Provider ABC is the contract between SlotManager and the concrete backends.
 
 Live providers:
@@ -31,7 +31,7 @@ See PLAN.md §1, §3 and ARCHITECTURE.md §Key boundaries.
 
 from __future__ import annotations
 
-from hal0.providers.base import ContainerSpec, Provider
+from hal0.providers.base import Provider, RuntimeLaunchPlan
 from hal0.providers.comfyui import ComfyUIProvider
 from hal0.providers.container import ContainerProvider, container_provider
 from hal0.providers.flm import FLMProvider
@@ -68,9 +68,9 @@ def get_provider(name: str) -> Provider:
 __all__ = [
     "ComfyUIProvider",
     "ContainerProvider",
-    "ContainerSpec",
     "FLMProvider",
     "Provider",
+    "RuntimeLaunchPlan",
     "container_provider",
     "get_provider",
 ]

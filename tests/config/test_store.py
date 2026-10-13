@@ -167,8 +167,8 @@ class TestMountFor:
         monkeypatch.setattr(store, "is_nfs_path", lambda p: True)
         m = store.mount_for(str(tmp_path), read_only=True)
         assert m.selinux == ""
-        assert ":z" not in m.render()
-        assert ":Z" not in m.render()
+        assert ":z" not in m.render_quadlet()
+        assert ":Z" not in m.render_quadlet()
 
     def test_is_nfs_path_reads_proc_mounts_fstype(self, monkeypatch, tmp_path) -> None:
         """Exercises the REAL `is_nfs_path` (bypassing the suite-wide

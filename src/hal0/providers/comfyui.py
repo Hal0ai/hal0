@@ -40,7 +40,7 @@ import httpx
 
 from hal0.errors import Hal0Error
 from hal0.providers._gpu import resolve_gpu_device_paths, resolve_gpu_group_ids
-from hal0.providers.base import ContainerSpec, Mount, Provider
+from hal0.providers.base import Mount, Provider, RuntimeLaunchPlan
 from hal0.providers.comfyui_workflows import build_workflow
 
 log = logging.getLogger(__name__)
@@ -248,8 +248,8 @@ class ComfyUIProvider(Provider):
         self,
         slot_cfg: dict[str, Any],
         model_info: dict[str, Any],
-    ) -> ContainerSpec:
-        """Build a ContainerSpec replicating the live-validated CT105 deployment.
+    ) -> RuntimeLaunchPlan:
+        """Build a RuntimeLaunchPlan replicating the live-validated CT105 deployment.
 
         Mirrors `docker inspect comfyui` on CT105 (migration = replicate
         what works):
@@ -318,7 +318,7 @@ class ComfyUIProvider(Provider):
         # and llama_server's notes on stock-ubuntu /etc/group).
         group_add: list[str] = [str(gid) for gid in resolve_gpu_group_ids()]
 
-        return ContainerSpec(
+        return RuntimeLaunchPlan(
             image=self.image_ref(slot_cfg),
             command=command,
             env={},
@@ -329,7 +329,8 @@ class ComfyUIProvider(Provider):
             group_add=group_add,
             port=port,
             network_mode="host",
-            extra_args=["--ipc=host"],
+            # Host /dev/shm for Wan/Hunyuan video (see the docstring above).
+            ipc="host",
         )
 
     # ── Health ─────────────────────────────────────────────────────────────────

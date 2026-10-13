@@ -50,7 +50,7 @@ from hal0.config import store as model_store_module
 from hal0.config.paths import model_store_root
 from hal0.errors import Hal0Error
 from hal0.providers._gpu import resolve_gpu_device_paths, resolve_gpu_group_ids
-from hal0.providers.base import ContainerSpec, Mount, Provider
+from hal0.providers.base import Mount, Provider, RuntimeLaunchPlan
 
 # Default profile name if the slot TOML omits one.
 _DEFAULT_PROFILE = "qwen3-tts"
@@ -151,8 +151,8 @@ class Qwen3TTSProvider(Provider):
         self,
         slot_cfg: dict[str, Any],
         model_info: dict[str, Any],
-    ) -> ContainerSpec:
-        """Build a ContainerSpec for the GPU Qwen3-TTS slot.
+    ) -> RuntimeLaunchPlan:
+        """Build a RuntimeLaunchPlan for the GPU Qwen3-TTS slot.
 
         The toolbox image ENTRYPOINT is ``python3 qwen3tts_server.py``, so
         ``command`` carries only flags (no binary path / subcommand).
@@ -194,7 +194,7 @@ class Qwen3TTSProvider(Provider):
         store_root = model_store_root()
         cache_dir = _cache_dir()
 
-        return ContainerSpec(
+        return RuntimeLaunchPlan(
             image=self.image_ref(slot_cfg),
             command=command,
             # MIOpen user DB + custom kernel cache on the writable /cache mount;
@@ -224,7 +224,6 @@ class Qwen3TTSProvider(Provider):
             # Kokoro TTS slot. the Quadlet renderer derives
             # --publish=127.0.0.1:<port>:<port> from spec.port.
             network_mode="",
-            extra_args=[],
         )
 
     # ── Health / infer ─────────────────────────────────────────────────────────
