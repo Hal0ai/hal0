@@ -1,14 +1,14 @@
 """Auto-derive a slot's device + profile from the hardware probe (design D4).
 
 Maps a capability to a ``DeviceLiteral`` via the probe, then to a
-``SEED_PROFILES`` name. Chat/coder take the plain GPU base profile (MTP is
-never auto-forced — slots opt into the ROCmFPX MTP profiles explicitly);
+seed profile name. Chat/coder take the plain base profile (MTP is never
+auto-forced: the profile's ``mtp`` decides);
 embed/rerank take their dedicated backend-coherent lanes. NPU lanes are
 selected only when the NPU is present AND the operator opted in.
 
-The (device, profile) pairs this produces are backend-coherent per #807:
-``gpu-rocm``→``rocm`` (backend rocm), ``gpu-vulkan``→``vulkan``,
-``npu``→``flm``, ``cpu``→``tts``/``cpu-llm``.
+The (device, profile) pairs this produces are coherent per #807:
+``gpu-rocm``/``gpu-vulkan``/``gpu-cuda``→``chat``, ``npu``→``flm``,
+``cpu``→``cpu-chat`` (``kokoro`` for TTS).
 """
 
 from __future__ import annotations
@@ -203,8 +203,8 @@ def derive_profile(capability: str, device: str) -> str:
     """Return a ``SEED_PROFILES`` name for a (capability, device) pair.
 
     Reads the canonical device-class base profile from the single-source
-    :data:`~hal0.config.schema.DEVICE_DEFAULT_PROFILES` table (gpu-rocm→rocm,
-    gpu-vulkan→vulkan, cpu→cpu-llm, npu→flm) and layers the install path's
+    :data:`~hal0.config.schema.DEVICE_DEFAULT_PROFILES` table (GPU devices→chat,
+    cpu→cpu-chat, npu→flm) and layers the install path's
     capability specialisations on top:
 
     * ``embed`` → the ``embedding`` profile (llama-server ``--embedding``) on
@@ -217,9 +217,8 @@ def derive_profile(capability: str, device: str) -> str:
       own runtime family, not llama-server.
     * ``cpu`` + ``tts`` → the kokoro ``tts`` profile.
 
-    Chat/coder take the plain base profile — MTP is never auto-forced (the legacy
-    MTP ``rocm-dnse`` profile was removed 2026-07-05; slots opt into the ROCmFPX
-    MTP profiles explicitly).
+    Chat/coder take the plain base profile — MTP is never auto-forced; the
+    profile's ``mtp`` decides.
 
     The embed/rerank lanes are deliberately NOT device-gated (#1830). The old
     ``gpu-rocm``/``gpu-vulkan`` gate dated from the retired per-backend
@@ -229,14 +228,13 @@ def derive_profile(capability: str, device: str) -> str:
     was seeded with a chat profile, launched without its mode flag, reported
     ``state=ready`` and 501'd its own endpoint.
 
-    An unknown device falls back to ``cpu-llm`` (the CPU-coherent llama-server
+    An unknown device falls back to ``cpu-chat`` (the CPU-coherent llama-server
     profile) — returning a GPU profile there caused #807 to reject the slot on
     GPU-less boxes (device=cpu + profile=vulkan incoherent, #834).
     """
     if device == "gpu-rocm" and capability in ("chat", "coder"):
-        # Plain ROCm GPU LLM. (The legacy MTP rocm-dnse profile was removed
-        # 2026-07-05; MTP dense now lives on the ROCmFPX profiles, which slots
-        # opt into explicitly — derivation never silently forces MTP.)
+        # Plain ROCm GPU LLM. Derivation never forces MTP; the profile's
+        # ``mtp`` decides.
         return "chat"
     if capability in ("embed", "rerank") and device != "npu":
         # Embeddings/rerankers get their dedicated profile (llama-server

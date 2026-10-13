@@ -55,6 +55,9 @@ const BLANK = {
 // enable_thinking on the wire is null (auto) | true | false.
 export function thinkingToForm(v) { return v === true ? 'on' : v === false ? 'off' : 'auto'; }
 export function thinkingFromForm(v) { return v === 'on' ? true : v === 'off' ? false : null; }
+// Unset (null) reasons only when a request asks — the same as 'off' — so the
+// card and preview say so instead of implying the model decides.
+export function thinkingLabel(v) { return v === 'on' ? 'on' : v === 'off' ? 'off' : 'default (off)'; }
 const switchOf = (v) => (v === 'off' ? 'off' : 'auto');
 
 // 32768 → "32K"; non-round values keep the exact count.
@@ -328,7 +331,7 @@ export function ProfileCard({ p, index, onEdit, onClone, onDelete, onExport }) {
 
       <div className="stk-lib-slotlist" data-testid={`pf-tune-${p.name}`}>
         <PfRow label="ctx" value={p.ctx_size != null ? ctxLabel(p.ctx_size) : 'model native'} />
-        <PfRow label="thinking" value={thinkingToForm(p.enable_thinking)} />
+        <PfRow label="thinking" value={thinkingLabel(thinkingToForm(p.enable_thinking))} />
         <PfRow label="vision" value={p.vision === 'off' ? 'off' : 'auto'} />
         <PfRow label="mtp" value={p.mtp === 'off' ? 'off' : 'auto'} />
         <PfRow label="runner" value={p.runner ? runnerTitleFor(p.runner, backends) : 'auto'} />
@@ -621,7 +624,7 @@ export function ProfileDrawer({ mode, source, existing = [], onClose, onSaved })
         <>
           <div className="pf-drawer-preview mono" data-testid="pf-drawer-preview">
             <span className="pf-chip-dot" />
-            ctx {ctxLabel(String(form.ctx ?? '').trim() || null)} · thinking {form.thinking} · vision {form.vision} · mtp {form.mtp}
+            ctx {ctxLabel(String(form.ctx ?? '').trim() || null)} · thinking {thinkingLabel(form.thinking)} · vision {form.vision} · mtp {form.mtp}
           </div>
           <span className="pf-grow" />
           {f.submitted && blocking && (
@@ -708,9 +711,9 @@ export function ProfileDrawer({ mode, source, existing = [], onClose, onSaved })
         <FormRow label="Thinking" sub="reasoning default for requests this profile serves">
           <select className="pf-input mono" value={form.thinking}
             onChange={e => set('thinking', e.target.value)} data-testid="pf-select-thinking">
-            <option value="auto">Auto — the model decides</option>
-            <option value="on">On — always reason first</option>
-            <option value="off">Off — never reason</option>
+            <option value="auto">Default — off unless the request asks</option>
+            <option value="on">On — reason unless the request opts out</option>
+            <option value="off">Off — reason only when the request asks</option>
           </select>
         </FormRow>
 
