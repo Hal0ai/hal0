@@ -21,6 +21,15 @@
 #             subshells, and third-party tools like pip/npm/apt-get) lands
 #             in the log. Exports HAL0_INSTALL_LOG (the path, for display)
 #             and HAL0_INSTALL_LOG_FD (the open fd, for writing/reading).
+#           hal0_run_without_log_fd CMD... — run CMD with the log fd
+#             closed. Every privilege drop (runuser -u hal0 ...) goes through
+#             it, so an unprivileged process never inherits a writable
+#             handle on the root-owned log.
+#           hal0_tmp_track PATH... / hal0_tmp_remove PATH... /
+#             hal0_tmp_cleanup — register mktemp'd scratch files and dirs,
+#             remove one early, or remove every one still registered.
+#             install.sh's EXIT trap calls hal0_tmp_cleanup, so an abort
+#             mid-step does not leave root's downloads behind in /tmp.
 # Modder notes:
 #   exec-based teeing (not a per-`echo` wrapper) so nothing in the rest of
 #   the ~4,000-line install.sh has to change to be captured. Root gets
@@ -104,6 +113,64 @@ hal0_excl_open() {
     done
     umask "$old_umask"
     [[ -n "$HAL0_EXCL_FD" ]]
+}
+
+# hal0_run_without_log_fd CMD [ARGS...] — see the header. The log fd is
+# opened write-only and is inherited by every child, so without this a
+# `runuser -u hal0` child could append to or truncate the root-owned 0600
+# log through it (#2407 review). The close happens in a subshell, so the
+# installer's own fd stays open for the tee processes, the failure report
+# and the summary. sudo needs no wrapper: it closes fds above 2 itself.
+hal0_run_without_log_fd() {
+    if [[ -n "${HAL0_INSTALL_LOG_FD:-}" ]]; then
+        (
+            exec {HAL0_INSTALL_LOG_FD}>&-
+            "$@"
+        )
+    else
+        "$@"
+    fi
+}
+
+# Scratch paths created with mktemp that hal0_tmp_cleanup removes. Only the
+# shell that registered a path can clean it up, so register from the main
+# install shell, not from inside $(...) or a ( ) subshell.
+HAL0_TMP_PATHS=()
+
+hal0_tmp_track() {
+    local p
+    for p in "$@"; do
+        [[ -n "$p" ]] && HAL0_TMP_PATHS+=("$p")
+    done
+    return 0
+}
+
+# hal0_tmp_remove PATH... — remove now and stop tracking, so the EXIT trap
+# never runs rm on a name this run already gave up (rm -rf never follows a
+# symlink, but there is no reason to touch the name twice).
+hal0_tmp_remove() {
+    local p q
+    local -a keep
+    for p in "$@"; do
+        [[ -n "$p" ]] || continue
+        rm -rf -- "$p" 2>/dev/null || true
+        keep=()
+        for q in "${HAL0_TMP_PATHS[@]}"; do
+            [[ "$q" == "$p" ]] || keep+=("$q")
+        done
+        HAL0_TMP_PATHS=("${keep[@]}")
+    done
+    return 0
+}
+
+# hal0_tmp_cleanup — the EXIT-trap half. Never fails, never changes $?.
+hal0_tmp_cleanup() {
+    local p
+    for p in "${HAL0_TMP_PATHS[@]}"; do
+        [[ -n "$p" ]] && rm -rf -- "$p" 2>/dev/null
+    done
+    HAL0_TMP_PATHS=()
+    return 0
 }
 
 # hal0_install_log_init — idempotent (a second call is a no-op once

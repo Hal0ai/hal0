@@ -1139,7 +1139,9 @@ trap 'hal0_report_on_exit "$?"' EXIT
 
     def test_install_sh_wires_exit_trap_and_err_trap_marks_written(self) -> None:
         src = (REPO / "installer" / "install.sh").read_text()
-        assert "trap 'hal0_report_on_exit \"$?\"' EXIT" in src
+        # The same EXIT trap also runs hal0_tmp_cleanup (#2407); the report
+        # hook stays first so it still sees the install's own exit status.
+        assert "trap 'hal0_report_on_exit \"$?\"; hal0_tmp_cleanup' EXIT" in src
         assert "_HAL0_REPORT_WRITTEN=1" in src
         # The EXIT trap must precede the first release-gate die().
         assert src.index("hal0_report_on_exit") < src.index(

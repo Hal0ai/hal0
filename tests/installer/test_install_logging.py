@@ -8,11 +8,14 @@ without touching this test process's own stdout.
 
 from __future__ import annotations
 
+import fnmatch
 import os
 import re
 import subprocess
 import uuid
 from pathlib import Path
+
+import pytest
 
 REPO = Path(__file__).resolve().parents[2]
 LOGGING_SH = REPO / "installer" / "lib" / "logging.sh"
@@ -397,3 +400,90 @@ echo "path=$HAL0_EXCL_PATH"
     def test_a_symlink_to_a_char_device_is_not_used(self, tmp_path: Path) -> None:
         proc = _run(self._script(tmp_path, "/dev/null"))
         self._check(proc, tmp_path)
+
+
+class TestDoctorBundleFindsTheNewNames:
+    """``hal0 doctor bundle`` locates the install log and failure report by
+    glob (src/hal0/cli/doctor_bundle.py ``_INSTALL_LOG_GLOBS`` /
+    ``_INSTALL_REPORT_GLOBS``). #2407 added a random part to every name, so
+    pin that the names the installer now produces still match those globs,
+    and that the bundle actually selects such a file."""
+
+    @staticmethod
+    def _pattern(globs: tuple[tuple[str, str], ...], directory: str) -> str:
+        return next(pattern for d, pattern in globs if d == directory)
+
+    def test_root_log_name_matches_the_var_log_glob(self) -> None:
+        from hal0.cli import doctor_bundle
+
+        script = f"""
+source "{LOGGING_SH}"
+id() {{ echo 0; }}
+hal0_install_log_path
+"""
+        tmpl = Path(_run(script).stdout.strip())
+        name = tmpl.name.replace("XXXXXX", "0123456789ab")
+        pattern = self._pattern(doctor_bundle._INSTALL_LOG_GLOBS, str(tmpl.parent))
+        assert fnmatch.fnmatchcase(name, pattern), (name, pattern)
+
+    def test_tmp_log_name_matches_the_tmp_glob(self) -> None:
+        from hal0.cli import doctor_bundle
+
+        script = f"""
+source "{LOGGING_SH}"
+id() {{ echo 1000; }}
+hal0_install_log_init
+echo "log=$HAL0_INSTALL_LOG"
+"""
+        proc = _run(script)
+        line = next(line for line in proc.stdout.splitlines() if line.startswith("log="))
+        log = Path(line.removeprefix("log="))
+        try:
+            assert log.parent == Path("/tmp"), proc.stdout + proc.stderr
+            pattern = self._pattern(doctor_bundle._INSTALL_LOG_GLOBS, "/tmp")
+            assert fnmatch.fnmatchcase(log.name, pattern), (log.name, pattern)
+        finally:
+            if log.name.startswith("hal0-install-") and log.parent == Path("/tmp"):
+                log.unlink(missing_ok=True)
+
+    def test_report_name_matches_the_report_globs(self, tmp_path: Path) -> None:
+        from hal0.cli import doctor_bundle
+
+        failure_report = REPO / "installer" / "lib" / "failure-report.sh"
+        log = tmp_path / "hal0-install-0123456789ab.log"
+        log.write_text("log\n")
+        script = f"""
+IFS=$'\\n\\t'
+source "{failure_report}"
+_hal0_report_redact_file() {{ return 1; }}
+export HAL0_INSTALL_LOG="{log}"
+echo "report=$(hal0_write_failure_report "Pre-flight checks")"
+"""
+        proc = _run(script)
+        line = next(line for line in proc.stdout.splitlines() if line.startswith("report="))
+        report = Path(line.removeprefix("report="))
+        assert report.parent == tmp_path, proc.stdout + proc.stderr
+        for directory in ("/var/log/hal0", "/tmp"):
+            pattern = self._pattern(doctor_bundle._INSTALL_REPORT_GLOBS, directory)
+            assert fnmatch.fnmatchcase(report.name, pattern), (report.name, pattern)
+
+    def test_bundle_selects_a_log_created_with_the_root_naming(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """End to end: hal0_excl_open makes a log the way the root branch of
+        hal0_install_log_init does, in a stand-in for /var/log/hal0, and the
+        bundle's own selection (glob + lstat checks) picks it."""
+        from hal0.cli import doctor_bundle
+
+        pattern = self._pattern(doctor_bundle._INSTALL_LOG_GLOBS, "/var/log/hal0")
+        monkeypatch.setattr(doctor_bundle, "_INSTALL_LOG_GLOBS", ((str(tmp_path), pattern),))
+        script = f"""
+source "{LOGGING_SH}"
+hal0_excl_open "{tmp_path}/install-20990101-000000-" .log
+printf 'line\\n' >&"$HAL0_EXCL_FD"
+echo "path=$HAL0_EXCL_PATH"
+"""
+        proc = _run(script)
+        line = next(line for line in proc.stdout.splitlines() if line.startswith("path="))
+        created = Path(line.removeprefix("path="))
+        assert doctor_bundle._latest_install_log() == created, proc.stdout + proc.stderr

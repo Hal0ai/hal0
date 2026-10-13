@@ -445,6 +445,17 @@ applying. Add those subsections to a version's section to surface them; see
   Qwen3-TTS clients, and the memory reranker. Requests to `127.0.0.1`,
   `localhost` and `[::1]` now go direct. Remote providers still use the proxy,
   and the dispatcher's connection limits are unchanged. (#2585)
+- **The installer no longer writes to guessable file names.** Running as
+  root, it wrote the install log, the failure report, the NodeSource setup
+  script and the FastFlowLM `.deb` to timestamped or fixed names in `/tmp` or
+  in the hal0-owned `/var/log/hal0`, and a plain redirect or `curl -o`
+  followed any symlink a local user had planted there, so a root install
+  could overwrite any file. The log and the report now get a random part in
+  their names (`install-<ts>-<random>.log`, `hal0-install-<random>.log`,
+  `hal0-install-report-<ts>-<random>.txt`), are created owner-only with
+  O_EXCL and are written only through the open file. The downloads come from
+  `mktemp` and are removed when the installer exits, including on an abort.
+  `hal0 doctor bundle` still finds the log and the report. (#2407)
 
 ### Fixed
 
