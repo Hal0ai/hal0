@@ -7,10 +7,17 @@ the deduped argv plus, per flag, which layer (ADR-0029: base / model / profile
 
 from __future__ import annotations
 
+from typing import Any
 from unittest.mock import patch
 
+import pytest
+
 from hal0.config.schema import SEED_PROFILES, ProfileConfig
-from hal0.providers.container import resolved_argv_detail_for_slot
+from hal0.providers.container import (
+    _spec_provider_for,
+    resolved_argv_detail_for_slot,
+    resolved_command_for_slot,
+)
 
 
 def _profile() -> ProfileConfig:
@@ -82,3 +89,59 @@ def test_detail_none_when_the_named_profile_is_missing() -> None:
     (``slot.profile_missing``); the best-effort preview shows nothing."""
     cfg = {"profile": "no-such-profile-anywhere", "model": {"default": "m"}}
     assert resolved_argv_detail_for_slot(cfg) is None
+
+
+# ── dispatch-aware: llama-server does not compose every slot's launch ─────────
+
+
+@pytest.mark.parametrize(
+    "cfg",
+    [
+        pytest.param({"type": "tts", "model": {"default": "kokoro-82m"}}, id="kokoro-by-type"),
+        pytest.param(
+            {"type": "transcription", "model": {"default": "moonshine"}}, id="moonshine-by-type"
+        ),
+        pytest.param({"type": "image", "model": {"default": "sdxl"}}, id="comfyui-by-type"),
+        pytest.param({"provider": "comfyui", "model": {"default": "sdxl"}}, id="comfyui-provider"),
+        pytest.param({"device": "npu", "model": {"default": "gemma3-1b"}}, id="flm-npu-device"),
+    ],
+)
+def test_detail_is_none_for_a_slot_a_provider_launches(cfg: dict[str, Any]) -> None:
+    """A slot ``_spec_provider_for`` hands to a provider runs that provider's
+    own command; the llama-server preview must not invent one (ADR-0029)."""
+    assert _spec_provider_for(cfg) is not None
+    assert resolved_argv_detail_for_slot(cfg) is None
+    assert resolved_command_for_slot(cfg) is None
+
+
+@pytest.mark.parametrize("family", ["flm", "kokoro", "qwen3tts", "moonshine", "comfyui"])
+def test_detail_is_none_for_a_profile_naming_a_provider_family(family: str) -> None:
+    """The profile's ``runtime_family`` decides, not only device/type."""
+    cfg = {"profile": "p", "model": {"default": "m"}}
+    with patch("hal0.providers.container._profile_runtime_family", return_value=family):
+        assert _spec_provider_for(cfg) is not None
+        assert resolved_argv_detail_for_slot(cfg) is None
+
+
+def test_detail_is_none_for_an_unknown_runtime_family() -> None:
+    """The launch path refuses this slot loudly; the preview shows nothing."""
+    cfg = {"profile": "p", "model": {"default": "m"}}
+    with patch("hal0.providers.container._profile_runtime_family", return_value="mystery"):
+        assert resolved_argv_detail_for_slot(cfg) is None
+
+
+def test_detail_for_a_llama_server_family_profile_is_unchanged() -> None:
+    cfg = {"profile": "p", "port": 8101, "model": {"default": "m"}}
+    with (
+        patch("hal0.providers.container._profile_runtime_family", return_value="llama-server"),
+        patch("hal0.providers.container._resolve_profile", return_value=_profile()),
+        patch(
+            "hal0.providers.container._best_effort_model_info",
+            return_value={"_model_key": "m", "path": "m"},
+        ),
+    ):
+        assert _spec_provider_for(cfg) is None
+        detail = resolved_argv_detail_for_slot(cfg)
+    assert detail is not None
+    assert "--model" in detail["argv"]
+    assert detail["provenance"]

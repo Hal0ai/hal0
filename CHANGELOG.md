@@ -365,6 +365,15 @@ applying. Add those subsections to a version's section to surface them; see
   model decides". hal0 treats it as off unless the request asks, so the
   option, the profile card and the drawer preview now say "default (off)".
 
+- `GET /api/slots/{name}/resolved` no longer invents a llama-server command
+  for a slot that llama-server does not launch. Kokoro, Moonshine, Qwen3-TTS,
+  ComfyUI and FLM/NPU slots got a made-up `base`/`model`/`profile`/`slot`
+  argv, and the slot drawer showed it as the command they run. The endpoint
+  now asks the same provider selection the launch path uses and answers
+  `argv: null` with empty `provenance` for those slots, as ADR-0029 says; the
+  `resolved_command` field of `GET /api/slots` follows suit, and the drawer
+  says the command is not composed by llama-server. llama-server slots are
+  unchanged (#2577).
 - A profile, or the recorded tune of a slot the profile conversion blocked,
   can no longer redirect a slot's model or reach outside it through a short
   or alternative llama.cpp flag. The flag screen only knew one spelling of

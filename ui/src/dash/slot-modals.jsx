@@ -47,6 +47,7 @@ import { RichSelect } from "./rich-select.jsx";
 // file — the slot CARD's apply confirm asks the same question and must get the
 // same answer from the same code, without importing this drawer.
 import { laneTitle, profileApplyPreview, profileFitsSlot } from "./profile-apply-preview.js";
+import { resolvedCommandText } from "./resolved-command.js";
 import { useSlotLogsStream } from "@/api/hooks/useLogs";
 import { ENDPOINTS } from "@/api/endpoints";
 import { normalizeApiModel, isUpstreamModel } from "@/lib/normalizeApiModel";
@@ -2413,22 +2414,10 @@ function EditSlotDrawer({ open, slot, onClose }) {
 								transition: "opacity .15s ease",
 							}}
 						>
-							{(() => {
-								// Prefer deduped argv from /resolved when available; fall back to
-								// slot.resolved_command (list-payload) then a "not yet" sentinel.
-								const resolvedData = resolvedQuery.data;
-								const argv = resolvedData?.argv ?? null;
-								if (Array.isArray(argv) && argv.length > 0) {
-									return argv.join(" \\\n  ");
-								}
-								if (Array.isArray(slot.resolved_command)) {
-									return slot.resolved_command.join(" \\\n  ");
-								}
-								return (
-									slot.resolved_command ||
-									"— not yet available (slot not loaded)"
-								);
-							})()}
+							{/* Deduped argv from /resolved, else slot.resolved_command, else
+							    a sentinel — a null argv is the endpoint's answer for a slot
+							    llama-server does not launch (resolved-command.js). */}
+							{resolvedCommandText(resolvedQuery.data, slot)}
 						</div>
 					</div>
 					{/* Provenance legend + per-flag badges — only when the /resolved endpoint

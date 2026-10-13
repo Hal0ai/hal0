@@ -2920,7 +2920,12 @@ def _resolve_slot_argv(
 
     Returns ``(image, ResolvedArgv)`` — the deduped flag portion (image
     excluded) plus per-flag provenance — or ``None`` when the slot cannot
-    launch (a missing profile, an unconverted slot). Consumes the SAME
+    launch (a missing profile, an unconverted slot) or when llama-server does
+    not compose its launch at all. The last case asks
+    :func:`_spec_provider_for`, the one dispatch rule the launch path uses: a
+    slot that resolves to a provider (FLM, Kokoro, Moonshine, Qwen3-TTS,
+    ComfyUI) runs that provider's own command, so a llama-server argv built
+    here would be fiction (ADR-0029). Consumes the SAME
     :func:`_llama_argv_segments` builder and :func:`_resolve_llama_scalars`
     resolver (via :func:`_resolve_preview_bundle`) the launch path uses, so
     the previewed argv (including the mtp override, model-registry defaults,
@@ -2928,6 +2933,14 @@ def _resolve_slot_argv(
     ctx-size) is byte-identical to what :meth:`ContainerProvider.container_spec`
     would launch.
     """
+    try:
+        non_llama = _spec_provider_for(slot_cfg) is not None
+    except UnknownRuntimeFamilyError:
+        # No provider, no llama-server either: the launch path refuses this
+        # slot loudly, and the best-effort preview has nothing true to show.
+        non_llama = True
+    if non_llama:
+        return None
     pin = blocked_slot_pin(slot_cfg) if _has_tuning_keys(slot_cfg) else None
     if pin is not None and pin.get("argv") is not None:
         # A slot the conversion blocked launches its pre-conversion tune, on
@@ -2966,7 +2979,10 @@ def resolved_argv_detail_for_slot(
     ``model`` / ``profile`` / ``slot``) —
     so an operator can see exactly which
     source won each flag and how many duplicates were collapsed. The UI renders
-    these labels generically. ``None`` for a slot that cannot launch.
+    these labels generically. ``None`` for a slot that cannot launch and for a
+    slot whose launch llama-server does not compose (FLM, Kokoro, Moonshine,
+    Qwen3-TTS, ComfyUI): those run their provider's own command, and no argv
+    is fabricated for them.
     """
     resolved = _resolve_slot_argv(slot_cfg, model_path)
     if resolved is None:
