@@ -26,6 +26,7 @@ from hal0.api._redact import (
     redact_log_line,
     redact_value,
 )
+from hal0.observability.sentry import SENSITIVE_HEADERS
 from hal0.redaction import MASK, redact_shareable_text
 
 # ── is_sensitive_key ──────────────────────────────────────────────────────
@@ -1008,3 +1009,15 @@ class TestSharedFixture:
             out = redact_log_line(line)
             assert v not in out, out
             assert name in out, out
+
+    @pytest.mark.parametrize("key", _CASES["sensitive_keys"])
+    def test_a_secret_key_name_is_sensitive(self, key: str) -> None:
+        assert is_sensitive_key(key)
+
+    @pytest.mark.parametrize("key", _CASES["plain_keys"])
+    def test_a_plain_key_name_is_not_sensitive(self, key: str) -> None:
+        assert not is_sensitive_key(key)
+
+    def test_the_sensitive_headers_are_the_backend_set(self) -> None:
+        # ui/src/sentry.ts masks the same headers whole; its test reads this list.
+        assert set(self._CASES["sensitive_headers"]) == SENSITIVE_HEADERS

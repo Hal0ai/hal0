@@ -1,5 +1,5 @@
 {
-  "_comment": "Cases for the shared redaction shape pass, read by tests/api/test_redact.py (hal0.api._redact.redact_log_line) and ui/src/sentry.test.ts (redactSecrets). Change src/hal0/redaction.py and ui/src/sentry.ts together; a case added here is checked by both. mask: [line, secret] - the secret must not survive and the mask must appear. keep: lines that come back unchanged. exact: [line, expected]. mask_names / keep_names: NAME=<value> lines whose value must / must not be masked; mask_hyphen_names additionally in the NAME: v, JSON and --NAME=v forms, with the name kept in the output.",
+  "_comment": "Cases for the shared redaction shape pass, read by tests/api/test_redact.py (hal0.api._redact.redact_log_line) and ui/src/sentry.test.ts (redactSecrets). Change src/hal0/redaction.py and ui/src/sentry.ts together; a case added here is checked by both. mask: [line, secret] - the secret must not survive and the mask must appear. keep: lines that come back unchanged. exact: [line, expected]. mask_names / keep_names: NAME=<value> lines whose value must / must not be masked; mask_hyphen_names additionally in the NAME: v, JSON and --NAME=v forms, with the name kept in the output. sensitive_keys / plain_keys: key names whose value the structured scrubbers (is_sensitive_key in src/hal0/api/_redact.py, isSensitiveKey in ui/src/sentry.ts) must / must not mask whole. sensitive_headers: exactly SENSITIVE_HEADERS in src/hal0/observability/sentry.py, also masked whole by ui/src/sentry.ts.",
   "value": "Plural_Tok3n_99xyzw",
   "hyphen_value": "Zq8vR2mW9xK4tL7pQ3",
   "mask": [
@@ -206,6 +206,22 @@
     [
       "PASSPHRAſE=Sphrase_fold_xyzab",
       "Sphrase_fold_xyzab"
+    ],
+    [
+      "ſecret=Sfold_s_1234xyz",
+      "Sfold_s_1234xyz"
+    ],
+    [
+      "toKen=Sfold_k_1234xyz",
+      "Sfold_k_1234xyz"
+    ],
+    [
+      "password\u001c=Sws_1c_1234xyz",
+      "Sws_1c_1234xyz"
+    ],
+    [
+      "password\u0085=Sws_85_1234xyz",
+      "Sws_85_1234xyz"
     ]
   ],
   "keep": [
@@ -394,5 +410,41 @@
     "db-password-primary",
     "client-secret-staging",
     "my-key"
+  ],
+  "sensitive_keys": [
+    "password",
+    "HF_TOKEN",
+    "apiKey",
+    "x-api-key",
+    "accessKey",
+    "client_secret",
+    "HAL0_ADMIN_KEY",
+    "KEY",
+    "salt",
+    "max_tokens",
+    "ſecret",
+    "toKen",
+    "HAL0_CLIENT_KEY\n"
+  ],
+  "plain_keys": [
+    "url",
+    "arguments",
+    "status_code",
+    "message",
+    "KEY_ROTATION_DAYS",
+    "KEYBOARD_LAYOUT",
+    "monkey",
+    "keys"
+  ],
+  "sensitive_headers": [
+    "authorization",
+    "proxy-authorization",
+    "cookie",
+    "set-cookie",
+    "x-api-key",
+    "api-key",
+    "x-auth-token",
+    "x-hal0-admin-key",
+    "x-hal0-client-key"
   ]
 }

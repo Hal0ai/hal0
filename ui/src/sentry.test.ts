@@ -12,7 +12,7 @@
 import { beforeAll, describe, expect, it, vi } from 'vitest'
 
 import sharedCases from '../../tests/fixtures/redaction_shapes.json'
-import { initSentry, redactSecrets, redactTree } from './sentry'
+import { initSentry, isSensitiveKey, redactSecrets, redactTree } from './sentry'
 
 const MASK = '***REDACTED***'
 
@@ -84,6 +84,9 @@ interface SharedCases {
   mask_names: string[]
   keep_names: string[]
   mask_hyphen_names: string[]
+  sensitive_keys: string[]
+  plain_keys: string[]
+  sensitive_headers: string[]
 }
 const shared = sharedCases as unknown as SharedCases
 
@@ -267,17 +270,63 @@ describe('redactTree', () => {
     expect(out.length).toBe(20_000)
     expect(out.at(-1)).toBe('[Truncated]')
   })
+
+  it('counts leaves toward the size cap, so a flat array of strings is not scanned whole', () => {
+    const flat = Array.from({ length: 200_000 }, () => `HF_TOKEN=hf_abcdefghijklmnop ${'x'.repeat(40)}`)
+    const started = performance.now()
+    const out = redactTree(flat) as unknown[]
+    expect(performance.now() - started).toBeLessThan(500)
+    expect(out[0]).toBe(`HF_TOKEN=***REDACTED*** ${'x'.repeat(40)}`)
+    expect(out.at(-1)).toBe('[Truncated]')
+    expect(JSON.stringify(out)).not.toContain('hf_abcdefghijklmnop')
+  })
+
+  it('masks the value under a secret-named key whole, as the backend _scrub does', () => {
+    const out = redactTree({
+      password: 'hunter22222',
+      auth: { apiKey: 'plainvalue123', nested: { client_secret: { any: 'shape' } } },
+      list: [{ HAL0_ADMIN_KEY: 'abc' }],
+      url: 'https://h/p',
+      count: 3,
+    })
+    expect(out).toEqual({
+      password: MASK,
+      auth: { apiKey: MASK, nested: { client_secret: MASK } },
+      list: [{ HAL0_ADMIN_KEY: MASK }],
+      url: 'https://h/p',
+      count: 3,
+    })
+  })
+
+  it.each(shared.sensitive_keys)('treats the key %j as sensitive (shared fixture)', (key) => {
+    expect(isSensitiveKey(key)).toBe(true)
+    expect(redactTree({ [key]: 'plainvalue123' })).toEqual({ [key]: MASK })
+  })
+
+  it.each(shared.plain_keys)('treats the key %j as plain (shared fixture)', (key) => {
+    expect(isSensitiveKey(key)).toBe(false)
+    expect(redactTree({ [key]: 'plainvalue123' })).toEqual({ [key]: 'plainvalue123' })
+  })
+
+  it('cuts every string at ? in URL mode', () => {
+    expect(redactTree({ 'url.full': 'https://h/p?api_key=q', 'http.query': '?api_key=q' }, { urls: true })).toEqual({
+      'url.full': 'https://h/p',
+      'http.query': '',
+    })
+  })
 })
 
 describe('initSentry beforeSend', () => {
   type Hook = (event: Record<string, unknown>) => Record<string, unknown> | null
   let beforeSend: Hook
+  let beforeSendTransaction: Hook
 
   beforeAll(async () => {
     vi.stubEnv('VITE_SENTRY_DSN', 'https://public@example.invalid/1')
     vi.stubGlobal('__HAL0_UI_VERSION__', 'test')
     expect(await initSentry()).toBe(true)
     beforeSend = sdk.init.mock.calls[0][0].beforeSend as Hook
+    beforeSendTransaction = sdk.init.mock.calls[0][0].beforeSendTransaction as Hook
   })
 
   const HF = 'hf_abcdefghijklmnopqrstuvwx'
@@ -360,5 +409,94 @@ describe('initSentry beforeSend', () => {
       },
     }
     expect(beforeSend(hostile as unknown as Record<string, unknown>)).toBeNull()
+    expect(beforeSendTransaction(hostile as unknown as Record<string, unknown>)).toBeNull()
+  })
+
+  it('masks sensitive request headers by name, whatever the value looks like', () => {
+    const headers: Record<string, string> = { Accept: 'text/html', 'X-Upstream-Token': 'plainvalue123' }
+    for (const name of shared.sensitive_headers) headers[name] = `${name}-dXNlcjpwYXNz`
+    headers.Authorization = 'Basic dXNlcjpwYXNz'
+    headers.Cookie = 'session=abcdef0123456789'
+    const out = beforeSend({ request: { url: 'https://h/p', headers } }) as {
+      request: { headers: Record<string, string> }
+    }
+    const text = JSON.stringify(out)
+    expect(text).not.toContain('dXNlcjpwYXNz')
+    expect(text).not.toContain('abcdef0123456789')
+    expect(text).not.toContain('plainvalue123')
+    expect(out.request.headers.Authorization).toBe(MASK)
+    expect(out.request.headers.Cookie).toBe(MASK)
+    expect(out.request.headers.Accept).toBe('text/html')
+  })
+
+  it('masks a structured secret in a console breadcrumb by its key', () => {
+    const out = beforeSend({
+      breadcrumbs: [{ category: 'console', data: { arguments: ['login', { password: 'hunter22222' }] } }],
+      extra: { config: { apiKey: 'plainvalue123' } },
+    })
+    const text = JSON.stringify(out)
+    expect(text).not.toContain('hunter22222')
+    expect(text).not.toContain('plainvalue123')
+  })
+
+  it('drops the query from stack frame URLs but keeps the exception text whole', () => {
+    const out = beforeSend({
+      exception: {
+        values: [
+          {
+            type: 'Error',
+            value: 'why? Authorization: Bearer abc123456789',
+            stacktrace: {
+              frames: [{ filename: 'https://h/?api_key=framesecret', abs_path: 'https://h/a.js?api_key=framesecret', lineno: 3 }],
+            },
+          },
+        ],
+      },
+    }) as { exception: { values: { value: string; stacktrace: { frames: { lineno: number }[] } }[] } }
+    const text = JSON.stringify(out)
+    expect(text).not.toContain('framesecret')
+    expect(text).not.toContain('abc123456789')
+    expect(out.exception.values[0].value).toBe(`why? Authorization: Bearer ${MASK}`)
+    expect(out.exception.values[0].stacktrace.frames[0].lineno).toBe(3)
+  })
+
+  it('scrubs a transaction event: name, request, trace context and every span', () => {
+    const metadata = { spanCountBeforeProcessing: 1 }
+    const out = beforeSendTransaction({
+      type: 'transaction',
+      transaction: `/p/${HF}`,
+      user: { id: 'u' },
+      request: { url: 'https://h/p?api_key=txsecret', headers: { Authorization: 'Basic dXNlcjpwYXNz' } },
+      contexts: { trace: { data: { url: 'https://h/p?api_key=txsecret', 'sentry.op': 'pageload' } } },
+      spans: [
+        {
+          op: 'http.client',
+          description: 'GET https://u:pw12345678@h/api?api_key=txsecret',
+          data: {
+            url: 'https://h/api?api_key=txsecret',
+            'url.full': 'https://h/api?api_key=txsecret',
+            'http.query': '?api_key=txsecret',
+            'http.method': 'GET',
+            'http.response.status_code': 200,
+            'x-auth-token': 'plainvalue123',
+          },
+        },
+      ],
+      sdkProcessingMetadata: metadata,
+    }) as {
+      spans: { op: string; description: string; data: Record<string, unknown> }[]
+      sdkProcessingMetadata: unknown
+    }
+    const text = JSON.stringify(out)
+    for (const secret of ['txsecret', 'pw12345678', HF, 'dXNlcjpwYXNz', 'plainvalue123']) {
+      expect(text).not.toContain(secret)
+    }
+    expect(out).not.toHaveProperty('user')
+    expect(out.spans[0].op).toBe('http.client')
+    expect(out.spans[0].description).toBe(`GET https://u:${MASK}@h/api`)
+    expect(out.spans[0].data['http.method']).toBe('GET')
+    expect(out.spans[0].data['http.response.status_code']).toBe(200)
+    // The SDK reads this back after the hook; it must survive untouched.
+    expect(out.sdkProcessingMetadata).toBe(metadata)
   })
 })

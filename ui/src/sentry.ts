@@ -24,6 +24,10 @@
 //   * every URL is truncated at `?` before it is sent. hal0 accepts
 //     `?api_key=` on SSE/WS URLs (browsers cannot set headers on those), so a
 //     query string is assumed to be credential-bearing.
+//   * error AND transaction events are scrubbed (`beforeSend`,
+//     `beforeSendTransaction`): every text field through `redactSecrets`, a
+//     value under a secret-named key or a sensitive header masked whole, and a
+//     hook that throws drops the event.
 //   * no Session Replay, no `attachStacktrace` of DOM content — a replay of a
 //     chat pane would ship prompt text off the box.
 
@@ -469,31 +473,74 @@ export function redactSecrets(value: unknown): unknown {
 
 // ── Structured values ────────────────────────────────────────────────────────
 //
-// The TS twin of `redact_text_tree`: redact every string inside a value. Unlike
-// the Python it returns a COPY, because Sentry hands us `console` arguments and
-// the like by reference and rewriting the application's own objects would be a
-// bug. It is bounded and cycle-safe: a value deeper than `MAX_DEPTH`, or past
-// `MAX_NODES` visited, or a reference to one of its own ancestors, is replaced
-// by a marker rather than walked (fail closed, never ship what was not scrubbed).
+// Port of `is_sensitive_key` (`_SENSITIVE_RE` in `src/hal0/api/_redact.py`):
+// a value whose KEY names a secret is masked without being looked at, because a
+// bare value (`{ password: 'hunter2' }`) has no shape for `redactSecrets` to
+// find. It is a substring search, so it over-masks (`max_tokens`) on purpose,
+// exactly as the backend's `_scrub` does. KEEP IN SYNC with `_SENSITIVE_RE`;
+// the shared fixture's `sensitive_keys` and `plain_keys` pin both. `\n?$` is
+// Python's `$`, which also matches before a final newline.
+const SENSITIVE_KEY_RE = rx(
+  String.raw`SECRET|TOKEN|PASSWORD|PASS|API[_-]?KEY|ACCESS[_-]?KEY|PRIVATE[_-]?KEY` +
+    String.raw`|ENCRYPTION[_-]?KEY|SALT|_KEY\n?$|^KEY\n?$`,
+  'iu',
+)
+
+export function isSensitiveKey(key: string): boolean {
+  return SENSITIVE_KEY_RE.test(key)
+}
+
+// Port of `SENSITIVE_HEADERS` in `src/hal0/observability/sentry.py`: request
+// headers masked wholesale, compared lower-cased. These carry a credential under
+// a name `isSensitiveKey` does not catch, and `Authorization: Basic dXNl...` or a
+// raw `Cookie` value has no text shape once its name is gone. KEEP IN SYNC; the
+// shared fixture's `sensitive_headers` pins both.
+const SENSITIVE_HEADERS: ReadonlySet<string> = new Set([
+  'authorization',
+  'proxy-authorization',
+  'cookie',
+  'set-cookie',
+  'x-api-key',
+  'api-key',
+  'x-auth-token',
+  'x-hal0-admin-key',
+  'x-hal0-client-key',
+])
+
+// The TS twin of the backend's `_scrub`: mask the value under a sensitive key
+// and redact every other string inside a value. Unlike the Python it returns a
+// COPY, because Sentry hands us `console` arguments and the like by reference
+// and rewriting the application's own objects would be a bug. It is bounded and
+// cycle-safe: past `MAX_DEPTH`, past `MAX_NODES` values visited (leaves count
+// too, so a flat array of a million strings is not scanned a million times), or
+// at a reference to one of its own ancestors, a value is replaced by a marker
+// rather than walked (fail closed, never ship what was not scrubbed).
+//
+// With `urls`, every string is also truncated at `?` before it is redacted:
+// span and stack-frame fields hold full request URLs under many names
+// (`url.full`, `http.query`, `abs_path`), and a query string is assumed to be
+// credential-bearing.
 const MAX_DEPTH = 8
 const MAX_NODES = 5000
 
-export function redactTree(value: unknown): unknown {
+export function redactTree(value: unknown, opts: { urls?: boolean } = {}): unknown {
   let nodes = 0
   const ancestors = new Set<object>()
   const walk = (v: unknown, depth: number): unknown => {
-    if (typeof v === 'string') return redactSecrets(v)
+    nodes += 1
+    if (nodes > MAX_NODES || depth > MAX_DEPTH) return '[Truncated]'
+    if (typeof v === 'string') return opts.urls ? scrubUrl(v) : redactSecrets(v)
     if (v === null || typeof v !== 'object') {
       return typeof v === 'function' || typeof v === 'symbol' ? '[Unserializable]' : v
     }
-    nodes += 1
-    if (nodes > MAX_NODES || depth > MAX_DEPTH) return '[Truncated]'
     if (ancestors.has(v)) return '[Circular]'
     ancestors.add(v)
     try {
       if (Array.isArray(v)) return v.map((item) => walk(item, depth + 1))
       const copy: Record<string, unknown> = {}
-      for (const [key, item] of Object.entries(v)) copy[key] = walk(item, depth + 1)
+      for (const [key, item] of Object.entries(v)) {
+        copy[key] = isSensitiveKey(key) ? MASK : walk(item, depth + 1)
+      }
       return copy
     } finally {
       ancestors.delete(v)
@@ -510,8 +557,12 @@ function scrubUrl(value: unknown): unknown {
 
 type Bag = Record<string, unknown>
 
-// Scrub everything in `event` that can carry text. Mutates `event`, which is
-// Sentry's own copy. Throws on anything unexpected: the caller drops the event.
+const isBag = (v: unknown): v is Bag => v !== null && typeof v === 'object'
+
+// Scrub everything in `event` that can carry text, for error and transaction
+// events alike. Mutates `event`, which is Sentry's own copy, and leaves
+// `sdkProcessingMetadata` alone (the SDK reads it back after the hook). Throws
+// on anything unexpected: the caller drops the event.
 function scrubEvent(event: Bag): Bag {
   delete event.user
   const request = event.request as Bag | undefined
@@ -520,24 +571,29 @@ function scrubEvent(event: Bag): Bag {
     delete request.query_string
     delete request.cookies
     delete request.data
-    if (request.headers && typeof request.headers === 'object') {
-      const headers = redactTree(request.headers) as Bag
-      for (const key of Object.keys(headers)) {
+    delete request.env
+    if (isBag(request.headers)) {
+      const headers: Bag = {}
+      for (const [key, item] of Object.entries(request.headers)) {
+        const name = key.toLowerCase()
+        if (SENSITIVE_HEADERS.has(name) || isSensitiveKey(key)) headers[key] = MASK
         // `Referer` is a URL of the page that made the request.
-        if (key.toLowerCase() === 'referer' || key.toLowerCase() === 'referrer') {
-          headers[key] = scrubUrl(headers[key])
-        }
+        else if (name === 'referer' || name === 'referrer') headers[key] = scrubUrl(item)
+        else headers[key] = redactTree(item)
       }
       request.headers = headers
     }
   }
 
+  // A pageload or navigation transaction is named after the URL path.
+  if (typeof event.transaction === 'string') event.transaction = scrubUrl(event.transaction)
+
   if (Array.isArray(event.breadcrumbs)) {
-    event.breadcrumbs = event.breadcrumbs.map((crumb: Bag) => {
-      if (!crumb || typeof crumb !== 'object') return crumb
+    event.breadcrumbs = event.breadcrumbs.map((crumb: unknown) => {
+      if (!isBag(crumb)) return crumb
       const out: Bag = { ...crumb }
       if (typeof out.message === 'string') out.message = redactSecrets(out.message)
-      if (out.data && typeof out.data === 'object') {
+      if (isBag(out.data)) {
         // The default console breadcrumb keeps the raw call in `data.arguments`.
         const data = redactTree(out.data) as Bag
         for (const key of ['url', 'from', 'to']) {
@@ -550,26 +606,56 @@ function scrubEvent(event: Bag): Bag {
   }
 
   // `extra` holds `__serialized__` for a captured plain object; `contexts` and
-  // `tags` are free-form too.
+  // `tags` are free-form too. `contexts.trace.data` holds a transaction's root
+  // span attributes, URLs included.
   for (const key of ['extra', 'contexts', 'tags']) {
-    if (event[key] && typeof event[key] === 'object') {
-      event[key] = redactTree(event[key])
-    }
+    if (isBag(event[key])) event[key] = redactTree(event[key])
+  }
+  const contexts = event.contexts as Bag | undefined
+  if (contexts && isBag(contexts.trace)) contexts.trace = redactTree(contexts.trace, { urls: true })
+
+  // A transaction's child spans. A fetch/XHR span carries the full request URL
+  // in its description and in several `data` attributes (`url`, `url.full`,
+  // `http.query`), so every string in a span is URL-scrubbed.
+  if (Array.isArray(event.spans)) {
+    event.spans = event.spans.map((span: unknown) =>
+      isBag(span) ? redactTree(span, { urls: true }) : span,
+    )
   }
 
   // The text surfaces. `message` is the top-level string form, `logentry` its
   // structured twin, and `exception.values[].value` is what actually carries an
-  // upstream 401's echoed header.
+  // upstream 401's echoed header. The rest of an exception value (a frame's
+  // `filename` and `abs_path` are URLs) is URL-scrubbed; `value` is not cut at
+  // `?`, because it is prose.
   if (typeof event.message === 'string') event.message = redactSecrets(event.message)
   const logentry = event.logentry as Bag | undefined
   if (logentry && typeof logentry.message === 'string') {
     logentry.message = redactSecrets(logentry.message)
   }
-  const exception = event.exception as { values?: Bag[] } | undefined
-  for (const value of exception?.values ?? []) {
-    if (typeof value.value === 'string') value.value = redactSecrets(value.value)
+  const exception = event.exception as Bag | undefined
+  if (exception && Array.isArray(exception.values)) {
+    exception.values = exception.values.map((value: unknown) => {
+      if (!isBag(value)) return value
+      const out = redactTree(value, { urls: true }) as Bag
+      if (typeof value.value === 'string') out.value = redactSecrets(value.value)
+      return out
+    })
   }
   return event
+}
+
+// The `beforeSend` / `beforeSendTransaction` hook: error events reach only the
+// first and transaction events only the second, so both are registered, as the
+// backend registers `scrub_event` for both.
+function scrubOrDrop<T>(event: T): T | null {
+  try {
+    return scrubEvent(event as unknown as Bag) as unknown as T
+  } catch {
+    // Fail closed, same as the backend: an event we could not scrub is an
+    // event we do not send.
+    return null
+  }
 }
 
 /**
@@ -601,15 +687,10 @@ export async function initSentry(): Promise<boolean> {
       // otherwise it instruments every fetch/XHR on the dashboard's polling
       // loops for events that are immediately discarded.
       integrations: tracesSampleRate > 0 ? [mod.browserTracingIntegration()] : [],
-      beforeSend(event) {
-        try {
-          return scrubEvent(event as unknown as Bag) as unknown as typeof event
-        } catch {
-          // Fail closed, same as the backend: an event we could not scrub is
-          // an event we do not send.
-          return null
-        }
-      },
+      // Spans are sent inside their transaction event (no span streaming), so
+      // `beforeSendTransaction` sees every span the tracing integration made.
+      beforeSend: (event) => scrubOrDrop(event),
+      beforeSendTransaction: (event) => scrubOrDrop(event),
     })
     mod.setTag('hal0.component', 'ui')
     sentry = mod

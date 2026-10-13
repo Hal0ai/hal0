@@ -85,6 +85,8 @@ DSN_ENV_VARS: Final[tuple[str, ...]] = ("HAL0_SENTRY_DSN", "SENTRY_DSN")
 # this list still passes through the key-name scrubber below, which
 # catches ``X-Foo-Token``-shaped names generically; this set exists for
 # the names that carry a credential without a matching key-name token.
+# ui/src/sentry.ts masks the same set; ``sensitive_headers`` in
+# tests/fixtures/redaction_shapes.json must equal it, and both suites read it.
 SENSITIVE_HEADERS: Final[frozenset[str]] = frozenset(
     {
         "authorization",
