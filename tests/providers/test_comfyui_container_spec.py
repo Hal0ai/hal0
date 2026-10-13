@@ -126,8 +126,31 @@ def test_comfyui_data_root_env_override(monkeypatch: pytest.MonkeyPatch) -> None
     assert not any(m.source.startswith("/mnt/ai-models/comfyui") for m in spec.mounts)
 
 
-def test_comfyui_profile_flags_fallback_without_profile() -> None:
-    """No resolvable profile → live-validated default flag bundle."""
+def test_comfyui_named_missing_profile_refuses_to_launch() -> None:
+    """A slot that names a profile the catalog lacks fails closed, as every
+    llama-server slot does (ADR-0029) — it never launches the default tune."""
+    from hal0.errors import UnprocessableEntity
+
+    with pytest.raises(UnprocessableEntity) as exc_info:
+        ComfyUIProvider().container_spec(_img_cfg(profile="no-such-profile"), {})
+    assert exc_info.value.code == "slot.profile_missing"
+    assert exc_info.value.details == {"slot": "img", "profile": "no-such-profile"}
+
+
+def test_comfyui_nested_slot_profile_missing_refuses_to_launch() -> None:
+    """The ``[slot].profile`` spelling is the same named profile."""
+    from hal0.errors import UnprocessableEntity
+
+    cfg = _img_cfg()
+    del cfg["profile"]
+    cfg["slot"] = {"profile": "no-such-profile"}
+    with pytest.raises(UnprocessableEntity) as exc_info:
+        ComfyUIProvider().container_spec(cfg, {})
+    assert exc_info.value.code == "slot.profile_missing"
+
+
+def test_comfyui_profile_flags_default_without_profile() -> None:
+    """A slot that names NO profile → live-validated default flag bundle."""
     cfg = _img_cfg()
     del cfg["profile"]
     spec = ComfyUIProvider().container_spec(cfg, {})

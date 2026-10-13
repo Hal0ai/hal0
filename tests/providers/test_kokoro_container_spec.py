@@ -118,3 +118,13 @@ def test_slot_port_override_wins() -> None:
 
     unit = _render_from_spec("tts", spec, runtime_bin="/usr/bin/docker")
     assert "PublishPort=127.0.0.1:8097:8097" in unit.splitlines()
+
+
+def test_named_missing_profile_refuses_to_launch() -> None:
+    """A slot naming a profile the catalog lacks fails closed (ADR-0029); it
+    never launches some other tune."""
+    from hal0.errors import NotFound
+
+    with pytest.raises(NotFound) as exc_info:
+        KokoroProvider().container_spec(_slot_cfg(profile="no-such-profile"), {})
+    assert exc_info.value.code == "profiles.not_found"

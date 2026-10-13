@@ -172,11 +172,22 @@ def resolve_slot_profile(slot_cfg: Mapping[str, Any]) -> Any:
     does not have refuses to launch (``slot.profile_missing``) — there is no
     silent fallback to some other tune.
     """
-    from hal0.errors import NotFound
-
     name = str(slot_cfg.get("profile") or "")
     if not name:
         name = TYPE_DEFAULT_PROFILE.get(str(slot_cfg.get("type") or ""), "chat")
+    return resolve_named_profile(slot_cfg, name)
+
+
+def resolve_named_profile(slot_cfg: Mapping[str, Any], name: str) -> Any:
+    """Resolve ``name`` for ``slot_cfg``; a name the catalog lacks refuses to launch.
+
+    The one place a missing profile becomes ``slot.profile_missing``. Every
+    provider that launches a slot from a profile it was *named* reaches the
+    catalog through here, so a typo in a profile name can never quietly launch
+    some other tune (ADR-0029).
+    """
+    from hal0.errors import NotFound
+
     try:
         return _resolve_profile(name)
     except NotFound as exc:
@@ -1221,8 +1232,9 @@ def _profile_runtime_family(slot_cfg: dict[str, Any]) -> str | None:
     """Return the slot profile's ``runtime_family`` via ProfileCatalog, or None.
 
     None when the slot has no profile or the lookup fails — callers fall back
-    to device/type discriminators.  Never raises: a malformed or missing
-    profile must not break slot dispatch.
+    to device/type discriminators.  Never raises: dispatch only picks the
+    provider, and the provider itself refuses a named profile that does not
+    exist (:func:`resolve_named_profile`, ``slot.profile_missing``).
     """
     name = str(slot_cfg.get("profile") or slot_cfg.get("slot", {}).get("profile") or "")
     if not name:
