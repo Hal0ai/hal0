@@ -25,9 +25,15 @@ describe('resolvedCommandText', () => {
     )
   })
 
-  it('falls back to the list payload command when /resolved has no argv', () => {
+  it('lets an explicit null from /resolved beat an older list-payload command', () => {
     const data = { name: 'x', argv: null, provenance: [], removed: 0 }
     expect(resolvedCommandText(data, { resolved_command: ['img', '-b', '8'] })).toBe(
+      NOT_LLAMA_TEXT,
+    )
+  })
+
+  it('falls back to the list payload command until /resolved has answered', () => {
+    expect(resolvedCommandText(undefined, { resolved_command: ['img', '-b', '8'] })).toBe(
       'img \\\n  -b \\\n  8',
     )
   })

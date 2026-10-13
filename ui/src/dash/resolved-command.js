@@ -4,13 +4,14 @@
 // slot whose launch llama-server does not compose (FLM, Kokoro, Moonshine,
 // Qwen3-TTS, ComfyUI): those run their provider's own command, and the API
 // invents none (ADR-0029). That null is a finished answer, not "still loading",
-// so the box must say so rather than the "not yet available (slot not loaded)"
+// so the box must say so (it is also the answer for a slot that cannot launch)
+// rather than the "not yet available (slot not loaded)"
 // sentinel it uses before any answer exists.
 //
 // Pure: a function of its arguments, no React, no window globals.
 
 export const NOT_LLAMA_TEXT =
-	"— not composed by llama-server (this slot runs its provider's own command)";
+	"— no llama-server command (the slot runs its provider's own command, or cannot launch as configured)";
 export const NOT_LOADED_TEXT = "— not yet available (slot not loaded)";
 
 /**
@@ -26,16 +27,17 @@ export function resolvedCommandText(resolvedData, slot) {
 	if (Array.isArray(argv) && argv.length > 0) {
 		return argv.join(" \\\n  ");
 	}
+	// The endpoint answered and named no argv: a finished answer that beats
+	// the list payload's (possibly older) command — the slot either runs its
+	// provider's own command or cannot launch as configured.
+	if (resolvedData && "argv" in resolvedData && resolvedData.argv === null) {
+		return NOT_LLAMA_TEXT;
+	}
 	if (Array.isArray(slot?.resolved_command)) {
 		return slot.resolved_command.join(" \\\n  ");
 	}
 	if (slot?.resolved_command) {
 		return slot.resolved_command;
-	}
-	// The endpoint answered and named no argv: the slot's launch is not
-	// llama-server's to describe.
-	if (resolvedData && "argv" in resolvedData && resolvedData.argv === null) {
-		return NOT_LLAMA_TEXT;
 	}
 	return NOT_LOADED_TEXT;
 }
