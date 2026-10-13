@@ -113,8 +113,10 @@ export function findModelFactFlags(text) {
     if (MODEL_FACT_SET.has(canon) || DERIVED_PLACEMENT.has(canon)) {
       add(name);
     } else if (canon === "--reasoning-format") {
-      const val = tok.includes("=") ? tok.slice(tok.indexOf("=") + 1) : tokens[i + 1];
-      if (val === "none") add(tok.includes("=") ? tok : "--reasoning-format none");
+      const raw = tok.includes("=") ? tok.slice(tok.indexOf("=") + 1) : tokens[i + 1];
+      // The server compares value.strip().lower(); so does this check.
+      const val = String(raw ?? "").trim().toLowerCase();
+      if (val === "none") add(tok.includes("=") ? tok : `${tok} ${raw}`);
     }
   }
   return offenders;
@@ -294,7 +296,16 @@ export const HOST_OWNED_FLAGS = [
   "--cors-methods",
   "--cors-origins",
   "--docker-repo",
+  "--embd-gemma-default",
   "--file",
+  "--fim-qwen-1.5b-default",
+  "--fim-qwen-14b-spec",
+  "--fim-qwen-30b-default",
+  "--fim-qwen-3b-default",
+  "--fim-qwen-7b-default",
+  "--fim-qwen-7b-spec",
+  "--gpt-oss-120b-default",
+  "--gpt-oss-20b-default",
   "--grammar-file",
   "--hf-file",
   "--hf-repo",
@@ -328,6 +339,7 @@ export const HOST_OWNED_FLAGS = [
   "--save-all-logits",
   "--server-base",
   "--slot-save-path",
+  "--spec-default",
   "--spec-draft-hf",
   "--spec-draft-model",
   "--ssl-cert-file",
@@ -337,6 +349,8 @@ export const HOST_OWNED_FLAGS = [
   "--tools-runtime",
   "--tts-speaker-file",
   "--video-ffmpeg-dir",
+  "--vision-gemma-12b-default",
+  "--vision-gemma-4b-default",
   "--webui-config-file",
   "--webui-mcp-proxy"
 ];
@@ -347,9 +361,187 @@ export function findHostOwnedFlags(text) {
   return findByCanon(text, HOST_OWNED_SET);
 }
 
+// Every flag spelling llama.cpp (b11574) declares with no value argument: the
+// token after one of these is the next argument, never its value. Mirrors
+// hal0.slots.argv.VALUELESS_FLAGS verbatim (kept in sync by
+// tests/ui_contracts/test_flag_aliases_mirror.py; strict JSON).
+export const VALUELESS_FLAGS = [
+  "--agent",
+  "--backend-sampling",
+  "--cache-idle-slots",
+  "--cache-list",
+  "--cache-prompt",
+  "--check",
+  "--check-tensors",
+  "--completion-bash",
+  "--cont-batching",
+  "--context-shift",
+  "--conversation",
+  "--cors-credentials",
+  "--cpu-moe",
+  "--cpu-moe-draft",
+  "--dflash",
+  "--diffusion-visual",
+  "--display-prompt",
+  "--eagle3",
+  "--embd-gemma-default",
+  "--embedding",
+  "--embeddings",
+  "--escape",
+  "--fim-qwen-1.5b-default",
+  "--fim-qwen-14b-spec",
+  "--fim-qwen-30b-default",
+  "--fim-qwen-3b-default",
+  "--fim-qwen-7b-default",
+  "--fim-qwen-7b-spec",
+  "--gpt-oss-120b-default",
+  "--gpt-oss-20b-default",
+  "--hellaswag",
+  "--help",
+  "--ids",
+  "--ignore-eos",
+  "--in-prefix-bos",
+  "--interactive",
+  "--interactive-first",
+  "--jinja",
+  "--kl-divergence",
+  "--kv-offload",
+  "--kv-unified",
+  "--list-devices",
+  "--log-disable",
+  "--log-jsonl",
+  "--log-prefix",
+  "--log-timestamps",
+  "--log-verbose",
+  "--lora-init-without-apply",
+  "--metrics",
+  "--mmproj-auto",
+  "--mmproj-offload",
+  "--models-autoload",
+  "--mtp",
+  "--multiline-input",
+  "--multiple-choice",
+  "--nextn",
+  "--no-agent",
+  "--no-bos",
+  "--no-cache-idle-slots",
+  "--no-cache-prompt",
+  "--no-cont-batching",
+  "--no-context-shift",
+  "--no-conversation",
+  "--no-cors-credentials",
+  "--no-display-prompt",
+  "--no-escape",
+  "--no-host",
+  "--no-jinja",
+  "--no-kv-offload",
+  "--no-kv-unified",
+  "--no-log-jsonl",
+  "--no-log-prefix",
+  "--no-log-timestamps",
+  "--no-mmproj",
+  "--no-mmproj-auto",
+  "--no-mmproj-offload",
+  "--no-models-autoload",
+  "--no-op-offload",
+  "--no-parse-special",
+  "--no-perf",
+  "--no-ppl",
+  "--no-prefill-assistant",
+  "--no-reasoning-preserve",
+  "--no-repack",
+  "--no-show-timings",
+  "--no-skip-chat-parsing",
+  "--no-slots",
+  "--no-spec-draft-backend-sampling",
+  "--no-ui",
+  "--no-ui-mcp-proxy",
+  "--no-warmup",
+  "--no-webui",
+  "--no-webui-mcp-proxy",
+  "--offline",
+  "--op-offload",
+  "--parse-special",
+  "--perf",
+  "--ppl",
+  "--prefill-assistant",
+  "--process-output",
+  "--prompt-cache-all",
+  "--prompt-cache-ro",
+  "--props",
+  "--reasoning-preserve",
+  "--repack",
+  "--rerank",
+  "--reranking",
+  "--reuse-port",
+  "--save-logits",
+  "--show-count",
+  "--show-statistics",
+  "--show-timings",
+  "--simple-io",
+  "--single-turn",
+  "--skip-chat-parsing",
+  "--slots",
+  "--spec-default",
+  "--spec-draft-backend-sampling",
+  "--spec-draft-cpu-moe",
+  "--special",
+  "--spm-infill",
+  "--stdin",
+  "--swa-full",
+  "--ui",
+  "--ui-mcp-proxy",
+  "--usage",
+  "--verbose",
+  "--verbose-prompt",
+  "--version",
+  "--vision-gemma-12b-default",
+  "--vision-gemma-4b-default",
+  "--warmup",
+  "--webui",
+  "--webui-mcp-proxy",
+  "--winogrande",
+  "-ag",
+  "-bs",
+  "-cb",
+  "-cl",
+  "-cmoe",
+  "-cmoed",
+  "-cnv",
+  "-e",
+  "-h",
+  "-i",
+  "-if",
+  "-kvo",
+  "-kvu",
+  "-mli",
+  "-nkvo",
+  "-no-ag",
+  "-no-cnv",
+  "-no-kvu",
+  "-nocb",
+  "-nr",
+  "-pps",
+  "-sp",
+  "-st",
+  "-tgs",
+  "-v"
+];
+const VALUELESS_SET = new Set(VALUELESS_FLAGS);
+
+// Whether a flag token may take the next token as its value, as the server's
+// argv._takes_value decides: a joined `--flag=value` already carries it, and
+// a valueless switch never takes one.
+export function takesValue(tok) {
+  if (tok.includes("=")) return false;
+  const name = tok.startsWith("--") ? tok.replace(/_/g, "-") : tok;
+  return !VALUELESS_SET.has(name);
+}
+
 // Bare arguments in `text` — a value with no flag in front of it, including a
-// value after a joined `--flag=value` (which already carries its value). The
-// server refuses them (slot.positional_arg_denied). Empty = clean.
+// value after a joined `--flag=value` or after a valueless switch
+// (`--metrics /etc/shadow`). The server refuses them
+// (slot.positional_arg_denied). Empty = clean.
 export function findPositionalArgs(text) {
   const { tokens } = tokenizeFlags(text);
   const out = [];
@@ -357,7 +549,7 @@ export function findPositionalArgs(text) {
   while (i < tokens.length) {
     const tok = tokens[i];
     if (isFlagToken(tok)) {
-      const takesNext = !tok.includes("=") && i + 1 < tokens.length && !isFlagToken(tokens[i + 1]);
+      const takesNext = takesValue(tok) && i + 1 < tokens.length && !isFlagToken(tokens[i + 1]);
       i += takesNext ? 2 : 1;
     } else {
       out.push(tok);
@@ -376,7 +568,7 @@ export function flagPairs(tokens) {
   while (i < tokens.length) {
     const tok = tokens[i];
     if (isFlagToken(tok)) {
-      if (i + 1 < tokens.length && !isFlagToken(tokens[i + 1])) {
+      if (takesValue(tok) && i + 1 < tokens.length && !isFlagToken(tokens[i + 1])) {
         out.push({ flag: tok, canon: screenCanon(tok), value: tokens[i + 1] });
         i += 2;
       } else {

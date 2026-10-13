@@ -695,6 +695,10 @@ describe('ProfileDrawer tune fields (ADR-0029)', () => {
     ['-ag', 'hal0 manages all of that for the slot'],
     ['/etc/shadow', 'has no flag in front of it'],
     ['--temp=0.7 /etc/shadow', 'has no flag in front of it'],
+    ['-mu https://example.com/model.gguf', 'hal0 manages all of that for the slot'],
+    ['--gpt-oss-20b-default', 'hal0 manages all of that for the slot'],
+    ['--metrics /etc/shadow', 'has no flag in front of it'],
+    ['--reasoning_format=NONE', "can't be set on a profile"],
   ])('rejects %s inline and does not save (every llama.cpp spelling)', async (flags, msg) => {
     const { host, root } = drawer('create')
     setValue(field(host, 'pf-input-name') as HTMLInputElement, 'bad-spelling')

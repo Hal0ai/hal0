@@ -199,6 +199,91 @@ def test_a_joined_flag_followed_by_a_flag_is_fine() -> None:
     ]
 
 
+#: The preset switches arg.cpp b11574 declares in its "presets" group (each
+#: sets a model and a port; most download weights). Pinned here so a new
+#: preset in a runner bump is a deliberate addition.
+PRESETS = [
+    "--embd-gemma-default",
+    "--fim-qwen-1.5b-default",
+    "--fim-qwen-3b-default",
+    "--fim-qwen-7b-default",
+    "--fim-qwen-7b-spec",
+    "--fim-qwen-14b-spec",
+    "--fim-qwen-30b-default",
+    "--gpt-oss-20b-default",
+    "--gpt-oss-120b-default",
+    "--vision-gemma-4b-default",
+    "--vision-gemma-12b-default",
+    "--spec-default",
+]
+
+
+def test_the_preset_set_is_pinned() -> None:
+    from hal0.slots.argv import LLAMA_PRESET_FLAGS
+
+    assert set(PRESETS) == LLAMA_PRESET_FLAGS
+    assert LLAMA_PRESET_FLAGS <= HOST_OWNED_FLAGS
+
+
+@pytest.mark.parametrize("preset", PRESETS)
+def test_each_preset_switch_is_refused(preset: str) -> None:
+    for flags in (preset, f"-fa auto {preset}", f"--{preset[2:].replace('-', '_')}"):
+        with pytest.raises(BadRequest) as exc:
+            screen_profile_flags(flags)
+        assert exc.value.code == "slot.host_owned_flag_denied"
+        with pytest.raises(BadRequest) as exc:
+            resolve_argv([("profile", flags.split())])
+        assert exc.value.code == "slot.host_owned_flag_denied"
+
+
+def test_the_preset_switch_is_refused_on_the_pinned_path() -> None:
+    with pytest.raises(Hal0Error) as exc:
+        _pinned(["-fa", "auto", "--gpt-oss-20b-default"])
+    assert exc.value.code == "slot.host_owned_flag_denied"
+
+
+@pytest.mark.parametrize(
+    "tokens",
+    [
+        ["--metrics", "/etc/shadow"],
+        ["--embedding", "/m.gguf"],
+        ["--no-context-shift", "/etc/shadow", "-fa", "auto"],
+        ["--cont_batching", "x"],
+        ["-kvu", "/etc/shadow"],
+        ["--no-warmup", "-1"],
+    ],
+)
+def test_a_token_after_a_valueless_switch_is_positional(tokens: list[str]) -> None:
+    """llama.cpp declares these switches with no value (arg.cpp b11574), so the
+    next token is a separate argument — a bare one the screen refuses."""
+    with pytest.raises(BadRequest) as exc:
+        screen_profile_flags(" ".join(tokens))
+    assert exc.value.code == "slot.positional_arg_denied"
+    assert tokens[1] in exc.value.details["args"]
+    with pytest.raises(BadRequest) as exc:
+        resolve_argv([("profile", tokens)])
+    assert exc.value.code == "slot.positional_arg_denied"
+
+
+def test_valueless_switches_from_the_runner_table() -> None:
+    """Spot-check the arity table against arg.cpp b11574: switches are
+    valueless, flags with a value hint are not."""
+    from hal0.slots.argv import VALUELESS_FLAGS
+
+    for switch in ("--metrics", "--jinja", "--no-jinja", "-kvu", "--embedding", "--mtp", "-ag"):
+        assert switch in VALUELESS_FLAGS, switch
+    for valued in ("-fa", "--reasoning", "--cache-reuse", "--temp", "-b", "--spec-type", "-ngld"):
+        assert valued not in VALUELESS_FLAGS, valued
+
+
+def test_an_unknown_flag_keeps_the_value_heuristic() -> None:
+    """A flag llama.cpp does not declare still takes the next token as its
+    value (the screen does not guess at arity it has no table for)."""
+    screen_profile_flags(
+        "--model_path /mnt/ai-models/local/kokoro-v1/kokoro-onnx --model_arch base"
+    )
+
+
 @pytest.mark.parametrize("flags", ["-ag", "--agent", "-fa auto -ag", "--agent -fa auto"])
 def test_the_agent_shortcut_is_refused_as_a_bare_switch(flags: str) -> None:
     """``-ag`` / ``--agent`` enables the MCP proxy and every built-in tool
@@ -288,7 +373,8 @@ def test_every_shipped_addon_passes_the_screen(name: str, flags: str) -> None:
         "--reasoning off --reasoning-budget -1 --reasoning-format deepseek",
         "--parallel 2 -kvu --cache-reuse 256 --rope-scaling yarn --rope-freq-base 1e6",
         "--spec-type draft-mtp --spec-draft-n-max 8 --spec-draft-p-min 0.0 -ngld all",
-        "--override-kv tokenizer.ggml.add_bos_token=bool:false --no-mmap --mlock",
+        "--override-kv tokenizer.ggml.add_bos_token=bool:false --no-warmup --cont-batching",
+        "--metrics --no-context-shift --cache-reuse 256 --mtp",
     ],
 )
 def test_legitimate_tuning_flags_still_pass(flags: str) -> None:

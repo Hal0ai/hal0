@@ -341,12 +341,15 @@ applying. Add those subsections to a version's section to surface them; see
   each flag, so `-m /etc/shadow` replaced the slot's model (llama-server
   keeps the last `-m`), and `-hf`, `--model-url`, `--api-key-file`,
   `--ssl-key-file`, `--log-file`, `--path`, `--rpc`, `--tools`, the
-  `-ag`/`--agent` tools shortcut and similar flags passed unscreened. Every
+  `-ag`/`--agent` tools shortcut, the preset switches that download a model
+  (`--gpt-oss-20b-default`, `--embd-gemma-default`, …) and similar flags
+  passed unscreened. Every
   spelling llama.cpp accepts is now screened (short and alternative forms,
   `flag=value`, `_` for `-`). Flags that fetch a remote model, read or write
   a host file, open or shape a listener, or set auth/TLS are refused
   (`slot.host_owned_flag_denied`), as are bare positional arguments,
-  including one after a joined `--flag=value` (`slot.positional_arg_denied`).
+  including one after a joined `--flag=value` or after a switch that takes no
+  value, such as `--metrics` (`slot.positional_arg_denied`).
   The profile drawer shows the same refusals inline before Save. The seeds
   and the shipped add-ons are unaffected.
 - The bundled agent's STATE.md capability summary now lists speech-to-text

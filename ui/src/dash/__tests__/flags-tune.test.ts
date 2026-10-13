@@ -19,6 +19,7 @@ import {
   findPositionalArgs,
   findSlotHardwareFlags,
   HOST_OWNED_FLAGS,
+  VALUELESS_FLAGS,
   screenCanon,
   flagsEquivalent,
   isFlagToken,
@@ -298,5 +299,43 @@ describe('findPositionalArgs', () => {
   })
   it('treats a value after a spaced flag (negative numbers too) as that flag\'s value', () => {
     expect(findPositionalArgs('-fa auto --reasoning-budget -1 --temp=0.7 -b 512')).toEqual([])
+  })
+})
+
+describe('preset switches (#2567)', () => {
+  it.each([
+    '--embd-gemma-default',
+    '--fim-qwen-7b-default',
+    '--fim-qwen-14b-spec',
+    '--gpt-oss-120b-default',
+    '--vision-gemma-4b-default',
+    '--spec-default',
+  ])('%s is refused as host-owned', (preset) => {
+    expect(findHostOwnedFlags(`-fa auto ${preset}`)).toEqual([preset])
+  })
+})
+
+describe('findPositionalArgs (valueless switches)', () => {
+  it('a token after a valueless switch is a bare argument', () => {
+    expect(VALUELESS_FLAGS).toContain('--metrics')
+    expect(findPositionalArgs('--metrics /etc/shadow')).toEqual(['/etc/shadow'])
+    expect(findPositionalArgs('--embedding /m.gguf -fa auto')).toEqual(['/m.gguf'])
+    expect(findPositionalArgs('--cont_batching x')).toEqual(['x'])
+  })
+  it('a valued flag keeps its value', () => {
+    expect(findPositionalArgs('--cache-reuse 256 -fa auto --metrics')).toEqual([])
+  })
+})
+
+describe('reasoning-format none (case and spacing)', () => {
+  it.each([
+    ['--reasoning_format=NONE', '--reasoning_format=NONE'],
+    ['--reasoning-format None', '--reasoning-format None'],
+    ['--reasoning-format=none', '--reasoning-format=none'],
+  ])('%s is refused', (text, named) => {
+    expect(findModelFactFlags(text)).toEqual([named])
+  })
+  it('other formats pass', () => {
+    expect(findModelFactFlags('--reasoning-format DeepSeek')).toEqual([])
   })
 })

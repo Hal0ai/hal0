@@ -161,6 +161,198 @@ SLOT_HARDWARE_FLAGS: frozenset[str] = frozenset(
     }
 )
 
+#: llama.cpp's built-in preset switches (the "presets" group at the end of
+#: ``common/arg.cpp`` at the runner pin, b11574). Each one sets a model, a
+#: port and a sampler at once, and most download the weights from Hugging
+#: Face (``--embd-gemma-default`` …), so none may come from a profile.
+LLAMA_PRESET_FLAGS: frozenset[str] = frozenset(
+    {
+        "--embd-gemma-default",
+        "--fim-qwen-1.5b-default",
+        "--fim-qwen-3b-default",
+        "--fim-qwen-7b-default",
+        "--fim-qwen-7b-spec",
+        "--fim-qwen-14b-spec",
+        "--fim-qwen-30b-default",
+        "--gpt-oss-20b-default",
+        "--gpt-oss-120b-default",
+        "--vision-gemma-4b-default",
+        "--vision-gemma-12b-default",
+        "--spec-default",
+    }
+)
+
+#: Every flag spelling llama.cpp b11574 declares with no value argument — a
+#: plain switch or a ``bool`` switch with a ``--no-`` form (``common/arg.cpp``:
+#: options whose handler takes no value). The token after one of these is the
+#: next argument, never its value, so ``--metrics /etc/shadow`` is a switch
+#: followed by a bare positional. A flag llama.cpp does not declare keeps the
+#: "the next non-flag token is its value" heuristic.
+VALUELESS_FLAGS: frozenset[str] = frozenset(
+    {
+        "--agent",
+        "--backend-sampling",
+        "--cache-idle-slots",
+        "--cache-list",
+        "--cache-prompt",
+        "--check",
+        "--check-tensors",
+        "--completion-bash",
+        "--cont-batching",
+        "--context-shift",
+        "--conversation",
+        "--cors-credentials",
+        "--cpu-moe",
+        "--cpu-moe-draft",
+        "--dflash",
+        "--diffusion-visual",
+        "--display-prompt",
+        "--eagle3",
+        "--embd-gemma-default",
+        "--embedding",
+        "--embeddings",
+        "--escape",
+        "--fim-qwen-1.5b-default",
+        "--fim-qwen-14b-spec",
+        "--fim-qwen-30b-default",
+        "--fim-qwen-3b-default",
+        "--fim-qwen-7b-default",
+        "--fim-qwen-7b-spec",
+        "--gpt-oss-120b-default",
+        "--gpt-oss-20b-default",
+        "--hellaswag",
+        "--help",
+        "--ids",
+        "--ignore-eos",
+        "--in-prefix-bos",
+        "--interactive",
+        "--interactive-first",
+        "--jinja",
+        "--kl-divergence",
+        "--kv-offload",
+        "--kv-unified",
+        "--list-devices",
+        "--log-disable",
+        "--log-jsonl",
+        "--log-prefix",
+        "--log-timestamps",
+        "--log-verbose",
+        "--lora-init-without-apply",
+        "--metrics",
+        "--mmproj-auto",
+        "--mmproj-offload",
+        "--models-autoload",
+        "--mtp",
+        "--multiline-input",
+        "--multiple-choice",
+        "--nextn",
+        "--no-agent",
+        "--no-bos",
+        "--no-cache-idle-slots",
+        "--no-cache-prompt",
+        "--no-cont-batching",
+        "--no-context-shift",
+        "--no-conversation",
+        "--no-cors-credentials",
+        "--no-display-prompt",
+        "--no-escape",
+        "--no-host",
+        "--no-jinja",
+        "--no-kv-offload",
+        "--no-kv-unified",
+        "--no-log-jsonl",
+        "--no-log-prefix",
+        "--no-log-timestamps",
+        "--no-mmproj",
+        "--no-mmproj-auto",
+        "--no-mmproj-offload",
+        "--no-models-autoload",
+        "--no-op-offload",
+        "--no-parse-special",
+        "--no-perf",
+        "--no-ppl",
+        "--no-prefill-assistant",
+        "--no-reasoning-preserve",
+        "--no-repack",
+        "--no-show-timings",
+        "--no-skip-chat-parsing",
+        "--no-slots",
+        "--no-spec-draft-backend-sampling",
+        "--no-ui",
+        "--no-ui-mcp-proxy",
+        "--no-warmup",
+        "--no-webui",
+        "--no-webui-mcp-proxy",
+        "--offline",
+        "--op-offload",
+        "--parse-special",
+        "--perf",
+        "--ppl",
+        "--prefill-assistant",
+        "--process-output",
+        "--prompt-cache-all",
+        "--prompt-cache-ro",
+        "--props",
+        "--reasoning-preserve",
+        "--repack",
+        "--rerank",
+        "--reranking",
+        "--reuse-port",
+        "--save-logits",
+        "--show-count",
+        "--show-statistics",
+        "--show-timings",
+        "--simple-io",
+        "--single-turn",
+        "--skip-chat-parsing",
+        "--slots",
+        "--spec-default",
+        "--spec-draft-backend-sampling",
+        "--spec-draft-cpu-moe",
+        "--special",
+        "--spm-infill",
+        "--stdin",
+        "--swa-full",
+        "--ui",
+        "--ui-mcp-proxy",
+        "--usage",
+        "--verbose",
+        "--verbose-prompt",
+        "--version",
+        "--vision-gemma-12b-default",
+        "--vision-gemma-4b-default",
+        "--warmup",
+        "--webui",
+        "--webui-mcp-proxy",
+        "--winogrande",
+        "-ag",
+        "-bs",
+        "-cb",
+        "-cl",
+        "-cmoe",
+        "-cmoed",
+        "-cnv",
+        "-e",
+        "-h",
+        "-i",
+        "-if",
+        "-kvo",
+        "-kvu",
+        "-mli",
+        "-nkvo",
+        "-no-ag",
+        "-no-cnv",
+        "-no-kvu",
+        "-nocb",
+        "-nr",
+        "-pps",
+        "-sp",
+        "-st",
+        "-tgs",
+        "-v",
+    }
+)
+
 # ── Host-owned flags ──────────────────────────────────────────────────────────
 #
 # llama-server flags that reach outside the slot's own tune: fetching a model
@@ -170,72 +362,75 @@ SLOT_HARDWARE_FLAGS: frozenset[str] = frozenset(
 # or a blocked slot's recorded tune — may never set them. Canonical (long)
 # spellings from llama.cpp's ``common/arg.cpp`` at the runner pin (b11574);
 # :data:`FLAG_ALIASES` maps every short/alternative spelling onto them.
-HOST_OWNED_FLAGS: frozenset[str] = frozenset(
-    {
-        # Remote model fetches.
-        "--model-url",
-        "--mmproj-url",
-        "--hf-repo",
-        "--hf-file",
-        "--hf-token",
-        "--docker-repo",
-        "--spec-draft-hf",
-        "--server-base",
-        # Host file reads and writes.
-        "--spec-draft-model",
-        "--file",
-        "--system-prompt-file",
-        "--in-file",
-        "--binary-file",
-        "--prompt-cache",
-        "--grammar-file",
-        "--json-schema-file",
-        "--lora",
-        "--lora-scaled",
-        "--control-vector",
-        "--control-vector-scaled",
-        "--lookup-cache-static",
-        "--lookup-cache-dynamic",
-        "--context-file",
-        "--output-file",
-        "--save-all-logits",
-        "--logits-output-dir",
-        "--log-file",
-        "--log-prompts-dir",
-        "--slot-save-path",
-        "--media-path",
-        "--path",
-        "--image",
-        "--video-ffmpeg-dir",
-        "--positive-file",
-        "--negative-file",
-        "--tts-speaker-file",
-        "--webui-config-file",
-        "--mcp-servers-config",
-        "--models-dir",
-        "--models-preset",
-        # Listener / network policy (and the router mode that spawns servers).
-        "--rpc",
-        "--reuse-port",
-        "--api-prefix",
-        "--cors-origins",
-        "--cors-methods",
-        "--cors-headers",
-        "--cors-credentials",
-        "--webui-mcp-proxy",
-        # ``--agent`` is the shortcut for ``--tools all`` plus the MCP proxy.
-        "--agent",
-        "--tools",
-        "--tools-runtime",
-        "--mcp-servers-json",
-        "--models-max",
-        "--models-autoload",
-        # Auth / TLS.
-        "--api-key",
-        "--api-key-file",
-        "--ssl-key-file",
-        "--ssl-cert-file",
-    }
+HOST_OWNED_FLAGS: frozenset[str] = (
+    frozenset(
+        {
+            # Remote model fetches.
+            "--model-url",
+            "--mmproj-url",
+            "--hf-repo",
+            "--hf-file",
+            "--hf-token",
+            "--docker-repo",
+            "--spec-draft-hf",
+            "--server-base",
+            # Host file reads and writes.
+            "--spec-draft-model",
+            "--file",
+            "--system-prompt-file",
+            "--in-file",
+            "--binary-file",
+            "--prompt-cache",
+            "--grammar-file",
+            "--json-schema-file",
+            "--lora",
+            "--lora-scaled",
+            "--control-vector",
+            "--control-vector-scaled",
+            "--lookup-cache-static",
+            "--lookup-cache-dynamic",
+            "--context-file",
+            "--output-file",
+            "--save-all-logits",
+            "--logits-output-dir",
+            "--log-file",
+            "--log-prompts-dir",
+            "--slot-save-path",
+            "--media-path",
+            "--path",
+            "--image",
+            "--video-ffmpeg-dir",
+            "--positive-file",
+            "--negative-file",
+            "--tts-speaker-file",
+            "--webui-config-file",
+            "--mcp-servers-config",
+            "--models-dir",
+            "--models-preset",
+            # Listener / network policy (and the router mode that spawns servers).
+            "--rpc",
+            "--reuse-port",
+            "--api-prefix",
+            "--cors-origins",
+            "--cors-methods",
+            "--cors-headers",
+            "--cors-credentials",
+            "--webui-mcp-proxy",
+            # ``--agent`` is the shortcut for ``--tools all`` plus the MCP proxy.
+            "--agent",
+            "--tools",
+            "--tools-runtime",
+            "--mcp-servers-json",
+            "--models-max",
+            "--models-autoload",
+            # Auth / TLS.
+            "--api-key",
+            "--api-key-file",
+            "--ssl-key-file",
+            "--ssl-cert-file",
+        }
+    )
+    | LLAMA_PRESET_FLAGS
 )
 
 # Segment labels whose tokens are free-form operator text rather than
@@ -321,15 +516,29 @@ class _Pair:
     source: str = ""  # which input segment this token came from (provenance)
 
 
+def _takes_value(flag: str) -> bool:
+    """Whether ``flag`` may take the next token as its value.
+
+    A joined ``--flag=value`` already carries it, and a switch llama.cpp
+    declares with no value (:data:`VALUELESS_FLAGS`) never takes one.
+    """
+    if "=" in flag:
+        return False
+    name = flag.replace("_", "-") if flag.startswith("--") else flag
+    return name not in VALUELESS_FLAGS
+
+
 def _split_pairs(tokens: list[str], sources: list[str] | None = None) -> list[_Pair]:
     """Group a flat token list into ``(flag, value?)`` pairs, order preserved.
 
     A flag consumes the following token as its value iff that token is not
     itself a flag (so ``--jinja --metrics`` are two valueless bools, while
     ``-b 8192`` and ``--temp 0`` carry a value). A joined ``--flag=value``
-    already carries its value, so it consumes nothing: the next non-flag token
-    is a bare positional (``--temp=0.7 /etc/shadow``). Bare positionals are
-    kept under ``canon=None`` so dedup never touches them.
+    already carries its value, and a switch llama.cpp declares with no value
+    (:data:`VALUELESS_FLAGS`) never takes one, so neither consumes anything:
+    the next non-flag token is a bare positional (``--temp=0.7 /etc/shadow``,
+    ``--metrics /etc/shadow``). Bare positionals are kept under ``canon=None``
+    so dedup never touches them.
 
     ``sources`` is an optional parallel list labelling each token's origin
     segment; a pair takes the source of its flag (or positional) token.
@@ -341,7 +550,7 @@ def _split_pairs(tokens: list[str], sources: list[str] | None = None) -> list[_P
         tok = tokens[i]
         src = sources[i] if sources is not None else ""
         if _is_flag(tok):
-            if "=" not in tok and i + 1 < n and not _is_flag(tokens[i + 1]):
+            if _takes_value(tok) and i + 1 < n and not _is_flag(tokens[i + 1]):
                 pairs.append(_Pair(_canon(tok), tok, (tokens[i + 1],), src))
                 i += 2
             else:
@@ -698,10 +907,12 @@ __all__ = [
     "APPEND_FLAGS",
     "FLAG_ALIASES",
     "HOST_OWNED_FLAGS",
+    "LLAMA_PRESET_FLAGS",
     "MANAGED_ARGS_DENYLIST",
     "PROFILE_SEGMENT_LABELS",
     "SLOT_HARDWARE_FLAGS",
     "UNTRUSTED_SEGMENT_LABELS",
+    "VALUELESS_FLAGS",
     "FlagProvenance",
     "NormalizedArgv",
     "ResolvedArgv",
