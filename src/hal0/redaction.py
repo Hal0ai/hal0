@@ -658,10 +658,16 @@ def _mask_literals(text: str, literals: list[str]) -> str:
     body = _literal_trie_regex(trie)
     if body is None:
         return _replace_each(text, literals)
+    try:
+        scan = re.compile(f"(?=({body}))")
+    except (re.error, RecursionError, OverflowError):
+        # Fail closed onto the loop: never let a pattern ``re`` cannot
+        # compile cost a secret its mask.
+        return _replace_each(text, literals)
 
     occurrences: list[list[int]] = [[] for _ in literals]
     budget = _LITERAL_OCCURRENCES_PER_CHAR_MAX * len(text) + len(literals)
-    for match in re.finditer(f"(?=({body}))", text):
+    for match in scan.finditer(text):
         start, prefixes = match.start(), ends[lit_id[match.group(1)]]
         budget -= len(prefixes)
         if budget < 0:
