@@ -13,9 +13,13 @@ import {
   SLOT_HARDWARE_FLAGS,
   canonFlag,
   diffFlags,
+  findHostOwnedFlags,
   findManagedFlags,
   findModelFactFlags,
+  findPositionalArgs,
   findSlotHardwareFlags,
+  HOST_OWNED_FLAGS,
+  screenCanon,
   flagsEquivalent,
   isFlagToken,
   tokenizeFlags,
@@ -209,3 +213,90 @@ describe('flagsEquivalent', () => {
 })
 
 
+
+// ── every llama.cpp spelling is screened, as on the server (#2567) ──────────
+
+describe('screenCanon', () => {
+  it('folds short, joined and underscore spellings onto the canonical flag', () => {
+    expect(screenCanon('-m')).toBe('--model')
+    expect(screenCanon('-m=/etc/shadow')).toBe('--model')
+    expect(screenCanon('--model=/etc/shadow')).toBe('--model')
+    expect(screenCanon('--api_key')).toBe('--api-key')
+    expect(screenCanon('-hfr')).toBe('--hf-repo')
+    expect(screenCanon('--gpu-layers')).toBe('--n-gpu-layers')
+    expect(screenCanon('-b')).toBe('--batch-size')
+  })
+})
+
+describe('findManagedFlags (every spelling)', () => {
+  it.each([
+    ['-m /etc/shadow', '-m'],
+    ['-m=/etc/shadow', '-m'],
+    ['--model=/etc/shadow', '--model'],
+    ['-a evil', '-a'],
+    ['--alias=evil', '--alias'],
+    ['--ctx_size 4096', '--ctx_size'],
+  ])('%s is flagged as %s', (text, typed) => {
+    expect(findManagedFlags(`-fa auto ${text}`)).toEqual([typed])
+  })
+})
+
+describe('findSlotHardwareFlags (every spelling)', () => {
+  it('catches --gpu-layers, joined and underscore forms', () => {
+    expect(findSlotHardwareFlags('--gpu-layers 99 -ngl=1 --n_gpu_layers 2')).toEqual([
+      '--gpu-layers',
+      '-ngl',
+      '--n_gpu_layers',
+    ])
+  })
+})
+
+describe('findModelFactFlags (every spelling)', () => {
+  it('catches -mm, --no-jinja and the projector device', () => {
+    expect(findModelFactFlags('-mm /p.gguf --no-jinja -mmdev ROCm0 -devd CUDA0')).toEqual([
+      '-mm',
+      '--no-jinja',
+      '-mmdev',
+      '-devd',
+    ])
+  })
+})
+
+describe('findHostOwnedFlags', () => {
+  it.each([
+    '-hf org/model',
+    '-hfr org/model',
+    '--hf-repo=org/model',
+    '-mu https://x/m.gguf',
+    '-md /etc/shadow',
+    '--api-key secret',
+    '--api_key_file /etc/shadow',
+    '--ssl-key-file /k',
+    '--log-file /tmp/x',
+    '--path /',
+    '--rpc 10.0.0.1:50052',
+    '--tools all',
+    '-ag',
+    '--agent',
+  ])('%s is refused', (text) => {
+    const offenders = findHostOwnedFlags(`-fa auto ${text}`)
+    expect(offenders).toHaveLength(1)
+    expect(HOST_OWNED_FLAGS).toContain(screenCanon(offenders[0]))
+  })
+
+  it('leaves tuning flags alone', () => {
+    expect(
+      findHostOwnedFlags('-fa auto -b 2048 -ub 512 -ctk q8_0 --temp 0.7 --no-agent --reasoning-budget -1'),
+    ).toEqual([])
+  })
+})
+
+describe('findPositionalArgs', () => {
+  it('flags a bare argument, including one after a joined flag', () => {
+    expect(findPositionalArgs('/etc/shadow -fa auto')).toEqual(['/etc/shadow'])
+    expect(findPositionalArgs('--temp=0.7 /etc/shadow')).toEqual(['/etc/shadow'])
+  })
+  it('treats a value after a spaced flag (negative numbers too) as that flag\'s value', () => {
+    expect(findPositionalArgs('-fa auto --reasoning-budget -1 --temp=0.7 -b 512')).toEqual([])
+  })
+})

@@ -8,7 +8,7 @@ import json
 import re
 from pathlib import Path
 
-from hal0.slots.argv import FLAG_ALIASES
+from hal0.slots.argv import FLAG_ALIASES, HOST_OWNED_FLAGS
 
 
 def test_ui_flag_alias_mirror_matches_server():
@@ -18,3 +18,10 @@ def test_ui_flag_alias_mirror_matches_server():
     # the literal is written as strict JSON (double-quoted keys/values) by Task 1
     ui = json.loads(m.group(1))
     assert ui == dict(FLAG_ALIASES)
+
+
+def test_ui_host_owned_flags_mirror_matches_server():
+    src = Path("ui/src/dash/flags-tune.js").read_text()
+    m = re.search(r"export const HOST_OWNED_FLAGS = (\[[^\]]*\])", src, re.S)
+    assert m, "HOST_OWNED_FLAGS export not found in flags-tune.js"
+    assert set(json.loads(m.group(1))) == set(HOST_OWNED_FLAGS)

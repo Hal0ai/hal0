@@ -340,13 +340,15 @@ applying. Add those subsections to a version's section to surface them; see
   or alternative llama.cpp flag. The flag screen only knew one spelling of
   each flag, so `-m /etc/shadow` replaced the slot's model (llama-server
   keeps the last `-m`), and `-hf`, `--model-url`, `--api-key-file`,
-  `--ssl-key-file`, `--log-file`, `--path`, `--rpc`, `--tools` and similar
-  flags passed unscreened. Every spelling llama.cpp accepts is now screened
-  (short and alternative forms, `flag=value`, `_` for `-`). Flags that fetch
-  a remote model, read or write a host file, open or shape a listener, or set
-  auth/TLS are refused (`slot.host_owned_flag_denied`), as are bare
-  positional arguments (`slot.positional_arg_denied`). The seeds and the
-  shipped add-ons are unaffected.
+  `--ssl-key-file`, `--log-file`, `--path`, `--rpc`, `--tools`, the
+  `-ag`/`--agent` tools shortcut and similar flags passed unscreened. Every
+  spelling llama.cpp accepts is now screened (short and alternative forms,
+  `flag=value`, `_` for `-`). Flags that fetch a remote model, read or write
+  a host file, open or shape a listener, or set auth/TLS are refused
+  (`slot.host_owned_flag_denied`), as are bare positional arguments,
+  including one after a joined `--flag=value` (`slot.positional_arg_denied`).
+  The profile drawer shows the same refusals inline before Save. The seeds
+  and the shipped add-ons are unaffected.
 - The bundled agent's STATE.md capability summary now lists speech-to-text
   and reranking slots. It matched slot types `stt` and `rerank`, but slots
   are typed `transcription` and `reranking`, so a Moonshine STT slot or a

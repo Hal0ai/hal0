@@ -100,6 +100,7 @@ FLAG_ALIASES: dict[str, str] = {
     "--ui-config-file": "--webui-config-file",
     # Listener / network policy.
     "--ui-mcp-proxy": "--webui-mcp-proxy",
+    "-ag": "--agent",
 }
 
 # Flags whose semantics are "may be repeated" — never deduped. Keyed by the
@@ -222,6 +223,8 @@ HOST_OWNED_FLAGS: frozenset[str] = frozenset(
         "--cors-headers",
         "--cors-credentials",
         "--webui-mcp-proxy",
+        # ``--agent`` is the shortcut for ``--tools all`` plus the MCP proxy.
+        "--agent",
         "--tools",
         "--tools-runtime",
         "--mcp-servers-json",
@@ -323,8 +326,10 @@ def _split_pairs(tokens: list[str], sources: list[str] | None = None) -> list[_P
 
     A flag consumes the following token as its value iff that token is not
     itself a flag (so ``--jinja --metrics`` are two valueless bools, while
-    ``-b 8192`` and ``--temp 0`` carry a value). Bare positionals are kept
-    under ``canon=None`` so dedup never touches them.
+    ``-b 8192`` and ``--temp 0`` carry a value). A joined ``--flag=value``
+    already carries its value, so it consumes nothing: the next non-flag token
+    is a bare positional (``--temp=0.7 /etc/shadow``). Bare positionals are
+    kept under ``canon=None`` so dedup never touches them.
 
     ``sources`` is an optional parallel list labelling each token's origin
     segment; a pair takes the source of its flag (or positional) token.
@@ -336,7 +341,7 @@ def _split_pairs(tokens: list[str], sources: list[str] | None = None) -> list[_P
         tok = tokens[i]
         src = sources[i] if sources is not None else ""
         if _is_flag(tok):
-            if i + 1 < n and not _is_flag(tokens[i + 1]):
+            if "=" not in tok and i + 1 < n and not _is_flag(tokens[i + 1]):
                 pairs.append(_Pair(_canon(tok), tok, (tokens[i + 1],), src))
                 i += 2
             else:

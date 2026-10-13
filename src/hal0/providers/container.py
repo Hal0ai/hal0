@@ -1523,16 +1523,26 @@ def _pinned_segments(
             return None
 
     ctx = ngl = threads = None
-    jinja = template = projector = no_projector = draft = False
+    jinja = no_jinja = template = projector = no_projector = draft = False
     tune: list[str] = []
     for pair in _split_pairs(list(argv)):
         canon = pair.canon
-        if canon in ("--host", "--port", "--model", "--alias", "--device", "--metrics"):
+        if canon in (
+            "--host",
+            "--port",
+            "--model",
+            "--alias",
+            "--device",
+            "--mmproj-device",
+            "--metrics",
+        ):
             continue  # rebuilt from today's slot and model
         if canon == "--ctx-size":
             ctx = _int(_value(pair))
         elif canon == "--jinja":
             jinja = True
+        elif canon == "--no-jinja":
+            no_jinja = True
         elif canon in ("--chat-template", "--chat-template-file"):
             template = True
         elif canon == "--mmproj":
@@ -1556,6 +1566,10 @@ def _pinned_segments(
     if scalars.get("model_alias"):
         base += ["--alias", str(scalars["model_alias"])]
     base += ["--ctx-size", str(ctx or scalars["context_size"])]
+    # A recorded --no-jinja is a model fact the profile layer may not carry:
+    # it is consumed here and the model's own jinja fact decides.
+    if no_jinja:
+        jinja = bool(scalars.get("jinja"))
     model: list[str] = ["--jinja"] if jinja else []
     if template and scalars.get("chat_template_path"):
         model += ["--chat-template-file", str(scalars["chat_template_path"])]

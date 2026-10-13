@@ -78,6 +78,8 @@ SPELLINGS: dict[str, tuple[str, ...]] = {
     "--api-prefix": ("--api-prefix",),
     "--cors-origins": ("--cors-origins",),
     "--tools": ("--tools",),
+    # the shortcut for ``--tools all`` plus the MCP proxy
+    "--agent": ("-ag", "--agent"),
     "--webui-mcp-proxy": ("--ui-mcp-proxy", "--webui-mcp-proxy"),
 }
 
@@ -168,6 +170,54 @@ def test_bare_positional_args_are_refused(tokens: list[str]) -> None:
     assert exc.value.code == "slot.positional_arg_denied"
 
 
+@pytest.mark.parametrize(
+    "tokens",
+    [
+        ["--temp=0.7", "/etc/shadow"],
+        ["-b=512", "/models/evil.gguf"],
+        ["--reasoning-budget=-1", "/etc/shadow", "-fa", "auto"],
+    ],
+)
+def test_a_bare_argument_after_a_joined_flag_is_positional(tokens: list[str]) -> None:
+    """A joined ``--flag=value`` already carries its value, so the next bare
+    token is positional — not a second value the screen would skip."""
+    with pytest.raises(BadRequest) as exc:
+        screen_profile_flags(" ".join(tokens))
+    assert exc.value.code == "slot.positional_arg_denied"
+    assert tokens[1] in exc.value.details["args"]
+    with pytest.raises(BadRequest) as exc:
+        resolve_argv([("profile", tokens)])
+    assert exc.value.code == "slot.positional_arg_denied"
+
+
+def test_a_joined_flag_followed_by_a_flag_is_fine() -> None:
+    screen_profile_flags("--temp=0.7 -fa auto --top-k=40")
+    assert resolve_argv([("profile", ["--temp=0.7", "-fa", "auto"])]).argv == [
+        "--temp=0.7",
+        "-fa",
+        "auto",
+    ]
+
+
+@pytest.mark.parametrize("flags", ["-ag", "--agent", "-fa auto -ag", "--agent -fa auto"])
+def test_the_agent_shortcut_is_refused_as_a_bare_switch(flags: str) -> None:
+    """``-ag`` / ``--agent`` enables the MCP proxy and every built-in tool
+    (shell execution included) in one switch."""
+    import shlex
+
+    with pytest.raises(BadRequest) as exc:
+        screen_profile_flags(flags)
+    assert exc.value.code == "slot.host_owned_flag_denied"
+    with pytest.raises(BadRequest) as exc:
+        resolve_argv([("profile", shlex.split(flags))])
+    assert exc.value.code == "slot.host_owned_flag_denied"
+
+
+@pytest.mark.parametrize("flags", ["--no-agent", "-no-ag", "--no-webui-mcp-proxy"])
+def test_turning_the_agent_tools_off_is_allowed(flags: str) -> None:
+    screen_profile_flags(flags)
+
+
 def test_underscore_spelling_dedups_against_its_dash_form() -> None:
     """``--n_predict`` and ``--n-predict`` are one flag to llama.cpp; the last
     one wins, as for any other duplicate."""
@@ -251,7 +301,7 @@ def test_legitimate_tuning_flags_still_pass(flags: str) -> None:
 # ── the blocked-slot pinned path ────────────────────────────────────────────
 
 
-def _pinned(argv: list[str]) -> list[str]:
+def _pinned(argv: list[str], *, jinja: bool = True) -> list[str]:
     """Resolve a blocked slot's recorded tune the way the launch does."""
     from hal0.providers.container import _pinned_segments
 
@@ -264,6 +314,7 @@ def _pinned(argv: list[str]) -> list[str]:
         "slot_threads": None,
         "slot_metrics": True,
         "backend": "rocm",
+        "jinja": jinja,
     }
     segments = _pinned_segments(
         {"argv": argv}, {"name": "agent"}, 8081, "/models/real.gguf", scalars
@@ -313,3 +364,24 @@ def test_pinned_tune_with_a_bare_positional_refuses_to_launch() -> None:
     with pytest.raises(Hal0Error) as exc:
         _pinned(["/etc/shadow", "-fa", "auto"])
     assert exc.value.code == "slot.positional_arg_denied"
+
+
+@pytest.mark.parametrize("model_jinja", [True, False])
+@pytest.mark.parametrize("spelling", [["--no-jinja"], ["--no_jinja"], ["--jinja", "--no-jinja"]])
+def test_pinned_tune_with_no_jinja_still_launches(model_jinja: bool, spelling: list[str]) -> None:
+    """A recorded ``--no-jinja`` (a model fact the profile layer may not carry)
+    is consumed when the pinned launch is rebuilt, and the model's jinja fact
+    decides — the slot launches instead of being refused."""
+    argv = _pinned(["-fa", "auto", *spelling, "-b", "512"], jinja=model_jinja)
+    assert ("--jinja" in argv) is model_jinja
+    assert "--no-jinja" not in argv and "--no_jinja" not in argv
+    assert argv[argv.index("-b") + 1] == "512"
+
+
+@pytest.mark.parametrize("spelling", [["-mmdev", "ROCm0"], ["--mmproj-device=none"]])
+def test_pinned_tune_with_a_projector_device_still_launches(spelling: list[str]) -> None:
+    """The projector device is placement: dropped from the record and left to
+    follow the slot's device."""
+    argv = _pinned(["-fa", "auto", *spelling])
+    assert "-mmdev" not in argv
+    assert not any(t.startswith("--mmproj-device") for t in argv)
