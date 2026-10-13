@@ -49,10 +49,10 @@ backend selection degrades to CPU rather than refusing to run.
 - **Hardware-aware slots** — each capability gets its own container,
   image, flags, port, and lifecycle, sharing only the GPU through an
   arbiter.
-- **Profiles** — bench-tuned llama-server flag bundles per backend
-  (`rocm`, `rocm-dnse`, `rocm-moe`, `vulkan`, `cuda`, dedicated `embed`/
-  `rerank` lanes, and more) that a slot picks up for its image, flags,
-  and MTP behavior.
+- **Profiles** — the whole tune for a slot: llama-server flags, context
+  window, thinking default, vision and MTP (seeds include `chat`, `agent`,
+  `utility`, `coding`, `embedding` and `reranking`). A slot names a profile;
+  to run one model two ways, make two profiles.
 - **Stacks** — named, exportable bundles of slot + profile + model
   assignments (built-in `saber`, `forge`, and `pi`) that you can load,
   clone, and re-apply as a single declarative unit.

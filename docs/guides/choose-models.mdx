@@ -1,6 +1,6 @@
 ---
 title: Choose models
-description: hal0's curated catalogue of recommended chat, embed, rerank, and image models, how launch flags now live on the model instead of the slot, and how to edit a model from the dashboard's row menu.
+description: hal0's curated catalogue of recommended chat, embed, rerank, and image models, what a model row records (facts about its file) versus what a profile tunes, and how to edit a model from the dashboard's row menu.
 sidebar:
   order: 30
 ---
@@ -32,7 +32,7 @@ own unified-memory pool before pulling.
 | Id | Notes |
 |---|---|
 | `qwen3-coder-next` | Frontier coding model; needs a large memory pool. |
-| `qwen3.8-27b` | General-purpose default with MTP, vision and tool calling (Unsloth `UD-Q4_K_XL` plus the `mmproj-F16` vision projector; 98,304-token default context). |
+| `qwen3.8-27b` | General-purpose default with MTP, vision and tool calling (Unsloth `UD-Q4_K_XL` plus the `mmproj-F16` vision projector; the catalogue lists a 98,304-token context, and the window a slot runs is its profile's `ctx_size`). |
 | `gpt-oss-20b` | OpenAI open-weights 20B. |
 | `qwen3.5-9b` | Lean default; fits alongside embed + voice slots. |
 | `qwen3.5-0.8b` | Tiny; sub-second cold start. |
@@ -68,7 +68,7 @@ direction). The filter chips are:
 
 | Chip | Matches |
 |---|---|
-| MTP | `defaults.mtp === true`, or the model carries the legacy `mtp` tag — a plain OR, so the tag still matches even when `defaults.mtp` is explicitly `false` (see "Vision and MTP" below) |
+| MTP | the model's MTP-heads fact is explicitly on, or the model carries the legacy `mtp` tag — a plain OR, so the tag still matches even when the fact is explicitly off (see "Vision and MTP" below) |
 | MOE | a mixture-of-experts architecture (`qwen3next`, `mixtral`, `deepseek-moe`), or — since no registry row persists `architecture` yet — the `moe`/`a3b`/`mtp` tag or an `a3b` token in the id |
 | DENSE | neither MTP nor MOE |
 | Embed | `type === "embedding"` |
@@ -88,43 +88,54 @@ above.
 
 The **Profiles** tab lives alongside Inference / Image / Upstream at the
 top of the Models view (`#models/profiles`) — that's where you manage the
-runtime-profile templates the model drawer's template picker draws from.
-See [Manage slots](/docs/guides/manage-slots) for what a profile controls.
+profiles slots run under. A profile is the whole tune, so its create/edit
+form has a field for each part: **Context** (tokens; empty means the model's
+native window, capped at 32768, or 8192 when the model reports no native
+window), **Thinking** (Default, On or Off; Default is off unless the request
+asks), **Vision** (Auto or Off), **MTP** (Auto or Off), **Flags**, and an
+optional **Runtime**. See
+[Capabilities & profiles](/docs/concepts/capabilities-and-profiles) for what
+each field does and how a launch command is assembled from them.
 
-A profile's create/edit form has an optional **Runtime** select — "— Auto ·
-no runtime pinned —" to leave it unset, or any runtime this box's registry
-carries to pin one (the single-purpose runtimes like Kokoro included, since a
-profile has no slot type to narrow the list to one family). A profile
-that pins a runtime shows a matching badge on its card. Seed profiles always
-render the select disabled: forking a seed copies its runtime binding
-verbatim, and you change it by editing the copy. Naming a runtime here does
-more than set a default flag bundle — applying the profile to a slot (at
-create time, from the slot drawer, or via a model's preferred-profile
-adoption) also sets that slot's runtime and, for a single-backend runtime,
-its GPU lane. See [Manage slots → Dashboard: the slot edit
+The **Runtime** select reads "— Auto · no runtime pinned —" to leave it
+unset, or any runtime this box's registry carries to pin one (the
+single-purpose runtimes like Kokoro included, since a profile has no slot
+type to narrow the list to one family). A profile that pins a runtime shows a
+matching badge on its card. Seed profiles always render the select disabled:
+forking a seed copies its runtime binding verbatim, and you change it by
+editing the copy. Naming a runtime here does more than set a default flag
+bundle — applying the profile to a slot (at create time or from the slot
+drawer) also sets that slot's runtime and, for a single-backend runtime, its
+GPU lane. See [Manage slots → Dashboard: the slot edit
 drawer](/docs/guides/manage-slots) for what that apply looks like from the
 slot side.
 
-## Launch flags now live on the model, not the slot
+## The model holds facts; the profile holds the tune
 
-As of v1.0, tuning knobs that used to be per-slot — `extra_args`, `mtp`,
-`jinja`, `enable_thinking`, `vision`, `chat_template`, `context_size`, and
-preferred `profile` — belong to the **model** (`ModelDefaults`), not the
-slot. A slot binds a model and gets its launch behavior *from* that
-model's defaults; the old per-slot fields still round-trip in TOML for
-compatibility but are inert at launch, and a one-shot migrator folds any
-value you had set there into the model.
+A model's registry row records facts about its file, and the launch reads
+them: path and file set, size, quantization, architecture, the native
+context window, the chat template (`auto` means the template embedded in the
+GGUF), the multimodal projector (`mmproj`), whether the file has MTP heads,
+and whether its chat template works with `--jinja`. Every tune — flags,
+context window, thinking default, vision on or off, MTP on or off — belongs
+to a **profile**, and a slot names the profile it runs. To run one model at
+two context sizes, or with different sampling, make two profiles and point
+each slot at its own; see [Capabilities &
+profiles](/docs/concepts/capabilities-and-profiles).
 
-There's no dedicated `hal0 model edit` CLI verb for these fields — set
-them via `PUT /api/models/{model_id}` or, more practically, from the
-dashboard's model drawer.
+There's no dedicated `hal0 model edit` CLI verb for the facts — set them via
+`PUT /api/models/{model_id}` or, more practically, from the dashboard's model
+drawer. A write that carries a tune (`extra_args`, `context_size`,
+`enable_thinking`, `vision`, `profile`, …) is refused with
+`422 model.defaults_key_removed`; put it on a profile instead.
 
 Curated type-tag chips (mtp / coder / reasoning / vision, ticked on the
-old recipe editor) are retired: behavior is now owned by typed fields —
-`defaults.mtp`, `capability_flags.tool_calling`, `defaults.enable_thinking`,
-and the `capabilities` list + `mmproj` path for vision. The old tags still
-exist in the registry as inert, freeform labels; nothing routes on them
-anymore.
+old recipe editor) are retired: behavior comes from typed fields — the
+model's MTP-heads fact, `capability_flags.tool_calling`, the profile's
+`enable_thinking`, and the `capabilities` list + `mmproj` path for vision.
+The old tags still exist in the registry as inert, freeform labels; nothing
+routes on them anymore, except that the `mtp` tag is the fallback when the
+MTP-heads fact is unset.
 
 ## Edit a model from the dashboard
 
@@ -146,80 +157,61 @@ The same drawer opens from a slot card's pencil icon (see
 model-edit pencil) for whichever model is currently bound to that slot —
 same drawer, two entry points.
 
-The drawer is organized top to bottom as:
+The drawer edits facts only. It is organized top to bottom as:
 
 - **Display name** — what the dashboard shows; empty keeps the model id.
 - **Default for `<type>`** — a badge plus a Set/Remove toggle for the
   per-type default marker (see below).
-- **Launch flags** — a hero textarea framed as the resolved launch
-  command, with a profile picker beside it (see "Templates, flags, and
-  divergence" below).
-- **Typed capabilities** — Thinking, MTP, Jinja, and Vision, each an
-  Auto/On/Off toggle, plus an editable Chat template picker (saved as
-  `defaults.chat_template`), a read-only Modality readout, and a
-  read-only capabilities readout — the model's registry capabilities
-  (pull metadata / auto-detect). As of #2193 capabilities have no
-  chip-editing UI anywhere in the drawer; see "Vision and MTP" below for
-  how a pulled model picks up `vision` in the first place.
-- **Context size** — tokens; empty means the launcher default. Must be a
-  whole number ≥ 128 if set; the server enforces the same floor
-  (`400 model.context_size_out_of_range`).
-- **Runner compatibility** — the Backends chip set (slot-compat
-  filtering); still editable here.
+- **A facts band** — quant, size, architecture, a short sha256, and the slots
+  that use the model, each a link to its slot drawer.
+- **File facts** — the **Chat template** picker (`auto` uses the template
+  embedded in the GGUF), an overrides ledger for **MTP heads** (does this
+  file carry MTP heads) and **Jinja** (does its chat template work with
+  `--jinja`), a read-only capabilities readout — the model's registry
+  capabilities (pull metadata / auto-detect) — and the read-only **Native
+  context** window. In the ledger, Auto is invisible: only an explicit On or
+  Off shows as a chip, set with "+ Override…" and cleared with ✕. As of #2193
+  capabilities have no chip-editing UI anywhere in the drawer; see "Vision and
+  MTP" below for how a pulled model picks up `vision` in the first place.
+- **Runner compatibility** — the **Engine** that serves the model, and the
+  read-only **Runs on** lanes, computed from the architecture and the runner
+  catalogue.
 - **Source · re-pull coords** — MMProj sidecar path (editable; gated by
-  the vision↔mmproj invariant below), HF repo, HF filename.
+  the vision↔mmproj invariant below), HF repo, HF filename, and the read-only
+  paths.
 
-Saving writes only the fields that changed, plus the full `defaults` block
-(model defaults merge one level deep server-side, so every typed-capability
-key is always sent explicitly — a value, or `null` to clear it). The
-drawer's footer warns that changes require the slot to restart to take
-effect, and the Save button stays disabled until something is actually
-dirty.
+A note at the top of the drawer says where the rest went: flags, context
+window, thinking, vision and MTP on/off are set on a profile, and a slot
+picks the profile.
 
-### Templates, flags, and divergence
-
-The flags textarea is literally what launches — hal0 computes and rejects
-a short managed-argument set inline before save: `--model`, `--ctx-size` /
-`-c`, `--host`, `--port`, `--n-gpu-layers` / `-ngl`, and `--alias`. Slot
-hardware flags (`-ngl`/`--n-gpu-layers`, `-dev`/`--device`, `-t`/`--threads`)
-are rejected too, with a message pointing at the slot's hardware grid
-instead — the model is device-agnostic and carries no runner or image.
-
-Picking a profile from the dropdown **stamps** its flags into the
-textarea — a one-time copy, not a live link. If your edits would be
-overwritten a confirm dialog asks first. Once stamped, editing the
-textarea further diverges the model from the profile; a "diverged"
-badge appears along with an inline diff (added / changed / removed
-flags) and a "reset to profile" action that re-stamps the profile's
-current text over your edits.
+Saving writes only the fields that changed. The drawer's footer warns that
+changes require the slot to restart to take effect, and the Save button stays
+disabled until something is actually dirty.
 
 ### Vision and MTP
 
-Vision is Auto/On/Off, same as the other typed caps: Auto loads the
-`mmproj` sidecar whenever the model carries one; Off force-suppresses it
-even on a vision-capable model (frees roughly 0.9 GB of resident VRAM).
-Capabilities — including `vision` — are read-only in this drawer; they
-come from the registry row, not from anything hand-ticked here. A model
-whose capabilities already include `vision` still needs a non-empty
-`mmproj` path to save — clearing the path blocks save with an inline
-error. What changed under #2193 is how a pulled model picks up `vision`
-in the first place: the Add-from-HF modal's projector picker offers any
-mmproj sidecar the repo ships (auto-preselected, with a "None — text
-only" option), and the `vision` label is derived automatically from that
-choice — there's no separate hand-ticked vision toggle in that flow
-anymore.
+Whether the projector loads is the profile's `vision` setting: `auto` loads
+the model's `mmproj` sidecar whenever the model carries one; `off` never
+loads it, even on a vision-capable model (frees roughly 0.9 GB of resident
+VRAM). Capabilities — including `vision` — are read-only in the model drawer;
+they come from the registry row, not from anything hand-ticked there. A model
+whose capabilities already include `vision` still needs a non-empty `mmproj`
+path to save — clearing the path blocks save with an inline error. What
+changed under #2193 is how a pulled model picks up `vision` in the first
+place: the Add-from-HF modal's projector picker offers any mmproj sidecar the
+repo ships (auto-preselected, with a "None — text only" option), and the
+`vision` label is derived automatically from that choice — there's no
+separate hand-ticked vision toggle in that flow anymore.
 
-MTP eligibility is a tri-state on `defaults.mtp`: an explicit `true` or
-`false` wins in either direction over the registry's legacy `mtp` tag;
-leaving it at Auto falls back to that tag when present. There is no
-filename-based MTP sniff anymore — an uncurated pull with neither the tag
-nor an explicit `defaults.mtp` is simply not MTP-eligible. That tri-state
-precedence is what the drawer's MTP toggle and the backend launch path
-(`hal0.model_meta.model_is_mtp_eligible`) both use — but the Models list's
-MTP filter **chip** doesn't: it's a plain OR of `defaults.mtp === true`
-and the legacy tag (`ui/src/dash/model-sort.js`), so a model tagged `mtp`
-still shows the MTP chip even when its `defaults.mtp` is explicitly set to
-`false`. The chip and the toggle can disagree on the same row.
+MTP has two halves. The model records the fact — **MTP heads** in the
+drawer's ledger is a tri-state: an explicit On or Off wins in either
+direction over the registry's legacy `mtp` tag, and leaving it at Auto falls
+back to that tag when present. There is no filename-based MTP sniff — an
+uncurated pull with neither the tag nor an explicit fact has no heads as far
+as hal0 knows. Whether a slot *uses* the heads is the profile's `mtp`
+(`auto` or `off`). The Models list's MTP filter **chip** is a plain OR of the
+explicit fact being On and the legacy tag (`ui/src/dash/model-sort.js`), so a
+model tagged `mtp` still shows the chip even when its fact is explicitly Off.
 
 ### Per-type default
 
@@ -233,42 +225,15 @@ hal0 model default qwen3.8-27b          # promote (demotes the current holder)
 hal0 model default qwen3.8-27b --clear  # clear — the type is left with no default
 ```
 
-## Preferred profile
-
-A registry model can declare a **preferred profile** — the runtime
-profile it wants loaded alongside it — under `defaults.profile`:
-
-```sh
-curl -X PUT http://localhost:8080/api/models/qwen3.8-27b \
-  -H 'content-type: application/json' \
-  -d '{"defaults": {"profile": "rocm-moe"}}'
-```
-
-A slot adopts this preference automatically: when it's created bound to
-the model with no explicit profile of its own, and again on **every**
-subsequent model swap. The preference is honoured only when it's compatible
-with the slot's existing device *class* (gpu/cpu/npu/img) and type — an
-incompatible preference is ignored and the slot keeps its current profile.
-Within that same device class, though, a preferred profile that pins a
-runtime (see [The Profiles tab](#filter-and-sort-the-catalog) above) *can*
-now flip the slot's specific GPU lane — e.g. adopting a Strix-carrying
-preference on a `gpu-rocm` slot moves it to `gpu-vulkan` — the same
-profile-wins reconcile the slot drawer's Profile row previews. It's still
-never adopted if that flip isn't physically possible on this host (a
-ROCm-only runtime with no `/dev/kfd`, for instance); the slot keeps its
-current profile in that case instead. A flags-only preferred profile (no
-runtime pinned) behaves as before and never touches the slot's hardware.
-
 ## How model fit is evaluated
 
 Before a model is assigned to a slot, hal0 checks that the model's
 classified modality matches the slot type (chat → `llm`, embed →
 `embedding`, and so on), that the model id actually resolves in the local
-registry, and that the slot's device agrees with the profile's device
-class. A hard mismatch blocks the assignment; a soft mismatch (for
-example a custom image on the wrong device class) is allowed through as
-degraded, with the reason surfaced in the dashboard so you know it needs
-attention. This is why the device you pick for a slot has to stay
+registry, and that the slot's device suits the slot's profile (a
+single-purpose engine, such as an FLM profile, needs a matching device). A
+hard mismatch blocks the assignment, with the reason surfaced in the
+dashboard. This is why the device you pick for a slot has to stay
 consistent with what you assign to it — see
 [Manage slots](/docs/guides/manage-slots) for `--hardware`.
 

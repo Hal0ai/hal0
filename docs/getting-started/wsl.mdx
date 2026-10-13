@@ -24,7 +24,7 @@ inference can work — but the accelerator story does not translate:
 
 | Capability | Under WSL2 |
 |---|---|
-| **CPU inference** | Works (via the `cpu-llm` profile). |
+| **CPU inference** | Works (via the `cpu-chat` profile). |
 | **systemd** | Required by hal0, but **off by default** in WSL — you must enable it (below) or pre-flight fails. |
 | **ROCm** | Unavailable — WSL2 exposes no `/dev/kfd`. |
 | **Vulkan (iGPU)** | WSL2 presents the GPU through Microsoft's `/dev/dxg`, not the native `/dev/dri/renderD128` + `/dev/kfd` nodes hal0's slots expect. Untested; do not rely on it. |
@@ -75,7 +75,7 @@ The bootstrap and installer run exactly as on bare metal — verify the
 tarball, install podman, build the venv, write systemd units, and start
 `hal0-api` on port `8080`. Because no GPU/NPU nodes are available, the
 hardware probe falls back to CPU and the `cpu` device is seeded with the
-`cpu-llm` chat profile, so you still get a working primary chat slot.
+`cpu-chat` chat profile, so you still get a working primary chat slot.
 
 <Aside type="note" title="Ports and reachability">
 `hal0-api` binds `0.0.0.0:8080` and OpenWebUI `:3001`. From Windows,

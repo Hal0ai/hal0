@@ -40,8 +40,8 @@ These map directly to four of hal0's five canonical devices: `gpu-rocm`,
 `gpu-vulkan`, `npu`, and `cpu`. (The fifth, `gpu-cuda`, exists too — see the
 note on NVIDIA below — but it has nothing to do with Strix Halo, which has no
 NVIDIA silicon.) A slot's `device` field is what picks one of these — see
-[Capabilities & profiles](/docs/concepts/capabilities-and-profiles) for why
-that ownership lives on the slot, not the profile, as of v1.0.
+[Slots](/docs/concepts/slots#who-owns-what-slot-model-profile) for what the
+slot owns and what the profile owns.
 
 ## ROCm or Vulkan on the iGPU
 
@@ -154,13 +154,16 @@ letting them fight over the pool.
 hal0 also never budgets a model against the *entire* unified pool: the OS,
 the container runtime, and every other slot need headroom too. When hal0
 seeds its llama.cpp slots (`agent`, `brain`, `coder`, `embed`, `rerank`,
-`utility`) onto a box, it clamps each seed's `context_size` against a bounded
-**memory envelope**, not the raw pool, and `hal0 doctor all` checks existing
-slots against the same envelope (its `seed_context_envelope` row): on
-unified-memory hardware that is 55% of total RAM, floored at 2 GiB; on a
+`utility`) onto a box, it clamps each seed's context window (the `ctx_size` of
+the profile the slot names) against a bounded **memory envelope**, not the raw
+pool, and `hal0 doctor all` checks existing slots against the same envelope
+(its `seed_context_envelope` row): on unified-memory hardware that is 55% of total RAM, floored at 2 GiB; on a
 discrete GPU it's the card's own VRAM; on a CPU-only box it's 35% of RAM,
 clamped to 3–8 GiB. It never exceeds the box's actual RAM, and the `agent`
-and `brain` seeds are never clamped below the 64,000-token Hermes floor.
+and `brain` seeds are never clamped below the 64,000-token Hermes floor. When a
+box cannot afford the seed profile's window, the installer writes a custom profile named
+`<seed>-ctx<N>` and points the slot at it; the slot file itself carries no
+context key.
 
 ![The Slots view: the iGPU GTT carve-out bar above the Inference Engine, where iGPU and FLM (NPU) slots share the unified-memory pool](/screenshots/npu-occupancy.png)
 *The shared GTT carve-out above the Inference Engine — iGPU slots and FLM (NPU) slots both draw from one unified-memory pool.*

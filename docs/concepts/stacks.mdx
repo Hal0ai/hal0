@@ -8,7 +8,7 @@ sidebar:
 import { Aside, Card, CardGrid, LinkCard, Steps } from '@astrojs/starlight/components';
 
 Editing slots one at a time works, but swapping an entire lineup — the
-`agent` model, the `utility` model, their profiles, MTP settings, the embed
+`agent` model, the `utility` model, their profiles, the embed
 and rerank lanes that ride along with them — is tedious to do by hand, and
 easy to leave half-applied. A **stack** is a single named entry that bundles
 a whole set of slot assignments together with the profile and model metadata
@@ -22,8 +22,8 @@ exactly what the stack describes, in one guarded operation.
 **An honest maturity note.** Stacks is hal0's youngest major subsystem —
 real, working, not a stub, but with a track record worth knowing about. The
 guard that stops a stack from writing a slot config a manual edit would be
-refused (the model-owned-key partition described in the hardware/model
-write boundary section of [Slots](/docs/concepts/slots))
+refused (the tuning-key partition described in
+[Slots](/docs/concepts/slots#who-owns-what-slot-model-profile))
 had to be retrofitted into the stacks-apply path more than once, because the
 apply engine originally hand-rolled its own merge instead of routing through
 the same guarded pipeline every other slot writer used. A shared gate
@@ -50,11 +50,12 @@ fields:
 |---|---|
 | `slot` | The slot name (existing, or new — created on apply). |
 | `model` / `profile` | References resolved against the stack's own embedded `models`/`profiles` maps. |
-| `device`, `provider`, `role` | Device, provider label, and LLM role — device is slot-owned, same as an ordinary slot. |
-| `vision` | Whether the mmproj sidecar loads for this row (defaults **off** — a stack row opts in explicitly, unlike a raw slot, which defaults it on). Model-owned, same as on an ordinary slot. |
-| `mtp` | The tri-state Auto/On/Off override — `null` defers to model eligibility. Model-owned. |
-| `enable_thinking`, `server_extra_args` | Same knobs as the slot drawer; `enable_thinking` is model-owned. |
+| `device`, `provider` | Device and provider label. Device is slot-owned, same as an ordinary slot. |
 | `capabilities` | Embed/rerank/stt/tts/vision capability children carried by this row, each with its own `device`/`provider`/`model`/`enabled`. |
+
+A row carries no tuning. The context window, flags, thinking default, vision
+and MTP all belong to the profile the row names; to run one model with
+different tuning, name a different profile.
 
 A stack also embeds a transport-safe copy of every profile and model it
 references, so importing it onto a fresh host doesn't depend on that host
@@ -66,8 +67,8 @@ hal0 ships three built-in stacks tuned to the reference Strix Halo roster,
 each pairing an `agent` and a `utility` slot and carrying dedicated embed and
 rerank rows so memory recall works out of the box:
 
-- **`saber`** — a MoE agent model, MTP on, paired with a fast utility model.
-- **`forge`** — a coding-focused agent/utility pair, both MTP-enabled.
+- **`saber`** — a MoE agent model on the `agent` profile, paired with a fast utility model.
+- **`forge`** — a coding-focused agent/utility pair, both MTP-capable builds.
 - **`pi`** — a lightweight-host-oriented pairing.
 
 Like seed profiles, the three seeds are **immutable** — applying a change to
@@ -83,10 +84,9 @@ in a state a manual edit couldn't also produce:
 1. **Plan and commit.** For every row that names a model against a slot that
    already exists, hal0 computes the resulting slot config and routes it
    through the exact same guarded pipeline every other slot writer uses —
-   the model-owned-key partition, NPU exclusivity, default-uniqueness. A row
-   that would fail that pipeline (say, a row trying to smuggle a model-owned
-   key onto the slot) is rejected and reported, but doesn't abort the rest of
-   the apply — one bad row never blocks the others. The result commits
+   the tuning-key partition, NPU exclusivity, default-uniqueness. A row that
+   would fail that pipeline is rejected and reported, but doesn't abort the
+   rest of the apply — one bad row never blocks the others. The result commits
    atomically.
 
 2. **Converge.** With the config committed, hal0 walks the live slot set and
@@ -154,14 +154,13 @@ the clean/modified drift badge, plus Edit, Export, and Re-apply actions —
 and a **Library** grid of every other stack, with Load, Clone, Export, Edit,
 and Delete affordances (Edit and Delete are hidden for the three immutable
 seeds). Editing or creating a stack opens a row-by-row drawer: slot name
-(with a "new slot" chip when it doesn't exist yet), model, device, a profile
-picker, and the same Auto/On/Off MTP control the slot drawer uses — shown
-only when it's actually relevant to the row.
+(with a "new slot" chip when it doesn't exist yet), model, device, and a
+profile picker.
 
 ## Where to go next
 
 <CardGrid>
-  <LinkCard title="Slots" href="/docs/concepts/slots" description="The lifecycle and write-boundary partition a stack converges against." />
+  <LinkCard title="Slots" href="/docs/concepts/slots" description="The lifecycle and the slot / model / profile ownership split a stack converges against." />
   <LinkCard title="Capabilities & profiles" href="/docs/concepts/capabilities-and-profiles" description="What a stack row's profile and capability children configure." />
   <LinkCard title="Architecture" href="/docs/concepts/architecture" description="Where stacks sit relative to the dispatcher and slot manager." />
 </CardGrid>

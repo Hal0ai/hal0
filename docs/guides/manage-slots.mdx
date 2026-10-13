@@ -43,10 +43,9 @@ today — see Config drift after an update, below.
 The dashboard's per-slot cards (Inference pane) carry a metric row —
 **tok/s**, **ttft**, and **mem** (resident memory in GB, from the slot's
 `mem_mb`) — plus a footer strip of chips: a **context** chip (`Nk ctx`,
-shown on a full-size card whenever `ctx_max` is a positive number — MiniCards
-never show it; only `llm` slots get an effective context resolved, other slot
-types report their TOML's own `context_size` if set and otherwise omit
-`ctx_max`), an **image status** chip when
+shown on a full-size card whenever the slot's `ctx_effective` is a positive
+number — MiniCards never show it; TTS, STT and image slots have no context
+window and omit it), an **image status** chip when
 hal0 could not read the container image store (label "image ?" — not a claim
 the image is missing, see [Slot lifecycle reference](/docs/reference/slot-lifecycle)),
 and a **crash-loop breaker** chip whenever a slot is backing off or parked
@@ -66,10 +65,10 @@ confirm, then applies `PUT /api/slots/{name}/config` followed by a background
 editor and is the only way to clear a profile.
 
 <Aside type="note">
-`primary` and `chat` are retired slot/role names — neither is accepted as
-an alias anymore. The canonical LLM roles are `agent` (the capable
+`primary` and `chat` are retired slot names — neither is accepted as
+an alias anymore. The canonical LLM slots are `agent` (the capable
 default/fallback anchor) and `utility` (the cheap helper seeded for
-memory extraction); a custom slot is reachable only by its own name.
+memory extraction); a slot is reachable only by its own name.
 </Aside>
 
 ## Create a slot
@@ -78,8 +77,7 @@ memory extraction); a custom slot is reachable only by its own name.
 hal0 slot create embed \
   --type embedding \
   --model nomic-embed-text-v1.5-q8_0 \
-  --hardware rocm \
-  --ctx-size 8192
+  --hardware rocm
 ```
 
 <Steps>
@@ -106,31 +104,36 @@ hal0 slot create embed \
    `device` field directly (`vulkan → gpu-vulkan`, `rocm → gpu-rocm`,
    `cpu → cpu`) — as of v1.0, **the slot owns its hardware grid**
    (`device`, `n_gpu_layers`, `threads`, `binary`, `image_pin`), not the
-   profile it references. A profile now only supplies flags/image
-   template.
+   profile it references. The profile supplies the tune: flags, context
+   window, thinking default, vision and MTP.
 
 5. **`--port` / `-p`** — the slot's port. Omit it and hal0 auto-assigns
    the next free port.
 
-6. **`--ctx-size`** — context window in tokens (default `4096`).
+6. **`--profile`** — the profile: the slot's whole tune (flags, context
+   window, thinking, vision, MTP). Omit it and hal0 infers the profile the
+   slot's `--type` implies: `embedding` → `embedding` (`--embedding`),
+   `reranking` → `reranking` (`--reranking`), `tts`/`transcription` → the
+   engine hal0 ships for the chosen device (Kokoro on CPU, Qwen3-TTS on ROCm,
+   Moonshine for CPU speech-to-text), `image` → `comfyui`. Nothing is inferred
+   where hal0 has no engine for that pairing — a `tts` slot on a Vulkan
+   device, for instance, keeps the CPU Kokoro runtime rather than being
+   pinned to the ROCm-only Qwen3 image. That inference is what makes a
+   capability slot actually serve its endpoint — an `embedding` slot with no
+   `--embedding` flag loads to `ready` and returns HTTP 501 from
+   `/v1/embeddings`. An `llm` slot is the one type that infers nothing: no
+   mode flag is at stake, so with no `--profile` it runs the `chat` seed.
+   Change a slot's profile later with `hal0 slot edit <name> --profile
+   <profile>` or the slot drawer.
 
-7. **`--profile`** — the runtime profile (flag bundle + engine). Omit it
-   and hal0 infers the profile the slot's `--type` implies: `embedding` →
-   `embedding` (`--embedding`), `reranking` → `reranking`
-   (`--reranking`), `tts`/`transcription` → the engine hal0 ships for the
-   chosen device (Kokoro on CPU, Qwen3-TTS on ROCm, Moonshine for CPU
-   speech-to-text). Nothing is inferred where hal0 has no engine for that
-   pairing — a `tts` slot on a Vulkan device, for instance, keeps the CPU
-   Kokoro runtime rather than being pinned to the ROCm-only Qwen3 image.
-   `image` → `comfyui`. Nothing is inferred where hal0 has no engine for
-   that pairing — a `tts` slot on a Vulkan device, for instance, keeps the
-   CPU Kokoro runtime rather than being pinned to the ROCm-only Qwen3
-   image. That inference is what makes a capability slot actually serve
-   its endpoint — an `embedding` slot with no `--embedding` flag loads to
-   `ready` and returns HTTP 501 from `/v1/embeddings`. An `llm` slot is
-   the one type that infers nothing: no mode flag is at stake, so its
-   tune stays the model's (or yours). Change a slot's profile later with
-   `hal0 slot edit <name> --profile <profile>` or the slot drawer.
+   There is no `--ctx-size`: the context window is the profile's `ctx_size`.
+   For a window other than the seed's, create a profile first and name it
+   here:
+
+   ```sh
+   hal0 profile create chat-16k --from chat --ctx-size 16384
+   hal0 slot create scratch --model qwen3.5-9b --profile chat-16k
+   ```
 
    A profile can also pin a **runtime** — one of hal0's runner-registry
    entries (Standard, NVIDIA CUDA,
@@ -184,7 +187,7 @@ hal0 slot restart agent
 ```
 
 Unloads then reloads — used after editing config that the running
-container baked in (ports, hardware grid, ctx size).
+container baked in (ports, hardware grid, or the profile's flags and context size).
 
 </TabItem>
 <TabItem label="Unload">
@@ -284,25 +287,20 @@ setting one) is how you take a slot out of rotation without deleting it.
 ## Edit slot config
 
 ```sh
-hal0 slot edit agent --ctx-size 32768
+hal0 slot edit agent --profile agent-32k
 hal0 slot edit embed --hardware rocm
 hal0 slot edit rerank --profile reranking
 ```
 
-Pass any subset of `--model`, `--port`, `--ctx-size`, `--provider`,
-`--hardware`, `--profile`. At least one is required. Changes the container
-baked in (port, hardware grid) take effect on the next `restart`.
-
-<Aside type="tip" title="Repairing a profile-less capability slot">
-Capability slots created before v1.0 could land on disk with no `profile`
-key — they load to `ready` but return HTTP 501 from their own endpoint,
-because the profile is what carries llama-server's `--embedding` /
-`--reranking` mode flag. Check with `hal0 slot show <name>` (its on-disk
-TOML is included in the output, so you don't need to know whether this box
-keys slot files by name or by id); repair with `hal0 slot edit <name>
---profile embedding` (or `reranking`) followed by `hal0 slot restart
-<name>`. Newly created slots infer it automatically.
-</Aside>
+Pass any subset of `--model`, `--port`, `--provider`, `--hardware`,
+`--profile`. At least one is required. Changes the container baked in (port,
+hardware grid, profile) take effect on the next `restart`. A slot has no
+flags or context size of its own to edit; to change them, edit the profile it
+runs (`hal0 profile edit <name> --ctx-size N`) or point the slot at another
+one. Editing a profile affects every slot that runs it, and each picks up
+changed flags, context window, vision or MTP at its next restart. A changed
+profile `runner` does not reach a slot that way: re-apply the profile to each
+slot with `hal0 slot edit <slot> --profile <name>`, then restart it.
 
 ## Switching a slot to the Vulkan lane
 
@@ -395,8 +393,8 @@ caution under Rename, earlier on this page.
 
 ### Hardware
 
-Holds the fields v1.0 moved onto the slot itself — see [The hardware/model
-write boundary](/docs/concepts/slots) for why. The old separate **Device**,
+Holds the placement fields the slot owns — see [Who owns what: slot, model,
+profile](/docs/concepts/slots#who-owns-what-slot-model-profile). The old separate **Device**,
 **Runner Image**, and **Runner Binary** controls are gone — a runtime-first
 redesign folded them into two fields, since `device` is now *derived* from
 the runtime you pick rather than an independently editable value:
@@ -437,46 +435,59 @@ ref ships — the slot keeps its current runtime binary and may fail at
 spawn." and a "Use release image" button to clear it. A pin never widens or
 narrows the Runtime/Lane options above it.
 
-### Profile: same-device tuning, or a cross-device switch
+### Profile: the slot's whole tune
 
-The **Profile** select lists profiles that fit the slot's current device
-first. A profile declaring a *different* backend is also offered, grouped
-under "Other backend — switches slot device" — picking one stages a device
-switch (and a restart) for the next Save, and Save blocks if the switch would
-strand the slot's currently bound model on a backend it can't run. A profile
-matching the bound model's own stamped preference shows as adopted from the
-model (swapping the model may change it); one you pick that diverges instead
-overlays its flags on top of the model's tune for this slot only, at launch.
+The **Profile** select lists the profiles that suit the slot: its type, and,
+for a profile that pins a runtime, the slot's device class. Picking one stages
+it; nothing is written until Save, which applies the profile and restarts the
+slot. The profile is the slot's whole tune (flags, context window, thinking
+default, vision, MTP, and optionally a runtime), so an inline preview above
+the select lists what the pick changes: the runtime and lane when the profile
+pins one, each of context, thinking, vision and MTP that differs (old → new),
+how many flags differ, and that the slot restarts on Save. A profile name the
+slot carries that no longer fits it stays selectable with a warning rather
+than being rewritten.
 
-A profile can also carry a **runtime** (see [Choose models → Profiles
-tab](/docs/guides/choose-models)), not just flags. Picking one that names a
-runtime different from the slot's current binary shows an inline preview
-above the select — "Applying this profile: runtime → ‹title› (‹lane›) …
-slot restarts on Save" — and mirrors the pick straight into the Hardware
-group's Runtime/Lane controls so you see the post-save state immediately.
-Save itself doesn't change: the same profile-wins logic runs whether you
+Beside the select, **Edit profile** opens the selected custom profile in a
+drawer; on a seed profile, which is read-only, the same button reads
+**Duplicate & edit** and forks a custom copy. When other slots run the same
+profile, a hint names them, because editing the profile changes those slots too (each
+picks up the change at its next restart, except a changed runtime, which
+needs the profile re-applied to the slot). Under the select, a read-only line
+shows the **effective context** and where it came from: set by the profile,
+the model's native window, or the default window when the model reports none.
+To change it, edit the profile.
+
+A profile can also carry a **runtime** (see [Capabilities &
+profiles](/docs/concepts/capabilities-and-profiles)), not just flags. Picking
+one that names a runtime different from the slot's current binary mirrors the
+pick straight into the Hardware group's Runtime/Lane controls so you see the
+post-save state immediately. The same profile-wins logic runs whether you
 edit an existing slot or `hal0 slot create --profile <profile>` a new one
 (see Create a slot, above). The only thing that blocks the apply is physical
 infeasibility — a ROCm-only runtime profile on a host with no `/dev/kfd`, for
 example — never whether the slot's bound model happens to run well under it.
 
-### Model: swap and the context ceiling
+A slot whose file the profile-centric conversion could not convert shows a
+**conversion blocked** badge with the reason and the fix. It launches with
+its recorded pre-conversion tune only while its file is unchanged and still
+carries the old tuning keys (placement and the model come from the current
+slot). Editing the file drops the record: if tuning keys remain, the slot
+refuses to launch (`slot.unconverted`) until the conversion succeeds or you
+remove them. See
+[Update and roll back](/docs/guides/update-and-rollback#profile-centric-config-conversion).
+
+### Model: swap and the file facts
 
 The **Model** select swaps the slot's bound model — on a live container slot
-this cold-restarts it, and the drawer confirms before firing that restart.
-The pencil button beside it opens the bound model's own tune (launch flags,
-chat template, capabilities) docked to the left of the slot drawer, so your
-in-progress slot edits stay visible while you adjust the model. It's disabled
-when no model is bound yet, or when the bound id doesn't resolve to a
-registry row.
-
-**Context (ceiling)** sets `[model].context_size` — a hardware ceiling that
-clamps the model's own resolved context window down. The one exception is a
-model with no explicit `defaults.context_size` of its own: there, the
-ceiling replaces the dense-capped derived default rather than clamping it,
-so it can raise the effective window (still bounded by the model's native
-GGUF context) — see [Slots](/docs/concepts/slots) for the mechanics. Leave
-it unset to just follow the model.
+this cold-restarts it, and the drawer confirms before firing that restart. A
+swap keeps the slot's profile: the tune stays, the file changes. The pencil
+button beside it opens the bound model's file facts (chat template, whether
+the file has MTP heads, whether its template works with `--jinja`, native
+context) docked to the left of the slot drawer, so your in-progress slot edits
+stay visible while you adjust the model. It's disabled when no model is bound
+yet, or when the bound id doesn't resolve to a registry row. The drawer has
+no flag or context fields; those are the profile's.
 
 Binding a model that is a fork-only quantization (ROCmFPX-family, IU4 or
 ActiveFPX) is refused rather than left to crash-loop: launching the slot
@@ -491,8 +502,9 @@ instantly on blur — lower unloads first under memory pressure, with
 least-recently-used as the tie-break; pin the slot instead to exempt it
 entirely. Below it, **Resolved command** shows the actual `podman` argv hal0
 would launch right now, with per-flag source badges when the API supplies
-provenance — a way to confirm a hardware or profile change actually changed
-what will run before you restart.
+provenance — `base`, `model`, `profile` or `slot`, the layer that set each
+flag — a way to confirm a hardware or profile change actually changed what
+will run before you restart.
 
 ### Deleting a slot from the drawer
 
@@ -510,22 +522,21 @@ icon next to its model control. Click it to open the model drawer directly
 for the slot's currently bound model, without opening the slot's own drawer
 first. Here the drawer is **not docked** — it opens in its normal
 flush-right position with its own dim scrim, unlike the docked instance the
-slot drawer opens (see "Model: swap and the context ceiling," above). The
+slot drawer opens (see "Model: swap and the file facts," above). The
 pencil is disabled when no model is bound yet.
 
 This is a separate action from the model dropdown on the same card, which
-swaps *which* model the slot runs — the pencil edits the *bound* model's own
-settings.
+swaps *which* model the slot runs — the pencil edits the *bound* model's file
+facts.
 
 <Aside type="note" title="Editing raw flags in the dashboard">
-`[server].extra_args` on a slot is legacy TOML round-trip only as of
-v1.0 — it's inert at launch. The live tuning surface for launch flags is
-the model's own `defaults.extra_args`, edited from the model drawer (see
-[Choose models](/docs/guides/choose-models)) — this is also where
-`[server].extra_args` writes are screened against the hardware/managed-flag
-denylist, see [Edit configuration](/docs/guides/configure).
+A slot has no launch flags of its own, and `[server].extra_args` is refused
+on a slot write (`slot.tuning_key_denied`). Launch flags are edited on the
+profile, from the **Edit profile** button in the slot drawer or the Profiles
+tab. A profile's flags are screened against the hardware, managed, model-fact
+and host-owned flag lists when it is saved; see [Edit
+configuration](/docs/guides/configure#launch-flags-are-screened-on-the-profile).
 </Aside>
-
 ## Editing multiple slots at once: Stacks
 
 The dashboard's **Stacks** view (there's no `hal0 stack` CLI command — it's
@@ -534,9 +545,9 @@ edit several slots as one named, portable bundle instead of one at a
 time. **Apply** (`POST /api/stacks/{slug}/apply`) creates any slot named
 in the stack that doesn't exist yet, then *converges* the live slot set —
 applying a stack is a declarative replace of what's currently running,
-not a merge. `[server].extra_args` set from a stack row goes through the
-same write-boundary screen as a direct `hal0 slot edit` — a blocked flag
-fails that one slot's convergence without aborting the rest of the apply.
+not a merge. A stack row goes through the same slot-write checks as a direct
+`hal0 slot edit`: a row the checks refuse fails that one slot's convergence
+without aborting the rest of the apply.
 
 See [Stacks](/docs/concepts/stacks) for the full concept — row fields,
 plan/converge phases, drift states, export/import/snapshot.
@@ -594,40 +605,29 @@ Slot runtimes and image pins are converted onto the current runner system by
 config; see [Manage runner images → Upgrading an older
 install](/docs/guides/manage-runner-images/#upgrading-an-older-install).
 
-A handful of one-shot `hal0 slot migrate-*` commands exist for bringing
-older on-disk slot config forward through the v1.0 field-ownership
-changes: `migrate-id-keying`, `migrate-hw`, `migrate-caps`,
-`migrate-flags`. These are **manual, operator-run**
-migrations — `hal0 update` only *detects* which ones a box still needs and
-prints the exact command to run; it never applies one for you. `hal0 slot
-migrate-hw --apply` (and its siblings) also refuse to run while `hal0-api`
-or any `hal0-slot@*` unit is active, since rewriting slot TOML under a live
-runtime risks a split-brain config. `hal0 update` already knows whether any
-such unit is up, so the command it prints carries `--stop-services` for you
-when that's the case (stopping those units before proceeding) — copy the
-line verbatim rather than adding the flag yourself. The flag stops nothing
-until the run's own checks and the confirmation prompt have passed. If the
-run then refuses or fails, it starts the units it stopped again. After a
-successful run they stay stopped, and the command names them: restart hal0
-yourself (after `systemctl daemon-reload` where the command says so).
+Slot tuning, profiles and stacks are converted onto the profile-centric model
+by `hal0 profile migrate`, which `hal0 update` also runs for you; see [Update
+and roll back](/docs/guides/update-and-rollback#profile-centric-config-conversion).
+Run `hal0 profile migrate` to preview the plan, and
+`sudo -u hal0 hal0 profile migrate --apply` to convert by hand.
 
-`migrate-flags --apply` folds every slot it can. A slot whose default model
-has no registry row is skipped and named in the summary, the other slots
-still fold, and the command exits `2` (applied, some slots skipped) rather
-than `0`; the dry-run preview names the same skips, and `hal0 update` keeps
-listing `migrate-flags` as outstanding. Register the model or rebind the slot,
-then re-run (models that already folded are a no-op).
-
-Slots served by a provider other than llama-server (text-to-speech,
-transcription, image, NPU) don't use the folded launch tune. If their model
-has no registry row, the fold prints an informational `skip` line for them and
-neither changes the exit code nor counts as outstanding work.
+One manual slot migration remains: `hal0 slot migrate-id-keying`, which
+flips name-keyed slot files, state directories and units to id-keyed ones. It
+is **operator-run only** — nothing in `hal0 update` runs it. It previews by
+default; `--apply` writes, after writing a tar backup of `/etc/hal0/slots`,
+`/var/lib/hal0/slots` and `/var/lib/hal0/hal0.db` to `/var/lib/hal0/backups/`.
+It refuses to run while `hal0-api` or any `hal0-slot@*` unit is active, since
+renaming slot artefacts under a live runtime risks a split-brain config; pass
+`--stop-services` to stop those units first. They are started again if the run
+refuses or fails, and stay stopped after a successful run, so restart hal0
+yourself afterwards (after `systemctl daemon-reload` where the command says
+so).
 
 ## Related
 
 - [Pull and register models](/docs/guides/pull-and-register-models) — get
   a model into the registry before assigning it.
 - [Choose models](/docs/guides/choose-models) — recommended picks per
-  slot, the model-owned launch defaults, and the dashboard's kebab menu.
-- [Edit configuration](/docs/guides/configure) — the slot-owned hardware
-  grid and where `[server].extra_args` is screened.
+  slot, the model's file facts, and the dashboard's kebab menu.
+- [Edit configuration](/docs/guides/configure) — who owns which setting
+  and where a profile's flags are screened.

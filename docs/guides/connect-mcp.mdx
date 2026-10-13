@@ -345,11 +345,9 @@ routes to the gated tier at call time.
 **Gated — always require approval:** `model_pull`, `model_delete`,
 `slot_create`, `slot_delete`, `slot_restart`, `capability_set`,
 `config_write`, `provider_credential_write`, `stack_apply`,
-`stack_import`, `stack_delete`, `profile_import`, `profile_delete`, and
-`logs_tail`. `slot_create` and `config_write` here follow the same
-[server].extra_args screening as every other slot write path — see the
-"[server].extra_args is screened everywhere" section of
-[Edit configuration](/docs/guides/configure).
+`stack_import`, `stack_delete`, `profile_create`, `profile_update`,
+`profile_import`, `profile_delete`, and
+`logs_tail`. `slot_create` and `config_write` go through the same slot-write checks as every other path: a tuning key on the slot is refused with `slot.tuning_key_denied`, and a `LLAMA_ARG_*` variable in `[server].env` with `slot.llama_env_denied`. Tunes belong on a profile; see [Edit configuration](/docs/guides/configure#launch-flags-are-screened-on-the-profile).
 
 ### The approval flow
 
@@ -372,5 +370,5 @@ routes to the gated tier at call time.
 
 - [Enable memory](/docs/guides/enable-memory) — what the memory subsystem powers.
 - [Run agents](/docs/guides/run-agents) — the approvals queue in context.
-- [Edit configuration](/docs/guides/configure) — where per-server env secrets and the extra_args screen live.
+- [Edit configuration](/docs/guides/configure) — where per-server env secrets and the profile flag screen live.
 - [Security](/docs/concepts/security) — the LAN-open posture, MCP allowlist, and origin gate.
