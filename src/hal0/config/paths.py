@@ -463,8 +463,9 @@ def profiles_toml() -> Path:
 def stacks_toml() -> Path:
     """Return the stack catalog path (/etc/hal0/stacks.toml).
 
-    The file is optional — :func:`hal0.config.loader.load_stacks_config`
-    returns the built-in seed stacks (empty until they ship) when absent.
+    The file is optional and holds operator stacks only — the seed stacks are
+    virtual, overlaid from code on every
+    :func:`hal0.config.loader.load_stacks_config` and never written.
 
     FHS:       /etc/hal0/stacks.toml
     HAL0_HOME: $HAL0_HOME/etc/hal0/stacks.toml

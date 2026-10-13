@@ -427,6 +427,18 @@ applying. Add those subsections to a version's section to surface them; see
   form of an IPv6 address); anything else is refused. An install-time
   `HAL0_PUBLIC_URL`, including the bare-host form, is saved to
   `[network].public_url` once, never over a set value. (#2382)
+- The seed stacks (`saber`, `forge`, `pi`) are now virtual, like the seed
+  profiles: hal0 takes them from code on every load, and a same-named entry
+  in `/etc/hal0/stacks.toml` is ignored. Before, the seeds were used only when
+  `stacks.toml` did not exist, so a box that had upgraded kept the copies an
+  older release wrote, which still named the retired `rocm`, `vulkan` and
+  `rocm-moe` profiles, and applying them failed. The API refuses to edit seed
+  stacks, so there was no way to fix them. Seed stacks are never written
+  back, so the next stack create, edit, delete, snapshot or import cleans
+  those copies out of `stacks.toml`. `hal0 profile migrate` no longer plans
+  or blocks on a seed-named stack in the file. Custom stacks are unchanged.
+  (#2584)
+
 - Deleting a custom profile is no longer allowed while a slot file still
   names it but fails to load. A slot that is unconverted (`slot.unconverted`)
   or otherwise invalid was left out of the profile in-use scan, so the delete

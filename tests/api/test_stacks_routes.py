@@ -72,6 +72,35 @@ def test_list_ships_seed_catalog(client: TestClient) -> None:
     assert all(s["seed"] is True for s in body["stacks"] if s["slug"] in {"saber", "forge", "pi"})
 
 
+def test_stale_seed_on_disk_lists_as_the_code_seed_and_a_write_cleans_it(
+    tmp_hal0_home: str,
+) -> None:
+    """A stacks.toml written by an older release holds a `forge` naming retired
+    profiles. The API serves the code seed, still refuses to edit it, and the
+    next write drops the stale copy from disk."""
+    import tomllib
+
+    path = Path(tmp_hal0_home) / "etc" / "hal0" / "stacks.toml"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        '[stack.forge]\nname = "Forge"\n\n'
+        '[[stack.forge.slots]]\nslot = "agent"\nmodel = "old"\nprofile = "rocm"\n\n'
+        '[[stack.forge.slots]]\nslot = "utility"\nmodel = "old"\nprofile = "vulkan"\n',
+        encoding="utf-8",
+    )
+    with TestClient(create_app()) as c:
+        forge = next(s for s in c.get("/api/stacks").json()["stacks"] if s["slug"] == "forge")
+        assert forge["seed"] is True
+        assert {row["profile"] for row in forge["slots"]}.isdisjoint({"rocm", "vulkan", "rocm-moe"})
+        assert c.put("/api/stacks/forge", json=_stack_body()).status_code == 409
+        assert (
+            c.post("/api/stacks", json={"slug": "mine", "stack": _stack_body()}).status_code == 201
+        )
+        slugs = [s["slug"] for s in c.get("/api/stacks").json()["stacks"]]
+    assert slugs == ["saber", "forge", "pi", "mine"]
+    assert set(tomllib.loads(path.read_text(encoding="utf-8"))["stack"]) == {"mine"}
+
+
 # ── POST (create) ──────────────────────────────────────────────────────────────
 
 
