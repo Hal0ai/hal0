@@ -39,7 +39,6 @@ from hal0.config import paths
 from hal0.errors import Hal0Error
 from hal0.registry import fallback as _registry_fallback
 from hal0.slot_config import (
-    reject_slot_llama_env,
     slot_write_lock,
     write_slot_toml,
 )
@@ -2670,6 +2669,13 @@ class SlotManager:
         slots/*.toml write path (issue #697).
         """
         cfg_dict = _cfg_to_dict(slot_cfg)
+        # The in-process write boundary (ADR-0029 §5): a payload carrying a
+        # profile-owned tuning key (slot.tuning_key_denied), a llama-server
+        # option in [server].env (slot.llama_env_denied) or a key removed from
+        # the schema (slot.removed_key_denied) is refused before any
+        # derivation or disk write, in-process creates included — the same
+        # screen the HTTP routes and ``update_config`` run.
+        guard_slot_write_payload(cfg_dict)
         # #1830: for an embedding/reranking/TTS/STT/image slot the profile is
         # not only a tune, it is the mode flag (``--embedding`` /
         # ``--reranking``) or the runtime engine; without it the slot loads to
@@ -2701,9 +2707,6 @@ class SlotManager:
         # the utility slot (vulkan device + rocm-dnse profile). Every field is
         # "new" at create time, so a conflicting device+profile is an explicit
         # operator error and raises.
-        # A llama-server option set through [server].env is refused on every
-        # write path, in-process creates included (slot.llama_env_denied).
-        reject_slot_llama_env(cfg_dict)
         _reconcile_device_profile(cfg_dict, set(cfg_dict.keys()))
         await self._check_npu_exclusivity(slot_name, cfg_dict)
         # SC-4, first-of-type: the create modal no longer asks "make this the
@@ -2962,29 +2965,20 @@ class SlotManager:
             # device flip re-points the profile (the POST /backend path,
             # which writes device only), and an explicit conflicting pair
             # raises. Only the field(s) the caller changed drive
-            # reconciliation. Returns a fresh dict — rebind ``cfg_dict``.
-            cfg_dict = reconcile_slot_updates(cfg_dict, updates)
-
-            # PR-11: re-run the NPU exclusivity guard whenever the merged
-            # config could land a second device=npu, type=llm anchor (plan
-            # §5.3). Cheap when no NPU LLM is involved — the helper short-
-            # circuits on the merged cfg's own device/type.
-            await self._check_npu_exclusivity(slot_name, cfg_dict)
-
-            # SC-4: a PATCH that flips default=true (even when ``type`` lives
-            # only on the pre-existing config) is checked against the merged
-            # cfg_dict — the authoritative post-merge state, same as the NPU
-            # guard. The peer walk excludes slot_name, so re-persisting the
-            # sole default never self-conflicts.
+            # reconciliation.
             #
-            # ``changed_keys`` is the update's own key set: a PATCH that does
-            # not carry ``default`` skips the check entirely, so an unrelated
-            # edit to a slot caught in a pre-existing two-defaults-on-disk
-            # state is no longer wrongly rejected for a conflict it did not
-            # create. A PATCH that DOES set ``default`` is still fully guarded.
-            await self._check_default_uniqueness(
-                slot_name, cfg_dict, changed_keys=set(updates.keys())
-            )
+            # ``reconcile_and_guard_slot_config`` also runs the write
+            # boundary on the payload FIRST (ADR-0029 §5: tuning keys,
+            # [server].env llama options and removed keys are refused, so an
+            # in-process caller can't persist a slot that then fails to load
+            # as ``slot.unconverted``), and, on the merged config, the
+            # cross-slot guards: PR-11 (a second model-bound device=npu,
+            # type=llm anchor, plan §5.3) and SC-4 (a second default=true of a
+            # type; ``changed_keys`` is the update's own key set, so an
+            # unrelated edit to a slot caught in a pre-existing
+            # two-defaults-on-disk state is not rejected for a conflict it did
+            # not create). Returns a fresh dict — rebind ``cfg_dict``.
+            cfg_dict = reconcile_and_guard_slot_config(slot_name, cfg_dict, updates)
 
             try:
                 write_slot_toml(cfg_path, cfg_dict)

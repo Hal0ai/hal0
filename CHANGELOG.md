@@ -374,6 +374,14 @@ applying. Add those subsections to a version's section to surface them; see
   `resolved_command` field of `GET /api/slots` follows suit, and the drawer
   says the command is not composed by llama-server. llama-server slots are
   unchanged (#2577).
+- `SlotManager.create()` and `update_config()` now run the same write guard as
+  the HTTP routes. `create()` only screened `[server].env`, so an in-process
+  caller could write a profile-owned tuning key (`ctx_size`, `parallel`,
+  `mtp`, `[model].context_size`, `[server].extra_args`, ...) that the loader
+  then refused at launch as `slot.unconverted`; both methods also now refuse
+  the removed `enabled` key (`slot.removed_key_denied`). The NPU backend
+  install route no longer writes `enabled = true` into the slot it creates.
+  (#2578)
 - A profile, or the recorded tune of a slot the profile conversion blocked,
   can no longer redirect a slot's model or reach outside it through a short
   or alternative llama.cpp flag. The flag screen only knew one spelling of

@@ -382,7 +382,8 @@ async def load_npu_model(request: Request, slot_manager: SlotManagerDep) -> dict
             "type": "llm",
             "runtime": "container",
             "profile": "flm",
-            "enabled": True,
+            # No ``enabled`` key (#1369): the model id IS the activation, and
+            # the write boundary refuses the removed key.
             "model": {"default": model_id},
         }
         await slot_manager.create(slot_name, cfg)

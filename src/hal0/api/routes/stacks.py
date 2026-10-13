@@ -205,7 +205,6 @@ async def _create_missing_slots(
     one bad entry doesn't sink the whole apply. Returns ``(created, errors)``.
     """
     from hal0.api.routes.slots import _normalize_create_body
-    from hal0.slots.config_write import guard_slot_write_payload
 
     created: list[str] = []
     errors: list[dict[str, str]] = []
@@ -229,10 +228,8 @@ async def _create_missing_slots(
             "profile": profile,
         }
         try:
-            # `SlotManager.create()` has no write-boundary screen of its own, so
-            # run the same in-process partition guard the HTTP create path runs;
+            # `SlotManager.create()` runs the in-process write boundary itself;
             # per-slot failures are collected below like any other create error.
-            guard_slot_write_payload(body)
             await slot_manager.create(entry.slot, _normalize_create_body(body))
             created.append(entry.slot)
         except Exception as exc:

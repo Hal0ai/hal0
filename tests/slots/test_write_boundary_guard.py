@@ -176,3 +176,101 @@ def test_guard_runs_before_the_merge(tmp_hal0_home: str) -> None:
             "agent", base, {"model": {"default": "new"}, "vision": True}, slots_dir=slots
         )
     assert base == snapshot, "base must never be mutated, rejected or not"
+
+
+# ── SlotManager is held to the same boundary (in-process writers) ─────────────
+
+
+def _base_cfg(name: str = "chat") -> dict:
+    return {
+        "name": name,
+        "port": 18081,
+        "type": "llm",
+        "device": "gpu-rocm",
+        "profile": "chat",
+        "model": {"default": "m"},
+    }
+
+
+def _with_payload(cfg: dict, payload: dict) -> dict:
+    """Overlay ``payload`` onto ``cfg`` one table deep (so [model] keeps default)."""
+    out = {**cfg}
+    for key, value in payload.items():
+        if isinstance(value, dict) and isinstance(out.get(key), dict):
+            out[key] = {**out[key], **value}
+        else:
+            out[key] = value
+    return out
+
+
+@pytest.mark.parametrize(("payload", "key"), _TUNING_PAYLOADS)
+async def test_slot_manager_create_refuses_every_tuning_key(
+    tmp_hal0_home: str, payload: dict, key: str
+) -> None:
+    from hal0.config import paths
+    from hal0.slots.manager import SlotManager
+
+    with pytest.raises(BadRequest) as exc:
+        await SlotManager().create("chat", _with_payload(_base_cfg(), payload))
+    assert exc.value.code == "slot.tuning_key_denied"
+    assert key in exc.value.details["keys"]
+    assert not (paths.slots_config_dir() / "chat.toml").exists()
+
+
+@pytest.mark.parametrize(("payload", "key"), _TUNING_PAYLOADS)
+async def test_slot_manager_update_config_refuses_every_tuning_key(
+    tmp_hal0_home: str, payload: dict, key: str
+) -> None:
+    from hal0.config import paths
+    from hal0.slots.manager import SlotManager
+
+    sm = SlotManager()
+    await sm.create("chat", _base_cfg())
+    path = paths.slots_config_dir() / "chat.toml"
+    before = path.read_text(encoding="utf-8")
+
+    with pytest.raises(BadRequest) as exc:
+        await sm.update_config("chat", payload)
+    assert exc.value.code == "slot.tuning_key_denied"
+    assert key in exc.value.details["keys"]
+    assert path.read_text(encoding="utf-8") == before
+
+
+async def test_slot_manager_create_refuses_a_removed_key(tmp_hal0_home: str) -> None:
+    from hal0.config import paths
+    from hal0.slots.manager import SlotManager
+
+    with pytest.raises(BadRequest) as exc:
+        await SlotManager().create("chat", {**_base_cfg(), "enabled": True})
+    assert exc.value.code == "slot.removed_key_denied"
+    assert not (paths.slots_config_dir() / "chat.toml").exists()
+
+
+async def test_slot_manager_update_config_refuses_a_removed_key(tmp_hal0_home: str) -> None:
+    from hal0.config import paths
+    from hal0.slots.manager import SlotManager
+
+    sm = SlotManager()
+    await sm.create("chat", _base_cfg())
+    path = paths.slots_config_dir() / "chat.toml"
+    before = path.read_text(encoding="utf-8")
+
+    with pytest.raises(BadRequest) as exc:
+        await sm.update_config("chat", {"enabled": False})
+    assert exc.value.code == "slot.removed_key_denied"
+    assert path.read_text(encoding="utf-8") == before
+
+
+async def test_slot_manager_clean_create_and_update_still_work(tmp_hal0_home: str) -> None:
+    """The guard refuses tunes and removed keys, nothing else: an ordinary
+    placement/profile/model write still lands."""
+    from hal0.slots.manager import SlotManager
+
+    sm = SlotManager()
+    await sm.create("chat", _base_cfg())
+    await sm.update_config("chat", {"model": {"default": "new"}, "priority": 3})
+
+    cfg = await sm.get_config("chat")
+    assert cfg["model"]["default"] == "new"
+    assert cfg["priority"] == 3
+    assert cfg["profile"] == "chat"
