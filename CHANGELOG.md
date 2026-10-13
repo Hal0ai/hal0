@@ -411,6 +411,19 @@ applying. Add those subsections to a version's section to surface them; see
     `install.sh`, and the copy of the version-compare helpers in the updater
     API route (it now shares `hal0.updater.updater._is_newer`).
 
+### Security
+
+- **Local inference traffic no longer goes through your HTTP proxy.** With
+  `HTTP_PROXY`, `HTTPS_PROXY` or `ALL_PROXY` set and `NO_PROXY` not covering
+  loopback, hal0-api sent every `/v1` request for a local slot to the proxy in
+  cleartext: prompts, completions and uploaded audio, although none of it
+  needs to leave the box. The same happened to slot health and readiness
+  probes, the omni router's call back into hal0's own `/v1`, the NPU
+  speech-to-text and embedding route, the ComfyUI, Kokoro, Moonshine and
+  Qwen3-TTS clients, and the memory reranker. Requests to `127.0.0.1`,
+  `localhost` and `[::1]` now go direct. Remote providers still use the proxy,
+  and the dispatcher's connection limits are unchanged. (#2585)
+
 ### Fixed
 
 - A browser origin you allow now survives an installer re-run. The REST and

@@ -39,6 +39,7 @@ import httpx
 from hal0.config import store as model_store_module
 from hal0.config.paths import model_store_root
 from hal0.errors import Hal0Error
+from hal0.http_client import async_client
 from hal0.providers.base import Provider, RuntimeLaunchPlan
 
 # Default profile name if the slot TOML omits one.
@@ -203,7 +204,7 @@ class KokoroProvider(Provider):
         """
         url = f"http://127.0.0.1:{port}/health"
         try:
-            async with httpx.AsyncClient(timeout=_HEALTH_TIMEOUT) as client:
+            async with async_client(timeout=_HEALTH_TIMEOUT) as client:
                 resp = await client.get(url)
                 if resp.status_code == 200:
                     body = resp.json()
@@ -222,7 +223,7 @@ class KokoroProvider(Provider):
         """Passthrough /v1/audio/speech to kokoro-server."""
         url = f"http://127.0.0.1:{port}/v1/audio/speech"
         try:
-            async with httpx.AsyncClient(timeout=_INFER_TIMEOUT) as client:
+            async with async_client(timeout=_INFER_TIMEOUT) as client:
                 resp = await client.post(url, json=body)
                 resp.raise_for_status()
                 return resp.json()

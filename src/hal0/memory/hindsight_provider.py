@@ -136,12 +136,14 @@ class Hal0Reranker:
             return []
         import httpx
 
+        from hal0.http_client import async_client
+
         payload = {"model": self._model, "query": query, "documents": list(documents)}
         timeout = httpx.Timeout(
             connect=self._connect_timeout_s, read=self._read_timeout_s, write=2.0, pool=None
         )
         try:
-            async with httpx.AsyncClient(timeout=timeout) as client:
+            async with async_client(timeout=timeout) as client:
                 resp = await client.post(f"{self._base_url}/v1/rerankings", json=payload)
                 resp.raise_for_status()
                 body = resp.json()

@@ -1863,6 +1863,23 @@ async def _memory_reprobe_loop(
         log.warning("hal0.memory.heal_replay_retry", attempt=attempts)
 
 
+def _omni_router_http_client() -> httpx.AsyncClient:
+    """The OmniRouter's own client, decoupled from the dispatcher's pool.
+
+    It re-enters hal0's ``/v1`` on ``HAL0_SELF_BASE_URL`` (loopback by
+    default) with the caller's prompt in the body. :func:`hal0.http_client.
+    async_client` keeps that loopback hop off ``HTTP(S)_PROXY`` /
+    ``ALL_PROXY`` while any remote target keeps the proxy environment
+    (#2585).
+    """
+    from hal0.http_client import async_client
+
+    return async_client(
+        timeout=httpx.Timeout(connect=5.0, read=300.0, write=10.0, pool=5.0),
+        follow_redirects=False,
+    )
+
+
 async def _boot_background_tasks(app: FastAPI, ctx: BootState) -> None:
     """Phase — MCP session managers + refresh / GPU-arbiter loops + omni & NPU routers.
 
@@ -1980,10 +1997,7 @@ async def _boot_background_tasks(app: FastAPI, ctx: BootState) -> None:
     try:
         from hal0.omni_router import OmniRouter
 
-        ctx.omni_router_client = httpx.AsyncClient(
-            timeout=httpx.Timeout(connect=5.0, read=300.0, write=10.0, pool=5.0),
-            follow_redirects=False,
-        )
+        ctx.omni_router_client = _omni_router_http_client()
         api_base_url = os.environ.get("HAL0_SELF_BASE_URL", "http://127.0.0.1:8080")
         ctx.omni_router = OmniRouter(
             slot_manager=ctx.slot_manager,

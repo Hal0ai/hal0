@@ -39,6 +39,7 @@ from typing import Any
 import httpx
 
 from hal0.errors import Hal0Error
+from hal0.http_client import async_client
 from hal0.providers._gpu import resolve_gpu_device_paths, resolve_gpu_group_ids
 from hal0.providers.base import Mount, Provider, RuntimeLaunchPlan
 from hal0.providers.comfyui_workflows import build_workflow
@@ -359,7 +360,7 @@ class ComfyUIProvider(Provider):
         """
         url = f"http://127.0.0.1:{port}/system_stats"
         try:
-            async with httpx.AsyncClient(timeout=_HEALTH_TIMEOUT) as client:
+            async with async_client(timeout=_HEALTH_TIMEOUT) as client:
                 resp = await client.get(url)
                 if resp.status_code != 200:
                     return {
@@ -439,7 +440,7 @@ class ComfyUIProvider(Provider):
 
         base_url = f"http://127.0.0.1:{port}"
         try:
-            async with httpx.AsyncClient(timeout=_INFER_TIMEOUT) as client:
+            async with async_client(timeout=_INFER_TIMEOUT) as client:
                 # 1. Submit workflow.
                 submit_resp = await client.post(f"{base_url}/prompt", json=prompt_payload)
                 if submit_resp.status_code != 200:
