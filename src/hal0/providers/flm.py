@@ -41,7 +41,7 @@ import httpx
 
 from hal0.errors import Hal0Error
 from hal0.http_client import async_client
-from hal0.providers.base import ContainerSpec, Provider
+from hal0.providers.base import Mount, Provider, RuntimeLaunchPlan
 
 # ── Toolbox image ─────────────────────────────────────────────────────────────
 # ── On-disk layout ────────────────────────────────────────────────────────────
@@ -809,8 +809,8 @@ class FLMProvider(Provider):
         self,
         slot_cfg: dict[str, Any],
         model_info: dict[str, Any],
-    ) -> ContainerSpec:
-        """Build a ContainerSpec for FLM in the toolbox image.
+    ) -> RuntimeLaunchPlan:
+        """Build a RuntimeLaunchPlan for FLM in the toolbox image.
 
         The toolbox image is self-contained: FLM is built in and lives at
         /opt/fastflowlm/ (binary, libs, xclbins, share assets). The image
@@ -843,9 +843,7 @@ class FLMProvider(Provider):
         # /var/lib/hal0/.config — NOT /root/.config. Mounting at the
         # wrong HOME would silently drop every pulled model into the
         # container's writable overlay and lose it on exit.
-        mounts: list[tuple[str, str]] = [
-            (flm_models, "/var/lib/hal0/.config/flm/models"),
-        ]
+        mounts = [Mount(flm_models, "/var/lib/hal0/.config/flm/models")]
 
         # Build the argv passed to the image's ENTRYPOINT. The image runs
         # /usr/local/bin/flm via tini, so what we provide here is the
@@ -874,7 +872,7 @@ class FLMProvider(Provider):
         # so the spec doesn't depend on /etc/group in the container.
         render_gid = _resolve_render_gid()
 
-        return ContainerSpec(
+        return RuntimeLaunchPlan(
             image=self.image_ref(slot_cfg),
             command=command,
             env={
@@ -910,11 +908,9 @@ class FLMProvider(Provider):
             # The renderer derives --publish=127.0.0.1:<port>:<port> from
             # spec.port declaratively — no hand-rolled "-p" here.
             network_mode="",
-            extra_args=[
-                # NPU model weights are pinned in DMA-locked memory; this
-                # is the same flag haloai's systemd unit sets.
-                "--ulimit memlock=-1",
-            ],
+            # NPU model weights are pinned in DMA-locked memory; this is the
+            # same limit haloai's systemd unit sets.
+            ulimits=["memlock=-1"],
         )
 
     # ── Health / infer ─────────────────────────────────────────────────────────

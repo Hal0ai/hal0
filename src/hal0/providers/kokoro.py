@@ -17,9 +17,8 @@ Weights:
   ``--model_path`` flag the profile bakes in resolves correctly without
   path translation.
 
-  The mount dst string carries the ``:ro`` suffix directly because
-  the Quadlet renderer emits mounts as ``Volume={src}:{dst}``
-  verbatim — there is no separate read-only flag on ContainerSpec.
+  The mount is read-only through :func:`hal0.config.store.mount_for`
+  (``Mount.read_only``); the renderer adds the ``:ro`` option.
 
 No devices / group_add:
   Kokoro runs ONNX inference entirely on CPU (no CUDA, ROCm, or NPU).
@@ -40,7 +39,7 @@ import httpx
 from hal0.config import store as model_store_module
 from hal0.config.paths import model_store_root
 from hal0.errors import Hal0Error
-from hal0.providers.base import ContainerSpec, Provider
+from hal0.providers.base import Provider, RuntimeLaunchPlan
 
 # Default profile name if the slot TOML omits one.
 _DEFAULT_PROFILE = "kokoro"
@@ -127,8 +126,8 @@ class KokoroProvider(Provider):
         self,
         slot_cfg: dict[str, Any],
         model_info: dict[str, Any],
-    ) -> ContainerSpec:
-        """Build a ContainerSpec for the Kokoro TTS slot.
+    ) -> RuntimeLaunchPlan:
+        """Build a RuntimeLaunchPlan for the Kokoro TTS slot.
 
         The toolbox image ENTRYPOINT is ``tini -- kokoro-server``, so
         ``command`` carries only flags (no binary path / subcommand).
@@ -167,7 +166,7 @@ class KokoroProvider(Provider):
         # default /mnt/ai-models).
         store_root = model_store_root()
 
-        return ContainerSpec(
+        return RuntimeLaunchPlan(
             image=self.image_ref(slot_cfg),
             command=command,
             env={},
@@ -186,7 +185,6 @@ class KokoroProvider(Provider):
             # coexist.  the Quadlet renderer derives
             # --publish=127.0.0.1:<port>:<port> from spec.port.
             network_mode="",
-            extra_args=[],
         )
 
     # ── Health / infer ─────────────────────────────────────────────────────────

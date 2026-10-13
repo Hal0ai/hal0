@@ -12,9 +12,9 @@ and ``infer()`` probe and forward requests.
 Port target: haloai lib/providers/base.py.
 See PLAN.md §3, ARCHITECTURE.md §Key boundaries ("Providers are stateless").
 
-RuntimeLaunchPlan (alias ``ContainerSpec``) captures everything needed to
-render a Podman Quadlet ``.container`` unit.  Frozen so Providers cannot
-accidentally share mutable state across slots.
+RuntimeLaunchPlan captures everything needed to render a Podman Quadlet
+``.container`` unit.  Frozen so Providers cannot accidentally share mutable
+state across slots.
 """
 
 from __future__ import annotations
@@ -31,11 +31,8 @@ _log = logging.getLogger(__name__)
 class Mount:
     """A single volume mount, with read-only as a first-class flag.
 
-    Replaces the old convention of smuggling ``:ro`` into the container
-    target string.  The renderer calls :meth:`render` to produce the
-    ``--volume`` value, so providers declare intent (``read_only=True``)
-    instead of hand-appending ``:ro`` and hoping the renderer passes it
-    through verbatim.
+    Providers declare intent (``read_only=True``); the renderer calls
+    :meth:`render_quadlet` to produce the Quadlet ``Volume=`` value.
     """
 
     source: str
@@ -46,31 +43,11 @@ class Mount:
     #: read the bind; a harmless no-op where SELinux is disabled. Empty = none.
     selinux: str = ""
 
-    def render(self) -> str:
-        """Return the ``{src}:{dst}[:ro[,z]]`` value for ``--volume=``."""
-        target = self.target
-        read_only = self.read_only
-        # Tolerate a target that already smuggles ``:ro`` (legacy callers /
-        # coerced tuples) so we never emit a doubled ``:ro``.
-        if target.endswith(":ro"):
-            target = target[: -len(":ro")]
-            read_only = True
-        opts: list[str] = []
-        if read_only:
-            opts.append("ro")
-        if self.selinux:
-            opts.append(self.selinux)
-        suffix = (":" + ",".join(opts)) if opts else ""
-        return f"{self.source}:{target}{suffix}"
-
     def render_quadlet(self) -> str:
         """Return the Podman Quadlet ``Volume=`` value: ``src:dst[:ro,z]``.
 
-        Same ``{src}:{dst}`` shape as :meth:`render`, but the mount options are
-        a single colon-separated group (``ro,z``) — Quadlet's ``Volume=`` syntax
-        — rather than the ``--volume=`` argv form (which :meth:`render` already
-        happens to match). Kept a distinct method so the load-bearing shape
-        difference is explicit and the SELinux-on-NFS suppression lives here.
+        The mount options are a single colon-separated group (``ro,z``) —
+        Quadlet's ``Volume=`` syntax.
 
         **NFS gotcha:** an NFS source can't be SELinux-relabelled (``chcon`` →
         ENOTSUP; podman aborts the bind). When the source is on NFS the ``:z`` /
@@ -78,13 +55,8 @@ class Mount:
         and a one-shot warning is logged — the Quadlet file is written once at
         load and can't re-render on a later mount-state change.
         """
-        target = self.target
-        read_only = self.read_only
-        if target.endswith(":ro"):
-            target = target[: -len(":ro")]
-            read_only = True
         opts: list[str] = []
-        if read_only:
+        if self.read_only:
             opts.append("ro")
         if self.selinux:
             from hal0.config.paths import is_nfs
@@ -97,22 +69,7 @@ class Mount:
             else:
                 opts.append(self.selinux)
         suffix = (":" + ",".join(opts)) if opts else ""
-        return f"{self.source}:{target}{suffix}"
-
-    @classmethod
-    def coerce(cls, mount: Mount | tuple[str, str]) -> Mount:
-        """Normalise a ``Mount`` or a legacy ``(src, dst)`` tuple to ``Mount``.
-
-        A tuple whose target ends in ``:ro`` is interpreted as a read-only
-        mount — the renderer stays correct whether callers were migrated to
-        :class:`Mount` or still pass the old tuple shape.
-        """
-        if isinstance(mount, Mount):
-            return mount
-        source, target = mount
-        if target.endswith(":ro"):
-            return cls(source, target[: -len(":ro")], read_only=True)
-        return cls(source, target, read_only=False)
+        return f"{self.source}:{self.target}{suffix}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -186,9 +143,8 @@ class RuntimeLaunchPlan:
     env: dict[str, str] = field(default_factory=dict)
     """Environment variables injected via docker run --env."""
 
-    mounts: list[Mount | tuple[str, str]] = field(default_factory=list)
-    """Volume mounts.  Prefer :class:`Mount`; legacy ``(src, dst)`` tuples are
-    coerced by the renderer (``:ro`` target suffix → ``read_only``)."""
+    mounts: list[Mount] = field(default_factory=list)
+    """Volume mounts (read-only is a first-class :class:`Mount` flag)."""
 
     devices: list[str] = field(default_factory=list)
     """Device paths to pass through, e.g. ["/dev/dri/renderD128"]."""
@@ -208,17 +164,15 @@ class RuntimeLaunchPlan:
     network_mode: str = "host"
     """Docker network mode.  "host" is the default for slot containers."""
 
-    extra_args: list[str] = field(default_factory=list)
-    """Escape hatch: additional docker run arguments appended verbatim."""
+    ipc: str = ""
+    """IPC namespace mode (``podman run --ipc``), e.g. ``"host"``.  Empty keeps
+    podman's private namespace."""
+
+    ulimits: list[str] = field(default_factory=list)
+    """``podman run --ulimit`` values, e.g. ``["memlock=-1"]``."""
 
     health: HealthCheck | None = None
     """Optional ``--health-*`` override (None = inherit the image's HEALTHCHECK)."""
-
-
-#: Backwards-compatible alias.  ``RuntimeLaunchPlan`` is the canonical name
-#: (it carries health + first-class read-only mounts, not just a container
-#: spec); existing imports of ``ContainerSpec`` keep working.
-ContainerSpec = RuntimeLaunchPlan
 
 
 class Provider(ABC):
@@ -302,8 +256,8 @@ class Provider(ABC):
         self,
         slot_cfg: dict[str, Any],
         model_info: dict[str, Any],
-    ) -> ContainerSpec:
-        """Build the ContainerSpec for this slot + model combination.
+    ) -> RuntimeLaunchPlan:
+        """Build the RuntimeLaunchPlan for this slot + model combination.
 
         Called by SlotManager.spawn() to render the systemd unit override.
         """

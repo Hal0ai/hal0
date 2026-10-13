@@ -38,6 +38,15 @@ applying. Add those subsections to a version's section to surface them; see
   `packaging/runner/` and their tests) is gone. The workflow had re-run on a
   dependency bump and moved the published
   `hal0-toolbox-qwen3tts:v1` tag to an image that had not passed the gate.
+- The container launch plan no longer has a free-form `extra_args` field
+  (ADR-0029 phase 4b). ComfyUI's host IPC and FLM's unlimited memlock are now
+  typed fields (`ipc`, `ulimits`) and render the same `PodmanArgs=` lines as
+  before, so slot units are unchanged. Every ComfyUI and FLM load used to log
+  a `container.extra_args_deprecated` warning; that warning is gone. No slot,
+  model or API setting ever reached this field, so no configuration changes.
+  The `ContainerSpec` alias and launch-plan mounts given as `(source, target)`
+  tuples are removed as well.
+
 ### Highlights
 
 - **A fresh runner system (ADR-0028).** Every runner has one name, used for

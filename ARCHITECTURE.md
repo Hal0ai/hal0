@@ -178,7 +178,7 @@ namespace drift.
   podman container per slot. GPU/llama-server slots render via the
   flag-bundle path; `_spec_provider_for` hands NPU (FLM), TTS (Kokoro),
   and image (ComfyUI) slots to their own provider, which builds a
-  `ContainerSpec` rendered into the same unit shape. The profile
+  `RuntimeLaunchPlan` rendered into the same unit shape. The profile
   (`/etc/hal0/profiles.toml`, seeded from `config/schema.SEED_PROFILES`)
   supplies the container image + bench-tuned flags; the slot TOML
   supplies model path, `context_size`, and port.

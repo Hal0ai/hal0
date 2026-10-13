@@ -65,7 +65,7 @@ There is **no** `api/routes/lemonade_proxy.py`.
 ## Providers (`providers/`)
 
 - `providers/container.py` — `ContainerProvider`, the **sole** slot-lifecycle backend. Each slot → systemd template unit `hal0-slot@<name>.service` running `podman run … <image> --model <path> --port <n> <flags>`. Port is loopback-published; dispatcher reaches it via a `kind="remote"` upstream entry. Mounts `/mnt/ai-models` at the identical path (registry GGUFs are symlinks to absolute `/mnt/ai-models/...` targets).
-- `providers/base.py` — `Provider` ABC (stateless) + `ContainerSpec` (frozen).
+- `providers/base.py` — `Provider` ABC (stateless) + `RuntimeLaunchPlan` (frozen).
 - `providers/llama_server.py` — llama.cpp argv/env derivation (Vulkan default, ROCm opt-in) consumed by container profiles.
 - `providers/flm.py` — AMD NPU via host FLM (Strix Halo only).
 - `providers/comfyui.py`, `kokoro.py`, `qwen3tts.py` — image-gen / TTS helpers (driven by `api/routes/v1.py`, not self-managed slots).

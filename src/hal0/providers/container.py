@@ -88,7 +88,7 @@ from hal0.providers._gpu import (
     resolve_image_runtime_uid,
     runtime_lane_for_provider,
 )
-from hal0.providers.base import HealthCheck, Mount, Provider, RuntimeLaunchPlan
+from hal0.providers.base import HealthCheck, Provider, RuntimeLaunchPlan
 from hal0.providers.podman_mutate import PullLineParser
 from hal0.slot_lifecycle_budget import (
     HEALTH_TIMEOUT_S,
@@ -105,10 +105,6 @@ from hal0.slots.naming import (
 )
 from hal0.slots.state import SlotSpawnFailed
 from hal0.system.seam import SeamTimeout, SystemCtlSeam, is_hal0_service_user
-
-# ``ContainerSpec`` is the back-compat alias for ``RuntimeLaunchPlan``; some
-# callers/tests still import the old name from this module.
-ContainerSpec = RuntimeLaunchPlan
 
 #: Existence probe for GPU device nodes (/dev/kfd, /dev/dri/renderD*), used by
 #: the AMD passthrough filter in :meth:`ContainerProvider.container_spec`.
@@ -870,7 +866,7 @@ def _render_quadlet_from_plan(
     # Read-only + SELinux ``:z`` are first-class Mount flags; render_quadlet omits
     # the relabel on NFS sources (chcon ENOTSUP there).
     for mount in plan.mounts:
-        lines.append(f"Volume={Mount.coerce(mount).render_quadlet()}")
+        lines.append(f"Volume={mount.render_quadlet()}")
     for k, v in plan.env.items():
         lines.append(f"Environment={k}={v}")
     # Publish derived from plan.port (declarative). Skipped under host networking
@@ -882,24 +878,19 @@ def _render_quadlet_from_plan(
     # hardcoded port; the slot runs on its own port, so override it declaratively.
     if plan.health is not None:
         lines.extend(plan.health.render_quadlet())
-    # extra_args escape hatch (e.g. ``--ipc=host``, ``--ulimit memlock=-1``):
-    # Quadlet has no typed key for arbitrary ``podman run`` flags, so they pass
-    # through ``PodmanArgs=`` verbatim. DEPRECATED — kept working for one release
-    # so an operator's hand-authored extra_args survives the Quadlet upgrade.
-    podman_args: list[str] = []
-    for extra in plan.extra_args:
-        podman_args.extend(shlex.split(extra))
-    if podman_args:
-        log.warning(
-            "container.extra_args_deprecated",
-            extra={
-                "slot": instance_token,
-                "podman_args": podman_args,
-                "hint": "extra_args is deprecated; move these to a "
-                "hal0-slot@<token>.container.d/ drop-in with typed Quadlet keys",
-            },
-        )
-        lines.append("PodmanArgs=" + " ".join(shlex.quote(a) for a in podman_args))
+    # IPC namespace + ulimits ride ``PodmanArgs=`` for the same reason as
+    # group_add/security_opt above (no native Ipc=/Ulimit= keys — podman 4.x
+    # generators reject keys they do not know). They get their own line, after
+    # the health keys, so ComfyUI's and FLM's units render byte-for-byte as
+    # they did before these flags were typed
+    # (tests/providers/test_quadlet_golden_runtime_args.py).
+    runtime_args: list[str] = []
+    if plan.ipc:
+        runtime_args.append(f"--ipc={plan.ipc}")
+    for limit in plan.ulimits:
+        runtime_args += ["--ulimit", limit]
+    if runtime_args:
+        lines.append("PodmanArgs=" + " ".join(shlex.quote(a) for a in runtime_args))
     # Exec = the in-container argv (after the image). Every token is
     # ``shlex.quote``-d — NOT the old "quote only if it has a space" rule — so a
     # space-less token carrying shell/systemd-special characters (notably a JSON

@@ -193,7 +193,7 @@ _PLANS: dict[str, tuple[RuntimeLaunchPlan, dict[str, Any]]] = {
             command=["python", "main.py"],
             port=8188,
             network_mode="host",
-            extra_args=["--ipc=host"],
+            ipc="host",
         ),
         {},
     ),
@@ -203,32 +203,20 @@ _PLANS: dict[str, tuple[RuntimeLaunchPlan, dict[str, Any]]] = {
             command=["flm", "serve"],
             port=8110,
             network_mode="",
-            extra_args=["--ulimit memlock=-1"],
+            ulimits=["memlock=-1"],
         ),
         {},
     ),
 }
 
 
-# The deprecated `extra_args` escape hatch renders arbitrary `podman run` flags
-# into PodmanArgs=. #1759 allow-lists only the flags hal0's providers emit
+# #1759 allow-lists only the PodmanArgs= flags hal0's renderer emits
 # (--group-add/--security-opt/--ipc/--ulimit), so an out-of-list flag is refused
-# at the root seam — that was the surviving root-exec vector. Pinned here.
+# at the root seam even though the renderer has no way left to produce one.
 def test_out_of_allowlist_podman_args_are_refused_at_the_seam() -> None:
-    """A slot whose extra_args carry a flag outside the provider allow-list
-    (e.g. --privileged) is rejected on the root side after #1759, by design."""
-    from hal0.providers.base import RuntimeLaunchPlan as _Plan
-    from hal0.providers.container import _render_quadlet_from_plan as _render
-
-    plan = _Plan(
-        image="ghcr.io/hal0ai/hal0-toolbox-vulkan:v1",
-        command=["llama-server"],
-        extra_args=["--privileged"],
-        port=8101,
-        network_mode="",
-    )
-    body = _render("chat", plan)
-    assert "PodmanArgs=" in body  # the renderer still emits it (with a warning)
+    """A unit body carrying a flag outside the allow-list (e.g. --privileged)
+    is rejected on the root side, by design."""
+    body = f"{_HEAD}PodmanArgs=--privileged\n"
     err = _rejects(body, "chat")
     assert "PodmanArgs" in err
 

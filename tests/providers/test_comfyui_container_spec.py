@@ -76,11 +76,11 @@ def test_comfyui_spec_matches_live_deployment() -> None:
         assert (f"/mnt/ai-models/comfyui/{sub}", f"/opt/ComfyUI/{sub}") in pairs
     assert any("extra_model_paths.yaml" in m.source for m in spec.mounts)
     # Wan/Hunyuan video models need shared memory.
-    assert "--ipc=host" in spec.extra_args
+    assert spec.ipc == "host"
     # podman 125s on --shm-size with --ipc=host ("cannot set shmsize when
     # running in the host IPC Namespace") — docker ignored the combo. Host
     # /dev/shm (63G on CT105) serves the video models directly.
-    assert not any(a.startswith("--shm-size") for a in spec.extra_args)
+    assert "--shm-size" not in _render_from_spec("img", spec)
     assert set(spec.security_opt) == {
         "seccomp=unconfined",
         "apparmor=unconfined",
@@ -112,7 +112,7 @@ def test_comfyui_extra_model_paths_mount_is_read_only() -> None:
     assert yaml_mount.source == "/mnt/ai-models/comfyui/extra_model_paths.yaml"
     assert yaml_mount.target == "/opt/ComfyUI/extra_model_paths.yaml"
     assert yaml_mount.read_only is True
-    assert yaml_mount.render() == (
+    assert yaml_mount.render_quadlet() == (
         "/mnt/ai-models/comfyui/extra_model_paths.yaml:/opt/ComfyUI/extra_model_paths.yaml:ro"
     )
 
@@ -159,7 +159,7 @@ def test_renderer_host_network_skips_publish_and_keeps_shm() -> None:
     assert not any(line.startswith("PublishPort=") for line in lines), (
         "host networking must not publish ports"
     )
-    # extra_args (--ipc=host) pass through the deprecated PodmanArgs= escape hatch.
+    # The typed ipc field renders through PodmanArgs= (no native Quadlet key).
     assert "PodmanArgs=--ipc=host" in lines
     assert "--shm-size" not in unit
     assert "--security-opt label=disable" in unit

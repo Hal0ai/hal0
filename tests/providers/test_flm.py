@@ -156,7 +156,7 @@ def test_container_spec_does_not_bind_mount_host_flm_tree(
     """
     spec = provider.container_spec(slot_cfg, model_info)
     mount_pairs = list(spec.mounts)
-    host_dirs = [host for host, _ in mount_pairs]
+    host_dirs = [m.source for m in mount_pairs]
     assert "/opt/hal0/flm-ubuntu" not in host_dirs, (
         "host /opt/hal0/flm-ubuntu must NOT be bind-mounted — the image "
         f"is self-contained. Mounts: {mount_pairs!r}"

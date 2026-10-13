@@ -7,7 +7,7 @@ Covers:
     Exec= argv (flags merged from profile, identical-path /mnt/ai-models:ro,z
     mount, loopback PublishPort, numeric GroupAdd, apparmor/seccomp unconfined)
   * the MTP draft bundle (profile layer) and draft device (slot layer)
-  * ContainerProvider.container_spec returns a ContainerSpec with correct
+  * ContainerProvider.container_spec returns a RuntimeLaunchPlan with correct
     image, command, mounts, and security opts
   * load_sync / unload_sync call the right systemctl commands (mocked)
 """
@@ -757,11 +757,10 @@ class TestContainerSpec:
 
     def test_loopback_publish_derived_from_port(self) -> None:
         """Loopback publish is derived from port + empty network_mode by the
-        renderer (declarative) — not hand-rolled into extra_args."""
+        renderer (declarative)."""
         spec = self._build_spec()
         assert spec.port == 8095
         assert spec.network_mode == ""
-        assert not any("127.0.0.1" in a for a in spec.extra_args)
         unit = _render_from_plan("test-slot", spec)
         assert "PublishPort=127.0.0.1:8095:8095" in unit.splitlines()
 

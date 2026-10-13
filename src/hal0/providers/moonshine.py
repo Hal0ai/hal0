@@ -46,7 +46,7 @@ import httpx
 from hal0.config import store as model_store_module
 from hal0.config.paths import model_store_root
 from hal0.errors import Hal0Error
-from hal0.providers.base import ContainerSpec, Mount, Provider
+from hal0.providers.base import Mount, Provider, RuntimeLaunchPlan
 
 log = logging.getLogger(__name__)
 
@@ -296,8 +296,8 @@ class MoonshineProvider(Provider):
         self,
         slot_cfg: dict[str, Any],
         model_info: dict[str, Any],
-    ) -> ContainerSpec:
-        """Build a ContainerSpec for the Moonshine STT slot.
+    ) -> RuntimeLaunchPlan:
+        """Build a RuntimeLaunchPlan for the Moonshine STT slot.
 
         The toolbox image ENTRYPOINT is the FastAPI server, so ``command``
         carries only flags. Flags come from the resolved profile
@@ -395,7 +395,7 @@ class MoonshineProvider(Provider):
         mounts = [model_store_module.mount_for(store_root, read_only=True)]
         mounts.extend(_extra_weight_mounts(model_path, store_root))
 
-        return ContainerSpec(
+        return RuntimeLaunchPlan(
             image=self.image_ref(slot_cfg),
             command=command,
             env={},
@@ -416,7 +416,6 @@ class MoonshineProvider(Provider):
             # other CPU slots; the Quadlet renderer derives
             # --publish=127.0.0.1:<port>:<port> from spec.port.
             network_mode="",
-            extra_args=[],
         )
 
     # ── Health / infer ─────────────────────────────────────────────────────────

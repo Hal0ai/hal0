@@ -39,7 +39,7 @@ def resolved_profile_fits_slot(resolved: Any, cfg_dict: Mapping[str, Any]) -> bo
 
     Pure: no catalog lookup, so a dry run that already holds the definition
     (see :func:`hal0.profiles.resolve_loaded_profile`) can ask the same
-    question without the adoption write ``ProfileCatalog.resolve`` may do.
+    question without re-reading the catalog.
     """
     slot_type = cfg_dict.get("type")
     if slot_type and slot_type not in resolved.supported_slot_types:
@@ -176,14 +176,6 @@ def type_implied_profile(cfg_dict: dict[str, Any]) -> str | None:
         )
         return None
     return candidate if fits else None
-
-
-# RETIRED (spec-hw-slot-ownership §2/§3): the model-driven preferred-runner
-# adoption (``preferred_runner_for`` + ``apply_preferred_runner``) is gone — the
-# runner is the slot's own ``SlotConfig.binary`` field, set by the operator, and
-# the image resolves from ``slot.image_pin or RUNNER_IMAGES[slot.binary]`` (or
-# the HW-gated default) at launch. Only the generic device/backend fit predicate
-# below survives (reused by the §4 fit-check).
 
 
 def runner_fits_slot(runner_key: str, cfg_dict: dict[str, Any]) -> bool:

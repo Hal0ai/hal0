@@ -8,13 +8,13 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from hal0.providers.base import ContainerSpec
+from hal0.providers.base import Mount, RuntimeLaunchPlan
 from hal0.providers.container import ContainerProvider, _render_quadlet_from_plan
 
 _TEST_RUNTIME = "/usr/bin/docker"
 
 
-def _flm_spec(**overrides: Any) -> ContainerSpec:
+def _flm_spec(**overrides: Any) -> RuntimeLaunchPlan:
     base = dict(
         image="ghcr.io/hal0ai/hal0-toolbox-flm:v1",
         command=[
@@ -30,22 +30,22 @@ def _flm_spec(**overrides: Any) -> ContainerSpec:
         env={
             "LD_LIBRARY_PATH": "/opt/fastflowlm/lib:/opt/xilinx/xrt/lib:/usr/lib/x86_64-linux-gnu"
         },
-        mounts=[("/var/lib/hal0/.config/flm/models", "/var/lib/hal0/.config/flm/models")],
+        mounts=[Mount("/var/lib/hal0/.config/flm/models", "/var/lib/hal0/.config/flm/models")],
         devices=["/dev/accel/accel0", "/dev/dri/renderD128"],
         cap_add=[],
         security_opt=["apparmor=unconfined", "seccomp=unconfined"],
         group_add=["993"],
         port=8088,
         network_mode="",
-        extra_args=["--ulimit memlock=-1"],
+        ulimits=["memlock=-1"],
     )
     base.update(overrides)
-    return ContainerSpec(**base)
+    return RuntimeLaunchPlan(**base)
 
 
 def _render_from_spec(
     token: str,
-    spec: ContainerSpec,
+    spec: RuntimeLaunchPlan,
     *,
     runtime_bin: str | None = None,
     publish_host: str = "127.0.0.1",
@@ -81,7 +81,7 @@ class TestRenderUnitFromSpec:
         lines = unit.splitlines()
         # Exec= is the in-container argv only (no image / runtime preamble).
         assert _exec(unit) == list(spec.command)
-        # extra_args ``--ulimit memlock=-1`` passes through PodmanArgs= verbatim.
+        # The typed ulimit renders through PodmanArgs= (no native Quadlet key).
         assert "PodmanArgs=--ulimit memlock=-1" in lines
         assert any(line.startswith("Environment=LD_LIBRARY_PATH=") for line in lines)
 
@@ -101,7 +101,7 @@ class TestRenderUnitFromSpec:
         assert "GroupAdd=" not in unit
 
     def test_loopback_publish_derived_from_spec_port(self) -> None:
-        """PublishPort is rendered declaratively from spec.port, not extra_args."""
+        """PublishPort is rendered declaratively from spec.port."""
         unit = _render_from_spec("npu", _flm_spec(), runtime_bin=_TEST_RUNTIME)
         assert "PublishPort=127.0.0.1:8088:8088" in unit.splitlines()
 
