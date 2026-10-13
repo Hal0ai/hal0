@@ -128,11 +128,10 @@ Exactly one of `model_id` / `hf_repo` is required (`422` otherwise). The
 endpoint classifies the model's capability (chat, embed, rerank, stt, tts,
 or image), fits it to *this host's* cached hardware snapshot the same way
 slot creation's device auto-pick does, and clones the closest seed
-profile — including upgrading a chat model to the `moe` seed instead of the
-flat `chat` fallback when its architecture (or `mtp`/`a3b` tags) says MoE.
-A HuggingFace repo also picks up the recommended GGUF variant's quant and,
-when HF reports parsed GGUF metadata for the repo, its architecture and
-native context length.
+profile.
+A HuggingFace repo also picks up the recommended GGUF variant and, when HF
+reports parsed GGUF metadata for the repo, its architecture and native context
+length; they feed the draft's `intent` headline.
 
 The response wraps a portable `.hal0profile.json` envelope (the same shape
 a profile export produces) plus `warnings` (anything it had to fall back
@@ -144,9 +143,10 @@ on) and `sources` (where each fact came from):
     "kind": "hal0.profile",
     "name": "qwen3-4b-q4_k_m",
     "profile": {
-      "flags": "-fa on --jinja -b 2048 -ub 512",
+      "flags": "-fa auto -b 2048 -ub 512",
+      "vision": "auto",
+      "mtp": "auto",
       "cloned_from": "chat",
-      "quant": "Q4_K_M",
       "intent": "Qwen3 4B · qwen3 · 32K ctx · chat · gpu-rocm"
     }
   },
@@ -278,9 +278,9 @@ s.backup(d); d.close(); s.close()"
 ## The registry on disk
 
 Registry entries are metadata records — id, display name, path, size,
-SHA-256, capabilities, and the model's own launch defaults (including an
-optional preferred profile) — see
-[Choose models](/docs/guides/choose-models), which covers how those launch
-defaults now live on the model instead of the slot.
+SHA-256, capabilities, and facts about the file (chat template, whether it has
+MTP heads, whether its template works with `--jinja`). A model row holds no
+tuning: the context window, flags and thinking default live on a profile — see
+[Choose models](/docs/guides/choose-models).
 The registry is the source of truth the dispatcher resolves model ids
 against; the actual weights live in your configured model store.

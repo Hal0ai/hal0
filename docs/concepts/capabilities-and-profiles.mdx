@@ -1,6 +1,6 @@
 ---
 title: Capabilities & profiles
-description: How hal0 separates what a slot does (capabilities), how it's tuned (profiles), and where it runs (the slot's own hardware grid) — and why that last split changed in v1.0.
+description: How hal0 separates what a slot does (capabilities), how it's tuned (profiles, which hold the whole tune), and where it runs (the slot's own hardware grid).
 sidebar:
   order: 30
 ---
@@ -8,11 +8,11 @@ sidebar:
 import { Aside, Card, CardGrid, LinkCard } from '@astrojs/starlight/components';
 
 Three distinct ideas shape every slot in hal0: **capabilities** describe what
-you want a slot to do, **profiles** describe the model-behavior tune it runs
-with, and the **slot itself** describes where it runs and how big its context
-window is. That last split is new in v1.0 — profiles used to carry hardware
-intent too. Getting the boundary right matters, because it's now enforced,
-not just a naming convention.
+you want a slot to do, **profiles** describe the whole tune it runs with
+(flags, context window, thinking default, vision, MTP), and the **slot itself**
+describes where it runs. The model row sits beside them and records only
+facts about its file. Each setting has exactly one owner, and the boundary is
+enforced at every write path, not just a naming convention.
 
 ## Capabilities: what a slot does
 
@@ -53,52 +53,78 @@ capability resolves to an ordinary [slot](/docs/concepts/slots) that the
 SlotManager runs as a podman container.
 </Aside>
 
-## Profiles: how a slot is tuned
+## Profiles: the whole tune
 
-A **profile** is a reusable, **device-agnostic** tune template. It bundles
-model-behavior flags — sampler settings, KV-cache type and quantization,
-batch/ubatch size, reasoning mode, jinja/chat-template behavior — and nothing
-about *placement*. As of v1.0, a profile carries **no container image ref and
-no placement information**: no device, no GPU index, no thread count, no
-`-c`/`--ctx-size` (that flag is on hal0's own managed-args denylist and can
-never appear in a profile's flags). All of that lives on the
-[slot](/docs/concepts/slots), in the hardware/model write boundary.
+A **profile** is a reusable, device-agnostic tune. It holds everything that
+decides *how* a model runs in a slot, and nothing about *where*:
 
-The one placement-adjacent thing a profile *can* carry is an optional
-**runtime** — a `RUNNER_IMAGES` registry key (`runner`), never a raw image
-ref or tag. A key survives an image/tag update, which is exactly the rot
-that got the old `image` field removed from profiles in the first place. See
-"Profiles can carry a runtime" below.
+| Field | Meaning |
+|---|---|
+| `flags` | Free llama-server flags: KV-cache types, batch and ubatch size, sampling, reasoning, `--parallel`. |
+| `ctx_size` | The context window in tokens (128 to 16,777,216). Unset means the model's native window, capped at 32768, or 8192 when the model reports none. |
+| `enable_thinking` | The request-time reasoning default for requests the slot serves. A request can always override it; unset means off unless the request asks. |
+| `vision` | `auto` loads the model's multimodal projector when it has one; `off` never does. |
+| `mtp` | `auto` drafts with the model's MTP heads when it has them and the runner supports it; `off` never does. |
+| `runner` | Optional runtime, a `RUNNER_IMAGES` registry key. See "Profiles can carry a runtime" below. |
+| `intent`, `cloned_from` | Informational: the card headline, and the profile this one was copied from. |
 
-This is a genuine v1.0 change, not a renaming exercise: pre-1.0 profiles were
-identity-bound to a backend (`rocm`, `vulkan`, `cuda`) and carried an image.
-The 1.0 seed catalog is organized by **workload** instead, so the same profile
-works regardless of which device a slot targets:
+A profile carries no container image ref and no placement: no device, GPU
+index, thread count or layer count. All of that lives on the
+[slot](/docs/concepts/slots#who-owns-what-slot-model-profile). The context
+window is the profile's `ctx_size` field, not a flag: `--ctx-size` is on
+hal0's managed-args denylist and can never appear in a profile's `flags`.
+
+The model holds only facts about its file (path, architecture, native
+context, chat template, projector, whether it has MTP heads). A slot names
+exactly one profile. To run one model with different tuning — another
+context size, other sampling, a different KV-cache type — make a second
+profile and point another slot at it. No tune lives on the model, so two
+slots that share a file never conflict.
+
+```sh
+hal0 profile create agent-32k --from agent --ctx-size 32768
+hal0 profile edit agent-32k --flags "-fa auto -b 2048 -ub 512 --temp 0.6" --thinking
+hal0 slot edit scratch --profile agent-32k
+hal0 slot restart scratch
+```
+
+`hal0 profile list` and `hal0 profile show <name>` read the catalog.
+`hal0 profile create <name> --from <profile>` duplicates a seed or a custom
+profile and applies any other options on top; `hal0 profile edit <name>`
+changes a custom profile (`--flags`, `--ctx-size` / `--clear-ctx-size`,
+`--thinking` / `--no-thinking` / `--clear-thinking`, `--vision`, `--mtp`,
+`--runner`, `--intent`). Slots running an edited profile pick the change up
+at their next restart. A profile that a slot still names can't be deleted
+(`profiles.in_use`); the dashboard's Profiles tab shows which slots use each
+one.
+
+The seed catalog is organized by **workload**, so the same profile works
+regardless of which device a slot targets:
 
 | Profile | Purpose |
 |---|---|
 | `chat` | Minimal generic chat — fallback for unknown models |
-| `embedding` | Pooled embeddings (`--embedding`, wide ubatch) |
-| `reranking` | Reranking (`--reranking`) — always a separate instance from `embedding` |
+| `agent` | The agent workload: deterministic sampling, reasoning off, vision off, 64K context (`ctx_size` 65536 — the bundled Hermes agent needs at least 64,000) |
+| `utility` | The utility workload: generic chat flags, 64K context |
+| `coding` | Code generation: higher temperature, reasoning off, vision off |
+| `embedding` | Pooled embeddings (`--embedding`, wide ubatch), 4096 context |
+| `reranking` | Reranking (`--reranking`), 4096 context — always a separate instance from `embedding` |
 | `cpu-chat` | CPU-safe chat |
-| `flm` | FLM inference on the NPU (chat/embed/STT) |
+| `flm` | FLM inference on the NPU (chat/embed/STT), 16384 context |
 | `kokoro` | Text-to-speech (Kokoro), CPU |
 | `qwen3-tts` | Text-to-speech (Qwen3-TTS), GPU |
 | `moonshine` | Speech-to-text (Moonshine), CPU |
 | `comfyui` | Image generation (ComfyUI) |
-| `brain` | The hal0-brain steward workload (small tool-routing model) |
+| `brain` | The hal0-brain steward workload (small tool-routing model), 64K context |
 
 `embedding` and `reranking` are deliberately separate profiles/slots rather than
 one server handling both — combining `--embedding` and `--reranking` on a
 single llama-server instance produces all-zero scores.
 
-That's the whole shipped seed core — ten profiles, one per runtime family
-plus the generic llama-server workloads. Five workload variants the
-1.0/1.1 catalog seeded (`chat-long-context`, `dense`, `moe`, `thinking`,
-`coding`) were demoted off
-the seed list; an existing install keeps them as ordinary custom profiles,
-and a fresh install can pull them back in as published addons — see
-[Profile addons](/docs/reference/profile-addons).
+Every slot hal0 ships names one of these seeds. Further workload variants
+(`chat-long-context`, `dense`, `moe`, `thinking`) are published as addons that
+you can import as custom profiles — see [Profile
+addons](/docs/reference/profile-addons).
 
 ### Seed profiles are virtual
 
@@ -112,10 +138,12 @@ pinned to a stale on-disk copy.
 
 Seed profiles are immutable through the API too — updating or deleting a
 profile whose name matches a seed is rejected outright. **The only way to
-customise one is to clone it**: the dashboard's Profiles tab turns "Edit" into
-"Edit a copy" for a seed, forking a `<seed>-custom` profile (with
-`cloned_from` recording the original) that you're then free to tune; Delete
-stays disabled on the seed itself.
+customise one is to clone it**: `hal0 profile create <new-name> --from
+<seed>`, the dashboard's slot drawer ("Duplicate & edit" beside the profile
+picker), or the Profiles tab, where "Edit" becomes "Edit a copy" for a seed
+and forks a `<seed>-custom` profile (with `cloned_from` recording the
+original) that you're then free to tune. Delete stays disabled on the seed
+itself.
 
 Each profile is also classified into a **runtime family** (llama-server,
 FLM, Kokoro, Qwen3-TTS, or ComfyUI) that determines which slot types it can
@@ -128,13 +156,11 @@ host — the same sharing model [stacks](/docs/concepts/stacks) use. An
 envelope naming a runtime this host does not carry still imports: the unknown
 key is stripped and the profile lands with no runtime pinned, reported as
 `runner_stripped` on both the dry run and the commit. Importing never blocks
-on hardware or registry differences.
+on hardware or registry differences. Envelopes use profile schema 2; an
+envelope exported before profile-centric config (schema 1) is refused whole
+rather than imported with fields silently dropped.
 
-## Where hardware placement actually lives now: the slot
-
-This is the section that changed most in v1.0, so it's worth stating
-precisely, since a plausible-but-wrong reading — "profiles are entirely
-inert" — undersells one real nuance below.
+## Where hardware placement lives: the slot
 
 A slot carries its own **device** field — `gpu-rocm`, `gpu-vulkan`,
 `gpu-cuda`, `cpu`, or `npu` — plus `gpu_index`, `n_gpu_layers`, `threads`, and
@@ -142,32 +168,13 @@ A slot carries its own **device** field — `gpu-rocm`, `gpu-vulkan`,
 slot's **Runtime**; `image_pin` is a debug-only escape hatch for a full
 image override, not a normal way to reach a shipped runtime). This "hardware
 grid" is what the slot owns exclusively, validated at config-load time so a
-typo fails fast. Legacy configs that still set the old overloaded `backend`
-field are auto-promoted to `device` on load, so old slot TOMLs keep working.
-
-A `ProfileConfig` still carries two optional fields, `device_class` and
-`backend`, for back-compat — but as of v1.0 they are **inert match-only fit
-hints**, not a source of runtime configuration:
-
-- None of the 10 shipped seed profiles set either field — they're
-  device-agnostic by construction.
-- When set (on a hand-authored or pre-1.0 profile), `device_class` is
-  consulted only as a **fit-check** signal (surfacing a
-  `profile.device_class_mismatch` warning if it disagrees with the slot's
-  actual device) and `backend` is consulted only as a **fallback** when a
-  slot has no `device` set at all — the normal 1.0 case (a slot with a real
-  `device`) always overrides both fields with `device_to_backend(slot.device)`.
-- GPU device-node passthrough — which physical GPU nodes actually get mapped
-  into the container — is decided from the slot's `device` alone, not from a
-  profile's fields. Earlier code paths that still read the profile here have
-  been fixed; a CPU-targeted slot no longer requests real GPU device nodes
-  just because its profile happened to carry a stale `device_class`.
+typo fails fast. Which physical GPU device nodes get mapped into the
+container is decided from the slot's `device` alone.
 
 <Aside type="tip">
-If you're auditing a config: the slot's `device` is authoritative. A
-profile's `device_class`/`backend`, if present at all, only matter when the
-slot itself has nothing set — treat them as legacy fallback plumbing, not as
-something you'd deliberately configure on a new install.
+If you're auditing a config: the slot's `device` is authoritative, and a
+profile never contributes hardware. The only placement-adjacent thing a
+profile can carry is its optional `runner`, described below.
 </Aside>
 
 ![The Profiles tab in the hal0 dashboard showing seed profile cards with bench metrics and intent chips](/screenshots/profiles-tab.png)
@@ -230,11 +237,12 @@ the slot's `binary` switches to the profile's runtime key, and — for a
 single-lane runtime — its `device` follows to the matching lane (a
 multi-lane runtime like Standard only flips `binary` and leaves
 the current lane alone). The slot drawer's Profile row previews this before
-you save. The same rule governs swapping a slot onto a different model whose
-preferred profile carries a runtime. Either path is blocked only when it's
-physically impossible — e.g. picking a ROCm-only runtime on a host with no
-`/dev/kfd` — which fails with a plain-language error before anything is
-written, rather than partially applying.
+you save, and `hal0 slot create --profile <profile>` applies the same rule at
+create time. Swapping the slot's model keeps its profile, so it never changes
+the runtime. The apply is blocked only when it's physically impossible — e.g.
+picking a ROCm-only runtime on a host with no `/dev/kfd` — which fails with a
+plain-language error before anything is written, rather than partially
+applying.
 
 ### Unsupported quantizations
 
@@ -248,7 +256,7 @@ Use a plain GGUF build of the same model. Reference:
 
 ## Flag precedence: how a launch command is assembled
 
-A container slot's actual launch command is built from several layers,
+A container slot's actual launch command is built from four layers,
 concatenated in a fixed order and then deduplicated **last-wins** per flag
 (short and long spellings of the same flag — `-b`/`--batch-size`,
 `-ngl`/`--n-gpu-layers`, `-ctk`/`--cache-type-k`, and friends — are treated as
@@ -256,74 +264,67 @@ the same key; `--lora`, `--draft-model`, and `--override-kv` are appended,
 never deduped, since llama-server treats repeats of those additively):
 
 1. **base** — `--host`/`--port`/`--model`/`--alias`/`--ctx-size`, always
-   present. Context size here is the model's resolved window, capped by the
-   slot's own ceiling — see the "context size is a ceiling, not an
-   override" section of [Slots](/docs/concepts/slots).
-2. **profile** — the profile's `flags`.
-3. **model defaults** — the registry model's `defaults.extra_args` (plus
-   `-ngl` from the slot, not the model), with the model's **family default**
-   (next section) prepended.
-4. **chat template / mmproj** — `--chat-template-file`, `--mmproj`, resolved
-   from the model.
-5. **slot's own hardware grid** — `device`/`n_gpu_layers`/`threads`, always
-   slot-owned, always applied here.
-6. **`[server].extra_args`** — hand-authored on the slot itself, always wins last.
+   present. The context size is the profile's `ctx_size`, else the model's
+   native window capped at 32768, else 8192 — see "The context window comes
+   from the profile" in [Slots](/docs/concepts/slots#who-owns-what-slot-model-profile).
+2. **model** — facts about the file: family quirks, `--jinja` (added when the
+   runner supports it, unless the model's `jinja` fact is `false` or the
+   profile is an embedding or reranking one), `--chat-template-file`, and
+   `--mmproj` (only when the profile's `vision` is `auto`).
+3. **profile** — the MTP draft bundle when MTP is in effect, then the
+   profile's `flags`. Because the flags come second, a profile's own
+   `--spec-draft-*` values win over the bundle.
+4. **slot** — the hardware grid: `-ngl` and `--threads` from
+   `n_gpu_layers`/`threads`, `--metrics`, and, when MTP is in effect,
+   `--spec-draft-device` derived from the slot's own device.
 
 The slot Edit drawer's **resolved command** panel shows the fully assembled
-argv with a per-flag provenance badge, backed by `GET /api/slots/{name}/resolved`
-— the same resolver drives both this preview and the actual launch, so what
-you see is what runs.
+argv with a per-flag provenance badge (`base`, `model`, `profile` or `slot`),
+backed by `GET /api/slots/{name}/resolved` — the same resolver drives both
+this preview and the actual launch, so what you see is what runs.
 
-### `FAMILY_DEFAULTS` — pinning quirky model architectures
+Each layer owns its flags. A profile's `flags` are screened when the profile
+is saved and again at launch: hardware flags, hal0-managed flags, model-fact
+flags, host-owned flags and bare positional arguments are refused, in every
+spelling llama.cpp accepts. See [Edit
+configuration](/docs/guides/configure#launch-flags-are-screened-on-the-profile)
+for the list.
 
-Some model architectures need flags no profile should reasonably have to
-know about. `FAMILY_DEFAULTS` is a small, code-only table — virtual like the
-seed profiles, never persisted — keyed on model family (detected from a token
-scan of the model's id/filename) that layers architecture-specific overrides
-into the model-defaults layer above. Today it has one tenant:
+### Family quirks
 
-```
-gemma → -ctk f16 -ctv f16 --cache-reuse 0
-```
+Some model architectures need flags no profile should reasonably have to know
+about. The model layer carries a code-shipped table of per-family overrides
+(`config/data/family_defaults.toml`, keyed by architecture) that is prepended
+to the model layer. It ships empty today, so no family currently adds flags;
+a family-specific recipe is a profile you pick.
 
-Gemma's interleaved sliding-window attention regresses under quantized KV
-cache, so **any** Gemma model on **any** q8-KV profile is pinned back to f16
-KV with cache-reuse disabled automatically — no per-slot opt-in needed.
+## MTP: the model has heads, the profile decides
 
-## MTP: a model × slot decision
+MTP (multi-token prediction / speculative decoding) takes two inputs:
 
-MTP (multi-token prediction / speculative decoding) is a **model capability**
-as of v1.0, not something a profile turns on. It's resolved from two
-independent signals:
+1. **Model: does the file have MTP heads?** An explicit `mtp` fact on the
+   model row wins in either direction. Left unset, the registry `mtp` tag
+   decides. There is no filename-based sniff.
+2. **Profile: `mtp = "auto"` or `"off"`.** `auto` (the default) drafts when
+   the model has heads *and* the launching runner declares MTP support; `off`
+   never drafts. MTP is also never used in embedding or reranking mode.
 
-1. **Model eligibility** — a model is MTP-eligible if the registry `mtp` tag
-   is set, or an `MTP` marker appears in its id/filename as a delimited token
-   (e.g. `...-mtp-...`), gated by the launching runner's declared MTP support.
-2. **Slot override** — a slot's `mtp` field is a tri-state: `true` forces MTP
-   on, `false` forces it off, and unset (Auto) defers to model eligibility.
-
-A profile's own `mtp` field still exists on disk for API/round-trip
-back-compat, but it is **informational only** — it is not read by
-`resolve_profile_flags()` or the launch path at all. Whether a launch uses MTP
-is a property of the model you pair the profile with, not something the
-profile itself switches on.
-
-Resolution: an explicit slot override always wins. Under Auto, MTP is enabled
-only when the model is eligible. Forcing MTP on a model with no MTP layers at
-all makes llama-server refuse to start, so only use the override for models
-you know are genuinely MTP-capable.
+A slot has no MTP setting. To stop one slot drafting, give it a profile with
+`mtp = "off"`. Under `auto`, a model without heads launches without a draft
+(hal0 logs `mtp.auto_off_model_ineligible`), so there is no way to force
+llama-server into the "model doesn't contain MTP layers" refusal.
 
 <Aside type="tip">
-When MTP is effectively on, hal0 merges a tuned speculative-decoding flag
-bundle into the launch command as **defaults only** — any `--spec-draft-*`
-flag set explicitly upstream of it wins over the bundle. The bundle's draft
-device tracks the slot's own device rather than a hardcoded value.
+When MTP is in effect, hal0 merges a tuned speculative-decoding flag
+bundle into the profile layer as **defaults only** — any `--spec-draft-*`
+flag in the profile's own `flags` wins over the bundle. The bundle's draft
+device (`--spec-draft-device`) is set by the slot layer from the slot's own
+device, and a profile may not set it.
 </Aside>
 
-In the dashboard, the slot Edit drawer (and each stack row) exposes this as a
-three-way Auto/On/Off control with a live "Auto · active/inactive" hint.
-
-![The per-slot MTP control — Auto follows model eligibility, or force it On/Off; the reason line explains why the current state applies](/screenshots/mtp-control.png)
+In the dashboard, the MTP choice is the **MTP** row of the profile form
+(Auto or Off). The model drawer shows only the **MTP heads** file fact, and
+the slot drawer and stack rows have no MTP control.
 
 ## The NPU trio
 
@@ -346,7 +347,7 @@ the NPU container isn't dispatchable, trio requests degrade with a clear
 ## Where to go next
 
 <CardGrid>
-  <LinkCard title="Slots" href="/docs/concepts/slots" description="The lifecycle these profiles configure, and the write-boundary partition in full." />
+  <LinkCard title="Slots" href="/docs/concepts/slots" description="The lifecycle these profiles configure, and who owns what between slot, model and profile." />
   <LinkCard title="Stacks" href="/docs/concepts/stacks" description="Bundling slot + profile + model picks into one portable, applyable unit." />
   <LinkCard title="Strix Halo" href="/docs/concepts/strix-halo" description="The iGPU + NPU + unified memory behind the devices." />
   <LinkCard title="Architecture" href="/docs/concepts/architecture" description="How the orchestrator fits under the API." />

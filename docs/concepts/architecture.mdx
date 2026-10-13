@@ -93,9 +93,9 @@ real lifecycle events, not systemd snapshots.
 
 Slots are the unit hal0 reasons about everywhere: the dispatcher routes to
 them, the GPU arbiter coordinates exclusive GPU access between them, and
-profiles configure how they run. As of v1.0, the slot is also the sole owner
-of *where* a model runs and *how much context it gets* — a real split from
-profiles, covered below and in [Slots](/docs/concepts/slots).
+profiles configure how they run. A slot owns *where* a model runs; the profile
+it names owns *how* it runs, including the context window. That split is covered
+below and in [Slots](/docs/concepts/slots#who-owns-what-slot-model-profile).
 
 ## Capabilities & profiles: what a slot does, and how
 
@@ -104,22 +104,22 @@ A slot's behavior is shaped by two more ideas that sit on top of it:
 - A **capability** groups related slots under one operator-facing idea
   (`embed`, `voice`, `img`, `vision`) so you configure a concept, not raw
   slot fields.
-- A **profile** is a device-agnostic, reusable *tune template* — sampler
-  settings, KV-cache policy, batch size, reasoning mode. As of the v1.0
-  hardware-ownership split, a profile carries **no image ref and no hardware
-  placement** — that's the slot's job. It may optionally name a **Runtime**
-  by registry key (never an image ref); applying such a profile switches the
-  slot's runtime — and, for a single-lane runtime, its device — on save.
+- A **profile** is a reusable, complete *tune*: llama-server flags (sampler
+  settings, KV-cache types, batch size), the context window (`ctx_size`), the
+  reasoning default, whether the model's vision projector loads, and whether
+  MTP drafts. It carries no placement: device, GPU layers and threads belong
+  to the slot. It may optionally name a **Runtime** by registry key (never an
+  image ref); applying such a profile switches the slot's runtime, and for a
+  single-lane runtime its device, on save.
 
 See [Capabilities & profiles](/docs/concepts/capabilities-and-profiles) for
-the full model, including the write-boundary partition between what the slot
-owns and what the model owns.
+the full model, including how the slot, the model and the profile split
+ownership of a launch.
 
 ## Stacks: applying a slot set as one unit
 
 Editing slots one at a time works, but swapping an entire lineup — the
-`agent` model, the `utility` model, their profiles, MTP settings — is
-tedious to do by hand. A **stack** is a single `[stack.<slug>]` entry in
+`agent` model, the `utility` model, their profiles — is tedious to do by hand. A **stack** is a single `[stack.<slug>]` entry in
 `stacks.toml` that bundles a set of slot assignments together with the
 profiles and model metadata they reference, so the whole bundle is portable
 to another machine.
@@ -218,7 +218,7 @@ OpenAI talks to hal0.
 ## Where to go next
 
 <CardGrid>
-  <LinkCard title="Slots" href="/docs/concepts/slots" description="The lifecycle, single-flight dispatch, and the write-boundary partition." />
+  <LinkCard title="Slots" href="/docs/concepts/slots" description="The lifecycle, single-flight dispatch, and the slot / model / profile ownership split." />
   <LinkCard title="Capabilities & profiles" href="/docs/concepts/capabilities-and-profiles" description="How capabilities, profiles, and devices shape a slot." />
   <LinkCard title="Stacks" href="/docs/concepts/stacks" description="Applying a whole slot lineup as one declarative unit." />
   <LinkCard title="Strix Halo" href="/docs/concepts/strix-halo" description="The reference hardware and why it's the tuning target." />

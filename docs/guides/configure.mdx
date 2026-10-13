@@ -118,40 +118,52 @@ Reads `meta.schema_version`, runs the registered migration chain, and
 advanced**. If the config is already current (or absent), nothing is
 written.
 
-<Aside type="caution">
-`hal0 update` runs this same migration chain automatically as part of an
-apply — see [Update and roll back](/docs/guides/update-and-rollback) for
-a **destructive** step in that same chain: on a pre-v1.0 box
-(`schema_version < 2`), the updater wipes and reseeds `profiles.toml`.
-Read that guide before your first v1.0 update if you've hand-edited
-custom profiles.
-</Aside>
+## Who owns which setting
 
-## Hardware ownership moved: slot, not profile
+A launch is described by three objects. A **model** row holds facts about its
+file: path, architecture, native context window, chat template, multimodal
+projector, and whether the file has MTP heads. A **profile** holds every tune:
+free llama-server flags, `ctx_size`, `enable_thinking`, `vision` (`auto` or
+`off`) and `mtp` (`auto` or `off`). A **slot** holds placement (`device`,
+`gpu_index`, `n_gpu_layers`, `threads`, `binary`, `image_pin`) and names its
+model and its profile. See
+[Slots](/docs/concepts/slots#who-owns-what-slot-model-profile) for how the
+launch command is assembled from the three.
 
-If you're carrying config from a pre-v1.0 install: profiles used to own
-device/context-size selection. As of v1.0 the **slot** owns its hardware
-grid directly — `device`, `n_gpu_layers`, `threads`, `binary`, and the
-`image_pin` escape hatch all live on `SlotConfig`, not the profile. A
-profile now only supplies flags/image template; the slot supplies model,
-context, and port. Legacy per-slot fields (`parallel`, `chat_template`,
-`[model].n_gpu_layers`, `[server].extra_args`) are marked inert at launch
-and folded into the bound *model's* own defaults by a one-shot migrator —
-see [Choose models](/docs/guides/choose-models).
+A slot write that carries a tuning key is refused with
+`slot.tuning_key_denied`: `[model].context_size` / `ctx_size`, `parallel`,
+`chat_template`, `workers`, `mtp`, `enable_thinking`, `vision`, or
+`[server].extra_args`. Set the window and flags with `hal0 profile
+create|edit` and point the slot at that profile. A slot file that still
+carries one of those keys fails to load with `slot.unconverted`; `hal0 update`
+converts such files once, automatically, and `hal0 profile migrate` previews
+the conversion (see [Update and roll
+back](/docs/guides/update-and-rollback#profile-centric-config-conversion)).
 
-## `[server].extra_args` is screened everywhere
+## Launch flags are screened on the profile
 
-The freeform `[server].extra_args` string on a slot (llama-server CLI
-passthrough — sampling params, `--jinja`, `--metrics`, cache/quant
-tuning) is checked against a denylist of hardware and hal0-managed flags
-(`--n-gpu-layers`/`-ngl`, `--device`/`-dev`, `--threads`/`-t`, `--model`,
-`--ctx-size`, `--host`, `--port`, `--alias`) before it's written. This
-screen now runs on **every** write path — the HTTP config route, `hal0
-slot create`/`edit`, and the stacks-apply engine — not just the API route
-it originally covered. A blocked flag fails the write outright with a
-`slot.hardware_flag_denied` or `slot.managed_arg_denied` error explaining
-where that setting actually belongs (the slot's hardware grid, or the
-model's own launch defaults) rather than being silently stripped.
+A profile's `flags` text is checked when the profile is saved (the HTTP route,
+profile import and `hal0 profile create|edit`) and again at every launch. The
+check refuses, in every spelling llama.cpp accepts:
+
+- slot hardware flags (`-ngl`/`--n-gpu-layers`, `-dev`/`--device`,
+  `-t`/`--threads`), which belong on the slot (`slot.hardware_flag_denied`);
+- hal0-managed flags (`--model`, `--host`, `--port`, `--alias`, `--ctx-size`),
+  where the context window is the profile's `ctx_size` field
+  (`slot.managed_arg_denied`);
+- model-fact flags (`--jinja`, `--chat-template*`, `--mmproj`, `--no-mmproj`),
+  plus `--spec-draft-device` and `--mmproj-device`, which hal0 sets from the
+  model and the slot (`profiles.model_fact_flag_denied`);
+- host-owned flags: remote model fetches such as `-hf` and `--model-url`, host
+  file reads and writes such as `--api-key-file` and `--log-file`, and
+  listener, auth and TLS settings (`slot.host_owned_flag_denied`);
+- bare positional arguments (`slot.positional_arg_denied`);
+- `--reasoning-format none` (`slot.reasoning_format_none_denied`).
+
+A slot's `[server].env` is screened the same way: it may not set any
+`LLAMA_ARG_*` variable, nor `LLAMA_API_KEY`, `HF_TOKEN` or
+`MTMD_BACKEND_DEVICE`. Those are llama-server options, so they belong on the
+profile (`slot.llama_env_denied`).
 
 ## Atomic writes
 
@@ -162,6 +174,6 @@ pattern so a write is either fully applied or not at all.
 ## See also
 
 - [Configuration schema reference](/docs/reference/config-schema) — every key in `hal0.toml` and the per-slot files.
-- [Manage slots](/docs/guides/manage-slots) — the slot-owned hardware grid in practice.
-- [Update and roll back](/docs/guides/update-and-rollback) — how updates preserve `/etc/hal0`, and the profiles.toml reseed warning.
+- [Manage slots](/docs/guides/manage-slots) — placement on the slot, and picking its model and profile.
+- [Update and roll back](/docs/guides/update-and-rollback) — how updates preserve `/etc/hal0`, and the profile-centric conversion.
 - [Connect MCP servers](/docs/guides/connect-mcp) — the `mcp-servers/<id>.toml` files.

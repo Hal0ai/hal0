@@ -163,6 +163,44 @@ Settings → Updates page shows next to the channel.
 
 </Steps>
 
+## Profile-centric config conversion
+
+Slot files carry placement only; every tune (flags, context window, thinking
+default, vision, MTP) lives on a profile ([ADR-0029](/docs/adr/0029-profile-centric-config)).
+`hal0 update` converts an older install once, automatically, after the
+runner-system conversion; `hal0 serve` also runs it when it starts `hal0-api`,
+before config is validated. The conversion gives every slot the profile that
+keeps what it launches today, generating one where needed, and reports every
+value that never reached a launch (those are dropped, never applied). Before it
+writes anything it backs up every file it changes, plus the model tuning rows,
+to `/var/lib/hal0/backups/profiles-<ts>.tar.gz`. A run with nothing to write
+makes no backup, and a rerun converts nothing that is already in the new shape.
+
+Preview the plan without changing anything, or run it by hand as the service
+user:
+
+```sh
+hal0 profile migrate                         # preview: profiles to generate, slots to re-point, dropped values
+sudo -u hal0 hal0 profile migrate --apply    # convert (backs up first)
+```
+
+Run `--apply` as `hal0`, not as root, so the backup stays readable by
+`hal0-api` and `hal0 update --rollback`.
+
+Four launch changes are reported rather than applied silently:
+
+- a slot without a usable profile gets its type's seed (`embedding`, `reranking`);
+- `--jinja` is no longer added in embedding or reranking mode;
+- the MTP draft device follows the slot's own device;
+- forced MTP stops on a runner without MTP support.
+
+If a slot, stored profile or stack cannot be converted, `hal0 update` prints
+each blocker with its reason and the fix, and exits **2** (applied, not
+converged); `hal0 profile migrate` also exits 2 while anything is blocked. A
+blocked slot keeps launching the command it ran before the conversion until its
+file is edited, and every other slot still converts. To go back, see "Rolling
+back past the profile-centric conversion" below.
+
 ## Upgrading to 1.3.0
 
 The config schema version is unchanged and nothing needs a manual migration
@@ -279,8 +317,8 @@ transient pull failure). `--check` prints the status row without
 converging.
 
 <Aside type="note">
-An apply that leaves the profile-catalog reset (see above) or a component
-unconverged still reports the update as applied, but exits **2** —
+An apply that leaves a component unconverged, or a slot blocked by the
+profile-centric conversion, still reports the update as applied, but exits **2** —
 distinct from a failed update (exit 1). `hal0 update` prints the same
 convergence report and component table inline after an apply, so you
 don't need a separate `hal0 update status` call to see what's left.
@@ -310,9 +348,9 @@ config's schema version is ahead of what the previous tree understands —
 migrations are forward-only, so the older tree just parses what it can.
 If no previous-version record exists, there's nothing to roll back to.
 
-As covered above, **rollback never restores `profiles.toml`** — that's a
-config-state change, not a code-tree change, and the two are deliberately
-decoupled. The one exception is the profile-centric conversion below.
+Rollback swaps the code tree only. It does not restore `profiles.toml`,
+slot files or any other config: that is config state, deliberately decoupled
+from the code tree. The one exception is the profile-centric conversion below.
 
 ### Rolling back past the profile-centric conversion
 
@@ -369,5 +407,5 @@ container back to the release pin. `--check` prints the status row only;
 
 ## See also
 
-- [Edit configuration](/docs/guides/configure) — `/etc/hal0` is preserved across updates, with the one exception above.
+- [Edit configuration](/docs/guides/configure) — `/etc/hal0` is preserved across updates; the profile-centric conversion rewrites slot, profile and stack files only after a backup.
 - [Logs and activity](/docs/guides/logs-and-activity) — watch the apply job and `hal0-api` restart.

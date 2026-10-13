@@ -58,8 +58,8 @@ A slot with no `binary` set derives one from its `device`
 (`hal0.runners.runner_for_backend`) — this is the ordinary case: `cuda`
 backend picks `cuda`, a `cpu` device or backend picks `cpu`, and anything else
 (`rocm`, `vulkan`, an unspecified GPU) picks `standard`. A **profile** can
-optionally pin one of these runner keys too (see [Choose models → Preferred
-profile](/docs/guides/choose-models)); flags-only profiles (all seeds) still
+optionally pin one of these runner keys too (see [Capabilities & profiles → Profiles can carry a
+runtime](/docs/concepts/capabilities-and-profiles#profiles-can-carry-a-runtime)); flags-only profiles (all seeds) still
 never name an image directly — see
 [Providers, profiles & devices](/docs/reference/providers-profiles-devices/).
 The provider (`ContainerProvider`, `FLMProvider`, …) is what actually starts
@@ -532,8 +532,8 @@ the same model; hal0 refuses to add, pull, scan or launch a fork-only quant
 
 ## See also
 
-- [Slots](/docs/concepts/slots/) — the lifecycle state machine and the
-  hardware/model write boundary that `binary`/`image_pin` are part of.
+- [Slots](/docs/concepts/slots/) — the lifecycle state machine and who owns
+  what between slot, model and profile; `binary`/`image_pin` are slot-owned.
 - [Manage slots](/docs/guides/manage-slots/) — creating/editing slots,
   switching GPU lanes, and reading the config-drift warning.
 - [Providers, profiles & devices](/docs/reference/providers-profiles-devices/) —

@@ -120,14 +120,15 @@ see [Edit configuration](/docs/guides/configure).
 ### Which container image the `img` slot runs
 
 The `img` slot resolves its image in this order: `image_pin` (top-level or
-`[slot]`-nested, honored verbatim), then a legacy string `image` key, then
-`[slots].default_images.comfyui` in `hal0.toml` (the operator's choice of
-launch image for ComfyUI, set from the Runner Images page — see
+`[slot]`-nested, honored verbatim), then `[slots].default_images.comfyui` in
+`hal0.toml` (the operator's choice of launch image for ComfyUI, set from the
+Runner Images page — see
 [Manage runner images](/docs/guides/manage-runner-images)), then the
 `comfyui` runner's resolved image (`HAL0_RUNNER_IMAGE_COMFYUI`, then the
-`manifest.json` pin for `comfyui`). `hal0 slot migrate-flags` folds an old
-`image` value into `image_pin`, so clear `image_pin` in
-`/etc/hal0/slots/img.toml` if you want the resolved default.
+`manifest.json` pin for `comfyui`). A bare `image` string left in an older
+`img` slot file is moved to `image_pin` by the profile-centric conversion that
+`hal0 update` runs. Clear `image_pin` in `/etc/hal0/slots/img.toml` if you
+want the resolved default.
 
 ## Generate an image
 
