@@ -30,6 +30,9 @@ import {
   findManagedFlags,
   findSlotHardwareFlags,
   findModelFactFlags,
+  findHostOwnedFlags,
+  findPositionalArgs,
+  screenCanon,
   tokenizeFlags,
   MANAGED_FLAG_SOURCE,
   MODEL_FACT_FLAG_SOURCE,
@@ -387,7 +390,7 @@ function Section({ title, count, hint, children }) {
 // profiles.model_fact_flag_denied).
 function managedFlagError(offenders) {
   const first = offenders[0];
-  const canon = first === '-ngl' ? '--n-gpu-layers' : first === '-c' ? '--ctx-size' : first;
+  const canon = screenCanon(first);
   const where = MANAGED_FLAG_SOURCE[first] || MANAGED_FLAG_SOURCE[canon] || 'the slot/model configuration';
   const rest = offenders.length > 1 ? ` (also managed: ${offenders.slice(1).join(', ')})` : '';
   return `${first} is computed by hal0 and can't be set here — it comes from ${where}. Remove it.${rest}`;
@@ -400,15 +403,26 @@ function hardwareFlagError(offenders) {
 
 function modelFactFlagError(offenders) {
   const first = offenders[0];
-  const name = first.split(/[ =]/)[0];
+  const name = screenCanon(first.split(/[ =]/)[0]);
   const where = MODEL_FACT_FLAG_SOURCE[name];
   const why = where
     ? `it is a fact about the model file, set on ${where}, not on the profile`
-    : name === '--spec-draft-device'
-      ? 'hal0 derives the draft device from the slot\'s device'
+    : name === '--spec-draft-device' || name === '--mmproj-device'
+      ? 'hal0 derives it from the slot\'s device'
       : 'it breaks the reasoning split hal0 depends on';
   const rest = offenders.length > 1 ? ` (also: ${offenders.slice(1).join(', ')})` : '';
   return `${first} can't be set on a profile — ${why}. Remove it.${rest}`;
+}
+
+function hostOwnedFlagError(offenders) {
+  const first = offenders[0];
+  const rest = offenders.length > 1 ? ` (also: ${offenders.slice(1).join(', ')})` : '';
+  return `${first} can't be set on a profile — it fetches a model, reads or writes a host file, opens or shapes a listener, or sets auth/TLS, and hal0 manages all of that for the slot. Remove it.${rest}`;
+}
+
+function positionalArgError(args) {
+  const rest = args.length > 1 ? ` (also: ${args.slice(1).join(', ')})` : '';
+  return `“${args[0]}” has no flag in front of it — every value must follow its flag. Remove it or add the flag.${rest}`;
 }
 
 // Context window text → error message or null. Empty = defer to the model's
@@ -444,10 +458,16 @@ function validateForm(form, existing) {
   const managed = quoteErr ? [] : findManagedFlags(flagsText);
   // Model-fact flags are refused outright (profiles.model_fact_flag_denied).
   const facts = quoteErr ? [] : findModelFactFlags(flagsText);
+  // Host-owned flags and bare arguments (slot.host_owned_flag_denied /
+  // slot.positional_arg_denied), the same screens the server runs.
+  const host = quoteErr ? [] : findHostOwnedFlags(flagsText);
+  const positional = quoteErr ? [] : findPositionalArgs(flagsText);
   if (quoteErr) errs.flags = quoteErr;
   else if (hw.length) errs.flags = hardwareFlagError(hw);
   else if (managed.length) errs.flags = managedFlagError(managed);
   else if (facts.length) errs.flags = modelFactFlagError(facts);
+  else if (host.length) errs.flags = hostOwnedFlagError(host);
+  else if (positional.length) errs.flags = positionalArgError(positional);
   return errs;
 }
 

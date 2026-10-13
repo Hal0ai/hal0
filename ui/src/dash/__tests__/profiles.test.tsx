@@ -684,6 +684,31 @@ describe('ProfileDrawer tune fields (ADR-0029)', () => {
     act(() => root.unmount())
   })
 
+  it.each([
+    ['-m /etc/shadow', 'computed by hal0'],
+    ['-m=/etc/shadow', 'computed by hal0'],
+    ['--model=/etc/shadow', 'computed by hal0'],
+    ['-a evil', 'computed by hal0'],
+    ['--gpu-layers 99', 'belongs on the slot'],
+    ['-hf org/model', 'hal0 manages all of that for the slot'],
+    ['--api_key secret', 'hal0 manages all of that for the slot'],
+    ['-ag', 'hal0 manages all of that for the slot'],
+    ['/etc/shadow', 'has no flag in front of it'],
+    ['--temp=0.7 /etc/shadow', 'has no flag in front of it'],
+    ['-mu https://example.com/model.gguf', 'hal0 manages all of that for the slot'],
+    ['--gpt-oss-20b-default', 'hal0 manages all of that for the slot'],
+    ['--metrics /etc/shadow', 'has no flag in front of it'],
+    ['--reasoning_format=NONE', "can't be set on a profile"],
+  ])('rejects %s inline and does not save (every llama.cpp spelling)', async (flags, msg) => {
+    const { host, root } = drawer('create')
+    setValue(field(host, 'pf-input-name') as HTMLInputElement, 'bad-spelling')
+    setValue(field(host, 'pf-input-flags') as HTMLTextAreaElement, `-fa on ${flags}`)
+    await submit(host)
+    expect(createCalls).toHaveLength(0)
+    expect(host.textContent).toContain(msg)
+    act(() => root.unmount())
+  })
+
   it('still rejects hardware and managed flags, and allows a reasoning format other than none', async () => {
     const { host, root } = drawer('create')
     setValue(field(host, 'pf-input-name') as HTMLInputElement, 'hw')

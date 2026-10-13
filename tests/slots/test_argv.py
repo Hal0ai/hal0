@@ -312,11 +312,16 @@ def test_resolve_argv_equivalent_argv_to_normalize() -> None:
 
 
 def test_resolve_argv_omits_append_flags_from_provenance() -> None:
-    res = resolve_argv([("model", ["--jinja"]), ("profile", ["--lora", "a", "--lora", "b"])])
+    res = resolve_argv(
+        [
+            ("model", ["--jinja"]),
+            ("profile", ["--override-kv", "a=int:1", "--override-kv", "b=int:2"]),
+        ]
+    )
     flags = {p.flag for p in res.provenance}
-    assert "--lora" not in flags  # append flags aren't deduped -> no single "winner"
+    assert "--override-kv" not in flags  # append flags aren't deduped -> no single "winner"
     assert "--jinja" in flags
-    assert res.argv.count("--lora") == 2
+    assert res.argv.count("--override-kv") == 2
 
 
 def test_profile_is_the_only_untrusted_layer() -> None:
@@ -458,8 +463,11 @@ def test_managed_args_denylist_covers_expected_flags() -> None:
 
 def test_slot_hardware_flags_covers_grid_flags_both_spellings() -> None:
     """spec-hw-slot-ownership §5 partition set: the grid-owned hardware flags
-    (device/-dev, NGL/-ngl, threads/--threads) in BOTH long and short form."""
-    expected = frozenset({"--n-gpu-layers", "-ngl", "--device", "-dev", "--threads", "-t"})
+    (device/-dev, NGL/-ngl/--gpu-layers, threads/--threads) in every spelling
+    llama.cpp accepts."""
+    expected = frozenset(
+        {"--n-gpu-layers", "-ngl", "--gpu-layers", "--device", "-dev", "--threads", "-t"}
+    )
     assert expected == SLOT_HARDWARE_FLAGS
 
 

@@ -406,8 +406,10 @@ def screen_profile_flags(flags: str | None) -> None:
     hardware flags (the slot's typed fields), hal0-managed flags (including
     ``--ctx-size``: use ``ctx_size``), model-fact flags (``--jinja``,
     ``--chat-template*``, ``--mmproj*``, ``--no-mmproj*``),
-    ``--spec-draft-device`` (the slot's device decides it) or
-    ``--reasoning-format none`` (#2545). The text must be valid shell text.
+    ``--spec-draft-device`` (the slot's device decides it), a host-owned flag
+    (remote model fetch, host file, listener, auth/TLS), a bare positional or
+    ``--reasoning-format none`` (#2545), in any spelling. The text must be
+    valid shell text.
     """
     if not flags or not flags.strip():
         return
@@ -419,15 +421,9 @@ def screen_profile_flags(flags: str | None) -> None:
             code="profiles.flags_malformed",
             details={"flags": flags},
         ) from exc
-    from hal0.slots.argv import (
-        _deny_managed_flags,
-        _deny_profile_owned_elsewhere,
-        _deny_slot_hardware_flags,
-        deny_reasoning_format_none,
-    )
+    from hal0.slots.argv import deny_reasoning_format_none, screen_profile_segment
 
-    # Hardware first so -ngl (in both sets) gets the "belongs on the slot" message.
-    _deny_slot_hardware_flags(tokens, segment="profile flags")
-    _deny_managed_flags(tokens, segment="profile flags")
+    # The launch-time screen (hardware, managed, model-fact, host-owned flags
+    # and bare positionals, in every spelling), plus #2545 on the write side.
     deny_reasoning_format_none(tokens, segment="profile flags")
-    _deny_profile_owned_elsewhere(tokens, segment="profile flags")
+    screen_profile_segment(tokens, segment="profile flags")

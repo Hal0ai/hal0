@@ -8,12 +8,19 @@
 // the drawer can say so inline before the PUT fires:
 //
 //   · managed flags      — hal0 computes them (hal0.slots.argv.MANAGED_ARGS_DENYLIST):
-//                          --model --ctx-size/-c --host --port --n-gpu-layers --alias
-//   · slot hardware      — the slot's grid owns them: -ngl -dev/--device -t/--threads
+//                          --model/-m --ctx-size/-c --host --port --n-gpu-layers --alias/-a
+//   · slot hardware      — the slot's grid owns them: -ngl/--gpu-layers -dev/--device -t/--threads
 //   · model-fact flags   — the model row owns them (profiles.model_fact_flag_denied):
-//                          --jinja --chat-template --chat-template-file
-//                          --mmproj --no-mmproj --mmproj-auto
-//   · --spec-draft-device, and --reasoning-format none
+//                          --jinja/--no-jinja --chat-template --chat-template-file
+//                          --mmproj/-mm --no-mmproj --mmproj-auto/--no-mmproj-auto
+//   · --spec-draft-device, --mmproj-device, and --reasoning-format none
+//   · host-owned flags   — remote model fetches, host files, listener and auth/TLS
+//                          settings, --agent (slot.host_owned_flag_denied)
+//   · bare arguments     — a value with no flag (slot.positional_arg_denied)
+//
+// Every screen matches the canonical name (screenCanon), the way the server
+// does, so each spelling llama.cpp accepts is caught: short and alternative
+// forms, `flag=value`, and `_` for `-` in a --long flag.
 //
 // diffFlags compares two profiles' flag texts (the slot preview counts what a
 // profile swap changes).
@@ -28,8 +35,9 @@ export const MANAGED_FLAGS = [
   "--n-gpu-layers",
   "--alias",
 ];
-const MANAGED_SHORT = { "-ngl": "--n-gpu-layers", "-c": "--ctx-size" };
-const MANAGED_SET = new Set([...MANAGED_FLAGS, ...Object.keys(MANAGED_SHORT)]);
+// Matched by canonical name (screenCanon), so every spelling FLAG_ALIASES
+// knows (-m, -a, -c, -ngl, --gpu-layers, …) is caught.
+const MANAGED_CANON_SET = new Set(MANAGED_FLAGS);
 
 // Slot-hardware flags (spec-hw-slot-ownership §5): the grid-owned hardware
 // flags a PROFILE tune must never carry — they belong on the slot's typed
@@ -40,27 +48,19 @@ const MANAGED_SET = new Set([...MANAGED_FLAGS, ...Object.keys(MANAGED_SHORT)]);
 export const SLOT_HARDWARE_FLAGS = [
   "-ngl",
   "--n-gpu-layers",
+  "--gpu-layers",
   "-dev",
   "--device",
   "--threads",
   "-t",
 ];
-const SLOT_HARDWARE_SET = new Set(SLOT_HARDWARE_FLAGS);
+const SLOT_HARDWARE_CANON_SET = new Set(["--n-gpu-layers", "--device", "--threads"]);
 
 // The slot-hardware flags present in `text` (deduped, order-preserved). Empty
 // array = clean. Used by the profile flag editor to reject the grid-owned
 // hardware flags with a "these belong on the slot" message.
 export function findSlotHardwareFlags(text) {
-  const { tokens } = tokenizeFlags(text);
-  const seen = new Set();
-  const offenders = [];
-  for (const tok of tokens) {
-    if (SLOT_HARDWARE_SET.has(tok) && !seen.has(tok)) {
-      seen.add(tok);
-      offenders.push(tok);
-    }
-  }
-  return offenders;
+  return findByCanon(text, SLOT_HARDWARE_CANON_SET);
 }
 
 // Model-fact flags (ADR-0029): the chat template and projector are properties
@@ -68,11 +68,13 @@ export function findSlotHardwareFlags(text) {
 // Mirrors the server's profiles.model_fact_flag_denied screen.
 export const MODEL_FACT_FLAGS = [
   "--jinja",
+  "--no-jinja",
   "--chat-template",
   "--chat-template-file",
   "--mmproj",
   "--no-mmproj",
   "--mmproj-auto",
+  "--no-mmproj-auto",
 ];
 const MODEL_FACT_SET = new Set(MODEL_FACT_FLAGS);
 
@@ -80,17 +82,19 @@ const MODEL_FACT_SET = new Set(MODEL_FACT_FLAGS);
 // copy.
 export const MODEL_FACT_FLAG_SOURCE = {
   "--jinja": "the model's Jinja fact",
+  "--no-jinja": "the model's Jinja fact",
   "--chat-template": "the model's Chat template",
   "--chat-template-file": "the model's Chat template",
   "--mmproj": "the model's mmproj path (Source)",
   "--no-mmproj": "this profile's Vision field (set it to off)",
   "--mmproj-auto": "this profile's Vision field",
+  "--no-mmproj-auto": "this profile's Vision field (set it to off)",
 };
 
 // Other flags the profile screen refuses outright: the draft-model device is
 // derived from the slot's device, and `--reasoning-format none` would break
 // the reasoning split hal0 relies on.
-const SPEC_DRAFT_DEVICE = "--spec-draft-device";
+const DERIVED_PLACEMENT = new Set(["--spec-draft-device", "--mmproj-device"]);
 
 // Offending tokens in `text` for the profile flag screen beyond managed and
 // hardware: model-fact flags, --spec-draft-device and `--reasoning-format
@@ -103,12 +107,16 @@ export function findModelFactFlags(text) {
   const add = (t) => { if (!seen.has(t)) { seen.add(t); offenders.push(t); } };
   for (let i = 0; i < tokens.length; i += 1) {
     const tok = tokens[i];
-    const name = tok.includes("=") && tok.startsWith("--") ? tok.slice(0, tok.indexOf("=")) : tok;
-    if (MODEL_FACT_SET.has(name) || name === SPEC_DRAFT_DEVICE) {
+    if (!isFlagToken(tok)) continue;
+    const name = typedName(tok);
+    const canon = screenCanon(tok);
+    if (MODEL_FACT_SET.has(canon) || DERIVED_PLACEMENT.has(canon)) {
       add(name);
-    } else if (name === "--reasoning-format") {
-      const val = tok.includes("=") ? tok.slice(tok.indexOf("=") + 1) : tokens[i + 1];
-      if (val === "none") add(tok.includes("=") ? tok : "--reasoning-format none");
+    } else if (canon === "--reasoning-format") {
+      const raw = tok.includes("=") ? tok.slice(tok.indexOf("=") + 1) : tokens[i + 1];
+      // The server compares value.strip().lower(); so does this check.
+      const val = String(raw ?? "").trim().toLowerCase();
+      if (val === "none") add(tok.includes("=") ? tok : `${tok} ${raw}`);
     }
   }
   return offenders;
@@ -171,10 +179,6 @@ export function tokenizeFlags(text) {
   return { tokens, error: null };
 }
 
-// Canonicalise a flag spelling onto its managed key (or return it unchanged).
-function canonManaged(flag) {
-  return MANAGED_SHORT[flag] || flag;
-}
 
 // Short → long canonicalisation for llama-server's own flag spellings. Mirrors
 // hal0.slots.argv.FLAG_ALIASES verbatim (kept in sync by
@@ -197,7 +201,40 @@ export const FLAG_ALIASES = {
   "-mg": "--main-gpu",
   "-np": "--parallel",
   "-kvu": "--kv-unified",
-  "-ngld": "--n-gpu-layers-draft"
+  "-ngld": "--n-gpu-layers-draft",
+  "-m": "--model",
+  "-a": "--alias",
+  "--gpu-layers": "--n-gpu-layers",
+  "-mm": "--mmproj",
+  "-devd": "--spec-draft-device",
+  "--device-draft": "--spec-draft-device",
+  "-mmdev": "--mmproj-device",
+  "-mu": "--model-url",
+  "-mmu": "--mmproj-url",
+  "-hf": "--hf-repo",
+  "-hfr": "--hf-repo",
+  "-hff": "--hf-file",
+  "-hft": "--hf-token",
+  "-dr": "--docker-repo",
+  "-hfd": "--spec-draft-hf",
+  "-hfrd": "--spec-draft-hf",
+  "--hf-repo-draft": "--spec-draft-hf",
+  "-md": "--spec-draft-model",
+  "--model-draft": "--spec-draft-model",
+  "-f": "--file",
+  "-sysf": "--system-prompt-file",
+  "-jf": "--json-schema-file",
+  "-bf": "--binary-file",
+  "-lcs": "--lookup-cache-static",
+  "-lcd": "--lookup-cache-dynamic",
+  "-o": "--output-file",
+  "--output": "--output-file",
+  "--kl-divergence-base": "--save-all-logits",
+  "--audio": "--image",
+  "--video": "--image",
+  "--ui-config-file": "--webui-config-file",
+  "--ui-mcp-proxy": "--webui-mcp-proxy",
+  "-ag": "--agent"
 };
 
 // Fold a flag spelling onto its canonical long form via FLAG_ALIASES, or
@@ -205,6 +242,321 @@ export const FLAG_ALIASES = {
 // unrecognised flag entirely).
 export function canonFlag(flag) {
   return FLAG_ALIASES[flag] || flag;
+}
+
+// The canonical flag a token names, the way the server's argv._canon reads
+// it: the `flag=value` join form is split, `_` reads as `-` in a --long flag
+// (llama.cpp rewrites it the same way), and every short/alternative spelling
+// folds through FLAG_ALIASES. Every ownership screen below matches on this,
+// so `-m x`, `-m=x`, `--model=x` and `--api_key x` are all caught.
+export function screenCanon(tok) {
+  let name = String(tok || "");
+  if (name.includes("=")) name = name.slice(0, name.indexOf("="));
+  if (name.startsWith("--")) name = name.replace(/_/g, "-");
+  return canonFlag(name);
+}
+
+// The name a token is reported by: what the operator typed, without a
+// joined `=value`.
+function typedName(tok) {
+  return tok.includes("=") ? tok.slice(0, tok.indexOf("=")) : tok;
+}
+
+// Offending flags in `text` whose canonical name is in `set`, by the spelling
+// the operator typed (deduped, order-preserved).
+function findByCanon(text, set) {
+  const { tokens } = tokenizeFlags(text);
+  const seen = new Set();
+  const offenders = [];
+  for (const tok of tokens) {
+    if (!isFlagToken(tok) || !set.has(screenCanon(tok))) continue;
+    const name = typedName(tok);
+    if (!seen.has(name)) { seen.add(name); offenders.push(name); }
+  }
+  return offenders;
+}
+
+// Flags that reach outside the slot's tune: remote model fetches, host file
+// reads/writes, listener / CORS / router settings, auth/TLS, and the --agent
+// tools shortcut. hal0 manages all of these, and the server refuses them in a
+// profile (slot.host_owned_flag_denied). Mirrors hal0.slots.argv.HOST_OWNED_FLAGS
+// verbatim (kept in sync by tests/ui_contracts/test_flag_aliases_mirror.py;
+// strict JSON so that parse holds).
+export const HOST_OWNED_FLAGS = [
+  "--agent",
+  "--api-key",
+  "--api-key-file",
+  "--api-prefix",
+  "--binary-file",
+  "--context-file",
+  "--control-vector",
+  "--control-vector-scaled",
+  "--cors-credentials",
+  "--cors-headers",
+  "--cors-methods",
+  "--cors-origins",
+  "--docker-repo",
+  "--embd-gemma-default",
+  "--file",
+  "--fim-qwen-1.5b-default",
+  "--fim-qwen-14b-spec",
+  "--fim-qwen-30b-default",
+  "--fim-qwen-3b-default",
+  "--fim-qwen-7b-default",
+  "--fim-qwen-7b-spec",
+  "--gpt-oss-120b-default",
+  "--gpt-oss-20b-default",
+  "--grammar-file",
+  "--hf-file",
+  "--hf-repo",
+  "--hf-token",
+  "--image",
+  "--in-file",
+  "--json-schema-file",
+  "--log-file",
+  "--log-prompts-dir",
+  "--logits-output-dir",
+  "--lookup-cache-dynamic",
+  "--lookup-cache-static",
+  "--lora",
+  "--lora-scaled",
+  "--mcp-servers-config",
+  "--mcp-servers-json",
+  "--media-path",
+  "--mmproj-url",
+  "--model-url",
+  "--models-autoload",
+  "--models-dir",
+  "--models-max",
+  "--models-preset",
+  "--negative-file",
+  "--output-file",
+  "--path",
+  "--positive-file",
+  "--prompt-cache",
+  "--reuse-port",
+  "--rpc",
+  "--save-all-logits",
+  "--server-base",
+  "--slot-save-path",
+  "--spec-default",
+  "--spec-draft-hf",
+  "--spec-draft-model",
+  "--ssl-cert-file",
+  "--ssl-key-file",
+  "--system-prompt-file",
+  "--tools",
+  "--tools-runtime",
+  "--tts-speaker-file",
+  "--video-ffmpeg-dir",
+  "--vision-gemma-12b-default",
+  "--vision-gemma-4b-default",
+  "--webui-config-file",
+  "--webui-mcp-proxy"
+];
+const HOST_OWNED_SET = new Set(HOST_OWNED_FLAGS);
+
+// The host-owned flags in `text`, by the spelling typed. Empty = clean.
+export function findHostOwnedFlags(text) {
+  return findByCanon(text, HOST_OWNED_SET);
+}
+
+// Every flag spelling llama.cpp (b11574) declares with no value argument: the
+// token after one of these is the next argument, never its value. Mirrors
+// hal0.slots.argv.VALUELESS_FLAGS verbatim (kept in sync by
+// tests/ui_contracts/test_flag_aliases_mirror.py; strict JSON).
+export const VALUELESS_FLAGS = [
+  "--agent",
+  "--backend-sampling",
+  "--cache-idle-slots",
+  "--cache-list",
+  "--cache-prompt",
+  "--check",
+  "--check-tensors",
+  "--completion-bash",
+  "--cont-batching",
+  "--context-shift",
+  "--conversation",
+  "--cors-credentials",
+  "--cpu-moe",
+  "--cpu-moe-draft",
+  "--dflash",
+  "--diffusion-visual",
+  "--display-prompt",
+  "--eagle3",
+  "--embd-gemma-default",
+  "--embedding",
+  "--embeddings",
+  "--escape",
+  "--fim-qwen-1.5b-default",
+  "--fim-qwen-14b-spec",
+  "--fim-qwen-30b-default",
+  "--fim-qwen-3b-default",
+  "--fim-qwen-7b-default",
+  "--fim-qwen-7b-spec",
+  "--gpt-oss-120b-default",
+  "--gpt-oss-20b-default",
+  "--hellaswag",
+  "--help",
+  "--ids",
+  "--ignore-eos",
+  "--in-prefix-bos",
+  "--interactive",
+  "--interactive-first",
+  "--jinja",
+  "--kl-divergence",
+  "--kv-offload",
+  "--kv-unified",
+  "--list-devices",
+  "--log-disable",
+  "--log-jsonl",
+  "--log-prefix",
+  "--log-timestamps",
+  "--log-verbose",
+  "--lora-init-without-apply",
+  "--metrics",
+  "--mmproj-auto",
+  "--mmproj-offload",
+  "--models-autoload",
+  "--mtp",
+  "--multiline-input",
+  "--multiple-choice",
+  "--nextn",
+  "--no-agent",
+  "--no-bos",
+  "--no-cache-idle-slots",
+  "--no-cache-prompt",
+  "--no-cont-batching",
+  "--no-context-shift",
+  "--no-conversation",
+  "--no-cors-credentials",
+  "--no-display-prompt",
+  "--no-escape",
+  "--no-host",
+  "--no-jinja",
+  "--no-kv-offload",
+  "--no-kv-unified",
+  "--no-log-jsonl",
+  "--no-log-prefix",
+  "--no-log-timestamps",
+  "--no-mmproj",
+  "--no-mmproj-auto",
+  "--no-mmproj-offload",
+  "--no-models-autoload",
+  "--no-op-offload",
+  "--no-parse-special",
+  "--no-perf",
+  "--no-ppl",
+  "--no-prefill-assistant",
+  "--no-reasoning-preserve",
+  "--no-repack",
+  "--no-show-timings",
+  "--no-skip-chat-parsing",
+  "--no-slots",
+  "--no-spec-draft-backend-sampling",
+  "--no-ui",
+  "--no-ui-mcp-proxy",
+  "--no-warmup",
+  "--no-webui",
+  "--no-webui-mcp-proxy",
+  "--offline",
+  "--op-offload",
+  "--parse-special",
+  "--perf",
+  "--ppl",
+  "--prefill-assistant",
+  "--process-output",
+  "--prompt-cache-all",
+  "--prompt-cache-ro",
+  "--props",
+  "--reasoning-preserve",
+  "--repack",
+  "--rerank",
+  "--reranking",
+  "--reuse-port",
+  "--save-logits",
+  "--show-count",
+  "--show-statistics",
+  "--show-timings",
+  "--simple-io",
+  "--single-turn",
+  "--skip-chat-parsing",
+  "--slots",
+  "--spec-default",
+  "--spec-draft-backend-sampling",
+  "--spec-draft-cpu-moe",
+  "--special",
+  "--spm-infill",
+  "--stdin",
+  "--swa-full",
+  "--ui",
+  "--ui-mcp-proxy",
+  "--usage",
+  "--verbose",
+  "--verbose-prompt",
+  "--version",
+  "--vision-gemma-12b-default",
+  "--vision-gemma-4b-default",
+  "--warmup",
+  "--webui",
+  "--webui-mcp-proxy",
+  "--winogrande",
+  "-ag",
+  "-bs",
+  "-cb",
+  "-cl",
+  "-cmoe",
+  "-cmoed",
+  "-cnv",
+  "-e",
+  "-h",
+  "-i",
+  "-if",
+  "-kvo",
+  "-kvu",
+  "-mli",
+  "-nkvo",
+  "-no-ag",
+  "-no-cnv",
+  "-no-kvu",
+  "-nocb",
+  "-nr",
+  "-pps",
+  "-sp",
+  "-st",
+  "-tgs",
+  "-v"
+];
+const VALUELESS_SET = new Set(VALUELESS_FLAGS);
+
+// Whether a flag token may take the next token as its value, as the server's
+// argv._takes_value decides: a joined `--flag=value` already carries it, and
+// a valueless switch never takes one.
+export function takesValue(tok) {
+  if (tok.includes("=")) return false;
+  const name = tok.startsWith("--") ? tok.replace(/_/g, "-") : tok;
+  return !VALUELESS_SET.has(name);
+}
+
+// Bare arguments in `text` — a value with no flag in front of it, including a
+// value after a joined `--flag=value` or after a valueless switch
+// (`--metrics /etc/shadow`). The server refuses them
+// (slot.positional_arg_denied). Empty = clean.
+export function findPositionalArgs(text) {
+  const { tokens } = tokenizeFlags(text);
+  const out = [];
+  let i = 0;
+  while (i < tokens.length) {
+    const tok = tokens[i];
+    if (isFlagToken(tok)) {
+      const takesNext = takesValue(tok) && i + 1 < tokens.length && !isFlagToken(tokens[i + 1]);
+      i += takesNext ? 2 : 1;
+    } else {
+      out.push(tok);
+      i += 1;
+    }
+  }
+  return out;
 }
 
 // Group a flat token list into { flag, value } pairs (a flag consumes the next
@@ -216,11 +568,11 @@ export function flagPairs(tokens) {
   while (i < tokens.length) {
     const tok = tokens[i];
     if (isFlagToken(tok)) {
-      if (i + 1 < tokens.length && !isFlagToken(tokens[i + 1])) {
-        out.push({ flag: tok, canon: canonManaged(tok), value: tokens[i + 1] });
+      if (takesValue(tok) && i + 1 < tokens.length && !isFlagToken(tokens[i + 1])) {
+        out.push({ flag: tok, canon: screenCanon(tok), value: tokens[i + 1] });
         i += 2;
       } else {
-        out.push({ flag: tok, canon: canonManaged(tok), value: null });
+        out.push({ flag: tok, canon: screenCanon(tok), value: null });
         i += 1;
       }
     } else {
@@ -233,16 +585,7 @@ export function flagPairs(tokens) {
 // The managed flags present in `text`, by the spelling the operator typed
 // (deduped, order-preserved). Empty array = clean.
 export function findManagedFlags(text) {
-  const { tokens } = tokenizeFlags(text);
-  const seen = new Set();
-  const offenders = [];
-  for (const tok of tokens) {
-    if (MANAGED_SET.has(tok) && !seen.has(tok)) {
-      seen.add(tok);
-      offenders.push(tok);
-    }
-  }
-  return offenders;
+  return findByCanon(text, MANAGED_CANON_SET);
 }
 
 // Diff two flag texts. `nextText` is where we are going, `prevText` where we

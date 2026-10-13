@@ -119,8 +119,14 @@ Profile flags may not set what another layer owns. Hardware flags
 (`slots/argv.py` `SLOT_HARDWARE_FLAGS`), managed flags
 (`MANAGED_ARGS_DENYLIST`, which covers `--ctx-size`), model-fact flags
 (`--jinja`, `--chat-template*`, `--mmproj`, `--no-mmproj`, `--mmproj-auto`)
-and `--spec-draft-device` are rejected when a profile is saved and refused
-again at launch. `--reasoning-format none` stays rejected (#2545). The
+`--spec-draft-device` and `--mmproj-device`, host-owned flags
+(`HOST_OWNED_FLAGS`: remote model fetches such as `-hf`/`--model-url`, host
+file reads and writes such as `--api-key-file`/`--log-file`/`--path`,
+listener and auth/TLS settings) and bare positional arguments are rejected
+when a profile is saved and refused again at launch, in every spelling
+llama.cpp accepts (the short and alternative forms in its `common/arg.cpp`,
+the `flag=value` join form, and `_` for `-` in a long flag, all folded by
+`FLAG_ALIASES`). `--reasoning-format none` stays rejected (#2545). The
 non-llama providers already read profile flags live; they keep doing so.
 The self-managed engines (kokoro, moonshine, qwen3-tts) are the one place a
 profile names a file: their bundle has no model row (`slots/state.py`
@@ -346,11 +352,15 @@ exactly once. It follows ADR-0028's contract:
     preview (`blocked_slot_pin`) launch that slot with its recorded tune, on a
     base, model facts and placement rebuilt from today's slot and model: host,
     port, model path, alias, chat template and projector are never taken from
-    the record. The recorded tune is screened like a profile (managed,
-    hardware and model-fact flags refuse; the #2545 strip applies), and a
-    record that is not a list of strings refuses with `slot.unconverted`. So
-    a converter problem never takes a working slot down, a moved model file
-    cannot stale it, and an edited ledger cannot redirect it. Once the
+    the record: the record's own base flags are dropped in every spelling
+    (`-m`, `-m=…`, `--model=…`, `-a`, …) before the base is rebuilt. The rest
+    of the recorded tune is screened like a profile (hardware, model-fact and
+    host-owned flags and bare positionals refuse; the #2545 strip applies),
+    and a record that is not a list of strings refuses with
+    `slot.unconverted`. So a converter problem never takes a working slot
+    down, a moved model file cannot stale it, and an edited ledger can neither
+    redirect it to another model or listener nor make it read a host file or
+    fetch a remote model. Once the
     operator edits the slot file the pin no longer applies. `/api/slots`
     reports such a slot as `conversion_blocked` (reason, fix, and whether it
     still runs its pre-conversion tune), and the dashboard badges it.
