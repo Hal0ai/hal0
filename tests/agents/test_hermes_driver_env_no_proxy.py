@@ -221,8 +221,14 @@ def test_driver_env_drops_no_proxy_entries_that_could_break_the_env_file(
     )
     hp._write_driver_env()
     body = driver_env.read_text()
+    # Only the NO_PROXY lines carry operator input; the regenerated header
+    # legitimately names ``KEY=value`` (#2373), so check those lines alone.
+    proxy_lines = "\n".join(
+        line for line in body.splitlines() if line.startswith(("NO_PROXY=", "no_proxy="))
+    )
+    assert proxy_lines
     for char in ('"', "'", "#y", "=v", "\x07", "a b"):
-        assert char not in body.split("\n", 1)[1]
+        assert char not in proxy_lines.replace("NO_PROXY=", "").replace("no_proxy=", "")
     upper, lower = _no_proxy_entries(driver_env)
     assert upper == lower
     assert upper == [
