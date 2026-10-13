@@ -376,7 +376,7 @@ def _build_hermes_env(cfg: AgentConfig) -> dict[str, str]:
     env["HERMES_DASHBOARD_TUI"] = "1"
     # Point hermes at the version-correct pre-built dashboard assets. We honor
     # an existing HERMES_WEB_DIST ONLY when it resolves to a real directory (a
-    # deliberate hand-built tree set via /etc/hal0/agents/hermes.env); a stale
+    # deliberate hand-built tree set in a `systemctl edit` drop-in); a stale
     # value inherited from an older unit drop-in — notably the pre-fix
     # python3.12 path that breaks on other interpreters — won't exist, so we
     # replace it with the auto-resolved path. When no built dist is found at
