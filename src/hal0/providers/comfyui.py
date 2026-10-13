@@ -223,26 +223,20 @@ class ComfyUIProvider(Provider):
     def _profile_flags(self, slot_cfg: dict[str, Any]) -> str:
         """Resolve the slot's profile to its flag bundle.
 
-        Resolves through :class:`~hal0.profiles.ProfileCatalog` (one profile
-        interface, ``resolved_flags`` already MTP-expanded). Falls back to the
-        live-validated default bundle when the slot has no profile or the
-        lookup fails — the img slot must always come up with the bench-tuned
-        flags.
+        A slot that names a profile gets that profile's flags (``resolved_flags``
+        is already MTP-expanded). A name the catalog lacks refuses to launch
+        (``slot.profile_missing``, as every llama-server slot does — ADR-0029):
+        a typo must not quietly launch a different tune. Only a slot that names
+        no profile, or whose profile carries no flags, gets the live-validated
+        default bundle.
         """
         profile_name = str(slot_cfg.get("profile") or slot_cfg.get("slot", {}).get("profile") or "")
-        if profile_name:
-            try:
-                from hal0.profiles import ProfileCatalog
+        if not profile_name:
+            return _DEFAULT_PROFILE_FLAGS
+        from hal0.providers.container import resolve_named_profile
 
-                flags = ProfileCatalog().resolve(profile_name).resolved_flags.strip()
-                if flags:
-                    return flags
-            except Exception:
-                log.warning(
-                    "comfyui.profile_lookup_failed; using default flags",
-                    extra={"profile": profile_name},
-                )
-        return _DEFAULT_PROFILE_FLAGS
+        flags = resolve_named_profile(slot_cfg, profile_name).resolved_flags.strip()
+        return flags or _DEFAULT_PROFILE_FLAGS
 
     def container_spec(
         self,

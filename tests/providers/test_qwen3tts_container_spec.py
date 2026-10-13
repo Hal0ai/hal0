@@ -179,3 +179,14 @@ def test_qwen3tts_family_wins_over_generic_tts_fallback() -> None:
     kok = _spec_provider_for({"type": "tts", "profile": "kokoro"})
     assert isinstance(qwen, Qwen3TTSProvider)
     assert isinstance(kok, KokoroProvider)
+
+
+def test_named_missing_profile_refuses_to_launch() -> None:
+    """A slot naming a profile the catalog lacks fails closed (ADR-0029); it
+    never launches some other tune."""
+    from hal0.errors import UnprocessableEntity
+
+    with pytest.raises(UnprocessableEntity) as exc_info:
+        Qwen3TTSProvider().container_spec(_slot_cfg(profile="no-such-profile"), {})
+    assert exc_info.value.code == "slot.profile_missing"
+    assert exc_info.value.details["profile"] == "no-such-profile"
