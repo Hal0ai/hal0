@@ -636,12 +636,16 @@ def test_delete_in_use_409_despite_corrupt_sibling_toml(tmp_hal0_home: str) -> N
     assert "gpu-slot" in err["details"]["slots"]
 
 
-def test_delete_succeeds_with_only_corrupt_toml_and_warns(
+def test_delete_fails_closed_with_only_corrupt_toml_and_warns(
     tmp_hal0_home: str,
     capsys: pytest.CaptureFixture[str],
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """Only a corrupt slot TOML on disk: DELETE succeeds; scan warning fires.
+    """Only a corrupt slot TOML on disk: DELETE refuses (#2574); listing works.
+
+    The unreadable file may well name the profile, so the delete fails closed
+    with 409 ``profiles.slot_unreadable`` naming the slot, the scan warning
+    still fires and ``GET /api/profiles`` keeps working.
 
     structlog output routing is GLOBAL and order-dependent across the test
     suite: standalone, this app renders via PrintLogger to stdout (capsys);
@@ -660,11 +664,39 @@ def test_delete_succeeds_with_only_corrupt_toml_and_warns(
         capsys.readouterr()  # drain startup noise
         with caplog.at_level("WARNING"):
             r = c.delete("/api/profiles/my-vulkan")
+            listed = c.get("/api/profiles")
         captured = capsys.readouterr()
-    assert r.status_code == 204
+    assert r.status_code == 409
+    err = r.json()["error"]
+    assert err["code"] == "profiles.slot_unreadable"
+    assert err["details"]["slots"] == ["broken-slot"]
+    assert "broken-slot" in err["message"]
+    assert listed.status_code == 200
+    assert "my-vulkan" in {p["name"] for p in listed.json()}
     log_text = captured.out + captured.err + caplog.text
     assert "profiles.in_use_scan_error" in log_text
     assert "broken-slot" in log_text
+
+
+def test_delete_in_use_409_for_unconverted_slot(tmp_hal0_home: str) -> None:
+    """A slot refused with ``slot.unconverted`` still counts as using its profile (#2574)."""
+    app = create_app()
+    with TestClient(app) as c:
+        c.post("/api/profiles", json={"name": "my-vulkan"})
+        root = Path(tmp_hal0_home) / "etc" / "hal0" / "slots"
+        root.mkdir(parents=True, exist_ok=True)
+        (root / "stale-slot.toml").write_text(
+            '[slot]\nname = "stale-slot"\nport = 8093\nprofile = "my-vulkan"\nctx_size = 4096\n',
+            encoding="utf-8",
+        )
+        listed = c.get("/api/profiles").json()
+        r = c.delete("/api/profiles/my-vulkan")
+    item = next(p for p in listed if p["name"] == "my-vulkan")
+    assert item["used_by"] == ["stale-slot"]
+    assert r.status_code == 409
+    err = r.json()["error"]
+    assert err["code"] == "profiles.in_use"
+    assert err["details"]["slots"] == ["stale-slot"]
 
 
 # ── cloned_from provenance ─────────────────────────────────────────────────────

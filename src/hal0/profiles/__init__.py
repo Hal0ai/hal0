@@ -26,9 +26,11 @@ from typing import Any, Literal
 
 from hal0.config import paths
 from hal0.config.loader import (
+    ConfigNotFound,
     list_slots,
     load_profiles_config,
     load_slot_config,
+    read_slot_profile_ref,
     save_profiles_config,
 )
 from hal0.config.schema import (
@@ -249,36 +251,67 @@ class ProfileCatalog:
                     code="profiles.not_found",
                     details={"profile": name},
                 )
-            in_use_slots = self.slots_using(name)
+            in_use_slots, unreadable = self._scan_slots_for(name)
             if in_use_slots:
                 raise Conflict(
                     f"profile {name!r} is in use by slot(s): {', '.join(in_use_slots)}",
                     code="profiles.in_use",
                     details={"slots": in_use_slots},
                 )
+            if unreadable:
+                # Fail closed: a slot file nobody can parse may well name this
+                # profile, and deleting it would break that slot once it is fixed.
+                raise Conflict(
+                    f"cannot tell whether profile {name!r} is in use: slot file(s) "
+                    f"{', '.join(unreadable)} could not be read; fix or remove them first",
+                    code="profiles.slot_unreadable",
+                    details={"profile": name, "slots": unreadable},
+                )
             del catalog.profile[name]
             save_profiles_config(catalog, self._path)
 
     def slots_using(self, name: str) -> list[str]:
         """Return slot names whose TOML references ``name``."""
-        return [slot for slot, profile in self._slot_profiles() if profile == name]
+        return self._scan_slots_for(name)[0]
+
+    def _scan_slots_for(self, name: str) -> tuple[list[str], list[str]]:
+        """Return ``(slots naming name, unreadable slot stems)``."""
+        entries, unreadable = self._scan_slots()
+        return [slot for slot, profile in entries if profile == name], unreadable
 
     def _slot_profiles(self) -> list[tuple[str, str | None]]:
-        """Return ``(slot_name, profile_name)`` for every slot, in one pass.
+        """Return ``(slot_name, profile_name)`` for every readable slot."""
+        return self._scan_slots()[0]
 
-        Malformed slot TOMLs are logged and skipped so a single bad slot never
-        breaks the whole profile listing. The reported identity is always the
-        display name the TOML embeds, whichever stem (name or id) it lives under.
+    def _scan_slots(self) -> tuple[list[tuple[str, str | None]], list[str]]:
+        """Scan every slot once: ``(entries, unreadable stems)``.
+
+        The reported identity is the display name the TOML embeds, whichever
+        stem (name or id) it lives under. A slot that fails the typed load
+        (``slot.unconverted``, a stale key) still names its profile in the raw
+        TOML, so it is read untyped and counted. Only a file that cannot be
+        parsed as TOML at all lands in ``unreadable`` (by stem); it is logged
+        and left out of the entries so one bad slot never breaks the profile
+        listing, while ``delete`` refuses on it.
         """
-        out: list[tuple[str, str | None]] = []
-        for slot_name in list_slots():
+        entries: list[tuple[str, str | None]] = []
+        unreadable: list[str] = []
+        for stem in list_slots():
             try:
-                cfg = load_slot_config(slot_name)
+                cfg = load_slot_config(stem)
             except Exception as exc:
-                log.warning("profiles.in_use_scan_error slot=%s error=%s", slot_name, exc)
+                log.warning("profiles.in_use_scan_typed_load_failed slot=%s error=%s", stem, exc)
+            else:
+                entries.append((cfg.name, cfg.profile))
                 continue
-            out.append((cfg.name, cfg.profile))
-        return out
+            try:
+                entries.append(read_slot_profile_ref(stem))
+            except ConfigNotFound:
+                continue  # removed between the directory scan and the read
+            except Exception as exc:
+                log.warning("profiles.in_use_scan_error slot=%s error=%s", stem, exc)
+                unreadable.append(stem)
+        return entries, unreadable
 
     def _used_by_index(self) -> dict[str, list[str]]:
         """Map ``profile_name -> [slot names]`` from a single slot scan."""

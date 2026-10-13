@@ -344,6 +344,15 @@ applying. Add those subsections to a version's section to surface them; see
 
 ### Fixed
 
+- Deleting a custom profile is no longer allowed while a slot file still
+  names it but fails to load. A slot that is unconverted (`slot.unconverted`)
+  or otherwise invalid was left out of the profile in-use scan, so the delete
+  went through and the slot later failed with `slot.profile_missing`. The scan
+  now reads the profile name from the raw slot TOML (either layout) when the
+  typed load fails, so `profiles.in_use` and the Profiles tab's `used_by` list
+  include those slots. A slot file that is not valid TOML makes the delete
+  fail with 409 `profiles.slot_unreadable`, naming the file; the profile list
+  keeps working. (#2574)
 - A profile, or the recorded tune of a slot the profile conversion blocked,
   can no longer redirect a slot's model or reach outside it through a short
   or alternative llama.cpp flag. The flag screen only knew one spelling of
