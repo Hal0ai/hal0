@@ -588,6 +588,7 @@ _TUNING_BODIES = [
     ({"enable_thinking": True}, "enable_thinking"),
     ({"vision": True}, "vision"),
     ({"parallel": 2}, "parallel"),
+    ({"ctx_size": 4096}, "ctx_size"),
     ({"chat_template": "chatml"}, "chat_template"),
     ({"model": {"default": "qwen3-4b-q4_k_m", "context_size": 4096}}, "[model].context_size"),
     ({"model": {"default": "qwen3-4b-q4_k_m", "n_gpu_layers": 40}}, "[model].n_gpu_layers"),
@@ -672,75 +673,32 @@ def test_create_slot_without_autoload_persists_explicit_false(
     assert cfg.get("autoload") is False
 
 
-@pytest.mark.parametrize(
-    ("body", "key"),
-    [
-        # Top-level keys an operator reaches for...
-        ({"mtp": True}, "mtp"),
-        ({"enable_thinking": True}, "enable_thinking"),
-        ({"vision": True}, "vision"),
-        ({"parallel": 2}, "parallel"),
-        # ...and the [model] keys this route merges into.
-        # ``ctx_size`` is also a top-level tuning key, so it is named as such.
-        ({"ctx_size": 4096}, "ctx_size"),
-        ({"context_size": 4096}, "[model].context_size"),
-        ({"n_gpu_layers": 40}, "[model].n_gpu_layers"),
-        ({"rope_freq_base": 1e6}, "[model].rope_freq_base"),
-    ],
-)
-def test_patch_defaults_rejects_tuning_keys_with_the_right_message(
-    body: dict[str, Any],
-    key: str,
-    slot_root: Path,
-    container_stub: dict[str, Any],
-    isolated_client: TestClient,
-) -> None:
-    """PATCH /defaults names the PARTITION, not a spelling mistake.
-
-    The key is spelled perfectly; it just belongs on the slot's profile
-    (ADR-0029), and the message has to say so or the operator hunts for a
-    typo that doesn't exist. The slot file is untouched.
-    """
-    before = (slot_root / "chat.toml").read_text(encoding="utf-8")
-    r = isolated_client.patch("/api/slots/chat/defaults", json=body)
-    assert r.status_code == 400, r.text
-    err = r.json()["error"]
-    assert err["code"] == "slot.tuning_key_denied", err
-    assert "belong on a profile" in err["message"]
-    assert key in err["details"]["keys"]
-    assert (slot_root / "chat.toml").read_text(encoding="utf-8") == before
-
-
-def test_patch_defaults_still_rejects_a_real_typo_as_unknown(
-    slot_root: Path,
-    container_stub: dict[str, Any],
-    isolated_client: TestClient,
-) -> None:
-    """The model-owned check must not swallow the unknown-key check.
-
-    A genuine typo still reports its real destination path (``model.<key>``)
-    under ``validation.unknown_keys`` — the partition check runs first but only
-    claims the three keys it owns.
-    """
-    r = isolated_client.patch("/api/slots/chat/defaults", json={"ctx_sizee": 4096})
-    assert r.status_code == 400, r.text
-    err = r.json()["error"]
-    assert err["code"] == "validation.unknown_keys", err
-    assert "model.ctx_sizee" in err["details"]["unknown_keys"]
-
-
-def test_patch_defaults_accepts_a_real_default(
+def test_put_config_accepts_a_model_rebind(
     slot_root: Path,
     container_stub: dict[str, Any],
     isolated_client: TestClient,
 ) -> None:
     """Sanity floor: the guards didn't break the happy path — rebinding the
-    slot's model is what this route is for, and ``[model]`` holds only it."""
-    r = isolated_client.patch("/api/slots/chat/defaults", json={"default": "qwen3-8b"})
+    slot's model is ``PUT /config`` with ``{"model": {"default": ...}}``, and
+    ``[model]`` holds only it."""
+    r = isolated_client.put("/api/slots/chat/config", json={"model": {"default": "qwen3-8b"}})
     assert r.status_code == 200, r.text
     cfg = isolated_client.get("/api/slots/chat/config").json()
     assert cfg["model"] == {"default": "qwen3-8b"}
     assert cfg["profile"] == "chat", "a model swap keeps the slot's profile"
+
+
+def test_patch_defaults_route_is_gone(
+    slot_root: Path,
+    container_stub: dict[str, Any],
+    isolated_client: TestClient,
+) -> None:
+    """ADR-0029 section 6: ``PATCH /api/slots/{name}/defaults`` is removed with
+    no alias. A model rebind is ``PUT /config`` with ``{"model": {"default": ...}}``."""
+    before = (slot_root / "chat.toml").read_text(encoding="utf-8")
+    r = isolated_client.patch("/api/slots/chat/defaults", json={"default": "qwen3-8b"})
+    assert r.status_code in (404, 405), r.text
+    assert (slot_root / "chat.toml").read_text(encoding="utf-8") == before
 
 
 def test_delete_forwards_force_query_param(
@@ -799,25 +757,6 @@ def test_config_write_rebinding_the_model_default_evicts_the_old_id(
     assert "qwen3-4b-q4_k_m" in app.state.upstream_models.get("hal0", [])
 
     r = client.put("/api/slots/chat/config", json={"model": {"default": "qwen3-8b-q4_k_m"}})
-    assert r.status_code == 200, r.text
-
-    bucket = app.state.upstream_models.get("hal0", [])
-    assert "qwen3-4b-q4_k_m" not in bucket
-    assert "qwen3-8b-q4_k_m" in bucket
-
-
-def test_patch_defaults_rebinding_the_model_default_evicts_the_old_id(
-    slot_root: Path,
-    container_stub: dict[str, Any],
-    isolated_app_client: tuple[FastAPI, TestClient],
-) -> None:
-    """PATCH /defaults writes through ``update_config(name, {"model": …})``
-    and ``default`` is a ModelConfig field, so it can rebind the model id
-    exactly like PUT /config — and must evict the old id the same way."""
-    app, client = isolated_app_client
-    assert "qwen3-4b-q4_k_m" in app.state.upstream_models.get("hal0", [])
-
-    r = client.patch("/api/slots/chat/defaults", json={"default": "qwen3-8b-q4_k_m"})
     assert r.status_code == 200, r.text
 
     bucket = app.state.upstream_models.get("hal0", [])
@@ -1737,12 +1676,12 @@ def test_synthetic_composite_slot_serving_when_model_loaded(
     assert by_name["hal0"]["status"] == "serving"
 
 
-def test_patch_defaults_preserves_slot_fields(
+def test_put_config_model_rebind_preserves_slot_fields(
     slot_root: Path,
     isolated_client: TestClient,
 ) -> None:
-    """Regression: the slot-edit Save's ``PATCH /defaults`` must not wipe the
-    rest of the slot.
+    """Regression: a ``PUT /config`` model rebind must not wipe the rest of
+    the slot.
 
     A shallow merge once replaced the whole ``[model]`` table, silently
     dropping ``[model].default``. The partial update touches only the keys it
@@ -1752,7 +1691,7 @@ def test_patch_defaults_preserves_slot_fields(
     assert before.status_code == 200, before.text
     assert before.json()["model"]["default"] == "qwen3-4b-q4_k_m"
 
-    r = isolated_client.patch("/api/slots/chat/defaults", json={"default": "qwen3-8b"})
+    r = isolated_client.put("/api/slots/chat/config", json={"model": {"default": "qwen3-8b"}})
     assert r.status_code == 200, r.text
 
     after = isolated_client.get("/api/slots/chat/config").json()

@@ -376,25 +376,6 @@ _INVALID_JSON_BODY = b"this is not json {{{"
             "request.not_an_object",
             id="slots_config_not_an_object",
         ),
-        # ── slots.py PATCH /api/slots/{name}/defaults ──────────────────
-        # 588: invalid JSON
-        pytest.param(
-            "PATCH",
-            "/api/slots/primary/defaults",
-            _INVALID_JSON_BODY,
-            400,
-            "request.invalid_json",
-            id="slots_defaults_invalid_json",
-        ),
-        # 590: not an object
-        pytest.param(
-            "PATCH",
-            "/api/slots/primary/defaults",
-            _json.dumps("ctx_size=2048").encode("utf-8"),
-            400,
-            "request.not_an_object",
-            id="slots_defaults_not_an_object",
-        ),
         # ── slots.py POST /api/slots/{name}/swap ───────────────────────
         # 680: missing model_id
         pytest.param(

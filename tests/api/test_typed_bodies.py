@@ -11,7 +11,7 @@ Every case here asserts the SAME contract the untyped sites already had:
     ``{"detail": [...]}`` shape, since these routes stay hand-parsed
     ``await request.json()`` handlers, not FastAPI body-params.
   * the LEFT-LOOSE sites (create_slot / update_slot_config /
-    update_slot_defaults / create_model / update_model / add-from-path /
+    create_model / update_model / add-from-path /
     inspect / validate / scan) are unchanged by this lane — a couple of
     smoke checks pin that.
 
@@ -317,14 +317,6 @@ def test_update_slot_config_unknown_key_still_400s(
     slot_root: Path, slots_client: TestClient
 ) -> None:
     r = slots_client.put("/api/slots/chat/config", json={"enabeld": True})
-    assert r.status_code == 400, r.text
-    assert r.json()["error"]["code"] == "validation.unknown_keys"
-
-
-def test_update_slot_defaults_unknown_key_still_400s(
-    slot_root: Path, slots_client: TestClient
-) -> None:
-    r = slots_client.patch("/api/slots/chat/defaults", json={"ctx_sizee": 4096})
     assert r.status_code == 400, r.text
     assert r.json()["error"]["code"] == "validation.unknown_keys"
 
