@@ -96,7 +96,7 @@ from hal0.slot_lifecycle_budget import (
     UNIT_START_TIMEOUT_S,
 )
 from hal0.slots.activation import autoload_enabled
-from hal0.slots.argv import ResolvedArgv, resolve_argv
+from hal0.slots.argv import ResolvedArgv, deny_llama_env, resolve_argv
 from hal0.slots.naming import (
     slot_container_name,
     slot_instance_token,
@@ -1647,6 +1647,9 @@ def _resolve_llama_scalars(
     server_env = server_table.get("env") if isinstance(server_table, dict) else None
     if not isinstance(server_env, dict):
         server_env = None
+    # llama-server reads every option from LLAMA_ARG_* env too: a slot env may
+    # not set what the profile screen refuses (a hand-edited file included).
+    deny_llama_env(server_env, segment="slot [server].env")
 
     model_table = slot_cfg.get("model") if isinstance(slot_cfg.get("model"), dict) else {}
     # Registry model id → llama-server --alias so the container advertises the

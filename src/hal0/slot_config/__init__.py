@@ -276,6 +276,27 @@ def reject_slot_tuning_keys(payload: dict[str, Any]) -> None:
             details={"keys": offenders},
             code="slot.tuning_key_denied",
         )
+    reject_slot_llama_env(payload)
+
+
+def reject_slot_llama_env(payload: dict[str, Any]) -> None:
+    """400 when a slot write sets a llama-server option through ``[server].env``.
+
+    llama.cpp reads every option from a ``LLAMA_ARG_*`` (or ``LLAMA_API_KEY`` /
+    ``HF_TOKEN`` / ``MTMD_BACKEND_DEVICE``) environment variable too, so a
+    slot env could otherwise set what the profile screen refuses
+    (``slot.llama_env_denied``; :func:`hal0.slots.argv.deny_llama_env`).
+    Checked on the ``[server]`` table at the top level and under the loader's
+    ``extra`` catch-all.
+    """
+    from hal0.slots.argv import deny_llama_env
+
+    if not isinstance(payload, dict):
+        return
+    extra = payload.get("extra") if isinstance(payload.get("extra"), dict) else {}
+    for server in (payload.get("server"), extra.get("server")):
+        if isinstance(server, dict):
+            deny_llama_env(server.get("env"), segment="slot [server].env")
 
 
 # ── removed slot-write keys (#1369) ─────────────────────────────────────────
@@ -778,6 +799,7 @@ __all__ = [
     "SlotSelection",
     "merge_slot_config",
     "reject_removed_slot_keys",
+    "reject_slot_llama_env",
     "reject_slot_tuning_keys",
     "slot_scalar_table",
     "slot_write_lock",

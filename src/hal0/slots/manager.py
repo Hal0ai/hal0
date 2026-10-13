@@ -39,6 +39,7 @@ from hal0.config import paths
 from hal0.errors import Hal0Error
 from hal0.registry import fallback as _registry_fallback
 from hal0.slot_config import (
+    reject_slot_llama_env,
     slot_write_lock,
     write_slot_toml,
 )
@@ -2701,6 +2702,9 @@ class SlotManager:
         # the utility slot (vulkan device + rocm-dnse profile). Every field is
         # "new" at create time, so a conflicting device+profile is an explicit
         # operator error and raises.
+        # A llama-server option set through [server].env is refused on every
+        # write path, in-process creates included (slot.llama_env_denied).
+        reject_slot_llama_env(cfg_dict)
         _reconcile_device_profile(cfg_dict, set(cfg_dict.keys()))
         await self._check_npu_exclusivity(slot_name, cfg_dict)
         # SC-4, first-of-type: the create modal no longer asks "make this the
