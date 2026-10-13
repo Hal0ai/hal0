@@ -35,6 +35,7 @@ import structlog
 
 from hal0.config import paths as _paths
 from hal0.errors import Hal0Error
+from hal0.http_client import async_client
 from hal0.upstreams.filters import ModelFilters
 
 if TYPE_CHECKING:
@@ -631,7 +632,9 @@ class UpstreamRegistry:
 
     def _get_client(self) -> httpx.AsyncClient:
         if self._client is None or self._client.is_closed:
-            self._client = httpx.AsyncClient(
+            # Probes local slots and remote providers alike: async_client
+            # keeps the loopback ones off the proxy environment (#2585).
+            self._client = async_client(
                 timeout=httpx.Timeout(connect=5.0, read=300.0, write=10.0, pool=10.0),
                 limits=httpx.Limits(max_connections=64, max_keepalive_connections=16),
             )

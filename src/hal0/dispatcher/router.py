@@ -57,6 +57,7 @@ from hal0.dispatcher.lane_pin import lane_slot_pin, rank_slot_name
 from hal0.dispatcher.single_flight import SingleFlightGroup
 from hal0.errors import Hal0Error
 from hal0.forwarded_headers import forwardable_request_headers
+from hal0.http_client import async_client
 from hal0.slots.state import SlotCrashLooping, SlotState
 from hal0.upstreams.registry import Upstream, UpstreamRegistry
 
@@ -526,7 +527,13 @@ class Dispatcher:
             # _forward_streaming so the stall guard owns the bound (#1893).
             # Connection limits match registry.py to prevent pool starvation
             # under sustained slow-upstream load (#415).
-            self._http_client = httpx.AsyncClient(
+            #
+            # This one client serves both local slots (loopback) and remote
+            # providers. async_client mounts loopback on a direct transport
+            # with these same limits, so a slot request never reaches
+            # HTTP(S)_PROXY / ALL_PROXY, prompt and all, while remote
+            # providers keep the proxy environment (#2585).
+            self._http_client = async_client(
                 timeout=httpx.Timeout(
                     connect=5.0,
                     read=self._direct_read_timeout_s,

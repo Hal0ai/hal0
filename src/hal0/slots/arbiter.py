@@ -113,9 +113,11 @@ async def _comfyui_free() -> bool:
     """
     import httpx
 
+    from hal0.http_client import async_client
+
     timeout = httpx.Timeout(_COMFYUI_HTTP_TIMEOUT_S, connect=_COMFYUI_CONNECT_TIMEOUT_S)
     try:
-        async with httpx.AsyncClient(timeout=timeout) as client:
+        async with async_client(timeout=timeout) as client:
             resp = await client.post(
                 f"{_comfyui_base_url()}/free",
                 json={"unload_models": True, "free_memory": True},
@@ -134,9 +136,11 @@ async def _comfyui_queue_counts() -> tuple[int, int] | None:
     """
     import httpx
 
+    from hal0.http_client import async_client
+
     timeout = httpx.Timeout(_COMFYUI_HTTP_TIMEOUT_S, connect=_COMFYUI_CONNECT_TIMEOUT_S)
     try:
-        async with httpx.AsyncClient(timeout=timeout) as client:
+        async with async_client(timeout=timeout) as client:
             resp = await client.get(f"{_comfyui_base_url()}/queue")
             if resp.status_code != 200:
                 return None
@@ -170,9 +174,11 @@ async def _comfyui_queue_state() -> tuple[int, int] | None:
     """
     import httpx
 
+    from hal0.http_client import async_client
+
     timeout = httpx.Timeout(_COMFYUI_HTTP_TIMEOUT_S, connect=_COMFYUI_CONNECT_TIMEOUT_S)
     try:
-        async with httpx.AsyncClient(timeout=timeout) as client:
+        async with async_client(timeout=timeout) as client:
             resp = await client.get(f"{_comfyui_base_url()}/queue")
     except httpx.ConnectError:
         return None

@@ -49,6 +49,7 @@ from hal0.api.middleware.error_codes import Conflict, UnprocessableEntity
 from hal0.api.routes.power import _probe_power
 from hal0.comfyui.selection import auto_selections, variant_for
 from hal0.hardware import gpu_view
+from hal0.http_client import async_client
 
 router = APIRouter()
 log = logging.getLogger(__name__)
@@ -101,7 +102,7 @@ _IMG_CONTAINER = "hal0-slot-img"
 
 
 def _build_client(timeout: httpx.Timeout) -> httpx.AsyncClient:
-    return httpx.AsyncClient(timeout=timeout, limits=_POOL_LIMITS)
+    return async_client(timeout=timeout, limits=_POOL_LIMITS)
 
 
 def _get_client() -> httpx.AsyncClient:

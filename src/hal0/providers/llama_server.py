@@ -32,6 +32,7 @@ from typing import Any
 import httpx
 
 from hal0.errors import Hal0Error
+from hal0.http_client import async_client
 
 log = logging.getLogger(__name__)
 
@@ -81,7 +82,7 @@ class LlamaServerProvider:
         models_url = f"http://127.0.0.1:{port}/v1/models"
         chat_url = f"http://127.0.0.1:{port}/v1/chat/completions"
         try:
-            async with httpx.AsyncClient(timeout=_HEALTH_TIMEOUT) as client:
+            async with async_client(timeout=_HEALTH_TIMEOUT) as client:
                 # 1. /v1/models must return non-empty list.
                 models_resp = await client.get(models_url)
                 models_resp.raise_for_status()
@@ -132,7 +133,7 @@ class LlamaServerProvider:
         """Passthrough /v1/chat/completions to llama-server."""
         url = f"http://127.0.0.1:{port}/v1/chat/completions"
         try:
-            async with httpx.AsyncClient(timeout=_INFER_TIMEOUT) as client:
+            async with async_client(timeout=_INFER_TIMEOUT) as client:
                 resp = await client.post(url, json=body)
                 resp.raise_for_status()
                 return resp.json()

@@ -22,6 +22,8 @@ from typing import Any
 
 import httpx
 
+from hal0.http_client import async_client
+
 
 async def fetch_for_slot(name: str, port: int | None) -> dict[str, Any]:
     """Proxy a slot's ``GET /v1/audio/voices`` on loopback.
@@ -32,7 +34,7 @@ async def fetch_for_slot(name: str, port: int | None) -> dict[str, Any]:
     if not isinstance(port, int) or port <= 0:
         return {"name": name, "voices": [], "source": "offline"}
     try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(2.0, connect=1.0)) as client:
+        async with async_client(timeout=httpx.Timeout(2.0, connect=1.0)) as client:
             resp = await client.get(f"http://127.0.0.1:{port}/v1/audio/voices")
             resp.raise_for_status()
             payload = resp.json()

@@ -34,6 +34,7 @@ import httpx
 
 from hal0.dispatcher._npu_common import is_container_npu_cfg
 from hal0.errors import Hal0Error
+from hal0.http_client import async_client
 
 log = logging.getLogger(__name__)
 
@@ -241,7 +242,7 @@ class NpuTrioRouter:
             )
         # Per-call client — slightly more expensive but keeps the router
         # usable without a wired-in pool (tests, ad-hoc scripts).
-        async with httpx.AsyncClient(timeout=self._timeout_s) as client:
+        async with async_client(timeout=self._timeout_s) as client:
             return await client.post(url, content=content, json=json, headers=headers)
 
 

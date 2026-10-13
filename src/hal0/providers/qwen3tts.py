@@ -49,6 +49,7 @@ import httpx
 from hal0.config import store as model_store_module
 from hal0.config.paths import model_store_root
 from hal0.errors import Hal0Error
+from hal0.http_client import async_client
 from hal0.providers._gpu import resolve_gpu_device_paths, resolve_gpu_group_ids
 from hal0.providers.base import Mount, Provider, RuntimeLaunchPlan
 
@@ -242,7 +243,7 @@ class Qwen3TTSProvider(Provider):
         """
         url = f"http://127.0.0.1:{port}/health"
         try:
-            async with httpx.AsyncClient(timeout=_HEALTH_TIMEOUT) as client:
+            async with async_client(timeout=_HEALTH_TIMEOUT) as client:
                 resp = await client.get(url)
                 if resp.status_code == 200:
                     body = resp.json()
@@ -261,7 +262,7 @@ class Qwen3TTSProvider(Provider):
         """Passthrough /v1/audio/speech to qwen3tts-server."""
         url = f"http://127.0.0.1:{port}/v1/audio/speech"
         try:
-            async with httpx.AsyncClient(timeout=_INFER_TIMEOUT) as client:
+            async with async_client(timeout=_INFER_TIMEOUT) as client:
                 resp = await client.post(url, json=body)
                 resp.raise_for_status()
                 return resp.json()  # type: ignore[no-any-return]
