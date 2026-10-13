@@ -291,7 +291,8 @@ otherwise a caller can pick its own rate-limit bucket by forging the header.
 
 For state-changing HTTP methods (`POST`/`PUT`/`PATCH`/`DELETE`) and all
 WebSocket upgrades, hal0 checks the `Origin` header before tier auth even
-runs: no header → allowed, origin in `HAL0_ALLOWED_ORIGINS` → allowed,
+runs: no header → allowed, origin in the allowlist (`HAL0_ALLOWED_ORIGINS`
+plus `hal0.toml`'s `[network]` origins) → allowed,
 origin equals the request's own origin **and** the `Host` is an IP address
 (v4 or v6) → allowed, otherwise `403 auth.origin_forbidden` (or WS close code
 `4403`).
@@ -302,11 +303,12 @@ nothing: a page on an attacker's domain can rebind that name to the box's IP
 and send both headers itself (DNS rebinding). The installer seeds
 `HAL0_ALLOWED_ORIGINS` with `localhost`, `127.0.0.1`, every detected LAN IP,
 the box hostname (plus its `.local` form), and `hal0.local`, all on the API
-port, plus the origin of `network.public_url` when an answer file sets one.
-If you reach hal0 by any other name, such as a reverse proxy's domain, its
-origin (`https://hal0.example.com`) must be in `HAL0_ALLOWED_ORIGINS`. The
-variable replaces the list rather than adding to it, so keep the seeded
-entries when you set it.
+port. If you reach hal0 by any other name, such as a reverse proxy's domain
+or a router-assigned `box.lan`, allow its origin with
+`hal0 network public-url set` or `hal0 network origins add`; see
+[Allow the public URL](#allow-the-public-url). Until you do, the browser gets
+`403 auth.origin_forbidden`, and the API log records the refused origin
+under `hal0.auth.origin_rejected`.
 
 ## Route classification
 

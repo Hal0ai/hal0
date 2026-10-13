@@ -338,6 +338,31 @@ def test_dev_open_posture_skips_origin_gate(
     assert resp.status_code != 403, resp.text
 
 
+def test_middleware_named_proxy_origin_needs_network_allowlist(
+    hardened_app: TestClient, tmp_path: Path
+) -> None:
+    # #2327 composed with #2382: a reverse-proxy domain that preserves Host
+    # used to pass via Origin == Host. It is now refused, the 403 names the
+    # persisted remedy, and once [network].extra_origins lists the origin the
+    # same request passes on the next call, with no restart.
+    proxy_headers = {
+        "Host": "hal0.proxy.example",
+        "Origin": "https://hal0.proxy.example",
+        "Authorization": "Bearer admin-xyz",
+    }
+    resp = hardened_app.post("/api/settings", headers=proxy_headers, json={})
+    assert resp.status_code == 403
+    err = resp.json()["error"]
+    assert err["code"] == "auth.origin_forbidden"
+    assert "hal0 network origins add" in err["message"]
+    assert "hal0.proxy.example" not in err["message"]  # caller input is not echoed
+
+    toml = tmp_path / "home" / "etc" / "hal0" / "hal0.toml"
+    toml.write_text('[network]\nextra_origins = ["https://hal0.proxy.example"]\n', encoding="utf-8")
+    resp = hardened_app.post("/api/settings", headers=proxy_headers, json={})
+    assert resp.status_code not in (401, 403), resp.text
+
+
 # ---------------------------------------------------------------------------
 # 3. Login rate-limit
 

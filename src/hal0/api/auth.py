@@ -457,6 +457,16 @@ def _lan_admin_gate(auth_class: AuthClass, scope: dict[str, Any]) -> bool:
 # Enforcement decision
 
 
+# The 403 body names the remedy rather than echoing the caller's Origin.
+# A named origin (a reverse proxy's domain, a router-assigned DNS name)
+# passes only through the allowlist since #2327; `hal0 network` persists one
+# in hal0.toml's [network] section (#2382).
+_ORIGIN_FORBIDDEN_MSG = (
+    "origin not allowed; to allow a reverse-proxy or other named origin, run "
+    "`hal0 network public-url set <url>` or `hal0 network origins add <origin>`"
+)
+
+
 def _envelope(code: str, message: str) -> dict[str, Any]:
     # Mirrors hal0.api.middleware.error_codes._envelope's shape exactly so
     # a 401/403 from this middleware looks identical to one raised by a
@@ -587,11 +597,15 @@ class AuthEnforcementMiddleware:
                 path=path,
                 method=method,
                 scope_type=scope_type,
+                # Truncated: the header is caller-supplied. Logged so an
+                # operator behind a reverse proxy can see which origin to
+                # allow (#2327).
+                origin=_headers_from_scope(scope).get("origin", "")[:200],
             )
             if scope_type == "websocket":
                 await send({"type": "websocket.close", "code": 4403})
                 return
-            payload = json.dumps(_envelope("auth.origin_forbidden", "origin not allowed")).encode(
+            payload = json.dumps(_envelope("auth.origin_forbidden", _ORIGIN_FORBIDDEN_MSG)).encode(
                 "utf-8"
             )
             await send(

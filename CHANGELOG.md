@@ -76,9 +76,31 @@ applying. Add those subsections to a version's section to surface them; see
   the same allowlist, plus `If-None-Match` and `If-Modified-Since`; it
   already stripped cookies and `Authorization`, and now also drops
   `X-API-Key` and any client `X-hal0-*` header.
+- The REST Origin gate no longer accepts a request just because its `Origin`
+  matches its `Host` (#2327). On a DNS name that match proves nothing: a page
+  on an attacker's domain can rebind its own name to the box and send both
+  headers (DNS rebinding). The fallback now accepts only the request's own
+  origin on an IP-literal `Host` (v4 or v6), the same rule the agent-chat
+  WebSocket gate already used (#2326); a named origin passes only through the
+  allowlist. `http://localhost:8080` joins the built-in default allowlist,
+  since browsers resolve `localhost` locally and no remote page can own it.
 
 ### Breaking
 
+- **Reverse proxies and other DNS names need their origin allowed** wherever
+  the Origin gate runs: `require_auth` on, or (#1822) ADMIN routes reached
+  from a non-loopback peer on a LAN-bound box with an admin key (#2327). A browser reaching hal0 by a name the installer did
+  not seed, such as a reverse proxy's domain or a router-assigned `box.lan`,
+  used to pass the Origin gate because its `Origin` matched its `Host`. It
+  now gets `403 auth.origin_forbidden` on state-changing requests and WS
+  close `4403` on upgrades. `hal0 update` cannot know that name, because hal0
+  never recorded it. Allow it once with
+  `hal0 network public-url set https://hal0.example.com` or
+  `hal0 network origins add <origin>` (or Settings ▸ Network); the change
+  applies on the next request with no restart. The refused origin is logged
+  as `hal0.auth.origin_rejected`. Access by `localhost`, `127.0.0.1`, a LAN
+  IP, `hal0.local`, the box hostname or an installer-seeded `public_url` is
+  unchanged, and a box where the gate does not run is unaffected.
 - Upgrades now start at **1.3.0**. Every release manifest carries
   `upgrade_from: ">=1.3.0"` (declared in `manifest.json`), so `hal0 update`
   on a box below 1.3.0 stops with `system.update_upgrade_path_unsupported`
