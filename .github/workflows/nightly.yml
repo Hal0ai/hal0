@@ -49,16 +49,23 @@ jobs:
           ref: main
           fetch-depth: 0
 
-      - name: Greenness gate — latest CI run on main must be success
+      - name: Greenness gate — CI for main HEAD must be success
         id: green
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          # Judge the commit we are about to tag, not "whatever run is newest":
+          # take the newest non-cancelled CI run for main's HEAD. A run that
+          # is still pending/in progress has no conclusion, so it skips (the
+          # next nightly picks the commit up) rather than tagging untested code.
+          HEAD_SHA="$(git rev-parse HEAD)"
           CONCLUSION="$(gh run list --workflow=ci.yml --branch=main \
-            --limit=1 --json conclusion --jq '.[0].conclusion // "none"')"
-          echo "latest main CI conclusion: ${CONCLUSION}"
+            --event=push --commit="${HEAD_SHA}" --limit=20 \
+            --json conclusion,status \
+            --jq '[.[] | select(.conclusion != "cancelled")][0] | if . == null then "none" elif .status != "completed" then .status else .conclusion end')"
+          echo "main HEAD ${HEAD_SHA} CI conclusion: ${CONCLUSION}"
           if [[ "${CONCLUSION}" != "success" ]]; then
-            echo "::notice::main CI is '${CONCLUSION}', not success — skipping nightly."
+            echo "::notice::main CI for ${HEAD_SHA} is '${CONCLUSION}', not success — skipping nightly."
             echo "skip=true" >> "$GITHUB_OUTPUT"
           else
             echo "skip=false" >> "$GITHUB_OUTPUT"
