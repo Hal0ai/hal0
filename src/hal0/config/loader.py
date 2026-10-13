@@ -526,6 +526,29 @@ def save_slot_config(cfg: SlotConfig, path: Path | None = None) -> None:
     write_toml_atomic(target, data)
 
 
+def read_slot_profile_ref(slot_name: str) -> tuple[str, str | None]:
+    """Return ``(display_name, profile)`` from a slot TOML without validating it.
+
+    The untyped sibling of :func:`load_slot_config` for the profile in-use scan:
+    a slot file that fails the typed load (an unconverted tune, a stale key)
+    still *names* its profile, and a profile delete must see that. Resolves both
+    layouts exactly as the typed loader does (top-level ``profile`` or
+    ``[slot].profile``) by sharing :func:`_flatten_slot_toml`.
+
+    Raises:
+        ConfigNotFound: If the slot TOML doesn't exist.
+        ConfigParseError: If the file cannot be parsed as TOML at all.
+    """
+    raw = _read_toml(paths.slots_config_dir() / f"{slot_name}.toml")
+    flat = _flatten_slot_toml(raw, slot_name=slot_name)
+    name = flat.get("name")
+    profile = flat.get("profile")
+    return (
+        name if isinstance(name, str) and name else slot_name,
+        profile if isinstance(profile, str) and profile else None,
+    )
+
+
 def list_slots() -> list[str]:
     """Return all configured slot *stems* of /etc/hal0/slots/*.toml, sorted.
 
@@ -1061,6 +1084,7 @@ __all__ = [
     "load_slot_config",
     "load_slot_config_by_id",
     "load_upstreams_config",
+    "read_slot_profile_ref",
     "resolve_profile",
     "save_agent_config",
     "save_hal0_config",

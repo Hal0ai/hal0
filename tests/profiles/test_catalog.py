@@ -189,6 +189,68 @@ def test_delete_profile_in_use_raises_conflict(tmp_hal0_home: str) -> None:
     assert exc.value.details["slots"] == ["chat"]
 
 
+def _slots_dir(tmp_hal0_home: str) -> Path:
+    root = Path(tmp_hal0_home) / "etc" / "hal0" / "slots"
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def test_delete_profile_blocked_by_unconverted_slot(tmp_hal0_home: str) -> None:
+    """A slot refused with ``slot.unconverted`` still names its profile (#2574)."""
+    root = _slots_dir(tmp_hal0_home)
+    # Legacy nested layout: tuning key under [slot] fails the typed load.
+    (root / "chat.toml").write_text(
+        '[slot]\nname = "chat"\nport = 8081\nprofile = "my-rocm"\nctx_size = 4096\n',
+        encoding="utf-8",
+    )
+    # Flat layout, id-keyed stem: the display name comes from inside the file.
+    (root / "143.toml").write_text(
+        'id = 143\nname = "brain"\nport = 8082\nprofile = "my-rocm"\nparallel = 2\n',
+        encoding="utf-8",
+    )
+    catalog = ProfileCatalog()
+    catalog.create("my-rocm", ProfileConfig())
+
+    assert sorted(catalog.slots_using("my-rocm")) == ["brain", "chat"]
+    by_name = {p.name: p for p in catalog.list()}
+    assert sorted(by_name["my-rocm"].used_by) == ["brain", "chat"]
+
+    with pytest.raises(Conflict) as exc:
+        catalog.delete("my-rocm")
+
+    assert exc.value.code == "profiles.in_use"
+    assert sorted(exc.value.details["slots"]) == ["brain", "chat"]
+    assert "my-rocm" in load_profiles_config().profile
+
+
+def test_delete_profile_fails_closed_on_unparseable_slot(tmp_hal0_home: str) -> None:
+    """A slot that is not even TOML blocks the delete, but not the listing (#2574)."""
+    root = _slots_dir(tmp_hal0_home)
+    (root / "good.toml").write_text(
+        '[slot]\nname = "good"\nport = 8081\nprofile = "chat"\n', encoding="utf-8"
+    )
+    (root / "broken.toml").write_text("[slot\nname = \n", encoding="utf-8")
+    catalog = ProfileCatalog()
+    catalog.create("my-rocm", ProfileConfig())
+
+    by_name = {p.name: p for p in catalog.list()}
+    assert by_name["chat"].used_by == ("good",)
+    assert by_name["my-rocm"].used_by == ()
+
+    with pytest.raises(Conflict) as exc:
+        catalog.delete("my-rocm")
+
+    assert exc.value.code == "profiles.slot_unreadable"
+    assert exc.value.details["slots"] == ["broken"]
+    assert "broken" in str(exc.value)
+    assert "my-rocm" in load_profiles_config().profile
+
+    # Once the slot is repaired (or removed) the delete goes through.
+    (root / "broken.toml").unlink()
+    catalog.delete("my-rocm")
+    assert "my-rocm" not in load_profiles_config().profile
+
+
 def test_cloned_from_persists_and_round_trips(tmp_hal0_home: str) -> None:
     catalog = ProfileCatalog()
 

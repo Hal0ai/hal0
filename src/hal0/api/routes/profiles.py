@@ -584,6 +584,8 @@ async def delete_profile(name: str, request: Request) -> None:
         409 profiles.seed_immutable: name is a seed profile.
         404 profiles.not_found: custom profile not found.
         409 profiles.in_use: one or more slots reference this profile.
+        409 profiles.slot_unreadable: a slot file cannot be parsed, so whether
+            it references this profile is unknown (fail closed).
     """
     async with record_action(request, category="profile", action="profile.delete", target=name):
         ProfileCatalog().delete(name)
