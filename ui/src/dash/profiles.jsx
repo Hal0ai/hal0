@@ -53,6 +53,8 @@ const BLANK = {
 
 // ── typed tune fields ────────────────────────────────────────────────────────
 // enable_thinking on the wire is null (unset: off unless the request asks) | true | false.
+// A structured-output request with no preference is exempt from the off
+// default and keeps the chat template's own default (normalize/thinking.py).
 export function thinkingToForm(v) { return v === true ? 'on' : v === false ? 'off' : 'auto'; }
 export function thinkingFromForm(v) { return v === 'on' ? true : v === 'off' ? false : null; }
 // Unset (null) reasons only when a request asks — the same as 'off' — so the
@@ -708,7 +710,7 @@ export function ProfileDrawer({ mode, source, existing = [], onClose, onSaved })
             data-testid="pf-input-ctx" />
         </FormRow>
 
-        <FormRow label="Thinking" sub="reasoning default for requests this profile serves">
+        <FormRow label="Thinking" sub="reasoning default for requests this profile serves; structured-output (JSON) requests keep the model's template default unless they ask">
           <select className="pf-input mono" value={form.thinking}
             onChange={e => set('thinking', e.target.value)} data-testid="pf-select-thinking">
             <option value="auto">Default — off unless the request asks</option>
