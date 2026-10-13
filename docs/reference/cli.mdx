@@ -383,8 +383,8 @@ launches. Without flags it writes nothing.
   Run it as the service user, `sudo -u hal0 hal0 profile migrate --apply`
   (it refuses to run as root, which would leave a backup hal0 cannot read).
   It writes `/var/lib/hal0/backups/profiles-<ts>.tar.gz` first and checks each
-  converted slot's launch against the plan. A slot that does not match is put
-  back and reported as blocked.
+  converted llama-server slot's launch against the plan (other engines are not
+  compared). A slot that does not match is put back and reported as blocked.
 - `--restore <archive>` puts that backup back for a downgrade: the files and
   the model columns. Stop `hal0-api` first. Until you run `--apply` again,
   the automatic conversion stands down on that release.

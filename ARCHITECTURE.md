@@ -609,10 +609,12 @@ A slot write that carries a tuning key is refused with
 rebinds the model. `hal0.config.migrations.profile_centric` moves an
 older install onto this shape: it runs after `hal0 update` activates the
 new tree and when `hal0 serve` starts `hal0-api`, backs up every file it
-changes, and checks each converted slot's launch against its plan. A slot
-that does not match keeps launching its pre-conversion command, is listed
-by `hal0 update` (exit 2), and shows as `conversion_blocked` on
-`/api/slots`. `hal0 update --rollback` to a release before the conversion
+changes, and checks each converted llama-server slot's launch against its
+plan (`_verify` in `profile_centric_apply.py`; FLM, TTS, STT and image
+slots get no such comparison, so a launch mismatch cannot block them). A
+llama-server slot that does not match keeps launching its pre-conversion
+command, is listed by `hal0 update` (exit 2), and shows as
+`conversion_blocked` on `/api/slots`. `hal0 update --rollback` to a release before the conversion
 puts the backups back first.
 
 (Historical: slots once mapped logically onto a single shared `lemond`
