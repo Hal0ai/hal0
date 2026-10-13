@@ -1,0 +1,196 @@
+---
+title: "Manage slots: the dashboard drawer"
+description: The dashboard's slot edit drawer — lifecycle toggles, hardware and runtime, the profile, the model, the resolved launch command, and deleting a slot from the UI.
+sidebar:
+  order: 11
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+This is the second half of the manage-slots guide. The first half,
+[Manage slots](/docs/guides/manage-slots/), covers the `hal0 slot` CLI: listing,
+creating, loading, swapping, editing, deleting, logs and migration. This page covers
+the dashboard's slot edit drawer, which drives the same API.
+
+## Dashboard: the slot edit drawer
+
+Click **Edit** on any slot card, or a slot's row in the SLOTS list, to open
+its drawer at `#slots/<name>`. It's the dashboard's equivalent of `hal0 slot
+edit`, plus the lifecycle controls, the runtime profile, and a live view of
+the resolved launch command.
+
+### Header: lifecycle toggles and the breaker chip
+
+Two toggles sit side by side in the header, applying instantly (their own
+`PUT`, independent of Save below):
+
+- **Auto-Load** — start this slot automatically at boot. Controls startup
+  only.
+- **Pinned** / **Unpinned** — once loaded, a pinned slot stays resident:
+  exempt from idle and memory-pressure eviction, and `unload`/`delete`
+  require `?force=true`. Pinning never starts a slot on its own — that's
+  Auto-Load's job.
+
+Next to the lifecycle state chip, the drawer shows the same **crash-loop
+breaker** chip the slot card does whenever the slot is backing off or parked
+after repeated load failures — see the [Slot lifecycle
+reference](/docs/reference/slot-lifecycle) for what triggers it.
+
+### Identity, runner, and image status (read-only)
+
+Two read-only strips show the slot's stable `id`, its `port` (assigned by
+PortAuthority), its lifecycle `state`, its resolved runner `binary`, its
+fixed `type` (set at creation — make a new slot for a different kind), and
+its container `image status`. The **Name** field next to them is always
+disabled — display only. A **Rename** button beside it opens a separate
+Rename dialog, which is the actual offline-gated control: while the slot is
+up, its input is disabled too and an inline notice explains that renaming
+re-templates `hal0-slot@<name>` and needs the unit stopped first — see the
+caution under Rename, earlier on this page.
+
+### Hardware
+
+Holds the placement fields the slot owns — see [Who owns what: slot, model,
+profile](/docs/concepts/slots#who-owns-what-slot-model-profile). The old separate **Device**,
+**Runner Image**, and **Runner Binary** controls are gone — a runtime-first
+redesign folded them into two fields, since `device` is now *derived* from
+the runtime you pick rather than an independently editable value:
+
+- **Runtime** lists hal0's runner-registry entries, filtered to what this
+  slot's type and this box's detected hardware can actually run. Each option
+  shows the runtime's name, its lane(s) when it offers more than one (e.g.
+  "Standard · ROCm + Vulkan"), and a "· not pulled" suffix when its image
+  hasn't been downloaded yet; picking one shows its one-line description
+  underneath. Default-tier runtimes are listed first (ADR-0027). The
+  llama.cpp runtimes as of this release: **Standard** (default; ROCm or
+  Vulkan on AMD GPUs), **CPU** (default; no GPU needed) and the optional
+  **NVIDIA CUDA** (CUDA only) — plus the engines for other slot types: **NPU (FastFlowLM)**, **Kokoro speech**,
+  **Moonshine transcription**, **ComfyUI** and the optional **Qwen3 TTS**.
+  A persisted `binary` this box no longer offers for the slot (older
+  release, hand-edited TOML) stays selectable as its own "‹binary› · not in
+  this catalog" option rather than being silently rewritten. Picking a new
+  runtime shows an inline note that Save will move the slot to that lane and
+  restart it.
+- **Lane** — Auto / ROCm / Vulkan pills — only appears when the picked
+  runtime actually offers more than one backend. Today that's Standard
+  alone; every other GPU runtime (NVIDIA CUDA, Qwen3 TTS) declares exactly
+  one backend, so it has nothing to pick between.
+
+**Threads** is the CPU thread count (`0` = runtime default); **NGL** is GPU
+layers to offload (`-1` = all). Every field here needs a restart to take
+effect.
+
+Below NGL, a collapsed **Advanced — image & version** disclosure holds what
+used to live in the main Hardware fields: a read-only **Image** line (the
+effective ref this slot runs — a debug pin if one is set, otherwise the
+release image for the picked Runtime, captioned "pinned by release ·
+reconciled by hal0 update"), a **Version** line pointing at the [Runner
+Images page](/docs/guides/manage-runner-images) for version/rollback
+management, and a **Debug pin** behind a "Pin a custom image ref…" button —
+opening it shows the warning "Debug-only. hal0 can't verify what a custom
+ref ships — the slot keeps its current runtime binary and may fail at
+spawn." and a "Use release image" button to clear it. A pin never widens or
+narrows the Runtime/Lane options above it.
+
+### Profile: the slot's whole tune
+
+The **Profile** select lists the profiles that suit the slot: its type, and,
+for a profile that pins a runtime, the slot's device class. Picking one stages
+it; nothing is written until Save, which applies the profile and restarts the
+slot. The profile is the slot's whole tune (flags, context window, thinking
+default, vision, MTP, and optionally a runtime), so an inline preview above
+the select lists what the pick changes: the runtime and lane when the profile
+pins one, each of context, thinking, vision and MTP that differs (old → new),
+how many flags differ, and that the slot restarts on Save. A profile name the
+slot carries that no longer fits it stays selectable with a warning rather
+than being rewritten.
+
+Beside the select, **Edit profile** opens the selected custom profile in a
+drawer; on a seed profile, which is read-only, the same button reads
+**Duplicate & edit** and forks a custom copy. When other slots run the same
+profile, a hint names them, because editing the profile changes those slots too (each
+picks up the change at its next restart, except a changed runtime, which
+needs the profile re-applied to the slot). Under the select, a read-only line
+shows the **effective context** and where it came from: set by the profile,
+the model's native window, or the default window when the model reports none.
+To change it, edit the profile.
+
+A profile can also carry a **runtime** (see [Capabilities &
+profiles](/docs/concepts/capabilities-and-profiles)), not just flags. Picking
+one that names a runtime different from the slot's current binary mirrors the
+pick straight into the Hardware group's Runtime/Lane controls so you see the
+post-save state immediately. The same profile-wins logic runs whether you
+edit an existing slot or `hal0 slot create --profile <profile>` a new one
+(see [Create a slot](/docs/guides/manage-slots/#create-a-slot)). The only thing that blocks the apply is physical
+infeasibility — a ROCm-only runtime profile on a host with no `/dev/kfd`, for
+example — never whether the slot's bound model happens to run well under it.
+
+A slot whose file the profile-centric conversion could not convert shows a
+**conversion blocked** badge with the reason and the fix. It launches with
+its recorded pre-conversion tune only while its file is unchanged and still
+carries the old tuning keys (placement and the model come from the current
+slot). Editing the file drops the record: if tuning keys remain, the slot
+refuses to launch (`slot.unconverted`) until the conversion succeeds or you
+remove them. See
+[Update and roll back](/docs/guides/update-and-rollback#profile-centric-config-conversion).
+
+### Model: swap and the file facts
+
+The **Model** select swaps the slot's bound model — on a live container slot
+this cold-restarts it, and the drawer confirms before firing that restart. A
+swap keeps the slot's profile: the tune stays, the file changes. The pencil
+button beside it opens the bound model's file facts (chat template, whether
+the file has MTP heads, whether its template works with `--jinja`, native
+context) docked to the left of the slot drawer, so your in-progress slot edits
+stay visible while you adjust the model. It's disabled when no model is bound
+yet, or when the bound id doesn't resolve to a registry row. The drawer has
+no flag or context fields; those are the profile's.
+
+Binding a model that is a fork-only quantization (ROCmFPX-family, IU4 or
+ActiveFPX) is refused rather than left to crash-loop: launching the slot
+answers 422 `slot.unsupported_quant`, and adding or pulling such a file
+answers 422 `models.unsupported_quant`. Use a plain GGUF build of the same
+model.
+
+### Advanced: eviction priority and the resolved command
+
+Collapsed by default. **Eviction priority** (`0`–`100`, default `50`) applies
+instantly on blur — lower unloads first under memory pressure, with
+least-recently-used as the tie-break; pin the slot instead to exempt it
+entirely. Below it, **Resolved command** shows the actual `podman` argv hal0
+would launch right now, with per-flag source badges when the API supplies
+provenance — `base`, `model`, `profile` or `slot`, the layer that set each
+flag — a way to confirm a hardware or profile change actually changed what
+will run before you restart.
+
+### Deleting a slot from the drawer
+
+The footer's **Delete slot** button states the real blast radius before you
+confirm: it removes the `hal0-slot@<name>.service` unit, releases the port
+back to PortAuthority, and deletes the slot's on-disk state directory under
+`/var/lib/hal0/slots/` (keyed by name, or by the slot's numeric id on a box
+that has run `migrate-id-keying`) — the bound model and its weights are
+explicitly untouched.
+
+### The model-edit pencil, outside the drawer
+
+Every slot card in the dashboard's **Slots** view also carries its own pencil
+icon next to its model control. Click it to open the model drawer directly
+for the slot's currently bound model, without opening the slot's own drawer
+first. Here the drawer is **not docked** — it opens in its normal
+flush-right position with its own dim scrim, unlike the docked instance the
+slot drawer opens (see "Model: swap and the file facts," above). The
+pencil is disabled when no model is bound yet.
+
+This is a separate action from the model dropdown on the same card, which
+swaps *which* model the slot runs — the pencil edits the *bound* model's file
+facts.
+
+<Aside type="note" title="Editing raw flags in the dashboard">
+A slot has no launch flags of its own, and `[server].extra_args` is refused
+on a slot write (`slot.tuning_key_denied`). Launch flags are edited on the
+profile, from the **Edit profile** button in the slot drawer or the Profiles
+tab. A profile's flags are screened against the hardware, managed, model-fact
+and host-owned flag lists when it is saved; see [Edit
+configuration](/docs/guides/configure#launch-flags-are-screened-on-the-profile).
+</Aside>

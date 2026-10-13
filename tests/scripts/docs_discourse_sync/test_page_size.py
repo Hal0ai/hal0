@@ -113,3 +113,14 @@ def test_split_config_schema_pages_have_distinct_topics() -> None:
     second = docs["reference/config-schema-profiles"]
     assert first.external_id == "hal0-docs--reference--config-schema"
     assert second.external_id == "hal0-docs--reference--config-schema-profiles"
+
+
+def test_split_manage_slots_pages_have_distinct_topics() -> None:
+    # Same shape as the config-schema split: the original keeps its topic,
+    # the dashboard half gets a topic of its own.
+    docs = {d.rel_key: d for d in discovery.discover_docs(REPO_ROOT / "docs")}
+    assert docs["guides/manage-slots"].external_id == "hal0-docs--guides--manage-slots"
+    assert (
+        docs["guides/manage-slots-dashboard"].external_id
+        == "hal0-docs--guides--manage-slots-dashboard"
+    )
