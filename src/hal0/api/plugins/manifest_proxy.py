@@ -22,9 +22,11 @@ v3 dashboard can consume them through hal0-api as a single boundary:
 
 Header policy (DA-sec-ops MUST-FIX #2):
 
-* Inbound: strip ``Authorization`` + ``Cookie`` from the browser request
-  before forwarding. These are hal0 session credentials; upstream
-  Hermes does not need them and must not see them.
+* Inbound: forward only the allowlist in :mod:`hal0.forwarded_headers`
+  (plus conditional-GET headers), so ``Authorization``, ``Cookie``,
+  ``X-API-Key`` and client ``X-hal0-*`` never reach Hermes (#2538). These
+  are hal0 session credentials; upstream Hermes does not need them and
+  must not see them.
 * Outbound: inject ``X-hal0-Agent: hermes`` (resolved from the
   ``HAL0_AGENT_ID`` env or a per-request override) by design.
 
@@ -52,6 +54,8 @@ import structlog
 from fastapi import APIRouter, Request
 from fastapi.responses import Response
 
+from hal0.forwarded_headers import forwardable_request_headers
+
 log = structlog.get_logger(__name__)
 
 router = APIRouter()
@@ -66,23 +70,6 @@ _DEFAULT_UPSTREAM = "http://127.0.0.1:9119"
 # manifest-driven <script> tags injected by ``PluginTabHost`` while
 # preventing inline scripts and unallowlisted origins from running.
 _MANIFEST_CSP = "script-src 'self' 'strict-dynamic'"
-
-# Hop-by-hop headers — must not be forwarded across the proxy boundary
-# (standard RFC 9110 §7.6.1 set).
-_REQUEST_HOP_BY_HOP = frozenset(
-    {
-        "host",
-        "connection",
-        "keep-alive",
-        "proxy-authenticate",
-        "proxy-authorization",
-        "te",
-        "trailer",
-        "transfer-encoding",
-        "upgrade",
-        "content-length",
-    }
-)
 
 _RESPONSE_HOP_BY_HOP = frozenset(
     {
@@ -99,17 +86,9 @@ _RESPONSE_HOP_BY_HOP = frozenset(
     }
 )
 
-# Browser session credentials. Stripped from every inbound request
-# before forwarding so upstream Hermes never sees hal0 cookies / bearer
-# tokens (identity routes through ``X-hal0-Agent`` only; the
-# DA-sec-ops review locked this in for plugin proxy traffic too).
-_INBOUND_STRIP = frozenset(
-    {
-        "authorization",
-        "cookie",
-        "x-hermes-session-token",
-    }
-)
+# Conditional-GET headers the asset proxy passes on so the browser's cached
+# plugin bundles can revalidate, on top of the shared allowlist.
+_EXTRA_FORWARDED = ("if-none-match", "if-modified-since")
 
 
 def _upstream_base_url() -> str:
@@ -129,12 +108,15 @@ def _agent_id() -> str:
 
 
 def _filter_request_headers(headers: Any) -> dict[str, str]:
-    """Strip hop-by-hop + browser session credentials from the request."""
-    return {
-        k: v
-        for k, v in headers.items()
-        if k.lower() not in _REQUEST_HOP_BY_HOP and k.lower() not in _INBOUND_STRIP
-    }
+    """Allowlisted request headers for the loopback Hermes dashboard (#2538).
+
+    Upstream Hermes never sees hal0 cookies, bearer tokens, ``X-API-Key`` or
+    a client-supplied ``X-hal0-*``: identity routes through the
+    ``X-hal0-Agent`` header the caller sets afterwards (the DA-sec-ops review
+    locked this in for plugin proxy traffic). Keys come back lower-cased, so
+    that header cannot be duplicated by a differently-cased client copy.
+    """
+    return forwardable_request_headers(headers, extra=_EXTRA_FORWARDED)
 
 
 def _filter_response_headers(headers: Any) -> dict[str, str]:

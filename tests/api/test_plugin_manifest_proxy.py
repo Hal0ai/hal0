@@ -304,6 +304,40 @@ def test_manifest_endpoint_strips_auth_and_cookie_and_injects_agent(
     assert forwarded.get("x-hal0-agent") == "hermes"
 
 
+def test_manifest_endpoint_drops_api_key_and_spoofed_agent_header(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#2538: an allowlist, so ``X-API-Key`` and a client ``X-hal0-*`` stay behind.
+
+    The client's ``x-hal0-agent`` used to survive next to the injected
+    ``X-hal0-Agent`` (different case, two dict keys), so Hermes saw both.
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=[])
+
+    seen = _patch_client(monkeypatch, handler)
+
+    resp = client.get(
+        "/api/dashboard/plugins",
+        headers={
+            "X-API-Key": "key-do-not-leak",
+            "x-hal0-agent": "someone-else",
+            "X-hal0-Private": "1",
+            "X-Forwarded-For": "192.0.2.10",
+            "If-None-Match": '"etag-1"',
+        },
+    )
+    assert resp.status_code == 200
+
+    upstream = seen[0]
+    assert "x-api-key" not in upstream.headers
+    assert "x-hal0-private" not in upstream.headers
+    assert "x-forwarded-for" not in upstream.headers
+    assert upstream.headers.get_list("x-hal0-agent") == ["hermes"]
+    assert upstream.headers.get("if-none-match") == '"etag-1"'
+
+
 def test_manifest_endpoint_503_when_upstream_unreachable(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -508,6 +542,44 @@ def test_asset_endpoint_strips_auth_and_injects_agent(
     assert "authorization" not in forwarded
     assert "cookie" not in forwarded
     assert forwarded.get("x-hal0-agent") == "hermes"
+
+
+def test_asset_endpoint_forwards_only_the_allowlist(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#2538: the asset proxy uses the same allowlist plus conditional-GET headers."""
+    body = b"/* css */"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/dashboard/plugins":
+            return httpx.Response(200, json=[])
+        return httpx.Response(200, content=body, headers={"content-type": "text/css"})
+
+    seen = _patch_client(monkeypatch, handler)
+
+    resp = client.get(
+        "/dashboard-plugins/kanban/dist/style.css",
+        headers={
+            "X-API-Key": "key-do-not-leak",
+            "X-Hermes-Session-Token": "token-do-not-leak",
+            "Proxy-Authorization": "Basic do-not-leak",
+            "x-hal0-agent": "someone-else",
+            "X-hal0-Private": "1",
+            "If-Modified-Since": "Tue, 13 Oct 2026 00:00:00 GMT",
+            "If-None-Match": '"etag-2"',
+        },
+    )
+    assert resp.status_code == 200
+
+    # The proxy may refresh the manifest around the asset fetch; check every call.
+    for upstream in seen:
+        assert [v for v in upstream.headers.values() if "do-not-leak" in v] == []
+    (asset_req,) = [r for r in seen if r.url.path == "/dashboard-plugins/kanban/dist/style.css"]
+    assert [v for v in asset_req.headers.values() if "do-not-leak" in v] == []
+    assert "x-hal0-private" not in asset_req.headers
+    assert asset_req.headers.get_list("x-hal0-agent") == ["hermes"]
+    assert asset_req.headers.get("if-modified-since") == "Tue, 13 Oct 2026 00:00:00 GMT"
+    assert asset_req.headers.get("if-none-match") == '"etag-2"'
 
 
 def test_agent_id_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
