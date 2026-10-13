@@ -291,13 +291,10 @@ top-level scalars are accepted on load and normalized.
 | `image_pin` | str \| null | `null` | — | debug-only escape-hatch image ref override (ADR-0006) — not the intended path to a shipped runtime; use `profile.runner` or the slot drawer's Runtime selector instead |
 | `provider` | str | `"llama-server"` | — | one of `llama-server, flm, moonshine, kokoro, qwen3tts, comfyui`; **deprecated**, legacy label only — all slots run as podman containers now |
 | `runtime` | `"container"` | `"container"` | — | only value; deprecated field |
-| `profile` | str \| null | `null` | — | references `profiles.toml` |
-| `parallel` | int \| null | `null` | — | `>= 1`; **inert** (sunset) |
-| `chat_template` | str \| null | `null` | — | **inert** (sunset) |
+| `profile` | str \| null | `null` | — | a seed name or a `profiles.toml` entry; the profile is the slot's whole tune (ADR-0029). `null` = the slot type's seed (`embedding`, `reranking`), else `chat`. A name the catalog does not have fails the launch with `slot.profile_missing` |
 | `default_voice` | str \| null | `null` | — | TTS slots |
 | `default_speed` | float \| null | `null` | — | `0.25-4.0` |
 | `default_response_format` | str \| null | `null` | — | one of `mp3, wav, opus, flac, pcm` |
-| `workers` | int | `1` | — | `>= 1`; deprecated/inert |
 | `idle_timeout_s` | int | `300` | — | `>= 0`; `0` disables IDLE-TTL eviction for this slot only — pressure and pre-load eviction are separate paths, exempted only by `pinned`. Read via the raw-dict sweep path (not the typed loader), an out-of-range value there is clamped/floored at read time, not errored — the typed `POST`/`PUT` API path still hard-rejects via pydantic's `ge` |
 | `pinned` | bool | `false` | — | exempts the slot from auto-eviction; blocks manual unload without `force` |
 | `autoload` | bool \| null | `null` | — | `true` → the Quadlet unit gets `[Install] WantedBy=hal0.target` and the slot starts at boot; `false` → unit exists, nothing starts it. `null` (key absent) is the migration shim: derived from a non-empty `model.default`. `POST /api/slots` persists an explicit value (`false`) |
@@ -316,6 +313,8 @@ but ignored, with a one-time deprecation warning. See
 `output_sanity` (bool, default `true`) is accepted here too, though it is not a typed
 field: `false` exempts this one slot from the output-sanity gate — see
 [Slot lifecycle](/docs/reference/slot-lifecycle/).
+
+A slot holds placement (device, layers, threads, runner), its model and its profile, and nothing else about how the model runs. A write that carries a tuning key (`parallel`, `chat_template`, `workers`, `ctx_size`, `mtp`, `enable_thinking`, `vision`, `[model].context_size`, `[model].ctx_size`, `[model].n_gpu_layers`, `[model].rope_freq_base`, `[model].extra` or `[server].extra_args`) is refused with a 400 `slot.tuning_key_denied` ("belongs on a profile"). A slot file on disk that still carries one fails to load with `slot.unconverted`; `hal0 profile migrate` removes them (see the [CLI reference](/docs/reference/cli/)).
 
 <Aside type="note">
 The slot's `device` is the single authoritative hardware fact; a profile carries no
@@ -342,6 +341,8 @@ other tune live on the slot's profile (ADR-0029); a write carrying one is reject
 | Key | Type | Default | Constraints |
 |---|---|---|---|
 | `env` | dict[str,str] \| null | `null` | keys must match `^[A-Za-z_][A-Za-z0-9_]*$`; values must not contain `\n`/`\r` |
+
+`env` may not set a llama-server option. Names that start with `LLAMA_ARG_`, and `LLAMA_API_KEY`, `HF_TOKEN` and `MTMD_BACKEND_DEVICE`, are refused with a 400 `slot.llama_env_denied`, at write time and again at launch: llama-server reads each of them as a launch option, and launch options belong on the slot's profile.
 
 ### `[npu]` (nested under a slot)
 
@@ -434,7 +435,7 @@ copy — they can't be edited or deleted, only cloned.
 
 | Key | Type | Default | Constraints |
 |---|---|---|---|
-| `flags` | str | `""` | bench-tuned llama-server CLI flags |
+| `flags` | str | `""` | free llama-server flags: KV cache types, batch sizes, sampling, reasoning, `--parallel`. Screened on write and again at launch (below). |
 | `ctx_size` | int \| null | `null` | `128`–`16777216`. `null` = the model's native window, dense-capped at 32768, else 8192. |
 | `enable_thinking` | bool \| null | `null` | request-time reasoning default for slots running this profile |
 | `vision` | `"auto"\|"off"` | `"auto"` | `auto` loads the model's mmproj when it has one |
@@ -442,6 +443,17 @@ copy — they can't be edited or deleted, only cloned.
 | `runner` | str \| null | `null` | optional `RUNNER_IMAGES` registry key; applying the profile sets the slot's `binary` to this key and, for a single-backend runner, also derives the slot's `device` (profile wins). Validated on write — an unknown key 422s `profiles.unknown_runner`. `null` = flags-only tune (every seed profile). |
 | `cloned_from` | str \| null | `null` | provenance |
 | `intent` | str | `""` | dashboard card headline |
+
+`flags` may not set what another layer owns. Each class below is rejected when the profile is saved and refused again at launch, in every spelling llama.cpp accepts (short and alternative forms, `--flag=value`, and `_` for `-`):
+
+| Class | Examples | Error code |
+|---|---|---|
+| Hardware (the slot owns it) | `-ngl`, `-dev`, `-t` | `slot.hardware_flag_denied` |
+| Managed by hal0 | `--model`, `--host`, `--port`, `--alias`, `--ctx-size` | `slot.managed_arg_denied` |
+| Model facts, derived placement | `--jinja`, `--chat-template*`, `--mmproj`, `--no-mmproj`, `--mmproj-auto`, `--spec-draft-device`, `--mmproj-device` | `profiles.model_fact_flag_denied` |
+| Host-owned | remote model fetches (`-hf`, `--model-url`), host file reads and writes (`--api-key-file`, `--log-file`, `--lora`), listener and auth/TLS settings (`--rpc`, `--api-key`), llama.cpp's built-in preset switches (`--gpt-oss-20b-default`, `--spec-default`) | `slot.host_owned_flag_denied` |
+| Bare positional arguments | a value with no flag in front of it | `slot.positional_arg_denied` |
+| `--reasoning-format none` | — | `slot.reasoning_format_none_denied` |
 
 <Aside type="note">
 The slot's own `device` enum is the single authoritative hardware
@@ -458,7 +470,7 @@ Profiles no longer carry an `image` field — image resolution is slot-owned
 ## `stacks.toml`
 
 Root model `StacksConfig`, `extra="forbid"`: `stack: dict[str, StackConfig]` keyed by
-slug. `STACK_SCHEMA_VERSION_CURRENT = 1`.
+slug. `STACK_SCHEMA_VERSION_CURRENT = 3`.
 
 ### `[stack.<slug>]`
 
@@ -471,7 +483,7 @@ slug. `STACK_SCHEMA_VERSION_CURRENT = 1`.
 | `author` | str | `""` |
 | `icon` | str | `""` |
 | `tags` | list[str] | `[]` |
-| `schema_version` | int | `1` |
+| `schema_version` | int | `3` |
 | `hal0_version` | str | `""` |
 | `slots` | list[table] | `[]` — see `StackSlotEntry` below |
 | `profiles` | dict[str, table] | `{}` — `ProfileConfig` entries |
@@ -489,6 +501,8 @@ slug. `STACK_SCHEMA_VERSION_CURRENT = 1`.
 | `device` | str \| null | `null` | — | must be a valid device id if set |
 | `provider` | str \| null | `null` | — | — |
 | `capabilities` | list[table] | `[]` | — | see `StackCapabilityRow` below |
+
+A slot entry names a model, a profile and placement. It carries no tuning: the profile owns `vision`, `mtp`, `enable_thinking` and the flags.
 
 ### `StackCapabilityRow`
 
@@ -516,6 +530,7 @@ slug. `STACK_SCHEMA_VERSION_CURRENT = 1`.
 | `quant` | str | `""` | — |
 | `capabilities` | list[str] | `[]` | — |
 | `backends` | list[str] | `[]` | — |
+| `provider` | str \| null | `null` | — |
 | `mmproj` | str \| null | `null` | — |
 
 ## `agents/<name>.toml`

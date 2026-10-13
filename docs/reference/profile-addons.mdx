@@ -34,11 +34,10 @@ An addon is **a portable profile envelope and nothing else**:
   (`hal0.profiles.screen_profile_runner`).
 
 <Aside type="note">
-The addons hal0 publishes itself are the five tunes pruned out of the seed
-core — `chat-long-context`, `dense`, `moe`, `thinking`, `coding`. All five
-are llama-server
-tunes and ship `runner` **unset**, so the runtime the slot already resolves
-(Auto) is the one-click correct answer for every one of them.
+The addons hal0 publishes itself are four tunes kept out of the seed
+core — `chat-long-context`, `dense`, `moe`, `thinking`. All four are
+llama-server tunes and ship `runner` **unset**, so the runtime the slot
+already resolves (Auto) is the one-click correct answer for every one of them.
 </Aside>
 
 ## The `.hal0profile.json` envelope
@@ -49,7 +48,7 @@ Produced by `hal0.profiles.portable.export_envelope`, and by
 | Field | Type | Meaning |
 |---|---|---|
 | `kind` | string | Always `hal0.profile` (`portable.ENVELOPE_KIND`). Import rejects anything else. |
-| `schema_version` | int | Envelope schema. Current: `1` (`PROFILE_SCHEMA_VERSION_CURRENT`). |
+| `schema_version` | int | Envelope schema. Current: `2` (`PROFILE_SCHEMA_VERSION_CURRENT`). A schema-1 envelope is refused. |
 | `hal0_version` | string | The release that produced the file. Provenance only — never gates import. |
 | `exported_at` | string | Caller-stamped timestamp. `export_envelope` has no clock of its own. |
 | `name` | string | Suggested profile name. The importer may override it. |
@@ -60,22 +59,23 @@ The checksum covers `profile` and nothing else, so re-exporting the same
 profile yields the same checksum no matter what `exported_at` says
 (`portable._checksum`).
 
-A real published addon, `community/addons/coding.hal0profile.json`, verbatim:
+A real published addon, `community/addons/dense.hal0profile.json`, verbatim:
 
 ```json
 {
-  "checksum": "sha256:291988b6402f6bbbdbbc951b7f87e0d2c6ff3e386e94f5e008a1506bf9cf88dd",
+  "checksum": "sha256:11944623612f84aaa4f2a4d13f6425f385df1bf5818160a53f78d8ddd2ac8916",
   "exported_at": "2026-09-01T00:00:00Z",
   "hal0_version": "1.4.0",
   "kind": "hal0.profile",
-  "name": "coding",
+  "name": "dense",
   "profile": {
-    "flags": "--jinja -fa auto -b 2048 -ub 512 --reasoning off --reasoning-budget -1 --no-context-shift --temp 0.7 --top-p 0.95 --top-k 40 --seed 123 --no-mmproj",
-    "intent": "Code-gen workload (coder slot, qwen3-coder, qwopus-coder) · 32K ctx",
-    "mtp": false,
-    "quant": ""
+    "ctx_size": 131072,
+    "flags": "-fa auto -b 2048 -ub 512 --reasoning off --reasoning-budget -1 --no-context-shift --temp 0 --top-p 0.95 --top-k 20 --seed 123",
+    "intent": "Generic dense workload · tuned for 128K ctx",
+    "mtp": "auto",
+    "vision": "off"
   },
-  "schema_version": 1
+  "schema_version": 2
 }
 ```
 
@@ -91,14 +91,14 @@ downloading** whether it can install a row.
   "schema_version": 1,
   "addons": [
     {
-      "name": "coding",
-      "title": "Code-gen workload",
-      "description": "Code-gen workload (coder slot, qwen3-coder, qwopus-coder) · 32K ctx",
+      "name": "dense",
+      "title": "Generic dense workload",
+      "description": "Generic dense workload · tuned for 128K ctx",
       "runtime_family": "llama-server",
       "runner": null,
-      "checksum": "sha256:291988b6402f6bbbdbbc951b7f87e0d2c6ff3e386e94f5e008a1506bf9cf88dd",
-      "file": "coding.hal0profile.json",
-      "min_hal0_version": "1.2.0"
+      "checksum": "sha256:11944623612f84aaa4f2a4d13f6425f385df1bf5818160a53f78d8ddd2ac8916",
+      "file": "dense.hal0profile.json",
+      "min_hal0_version": "1.5.0"
     }
   ]
 }
@@ -117,10 +117,9 @@ downloading** whether it can install a row.
 | `addons[].file` | Envelope filename, relative to the index. |
 | `addons[].min_hal0_version` | Oldest hal0 release that can install this row. |
 
-`min_hal0_version` is **1.2.0** for every row hal0 publishes. 1.1.0 shipped
-portable profiles but not the import-side `runner` handling, so an envelope
-naming a runner key that release did not know had no defined behaviour there;
-the tolerant import lands in 1.2.0.
+`min_hal0_version` is **1.5.0** for every row hal0 publishes
+(`MIN_HAL0_VERSION` in `scripts/export_addons.py`). The envelopes are schema 2,
+which an older release does not read.
 
 ## Serving a catalog
 
@@ -128,7 +127,7 @@ An addon site is a **static directory** — no API, no database:
 
 ```
 /addons/index.json
-/addons/coding.hal0profile.json
+/addons/dense.hal0profile.json
 /addons/thinking.hal0profile.json
 …
 ```
@@ -158,7 +157,7 @@ the `.hal0profile.json` file. The underlying call is
 `POST /api/profiles/import` (`src/hal0/api/routes/profiles.py`):
 
 ```json
-{ "envelope": { }, "name": "coding", "dry_run": false, "force": false }
+{ "envelope": { }, "name": "dense", "dry_run": false, "force": false }
 ```
 
 - **Dry run** (`"dry_run": true`) validates the envelope and reports back
@@ -179,13 +178,16 @@ and `PUT` enforce. A forced import is logged.
 
 ## Compatibility rules
 
-**Envelope schema gate.** `schema_version` greater than the running hal0's
+**Envelope schema gate.** A `schema_version` below 2 is refused whole — 400
+`profiles.envelope_schema_unsupported`, with `got` and `supported_min` in the
+error details, and a "re-export from hal0 1.5" message — rather than having
+fields silently stripped (`hal0.profiles.portable.parse_envelope`). A
+`schema_version` greater than the running hal0's
 `PROFILE_SCHEMA_VERSION_CURRENT` is rejected outright — 400
 `profiles.envelope_too_new`, with `got` and `supported` in the error details
-(`hal0.profiles.portable.import_profile`). Older versions are accepted; the
-migration seam is there, but only v1 exists so far. Unknown *envelope* keys are
-ignored (`ProfileEnvelope` is `extra="ignore"`) so a newer producer's additions
-never break an older importer — the inner `ProfileConfig` still forbids unknown
+(`hal0.profiles.portable.import_profile`). Unknown *envelope* keys are ignored
+(`ProfileEnvelope` is `extra="ignore"`) so a newer producer's additions never
+break an older importer — the inner `ProfileConfig` still forbids unknown
 fields, so a bogus profile key is a hard `profiles.bad_envelope`.
 
 **Unknown `runner`.** A `runner` key the importing box does not have in
@@ -206,10 +208,15 @@ listing the available keys in `details.available`
 first so the UI can offer a different name.
 
 **Flags.** Screened unconditionally on every import, forced or not: a profile
-may not carry hardware flags the slot owns as typed fields (`--device`,
-`--n-gpu-layers`, `--threads`) or arguments hal0 supplies itself (`--model`,
-`--ctx-size`, `--host`, `--port`, `--alias`).
-Violations are 400 `slot.hardware_flag_denied` / `slot.managed_arg_denied`.
+may not carry hardware flags the slot owns (`-ngl`, `-dev`, `-t`), arguments
+hal0 supplies itself (`--model`, `--ctx-size`, `--host`, `--port`, `--alias`),
+model-fact flags (`--jinja`, `--chat-template*`, `--mmproj`, `--no-mmproj`),
+host-owned flags (remote model fetches, host file reads and writes, listener
+and auth/TLS settings, llama.cpp's built-in preset switches), bare positional
+arguments or `--reasoning-format none`. Violations are a 400 with
+`slot.hardware_flag_denied`, `slot.managed_arg_denied`,
+`profiles.model_fact_flag_denied`, `slot.host_owned_flag_denied`,
+`slot.positional_arg_denied` or `slot.reasoning_format_none_denied`.
 
 ## Publishing your own
 

@@ -179,9 +179,15 @@ namespace drift.
   flag-bundle path; `_spec_provider_for` hands NPU (FLM), TTS (Kokoro),
   and image (ComfyUI) slots to their own provider, which builds a
   `RuntimeLaunchPlan` rendered into the same unit shape. The profile
-  (`/etc/hal0/profiles.toml`, seeded from `config/schema.SEED_PROFILES`)
-  supplies the container image + bench-tuned flags; the slot TOML
-  supplies model path, `context_size`, and port.
+  (`/etc/hal0/profiles.toml` with the code-shipped seeds from
+  `config/data/seed_profiles.toml` overlaid) is the whole tune: flags,
+  context window, reasoning default, vision and MTP. The model registry
+  row holds facts about its file; the slot TOML holds placement
+  (device, layers, threads, port, runner) plus which model and profile it
+  runs. The llama-server argv is composed `base` → `model` → `profile` →
+  `slot` and deduplicated last-wins (`slots/argv.py` `resolve_argv`); the
+  runner image is slot-owned (`binary` / `image_pin`), resolved through
+  `RUNNER_IMAGES` (ADR-0029).
 
   Request dispatch (separate from lifecycle) flows through hal0-api's
   `/v1` surface: the `Dispatcher` (registry binding → container-remote
@@ -564,12 +570,11 @@ ship that, it's a separate noun and gets its own gloss entry.)
 
 Per-slot hardware preference. Field on `SlotConfig` replacing v0.1.x's
 overloaded `backend` field (which mixed providers and backends). Enum:
-`gpu-rocm` | `gpu-vulkan` | `cpu` | `npu`. Default for new installs:
-`gpu-rocm`. `model_meta.device_to_backend(device)` maps it to a
-`(recipe, llamacpp)` pair, and the device selects the container profile
-(`config/schema.DEVICE_DEFAULT_PROFILES`): `gpu-rocm` → `rocm` (ROCm-FP4
-llama-server image), `gpu-vulkan` → `vulkan`, `cpu` → `tts`, `npu` →
-`flm` (the FLM NPU image).
+`gpu-rocm` | `gpu-vulkan` | `gpu-cuda` | `cpu` | `npu`. Default for new
+installs: `gpu-rocm`. `model_meta.device_to_backend(device)` maps it to a
+`(recipe, llamacpp)` pair, and the device selects the default profile
+(`config/schema.DEVICE_DEFAULT_PROFILES`): `gpu-rocm`, `gpu-vulkan` and
+`gpu-cuda` → `chat`, `cpu` → `cpu-chat`, `npu` → `flm`.
 
 Note: spike data showed `gpu-vulkan` is much slower than `gpu-rocm` for
 Strix Halo — the user-facing UI should advise `gpu-rocm` as the
@@ -587,12 +592,28 @@ memory or RAG primitive — slots serve inference, memory lives in
 `podman run` of the slot's container (llama-server, FLM, Kokoro, or
 ComfyUI). `SlotManager` dispatches lifecycle (load/unload/swap/status)
 through `ContainerProvider` (`src/hal0/providers/container.py`); the
-profile (`/etc/hal0/profiles.toml`) supplies the image + bench-tuned
-flags, the slot TOML supplies model/port/`context_size`. Slot state
+profile (`/etc/hal0/profiles.toml`) supplies the tune (flags, context
+window, reasoning, vision, MTP), the slot TOML supplies placement and
+names the model and profile. Slot state
 (`ready`/`idle`/`serving`) comes from the state machine in
 `hal0.slots.state`, reconciled against `systemctl is-active` + a `/health`
 probe on the slot's loopback port. Slot identity persists in
 `capabilities.toml`; the runtime layer is the per-slot container.
+
+**Who owns what (ADR-0029).** The model row holds facts about its file
+(path, architecture, native context, chat template, projector, whether it
+has MTP heads). The profile holds every tune. The slot holds placement —
+device, layers, threads, port, runner — and names its model and profile.
+A slot write that carries a tuning key is refused with
+`slot.tuning_key_denied`, and `PATCH /api/slots/{name}/defaults` only
+rebinds the model. `hal0.config.migrations.profile_centric` moves an
+older install onto this shape: it runs after `hal0 update` activates the
+new tree and when `hal0 serve` starts `hal0-api`, backs up every file it
+changes, and checks each converted slot's launch against its plan. A slot
+that does not match keeps launching its pre-conversion command, is listed
+by `hal0 update` (exit 2), and shows as `conversion_blocked` on
+`/api/slots`. `hal0 update --rollback` to a release before the conversion
+puts the backups back first.
 
 (Historical: slots once mapped logically onto a single shared `lemond`
 (Lemonade) process with no per-slot systemd unit. The Lemonade runtime

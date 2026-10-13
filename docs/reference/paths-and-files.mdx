@@ -55,6 +55,9 @@ key layout.
 ├── .first_run_done          # first-run completion sentinel
 ├── registry/
 │   └── ignored-paths.json   # model paths the discovery scan skips (deleted models' kept files)
+├── backups/                 # 0600 tar.gz archives written before a one-shot conversion: runners-<ts>.tar.gz, profiles-<ts>.tar.gz
+├── profile-centric-ledger.json  # demoted-seed markers and blocked-slot records for the profile-centric conversion
+├── profile-centric.json     # audit record of the last conversion run (0640); never read back
 ├── models/                  # default model cache (unless overridden — see below)
 ├── slots/<name>/             # per-slot working dir
 ├── agents/
@@ -66,6 +69,8 @@ key layout.
 ├── .hermes/runtime.json      # Hermes runtime info (embed token, etc)
 └── .config/flm/models/       # default FLM (NPU) model cache
 ```
+
+`profile-centric.json` is written for the record only. What still needs converting is read from each file's content, so running `hal0 profile migrate` again after a conversion plans nothing. To undo a conversion for a downgrade, see `hal0 profile migrate --restore` in the [CLI reference](/docs/reference/cli/).
 
 ### Model store resolution
 
