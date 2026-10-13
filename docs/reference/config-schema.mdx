@@ -291,7 +291,7 @@ top-level scalars are accepted on load and normalized.
 | `image_pin` | str \| null | `null` | — | debug-only escape-hatch image ref override (ADR-0006) — not the intended path to a shipped runtime; use `profile.runner` or the slot drawer's Runtime selector instead |
 | `provider` | str | `"llama-server"` | — | one of `llama-server, flm, moonshine, kokoro, qwen3tts, comfyui`; **deprecated**, legacy label only — all slots run as podman containers now |
 | `runtime` | `"container"` | `"container"` | — | only value; deprecated field |
-| `profile` | str \| null | `null` | — | a seed name or a `profiles.toml` entry; the profile is the slot's whole tune (ADR-0029). `null` = the slot type's seed (`embedding`, `reranking`), else `chat`. A name the catalog does not have fails the launch with `slot.profile_missing` |
+| `profile` | str \| null | `null` | — | a seed name or a `profiles.toml` entry; the profile is the slot's whole tune (ADR-0029). `null` = the slot type's seed (`embedding`, `reranking`), else `chat`; a profileless `tts`, `transcription` or `image` slot uses its engine's default instead (`kokoro`, or `qwen3-tts` on the Qwen3-TTS engine; `moonshine`; ComfyUI's built-in flag bundle). A name the catalog does not have fails the launch with `slot.profile_missing` |
 | `default_voice` | str \| null | `null` | — | TTS slots |
 | `default_speed` | float \| null | `null` | — | `0.25-4.0` |
 | `default_response_format` | str \| null | `null` | — | one of `mp3, wav, opus, flac, pcm` |
@@ -314,7 +314,7 @@ but ignored, with a one-time deprecation warning. See
 field: `false` exempts this one slot from the output-sanity gate — see
 [Slot lifecycle](/docs/reference/slot-lifecycle/).
 
-A slot holds placement (device, layers, threads, runner), its model and its profile, and nothing else about how the model runs. A write that carries a tuning key (`parallel`, `chat_template`, `workers`, `ctx_size`, `mtp`, `enable_thinking`, `vision`, `[model].context_size`, `[model].ctx_size`, `[model].n_gpu_layers`, `[model].rope_freq_base`, `[model].extra` or `[server].extra_args`) is refused with a 400 `slot.tuning_key_denied` ("belongs on a profile"). A slot file on disk that still carries one fails to load with `slot.unconverted`; `hal0 profile migrate` removes them (see the [CLI reference](/docs/reference/cli/)).
+A slot holds placement (device, layers, threads, runner), its model and its profile, and nothing else about how the model runs. A write that carries a tuning key (`parallel`, `chat_template`, `workers`, `ctx_size`, `mtp`, `enable_thinking`, `vision`, `[model].context_size`, `[model].ctx_size`, `[model].n_gpu_layers`, `[model].rope_freq_base`, `[model].extra` or `[server].extra_args`) is refused with a 400 `slot.tuning_key_denied` ("belongs on a profile"). A slot file on disk that still carries one is refused at launch with `slot.unconverted`, unless the profile-centric conversion blocked it and the file is unchanged since, in which case the slot keeps launching the command it ran before the conversion. `hal0 profile migrate --apply` removes the keys (see the [CLI reference](/docs/reference/cli/)).
 
 <Aside type="note">
 The slot's `device` is the single authoritative hardware fact; a profile carries no
@@ -342,7 +342,7 @@ other tune live on the slot's profile (ADR-0029); a write carrying one is reject
 |---|---|---|---|
 | `env` | dict[str,str] \| null | `null` | keys must match `^[A-Za-z_][A-Za-z0-9_]*$`; values must not contain `\n`/`\r` |
 
-`env` may not set a llama-server option. Names that start with `LLAMA_ARG_`, and `LLAMA_API_KEY`, `HF_TOKEN` and `MTMD_BACKEND_DEVICE`, are refused with a 400 `slot.llama_env_denied`, at write time and again at launch: llama-server reads each of them as a launch option, and launch options belong on the slot's profile.
+`env` may not set a llama-server option. Names that start with `LLAMA_ARG_`, and `LLAMA_API_KEY`, `HF_TOKEN` and `MTMD_BACKEND_DEVICE`, are refused with a 400 `slot.llama_env_denied`, at write time and again at launch: each of them sets a llama-server option. A `LLAMA_ARG_*` name sets what the matching flag sets, so it belongs in the profile's `flags` and only when that flag is allowed there. `LLAMA_API_KEY`, `HF_TOKEN` and `MTMD_BACKEND_DEVICE` set `--api-key`, `--hf-token` and `--mmproj-device`, which hal0 owns and no profile may set either.
 
 ### `[npu]` (nested under a slot)
 
@@ -444,7 +444,7 @@ copy — they can't be edited or deleted, only cloned.
 | `cloned_from` | str \| null | `null` | provenance |
 | `intent` | str | `""` | dashboard card headline |
 
-`flags` may not set what another layer owns. Each class below is rejected when the profile is saved and refused again at launch, in every spelling llama.cpp accepts (short and alternative forms, `--flag=value`, and `_` for `-`):
+`flags` may not set what another layer owns. Every class below except the last is rejected when the profile is saved and refused again at launch, in every spelling llama.cpp accepts (short and alternative forms, `--flag=value`, and `_` for `-`). `--reasoning-format none` is rejected on save, but launch removes it from the command instead of refusing:
 
 | Class | Examples | Error code |
 |---|---|---|
@@ -453,7 +453,7 @@ copy — they can't be edited or deleted, only cloned.
 | Model facts, derived placement | `--jinja`, `--chat-template*`, `--mmproj`, `--no-mmproj`, `--mmproj-auto`, `--spec-draft-device`, `--mmproj-device` | `profiles.model_fact_flag_denied` |
 | Host-owned | remote model fetches (`-hf`, `--model-url`), host file reads and writes (`--api-key-file`, `--log-file`, `--lora`), listener and auth/TLS settings (`--rpc`, `--api-key`), llama.cpp's built-in preset switches (`--gpt-oss-20b-default`, `--spec-default`) | `slot.host_owned_flag_denied` |
 | Bare positional arguments | a value with no flag in front of it | `slot.positional_arg_denied` |
-| `--reasoning-format none` | — | `slot.reasoning_format_none_denied` |
+| `--reasoning-format none` | — | `slot.reasoning_format_none_denied` on save; stripped, not refused, at launch |
 
 <Aside type="note">
 The slot's own `device` enum is the single authoritative hardware

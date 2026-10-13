@@ -369,7 +369,7 @@ and export stay dashboard/API-only (`/api/profiles`).
 | `profile edit <name>` | `name` | `--flags`, `--ctx-size`, `--clear-ctx-size`, `--thinking`/`--no-thinking`, `--clear-thinking`, `--vision`, `--mtp`, `--runner` (`''` clears), `--intent`, `--json` |
 | `profile migrate` | — | `--apply`, `--restore <archive>`, `--json` |
 
-Seed profiles are read-only: `profile edit` on one is refused with the duplicate-first hint (`profile create <new> --from <seed>`). Edits reach a running slot at its next restart. A slot with no profile runs its type's seed, and one that names a profile that does not exist fails to launch with `slot.profile_missing`.
+Seed profiles are read-only: `profile edit` on one is refused with the duplicate-first hint (`profile create <new> --from <seed>`). Edits reach a running slot at its next restart, except `runner`: a launch resolves its image from the slot's `binary`, which is copied from the profile's `runner` only when the profile is applied to the slot (`slot edit <slot> --profile <name>`). After `profile edit --runner`, re-apply the profile to each slot that uses it. A llama-server slot with no profile runs its type's seed (`chat` for an `llm` slot), and one that names a profile that does not exist fails to launch with `slot.profile_missing`.
 
 `profile migrate` moves this box to profile-centric config
 ([ADR-0029](/docs/adr/0029-profile-centric-config)).

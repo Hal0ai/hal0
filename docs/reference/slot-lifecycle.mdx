@@ -246,14 +246,14 @@ previously were not.
 
 A slot holds placement (device, layers, threads, runner), its model and its profile. The profile holds every tune; the model row holds facts about its file.
 
-`guard_slot_write_payload` (`hal0.slots.config_write`) is the single shared in-process gate every writer of slot TOML passes through: API routes, stacks-apply and `SlotManager` alike. It refuses:
+Two entry points enforce the same key-space rule. The slot HTTP routes (`POST /api/slots`, `PUT /api/slots/{name}/config`, `PATCH /api/slots/{name}/defaults`) check the body in `api.routes.slots` before touching disk. Writers that never pass through those routes, stacks-apply and `SlotManager`, go through `guard_slot_write_payload` (`hal0.slots.config_write`). Both refuse:
 
 - **A tuning key** (`[model].context_size` / `ctx_size`, `[server].extra_args`, `parallel`, `chat_template`, `workers`, `mtp`, `enable_thinking`, `vision`) with a 400 `slot.tuning_key_denied` ("belongs on a profile"). Set it on the slot's profile (`PUT /api/profiles/{name}`) or pick another profile.
 - **A llama-server option in `[server].env`** (`LLAMA_ARG_*`, `LLAMA_API_KEY`, `HF_TOKEN`, `MTMD_BACKEND_DEVICE`) with a 400 `slot.llama_env_denied`. llama-server reads each of them as a launch option, and launch options belong on the profile.
 
 `PATCH /api/slots/{name}/defaults` only rebinds the slot's model (`{"default": "<model id>"}`) and refuses tuning keys the same way.
 
-A slot file on disk that still carries a tuning key fails to load with `slot.unconverted` until `hal0 profile migrate --apply` removes it. `GET /api/slots` reports a slot the conversion blocked as `conversion_blocked` (`reason`, `fix`, `running_pre_conversion`); while its file is unchanged it keeps launching the command it ran before the conversion.
+A slot file on disk that still carries a tuning key is refused at launch with `slot.unconverted`, and the typed slot-config loader rejects it too, until `hal0 profile migrate --apply` removes the key. The exception is a slot the conversion blocked: while its file is unchanged since, it keeps launching the command it ran before the conversion, and `GET /api/slots` reports it as `conversion_blocked` (`reason`, `fix`, `running_pre_conversion`).
 
 ## Launch composition and effective context
 
