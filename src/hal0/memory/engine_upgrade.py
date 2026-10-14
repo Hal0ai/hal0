@@ -28,8 +28,9 @@ Upgrade shape — build-aside, swap, verify, roll back:
   ``memory_units_bm25`` view). So the old venv alone is never a rollback —
   the snapshot is, and the rollback below restores both together. It is
   taken fresh on every attempt (a previous failed attempt's copy predates
-  everything the old engine wrote since), unless the old engine was not
-  serving before the stop, when the existing copy is the last known good;
+  everything the old engine wrote since). A rollback that cannot restore
+  ``.pg0`` leaves the engine stopped and a ``.pg0.restore-failed`` marker,
+  and the next attempt restores the snapshot before anything else;
 * after the swap the pass polls ``/health`` and requires ``/version`` to
   report exactly the pin; any postcheck failure restores both the old venv and
   the snapshot.
@@ -57,6 +58,7 @@ wrapper only ever catches genuine bugs.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import shutil
@@ -303,6 +305,24 @@ def _prune_keep_newest(parent: Path, pattern: str) -> None:
         shutil.rmtree(stale, ignore_errors=True)
 
 
+#: Written by a rollback whose ``.pg0`` restore failed; holds the snapshot
+#: path. While it exists ``.pg0`` is untrusted (see ``upgrade_memory_engine``).
+_RESTORE_FAILED_MARKER = ".pg0.restore-failed"
+
+
+def _restore_pg(runner: Runner, snapshot: Path, pg: Path) -> bool:
+    """Replace ``pg`` with a copy of ``snapshot``; ``False`` if the copy failed."""
+    shutil.rmtree(pg, ignore_errors=True)
+    try:
+        proc = _run(runner, ["cp", "-a", str(snapshot), str(pg)], timeout=_PIP_TIMEOUT_S)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    if proc.returncode != 0:
+        return False
+    _chown_tree(pg)
+    return True
+
+
 def _svc(seam: SystemCtlSeam, verb: str, *, check: bool = True) -> None:
     seam.systemctl("systemctl", verb, SERVICE, check=check, timeout=_SYSTEMCTL_TIMEOUT_S)
 
@@ -440,13 +460,6 @@ def upgrade_memory_engine(
         return {**result, "status": "build_failed", "error": str(exc)}
     _chown_tree(venv_new)
 
-    # Is the OLD engine serving right now? Decides below whether a snapshot
-    # left by an earlier failed attempt may be replaced: a live engine proves
-    # the current .pg0 is good (and may hold writes newer than that snapshot);
-    # a dead one may mean a rollback's restore failed and the snapshot is the
-    # only good copy left.
-    old_live = http_get(f"{ENGINE_BASE_URL}/health") is not None
-
     # ── Stop the engine; quiesce .pg0 for a consistent snapshot ──
     try:
         _svc(seam, "stop")
@@ -455,23 +468,40 @@ def upgrade_memory_engine(
         log.warning("updater.memory_engine_stop_failed", job_id=job_id, error=str(exc))
         return {**result, "status": "build_failed", "error": f"stop failed: {exc}"}
 
+    # ── A previous rollback that could not restore .pg0 left it untrusted ──
+    #
+    # Its marker names the snapshot that is the last known good copy. Restore
+    # that first; never snapshot, migrate or serve a half-restored data dir.
+    marker = hs / _RESTORE_FAILED_MARKER
+    if marker.exists():
+        recorded = marker.read_text(encoding="utf-8").strip()
+        good = Path(recorded) if recorded else pg_snap
+        if not good.exists() or not _restore_pg(runner, good, pg):
+            shutil.rmtree(venv_new, ignore_errors=True)
+            log.warning(
+                "updater.memory_engine_db_untrusted",
+                job_id=job_id,
+                snapshot=str(good),
+                remedy=f"restore {good} to {pg} by hand (cp -a), delete {marker}, then "
+                f"restart {SERVICE} — the engine stays stopped until then",
+            )
+            return {
+                **result,
+                "status": "snapshot_failed",
+                "error": f"{pg} is untrusted (an earlier rollback could not restore it) "
+                f"and restoring {good} failed",
+            }
+        marker.unlink()
+        log.warning("updater.memory_engine_db_restored", job_id=job_id, snapshot=str(good))
+
     # ── Snapshot: the only rollback for a one-way alembic migration ──
     #
     # Taken fresh on every attempt. A snapshot from an earlier failed attempt
     # is stale: the old engine served (and took writes) after that rollback,
     # and restoring it on a second failure would silently drop every memory
-    # written in between. It is replaced only once the new copy is complete,
-    # and kept as-is when the old engine was not live before the stop (the
-    # current .pg0 is then not known to be good).
-    reuse_snapshot = pg_snap.exists() and not old_live
-    if reuse_snapshot:
-        log.warning(
-            "updater.memory_engine_snapshot_reused",
-            job_id=job_id,
-            snapshot=str(pg_snap),
-            reason="old engine was not answering /health before the stop",
-        )
-    if pg.exists() and not reuse_snapshot:
+    # written in between. The previous snapshot is kept aside until the new
+    # copy is in place.
+    if pg.exists():
         free = shutil.disk_usage(hs).free
         needed = int(_du_bytes(pg) * _SNAPSHOT_FREE_FACTOR)
         if free < needed:
@@ -486,22 +516,35 @@ def upgrade_memory_engine(
                 "without a .pg0 snapshot (the DB migration is one-way)",
             )
             return {**result, "status": "snapshot_failed", "error": "insufficient disk space"}
-        # Not ``.pg0.pre-*``: the converged-branch prune must never see it.
+        # Neither name matches ``.pg0.pre-*``: the converged-branch prune must
+        # never see them.
         pg_snap_new = hs / ".pg0.snapshot-new"
+        pg_snap_prev = hs / ".pg0.snapshot-prev"
+        if pg_snap_prev.exists() and not pg_snap.exists():
+            os.rename(pg_snap_prev, pg_snap)  # a previous swap died half-way
         shutil.rmtree(pg_snap_new, ignore_errors=True)
+        shutil.rmtree(pg_snap_prev, ignore_errors=True)
         proc = _run(runner, ["cp", "-a", str(pg), str(pg_snap_new)], timeout=_PIP_TIMEOUT_S)
-        if proc.returncode != 0:
+        error: str | None = None if proc.returncode == 0 else (proc.stderr or "cp failed")
+        if error is None:
+            try:
+                if pg_snap.exists():
+                    os.rename(pg_snap, pg_snap_prev)
+                os.rename(pg_snap_new, pg_snap)
+            except OSError as exc:
+                error = f"snapshot swap failed: {exc}"
+                if pg_snap_prev.exists() and not pg_snap.exists():
+                    # On failure the previous copy survives as
+                    # .pg0.snapshot-prev; the next attempt moves it back.
+                    with contextlib.suppress(OSError):
+                        os.rename(pg_snap_prev, pg_snap)
+        if error is not None:
             shutil.rmtree(pg_snap_new, ignore_errors=True)
             shutil.rmtree(venv_new, ignore_errors=True)
             _svc(seam, "start", check=False)
-            log.warning(
-                "updater.memory_engine_snapshot_failed",
-                job_id=job_id,
-                error=proc.stderr,
-            )
-            return {**result, "status": "snapshot_failed", "error": proc.stderr}
-        shutil.rmtree(pg_snap, ignore_errors=True)
-        os.rename(pg_snap_new, pg_snap)
+            log.warning("updater.memory_engine_snapshot_failed", job_id=job_id, error=error)
+            return {**result, "status": "snapshot_failed", "error": error}
+        shutil.rmtree(pg_snap_prev, ignore_errors=True)
         _chown_tree(pg_snap)
 
     # ── Swap (two same-fs renames) ──
@@ -543,20 +586,24 @@ def upgrade_memory_engine(
     shutil.rmtree(failed_venv, ignore_errors=True)
     os.rename(venv, failed_venv)
     os.rename(venv_old, venv)
-    if pg_snap.exists():
-        shutil.rmtree(pg, ignore_errors=True)
-        proc = _run(runner, ["cp", "-a", str(pg_snap), str(pg)], timeout=_PIP_TIMEOUT_S)
-        if proc.returncode == 0:
-            _chown_tree(pg)
-        else:
-            log.warning(
-                "updater.memory_engine_pg_restore_failed",
-                job_id=job_id,
-                error=proc.stderr,
-                remedy=f"restore {pg_snap} to {pg} by hand, then restart {SERVICE}",
-            )
-    _svc(seam, "start", check=False)
-    old_healthy = _poll_health(http_get, _ROLLBACK_HEALTH_POLL_TOTAL_S)
+    restored = True
+    if pg_snap.exists() and not _restore_pg(runner, pg_snap, pg):
+        restored = False
+        # Never start an engine on a half-restored data dir: it could
+        # initialise an empty database and serve it. The marker makes the next
+        # attempt restore the snapshot before anything else.
+        (hs / _RESTORE_FAILED_MARKER).write_text(f"{pg_snap}\n", encoding="utf-8")
+        log.warning(
+            "updater.memory_engine_pg_restore_failed",
+            job_id=job_id,
+            remedy=f"engine left stopped; re-run 'hal0 update' to retry the restore, or "
+            f"restore {pg_snap} to {pg} by hand, delete {hs / _RESTORE_FAILED_MARKER} and "
+            f"restart {SERVICE}",
+        )
+    old_healthy = False
+    if restored:
+        _svc(seam, "start", check=False)
+        old_healthy = _poll_health(http_get, _ROLLBACK_HEALTH_POLL_TOTAL_S)
     log.warning(
         "updater.memory_engine_upgrade_failed",
         job_id=job_id,

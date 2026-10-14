@@ -537,8 +537,12 @@ applying. Add those subsections to a version's section to surface them; see
   a new one, so a second rollback restored it and dropped everything written
   since the first rollback. Each attempt now takes a fresh snapshot after
   the old engine stops, and replaces the previous one only once the copy is
-  complete. The existing snapshot is kept unchanged when the old engine was
-  not answering before the stop.
+  complete. A rollback that cannot copy the snapshot back no longer starts
+  the old engine on a half-restored `.pg0`, which could have initialised an
+  empty database and served it. It leaves the engine stopped and writes
+  `.pg0.restore-failed`. The next `hal0 update` restores the snapshot before
+  doing anything else. If that restore fails too, the engine stays stopped
+  and the update reports how to restore by hand.
 
 - A browser origin you allow now survives an installer re-run. The REST and
   WebSocket origin checks only read `HAL0_ALLOWED_ORIGINS`, which sits in the
