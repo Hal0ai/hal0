@@ -189,7 +189,7 @@ def test_reset_key_falls_back_to_local_write_when_api_down(
 
 
 @pytest.mark.parametrize(
-    "url", ["http://10.0.1.50:8080", "https://hal0.example.com", "http://evil@127.0.0.1:8080"]
+    "url", ["http://192.0.2.50:8080", "https://hal0.example.com", "http://evil@127.0.0.1:8080"]
 )
 def test_reset_key_refuses_a_non_loopback_api_url(
     tmp_path, monkeypatch: pytest.MonkeyPatch, captured: dict[str, Any], url: str
