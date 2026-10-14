@@ -968,6 +968,23 @@ def test_resolve_primary_slot_picks_named_primary_slot() -> None:
     assert out["context_length"] == 16384
 
 
+def test_primary_pick_and_auxiliary_main_agree_without_agent_slot() -> None:
+    # ADR-0023 retired `chat`/`primary`: with `brain` + `chat` and no `agent`,
+    # both resolvers must take the same slot (first ready llm in pool order),
+    # never one by alphabetical accident and one by legacy name (#2635).
+    slots = [
+        {"name": "brain", "type": "llm", "state": "ready", "model_id": "brain-model"},
+        {"name": "chat", "type": "llm", "state": "ready", "model_id": "chat-model"},
+    ]
+    primary = hp._resolve_primary_slot(slots_fetcher=lambda: slots)
+    from hal0.agents.role_slots import candidate_from_slot_mapping, resolve_role_slots
+
+    role_map = resolve_role_slots("hermes", [candidate_from_slot_mapping(s) for s in slots])
+    main = next(e for e in role_map.entries if e.role == "main")
+    assert primary["model"] == "brain-model"
+    assert main.model == primary["model"]
+
+
 def test_resolve_primary_slot_reads_the_slot_views_effective_window() -> None:
     """ADR-0029: ``/api/slots`` carries ``ctx_effective`` (the profile's window,
     else the model's native one) — it wins over any other key."""

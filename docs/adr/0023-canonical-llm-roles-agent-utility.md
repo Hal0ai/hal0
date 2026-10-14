@@ -91,3 +91,4 @@ the normal slot-alias machinery.**
 - `src/hal0/memory/__init__.py:222` — Hindsight as the platform engine
 - `src/hal0/dispatcher/_capability_resolve.py:28,156,239,248` — rule-9
   fallback to the `agent` anchor
+- After the 1.3.0 upgrade floor no legacy main-slot names (`chat`, `primary`) are recognised anywhere: Hermes's main model and its auxiliary role map both take `agent`, else the first ready LLM slot in pool order, and log the fallback (#2635).

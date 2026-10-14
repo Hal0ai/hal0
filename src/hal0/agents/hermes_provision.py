@@ -1444,7 +1444,18 @@ def _resolve_primary_slot(
         # only within a residency tier — never let the name match override
         # readiness.
         named = next((s for s in pool if s.get("name") == "agent"), None)
-        return named or next(iter(pool), None)
+        if named is not None:
+            return named
+        chosen = next(iter(pool), None)
+        if chosen is not None:
+            # No ready `agent` slot: first ready llm slot in pool order, the
+            # same fallback role_slots._main_candidate uses (#2635).
+            log.warning(
+                "hermes.primary_slot_fallback",
+                chosen=chosen.get("name"),
+                candidates=[s.get("name") for s in pool],
+            )
+        return chosen
 
     primary = _pick(wired) or _pick(warming)
     if primary is None:

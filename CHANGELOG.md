@@ -32,6 +32,12 @@ applying. Add those subsections to a version's section to surface them; see
 
 ### Fixed
 
+- Hermes's main model and its auxiliary role map now agree on one slot. On a
+  box with no `agent` slot, `_resolve_primary_slot` and the role resolver both
+  take the first ready LLM slot in pool order (`chat`/`primary` are no longer
+  special, per ADR-0023), and log the fallback as
+  `hermes.primary_slot_fallback` / `role_slots.main_fallback` instead of
+  choosing silently (#2635).
 - A box already on the newest nightly no longer offers that same nightly to
   itself as an update. `GET /api/updates/check` and `GET /api/updates/state`
   now compare the release manifest against the installed release

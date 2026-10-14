@@ -7,7 +7,10 @@ import json
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+import structlog
 from pydantic import BaseModel, ConfigDict
+
+log = structlog.get_logger(__name__)
 
 ROLE_ORDER: tuple[str, ...] = (
     "main",
@@ -114,11 +117,21 @@ def _llm_capable(candidate: RoleSlotCandidate) -> bool:
 
 
 def _main_candidate(slots: Sequence[RoleSlotCandidate]) -> RoleSlotCandidate | None:
+    # ADR-0023: `agent` is the only canonical main slot; `chat`/`primary` are
+    # retired and are ordinary slots here. Without `agent`, fall back to the
+    # first ready llm slot in pool order — the same order and rule
+    # hermes_provision._resolve_primary_slot uses, so both agree (#2635).
     eligible = tuple(slot for slot in slots if _llm_capable(slot))
-    for label in ("agent", "chat", "primary"):
-        if candidate := next((slot for slot in eligible if _matches(slot, label)), None):
-            return candidate
-    return next((slot for slot in eligible if slot.ready), None)
+    if agent := next((slot for slot in eligible if _matches(slot, "agent")), None):
+        return agent
+    fallback = next((slot for slot in eligible if slot.ready), None)
+    if fallback is not None:
+        log.warning(
+            "role_slots.main_fallback",
+            chosen=fallback.label,
+            candidates=[slot.label for slot in eligible],
+        )
+    return fallback
 
 
 def _entry(
