@@ -1321,6 +1321,59 @@ class TestBackslashEscapedQuotes:
         assert "pk_tok_Uu12" not in body, body
 
 
+class TestQuotedAuthorizationValue:
+    """#2605, the installer's copy of the fix in hal0.redaction: an
+    ``Authorization`` value that opens with a quote, after a known scheme, is
+    the credential whole, spaces and all; its quotes are kept."""
+
+    @pytest.mark.parametrize(
+        ("line", "expected"),
+        [
+            ('Authorization: Bearer "pk_a pk_b"', f'Authorization: Bearer "{_MASK}"'),
+            ("Authorization: Bearer 'pk_a pk_b' z", f"Authorization: Bearer '{_MASK}' z"),
+            ('Authorization: Basic "pk_a pk_b"', f'Authorization: Basic "{_MASK}"'),
+            ('Proxy-Authorization: Token "pk_a pk_b" z', f'Proxy-Authorization: Token "{_MASK}" z'),
+            ('Authorization: Digest "pk_a pk_b"', f'Authorization: Digest "{_MASK}"'),
+            ('Authorization: Bearer ""', f'Authorization: Bearer "{_MASK}"'),
+            # An escaped quote does not close the value (#2604).
+            (r'Authorization: Bearer "pk_a\"pk_b c" z', f'Authorization: Bearer "{_MASK}" z'),
+            # A quote that never closes, or that a later NAME would straddle,
+            # masks to the end of the line.
+            ('Authorization: Bearer "pk_a pk_b', f'Authorization: Bearer "{_MASK}'),
+            ('Authorization: Basic "pk_a HF_TOKEN="pk_b" end', f'Authorization: Basic "{_MASK}'),
+            # A secret after the closing quote is masked on its own.
+            (
+                'Authorization: Basic "pk_a pk_b" HF_TOKEN=pk_c',
+                f'Authorization: Basic "{_MASK}" HF_TOKEN={_MASK}',
+            ),
+        ],
+    )
+    def test_the_whole_quoted_value_is_masked(self, line: str, expected: str) -> None:
+        out = _mask_patterns(line).strip()
+        assert out == expected
+        assert _mask_patterns(out).strip() == expected  # idempotent
+
+    def test_an_unclosed_quote_ends_at_its_own_line(self) -> None:
+        text = 'Authorization: Bearer "pk_a\nmessage="hello"\nAuthorization: Basic "pk_b pk_c" x'
+        assert _mask_patterns(text).splitlines() == [
+            f'Authorization: Bearer "{_MASK}',
+            'message="hello"',
+            f'Authorization: Basic "{_MASK}" x',
+        ]
+
+    def test_the_report_carries_no_quoted_credential(self, tmp_path: Path) -> None:
+        box = _make_box(tmp_path)
+        box["log"].write_text(
+            'curl -H Authorization: Bearer "pk_bear_Zz12 pk_bear_Yy34"\n'
+            "Authorization: Basic 'pk_basic_Xx56 pk_basic_Ww78' z\n"
+        )
+        proc, report = _run_report(box)
+        assert report is not None and report.is_file(), proc.stderr
+        body = report.read_text()
+        for secret in ("pk_bear_Zz12", "pk_bear_Yy34", "pk_basic_Xx56", "pk_basic_Ww78"):
+            assert secret not in body, body
+
+
 # ── #2402: multi-line TOML arrays under a sensitive key ─────────────────────
 
 _ARR_A = "arrSecretAlpha1Kq2Wz9Xc"  # no known prefix: literal pass only

@@ -382,6 +382,26 @@
     [
       "{\"token\": \"pk8 \\\"escaped tail\\\" end\", \"x\": 1}",
       "escaped tail"
+    ],
+    [
+      "Authorization: Basic \"pk9 basic tail\"",
+      "basic tail"
+    ],
+    [
+      "Authorization: Token 'pk9 token tail' z",
+      "token tail"
+    ],
+    [
+      "Proxy-Authorization: Basic \"pk9 proxy tail\"",
+      "proxy tail"
+    ],
+    [
+      "Authorization: Digest \"pk9 \\\"escaped tail\\\" end\" z",
+      "escaped tail"
+    ],
+    [
+      "Authorization: Bearer \"pk9 bearer tail\"",
+      "bearer tail"
     ]
   ],
   "keep": [
@@ -702,6 +722,46 @@
     [
       "password=\"a b\\",
       "password=\"***REDACTED***"
+    ],
+    [
+      "Authorization: Basic \"abc def\"",
+      "Authorization: Basic \"***REDACTED***\""
+    ],
+    [
+      "Authorization: Token 'abc def' z",
+      "Authorization: Token '***REDACTED***' z"
+    ],
+    [
+      "Proxy-Authorization: Basic \"abc def\" z",
+      "Proxy-Authorization: Basic \"***REDACTED***\" z"
+    ],
+    [
+      "Authorization: Basic \"a\\\"b c\" z",
+      "Authorization: Basic \"***REDACTED***\" z"
+    ],
+    [
+      "Authorization: Basic \"abc def",
+      "Authorization: Basic \"***REDACTED***"
+    ],
+    [
+      "Authorization: Basic \"\"",
+      "Authorization: Basic \"***REDACTED***\""
+    ],
+    [
+      "Authorization: Basic \"abc def\"\nnext \"q\" x",
+      "Authorization: Basic \"***REDACTED***\"\nnext \"q\" x"
+    ],
+    [
+      "Authorization: Digest \"a b\" HF_TOKEN=z",
+      "Authorization: Digest \"***REDACTED***\" HF_TOKEN=***REDACTED***"
+    ],
+    [
+      "Authorization: Basic \"a HF_TOKEN=\"zz\" end",
+      "Authorization: Basic \"***REDACTED***\" end"
+    ],
+    [
+      "Authorization: Bearer \"abc def\"",
+      "Authorization: Bearer ***REDACTED***"
     ]
   ],
   "mask_names": [

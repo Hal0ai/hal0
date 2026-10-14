@@ -715,8 +715,32 @@ const AUTH_RAW_RE = rx(
   'giu',
 )
 
+// `_AUTH_QUOTED_RE`: up to a quoted value after an `Authorization` scheme.
+const AUTH_QUOTED_RE = rx(
+  String.raw`authorization["']?\s*:\s*["']?${AUTH_SCHEMES}\s+(?=["'])`,
+  'giu',
+)
+
+// `_mask_quoted_values`: `prefix` (global) matches up to a value that opens with
+// a quote; mask each such value, as `quotedValueEnd` bounds it, and keep the
+// match and the value's quotes.
+function maskQuotedValues(line: string, prefix: RegExp, log: boolean): string {
+  let out = ''
+  let last = 0
+  prefix.lastIndex = 0
+  for (let m = prefix.exec(line); m; m = prefix.exec(line)) {
+    const start = m.index + m[0].length
+    const [end, closed] = quotedValueEnd(line, start, log)
+    out += line.slice(last, start) + line[start] + MASK + (closed ? line[start] : '')
+    last = end
+    prefix.lastIndex = end
+  }
+  return out + line.slice(last)
+}
+
 function maskAuthorization(line: string, log: boolean): string {
-  let out = maskBareValues(line, AUTH_BASIC_TOKEN_RE, AUTH_BASIC_TOKEN_VALUE, log)
+  let out = maskQuotedValues(line, AUTH_QUOTED_RE, log)
+  out = maskBareValues(out, AUTH_BASIC_TOKEN_RE, AUTH_BASIC_TOKEN_VALUE, log)
   out = maskBareValues(out, BEARER_RULE_RE, BEARER_TOKEN, log)
   out = maskBareValues(out, AUTH_SCHEME_RE, AUTH_SCHEME_VALUE, log)
   return maskBareValues(out, AUTH_RAW_RE, AUTH_RAW_VALUE, log, true)

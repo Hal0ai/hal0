@@ -1357,6 +1357,9 @@ class TestUnclosedQuotes:
             'api_key="a\nx="b\n',
             # A backslash and the character after it are one unit (#2604).
             'api_key="a\\" ',
+            'Authorization: Bearer "a ',
+            "Authorization: Basic 'a b' ",
+            'Authorization: Digest "a\\" ',
             "api_key='a \\' ",
             'api_key="a\\\\"b ',
         ],
@@ -1397,6 +1400,39 @@ class TestBackslashEscapedQuotes:
         out = redact(r'password="pk_a\\" next=1')
         assert out.endswith(" next=1"), out
         assert "pk_a" not in out, out
+
+
+class TestQuotedAuthorizationValue:
+    """#2605: an ``Authorization`` value that opens with a quote, after a known
+    scheme, is masked whole by the shareable-text pass as it is by the log pass,
+    and keeps its quotes."""
+
+    @pytest.mark.parametrize(
+        ("line", "expected"),
+        [
+            ('Authorization: Bearer "abc def"', f'Authorization: Bearer "{MASK}"'),
+            ("Authorization: Bearer 'abc def' z", f"Authorization: Bearer '{MASK}' z"),
+            ('Authorization: Basic "abc def"', f'Authorization: Basic "{MASK}"'),
+            ('Proxy-Authorization: Token "abc def" z', f'Proxy-Authorization: Token "{MASK}" z'),
+            (r'Authorization: Bearer "a\"b c" z', f'Authorization: Bearer "{MASK}" z'),
+            ('Authorization: Bearer "abc def', f'Authorization: Bearer "{MASK}'),
+            ('Authorization: Bearer ""', f'Authorization: Bearer "{MASK}"'),
+            (
+                'Authorization: Bearer "a b"\nmessage="hello"',
+                f'Authorization: Bearer "{MASK}"\nmessage="hello"',
+            ),
+        ],
+    )
+    def test_the_quoted_value_is_masked_whole(self, line: str, expected: str) -> None:
+        out = redact_shareable_text(line)
+        assert out == expected
+        assert redact_shareable_text(out) == expected  # idempotent
+
+    @pytest.mark.parametrize(
+        "line", ['Authorization: Bearer "abc def"', "Authorization: Bearer 'abc def'"]
+    )
+    def test_the_log_pass_masks_it_too(self, line: str) -> None:
+        assert "abc" not in redact_log_line(line)
 
 
 # ── #2413: the cases shared with the dashboard's browser-side port ─────────
