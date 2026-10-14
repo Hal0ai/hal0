@@ -303,7 +303,10 @@ _hal0_report_redact_toml_stream() {
 _hal0_report_emit_secret() {
     local value="$1" line
     while IFS= read -r line; do
-        line="${line%$'\r'}"
+        # One trailing CR off. Not `${line%$'\r'}`: bash tries every suffix
+        # length against that pattern, so on a line as long as a megabyte it is
+        # quadratic (#2618); a substring is linear.
+        [[ "${line: -1}" == $'\r' ]] && line="${line::${#line}-1}"
         [[ ${#line} -ge 4 ]] || continue
         # Digits alone or inside one matching quote pair (`'12345'`, `"86400"`):
         # the env harvest emits the raw value too, quotes included.
@@ -518,6 +521,26 @@ _hal0_report_text_value_is_secret() {
     return 0
 }
 
+# True if $1 matches the ERE $2 (the `NAME[=:]` tail of a harvested value).
+# bash's `=~` backtracks over the pattern's unbounded name run at every start
+# position, so a long value of name characters took quadratic time (320 KB of
+# `a` took 1.3 s, #2626). A value past _HAL0_REPORT_TAIL_BASH_MAX characters
+# goes to grep -E instead: the same pattern in the same locale, which GNU grep
+# runs as a DFA, linear in the value (a here-string, not a pipe, so grep -q
+# closing early cannot fail the pipeline under pipefail). Short values stay on
+# `=~`, where the quadratic is below a millisecond and grep's process start
+# would cost more.
+# $1 must be one line, as a harvested hit always is: grep judges a line at a
+# time while `=~` anchors `$` at the end of the whole string.
+_HAL0_REPORT_TAIL_BASH_MAX=8192
+_hal0_report_ends_in_name() {
+    if ((${#1} <= _HAL0_REPORT_TAIL_BASH_MAX)); then
+        [[ "$1" =~ $2 ]]
+    else
+        grep -qaE -- "$2" <<<"$1"
+    fi
+}
+
 # Values of every `SENSITIVE_NAME=value` or `SENSITIVE_NAME: value` (a JSON
 # field, a YAML key, an HTTP header; #2400) that appears anywhere in the
 # assembled report (an echoed export, a command line), so the same value is
@@ -553,7 +576,7 @@ _hal0_report_harvest_report_text() {
         # A hyphenated name is judged whole (`x-api-key`, `max-tokens`, #2466);
         # a flag's leading dashes do not count.
         while [[ "$name" == -* ]]; do name="${name#-}"; done
-        [[ "${value,,}" =~ $tail ]] && continue
+        _hal0_report_ends_in_name "${value,,}" "$tail" && continue
         _hal0_report_text_value_is_secret "$name" "$value" || continue
         _hal0_report_emit_secret "$value"
     done <<<"$hits"
