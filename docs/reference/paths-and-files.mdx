@@ -70,7 +70,7 @@ key layout.
 └── .config/flm/models/       # default FLM (NPU) model cache
 ```
 
-`profile-centric.json` is not consulted to decide what still needs converting: that is read from each file's content, so running `hal0 profile migrate` again writes nothing for entries already converted. An unchanged blocked slot is reported again and is not retried until its file changes. The file does have one reader: `hal0 update --rollback` takes the list of conversion backups from it when the target release predates the conversion. Do not delete it while you may still roll back; without it the rollback finds no backups to restore. To undo a conversion by hand for a downgrade, see `hal0 profile migrate --restore` in the [CLI reference](/docs/reference/cli/).
+`profile-centric.json` is not consulted to decide what still needs converting: that is read from each file's content, so running `hal0 profile migrate` again writes nothing for entries already converted. An unchanged blocked slot is reported again and is not retried until its file changes. The file does have one reader: `hal0 update --rollback` takes the list of conversion backups from it when the target release predates the conversion. Do not delete it while you may still roll back; without it the rollback finds no backups to restore. To undo a conversion by hand for a downgrade, see `hal0 profile migrate --restore` in the [CLI reference](/docs/reference/cli-operator/).
 
 ### Model store resolution
 

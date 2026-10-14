@@ -838,7 +838,7 @@ reversible; the runtime reads either layout, so run it in a downtime window.
 Everything else — schema migrations, the config-load repairs, and the
 runner-system conversion (`hal0 runner-images migrate`, which archives every
 file it changes under `/var/lib/hal0/backups/` first; see
-[Manage runner images](./docs/guides/manage-runner-images.mdx)) — runs
+[Manage runner images](./docs/guides/manage-runner-images-lifecycle.mdx)) — runs
 itself. Full breaking-change, migration and known-issue detail is in
 [`CHANGELOG.md`](./CHANGELOG.md).
 

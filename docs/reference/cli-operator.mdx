@@ -1,0 +1,185 @@
+---
+title: "hal0 CLI reference: runner images, profiles, MCP, auth & more"
+description: "Reference for the hal0 runner-images, profile, mcp, auth, network, oauth and board sub-apps, the slot lifecycle timeouts, and the hal0-agent binary — verified against src/hal0/cli in the v1.0 tree."
+sidebar:
+  order: 11
+---
+
+This is the second half of the CLI reference. The first half,
+[hal0 CLI reference](/docs/reference/cli/), covers the global flags, the top-level
+commands, and the `slot`, `model`, `memory`, `config`, `doctor`, `upstream`,
+`capabilities`, `comfyui`, `agent` and `app` sub-apps. This page covers the remaining
+sub-apps, the slot lifecycle timeouts, and the separate `hal0-agent` binary.
+
+## `hal0 runner-images` — manage the runner-image catalogue
+
+Talks to the runner-image store/sync/pull/rm service layer directly (not
+the API), so `ls` keeps working even when `hal0-api` is down. `rm` mirrors
+`DELETE /api/runner-images/{id}/tags/{tag}`'s guard order, but cannot see
+a dashboard pull job's in-memory state — a concurrently running `hal0-api`
+pull of the same tag can race it.
+
+| Command | Args | Flags |
+|---|---|---|
+| `runner-images ls` | — | — |
+| `runner-images sync` | — | — (prints each catalogue entry it skipped and why) |
+| `runner-images pull <id>` | `id` (catalogue id) | `--tag` (default: the row's headline tag) |
+| `runner-images rm <id>` | `id` (catalogue id) | `--tag` (required) |
+| `runner-images migrate` | — | `--apply`, `--restore <archive>` |
+
+`runner-images migrate` previews the one-shot conversion onto the fresh
+runner system (ADR-0028). `hal0 update` runs it automatically. `--apply`
+runs it, backing up every file it changes to
+`/var/lib/hal0/backups/runners-<ts>.tar.gz` first, and `--restore <archive>`
+puts such a backup back.
+
+## `hal0 profile` — inspect and edit profiles
+
+A profile is the tune a slot launches a model with: flags, context window, reasoning
+default, vision and MTP ([ADR-0029](/docs/adr/0029-profile-centric-config)). The
+context window is a profile setting, not a slot one: `slot create` / `slot edit` have no
+`--ctx-size`; use `profile create --ctx-size` / `profile edit --ctx-size`, then point the
+slot at the profile with `slot edit <slot> --profile <name>`. Delete, generate, import
+and export stay dashboard/API-only (`/api/profiles`).
+
+| Command | Args | Flags |
+|---|---|---|
+| `profile list` | — | `--json` |
+| `profile show <name>` | `name` | `--json` |
+| `profile create <name>` | `name` | `--from <profile>` (duplicate a seed or custom profile first), `--flags`, `--ctx-size` (128-16777216), `--thinking`/`--no-thinking`, `--vision` (`auto`\|`off`), `--mtp` (`auto`\|`off`), `--runner`, `--intent`, `--json` |
+| `profile edit <name>` | `name` | `--flags`, `--ctx-size`, `--clear-ctx-size`, `--thinking`/`--no-thinking`, `--clear-thinking`, `--vision`, `--mtp`, `--runner` (`''` clears), `--intent`, `--json` |
+| `profile migrate` | — | `--apply`, `--restore <archive>`, `--json` |
+
+Seed profiles are read-only: `profile edit` on one is refused with the duplicate-first hint (`profile create <new> --from <seed>`). Edits reach a running slot at its next restart, except `runner`: a launch resolves its image from the slot's `binary`, which is copied from the profile's `runner` only when the profile is applied to the slot (`slot edit <slot> --profile <name>`). After `profile edit --runner`, re-apply the profile to each slot that uses it. A llama-server slot with no profile runs its type's seed (`chat` for an `llm` slot), and one that names a profile that does not exist fails to launch with `slot.profile_missing`.
+
+`profile migrate` moves this box to profile-centric config
+([ADR-0029](/docs/adr/0029-profile-centric-config)).
+It reads this box's slot, profile and stack files and the model registry, and
+prints the profiles it would generate, the slots it would re-point, the keys it
+would drop, and every configured value that does not reach the launch today.
+Those values are dropped, never applied: the conversion keeps what each slot
+launches. Without flags it writes nothing.
+
+- `--apply` converts. `hal0 update` and `hal0 serve` do this automatically.
+  Run it as the service user, `sudo -u hal0 hal0 profile migrate --apply`
+  (it refuses to run as root, which would leave a backup hal0 cannot read).
+  It writes `/var/lib/hal0/backups/profiles-<ts>.tar.gz` first and checks each
+  converted llama-server slot's launch against the plan (other engines are not
+  compared). A slot that does not match is put back and reported as blocked.
+- `--restore <archive>` puts that backup back for a downgrade: the files and
+  the model columns. Stop `hal0-api` first. Until you run `--apply` again,
+  the automatic conversion stands down on that release.
+
+It exits 2 when anything cannot be converted: a slot, a stored profile (even
+one no slot uses), or a stack. `--json` lists those under `blocked`. What still
+needs converting is read from each file's content, so running it again after a
+conversion shows nothing to do.
+
+## `hal0 mcp` — manage MCP servers
+
+`add`/`remove` are aliases of `install`/`uninstall` (ADR-0015) — same
+route, same behaviour, different vocabulary.
+
+| Command | Args | Flags |
+|---|---|---|
+| `mcp list` | — | `--json` |
+| `mcp status <server_id>` | `server_id` | `--json` |
+| `mcp install <url_spec>` | `url_spec` | `--json` |
+| `mcp add <url_spec>` | `url_spec` | `--json` |
+| `mcp uninstall <server_id>` | `server_id` | `--force`/`-f` |
+| `mcp remove <server_id>` | `server_id` | `--force`/`-f` |
+| `mcp restart <server_id>` | `server_id` | — |
+| `mcp test <server_id>` | `server_id` | `--json` |
+| `mcp allow <server_id> <tool>` | `server_id`, `tool` | — |
+| `mcp gate <server_id> <tool>` | `server_id`, `tool` | — |
+| `mcp block <server_id> <tool>` | `server_id`, `tool` | — |
+| `mcp expose <server_id>` | `server_id` | `--hermes`/`--no-hermes`, `--brain`/`--no-brain` |
+| `mcp catalog list` | — | `--json` |
+| `mcp catalog refresh` | — | `--json` |
+
+## `hal0 auth` — manage hal0 API authentication
+
+`KeyTier` enum: `admin|client`. `RequireToggle` enum: `on|off`.
+
+| Command | Args | Flags |
+|---|---|---|
+| `auth status` | — | `--json` |
+| `auth rotate [tier]` | optional `tier` (default `admin`) | `--force`/`-f` |
+| `auth require <toggle>` | `toggle` (required) | — |
+| `auth reset-key` | — (run with `sudo`) | `--force`/`-f` |
+
+## `hal0 network` — browser origins hal0 accepts
+
+Edits `hal0.toml` `[network]` through the API, never `api.env`, so the values
+survive an installer re-run. `public-url set|clear` use `PUT /api/settings`.
+`origins add|remove` use `POST /api/settings/network`, which applies the one
+entry to the list on disk, so a concurrent edit elsewhere is never lost.
+Changes apply on the next request, with no restart. See [Allow the public URL](/docs/operate/auth#allow-the-public-url).
+
+| Command | Args | Flags |
+|---|---|---|
+| `network public-url show` | — | — |
+| `network public-url set <url>` | `url`: absolute `http`/`https` URL | — |
+| `network public-url clear` | — | — |
+| `network origins list` | — | — |
+| `network origins add <origin>` | `origin`: `scheme://host[:port]`, no path | — |
+| `network origins remove <origin>` | `origin` | — |
+
+## `hal0 oauth` — connect OAuth providers for Hermes skills
+
+Consent is a link, not a pasted code: the provider redirects straight back to
+`GET /api/oauth/{provider}/callback` and hal0 exchanges the code itself. Poll
+`oauth status <provider>` until `connected` flips true.
+
+| Command | Args | Flags |
+|---|---|---|
+| `oauth list` | — | `--json` |
+| `oauth connect <provider>` | `provider` | — |
+| `oauth disconnect <provider>` | `provider` | `--force`/`-f` |
+| `oauth status <provider>` | `provider` | `--json` |
+| `oauth set-client-secret <provider>` | `provider` | `--value` (required; prompted securely if omitted) |
+
+## `hal0 board` — operator task board
+
+| Command | Args | Flags |
+|---|---|---|
+| `board list` | — | `--board`, `--include-archived`, `--json` |
+| `board show <task_id>` | `task_id` | `--json` |
+| `board add <title>` | `title` | `--body` (default `""`), `--assignee` (default `""`), `--status` (default `triage`), `--board`, `--priority` (default `0`) |
+| `board move <task_id> <status>` | `task_id`, `status` | — |
+
+## Slot lifecycle timeouts
+
+Commands that drive the slot state machine — `slot load` / `unload` / `restart`
+/ `swap` / `delete`, `model run`, `capabilities set`, `update --restart-slots` —
+block until the server converges the slot. Their client read timeouts are not
+hand-picked; they are derived from the server's own bounds in
+`hal0.slot_lifecycle_budget` (the health poll, one container terminate per
+unload, an allowance for the pre-load evictions and for queueing behind an
+in-flight op on the same slot, plus a podman/systemd overhead factor).
+
+| Verb shape | Budget |
+|---|---|
+| load (`slot load`, `model run`, NPU backend load) | 2139s |
+| unload (`slot unload`, `slot delete`, NPU backend unload) | 1104s |
+| restart / swap (`slot restart`, `slot swap`, `capabilities set`) | 3243s |
+| `update --restart-slots`, per drifted slot | 3243s (3 slots = 9729s) |
+
+These are ceilings on a *wedged* daemon, not expected durations — a healthy
+load returns in seconds. While they wait, `slot load`/`unload`/`restart`/`swap`
+and `update --restart-slots` show an elapsed counter and the slot's live state on
+a terminal (one summary line when not a TTY; only the final JSON with `--json`),
+and every `systemctl`/podman call the server makes is bounded — a wedged one
+answers `504 slot.seam_timeout` — but a genuinely stuck slot can still hold the
+terminal for the full budget. If you are
+scripting against them (CI, smoke tests), wrap the call in your own
+`timeout(1)` rather than relying on the CLI to give up first.
+
+## `hal0-agent` (separate binary)
+
+Not part of the `hal0` app — a standalone argparse binary invoked by
+`hal0-agent@<id>.service`, not intended for direct interactive use:
+
+```sh
+hal0-agent <agent_id> serve|stop|status|reprovision|render-context
+```

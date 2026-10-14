@@ -42,6 +42,9 @@ from hal0.cli.main import app
 
 # Repo root: tests/cli/this_file.py -> parents[2] is the repo root.
 _CLI_MDX = Path(__file__).resolve().parents[2] / "docs" / "reference" / "cli.mdx"
+# The CLI reference is split in two pages to stay under the Discourse post limit;
+# a command is documented if either page carries it.
+_CLI_MDX_OPERATOR = _CLI_MDX.with_name("cli-operator.mdx")
 
 # Commands that are real but intentionally not given their own line in the
 # grouped command sections. Each entry needs a reason so the exemption is a
@@ -116,7 +119,9 @@ def _documented(term: str, text: str) -> bool:
 
 
 def test_cli_mdx_documents_every_command() -> None:
-    text = _CLI_MDX.read_text(encoding="utf-8")
+    text = (
+        _CLI_MDX.read_text(encoding="utf-8") + "\n" + _CLI_MDX_OPERATOR.read_text(encoding="utf-8")
+    )
     missing: list[str] = []
     for path in sorted(set(_walk(app))):
         if path in ALLOWED_MISSING:
@@ -127,7 +132,7 @@ def test_cli_mdx_documents_every_command() -> None:
         if not _documented(path, text) and not _documented(f"hal0 {path}", text):
             missing.append(path)
     assert not missing, (
-        "docs/reference/cli.mdx is missing these real CLI commands: "
+        "docs/reference/cli.mdx and cli-operator.mdx are missing these real CLI commands: "
         + ", ".join(missing)
         + ". Add a line under the right section (or, for an intentional "
         "omission, add it to ALLOWED_MISSING with a reason)."
