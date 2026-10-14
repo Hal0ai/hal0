@@ -38,6 +38,12 @@ applying. Add those subsections to a version's section to surface them; see
   special, per ADR-0023), and log the fallback as
   `hermes.primary_slot_fallback` / `role_slots.main_fallback` instead of
   choosing silently (#2635).
+- **omni:** a pinned image mode is now reported at once instead of after the
+  ComfyUI queue wait, and a chat request waits at most 15 s for the caller
+  restore (the detached restore keeps its 600 s queue wait), so a busy or
+  unreadable `/queue` no longer holds a request for ten minutes and ends in
+  `gpu.queue_busy` (#2639).
+
 - A box already on the newest nightly no longer offers that same nightly to
   itself as an update. `GET /api/updates/check` and `GET /api/updates/state`
   now compare the release manifest against the installed release

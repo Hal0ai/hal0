@@ -663,12 +663,21 @@ class GpuArbiter:
         other failed read is NOT evidence the render stopped and counts as
         busy. Raises :class:`ArbiterQueueBusy` if the queue has not drained
         within ``max_wait_s``; nothing is freed or reloaded in that case.
-        No-op in LLM mode, like ``restore_llm``.
+        A pinned mode raises :class:`ArbiterPinned` immediately, before any
+        queue read. No-op in LLM mode, like ``restore_llm``.
 
         The omni tool loop uses this after an image round (#2191).
         """
         if self.mode is not GpuMode.IMG:
             return
+        # A pinned image mode is an operator's choice that no queue drain will
+        # change (and "someone is rendering" is the normal pinned case): answer
+        # now rather than wait out the queue and then report queue_busy (#2639).
+        if self.pinned and not force:
+            raise ArbiterPinned(
+                "GPU image mode is pinned; pass force=true to restore LLM slots",
+                details={"pinned": True},
+            )
         deadline = time.monotonic() + max_wait_s
         while True:
             try:

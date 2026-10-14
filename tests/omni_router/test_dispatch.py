@@ -8,6 +8,7 @@ from conftest.
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 import httpx
@@ -624,3 +625,57 @@ async def test_a_failed_restore_is_reported_not_raised() -> None:
 @pytest.mark.asyncio
 async def test_no_arbiter_means_nothing_to_do() -> None:
     assert await restore_caller_after_images(_restore_ctx([_GPU_CALLER, _IMG], None)) is None
+
+
+class _SlowArbiter(_FakeArbiter):
+    """Unpinned arbiter whose ComfyUI queue never drains (or never answers)."""
+
+    def __init__(self) -> None:
+        super().__init__("img")
+        self.finished = False
+        self.cancelled = False
+
+    async def restore_llm_when_idle(
+        self, *, force: bool = False, max_wait_s: float = 600.0
+    ) -> None:
+        self.restore_calls += 1
+        try:
+            await asyncio.sleep(30)  # stands in for the 600 s queue wait
+        except asyncio.CancelledError:
+            self.cancelled = True
+            raise
+        self.finished = True
+
+
+@pytest.mark.asyncio
+async def test_in_request_restore_wait_is_bounded_and_the_restore_continues() -> None:
+    """A busy (or unreadable) ComfyUI queue must not hold a chat request for
+    the detached restore's full wait (#2639)."""
+    arbiter = _SlowArbiter()
+    t0 = asyncio.get_running_loop().time()
+    reason = await restore_caller_after_images(
+        _restore_ctx([_GPU_CALLER, _IMG], arbiter), max_wait_s=0.05
+    )
+    assert asyncio.get_running_loop().time() - t0 < 5
+    assert reason is not None and "queue_busy" in reason
+    # The restore was not cancelled by the bound: it is still running detached.
+    await asyncio.sleep(0)
+    assert arbiter.cancelled is False and arbiter.finished is False
+    from hal0.omni_router.dispatch import _DETACHED_RESTORES
+
+    for task in list(_DETACHED_RESTORES):
+        task.cancel()
+    await asyncio.sleep(0)
+
+
+@pytest.mark.asyncio
+async def test_pinned_with_a_busy_queue_reports_pinned_at_once() -> None:
+    class _PinnedBusy(_FakeArbiter):
+        async def restore_llm_when_idle(
+            self, *, force: bool = False, max_wait_s: float = 600.0
+        ) -> None:
+            await self.restore_llm(force=force)  # pin check precedes any queue wait
+
+    arbiter = _PinnedBusy("img", pinned=True)
+    reason = await restore_caller_after_images(_restore_ctx([_GPU_CALLER, _IMG], arbiter))
+    assert reason is not None and "pinned" in reason
