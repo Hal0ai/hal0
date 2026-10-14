@@ -279,15 +279,8 @@ async def bank_stats(request: Request, bank_id: str) -> Any:
     stats = await _forward(client, "GET", f"/v1/default/banks/{bank_id}/stats")
     if not _looks_like_placeholder_stats(stats):
         return stats
-    banks_resp = await _forward(client, "GET", "/v1/default/banks")
-    banks = banks_resp.get("banks") if isinstance(banks_resp, dict) else banks_resp
-    known_ids = (
-        {(b.get("bank_id") if isinstance(b, dict) else b) for b in banks}
-        if isinstance(banks, list)
-        else set()
-    )
-    if bank_id not in known_ids:
-        raise NotFound(f"bank {bank_id!r} does not exist", code="memory.bank_not_found")
+    # Same lookup as the composed profile route: id or 1.0 alias, every page.
+    await _bank_profile(client, bank_id)  # raises NotFound (memory.bank_not_found)
     return stats
 
 

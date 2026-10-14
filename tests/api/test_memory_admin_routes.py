@@ -806,3 +806,24 @@ def test_profile_get_stops_when_the_listing_is_exhausted(monkeypatch: pytest.Mon
         r = c.get("/api/memory/banks/shared/profile")
     assert r.status_code == 404
     assert offsets == [0, 2]
+
+
+def test_bank_stats_placeholder_for_an_alias_is_not_a_404(
+    client: TestClient, recorder: _Recorder
+) -> None:
+    # An empty real bank addressed by its 1.0 alias answers the all-zero
+    # placeholder; the existence check must accept the alias.
+    recorder.respond(
+        "GET",
+        "/v1/default/banks/household/stats",
+        200,
+        {"total_nodes": 0, "total_links": 0, "total_documents": 0},
+    )
+    recorder.respond(
+        "GET",
+        "/v1/default/banks",
+        200,
+        {"banks": [{"bank_id": "shared", "matched_aliases": ["household"]}], "total": 1},
+    )
+    r = client.get("/api/memory/banks/household/stats")
+    assert r.status_code == 200, r.text
