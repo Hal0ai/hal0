@@ -37,7 +37,9 @@ Upgrade shape — build-aside, swap, verify, roll back:
 
 ``hal0 update --rollback`` re-activates the previous hal0 tree but leaves the
 engine (and its migrated ``.pg0``) on the new version, because reverting a
-one-way DB migration behind the operator's back would be worse. The engine's
+one-way DB migration behind the operator's back would be worse. For the same
+reason the pass never converges *downwards*: an installed engine newer than
+the pin returns ``ahead`` with a remedy and touches nothing (#2613). The engine's
 HTTP surface is NOT purely additive across 0.9.2 → 1.0.0: hindsight-api 0.10.0
 retired ``GET/PUT .../profile`` (410) and made the mental-model list
 metadata-only by default. A hal0 tree rolled back to one pinned on 0.9.2 keeps
@@ -72,6 +74,7 @@ from pathlib import Path
 from typing import Any
 
 import structlog
+from packaging.version import InvalidVersion, Version
 
 from hal0.config.paths import var_lib
 from hal0.system.seam import SystemCtlSeam
@@ -217,6 +220,19 @@ def _installed_version(runner: Runner, venv: Path) -> str | None:
     return version or None
 
 
+def _is_newer_than_pin(installed: str) -> bool:
+    """True only when ``installed`` parses as a version strictly above the pin.
+
+    Anything unparseable (``"unknown"``, a broken probe) is NOT provably
+    newer, so it keeps the rebuild behaviour — a venv we cannot read still
+    needs converging.
+    """
+    try:
+        return Version(installed) > Version(HINDSIGHT_API_PIN)
+    except InvalidVersion:
+        return False
+
+
 def _interpreter_in_band(runner: Runner, py: str) -> bool:
     try:
         proc = _run(
@@ -358,7 +374,7 @@ def upgrade_memory_engine(
     :func:`hal0.memory.extraction_env.apply_extraction_slot`.
 
     Returns a status dict whose ``status`` is one of ``skipped``,
-    ``converged``, ``stale``, ``build_failed``, ``snapshot_failed``,
+    ``converged``, ``stale``, ``ahead``, ``build_failed``, ``snapshot_failed``,
     ``upgraded``, ``rolled_back``. Only genuine bugs raise.
     """
     seam = seam if seam is not None else SystemCtlSeam()
@@ -397,6 +413,29 @@ def upgrade_memory_engine(
         _prune_keep_newest(hs, ".venv.old-*")
         _prune_keep_newest(hs, ".pg0.pre-*")
         return {"status": "converged", "version": installed}
+
+    if _is_newer_than_pin(installed):
+        # A rolled-back (older-pinned) hal0 tree. Converging would downgrade
+        # the engine onto a schema the newer engine already migrated, and
+        # the old engine serves it without complaint (#2613). Refuse in
+        # both modes; nothing is stopped, built or snapshotted.
+        remedy = (
+            f"update hal0 to a release pinned at or above hindsight-api {installed}; "
+            f"or restore .pg0.pre-{HINDSIGHT_API_PIN} by hand together with the matching venv"
+        )
+        log.warning(
+            "updater.memory_engine_ahead",
+            job_id=job_id,
+            installed=installed,
+            pinned=HINDSIGHT_API_PIN,
+            remedy=remedy,
+        )
+        return {
+            "status": "ahead",
+            "installed": installed,
+            "pinned": HINDSIGHT_API_PIN,
+            "remedy": remedy,
+        }
 
     if not upgrade:
         log.warning(

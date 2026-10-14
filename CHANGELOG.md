@@ -30,6 +30,16 @@ applying. Add those subsections to a version's section to surface them; see
 
 ## [Unreleased]
 
+### Fixed
+
+- The Hindsight engine upgrade pass no longer downgrades the engine. When the
+  installed `hindsight-api` is newer than the version the running hal0 tree
+  pins (for example after `hal0 update --rollback`), the pass now stops with
+  status `ahead` and a remedy instead of rebuilding an older engine onto the
+  newer database schema, and the boot-time check logs the same. Update hal0 to
+  a release pinned at or above the installed engine, or restore
+  `.pg0.pre-<pin>` by hand with the matching venv (#2613).
+
 ### Removed
 
 - hal0 no longer builds runner or toolbox images. Those images are built
