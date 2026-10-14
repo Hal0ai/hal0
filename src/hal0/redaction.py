@@ -332,11 +332,20 @@ def _value_class(chunk: str, sep: str = "[;,]") -> _ValueClass:
 # A Bearer token: no separator ends it early.
 _BEARER_TOKEN: Final[_ValueClass] = _value_class(r"[A-Za-z0-9._~+/=-]*", "(?!)")
 
+# Whitespace that is no line break: a quoted value never starts on the next line.
+_HSPACE: Final[str] = r"(?:(?!\n)\s)"
 # Up to the value of a secret that starts with a ``Bearer``, ``Authorization``
 # or ``--flag`` keyword; a lookahead checks for the value's first character.
 _PACKED_HEAD_RE: Final[re.Pattern[str]] = re.compile(
     r"(?P<bearer>bearer\s+(?=[A-Za-z0-9._~+/=-]|" + re.escape(MASK) + r"))"
-    r"|(?P<authorization>authorization[\"']?\s*:\s*[\"']?" + _AUTH_SCHEMES + r"\s+(?=[^\s\"',]))"
+    r"|(?P<authorization>authorization[\"']?\s*:\s*[\"']?"
+    + _AUTH_SCHEMES
+    + r"\s+(?=[^\s\"',])"
+    # A quoted value is read on one line (#2605), headers and all; a bare one may
+    # follow a line break.
+    + rf"|authorization[\"']?{_HSPACE}*:{_HSPACE}*[\"']?"
+    + _AUTH_SCHEMES
+    + rf"{_HSPACE}+(?=[\"']))"
     r"|(?P<authorization_raw>authorization[\"']?\s*:\s*[\"']?"
     r"(?!" + _AUTH_SCHEMES + r"(?:\s|$))(?=[^\s\"',]{8}))"
     r"|(?P<flag>" + _FLAG_PREFIX + r"(?=[^-\s]))",
@@ -682,6 +691,21 @@ def _mask_bare_values(
     return "".join(out)
 
 
+def _mask_quoted_values(pattern: re.Pattern[str], line: str, log: bool) -> str:
+    """``pattern`` matches up to a value that opens with a quote; mask each
+    such value as :func:`_quoted_value_end` bounds it, and keep the match and
+    the value's quotes (#2605)."""
+    out: list[str] = []
+    pos = at = 0
+    while (match := pattern.search(line, at)) is not None:
+        start = match.end()
+        end, closed = _quoted_value_end(line, start, log=log)
+        out += (line[pos:start], line[start], MASK, line[start] if closed else "")
+        pos = at = end
+    out.append(line[pos:])
+    return "".join(out)
+
+
 # A shape rule: ``rule(line, log)``, ``log`` as in :func:`_starts_secret`.
 _Rule = Callable[[str, bool], str]
 
@@ -697,9 +721,20 @@ def _bare_value_rule(prefix: str, value: _ValueClass, *, spaces: bool = False) -
     return lambda line, log: _mask_bare_values(pattern, value, spaces, line, log)
 
 
+# Up to a quoted value after an ``Authorization`` scheme (the bare-value rules
+# below need a first character that is no quote). The whitespace is horizontal,
+# so a header that ends a line never takes the quoted text on the next one.
+_AUTH_QUOTED_RE: Final[re.Pattern[str]] = re.compile(
+    rf"authorization[\"']?{_HSPACE}*:{_HSPACE}*[\"']?" + _AUTH_SCHEMES + rf"{_HSPACE}+(?=[\"'])",
+    re.I,
+)
+
 # Ordered rules, as in _hal0_report_mask_patterns: these run before the
 # NAME[=:]value pass, _SHAPE_RULES_AFTER after it.
 _SHAPE_RULES: Final[tuple[_Rule, ...]] = (
+    # An ``Authorization`` value that opens with a quote, after a known
+    # scheme (#2605): the quoted text is the credential, spaces and all.
+    lambda line, log: _mask_quoted_values(_AUTH_QUOTED_RE, line, log),
     _bare_value_rule(
         r"authorization:\s*(?:basic|token)\s+(?=[^\s'\"])", _value_class(r"[^\s'\";,]*")
     ),

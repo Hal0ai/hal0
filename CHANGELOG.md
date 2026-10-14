@@ -133,6 +133,16 @@ applying. Add those subsections to a version's section to surface them; see
   escape the quote after it. A shell's single quotes have no escapes, but a
   log or JSON dump of a value does, and reading one as an escape can only mask
   more of the line.
+- Doctor-bundle and installer failure-report redaction now mask an
+  `Authorization` value that opens with a quote after a known scheme, such as
+  `Authorization: Bearer "abc def"` or `Authorization: Basic 'abc def'`
+  (`Proxy-Authorization` too). Their scheme rule needed a first character that
+  was no quote, so the line came out unchanged and the credential shipped in
+  clear (#2605). The quoted text is masked whole with its quotes kept, an
+  escaped quote does not close it, and one that never closes is masked to the
+  end of its line. The log pass and the dashboard's Sentry scrubber already
+  masked a quoted Bearer value; they now also mask a quoted Basic, Token or
+  other scheme value, which they left visible.
 
 ### Breaking
 

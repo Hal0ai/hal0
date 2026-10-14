@@ -382,6 +382,38 @@
     [
       "{\"token\": \"pk8 \\\"escaped tail\\\" end\", \"x\": 1}",
       "escaped tail"
+    ],
+    [
+      "Authorization: Basic \"pk9 basic tail\"",
+      "basic tail"
+    ],
+    [
+      "Authorization: Token 'pk9 token tail' z",
+      "token tail"
+    ],
+    [
+      "Proxy-Authorization: Basic \"pk9 proxy tail\"",
+      "proxy tail"
+    ],
+    [
+      "Authorization: Digest \"pk9 \\\"escaped tail\\\" end\" z",
+      "escaped tail"
+    ],
+    [
+      "Authorization: Bearer \"pk9 bearer tail\"",
+      "bearer tail"
+    ],
+    [
+      "X_KEY=pk10;Authorization: Basic \"pk10 packed tail\"",
+      "packed tail"
+    ],
+    [
+      "A_TOKEN=pk10,Authorization: Digest 'pk10 packed tail'",
+      "packed tail"
+    ],
+    [
+      "Authorization: Basic \"pk11 outer,Authorization: Basic \"pk11 INNER SECRET\"",
+      "INNER SECRET"
     ]
   ],
   "keep": [
@@ -702,6 +734,78 @@
     [
       "password=\"a b\\",
       "password=\"***REDACTED***"
+    ],
+    [
+      "Authorization: Basic \"abc def\"",
+      "Authorization: Basic \"***REDACTED***\""
+    ],
+    [
+      "Authorization: Token 'abc def' z",
+      "Authorization: Token '***REDACTED***' z"
+    ],
+    [
+      "Proxy-Authorization: Basic \"abc def\" z",
+      "Proxy-Authorization: Basic \"***REDACTED***\" z"
+    ],
+    [
+      "Authorization: Basic \"a\\\"b c\" z",
+      "Authorization: Basic \"***REDACTED***\" z"
+    ],
+    [
+      "Authorization: Basic \"abc def",
+      "Authorization: Basic \"***REDACTED***"
+    ],
+    [
+      "Authorization: Basic \"\"",
+      "Authorization: Basic \"***REDACTED***\""
+    ],
+    [
+      "Authorization: Basic \"abc def\"\nnext \"q\" x",
+      "Authorization: Basic \"***REDACTED***\"\nnext \"q\" x"
+    ],
+    [
+      "Authorization: Digest \"a b\" HF_TOKEN=z",
+      "Authorization: Digest \"***REDACTED***\" HF_TOKEN=***REDACTED***"
+    ],
+    [
+      "Authorization: Basic \"a HF_TOKEN=\"zz\" end",
+      "Authorization: Basic \"***REDACTED***\" end"
+    ],
+    [
+      "Authorization: Bearer \"abc def\"",
+      "Authorization: Bearer ***REDACTED***"
+    ],
+    [
+      "X_KEY=abc;Authorization: Basic \"TOP SECRET\"",
+      "X_KEY=***REDACTED***;Authorization: Basic \"***REDACTED***\""
+    ],
+    [
+      "A_TOKEN=x,Authorization: Token 'a b' z",
+      "A_TOKEN=***REDACTED***,Authorization: Token '***REDACTED***' z"
+    ],
+    [
+      "X_KEY=abc;Authorization: Bearer \"TOP SECRET\"",
+      "X_KEY=***REDACTED***;Authorization: Bearer ***REDACTED***"
+    ],
+    [
+      "Authorization: Basic\n\"hello world\" next",
+      "Authorization: Basic\n\"hello world\" next"
+    ],
+    [
+      "Authorization:\r\nBasic 'hello world' next",
+      "Authorization:\r\nBasic 'hello world' next"
+    ],
+    [
+      "Authorization: Basic\r\n\"hello world\" next",
+      "Authorization: Basic\r\n\"hello world\" next"
+    ],
+    [
+      "X_KEY=abcAuthorization: Basic\n\"hello world\" next",
+      "X_KEY=***REDACTED*** Basic\n\"hello world\" next"
+    ],
+    [
+      "X_KEY=abcAuthorization:\nBasic \"hello world\" next",
+      "X_KEY=***REDACTED***\nBasic \"hello world\" next"
     ]
   ],
   "mask_names": [

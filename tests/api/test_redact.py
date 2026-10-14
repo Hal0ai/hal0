@@ -1361,6 +1361,9 @@ class TestUnclosedQuotes:
             'api_key="a\nx="b\n',
             # A backslash and the character after it are one unit (#2604).
             'api_key="a\\" ',
+            'Authorization: Bearer "a ',
+            "Authorization: Basic 'a b' ",
+            'Authorization: Digest "a\\" ',
             "api_key='a \\' ",
             'api_key="a\\\\"b ',
         ],
@@ -1401,6 +1404,54 @@ class TestBackslashEscapedQuotes:
         out = redact(r'password="pk_a\\" next=1')
         assert out.endswith(" next=1"), out
         assert "pk_a" not in out, out
+
+
+class TestQuotedAuthorizationValue:
+    """#2605: an ``Authorization`` value that opens with a quote, after a known
+    scheme, is masked whole by the shareable-text pass as it is by the log pass,
+    and keeps its quotes."""
+
+    @pytest.mark.parametrize(
+        ("line", "expected"),
+        [
+            ('Authorization: Bearer "abc def"', f'Authorization: Bearer "{MASK}"'),
+            ("Authorization: Bearer 'abc def' z", f"Authorization: Bearer '{MASK}' z"),
+            ('Authorization: Basic "abc def"', f'Authorization: Basic "{MASK}"'),
+            ('Proxy-Authorization: Token "abc def" z', f'Proxy-Authorization: Token "{MASK}" z'),
+            (r'Authorization: Bearer "a\"b c" z', f'Authorization: Bearer "{MASK}" z'),
+            ('Authorization: Bearer "abc def', f'Authorization: Bearer "{MASK}'),
+            ('Authorization: Bearer ""', f'Authorization: Bearer "{MASK}"'),
+            (
+                'Authorization: Bearer "a b"\nmessage="hello"',
+                f'Authorization: Bearer "{MASK}"\nmessage="hello"',
+            ),
+        ],
+    )
+    def test_the_quoted_value_is_masked_whole(self, line: str, expected: str) -> None:
+        out = redact_shareable_text(line)
+        assert out == expected
+        assert redact_shareable_text(out) == expected  # idempotent
+
+    def test_a_header_that_ends_a_line_takes_nothing_from_the_next(self) -> None:
+        line = 'Authorization: Basic\n"hello world" next'
+        assert redact_shareable_text(line) == line
+        assert redact_log_line(line) == line
+
+    @pytest.mark.parametrize(
+        "line", ['Authorization: Bearer "abc def"', "Authorization: Bearer 'abc def'"]
+    )
+    def test_the_log_pass_masks_it_too(self, line: str) -> None:
+        assert "abc" not in redact_log_line(line)
+
+    @pytest.mark.parametrize("redact", [redact_log_line, redact_shareable_text])
+    @pytest.mark.parametrize("scheme", ["Basic", "Bearer"])
+    def test_one_packed_after_another_secret_is_masked(self, redact, scheme: str) -> None:
+        # The ``;`` ends the first value only where a secret starts after it, and
+        # a quoted value counts (#2605).
+        out = redact(f'X_KEY=abc;Authorization: {scheme} "TOP SECRET"')
+        assert "TOP" not in out and "SECRET" not in out, out
+        assert out.startswith(f"X_KEY={MASK};Authorization: {scheme}"), out
+        assert redact(out) == out
 
 
 # ── #2413: the cases shared with the dashboard's browser-side port ─────────
