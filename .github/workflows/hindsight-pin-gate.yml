@@ -107,7 +107,7 @@ jobs:
           sudo mkdir -p /mnt/gate/tmp
           sudo chown -R "$(id -u):$(id -g)" /mnt/gate
           df -h / /mnt
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7
         with:
           # Inside engine_upgrade.PY_MIN_MINOR..PY_MAX_MINOR (3.11-3.13), and
           # the same primary CI runs. The gate builds its throwaway engine
