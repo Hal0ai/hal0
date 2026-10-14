@@ -833,6 +833,7 @@ class TestShareableLiteralsSinglePass:
         assert out == f"a{MASK}"
 
     @pytest.mark.parametrize("value", ["val{:07d}", "v*{:07d}"])
+    @pytest.mark.timing
     def test_800kb_of_distinct_secrets_is_fast(self, value: str) -> None:
         """18 s on main for the plain form; a ``*`` inside a value that
         cannot touch a MASK keeps the single pass. Each value also appears
@@ -938,6 +939,7 @@ class TestRedactionTimeIsLinear:
         ],
     )
     @pytest.mark.parametrize("redact", [redact_log_line, redact_shareable_text])
+    @pytest.mark.timing
     def test_a_worst_case_line_is_fast(self, redact, unit: str, length: int) -> None:
         import time
 
@@ -1064,6 +1066,7 @@ class TestPackedSecrets:
         "unit", ["x_key=a;", "token=a;", "a;Bearer ", "--token=a;", "Authorization: Basic a;"]
     )
     @pytest.mark.parametrize("redact", [redact_log_line, redact_shareable_text])
+    @pytest.mark.timing
     def test_a_long_packed_run_is_fast(self, redact, unit: str) -> None:
         import time
 
@@ -1163,6 +1166,7 @@ class TestEmptyValueBeforeASecret:
 
     @pytest.mark.parametrize("unit", ["x_key= ", "token= ", "a_key=  "])
     @pytest.mark.parametrize("redact", [redact_log_line, redact_shareable_text])
+    @pytest.mark.timing
     def test_a_long_run_of_empty_values_is_fast(self, redact, unit: str) -> None:
         import time
 
@@ -1264,6 +1268,7 @@ class TestGluedSecrets:
         ],
     )
     @pytest.mark.parametrize("redact", [redact_log_line, redact_secret_shapes])
+    @pytest.mark.timing
     def test_a_long_glued_run_is_fast(self, redact, unit: str) -> None:
         import time
 
@@ -1337,6 +1342,7 @@ class TestUnclosedQuotes:
         "unit", ['password="a ', 'x="a.b_token": ', "secret: '", 'tokenizer="a ', 'a"b_token="']
     )
     @pytest.mark.parametrize("redact", [redact_log_line, redact_shareable_text])
+    @pytest.mark.timing
     def test_a_long_run_of_quotes_is_fast(self, redact, unit: str) -> None:
         import time
 
