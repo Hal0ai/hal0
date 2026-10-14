@@ -1451,6 +1451,12 @@ class TestUnclosedQuotes:
             'Authorization: Bearer "a ',
             "Authorization: Basic 'a b' ",
             'Authorization: Digest "a\\" ',
+            # An escaped opening quote (#2616).
+            'password=\\"a ',
+            'password=\\"a\\\\" ',
+            '{\\"token\\": \\"a b\\", ',
+            '--token \\"a ',
+            'password=\\"' + "\\" * 3,
             "api_key='a \\' ",
             'api_key="a\\\\"b ',
         ],
@@ -1539,6 +1545,82 @@ class TestQuotedAuthorizationValue:
         assert "TOP" not in out and "SECRET" not in out, out
         assert out.startswith(f"X_KEY={MASK};Authorization: {scheme}"), out
         assert redact(out) == out
+
+
+class TestEscapedOpeningQuote:
+    """#2616: a value that opens with a backslash-escaped quote (text escaped to
+    sit inside a string: a JSON value in a log message, a command line in a JSON
+    field) is read as a quoted value closed by the same delimiter, so it is
+    masked whole, in every place a value can start."""
+
+    _HEADS = (
+        "password=",
+        "api_key=",
+        "X_KEY=",
+        "HAL0_BEARER_TOKEN=",
+        "--token ",
+        "--token=",
+        "--api-key ",
+        "Authorization: Basic ",
+        "Authorization: Bearer ",
+        "Proxy-Authorization: Token ",
+        r"{\"password\": ",
+        r"{\"token\":",
+        r"{\\\"password\\\": ",
+    )
+
+    @pytest.mark.parametrize("redact", [redact_log_line, redact_shareable_text])
+    @pytest.mark.parametrize("head", _HEADS)
+    @pytest.mark.parametrize("k", [1, 2, 3])
+    @pytest.mark.parametrize("quote", ['"', "'"])
+    @pytest.mark.parametrize("tail", [" z", ', "x": 1}', "\nnext line"])
+    def test_the_value_is_masked_whole(self, redact, head: str, k: int, quote: str, tail: str):
+        delim = "\\" * k + quote
+        for value in ("SECRETONE SECRETTWO", "SECRETONE,SECRETTWO;x"):
+            out = redact(f"{head}{delim}{value}{delim}{tail}")
+            assert "SECRET" not in out, out
+            # What follows the closing delimiter stays (a bare value's own comma goes).
+            assert out.endswith(tail.lstrip(",")), out
+
+    @pytest.mark.parametrize("redact", [redact_log_line, redact_shareable_text])
+    @pytest.mark.parametrize("head", _HEADS)
+    def test_an_unclosed_value_masks_to_the_end_of_its_line(self, redact, head: str) -> None:
+        out = redact(f'{head}\\"SECRETONE SECRETTWO\nnext \\"q\\" x')
+        assert "SECRET" not in out, out
+        assert out.endswith('\nnext \\"q\\" x'), out
+
+    @pytest.mark.parametrize(
+        ("line", "expected"),
+        [
+            (r"password=\"abc def\" z", rf"password=\"{MASK}\" z"),
+            (r"password=\'abc def\' z", rf"password=\'{MASK}\' z"),
+            (r"{\"password\": \"a b\", \"x\": 1}", rf"{{\"password\": \"{MASK}\", \"x\": 1}}"),
+            (r"x {\"token\":\"a b\"} y", rf"x {{\"token\":\"{MASK}\"}} y"),
+            # An escaped backslash and a quote is its own delimiter.
+            (r'password=\\"abc def\\" z', rf'password=\\"{MASK}\\" z'),
+            # A longer run inside the value does not close it.
+            (r"password=\"abc \\\"def\\\" ghi\" z", rf"password=\"{MASK}\" z"),
+            (r"{\\\"password\\\": \\\"a b\\\"}", rf"{{\\\"password\\\": \\\"{MASK}\\\"}}"),
+            (r"--token \"abc def\" z", rf"--token \"{MASK}\" z"),
+            (r"Authorization: Basic \"abc def\" z", rf"Authorization: Basic \"{MASK}\" z"),
+            # Not an opener: a backslash that is no part of an escaped quote.
+            (r"password=\abc def", f"password={MASK} def"),
+            # A plain quoted value after a flag and a space runs to its quote.
+            ('--token "abc def" z', f"--token {MASK} z"),
+            ("--password 'abc def' z", f"--password {MASK} z"),
+        ],
+    )
+    def test_the_share_pass_rendering_keeps_the_delimiters(self, line: str, expected: str) -> None:
+        # The log pass drops the quotes of a ``*_KEY=`` and a bearer value, the
+        # share pass keeps them; both are idempotent.
+        out = redact_shareable_text(line)
+        assert out == expected
+        assert redact_shareable_text(out) == expected
+        assert redact_log_line(redact_log_line(line)) == redact_log_line(line)
+
+    def test_a_secret_after_the_closing_delimiter_is_masked_too(self) -> None:
+        out = redact_shareable_text(r"password=\"a b\" HF_TOKEN=hf_secretvalue1")
+        assert out == rf"password=\"{MASK}\" HF_TOKEN={MASK}"
 
 
 # ── #2413: the cases shared with the dashboard's browser-side port ─────────

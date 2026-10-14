@@ -126,7 +126,7 @@ def redact_log_line(line: str) -> str:
             end = _swallowing_end(line, start, end, _LOG_TOKEN, log=True)
         else:
             start = match.end()  # the lookahead saw a character there
-            if line[start] in _QUOTES:
+            if _delimiter(line, start):
                 end = _quoted_log_value_end(line, start)
             else:
                 end = _bare_value_end(line, start, _LOG_VALUE, log=True)
@@ -275,7 +275,7 @@ _NAME_RUN: Final[str] = r"[A-Za-z0-9_-]"
 _NAME_SEP_RE: Final[re.Pattern[str]] = re.compile(
     rf"(?<!{_NAME_RUN})(?P<name>(?={_NAME_RUN}*?{_SECRET_WORD}"
     rf"|(?:{_NAME_RUN}*[_-])?KEY(?!{_NAME_RUN})){_NAME_RUN}*+)"
-    r"(?P<sep>[\"']?\s*[=:]\s*)"
+    r"(?P<sep>(?:\\*+[\"'])?\s*[=:]\s*)"
     r"(?=[^\s,}&])",
     re.IGNORECASE,
 )
@@ -334,20 +334,25 @@ _BEARER_TOKEN: Final[_ValueClass] = _value_class(r"[A-Za-z0-9._~+/=-]*", "(?!)")
 
 # Whitespace that is no line break: a quoted value never starts on the next line.
 _HSPACE: Final[str] = r"(?:(?!\n)\s)"
+# A quote around an ``Authorization`` name or scheme: plain or escaped (#2616).
+_AQ: Final[str] = r"(?:\\*+[\"'])?"
+# Not at the start of a quoted value, plain or escaped: a bare value starts
+# anywhere else, and the quoted-value rules read the rest (#2616).
+_NOT_OPENER: Final[str] = r"(?!\\*+[\"'])"
 # Up to the value of a secret that starts with a ``Bearer``, ``Authorization``
 # or ``--flag`` keyword; a lookahead checks for the value's first character.
 _PACKED_HEAD_RE: Final[re.Pattern[str]] = re.compile(
     r"(?P<bearer>bearer\s+(?=[A-Za-z0-9._~+/=-]|" + re.escape(MASK) + r"))"
-    r"|(?P<authorization>authorization[\"']?\s*:\s*[\"']?"
+    rf"|(?P<authorization>authorization{_AQ}\s*:\s*{_AQ}"
     + _AUTH_SCHEMES
-    + r"\s+(?=[^\s\"',])"
+    + rf"\s+{_NOT_OPENER}(?=[^\s\"',])"
     # A quoted value is read on one line (#2605), headers and all; a bare one may
     # follow a line break.
-    + rf"|authorization[\"']?{_HSPACE}*:{_HSPACE}*[\"']?"
+    + rf"|authorization{_AQ}{_HSPACE}*:{_HSPACE}*{_AQ}"
     + _AUTH_SCHEMES
-    + rf"{_HSPACE}+(?=[\"']))"
-    r"|(?P<authorization_raw>authorization[\"']?\s*:\s*[\"']?"
-    r"(?!" + _AUTH_SCHEMES + r"(?:\s|$))(?=[^\s\"',]{8}))"
+    + rf"{_HSPACE}+(?=\\*+[\"']))"
+    rf"|(?P<authorization_raw>authorization{_AQ}\s*:\s*{_AQ}"
+    r"(?!" + _AUTH_SCHEMES + rf"(?:\s|$)){_NOT_OPENER}(?=[^\s\"',]{{8}}))"
     r"|(?P<flag>" + _FLAG_PREFIX + r"(?=[^-\s]))",
     re.I,
 )
@@ -464,17 +469,49 @@ _QUOTED_RUN: Final[dict[str, re.Pattern[str]]] = {
     '"': re.compile(r'[^"\\\n]*(?:\\[^\n]?[^"\\\n]*)*'),
     "'": re.compile(r"[^'\\\n]*(?:\\[^\n]?[^'\\\n]*)*"),
 }
+# A quoted value's opening delimiter: a quote, or, in text that was escaped to
+# sit inside a string (a JSON value in a log message, a command line in a
+# JSON field), backslashes and a quote. The closing delimiter is the same
+# text, so ``\"a b\"`` and ``\\"a b\\"`` are values, each closed by its own kind
+# (#2616). The backslashes are possessive: a run is read once.
+_OPENER_RE: Final[re.Pattern[str]] = re.compile(r"\\*+[\"']")
+# Where a delimiter of ``k`` backslashes and the quote ``q`` ends an escaped
+# value: a quote after a run of exactly ``k`` backslashes, or a line break.
+# The lookbehind lets a run be matched from its start only.
+_ESCAPED_CLOSE: Final[dict[str, re.Pattern[str]]] = {
+    '"': re.compile(r'(?<!\\)(\\*+)"|\n'),
+    "'": re.compile(r"(?<!\\)(\\*+)'|\n"),
+}
+
+
+def _delimiter(line: str, pos: int) -> str:
+    """The opening delimiter of the quoted value that starts at ``line[pos]``
+    (a quote, or backslashes and a quote), or ``""`` if none does."""
+    match = _OPENER_RE.match(line, pos)
+    return match.group() if match else ""
 
 
 def _quote_close(line: str, start: int) -> tuple[int, bool]:
-    """Where the quoted value that opens at ``line[start]`` ends, and whether
-    it closes there: at its closing quote on the same line, one that no
-    backslash escapes (#2604), or, if it has none, at the end of its line. An
-    unclosed quote masks the rest of its line (#2593), and never pairs with a
-    quote on a later one. The scan stops at the value's end, which the caller
-    then moves past, so it is linear (#2501)."""
-    end = _QUOTED_RUN[line[start]].match(line, start + 1).end()  # type: ignore[union-attr]
-    return end, end < len(line) and line[end] == line[start]
+    """Where the quoted value that opens at ``line[start]`` (see
+    :func:`_delimiter`; it must open one) ends, and whether it closes there: at
+    its closing delimiter on the same line or, if it has none, at the end of
+    its line. A plain quote is closed by a quote that no backslash escapes
+    (#2604); an escaped one by the same delimiter, a quote after exactly as
+    many backslashes, so a longer run inside it does not close it (#2616). An
+    unclosed value masks the rest of its line (#2593), and never pairs with a
+    delimiter on a later one. The scan stops at the value's end, which the
+    caller then moves past, so it is linear (#2501)."""
+    delim = _delimiter(line, start)
+    quote = delim[-1]
+    if len(delim) == 1:
+        end = _QUOTED_RUN[quote].match(line, start + 1).end()  # type: ignore[union-attr]
+        return end, end < len(line) and line[end] == quote
+    for match in _ESCAPED_CLOSE[quote].finditer(line, start + len(delim)):
+        if match.group() == "\n":
+            return match.start(), False
+        if match.end() - match.start() == len(delim):
+            return match.start(), True
+    return len(line), False
 
 
 def _value_stop(line: str, start: int, value: _ValueClass, log: bool) -> int:
@@ -515,7 +552,7 @@ def _swallowed(
         value_start, value = head
         if not secret:
             return at.start(), value_start, value
-        if line[value_start] in "\"'":
+        if _delimiter(line, value_start):
             stop = _quote_close(line, value_start)[0]
             if stop < end:
                 continue
@@ -562,10 +599,10 @@ def _past_swallowed(
     enclosing: list[tuple[_ValueClass, bool]] = [] if outer is None else [(outer, False)]
     harvest = value is _NAME_VALUE
     while True:
-        if line[value_start] in "\"'":
+        if delim := _delimiter(line, value_start):
             close, closed = _quote_close(line, value_start)
-            end = close + closed
-            nested = _swallowed(line, value_start + 1, close, log=log)
+            end = close + len(delim) * closed
+            nested = _swallowed(line, value_start + len(delim), close, log=log)
         else:
             end = _value_stop(line, value_start, value, log)
             nested = _swallowed(line, value_start, end, log=log)
@@ -641,13 +678,14 @@ def _quoted_value_end(
     spans: list[_Span] | None = None,
 ) -> tuple[int, bool]:
     """Where the quoted value that opens at ``line[start]`` ends, and whether
-    its quote closes: past its closing quote or, if it has none, at the end
-    of its line, and past the value of a secret it swallows
+    its delimiter closes: past its closing delimiter or, if it has none, at the
+    end of its line, and past the value of a secret it swallows
     (:func:`_past_swallowed`, #2593). The quoted text is masked whole, spaces
     and all (#2598)."""
+    delim = _delimiter(line, start)
     close, closed = _quote_close(line, start)
-    end = close + closed
-    swallowed = _swallowed(line, start + 1, close, log=log, secret=secret)
+    end = close + len(delim) * closed
+    swallowed = _swallowed(line, start + len(delim), close, log=log, secret=secret)
     if swallowed is not None:
         end = _past_swallowed(
             line,
@@ -661,27 +699,36 @@ def _quoted_value_end(
     return end, closed
 
 
-def _quoted_log_value_end(line: str, start: int) -> int:
-    """:func:`_quoted_value_end` for a LOG_SECRET_RE value that opens with a
-    quote, then on as a bare value runs on from there: over characters glued to
-    the closing quote (``api_key='a b'c`` masks ``'a b'c``) and a ``,`` or
-    ``;`` that starts no secret, so that masking the result again changes
-    nothing."""
-    end, _closed = _quoted_value_end(line, start, log=True)
-    return _bare_value_end(line, end, _LOG_VALUE, log=True)
+def _quoted_log_value_end(line: str, start: int, *, log: bool = True) -> int:
+    """:func:`_quoted_value_end` for a bare-style value that opens with a quote,
+    then on as a bare value runs on from there: over characters glued to the
+    closing quote (``api_key='a b'c`` masks ``'a b'c``) and a ``,`` or ``;``
+    that starts no secret, so that masking the result again changes nothing."""
+    end, _closed = _quoted_value_end(line, start, log=log)
+    return _bare_value_end(line, end, _LOG_VALUE, log=log)
 
 
 def _mask_bare_values(
-    pattern: re.Pattern[str], value: _ValueClass, spaces: bool, line: str, log: bool
+    pattern: re.Pattern[str],
+    value: _ValueClass,
+    spaces: bool,
+    line: str,
+    log: bool,
+    quoted: bool = False,
 ) -> str:
     """``pattern`` matches up to a bare value; mask each such value, as
     :func:`_bare_value_end` bounds it, and keep the match. With ``spaces``
-    the value may hold whitespace, but does not end with any."""
+    the value may hold whitespace, but does not end with any. With ``quoted``
+    a value that opens with a quote runs to its closing quote, quotes and all
+    (:func:`_quoted_log_value_end`)."""
     out: list[str] = []
     pos = at = 0
     while (match := pattern.search(line, at)) is not None:
         start = match.end()
-        end = at = _bare_value_end(line, start, value, log=log)
+        if quoted and _delimiter(line, start):
+            end = at = _quoted_log_value_end(line, start, log=log)
+        else:
+            end = at = _bare_value_end(line, start, value, log=log)
         if spaces:
             end = start + len(line[start:end].rstrip())
         if end > start:
@@ -700,7 +747,8 @@ def _mask_quoted_values(pattern: re.Pattern[str], line: str, log: bool) -> str:
     while (match := pattern.search(line, at)) is not None:
         start = match.end()
         end, closed = _quoted_value_end(line, start, log=log)
-        out += (line[pos:start], line[start], MASK, line[start] if closed else "")
+        delim = _delimiter(line, start)
+        out += (line[pos:start], delim, MASK, delim if closed else "")
         pos = at = end
     out.append(line[pos:])
     return "".join(out)
@@ -714,18 +762,20 @@ def _sub_rule(pattern: re.Pattern[str], repl: str) -> _Rule:
     return lambda line, log: pattern.sub(repl, line)
 
 
-def _bare_value_rule(prefix: str, value: _ValueClass, *, spaces: bool = False) -> _Rule:
+def _bare_value_rule(
+    prefix: str, value: _ValueClass, *, spaces: bool = False, quoted: bool = False
+) -> _Rule:
     """A rule that masks the value after ``prefix`` (a regex ending in a
     lookahead for the value's first character), up to a packed secret."""
     pattern = re.compile(prefix, re.I)
-    return lambda line, log: _mask_bare_values(pattern, value, spaces, line, log)
+    return lambda line, log: _mask_bare_values(pattern, value, spaces, line, log, quoted)
 
 
 # Up to a quoted value after an ``Authorization`` scheme (the bare-value rules
 # below need a first character that is no quote). The whitespace is horizontal,
 # so a header that ends a line never takes the quoted text on the next one.
 _AUTH_QUOTED_RE: Final[re.Pattern[str]] = re.compile(
-    rf"authorization[\"']?{_HSPACE}*:{_HSPACE}*[\"']?" + _AUTH_SCHEMES + rf"{_HSPACE}+(?=[\"'])",
+    rf"authorization{_AQ}{_HSPACE}*:{_HSPACE}*{_AQ}" + _AUTH_SCHEMES + rf"{_HSPACE}+(?=\\*+[\"'])",
     re.I,
 )
 
@@ -736,7 +786,8 @@ _SHAPE_RULES: Final[tuple[_Rule, ...]] = (
     # scheme (#2605): the quoted text is the credential, spaces and all.
     lambda line, log: _mask_quoted_values(_AUTH_QUOTED_RE, line, log),
     _bare_value_rule(
-        r"authorization:\s*(?:basic|token)\s+(?=[^\s'\"])", _value_class(r"[^\s'\";,]*")
+        r"authorization:\s*(?:basic|token)\s+" + _NOT_OPENER + r"(?=[^\s'\"])",
+        _value_class(r"[^\s'\";,]*"),
     ),
     _bare_value_rule(r"bearer\s+(?=[A-Za-z0-9._~+/=-])", _BEARER_TOKEN),
     # Any other ``Authorization`` value (#2410). A known scheme is kept and
@@ -747,12 +798,12 @@ _SHAPE_RULES: Final[tuple[_Rule, ...]] = (
     # re-mask to the same text. A raw value holds spaces, so a secret after
     # one (``rawkey HF_TOKEN"=v``) is swallowed, and masked with it (#2595).
     _bare_value_rule(
-        r"authorization[\"']?\s*:\s*[\"']?" + _AUTH_SCHEMES + r"\s+(?=[^\s\"',])",
+        rf"authorization{_AQ}\s*:\s*{_AQ}" + _AUTH_SCHEMES + rf"\s+{_NOT_OPENER}(?=[^\s\"',])",
         _value_class(r"[^\s\"',;]*", ";"),
     ),
     _bare_value_rule(
-        r"authorization[\"']?\s*:\s*[\"']?"
-        r"(?!" + _AUTH_SCHEMES + r"(?:\s|$))(?=[^\s\"',]{8,})",
+        rf"authorization{_AQ}\s*:\s*{_AQ}"
+        r"(?!" + _AUTH_SCHEMES + rf"(?:\s|$)){_NOT_OPENER}(?=[^\s\"',]{{8,}})",
         _AUTH_RAW_VALUE,
         spaces=True,
     ),
@@ -760,10 +811,16 @@ _SHAPE_RULES: Final[tuple[_Rule, ...]] = (
     _sub_rule(re.compile(_URL_SCHEME + r"[^/@\s:]*+):[^/@\s]++@", re.I), rf"\g<1>:{MASK}@"),
     _sub_rule(re.compile(_URL_SCHEME + r")[^/@\s:]{16,}+@", re.I), rf"\g<1>{MASK}@"),
 )
+# Up to the escaped quoted value of a ``--secret`` flag.
+_FLAG_ESCAPED_RE: Final[re.Pattern[str]] = re.compile(_FLAG_PREFIX + r"(?=\\+[\"'])", re.I)
 _SHAPE_RULES_AFTER: Final[tuple[_Rule, ...]] = (
     # ``--token=value`` / ``--api-key value``; what comes before the flag in
     # its run is kept.
-    _bare_value_rule(_FLAG_PREFIX + r"(?=[^-\s])", _value_class(r"[^\s;,]*")),
+    # An escaped quoted value (#2616); a plain quoted one reads as a bare value.
+    lambda line, log: _mask_quoted_values(_FLAG_ESCAPED_RE, line, log),
+    _bare_value_rule(
+        _FLAG_PREFIX + r"(?!\\+[\"'])(?=[^-\s])", _value_class(r"[^\s;,]*"), quoted=True
+    ),
     _sub_rule(re.compile(r"(client_id=)[A-Za-z0-9_.-]{16,}", re.I), rf"\g<1>{MASK}"),
     # A JWT starts at the first ``eyJ`` of its run; group 1 keeps what
     # comes before it.
@@ -822,10 +879,10 @@ def _name_values(line: str, *, log: bool = False) -> Iterator[_NameValue]:
         secret = _is_secret_name(match.group("name"))
         spans: list[_Span] = []
         closing = ""
-        if line[start] in "\"'":
+        if delim := _delimiter(line, start):
             end, closed = _quoted_value_end(line, start, log=log, secret=secret, spans=spans)
             if closed:
-                closing = line[start]
+                closing = delim
         else:
             end = _bare_value_end(line, start, _NAME_VALUE, log=log, secret=secret, spans=spans)
         yield _NameValue(match, secret, end, closing, spans)
@@ -843,7 +900,7 @@ def _mask_name_values(line: str, log: bool) -> str:
         start = match.end()
         if end == start or not secret:
             continue
-        quote = line[start] if line[start] in "\"'" else ""
+        quote = _delimiter(line, start)
         out += (line[pos:start], quote, MASK, closing)
         pos = end
     out.append(line[pos:])
@@ -1085,7 +1142,12 @@ def _harvest_secret_literals(text: str) -> list[str]:
         else:
             continue
         for start, stop in spans:
-            value = text[start:stop].strip("\"'").strip()
+            value = text[start:stop]
+            # An escaped quoted value is read without its delimiters (#2616); a
+            # plain one without its quotes.
+            if len(delim := _delimiter(value, 0)) > 1:
+                value = value[len(delim) :].removesuffix(delim)
+            value = value.strip("\"'").strip()
             if (
                 len(value) < 8
                 or value.isdigit()

@@ -165,6 +165,21 @@ applying. Add those subsections to a version's section to surface them; see
   secret longer than 128 characters is now masked with one plain replace, ahead
   of the scan, which is linear for one such secret; the output is unchanged.
   The log redaction and the dashboard's Sentry scrubber were already linear.
+- Log, Sentry, doctor-bundle and installer failure-report redaction now mask a
+  secret whose value opens with a backslash-escaped quote, as in a JSON value
+  inside a log message or a command line inside a JSON field: `password=\"abc
+  def\"` leaked `abc def\"` after the first space or quote, and
+  `{\"password\": \"a b\"}` was not masked at all (#2616). The value is read
+  as quoted and closed by the same delimiter, the quote after exactly as many
+  backslashes, so `\\"` and `\\\"` are delimiters of their own and a longer run
+  inside the value does not close it. It is masked whole in every place a value
+  can start: `NAME=`, `NAME": `, `--flag value`, `*_KEY=`, `HAL0_BEARER_TOKEN=`
+  and an `Authorization` or `Proxy-Authorization` scheme (the header's own quotes
+  may be escaped too). A value that never closes is masked to the end of its
+  line. A plain quoted value after a `--secret` flag and a space, such as
+  `--token "abc def"`, is now masked to its closing quote too, instead of to the
+  first space. The installer report drops the escaped delimiters and the
+  backslashes in front of a secret name's closing quote when it masks.
 
 ### Breaking
 

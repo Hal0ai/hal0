@@ -178,8 +178,8 @@ function maskLogSecrets(value: string): string {
       end = swallowingEnd(value, start, m.index + m[0].length, LOG_TOKEN, true)
     } else {
       start = m.index + m[0].length
-      end = isQuote(value[start])
-        ? quotedLogValueEnd(value, start)
+      end = delimiter(value, start)
+        ? quotedLogValueEnd(value, start, true)
         : bareValueEnd(value, start, LOG_VALUE, true)
     }
     if (end > start) {
@@ -328,7 +328,7 @@ function isSecretName(rawName: string): boolean {
 const NAME_RUN_RE = rx(String.raw`[A-Za-z0-9_-]+`, 'gu')
 // Up to the value, which a lookahead checks for (`_NAME_SEP_RE`): quoted
 // (closed or not, #2593) or bare.
-const NAME_VALUE_TAIL_RE = rx(String.raw`(["']?\s*[=:]\s*)(?=[^\s,}&])`, 'yu')
+const NAME_VALUE_TAIL_RE = rx(String.raw`((?:\\*["'])?\s*[=:]\s*)(?=[^\s,}&])`, 'yu')
 
 function maskNameValues(line: string, log: boolean): string {
   let out = ''
@@ -352,18 +352,18 @@ function maskNameValues(line: string, log: boolean): string {
     // line, a bare one as `bareValueEnd` says, either past a secret it swallows.
     let end: number
     let closing = ''
-    if (isQuote(line[start])) {
+    const delim = delimiter(line, start)
+    if (delim) {
       const [quotedEnd, closed] = quotedValueEnd(line, start, log, secret)
       end = quotedEnd
-      if (closed) closing = line[start]
+      if (closed) closing = delim
     } else {
       end = bareValueEnd(line, start, NAME_VALUE, log, secret)
     }
     // A match is consumed whole, benign or not.
     NAME_RUN_RE.lastIndex = end
     if (end === start || !secret) continue
-    const quote = isQuote(line[start]) ? line[start] : ''
-    out += line.slice(last, start) + `${quote}${MASK}${closing}`
+    out += line.slice(last, start) + `${delim}${MASK}${closing}`
     last = end
   }
   return out + line.slice(last)
@@ -405,13 +405,17 @@ const OPENERS_RE = /["'(\[{<]*/y
 const BEARER_HEAD_RE = rx(String.raw`bearer\s+(?=[A-Za-z0-9._~+/=-]|\*\*\*REDACTED\*\*\*)`, 'yiu')
 // A quoted value is read on one line; a bare one may follow a line break.
 const HSPACE = String.raw`(?:(?!\n)\s)`
+// A quote around an `Authorization` name or scheme, plain or escaped (`_AQ`),
+// and a position that is no quoted value's start, plain or escaped (`_NOT_OPENER`).
+const AQ = String.raw`(?:\\*["'])?`
+const NOT_OPENER = String.raw`(?!\\*["'])`
 const AUTH_HEAD_RE = rx(
-  String.raw`authorization["']?\s*:\s*["']?${AUTH_SCHEMES}\s+(?=[^\s"',])` +
-    String.raw`|authorization["']?${HSPACE}*:${HSPACE}*["']?${AUTH_SCHEMES}${HSPACE}+(?=["'])`,
+  String.raw`authorization${AQ}\s*:\s*${AQ}${AUTH_SCHEMES}\s+${NOT_OPENER}(?=[^\s"',])` +
+    String.raw`|authorization${AQ}${HSPACE}*:${HSPACE}*${AQ}${AUTH_SCHEMES}${HSPACE}+(?=\\*["'])`,
   'yiu',
 )
 const AUTH_RAW_HEAD_RE = rx(
-  String.raw`authorization["']?\s*:\s*["']?(?!${AUTH_SCHEMES}(?:\s|$))(?=[^\s"',]{8})`,
+  String.raw`authorization${AQ}\s*:\s*${AQ}(?!${AUTH_SCHEMES}(?:\s|$))${NOT_OPENER}(?=[^\s"',]{8})`,
   'yiu',
 )
 // `_FLAG_PREFIX` up to the value. The flag's run is tested for a secret word
@@ -509,7 +513,14 @@ const SWALLOW_KEYWORD_RE = rx('bearer|authorization|hal0_bearer_token|client_id'
 // `_CLIENT_ID_HEAD_RE`.
 const CLIENT_ID_HEAD_RE = rx(String.raw`client_id=(?=[A-Za-z0-9_.-]{16})`, 'yiu')
 
-const isQuote = (c: string | undefined): boolean => c === '"' || c === "'"
+// `_delimiter`: the opening delimiter of the quoted value that starts at
+// `line[pos]`: a quote, or backslashes and a quote (text escaped to sit inside a
+// string, `\"a b\"`), or '' if none does. The closing delimiter is the same text.
+const OPENER_RE = /\\*["']/y
+function delimiter(line: string, pos: number): string {
+  OPENER_RE.lastIndex = pos
+  return OPENER_RE.exec(line)?.[0] ?? ''
+}
 
 // `_quote_close`: where the quoted value opening at `line[start]` ends, and
 // whether it closes there: at its closing quote on the same line, one that no
@@ -521,11 +532,30 @@ const QUOTED_RUN_RE: Record<string, RegExp> = {
   '"': /[^"\\\n]*(?:\\[^\n]?[^"\\\n]*)*/y,
   "'": /[^'\\\n]*(?:\\[^\n]?[^'\\\n]*)*/y,
 }
+// An escaped delimiter (`\"`, `\\"`) is closed by the same delimiter, a quote after
+// exactly as many backslashes, so a longer run inside the value does not close it.
 function quoteClose(line: string, start: number): [number, boolean] {
-  const re = QUOTED_RUN_RE[line[start]]
-  re.lastIndex = start + 1
-  const end = start + 1 + (re.exec(line) as RegExpExecArray)[0].length
-  return [end, end < line.length && line[end] === line[start]]
+  const delim = delimiter(line, start)
+  const quote = delim[delim.length - 1]
+  if (delim.length === 1) {
+    const re = QUOTED_RUN_RE[quote]
+    re.lastIndex = start + 1
+    const end = start + 1 + (re.exec(line) as RegExpExecArray)[0].length
+    return [end, end < line.length && line[end] === quote]
+  }
+  // One pass over the value: count each run of backslashes, and stop at its
+  // closing delimiter or the end of its line.
+  let run = 0
+  for (let i = start + delim.length; i < line.length; i += 1) {
+    const c = line[i]
+    if (c === '\\') run += 1
+    else {
+      if (c === '\n') return [i, false]
+      if (c === quote && run === delim.length - 1) return [i - run, true]
+      run = 0
+    }
+  }
+  return [line.length, false]
 }
 
 // `_value_stop`: `packedValueEnd`, less trailing whitespace.
@@ -569,7 +599,7 @@ function swallowed(
     const [valueStart, value] = found
     if (!secret) return [pos, valueStart, value]
     let stop: number
-    if (isQuote(line[valueStart])) {
+    if (delimiter(line, valueStart)) {
       stop = quoteClose(line, valueStart)[0]
       if (stop < end) continue
     } else {
@@ -607,10 +637,11 @@ function pastSwallowed(
   for (;;) {
     let end: number
     let nested: Swallowed | null
-    if (isQuote(line[valueStart])) {
+    const delim = delimiter(line, valueStart)
+    if (delim) {
       const [close, closed] = quoteClose(line, valueStart)
-      end = close + (closed ? 1 : 0)
-      nested = swallowed(line, valueStart + 1, close, log)
+      end = close + (closed ? delim.length : 0)
+      nested = swallowed(line, valueStart + delim.length, close, log)
     } else {
       end = valueStop(line, valueStart, value, log)
       nested = swallowed(line, valueStart, end, log)
@@ -664,17 +695,18 @@ function quotedValueEnd(
   log: boolean,
   secret = true,
 ): [number, boolean] {
+  const delim = delimiter(line, start)
   const [close, closed] = quoteClose(line, start)
-  let end = close + (closed ? 1 : 0)
-  const inner = swallowed(line, start + 1, close, log, secret)
+  let end = close + (closed ? delim.length : 0)
+  const inner = swallowed(line, start + delim.length, close, log, secret)
   if (inner) end = pastSwallowed(line, inner, null, log, secret)
   return [end, closed]
 }
 
-// `_quoted_log_value_end`: `quotedValueEnd` for a LOG_SECRET_RE value that opens
+// `_quoted_log_value_end`: `quotedValueEnd` for a bare-style value that opens
 // with a quote, then on as a bare value runs on from there.
-function quotedLogValueEnd(line: string, start: number): number {
-  return bareValueEnd(line, quotedValueEnd(line, start, true)[0], LOG_VALUE, true)
+function quotedLogValueEnd(line: string, start: number, log: boolean): number {
+  return bareValueEnd(line, quotedValueEnd(line, start, log)[0], LOG_VALUE, log)
 }
 
 // `_mask_bare_values`: `prefix` (global) matches up to a bare value; mask each
@@ -704,17 +736,20 @@ function maskBareValues(
 }
 
 // The first four `_SHAPE_RULES`, in order.
-const AUTH_BASIC_TOKEN_RE = rx(String.raw`authorization:\s*(?:basic|token)\s+(?=[^\s'"])`, 'giu')
+const AUTH_BASIC_TOKEN_RE = rx(
+  String.raw`authorization:\s*(?:basic|token)\s+${NOT_OPENER}(?=[^\s'"])`,
+  'giu',
+)
 const BEARER_RULE_RE = rx(String.raw`bearer\s+(?=[A-Za-z0-9._~+/=-])`, 'giu')
 const AUTH_SCHEME_RE = rx(
-  String.raw`authorization["']?\s*:\s*["']?${AUTH_SCHEMES}\s+(?=[^\s"',])`,
+  String.raw`authorization${AQ}\s*:\s*${AQ}${AUTH_SCHEMES}\s+${NOT_OPENER}(?=[^\s"',])`,
   'giu',
 )
 const AUTH_SCHEME_VALUE = valueClass(String.raw`[^\s"',;]*`, ';')
 // Any other `Authorization` value of 8+ characters is a raw credential, masked
 // to the end of the header value; a secret after a space in it is swallowed.
 const AUTH_RAW_RE = rx(
-  String.raw`authorization["']?\s*:\s*["']?(?!${AUTH_SCHEMES}(?:\s|$))(?=[^\s"',]{8,})`,
+  String.raw`authorization${AQ}\s*:\s*${AQ}(?!${AUTH_SCHEMES}(?:\s|$))${NOT_OPENER}(?=[^\s"',]{8,})`,
   'giu',
 )
 
@@ -722,7 +757,7 @@ const AUTH_RAW_RE = rx(
 // The whitespace is horizontal (`HSPACE`), so a header that ends a line never
 // takes the quoted text on the next one.
 const AUTH_QUOTED_RE = rx(
-  String.raw`authorization["']?${HSPACE}*:${HSPACE}*["']?${AUTH_SCHEMES}${HSPACE}+(?=["'])`,
+  String.raw`authorization${AQ}${HSPACE}*:${HSPACE}*${AQ}${AUTH_SCHEMES}${HSPACE}+(?=\\*["'])`,
   'giu',
 )
 
@@ -736,7 +771,8 @@ function maskQuotedValues(line: string, prefix: RegExp, log: boolean): string {
   for (let m = prefix.exec(line); m; m = prefix.exec(line)) {
     const start = m.index + m[0].length
     const [end, closed] = quotedValueEnd(line, start, log)
-    out += line.slice(last, start) + line[start] + MASK + (closed ? line[start] : '')
+    const delim = delimiter(line, start)
+    out += line.slice(last, start) + delim + MASK + (closed ? delim : '')
     last = end
     prefix.lastIndex = end
   }
@@ -796,10 +832,24 @@ function maskFlags(line: string, log: boolean): string {
     const tail = FLAG_VALUE_RE.exec(line)
     if (!tail) continue
     const start = runEnd + tail[0].length
-    const end = bareValueEnd(line, start, FLAG_VALUE, log)
+    // A quoted value runs to its closing quote. An escaped one keeps its
+    // delimiters (`_FLAG_ESCAPED_RE`); a plain one is masked with its quotes.
+    const delim = delimiter(line, start)
+    let end: number
+    let [open, close] = ['', '']
+    if (delim) {
+      const [quotedEnd, closed] = quotedValueEnd(line, start, log)
+      end = quotedLogValueEnd(line, start, log)
+      if (delim.length > 1) {
+        end = quotedEnd
+        ;[open, close] = [delim, closed ? delim : '']
+      }
+    } else {
+      end = bareValueEnd(line, start, FLAG_VALUE, log)
+    }
     FLAG_RUN_RE.lastIndex = end
     if (end > start) {
-      out += line.slice(last, start) + MASK
+      out += line.slice(last, start) + open + MASK + close
       last = end
     }
   }
