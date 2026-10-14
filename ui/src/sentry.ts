@@ -172,9 +172,10 @@ function maskLogSecrets(value: string): string {
     let start: number
     let end: number
     if (m[4] !== undefined || m[6] !== undefined) {
-      // A Bearer token or a client_id holds no `;` or `,`: the match ends with it.
+      // A Bearer token or a client_id holds no `;` or `,`: the match ends with
+      // it, or past a secret it swallows (#2595).
       start = m.index + (m[3] ?? m[5]).length
-      end = m.index + m[0].length
+      end = swallowingEnd(value, start, m.index + m[0].length, LOG_TOKEN, true)
     } else {
       start = m.index + m[0].length
       end = bareValueEnd(value, start, LOG_VALUE, true)
@@ -323,19 +324,9 @@ function isSecretName(rawName: string): boolean {
 // (a separator cannot start with a name character, so the Python name always
 // ends at the run's end too) and the separator is tried once after it.
 const NAME_RUN_RE = rx(String.raw`[A-Za-z0-9_-]+`, 'gu')
-// Up to the value, which a lookahead checks for (`_NAME_SEP_RE`).
-const NAME_VALUE_TAIL_RE = rx(
-  String.raw`(["']?\s*[=:]\s*)(?="[^"]*"|'[^']*'|[^"'\s,}&])`,
-  'yu',
-)
-
-// Where the value starting at `line[start]` ends (`_name_values`): a quoted one
-// at its closing quote, a bare one as `bareValueEnd` says.
-function nameValueEnd(line: string, start: number, log: boolean): number {
-  const c = line[start]
-  if (c === '"' || c === "'") return line.indexOf(c, start + 1) + 1
-  return bareValueEnd(line, start, NAME_VALUE, log)
-}
+// Up to the value, which a lookahead checks for (`_NAME_SEP_RE`): quoted
+// (closed or not, #2593) or bare.
+const NAME_VALUE_TAIL_RE = rx(String.raw`(["']?\s*[=:]\s*)(?=[^\s,}&])`, 'yu')
 
 function maskNameValues(line: string, log: boolean): string {
   let out = ''
@@ -344,6 +335,9 @@ function maskNameValues(line: string, log: boolean): string {
   for (let run = NAME_RUN_RE.exec(line); run; run = NAME_RUN_RE.exec(line)) {
     const name = run[0]
     const nameEnd = run.index + name.length
+    // The rest of a run that a benign value ended inside (at a keyword) is no
+    // name, as the Python's lookbehind says.
+    if (run.index > 0 && NAME_CHAR_RE.test(line[run.index - 1])) continue
     // No secret word: the Python has no match here and carries on right after
     // the name, so a `NAME=value` inside the value is still seen.
     if (!SECRET_WORD_RE.test(name) && !KEY_NAME_RE.test(name)) continue
@@ -351,12 +345,25 @@ function maskNameValues(line: string, log: boolean): string {
     const tail = NAME_VALUE_TAIL_RE.exec(line)
     if (!tail) continue
     const start = nameEnd + tail[0].length
-    const end = nameValueEnd(line, start, log)
+    const secret = isSecretName(name)
+    // `_name_values`: a quoted value ends at its closing quote or the end of its
+    // line, a bare one as `bareValueEnd` says, either past a secret it swallows.
+    let end: number
+    let closing = ''
+    if (isQuote(line[start])) {
+      const [close, closed] = quoteClose(line, start)
+      end = close + (closed ? 1 : 0)
+      if (closed) closing = line[start]
+      const inner = swallowed(line, start + 1, close, log, secret)
+      if (inner) end = pastSwallowed(line, inner, null, log, secret)
+    } else {
+      end = bareValueEnd(line, start, NAME_VALUE, log, secret)
+    }
     // A match is consumed whole, benign or not.
     NAME_RUN_RE.lastIndex = end
-    if (end === start || !isSecretName(name)) continue
-    const quote = line[start] === '"' || line[start] === "'" ? line[start] : ''
-    out += line.slice(last, start) + `${quote}${MASK}${quote}`
+    if (end === start || !secret) continue
+    const quote = isQuote(line[start]) ? line[start] : ''
+    out += line.slice(last, start) + `${quote}${MASK}${closing}`
     last = end
   }
   return out + line.slice(last)
@@ -383,48 +390,95 @@ const valueClass = (chunk: string, sep = '[;,]'): ValueClass => [rx(chunk, 'yu')
 
 const LOG_VALUE = valueClass(String.raw`[^\s;,]*`)
 const NAME_VALUE = valueClass(String.raw`[^"'\s,}&;]*`, ';')
+// `_LOG_TOKEN`: a `SECRET_RE` Bearer token or client_id.
+const LOG_TOKEN = valueClass(String.raw`[A-Za-z0-9_\-.]*`, '(?!)')
+// `_BEARER_TOKEN`.
+const BEARER_TOKEN = valueClass(String.raw`[A-Za-z0-9._~+/=-]*`, '(?!)')
+const AUTH_BASIC_TOKEN_VALUE = valueClass(String.raw`[^\s'";,]*`)
+// A raw `Authorization` value, which may hold spaces (`_AUTH_RAW_VALUE`).
+const AUTH_RAW_VALUE = valueClass(String.raw`[^\n"',;]*`, ';')
+// `_SWALLOWED_VALUE["bearer"]`: a Bearer token, maybe already masked.
+const SWALLOWED_BEARER = valueClass(String.raw`[A-Za-z0-9._~+/=*-]*`, '(?!)')
 
 const OPENERS_RE = /["'(\[{<]*/y
-// `_PACKED_HEAD_RE`, less the `--flag` alternative (`FLAG_HEAD_RE`).
-const PACKED_HEAD_RE = rx(
-  String.raw`bearer\s+(?:[A-Za-z0-9._~+/=-]|\*\*\*REDACTED\*\*\*)` +
-    String.raw`|authorization["']?\s*:\s*["']?(?:${AUTH_SCHEMES}\s+[^\s"',]` +
-    String.raw`|(?!${AUTH_SCHEMES}(?:\s|$))[^\s"',]{8})`,
+// `_PACKED_HEAD_RE`, one alternative at a time, each up to the value.
+const BEARER_HEAD_RE = rx(String.raw`bearer\s+(?=[A-Za-z0-9._~+/=-]|\*\*\*REDACTED\*\*\*)`, 'yiu')
+const AUTH_HEAD_RE = rx(
+  String.raw`authorization["']?\s*:\s*["']?${AUTH_SCHEMES}\s+(?=[^\s"',])`,
   'yiu',
 )
-// `_FLAG_PREFIX` then the value's first character. The flag's run is tested
-// for a secret word in code, as `maskFlags` does.
-const FLAG_HEAD_RE = rx(String.raw`(?:[A-Za-z0-9]|-(?!-))*(--[A-Za-z0-9-]*)(?:=|\s+)[^-\s]`, 'yu')
-// `_LOG_HEAD_RE`.
-const LOG_HEAD_RE = rx(
-  String.raw`Authorization:\s*Bearer\s+\S|HAL0_BEARER_TOKEN=\S|\b(?:[A-Za-z][A-Za-z0-9_]*_KEY|KEY)=\S`,
+const AUTH_RAW_HEAD_RE = rx(
+  String.raw`authorization["']?\s*:\s*["']?(?!${AUTH_SCHEMES}(?:\s|$))(?=[^\s"',]{8})`,
   'yiu',
 )
+// `_FLAG_PREFIX` up to the value. The flag's run is tested for a secret word
+// in code, as `maskFlags` does, and its lookbehind in `head`.
+const FLAG_HEAD_RE = rx(
+  String.raw`(?:[A-Za-z0-9]|-(?!-))*(--[A-Za-z0-9-]*)(?:=|\s+)(?=[^-\s])`,
+  'yu',
+)
+// `_LOG_HEAD_RE`; the `\b` of its `_KEY=` alternative is tested in `head`.
+const LOG_HEAD_RE = rx(String.raw`Authorization:\s*Bearer\s+(?=\S)|HAL0_BEARER_TOKEN=(?=\S)`, 'yiu')
+const LOG_KEY_HEAD_RE = rx(String.raw`(?:[A-Za-z][A-Za-z0-9_]*_KEY|KEY)=(?=\S)`, 'yiu')
 const NAME_HEAD_RE = rx(String.raw`[A-Za-z0-9_-]+`, 'yu')
+// What the Python's lookbehinds test for, in its `re.I` sense.
+const NAME_CHAR_RE = rx(String.raw`[A-Za-z0-9_-]`, 'u')
+const FLAG_RUN_CHAR_RE = rx(String.raw`[A-Za-z0-9-]`, 'u')
+const ALNUM_RE = rx(String.raw`[A-Za-z0-9]`, 'u')
+// A Unicode word character, for Python's `\b`.
+const WORD_CHAR_RE = /[\p{L}\p{N}_]/u
 
 function stickyMatch(re: RegExp, line: string, pos: number): RegExpExecArray | null {
   re.lastIndex = pos
   return re.exec(line)
 }
 
+// Where a secret's value starts, and the class it is read with.
+type Head = [number, ValueClass]
+
+// `_head`: where the value starts of a secret whose name or keyword starts at
+// `line[pos]`, and the class its value is read with when another value has
+// swallowed it, or null. With `log`, also a secret that `SECRET_RE` masks.
+function head(line: string, pos: number, log: boolean): Head | null {
+  let m = stickyMatch(BEARER_HEAD_RE, line, pos)
+  if (m) return [pos + m[0].length, SWALLOWED_BEARER]
+  m = stickyMatch(AUTH_HEAD_RE, line, pos)
+  if (m) return [pos + m[0].length, AUTH_BASIC_TOKEN_VALUE]
+  m = stickyMatch(AUTH_RAW_HEAD_RE, line, pos)
+  if (m) return [pos + m[0].length, AUTH_RAW_VALUE]
+  const prev = pos > 0 ? line[pos - 1] : ''
+  if (!FLAG_RUN_CHAR_RE.test(prev)) {
+    m = stickyMatch(FLAG_HEAD_RE, line, pos)
+    if (m && FLAG_WORD_RE.test(m[1])) return [pos + m[0].length, LOG_VALUE]
+  }
+  if (log) {
+    m = stickyMatch(LOG_HEAD_RE, line, pos)
+    if (!m && !WORD_CHAR_RE.test(prev)) m = stickyMatch(LOG_KEY_HEAD_RE, line, pos)
+    if (m) return [pos + m[0].length, LOG_VALUE]
+  }
+  if (NAME_CHAR_RE.test(prev)) return null
+  const name = stickyMatch(NAME_HEAD_RE, line, pos)?.[0]
+  if (name === undefined || (!SECRET_WORD_RE.test(name) && !KEY_NAME_RE.test(name))) return null
+  const tail = stickyMatch(NAME_VALUE_TAIL_RE, line, pos + name.length)
+  return tail && isSecretName(name) ? [pos + name.length + tail[0].length, NAME_VALUE] : null
+}
+
 // `_starts_secret`: true if a secret that the shape rules mask (or have masked)
 // starts at `line[pos]`, after any opening quotes or brackets. With `log`, also
 // one that `SECRET_RE` masks.
 function startsSecret(line: string, pos: number, log: boolean): boolean {
-  const at = pos + (stickyMatch(OPENERS_RE, line, pos)?.[0].length ?? 0)
-  if (stickyMatch(PACKED_HEAD_RE, line, at)) return true
-  const flag = stickyMatch(FLAG_HEAD_RE, line, at)
-  if (flag && FLAG_WORD_RE.test(flag[1])) return true
-  if (log && stickyMatch(LOG_HEAD_RE, line, at)) return true
-  const name = stickyMatch(NAME_HEAD_RE, line, at)?.[0]
-  if (name === undefined || (!SECRET_WORD_RE.test(name) && !KEY_NAME_RE.test(name))) return false
-  return stickyMatch(NAME_VALUE_TAIL_RE, line, at + name.length) !== null && isSecretName(name)
+  return head(line, pos + (stickyMatch(OPENERS_RE, line, pos)?.[0].length ?? 0), log) !== null
 }
 
-// `_bare_value_end`: where the bare value of class `value` starting at
-// `line[start]` ends. Every step moves forward and tests one separator, so
-// this is linear in the value.
-function bareValueEnd(line: string, start: number, [chunk, sep]: ValueClass, log: boolean): number {
+// `_packed_value_end`: where the bare value of class `value` starting at
+// `line[start]` ends, before `bareValueEnd` looks for a swallowed secret. Every
+// step moves forward and tests one separator, so this is linear in the value.
+function packedValueEnd(
+  line: string,
+  start: number,
+  [chunk, sep]: ValueClass,
+  log: boolean,
+): number {
   let end = start
   for (;;) {
     end += stickyMatch(chunk, line, end)?.[0].length ?? 0
@@ -438,6 +492,156 @@ function bareValueEnd(line: string, start: number, [chunk, sep]: ValueClass, log
 
 // Python's whitespace (`\s`) at the end of a string, for `rstrip`.
 const TRAILING_WS_RE = rx(String.raw`\s+$`, 'u')
+
+// ── Swallowed secrets (#2593, #2594, #2595) ──────────────────────────────────
+//
+// Port of the "Swallowed secrets" block in `redaction.py`. A value that takes
+// in the start of another secret whose value lies past its end (after an empty
+// value, glued on, or past a quote that does not close where it should) is
+// extended over that secret's value, read as its own rule reads it. Only a
+// benign value, which is not masked, ends before the secret instead.
+
+// `_SWALLOW_AT_RE`'s keywords, which may start anywhere.
+const SWALLOW_KEYWORD_RE = rx('bearer|authorization|hal0_bearer_token|client_id', 'yiu')
+// `_CLIENT_ID_HEAD_RE`.
+const CLIENT_ID_HEAD_RE = rx(String.raw`client_id=(?=[A-Za-z0-9_.-]{16})`, 'yiu')
+
+const isQuote = (c: string | undefined): boolean => c === '"' || c === "'"
+
+// `_quote_close`: where the quoted value opening at `line[start]` ends, and
+// whether it closes there; an unclosed one runs to the end of its line.
+function quoteClose(line: string, start: number): [number, boolean] {
+  const close = line.indexOf(line[start], start + 1)
+  if (close >= 0) return [close, true]
+  const eol = line.indexOf('\n', start)
+  return [eol < 0 ? line.length : eol, false]
+}
+
+// `_value_stop`: `packedValueEnd`, less trailing whitespace.
+function valueStop(line: string, start: number, value: ValueClass, log: boolean): number {
+  const end = packedValueEnd(line, start, value, log)
+  return start + line.slice(start, end).replace(TRAILING_WS_RE, '').length
+}
+
+// `_swallowed_head`: `head`, or a long `client_id=`.
+function swallowedHead(line: string, pos: number, log: boolean): Head | null {
+  const m = stickyMatch(CLIENT_ID_HEAD_RE, line, pos)
+  if (m) return [pos + m[0].length, LOG_TOKEN]
+  return head(line, pos, log)
+}
+
+// Where a swallowed secret starts, where its value starts, and its class.
+type Swallowed = [number, number, ValueClass]
+
+// `_swallowed`: a secret that starts inside the value `line[start:end]` and
+// whose own value does not end inside it, or null; of those, the one whose
+// value reaches furthest, then the first. In a value that is not `secret`, the
+// first secret counts. A value read from inside one already read ends where
+// that one does, so each class reads each character at most once.
+function swallowed(
+  line: string,
+  start: number,
+  end: number,
+  log: boolean,
+  secret = true,
+): Swallowed | null {
+  const read = new Map<ValueClass, [number, number]>()
+  let best: Swallowed | null = null
+  let reach = -1
+  for (let pos = start; pos < end; pos += 1) {
+    // A name, flag or word at the start of its run, or a keyword anywhere.
+    if (pos > 0 && ALNUM_RE.test(line[pos - 1])) {
+      if (!'bBaAhHcC'.includes(line[pos]) || !stickyMatch(SWALLOW_KEYWORD_RE, line, pos)) continue
+    }
+    const found = swallowedHead(line, pos, log)
+    if (!found) continue
+    const [valueStart, value] = found
+    if (!secret) return [pos, valueStart, value]
+    let stop: number
+    if (isQuote(line[valueStart])) {
+      stop = quoteClose(line, valueStart)[0]
+      if (stop < end) continue
+    } else {
+      let last = read.get(value)
+      if (!last || valueStart < last[0] || valueStart > last[1]) {
+        last = [valueStart, valueStop(line, valueStart, value, log)]
+        read.set(value, last)
+      }
+      stop = last[1]
+      if (valueStart < end && stop <= end) continue
+    }
+    if (stop > reach) {
+      best = [pos, valueStart, value]
+      reach = stop
+    }
+  }
+  return best
+}
+
+// `_past_swallowed`: where a value of class `outer` (null when quoted) that
+// swallowed a secret ends. If it is not `secret` that is where the secret
+// starts; otherwise past the secret's value, then on as each value it was
+// inside would run, so redacting the masked text again keeps it.
+function pastSwallowed(
+  line: string,
+  [pos, firstValueStart, firstValue]: Swallowed,
+  outer: ValueClass | null,
+  log: boolean,
+  secret: boolean,
+): number {
+  if (!secret) return pos
+  const enclosing: ValueClass[] = outer ? [outer] : []
+  let valueStart = firstValueStart
+  let value = firstValue
+  for (;;) {
+    let end: number
+    let nested: Swallowed | null
+    if (isQuote(line[valueStart])) {
+      const [close, closed] = quoteClose(line, valueStart)
+      end = close + (closed ? 1 : 0)
+      nested = swallowed(line, valueStart + 1, close, log)
+    } else {
+      end = valueStop(line, valueStart, value, log)
+      nested = swallowed(line, valueStart, end, log)
+      if (nested) enclosing.push(value)
+    }
+    while (!nested && enclosing.length > 0) {
+      valueStart = end
+      value = enclosing.pop() as ValueClass
+      end = valueStop(line, valueStart, value, log)
+      nested = swallowed(line, valueStart, end, log)
+      if (nested) enclosing.push(value)
+    }
+    if (!nested) return end
+    ;[, valueStart, value] = nested
+  }
+}
+
+// `_swallowing_end`: `end`, or past the value of a secret that the value
+// `line[start:end]`, of class `value`, swallows.
+function swallowingEnd(
+  line: string,
+  start: number,
+  end: number,
+  value: ValueClass,
+  log: boolean,
+  secret = true,
+): number {
+  const found = swallowed(line, start, end, log, secret)
+  return found ? pastSwallowed(line, found, value, log, secret) : end
+}
+
+// `_bare_value_end`: where the bare value of class `value` starting at
+// `line[start]` ends: before a packed secret, or past a secret it swallows.
+function bareValueEnd(
+  line: string,
+  start: number,
+  value: ValueClass,
+  log: boolean,
+  secret = true,
+): number {
+  return swallowingEnd(line, start, packedValueEnd(line, start, value, log), value, log, secret)
+}
 
 // `_mask_bare_values`: `prefix` (global) matches up to a bare value; mask each
 // such value and keep the match. With `spaces` the value may hold whitespace,
@@ -467,24 +671,22 @@ function maskBareValues(
 
 // The first four `_SHAPE_RULES`, in order.
 const AUTH_BASIC_TOKEN_RE = rx(String.raw`authorization:\s*(?:basic|token)\s+(?=[^\s'"])`, 'giu')
-const AUTH_BASIC_TOKEN_VALUE = valueClass(String.raw`[^\s'";,]*`)
-const BEARER_RULE_RE = rx(String.raw`(bearer\s+)[A-Za-z0-9._~+/=-]+`, 'giu')
+const BEARER_RULE_RE = rx(String.raw`bearer\s+(?=[A-Za-z0-9._~+/=-])`, 'giu')
 const AUTH_SCHEME_RE = rx(
   String.raw`authorization["']?\s*:\s*["']?${AUTH_SCHEMES}\s+(?=[^\s"',])`,
   'giu',
 )
 const AUTH_SCHEME_VALUE = valueClass(String.raw`[^\s"',;]*`, ';')
 // Any other `Authorization` value of 8+ characters is a raw credential, masked
-// to the end of the header value or to whitespace that starts a secret.
+// to the end of the header value; a secret after a space in it is swallowed.
 const AUTH_RAW_RE = rx(
   String.raw`authorization["']?\s*:\s*["']?(?!${AUTH_SCHEMES}(?:\s|$))(?=[^\s"',]{8,})`,
   'giu',
 )
-const AUTH_RAW_VALUE = valueClass(String.raw`[^\s"',;]*`, String.raw`(?!\n)\s|;`)
 
 function maskAuthorization(line: string, log: boolean): string {
   let out = maskBareValues(line, AUTH_BASIC_TOKEN_RE, AUTH_BASIC_TOKEN_VALUE, log)
-  out = out.replace(BEARER_RULE_RE, `$1${MASK}`)
+  out = maskBareValues(out, BEARER_RULE_RE, BEARER_TOKEN, log)
   out = maskBareValues(out, AUTH_SCHEME_RE, AUTH_SCHEME_VALUE, log)
   return maskBareValues(out, AUTH_RAW_RE, AUTH_RAW_VALUE, log, true)
 }

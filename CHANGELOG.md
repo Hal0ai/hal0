@@ -99,8 +99,22 @@ applying. Add those subsections to a version's section to surface them; see
   secret, and each secret is masked under its own name. A `;` or `,`
   followed by anything else stays inside the masked value. The same rule
   applies to the dashboard's Sentry scrubber, the doctor bundle and the
-  installer failure report. In hal0's logs and the Sentry scrubber, a raw
-  `Authorization` value also ends before whitespace that starts a secret.
+  installer failure report.
+- Log, Sentry and failure-report redaction no longer leave a secret's value
+  visible when the value before it takes in its name (#2593, #2594, #2595):
+  after an empty value (`KEY=  X_KEY= v`), glued on with no separator
+  (`Bearer a.Authorization: Token b`, or concatenated headers such as
+  `Bearer abcX-Api-Key: def`), or past a quote that does not close where it
+  should (`--api-key="v, db-password": w`). Where the second name begins is
+  unknown (`abc` may be part of the token), so the first mask now runs on
+  over the second secret's value instead of cutting the name out:
+  `KEY=  ***REDACTED***`. A quoted secret value that never closes is masked
+  to the end of its line, a secret after a space in a raw `Authorization`
+  value is masked with it, and a value of a name that is not secret, such as
+  `max_tokens=`, ends before a secret inside it. The same applies to the
+  dashboard's Sentry scrubber, the doctor bundle and the installer failure
+  report, which now also masks a raw `Authorization` value on a line that
+  holds another header with a known scheme.
 
 ### Breaking
 

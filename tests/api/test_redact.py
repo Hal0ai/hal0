@@ -27,7 +27,7 @@ from hal0.api._redact import (
     redact_value,
 )
 from hal0.observability.sentry import SENSITIVE_HEADERS
-from hal0.redaction import MASK, redact_shareable_text
+from hal0.redaction import MASK, redact_secret_shapes, redact_shareable_text
 
 # ── is_sensitive_key ──────────────────────────────────────────────────────
 
@@ -1065,6 +1065,279 @@ class TestPackedSecrets:
     )
     @pytest.mark.parametrize("redact", [redact_log_line, redact_shareable_text])
     def test_a_long_packed_run_is_fast(self, redact, unit: str) -> None:
+        import time
+
+        line = unit * (80_000 // len(unit))
+        start = time.perf_counter()
+        redact(line)
+        elapsed = time.perf_counter() - start
+        assert elapsed < TestRedactionTimeIsLinear._BOUND_S, f"{unit!r} took {elapsed:.2f}s"
+
+
+# ── #2594: an empty value before a second secret ────────────────────────────
+
+
+class TestEmptyValueBeforeASecret:
+    """#2594: ``NAME=`` with an empty value, then whitespace, took the next
+    word as its value. When that word was another secret's name, the name was
+    masked as the first value and the second value was left visible."""
+
+    @pytest.mark.parametrize(
+        ("line", "secrets"),
+        [
+            # The line from the issue.
+            ("KEY=  X_KEY= pk_second_2", ["pk_second_2"]),
+            ("HF_TOKEN=  password: pk_second_2", ["pk_second_2"]),
+            ("X_KEY= Y_KEY= pk_second_2", ["pk_second_2"]),
+            ("api_key=\tsecret= pk_second_2", ["pk_second_2"]),
+            ("password: HF_TOKEN= pk_second_2", ["pk_second_2"]),
+            ('password: HF_TOKEN= "pk second 2"', ["pk", "second"]),
+            ("token= Bearer pk_second_2", ["pk_second_2"]),
+            ("token= --password pk_second_2", ["pk_second_2"]),
+            ("token= Authorization: Basic pk_second_2", ["pk_second_2"]),
+            ("Authorization: Basic X_KEY= pk_second_2", ["pk_second_2"]),
+            ("--token X_KEY= pk_second_2", ["pk_second_2"]),
+            # Bytes glued to the second name may be the first value: masked.
+            ("KEY= pk_first_1X_KEY= pk_second_2", ["pk_first_1", "pk_second_2"]),
+            # A benign first name took the second secret's name too.
+            ("max_tokens= HF_TOKEN= pk_second_2", ["pk_second_2"]),
+            # A chain of empty values.
+            ("A_KEY= B_KEY= C_KEY= pk_third_3", ["pk_third_3"]),
+            # The env-dump shape: one assignment per line.
+            ("HF_TOKEN=\nX_KEY= pk_second_2", ["pk_second_2"]),
+        ],
+    )
+    @pytest.mark.parametrize("redact", [redact_log_line, redact_shareable_text])
+    def test_the_second_secret_is_masked(self, redact, line: str, secrets: list[str]) -> None:
+        out = redact(line)
+        for secret in secrets:
+            assert secret not in out, (line, out)
+        assert redact(out) == out  # idempotent
+
+    @pytest.mark.parametrize(
+        ("line", "expected"),
+        [
+            # The redactor cannot tell where the second name begins, so the
+            # first mask runs on over the second value (fail closed).
+            ("KEY=  X_KEY= v", f"KEY=  {MASK}"),
+            ("HF_TOKEN=  password: pw", f"HF_TOKEN=  {MASK}"),
+            ("A_KEY= B_KEY= C_KEY= v", f"A_KEY= {MASK}"),
+            ("X_KEY= Y_KEY= v w", f"X_KEY= {MASK} w"),
+            ('token= HF_TOKEN= "v w" x', f"token= {MASK} x"),
+            # A benign value is not masked: it ends before the secret instead.
+            ("max_tokens= HF_TOKEN= v", f"max_tokens= HF_TOKEN= {MASK}"),
+            ("max_tokens= 5", "max_tokens= 5"),
+        ],
+    )
+    @pytest.mark.parametrize("redact", [redact_log_line, redact_shareable_text])
+    def test_the_rendering(self, redact, line: str, expected: str) -> None:
+        assert redact(line) == expected
+
+    @pytest.mark.parametrize(
+        "line",
+        [
+            # The next word starts no secret, so it may be the value: masked.
+            "token= abc",
+            "token= max_tokens=5",
+            "token= tokenizer=x",
+            "token= HF_TOKEN=",
+            "token= Bearer",
+        ],
+    )
+    @pytest.mark.parametrize("redact", [redact_log_line, redact_shareable_text])
+    def test_a_word_that_starts_no_secret_is_still_the_value(self, redact, line: str) -> None:
+        assert redact(line) == f"token= {MASK}"
+
+    def test_the_shareable_harvest_takes_the_swallowed_value(self) -> None:
+        """The literal harvest reads the same values, and also takes the
+        swallowed second value on its own, so it is masked where it appears
+        bare."""
+        out = redact_shareable_text("KEY=  X_KEY= abcdefgh12\nlater abcdefgh12 X_KEY=\n")
+        assert out == f"KEY=  {MASK}\nlater {MASK} X_KEY=\n"
+
+    def test_the_shareable_harvest_takes_no_name_as_a_value(self) -> None:
+        """``api_key=`` is not harvested as ``Y_KEY``'s value: masked where it
+        appears, it would hide that name and leave a short value in clear."""
+        out = redact_shareable_text("Y_KEY=   api_key= \nlater api_key= sh0rt\n")
+        assert out == f"Y_KEY=   {MASK} \nlater api_key= {MASK}\n"
+
+    @pytest.mark.parametrize("unit", ["x_key= ", "token= ", "a_key=  "])
+    @pytest.mark.parametrize("redact", [redact_log_line, redact_shareable_text])
+    def test_a_long_run_of_empty_values_is_fast(self, redact, unit: str) -> None:
+        import time
+
+        line = unit * (80_000 // len(unit)) + "v"
+        start = time.perf_counter()
+        out = redact(line)
+        elapsed = time.perf_counter() - start
+        assert out.endswith(MASK)
+        assert elapsed < TestRedactionTimeIsLinear._BOUND_S, f"{unit!r} took {elapsed:.2f}s"
+
+
+# ── #2595: secrets glued together with no separator ─────────────────────────
+
+
+class TestGluedSecrets:
+    """#2595: with no whitespace, ``;`` or ``,`` between two secrets, the
+    first value ran on over the second secret's name, and the second value
+    was left visible."""
+
+    @pytest.mark.parametrize(
+        ("line", "secrets"),
+        [
+            # The line from the issue.
+            ("Bearer pk_first_1.Authorization: Token pk_second_2", ["pk_first_1", "pk_second_2"]),
+            # Concatenated headers: the name is glued to the first value.
+            (
+                "Authorization: Bearer pk_first_1X-Api-Key: pk_second_2",
+                ["pk_first_1", "pk_second_2"],
+            ),
+            ("X_KEY=pk_first_1Bearer pk_second_2", ["pk_first_1", "pk_second_2"]),
+            ("X_KEY=pk_first_1.HF_TOKEN= pk_second_2", ["pk_first_1", "pk_second_2"]),
+            ("token=pk_first_1.HF_TOKEN= pk_second_2", ["pk_first_1", "pk_second_2"]),
+            ("token=pk_first_1--password pk_second_2", ["pk_first_1", "pk_second_2"]),
+            ("X_KEY=pk_first_1/password: pk_second_2", ["pk_first_1", "pk_second_2"]),
+            ("Authorization: Basic pk_first_1Bearer pk_second_2", ["pk_first_1", "pk_second_2"]),
+            ("client_id=pk_first_1_abcdefghHF_TOKEN= pk_second_2", ["pk_first_1", "pk_second_2"]),
+            ("Authorization: Bearer X_KEY= pk_second_2", ["pk_second_2"]),
+            # The second value starts inside the first but runs on past it.
+            ('X_KEY=pk_first_1.HF_TOKEN="pk_second_2 pk_third_3"', ["pk_first_1", "pk_third_3"]),
+            ("Bearer pk_first_1.b_token=pk_second_2:pk_third_3", ["pk_first_1", "pk_third_3"]),
+            # A raw Authorization value holds spaces: a secret after one is
+            # masked with it.
+            ('Authorization: pk_first_1raw HF_TOKEN"=pk_second_2', ["pk_first_1", "pk_second_2"]),
+            # Three in a row.
+            (
+                "Bearer pk_first_1.X_KEY= pk_second_2.Authorization: Basic pk_third_3",
+                ["pk_first_1", "pk_second_2", "pk_third_3"],
+            ),
+            # A benign first name: its value is shown, and ends at the secret.
+            ("max_tokens=5.HF_TOKEN= pk_second_2", ["pk_second_2"]),
+        ],
+    )
+    @pytest.mark.parametrize("redact", [redact_log_line, redact_shareable_text])
+    def test_the_glued_secret_is_masked(self, redact, line: str, secrets: list[str]) -> None:
+        out = redact(line)
+        for secret in secrets:
+            assert secret not in out, (line, out)
+        assert redact(out) == out  # idempotent
+
+    @pytest.mark.parametrize(
+        ("line", "expected"),
+        [
+            # Where the second name begins is unknown, so the first mask runs
+            # on over the second value (fail closed).
+            ("Bearer a.Authorization: Token b", f"Bearer {MASK}"),
+            ("Bearer a.Authorization: Token b c", f"Bearer {MASK} c"),
+            ("Authorization: Bearer abcX-Api-Key: def", f"Authorization: Bearer {MASK}"),
+            ("X_KEY=a.HF_TOKEN= b c", f"X_KEY={MASK} c"),
+            ('Authorization: rawcred12 HF_TOKEN"=v', f"Authorization: {MASK}"),
+            # A second secret all inside the first value is masked with it.
+            ("X_KEY=a.HF_TOKEN=b c", f"X_KEY={MASK} c"),
+            # A benign value ends before the secret, which keeps its name.
+            ("max_tokens=5.HF_TOKEN= v", f"max_tokens=5.HF_TOKEN= {MASK}"),
+        ],
+    )
+    @pytest.mark.parametrize("redact", [redact_log_line, redact_shareable_text])
+    def test_the_rendering(self, redact, line: str, expected: str) -> None:
+        assert redact(line) == expected
+
+    def test_the_furthest_reading_of_nested_names_is_masked(self) -> None:
+        """``Fin-X_KEY=`` and ``X_KEY=`` both start the second secret; read as
+        ``X_KEY=`` by LOG_SECRET_RE its value runs on over the quote, so the
+        mask does too."""
+        assert redact_log_line("Bearer a.Fin-X_KEY=b'pk_third_3 d") == f"Bearer {MASK} d"
+
+    def test_the_shareable_harvest_takes_the_glued_value(self) -> None:
+        out = redact_shareable_text("HF_TOKEN=abcdefgh12.X_KEY= secretval9\nlater secretval9\n")
+        assert out == f"HF_TOKEN={MASK}\nlater {MASK}\n"
+
+    @pytest.mark.parametrize(
+        "unit",
+        [
+            "a.b_token=",
+            "aBearer ",
+            "X_KEY=a.",
+            "a.Authorization: Basic ",
+            "--token=a.",
+            "aHF_TOKEN=",
+        ],
+    )
+    @pytest.mark.parametrize("redact", [redact_log_line, redact_secret_shapes])
+    def test_a_long_glued_run_is_fast(self, redact, unit: str) -> None:
+        import time
+
+        for line in (unit * (80_000 // len(unit)), unit * (80_000 // len(unit)) + " v"):
+            start = time.perf_counter()
+            redact(line)
+            elapsed = time.perf_counter() - start
+            assert elapsed < TestRedactionTimeIsLinear._BOUND_S, f"{unit!r} took {elapsed:.2f}s"
+
+
+# ── #2593: a quote that does not close where it should ──────────────────────
+
+
+class TestUnclosedQuotes:
+    """#2593: a quoted value ran to the next quote. When its own quote did
+    not close, that was the quote of a later secret's name or value, and the
+    later value was left visible. A quote that never closed left the whole
+    value visible."""
+
+    @pytest.mark.parametrize(
+        ("line", "secrets"),
+        [
+            # The line from the issue.
+            ('--api-key="pk_first_1, db-password": pk_second_2', ["pk_first_1", "pk_second_2"]),
+            ('password="pk_first_1 HF_TOKEN="pk_second_2"', ["pk_first_1", "pk_second_2"]),
+            ('password="pk_first_1.HF_TOKEN="pk_second_2"', ["pk_first_1", "pk_second_2"]),
+            ('password="pk_first_1 b_token": pk_second_2', ["pk_first_1", "pk_second_2"]),
+            ("secret='pk_first_1, api_key': pk_second_2", ["pk_first_1", "pk_second_2"]),
+            ('password: "HF_TOKEN": "pk_second_2 pk_third_3"', ["pk_second_2", "pk_third_3"]),
+            # A quote that never closes masks the rest of the line.
+            ('password="pk_first_1 pk_second_2', ["pk_first_1", "pk_second_2"]),
+            ('{"token": "pk_first_1', ["pk_first_1"]),
+            ("password: 'pk_first_1 pk_second_2", ["pk_first_1", "pk_second_2"]),
+            # A benign quoted value ends before a secret inside it.
+            ('max_tokens="5 HF_TOKEN="pk_second_2"', ["pk_second_2"]),
+            ("tokenizer='Qwen password: pk_second_2", ["pk_second_2"]),
+        ],
+    )
+    @pytest.mark.parametrize("redact", [redact_log_line, redact_shareable_text])
+    def test_the_later_secret_is_masked(self, redact, line: str, secrets: list[str]) -> None:
+        out = redact(line)
+        for secret in secrets:
+            assert secret not in out, (line, out)
+        assert redact(out) == out  # idempotent
+
+    @pytest.mark.parametrize(
+        ("line", "expected"),
+        [
+            ('password="abc HF_TOKEN="zzz" more', f'password="{MASK}" more'),
+            ('password="a.b_token": zzz more', f'password="{MASK}" more'),
+            ('password: "HF_TOKEN": "v w"', f'password: "{MASK}"'),
+            ('password="abc def', f'password="{MASK}'),
+            ('{"token": "abc', f'{{"token": "{MASK}'),
+            ('password="abc\nX=1', f'password="{MASK}\nX=1'),
+            ('max_tokens="5 HF_TOKEN="zzz"', f'max_tokens="5 HF_TOKEN="{MASK}"'),
+            # Quotes that close where they should are read as before.
+            ('"X_KEY": "v", "HF_TOKEN": "w"', f'"X_KEY": "{MASK}", "HF_TOKEN": "{MASK}"'),
+            ('max_tokens="5"', 'max_tokens="5"'),
+        ],
+    )
+    def test_the_rendering(self, line: str, expected: str) -> None:
+        assert redact_log_line(line) == expected
+        assert redact_shareable_text(line) == expected
+
+    def test_the_issue_line_renders_without_the_second_value(self) -> None:
+        line = '--api-key="v, db-password": w'
+        assert redact_shareable_text(line) == f"--api-key={MASK}"
+        assert redact_log_line(line) == f'--api-key={MASK} db-password": {MASK}'
+
+    @pytest.mark.parametrize(
+        "unit", ['password="a ', 'x="a.b_token": ', "secret: '", 'tokenizer="a ', 'a"b_token="']
+    )
+    @pytest.mark.parametrize("redact", [redact_log_line, redact_shareable_text])
+    def test_a_long_run_of_quotes_is_fast(self, redact, unit: str) -> None:
         import time
 
         line = unit * (80_000 // len(unit))

@@ -176,43 +176,43 @@
       "Sjson_ctl_1920xyz"
     ],
     [
-      "Authorization:rawauth_nel_7781xyz",
+      "Authorization:\u0085rawauth_nel_7781xyz",
       "rawauth_nel_7781xyz"
     ],
     [
-      "http://u:Spw﻿4460xyzab@h/r",
-      "Spw﻿4460xyzab"
+      "http://u:Spw\ufeff4460xyzab@h/r",
+      "Spw\ufeff4460xyzab"
     ],
     [
-      "client_id=Sturk2174xBrT7p3XıWCVcXGvnnwSo1",
-      "Sturk2174xBrT7p3XıWCVcXGvnnwSo1"
+      "client_id=Sturk2174xBrT7p3X\u0131WCVcXGvnnwSo1",
+      "Sturk2174xBrT7p3X\u0131WCVcXGvnnwSo1"
     ],
     [
-      "--passſword Sflag_long_s_16xyzab",
+      "--pass\u017fword Sflag_long_s_16xyzab",
       "Sflag_long_s_16xyzab"
     ],
     [
-      "\"github-token-Kci\" = Skelvin_825xyzabc",
+      "\"github-token-\u212aci\" = Skelvin_825xyzabc",
       "Skelvin_825xyzabc"
     ],
     [
-      "HAL0_AéDMIN_KEY=S1_visible_xyzab;Authorization:\"DPoP S2_visible_xyzab",
+      "HAL0_A\u00e9DMIN_KEY=S1_visible_xyzab;Authorization:\"DPoP S2_visible_xyzab",
       "S1_visible_xyzab"
     ],
     [
-      "HAL0_AéDMIN_KEY=S1_visible_xyzab;Authorization:\"DPoP S2_visible_xyzab",
+      "HAL0_A\u00e9DMIN_KEY=S1_visible_xyzab;Authorization:\"DPoP S2_visible_xyzab",
       "S2_visible_xyzab"
     ],
     [
-      "PASSPHRAſE=Sphrase_fold_xyzab",
+      "PASSPHRA\u017fE=Sphrase_fold_xyzab",
       "Sphrase_fold_xyzab"
     ],
     [
-      "ſecret=Sfold_s_1234xyz",
+      "\u017fecret=Sfold_s_1234xyz",
       "Sfold_s_1234xyz"
     ],
     [
-      "toKen=Sfold_k_1234xyz",
+      "to\u212aen=Sfold_k_1234xyz",
       "Sfold_k_1234xyz"
     ],
     [
@@ -262,6 +262,78 @@
     [
       "Authorization: pk2_rawcred1 HF_TOKEN\"=pk2_after_raw",
       "pk2_after_raw"
+    ],
+    [
+      "KEY=  X_KEY= pk3_after_empty",
+      "pk3_after_empty"
+    ],
+    [
+      "HF_TOKEN=  password: pk3_after_empty",
+      "pk3_after_empty"
+    ],
+    [
+      "max_tokens= HF_TOKEN= pk3_after_benign",
+      "pk3_after_benign"
+    ],
+    [
+      "KEY= pk3_glued_firstX_KEY= pk3_glued_second",
+      "pk3_glued_first"
+    ],
+    [
+      "KEY= pk3_glued_firstX_KEY= pk3_glued_second",
+      "pk3_glued_second"
+    ],
+    [
+      "Bearer pk4_first.Authorization: Token pk4_second",
+      "pk4_second"
+    ],
+    [
+      "Authorization: Bearer pk4_firstX-Api-Key: pk4_second",
+      "pk4_first"
+    ],
+    [
+      "Authorization: Bearer pk4_firstX-Api-Key: pk4_second",
+      "pk4_second"
+    ],
+    [
+      "X_KEY=pk4_first.HF_TOKEN= pk4_second",
+      "pk4_second"
+    ],
+    [
+      "token=pk4_first--password pk4_second",
+      "pk4_second"
+    ],
+    [
+      "X_KEY=pk4_first.HF_TOKEN=\"pk4 second value\"",
+      "second value"
+    ],
+    [
+      "client_id=pk4_first_abcdefghHF_TOKEN= pk4_second",
+      "pk4_second"
+    ],
+    [
+      "--api-key=\"pk5_first, db-password\": pk5_second",
+      "pk5_second"
+    ],
+    [
+      "password=\"pk5_first HF_TOKEN=\"pk5_second\"",
+      "pk5_second"
+    ],
+    [
+      "password=\"pk5_first.b_token\": pk5_second",
+      "pk5_second"
+    ],
+    [
+      "password=\"pk5 unclosed value",
+      "unclosed value"
+    ],
+    [
+      "{\"token\": \"pk5_truncated",
+      "pk5_truncated"
+    ],
+    [
+      "max_tokens=\"5 HF_TOKEN=\"pk5_after_benign\"",
+      "pk5_after_benign"
     ]
   ],
   "keep": [
@@ -286,7 +358,9 @@
     "HF_TOKEN_FILE=/run/secrets/hf",
     "authorization: denied",
     "authorization: denied for bob",
-    "see https://example.com/docs and ftp://host/file"
+    "see https://example.com/docs and ftp://host/file",
+    "max_tokens=\"5\"",
+    "tokenizer='Qwen/Qwen3-8B'"
   ],
   "exact": [
     [
@@ -391,7 +465,71 @@
     ],
     [
       "Authorization: rawcred12 HF_TOKEN\"=v",
-      "Authorization: ***REDACTED*** HF_TOKEN\"=***REDACTED***"
+      "Authorization: ***REDACTED***"
+    ],
+    [
+      "KEY=  X_KEY= v",
+      "KEY=  ***REDACTED***"
+    ],
+    [
+      "A_KEY= B_KEY= C_KEY= v",
+      "A_KEY= ***REDACTED***"
+    ],
+    [
+      "X_KEY= Y_KEY= v w",
+      "X_KEY= ***REDACTED*** w"
+    ],
+    [
+      "max_tokens= HF_TOKEN= v",
+      "max_tokens= HF_TOKEN= ***REDACTED***"
+    ],
+    [
+      "max_tokens=token=abcdefgh1234",
+      "max_tokens=token=***REDACTED***"
+    ],
+    [
+      "Bearer a.Authorization: Token b",
+      "Bearer ***REDACTED***"
+    ],
+    [
+      "Bearer a.Authorization: Token b c",
+      "Bearer ***REDACTED*** c"
+    ],
+    [
+      "X_KEY=a.HF_TOKEN= b c",
+      "X_KEY=***REDACTED*** c"
+    ],
+    [
+      "X_KEY=a.HF_TOKEN=b c",
+      "X_KEY=***REDACTED*** c"
+    ],
+    [
+      "max_tokens=5.HF_TOKEN= v",
+      "max_tokens=5.HF_TOKEN= ***REDACTED***"
+    ],
+    [
+      "--api-key=\"v, db-password\": w",
+      "--api-key=***REDACTED*** db-password\": ***REDACTED***"
+    ],
+    [
+      "password=\"abc HF_TOKEN=\"zzz\" more",
+      "password=\"***REDACTED***\" more"
+    ],
+    [
+      "password: \"HF_TOKEN\": \"v w\"",
+      "password: \"***REDACTED***\""
+    ],
+    [
+      "password=\"abc def",
+      "password=\"***REDACTED***"
+    ],
+    [
+      "{\"token\": \"abc",
+      "{\"token\": \"***REDACTED***"
+    ],
+    [
+      "max_tokens=\"5 HF_TOKEN=\"zzz\"",
+      "max_tokens=\"5 HF_TOKEN=\"***REDACTED***\""
     ]
   ],
   "mask_names": [
@@ -502,8 +640,8 @@
     "KEY",
     "salt",
     "max_tokens",
-    "ſecret",
-    "toKen",
+    "\u017fecret",
+    "to\u212aen",
     "HAL0_CLIENT_KEY\n"
   ],
   "plain_keys": [
