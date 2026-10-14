@@ -6688,6 +6688,18 @@ def _driver_env_no_proxy(exposed: list[str] | None = None) -> str:
     return ",".join(dict.fromkeys([*operator, *_NO_PROXY_BASE, *exposed]))
 
 
+class DriverEnvPolicyUnknown(RuntimeError):
+    """Raised when a driver env render cannot determine the required
+    ``NO_PROXY`` host set and no previous policy is readable to keep.
+
+    Committing a policy without the exposed hosts could route a surviving
+    local MCP connection's traffic — including its ``[secrets]`` headers —
+    through an environment proxy (#2330), and treating the render as a no-op
+    would strand a credential refresh behind a false success (#2602 review).
+    Failing closed makes the refresh visible and retryable.
+    """
+
+
 def _write_driver_env(
     state: BootstrapState | None = None,
     *,
@@ -6777,27 +6789,28 @@ def _write_driver_env(
             existing = path.read_text(encoding="utf-8")
     # #2330: keep loopback MCP traffic, and its header values, off any proxy.
     # When discovery failed and the caller gave no host list, a recomputed
-    # value would drop exclusions surviving local connections still need, so
-    # the previous policy is kept verbatim instead of committing a reduced
-    # one; the next render with healthy discovery prunes it normally (#2534).
+    # value could drop exclusions surviving local connections still need, so
+    # the previous policy is kept verbatim; the next render with healthy
+    # discovery prunes it normally (#2534). With no readable previous policy
+    # there is nothing safe to write: installed MCP records can predate the
+    # file, and skipping the render would strand an already-rendered token
+    # rotation behind a fake no-op — fail closed instead and let the caller
+    # retry once discovery heals (#2602 review).
     no_proxy = _driver_env_no_proxy(no_proxy_hosts)
     if no_proxy is None:
         prev = _no_proxy_env_lines(existing)
         if prev:
             lines += prev
-        elif path.exists():
-            # No previous policy readable to keep: writing a base-only value
-            # is still safe on a first render (nothing can have connected
-            # yet), but this file already carries one, so a rewrite would
-            # commit the reduced policy. Leave it untouched.
+        else:
             log.warning(
-                "hermes_provision.driver_env_discovery_failed_kept_policy",
+                "hermes_provision.driver_env_policy_unknown",
                 path=str(path),
             )
-            return path, False
-        else:
-            no_proxy = ",".join(_NO_PROXY_BASE)
-            lines += [f"NO_PROXY={no_proxy}", f"no_proxy={no_proxy}"]
+            raise DriverEnvPolicyUnknown(
+                "MCP host discovery failed and no previous NO_PROXY policy is "
+                "readable; the driver env is left unchanged — retry once host "
+                "discovery works"
+            )
     else:
         lines += [f"NO_PROXY={no_proxy}", f"no_proxy={no_proxy}"]
     body = "\n".join(lines) + "\n"

@@ -186,20 +186,41 @@ def test_driver_env_keeps_the_previous_policy_when_discovery_fails(
     assert "127.0.0.2" in _no_proxy_entries(driver_env)[0]
 
 
-def test_driver_env_writes_loopback_only_on_a_first_render_when_discovery_fails(
+def test_driver_env_fails_closed_on_a_first_render_when_discovery_fails(
     driver_env: Path, tmp_hal0_home: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """With no previous policy to keep, a first render cannot have any
-    surviving connection to protect, so loopback-only is safe rather than
-    reduced (#2534 review)."""
+    """With no previous policy to keep, a render cannot verify the required
+    host set: installed MCP records can predate the file, so a base-only
+    value could send a surviving connection's traffic to the proxy. Fail
+    closed and leave the file unwritten (#2534 review)."""
     def broken() -> list[str]:
         raise RuntimeError("registry unavailable")
 
     monkeypatch.setattr(installed, "exposed_loopback_hosts", broken)
+    with pytest.raises(hp.DriverEnvPolicyUnknown):
+        hp._write_driver_env()
+    assert not driver_env.exists()
+
+
+def test_driver_env_surfaces_a_refresh_failure_instead_of_a_fake_no_op(
+    driver_env: Path, tmp_hal0_home: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The failure must be visible for retry, not reported as (path, False):
+    on the unprivileged path the same branch (unreadable root-owned file)
+    would strand an already-rendered token rotation in the old file (#2602
+    review)."""
     hp._write_driver_env()
-    upper, lower = _no_proxy_entries(driver_env)
-    assert upper == lower
-    assert upper == ["localhost", "127.0.0.1", "::1"]
+
+    def broken() -> list[str]:
+        raise RuntimeError("registry unavailable")
+
+    monkeypatch.setattr(installed, "exposed_loopback_hosts", broken)
+    # The previous policy can no longer be read — the unprivileged 0600
+    # situation in production.
+    driver_env.unlink()
+    with pytest.raises(hp.DriverEnvPolicyUnknown):
+        hp._write_driver_env()
+    assert not driver_env.exists()
 
 
 def test_driver_env_keeps_the_exclusions_in_hal0_apis_env_file(
