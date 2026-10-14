@@ -1723,3 +1723,64 @@ cat "$report"
         )
         assert "genuine log line" in proc.stdout, proc.stdout + proc.stderr
         assert "root-only-content" not in proc.stdout
+
+
+# ── #2618: a long line of glued secrets harvests in linear time ─────────────
+
+
+class TestHarvestOfALongLineIsLinear:
+    """#2618: ``_hal0_report_emit_secret`` took the line's trailing CR off with
+    ``${line%$'\\r'}``. With no CR at the end bash tries every suffix length
+    against that pattern, so a harvested value as long as the line cost time
+    quadratic in its length (320 KB of ``X_KEY=a.`` units took 1.2 s, 1 MB about
+    12 s)."""
+
+    # 640 KB of glued units: ~0.25 s once linear, ~5.7 s when quadratic. The
+    # bound is ~10x the first so a loaded CI runner does not trip it (#2610).
+    _BOUND_S = 3.0
+
+    @pytest.mark.timing
+    def test_a_long_line_of_glued_units_is_harvested_fast(self, tmp_path: Path) -> None:
+        line = tmp_path / "line.log"
+        line.write_text("X_KEY=a." * 80_000 + "\n")
+        start = time.perf_counter()
+        proc = _bash(f'_hal0_report_harvest_report_text "{line}"')
+        elapsed = time.perf_counter() - start
+        assert proc.returncode == 0, proc.stderr
+        assert elapsed < self._BOUND_S, f"{line.stat().st_size} bytes took {elapsed:.2f}s"
+        # The one value is still harvested whole: everything after `X_KEY=`.
+        assert proc.stdout == "a." + "X_KEY=a." * 79_999 + "\n"
+
+    @pytest.mark.timing
+    def test_a_long_value_is_emitted_fast(self) -> None:
+        # With no CR at the end every suffix length was tried and failed (one
+        # that ends in a CR matched at once and was fast), whatever the content.
+        size = 640_000
+        start = time.perf_counter()
+        proc = _bash(f"v=$(head -c {size} /dev/zero | tr '\\0' a); _hal0_report_emit_secret \"$v\"")
+        elapsed = time.perf_counter() - start
+        assert proc.returncode == 0, proc.stderr
+        assert elapsed < self._BOUND_S, f"{size} chars took {elapsed:.2f}s"
+        assert proc.stdout == "a" * size + "\n"
+
+    @pytest.mark.parametrize(
+        ("raw", "expected"),
+        [
+            ("abcdefgh\r", ["abcdefgh"]),
+            # Only one CR comes off, as before (a CR is shown as `@` below:
+            # text-mode capture would turn it into a newline).
+            ("abcdefgh\r\r", ["abcdefgh@"]),
+            ("abcdefgh\r\nijklmnop\r", ["abcdefgh", "ijklmnop"]),
+            # A line that is shorter than 4 once the CR is gone is skipped.
+            ("abc\r", []),
+            ("\r", []),
+            ("abcdefgh", ["abcdefgh"]),
+        ],
+    )
+    def test_one_trailing_cr_is_still_taken_off(self, raw: str, expected: list[str]) -> None:
+        script = "v=" + "".join(
+            "$'\\r'" if c == "\r" else "$'\\n'" if c == "\n" else c for c in raw
+        )
+        proc = _bash(f'{script}; _hal0_report_emit_secret "$v" | tr "\\r" "@"')
+        assert proc.returncode == 0, proc.stderr
+        assert proc.stdout.split("\n")[:-1] == expected

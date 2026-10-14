@@ -303,7 +303,10 @@ _hal0_report_redact_toml_stream() {
 _hal0_report_emit_secret() {
     local value="$1" line
     while IFS= read -r line; do
-        line="${line%$'\r'}"
+        # One trailing CR off. Not `${line%$'\r'}`: bash tries every suffix
+        # length against that pattern, so on a line as long as a megabyte it is
+        # quadratic (#2618); a substring is linear.
+        [[ "${line: -1}" == $'\r' ]] && line="${line::${#line}-1}"
         [[ ${#line} -ge 4 ]] || continue
         # Digits alone or inside one matching quote pair (`'12345'`, `"86400"`):
         # the env harvest emits the raw value too, quotes included.

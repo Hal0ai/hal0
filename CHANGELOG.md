@@ -197,6 +197,14 @@ applying. Add those subsections to a version's section to surface them; see
   character starts there, so `éapi_key=,secret` and `٣api_key=,secret` are masked
   by both, where neither masked them. The browser also finds names once per run
   now: a long run of `ıa` took quadratic time.
+- The installer failure report no longer takes quadratic time on a long line
+  of glued secrets: 1.2 s for 320 KB of `X_KEY=a.` units, 12 s for 1 MB, and
+  6 s for the whole report at 640 KB (#2618). Reading a harvested value took its
+  trailing carriage return off with a `${line%$'\r'}` suffix match, and bash
+  tries every suffix length against that, so a value as long as the line cost
+  time quadratic in its length whenever it did not end in a CR. It now checks
+  the last character and cuts it with a substring, which is linear; the report
+  is unchanged.
 
 ### Breaking
 
