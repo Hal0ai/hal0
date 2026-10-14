@@ -1731,7 +1731,10 @@ def build_server(
 
     @server.tool(
         name="memory_mental_model_list",
-        description="List a bank's mental models (stored reflect responses).",
+        description=(
+            "List a bank's mental models (stored reflect responses). Metadata only "
+            "unless detail is 'content' or 'full'."
+        ),
         annotations=_ANNOTATIONS["memory_mental_model_list"],
     )
     async def memory_mental_model_list(

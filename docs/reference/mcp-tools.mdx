@@ -248,7 +248,7 @@ same verdict, belt and braces).
 | `memory_recall` | `query` | token-budgeted, consolidated memory — `{results: [...]}` |
 | `memory_reflect` | `query` | LLM-backed synthesis grounded in recalled facts; `{status: "unsupported"}` on engines without this capability |
 | `memory_history` | `id` | curation history for one memory unit |
-| `memory_mental_model_list` | none | a bank's mental models (stored `memory_reflect` answers kept refreshed) |
+| `memory_mental_model_list` | none | a bank's mental models (stored `memory_reflect` answers kept refreshed). Metadata only (id, name, tags, staleness) unless `detail` is `content` or `full`; read one model's content with `memory_mental_model_get` |
 | `memory_mental_model_get` | `id` | one mental model |
 | `memory_directive_list` | none | a bank's directives (standing instructions injected into prompts) |
 | `memory_directive_get` | `id` | one directive |

@@ -473,9 +473,12 @@ export interface MentalModel {
 export function useMentalModels(bank: string | null) {
   return useQuery<{ items: MentalModel[]; total: number }>({
     queryKey: ['memory', 'banks', bank, 'mental-models'],
+    // `detail=content`: the engine's list defaults to metadata only from
+    // hindsight-api 0.10.0 on, which drops the `source_query` and `content`
+    // the Rules tab renders. The parameter exists on older engines too.
     queryFn: () =>
       apiGet<{ items: MentalModel[]; total: number }>(
-        ENDPOINTS.memoryBankMentalModels(bank as string),
+        `${ENDPOINTS.memoryBankMentalModels(bank as string)}?detail=content`,
       ),
     enabled: !!bank,
     staleTime: 10_000,

@@ -31,7 +31,10 @@ def mm_list_cmd(
     """List a bank's mental models."""
     _require_api()
     try:
-        result = api_get(f"/api/memory/banks/{bank}/mental-models")
+        # hindsight-api >= 0.10.0 lists metadata only by default; ask for
+        # content so ``--json`` keeps carrying each model's content and
+        # source_query, as it did on older engines.
+        result = api_get(f"/api/memory/banks/{bank}/mental-models", params={"detail": "content"})
     except CliApiError as exc:
         die(str(exc))
         return
