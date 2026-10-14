@@ -2,51 +2,39 @@
 /**
  * hal0 — hindsight-coding-agents binding for Pi.
  *
- * DEVIATION FROM SPEC (see task-4-report.md for full evidence): the pinned
- * @vectorize-io/hindsight-coding-agents@0.4.3 does NOT export `RuntimeCore`
- * or `resolveHostMemory` from any subpath — there is no `dist/core/*` in the
- * published package at all (its build inlines each harness's copy of those
- * classes privately into that harness's own bundle; none re-export them).
- * The only exported, working Pi-shaped binding in 0.4.3 is `dist/prime-agent.js`'s
- * default `extension` function — the same file the package's own package.json
- * `"pi": { "extensions": [...] }` field declares as ITS canonical Pi
- * extension. We delegate to it rather than hand-rolling a duplicate RuntimeCore
- * binding that the package's public API makes impossible to construct.
+ * @vectorize-io/hindsight-coding-agents does not export `RuntimeCore` or
+ * `resolveHostMemory` from any public subpath — each harness bundle inlines
+ * its own private copy — so hal0 cannot hand-roll a binding. Instead it
+ * delegates to the package's own Pi extension, `dist/pi.js` (default export;
+ * reached through the package's `./dist/*` export map, an internal API —
+ * hence the exact pin in this directory's package.json).
  *
- * That upstream extension:
- *   - wires "before_agent_start" -> RuntimeCore.onPrompt + injects via the
- *     returned `systemPrompt` (matches this plan's mapping),
- *   - wires "agent_end" -> RuntimeCore.onTranscript (matches this plan's
- *     mapping),
- *   - seeds (RuntimeCore.seedIfCold) synchronously inline during its own
- *     setup, i.e. on extension load — there is no separate "session_start"
- *     wiring to replicate,
- *   - registers hindsight's native hindsight_* tools via `pi.registerTool`
- *     (bonus over this plan, not requested but harmless and fail-open),
- *   - does NOT wire any "session_shutdown"/idle flush — RuntimeCore.onSessionIdle
- *     is unreachable from here (no exported way to obtain the RuntimeCore
- *     instance the upstream extension constructs internally), so unlike this
- *     plan's mapping there is no final-flush hook. Write-back still happens
- *     every `agent_end` (turn cadence), which is upstream's actual fail-open
- *     substitute for a Stop-hook they do not have here either.
+ * That extension (verified against 0.8.1):
+ *   - seeds (`RuntimeCore.seedIfCold`) when the extension loads / on
+ *     "session_start" — no separate wiring to replicate,
+ *   - wires "before_agent_start" -> `onPrompt` + injects recalled memory
+ *     into the system prompt,
+ *   - wires "agent_end" -> `onTranscript` (write-back every turn),
+ *   - wires "session_shutdown" -> `flush()`, so the last turn's write-back
+ *     is not lost at exit,
+ *   - registers hindsight's native `hindsight_*` tools via `pi.registerTool`.
  *
- * HARNESS LABEL: upstream identifies Pi as harness "prime-agent" (hardcoded,
- * private, unexported — dist/prime-agent.js's own `var HARNESS2 =
- * "prime-agent"`, passed as `RuntimeCore`'s 4th constructor arg; nothing in
- * 0.4.3's public API can relabel it, the `HINDSIGHT_HARNESS` env var included
- * — it only feeds `Config.harness`, a config-loading field this extension's
- * `createRuntime` never reads). Accepted as Pi's factual hindsight harness
- * identity at this pin: bank naming keys off {gitProject}, not harness, so
- * this label only shows up in diagnostics/retain tags, not bank identity.
+ * HARNESS LABEL: upstream identifies this binding as harness "pi" (its
+ * `createPiExtension("pi")`). Through 0.4.3 only the Prime Agent fork's
+ * bundle (`dist/prime-agent.js`, label "prime-agent") was reachable, so
+ * memories retained by hal0's Pi before the 0.8.1 bump carry the
+ * "prime-agent" label. Bank naming keys off {gitProject}, not the harness,
+ * so old and new memories share one bank; the label only shows up in
+ * diagnostics, retain tags and the `harnesses.pi` config section.
  *
- * Upgrading the pin is a deliberate act regardless: re-verify these findings
- * against the new dist/ layout before bumping past 0.4.3.
+ * Upgrading the pin is a deliberate act: re-verify the dist/ layout and the
+ * hook wiring above against the new version before bumping.
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 // Deep import into the package's exported "./dist/*" map; see the module doc
-// comment above for why this is the only reachable Pi-shaped binding in 0.4.3.
-import hindsightPrimeAgentExtension from "@vectorize-io/hindsight-coding-agents/dist/prime-agent.js";
+// comment above for why this is the reachable Pi-shaped binding.
+import hindsightPiExtension from "@vectorize-io/hindsight-coding-agents/dist/pi.js";
 
 export default async function (pi: ExtensionAPI) {
   // Fail-open: a dead hindsight-api (9177), a misconfigured bank, or any
@@ -56,7 +44,7 @@ export default async function (pi: ExtensionAPI) {
   // and seeding eagerly, so the whole call needs to be inside this guard —
   // there is no per-hook boundary to wrap individually from out here.
   try {
-    await hindsightPrimeAgentExtension(pi);
+    await hindsightPiExtension(pi);
   } catch (error) {
     console.error(`[hindsight] disabled: ${error instanceof Error ? error.message : error}`);
   }
