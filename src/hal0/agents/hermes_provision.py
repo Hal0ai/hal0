@@ -6712,7 +6712,7 @@ def _no_proxy_in_env_file(body: str | None) -> list[str]:
     return out
 
 
-def _driver_env_no_proxy(existing_body: str | None, exposed: list[str] | None = None) -> str:
+def _driver_env_no_proxy(exposed: list[str] | None = None) -> str:
     """The ``NO_PROXY`` value for the driver env (#2330).
 
     Hermes's MCP client is an ``httpx.AsyncClient`` with the default
@@ -6722,11 +6722,12 @@ def _driver_env_no_proxy(existing_body: str | None, exposed: list[str] | None = 
     unit, so its value replaces whatever the unit inherits; the result
     therefore keeps the operator's entries first and appends
     :data:`_NO_PROXY_BASE` plus every loopback host an exposed record uses.
-    Operator entries come from this process's environment, hal0-api's
+    Operator entries come from this process's environment and hal0-api's
     ``api.env`` (readable by the hal0 user, so a run from a shell without
-    them still keeps them) and the file being replaced, when readable. Both
-    spellings are merged because Python's proxy lookup prefers the lowercase
-    one.
+    them still keeps them). The file being replaced is *not* a source
+    (#2534): folding its previous value back in made every entry permanent
+    for root renders, so an entry the operator removed from api.env stayed
+    in the service's ``NO_PROXY`` forever.
 
     ``exposed`` is the loopback host list the caller already looked up (the
     MCP join passes the set it is about to record, so a second lookup can't
@@ -6741,7 +6742,6 @@ def _driver_env_no_proxy(existing_body: str | None, exposed: list[str] | None = 
     with contextlib.suppress(OSError):
         api_env = _cfg_paths.api_env().read_text(encoding="utf-8")
     operator += _no_proxy_in_env_file(api_env)
-    operator += _no_proxy_in_env_file(existing_body)
     if exposed is None:
         try:
             from hal0.mcp.installed import exposed_loopback_hosts
@@ -6843,12 +6843,14 @@ def _write_driver_env(
     direct = sandboxed or os.geteuid() == 0
     existing: str | None = None
     if path.exists():
-        # Unreadable when unprivileged (0600 root:root): the operator's
-        # NO_PROXY then comes from this process's environment alone.
+        # Only for the no-op check below — not an operator NO_PROXY source
+        # (#2534): folding the file's own value back in made every entry
+        # permanent for root renders. Unreadable when unprivileged (0600
+        # root:root), which just forces a rewrite through the seam.
         with contextlib.suppress(OSError):
             existing = path.read_text(encoding="utf-8")
     # #2330: keep loopback MCP traffic, and its header values, off any proxy.
-    no_proxy = _driver_env_no_proxy(existing, no_proxy_hosts)
+    no_proxy = _driver_env_no_proxy(no_proxy_hosts)
     lines += [f"NO_PROXY={no_proxy}", f"no_proxy={no_proxy}"]
     body = "\n".join(lines) + "\n"
     if path.exists():
