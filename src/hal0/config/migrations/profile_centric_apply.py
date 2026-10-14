@@ -291,13 +291,15 @@ def _plan_hash(sp: pc.SlotPlan, plan: pc.ConversionPlan, file_hash: str) -> str:
 
 def _revert_stack_rows(plan: pc.ConversionPlan, names: set[str]) -> bool:
     """A blocked slot keeps its file, so a stack row that followed it keeps its
-    whole original row: no re-point, no dropped keys."""
+    profile: no re-point. The retired tuning keys are still dropped: stack apply
+    never read them, and ``StackSlotEntry`` forbids them, so keeping them would
+    make the whole stacks.toml fail validation (#2649)."""
     reverted = False
     for st in plan.stacks:
         for row in st.rows:
-            if row.get("slot") in names and (row.get("profile") or row.get("drop")):
+            if row.get("slot") in names and row.get("profile"):
                 row["profile"] = None
-                row["drop"] = []
+                row["change"] = row.get("drop_note") or ""
                 reverted = True
     return reverted
 

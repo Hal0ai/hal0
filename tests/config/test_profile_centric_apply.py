@@ -518,7 +518,30 @@ def test_verify_block_reverts_the_stack_row_that_followed_the_slot(
     monkeypatch.setattr(pca, "_verify", lambda plan: {"1.toml": "--ctx-size: plan 1, launch 2"})
     pca.migrate_profile_centric()
     (row,) = tomllib.loads(paths.stacks_toml().read_text())["stack"]["st"]["slots"]
-    assert row == {"slot": "agent", "profile": "thinking", "mtp": True}  # whole row kept
+    # The profile is kept; the retired tuning key is not (StackSlotEntry forbids it).
+    assert row == {"slot": "agent", "profile": "thinking"}
+
+
+def test_blocked_slot_stack_row_still_drops_retired_keys_and_file_validates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#2649: a v1.3.0 row (``vision = false``) for a blocked slot must not leave
+    stacks.toml failing validation, and the report must not claim a reverted drop."""
+    from hal0.config.loader import load_stacks_config
+
+    production_install()
+    write_toml(
+        paths.stacks_toml(),
+        {"stack": {"st": {"slots": [{"slot": "agent", "profile": "thinking", "vision": False}]}}},
+    )
+    monkeypatch.setattr(pca, "_verify", lambda plan: {"1.toml": "--ctx-size: plan 1, launch 2"})
+    report = pca.migrate_profile_centric()
+    (row,) = tomllib.loads(paths.stacks_toml().read_text())["stack"]["st"]["slots"]
+    assert row == {"slot": "agent", "profile": "thinking"}
+    assert "st" in load_stacks_config().stack  # no ConfigParseError
+    assert report.plan is not None
+    lines = [ln for ln in report.plan.lines() if ln.startswith("stack st row agent")]
+    assert lines == ["stack st row agent: drop vision"]  # only what actually happens
 
 
 def test_shipped_installer_config_converts_nothing() -> None:
