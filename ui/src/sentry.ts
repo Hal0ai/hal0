@@ -509,12 +509,14 @@ const CLIENT_ID_HEAD_RE = rx(String.raw`client_id=(?=[A-Za-z0-9_.-]{16})`, 'yiu'
 const isQuote = (c: string | undefined): boolean => c === '"' || c === "'"
 
 // `_quote_close`: where the quoted value opening at `line[start]` ends, and
-// whether it closes there: at its closing quote on the same line or, if it has
-// none, at the end of its line. An unclosed quote never pairs with a quote on a
-// later line.
+// whether it closes there: at its closing quote on the same line, one that no
+// backslash escapes, or, if it has none, at the end of its line. An unclosed
+// quote never pairs with a quote on a later line. A backslash and the character
+// after it are one unit in either kind of quote, and a backslash right before
+// the end of its line is part of the value (`_QUOTED_RUN`).
 const QUOTED_RUN_RE: Record<string, RegExp> = {
-  '"': /[^"\n]*/y,
-  "'": /[^'\n]*/y,
+  '"': /[^"\\\n]*(?:\\[^\n]?[^"\\\n]*)*/y,
+  "'": /[^'\\\n]*(?:\\[^\n]?[^'\\\n]*)*/y,
 }
 function quoteClose(line: string, start: number): [number, boolean] {
   const re = QUOTED_RUN_RE[line[start]]

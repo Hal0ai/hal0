@@ -443,19 +443,27 @@ def _swallowed_head(line: str, pos: int, *, log: bool) -> tuple[int, _ValueClass
 
 
 # What a quoted value that opens with each quote holds up to its closing quote
-# or the end of its line: a run of characters that end neither.
+# or the end of its line: a run of characters that end neither, in which a
+# backslash and the character after it (a ``\"``, a ``\\``) are one unit and
+# end nothing. Either quote honours the escape: a shell's single quotes do not,
+# but a JSON-ish dump or a log of an escaped value does, and reading ``\'`` as
+# an escape can only mask more of the line, never less. A backslash right
+# before the end of its line is taken too, so it is masked with the value. The
+# two parts of each loop cover different characters, so the run is matched
+# without backtracking.
 _QUOTED_RUN: Final[dict[str, re.Pattern[str]]] = {
-    '"': re.compile(r'[^"\n]*'),
-    "'": re.compile(r"[^'\n]*"),
+    '"': re.compile(r'[^"\\\n]*(?:\\[^\n]?[^"\\\n]*)*'),
+    "'": re.compile(r"[^'\\\n]*(?:\\[^\n]?[^'\\\n]*)*"),
 }
 
 
 def _quote_close(line: str, start: int) -> tuple[int, bool]:
     """Where the quoted value that opens at ``line[start]`` ends, and whether
-    it closes there: at its closing quote on the same line or, if it has none,
-    at the end of its line. An unclosed quote masks the rest of its line
-    (#2593), and never pairs with a quote on a later one. The scan stops at the
-    value's end, which the caller then moves past, so it is linear (#2501)."""
+    it closes there: at its closing quote on the same line, one that no
+    backslash escapes (#2604), or, if it has none, at the end of its line. An
+    unclosed quote masks the rest of its line (#2593), and never pairs with a
+    quote on a later one. The scan stops at the value's end, which the caller
+    then moves past, so it is linear (#2501)."""
     end = _QUOTED_RUN[line[start]].match(line, start + 1).end()  # type: ignore[union-attr]
     return end, end < len(line) and line[end] == line[start]
 

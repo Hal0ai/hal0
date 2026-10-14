@@ -325,6 +325,10 @@ _hal0_report_unquote() {
     printf '%s' "$v"
 }
 
+# A TOML basic string, its body in group 1 (an escape is a backslash and the
+# character after it).
+_HAL0_REPORT_TOML_BASIC_RE='^"(([^"\\]|\\.)*)"'
+
 # Values of every sensitive-named shell variable (exported or not — the
 # installer may hold a credential in a plain shell var).
 _hal0_report_harvest_shell_vars() {
@@ -416,11 +420,15 @@ _hal0_report_harvest_toml_file() {
                 ((_HAL0_TA_DEPTH <= 0)) || in_array=1
                 continue
             fi
-            if [[ "$raw" =~ ^\"([^\"]*)\" || "$raw" =~ ^\'([^\']*)\' ]]; then
+            # A basic string holds `\"` and `\\` escapes (#2604); a literal one none.
+            if [[ "$raw" =~ $_HAL0_REPORT_TOML_BASIC_RE || "$raw" =~ ^\'([^\']*)\' ]]; then
                 raw="${BASH_REMATCH[1]}"
             else
                 raw="${raw%%#*}"
                 raw="${raw%%[[:space:]]*}"
+                # A string that never closes (a malformed file): its opening
+                # quote is no part of the secret.
+                raw="${raw#[\"\']}"
             fi
             _hal0_report_emit_secret "$raw"
         fi
@@ -675,7 +683,7 @@ _hal0_report_swallow_mask_exprs() {
     local m="$_HAL0_REPORT_MASK" k="$_HAL0_REPORT_PACKED"
     local w="$_HAL0_REPORT_SWALLOW" kw="$_HAL0_REPORT_KEYWORD" v="$_HAL0_REPORT_NAME_VALUE"
     printf '%s\n' "s#${w}+#${w}#g"
-    printf '%s\n' "s#${w}\"[^\"${w}]*\"#\"${m}\"#g" "s#${w}'[^'${w}]*'#'${m}'#g"
+    printf '%s\n' "s#${w}\"([^\"\\${w}]|\\\\[^${w}])*\"#\"${m}\"#g" "s#${w}'([^'\\${w}]|\\\\[^${w}])*'#'${m}'#g"
     printf '%s\n' "s#${w}([\"']).*\$#\\1${m}#"
     printf '%s\n' "s#([${w}${v}])[^\"'[:space:],}&${k}${w}${kw}${v}]+#\\1${m}#g"
 }
@@ -718,8 +726,8 @@ _hal0_report_mask_patterns() {
         -e "s#(authorization)${kw}#\\1#gI" \
         -e "s#([a-z][a-z0-9+.-]*://[^/@[:space:]:]*):[^/@[:space:]]+@#\\1:${m}@#gI" \
         -e "s#([a-z][a-z0-9+.-]*://)[^/@[:space:]:]{16,}@#\\1${m}@#gI" \
-        -e "s#${pre}\"[^\"]*\"#\\1\"${m}\"#gI" \
-        -e "s#${pre}'[^']*'#\\1'${m}'#gI" \
+        -e "s#${pre}\"([^\"\\\\]|\\\\.)*\"#\\1\"${m}\"#gI" \
+        -e "s#${pre}'([^'\\\\]|\\\\.)*'#\\1'${m}'#gI" \
         -e "s#${pre}[^\"'[:space:],}&${k}${w}${kw}${v}][^\"'[:space:],}&${k}${kw}]*#\\1${m}#gI" \
         -e "s#(--[A-Za-z0-9-]*(secret|token|password|pass|api-key|apikey|private-key)[A-Za-z0-9-]*(=|[[:space:]]+))[^-[:space:]${k}${kw}][^[:space:]${k}${kw}]*#\\1${m}#gI" \
         -e "s#(client_id=)[A-Za-z0-9_.-]{16,}#\\1${m}#gI" \
