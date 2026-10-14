@@ -233,6 +233,9 @@ def profile_set_cmd(
         return
 
     try:
+        # Read first: a config PATCH for an unknown bank would create it, so a
+        # mistyped id must fail here (404) rather than mint a new bank.
+        _fetch_profile(bank)
         api_patch(f"/api/memory/banks/{bank}/config", json={"updates": updates})
         final = _fetch_profile(bank)
     except CliApiError as exc:

@@ -132,6 +132,13 @@ def test_profile_set_requires_at_least_one_field(stub_api) -> None:
     assert not stub_api["patch"]
 
 
+def test_profile_set_unknown_bank_fails_before_writing(stub_api) -> None:
+    # A config PATCH would create the bank; a typo must not mint one.
+    result = runner.invoke(bc.app, ["profile", "set", "nope", "--skepticism", "5"])
+    assert result.exit_code != 0
+    assert not stub_api["patch"]
+
+
 def test_profile_set_disposition_goes_through_config_patch(stub_api) -> None:
     result = runner.invoke(bc.app, ["profile", "set", "shared", "--skepticism", "5"])
     assert result.exit_code == 0, result.output

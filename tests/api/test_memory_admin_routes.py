@@ -737,3 +737,72 @@ def test_profile_put_unknown_bank_404_without_writing(
     r = client.put("/api/memory/banks/nope/profile", json={"disposition": {"empathy": 2}})
     assert r.status_code == 404
     assert not [q for q in recorder.requests if q["method"] == "PATCH"]
+
+
+def test_profile_get_resolves_an_alias_to_the_canonical_bank(
+    client: TestClient, recorder: _Recorder
+) -> None:
+    recorder.respond(
+        "GET",
+        "/v1/default/banks",
+        200,
+        {
+            "banks": [
+                {
+                    "bank_id": "shared",
+                    "name": "Shared brain",
+                    "disposition": {"skepticism": 3, "literalism": 3, "empathy": 3},
+                    "mission": "",
+                    "matched_aliases": ["household"],
+                }
+            ],
+            "total": 1,
+        },
+    )
+    r = client.get("/api/memory/banks/household/profile")
+    assert r.status_code == 200
+    assert r.json()["bank_id"] == "shared"
+
+
+def _paged_client(handler: Any) -> TestClient:
+    http = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), base_url="http://127.0.0.1:9177"
+    )
+    rest = HindsightRestClient(http_client=http, api_key="hal0-local-noauth")
+    return TestClient(_build_app(_HindsightStubProvider(rest)))
+
+
+def test_profile_get_walks_pages_of_substring_matches(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(memory_admin, "_PROFILE_LIST_PAGE", 2)
+    pages = {
+        "0": [{"bank_id": "shared-a"}, {"bank_id": "shared-b"}],
+        "2": [{"bank_id": "shared-c"}, {"bank_id": "shared", "name": "Shared"}],
+    }
+    offsets: list[str] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        offset = request.url.params.get("offset", "0")
+        offsets.append(offset)
+        return httpx.Response(200, json={"banks": pages.get(offset, []), "total": 4})
+
+    with _paged_client(handler) as c:
+        r = c.get("/api/memory/banks/shared/profile")
+    assert r.status_code == 200, r.text
+    assert r.json()["name"] == "Shared"
+    assert offsets == ["0", "2"]
+
+
+def test_profile_get_stops_when_the_listing_is_exhausted(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(memory_admin, "_PROFILE_LIST_PAGE", 2)
+    offsets: list[int] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        offset = int(request.url.params.get("offset", "0"))
+        offsets.append(offset)
+        banks = [{"bank_id": f"shared-{offset}"}, {"bank_id": f"shared-{offset + 1}"}]
+        return httpx.Response(200, json={"banks": banks if offset < 4 else [], "total": 4})
+
+    with _paged_client(handler) as c:
+        r = c.get("/api/memory/banks/shared/profile")
+    assert r.status_code == 404
+    assert offsets == [0, 2]

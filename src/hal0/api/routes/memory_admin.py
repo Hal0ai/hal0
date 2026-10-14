@@ -310,22 +310,50 @@ async def bank_stats(request: Request, bank_id: str) -> Any:
 _DISPOSITION_TRAITS = ("skepticism", "literalism", "empathy")
 
 
+_PROFILE_LIST_PAGE = 1000
+
+
+def _is_bank(item: Any, bank_id: str) -> bool:
+    """``item`` is the bank ``bank_id`` names — by id, or by a 1.0 alias.
+
+    Every engine bank route accepts an alias in place of the id; the list
+    answers with the canonical ``bank_id`` and the alias in
+    ``matched_aliases`` (absent before hindsight-api 0.10.2).
+    """
+    if not isinstance(item, dict):
+        return False
+    aliases = item.get("matched_aliases")
+    return item.get("bank_id") == bank_id or (isinstance(aliases, list) and bank_id in aliases)
+
+
 async def _bank_profile(client: Any, bank_id: str) -> dict[str, Any]:
-    listing = await _forward(
-        client, "GET", "/v1/default/banks", params={"q": bank_id, "limit": "1000"}
-    )
-    banks = listing.get("banks") if isinstance(listing, dict) else None
-    for item in banks if isinstance(banks, list) else []:
-        if isinstance(item, dict) and item.get("bank_id") == bank_id:
-            mission = item.get("mission") or ""
-            return {
-                "bank_id": bank_id,
-                "name": item.get("name"),
-                "disposition": item.get("disposition") or {},
-                "mission": mission,
-                # The old response carried the mission twice; kept for callers.
-                "background": mission,
-            }
+    # ``q`` is a substring filter on id or name, applied before paging, so
+    # walk the pages until the exact bank turns up or the listing runs out.
+    offset = 0
+    while True:
+        listing = await _forward(
+            client,
+            "GET",
+            "/v1/default/banks",
+            params={"q": bank_id, "limit": str(_PROFILE_LIST_PAGE), "offset": str(offset)},
+        )
+        banks = listing.get("banks") if isinstance(listing, dict) else None
+        banks = banks if isinstance(banks, list) else []
+        for item in banks:
+            if _is_bank(item, bank_id):
+                mission = item.get("mission") or ""
+                return {
+                    "bank_id": item["bank_id"],
+                    "name": item.get("name"),
+                    "disposition": item.get("disposition") or {},
+                    "mission": mission,
+                    # The old response carried the mission twice; kept for callers.
+                    "background": mission,
+                }
+        offset += len(banks)
+        total = listing.get("total") if isinstance(listing, dict) else None
+        if not banks or not isinstance(total, int) or offset >= total:
+            break
     raise NotFound(f"bank {bank_id!r} does not exist", code="memory.bank_not_found")
 
 
