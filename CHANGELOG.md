@@ -531,6 +531,15 @@ applying. Add those subsections to a version's section to surface them; see
 
 ### Fixed
 
+- A memory-engine upgrade that failed once no longer loses memories on a
+  second failure. The first failed attempt kept its `.pg0.pre-<version>`
+  snapshot. Every later attempt then reused that snapshot instead of taking
+  a new one, so a second rollback restored it and dropped everything written
+  since the first rollback. Each attempt now takes a fresh snapshot after
+  the old engine stops, and replaces the previous one only once the copy is
+  complete. The existing snapshot is kept unchanged when the old engine was
+  not answering before the stop.
+
 - A browser origin you allow now survives an installer re-run. The REST and
   WebSocket origin checks only read `HAL0_ALLOWED_ORIGINS`, which sits in the
   installer-managed block of `/etc/hal0/api.env`, so a reverse-proxy origin

@@ -266,3 +266,73 @@ def test_root_mode_chowns_artifacts(hs, monkeypatch):
     assert result["status"] == "upgraded"
     assert any(".venv.new" in p for p in chowned)  # built venv handed to hal0
     assert any(f".pg0.pre-{OLD_VERSION}" in p for p in chowned)  # snapshot too
+
+
+def _wrong_version(url: str):
+    if url.endswith("/version"):
+        return {"api_version": "0.0.0"}
+    return {"status": "healthy"}
+
+
+def test_retry_replaces_a_stale_snapshot_from_an_earlier_failed_attempt(hs):
+    # An earlier attempt failed and rolled back, leaving its snapshot; the
+    # old engine then took writes. A second failed attempt must restore THOSE
+    # writes, not the first attempt's copy (Codex review on #2612).
+    stale = hs / f".pg0.pre-{OLD_VERSION}"
+    stale.mkdir()
+    (stale / "PG_VERSION").write_text("18\n")
+    (stale / "marker").write_text("first attempt")
+    (hs / ".pg0" / "marker").write_text("written after the first rollback")
+
+    result = upgrade_memory_engine(
+        seam=FakeSeam(), runner=FakeRunner(), http_get=_wrong_version, hs_dir=hs
+    )
+    assert result["status"] == "rolled_back"
+    assert (stale / "marker").read_text() == "written after the first rollback"
+    assert (hs / ".pg0" / "marker").read_text() == "written after the first rollback"
+    assert not (hs / ".pg0.snapshot-new").exists()
+
+
+def test_existing_snapshot_is_kept_when_the_old_engine_was_down(hs):
+    # A dead old engine may mean an earlier rollback's restore failed, so the
+    # current .pg0 is not known to be good: never overwrite the snapshot from it.
+    stale = hs / f".pg0.pre-{OLD_VERSION}"
+    stale.mkdir()
+    (stale / "PG_VERSION").write_text("18\n")
+    (stale / "marker").write_text("last known good")
+    (hs / ".pg0" / "marker").write_text("possibly half-restored")
+    probes: list[str] = []
+
+    def down_then_wrong_version(url: str):
+        probes.append(url)
+        if len(probes) == 1:
+            return None  # the pre-stop liveness probe: old engine not answering
+        return _wrong_version(url)
+
+    result = upgrade_memory_engine(
+        seam=FakeSeam(), runner=FakeRunner(), http_get=down_then_wrong_version, hs_dir=hs
+    )
+    assert result["status"] == "rolled_back"
+    assert (stale / "marker").read_text() == "last known good"
+    assert (hs / ".pg0" / "marker").read_text() == "last known good"
+
+
+def test_snapshot_copy_failure_keeps_the_previous_snapshot(hs):
+    stale = hs / f".pg0.pre-{OLD_VERSION}"
+    stale.mkdir()
+    (stale / "marker").write_text("previous")
+
+    class CpFails(FakeRunner):
+        def __call__(self, args, **kwargs):
+            if str(args[0]) == "cp":
+                self.calls.append([str(a) for a in args])
+                return subprocess.CompletedProcess(args, 1, "", "No space left on device")
+            return super().__call__(args, **kwargs)
+
+    seam = FakeSeam()
+    result = upgrade_memory_engine(seam=seam, runner=CpFails(), http_get=_healthy, hs_dir=hs)
+    assert result["status"] == "snapshot_failed"
+    assert seam.verbs == ["stop", "start"]
+    assert (stale / "marker").read_text() == "previous"
+    assert not (hs / ".pg0.snapshot-new").exists()
+    assert (hs / ".venv" / "bin" / "hindsight-api").exists()

@@ -26,7 +26,10 @@ Upgrade shape — build-aside, swap, verify, roll back:
   and serves against tables it does not know (verified 0.9.2 on a 1.0.0
   ``.pg0``; 0.10.0 dropped ``document_attachments`` and the
   ``memory_units_bm25`` view). So the old venv alone is never a rollback —
-  the snapshot is, and the rollback below restores both together;
+  the snapshot is, and the rollback below restores both together. It is
+  taken fresh on every attempt (a previous failed attempt's copy predates
+  everything the old engine wrote since), unless the old engine was not
+  serving before the stop, when the existing copy is the last known good;
 * after the swap the pass polls ``/health`` and requires ``/version`` to
   report exactly the pin; any postcheck failure restores both the old venv and
   the snapshot.
@@ -437,6 +440,13 @@ def upgrade_memory_engine(
         return {**result, "status": "build_failed", "error": str(exc)}
     _chown_tree(venv_new)
 
+    # Is the OLD engine serving right now? Decides below whether a snapshot
+    # left by an earlier failed attempt may be replaced: a live engine proves
+    # the current .pg0 is good (and may hold writes newer than that snapshot);
+    # a dead one may mean a rollback's restore failed and the snapshot is the
+    # only good copy left.
+    old_live = http_get(f"{ENGINE_BASE_URL}/health") is not None
+
     # ── Stop the engine; quiesce .pg0 for a consistent snapshot ──
     try:
         _svc(seam, "stop")
@@ -446,7 +456,22 @@ def upgrade_memory_engine(
         return {**result, "status": "build_failed", "error": f"stop failed: {exc}"}
 
     # ── Snapshot: the only rollback for a one-way alembic migration ──
-    if pg.exists() and not pg_snap.exists():
+    #
+    # Taken fresh on every attempt. A snapshot from an earlier failed attempt
+    # is stale: the old engine served (and took writes) after that rollback,
+    # and restoring it on a second failure would silently drop every memory
+    # written in between. It is replaced only once the new copy is complete,
+    # and kept as-is when the old engine was not live before the stop (the
+    # current .pg0 is then not known to be good).
+    reuse_snapshot = pg_snap.exists() and not old_live
+    if reuse_snapshot:
+        log.warning(
+            "updater.memory_engine_snapshot_reused",
+            job_id=job_id,
+            snapshot=str(pg_snap),
+            reason="old engine was not answering /health before the stop",
+        )
+    if pg.exists() and not reuse_snapshot:
         free = shutil.disk_usage(hs).free
         needed = int(_du_bytes(pg) * _SNAPSHOT_FREE_FACTOR)
         if free < needed:
@@ -461,9 +486,12 @@ def upgrade_memory_engine(
                 "without a .pg0 snapshot (the DB migration is one-way)",
             )
             return {**result, "status": "snapshot_failed", "error": "insufficient disk space"}
-        proc = _run(runner, ["cp", "-a", str(pg), str(pg_snap)], timeout=_PIP_TIMEOUT_S)
+        # Not ``.pg0.pre-*``: the converged-branch prune must never see it.
+        pg_snap_new = hs / ".pg0.snapshot-new"
+        shutil.rmtree(pg_snap_new, ignore_errors=True)
+        proc = _run(runner, ["cp", "-a", str(pg), str(pg_snap_new)], timeout=_PIP_TIMEOUT_S)
         if proc.returncode != 0:
-            shutil.rmtree(pg_snap, ignore_errors=True)
+            shutil.rmtree(pg_snap_new, ignore_errors=True)
             shutil.rmtree(venv_new, ignore_errors=True)
             _svc(seam, "start", check=False)
             log.warning(
@@ -472,6 +500,8 @@ def upgrade_memory_engine(
                 error=proc.stderr,
             )
             return {**result, "status": "snapshot_failed", "error": proc.stderr}
+        shutil.rmtree(pg_snap, ignore_errors=True)
+        os.rename(pg_snap_new, pg_snap)
         _chown_tree(pg_snap)
 
     # ── Swap (two same-fs renames) ──
