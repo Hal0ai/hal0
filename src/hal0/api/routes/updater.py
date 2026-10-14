@@ -1142,28 +1142,36 @@ async def slot_drift(request: Request) -> dict[str, Any]:
     }
 
 
-async def _slots_in_flight(sm: Any, names: list[str]) -> set[str]:
+async def _slots_in_flight(
+    sm: Any, names: list[str], *, treat_unknown_as_busy: bool = False
+) -> set[str]:
     """Names among ``names`` that llama-server reports as processing a request.
 
     Source: the live ``/metrics`` scrape (``requests_processing``,
-    ``hal0.slots.metrics_collect.llama_metrics``). Best-effort: a slot with no
-    port, no ``--metrics`` endpoint or a failed scrape yields no reading and
-    is NOT counted busy -- there is no other reliable in-flight signal, so
-    "unknown" must not block a restart the caller asked for (#2096).
+    ``hal0.slots.metrics_collect.llama_metrics``). A slot with no port, no
+    ``--metrics`` endpoint (ComfyUI, TTS/STT, FLM, ...) or a failed/timed-out
+    scrape yields no reading. By default that is NOT counted busy -- there is
+    no other reliable in-flight signal, so "unknown" must not block a restart
+    the operator asked for (#2096). With ``treat_unknown_as_busy`` (the
+    unattended boot pass, #2634) a missing reading counts as busy: only a slot
+    whose reading shows ``requests_processing == 0`` is safe to bounce.
     """
     from hal0.slots import metrics_collect
 
     try:
         ports = {getattr(s, "name", None): getattr(s, "port", 0) or 0 for s in await sm.list()}
     except Exception:  # pragma: no cover - defensive
-        return set()
+        return set(names) if treat_unknown_as_busy else set()
     busy: set[str] = set()
     for name in names:
         try:
             reading = await metrics_collect.llama_metrics(int(ports.get(name) or 0))
-        except Exception:  # pragma: no cover - defensive
-            continue
-        if int(reading.get("requests_processing") or 0) > 0:
+        except Exception:
+            reading = {}
+        if reading.get("requests_processing") is None:
+            if treat_unknown_as_busy:
+                busy.add(name)
+        elif int(reading["requests_processing"] or 0) > 0:
             busy.add(name)
     return busy
 
@@ -1211,28 +1219,35 @@ _RESTART_SWEEP_LOCK = asyncio.Lock()
 
 
 async def restart_drifted(
-    sm: Any, *, only: set[str] | None = None, skip_busy: bool = False
+    sm: Any,
+    *,
+    only: set[str] | None = None,
+    skip_busy: bool = False,
+    treat_unknown_as_busy: bool = False,
 ) -> dict[str, Any]:
     """Bounce the drifted slots (optionally a subset); the one restart path.
 
     Shared by ``POST /restart-slots`` and the post-start image-drift pass
     (#2096). Per-slot failures are recorded, never re-raised. With
     ``skip_busy`` a slot llama-server reports as processing is left alone and
-    listed under ``skipped_busy``. Sweeps are serialised on
+    listed under ``skipped_busy``; ``treat_unknown_as_busy`` (unattended
+    callers, #2634) extends that to slots with no metrics reading. Sweeps are serialised on
     :data:`_RESTART_SWEEP_LOCK`; drift is read inside the lock.
     """
     async with _RESTART_SWEEP_LOCK:
-        return await _restart_drifted_locked(sm, only=only, skip_busy=skip_busy)
+        return await _restart_drifted_locked(
+            sm, only=only, skip_busy=skip_busy, treat_unknown_as_busy=treat_unknown_as_busy
+        )
 
 
 async def _restart_drifted_locked(
-    sm: Any, *, only: set[str] | None, skip_busy: bool
+    sm: Any, *, only: set[str] | None, skip_busy: bool, treat_unknown_as_busy: bool
 ) -> dict[str, Any]:
     drifted = await _collect_slot_drift(sm)
     targets = [d["slot"] for d in drifted if only is None or d["slot"] in only]
     skipped_busy: list[str] = []
     if skip_busy and targets:
-        busy = await _slots_in_flight(sm, targets)
+        busy = await _slots_in_flight(sm, targets, treat_unknown_as_busy=treat_unknown_as_busy)
         skipped_busy = [n for n in targets if n in busy]
         targets = [n for n in targets if n not in busy]
     restarted: list[str] = []
@@ -1266,7 +1281,9 @@ async def post_start_image_drift_restart(
 
     An image-drifted running container serves a build the installed release
     replaced, whichever path (CLI, dashboard, manual) put the new code in
-    place. Busy slots are skipped. The outcome lands on
+    place. Busy slots are skipped, and so is any slot with no metrics reading
+    (no ``--metrics``, non-llama runtime, timed-out scrape): unattended, only
+    a slot proven idle is bounced (#2634). The outcome lands on
     ``state.post_start_image_drift_restart`` for ``/slot-drift``; nothing is
     stored when no slot qualified. Never raises.
     """
@@ -1286,7 +1303,7 @@ async def post_start_image_drift_restart(
         }
         if not names:
             return
-        out = await restart_drifted(sm, only=names, skip_busy=True)
+        out = await restart_drifted(sm, only=names, skip_busy=True, treat_unknown_as_busy=True)
         result = {
             "restarted": out["restarted"],
             "skipped_busy": out["skipped_busy"],

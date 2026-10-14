@@ -49,6 +49,7 @@ applying. Add those subsections to a version's section to surface them; see
   restore (the detached restore keeps its 600 s queue wait), so a busy or
   unreadable `/queue` no longer holds a request for ten minutes and ends in
   `gpu.queue_busy` (#2639).
+- The boot-time image-drift restart no longer bounces slots it cannot prove idle. A slot with no `/metrics` reading (ComfyUI, Kokoro, Qwen3-TTS, Moonshine, FLM, llama slots without `--metrics`, or a timed-out scrape) used to count as idle and could be restarted mid-request; it now lands under `skipped_busy`. The explicit `hal0 update --restart-slots` keeps its behaviour. The runner-catalogue boot sync task is also cancelled at shutdown. (#2634)
 
 - A box already on the newest nightly no longer offers that same nightly to
   itself as an update. `GET /api/updates/check` and `GET /api/updates/state`

@@ -1105,6 +1105,7 @@ class BootState:
     stop_gpu_arbiter_idle_loop: Any = None
     image_drift_task: asyncio.Task[None] | None = None
     stop_image_drift_task: Any = None
+    stop_runner_catalogue_sync_task: Any = None
     memory_reprobe_task: asyncio.Task[None] | None = None
     stop_memory_reprobe_task: Any = None
     omni_router_client: httpx.AsyncClient | None = None
@@ -1965,6 +1966,15 @@ async def _boot_background_tasks(app: FastAPI, ctx: BootState) -> None:
             _boot_background_catalogue_sync(app)
         )
 
+    async def _stop_runner_catalogue_sync_task() -> None:
+        task = getattr(app.state, "runner_catalogue_sync_task", None)
+        if task is not None:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
+    ctx.stop_runner_catalogue_sync_task = _stop_runner_catalogue_sync_task
+
     # Memory provider self-heal loop (#1613). Armed only when create_app
     # wrapped a boot-degraded provider in SelfHealingMemoryProvider; polls
     # until the hindsight engine answers a probe, then the shell swaps its
@@ -2455,6 +2465,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             stack.push_async_callback(ctx.stop_refresh_task)
             stack.push_async_callback(ctx.stop_gpu_arbiter_idle_loop)
             stack.push_async_callback(ctx.stop_image_drift_task)
+            stack.push_async_callback(ctx.stop_runner_catalogue_sync_task)
             stack.push_async_callback(ctx.stop_memory_reprobe_task)
             ctx.metrics_service.start()
             stack.push_async_callback(ctx.metrics_service.stop)
