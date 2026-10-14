@@ -204,6 +204,18 @@ async def restart_agent(agent_id: str, request: Request) -> dict[str, str]:
             details={"agent_id": agent_id},
         )
 
+    return await restart_agent_unit(agent_id, actor=_resolve_actor(request))
+
+
+async def restart_agent_unit(agent_id: str, *, actor: str) -> dict[str, str]:
+    """Run ``systemctl restart hal0-agent@{agent_id}.service`` and audit it.
+
+    The body of :func:`restart_agent`, shared with routes that restart the
+    agent after changing its config (``command_approvals``). Raises
+    :class:`~hal0.errors.Hal0Error` on every failure (no systemctl, spawn
+    failure, timeout, non-zero exit); returns ``{agent_id, unit, status,
+    detail}`` on success. The caller validates ``agent_id``.
+    """
     systemctl = _systemctl_path()
     if systemctl is None:
         # 503-equivalent. Surfaces as a clear "host doesn't have systemd"
@@ -215,7 +227,6 @@ async def restart_agent(agent_id: str, request: Request) -> dict[str, str]:
         )
 
     unit = _unit_name(agent_id)
-    actor = _resolve_actor(request)
 
     audit_log.info(
         "agent.restart.invoked",
@@ -326,4 +337,4 @@ async def restart_agent(agent_id: str, request: Request) -> dict[str, str]:
 # at module-internals via the underscore name.
 KNOWN_AGENT_IDS = _KNOWN_AGENT_IDS
 
-__all__ = ["KNOWN_AGENT_IDS", "router", "unit_is_active"]
+__all__ = ["KNOWN_AGENT_IDS", "restart_agent_unit", "router", "unit_is_active"]

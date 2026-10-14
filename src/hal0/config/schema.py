@@ -2200,6 +2200,43 @@ class MCPServerConfig(BaseModel):
         return self
 
 
+HermesCommandApprovalsLiteral = Literal["smart", "manual"]
+HERMES_COMMAND_APPROVALS_MODES: tuple[str, ...] = ("smart", "manual")
+
+
+class HermesAgentSettings(BaseModel):
+    """``[hermes]`` table of ``/etc/hal0/agents/hermes.toml`` — operator settings.
+
+    Deliberately NOT a field of :class:`AgentConfig`: that model is validated
+    strictly by the MCP allow-list classifier
+    (:mod:`hal0.agents.mcp_client`), so a typed field there would turn a
+    hand-edited typo in this table into a broken MCP client. The table rides
+    along through ``AgentConfig``'s ``extra="allow"``; this model validates
+    it on every write (API/CLI) and the provisioner reads it leniently
+    (:mod:`hal0.agents.hermes_command_approvals`).
+
+    ``command_approvals`` maps to Hermes's own ``approvals.mode``: whether a
+    dangerous terminal command or ``execute_code`` script is first judged by
+    an auxiliary model call (``smart``) or always asked of a human
+    (``manual``). Unrelated to hal0's MCP tool approval queue
+    (``/api/agent/approvals``), which gates hal0 MCP tool calls.
+
+    ``extra="forbid"``: a leaf tunable table.
+    """
+
+    model_config = {"populate_by_name": True, "extra": "forbid"}
+
+    command_approvals: HermesCommandApprovalsLiteral = Field(
+        default="smart",
+        description=(
+            "Hermes command approvals (Hermes's approvals.mode). 'smart' = an "
+            "auxiliary model call approves a flagged command, and anything but "
+            "APPROVE falls back to asking a human. 'manual' = a human approves "
+            "every flagged command."
+        ),
+    )
+
+
 class AgentMetadataConfig(BaseModel):
     """``[agent]`` block — name + display + filesystem sandbox root."""
 
@@ -3327,6 +3364,7 @@ __all__ = [
     "DEFAULT_DEVICE",
     "DEVICE_DEFAULT_PROFILES",
     "FAMILY_DEFAULTS",
+    "HERMES_COMMAND_APPROVALS_MODES",
     "MTP_DRAFT_BUNDLE",
     "PROFILE_BENCH",
     "PROFILE_SCHEMA_VERSION_CURRENT",
@@ -3344,6 +3382,8 @@ __all__ = [
     "GPUInfo",
     "Hal0Config",
     "HardwareInfo",
+    "HermesAgentSettings",
+    "HermesCommandApprovalsLiteral",
     "ImageGenConfig",
     "MCPServerConfig",
     "MemoryConfig",

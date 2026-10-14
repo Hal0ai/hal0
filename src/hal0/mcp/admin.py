@@ -3109,6 +3109,12 @@ EXCLUDED_TOOLS: dict[str, str] = {
         "operator-console concern, not a tool an agent should hold over its "
         "own or sibling agents' sessions."
     ),
+    "hermes_command_approvals": (
+        "GET/PUT /api/agents/{agent_id}/command-approvals switches Hermes's own "
+        "dangerous-command gate (approvals.mode smart|manual). An agent loosening "
+        "the gate on its own commands would defeat it: operator-only, no loosen "
+        "path, read included (the dashboard and CLI show it)."
+    ),
     # ── Policy-by-record (§4.3 buildout): these surfaces were unclassified
     # by silence — recorded explicitly now so a future pass reads "excluded,
     # leave it" instead of re-litigating each one.

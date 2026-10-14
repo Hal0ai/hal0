@@ -29,6 +29,7 @@ from hal0.cli._shared import (
     api_delete,
     api_get,
     api_post,
+    api_put,
     die,
 )
 from hal0.cli._shared import _console as _stderr_console
@@ -1386,6 +1387,96 @@ def approvals_deny(
         die(str(exc))
         return
     console.print(f"[bold]Denied[/bold] {approval_id}.")
+
+
+# ── Hermes command approvals (Hermes's approvals.mode) ──────────────────────
+
+_COMMAND_APPROVALS_PATH = "/api/agents/hermes/command-approvals"
+_COMMAND_APPROVALS_MODE_HELP = {
+    "smart": (
+        "a call to your hal0/agent model approves a flagged command first; if that "
+        "call fails or answers anything but APPROVE, Hermes falls back to asking you"
+    ),
+    "manual": "you approve every flagged command yourself",
+}
+
+
+@app.command(
+    "command-approvals",
+    epilog=(
+        "Hermes's own gate on dangerous terminal commands and execute_code scripts "
+        "(Hermes's approvals.mode). Only matters while the Hermes terminal tool is "
+        "on. Not the same as `hal0 agent approvals`, the queue for gated hal0 MCP "
+        "tool calls. An approvals.mode in /etc/hal0/agents/hermes/overrides.yaml "
+        "wins over this setting."
+    ),
+)
+def agent_command_approvals(
+    mode: str | None = typer.Argument(
+        None,
+        help="smart or manual. Omit to show the current setting.",
+        show_default=False,
+    ),
+    json_out: bool = typer.Option(False, "--json", help="Print the raw API response."),
+) -> None:
+    """Show or set Hermes command approvals (smart or manual)."""
+    if mode is not None and mode not in _COMMAND_APPROVALS_MODE_HELP:
+        die(f"mode must be smart or manual; got {mode!r}.")
+        return
+    url = _api_base()
+    if _api_unreachable(url):
+        raise typer.Exit(1)
+    try:
+        if mode is None:
+            data = api_get(_COMMAND_APPROVALS_PATH)
+        else:
+            # The restart inside the PUT can take up to ~30s (restart.py's
+            # SYSTEMCTL_TIMEOUT_SECONDS) on top of the config write.
+            data = api_put(
+                _COMMAND_APPROVALS_PATH,
+                json={"mode": mode},
+                headers={"X-hal0-Agent": "hal0-cli"},
+                timeout=90.0,
+            )
+    except CliApiError as exc:
+        die(str(exc))
+        return
+    if json_out:
+        console.print_json(jsonlib.dumps(data))
+        return
+    if not isinstance(data, dict):
+        die(f"unexpected response: {data!r}")
+        return
+    if mode is not None and data.get("message"):
+        console.print(str(data["message"]))
+    _print_command_approvals(data)
+
+
+def _print_command_approvals(data: dict[str, Any]) -> None:
+    setting = str(data.get("mode") or "—")
+    effective = str(data.get("effective") or "—")
+    source = data.get("source")
+    lines = [
+        f"Hermes command approvals: [bold]{setting}[/bold]"
+        + (" [dim](default)[/dim]" if source == "default" else ""),
+        f"  {_COMMAND_APPROVALS_MODE_HELP.get(setting, '')}",
+    ]
+    if source == "overrides":
+        lines.append(
+            f"[yellow]In effect: {effective}[/yellow], set by "
+            f"{data.get('overrides_path') or 'overrides.yaml'}, which wins over this setting."
+        )
+    if data.get("invalid_value"):
+        lines.append(
+            f"[yellow]The stored value {data['invalid_value']!r} is invalid;[/yellow] "
+            f"using the default ({data.get('default')})."
+        )
+    if data.get("in_sync") is False:
+        lines.append(
+            f"[yellow]Hermes's config.yaml says {data.get('rendered')!r}, not {effective!r}.[/yellow] "
+            "Run `hal0 agent reprovision hermes`, or set the mode again, to re-apply it."
+        )
+    console.print("\n".join(lines))
 
 
 # ── Bootstrap (Hermes provisioning, Phase 10) ────────────────────────────────

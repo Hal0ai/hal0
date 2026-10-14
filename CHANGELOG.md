@@ -735,6 +735,25 @@ applying. Add those subsections to a version's section to surface them; see
   the CLI. They set `--flags`, `--ctx-size`, `--thinking`, `--vision`,
   `--mtp`, `--runner` and `--intent`, and `--from` duplicates a seed or a
   custom profile first. Seeds stay read-only.
+- Hermes command approvals can be switched between `smart` and `manual` from
+  the dashboard (Settings ▸ Security) or with
+  `hal0 agent command-approvals [smart|manual]`; with no argument it shows
+  the setting. This is Hermes' own `approvals.mode`, its gate on dangerous
+  shell commands and `execute_code` scripts while the terminal tool is on.
+  It is separate from hal0's approval queue for gated MCP tool calls
+  (`hal0 agent approvals`). `smart` stays the default: your `hal0/agent`
+  model approves a flagged command first, and if that call fails or answers
+  anything but APPROVE, Hermes falls back to asking you. `manual` asks you
+  every time. A change re-renders Hermes' config and restarts
+  `hal0-agent@hermes` if it is running; if a step fails, the previous
+  setting is restored. The setting is stored in the root-owned
+  `/etc/hal0/agents/hermes.toml` (`[hermes] command_approvals`), out of the
+  agent's reach on disk, and the admin MCP tools never expose it. An
+  `approvals.mode` in `/etc/hal0/agents/hermes/overrides.yaml` still wins,
+  and both surfaces show it as the value in effect. Known limit until
+  ADR-0024 ships: agents authenticate with the box admin key, so an agent
+  with the terminal tool on can call the API route
+  (`PUT /api/agents/hermes/command-approvals`) that changes it.
 
 ### Changed
 
@@ -795,8 +814,8 @@ applying. Add those subsections to a version's section to surface them; see
   it or asks you. If that call fails, returns anything unexpected or times
   out (up to about 90 seconds), you are asked as before. Existing boxes switch
   to smart approvals the next time Hermes is provisioned. To keep being asked
-  about every flagged command, set `approvals.mode: manual` in
-  `/etc/hal0/agents/hermes/overrides.yaml`. The plugin contracts hal0 uses (memory
+  about every flagged command, run `hal0 agent command-approvals manual` (see
+  Added). The plugin contracts hal0 uses (memory
   provider, provider profile, plugin context, voice registries, the API
   server's runs, sessions and jobs routes, and the kanban schema and run
   routes) are otherwise unchanged. Upstream Hermes now gives up on a memory

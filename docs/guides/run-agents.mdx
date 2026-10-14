@@ -114,6 +114,49 @@ spawned by hal0's own dispatcher, not `delegate_task`), and the hal0 MCP tools
 (slot state, model management, hardware readouts) — is unaffected: those go
 through the hal0 API, not a shell.
 
+### Command approvals: smart or manual
+
+With the terminal tool on, Hermes stops before a dangerous shell command or an
+`execute_code` script and asks for approval. The command approvals setting
+(Hermes' own `approvals.mode`) decides who answers first:
+
+- **Smart** (the default): a call to your `hal0/agent` model approves the
+  command. If that call fails, or answers anything but APPROVE, Hermes falls
+  back to asking you.
+- **Manual**: you approve every flagged command yourself.
+
+Switch it in the dashboard (Settings ▸ Security ▸ Hermes command approvals) or
+from the CLI:
+
+```sh
+hal0 agent command-approvals          # show the setting and what is in effect
+hal0 agent command-approvals manual   # always ask me
+hal0 agent command-approvals smart    # let the approval model answer first
+```
+
+The change re-renders Hermes' config and restarts `hal0-agent@hermes` if it is
+running. If any step fails, the previous setting is restored and the command
+reports the error. While the terminal tool is off, the setting has no effect.
+
+This is not [the approvals queue](#the-approvals-queue). That queue holds gated
+hal0 MCP tool calls. Command approvals gate the shell commands Hermes runs.
+
+The setting is stored as `command_approvals` in the `[hermes]` table of
+`/etc/hal0/agents/hermes.toml`. That file is root-owned, so the agent cannot
+change it on disk. An `approvals.mode` in
+`/etc/hal0/agents/hermes/overrides.yaml` wins over the setting. The dashboard
+and `hal0 agent command-approvals` then show the override's value as the one in
+effect.
+
+<Aside type="caution" title="Known limit">
+Until [ADR-0024](/docs/adr/0024-agent-credential-tier)
+ships, agents authenticate with the box admin key. A Hermes agent with the
+terminal tool on can therefore call the admin API that changes this setting,
+just as it can approve its own queued MCP calls. The admin MCP tools never
+expose the setting, and the API refuses a request that identifies itself as an
+agent, but neither stops a prompt-injected agent with a shell.
+</Aside>
+
 ## Manage the lifecycle
 
 <Tabs>
@@ -294,7 +337,9 @@ the tool off, run the steps yourself. On a box provisioned before 1.3.0, run
 ## The approvals queue
 
 Destructive or gated tool calls don't execute immediately — they land in
-an approvals queue you review:
+an approvals queue you review. This queue covers hal0 MCP tool calls; the
+shell commands Hermes runs are gated separately by
+[command approvals](#command-approvals-smart-or-manual).
 
 ```sh
 hal0 agent approvals list                # pending requests
