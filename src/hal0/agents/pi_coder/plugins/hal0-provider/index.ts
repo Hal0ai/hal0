@@ -12,12 +12,13 @@
  */
 
 import {
+  type Api,
   type AssistantMessageEventStream,
-  type Context,
   createAssistantMessageEventStream,
   type Model,
   openAICompletionsApi,
   type SimpleStreamOptions,
+  type TranscriptContext,
 } from "@earendil-works/pi-ai/compat";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
@@ -69,16 +70,22 @@ async function fetchHal0Models(): Promise<Model<"openai-completions">[]> {
   return models;
 }
 
+// pi >= 0.86 hands custom providers a normalized TranscriptContext and types
+// the registered stream function over the open `Api` union; the delegate
+// below only ever sees hal0's own openai-completions models.
 function streamHal0(
-  model: Model<"openai-completions">,
-  context: Context,
+  model: Model<Api>,
+  context: TranscriptContext,
   options?: SimpleStreamOptions,
 ): AssistantMessageEventStream {
   const stream = createAssistantMessageEventStream();
   (async () => {
     try {
       const api = openAICompletionsApi();
-      const modelWithUrl = { ...model, baseUrl: `${HAL0_API_URL}/v1` };
+      const modelWithUrl = {
+        ...(model as Model<"openai-completions">),
+        baseUrl: `${HAL0_API_URL}/v1`,
+      };
       const apiKey = options?.apiKey ?? HAL0_API_KEY;
       const innerStream = api.streamSimple(modelWithUrl, context, {
         ...options,
