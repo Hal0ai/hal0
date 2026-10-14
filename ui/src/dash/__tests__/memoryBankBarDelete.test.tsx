@@ -12,9 +12,8 @@
 // no-ES-imports .jsx module reads are test-installed fakes, and the flow is
 // driven end to end — trash button → dialog with blast radius → type the bank
 // id → Delete bank fires useBankDelete and reselects the next bank.
-import React from 'react'
+import React, { act } from 'react'
 import { createRoot } from 'react-dom/client'
-import { act } from 'react-dom/test-utils'
 import { afterEach, describe, expect, it } from 'vitest'
 
 ;(globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true

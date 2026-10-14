@@ -15,9 +15,8 @@
 //
 // The data hooks are mocked at the module boundary (contract-shaped rows);
 // primitives.jsx's ConfirmDialog/Modal render for real.
-import React from 'react'
+import React, { act } from 'react'
 import { createRoot } from 'react-dom/client'
-import { act } from 'react-dom/test-utils'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 ;(globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true

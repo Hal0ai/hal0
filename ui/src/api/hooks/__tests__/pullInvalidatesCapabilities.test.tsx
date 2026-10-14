@@ -11,9 +11,8 @@
 // Harness mirrors src/dash/__tests__/runner-images-pull-terminal.test.tsx:
 // no @testing-library, a probe component mounted with createRoot/act, the api
 // client mocked at its boundary, and a hand-rolled fake EventSource.
-import React from 'react'
+import React, { act } from 'react'
 import { createRoot } from 'react-dom/client'
-import { act } from 'react-dom/test-utils'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
