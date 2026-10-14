@@ -39,6 +39,12 @@ applying. Add those subsections to a version's section to surface them; see
   newer database schema, and the boot-time check logs the same. Update hal0 to
   a release pinned at or above the installed engine, or restore
   `.pg0.pre-<pin>` by hand with the matching venv (#2613).
+- Two slot TOMLs that declare the same `name` no longer both load. hal0
+  keeps one (the id-keyed `<id>.toml` when present, else the first by
+  filename), logs `slot.duplicate_toml` with both paths, and skips the other,
+  so `GET /api/slots` lists the slot once. Deleting a model that only the
+  skipped stale file referenced no longer unloads the live slot of the same
+  name (#2542).
 
 ### Removed
 

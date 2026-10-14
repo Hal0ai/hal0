@@ -704,19 +704,25 @@ def slots_referencing_model(model_id: str) -> list[dict[str, Any]]:
 
     Reads slot TOMLs directly so the cascade also catches slots whose
     SlotManager hasn't been touched this process — the source of truth is
-    the TOML on disk. Each returned dict carries at minimum ``name`` +
+    the TOML on disk. A file shadowed by a same-named sibling is skipped (see
+    :func:`hal0.slots.layout.shadowed_slot_files`). Each returned dict carries at minimum ``name`` +
     the parsed config body (used by callers to clear the default field).
     """
     import tomllib
 
     from hal0.config import paths as cfg_paths
+    from hal0.slots.layout import shadowed_slot_files
 
     cfg_dir = cfg_paths.slots_config_dir()
     if not cfg_dir.exists():
         return []
     affected: list[dict[str, Any]] = []
+    # #2542: a TOML shadowed by another file with the same name is not the
+    # config the SlotManager runs. Reporting it would unload the live slot
+    # (by name) for a model only the stale file references.
+    shadowed = shadowed_slot_files(cfg_dir)
     for p in sorted(cfg_dir.glob("*.toml")):
-        if p.name.startswith("."):
+        if p.name.startswith(".") or p in shadowed:
             continue
         try:
             with open(p, "rb") as f:

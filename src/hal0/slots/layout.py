@@ -123,6 +123,39 @@ def slot_stems_by_name(config_dir: Path | str) -> dict[str, str]:
     return out
 
 
+def shadowed_slot_files(config_dir: Path | str) -> dict[Path, Path]:
+    """Map each *shadowed* slot TOML to the sibling that wins its name (#2542).
+
+    Two files under *config_dir* declaring the same display name (a stale
+    ``agent.toml`` left beside ``1.toml``) are one slot with two configs. One
+    file wins; every other is returned here as ``{loser: winner}``.
+
+    The winner is the id-keyed (digit-stem) file, since that is the converged
+    layout and the one ``SlotManager._config_file_for`` reads once the slot
+    has an identity row; otherwise the first in sorted order. A file whose display name
+    cannot be recovered is never reported — it is still reachable by stem.
+    """
+    d = Path(config_dir)
+    if not d.exists():
+        return {}
+    groups: dict[str, list[Path]] = {}
+    for p in sorted(d.glob("*.toml")):
+        if p.name.startswith("."):
+            continue
+        name = read_slot_display_name(p) or (None if is_id_stem(p.stem) else p.stem)
+        if name is not None:
+            groups.setdefault(name, []).append(p)
+    out: dict[Path, Path] = {}
+    for files in groups.values():
+        if len(files) < 2:
+            continue
+        winner = next((f for f in files if is_id_stem(f.stem)), files[0])
+        for f in files:
+            if f != winner:
+                out[f] = winner
+    return out
+
+
 def resolve_slot_stem(config_dir: Path | str, key: str) -> str | None:
     """The on-disk stem for a slot addressed by display name OR stem.
 
@@ -147,6 +180,7 @@ __all__ = [
     "is_id_stem",
     "read_slot_display_name",
     "resolve_slot_stem",
+    "shadowed_slot_files",
     "slot_state_path",
     "slot_stems_by_name",
     "slot_toml_path",
