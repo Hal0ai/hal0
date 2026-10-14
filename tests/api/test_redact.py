@@ -879,6 +879,93 @@ class TestShareableLiteralsSinglePass:
             assert _mask_literals(text, literals) == self._loop(text, literals), (text, literals)
 
     @pytest.mark.parametrize(
+        "text",
+        [
+            # Glued units: one harvested value as long as the line.
+            "X_KEY=a." * 60_000,
+            # A long quoted value that never closes, plain and with an escape
+            # at every other character.
+            'password="' + "a" * 120_000,
+            'password="' + "\\a" * 120_000,
+            # A periodic value with a longer period.
+            "X_KEY=" + "abcdefghijklmnop" * 30_000,
+        ],
+        ids=["glued", "unclosed", "unclosed-escapes", "periodic"],
+    )
+    @pytest.mark.timing
+    def test_a_long_secret_in_periodic_text_is_masked_in_linear_time(self, text: str) -> None:
+        """#2600: the scan for a harvested literal retried it at every position,
+        and in text that repeats the literal's own prefix each try ran far into
+        it: 4.5 s for 320 KB of ``X_KEY=a.`` and 4.7 s for 120 KB of ``a`` in an
+        open quote on main. Linear, they take about 0.1 s on a dev box (the
+        bound leaves 10x for a loaded runner); the old scan fails it."""
+        import time
+
+        start = time.perf_counter()
+        out = redact_shareable_text(text)
+        elapsed = time.perf_counter() - start
+        assert elapsed < 3.0, f"{len(text)} chars took {elapsed:.2f}s"
+        assert MASK in out
+
+    def test_past_the_budget_the_longest_literals_still_take_the_replace(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Only as many long literals as the budget allows are replaced, and they
+        are the longest ones: the periodic one that makes the scan quadratic is
+        not left to it because thousands of others do not fit (#2600)."""
+        import hal0.redaction as redaction
+
+        seen: list[list[str]] = []
+        real = redaction._replace_each
+
+        def spy(text: str, literals: list[str]) -> str:
+            seen.append(list(literals))
+            return real(text, literals)
+
+        monkeypatch.setattr(redaction, "_replace_each", spy)
+        longest = "ab" * 200
+        others = [f"{i:04d}" + "x" * 150 for i in range(50)]
+        text = "\n".join([longest, *others, longest])
+        monkeypatch.setattr(redaction, "_LITERAL_REPLACE_BUDGET", 2 * len(text))
+        out = redaction._mask_literals(text, [longest, *others])
+        assert seen[0] == [longest, others[0]]
+        assert out == self._loop(text, [longest, *others])
+
+    @pytest.mark.parametrize(
+        ("longest", "budget"),
+        [(1, 10**9), (2, 10**9), (3, 10**9), (5, 10**9), (2, 0), (3, 40), (2, 100), (1, 150)],
+    )
+    def test_the_longest_literals_first_run_the_loop_with_the_same_result(
+        self, longest: int, budget: int, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Literals past ``_LITERAL_SCAN_MAX`` characters are masked one
+        ``str.replace`` at a time, ahead of the scan, while their number times
+        the text's length is within ``_LITERAL_REPLACE_BUDGET`` (#2600). Lowering
+        the limits runs the differential on both sides of them."""
+        import random
+
+        import hal0.redaction as redaction
+        from hal0.redaction import _mask_literals
+
+        monkeypatch.setattr(redaction, "_LITERAL_SCAN_MAX", longest)
+        monkeypatch.setattr(redaction, "_LITERAL_REPLACE_BUDGET", budget)
+        rng = random.Random(2600 + longest)
+        alphabets = ["ab", "abc", "aB*", "a*RED", "xy\n.", "é€a", "a(b)[", "\\a"]
+        for _ in range(8_000):
+            alphabet = rng.choice(alphabets)
+            text = "".join(rng.choice(alphabet) for _ in range(rng.randint(0, 50)))
+            literals = []
+            for _ in range(rng.randint(1, 8)):
+                if text and rng.random() < 0.7:
+                    i = rng.randint(0, len(text) - 1)
+                    literals.append(text[i : rng.randint(i + 1, min(len(text), i + 12))])
+                else:
+                    literals.append("".join(rng.choice(alphabet) for _ in range(rng.randint(1, 9))))
+            if rng.random() < 0.7:
+                literals.sort(key=len, reverse=True)
+            assert _mask_literals(text, literals) == self._loop(text, literals), (text, literals)
+
+    @pytest.mark.parametrize(
         ("setting", "value"),
         [("_LITERAL_TRIE_MAX_NESTING", 0), ("_LITERAL_OCCURRENCES_PER_CHAR_MAX", 0)],
     )
