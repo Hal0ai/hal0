@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -233,7 +234,14 @@ async def test_pressure_evict_noop_when_probe_fails(
     def _boom() -> tuple[float, float]:
         raise OSError("cannot read /proc/meminfo")
 
-    # Local import inside _probe_host_free_mb resolves this name at call time.
+    # Both imports inside probe_host_free_mb resolve at call time. The GPU
+    # sample is consulted first, so on a UMA/iGPU host it would answer before
+    # the meminfo reader is ever reached (#2553); pin it to "no UMA pool" so
+    # the /proc/meminfo failure path is exercised on any hardware.
+    monkeypatch.setattr(
+        "hal0.hardware.gpu_view.sample",
+        lambda *a, **k: SimpleNamespace(is_uma=False, gtt_total_mb=None, gtt_used_mb=None),
+    )
     monkeypatch.setattr("hal0.slots.capacity._read_meminfo", _boom)
     assert sm._probe_host_free_mb() == float("inf")
 
