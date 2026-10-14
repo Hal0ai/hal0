@@ -24,7 +24,7 @@ Design notes:
 
 Subclasses the upstream ``ProviderProfile`` dataclass (``providers.base``),
 which resolves inside the Hermes venv at runtime. A vendored copy of the frozen
-pin (``9de9c25f``) keeps the module importable in hal0's own venv for unit
+pin (``3ef6bbd2``) keeps the module importable in hal0's own venv for unit
 tests. All discovery paths are best-effort: a transport failure falls back to
 ``fallback_models`` (or ``None``) so a missing hal0-api can't wedge Hermes.
 """
@@ -38,7 +38,7 @@ from typing import Any
 
 # ── Vendored-ABC + import-fallback ─────────────────────────────────────────
 # The real ``ProviderProfile`` dataclass lives in the Hermes venv. The pinned
-# surface (NousResearch/hermes-agent ``9de9c25f``, ``providers/base.py``) is
+# surface (NousResearch/hermes-agent ``3ef6bbd2``, ``providers/base.py``) is
 # vendored verbatim below so this module stays importable in hal0's own venv.
 try:  # pragma: no cover — the real import only resolves inside the Hermes venv
     from providers.base import ProviderProfile  # type: ignore[import-not-found]
@@ -93,6 +93,9 @@ except ImportError:  # pragma: no cover — covered by the hal0-venv fallback pa
                 self, *, reasoning_config: dict | None = None, **context: Any
             ) -> tuple[dict[str, Any], dict[str, Any]]:
                 return {}, {}
+
+            def default_vision_model(self) -> str | None:
+                return None
 
             def get_max_tokens(self, model: str | None) -> int | None:
                 return self.default_max_tokens

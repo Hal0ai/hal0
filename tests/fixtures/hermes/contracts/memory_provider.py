@@ -5,8 +5,8 @@
 Adapter lane: **hal0-memory** (the one active external memory provider).
 
 Signatures are copied verbatim from the reviewed official pin
-``9de9c25f620ff7f1ce0fd5457d596052d5159596`` (``agent/memory_provider.py``,
-Hermes v2026.7.7.2 / 0.18.2). A Hermes bump that reshapes any of these
+``3ef6bbd201263d354fd83ec55b3c306ded2eb72a`` (``agent/memory_provider.py``,
+Hermes v2026.7.20 / 0.19.0). A Hermes bump that reshapes any of these
 lifecycle seams must re-vendor this file and update the frozen signatures in
 ``tests/agents/hermes/test_contract_compatibility.py`` — that diff is the
 tripwire the ``hermes-sdk-diff`` drift-watch and the compat-pin exist to force.

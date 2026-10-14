@@ -12,7 +12,7 @@ run/session surface, not the kanban plugin's per-task worker ledger).
 
 Schema + route table + the dashboard session-token injection format are
 copied verbatim from the reviewed official pin
-``9de9c25f620ff7f1ce0fd5457d596052d5159596`` (Hermes v2026.7.7.2 / 0.18.2):
+``3ef6bbd201263d354fd83ec55b3c306ded2eb72a`` (Hermes v2026.7.20 / 0.19.0):
 ``hermes_cli/kanban_db.py`` (schema) and
 ``plugins/kanban/dashboard/plugin_api.py`` (routes, mounted at
 ``/api/plugins/kanban`` by ``hermes_cli/web_server.py``'s generic

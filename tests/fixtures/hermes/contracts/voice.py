@@ -5,7 +5,7 @@
 Adapter lane: **hal0-voice** (routes Hermes STT/TTS through active hal0 slots).
 
 Two seams from the reviewed official pin
-``9de9c25f620ff7f1ce0fd5457d596052d5159596`` (Hermes v2026.7.7.2 / 0.18.2):
+``3ef6bbd201263d354fd83ec55b3c306ded2eb72a`` (Hermes v2026.7.20 / 0.19.0):
 
 1. The **command-provider** config path (initial hal0-voice implementation):
    generated ``tts`` / ``stt`` config selecting stable hal0 wrapper commands.

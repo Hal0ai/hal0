@@ -5,9 +5,15 @@
 # deliberately reviewed commit, runs `hermes config migrate` to reconcile the
 # config schema, and reprovisions.
 #
-# Compatibility posture: pin the reviewed official v2026.7.7.2 release commit
-# so provider, memory, and voice plugin contracts cannot drift underneath the
-# bundled hal0 adapters. Lift this pin only through the compatibility review.
+# Compatibility posture: pin the reviewed official v2026.7.20 (0.19.0) release
+# commit so provider, memory, and voice plugin contracts cannot drift underneath
+# the bundled hal0 adapters. Lift this pin only through the compatibility review.
+#
+# 0.19.0 is the ceiling for this install model. From v2026.7.30 (0.19.1) upstream
+# setup.py refuses to build a wheel or sdist outside its Nix build (d84e11af,
+# NousResearch/hermes-agent#68217), so a `git+` requirement no longer installs;
+# from v0.21.6 every core dependency is also gated to Python >= 3.14 while this
+# venv is built on 3.12. Moving past 0.19.0 needs a new install model first.
 #
 # The `web` extra pulls fastapi + uvicorn[standard], which the hal0 agent
 # unit needs: it runs `hermes serve` in web/dashboard mode (HERMES_WEB_DIST
@@ -21,4 +27,4 @@
 # `hermes-venv-missing-mcp-extra`). The provisioning `mcp_wire` phase now
 # hard-fails when the venv client cannot import/connect — do not drop this
 # extra.
-hermes-agent[web,mcp] @ git+https://github.com/NousResearch/hermes-agent.git@9de9c25f620ff7f1ce0fd5457d596052d5159596
+hermes-agent[web,mcp] @ git+https://github.com/NousResearch/hermes-agent.git@3ef6bbd201263d354fd83ec55b3c306ded2eb72a

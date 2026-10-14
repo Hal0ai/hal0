@@ -880,7 +880,7 @@ def test_shipped_requirement_is_the_vetted_commit_pin() -> None:
         # Vetted commit pin — the production posture.
         (
             "hermes-agent[web] @ git+https://github.com/NousResearch/hermes-agent.git@"
-            "9de9c25f620ff7f1ce0fd5457d596052d5159596",
+            "3ef6bbd201263d354fd83ec55b3c306ded2eb72a",
             True,
         ),
         # Floored+capped spec — blocks 0.15.2 numerically.
@@ -921,9 +921,9 @@ def test_version_pin_reports_commit_ref_without_crashing(monkeypatch, tmp_path) 
         monkeypatch,
         tmp_path,
         "# comment\nhermes-agent[web] @ git+https://github.com/NousResearch/"
-        "hermes-agent.git@9de9c25f620ff7f1ce0fd5457d596052d5159596\n",
+        "hermes-agent.git@3ef6bbd201263d354fd83ec55b3c306ded2eb72a\n",
     )
-    assert pin == "9de9c25f620f"
+    assert pin == "3ef6bbd20126"
 
 
 def test_version_pin_reports_exact_floored_and_unknown_forms(monkeypatch, tmp_path) -> None:

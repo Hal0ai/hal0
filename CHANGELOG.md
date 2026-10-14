@@ -775,6 +775,23 @@ applying. Add those subsections to a version's section to surface them; see
   runtime's tier.
 - ADR-0025 open question 1 is answered: the agent slot moves to
   Qwen3.8-27B on the `upstream` runner when that runner ships.
+- Hermes Agent moves from v2026.7.7.2 (0.18.2) to v2026.7.20 (0.19.0),
+  pinned at upstream commit `3ef6bbd2` (#2566). This is the newest release
+  hal0 can install. From 0.19.1 upstream no longer builds wheels outside its
+  Nix build, and from 0.21.6 it needs Python 3.14, so going further needs a
+  new Hermes install method. hal0 now writes `approvals.mode: smart`,
+  which is also the new upstream default. Before a dangerous terminal
+  command reaches you, a call to your `hal0/agent` model approves it, denies
+  it or asks you. If that call fails, returns anything unexpected or times
+  out (up to about 90 seconds), you are asked as before. Existing boxes switch
+  to smart approvals the next time Hermes is provisioned. To keep being asked
+  about every flagged command, set `approvals.mode: manual` in
+  `/etc/hal0/agents/hermes/overrides.yaml`. The plugin contracts hal0 uses (memory
+  provider, provider profile, plugin context, voice registries, the API
+  server's runs, sessions and jobs routes, and the kanban schema and run
+  routes) are otherwise unchanged. Upstream Hermes now gives up on a memory
+  prefetch after 8 seconds, so a slow Hindsight recall skips that turn's
+  recalled context instead of delaying the reply.
 
 - ADR-0024: the "approval-route fix only" option is recorded as considered and
   not shipped (an agent holding the admin key can log in for a cookie, and an

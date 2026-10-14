@@ -201,15 +201,25 @@ warn_unused_configs = true
 # `chore(hermes): bump upstream pin to <short-sha>` PR).
 [tool.hal0.upstream-hermes]
 # Aligned to the reviewed official compatibility freeze (research doc §"Supported
-# compatibility freeze"): NousResearch/hermes-agent v2026.7.7.2 / 0.18.2, the same
+# compatibility freeze"): NousResearch/hermes-agent v2026.7.20 / 0.19.0, the same
 # immutable commit the installer requirements.txt and the frozen contract fixtures
 # (tests/fixtures/hermes/contracts/) pin. The drift-watch, the compat pin, and the
 # fixtures MUST stay in lockstep — tests/agents/hermes/test_contract_compatibility.py
-# enforces it. Preserve the prior earendil-works@0554ef1 (2026-05-28) as historical
-# provenance in git history; it is NOT the production source of record.
+# enforces it. `date` is the upstream commit date of `commit`, not the bump date.
+#
+# 0.19.0 is the newest release hal0's install model can take. Upstream stopped
+# supporting pip/wheel installs in d84e11af (#68217, first released in v2026.7.30 /
+# 0.19.1): its setup.py now raises on bdist_wheel/sdist outside a Nix build, so the
+# `hermes-agent @ git+…` requirement cannot build. From v0.21.6 every core
+# dependency is also marked `python_version >= '3.14'`, while hal0 builds the
+# Hermes venv on 3.12. Bumping past this commit needs the install model reworked
+# first; the drift issue stays open until then.
+#
+# History: 9de9c25f (v2026.7.7.2 / 0.18.2, 2026-07-07) before this; the original
+# earendil-works@0554ef1 (2026-05-28) is historical provenance in git history only.
 repo   = "https://github.com/NousResearch/hermes-agent"
-commit = "9de9c25f620ff7f1ce0fd5457d596052d5159596"
-date   = "2026-07-07"
+commit = "3ef6bbd201263d354fd83ec55b3c306ded2eb72a"
+date   = "2026-07-20"
 
 # Surfaces hal0 vendors, shims, or proxies. The diff job only opens an
 # issue when one of these paths changes between the pinned commit and

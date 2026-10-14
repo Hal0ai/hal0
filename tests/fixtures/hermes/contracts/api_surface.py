@@ -11,8 +11,8 @@ Adapter lanes:
   family and the managed-cron fire webhook ``/api/cron/fire``.
 
 Route table + security constants copied verbatim from the reviewed official pin
-``9de9c25f620ff7f1ce0fd5457d596052d5159596``
-(``gateway/platforms/api_server.py``, Hermes v2026.7.7.2 / 0.18.2).
+``3ef6bbd201263d354fd83ec55b3c306ded2eb72a``
+(``gateway/platforms/api_server.py``, Hermes v2026.7.20 / 0.19.0).
 
 SECURITY (board fold, lxc105): ``DEFAULT_HOST`` is loopback, the server refuses
 to start without ``API_SERVER_KEY`` and rejects placeholder / <16-char keys via
@@ -97,3 +97,12 @@ JOB_ROUTES = (
     ("post", "/api/jobs/{job_id}/run"),
     ("post", "/api/cron/fire"),
 )
+
+# Generic platform event-callback ingress, added in 0.19.0. Authenticated by the
+# target platform adapter's own verifier, NOT API_SERVER_KEY. Frozen so the
+# security checklist sees any change to this unauthenticated-by-key surface.
+PLATFORM_CALLBACK_ROUTES = (("post", "/api/platforms/{platform}/events"),)
+
+# Since 0.19.0 every route above is also mounted under this prefix (same
+# handlers; the profile-prefix middleware scopes config to that profile).
+PROFILE_ROUTE_PREFIX = "/p/{profile}"

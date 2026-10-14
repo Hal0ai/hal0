@@ -2,7 +2,7 @@
 
 Every assertion here freezes one Hermes SDK / plugin / HTTP / config touchpoint
 that a planned hal0 adapter lane consumes, copied verbatim from the reviewed
-official pin ``9de9c25f`` (NousResearch/hermes-agent v2026.7.7.2 / 0.18.2). The
+official pin ``3ef6bbd2`` (NousResearch/hermes-agent v2026.7.20 / 0.19.0). The
 frozen fixtures live under ``tests/fixtures/hermes/contracts/`` and each is
 labelled with its consuming adapter lane.
 
@@ -36,7 +36,7 @@ from tests.fixtures.hermes.contracts.provider_profile import (
     register_provider,
 )
 
-HERMES_COMMIT = "9de9c25f620ff7f1ce0fd5457d596052d5159596"
+HERMES_COMMIT = "3ef6bbd201263d354fd83ec55b3c306ded2eb72a"
 HERMES_REPO = "https://github.com/NousResearch/hermes-agent"
 _REPO_ROOT = Path(__file__).parents[3]
 
@@ -66,6 +66,12 @@ def test_provider_profile_fetch_models_signature() -> None:
         "(self, *, api_key: 'str | None' = None, base_url: 'str | None' = None, "
         "timeout: 'float' = 8.0) -> 'list[str] | None'"
     )
+
+
+def test_provider_profile_default_vision_model_hook() -> None:
+    # Added upstream in 0.19.0; hal0-provider inherits the None default.
+    assert str(signature(ProviderProfile.default_vision_model)) == "(self) -> 'str | None'"
+    assert ProviderProfile(name="hal0").default_vision_model() is None
 
 
 def test_provider_registration_seam_signatures() -> None:
@@ -307,6 +313,23 @@ def test_dashboard_session_token_injection_format_is_frozen() -> None:
 
 
 # ── SECURITY CHECKLIST (board fold, lxc105 — item 4) ───────────────────────
+
+
+def test_upstream_approvals_default_is_frozen_and_hal0_pins_its_own() -> None:
+    # Upstream default since 0.19.0 (#62661). If upstream moves it again this
+    # trips, and hal0's explicit choice gets re-reviewed against the new
+    # upstream semantics.
+    from hal0.agents.hermes_provision import HAL0_APPROVALS_MODE
+
+    assert config_defaults.APPROVALS_MODE_DEFAULT == "smart"
+    assert HAL0_APPROVALS_MODE == "smart"
+
+
+def test_platform_callback_route_is_frozen() -> None:
+    # Not API_SERVER_KEY-authenticated (platform-adapter verifier instead), so
+    # it is frozen for the security checklist. The server still binds loopback.
+    assert api_surface.PLATFORM_CALLBACK_ROUTES == (("post", "/api/platforms/{platform}/events"),)
+    assert api_surface.PROFILE_ROUTE_PREFIX == "/p/{profile}"
 
 
 def test_api_server_never_defaults_to_non_loopback_bind() -> None:
