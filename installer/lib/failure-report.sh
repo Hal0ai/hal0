@@ -745,9 +745,10 @@ _hal0_report_escaped_name_exprs() {
 
 # The sed expressions that mask an escaped quoted value after a secret NAME[=:],
 # a `--secret` flag or an `Authorization` scheme, for each k up to 8 and each
-# quote. A quote that does not close, or that a NAME mark or a glued keyword (a
-# secret the value swallows) would straddle, masks to the end of the line. Run
-# between the marks and their masks, so what they leave is no longer a value.
+# quote; an opener with more backslashes masks to the end of its line. So does
+# a quote that does not close, or that a NAME mark or a glued keyword (a secret
+# the value swallows) would straddle. Run between the marks and their masks, so
+# what they leave is no longer a value.
 _hal0_report_escaped_value_exprs() {
     local m="$_HAL0_REPORT_MASK" k="$_HAL0_REPORT_PACKED" w="$_HAL0_REPORT_SWALLOW"
     local kw="$_HAL0_REPORT_KEYWORD" v="$_HAL0_REPORT_NAME_VALUE"
@@ -774,6 +775,8 @@ _hal0_report_escaped_value_exprs() {
                 printf '%s\n' "s#${ctx}${marks}\\\\{${n}}${q}(${bodystop})*[${stops}].*\$#\\1${m}#I"
                 printf '%s\n' "s#${ctx}${marks}\\\\{${n}}${q}(${body})*(\\\\)?\$#\\1${m}#I"
             done
+            # An opener past that range is masked to the end of its line.
+            printf '%s\n' "s#${ctx}${marks}\\\\{9,}${q}.*\$#\\1${m}#I"
         done
     done
     printf '%s\n' "}"

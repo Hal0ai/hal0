@@ -1420,6 +1420,17 @@ class TestEscapedOpeningQuote:
         assert out == f"{head}{_MASK} z"
 
     @pytest.mark.parametrize("head", _HEADS)
+    @pytest.mark.parametrize("k", [9, 10, 40])
+    def test_a_delimiter_past_the_generated_range_masks_to_the_end_of_the_line(
+        self, head: str, k: int
+    ) -> None:
+        """The expressions are generated up to 8 backslashes; a longer opener is
+        not left to the bare-value rules, which stop at the first space."""
+        delim = "\\" * k + '"'
+        out = _mask_patterns(f"{head}{delim}pk_a pk_b{delim} z\nnext").splitlines()
+        assert out == [f"{head}{_MASK}", "next"]
+
+    @pytest.mark.parametrize("head", _HEADS)
     def test_an_unclosed_value_masks_to_the_end_of_its_line(self, head: str) -> None:
         out = _mask_patterns(f'{head}\\"pk_a pk_b\nnext \\"q\\" x')
         assert out.splitlines() == [f"{head}{_MASK}", 'next \\"q\\" x']
