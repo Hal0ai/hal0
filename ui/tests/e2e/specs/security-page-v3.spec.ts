@@ -223,3 +223,91 @@ test.describe('Settings → Security', () => {
     await expect(page.getByTestId('security-key-client')).toContainText('ef56gh78')
   })
 })
+
+const CMD_APPROVALS = {
+  agent_id: 'hermes',
+  mode: 'smart',
+  effective: 'smart',
+  source: 'default',
+  default: 'smart',
+  allowed: ['smart', 'manual'],
+  invalid_value: null,
+  overrides_path: '/etc/hal0/agents/hermes/overrides.yaml',
+  rendered: 'smart',
+  in_sync: true,
+}
+
+test.describe('Settings → Security → Hermes command approvals', () => {
+  test('switching to manual PUTs the mode and shows the result', async ({ page }) => {
+    await mockAuthStatus(page, { auth_required: false, has_admin_key: true, tier: 'admin' })
+    let putBody: unknown = null
+    await page.route('**/api/agents/hermes/command-approvals', async (route) => {
+      if (route.request().method() === 'PUT') {
+        putBody = route.request().postDataJSON()
+        return route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify({
+            ...CMD_APPROVALS,
+            mode: 'manual',
+            effective: 'manual',
+            source: 'setting',
+            rendered: 'manual',
+            changed: true,
+            restart: 'restarted',
+            message: 'Hermes command approvals set to manual. Hermes restarted.',
+          }),
+        })
+      }
+      return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(CMD_APPROVALS) })
+    })
+    await openSecurity(page)
+
+    const panel = page.getByTestId('cmd-approvals')
+    await expect(panel).toContainText('separate from hal0')
+    await expect(page.getByTestId('cmd-approvals-smart')).toHaveAttribute('aria-checked', 'true')
+    await expect(page.getByTestId('cmd-approvals-help')).toContainText('falls back to asking you')
+
+    await page.getByTestId('cmd-approvals-manual').click()
+    await expect(page.getByTestId('cmd-approvals-saved')).toContainText('set to manual')
+    await expect(page.getByTestId('cmd-approvals-manual')).toHaveAttribute('aria-checked', 'true')
+    expect(putBody).toEqual({ mode: 'manual' })
+  })
+
+  test('an overrides.yaml value is shown as the one in effect', async ({ page }) => {
+    await mockAuthStatus(page, { auth_required: false, has_admin_key: true, tier: 'admin' })
+    await page.route('**/api/agents/hermes/command-approvals', (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ ...CMD_APPROVALS, mode: 'manual', effective: 'smart', source: 'overrides' }),
+      }),
+    )
+    await openSecurity(page)
+    await expect(page.getByTestId('cmd-approvals-overridden')).toContainText('In effect: smart')
+    await expect(page.getByTestId('cmd-approvals-overridden')).toContainText('overrides.yaml')
+  })
+
+  test('a failed apply shows the server error', async ({ page }) => {
+    await mockAuthStatus(page, { auth_required: false, has_admin_key: true, tier: 'admin' })
+    await page.route('**/api/agents/hermes/command-approvals', (route) =>
+      route.request().method() === 'PUT'
+        ? route.fulfill({
+            status: 500,
+            contentType: 'application/json',
+            body: JSON.stringify({
+              error: {
+                code: 'agent.command_approvals_apply_failed',
+                message: 'Hermes restart failed (rc=1). The previous setting and config were restored.',
+                details: {},
+              },
+            }),
+          })
+        : route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(CMD_APPROVALS) }),
+    )
+    await openSecurity(page)
+    await page.getByTestId('cmd-approvals-manual').click()
+    await expect(page.getByTestId('cmd-approvals-save-error')).toContainText('previous setting and config were restored')
+    await expect(page.getByTestId('cmd-approvals-smart')).toHaveAttribute('aria-checked', 'true')
+  })
+})
