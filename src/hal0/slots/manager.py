@@ -63,7 +63,7 @@ from hal0.slots.config_write import (
 )
 from hal0.slots.drift import _CONFIG_DRIFT_KEYS, _argv_values
 from hal0.slots.drift import compute_config_drift as _compute_config_drift
-from hal0.slots.layout import is_id_stem, resolve_slot_stem
+from hal0.slots.layout import is_id_stem, resolve_slot_stem, shadowed_slot_files
 from hal0.slots.npu.trio import is_npu_trio_shadow
 from hal0.slots.npu.trio import reconcile_trio_slots as _npu_reconcile_trio_slots
 from hal0.slots.preload_evict import _DEFAULT_HEADROOM_MB
@@ -764,10 +764,21 @@ class SlotManager:
         if not cfg_dir.exists():
             return []
         out: list[tuple[int | None, str, Path]] = []
+        # #2542: two files claiming one name are one slot with two configs.
+        # Keep the winning file, warn about the rest, skip them.
+        shadowed = shadowed_slot_files(cfg_dir)
         for p in sorted(cfg_dir.glob("*.toml")):
             if p.name.startswith("."):
                 continue
             stem = p.stem
+            if p in shadowed:
+                log.warning(
+                    "slot.duplicate_toml",
+                    extra={"skipped": str(p), "kept": str(shadowed[p])},
+                )
+                if dropped is not None:
+                    dropped.append(stem)
+                continue
             if is_id_stem(stem):
                 sid = int(stem)
                 name = self._slot_name_from_id_toml(p, sid)
