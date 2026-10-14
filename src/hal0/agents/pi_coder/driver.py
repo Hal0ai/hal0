@@ -14,7 +14,7 @@ minimal profile (spec D2):
    provider. Set as the default provider/model in ``settings.json``.
 3. Memory — two wires (spec D3/D4), not one:
    a. ``hal0-memory`` MCP server upserted into pi's global
-      ``~/.pi/agent/mcp.json`` override file (consumed by the pinned
+      ``~/.pi/agent/mcp.json`` (Pi's own MCP config, read by the pinned
       ``pi-mcp-adapter`` package), pointed at hal0-api's memory MCP
       mount.
    b. The ``hindsight`` extension (``plugins/hindsight/``), a vendored
@@ -74,14 +74,15 @@ _THEME_SRC = Path(__file__).resolve().parent / "themes" / "hal0.json"
 # pi-mcp-adapter pin (spec D2) — the generic MCP proxy layer used for
 # hal0-memory (and anything else the operator points it at). Bump in
 # lockstep with installer/agents/pi.sh and scripts/smoke-pi.sh.
-_ADAPTER_PIN = "npm:pi-mcp-adapter@2.31.0"
+_ADAPTER_PIN = "npm:pi-mcp-adapter@5.3.0"
 
 # Packages hal0 manages in pi's settings.json ``packages`` array.
 # Dedup'd against operator entries on every install; removed (only
 # these entries) on uninstall.
 #
 # The deployed extensions must NOT be listed here: pi (verified on
-# 0.84.4, CT105 acceptance) auto-discovers every directory under
+# 0.84.4, CT105 acceptance; auto-discovery re-confirmed on 1.2.0)
+# auto-discovers every directory under
 # ``~/.pi/agent/extensions/``, and an explicit ``extensions/<name>``
 # packages entry loads the same extension a second time — the duplicate
 # ``registerTool`` calls then fail the whole extension with
@@ -450,8 +451,10 @@ class PiDriver(AgentDriver):
 
     def _write_mcp_config(self, *, bearer_token: str | None) -> None:
         """Upsert the hal0-memory MCP server into ~/.pi/agent/mcp.json
-        (pi-mcp-adapter's Pi-global override file). Preserves every other
-        server the operator configured.
+        (Pi's own global MCP file; ``pi-mcp-adapter`` >= 5.0 reads it on
+        Pi >= 0.99, and the entry shape — ``url`` + ``headers`` — is the
+        same one Pi's built-in MCP uses). Preserves every other server the
+        operator configured.
 
         Identity always rides the ``X-hal0-Agent`` header (mirrors
         ``hermes_provision.py``'s MCP wiring and the ``_AGENT_HEADER`` the
