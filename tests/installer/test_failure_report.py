@@ -1238,6 +1238,36 @@ class TestUnclosedQuotes:
             assert secret not in body, body
 
 
+class TestQuotedKeyValueWithSpaces:
+    """#2598: ``redact_log_line`` masked a quoted ``*_KEY=`` value only up to its
+    first space. This pass has no such separate rule (the name rule reads the
+    quote), so these pin that it already masks the whole value, as the
+    redaction fixture's cases require of ``redact_log_line``."""
+
+    @pytest.mark.parametrize(
+        ("line", "expected"),
+        [
+            ("api_key='pk_a pk_b'", f"api_key='{_MASK}'"),
+            ('api_key="pk_a pk_b"', f'api_key="{_MASK}"'),
+            ('api_key="pk_a   pk_b   pk_c" next', f'api_key="{_MASK}" next'),
+            ("api_key='pk_a pk_b", f"api_key='{_MASK}"),
+            ('HAL0_ADMIN_KEY="pk_a pk_b', f'HAL0_ADMIN_KEY="{_MASK}'),
+        ],
+    )
+    def test_the_whole_quoted_value_is_masked(self, line: str, expected: str) -> None:
+        assert _mask_patterns(line).strip() == expected
+
+    def test_an_unclosed_quote_ends_at_its_own_line(self) -> None:
+        """The pass is line by line, so a quote left open pairs with none on the
+        next line (the same as ``redact_log_line``, #2598)."""
+        text = 'api_key="pk_a\nmessage="hello"\npassword="pk_b pk_c"'
+        assert _mask_patterns(text).splitlines() == [
+            f'api_key="{_MASK}',
+            'message="hello"',
+            f'password="{_MASK}"',
+        ]
+
+
 # ── #2402: multi-line TOML arrays under a sensitive key ─────────────────────
 
 _ARR_A = "arrSecretAlpha1Kq2Wz9Xc"  # no known prefix: literal pass only

@@ -115,6 +115,15 @@ applying. Add those subsections to a version's section to surface them; see
   dashboard's Sentry scrubber, the doctor bundle and the installer failure
   report, which now also masks a raw `Authorization` value on a line that
   holds another header with a known scheme.
+- Log and Sentry redaction now mask the whole quoted value of a `*_KEY=`,
+  `HAL0_BEARER_TOKEN=` or `Authorization: Bearer` field. A value that held
+  spaces was masked only up to the first one, so `api_key='a b'` rendered as
+  `api_key=***REDACTED*** b'` and the rest of the secret stayed visible
+  (#2598). The value now runs to its closing quote on the same line, or to
+  the end of its line if it never closes; a quote left open no longer pairs
+  with one on a later line, so the next line is not swallowed. The doctor
+  bundle and the installer failure report already masked a quoted `*_KEY=`
+  value whole.
 
 ### Breaking
 

@@ -125,8 +125,11 @@ def redact_log_line(line: str) -> str:
             start, end = match.span(token)
             end = _swallowing_end(line, start, end, _LOG_TOKEN, log=True)
         else:
-            start = match.end()
-            end = _bare_value_end(line, start, _LOG_VALUE, log=True)
+            start = match.end()  # the lookahead saw a character there
+            if line[start] in _QUOTES:
+                end = _quoted_log_value_end(line, start)
+            else:
+                end = _bare_value_end(line, start, _LOG_VALUE, log=True)
         if end > start:
             out += (line[pos:start], MASK)
             pos = end
@@ -439,15 +442,22 @@ def _swallowed_head(line: str, pos: int, *, log: bool) -> tuple[int, _ValueClass
     return _head(line, pos, log=log)
 
 
+# What a quoted value that opens with each quote holds up to its closing quote
+# or the end of its line: a run of characters that end neither.
+_QUOTED_RUN: Final[dict[str, re.Pattern[str]]] = {
+    '"': re.compile(r'[^"\n]*'),
+    "'": re.compile(r"[^'\n]*"),
+}
+
+
 def _quote_close(line: str, start: int) -> tuple[int, bool]:
     """Where the quoted value that opens at ``line[start]`` ends, and whether
-    it closes there: at its closing quote or, if it has none, at the end of
-    its line. An unclosed quote masks the rest of the line (#2593)."""
-    close = line.find(line[start], start + 1)
-    if close >= 0:
-        return close, True
-    eol = line.find("\n", start)
-    return (len(line) if eol < 0 else eol), False
+    it closes there: at its closing quote on the same line or, if it has none,
+    at the end of its line. An unclosed quote masks the rest of its line
+    (#2593), and never pairs with a quote on a later one. The scan stops at the
+    value's end, which the caller then moves past, so it is linear (#2501)."""
+    end = _QUOTED_RUN[line[start]].match(line, start + 1).end()  # type: ignore[union-attr]
+    return end, end < len(line) and line[end] == line[start]
 
 
 def _value_stop(line: str, start: int, value: _ValueClass, log: bool) -> int:
@@ -605,6 +615,45 @@ def _swallowing_end(
     )
 
 
+def _quoted_value_end(
+    line: str,
+    start: int,
+    *,
+    log: bool = False,
+    secret: bool = True,
+    spans: list[_Span] | None = None,
+) -> tuple[int, bool]:
+    """Where the quoted value that opens at ``line[start]`` ends, and whether
+    its quote closes: past its closing quote or, if it has none, at the end
+    of its line, and past the value of a secret it swallows
+    (:func:`_past_swallowed`, #2593). The quoted text is masked whole, spaces
+    and all (#2598)."""
+    close, closed = _quote_close(line, start)
+    end = close + closed
+    swallowed = _swallowed(line, start + 1, close, log=log, secret=secret)
+    if swallowed is not None:
+        end = _past_swallowed(
+            line,
+            start,
+            swallowed,
+            None,
+            log=log,
+            secret=secret,
+            spans=[] if spans is None else spans,
+        )
+    return end, closed
+
+
+def _quoted_log_value_end(line: str, start: int) -> int:
+    """:func:`_quoted_value_end` for a LOG_SECRET_RE value that opens with a
+    quote, then on as a bare value runs on from there: over characters glued to
+    the closing quote (``api_key='a b'c`` masks ``'a b'c``) and a ``,`` or
+    ``;`` that starts no secret, so that masking the result again changes
+    nothing."""
+    end, _closed = _quoted_value_end(line, start, log=True)
+    return _bare_value_end(line, end, _LOG_VALUE, log=True)
+
+
 def _mask_bare_values(
     pattern: re.Pattern[str], value: _ValueClass, spaces: bool, line: str, log: bool
 ) -> str:
@@ -731,15 +780,9 @@ def _name_values(line: str, *, log: bool = False) -> Iterator[_NameValue]:
         spans: list[_Span] = []
         closing = ""
         if line[start] in "\"'":
-            close, closed = _quote_close(line, start)
-            end = close + closed
+            end, closed = _quoted_value_end(line, start, log=log, secret=secret, spans=spans)
             if closed:
                 closing = line[start]
-            swallowed = _swallowed(line, start + 1, close, log=log, secret=secret)
-            if swallowed is not None:
-                end = _past_swallowed(
-                    line, start, swallowed, None, log=log, secret=secret, spans=spans
-                )
         else:
             end = _bare_value_end(line, start, _NAME_VALUE, log=log, secret=secret, spans=spans)
         yield _NameValue(match, secret, end, closing, spans)

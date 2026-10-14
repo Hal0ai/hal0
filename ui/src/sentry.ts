@@ -178,7 +178,9 @@ function maskLogSecrets(value: string): string {
       end = swallowingEnd(value, start, m.index + m[0].length, LOG_TOKEN, true)
     } else {
       start = m.index + m[0].length
-      end = bareValueEnd(value, start, LOG_VALUE, true)
+      end = isQuote(value[start])
+        ? quotedLogValueEnd(value, start)
+        : bareValueEnd(value, start, LOG_VALUE, true)
     }
     if (end > start) {
       out += value.slice(last, start) + MASK
@@ -351,11 +353,9 @@ function maskNameValues(line: string, log: boolean): string {
     let end: number
     let closing = ''
     if (isQuote(line[start])) {
-      const [close, closed] = quoteClose(line, start)
-      end = close + (closed ? 1 : 0)
+      const [quotedEnd, closed] = quotedValueEnd(line, start, log, secret)
+      end = quotedEnd
       if (closed) closing = line[start]
-      const inner = swallowed(line, start + 1, close, log, secret)
-      if (inner) end = pastSwallowed(line, inner, null, log, secret)
     } else {
       end = bareValueEnd(line, start, NAME_VALUE, log, secret)
     }
@@ -509,12 +509,18 @@ const CLIENT_ID_HEAD_RE = rx(String.raw`client_id=(?=[A-Za-z0-9_.-]{16})`, 'yiu'
 const isQuote = (c: string | undefined): boolean => c === '"' || c === "'"
 
 // `_quote_close`: where the quoted value opening at `line[start]` ends, and
-// whether it closes there; an unclosed one runs to the end of its line.
+// whether it closes there: at its closing quote on the same line or, if it has
+// none, at the end of its line. An unclosed quote never pairs with a quote on a
+// later line.
+const QUOTED_RUN_RE: Record<string, RegExp> = {
+  '"': /[^"\n]*/y,
+  "'": /[^'\n]*/y,
+}
 function quoteClose(line: string, start: number): [number, boolean] {
-  const close = line.indexOf(line[start], start + 1)
-  if (close >= 0) return [close, true]
-  const eol = line.indexOf('\n', start)
-  return [eol < 0 ? line.length : eol, false]
+  const re = QUOTED_RUN_RE[line[start]]
+  re.lastIndex = start + 1
+  const end = start + 1 + (re.exec(line) as RegExpExecArray)[0].length
+  return [end, end < line.length && line[end] === line[start]]
 }
 
 // `_value_stop`: `packedValueEnd`, less trailing whitespace.
@@ -641,6 +647,29 @@ function bareValueEnd(
   secret = true,
 ): number {
   return swallowingEnd(line, start, packedValueEnd(line, start, value, log), value, log, secret)
+}
+
+// `_quoted_value_end`: where the quoted value opening at `line[start]` ends,
+// and whether its quote closes: past its closing quote or, if it has none, at
+// the end of its line, and past the value of a secret it swallows. The quoted
+// text is masked whole, spaces and all (#2598).
+function quotedValueEnd(
+  line: string,
+  start: number,
+  log: boolean,
+  secret = true,
+): [number, boolean] {
+  const [close, closed] = quoteClose(line, start)
+  let end = close + (closed ? 1 : 0)
+  const inner = swallowed(line, start + 1, close, log, secret)
+  if (inner) end = pastSwallowed(line, inner, null, log, secret)
+  return [end, closed]
+}
+
+// `_quoted_log_value_end`: `quotedValueEnd` for a LOG_SECRET_RE value that opens
+// with a quote, then on as a bare value runs on from there.
+function quotedLogValueEnd(line: string, start: number): number {
+  return bareValueEnd(line, quotedValueEnd(line, start, true)[0], LOG_VALUE, true)
 }
 
 // `_mask_bare_values`: `prefix` (global) matches up to a bare value; mask each
