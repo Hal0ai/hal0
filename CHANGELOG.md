@@ -205,6 +205,13 @@ applying. Add those subsections to a version's section to surface them; see
   time quadratic in its length whenever it did not end in a CR. It now checks
   the last character and cuts it with a substring, which is linear; the report
   is unchanged.
+- The installer failure report no longer takes quadratic time on a long value
+  of plain characters either: 1.3 s for 320 KB of `a` after `X_KEY=` and 12 s
+  for 1 MB (#2626). The check that a harvested value ends in a name and its
+  separator (`api_key=`) was a regex that bash backtracks over at every
+  position. A value longer than 8192 characters now goes to `grep -E` with the
+  same pattern, which runs in time linear in the value; shorter ones keep the
+  bash test, so the report is unchanged.
 
 ### Breaking
 

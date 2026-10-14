@@ -1784,3 +1784,62 @@ class TestHarvestOfALongLineIsLinear:
         proc = _bash(f'{script}; _hal0_report_emit_secret "$v" | tr "\\r" "@"')
         assert proc.returncode == 0, proc.stderr
         assert proc.stdout.split("\n")[:-1] == expected
+
+
+class TestHarvestOfALongBareValueIsLinear:
+    """#2626: the check that a harvested value ends in a name and its separator
+    (``api_key=`` in ``Y_KEY=   api_key= ``, #2594) was a regex bash backtracks
+    over at every position, so a long value of name characters took quadratic
+    time (320 KB of ``a`` took 1.3 s). Past a length it now goes to ``grep -E``,
+    the same pattern run as a DFA."""
+
+    # 640 KB: ~0.2 s once linear, ~5 s when quadratic; ~10x headroom (#2610).
+    _BOUND_S = 3.0
+
+    @pytest.mark.timing
+    @pytest.mark.parametrize("end", ["", "=", "==", "_key=", "token:"])
+    def test_a_long_bare_value_is_harvested_fast(self, tmp_path: Path, end: str) -> None:
+        line = tmp_path / "line.log"
+        line.write_text("X_KEY=" + "a" * 640_000 + end + "\n")
+        start = time.perf_counter()
+        proc = _bash(f'_hal0_report_harvest_report_text "{line}"')
+        elapsed = time.perf_counter() - start
+        assert proc.returncode == 0, proc.stderr
+        assert elapsed < self._BOUND_S, f"ends in {end!r}: took {elapsed:.2f}s"
+        # A value that ends in a name and its separator is not harvested.
+        harvested = proc.stdout.splitlines()
+        if end in ("_key=", "token:"):
+            assert harvested == []
+        else:
+            assert harvested == ["a" * 640_000 + end]
+
+    @pytest.mark.parametrize("bash_max", ["8192", "0"])
+    @pytest.mark.parametrize(
+        ("line", "harvested"),
+        [
+            # A value that ends in a name (a secret word, or `key` after `_`
+            # or `-`) and its separator is skipped.
+            ("X_KEY=abcdefgh12345678token=", []),
+            ("X_KEY=abcdefgh12345678_key:", []),
+            ("HF_TOKEN=abcdefgh12345678x-api-key=", []),
+            ("X_KEY=abcdefgh12345678.token=", []),
+            ("X_KEY=abcdefgh12345678.tokens=", []),
+            # `key` right after a name character is part of no name here, and a
+            # name needs a secret word.
+            ("X_KEY=abcdefgh1234key=", ["abcdefgh1234key="]),
+            ("X_KEY=abcdefgh12345678=", ["abcdefgh12345678="]),
+            ("X_KEY=abcdefgh12345678token", ["abcdefgh12345678token"]),
+        ],
+    )
+    def test_both_paths_judge_the_tail_alike(
+        self, tmp_path: Path, bash_max: str, line: str, harvested: list[str]
+    ) -> None:
+        """``0`` sends every value through grep, the default keeps short ones on
+        bash's own regex; they must agree."""
+        log = tmp_path / "line.log"
+        log.write_text(line + "\n")
+        proc = _bash(
+            f'_HAL0_REPORT_TAIL_BASH_MAX={bash_max}; _hal0_report_harvest_report_text "{log}"'
+        )
+        assert proc.returncode == 0, proc.stderr
+        assert proc.stdout.splitlines() == harvested
