@@ -3,7 +3,7 @@
 The route layer owns:
   - release-manifest fetch (delegated to ``hal0.updater.fetch_release_manifest``
     which honours ``HAL0_RELEASES_URL`` for tests + file:// fallback)
-  - version comparison against ``hal0.__version__``
+  - version comparison against ``installed_version()``
   - channel read/write (persisted in ``hal0.toml`` via ``Hal0Config.telemetry.channel``)
   - apply-job bookkeeping (queued / running / applied / failed) - jobs
     live on ``app.state.update_jobs`` AND are mirrored to disk under
@@ -57,7 +57,7 @@ from hal0.updater import (
     releases_url_override,
     validate_release_version,
 )
-from hal0.updater.updater import _is_newer
+from hal0.updater.updater import _is_newer, installed_version
 
 log = structlog.get_logger(__name__)
 
@@ -510,6 +510,8 @@ async def update_state(request: Request) -> dict[str, Any]:
     response.
     """
     channel = _current_channel(request)
+    # #2629: current/VERSION, not the wheel base version (no nightly stamp).
+    installed = installed_version()
 
     # hal0 self-update: reuse ``check_updates`` semantics but tolerate
     # a manifest fetch failure (dashboard shouldn't go blank just
@@ -528,7 +530,7 @@ async def update_state(request: Request) -> dict[str, Any]:
             if hal0_revoked and latest:
                 hal0_revoked_version = latest
             # A revoked latest is not offered (but its reason is surfaced).
-            if latest and not hal0_revoked and _is_newer(latest, __version__):
+            if latest and not hal0_revoked and _is_newer(latest, installed):
                 hal0_available = latest
     except (OSError, ValueError):
         pass
@@ -540,7 +542,7 @@ async def update_state(request: Request) -> dict[str, Any]:
 
     return {
         "hal0": {
-            "current": __version__,
+            "current": installed,
             "available": hal0_available,
             "channel": channel,
             # #2128: non-None when HAL0_RELEASES_URL bypasses channel
@@ -586,6 +588,8 @@ async def check_updates(request: Request) -> dict[str, Any]:
     check for updates" without crashing.
     """
     channel = _current_channel(request)
+    # #2629: current/VERSION, not the wheel base version (no nightly stamp).
+    installed = installed_version()
     url = releases_url(channel)
     url_override = releases_url_override()
     try:
@@ -611,7 +615,7 @@ async def check_updates(request: Request) -> dict[str, Any]:
         revoked_reason = str(manifest.get("revoked_reason") or "")
 
     # A revoked (yanked) latest is never offered as an available update.
-    update_available = bool(latest) and not revoked and _is_newer(latest, __version__)
+    update_available = bool(latest) and not revoked and _is_newer(latest, installed)
 
     def _components_pending() -> int:
         try:
@@ -622,7 +626,7 @@ async def check_updates(request: Request) -> dict[str, Any]:
             return 0  # courtesy field — never fail /check over it
 
     return {
-        "current": __version__,
+        "current": installed,
         "latest": latest or None,
         "channel": channel,
         "update_available": update_available,
