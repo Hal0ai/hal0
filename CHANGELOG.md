@@ -771,10 +771,17 @@ applying. Add those subsections to a version's section to surface them; see
   pinned at upstream commit `3ef6bbd2` (#2566). This is the newest release
   hal0 can install. From 0.19.1 upstream no longer builds wheels outside its
   Nix build, and from 0.21.6 it needs Python 3.14, so going further needs a
-  new Hermes install method. The plugin contracts hal0 uses (memory
+  new Hermes install method. hal0 now writes `approvals.mode: smart`,
+  which is also the new upstream default. Before a dangerous terminal
+  command reaches you, a call to your `hal0/agent` model approves it, denies
+  it or asks you. If that call fails, returns anything unexpected or times
+  out (up to about 90 seconds), you are asked as before. Existing boxes switch
+  to smart approvals the next time Hermes is provisioned. To keep being asked
+  about every flagged command, set `approvals.mode: manual` in
+  `/etc/hal0/agents/hermes/overrides.yaml`. The plugin contracts hal0 uses (memory
   provider, provider profile, plugin context, voice registries, the API
   server's runs, sessions and jobs routes, and the kanban schema and run
-  routes) are unchanged. Upstream Hermes now gives up on a memory
+  routes) are otherwise unchanged. Upstream Hermes now gives up on a memory
   prefetch after 8 seconds, so a slow Hindsight recall skips that turn's
   recalled context instead of delaying the reply.
 

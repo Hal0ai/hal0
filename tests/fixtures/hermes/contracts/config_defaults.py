@@ -37,3 +37,11 @@ STT_PROVIDER_CONFIG_KEY = "stt.provider"
 # API_SERVER_HOST documents a loopback default and states the key is required
 # even on loopback binds. Frozen as the literal default string.
 API_SERVER_HOST_DEFAULT = "127.0.0.1"
+
+# hermes_cli/config.py DEFAULT_CONFIG["approvals"]["mode"] — observed default.
+# Upstream flipped this from "manual" to "smart" in 0.19.0 (#62661): an
+# auxiliary LLM approves or denies dangerous terminal commands before any human
+# prompt. hal0 writes approvals.mode explicitly in its provisioning overlay
+# (hal0.agents.hermes_provision.HAL0_APPROVALS_MODE, "smart" by operator
+# choice), so a change here is reviewed rather than silently inherited.
+APPROVALS_MODE_DEFAULT = "smart"

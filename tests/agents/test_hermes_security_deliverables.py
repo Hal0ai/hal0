@@ -39,6 +39,23 @@ def _overlay(hermes_home: Path | str) -> dict[str, object]:
     )
 
 
+def test_approvals_mode_written_explicitly_as_smart() -> None:
+    # Operator choice: smart approvals, pinned by hal0 rather than inherited.
+    assert _overlay("/var/lib/hal0/.hermes")["approvals.mode"] == "smart"
+    assert hp.HAL0_APPROVALS_MODE == "smart"
+
+
+def test_approval_judge_rides_the_main_hal0_model() -> None:
+    # No auxiliary.approval.* override: hermes's "auto" resolution sends the
+    # smart-approval call to the main provider (custom -> hal0 gateway), the
+    # same endpoint and model the chat turn uses.
+    overlay = _overlay("/var/lib/hal0/.hermes")
+    assert not [k for k in overlay if k.startswith("auxiliary.approval.")]
+    assert overlay["model.provider"] == "custom"
+    assert overlay["model.base_url"] == "http://127.0.0.1:8080/v1"
+    assert overlay["model.default"] == "hal0/agent"
+
+
 def test_terminal_cwd_is_scratch_under_hermes_home() -> None:
     overlay = _overlay("/var/lib/hal0/.hermes")
     assert overlay["terminal.cwd"] == "/var/lib/hal0/.hermes/scratch"

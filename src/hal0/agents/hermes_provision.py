@@ -1868,6 +1868,10 @@ def terminal_tool_enabled(
     return False, "default-off"
 
 
+# Value hal0 writes for ``approvals.mode`` (see _build_config_overlay).
+HAL0_APPROVALS_MODE = "smart"
+
+
 def _config_list_keys(
     *,
     terminal_enabled: bool,
@@ -1967,6 +1971,22 @@ def _build_config_overlay(
     # mechanism hermes itself documents as the non-interactive path
     # (--accept-hooks / HERMES_ACCEPT_HOOKS=1 / hooks_auto_accept: true).
     pairs.append(("hooks_auto_accept", True))
+
+    # approvals.mode — "smart" is the operator's choice for hal0, written
+    # explicitly so the posture is hal0's rather than inherited from the
+    # upstream default (also "smart" since hermes 0.19.0, #62661). In smart
+    # mode an auxiliary LLM call answers APPROVE / DENY / ESCALATE for a
+    # flagged command before any human prompt. hal0 writes no
+    # ``auxiliary.approval.*`` key, so that call resolves through hermes's
+    # "auto" chain to the main provider: ``custom`` -> the hal0 gateway ->
+    # ``model.default`` (``hal0/agent`` under live-resolve). Trade-off: the
+    # judge is a local slot model, which may be the same model that proposed
+    # the command. Any failure (error, empty or unexpected answer, timeout)
+    # escalates to the normal human prompt; a DENY in an interactive session
+    # also goes to the human. An operator who wants every flagged command
+    # asked sets ``approvals.mode: manual`` in overrides.yaml, which merges
+    # on top of this overlay.
+    pairs.append(("approvals.mode", HAL0_APPROVALS_MODE))
 
     # model.* — the OpenAI-compatible-LAN wiring. ``provider: custom`` is
     # hermes's built-in bucket for Ollama/vLLM/llama.cpp endpoints; hal0 is

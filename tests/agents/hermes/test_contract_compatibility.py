@@ -315,6 +315,16 @@ def test_dashboard_session_token_injection_format_is_frozen() -> None:
 # ── SECURITY CHECKLIST (board fold, lxc105 — item 4) ───────────────────────
 
 
+def test_upstream_approvals_default_is_frozen_and_hal0_pins_its_own() -> None:
+    # Upstream default since 0.19.0 (#62661). If upstream moves it again this
+    # trips, and hal0's explicit choice gets re-reviewed against the new
+    # upstream semantics.
+    from hal0.agents.hermes_provision import HAL0_APPROVALS_MODE
+
+    assert config_defaults.APPROVALS_MODE_DEFAULT == "smart"
+    assert HAL0_APPROVALS_MODE == "smart"
+
+
 def test_platform_callback_route_is_frozen() -> None:
     # Not API_SERVER_KEY-authenticated (platform-adapter verifier instead), so
     # it is frozen for the security checklist. The server still binds loopback.
