@@ -1274,6 +1274,79 @@ class TestGluedSecrets:
             assert elapsed < TestRedactionTimeIsLinear._BOUND_S, f"{unit!r} took {elapsed:.2f}s"
 
 
+# ── #2593: a quote that does not close where it should ──────────────────────
+
+
+class TestUnclosedQuotes:
+    """#2593: a quoted value ran to the next quote. When its own quote did
+    not close, that was the quote of a later secret's name or value, and the
+    later value was left visible. A quote that never closed left the whole
+    value visible."""
+
+    @pytest.mark.parametrize(
+        ("line", "secrets"),
+        [
+            # The line from the issue.
+            ('--api-key="pk_first_1, db-password": pk_second_2', ["pk_first_1", "pk_second_2"]),
+            ('password="pk_first_1 HF_TOKEN="pk_second_2"', ["pk_first_1", "pk_second_2"]),
+            ('password="pk_first_1.HF_TOKEN="pk_second_2"', ["pk_first_1", "pk_second_2"]),
+            ('password="pk_first_1 b_token": pk_second_2', ["pk_first_1", "pk_second_2"]),
+            ("secret='pk_first_1, api_key': pk_second_2", ["pk_first_1", "pk_second_2"]),
+            ('password: "HF_TOKEN": "pk_second_2 pk_third_3"', ["pk_second_2", "pk_third_3"]),
+            # A quote that never closes masks the rest of the line.
+            ('password="pk_first_1 pk_second_2', ["pk_first_1", "pk_second_2"]),
+            ('{"token": "pk_first_1', ["pk_first_1"]),
+            ("password: 'pk_first_1 pk_second_2", ["pk_first_1", "pk_second_2"]),
+            # A benign quoted value ends before a secret inside it.
+            ('max_tokens="5 HF_TOKEN="pk_second_2"', ["pk_second_2"]),
+            ("tokenizer='Qwen password: pk_second_2", ["pk_second_2"]),
+        ],
+    )
+    @pytest.mark.parametrize("redact", [redact_log_line, redact_shareable_text])
+    def test_the_later_secret_is_masked(self, redact, line: str, secrets: list[str]) -> None:
+        out = redact(line)
+        for secret in secrets:
+            assert secret not in out, (line, out)
+        assert redact(out) == out  # idempotent
+
+    @pytest.mark.parametrize(
+        ("line", "expected"),
+        [
+            ('password="abc HF_TOKEN="zzz" more', f'password="{MASK}" more'),
+            ('password="a.b_token": zzz more', f'password="{MASK}" more'),
+            ('password: "HF_TOKEN": "v w"', f'password: "{MASK}"'),
+            ('password="abc def', f'password="{MASK}'),
+            ('{"token": "abc', f'{{"token": "{MASK}'),
+            ('password="abc\nX=1', f'password="{MASK}\nX=1'),
+            ('max_tokens="5 HF_TOKEN="zzz"', f'max_tokens="5 HF_TOKEN="{MASK}"'),
+            # Quotes that close where they should are read as before.
+            ('"X_KEY": "v", "HF_TOKEN": "w"', f'"X_KEY": "{MASK}", "HF_TOKEN": "{MASK}"'),
+            ('max_tokens="5"', 'max_tokens="5"'),
+        ],
+    )
+    def test_the_rendering(self, line: str, expected: str) -> None:
+        assert redact_log_line(line) == expected
+        assert redact_shareable_text(line) == expected
+
+    def test_the_issue_line_renders_without_the_second_value(self) -> None:
+        line = '--api-key="v, db-password": w'
+        assert redact_shareable_text(line) == f"--api-key={MASK}"
+        assert redact_log_line(line) == f'--api-key={MASK} db-password": {MASK}'
+
+    @pytest.mark.parametrize(
+        "unit", ['password="a ', 'x="a.b_token": ', "secret: '", 'tokenizer="a ', 'a"b_token="']
+    )
+    @pytest.mark.parametrize("redact", [redact_log_line, redact_shareable_text])
+    def test_a_long_run_of_quotes_is_fast(self, redact, unit: str) -> None:
+        import time
+
+        line = unit * (80_000 // len(unit))
+        start = time.perf_counter()
+        redact(line)
+        elapsed = time.perf_counter() - start
+        assert elapsed < TestRedactionTimeIsLinear._BOUND_S, f"{unit!r} took {elapsed:.2f}s"
+
+
 # ── #2413: the cases shared with the dashboard's browser-side port ─────────
 
 

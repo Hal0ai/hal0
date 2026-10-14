@@ -310,6 +310,30 @@
     [
       "client_id=pk4_first_abcdefghHF_TOKEN= pk4_second",
       "pk4_second"
+    ],
+    [
+      "--api-key=\"pk5_first, db-password\": pk5_second",
+      "pk5_second"
+    ],
+    [
+      "password=\"pk5_first HF_TOKEN=\"pk5_second\"",
+      "pk5_second"
+    ],
+    [
+      "password=\"pk5_first.b_token\": pk5_second",
+      "pk5_second"
+    ],
+    [
+      "password=\"pk5 unclosed value",
+      "unclosed value"
+    ],
+    [
+      "{\"token\": \"pk5_truncated",
+      "pk5_truncated"
+    ],
+    [
+      "max_tokens=\"5 HF_TOKEN=\"pk5_after_benign\"",
+      "pk5_after_benign"
     ]
   ],
   "keep": [
@@ -334,7 +358,9 @@
     "HF_TOKEN_FILE=/run/secrets/hf",
     "authorization: denied",
     "authorization: denied for bob",
-    "see https://example.com/docs and ftp://host/file"
+    "see https://example.com/docs and ftp://host/file",
+    "max_tokens=\"5\"",
+    "tokenizer='Qwen/Qwen3-8B'"
   ],
   "exact": [
     [
@@ -480,6 +506,30 @@
     [
       "max_tokens=5.HF_TOKEN= v",
       "max_tokens=5.HF_TOKEN= ***REDACTED***"
+    ],
+    [
+      "--api-key=\"v, db-password\": w",
+      "--api-key=***REDACTED*** db-password\": ***REDACTED***"
+    ],
+    [
+      "password=\"abc HF_TOKEN=\"zzz\" more",
+      "password=\"***REDACTED***\" more"
+    ],
+    [
+      "password: \"HF_TOKEN\": \"v w\"",
+      "password: \"***REDACTED***\""
+    ],
+    [
+      "password=\"abc def",
+      "password=\"***REDACTED***"
+    ],
+    [
+      "{\"token\": \"abc",
+      "{\"token\": \"***REDACTED***"
+    ],
+    [
+      "max_tokens=\"5 HF_TOKEN=\"zzz\"",
+      "max_tokens=\"5 HF_TOKEN=\"***REDACTED***\""
     ]
   ],
   "mask_names": [

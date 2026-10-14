@@ -517,7 +517,7 @@ _hal0_report_text_value_is_secret() {
 # plausible secrets are harvested (_hal0_report_text_value_is_secret). A
 # value ends before a packed secret (#2529), as in the pattern pass, so
 # `abc;Bearer` is not one literal whose mask would hide the token's name. A
-# secret that a value would swallow (#2594, #2595) has its own value
+# secret that a value would swallow (#2593-#2595) has its own value
 # harvested, but that value is not: what comes before the secret may end in
 # a name (`HF_TOKEN=x-api-key=b_token= v`), and masking it elsewhere would
 # hide that name. Nor is a value that ends in a name and its separator
@@ -617,29 +617,32 @@ _hal0_report_packed_mark_expr() {
     local heads="bearer[[:space:]]+([A-Za-z0-9._~+/=-]|[*]{3}REDACTED[*]{3})"
     heads+="|authorization[\"']?[[:space:]]*:[[:space:]]*[\"']?(${_HAL0_REPORT_AUTH_SCHEMES}[[:space:]]+[^[:space:]\"',]|[^[:space:]\"',]{8})"
     heads+="|--[A-Za-z0-9-]*(secret|token|password|pass|api-key|apikey|private-key)[A-Za-z0-9-]*(=|[[:space:]]+)[^-[:space:]]"
-    heads+="|(${_HAL0_REPORT_TEXT_NAME_RE})[\"']?[[:space:]]*[=:][[:space:]]*(\"[^\"]*\"|'[^']*'|[^\"'[:space:],}&])"
+    heads+="|(${_HAL0_REPORT_TEXT_NAME_RE})[\"']?[[:space:]]*[=:][[:space:]]*[^[:space:],}&]"
     printf '%s' "s#([;,])([\"'([{<]*(${heads}))#${_HAL0_REPORT_PACKED}\\1\\2#gI"
 }
 
-# Swallowed secrets (#2594, #2595): a value can take in the start of another
-# secret whose own value lies past it, which was then left visible: after an
-# empty value (`KEY=  X_KEY= v`), or glued on with no separator
-# (`Authorization: Bearer abcX-Api-Key: def`). Where a NAME begins is unknown
-# (`abcX-Api-Key` may be a token glued to a name), so no value is cut before
-# one: every NAME[=:]value value is masked first, and a value that swallows
-# the name is then masked over it as before. Mirrors the "Swallowed secrets"
-# block in hal0.redaction, which extends the first mask instead. No
+# Swallowed secrets (#2593, #2594, #2595): a value can take in the start of
+# another secret whose own value lies past it, which was then left visible:
+# after an empty value (`KEY=  X_KEY= v`), glued on with no separator
+# (`Authorization: Bearer abcX-Api-Key: def`), or past a quote that does not
+# close where it should (`--api-key="v, db-password": w`). Where a NAME
+# begins is unknown (`abcX-Api-Key` may be a token glued to a name), so no
+# value is cut before one: every NAME[=:]value value is masked first, and a
+# value that swallows the name is then masked over it as before. A quoted
+# value that a NAME's separator or quoted value would straddle, or that does
+# not close, is masked to the end of the line. Mirrors the "Swallowed
+# secrets" block in hal0.redaction, which extends the first mask instead. No
 # value takes in a Bearer, Authorization or --flag keyword (a value glued on
 # to one is cut off it), so each of those secrets is masked by its own rule:
 # the keyword is all that stays in clear.
 #
 # sed has no lookahead and its matches do not overlap, so bytes mark these
 # places: _HAL0_REPORT_SWALLOW where the value starts of a NAME whose
-# separator holds whitespace or a quote, or whose value is quoted;
-# _HAL0_REPORT_NAME_VALUE where any other NAME's value starts; and
-# _HAL0_REPORT_KEYWORD before a keyword that a value would take in, where
-# every bare value class stops. All are removed at the end (a stray one in
-# the input is dropped first).
+# separator holds whitespace or a quote, or whose value is quoted, as such a
+# NAME may straddle the end of a quoted value; _HAL0_REPORT_NAME_VALUE where
+# any other NAME's value starts; and _HAL0_REPORT_KEYWORD before a keyword
+# that a value would take in, where every bare value class stops. All are
+# removed at the end (a stray one in the input is dropped first).
 _HAL0_REPORT_SWALLOW=$'\002'
 _HAL0_REPORT_KEYWORD=$'\003'
 _HAL0_REPORT_NAME_VALUE=$'\004'
@@ -666,12 +669,14 @@ _hal0_report_swallow_mark_exprs() {
 }
 
 # The sed expressions that mask each marked value: a quoted one to its
-# closing quote, a bare one to the end of the NAME[=:]value class.
+# closing quote, unless a mark comes first or it does not close, and then to
+# the end of the line; a bare one to the end of the NAME[=:]value class.
 _hal0_report_swallow_mask_exprs() {
     local m="$_HAL0_REPORT_MASK" k="$_HAL0_REPORT_PACKED"
     local w="$_HAL0_REPORT_SWALLOW" kw="$_HAL0_REPORT_KEYWORD" v="$_HAL0_REPORT_NAME_VALUE"
     printf '%s\n' "s#${w}+#${w}#g"
-    printf '%s\n' "s#${w}\"[^\"]*\"#\"${m}\"#g" "s#${w}'[^']*'#'${m}'#g"
+    printf '%s\n' "s#${w}\"[^\"${w}]*\"#\"${m}\"#g" "s#${w}'[^'${w}]*'#'${m}'#g"
+    printf '%s\n' "s#${w}([\"']).*\$#\\1${m}#"
     printf '%s\n' "s#([${w}${v}])[^\"'[:space:],}&${k}${w}${kw}${v}]+#\\1${m}#g"
 }
 
@@ -685,7 +690,8 @@ _hal0_report_swallow_cut_exprs() {
     # A value that starts, after whitespace, with another secret (#2594);
     # twice, as a match takes the character before the next name.
     local empty="s#((^|[^A-Za-z0-9_-])${name}[\"']?[[:space:]]*[=:][[:space:]]+)([\"'([{<]*(${heads}))#\\1${w}\\6#gI"
-    # A NAME glued on to a value (#2595) whose value lies past that value.
+    # A NAME glued on to a value (#2595), or past its quote (#2593), whose
+    # value lies past that value.
     local glued="s#([^A-Za-z0-9_[:space:]${w}-])(${name}([\"'][[:space:]]*[=:]|[[:space:]]*[=:][[:space:]]+|[[:space:]]*[=:][[:space:]]*[\"']))#\\1${w}\\2#gI"
     printf '%s\n' "$empty" "$empty" "$glued" "$glued"
     printf '%s\n' "s#(${_HAL0_REPORT_KEYWORD_HEAD})#${w}\\1#gI"

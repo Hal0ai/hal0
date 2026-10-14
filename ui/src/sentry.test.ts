@@ -227,6 +227,10 @@ describe('redactSecrets: linear time', () => {
       'a raw Authorization value of many words, then a secret',
       `Authorization: abcdefghij${' a'.repeat(N / 2)} HF_TOKEN"=v`,
     ],
+    // #2593: quoted values that close at a later name's quote, or never.
+    ['unclosed quotes repeated', 'password="a '.repeat(N / 12)],
+    ['quoted names repeated', 'x="a.b_token": '.repeat(N / 15)],
+    ['a quote before each name', 'a"b_token="'.repeat(N / 11)],
   ]
 
   it.each(inputs)('%s', (_label, text) => {

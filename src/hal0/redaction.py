@@ -110,9 +110,10 @@ def redact_log_line(line: str) -> str:
 
     A second secret packed after a ``;`` or ``,`` (``X_KEY=a;Bearer b``)
     is masked on its own and keeps its name (#2529). One that a value takes
-    in some other way, after an empty value (``KEY=  X_KEY= v``) or glued on
-    (``Bearer a.Authorization: Token b``), is masked with that value (#2594,
-    #2595).
+    in some other way, after an empty value (``KEY=  X_KEY= v``), glued on
+    (``Bearer a.Authorization: Token b``) or past a quote that does not
+    close where it should (``--api-key="v, db-password": w``), is masked
+    with that value (#2593-#2595).
     """
     out: list[str] = []
     pos = at = 0
@@ -262,16 +263,17 @@ _NAME_JUDGED_WHOLE_MAX: Final[int] = 128
 #   which the replacement keeps.
 _NAME_RUN: Final[str] = r"[A-Za-z0-9_-]"
 
-# ``NAME`` + separator, up to the value: double-quoted, single-quoted or
-# bare, which a lookahead checks for and :func:`_name_values` reads. The name
-# starts at a word start, so a hyphenated name is matched whole. The
-# separator cannot start with a name character, so the name is the whole
-# run, and _SECRET_NAME is tested once on it by a lookahead (#2501).
+# ``NAME`` + separator, up to the value: double-quoted, single-quoted (closed
+# or not, #2593) or bare, which a lookahead checks for and
+# :func:`_name_values` reads. The name starts at a word start, so a
+# hyphenated name is matched whole. The separator cannot start with a name
+# character, so the name is the whole run, and _SECRET_NAME is tested once
+# on it by a lookahead (#2501).
 _NAME_SEP_RE: Final[re.Pattern[str]] = re.compile(
     rf"(?<!{_NAME_RUN})(?P<name>(?={_NAME_RUN}*?{_SECRET_WORD}"
     rf"|(?:{_NAME_RUN}*[_-])?KEY(?!{_NAME_RUN})){_NAME_RUN}*+)"
     r"(?P<sep>[\"']?\s*[=:]\s*)"
-    r"(?=\"[^\"]*\"|'[^']*'|[^\"'\s,}&])",
+    r"(?=[^\s,}&])",
     re.IGNORECASE,
 )
 # A bare NAME[=:]value value: its characters other than a packed ``;``, and
@@ -391,7 +393,7 @@ def _packed_value_end(line: str, start: int, value: _ValueClass, log: bool) -> i
         return end
 
 
-# ── Swallowed secrets (#2594, #2595) ────────────────────────────────────────
+# ── Swallowed secrets (#2593, #2594, #2595) ─────────────────────────────────
 #
 # A value can take in the start of another secret whose own value lies past
 # the first value's end, so the second value was left visible:
@@ -399,15 +401,19 @@ def _packed_value_end(line: str, start: int, value: _ValueClass, log: bool) -> i
 # * an empty value then whitespace (#2594): in ``KEY=  X_KEY= v`` the value
 #   of ``KEY`` runs to the next whitespace, so it is ``X_KEY=``;
 # * no separator at all (#2595): in ``Bearer a.Authorization: Token b`` the
-#   token runs on over ``Authorization``.
+#   token runs on over ``Authorization``;
+# * a quote that does not close where it should (#2593): in
+#   ``--api-key="v, db-password": w`` the quoted value closes at the quote
+#   after the next name.
 #
 # Cutting the first value before the second secret would not be safe: a name
 # is a run of name characters and the redactor cannot tell where it begins
 # (``KEY= abcX_KEY= v`` may be the value ``abc`` glued to the name
-# ``X_KEY``). So the first mask is extended over the second secret's value
-# instead, and nothing either reading takes for a value is left visible
-# (fail closed). Only a benign NAME[=:]value (``max_tokens``), whose value is
-# not masked, is cut before the secret, which then keeps its name.
+# ``X_KEY``), and a quoted value may really hold ``, db-password``. So the
+# first mask is extended over the second secret's value instead, and nothing
+# either reading takes for a value is left visible (fail closed). Only a
+# benign NAME[=:]value (``max_tokens``), whose value is not masked, is cut
+# before the secret, which then keeps its name.
 #
 # The swallowed value is read as its own rule reads it (:func:`_head`), or to
 # its closing quote, and is extended in turn over a secret it swallows.
@@ -431,6 +437,17 @@ def _swallowed_head(line: str, pos: int, *, log: bool) -> tuple[int, _ValueClass
     if client_id is not None:
         return client_id.end(), _LOG_TOKEN
     return _head(line, pos, log=log)
+
+
+def _quote_close(line: str, start: int) -> tuple[int, bool]:
+    """Where the quoted value that opens at ``line[start]`` ends, and whether
+    it closes there: at its closing quote or, if it has none, at the end of
+    its line. An unclosed quote masks the rest of the line (#2593)."""
+    close = line.find(line[start], start + 1)
+    if close >= 0:
+        return close, True
+    eol = line.find("\n", start)
+    return (len(line) if eol < 0 else eol), False
 
 
 def _value_stop(line: str, start: int, value: _ValueClass, log: bool) -> int:
@@ -471,8 +488,8 @@ def _swallowed(
         value_start, value = head
         if not secret:
             return at.start(), value_start, value
-        quote = line[value_start]
-        if quote in "\"'" and (stop := line.find(quote, value_start + 1)) >= 0:
+        if line[value_start] in "\"'":
+            stop = _quote_close(line, value_start)[0]
             if stop < end:
                 continue
         else:
@@ -518,9 +535,10 @@ def _past_swallowed(
     enclosing: list[tuple[_ValueClass, bool]] = [] if outer is None else [(outer, False)]
     harvest = value is _NAME_VALUE
     while True:
-        quote = line[value_start]
-        if quote in "\"'" and (close := line.find(quote, value_start + 1)) >= 0:
-            end, nested = close + 1, None
+        if line[value_start] in "\"'":
+            close, closed = _quote_close(line, value_start)
+            end = close + closed
+            nested = _swallowed(line, value_start + 1, close, log=log)
         else:
             end = _value_stop(line, value_start, value, log)
             nested = _swallowed(line, value_start, end, log=log)
@@ -693,6 +711,7 @@ class _NameValue(NamedTuple):
     match: re.Match[str]  # the ``_NAME_SEP_RE`` match, up to the value
     secret: bool  # :func:`_is_secret_name` on the whole name
     end: int  # where the value ends
+    closing: str  # the quote that closes a quoted value, if any
     # When a secret's value swallowed another secret, the parts of its mask
     # (:func:`_past_swallowed`). Empty otherwise.
     spans: list[_Span]
@@ -710,11 +729,20 @@ def _name_values(line: str, *, log: bool = False) -> Iterator[_NameValue]:
         start = match.end()
         secret = _is_secret_name(match.group("name"))
         spans: list[_Span] = []
+        closing = ""
         if line[start] in "\"'":
-            end = line.index(line[start], start + 1) + 1
+            close, closed = _quote_close(line, start)
+            end = close + closed
+            if closed:
+                closing = line[start]
+            swallowed = _swallowed(line, start + 1, close, log=log, secret=secret)
+            if swallowed is not None:
+                end = _past_swallowed(
+                    line, start, swallowed, None, log=log, secret=secret, spans=spans
+                )
         else:
             end = _bare_value_end(line, start, _NAME_VALUE, log=log, secret=secret, spans=spans)
-        yield _NameValue(match, secret, end, spans)
+        yield _NameValue(match, secret, end, closing, spans)
         at = end
 
 
@@ -725,12 +753,12 @@ def _mask_name_values(line: str, log: bool) -> str:
     ``api-token-prod`` as ``api_token_prod`` (#2488)."""
     out: list[str] = []
     pos = 0
-    for match, secret, end, _spans in _name_values(line, log=log):
+    for match, secret, end, closing, _spans in _name_values(line, log=log):
         start = match.end()
         if end == start or not secret:
             continue
         quote = line[start] if line[start] in "\"'" else ""
-        out += (line[pos:start], quote, MASK, quote)
+        out += (line[pos:start], quote, MASK, closing)
         pos = end
     out.append(line[pos:])
     return "".join(out)
@@ -961,7 +989,7 @@ def _harvest_secret_literals(text: str) -> list[str]:
     (in log text it names a setting, not a credential). A secret value that
     another one swallowed (#2594) is harvested on its own as well."""
     found: set[str] = set()
-    for match, secret, end, swallowed in _name_values(text):
+    for match, secret, end, _closing, swallowed in _name_values(text):
         if not secret:
             continue
         if swallowed:

@@ -324,11 +324,9 @@ function isSecretName(rawName: string): boolean {
 // (a separator cannot start with a name character, so the Python name always
 // ends at the run's end too) and the separator is tried once after it.
 const NAME_RUN_RE = rx(String.raw`[A-Za-z0-9_-]+`, 'gu')
-// Up to the value, which a lookahead checks for (`_NAME_SEP_RE`).
-const NAME_VALUE_TAIL_RE = rx(
-  String.raw`(["']?\s*[=:]\s*)(?="[^"]*"|'[^']*'|[^"'\s,}&])`,
-  'yu',
-)
+// Up to the value, which a lookahead checks for (`_NAME_SEP_RE`): quoted
+// (closed or not, #2593) or bare.
+const NAME_VALUE_TAIL_RE = rx(String.raw`(["']?\s*[=:]\s*)(?=[^\s,}&])`, 'yu')
 
 function maskNameValues(line: string, log: boolean): string {
   let out = ''
@@ -348,16 +346,24 @@ function maskNameValues(line: string, log: boolean): string {
     if (!tail) continue
     const start = nameEnd + tail[0].length
     const secret = isSecretName(name)
-    // `_name_values`: a quoted value ends at its closing quote, a bare one as
-    // `bareValueEnd` says.
-    const end = isQuote(line[start])
-      ? line.indexOf(line[start], start + 1) + 1
-      : bareValueEnd(line, start, NAME_VALUE, log, secret)
+    // `_name_values`: a quoted value ends at its closing quote or the end of its
+    // line, a bare one as `bareValueEnd` says, either past a secret it swallows.
+    let end: number
+    let closing = ''
+    if (isQuote(line[start])) {
+      const [close, closed] = quoteClose(line, start)
+      end = close + (closed ? 1 : 0)
+      if (closed) closing = line[start]
+      const inner = swallowed(line, start + 1, close, log, secret)
+      if (inner) end = pastSwallowed(line, inner, null, log, secret)
+    } else {
+      end = bareValueEnd(line, start, NAME_VALUE, log, secret)
+    }
     // A match is consumed whole, benign or not.
     NAME_RUN_RE.lastIndex = end
     if (end === start || !secret) continue
     const quote = isQuote(line[start]) ? line[start] : ''
-    out += line.slice(last, start) + `${quote}${MASK}${quote}`
+    out += line.slice(last, start) + `${quote}${MASK}${closing}`
     last = end
   }
   return out + line.slice(last)
@@ -487,13 +493,13 @@ function packedValueEnd(
 // Python's whitespace (`\s`) at the end of a string, for `rstrip`.
 const TRAILING_WS_RE = rx(String.raw`\s+$`, 'u')
 
-// ── Swallowed secrets (#2594, #2595) ─────────────────────────────────────────
+// ── Swallowed secrets (#2593, #2594, #2595) ──────────────────────────────────
 //
 // Port of the "Swallowed secrets" block in `redaction.py`. A value that takes
 // in the start of another secret whose value lies past its end (after an empty
-// value, or glued on) is extended over that secret's value, read as its own
-// rule reads it. Only a benign value, which is not masked, ends before the
-// secret instead.
+// value, glued on, or past a quote that does not close where it should) is
+// extended over that secret's value, read as its own rule reads it. Only a
+// benign value, which is not masked, ends before the secret instead.
 
 // `_SWALLOW_AT_RE`'s keywords, which may start anywhere.
 const SWALLOW_KEYWORD_RE = rx('bearer|authorization|hal0_bearer_token|client_id', 'yiu')
@@ -502,9 +508,14 @@ const CLIENT_ID_HEAD_RE = rx(String.raw`client_id=(?=[A-Za-z0-9_.-]{16})`, 'yiu'
 
 const isQuote = (c: string | undefined): boolean => c === '"' || c === "'"
 
-// Where the quoted value opening at `line[start]` closes, or -1 if it does not.
-const quoteClose = (line: string, start: number): number =>
-  isQuote(line[start]) ? line.indexOf(line[start], start + 1) : -1
+// `_quote_close`: where the quoted value opening at `line[start]` ends, and
+// whether it closes there; an unclosed one runs to the end of its line.
+function quoteClose(line: string, start: number): [number, boolean] {
+  const close = line.indexOf(line[start], start + 1)
+  if (close >= 0) return [close, true]
+  const eol = line.indexOf('\n', start)
+  return [eol < 0 ? line.length : eol, false]
+}
 
 // `_value_stop`: `packedValueEnd`, less trailing whitespace.
 function valueStop(line: string, start: number, value: ValueClass, log: boolean): number {
@@ -546,8 +557,9 @@ function swallowed(
     if (!found) continue
     const [valueStart, value] = found
     if (!secret) return [pos, valueStart, value]
-    let stop = quoteClose(line, valueStart)
-    if (stop >= 0) {
+    let stop: number
+    if (isQuote(line[valueStart])) {
+      stop = quoteClose(line, valueStart)[0]
       if (stop < end) continue
     } else {
       let last = read.get(value)
@@ -584,10 +596,10 @@ function pastSwallowed(
   for (;;) {
     let end: number
     let nested: Swallowed | null
-    const close = quoteClose(line, valueStart)
-    if (close >= 0) {
-      end = close + 1
-      nested = null
+    if (isQuote(line[valueStart])) {
+      const [close, closed] = quoteClose(line, valueStart)
+      end = close + (closed ? 1 : 0)
+      nested = swallowed(line, valueStart + 1, close, log)
     } else {
       end = valueStop(line, valueStart, value, log)
       nested = swallowed(line, valueStart, end, log)

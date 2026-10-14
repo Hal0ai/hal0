@@ -1198,6 +1198,46 @@ class TestGluedSecrets:
         assert "pk_api_Vv90" not in body, body
 
 
+# ── #2593: a quote that does not close where it should ──────────────────────
+
+
+class TestUnclosedQuotes:
+    """#2593, the installer's copy of the fix in hal0.redaction: a quoted value
+    ran to the next quote, which could be a later secret's, and a quote that
+    never closed left the whole value visible."""
+
+    @pytest.mark.parametrize(
+        ("line", "expected"),
+        [
+            ('--api-key="pk_first_1, db-password": pk_second_2', f"--api-key={_MASK} {_MASK}"),
+            ('password="pk_first_1 HF_TOKEN="pk_second_2" more', f'password="{_MASK}'),
+            ('password="pk_first_1 pk_second_2', f'password="{_MASK}'),
+            ('{"token": "pk_first_1', f'{{"token": "{_MASK}'),
+            # Quotes that close where they should are read as before.
+            (
+                '{"password": "pk_first_1", "user": "bob"}',
+                f'{{"password": "{_MASK}", "user": "bob"}}',
+            ),
+            ('X_KEY=a;"HF_TOKEN": "pk second 2"', f'X_KEY={_MASK};"HF_TOKEN": "{_MASK}"'),
+        ],
+    )
+    def test_the_pattern_pass_masks_past_the_quote(self, line: str, expected: str) -> None:
+        assert _mask_patterns(line).strip() == expected
+
+    def test_the_report_carries_no_value_past_a_quote(self, tmp_path: Path) -> None:
+        box = _make_box(tmp_path)
+        box["log"].write_text(
+            '--api-key="pk_api_Zz12, db-password": pk_db_Yy34\n'
+            'password="pk_pw_Xx56 HF_TOKEN="pk_hf_Ww78"\n'
+            '{"token": "pk_cut_Vv90\n'
+        )
+        proc, report = _run_report(box)
+        assert report is not None and report.is_file(), proc.stderr
+        body = report.read_text()
+        for secret in ("pk_api_Zz12", "pk_db_Yy34", "pk_pw_Xx56", "pk_hf_Ww78", "pk_cut_Vv90"):
+            assert secret not in body, body
+
+
 # ── #2402: multi-line TOML arrays under a sensitive key ─────────────────────
 
 _ARR_A = "arrSecretAlpha1Kq2Wz9Xc"  # no known prefix: literal pass only
