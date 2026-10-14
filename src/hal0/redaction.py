@@ -713,9 +713,12 @@ def _bare_value_rule(prefix: str, value: _ValueClass, *, spaces: bool = False) -
 
 
 # Up to a quoted value after an ``Authorization`` scheme (the bare-value rules
-# below need a first character that is no quote).
+# below need a first character that is no quote). The whitespace is horizontal,
+# so a header that ends a line never takes the quoted text on the next one.
+_HSPACE: Final[str] = r"(?:(?!\n)\s)"
 _AUTH_QUOTED_RE: Final[re.Pattern[str]] = re.compile(
-    r"authorization[\"']?\s*:\s*[\"']?" + _AUTH_SCHEMES + r"\s+(?=[\"'])", re.I
+    rf"authorization[\"']?{_HSPACE}*:{_HSPACE}*[\"']?" + _AUTH_SCHEMES + rf"{_HSPACE}+(?=[\"'])",
+    re.I,
 )
 
 # Ordered rules, as in _hal0_report_mask_patterns: these run before the

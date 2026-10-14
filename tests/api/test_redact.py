@@ -1428,6 +1428,11 @@ class TestQuotedAuthorizationValue:
         assert out == expected
         assert redact_shareable_text(out) == expected  # idempotent
 
+    def test_a_header_that_ends_a_line_takes_nothing_from_the_next(self) -> None:
+        line = 'Authorization: Basic\n"hello world" next'
+        assert redact_shareable_text(line) == line
+        assert redact_log_line(line) == line
+
     @pytest.mark.parametrize(
         "line", ['Authorization: Bearer "abc def"', "Authorization: Bearer 'abc def'"]
     )

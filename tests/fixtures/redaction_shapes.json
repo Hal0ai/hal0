@@ -782,6 +782,18 @@
     [
       "X_KEY=abc;Authorization: Bearer \"TOP SECRET\"",
       "X_KEY=***REDACTED***;Authorization: Bearer ***REDACTED***"
+    ],
+    [
+      "Authorization: Basic\n\"hello world\" next",
+      "Authorization: Basic\n\"hello world\" next"
+    ],
+    [
+      "Authorization:\r\nBasic 'hello world' next",
+      "Authorization:\r\nBasic 'hello world' next"
+    ],
+    [
+      "Authorization: Basic\r\n\"hello world\" next",
+      "Authorization: Basic\r\n\"hello world\" next"
     ]
   ],
   "mask_names": [

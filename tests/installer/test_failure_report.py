@@ -1366,6 +1366,15 @@ class TestQuotedAuthorizationValue:
             f'Authorization: Basic "{_MASK}" x',
         ]
 
+    def test_a_header_that_ends_a_line_takes_nothing_from_the_next(self) -> None:
+        text = 'Authorization: Basic\n"hello world" next\nAuthorization:\nBasic "hello" x'
+        assert _mask_patterns(text).splitlines() == [
+            "Authorization: Basic",
+            '"hello world" next',
+            "Authorization:",
+            'Basic "hello" x',
+        ]
+
     def test_the_report_carries_no_quoted_credential(self, tmp_path: Path) -> None:
         box = _make_box(tmp_path)
         box["log"].write_text(

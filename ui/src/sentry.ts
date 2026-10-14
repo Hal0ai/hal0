@@ -716,8 +716,11 @@ const AUTH_RAW_RE = rx(
 )
 
 // `_AUTH_QUOTED_RE`: up to a quoted value after an `Authorization` scheme.
+// The whitespace is horizontal, so a header that ends a line never takes the
+// quoted text on the next one.
+const HSPACE = String.raw`(?:(?!\n)\s)`
 const AUTH_QUOTED_RE = rx(
-  String.raw`authorization["']?\s*:\s*["']?${AUTH_SCHEMES}\s+(?=["'])`,
+  String.raw`authorization["']?${HSPACE}*:${HSPACE}*["']?${AUTH_SCHEMES}${HSPACE}+(?=["'])`,
   'giu',
 )
 
