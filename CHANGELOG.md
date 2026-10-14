@@ -728,6 +728,14 @@ applying. Add those subsections to a version's section to surface them; see
 
 ### Changed
 
+- The pinned OpenWebUI image moves to upstream v0.12.0 (manifest-list digest
+  `sha256:156503890315…`, linux/amd64 and linux/arm64). The pin lives in the
+  same three places as before: `hal0.openwebui.image_pin`, the
+  `hal0-openwebui.service` unit and `installer/install.sh`. The v0.12.0
+  release notes list no breaking changes. The port, data path and every
+  environment variable hal0 writes into `openwebui.env` are unchanged. New
+  upstream options such as `ENABLE_MFA` default to off, so existing boxes
+  behave as before. Run `hal0 update owui` to move a running box.
 - The dashboard follows the profile-centric config (ADR-0029). A profile now
   holds the whole tune: the profile drawer gains context size (128 to
   16,777,216 tokens), thinking (Auto, On, Off), vision (Auto, Off) and MTP
