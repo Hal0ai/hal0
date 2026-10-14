@@ -222,6 +222,46 @@
     [
       "password\u0085=Sws_85_1234xyz",
       "Sws_85_1234xyz"
+    ],
+    [
+      "X_KEY=abc;Bearer pk2_bearer_tok",
+      "pk2_bearer_tok"
+    ],
+    [
+      "HAL0_BEARER_TOKEN=x,HF_TOKEN= pk2_hf_value",
+      "pk2_hf_value"
+    ],
+    [
+      "token=pk2_first_value;password=pk2_second_value",
+      "pk2_first_value"
+    ],
+    [
+      "token=pk2_first_value;password=pk2_second_value",
+      "pk2_second_value"
+    ],
+    [
+      "max_tokens=5;HF_TOKEN= pk2_after_benign",
+      "pk2_after_benign"
+    ],
+    [
+      "Authorization: Basic pk2_basic;HF_TOKEN= pk2_after_basic",
+      "pk2_after_basic"
+    ],
+    [
+      "--token=pk2_flag;--password pk2_after_flag",
+      "pk2_after_flag"
+    ],
+    [
+      "X_KEY=pk2_first;\"HF_TOKEN\": \"pk2 quoted value\"",
+      "pk2 quoted value"
+    ],
+    [
+      "X_KEY=pk2_first;Authorization: Bearer \"pk2_quoted_bearer",
+      "pk2_quoted_bearer"
+    ],
+    [
+      "Authorization: pk2_rawcred1 HF_TOKEN\"=pk2_after_raw",
+      "pk2_after_raw"
     ]
   ],
   "keep": [
@@ -312,6 +352,46 @@
     [
       "foo=token=Zq8vR2mW9xK4tL7pQ3",
       "foo=token=***REDACTED***"
+    ],
+    [
+      "X_KEY=abc;Bearer tok",
+      "X_KEY=***REDACTED***;Bearer ***REDACTED***"
+    ],
+    [
+      "HAL0_BEARER_TOKEN=x,HF_TOKEN= hf_v",
+      "HAL0_BEARER_TOKEN=***REDACTED***,HF_TOKEN= ***REDACTED***"
+    ],
+    [
+      "token=a;password=b",
+      "token=***REDACTED***;password=***REDACTED***"
+    ],
+    [
+      "api_key=x,secret=y",
+      "api_key=***REDACTED***,secret=***REDACTED***"
+    ],
+    [
+      "max_tokens=5;HF_TOKEN= hf_v",
+      "max_tokens=5;HF_TOKEN= ***REDACTED***"
+    ],
+    [
+      "X_KEY=abc;max_tokens=def",
+      "X_KEY=***REDACTED***"
+    ],
+    [
+      "X_KEY=;HF_TOKEN= hf_v",
+      "X_KEY=;HF_TOKEN= ***REDACTED***"
+    ],
+    [
+      "Authorization: Basic abc,HF_TOKEN= hf_v",
+      "Authorization: Basic ***REDACTED***,HF_TOKEN= ***REDACTED***"
+    ],
+    [
+      "--token=a;--password b",
+      "--token=***REDACTED***;--password ***REDACTED***"
+    ],
+    [
+      "Authorization: rawcred12 HF_TOKEN\"=v",
+      "Authorization: ***REDACTED*** HF_TOKEN\"=***REDACTED***"
     ]
   ],
   "mask_names": [

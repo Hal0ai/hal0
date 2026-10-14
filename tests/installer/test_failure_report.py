@@ -1049,6 +1049,59 @@ class TestSchemelessAuthorization:
         assert "rawauth_Pl34Ok56Ij78" not in report.read_text()
 
 
+# ── #2529: a second secret packed after ``;`` or ``,`` ──────────────────────
+
+_PACKED_LINES = [
+    ("X_KEY=abc;Bearer pk_second_2", "X_KEY=***REDACTED***;Bearer ***REDACTED***"),
+    (
+        "HAL0_BEARER_TOKEN=x,HF_TOKEN= pk_second_2",
+        "HAL0_BEARER_TOKEN=***REDACTED***,HF_TOKEN= ***REDACTED***",
+    ),
+    ("token=pk_first_1;HF_TOKEN= pk_second_2", "token=***REDACTED***;HF_TOKEN= ***REDACTED***"),
+    ("X_KEY=pk_first_1;password: pk_second_2", "X_KEY=***REDACTED***;password: ***REDACTED***"),
+    (
+        "Authorization: Basic pk_first_1;HF_TOKEN= pk_second_2",
+        "Authorization: Basic ***REDACTED***;HF_TOKEN= ***REDACTED***",
+    ),
+    (
+        "--token=pk_first_1;--password pk_second_2",
+        "--token=***REDACTED***;--password ***REDACTED***",
+    ),
+    (
+        'X_KEY=pk_first_1;"HF_TOKEN": "pk second 2"',
+        'X_KEY=***REDACTED***;"HF_TOKEN": "***REDACTED***"',
+    ),
+    # Nothing secret starts after the ``;``: it stays in the masked value.
+    ("X_KEY=pk;first;1", "X_KEY=***REDACTED***"),
+]
+
+
+class TestPackedSecrets:
+    """#2529, the installer's copy of the fix in hal0.redaction: a value ends
+    before a ``;`` or ``,`` that starts another secret, so the second one
+    keeps its name and its value is masked."""
+
+    @pytest.mark.parametrize(("line", "expected"), _PACKED_LINES)
+    def test_the_pattern_pass_masks_each_packed_secret(self, line: str, expected: str) -> None:
+        assert _mask_patterns(line).strip() == expected
+
+    def test_a_stray_marker_byte_is_dropped(self) -> None:
+        assert _mask_patterns("a\x01b X_KEY=c\x01;d").strip() == "ab X_KEY=***REDACTED***"
+
+    def test_the_report_carries_no_packed_secret(self, tmp_path: Path) -> None:
+        box = _make_box(tmp_path)
+        box["log"].write_text(
+            "X_KEY=abcdefgh12;Bearer pk_bearer_Zz12\n"
+            "HAL0_BEARER_TOKEN=x,HF_TOKEN= pk_hf_Yy34\n"
+            "max_tokens=5;HF_TOKEN= pk_hf_Xx56\n"
+        )
+        proc, report = _run_report(box)
+        assert report is not None and report.is_file(), proc.stderr
+        body = report.read_text()
+        for secret in ("abcdefgh12", "pk_bearer_Zz12", "pk_hf_Yy34", "pk_hf_Xx56"):
+            assert secret not in body, body
+
+
 # ── #2402: multi-line TOML arrays under a sensitive key ─────────────────────
 
 _ARR_A = "arrSecretAlpha1Kq2Wz9Xc"  # no known prefix: literal pass only

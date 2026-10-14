@@ -30,14 +30,15 @@ everything here so existing importers keep working unchanged.
 from __future__ import annotations
 
 import re
+from collections.abc import Callable, Iterator
 from typing import Any, Final
 
 # Plain sentinel for masked values. Exposed so a caller can grep logs /
 # fixtures for the exact token.
 MASK: Final[str] = "***REDACTED***"
 
-# Compiled once at import time. Each alternative ends with a
-# ``(?P<...>...)`` capture of just the secret token; ``redact_log_line``
+# Compiled once at import time. Each alternative ends where the secret
+# token starts, or with a ``(?P<...>...)`` capture of it; ``redact_log_line``
 # rewrites that token to :data:`MASK` while leaving the surrounding
 # ``Authorization:``, ``Bearer``, ``HAL0_BEARER_TOKEN=``, ``client_id=``,
 # or ``<NAME>_KEY=``/``KEY=`` prefix in place so an operator reading a
@@ -54,12 +55,31 @@ MASK: Final[str] = "***REDACTED***"
 # are caught if one is ever stamped into a log line verbatim, not just
 # in structured config — same conservative "over-redact" posture as
 # is_sensitive_key.
+#
+# The ``Authorization: Bearer``, ``HAL0_BEARER_TOKEN=`` and ``*_KEY=``
+# alternatives match up to their value only (a lookahead checks there is
+# one): the value runs to the next whitespace except where a second secret
+# is packed after a ``;`` or ``,``, which :func:`_bare_value_end` decides
+# (#2529).
 LOG_SECRET_RE: Final[re.Pattern[str]] = re.compile(
-    r"(?P<prefix_auth>Authorization:\s*Bearer\s+)(?P<auth_token>\S+)"
-    r"|(?P<prefix_env>HAL0_BEARER_TOKEN=)(?P<env_token>\S+)"
+    r"(?P<prefix_auth>Authorization:\s*Bearer\s+)(?=\S)"
+    r"|(?P<prefix_env>HAL0_BEARER_TOKEN=)(?=\S)"
     r"|(?P<prefix_bearer>Bearer\s+)(?P<bearer_token>[A-Za-z0-9_\-\.]+)"
     r"|(?P<prefix_client_id>client_id=)(?P<client_id_token>[A-Za-z0-9_\-\.]{16,})"
-    r"|(?P<prefix_key>\b(?:[A-Za-z][A-Za-z0-9_]*_KEY|KEY)=)(?P<key_token>\S+)",
+    r"|(?P<prefix_key>\b(?:[A-Za-z][A-Za-z0-9_]*_KEY|KEY)=)(?=\S)",
+    re.IGNORECASE,
+)
+# A LOG_SECRET_RE bare value: its characters other than a packed separator,
+# and the separators (see _ValueClass).
+_LOG_VALUE: Final[tuple[re.Pattern[str], re.Pattern[str]]] = (
+    re.compile(r"[^\s;,]*"),
+    re.compile(r"[;,]"),
+)
+# Where a LOG_SECRET_RE secret with a value that may follow whitespace starts
+# (Bearer tokens and long client_ids hold neither whitespace nor ``;``/``,``,
+# so a value that swallows one still masks it).
+_LOG_HEAD_RE: Final[re.Pattern[str]] = re.compile(
+    r"Authorization:\s*Bearer\s+\S|HAL0_BEARER_TOKEN=\S|\b(?:[A-Za-z][A-Za-z0-9_]*_KEY|KEY)=\S",
     re.IGNORECASE,
 )
 
@@ -81,16 +101,26 @@ def redact_log_line(line: str) -> str:
     matches, so re-running over already-redacted text is a no-op. That
     matters because the same string can cross more than one seam
     (emit-time redaction, then again at the durable write).
+
+    A second secret packed after a ``;`` or ``,`` (``X_KEY=a;Bearer b``)
+    is masked on its own and keeps its name (#2529).
     """
-
-    def _sub(match: re.Match[str]) -> str:
-        groups = match.groupdict()
-        for prefix_group in ("prefix_auth", "prefix_env", "prefix_client_id", "prefix_key"):
-            if groups[prefix_group] is not None:
-                return f"{groups[prefix_group]}{MASK}"
-        return f"{groups['prefix_bearer']}{MASK}"
-
-    return redact_secret_shapes(LOG_SECRET_RE.sub(_sub, line))
+    out: list[str] = []
+    pos = at = 0
+    while (match := LOG_SECRET_RE.search(line, at)) is not None:
+        token = match.lastgroup
+        if token in ("bearer_token", "client_id_token"):
+            # These tokens hold no ``;`` or ``,``: the match ends with them.
+            start, end = match.span(token)
+        else:
+            start = match.end()
+            end = _bare_value_end(line, start, _LOG_VALUE, log=True)
+        if end > start:
+            out += (line[pos:start], MASK)
+            pos = end
+        at = end
+    out.append(line[pos:])
+    return _redact_shapes("".join(out), log=True)
 
 
 def redact_text_tree(value: Any) -> Any:
@@ -221,16 +251,23 @@ _NAME_JUDGED_WHOLE_MAX: Final[int] = 128
 #   which the replacement keeps.
 _NAME_RUN: Final[str] = r"[A-Za-z0-9_-]"
 
-# ``NAME`` + separator, then the value: double-quoted, single-quoted or bare.
-# The name starts at a word start, so a hyphenated name is matched whole.
-# The separator cannot start with a name character, so the name is the whole
+# ``NAME`` + separator, up to the value: double-quoted, single-quoted or
+# bare, which a lookahead checks for and :func:`_name_values` reads. The name
+# starts at a word start, so a hyphenated name is matched whole. The
+# separator cannot start with a name character, so the name is the whole
 # run, and _SECRET_NAME is tested once on it by a lookahead (#2501).
-_NAME_VALUE_SHAPE_RE: Final[re.Pattern[str]] = re.compile(
+_NAME_SEP_RE: Final[re.Pattern[str]] = re.compile(
     rf"(?<!{_NAME_RUN})(?P<name>(?={_NAME_RUN}*?{_SECRET_WORD}"
     rf"|(?:{_NAME_RUN}*[_-])?KEY(?!{_NAME_RUN})){_NAME_RUN}*+)"
     r"(?P<sep>[\"']?\s*[=:]\s*)"
-    r"(?P<value>\"[^\"]*\"|'[^']*'|[^\"'\s,}&]+)",
+    r"(?=\"[^\"]*\"|'[^']*'|[^\"'\s,}&])",
     re.IGNORECASE,
+)
+# A bare NAME[=:]value value: its characters other than a packed ``;``, and
+# that separator (see _ValueClass).
+_NAME_VALUE: Final[tuple[re.Pattern[str], re.Pattern[str]]] = (
+    re.compile(r"[^\"'\s,}&;]*"),
+    re.compile(";"),
 )
 
 # HTTP auth schemes whose name is kept when an ``Authorization`` value is
@@ -244,60 +281,158 @@ _AUTH_SCHEMES: Final[str] = (
 # ``://``; the run's leading non-letters are kept in the group (#2501).
 _URL_SCHEME: Final[str] = r"((?<![a-z0-9+.-])[0-9+.-]*+[a-z][a-z0-9+.-]*+://"
 
-# Ordered (pattern, replacement) pairs, as in _hal0_report_mask_patterns:
-# these run before the NAME[=:]value pass, _SHAPE_RULES_AFTER after it.
-_SHAPE_RULES: Final[tuple[tuple[re.Pattern[str], str], ...]] = (
-    (re.compile(r"(authorization:\s*(?:basic|token)\s+)[^\s'\"]+", re.I), rf"\g<1>{MASK}"),
-    (re.compile(r"(bearer\s+)[A-Za-z0-9._~+/=-]+", re.I), rf"\g<1>{MASK}"),
+# ``--token=`` / ``--api-key ``: up to a ``--flag`` value. The flag is the
+# run's first ``--``, and the match starts at the run's start (#2501).
+_FLAG_PREFIX: Final[str] = (
+    r"(?<![A-Za-z0-9-])(?:[A-Za-z0-9]|-(?!-))*+"
+    r"--(?=[A-Za-z0-9-]*?(?:secret|token|password|pass|api-key|apikey|private-key))"
+    r"[A-Za-z0-9-]*+(?:=|\s++)"
+)
+
+# ── Packed secrets (#2529) ──────────────────────────────────────────────────
+#
+# A bare value runs to the next whitespace, so in ``X_KEY=abc;Bearer tok`` or
+# ``A_TOKEN=x,HF_TOKEN= y`` the first value used to swallow the second
+# secret's name, and the second value, after a space, was left visible. A
+# bare value now ends before a ``;`` or ``,`` that starts another secret: one
+# of the rules here whose value may come after whitespace (``Bearer``,
+# ``Authorization``, a ``--flag``, a secret ``NAME[=:]``), maybe behind
+# opening quotes or brackets. That secret is masked by its own rule, keeping
+# its name. A separator followed by anything else stays in the value and is
+# masked with it: a cut only ever leaves a secret's NAME outside a mask, and
+# only where that secret's value is masked in turn (fail closed).
+#
+# A value class is a pair of patterns: ``chunk`` matches a run of the value's
+# characters that never end it, ``sep`` one character that ends it only
+# where a packed secret starts right after it.
+_ValueClass = tuple[re.Pattern[str], re.Pattern[str]]
+_PACKED_OPENERS_RE: Final[re.Pattern[str]] = re.compile(r"[\"'(\[{<]*")
+_PACKED_HEAD_RE: Final[re.Pattern[str]] = re.compile(
+    r"bearer\s+(?:[A-Za-z0-9._~+/=-]|" + re.escape(MASK) + r")"
+    r"|authorization[\"']?\s*:\s*[\"']?(?:"
+    + _AUTH_SCHEMES
+    + r"\s+[^\s\"',]|(?!"
+    + _AUTH_SCHEMES
+    + r"(?:\s|$))[^\s\"',]{8})"
+    r"|" + _FLAG_PREFIX + r"[^-\s]",
+    re.I,
+)
+
+
+def _value_class(chunk: str, sep: str = "[;,]") -> _ValueClass:
+    return re.compile(chunk), re.compile(sep)
+
+
+def _starts_secret(line: str, pos: int, *, log: bool = False) -> bool:
+    """True if a secret that the shape rules mask (or have masked) starts at
+    ``line[pos]``, after any opening quotes or brackets (#2529). With
+    ``log``, also one that LOG_SECRET_RE masks: only its own pass may cut
+    there, as the shape pass after it would not mask all of them."""
+    pos = _PACKED_OPENERS_RE.match(line, pos).end()  # type: ignore[union-attr]
+    if _PACKED_HEAD_RE.match(line, pos) or (log and _LOG_HEAD_RE.match(line, pos)):
+        return True
+    named = _NAME_SEP_RE.match(line, pos)
+    return named is not None and _is_secret_name(named.group("name"))
+
+
+def _bare_value_end(line: str, start: int, value: _ValueClass, *, log: bool = False) -> int:
+    """Where the bare value of class ``value`` starting at ``line[start]``
+    ends (#2529): at the first character that is neither in a chunk nor a
+    separator with no secret starting after it (:func:`_starts_secret`).
+    Every step moves forward and tests one separator, so this is linear in
+    the value (#2501)."""
+    chunk, sep = value
+    end = start
+    while True:
+        end = chunk.match(line, end).end()  # type: ignore[union-attr]
+        if sep.match(line, end) and not _starts_secret(line, end + 1, log=log):
+            end += 1
+            continue
+        return end
+
+
+def _mask_bare_values(
+    pattern: re.Pattern[str], value: _ValueClass, spaces: bool, line: str, log: bool
+) -> str:
+    """``pattern`` matches up to a bare value; mask each such value, as
+    :func:`_bare_value_end` bounds it, and keep the match. With ``spaces``
+    the value may hold whitespace, but does not end with any."""
+    out: list[str] = []
+    pos = at = 0
+    while (match := pattern.search(line, at)) is not None:
+        start = match.end()
+        end = at = _bare_value_end(line, start, value, log=log)
+        if spaces:
+            end = start + len(line[start:end].rstrip())
+        if end > start:
+            out += (line[pos:start], MASK)
+            pos = end
+    out.append(line[pos:])
+    return "".join(out)
+
+
+# A shape rule: ``rule(line, log)``, ``log`` as in :func:`_starts_secret`.
+_Rule = Callable[[str, bool], str]
+
+
+def _sub_rule(pattern: re.Pattern[str], repl: str) -> _Rule:
+    return lambda line, log: pattern.sub(repl, line)
+
+
+def _bare_value_rule(prefix: str, value: _ValueClass, *, spaces: bool = False) -> _Rule:
+    """A rule that masks the value after ``prefix`` (a regex ending in a
+    lookahead for the value's first character), up to a packed secret."""
+    pattern = re.compile(prefix, re.I)
+    return lambda line, log: _mask_bare_values(pattern, value, spaces, line, log)
+
+
+# Ordered rules, as in _hal0_report_mask_patterns: these run before the
+# NAME[=:]value pass, _SHAPE_RULES_AFTER after it.
+_SHAPE_RULES: Final[tuple[_Rule, ...]] = (
+    _bare_value_rule(
+        r"authorization:\s*(?:basic|token)\s+(?=[^\s'\"])", _value_class(r"[^\s'\";,]*")
+    ),
+    _sub_rule(re.compile(r"(bearer\s+)[A-Za-z0-9._~+/=-]+", re.I), rf"\g<1>{MASK}"),
     # Any other ``Authorization`` value (#2410). A known scheme is kept and
     # the credential after it masked. Anything else of 8+ characters is
     # treated as a raw credential and masked to the end of the header value,
     # so a raw key followed by more words is never taken for a scheme; a
     # short word such as ``denied`` is left alone. Already-masked values
-    # re-mask to the same text.
-    (
-        re.compile(
-            r"(authorization[\"']?\s*:\s*[\"']?" + _AUTH_SCHEMES + r"\s+)[^\s\"',]+",
-            re.I,
-        ),
-        rf"\g<1>{MASK}",
+    # re-mask to the same text. A raw value also ends before whitespace that
+    # starts a secret (#2529): it holds spaces, so ``rawkey HF_TOKEN"=v``
+    # would otherwise lose the second secret's name.
+    _bare_value_rule(
+        r"authorization[\"']?\s*:\s*[\"']?" + _AUTH_SCHEMES + r"\s+(?=[^\s\"',])",
+        _value_class(r"[^\s\"',;]*", ";"),
     ),
-    (
-        re.compile(
-            r"(authorization[\"']?\s*:\s*[\"']?)"
-            r"(?!" + _AUTH_SCHEMES + r"(?:\s|$))(?=[^\s\"',]{8,})[^\"',\n]*[^\s\"',]",
-            re.I,
-        ),
-        rf"\g<1>{MASK}",
+    _bare_value_rule(
+        r"authorization[\"']?\s*:\s*[\"']?"
+        r"(?!" + _AUTH_SCHEMES + r"(?:\s|$))(?=[^\s\"',]{8,})",
+        _value_class(r"[^\s\"',;]*", r"[^\S\n]|;"),
+        spaces=True,
     ),
     # URL userinfo. The scheme starts at the first letter of its run.
-    (re.compile(_URL_SCHEME + r"[^/@\s:]*+):[^/@\s]++@", re.I), rf"\g<1>:{MASK}@"),
-    (re.compile(_URL_SCHEME + r")[^/@\s:]{16,}+@", re.I), rf"\g<1>{MASK}@"),
+    _sub_rule(re.compile(_URL_SCHEME + r"[^/@\s:]*+):[^/@\s]++@", re.I), rf"\g<1>:{MASK}@"),
+    _sub_rule(re.compile(_URL_SCHEME + r")[^/@\s:]{16,}+@", re.I), rf"\g<1>{MASK}@"),
 )
-_SHAPE_RULES_AFTER: Final[tuple[tuple[re.Pattern[str], str], ...]] = (
-    # ``--token=value`` / ``--api-key value``. The flag is the run's first
-    # ``--``: group 1 starts at the run's start and keeps what comes before.
-    (
-        re.compile(
-            r"((?<![A-Za-z0-9-])(?:[A-Za-z0-9]|-(?!-))*+"
-            r"--(?=[A-Za-z0-9-]*?(?:secret|token|password|pass|api-key|apikey|private-key))"
-            r"[A-Za-z0-9-]*+(?:=|\s++))[^-\s]\S*",
-            re.I,
-        ),
-        rf"\g<1>{MASK}",
-    ),
-    (re.compile(r"(client_id=)[A-Za-z0-9_.-]{16,}", re.I), rf"\g<1>{MASK}"),
+_SHAPE_RULES_AFTER: Final[tuple[_Rule, ...]] = (
+    # ``--token=value`` / ``--api-key value``; what comes before the flag in
+    # its run is kept.
+    _bare_value_rule(_FLAG_PREFIX + r"(?=[^-\s])", _value_class(r"[^\s;,]*")),
+    _sub_rule(re.compile(r"(client_id=)[A-Za-z0-9_.-]{16,}", re.I), rf"\g<1>{MASK}"),
     # A JWT starts at the first ``eyJ`` of its run; group 1 keeps what
     # comes before it.
-    (
+    _sub_rule(
         re.compile(
             r"((?<![A-Za-z0-9_-])(?:(?!eyJ)[A-Za-z0-9_-])*+)"
             r"eyJ[A-Za-z0-9_-]{10,}+\.[A-Za-z0-9_-]{10,}+\.[A-Za-z0-9_-]{10,}"
         ),
         rf"\g<1>{MASK}",
     ),
-    (re.compile(r"(?:hf_|sk-|gh[pousr]_|github_pat_|xox[baprs]-)[A-Za-z0-9_-]{20,}"), MASK),
-    (re.compile(r"AKIA[0-9A-Z]{16}"), MASK),
+    _sub_rule(
+        re.compile(r"(?:hf_|sk-|gh[pousr]_|github_pat_|xox[baprs]-)[A-Za-z0-9_-]{20,}"), MASK
+    ),
+    _sub_rule(re.compile(r"AKIA[0-9A-Z]{16}"), MASK),
 )
 
 
@@ -317,19 +452,38 @@ def _is_secret_name(name: str) -> bool:
     return bool(_SECRET_NAME_RE.fullmatch(name))
 
 
-def _matched_name_is_secret(match: re.Match[str]) -> bool:
-    """:func:`_is_secret_name` on a ``_NAME_VALUE_SHAPE_RE`` match's whole
+def _name_values(line: str, *, log: bool = False) -> Iterator[tuple[re.Match[str], int]]:
+    """Each ``NAME[=:]value`` in ``line`` (a ``_NAME_SEP_RE`` match) with the
+    index its value ends at. A quoted value ends at its closing quote; a bare
+    one at whitespace, ``,``, ``}``, ``&``, a quote, or a ``;`` that starts
+    another secret (#2529). A match is consumed whole, benign name or not."""
+    at = 0
+    while (match := _NAME_SEP_RE.search(line, at)) is not None:
+        start = match.end()
+        if line[start] in "\"'":
+            end = line.index(line[start], start + 1) + 1
+        else:
+            end = _bare_value_end(line, start, _NAME_VALUE, log=log)
+        yield match, end
+        at = end
+
+
+def _mask_name_values(line: str, log: bool) -> str:
+    """Mask the value of every secret-named ``NAME[=:]value`` in ``line``,
+    keeping a quoted value's quotes. :func:`_is_secret_name` judges the whole
     name, so ``max-tokens`` is judged as ``max_tokens`` (#2466) and
     ``api-token-prod`` as ``api_token_prod`` (#2488)."""
-    return _is_secret_name(match.group("name"))
-
-
-def _mask_name_value(match: re.Match[str]) -> str:
-    if not _matched_name_is_secret(match):
-        return match.group(0)
-    value = match.group("value")
-    quote = value[0] if value[0] in "\"'" else ""
-    return f"{match.group('name')}{match.group('sep')}{quote}{MASK}{quote}"
+    out: list[str] = []
+    pos = 0
+    for match, end in _name_values(line, log=log):
+        start = match.end()
+        if end == start or not _is_secret_name(match.group("name")):
+            continue
+        quote = line[start] if line[start] in "\"'" else ""
+        out += (line[pos:start], quote, MASK, quote)
+        pos = end
+    out.append(line[pos:])
+    return "".join(out)
 
 
 def redact_secret_named_values(value: Any) -> Any:
@@ -525,11 +679,17 @@ def redact_secret_shapes(line: str) -> str:
     (#2413): the cases in ``tests/fixtures/redaction_shapes.json`` are checked
     against both, so a rule changed here needs the port and the fixture
     updated in the same commit."""
-    for pattern, repl in _SHAPE_RULES:
-        line = pattern.sub(repl, line)
-    line = _NAME_VALUE_SHAPE_RE.sub(_mask_name_value, line)
-    for pattern, repl in _SHAPE_RULES_AFTER:
-        line = pattern.sub(repl, line)
+    return _redact_shapes(line, log=False)
+
+
+def _redact_shapes(line: str, *, log: bool) -> str:
+    """:func:`redact_secret_shapes`; ``log`` when LOG_SECRET_RE has already
+    run on ``line``, so a value may also end before one of its secrets."""
+    for rule in _SHAPE_RULES:
+        line = rule(line, log)
+    line = _mask_name_values(line, log)
+    for rule in _SHAPE_RULES_AFTER:
+        line = rule(line, log)
     return line
 
 
@@ -544,11 +704,11 @@ def _harvest_secret_literals(text: str) -> list[str]:
     numeric, not an env-var name, and not under the bare field name ``key``
     (in log text it names a setting, not a credential)."""
     found: set[str] = set()
-    for match in _NAME_VALUE_SHAPE_RE.finditer(text):
-        name = match.group("name").lstrip("-")
-        if name.lower() == "key" or not _matched_name_is_secret(match):
+    for match, end in _name_values(text):
+        name = match.group("name")
+        if name.lstrip("-").lower() == "key" or not _is_secret_name(name):
             continue
-        value = match.group("value").strip("\"'").strip()
+        value = text[match.end() : end].strip("\"'").strip()
         if (
             len(value) < 8
             or value.isdigit()

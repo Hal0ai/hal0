@@ -145,36 +145,45 @@ function rx(src: string, flags: string, fold = true): RegExp {
   return new RegExp(out, flags)
 }
 
+// The `Authorization: Bearer`, `HAL0_BEARER_TOKEN=` and `*_KEY=` alternatives
+// end where their value starts: it runs to the next whitespace except where a
+// second secret is packed after a `;` or `,` (`bareValueEnd`, #2529).
 const SECRET_RE = rx(
-  String.raw`(Authorization:\s*Bearer\s+)(\S+)|(HAL0_BEARER_TOKEN=)(\S+)|(Bearer\s+)([A-Za-z0-9_\-.]+)|(client_id=)([A-Za-z0-9_\-.]{16,})|(\b(?:[A-Za-z][A-Za-z0-9_]*_KEY|KEY)=)(\S+)`,
+  String.raw`(Authorization:\s*Bearer\s+)(?=\S)|(HAL0_BEARER_TOKEN=)(?=\S)|(Bearer\s+)([A-Za-z0-9_\-.]+)|(client_id=)([A-Za-z0-9_\-.]{16,})|(\b(?:[A-Za-z][A-Za-z0-9_]*_KEY|KEY)=)(?=\S)`,
   'giu',
 )
 
 // A Unicode word character, as Python's `\w`: a letter, a number or `_`.
 const WORD_CHAR_END_RE = /[\p{L}\p{N}_]$/u
 
-// `LOG_SECRET_RE.sub`. The `\b` in the pattern is ASCII-only, so a `_KEY=`
-// match that follows a non-ASCII letter (`Éfoo_KEY=`) is one Python's `\b`
-// does not allow: skip it and carry on one character later, as Python would.
+// `LOG_SECRET_RE` in `redact_log_line`. The `\b` in the pattern is ASCII-only,
+// so a `_KEY=` match that follows a non-ASCII letter (`Éfoo_KEY=`) is one
+// Python's `\b` does not allow: skip it and carry on one character later, as
+// Python would.
 function maskLogSecrets(value: string): string {
   let out = ''
   let last = 0
   SECRET_RE.lastIndex = 0
   for (let m = SECRET_RE.exec(value); m; m = SECRET_RE.exec(value)) {
-    if (m[9] !== undefined && WORD_CHAR_END_RE.test(value.slice(Math.max(0, m.index - 2), m.index))) {
+    if (m[7] !== undefined && WORD_CHAR_END_RE.test(value.slice(Math.max(0, m.index - 2), m.index))) {
       SECRET_RE.lastIndex = m.index + 1
       continue
     }
-    // Alternatives are (prefix, token) pairs; the first defined prefix wins.
-    let prefix = ''
-    for (let i = 1; i < 10; i += 2) {
-      if (m[i] !== undefined) {
-        prefix = m[i]
-        break
-      }
+    let start: number
+    let end: number
+    if (m[4] !== undefined || m[6] !== undefined) {
+      // A Bearer token or a client_id holds no `;` or `,`: the match ends with it.
+      start = m.index + (m[3] ?? m[5]).length
+      end = m.index + m[0].length
+    } else {
+      start = m.index + m[0].length
+      end = bareValueEnd(value, start, LOG_VALUE, true)
     }
-    out += value.slice(last, m.index) + prefix + MASK
-    last = m.index + m[0].length
+    if (end > start) {
+      out += value.slice(last, start) + MASK
+      last = end
+    }
+    SECRET_RE.lastIndex = end
   }
   return out + value.slice(last)
 }
@@ -314,12 +323,21 @@ function isSecretName(rawName: string): boolean {
 // (a separator cannot start with a name character, so the Python name always
 // ends at the run's end too) and the separator is tried once after it.
 const NAME_RUN_RE = rx(String.raw`[A-Za-z0-9_-]+`, 'gu')
+// Up to the value, which a lookahead checks for (`_NAME_SEP_RE`).
 const NAME_VALUE_TAIL_RE = rx(
-  String.raw`(["']?\s*[=:]\s*)("[^"]*"|'[^']*'|[^"'\s,}&]+)`,
+  String.raw`(["']?\s*[=:]\s*)(?="[^"]*"|'[^']*'|[^"'\s,}&])`,
   'yu',
 )
 
-function maskNameValues(line: string): string {
+// Where the value starting at `line[start]` ends (`_name_values`): a quoted one
+// at its closing quote, a bare one as `bareValueEnd` says.
+function nameValueEnd(line: string, start: number, log: boolean): number {
+  const c = line[start]
+  if (c === '"' || c === "'") return line.indexOf(c, start + 1) + 1
+  return bareValueEnd(line, start, NAME_VALUE, log)
+}
+
+function maskNameValues(line: string, log: boolean): string {
   let out = ''
   let last = 0
   NAME_RUN_RE.lastIndex = 0
@@ -332,13 +350,14 @@ function maskNameValues(line: string): string {
     NAME_VALUE_TAIL_RE.lastIndex = nameEnd
     const tail = NAME_VALUE_TAIL_RE.exec(line)
     if (!tail) continue
+    const start = nameEnd + tail[0].length
+    const end = nameValueEnd(line, start, log)
     // A match is consumed whole, benign or not.
-    NAME_RUN_RE.lastIndex = nameEnd + tail[0].length
-    if (!isSecretName(name)) continue
-    const value = tail[2]
-    const quote = value[0] === '"' || value[0] === "'" ? value[0] : ''
-    out += line.slice(last, run.index) + `${name}${tail[1]}${quote}${MASK}${quote}`
-    last = NAME_RUN_RE.lastIndex
+    NAME_RUN_RE.lastIndex = end
+    if (end === start || !isSecretName(name)) continue
+    const quote = line[start] === '"' || line[start] === "'" ? line[start] : ''
+    out += line.slice(last, start) + `${quote}${MASK}${quote}`
+    last = end
   }
   return out + line.slice(last)
 }
@@ -348,18 +367,127 @@ function maskNameValues(line: string): string {
 const AUTH_SCHEMES =
   '(?:basic|bearer|token|apikey|api-key|key|bot|ssws|negotiate|digest|ntlm|oauth|hawk|dpop|aws4-hmac-sha256)'
 
-// The first four `_SHAPE_RULES`; each keeps group 1 and masks the rest.
-const AUTH_RULES: RegExp[] = [
-  rx(String.raw`(authorization:\s*(?:basic|token)\s+)[^\s'"]+`, 'giu'),
-  rx(String.raw`(bearer\s+)[A-Za-z0-9._~+/=-]+`, 'giu'),
-  rx(String.raw`(authorization["']?\s*:\s*["']?${AUTH_SCHEMES}\s+)[^\s"',]+`, 'giu'),
-  // Any other `Authorization` value of 8+ characters is a raw credential.
-  rx(
-    String.raw`(authorization["']?\s*:\s*["']?)(?!${AUTH_SCHEMES}(?:\s|$))` +
-      String.raw`(?=[^\s"',]{8,})[^"',\n]*[^\s"',]`,
-    'giu',
-  ),
-]
+// ── Packed secrets (#2529) ───────────────────────────────────────────────────
+//
+// Port of the "Packed secrets" block in `redaction.py`. A bare value used to
+// run to the next whitespace, so `X_KEY=abc;Bearer tok` lost the second
+// secret's name to the first mask and left `tok` visible. A bare value now ends
+// before a `;` or `,` that starts another secret (`startsSecret`); a separator
+// followed by anything else stays in the value and is masked with it.
+//
+// A value class is `[chunk, sep]`: `chunk` matches a run of the value's
+// characters that never end it, `sep` one character that ends it only where a
+// packed secret starts right after it. Both are sticky.
+type ValueClass = [RegExp, RegExp]
+const valueClass = (chunk: string, sep = '[;,]'): ValueClass => [rx(chunk, 'yu'), rx(sep, 'yu')]
+
+const LOG_VALUE = valueClass(String.raw`[^\s;,]*`)
+const NAME_VALUE = valueClass(String.raw`[^"'\s,}&;]*`, ';')
+
+const OPENERS_RE = /["'(\[{<]*/y
+// `_PACKED_HEAD_RE`, less the `--flag` alternative (`FLAG_HEAD_RE`).
+const PACKED_HEAD_RE = rx(
+  String.raw`bearer\s+(?:[A-Za-z0-9._~+/=-]|\*\*\*REDACTED\*\*\*)` +
+    String.raw`|authorization["']?\s*:\s*["']?(?:${AUTH_SCHEMES}\s+[^\s"',]` +
+    String.raw`|(?!${AUTH_SCHEMES}(?:\s|$))[^\s"',]{8})`,
+  'yiu',
+)
+// `_FLAG_PREFIX` then the value's first character. The flag's run is tested
+// for a secret word in code, as `maskFlags` does.
+const FLAG_HEAD_RE = rx(String.raw`(?:[A-Za-z0-9]|-(?!-))*(--[A-Za-z0-9-]*)(?:=|\s+)[^-\s]`, 'yu')
+// `_LOG_HEAD_RE`.
+const LOG_HEAD_RE = rx(
+  String.raw`Authorization:\s*Bearer\s+\S|HAL0_BEARER_TOKEN=\S|\b(?:[A-Za-z][A-Za-z0-9_]*_KEY|KEY)=\S`,
+  'yiu',
+)
+const NAME_HEAD_RE = rx(String.raw`[A-Za-z0-9_-]+`, 'yu')
+
+function stickyMatch(re: RegExp, line: string, pos: number): RegExpExecArray | null {
+  re.lastIndex = pos
+  return re.exec(line)
+}
+
+// `_starts_secret`: true if a secret that the shape rules mask (or have masked)
+// starts at `line[pos]`, after any opening quotes or brackets. With `log`, also
+// one that `SECRET_RE` masks.
+function startsSecret(line: string, pos: number, log: boolean): boolean {
+  const at = pos + (stickyMatch(OPENERS_RE, line, pos)?.[0].length ?? 0)
+  if (stickyMatch(PACKED_HEAD_RE, line, at)) return true
+  const flag = stickyMatch(FLAG_HEAD_RE, line, at)
+  if (flag && FLAG_WORD_RE.test(flag[1])) return true
+  if (log && stickyMatch(LOG_HEAD_RE, line, at)) return true
+  const name = stickyMatch(NAME_HEAD_RE, line, at)?.[0]
+  if (name === undefined || (!SECRET_WORD_RE.test(name) && !KEY_NAME_RE.test(name))) return false
+  return stickyMatch(NAME_VALUE_TAIL_RE, line, at + name.length) !== null && isSecretName(name)
+}
+
+// `_bare_value_end`: where the bare value of class `value` starting at
+// `line[start]` ends. Every step moves forward and tests one separator, so
+// this is linear in the value.
+function bareValueEnd(line: string, start: number, [chunk, sep]: ValueClass, log: boolean): number {
+  let end = start
+  for (;;) {
+    end += stickyMatch(chunk, line, end)?.[0].length ?? 0
+    if (stickyMatch(sep, line, end) && !startsSecret(line, end + 1, log)) {
+      end += 1
+      continue
+    }
+    return end
+  }
+}
+
+// Python's whitespace (`\s`) at the end of a string, for `rstrip`.
+const TRAILING_WS_RE = rx(String.raw`\s+$`, 'u')
+
+// `_mask_bare_values`: `prefix` (global) matches up to a bare value; mask each
+// such value and keep the match. With `spaces` the value may hold whitespace,
+// but does not end with any.
+function maskBareValues(
+  line: string,
+  prefix: RegExp,
+  value: ValueClass,
+  log: boolean,
+  spaces = false,
+): string {
+  let out = ''
+  let last = 0
+  prefix.lastIndex = 0
+  for (let m = prefix.exec(line); m; m = prefix.exec(line)) {
+    const start = m.index + m[0].length
+    let end = bareValueEnd(line, start, value, log)
+    prefix.lastIndex = end
+    if (spaces) end = start + line.slice(start, end).replace(TRAILING_WS_RE, '').length
+    if (end > start) {
+      out += line.slice(last, start) + MASK
+      last = end
+    }
+  }
+  return out + line.slice(last)
+}
+
+// The first four `_SHAPE_RULES`, in order.
+const AUTH_BASIC_TOKEN_RE = rx(String.raw`authorization:\s*(?:basic|token)\s+(?=[^\s'"])`, 'giu')
+const AUTH_BASIC_TOKEN_VALUE = valueClass(String.raw`[^\s'";,]*`)
+const BEARER_RULE_RE = rx(String.raw`(bearer\s+)[A-Za-z0-9._~+/=-]+`, 'giu')
+const AUTH_SCHEME_RE = rx(
+  String.raw`authorization["']?\s*:\s*["']?${AUTH_SCHEMES}\s+(?=[^\s"',])`,
+  'giu',
+)
+const AUTH_SCHEME_VALUE = valueClass(String.raw`[^\s"',;]*`, ';')
+// Any other `Authorization` value of 8+ characters is a raw credential, masked
+// to the end of the header value or to whitespace that starts a secret.
+const AUTH_RAW_RE = rx(
+  String.raw`authorization["']?\s*:\s*["']?(?!${AUTH_SCHEMES}(?:\s|$))(?=[^\s"',]{8,})`,
+  'giu',
+)
+const AUTH_RAW_VALUE = valueClass(String.raw`[^\s"',;]*`, String.raw`(?!\n)\s|;`)
+
+function maskAuthorization(line: string, log: boolean): string {
+  let out = maskBareValues(line, AUTH_BASIC_TOKEN_RE, AUTH_BASIC_TOKEN_VALUE, log)
+  out = out.replace(BEARER_RULE_RE, `$1${MASK}`)
+  out = maskBareValues(out, AUTH_SCHEME_RE, AUTH_SCHEME_VALUE, log)
+  return maskBareValues(out, AUTH_RAW_RE, AUTH_RAW_VALUE, log, true)
+}
 
 // True when `://` at `at` follows a URL scheme, `[a-z][a-z0-9+.-]*`. The Python
 // puts the scheme in the pattern, which rescans the whole run from every
@@ -390,23 +518,28 @@ const URL_LONG_USER_RE = rx(String.raw`:\/\/[^/@\s:]{16,}@`, 'g')
 
 const FLAG_RUN_RE = rx(String.raw`--[A-Za-z0-9-]*`, 'gu')
 const FLAG_WORD_RE = rx(String.raw`secret|token|password|pass|api-key|apikey|private-key`, 'iu')
-const FLAG_VALUE_RE = rx(String.raw`(=|\s+)[^-\s]\S*`, 'yu')
+const FLAG_VALUE_RE = rx(String.raw`(?:=|\s+)(?=[^-\s])`, 'yu')
+const FLAG_VALUE = valueClass(String.raw`[^\s;,]*`)
 
 // `--token VALUE`, `--api-key=VALUE`. The Python rescans from every `--` of a
 // long dash run; every start in the run has the same outcome, so scan it once.
-function maskFlags(line: string): string {
+function maskFlags(line: string, log: boolean): string {
   let out = ''
   let last = 0
   FLAG_RUN_RE.lastIndex = 0
   for (let run = FLAG_RUN_RE.exec(line); run; run = FLAG_RUN_RE.exec(line)) {
-    const end = run.index + run[0].length
+    const runEnd = run.index + run[0].length
     if (!FLAG_WORD_RE.test(run[0])) continue
-    FLAG_VALUE_RE.lastIndex = end
+    FLAG_VALUE_RE.lastIndex = runEnd
     const tail = FLAG_VALUE_RE.exec(line)
     if (!tail) continue
-    FLAG_RUN_RE.lastIndex = end + tail[0].length
-    out += line.slice(last, run.index) + `${run[0]}${tail[1]}${MASK}`
-    last = FLAG_RUN_RE.lastIndex
+    const start = runEnd + tail[0].length
+    const end = bareValueEnd(line, start, FLAG_VALUE, log)
+    FLAG_RUN_RE.lastIndex = end
+    if (end > start) {
+      out += line.slice(last, start) + MASK
+      last = end
+    }
   }
   return out + line.slice(last)
 }
@@ -445,8 +578,13 @@ function maskJwts(line: string): string {
  * WAS present. Idempotent. Port of `redact_secret_shapes`, same rule order.
  */
 export function redactSecretShapes(line: string): string {
-  let out = line
-  for (const re of AUTH_RULES) out = out.replace(re, `$1${MASK}`)
+  return shapes(line, false)
+}
+
+// `_redact_shapes`: `log` when `SECRET_RE` has already run on `line`, so a value
+// may also end before one of its secrets.
+function shapes(line: string, log: boolean): string {
+  let out = maskAuthorization(line, log)
   const beforePassword = out
   out = beforePassword.replace(URL_PASSWORD_RE, (m, userinfo: string, offset: number) =>
     followsScheme(beforePassword, offset) ? `${userinfo}:${MASK}@` : m,
@@ -455,8 +593,8 @@ export function redactSecretShapes(line: string): string {
   out = beforeLongUser.replace(URL_LONG_USER_RE, (m, offset: number) =>
     followsScheme(beforeLongUser, offset) ? `://${MASK}@` : m,
   )
-  out = maskNameValues(out)
-  out = maskFlags(out)
+  out = maskNameValues(out, log)
+  out = maskFlags(out, log)
   out = out.replace(CLIENT_ID_RE, `$1${MASK}`)
   out = maskJwts(out)
   // Case-sensitive, as in Python.
@@ -468,7 +606,7 @@ export function redactSecretShapes(line: string): string {
 // pinned against the same cases as the Python original.
 export function redactSecrets(value: unknown): unknown {
   if (typeof value !== 'string') return value
-  return redactSecretShapes(maskLogSecrets(value))
+  return shapes(maskLogSecrets(value), true)
 }
 
 // ── Structured values ────────────────────────────────────────────────────────
