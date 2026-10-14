@@ -145,39 +145,58 @@ function rx(src: string, flags: string, fold = true): RegExp {
   return new RegExp(out, flags)
 }
 
-// The `Authorization: Bearer`, `HAL0_BEARER_TOKEN=` and `*_KEY=` alternatives
-// end where their value starts: it runs to the next whitespace except where a
-// second secret is packed after a `;` or `,` (`bareValueEnd`, #2529).
+// The `Authorization: Bearer` and `HAL0_BEARER_TOKEN=` alternatives of
+// `LOG_SECRET_RE` end where their value starts: it runs to the next whitespace
+// except where a second secret is packed after a `;` or `,` (`bareValueEnd`,
+// #2529). Its `*_KEY=` alternative is `keyNameStarts`.
 const SECRET_RE = rx(
-  String.raw`(Authorization:\s*Bearer\s+)(?=\S)|(HAL0_BEARER_TOKEN=)(?=\S)|(Bearer\s+)([A-Za-z0-9_\-.]+)|(client_id=)([A-Za-z0-9_\-.]{16,})|(\b(?:[A-Za-z][A-Za-z0-9_]*_KEY|KEY)=)(?=\S)`,
+  String.raw`(Authorization:\s*Bearer\s+)(?=\S)|(HAL0_BEARER_TOKEN=)(?=\S)|(Bearer\s+)([A-Za-z0-9_\-.]+)|(client_id=)([A-Za-z0-9_\-.]{16,})`,
   'giu',
 )
 
-// A Unicode word character, as Python's `\w`: a letter, a number or `_`.
-const WORD_CHAR_END_RE = /[\p{L}\p{N}_]$/u
+// What may come before a `*_KEY=` name without ending it: the ASCII word
+// characters and the four non-ASCII letters that `re.I` folds onto them (`İ ı ſ
+// K`), as `_NAME_START` in `redact_log_line` says (#2599). Not Unicode's `\w`,
+// and not the ASCII `\b`, which starts a name after any non-ASCII character,
+// the four included, and tries it at every one in a long run of them.
+const NAME_CHAR_BEFORE_RE = /[A-Za-z0-9_\u0130\u0131\u017f\u212a]/
+// A letter a name may start at, after anything that is no part of a name run.
+const NAME_START_RE = /(?:^|[^A-Za-z0-9_\u0130\u0131\u017f\u212a])[A-Za-z\u0130\u0131\u017f\u212a]/g
 
-// `LOG_SECRET_RE` in `redact_log_line`. The `\b` in the pattern is ASCII-only,
-// so a `_KEY=` match that follows a non-ASCII letter (`Éfoo_KEY=`) is one
-// Python's `\b` does not allow: skip it and carry on one character later, as
-// Python would.
+// `LOG_SECRET_RE` in `redact_log_line`. The `*_KEY=` names are found from the
+// start of each name run, once each, so the search is linear whatever the run
+// holds; the other alternatives are searched for from where the last value
+// ended, and the two are taken in order of where they start.
 function maskLogSecrets(value: string): string {
   let out = ''
-  let last = 0
-  SECRET_RE.lastIndex = 0
-  for (let m = SECRET_RE.exec(value); m; m = SECRET_RE.exec(value)) {
-    if (m[7] !== undefined && WORD_CHAR_END_RE.test(value.slice(Math.max(0, m.index - 2), m.index))) {
-      SECRET_RE.lastIndex = m.index + 1
-      continue
+  let last = 0 // where the text not yet copied starts
+  let cursor = 0 // where the search goes on: past the last match's value
+  const keys = keyNameStarts(value)
+  let next = 0
+  let found: RegExpExecArray | null | undefined // undefined: not searched for yet
+  for (;;) {
+    while (next < keys.length && keys[next][0] < cursor) next += 1
+    if (found === undefined || (found && found.index < cursor)) {
+      SECRET_RE.lastIndex = cursor
+      found = SECRET_RE.exec(value)
     }
     let start: number
     let end: number
-    if (m[4] !== undefined || m[6] !== undefined) {
+    if (next < keys.length && (!found || keys[next][0] < found.index)) {
+      start = keys[next][1]
+      next += 1
+      end = delimiter(value, start)
+        ? quotedLogValueEnd(value, start, true)
+        : bareValueEnd(value, start, LOG_VALUE, true)
+    } else if (!found) {
+      break
+    } else if (found[4] !== undefined || found[6] !== undefined) {
       // A Bearer token or a client_id holds no `;` or `,`: the match ends with
       // it, or past a secret it swallows (#2595).
-      start = m.index + (m[3] ?? m[5]).length
-      end = swallowingEnd(value, start, m.index + m[0].length, LOG_TOKEN, true)
+      start = found.index + (found[3] ?? found[5]).length
+      end = swallowingEnd(value, start, found.index + found[0].length, LOG_TOKEN, true)
     } else {
-      start = m.index + m[0].length
+      start = found.index + found[0].length
       end = delimiter(value, start)
         ? quotedLogValueEnd(value, start, true)
         : bareValueEnd(value, start, LOG_VALUE, true)
@@ -186,9 +205,22 @@ function maskLogSecrets(value: string): string {
       out += value.slice(last, start) + MASK
       last = end
     }
-    SECRET_RE.lastIndex = end
+    cursor = end
   }
   return out + value.slice(last)
+}
+
+// Each `*_KEY=` name in `value`: where it starts and where its value does. A
+// name starts at a letter with no name run before it, so a run is tried once.
+function keyNameStarts(value: string): [number, number][] {
+  const found: [number, number][] = []
+  NAME_START_RE.lastIndex = 0
+  for (let m = NAME_START_RE.exec(value); m; m = NAME_START_RE.exec(value)) {
+    const at = m.index + m[0].length - 1
+    const head = stickyMatch(LOG_KEY_HEAD_RE, value, at)
+    if (head) found.push([at, at + head[0].length])
+  }
+  return found
 }
 
 // ── Shared shape pass (port of `redact_secret_shapes`) ───────────────────────
@@ -432,8 +464,6 @@ const NAME_HEAD_RE = rx(String.raw`[A-Za-z0-9_-]+`, 'yu')
 const NAME_CHAR_RE = rx(String.raw`[A-Za-z0-9_-]`, 'u')
 const FLAG_RUN_CHAR_RE = rx(String.raw`[A-Za-z0-9-]`, 'u')
 const ALNUM_RE = rx(String.raw`[A-Za-z0-9]`, 'u')
-// A Unicode word character, for Python's `\b`.
-const WORD_CHAR_RE = /[\p{L}\p{N}_]/u
 
 function stickyMatch(re: RegExp, line: string, pos: number): RegExpExecArray | null {
   re.lastIndex = pos
@@ -460,7 +490,7 @@ function head(line: string, pos: number, log: boolean): Head | null {
   }
   if (log) {
     m = stickyMatch(LOG_HEAD_RE, line, pos)
-    if (!m && !WORD_CHAR_RE.test(prev)) m = stickyMatch(LOG_KEY_HEAD_RE, line, pos)
+    if (!m && !NAME_CHAR_BEFORE_RE.test(prev)) m = stickyMatch(LOG_KEY_HEAD_RE, line, pos)
     if (m) return [pos + m[0].length, LOG_VALUE]
   }
   if (NAME_CHAR_RE.test(prev)) return null

@@ -1027,6 +1027,8 @@ class TestRedactionTimeIsLinear:
             ("eyJ", 80_000),  # JWT rule
             ("-", 80_000),  # ``--flag`` rule, no secret word
             ("--token-x-", 8_000),  # ``--flag`` rule, a word at every start
+            ("\u0131a", 80_000),  # a name run of letters a name may start at (#2599)
+            ("\u0131api_key=,x ", 40_000),  # a folded-letter name at every start
         ],
     )
     @pytest.mark.parametrize("redact", [redact_log_line, redact_shareable_text])

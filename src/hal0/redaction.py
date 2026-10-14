@@ -37,6 +37,15 @@ from typing import Any, Final, NamedTuple
 # fixtures for the exact token.
 MASK: Final[str] = "***REDACTED***"
 
+# Where a ``*_KEY=`` name may start in LOG_SECRET_RE: after anything that is no
+# part of a name run. The run is the ASCII word characters, with the four
+# non-ASCII letters that ``re.I`` folds onto them (U+0130, U+0131, U+017F and
+# U+212A, the ones ``[A-Za-z]`` matches under it), the same class the other
+# name rules use
+# (#2599). Not ``\b``: that reads every Unicode letter and digit as part of
+# the word, which ui/src/sentry.ts cannot reproduce with its ASCII ``\b``.
+_NAME_START: Final[str] = r"(?<![A-Za-z0-9_])"
+
 # Compiled once at import time. Each alternative ends where the secret
 # token starts, or with a ``(?P<...>...)`` capture of it; ``redact_log_line``
 # rewrites that token to :data:`MASK` while leaving the surrounding
@@ -66,7 +75,7 @@ LOG_SECRET_RE: Final[re.Pattern[str]] = re.compile(
     r"|(?P<prefix_env>HAL0_BEARER_TOKEN=)(?=\S)"
     r"|(?P<prefix_bearer>Bearer\s+)(?P<bearer_token>[A-Za-z0-9_\-\.]+)"
     r"|(?P<prefix_client_id>client_id=)(?P<client_id_token>[A-Za-z0-9_\-\.]{16,})"
-    r"|(?P<prefix_key>\b(?:[A-Za-z][A-Za-z0-9_]*_KEY|KEY)=)(?=\S)",
+    rf"|(?P<prefix_key>{_NAME_START}(?:[A-Za-z][A-Za-z0-9_]*_KEY|KEY)=)(?=\S)",
     re.IGNORECASE,
 )
 # A LOG_SECRET_RE bare value: its characters other than a packed separator,
@@ -85,7 +94,7 @@ _LOG_TOKEN: Final[tuple[re.Pattern[str], re.Pattern[str]]] = (
 # nor ``;``/``,``, so a value that swallows one still masks it).
 _LOG_HEAD_RE: Final[re.Pattern[str]] = re.compile(
     r"Authorization:\s*Bearer\s+(?=\S)|HAL0_BEARER_TOKEN=(?=\S)"
-    r"|\b(?:[A-Za-z][A-Za-z0-9_]*_KEY|KEY)=(?=\S)",
+    rf"|{_NAME_START}(?:[A-Za-z][A-Za-z0-9_]*_KEY|KEY)=(?=\S)",
     re.IGNORECASE,
 )
 

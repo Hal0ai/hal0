@@ -186,6 +186,17 @@ applying. Add those subsections to a version's section to surface them; see
   `--token "abc def"`, is now masked to its closing quote too, instead of to the
   first space. The installer report drops the escaped delimiters and the
   backslashes in front of a secret name's closing quote when it masks.
+- The log redaction and the dashboard's Sentry scrubber now start a `*_KEY=`
+  name at the same place. The server tested a Unicode word boundary and the
+  browser an ASCII one, so a name that follows or starts with `ı`, `İ`, `ſ`
+  (long s) or the Kelvin sign was masked by one and not the other: the browser
+  left `İprivate_key=&secret` visible, and masked `ıapi_key='x y'` with its
+  quotes kept where the server drops them (#2599). Both now use the class the
+  other name rules already use: the ASCII word characters and those four
+  letters, which `re.I` folds onto `i`, `s` and `k`. A name after any other
+  character starts there, so `éapi_key=,secret` and `٣api_key=,secret` are masked
+  by both, where neither masked them. The browser also finds names once per run
+  now: a long run of `ıa` took quadratic time.
 
 ### Breaking
 
