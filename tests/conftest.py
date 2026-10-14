@@ -349,3 +349,26 @@ def _clear_image_present_cache():
     slot_view._image_present_cache.clear()
     yield
     slot_view._image_present_cache.clear()
+
+
+def _coverage_active(config: pytest.Config) -> bool:
+    """True when pytest-cov is tracing this run (``--cov``, the main-push CI leg)."""
+    return config.pluginmanager.hasplugin("_cov") and bool(
+        getattr(config.option, "cov_source", None)
+    )
+
+
+def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
+    """Skip ``@pytest.mark.timing`` tests while coverage traces the run.
+
+    A wall-clock bound measures the code, not the tracer: under ``--cov`` the
+    redaction scans run 5-14x slower on 3.12/3.13, so a linear-time guard
+    fails on main pushes while the code is fine (it passes in ~1s untraced).
+    The PR leg runs without coverage and still enforces every bound.
+    """
+    if not _coverage_active(config):
+        return
+    skip = pytest.mark.skip(reason="wall-clock bound is meaningless under coverage tracing")
+    for item in items:
+        if "timing" in item.keywords:
+            item.add_marker(skip)
