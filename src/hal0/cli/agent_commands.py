@@ -1466,15 +1466,26 @@ def _print_command_approvals(data: dict[str, Any]) -> None:
             f"[yellow]In effect: {effective}[/yellow], set by "
             f"{data.get('overrides_path') or 'overrides.yaml'}, which wins over this setting."
         )
+    if data.get("seed_unreadable"):
+        lines.append(
+            f"[yellow]{data.get('seed_path') or 'The seed TOML'} could not be read;[/yellow] "
+            f"the stored setting is unknown, so the default ({data.get('default')}) is in use. "
+            "Fix the file or run `sudo hal0 agent reprovision hermes --repair`."
+        )
     if data.get("invalid_value"):
         lines.append(
             f"[yellow]The stored value {data['invalid_value']!r} is invalid;[/yellow] "
             f"using the default ({data.get('default')})."
         )
     if data.get("in_sync") is False:
+        fix = (
+            "Run `sudo hal0 agent reprovision hermes` to re-apply overrides.yaml."
+            if source == "overrides"
+            else f"Run `hal0 agent command-approvals {effective}` to re-apply it."
+        )
         lines.append(
             f"[yellow]Hermes's config.yaml says {data.get('rendered')!r}, not {effective!r}.[/yellow] "
-            "Run `hal0 agent reprovision hermes`, or set the mode again, to re-apply it."
+            + fix
         )
     console.print("\n".join(lines))
 

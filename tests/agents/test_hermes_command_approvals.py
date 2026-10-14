@@ -72,9 +72,15 @@ def box(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
 
 
 class _Unit:
-    def __init__(self, active: bool | None = True, fail: bool = False) -> None:
+    def __init__(
+        self,
+        active: bool | None = True,
+        fail: bool = False,
+        fail_code: str = "agent.restart_failed",
+    ) -> None:
         self.active = active
         self.fail = fail
+        self.fail_code = fail_code
         self.restarts = 0
 
     async def unit_active(self) -> bool | None:
@@ -83,7 +89,7 @@ class _Unit:
     async def restart(self) -> dict[str, Any]:
         self.restarts += 1
         if self.fail:
-            raise Hal0Error("systemctl restart failed (rc=1)", code="agent.restart_failed")
+            raise Hal0Error("systemctl restart failed", code=self.fail_code)
         return {"status": "restarted"}
 
 
@@ -156,9 +162,18 @@ def test_read_setting_invalid_falls_back_and_reports(box: dict[str, Any]) -> Non
     assert cmd.status()["invalid_value"] == "off"
 
 
-def test_read_setting_corrupt_seed_is_default(box: dict[str, Any]) -> None:
-    box["seed"].write_text("this is = = not toml")
-    assert cmd.read_setting().mode == "smart"
+def test_read_setting_corrupt_seed_is_default_and_flagged(box: dict[str, Any]) -> None:
+    box["seed"].write_text(SEED + '\n[hermes]\ncommand_approvals = "manual"\n= = broken')
+    got = cmd.read_setting()
+    assert (got.mode, got.stored, got.unreadable) == ("smart", False, True)
+    st = cmd.status()
+    # Not presented as a clean "smart (default)" over the operator's manual.
+    assert st["seed_unreadable"] is True and st["seed_path"] == str(box["seed"])
+
+
+def test_read_setting_absent_file_is_not_unreadable(box: dict[str, Any]) -> None:
+    box["seed"].unlink()
+    assert cmd.read_setting().unreadable is False
 
 
 def test_override_bare_off_reads_as_off(box: dict[str, Any]) -> None:
@@ -218,11 +233,72 @@ def test_apply_persists_renders_and_restarts(box: dict[str, Any]) -> None:
 
 
 def test_apply_inactive_unit_is_not_started(box: dict[str, Any]) -> None:
-    for active in (False, None):
-        unit = _Unit(active=active)
-        out = _apply("manual" if active is False else "smart", unit)
-        assert unit.restarts == 0
-        assert out["restart"] == "skipped-inactive"
+    unit = _Unit(active=False)
+    out = _apply("manual", unit)
+    assert unit.restarts == 0
+    assert out["restart"] == "skipped-inactive"
+    assert "not running" in out["message"]
+
+
+def test_apply_unknown_liveness_is_not_reported_as_stopped(box: dict[str, Any]) -> None:
+    """unit_is_active() -> None (no systemd, probe timeout) is UNKNOWN, not inactive."""
+    unit = _Unit(active=None)
+    out = _apply("manual", unit)
+    assert unit.restarts == 0
+    assert out["restart"] == "unknown"
+    assert "could not tell whether Hermes is running" in out["message"]
+    assert "not running" not in out["message"]
+    # The new mode is saved and rendered; only the restart is outstanding.
+    assert _stored(box["seed"]) == "manual" and _rendered(box["config"]) == "manual"
+
+
+def test_apply_restart_timeout_keeps_the_new_state(box: dict[str, Any]) -> None:
+    """The unit may still be starting on the new config: never roll the files back."""
+    unit = _Unit(active=True, fail=True, fail_code="agent.restart_timeout")
+    out = _apply("manual", unit)
+    assert out["restart"] == "timeout"
+    assert "unknown" in out["message"]
+    assert _stored(box["seed"]) == "manual"
+    assert _rendered(box["config"]) == "manual"
+    assert (out["mode"], out["in_sync"]) == ("manual", True)
+
+
+def test_apply_re_merges_overrides_after_config_set(
+    box: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An override that lands mid-apply must still win, as at provisioning."""
+    real_set = cmd._config_set
+
+    def _set_then_override(mode: str) -> list[str]:
+        box["overrides"].parent.mkdir(parents=True, exist_ok=True)
+        box["overrides"].write_text("approvals:\n  mode: smart\n")
+        return real_set(mode)
+
+    monkeypatch.setattr(cmd, "_config_set", _set_then_override)
+    out = _apply("manual", _Unit())
+    assert _rendered(box["config"]) == "smart"
+    assert (out["mode"], out["effective"], out["source"], out["in_sync"]) == (
+        "manual",
+        "smart",
+        "overrides",
+        True,
+    )
+
+
+def test_apply_overrides_re_merge_failure_rolls_back(
+    box: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def _broken_merge() -> None:
+        raise ValueError("overrides.yaml: mapping values are not allowed here")
+
+    monkeypatch.setattr(cmd, "_merge_overrides", _broken_merge)
+    seed_before, config_before = box["seed"].read_text(), box["config"].read_text()
+    unit = _Unit()
+    with pytest.raises(cmd.CommandApprovalsApplyFailed, match="overrides re-merge"):
+        _apply("manual", unit)
+    assert box["seed"].read_text() == seed_before
+    assert box["config"].read_text() == config_before
+    assert unit.restarts == 0
 
 
 def test_apply_same_value_is_a_noop(box: dict[str, Any]) -> None:
@@ -445,3 +521,20 @@ def test_apply_recording_the_running_value_does_not_restart(box: dict[str, Any])
     assert _stored(box["seed"]) == "smart"
     assert out["restart"] == "not-needed" and out["source"] == "setting"
     assert unit.restarts == 0
+
+
+def test_apply_unreadable_config_changes_nothing(
+    box: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """config.yaml is snapshotted before the seed write, so a read error writes nothing."""
+    real_read = Path.read_text
+
+    def _read(self: Path, *a: Any, **kw: Any) -> str:
+        if self == box["config"]:
+            raise PermissionError("config.yaml: permission denied")
+        return real_read(self, *a, **kw)
+
+    monkeypatch.setattr(Path, "read_text", _read)
+    with pytest.raises(cmd.CommandApprovalsApplyFailed, match="Nothing was changed"):
+        _apply("manual", _Unit())
+    assert box["writes"] == []

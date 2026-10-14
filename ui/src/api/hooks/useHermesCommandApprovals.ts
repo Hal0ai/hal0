@@ -29,6 +29,9 @@ export interface CommandApprovalsStatus {
   default: CommandApprovalsMode
   allowed: CommandApprovalsMode[]
   invalid_value: string | null
+  /** The seed TOML exists but could not be read; the stored choice is unknown. */
+  seed_unreadable: boolean
+  seed_path: string
   overrides_path: string
   /** approvals.mode in Hermes's config.yaml now; null when not provisioned. */
   rendered: string | null
@@ -43,6 +46,10 @@ export interface CommandApprovalsResult extends CommandApprovalsStatus {
     | 'skipped-overridden'
     | 'skipped-not-installed'
     | 'not-needed'
+    /** hal0 could not tell whether Hermes is running; restart it to apply. */
+    | 'unknown'
+    /** The restart did not finish in time; whether Hermes is running is unknown. */
+    | 'timeout'
   message: string
 }
 

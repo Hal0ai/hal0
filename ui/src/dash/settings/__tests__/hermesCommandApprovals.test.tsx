@@ -11,7 +11,9 @@ import { HermesCommandApprovalsView } from '../pages/server/HermesCommandApprova
 import {
   COMMAND_APPROVALS_INTRO,
   COMMAND_APPROVALS_MODES,
+  canReapply,
   commandApprovalsNotices,
+  commandApprovalsSaveResult,
 } from '../pages/server/commandApprovals.js'
 import { ENDPOINTS } from '@/api/endpoints'
 
@@ -25,6 +27,8 @@ const base = {
   default: 'smart',
   allowed: ['smart', 'manual'],
   invalid_value: null,
+  seed_unreadable: false,
+  seed_path: '/etc/hal0/agents/hermes.toml',
   overrides_path: '/etc/hal0/agents/hermes/overrides.yaml',
   rendered: 'smart',
   in_sync: true,
@@ -86,5 +90,39 @@ describe('Hermes command approvals panel', () => {
     const html = render({ status: undefined, error: 'API error 401' })
     expect(html).toContain('Could not read the setting: API error 401')
     expect((html.match(/disabled=""/g) || []).length).toBe(2)
+  })
+
+  it('flags an unreadable seed instead of presenting the default as chosen', () => {
+    const notices = commandApprovalsNotices({ ...base, seed_unreadable: true })
+    expect(notices.map((n) => n.testid)).toEqual(['cmd-approvals-unreadable'])
+    expect(notices[0].text).toContain('/etc/hal0/agents/hermes.toml could not be read')
+  })
+
+  it('keeps the current mode clickable while config.yaml has drifted, so a re-pick re-applies', () => {
+    const drifted = { ...base, source: 'setting', rendered: 'off', in_sync: false }
+    expect(canReapply(drifted)).toBe(true)
+    const html = render({ status: drifted })
+    const smartBtn = html.match(/<button[^>]*data-testid="cmd-approvals-smart"[^>]*>/)![0]
+    expect(smartBtn).not.toContain('disabled')
+    expect(commandApprovalsNotices(drifted)[0].text).toContain('Pick smart again')
+  })
+
+  it('under an override, drift advice is reprovision only and the current mode stays disabled', () => {
+    const st = { ...base, mode: 'manual', effective: 'smart', source: 'overrides', rendered: 'off', in_sync: false }
+    expect(canReapply(st)).toBe(false)
+    const drift = commandApprovalsNotices(st).find((n) => n.testid === 'cmd-approvals-drift')!
+    expect(drift.text).toContain('reprovision hermes')
+    expect(drift.text).not.toContain('Pick')
+    const manualBtn = render({ status: st }).match(/<button[^>]*data-testid="cmd-approvals-manual"[^>]*>/)![0]
+    expect(manualBtn).toContain('disabled')
+  })
+
+  it('shows an uncertain restart as a warning, not a success', () => {
+    for (const restart of ['unknown', 'timeout']) {
+      expect(commandApprovalsSaveResult({ ...base, restart, changed: true, message: 'm' })?.tone).toBe('warn')
+    }
+    expect(commandApprovalsSaveResult({ ...base, restart: 'restarted', changed: true, message: 'm' })?.tone).toBe('ok')
+    const html = render({ status: base, saved: { tone: 'warn', text: 'could not tell whether Hermes is running' } })
+    expect(html).toContain('data-tone="warn"')
   })
 })

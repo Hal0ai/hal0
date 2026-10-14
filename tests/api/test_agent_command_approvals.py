@@ -236,3 +236,28 @@ def test_put_without_hermes_installed_is_409(box: dict[str, Any], client: TestCl
 
 def test_route_agent_id_matches_the_module() -> None:
     assert routes._AGENT_ID == cmd.AGENT_ID
+
+
+def test_unknown_liveness_reports_restart_unknown(box: dict[str, Any], client: TestClient) -> None:
+    box["calls"]["active"] = None
+    body = client.put(PATH, json={"mode": "manual"}).json()
+    assert body["restart"] == "unknown" and box["calls"]["restarts"] == []
+
+
+def test_restart_timeout_is_200_with_unknown_outcome(
+    box: dict[str, Any], client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def _timeout(agent_id: str, *, actor: str) -> dict[str, str]:
+        raise Hal0Error("systemctl restart timed out", code="agent.restart_timeout")
+
+    monkeypatch.setattr(restart_seam, "restart_agent_unit", _timeout)
+    res = client.put(PATH, json={"mode": "manual"})
+    assert res.status_code == 200
+    assert res.json()["restart"] == "timeout"
+    assert 'command_approvals = "manual"' in box["seed"].read_text()
+
+
+def test_restart_timeout_code_matches_the_seam() -> None:
+    import inspect
+
+    assert f'code="{cmd.RESTART_TIMEOUT_CODE}"' in inspect.getsource(restart_seam)

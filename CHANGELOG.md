@@ -747,13 +747,17 @@ applying. Add those subsections to a version's section to surface them; see
   every time. A change re-renders Hermes' config and restarts
   `hal0-agent@hermes` if it is running; if a step fails, the previous
   setting is restored. The setting is stored in the root-owned
-  `/etc/hal0/agents/hermes.toml` (`[hermes] command_approvals`), out of the
-  agent's reach on disk, and the admin MCP tools never expose it. An
+  `/etc/hal0/agents/hermes.toml` (`[hermes] command_approvals`), which the
+  agent cannot write, and the admin MCP tools never expose it. An
   `approvals.mode` in `/etc/hal0/agents/hermes/overrides.yaml` still wins,
-  and both surfaces show it as the value in effect. Known limit until
-  ADR-0024 ships: agents authenticate with the box admin key, so an agent
-  with the terminal tool on can call the API route
-  (`PUT /api/agents/hermes/command-approvals`) that changes it.
+  and both surfaces show it as the value in effect. When Hermes'
+  `config.yaml` drifts from the expected value, both surfaces say so and
+  `hal0 doctor all` shows a warning row. Known limits: Hermes reads the mode
+  from its own `config.yaml`, which the agent's user owns, so an agent with
+  the terminal tool on can edit it directly (re-provisioning restores your
+  choice). Until ADR-0024 ships, agents also authenticate with the box admin
+  key, so such an agent can call the API route
+  (`PUT /api/agents/hermes/command-approvals`) that changes the setting.
 
 ### Changed
 

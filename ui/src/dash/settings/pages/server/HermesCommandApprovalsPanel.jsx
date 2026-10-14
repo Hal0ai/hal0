@@ -19,8 +19,9 @@ import {
 import {
   COMMAND_APPROVALS_INTRO,
   COMMAND_APPROVALS_MODES,
+  canReapply,
   commandApprovalsNotices,
-  commandApprovalsSaveText,
+  commandApprovalsSaveResult,
 } from './commandApprovals.js'
 
 export function HermesCommandApprovalsView({
@@ -34,6 +35,9 @@ export function HermesCommandApprovalsView({
 }) {
   const selected = status?.mode
   const notices = commandApprovalsNotices(status)
+  // The current mode stays clickable while config.yaml has drifted from it,
+  // so "pick it again" (the drift notice) actually re-applies.
+  const reapply = canReapply(status)
   const help = COMMAND_APPROVALS_MODES.find((m) => m.id === selected)?.help
 
   return (
@@ -72,7 +76,7 @@ export function HermesCommandApprovalsView({
                   className={on ? 'btn sm' : 'btn ghost sm'}
                   data-testid={'cmd-approvals-' + m.id}
                   title={m.help}
-                  disabled={loading || !!error || pending || on}
+                  disabled={loading || !!error || pending || (on && !reapply)}
                   onClick={() => onSelect && onSelect(m.id)}
                 >
                   {pending && !on ? 'Applying…' : m.label}
@@ -102,8 +106,13 @@ export function HermesCommandApprovalsView({
           </div>
         )}
         {!saveError && saved && (
-          <div data-testid="cmd-approvals-saved" className="mono" style={{ fontSize: 10.5, color: 'var(--ok)', padding: '0 14px 12px', lineHeight: 1.55 }}>
-            {saved}
+          <div
+            data-testid="cmd-approvals-saved"
+            data-tone={saved.tone}
+            className="mono"
+            style={{ fontSize: 10.5, color: saved.tone === 'warn' ? 'var(--warn)' : 'var(--ok)', padding: '0 14px 12px', lineHeight: 1.55 }}
+          >
+            {saved.text}
           </div>
         )}
       </div>
@@ -121,7 +130,7 @@ export function HermesCommandApprovalsPanel() {
       error={q.isError ? (q.error?.message || 'request failed') : null}
       pending={set.isPending}
       saveError={set.isError ? (set.error?.message || 'could not apply the change') : null}
-      saved={set.isSuccess ? commandApprovalsSaveText(set.data) : null}
+      saved={set.isSuccess ? commandApprovalsSaveResult(set.data) : null}
       onSelect={(mode) => set.mutate(mode)}
     />
   )

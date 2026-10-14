@@ -34,14 +34,22 @@ Precedence
 ``approvals.mode`` there wins over this setting. :func:`status` reports that
 instead of claiming the setting is in effect.
 
-Known limit (ADR-0024)
-----------------------
-Agents still authenticate with the box admin key, so an agent that can make
-arbitrary HTTP calls (only with the terminal tool on) can call the ADMIN
-route that changes this setting, the same gap that lets it approve its own
-MCP calls. The admin MCP server never exposes the route as a tool
-(``EXCLUDED_TOOLS["hermes_command_approvals"]``), and the route refuses a
-request that identifies itself as an agent.
+Known limits
+------------
+The setting is not a boundary against an agent with the terminal tool on:
+
+* Hermes reads ``approvals.mode`` from ``$HERMES_HOME/config.yaml``, which
+  the ``hal0`` user owns (``install/perms.py``) and the agent runs as. With a
+  shell it can rewrite that key directly (e.g. to ``off``), no API involved;
+  ADR-0024 does not change that. The seed TOML keeps the operator's choice,
+  re-provisioning restores it, and :func:`status` / ``hal0 doctor all``
+  report the drift (``in_sync``).
+* Agents still authenticate with the box admin key (ADR-0024), so an agent
+  that can make arbitrary HTTP calls can call the ADMIN route that changes
+  the setting, the same gap that lets it approve its own MCP calls. The
+  admin MCP server never exposes the route as a tool
+  (``EXCLUDED_TOOLS["hermes_command_approvals"]``), and the route refuses a
+  request that identifies itself as an agent.
 """
 
 from __future__ import annotations
@@ -70,6 +78,11 @@ SETTING_KEY = "command_approvals"
 #: Hermes config key the setting renders to.
 HERMES_CONFIG_KEY = "approvals.mode"
 MODES: tuple[str, ...] = HERMES_COMMAND_APPROVALS_MODES
+
+#: ``Hal0Error.code`` the restart seam raises when ``systemctl restart`` times
+#: out (hal0.api.agents.restart). Kept literal so this module stays free of
+#: hal0.api imports.
+RESTART_TIMEOUT_CODE = "agent.restart_timeout"
 
 # One apply at a time per process: two concurrent PUTs must not interleave
 # their snapshot / write / rollback steps.
@@ -117,6 +130,9 @@ class SettingRead:
     mode: str
     stored: bool
     invalid_value: str | None = None
+    #: The seed TOML exists but could not be read or parsed, so whatever the
+    #: operator stored there is unknown and the default is in use.
+    unreadable: bool = False
 
 
 def validate_mode(value: Any) -> str:
@@ -144,11 +160,21 @@ def read_setting(path: Path | None = None) -> SettingRead:
     """The operator's stored setting, read leniently.
 
     An absent key, an unreadable file or an invalid value all yield the
-    default; an invalid value is reported in ``invalid_value`` (and logged)
-    so the dashboard can say so instead of silently papering over it.
-    Never raises: provisioning must not abort over this one key.
+    default. An invalid value is reported in ``invalid_value`` and an
+    unreadable or unparseable seed in ``unreadable`` (both logged), so the
+    dashboard and CLI can say so instead of showing "smart (default)" over
+    an operator's ``manual``. Never raises: provisioning must not abort over
+    this one key.
     """
-    data = _read_seed(path or _seed_path()) or {}
+    seed_path = path or _seed_path()
+    data = _read_seed(seed_path)
+    if data is None:
+        log.warning(
+            "hermes.command_approvals.seed_unreadable",
+            path=str(seed_path),
+            fallback=default_mode(),
+        )
+        return SettingRead(mode=default_mode(), stored=False, unreadable=True)
     table = data.get(SETTING_TABLE)
     if not isinstance(table, dict) or SETTING_KEY not in table:
         return SettingRead(mode=default_mode(), stored=False)
@@ -160,7 +186,7 @@ def read_setting(path: Path | None = None) -> SettingRead:
             "hermes.command_approvals.invalid_setting",
             value=str(raw),
             fallback=default_mode(),
-            path=str(path or _seed_path()),
+            path=str(seed_path),
         )
         return SettingRead(mode=default_mode(), stored=False, invalid_value=str(raw))
 
@@ -221,6 +247,8 @@ def status() -> dict[str, Any]:
         "default": default_mode(),
         "allowed": list(MODES),
         "invalid_value": setting.invalid_value,
+        "seed_unreadable": setting.unreadable,
+        "seed_path": str(_seed_path()),
         "overrides_path": str(_overrides_path()),
         "rendered": rendered,
         "in_sync": None if rendered is None else rendered == effective,
@@ -259,6 +287,10 @@ def _restore_config(text: str) -> None:
     hp._atomic_write(_config_path(), text)
 
 
+def _merge_overrides() -> None:
+    hp._merge_config_yaml_layers(_config_path(), list_keys={}, overrides_path=_overrides_path())
+
+
 async def apply_mode(
     mode: Any,
     *,
@@ -278,12 +310,17 @@ async def apply_mode(
        If Hermes's config is not rendered yet, or already holds ``mode``,
        nothing else happens. (No seed TOML at all means Hermes is not
        installed: refused with :class:`CommandApprovalsUnavailable`.)
-    4. ``hermes config set approvals.mode`` and read it back.
-    5. Restart ``hal0-agent@hermes`` when it is running (a stopped agent
-       picks the value up when it next starts).
+    4. ``hermes config set approvals.mode``, re-merge overrides.yaml on top
+       (as provisioning does), and read it back.
+    5. Restart ``hal0-agent@hermes`` when it is running. A stopped agent
+       picks the value up when it next starts; when liveness is unknown the
+       response says so (``restart: "unknown"``) instead of claiming it is
+       stopped.
 
     A failure in 4 or 5 restores the previous seed TOML and config.yaml and
-    raises :class:`CommandApprovalsApplyFailed`.
+    raises :class:`CommandApprovalsApplyFailed`. The exception is a restart
+    TIMEOUT: the unit may still be starting on the new config, so the new
+    state is kept and the response reports ``restart: "timeout"``.
 
     ``restart`` must raise :class:`~hal0.errors.Hal0Error` on failure.
     """
@@ -318,6 +355,17 @@ async def apply_mode(
         before = status()
         config_path = _config_path()
         installed = config_path.is_file()
+        # Snapshot config.yaml BEFORE any write, so a read failure here
+        # changes nothing (rather than leaving a new seed with no rollback).
+        config_before_text = ""
+        if installed:
+            try:
+                config_before_text = config_path.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError) as exc:
+                raise CommandApprovalsApplyFailed(
+                    f"could not read {config_path}: {exc}. Nothing was changed.",
+                    details={"path": str(config_path), "error": str(exc)},
+                ) from exc
         override = before["source"] == "overrides"
         noop = (
             before["mode"] == mode
@@ -376,8 +424,6 @@ async def apply_mode(
                 "message": f"Saved {mode}. Hermes already uses it; no restart needed.",
             }
 
-        config_before_text = config_path.read_text(encoding="utf-8")
-
         async def _rollback(reason: str) -> list[str]:
             errors: list[str] = []
             try:
@@ -399,8 +445,17 @@ async def apply_mode(
             return errors
 
         set_errors = await asyncio.to_thread(_config_set, mode)
+        if not set_errors:
+            # Re-merge overrides.yaml on top, exactly as provisioning does after
+            # its own `config set` pass: an operator override that appeared
+            # since `before` was read must still win.
+            try:
+                await asyncio.to_thread(_merge_overrides)
+            except Exception as exc:  # YAML error, OSError: roll back below
+                set_errors = [f"overrides re-merge: {exc}"]
+        expected = read_override() or mode
         rendered = read_rendered()
-        if set_errors or rendered != mode:
+        if set_errors or rendered != expected:
             reason = "; ".join(set_errors) or f"config.yaml reads back {rendered!r}"
             rollback_errors = await _rollback(reason)
             raise CommandApprovalsApplyFailed(
@@ -414,31 +469,73 @@ async def apply_mode(
             )
 
         active = await unit_active()
-        restart_state = "skipped-inactive"
-        if active is True:
-            try:
-                await restart()
-            except Hal0Error as exc:
-                rollback_errors = await _rollback(f"restart failed: {exc}")
-                raise CommandApprovalsApplyFailed(
-                    f"Hermes restart failed ({exc}). "
-                    + (
-                        "The previous setting and config were restored; check "
-                        "`hal0 agent status` because the agent may be stopped."
-                        if not rollback_errors
-                        else "Restoring the previous setting also failed: "
-                        + "; ".join(rollback_errors)
-                    ),
-                    details={"mode": mode, "rollback_errors": rollback_errors},
-                ) from exc
-            restart_state = "restarted"
+        if active is None:
+            # Liveness is unobservable (no systemd, a wedged bus, a probe
+            # timeout). Never treat unknown as "not running".
+            return {
+                **status(),
+                "changed": True,
+                "restart": "unknown",
+                "message": (
+                    f"Hermes command approvals set to {mode}, but hal0 could not tell "
+                    "whether Hermes is running. Restart it to apply: "
+                    "sudo systemctl restart hal0-agent@hermes"
+                ),
+            }
+        if active is False:
+            return {
+                **status(),
+                "changed": True,
+                "restart": "skipped-inactive",
+                "message": (
+                    f"Hermes command approvals set to {mode}. Hermes is not running; "
+                    "it uses the new mode when it next starts."
+                ),
+            }
 
-        message = f"Hermes command approvals set to {mode}."
-        if restart_state == "restarted":
-            message += " Hermes restarted."
-        else:
-            message += " Hermes is not running; it uses the new mode when it next starts."
-        return {**status(), "changed": True, "restart": restart_state, "message": message}
+        try:
+            await restart()
+        except Hal0Error as exc:
+            if getattr(exc, "code", None) == RESTART_TIMEOUT_CODE:
+                # The unit may still be coming up on the NEW config. Rolling
+                # the files back now could leave Hermes running the new mode
+                # while the setting and GET say the old one, so keep the new
+                # state (it is consistent on disk) and say the outcome is
+                # unknown.
+                audit_log.warning(
+                    "agent.command_approvals.restart_timeout",
+                    agent_id=AGENT_ID,
+                    actor=actor,
+                    mode=mode,
+                )
+                return {
+                    **status(),
+                    "changed": True,
+                    "restart": "timeout",
+                    "message": (
+                        f"Hermes command approvals set to {mode}, but the Hermes restart "
+                        "did not finish in time, so whether it is running is unknown. "
+                        "Check `hal0 agent status hermes`."
+                    ),
+                }
+            rollback_errors = await _rollback(f"restart failed: {exc}")
+            raise CommandApprovalsApplyFailed(
+                f"Hermes restart failed ({exc}). "
+                + (
+                    "The previous setting and config were restored; check "
+                    "`hal0 agent status` because the agent may be stopped."
+                    if not rollback_errors
+                    else "Restoring the previous setting also failed: " + "; ".join(rollback_errors)
+                ),
+                details={"mode": mode, "rollback_errors": rollback_errors},
+            ) from exc
+
+        return {
+            **status(),
+            "changed": True,
+            "restart": "restarted",
+            "message": f"Hermes command approvals set to {mode}. Hermes restarted.",
+        }
 
 
 __all__ = [

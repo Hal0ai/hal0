@@ -16,7 +16,9 @@ every slot op + self-update runs through (#1465), whether the bundled agent
 shares ``hal0-api``'s UID (ADR-0002 — advisory, it is the shipped default),
 and the context window behind
 Hermes' anchor model (#1867 — the smoke probes never run on an in-place
-upgrade, which is the only shape that defect survives in).
+upgrade, which is the only shape that defect survives in). It also flags a
+Hermes ``config.yaml`` whose ``approvals.mode`` drifted from the operator's
+command-approvals setting (advisory).
 
 Strictly read-only — there is no ``--fix`` here; the per-surface subcommands
 own repair. Exit codes:
@@ -1272,6 +1274,74 @@ def check_hermes_mcp_config_auth(
     )
 
 
+def check_hermes_command_approvals(
+    *,
+    status_fn: Callable[[], dict[str, Any]] | None = None,
+    config_path: Path | None = None,
+) -> Check:
+    """Hermes' rendered ``approvals.mode`` must match the operator's choice.
+
+    ADVISORY (warn, never fail). The setting lives in the root-owned seed TOML
+    (``hal0 agent command-approvals``), but Hermes reads ``approvals.mode`` from
+    its own ``config.yaml`` under ``HERMES_HOME``, which the ``hal0`` user owns.
+    A hand edit, or a Hermes agent with the terminal tool on, can change that
+    file directly (for example to ``off``) without any API call, so drift is
+    worth surfacing. An ``approvals.mode`` in overrides.yaml is the expected
+    value when it is set.
+    """
+    from hal0.agents import hermes_command_approvals as cmd
+    from hal0.agents.hermes_provision import HERMES_HOME_DEFAULT
+
+    name, label = "hermes_command_approvals", "Hermes command approvals"
+    path = config_path if config_path is not None else (HERMES_HOME_DEFAULT / "config.yaml")
+    if not path.exists():
+        return Check(name, label, _PASS, "hermes not provisioned — nothing to check")
+    try:
+        st = (status_fn or cmd.status)()
+    except Exception as exc:  # a broken read must not crash the roll-up
+        return Check(name, label, _WARN, f"could not read the setting: {exc}")
+    if st.get("seed_unreadable"):
+        return Check(
+            name,
+            label,
+            _WARN,
+            f"{st.get('seed_path')} could not be read or parsed, so the default "
+            f"({st.get('default')}) is in use — fix the file or run "
+            "`hal0 agent reprovision hermes --repair`",
+        )
+    if st.get("invalid_value"):
+        return Check(
+            name,
+            label,
+            _WARN,
+            f"stored value {st['invalid_value']!r} is invalid; using the default "
+            f"({st.get('default')}) — run `hal0 agent command-approvals smart|manual`",
+        )
+    rendered, effective = st.get("rendered"), st.get("effective")
+    if rendered is None:
+        return Check(
+            name,
+            label,
+            _PASS,
+            f"could not read approvals.mode from {path} — run as root to check it",
+        )
+    if st.get("in_sync") is False:
+        fix = (
+            "run `hal0 agent reprovision hermes` to re-apply overrides.yaml"
+            if st.get("source") == "overrides"
+            else f"run `hal0 agent command-approvals {effective}` to re-apply it"
+        )
+        return Check(
+            name,
+            label,
+            _WARN,
+            f"config.yaml has approvals.mode {rendered!r} but {effective!r} is expected "
+            f"(source: {st.get('source')}); a hand edit or a terminal-enabled agent "
+            f"changed it — {fix}",
+        )
+    return Check(name, label, _PASS, f"{effective} ({st.get('source')})")
+
+
 #: The placeholder credential the hindsight-api unit ships for the auth-off
 #: posture — see installer/systemd/hindsight-api.service.
 _HINDSIGHT_LLM_PLACEHOLDER = "hal0-local-noauth"
@@ -1508,6 +1578,7 @@ def build_all_checks(base: str | None = None) -> list[Check]:
         check_seams(),
         check_mcp_mounts(),
         check_hermes_mcp_config_auth(auth=auth_payload),
+        check_hermes_command_approvals(),
         check_hermes_anchor_window(base=base),
         check_hindsight_llm_auth(auth=auth_payload),
         check_memory_engine_version(memory=payloads["memory"]),

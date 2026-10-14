@@ -34,6 +34,13 @@ export function commandApprovalsNotices(status) {
       text: `In effect: ${status.effective}. ${status.overrides_path} sets approvals.mode, which wins over this setting. Remove it there to use the choice above.`,
     })
   }
+  if (status.seed_unreadable) {
+    out.push({
+      tone: 'warn',
+      testid: 'cmd-approvals-unreadable',
+      text: `${status.seed_path} could not be read, so the stored setting is unknown and the default (${status.default}) is in use. Fix the file or run sudo hal0 agent reprovision hermes --repair.`,
+    })
+  }
   if (status.invalid_value) {
     out.push({
       tone: 'warn',
@@ -45,7 +52,10 @@ export function commandApprovalsNotices(status) {
     out.push({
       tone: 'warn',
       testid: 'cmd-approvals-drift',
-      text: `Hermes's config.yaml says "${status.rendered}", not "${status.effective}". Pick the mode again (or run hal0 agent reprovision hermes) to re-apply it.`,
+      text:
+        status.source === 'overrides'
+          ? `Hermes's config.yaml says "${status.rendered}", not "${status.effective}" from overrides.yaml. Run sudo hal0 agent reprovision hermes to re-apply it.`
+          : `Hermes's config.yaml says "${status.rendered}", not "${status.effective}". Pick ${status.effective} again to re-apply it.`,
     })
   }
   if (status.rendered == null) {
@@ -58,8 +68,14 @@ export function commandApprovalsNotices(status) {
   return out
 }
 
-/** One-line result after a save, from the PUT response. */
-export function commandApprovalsSaveText(result) {
-  if (!result) return null
-  return result.message || null
+/** True when re-picking the current mode re-applies it (config.yaml drifted). */
+export function canReapply(status) {
+  return !!status && status.in_sync === false && status.source !== 'overrides'
+}
+
+/** Result line after a save: `{ tone: 'ok' | 'warn', text }`, or null. */
+export function commandApprovalsSaveResult(result) {
+  if (!result || !result.message) return null
+  const uncertain = result.restart === 'unknown' || result.restart === 'timeout'
+  return { tone: uncertain ? 'warn' : 'ok', text: result.message }
 }

@@ -20,6 +20,8 @@ STATUS = {
     "default": "smart",
     "allowed": ["smart", "manual"],
     "invalid_value": None,
+    "seed_unreadable": False,
+    "seed_path": "/etc/hal0/agents/hermes.toml",
     "overrides_path": "/etc/hal0/agents/hermes/overrides.yaml",
     "rendered": "smart",
     "in_sync": True,
@@ -113,3 +115,24 @@ def test_json_output(api: dict[str, Any]) -> None:
     res = _invoke("--json")
     assert res.exit_code == 0
     assert '"effective": "smart"' in res.output
+
+
+def test_drift_fix_names_the_mode_to_repick(api: dict[str, Any]) -> None:
+    api["status"].update(source="setting", rendered="off", in_sync=False)
+    out = " ".join(_invoke().output.split())  # Rich wraps at 80 columns
+    assert "hal0 agent command-approvals smart" in out
+
+
+def test_drift_under_override_advises_reprovision_only(api: dict[str, Any]) -> None:
+    api["status"].update(
+        mode="manual", effective="smart", source="overrides", rendered="off", in_sync=False
+    )
+    out = " ".join(_invoke().output.split())
+    assert "reprovision hermes" in out
+    assert "command-approvals smart" not in out
+
+
+def test_unreadable_seed_is_shown(api: dict[str, Any]) -> None:
+    api["status"].update(seed_unreadable=True)
+    res = _invoke()
+    assert "could not be read" in res.output
