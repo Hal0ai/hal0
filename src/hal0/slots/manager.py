@@ -394,6 +394,8 @@ class SlotManager:
         # write.  Callers receive deep copies — the cached dict is never
         # handed out for mutation.
         self._cfg_cache: dict[int, tuple[int, int, dict[str, Any]]] = {}
+        # #2631: shadowed duplicate slot TOMLs already warned about.
+        self._warned_duplicate_tomls: set[Path] = set()
         # In-memory copy of the latest state per slot (mirrors state.json).
         self._states: dict[int, SlotStateRecord] = {}
         # Crash-loop breaker (issue i4): consecutive load-failure count +
@@ -772,12 +774,16 @@ class SlotManager:
                 continue
             stem = p.stem
             if p in shadowed:
-                log.warning(
-                    "slot.duplicate_toml",
-                    extra={"skipped": str(p), "kept": str(shadowed[p])},
-                )
-                if dropped is not None:
-                    dropped.append(stem)
+                # #2631: the winning file was read in full, so this is not a
+                # lost slot and must NOT go in ``dropped`` (that would mark
+                # every /v1/models fetch partial). Warn once per path per
+                # process; enumeration runs on every /api/slots poll.
+                if p not in self._warned_duplicate_tomls:
+                    self._warned_duplicate_tomls.add(p)
+                    log.warning(
+                        "slot.duplicate_toml",
+                        extra={"skipped": str(p), "kept": str(shadowed[p])},
+                    )
                 continue
             if is_id_stem(stem):
                 sid = int(stem)

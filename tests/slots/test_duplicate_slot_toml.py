@@ -63,13 +63,54 @@ def test_enumerator_skips_later_duplicate_and_warns(
     assert str(stale) in str(msgs[0].__dict__) and str(live) in str(msgs[0].__dict__)
 
 
-def test_enumerator_reports_shadowed_stem_as_dropped(tmp_hal0_home: str) -> None:
+def test_enumerator_does_not_report_shadowed_stem_as_dropped(tmp_hal0_home: str) -> None:
+    """#2631: a shadowed file is not a lost slot; the winner was read in full."""
     root = _slots_root(tmp_hal0_home)
     _write(root, "1", "agent", "live")
     _write(root, "agent", "agent", "stale")
     dropped: list[str] = []
     SlotManager()._iter_configured_slots(dropped=dropped)
-    assert dropped == ["agent"]
+    assert dropped == []
+
+
+@pytest.mark.asyncio
+async def test_iter_configs_detailed_complete_with_shadowed_sibling(tmp_hal0_home: str) -> None:
+    root = _slots_root(tmp_hal0_home)
+    _write(root, "1", "agent", "live")
+    _write(root, "agent", "agent", "stale", port=8192)
+    cfgs, skipped = await SlotManager().iter_configs_detailed()
+    assert skipped == []
+    assert [c["name"] for c in cfgs] == ["agent"]
+
+
+def test_duplicate_warning_logged_once_per_path(
+    tmp_hal0_home: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    root = _slots_root(tmp_hal0_home)
+    _write(root, "1", "agent", "live")
+    _write(root, "agent", "agent", "stale", port=8192)
+    sm = SlotManager()
+    with caplog.at_level(logging.WARNING):
+        sm._iter_configured_slots()
+        sm._iter_configured_slots()
+    msgs = [r for r in caplog.records if r.getMessage() == "slot.duplicate_toml"]
+    assert len(msgs) == 1
+
+
+@pytest.mark.asyncio
+async def test_composite_fetch_not_degraded_with_shadowed_sibling(tmp_hal0_home: str) -> None:
+    from hal0.api import _fetch_hal0_composite_models_detailed, _hal0_model_cache_clear
+
+    root = _slots_root(tmp_hal0_home)
+    _write(root, "1", "agent", "live-model")
+    _write(root, "agent", "agent", "stale-model", port=8192)
+    _hal0_model_cache_clear()
+    try:
+        models, degraded = await _fetch_hal0_composite_models_detailed(SlotManager())
+    finally:
+        _hal0_model_cache_clear()
+    assert degraded is False
+    assert len(models) == 1  # the slot lists once
 
 
 def test_slots_referencing_model_ignores_shadowed_stale_file(tmp_hal0_home: str) -> None:
