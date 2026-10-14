@@ -587,12 +587,20 @@ def upgrade_memory_engine(
     os.rename(venv, failed_venv)
     os.rename(venv_old, venv)
     restored = True
-    if pg_snap.exists() and not _restore_pg(runner, pg_snap, pg):
-        restored = False
-        # Never start an engine on a half-restored data dir: it could
-        # initialise an empty database and serve it. The marker makes the next
-        # attempt restore the snapshot before anything else.
-        (hs / _RESTORE_FAILED_MARKER).write_text(f"{pg_snap}\n", encoding="utf-8")
+    marker = hs / _RESTORE_FAILED_MARKER
+    # The marker goes down BEFORE .pg0 is touched and is removed only once the
+    # copy succeeded, so a crash or ENOSPC mid-copy still leaves it: without
+    # it the next attempt would snapshot the partial .pg0 over the last good
+    # copy. Never start an engine on a half-restored data dir either: it could
+    # initialise an empty database and serve it.
+    if pg_snap.exists():
+        with contextlib.suppress(OSError):
+            marker.write_text(f"{pg_snap}\n", encoding="utf-8")
+        restored = _restore_pg(runner, pg_snap, pg)
+        if restored:
+            with contextlib.suppress(OSError):
+                marker.unlink(missing_ok=True)
+    if not restored:
         log.warning(
             "updater.memory_engine_pg_restore_failed",
             job_id=job_id,

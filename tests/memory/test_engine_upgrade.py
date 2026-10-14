@@ -382,3 +382,21 @@ def test_snapshot_copy_failure_keeps_the_previous_snapshot(hs):
     assert (stale / "marker").read_text() == "previous"
     assert not (hs / ".pg0.snapshot-new").exists()
     assert (hs / ".venv" / "bin" / "hindsight-api").exists()
+
+
+def test_restore_marker_is_down_before_the_copy_and_gone_after_success(hs):
+    seen: list[bool] = []
+
+    class Watch(FakeRunner):
+        def __call__(self, args, **kwargs):
+            args = [str(a) for a in args]
+            if args[0] == "cp" and ".pg0.pre-" in args[2]:
+                seen.append((hs / ".pg0.restore-failed").exists())
+            return super().__call__(args, **kwargs)
+
+    result = upgrade_memory_engine(
+        seam=FakeSeam(), runner=Watch(), http_get=_wrong_version, hs_dir=hs
+    )
+    assert result["status"] == "rolled_back"
+    assert seen == [True]  # a crash mid-copy would leave the marker
+    assert not (hs / ".pg0.restore-failed").exists()
