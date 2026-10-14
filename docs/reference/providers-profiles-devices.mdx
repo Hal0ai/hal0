@@ -186,8 +186,9 @@ A slot's `binary` field selects a runner key directly; left empty, it derives on
 hal0 does not ship a llama.cpp fork, so no runner loads ROCmFPX-family (ROCmFP4, …), IU4 or ActiveFPX GGUFs. They are refused up front rather than at load: adding from a path and pulling answer 422 `models.unsupported_quant`, a library scan skips the file with reason `unsupported_quant:<label>`, and launching a slot whose model is one answers 422 `slot.unsupported_quant` (`hal0.registry.detect.unsupported_quant`). Use a plain GGUF build of the same model.
 
 See [Manage runner images](/docs/guides/manage-runner-images/) for the
-catalogue page (Slots → Runner Images), the Vulkan lane's image gate, and
-what pulling/pinning/updating an image does and does not do to a running
+catalogue page (Slots → Runner Images) and the Vulkan lane's image gate, and
+[Manage runner images: pulling, pinning & upgrading](/docs/guides/manage-runner-images-lifecycle/)
+for what pulling/pinning/updating an image does and does not do to a running
 slot.
 
 ## Device taxonomy

@@ -99,7 +99,7 @@ An apply that leaves any component below still `pending`
 exits **2** rather than reporting a clean success — distinct from a failed
 update (`die()` → exit 1).
 
-It also exits **2** when the profile-centric conversion ([ADR-0029](/docs/adr/0029-profile-centric-config)) left a slot, a stored profile or a stack unconverted. `hal0 update` prints one line per blocker: the target (a slot file, `profile:<name>` or `stack:<name>`), the reason, and the fix. A blocked slot keeps launching the command it ran before the update until its file is edited. See [`hal0 profile`](#hal0-profile--inspect-and-edit-profiles).
+It also exits **2** when the profile-centric conversion ([ADR-0029](/docs/adr/0029-profile-centric-config)) left a slot, a stored profile or a stack unconverted. `hal0 update` prints one line per blocker: the target (a slot file, `profile:<name>` or `stack:<name>`), the reason, and the fix. A blocked slot keeps launching the command it ran before the update until its file is edited. See [`hal0 profile`](/docs/reference/cli-operator/#hal0-profile--inspect-and-edit-profiles).
 
 `hal0 update status` prints the same hal0 version/channel check plus a
 per-component table (installed / pinned / status) for the four
@@ -167,7 +167,7 @@ hardware backend. The hardware backend is selected with `--hardware`, and stored
 | `model scan` | — | — |
 | `model add <path>` | `path` | `--id` (default `""`), `--name`, `--license` (default `""`), `--overwrite` |
 | `model store [path]` | optional `path` | `--migrate` |
-| `model run <ref>` | `ref` | `--slot`/`-s` (default `""`), `--timeout` (default: the derived slot-load budget from `hal0.slot_lifecycle_budget`, `622` at time of writing — see "Slot lifecycle timeouts" below) |
+| `model run <ref>` | `ref` | `--slot`/`-s` (default `""`), `--timeout` (default: the derived slot-load budget from `hal0.slot_lifecycle_budget`, `622` at time of writing — see [Slot lifecycle timeouts](/docs/reference/cli-operator/#slot-lifecycle-timeouts)) |
 
 ## `hal0 memory` — manage hal0 memory (Hindsight engine)
 
