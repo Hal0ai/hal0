@@ -5,10 +5,14 @@ on:
     branches: [main]
   pull_request:
 
-# Cancel superseded PR runs to save runners; never cancel a push to main
-# (every main commit must build — required checks + the nightly greenness gate).
+# Cancel superseded PR runs to save runners. Push-to-main runs get one group
+# per commit, so no run for a main commit is ever queued behind, replaced by,
+# or cancelled by a newer push (every main commit must build: required checks
+# + the nightly greenness gate). A shared per-ref group is not enough:
+# cancel-in-progress: false still lets GitHub drop a *pending* run when a newer
+# one queues in the same group (#2429).
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.event_name == 'push' && github.sha || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 # Least privilege: CI only needs to read the repo.
