@@ -414,6 +414,50 @@
     [
       "Authorization: Basic \"pk11 outer,Authorization: Basic \"pk11 INNER SECRET\"",
       "INNER SECRET"
+    ],
+    [
+      "password=\\\"pk12 escaped tail\\\" z",
+      "escaped tail"
+    ],
+    [
+      "api_key=\\'pk12 escaped tail\\' z",
+      "escaped tail"
+    ],
+    [
+      "--token \\\"pk12 escaped tail\\\" z",
+      "escaped tail"
+    ],
+    [
+      "HAL0_BEARER_TOKEN=\\\"pk12 escaped tail\\\" z",
+      "escaped tail"
+    ],
+    [
+      "Authorization: Basic \\\"pk12 escaped tail\\\" z",
+      "escaped tail"
+    ],
+    [
+      "Proxy-Authorization: Token \\\"pk12 escaped tail\\\" z",
+      "escaped tail"
+    ],
+    [
+      "{\\\"password\\\": \\\"pk12 escaped tail\\\", \\\"x\\\": 1}",
+      "escaped tail"
+    ],
+    [
+      "x {\\\"token\\\":\\\"pk12 escaped tail\\\"} y",
+      "escaped tail"
+    ],
+    [
+      "password=\\\\\"pk12 escaped tail\\\\\" z",
+      "escaped tail"
+    ],
+    [
+      "password=\\\"pk12 \\\\\\\"escaped tail\\\\\\\" end\\\" z",
+      "escaped tail"
+    ],
+    [
+      "{\\\\\\\"password\\\\\\\": \\\\\\\"pk12 escaped tail\\\\\\\"}",
+      "escaped tail"
     ]
   ],
   "keep": [
@@ -806,6 +850,82 @@
     [
       "X_KEY=abcAuthorization:\nBasic \"hello world\" next",
       "X_KEY=***REDACTED***\nBasic \"hello world\" next"
+    ],
+    [
+      "password=\\\"abc def\\\" z",
+      "password=\\\"***REDACTED***\\\" z"
+    ],
+    [
+      "password=\\'abc def\\' z",
+      "password=\\'***REDACTED***\\' z"
+    ],
+    [
+      "api_key=\\\"abc def\\\" z",
+      "api_key=***REDACTED*** z"
+    ],
+    [
+      "HAL0_BEARER_TOKEN=\\\"abc def\\\" z",
+      "HAL0_BEARER_TOKEN=***REDACTED*** z"
+    ],
+    [
+      "Authorization: Basic \\\"abc def\\\" z",
+      "Authorization: Basic \\\"***REDACTED***\\\" z"
+    ],
+    [
+      "Authorization: Bearer \\\"abc def\\\" z",
+      "Authorization: Bearer ***REDACTED*** z"
+    ],
+    [
+      "Proxy-Authorization: Token \\\"abc def\\\" z",
+      "Proxy-Authorization: Token \\\"***REDACTED***\\\" z"
+    ],
+    [
+      "--token \\\"abc def\\\" z",
+      "--token \\\"***REDACTED***\\\" z"
+    ],
+    [
+      "--token=\\\"abc def\\\" z",
+      "--token=\\\"***REDACTED***\\\" z"
+    ],
+    [
+      "{\\\"password\\\": \\\"a b\\\", \\\"x\\\": 1}",
+      "{\\\"password\\\": \\\"***REDACTED***\\\", \\\"x\\\": 1}"
+    ],
+    [
+      "x {\\\"token\\\":\\\"a b\\\"} y",
+      "x {\\\"token\\\":\\\"***REDACTED***\\\"} y"
+    ],
+    [
+      "password=\\\\\"abc def\\\\\" z",
+      "password=\\\\\"***REDACTED***\\\\\" z"
+    ],
+    [
+      "password=\\\"abc \\\\\\\"def\\\\\\\" ghi\\\" z",
+      "password=\\\"***REDACTED***\\\" z"
+    ],
+    [
+      "{\\\\\\\"password\\\\\\\": \\\\\\\"a b\\\\\\\"}",
+      "{\\\\\\\"password\\\\\\\": \\\\\\\"***REDACTED***\\\\\\\"}"
+    ],
+    [
+      "password=\\\"abc def",
+      "password=\\\"***REDACTED***"
+    ],
+    [
+      "password=\\\"\\\" z",
+      "password=\\\"***REDACTED***\\\" z"
+    ],
+    [
+      "password=\\\"abc def\\\"\nnext \\\"q\\\" x",
+      "password=\\\"***REDACTED***\\\"\nnext \\\"q\\\" x"
+    ],
+    [
+      "password=\\\"abc def\nnext \\\"q\\\" x",
+      "password=\\\"***REDACTED***\nnext \\\"q\\\" x"
+    ],
+    [
+      "password=\\abc def",
+      "password=***REDACTED*** def"
     ]
   ],
   "mask_names": [

@@ -1394,6 +1394,82 @@ class TestQuotedAuthorizationValue:
             assert secret not in body, body
 
 
+class TestEscapedOpeningQuote:
+    """#2616, the installer's copy of the fix in hal0.redaction: a value that
+    opens with a backslash-escaped quote is masked whole, closed by the same
+    delimiter, with its delimiters dropped (as this pass masks any bare value)."""
+
+    _HEADS = (
+        "password=",
+        "api_key=",
+        "HAL0_BEARER_TOKEN=",
+        "--token ",
+        "--token=",
+        "--api-key ",
+        "Authorization: Basic ",
+        "Authorization: Bearer ",
+        "Proxy-Authorization: Token ",
+    )
+
+    @pytest.mark.parametrize("head", _HEADS)
+    @pytest.mark.parametrize("k", [1, 2, 3, 7])
+    @pytest.mark.parametrize("quote", ['"', "'"])
+    def test_the_value_is_masked_whole(self, head: str, k: int, quote: str) -> None:
+        delim = "\\" * k + quote
+        out = _mask_patterns(f"{head}{delim}pk_a pk_b{delim} z").strip()
+        assert out == f"{head}{_MASK} z"
+
+    @pytest.mark.parametrize("head", _HEADS)
+    def test_an_unclosed_value_masks_to_the_end_of_its_line(self, head: str) -> None:
+        out = _mask_patterns(f'{head}\\"pk_a pk_b\nnext \\"q\\" x')
+        assert out.splitlines() == [f"{head}{_MASK}", 'next \\"q\\" x']
+
+    @pytest.mark.parametrize(
+        ("line", "expected"),
+        [
+            # JSON in a JSON string, the realistic source.
+            (r"{\"password\": \"pk_a pk_b\", \"x\": 1}", rf'{{\"password": {_MASK}, \"x\": 1}}'),
+            (r"x {\"token\":\"pk_a pk_b\"} y", rf'x {{\"token":{_MASK}}} y'),
+            (r"{\"Authorization\": \"Basic pk_a\"}", rf'{{\"Authorization": "Basic {_MASK}"}}'),
+            # A bare value after a name whose quote is escaped.
+            (r"{\"password\": 12345678}", rf'{{\"password": {_MASK}}}'),
+            # A longer run inside the value does not close it.
+            (r"password=\"pk_a \\\"pk_b\\\" pk_c\" z", f"password={_MASK} z"),
+            # An escaped backslash and a quote is its own delimiter.
+            (r'password=\\"pk_a pk_b\\" z', f"password={_MASK} z"),
+            # Not an opener: a backslash that is no part of an escaped quote.
+            (r"password=\pk_a pk_b", f"password={_MASK} pk_b"),
+            # A plain quoted value after a flag and a space runs to its quote.
+            ('--token "pk_a pk_b" z', f"--token {_MASK} z"),
+            ("--password 'pk_a pk_b' z", f"--password {_MASK} z"),
+        ],
+    )
+    def test_the_json_forms_and_the_rest(self, line: str, expected: str) -> None:
+        out = _mask_patterns(line).strip()
+        assert out == expected
+        assert _mask_patterns(out).strip() == expected  # idempotent
+
+    def test_the_report_carries_no_escaped_quoted_secret(self, tmp_path: Path) -> None:
+        box = _make_box(tmp_path)
+        box["log"].write_text(
+            'msg: {\\"password\\": \\"pk_pw_Xx56 pk_pw_Ww78\\", \\"x\\": 1}\n'
+            'cmd: curl --token \\"pk_tok_Vv90 pk_tok_Uu12\\" url\n'
+            'hdr: Authorization: Basic \\"pk_auth_Tt34 pk_auth_Ss56\\"\n'
+        )
+        proc, report = _run_report(box)
+        assert report is not None and report.is_file(), proc.stderr
+        body = report.read_text()
+        for secret in (
+            "pk_pw_Xx56",
+            "pk_pw_Ww78",
+            "pk_tok_Vv90",
+            "pk_tok_Uu12",
+            "pk_auth_Tt34",
+            "pk_auth_Ss56",
+        ):
+            assert secret not in body, body
+
+
 # ── #2402: multi-line TOML arrays under a sensitive key ─────────────────────
 
 _ARR_A = "arrSecretAlpha1Kq2Wz9Xc"  # no known prefix: literal pass only

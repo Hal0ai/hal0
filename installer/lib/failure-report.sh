@@ -721,6 +721,74 @@ _hal0_report_quoted_auth_exprs() {
     done
 }
 
+# Escaped quotes (#2616): text that was escaped to sit inside a string, a JSON
+# value in a log message or a command line in a JSON field, holds `\"a b\"`
+# where a plain one holds `"a b"`, and `\"password\": \"a b\"` for
+# `"password": "a b"`. The delimiters are `\` repeated k times and a quote; a
+# value is closed by the same delimiter (exactly k backslashes), so a longer
+# run inside it does not close it. Masked whole, delimiters and all, with the
+# mask the rules after these see in place of any value.
+#
+# The sed expressions that take the backslashes out of an escaped quote after
+# the name of a secret or of an `Authorization` header, or before a scheme, so
+# every rule that reads `NAME": ` reads `NAME\": ` too. Only lines that hold an
+# escaped quote are looked at.
+_hal0_report_escaped_name_exprs() {
+    local scheme="$_HAL0_REPORT_AUTH_SCHEMES"
+    printf '%s\n' "/\\\\+[\"']/{"
+    # The name pattern holds two groups of its own, so the quote is group 4.
+    printf '%s\n' "s#(${_HAL0_REPORT_TEXT_NAME_RE})\\\\+([\"'][[:space:]]*[=:])#\\1\\4#gI"
+    printf '%s\n' "s#(authorization)\\\\+([\"'][[:space:]]*:)#\\1\\2#gI"
+    printf '%s\n' "s#(authorization[\"']?[[:space:]]*:[[:space:]]*)\\\\+([\"']${scheme}[[:space:]])#\\1\\2#gI"
+    printf '%s\n' "}"
+}
+
+# The sed expressions that mask an escaped quoted value after a secret NAME[=:],
+# a `--secret` flag or an `Authorization` scheme, for each k up to 8 and each
+# quote. A quote that does not close, or that a NAME mark or a glued keyword (a
+# secret the value swallows) would straddle, masks to the end of the line. Run
+# between the marks and their masks, so what they leave is no longer a value.
+_hal0_report_escaped_value_exprs() {
+    local m="$_HAL0_REPORT_MASK" k="$_HAL0_REPORT_PACKED" w="$_HAL0_REPORT_SWALLOW"
+    local kw="$_HAL0_REPORT_KEYWORD" v="$_HAL0_REPORT_NAME_VALUE"
+    local pre="((^|[^A-Za-z0-9_-])(${_HAL0_REPORT_TEXT_NAME_RE})[\"']?[[:space:]]*[=:][[:space:]]*)"
+    local flag="(--[A-Za-z0-9-]*(secret|token|password|pass|api-key|apikey|private-key)[A-Za-z0-9-]*(=|[[:space:]]+))"
+    local auth="(authorization[\"']?[[:space:]]*:[[:space:]]*[\"']?${_HAL0_REPORT_AUTH_SCHEMES}[[:space:]]+)"
+    local marks="[${k}${w}${kw}${v}]*" stops="${w}${kw}${v}" ctx n q j body bodystop
+    printf '%s\n' "/\\\\+[\"']/{"
+    for ctx in "$pre" "$flag" "$auth"; do
+        for q in '"' "'"; do
+            for n in 1 2 3 4 5 6 7 8; do
+                # What a value holds: a character, a run of backslashes and the
+                # character after it, or a run of any other length and a quote.
+                body="[^\\\\]|\\\\+[^\\\\${q}]"
+                bodystop="[^\\\\${stops}]|\\\\+[^\\\\${q}${stops}]"
+                for ((j = 1; j <= 8; j++)); do
+                    ((j == n)) && continue
+                    body+="|\\\\{${j}}${q}"
+                    bodystop+="|\\\\{${j}}${q}"
+                done
+                body+="|\\\\{9,}${q}"
+                bodystop+="|\\\\{9,}${q}"
+                printf '%s\n' "s#${ctx}${marks}\\\\{${n}}${q}(${bodystop})*\\\\{${n}}${q}#\\1${m}#gI"
+                printf '%s\n' "s#${ctx}${marks}\\\\{${n}}${q}(${bodystop})*[${stops}].*\$#\\1${m}#I"
+                printf '%s\n' "s#${ctx}${marks}\\\\{${n}}${q}(${body})*(\\\\)?\$#\\1${m}#I"
+            done
+        done
+    done
+    printf '%s\n' "}"
+    # A plain quoted value after a `--secret` flag, which the bare-value rule
+    # would mask only to its first space; a backslash and the character after it
+    # are one unit in it, as in hal0.redaction.
+    printf '%s\n' "/--/{"
+    for q in '"' "'"; do
+        printf '%s\n' "s#${flag}${marks}${q}(([^\\\\${q}${stops}]|\\\\[^${stops}])*)${q}#\\1${m}#gI"
+        printf '%s\n' "s#${flag}${marks}${q}(([^\\\\${q}${stops}]|\\\\[^${stops}])*)[${stops}].*\$#\\1${m}#I"
+        printf '%s\n' "s#${flag}${marks}${q}(([^\\\\${q}]|\\\\.)*)(\\\\)?\$#\\1${m}#I"
+    done
+    printf '%s\n' "}"
+}
+
 _hal0_report_mask_patterns() {
     local m="$_HAL0_REPORT_MASK" k="$_HAL0_REPORT_PACKED" mark expr
     local w="$_HAL0_REPORT_SWALLOW" kw="$_HAL0_REPORT_KEYWORD" v="$_HAL0_REPORT_NAME_VALUE"
@@ -728,11 +796,16 @@ _hal0_report_mask_patterns() {
     local -a swallow=()
     while IFS= read -r expr; do
         swallow+=(-e "$expr")
-    done < <(_hal0_report_swallow_mark_exprs && _hal0_report_quoted_auth_exprs \
-        && _hal0_report_swallow_mask_exprs)
+    done < <(_hal0_report_swallow_mark_exprs && _hal0_report_escaped_value_exprs \
+        && _hal0_report_quoted_auth_exprs && _hal0_report_swallow_mask_exprs)
     mark="$(_hal0_report_packed_mark_expr)"
+    local -a esc_name=()
+    while IFS= read -r expr; do
+        esc_name+=(-e "$expr")
+    done < <(_hal0_report_escaped_name_exprs)
     LC_ALL=C sed -E \
         -e "s#[${k}${w}${kw}${v}]##g" \
+        "${esc_name[@]}" \
         -e "$mark" \
         "${swallow[@]}" \
         -e "s#(authorization:[[:space:]]*(basic|token)[[:space:]]+)[^[:space:]'\"${k}${w}${kw}${v}][^[:space:]'\"${k}${kw}]*#\\1${m}#gI" \
