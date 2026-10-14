@@ -91,6 +91,16 @@ applying. Add those subsections to a version's section to surface them; see
   WebSocket gate already used (#2326); a named origin passes only through the
   allowlist. `http://localhost:8080` joins the built-in default allowlist,
   since browsers resolve `localhost` locally and no remote page can own it.
+- Log, Sentry and failure-report redaction now mask a second secret packed
+  after a `;` or `,` (#2529). In `X_KEY=abc;Bearer tok` or
+  `HAL0_BEARER_TOKEN=x,HF_TOKEN= hf_v` the first value used to run on to the
+  next space and take the second secret's name with it, so `tok` and `hf_v`
+  were left visible. A value now ends before a `;` or `,` that starts another
+  secret, and each secret is masked under its own name. A `;` or `,`
+  followed by anything else stays inside the masked value. The same rule
+  applies to the dashboard's Sentry scrubber, the doctor bundle and the
+  installer failure report. In hal0's logs and the Sentry scrubber, a raw
+  `Authorization` value also ends before whitespace that starts a secret.
 
 ### Breaking
 

@@ -514,13 +514,18 @@ _hal0_report_text_value_is_secret() {
 # field, a YAML key, an HTTP header; #2400) that appears anywhere in the
 # assembled report (an echoed export, a command line), so the same value is
 # also masked where it later appears bare (in a URL, a journal line). Only
-# plausible secrets are harvested (_hal0_report_text_value_is_secret).
-# Returns non-zero only if grep itself errored (rc 2) — no match is fine.
+# plausible secrets are harvested (_hal0_report_text_value_is_secret). A
+# value ends before a packed secret (#2529), as in the pattern pass, so
+# `abc;Bearer` is not one literal whose mask would hide the token's name.
+# Returns non-zero only if sed or grep itself errored — no match is fine.
 _hal0_report_harvest_report_text() {
-    local file="$1" hits rc=0 hit name value
+    local file="$1" hits rc=0 hit name value k="$_HAL0_REPORT_PACKED"
+    LC_ALL=C sed -E -e "s#${k}##g" -e "$(_hal0_report_packed_mark_expr)" "$file" \
+        >"${file}.packed" || return 1
     hits="$(LC_ALL=C grep -oiE \
-        "(^|[^A-Za-z0-9_-])(${_HAL0_REPORT_TEXT_NAME_RE})[\"']?[[:space:]]*[=:][[:space:]]*[\"']?[^\"'[:space:],}&]+" \
-        "$file")" || rc=$?
+        "(^|[^A-Za-z0-9_-])(${_HAL0_REPORT_TEXT_NAME_RE})[\"']?[[:space:]]*[=:][[:space:]]*[\"']?[^\"'[:space:],}&${k}]+" \
+        "${file}.packed")" || rc=$?
+    rm -f "${file}.packed"
     [[ $rc -le 1 ]] || return 1
     while IFS= read -r hit; do
         [[ "$hit" =~ ([A-Za-z0-9_-]+)[\"\']?[[:space:]]*[=:][[:space:]]*[\"\']?(.*)$ ]] || continue
@@ -579,24 +584,49 @@ _hal0_report_mask_literals() {
 # mirrors hal0.redaction._AUTH_SCHEMES.
 _HAL0_REPORT_AUTH_SCHEMES='(basic|bearer|token|apikey|api-key|key|bot|ssws|negotiate|digest|ntlm|oauth|hawk|dpop|aws4-hmac-sha256)'
 
+# Packed secrets (#2529): a bare value ends before a `;` or `,` that starts
+# another secret, so in `X_KEY=abc;Bearer tok` or `A_TOKEN=x,HF_TOKEN= y` the
+# second secret keeps its name and its value is masked. sed has no lookahead,
+# so this byte is put before each such separator first, every bare value
+# class stops at it, and it is removed at the end (a stray one in the input
+# is dropped first). A separator followed by anything else stays in the value
+# and is masked with it. Mirrors hal0.redaction._starts_secret, without its
+# benign names: this pass masks a `max_tokens` value too.
+_HAL0_REPORT_PACKED=$'\001'
+
+# The sed expression that marks each packed separator. A secret starts with
+# a name whose value this pass masks, a Bearer token, an Authorization header
+# value or a --token flag, maybe behind opening quotes or brackets.
+_hal0_report_packed_mark_expr() {
+    local heads="bearer[[:space:]]+([A-Za-z0-9._~+/=-]|[*]{3}REDACTED[*]{3})"
+    heads+="|authorization[\"']?[[:space:]]*:[[:space:]]*[\"']?(${_HAL0_REPORT_AUTH_SCHEMES}[[:space:]]+[^[:space:]\"',]|[^[:space:]\"',]{8})"
+    heads+="|--[A-Za-z0-9-]*(secret|token|password|pass|api-key|apikey|private-key)[A-Za-z0-9-]*(=|[[:space:]]+)[^-[:space:]]"
+    heads+="|(${_HAL0_REPORT_TEXT_NAME_RE})[\"']?[[:space:]]*[=:][[:space:]]*(\"[^\"]*\"|'[^']*'|[^\"'[:space:],}&])"
+    printf '%s' "s#([;,])([\"'([{<]*(${heads}))#${_HAL0_REPORT_PACKED}\\1\\2#gI"
+}
+
 _hal0_report_mask_patterns() {
-    local m="$_HAL0_REPORT_MASK"
+    local m="$_HAL0_REPORT_MASK" k="$_HAL0_REPORT_PACKED" mark
     local pre="((^|[^A-Za-z0-9_-])(${_HAL0_REPORT_TEXT_NAME_RE})[\"']?[[:space:]]*[=:][[:space:]]*)"
+    mark="$(_hal0_report_packed_mark_expr)"
     LC_ALL=C sed -E \
-        -e "s#(authorization:[[:space:]]*(basic|token)[[:space:]]+)[^[:space:]'\"]+#\\1${m}#gI" \
+        -e "s#${k}##g" \
+        -e "$mark" \
+        -e "s#(authorization:[[:space:]]*(basic|token)[[:space:]]+)[^[:space:]'\"${k}]+#\\1${m}#gI" \
         -e "s#(bearer[[:space:]]+)[A-Za-z0-9._~+/=-]+#\\1${m}#gI" \
-        -e "s#(authorization[\"']?[[:space:]]*:[[:space:]]*[\"']?${_HAL0_REPORT_AUTH_SCHEMES}[[:space:]]+)[^[:space:]\"',]+#\\1${m}#gI" \
+        -e "s#(authorization[\"']?[[:space:]]*:[[:space:]]*[\"']?${_HAL0_REPORT_AUTH_SCHEMES}[[:space:]]+)[^[:space:]\"',${k}]+#\\1${m}#gI" \
         -e "/authorization[\"']?[[:space:]]*:[[:space:]]*[\"']?${_HAL0_REPORT_AUTH_SCHEMES}([[:space:]]|\$)/I!s#(authorization[\"']?[[:space:]]*:[[:space:]]*[\"']?)[^[:space:]\"',]{8,}[^\"',]*#\\1${m}#gI" \
         -e "s#([a-z][a-z0-9+.-]*://[^/@[:space:]:]*):[^/@[:space:]]+@#\\1:${m}@#gI" \
         -e "s#([a-z][a-z0-9+.-]*://)[^/@[:space:]:]{16,}@#\\1${m}@#gI" \
         -e "s#${pre}\"[^\"]*\"#\\1\"${m}\"#gI" \
         -e "s#${pre}'[^']*'#\\1'${m}'#gI" \
-        -e "s#${pre}[^\"'[:space:],}&]+#\\1${m}#gI" \
-        -e "s#(--[A-Za-z0-9-]*(secret|token|password|pass|api-key|apikey|private-key)[A-Za-z0-9-]*(=|[[:space:]]+))[^-[:space:]][^[:space:]]*#\\1${m}#gI" \
+        -e "s#${pre}[^\"'[:space:],}&${k}]+#\\1${m}#gI" \
+        -e "s#(--[A-Za-z0-9-]*(secret|token|password|pass|api-key|apikey|private-key)[A-Za-z0-9-]*(=|[[:space:]]+))[^-[:space:]${k}][^[:space:]${k}]*#\\1${m}#gI" \
         -e "s#(client_id=)[A-Za-z0-9_.-]{16,}#\\1${m}#gI" \
         -e "s#eyJ[A-Za-z0-9_-]{10,}\\.[A-Za-z0-9_-]{10,}\\.[A-Za-z0-9_-]{10,}#${m}#g" \
         -e "s#(hf_|sk-|gh[pousr]_|github_pat_|xox[baprs]-)[A-Za-z0-9_-]{20,}#${m}#g" \
-        -e "s#AKIA[0-9A-Z]{16}#${m}#g"
+        -e "s#AKIA[0-9A-Z]{16}#${m}#g" \
+        -e "s#${k}##g"
 }
 
 # _hal0_report_redact_file SECRETS IN OUT WORKDIR — run the text pass and

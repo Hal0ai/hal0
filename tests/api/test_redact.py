@@ -963,6 +963,117 @@ class TestRedactionTimeIsLinear:
         assert "hunter2" not in out and "s3cr3t" not in out and ":pw@" not in out
 
 
+# ── #2529: a second secret packed after ``;`` or ``,`` ──────────────────────
+
+
+class TestPackedSecrets:
+    """#2529: a bare value used to run to the next whitespace, so a second
+    secret packed after it with ``;`` or ``,`` lost its name to the first
+    mask, and its own value, after a space, was left visible."""
+
+    @pytest.mark.parametrize(
+        ("line", "secrets"),
+        [
+            # The two lines from the issue.
+            ("X_KEY=pk_first_1;Bearer pk_second_2", ["pk_first_1", "pk_second_2"]),
+            ("HAL0_BEARER_TOKEN=pk_first_1,HF_TOKEN= pk_second_2", ["pk_first_1", "pk_second_2"]),
+            ("token=pk_first_1;password=pk_second_2", ["pk_first_1", "pk_second_2"]),
+            ("api_key=pk_first_1,secret=pk_second_2", ["pk_first_1", "pk_second_2"]),
+            ("token=pk_first_1;HF_TOKEN= pk_second_2", ["pk_first_1", "pk_second_2"]),
+            ("X_KEY=pk_first_1;HF_TOKEN = pk_second_2", ["pk_first_1", "pk_second_2"]),
+            ("X_KEY=pk_first_1;password: pk_second_2", ["pk_first_1", "pk_second_2"]),
+            ('X_KEY=pk_first_1;"HF_TOKEN": "pk second 2"', ["pk_first_1", "second"]),
+            ("HF_TOKEN=pk_first_1;Bearer pk_second_2", ["pk_first_1", "pk_second_2"]),
+            # A benign first name used to swallow the second secret's name too.
+            ("max_tokens=5;HF_TOKEN= pk_second_2", ["pk_second_2"]),
+            ("hf_token_file=/run/x;HF_TOKEN= pk_second_2", ["pk_second_2"]),
+            # Authorization header values.
+            (
+                "Authorization: Bearer pk_first_1;HF_TOKEN= pk_second_2",
+                ["pk_first_1", "pk_second_2"],
+            ),
+            (
+                "Authorization: Basic pk_first_1;HF_TOKEN= pk_second_2",
+                ["pk_first_1", "pk_second_2"],
+            ),
+            (
+                "Authorization: Basic pk_first_1,HF_TOKEN= pk_second_2",
+                ["pk_first_1", "pk_second_2"],
+            ),
+            (
+                "Authorization: Token pk_first_1;password: pk_second_2",
+                ["pk_first_1", "pk_second_2"],
+            ),
+            ("X_KEY=pk_first_1,Authorization: Basic pk_second_2", ["pk_first_1", "pk_second_2"]),
+            ("X_KEY=pk_first_1;Authorization: pk_second_2_raw", ["pk_first_1", "pk_second_2"]),
+            # ``--flag`` values.
+            ("--token=pk_first_1;--password pk_second_2", ["pk_first_1", "pk_second_2"]),
+            ("--token=pk_first_1;HF_TOKEN= pk_second_2", ["pk_first_1", "pk_second_2"]),
+            ("X_KEY=pk_first_1;--password pk_second_2", ["pk_first_1", "pk_second_2"]),
+            # Three in a row.
+            (
+                "a_key=pk_first_1;b_token= pk_second_2,Bearer pk_third_3",
+                ["pk_first_1", "pk_second_2", "pk_third_3"],
+            ),
+        ],
+    )
+    @pytest.mark.parametrize("redact", [redact_log_line, redact_shareable_text])
+    def test_every_packed_secret_is_masked(self, redact, line: str, secrets: list[str]) -> None:
+        out = redact(line)
+        for secret in secrets:
+            assert secret not in out, (line, out)
+        assert redact(out) == out  # idempotent
+
+    @pytest.mark.parametrize(
+        ("line", "expected"),
+        [
+            ("X_KEY=abc;Bearer tok", f"X_KEY={MASK};Bearer {MASK}"),
+            ("HAL0_BEARER_TOKEN=x,HF_TOKEN= hf_v", f"HAL0_BEARER_TOKEN={MASK},HF_TOKEN= {MASK}"),
+            ("token=a;password=b", f"token={MASK};password={MASK}"),
+            ("max_tokens=5;HF_TOKEN= hf_v", f"max_tokens=5;HF_TOKEN= {MASK}"),
+        ],
+    )
+    def test_each_packed_secret_keeps_its_own_name(self, line: str, expected: str) -> None:
+        assert redact_log_line(line) == expected
+
+    @pytest.mark.parametrize(
+        "line",
+        [
+            # What follows the ``;`` is no secret, so it may be part of the
+            # first value: it stays masked with it.
+            "X_KEY=pk;first;1",
+            "X_KEY=pk_first_1;max_tokens=pk_more_2",
+            "X_KEY=pk_first_1;tokenizer=pk_more_2",
+            "X_KEY=pk_first_1,Bearer",
+            "X_KEY=pk_first_1;HF_TOKEN=",
+        ],
+    )
+    def test_a_value_runs_on_over_a_separator_that_starts_no_secret(self, line: str) -> None:
+        assert redact_log_line(line) == f"X_KEY={MASK}"
+
+    def test_an_empty_value_before_a_packed_secret(self) -> None:
+        assert redact_log_line("X_KEY=;HF_TOKEN= hf_v") == f"X_KEY=;HF_TOKEN= {MASK}"
+
+    def test_the_shareable_harvest_stops_at_a_packed_secret(self) -> None:
+        """The literal harvest reads the same values: ``abc;Bearer`` is not
+        one literal that, masked, hides the bearer token's prefix."""
+        out = redact_shareable_text("HF_TOKEN=abcdefgh12;Bearer tok_Zz12\nlater abcdefgh12\n")
+        assert out == f"HF_TOKEN={MASK};Bearer {MASK}\nlater {MASK}\n"
+
+    @pytest.mark.parametrize(
+        "unit", ["x_key=a;", "token=a;", "a;Bearer ", "--token=a;", "Authorization: Basic a;"]
+    )
+    @pytest.mark.parametrize("redact", [redact_log_line, redact_shareable_text])
+    def test_a_long_packed_run_is_fast(self, redact, unit: str) -> None:
+        import time
+
+        line = unit * (80_000 // len(unit))
+        start = time.perf_counter()
+        redact(line)
+        elapsed = time.perf_counter() - start
+        assert elapsed < TestRedactionTimeIsLinear._BOUND_S, f"{unit!r} took {elapsed:.2f}s"
+
+
 # ── #2413: the cases shared with the dashboard's browser-side port ─────────
 
 

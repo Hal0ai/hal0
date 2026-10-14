@@ -205,6 +205,13 @@ describe('redactSecrets: linear time', () => {
     ['client_id= repeated', 'client_id='.repeat(N / 10)],
     ['a_ repeated', 'a_'.repeat(N / 2)],
     ['KEY= repeated', 'KEY='.repeat(N / 4)],
+    // #2529: a value tests each `;` or `,` in it for a packed secret.
+    ['packed X_KEY=a; repeated', 'X_KEY=a;'.repeat(N / 8)],
+    ['packed token=a; repeated', 'token=a;'.repeat(N / 8)],
+    ['packed ;Bearer a repeated', ';Bearer a'.repeat(N / 9)],
+    ['packed --token=a; repeated', '--token=a;'.repeat(N / 10)],
+    ['one value of many ;a', `X_KEY=${';a'.repeat(N / 2)}`],
+    ['a raw Authorization value of many words', `Authorization: abcdefghij${' a'.repeat(N / 2)}`],
   ]
 
   it.each(inputs)('%s', (_label, text) => {
