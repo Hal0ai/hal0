@@ -55,7 +55,9 @@ applying. Add those subsections to a version's section to surface them; see
   filename), logs `slot.duplicate_toml` with both paths, and skips the other,
   so `GET /api/slots` lists the slot once. Deleting a model that only the
   skipped stale file referenced no longer unloads the live slot of the same
-  name (#2542).
+  name (#2542). The skipped file is logged once per process and no longer
+  marks the slot enumeration partial, so `/v1/models` keeps refreshing while
+  the stale file is present (#2631).
 
 ### Removed
 
