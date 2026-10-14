@@ -334,6 +334,34 @@
     [
       "max_tokens=\"5 HF_TOKEN=\"pk5_after_benign\"",
       "pk5_after_benign"
+    ],
+    [
+      "api_key='pk6 single tail'",
+      "single tail"
+    ],
+    [
+      "api_key=\"pk6 double tail\"",
+      "double tail"
+    ],
+    [
+      "HAL0_ADMIN_KEY=\"pk6   several   spaces\" next",
+      "several   spaces"
+    ],
+    [
+      "HAL0_BEARER_TOKEN='pk6 env tail'",
+      "env tail"
+    ],
+    [
+      "Authorization: Bearer 'pk6 header tail'",
+      "header tail"
+    ],
+    [
+      "api_key=\"pk6 unclosed tail",
+      "unclosed tail"
+    ],
+    [
+      "X_KEY='pk6 quoted' HF_TOKEN= pk6_after",
+      "pk6_after"
     ]
   ],
   "keep": [
@@ -509,7 +537,7 @@
     ],
     [
       "--api-key=\"v, db-password\": w",
-      "--api-key=***REDACTED*** db-password\": ***REDACTED***"
+      "--api-key=***REDACTED***"
     ],
     [
       "password=\"abc HF_TOKEN=\"zzz\" more",
@@ -530,6 +558,58 @@
     [
       "max_tokens=\"5 HF_TOKEN=\"zzz\"",
       "max_tokens=\"5 HF_TOKEN=\"***REDACTED***\""
+    ],
+    [
+      "api_key='a b'",
+      "api_key=***REDACTED***"
+    ],
+    [
+      "api_key=\"a b\"",
+      "api_key=***REDACTED***"
+    ],
+    [
+      "api_key=\"a   b   c\" next",
+      "api_key=***REDACTED*** next"
+    ],
+    [
+      "api_key='a b' and 'c d'",
+      "api_key=***REDACTED*** and 'c d'"
+    ],
+    [
+      "api_key=\"a b\", other=1",
+      "api_key=***REDACTED*** other=1"
+    ],
+    [
+      "api_key='it\"s a b' z",
+      "api_key=***REDACTED*** z"
+    ],
+    [
+      "api_key='' x",
+      "api_key=***REDACTED*** x"
+    ],
+    [
+      "HAL0_BEARER_TOKEN='a b' x",
+      "HAL0_BEARER_TOKEN=***REDACTED*** x"
+    ],
+    [
+      "Authorization: Bearer 'a b' x",
+      "Authorization: Bearer ***REDACTED*** x"
+    ],
+    [
+      "api_key='a b",
+      "api_key=***REDACTED***"
+    ],
+    [
+      "api_key=\"a b HF_TOKEN=z",
+      "api_key=***REDACTED***"
+    ],
+    [
+      "api_key=\"a b\nnext line",
+      "api_key=***REDACTED***\nnext line"
+    ],
+    [
+      "api_key='a b'tail",
+      "api_key=***REDACTED***"
     ]
   ],
   "mask_names": [

@@ -1336,10 +1336,23 @@ class TestUnclosedQuotes:
     def test_the_issue_line_renders_without_the_second_value(self) -> None:
         line = '--api-key="v, db-password": w'
         assert redact_shareable_text(line) == f"--api-key={MASK}"
-        assert redact_log_line(line) == f'--api-key={MASK} db-password": {MASK}'
+        # The log pass masks the whole quoted value too (#2598), not up to its
+        # first space.
+        assert redact_log_line(line) == f"--api-key={MASK}"
 
     @pytest.mark.parametrize(
-        "unit", ['password="a ', 'x="a.b_token": ', "secret: '", 'tokenizer="a ', 'a"b_token="']
+        "unit",
+        [
+            'password="a ',
+            'x="a.b_token": ',
+            "secret: '",
+            'tokenizer="a ',
+            'a"b_token="',
+            # A quoted ``*_KEY=`` value, closed or not (#2598).
+            "api_key='a ",
+            "api_key='a b' ",
+            'X_KEY="a HF_TOKEN=" ',
+        ],
     )
     @pytest.mark.parametrize("redact", [redact_log_line, redact_shareable_text])
     @pytest.mark.timing
