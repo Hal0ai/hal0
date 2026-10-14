@@ -6,8 +6,8 @@ Adapter lane: **hal0-provider** (dynamic model-provider plugin, chat_completions
 
 Fields and the ``fetch_models`` / ``register_provider`` / ``get_provider_profile``
 signatures are copied verbatim from the reviewed official pin
-``9de9c25f620ff7f1ce0fd5457d596052d5159596`` (``providers/base.py`` and
-``providers/__init__.py``, Hermes v2026.7.7.2 / 0.18.2).
+``3ef6bbd201263d354fd83ec55b3c306ded2eb72a`` (``providers/base.py`` and
+``providers/__init__.py``, Hermes v2026.7.20 / 0.19.0).
 
 The provider lane consumes: ``api_mode`` defaulting to ``chat_completions``
 (OpenAI-compat transport), ``aliases`` (stable role aliases), ``base_url`` /
@@ -79,6 +79,11 @@ class ProviderProfile:
         **context: Any,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         return {}, {}
+
+    # Added upstream in 0.19.0. hal0-provider does not override it, so vision
+    # resolution falls back to the chat model / aggregator chain as before.
+    def default_vision_model(self) -> str | None:
+        return None
 
     def get_max_tokens(self, model: str | None) -> int | None:
         return self.default_max_tokens

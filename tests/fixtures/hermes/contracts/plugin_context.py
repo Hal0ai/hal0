@@ -9,8 +9,8 @@ dispatch_tool, inject_message), and the optional future **hal0-context**
 (register_context_engine).
 
 Signatures copied verbatim from the reviewed official pin
-``9de9c25f620ff7f1ce0fd5457d596052d5159596`` (``hermes_cli/plugins.py``,
-Hermes v2026.7.7.2 / 0.18.2). ``register(ctx)`` is called once at startup; a
+``3ef6bbd201263d354fd83ec55b3c306ded2eb72a`` (``hermes_cli/plugins.py``,
+Hermes v2026.7.20 / 0.19.0). ``register(ctx)`` is called once at startup; a
 registration crash disables only that plugin (per the design's "every adapter
 degrades independently" requirement).
 

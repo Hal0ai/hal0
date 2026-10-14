@@ -681,13 +681,13 @@ known_issues:
     adjudicated: v1.0.0-rc.6
     related_issue: 1829
     summary: >-
-      A fresh install's hermes-agent (0.18.2, from the pinned VCS commit) ships neither
+      A fresh install's hermes-agent (0.19.0 at the current pin, 0.18.2 before it; from the pinned VCS commit) ships neither
       hermes_cli/web_dist nor the web frontend source, so GET :9119/ returns 404 "Frontend not
       built". The agent process is otherwise healthy and hal0's unit STATUS string says so
       truthfully ("hermes agent up; dashboard UI not built (no web_dist bundled)").
     why: >-
-      hal0 deliberately pins hermes-agent to an immutable, reviewed upstream commit (9de9c25f /
-      0.18.2) under a governed compatibility freeze (VETTED_HERMES_REFS + contract fixtures).
+      hal0 deliberately pins hermes-agent to an immutable, reviewed upstream commit (3ef6bbd2 /
+      0.19.0; 9de9c25f / 0.18.2 before) under a governed compatibility freeze (VETTED_HERMES_REFS + contract fixtures).
       The dashboard bundle is an upstream npm build artifact the pinned git tree does not carry
       pre-built, so a VCS install of the pin cannot contain it — and the tree ships no
       hermes_cli/web source either, so even a node-equipped box has nothing to build. hal0

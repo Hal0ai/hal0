@@ -817,7 +817,7 @@ HERMES_REQUIREMENTS = (
 # adding it here AND refreshing the contract fixtures under
 # ``tests/fixtures/hermes/contracts/`` +
 # ``tests/agents/hermes/test_contract_compatibility.py``.
-VETTED_HERMES_REFS: frozenset[str] = frozenset({"9de9c25f620ff7f1ce0fd5457d596052d5159596"})
+VETTED_HERMES_REFS: frozenset[str] = frozenset({"3ef6bbd201263d354fd83ec55b3c306ded2eb72a"})
 
 # Broken-build floor (#1247): every hermes-agent below this is off-limits to any
 # resolver, including old-Python wheel fallbacks that would otherwise land on the
@@ -1219,7 +1219,8 @@ def _phase_home_init(ctx: _StepCtx) -> PhaseResult:
 KANBAN_DB_NAME = "kanban.db"
 
 # The table set hermes's own SCHEMA_SQL creates (hermes_cli/kanban_db.py,
-# pinned ref 9de9c25f620ff7f1ce0fd5457d596052d5159596 / PyPI 0.18.2 parity).
+# pinned ref 3ef6bbd201263d354fd83ec55b3c306ded2eb72a / v2026.7.20 / 0.19.0;
+# unchanged since 0.18.2).
 # Used ONLY as a cheap existence probe for the convergent skip — never as a
 # CREATE statement source, so a future upstream migration can add columns or
 # tables without hal0 drifting out of sync.

@@ -5,8 +5,8 @@
 Adapter lane: **hal0-memory** (installed seed layout + registration collector).
 
 Copied from the reviewed official pin
-``9de9c25f620ff7f1ce0fd5457d596052d5159596`` (``plugins/memory/__init__.py``,
-Hermes v2026.7.7.2 / 0.18.2).
+``3ef6bbd201263d354fd83ec55b3c306ded2eb72a`` (``plugins/memory/__init__.py``,
+Hermes v2026.7.20 / 0.19.0).
 
 Two frozen facts the design doc's LXC105 compatibility-defect correction
 (#3 in the research doc) depends on:
