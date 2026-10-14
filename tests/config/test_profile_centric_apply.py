@@ -1062,3 +1062,31 @@ def test_blocked_embedded_stack_profile_is_kept_verbatim_across_runs() -> None:
     assert "vis" not in st.profiles and "vis" not in st.profile_rewrites
     assert second.backup is None
     assert _snapshot() == after_first
+
+
+def test_generated_profile_never_takes_a_blocked_name() -> None:
+    """The slug a generated profile would get is a blocked profile's name."""
+    write_toml(paths.profiles_toml(), {"profile": {"chat-n": {"flags": _VIS_FLAGS}}})
+    write_slot(
+        "2",
+        {
+            "id": 2,
+            "name": "plain",
+            "type": "llm",
+            "device": "gpu-rocm",
+            "profile": "chat",
+            "port": 8082,
+            "workers": 1,
+            "model": {"default": "n"},
+        },
+    )
+    write_db([old_model("n", defaults={"extra_args": "--temp 0.6"})])
+    report = pca.migrate_profile_centric()
+    assert report.plan is not None
+    (plain,) = report.plan.slots
+    assert plain.status == "convert", report.plan.lines()
+    assert plain.profile_after != "chat-n"
+    assert plain.profile_after in report.plan.profiles
+    stored = tomllib.loads(paths.profiles_toml().read_text())["profile"]
+    assert stored["chat-n"] == {"flags": _VIS_FLAGS}
+    assert "--mmproj" not in plain.argv_after

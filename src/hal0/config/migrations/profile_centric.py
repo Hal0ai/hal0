@@ -984,7 +984,9 @@ class _Planner:
                 return name
         taken = {**{n: {} for n in self.reserved}, **self.catalog}
         name = slug_name(base, suffix, content=content, taken=taken)
-        if name in self.reserved and name not in self.catalog:
+        if name in self.plan.blocked_profiles or (
+            name in self.reserved and name not in self.catalog
+        ):
             name = self._free_name(name, "converted")
         self.catalog[name] = content
         self.plan.profiles[name] = content
