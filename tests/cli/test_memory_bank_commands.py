@@ -21,7 +21,7 @@ runner = CliRunner()
 def stub_api(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(bc, "_api_unreachable", lambda _url: False)
 
-    calls: dict[str, list[Any]] = {"get": [], "put": [], "patch": [], "post": [], "delete": []}
+    calls: dict[str, list[Any]] = {"get": [], "patch": [], "post": [], "delete": []}
     responses: dict[str, Any] = {}
 
     def fake_get(path: str, **kw: Any) -> Any:
@@ -38,6 +38,18 @@ def stub_api(monkeypatch: pytest.MonkeyPatch):
                     }
                 ]
             }
+        if path.endswith("/profile"):
+            if path != "/api/memory/banks/shared/profile":
+                raise bc.CliApiError("bank 'nope' does not exist", status=404)
+            return responses.get(
+                "profile",
+                {
+                    "bank_id": "shared",
+                    "name": "shared",
+                    "mission": "",
+                    "disposition": {"skepticism": 3, "literalism": 3, "empathy": 3},
+                },
+            )
         if path.endswith("/stats"):
             return {
                 "total_nodes": 10,
@@ -48,21 +60,7 @@ def stub_api(monkeypatch: pytest.MonkeyPatch):
                 "operations_by_status": {"failed": 1, "completed": 9},
                 "last_consolidated_at": None,
             }
-        if path.endswith("/profile"):
-            return responses.get(
-                "profile",
-                {
-                    "bank_id": "shared",
-                    "name": "shared",
-                    "mission": "",
-                    "disposition": {"skepticism": 3, "literalism": 3, "empathy": 3},
-                },
-            )
         return {}
-
-    def fake_put(path: str, **kw: Any) -> Any:
-        calls["put"].append((path, kw.get("json")))
-        return {"bank_id": "shared", **(kw.get("json") or {})}
 
     def fake_patch(path: str, **kw: Any) -> Any:
         calls["patch"].append((path, kw.get("json")))
@@ -79,7 +77,6 @@ def stub_api(monkeypatch: pytest.MonkeyPatch):
         return {"deleted": True}
 
     monkeypatch.setattr(bc, "api_get", fake_get)
-    monkeypatch.setattr(bc, "api_put", fake_put)
     monkeypatch.setattr(bc, "api_patch", fake_patch)
     monkeypatch.setattr(bc, "api_post", fake_post)
     monkeypatch.setattr(bc, "api_delete", fake_delete)
@@ -109,29 +106,46 @@ def test_bank_stats(stub_api) -> None:
     assert stub_api["get"][-1][0] == "/api/memory/banks/shared/stats"
 
 
-def test_profile_get(stub_api) -> None:
+def test_profile_get_reads_hal0s_profile_route(stub_api) -> None:
+    stub_api["_responses"]["profile"] = {
+        "bank_id": "shared",
+        "name": "Shared brain",
+        "mission": "help the household",
+        "disposition": {"skepticism": 4, "literalism": 2, "empathy": 5},
+    }
     result = runner.invoke(bc.app, ["profile", "get", "shared", "--json"])
-    assert result.exit_code == 0
+    assert result.exit_code == 0, result.output
     payload = json.loads(result.output)
-    assert payload["disposition"]["skepticism"] == 3
+    assert payload["disposition"] == {"skepticism": 4, "literalism": 2, "empathy": 5}
+    assert stub_api["get"][-1][0] == "/api/memory/banks/shared/profile"
+
+
+def test_profile_get_unknown_bank_fails(stub_api) -> None:
+    result = runner.invoke(bc.app, ["profile", "get", "nope", "--json"])
+    assert result.exit_code != 0
+    assert "does not exist" in result.output
 
 
 def test_profile_set_requires_at_least_one_field(stub_api) -> None:
     result = runner.invoke(bc.app, ["profile", "set", "shared"])
     assert result.exit_code != 0
-    assert not stub_api["put"]
     assert not stub_api["patch"]
 
 
-def test_profile_set_disposition_merges_and_puts_full_object(stub_api) -> None:
+def test_profile_set_unknown_bank_fails_before_writing(stub_api) -> None:
+    # A config PATCH would create the bank; a typo must not mint one.
+    result = runner.invoke(bc.app, ["profile", "set", "nope", "--skepticism", "5"])
+    assert result.exit_code != 0
+    assert not stub_api["patch"]
+
+
+def test_profile_set_disposition_goes_through_config_patch(stub_api) -> None:
     result = runner.invoke(bc.app, ["profile", "set", "shared", "--skepticism", "5"])
     assert result.exit_code == 0, result.output
-    path, payload = stub_api["put"][-1]
-    assert path == "/api/memory/banks/shared/profile"
-    # All three disposition fields must be present (upstream requires it),
-    # only skepticism should differ from the fetched default.
-    assert payload == {"disposition": {"skepticism": 5, "literalism": 3, "empathy": 3}}
-    assert not stub_api["patch"]
+    path, payload = stub_api["patch"][-1]
+    assert path == "/api/memory/banks/shared/config"
+    # Config updates are partial: only the trait that was passed is sent.
+    assert payload == {"updates": {"disposition_skepticism": 5}}
 
 
 def test_profile_set_mission_fields_go_through_config_patch(stub_api) -> None:
@@ -153,17 +167,19 @@ def test_profile_set_mission_fields_go_through_config_patch(stub_api) -> None:
     assert payload == {
         "updates": {"retain_mission": "extract carefully", "reflect_mission": "be terse"}
     }
-    assert not stub_api["put"]
 
 
-def test_profile_set_can_touch_both_resources_in_one_call(stub_api) -> None:
+def test_profile_set_traits_and_missions_share_one_patch(stub_api) -> None:
     result = runner.invoke(
         bc.app,
         ["profile", "set", "shared", "--empathy", "5", "--observations-mission", "notice patterns"],
     )
     assert result.exit_code == 0, result.output
-    assert stub_api["put"], "disposition PUT expected"
-    assert stub_api["patch"], "config PATCH expected"
+    assert len(stub_api["patch"]) == 1
+    _path, payload = stub_api["patch"][0]
+    assert payload == {
+        "updates": {"observations_mission": "notice patterns", "disposition_empathy": 5}
+    }
 
 
 def test_export_writes_file(stub_api, tmp_path) -> None:

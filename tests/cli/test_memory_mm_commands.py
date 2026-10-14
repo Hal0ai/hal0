@@ -20,6 +20,7 @@ def stub_api(monkeypatch: pytest.MonkeyPatch):
 
     def fake_get(path: str, **kw: Any) -> Any:
         calls["get"].append(path)
+        calls.setdefault("get_params", []).append(kw.get("params"))
         if path.endswith("/mental-models"):
             return {"items": [{"id": "mm-1", "name": "user-prefs", "updated_at": "t1"}]}
         if path.endswith("/history"):
@@ -46,6 +47,8 @@ def test_mm_list(stub_api) -> None:
     payload = json.loads(result.output)
     assert payload["items"][0]["id"] == "mm-1"
     assert stub_api["get"] == ["/api/memory/banks/shared/mental-models"]
+    # The engine lists metadata only by default from 0.10.0 on.
+    assert stub_api["get_params"] == [{"detail": "content"}]
 
 
 def test_mm_refresh(stub_api) -> None:

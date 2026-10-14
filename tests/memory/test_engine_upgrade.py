@@ -266,3 +266,137 @@ def test_root_mode_chowns_artifacts(hs, monkeypatch):
     assert result["status"] == "upgraded"
     assert any(".venv.new" in p for p in chowned)  # built venv handed to hal0
     assert any(f".pg0.pre-{OLD_VERSION}" in p for p in chowned)  # snapshot too
+
+
+def _wrong_version(url: str):
+    if url.endswith("/version"):
+        return {"api_version": "0.0.0"}
+    return {"status": "healthy"}
+
+
+def test_retry_replaces_a_stale_snapshot_from_an_earlier_failed_attempt(hs):
+    # An earlier attempt failed and rolled back, leaving its snapshot; the
+    # old engine then took writes. A second failed attempt must restore THOSE
+    # writes, not the first attempt's copy (Codex review on #2612).
+    stale = hs / f".pg0.pre-{OLD_VERSION}"
+    stale.mkdir()
+    (stale / "PG_VERSION").write_text("18\n")
+    (stale / "marker").write_text("first attempt")
+    (hs / ".pg0" / "marker").write_text("written after the first rollback")
+
+    result = upgrade_memory_engine(
+        seam=FakeSeam(), runner=FakeRunner(), http_get=_wrong_version, hs_dir=hs
+    )
+    assert result["status"] == "rolled_back"
+    assert (stale / "marker").read_text() == "written after the first rollback"
+    assert (hs / ".pg0" / "marker").read_text() == "written after the first rollback"
+    assert not (hs / ".pg0.snapshot-new").exists()
+
+
+class RestoreFails(FakeRunner):
+    """``cp -a <snapshot> .pg0`` fails (the rollback restore); other copies work."""
+
+    def __call__(self, args, **kwargs):
+        args = [str(a) for a in args]
+        if args[0] == "cp" and ".pg0.pre-" in args[2]:
+            self.calls.append(args)
+            return subprocess.CompletedProcess(args, 1, "", "Input/output error")
+        return super().__call__(args, **kwargs)
+
+
+def test_failed_restore_marks_the_db_and_leaves_the_engine_stopped(hs):
+    # Starting an engine on a half-restored .pg0 could initialise an empty
+    # database and serve it (Codex review on #2612).
+    seam = FakeSeam()
+    result = upgrade_memory_engine(
+        seam=seam, runner=RestoreFails(), http_get=_wrong_version, hs_dir=hs
+    )
+    assert result["status"] == "rolled_back"
+    assert result["old_engine_healthy"] is False
+    assert seam.verbs == ["stop", "start", "stop"]  # no start on the bad .pg0
+    marker = hs / ".pg0.restore-failed"
+    assert marker.read_text().strip() == str(hs / f".pg0.pre-{OLD_VERSION}")
+    assert (hs / f".pg0.pre-{OLD_VERSION}" / "PG_VERSION").exists()
+
+
+def test_next_attempt_restores_the_marked_snapshot_before_anything_else(hs):
+    good = hs / f".pg0.pre-{OLD_VERSION}"
+    good.mkdir()
+    (good / "PG_VERSION").write_text("18\n")
+    (good / "marker").write_text("last known good")
+    shutil.rmtree(hs / ".pg0")
+    (hs / ".pg0").mkdir()  # half-restored debris
+    (hs / ".pg0.restore-failed").write_text(f"{good}\n")
+    runner = FakeRunner()
+
+    result = upgrade_memory_engine(seam=FakeSeam(), runner=runner, http_get=_healthy, hs_dir=hs)
+    assert result["status"] == "upgraded"
+    assert not (hs / ".pg0.restore-failed").exists()
+    assert (hs / ".pg0" / "marker").read_text() == "last known good"
+    copies = [c for c in runner.calls if c[0] == "cp"]
+    # restore first, then the fresh snapshot of the restored data dir
+    assert copies[0][2:] == [str(good), str(hs / ".pg0")]
+    assert copies[1][2] == str(hs / ".pg0")
+
+
+def test_marked_db_with_no_snapshot_aborts_and_stays_stopped(hs):
+    (hs / ".pg0.restore-failed").write_text(f"{hs / '.pg0.pre-gone'}\n")
+    seam = FakeSeam()
+    result = upgrade_memory_engine(seam=seam, runner=FakeRunner(), http_get=_healthy, hs_dir=hs)
+    assert result["status"] == "snapshot_failed"
+    assert "untrusted" in result["error"]
+    assert seam.verbs == ["stop"]
+    assert (hs / ".pg0.restore-failed").exists()
+    assert not (hs / ".venv.new").exists()
+    assert (hs / ".venv" / "bin" / "hindsight-api").exists()
+
+
+def test_a_half_finished_snapshot_swap_is_recovered(hs):
+    prev = hs / ".pg0.snapshot-prev"
+    prev.mkdir()
+    (prev / "marker").write_text("previous")
+    result = upgrade_memory_engine(
+        seam=FakeSeam(), runner=FakeRunner(), http_get=_wrong_version, hs_dir=hs
+    )
+    assert result["status"] == "rolled_back"
+    assert not prev.exists()
+    assert (hs / f".pg0.pre-{OLD_VERSION}" / "PG_VERSION").exists()  # fresh snapshot
+
+
+def test_snapshot_copy_failure_keeps_the_previous_snapshot(hs):
+    stale = hs / f".pg0.pre-{OLD_VERSION}"
+    stale.mkdir()
+    (stale / "marker").write_text("previous")
+
+    class CpFails(FakeRunner):
+        def __call__(self, args, **kwargs):
+            if str(args[0]) == "cp":
+                self.calls.append([str(a) for a in args])
+                return subprocess.CompletedProcess(args, 1, "", "No space left on device")
+            return super().__call__(args, **kwargs)
+
+    seam = FakeSeam()
+    result = upgrade_memory_engine(seam=seam, runner=CpFails(), http_get=_healthy, hs_dir=hs)
+    assert result["status"] == "snapshot_failed"
+    assert seam.verbs == ["stop", "start"]
+    assert (stale / "marker").read_text() == "previous"
+    assert not (hs / ".pg0.snapshot-new").exists()
+    assert (hs / ".venv" / "bin" / "hindsight-api").exists()
+
+
+def test_restore_marker_is_down_before_the_copy_and_gone_after_success(hs):
+    seen: list[bool] = []
+
+    class Watch(FakeRunner):
+        def __call__(self, args, **kwargs):
+            args = [str(a) for a in args]
+            if args[0] == "cp" and ".pg0.pre-" in args[2]:
+                seen.append((hs / ".pg0.restore-failed").exists())
+            return super().__call__(args, **kwargs)
+
+    result = upgrade_memory_engine(
+        seam=FakeSeam(), runner=Watch(), http_get=_wrong_version, hs_dir=hs
+    )
+    assert result["status"] == "rolled_back"
+    assert seen == [True]  # a crash mid-copy would leave the marker
+    assert not (hs / ".pg0.restore-failed").exists()

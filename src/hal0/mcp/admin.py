@@ -2841,7 +2841,10 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
         "per-fact id from a search/recall/list result, not memory_add's document_id."
     ),
     "memory_history": "Revision history for one memory unit (curation audit trail).",
-    "memory_mental_model_list": "List a bank's mental models (stored reflect responses).",
+    "memory_mental_model_list": (
+        "List a bank's mental models (stored reflect responses). Metadata only "
+        "unless detail is 'content' or 'full'."
+    ),
     "memory_mental_model_get": "Get one mental model by id.",
     "memory_mental_model_create": (
         "Create a mental model — a standing question kept refreshed from memory. "

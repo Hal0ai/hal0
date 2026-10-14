@@ -203,11 +203,14 @@ Deleting a whole bank requires `--confirm <bank>` to exactly match the
 target bank id — the CLI refuses before the request even reaches the
 server if it doesn't, and the server enforces the same check independently.
 
-`bank profile set` splits its flags across two different upstream calls:
-`--skepticism`/`--literalism`/`--empathy` (1–5 disposition traits) go
-through a profile PUT; `--retain-mission`/`--observations-mission`/
-`--reflect-mission` go through a bank-config PATCH. Pass any combination —
-only the fields you name are changed.
+`bank profile set` writes every flag as a bank-config override in one
+config PATCH: `--skepticism`/`--literalism`/`--empathy` (1–5 disposition
+traits) and `--retain-mission`/`--observations-mission`/`--reflect-mission`.
+Pass any combination — only the fields you name are changed. `bank profile
+get` shows the bank's name, mission and effective disposition. The memory
+engine's own `/profile` endpoint answers `410 Gone` from Hindsight 0.10.0 on;
+hal0's `/api/memory/banks/<bank>/profile` keeps working by composing the same
+answer from the bank list and the bank config.
 
 ## Async operations and mental models
 

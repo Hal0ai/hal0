@@ -279,16 +279,116 @@ async def bank_stats(request: Request, bank_id: str) -> Any:
     stats = await _forward(client, "GET", f"/v1/default/banks/{bank_id}/stats")
     if not _looks_like_placeholder_stats(stats):
         return stats
-    banks_resp = await _forward(client, "GET", "/v1/default/banks")
-    banks = banks_resp.get("banks") if isinstance(banks_resp, dict) else banks_resp
-    known_ids = (
-        {(b.get("bank_id") if isinstance(b, dict) else b) for b in banks}
-        if isinstance(banks, list)
-        else set()
-    )
-    if bank_id not in known_ids:
-        raise NotFound(f"bank {bank_id!r} does not exist", code="memory.bank_not_found")
+    # Same lookup as the composed profile route: id or 1.0 alias, every page.
+    await _bank_profile(client, bank_id)  # raises NotFound (memory.bank_not_found)
     return stats
+
+
+# ── /banks/{bank_id}/profile — composed (the engine retired its own) ─────────
+#
+# hindsight-api 0.10.0 retired GET/PUT /v1/default/banks/{bank}/profile:
+# both answer 410 Gone from then on (upstream #4127). This hal0 route is a
+# public 1.x surface, so it stays, composed from the two engine calls that
+# replaced it (both present with these shapes on 0.9.2 as well):
+#
+# * GET reads the bank's entry from ``GET /v1/default/banks?q=<bank>``. That
+#   item carries name, mission and disposition with the same resolution the
+#   old endpoint applied (bank config overlaid on the legacy ``banks``
+#   columns), so a disposition written through the old PUT still shows its
+#   effective value. ``GET .../config`` would not: it reports config only.
+# * PUT writes the traits as ``disposition_*`` overrides through
+#   ``PATCH .../config``. Config updates are partial, so a body naming one
+#   trait changes only that trait.
+
+_DISPOSITION_TRAITS = ("skepticism", "literalism", "empathy")
+
+
+_PROFILE_LIST_PAGE = 1000
+
+
+def _is_bank(item: Any, bank_id: str) -> bool:
+    """``item`` is the bank ``bank_id`` names — by id, or by a 1.0 alias.
+
+    Every engine bank route accepts an alias in place of the id; the list
+    answers with the canonical ``bank_id`` and the alias in
+    ``matched_aliases`` (absent before hindsight-api 0.10.2).
+    """
+    if not isinstance(item, dict):
+        return False
+    aliases = item.get("matched_aliases")
+    return item.get("bank_id") == bank_id or (isinstance(aliases, list) and bank_id in aliases)
+
+
+async def _bank_profile(client: Any, bank_id: str) -> dict[str, Any]:
+    # ``q`` is a substring filter on id or name, applied before paging, so
+    # walk the pages until the exact bank turns up or the listing runs out.
+    offset = 0
+    while True:
+        listing = await _forward(
+            client,
+            "GET",
+            "/v1/default/banks",
+            params={"q": bank_id, "limit": str(_PROFILE_LIST_PAGE), "offset": str(offset)},
+        )
+        banks = listing.get("banks") if isinstance(listing, dict) else None
+        banks = banks if isinstance(banks, list) else []
+        for item in banks:
+            if _is_bank(item, bank_id):
+                mission = item.get("mission") or ""
+                return {
+                    "bank_id": item["bank_id"],
+                    "name": item.get("name"),
+                    "disposition": item.get("disposition") or {},
+                    "mission": mission,
+                    # The old response carried the mission twice; kept for callers.
+                    "background": mission,
+                }
+        offset += len(banks)
+        total = listing.get("total") if isinstance(listing, dict) else None
+        if not banks or not isinstance(total, int) or offset >= total:
+            break
+    raise NotFound(f"bank {bank_id!r} does not exist", code="memory.bank_not_found")
+
+
+@router.get("/banks/{bank_id}/profile")
+async def bank_profile_get(request: Request, bank_id: str) -> dict[str, Any]:
+    client = _client(request)
+    _validate_segments({"bank_id": bank_id})
+    return await _bank_profile(client, bank_id)
+
+
+@router.put("/banks/{bank_id}/profile")
+async def bank_profile_put(request: Request, bank_id: str) -> dict[str, Any]:
+    client = _client(request)
+    _validate_segments({"bank_id": bank_id})
+    body = await _read_body(request)
+    disposition = body.get("disposition") if isinstance(body, dict) else None
+    if not isinstance(disposition, dict) or not disposition:
+        raise UnprocessableEntity(
+            'body must be {"disposition": {skepticism?, literalism?, empathy?}}',
+            code="memory.invalid_body",
+        )
+    updates: dict[str, int] = {}
+    for trait, value in disposition.items():
+        if trait not in _DISPOSITION_TRAITS:
+            raise UnprocessableEntity(
+                f"unknown disposition trait: {trait!r}", code="memory.invalid_body"
+            )
+        if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 5:
+            raise UnprocessableEntity(
+                f"disposition.{trait} must be an integer 1-5, got {value!r}",
+                code="memory.invalid_body",
+            )
+        updates[f"disposition_{trait}"] = value
+    # 404 before writing: PATCH .../config would otherwise create the bank.
+    await _bank_profile(client, bank_id)
+    await _forward(
+        client,
+        "PATCH",
+        f"/v1/default/banks/{bank_id}/config",
+        json_body={"updates": updates},
+    )
+    return await _bank_profile(client, bank_id)
 
 
 @router.get("/banks/{bank_id}/graph/subgraph")
@@ -868,8 +968,9 @@ async def bank_document_transfer_import(request: Request, bank_id: str) -> Any:
 #
 # (hal0 method, hal0 path under /api/memory, upstream path template).
 # Query params and JSON bodies forward verbatim; see module docstring for the
-# error-mapping contract. Upstream paths follow the 0.7.x OpenAPI spec —
-# deprecated endpoints (background, entity regenerate) are deliberately absent.
+# error-mapping contract. Upstream paths follow the engine's OpenAPI spec —
+# retired endpoints (profile, background, entity regenerate) are deliberately
+# absent.
 
 _FORWARDS: tuple[tuple[str, str, str], ...] = (
     # banks
@@ -886,8 +987,9 @@ _FORWARDS: tuple[tuple[str, str, str], ...] = (
         "/banks/{bank_id}/stats/timeseries",
         "/v1/default/banks/{bank_id}/stats/memories-timeseries",
     ),
-    ("GET", "/banks/{bank_id}/profile", "/v1/default/banks/{bank_id}/profile"),
-    ("PUT", "/banks/{bank_id}/profile", "/v1/default/banks/{bank_id}/profile"),
+    # GET/PUT /banks/{bank_id}/profile are NOT here: hindsight-api 0.10.0
+    # retired them (always 410 Gone), so hal0 composes them — see
+    # ``bank_profile_get``/``bank_profile_put`` above.
     ("GET", "/banks/{bank_id}/config", "/v1/default/banks/{bank_id}/config"),
     ("PATCH", "/banks/{bank_id}/config", "/v1/default/banks/{bank_id}/config"),
     ("DELETE", "/banks/{bank_id}/config", "/v1/default/banks/{bank_id}/config"),
