@@ -17,9 +17,8 @@
 // and drive a hand-rolled fake EventSource (mirrors that file's apiPost-spy
 // idiom for faking the api boundary, extended to apiGet + a controllable
 // EventSource class installed on globalThis).
-import React from 'react'
+import React, { act } from 'react'
 import { createRoot } from 'react-dom/client'
-import { act } from 'react-dom/test-utils'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 

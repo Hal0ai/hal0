@@ -14,11 +14,10 @@
 // slot-modals.jsx is a window-globals dash module (bare `Drawer`/`FieldGroup`/
 // `ConfirmDialog`/... identifiers resolve off `window`), so the globals are
 // installed before the dynamic import — same pattern as model-drawer.test.tsx.
-import React from 'react'
+import React, { act } from 'react'
 import * as ReactDOMClient from 'react-dom/client'
 import { createPortal } from 'react-dom'
 import { createRoot } from 'react-dom/client'
-import { act } from 'react-dom/test-utils'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 

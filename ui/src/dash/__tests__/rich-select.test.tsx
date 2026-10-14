@@ -9,9 +9,8 @@
 //
 // This repo has no @testing-library — mount with createRoot/act directly
 // (mirrors runner-images-pull-terminal.test.tsx's own note on this).
-import React from 'react'
+import React, { act } from 'react'
 import { createRoot } from 'react-dom/client'
-import { act } from 'react-dom/test-utils'
 import { afterEach, describe, expect, it } from 'vitest'
 
 import { RichSelect } from '../rich-select'

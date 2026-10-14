@@ -5,11 +5,10 @@
 // StackSlotEntry forbids any other key, so the editor must never send mtp,
 // vision, enable_thinking, server_extra_args or binary — and must carry a
 // stored row's provider through an edit instead of dropping it.
-import React from 'react'
+import React, { act } from 'react'
 import * as ReactDOMClient from 'react-dom/client'
 import { createPortal } from 'react-dom'
 import { createRoot } from 'react-dom/client'
-import { act } from 'react-dom/test-utils'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 ;(globalThis as unknown as { window: typeof globalThis }).window = globalThis

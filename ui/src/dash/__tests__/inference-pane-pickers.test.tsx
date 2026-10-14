@@ -14,9 +14,8 @@
 // inference-pane.jsx is a window-globals dash module (bare `React.Fragment`/
 // `React.cloneElement` identifiers resolve off `window` under vitest's
 // classic-JSX esbuild config) — same pattern as model-drawer.test.tsx.
-import React from 'react'
+import React, { act } from 'react'
 import { createRoot } from 'react-dom/client'
-import { act } from 'react-dom/test-utils'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 ;(globalThis as unknown as { window: typeof globalThis }).window = globalThis

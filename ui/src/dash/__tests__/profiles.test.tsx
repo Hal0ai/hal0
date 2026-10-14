@@ -6,9 +6,8 @@
 // `FormDrawer`/`ImportDialog`/`Icons` identifiers resolve off `window`), so
 // the globals are installed before the dynamic import — same pattern as
 // runner-images-view.test.tsx / memoryOverviewV2.smoke.test.tsx.
-import React from 'react'
+import React, { act } from 'react'
 import { createRoot } from 'react-dom/client'
-import { act } from 'react-dom/test-utils'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
