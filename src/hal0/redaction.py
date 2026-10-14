@@ -1126,11 +1126,11 @@ _LITERAL_OCCURRENCES_PER_CHAR_MAX: Final[int] = 4
 # text for one literal. Shorter literals bound each try, so the scan stays
 # linear with this as the constant.
 _LITERAL_SCAN_MAX: Final[int] = 128
-# The literals past it take one ``str.replace`` each, over the whole text, so
-# only while their number times the text's length stays within this many
-# characters (about half a second at ``str.replace``'s speed): a bundle with
-# thousands of long distinct secrets is scanned in one pass instead (#2533).
-_LITERAL_REPLACE_BUDGET: Final[int] = 2_000_000_000
+# The literals past it take one ``str.replace`` each, over the whole text, the
+# longest first and only as many as fit in this many characters (about a tenth
+# of a second at ``str.replace``'s speed): a bundle with thousands of long
+# distinct secrets scans the rest in one pass instead (#2533).
+_LITERAL_REPLACE_BUDGET: Final[int] = 500_000_000
 
 
 def _may_match_a_mask(literal: str) -> bool:
@@ -1198,9 +1198,11 @@ def _mask_literals(text: str, literals: list[str]) -> str:
     long_run = 0
     while long_run < len(literals) and len(literals[long_run]) > _LITERAL_SCAN_MAX:
         long_run += 1
-    if long_run * len(text) <= _LITERAL_REPLACE_BUDGET:
-        text = _replace_each(text, literals[:long_run])
-        literals = literals[long_run:]
+    # The longest ones that fit the budget; those are the ones whose tries run
+    # furthest, and the rest still go in the order the loop would take them.
+    long_run = min(long_run, _LITERAL_REPLACE_BUDGET // max(len(text), 1))
+    text = _replace_each(text, literals[:long_run])
+    literals = literals[long_run:]
     if not literals or any(_may_match_a_mask(literal) for literal in literals):
         return _replace_each(text, literals)
     # A trie of the literals; key "" marks where one ends and holds its id.

@@ -907,8 +907,33 @@ class TestShareableLiteralsSinglePass:
         assert elapsed < 3.0, f"{len(text)} chars took {elapsed:.2f}s"
         assert MASK in out
 
+    def test_past_the_budget_the_longest_literals_still_take_the_replace(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Only as many long literals as the budget allows are replaced, and they
+        are the longest ones: the periodic one that makes the scan quadratic is
+        not left to it because thousands of others do not fit (#2600)."""
+        import hal0.redaction as redaction
+
+        seen: list[list[str]] = []
+        real = redaction._replace_each
+
+        def spy(text: str, literals: list[str]) -> str:
+            seen.append(list(literals))
+            return real(text, literals)
+
+        monkeypatch.setattr(redaction, "_replace_each", spy)
+        longest = "ab" * 200
+        others = [f"{i:04d}" + "x" * 150 for i in range(50)]
+        text = "\n".join([longest, *others, longest])
+        monkeypatch.setattr(redaction, "_LITERAL_REPLACE_BUDGET", 2 * len(text))
+        out = redaction._mask_literals(text, [longest, *others])
+        assert seen[0] == [longest, others[0]]
+        assert out == self._loop(text, [longest, *others])
+
     @pytest.mark.parametrize(
-        ("longest", "budget"), [(1, 10**9), (2, 10**9), (3, 10**9), (5, 10**9), (2, 0), (3, 40)]
+        ("longest", "budget"),
+        [(1, 10**9), (2, 10**9), (3, 10**9), (5, 10**9), (2, 0), (3, 40), (2, 100), (1, 150)],
     )
     def test_the_longest_literals_first_run_the_loop_with_the_same_result(
         self, longest: int, budget: int, monkeypatch: pytest.MonkeyPatch
