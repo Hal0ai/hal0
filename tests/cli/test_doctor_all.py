@@ -1206,6 +1206,13 @@ def test_build_all_checks_composes_verify_plus_extras(monkeypatch: pytest.Monkey
     )
     monkeypatch.setattr(
         da,
+        "check_hermes_command_approvals",
+        lambda **_kw: Check(
+            "hermes_command_approvals", "Hermes command approvals", "pass", "stubbed"
+        ),
+    )
+    monkeypatch.setattr(
+        da,
         "check_hindsight_llm_auth",
         lambda **_kw: Check("hindsight_llm_auth", "Memory engine LLM auth", "pass", "stubbed"),
     )
@@ -1244,8 +1251,8 @@ def test_build_all_checks_composes_verify_plus_extras(monkeypatch: pytest.Monkey
 
     checks = da.build_all_checks()
     keys = [c.key for c in checks]
-    # 7 verify rows + 20 extras.
-    assert keys[-20:] == [
+    # 7 verify rows + 21 extras.
+    assert keys[-21:] == [
         "auth",
         "models",
         "registry-toml",
@@ -1263,6 +1270,7 @@ def test_build_all_checks_composes_verify_plus_extras(monkeypatch: pytest.Monkey
         "seams",
         "mcp_mounts",
         "hermes_mcp_auth",
+        "hermes_command_approvals",
         "hermes_anchor_window",
         "hindsight_llm_auth",
         "memory_engine_version",
@@ -1476,3 +1484,69 @@ def test_api_journal_process_probe_unknown_without_systemctl(
 ) -> None:
     monkeypatch.setattr(da.shutil, "which", lambda _cmd: None)
     assert da._api_process_ids() is None
+
+
+# ── check_hermes_command_approvals (advisory drift row) ─────────────────────
+
+
+def _approvals_status(**over: object) -> dict[str, object]:
+    base: dict[str, object] = {
+        "mode": "smart",
+        "effective": "smart",
+        "source": "setting",
+        "default": "smart",
+        "invalid_value": None,
+        "seed_unreadable": False,
+        "seed_path": "/etc/hal0/agents/hermes.toml",
+        "rendered": "smart",
+        "in_sync": True,
+    }
+    base.update(over)
+    return base
+
+
+def _approvals_check(tmp_path, **over: object) -> Check:
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text("approvals:\n  mode: smart\n")
+    return da.check_hermes_command_approvals(
+        status_fn=lambda: _approvals_status(**over), config_path=cfg
+    )
+
+
+def test_command_approvals_not_provisioned_passes(tmp_path) -> None:
+    c = da.check_hermes_command_approvals(config_path=tmp_path / "missing.yaml")
+    assert c.status == "pass" and "not provisioned" in c.detail
+
+
+def test_command_approvals_in_sync_passes(tmp_path) -> None:
+    c = _approvals_check(tmp_path)
+    assert c.status == "pass" and c.detail == "smart (setting)"
+
+
+def test_command_approvals_drift_warns_with_the_setting_fix(tmp_path) -> None:
+    c = _approvals_check(tmp_path, mode="manual", effective="manual", rendered="off", in_sync=False)
+    assert c.status == "warn"
+    assert "'off'" in c.detail and "terminal-enabled agent" in c.detail
+    assert "hal0 agent command-approvals manual" in c.detail
+
+
+def test_command_approvals_drift_under_override_advises_reprovision_only(tmp_path) -> None:
+    c = _approvals_check(tmp_path, source="overrides", rendered="manual", in_sync=False)
+    assert c.status == "warn"
+    assert "hal0 agent reprovision hermes" in c.detail
+    assert "command-approvals" not in c.detail
+
+
+def test_command_approvals_unreadable_seed_warns(tmp_path) -> None:
+    c = _approvals_check(tmp_path, seed_unreadable=True, source="default")
+    assert c.status == "warn" and "could not be read" in c.detail
+
+
+def test_command_approvals_invalid_value_warns(tmp_path) -> None:
+    c = _approvals_check(tmp_path, invalid_value="bogus", source="default")
+    assert c.status == "warn" and "'bogus'" in c.detail
+
+
+def test_command_approvals_unreadable_config_is_not_a_finding(tmp_path) -> None:
+    c = _approvals_check(tmp_path, rendered=None, in_sync=None)
+    assert c.status == "pass" and "run as root" in c.detail

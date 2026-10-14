@@ -22,12 +22,15 @@
 // Files: this page + RotateKeyDialog.jsx (type-to-confirm → POST /api/auth/
 // rotate; shows fingerprint/rotated_at, never the value) + ExposureTable.jsx
 // (static class taxonomy + live per-route table from GET /api/auth/exposure).
+// HermesCommandApprovalsPanel.jsx switches Hermes's own approvals.mode
+// (smart | manual) through /api/agents/hermes/command-approvals.
 
 import { useAuthStatus } from '@/api/hooks/useAuthStatus'
 import { useSetRequireAuth, useLogout } from '@/api/hooks/useAuthActions'
 import { enforcementPosture, loginErrorMessage } from '@/dash/auth/gateDecision.js'
 import { RotateKeyDialog } from './RotateKeyDialog.jsx'
 import { ExposureTable } from './ExposureTable.jsx'
+import { HermesCommandApprovalsPanel } from './HermesCommandApprovalsPanel.jsx'
 
 const { useState: useStateS } = React
 
@@ -98,7 +101,7 @@ export function SecurityPage() {
     <div className="s-section" data-testid="security-page">
       <h2>Security &amp; Access</h2>
       <p className="desc">
-        Authentication posture, API-key status, and route exposure policy. hal0&apos;s auth
+        Authentication posture, API-key status, Hermes command approvals, and route exposure policy. hal0&apos;s auth
         surface (<span className="mono">GET /api/auth/status</span>) never returns a key value, and
         neither does this page. Assumes an admin session (a browser HMAC session is admin-equivalent).
       </p>
@@ -245,6 +248,9 @@ export function SecurityPage() {
           }
         />
       </div>
+
+      {/* ── Hermes command approvals (Hermes approvals.mode) ────────── */}
+      <HermesCommandApprovalsPanel />
 
       {/* ── route exposure (static taxonomy + live per-route table) ─── */}
       <ExposureTable />

@@ -93,6 +93,7 @@ _EXPECTED_EXTRA_POLICY: dict[str, str] = {
     "UpdatesConfig": "forbid",
     "AgentAuthConfig": "forbid",
     "ToolPolicy": "forbid",
+    "HermesAgentSettings": "forbid",
     "ActivityConfig": "forbid",
     "BrainChatConfig": "forbid",
     # [realtime] — the WS /v1/realtime tunables (HP-realtime inc-1). Forbid: a

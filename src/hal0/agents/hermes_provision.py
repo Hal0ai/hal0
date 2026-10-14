@@ -1868,7 +1868,10 @@ def terminal_tool_enabled(
     return False, "default-off"
 
 
-# Value hal0 writes for ``approvals.mode`` (see _build_config_overlay).
+# Default hal0 writes for ``approvals.mode`` (see _build_config_overlay). The
+# operator's choice lives in ``[hermes].command_approvals`` of the seed TOML
+# (hal0.agents.hermes_command_approvals); this constant is what an unset or
+# unreadable setting falls back to.
 HAL0_APPROVALS_MODE = "smart"
 
 
@@ -1941,6 +1944,7 @@ def _build_config_overlay(
     hermes_home: Path | str = HERMES_HOME_DEFAULT,
     terminal_enabled: bool = False,
     terminal_backend: str | None = None,
+    approvals_mode: str = HAL0_APPROVALS_MODE,
 ) -> list[tuple[str, Any]]:
     """Ordered ``(dotted_key, value)`` overlay applied via ``hermes config set``.
 
@@ -1983,10 +1987,12 @@ def _build_config_overlay(
     # judge is a local slot model, which may be the same model that proposed
     # the command. Any failure (error, empty or unexpected answer, timeout)
     # escalates to the normal human prompt; a DENY in an interactive session
-    # also goes to the human. An operator who wants every flagged command
-    # asked sets ``approvals.mode: manual`` in overrides.yaml, which merges
-    # on top of this overlay.
-    pairs.append(("approvals.mode", HAL0_APPROVALS_MODE))
+    # also goes to the human. The value written is the operator's setting
+    # (``[hermes].command_approvals`` in the seed TOML, switched with
+    # ``hal0 agent command-approvals`` or the dashboard's Security page),
+    # defaulting to HAL0_APPROVALS_MODE. An ``approvals.mode`` in
+    # overrides.yaml still wins: it merges on top of this overlay.
+    pairs.append(("approvals.mode", approvals_mode))
 
     # model.* — the OpenAI-compatible-LAN wiring. ``provider: custom`` is
     # hermes's built-in bucket for Ollama/vLLM/llama.cpp endpoints; hal0 is
@@ -2766,6 +2772,12 @@ def _phase_config_write(ctx: _StepCtx) -> PhaseResult:
         )
     system_prompt, personality_name = _active_persona_render(state, mcp_servers=mcp_servers)
     live_resolve_enabled = _live_resolve_enabled()
+    # Operator's Hermes command-approvals setting, read from the root-owned
+    # seed TOML (never from agent-writable state). Lenient: an unreadable or
+    # invalid value falls back to HAL0_APPROVALS_MODE.
+    from hal0.agents import hermes_command_approvals as _cmd_approvals
+
+    approvals_mode = _cmd_approvals.read_setting().mode
 
     pairs = _build_config_overlay(
         primary=primary,
@@ -2780,6 +2792,7 @@ def _phase_config_write(ctx: _StepCtx) -> PhaseResult:
         hermes_home=hermes_home,
         terminal_enabled=terminal_enabled,
         terminal_backend=terminal_backend,
+        approvals_mode=approvals_mode,
     )
     applied, errors = _apply_config_set(
         pairs, hermes_bin=hermes_bin, hermes_home=hermes_home, run=run
@@ -2848,6 +2861,7 @@ def _phase_config_write(ctx: _StepCtx) -> PhaseResult:
             "terminal_tool": "on" if terminal_enabled_in_config(config_after) else "off",
             "terminal_tool_decision": "on" if terminal_enabled else "off",
             "terminal_tool_reason": terminal_reason,
+            "approvals_mode": approvals_mode,
             "terminal_state_stale": terminal_state_stale,
             "honcho_json_changed": honcho_json_changed,
             "config_set_errors": errors,
@@ -6582,7 +6596,21 @@ def _write_seed_toml(state: BootstrapState, *, repair: bool) -> tuple[Path, bool
     mcp_block["servers"] = servers_block
     merged["mcp"] = mcp_block
 
-    body = tomli_w.dumps(merged)
+    write_seed_toml_body(tomli_w.dumps(merged))
+    return path, True
+
+
+def write_seed_toml_body(body: str) -> None:
+    """Write a complete seed TOML body to :data:`INSTALL_SEED_PATH`, privilege-aware.
+
+    The seed lives in root:root ``/etc/hal0/agents`` (``install/perms.py``), so
+    an unprivileged caller (hal0-api, the dropped provisioner) delegates the
+    write to the ``hal0-agentenv write-seed-toml`` seam, which builds the path
+    from the validated agent name. Callers read-merge first: the file is 0644
+    world-readable. Raises ``OSError`` / ``subprocess.CalledProcessError`` on
+    failure.
+    """
+    path = INSTALL_SEED_PATH
     if os.geteuid() == 0:
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_suffix(".toml.tmp")
@@ -6591,11 +6619,7 @@ def _write_seed_toml(state: BootstrapState, *, repair: bool) -> tuple[Path, bool
         with contextlib.suppress(OSError):
             os.chown(path, 0, 0)
     else:
-        # Seed TOML lives in root:root /etc/hal0/agents — delegate the write to
-        # the seam (it builds the path from the validated agent name). The
-        # read-merge above works unprivileged: the file is 0644 world-readable.
         _privileged_env_write("write-seed-toml", body)
-    return path, True
 
 
 #: Hosts Hermes must always reach directly, never through an environment proxy:

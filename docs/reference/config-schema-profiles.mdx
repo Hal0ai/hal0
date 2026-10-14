@@ -240,6 +240,18 @@ Root model `AgentConfig`, `extra="allow"`. `AGENT_CONFIG_SCHEMA_VERSION = 1`.
 `allow`, `gated`, and `blocked` must be disjoint — validation raises naming the
 overlapping tool names.
 
+### `[hermes]` (`hermes.toml` only)
+
+Model `HermesAgentSettings`, `extra="forbid"`. Kept outside `AgentConfig` and
+carried by its `extra="allow"`, so a bad value here never breaks MCP allow-list
+loading. Writes through `hal0 agent command-approvals` and
+`PUT /api/agents/hermes/command-approvals` are validated; provisioning reads the
+value leniently and falls back to the default if it is invalid.
+
+| Key | Type | Default | Constraints |
+|---|---|---|---|
+| `command_approvals` | `"smart"\|"manual"` | `"smart"` | Rendered to Hermes' `approvals.mode`; an `approvals.mode` in `agents/hermes/overrides.yaml` wins |
+
 ## `hardware.json`
 
 Root model `HardwareInfo`, `extra="allow"` (JSON, not TOML). Written by

@@ -184,6 +184,12 @@ export const ENDPOINTS = {
   // Backend: hal0.api.agents.restart — only "hermes" is a known id in v0.3.
   agentRestart: (id: string) =>
     `/api/agents/${encodeURIComponent(id)}/restart`,
+  // Hermes command approvals — Hermes's own approvals.mode (smart | manual).
+  // GET → {mode, effective, source, ...}; PUT {mode} re-renders + restarts.
+  // Backend: hal0.api.agents.command_approvals (only "hermes" is known).
+  // NOT the MCP approval queue (agentApprovals*).
+  agentCommandApprovals: (id: string) =>
+    `/api/agents/${encodeURIComponent(id)}/command-approvals`,
   agentApprovals: '/api/agent/approvals',
   // Approval CRUD — list is an alias of agentApprovals; approve/deny are
   // the action endpoints added by backend-dev task #7 (PR #741 TODOs).

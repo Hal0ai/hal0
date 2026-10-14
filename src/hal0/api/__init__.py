@@ -23,6 +23,9 @@ from fastapi import FastAPI
 from hal0 import __version__
 from hal0.activity import AuditStore
 from hal0.api.agents import (
+    command_approvals as agents_command_approvals_routes,
+)
+from hal0.api.agents import (
     memory_stats as agents_memory_stats_routes,
 )
 from hal0.api.agents import (
@@ -2787,6 +2790,15 @@ def create_app() -> FastAPI:
         agents_restart_routes.router,
         prefix="/api/agents",
         tags=["agents", "restart"],
+    )
+
+    # Hermes command approvals (Hermes's approvals.mode: smart | manual).
+    # Persists to the root-owned seed TOML, re-renders config.yaml and
+    # restarts hal0-agent@hermes. Never an MCP tool (EXCLUDED_TOOLS).
+    app.include_router(
+        agents_command_approvals_routes.router,
+        prefix="/api/agents",
+        tags=["agents", "command-approvals"],
     )
 
     # Agent memory stats (v0.3 PR-11). GET /api/agents/{id}/memory/stats
