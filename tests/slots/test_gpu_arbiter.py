@@ -1212,3 +1212,28 @@ async def test_restore_llm_when_idle_treats_an_unreachable_queue_as_idle(
     await arb.restore_llm_when_idle()
 
     assert arb.mode is GpuMode.LLM
+
+
+async def test_restore_llm_when_idle_refuses_a_pinned_mode_before_polling_the_queue(
+    fake_mgr: FakeManager, state_path: Path, comfyui_http: dict[str, Any], monkeypatch
+) -> None:
+    """Pinned image mode with a busy ComfyUI is the normal pinned case (someone
+    rendering in the web UI): report "pinned" at once instead of waiting out
+    the queue and then reporting queue_busy (#2639)."""
+    arb = GpuArbiter(fake_mgr, state_path=state_path)
+    await arb.ensure_img(pin=True)
+    polled = 0
+
+    async def _queue() -> tuple[int, int] | None:
+        nonlocal polled
+        polled += 1
+        return (1, 0)
+
+    monkeypatch.setattr(arbiter_mod, "_comfyui_queue_state", _queue)
+
+    with pytest.raises(arbiter_mod.ArbiterPinned):
+        await arb.restore_llm_when_idle()
+
+    assert polled == 0
+    assert arb.mode is GpuMode.IMG
+    assert comfyui_http["free"] == 0

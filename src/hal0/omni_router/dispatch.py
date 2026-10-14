@@ -192,8 +192,27 @@ IMAGE_TOOLS: frozenset[str] = frozenset({"generate_image", "edit_image"})
 #: Restores detached from a cancelled request, kept referenced until done.
 _DETACHED_RESTORES: set[asyncio.Task[Any]] = set()
 
+#: How long the chat request itself waits for the caller restore. A restore
+#: with an idle queue takes one model reload; a busy (or unreadable) ComfyUI
+#: queue can hold the restore for up to the arbiter's 600 s. The request gives
+#: up after this and answers with the image plus a "caller not restored"
+#: note, while the detached restore keeps waiting and restores the LLM set when
+#: the queue drains (#2639).
+_RESTORE_REQUEST_WAIT_S = 15.0
 
-async def restore_caller_after_images(ctx: DispatchContext) -> str | None:
+
+def _log_detached_restore(task: asyncio.Task[Any]) -> None:
+    """Retrieve a detached restore's outcome so it is logged, never 'never retrieved'."""
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        log.info("omni.detached_restore_ended error=%s", exc)
+
+
+async def restore_caller_after_images(
+    ctx: DispatchContext, *, max_wait_s: float = _RESTORE_REQUEST_WAIT_S
+) -> str | None:
     """Bring the caller LLM back after an image round flipped the exclusive GPU.
 
     On a single-GPU box the img and llm slots share the GPU: dispatching
@@ -222,6 +241,10 @@ async def restore_caller_after_images(ctx: DispatchContext) -> str | None:
     mode (an operator's explicit choice, respected) or a failed restore.
     The reason is for the client; the loop must not ask the evicted LLM to
     consume it.
+
+    The request waits at most ``max_wait_s`` for the restore; past that it
+    returns a ``gpu.queue_busy`` reason and leaves the restore running, so a
+    chat request is never blocked for the arbiter's full queue wait.
     """
     arbiter = getattr(ctx.slot_manager, "arbiter", None)
     if arbiter is None:
@@ -244,8 +267,20 @@ async def restore_caller_after_images(ctx: DispatchContext) -> str | None:
         restore = asyncio.ensure_future(arbiter.restore_llm_when_idle())
         _DETACHED_RESTORES.add(restore)
         restore.add_done_callback(_DETACHED_RESTORES.discard)
+        restore.add_done_callback(_log_detached_restore)
         try:
-            await asyncio.shield(restore)
+            await asyncio.wait_for(asyncio.shield(restore), timeout=max_wait_s)
+        except TimeoutError:
+            log.info(
+                "omni.image_caller_restore_pending caller=%s wait_s=%s",
+                ctx.caller_slot_name,
+                max_wait_s,
+            )
+            return (
+                f"the caller LLM slot {ctx.caller_slot_name!r} was not restored within "
+                f"{max_wait_s:.0f}s (gpu.queue_busy: ComfyUI still has renders queued or "
+                f"its queue could not be read); the restore continues in the background"
+            )
         except asyncio.CancelledError:
             # The request is gone; the restore keeps running on its own.
             log.info("omni.image_caller_restore_detached caller=%s", ctx.caller_slot_name)
