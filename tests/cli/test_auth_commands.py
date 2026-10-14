@@ -188,6 +188,44 @@ def test_reset_key_falls_back_to_local_write_when_api_down(
     assert "systemctl restart hal0-api" in " ".join(result.output.split())
 
 
+@pytest.mark.parametrize(
+    "url", ["http://10.0.1.50:8080", "https://hal0.example.com", "http://evil@127.0.0.1:8080"]
+)
+def test_reset_key_refuses_a_non_loopback_api_url(
+    tmp_path, monkeypatch: pytest.MonkeyPatch, captured: dict[str, Any], url: str
+) -> None:
+    """#2640: reset-key edits the local api.env, so a remote HAL0_API_URL must
+    never receive the rotation nor have a stale local key printed as new."""
+    api_env = _seed_api_env(tmp_path, monkeypatch, "HAL0_ADMIN_KEY=old-key\n")
+    monkeypatch.setattr(auth_commands.os, "geteuid", lambda: 0)
+    monkeypatch.setenv("HAL0_API_URL", url)
+    monkeypatch.setenv("HAL0_ADMIN_KEY", "remote-box-key")
+
+    def boom(*a: Any, **k: Any) -> Any:
+        raise AssertionError("remote API must not be contacted")
+
+    monkeypatch.setattr(auth_commands, "api_post", boom)
+    monkeypatch.setattr(auth_commands, "_api_unreachable", boom)
+
+    result = runner.invoke(auth_commands.app, ["reset-key", "--force"])
+    assert result.exit_code != 0
+    assert "HAL0_API_URL" in " ".join(result.output.split())
+    assert "New hal0 admin key" not in result.output
+    assert "old-key" not in result.output
+    assert api_env.read_text() == "HAL0_ADMIN_KEY=old-key\n"
+    assert "path" not in captured
+
+
+def test_reset_key_accepts_a_loopback_api_url(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _seed_api_env(tmp_path, monkeypatch, "HAL0_ADMIN_KEY=old-key\n")
+    monkeypatch.setattr(auth_commands.os, "geteuid", lambda: 0)
+    monkeypatch.setenv("HAL0_API_URL", "http://localhost:9999")
+    monkeypatch.setattr(auth_commands, "_api_unreachable", lambda _url: True)
+    result = runner.invoke(auth_commands.app, ["reset-key", "--force"])
+    assert result.exit_code == 0, result.output
+    assert "New hal0 admin key" in result.output
+
+
 def test_reset_key_prompt_warns_about_the_lan_admin_gate(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -151,8 +151,21 @@ def auth_reset_key(
     loopback: ADMIN-class routes then need the key from other devices even
     with ``require_auth`` off. The prompt says so.
     """
+    from hal0.service_identity import is_loopback_url
+
     if os.geteuid() != 0:
         die("reset-key needs root to read /etc/hal0/api.env — run: sudo hal0 auth reset-key")
+        return
+    # reset-key rewrites THIS box's api.env and prints the key from it, but the
+    # rotate endpoint never returns the new key. With HAL0_API_URL on another
+    # host (e.g. via `sudo -E`) the remote key would rotate while a stale local
+    # key is printed (#2640), so refuse rather than guess a loopback base.
+    if not is_loopback_url(_api_base()):
+        die(
+            f"reset-key only rotates the key on this box, but HAL0_API_URL points at "
+            f"{_api_base()}. Unset HAL0_API_URL (or point it at loopback) and run it again; "
+            "to rotate another box's key use `hal0 auth rotate admin` against it."
+        )
         return
     if not force:
         typer.confirm(

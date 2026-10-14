@@ -50,6 +50,10 @@ applying. Add those subsections to a version's section to surface them; see
   unreadable `/queue` no longer holds a request for ten minutes and ends in
   `gpu.queue_busy` (#2639).
 
+- `hal0 auth reset-key` now refuses, with a non-zero exit, when `HAL0_API_URL`
+  points at a non-loopback host. It edits this box's `api.env`, so it used to
+  rotate the remote box's key (e.g. under `sudo -E`) while printing this box's
+  unchanged key as the new one (#2640).
 - A box already on the newest nightly no longer offers that same nightly to
   itself as an update. `GET /api/updates/check` and `GET /api/updates/state`
   now compare the release manifest against the installed release
