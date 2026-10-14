@@ -458,6 +458,94 @@
     [
       "{\\\\\\\"password\\\\\\\": \\\\\\\"pk12 escaped tail\\\\\\\"}",
       "escaped tail"
+    ],
+    [
+      "\u0131api_key=,pk13_leak_value",
+      "pk13_leak_value"
+    ],
+    [
+      "x \u0131HAL0_ADMIN_KEY=&pk13_leak_value",
+      "pk13_leak_value"
+    ],
+    [
+      "\u0130api_key=,pk13_leak_value",
+      "pk13_leak_value"
+    ],
+    [
+      "x \u0130HAL0_ADMIN_KEY=&pk13_leak_value",
+      "pk13_leak_value"
+    ],
+    [
+      "\u017fapi_key=,pk13_leak_value",
+      "pk13_leak_value"
+    ],
+    [
+      "x \u017fHAL0_ADMIN_KEY=&pk13_leak_value",
+      "pk13_leak_value"
+    ],
+    [
+      "\u212aapi_key=,pk13_leak_value",
+      "pk13_leak_value"
+    ],
+    [
+      "x \u212aHAL0_ADMIN_KEY=&pk13_leak_value",
+      "pk13_leak_value"
+    ],
+    [
+      "\u00e9api_key=,pk13_leak_value",
+      "pk13_leak_value"
+    ],
+    [
+      "x \u00e9HAL0_ADMIN_KEY=&pk13_leak_value",
+      "pk13_leak_value"
+    ],
+    [
+      "\u0663api_key=,pk13_leak_value",
+      "pk13_leak_value"
+    ],
+    [
+      "x \u0663HAL0_ADMIN_KEY=&pk13_leak_value",
+      "pk13_leak_value"
+    ],
+    [
+      "\u4e2dapi_key=,pk13_leak_value",
+      "pk13_leak_value"
+    ],
+    [
+      "x \u4e2dHAL0_ADMIN_KEY=&pk13_leak_value",
+      "pk13_leak_value"
+    ],
+    [
+      "\u00dfapi_key=,pk13_leak_value",
+      "pk13_leak_value"
+    ],
+    [
+      "x \u00dfHAL0_ADMIN_KEY=&pk13_leak_value",
+      "pk13_leak_value"
+    ],
+    [
+      "\u0131api_key='pk13 leak value'",
+      "leak value"
+    ],
+    [
+      "--\u0130api_key=}pk13_leak_value",
+      "pk13_leak_value"
+    ],
+    [
+      "\u0131\u0130_KEY=,pk13_leak_value",
+      "pk13_leak_value"
+    ],
+    [
+      "ap\u0131_key=,pk13_leak_value",
+      "pk13_leak_value"
+    ],
+    [
+      "api_\u212aEY=,pk13_leak_value",
+      "pk13_leak_value"
+    ],
+    [
+      "\u017fecret_KEY=,pk13_leak_value",
+      "pk13_leak_value"
     ]
   ],
   "keep": [
@@ -926,6 +1014,38 @@
     [
       "password=\\abc def",
       "password=***REDACTED*** def"
+    ],
+    [
+      "\u0131api_key='x y'",
+      "\u0131api_key=***REDACTED***"
+    ],
+    [
+      "\u0130api_key='x y'",
+      "\u0130api_key=***REDACTED***"
+    ],
+    [
+      "\u017fapi_key='x y'",
+      "\u017fapi_key=***REDACTED***"
+    ],
+    [
+      "\u212aapi_key='x y'",
+      "\u212aapi_key=***REDACTED***"
+    ],
+    [
+      "\u00e9api_key='x y'",
+      "\u00e9api_key=***REDACTED***"
+    ],
+    [
+      "\u0663KEY=,abc",
+      "\u0663KEY=***REDACTED***"
+    ],
+    [
+      "x \u0131\u0130\u017f\u212a_KEY=,abc",
+      "x \u0131\u0130\u017f\u212a_KEY=***REDACTED***"
+    ],
+    [
+      "1api_key=,abc",
+      "1api_key=,abc"
     ]
   ],
   "mask_names": [

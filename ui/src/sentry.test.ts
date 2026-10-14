@@ -193,6 +193,9 @@ describe('redactSecrets: linear time', () => {
     ['one long name that continues with no separator', 'token'.repeat(N / 5)],
     ['one long hyphenated name with no separator', 'api-token-'.repeat(N / 10)],
     ['eyJ repeated', 'eyJ'.repeat(N / 3)],
+    // #2599: a `_KEY=` name may start at these, which the ASCII `\\b` let it, at every `a`.
+    ['dotless i and a, repeated', '\u0131a'.repeat(N / 2)],
+    ['a folded-letter name at every start', '\u0131api_key=,x '.repeat(N / 12)],
     ['eyJ then a long run', `eyJ${'a'.repeat(N)}`],
     ['hf_ repeated', 'hf_'.repeat(N / 3)],
     ['a long scheme-like run before ://', `${'a1.'.repeat(N / 3)}://`],
