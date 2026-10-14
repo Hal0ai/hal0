@@ -196,7 +196,8 @@ class ModelPlan:
 @dataclass
 class StackPlan:
     stack: str
-    #: ``{"index", "slot", "change", "drop": [keys], "profile": new name | None}``
+    #: ``{"index", "slot", "change", "drop": [keys], "profile": new name | None,
+    #: "drop_note"}``
     rows: list[dict[str, Any]] = field(default_factory=list)
     profile_rewrites: dict[str, list[str]] = field(default_factory=dict)
     #: embedded profiles in the new shape, by name
@@ -296,7 +297,8 @@ class ConversionPlan:
             out.extend(f"  note: {n}" for n in m.notes)
         for st in self.stacks:
             for row in st.rows:
-                out.append(f"stack {st.stack} row {row['slot']}: {row['change']}")
+                if row["change"]:  # a reverted re-point may leave nothing to report
+                    out.append(f"stack {st.stack} row {row['slot']}: {row['change']}")
             for name, notes in st.profile_rewrites.items():
                 out.append(f"stack {st.stack} profile {name}: rewrite ({'; '.join(notes)})")
             out.extend(f"stack {st.stack}: BLOCKED: {e}" for e in st.errors)
@@ -1511,6 +1513,7 @@ class _Planner:
     ) -> dict[str, Any]:
         parts: list[str] = []
         new_profile: str | None = None
+        drop_note = ""
         present = [k for k in STACK_ROW_TUNING_KEYS if k in row]
         if present:
             shown = [
@@ -1518,10 +1521,10 @@ class _Planner:
                 for k in present
                 if row[k] not in (None, "") and not (k == "vision" and row[k] is False)
             ]
-            parts.append(
-                f"drop {', '.join(present)}"
-                + (f" (inert today: {', '.join(shown)})" if shown else "")
+            drop_note = f"drop {', '.join(present)}" + (
+                f" (inert today: {', '.join(shown)})" if shown else ""
             )
+            parts.append(drop_note)
         pname = str(row.get("profile") or "")
         if pname and pname not in embedded:
             sp = by_slot.get(str(row.get("slot") or ""))
@@ -1545,7 +1548,13 @@ class _Planner:
                 elif new != pname:
                     parts.append(f"profile {pname!r} -> {new!r}")
                     new_profile = new
-        return {"change": "; ".join(parts), "drop": present, "profile": new_profile}
+        return {
+            "change": "; ".join(parts),
+            "drop": present,
+            "profile": new_profile,
+            # What stays true if a blocked slot reverts the re-point (the drop).
+            "drop_note": drop_note,
+        }
 
 
 def plan_conversion(inputs: Inputs | None = None) -> ConversionPlan:

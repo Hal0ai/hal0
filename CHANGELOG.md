@@ -32,6 +32,12 @@ applying. Add those subsections to a version's section to surface them; see
 
 ### Fixed
 
+- A stack row whose slot the profile-centric conversion blocks now still drops
+  the retired tuning keys (`vision`, `mtp`, `enable_thinking`,
+  `server_extra_args`). Only the profile re-point is reverted. Before, the
+  row kept them, `StackSlotEntry` rejected the rewritten `stacks.toml`, and
+  every `/api/stacks` call failed until the block cleared. The migration plan
+  no longer reports a drop it reverted (#2649).
 - Hermes's main model and its auxiliary role map now agree on one slot. On a
   box with no `agent` slot, `_resolve_primary_slot` and the role resolver both
   take the first ready LLM slot in pool order (`chat`/`primary` are no longer
