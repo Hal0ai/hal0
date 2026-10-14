@@ -442,15 +442,22 @@ def _swallowed_head(line: str, pos: int, *, log: bool) -> tuple[int, _ValueClass
     return _head(line, pos, log=log)
 
 
+# What a quoted value that opens with each quote holds up to its closing quote
+# or the end of its line: a run of characters that end neither.
+_QUOTED_RUN: Final[dict[str, re.Pattern[str]]] = {
+    '"': re.compile(r'[^"\n]*'),
+    "'": re.compile(r"[^'\n]*"),
+}
+
+
 def _quote_close(line: str, start: int) -> tuple[int, bool]:
     """Where the quoted value that opens at ``line[start]`` ends, and whether
-    it closes there: at its closing quote or, if it has none, at the end of
-    its line. An unclosed quote masks the rest of the line (#2593)."""
-    close = line.find(line[start], start + 1)
-    if close >= 0:
-        return close, True
-    eol = line.find("\n", start)
-    return (len(line) if eol < 0 else eol), False
+    it closes there: at its closing quote on the same line or, if it has none,
+    at the end of its line. An unclosed quote masks the rest of its line
+    (#2593), and never pairs with a quote on a later one. The scan stops at the
+    value's end, which the caller then moves past, so it is linear (#2501)."""
+    end = _QUOTED_RUN[line[start]].match(line, start + 1).end()  # type: ignore[union-attr]
+    return end, end < len(line) and line[end] == line[start]
 
 
 def _value_stop(line: str, start: int, value: _ValueClass, log: bool) -> int:

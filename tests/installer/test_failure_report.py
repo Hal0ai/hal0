@@ -1257,6 +1257,16 @@ class TestQuotedKeyValueWithSpaces:
     def test_the_whole_quoted_value_is_masked(self, line: str, expected: str) -> None:
         assert _mask_patterns(line).strip() == expected
 
+    def test_an_unclosed_quote_ends_at_its_own_line(self) -> None:
+        """The pass is line by line, so a quote left open pairs with none on the
+        next line (the same as ``redact_log_line``, #2598)."""
+        text = 'api_key="pk_a\nmessage="hello"\npassword="pk_b pk_c"'
+        assert _mask_patterns(text).splitlines() == [
+            f'api_key="{_MASK}',
+            'message="hello"',
+            f'password="{_MASK}"',
+        ]
+
 
 # ── #2402: multi-line TOML arrays under a sensitive key ─────────────────────
 

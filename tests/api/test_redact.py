@@ -1352,6 +1352,9 @@ class TestUnclosedQuotes:
             "api_key='a ",
             "api_key='a b' ",
             'X_KEY="a HF_TOKEN=" ',
+            # An unclosed quote ends at its line, so one on every line is no run
+            # that pairs with the next (#2598).
+            'api_key="a\nx="b\n',
         ],
     )
     @pytest.mark.parametrize("redact", [redact_log_line, redact_shareable_text])

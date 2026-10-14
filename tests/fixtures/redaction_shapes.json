@@ -362,6 +362,10 @@
     [
       "X_KEY='pk6 quoted' HF_TOKEN= pk6_after",
       "pk6_after"
+    ],
+    [
+      "api_key=\"pk7 first\npassword=\"pk7 second line\"",
+      "pk7 second line"
     ]
   ],
   "keep": [
@@ -610,6 +614,26 @@
     [
       "api_key='a b'tail",
       "api_key=***REDACTED***"
+    ],
+    [
+      "api_key=\"one\nmessage=\"hello\"",
+      "api_key=***REDACTED***\nmessage=\"hello\""
+    ],
+    [
+      "Authorization: Bearer \"abc def\nordinary \"quoted\" details",
+      "Authorization: Bearer ***REDACTED***\nordinary \"quoted\" details"
+    ],
+    [
+      "api_key='one two\nmessage='hello' x",
+      "api_key=***REDACTED***\nmessage='hello' x"
+    ],
+    [
+      "api_key=\"one\npassword=\"secret two\" tail",
+      "api_key=***REDACTED***\npassword=\"***REDACTED***\" tail"
+    ],
+    [
+      "password=\"one\nmessage=\"hello\" ok",
+      "password=\"***REDACTED***\nmessage=\"hello\" ok"
     ]
   ],
   "mask_names": [

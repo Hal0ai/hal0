@@ -509,12 +509,18 @@ const CLIENT_ID_HEAD_RE = rx(String.raw`client_id=(?=[A-Za-z0-9_.-]{16})`, 'yiu'
 const isQuote = (c: string | undefined): boolean => c === '"' || c === "'"
 
 // `_quote_close`: where the quoted value opening at `line[start]` ends, and
-// whether it closes there; an unclosed one runs to the end of its line.
+// whether it closes there: at its closing quote on the same line or, if it has
+// none, at the end of its line. An unclosed quote never pairs with a quote on a
+// later line.
+const QUOTED_RUN_RE: Record<string, RegExp> = {
+  '"': /[^"\n]*/y,
+  "'": /[^'\n]*/y,
+}
 function quoteClose(line: string, start: number): [number, boolean] {
-  const close = line.indexOf(line[start], start + 1)
-  if (close >= 0) return [close, true]
-  const eol = line.indexOf('\n', start)
-  return [eol < 0 ? line.length : eol, false]
+  const re = QUOTED_RUN_RE[line[start]]
+  re.lastIndex = start + 1
+  const end = start + 1 + (re.exec(line) as RegExpExecArray)[0].length
+  return [end, end < line.length && line[end] === line[start]]
 }
 
 // `_value_stop`: `packedValueEnd`, less trailing whitespace.
