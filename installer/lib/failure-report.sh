@@ -530,6 +530,8 @@ _hal0_report_text_value_is_secret() {
 # closing early cannot fail the pipeline under pipefail). Short values stay on
 # `=~`, where the quadratic is below a millisecond and grep's process start
 # would cost more.
+# $1 must be one line, as a harvested hit always is: grep judges a line at a
+# time while `=~` anchors `$` at the end of the whole string.
 _HAL0_REPORT_TAIL_BASH_MAX=8192
 _hal0_report_ends_in_name() {
     if ((${#1} <= _HAL0_REPORT_TAIL_BASH_MAX)); then
