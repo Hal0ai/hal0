@@ -57,6 +57,10 @@ applying. Add those subsections to a version's section to surface them; see
   `runners`; the installer, the Vulkan-lane gate, the bench harness and
   `hal0 doctor toolbox-pull` all read it. The runner-image catalogue now syncs
   by itself at startup and during `hal0 update`.
+- **The bundled Hindsight memory engine moves to 1.0.0** (from 0.9.2), its
+  first major release. `hal0 update` and an `install.sh` re-run upgrade it
+  with the existing build-aside, snapshot, swap, verify and roll-back pass;
+  see Migrations for what that does to the engine's database.
 
 ### Security
 
@@ -785,6 +789,16 @@ applying. Add those subsections to a version's section to surface them; see
   `~/.pi/agent/settings.json` (`"-builtin:mcp"` under `extensions`) because the
   adapter replaces it.
 
+- `hal0 memory bank profile get` and `set` no longer call the memory
+  engine's `/profile` endpoint, which answers `410 Gone` from Hindsight
+  0.10.0 on. `get` reads the bank's name, mission and effective disposition
+  from the bank list. `set` writes the disposition traits and the three
+  missions in one bank-config PATCH. The `/api/memory/banks/{bank}/profile`
+  passthrough is removed. `hal0 memory mm list` and the dashboard ask for
+  mental-model content explicitly, because the engine's list now returns
+  metadata only by default. The `memory_mental_model_list` MCP tool keeps the
+  engine's new default. Pass `detail: "content"` to get each model's content.
+
 ### Migrations
 
 - **A leftover `/var/lib/hal0/registry/registry.toml` is retired, not
@@ -812,6 +826,26 @@ applying. Add those subsections to a version's section to surface them; see
   values to `model-extra-args-<time>.json`; backups are readable by their
   owner only. Running slots keep their old
   command line until their next restart.
+
+- **The Hindsight memory engine's database migrates one way to 1.0.0.** The
+  first start of hindsight-api 1.0.0 runs the engine's schema migrations for
+  0.10.0 through 1.0.0 on `/var/lib/hal0/memory/hindsight/.pg0`. Among other
+  changes they add bank aliases and attachments, and they drop the unused
+  `document_attachments` table and `memory_units_bm25` view. Before the new
+  engine starts, the upgrade stops the old engine and copies `.pg0` to
+  `.pg0.pre-0.9.2`, and it needs 1.5 times the size of `.pg0` free to do so.
+  If 1.0.0 does not answer `/health` and report its version, the old venv and
+  that copy are both restored. The copy is kept after a successful upgrade;
+  the next run that finds the engine on 1.0.0 deletes only older copies such
+  as `.pg0.pre-0.8.4`. Memories, documents, directives, mental models
+  and bank settings are carried over unchanged. A bank disposition set
+  through the old profile endpoint still applies. The embedded PostgreSQL
+  stays on 18.1, so the data directory itself is not upgraded.
+  `hal0 update --rollback` leaves the engine on 1.0.0, as it did for 0.9.2.
+  Memory keeps working on the older hal0, but two things the older hal0
+  calls changed in the engine: its `hal0 memory bank profile` commands fail
+  with `410 Gone`, and the dashboard's mental-model rows lose their content
+  preview.
 
 ## [1.4.0] — 2026-10-08
 

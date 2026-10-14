@@ -20,16 +20,25 @@ Upgrade shape — build-aside, swap, verify, roll back:
   serving, so a pip/network failure costs nothing;
 * the engine is stopped and ``.pg0`` is snapshotted to ``.pg0.pre-<old>``
   BEFORE the new engine ever starts, because hindsight-api runs its alembic
-  migrations on startup and they are effectively one-way (an old engine cannot
-  run against a migrated schema) — the snapshot is the only rollback;
+  migrations on startup and they are effectively one-way: nothing in hal0 runs
+  an alembic downgrade, and an old engine does NOT refuse a migrated schema —
+  it logs "Database is at a newer migration revision … Skipping migrations"
+  and serves against tables it does not know (verified 0.9.2 on a 1.0.0
+  ``.pg0``; 0.10.0 dropped ``document_attachments`` and the
+  ``memory_units_bm25`` view). So the old venv alone is never a rollback —
+  the snapshot is, and the rollback below restores both together;
 * after the swap the pass polls ``/health`` and requires ``/version`` to
   report exactly the pin; any postcheck failure restores both the old venv and
   the snapshot.
 
 ``hal0 update --rollback`` re-activates the previous hal0 tree but leaves the
-engine (and its migrated ``.pg0``) on the new version — acceptable because the
-engine's HTTP surface is additive across the supported window, and reverting a
-one-way DB migration behind the operator's back would be worse.
+engine (and its migrated ``.pg0``) on the new version, because reverting a
+one-way DB migration behind the operator's back would be worse. The engine's
+HTTP surface is NOT purely additive across 0.9.2 → 1.0.0: hindsight-api 0.10.0
+retired ``GET/PUT .../profile`` (410) and made the mental-model list
+metadata-only by default. A hal0 tree rolled back to one pinned on 0.9.2 keeps
+memory retain/recall/reflect, but its ``hal0 memory bank profile`` commands
+fail and the dashboard's mental-model rows lose their content preview.
 
 Privileges: on the ``hal0 update`` path this runs as the unprivileged ``hal0``
 user (the venv and ``.pg0`` are hal0-owned; service stop/start routes through
@@ -67,7 +76,7 @@ log = structlog.get_logger(__name__)
 #: The engine version every box converges on. Single source of truth —
 #: install.sh's ``HINDSIGHT_PIN`` shell variable must match
 #: (tests/installer/test_hindsight_pin_lockstep.py enforces it).
-HINDSIGHT_API_PIN = "0.9.2"
+HINDSIGHT_API_PIN = "1.0.0"
 
 #: Full unit name — must key into ``COMPANION_SERVICE_UNITS`` so the seam
 #: routes to the wrapper's ``svc-stop/svc-start hindsight`` arms (a bare
