@@ -32,6 +32,11 @@ applying. Add those subsections to a version's section to surface them; see
 
 ### Fixed
 
+- A box already on the newest nightly no longer offers that same nightly to
+  itself as an update. `GET /api/updates/check` and `GET /api/updates/state`
+  now compare the release manifest against the installed release
+  (`current/VERSION`) instead of the wheel base version, so the dashboard and
+  API stop reporting `1.4.0` → `1.4.0-nightly.<stamp>` forever (#2629).
 - The Hindsight engine upgrade pass no longer downgrades the engine. When the
   installed `hindsight-api` is newer than the version the running hal0 tree
   pins (for example after `hal0 update --rollback`), the pass now stops with

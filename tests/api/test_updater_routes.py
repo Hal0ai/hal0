@@ -213,6 +213,48 @@ def test_check_no_update_when_versions_match(
     assert body["latest"] == __version__
 
 
+NIGHTLY = "1.4.0-nightly.20261014214325"
+
+
+def test_check_uses_installed_version_not_wheel_base(
+    isolated_client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#2629: a box on the newest nightly must not offer itself as an update.
+
+    ``hal0.__version__`` is the wheel base version (``1.4.0``) and cannot carry
+    the nightly stamp; ``installed_version()`` (``current/VERSION``) can.
+    """
+    manifest = _write_manifest(tmp_path / "nightly.json", {"version": NIGHTLY})
+    monkeypatch.setenv("HAL0_RELEASES_URL", str(manifest))
+    monkeypatch.setattr("hal0.api.routes.updater.installed_version", lambda: NIGHTLY)
+
+    body = isolated_client.get("/api/updates/check").json()
+    assert body["current"] == NIGHTLY
+    assert body["latest"] == NIGHTLY
+    assert body["update_available"] is False
+
+    status = isolated_client.get("/api/updates/state").json()
+    assert status["hal0"]["current"] == NIGHTLY
+    assert status["hal0"]["available"] is None
+
+
+def test_check_offers_newer_nightly_than_installed(
+    isolated_client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#2629 inverse: a newer nightly than the installed one is still offered."""
+    newer = "1.4.0-nightly.20261015000000"
+    manifest = _write_manifest(tmp_path / "newer.json", {"version": newer})
+    monkeypatch.setenv("HAL0_RELEASES_URL", str(manifest))
+    monkeypatch.setattr("hal0.api.routes.updater.installed_version", lambda: NIGHTLY)
+
+    body = isolated_client.get("/api/updates/check").json()
+    assert body["current"] == NIGHTLY
+    assert body["update_available"] is True
+
+    status = isolated_client.get("/api/updates/state").json()
+    assert status["hal0"]["available"] == newer
+
+
 def test_check_revoked_latest_not_recommended(
     isolated_client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
