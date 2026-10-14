@@ -46,6 +46,14 @@ def test_agent_anchor_wins_over_legacy_main_labels() -> None:
     assert entries["main"].label == "agent"
 
 
+def test_legacy_main_labels_are_ordinary_slots() -> None:
+    # ADR-0023 retired `chat`/`primary`; with no `agent`, main is the first
+    # ready llm slot in pool order, not a slot picked by legacy name (#2635).
+    entries = _entries(_slot("brain"), _slot("chat"), _slot("primary"))
+
+    assert entries["main"].label == "brain"
+
+
 def test_utility_roles_prefer_ready_utility_slot() -> None:
     entries = _entries(_slot("agent"), _slot("utility", model="utility-model"))
 
