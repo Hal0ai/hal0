@@ -154,6 +154,61 @@ def test_boot_mode_reports_stale_and_touches_nothing(hs):
     assert not (hs / ".venv.new").exists()
 
 
+def _installed_as(version: str):
+    """Runner whose existing venv reports ``version`` for the dist probe."""
+    inner = FakeRunner()
+
+    def runner(args, **kwargs):
+        args = [str(a) for a in args]
+        if (
+            len(args) >= 3
+            and args[1] == "-c"
+            and "importlib.metadata" in args[2]
+            and ".venv.new" not in args[0]
+        ):
+            return subprocess.CompletedProcess(args, 0, f"{version}\n", "")
+        return inner(args, **kwargs)
+
+    runner.inner = inner  # type: ignore[attr-defined]
+    return runner
+
+
+@pytest.mark.parametrize("upgrade", [True, False])
+def test_engine_newer_than_pin_is_never_downgraded(hs, upgrade):
+    """#2613: a rolled-back tree pinned below the installed engine must refuse."""
+    seam = FakeSeam()
+    runner = _installed_as("99.0.0")
+    result = upgrade_memory_engine(
+        upgrade=upgrade, seam=seam, runner=runner, http_get=_healthy, hs_dir=hs
+    )
+    assert result["status"] == "ahead"
+    assert result["installed"] == "99.0.0"
+    assert result["pinned"] == HINDSIGHT_API_PIN
+    assert ".pg0.pre-" + HINDSIGHT_API_PIN in result["remedy"]
+    assert seam.calls == []  # engine never stopped
+    assert not (hs / ".venv.new").exists()  # nothing built
+    assert not list(hs.glob(".pg0.pre-*"))  # nothing snapshotted
+    assert not list(hs.glob(".venv.old-*"))
+    assert not any("pip" in Path(c[0]).name for c in runner.inner.calls)
+
+
+def test_ahead_compares_versions_not_strings(hs):
+    result = upgrade_memory_engine(
+        seam=FakeSeam(), runner=_installed_as("1000.0.0"), http_get=_healthy, hs_dir=hs
+    )
+    assert result["status"] == "ahead"  # numeric, not lexical: "1000.0.0" < "1.0.0" as strings
+
+
+def test_unparseable_installed_version_still_converges(hs):
+    """'unknown'/garbage is not provably newer — keep the rebuild behaviour."""
+    seam = FakeSeam()
+    result = upgrade_memory_engine(
+        seam=seam, runner=_installed_as("not-a-version"), http_get=_healthy, hs_dir=hs
+    )
+    assert result["status"] == "upgraded"
+    assert seam.verbs == ["stop", "start"]
+
+
 def test_build_failure_never_stops_the_engine(hs):
     seam = FakeSeam()
     result = upgrade_memory_engine(seam=seam, runner=FakeRunner(pip_rc=1), hs_dir=hs)
