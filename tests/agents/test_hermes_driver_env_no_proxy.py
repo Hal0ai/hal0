@@ -159,7 +159,47 @@ def test_driver_env_no_proxy_is_stable_across_rewrites(
     _, wrote = hp._write_driver_env()
     assert wrote is True
     _, wrote = hp._write_driver_env()
-    assert wrote is False  # merging the file's own value back in is a no-op
+    assert wrote is False  # every source is re-read, so the value recomputes identically
+
+
+def test_driver_env_keeps_the_previous_policy_when_discovery_fails(
+    driver_env: Path, tmp_hal0_home: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A render that cannot verify the required host set keeps the previous
+    NO_PROXY verbatim instead of committing a reduced one (#2534 review):
+    surviving local connections keep their proxy bypass until a render with
+    healthy discovery recomputes and prunes normally."""
+    _install(
+        "local-a",
+        "http://127.0.0.2:9000/mcp",
+        exposure=installed.ExposureConfig(hermes=True),
+    )
+    hp._write_driver_env()
+    assert "127.0.0.2" in _no_proxy_entries(driver_env)[0]
+
+    def broken() -> list[str]:
+        raise RuntimeError("registry unavailable")
+
+    monkeypatch.setattr(installed, "exposed_loopback_hosts", broken)
+    _, wrote = hp._write_driver_env()
+    assert wrote is False  # the carried-forward policy makes the render a no-op
+    assert "127.0.0.2" in _no_proxy_entries(driver_env)[0]
+
+
+def test_driver_env_writes_loopback_only_on_a_first_render_when_discovery_fails(
+    driver_env: Path, tmp_hal0_home: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With no previous policy to keep, a first render cannot have any
+    surviving connection to protect, so loopback-only is safe rather than
+    reduced (#2534 review)."""
+    def broken() -> list[str]:
+        raise RuntimeError("registry unavailable")
+
+    monkeypatch.setattr(installed, "exposed_loopback_hosts", broken)
+    hp._write_driver_env()
+    upper, lower = _no_proxy_entries(driver_env)
+    assert upper == lower
+    assert upper == ["localhost", "127.0.0.1", "::1"]
 
 
 def test_driver_env_keeps_the_exclusions_in_hal0_apis_env_file(
