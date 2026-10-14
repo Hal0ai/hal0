@@ -404,7 +404,7 @@ const OPENERS_RE = /["'(\[{<]*/y
 // `_PACKED_HEAD_RE`, one alternative at a time, each up to the value.
 const BEARER_HEAD_RE = rx(String.raw`bearer\s+(?=[A-Za-z0-9._~+/=-]|\*\*\*REDACTED\*\*\*)`, 'yiu')
 const AUTH_HEAD_RE = rx(
-  String.raw`authorization["']?\s*:\s*["']?${AUTH_SCHEMES}\s+(?=[^\s"',])`,
+  String.raw`authorization["']?\s*:\s*["']?${AUTH_SCHEMES}\s+(?=[^\s,])`,
   'yiu',
 )
 const AUTH_RAW_HEAD_RE = rx(

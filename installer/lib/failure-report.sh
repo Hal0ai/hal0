@@ -623,7 +623,7 @@ _HAL0_REPORT_PACKED=$'\001'
 # value or a --token flag, maybe behind opening quotes or brackets.
 _hal0_report_packed_mark_expr() {
     local heads="bearer[[:space:]]+([A-Za-z0-9._~+/=-]|[*]{3}REDACTED[*]{3})"
-    heads+="|authorization[\"']?[[:space:]]*:[[:space:]]*[\"']?(${_HAL0_REPORT_AUTH_SCHEMES}[[:space:]]+[^[:space:]\"',]|[^[:space:]\"',]{8})"
+    heads+="|authorization[\"']?[[:space:]]*:[[:space:]]*[\"']?(${_HAL0_REPORT_AUTH_SCHEMES}[[:space:]]+[^[:space:],]|[^[:space:]\"',]{8})"
     heads+="|--[A-Za-z0-9-]*(secret|token|password|pass|api-key|apikey|private-key)[A-Za-z0-9-]*(=|[[:space:]]+)[^-[:space:]]"
     heads+="|(${_HAL0_REPORT_TEXT_NAME_RE})[\"']?[[:space:]]*[=:][[:space:]]*[^[:space:],}&]"
     printf '%s' "s#([;,])([\"'([{<]*(${heads}))#${_HAL0_REPORT_PACKED}\\1\\2#gI"

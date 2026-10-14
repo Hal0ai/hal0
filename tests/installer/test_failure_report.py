@@ -1341,6 +1341,11 @@ class TestQuotedAuthorizationValue:
             # masks to the end of the line.
             ('Authorization: Bearer "pk_a pk_b', f'Authorization: Bearer "{_MASK}'),
             ('Authorization: Basic "pk_a HF_TOKEN="pk_b" end', f'Authorization: Basic "{_MASK}'),
+            # One packed after another secret keeps its separator, as an unquoted one does.
+            (
+                'X_KEY=pk_a;Authorization: Basic "pk_b pk_c"',
+                f'X_KEY={_MASK};Authorization: Basic "{_MASK}"',
+            ),
             # A secret after the closing quote is masked on its own.
             (
                 'Authorization: Basic "pk_a pk_b" HF_TOKEN=pk_c',

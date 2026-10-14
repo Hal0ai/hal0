@@ -1434,6 +1434,16 @@ class TestQuotedAuthorizationValue:
     def test_the_log_pass_masks_it_too(self, line: str) -> None:
         assert "abc" not in redact_log_line(line)
 
+    @pytest.mark.parametrize("redact", [redact_log_line, redact_shareable_text])
+    @pytest.mark.parametrize("scheme", ["Basic", "Bearer"])
+    def test_one_packed_after_another_secret_is_masked(self, redact, scheme: str) -> None:
+        # The ``;`` ends the first value only where a secret starts after it, and
+        # a quoted value counts (#2605).
+        out = redact(f'X_KEY=abc;Authorization: {scheme} "TOP SECRET"')
+        assert "TOP" not in out and "SECRET" not in out, out
+        assert out.startswith(f"X_KEY={MASK};Authorization: {scheme}"), out
+        assert redact(out) == out
+
 
 # ── #2413: the cases shared with the dashboard's browser-side port ─────────
 

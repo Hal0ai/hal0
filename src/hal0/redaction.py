@@ -336,7 +336,7 @@ _BEARER_TOKEN: Final[_ValueClass] = _value_class(r"[A-Za-z0-9._~+/=-]*", "(?!)")
 # or ``--flag`` keyword; a lookahead checks for the value's first character.
 _PACKED_HEAD_RE: Final[re.Pattern[str]] = re.compile(
     r"(?P<bearer>bearer\s+(?=[A-Za-z0-9._~+/=-]|" + re.escape(MASK) + r"))"
-    r"|(?P<authorization>authorization[\"']?\s*:\s*[\"']?" + _AUTH_SCHEMES + r"\s+(?=[^\s\"',]))"
+    r"|(?P<authorization>authorization[\"']?\s*:\s*[\"']?" + _AUTH_SCHEMES + r"\s+(?=[^\s,]))"
     r"|(?P<authorization_raw>authorization[\"']?\s*:\s*[\"']?"
     r"(?!" + _AUTH_SCHEMES + r"(?:\s|$))(?=[^\s\"',]{8}))"
     r"|(?P<flag>" + _FLAG_PREFIX + r"(?=[^-\s]))",
