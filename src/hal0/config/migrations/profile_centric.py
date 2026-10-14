@@ -893,9 +893,16 @@ class _Planner:
         """
         content = _tidy(conv.content)
         if conv.errors:
-            # Written without the offending flag; every slot still running it
-            # is blocked, and the profile itself is reported as blocked.
+            # Blocked: the stored entry stays exactly as it is (never renamed,
+            # rewritten or written stripped), so the block repeats on every
+            # run until the operator moves the flag to the model (#2648). The
+            # stripped content is a planning view only: every slot still
+            # running the profile is blocked, nothing reuses it
+            # (``_generate``), and ``custom_profiles`` leaves it out.
             self.plan.blocked_profiles[name] = conv.errors
+            if name not in target_seeds():
+                self.catalog[name] = content
+            return name
         if name in target_seeds():
             if _identity(content) == _identity(target_seeds()[name]):
                 if not new:
@@ -904,8 +911,6 @@ class _Planner:
                     ]
                 return name
             renamed = self._free_name(name, "custom")
-            if name in self.plan.blocked_profiles:
-                self.plan.blocked_profiles[renamed] = self.plan.blocked_profiles.pop(name)
             self.plan.renames[name] = renamed
             self.catalog[renamed] = content
             self.plan.profiles[renamed] = content
@@ -971,6 +976,8 @@ class _Planner:
         content = _tidy(content)
         ident = _identity(content)
         for name in sorted(self.catalog):
+            if name in self.plan.blocked_profiles:
+                continue  # kept verbatim on disk: it is not what the catalog holds
             if _identity(self.catalog[name]) == ident:
                 return name
         taken = {**{n: {} for n in self.reserved}, **self.catalog}
@@ -1485,7 +1492,10 @@ class _Planner:
                     continue
                 conv = convert_profile(entry, frozen.LLAMA)
                 if conv.errors:
+                    # Left as stored, like a mixed one: never written stripped
+                    # (#2648), so the stack stays blocked until it is fixed.
                     st.errors.append(f"embedded profile {pname!r}: " + "; ".join(conv.errors))
+                    continue
                 if conv.notes or _tidy(conv.content) != dict(entry):
                     st.profile_rewrites[str(pname)] = conv.notes or ["rewritten in the new shape"]
                 st.profiles[str(pname)] = _tidy(conv.content)
@@ -1557,8 +1567,11 @@ def plan_conversion(inputs: Inputs | None = None) -> ConversionPlan:
     planner.plan_models()
     planner.plan_stacks()
     plan = planner.plan
+    # A blocked profile is not in it: its stored entry stays verbatim.
     plan.custom_profiles = {
-        name: content for name, content in planner.catalog.items() if name not in target_seeds()
+        name: content
+        for name, content in planner.catalog.items()
+        if name not in target_seeds() and name not in plan.blocked_profiles
     }
     return plan
 
