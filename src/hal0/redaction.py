@@ -332,11 +332,16 @@ def _value_class(chunk: str, sep: str = "[;,]") -> _ValueClass:
 # A Bearer token: no separator ends it early.
 _BEARER_TOKEN: Final[_ValueClass] = _value_class(r"[A-Za-z0-9._~+/=-]*", "(?!)")
 
+# Whitespace that is no line break: a quoted value never starts on the next line.
+_HSPACE: Final[str] = r"(?:(?!\n)\s)"
 # Up to the value of a secret that starts with a ``Bearer``, ``Authorization``
 # or ``--flag`` keyword; a lookahead checks for the value's first character.
 _PACKED_HEAD_RE: Final[re.Pattern[str]] = re.compile(
     r"(?P<bearer>bearer\s+(?=[A-Za-z0-9._~+/=-]|" + re.escape(MASK) + r"))"
-    r"|(?P<authorization>authorization[\"']?\s*:\s*[\"']?" + _AUTH_SCHEMES + r"\s+(?=[^\s,]))"
+    r"|(?P<authorization>authorization[\"']?\s*:\s*[\"']?"
+    + _AUTH_SCHEMES
+    # A quoted value is read on one line (#2605); a bare one may follow a line break.
+    + rf"(?:\s+(?=[^\s\"',])|{_HSPACE}+(?=[\"'])))"
     r"|(?P<authorization_raw>authorization[\"']?\s*:\s*[\"']?"
     r"(?!" + _AUTH_SCHEMES + r"(?:\s|$))(?=[^\s\"',]{8}))"
     r"|(?P<flag>" + _FLAG_PREFIX + r"(?=[^-\s]))",
@@ -715,7 +720,6 @@ def _bare_value_rule(prefix: str, value: _ValueClass, *, spaces: bool = False) -
 # Up to a quoted value after an ``Authorization`` scheme (the bare-value rules
 # below need a first character that is no quote). The whitespace is horizontal,
 # so a header that ends a line never takes the quoted text on the next one.
-_HSPACE: Final[str] = r"(?:(?!\n)\s)"
 _AUTH_QUOTED_RE: Final[re.Pattern[str]] = re.compile(
     rf"authorization[\"']?{_HSPACE}*:{_HSPACE}*[\"']?" + _AUTH_SCHEMES + rf"{_HSPACE}+(?=[\"'])",
     re.I,

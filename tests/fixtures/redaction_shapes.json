@@ -794,6 +794,10 @@
     [
       "Authorization: Basic\r\n\"hello world\" next",
       "Authorization: Basic\r\n\"hello world\" next"
+    ],
+    [
+      "X_KEY=abcAuthorization: Basic\n\"hello world\" next",
+      "X_KEY=***REDACTED*** Basic\n\"hello world\" next"
     ]
   ],
   "mask_names": [
