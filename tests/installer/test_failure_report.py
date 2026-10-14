@@ -1268,6 +1268,49 @@ class TestQuotedKeyValueWithSpaces:
         ]
 
 
+class TestBackslashEscapedQuotes:
+    """#2604, the installer's copy of the fix in hal0.redaction: a quote that a
+    backslash escapes does not end a quoted value, in either kind of quote."""
+
+    @pytest.mark.parametrize(
+        ("line", "expected"),
+        [
+            (r'api_key="\"pk_a pk_b\"" z', f'api_key="{_MASK}" z'),
+            (r"api_key='it\'s pk_a pk_b' z", f"api_key='{_MASK}' z"),
+            (r'password="pk_a \"pk_b\" pk_c" tail', f'password="{_MASK}" tail'),
+            (r'{"token": "pk_a \"pk_b\" c", "x": 1}', f'{{"token": "{_MASK}", "x": 1}}'),
+            # An escaped backslash does not escape the quote after it.
+            (r'password="pk_a\\" next=1', f'password="{_MASK}" next=1'),
+            (r'password="pk_a\\\"pk_b" next=1', f'password="{_MASK}" next=1'),
+            # A quote that only an escape would close stays open to the line's end.
+            (r'password="pk_a \"pk_b', f'password="{_MASK}'),
+            ('password="pk_a pk_b\\', f'password="{_MASK}'),
+        ],
+    )
+    def test_the_pattern_pass_masks_the_whole_value(self, line: str, expected: str) -> None:
+        assert _mask_patterns(line).strip() == expected
+
+    def test_a_toml_basic_string_is_harvested_whole(self, tmp_path: Path) -> None:
+        toml = tmp_path / "c.toml"
+        toml.write_text('api_token = "pk_a\\"pk_b pk_c"\n')
+        out = _bash(f'_hal0_report_harvest_toml_file "{toml}"')
+        assert out.stdout.splitlines() == ['pk_a\\"pk_b pk_c'], out.stderr
+
+    def test_the_report_carries_no_value_past_an_escaped_quote(self, tmp_path: Path) -> None:
+        box = _make_box(tmp_path)
+        box["log"].write_text(
+            'api_key="\\"pk_api_Zz12 pk_api_Yy34\\"" z\n'
+            "password='it\\'s pk_pw_Xx56 pk_pw_Ww78' z\n"
+            '{"token": "pk_tok_Vv90 \\"pk_tok_Uu12\\" end", "x": 1}\n'
+        )
+        proc, report = _run_report(box)
+        assert report is not None and report.is_file(), proc.stderr
+        body = report.read_text()
+        for secret in ("pk_api_Zz12", "pk_api_Yy34", "pk_pw_Xx56", "pk_pw_Ww78", "pk_tok_Vv90"):
+            assert secret not in body, body
+        assert "pk_tok_Uu12" not in body, body
+
+
 # ── #2402: multi-line TOML arrays under a sensitive key ─────────────────────
 
 _ARR_A = "arrSecretAlpha1Kq2Wz9Xc"  # no known prefix: literal pass only

@@ -366,6 +366,22 @@
     [
       "api_key=\"pk7 first\npassword=\"pk7 second line\"",
       "pk7 second line"
+    ],
+    [
+      "api_key=\"pk8 \\\"escaped tail\\\" end\" z",
+      "escaped tail"
+    ],
+    [
+      "X_KEY='pk8 it\\'s escaped tail' z",
+      "escaped tail"
+    ],
+    [
+      "password=\"pk8 \\\"escaped tail\\\"\" z",
+      "escaped tail"
+    ],
+    [
+      "{\"token\": \"pk8 \\\"escaped tail\\\" end\", \"x\": 1}",
+      "escaped tail"
     ]
   ],
   "keep": [
@@ -634,6 +650,58 @@
     [
       "password=\"one\nmessage=\"hello\" ok",
       "password=\"***REDACTED***\nmessage=\"hello\" ok"
+    ],
+    [
+      "api_key=\"\\\"a b\\\"\" z",
+      "api_key=***REDACTED*** z"
+    ],
+    [
+      "api_key='it\\'s a b' z",
+      "api_key=***REDACTED*** z"
+    ],
+    [
+      "api_key=\"a\\\\\" next=1",
+      "api_key=***REDACTED*** next=1"
+    ],
+    [
+      "api_key=\"a\\\\\\\\\" next=1",
+      "api_key=***REDACTED*** next=1"
+    ],
+    [
+      "api_key=\"a\\\\\\\"b c\" next=1",
+      "api_key=***REDACTED*** next=1"
+    ],
+    [
+      "api_key=\"a b\\",
+      "api_key=***REDACTED***"
+    ],
+    [
+      "api_key=\"a\\\"\nmessage=\"hello\"",
+      "api_key=***REDACTED***\nmessage=\"hello\""
+    ],
+    [
+      "password=\"a \\\"b\\\" c\" tail",
+      "password=\"***REDACTED***\" tail"
+    ],
+    [
+      "{\"token\": \"a \\\"b\\\" c\", \"x\": 1}",
+      "{\"token\": \"***REDACTED***\", \"x\": 1}"
+    ],
+    [
+      "password=\"a\\\\\" next=1",
+      "password=\"***REDACTED***\" next=1"
+    ],
+    [
+      "password='a \\'b\\' c' tail",
+      "password='***REDACTED***' tail"
+    ],
+    [
+      "password=\"a \\\"b",
+      "password=\"***REDACTED***"
+    ],
+    [
+      "password=\"a b\\",
+      "password=\"***REDACTED***"
     ]
   ],
   "mask_names": [

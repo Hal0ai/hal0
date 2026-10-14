@@ -1355,6 +1355,10 @@ class TestUnclosedQuotes:
             # An unclosed quote ends at its line, so one on every line is no run
             # that pairs with the next (#2598).
             'api_key="a\nx="b\n',
+            # A backslash and the character after it are one unit (#2604).
+            'api_key="a\\" ',
+            "api_key='a \\' ",
+            'api_key="a\\\\"b ',
         ],
     )
     @pytest.mark.parametrize("redact", [redact_log_line, redact_shareable_text])
@@ -1367,6 +1371,32 @@ class TestUnclosedQuotes:
         redact(line)
         elapsed = time.perf_counter() - start
         assert elapsed < TestRedactionTimeIsLinear._BOUND_S, f"{unit!r} took {elapsed:.2f}s"
+
+
+class TestBackslashEscapedQuotes:
+    """#2604: a quote that a backslash escapes does not end a quoted value, so
+    a secret that holds one is masked whole in every pass."""
+
+    @pytest.mark.parametrize("redact", [redact_log_line, redact_shareable_text])
+    @pytest.mark.parametrize(
+        "line",
+        [
+            r'password="\"pk_a pk_b\"" z',
+            r"password='it\'s pk_a pk_b' z",
+            r'api_key="pk_a \"pk_b\" pk_c" z',
+            r'{"token": "pk_a \"pk_b\"", "x": 1}',
+        ],
+    )
+    def test_the_value_is_masked_whole(self, redact, line: str) -> None:
+        out = redact(line)
+        assert "pk_" not in out, out
+        assert redact(out) == out  # idempotent
+
+    @pytest.mark.parametrize("redact", [redact_log_line, redact_shareable_text])
+    def test_an_escaped_backslash_does_not_escape_the_closing_quote(self, redact) -> None:
+        out = redact(r'password="pk_a\\" next=1')
+        assert out.endswith(" next=1"), out
+        assert "pk_a" not in out, out
 
 
 # ── #2413: the cases shared with the dashboard's browser-side port ─────────

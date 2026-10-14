@@ -124,6 +124,15 @@ applying. Add those subsections to a version's section to surface them; see
   with one on a later line, so the next line is not swallowed. The doctor
   bundle and the installer failure report already masked a quoted `*_KEY=`
   value whole.
+- Log, Sentry, doctor-bundle and installer failure-report redaction no longer
+  end a quoted secret at a backslash-escaped quote. `api_key="\"a b\"" z`
+  rendered as `api_key=***REDACTED*** b\"" z`, and a value such as
+  `'it\'s a b'` leaked everything after the escape (#2604). A backslash and
+  the character after it now count as one unit in both kinds of quote, so an
+  escaped quote does not close the value and an escaped backslash does not
+  escape the quote after it. A shell's single quotes have no escapes, but a
+  log or JSON dump of a value does, and reading one as an escape can only mask
+  more of the line.
 
 ### Breaking
 
