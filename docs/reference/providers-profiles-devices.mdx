@@ -69,7 +69,7 @@ header, none`.
 </Aside>
 
 Persisted config is a `ProviderEntry` per upstream (see
-[Config schema → providers.toml](/docs/reference/config-schema/)):
+[Config schema → providers.toml](/docs/reference/config-schema-profiles/#providerstoml)):
 `catalog_id`, `name`/`base_url` overrides, `auth_value_env` (the **name** of an
 environment variable, never the key itself — the actual secret lives in `api.env`),
 `enabled`, `models`.
@@ -79,7 +79,7 @@ environment variable, never the key itself — the actual secret lives in `api.e
 `upstreams.toml`/`UpstreamEntry` are a **separate schema** from `providers.toml`/
 `ProviderEntry` above — both represent "remote provider" concepts but are distinct
 tables with distinct fields (`UpstreamEntry` adds `kind`, `warmup_strategy`,
-`model_filters`; see [Config schema](/docs/reference/config-schema/)).
+`model_filters`; see [Config schema](/docs/reference/config-schema-profiles/#upstreamstoml)).
 Verify which one a given feature actually reads before documenting behavior.
 </Aside>
 
@@ -113,7 +113,7 @@ layer owns: hardware flags (`-ngl`, `-dev`, `-t`), managed flags (`--model`, `--
 and writes such as `--api-key-file` and `--log-file`, listener and auth/TLS settings,
 llama.cpp's built-in preset switches) and bare positional arguments. They are rejected when the profile is saved and refused again at launch, in every
 spelling llama.cpp accepts. `--reasoning-format none` is rejected on save too, but launch strips it from the command instead of refusing. The error codes are listed in
-[Config schema](/docs/reference/config-schema/#profilestoml).
+[Config schema](/docs/reference/config-schema-profiles/#profilestoml).
 
 Profiles carry **no `image` field** — image resolution is slot-owned
 (`slot.image_pin` or `RUNNER_IMAGES[slot.binary]`).
