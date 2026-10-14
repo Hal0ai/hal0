@@ -27,6 +27,9 @@ import { useUpdateState } from '@/api/hooks/useUpdates'
 // VITE_SENTRY_DSN baked in, captureUiException is a no-op and the SDK chunk is
 // never fetched.
 import { captureUiException } from '@/sentry'
+// Benchmarks page (#benchmarks): a real ES module, imported directly rather
+// than read off a `window.BenchmarksView` global.
+import Benchmarks from './Benchmarks'
 
 const { useState: useStateA, useEffect: useEffectA } = React;
 
@@ -314,9 +317,7 @@ function App() {
       // Benchmarks (#benchmarks): roster board / run detail / evals / run
       // queue over /api/benchmarks/* (hal0.bench store).
       case "benchmarks":
-        return typeof BenchmarksView === "function"
-          ? <BenchmarksView />
-          : <div className="view">Benchmarks unavailable — bundle stale.</div>;
+        return <Benchmarks />;
       case "settings": return <SettingsShell param={param} />;
       default:         return <div className="view">Not found.</div>;
     }
