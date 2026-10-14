@@ -1118,6 +1118,19 @@ def redact_shareable_text(text: str) -> str:
 # each other, many times over.
 _LITERAL_TRIE_MAX_NESTING: Final[int] = 100
 _LITERAL_OCCURRENCES_PER_CHAR_MAX: Final[int] = 4
+# A literal longer than this is masked by ``str.replace`` ahead of the scan
+# (#2600). The scan tries every literal at every position, and where the text
+# repeats a literal's own prefix (a value of glued ``a.`` units, an open quote
+# over a long run of ``a``) each try runs far into it: quadratic in the text
+# when the literal is as long as the line. ``str.replace`` is linear in the
+# text for one literal. Shorter literals bound each try, so the scan stays
+# linear with this as the constant.
+_LITERAL_SCAN_MAX: Final[int] = 128
+# The literals past it take one ``str.replace`` each, over the whole text, so
+# only while their number times the text's length stays within this many
+# characters (about half a second at ``str.replace``'s speed): a bundle with
+# thousands of long distinct secrets is scanned in one pass instead (#2533).
+_LITERAL_REPLACE_BUDGET: Final[int] = 2_000_000_000
 
 
 def _may_match_a_mask(literal: str) -> bool:
@@ -1178,6 +1191,16 @@ def _mask_literals(text: str, literals: list[str]) -> str:
     masked in the loop's order. Such a literal, or a pathological set of
     literals, takes the loop itself.
     """
+    # The longest literals come first, and the loop masks them first: do the same,
+    # with str.replace, so the scan only meets literals whose tries are short.
+    # What it scans is then a text with those masks in it, which it handles as
+    # any text that holds a MASK (below).
+    long_run = 0
+    while long_run < len(literals) and len(literals[long_run]) > _LITERAL_SCAN_MAX:
+        long_run += 1
+    if long_run * len(text) <= _LITERAL_REPLACE_BUDGET:
+        text = _replace_each(text, literals[:long_run])
+        literals = literals[long_run:]
     if not literals or any(_may_match_a_mask(literal) for literal in literals):
         return _replace_each(text, literals)
     # A trie of the literals; key "" marks where one ends and holds its id.

@@ -143,6 +143,14 @@ applying. Add those subsections to a version's section to surface them; see
   end of its line. The log pass and the dashboard's Sentry scrubber already
   masked a quoted Bearer value; they now also mask a quoted Basic, Token or
   other scheme value, which they left visible.
+- The doctor bundle's redaction no longer takes quadratic time on a long line
+  that holds one long secret in text that repeats its own start: 4.5 s for
+  320 KB of `X_KEY=a.` units and 4.7 s for a 120 KB `password="aaa…` that never
+  closes (#2600). Masking each harvested secret everywhere it appears scanned
+  for all of them at every position, and each try ran far into a long one. A
+  secret longer than 128 characters is now masked with one plain replace, ahead
+  of the scan, which is linear for one such secret; the output is unchanged.
+  The log redaction and the dashboard's Sentry scrubber were already linear.
 
 ### Breaking
 
