@@ -838,7 +838,11 @@ class TestShareableLiteralsSinglePass:
         """18 s on main for the plain form; a ``*`` inside a value that
         cannot touch a MASK keeps the single pass. Each value also appears
         bare on its own line, which only the harvested-literal pass masks,
-        so the output proves that pass ran over every value."""
+        so the output proves that pass ran over every value.
+
+        The fix runs in about 1.2 s on a dev box and about 5 s on a loaded
+        PR runner (xdist workers share its cores), so the bound sits at 10 s:
+        the old per-literal loop's 18 s still fails it."""
         import time
 
         text = "\n".join(f"token={value.format(i)}\n{value.format(i)}" for i in range(45_000))
@@ -846,7 +850,7 @@ class TestShareableLiteralsSinglePass:
         start = time.perf_counter()
         out = redact_shareable_text(text)
         elapsed = time.perf_counter() - start
-        assert elapsed < 5.0, f"{len(text)} chars took {elapsed:.2f}s"
+        assert elapsed < 10.0, f"{len(text)} chars took {elapsed:.2f}s"
         assert out == "\n".join([f"token={MASK}\n{MASK}"] * 45_000)
 
     def test_differential_against_the_loop(self) -> None:
