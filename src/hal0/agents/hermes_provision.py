@@ -6712,6 +6712,22 @@ def _no_proxy_in_env_file(body: str | None) -> list[str]:
     return out
 
 
+def _no_proxy_env_lines(body: str | None) -> list[str]:
+    """The verbatim ``NO_PROXY``/``no_proxy`` lines of an env-file body.
+
+    Only this renderer writes the file, and it writes both spellings as plain
+    ``KEY=value`` lines, so a raw prefix match is enough — no shell spellings
+    to unfold here. Used to carry the previous policy forward verbatim when a
+    render cannot verify the required host set (#2534 review), never to
+    compute a new one.
+    """
+    return [
+        line
+        for line in (body or "").splitlines()
+        if line.split("=", 1)[0] in ("NO_PROXY", "no_proxy")
+    ]
+
+
 def _driver_env_no_proxy(exposed: list[str] | None = None) -> str:
     """The ``NO_PROXY`` value for the driver env (#2330).
 
@@ -6732,6 +6748,10 @@ def _driver_env_no_proxy(exposed: list[str] | None = None) -> str:
     ``exposed`` is the loopback host list the caller already looked up (the
     MCP join passes the set it is about to record, so a second lookup can't
     fail and leave the recorded set unwritten); ``None`` looks it up here.
+    Returns ``None`` when that lookup failed and the caller supplied no list:
+    the required-host set is then unknown, and the caller decides whether a
+    reduced value is safe to commit (a rewrite here keeps the previous
+    policy verbatim instead).
     """
     from hal0.config import paths as _cfg_paths
 
@@ -6749,7 +6769,10 @@ def _driver_env_no_proxy(exposed: list[str] | None = None) -> str:
             exposed = exposed_loopback_hosts()
         except Exception as exc:  # never fail the env write over the MCP registry
             log.warning("hermes_provision.driver_env_mcp_hosts_failed", error=str(exc))
-            exposed = []
+            # Signalled, not degraded to an empty list: a recomputed value here
+            # would silently drop the exclusions surviving local connections
+            # still need (#2534 review). The caller keeps the previous policy.
+            return None
     # Only host, IP, CIDR, `*` and leading-dot entries reach the file: the
     # value lands unquoted in a systemd EnvironmentFile, where a stray quote
     # (say from a malformed api.env line) would swallow the lines after it.
@@ -6850,8 +6873,30 @@ def _write_driver_env(
         with contextlib.suppress(OSError):
             existing = path.read_text(encoding="utf-8")
     # #2330: keep loopback MCP traffic, and its header values, off any proxy.
+    # When discovery failed and the caller gave no host list, a recomputed
+    # value would drop exclusions surviving local connections still need, so
+    # the previous policy is kept verbatim instead of committing a reduced
+    # one; the next render with healthy discovery prunes it normally (#2534).
     no_proxy = _driver_env_no_proxy(no_proxy_hosts)
-    lines += [f"NO_PROXY={no_proxy}", f"no_proxy={no_proxy}"]
+    if no_proxy is None:
+        prev = _no_proxy_env_lines(existing)
+        if prev:
+            lines += prev
+        elif path.exists():
+            # No previous policy readable to keep: writing a base-only value
+            # is still safe on a first render (nothing can have connected
+            # yet), but this file already carries one, so a rewrite would
+            # commit the reduced policy. Leave it untouched.
+            log.warning(
+                "hermes_provision.driver_env_discovery_failed_kept_policy",
+                path=str(path),
+            )
+            return path, False
+        else:
+            no_proxy = ",".join(_NO_PROXY_BASE)
+            lines += [f"NO_PROXY={no_proxy}", f"no_proxy={no_proxy}"]
+    else:
+        lines += [f"NO_PROXY={no_proxy}", f"no_proxy={no_proxy}"]
     body = "\n".join(lines) + "\n"
     if path.exists():
         unchanged = existing == body
