@@ -22,9 +22,8 @@
     "allowJs": true,
     "checkJs": false,
 
-    "baseUrl": ".",
     "paths": {
-      "@/*": ["src/*"]
+      "@/*": ["./src/*"]
     },
 
     "types": ["vite/client"]
