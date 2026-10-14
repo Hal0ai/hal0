@@ -868,8 +868,9 @@ async def bank_document_transfer_import(request: Request, bank_id: str) -> Any:
 #
 # (hal0 method, hal0 path under /api/memory, upstream path template).
 # Query params and JSON bodies forward verbatim; see module docstring for the
-# error-mapping contract. Upstream paths follow the 0.7.x OpenAPI spec —
-# deprecated endpoints (background, entity regenerate) are deliberately absent.
+# error-mapping contract. Upstream paths follow the engine's OpenAPI spec —
+# retired endpoints (profile, background, entity regenerate) are deliberately
+# absent.
 
 _FORWARDS: tuple[tuple[str, str, str], ...] = (
     # banks
@@ -886,8 +887,9 @@ _FORWARDS: tuple[tuple[str, str, str], ...] = (
         "/banks/{bank_id}/stats/timeseries",
         "/v1/default/banks/{bank_id}/stats/memories-timeseries",
     ),
-    ("GET", "/banks/{bank_id}/profile", "/v1/default/banks/{bank_id}/profile"),
-    ("PUT", "/banks/{bank_id}/profile", "/v1/default/banks/{bank_id}/profile"),
+    # GET/PUT /banks/{bank_id}/profile are NOT here: hindsight-api 0.10.0
+    # retired them (always 410 Gone). Disposition and missions are bank config
+    # (PATCH .../config); name/mission/effective disposition ride the bank list.
     ("GET", "/banks/{bank_id}/config", "/v1/default/banks/{bank_id}/config"),
     ("PATCH", "/banks/{bank_id}/config", "/v1/default/banks/{bank_id}/config"),
     ("DELETE", "/banks/{bank_id}/config", "/v1/default/banks/{bank_id}/config"),

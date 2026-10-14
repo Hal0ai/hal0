@@ -4,21 +4,25 @@ Thin HTTP client over the allowlisted passthrough in
 :mod:`hal0.api.routes.memory_admin` (``/api/memory/banks/...``), which
 forwards verbatim to the Hindsight REST API (``/v1/default/banks/...``).
 
-Field-shape note (checked against a live 0.7.2 instance's ``/openapi.json``):
-Hindsight splits "profile" across two upstream resources that this CLI's
-``bank profile`` command presents as one surface:
+Profile note (source-checked against the hindsight-api v0.9.2 and v1.0.0
+tags): the engine retired ``GET/PUT .../profile`` in 0.10.0 — both answer
+``410 Gone`` from then on. A bank's "profile" is now bank *configuration*,
+and this CLI's ``bank profile`` command presents it as one surface:
 
-  - ``PUT .../profile`` only accepts ``{"disposition": {skepticism,
-    literalism, empathy}}`` (``UpdateDispositionRequest``) — all three
-    traits are required, so ``profile set`` fetches the current profile
-    and merges in only the traits the caller passed.
-  - ``retain_mission`` / ``observations_mission`` / ``reflect_mission``
-    are bank *config* overrides (``BankTemplateConfig``), set via
-    ``PATCH .../config`` with ``{"updates": {...}}`` — not the profile
-    endpoint at all, despite reading like profile fields.
+  - ``profile get`` reads the bank's entry from ``GET .../banks?q=<bank>``.
+    That item carries ``name``, ``mission`` and ``disposition`` with the
+    same resolution the old profile endpoint applied (bank config
+    overlaid on the legacy ``banks`` columns), so a disposition written
+    through the old ``PUT .../profile`` still shows its effective value.
+    ``GET .../config`` would not: it reports only config-level values.
+  - ``profile set`` writes every flag through ``PATCH .../config`` with
+    ``{"updates": {...}}`` — the three missions as ``retain_mission`` /
+    ``observations_mission`` / ``reflect_mission`` and the traits as
+    ``disposition_skepticism`` / ``_literalism`` / ``_empathy``. Config
+    updates are partial, so only the fields the caller passed are sent.
 
-``bank profile set`` routes each flag to the correct upstream call and
-only sends the fields the caller actually passed.
+Both calls exist with these shapes on 0.9.2 as well, so the command works
+on either side of an engine upgrade.
 """
 
 from __future__ import annotations
@@ -40,7 +44,6 @@ from hal0.cli._shared import (
     api_get,
     api_patch,
     api_post,
-    api_put,
     die,
 )
 
@@ -48,11 +51,6 @@ app = typer.Typer(help="Manage Hindsight banks (list, stats, profile, export/imp
 console = Console()
 
 _DISPOSITION_FIELDS = ("skepticism", "literalism", "empathy")
-_CONFIG_MISSION_FIELDS = {
-    "retain_mission": "retain_mission",
-    "observations_mission": "observations_mission",
-    "reflect_mission": "reflect_mission",
-}
 
 
 def _require_api() -> str:
@@ -153,16 +151,34 @@ def _render_profile(payload: dict[str, Any], bank: str) -> None:
     t = Table.grid(padding=(0, 2))
     t.add_column("k", style="dim")
     t.add_column("v")
-    t.add_row("Name", str(payload.get("name", "—")))
+    t.add_row("Name", str(payload.get("name") or "—"))
     t.add_row("Mission", str(payload.get("mission") or "[dim]none[/dim]"))
     disp = payload.get("disposition") or {}
     t.add_row(
         "Disposition",
         ", ".join(f"{k}={disp.get(k)}" for k in _DISPOSITION_FIELDS if k in disp) or "—",
     )
-    if payload.get("background"):
-        t.add_row("Background (deprecated)", str(payload["background"]))
     console.print(Panel(t, title=f"memory · bank {bank} · profile", border_style="dim"))
+
+
+def _fetch_profile(bank: str) -> dict[str, Any]:
+    """The bank's profile, read from its bank-list entry.
+
+    ``q`` is a substring filter on id *or* name, so the exact ``bank_id``
+    match is picked out here. Raises :class:`CliApiError` when no bank has
+    that id — the 404 the retired ``GET .../profile`` used to answer.
+    """
+    result = api_get("/api/memory/banks", params={"q": bank, "limit": 1000})
+    banks = (result or {}).get("banks", []) if isinstance(result, dict) else []
+    for item in banks:
+        if isinstance(item, dict) and item.get("bank_id") == bank:
+            return {
+                "bank_id": bank,
+                "name": item.get("name"),
+                "mission": item.get("mission") or "",
+                "disposition": item.get("disposition") or {},
+            }
+    raise CliApiError(f"bank {bank!r} not found", status=404)
 
 
 @profile_app.command("get")
@@ -173,7 +189,7 @@ def profile_get_cmd(
     """Show a bank's profile (name, mission, disposition traits)."""
     _require_api()
     try:
-        p = api_get(f"/api/memory/banks/{bank}/profile")
+        p = _fetch_profile(bank)
     except CliApiError as exc:
         die(str(exc))
         return
@@ -209,36 +225,28 @@ def profile_set_cmd(
     ),
     json_out: bool = typer.Option(False, "--json", help="Emit raw JSON instead of a panel."),
 ) -> None:
-    """Read-modify-write a bank's profile.
+    """Update a bank's profile.
 
-    Disposition traits (--skepticism/--literalism/--empathy) go through
-    ``PUT .../profile``; mission fields (--retain-mission/
-    --observations-mission/--reflect-mission) go through
-    ``PATCH .../config`` — see module docstring for why these are split.
-    Only the fields you pass are changed; everything else is left alone.
+    Every flag is a bank config override written with one
+    ``PATCH .../config`` — see the module docstring. Only the fields you
+    pass are changed; everything else is left alone.
     """
     _require_api()
 
-    config_updates = {
-        flag: value
-        for flag, value in (
+    updates = {
+        key: value
+        for key, value in (
             ("retain_mission", retain_mission),
             ("observations_mission", observations_mission),
             ("reflect_mission", reflect_mission),
-        )
-        if value is not None
-    }
-    disposition_updates = {
-        flag: value
-        for flag, value in (
-            ("skepticism", skepticism),
-            ("literalism", literalism),
-            ("empathy", empathy),
+            ("disposition_skepticism", skepticism),
+            ("disposition_literalism", literalism),
+            ("disposition_empathy", empathy),
         )
         if value is not None
     }
 
-    if not config_updates and not disposition_updates:
+    if not updates:
         die(
             "pass at least one of --retain-mission/--observations-mission/--reflect-mission "
             "/--skepticism/--literalism/--empathy"
@@ -246,17 +254,8 @@ def profile_set_cmd(
         return
 
     try:
-        if disposition_updates:
-            current = api_get(f"/api/memory/banks/{bank}/profile")
-            disp = dict((current or {}).get("disposition") or {})
-            disp.update(disposition_updates)
-            # DispositionTraits requires all three fields on every PUT.
-            for field in _DISPOSITION_FIELDS:
-                disp.setdefault(field, 3)
-            api_put(f"/api/memory/banks/{bank}/profile", json={"disposition": disp})
-        if config_updates:
-            api_patch(f"/api/memory/banks/{bank}/config", json={"updates": config_updates})
-        final = api_get(f"/api/memory/banks/{bank}/profile")
+        api_patch(f"/api/memory/banks/{bank}/config", json={"updates": updates})
+        final = _fetch_profile(bank)
     except CliApiError as exc:
         die(str(exc))
         return
