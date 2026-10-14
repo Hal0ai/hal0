@@ -37,8 +37,8 @@ one-way DB migration behind the operator's back would be worse. The engine's
 HTTP surface is NOT purely additive across 0.9.2 → 1.0.0: hindsight-api 0.10.0
 retired ``GET/PUT .../profile`` (410) and made the mental-model list
 metadata-only by default. A hal0 tree rolled back to one pinned on 0.9.2 keeps
-memory retain/recall/reflect, but its ``hal0 memory bank profile`` commands
-fail and the dashboard's mental-model rows lose their content preview.
+memory retain/recall/reflect, but its bank-profile route and CLI fail and
+the dashboard's mental-model rows lose their content preview.
 
 Privileges: on the ``hal0 update`` path this runs as the unprivileged ``hal0``
 user (the venv and ``.pg0`` are hal0-owned; service stop/start routes through

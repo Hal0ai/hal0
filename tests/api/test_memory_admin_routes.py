@@ -11,6 +11,7 @@ Run targeted:
 
 from __future__ import annotations
 
+import json
 from collections.abc import Iterator
 from typing import Any
 
@@ -646,3 +647,93 @@ def test_engine_route_mounted_on_create_app(tmp_hal0_home: str) -> None:
     # Any non-404 means the router is mounted; payload contract covered above.
     assert r.status_code == 200
     assert "enabled" in r.json()
+
+
+# ── /banks/{bank_id}/profile — composed; the engine's own route is a 410 ──────
+
+_LISTED_BANKS = {
+    "banks": [
+        # ``q`` is a substring filter on id or name: a near-miss id is listed too.
+        {
+            "bank_id": "shared-archive",
+            "name": "Archive",
+            "disposition": {"skepticism": 1, "literalism": 1, "empathy": 1},
+            "mission": "old",
+        },
+        {
+            "bank_id": "shared",
+            "name": "Shared brain",
+            "disposition": {"skepticism": 5, "literalism": 1, "empathy": 2},
+            "mission": "help the household",
+        },
+    ]
+}
+
+
+def test_profile_get_composes_from_the_bank_list(client: TestClient, recorder: _Recorder) -> None:
+    recorder.respond("GET", "/v1/default/banks", 200, _LISTED_BANKS)
+    r = client.get("/api/memory/banks/shared/profile")
+    assert r.status_code == 200
+    assert r.json() == {
+        "bank_id": "shared",
+        "name": "Shared brain",
+        "disposition": {"skepticism": 5, "literalism": 1, "empathy": 2},
+        "mission": "help the household",
+        "background": "help the household",
+    }
+    assert [(q["method"], q["path"]) for q in recorder.requests] == [("GET", "/v1/default/banks")]
+    assert recorder.requests[0]["params"]["q"] == "shared"
+
+
+def test_profile_get_unknown_bank_404(client: TestClient, recorder: _Recorder) -> None:
+    recorder.respond("GET", "/v1/default/banks", 200, _LISTED_BANKS)
+    r = client.get("/api/memory/banks/nope/profile")
+    assert r.status_code == 404
+    assert r.json()["error"]["code"] == "memory.bank_not_found"
+
+
+def test_profile_put_writes_traits_as_config_overrides(
+    client: TestClient, recorder: _Recorder
+) -> None:
+    recorder.respond("GET", "/v1/default/banks", 200, _LISTED_BANKS)
+    r = client.put(
+        "/api/memory/banks/shared/profile", json={"disposition": {"skepticism": 4, "empathy": 3}}
+    )
+    assert r.status_code == 200, r.text
+    patches = [q for q in recorder.requests if q["method"] == "PATCH"]
+    assert [q["path"] for q in patches] == ["/v1/default/banks/shared/config"]
+    assert json.loads(patches[0]["body"]) == {
+        "updates": {"disposition_skepticism": 4, "disposition_empathy": 3}
+    }
+    assert not any(q["path"].endswith("/profile") for q in recorder.requests)
+    assert r.json()["bank_id"] == "shared"
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {},
+        {"disposition": {}},
+        {"disposition": {"cheerfulness": 3}},
+        {"disposition": {"skepticism": 0}},
+        {"disposition": {"skepticism": 6}},
+        {"disposition": {"skepticism": "4"}},
+        {"disposition": {"skepticism": True}},
+    ],
+)
+def test_profile_put_rejects_bad_bodies(
+    client: TestClient, recorder: _Recorder, body: dict[str, Any]
+) -> None:
+    recorder.respond("GET", "/v1/default/banks", 200, _LISTED_BANKS)
+    r = client.put("/api/memory/banks/shared/profile", json=body)
+    assert r.status_code == 422
+    assert not [q for q in recorder.requests if q["method"] == "PATCH"]
+
+
+def test_profile_put_unknown_bank_404_without_writing(
+    client: TestClient, recorder: _Recorder
+) -> None:
+    recorder.respond("GET", "/v1/default/banks", 200, _LISTED_BANKS)
+    r = client.put("/api/memory/banks/nope/profile", json={"disposition": {"empathy": 2}})
+    assert r.status_code == 404
+    assert not [q for q in recorder.requests if q["method"] == "PATCH"]

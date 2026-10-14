@@ -291,6 +291,85 @@ async def bank_stats(request: Request, bank_id: str) -> Any:
     return stats
 
 
+# ── /banks/{bank_id}/profile — composed (the engine retired its own) ─────────
+#
+# hindsight-api 0.10.0 retired GET/PUT /v1/default/banks/{bank}/profile:
+# both answer 410 Gone from then on (upstream #4127). This hal0 route is a
+# public 1.x surface, so it stays, composed from the two engine calls that
+# replaced it (both present with these shapes on 0.9.2 as well):
+#
+# * GET reads the bank's entry from ``GET /v1/default/banks?q=<bank>``. That
+#   item carries name, mission and disposition with the same resolution the
+#   old endpoint applied (bank config overlaid on the legacy ``banks``
+#   columns), so a disposition written through the old PUT still shows its
+#   effective value. ``GET .../config`` would not: it reports config only.
+# * PUT writes the traits as ``disposition_*`` overrides through
+#   ``PATCH .../config``. Config updates are partial, so a body naming one
+#   trait changes only that trait.
+
+_DISPOSITION_TRAITS = ("skepticism", "literalism", "empathy")
+
+
+async def _bank_profile(client: Any, bank_id: str) -> dict[str, Any]:
+    listing = await _forward(
+        client, "GET", "/v1/default/banks", params={"q": bank_id, "limit": "1000"}
+    )
+    banks = listing.get("banks") if isinstance(listing, dict) else None
+    for item in banks if isinstance(banks, list) else []:
+        if isinstance(item, dict) and item.get("bank_id") == bank_id:
+            mission = item.get("mission") or ""
+            return {
+                "bank_id": bank_id,
+                "name": item.get("name"),
+                "disposition": item.get("disposition") or {},
+                "mission": mission,
+                # The old response carried the mission twice; kept for callers.
+                "background": mission,
+            }
+    raise NotFound(f"bank {bank_id!r} does not exist", code="memory.bank_not_found")
+
+
+@router.get("/banks/{bank_id}/profile")
+async def bank_profile_get(request: Request, bank_id: str) -> dict[str, Any]:
+    client = _client(request)
+    _validate_segments({"bank_id": bank_id})
+    return await _bank_profile(client, bank_id)
+
+
+@router.put("/banks/{bank_id}/profile")
+async def bank_profile_put(request: Request, bank_id: str) -> dict[str, Any]:
+    client = _client(request)
+    _validate_segments({"bank_id": bank_id})
+    body = await _read_body(request)
+    disposition = body.get("disposition") if isinstance(body, dict) else None
+    if not isinstance(disposition, dict) or not disposition:
+        raise UnprocessableEntity(
+            'body must be {"disposition": {skepticism?, literalism?, empathy?}}',
+            code="memory.invalid_body",
+        )
+    updates: dict[str, int] = {}
+    for trait, value in disposition.items():
+        if trait not in _DISPOSITION_TRAITS:
+            raise UnprocessableEntity(
+                f"unknown disposition trait: {trait!r}", code="memory.invalid_body"
+            )
+        if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 5:
+            raise UnprocessableEntity(
+                f"disposition.{trait} must be an integer 1-5, got {value!r}",
+                code="memory.invalid_body",
+            )
+        updates[f"disposition_{trait}"] = value
+    # 404 before writing: PATCH .../config would otherwise create the bank.
+    await _bank_profile(client, bank_id)
+    await _forward(
+        client,
+        "PATCH",
+        f"/v1/default/banks/{bank_id}/config",
+        json_body={"updates": updates},
+    )
+    return await _bank_profile(client, bank_id)
+
+
 @router.get("/banks/{bank_id}/graph/subgraph")
 async def bank_subgraph(request: Request, bank_id: str) -> dict[str, Any]:
     client = _client(request)
@@ -888,8 +967,8 @@ _FORWARDS: tuple[tuple[str, str, str], ...] = (
         "/v1/default/banks/{bank_id}/stats/memories-timeseries",
     ),
     # GET/PUT /banks/{bank_id}/profile are NOT here: hindsight-api 0.10.0
-    # retired them (always 410 Gone). Disposition and missions are bank config
-    # (PATCH .../config); name/mission/effective disposition ride the bank list.
+    # retired them (always 410 Gone), so hal0 composes them — see
+    # ``bank_profile_get``/``bank_profile_put`` above.
     ("GET", "/banks/{bank_id}/config", "/v1/default/banks/{bank_id}/config"),
     ("PATCH", "/banks/{bank_id}/config", "/v1/default/banks/{bank_id}/config"),
     ("DELETE", "/banks/{bank_id}/config", "/v1/default/banks/{bank_id}/config"),

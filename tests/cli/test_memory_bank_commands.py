@@ -27,29 +27,29 @@ def stub_api(monkeypatch: pytest.MonkeyPatch):
     def fake_get(path: str, **kw: Any) -> Any:
         calls["get"].append((path, kw))
         if path == "/api/memory/banks":
-            bank = dict(
-                responses.get(
-                    "bank",
+            return {
+                "banks": [
                     {
                         "bank_id": "shared",
                         "name": "shared",
-                        "mission": "",
-                        "disposition": {"skepticism": 3, "literalism": 3, "empathy": 3},
-                    },
-                )
+                        "fact_count": 42,
+                        "last_document_at": "2026-07-01T00:00:00Z",
+                        "created_at": "2026-01-01T00:00:00Z",
+                    }
+                ]
+            }
+        if path.endswith("/profile"):
+            if path != "/api/memory/banks/shared/profile":
+                raise bc.CliApiError("bank 'nope' does not exist", status=404)
+            return responses.get(
+                "profile",
+                {
+                    "bank_id": "shared",
+                    "name": "shared",
+                    "mission": "",
+                    "disposition": {"skepticism": 3, "literalism": 3, "empathy": 3},
+                },
             )
-            bank.update(
-                fact_count=42,
-                last_document_at="2026-07-01T00:00:00Z",
-                created_at="2026-01-01T00:00:00Z",
-            )
-            # ``q`` is the engine's substring filter on id or name, so a
-            # near-miss id is listed too; the CLI must pick the exact match.
-            near_miss = {**bank, "bank_id": "shared-archive", "name": "shared-archive"}
-            near_miss["disposition"] = {"skepticism": 1, "literalism": 1, "empathy": 1}
-            if (kw.get("params") or {}).get("q"):
-                return {"banks": [near_miss, bank]}
-            return {"banks": [bank]}
         if path.endswith("/stats"):
             return {
                 "total_nodes": 10,
@@ -106,10 +106,8 @@ def test_bank_stats(stub_api) -> None:
     assert stub_api["get"][-1][0] == "/api/memory/banks/shared/stats"
 
 
-def test_profile_get_reads_the_bank_list_entry(stub_api) -> None:
-    # GET/PUT .../profile answer 410 from hindsight-api 0.10.0 on; the bank
-    # list carries the same resolved name/mission/disposition.
-    stub_api["_responses"]["bank"] = {
+def test_profile_get_reads_hal0s_profile_route(stub_api) -> None:
+    stub_api["_responses"]["profile"] = {
         "bank_id": "shared",
         "name": "Shared brain",
         "mission": "help the household",
@@ -118,22 +116,14 @@ def test_profile_get_reads_the_bank_list_entry(stub_api) -> None:
     result = runner.invoke(bc.app, ["profile", "get", "shared", "--json"])
     assert result.exit_code == 0, result.output
     payload = json.loads(result.output)
-    assert payload == {
-        "bank_id": "shared",
-        "name": "Shared brain",
-        "mission": "help the household",
-        "disposition": {"skepticism": 4, "literalism": 2, "empathy": 5},
-    }
-    path, kw = stub_api["get"][-1]
-    assert path == "/api/memory/banks"
-    assert kw["params"]["q"] == "shared"
-    assert not any(p.endswith("/profile") for p, _ in stub_api["get"])
+    assert payload["disposition"] == {"skepticism": 4, "literalism": 2, "empathy": 5}
+    assert stub_api["get"][-1][0] == "/api/memory/banks/shared/profile"
 
 
 def test_profile_get_unknown_bank_fails(stub_api) -> None:
     result = runner.invoke(bc.app, ["profile", "get", "nope", "--json"])
     assert result.exit_code != 0
-    assert "not found" in result.output
+    assert "does not exist" in result.output
 
 
 def test_profile_set_requires_at_least_one_field(stub_api) -> None:

@@ -5,24 +5,19 @@ Thin HTTP client over the allowlisted passthrough in
 forwards verbatim to the Hindsight REST API (``/v1/default/banks/...``).
 
 Profile note (source-checked against the hindsight-api v0.9.2 and v1.0.0
-tags): the engine retired ``GET/PUT .../profile`` in 0.10.0 — both answer
-``410 Gone`` from then on. A bank's "profile" is now bank *configuration*,
-and this CLI's ``bank profile`` command presents it as one surface:
+tags): the engine retired its own ``GET/PUT .../profile`` in 0.10.0 — both
+answer ``410 Gone`` from then on. hal0-api composes
+``/api/memory/banks/{bank}/profile`` from the calls that replaced them
+(see :func:`hal0.api.routes.memory_admin.bank_profile_get`), and this CLI's
+``bank profile`` command uses that:
 
-  - ``profile get`` reads the bank's entry from ``GET .../banks?q=<bank>``.
-    That item carries ``name``, ``mission`` and ``disposition`` with the
-    same resolution the old profile endpoint applied (bank config
-    overlaid on the legacy ``banks`` columns), so a disposition written
-    through the old ``PUT .../profile`` still shows its effective value.
-    ``GET .../config`` would not: it reports only config-level values.
+  - ``profile get`` reads hal0's profile route: name, mission and the
+    effective disposition (bank config overlaid on the legacy columns).
   - ``profile set`` writes every flag through ``PATCH .../config`` with
     ``{"updates": {...}}`` — the three missions as ``retain_mission`` /
     ``observations_mission`` / ``reflect_mission`` and the traits as
     ``disposition_skepticism`` / ``_literalism`` / ``_empathy``. Config
     updates are partial, so only the fields the caller passed are sent.
-
-Both calls exist with these shapes on 0.9.2 as well, so the command works
-on either side of an engine upgrade.
 """
 
 from __future__ import annotations
@@ -162,23 +157,7 @@ def _render_profile(payload: dict[str, Any], bank: str) -> None:
 
 
 def _fetch_profile(bank: str) -> dict[str, Any]:
-    """The bank's profile, read from its bank-list entry.
-
-    ``q`` is a substring filter on id *or* name, so the exact ``bank_id``
-    match is picked out here. Raises :class:`CliApiError` when no bank has
-    that id — the 404 the retired ``GET .../profile`` used to answer.
-    """
-    result = api_get("/api/memory/banks", params={"q": bank, "limit": 1000})
-    banks = (result or {}).get("banks", []) if isinstance(result, dict) else []
-    for item in banks:
-        if isinstance(item, dict) and item.get("bank_id") == bank:
-            return {
-                "bank_id": bank,
-                "name": item.get("name"),
-                "mission": item.get("mission") or "",
-                "disposition": item.get("disposition") or {},
-            }
-    raise CliApiError(f"bank {bank!r} not found", status=404)
+    return api_get(f"/api/memory/banks/{bank}/profile")
 
 
 @profile_app.command("get")

@@ -207,9 +207,10 @@ server if it doesn't, and the server enforces the same check independently.
 config PATCH: `--skepticism`/`--literalism`/`--empathy` (1–5 disposition
 traits) and `--retain-mission`/`--observations-mission`/`--reflect-mission`.
 Pass any combination — only the fields you name are changed. `bank profile
-get` reads the bank's name, mission and effective disposition from the bank
-list. The memory engine's own `/profile` endpoint answers `410 Gone` from
-Hindsight 0.10.0 on, so neither command calls it.
+get` shows the bank's name, mission and effective disposition. The memory
+engine's own `/profile` endpoint answers `410 Gone` from Hindsight 0.10.0 on;
+hal0's `/api/memory/banks/<bank>/profile` keeps working by composing the same
+answer from the bank list and the bank config.
 
 ## Async operations and mental models
 

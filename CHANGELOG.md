@@ -789,12 +789,13 @@ applying. Add those subsections to a version's section to surface them; see
   `~/.pi/agent/settings.json` (`"-builtin:mcp"` under `extensions`) because the
   adapter replaces it.
 
-- `hal0 memory bank profile get` and `set` no longer call the memory
-  engine's `/profile` endpoint, which answers `410 Gone` from Hindsight
-  0.10.0 on. `get` reads the bank's name, mission and effective disposition
-  from the bank list. `set` writes the disposition traits and the three
-  missions in one bank-config PATCH. The `/api/memory/banks/{bank}/profile`
-  passthrough is removed. `hal0 memory mm list` and the dashboard ask for
+- `GET`/`PUT /api/memory/banks/{bank}/profile` no longer forward to the
+  memory engine's `/profile` endpoint, which answers `410 Gone` from
+  Hindsight 0.10.0 on. hal0 now builds the same response from the bank list
+  (name, mission, effective disposition), and a `PUT` writes the disposition
+  traits as bank-config overrides. A `PUT` may now name only some traits.
+  `hal0 memory bank profile set` writes traits and missions in one
+  bank-config PATCH. `hal0 memory mm list` and the dashboard ask for
   mental-model content explicitly, because the engine's list now returns
   metadata only by default. The `memory_mental_model_list` MCP tool keeps the
   engine's new default. Pass `detail: "content"` to get each model's content.
@@ -843,9 +844,9 @@ applying. Add those subsections to a version's section to surface them; see
   stays on 18.1, so the data directory itself is not upgraded.
   `hal0 update --rollback` leaves the engine on 1.0.0, as it did for 0.9.2.
   Memory keeps working on the older hal0, but two things the older hal0
-  calls changed in the engine: its `hal0 memory bank profile` commands fail
-  with `410 Gone`, and the dashboard's mental-model rows lose their content
-  preview.
+  calls changed in the engine: its `/api/memory/banks/{bank}/profile` route
+  and `hal0 memory bank profile` commands fail with `410 Gone`, and the
+  dashboard's mental-model rows lose their content preview.
 
 ## [1.4.0] — 2026-10-08
 
