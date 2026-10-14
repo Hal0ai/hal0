@@ -763,6 +763,18 @@ applying. Add those subsections to a version's section to surface them; see
   not shipped (an agent holding the admin key can log in for a cookie, and an
   on-box caller passes the LAN gate); `tests/api/test_agent_self_approval.py`
   pins agent self-approval as a strict xfail until the v1.5 tier lands.
+- The bundled Pi agent moves to current upstream: `@earendil-works/pi-coding-agent`
+  0.84.4 to 1.2.0, `pi-mcp-adapter` 2.31.0 to 5.3.0 and
+  `@vectorize-io/hindsight-coding-agents` 0.4.3 to 0.8.1. The `hal0-provider`
+  extension follows Pi's new custom-provider stream types, and the `hindsight`
+  extension now loads upstream's own Pi binding (`dist/pi.js`) instead of the
+  Prime Agent bundle, so memories retained from Pi are labelled `pi` rather
+  than `prime-agent` (the bank is unchanged) and the last turn's write-back is
+  flushed when Pi exits. The `hal0` Pi theme points at Pi's new schema URL.
+  Existing installs pick this up when the Pi agent is reinstalled; the first
+  Pi start after the bump turns Pi's built-in MCP off in
+  `~/.pi/agent/settings.json` (`"-builtin:mcp"` under `extensions`) because the
+  adapter replaces it.
 
 ### Migrations
 
