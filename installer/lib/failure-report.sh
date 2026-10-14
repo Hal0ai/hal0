@@ -708,14 +708,15 @@ _hal0_report_swallow_cut_exprs() {
 # The sed expressions that mask an `Authorization` value that opens with a
 # quote, after a known scheme (#2605): the quoted text is the credential,
 # spaces and all, and its quotes are kept. As for any quoted value, an escaped
-# quote does not close it (#2604); one that a NAME mark would straddle, or that
-# does not close, is masked to the end of the line.
+# quote does not close it (#2604); one that a NAME mark or a glued keyword (a
+# secret the value swallows) would straddle, or that does not close, is masked
+# to the end of the line.
 _hal0_report_quoted_auth_exprs() {
-    local m="$_HAL0_REPORT_MASK" w="$_HAL0_REPORT_SWALLOW" q
+    local m="$_HAL0_REPORT_MASK" w="$_HAL0_REPORT_SWALLOW" kw="$_HAL0_REPORT_KEYWORD" q
     local head="(authorization[\"']?[[:space:]]*:[[:space:]]*[\"']?${_HAL0_REPORT_AUTH_SCHEMES}[[:space:]]+)"
     for q in '"' "'"; do
-        printf '%s\n' "s#${head}${q}(([^${q}\\${w}]|\\\\.)*)${q}#\\1${q}${m}${q}#gI"
-        printf '%s\n' "s#${head}${q}(([^${q}\\${w}]|\\\\.)*)${w}.*\$#\\1${q}${m}#I"
+        printf '%s\n' "s#${head}${q}(([^${q}\\${w}${kw}]|\\\\.)*)${q}#\\1${q}${m}${q}#gI"
+        printf '%s\n' "s#${head}${q}(([^${q}\\${w}${kw}]|\\\\.)*)[${w}${kw}].*\$#\\1${q}${m}#I"
         printf '%s\n' "s#${head}${q}(([^${q}\\]|\\\\.)*)\\\\?\$#\\1${q}${m}#I"
     done
 }

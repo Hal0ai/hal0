@@ -406,7 +406,8 @@ const BEARER_HEAD_RE = rx(String.raw`bearer\s+(?=[A-Za-z0-9._~+/=-]|\*\*\*REDACT
 // A quoted value is read on one line; a bare one may follow a line break.
 const HSPACE = String.raw`(?:(?!\n)\s)`
 const AUTH_HEAD_RE = rx(
-  String.raw`authorization["']?\s*:\s*["']?${AUTH_SCHEMES}(?:\s+(?=[^\s"',])|${HSPACE}+(?=["']))`,
+  String.raw`authorization["']?\s*:\s*["']?${AUTH_SCHEMES}\s+(?=[^\s"',])` +
+    String.raw`|authorization["']?${HSPACE}*:${HSPACE}*["']?${AUTH_SCHEMES}${HSPACE}+(?=["'])`,
   'yiu',
 )
 const AUTH_RAW_HEAD_RE = rx(

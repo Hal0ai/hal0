@@ -410,6 +410,10 @@
     [
       "A_TOKEN=pk10,Authorization: Digest 'pk10 packed tail'",
       "packed tail"
+    ],
+    [
+      "Authorization: Basic \"pk11 outer,Authorization: Basic \"pk11 INNER SECRET\"",
+      "INNER SECRET"
     ]
   ],
   "keep": [
@@ -798,6 +802,10 @@
     [
       "X_KEY=abcAuthorization: Basic\n\"hello world\" next",
       "X_KEY=***REDACTED*** Basic\n\"hello world\" next"
+    ],
+    [
+      "X_KEY=abcAuthorization:\nBasic \"hello world\" next",
+      "X_KEY=***REDACTED***\nBasic \"hello world\" next"
     ]
   ],
   "mask_names": [

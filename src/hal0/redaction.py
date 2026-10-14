@@ -340,8 +340,12 @@ _PACKED_HEAD_RE: Final[re.Pattern[str]] = re.compile(
     r"(?P<bearer>bearer\s+(?=[A-Za-z0-9._~+/=-]|" + re.escape(MASK) + r"))"
     r"|(?P<authorization>authorization[\"']?\s*:\s*[\"']?"
     + _AUTH_SCHEMES
-    # A quoted value is read on one line (#2605); a bare one may follow a line break.
-    + rf"(?:\s+(?=[^\s\"',])|{_HSPACE}+(?=[\"'])))"
+    + r"\s+(?=[^\s\"',])"
+    # A quoted value is read on one line (#2605), headers and all; a bare one may
+    # follow a line break.
+    + rf"|authorization[\"']?{_HSPACE}*:{_HSPACE}*[\"']?"
+    + _AUTH_SCHEMES
+    + rf"{_HSPACE}+(?=[\"']))"
     r"|(?P<authorization_raw>authorization[\"']?\s*:\s*[\"']?"
     r"(?!" + _AUTH_SCHEMES + r"(?:\s|$))(?=[^\s\"',]{8}))"
     r"|(?P<flag>" + _FLAG_PREFIX + r"(?=[^-\s]))",
