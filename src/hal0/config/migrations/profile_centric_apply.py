@@ -171,14 +171,15 @@ def _profiles_file(raw: dict[str, Any] | None, plan: pc.ConversionPlan) -> dict[
     data: dict[str, Any] = {} if raw is None else json.loads(json.dumps(raw))
     stored = data.get("profile") if isinstance(data.get("profile"), dict) else {}
     # Entries already in the new shape that the plan does not carry (one a
-    # new seed shadows) and entries mixing both shapes (blocked) stay exactly
-    # as stored: the converter never deletes or rewrites what it cannot read.
+    # new seed shadows) and blocked entries (mixed shapes, or a model-fact
+    # flag with no profile home, #2648) stay exactly as stored: the converter
+    # never deletes or rewrites what it cannot convert.
     kept = {
         name: entry
         for name, entry in stored.items()
         if name not in plan.custom_profiles
         and isinstance(entry, dict)
-        and pc.profile_shape(entry)[0] in ("new", "mixed")
+        and (pc.profile_shape(entry)[0] in ("new", "mixed") or name in plan.blocked_profiles)
     }
     data["profile"] = dict(
         sorted({**kept, **{n: dict(c) for n, c in plan.custom_profiles.items()}}.items())

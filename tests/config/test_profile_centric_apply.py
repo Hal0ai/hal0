@@ -934,3 +934,131 @@ def test_migrate_apply_refuses_root(monkeypatch: pytest.MonkeyPatch) -> None:
     result = CliRunner().invoke(app, ["profile", "migrate", "--apply"])
     assert result.exit_code != 0
     assert "sudo -u hal0 hal0 profile migrate --apply" in " ".join(result.output.split())
+
+
+# ── #2648: a blocked profile is kept verbatim, run after run ──────────────────
+
+_VIS_FLAGS = "--temp 0.6 --mmproj /models/x/proj.gguf"
+
+
+def _vision_profile_install(
+    defaults: dict[str, Any] | None, *, more: list[dict[str, Any]] | None = None
+) -> None:
+    """A custom profile carrying a model-fact flag, bound to an llm slot.
+
+    A second old-shape profile that converts cleanly makes the run rewrite
+    profiles.toml, so the blocked entry has to survive a rewrite of its file.
+    """
+    write_toml(
+        paths.profiles_toml(),
+        {
+            "profile": {
+                "myvis": {"flags": _VIS_FLAGS},
+                "other": {"flags": "--jinja -fa auto -b 2", "mtp": False},
+            }
+        },
+    )
+    write_slot(
+        "1",
+        {
+            "id": 1,
+            "name": "vis",
+            "type": "llm",
+            "device": "gpu-rocm",
+            "profile": "myvis",
+            "port": 8081,
+            "workers": 1,
+            "model": {"default": "m"},
+        },
+    )
+    write_db([old_model("m", defaults=defaults), *(more or [])])
+
+
+@pytest.mark.parametrize(
+    "defaults",
+    [
+        None,
+        {"profile": "chat", "extra_args": "--temp 0.7"},
+        {"profile": "myvis", "extra_args": _VIS_FLAGS},
+    ],
+    ids=["unstamped", "divergent", "stamped"],
+)
+def test_blocked_profile_keeps_its_model_fact_flag_across_runs(
+    defaults: dict[str, Any] | None,
+) -> None:
+    _vision_profile_install(defaults)
+    slot_before = (paths.slots_config_dir() / "1.toml").read_bytes()
+
+    first = pca.migrate_profile_centric()
+    assert first.plan is not None
+    assert {"1.toml", "profile:myvis"} <= set(first.plan.blockers), first.plan.lines()
+    stored = tomllib.loads(paths.profiles_toml().read_text())["profile"]
+    assert stored["myvis"] == {"flags": _VIS_FLAGS}  # verbatim, flag and all
+    assert stored["other"] == {"flags": "-fa auto -b 2"}  # the rest still converts
+    assert (paths.slots_config_dir() / "1.toml").read_bytes() == slot_before
+
+    after_first = _snapshot()
+    second = pca.migrate_profile_centric()
+    assert second.plan is not None
+    assert {"1.toml", "profile:myvis"} <= set(second.plan.blockers), second.plan.lines()
+    assert "myvis" not in second.plan.profile_rewrites
+    assert "myvis" not in second.plan.custom_profiles
+    assert second.backup is None  # nothing written for it
+    assert _snapshot() == after_first
+    stored = tomllib.loads(paths.profiles_toml().read_text())["profile"]
+    assert stored["myvis"] == {"flags": _VIS_FLAGS}
+
+
+def test_blocked_profile_is_not_reused_for_another_slot() -> None:
+    """A generated profile with the stripped tune must not take the blocked
+    name: the stored entry keeps the projector flag."""
+    _vision_profile_install(None, more=[old_model("n", defaults={"extra_args": "--temp 0.6"})])
+    write_slot(
+        "2",
+        {
+            "id": 2,
+            "name": "plain",
+            "type": "llm",
+            "device": "gpu-rocm",
+            "profile": "chat",
+            "port": 8082,
+            "workers": 1,
+            "model": {"default": "n"},
+        },
+    )
+    report = pca.migrate_profile_centric()
+    assert report.plan is not None
+    plain = next(s for s in report.plan.slots if s.file == "2.toml")
+    assert plain.status == "convert" and plain.profile_after != "myvis", report.plan.lines()
+    assert "--mmproj" not in plain.argv_after
+
+
+def test_blocked_embedded_stack_profile_is_kept_verbatim_across_runs() -> None:
+    production_install()
+    write_toml(
+        paths.stacks_toml(),
+        {
+            "stack": {
+                "st": {
+                    "slots": [],
+                    "profiles": {
+                        "vis": {"flags": _VIS_FLAGS},
+                        "old": {"flags": "--jinja -fa auto -b 2", "mtp": False},
+                    },
+                }
+            }
+        },
+    )
+    first = pca.migrate_profile_centric()
+    assert first.plan is not None and "stack:st" in first.plan.blockers
+    embedded = tomllib.loads(paths.stacks_toml().read_text())["stack"]["st"]["profiles"]
+    assert embedded["vis"] == {"flags": _VIS_FLAGS}
+    assert embedded["old"] == {"flags": "-fa auto -b 2"}
+
+    after_first = _snapshot()
+    second = pca.migrate_profile_centric()
+    assert second.plan is not None and "stack:st" in second.plan.blockers
+    (st,) = [s for s in second.plan.stacks if s.stack == "st"]
+    assert "vis" not in st.profiles and "vis" not in st.profile_rewrites
+    assert second.backup is None
+    assert _snapshot() == after_first

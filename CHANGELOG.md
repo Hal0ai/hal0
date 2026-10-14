@@ -70,6 +70,14 @@ applying. Add those subsections to a version's section to surface them; see
   name (#2542). The skipped file is logged once per process and no longer
   marks the slot enumeration partial, so `/v1/models` keeps refreshing while
   the stale file is present (#2631).
+- The profile-centric conversion no longer strips a blocked custom profile.
+  A profile (or a stack's embedded profile) whose flags carry a model fact
+  with no profile home (`--mmproj`, `--chat-template`, `--chat-template-file`)
+  was reported as blocked but written back without that flag, so the next
+  start converted its slot as unchanged and launched it without the projector
+  or template. The entry now stays in `profiles.toml` (or `stacks.toml`)
+  exactly as stored, is never reused for another slot's generated profile,
+  and blocks on every run until the flag is moved to the model (#2648).
 
 ### Removed
 
@@ -444,6 +452,9 @@ applying. Add those subsections to a version's section to surface them; see
     `/var/lib/hal0/profile-centric-ledger.json`. A profile entry that is
     still invalid is set aside (`profiles.invalid` for the slots that name
     it) instead of failing the whole catalog.
+  - A custom or stack-embedded profile that carries `--mmproj` or
+    `--chat-template[-file]` is left as it is and blocks, with the slots that
+    use it, until that flag is moved to the model.
   - `hal0 update` lists every blocker with its fix and exits 2. A blocked
     slot keeps launching the command it ran before the conversion until its
     file is edited, and a run with nothing to write makes no backup. Run a
