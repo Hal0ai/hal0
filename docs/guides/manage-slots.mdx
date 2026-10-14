@@ -384,7 +384,7 @@ was serving when the update landed keeps running its old argv until its
 *next* load, swap, or restart. The one exception is a runner-image change:
 `hal0 update` (and `hal0-api` at start) restarts idle slots whose running
 image differs from the one a fresh render would pick, and skips slots with a
-request in flight — see [Manage runner images](/docs/guides/manage-runner-images/#what-happens-to-a-running-slot-when-its-image-changes).
+request in flight — see [Manage runner images](/docs/guides/manage-runner-images-lifecycle/#what-happens-to-a-running-slot-when-its-image-changes).
 
 `hal0 slot status <name>` is how you check whether a running slot is in
 that stale window — it prints `WARN config drift: ...` when the
@@ -425,7 +425,7 @@ Logs come from the slot's `hal0-slot@<name>.service` journal.
 Slot runtimes and image pins are converted onto the current runner system by
 `hal0 runner-images migrate`, which `hal0 update` runs for you before it validates
 config; see [Manage runner images → Upgrading an older
-install](/docs/guides/manage-runner-images/#upgrading-an-older-install).
+install](/docs/guides/manage-runner-images-lifecycle/#upgrading-an-older-install).
 
 Slot tuning, profiles and stacks are converted onto the profile-centric model
 by `hal0 profile migrate`, which `hal0 update` also runs for you; see [Update

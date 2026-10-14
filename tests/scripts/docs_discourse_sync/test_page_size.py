@@ -136,6 +136,19 @@ def test_split_manage_slots_pages_have_distinct_topics() -> None:
     )
 
 
+def test_split_cli_env_vars_and_runner_images_pages_have_distinct_topics() -> None:
+    # Same shape again: each original keeps its topic, the second half gets one
+    # of its own.
+    docs = {d.rel_key: d for d in discovery.discover_docs(REPO_ROOT / "docs")}
+    for original, second in (
+        ("reference/cli", "reference/cli-operator"),
+        ("reference/env-vars", "reference/env-vars-install"),
+        ("guides/manage-runner-images", "guides/manage-runner-images-lifecycle"),
+    ):
+        assert docs[original].external_id == "hal0-docs--" + original.replace("/", "--")
+        assert docs[second].external_id == "hal0-docs--" + second.replace("/", "--")
+
+
 def _doc(rel_key: str, body_md: str) -> discovery.Doc:
     section, _, slug = rel_key.partition("/")
     return discovery.Doc(
