@@ -142,6 +142,46 @@ def _content_changed(
     return existing_raw != new_raw
 
 
+def prepare_body(
+    doc: Doc, *, uploader: images.ImageUploader, assets_root: Path | None, site_base_url: str
+) -> images.ImageRewriteResult:
+    """Pass-one body: *doc* with its images resolved, links not yet rewritten.
+
+    This is what a brand-new topic is *created* with, so it is subject to the
+    post-length limit on its own, separately from the final body.
+    """
+    return images.rewrite_images(
+        doc.body_md, uploader=uploader, assets_root=assets_root, site_base_url=site_base_url
+    )
+
+
+def finalize_body(doc: Doc, prepared: str, url_map: dict[str, str]) -> links.RewriteResult:
+    """Pass-two body: *prepared* with every internal link rewritten to its topic URL."""
+    return links.rewrite_internal_links(prepared, current_dir=doc.source_dir_key, url_map=url_map)
+
+
+def rendered_bodies(
+    doc: Doc,
+    *,
+    uploader: images.ImageUploader,
+    assets_root: Path | None,
+    site_base_url: str,
+    url_map: dict[str, str],
+) -> tuple[str, str]:
+    """Both bodies :func:`sync_docs` can send Discourse for *doc*.
+
+    ``(created_with, updated_to)``: the pass-one body a new topic is created
+    with, then the link-rewritten body it is updated to. Either one is
+    rejected with a 422 when it exceeds :data:`DISCOURSE_MAX_POST_CHARS`.
+    ``sync_docs`` builds them with the same two functions, so a size check
+    on this cannot drift from what is actually sent.
+    """
+    prepared = prepare_body(
+        doc, uploader=uploader, assets_root=assets_root, site_base_url=site_base_url
+    ).body_md
+    return prepared, finalize_body(doc, prepared, url_map).body_md
+
+
 def _topic_url(topic: Topic, external_id: str, *, base_url: str) -> str:
     if topic.topic_id == -1:
         # dry-run placeholder: not a real topic yet, no slug/id to link to.
@@ -236,8 +276,8 @@ def sync_docs(
     # topic is created/updated with already carries upload:// URLs.
     prepared: dict[str, str] = {}
     for doc in docs:
-        result = images.rewrite_images(
-            doc.body_md, uploader=client, assets_root=assets_root, site_base_url=site_base_url
+        result = prepare_body(
+            doc, uploader=client, assets_root=assets_root, site_base_url=site_base_url
         )
         prepared[doc.external_id] = result.body_md
         report.warnings.extend(f"{doc.external_id}: {w}" for w in result.fallback_warnings)
@@ -273,9 +313,7 @@ def sync_docs(
     # Pass 2: rewrite internal cross-links now that every topic has a URL,
     # then settle each doc's *final* content against the server.
     for doc in docs:
-        rewrite = links.rewrite_internal_links(
-            prepared[doc.external_id], current_dir=doc.source_dir_key, url_map=url_map
-        )
+        rewrite = finalize_body(doc, prepared[doc.external_id], url_map)
         report.warnings.extend(
             f"{doc.external_id}: unresolved link {u}" for u in rewrite.unresolved
         )

@@ -20,9 +20,9 @@ import re
 from pathlib import Path
 
 from scripts.docs_discourse_sync.discourse_client import Topic
-from scripts.docs_discourse_sync.sync import DISCOURSE_MAX_POST_CHARS
+from scripts.docs_discourse_sync.sync import DISCOURSE_MAX_POST_CHARS, rendered_bodies
 
-from scripts.docs_discourse_sync import discovery, images, links
+from scripts.docs_discourse_sync import discovery, images
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
@@ -61,20 +61,30 @@ def _url_map(docs: list[discovery.Doc]) -> dict[str, str]:
     }
 
 
-def rendered_body(doc: discovery.Doc, url_map: dict[str, str]) -> str:
-    """*doc*'s post body as ``sync_docs`` sends it to Discourse."""
-    prepared = images.rewrite_images(
-        doc.body_md, uploader=_NoUploads(), assets_root=None, site_base_url="https://hal0.dev"
-    ).body_md
-    return links.rewrite_internal_links(
-        prepared, current_dir=doc.source_dir_key, url_map=url_map
-    ).body_md
+def rendered_length(doc: discovery.Doc, url_map: dict[str, str]) -> int:
+    """The larger of the two bodies ``sync_docs`` sends Discourse for *doc*.
+
+    A new topic is created from the pass-one body (images resolved, links not
+    yet rewritten) and then updated to the link-rewritten pass-two body, and
+    Discourse enforces the limit on each request. Both come from
+    ``sync.rendered_bodies``, the same functions ``sync_docs`` uses.
+    """
+    created, updated = rendered_bodies(
+        doc,
+        uploader=_NoUploads(),
+        assets_root=None,
+        site_base_url="https://hal0.dev",
+        url_map=url_map,
+    )
+    return max(len(created), len(updated))
 
 
-def oversized_pages(docs: list[discovery.Doc], *, limit: int) -> list[tuple[str, int]]:
+def oversized_pages(
+    docs: list[discovery.Doc], *, limit: int, url_map: dict[str, str] | None = None
+) -> list[tuple[str, int]]:
     """``(rel_key, rendered length)`` of every page over *limit*, largest first."""
-    url_map = _url_map(docs)
-    sizes = [(doc.rel_key, len(rendered_body(doc, url_map))) for doc in docs]
+    url_map = _url_map(docs) if url_map is None else url_map
+    sizes = [(doc.rel_key, rendered_length(doc, url_map)) for doc in docs]
     return sorted(((p, n) for p, n in sizes if n > limit), key=lambda item: -item[1])
 
 
@@ -124,3 +134,46 @@ def test_split_manage_slots_pages_have_distinct_topics() -> None:
         docs["guides/manage-slots-dashboard"].external_id
         == "hal0-docs--guides--manage-slots-dashboard"
     )
+
+
+def _doc(rel_key: str, body_md: str) -> discovery.Doc:
+    section, _, slug = rel_key.partition("/")
+    return discovery.Doc(
+        source_path=Path(f"docs/{rel_key}.mdx"),
+        section=section,
+        subsection=None,
+        slug=slug,
+        title=slug,
+        short_title=slug,
+        external_id=discovery.make_external_id(section, slug),
+        rel_key=rel_key,
+        body_md=body_md,
+        sidebar_order=1,
+        applies_to_version=None,
+        site_path=f"/docs/{rel_key}/",
+    )
+
+
+def test_pass_one_body_over_the_limit_is_caught_even_when_pass_two_fits() -> None:
+    # A new topic is created from the pass-one body, whose links are still the
+    # long site paths. Rewriting them to short topic URLs shrinks the page, so
+    # a check that only measured the final body would let this one through
+    # and the sync would 422 at creation.
+    target = _doc("reference/" + "t" * 100, "target")
+    link = f"[x](/docs/reference/{'t' * 100}/)"
+    source = _doc("reference/source", " ".join([link] * 100))
+    short_urls = {target.rel_key: "https://f.dev/t/t/1", source.rel_key: "https://f.dev/t/s/2"}
+
+    created, updated = rendered_bodies(
+        source,
+        uploader=_NoUploads(),
+        assets_root=None,
+        site_base_url="https://hal0.dev",
+        url_map=short_urls,
+    )
+    limit = 6_000
+    assert len(updated) < limit < len(created)
+
+    over = oversized_pages([target, source], limit=limit, url_map=short_urls)
+    assert [key for key, _ in over] == ["reference/source"]
+    assert over[0][1] == len(created)
