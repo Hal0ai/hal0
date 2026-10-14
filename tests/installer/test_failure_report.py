@@ -1296,6 +1296,16 @@ class TestBackslashEscapedQuotes:
         out = _bash(f'_hal0_report_harvest_toml_file "{toml}"')
         assert out.stdout.splitlines() == ['pk_a\\"pk_b pk_c'], out.stderr
 
+    def test_an_unterminated_toml_string_is_harvested_without_its_opening_quote(
+        self, tmp_path: Path
+    ) -> None:
+        """A quote that never closes (a malformed file) is no part of the secret,
+        so the bare copy of it elsewhere in the report still matches."""
+        toml = tmp_path / "c.toml"
+        toml.write_text('api_token = "pk_alpha\\"pk_beta\nother_token = "pk_gamma nope\n')
+        out = _bash(f'_hal0_report_harvest_toml_file "{toml}"')
+        assert out.stdout.splitlines() == ['pk_alpha\\"pk_beta', "pk_gamma"], out.stderr
+
     def test_the_report_carries_no_value_past_an_escaped_quote(self, tmp_path: Path) -> None:
         box = _make_box(tmp_path)
         box["log"].write_text(

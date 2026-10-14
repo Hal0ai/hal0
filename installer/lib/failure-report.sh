@@ -426,6 +426,9 @@ _hal0_report_harvest_toml_file() {
             else
                 raw="${raw%%#*}"
                 raw="${raw%%[[:space:]]*}"
+                # A string that never closes (a malformed file): its opening
+                # quote is no part of the secret.
+                raw="${raw#[\"\']}"
             fi
             _hal0_report_emit_secret "$raw"
         fi
