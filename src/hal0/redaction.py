@@ -75,6 +75,11 @@ _LOG_VALUE: Final[tuple[re.Pattern[str], re.Pattern[str]]] = (
     re.compile(r"[^\s;,]*"),
     re.compile(r"[;,]"),
 )
+# A LOG_SECRET_RE Bearer token or client_id: no separator ends it early.
+_LOG_TOKEN: Final[tuple[re.Pattern[str], re.Pattern[str]]] = (
+    re.compile(r"[A-Za-z0-9_\-\.]*", re.IGNORECASE),
+    re.compile(r"(?!)"),
+)
 # Where a LOG_SECRET_RE secret with a value that may follow whitespace starts,
 # up to that value (Bearer tokens and long client_ids hold neither whitespace
 # nor ``;``/``,``, so a value that swallows one still masks it).
@@ -105,16 +110,19 @@ def redact_log_line(line: str) -> str:
 
     A second secret packed after a ``;`` or ``,`` (``X_KEY=a;Bearer b``)
     is masked on its own and keeps its name (#2529). One that a value takes
-    in some other way, as after an empty value (``KEY=  X_KEY= v``), is
-    masked with that value (#2594).
+    in some other way, after an empty value (``KEY=  X_KEY= v``) or glued on
+    (``Bearer a.Authorization: Token b``), is masked with that value (#2594,
+    #2595).
     """
     out: list[str] = []
     pos = at = 0
     while (match := LOG_SECRET_RE.search(line, at)) is not None:
         token = match.lastgroup
         if token in ("bearer_token", "client_id_token"):
-            # These tokens hold no ``;`` or ``,``: the match ends with them.
+            # These tokens hold no ``;`` or ``,``: the match ends with them,
+            # or past a secret they swallow (#2595).
             start, end = match.span(token)
+            end = _swallowing_end(line, start, end, _LOG_TOKEN, log=True)
         else:
             start = match.end()
             end = _bare_value_end(line, start, _LOG_VALUE, log=True)
@@ -316,6 +324,9 @@ def _value_class(chunk: str, sep: str = "[;,]") -> _ValueClass:
     return re.compile(chunk, re.I), re.compile(sep)
 
 
+# A Bearer token: no separator ends it early.
+_BEARER_TOKEN: Final[_ValueClass] = _value_class(r"[A-Za-z0-9._~+/=-]*", "(?!)")
+
 # Up to the value of a secret that starts with a ``Bearer``, ``Authorization``
 # or ``--flag`` keyword; a lookahead checks for the value's first character.
 _PACKED_HEAD_RE: Final[re.Pattern[str]] = re.compile(
@@ -327,9 +338,9 @@ _PACKED_HEAD_RE: Final[re.Pattern[str]] = re.compile(
     re.I,
 )
 # The class each such secret's value is read with when another value has
-# swallowed it (#2594): its own rule's, or a wider one. A Bearer token may
-# already be masked.
-_AUTH_RAW_VALUE: Final[_ValueClass] = _value_class(r"[^\s\"',;]*", r"[^\S\n]|;")
+# swallowed it (#2595): its own rule's, or a wider one. A Bearer token may
+# already be masked; a raw Authorization value may hold spaces.
+_AUTH_RAW_VALUE: Final[_ValueClass] = _value_class(r"[^\n\"',;]*", ";")
 _SWALLOWED_VALUE: Final[dict[str | None, _ValueClass]] = {
     "bearer": _value_class(r"[A-Za-z0-9._~+/=*-]*", "(?!)"),
     "authorization": _value_class(r"[^\s'\";,]*"),
@@ -380,14 +391,15 @@ def _packed_value_end(line: str, start: int, value: _ValueClass, log: bool) -> i
         return end
 
 
-# ── Swallowed secrets (#2594) ───────────────────────────────────────────────
+# ── Swallowed secrets (#2594, #2595) ────────────────────────────────────────
 #
 # A value can take in the start of another secret whose own value lies past
-# the first value's end, so the second value was left visible: after an
-# empty value then whitespace, in ``KEY=  X_KEY= v`` the value of ``KEY``
-# runs to the next whitespace, so it is ``X_KEY=``. A secret is looked for
-# wherever in the value it may start, so one glued on to a bare value
-# (``token=a.HF_TOKEN= v``) is found the same way.
+# the first value's end, so the second value was left visible:
+#
+# * an empty value then whitespace (#2594): in ``KEY=  X_KEY= v`` the value
+#   of ``KEY`` runs to the next whitespace, so it is ``X_KEY=``;
+# * no separator at all (#2595): in ``Bearer a.Authorization: Token b`` the
+#   token runs on over ``Authorization``.
 #
 # Cutting the first value before the second secret would not be safe: a name
 # is a run of name characters and the redactor cannot tell where it begins
@@ -401,10 +413,24 @@ def _packed_value_end(line: str, start: int, value: _ValueClass, log: bool) -> i
 # its closing quote, and is extended in turn over a secret it swallows.
 
 # Where a swallowed secret may start inside a value: a name, flag or word at
-# the start of its run, or a keyword anywhere. :func:`_head` decides.
+# the start of its run, or a keyword anywhere. :func:`_swallowed_head`
+# decides.
 _SWALLOW_AT_RE: Final[re.Pattern[str]] = re.compile(
-    r"(?<![A-Za-z0-9])(?=[A-Za-z0-9_-])|(?=bearer|authorization|hal0_bearer_token)", re.I
+    r"(?<![A-Za-z0-9])(?=[A-Za-z0-9_-])|(?=bearer|authorization|hal0_bearer_token|client_id)",
+    re.I,
 )
+# A long ``client_id=``, which LOG_SECRET_RE and the shape rules mask. It
+# holds no ``;``, ``,`` or whitespace, so it is no packed secret (#2529), but
+# a value can swallow its name.
+_CLIENT_ID_HEAD_RE: Final[re.Pattern[str]] = re.compile(r"client_id=(?=[A-Za-z0-9_.-]{16})", re.I)
+
+
+def _swallowed_head(line: str, pos: int, *, log: bool) -> tuple[int, _ValueClass] | None:
+    """:func:`_head`, or a long ``client_id=``."""
+    client_id = _CLIENT_ID_HEAD_RE.match(line, pos)
+    if client_id is not None:
+        return client_id.end(), _LOG_TOKEN
+    return _head(line, pos, log=log)
 
 
 def _value_stop(line: str, start: int, value: _ValueClass, log: bool) -> int:
@@ -439,7 +465,7 @@ def _swallowed(
     found: _Swallowed | None = None
     reach = -1
     for at in _SWALLOW_AT_RE.finditer(line, start, end):
-        head = _head(line, at.start(), log=log)
+        head = _swallowed_head(line, at.start(), log=log)
         if head is None:
             continue
         value_start, value = head
@@ -602,15 +628,14 @@ _SHAPE_RULES: Final[tuple[_Rule, ...]] = (
     _bare_value_rule(
         r"authorization:\s*(?:basic|token)\s+(?=[^\s'\"])", _value_class(r"[^\s'\";,]*")
     ),
-    _sub_rule(re.compile(r"(bearer\s+)[A-Za-z0-9._~+/=-]+", re.I), rf"\g<1>{MASK}"),
+    _bare_value_rule(r"bearer\s+(?=[A-Za-z0-9._~+/=-])", _BEARER_TOKEN),
     # Any other ``Authorization`` value (#2410). A known scheme is kept and
     # the credential after it masked. Anything else of 8+ characters is
     # treated as a raw credential and masked to the end of the header value,
     # so a raw key followed by more words is never taken for a scheme; a
     # short word such as ``denied`` is left alone. Already-masked values
-    # re-mask to the same text. A raw value also ends before whitespace that
-    # starts a secret (#2529): it holds spaces, so ``rawkey HF_TOKEN"=v``
-    # would otherwise lose the second secret's name.
+    # re-mask to the same text. A raw value holds spaces, so a secret after
+    # one (``rawkey HF_TOKEN"=v``) is swallowed, and masked with it (#2595).
     _bare_value_rule(
         r"authorization[\"']?\s*:\s*[\"']?" + _AUTH_SCHEMES + r"\s+(?=[^\s\"',])",
         _value_class(r"[^\s\"',;]*", ";"),

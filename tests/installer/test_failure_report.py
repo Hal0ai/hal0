@@ -1143,6 +1143,61 @@ class TestEmptyValueBeforeASecret:
             assert secret not in body, body
 
 
+# ── #2595: secrets glued together with no separator ─────────────────────────
+
+
+class TestGluedSecrets:
+    """#2595, the installer's copy of the fix in hal0.redaction: with no
+    whitespace, ``;`` or ``,`` between two secrets, the first value ran on over
+    the second one's name and left its value visible."""
+
+    @pytest.mark.parametrize(
+        ("line", "expected"),
+        [
+            (
+                "Bearer pk_first_1.Authorization: Token pk_second_2",
+                f"Bearer {_MASK}Authorization: Token {_MASK}",
+            ),
+            (
+                "Authorization: Bearer pk_first_1X-Api-Key: pk_second_2",
+                f"Authorization: Bearer {_MASK} {_MASK}",
+            ),
+            ("token=pk_first_1.HF_TOKEN= pk_second_2", f"token={_MASK} {_MASK}"),
+            ("token=pk_first_1--password pk_second_2", f"token={_MASK}--password {_MASK}"),
+            (
+                "Authorization: Basic pk_first_1Bearer pk_second_2",
+                f"Authorization: Basic {_MASK}Bearer {_MASK}",
+            ),
+            # A raw header is masked even beside one with a known scheme.
+            (
+                "Authorization: Basic pk_first_1, Proxy-Authorization: pk_second_2_raw",
+                f"Authorization: Basic {_MASK} Proxy-Authorization: {_MASK}",
+            ),
+            # A second secret all inside the first value is masked with it.
+            ("X_KEY=pk_first_1.HF_TOKEN=pk_second_2 c", f"X_KEY={_MASK} c"),
+        ],
+    )
+    def test_the_pattern_pass_masks_the_glued_secret(self, line: str, expected: str) -> None:
+        assert _mask_patterns(line).strip() == expected
+
+    def test_a_stray_marker_byte_is_dropped(self) -> None:
+        assert _mask_patterns("a\x03b X_KEY=c\x03d").strip() == f"ab X_KEY={_MASK}"
+
+    def test_the_report_carries_no_glued_secret(self, tmp_path: Path) -> None:
+        box = _make_box(tmp_path)
+        box["log"].write_text(
+            "Bearer pk_bearer_Zz12.Authorization: Token pk_tok_Yy34\n"
+            "HF_TOKEN=x-api-key=--token=pk_flag_Xx56\n"
+            "later --token pk_later_Ww78 x-api-key= pk_api_Vv90\n"
+        )
+        proc, report = _run_report(box)
+        assert report is not None and report.is_file(), proc.stderr
+        body = report.read_text()
+        for secret in ("pk_bearer_Zz12", "pk_tok_Yy34", "pk_flag_Xx56", "pk_later_Ww78"):
+            assert secret not in body, body
+        assert "pk_api_Vv90" not in body, body
+
+
 # ── #2402: multi-line TOML arrays under a sensitive key ─────────────────────
 
 _ARR_A = "arrSecretAlpha1Kq2Wz9Xc"  # no known prefix: literal pass only

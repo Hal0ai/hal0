@@ -517,7 +517,7 @@ _hal0_report_text_value_is_secret() {
 # plausible secrets are harvested (_hal0_report_text_value_is_secret). A
 # value ends before a packed secret (#2529), as in the pattern pass, so
 # `abc;Bearer` is not one literal whose mask would hide the token's name. A
-# secret that a value would swallow (#2594) has its own value
+# secret that a value would swallow (#2594, #2595) has its own value
 # harvested, but that value is not: what comes before the secret may end in
 # a name (`HF_TOKEN=x-api-key=b_token= v`), and masking it elsewhere would
 # hide that name. Nor is a value that ends in a name and its separator
@@ -592,7 +592,10 @@ _hal0_report_mask_literals() {
 # and unquoted NAME=value / NAME: value, Basic/token auth, a scheme-less
 # `Authorization: <value>`: a known scheme is kept, any other value of 8+
 # characters is masked to the end of the header (#2410), URL credentials,
-# --token-style flags, and well-known token prefixes. Case-insensitive.
+# --token-style flags, and well-known token prefixes. Case-insensitive. A
+# header with a known scheme is kept from the raw rule by a
+# _HAL0_REPORT_KEYWORD byte after its `authorization`, so a raw one on the same
+# line is still masked (#2595).
 # HTTP auth schemes whose name is kept when an Authorization value is masked;
 # mirrors hal0.redaction._AUTH_SCHEMES.
 _HAL0_REPORT_AUTH_SCHEMES='(basic|bearer|token|apikey|api-key|key|bot|ssws|negotiate|digest|ntlm|oauth|hawk|dpop|aws4-hmac-sha256)'
@@ -618,9 +621,9 @@ _hal0_report_packed_mark_expr() {
     printf '%s' "s#([;,])([\"'([{<]*(${heads}))#${_HAL0_REPORT_PACKED}\\1\\2#gI"
 }
 
-# Swallowed secrets (#2594): a value can take in the start of another secret
-# whose own value lies past it, which was then left visible: after an empty
-# value (`KEY=  X_KEY= v`), or with a name glued on to it
+# Swallowed secrets (#2594, #2595): a value can take in the start of another
+# secret whose own value lies past it, which was then left visible: after an
+# empty value (`KEY=  X_KEY= v`), or glued on with no separator
 # (`Authorization: Bearer abcX-Api-Key: def`). Where a NAME begins is unknown
 # (`abcX-Api-Key` may be a token glued to a name), so no value is cut before
 # one: every NAME[=:]value value is masked first, and a value that swallows
@@ -682,9 +685,10 @@ _hal0_report_swallow_cut_exprs() {
     # A value that starts, after whitespace, with another secret (#2594);
     # twice, as a match takes the character before the next name.
     local empty="s#((^|[^A-Za-z0-9_-])${name}[\"']?[[:space:]]*[=:][[:space:]]+)([\"'([{<]*(${heads}))#\\1${w}\\6#gI"
-    # A NAME glued on to a value whose own value lies past that value.
+    # A NAME glued on to a value (#2595) whose value lies past that value.
     local glued="s#([^A-Za-z0-9_[:space:]${w}-])(${name}([\"'][[:space:]]*[=:]|[[:space:]]*[=:][[:space:]]+|[[:space:]]*[=:][[:space:]]*[\"']))#\\1${w}\\2#gI"
     printf '%s\n' "$empty" "$empty" "$glued" "$glued"
+    printf '%s\n' "s#(${_HAL0_REPORT_KEYWORD_HEAD})#${w}\\1#gI"
 }
 
 _hal0_report_mask_patterns() {
@@ -703,7 +707,9 @@ _hal0_report_mask_patterns() {
         -e "s#(authorization:[[:space:]]*(basic|token)[[:space:]]+)[^[:space:]'\"${k}${w}${kw}${v}][^[:space:]'\"${k}${kw}]*#\\1${m}#gI" \
         -e "s#(bearer[[:space:]]+)[A-Za-z0-9._~+/=-]+#\\1${m}#gI" \
         -e "s#(authorization[\"']?[[:space:]]*:[[:space:]]*[\"']?${_HAL0_REPORT_AUTH_SCHEMES}[[:space:]]+)[^[:space:]\"',${k}${w}${kw}${v}][^[:space:]\"',${k}${kw}]*#\\1${m}#gI" \
-        -e "/authorization[\"']?[[:space:]]*:[[:space:]]*[\"']?${_HAL0_REPORT_AUTH_SCHEMES}([[:space:]]|\$)/I!s#(authorization[\"']?[[:space:]]*:[[:space:]]*[\"']?)[^[:space:]\"',]{8,}[^\"',]*#\\1${m}#gI" \
+        -e "s#(authorization)([\"']?[[:space:]]*:[[:space:]]*[\"']?${_HAL0_REPORT_AUTH_SCHEMES}([[:space:]]|\$))#\\1${kw}\\2#gI" \
+        -e "s#(authorization[\"']?[[:space:]]*:[[:space:]]*[\"']?)[^[:space:]\"',]{8,}[^\"',]*#\\1${m}#gI" \
+        -e "s#(authorization)${kw}#\\1#gI" \
         -e "s#([a-z][a-z0-9+.-]*://[^/@[:space:]:]*):[^/@[:space:]]+@#\\1:${m}@#gI" \
         -e "s#([a-z][a-z0-9+.-]*://)[^/@[:space:]:]{16,}@#\\1${m}@#gI" \
         -e "s#${pre}\"[^\"]*\"#\\1\"${m}\"#gI" \

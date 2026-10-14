@@ -282,6 +282,34 @@
     [
       "KEY= pk3_glued_firstX_KEY= pk3_glued_second",
       "pk3_glued_second"
+    ],
+    [
+      "Bearer pk4_first.Authorization: Token pk4_second",
+      "pk4_second"
+    ],
+    [
+      "Authorization: Bearer pk4_firstX-Api-Key: pk4_second",
+      "pk4_first"
+    ],
+    [
+      "Authorization: Bearer pk4_firstX-Api-Key: pk4_second",
+      "pk4_second"
+    ],
+    [
+      "X_KEY=pk4_first.HF_TOKEN= pk4_second",
+      "pk4_second"
+    ],
+    [
+      "token=pk4_first--password pk4_second",
+      "pk4_second"
+    ],
+    [
+      "X_KEY=pk4_first.HF_TOKEN=\"pk4 second value\"",
+      "second value"
+    ],
+    [
+      "client_id=pk4_first_abcdefghHF_TOKEN= pk4_second",
+      "pk4_second"
     ]
   ],
   "keep": [
@@ -411,7 +439,7 @@
     ],
     [
       "Authorization: rawcred12 HF_TOKEN\"=v",
-      "Authorization: ***REDACTED*** HF_TOKEN\"=***REDACTED***"
+      "Authorization: ***REDACTED***"
     ],
     [
       "KEY=  X_KEY= v",
@@ -432,6 +460,26 @@
     [
       "max_tokens=token=abcdefgh1234",
       "max_tokens=token=***REDACTED***"
+    ],
+    [
+      "Bearer a.Authorization: Token b",
+      "Bearer ***REDACTED***"
+    ],
+    [
+      "Bearer a.Authorization: Token b c",
+      "Bearer ***REDACTED*** c"
+    ],
+    [
+      "X_KEY=a.HF_TOKEN= b c",
+      "X_KEY=***REDACTED*** c"
+    ],
+    [
+      "X_KEY=a.HF_TOKEN=b c",
+      "X_KEY=***REDACTED*** c"
+    ],
+    [
+      "max_tokens=5.HF_TOKEN= v",
+      "max_tokens=5.HF_TOKEN= ***REDACTED***"
     ]
   ],
   "mask_names": [

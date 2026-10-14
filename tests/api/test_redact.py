@@ -27,7 +27,7 @@ from hal0.api._redact import (
     redact_value,
 )
 from hal0.observability.sentry import SENSITIVE_HEADERS
-from hal0.redaction import MASK, redact_shareable_text
+from hal0.redaction import MASK, redact_secret_shapes, redact_shareable_text
 
 # ── is_sensitive_key ──────────────────────────────────────────────────────
 
@@ -1172,6 +1172,106 @@ class TestEmptyValueBeforeASecret:
         elapsed = time.perf_counter() - start
         assert out.endswith(MASK)
         assert elapsed < TestRedactionTimeIsLinear._BOUND_S, f"{unit!r} took {elapsed:.2f}s"
+
+
+# ── #2595: secrets glued together with no separator ─────────────────────────
+
+
+class TestGluedSecrets:
+    """#2595: with no whitespace, ``;`` or ``,`` between two secrets, the
+    first value ran on over the second secret's name, and the second value
+    was left visible."""
+
+    @pytest.mark.parametrize(
+        ("line", "secrets"),
+        [
+            # The line from the issue.
+            ("Bearer pk_first_1.Authorization: Token pk_second_2", ["pk_first_1", "pk_second_2"]),
+            # Concatenated headers: the name is glued to the first value.
+            (
+                "Authorization: Bearer pk_first_1X-Api-Key: pk_second_2",
+                ["pk_first_1", "pk_second_2"],
+            ),
+            ("X_KEY=pk_first_1Bearer pk_second_2", ["pk_first_1", "pk_second_2"]),
+            ("X_KEY=pk_first_1.HF_TOKEN= pk_second_2", ["pk_first_1", "pk_second_2"]),
+            ("token=pk_first_1.HF_TOKEN= pk_second_2", ["pk_first_1", "pk_second_2"]),
+            ("token=pk_first_1--password pk_second_2", ["pk_first_1", "pk_second_2"]),
+            ("X_KEY=pk_first_1/password: pk_second_2", ["pk_first_1", "pk_second_2"]),
+            ("Authorization: Basic pk_first_1Bearer pk_second_2", ["pk_first_1", "pk_second_2"]),
+            ("client_id=pk_first_1_abcdefghHF_TOKEN= pk_second_2", ["pk_first_1", "pk_second_2"]),
+            ("Authorization: Bearer X_KEY= pk_second_2", ["pk_second_2"]),
+            # The second value starts inside the first but runs on past it.
+            ('X_KEY=pk_first_1.HF_TOKEN="pk_second_2 pk_third_3"', ["pk_first_1", "pk_third_3"]),
+            ("Bearer pk_first_1.b_token=pk_second_2:pk_third_3", ["pk_first_1", "pk_third_3"]),
+            # A raw Authorization value holds spaces: a secret after one is
+            # masked with it.
+            ('Authorization: pk_first_1raw HF_TOKEN"=pk_second_2', ["pk_first_1", "pk_second_2"]),
+            # Three in a row.
+            (
+                "Bearer pk_first_1.X_KEY= pk_second_2.Authorization: Basic pk_third_3",
+                ["pk_first_1", "pk_second_2", "pk_third_3"],
+            ),
+            # A benign first name: its value is shown, and ends at the secret.
+            ("max_tokens=5.HF_TOKEN= pk_second_2", ["pk_second_2"]),
+        ],
+    )
+    @pytest.mark.parametrize("redact", [redact_log_line, redact_shareable_text])
+    def test_the_glued_secret_is_masked(self, redact, line: str, secrets: list[str]) -> None:
+        out = redact(line)
+        for secret in secrets:
+            assert secret not in out, (line, out)
+        assert redact(out) == out  # idempotent
+
+    @pytest.mark.parametrize(
+        ("line", "expected"),
+        [
+            # Where the second name begins is unknown, so the first mask runs
+            # on over the second value (fail closed).
+            ("Bearer a.Authorization: Token b", f"Bearer {MASK}"),
+            ("Bearer a.Authorization: Token b c", f"Bearer {MASK} c"),
+            ("Authorization: Bearer abcX-Api-Key: def", f"Authorization: Bearer {MASK}"),
+            ("X_KEY=a.HF_TOKEN= b c", f"X_KEY={MASK} c"),
+            ('Authorization: rawcred12 HF_TOKEN"=v', f"Authorization: {MASK}"),
+            # A second secret all inside the first value is masked with it.
+            ("X_KEY=a.HF_TOKEN=b c", f"X_KEY={MASK} c"),
+            # A benign value ends before the secret, which keeps its name.
+            ("max_tokens=5.HF_TOKEN= v", f"max_tokens=5.HF_TOKEN= {MASK}"),
+        ],
+    )
+    @pytest.mark.parametrize("redact", [redact_log_line, redact_shareable_text])
+    def test_the_rendering(self, redact, line: str, expected: str) -> None:
+        assert redact(line) == expected
+
+    def test_the_furthest_reading_of_nested_names_is_masked(self) -> None:
+        """``Fin-X_KEY=`` and ``X_KEY=`` both start the second secret; read as
+        ``X_KEY=`` by LOG_SECRET_RE its value runs on over the quote, so the
+        mask does too."""
+        assert redact_log_line("Bearer a.Fin-X_KEY=b'pk_third_3 d") == f"Bearer {MASK} d"
+
+    def test_the_shareable_harvest_takes_the_glued_value(self) -> None:
+        out = redact_shareable_text("HF_TOKEN=abcdefgh12.X_KEY= secretval9\nlater secretval9\n")
+        assert out == f"HF_TOKEN={MASK}\nlater {MASK}\n"
+
+    @pytest.mark.parametrize(
+        "unit",
+        [
+            "a.b_token=",
+            "aBearer ",
+            "X_KEY=a.",
+            "a.Authorization: Basic ",
+            "--token=a.",
+            "aHF_TOKEN=",
+        ],
+    )
+    @pytest.mark.parametrize("redact", [redact_log_line, redact_secret_shapes])
+    def test_a_long_glued_run_is_fast(self, redact, unit: str) -> None:
+        import time
+
+        for line in (unit * (80_000 // len(unit)), unit * (80_000 // len(unit)) + " v"):
+            start = time.perf_counter()
+            redact(line)
+            elapsed = time.perf_counter() - start
+            assert elapsed < TestRedactionTimeIsLinear._BOUND_S, f"{unit!r} took {elapsed:.2f}s"
 
 
 # ── #2413: the cases shared with the dashboard's browser-side port ─────────
