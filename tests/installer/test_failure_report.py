@@ -1102,6 +1102,47 @@ class TestPackedSecrets:
             assert secret not in body, body
 
 
+# ── #2594: an empty value before a second secret ────────────────────────────
+
+_MASK = "***REDACTED***"
+
+
+class TestEmptyValueBeforeASecret:
+    """#2594, the installer's copy of the fix in hal0.redaction: ``NAME=`` with
+    an empty value, then whitespace, took the next secret's name as its value
+    and left that secret's value visible. Every NAME value is masked first,
+    so it no longer is."""
+
+    @pytest.mark.parametrize(
+        ("line", "expected"),
+        [
+            ("KEY=  X_KEY= pk_second_2", f"KEY=  {_MASK} {_MASK}"),
+            ("HF_TOKEN=  password: pk_second_2", f"HF_TOKEN=  {_MASK} {_MASK}"),
+            ("A_KEY= B_KEY= C_KEY= pk_third_3", f"A_KEY= {_MASK} {_MASK} {_MASK}"),
+            # A keyword's secret is masked by its own rule, which keeps the keyword.
+            ("token= Bearer pk_second_2", f"token= Bearer {_MASK}"),
+            ("tokenizer=  --password pk_second_2", f"tokenizer=  --password {_MASK}"),
+        ],
+    )
+    def test_the_pattern_pass_masks_the_second_secret(self, line: str, expected: str) -> None:
+        assert _mask_patterns(line).strip() == expected
+
+    def test_a_stray_marker_byte_is_dropped(self) -> None:
+        assert _mask_patterns("a\x02b\x04c X_KEY=d\x02").strip() == f"abc X_KEY={_MASK}"
+
+    def test_the_report_carries_no_value_after_an_empty_one(self, tmp_path: Path) -> None:
+        """The harvest takes no value that ends in a secret name and its
+        separator (``api_key=`` below): masked where it appears, it would hide
+        that name, and a short value after it would be left in clear."""
+        box = _make_box(tmp_path)
+        box["log"].write_text("KEY=  X_KEY= pk_hf_Yy34\nY_KEY=   api_key= \nlater api_key= sh0rt\n")
+        proc, report = _run_report(box)
+        assert report is not None and report.is_file(), proc.stderr
+        body = report.read_text()
+        for secret in ("pk_hf_Yy34", "sh0rt"):
+            assert secret not in body, body
+
+
 # ── #2402: multi-line TOML arrays under a sensitive key ─────────────────────
 
 _ARR_A = "arrSecretAlpha1Kq2Wz9Xc"  # no known prefix: literal pass only

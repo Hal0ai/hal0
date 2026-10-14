@@ -31,7 +31,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable, Iterator
-from typing import Any, Final
+from typing import Any, Final, NamedTuple
 
 # Plain sentinel for masked values. Exposed so a caller can grep logs /
 # fixtures for the exact token.
@@ -75,11 +75,12 @@ _LOG_VALUE: Final[tuple[re.Pattern[str], re.Pattern[str]]] = (
     re.compile(r"[^\s;,]*"),
     re.compile(r"[;,]"),
 )
-# Where a LOG_SECRET_RE secret with a value that may follow whitespace starts
-# (Bearer tokens and long client_ids hold neither whitespace nor ``;``/``,``,
-# so a value that swallows one still masks it).
+# Where a LOG_SECRET_RE secret with a value that may follow whitespace starts,
+# up to that value (Bearer tokens and long client_ids hold neither whitespace
+# nor ``;``/``,``, so a value that swallows one still masks it).
 _LOG_HEAD_RE: Final[re.Pattern[str]] = re.compile(
-    r"Authorization:\s*Bearer\s+\S|HAL0_BEARER_TOKEN=\S|\b(?:[A-Za-z][A-Za-z0-9_]*_KEY|KEY)=\S",
+    r"Authorization:\s*Bearer\s+(?=\S)|HAL0_BEARER_TOKEN=(?=\S)"
+    r"|\b(?:[A-Za-z][A-Za-z0-9_]*_KEY|KEY)=(?=\S)",
     re.IGNORECASE,
 )
 
@@ -103,7 +104,9 @@ def redact_log_line(line: str) -> str:
     (emit-time redaction, then again at the durable write).
 
     A second secret packed after a ``;`` or ``,`` (``X_KEY=a;Bearer b``)
-    is masked on its own and keeps its name (#2529).
+    is masked on its own and keeps its name (#2529). One that a value takes
+    in some other way, as after an empty value (``KEY=  X_KEY= v``), is
+    masked with that value (#2594).
     """
     out: list[str] = []
     pos = at = 0
@@ -307,20 +310,48 @@ _FLAG_PREFIX: Final[str] = (
 # where a packed secret starts right after it.
 _ValueClass = tuple[re.Pattern[str], re.Pattern[str]]
 _PACKED_OPENERS_RE: Final[re.Pattern[str]] = re.compile(r"[\"'(\[{<]*")
-_PACKED_HEAD_RE: Final[re.Pattern[str]] = re.compile(
-    r"bearer\s+(?:[A-Za-z0-9._~+/=-]|" + re.escape(MASK) + r")"
-    r"|authorization[\"']?\s*:\s*[\"']?(?:"
-    + _AUTH_SCHEMES
-    + r"\s+[^\s\"',]|(?!"
-    + _AUTH_SCHEMES
-    + r"(?:\s|$))[^\s\"',]{8})"
-    r"|" + _FLAG_PREFIX + r"[^-\s]",
-    re.I,
-)
 
 
 def _value_class(chunk: str, sep: str = "[;,]") -> _ValueClass:
-    return re.compile(chunk), re.compile(sep)
+    return re.compile(chunk, re.I), re.compile(sep)
+
+
+# Up to the value of a secret that starts with a ``Bearer``, ``Authorization``
+# or ``--flag`` keyword; a lookahead checks for the value's first character.
+_PACKED_HEAD_RE: Final[re.Pattern[str]] = re.compile(
+    r"(?P<bearer>bearer\s+(?=[A-Za-z0-9._~+/=-]|" + re.escape(MASK) + r"))"
+    r"|(?P<authorization>authorization[\"']?\s*:\s*[\"']?" + _AUTH_SCHEMES + r"\s+(?=[^\s\"',]))"
+    r"|(?P<authorization_raw>authorization[\"']?\s*:\s*[\"']?"
+    r"(?!" + _AUTH_SCHEMES + r"(?:\s|$))(?=[^\s\"',]{8}))"
+    r"|(?P<flag>" + _FLAG_PREFIX + r"(?=[^-\s]))",
+    re.I,
+)
+# The class each such secret's value is read with when another value has
+# swallowed it (#2594): its own rule's, or a wider one. A Bearer token may
+# already be masked.
+_AUTH_RAW_VALUE: Final[_ValueClass] = _value_class(r"[^\s\"',;]*", r"[^\S\n]|;")
+_SWALLOWED_VALUE: Final[dict[str | None, _ValueClass]] = {
+    "bearer": _value_class(r"[A-Za-z0-9._~+/=*-]*", "(?!)"),
+    "authorization": _value_class(r"[^\s'\";,]*"),
+    "authorization_raw": _AUTH_RAW_VALUE,
+    "flag": _LOG_VALUE,
+}
+
+
+def _head(line: str, pos: int, *, log: bool = False) -> tuple[int, _ValueClass] | None:
+    """Where the value starts of a secret whose name or keyword starts at
+    ``line[pos]``, and the class its value is read with, or None if no
+    secret starts there. The secret is one the shape rules mask (or have
+    masked) or, with ``log``, one that LOG_SECRET_RE masks."""
+    head = _PACKED_HEAD_RE.match(line, pos)
+    if head is not None:
+        return head.end(), _SWALLOWED_VALUE[head.lastgroup]
+    if log and (head := _LOG_HEAD_RE.match(line, pos)) is not None:
+        return head.end(), _LOG_VALUE
+    named = _NAME_SEP_RE.match(line, pos)
+    if named is not None and _is_secret_name(named.group("name")):
+        return named.end(), _NAME_VALUE
+    return None
 
 
 def _starts_secret(line: str, pos: int, *, log: bool = False) -> bool:
@@ -329,18 +360,16 @@ def _starts_secret(line: str, pos: int, *, log: bool = False) -> bool:
     ``log``, also one that LOG_SECRET_RE masks: only its own pass may cut
     there, as the shape pass after it would not mask all of them."""
     pos = _PACKED_OPENERS_RE.match(line, pos).end()  # type: ignore[union-attr]
-    if _PACKED_HEAD_RE.match(line, pos) or (log and _LOG_HEAD_RE.match(line, pos)):
-        return True
-    named = _NAME_SEP_RE.match(line, pos)
-    return named is not None and _is_secret_name(named.group("name"))
+    return _head(line, pos, log=log) is not None
 
 
-def _bare_value_end(line: str, start: int, value: _ValueClass, *, log: bool = False) -> int:
+def _packed_value_end(line: str, start: int, value: _ValueClass, log: bool) -> int:
     """Where the bare value of class ``value`` starting at ``line[start]``
-    ends (#2529): at the first character that is neither in a chunk nor a
-    separator with no secret starting after it (:func:`_starts_secret`).
-    Every step moves forward and tests one separator, so this is linear in
-    the value (#2501)."""
+    ends before :func:`_bare_value_end` looks for a swallowed secret: at the
+    first character that is neither in a chunk nor a separator with no
+    secret starting after it (:func:`_starts_secret`, #2529). Every step
+    moves forward and tests one separator, so this is linear in the value
+    (#2501)."""
     chunk, sep = value
     end = start
     while True:
@@ -349,6 +378,187 @@ def _bare_value_end(line: str, start: int, value: _ValueClass, *, log: bool = Fa
             end += 1
             continue
         return end
+
+
+# ── Swallowed secrets (#2594) ───────────────────────────────────────────────
+#
+# A value can take in the start of another secret whose own value lies past
+# the first value's end, so the second value was left visible: after an
+# empty value then whitespace, in ``KEY=  X_KEY= v`` the value of ``KEY``
+# runs to the next whitespace, so it is ``X_KEY=``. A secret is looked for
+# wherever in the value it may start, so one glued on to a bare value
+# (``token=a.HF_TOKEN= v``) is found the same way.
+#
+# Cutting the first value before the second secret would not be safe: a name
+# is a run of name characters and the redactor cannot tell where it begins
+# (``KEY= abcX_KEY= v`` may be the value ``abc`` glued to the name
+# ``X_KEY``). So the first mask is extended over the second secret's value
+# instead, and nothing either reading takes for a value is left visible
+# (fail closed). Only a benign NAME[=:]value (``max_tokens``), whose value is
+# not masked, is cut before the secret, which then keeps its name.
+#
+# The swallowed value is read as its own rule reads it (:func:`_head`), or to
+# its closing quote, and is extended in turn over a secret it swallows.
+
+# Where a swallowed secret may start inside a value: a name, flag or word at
+# the start of its run, or a keyword anywhere. :func:`_head` decides.
+_SWALLOW_AT_RE: Final[re.Pattern[str]] = re.compile(
+    r"(?<![A-Za-z0-9])(?=[A-Za-z0-9_-])|(?=bearer|authorization|hal0_bearer_token)", re.I
+)
+
+
+def _value_stop(line: str, start: int, value: _ValueClass, log: bool) -> int:
+    """:func:`_packed_value_end`, less trailing whitespace (only a raw
+    Authorization value holds any)."""
+    end = _packed_value_end(line, start, value, log)
+    return start + len(line[start:end].rstrip())
+
+
+_Swallowed = tuple[int, int, _ValueClass]
+# A part of a masked value: start, end, and whether the literal harvest
+# takes it (:func:`_past_swallowed`).
+_Span = tuple[int, int, bool]
+
+
+def _swallowed(
+    line: str, start: int, end: int, *, log: bool, secret: bool = True
+) -> _Swallowed | None:
+    """``(pos, value_start, value_class)`` (:func:`_head`) of a secret that
+    starts at ``line[pos]`` inside the value ``line[start:end]`` and whose
+    own value does not end inside it: it starts at or after ``end``, or,
+    read as its own rule reads it, runs on past ``end``. Of those, the one
+    whose value reaches furthest, then the first: names can nest
+    (``-X_KEY=`` inside ``a-X_KEY=``), and the mask must cover the longest
+    reading. In a value that is not ``secret``, and so is not masked, the
+    first secret counts, whatever its value.
+
+    Linear in the value (#2501): each candidate is tested once, and a value
+    read from inside one already read ends where that one does, so each
+    class reads each character at most once."""
+    read: dict[int, tuple[int, int]] = {}  # id(class) -> the last value read
+    found: _Swallowed | None = None
+    reach = -1
+    for at in _SWALLOW_AT_RE.finditer(line, start, end):
+        head = _head(line, at.start(), log=log)
+        if head is None:
+            continue
+        value_start, value = head
+        if not secret:
+            return at.start(), value_start, value
+        quote = line[value_start]
+        if quote in "\"'" and (stop := line.find(quote, value_start + 1)) >= 0:
+            if stop < end:
+                continue
+        else:
+            last_start, last_end = read.get(id(value), (-1, -1))
+            if not last_start <= value_start <= last_end:
+                last_start, last_end = value_start, _value_stop(line, value_start, value, log)
+                read[id(value)] = (last_start, last_end)
+            stop = last_end
+            if value_start < end and stop <= end:
+                continue
+        if stop > reach:
+            found, reach = (at.start(), value_start, value), stop
+    return found
+
+
+def _past_swallowed(
+    line: str,
+    start: int,
+    swallowed: _Swallowed,
+    outer: _ValueClass | None,
+    *,
+    log: bool,
+    secret: bool,
+    spans: list[_Span],
+) -> int:
+    """Where a value starting at ``line[start]``, of class ``outer`` (None
+    when quoted), that swallowed a secret ends. If it is not ``secret`` that
+    is where the secret starts. Otherwise it runs past the secret's value,
+    read as its own rule reads it, and then on as each value it was inside
+    would run, so the end is one that redacting the masked text again keeps
+    (idempotence). A secret swallowed on the way is passed over in turn.
+
+    Each part of the mask is added to ``spans``. The literal harvest takes
+    the parts of a swallowed ``NAME[=:]value`` value, but not the first
+    value's own part: that may end in a name (``KEY= HF_TOKEN=a.b_token=
+    v``), and masking it elsewhere would hide that name."""
+    pos, value_start, value = swallowed
+    if not secret:
+        return pos
+    spans.append((start, pos, False))
+    # The values to run on with once the current one ends, innermost last,
+    # each with whether it is a swallowed NAME[=:]value value.
+    enclosing: list[tuple[_ValueClass, bool]] = [] if outer is None else [(outer, False)]
+    harvest = value is _NAME_VALUE
+    while True:
+        quote = line[value_start]
+        if quote in "\"'" and (close := line.find(quote, value_start + 1)) >= 0:
+            end, nested = close + 1, None
+        else:
+            end = _value_stop(line, value_start, value, log)
+            nested = _swallowed(line, value_start, end, log=log)
+            if nested is not None:
+                enclosing.append((value, harvest))
+        while nested is None and enclosing:
+            if harvest:
+                spans.append((value_start, end, True))
+            value_start, (value, harvest) = end, enclosing.pop()
+            end = _value_stop(line, value_start, value, log)
+            nested = _swallowed(line, value_start, end, log=log)
+            if nested is not None:
+                enclosing.append((value, harvest))
+        if nested is None:
+            if harvest:
+                spans.append((value_start, end, True))
+            return end
+        if harvest:
+            spans.append((value_start, nested[0], True))
+        _pos, value_start, value = nested
+        harvest = value is _NAME_VALUE
+
+
+def _bare_value_end(
+    line: str,
+    start: int,
+    value: _ValueClass,
+    *,
+    log: bool = False,
+    secret: bool = True,
+    spans: list[_Span] | None = None,
+) -> int:
+    """Where the bare value of class ``value`` starting at ``line[start]``
+    ends: before a packed secret (:func:`_packed_value_end`), or past the
+    value of a secret it swallows (:func:`_past_swallowed`)."""
+    end = _packed_value_end(line, start, value, log)
+    return _swallowing_end(line, start, end, value, log=log, secret=secret, spans=spans)
+
+
+def _swallowing_end(
+    line: str,
+    start: int,
+    end: int,
+    value: _ValueClass | None,
+    *,
+    log: bool,
+    secret: bool = True,
+    spans: list[_Span] | None = None,
+) -> int:
+    """``end``, or past the value of a secret that the value
+    ``line[start:end]``, of class ``value``, swallows
+    (:func:`_past_swallowed`)."""
+    swallowed = _swallowed(line, start, end, log=log, secret=secret)
+    if swallowed is None:
+        return end
+    return _past_swallowed(
+        line,
+        start,
+        swallowed,
+        value,
+        log=log,
+        secret=secret,
+        spans=[] if spans is None else spans,
+    )
 
 
 def _mask_bare_values(
@@ -408,7 +618,7 @@ _SHAPE_RULES: Final[tuple[_Rule, ...]] = (
     _bare_value_rule(
         r"authorization[\"']?\s*:\s*[\"']?"
         r"(?!" + _AUTH_SCHEMES + r"(?:\s|$))(?=[^\s\"',]{8,})",
-        _value_class(r"[^\s\"',;]*", r"[^\S\n]|;"),
+        _AUTH_RAW_VALUE,
         spaces=True,
     ),
     # URL userinfo. The scheme starts at the first letter of its run.
@@ -452,19 +662,34 @@ def _is_secret_name(name: str) -> bool:
     return bool(_SECRET_NAME_RE.fullmatch(name))
 
 
-def _name_values(line: str, *, log: bool = False) -> Iterator[tuple[re.Match[str], int]]:
-    """Each ``NAME[=:]value`` in ``line`` (a ``_NAME_SEP_RE`` match) with the
-    index its value ends at. A quoted value ends at its closing quote; a bare
-    one at whitespace, ``,``, ``}``, ``&``, a quote, or a ``;`` that starts
-    another secret (#2529). A match is consumed whole, benign name or not."""
+class _NameValue(NamedTuple):
+    """A ``NAME[=:]value`` found by :func:`_name_values`."""
+
+    match: re.Match[str]  # the ``_NAME_SEP_RE`` match, up to the value
+    secret: bool  # :func:`_is_secret_name` on the whole name
+    end: int  # where the value ends
+    # When a secret's value swallowed another secret, the parts of its mask
+    # (:func:`_past_swallowed`). Empty otherwise.
+    spans: list[_Span]
+
+
+def _name_values(line: str, *, log: bool = False) -> Iterator[_NameValue]:
+    """Each ``NAME[=:]value`` in ``line``. A quoted value ends at its closing
+    quote; a bare one at whitespace, ``,``, ``}``, ``&``, a quote, or a ``;``
+    that starts another secret (#2529). A secret's value that swallows
+    another secret runs on over that secret's value; a benign one ends
+    before it (:func:`_past_swallowed`). A match is consumed whole, benign
+    name or not."""
     at = 0
     while (match := _NAME_SEP_RE.search(line, at)) is not None:
         start = match.end()
+        secret = _is_secret_name(match.group("name"))
+        spans: list[_Span] = []
         if line[start] in "\"'":
             end = line.index(line[start], start + 1) + 1
         else:
-            end = _bare_value_end(line, start, _NAME_VALUE, log=log)
-        yield match, end
+            end = _bare_value_end(line, start, _NAME_VALUE, log=log, secret=secret, spans=spans)
+        yield _NameValue(match, secret, end, spans)
         at = end
 
 
@@ -475,9 +700,9 @@ def _mask_name_values(line: str, log: bool) -> str:
     ``api-token-prod`` as ``api_token_prod`` (#2488)."""
     out: list[str] = []
     pos = 0
-    for match, end in _name_values(line, log=log):
+    for match, secret, end, _spans in _name_values(line, log=log):
         start = match.end()
-        if end == start or not _is_secret_name(match.group("name")):
+        if end == start or not secret:
             continue
         quote = line[start] if line[start] in "\"'" else ""
         out += (line[pos:start], quote, MASK, quote)
@@ -694,6 +919,12 @@ def _redact_shapes(line: str, *, log: bool) -> str:
 
 
 _ENV_NAME_VALUE_RE: Final[re.Pattern[str]] = re.compile(r"[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+")
+# A value that ends in a name and its separator (``api_key=`` in
+# ``Y_KEY=   api_key= ``): masked wherever it appears, it would hide that
+# name, and so the value after it (#2594).
+_NAME_TAIL_RE: Final[re.Pattern[str]] = re.compile(
+    rf"(?<!{_NAME_RUN})({_NAME_RUN}++)[\"']?\s*[=:]$", re.IGNORECASE
+)
 _NOT_SECRET_WORDS: Final[frozenset[str]] = frozenset({"true", "false", "none", "null", "unset"})
 
 
@@ -702,22 +933,30 @@ def _harvest_secret_literals(text: str) -> list[str]:
     first. Same filter as failure-report.sh's
     _hal0_report_text_value_is_secret: at least 8 characters, not purely
     numeric, not an env-var name, and not under the bare field name ``key``
-    (in log text it names a setting, not a credential)."""
+    (in log text it names a setting, not a credential). A secret value that
+    another one swallowed (#2594) is harvested on its own as well."""
     found: set[str] = set()
-    for match, end in _name_values(text):
-        name = match.group("name")
-        if name.lstrip("-").lower() == "key" or not _is_secret_name(name):
+    for match, secret, end, swallowed in _name_values(text):
+        if not secret:
             continue
-        value = text[match.end() : end].strip("\"'").strip()
-        if (
-            len(value) < 8
-            or value.isdigit()
-            or _ENV_NAME_VALUE_RE.fullmatch(value)
-            or value.lower() in _NOT_SECRET_WORDS
-            or value in MASK
-        ):
+        if swallowed:
+            spans = [(start, stop) for start, stop, harvest in swallowed if harvest]
+        elif match.group("name").lstrip("-").lower() != "key":
+            spans = [(match.end(), end)]
+        else:
             continue
-        found.add(value)
+        for start, stop in spans:
+            value = text[start:stop].strip("\"'").strip()
+            if (
+                len(value) < 8
+                or value.isdigit()
+                or _ENV_NAME_VALUE_RE.fullmatch(value)
+                or value.lower() in _NOT_SECRET_WORDS
+                or value in MASK
+                or ((tail := _NAME_TAIL_RE.search(value)) and _is_secret_name(tail.group(1)))
+            ):
+                continue
+            found.add(value)
     return sorted(found, key=len, reverse=True)
 
 

@@ -176,43 +176,43 @@
       "Sjson_ctl_1920xyz"
     ],
     [
-      "Authorization:rawauth_nel_7781xyz",
+      "Authorization:\u0085rawauth_nel_7781xyz",
       "rawauth_nel_7781xyz"
     ],
     [
-      "http://u:Spw﻿4460xyzab@h/r",
-      "Spw﻿4460xyzab"
+      "http://u:Spw\ufeff4460xyzab@h/r",
+      "Spw\ufeff4460xyzab"
     ],
     [
-      "client_id=Sturk2174xBrT7p3XıWCVcXGvnnwSo1",
-      "Sturk2174xBrT7p3XıWCVcXGvnnwSo1"
+      "client_id=Sturk2174xBrT7p3X\u0131WCVcXGvnnwSo1",
+      "Sturk2174xBrT7p3X\u0131WCVcXGvnnwSo1"
     ],
     [
-      "--passſword Sflag_long_s_16xyzab",
+      "--pass\u017fword Sflag_long_s_16xyzab",
       "Sflag_long_s_16xyzab"
     ],
     [
-      "\"github-token-Kci\" = Skelvin_825xyzabc",
+      "\"github-token-\u212aci\" = Skelvin_825xyzabc",
       "Skelvin_825xyzabc"
     ],
     [
-      "HAL0_AéDMIN_KEY=S1_visible_xyzab;Authorization:\"DPoP S2_visible_xyzab",
+      "HAL0_A\u00e9DMIN_KEY=S1_visible_xyzab;Authorization:\"DPoP S2_visible_xyzab",
       "S1_visible_xyzab"
     ],
     [
-      "HAL0_AéDMIN_KEY=S1_visible_xyzab;Authorization:\"DPoP S2_visible_xyzab",
+      "HAL0_A\u00e9DMIN_KEY=S1_visible_xyzab;Authorization:\"DPoP S2_visible_xyzab",
       "S2_visible_xyzab"
     ],
     [
-      "PASSPHRAſE=Sphrase_fold_xyzab",
+      "PASSPHRA\u017fE=Sphrase_fold_xyzab",
       "Sphrase_fold_xyzab"
     ],
     [
-      "ſecret=Sfold_s_1234xyz",
+      "\u017fecret=Sfold_s_1234xyz",
       "Sfold_s_1234xyz"
     ],
     [
-      "toKen=Sfold_k_1234xyz",
+      "to\u212aen=Sfold_k_1234xyz",
       "Sfold_k_1234xyz"
     ],
     [
@@ -262,6 +262,26 @@
     [
       "Authorization: pk2_rawcred1 HF_TOKEN\"=pk2_after_raw",
       "pk2_after_raw"
+    ],
+    [
+      "KEY=  X_KEY= pk3_after_empty",
+      "pk3_after_empty"
+    ],
+    [
+      "HF_TOKEN=  password: pk3_after_empty",
+      "pk3_after_empty"
+    ],
+    [
+      "max_tokens= HF_TOKEN= pk3_after_benign",
+      "pk3_after_benign"
+    ],
+    [
+      "KEY= pk3_glued_firstX_KEY= pk3_glued_second",
+      "pk3_glued_first"
+    ],
+    [
+      "KEY= pk3_glued_firstX_KEY= pk3_glued_second",
+      "pk3_glued_second"
     ]
   ],
   "keep": [
@@ -392,6 +412,26 @@
     [
       "Authorization: rawcred12 HF_TOKEN\"=v",
       "Authorization: ***REDACTED*** HF_TOKEN\"=***REDACTED***"
+    ],
+    [
+      "KEY=  X_KEY= v",
+      "KEY=  ***REDACTED***"
+    ],
+    [
+      "A_KEY= B_KEY= C_KEY= v",
+      "A_KEY= ***REDACTED***"
+    ],
+    [
+      "X_KEY= Y_KEY= v w",
+      "X_KEY= ***REDACTED*** w"
+    ],
+    [
+      "max_tokens= HF_TOKEN= v",
+      "max_tokens= HF_TOKEN= ***REDACTED***"
+    ],
+    [
+      "max_tokens=token=abcdefgh1234",
+      "max_tokens=token=***REDACTED***"
     ]
   ],
   "mask_names": [
@@ -502,8 +542,8 @@
     "KEY",
     "salt",
     "max_tokens",
-    "ſecret",
-    "toKen",
+    "\u017fecret",
+    "to\u212aen",
     "HAL0_CLIENT_KEY\n"
   ],
   "plain_keys": [

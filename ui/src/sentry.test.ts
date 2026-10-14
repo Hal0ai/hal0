@@ -141,9 +141,11 @@ describe('redactSecrets: shape pass', () => {
     expect(redactSecrets('foo=token=abcdefgh1234')).toBe(`foo=token=${MASK}`)
   })
 
-  it('consumes the value of a benign secret-word name whole', () => {
-    // The Python match covers `max_tokens=<value>` and keeps it as written.
-    expect(redactSecrets('max_tokens=token=abcdefgh1234')).toBe('max_tokens=token=abcdefgh1234')
+  it('ends the value of a benign secret-word name before a secret in it', () => {
+    // The benign value is not masked, so a secret it took in would be left in
+    // clear (#2594): it ends where the secret starts, as in the Python.
+    expect(redactSecrets('max_tokens=token=abcdefgh1234')).toBe(`max_tokens=token=${MASK}`)
+    expect(redactSecrets('max_tokens=5')).toBe('max_tokens=5')
   })
 
   it('judges a name longer than 128 characters as written', () => {
@@ -212,6 +214,9 @@ describe('redactSecrets: linear time', () => {
     ['packed --token=a; repeated', '--token=a;'.repeat(N / 10)],
     ['one value of many ;a', `X_KEY=${';a'.repeat(N / 2)}`],
     ['a raw Authorization value of many words', `Authorization: abcdefghij${' a'.repeat(N / 2)}`],
+    // #2594: each empty value tests the next word for a swallowed secret.
+    ['empty x_key= values repeated', 'x_key= '.repeat(N / 7)],
+    ['empty token= values repeated', 'token= '.repeat(N / 7)],
   ]
 
   it.each(inputs)('%s', (_label, text) => {

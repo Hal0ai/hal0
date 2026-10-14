@@ -516,23 +516,36 @@ _hal0_report_text_value_is_secret() {
 # also masked where it later appears bare (in a URL, a journal line). Only
 # plausible secrets are harvested (_hal0_report_text_value_is_secret). A
 # value ends before a packed secret (#2529), as in the pattern pass, so
-# `abc;Bearer` is not one literal whose mask would hide the token's name.
+# `abc;Bearer` is not one literal whose mask would hide the token's name. A
+# secret that a value would swallow (#2594) has its own value
+# harvested, but that value is not: what comes before the secret may end in
+# a name (`HF_TOKEN=x-api-key=b_token= v`), and masking it elsewhere would
+# hide that name. Nor is a value that ends in a name and its separator
+# (`api_key=` in `Y_KEY=   api_key= `), for the same reason (#2594).
 # Returns non-zero only if sed or grep itself errored — no match is fine.
 _hal0_report_harvest_report_text() {
-    local file="$1" hits rc=0 hit name value k="$_HAL0_REPORT_PACKED"
-    LC_ALL=C sed -E -e "s#${k}##g" -e "$(_hal0_report_packed_mark_expr)" "$file" \
-        >"${file}.packed" || return 1
+    local file="$1" hits rc=0 hit name value expr k="$_HAL0_REPORT_PACKED"
+    local w="$_HAL0_REPORT_SWALLOW" kw="$_HAL0_REPORT_KEYWORD" v="$_HAL0_REPORT_NAME_VALUE"
+    local tail="(^|[^a-z0-9_-])(${_HAL0_REPORT_TEXT_NAME_RE,,})[\"']?[[:space:]]*[=:]\$"
+    local -a cut=()
+    while IFS= read -r expr; do
+        cut+=(-e "$expr")
+    done < <(_hal0_report_swallow_cut_exprs)
+    LC_ALL=C sed -E -e "s#[${k}${w}${kw}${v}]##g" -e "$(_hal0_report_packed_mark_expr)" \
+        "${cut[@]}" "$file" >"${file}.packed" || return 1
     hits="$(LC_ALL=C grep -oiE \
-        "(^|[^A-Za-z0-9_-])(${_HAL0_REPORT_TEXT_NAME_RE})[\"']?[[:space:]]*[=:][[:space:]]*[\"']?[^\"'[:space:],}&${k}]+" \
+        "(^|[^A-Za-z0-9_-])(${_HAL0_REPORT_TEXT_NAME_RE})[\"']?[[:space:]]*[=:][[:space:]]*[\"']?[^\"'[:space:],}&${k}${w}]+${w}?" \
         "${file}.packed")" || rc=$?
     rm -f "${file}.packed"
     [[ $rc -le 1 ]] || return 1
     while IFS= read -r hit; do
+        [[ "$hit" == *"$w" ]] && continue
         [[ "$hit" =~ ([A-Za-z0-9_-]+)[\"\']?[[:space:]]*[=:][[:space:]]*[\"\']?(.*)$ ]] || continue
         name="${BASH_REMATCH[1]}" value="${BASH_REMATCH[2]}"
         # A hyphenated name is judged whole (`x-api-key`, `max-tokens`, #2466);
         # a flag's leading dashes do not count.
         while [[ "$name" == -* ]]; do name="${name#-}"; done
+        [[ "${value,,}" =~ $tail ]] && continue
         _hal0_report_text_value_is_secret "$name" "$value" || continue
         _hal0_report_emit_secret "$value"
     done <<<"$hits"
@@ -605,28 +618,104 @@ _hal0_report_packed_mark_expr() {
     printf '%s' "s#([;,])([\"'([{<]*(${heads}))#${_HAL0_REPORT_PACKED}\\1\\2#gI"
 }
 
+# Swallowed secrets (#2594): a value can take in the start of another secret
+# whose own value lies past it, which was then left visible: after an empty
+# value (`KEY=  X_KEY= v`), or with a name glued on to it
+# (`Authorization: Bearer abcX-Api-Key: def`). Where a NAME begins is unknown
+# (`abcX-Api-Key` may be a token glued to a name), so no value is cut before
+# one: every NAME[=:]value value is masked first, and a value that swallows
+# the name is then masked over it as before. Mirrors the "Swallowed secrets"
+# block in hal0.redaction, which extends the first mask instead. No
+# value takes in a Bearer, Authorization or --flag keyword (a value glued on
+# to one is cut off it), so each of those secrets is masked by its own rule:
+# the keyword is all that stays in clear.
+#
+# sed has no lookahead and its matches do not overlap, so bytes mark these
+# places: _HAL0_REPORT_SWALLOW where the value starts of a NAME whose
+# separator holds whitespace or a quote, or whose value is quoted;
+# _HAL0_REPORT_NAME_VALUE where any other NAME's value starts; and
+# _HAL0_REPORT_KEYWORD before a keyword that a value would take in, where
+# every bare value class stops. All are removed at the end (a stray one in
+# the input is dropped first).
+_HAL0_REPORT_SWALLOW=$'\002'
+_HAL0_REPORT_KEYWORD=$'\003'
+_HAL0_REPORT_NAME_VALUE=$'\004'
+
+# A Bearer, Authorization or --flag secret's start.
+_HAL0_REPORT_KEYWORD_HEAD="bearer[[:space:]]+([A-Za-z0-9._~+/=-]|[*]{3}REDACTED[*]{3})|authorization[\"']?[[:space:]]*:|--[A-Za-z0-9-]*(secret|token|password|pass|api-key|apikey|private-key)[A-Za-z0-9-]*(=|[[:space:]]+)[^-[:space:]]"
+
+# The sed expressions that mark the pattern pass: each glued keyword, then
+# where each NAME's value starts. The NAME marks are made twice: a match
+# takes the character before a name, so in a run of them (`A=  B=  C= v`)
+# every other one is marked the first time. A NAME value that is a keyword's
+# secret (`token= Bearer x`, `tokenizer=  --password x`) is not masked
+# first: its mark becomes a _HAL0_REPORT_KEYWORD one, so the keyword's own
+# rule masks that secret and the NAME[=:]value one leaves it alone.
+_hal0_report_swallow_mark_exprs() {
+    local w="$_HAL0_REPORT_SWALLOW" kw="$_HAL0_REPORT_KEYWORD" v="$_HAL0_REPORT_NAME_VALUE"
+    local name="(^|[^A-Za-z0-9_-])(${_HAL0_REPORT_TEXT_NAME_RE})"
+    local spaced="s#(${name}([\"'][[:space:]]*[=:][[:space:]]*|[[:space:]]*[=:][[:space:]]+))#\\1${w}#gI"
+    local quoted="s#(${name}[[:space:]]*[=:])([\"'])#\\1${w}\\6#gI"
+    local plain="s#(${name}[[:space:]]*[=:])([^[:space:]\"'${w}${kw}${v}])#\\1${v}\\6#gI"
+    printf '%s\n' "s#([^[:space:]])(${_HAL0_REPORT_KEYWORD_HEAD})#\\1${kw}\\2#gI"
+    printf '%s\n' "$spaced" "$quoted" "$plain" "$spaced" "$quoted" "$plain"
+    printf '%s\n' "s#[${w}${v}]+(${_HAL0_REPORT_KEYWORD_HEAD})#${kw}\\1#gI"
+}
+
+# The sed expressions that mask each marked value: a quoted one to its
+# closing quote, a bare one to the end of the NAME[=:]value class.
+_hal0_report_swallow_mask_exprs() {
+    local m="$_HAL0_REPORT_MASK" k="$_HAL0_REPORT_PACKED"
+    local w="$_HAL0_REPORT_SWALLOW" kw="$_HAL0_REPORT_KEYWORD" v="$_HAL0_REPORT_NAME_VALUE"
+    printf '%s\n' "s#${w}+#${w}#g"
+    printf '%s\n' "s#${w}\"[^\"]*\"#\"${m}\"#g" "s#${w}'[^']*'#'${m}'#g"
+    printf '%s\n' "s#([${w}${v}])[^\"'[:space:],}&${k}${w}${kw}${v}]+#\\1${m}#g"
+}
+
+# The sed expressions that put _HAL0_REPORT_SWALLOW before each secret that
+# a value could swallow, for the literal harvest only: a harvested value ends
+# there, so it is never a literal that, masked elsewhere, hides that secret's
+# name. The secret's own value is harvested in turn.
+_hal0_report_swallow_cut_exprs() {
+    local w="$_HAL0_REPORT_SWALLOW" name="(${_HAL0_REPORT_TEXT_NAME_RE})"
+    local heads="${_HAL0_REPORT_KEYWORD_HEAD}|${name}[\"']?[[:space:]]*[=:][[:space:]]*[^[:space:],}&]"
+    # A value that starts, after whitespace, with another secret (#2594);
+    # twice, as a match takes the character before the next name.
+    local empty="s#((^|[^A-Za-z0-9_-])${name}[\"']?[[:space:]]*[=:][[:space:]]+)([\"'([{<]*(${heads}))#\\1${w}\\6#gI"
+    # A NAME glued on to a value whose own value lies past that value.
+    local glued="s#([^A-Za-z0-9_[:space:]${w}-])(${name}([\"'][[:space:]]*[=:]|[[:space:]]*[=:][[:space:]]+|[[:space:]]*[=:][[:space:]]*[\"']))#\\1${w}\\2#gI"
+    printf '%s\n' "$empty" "$empty" "$glued" "$glued"
+}
+
 _hal0_report_mask_patterns() {
-    local m="$_HAL0_REPORT_MASK" k="$_HAL0_REPORT_PACKED" mark
+    local m="$_HAL0_REPORT_MASK" k="$_HAL0_REPORT_PACKED" mark expr
+    local w="$_HAL0_REPORT_SWALLOW" kw="$_HAL0_REPORT_KEYWORD" v="$_HAL0_REPORT_NAME_VALUE"
     local pre="((^|[^A-Za-z0-9_-])(${_HAL0_REPORT_TEXT_NAME_RE})[\"']?[[:space:]]*[=:][[:space:]]*)"
+    local -a swallow=()
+    while IFS= read -r expr; do
+        swallow+=(-e "$expr")
+    done < <(_hal0_report_swallow_mark_exprs && _hal0_report_swallow_mask_exprs)
     mark="$(_hal0_report_packed_mark_expr)"
     LC_ALL=C sed -E \
-        -e "s#${k}##g" \
+        -e "s#[${k}${w}${kw}${v}]##g" \
         -e "$mark" \
-        -e "s#(authorization:[[:space:]]*(basic|token)[[:space:]]+)[^[:space:]'\"${k}]+#\\1${m}#gI" \
+        "${swallow[@]}" \
+        -e "s#(authorization:[[:space:]]*(basic|token)[[:space:]]+)[^[:space:]'\"${k}${w}${kw}${v}][^[:space:]'\"${k}${kw}]*#\\1${m}#gI" \
         -e "s#(bearer[[:space:]]+)[A-Za-z0-9._~+/=-]+#\\1${m}#gI" \
-        -e "s#(authorization[\"']?[[:space:]]*:[[:space:]]*[\"']?${_HAL0_REPORT_AUTH_SCHEMES}[[:space:]]+)[^[:space:]\"',${k}]+#\\1${m}#gI" \
+        -e "s#(authorization[\"']?[[:space:]]*:[[:space:]]*[\"']?${_HAL0_REPORT_AUTH_SCHEMES}[[:space:]]+)[^[:space:]\"',${k}${w}${kw}${v}][^[:space:]\"',${k}${kw}]*#\\1${m}#gI" \
         -e "/authorization[\"']?[[:space:]]*:[[:space:]]*[\"']?${_HAL0_REPORT_AUTH_SCHEMES}([[:space:]]|\$)/I!s#(authorization[\"']?[[:space:]]*:[[:space:]]*[\"']?)[^[:space:]\"',]{8,}[^\"',]*#\\1${m}#gI" \
         -e "s#([a-z][a-z0-9+.-]*://[^/@[:space:]:]*):[^/@[:space:]]+@#\\1:${m}@#gI" \
         -e "s#([a-z][a-z0-9+.-]*://)[^/@[:space:]:]{16,}@#\\1${m}@#gI" \
         -e "s#${pre}\"[^\"]*\"#\\1\"${m}\"#gI" \
         -e "s#${pre}'[^']*'#\\1'${m}'#gI" \
-        -e "s#${pre}[^\"'[:space:],}&${k}]+#\\1${m}#gI" \
-        -e "s#(--[A-Za-z0-9-]*(secret|token|password|pass|api-key|apikey|private-key)[A-Za-z0-9-]*(=|[[:space:]]+))[^-[:space:]${k}][^[:space:]${k}]*#\\1${m}#gI" \
+        -e "s#${pre}[^\"'[:space:],}&${k}${w}${kw}${v}][^\"'[:space:],}&${k}${kw}]*#\\1${m}#gI" \
+        -e "s#(--[A-Za-z0-9-]*(secret|token|password|pass|api-key|apikey|private-key)[A-Za-z0-9-]*(=|[[:space:]]+))[^-[:space:]${k}${kw}][^[:space:]${k}${kw}]*#\\1${m}#gI" \
         -e "s#(client_id=)[A-Za-z0-9_.-]{16,}#\\1${m}#gI" \
         -e "s#eyJ[A-Za-z0-9_-]{10,}\\.[A-Za-z0-9_-]{10,}\\.[A-Za-z0-9_-]{10,}#${m}#g" \
         -e "s#(hf_|sk-|gh[pousr]_|github_pat_|xox[baprs]-)[A-Za-z0-9_-]{20,}#${m}#g" \
         -e "s#AKIA[0-9A-Z]{16}#${m}#g" \
-        -e "s#${k}##g"
+        -e "s#[${k}${w}${kw}${v}]##g" \
+        -e "s#([*]{3}REDACTED[*]{3})+#${m}#g"
 }
 
 # _hal0_report_redact_file SECRETS IN OUT WORKDIR — run the text pass and
