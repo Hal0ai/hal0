@@ -183,9 +183,18 @@ def _orch(tmp_path: Path) -> CapabilityOrchestrator:
 
 
 async def test_capabilities_get_state_probes_off_loop(
-    slow_flm_list: _SlowFlmList, tmp_path: Path, tmp_hal0_home: str
+    slow_flm_list: _SlowFlmList,
+    tmp_path: Path,
+    tmp_hal0_home: str,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """GET /api/capabilities builds NPU picker rows from ``flm list``."""
+    monkeypatch.setattr(
+        "hal0.capabilities.catalog.available_backends",
+        lambda: [
+            {"id": "npu", "label": "NPU", "short": "NPU", "provider": "flm", "multiplex": True}
+        ],
+    )
     state = await _orch(tmp_path).get_state()
 
     slow_flm_list.assert_ran_off_loop()

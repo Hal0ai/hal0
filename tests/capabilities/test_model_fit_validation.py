@@ -130,7 +130,7 @@ def test_validate_model_fit_passes_registry_for_registry_model(
 def test_models_for_capability_filters_backends_blocked_by_model_fit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    def fake_flat_rows_for_capability(capability, *, registry=None):
+    def fake_flat_rows_for_capability(capability, *, registry=None, host_gated=False):
         assert capability == "rerank"
         return [
             {

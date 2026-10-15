@@ -32,6 +32,24 @@ from hal0.capabilities.orchestrator import CapabilityOrchestrator
 
 
 @pytest.fixture(autouse=True)
+def _npu_advertised(monkeypatch: pytest.MonkeyPatch) -> None:
+    """These tests exercise the NPU path; the host advertises npu (#2659 gate)."""
+    monkeypatch.setattr(
+        "hal0.capabilities.catalog.available_backends",
+        lambda: [
+            {"id": "npu", "label": "NPU", "short": "NPU", "provider": "flm", "multiplex": True},
+            {
+                "id": "cpu",
+                "label": "CPU",
+                "short": "CPU",
+                "provider": "llama-server",
+                "multiplex": False,
+            },
+        ],
+    )
+
+
+@pytest.fixture(autouse=True)
 def _no_spawn_context_refresh(monkeypatch: pytest.MonkeyPatch) -> None:
     import hal0.agents.hermes_refresh as _hr
 

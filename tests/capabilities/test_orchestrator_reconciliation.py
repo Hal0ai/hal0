@@ -33,6 +33,24 @@ import pytest
 from hal0.capabilities.orchestrator import CapabilityOrchestrator
 
 
+@pytest.fixture(autouse=True)
+def _npu_advertised(monkeypatch: pytest.MonkeyPatch) -> None:
+    """These tests exercise the NPU path; the host advertises npu (#2659 gate)."""
+    monkeypatch.setattr(
+        "hal0.capabilities.catalog.available_backends",
+        lambda: [
+            {"id": "npu", "label": "NPU", "short": "NPU", "provider": "flm", "multiplex": True},
+            {
+                "id": "cpu",
+                "label": "CPU",
+                "short": "CPU",
+                "provider": "llama-server",
+                "multiplex": False,
+            },
+        ],
+    )
+
+
 def _read_slot_toml(home: Path, slot: str = "embed") -> dict[str, Any]:
     path = home / "etc" / "hal0" / "slots" / f"{slot}.toml"
     with open(path, "rb") as f:

@@ -455,9 +455,9 @@ async def test_probe_landing_mid_get_state_yields_a_consistent_response(
 ) -> None:
     """``get_state`` reads ``available_backends()`` and then builds catalogs that
     read it again. Land the probe exactly between the two reads: the catalogs
-    must equal what a settled-absent and a settled-present probe produce,
-    because catalog rows never depend on NPU presence (NPU rows come from
-    ``flm list``; ``host_backends`` gates only the gpu-*/cpu lanes)."""
+    must equal what a settled-present probe produces. NPU rows now depend on
+    the probe (#2659): they are offered only when ``available_backends()``
+    advertises npu, so a settled-absent catalog carries none."""
     import hal0.agents.hermes_refresh as _hr
     import hal0.providers.flm as flm_mod
 
@@ -479,7 +479,9 @@ async def test_probe_landing_mid_get_state_yields_a_consistent_response(
     assert any(
         b["id"] == "npu" for row in when_present["embed"]["embed"] for b in row["backends"]
     ), "fixture: the catalog should carry an NPU row"
-    assert when_absent == when_present
+    assert not any(
+        b["id"] == "npu" for row in when_absent["embed"]["embed"] for b in row["backends"]
+    ), "an unadvertised npu must not be offered (#2659)"
 
     slow_probe.answer = True
     monkeypatch.setattr(catalog, "_flm_last_definitive", None)
@@ -501,7 +503,7 @@ async def test_probe_landing_mid_get_state_yields_a_consistent_response(
 
     assert landed_between == [True], "the probe did not land between the two reads"
     assert "npu" not in [b["id"] for b in state["backends"]]
-    assert state["catalogs"] == when_present == when_absent
+    assert state["catalogs"] == when_present
 
 
 # ── FLM pull path keeps the known answer across its reset ───────────────────

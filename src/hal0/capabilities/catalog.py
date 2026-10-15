@@ -883,6 +883,7 @@ def _flat_rows_for_capability(
     capability: str,
     *,
     registry: ModelRegistry | None = None,
+    host_gated: bool = False,
 ) -> list[dict[str, Any]]:
     """Build per-(model, backend) flat rows for one capability child.
 
@@ -918,7 +919,7 @@ def _flat_rows_for_capability(
             seen.add(key)
             rows.append(_entry_to_row(entry, backend_id, caps, registry=registry))
 
-    for npu_row in _flm_rows_for_capability(capability):
+    for npu_row in _flm_rows_for_capability(capability, host_gated=host_gated):
         key = (npu_row["id"], npu_row["backend"])
         if key in seen:
             continue
@@ -1132,8 +1133,13 @@ def models_for_capability(
     capability: str,
     *,
     registry: ModelRegistry | None = None,
+    host_gated: bool = False,
 ) -> list[dict[str, Any]]:
     """Return picker entries for one capability child, grouped by model id.
+
+    ``host_gated`` drops NPU rows when ``available_backends()`` does not
+    advertise npu (#2659); the served catalogs set it, validation and
+    ``hal0 capabilities migrate`` do not.
 
     Each entry carries the model-level fields plus a ``backends`` list,
     one element per backend the model can actually run on::
@@ -1164,7 +1170,7 @@ def models_for_capability(
     """
     flat = [
         fitted
-        for row in _flat_rows_for_capability(capability, registry=registry)
+        for row in _flat_rows_for_capability(capability, registry=registry, host_gated=host_gated)
         for fitted in [_row_with_model_fit(capability, row, registry=registry)]
         if fitted is not None
     ]
@@ -1203,7 +1209,7 @@ def models_for_capability(
     return [grouped[rid] for rid in order]
 
 
-def _flm_rows_for_capability(capability: str) -> list[dict[str, Any]]:
+def _flm_rows_for_capability(capability: str, *, host_gated: bool = False) -> list[dict[str, Any]]:
     """Return picker rows the NPU/FLM toolbox can serve for one capability.
 
     Probes :func:`hal0.providers.flm.flm_served_models` (cached at module
@@ -1222,6 +1228,16 @@ def _flm_rows_for_capability(capability: str) -> list[dict[str, Any]]:
     process restart.
     """
     if capability not in _NPU_FANOUT_CAPS:
+        return []
+    # Host-truth gate (#2659), the npu counterpart of the gpu-rocm gating
+    # (#2029/#2447): ``flm list -j`` runs on the host binary, but
+    # available_backends() advertises npu only when the FLM runner image is
+    # also present. Without it every row here is a selection that can never
+    # serve, so offer none.
+    # Opt-in: ``hal0 capabilities migrate`` and apply validation judge a
+    # persisted selection by ``flm list`` alone and must not depend on the
+    # FLM-image probe (#1974/#2333), so only the served catalogs gate.
+    if host_gated and "npu" not in {b["id"] for b in available_backends()}:
         return []
     # Local import so catalog.py doesn't drag the provider module (and
     # its httpx dependency) onto every import path.
@@ -1276,18 +1292,18 @@ def catalogs_by_slot(
     """
     return {
         "embed": {
-            "embed": models_for_capability("embed", registry=registry),
-            "rerank": models_for_capability("rerank", registry=registry),
+            "embed": models_for_capability("embed", registry=registry, host_gated=True),
+            "rerank": models_for_capability("rerank", registry=registry, host_gated=True),
         },
         "voice": {
-            "stt": models_for_capability("stt", registry=registry),
-            "tts": models_for_capability("tts", registry=registry),
+            "stt": models_for_capability("stt", registry=registry, host_gated=True),
+            "tts": models_for_capability("tts", registry=registry, host_gated=True),
         },
         "img": {
-            "img": models_for_capability("image", registry=registry),
+            "img": models_for_capability("image", registry=registry, host_gated=True),
         },
         "chat": {
-            "chat": models_for_capability("chat", registry=registry),
+            "chat": models_for_capability("chat", registry=registry, host_gated=True),
         },
     }
 
