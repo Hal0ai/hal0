@@ -60,11 +60,9 @@ def test_stt_provider_without_a_runtime_resolves_no_profile() -> None:
     """A provider hal0 has no runtime profile for must not inherit the CPU
     engine's profile.
 
-    Live defect (lxc105): the picker offers Whisper-Large-v3-Turbo under
-    provider ``whispercpp`` (a curated surfacing decision from #514 with no
-    runtime behind it). The device-only rule handed that cpu row Moonshine's
-    profile, which would have pointed MoonshineProvider at a Whisper GGUF it
-    cannot load.
+    The device-only rule would hand a cpu row naming an unknown provider
+    (e.g. a stale ``whispercpp`` selection, #2691) Moonshine's profile,
+    pointing MoonshineProvider at weights it cannot load.
     """
     assert profile_name_for_fit("stt", "cpu", "whispercpp") is None
     assert profile_name_for_fit("stt", "gpu-vulkan", "whispercpp") is None

@@ -98,7 +98,7 @@ def test_commit_rows_stamps_provider_alongside_backends(tmp_hal0_home: str) -> N
 def test_scan_commit_rejects_out_of_vocab_provider(tmp_hal0_home: str) -> None:
     """An operator-supplied ``provider`` on a scan-commit row must be screened
     against RUNTIME_FAMILIES same as the POST /api/models create path — an
-    out-of-vocab token like "whispercpp" (a curated-only tag, never valid on
+    out-of-vocab token like "whispercpp" (a retired engine tag, never valid on
     a registry row) must be skipped, not persisted unscreened."""
     fp = Path(tmp_hal0_home) / "mystery-voice.gguf"
     fp.write_bytes(b"\x00" * 8)

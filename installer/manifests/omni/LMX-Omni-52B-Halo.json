@@ -12,12 +12,6 @@
     "coder": null,
     "aux": [
       {
-        "slot": "stt",
-        "model_name": "Whisper-Large-v3-Turbo",
-        "size_gb": 1.6,
-        "lru": false
-      },
-      {
         "slot": "tts",
         "model_name": "kokoro-v1",
         "size_gb": 0.35,
@@ -42,7 +36,6 @@
     "description": "AMD's curated triple-modality kit for Strix Halo.",
     "members": [
       { "model_name": "Qwen3.6-35B-A3B-MTP-GGUF" },
-      { "model_name": "Whisper-Large-v3-Turbo" },
       { "model_name": "kokoro-v1" },
       { "model_name": "Flux-2-Klein-9B-GGUF" }
     ]

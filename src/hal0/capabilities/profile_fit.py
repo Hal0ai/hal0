@@ -49,11 +49,9 @@ def profile_name_for_fit(capability: str, device: str, provider: str = "") -> st
         #
         # ``provider`` is honoured NARROWLY here: a caller that names an
         # engine hal0 has no profile for gets ``None`` instead of the CPU
-        # engine's profile. Live case (lxc105): the picker offers
-        # Whisper-Large-v3-Turbo under provider ``whispercpp`` (a curated
-        # surfacing decision from #514, with no runtime behind it), and the
-        # device-only rule handed that row Moonshine's profile — a slot that
-        # would point MoonshineProvider at a Whisper GGUF it cannot load.
+        # engine's profile (#2691): otherwise a stale or foreign provider
+        # would be handed Moonshine's profile — a slot pointing
+        # MoonshineProvider at weights it cannot load.
         if provider and provider not in _STT_PROVIDERS_WITH_PROFILES:
             return None
         if device == "npu":

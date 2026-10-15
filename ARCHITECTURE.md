@@ -893,10 +893,10 @@ a per-tier concept, not a default-install concept.
 | Tier | Min unified RAM | `chat.primary` | `chat.coder` | Aux | NPU trio |
 |---|---|---|---|---|---|
 | `hal0-Lite` | 16 GB | qwen3.5-0.8b | — | — | — (not shown) |
-| `hal0-Default` | 32 GB | qwen3.5-9b | — | nomic-v1.5, whisper-tiny, kokoro:cpu | — (not shown) |
-| `hal0-Pro` | 64 GB | Qwen3.6-27B-MTP | Qwen3-Coder-30B-A3B | + bge-reranker-v2-m3, whisper-base, sd-turbo | shown, **opt-in** |
-| `hal0-Max` | 100 GB Strix Halo | Qwen3.6-35B-A3B-MTP | Qwen3-Coder-Next-80B-A3B | + whisper-large-v3-turbo, flux-2-klein-9b | shown, **opt-in** |
-| `LMX-Omni-52B-Halo` | 100 GB Strix Halo | Qwen3.6-35B-A3B-MTP | — | Whisper-Large-v3-Turbo, kokoro-v1, Flux-2-Klein-9B | — |
+| `hal0-Default` | 32 GB | qwen3.5-9b | — | nomic-v1.5, kokoro:cpu | — (not shown) |
+| `hal0-Pro` | 64 GB | Qwen3.6-27B-MTP | Qwen3-Coder-30B-A3B | + bge-reranker-v2-m3, sd-turbo | shown, **opt-in** |
+| `hal0-Max` | 100 GB Strix Halo | Qwen3.6-35B-A3B-MTP | Qwen3-Coder-Next-80B-A3B | + flux-2-klein-9b | shown, **opt-in** |
+| `LMX-Omni-52B-Halo` | 100 GB Strix Halo | Qwen3.6-35B-A3B-MTP | — | kokoro-v1, Flux-2-Klein-9B | — |
 
 Notes:
 - `hal0-Max` was originally proposed as `hal0-Halo` but renamed to avoid

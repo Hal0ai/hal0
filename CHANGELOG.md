@@ -46,6 +46,13 @@ applying. Add those subsections to a version's section to surface them; see
 
 ### Fixed
 
+- **catalog:** removed the three `whispercpp` STT rows (Whisper-Tiny, Whisper-Base,
+  Whisper-Large-v3-Turbo) and the `whispercpp` provider mapping: hal0 never
+  shipped a whisper.cpp runtime (ADR-0001), so the picker offered a model no
+  slot could serve. The omni bundle manifests no longer list them, and a
+  `voice.stt` selection whose provider has no runtime profile now fails with
+  `capability.no_engine_for_provider` instead of being rebound to the Moonshine
+  runner (#2691).
 - **slots:** healing a type-less slot TOML no longer stamps `type = "llm"` on a rerank/embed/tts slot: the type now follows the profile, then the slot name. The output-sanity gate also skips an `llm`-typed slot whose profile or launch flags carry `--reranking`/`--embedding`, and `hal0 doctor profiles --fix` rewrites an already-healed `type = "llm"` on a non-chat profile; the failure message now names that remedy (#2693).
 - **updater:** a slot whose model the runner-system conversion unassigned (a
   ROCmFPX/ROCmFP4/IU4/ActiveFPX quant no runner can load, ADR-0028 §7) is now

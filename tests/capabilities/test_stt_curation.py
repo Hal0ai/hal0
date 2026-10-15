@@ -1,39 +1,35 @@
-"""STT curation surfacing (#514).
+"""STT curation surfacing (#514, reversed by #2691).
 
-whisper-large-v3-turbo is a visible STT default that loads via the
-built-in whisper.cpp recipe. It must show up in the ``stt`` capability
-dropdown, while the lower-tier Tiny/Base bundle picks stay hidden
-(bundle_only).
+hal0 never shipped a whisper.cpp runtime (ADR-0001): the only Whisper it runs
+is ``whisper-v3:turbo`` through the FLM trio on the XDNA NPU. The three
+``whispercpp`` curated rows were dead picks and are gone; nothing in the curated
+table or the catalog may reintroduce the engine tag.
 """
 
 from __future__ import annotations
 
+import pytest
+
+from hal0.capabilities import catalog
 from hal0.capabilities.catalog import models_for_capability
-from hal0.registry.curated import CURATED_BY_ID
+from hal0.registry.curated import CURATED_BY_ID, CURATED_MODELS
 
 
-def test_whisper_large_v3_turbo_is_a_visible_stt_default() -> None:
-    entry = CURATED_BY_ID["Whisper-Large-v3-Turbo"]
-    assert entry.bundle_only is False
-    assert entry.capability == "stt"
-    assert entry.recommended_slot == "stt"
+def test_no_curated_row_carries_the_whispercpp_backend() -> None:
+    assert [m.id for m in CURATED_MODELS if m.backend == "whispercpp"] == []
+    for dead in ("Whisper-Tiny", "Whisper-Base", "Whisper-Large-v3-Turbo"):
+        assert dead not in CURATED_BY_ID
 
 
-def test_stt_dropdown_surfaces_whisper_turbo_not_lower_tiers() -> None:
+def test_catalog_does_not_know_the_whispercpp_provider() -> None:
+    assert "whispercpp" not in catalog._BACKEND_TO_PROVIDER
+    assert "whispercpp" not in catalog._RUNTIME_TO_HOST_BACKENDS
+    assert "whispercpp" not in catalog._BACKEND_TO_PROVIDER.values()
+
+
+def test_stt_dropdown_surfaces_no_whispercpp_row(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("hal0.providers.flm.flm_served_models", lambda: [])
     rows = models_for_capability("stt", registry=None)
-    ids = {row["id"] for row in rows}
-    assert "Whisper-Large-v3-Turbo" in ids
-    # Tiny/Base remain bundle_only — hidden from the standalone dropdown.
-    assert "Whisper-Tiny" not in ids
-    assert "Whisper-Base" not in ids
-
-
-def test_whisper_turbo_offers_a_real_backend() -> None:
-    rows = models_for_capability("stt", registry=None)
-    whisper = [r for r in rows if r["id"] == "Whisper-Large-v3-Turbo"]
-    assert whisper, "whisper-large-v3-turbo not surfaced for stt"
-    backends = {b["id"] for b in whisper[0]["backends"]}
-    providers = {b["provider"] for b in whisper[0]["backends"]}
-    # whispercpp fans out to a real host backend (gpu-vulkan/cpu), not empty.
-    assert backends & {"gpu-vulkan", "cpu"}
-    assert "whispercpp" in providers
+    for row in rows:
+        assert row["id"] not in {"Whisper-Tiny", "Whisper-Base", "Whisper-Large-v3-Turbo"}
+        assert all(b.get("provider") != "whispercpp" for b in row.get("backends", []))

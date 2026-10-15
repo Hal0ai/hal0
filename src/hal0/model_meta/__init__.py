@@ -210,8 +210,8 @@ def derive_model_provider(backends: Sequence[str] | None) -> str:
 
     Lane tags (rocm/vulkan/cuda/cpu) are hardware lanes, not engines — they
     resolve to the llama-server default. Mirrors capabilities.catalog's
-    step-3 resolution for registry rows; curated-only tokens (whispercpp,
-    vibevoice) never appear on registry models.
+    step-3 resolution for registry rows; curated-only tokens (vibevoice)
+    never appear on registry models.
 
     Total: always returns a :data:`RUNTIME_FAMILIES` member, even for an
     empty/``None`` input or an unrecognised tag set.

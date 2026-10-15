@@ -28,12 +28,12 @@ def test_catalogue_entries_have_hf_coordinates() -> None:
 
     ``bundle_only`` entries (#500) are exempt from the extension check:
     they are bundled-stock models loaded via their own recipe
-    (whispercpp/kokoro/sd-cpp) rather than hal0's hf pull layer, so they
+    (kokoro/sd-cpp) rather than hal0's hf pull layer, so they
     legitimately carry .bin / .onnx coordinates. hf_repo/hf_file are still
     required (informational), but the extension allowlist does not apply.
     """
-    # .bin covers whisper.cpp ggml weights (#514 — whisper-large-v3-turbo is a
-    # visible STT default loaded via the whispercpp recipe).
+    # .bin is kept in the allowlist for bundled-stock weights; no curated
+    # row ships whisper.cpp ggml weights any more (#2691).
     allowed_suffixes = (".gguf", ".safetensors", ".ckpt", ".bin")
     for m in CURATED_MODELS:
         if m.tags and "npu" in m.tags:

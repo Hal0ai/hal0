@@ -18,12 +18,6 @@
         "lru": false
       },
       {
-        "slot": "stt",
-        "model_name": "Whisper-Tiny",
-        "size_gb": 0.075,
-        "lru": false
-      },
-      {
         "slot": "tts",
         "model_name": "kokoro-v1",
         "size_gb": 0.35,
@@ -39,11 +33,10 @@
   "omni": {
     "kind": "collection.omni",
     "name": "hal0-Default",
-    "description": "Recommended starter bundle: chat, embed, STT, TTS.",
+    "description": "Recommended starter bundle: chat, embed, TTS.",
     "members": [
       { "model_name": "qwen3.5-9b" },
       { "model_name": "nomic-embed-text-v1.5-q8_0" },
-      { "model_name": "Whisper-Tiny" },
       { "model_name": "kokoro-v1" }
     ]
   }
