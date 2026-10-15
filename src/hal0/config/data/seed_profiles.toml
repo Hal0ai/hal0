@@ -41,15 +41,21 @@ intent = "Generic chat (fallback for unknown models)"
 [profile.agent]
 # The agent workload (ADR-0023 `agent` role; the bundled Hermes agent needs
 # at least 64,000 tokens of context). Deterministic sampling, reasoning off.
-flags = "-fa auto -b 2048 -ub 512 --reasoning off --reasoning-budget -1 --no-context-shift --temp 0 --top-p 0.95 --top-k 20 --seed 123"
+# --parallel 1: without it llama-server runs `-np auto` (4 sequences sharing
+# one unified KV pool), and one combined overflow 500s every in-flight
+# request on the slot (#2692).
+flags = "-fa auto -b 2048 -ub 512 --parallel 1 --reasoning off --reasoning-budget -1 --no-context-shift --temp 0 --top-p 0.95 --top-k 20 --seed 123"
 ctx_size = 65536
 vision = "off"
 intent = "Agent workload (bundled agent) · 64K ctx"
 
 [profile.utility]
 # The utility workload (ADR-0023 `utility` role): generic chat flags with the
-# 64K window hal0 ships for the utility slot.
-flags = "-fa auto -b 2048 -ub 512"
+# 64K window hal0 ships for the utility slot. --parallel 1 makes the slot's
+# capacity deterministic: the default `-np auto` shares ONE 65536-cell KV
+# pool across 4 sequences, so an overflow fails every co-tenant (Hindsight,
+# Hermes, brain) with HTTP 500 "Context size has been exceeded" (#2692).
+flags = "-fa auto -b 2048 -ub 512 --parallel 1"
 ctx_size = 65536
 intent = "Utility workload · 64K ctx"
 

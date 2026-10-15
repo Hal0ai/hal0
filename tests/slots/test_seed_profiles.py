@@ -41,8 +41,10 @@ SLOT_HARDWARE_FLAG_FRAGMENTS = (
     "--split-mode",
     "-ngld",
 )
+# ``--parallel`` is deliberately absent: ADR-0029 places it in the profile's
+# free-text ``flags`` (the slot's own ``parallel`` key is inert), and the
+# shared-service seeds pin ``--parallel 1`` on purpose (#2692).
 OPERATIONAL_FLAG_FRAGMENTS = (
-    "--parallel",
     "--metrics",
     "--no-webui",
     "--poll",
