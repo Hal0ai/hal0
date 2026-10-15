@@ -58,6 +58,7 @@ applying. Add those subsections to a version's section to surface them; see
   `voice.stt` selection whose provider has no runtime profile now fails with
   `capability.no_engine_for_provider` instead of being rebound to the Moonshine
   runner (#2691).
+- **normalize:** a `/v1` request carrying `response_format` (json_object/json_schema) or a llama.cpp `grammar`/`json_schema` now gets the default `chat_template_kwargs.enable_thinking=false` like any other request, so a Qwen3-family thinking-by-default model on the Hindsight extraction slot no longer spends the whole completion budget reasoning and returns 0 facts on every retain. The #2020 exemption now applies only to a model whose registry `chat_template` is `hal0-brain-sft`, and a profile's explicit `enable_thinking = false` is honoured on grammar requests on every template (#2713).
 - **slots:** healing a type-less slot TOML no longer stamps `type = "llm"` on a rerank/embed/tts slot: the type now follows the profile, then the slot name. The output-sanity gate also skips an `llm`-typed slot whose profile or launch flags carry `--reranking`/`--embedding`, and `hal0 doctor profiles --fix` rewrites an already-healed `type = "llm"` on a non-chat profile; the failure message now names that remedy (#2693).
 - **updater:** a slot whose model the runner-system conversion unassigned (a
   ROCmFPX/ROCmFP4/IU4/ActiveFPX quant no runner can load, ADR-0028 §7) is now

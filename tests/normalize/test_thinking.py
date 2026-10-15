@@ -1,4 +1,6 @@
-from hal0.normalize.thinking import apply_thinking_policy
+import pytest
+
+from hal0.normalize.thinking import apply_thinking_policy, template_collides_with_grammar
 
 
 def test_injects_chat_template_kwargs_enable_thinking_false_by_default():
@@ -96,38 +98,57 @@ def test_does_not_mutate_input():
     assert src2 == {"enable_thinking": False}
 
 
-# --- #2020: structured output must not get an unrequested suppression kwarg ---
+# --- #2020 / #2713: the grammar exemption is scoped to the colliding template ---
 #
 # The seeded hal0-brain-sft template emits a literal `<think>\n\n</think>` block
 # when `enable_thinking is false`; combined with a json_object/json_schema
 # grammar llama-server b109 throws "Failed to initialize samplers" and hard-400s.
-# A caller that never asked for reasoning suppression must not be given it.
+# On THAT template (grammar_collides=True) a caller that never asked for
+# reasoning suppression must not be given it. Every other template gets the
+# normal default suppression (#2713: Qwen3-family reasoning otherwise eats the
+# whole completion budget and structured output never arrives).
+
+_GRAMMAR_BODIES = [
+    {"model": "m", "messages": [], "response_format": {"type": "json_object"}},
+    {
+        "model": "m",
+        "response_format": {"type": "json_schema", "json_schema": {"name": "x", "schema": {}}},
+    },
+    {"model": "m", "grammar": 'root ::= "a"'},
+    {"model": "m", "json_schema": {"type": "object"}},
+]
 
 
-def test_json_object_response_format_skips_default_suppression():
-    body = {"model": "m", "messages": [], "response_format": {"type": "json_object"}}
-    out = apply_thinking_policy(body)
+@pytest.mark.parametrize("body", _GRAMMAR_BODIES)
+def test_colliding_template_grammar_skips_default_suppression(body):
+    out = apply_thinking_policy(body, grammar_collides=True)
     assert "chat_template_kwargs" not in out
     assert out == body
 
 
-def test_json_schema_response_format_skips_default_suppression():
-    body = {
-        "model": "m",
-        "response_format": {"type": "json_schema", "json_schema": {"name": "x", "schema": {}}},
-    }
+@pytest.mark.parametrize("body", _GRAMMAR_BODIES)
+def test_non_colliding_template_grammar_gets_default_suppression(body):
+    # #2713: a Qwen3-family template (anything not known to collide) is
+    # suppressed under a grammar exactly as without one.
     out = apply_thinking_policy(body)
-    assert "chat_template_kwargs" not in out
+    assert out["chat_template_kwargs"]["enable_thinking"] is False
 
 
-def test_llamacpp_grammar_skips_default_suppression():
-    out = apply_thinking_policy({"model": "m", "grammar": 'root ::= "a"'})
-    assert "chat_template_kwargs" not in out
+@pytest.mark.parametrize("body", _GRAMMAR_BODIES)
+def test_explicit_operator_off_honoured_on_colliding_template(body):
+    # #2713: a profile `enable_thinking = false` is the operator's explicit
+    # choice; it is applied even on the colliding template (a loud 400 beats a
+    # silent zero-fact retain).
+    out = apply_thinking_policy(body, default_thinking=False, grammar_collides=True)
+    assert out["chat_template_kwargs"]["enable_thinking"] is False
 
 
-def test_llamacpp_top_level_json_schema_skips_default_suppression():
-    out = apply_thinking_policy({"model": "m", "json_schema": {"type": "object"}})
-    assert "chat_template_kwargs" not in out
+def test_template_collides_with_grammar():
+    assert template_collides_with_grammar("hal0-brain-sft") is True
+    assert template_collides_with_grammar("qwen3.6-27b-mtp") is False
+    assert template_collides_with_grammar("chatml") is False
+    assert template_collides_with_grammar(None) is False
+    assert template_collides_with_grammar("") is False
 
 
 def test_text_response_format_still_suppressed():
@@ -144,10 +165,11 @@ def test_structured_output_respects_explicit_caller_suppression():
         "response_format": {"type": "json_object"},
         "chat_template_kwargs": {"enable_thinking": False},
     }
-    assert apply_thinking_policy(body) == body
+    assert apply_thinking_policy(body, grammar_collides=True) == body
 
     out = apply_thinking_policy(
-        {"model": "m", "response_format": {"type": "json_object"}, "enable_thinking": False}
+        {"model": "m", "response_format": {"type": "json_object"}, "enable_thinking": False},
+        grammar_collides=True,
     )
     assert out["chat_template_kwargs"]["enable_thinking"] is False
 
@@ -156,14 +178,18 @@ def test_structured_output_still_honours_thinking_default_true():
     # enable_thinking=true is grammar-compatible (verified live on the seeded
     # model), so a slot/model default of ON is still applied under json mode.
     out = apply_thinking_policy(
-        {"model": "m", "response_format": {"type": "json_object"}}, default_thinking=True
+        {"model": "m", "response_format": {"type": "json_object"}},
+        default_thinking=True,
+        grammar_collides=True,
     )
     assert out["chat_template_kwargs"]["enable_thinking"] is True
 
 
 def test_structured_output_policy_is_idempotent():
-    once = apply_thinking_policy({"model": "m", "response_format": {"type": "json_object"}})
-    assert apply_thinking_policy(once) == once
+    body = {"model": "m", "response_format": {"type": "json_object"}}
+    for collides in (True, False):
+        once = apply_thinking_policy(body, grammar_collides=collides)
+        assert apply_thinking_policy(once, grammar_collides=collides) == once
 
 
 def test_malformed_response_format_falls_back_to_default():
