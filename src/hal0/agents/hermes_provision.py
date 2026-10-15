@@ -6728,7 +6728,7 @@ def _no_proxy_env_lines(body: str | None) -> list[str]:
     ]
 
 
-def _driver_env_no_proxy(exposed: list[str] | None = None) -> str:
+def _driver_env_no_proxy(exposed: list[str] | None = None) -> str | None:
     """The ``NO_PROXY`` value for the driver env (#2330).
 
     Hermes's MCP client is an ``httpx.AsyncClient`` with the default
@@ -6767,11 +6767,12 @@ def _driver_env_no_proxy(exposed: list[str] | None = None) -> str:
             from hal0.mcp.installed import exposed_loopback_hosts
 
             exposed = exposed_loopback_hosts()
-        except Exception as exc:  # never fail the env write over the MCP registry
+        except Exception as exc:
             log.warning("hermes_provision.driver_env_mcp_hosts_failed", error=str(exc))
             # Signalled, not degraded to an empty list: a recomputed value here
-            # would silently drop the exclusions surviving local connections
-            # still need (#2534 review). The caller keeps the previous policy.
+            # could drop the exclusions surviving local connections still need
+            # (#2534 review). The caller keeps the previous policy or fails
+            # closed — a reduced value is never committed sight-unseen.
             return None
     # Only host, IP, CIDR, `*` and leading-dot entries reach the file: the
     # value lands unquoted in a systemd EnvironmentFile, where a stray quote
@@ -7029,7 +7030,24 @@ def _phase_install_artifacts(ctx: _StepCtx) -> PhaseResult:
     # are euid-aware: root writes directly (re-pinning root:root), a hal0-run
     # provisioner delegates the write to `sudo -n hal0-agentenv`.
     seed_path, seed_wrote = _write_seed_toml(state, repair=repair)
-    env_path, env_wrote = _write_driver_env(state)
+    try:
+        env_path, env_wrote = _write_driver_env(state)
+    except DriverEnvPolicyUnknown as exc:
+        # Fail the step, not the pipeline with a raw traceback: the reason is
+        # actionable and a rerun converges once the registry is readable
+        # (#2602 review). The seed write above is unaffected.
+        log.warning("hermes_provision.install_artifacts_policy_unknown", error=str(exc))
+        return PhaseResult(
+            status=PhaseStatus.FAIL,
+            reason=(
+                f"driver env not written: {exc} — fix the MCP registry, then "
+                "rerun `hal0 agent bootstrap hermes --repair`"
+            ),
+            details={
+                "seed_path": str(seed_path),
+                "seed_wrote": seed_wrote,
+            },
+        )
 
     return PhaseResult(
         status=PhaseStatus.OK,
