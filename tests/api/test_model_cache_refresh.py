@@ -216,3 +216,51 @@ async def test_fetch_exception_does_not_kill_refresher() -> None:
         task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await task
+
+
+@pytest.mark.asyncio
+async def test_cancel_swallowed_inside_fetch_still_stops_refresher() -> None:
+    """#2727: a cancel swallowed by the fetch must not park the loop on ``q.get()``.
+
+    On hal0-api stop, uvicorn cancels the in-flight chat, the slot flips
+    serving -> ready, and the lifespan cancels this task while it is inside
+    the ``/v1/models`` GET. httpx/httpcore can finish that GET normally and
+    drop the ``CancelledError`` (seen on a live box: ``cancelling()`` still 1
+    after the fetch returned), so the loop went back to ``q.get()`` and the
+    lifespan's ``await`` on the task never resolved.
+    """
+    bus = EventBus()
+    primary = _make_slot("primary")
+    upstreams = FakeUpstreamRegistry([primary])
+    entered = asyncio.Event()
+
+    async def fetch_and_cache(u: Upstream) -> list[str]:
+        entered.set()
+        try:
+            await asyncio.sleep(30)
+        except asyncio.CancelledError:
+            return []  # swallowed, like the library does
+        return []
+
+    task = asyncio.create_task(
+        _refresh_model_cache_on_ready(bus, upstreams, FakeSlotManager(), fetch_and_cache, {})
+    )
+    try:
+        await asyncio.sleep(0)
+        await bus.emit(
+            "slot.state",
+            "info",
+            "slot:primary",
+            "primary: serving → ready",
+            data={"slot": "primary", "from": "serving", "to": "ready"},
+        )
+        await asyncio.wait_for(entered.wait(), timeout=1.0)
+        task.cancel()
+        done, _ = await asyncio.wait({task}, timeout=1.0)
+        assert task in done, "refresher ignored a swallowed cancel and kept waiting"
+        assert task.cancelled()
+    finally:
+        if not task.done():
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task

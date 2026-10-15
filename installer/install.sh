@@ -1866,6 +1866,12 @@ EnvironmentFile=-${HF_SECRETS_ENV}
 ExecStart=${HAL0_BIN} serve --port \${HAL0_PORT}
 Restart=on-failure
 RestartSec=3
+# Stop budget (#2727): uvicorn drains requests for up to 20 s
+# (timeout_graceful_shutdown), then each lifespan teardown step is bounded
+# at 3 s, so a normal stop takes ~21 s and one hung step adds 3 s. Past 30 s
+# something is badly wrong, and systemd's 90 s default only stretched the
+# API outage before the same SIGKILL.
+TimeoutStopSec=30
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=hal0-api

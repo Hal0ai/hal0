@@ -769,6 +769,19 @@ def _flm_multiplex_tags(cfg: dict[str, Any]) -> list[str]:
     return tags
 
 
+def _raise_if_cancel_requested() -> None:
+    """Raise ``CancelledError`` if the current task has a pending cancel.
+
+    For long-lived loops that call into libraries which may swallow a
+    ``CancelledError`` and return normally. The swallowed cancel still
+    shows up in ``Task.cancelling()``, so a loop that checks it before
+    its next wait stops instead of waiting forever (#2727).
+    """
+    task = asyncio.current_task()
+    if task is not None and task.cancelling():
+        raise asyncio.CancelledError
+
+
 async def _refresh_model_cache_on_ready(
     event_bus: EventBus,
     upstreams: UpstreamRegistry,
@@ -784,9 +797,18 @@ async def _refresh_model_cache_on_ready(
     ``/v1/chat/completions`` to whichever slot last advertised that filename.
     SlotManager already emits ``slot.state`` events; subscribing here keeps
     the cache aligned without coupling the manager to app state.
+
+    Cancellation is re-checked before every wait (#2727). On shutdown,
+    uvicorn's cancel of an in-flight chat flips its slot serving -> ready,
+    so this task is usually inside the ``fetch_and_cache`` HTTP GET when
+    the lifespan cancels it. httpx/httpcore can complete that GET normally
+    and drop the ``CancelledError``, leaving only ``Task.cancelling()``
+    set. Without this check the loop went back to ``q.get()`` and waited
+    forever, and ``systemctl stop hal0-api`` hung until systemd's SIGKILL.
     """
     async with event_bus.subscribe() as q:
         while True:
+            _raise_if_cancel_requested()
             event = await q.get()
             if event.get("type") != "slot.state":
                 continue
@@ -2409,6 +2431,52 @@ async def _boot_brain_lane(
     return tuple(failed)
 
 
+#: Bound on each shutdown step in the lifespan teardown (#2727). uvicorn
+#: has already spent up to ``timeout_graceful_shutdown`` (20 s) draining
+#: requests by the time these run, and hal0-api.service gives the whole
+#: stop ``TimeoutStopSec=30``.
+_SHUTDOWN_STEP_TIMEOUT_S = 3.0
+
+
+def _bounded_shutdown_step(
+    name: str,
+    step: Callable[[], Awaitable[Any]],
+    *,
+    timeout_s: float | None = None,
+) -> Callable[[], Awaitable[None]]:
+    """Wrap a teardown callback so it can never stall the lifespan unwind.
+
+    The step runs as its own task and is waited on for at most
+    ``timeout_s``. A step still running then is cancelled and NOT awaited
+    again: ``asyncio.wait_for`` would wait for the cancellation to finish,
+    which is exactly what never happens when something in the step swallows
+    ``CancelledError`` (#2727). A step that raises is logged, not
+    propagated, so the remaining steps, ``hal0.api.shutdown`` and uvicorn's
+    "Application shutdown complete." always run.
+    """
+
+    async def _run() -> None:
+        bound = _SHUTDOWN_STEP_TIMEOUT_S if timeout_s is None else timeout_s
+        task = asyncio.ensure_future(step())
+        try:
+            done, _ = await asyncio.wait({task}, timeout=bound)
+        except asyncio.CancelledError:
+            task.cancel()
+            raise
+        if not done:
+            task.cancel()
+            log.warning("hal0.api.shutdown_step_timed_out", step=name, timeout_s=bound)
+            return
+        if task.cancelled():
+            log.warning("hal0.api.shutdown_step_cancelled", step=name)
+            return
+        exc = task.exception()
+        if exc is not None:
+            log.warning("hal0.api.shutdown_step_failed", step=name, error=repr(exc))
+
+    return _run
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Application boot/shutdown, decomposed into named, ordered boot phases.
@@ -2462,13 +2530,20 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         async with AsyncExitStack() as stack:
             for mgr in ctx.managers:
                 await stack.enter_async_context(mgr.run())
-            stack.push_async_callback(ctx.stop_refresh_task)
-            stack.push_async_callback(ctx.stop_gpu_arbiter_idle_loop)
-            stack.push_async_callback(ctx.stop_image_drift_task)
-            stack.push_async_callback(ctx.stop_runner_catalogue_sync_task)
-            stack.push_async_callback(ctx.stop_memory_reprobe_task)
+            # Each teardown callback is bounded (#2727): one that never
+            # returns must not hold the unwind until systemd's SIGKILL.
+            for name, stop in (
+                ("refresh_task", ctx.stop_refresh_task),
+                ("gpu_arbiter_idle_loop", ctx.stop_gpu_arbiter_idle_loop),
+                ("image_drift_task", ctx.stop_image_drift_task),
+                ("runner_catalogue_sync_task", ctx.stop_runner_catalogue_sync_task),
+                ("memory_reprobe_task", ctx.stop_memory_reprobe_task),
+            ):
+                stack.push_async_callback(_bounded_shutdown_step(name, stop))
             ctx.metrics_service.start()
-            stack.push_async_callback(ctx.metrics_service.stop)
+            stack.push_async_callback(
+                _bounded_shutdown_step("metrics_service", ctx.metrics_service.stop)
+            )
             yield
     finally:
         # First — issue #1225: cancel any in-flight model pull before doing
@@ -2483,8 +2558,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         if ctx.omni_router_client is not None:
             with contextlib.suppress(Exception):
                 await ctx.omni_router_client.aclose()
-        await ctx.slot_manager.stop_idle_monitor()
-        await ctx.dispatcher.aclose()
+        await _bounded_shutdown_step("slot_idle_monitor", ctx.slot_manager.stop_idle_monitor)()
+        await _bounded_shutdown_step("dispatcher", ctx.dispatcher.aclose)()
         with contextlib.suppress(Exception):
             await comfyui.aclose_client()
         log.info("hal0.api.shutdown")
