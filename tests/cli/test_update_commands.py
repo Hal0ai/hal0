@@ -1425,3 +1425,117 @@ def test_restart_slots_flag_does_not_name_render_error_slot(
     assert posted["/api/updates/restart-slots"] == {"slots": ["chat"]}
     assert "brain" in result.output
     assert "context_size" in result.output
+
+
+# ── #2661: rollback POST must outlive the server's synchronous pip reinstall ──
+
+
+class _SlowRollbackServer:
+    """Loopback stub answering ``POST /api/updates/rollback`` after ``delay_s``.
+
+    Mirrors the real route: it holds the request open while the prior tree is
+    re-pip'd, then answers with the real response shape.
+    """
+
+    def __init__(self, delay_s: float) -> None:
+        import json as _json
+        import threading
+        import time
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+        payload = _json.dumps(_ROLLBACK_BODY).encode()
+        self.hits = 0
+        outer = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self) -> None:
+                outer.hits += 1
+                time.sleep(delay_s)
+                try:
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(payload)))
+                    self.end_headers()
+                    self.wfile.write(payload)
+                except OSError:
+                    pass  # client gave up first
+
+            def log_message(self, *args: object) -> None:
+                pass
+
+        self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.httpd.daemon_threads = True
+        self.url = f"http://127.0.0.1:{self.httpd.server_address[1]}"
+        threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
+
+    def close(self) -> None:
+        self.httpd.shutdown()
+        self.httpd.server_close()
+
+
+@pytest.fixture
+def slow_rollback(monkeypatch: pytest.MonkeyPatch):
+    servers: list[_SlowRollbackServer] = []
+
+    def make(delay_s: float) -> _SlowRollbackServer:
+        srv = _SlowRollbackServer(delay_s)
+        servers.append(srv)
+        monkeypatch.setenv("HAL0_API_URL", srv.url)
+        monkeypatch.setattr(uc, "_api_unreachable", lambda url: False)
+        monkeypatch.setattr(uc, "_interactive", lambda: False)
+        return srv
+
+    yield make
+    for s in servers:
+        s.close()
+
+
+def test_rollback_post_budget_covers_a_slow_reinstall() -> None:
+    """The budget must clear the 13 s reinstall seen on a 32-core box (#2661)
+    with real headroom for slower hardware, not api_post's 10 s default."""
+    assert uc._ROLLBACK_TIMEOUT_S >= 120
+
+
+def test_rollback_waits_for_slow_server_and_renders_result(
+    monkeypatch: pytest.MonkeyPatch, slow_rollback
+) -> None:
+    """A server that answers after the old 10 s default would have expired
+    still gets its result rendered. The old default is simulated by scaling:
+    the stub answers in 1.5 s against a 0.5 s api_post default."""
+    import hal0.cli._shared as shared
+
+    real_post = shared.api_post
+    seen: list[float] = []
+
+    def post_with_small_default(path: str, *, timeout: float = 0.5, **kw: object):
+        seen.append(timeout)
+        return real_post(path, timeout=timeout, **kw)
+
+    monkeypatch.setattr(uc, "api_post", post_with_small_default)
+    monkeypatch.setattr(uc, "_ROLLBACK_TIMEOUT_S", 10.0)
+    slow_rollback(1.5)
+    result = runner.invoke(app, ["update", "--rollback", "--yes"])
+    assert result.exit_code == 0, result.output
+    assert seen == [10.0]
+    assert "rolled back" in result.output
+    assert "1.1.0" in result.output
+    assert "systemctl restart hal0-api" in result.output
+
+
+def test_rollback_timeout_warns_server_may_still_be_rolling_back(
+    monkeypatch: pytest.MonkeyPatch, slow_rollback
+) -> None:
+    """Past the bound: exit non-zero and say the rollback may have finished,
+    how to check, and that a second --rollback would flip back (#2661)."""
+    monkeypatch.setattr(uc, "_ROLLBACK_TIMEOUT_S", 0.3)
+    srv = slow_rollback(1.5)
+    result = runner.invoke(app, ["update", "--rollback", "--yes"])
+    assert result.exit_code == 1, result.output
+    out = " ".join(result.output.split())
+    assert "did not respond within" in out
+    assert "may still be rolling back" in out
+    assert "hal0 update --check" in out
+    assert "journalctl -u hal0-api" in out
+    assert "current/VERSION" in out
+    assert "flip back" in out
+    assert srv.hits == 1
