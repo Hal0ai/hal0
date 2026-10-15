@@ -88,6 +88,8 @@ class FakeContainerProvider:
         # answers True only on POSITIVE evidence, so existing tests keep the
         # "no evidence, nothing converges" behaviour.
         self.stopped_cleanly: set[str] = set()
+        # #2738 — slots whose unit was torn down to completion (quadlet gone).
+        self.removed_cleanly: set[str] = set()
         # #1922 — the fake slot server's completion output. "Paris" is the
         # right answer to the gate's prompt, so the default double models a
         # box whose model actually works, exactly as ``healthy = True`` models
@@ -130,6 +132,10 @@ class FakeContainerProvider:
     def unit_stopped_cleanly(self, slot: Any) -> bool:
         """Mirror ``ContainerProvider.unit_stopped_cleanly`` (#2130)."""
         return probe_slot_name(slot) in self.stopped_cleanly
+
+    def unit_removed_cleanly(self, slot: Any) -> bool:
+        """Mirror ``ContainerProvider.unit_removed_cleanly`` (#2738)."""
+        return probe_slot_name(slot) in self.removed_cleanly
 
     async def health(self, port: int, slot_cfg: dict[str, Any] | None = None) -> dict[str, Any]:
         # Mirrors ContainerProvider.health's (port, slot_cfg) signature —

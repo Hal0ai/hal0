@@ -31,6 +31,7 @@ import contextlib
 import copy
 import logging
 import time
+import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -294,6 +295,9 @@ class Slot:
 # ── Manager ──────────────────────────────────────────────────────────────────
 
 
+_SLOW_STOP_CONVERGED_MESSAGE = "stop took longer than the terminate budget; converged to offline (auto-reloads on next request)"
+
+
 class SlotManager:
     """Manages the lifecycle of all hal0 inference slots.
 
@@ -422,6 +426,8 @@ class SlotManager:
         # presence is the "adopted, not cold-loading" marker: only adoption
         # starts one, and any later transition cancels it.
         self._adopt_promoters: dict[int, asyncio.Task[None]] = {}
+        # #2738 — background finishers for stops that outlived the budget.
+        self._slow_stop_tasks: set[asyncio.Task[None]] = set()
         # Push-driven failure detector (P3-slots §1b-watchdog) — see watchdog.py.
         self._watchdog: SlotWatchdog = SlotWatchdog(self)
         # PULLING — optional model-pull hook + cache predicate.  When
@@ -1313,6 +1319,10 @@ class SlotManager:
         carried_extra: dict[str, Any] = dict(prior.extra) if prior else {}
         if extra:
             carried_extra.update(extra)
+        if not (extra and extra.get("slow_stop")):
+            # #2738: the slow-stop mark belongs to the one ERROR that stamped
+            # it; any other transition (including a different ERROR) retires it.
+            carried_extra.pop("slow_stop", None)
         if to_state in (SlotState.READY, SlotState.IDLE):
             # Converged healthy — clear the crash-loop breaker and its
             # carried extras. Covers load() success AND out-of-band
@@ -1578,6 +1588,31 @@ class SlotManager:
         except Exception as exc:
             log.warning(
                 "slot.unit_stopped_cleanly_probe_failed",
+                extra={"slot": slot_name, "error": str(exc)},
+            )
+            return False
+        return verdict is True
+
+    async def _unit_removed_cleanly(self, slot_name: str) -> bool:
+        """POSITIVE evidence a teardown ran to completion (#2738).
+
+        Same strictness as :meth:`_unit_stopped_cleanly`: anything
+        inconclusive answers ``False``.
+        """
+        cfg = await self._maybe_load_config(slot_name)
+        if cfg is None or is_npu_trio_shadow(cfg):
+            return False
+
+        from hal0.providers.container import container_provider
+
+        probe = getattr(container_provider(), "unit_removed_cleanly", None)
+        if probe is None:
+            return False
+        try:
+            verdict = await asyncio.get_event_loop().run_in_executor(None, probe, _cfg_to_dict(cfg))
+        except Exception as exc:
+            log.warning(
+                "slot.unit_removed_cleanly_probe_failed",
                 extra={"slot": slot_name, "error": str(exc)},
             )
             return False
@@ -2063,15 +2098,61 @@ class SlotManager:
                 await self.terminate(slot_name)
                 await self._transition(slot_name, SlotState.OFFLINE, force=True)
             except Exception as exc:
+                pending = getattr(exc, "pending", None)
+                slow = isinstance(exc, SlotTerminateTimeout) and pending is not None
+                token = uuid.uuid4().hex
                 await self._transition(
                     slot_name,
                     SlotState.ERROR,
                     message=str(exc),
+                    # #2738: the stop outlived the budget but is still running.
+                    # The ERROR is provisional — mark it so the teardown's
+                    # completion (below, or ``status()`` after an api restart)
+                    # can retire it instead of leaving it sticky.
+                    extra={"slow_stop": token} if slow else None,
                     force=True,
                 )
+                if slow:
+                    self._watch_slow_stop(slot_name, pending, token)
                 raise
             self._last_used.pop(self._key(slot_name), None)
             return await self.status(slot_name)
+
+    def _watch_slow_stop(self, slot_name: str, pending: Any, token: str) -> None:
+        """Retire a provisional ``slow_stop`` ERROR once the teardown lands (#2738).
+
+        ``terminate()`` abandoned its wait on the executor stop, but the stop
+        itself kept going. When it finishes cleanly the slot is simply
+        OFFLINE; stamping the budget error as final left it sticky (the
+        quadlet is gone, so the #2130 convergence could never fire) and, after
+        an api restart, made ``_wake_capability_slot`` skip it. The breadcrumb
+        keeps the slow stop visible once. A stop that fails leaves the ERROR.
+        """
+
+        async def _finish() -> None:
+            try:
+                await asyncio.shield(pending)
+            except Exception:
+                return
+            async with self._lock(slot_name):
+                rec = self._states.get(self._key(slot_name))
+                if (
+                    rec is None
+                    or rec.state != SlotState.ERROR
+                    or rec.extra.get("slow_stop") != token
+                ):
+                    return
+                await self._transition(
+                    slot_name,
+                    SlotState.OFFLINE,
+                    message=_SLOW_STOP_CONVERGED_MESSAGE,
+                    extra={"slow_stop": False},
+                    force=True,
+                )
+
+        task = asyncio.get_event_loop().create_task(_finish())
+        self._slow_stop_tasks.add(task)
+        task.add_done_callback(self._slow_stop_tasks.discard)
 
     async def restart(self, slot_name: str) -> Slot:
         """Restart a slot without changing its model assignment.
@@ -2302,13 +2383,33 @@ class SlotManager:
             # (the output-sanity teardown), or an inconclusive probe all keep
             # the ERROR — so genuine crash verdicts, the breaker bookkeeping,
             # and `last_crash_line` evidence are never retired by drift.
+            slow_stop = bool(rec.extra.get("slow_stop"))
             if await self._unit_stopped_cleanly(slot_name):
                 await self._transition(
                     slot_name,
                     SlotState.OFFLINE,
-                    message="container stopped (auto-reloads on next request)",
+                    message=_SLOW_STOP_CONVERGED_MESSAGE
+                    if slow_stop
+                    else "container stopped (auto-reloads on next request)",
+                    extra={"slow_stop": False} if slow_stop else None,
                     force=True,
                 )
+                observed = SlotState.OFFLINE
+                rec = self._states.get(self._key(slot_name)) or rec
+            elif slow_stop and await self._unit_removed_cleanly(slot_name):
+                # #2738: our own stop-budget ERROR, and the teardown it
+                # abandoned has since finished (unit file removed, Result=
+                # success). Only an ERROR carrying the ``slow_stop`` mark may
+                # converge on a removed unit — the output-sanity teardown
+                # leaves the same unit shape but a real verdict to keep.
+                await self._transition(
+                    slot_name,
+                    SlotState.OFFLINE,
+                    message=_SLOW_STOP_CONVERGED_MESSAGE,
+                    extra={"slow_stop": False},
+                    force=True,
+                )
+                self._deregister_container_upstream(slot_name)
                 observed = SlotState.OFFLINE
                 rec = self._states.get(self._key(slot_name)) or rec
         elif observed in (SlotState.OFFLINE, SlotState.ERROR) and active:
@@ -2681,9 +2782,22 @@ class SlotManager:
                 "slot.terminate_timeout",
                 extra={"slot": slot_name, "timeout_s": budget},
             )
-            raise SlotTerminateTimeout(
+
+            # #2738: the teardown keeps running in the executor. When it
+            # finishes, deregister the upstream here so a late success leaves
+            # the same registry a prompt one would — no reliance on a stale
+            # registration masking the slot until the next api restart.
+            def _late_deregister(fut: asyncio.Future[Any]) -> None:
+                if fut.cancelled() or fut.exception() is not None:
+                    return
+                self._deregister_container_upstream(slot_name)
+
+            stop.add_done_callback(_late_deregister)
+            timeout_exc = SlotTerminateTimeout(
                 f"stopping slot {slot_name!r} did not return within {budget}s"
-            ) from exc
+            )
+            timeout_exc.pending = stop  # type: ignore[attr-defined]
+            raise timeout_exc from exc
         self._deregister_container_upstream(slot_name)
 
     # ── slot CRUD ────────────────────────────────────────────────────────────

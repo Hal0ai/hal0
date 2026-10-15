@@ -23,6 +23,7 @@ upstream protocol.
 from __future__ import annotations
 
 import base64
+import contextlib
 import json
 import re
 import time
@@ -725,6 +726,13 @@ async def _wake_capability_slot(request: Request) -> None:
     # is handled by the dispatcher's readiness gate.
     from hal0.slots.state import SlotState
 
+    if slot_manager.state(slot_name) is SlotState.ERROR:
+        # #2738: a cached ERROR may be a teardown that has since finished
+        # (a stop that outlived its budget, persisted across an api
+        # restart). ``status()`` runs the convergence that retires it; a real
+        # ERROR stays ERROR and is skipped below as before.
+        with contextlib.suppress(Exception):
+            await slot_manager.status(slot_name)
     if slot_manager.state(slot_name) is not SlotState.OFFLINE:
         return
     # Mirror the chat branch: NEVER lazy-load onto the GPU against the

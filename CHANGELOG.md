@@ -51,6 +51,7 @@ applying. Add those subsections to a version's section to surface them; see
   at least one of its selections is enabled, so the "none active" warning and its
   enable next step are reachable again (#2736).
 
+- A slot unload whose stop outlives the 30 s terminate budget now converges to `offline` once the teardown finishes (with a one-time "converged to offline" message) instead of sticking in `error`; the upstream is deregistered when the late teardown lands, and `_wake_capability_slot` runs the convergence so capability requests auto-load the slot after an api restart instead of 404ing `dispatch.no_route` (#2738).
 - **slots:** a stopped slot whose state record kept a stale `model_id` no
   longer claims it is "still serving" a model after its `[model].default` was
   emptied; the "still serving" wording is now only used while the slot is live
