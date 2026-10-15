@@ -50,12 +50,17 @@ def test_rerank_suggestions_returned():
     assert all(s.capability == "rerank" for s in out)
 
 
-def test_stt_suggestions_use_stt_capability():
-    # _CAP_MATCH["stt"] must map to the curated "stt" capability (not "asr"),
-    # otherwise suggest_models returns nothing for speech.
-    out = suggest_models("stt", _hw(96), limit=3)
-    assert out, "expected curated stt picks"
-    assert all(s.capability == "stt" for s in out)
+def test_stt_suggestions_are_empty_without_a_curated_runtime():
+    # _CAP_MATCH["stt"] maps to the curated "stt" capability (not "asr"). No
+    # installable curated STT row exists any more: the whisper.cpp rows were
+    # dropped (#2691, nothing could serve them), Moonshine weights are
+    # operator-staged by design, and the NPU lane is the FLM trio shadow, not
+    # a pick. An answers-file `stt` slot with model_id "auto" therefore skips
+    # cleanly instead of pulling weights no runtime can load.
+    from hal0.install.suggest import _CAP_MATCH
+
+    assert _CAP_MATCH["stt"] == ("stt",)
+    assert suggest_models("stt", _hw(96), limit=3) == []
 
 
 def test_embed_suggestions_returned():
@@ -64,11 +69,15 @@ def test_embed_suggestions_returned():
 
 
 def test_npu_opt_in_threads_into_advertised_device():
-    # STT is NPU-only. With npu_opt_in=True the picker advertises the NPU lane;
-    # with the default (False) it advertises NO device — the SAME value apply
-    # uses, so the picker never advertises a lane apply_setup would skip (#1109).
+    # The device a suggestion advertises is derive_device's answer for the
+    # SAME npu_opt_in value apply_setup uses, so the picker never advertises
+    # a lane apply_setup would skip (#1109). STT no longer has a curated pick
+    # (#2691), so the lane itself is checked through derive_device and the
+    # suggestion list stays empty either way.
+    from hal0.install.profile_derive import derive_device
+
     hw = _hw(96, npu=True)
-    on = suggest_models("stt", hw, limit=3, npu_opt_in=True)
-    assert on and all(s.device == "npu" and s.profile == "flm" for s in on)
-    off = suggest_models("stt", hw, limit=3)  # default npu_opt_in=False
-    assert off and all(s.device is None and s.profile is None for s in off)
+    assert derive_device("stt", hw, npu_opt_in=True) == "npu"
+    assert derive_device("stt", hw, npu_opt_in=False) is None
+    assert suggest_models("stt", hw, limit=3, npu_opt_in=True) == []
+    assert suggest_models("stt", hw, limit=3) == []
