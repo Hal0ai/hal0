@@ -149,26 +149,82 @@ async def test_the_model_no_longer_picks_the_thinking_default():
     assert out["chat_template_kwargs"]["enable_thinking"] is False
 
 
+class _TemplateRegistry:
+    """Registry stub carrying only the ``chat_template`` model fact."""
+
+    def __init__(self, template):
+        self._template = template
+
+    def get(self, model_id):
+        if model_id != "big":
+            raise KeyError(model_id)
+        return SimpleNamespace(chat_template=self._template)
+
+
+_JSON_BODY = {
+    "model": "hal0/agent",
+    "messages": [{"role": "user", "content": "json please"}],
+    "response_format": {"type": "json_object"},
+}
+
+
+@pytest.fixture
+def no_thinking_profile(monkeypatch):
+    """A ``quiet`` profile with an explicit ``enable_thinking = false``."""
+    from hal0.config.schema import ProfileConfig
+    from hal0.profiles import resolve_loaded_profile
+    from hal0.providers import container
+
+    real = container._resolve_profile
+
+    def _resolve(name):
+        if name == "quiet":
+            return resolve_loaded_profile(name, ProfileConfig(enable_thinking=False))
+        return real(name)
+
+    monkeypatch.setattr("hal0.providers.container._resolve_profile", _resolve)
+
+
 @pytest.mark.asyncio
-async def test_json_mode_request_leaves_route_without_injected_suppression():
-    """#2020: a json_object body must reach the dispatcher WITHOUT an
-    unrequested ``enable_thinking: false`` — that kwarg plus a JSON grammar
-    hard-400s ("Failed to initialize samplers") on Qwen3-templated models."""
+async def test_json_mode_on_brain_sft_template_leaves_route_without_injected_suppression():
+    """#2020: on the hal0-brain-sft template a json_object body must reach the
+    dispatcher WITHOUT an unrequested ``enable_thinking: false`` — that kwarg
+    plus a JSON grammar hard-400s ("Failed to initialize samplers")."""
     import json
 
-    req = _make_request(cfgs=_PRIMARY, loaded={"big"})
-    out = await v1._normalize_chat_body(
-        req,
-        {
-            "model": "hal0/agent",
-            "messages": [{"role": "user", "content": "json please"}],
-            "response_format": {"type": "json_object"},
-        },
-    )
+    req = _make_request(cfgs=_PRIMARY, loaded={"big"}, registry=_TemplateRegistry("hal0-brain-sft"))
+    out = await v1._normalize_chat_body(req, dict(_JSON_BODY))
     assert out["model"] == "big"
     assert "chat_template_kwargs" not in out
     # the body the dispatcher re-reads must be clean too
     assert "chat_template_kwargs" not in json.loads(req._body)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("registry", [None, _TemplateRegistry(None), _TemplateRegistry("auto")])
+async def test_json_mode_on_non_colliding_template_gets_default_suppression(registry):
+    """#2713: a Qwen3-family model on its GGUF-embedded template (or any
+    template not known to collide) is suppressed under json mode like any
+    other request; left on, its reasoning eats the completion budget."""
+    import json
+
+    req = _make_request(cfgs=_PRIMARY, loaded={"big"}, registry=registry)
+    out = await v1._normalize_chat_body(req, dict(_JSON_BODY))
+    assert out["chat_template_kwargs"]["enable_thinking"] is False
+    assert json.loads(req._body)["chat_template_kwargs"]["enable_thinking"] is False
+
+
+@pytest.mark.asyncio
+async def test_json_mode_honours_explicit_profile_off_on_brain_sft(no_thinking_profile):
+    """#2713: a profile ``enable_thinking = false`` is the operator's explicit
+    choice and applies to grammar requests even on the colliding template."""
+    req = _make_request(
+        cfgs=[{**_PRIMARY[0], "profile": "quiet"}],
+        loaded={"big"},
+        registry=_TemplateRegistry("hal0-brain-sft"),
+    )
+    out = await v1._normalize_chat_body(req, dict(_JSON_BODY))
+    assert out["chat_template_kwargs"]["enable_thinking"] is False
 
 
 @pytest.mark.asyncio

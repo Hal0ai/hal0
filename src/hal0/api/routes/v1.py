@@ -26,6 +26,7 @@ import base64
 import json
 import re
 import time
+from collections.abc import Mapping
 from typing import Any
 from urllib.parse import urlparse
 
@@ -443,25 +444,27 @@ def _is_remote_model(request: Request, model_id: str) -> bool:
 
 async def _slot_thinking_default(
     request: Request, model_id: str, slot_name: str | None = None
-) -> bool:
+) -> bool | None:
     """The reasoning default for a request: the serving slot's profile (ADR-0029).
 
     The slot is the lane the request pinned (``hal0/<slot>``), else the first
     llm slot bound to ``model_id`` (default slot first). Its profile's
-    ``enable_thinking`` decides; unset, no slot, or an unresolvable profile
-    means off. Always overridable per request via top-level
-    ``enable_thinking`` / ``chat_template_kwargs``.
+    ``enable_thinking`` decides. ``None`` means the operator expressed no
+    preference (unset, no slot, or an unresolvable profile) and the policy's
+    own default (off) applies; an explicit ``False`` is the operator's choice
+    and is honoured even on grammar requests (#2713). Always overridable per
+    request via top-level ``enable_thinking`` / ``chat_template_kwargs``.
     """
     from hal0.errors import Hal0Error
     from hal0.providers.container import resolve_slot_profile
 
     sm = getattr(request.app.state, "slot_manager", None)
     if sm is None:
-        return False
+        return None
     try:
         cfgs = list(await sm.iter_configs())
     except Exception:
-        return False
+        return None
     llm = [c for c in cfgs if isinstance(c, dict) and str(c.get("type") or "llm") == "llm"]
     chosen = None
     if slot_name:
@@ -471,12 +474,43 @@ async def _slot_thinking_default(
         bound.sort(key=lambda c: c.get("default") is not True)
         chosen = bound[0] if bound else None
     if chosen is None:
-        return False
+        return None
     try:
         profile = resolve_slot_profile(chosen)
     except Hal0Error:
+        return None
+    value = getattr(profile, "enable_thinking", None)
+    return value if isinstance(value, bool) else None
+
+
+def _model_grammar_collides(request: Request, model_id: str) -> bool:
+    """True when ``model_id``'s chat template is known to hard-400 when its
+    ``enable_thinking=false`` branch meets a JSON grammar (#2020, #2713).
+
+    The carrier is the registry row's ``chat_template`` fact (ADR-0029: a fact
+    about the model file) — the same fact the launch path turns into
+    ``--chat-template-file`` (``hal0.providers.container``), so it names the
+    template the serving llama-server actually renders. A registry miss, an
+    un-wired registry, or ``auto`` (the GGUF-embedded template) is not known to
+    collide, and the request gets the normal default suppression.
+    """
+    from hal0.config.schema import resolve_chat_template
+    from hal0.normalize.thinking import template_collides_with_grammar
+
+    registry = getattr(request.app.state, "model_registry", None)
+    if registry is None:
         return False
-    return bool(getattr(profile, "enable_thinking", None))
+    try:
+        entry = registry.get(model_id)
+    except Exception:
+        return False
+    if isinstance(entry, Mapping):
+        template = entry.get("chat_template")
+    else:
+        template = getattr(entry, "chat_template", None)
+    if not isinstance(template, str):
+        return False
+    return template_collides_with_grammar(resolve_chat_template({"chat_template": template}))
 
 
 async def _normalize_chat_body(request: Request, body: dict[str, Any]) -> dict[str, Any]:
@@ -539,7 +573,11 @@ async def _normalize_chat_body(request: Request, body: dict[str, Any]) -> dict[s
     model_id = body.get("model")
     if isinstance(model_id, str) and not _is_remote_model(request, model_id):
         default_thinking = await _slot_thinking_default(request, model_id, pinned)
-        body = apply_thinking_policy(body, default_thinking=default_thinking)
+        body = apply_thinking_policy(
+            body,
+            default_thinking=default_thinking,
+            grammar_collides=_model_grammar_collides(request, model_id),
+        )
 
     import contextlib
 
