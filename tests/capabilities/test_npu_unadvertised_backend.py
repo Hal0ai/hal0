@@ -52,14 +52,16 @@ def test_catalog_hides_npu_rows_when_npu_not_advertised(
     monkeypatch: pytest.MonkeyPatch, cap: str
 ) -> None:
     _advertise(monkeypatch, _CPU)
-    assert catalog._flm_rows_for_capability(cap) == []
-    for row in models_for_capability(cap, registry=None):
+    assert catalog._flm_rows_for_capability(cap, host_gated=True) == []
+    # Ungated callers (migrate, apply validation) still see the host rows.
+    assert catalog._flm_rows_for_capability(cap)
+    for row in models_for_capability(cap, registry=None, host_gated=True):
         assert "npu" not in [b["id"] for b in row.get("backends", [])]
 
 
 def test_catalog_keeps_npu_rows_when_npu_advertised(monkeypatch: pytest.MonkeyPatch) -> None:
     _advertise(monkeypatch, _NPU, _CPU)
-    ids = {r["id"] for r in catalog._flm_rows_for_capability("embed")}
+    ids = {r["id"] for r in catalog._flm_rows_for_capability("embed", host_gated=True)}
     assert ids == {"embed-gemma:300m"}
 
 
