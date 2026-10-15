@@ -67,6 +67,13 @@ Speak MCP streamable-HTTP JSON-RPC with curl from the box (`127.0.0.1`), not fro
     field name colliding with the wrapper's own error sentinel, so re-run it on whichever
     status/show tools exist each release, not just the ones this run happened to catch.
 
+12. **tool_details vs tools/list, by name.** Compare the `tool_details` names in `/api/mcp/servers`
+   against the `tools/list` name sets of each server, not only the counts (182 admin + 26 memory on
+   1.4.0).
+13. **Type errors are type errors.** Call a tool with a wrong-typed required arg
+   (`{"args":{"name":123}}`) and assert the error is a type/validation error, not a coercion into
+   `slot.not_found`. Remember args must be wrapped in `args`.
+
 ## Carry-forward
 
 The MCP surface is how other agents consume hal0, so *silent* protocol wrongness here is worse

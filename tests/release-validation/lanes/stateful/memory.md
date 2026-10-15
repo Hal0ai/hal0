@@ -20,12 +20,13 @@ declare `utility` off-limits — say in your report which of the two you got.
    that target ships with a model assigned.
 2. **Baseline inventory.** `hal0 memory status`, `hal0 memory --help`, `GET /api/memory/engine`,
    `/api/memory/banks`, `/api/memory/list`. A fresh box should have zero failed operations.
-   Enumerate the banks you EXPECT on a fresh install (`shared`, and `agents` for the peer
-   registry) and record which exist and when each was created. rc.6 proved the seeding write
+   Enumerate the banks you EXPECT on a fresh install (`shared` only: the `agents` bank was retired by
+   ADR 0005; the agent-identity cards are tagged `agent-identity` inside `shared`) and record which
+   exist and when each was created. rc.6 proved the seeding write
    runs at install boot but can land in the volatile pgvector fallback (hindsight cold start
    outruns the boot probe) and never gets replayed after `provider_healed` — the bank then only
    appears on a later hal0-api restart. Two remedies are both acceptable, so accept EITHER: (a)
-   the durable `agents` bank exists with `created_at` ~= install time (the boot write landed
+   the durable `shared` bank exists with `created_at` ~= install time (the boot write landed
    durably first try), or (b) the durable bank exists, carries the expected identity cards, and
    its `created_at` is <= the timestamp of the first `provider_healed` journal line (the heal
    path replayed the idempotent card publish). Only fail this check if the bank is STILL absent,
@@ -105,6 +106,23 @@ declare `utility` off-limits — say in your report which of the two you got.
     `/config` diverge from the bank root, and `/config` even fabricates default values for a
     bank that 404s one path up). Send a malformed add (wrong field name) — the error should name
     the field, not surface as `system.internal`.
+
+12. **Extraction yield discrimination and the zero-yield signal.** Retain 2-3 differently worded
+   natural multi-sentence paragraphs (not a bare marker) and assert `GET
+   /api/memory/banks/{b}/documents/{doc}.memory_unit_count > 0` for every retain the lane creates,
+   not only that the op is terminal. Grep the hindsight journal for 'dropping this sub-chunk' and
+   report any hit as `warn` (yield variance, `memory-extraction-quality-is-anchor-dependent`) even
+   though the op is `completed`. Read zero-yield from the single-op GET (`nothing_learned`), not
+   from `memory ops list` (`memory-retain-zero-yield-visible-on-op-record-only`).
+13. **Hindsight call-scope audit and recovery.** During consolidation read `curl :<extraction
+   port>/slots | jq '.[].params.n_predict'`: -1 on an extraction slot is the
+   `hindsight-consolidation-uncapped` observation (#2669), record it with the `slow llm call:
+   scope=consolidation` token counts. After any hal0-api restart confirm in-flight retains
+   self-recover (retry_count 1, then completed, no failed ops). Before ending, canary the brain
+   slot: the idle reaper may have evicted it while utility carried all chat.
+14. **Unknown body keys on `/api/memory/add`.** Send `bank_id`, `bank` and a bogus `dataset`:
+   unknown keys are tolerated (200, lands in `shared`), a bogus `dataset` is 400. `known` per
+   `memory-add-ignores-unknown-body-keys`; report only its `still_report_if`.
 
 ## Leave behind
 

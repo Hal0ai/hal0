@@ -16,11 +16,91 @@
 # Do not treat a review-due entry as automatically still valid.
 
 schema: 1
-updated: 2026-08-22
-updated_for: v1.0.0-rc.7
+updated: 2026-10-15
+updated_for: v1.4.0-nightly.20261014214325
 
 known_issues:
   # ── Open defects, already tracked ───────────────────────────────────────────
+
+  - id: profile-centric-blocked-profile-stripped
+    status: open
+    issue: 2648
+    summary: >-
+      A custom profile carrying --mmproj / --chat-template[-file] is reported BLOCKED by the
+      profile-centric conversion but profiles.toml is rewritten without the flag on run 1, and
+      run 2 converts the slot as unchanged, so the slot launches without the projector/template.
+    review_at: v1.4.0
+    review_due: false
+
+  - id: stacks-toml-invalid-after-reverted-row
+    status: open
+    issue: 2649
+    summary: >-
+      After upgrade, a stack row for a slot the conversion blocked keeps `vision = false`
+      (retired key), so stacks.toml fails validation and every /api/stacks call errors until
+      the block clears.
+    review_at: v1.4.0
+    review_due: false
+
+  - id: omni-pin-checked-after-queue-wait
+    status: open
+    issue: 2639
+    summary: >-
+      With image mode pinned and ComfyUI busy, an omni request blocks up to 600 s and then
+      reports gpu.queue_busy instead of pinned; a hanging /queue blocks every image-tool request.
+    review_at: v1.4.0
+    review_due: false
+
+  - id: reset-key-remote-rotates-prints-local
+    status: open
+    issue: 2640
+    summary: >-
+      `hal0 auth reset-key` with HAL0_API_URL set rotates the remote box's key and prints the
+      local api.env key as the new one.
+    review_at: v1.4.0
+    review_due: false
+
+  - id: hermes-primary-pick-ignores-chat-primary
+    status: open
+    issue: 2635
+    summary: >-
+      On a box with no `agent` slot, Hermes's main model is the alphabetically first llm slot
+      while the auxiliary role map still picks `chat`/`primary`. Upgrade regression from #2550.
+    review_at: v1.4.0
+    review_due: false
+
+  - id: boot-drift-restart-bounces-nonllama-busy-slots
+    status: open
+    issue: 2634
+    summary: >-
+      The automatic post-start image-drift restart treats slots without a llama `/metrics`
+      reading (ComfyUI, Kokoro, Qwen3-TTS, Moonshine, FLM, metrics=false, timeouts) as idle and
+      restarts them mid-request.
+    review_at: v1.4.0
+    review_due: false
+
+  - id: shadowed-toml-marks-catalogue-partial
+    status: open
+    issue: 2631
+    summary: >-
+      With a stale same-named slot TOML beside the id-keyed file (e.g. `agent.toml` next to
+      `1.toml`), `/v1/models` never refreshes (degraded read is never cached) and
+      `slot.duplicate_toml` is logged on every enumeration. Regression from #2623 in this
+      nightly. Record as `known`.
+    review_at: v1.4.0
+    review_due: false
+
+  - id: nightly-self-update-loop
+    status: open
+    issue: 2629
+    summary: >-
+      On a nightly build, `hal0 update --check`, the dashboard update badge and
+      `GET /api/updates/check` report `current` as the base version (`1.4.0`) and offer the
+      already-installed nightly as an update. The API route compares against the wheel's
+      `__version__` instead of `installed_version()` (`current/VERSION`). Record as `known`;
+      judge the installed build by `/usr/lib/hal0/current/VERSION` and `release.json`.
+    review_at: v1.4.0
+    review_due: false
 
   - id: slot-logs-empty
     status: open
@@ -93,6 +173,7 @@ known_issues:
       The substitution is NOT disclosed in the response model field, or the journal shows a
       resolution_path with no corresponding loaded slot.
     review_at: v1.1.0
+    review_due: true
 
   - id: model-default-marker-is-per-type-fallback
     status: by-design
@@ -116,6 +197,7 @@ known_issues:
       prefer the servable same-type model carrying the flag); OR a request with no `model` field
       404s on a box where the `agent` slot DOES have a model bound in /etc/hal0/slots/agent.toml.
     review_at: v1.1.0
+    review_due: true
 
   - id: dispatcher-300s-read-timeout
     status: by-design
@@ -138,6 +220,7 @@ known_issues:
       port while hal0-api still fails it. (The MISLABEL — 502 "unreachable" instead of 504 with
       the deadline named — is a separate real defect, filed in rollup #1840.)
     review_at: v1.1.0
+    review_due: true
 
   - id: memory-operations-route-is-bank-scoped
     status: by-design
@@ -157,6 +240,7 @@ known_issues:
       the UI, an error message, or a lane brief tells a user to call a top-level
       /api/memory/operations.
     review_at: v1.1.0
+    review_due: true
 
   # ── Adjudicated by-design: slots ────────────────────────────────────────────
 
@@ -212,6 +296,7 @@ known_issues:
       warming ~6 min total across TWO loads; each load individually respecting the dwell is
       still by-design.
     review_at: v1.1.0
+    review_due: true
 
   - id: cpu-pinned-slot-keeps-ngl-flag
     status: by-design
@@ -236,6 +321,7 @@ known_issues:
       image_pin set; OR llama-server on a CPU-pinned slot logs non-zero offloaded layers. Do NOT
       re-report merely on `-ngl -1` in the argv, nor on the CPU image's tag name.
     review_at: v1.1.0
+    review_due: true
 
   - id: slot-config-endpoint-returns-raw-ceiling
     status: by-design
@@ -253,6 +339,7 @@ known_issues:
       writing it no longer changes the ceiling used by the launch path. (The DETAIL route
       `GET /api/slots/{name}` returning the raw ceiling as `ctx_max` is a real defect — #1835.)
     review_at: v1.1.0
+    review_due: true
 
   - id: capabilities-seed-devices-from-slot-tomls
     status: by-design
@@ -275,6 +362,7 @@ known_issues:
       The `img.img = gpu-rocm` seed versus the ComfyUI allow-list (`gpu-vulkan` only) mismatch is
       real but is filed once inside rollup #1840 — do not re-file it every run.
     review_at: v1.1.0
+    review_due: true
 
   # ── Adjudicated by-design: memory ───────────────────────────────────────────
 
@@ -303,6 +391,7 @@ known_issues:
       disproved. The entry itself stays by-design; report the timing against #1834, and read the
       rc6_note on regression `memory-extraction-never-lands` before filing anything.
     review_at: v1.1.0
+    review_due: true
 
   - id: hermes-memory-turn-slow-on-cpu
     status: by-design
@@ -343,6 +432,7 @@ known_issues:
       `failed` and `--all-failed` still does not queue it; OR the 409 body stops naming the
       current status; OR a retain is lost with no `failed` op and no `hal0 memory status` error.
     review_at: v1.1.0
+    review_due: true
 
   - id: batch-retain-parent-rows-are-bookkeeping
     status: by-design
@@ -365,6 +455,7 @@ known_issues:
       retains are completing normally; OR a completed parent's status/error does not mirror its
       children.
     review_at: v1.1.0
+    review_due: true
 
   - id: memory-enabled-is-restart-scoped
     status: by-design
@@ -387,6 +478,7 @@ known_issues:
       printing the restart line; OR hal0 grows a pending-restart indicator for other keys and
       memory.enabled is left out.
     review_at: v1.1.0
+    review_due: true
 
   # ── Adjudicated by-design: brain chat ───────────────────────────────────────
 
@@ -414,6 +506,7 @@ known_issues:
       under 120 s (the CLI hard-codes a 120 s client timeout against a 300 s server budget —
       that mismatch is real and worth reporting when it bites).
     review_at: v1.1.0
+    review_due: true
 
   - id: brain-turn-cancelled-on-client-disconnect
     status: by-design
@@ -438,6 +531,7 @@ known_issues:
       the client dies (that narrow "one in-flight upstream completion" question is unmeasured —
       file it as its own candidate, not as this one).
     review_at: v1.1.0
+    review_due: true
 
   - id: brain-chat-hand-parsed-body
     status: by-design
@@ -454,9 +548,13 @@ known_issues:
     still_report_if: >-
       The surface answers a body it could not parse, or a body whose `messages` key is present
       but not a list, with a normal model turn and NO {"type":"error"} SSE frame — that residue
-      is real and is filed in rollup #1840. Do not re-report the absent requestBody, the 200
+      is real but was closed NOT_PLANNED with #1840 on 2026-10-02 ("real but cosmetic, and we're
+      choosing not to track them"): it is not filed anywhere, so record it as `known`, and report
+      only if it gets WORSE (a malformed body makes the brain call a mutating/admin tool, or a
+      shipped client is seen sending a body that hits the coercion path). Do not re-report the absent requestBody, the 200
       status on this SSE route, or the empty-body framing.
     review_at: v1.1.0
+    review_due: true
 
   # ── Adjudicated by-design: MCP, CLI, UI ─────────────────────────────────────
 
@@ -476,6 +574,7 @@ known_issues:
       mount URLs (405 on loopback). Filed as regression `mcp-docs-connect-url-and-tool-tables`;
       do not re-derive it, just probe that entry.
     review_at: v1.1.0
+    review_due: true
 
   - id: mcp-args-additional-properties-open
     status: by-design
@@ -499,6 +598,7 @@ known_issues:
       blast radius of a gated tool (a lost `dry_run`/`confirm`/scope arg causing an unintended
       mutation); OR an MCP tool accepts an arg shape the equivalent REST call rejects.
     review_at: v1.1.0
+    review_due: true
 
   - id: cli-model-list-default-marker-column
     status: by-design
@@ -517,6 +617,7 @@ known_issues:
       A model with `"default": true` renders WITHOUT the `*`, or the `*` lands on the wrong row,
       or the marker leaks into `--json`.
     review_at: v1.1.0
+    review_due: true
 
   - id: cli-agent-status-detail-truncated
     status: by-design
@@ -537,6 +638,7 @@ known_issues:
       Separately: `details["warnings"]` is invisible in the table because only
       `details["failures"]` is routed around the slice — that belongs to #1828, not here.
     review_at: v1.1.0
+    review_due: true
 
   - id: cli-bench-is-argparse-passthrough
     status: by-design
@@ -558,6 +660,7 @@ known_issues:
       flag; OR a mutating bench verb (run, worker, publish, upload) misparses its arguments
       because of ignore_unknown_options and acts on the wrong target.
     review_at: v1.1.0
+    review_due: true
 
   - id: model-display-name-from-gguf-general-name
     status: by-design
@@ -578,6 +681,7 @@ known_issues:
       auto-scan (filename stem) display divergence is cosmetic and known — report it only if it
       causes an id collision or a duplicate registry entry.
     review_at: v1.1.0
+    review_due: true
 
   - id: ui-agents-card-amber-ready-dot
     status: by-design
@@ -597,6 +701,7 @@ known_issues:
       systemctl reports the unit active. The CSS class leaking into title/aria-label is a real
       small bug and is filed in rollup #1841.
     review_at: v1.1.0
+    review_due: true
 
   - id: hermes-state-md-as-of-is-change-marker
     status: by-design
@@ -626,6 +731,7 @@ known_issues:
       call-sites sentence is deleted from the clause above so no future run chases it. Path
       correction: the snapshot is /var/lib/hal0/STATE.md, not ~/.hermes/STATE.md.
     review_at: v1.1.0
+    review_due: true
 
   # ── Historical, unexplained ─────────────────────────────────────────────────
 
@@ -675,6 +781,7 @@ known_issues:
       already tracked at #1840 item 5 and as the unmet clause of #1791 above — but DO keep
       recording it against both entries every release until it is fixed.
     review_at: v1.1.0
+    review_due: true
 
   - id: hermes-wheel-missing-web-dist
     status: by-design
@@ -703,13 +810,19 @@ known_issues:
       account of it (brain board tools 401ing again post-#1829-rewire) — file that against the
       surface, not the wheel.
     review_at: v1.1.0
+    review_due: true
 
   - id: cli-api-polish-rollup-1840-still-open
     status: by-design      # process adjudication, not a product ruling
     adjudicated: v1.0.0-rc.6
     related_issue: 1840
     summary: >-
-      All thirteen #1840 items reproduce on rc.6.
+      All thirteen #1840 items reproduced on rc.6. On 2026-10-02 the operator closed #1840
+      NOT_PLANNED (items 4 and 9 split to #2282/#2283; the rest "real but cosmetic, and we're
+      choosing not to track them"). On v1.4.0-nightly.20261014214325: 1 (API side), 5 and 9 hold;
+      2, 3, 6, 7, 8, 10 and 11 still reproduce exactly as described and no worse; 4, 12 and 13 were
+      not exercisable. Record per-item as `known`; file nothing; do not cite "filed in #1840".
+      Item 6 is confirmed from source only (no doctor check reads failed hal0-slot@ units).
     why: >-
       #1840 is an open, unmilestoned polish backlog that rc.6 never claimed to fix — the rc.6
       CHANGELOG names it as the tracker for the remaining rc.5 sweep items, and rc.5 banded it
@@ -726,6 +839,7 @@ known_issues:
       fabricated-default payloads start being consumed by a shipped surface as if the bank
       existed.
     review_at: v1.1.0
+    review_due: true
 
   # ── Adjudicated by-design in v1.0.0-rc.6 ────────────────────────────────────
 
@@ -758,6 +872,7 @@ known_issues:
       header has no signal; high confidence on the no-signal chat default; architecture not
       being a tie-breaker; the `Next:` hint printing after the warning line.
     review_at: v1.1.0
+    review_due: true
 
   - id: brain-chat-context-exceeded-500-transient
     status: by-design
@@ -780,6 +895,7 @@ known_issues:
       code change to the 4096 cap to even be possible). A single occurrence during concurrent
       slot churn is a runner transient.
     review_at: v1.1.0
+    review_due: true
 
   - id: chat-to-embed-slot-500-passthrough
     status: by-design
@@ -809,7 +925,13 @@ known_issues:
       slot; OR the 500 occurs with the embed slot OFFLINE (must be a clean 404 then); OR
       /v1/models stops disclosing per-model labels/recipe; OR hal0 ships a typed
       capability-mismatch error and this path still leaks the raw upstream 500.
+    v1_4_0_note: >-
+      FIXED for the loaded case on v1.4.0-nightly.20261014214325: with embed loaded, chat naming
+      an embed/rerank id returns typed 409 dispatch.capability_mismatch. Only the embed-OFFLINE
+      404 clause still applies. The reverse direction (embeddings/rerank naming a CHAT slot) leaks
+      a raw 501 and is filed as #2672.
     review_at: v1.1.0
+    review_due: true
 
   - id: capability-apply-persists-intent-on-lifecycle-failure
     status: by-design
@@ -838,6 +960,7 @@ known_issues:
       (re-enters warming more than twice per apply, or restarts accumulate past the start
       limit); OR `capabilities set --disabled` no longer recovers the box.
     review_at: v1.1.0
+    review_due: true
 
   - id: doctor-perms-secrets-dir-0700-is-declared
     status: fixed          # #1896, v1.0.0-rc.7 — the 0755 declaration is gone
@@ -862,6 +985,7 @@ known_issues:
       owned by anything but root:root; OR secrets/hal0-api.env is not covered by a PermRow and
       lands group/world-readable.
     review_at: v1.1.0
+    review_due: true
 
   - id: pull-job-persist-fail-soft-scope
     status: by-design      # scopes the model-pull-jobs finding; the ownership defect itself is real
@@ -887,6 +1011,7 @@ known_issues:
       unwritable model-pull-jobs; OR activity.db is root-owned on a box freshly installed with
       rc.6+; OR /api/activity returns 200-with-empty instead of 503 when the store is down.
     review_at: v1.1.0
+    review_due: true
 
   - id: hermes-cwd-eacces-crash
     status: by-design
@@ -913,6 +1038,7 @@ known_issues:
       turn through the raw binary; OR upstream moves the git-root walk somewhere the wrapper's
       cd cannot protect.
     review_at: v1.1.0
+    review_due: true
 
   - id: update-restart-error-breadcrumb-on-success
     status: by-design
@@ -938,6 +1064,7 @@ known_issues:
       back (no post-restart "Application startup complete." under a new pid within ~60 s) —
       that last case is a REAL failed restart reported as ambiguous.
     review_at: v1.1.0
+    review_due: true
 
   - id: brain-tool-model-points-at-modelless-slot
     status: by-design
@@ -966,6 +1093,7 @@ known_issues:
       skip path stops printing the "no live target until an agent model is bound" notice; OR
       tool_model is repointed at a slot with no DEFAULT_CHAINS entry.
     review_at: v1.1.0
+    review_due: true
 
   - id: cli-slot-show-panel-clips-long-json-lines
     status: by-design
@@ -986,6 +1114,7 @@ known_issues:
       terminal; OR the CLI grows a non-JSON summary view whose only copy of an actionable
       remediation string is the clipped one.
     review_at: v1.1.0
+    review_due: true
 
   - id: ui-inference-card-header-is-device-highlight
     status: by-design
@@ -1005,6 +1134,7 @@ known_issues:
       FLM count is non-zero while the NPU · FLM pane renders no such slot; OR the header is
       relabelled to claim a total.
     review_at: v1.1.0
+    review_due: true
 
   - id: ui-bench-worker-badge-on-benchmarks-page
     status: by-design
@@ -1026,6 +1156,7 @@ known_issues:
       `systemctl is-active hal0-bench-worker` relative to a fresh/stale heartbeat; OR the badge
       reports the armed state as the ONLY signal again.
     review_at: v1.1.0
+    review_due: true
 
   - id: memory-extraction-quality-is-anchor-dependent
     status: by-design
@@ -1075,6 +1206,7 @@ known_issues:
       op reports `completed` while the raw document is ALSO absent (that is data loss, not
       yield, and is not covered by this entry).
     review_at: v1.1.0
+    review_due: true
 
   - id: slots-gpu-telemetry-on-vulkan-box-is-correct
     status: by-design      # retires the "host telemetry leak" framing of #1841 item 1
@@ -1099,6 +1231,7 @@ known_issues:
       no /dev/dri render node at all. Do NOT report it on a box with a render node serving on
       vulkan.
     review_at: v1.1.0
+    review_due: true
 
   - id: slot-capacity-vram-on-vulkan-is-declared
     status: by-design
@@ -1135,6 +1268,7 @@ known_issues:
       pulling/starting is likewise by-design — `per_slot` only lists warming/ready/serving/idle
       slots with a bound model.
     review_at: v1.1.0
+    review_due: true
 
   # ── Adjudicated by-design: v1.0.0-rc.7 curation ─────────────────────────────
 
@@ -1168,6 +1302,7 @@ known_issues:
       slot's own `podman logs` for the window BEFORE filing anything under this symptom — the
       user-visible string names the wrong subsystem by construction.
     review_at: v1.1.0
+    review_due: true
 
   - id: update-rollback-defers-hal0-api-restart
     status: by-design
@@ -1199,6 +1334,7 @@ known_issues:
       already has") is then spent; OR a rollback leaves the box in a state a manual `systemctl
       restart hal0-api` does NOT fix.
     review_at: v1.1.0
+    review_due: true
 
   - id: unversioned-openai-compat-paths-405-are-generic-not-rerank-specific
     status: by-design
@@ -1231,6 +1367,7 @@ known_issues:
       captured, to default to an unversioned /rerank against a custom base_url; OR hal0 begins
       serving some unversioned OpenAI-compat paths but not /rerank (inconsistent surface).
     review_at: v1.1.0
+    review_due: true
 
   - id: doctor-perms-split-brain-root-hermes-is-correct-detection
     status: by-design
@@ -1275,6 +1412,7 @@ known_issues:
       the run — establish provenance by birth timestamp against the installer log's last mtime
       before filing.
     review_at: v1.1.0
+    review_due: true
 
   - id: tts-catalog-lists-qwen3-on-gpu-rocm-regardless-of-host
     status: fixed          # #2447 / #2450 — the unconditional gpu-rocm row is gone
@@ -1304,3 +1442,271 @@ known_issues:
       qwen3-tts selection; OR the kokoro-v1 CPU row disappears, leaving a lane-less box with no
       TTS engine in the picker.
     review_at: v1.1.0
+    review_due: true
+
+  # ── Adjudicated in v1.4.0-nightly.20261014214325 ────────────────────────────
+  # Candidates the adversarial pass refuted or ruled by-design. Each is banked with its
+  # rationale so the next run does not spend budget re-deriving it.
+
+  - id: memory-retain-zero-yield-visible-on-op-record-only
+    status: by-design
+    adjudicated: v1.4.0-nightly.20261014214325
+    related_issue: 2030
+    summary: >-
+      `hal0 memory ops list` (plain or --json) shows a zero-yield retain as an ordinary
+      `completed` row with an empty error column, and `hal0 memory status` has no yield count.
+    why: >-
+      #2030 was fixed as specified. The signal is on the OPERATION RECORD every poller reads: the
+      single-op GET /api/memory/banks/{bank}/operations/{id} (the id POST /api/memory/add returns)
+      carries facts_extracted:0, document_fact_count:0, nothing_learned:true and the notice
+      "completed, but nothing was learned ...", the MCP memory_operation_get uses the same
+      annotate_retain_yield path, and the dashboard Add-fact flow raises a warn toast. Status
+      stays `completed` on purpose (an empty yield is a legitimate outcome) and the LIST is left
+      verbatim on purpose: annotating it would cost one document fetch per completed retain per
+      dashboard poll (commit 108b366d). The CLI has no `memory add` or `ops get` verb. The
+      "Output too long ... dropping this sub-chunk" journal line is Hindsight meeting hal0's
+      deliberate HINDSIGHT_API_RETAIN_MAX_COMPLETION_TOKENS=4096 (#1834) when the small extractor
+      runs away; that is yield variance, see memory-extraction-quality-is-anchor-dependent, and it
+      still lands as nothing_learned:true.
+    still_report_if: >-
+      The single-op GET or memory_operation_get for a terminal retain whose document has
+      memory_unit_count=0 lacks nothing_learned:true and the notice (including a Hindsight upgrade
+      that drops result_metadata.unit_ids_count or the op's document_id, which no-ops the
+      annotation silently); OR the dashboard Add-fact flow ends on "Fact added" with no warn toast
+      for such a retain; OR a retain reports completed while the raw document is also absent (data
+      loss, not yield); OR hal0 gains a CLI retain/`ops get` verb or a yield count in `memory
+      status` and it fails to show zero yield. Do NOT re-file because `memory ops list` or
+      `memory status` show no yield, or a dropped sub-chunk leaves extraction_errors_count at 0.
+    review_at: v1.5.0
+
+  - id: brain-tool-budget-exhaustion-typed-error
+    status: by-design
+    adjudicated: v1.4.0-nightly.20261014214325
+    summary: >-
+      With a small `[brain_chat] max_rounds` (1 reproduces it) a tool-using turn streams
+      tool_call/tool_result, then {"type":"error","message":"tool loop budget exhausted"}, then
+      done, with no token frames.
+    why: >-
+      max_rounds is a "runaway backstop" (schema.py, docs/concepts/brain.mdx). toolloop/engine.py
+      yields budget_event plus done by construction with no final no-tools summary round, and
+      tests/board/test_board_chat_tool_use_e2e.py::test_loop_budget_terminates_with_typed_error
+      pins it. The fetched results are not discarded: tool_result frames render as tool cards
+      (useBoard.ts). With max_rounds=1 every tool-using turn ends this way. The default (8) trigger
+      was not reproduced; on ct150 round 2 reroutes to tool_model and degrades first. This does
+      NOT match brain-chat-sse-silent-until-first-frame, which is about turns with no token AND no
+      error frame. Optional P2 enhancement: name `[brain_chat] max_rounds` in the message.
+    still_report_if: >-
+      At the DEFAULT max_rounds (8) with a ready tool_model an ordinary multi-step prompt of 4 or
+      fewer steps exhausts the budget; OR exhaustion closes the stream with no `error` frame
+      (silent) or no `done` frame; OR the streamed tool_result frames are missing or blank in the
+      dashboard thread after the budget error; OR exhaustion is reported as success (token or
+      done frame with no error frame).
+    review_at: v1.5.0
+
+  - id: brain-tool-result-not-summarised
+    status: by-design
+    adjudicated: v1.4.0-nightly.20261014214325
+    related_issue: 2673
+    summary: >-
+      After a brain tool call the 1B brain does not summarise the tool result back to the user;
+      the data reaches the client only as the tool_result frame.
+    why: >-
+      chat.py ROUTING SEMANTICS (~L1243-1258, ADR-0023 / spec-p3-brain 5a): once a turn enters a
+      tool chain all later rounds run on tool_model and "the 1B does NOT summarise tool results
+      back", for four stated reasons. The WORDING of the degrade sentence when tool_model cannot
+      be reached is a separate, filed defect (#2673).
+    still_report_if: >-
+      A turn that streamed a tool_result reaches done with NO token frame, or with a raw dispatch
+      envelope; OR the tool_result frame itself is suppressed or not rendered in the dashboard
+      drawer.
+    review_at: v1.5.0
+
+  - id: capability-path-pin-ignores-model
+    status: by-design
+    adjudicated: v1.4.0-nightly.20261014214325
+    related_issue: 2663
+    summary: >-
+      POST /v1/embeddings and /v1/rerank are served by the embed/rerank slot regardless of the
+      `model` sent (an unknown name, or a slot NAME such as a second embedding slot's, still
+      lands on the default embed slot); chat with an unknown model 404s only while the agent
+      anchor is offline.
+    why: >-
+      Path fragments pin a request to the embed/rerank slot before slot-name addressing
+      (_capability_resolve.py:42-44 and the resolve_by_capability docstring, rules 1-2 before 8;
+      docs/reference/api/openai-compat.mdx:166-175; locked by
+      tests/dispatcher/test_router.py::test_legacy_fallback_routes_embeddings_to_embed_slot). A
+      second embedding slot IS reachable by its model id (passthrough). With the agent anchor
+      loaded, chat with an unknown model is served by the anchor under
+      dispatcher-unknown-model-passthrough. The mislabelled response `model` is NOT by design and
+      is filed as #2663; the chat->embed direction stays under chat-to-embed-slot-500-passthrough.
+    still_report_if: >-
+      A request on /v1/embeddings or /v1/rerank naming a REGISTERED model id whose slot is a
+      different loaded embedding/rerank slot is served by the default embed/rerank slot; OR the
+      response `model` on a legacy_slot:embed / legacy_slot:rerank resolution still echoes the
+      client-supplied name after #2663 ships; OR a chat-capable model is served by the
+      embed/rerank slot.
+    review_at: v1.5.0
+
+  - id: v1-malformed-body-404-agent
+    status: by-design
+    adjudicated: v1.4.0-nightly.20261014214325
+    related_issue: 1840
+    summary: >-
+      On a box whose `agent` slot has no `[model]`, POST /v1/chat/completions with an unparseable
+      body, an empty body, a non-object JSON body, or `messages` but no `model` returns 404
+      dispatch.no_route "model 'agent' not found in registry ..." instead of a 400 invalid-JSON.
+    why: >-
+      _read_json_body (v1.py:264-298) deliberately coerces empty/malformed/non-dict bodies to {}
+      ("validation of the parsed shape belongs to the upstream"; unchanged since 517d47c3), and the
+      {} body takes ADR-0023 rule 9 to the agent anchor, which is already adjudicated for
+      model-less boxes in model-default-marker-is-per-type-fallback. It still fails loudly with a
+      4xx. The 400 "'messages' is required" seen for model-without-messages is llama-server's, not
+      hal0's. The operator closed the same class (#1840 items 7 and 8) NOT_PLANNED as "real but
+      cosmetic"; CLAUDE.md forbids filing cosmetic-only findings.
+    still_report_if: >-
+      A malformed, empty or non-object body on /v1/chat/completions (/v1/completions,
+      /v1/embeddings) returns 2xx, yields a real completion, or triggers a slot cold-load or model
+      pull; OR a valid body that DOES carry a `model` is reported as no_route for model 'agent';
+      OR on a box whose agent slot HAS a model bound a malformed body returns 404 no_route instead
+      of an upstream 4xx; OR the operator reopens #1840 items 7/8.
+    review_at: v1.5.0
+
+  - id: memory-add-ignores-unknown-body-keys
+    status: by-design
+    adjudicated: v1.4.0-nightly.20261014214325
+    summary: >-
+      POST /api/memory/add with `bank_id` (or a typo like `datset`) instead of `dataset` returns
+      200 and the write lands in `shared`, whereas an invalid `dataset` value returns 400
+      memory.namespace_invalid.
+    why: >-
+      The handler is hand-parsed and reads only `dataset` (docstring memory.py:767, docs
+      memory.mdx, mcp-tools.mdx:289); unknown keys are tolerated across hand-parsed routes
+      (brain-chat-hand-parsed-body). No /api/memory body route takes `bank_id`; it exists only as
+      a path segment on the engine-admin router. Under ADR 0005 the only body-selectable write
+      namespace is `shared` (private is header-only; a `private:` body value is a 400), so an
+      ignored key can never send a write somewhere a correctly keyed call could not.
+    still_report_if: >-
+      Any doc, UI request, CLI verb, hermes plugin, MCP schema or error message tells callers to
+      send `bank_id` (or any key other than `dataset`) in the body of /api/memory/{add,search,
+      recall,list,delete}; OR the body-selectable write namespace set grows beyond `shared`, so an
+      ignored key would silently misroute; OR a write whose namespace key was ignored lands
+      outside `shared` or in another agent's private scope; OR the MCP memory_add tool DECLARES a
+      bank/namespace property and silently ignores it (mcp-args-additional-properties-open).
+    review_at: v1.5.0
+
+  - id: podman-healthcheck-transient-failed-units
+    status: by-design
+    adjudicated: v1.4.0-nightly.20261014214325
+    summary: >-
+      `systemctl --failed` lists a transient `<cid>[-<hash>].service` ("[systemd-run] podman
+      healthcheck run") for ~30 s after every slot load/restart (longer for slow loads, one
+      HealthInterval per failing probe).
+    why: >-
+      Podman runs the first healthcheck ~100 ms after container start, before llama-server
+      listens, and `podman healthcheck run` exits 1 even inside --health-start-period (the period
+      only stops it counting toward retries). hal0's only part is the HealthCmd/HealthStartPeriod
+      override (#684, providers/base.py:86-90). Identical on podman 4.9.3 and 5.7.0, privileged
+      and not. The unit clears on the first passing check. No hal0 surface (doctor, doctor
+      bundle, slot list, bench) reads system-wide failed units. Different from
+      slot-delete-leaves-failed-unit (a persistent `hal0-slot@` residue). Lane failed-unit diffs
+      should carve these out.
+    still_report_if: >-
+      The transient unit is still in `systemctl --failed` after the container is healthy plus one
+      HealthInterval (30 s); OR it survives removal of the container / slot unload (leak); OR any
+      hal0 surface counts it as a failure or degrades status because of it; OR the slot's own
+      `hal0-slot@<name>.service` enters failed during a normal load.
+    review_at: v1.5.0
+
+  - id: runner-images-converged-is-catalogue-only
+    status: by-design
+    adjudicated: v1.4.0-nightly.20261014214325
+    summary: >-
+      After `hal0 update`, `hal0 update status` shows "Runner images | 8 images | 8 images |
+      converged" while `hal0 runner-images ls` shows every pinned image Store=missing.
+    why: >-
+      The runner-images component only resolves each runner's pinned ref and syncs the images.json
+      catalogue, best effort (runner_images_arm.py; registry.py:59-63; manage-runner-images.mdx
+      :209-216; ADR-0028 item 6: "images already in podman's store are a separate fact"). It is
+      not a prefetch; pulls are opt-in (`hal0 runner-images pull`, dashboard Pull) or podman pulls
+      on first slot start. "converged" means pins resolved and catalogue synced.
+    still_report_if: >-
+      The component reports converged while its converge result carries a catalogue_sync_error not
+      surfaced in `hal0 update`, `hal0 update status` or the dashboard row; OR its per-runner
+      detail rows disagree with resolve_runner_image in the running daemon (stale refs from the
+      previous release; ct150 showed old hal0-toolbox-* refs in the stored rows); OR a slot whose
+      image is Store=missing fails to start instead of pulling on first load, or the first-load
+      pull shows no progress state; OR an install/update path or docs promise that `hal0 update`
+      pre-pulls runner images. Do NOT re-report Store=missing after an update or the
+      "N images | N images | converged" row.
+    review_at: v1.5.0
+
+  - id: ui-rail-openwebui-link-unnamed
+    status: by-design      # operator wontfix; real but accepted, not a product ruling
+    adjudicated: v1.4.0-nightly.20261014214325
+    related_issue: 1841
+    summary: >-
+      At viewport widths 721-1080 px the sidebar OpenWebUI anchor (`svc-openwebui`, and by source
+      the Hermes Dash anchor) has no accessible name (`- link:` with only the href): `.lbl` is
+      display:none, no aria-label/title, SVG is aria-hidden. Named at 1081 px and above; the
+      drawer variant is unaffected.
+    why: >-
+      #1841 item 3, unchanged since rc.5. The operator closed #1841 NOT_PLANNED on 2026-10-02 with
+      this item named ("... lack a title/aria-label ... please reopen if accessibility becomes a
+      priority"). Fix is XS (aria-label/title on the two `.sb-svc` anchors in chrome.jsx
+      ServiceLinks) and an agent already editing chrome.jsx can fold it in.
+    still_report_if: >-
+      Any other `.sidebar .sb-svc` anchor or rail control has an empty accessible name at 721-1080
+      px; OR the drawer (`svc-drawer-*`) or full-width variants become unnamed; OR the rail link
+      loses its icon, href, target=_blank or keyboard focusability; OR accessibility is declared a
+      release priority.
+    review_at: v1.5.0
+
+  - id: brain-vulkan-garbage-fixture-unconstructable-on-fleet
+    status: by-design      # coverage gap, not a product defect
+    adjudicated: v1.4.0-nightly.20261014214325
+    related_issue: 1888
+    summary: >-
+      The unrun halves of regression brain-vulkan-backend-garbage-output (a second non-FPX chat
+      gguf, the ROCm lane, slots.md 8e conviction of a garbage backend) cannot be built on ct151.
+    why: >-
+      ct151 holds one chat gguf (already non-FPX), has no /dev/kfd, and holds only
+      runner-standard (gated, coherent) and runner-cpu (no Vulkan backend; coherent on CPU, so it
+      cannot stand in for garbage). A real 8e needs a garbage-producing image such as
+      rocmfpx:ade07ba pulled onto some box plus HAL0_ALLOW_VULKAN_FALLBACK=1 and an hal0-api
+      restart: a deliberate stateful fixture with operator sign-off. The #1922 output-sanity
+      gate runs on every llm load independent of that env var (output_sanity.skip_reason) and
+      is covered by 107 unit tests (tests/slots/test_output_sanity_gate.py,
+      tests/providers/test_gpu_vulkan_lane_gate.py). Record these as `skipped`, not findings.
+    still_report_if: >-
+      The temp-0 "The capital of France is" canary on any serving gpu-vulkan/gpu-rocm llm slot
+      lacks "Paris"; OR a gpu-vulkan slot whose image is not a gated pin reaches ready without
+      HAL0_ALLOW_VULKAN_FALLBACK; OR the journal shows slot.output_sanity_skipped with no
+      HAL0_SLOT_OUTPUT_SANITY / slot output_sanity=false override; OR an 8e fixture is built and
+      the slot lands anywhere but terminal `error` with slot.output_sanity_failed; OR the two
+      test files above fail.
+    review_at: v1.5.0
+
+  - id: hermes-stream-stall-guard-exercised
+    status: by-design
+    adjudicated: v1.4.0-nightly.20261014214325
+    related_issue: 1893
+    summary: >-
+      The #1893/#1918 stream stall guard works: against a never-terminating upstream hal0 ends the
+      relay at stream_idle_timeout_s / stream_total_timeout_s with an x_hal0_stall chunk plus
+      [DONE]; `hermes -z` prints the partial output plus the "[hal0] stall guard:" line.
+    why: >-
+      Exercised on ct150 against the installed Dispatcher (3 s idle -> 3.07 s, 4 s total -> 4.01 s)
+      and end to end with hermes through an emulator (rc=0). The guard emits finish_reason="length"
+      deliberately, so Hermes length-continues and sends 4 requests per turn: a silent upstream
+      shows nothing in `-z` mode for ~4x the bound (~20 min at the 300 s default) and the
+      diagnostic prints 4 times. Bounded and named, which meets #1893. Stale in the regression:
+      the raw hermes binary is /var/lib/hal0/venvs/hermes/bin/hermes (supported entry
+      /usr/local/bin/hermes), not /usr/lib/hal0/venvs/....
+    still_report_if: >-
+      A stream through /v1/chat/completions with finish_reason forever null runs past
+      stream_total_timeout_s or goes silent past stream_idle_timeout_s without ending in an
+      x_hal0_stall chunk plus [DONE]; OR `hermes -z ... --cli` against such a stream stays silent
+      past 4x the bound plus 60 s, or exits without the "[hal0] stall guard:" line; OR a stall
+      frame is emitted on a stream that terminated normally; OR either [dispatcher] default is 0
+      on a fresh install.
+    review_at: v1.5.0

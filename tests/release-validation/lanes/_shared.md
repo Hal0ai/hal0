@@ -28,6 +28,16 @@ You are validating a hal0 release candidate on a real box. Read, in this order:
 * Report what a *user* would experience, not what an expert who knows the workaround would.
   "Works once you load the utility slot" is a finding, not a pass, on a fresh install.
 
+## Box identity — check before you trust anything
+
+`CONTEXT.md` describes ONE box. In v1.4.0 several ct151 lanes were handed ct150's file. Before
+your first check, assert the box id and IP in `CONTEXT.md` match the box you were dispatched to
+(`boxes.toml` has the truth); if they do not, say so at the top of your report and take identity
+from `boxes.toml` plus live probes. Likewise confirm the installed version from
+`/usr/lib/hal0/current/VERSION`, not from `hal0 --version`. Other lanes and the regression-probe
+stage share the box: if a slot, bank or file changed under you, name who plausibly changed it
+and do not file it as a defect.
+
 ## The coherence canary — run it before trusting any generated text
 
 Structural checks (HTTP 200, container health, tok/s, well-formed SSE) all pass over pure

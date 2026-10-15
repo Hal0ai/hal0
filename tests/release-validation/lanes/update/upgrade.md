@@ -114,6 +114,24 @@ the fact otherwise:
    check it independently rather than trusting a `count: 0` drift response as "nothing to
    restart".
 
+8. **Pre-flight writability of the migration dirs** — regression `upgrade-migration-backups-eacces`
+   (#2657). BEFORE the update record `stat -c '%U:%G %a' /var/lib/hal0/backups` and `su -s /bin/sh
+   hal0 -c 'touch /var/lib/hal0/backups/.probe'`. root:hal0 2755 silently breaks the
+   post-activation migration. Do not fix it by hand before the run; record it, then report what the
+   update does.
+9. **'applied' is not 'done'.** After `hal0 update --yes` assert `convergence.converged=true` in
+   `/var/lib/hal0/update-jobs/*.json` and that `hal0 update status` exits 0. Then run `hal0
+   runner-images migrate` and `hal0 profile migrate` as dry runs and assert 'nothing to convert',
+   and that `slot.unconverted` and `*_migration_failed` are absent from the hal0-api journal. If
+   pending components print no `hal0 update component <id>` line, that is
+   `update-components-pending-no-guidance`.
+10. **Rollback timing and TOML diffs.** `time hal0 update --rollback --yes` and compare the CLI exit
+   code with `updater.rollback_ok` in the journal (re-pip takes ~15 s against the CLI's 10 s cap:
+   `update-rollback-cli-timeout`, #2661); never run it twice. Diff `/etc/hal0/slots/*.toml`
+   `[model].default` against `hal0 slot list` models to catch silent fallback substitution (agent
+   v3-q8-ffneq-lateq6 vs lfm2-5-2-6b-q8-0). New slot TOMLs (flm-embed, flm-stt) can be created by a
+   restart on the old tree; do not attribute them to the upgrade without the before-snapshot diff.
+
 ## Leave behind
 
 The box on the new version, healthy, with the "before" snapshot recorded in your report for the

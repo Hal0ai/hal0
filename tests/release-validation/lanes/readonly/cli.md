@@ -80,6 +80,18 @@ running stateful lane, not a defect. Attribution can take longer than the drift 
 subtle: this run's contention first showed up 30+ minutes into a lane, well after the initial
 baseline diff, so don't stop checking after the first comparison.
 
+9. **State-dir file ownership, not just directories** — regression `components-json-root-owned`
+   (#2670). `stat -c '%U:%G %a'` every file under `/var/lib/hal0/state` and run `sudo -u hal0 test
+   -w` on each; `journalctl -u hal0-api | grep -c state_persist_failed` since install. Do this
+   before any restart: the file heals itself on the first hal0-api write.
+10. **Verbs named in this brief must exist.** `hal0 registry` is NOT a 1.4.0 verb; confirm every
+   verb with `--help` before planning around it and record a missing one as a finding rather than
+   improvising. `hal0 agent reprovision`, `hal0 update --rollback` and anything that prompts read
+   stdin: run them with `</dev/null` and `--yes`.
+11. **Lane-start sanity.** Assert that the run `CONTEXT.md` names the box you were dispatched to (it
+   describes ONE box; ct151 lanes were handed ct150's file this release). If it does not, say so in
+   your report and take identity from `boxes.toml` plus live probes.
+
 ## Carry-forward
 
 Rollups are cheap to file and cheap to lose track of — when you find several small CLI defects,

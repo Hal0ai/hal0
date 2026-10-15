@@ -135,6 +135,37 @@ known-issues, or regressions, and add a line to the changelog below. A report re
 
 ### Kit changelog
 
+* **11** (2026-10-15) — Curation from the v1.4.0-nightly.20261014214325 run (31 verified findings:
+  20 filed as #2657-#2676, 11 refuted or ruled by-design/wontfix). `regressions.yaml`: 20 new
+  entries — ga-blocker `upgrade-migration-backups-eacces` (an upgraded box whose
+  /var/lib/hal0/backups is root:hal0 2755 cannot run the post-swap migrations as hal0, the
+  "restart to retry" remedy can never work, and the job still says `applied`; this is the cause
+  of the `runner-system-conversion` regression result), `update-rollback-cli-timeout`,
+  `capabilities-npu-apply-accepted-dead`, `slot-drift-blind-when-render-fails`,
+  `hermes-slot-list-payload-truncated`, `brain-steward-no-memory-path`,
+  `brain-grounding-guard-misses-why-and-health` and twelve minors. 38 entries are now marked
+  `promote_ready`, and ~30 existing entries carry a `last_result` / `v1_4_0_note` (stale jq
+  paths: `ctx_max` is now `ctx_effective`, /api/models and /api/services are objects, the
+  `agents` bank is retired; `fpx-quant-guard-dead-null-quant` now expects
+  `slot.unsupported_quant`). `known-issues.yaml`: 11 new entries with `still_report_if`
+  (zero-yield is visible on the single-op GET only, brain budget exhaustion, capability path pins,
+  malformed /v1 bodies, unknown memory body keys, podman healthcheck transient units,
+  runner-images "converged" is catalogue-only, rail link wontfix #1841, garbage-backend fixture
+  gap, stall guard exercised, tool-result not summarised); the brain-chat-hand-parsed-body and
+  #1840 entries now cite the NOT_PLANNED closure instead of "filed in #1840";
+  chat-to-embed-slot-500 notes the typed 409. `updated_for` bumped, and 52 entries whose
+  `review_at` is before v1.4.0 are flagged `review_due: true` (re-adjudicate or delete next
+  release). Lane briefs: every lane gained the checks its agents invented, in the form that
+  paid off — generalisations (sweep non-chat endpoints by name, diff catalogue rows against
+  advertised backends mechanically, compare state files not just dirs, check writability of
+  migration targets before the upgrade, assert `convergence.converged` rather than `applied`);
+  `_shared.md` gained a box-identity rule because ct151 lanes were handed ct150's CONTEXT.md.
+  Stale text fixed (`ctx_max`, `agents` bank, `/api/services` jq). `boxes.toml` (gitignored):
+  an unquoted prose paragraph made it invalid TOML, now commented; per-box facts added (ct151 has
+  an iGPU and vulkan, Python 3.14, podman 5.7, no FLM image; ct150 gids, pre-existing failed
+  units, 2755 backups dir). Preflight should write one CONTEXT.md per box (see promotion list in
+  the curation report).
+
 * **10** (2026-08-25) — ct151 reset facts relearned the hard way during the rc.9 fresh lane
   (#2064). `boxes.toml` `[boxes.ct151-cpu-fresh]`: gotcha 4 upgraded from a gid-drift check to
   a hard re-add — `pct rollback 151 pristine` DELETES the dev0/dev3 passthrough entries from

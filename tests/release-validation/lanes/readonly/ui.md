@@ -76,6 +76,22 @@ data" comparison is only valid if the baseline is re-read at the same instant.
 
 Close the browser when done.
 
+10. **GPU tiles on a vulkan-only box** — regression `ui-no-gpu-on-vulkan-only-box` (#2674). If
+   `/api/hardware` shows `compute_capable=false`, `vulkan_capable=true`, no `/dev/kfd` while a
+   vulkan slot serves, the Overview igpu row and health-strip cell and the Settings Live-hardware
+   and Power & thermal GPU rows must show values. Read the rendered text with Playwright, not the
+   bundle.
+11. **Classification agreement across surfaces.** (a) Settings Overview 'Services' shows ComfyUI as
+   warning 'down' while the footer counts 4/4 ready: both must classify 'stopped - starts on
+   demand' the same way. (b) Doctor panel cards named like HAL0-API-UNREACHABLE /
+   HAL0-RUNNERS-NONE-HEALTHY render with healthy evidence and '14/14 slot(s) healthy' while most
+   slots are offline: healthy counts must exclude offline slots or be labelled. (c) Footer 'N / M
+   ready' slots denominator changes between pages (3/3, 1/2, 2/7): assert it is stable or labelled.
+   Record each as `warn` unless it contradicts a status the user acts on.
+12. **Known, record as `known`:** `svc-openwebui` rail link has no accessible name at 721-1080 px
+   (`ui-rail-openwebui-link-unnamed`, #1841 wontfix). Probe that band with the accessibility tree
+   (`ariaSnapshot`), not textContent; report only the `still_report_if` conditions.
+
 ## Carry-forward
 
 Anything found here that can be expressed against fixtures should be promoted into
