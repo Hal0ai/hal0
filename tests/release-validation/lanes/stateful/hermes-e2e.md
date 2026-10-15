@@ -121,6 +121,12 @@ live chat: it is install-time ground truth, and it distinguishes "broken out of 
 
 19. **Fallback target vs smoke anchor.** Compare the `hal0/agent` fallback dispatch target (`dispatch.decision upstream=`) with the slot named in the provision smoke ("slot brain"); fail when they differ, and compare `hal0/brain` vs `hal0/agent` latency for an 8-token request when utility shares brain's model.
 
+20. **Gateway key after reprovision.** After `hal0 agent reprovision hermes`, assert the vault `API_SERVER_KEY` and the running gateway's key (`/proc/<pid>/environ`) match without a restart, and that `gateway_secrets_wire` is not `ok` when they differ (#2667 on Python 3.14).
+
+21. **Remember-then-recall timing.** Reply and wall time for a 'remember X' turn then an immediate recall turn with MEMORY.md moved aside, once on a quiet box and once with retains in `processing`; this gives a clean number for the 120 s GPU-box clause and separates `hermes-memory-turn-slow-on-cpu` from #2734.
+
+22. **`doctor perms` around the first agent session.** `hal0 doctor perms; echo rc=$?` and `stat -c '%U:%G %a' /var/lib/hal0/agents` before and after the first session handshake: `absent`/rc 0 before, `0700` DRIFT rc 1 after is #2719 (the chmod runs only when `secret.bin` is first created).
+
 ## Leave behind
 
 Hermes running with its SHIPPED config restored. Brain, utility, and embed slots healthy. State

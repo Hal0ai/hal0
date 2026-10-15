@@ -94,7 +94,7 @@ SSE and tok/s over pure garbage; the canary is the 2-second guard against that.
 14. **Tool passthrough proof via prompt_tokens, and cold-start latency.** Compare
    `usage.prompt_tokens` with and without `tools[]` on the same prompt through the gateway and
    directly on the slot port; they must match (85 vs 21 means tools were dropped). Unload
-   rerank/embed and time first byte of `/v1/rerank` and `/v1/embeddings` (2.6-2.7 s on ct151
+   rerank/embed and time first byte of `/v1/rerank` and `/v1/embeddings` (2.6-2.7 s on ct151 in one sample; 5-10 s cold under concurrent lane loads - take the median of three cold loads, not one
    vulkan); note it, do not file under 10 s.
 
 ## Standing instructions
@@ -115,11 +115,13 @@ from an untyped 500 to a typed 404 since the entry was last checked; the entry's
 
 18. **Probe the bare alias of EACH slot sharing a model**, including `model=agent` and `model=brain`, not only `brain`: the tie goes to health rank then upstream index (utility won `model=brain` 4/4 on ct151), so a single probe cannot discriminate #2665.
 
-19. **Non-chat cross-type, both directions.** `/v1/embeddings` naming the reranker id returns 200 with 384-d vectors (NOT a finding); `/v1/rerank` naming the embed id returns the raw `--reranking` 501 (#2672 sibling). Assert a typed error for the latter.
+19. **Non-chat cross-type, both directions.** `/v1/embeddings` naming the reranker id returns 200 with vectors (1024-d on bge-reranker-v2-m3, about a third zero; NOT a finding); `/v1/rerank` naming the embed id returns the raw `--reranking` 501 (#2672 sibling). Assert a typed error for the latter.
 
 20. **Record `pinned` and slot state around every `hal0/agent` wake.** agent reported `pinned=true` after a wake, so a later `hal0 slot unload agent` 409s. Idle eviction (embed, rerank and agent were reaped within ~2 min of each other) flips outcomes between loaded and offline: reload first and write the slot-state line before each dependent check.
 
 21. **Budget and fixtures.** Check 4's crash-loop cold path does not fit the 12 min budget; it now lives in the slots lane (fast-crash load). Check 17 (wrong-model vectors) needs two embedding models; mark it `skipped` on ct151 unless a second small embedding gguf is staged.
+
+22. **Slot NAME as model, for every ready slot.** Chat-complete naming each non-brain ready slot by NAME and diff the outcome against the `/v1/models` id list: an id advertised there but 404ing on chat is the #1837 ghost-id shape for a live slot. If another actor deletes a foreign slot mid-probe, record that and do not conclude.
 
 ## Leave behind
 

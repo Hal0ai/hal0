@@ -135,6 +135,32 @@ known-issues, or regressions, and add a line to the changelog below. A report re
 
 ### Kit changelog
 
+* **14** (2026-10-15) — Curation from the v1.4.0-nightly.20261015200136 run (verified findings:
+  5 new issues filed as #2736-#2740, 12 already-open issues re-observed and commented, the rest
+  refuted or ruled by-design). `regressions.yaml`: 5 new entries (doctor capability count false
+  PASS #2736, brain chat scalar `messages` zero-byte stream #2737, sticky ERROR after a slow stop
+  #2738, kokoro legacy `--model_path` re-download #2739, polish rollup of 7 items #2740). Every
+  existing probe carries this run's `last_result`; adjudicated away from the probe agent's call:
+  `capability-apply-skips-model-pull` to fixed (the last expect clause was vacuous),
+  `doctor-perms-never-converges` to fixed (the 2755 dir was a hand-made lane fixture; agents/ is
+  #2719), `hal0-api-shutdown-hang-90s` from blocked to regressed (verifier reproduced it, needs a
+  serving upstream). 19 entries gained a `v1_4_0_nightly_20261015200136_note` (verifier corrections,
+  e.g. 26+7+22 split of gated MCP tools, #2717 reproduces only on the standard runner image, #2720's
+  daemon does register the slot) and 9 stale repros were fixed (`scan/preview` takes `{"paths":[...]}`,
+  `ctx_max` -> `ctx_effective`, `.banks[]`, `.models[]`, `.convergence.post_activation_migrations.ok`,
+  rollback grep flipped, `--hardware vulkan`, FPX 422 at registration). `known-issues.yaml`: 5 new
+  entries (memory extraction serialising with chat on the stock install, capability defaults not
+  staged = nothing ships one, hand-made 2755 models dir, `model rm --keep-files` recovery, a pointer
+  list of 16 tracked issues), corrected rationale of `hindsight-extraction-shares-utility-slot` (a
+  stock fresh GPU install leaves utility model-less, so extraction shares brain), the
+  `capability-apply-undownloaded-409-holds` clause that let the refuted candidate through, the "no
+  silent-close path" claim (#2737) and the stale 384-d figure; `updated_for` bumped; 60 entries
+  remain `review_due` (46 at v1.1.0, 6 at v1.0.0, 8 at v1.4.0): re-adjudicate or delete. Lane briefs
+  gained 40 checks and lost stale text (`/api/memory`, `bench list`, the 384-d note, the pinned
+  `HAL0_RELEASES_URL` assumption in upgrade 2b); `_shared.md` gained fixture/cleanup rules.
+  `boxes.toml` (gitignored): ct151/ct163 facts. Preflight still hands ct163's CONTEXT.md to ct151
+  lanes; a per-box `CONTEXT-<box>.md` is now the first promotion item.
+
 * **13** (2026-10-15) — Curation from the v1.4.0-nightly.20261015155017 run (verified findings:
   17 filed as #2713-#2729, 21 already tracked and commented, the rest refuted or ruled
   by-design). `regressions.yaml`: 17 new entries (Qwen thinking leaving Hindsight extraction at

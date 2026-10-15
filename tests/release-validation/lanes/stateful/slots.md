@@ -185,6 +185,12 @@ immediately before you name a new throwaway resource, not only at lane start.
 
 21. **Pinned-slot unload from the CLI.** `hal0 slot unload utility` returns 409 `slot.pinned`; record whether any CLI option reaches `?force=true` (none in 1.4.0, #2729).
 
+22. **Record the slot's state immediately before any edit-then-load.** The 300 s idle reaper can evict the slot under test mid-lane; a `slot edit` on an evicted slot turns check 10's already-ready test into a plain offline load. Write the state line first, reload if needed, then edit.
+
+23. **Slow stop must converge.** After any unload or idle reap, assert the slot reads `offline` (never `error`) and `hal0/<slot>` aliases keep resolving. A `slot.terminate_timeout` / `did not return within 30.0s` error with the unit `not-found` is #2738 (do not reproduce it by throttling hal0-api on a shared box). Compare `GET /api/slots/<n>` state with `systemctl is-active hal0-slot@<n>` for every slot at lane exit.
+
+24. **Fixtures for `slot swap`.** The check needs a second small chat gguf; on a one-model box stage one (or state the accepted fixture in CONTEXT.md) rather than marking it skipped every release.
+
 ## Leave behind
 
 Brain slot loaded and healthy on the CPU-viable chat model; embed slot loaded (the memory lane

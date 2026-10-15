@@ -46,7 +46,7 @@ and described a layout that had already changed.
 4. **Malformed body.** POST an unparseable body and a body whose `messages` is the wrong type.
    The route is hand-parsed by house convention and answers 200 on this SSE surface — that part
    is adjudicated (`known-issues.yaml: brain-chat-hand-parsed-body`). What must happen is an
-   `{"type":"error"}` frame; silently answering an empty question is the finding.
+   `{"type":"error"}` frame; silently answering an empty question is the finding. Sweep every wrong-typed `messages` (`123`, `1.5`, `true`, `"x"`, `{}`, `null`, `[123]`) and assert `size_download > 0` with a last frame of done/error: a scalar giving 200 with 0 bytes in ~15 ms is #2737 (an unhandled TypeError in `_frame_messages`, ~1,500 journal lines per request).
 5. **Every tool, individually** — regression `brain-tools-image-gate` (#1789) and
    `brain-board-tools-401` (#1829). Do not rely on one conversation to exercise the tool
    surface: drive each family with a direct question that needs exactly that tool — a slots
@@ -117,11 +117,15 @@ read the tool_result payload and confirm it actually answers what was asked.
 
 17. **Table row vs tool_result, every row.** Compare each per-slot state the steward writes (running/serving/offline) with the matching `list_slots` row; summary sentences miscount on the 2.6B model (known prose-vs-tool_result), a contradicting TABLE ROW in >= 2 of 3 tries is a finding.
 
-18. **Unit conversion.** Ask "how much VRAM does this machine have" 6 times; regex every GB figure and require it within 1% of `gpu_vram_total_mb`/1000 or /1024 (#2728: 114.5/114.8 GB for 118784 MB in 6 of 7 runs).
+18. **Unit conversion.** Ask "how much VRAM does this machine have" 6 times; regex every GB figure and require it within 1% of `gpu_vram_total_mb`/1000 or /1024 (#2728: 114.5/114.8 GB for 118784 MB in 6 of 7 runs). Also run it on the unprompted hardware summary: the tenfold dropped digit (`11.9 GB`) appeared there and in a normal question. Judge conversions against the `tool_result` only; MB used/free are copied correctly and `gpu_util` is a 0..1 fraction.
 
 19. **Brain concurrency.** Assert the brain slot's own `/props` `total_slots` is 1 or that per-sequence context is >= 16k (#2714); the existing #2692 check covers only the utility profile. Announce first if you drive 4 concurrent 16k prompts: it kills other lanes' brain requests.
 
 20. **Memory path keys.** The steward's `memory_add` fact lives in bank `shared` with tags `visibility:private` and `agent:hermes__hal0-brain` (no bank `private:hermes__hal0-brain`); assert it is findable by `memory_search` under that scheme. Plain `/api/memory/search` does not return it.
+
+21. **Reads must not write.** After any recall turn ('what is my X'), diff the memory bank fact/doc count before and after; a write on a read intent is a finding.
+
+22. **Slot registry vs slot TOML.** After a previous stage restores a slot TOML, compare `/api/slots/<n>` `model_id` with the TOML (`agent` showed `lfm2.5-2.6b` with `no model assigned`); attribute stale state to the stage that edited it before filing.
 
 ## Leave behind
 

@@ -119,6 +119,14 @@ snapshot, residue accumulates anonymously across a serialised run unless each la
 
 18. **`systemctl --failed` at entry and exit**, classifying every new unit as a podman healthcheck transient or real.
 
+19. **Slot argv paths exist.** `podman inspect <ctr> --format '{{.Config.Cmd}}'` for every running slot; any `/mnt`, `/root` or `/home` path that does not exist on the box is #2739 (kokoro `--model_path /mnt/ai-models/...`). With tts loaded, `journalctl -u hal0-slot@tts | grep -c 'downloading kokoro ONNX'` should not grow per start.
+
+20. **Recovery after `model rm --keep-files`.** After `rm` then `model add <kept path>`, the row registers as `chat` with a bad-magic warning (known `model-add-detection-surfacing`; do not file). What must hold: `capabilities set <slot> <child> --disabled` then `--model <id> --backend <dev> --enabled` reaches ready and serves 200. A no-op re-apply of an unchanged enabled selection returns 200/offline by design (#2724 is the dangling selection).
+
+21. **Pull cancel.** `POST /api/models/<id>/pull/cancel` should move a job out of `queued`; the qwen3-4b-npu stub staying queued is #2723 (known). On other ids, assert cancel works.
+
+22. **Disable restores the TOML.** After `POST voice/stt {model:'',enabled:true}` then disable, `capabilities.toml` stt should be byte-identical to its pre-state (device and provider back to empty); diff against a backup taken first.
+
 ## Leave behind
 
 Capabilities left enabled on the backend this box supports; defaults set; scratch model files

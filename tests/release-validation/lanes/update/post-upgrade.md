@@ -101,6 +101,16 @@ did not ask for?**
 
 18. **Unit files.** Diff `/etc/systemd/system/hal0*.service` against `installer/systemd`; only slot quadlets are re-rendered by the updater.
 
+19. **Idle-reap stop must converge.** After any idle-reap stop on a loaded host, assert slot state returns to `offline` (not `error`) and `hal0/<slot>` aliases keep resolving (embed after a stop over 30 s is #2738). Diff `/api/slots` states against `systemctl is-active hal0-slot@X` for every slot at lane exit to catch persisted false errors.
+
+20. **Floor test needs a daemon-env assertion.** After `systemctl unset-environment`, check `/proc/<MainPID>/environ` for the override; unsetting the manager env does not clear a running daemon, so a second restart is required.
+
+21. **MCP initialize paths.** Use `/mcp/admin/mcp` and `/mcp/memory/mcp`; the bare `/mcp`, `/mcp/` and `/mcp/admin` return 405.
+
+22. **Snapshot profiles in the upgrade stage.** Capture `hal0 profile list --json` in the upgrade stage's before snapshot so the post-upgrade profile diff has a real baseline.
+
+23. **Steward answers carry the version.** Ask the steward for the system version and require the final prose, not only the `tool_result` frame, to contain the actual version string (one attempt showed the tool succeeding while the prose claimed it could not run tools).
+
 ## Leave behind
 
 The box healthy on the new version, with its accumulated state intact — it is the input to the

@@ -38,6 +38,15 @@ from `boxes.toml` plus live probes. Likewise confirm the installed version from
 stage share the box: if a slot, bank or file changed under you, name who plausibly changed it
 and do not file it as a defect.
 
+## Fixtures and cleanup you owe the next lane
+
+* A directory you create under `/var/lib/hal0/models/` by hand lands `2755` (umask 022 under a 2775
+  setgid parent) and shows up as drift in `hal0 doctor perms`; `chmod 2775` it or keep fixtures
+  outside the store (`known-issues: doctor-perms-handmade-models-dir-2755`).
+* Every MCP approval you queue, you deny; the inbox must be empty when you exit.
+* `CONTEXT.md` may be another box's file. Prefer `CONTEXT-<box>.md` in the run directory when it
+  exists; otherwise take identity from `boxes.toml` as above.
+
 ## The coherence canary — run it before trusting any generated text
 
 Structural checks (HTTP 200, container health, tok/s, well-formed SSE) all pass over pure

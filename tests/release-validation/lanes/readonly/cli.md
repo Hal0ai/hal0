@@ -10,7 +10,7 @@ command group is unfamiliar, run `--help` first and only run the verbs that clea
    `model list|show <id>|store`, `memory status|bank list|ops list`, `config` (read
    subcommands), `upstream list`, `capabilities list`, `agent list|status <name>`, `app`
    (read-only status), `mcp list|status <server>`,
-   `auth status`, `board` (read-only verbs), `bench` (list/results/history), `profile list|show <name>`,
+   `auth status`, `board` (read-only verbs), `bench status|results|history` (`bench list` is not a verb), `profile list|show <name>`,
    `update --check` (checks only — never apply).
 2. **Exit codes, measured properly.** Capture them as `out=$(cmd); rc=$?` — **never through a
    pipe**. Piping to `head` masks the real exit status and silently turns this check into a
@@ -102,6 +102,12 @@ baseline diff, so don't stop checking after the first comparison.
 16. **Dropped flags and dead hints.** `hal0 update --target 9.9.9 --check; echo rc=$?` must not read like a bare `--check` (#2729); `hal0 slot unload --help` must list the option the 409 `slot.pinned` message tells the user to pass.
 
 17. **Doctor honesty.** The "passed with N warning(s)" count equals the number of distinct warnings (a continuation line was counted, N=5 vs 4); an installed live host prints no install-time advice (node missing, ports in use, "will build the memory-engine venv"); and `hal0 doctor` is not silent while `systemctl --failed` lists a failed podman healthcheck transient.
+
+18. **`doctor verify` capability row against the selections.** `hal0 doctor verify | grep -i 'Capability slots'` vs `curl -s $API/api/capabilities | jq '[.selections[][]|select(.enabled==true)]|length'` (and `GET /api/doctor`, id `HAL0-CAPABILITIES-NONE`). `PASS 3 active: embed, img, voice` while every child is `enabled=false` is #2736; an enabled-but-idle on-demand selection may fairly count. Also compare with the set of slots actually ready and model-bound.
+
+19. **Non-interactive `slot delete`.** On a throwaway slot (`slot create ... -m <registered chat model>`; `-m` is required): `hal0 slot delete <n> </dev/null; echo rc=$?` (expect rc 1 "Aborted." and a hint, today none), `echo y | hal0 slot delete <n>` works, `echo y | hal0 slot delete utility` is refused 409 `slot.pinned`. There is no `--yes`, and `--force` has no help text and a stale seeded-slot docstring (#2740 items 6-7). Leave nothing behind.
+
+20. **Doctor on a release tree.** `HAL0_PLAIN=1 hal0 doctor </dev/null` ends `passed with N warning(s)` on a healthy box. Count the distinct warnings yourself; node-missing and own-port warnings on a signed release tree (no `ui/package.json`) are #2740 items 1-3, not new findings. Also `hal0 doctor profiles; echo rc=$?` with a non-loading slot TOML present: rc 0 is item 5.
 
 ## Carry-forward
 

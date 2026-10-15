@@ -136,6 +136,14 @@ declare `utility` off-limits — say in your report which of the two you got.
 
 21. **Recall `limit` and marker hygiene.** `/api/memory/recall` with `limit=6` returned 19 items (record the contract); use a unique marker per run (MARKER-7734 collides with the probe stage's MARKER-7734-RP).
 
+22. **Which slot serves `hal0/utility`?** With utility model-less, read `resolution_path` from the `dispatch.decision` line: on the stock shape it is `passthrough:brain`, not a 404 or dead-letter. Record it in the lane report.
+
+23. **Extraction blocks chat: measure, do not re-file.** While a `/api/memory/add` is in flight, time a 4-token `hal0/utility` chat every few seconds (idle baseline first, taken AFTER consolidation drains: `ops list` shows no processing/pending consolidation, which contaminates an idle baseline for 1-2 minutes). 80-110 s queueing behind retain/consolidation on the stock `--parallel 1` brain is `memory-extraction-serializes-with-chat-on-fresh-install` (#2734/#2669); report only the `still_report_if` conditions (5xx, > 300 s, extraction on a bound-utility box).
+
+24. **Recall is token-budgeted.** Assert the recall route honours `max_tokens` and that `limit` is not part of the contract; this is a documentation check, not a defect hunt.
+
+25. **Replay vs lane-origin identity cards.** After a degraded boot, assert a completion line follows `brain_lane.degraded_replay_armed`, or that no `agent-identity` card exists before the heal, to tell replay from lane-written cards.
+
 ## Leave behind
 
 Memory enabled, utility slot loaded, brain healthy. Note the marker you stored and the state of
