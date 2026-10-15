@@ -33,6 +33,13 @@ applying. Add those subsections to a version's section to surface them; see
 ### Fixed
 
 - **ui:** a vulkan-only GPU (render node passed through, no `/dev/kfd`) now counts as a GPU on the Overview utilization row and health strip and on the Settings Live-hardware and Power & thermal panels, instead of reading "no GPU access" while a vulkan slot is serving; the NPU rows gate on the NPU probe rather than the GPU one (#2674).
+- A profile whose `profiles.toml` entry fails validation is no longer
+  invisible. It is quarantined as before, but `GET /api/profiles` and
+  `hal0 profile list` now show it as a read-only row with the reason, the
+  Profiles page lists it under "Needs attention", and `hal0 profile delete`
+  (or the page) removes it. The `profiles.invalid` message on a slot bound to it
+  now says to recreate the profile under the same name or delete it, instead of
+  pointing at `hal0 profile edit`, which cannot see a quarantined entry (#2653).
 - The post-update runner-system and profile-centric conversions no longer
   fail on a box whose `/var/lib/hal0/backups` a root-run tool created as
   `root:hal0 2755`. Before, `hal0-api` (`User=hal0`) could not write the

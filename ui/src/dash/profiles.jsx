@@ -296,6 +296,42 @@ function RuntimeStateChip({ p, backends }) {
 // plus the runtime the profile carries: backend chips in the title row,
 // install state where the metric sits, title + blurb under the intent.
 export function ProfileCard({ p, index, onEdit, onClone, onDelete, onExport }) {
+  if (p.quarantined) return <QuarantinedCard p={p} index={index} onDelete={onDelete} />;
+  return <TunedProfileCard p={p} index={index} onEdit={onEdit} onClone={onClone} onDelete={onDelete} onExport={onExport} />;
+}
+
+// A profiles.toml entry that failed validation (#2653): it carries no tune,
+// only the reason it was set aside. Read-only apart from delete; recreating
+// the name through "New profile" replaces it.
+function QuarantinedCard({ p, index, onDelete }) {
+  const usedBy = p.used_by || [];
+  return (
+    <div className="stk-lib-card" style={{ animationDelay: (index * 34) + 'ms', opacity: 0.75 }}
+      data-testid={`pf-quarantined-${p.name}`}>
+      <div className="stk-lib-h">
+        <div className="stk-lib-id">
+          <div className="pf-title-row">
+            <span className="stk-lib-name">{p.name}</span>
+          </div>
+          <div className="stk-lib-intent" style={{ color: 'var(--err)' }}>invalid as stored</div>
+          <div className="pf-runtime-line mono" data-testid={`pf-quarantined-error-${p.name}`}>{p.error}</div>
+        </div>
+      </div>
+      <div className="stk-lib-f">
+        {usedBy.length
+          ? <span className="stk-tag" title={'used by ' + usedBy.join(', ')}>used by {usedBy.length}</span>
+          : <span className="mono pf-card-unused">unused</span>}
+        <span className="stk-tag">quarantined</span>
+        <span className="stk-spacer" />
+        <button className="stk-icon-btn" style={{ width: 26, height: 26 }} onClick={() => onDelete(p)}
+          title={usedBy.length ? 'In use — detach slots first' : 'Delete this entry (or recreate the name to replace it)'}
+          data-testid={`pf-btn-delete-${p.name}`}>{Icons.trash}</button>
+      </div>
+    </div>
+  );
+}
+
+function TunedProfileCard({ p, index, onEdit, onClone, onDelete, onExport }) {
   const systemInfoQuery = useSystemInfo();
   const backends = systemInfoQuery.data?.backends ?? {};
   const chips = runtimeChips(p, backends);
@@ -956,13 +992,15 @@ function ProfilesHeader({ count, onNew, onImport }) {
 
 function ProfilesView() {
   const query = useProfiles();
-  const profiles = query.data ?? [];
+  const allProfiles = query.data ?? [];
   const exportMut = useProfileExport();
 
   const [drawer, setDrawer] = useState(null);   // {mode, source}
   const [confirm, setConfirm] = useState(null);
   const [importing, setImporting] = useState(false);
 
+  const quarantined = allProfiles.filter(p => p.quarantined);
+  const profiles = allProfiles.filter(p => !p.quarantined);
   const seeds = profiles.filter(p => p.seed);
   const custom = profiles.filter(p => !p.seed);
   const inUseCount = profiles.filter(p => (p.used_by || []).length).length;
@@ -1015,7 +1053,7 @@ function ProfilesView() {
         </div>
       </div>
 
-      {profiles.length === 0 ? (
+      {profiles.length === 0 && quarantined.length === 0 ? (
         <div className="empty mono">No profiles configured.</div>
       ) : (
         <>
@@ -1038,6 +1076,15 @@ function ProfilesView() {
                 onExport={onExport} />
             ))}
           </Section>
+
+          {quarantined.length > 0 && (
+            <Section title="Needs attention" count={quarantined.length}
+              hint="invalid as stored · delete, or recreate the name to replace">
+              {quarantined.map((p, i) => (
+                <ProfileCard key={p.name} p={p} index={i} onDelete={pp => setConfirm(pp)} />
+              ))}
+            </Section>
+          )}
         </>
       )}
 
@@ -1045,7 +1092,7 @@ function ProfilesView() {
         <ProfileDrawer
           mode={drawer.mode}
           source={drawer.source}
-          existing={profiles.map(p => p.name)}
+          existing={allProfiles.filter(p => !p.quarantined).map(p => p.name)}
           onClose={() => setDrawer(null)}
           onSaved={() => setDrawer(null)}
         />
@@ -1055,7 +1102,7 @@ function ProfilesView() {
       )}
       {importing && (
         <ImportModal
-          existing={profiles.map(p => p.name)}
+          existing={allProfiles.filter(p => !p.quarantined).map(p => p.name)}
           onClose={() => setImporting(false)}
           onImported={() => setImporting(false)}
         />

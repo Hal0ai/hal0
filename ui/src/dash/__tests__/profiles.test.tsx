@@ -839,3 +839,28 @@ describe('ImportModal runtime preview (U5)', () => {
     act(() => root.unmount())
   })
 })
+
+// ── #2653: quarantined row ───────────────────────────────────────────────────
+
+describe('ProfileCard quarantined row (#2653)', () => {
+  it('renders the error and a delete button without any tuning values', () => {
+    const onDelete = vi.fn()
+    const { host } = mount(
+      React.createElement(ProfileCard, {
+        p: { name: 'broken', quarantined: true, error: 'not_a_field: Extra inputs are not permitted', seed: false, used_by: [] },
+        index: 0,
+        onEdit: vi.fn(),
+        onClone: vi.fn(),
+        onDelete,
+        onExport: vi.fn(),
+      }),
+    )
+    expect(host.querySelector('[data-testid="pf-quarantined-error-broken"]')?.textContent).toContain(
+      'Extra inputs are not permitted',
+    )
+    expect(host.querySelector('[data-testid="pf-btn-edit-broken"]')).toBeNull()
+    const del = host.querySelector('[data-testid="pf-btn-delete-broken"]') as HTMLButtonElement
+    act(() => del.click())
+    expect(onDelete).toHaveBeenCalledTimes(1)
+  })
+})

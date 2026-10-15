@@ -559,6 +559,24 @@ def test_delete_custom_204(client: TestClient) -> None:
     assert not any(p["name"] == "my-vulkan" for p in listed)
 
 
+def test_quarantined_profile_is_listed_and_deletable(
+    client: TestClient, tmp_hal0_home: str
+) -> None:
+    """#2653: an entry that failed validation shows as a read-only row and DELETE removes it."""
+    from hal0.config import paths
+
+    path = paths.profiles_toml()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text('[profile.broken]\nnot_a_field = "surprise"\n', encoding="utf-8")
+
+    row = next(p for p in client.get("/api/profiles").json() if p["name"] == "broken")
+    assert row["quarantined"] is True
+    assert row["error"]
+
+    assert client.delete("/api/profiles/broken").status_code == 204
+    assert not any(p["name"] == "broken" for p in client.get("/api/profiles").json())
+
+
 def test_delete_missing_404(client: TestClient) -> None:
     r = client.delete("/api/profiles/does-not-exist")
     assert r.status_code == 404

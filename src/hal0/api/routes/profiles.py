@@ -221,10 +221,19 @@ def list_profiles() -> list[dict[str, Any]]:
             "used_by":              ["agent"]    # slots bound to this profile
         }
 
+    An entry in profiles.toml that failed validation is set aside, not dropped
+    (#2653). It is listed as a read-only row that carries no tune::
+
+        {"name": "old", "quarantined": true, "error": "<why>", "seed": false,
+         "used_by": []}
+
+    ``DELETE /api/profiles/{name}`` removes it; ``POST /api/profiles`` under the
+    same name replaces it.
+
     Raises:
         500 (ConfigParseError): if profiles.toml is present but malformed.
     """
-    return [profile.to_dict() for profile in ProfileCatalog().list()]
+    return [profile.to_dict() for profile in ProfileCatalog().list(include_quarantined=True)]
 
 
 # `screen_profile_flags` (hal0.profiles) is the one flag screen for every write
