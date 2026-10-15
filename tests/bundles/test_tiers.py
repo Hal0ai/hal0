@@ -57,7 +57,7 @@ def test_hal0_default_matches_plan_table():
     assert m.primary.size_gb == pytest.approx(6.9)
     assert m.coder is None
     aux_models = {entry.model_name for entry in m.aux}
-    assert aux_models == {"nomic-embed-text-v1.5-q8_0", "Whisper-Tiny", "kokoro-v1"}
+    assert aux_models == {"nomic-embed-text-v1.5-q8_0", "kokoro-v1"}
     assert m.npu_trio_shown is False
 
 
@@ -70,10 +70,10 @@ def test_hal0_pro_matches_plan_table():
     assert m.coder.size_gb == pytest.approx(18.6)
     assert m.coder.lru is True
     aux_models = {entry.model_name for entry in m.aux}
-    # +bge-reranker, +whisper-base, +sd-turbo (plus carryover embed +
-    # kokoro:cpu — the "+" notation in plan §8.2 inherits Default's aux).
+    # +bge-reranker, +sd-turbo (plus carryover embed + kokoro:cpu — the
+    # "+" notation in plan §8.2 inherits Default's aux). No whisper.cpp STT
+    # model rides any tier (#2691).
     assert "bge-reranker-v2-m3-q4_k_m" in aux_models
-    assert "Whisper-Base" in aux_models
     assert "SD-Turbo-GGUF" in aux_models
     assert m.npu_trio_shown is True
     assert m.npu_trio_optin is False  # opt-in means user must tick the box
@@ -88,7 +88,7 @@ def test_hal0_max_matches_plan_table():
     assert m.coder.size_gb == pytest.approx(48.0)
     assert m.coder.lru is True
     aux_models = {entry.model_name for entry in m.aux}
-    assert "Whisper-Large-v3-Turbo" in aux_models
+    assert not any("whisper" in name.lower() for name in aux_models)
     assert "Flux-2-Klein-9B-GGUF" in aux_models
     assert m.npu_trio_shown is True
 
@@ -99,7 +99,7 @@ def test_lmx_kit_matches_plan_table():
     assert m.primary is not None and m.primary.model_name == "Qwen3.6-35B-A3B-MTP-GGUF"
     assert m.coder is None  # vendor kit doesn't ship a coder
     aux_models = {entry.model_name for entry in m.aux}
-    assert aux_models == {"Whisper-Large-v3-Turbo", "kokoro-v1", "Flux-2-Klein-9B-GGUF"}
+    assert aux_models == {"kokoro-v1", "Flux-2-Klein-9B-GGUF"}
     assert m.vendor == "amd"
     assert m.npu_trio_shown is False  # kit doesn't expose the toggle
 

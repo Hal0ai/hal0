@@ -413,8 +413,8 @@ async def commit_scan_rows(
         elif provider not in RUNTIME_FAMILIES:
             # Final-review fix: an operator-supplied provider string was
             # persisted unscreened, letting POST /api/models/scan mint an
-            # out-of-vocab row (e.g. "whispercpp", a curated-only tag the
-            # spec forbids on registry rows). Screen it against the same
+            # out-of-vocab row (any tag outside RUNTIME_FAMILIES, e.g. a
+            # curated-only tag the spec forbids on registry rows). Screen it against the same
             # vocab the create path enforces (see the ``model.provider_invalid``
             # check further down this module) and reject the row instead.
             skipped.append({"path": str(resolved), "reason": f"invalid_provider:{provider!r}"})

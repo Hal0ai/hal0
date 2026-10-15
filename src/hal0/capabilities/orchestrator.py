@@ -499,6 +499,28 @@ class CapabilityOrchestrator:
                 update={"device": self._resolve_stt_device(slot, child, merged.model)}
             )
 
+        # An enabled voice.stt selection whose provider has no runtime
+        # profile must fail loudly (#2691). profile_fit answers None for it;
+        # left to fall through, the slot kept (or was rebound to) the
+        # Moonshine runner while pointing at a model it cannot load.
+        if (
+            child == "stt"
+            and merged.enabled
+            and merged.provider
+            and profile_name_for_fit("stt", merged.device, merged.provider) is None
+        ):
+            raise BadRequest(
+                f"no STT runtime exists for provider {merged.provider!r} — "
+                "voice.stt providers with a runtime are 'moonshine' (cpu) and 'flm' (npu)",
+                code="capability.no_engine_for_provider",
+                details={
+                    "slot": slot,
+                    "child": child,
+                    "provider": merged.provider,
+                    "device": merged.device,
+                },
+            )
+
         # An enabled selection must name a device the host advertises
         # (#2659). npu is the case that bypasses every later gate (exempt
         # from the download check, always answers pending_reload), so a

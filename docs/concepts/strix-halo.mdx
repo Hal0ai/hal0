@@ -59,7 +59,7 @@ an explicit device pin, never "whatever llama.cpp picks":
 - **Vulkan** (`gpu-vulkan`) — the Mesa/RADV path. It needs only a DRM render
   node (`/dev/dri/renderD*`), which makes it the lane for boxes where `/dev/kfd`
   was never forwarded — an unprivileged LXC, for instance. It is also the lane
-  the non-llama.cpp Vulkan runtimes use (Kokoro TTS, whisper.cpp, ComfyUI).
+  the non-llama.cpp Vulkan runtimes use (Kokoro TTS, ComfyUI).
 
 ROCm is seeded on a box that can run it, because it carries hal0's validation history and is the lane
 MTP/speculative decode is tuned against. That choice is revisited at GA; in the

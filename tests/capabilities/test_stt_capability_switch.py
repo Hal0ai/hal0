@@ -449,3 +449,32 @@ def test_stt_engine_id_is_the_served_non_streaming_id(tmp_hal0_home: str) -> Non
     ids = {r["id"] for r in rows}
     assert "moonshine-base-en" in ids
     assert "moonshine-small-streaming-en" not in ids
+
+
+async def test_apply_provider_without_a_runtime_is_a_typed_error_and_writes_nothing(
+    tmp_hal0_home: str,
+) -> None:
+    """#2691: a provider with no runtime profile must fail per-request, not be
+    rebound to the Moonshine runner. No slot write, no stored selection."""
+    from hal0.errors import BadRequest
+
+    _write_stt_slot(tmp_hal0_home, device="cpu", profile="", provider="")
+    before = _read_stt_slot(tmp_hal0_home)
+    fake = FakeSlotManager()
+    orch = CapabilityOrchestrator(slot_manager=fake)
+
+    with pytest.raises(BadRequest) as exc_info:
+        await orch.apply(
+            "voice",
+            "stt",
+            {
+                "model": "moonshine-base-en",
+                "backend": "cpu",
+                "provider": "nonexistent",
+                "enabled": True,
+            },
+        )
+    assert exc_info.value.code == "capability.no_engine_for_provider"
+    assert "nonexistent" in str(exc_info.value)
+
+    assert _read_stt_slot(tmp_hal0_home) == before
