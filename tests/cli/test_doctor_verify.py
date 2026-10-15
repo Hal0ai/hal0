@@ -70,11 +70,48 @@ def test_check_dns_plain_ip_is_pass_no_mdns() -> None:
     assert c.status == "pass" and "no mDNS" in c.detail
 
 
+def _sel(enabled: bool, model: str = "") -> dict[str, object]:
+    return {"enabled": enabled, "model": model}
+
+
 def test_check_capabilities_active_vs_none() -> None:
-    active = dv.check_capabilities({"selections": {"embed": {"x": 1}, "voice": {}}})
+    active = dv.check_capabilities({"selections": {"embed": {"default": _sel(True, "m")}}})
     assert active.status == "pass" and "embed" in active.detail
     assert dv.check_capabilities({"selections": {}}).status == "warn"
     assert dv.check_capabilities(None).status == "warn"
+
+
+def test_check_capabilities_all_disabled_warns_with_enable_step() -> None:
+    """#2736: every seeded group has children; all disabled is not '3 active'."""
+    fresh = {
+        "selections": {
+            "embed": {"default": _sel(False)},
+            "img": {"gen": _sel(False), "edit": _sel(False)},
+            "voice": {"stt": _sel(False), "tts": _sel(False)},
+        }
+    }
+    c = dv.check_capabilities(fresh)
+    assert c.status == "warn" and c.detail == "none active"
+    assert any(s.label == "Enable a capability" for s in c.next_steps)
+
+
+def test_check_capabilities_enabled_without_model_counts_active() -> None:
+    c = dv.check_capabilities({"selections": {"voice": {"stt": _sel(True, "")}}})
+    assert c.status == "pass" and "voice" in c.detail
+
+
+def test_check_capabilities_mixed_lists_only_enabled_groups() -> None:
+    c = dv.check_capabilities(
+        {
+            "selections": {
+                "embed": {"default": _sel(False)},
+                "img": {"gen": _sel(False), "edit": _sel(True, "x")},
+                "voice": {"stt": _sel(False)},
+            }
+        }
+    )
+    assert c.status == "pass"
+    assert c.detail == "1 active: img"
 
 
 def test_check_memory_states() -> None:
@@ -114,7 +151,7 @@ def test_overall_status_precedence() -> None:
         health=None,  # critical fail
         urls=None,
         system={"checks": {"slot_manager": {"slots": 1, "errored": []}}},
-        capabilities={"selections": {"embed": {"x": 1}}},
+        capabilities={"selections": {"embed": {"default": {"enabled": True}}}},
         memory={"engine": None},
         services={"services": []},
     )
@@ -134,7 +171,7 @@ def test_overall_status_precedence() -> None:
         health={"version": "0.9.1"},
         urls={"api": "http://192.168.1.10:8080"},
         system={"checks": {"slot_manager": {"slots": 2, "errored": []}}},
-        capabilities={"selections": {"embed": {"x": 1}}},
+        capabilities={"selections": {"embed": {"default": {"enabled": True}}}},
         memory={"engine": None},
         services={"services": [{"id": "openwebui", "up": True}, {"id": "hermes", "up": True}]},
     )
@@ -160,7 +197,7 @@ def test_render_report_includes_urls_and_links() -> None:
             "openwebui": "http://hal0.local:3001",
         },
         system={"checks": {"slot_manager": {"slots": 1, "errored": []}}},
-        capabilities={"selections": {"embed": {"x": 1}}},
+        capabilities={"selections": {"embed": {"default": {"enabled": True}}}},
         memory={"engine": None},
         services={"services": [{"id": "openwebui", "up": True}, {"id": "hermes", "up": True}]},
     )

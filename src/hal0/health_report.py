@@ -236,7 +236,14 @@ def check_capabilities(capabilities: dict[str, Any] | None) -> Check:
         return Check(
             "capabilities", "Capability slots", _WARN, "none configured", next_steps=caps_steps
         )
-    active = [k for k, v in selections.items() if v]
+    # Schema v2 is nested (group -> child -> {enabled, model, ...}); a group
+    # with children is not active unless at least one child is enabled (#2736).
+    active = [
+        group
+        for group, children in selections.items()
+        if isinstance(children, dict)
+        and any(isinstance(sel, dict) and sel.get("enabled") for sel in children.values())
+    ]
     if not active:
         return Check(
             "capabilities", "Capability slots", _WARN, "none active", next_steps=caps_steps
