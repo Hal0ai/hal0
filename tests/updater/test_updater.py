@@ -1734,6 +1734,7 @@ def test_commit_runs_post_activation_migrations_after_the_swap(
         "pass_warnings": [],
         "conversion_blockers": [],
         "unassigned_models": [],
+        "model_bundles": [],
     }
     assert result["convergence"]["converged"] is True
 
@@ -1806,6 +1807,42 @@ def test_commit_carries_the_unassigned_models_without_failing_convergence(
 
     post = result["convergence"]["post_activation_migrations"]
     assert post["unassigned_models"] == [entry]
+    assert result["convergence"]["converged"] is True
+
+
+def test_commit_carries_a_failed_model_bundle_pull_without_failing_convergence(
+    synthetic_release: dict[str, Any], cosign_skip: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#2739: the kokoro-v1 bundle pass's report reaches the convergence dict;
+    a failed (offline) pull is reported with its remedy, never a blocker."""
+    entry = {
+        "model": "kokoro-v1",
+        "outcome": "failed",
+        "path": "/s/tts/kokoro-v1",
+        "remedy": "hal0 model pull kokoro-v1",
+        "error": "network unreachable",
+    }
+
+    class _Completed:
+        def __init__(self, returncode: int = 0, stdout: str = "", stderr: str = "") -> None:
+            self.returncode = returncode
+            self.stdout = stdout
+            self.stderr = stderr
+
+    def _fake_run(cmd, *a, **k):
+        if any("run_post_activation_migrations" in part for part in list(cmd)):
+            payload = {"from": 1, "to": 1, "model_bundles": [entry]}
+            envelope = json.dumps({updater_module._MIGRATION_RESULT_KEY: payload})
+            return _Completed(stdout=envelope)
+        return _Completed()
+
+    monkeypatch.setattr(updater_module, "_is_editable_install", lambda: False)
+    monkeypatch.setattr("hal0.updater.updater.subprocess.run", _fake_run)
+
+    result = asyncio.run(Updater().apply())
+
+    post = result["convergence"]["post_activation_migrations"]
+    assert post["model_bundles"] == [entry]
     assert result["convergence"]["converged"] is True
 
 

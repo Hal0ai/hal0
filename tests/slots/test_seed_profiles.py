@@ -155,6 +155,32 @@ def test_seed_has_no_operational_flags(name: str) -> None:
         assert fragment not in flags, f"{name} flags contain operational flag {fragment!r}: {flags}"
 
 
+#: Seeds that still name an operator-staged bundle by absolute path. Each is
+#: its own issue: moonshine weights are operator-staged by design (ADR-0001,
+#: #2473); qwen3-tts is ROCm-only and unverified. Kokoro is NOT here — its
+#: bundle is the pulled kokoro-v1 row and the provider derives the path from
+#: the store (ADR-0030, #2739). Shrink this set; never grow it.
+ABSOLUTE_PATH_SEED_EXEMPTIONS = frozenset({"moonshine", "qwen3-tts"})
+
+
+@pytest.mark.parametrize("name", SEED_PROFILE_NAMES)
+def test_seed_flags_name_no_absolute_path(name: str) -> None:
+    """A shipped seed must not bake an operator-local path: a fresh install
+    never has it, so the engine silently falls back (#2739)."""
+    if name in ABSOLUTE_PATH_SEED_EXEMPTIONS:
+        pytest.skip(f"{name}: operator-staged bundle path (tracked separately)")
+    tokens = shlex.split(_flags(name))
+    values = [t.split("=", 1)[1] if t.startswith("--") and "=" in t else t for t in tokens]
+    absolute = [v for v in values if v.startswith("/")]
+    assert not absolute, f"{name} flags carry absolute path(s) {absolute}: {_flags(name)}"
+
+
+def test_absolute_path_exemptions_are_still_needed() -> None:
+    """An exemption whose seed no longer carries a path must be removed."""
+    for name in ABSOLUTE_PATH_SEED_EXEMPTIONS:
+        assert any(t.startswith("/") for t in shlex.split(_flags(name))), name
+
+
 @pytest.mark.parametrize("name", SEED_PROFILE_NAMES)
 def test_seed_has_no_managed_hardware_or_model_fact_flags(name: str) -> None:
     """Token-exact via the argv alias table (``--model_path`` / ``--threads-batch``

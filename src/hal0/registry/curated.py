@@ -24,7 +24,8 @@ without touching the curated list.
 #   * Moonshine ships a multi-file ONNX bundle (``.ort`` files + tokenizer).
 #   * Whisper.cpp GGUF mirrors exist, but hal0's STT runtime is the Moonshine
 #     toolbox, which cannot load them.
-#   * Kokoro's public weight is a PyTorch pickle or ONNX + ``voices/*.bin``.
+#   * Kokoro's ONNX model + voices pack now pull through ``extra_files``
+#     (the stock ``kokoro-v1`` row, #2739); it is still ``bundle_only``.
 #   * VibeVoice is a multi-file diffusers-style safetensors repo.
 #
 # Either a multi-file pull mode in ``registry/pull.py`` or a whisper-cpp
@@ -76,6 +77,15 @@ class CuratedModel(BaseModel):
             "main file (WS-11) and associates it as the registry row's "
             "``mmproj`` sidecar so vision works without a directory scan. "
             "Empty for non-vision entries."
+        ),
+    )
+    extra_files: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Further files from the same HF repo that the engine loads beside "
+            "``hf_file``, installed into the same directory under their "
+            "upstream basenames (e.g. kokoro's voices pack, #2739). Empty for "
+            "single-file entries."
         ),
     )
     context_length: int = Field(
@@ -664,9 +674,9 @@ CURATED_MODELS: list[CuratedModel] = [
         backend="llamacpp",
     ),
     # ── STT / TTS picks ────────────────────────────────────────────────────
-    # Intentionally empty — see the module docstring TODO. The blocker is
-    # the pull layer's single-file shape vs. moonshine/kokoro's multi-file
-    # ONNX/PyTorch bundles.
+    # Intentionally empty — see the module docstring TODO. Kokoro's
+    # two-file bundle is pulled through ``extra_files`` (kokoro-v1, below);
+    # moonshine's multi-file ONNX bundle stays operator-staged (ADR-0001).
     # ── Image-gen models (recommended_slot="img", routed through ComfyUI) ────
     #
     # Curated picks intentionally span the licensing spectrum:
@@ -857,9 +867,13 @@ CURATED_MODELS: list[CuratedModel] = [
         license_url="https://www.apache.org/licenses/LICENSE-2.0",
         hf_repo="mikkoph/kokoro-onnx",
         hf_file="kokoro-v1.0.onnx",
+        # The runner loads the ONNX model plus the voices pack; both land in
+        # <store>/tts/kokoro-v1/ under these names (the runner globs
+        # kokoro-*.onnx and voices*.bin there, #2739).
+        extra_files=["voices-v1.0.bin"],
         recommended_slot="tts",
         tags=["tts"],
-        notes="Stock catalogue key (kokoro recipe, multi-file ONNX).",
+        notes="Stock catalogue key (kokoro recipe: ONNX model + voices pack).",
         capability="tts",
         backend="kokoro",
         bundle_only=True,

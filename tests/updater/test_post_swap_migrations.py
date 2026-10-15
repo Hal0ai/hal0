@@ -70,6 +70,7 @@ def test_success_parses_the_result_envelope(monkeypatch: pytest.MonkeyPatch) -> 
         "pass_warnings": [],
         "conversion_blockers": [],
         "unassigned_models": [],
+        "model_bundles": [],
     }
 
 
@@ -165,6 +166,7 @@ def test_child_script_emits_the_blockers(
         "to": 3,
         "conversion_blockers": blockers,
         "unassigned_models": [],
+        "model_bundles": [],
     }
 
 
@@ -186,6 +188,7 @@ def test_result_envelope_survives_interleaved_log_noise(monkeypatch: pytest.Monk
         "pass_warnings": [],
         "conversion_blockers": [],
         "unassigned_models": [],
+        "model_bundles": [],
     }
 
 
@@ -420,7 +423,7 @@ def test_forwards_the_real_migration_result_on_success(monkeypatch: pytest.Monke
     monkeypatch.setattr(
         updater_module,
         "run_post_activation_migrations",
-        lambda *, job_id=None, ceiling=None, skip_catalogue_sync=False, repair_hermes_venv=True, upgrade_memory_engine_venv=True, converge_companions=True, honour_restore_marker=False, rerender_after_runner_conversion=False: (
+        lambda *, job_id=None, ceiling=None, skip_catalogue_sync=False, repair_hermes_venv=True, upgrade_memory_engine_venv=True, converge_companions=True, honour_restore_marker=False, rerender_after_runner_conversion=False, fetch_model_bundles=True: (
             1,
             2,
         ),
@@ -445,8 +448,10 @@ def test_skips_the_catalogue_sync_pass(monkeypatch: pytest.MonkeyPatch) -> None:
         converge_companions=True,
         honour_restore_marker=False,
         rerender_after_runner_conversion=False,
+        fetch_model_bundles=True,
     ):
         seen["skip_catalogue_sync"] = skip_catalogue_sync
+        seen["fetch_model_bundles"] = fetch_model_bundles
         seen["honour_restore_marker"] = honour_restore_marker
         seen["rerender"] = rerender_after_runner_conversion
         return (1, 1)
@@ -458,3 +463,5 @@ def test_skips_the_catalogue_sync_pass(monkeypatch: pytest.MonkeyPatch) -> None:
     # The boot-time safety net stands down after a restore (a downgrade).
     assert seen["honour_restore_marker"] is True
     assert seen["rerender"] is True
+    # ...and never downloads a model bundle (#2739): it only logs the remedy.
+    assert seen["fetch_model_bundles"] is False

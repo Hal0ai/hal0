@@ -6,6 +6,8 @@ import shlex
 from typing import Any
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from hal0.providers.container import ContainerProvider, _spec_provider_for
 
 
@@ -116,6 +118,7 @@ def test_spec_provider_vulkan_returns_none() -> None:
 # ── load_sync kokoro TTS path ──────────────────────────────────────────────────
 
 
+@pytest.mark.usefixtures("kokoro_store")
 def test_tts_kokoro_slot_renders_spec_unit(tmp_hal0_home: str) -> None:
     """TTS/kokoro slot: spec unit rendered with --model_path, no AddDevice=, correct PublishPort=.
 
@@ -160,6 +163,7 @@ def test_tts_kokoro_slot_renders_spec_unit(tmp_hal0_home: str) -> None:
     assert "PublishPort=127.0.0.1:8084:8084" in unit_text
 
 
+@pytest.mark.usefixtures("kokoro_store")
 def test_tts_slot_by_type_only_no_profile() -> None:
     """type=tts without explicit profile still routes through Kokoro.
 
@@ -195,6 +199,7 @@ def test_tts_slot_by_type_only_no_profile() -> None:
     assert "AddDevice=" not in unit_text
 
 
+@pytest.mark.usefixtures("kokoro_store")
 def test_kokoro_path_does_not_require_registry_model_path() -> None:
     """kokoro-v1 is not a GGUF; model_info with NO 'path' must not raise.
 

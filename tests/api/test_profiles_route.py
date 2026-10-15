@@ -79,7 +79,8 @@ class TestListProfiles:
         data = client.get("/api/profiles").json()
         kokoro = next(item for item in data if item["name"] == "kokoro")
         assert kokoro["mtp"] == "auto"
-        assert "--model_path" in kokoro["flags"]
+        # The provider supplies --model_path from the store (#2739).
+        assert "--model_path" not in kokoro["flags"]
 
     def test_shipped_slot_seeds_exist(self, client: TestClient) -> None:
         """agent/utility/coding/brain are seeds, with the windows the slots rely on."""

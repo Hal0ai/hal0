@@ -281,13 +281,21 @@ def test_flm_slot_window_is_kept_in_its_own_profile() -> None:
 
 
 def test_self_managed_engine_keeps_its_bundle_path_in_the_profile() -> None:
-    """kokoro/moonshine/qwen3-tts have no model row for their bundle."""
+    """moonshine/qwen3-tts have no model row for their bundle; kokoro's
+    bundle is the pulled kokoro-v1 row and its path comes from the store
+    (ADR-0030, #2739)."""
     _slot(type="tts", profile="kokoro", model={"default": ""})
     plan = pc.plan_conversion()
     sp = _one(plan)
     assert sp.status != "blocked" and sp.profile_after == "kokoro"
     assert not any(m.register_path for m in plan.models)
-    assert "--model_path" in pc.target_seeds()["kokoro"]["flags"]
+    # Today's seed baked the operator-local path; the converter drops it
+    # (and says so) instead of forking a profile to keep it.
+    assert any("kokoro-v1" in c for c in sp.launch_changes)
+    seeds = pc.target_seeds()
+    assert "--model_path" not in seeds["kokoro"].get("flags", "")
+    assert "--model_path" in seeds["moonshine"]["flags"]
+    assert "--model_path" in seeds["qwen3-tts"]["flags"]
 
 
 def test_profile_less_kokoro_slot_is_reported_as_failing_today() -> None:

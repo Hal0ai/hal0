@@ -89,7 +89,8 @@ ctx_size = 16384
 intent = "FLM NPU (chat/embed/STT)"
 
 [profile.kokoro]
-flags = "--model_path /mnt/ai-models/local/kokoro-v1/kokoro-onnx"
+# No --model_path: the provider launches the pulled kokoro-v1 bundle from the
+# configured model store (<store>/tts/kokoro-v1/, ADR-0030, #2739).
 intent = "Kokoro TTS"
 
 [profile.moonshine]

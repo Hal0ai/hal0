@@ -295,8 +295,9 @@ def _final_path_for_entry(
     own model loaders pick them up without a per-id rename.
 
     When ``capability`` is set (the FirstRun v2 install engine, design D2),
-    the model lands in a capability-grouped tree with one canonical
-    ``model.gguf`` filename: ``<pull_root>/<capability>/<id>/model.gguf``.
+    the model lands in a capability-grouped tree. A GGUF gets one canonical
+    ``model.gguf`` filename: ``<pull_root>/<capability>/<id>/model.gguf``;
+    any other format keeps its upstream basename (:func:`_canonical_name`).
     This keeps the store self-documenting by role and gives the slot config
     a stable path that never chases a HF-specific filename. A sidecar
     ``meta.json`` (written by :func:`write_model_meta`) preserves provenance.
@@ -307,8 +308,78 @@ def _final_path_for_entry(
     if comfyui_subdir:
         return _comfyui_models_dir(comfyui_subdir) / filename
     if capability:
-        return _pull_root() / _sanitise_id(capability) / _sanitise_id(model_id) / "model.gguf"
+        # Same directory as :func:`hal0.config.store.capability_model_dir`,
+        # which is where the kokoro provider launches the bundle from.
+        return (
+            _pull_root()
+            / _sanitise_id(capability)
+            / _sanitise_id(model_id)
+            / _canonical_name(filename)
+        )
     return _final_path(model_id, filename)
+
+
+#: The canonical installed name of a capability-grouped GGUF pull.
+_CANONICAL_GGUF_NAME = "model.gguf"
+
+
+def _is_gguf(filename: str) -> bool:
+    return filename.lower().endswith(".gguf")
+
+
+def _canonical_name(filename: str) -> str:
+    """Installed basename for a capability-grouped pull.
+
+    A GGUF lands as the canonical ``model.gguf``. Any other format keeps its
+    upstream basename: the engines that load non-GGUF bundles locate their
+    files by name (kokoro globs ``kokoro-*.onnx`` + ``voices*.bin``), and an
+    ONNX file named ``model.gguf`` is a mislabel nothing can load (#2739).
+    """
+    if _is_gguf(filename):
+        return _CANONICAL_GGUF_NAME
+    return Path(filename).name or _CANONICAL_GGUF_NAME
+
+
+def _curated_extra_files(model_id: str, hf_repo: str) -> list[str]:
+    """The curated row's ``extra_files`` for this pull, or ``[]``.
+
+    Only when the pull's repo IS the curated row's repo: an operator who
+    points the same id at a different repo gets exactly the file they named.
+    """
+    from hal0.registry.curated import get_curated
+
+    curated = get_curated(model_id)
+    if curated is None or curated.hf_repo != hf_repo:
+        return []
+    return [f for f in curated.extra_files if f]
+
+
+def _remove_mislabeled_canonical(final: Path, hf_file: str) -> None:
+    """Drop a stale ``model.gguf`` beside a non-GGUF pull (#2739).
+
+    Before #2739 every capability-grouped pull was renamed ``model.gguf``,
+    so a kokoro pull left its ONNX file under that name, where the runner
+    never looks. Re-pulling now installs the file under its real name; the
+    old copy in the same per-model directory is dead weight, so remove it.
+    Only called for per-model directories (never the shared ComfyUI tree),
+    and only when the file is provably that old copy: the directory's
+    ``meta.json`` records this ``hf_file``, or the bytes are the same size
+    as the file just installed. Anything else is left alone.
+    """
+    if _is_gguf(hf_file) or final.name == _CANONICAL_GGUF_NAME:
+        return
+    stale = final.parent / _CANONICAL_GGUF_NAME
+    if not stale.is_file():
+        return
+    meta = read_model_meta(stale) or {}
+    try:
+        same_size = stale.stat().st_size == final.stat().st_size
+    except OSError:
+        same_size = False
+    if meta.get("hf_file") != hf_file and not same_size:
+        return
+    stale.unlink()
+    log.info("model.pull_removed_mislabeled", extra={"path": str(stale)})
 
 
 def write_model_meta(
@@ -1043,6 +1114,7 @@ async def run_pull(
     mmproj_file: str | None = None,
     dest_override: str | None = None,
     fileset: FileSetPlan | None = None,
+    extra_files: list[str] | None = None,
 ) -> None:
     """Background-task body: stream the file(s), hash, install, register.
 
@@ -1082,6 +1154,13 @@ async def run_pull(
             flat-layout model into the capability-grouped tree and
             orphaning the previous file. When set, ``capability`` /
             ``comfyui_subdir`` routing is bypassed for the main file.
+        extra_files: Further files from the same HF repo that the engine
+            needs beside the main file (kokoro's ``voices-v1.0.bin``),
+            installed into the main file's directory under their upstream
+            basenames. ``None`` (the default) reads the curated row's
+            ``extra_files`` for this model id and repo, so every caller — the
+            API, the installer, the update flow — lays down the same bundle
+            (#2739). Pass ``[]`` to pull the main file alone.
     """
     if fileset is not None:
         await _run_pull_fileset(
@@ -1097,9 +1176,13 @@ async def run_pull(
     job.state = "running"
     job.started_at = time.time()
     # Per-file manifest — main model first, optional mmproj sidecar second.
+    if extra_files is None:
+        extra_files = _curated_extra_files(job.model_id, hf_repo)
     job.files = [PullFile(hf_filename=hf_file, kind="model")]
     if mmproj_file:
         job.files.append(PullFile(hf_filename=mmproj_file, kind="mmproj"))
+    sidecar_recs = [PullFile(hf_filename=name, kind="sidecar") for name in extra_files]
+    job.files.extend(sidecar_recs)
     job._signal()
 
     base_headers: dict[str, str] = {"User-Agent": "hal0/installer"}
@@ -1118,6 +1201,10 @@ async def run_pull(
         main_rec = job.files[0]
         if dest_override:
             final = Path(dest_override)
+            # A pre-#2739 non-GGUF row records ``.../model.gguf``; re-pulling
+            # in place must install the real name, not the mislabel again.
+            if final.name == _CANONICAL_GGUF_NAME and not _is_gguf(hf_file):
+                final = final.parent / _canonical_name(hf_file)
         else:
             final = _final_path_for_entry(job.model_id, hf_file, comfyui_subdir, capability)
         digest = await _download_one(
@@ -1136,7 +1223,7 @@ async def run_pull(
         # Same directory as the main model, so the association survives the
         # discover scan's same-directory heuristic AND is set directly below.
         mmproj_final: Path | None = None
-        if len(job.files) > 1:
+        if mmproj_file:
             mm_rec = job.files[1]
             mmproj_final = final.parent / Path(mm_rec.hf_filename).name
             await _download_one(
@@ -1149,6 +1236,29 @@ async def run_pull(
                 base_done=main_rec.bytes_done,
                 base_total=main_rec.bytes_total,
             )
+
+        # ── Engine sidecars (#2739) ────────────────────────────────────────
+        # Same directory as the main file, upstream basename: the engine
+        # finds them by name (kokoro globs voices*.bin next to the ONNX).
+        sidecar_finals: list[Path] = []
+        for sc_rec in sidecar_recs:
+            done = sum(f.bytes_done for f in job.files)
+            total = sum(f.bytes_total for f in job.files)
+            sc_final = final.parent / Path(sc_rec.hf_filename).name
+            await _download_one(
+                job,
+                sc_rec,
+                client=client,
+                hf_repo=hf_repo,
+                base_headers=base_headers,
+                final=sc_final,
+                base_done=done,
+                base_total=total,
+            )
+            sidecar_finals.append(sc_final)
+
+        if not comfyui_subdir:
+            _remove_mislabeled_canonical(final, hf_file)
 
         # A delete cancels the job and waits for it (ADR-0026): if the cancel
         # landed after the last chunk, or the model was deleted after this job
@@ -1185,6 +1295,12 @@ async def run_pull(
                     mm_rec.bytes_done,
                     mm_rec.sha256,
                     "mmproj",
+                )
+            )
+        for sc_rec, sc_final in zip(sidecar_recs, sidecar_finals, strict=True):
+            installed_rows.append(
+                InstalledFile(
+                    sc_rec.hf_filename, sc_final, sc_rec.bytes_done, sc_rec.sha256, "sidecar"
                 )
             )
         _register_installed_files(registry, model_id=job.model_id, installed=installed_rows)
@@ -1520,6 +1636,12 @@ def _register_installed_files(
         for rec in installed:
             was = prior.get(rec.rel)
             old_sha = was["sha256"] if was else None
+            if old_sha == rec.sha256 and rec.sha256:
+                # Same bytes, new name (a #2739 relabel): the canonical blob
+                # referent was the removed file, so re-point it at the live one.
+                blob = repository.get_blob(conn, rec.sha256)
+                if blob is not None and not Path(blob["blob_path"]).is_file():
+                    repository.set_blob_path(conn, rec.sha256, str(rec.dest))
             if old_sha != rec.sha256:
                 if old_sha:
                     repository.drop_blob_ref(conn, old_sha)
