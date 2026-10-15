@@ -30,6 +30,16 @@ applying. Add those subsections to a version's section to surface them; see
 
 ## [Unreleased]
 
+### Breaking
+
+- `hal0 agent bootstrap hermes --repair` (and `HermesDriver.install`) no
+  longer fold the previous `hermes.env` back into `NO_PROXY` (#2534): an
+  exemption removed from `api.env` or the environment now actually
+  disappears from the agent's `NO_PROXY` on the next render. Renders that
+  cannot verify the required MCP host set (discovery failure with no
+  readable previous policy) fail closed — the `install_artifacts` step
+  reports a failure naming the fix instead of writing a reduced policy.
+
 ### Removed
 
 - hal0 no longer builds runner or toolbox images. Those images are built

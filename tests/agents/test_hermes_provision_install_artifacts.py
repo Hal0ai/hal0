@@ -180,3 +180,27 @@ def test_chat_proxy_finds_token_after_provision(
 
     monkeypatch.setenv("HAL0_HERMES_RUNTIME_JSON", str(runtime_path))
     assert chat_proxy._load_embed_token() == expected
+
+
+def test_phase_reports_failure_when_the_required_host_set_is_unknown(
+    artifact_state: hp.BootstrapState, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Discovery failure with no readable previous policy fails the step
+    with an actionable reason (#2602 review) — it must not escape as a raw
+    traceback mid-pipeline, and it must not write a reduced NO_PROXY."""
+    monkeypatch.delenv("HAL0_ADMIN_KEY", raising=False)
+    monkeypatch.delenv("HAL0_CLIENT_KEY", raising=False)
+
+    def broken() -> list[str]:
+        raise RuntimeError("registry unavailable")
+
+    monkeypatch.setattr("hal0.mcp.installed.exposed_loopback_hosts", broken)
+    result = hp._phase_install_artifacts(hp._StepCtx(state=artifact_state))
+
+    assert result.status is hp.PhaseStatus.FAIL
+    assert result.reason is not None
+    assert "fix the MCP registry" in result.reason
+    assert "--repair" in result.reason
+    # Nothing was written: a reduced driver env must not reach the disk, and
+    # the step is retried whole on the next run.
+    assert not hp.DRIVER_ENV_PATH.exists()

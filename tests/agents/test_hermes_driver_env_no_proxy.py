@@ -114,9 +114,7 @@ def test_driver_env_keeps_the_operators_proxy_exclusions(
     assert upper == [".hal0.example.com", "10.0.0.0", "intranet", "localhost", "127.0.0.1", "::1"]
 
 
-def test_driver_env_drops_a_value_only_in_the_file(
-    driver_env: Path, tmp_hal0_home: str
-) -> None:
+def test_driver_env_drops_a_value_only_in_the_file(driver_env: Path, tmp_hal0_home: str) -> None:
     """The file being replaced is not an operator source (#2534): an entry
     that lives only in an old hermes.env must not survive a re-render, or a
     root render keeps it forever after it left the operator's sources."""
@@ -193,6 +191,7 @@ def test_driver_env_fails_closed_on_a_first_render_when_discovery_fails(
     host set: installed MCP records can predate the file, so a base-only
     value could send a surviving connection's traffic to the proxy. Fail
     closed and leave the file unwritten (#2534 review)."""
+
     def broken() -> list[str]:
         raise RuntimeError("registry unavailable")
 
