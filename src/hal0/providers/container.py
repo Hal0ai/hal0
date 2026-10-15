@@ -2508,6 +2508,30 @@ class ContainerProvider(Provider):
             return props.get("Result", "") in ("success", "")
         return active_state == "failed" and _is_sigterm_stop(props)
 
+    def unit_removed_cleanly(self, slot: Mapping[str, Any] | str) -> bool:
+        """Was the slot's unit torn down to completion (#2738)?
+
+        ``True`` only for ``LoadState=not-found`` + ``ActiveState=inactive`` +
+        ``Result=success``: ``unload_sync`` removed the quadlet and the unit
+        ended cleanly. :meth:`unit_stopped_cleanly` can never see this shape
+        (it requires ``LoadState=loaded``). Callers must gate it on their own
+        evidence that the removal was a hal0 teardown — a removed unit alone is
+        not proof (the output-sanity teardown leaves the same shape).
+        """
+        try:
+            props = self.unit_status(slot)
+        except Exception as exc:  # pragma: no cover — defensive
+            log.warning(
+                "container.unit_status_failed",
+                extra={"slot": _artefact_token(slot), "error": str(exc)},
+            )
+            return False
+        return (
+            props.get("LoadState", "") == "not-found"
+            and props.get("ActiveState", "") == "inactive"
+            and props.get("Result", "") in ("success", "")
+        )
+
     def reset_failed(self, slot: Mapping[str, Any] | str) -> None:
         """Clear a unit's ``failed`` sub-state and its start-limit counter.
 
