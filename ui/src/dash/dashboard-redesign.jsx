@@ -19,7 +19,7 @@
 // memory-map.jsx / metric-cards.jsx.
 
 import { useSlots } from '@/api/hooks/useSlots'
-import { useHardware } from '@/api/hooks/useHardware'
+import { useHardware, hasGpuAccess, hasNpuAccess } from '@/api/hooks/useHardware'
 import { useStatsHardware } from '@/api/hooks/useStatsHardware'
 import { useStatsPower } from '@/api/hooks/useStatsPower'
 import { useThroughputHistory } from '@/api/hooks/useThroughputHistory'
@@ -257,10 +257,11 @@ function HealthStrip({ slots, heroTps, attentionItems }) {
   // #1797(3): /api/hardware sees the DRM node whether or not THIS box can
   // actually drive it (LXC shares the host's /sys/class/drm read-only) — a
   // CPU-only container reports the host iGPU's util/temp as if it were its
-  // own. `computeCapable` is the one probe field backed by a real capability
-  // check (rocm-smi presence, hardware/probe.py), so it's the honest gate.
+  // own. `computeCapable || vulkanCapable` are the probe fields backed by a
+  // real capability check (rocm-smi presence / a render node, probe.py); a
+  // vulkan-only box (#2674) still drives its GPU.
   const hw = useHardware()
-  const hasGpu = !!hw.data?.computeCapable
+  const hasGpu = hasGpuAccess(hw.data)
   const attentionCount = attentionItems.length
   // Compact summary across the broadened set: approvals vs everything else
   // (error slots, failed downloads, update, drift, messages) as "alerts".
@@ -593,11 +594,11 @@ function RDUtilizationCard({ swap }) {
 
   // #1797(3): the DRM/XDNA nodes are visible from any LXC sharing the host
   // kernel, so gpu_util/npu_status leak the HOST's accelerator state on a
-  // container with no actual compute access. `computeCapable` is the only
-  // probe field backed by a real capability test (rocm-smi presence) —
-  // gate both the iGPU and NPU rows on it so a CPU-only box shows its own
-  // truth (dash, "no GPU/NPU access") instead of the host's numbers.
-  const hasGpu = !!hw.data?.computeCapable
+  // container with no actual compute access. Gate the iGPU row on
+  // computeCapable || vulkanCapable (#2674: a vulkan-only box is a GPU box)
+  // and the NPU row on its own probe so a CPU-only box shows its own truth
+  // (dash, "no GPU/NPU access") instead of the host's numbers.
+  const hasGpu = hasGpuAccess(hw.data)
 
   const gpuGhz = st?.gpu_clock_mhz != null ? (st.gpu_clock_mhz / 1000).toFixed(1) : null
   const gpuTemp = st?.gpu_temp_c != null ? Math.round(st.gpu_temp_c) : null
@@ -608,13 +609,14 @@ function RDUtilizationCard({ swap }) {
     gpuW != null ? `${gpuW} W` : null,
   ].filter(Boolean).join(' · ') || (st?.gpu_util == null ? 'pending driver' : null)
 
+  const hasNpu = hasNpuAccess(hw.data)
   const cores = hw.data?.cores
   const npuStatus = st?.npu_status ?? null
-  const npuActive = hasGpu ? (npuStatus?.ok ?? null) : null
-  const npuUtil = hasGpu ? (st?.npu_util ?? null) : null
-  const npuGb = hasGpu && npuStatus?.model_mb ? mbToGb(npuStatus.model_mb) : null
+  const npuActive = hasNpu ? (npuStatus?.ok ?? null) : null
+  const npuUtil = hasNpu ? (st?.npu_util ?? null) : null
+  const npuGb = hasNpu && npuStatus?.model_mb ? mbToGb(npuStatus.model_mb) : null
   const npuSlots = slots.filter((s) => (s.device || '') === 'npu' && s.coresident).map((s) => s.name)
-  const npuCaption = !hasGpu ? 'no NPU access' : [
+  const npuCaption = !hasNpu ? 'no NPU access' : [
     npuSlots.length > 1 ? `${npuSlots.join(' + ')} coresident` : (npuSlots[0] || null),
     npuGb != null ? `${npuGb.toFixed(1)} GB` : null,
   ].filter(Boolean).join(' · ') || (npuActive == null ? 'pending driver' : null)

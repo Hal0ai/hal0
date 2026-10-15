@@ -32,6 +32,7 @@ applying. Add those subsections to a version's section to surface them; see
 
 ### Fixed
 
+- **ui:** a vulkan-only GPU (render node passed through, no `/dev/kfd`) now counts as a GPU on the Overview utilization row and health strip and on the Settings Live-hardware and Power & thermal panels, instead of reading "no GPU access" while a vulkan slot is serving; the NPU rows gate on the NPU probe rather than the GPU one (#2674).
 - The post-update runner-system and profile-centric conversions no longer
   fail on a box whose `/var/lib/hal0/backups` a root-run tool created as
   `root:hal0 2755`. Before, `hal0-api` (`User=hal0`) could not write the
