@@ -904,7 +904,8 @@ known_issues:
       the steward's completion at 4096 (`_MAX_COMPLETION_TOKENS`), an over-long prompt returns
       HTTP 400 `exceed_context_size_error`, and prompt+n_predict over the window returns 200
       with finish_reason=length — the 500 is not reachable by request size. The string lives in
-      the llama-server binary, not in hal0.
+      the llama-server binary, not in hal0. Note: concurrent sequences sharing the unified KV
+      pool can reach it (4 x ~16k tokens on a 65536 pool); #2714 pins brain to `--parallel 1`.
     still_report_if: >-
       The SSE error frame `primary slot HTTP 500: ...Context size has been exceeded.` reproduces
       >=2 times on a short prompt against a slot whose /slots n_ctx is >=16384, AND
