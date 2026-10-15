@@ -30,6 +30,20 @@ applying. Add those subsections to a version's section to surface them; see
 
 ## [Unreleased]
 
+### Added
+
+- The dashboard steward now has a real memory. Brain chat offers it
+  `memory_add`, `memory_search` and `memory_list`, scoped server-side to the
+  `hal0-brain` persona's namespace (`private:hermes__hal0-brain`); the model
+  cannot name another bank, and every other `memory_*` tool stays hidden.
+  Before, every memory tool was filtered out and nothing stored, so "remember
+  that my cat is called Zorbo" got "I've noted that" with nothing saved. The
+  steward's own `memory_add` works under the default `[brain_chat]
+  read_only = true`, the persona and fallback prompts tell the model to call
+  `memory_add` before claiming it remembered anything, and a "remember ..." or
+  "what did I tell you ..." turn answered with no tool call is rerouted to
+  `[brain_chat] tool_model` (#2658).
+
 ### Fixed
 
 - **mcp:** the hal0-admin `slot_list` result is now a compact roster (name, id, state, `loaded`, model id, backend, port, container health, image tag) sent as one compact-JSON text block with no duplicate `structuredContent`, instead of ~2.9 KB per slot. Hermes 0.19.0 cuts any tool result over its per-result budget (39,321 chars at 65,536 ctx) to a 1,500-char preview on `hermes -z` turns, so a box with 14+ slots was answered from a truncated first slot. `resolved_command`, the full `image` ref and nested tuning are no longer in the list; `slot_status` / `slot_by_name` still return the full row (#2662).

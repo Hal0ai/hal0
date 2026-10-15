@@ -85,9 +85,14 @@ def test_admin_schemas_require_path_args() -> None:
     assert by_name["profile_list"]["required"] == []
 
 
-def test_excluded_memory_tools_not_surfaced() -> None:
+def test_only_the_steward_memory_trio_is_surfaced() -> None:
+    """#2658: memory_add/search/list reach the brain; every other memory_* stays out."""
     names = {s["function"]["name"] for s in bc._admin_tool_schemas()}
-    assert not any(n.startswith("memory_") for n in names)
+    assert {n for n in names if n.startswith("memory_")} == {
+        "memory_add",
+        "memory_search",
+        "memory_list",
+    }
 
 
 # ── dispatch routing ─────────────────────────────────────────────────────────

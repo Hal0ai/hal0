@@ -2759,6 +2759,8 @@ class BrainChatConfig(BaseModel):
             "When true (the shipped default), the steward answers and reads "
             "state but every mutating or admin-write tool is refused "
             "server-side — independently of the persona's own tool policy. "
+            "The steward's own memory_add into its private namespace is the "
+            "one exception (#2658). "
             "Set false to let the steward act on the instance through tools."
         ),
     )

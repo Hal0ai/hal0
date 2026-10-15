@@ -92,7 +92,7 @@ key fails validation rather than being silently ignored.
 | Key | Type | Default | Notes |
 |---|---|---|---|
 | `enabled` | bool | `true` | Hard kill switch — `false` refuses every turn before any model call. |
-| `read_only` | bool | `true` | Refuses every mutating or admin-write tool **server-side**, independent of the persona's own tool policy. Ships `true`: a fresh v1.0 box answers questions and reads state, but cannot mutate the board or write admin config until an operator sets this to `false`. |
+| `read_only` | bool | `true` | Refuses every mutating or admin-write tool **server-side**, independent of the persona's own tool policy. The steward's own `memory_add` into its private namespace is exempt. Ships `true`: a fresh v1.0 box answers questions and reads state, but cannot mutate the board or write admin config until an operator sets this to `false`. |
 | `model` | str | `""` | Chat-model override; empty defers to the persona / `hal0/brain`. |
 | `tool_model` | str | `"hal0/agent"` | Where tool-calling rounds reroute when the chat model can't carry them (see below). `""` on disk is treated as "nobody set this" and coerced back to the default with a logged warning — to genuinely turn routing off, set it to `"off"`, `"none"`, or `"disabled"` explicitly. |
 | `max_rounds` | int | `8` | `1`–`100`. Runaway backstop on the tool loop per turn. |
@@ -171,9 +171,9 @@ the `hal0-brain` persona's tool policy (when one exists):
   hal0-api's own REST routes over self-HTTP.
 - The full [`hal0-admin` MCP catalog](/docs/reference/mcp-tools) minus a
   short exclusion list: names that collide with the local tools above (e.g.
-  `slot_load`/`slot_list`/`model_list`), and every `memory_*` tool — the
-  brain reaches its own memory through Hindsight directly (see below), not
-  through the agent memory engine's MCP dispatcher. That's well over 100
+  `slot_load`/`slot_list`/`model_list`), and every `memory_*` tool except
+  the steward's own three, `memory_add`, `memory_search` and `memory_list`
+  (see [Memory and MCP](#memory-and-mcp) below). That's well over 100
   tools once the exclusions are removed — this page doesn't enumerate them;
   see the catalog reference.
 
@@ -190,8 +190,10 @@ Two things enforce the boundary at dispatch time, both independent of what
 the model was shown: the persona's `tools_allowed` policy is checked again
 against the call the model actually made (never trust the advertised list),
 and `[brain_chat] read_only` — when true, the default — refuses any tool
-that isn't a read, full stop, regardless of what the persona would otherwise
-allow.
+that isn't a read, regardless of what the persona would otherwise allow. The
+one exception is `memory_add` into the steward's own private namespace: it
+changes no platform state, and without it a fresh install could not remember
+anything honestly.
 
 <Aside type="tip">
 Because `read_only` ships `true`, a freshly installed v1.0 brain can read and
@@ -202,10 +204,39 @@ operator flips it — that's a deliberate default, not a bug.
 ## Memory and MCP
 
 When [memory](/docs/concepts/memory) is enabled, the `hal0-brain` persona
-gets its own namespace (`private:hermes__hal0-brain`), separate from
-Hermes's own agent namespace, reached through Hindsight directly rather than
-the `memory_*` MCP tools an agent uses — which is exactly why `memory_*` is
-excluded from the tool surface described above.
+has its own namespace, `private:hermes__hal0-brain` (the persona's
+`memory_namespace`), separate from Hermes's own agent namespace. The steward
+reaches it through exactly three tools, the ones the persona auto-approves:
+
+- `memory_add(text)` saves one fact.
+- `memory_search(query, limit?)` finds saved facts.
+- `memory_list(limit?)` lists the most recent ones.
+
+The model never chooses where these go. Brain chat rebuilds each call from
+those fields only, forces the dataset to the persona's namespace, and runs it
+through the app's memory dispatcher with the identity pinned to
+`hermes__hal0-brain` in private mode. A `dataset` or bank argument from the
+model is dropped. The call takes the same retain/recall pipeline every other
+memory write takes, including the in-memory fallback when Hindsight is
+unreachable (writes there are lost on restart).
+
+Where the facts land depends on `[memory] unified_bank`. With the default
+(`true`) they go into the single `shared` Hindsight bank, tagged
+`visibility:private` and `agent:hermes__hal0-brain`, so only the steward reads
+them back and `GET /api/memory/banks` still lists just `shared`. With
+`unified_bank = false` they go into their own bank,
+`private__hermes__hal0-brain`, which appears in the bank list after the first
+write. No bank has to be created up front in either mode.
+
+The other `memory_*` tools (delete, recall, reflect, curate, history,
+mental models, directives, operations, tags, bank stats and consolidation)
+are not offered to the steward. Both the seeded persona prompt and the
+built-in fallback prompt tell the model to call `memory_add` before it claims
+to have noted anything. Persona files seeded before this change are not
+rewritten, so when a persona prompt does not mention `memory_add`, brain chat
+appends that rule at runtime. A "remember ..." or "what did I tell you ..."
+turn answered with no tool call is rerouted to `[brain_chat] tool_model`, the
+same way an ungrounded answer about slots is.
 
 For everything else the brain's admin surface *is* MCP under the hood: it
 calls the same `hal0.mcp.admin.dispatch()` core, the same tool descriptions
