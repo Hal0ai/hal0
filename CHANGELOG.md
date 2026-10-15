@@ -46,6 +46,11 @@ applying. Add those subsections to a version's section to surface them; see
 
 ### Fixed
 
+- `hal0 doctor verify` and `GET /api/doctor` no longer report "3 active: embed, img,
+  voice" on a fresh install: a capability group now counts as active only when
+  at least one of its selections is enabled, so the "none active" warning and its
+  enable next step are reachable again (#2736).
+
 - **slots:** a stopped slot whose state record kept a stale `model_id` no
   longer claims it is "still serving" a model after its `[model].default` was
   emptied; the "still serving" wording is now only used while the slot is live

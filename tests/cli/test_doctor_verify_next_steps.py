@@ -110,7 +110,7 @@ def test_check_capabilities_unreachable_offers_restart_hal0_api() -> None:
 
 
 def test_check_capabilities_active_has_no_steps() -> None:
-    c = dv.check_capabilities({"selections": {"embed": {"x": 1}}})
+    c = dv.check_capabilities({"selections": {"embed": {"default": {"enabled": True}}}})
     assert c.next_steps == ()
 
 
