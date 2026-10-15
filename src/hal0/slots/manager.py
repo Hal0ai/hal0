@@ -2351,6 +2351,24 @@ class SlotManager:
         provider = _cfg_effective_provider(cfg) if cfg else None
         if provider:
             meta["provider"] = provider
+        # #2694: a slot still serving a model whose binding was emptied (the
+        # ADR-0028 runner-system conversion unassigns a fork-only quant, or a
+        # hand edit) used to read idle with the old model_id and no message —
+        # nothing said the binding was gone until the next restart failed.
+        if (
+            cfg
+            and rec.model_id
+            and not meta.get("message")
+            and not _model_default(cfg)
+            and provider_requires_model(provider)
+        ):
+            from hal0.slot_config import unassigned_model_remedy
+
+            meta["message"] = (
+                f"no model assigned ([model].default is empty); still serving "
+                f"{rec.model_id!r} until the next restart. "
+                f"{unassigned_model_remedy(slot_name)}"
+            )
         breaker = self._breaker_snapshot(slot_name)
         if breaker:
             meta["breaker"] = breaker

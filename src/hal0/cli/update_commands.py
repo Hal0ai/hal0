@@ -362,6 +362,27 @@ def _print_convergence(convergence: dict | None) -> bool:
             soft_wrap=True,
         )
 
+    # ADR-0028 §7 / #2694: a slot whose model the runner-system conversion
+    # unassigned. Not a blocker (the conversion did what it must), but the
+    # operator must hear it here, not only in the journal: the running
+    # container keeps serving the old model until its next restart.
+    for entry in post_migrations.get("unassigned_models") or []:
+        if not isinstance(entry, dict):
+            continue
+        slot = str(entry.get("slot") or "?")
+        quant = entry.get("quant")
+        why = f" (a {escape(str(quant))} build no runner can load)" if quant else ""
+        remedy = entry.get("remedy") or (
+            f"assign a plain GGUF build: `hal0 slot edit {slot} --model <id>`"
+        )
+        console.print(
+            f"[yellow]![/yellow] slot {escape(slot)}: model "
+            f"{escape(str(entry.get('model') or '?'))}"
+            f"{why} was unassigned — it keeps serving until its next restart — fix: "
+            f"{escape(str(remedy))}",
+            soft_wrap=True,
+        )
+
     converged = bool(convergence.get("converged")) and not blockers
     if converged:
         console.print("[dim]on-disk config is fully converged.[/dim]")
@@ -482,11 +503,20 @@ def _print_drift_banner(
                 f"could not be restarted automatically: {f.get('slot')} \u2014 {f.get('error')}"
             )
     lines.extend(_render_error_lines(slots))
-    lines.append(
-        "\nThese slots are still running the pre-update launch command or image. Run "
-        "[bold]hal0 update --restart-slots[/bold] to bounce the drifted slots "
-        "(this briefly interrupts any in-flight request on them)."
-    )
+    if slots and all(_render_error(s) for s in slots):
+        # `--restart-slots` skips every one of these (#2660); sending the
+        # operator there is a dead end (#2696).
+        lines.append(
+            "\nThese slots are still running the pre-update launch command or image, "
+            "and none can be restarted until its config renders. Fix each slot as "
+            "described above, then run [bold]hal0 update --restart-slots[/bold]."
+        )
+    else:
+        lines.append(
+            "\nThese slots are still running the pre-update launch command or image. Run "
+            "[bold]hal0 update --restart-slots[/bold] to bounce the drifted slots "
+            "(this briefly interrupts any in-flight request on them)."
+        )
     console.print(Panel("\n".join(lines), title="Slots need restart", border_style="yellow"))
 
 
@@ -886,9 +916,14 @@ def update(
         )
         # An image diff still outstanding means a slot serves the build this
         # release replaced -- the update is not "fully successful" (#2096).
-        image_pending = [
-            n for n in _slot_names([x for x in drift.get("slots") or [] if _has_image_drift(x)])
-        ]
+        # A slot whose launch command does not render is never restarted by
+        # `--restart-slots` (#2660), so it gets its own line naming its own
+        # remedy, never the restart advice (#2696).
+        drifted = [x for x in drift.get("slots") or [] if isinstance(x, dict)]
+        render_blocked = [x for x in drifted if _render_error(x)]
+        image_pending = _slot_names(
+            [x for x in drifted if _has_image_drift(x) and not _render_error(x)]
+        )
         converged = _print_convergence(final.get("convergence"))
         # hal0-api is mid-self-restart right after commit applies (the unit
         # files were just re-rendered), so a strict _component_rows() fetch
@@ -905,19 +940,27 @@ def update(
             components_ok = True
         else:
             components_ok = _print_component_table(component_rows)
-        if converged and components_ok and not image_pending:
+        if converged and components_ok and not image_pending and not render_blocked:
             console.print(Panel("[green]update applied.[/green]", border_style="green"))
             return
-        if image_pending and converged and components_ok:
-            console.print(
-                Panel(
+        if (image_pending or render_blocked) and converged and components_ok:
+            lines: list[str] = []
+            if image_pending:
+                lines.append(
                     "[yellow]update applied, but restarts are pending:[/yellow] "
                     f"{', '.join(image_pending)} still run the old runner image.\n"
-                    "[dim]Run `hal0 update --restart-slots` once the slot is idle. "
-                    "(exit 2 = applied, convergence outstanding)[/dim]",
-                    border_style="yellow",
+                    "[dim]Run `hal0 update --restart-slots` once the slot is idle.[/dim]"
                 )
-            )
+            for slot in render_blocked:
+                lines.append(
+                    "[yellow]update applied, but slot "
+                    f"{escape(str(slot.get('slot')))} cannot restart until its config is "
+                    f"fixed:[/yellow] {escape(str(_render_error(slot)))}\n"
+                    "[dim]Fix the slot as described, then run "
+                    "`hal0 update --restart-slots`.[/dim]"
+                )
+            lines.append("[dim](exit 2 = applied, convergence outstanding)[/dim]")
+            console.print(Panel("\n".join(lines), border_style="yellow"))
             raise typer.Exit(2)
         # Refuse to report a clean success while the old on-disk shape survives:
         # the tree swapped, but the box is not the thing v1.0 promises. Exit 2 is

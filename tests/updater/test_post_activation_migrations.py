@@ -464,3 +464,31 @@ def test_conversion_blockers_are_returned_with_their_reasons(
 
 def test_a_converged_install_has_no_blockers(_stub_every_pass: dict[str, list[Any]]) -> None:
     assert run_post_activation_migrations().conversion_blockers == []
+
+
+def test_unassigned_models_are_returned_on_the_result(
+    monkeypatch: pytest.MonkeyPatch, _stub_every_pass: dict[str, list[Any]]
+) -> None:
+    """#2694: the runner-system conversion's per-slot "unassigned it" report
+    reaches the caller instead of only the journal."""
+    entry = {
+        "slot": "brain",
+        "model": "hal0-brain-sft-q8-rocmfpx",
+        "quant": "ROCmFP8",
+        "remedy": "assign a plain GGUF build: `hal0 slot edit brain --model <id>`",
+    }
+    monkeypatch.setattr(
+        "hal0.config.migrations.runner_system.migrate_runner_system",
+        lambda **_kw: RunnerMigrationReport(dry_run=False, unassigned=[entry]),
+    )
+
+    result = run_post_activation_migrations()
+
+    assert tuple(result) == (1, 2)
+    assert result.unassigned_models == [entry]
+
+
+def test_a_converged_install_has_no_unassigned_models(
+    _stub_every_pass: dict[str, list[Any]],
+) -> None:
+    assert run_post_activation_migrations().unassigned_models == []

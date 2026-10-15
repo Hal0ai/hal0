@@ -1733,6 +1733,7 @@ def test_commit_runs_post_activation_migrations_after_the_swap(
         "error": None,
         "pass_warnings": [],
         "conversion_blockers": [],
+        "unassigned_models": [],
     }
     assert result["convergence"]["converged"] is True
 
@@ -1775,6 +1776,37 @@ def test_commit_profile_conversion_blockers_mean_not_converged(
     assert post["ok"] is True
     assert post["conversion_blockers"] == [blocker]
     assert result["convergence"]["converged"] is False
+
+
+def test_commit_carries_the_unassigned_models_without_failing_convergence(
+    synthetic_release: dict[str, Any], cosign_skip: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#2694: a slot whose model the runner-system conversion unassigned is
+    relayed into the convergence dict so `hal0 update` can print it. The
+    conversion did what ADR-0028 §7 says, so this alone is not a blocker."""
+    entry = {"slot": "brain", "model": "m", "quant": "ROCmFP8", "remedy": "r"}
+
+    class _Completed:
+        def __init__(self, returncode: int = 0, stdout: str = "", stderr: str = "") -> None:
+            self.returncode = returncode
+            self.stdout = stdout
+            self.stderr = stderr
+
+    def _fake_run(cmd, *a, **k):
+        if any("run_post_activation_migrations" in part for part in list(cmd)):
+            payload = {"from": 1, "to": 1, "unassigned_models": [entry]}
+            envelope = json.dumps({updater_module._MIGRATION_RESULT_KEY: payload})
+            return _Completed(stdout=envelope)
+        return _Completed()
+
+    monkeypatch.setattr(updater_module, "_is_editable_install", lambda: False)
+    monkeypatch.setattr("hal0.updater.updater.subprocess.run", _fake_run)
+
+    result = asyncio.run(Updater().apply())
+
+    post = result["convergence"]["post_activation_migrations"]
+    assert post["unassigned_models"] == [entry]
+    assert result["convergence"]["converged"] is True
 
 
 def test_commit_post_activation_migration_failure_is_non_fatal_but_loud(

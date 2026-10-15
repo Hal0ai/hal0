@@ -193,6 +193,10 @@ class RunnerMigrationReport:
     #: Operator images left in place (not hal0's to manage). Reported, but
     #: not a change: they do not make the report "changed".
     kept: list[str] = field(default_factory=list)
+    #: One ``{"slot", "model", "quant", "remedy"}`` per slot whose model was
+    #: unassigned (#2694): the same event as its WARNING line, structured so
+    #: ``hal0 update`` can print it instead of leaving it in the journal.
+    unassigned: list[dict[str, str]] = field(default_factory=list)
     backup: str | None = None
     #: True when a restore marker made the boot-time conversion stand down.
     skipped_for_restore: bool = False
@@ -345,8 +349,13 @@ def plan_slot(
     actions: list[str],
     warnings: list[str],
     kept: list[str] | None = None,
+    unassigned: list[dict[str, str]] | None = None,
 ) -> dict[str, Any] | None:
-    """The converted slot TOML, or ``None`` when nothing changes."""
+    """The converted slot TOML, or ``None`` when nothing changes.
+
+    A slot whose model is unassigned also gets one entry in ``unassigned``
+    (when given): ``{"slot", "model", "quant", "remedy"}``.
+    """
     out = _deep_copy(raw)
     changed = False
     tables: list[dict[str, Any]] = [out]
@@ -394,12 +403,18 @@ def plan_slot(
         quant = fork_quant_of(model_id)
         if quant is not None:
             assert model is not None
+            from hal0.slot_config import unassigned_model_remedy
+
             model["default"] = ""
+            remedy = unassigned_model_remedy(name)
             warnings.append(
                 f"slot {name}: model {model_id!r} is a {quant} build no runner can load; "
-                "unassigned it (the slot keeps its settings). Pick a plain GGUF build "
-                "for this slot."
+                f"unassigned it (the slot keeps its settings). Fix: {remedy}."
             )
+            if unassigned is not None:
+                unassigned.append(
+                    {"slot": name, "model": model_id, "quant": quant, "remedy": remedy}
+                )
             changed = True
     return out if changed else None
 
@@ -1045,6 +1060,7 @@ def _plan_files(
                 actions=actions,
                 warnings=warnings,
                 kept=report.kept,
+                unassigned=report.unassigned,
             )
             if new is not None:
                 rest.append(

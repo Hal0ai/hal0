@@ -47,6 +47,19 @@ applying. Add those subsections to a version's section to surface them; see
 ### Fixed
 
 - **slots:** healing a type-less slot TOML no longer stamps `type = "llm"` on a rerank/embed/tts slot: the type now follows the profile, then the slot name. The output-sanity gate also skips an `llm`-typed slot whose profile or launch flags carry `--reranking`/`--embedding`, and `hal0 doctor profiles --fix` rewrites an already-healed `type = "llm"` on a non-chat profile; the failure message now names that remedy (#2693).
+- **updater:** a slot whose model the runner-system conversion unassigned (a
+  ROCmFPX/ROCmFP4/IU4/ActiveFPX quant no runner can load, ADR-0028 §7) is now
+  reported where the operator sees it. `hal0 update` prints one line per slot
+  naming the slot, the dropped model and the fix (`hal0 slot edit <slot>
+  --model <id>`, with `lfm2.5-2.6b` as the brain example); before, the warning
+  reached only the hal0-api journal (#2694). A slot still serving a model
+  whose `[model].default` is empty now carries a `message` on `/api/slots`
+  saying so, instead of reading idle with `message` null. Its render error
+  says "has no model assigned ([model].default is empty)" with the same fix,
+  instead of blaming a registry lookup (#2695). The exit-2 verdict no longer
+  sends a slot whose launch command does not render to
+  `hal0 update --restart-slots`, which skips such a slot; it names the slot's
+  own fix instead (#2696).
 - **mcp:** the hal0-admin `slot_list` result is now a compact roster (name, id, state, `loaded`, model id, backend, port, container health, image tag) sent as one compact-JSON text block with no duplicate `structuredContent`, instead of ~2.9 KB per slot. Hermes 0.19.0 cuts any tool result over its per-result budget (39,321 chars at 65,536 ctx) to a 1,500-char preview on `hermes -z` turns, so a box with 14+ slots was answered from a truncated first slot. `resolved_command`, the full `image` ref and nested tuning are no longer in the list; `slot_status` / `slot_by_name` still return the full row (#2662).
 - **ui:** a vulkan-only GPU (render node passed through, no `/dev/kfd`) now counts as a GPU on the Overview utilization row and health strip and on the Settings Live-hardware and Power & thermal panels, instead of reading "no GPU access" while a vulkan slot is serving; the NPU rows gate on the NPU probe rather than the GPU one (#2674).
 - A profile whose `profiles.toml` entry fails validation is no longer
@@ -510,6 +523,14 @@ applying. Add those subsections to a version's section to surface them; see
   `sudo chmod 2775 /var/lib/hal0/backups`), then
   `sudo systemctl restart hal0-api`; the runner-system and profile-centric
   conversions run again at that start.
+- **A slot that lost its model in the runner-system conversion** (#2694). A
+  box already upgraded before this fix was not told. To find such a slot, run
+  `grep -l '^default = ""' /etc/hal0/slots/*.toml`, or look for
+  `migrate.runner_system.applied` lines with "unassigned it" in
+  `journalctl -u hal0-api`. The container keeps serving the old model until
+  its next restart. Repair each slot with
+  `hal0 slot edit <slot> --model <id>`, using a plain GGUF build (for the
+  brain slot, `lfm2.5-2.6b`), then `hal0 update --restart-slots`.
 - **Profile-centric conversion** (`hal0.config.migrations.profile_centric_apply`,
   ADR-0029). It runs automatically on `hal0 update` after the runner-system
   conversion, and when `hal0 serve` starts `hal0-api`, before config is

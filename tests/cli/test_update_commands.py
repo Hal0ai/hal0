@@ -1427,6 +1427,128 @@ def test_restart_slots_flag_does_not_name_render_error_slot(
     assert "context_size" in result.output
 
 
+# ── #2694/#2696: an unassigned model, and a verdict that names a remedy that works ─
+
+_UNASSIGNED = {
+    "slot": "brain",
+    "model": "hal0-brain-sft-q8-rocmfpx",
+    "quant": "ROCmFP8",
+    "remedy": "assign a plain GGUF build: `hal0 slot edit brain --model <id>` (e.g. lfm2.5-2.6b)",
+}
+
+
+def test_print_convergence_reports_an_unassigned_model(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    convergence = _convergence([])
+    convergence["post_activation_migrations"]["unassigned_models"] = [_UNASSIGNED]
+    uc._print_convergence(convergence)
+    out = " ".join(capsys.readouterr().out.split())
+    assert "slot brain" in out
+    assert "hal0-brain-sft-q8-rocmfpx" in out
+    assert "ROCmFP8" in out
+    assert "hal0 slot edit brain --model <id>" in out
+    assert "lfm2.5-2.6b" in out
+
+
+def test_update_prints_the_unassigned_model(monkeypatch: pytest.MonkeyPatch) -> None:
+    convergence = _convergence([])
+    convergence["post_activation_migrations"]["unassigned_models"] = [_UNASSIGNED]
+    result = _run_update_with_convergence(monkeypatch, convergence)
+    out = " ".join(result.output.split())
+    assert "hal0-brain-sft-q8-rocmfpx" in out
+    assert "hal0 slot edit brain --model <id>" in out
+
+
+_NO_MODEL_ERR = (
+    "slot 'brain' has no model assigned ([model].default is empty); assign a plain GGUF "
+    "build: `hal0 slot edit brain --model <id>` (e.g. lfm2.5-2.6b)"
+)
+
+
+def _run_update_with_drift(monkeypatch: pytest.MonkeyPatch, slots: list[dict]) -> object:
+    monkeypatch.setattr(uc, "_api_unreachable", lambda url: False)
+    monkeypatch.setattr(uc, "_interactive", lambda: False)
+    monkeypatch.setattr("hal0.updater.updater._is_editable_install", lambda: False)
+
+    def fake_get(path: str, **kwargs: object) -> dict:
+        if path == "/api/updates/slot-drift":
+            return {"count": len(slots), "slots": slots}
+        if path == "/api/updates/components":
+            return {"components": [], "pending": 0}
+        return {
+            "current": "0.0.0",
+            "latest": "9.9.9",
+            "channel": "stable",
+            "update_available": True,
+            "manifest": {},
+        }
+
+    def fake_post(path: str, *, json: object = None, **kwargs: object) -> dict:
+        if path == "/api/updates/prepare":
+            return {"id": "p1", "state": "queued"}
+        if path == "/api/updates/commit":
+            return {"id": "c1", "state": "queued"}
+        return {"restarted": [], "skipped_busy": [], "failed": []}
+
+    def fake_poll(
+        job_id: str, *, terminal: tuple = ("applied", "failed"), **kwargs: object
+    ) -> dict:
+        if "prepared" in terminal:
+            return {"id": job_id, "state": "prepared", "resolved_version": "9.9.9", "notes": {}}
+        return {"id": job_id, "state": "applied", "convergence": _convergence([])}
+
+    monkeypatch.setattr(uc, "api_get", fake_get)
+    monkeypatch.setattr(uc, "api_post", fake_post)
+    monkeypatch.setattr(uc, "_poll_job", fake_poll)
+    return runner.invoke(app, ["update", "--no-restart-slots"])
+
+
+def _flat(output: str) -> str:
+    """The output with Rich panel borders removed and whitespace collapsed."""
+    return " ".join(output.replace("\u2502", " ").split())
+
+
+def test_verdict_does_not_send_a_render_error_slot_to_restart_slots(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#2696: `--restart-slots` refuses a render_error slot, so the exit-2
+    verdict must name the slot's own remedy instead."""
+    brain = {
+        "slot": "brain",
+        "render_error": _NO_MODEL_ERR,
+        "diffs": [
+            {"key": "render_error", "running": None, "rendered": None, "error": _NO_MODEL_ERR},
+            {"key": "image", "running": "x:0824", "rendered": "x:0826"},
+        ],
+    }
+    result = _run_update_with_drift(monkeypatch, [brain])
+    assert result.exit_code == 2, result.output
+    out = _flat(result.output)
+    assert "restarts are pending" not in out
+    assert "Run `hal0 update --restart-slots` once the slot is idle" not in out
+    assert "to bounce the drifted slots" not in out
+    assert "hal0 slot edit brain --model <id>" in out
+    assert "update applied." not in out
+
+
+def test_verdict_splits_render_error_slots_from_restartable_ones(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    brain = {
+        "slot": "brain",
+        "render_error": _NO_MODEL_ERR,
+        "diffs": [{"key": "image", "running": "x:0824", "rendered": "x:0826"}],
+    }
+    chat = {"slot": "chat", "diffs": [{"key": "image", "running": "x:0824", "rendered": "x:0826"}]}
+    result = _run_update_with_drift(monkeypatch, [brain, chat])
+    assert result.exit_code == 2, result.output
+    out = _flat(result.output)
+    assert "restarts are pending: chat still run the old runner image" in out
+    assert "restarts are pending: brain" not in out
+    assert "hal0 slot edit brain --model <id>" in out
+
+
 # ── #2661: rollback POST must outlive the server's synchronous pip reinstall ──
 
 
