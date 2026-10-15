@@ -614,6 +614,28 @@ def test_gate_skips_non_chat_slot_types(slot_type: str) -> None:
     assert output_sanity.skip_reason({"type": slot_type}) is not None
 
 
+@pytest.mark.parametrize(
+    "extra",
+    [
+        {"argv": ["llama-server", "--reranking", "--port", "8080"]},
+        {"flags": "--embedding --pooling mean"},
+        {"profile": "reranking"},
+        {"profile": "embedding"},
+    ],
+)
+def test_gate_skips_llm_typed_slot_with_non_chat_profile_or_argv(extra: dict[str, Any]) -> None:
+    """#2693: a stale ``type="llm"`` on a reranker must not run the chat probe."""
+    reason = output_sanity.skip_reason({"type": "llm", **extra})
+    assert reason is not None
+    assert reason.startswith("non_chat_")
+
+
+def test_failure_message_names_the_type_remedy() -> None:
+    verdict = output_sanity.SanityVerdict(ok=False, status="probe_http_500", sample="", detail="")
+    assert "type" in output_sanity.failure_message(verdict)
+    assert "hal0 doctor profiles --fix" in output_sanity.failure_message(verdict)
+
+
 def test_gate_honours_the_env_opt_out(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv(output_sanity.SANITY_ENV_VAR, "0")
     assert output_sanity.skip_reason({"type": "llm"}) == "disabled_by_env"

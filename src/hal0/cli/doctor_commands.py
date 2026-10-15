@@ -1797,6 +1797,63 @@ def check_slot_profile_refs(
     return rows
 
 
+def check_slot_type_vs_profile(
+    slots: list[tuple[str, str, str | None]],
+    profile_flags: dict[str, str] | None = None,
+) -> list[dict[str, str]]:
+    """Flag ``type = "llm"`` slots whose profile is rerank/embed/tts (#2693).
+
+    ``heal_missing_llm_type`` used to stamp ``llm`` on type-less non-chat TOMLs,
+    and that landed on disk; an ``llm`` type sends the slot through the chat
+    output-sanity probe, which a reranker cannot pass. ``slots`` is
+    ``(name, type, profile)``; ``profile_flags`` maps profile → launch flags so a
+    custom-named profile carrying ``--reranking`` is still caught. Rows carry
+    the ``expected`` type so :func:`repair_slot_types` can apply it.
+    """
+    from hal0.slots._cfg_helpers import infer_non_chat_type, non_chat_type_from_flags
+
+    flags = profile_flags or {}
+    rows: list[dict[str, str]] = []
+    for name, slot_type, profile in slots:
+        if slot_type != "llm" or not profile:
+            continue
+        expected = infer_non_chat_type(profile) or non_chat_type_from_flags(flags.get(profile))
+        if expected is None:
+            rows.append({"label": name, "status": "ok", "detail": f"type llm / profile {profile}"})
+            continue
+        rows.append(
+            {
+                "label": name,
+                "status": "drift",
+                "expected": expected,
+                "detail": (
+                    f'type = "llm" but profile {profile!r} is {expected} — load fails '
+                    f"the chat output-sanity probe (slot.output_sanity_failed). "
+                    f'Repair: hal0 doctor profiles --fix (sets type = "{expected}").'
+                ),
+            },
+        )
+    return rows
+
+
+def repair_slot_types(rows: list[dict[str, str]], paths_by_slot: dict[str, Path]) -> int:
+    """Rewrite ``type`` in the TOML of each drift row; returns slots repaired."""
+    from hal0.config.loader import _read_toml, write_toml_atomic
+
+    fixed = 0
+    for r in rows:
+        path = paths_by_slot.get(r["label"])
+        if r.get("status") != "drift" or "expected" not in r or path is None:
+            continue
+        data = _read_toml(path)
+        tbl = data.get("slot")
+        # ``type`` lives in [slot] on the nested shape, top level on the flat one.
+        (tbl if isinstance(tbl, dict) and "type" in tbl else data)["type"] = r["expected"]
+        write_toml_atomic(path, data)
+        fixed += 1
+    return fixed
+
+
 def _image_repo(ref: str) -> str:
     """Strip the tag/digest → the bare ``registry/repo`` of an image ref."""
     body = ref.split("@", 1)[0]  # drop @sha256:... digest
@@ -1956,6 +2013,11 @@ def doctor_profiles(
         "--json",
         help=("Emit stable Diagnosis JSON (HAL0-PROFILE-*) instead of the human tables."),
     ),
+    fix: bool = typer.Option(
+        False,
+        "--fix",
+        help='Rewrite type = "llm" to the profile\'s real type on rerank/embed/tts slots (#2693).',
+    ),
 ) -> None:
     """Audit the slot↔profile layer: dangling references + un-pulled images.
 
@@ -1973,6 +2035,7 @@ def doctor_profiles(
     """
     try:
         from hal0.config.loader import list_slots, load_slot_config
+        from hal0.config.paths import slots_config_dir as _slots_config_dir
         from hal0.profiles import ProfileCatalog
     except ImportError as exc:  # pragma: no cover — profile layer always present
         console.print(f"[red]✗[/red]  profile layer unavailable: {exc}")
@@ -1997,6 +2060,7 @@ def doctor_profiles(
     slot_profiles: list[tuple[str, str | None]] = []
     slot_types: dict[str, str] = {}
     slot_devices: dict[str, str] = {}
+    slot_files: dict[str, Path] = {}
     for slot_name in list_slots():
         try:
             cfg = load_slot_config(slot_name)
@@ -2008,24 +2072,43 @@ def doctor_profiles(
         # type decides whether it is drift, the device which profile repairs it.
         slot_types[cfg.name] = str(getattr(cfg, "type", "") or "")
         slot_devices[cfg.name] = str(getattr(cfg, "device", "") or "")
+        slot_files[cfg.name] = _slots_config_dir() / f"{slot_name}.toml"
 
     ref_rows = check_slot_profile_refs(slot_profiles, valid_names, slot_types, slot_devices)
     img_rows = check_profile_images_present(profiles, _local_image_repos())
 
     broken = [r for r in ref_rows if r["status"] == "drift"]
 
+    type_rows = check_slot_type_vs_profile(
+        [(n, slot_types.get(n, ""), p) for n, p in slot_profiles],
+        {p.name: str(getattr(p, "flags", "") or "") for p in profiles},
+    )
+    type_drift = [r for r in type_rows if r["status"] == "drift"]
+    if fix and type_drift and not json_output:
+        repaired = repair_slot_types(type_rows, slot_files)
+        console.print(f"[green]✓[/green]  fixed type on {repaired} slot(s); restart them to load.")
+        type_drift = []
+        type_rows = [r for r in type_rows if r["status"] != "drift"]
+
     if json_output:
         console.print_json(render_json(_diagnose_profiles(ref_rows, img_rows)))
-        raise typer.Exit(1 if broken else 0)
+        raise typer.Exit(1 if broken or type_drift else 0)
 
     _render_profiles("Slot → profile references", ref_rows)
     _render_profiles("Profile images (in-use)", img_rows)
+    if type_drift:
+        _render_profiles("Slot type vs profile", type_drift)
 
     if broken:
         console.print(
             f"\n[red]✗[/red]  {len(broken)} slot(s) have a broken profile reference "
             "or none at all — a dangling reference stops the slot from starting; "
             "a missing one lets it start and answer 501. See each row for the repair."
+        )
+        raise typer.Exit(1)
+    if type_drift:
+        console.print(
+            f"\n[red]✗[/red]  {len(type_drift)} slot(s) have the wrong type for their profile."
         )
         raise typer.Exit(1)
     console.print("\n[green]✓[/green]  every slot resolves to a real profile.")

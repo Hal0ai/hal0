@@ -261,7 +261,35 @@ def skip_reason(cfg: Mapping[str, Any] | None) -> str | None:
         # blank here means the config never went through the loader and we
         # cannot claim it is chat-capable.
         return f"slot_type_{slot_type or 'unset'}"
+    # #2693: a stale/wrong ``type="llm"`` on a reranker/embedder must not send
+    # it through a chat completion it cannot answer. The profile name or the
+    # launch flags (``--reranking`` / ``--embedding``) are the stronger signal.
+    non_chat = _non_chat_signal(cfg)
+    if non_chat is not None:
+        return f"non_chat_{non_chat}"
     return None
+
+
+def _non_chat_signal(cfg: Mapping[str, Any]) -> str | None:
+    """Non-chat type implied by the slot's argv/flags or its profile, or ``None``."""
+    from hal0.slots._cfg_helpers import infer_non_chat_type, non_chat_type_from_flags
+
+    for key in ("argv", "flags"):
+        found = non_chat_type_from_flags(cfg.get(key))
+        if found:
+            return found
+    profile = str(cfg.get("profile") or "").strip()
+    if not profile:
+        return None
+    found = infer_non_chat_type(profile)
+    if found in ("reranking", "embedding"):
+        return found
+    try:
+        from hal0.profiles import ProfileCatalog
+
+        return non_chat_type_from_flags(ProfileCatalog().resolve(profile).flags)
+    except Exception:  # unresolvable profile: not evidence either way
+        return None
 
 
 def probe_budget_s(cfg: Mapping[str, Any] | None) -> float | None:
@@ -559,7 +587,8 @@ def failure_message(verdict: SanityVerdict) -> str:
         detail += f" [{verdict.detail}]"
     return (
         f"{what}: {detail}. The model server answers /health but does not produce "
-        f"coherent text — check the runner image and GPU backend. Set "
+        f"coherent text — check the runner image and GPU backend. If this slot serves "
+        f"rerank/embed/TTS, its TOML ``type`` is wrong: run `hal0 doctor profiles --fix`. Set "
         f"{SANITY_ENV_VAR}=0 (or {SANITY_CFG_KEY} = false in the slot TOML) to bypass."
     )
 
