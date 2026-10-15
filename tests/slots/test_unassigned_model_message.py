@@ -50,3 +50,23 @@ async def test_a_bound_slot_gets_no_unassigned_message(
     await sm.load("chat")
     slot = await sm.status("chat")
     assert "no model assigned" not in (slot.metadata.get("message") or "")
+
+
+async def test_offline_slot_with_stale_model_id_is_not_said_to_be_serving(
+    slot_root: Path,
+    container_stub: FakeContainerProvider,
+) -> None:
+    """#2715: a stopped slot whose state record keeps an old model_id."""
+    sm = SlotManager()
+    await sm.load("chat")
+    container_stub.active.discard("chat")
+    # An offline record with a stale model_id and no message of its own.
+    await sm._transition("chat", SlotState.OFFLINE, message="", force=True)
+    _empty_the_binding(slot_root)
+
+    slot = await sm.status("chat")
+
+    assert slot.state == SlotState.OFFLINE
+    message = slot.metadata.get("message") or ""
+    assert "no model assigned" in message
+    assert "still serving" not in message

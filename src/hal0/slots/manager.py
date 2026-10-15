@@ -2362,13 +2362,18 @@ class SlotManager:
             and not _model_default(cfg)
             and provider_requires_model(provider)
         ):
-            from hal0.slot_config import unassigned_model_remedy
+            from hal0.slot_config import no_model_assigned_message, unassigned_model_remedy
 
-            meta["message"] = (
-                f"no model assigned ([model].default is empty); still serving "
-                f"{rec.model_id!r} until the next restart. "
-                f"{unassigned_model_remedy(slot_name)}"
-            )
+            if observed in (SlotState.READY, SlotState.SERVING, SlotState.IDLE):
+                meta["message"] = (
+                    f"no model assigned ([model].default is empty); still serving "
+                    f"{rec.model_id!r} until the next restart. "
+                    f"{unassigned_model_remedy(slot_name)}"
+                )
+            else:
+                # #2715: an offline slot keeps a stale ``model_id`` from its
+                # last load; it is not serving anything, so don't claim it is.
+                meta["message"] = no_model_assigned_message(slot_name)
         breaker = self._breaker_snapshot(slot_name)
         if breaker:
             meta["breaker"] = breaker
