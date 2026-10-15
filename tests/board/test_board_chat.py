@@ -647,7 +647,11 @@ def test_hal0_brain_persona_overrides_prompt_and_model(tmp_path) -> None:
     client.post("/api/brain/chat", json={"messages": [{"role": "user", "content": "hello"}]})
     sent = stub.calls[0]
     assert sent["model"] == "hal0/custom-brain"
-    assert sent["messages"][0] == {"role": "system", "content": "operator-tuned steward prompt"}
+    assert sent["messages"][0]["role"] == "system"
+    # The operator's prompt leads; a prompt that does not mention memory_add
+    # gets the steward's memory rule appended (#2658).
+    assert sent["messages"][0]["content"].startswith("operator-tuned steward prompt")
+    assert "memory_add" in sent["messages"][0]["content"]
 
 
 # ── thinking frames (reasoning models) ──────────────────────────────────────

@@ -30,6 +30,20 @@ applying. Add those subsections to a version's section to surface them; see
 
 ## [Unreleased]
 
+### Added
+
+- The dashboard steward now has a real memory. Brain chat offers it
+  `memory_add`, `memory_search` and `memory_list`, scoped server-side to the
+  `hal0-brain` persona's namespace (`private:hermes__hal0-brain`); the model
+  cannot name another bank, and every other `memory_*` tool stays hidden.
+  Before, every memory tool was filtered out and nothing stored, so "remember
+  that my cat is called Zorbo" got "I've noted that" with nothing saved. The
+  steward's own `memory_add` works under the default `[brain_chat]
+  read_only = true`, the persona and fallback prompts tell the model to call
+  `memory_add` before claiming it remembered anything, and a "remember ..." or
+  "what did I tell you ..." turn answered with no tool call is rerouted to
+  `[brain_chat] tool_model` (#2658).
+
 ### Fixed
 
 - **ui:** a vulkan-only GPU (render node passed through, no `/dev/kfd`) now counts as a GPU on the Overview utilization row and health strip and on the Settings Live-hardware and Power & thermal panels, instead of reading "no GPU access" while a vulkan slot is serving; the NPU rows gate on the NPU probe rather than the GPU one (#2674).

@@ -79,6 +79,7 @@ class MemoryDispatcher:
         self._wrapper = wrapper
         self._client_id_resolver = client_id_resolver
         self._private_resolver = private_resolver
+        self._add_preflight = add_preflight
         # Build the underlying closure once. Re-binding per-call would
         # waste work — make_dispatcher's closure already reads the
         # resolvers at call time.
@@ -102,6 +103,23 @@ class MemoryDispatcher:
     async def __call__(self, tool: str, args: dict[str, Any]) -> dict[str, Any]:
         """Callable sugar — same as :meth:`dispatch`."""
         return await self._inner(tool, args)
+
+    def scoped(self, client_id: str) -> MemoryDispatcher:
+        """A dispatcher pinned to ``private:<client_id>`` for an in-process caller.
+
+        The app-level instance resolves identity and the private toggle off the
+        live MCP request, which an in-process caller such as the brain chat
+        (#2658) does not have. This returns a sibling over the SAME provider and
+        the SAME ``memory_add`` preflight, but with the identity fixed to
+        ``client_id`` and private mode always on, so every write resolves to
+        ``private:<client_id>`` no matter what dataset the arguments name.
+        """
+        return MemoryDispatcher(
+            self._wrapper,
+            client_id_resolver=lambda: client_id,
+            private_resolver=lambda: True,
+            add_preflight=self._add_preflight,
+        )
 
     @property
     def wrapper(self) -> Any:
