@@ -1174,6 +1174,13 @@ class TestPackedSecrets:
 
 
 class TestEmptyValueBeforeASecret:
+    #: Wall-clock bound for the long-run test below. The empty-value run costs
+    #: about 1 s on a loaded PR runner (1.01 s twice on 2026-10-14/15, #2677),
+    #: so borrowing TestRedactionTimeIsLinear's 1 s bound made unrelated PRs
+    #: red. 3x headroom keeps the linear-time property asserted (a quadratic
+    #: scan of 80 KB took tens of seconds, #2600) without flaking.
+    _BOUND_S = 3.0
+
     """#2594: ``NAME=`` with an empty value, then whitespace, took the next
     word as its value. When that word was another secret's name, the name was
     masked as the first value and the second value was left visible."""
@@ -1268,7 +1275,7 @@ class TestEmptyValueBeforeASecret:
         out = redact(line)
         elapsed = time.perf_counter() - start
         assert out.endswith(MASK)
-        assert elapsed < TestRedactionTimeIsLinear._BOUND_S, f"{unit!r} took {elapsed:.2f}s"
+        assert elapsed < self._BOUND_S, f"{unit!r} took {elapsed:.2f}s"
 
 
 # ── #2595: secrets glued together with no separator ─────────────────────────
