@@ -125,8 +125,16 @@ declare `utility` off-limits — say in your report which of the two you got.
    `memory-add-ignores-unknown-body-keys`; report only its `still_report_if`.
 
 15. **Identity-card growth.** Count `agent-identity` facts/documents in `/api/memory/banks/shared` (tags endpoint plus document list) and note each healthy hal0-api boot in the journal; one new Hermes and one new hal0-brain card per boot is #2700. Only restart hal0-api if the lane owner allows it; otherwise compare against the boot count.
-16. **Cancel a child, retry the child.** Cancel a retain child, `hal0 memory ops retry --bank <b> --id <child>`, then assert the parent id from `/api/memory/add` converges to completed (#2699). Retry of a pending PARENT should refuse (409) like the child. Delete the probe document afterwards.
+16. **Cancel a child, retry the child.** Cancel a retain child, `hal0 memory ops retry --bank <b> --id <child>`, then assert the parent id from `/api/memory/add` converges to completed (#2699). Retry the CHILD only and leave the parent alone until the child is terminal (retrying the parent in between repairs it and makes the check pass falsely). Retry of a PENDING parent returning 200 is by design (known-issues `batch-retain-parent-retry-is-idempotent`). Delete the probe document afterwards.
 17. **Invalid JSON.** POST `{bad` to `/api/memory/add`, `/search`, `/recall`, `/delete`; a 4xx is correct, 500 `system.internal` is #2701. Note that `/api/memory/list` ignores an undocumented `tags` param silently; decide whether unknown query params should be rejected. The API exposes `updated_at` only, so time ops with `updated_at` on `status=completed`.
+
+18. **Yield per staged chat model.** After binding a model to utility, a natural multi-sentence retain must give `memory_unit_count > 0` with EACH staged chat model (qwen3.5-0.8B and lfm2.5-2.6b); count `Extract facts:` lines by yield. Then A/B a `json_schema` call to `hal0/utility` with and without `chat_template_kwargs.enable_thinking=false` (#2713: finish=length, empty content, reasoning only). Restore utility to lfm2.5-2.6b afterwards.
+
+19. **Replay completion.** After a degraded-boot heal, check whether `brain_lane.degraded_replay_armed` is followed by a completion line; no line means the identity cards may have come from the hermes lane, not the replay. Count `agent-identity` documents once, restart is serialized elsewhere (#2700).
+
+20. **Fast failed retain.** Use a hindsight drop-in pointing at a dead LLM base URL (or a model-less utility on a box where brain is down) to get a failed retain in seconds so check 9's `--all-failed` positive path fits the budget; remove the drop-in.
+
+21. **Recall `limit` and marker hygiene.** `/api/memory/recall` with `limit=6` returned 19 items (record the contract); use a unique marker per run (MARKER-7734 collides with the probe stage's MARKER-7734-RP).
 
 ## Leave behind
 

@@ -175,6 +175,16 @@ immediately before you name a new throwaway resource, not only at lane start.
 15. **Crash-slot warming window.** During the 180 s warming window of the crash slot sample `hal0 doctor verify` and `hal0 status` every 20 s and note when the failed unit is first surfaced relative to the error flip. A second `slot load` on an already-failed unit: does it fast-fail or wait the full window? Stop at 100 s and say so.
 16. **Where the image_pin refusal shows.** The load response is the generic 500 (#1424); also read `GET /api/slots/<n>` `metadata.message` and `hal0 slot show <n>`, and record whether either renders the refusal. On a kfd-less box `slot create --hardware rocm` is accepted; record whether the load response or only the slot record carries the GpuPreflightError text.
 
+17. **Fast-crash load returns fast.** Load a slot bound to a 2 MB random-bytes file (file must be readable by hal0, not under /root); the 500 `slot.spawn_failed` must return in < ~30 s while the unit is terminal, and a second load with the unit already `failed` too (#2717: both take ~180 s). Clean up and assert `systemctl --failed` is empty; check `hal0 doctor` names the unit (#1840 item 6, known).
+
+18. **Offline slot makes no serving claim.** After unloading a slot with an empty `[model].default` that previously served, `GET /api/slots/<n>` `message` must not say "still serving" (#2715).
+
+19. **State files writable.** `sudo -u hal0 test -w` on `state/components.json` and `registry/ignored-paths.json.lock` BEFORE any hal0-api restart; fail the check if `hal0 doctor perms` says "ownership clean" while they are not writable (#2670, #2698).
+
+20. **`image_status` on profile-less running slots.** For hand-created running LLM slots expect `present`; `not-configured` needs to be documented as intended or reported. Also read the `doctor verify` Capability line ("3 active: embed, img, voice") against reality: img was listed active while offline and model-less (uninvestigated).
+
+21. **Pinned-slot unload from the CLI.** `hal0 slot unload utility` returns 409 `slot.pinned`; record whether any CLI option reaches `?force=true` (none in 1.4.0, #2729).
+
 ## Leave behind
 
 Brain slot loaded and healthy on the CPU-viable chat model; embed slot loaded (the memory lane

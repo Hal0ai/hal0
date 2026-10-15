@@ -135,6 +135,40 @@ known-issues, or regressions, and add a line to the changelog below. A report re
 
 ### Kit changelog
 
+* **13** (2026-10-15) — Curation from the v1.4.0-nightly.20261015155017 run (verified findings:
+  17 filed as #2713-#2729, 21 already tracked and commented, the rest refuted or ruled
+  by-design). `regressions.yaml`: 17 new entries (Qwen thinking leaving Hindsight extraction at
+  0 facts, brain seed profile without `--parallel`, "still serving" message on an offline slot,
+  Hermes turns queued behind extraction, 180 s load block on a unit parked with exit 64, kokoro
+  gpu-vulkan row, agents/ 0700 vs 0711, `config validate` blind to slot TOMLs, dead memory
+  reranker docs, gated MCP tools queueing malformed calls, un-pullable stub stuck `queued`,
+  `model rm` leaving an enabled capability, auto-scan ignoring the GGUF header, Overview
+  utilisation fractions, intermittent 90 s hal0-api stop hang, steward GB conversions, and a
+  three-item rollup #2729). Every existing probe carries this run's `last_result`; 4 results were
+  adjudicated away from the probe agent's call (`vulkan-lane-stale-image-preflight-refusal` and
+  `crash-loop-lifecycle` to fixed, `doctor-perms-never-converges` to partial,
+  `identity-cards-duplicated-each-boot` from blocked to regressed). 30 entries carry a
+  `v1_4_0_nightly_20261015155017_note` (verifier corrections: "regressed" on a never-fixed open
+  issue means "still failing", not a regression; tie-break and Python-version scoping;
+  stale repros; entries to retire). `known-issues.yaml`: 8 new entries (count-key redaction,
+  batch-retain parent retry idempotent, persisted non-chat `type = llm` needs `doctor --fix`,
+  no-op capability re-POST, reranker code path fallback-only, embeddings/rerank to wrong slot
+  #2672, omitted-model 404 #2666, and a pointer list of 18 tracked open issues re-observed here),
+  notes on five existing ones (load-restart-error-surfacing now says #1424 is closed and the
+  GPU-preflight residual has no tracker; brain-chat-context-exceeded-500 is superseded in part
+  by #2714; crash-loop 180 s dwell narrowed; anchor-dependent extraction quality; steward prose
+  vs table row), `updated_for` bumped. 60 entries are `review_due`: re-adjudicate or delete.
+  Lane briefs gained 47 checks, mostly generalisations (gated-tool empty-args sweep, apply every
+  advertised row after a pull, scan vs add on identical bytes, fast-crash load timing,
+  doctor-perms after first use, validators vs daemon, GB-unit regex, time-to-quiet) and lost
+  stale text (retired hermes snapshot and `external_dirs` checks, the Vulkan-to-ROCm relabel
+  check 2b, wrong route names, `hal0 registry`, the memory check that expected a 409 on a pending
+  parent). Budget watch: stateful lanes grew 3-6 checks each; capabilities (18) and slots (21)
+  are the likeliest to miss 12 min, so drop their oldest fixed-for-three-releases checks first.
+  `boxes.toml` (gitignored): ct150 and ct151 facts (see per-box FACTS LEARNED). Preflight still
+  hands ct150's CONTEXT.md to ct151 lanes; the curation report's promotion list asks for a
+  per-box file.
+
 * **12** (2026-10-15) — Curation from the v1.4.0-nightly.20261015021622 run (verified findings:
   17 filed as #2690-#2706, 13 already tracked and commented, the rest refuted or ruled by-design).
   `regressions.yaml`: 17 new entries (voice STT gpu-rocm fallback and Whisper row, utility

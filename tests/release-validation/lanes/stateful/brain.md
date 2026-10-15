@@ -113,6 +113,16 @@ read the tool_result payload and confirm it actually answers what was asked.
 14. **tool_model offline.** With `tool_model` pointed at an offline model-less slot, the final reply must not discard a successful `tool_result` for a plain port or state question (#2673). Restore hal0.toml by sha256.
 15. **Concurrency.** Fire six simultaneous brain turns at one 65536-ctx slot and note any 'Context size has been exceeded' 500 that the steward renders as a 'tools can't run' message (cause: `utility-profile-shared-kv-pool-overflow`, #2692). Announce first: it kills other lanes' in-flight requests. Out of scope but worth an ADR check: with `read_only=false` board mutations bypass the persona approval queue.
 
+16. **Reroute wording.** After `hal0 config reload`, point `[brain_chat] tool_model` at an offline model-less slot (a bare toml edit alone does not take effect) and require the final reply not to claim the brain "can't emit tool calls" once a `tool_result` frame was streamed (#2673; a context-size error from the tool model gets the same prose).
+
+17. **Table row vs tool_result, every row.** Compare each per-slot state the steward writes (running/serving/offline) with the matching `list_slots` row; summary sentences miscount on the 2.6B model (known prose-vs-tool_result), a contradicting TABLE ROW in >= 2 of 3 tries is a finding.
+
+18. **Unit conversion.** Ask "how much VRAM does this machine have" 6 times; regex every GB figure and require it within 1% of `gpu_vram_total_mb`/1000 or /1024 (#2728: 114.5/114.8 GB for 118784 MB in 6 of 7 runs).
+
+19. **Brain concurrency.** Assert the brain slot's own `/props` `total_slots` is 1 or that per-sequence context is >= 16k (#2714); the existing #2692 check covers only the utility profile. Announce first if you drive 4 concurrent 16k prompts: it kills other lanes' brain requests.
+
+20. **Memory path keys.** The steward's `memory_add` fact lives in bank `shared` with tags `visibility:private` and `agent:hermes__hal0-brain` (no bank `private:hermes__hal0-brain`); assert it is findable by `memory_search` under that scheme. Plain `/api/memory/search` does not return it.
+
 ## Leave behind
 
 Brain healthy. Note any slot you loaded for the tool-model test, and restore `brain_chat` config

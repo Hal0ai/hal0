@@ -113,6 +113,14 @@ from an untyped 500 to a typed 404 since the entry was last checked; the entry's
 16. **Second slot's bare alias (#2665).** With two ready slots on one model, probe the bare alias of the SECOND-declared slot, not the first (the first passes by order and cannot discriminate). Also decide whether the `hal0/agent` warm fallback (served by brain in one state, wakes agent in another) should be strict; record both states.
 17. **Wrong-model vectors.** Request an unloaded REGISTERED embedding id (qwen3-embedding-0-6b-q8-0, 1024-d) while another embed model is served; assert a typed error or matching dimension and `model` equal to `GET /api/slots/embed` `model_id` (#2663, #2672). State in the report that the `json_object` check ran on a non-Qwen3-templated brain (lfm2.5) and so did NOT exercise the collision case.
 
+18. **Probe the bare alias of EACH slot sharing a model**, including `model=agent` and `model=brain`, not only `brain`: the tie goes to health rank then upstream index (utility won `model=brain` 4/4 on ct151), so a single probe cannot discriminate #2665.
+
+19. **Non-chat cross-type, both directions.** `/v1/embeddings` naming the reranker id returns 200 with 384-d vectors (NOT a finding); `/v1/rerank` naming the embed id returns the raw `--reranking` 501 (#2672 sibling). Assert a typed error for the latter.
+
+20. **Record `pinned` and slot state around every `hal0/agent` wake.** agent reported `pinned=true` after a wake, so a later `hal0 slot unload agent` 409s. Idle eviction (embed, rerank and agent were reaped within ~2 min of each other) flips outcomes between loaded and offline: reload first and write the slot-state line before each dependent check.
+
+21. **Budget and fixtures.** Check 4's crash-loop cold path does not fit the 12 min budget; it now lives in the slots lane (fast-crash load). Check 17 (wrong-model vectors) needs two embedding models; mark it `skipped` on ct151 unless a second small embedding gguf is staged.
+
 ## Leave behind
 
 Brain and embed loaded and healthy. Any model you caused to auto-load, unload again.

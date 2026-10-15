@@ -113,6 +113,14 @@ live chat: it is install-time ground truth, and it distinguishes "broken out of 
 14. **Aliases after reprovision.** `model_aliases` in hermes `config.yaml` must name only slots/models that exist (#2704); an alias left by a deleted slot is a finding, leftovers from another lane are attribution only. Count in `slot_list` must exclude the synthetic `hal0` row, or a model counting ready slots from the payload gets the wrong number (#2697).
 15. **Make the cwd probe real, and time the turn.** c8 cannot fail unless `/root/.git` exists and is unreadable: create one first (and remove it). Record the split of a trivial hermes turn (~24 s on ct151) into startup/MCP discovery (208 tools), dispatch, and the post-turn `/api/memory/add` x2.
 
+16. **Time-to-quiet per turn.** After your hermes turns sample utility `/metrics` requests_processing/deferred and `hal0 memory ops list` every 60 s for 10 min; record retain + consolidation ops per turn (2 retains plus a consolidation here). Also `-o short-iso-precise` journal timestamps per turn to split startup / MCP discovery / dispatch / post-turn memory/add. Makes the "GPU box turn > 120 s" clause measurable and catches #2716.
+
+17. **First-session perms.** `hal0 doctor perms; echo $?` and `stat -c '%U:%G %a' /var/lib/hal0/agents` before and after the first dashboard/agent-chat session call (expect 711, #2719).
+
+18. **Which store did the memory turn reach?** Assert whether the fact went to the builtin `/var/lib/hal0/.hermes/memories/MEMORY.md` or to Hindsight, and run the recall turn with MEMORY.md moved aside so a correct recall must come from the backend. Restore the file.
+
+19. **Fallback target vs smoke anchor.** Compare the `hal0/agent` fallback dispatch target (`dispatch.decision upstream=`) with the slot named in the provision smoke ("slot brain"); fail when they differ, and compare `hal0/brain` vs `hal0/agent` latency for an 8-token request when utility shares brain's model.
+
 ## Leave behind
 
 Hermes running with its SHIPPED config restored. Brain, utility, and embed slots healthy. State

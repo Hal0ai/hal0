@@ -17,7 +17,7 @@
 
 schema: 1
 updated: 2026-10-15
-updated_for: v1.4.0-nightly.20261015021622
+updated_for: v1.4.0-nightly.20261015155017
 
 known_issues:
   # ── Open defects, already tracked ───────────────────────────────────────────
@@ -111,7 +111,7 @@ known_issues:
     review_due: true
 
   - id: slot-logs-empty
-    status: open
+    status: fixed
     issue: 1429
     summary: >-
       `hal0 slot logs <name>` returns "no logs" for healthy container slots — the quadlet sets
@@ -120,7 +120,7 @@ known_issues:
     review_due: true
 
   - id: load-restart-error-surfacing
-    status: open
+    status: fixed
     issue: 1424
     summary: >-
       Slot load/restart failures surface as CLI timeouts or generic errors rather than the
@@ -142,11 +142,27 @@ known_issues:
       — verified true in the same probe. Do not re-file "bare 500 on slot load failure" without
       also checking metadata.message; if that is ALSO empty, it is regression
       `container-health-readerror-unhandled`'s territory, not this entry's.
+    v1_4_0_nightly_20261015155017_note: >-
+      Re-adjudicated on 20261015155017 (vulkan-preflight-refusal-bare-500, refuted as a
+      finding): the bare 500 system.internal on EVERY GPU preflight refusal is still this entry,
+      unchanged for three nightlies; the two prior reports scored vulkan-lane-stale-image-
+      preflight-refusal fixed on it. #1424 is CLOSED (2026-08-24) and only covered the
+      CalledProcessError -> SlotSpawnFailed path (container.py:2091-2111); GpuPreflightError
+      (providers/_gpu.py:95, raised at :627/:640/:778/:864) falls to the catch-all
+      (api/middleware/error_codes.py:129-141) so this residual has NO open tracker. Optional XS
+      ticket: subclass it from Hal0Error with a typed code such as slot.gpu_preflight_refused
+      and a 409/422. still_report_if (NEW): a GPU preflight refusal (Vulkan image gate, render-
+      node gate, /dev/kfd gate) leaves GET /api/slots/<n> metadata.message empty or generic, or
+      leaves the slot in any state but `error`; OR a container or unit is started for the
+      refused slot; OR a typed envelope is added and the load still returns system.internal; OR
+      a NON-preflight load failure (spawn, health, output-sanity) regresses to a bare
+      system.internal 500. Do NOT re-file "bare 500 on GPU preflight refusal" while
+      metadata.message carries the #1888/kfd/render-node text.
     review_at: v1.0.0
     review_due: true
 
   - id: hindsight-doctor-status-mismatch
-    status: open
+    status: fixed
     issue: 1543
     summary: >-
       `hal0 doctor` and `hal0 memory status` disagree about hindsight health.
@@ -303,6 +319,14 @@ known_issues:
       one automatic retry load can follow the first ERROR stamp, so a selection can read
       warming ~6 min total across TWO loads; each load individually respecting the dwell is
       still by-design.
+    v1_4_0_nightly_20261015155017_note: >-
+      Narrowed on 20261015155017: the 180 s warming dwell is by design ONLY for a unit that is
+      still activating/auto-restarting (older runner image or image_pin lacking the #2037
+      exit-64 entrypoint). For a unit that systemd already holds terminal (ActiveState=failed,
+      ExecMainStatus=64, NRestarts=0, RestartPreventExitStatus=64 in the quadlet) an explicit
+      POST /load that blocks ~180 s is #2717 (regression crash-loop-load-no-fast-fail),
+      including a second load sent while the unit is already failed (~182 s). Report it under
+      that key, not here.
     review_at: v1.1.0
     review_due: true
 
@@ -911,6 +935,16 @@ known_issues:
       hal0.brain_chat is demonstrably sending prompt+max_tokens above that window (requires a
       code change to the 4096 cap to even be possible). A single occurrence during concurrent
       slot churn is a runner transient.
+    v1_4_0_nightly_20261015155017_note: >-
+      SUPERSEDED IN PART on 20261015155017: the "not reachable by request size" rationale holds
+      for ONE request but not for concurrent sequences sharing a KV pool. The seed brain profile
+      has no --parallel (total_slots 4 over one 65536 pool), so four decoding sequences passing
+      65536 in total all fail with this exact 500 (journal: `decode: Context size has been
+      exceeded` then send_error on 4 tasks; reproduced with 4x16k /completion, n_predict 1500,
+      ignore_eos). Filed as #2714 (regression brain-slot-4seq-shared-kv-overflow). Re-adjudicate
+      this entry once #2714 lands; until then a Context-size 500 on brain with >= 2 other brain
+      requests in flight is #2714, not a transient. The "6 exceeded lines" in a journal are ONE
+      overflow event (1 decode + 4 send_error + 1 update_slots).
     review_at: v1.1.0
     review_due: true
 
@@ -1222,6 +1256,15 @@ known_issues:
       hal0 gains an "extracted 0 facts" op/status indicator and it fails to fire; OR the retain
       op reports `completed` while the raw document is ALSO absent (that is data loss, not
       yield, and is not covered by this entry).
+    v1_4_0_nightly_20261015155017_note: >-
+      Added on 20261015155017: the rc7 still_report_if ("0 facts on a box whose resolved
+      extraction slot IS serving an operator-assigned model, for content a comparable model
+      extracts facts from") is now MET by a deterministic proxy decision, not yield variance: a
+      thinking-by-default Qwen3/3.5 model on utility under a profile without `--reasoning off`
+      yields 0 facts on every retain (#2713, regression utility-qwen-structured-output-zero-
+      facts; thinking.py:104). lfm2.5-2.6b (default utility) also shows occasional 0-fact
+      `Output too long` drops on ct151; that remains anchor variance. Do not use lfm2.5-2.6b as
+      a clean "works" control, use the yield rate.
     review_at: v1.1.0
     review_due: true
 
@@ -1890,6 +1933,19 @@ known_issues:
       value and ZERO tool_call frames, or calls a non-matching tool and reports that tool's result
       as the answer, in >=2 of 3 tries. Guard-keyword misses on why/health phrasings stay with
       #2675.
+    v1_4_0_nightly_20261015155017_note: >-
+      Added on 20261015155017 (steward-reports-offline-slot-serving, steward half): a 2.6B
+      steward summary sentence that lumps an OFFLINE slot in with the serving ones (4 of 5 runs
+      on ct151) is prose-vs-tool_result error after a correct list_slots call; the table row
+      said offline 5/5. A/B with the "still serving" message present / blanked / blanked with
+      model_id nulled gave 0 wrong agent-serving rows in every variant, so that message does not
+      drive it. The same summaries also miscount everything else ("10 active slots", the hal0
+      composite counted, #2697). The hal0-side message on an offline slot is its own defect
+      (#2715, see regressions unassigned-model-message-on-offline-slot). Suggested
+      still_report_if addition: OR the steward's per-slot TABLE ROW contradicts the matching
+      list_slots state in >= 2 of 3 tries with the coherence canary passing (a summary-sentence
+      miscount alone stays prose-vs-tool_result). VRAM/GB unit conversion errors are filed
+      separately as #2728.
     review_at: v1.5.0
 
   - id: capability-apply-undownloaded-409-holds
@@ -1947,4 +2003,196 @@ known_issues:
       the caller did not name and a mutating tool acts on it; OR it contains URL-structural
       characters (? # % ..) and routes to a different endpoint than the tool's template; OR the
       direct REST call with the same string returns a different status or code.
+    review_at: v1.5.0
+
+  - id: settings-redacts-token-count-keys
+    status: by-design
+    adjudicated: v1.4.0-nightly.20261015155017
+    summary: >-
+      GET /api/settings and /api/settings/fields echo memory.graph.extraction_max_tokens as
+      {"value":"***REDACTED***","set":true} (secret=true); is_sensitive_key is True for
+      extraction_max_tokens and max_tokens. It is the only masked leaf in /api/settings.
+    why: >-
+      Key-name redaction in hal0.api._redact (is_sensitive_key / redact_config) deliberately
+      over-masks any key containing TOKEN, including count keys (#553 over-redact spec in
+      _redact.py:46-51; pinned by tests/api/test_redact.py:43 and
+      tests/fixtures/redaction_shapes.json sensitive_keys, which lists max_tokens, #2520;
+      ui/src/sentry.ts:959 "over-masks max_tokens on purpose"). redaction.py:921-927 documents
+      the count-name exemption (#2466/#2487) as applying only to the TEXT redactors. Nothing a
+      user sees or saves is affected: the dashboard reads extraction_limits.max_tokens (4096,
+      unmasked) from GET /api/memory/graph/status, and PUT /api/settings refuses every
+      memory.graph.* key (settings.py:98-110, :173) so the masked object cannot be written back.
+      Unmasking counts is a design change to the pinned contract (enhancement), not a release
+      finding.
+    still_report_if: >-
+      A dashboard page or CLI command shows ***REDACTED***, [object Object] or a blank in place
+      of a token-count setting; OR GET /api/memory/graph/status masks
+      extraction_limits.max_tokens; OR a settings write or preview path (PUT /api/settings,
+      /api/settings/preview, PUT /api/memory/graph) accepts the masked {value,set} object back
+      and persists it or reports 'no change' for a real token-count change; OR is_sensitive_key
+      stops masking a real credential key (HF_TOKEN, *_API_KEY); OR masking spreads beyond the
+      key's own value (installer report or doctor bundle masks the literal number elsewhere, the
+      #2439 class).
+    review_at: v1.5.0
+
+  - id: batch-retain-parent-retry-is-idempotent
+    status: by-design
+    adjudicated: v1.4.0-nightly.20261015155017
+    issue: 2699
+    summary: >-
+      POST .../operations/<pending batch_retain parent>/retry returns 200 "queued for retry" and
+      changes nothing about the in-flight children.
+    why: >-
+      retry_operation on a payload-less batch_retain parent means "re-run the batch's
+      outstanding work": it re-queues only failed or cancelled children, deliberately leaves
+      pending/processing children alone so a second worker cannot race a live one on the same
+      document_id (engine comment cites #1795), and keeps the parent pending only while a non-
+      completed child exists. Verified on ct151: child status, retry_count and updated_at
+      unchanged, only the parent's updated_at moved. The memory brief's old expectation that
+      this returns 409 was wrong (fixed in lanes/stateful/memory.md). The REAL defect is the
+      cancelled-parent trap (#2699, regression memory-parent-op-stuck-cancelled).
+    still_report_if: >-
+      Retrying a pending parent changes any child's status, retry_count, worker_id or claimed_at
+      while that child is pending/processing; OR leaves the parent in a different status than
+      before; OR a second worker claims the same child; OR it returns 200 for a parent whose
+      children are ALL completed (that must be the 409 "no incomplete sub-batches").
+    review_at: v1.5.0
+
+  - id: nonchat-slot-type-llm-persisted-needs-doctor-fix
+    status: by-design
+    adjudicated: v1.4.0-nightly.20261015155017
+    issue: 2710
+    summary: >-
+      On an upgraded box whose rerank/embed/kokoro-tts slot TOMLs a pre-#2710 build had healed
+      to disk as type = "llm", the update leaves that type in place; `hal0 doctor profiles`
+      reports DRIFT and `--fix` rewrites it.
+    why: >-
+      #2710 (e0f8b94e) made heal_missing_llm_type (_cfg_helpers.py:129) act only on an EMPTY
+      type and shipped `hal0 doctor profiles --fix` as the repair for already-persisted values;
+      regressions heal-missing-llm-type-gates-nonchat-slots expects "a doctor/migration check
+      fixes a persisted type=llm", which doctor --fix is. Embed and rerank keep serving
+      correctly (POST /v1/rerank 200; a chat request to embed is a typed
+      dispatch.capability_mismatch; skip_reason returns non_chat_embedding). flm type=llm is
+      correct (gemma3 chat). Fresh installs seed explicit types and a type-less TOML heals
+      correctly on this build. The remaining minor items (no post-update nudge, stale embed
+      DRIFT text, wrong type in /api/slots and /v1/models aliases) are filed in rollup #2729.
+    still_report_if: >-
+      A slot whose profile is reranking/embedding (or carries --reranking/--embedding) and whose
+      TOML has type = "llm" fails to load or fails the output-sanity probe; OR /v1/rerank or
+      /v1/embeddings to such a slot returns non-200; OR `hal0 doctor profiles --fix` does not
+      rewrite the type on a rerank/embed/tts slot whose TOML otherwise validates; OR a freshly
+      installed box, or a type-less TOML on a post-#2710 build, ends up with type = "llm" on a
+      non-chat profile; OR /v1/models labels an embed/rerank slot alias as chat.
+    review_at: v1.5.0
+
+  - id: capability-apply-noop-repost-reports-existing-status
+    status: by-design
+    adjudicated: v1.4.0-nightly.20261015155017
+    summary: >-
+      After a failed apply left a capability slot in error, a UI-shaped re-POST of {model,
+      enabled} with nothing changed returns 200 {ok:true, status:"error"}.
+    why: >-
+      orchestrator.apply with no enabled/model/device change hits none of the lifecycle branches
+      (orchestrator.py:600-645) and returns _slot_status_string, i.e. it reads the existing
+      status back truthfully; the journal shows no load attempt. It is not a failing apply
+      returning 2xx. The dashboard TtsPanel has no backend picker (useCapabilitySelection sends
+      only {model, enabled}).
+    still_report_if: >-
+      A re-POST that DOES change enabled, model or device and fails the lifecycle step still
+      returns 2xx; OR status reads ready/ok while the slot is in error.
+    review_at: v1.5.0
+
+  - id: memory-reranker-code-path-fallback-only
+    status: open
+    issue: 2721
+    summary: >-
+      With Hindsight >= 0.8 (shipped 1.0.0) recall never calls hal0's external reranker or the
+      rerank slot; the [memory.embedding] rerank_* knobs and the Settings > Memory Reranker
+      panel change nothing about recall.
+    why: >-
+      The code is deliberate (#1612, 55edfa6d): HindsightProvider.recall calls _rerank_union
+      only when no recalled item has a numeric score (hindsight_provider.py:1732-1733) and
+      Hindsight returns scores.final (which includes its own bundled cross-encoder, run on CPU)
+      on every result, in unified and multi-bank mode. The defect is the documentation and UI
+      copy, filed as #2721 (docs/ui). Recall quality is not lost.
+    still_report_if: >-
+      A recall against Hindsight >= 0.8 that returns at least one result without a numeric
+      scores.final does not trigger POST /v1/rerankings; OR any doc, schema description, CLI
+      help or dashboard string again claims that [memory.embedding] rerank_* or the rerank slot
+      re-ranks memory recall unconditionally; OR hal0 repoints Hindsight's reranker at the
+      rerank slot and recall still does not hit the slot; OR the seed-stack docs again claim the
+      rerank row is needed for memory recall.
+    review_at: v1.5.0
+
+  - id: embeddings-rerank-to-wrong-slot-raw-501
+    status: open
+    issue: 2672
+    summary: >-
+      /v1/embeddings or /v1/rerank naming a CHAT slot or chat model id, and /v1/rerank naming
+      the EMBED model id, return llama-server's raw 501 ("Start it with `--embeddings`" /
+      "`--reranking`") instead of a typed 409 dispatch.capability_mismatch.
+    why: >-
+      Open P2 #2672, not a regression: guard_capability_mismatch
+      (dispatcher/_capability_resolve.py:311-319) only gates chat-shaped paths
+      (_CHAT_SHAPED_PATHS, L94), so the reverse direction was never implemented. /v1/embeddings
+      naming the reranker id returns 200 with 384-d vectors because the rerank slot runs
+      --reranking, which implies embedding mode; that is OpenAI-compat passthrough, NOT a
+      finding. Related but distinct: the response `model` label echoing the client string on
+      legacy_slot:embed/rerank is #2663.
+    still_report_if: >-
+      #2672 is closed as fixed and any of these requests still returns a raw upstream 501
+      instead of a typed 409 dispatch.capability_mismatch; OR a request on /v1/embeddings or
+      /v1/rerank naming an embed or rerank model id is routed to a CHAT slot; OR one of these
+      requests returns 2xx with a chat completion body or an empty/zero-length embedding (silent
+      wrongness); OR the same leak appears on /v1/audio/speech or /v1/images/* naming a chat
+      slot (untested; file under #2672).
+    review_at: v1.5.0
+
+  - id: omitted-model-404-agent-bound-offline
+    status: open
+    issue: 2666
+    summary: >-
+      With an agent model bound in agent.toml and the agent slot offline, POST
+      /v1/chat/completions with no `model`, "" or "default" returns 404 dispatch.no_route in <
+      0.1 s and nothing wakes the anchor, while hal0/agent wakes it.
+    why: >-
+      Open P2 #2666, never fixed (no commit on main): _ensure_backend_for_model
+      (routes/v1.py:583) returns early on a falsy model. This is exactly the third
+      still_report_if clause of model-default-marker-is-per-type-fallback; the model-less agent
+      case stays by design (v1-malformed-body-404-agent).
+    still_report_if: >-
+      #2666 is closed as fixed and an omitted model still 404s on a box whose agent slot has a
+      model bound; OR the omitted-model request returns 2xx from a different slot than the one
+      hal0/agent would pick.
+    review_at: v1.5.0
+
+  - id: tracked-open-defects-20261015155017
+    status: open
+    summary: >-
+      Pointers, not adjudications: these re-observed defects are tracked open issues. Record
+      them as `known` with the issue number; do not file them again or call them regressions
+      (nothing was ever fixed): #2663 echo of client model on legacy_slot:embed/rerank; #2665
+      bare slot alias ignores lane pin (tie won by health rank then upstream index, not
+      declaration order); #2667 hermes reprovision rotates the gateway key (Python 3.14+ only;
+      on 3.12 the phase records outcome "failed" inside an ok phase); #2668 slot create/edit
+      accept an unregistered model id and load substitutes (the journal line
+      slot.model_default_fallback names no models); #2669 consolidation uncapped (observation
+      only); #2670 components.json / state dir root-owned until the next hal0-api write; #2671
+      hermes smoke memory roundtrip race; #2673 tool-reroute message wording (any tool_model
+      error, including context overflow, gets the "no model behind it" prose); #2676
+      _resolve_virtual_model_entry first catalog row (fails in both directions at the 8192
+      floor); #2697 MCP slot_list count (+1 synthetic, and #2688 dropped the _synthetic marker);
+      #2698 tombstone lock root-owned on fresh installs (ct150 is clean); #2699 cancelled batch
+      parent (see batch-retain-parent-retry-is-idempotent for what is NOT a finding); #2700
+      identity cards re-added every memory-on boot; #2701 hand-parsed body 500s (extends to a
+      missing required field on /api/memory/search and /delete); #2702 qwen3-4b-npu dead first
+      catalog row; #2703 duplicate registry rows on `model add` of one path (tombstone harm is
+      latent); #2704 stale hermes model_aliases; #2705 Overview services chip shows stopped as
+      down (the dashboard card's "unreachable" wording is a note on the same issue); #2706
+      polish rollup (4 items).
+    still_report_if: >-
+      The per-issue state changes: an issue is closed as fixed and the repro still reproduces on
+      a build containing the fix commit (then it is a regression, say so); OR the defect is
+      observed with a materially different cause or wider scope than the issue describes
+      (comment on the issue with the new evidence).
     review_at: v1.5.0
