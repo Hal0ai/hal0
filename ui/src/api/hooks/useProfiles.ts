@@ -56,6 +56,12 @@ export interface Profile {
   rtf?: number | null
   /** Slot names currently bound to this profile. */
   used_by?: string[]
+  /** True for a profiles.toml entry that failed validation and was set aside
+   *  (#2653). Such a row carries only `name`, `error`, `seed` and `used_by` —
+   *  no tune. DELETE removes it; POST under the same name replaces it. */
+  quarantined?: boolean
+  /** Why a quarantined entry was rejected. */
+  error?: string
 }
 
 export interface ProfileBody {

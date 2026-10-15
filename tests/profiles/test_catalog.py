@@ -526,3 +526,74 @@ def test_resolve_still_raises_for_an_unknown_name(tmp_path: Path) -> None:
     catalog = ProfileCatalog(path=tmp_path / "profiles.toml")
     with pytest.raises(NotFound):
         catalog.resolve("no-such-profile")
+
+
+# ── quarantined entries (#2653) ───────────────────────────────────────────────
+
+
+def _write_bad_profile(name: str = "broken") -> Path:
+    from hal0.config import paths
+
+    p = paths.profiles_toml()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(f'[profile.{name}]\nnot_a_field = "surprise"\n', encoding="utf-8")
+    return p
+
+
+def test_list_can_include_quarantined_entries_as_read_only_rows(tmp_hal0_home: str) -> None:
+    _write_bad_profile()
+    catalog = ProfileCatalog()
+
+    # The default stays valid-only: internal callers use it as the set of
+    # names a slot may bind to.
+    assert "broken" not in {p.name for p in catalog.list()}
+
+    rows = {r["name"]: r for r in (p.to_dict() for p in catalog.list(include_quarantined=True))}
+    assert rows["broken"]["quarantined"] is True
+    assert rows["broken"]["error"]
+    assert rows["broken"]["seed"] is False
+    assert rows["agent"].get("quarantined") is not True
+
+
+def test_delete_removes_a_quarantined_entry_from_disk(tmp_hal0_home: str) -> None:
+    path = _write_bad_profile()
+    ProfileCatalog().delete("broken")
+
+    assert "broken" not in path.read_text(encoding="utf-8")
+    assert "broken" not in {p.name for p in ProfileCatalog().list(include_quarantined=True)}
+
+
+def test_delete_of_a_quarantined_entry_still_refuses_when_a_slot_names_it(
+    tmp_hal0_home: str,
+) -> None:
+    _write_bad_profile()
+    (_slots_dir(tmp_hal0_home) / "chat.toml").write_text(
+        'name = "chat"\nport = 8081\nprofile = "broken"\n', encoding="utf-8"
+    )
+    with pytest.raises(Conflict) as exc:
+        ProfileCatalog().delete("broken")
+    assert exc.value.code == "profiles.in_use"
+
+
+def test_update_of_a_quarantined_entry_names_the_working_remedies(tmp_hal0_home: str) -> None:
+    _write_bad_profile()
+    with pytest.raises(UnprocessableEntity) as exc:
+        ProfileCatalog().update("broken", ProfilePatch(flags="-fa on"))
+    assert exc.value.code == "profiles.invalid"
+    assert "recreate it under the same name or delete it" in str(exc.value)
+
+
+def test_resolve_message_names_the_working_remedies(tmp_hal0_home: str) -> None:
+    _write_bad_profile()
+    with pytest.raises(UnprocessableEntity) as exc:
+        ProfileCatalog().resolve("broken")
+    assert "recreate it under the same name or delete it" in str(exc.value)
+    assert "hal0 profile edit" not in str(exc.value)
+
+
+def test_recreating_a_quarantined_name_replaces_the_held_entry(tmp_hal0_home: str) -> None:
+    path = _write_bad_profile()
+    ProfileCatalog().create("broken", ProfileConfig(flags="-fa on"))
+
+    assert "not_a_field" not in path.read_text(encoding="utf-8")
+    assert ProfileCatalog().resolve("broken").flags == "-fa on"

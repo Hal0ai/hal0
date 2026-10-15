@@ -82,6 +82,19 @@ def profile_list(
             continue
         tps = p.get("tps")
         used_by = p.get("used_by") or []
+        if p.get("quarantined"):
+            table.add_row(
+                f"[dim]{p.get('name', '—')}[/dim]",
+                "[red]quarantined[/red]",
+                f"[dim]{p.get('error') or 'invalid as stored'}[/dim]",
+                "",
+                "",
+                "",
+                "",
+                "",
+                ", ".join(used_by) if used_by else "—",
+            )
+            continue
         table.add_row(
             p.get("name", "—"),
             f"{p['ctx_size']:,}" if isinstance(p.get("ctx_size"), int) else "native",

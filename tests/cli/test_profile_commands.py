@@ -73,6 +73,28 @@ def test_list_renders_table_with_names(monkeypatch: pytest.MonkeyPatch) -> None:
     assert "device" not in result.output.lower()
 
 
+def test_list_renders_a_quarantined_row_with_its_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    payload = [
+        {"name": "agent", "ctx_size": 65536, "vision": "auto", "mtp": "auto", "used_by": []},
+        {
+            "name": "broken",
+            "quarantined": True,
+            "error": "not_a_field: Extra inputs are not permitted",
+            "seed": False,
+            "used_by": ["primary"],
+        },
+    ]
+    _stub_reachable(monkeypatch)
+    monkeypatch.setattr(profile_commands, "api_get", lambda _p, **_k: payload)
+    monkeypatch.setattr(profile_commands, "console", Console(width=200))
+
+    result = runner.invoke(profile_commands.app, ["list"], env={"COLUMNS": "200"})
+    assert result.exit_code == 0, result.output
+    assert "broken" in result.output
+    assert "quarantined" in result.output
+    assert "Extra inputs are not permitted" in result.output
+
+
 def test_list_empty_shows_dim_message(monkeypatch: pytest.MonkeyPatch) -> None:
     _stub_reachable(monkeypatch)
     monkeypatch.setattr(profile_commands, "api_get", lambda _p, **_k: [])

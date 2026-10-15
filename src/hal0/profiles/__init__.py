@@ -100,6 +100,38 @@ class ResolvedProfile:
 
 
 @dataclass(frozen=True, slots=True)
+class QuarantinedProfile:
+    """A ``profiles.toml`` entry that failed validation and was set aside (#2653).
+
+    A read-only row: it has no tune to show, only the reason it was rejected.
+    The operator's working remedies are to delete it or to recreate it under
+    the same name (``create`` only checks the valid catalog, and the next save
+    drops the held raw entry).
+    """
+
+    name: str
+    error: str
+    used_by: tuple[str, ...] = ()
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "name": self.name,
+            "quarantined": True,
+            "error": self.error,
+            "seed": False,
+            "used_by": list(self.used_by),
+        }
+
+
+def _quarantined_message(name: str, reason: str) -> str:
+    return (
+        f"profile {name!r} is invalid as stored and was set aside: {reason}; "
+        "recreate it under the same name or delete it "
+        "(hal0 profile delete / the Profiles page)"
+    )
+
+
+@dataclass(frozen=True, slots=True)
 class ProfilePatch:
     """Partial profile update input.
 
@@ -167,22 +199,36 @@ class ProfileCatalog:
     def _path_or_default(self) -> Path:
         return self._path or paths.profiles_toml()
 
-    def list(self) -> list[ResolvedProfile]:
+    def list(self, *, include_quarantined: bool = False) -> list[ResolvedProfile]:
+        """Every valid profile; with ``include_quarantined`` also the set-aside ones.
+
+        The default stays valid-only: internal callers use it as the set of
+        names a slot may bind to. The API passes ``include_quarantined=True``
+        so the operator can see (and delete) an entry that failed validation.
+        """
         cfg = load_profiles_config(self._path)
         used_by = self._used_by_index()
-        return [
+        items: list[Any] = [
             self._resolve_item(name, profile, used_by=tuple(used_by.get(name, ())))
             for name, profile in cfg.profile.items()
         ]
+        if include_quarantined:
+            items.extend(
+                QuarantinedProfile(
+                    name=name,
+                    error=str(held["reason"]),
+                    used_by=tuple(used_by.get(name, ())),
+                )
+                for name, held in cfg.quarantined.items()
+            )
+        return items
 
     def resolve(self, name: str) -> ResolvedProfile:
         cfg = load_profiles_config(self._path)
         profile = cfg.profile.get(name)
         if profile is None and name in cfg.quarantined:
             raise UnprocessableEntity(
-                f"profile {name!r} is invalid as stored and was set aside: "
-                f"{cfg.quarantined[name]['reason']}; fix or recreate it "
-                "(hal0 profile edit / the Profiles page)",
+                _quarantined_message(name, cfg.quarantined[name]["reason"]),
                 code="profiles.invalid",
                 details={"profile": name, "reason": cfg.quarantined[name]["reason"]},
             )
@@ -217,6 +263,13 @@ class ProfileCatalog:
         with self._lock:
             catalog = load_profiles_config(self._path)
             existing = catalog.profile.get(name)
+            if existing is None and name in catalog.quarantined:
+                reason = catalog.quarantined[name]["reason"]
+                raise UnprocessableEntity(
+                    _quarantined_message(name, reason),
+                    code="profiles.invalid",
+                    details={"profile": name, "reason": reason},
+                )
             if existing is None:
                 raise NotFound(
                     f"profile {name!r} not found",
@@ -245,7 +298,7 @@ class ProfileCatalog:
         self._guard_custom(name)
         with self._lock:
             catalog = load_profiles_config(self._path)
-            if name not in catalog.profile:
+            if name not in catalog.profile and name not in catalog.quarantined:
                 raise NotFound(
                     f"profile {name!r} not found",
                     code="profiles.not_found",
@@ -267,7 +320,12 @@ class ProfileCatalog:
                     code="profiles.slot_unreadable",
                     details={"profile": name, "slots": unreadable},
                 )
-            del catalog.profile[name]
+            if name in catalog.profile:
+                del catalog.profile[name]
+            else:
+                # A quarantined entry is held raw; dropping it here is what
+                # removes it from disk on save.
+                del catalog.quarantined[name]
             save_profiles_config(catalog, self._path)
 
     def slots_using(self, name: str) -> list[str]:
