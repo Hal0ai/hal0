@@ -946,12 +946,13 @@ mkdir -p \
     "${MODELS_DIR}" \
     "${VAR_DIR}/registry" \
     "${VAR_DIR}/slots" \
+    "${VAR_DIR}/backups" \
     "${VAR_DIR}/openwebui" \
     "${VAR_DIR}/cache" \
     "${UNIT_DIR}"
 info "directories under ${PREFIX}, ${ETC_DIR}, ${VAR_DIR} (pulls → ${MODELS_DIR})"
 
-# O13: the runtime state trees (slots/, registry/, models/) are born root:root
+# O13: the runtime state trees (slots/, registry/, models/, backups/) are born root:root
 # from the mkdir above, but hal0-api runs User=hal0 and must create
 # slots/<id>/state.json, write the registry, and write pulled model files
 # there. Left root:root, every slot degrades to `error` on a fresh box, and
@@ -964,8 +965,10 @@ info "directories under ${PREFIX}, ${ETC_DIR}, ${VAR_DIR} (pulls → ${MODELS_DI
 # ${MODELS_DIR}, which may point off-tree via --models-dir/HAL0_MODELS_DIR;
 # an external store's ownership is out of scope here).
 if [[ "${DEV_MODE}" -eq 0 ]] && getent passwd hal0 >/dev/null 2>&1; then
-    chown hal0:hal0 "${VAR_DIR}/slots" "${VAR_DIR}/registry" "${VAR_DIR}/models" 2>/dev/null || true
-    chmod 2775 "${VAR_DIR}/slots" "${VAR_DIR}/registry" "${VAR_DIR}/models" 2>/dev/null || true
+    chown hal0:hal0 "${VAR_DIR}/slots" "${VAR_DIR}/registry" "${VAR_DIR}/models" \
+        "${VAR_DIR}/backups" 2>/dev/null || true
+    chmod 2775 "${VAR_DIR}/slots" "${VAR_DIR}/registry" "${VAR_DIR}/models" \
+        "${VAR_DIR}/backups" 2>/dev/null || true
 fi
 
 # mDNS addon advertisements (#2059): services/mdns.py (hal0-api, User=hal0)
