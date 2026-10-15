@@ -14,6 +14,7 @@ and ``flm`` seeds, plus a Moonshine STT slot).
 
 from __future__ import annotations
 
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -102,8 +103,9 @@ _DEFAULTS = [
 
 
 @pytest.fixture(autouse=True)
-def _isolated_home(tmp_hal0_home: str, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("HAL0_MODEL_STORE", "/mnt/ai-models")
+def _isolated_home(tmp_hal0_home: str, kokoro_store: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # The kokoro provider refuses to launch without its pulled bundle (#2739).
+    monkeypatch.setenv("HAL0_MODEL_STORE", str(kokoro_store))
 
 
 def _set_family_default(monkeypatch: pytest.MonkeyPatch, family: str, enabled: bool) -> None:

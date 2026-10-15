@@ -155,6 +155,17 @@ def repo_dirname(repo: str) -> str:
     return "models--" + "--".join(_sanitise(seg) for seg in segments)
 
 
+def capability_model_dir(capability: str, model_id: str) -> Path:
+    """``<store_root>/<capability>/<model_id>`` — the capability-grouped layout.
+
+    The directory a capability-routed pull (FirstRun v2, design D2) installs a
+    model into, and therefore the directory a self-managed engine (kokoro) is
+    launched from. One function for both sides so the writer and the reader
+    can never disagree about where the bundle lives (#2739).
+    """
+    return store_root() / _sanitise(capability) / _sanitise(model_id)
+
+
 def model_dir(repo: str, revision: str) -> Path:
     """``<store_root>/models--<org>--<repo>/snapshots/<revision>``."""
     return store_root() / repo_dirname(repo) / "snapshots" / _sanitise(revision)

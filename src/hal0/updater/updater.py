@@ -1781,10 +1781,15 @@ class PostActivationResult(tuple):
     conversion unassigned (ADR-0028 §7, #2694):
     ``{"slot", "model", "quant", "remedy"}``. Not a blocker: the conversion
     did what it must, but the operator has to be told, and how to fix it.
+    ``model_bundles`` lists the engine bundles the upgrade fetched or could
+    not fetch (#2739, ADR-0030): ``{"model", "outcome", "path", "remedy",
+    "error"?}``. Not a blocker either: a failed fetch leaves the slot's spawn
+    preflight naming the same remedy.
     """
 
     conversion_blockers: list[dict[str, str]]
     unassigned_models: list[dict[str, str]]
+    model_bundles: list[dict[str, str]]
 
     def __new__(
         cls,
@@ -1792,9 +1797,11 @@ class PostActivationResult(tuple):
         target: int,
         conversion_blockers: list[dict[str, str]] | None = None,
         unassigned_models: list[dict[str, str]] | None = None,
+        model_bundles: list[dict[str, str]] | None = None,
     ) -> PostActivationResult:
         obj = super().__new__(cls, (source, target))
         obj.conversion_blockers = list(conversion_blockers or [])
+        obj.model_bundles = list(model_bundles or [])
         obj.unassigned_models = list(unassigned_models or [])
         return obj
 
@@ -1836,6 +1843,7 @@ def run_post_activation_migrations(
     converge_companions: bool = True,
     honour_restore_marker: bool = False,
     rerender_after_runner_conversion: bool = False,
+    fetch_model_bundles: bool = True,
 ) -> PostActivationResult:
     """Run every post-activation migration pass hal0 ships, in order.
 
@@ -1904,6 +1912,12 @@ def run_post_activation_migrations(
     runner-system conversion changed something, so a running or restarted slot
     picks up the converted image and runner. :func:`check_outstanding_migrations`
     passes ``True``; an update re-renders every unit after this call anyway.
+
+    ``fetch_model_bundles`` lets the kokoro bundle pass
+    (:func:`hal0.config.migrations.kokoro_bundle.ensure_kokoro_bundle`) pull
+    ``kokoro-v1`` once when kokoro is in use and the store holds no loadable
+    bundle (#2739). :func:`check_outstanding_migrations` passes ``False``: the
+    boot-time net never downloads, it only logs the remedy.
 
     ``honour_restore_marker`` makes the runner-system conversion stand down
     after an operator restored its backup (a downgrade).
@@ -1985,6 +1999,20 @@ def run_post_activation_migrations(
         # Non-fatal: an affected slot keeps refusing to load (the #1923
         # preflight guard) until the operator manually relabels its device.
 
+    # ── Kokoro store bundle (#2739, ADR-0030): from 1.4.0 the tts slot
+    # launches only from the pulled kokoro-v1 bundle, so an upgraded box that
+    # uses kokoro gets it fetched once here instead of losing speech until a
+    # manual pull. Never fatal: a failed fetch is reported with its remedy.
+    model_bundles: list[dict[str, str]] = []
+    try:
+        from hal0.config.migrations.kokoro_bundle import ensure_kokoro_bundle
+
+        bundle_report = ensure_kokoro_bundle(job_id=job_id, fetch=fetch_model_bundles)
+        if bundle_report is not None:
+            model_bundles.append(bundle_report)
+    except Exception as exc:
+        log.warning("updater.kokoro_bundle_pull_failed", job_id=job_id, error=str(exc))
+
     try:
         from hal0.agents.bundled_skills import prune_retired_skills
 
@@ -2023,6 +2051,7 @@ def run_post_activation_migrations(
         # #2694: the runner-system report used to be dropped here except its
         # ``backup``, so a slot that lost its model was told only to the journal.
         list(getattr(conversion, "unassigned", None) or []),
+        model_bundles,
     )
 
 
@@ -2062,6 +2091,7 @@ def check_outstanding_migrations(*, job_id: str | None = None) -> tuple[int, int
             repair_hermes_venv=False,
             upgrade_memory_engine_venv=False,
             converge_companions=False,
+            fetch_model_bundles=False,
         )
     except Exception as exc:
         log.warning("updater.boot_migration_check_failed", job_id=job_id, error=str(exc))
@@ -3520,6 +3550,7 @@ _NON_FATAL_MIGRATION_FAILURE_EVENTS: tuple[str, ...] = (
     "updater.retired_skills_prune_failed",
     "updater.memory_engine_upgrade_failed",
     "updater.components_converge_failed",
+    "updater.kokoro_bundle_pull_failed",
 )
 
 
@@ -3565,7 +3596,8 @@ async def _run_post_activation_migrations_after_swap(
     subprocess can produce, not just a non-zero return code.
 
     Returns ``{"from": int, "to": int, "pass_warnings": list[str],
-    "conversion_blockers": list[dict], "unassigned_models": list[dict]}``
+    "conversion_blockers": list[dict], "unassigned_models": list[dict],
+    "model_bundles": list[dict]}``
     (each list is empty when the incoming release predates it).
     """
     payload = json.dumps(
@@ -3579,7 +3611,8 @@ async def _run_post_activation_migrations_after_swap(
         + repr(_MIGRATION_RESULT_KEY)
         + ": {'from': result[0], 'to': result[1],"
         " 'conversion_blockers': list(getattr(result, 'conversion_blockers', None) or []),"
-        " 'unassigned_models': list(getattr(result, 'unassigned_models', None) or [])}})"
+        " 'unassigned_models': list(getattr(result, 'unassigned_models', None) or []),"
+        " 'model_bundles': list(getattr(result, 'model_bundles', None) or [])}})"
         " + chr(10))\n"
     )
     script = (
@@ -3655,6 +3688,7 @@ async def _run_post_activation_migrations_after_swap(
                     "pass_warnings": pass_warnings,
                     "conversion_blockers": list(result.get("conversion_blockers") or []),
                     "unassigned_models": list(result.get("unassigned_models") or []),
+                    "model_bundles": list(result.get("model_bundles") or []),
                 }
         raise UpdateError(
             "post-activation migrations subprocess exited 0 but produced no result marker",
@@ -3889,6 +3923,7 @@ class Updater:
         pass_warnings: list[str] = []
         blockers: list[dict[str, str]] = []
         unassigned: list[dict[str, str]] = []
+        model_bundles: list[dict[str, str]] = []
         try:
             migration_result = await _run_post_activation_migrations_after_swap(
                 manifest.min_data_version,
@@ -3898,6 +3933,7 @@ class Updater:
             pass_warnings = list(migration_result.get("pass_warnings") or [])
             blockers = list(migration_result.get("conversion_blockers") or [])
             unassigned = list(migration_result.get("unassigned_models") or [])
+            model_bundles = list(migration_result.get("model_bundles") or [])
         except Exception as exc:
             # LOUD, not silent (#1960's failure-mode decision): the tree is
             # already active by this point — the symlink swap and venv re-pip
@@ -3973,6 +4009,9 @@ class Updater:
                 # unassigned a model from. Reported with a remedy, but not a
                 # blocker: the conversion did what it must.
                 "unassigned_models": unassigned,
+                # #2739: engine bundles the upgrade fetched (kokoro-v1), or
+                # could not fetch, with the remedy. Not a blocker.
+                "model_bundles": model_bundles,
             },
             "converged": migrations_error is None and not blockers,
         }
@@ -3984,6 +4023,9 @@ class Updater:
             post_activation_migrations_pass_warnings=pass_warnings,
             conversion_blockers=[b["target"] for b in blockers],
             unassigned_models=[u.get("slot") for u in unassigned if isinstance(u, dict)],
+            model_bundles=[
+                f"{b.get('model')}:{b.get('outcome')}" for b in model_bundles if isinstance(b, dict)
+            ],
         )
 
         return {

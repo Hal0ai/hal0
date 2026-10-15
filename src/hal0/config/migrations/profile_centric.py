@@ -1386,6 +1386,8 @@ class _Planner:
         base_content = self.catalog.get(base, {"flags": ""})
         flags_now = old_flags if old_flags is not None else str(base_content.get("flags") or "")
         tokens = shlex.split(flags_now) if flags_now.strip() else []
+        if engine == "kokoro":
+            tokens = self._drop_kokoro_model_path(sp, tokens)
         target: dict[str, Any] = {
             "flags": _join(tokens),
             "runner": ENGINE_RUNNER.get(engine),
@@ -1412,6 +1414,38 @@ class _Planner:
         target.update(cloned_from=base, intent=f"Converted: slot {sp.name}, model {model_id}")
         sp.profile_after = self._generate(base, model_id or engine, target)
         sp.generated = sp.profile_after in self.plan.profiles
+
+    @staticmethod
+    def _drop_kokoro_model_path(sp: SlotPlan, tokens: list[str]) -> list[str]:
+        """Kokoro's ``--model_path`` is not a tune: the provider supplies it.
+
+        The kokoro bundle is the pulled ``kokoro-v1`` row and the provider
+        derives ``--model_path`` from the model store (ADR-0030, #2739), so a
+        path in today's flags is dropped instead of forking a profile to keep
+        it (the provider would ignore it anyway).
+        """
+        out: list[str] = []
+        dropped = ""
+        skip = False
+        for i, tok in enumerate(tokens):
+            if skip:
+                skip = False
+                continue
+            if tok == "--model_path":
+                dropped = tokens[i + 1] if i + 1 < len(tokens) else ""
+                skip = True
+                continue
+            if tok.startswith("--model_path="):
+                dropped = tok.split("=", 1)[1]
+                continue
+            out.append(tok)
+        if dropped:
+            sp.launch_changes.append(
+                f"kokoro --model_path {dropped!r} dropped: the slot launches the "
+                "pulled kokoro-v1 bundle from the model store (`hal0 model pull "
+                "kokoro-v1` if it is not pulled yet)"
+            )
+        return out
 
     # -- models and stacks -----------------------------------------------
 

@@ -114,14 +114,35 @@ capability selection — this future-work trigger is recorded in ADR-0001
 | `gpu-rocm` | `qwen3tts` | Strix Halo iGPU (ROCm, native gfx1151) |
 
 Selecting a device rewrites which provider the `tts` (or `stt`) slot
-loads — the slot itself doesn't move. Kokoro, Qwen3-TTS, and Moonshine
-weights are all operator-staged (not pulled through the hal0 registry;
-whisper-v3:turbo on the FLM/NPU path resolves through FastFlowLM's own
-model handling instead). Moonshine's weights preflight at slot spawn — a
-missing or empty bundle fails loudly, by name (`slot.weights_missing`),
-rather than starting a container that 500s on the first request. The
-`tts` slot additionally mounts a writable cache directory for
-kernel/tokenizer caches.
+loads — the slot itself doesn't move. Qwen3-TTS and Moonshine weights are
+operator-staged (not pulled through the hal0 registry; whisper-v3:turbo on
+the FLM/NPU path resolves through FastFlowLM's own model handling instead).
+Moonshine's weights preflight at slot spawn — a missing or empty bundle
+fails loudly, by name (`slot.weights_missing`), rather than starting a
+container that 500s on the first request.
+
+### Kokoro weights
+
+Kokoro's weights come from the registry: `hal0 model pull kokoro-v1`
+installs the ONNX model and the voices pack into the model store, at
+`<store>/tts/kokoro-v1/kokoro-v1.0.onnx` and
+`<store>/tts/kokoro-v1/voices-v1.0.bin`. `<store>` is the configured
+`[models].store`, `/var/lib/hal0/models` on a fresh install. The `tts` slot
+mounts the store read-only and hal0 passes that directory as the runner's
+`--model_path`, so the `kokoro` profile carries no path.
+
+If either file is missing, the slot refuses to start with
+`slot.weights_missing` and names the command to run
+(`hal0 model pull kokoro-v1`). It never falls back to downloading the
+weights at start-up, so an offline box runs Kokoro once the bundle is
+pulled.
+
+On upgrade to 1.4.0, `hal0 update` pulls the bundle once if a slot or
+capability selection uses Kokoro and the store does not have it yet. This
+also replaces the single `model.gguf` an earlier pull left there (the ONNX
+file under the wrong name, with no voices pack). On a box without internet
+access the update still completes; run `hal0 model pull kokoro-v1` once it
+is online. Until then the `tts` slot's error names the same command.
 
 ### Staging the Moonshine weights
 

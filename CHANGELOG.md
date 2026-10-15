@@ -52,6 +52,20 @@ applying. Add those subsections to a version's section to surface them; see
   enable next step are reachable again (#2736).
 
 - A slot unload whose stop outlives the 30 s terminate budget now converges to `offline` once the teardown finishes (with a one-time "converged to offline" message) instead of sticking in `error`; the upstream is deregistered when the late teardown lands, and `_wake_capability_slot` runs the convergence so capability requests auto-load the slot after an api restart instead of 404ing `dispatch.no_route` (#2738).
+- **tts:** the Kokoro slot now launches from the bundle `hal0 model pull
+  kokoro-v1` installs, instead of a hardcoded `/mnt/ai-models/local/...`
+  path that a fresh install never has. Before, every tts start downloaded
+  about 354 MB from GitHub into the container's throwaway filesystem, and a
+  box without internet access could not speak. The pull now installs
+  `kokoro-v1.0.onnx` and `voices-v1.0.bin` under `<store>/tts/kokoro-v1/`,
+  the provider passes that directory as `--model_path` from the configured
+  store, and the seeded `kokoro` profile names no path. A missing bundle
+  fails the slot with `slot.weights_missing` naming the pull command. On
+  upgrade, `hal0 update` pulls the bundle once when kokoro is in use and the
+  store lacks it, replacing the mislabelled `model.gguf` an earlier pull left.
+  If the box is offline the update still succeeds, and the remedy
+  (`hal0 model pull kokoro-v1`) is reported and named by the slot's error
+  (ADR-0030, #2739).
 - **slots:** a stopped slot whose state record kept a stale `model_id` no
   longer claims it is "still serving" a model after its `[model].default` was
   emptied; the "still serving" wording is now only used while the slot is live

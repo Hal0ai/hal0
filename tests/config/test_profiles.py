@@ -378,11 +378,12 @@ class TestSeedFileParity:
 
 
 def test_kokoro_seed_profile() -> None:
-    """The self-managed engines' bundle has no model row, so its path stays
-    in the profile (ADR-0029 decision 2)."""
+    """Kokoro's bundle is the pulled kokoro-v1 row: the provider derives
+    ``--model_path`` from the store, so the seed carries no path (ADR-0030,
+    #2739)."""
     prof = SEED_PROFILES["kokoro"]
     assert set(prof) <= {"flags", "intent"}
-    assert "--model_path" in prof["flags"]
+    assert "--model_path" not in prof.get("flags", "")
 
 
 # ── seeds carry no hardware hints; DEVICE_DEFAULT_PROFILES ─────────────────────

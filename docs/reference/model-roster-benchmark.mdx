@@ -63,17 +63,19 @@ the first-run wizard's model cards render via `GET /api/install/curated-models`.
 | `size_gb`, `vram_gb_min` | — |
 | `license`, `license_url` | — |
 | `hf_repo`, `hf_file`, `mmproj_file` (optional) | — |
+| `extra_files` (optional) | further files from the same repo, installed beside `hf_file` |
 | `context_length` | — |
 | `recommended_slot` | `chat` or `img` |
 | `capability` | `chat, embed, asr, tts, image` |
 | `tags`, `notes` | — |
 
 <Aside type="caution">
-STT/TTS curated picks are not implemented as of this writing — kokoro and vibevoice
-can't be expressed in the current single-file GGUF/safetensors/checkpoint curated
-schema (they ship as multi-file ONNX/PyTorch bundles). This is a documented open item
-in source with three possible resolution paths, none landed for those two. Don't
-document a curated STT/TTS pick flow as existing for kokoro or vibevoice.
+STT/TTS curated picks are not implemented as of this writing. The one exception is
+the stock `kokoro-v1` row: it is `bundle_only` (hidden from the wizard and pickers)
+and pulls its ONNX model plus voices pack through `extra_files`, so
+`hal0 model pull kokoro-v1` installs the bundle the `tts` slot launches from.
+VibeVoice ships a multi-file PyTorch bundle that still has no curated row. Don't
+document a curated STT/TTS pick flow in the wizard as existing.
 
 Moonshine's resolution is decided (it doesn't wait on the curated-schema redesign):
 weights are operator-staged under the model store rather than registry-pulled, and

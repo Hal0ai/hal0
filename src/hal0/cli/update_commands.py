@@ -278,6 +278,7 @@ _MIGRATION_PASS_LABELS: dict[str, str] = {
     "updater.memory_engine_upgrade_failed": "memory engine upgrade",
     "updater.components_converge_failed": "component convergence",
     "updater.retired_skills_prune_failed": "retired bundled-skill cleanup",
+    "updater.kokoro_bundle_pull_failed": "kokoro-v1 bundle pull (run: hal0 model pull kokoro-v1)",
 }
 
 
@@ -380,6 +381,28 @@ def _print_convergence(convergence: dict | None) -> bool:
             f"{escape(str(entry.get('model') or '?'))}"
             f"{why} was unassigned — it keeps serving until its next restart — fix: "
             f"{escape(str(remedy))}",
+            soft_wrap=True,
+        )
+
+    # #2739 / ADR-0030: the kokoro tts slot launches only from the pulled
+    # store bundle, so the upgrade fetches it once. Say what happened; a
+    # failed fetch is not a blocker, but the operator needs the remedy.
+    for entry in post_migrations.get("model_bundles") or []:
+        if not isinstance(entry, dict):
+            continue
+        model = escape(str(entry.get("model") or "?"))
+        path = escape(str(entry.get("path") or "the model store"))
+        remedy = escape(str(entry.get("remedy") or f"hal0 model pull {model}"))
+        outcome = entry.get("outcome")
+        if outcome == "pulled":
+            console.print(f"[green]✓[/green] pulled the {model} bundle into {path}", soft_wrap=True)
+            continue
+        why = escape(str(entry.get("error") or "")) if outcome == "failed" else ""
+        console.print(
+            f"[yellow]![/yellow] {model} bundle "
+            f"{'could not be pulled' if outcome == 'failed' else 'is missing'} into {path}"
+            f"{f' ({why})' if why else ''} — the tts slot will not start until it is there "
+            f"— fix: `{remedy}`",
             soft_wrap=True,
         )
 
