@@ -40,6 +40,11 @@ applying. Add those subsections to a version's section to surface them; see
   (or the page) removes it. The `profiles.invalid` message on a slot bound to it
   now says to recreate the profile under the same name or delete it, instead of
   pointing at `hal0 profile edit`, which cannot see a quarantined entry (#2653).
+- A host with an NPU but no FLM runner image no longer lists NPU-only models
+  in the capability catalogs, and a capability apply naming backend `npu` on
+  it (API or `hal0 capabilities set ... --backend npu`) is refused with 400
+  `capability.backend_unavailable` instead of returning 200 `pending_reload`
+  and committing a selection that can never serve (#2659).
 - The post-update runner-system and profile-centric conversions no longer
   fail on a box whose `/var/lib/hal0/backups` a root-run tool created as
   `root:hal0 2755`. Before, `hal0-api` (`User=hal0`) could not write the

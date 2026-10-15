@@ -489,6 +489,28 @@ class CapabilityOrchestrator:
                 details={"slot": slot, "child": child, "device": merged.device},
             )
 
+        # An enabled selection must name a device the host advertises
+        # (#2659). npu is the case that bypasses every later gate (exempt
+        # from the download check, always answers pending_reload), so a
+        # host with an NPU but no FLM runner image would commit a
+        # selection that can never serve. Disabling stays unconditional.
+        if merged.enabled and merged.device == "npu":
+            from hal0.capabilities.catalog import available_backends
+
+            advertised = [b["id"] for b in available_backends()]
+            if "npu" not in advertised:
+                raise BadRequest(
+                    "backend 'npu' is not available on this host (no FLM runner "
+                    "image); pick one of the advertised backends",
+                    code="capability.backend_unavailable",
+                    details={
+                        "slot": slot,
+                        "child": child,
+                        "backend": merged.device,
+                        "available_backends": advertised,
+                    },
+                )
+
         # Validate the model against the catalog when one is set + the
         # caller didn't explicitly clear it. We don't fail when the model
         # is empty — that's the "unset" state. The downloaded gate only

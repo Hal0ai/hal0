@@ -1223,6 +1223,13 @@ def _flm_rows_for_capability(capability: str) -> list[dict[str, Any]]:
     """
     if capability not in _NPU_FANOUT_CAPS:
         return []
+    # Host-truth gate (#2659), the npu counterpart of the gpu-rocm gating
+    # (#2029/#2447): ``flm list -j`` runs on the host binary, but
+    # available_backends() advertises npu only when the FLM runner image is
+    # also present. Without it every row here is a selection that can never
+    # serve, so offer none.
+    if "npu" not in {b["id"] for b in available_backends()}:
+        return []
     # Local import so catalog.py doesn't drag the provider module (and
     # its httpx dependency) onto every import path.
     from hal0.providers.flm import flm_served_models
