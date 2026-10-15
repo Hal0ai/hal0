@@ -89,3 +89,25 @@ def test_schema_shims_match_loaded_seed_data() -> None:
     assert seeds.seed_stacks() == SEED_STACKS
     assert seeds.profile_bench() == PROFILE_BENCH
     assert seeds.family_defaults() == FAMILY_DEFAULTS
+
+
+def _flag_tokens(name: str) -> list[str]:
+    return str(seeds.seed_profiles()[name].get("flags", "")).split()
+
+
+def test_shared_service_seeds_serve_one_sequence() -> None:
+    """#2692: without ``--parallel`` llama-server runs ``-np auto`` (4
+    sequences in ONE unified KV pool). One combined overflow then 500s every
+    in-flight request on the slot, so the slots that front several callers
+    (utility: Hindsight + Hermes + brain; agent: Hermes) pin one sequence."""
+    for name in ("utility", "agent"):
+        tokens = _flag_tokens(name)
+        assert "--parallel" in tokens, name
+        assert tokens[tokens.index("--parallel") + 1] == "1", name
+
+
+def test_utility_seed_parallel_reaches_the_launch_argv() -> None:
+    """The seed's ``--parallel 1`` survives the profile screen unchanged."""
+    from hal0.profiles import screen_profile_flags
+
+    screen_profile_flags(str(seeds.seed_profiles()["utility"]["flags"]))
