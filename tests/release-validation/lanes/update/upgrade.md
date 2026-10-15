@@ -132,6 +132,10 @@ the fact otherwise:
    v3-q8-ffneq-lateq6 vs lfm2-5-2-6b-q8-0). New slot TOMLs (flm-embed, flm-stt) can be created by a
    restart on the old tree; do not attribute them to the upgrade without the before-snapshot diff.
 
+11. **Brain survives the conversion.** After the conversions assert each slot's `[model].default` is non-empty and `model_id` equals it; if a slot lost its model (brain on a fork-only quant), `hal0 update --restart-slots` must succeed or the verdict must name the cause (#2694-#2696, regressions `upgrade-silent-model-unassign` etc.). Also assert installed=true models have their file on disk.
+12. **Version identity and roll-forward.** For nightly-vs-nightly rollback judge by `/usr/lib/hal0/current/VERSION`; `/api/health` and `hal0 --version` say `1.4.0`. Run the roll-forward as its own step and record its exit code. `hal0 doctor perms --fix` prompts on stdin and aborts over ssh: use `--force` or a pty.
+13. **Log noise.** Count `profiles.unknown_keys_kept` journal lines per minute before and after the conversions (about 2000 multi-line entries in 9 minutes before the fix); after it must be 0. Do NOT file a stale update-job record after a repair (`update-job-record-is-a-snapshot`).
+
 ## Leave behind
 
 The box on the new version, healthy, with the "before" snapshot recorded in your report for the

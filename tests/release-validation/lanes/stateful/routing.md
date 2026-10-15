@@ -109,6 +109,10 @@ by-design — rc.7 found `chat-to-embed-slot-500-passthrough`'s offline half had
 from an untyped 500 to a typed 404 since the entry was last checked; the entry's own
 `still_report_if` was written to catch exactly that but nothing had re-tested it since rc.6.
 
+15. **Set up #2666 explicitly.** The shipped `agent.toml` is model-less while `/api/slots` shows `model_id` from the per-type fallback. Back up `agent.toml`, add a `[model]` block, probe, restore with `cp -p`. Do not rely on the displayed model_id.
+16. **Second slot's bare alias (#2665).** With two ready slots on one model, probe the bare alias of the SECOND-declared slot, not the first (the first passes by order and cannot discriminate). Also decide whether the `hal0/agent` warm fallback (served by brain in one state, wakes agent in another) should be strict; record both states.
+17. **Wrong-model vectors.** Request an unloaded REGISTERED embedding id (qwen3-embedding-0-6b-q8-0, 1024-d) while another embed model is served; assert a typed error or matching dimension and `model` equal to `GET /api/slots/embed` `model_id` (#2663, #2672). State in the report that the `json_object` check ran on a non-Qwen3-templated brain (lfm2.5) and so did NOT exercise the collision case.
+
 ## Leave behind
 
 Brain and embed loaded and healthy. Any model you caused to auto-load, unload again.

@@ -92,6 +92,9 @@ baseline diff, so don't stop checking after the first comparison.
    describes ONE box; ct151 lanes were handed ct150's file this release). If it does not, say so in
    your report and take identity from `boxes.toml` plus live probes.
 
+12. **Unknown names must fail.** `hal0 agent status nosuch`, `hal0 agent log nosuch`, `hal0 slot show nosuch`, `hal0 profile show nosuch`, `hal0 mcp status nosuch`: record each exit code. Siblings exit 1; `agent status` exits 0 (regression `polish-rollup-1-4-0-nightly-20261015`, #2706). An un-bootstrapped KNOWN agent (`pi`) exiting 0 is correct.
+13. **`doctor perms` against reality.** For every file under `/var/lib/hal0/state` and `/var/lib/hal0/registry` compare `sudo -u hal0 test -w` with the `doctor perms` verdict, and run `find /var/lib/hal0 -user root ! -path '*/secrets*' -type f`. Doctor has no row for `state/components.json` or `registry/*.lock` (#2670, #2698), so root-owned files it calls clean are findings. Run it right after install, before any restart: components.json heals on the first hal0-api write; record how many minutes that took.
+
 ## Carry-forward
 
 Rollups are cheap to file and cheap to lose track of — when you find several small CLI defects,

@@ -89,6 +89,9 @@ chat messages — that is the `hermes-e2e` stateful lane.
    exist under the hermes home. Read-only, so check presence only; if the lane cannot cause a
    prompt build, record `skipped`.
 
+12. **Two views of one gateway.** Compare `:9119/api/status` `gateway_platforms` (`{}`) with `gateway_state.json` platforms (`api_server` connected). Probably upstream hermes behaviour; one line in the report, not a finding.
+13. **Smoke marker needs the retain op.** For the `memory_roundtrip` warn or pass, also read the marker's retain op: `status` `completed` with `facts_committed=0` and no error is a silent zero-fact extraction and explains a warn on a healthy box (#2671).
+
 ## Carry-forward
 
 Hermes findings have historically been *reporting* defects rather than functional ones. Treat

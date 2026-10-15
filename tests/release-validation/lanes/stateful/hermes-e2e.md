@@ -109,6 +109,10 @@ live chat: it is install-time ground truth, and it distinguishes "broken out of 
    (cliff ~39,321 chars at ctx 65536, ~14 slots). Under it, answer correctness is the check; do not
    create slots just to cross it.
 
+13. **Quiet vs contended utility.** Run the slot_list tool turn twice, once quiet and once with `requests_processing >= 2` on utility (`:<port>/metrics`); assert the answer and `journalctl -u hal0-slot@utility` has no 'failed to find a memory slot'. Then two concurrent ~35k-token prompts at the utility port (announce first): neither may 500 'Context size has been exceeded' (`utility-profile-shared-kv-pool-overflow`).
+14. **Aliases after reprovision.** `model_aliases` in hermes `config.yaml` must name only slots/models that exist (#2704); an alias left by a deleted slot is a finding, leftovers from another lane are attribution only. Count in `slot_list` must exclude the synthetic `hal0` row, or a model counting ready slots from the payload gets the wrong number (#2697).
+15. **Make the cwd probe real, and time the turn.** c8 cannot fail unless `/root/.git` exists and is unreadable: create one first (and remove it). Record the split of a trivial hermes turn (~24 s on ct151) into startup/MCP discovery (208 tools), dispatch, and the post-turn `/api/memory/add` x2.
+
 ## Leave behind
 
 Hermes running with its SHIPPED config restored. Brain, utility, and embed slots healthy. State

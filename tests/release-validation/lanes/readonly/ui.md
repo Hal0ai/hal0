@@ -92,6 +92,10 @@ Close the browser when done.
    (`ui-rail-openwebui-link-unnamed`, #1841 wontfix). Probe that band with the accessibility tree
    (`ariaSnapshot`), not textContent; report only the `still_report_if` conditions.
 
+13. **Footer SLOTS chip, all pages in one pass.** Record `[data-testid=foot-health-runtimes]` on every nav page, with a fetch of `/api/slots` inside each page. The value is page-independent and moves only when slots change (`footer-slots-chip-counts-configured-slots`); a disagreement with `/api/slots` unchanged is a finding.
+14. **Services panel vs footer.** For any service with `state: "stopped"` in `/api/services/health` (ComfyUI on a fresh box) compare the Settings > Overview Services chip with the footer pip; the panel showing a warn "down" is #2705.
+15. **Tooling fallback.** If Playwright MCP tools are absent use the container: `docker run --rm --network host mcr.microsoft.com/playwright:v1.64.0-noble` with a script. Nav rail rows are `div.sb-row` hash routes, not links: take an `ariaSnapshot` and check each row exposes a role and is keyboard-focusable.
+
 ## Carry-forward
 
 Anything found here that can be expressed against fixtures should be promoted into

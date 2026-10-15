@@ -103,6 +103,10 @@ snapshot, residue accumulates anonymously across a serialised run unless each la
    actually receives requests during a multi-bank recall (counter on its `/metrics`) so
    Hal0Reranker is known to be exercised.
 
+10. **Apply every STT/TTS/embed row twice.** Once with an explicit backend, once UI-shaped (`{model, enabled}` only), diffing `capabilities.toml` and `/etc/hal0/slots` each time. An applied row must be ready or leave nothing behind, and its provider/engine must match what the catalog advertised (#2690, #2691). For every row, applying each ADVERTISED backend must not return `no_engine_for_device`. Moonshine `slot.weights_missing` is by design.
+11. **Leftovers after `hal0 model rm`.** For each capability type pull then remove a small model and `find` the store for leftover `meta.json` and empty dirs (#2706). `model add`: try a root-owned mode-700 dir against a nonexistent file (compare errors), and re-add an already registered path (#2703).
+12. **Mechanical anti-scar greps.** `grep -rnE '/mnt/ai-models|/root|/home' installer/etc-hal0 src/hal0/config/data` for operator-local paths in shipped seeds. Say explicitly whether the memory reranker config is dead on Hindsight 1.0.0: compare the rerank slot's `/metrics` `prompt_tokens_total` before and after a `hal0 memory recall`.
+
 ## Leave behind
 
 Capabilities left enabled on the backend this box supports; defaults set; scratch model files
