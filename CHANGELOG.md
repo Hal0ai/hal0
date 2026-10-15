@@ -46,6 +46,11 @@ applying. Add those subsections to a version's section to surface them; see
 
 ### Fixed
 
+- **slots:** a stopped slot whose state record kept a stale `model_id` no
+  longer claims it is "still serving" a model after its `[model].default` was
+  emptied; the "still serving" wording is now only used while the slot is live
+  (ready/idle/serving), and an offline slot gets the plain "no model assigned"
+  message (#2715, follow-up to #2694).
 - **catalog:** removed the three `whispercpp` STT rows (Whisper-Tiny, Whisper-Base,
   Whisper-Large-v3-Turbo) and the `whispercpp` provider mapping: hal0 never
   shipped a whisper.cpp runtime (ADR-0001), so the picker offered a model no
