@@ -44,6 +44,18 @@ applying. Add those subsections to a version's section to surface them; see
   `hal0 update` "Migration incomplete" panel names the fix instead of only
   saying to restart (#2657).
 
+- A running slot whose launch command no longer renders (for example a
+  profile-centric slot that still carries `[model].context_size`) now shows
+  up in `GET /api/updates/slot-drift` and the `hal0 update` summary with its
+  image drift and a `render_error` that says why. Before, the drift check
+  returned nothing for it, so the summary said "no slots need restart" while
+  `/api/slots` reported `image_mismatch`. The automatic image-drift restart,
+  the CLI's post-apply restart, `hal0 update --restart-slots`, `slot load`'s
+  re-converge, and an unnamed `POST /api/updates/restart-slots` leave such a
+  slot running and list it under `skipped_render_error`, since a restart
+  would fail to render and take it down. Naming the slot in
+  `POST /api/updates/restart-slots` (without `skip_busy`) still restarts it
+  (#2660).
 - A stack row whose slot the profile-centric conversion blocks now still drops
   the retired tuning keys (`vision`, `mtp`, `enable_thinking`,
   `server_extra_args`). Only the profile re-point is reverted. Before, the

@@ -1370,3 +1370,58 @@ def test_print_convergence_blockers_alone_mean_not_converged(
     out = " ".join(capsys.readouterr().out.split())
     assert "profile conversion blocked: stack:saber — row agent: --jinja" in out
     assert "fully converged" not in out
+
+
+# ── #2660: a slot that cannot re-render ────────────────────────────────────────
+
+_RERR = "slot 'brain' still carries [model].context_size (ADR-0029)"
+_RENDER_SLOT = {
+    "slot": "brain",
+    "render_error": _RERR,
+    "diffs": [
+        {"key": "render_error", "running": None, "rendered": None, "error": _RERR},
+        {"key": "image", "running": "x:0824", "rendered": "x:0826"},
+    ],
+}
+
+
+def test_drift_banner_shows_render_error(capsys: pytest.CaptureFixture[str]) -> None:
+    uc._print_drift_banner({"count": 1, "slots": [_RENDER_SLOT]})
+    out = capsys.readouterr().out
+    assert "no slots need restart" not in out
+    assert "brain" in out
+    assert "context_size" in out
+
+
+def test_auto_restart_image_drift_leaves_render_error_slot_out(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    posted: list = []
+    monkeypatch.setattr(uc, "api_post", lambda path, **k: posted.append(k) or {})
+    out = uc._auto_restart_image_drift({"count": 1, "slots": [_RENDER_SLOT]})
+    assert out == {}
+    assert posted == []
+
+
+def test_restart_slots_flag_does_not_name_render_error_slot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``--restart-slots`` restarts the other drifted slots and reports why the
+    render-error slot was left running."""
+    monkeypatch.setattr(uc, "_api_unreachable", lambda url: False)
+    chat = {"slot": "chat", "diffs": [{"key": "--ctx-size", "running": "1", "rendered": "2"}]}
+    monkeypatch.setattr(
+        uc, "api_get", lambda path, **k: {"count": 2, "slots": [_RENDER_SLOT, chat]}
+    )
+    posted: dict = {}
+
+    def fake_post(path: str, *, json: object = None, **kwargs: object) -> dict:
+        posted[path] = json
+        return {"restarted": ["chat"], "failed": [], "count": 1}
+
+    monkeypatch.setattr(uc, "api_post", fake_post)
+    result = runner.invoke(app, ["update", "--restart-slots"])
+    assert result.exit_code == 0, result.output
+    assert posted["/api/updates/restart-slots"] == {"slots": ["chat"]}
+    assert "brain" in result.output
+    assert "context_size" in result.output

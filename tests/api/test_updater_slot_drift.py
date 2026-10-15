@@ -210,7 +210,13 @@ async def test_shared_restart_function_matches_route_shape(
         restart_error={},
     )
     out = await updater_routes.restart_drifted(sm, only={"a", "b"}, skip_busy=True)
-    assert out == {"restarted": ["a"], "failed": [], "skipped_busy": ["b"], "count": 1}
+    assert out == {
+        "restarted": ["a"],
+        "failed": [],
+        "skipped_busy": ["b"],
+        "skipped_render_error": [],
+        "count": 1,
+    }
 
 
 @pytest.mark.asyncio
@@ -388,3 +394,95 @@ async def test_explicit_restart_with_empty_reading_still_restarts(
     out = await updater_routes.restart_drifted(sm, only={"silent"}, skip_busy=True)
     assert out["restarted"] == ["silent"]
     assert out["skipped_busy"] == []
+
+
+# ── #2660: a slot whose argv cannot be re-rendered ───────────────────────────
+#
+# compute_config_drift reports the image diff plus a ``render_error`` entry.
+# /slot-drift must list the slot and say why; no restart pass the operator did
+# not name the slot in may bounce it, since a restart would fail to render and
+# take it down.
+
+_RERR = "slot 'brain' still carries [model].context_size (ADR-0029)"
+_RENDER = {"key": "render_error", "running": None, "rendered": None, "error": _RERR}
+_RENDER_DRIFT = {"drifted": True, "diffs": [_RENDER, _IMG], "render_error": _RERR}
+
+
+def test_slot_drift_lists_render_error_slot(client: TestClient) -> None:
+    _install_sm(client, _StubSlotManager({"brain": dict(_RENDER_DRIFT)}))
+    body = client.get("/api/updates/slot-drift").json()
+    assert body["count"] == 1
+    entry = body["slots"][0]
+    assert entry["slot"] == "brain"
+    assert entry["render_error"] == _RERR
+    assert [d["key"] for d in entry["diffs"]] == ["render_error", "image"]
+
+
+@pytest.mark.asyncio
+async def test_post_start_restart_skips_render_error_slot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _no_busy(monkeypatch)
+    sm = _StubSlotManager(
+        {
+            "brain": dict(_RENDER_DRIFT),
+            "img": {"drifted": True, "diffs": [_IMG]},
+        }
+    )
+    state = SimpleNamespace(slot_manager=sm)
+    await updater_routes.post_start_image_drift_restart(state, enabled=True, settle_s=0)
+    assert sm.restarted == ["img"]
+    res = state.post_start_image_drift_restart
+    assert res["restarted"] == ["img"]
+    assert res["skipped_render_error"] == ["brain"]
+    assert res["skipped_busy"] == []
+    assert res["failed"] == []
+
+
+@pytest.mark.asyncio
+async def test_post_start_restart_with_only_render_error_slot_restarts_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _no_busy(monkeypatch)
+    sm = _StubSlotManager({"brain": dict(_RENDER_DRIFT)})
+    state = SimpleNamespace(slot_manager=sm)
+    await updater_routes.post_start_image_drift_restart(state, enabled=True, settle_s=0)
+    assert sm.restarted == []
+    assert state.post_start_image_drift_restart["skipped_render_error"] == ["brain"]
+
+
+def test_restart_slots_unnamed_sweep_skips_render_error_slot(client: TestClient) -> None:
+    sm = _StubSlotManager(
+        {"brain": dict(_RENDER_DRIFT), "chat": {"drifted": True, "diffs": [_ARGV]}}
+    )
+    _install_sm(client, sm)
+    body = client.post("/api/updates/restart-slots").json()
+    assert body["restarted"] == ["chat"]
+    assert body["skipped_render_error"] == ["brain"]
+    assert sm.restarted == ["chat"]
+
+
+def test_restart_slots_named_render_error_slot_is_restarted(client: TestClient) -> None:
+    """The operator named the slot explicitly: their call, so it is bounced."""
+    sm = _StubSlotManager({"brain": dict(_RENDER_DRIFT)})
+    _install_sm(client, sm)
+    body = client.post("/api/updates/restart-slots", json={"slots": ["brain"]}).json()
+    assert body["restarted"] == ["brain"]
+    assert body["skipped_render_error"] == []
+    assert sm.restarted == ["brain"]
+
+
+def test_restart_slots_skip_busy_sweep_skips_named_render_error_slot(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``skip_busy`` marks the CLI's automatic post-apply sweep: even when it
+    names the slot, a render-error slot is left alone."""
+    _no_busy(monkeypatch)
+    sm = _StubSlotManager({"brain": dict(_RENDER_DRIFT)})
+    _install_sm(client, sm)
+    body = client.post(
+        "/api/updates/restart-slots", json={"slots": ["brain"], "skip_busy": True}
+    ).json()
+    assert body["restarted"] == []
+    assert body["skipped_render_error"] == ["brain"]
+    assert sm.restarted == []

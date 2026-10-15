@@ -25,6 +25,7 @@ import httpx
 import typer
 from rich.console import Console
 from rich.markdown import Markdown
+from rich.markup import escape
 from rich.panel import Panel
 from rich.table import Table
 
@@ -404,6 +405,29 @@ def _slot_names(slots: list) -> list[str]:
     return [str(s.get("slot")) for s in slots if isinstance(s, dict) and s.get("slot")]
 
 
+def _render_error(slot: object) -> str | None:
+    """The reason a drifted slot's launch command cannot be rendered (#2660).
+
+    Such a slot is never restarted by an automatic pass or by
+    ``--restart-slots``: the restart would fail to render and take it down.
+    The operator fixes the config first, or names the slot explicitly in
+    ``POST /api/updates/restart-slots``.
+    """
+    if not isinstance(slot, dict):
+        return None
+    err = slot.get("render_error")
+    return str(err) if err else None
+
+
+def _render_error_lines(slots: list) -> list[str]:
+    return [
+        f"cannot be restarted: {escape(str(s.get('slot')))} \u2014 its launch command does not "
+        f"render from the current config: {escape(err)}"
+        for s in slots
+        if (err := _render_error(s))
+    ]
+
+
 def _print_drift_banner(
     drift: dict,
     *,
@@ -449,6 +473,7 @@ def _print_drift_banner(
             lines.append(
                 f"could not be restarted automatically: {f.get('slot')} \u2014 {f.get('error')}"
             )
+    lines.extend(_render_error_lines(slots))
     lines.append(
         "\nThese slots are still running the pre-update launch command or image. Run "
         "[bold]hal0 update --restart-slots[/bold] to bounce the drifted slots "
@@ -466,7 +491,9 @@ def _auto_restart_image_drift(drift: dict) -> dict:
     turn an applied update into a hard error (the slot then still shows as
     drifted and the verdict says restarts are pending).
     """
-    names = _slot_names([s for s in drift.get("slots") or [] if _has_image_drift(s)])
+    names = _slot_names(
+        [s for s in drift.get("slots") or [] if _has_image_drift(s) and not _render_error(s)]
+    )
     if not names:
         return {}
     timeout_s = slot_lifecycle_timeout_s(loads=1, unloads=1, slots=len(names))
@@ -507,11 +534,12 @@ def _restart_drifted_slots() -> None:
     # Send the slots we counted rather than letting the route recompute drift:
     # otherwise a slot that drifts between the GET and the POST widens the
     # server's sweep past the budget derived from that count.
-    names = [
-        str(s.get("slot"))
-        for s in (drift.get("slots") or [])
-        if isinstance(s, dict) and s.get("slot")
-    ]
+    slots = drift.get("slots") or []
+    for line in _render_error_lines(slots):
+        console.print(f"[yellow]{line}[/yellow]")
+    names = _slot_names([s for s in slots if not _render_error(s)])
+    if not names and any(_render_error(s) for s in slots):
+        return
     payload = {"slots": names} if names else None
     timeout_s = slot_lifecycle_timeout_s(loads=1, unloads=1, slots=max(len(names), count))
     try:

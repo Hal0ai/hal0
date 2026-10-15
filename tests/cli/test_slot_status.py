@@ -60,3 +60,30 @@ def test_slot_status_silent_when_not_degraded(monkeypatch: pytest.MonkeyPatch) -
 
     assert result.exit_code == 0, result.output
     assert "specialty" not in result.output.lower()
+
+
+def test_slot_status_shows_render_error_reason(monkeypatch: pytest.MonkeyPatch) -> None:
+    """#2660: a slot that cannot re-render says why, not ``running=None``."""
+    monkeypatch.setattr(slot_commands, "_api_unreachable", lambda _url: False)
+    err = "slot 'chat' still carries [model].context_size (ADR-0029)"
+    monkeypatch.setattr(
+        slot_commands,
+        "api_get",
+        lambda path, **_kw: {
+            "name": "chat",
+            "status": "ready",
+            "model_id": "m",
+            "port": 8081,
+            "config_drift": {
+                "drifted": True,
+                "render_error": err,
+                "diffs": [{"key": "render_error", "running": None, "rendered": None, "error": err}],
+            },
+        },
+    )
+
+    result = runner.invoke(slot_commands.app, ["status", "chat"])
+
+    assert result.exit_code == 0, result.output
+    assert "[model].context_size" in result.output
+    assert "running=None" not in result.output

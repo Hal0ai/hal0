@@ -2033,6 +2033,8 @@ class SlotManager:
           evidence must not bounce a healthy container on every load;
         * a comparator that raises is likewise treated as "no drift". A
           convergence check that cannot run is not grounds for a restart.
+        * a slot that cannot re-render (``render_error``, #2660) is never
+          converged: the re-spawn would fail to render and take it down.
         """
         if is_npu_trio_shadow(cfg):
             return False
@@ -2043,6 +2045,8 @@ class SlotManager:
                 "slot.converge_check_failed",
                 extra={"slot": slot_name, "error": str(exc)},
             )
+            return False
+        if drift and drift.get("render_error"):
             return False
         return bool(drift and drift.get("drifted"))
 

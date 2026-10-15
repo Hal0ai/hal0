@@ -2284,6 +2284,20 @@ class ContainerProvider(Provider):
             return None
         return list(plan.command)
 
+    def render_error(self, slot_cfg: dict[str, Any], model_info: dict[str, Any]) -> str | None:
+        """Why :meth:`expected_argv` cannot render this slot, or None when it can.
+
+        ``expected_argv`` swallows the ``container_spec`` exception so a status
+        probe never fails; the drift comparator calls this after a None render
+        to report the reason as a ``render_error`` (#2660).
+        """
+        try:
+            provider = _spec_provider_for(slot_cfg) or self
+            provider.container_spec(slot_cfg, model_info)
+        except Exception as exc:
+            return str(exc) or type(exc).__name__
+        return None
+
     def unload_sync(self, slot_cfg: dict[str, Any]) -> None:
         """Stop and clean up the slot's Quadlet unit (synchronous).
 
