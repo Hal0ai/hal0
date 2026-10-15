@@ -121,7 +121,15 @@ intent = "ComfyUI"
 #
 # Sampler: temp 0.7 / top_p 0.95 (the rc.9 validation matrix ran green with
 # these). Batch is llama.cpp's default 2048/512.
-flags = "-fa auto -b 2048 -ub 512 --reasoning-budget -1 --no-context-shift --temp 0.7 --top-p 0.95"
+#
+# --parallel 1: without it llama-server runs `-np auto` (4 sequences sharing
+# ONE unified 65536-cell KV pool). When the in-flight sequences together
+# outgrow the pool, llama-server fails every one of them with HTTP 500
+# "Context size has been exceeded", though each fits the window alone (#2714,
+# same cause as utility/agent #2692). One sequence matches the "usually one
+# llama-server with --parallel 1" assumption in config/schema.py; concurrent
+# callers queue. A per-sequence-window concurrency model is a later design item.
+flags = "-fa auto -b 2048 -ub 512 --parallel 1 --reasoning-budget -1 --no-context-shift --temp 0.7 --top-p 0.95"
 ctx_size = 65536
 vision = "off"
 intent = "Brain steward (LFM2.5-2.6B + persona + tool-call routing) · 64K ctx"

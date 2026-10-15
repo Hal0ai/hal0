@@ -99,8 +99,9 @@ def test_shared_service_seeds_serve_one_sequence() -> None:
     """#2692: without ``--parallel`` llama-server runs ``-np auto`` (4
     sequences in ONE unified KV pool). One combined overflow then 500s every
     in-flight request on the slot, so the slots that front several callers
-    (utility: Hindsight + Hermes + brain; agent: Hermes) pin one sequence."""
-    for name in ("utility", "agent"):
+    (utility: Hindsight + Hermes + brain; agent: Hermes) pin one sequence.
+    #2714: brain (steward, UI and v1 traffic) was missed by #2692."""
+    for name in ("utility", "agent", "brain"):
         tokens = _flag_tokens(name)
         assert "--parallel" in tokens, name
         assert tokens[tokens.index("--parallel") + 1] == "1", name
