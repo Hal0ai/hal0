@@ -63,6 +63,13 @@ applying. Add those subsections to a version's section to surface them; see
   would fail to render and take it down. Naming the slot in
   `POST /api/updates/restart-slots` (without `skip_busy`) still restarts it
   (#2660).
+- The brain's live-state grounding guard (#2022) no longer lets "why is/are/do/does"
+  phrasing hide a live-state question, and now recognises services, health,
+  memory and hindsight as subjects. "Why is the agent slot offline?" and "Is the
+  hindsight memory service healthy?" under a brevity clause were answered with
+  zero tool calls and an invented answer on the shipped 1.1B steward; they are
+  now rerouted to the tool model like any other ungrounded live-state answer
+  (#2675).
 - A stack row whose slot the profile-centric conversion blocks now still drops
   the retired tuning keys (`vision`, `mtp`, `enable_thinking`,
   `server_extra_args`). Only the profile re-point is reverted. Before, the
