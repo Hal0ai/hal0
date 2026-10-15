@@ -656,6 +656,51 @@ def test_print_convergence_reports_a_failed_post_swap_migration(
     assert "kaboom" in out
 
 
+def test_print_convergence_points_an_eacces_backups_failure_at_doctor_perms(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """#2657: a restart can never fix a backups dir hal0 cannot write, so the
+    panel must name the repair instead of only "restart to retry"."""
+    converged = uc._print_convergence(
+        {
+            "post_activation_migrations": {
+                "ok": False,
+                "from": 1,
+                "to": 1,
+                "error": "post-activation migrations failed in the newly activated tree "
+                "(rc=1): RunnerMigrationError: could not write the runner-migration "
+                "backup ([Errno 13] Permission denied: "
+                "'/var/lib/hal0/backups/runners-20261014T180430.tar.gz'); nothing was changed",
+                "pass_warnings": [],
+            },
+            "converged": False,
+        }
+    )
+    out = capsys.readouterr().out
+    assert converged is False
+    assert "Migration incomplete" in out
+    assert "sudo hal0 doctor perms --fix" in out
+    assert "chmod 2775 /var/lib/hal0/backups" in out
+
+
+def test_print_convergence_generic_failure_has_no_backups_hint(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    uc._print_convergence(
+        {
+            "post_activation_migrations": {
+                "ok": False,
+                "from": 1,
+                "to": 1,
+                "error": "Hal0Error: kaboom",
+                "pass_warnings": [],
+            },
+            "converged": False,
+        }
+    )
+    assert "doctor perms" not in capsys.readouterr().out
+
+
 def test_print_convergence_shows_the_migrated_schema_range_on_success(
     capsys: pytest.CaptureFixture[str],
 ) -> None:

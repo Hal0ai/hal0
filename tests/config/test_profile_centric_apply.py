@@ -4,6 +4,7 @@ roll back, rerun and restore, on an install in the old shapes."""
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import stat
 import tomllib
@@ -174,6 +175,25 @@ def test_no_backup_no_write(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(pca, "_backups_dir", _boom)
     with pytest.raises(pca.ProfileConversionError, match="nothing was changed"):
         pca.migrate_profile_centric()
+    assert _snapshot() == before
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root bypasses the directory write check")
+def test_unwritable_backups_dir_names_the_remedy(monkeypatch: pytest.MonkeyPatch) -> None:
+    """#2657: the profile conversion shares the runner migration's backups
+    directory, so a root-owned 2755 one fails here too, with the remedy."""
+    production_install()
+    backups = paths.var_lib() / "backups"
+    backups.mkdir(parents=True, exist_ok=True)
+    backups.chmod(0o2555)
+    real_uid = os.geteuid()
+    monkeypatch.setattr(os, "geteuid", lambda: real_uid + 1)
+    before = _snapshot()
+    with pytest.raises(pca.ProfileConversionError) as info:
+        pca.migrate_profile_centric()
+    msg = str(info.value)
+    assert "nothing was changed" in msg
+    assert f"chmod 2775 {backups}" in msg
     assert _snapshot() == before
 
 

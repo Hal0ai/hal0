@@ -32,6 +32,17 @@ applying. Add those subsections to a version's section to surface them; see
 
 ### Fixed
 
+- The post-update runner-system and profile-centric conversions no longer
+  fail on a box whose `/var/lib/hal0/backups` a root-run tool created as
+  `root:hal0 2755`. Before, `hal0-api` (`User=hal0`) could not write the
+  backup, reported "nothing was changed", and every restart hit the same
+  error, so the box stayed unconverted. The conversion now makes a
+  directory it owns `2775`, and otherwise fails with the directory, its
+  owner and mode, and the fix. `hal0 doctor perms` now reports and fixes the
+  directory (`hal0:hal0 2775`), `install.sh` creates it that way, and the
+  `hal0 update` "Migration incomplete" panel names the fix instead of only
+  saying to restart (#2657).
+
 - A stack row whose slot the profile-centric conversion blocks now still drops
   the retired tuning keys (`vision`, `mtp`, `enable_thinking`,
   `server_extra_args`). Only the profile re-point is reverted. Before, the
@@ -437,6 +448,12 @@ applying. Add those subsections to a version's section to surface them; see
 
 ### Migrations
 
+- **Upgraded boxes with a `root:hal0 2755` backups directory** (#2657). If
+  `hal0 update` showed "Migration incomplete" with `Permission denied` on
+  `/var/lib/hal0/backups`, run `sudo hal0 doctor perms --fix` (or
+  `sudo chmod 2775 /var/lib/hal0/backups`), then
+  `sudo systemctl restart hal0-api`; the runner-system and profile-centric
+  conversions run again at that start.
 - **Profile-centric conversion** (`hal0.config.migrations.profile_centric_apply`,
   ADR-0029). It runs automatically on `hal0 update` after the runner-system
   conversion, and when `hal0 serve` starts `hal0-api`, before config is

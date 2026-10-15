@@ -272,6 +272,17 @@ _MIGRATION_PASS_LABELS: dict[str, str] = {
 }
 
 
+#: The packaged path of the migration backups directory, for the #2657 hint.
+_BACKUPS_DIR_HINT = "/var/lib/hal0/backups"
+
+
+def _is_backups_dir_denied(error: str) -> bool:
+    """True when a post-swap migration failed on an unwritable backups dir (#2657)."""
+    return "/backups" in error and (
+        "Permission denied" in error or "Errno 13" in error or "not writable" in error
+    )
+
+
 def _print_convergence(convergence: dict | None) -> bool:
     """Report whether the post-update data migrations applied.
 
@@ -302,14 +313,28 @@ def _print_convergence(convergence: dict | None) -> bool:
                 f"[yellow]![/yellow] {label} logged a warning — see journalctl for hal0-api"
             )
     elif post_migrations:
+        error = str(post_migrations.get("error") or "unknown error")
+        retry = (
+            "shape. hal0-api retries this automatically at its next start — restart the\n"
+            "service now to retry immediately, or wait for the next scheduled restart."
+        )
+        if _is_backups_dir_denied(error):
+            # #2657: a restart alone can never fix this; the retry hits the
+            # same EACCES. Name the repair first.
+            retry = (
+                "shape. A restart alone will not fix it: hal0-api cannot write the\n"
+                "migration backups directory. Repair it, then restart hal0-api:\n"
+                "  sudo hal0 doctor perms --fix\n"
+                f"  (or: sudo chmod 2775 {_BACKUPS_DIR_HINT})\n"
+                "  sudo systemctl restart hal0-api"
+            )
         console.print(
             Panel(
                 "[bold red]Post-update data migrations did not apply.[/bold red]\n"
-                f"{post_migrations.get('error') or 'unknown error'}\n\n"
+                f"{error}\n\n"
                 "The new code is installed and running, but on-disk data (slot TOMLs,\n"
                 "hal0.toml schema, registry rows) may still reflect the PREVIOUS release's\n"
-                "shape. hal0-api retries this automatically at its next start — restart the\n"
-                "service now to retry immediately, or wait for the next scheduled restart.",
+                f"{retry}",
                 title="Migration incomplete",
                 border_style="red",
             )

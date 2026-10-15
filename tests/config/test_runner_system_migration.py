@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import sqlite3
 import stat
 import struct
@@ -705,11 +706,14 @@ def test_apply_converts_everything_with_a_backup(old_box: dict[str, Path]) -> No
 
 
 def test_backup_is_private(old_box: dict[str, Path]) -> None:
+    """Each archive is 0600; a directory this call creates lands at the
+    ownership table's declared shared mode (#2657), not a 0700 that locks out
+    whichever of root and hal0 did not create it."""
     report = migrate_runner_system()
     assert report.backup
     backup = Path(report.backup)
     assert stat.S_IMODE(backup.stat().st_mode) == 0o600
-    assert stat.S_IMODE(backup.parent.stat().st_mode) == 0o700
+    assert stat.S_IMODE(backup.parent.stat().st_mode) == 0o2775
 
 
 def test_existing_backups_dir_is_left_as_the_operator_set_it(old_box: dict[str, Path]) -> None:
@@ -722,6 +726,47 @@ def test_existing_backups_dir_is_left_as_the_operator_set_it(old_box: dict[str, 
     assert report.backup
     assert stat.S_IMODE(backups.stat().st_mode) == 0o2775
     assert stat.S_IMODE(Path(report.backup).stat().st_mode) == 0o600
+
+
+_AS_ROOT = os.geteuid() == 0
+
+
+@pytest.mark.skipif(_AS_ROOT, reason="root bypasses the directory write check")
+def test_unwritable_backups_dir_we_own_is_repaired(old_box: dict[str, Path]) -> None:
+    """#2657: an existing backups dir the current user owns but cannot write
+    (a umask-022 birth left it 2755, or worse) is made 2775 before the backup."""
+    backups = paths.var_lib() / "backups"
+    backups.mkdir(parents=True)
+    backups.chmod(0o2555)
+    report = migrate_runner_system()
+    assert report.backup and Path(report.backup).is_file()
+    assert stat.S_IMODE(backups.stat().st_mode) == 0o2775
+
+
+@pytest.mark.skipif(_AS_ROOT, reason="root bypasses the directory write check")
+def test_unwritable_backups_dir_owned_by_another_user_names_the_remedy(
+    old_box: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#2657: hal0-api (User=hal0) meeting a root:hal0 2755 backups dir cannot
+    repair it. The failure names the directory, its owner and mode, and the
+    one-line remedy, and still says nothing was changed."""
+    backups = paths.var_lib() / "backups"
+    backups.mkdir(parents=True)
+    backups.chmod(0o2555)
+    real_uid = os.geteuid()
+    monkeypatch.setattr(rs.os, "geteuid", lambda: real_uid + 1)  # someone else owns it
+    before = old_box["hal0_toml"].read_bytes()
+    with pytest.raises(RunnerMigrationError) as info:
+        migrate_runner_system()
+    msg = str(info.value)
+    assert "nothing was changed" in msg
+    assert str(backups) in msg
+    assert "2555" in msg
+    assert f"chmod 2775 {backups}" in msg
+    assert "hal0 doctor perms --fix" in msg
+    assert stat.S_IMODE(backups.stat().st_mode) == 0o2555
+    assert old_box["hal0_toml"].read_bytes() == before
+    assert not any(backups.iterdir())
 
 
 def test_backups_dir_symlink_is_refused(old_box: dict[str, Path], tmp_path: Path) -> None:

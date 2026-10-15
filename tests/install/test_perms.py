@@ -893,6 +893,8 @@ _HAL0_API_WRITE_LABELS = [
     "dashboard-layout.json",
     "update-jobs/",
     "models/chat-templates/",
+    # post-swap migration restore points (runner_system, profile_centric, #2657)
+    "backups/",
 ]
 
 
@@ -915,6 +917,7 @@ def _resolve_hal0_api_write_target(label: str) -> Path:
         "dashboard-layout.json": var_lib / "dashboard-layout.json",
         "update-jobs/": var_lib / "update-jobs",
         "models/chat-templates/": var_lib / "models" / "chat-templates",
+        "backups/": var_lib / "backups",
     }
     return targets[label]
 
@@ -1000,3 +1003,38 @@ def test_models_row_is_skipped_when_the_flm_store_is_models_itself(
 
     assert models not in planned
     assert models / "Gemma3-1B-NPU2" not in planned
+
+
+def test_root_owned_2755_backups_dir_is_drift_and_heals(
+    tmp_hal0_home: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#2657: a backups dir a root-run tool birthed ``root:hal0 2755`` locks the
+    ``User=hal0`` post-swap migrations out of their restore-point write.
+    ``doctor perms`` must report it and ``--fix`` must land ``hal0:hal0 2775``."""
+    backups = paths.var_lib() / "backups"
+    backups.mkdir(parents=True)
+    rows = [r for r in perms.ownership_table() if r.target == backups]
+    assert len(rows) == 1, "backups/ row must be present in the table"
+    row = rows[0]
+    assert (row.owner, row.group, row.mode) == ("hal0", "hal0", 0o2775)
+    assert row.glob is None  # dir only: archives stay 0600 as their writer made them
+
+    def _root_observe(p: Path) -> perms.PermObservation:
+        return perms.PermObservation(path=p, exists=True, owner="root", group="hal0", mode=0o2755)
+
+    pl = perms.plan(rows, observe_fn=_root_observe)
+    assert [d.path for d in pl.drifted] == [backups]
+    assert any(r["status"] == "drift" for r in perms.audit_rows(pl))
+
+    monkeypatch.setattr(perms.pwd, "getpwnam", lambda _n: type("P", (), {"pw_uid": 4242})())
+    monkeypatch.setattr(perms.grp, "getgrnam", lambda _n: type("G", (), {"gr_gid": 4243})())
+    chown_calls: list[tuple[str, int, int]] = []
+    chmod_calls: list[tuple[str, int]] = []
+    changed = perms.commit(
+        pl,
+        chown=lambda p, u, g: chown_calls.append((p, u, g)),
+        chmod=lambda p, m: chmod_calls.append((p, m)),
+    )
+    assert changed == [backups]
+    assert chown_calls == [(str(backups), 4242, 4243)]
+    assert chmod_calls == [(str(backups), 0o2775)]

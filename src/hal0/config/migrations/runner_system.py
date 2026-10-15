@@ -77,9 +77,12 @@ Contract:
 from __future__ import annotations
 
 import contextlib
+import errno
+import grp
 import io
 import json
 import os
+import pwd
 import re
 import secrets
 import shutil
@@ -809,13 +812,25 @@ def _replace_file(path: Path, data: bytes, *, default_mode: int = 0o640) -> None
         raise
 
 
-def _backups_dir() -> Path:
-    """The shared backups directory, ``0700`` only when this call creates it.
+#: The mode the ownership table declares for ``<var_lib>/backups``
+#: (:mod:`hal0.install.perms`, #2657): setgid, group-writable, so root-run
+#: tools and the ``User=hal0`` service can both add restore points.
+BACKUPS_DIR_MODE = 0o2775
 
-    The directory is shared with root-run tools (root-owned, group ``hal0``,
-    setgid on a packaged install), so an existing one is left as the operator
-    set it: hal0-api cannot chmod a directory it does not own, and tightening
-    it as root would lock the service user out. Each archive is ``0600``.
+
+def _backups_dir() -> Path:
+    """The shared backups directory, writable by the current user or an error.
+
+    The directory is shared between root-run tools and hal0-api
+    (``User=hal0``); :mod:`hal0.install.perms` declares it ``hal0:hal0 2775``.
+    A directory this call creates is chmodded to that mode (``mkdir``'s mode is
+    masked by the umask). An existing directory is left alone when it is
+    already writable (#2558). When it is not (#2657: a root-run tool under
+    umask 022 birthed it ``root:hal0 2755``), it is repaired to ``2775`` when
+    the current user owns it or is root; otherwise this raises a
+    :class:`PermissionError` that names the directory, its owner and mode, and
+    the one-line remedy, because no retry can succeed until an operator acts.
+    Each archive is ``0600``.
     """
     from hal0.config import paths
 
@@ -826,8 +841,45 @@ def _backups_dir() -> Path:
     except FileExistsError:
         _refuse_symlink_dir(backup_dir)
     else:
-        os.chmod(backup_dir, 0o700)  # mkdir's mode is masked by the umask
-    return backup_dir
+        os.chmod(backup_dir, BACKUPS_DIR_MODE)
+        return backup_dir
+    if os.access(backup_dir, os.W_OK | os.X_OK):
+        return backup_dir
+    st = os.stat(backup_dir)
+    euid = os.geteuid()
+    if euid in (0, st.st_uid):
+        with contextlib.suppress(OSError):
+            if euid == 0:
+                # Hand the group back to the parent's (hal0 on a packaged
+                # install) so the service user gains write, not just root.
+                os.chown(backup_dir, -1, os.stat(backup_dir.parent).st_gid)
+            os.chmod(backup_dir, BACKUPS_DIR_MODE)
+        if os.access(backup_dir, os.W_OK | os.X_OK):
+            return backup_dir
+        st = os.stat(backup_dir)
+    raise PermissionError(errno.EACCES, _backups_dir_remedy(backup_dir, st))
+
+
+def _backups_dir_remedy(backup_dir: Path, st: os.stat_result) -> str:
+    """Why ``backup_dir`` is unusable and the one-line fix (#2657)."""
+    owner = _id_name(pwd.getpwuid, st.st_uid, "pw_name")
+    group = _id_name(grp.getgrgid, st.st_gid, "gr_name")
+    me = _id_name(pwd.getpwuid, os.geteuid(), "pw_name")
+    fix = f"sudo chmod 2775 {backup_dir}"
+    if group != "hal0":
+        fix = f"sudo chgrp hal0 {backup_dir} && {fix}"
+    return (
+        f"backups directory {backup_dir} is not writable by {me} "
+        f"(owner {owner}:{group}, mode {stat.S_IMODE(st.st_mode):04o}); "
+        f"fix: {fix} (or sudo hal0 doctor perms --fix), then restart hal0-api"
+    )
+
+
+def _id_name(lookup: Callable[[int], Any], ident: int, attr: str) -> str:
+    try:
+        return str(getattr(lookup(ident), attr))
+    except KeyError:
+        return str(ident)
 
 
 def _write_backup(writes: Iterable[_FileWrite], runner_changes: list[_RunnerChange]) -> Path:

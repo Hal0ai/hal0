@@ -622,6 +622,23 @@ def ownership_table(
             child_mode=0o600,
             role="update-jobs/ (durable update-job snapshots)",
         ),
+        # backups/ — restore points of the post-swap config conversions
+        # (``config.migrations.runner_system._backups_dir``: ``runners-*`` and
+        # ``profiles-*`` tarballs) and of root-run tools (registry.toml
+        # retirement, ``slot migrate-id-keying``). Shared by root and the
+        # ``User=hal0`` service, so setgid + group-writable. A root-run tool
+        # under umask 022 births it ``root:hal0 2755``, which locked hal0-api's
+        # post-swap migrations out of their backup write on every retry
+        # (#2657). Dir only: each archive is born ``0600`` by its writer and a
+        # restore runs as that writer or root. Optional: absent until the
+        # first conversion or ``install.sh`` creates it.
+        PermRow(
+            var_lib / "backups",
+            state_owner,
+            service_group,
+            0o2775,
+            role="backups/ (migration restore points)",
+        ),
         # registry/ — born root:root from the same install.sh mkdir and
         # written by the User=hal0 daemon (the model-path tombstone file,
         # ``ignored-paths.json``). Same O13 birth-ownership class as slots/
