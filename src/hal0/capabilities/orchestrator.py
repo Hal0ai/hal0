@@ -489,6 +489,16 @@ class CapabilityOrchestrator:
                 details={"slot": slot, "child": child, "device": merged.device},
             )
 
+        # An enabled STT selection with no device (the dashboard sends only
+        # ``{model, enabled}``; a fresh install seeds ``device=""``) must be
+        # resolved here from the host's advertised backends. Left empty it
+        # reaches ``_ensure_slot_exists``' ``gpu-rocm`` fallback and writes a
+        # slot no kfd-less host can start (#2690).
+        if child == "stt" and merged.enabled and not merged.device:
+            merged = merged.model_copy(
+                update={"device": self._resolve_stt_device(slot, child, merged.model)}
+            )
+
         # An enabled selection must name a device the host advertises
         # (#2659). npu is the case that bypasses every later gate (exempt
         # from the download check, always answers pending_reload), so a
@@ -653,6 +663,40 @@ class CapabilityOrchestrator:
         }
 
     # ── slot TOML helpers ────────────────────────────────────────────────────
+
+    def _resolve_stt_device(self, slot: str, child: str, model_id: str) -> str:
+        """Pick the device for an STT save that named none (#2690).
+
+        Candidates are the host's advertised backends minus GPU lanes (hal0
+        ships no GPU STT engine, see the ``no_engine_for_device`` gate in
+        :meth:`apply`), narrowed to the backends the selected model's catalog
+        row supports. Raises 400 ``capability.no_engine_for_device`` when
+        nothing fits, before any slot or capabilities file is written.
+        """
+        from hal0.capabilities.catalog import available_backends
+
+        advertised = [b["id"] for b in available_backends()]
+        candidates = [b for b in advertised if not b.startswith("gpu")]
+        if model_id:
+            rows = models_for_capability("stt", registry=self._registry)
+            match = next((r for r in rows if r["id"] == model_id), None)
+            if match is not None:
+                legal = {b["id"] for b in match.get("backends", [])}
+                candidates = [b for b in candidates if b in legal]
+        if not candidates:
+            raise BadRequest(
+                "no STT engine can run on this host's backends "
+                f"{advertised!r}{f' for model {model_id!r}' if model_id else ''} — "
+                "voice.stt runs on 'cpu' (moonshine) or 'npu' (FLM whisper)",
+                code="capability.no_engine_for_device",
+                details={
+                    "slot": slot,
+                    "child": child,
+                    "model": model_id,
+                    "available_backends": advertised,
+                },
+            )
+        return candidates[0]
 
     def _validate_model_in_catalog(
         self,
