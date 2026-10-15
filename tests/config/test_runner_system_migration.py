@@ -1060,3 +1060,39 @@ def test_cli_restore_refusal_exits_1(old_box: dict[str, Path], tmp_path: Path) -
     result = CliRunner().invoke(app, ["migrate", "--restore", str(archive)])
     assert result.exit_code == 1
     assert "writable" in result.output
+
+
+# ── #2694: an unassigned model is reported with its slot, model and remedy ────
+
+
+def test_plan_slot_records_the_unassigned_model_with_a_remedy() -> None:
+    unassigned: list[dict[str, str]] = []
+    out = plan_slot(
+        {"name": "brain", "model": {"default": "hal0-brain-sft-q8-rocmfpx"}},
+        name="brain",
+        known=KNOWN,
+        fork_quant_of=lambda _mid: "ROCmFP8",
+        actions=[],
+        warnings=[],
+        unassigned=unassigned,
+    )
+    assert out is not None and out["model"]["default"] == ""
+    assert len(unassigned) == 1
+    entry = unassigned[0]
+    assert entry["slot"] == "brain"
+    assert entry["model"] == "hal0-brain-sft-q8-rocmfpx"
+    assert entry["quant"] == "ROCmFP8"
+    assert "hal0 slot edit brain --model <id>" in entry["remedy"]
+    assert "lfm2.5-2.6b" in entry["remedy"]
+
+
+def test_migration_report_lists_each_unassigned_slot(tmp_hal0_home: str, tmp_path: Path) -> None:
+    model = tmp_path / "hal0-brain-sft-q8-rocmfpx" / "model.gguf"
+    model.parent.mkdir()
+    model.write_bytes(_gguf([0, 12, 103]))
+    _seed_slot_on("brain-sft", model, paths.slots_config_dir())
+
+    report = migrate_runner_system()
+
+    assert [(u["slot"], u["model"]) for u in report.unassigned] == [("brain", "brain-sft")]
+    assert "hal0 slot edit brain --model <id>" in report.unassigned[0]["remedy"]

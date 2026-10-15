@@ -752,18 +752,45 @@ def _write_state(fs: FileState) -> None:
     write_toml_atomic(fs.path, fs.data)
 
 
+# ── an empty model binding (#2694/#2695) ──────────────────────────────────────
+
+
+def unassigned_model_remedy(slot_name: str) -> str:
+    """How to give ``slot_name`` a model again after its binding was emptied.
+
+    One wording for every surface that reports an empty ``[model].default``:
+    the runner-system conversion's report (ADR-0028 §7), ``hal0 update``, the
+    slot's ``message`` on ``/api/slots`` and the render error. The brain slot
+    gets its shipped default as an example (a plain GGUF every runner loads).
+    """
+    from hal0.install.brain_model import BRAIN_MODEL_DEFAULT
+
+    example = f" (e.g. {BRAIN_MODEL_DEFAULT})" if slot_name == "brain" else ""
+    return f"assign a plain GGUF build: `hal0 slot edit {slot_name} --model <id>`{example}"
+
+
+def no_model_assigned_message(slot_name: str) -> str:
+    """The error for a slot whose ``[model].default`` is empty (#2695)."""
+    return (
+        f"slot {slot_name!r} has no model assigned ([model].default is empty); "
+        f"{unassigned_model_remedy(slot_name)}"
+    )
+
+
 __all__ = [
     "ChangeSet",
     "FileState",
     "SlotConfigStore",
     "SlotSelection",
     "merge_slot_config",
+    "no_model_assigned_message",
     "reject_removed_slot_keys",
     "reject_slot_llama_env",
     "reject_slot_tuning_keys",
     "reject_unknown_slot_keys",
     "slot_scalar_table",
     "slot_write_lock",
+    "unassigned_model_remedy",
     "unknown_slot_config_keys",
     "write_slot_toml",
 ]

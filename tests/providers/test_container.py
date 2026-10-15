@@ -828,6 +828,29 @@ class TestContainerSpec:
             assert provider.expected_argv(_slot_cfg(), _model_info()) is None
             assert provider.render_error(_slot_cfg(), _model_info()) == str(boom)
 
+    def test_render_error_for_an_empty_binding_says_no_model_assigned(self) -> None:
+        """#2695: an emptied [model].default is not a registry failure."""
+        provider = self._provider()
+        cfg = _slot_cfg(name="brain", model={"default": ""})
+        with patch(
+            "hal0.providers.container._resolve_profile",
+            return_value=_moe_profile(),
+        ):
+            err = provider.render_error(cfg, {})
+        assert err is not None
+        assert "registry lookup failed" not in err
+        assert "slot 'brain' has no model assigned ([model].default is empty)" in err
+        assert "hal0 slot edit brain --model <id>" in err
+
+    def test_render_error_keeps_the_registry_text_when_a_model_is_set(self) -> None:
+        provider = self._provider()
+        with patch(
+            "hal0.providers.container._resolve_profile",
+            return_value=_moe_profile(),
+        ):
+            err = provider.render_error(_slot_cfg(), {})
+        assert err is not None and "registry lookup failed" in err
+
     def test_render_error_is_none_when_the_slot_renders(self) -> None:
         provider = self._provider()
         with patch(

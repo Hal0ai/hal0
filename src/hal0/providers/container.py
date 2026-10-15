@@ -723,7 +723,9 @@ def _fault_diagnosis(props: Mapping[str, str]) -> str:
     return diagnosis
 
 
-def _resolve_model_path(model_info: dict[str, Any]) -> str:
+def _resolve_model_path(
+    model_info: dict[str, Any], slot_cfg: Mapping[str, Any] | None = None
+) -> str:
     """Return the absolute GGUF path for this model.
 
     Prefers ``model_info["path"]`` (populated by ModelRegistry.get);
@@ -738,6 +740,13 @@ def _resolve_model_path(model_info: dict[str, Any]) -> str:
     ``registry/pull.py`` is where escape attempts fail fast instead).
     """
     path = model_info.get("path") or model_info.get("_model_key", "")
+    if not path and slot_cfg is not None and not _slot_model_default(slot_cfg):
+        # #2695: an empty binding is not a registry failure. The runner-system
+        # conversion (ADR-0028 §7) or a hand edit emptied [model].default, and
+        # the fix is a slot edit, not a registry repair.
+        from hal0.slot_config import no_model_assigned_message
+
+        raise ValueError(no_model_assigned_message(str(slot_cfg.get("name") or "?")))
     if not path:
         raise ValueError(
             "model_info has no 'path' — registry lookup failed; "
@@ -746,6 +755,11 @@ def _resolve_model_path(model_info: dict[str, Any]) -> str:
     with contextlib.suppress(Exception):
         model_store_module.assert_under_store(str(path), severity="warn")
     return str(path)
+
+
+def _slot_model_default(slot_cfg: Mapping[str, Any]) -> str:
+    model = slot_cfg.get("model")
+    return str(model.get("default") or "") if isinstance(model, Mapping) else ""
 
 
 def _render_quadlet_from_plan(
@@ -1829,7 +1843,7 @@ class ContainerProvider(Provider):
         # (MTP auto-off breadcrumb) fire here, never on preview/status renders.
         scalars = _resolve_llama_scalars(slot_cfg, model_info, profile, for_launch=True)
 
-        model_path = _resolve_model_path(model_info)
+        model_path = _resolve_model_path(model_info, slot_cfg)
         port = int(slot_cfg.get("port", 0))
 
         # GPU plumbing gate (#674/CPU-profile fix): only a gpu/img-class SLOT

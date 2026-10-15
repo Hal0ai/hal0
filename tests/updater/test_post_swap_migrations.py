@@ -64,7 +64,13 @@ def test_success_parses_the_result_envelope(monkeypatch: pytest.MonkeyPatch) -> 
     monkeypatch.setattr(updater_module.subprocess, "run", _fake_run)
 
     result = asyncio.run(_run_post_activation_migrations_after_swap(2, job_id="j1"))
-    assert result == {"from": 1, "to": 2, "pass_warnings": [], "conversion_blockers": []}
+    assert result == {
+        "from": 1,
+        "to": 2,
+        "pass_warnings": [],
+        "conversion_blockers": [],
+        "unassigned_models": [],
+    }
 
 
 def test_conversion_blockers_are_relayed_from_the_envelope(
@@ -80,6 +86,50 @@ def test_conversion_blockers_are_relayed_from_the_envelope(
 
     result = asyncio.run(_run_post_activation_migrations_after_swap(2, job_id="j1"))
     assert result["conversion_blockers"] == blockers
+
+
+def test_unassigned_models_are_relayed_from_the_envelope(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#2694: the child's per-slot "unassigned it" report reaches commit()."""
+    unassigned = [{"slot": "brain", "model": "m", "quant": "ROCmFP8", "remedy": "r"}]
+
+    def _fake_run(cmd, *a, **k):
+        payload = {"from": 2, "to": 2, "unassigned_models": unassigned}
+        return _Completed(stdout=json.dumps({updater_module._MIGRATION_RESULT_KEY: payload}))
+
+    monkeypatch.setattr(updater_module.subprocess, "run", _fake_run)
+
+    result = asyncio.run(_run_post_activation_migrations_after_swap(2, job_id="j1"))
+    assert result["unassigned_models"] == unassigned
+
+
+def test_child_script_emits_the_unassigned_models(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    import structlog
+
+    captured: dict[str, Any] = {}
+
+    def _fake_run(cmd, *a, **k):
+        captured["cmd"] = list(cmd)
+        return _Completed(stdout=_envelope(1, 1))
+
+    monkeypatch.setattr(updater_module.subprocess, "run", _fake_run)
+    asyncio.run(_run_post_activation_migrations_after_swap(1, job_id="j"))
+    script, payload = captured["cmd"][2], captured["cmd"][3]
+
+    unassigned = [{"slot": "brain", "model": "m", "quant": "ROCmFP8", "remedy": "r"}]
+    monkeypatch.setattr(
+        updater_module,
+        "run_post_activation_migrations",
+        lambda *_a, **_k: updater_module.PostActivationResult(1, 1, [], unassigned),
+    )
+    monkeypatch.setattr(structlog, "configure", lambda **_k: None)
+    monkeypatch.setattr("sys.argv", ["-c", payload])
+    exec(script, {})  # the script under test is our own literal
+    line = capsys.readouterr().out.strip().splitlines()[-1]
+    assert json.loads(line)[updater_module._MIGRATION_RESULT_KEY]["unassigned_models"] == unassigned
 
 
 def test_child_script_emits_the_blockers(
@@ -114,6 +164,7 @@ def test_child_script_emits_the_blockers(
         "from": 1,
         "to": 3,
         "conversion_blockers": blockers,
+        "unassigned_models": [],
     }
 
 
@@ -129,7 +180,13 @@ def test_result_envelope_survives_interleaved_log_noise(monkeypatch: pytest.Monk
     monkeypatch.setattr(updater_module.subprocess, "run", _fake_run)
 
     result = asyncio.run(_run_post_activation_migrations_after_swap(1, job_id=None))
-    assert result == {"from": 1, "to": 2, "pass_warnings": [], "conversion_blockers": []}
+    assert result == {
+        "from": 1,
+        "to": 2,
+        "pass_warnings": [],
+        "conversion_blockers": [],
+        "unassigned_models": [],
+    }
 
 
 def test_args_are_passed_through_as_a_single_json_argv_element(
