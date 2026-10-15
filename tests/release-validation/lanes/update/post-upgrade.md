@@ -80,6 +80,21 @@ did not ask for?**
    `memory-extraction-ctx-preflight-missing`, and a bare 400 with no op created can look like a
    pass if you only check the HTTP status.
 
+8. **Service-user write access to every migration target.** Assert `sudo -u hal0 test -w` on
+   `/var/lib/hal0/backups` and every other directory the post-activation migrations write to, not
+   just `*.db` files. A `post_swap_migration_failed` / `hal0.runner_system_migration_failed` /
+   `hal0.profile_centric_migration_failed` pair in the journal verifies (or refutes) the banner's
+   'restart retries automatically' claim.
+9. **Drift and routing after a partial migration.** For every slot with `image_mismatch=true` in
+   `/api/slots`, `GET /api/updates/slot-drift` must list it or the slot must show an explicit
+   unconverted/render_error state (`slot-drift-blind-when-render-fails`, #2660); run this on a box
+   whose migration did not apply. `POST /v1/chat/completions model=hal0/agent` must resolve to a
+   live slot (this protects 'upgraded boxes keep a bound agent slot', the premise of
+   `brain-tool-model-points-at-modelless-slot`). Diff `hal0 profile list` before and after: every
+   user-defined profile must survive and none be replaced by a same-named seed. Compare `hal0
+   runner-images ls` Store against the 'Runner images converged' line; Store=missing is by design
+   (`runner-images-converged-is-catalogue-only`).
+
 ## Leave behind
 
 The box healthy on the new version, with its accumulated state intact — it is the input to the

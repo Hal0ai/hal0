@@ -82,6 +82,13 @@ chat messages — that is the `hermes-e2e` stateful lane.
    what caught rc.6's "no chat model loaded" beside two serving slots (regression
    `hermes-state-chat-model-resolver`).
 
+10. **Which `/api/status`?** `:8080/api/status` is hal0's; `gateways[].ports` exists only on the
+   hermes dashboard `:9119/api/status`. Use the right one for the wiring check, and note `:9119/`
+   itself 404s by design (`hermes-wheel-missing-web-dist`).
+11. **Prompt snapshot.** After the first hermes prompt build, `.skills_prompt_snapshot.json` should
+   exist under the hermes home. Read-only, so check presence only; if the lane cannot cause a
+   prompt build, record `skipped`.
+
 ## Carry-forward
 
 Hermes findings have historically been *reporting* defects rather than functional ones. Treat

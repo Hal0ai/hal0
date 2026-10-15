@@ -22,8 +22,8 @@ Probe the REST surface from the workstation with curl against `$API` (from `CONT
    Note the exact form (PEP 440 `1.0.0rc5` vs tag form `1.0.0-rc.5`) and whether the two forms
    are used consistently.
 4. **Context window, all four surfaces at once** — regression `ctx-advertised-vs-resolved`
-   (#1788) and `slot-detail-ctx-max-raw` (#1835). For every slot, compare `ctx_max` from the
-   LIST route, `ctx_max` from the DETAIL route, `context_length` in `/v1/models`, and the
+   (#1788) and `slot-detail-ctx-max-raw` (#1835). For every slot, compare `ctx_effective` (`ctx_source` says profile/fallback; `ctx_max` no longer exists) from the
+   LIST route, `ctx_effective` from the DETAIL route, `context_length` in `/v1/models`, and the
    `--ctx-size` in the same detail payload's `resolved_command`. rc.5 fixed two of the four and
    a two-surface check scored it "fixed". `/api/slots/{name}/config` legitimately reports the
    raw TOML ceiling (see `known-issues.yaml`) — exclude it from the equality test but record it.
@@ -98,11 +98,22 @@ Probe the REST surface from the workstation with curl against `$API` (from `CONT
     (#2447, `known-issues: tts-catalog-lists-qwen3-on-gpu-rocm-regardless-of-host`, fixed): on a
     box without /dev/kfd plus a render node that row must be absent.
 13. **Services health vs service registry** — regression `services-health-omits-hindsight`.
-    `diff <(curl -s $API/api/services | jq -r '.[].id' | sort) <(curl -s $API/api/services/health
+    `diff <(curl -s $API/api/services | jq -r '.services[].id' | sort) <(curl -s $API/api/services/health
     | jq -r '.services[].id' | sort)`. Any id present in `/api/services` but absent from
     `/api/services/health` means the dashboard footer can never reflect that service's outage —
     check this directly here rather than only inferring it from the UI lane's footer diff, so an
     API-side omission is never misdiagnosed as "frontend still hardcoded".
+
+14. **Error-shape and synthetic-row hygiene.** A non-existent `/api/*` path must return a structured
+   JSON 404, not an empty body. Rows flagged `_synthetic` (the `hal0` composite) are excluded from
+   the per-slot ctx and image checks above. Record where the version is exposed (`/api/health` and
+   the CLI report the BASE version on a nightly; `current/VERSION` is the truth) and judge check 3
+   by that, not by the banner.
+15. **Catalog rows vs advertised backends, mechanically** — regression
+   `capabilities-npu-apply-accepted-dead` (#2659). `jq` every catalog row's `backends` against
+   `/api/capabilities .backends` and report the count of rows naming a backend the box does not
+   advertise (35 npu-only rows on ct151/ct150). Read-only: do not apply anything here, the
+   capabilities lane does.
 
 ## Carry-forward
 

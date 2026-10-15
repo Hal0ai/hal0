@@ -21,7 +21,7 @@ took 1.6 s to hit — but only if you check it before you start composing chat t
 `hermes-cannot-chat-64k-floor`.
 
 Also verify each entrypoint verb EXISTS before planning around it (`hal0 agent --help`). rc.5's
-brief named `hal0 agent smoke <name>`, which does not ship — a missing verb is a recorded finding,
+brief named `hal0 agent smoke <name>`, which does not ship (the re-run verb is `hal0 agent reprovision`) — a missing verb is a recorded finding,
 not something to improvise past.
 
 Then read the provision record's `completed_at` and `smoke_tests.details.failures` BEFORE any
@@ -57,7 +57,7 @@ live chat: it is install-time ground truth, and it distinguishes "broken out of 
      hermes-memory-turn-slow-on-cpu`); slot contention now belongs to
      `hindsight-extraction-shares-utility-slot` and the memory lane's check 7.
 4. **Context-window consistency across surfaces.** For the model hermes is bound to, assert
-   `/api/slots/<name>.ctx_max` == `/v1/models[<id>].context_length` == the resolved `--ctx-size`
+   `/api/slots/<name>.ctx_effective` == `/v1/models[<id>].context_length` == the resolved `--ctx-size`
    in the slot unit. Three surfaces, one number — and this is the number the agent's own gate
    reads.
 5. **Re-run the provisioning smoke** now that models are loaded, and read the RECORD, not the
@@ -85,6 +85,29 @@ live chat: it is install-time ground truth, and it distinguishes "broken out of 
    table itself matches what a mutated box actually holds, and it is what proves
    green-after-mutation on a REAL box rather than the unit-test fixture (#1942's tests cover
    the mode axis; the live ownership axis is checked nowhere else).
+
+10. **Reprovision idempotency of secrets** — regression `hermes-reprovision-rotates-gateway-key`
+   (#2667). Record the last 4 chars of `API_SERVER_KEY` in the vault and in the running gateway's
+   `/proc/<pid>/environ` before and after `hal0 agent reprovision hermes </dev/null` (it reads
+   stdin). They must be unchanged and the phase outcome `present`. Record the venv Python version
+   (`/usr/lib/hal0/venv/bin/python -V`): the rotation needs 3.14+. Restore with `systemctl restart
+   hermes-gateway`. Also diff `/var/lib/hal0/.hermes/config.yaml` around the reprovision (it adds
+   model_aliases, plugins.enabled, _config_version).
+11. **Serving slot per alias, memory headers, latency.** For `hal0/agent`, `brain`, `hal0/brain` and
+   the bare model id, read `dispatch.decision` upstream= and assert it matches `GET
+   /v1/models/<id>` name (`dispatch-slot-alias-ignores-lane-pin`,
+   `virtual-model-entry-first-row-not-matched-slot`). Memory recall checks must send `X-hal0-Agent:
+   hermes` and `X-hal0-Private: 1`; anonymous calls cannot see private facts. Record whether
+   prefetch recall fires on every turn and per-turn retain latency (Hindsight op created_at to
+   completed_at, p50 and max) against the 'working GPU acceleration' clause of
+   `hindsight-extraction-shares-utility-slot`. `hermes-smoke-memory-roundtrip-race`: a smoke_tests
+   memory_roundtrip warn is expected on a first provision; confirm a matching retain op completed
+   shortly afterwards.
+12. **Tool-result truncation cliff** — regression `hermes-slot-list-payload-truncated` (#2662).
+   Count slots (`curl $API/api/slots | jq length`) and `slot_list` payload size; a hermes tool
+   message ending '[Truncated: tool response was N chars' means the answer is not trustworthy
+   (cliff ~39,321 chars at ctx 65536, ~14 slots). Under it, answer correctness is the check; do not
+   create slots just to cross it.
 
 ## Leave behind
 

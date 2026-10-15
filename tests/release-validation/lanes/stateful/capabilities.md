@@ -90,6 +90,19 @@ snapshot, residue accumulates anonymously across a serialised run unless each la
 7. **Registry consistency after all of the above.** Re-list models and slots. Orphans, dangling
    references, stale capability bindings?
 
+8. **Apply a backend the box does not advertise** — regression
+   `capabilities-npu-apply-accepted-dead` (#2659). Back up `capabilities.toml` and the slot TOML
+   dir first and use an idle capability (voice/stt, not embed). POST an apply naming `backend:npu`
+   when `.backends` lacks npu: expect a typed 4xx and no file change. Then restore (disable, DELETE
+   the slot, copy the backup, diff clean). The UI-shaped body (no backend) should 400
+   `capability.illegal_backend_model_pair`.
+9. **Post-apply truth and leftovers.** After any capability apply compare `GET /api/slots/<slot>`
+   device, model and `resolved_command` with `capabilities.toml` (an apply that reports ready while
+   the container runs the previous config is silent wrongness). After `hal0 model rm` of a pulled
+   model check no empty model dir or meta.json is left in the store. Verify the rerank slot
+   actually receives requests during a multi-bank recall (counter on its `/metrics`) so
+   Hal0Reranker is known to be exercised.
+
 ## Leave behind
 
 Capabilities left enabled on the backend this box supports; defaults set; scratch model files

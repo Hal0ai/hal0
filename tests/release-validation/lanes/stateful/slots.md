@@ -158,6 +158,19 @@ immediately before you name a new throwaway resource, not only at lane start.
     the exact formula before flagging a divergence). State which figure is real RSS and which is
     an estimate.
 
+12. **Failed-unit diff carve-out and timing.** `systemctl --failed` will list transient
+   `[systemd-run] podman healthcheck run` units for ~30 s after each load/restart
+   (`podman-healthcheck-transient-failed-units`, by design): exclude them from the entry/exit diff,
+   still report `hal0-slot@*` units. Also time `POST /api/slots/<n>/load` on a fast-crash slot
+   (container exits within 2 s) and assert the typed `slot.crash_looping` envelope arrives in under
+   ~30 s, and that a unit already `failed` shows up in `doctor verify` / slot state during the 180
+   s warming window, not only after it flips to error.
+13. **Unregistered model on create/edit** — regression `slot-create-unregistered-model-substitution`
+   (#2668). `hal0 slot create zzsk-emb --type embedding --hardware vulkan --model
+   not-a-registered-id`, load it, and compare `hal0 slot list` Model with the TOML
+   `[model].default`; also after `slot edit --model` + unload, compare list Model with the TOML
+   (stale runtime id). Delete the slot afterwards.
+
 ## Leave behind
 
 Brain slot loaded and healthy on the CPU-viable chat model; embed slot loaded (the memory lane

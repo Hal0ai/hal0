@@ -78,6 +78,25 @@ SSE and tok/s over pure garbage; the canary is the 2-second guard against that.
     points at `:8080/v1`), so a green result here is worth checking before the memory lane
     spends its budget chasing a downstream symptom.
 
+12. **Named-ref sweep on non-chat endpoints** — regressions `embeddings-rerank-echo-client-model`
+   (#2663), `embeddings-to-chat-slot-raw-501` (#2672), `dispatch-slot-alias-ignores-lane-pin`
+   (#2665). On `/v1/embeddings` and `/v1/rerank` send (a) an unknown name, (b) a non-default slot's
+   NAME, (c) a registered-but-unloaded model id, (d) a loaded CHAT model. Assert the response
+   `model` and the `dispatch.decision` upstream agree with the slot that served, and that (d) is a
+   typed error, not a raw `--embeddings` 501. Path pinning of (a)/(b) to the embed slot is by
+   design (`capability-path-pin-ignores-model`). With two slots on one model, correlate by
+   `x-request-id`: the journal logs the RESOLVED model, so `model=brain` reads as the model id.
+13. **Omitted/empty model with a bound-but-offline anchor** — regression
+   `omitted-model-404-agent-bound-unloaded` (#2666). Compare `model` omitted, `""`, `"default"` and
+   `hal0/agent` against the same agent state (model-less = by design 404; bound but offline =
+   finding). Restore agent.toml byte-for-byte. Malformed JSON and a missing model on a model-less
+   box 404 naming `agent`: `known` (`v1-malformed-body-404-agent`).
+14. **Tool passthrough proof via prompt_tokens, and cold-start latency.** Compare
+   `usage.prompt_tokens` with and without `tools[]` on the same prompt through the gateway and
+   directly on the slot port; they must match (85 vs 21 means tools were dropped). Unload
+   rerank/embed and time first byte of `/v1/rerank` and `/v1/embeddings` (2.6-2.7 s on ct151
+   vulkan); note it, do not file under 10 s.
+
 ## Standing instructions
 
 Cross-check `journalctl -u hal0-api | grep dispatch.decision` (`resolution_path`, `upstream`)
