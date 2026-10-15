@@ -1398,7 +1398,8 @@ _LIVE_STATE_SUBJECT_RE = re.compile(
     r"vram|gtt|ram|gpu|npu|hardware|utili[sz]ation|temperature|"
     r"benchmarks?|agents?|profiles?|stacks?|approvals?|"
     r"board|tasks?|lanes?|queue|dispatcher|orchestration|"
-    r"logs?|uptime|disk|storage|settings?|version|install(?:er|ation)?s?"
+    r"logs?|uptime|disk|storage|settings?|version|install(?:er|ation)?s?|"
+    r"services?|health|healthy|unhealthy|hindsight|memory"
     r")\b",
     re.IGNORECASE,
 )
@@ -1409,7 +1410,8 @@ _LIVE_STATE_ASK_RE = re.compile(
     r"\?|\b("
     r"list|show|check|tell me|give me|what|which|where|when|who|how many|how much|"
     r"do i|are there|is there|any|status|state|right now|currently|"
-    r"running|loaded|bound|registered|installed|enabled|available|serving"
+    r"running|loaded|bound|registered|installed|enabled|available|serving|"
+    r"working|healthy|unhealthy|offline|online|up|down|alive|reachable"
     r")\b",
     re.IGNORECASE,
 )
@@ -1420,7 +1422,23 @@ _LIVE_STATE_ASK_RE = re.compile(
 _CONCEPTUAL_RE = re.compile(
     r"\bwhat(?:'s| is| are)\s+(?:a|an)\b|\bwhat does\b.*\bmean\b|"
     r"\bhow do(?:es)? (?:i|you|it|they)\b|\bexplain\b|\bdifference between\b|"
-    r"\bshould i\b|\bwhy (?:do|does|is|are)\b",
+    r"\bshould i\b",
+    re.IGNORECASE,
+)
+
+#: "why is/are/do/does ..." is conceptual UNLESS it names a live-state subject
+#: (#2675). "Why is the agent slot offline?" asks about this box right now;
+#: "why does quantisation reduce quality" does not. A why-question is live-state
+#: when it pairs a live-state subject with a status word. "Why does the board
+#: have a triage lane" has a subject but no status word, so it stays conceptual.
+_WHY_RE = re.compile(r"\bwhy (?:do|does|is|are)\b", re.IGNORECASE)
+_WHY_SERVICE_SUBJECT_RE = re.compile(
+    r"\b(services?|health|healthy|unhealthy|hindsight|memory|slots?)\b", re.IGNORECASE
+)
+_WHY_STATUS_RE = re.compile(
+    r"\b(offline|online|down|up|unhealthy|dead|failing|failed|crash(?:ing|ed)?|"
+    r"restart(?:ing|s|ed)?|stuck|unreachable|unavailable|not (?:running|loaded|working)|"
+    r"keeps?|slow|empty|missing)\b",
     re.IGNORECASE,
 )
 
@@ -1461,6 +1479,12 @@ def _asks_for_live_state(text: str) -> bool:
         return False
     if _CONCEPTUAL_RE.search(probe):
         return False
+    if _WHY_RE.search(probe):
+        # #2675: a live-state subject wins over "why" phrasing.
+        return bool(_WHY_STATUS_RE.search(probe)) and (
+            bool(_WHY_SERVICE_SUBJECT_RE.search(probe))
+            or bool(_LIVE_STATE_SUBJECT_RE.search(probe))
+        )
     return bool(_LIVE_STATE_SUBJECT_RE.search(probe)) and bool(_LIVE_STATE_ASK_RE.search(probe))
 
 

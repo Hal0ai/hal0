@@ -254,6 +254,13 @@ def test_grounding_fires_at_most_once_per_turn() -> None:
         "which agents are installed",
         "is the installer running?",
         "did the last installation finish?",
+        # #2675: "why" phrasing must not hide a live-state subject.
+        "Why is the agent slot offline? Answer in one short sentence.",
+        "Is the hindsight memory service healthy? Answer in one short sentence.",
+        "why does the brain slot keep restarting",
+        "is memory working",
+        "is the hindsight service up",
+        "Why are the services unhealthy?",
     ],
 )
 def test_live_state_questions_are_detected(prompt: str) -> None:
@@ -270,6 +277,9 @@ def test_live_state_questions_are_detected(prompt: str) -> None:
         "Explain how the dispatcher decides what to run",
         "How do I create a new profile?",
         "Why does the board have a triage lane",
+        "why does quantisation reduce quality",
+        "Why is memory important for an assistant?",
+        "Explain how the memory service works",
         "",
         "   ",
     ],
@@ -340,3 +350,20 @@ def test_the_system_prompt_forbids_trading_grounding_for_brevity() -> None:
     assert "BREVITY NEVER CANCELS A TOOL CALL" in prompt
     assert "GROUND EVERY CLAIM ABOUT THIS BOX IN A TOOL RESULT" in prompt
     assert "short AFTER you have looked" in prompt
+
+
+@pytest.mark.parametrize(
+    "prompt",
+    [
+        "Why is the agent slot offline? Answer in one short sentence.",
+        "Is the hindsight memory service healthy? Answer in one short sentence.",
+    ],
+)
+def test_2675_bypass_questions_are_rerouted_when_answered_without_a_tool(prompt: str) -> None:
+    stub = _StubLLM([_final(FABRICATED), _final("I could not check.")])
+    request = _fake_request(stub, model="hal0/brain", tool_model="hal0/agent")
+
+    events = _run(_collect(request, prompt))
+
+    assert stub.models == ["hal0/brain", "hal0/agent"]
+    assert _tokens(events) == "I could not check."
