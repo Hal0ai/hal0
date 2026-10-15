@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from hal0.config.loader import load_slot_config
 from hal0.slots._cfg_helpers import heal_missing_llm_type
 from hal0.slots.manager import SlotManager
@@ -44,6 +46,32 @@ class TestHealHelper:
         data = {"name": "brain", "type": "", "model": {"default": "q"}}
         assert heal_missing_llm_type(data) is True
         assert data["type"] == "llm"
+
+
+class TestHealInfersNonChatType:
+    """#2693: a type-less rerank/embed/tts slot must not be stamped ``llm``."""
+
+    @pytest.mark.parametrize(
+        ("name", "profile", "expected"),
+        [
+            ("rerank", "reranking", "reranking"),
+            ("embed", "embedding", "embedding"),
+            ("tts", "kokoro", "tts"),
+            ("voice", "qwen3-tts", "tts"),
+            ("brain", "rocm", "llm"),
+            ("brain", None, "llm"),
+            ("rerank", None, "reranking"),
+            ("embed", None, "embedding"),
+        ],
+    )
+    def test_type_follows_profile_then_name(
+        self, name: str, profile: str | None, expected: str
+    ) -> None:
+        data: dict = {"name": name, "model": {"default": "x"}}
+        if profile:
+            data["profile"] = profile
+        assert heal_missing_llm_type(data) is True
+        assert data["type"] == expected
 
 
 class TestHealOnLoad:

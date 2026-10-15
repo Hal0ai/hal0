@@ -46,6 +46,7 @@ applying. Add those subsections to a version's section to surface them; see
 
 ### Fixed
 
+- **slots:** healing a type-less slot TOML no longer stamps `type = "llm"` on a rerank/embed/tts slot: the type now follows the profile, then the slot name. The output-sanity gate also skips an `llm`-typed slot whose profile or launch flags carry `--reranking`/`--embedding`, and `hal0 doctor profiles --fix` rewrites an already-healed `type = "llm"` on a non-chat profile; the failure message now names that remedy (#2693).
 - **mcp:** the hal0-admin `slot_list` result is now a compact roster (name, id, state, `loaded`, model id, backend, port, container health, image tag) sent as one compact-JSON text block with no duplicate `structuredContent`, instead of ~2.9 KB per slot. Hermes 0.19.0 cuts any tool result over its per-result budget (39,321 chars at 65,536 ctx) to a 1,500-char preview on `hermes -z` turns, so a box with 14+ slots was answered from a truncated first slot. `resolved_command`, the full `image` ref and nested tuning are no longer in the list; `slot_status` / `slot_by_name` still return the full row (#2662).
 - **ui:** a vulkan-only GPU (render node passed through, no `/dev/kfd`) now counts as a GPU on the Overview utilization row and health strip and on the Settings Live-hardware and Power & thermal panels, instead of reading "no GPU access" while a vulkan slot is serving; the NPU rows gate on the NPU probe rather than the GPU one (#2674).
 - A profile whose `profiles.toml` entry fails validation is no longer

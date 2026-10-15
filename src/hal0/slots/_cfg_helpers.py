@@ -17,6 +17,7 @@ unchanged.
 
 from __future__ import annotations
 
+import re
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -65,6 +66,44 @@ def _model_default(cfg: SlotConfig | dict[str, Any]) -> str:
     return ""
 
 
+_RERANK_RE = re.compile(r"rerank")
+_EMBED_RE = re.compile(r"embed")
+_TTS_RE = re.compile(r"kokoro|(?<![a-z])tts(?![a-z])")
+_FLAG_RERANK_RE = re.compile(r"(?<![\w-])--rerank(?:ing)?(?![\w-])")
+_FLAG_EMBED_RE = re.compile(r"(?<![\w-])--embedding(?:s)?(?![\w-])")
+
+
+def non_chat_type_from_flags(flags: str | list[str] | tuple[str, ...] | None) -> str | None:
+    """``reranking``/``embedding`` when launch flags carry the mode flag, else ``None``."""
+    if not flags:
+        return None
+    text = flags if isinstance(flags, str) else " ".join(str(f) for f in flags)
+    if _FLAG_RERANK_RE.search(text):
+        return "reranking"
+    if _FLAG_EMBED_RE.search(text):
+        return "embedding"
+    return None
+
+
+def infer_non_chat_type(*names: str | None) -> str | None:
+    """Non-chat slot type implied by the first profile/slot name that names one.
+
+    Pass the profile name first, then the slot name. ``None`` means "no name
+    says non-chat" (the caller decides whether that is ``llm`` or unknown).
+    """
+    for raw in names:
+        n = str(raw or "").strip().lower()
+        if not n:
+            continue
+        if _RERANK_RE.search(n):
+            return "reranking"
+        if _EMBED_RE.search(n):
+            return "embedding"
+        if _TTS_RE.search(n):
+            return "tts"
+    return None
+
+
 def heal_missing_llm_type(data: dict[str, Any]) -> bool:
     """Default a type-less, llm-shaped slot config to ``type="llm"`` in place.
 
@@ -79,6 +118,9 @@ def heal_missing_llm_type(data: dict[str, Any]) -> bool:
     ``llama-server`` (the default provider) with no image-gen ``[image]``
     table. Explicit types (``image``/``tts``/``reranking``/``embed``…) are
     always respected — the heal only fires when ``type`` is absent/empty.
+    The healed type follows the profile, then the slot name (#2693):
+    ``reranking``/``embedding``/``tts`` for a non-chat one, ``llm`` otherwise —
+    stamping ``llm`` on a reranker sends it through the chat output-sanity probe.
     Returns True iff it mutated ``data``. Operates on the flat, ``[slot]``-
     hoisted dict shape (``[model]``/``[image]`` still nested).
     """
@@ -94,7 +136,7 @@ def heal_missing_llm_type(data: dict[str, Any]) -> bool:
     provider = str(data.get("provider") or "llama-server").strip().lower()
     if provider not in ("", "llama-server"):
         return False
-    data["type"] = "llm"
+    data["type"] = infer_non_chat_type(data.get("profile"), data.get("name")) or "llm"
     return True
 
 
@@ -104,4 +146,6 @@ __all__ = [
     "_cfg_to_dict",
     "_model_default",
     "heal_missing_llm_type",
+    "infer_non_chat_type",
+    "non_chat_type_from_flags",
 ]

@@ -22,7 +22,9 @@ from hal0.cli.doctor_commands import (
     _image_repo,
     check_profile_images_present,
     check_slot_profile_refs,
+    check_slot_type_vs_profile,
     doctor_profiles,
+    repair_slot_types,
 )
 
 
@@ -176,3 +178,43 @@ def test_doctor_profiles_reports_id_keyed_slot_by_real_name(
     summary = " ".join(d.get("summary", "") for d in out)
     assert "brain" in summary
     assert "143" not in summary
+
+
+# ── check_slot_type_vs_profile / repair_slot_types (#2693) ────────────────────
+
+
+def test_type_check_flags_llm_type_on_reranking_profile() -> None:
+    rows = check_slot_type_vs_profile([("rerank", "llm", "reranking"), ("brain", "llm", "rocm")])
+    by = {r["label"]: r for r in rows}
+    assert by["rerank"]["status"] == "drift"
+    assert by["rerank"]["expected"] == "reranking"
+    assert "hal0 doctor profiles --fix" in by["rerank"]["detail"]
+    assert by["brain"]["status"] == "ok"
+
+
+def test_type_check_uses_profile_flags_when_name_is_custom() -> None:
+    rows = check_slot_type_vs_profile(
+        [("r2", "llm", "my-ranker")], {"my-ranker": "--reranking -ngl 99"}
+    )
+    assert rows[0]["status"] == "drift"
+    assert rows[0]["expected"] == "reranking"
+
+
+def test_type_check_ignores_correct_and_non_llm_types() -> None:
+    assert check_slot_type_vs_profile([("rerank", "reranking", "reranking")]) == []
+
+
+def test_repair_slot_types_rewrites_type_on_disk(tmp_hal0_home: str) -> None:
+    from hal0.config.loader import _read_toml
+
+    root = Path(tmp_hal0_home) / "etc" / "hal0" / "slots"
+    root.mkdir(parents=True, exist_ok=True)
+    f = root / "rerank.toml"
+    f.write_text(
+        'name = "rerank"\nprofile = "reranking"\ntype = "llm"\n[model]\ndefault = "x"\n',
+        encoding="utf-8",
+    )
+    rows = check_slot_type_vs_profile([("rerank", "llm", "reranking")])
+    assert repair_slot_types(rows, {"rerank": f}) == 1
+    assert _read_toml(f)["type"] == "reranking"
+    assert _read_toml(f)["model"]["default"] == "x"
