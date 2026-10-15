@@ -14,7 +14,7 @@
 //   - useRequestsRollup() → GET /api/stats/requests  (dispatcher /v1 rollup)
 import { useState, useEffect } from 'react'
 import { useHealthSystem, failingChecks } from '@/api/hooks/useRuntime'
-import { useHardware } from '@/api/hooks/useHardware'
+import { useHardware, hasGpuAccess, hasNpuAccess } from '@/api/hooks/useHardware'
 import { useStatsHardware } from '@/api/hooks/useStatsHardware'
 import { useStatsPower } from '@/api/hooks/useStatsPower'
 import { useUpdateState } from '@/api/hooks/useUpdates'
@@ -103,10 +103,11 @@ function HardwarePanel() {
   // #1797(3): /api/stats/hardware sees the host's DRM/XDNA nodes whether or
   // not this box (an LXC sharing the host kernel) actually has GPU compute
   // access — a CPU-only container was rendering the host's GPU/NPU numbers
-  // as its own capacity. `computeCapable` is the one probe field backed by
-  // a real capability check (rocm-smi presence); gate the GPU/NPU rows on
-  // it and keep RAM/CPU, which are genuinely this box's own.
-  const hasGpu = !!hw.data?.computeCapable
+  // as its own capacity. Gate the GPU row on computeCapable || vulkanCapable
+  // (#2674: a vulkan-only box is a GPU box) and the NPU row on its own
+  // probe; keep RAM/CPU, which are genuinely this box's own.
+  const hasGpu = hasGpuAccess(hw.data)
+  const hasNpu = hasNpuAccess(hw.data)
 
   return (
     <div className="s-panel" style={{ marginTop: 12 }}>
@@ -123,11 +124,11 @@ function HardwarePanel() {
             <>
               <SRow k="GPU utilization" sub="Compute load on the primary accelerator" mono v={_pct(H.gpu_util)} />
               <SRow k="GPU VRAM" sub="Dedicated/GTT memory in use" mono v={<span style={{ color: 'var(--fg-3)' }}>{_mb(H.gpu_vram_used_mb ?? H.gtt_used_mb)} / {_mb(H.gpu_vram_total_mb)}</span>} />
-              {H.npu_status && <SRow k="NPU" sub="XDNA/FastFlowLM model residency" v={_statusChip(H.npu_status.ok, `${H.npu_status.ok ? 'ok' : 'not ok'} · ${_mb(H.npu_status.model_mb)}`)} />}
             </>
           ) : (
             <SRow k="GPU" sub="No GPU compute access on this box" mono v={<span style={{ color: 'var(--fg-4)' }}>—</span>} />
           )}
+          {hasNpu && H.npu_status && <SRow k="NPU" sub="XDNA/FastFlowLM model residency" v={_statusChip(H.npu_status.ok, `${H.npu_status.ok ? 'ok' : 'not ok'} · ${_mb(H.npu_status.model_mb)}`)} />}
         </>
       )}
     </div>
@@ -138,7 +139,7 @@ function PowerPanel() {
   const power = useStatsPower()
   const hw = useHardware()
   const P = power.data
-  const hasGpu = !!hw.data?.computeCapable
+  const hasGpu = hasGpuAccess(hw.data)
 
   return (
     <div className="s-panel" style={{ marginTop: 12 }}>

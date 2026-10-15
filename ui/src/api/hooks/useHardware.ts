@@ -63,7 +63,7 @@ function shortKernel(kernel: string): string {
 // Normalize into the v3 component shape, falling back to neutral defaults
 // (and the legacy display-shape keys, for the e2e mock / HAL0_DATA seed)
 // for fields a given backend doesn't surface.
-function normalizeHardware(raw: any): Hardware {
+export function normalizeHardware(raw: any): Hardware {
   const ramTotalMb = Number(raw?.ram_total_mb ?? raw?.ram_mb ?? 0)
   const ramFreeMb = Number(raw?.ram_available_mb ?? 0)
   const ramUsedMb = Math.max(0, ramTotalMb - ramFreeMb)
@@ -118,6 +118,21 @@ function normalizeHardware(raw: any): Hardware {
       ctx: Number(npu?.ctx ?? 0),
     },
   }
+}
+
+// #2674: a box can drive its GPU through ROCm (computeCapable) or only
+// through Vulkan (a render node passed through, no /dev/kfd). Either way a
+// serving slot is on the GPU, so GPU rows gate on both — the same predicate
+// memory-map.jsx uses. A CPU-only LXC (#1797) has neither, so the host-leak
+// guard still holds.
+export function hasGpuAccess(hw: Hardware | undefined | null): boolean {
+  return !!(hw?.computeCapable || hw?.vulkanCapable)
+}
+
+// NPU rows get their own predicate: an XDNA device is not implied by GPU
+// access of either kind.
+export function hasNpuAccess(hw: Hardware | undefined | null): boolean {
+  return !!hw?.npu?.present
 }
 
 const POLL_MS = 10_000
