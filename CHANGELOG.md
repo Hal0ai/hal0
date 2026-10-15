@@ -51,6 +51,10 @@ applying. Add those subsections to a version's section to surface them; see
   `gpu.queue_busy` (#2639).
 - The boot-time image-drift restart no longer bounces slots it cannot prove idle. A slot with no `/metrics` reading (ComfyUI, Kokoro, Qwen3-TTS, Moonshine, FLM, llama slots without `--metrics`, or a timed-out scrape) used to count as idle and could be restarted mid-request; it now lands under `skipped_busy`. The explicit `hal0 update --restart-slots` keeps its behaviour. The runner-catalogue boot sync task is also cancelled at shutdown. (#2634)
 
+- `hal0 auth reset-key` now refuses, with a non-zero exit, when `HAL0_API_URL`
+  points at a non-loopback host. It edits this box's `api.env`, so it used to
+  rotate the remote box's key (e.g. under `sudo -E`) while printing this box's
+  unchanged key as the new one (#2640).
 - A box already on the newest nightly no longer offers that same nightly to
   itself as an update. `GET /api/updates/check` and `GET /api/updates/state`
   now compare the release manifest against the installed release
