@@ -85,6 +85,14 @@ Speak MCP streamable-HTTP JSON-RPC with curl from the box (`127.0.0.1`), not fro
 
 20. **`slot_list` count and marker.** `count` equals the number of `kind: local` rows in `/api/slots`, or the composite `hal0` row is marked; count = real + 1 with no marker is #2697 (known, record it; #2688 also dropped `_synthetic`).
 
+21. **Classify the gated tools before sweeping them.** From the live `tools/list` split the GATED_TOOLS into (a) tools with PATH args, (b) tools whose required args are BODY fields only, (c) tools with no required args. Only (a) and (b) can queue a malformed call (26 and 7 of 55 on 200136); for (c) `{}` is schema-valid and `pending_approval` is correct (#2722). Type errors and `name=123` are excluded (`mcp-admin-path-args-are-stringified`). Assert the GATED_TOOLS list parsed from the release tag source matches the `gated` flag in `/api/mcp/servers` `tool_details`.
+
+22. **Leave the approvals inbox empty.** Every approval you queue, you deny (`POST /api/agent/approvals/<id>/deny`); record `GET /api/agent/approvals` empty at lane exit. Repeat calls dedupe (one row, `hit_count` grows), so count rows, not calls.
+
+23. **Annotation counts for both servers.** Report readOnly and destructive counts for memory as well as admin (13/3 for memory on 200136). When diffing docs names against served names, restrict the regex to the tool-column cells of the tables; an all-backticks regex pulls in field and error names.
+
+24. **Connect paths.** Probe `/mcp/admin/mcp` and `/mcp/memory/mcp` directly; bare `/mcp`, `/mcp/` and `/mcp/admin` return 405 and cost time-outs when probed blindly.
+
 ## Carry-forward
 
 The MCP surface is how other agents consume hal0, so *silent* protocol wrongness here is worse

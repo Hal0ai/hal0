@@ -17,7 +17,7 @@
 
 schema: 1
 updated: 2026-10-15
-updated_for: v1.4.0-nightly.20261015155017
+updated_for: v1.4.0-nightly.20261015200136
 
 known_issues:
   # ── Open defects, already tracked ───────────────────────────────────────────
@@ -409,8 +409,12 @@ known_issues:
       Deliberate and documented in installer/systemd/hindsight-api.service, justified against a
       measured alternative (~2 s/turn on utility vs 77-160 s on the NPU) and operator-overridable
       via `hal0 memory graph enable --slot <name>`, which writes a drop-in that survives upgrade.
-      On a GPU box `utility` carries its own small model, distinct from the `agent`/`brain` chat
-      anchors, so extraction and user chat do not even share a process.
+      On a box where `utility` is bound to its own model it is distinct from the `agent`/`brain`
+      chat anchors, so extraction and user chat do not even share a process. CORRECTED for
+      v1.4.0: that is NOT the stock fresh install, even with working GPU acceleration. A fresh
+      install seeds `utility` model-less (WS-E #1107), so `hal0/utility` resolves through the
+      ADR-0023 anchor fallback to `passthrough:brain`, the single `--parallel 1` sequence that
+      also serves chat. See memory-extraction-serializes-with-chat-on-fresh-install.
     still_report_if: >-
       The retain queue fails to drain across two consecutive 10-minute samples with pending>0 and
       an op whose age RESETS after `attempt=4/4` (the requeue loop — that is #1834, report
@@ -422,6 +426,7 @@ known_issues:
       (prefill 2716 tok/s), datum recorded against #1834, whose "CPU-only install" title is now
       disproved. The entry itself stays by-design; report the timing against #1834, and read the
       rc6_note on regression `memory-extraction-never-lands` before filing anything.
+    related_issues: [1834, 2734, 2669, 2716]
     review_at: v1.1.0
     review_due: true
 
@@ -524,8 +529,11 @@ known_issues:
     why: >-
       That is the client aborting, not an empty server response. Measured: a round that failed
       still delivered `data: {"type":"error",...}` followed by `data: {"type":"done"}` at +289 s.
-      There is no silent-close path — a per-round upstream failure always produces error+done,
-      and budget exhaustion yields an explicit error frame. The documented `ping` frame is
+      There is no silent-close path once a round has started — a per-round upstream failure
+      always produces error+done, and budget exhaustion yields an explicit error frame. The one
+      exception is #2737: a truthy scalar `messages` (123, 1.5, true) raises a TypeError in
+      _frame_messages before any round and closes with 0 bytes in ~15 ms (a different shape from a
+      held-open stream). The documented `ping` frame is
       emitted only while an approval gate is parked, by design. The dashboard drawer renders a
       typing indicator and sets no client timeout. Also by design: no `tools_unavailable` notice
       when `[brain_chat] tool_model` differs from the chat model, because the round can be
@@ -582,7 +590,8 @@ known_issues:
       but not a list, with a normal model turn and NO {"type":"error"} SSE frame — that residue
       is real but was closed NOT_PLANNED with #1840 on 2026-10-02 ("real but cosmetic, and we're
       choosing not to track them"): it is not filed anywhere, so record it as `known`, and report
-      only if it gets WORSE (a malformed body makes the brain call a mutating/admin tool, or a
+      only if it gets WORSE (note: #2737 is the scalar-`messages` case, which already got worse -
+      an unhandled TypeError and a zero-byte close - and is filed; do not file it again; a malformed body makes the brain call a mutating/admin tool, or a
       shipped client is seen sending a body that hits the coercion path). Do not re-report the absent requestBody, the 200
       status on this SSE route, or the empty-body framing.
     review_at: v1.1.0
@@ -1965,8 +1974,14 @@ known_issues:
       An enabled apply naming a row whose backends are all downloaded:false returns anything but
       the typed 409; OR it changes capabilities.toml or a slot TOML, starts a hal0-slot@ unit or
       creates a pull job; OR the 409 omits pull_endpoint/remediation for a pullable row; OR the
-      bundle stops rendering the "not downloaded" suffix; OR a shipped capability default names a
-      model the installer does not place on disk.
+      bundle stops rendering the "not downloaded" suffix; OR on a fresh install a seeded slot TOML
+      carries a non-empty [model].default/model_id, or a seeded capabilities.toml selection has a
+      non-empty model or enabled=true, for a model the installer did not place on disk; OR a stack or
+      bundle that is active by default names such a model; OR applying a seed stack or bundle whose
+      models are undownloaded writes slot/capability state or starts a unit without the typed 409
+      or a tracked pull job. Catalog picker rows (downloaded:false, pullable:true), inactive seed
+      stacks (/api/stacks active:false), collections/omni bundle manifests and source comments
+      (RerankPanel.jsx:2, EmbedPanel.jsx:2) are opt-in and do NOT count.
     review_at: v1.5.0
 
   - id: footer-slots-chip-counts-configured-slots
@@ -2136,7 +2151,8 @@ known_issues:
       Open P2 #2672, not a regression: guard_capability_mismatch
       (dispatcher/_capability_resolve.py:311-319) only gates chat-shaped paths
       (_CHAT_SHAPED_PATHS, L94), so the reverse direction was never implemented. /v1/embeddings
-      naming the reranker id returns 200 with 384-d vectors because the rerank slot runs
+      naming the reranker id returns 200 with vectors (1024-d on bge-reranker-v2-m3, roughly a
+      third of the entries zero; the older 384-d figure is stale) because the rerank slot runs
       --reranking, which implies embedding mode; that is OpenAI-compat passthrough, NOT a
       finding. Related but distinct: the response `model` label echoing the client string on
       legacy_slot:embed/rerank is #2663.
@@ -2196,4 +2212,142 @@ known_issues:
       a build containing the fix commit (then it is a regression, say so); OR the defect is
       observed with a materially different cause or wider scope than the issue describes
       (comment on the issue with the new evidence).
+    review_at: v1.5.0
+
+  # ── Adjudicated in v1.4.0-nightly.20261015200136 ───────────────────────────
+
+  - id: memory-extraction-serializes-with-chat-on-fresh-install
+    status: by-design
+    adjudicated: v1.4.0-nightly.20261015200136
+    related_issues: [2734, 2669, 2716]
+    summary: >-
+      On a stock fresh install (utility and agent model-less, brain `--parallel 1`), one
+      /api/memory/add keeps brain busy for ~200 s (retain_extract_facts 3965 tokens against the 4096
+      cap, ~112 s; then consolidation, uncapped, 5360 tokens, ~89 s). A 4-token hal0/utility chat
+      queued behind each took 108 s and 87 s versus 0.2-0.4 s idle. Requests queue and complete 200;
+      nothing 5xx. Chat is blocked only while an extraction or consolidation call is in flight, not as
+      a standing condition.
+    why: >-
+      Accepted v1.4.0 consequence of the `--parallel 1` stopgap (#2714/#2731), tracked by #2734
+      (open, v1.5.0, which names "extraction plus chat all wait on each other"; its 10-15 s per
+      steward turn estimate understates the wait behind memory work ~10x - timings posted there).
+      Length comes from #2669 (consolidation has no output cap) and lfm2.5-2.6b extraction running
+      near the 4096 cap (~660 output tokens per fact). hindsight-api documents the model-less
+      fallback to the agent anchor; ADR-0023 rule 9 is the anchor fallback. On a CPU-only box the
+      wait is longer and covered by hermes-memory-turn-slow-on-cpu. Workarounds: bind a model to
+      utility, or `hal0 memory graph enable --slot <name>`. Boxes with a model on utility (ct105)
+      do not hit it. Not reproduced: a standing "all chat stalls 1-3 min"; a 179 s Hermes recall
+      turn (not re-run). "3633 output tokens for a 40-token input" misreads the log: input_tokens is
+      ~3.2-3.4k (extraction prompt plus content).
+    still_report_if: >-
+      A chat or /v1 request queued behind Hindsight work fails (5xx, dispatcher timeout,
+      client-visible error) instead of completing; OR one queued request waits > 300 s; OR a
+      retain_extract_facts call shows n_predict above the effective RETAIN_MAX_COMPLETION_TOKENS;
+      OR chat on brain or agent waits behind extraction on a box where utility IS bound to its own
+      model (that is #2716 or new); OR after #2734 lands (brain --parallel > 1 or per-sequence
+      windows) chat still queues behind extraction or consolidation; OR the retain/consolidation
+      queue fails to drain across two 10-minute samples with no new writes.
+    review_at: v1.5.0
+
+  - id: capability-defaults-not-staged-by-installer
+    status: by-design
+    adjudicated: v1.4.0-nightly.20261015200136
+    related_issue: 2026
+    summary: >-
+      Claim: shipped embed/rerank (and tts) capability defaults name models (nomic-embed-text-v1.5-q8_0,
+      bge-reranker-v2-m3-q4_k_m, kokoro) that the installer does not place on disk.
+    why: >-
+      Nothing ships such a default. Shipped slot TOMLs have no [model].default (header: "Clean seed
+      (WS-E, #1107): no [model].default pin ... filling it in is what activates the slot (#1369)"),
+      seeded capabilities.toml selections are model="" enabled=false, and the install log says
+      "Seeded 0 slot(s); assign models from the dashboard or with hal0 model pull". The installer
+      pulls only the brain model. The named models appear only in opt-in surfaces: picker catalog
+      rows (downloaded:false, pullable:true; an apply gets the typed 409 from #2026), inactive seed
+      stacks (saber/forge/pi) and omni bundle manifests. A `grep -h model` on the slot TOMLs matches
+      only comment lines. Two stale source comments (RerankPanel.jsx:2, EmbedPanel.jsx:2) are
+      cosmetic and not to be filed.
+    still_report_if: >-
+      On a fresh install a seeded slot TOML carries a non-empty [model].default or model_id, or a
+      seeded capabilities.toml selection has a non-empty model or enabled=true, for a model the
+      installer did not place on disk; OR a stack or bundle is active by default and names such a
+      model; OR applying a seed stack or bundle with undownloaded models writes slot/capability
+      state or starts a unit without the typed 409 + pull_endpoint or a tracked pull job. Catalog
+      rows, inactive seed stacks, collections/omni manifests and source comments do not count.
+    review_at: v1.5.0
+
+  - id: doctor-perms-handmade-models-dir-2755
+    status: by-design
+    adjudicated: v1.4.0-nightly.20261015200136
+    related_issue: 1896
+    summary: >-
+      `hal0 doctor perms` reports `models/ (recursive) :: chat/zzsl-bad is hal0:hal0 2755, want 2775`
+      after a lane hand-placed a fixture under the model store.
+    why: >-
+      A directory made by hand with umask 022 under the setgid 2775 parent lands 2755; the audit
+      flagging it is correct and `doctor perms --fix` repairs it. hal0 never creates a directory for
+      `hal0 model add` / add-from-path (registers a file in place, "no copy"); its pull/finalize path
+      births 2775 (config/store.py _DIR_MODE 0o2775, install/perms.py SHARED_DIR_MODE 0o2775), proven
+      by birth/ctime of five pulled dirs on ct151. The 2755 dir came from the slots lane's fast-crash
+      fixture (check 17). Drift class 3 of #1896 ("daemon-created dir under a recursive row") has
+      not come back. The agents/ 0700-vs-0711 row is the separate #2719.
+    still_report_if: >-
+      A directory under /var/lib/hal0/models/ is 2755 (or not 2775) AND its birth time (`stat -c %w`)
+      matches a hal0-api / hal0 CLI creation event in the journal (pull job, runner or migration
+      step, tts/collections extraction, .tmp staging) with ctime within seconds and no lane having
+      touched it; OR add-from-path / `hal0 model add` gains a copy-into-store mode and the dir it
+      creates is not 2775; OR `doctor perms --fix` fails to bring a hand-made 2755 dir to 2775 or
+      the drift returns after --fix. Lanes that hand-place fixtures must `chmod 2775` the dir or use
+      /var/lib/hal0/scratch or /mnt/ai-models/scratch.
+    review_at: v1.5.0
+
+  - id: model-rm-keep-files-recovery-loses-capability
+    status: by-design
+    adjudicated: v1.4.0-nightly.20261015200136
+    related_issue: 2724
+    summary: >-
+      After `hal0 model rm kokoro-v1 --keep-files` then `hal0 model add <kept path>`, the row is
+      registered as capabilities [chat] (detection_confidence low) and "only a re-pull recovers tts".
+    why: >-
+      Each part is already adjudicated or filed. (a) A no-magic file (kokoro ONNX stored as
+      tts/kokoro-v1/model.gguf) registers as chat WITH the bad-magic warning: known
+      model-add-detection-surfacing; meta.json is a provenance sidecar read only by
+      install/brain_model.py, never by model add. (b) The enabled-but-offline selection after rm is
+      #2724. (c) The keep-files hint promises un-tombstoning, which add delivers (ADR-0026 s4). The
+      chat label does not affect tts serving: `capabilities set voice tts --disabled` then `--model
+      kokoro-v1 --backend cpu --enabled` reaches ready in 9 s and /v1/audio/speech returns 200 MP3
+      with the row still labelled chat. The "re-apply 200, offline" is a no-op re-apply (nothing
+      changed, no load dispatched; orchestrator.py:599-640), not a recovery failure.
+    still_report_if: >-
+      After rm --keep-files + model add, an explicit disable then `--model <id> --backend <dev>
+      --enabled` does NOT reach ready / serve 200 (slot load, catalog validation or dispatch has
+      started gating on the registry row's capabilities); OR model add on a GGUF-magic file
+      (chat/embed/rerank) registers different capabilities than the original pull; OR model add does
+      not clear the tombstone the keep-files delete wrote; OR add prints no bad-magic warning for a
+      non-GGUF file. Do not re-report the [chat] label on a re-added kokoro file, meta.json being
+      ignored by model add, or the enabled-but-offline selection after rm (#2724).
+    review_at: v1.5.0
+
+  - id: tracked-open-defects-20261015200136
+    status: open
+    summary: >-
+      Pointers, not adjudications. Re-observed on 200136 with evidence commented on the issue; record
+      as `known` with the number, do not file again, and do not call "regressed" what was never
+      fixed: #2717 load blocks ~180 s on a unit parked with exit 64 (vulkan/rocm runner-standard
+      image only; the cpu image crash-loops and is crash-loop-warming-180s-window); #2718 kokoro
+      gpu-vulkan row (also on a no-GPU box that advertises gpu-vulkan); #2719 agents/ 0700 vs 0711
+      (appears at the first agent session handshake; absent/rc 0 before it); #2720 `config validate`
+      blind to slot TOMLs (the daemon still registers such a slot); #2722 gated MCP tools queue
+      malformed calls (26 path-arg tools + 7 body-required-only tools; type errors excluded);
+      #2723 un-pullable qwen3-4b-npu stub stuck queued; #2724 model rm leaves an enabled capability;
+      #2725 auto-scan ignores the GGUF header and the meta.json sidecar; #2726 Settings Overview
+      utilisation fractions; #2727 hal0-api stop hang (needs a serving upstream, ~90-100 s SIGKILL
+      outage); #2728 steward GB conversions; #2729 items 1-2 (`update --check --target`, `slot
+      unload` of a pinned slot). Filed this run: #2736 doctor capability count, #2737 brain chat
+      scalar `messages`, #2738 sticky ERROR after a slow stop, #2739 kokoro legacy --model_path,
+      #2740 polish rollup.
+    still_report_if: >-
+      The per-issue state changes: an issue is closed as fixed and the repro still reproduces on a
+      build containing the fix commit (then it is a regression, say so); OR the defect is observed
+      with a materially different cause or wider scope than the issue describes (comment with the
+      evidence).
     review_at: v1.5.0

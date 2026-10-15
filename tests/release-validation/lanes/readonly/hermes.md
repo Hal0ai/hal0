@@ -93,6 +93,12 @@ chat messages — that is the `hermes-e2e` stateful lane.
 12. **Two views of one gateway.** Compare `:9119/api/status` `gateway_platforms` (`{}`) with `gateway_state.json` platforms (`api_server` connected). Probably upstream hermes behaviour; one line in the report, not a finding.
 13. **Smoke marker needs the retain op.** For the `memory_roundtrip` warn or pass, also read the marker's retain op: `status` `completed` with `facts_committed=0` and no error is a silent zero-fact extraction and explains a warn on a healthy box (#2671).
 
+14. **Smoke `memory_roundtrip` warn is timing or extraction?** Compare the completion time of the smoke marker's retain op (`hal0 memory ops list`) with the smoke run's search time in `provision.json`; completion later than the search means the warn is the #2671 race, not extraction failure.
+
+15. **Run the `on_session_start` hook twice back-to-back.** The first run can lag a slot another lane just loaded; the second must match `/api/slots`. A disagreement that persists on the second run is a finding.
+
+16. **Skip synthetic rows.** `/api/slots` carries a synthetic `hal0` composite entry (`_synthetic=true`, no `state`/`type`); scripts that iterate slots must skip it.
+
 ## Carry-forward
 
 Hermes findings have historically been *reporting* defects rather than functional ones. Treat

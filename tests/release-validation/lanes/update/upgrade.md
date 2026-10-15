@@ -33,8 +33,7 @@ the fact otherwise:
    bypasses the gate and is the documented recovery — confirm it still works, and note that
    needing it *is* the finding.
    * **2b. Channel-URL path (#1883).** Before the main upgrade run, separately verify the
-     documented channel-URL path end-to-end — do not rely on this box's pinned GitHub-asset
-     `HAL0_RELEASES_URL` for it (the pin bypasses exactly the path #1883 fixed). Two halves,
+     documented channel-URL path end-to-end — do not assume a pin: on ct150 `HAL0_RELEASES_URL` is empty in `api.env`, the systemd drop-ins and the daemon's `/proc/<pid>/environ`, so start from 'no pin' and note that the daemon already uses the channel URL (a GitHub-asset pin would bypass exactly the path #1883 fixed). Two halves,
      and the mechanics matter:
      - Proxy correctness: `curl -sS -o /dev/null -w '%{http_code}\n'` against
        `https://releases.hal0.dev/<channel>.json` AND the sibling
@@ -143,6 +142,12 @@ the fact otherwise:
 16. **Pins and types.** `hal0 update --target <bogus> --check` must not report "update available" for a different version (#2729); slot TOML `type` must match the profile modality (embedding/reranking/kokoro profiles must not carry `llm`; persisted ones are the known doctor-fix case).
 
 17. **Rollback then roll-forward is idempotent.** After the roll-forward expect `updater.migrations_noop` and zero conversion lines.
+
+18. **Attribute concurrent clients first.** Before timing anything on ct150 list who else is using it: `ss -tn | grep :8080`, the hermes pid, whether the agent slot is serving. Record `uptime` load average and agent-slot state before every restart or downtime measurement (agent traffic pushed load to 190 and distorted a 69 s startup).
+
+19. **Version identity on nightlies.** `/api/health` and `hal0 --version` say `1.4.0` for every nightly, so `cat /usr/lib/hal0/current/VERSION` before and after each rollback and roll-forward; that file, not the health comparison, shows convergence.
+
+20. **Roll-forward waits for the API.** Poll `/api/health` for 200 before `hal0 update --yes` after a restart (an immediate attempt exited 1 while the API was starting), and after `--yes` returns 0 keep polling: the CLI exits 0 with `update applied` while hal0-api can be down up to ~100 s when the stop hangs (#2727). Record the outage length.
 
 ## Leave behind
 
