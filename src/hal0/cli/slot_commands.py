@@ -21,6 +21,7 @@ from typing import Any
 
 import typer
 from rich.console import Console
+from rich.markup import escape
 from rich.panel import Panel
 from rich.syntax import Syntax
 from rich.table import Table
@@ -308,6 +309,10 @@ def _drift_warning(status: dict[str, Any]) -> str | None:
     if isinstance(diffs, list):
         for diff in diffs:
             if not isinstance(diff, dict):
+                continue
+            if diff.get("key") == "render_error":
+                # #2660: the launch command cannot be rendered; say why.
+                parts.append(f"render_error: {escape(str(diff.get('error')))}")
                 continue
             parts.append(
                 f"{diff.get('key')}: running={diff.get('running')} rendered={diff.get('rendered')}"

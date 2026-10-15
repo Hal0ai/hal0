@@ -381,3 +381,80 @@ async def test_load_converges_running_container_on_image_drift(
     # silently return the stale snapshot.
     await sm.load("chat")
     assert len(container_stub.load_calls) == 2
+
+
+# ── #2660: a running slot that cannot re-render ─────────────────────────────
+
+_RENDER_ERR = "slot 'chat' still carries [model].context_size (ADR-0029)"
+
+
+async def test_render_error_still_reports_image_drift(
+    slot_root: Path,
+    container_stub: FakeContainerProvider,
+) -> None:
+    """#2660: ``container_spec`` raising for a running slot must not hide image
+    drift. The image comparison needs only cfg + running image, so it is
+    reported alongside a ``render_error`` entry carrying the exception text.
+    """
+    container_stub.running_argv_by_slot["chat"] = ["--model", "/mnt/ai-models/qwen.gguf"]
+    container_stub.running_image_by_slot["chat"] = "ghcr.io/hal0ai/hal0-combined:0826"
+    sm = SlotManager()
+    await sm.load("chat")
+    # Render breaks after the container is up (e.g. a failed conversion).
+    container_stub.expected_argv_by_slot["chat"] = None
+    container_stub.render_error_by_slot["chat"] = _RENDER_ERR
+
+    snap = await sm.status("chat", include_config_drift=True)
+
+    drift = snap.metadata.get("config_drift")
+    assert drift is not None and drift["drifted"] is True
+    assert drift["render_error"] == _RENDER_ERR
+    keys = [d["key"] for d in drift["diffs"]]
+    assert keys == ["render_error", "image"]
+    assert drift["diffs"][0]["error"] == _RENDER_ERR
+    assert drift["diffs"][1] == {
+        "key": "image",
+        "running": "ghcr.io/hal0ai/hal0-combined:0826",
+        "rendered": _STANDARD_IMAGE,
+    }
+
+
+async def test_render_error_without_image_drift_is_still_surfaced(
+    slot_root: Path,
+    container_stub: FakeContainerProvider,
+) -> None:
+    """A render failure is its own drift state even when the image matches."""
+    container_stub.running_argv_by_slot["chat"] = ["--model", "/mnt/ai-models/qwen.gguf"]
+    container_stub.running_image_by_slot["chat"] = _STANDARD_IMAGE
+    sm = SlotManager()
+    await sm.load("chat")
+    container_stub.expected_argv_by_slot["chat"] = None
+
+    snap = await sm.status("chat", include_config_drift=True)
+
+    drift = snap.metadata.get("config_drift")
+    assert drift is not None and drift["drifted"] is True
+    assert [d["key"] for d in drift["diffs"]] == ["render_error"]
+    # No reason from the provider still yields a non-empty message.
+    assert drift["render_error"]
+
+
+async def test_load_does_not_converge_a_slot_that_cannot_render(
+    slot_root: Path,
+    container_stub: FakeContainerProvider,
+) -> None:
+    """#2660: a render error with image drift must not make ``load()`` bounce
+    the running container — the re-spawn would fail to render and take the
+    slot down.
+    """
+    container_stub.running_argv_by_slot["chat"] = ["--model", "/mnt/ai-models/qwen.gguf"]
+    container_stub.running_image_by_slot["chat"] = "ghcr.io/hal0ai/hal0-combined:0826"
+    sm = SlotManager()
+    await sm.load("chat")
+    assert len(container_stub.load_calls) == 1
+    container_stub.expected_argv_by_slot["chat"] = None
+    container_stub.render_error_by_slot["chat"] = _RENDER_ERR
+
+    await sm.load("chat")
+    assert len(container_stub.load_calls) == 1
+    assert container_stub.unload_calls == []

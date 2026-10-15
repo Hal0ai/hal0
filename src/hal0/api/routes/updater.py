@@ -1093,7 +1093,9 @@ async def _collect_slot_drift(sm: Any) -> list[dict[str, Any]]:
 
     Never raises: a probe failure on one slot logs and skips so a single bad
     slot can't blank the whole banner. Inactive slots (drift == None) are
-    dropped — a stopped slot cannot run a stale process.
+    dropped — a stopped slot cannot run a stale process. A running slot whose
+    argv cannot be rendered carries ``render_error`` (the reason) on its entry
+    (#2660).
     """
     try:
         slots = await sm.list()
@@ -1111,7 +1113,10 @@ async def _collect_slot_drift(sm: Any) -> list[dict[str, Any]]:
             log.warning("updater.slot_drift_probe_failed", slot=name, error=str(exc))
             continue
         if payload and payload.get("drifted"):
-            drifted.append({"slot": name, "diffs": payload.get("diffs") or []})
+            entry: dict[str, Any] = {"slot": name, "diffs": payload.get("diffs") or []}
+            if payload.get("render_error"):
+                entry["render_error"] = payload["render_error"]
+            drifted.append(entry)
     return drifted
 
 
@@ -1131,7 +1136,9 @@ async def slot_drift(request: Request) -> dict[str, Any]:
             ]
         }
 
-    ``count == 0`` is the clean case — nothing needs a restart.
+    ``count == 0`` is the clean case — nothing needs a restart. A slot whose
+    launch command cannot be rendered from its current config also carries
+    ``"render_error": "<reason>"`` and a ``render_error`` diff (#2660).
     """
     sm = _slot_manager(request)
     drifted = await _collect_slot_drift(sm)
@@ -1189,9 +1196,16 @@ async def restart_drifted_slots(request: Request) -> dict[str, Any]:
     llama-server reports an in-flight request alone and lists it under
     ``skipped_busy`` (used by the post-update image-drift restart, #2096).
 
+    A slot whose argv cannot be rendered (``render_error``, #2660) is listed
+    under ``skipped_render_error`` instead of restarted, unless the operator
+    named it in ``slots`` without ``skip_busy``: a restart would fail to
+    render and take the slot down, so only an explicit, attended request may
+    bounce it. The unnamed sweep and the ``skip_busy`` automatic sweep skip it.
+
     Response::
 
-        {"restarted": ["chat"], "failed": [], "skipped_busy": [], "count": 1}
+        {"restarted": ["chat"], "failed": [], "skipped_busy": [],
+         "skipped_render_error": [], "count": 1}
 
     A per-slot restart failure is recorded in ``failed`` (never re-raised) so
     one wedged slot can't abort the rest of the sweep.
@@ -1207,7 +1221,9 @@ async def restart_drifted_slots(request: Request) -> dict[str, Any]:
         if isinstance(raw, list) and raw:
             only = {str(s) for s in raw}
     skip_busy = isinstance(body, dict) and body.get("skip_busy") is True
-    return await restart_drifted(sm, only=only, skip_busy=skip_busy)
+    return await restart_drifted(
+        sm, only=only, skip_busy=skip_busy, skip_render_error=only is None or skip_busy
+    )
 
 
 #: One restart sweep at a time. The CLI's post-apply POST /restart-slots and
@@ -1224,6 +1240,7 @@ async def restart_drifted(
     only: set[str] | None = None,
     skip_busy: bool = False,
     treat_unknown_as_busy: bool = False,
+    skip_render_error: bool = True,
 ) -> dict[str, Any]:
     """Bounce the drifted slots (optionally a subset); the one restart path.
 
@@ -1231,20 +1248,36 @@ async def restart_drifted(
     (#2096). Per-slot failures are recorded, never re-raised. With
     ``skip_busy`` a slot llama-server reports as processing is left alone and
     listed under ``skipped_busy``; ``treat_unknown_as_busy`` (unattended
-    callers, #2634) extends that to slots with no metrics reading. Sweeps are serialised on
-    :data:`_RESTART_SWEEP_LOCK`; drift is read inside the lock.
+    callers, #2634) extends that to slots with no metrics reading. With
+    ``skip_render_error`` (the default) a slot whose argv cannot be rendered
+    is listed under ``skipped_render_error`` instead of bounced (#2660).
+    Sweeps are serialised on :data:`_RESTART_SWEEP_LOCK`; drift is read
+    inside the lock.
     """
     async with _RESTART_SWEEP_LOCK:
         return await _restart_drifted_locked(
-            sm, only=only, skip_busy=skip_busy, treat_unknown_as_busy=treat_unknown_as_busy
+            sm,
+            only=only,
+            skip_busy=skip_busy,
+            treat_unknown_as_busy=treat_unknown_as_busy,
+            skip_render_error=skip_render_error,
         )
 
 
 async def _restart_drifted_locked(
-    sm: Any, *, only: set[str] | None, skip_busy: bool, treat_unknown_as_busy: bool
+    sm: Any,
+    *,
+    only: set[str] | None,
+    skip_busy: bool,
+    treat_unknown_as_busy: bool,
+    skip_render_error: bool,
 ) -> dict[str, Any]:
     drifted = await _collect_slot_drift(sm)
-    targets = [d["slot"] for d in drifted if only is None or d["slot"] in only]
+    selected = [d for d in drifted if only is None or d["slot"] in only]
+    skipped_render_error = (
+        [d["slot"] for d in selected if d.get("render_error")] if skip_render_error else []
+    )
+    targets = [d["slot"] for d in selected if d["slot"] not in skipped_render_error]
     skipped_busy: list[str] = []
     if skip_busy and targets:
         busy = await _slots_in_flight(sm, targets, treat_unknown_as_busy=treat_unknown_as_busy)
@@ -1265,6 +1298,7 @@ async def _restart_drifted_locked(
         "restarted": restarted,
         "failed": failed,
         "skipped_busy": skipped_busy,
+        "skipped_render_error": skipped_render_error,
         "count": len(restarted),
     }
 
@@ -1283,7 +1317,8 @@ async def post_start_image_drift_restart(
     replaced, whichever path (CLI, dashboard, manual) put the new code in
     place. Busy slots are skipped, and so is any slot with no metrics reading
     (no ``--metrics``, non-llama runtime, timed-out scrape): unattended, only
-    a slot proven idle is bounced (#2634). The outcome lands on
+    a slot proven idle is bounced (#2634). A slot that cannot re-render is
+    never bounced and lands in ``skipped_render_error`` (#2660). The outcome lands on
     ``state.post_start_image_drift_restart`` for ``/slot-drift``; nothing is
     stored when no slot qualified. Never raises.
     """
@@ -1307,6 +1342,7 @@ async def post_start_image_drift_restart(
         result = {
             "restarted": out["restarted"],
             "skipped_busy": out["skipped_busy"],
+            "skipped_render_error": out["skipped_render_error"],
             "failed": out["failed"],
             "at": datetime.now(UTC).isoformat(),
         }

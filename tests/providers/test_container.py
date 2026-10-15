@@ -820,6 +820,22 @@ class TestContainerSpec:
         assert "--batch-size" not in argv
         assert "--ubatch-size" not in argv
 
+    def test_render_error_reports_why_expected_argv_is_none(self) -> None:
+        """#2660: the drift comparator needs the container_spec failure text."""
+        provider = self._provider()
+        boom = RuntimeError("slot 'chat' still carries [model].context_size")
+        with patch.object(type(provider), "container_spec", side_effect=boom):
+            assert provider.expected_argv(_slot_cfg(), _model_info()) is None
+            assert provider.render_error(_slot_cfg(), _model_info()) == str(boom)
+
+    def test_render_error_is_none_when_the_slot_renders(self) -> None:
+        provider = self._provider()
+        with patch(
+            "hal0.providers.container._resolve_profile",
+            return_value=_moe_profile(),
+        ):
+            assert provider.render_error(_slot_cfg(), _model_info()) is None
+
 
 # ── load_sync / unload_sync systemd interaction ───────────────────────────────
 

@@ -155,7 +155,14 @@ async def compute_config_drift(
 
     Returns a structured payload when the comparison is meaningful, or
     None when the slot is inactive, lacks a config, is an NPU trio shadow,
-    or the provider cannot read either side of the comparison.
+    or the provider cannot read the running argv.
+
+    A running slot whose argv cannot be rendered (``container_spec`` raises,
+    e.g. a profile-centric slot still carrying ``[model].context_size``,
+    ADR-0029) is reported as drifted with a ``render_error`` diff and a
+    top-level ``render_error`` message, plus the image diff when the running
+    image differs from the declared one (#2660). Restart passes the operator
+    did not aim at the slot leave it alone: a restart would fail to render.
     """
     if active is None:
         active = await host._is_active(slot_name)
@@ -196,25 +203,19 @@ async def compute_config_drift(
         loop.run_in_executor(None, provider.running_argv, cfg),
         loop.run_in_executor(None, provider.expected_argv, cfg, model_info),
     )
-    if not running or not rendered:
+    if not running:
         return None
-
-    running_flags = _argv_values(running, _CONFIG_DRIFT_KEYS)
-    rendered_flags = _argv_values(rendered, _CONFIG_DRIFT_KEYS)
-    # #1226: the renderer resolves a registry model id to its on-disk path
-    # (``--model``) and slugifies it for the advertised ``--alias``. A raw
-    # id on either side must be run through the SAME resolution before
-    # comparison, else a slot created with a registry id permanently
-    # false-warns (running path/slug vs rendered id). Resolve both sides.
-    model_key = model_info.get("_model_key") or model_default
-    model_path = model_info.get("path")
-    running_flags = _resolve_drift_flags(running_flags, model_key, model_path)
-    rendered_flags = _resolve_drift_flags(rendered_flags, model_key, model_path)
-    diffs = [
-        {"key": key, "running": running_flags.get(key), "rendered": rendered_flags.get(key)}
-        for key in _CONFIG_DRIFT_KEYS
-        if not _config_drift_values_equal(key, running_flags.get(key), rendered_flags.get(key))
-    ]
+    render_error: str | None = None
+    if rendered:
+        diffs = _argv_diffs(running, rendered, model_info, model_default)
+    else:
+        # #2660: the argv comparison is impossible, but returning None here
+        # also hid the image comparison below, which needs only cfg and the
+        # running image. Report the render failure as its own diff instead.
+        render_error = await loop.run_in_executor(
+            None, _render_error_reason, provider, cfg, model_info
+        )
+        diffs = [{"key": "render_error", "running": None, "rendered": None, "error": render_error}]
 
     # #2024: the argv comparison above never sees the container IMAGE. An
     # ``--hardware`` edit (cpu <-> vulkan <-> rocm) changes the resolved
@@ -241,7 +242,55 @@ async def compute_config_drift(
     if _image_mismatch(running_image, declared_image):
         diffs.append({"key": "image", "running": running_image, "rendered": declared_image})
 
-    return {"drifted": bool(diffs), "diffs": diffs}
+    out: dict[str, Any] = {"drifted": bool(diffs), "diffs": diffs}
+    if render_error is not None:
+        out["render_error"] = render_error
+    return out
+
+
+def _argv_diffs(
+    running: list[str],
+    rendered: list[str],
+    model_info: dict[str, Any],
+    model_default: str | None,
+) -> list[dict[str, Any]]:
+    """Per-flag differences between the running and the rendered argv."""
+    running_flags = _argv_values(running, _CONFIG_DRIFT_KEYS)
+    rendered_flags = _argv_values(rendered, _CONFIG_DRIFT_KEYS)
+    # #1226: the renderer resolves a registry model id to its on-disk path
+    # (``--model``) and slugifies it for the advertised ``--alias``. A raw
+    # id on either side must be run through the SAME resolution before
+    # comparison, else a slot created with a registry id permanently
+    # false-warns (running path/slug vs rendered id). Resolve both sides.
+    model_key = model_info.get("_model_key") or model_default
+    model_path = model_info.get("path")
+    running_flags = _resolve_drift_flags(running_flags, model_key, model_path)
+    rendered_flags = _resolve_drift_flags(rendered_flags, model_key, model_path)
+    return [
+        {"key": key, "running": running_flags.get(key), "rendered": rendered_flags.get(key)}
+        for key in _CONFIG_DRIFT_KEYS
+        if not _config_drift_values_equal(key, running_flags.get(key), rendered_flags.get(key))
+    ]
+
+
+_RENDER_ERROR_FALLBACK = "the slot's launch command cannot be rendered from its current config"
+
+
+def _render_error_reason(provider: Any, cfg: dict[str, Any], model_info: dict[str, Any]) -> str:
+    """The provider's reason the render failed, or a generic message.
+
+    Never raises and always returns a non-empty string: the reason is
+    best-effort detail on a drift state that is reported regardless.
+    """
+    probe = getattr(provider, "render_error", None)
+    if callable(probe):
+        try:
+            reason = probe(cfg, model_info)
+        except Exception:
+            reason = None
+        if isinstance(reason, str) and reason:
+            return reason
+    return _RENDER_ERROR_FALLBACK
 
 
 __all__ = [

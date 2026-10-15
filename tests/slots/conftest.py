@@ -66,6 +66,9 @@ class FakeContainerProvider:
         self.fail_unload: Exception | None = None
         self.running_argv_by_slot: dict[str, list[str] | None] = {}
         self.expected_argv_by_slot: dict[str, list[str] | None] = {}
+        # #2660 — why ``expected_argv`` returned None for a slot (the
+        # ``container_spec`` exception text). Empty means "renders fine".
+        self.render_error_by_slot: dict[str, str] = {}
         # #2024 — the live container's image per slot, read by the drift
         # comparator's image-mismatch check. None (the default) means
         # "unknown", same as a real provider whose inspect failed/found
@@ -160,6 +163,9 @@ class FakeContainerProvider:
         self, slot_cfg: dict[str, Any], model_info: dict[str, Any]
     ) -> list[str] | None:
         return self.expected_argv_by_slot.get(str(slot_cfg.get("name")))
+
+    def render_error(self, slot_cfg: dict[str, Any], model_info: dict[str, Any]) -> str | None:
+        return self.render_error_by_slot.get(str(slot_cfg.get("name")))
 
     def image_present(self, image: str) -> bool:
         return False
