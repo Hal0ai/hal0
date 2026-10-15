@@ -12,7 +12,10 @@ API surface facts that differ from what the tool signatures suggest.
   no structured payload — treat as transient, retry once before giving up.
 
 ### `slot_list`
-- No args (empty `{}`). Returns all slots.
+- No args (empty `{}`). Returns all slots as a compact roster (name, id, state,
+  `loaded`, model_id, backend, port, container health, image tag). It omits
+  `resolved_command`, the full `image` ref and tuning detail so a large roster
+  fits the agent's tool-result budget; call `slot_status` for those.
 - Can fail with empty error identically to `slot_status` — retry once.
 
 ### `read_resource`
@@ -61,8 +64,7 @@ API surface facts that differ from what the tool signatures suggest.
 - **`{"name":"agent"}` works fine. `{"name":"chat"}` fails with `mcp.missing_arg`.**
   This is NOT a general bug — the tool signature is correct. Something specific
   to the `"chat"` slot or its arg routing causes the parser to drop the `name`
-  field mid-flight. Workaround: use `slot_list` which returns full details for
-  every slot, or use `systemctl --user show -p ... --value <service>.service`
+  field mid-flight. Workaround: use `slot_list` for the roster, or use `systemctl --user show -p ... --value <service>.service`
   via terminal. If a specific slot name triggers this, avoid calling
   `slot_status` on it and fall back to `slot_list`.
 

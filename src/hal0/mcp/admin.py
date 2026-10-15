@@ -172,6 +172,7 @@ from typing import Any
 
 import httpx
 import structlog
+from mcp.types import CallToolResult, TextContent
 
 from hal0.api._redact import redact_log_line as _redact_log_line
 from hal0.mcp.approval_queue import ApprovalQueue
@@ -240,6 +241,79 @@ def _wrap_list_payload(tool: str, payload: Any) -> Any:
         return payload
     key = _LIST_TOOL_WRAP_KEY.get(tool, "items")
     return {key: payload, "count": len(payload)}
+
+
+# ── slot_list compaction (#2662) ─────────────────────────────────────────────
+#
+# Hermes truncates any MCP tool result over its per-result budget (39,321 chars
+# for the 65,536-ctx ``hal0/agent`` anchor) to a 1,500-char preview when no
+# sandbox exists, which is every ``hermes -z`` turn. The raw ``/api/slots`` row
+# (``resolved_command`` argv, full ``image`` ref with digest, nested metadata
+# and metrics) was ~2.9 KB per slot as Hermes sees it, so 14+ slots crossed the
+# cap and the model answered from the preview. The LIST therefore carries only
+# what a roster answer needs; ``slot_status`` / ``slot_by_name`` keep the full
+# row for per-slot detail.
+#
+# Wire shape: FastMCP's default for a ``dict`` return is pretty-printed text
+# PLUS ``structuredContent`` (the same JSON twice, and Hermes counts both).
+# #2025 pinned ``structuredContent`` for the single-slot reads
+# (``slot_status`` / ``slot_by_name`` / ``slot_by_id``) and left every other
+# tool alone. ``slot_list`` is the one read whose size is the problem, so it
+# alone ships one compact-JSON text block and no ``structuredContent``.
+_COMPACT_TEXT_TOOLS: frozenset[str] = frozenset({"slot_list"})
+
+_SLOT_LIST_ROW_KEYS: tuple[str, ...] = (
+    "name",
+    "id",
+    "state",
+    "status",
+    "kind",
+    "type",
+    "model_id",
+    "backend",
+    "declared_backend",
+    "provider",
+    "profile",
+    "port",
+    "container_status",
+    "container_health",
+    "image_status",
+    "last_used_at",
+    "pinned",
+    "default",
+)
+
+
+def _image_tag(image: Any) -> str | None:
+    """Tag of an image ref with any ``@sha256:`` digest and registry port dropped."""
+    if not isinstance(image, str) or not image:
+        return None
+    ref = image.split("@", 1)[0]
+    name = ref.rsplit("/", 1)[-1]
+    return name.split(":", 1)[1] if ":" in name else None
+
+
+def _compact_slot_row(row: Any) -> Any:
+    """Reduce one ``/api/slots`` row to the roster fields (non-dict passes through)."""
+    if not isinstance(row, dict):
+        return row
+    out: dict[str, Any] = {k: row[k] for k in _SLOT_LIST_ROW_KEYS if k in row}
+    state = row.get("state")
+    if state is not None:
+        from hal0.slots.state import is_dispatchable_state
+
+        out["loaded"] = is_dispatchable_state(state)
+    tag = _image_tag(row.get("image"))
+    if tag:
+        out["image_tag"] = tag
+    return out
+
+
+def _compact_slot_list(payload: Any) -> Any:
+    """Compact a wrapped ``{"slots": [...], "count": N}``; anything else unchanged."""
+    if not isinstance(payload, dict) or not isinstance(payload.get("slots"), list):
+        return payload
+    return {**payload, "slots": [_compact_slot_row(r) for r in payload["slots"]]}
 
 
 def _redact_logs_payload(payload: Any) -> Any:
@@ -2147,6 +2221,8 @@ async def _execute_tool(
     # top-level dict so the FastMCP result model validates. No-op for
     # every other tool and for the already-dict error envelope.
     result = _wrap_list_payload(tool, result)
+    if tool == "slot_list":
+        result = _compact_slot_list(result)
     return result
 
 
@@ -3388,12 +3464,28 @@ def build_server(
             # back isError:false with its payload intact (#2025).
             if _is_failure_envelope(result):
                 raise ToolError(json.dumps(result["error"]))
+            if tool_name in _COMPACT_TEXT_TOOLS:
+                return CallToolResult(  # type: ignore[return-value]
+                    content=[
+                        TextContent(
+                            type="text", text=json.dumps(result, separators=(",", ":"), default=str)
+                        )
+                    ]
+                )
             return result
 
         _tool.__name__ = tool_name
         _tool.__doc__ = description
         annotations = _ANNOTATIONS.get(tool_name)
-        server.tool(name=tool_name, description=description, annotations=annotations)(_tool)
+        server.tool(
+            name=tool_name,
+            description=description,
+            annotations=annotations,
+            # No outputSchema for the compact-text tools: with one defined the
+            # SDK demands ``structuredContent`` and would reject the single
+            # compact text block.
+            structured_output=False if tool_name in _COMPACT_TEXT_TOOLS else None,
+        )(_tool)
 
         # The wrapper's ``args: dict`` signature is deliberate — it passes the
         # whole arg dict through to ``dispatch`` untouched (a flat signature
