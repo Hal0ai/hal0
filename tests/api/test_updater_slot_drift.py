@@ -318,3 +318,73 @@ async def test_restart_drifted_serialises_concurrent_callers_and_does_not_double
     assert restarts == ["brain"]  # exactly one bounce
     assert max_overlap == 1
     assert sorted([first["count"], second["count"]]) == [0, 1]
+
+
+# ── automatic pass: "no reading" counts as busy (#2634) ───────────────────────
+
+
+def _readings(monkeypatch: pytest.MonkeyPatch, by_port: dict[int, Any]) -> None:
+    """Stub ``llama_metrics``: ``by_port`` maps port -> reading dict or an exception."""
+
+    async def fake(port: int) -> dict[str, Any]:
+        r = by_port.get(port, {})
+        if isinstance(r, BaseException):
+            raise r
+        return r
+
+    monkeypatch.setattr("hal0.slots.metrics_collect.llama_metrics", fake)
+
+
+@pytest.mark.asyncio
+async def test_post_start_restart_skips_slot_with_empty_reading(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # port 1 ("known") answers idle; port 2 ("silent", e.g. ComfyUI/TTS or a
+    # llama slot without --metrics) yields {}.
+    _readings(monkeypatch, {1: {"requests_processing": 0}, 2: {}})
+    sm = _StubSlotManager(
+        {
+            "known": {"drifted": True, "diffs": [_IMG]},
+            "silent": {"drifted": True, "diffs": [_IMG]},
+        }
+    )
+    state = SimpleNamespace(slot_manager=sm)
+    await updater_routes.post_start_image_drift_restart(state, enabled=True, settle_s=0)
+    assert sm.restarted == ["known"]
+    assert state.post_start_image_drift_restart["skipped_busy"] == ["silent"]
+
+
+@pytest.mark.asyncio
+async def test_post_start_restart_skips_slot_whose_scrape_timed_out(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _readings(monkeypatch, {1: TimeoutError("scrape timed out")})
+    sm = _StubSlotManager({"slow": {"drifted": True, "diffs": [_IMG]}})
+    state = SimpleNamespace(slot_manager=sm)
+    await updater_routes.post_start_image_drift_restart(state, enabled=True, settle_s=0)
+    assert sm.restarted == []
+    assert state.post_start_image_drift_restart["skipped_busy"] == ["slow"]
+
+
+@pytest.mark.asyncio
+async def test_post_start_restart_restarts_slot_with_idle_reading(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _readings(monkeypatch, {1: {"requests_processing": 0}})
+    sm = _StubSlotManager({"idle": {"drifted": True, "diffs": [_IMG]}})
+    state = SimpleNamespace(slot_manager=sm)
+    await updater_routes.post_start_image_drift_restart(state, enabled=True, settle_s=0)
+    assert sm.restarted == ["idle"]
+    assert state.post_start_image_drift_restart["skipped_busy"] == []
+
+
+@pytest.mark.asyncio
+async def test_explicit_restart_with_empty_reading_still_restarts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Operator-driven ``skip_busy`` keeps "unknown means not busy" (#2096)."""
+    _readings(monkeypatch, {1: {}})
+    sm = _StubSlotManager({"silent": {"drifted": True, "diffs": [_IMG]}})
+    out = await updater_routes.restart_drifted(sm, only={"silent"}, skip_busy=True)
+    assert out["restarted"] == ["silent"]
+    assert out["skipped_busy"] == []

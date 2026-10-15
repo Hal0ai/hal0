@@ -1886,7 +1886,8 @@ class UpdatesConfig(BaseModel):
             "At every hal0-api start, restart slots whose running container uses a "
             "different runner image than the one a fresh render would pick (a stale "
             "image keeps serving the build a release replaced). Slots with a request "
-            "in flight are skipped. Argv-only drift is never restarted. Consumed once "
+            "in flight, or whose activity cannot be read (no metrics endpoint, e.g. "
+            "image/speech runtimes), are skipped. Argv-only drift is never restarted. Consumed once "
             "at startup, so a change needs a hal0-api restart."
         ),
     )
