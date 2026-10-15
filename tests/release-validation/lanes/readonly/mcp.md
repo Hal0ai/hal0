@@ -79,6 +79,12 @@ Speak MCP streamable-HTTP JSON-RPC with curl from the box (`127.0.0.1`), not fro
 16. **Docs at the release tag.** Compare `docs/reference/mcp-tools.mdx` names against the tool list at the exact release tag, not the working tree HEAD.
 17. **`slot_list` count.** `count` should equal the number of `kind=="local"` rows in `/api/slots`; the synthetic `hal0` row makes it +1 (#2697, regression `mcp-slot-list-counts-synthetic-hal0`). Every REAL slot entry must have `id` and `state`; the synthetic row has both null by design (`slot-list-rest-includes-synthetic-hal0`). Non-string path args being stringified is `mcp-admin-path-args-are-stringified`: record `known`.
 
+18. **Gated tools reject malformed calls before queueing.** For every tool in `GATED_TOOLS` call with empty args and require `isError: true mcp.missing_arg`, not `pending_approval` (#2722). Then deny or cancel every approval you queued (`POST /api/agent/approvals/<id>/deny`) and assert `GET /api/agent/approvals` is empty: the inbox is shared state.
+
+19. **Docs names are a subset of served names**, not only a superset: a renamed or removed tool still named in `mcp-tools.mdx` is a docs defect.
+
+20. **`slot_list` count and marker.** `count` equals the number of `kind: local` rows in `/api/slots`, or the composite `hal0` row is marked; count = real + 1 with no marker is #2697 (known, record it; #2688 also dropped `_synthetic`).
+
 ## Carry-forward
 
 The MCP surface is how other agents consume hal0, so *silent* protocol wrongness here is worse

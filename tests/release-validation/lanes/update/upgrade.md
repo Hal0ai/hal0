@@ -136,6 +136,14 @@ the fact otherwise:
 12. **Version identity and roll-forward.** For nightly-vs-nightly rollback judge by `/usr/lib/hal0/current/VERSION`; `/api/health` and `hal0 --version` say `1.4.0`. Run the roll-forward as its own step and record its exit code. `hal0 doctor perms --fix` prompts on stdin and aborts over ssh: use `--force` or a pty.
 13. **Log noise.** Count `profiles.unknown_keys_kept` journal lines per minute before and after the conversions (about 2000 multi-line entries in 9 minutes before the fix); after it must be 0. Do NOT file a stale update-job record after a repair (`update-job-record-is-a-snapshot`).
 
+14. **API downtime across the update.** Run a 1 s `/api/health` poller across `hal0 update --yes`; downtime < ~30 s and no `stop-sigterm timed out` / `Failed with result 'timeout'` for hal0-api (#2727). Time `systemctl restart hal0-api` THREE times with a request in flight: the stall is intermittent.
+
+15. **Daemon load vs validators.** On every update-box boot compare journal `discover.ref_slot_load_failed` / `models.auto_scan_prune_skipped` with `hal0 config validate` and `hal0 profile migrate` output (#2720).
+
+16. **Pins and types.** `hal0 update --target <bogus> --check` must not report "update available" for a different version (#2729); slot TOML `type` must match the profile modality (embedding/reranking/kokoro profiles must not carry `llm`; persisted ones are the known doctor-fix case).
+
+17. **Rollback then roll-forward is idempotent.** After the roll-forward expect `updater.migrations_noop` and zero conversion lines.
+
 ## Leave behind
 
 The box on the new version, healthy, with the "before" snapshot recorded in your report for the

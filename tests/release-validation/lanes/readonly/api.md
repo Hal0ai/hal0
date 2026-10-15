@@ -13,8 +13,8 @@ Probe the REST surface from the workstation with curl against `$API` (from `CONT
 2. **Core surface.** Walk at minimum: `/health`, `/api/status`, `/api/slots`,
    `/api/slots/{name}`, `/api/slots/{name}/config`, `/api/models`, `/api/settings`,
    `/api/capabilities`, `/api/hardware`, `/api/profiles`, `/api/activity`, `/api/services`,
-   `/api/memory`, `/api/memory/engine`, `/api/memory/banks`, `/api/bench`, `/api/upstreams`,
-   `/api/agents`, `/api/apps`, `/api/auth/status`, `/api/board`, `/api/update/status`,
+   `/api/memory`, `/api/memory/engine`, `/api/memory/banks`, `/api/benchmarks/queue`, `/api/upstreams`,
+   `/api/agents`, `/api/auth/status`, `/api/board/board`, `/api/updates/components`,
    `/v1/models`. For each: well-formed JSON, no 5xx, no stack traces, values that make sense for
    this box.
 3. **Version consistency.** The version string must be identical and correct everywhere it
@@ -50,7 +50,7 @@ Probe the REST surface from the workstation with curl against `$API` (from `CONT
    (`grant-denied` / `podman-failed` / `podman-absent` / `invalid-argument` / `seam-error`),
    or for `slot_view.image_probe_failed` (`reason=probe-error` when the probe raised before
    reaching the seam, `reason=probe-timeout` when the whole slot probe blew its deadline
-   first), and cross-check `hal0 doctor seams`. Every
+   first), and cross-check `hal0 doctor` (there is no `doctor seams` verb; confirm with `--help`). Every
    `unknown` has exactly one of those two lines behind it; an `unknown` with neither is itself
    a finding. A whole fleet reading `unknown` is a broken install
    even though no field is lying. Conversely, `unknown` where the seam is demonstrably healthy
@@ -118,6 +118,14 @@ Probe the REST surface from the workstation with curl against `$API` (from `CONT
 16. **Security headers baseline.** Record which of `Content-Security-Policy`, `X-Frame-Options`, `X-Content-Type-Options` come back on `/` and `/api/status` (none on 1.4.0 nightlies). Observation, not a finding; report only a change against the previous report.
 17. **Empty-body 404 sweep.** List every GET under `/api` that answers 404 with `content-length: 0`, not only unknown paths.
 18. **Brief routes against the spec.** Assert every route this brief names is in `openapi.json`; a stale name is a kit defect, report it under kit feedback, not as a product finding. On a box with auth enabled (ct150 after the update, prod) an anonymous GET gets 401 `auth.required` before any body parse: use the key from `CONTEXT.md` or record `skipped`.
+
+19. **Redaction of count keys.** `jq '[paths(type=="object" and .value=="***REDACTED***")|join(".")]'` over `/api/settings`; the only masked leaf expected is `memory.graph.extraction_max_tokens` (known-issues `settings-redacts-token-count-keys`). A new masked leaf, or a masked number on any other surface, is a finding.
+
+20. **Missing field, not just invalid JSON.** POST `{"q":"x"}` to `/api/memory/add`, `/search`, `/recall`, `/delete`; add and recall answer 400 `validation.invalid`, search and delete answer 500 `system.internal` (#2701 scope). Any other route that 500s on a client mistake is the same class.
+
+21. **Bank sub-resource 404 uniformity.** Walk the 15 `/api/memory/banks/nosuchbank/*` subpaths; record the error codes (memory.engine_error on 14, memory.bank_not_found on profile). Observation; report only a change.
+
+22. **Concurrent-actor drift.** Diff `GET /api/models` ids at lane start and end and name the drift (it grew from 1 to 4 models in one run) so it is not mistaken for a defect.
 
 ## Carry-forward
 

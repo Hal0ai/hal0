@@ -9,8 +9,8 @@ command group is unfamiliar, run `--help` first and only run the verbs that clea
    `doctor perms`, `slot list|status|show <name>|metrics|capacity|logs <name>`,
    `model list|show <id>|store`, `memory status|bank list|ops list`, `config` (read
    subcommands), `upstream list`, `capabilities list`, `agent list|status <name>`, `app`
-   (read-only status), `registry` (read-only inspect), `mcp list|status <server>`,
-   `auth status`, `board` (read-only verbs), `bench` (list/records), `profile list|show <name>`,
+   (read-only status), `mcp list|status <server>`,
+   `auth status`, `board` (read-only verbs), `bench` (list/results/history), `profile list|show <name>`,
    `update --check` (checks only — never apply).
 2. **Exit codes, measured properly.** Capture them as `out=$(cmd); rc=$?` — **never through a
    pipe**. Piping to `head` masks the real exit status and silently turns this check into a
@@ -94,6 +94,14 @@ baseline diff, so don't stop checking after the first comparison.
 
 12. **Unknown names must fail.** `hal0 agent status nosuch`, `hal0 agent log nosuch`, `hal0 slot show nosuch`, `hal0 profile show nosuch`, `hal0 mcp status nosuch`: record each exit code. Siblings exit 1; `agent status` exits 0 (regression `polish-rollup-1-4-0-nightly-20261015`, #2706). An un-bootstrapped KNOWN agent (`pi`) exiting 0 is correct.
 13. **`doctor perms` against reality.** For every file under `/var/lib/hal0/state` and `/var/lib/hal0/registry` compare `sudo -u hal0 test -w` with the `doctor perms` verdict, and run `find /var/lib/hal0 -user root ! -path '*/secrets*' -type f`. Doctor has no row for `state/components.json` or `registry/*.lock` (#2670, #2698), so root-owned files it calls clean are findings. Run it right after install, before any restart: components.json heals on the first hal0-api write; record how many minutes that took.
+
+14. **`doctor perms` at the END of the lane too.** Re-run `hal0 doctor perms; echo rc=$?` after any agent-API call (`curl $API/api/agents/hermes/session/handshake`) and `stat -c '%U:%G %a' /var/lib/hal0/agents`: expect `hal0:hal0 711` (#2719, daemon-created paths that disagree with the table appear only after first use).
+
+15. **`config validate` against the daemon.** Compare `hal0 config validate` with `journalctl -u hal0-api -b | grep -E 'ref_slot_load_failed|auto_scan_prune_skipped'` and with `hal0 doctor profiles | grep 'does not load'`. Validate passing while the daemon refuses a slot TOML is #2720.
+
+16. **Dropped flags and dead hints.** `hal0 update --target 9.9.9 --check; echo rc=$?` must not read like a bare `--check` (#2729); `hal0 slot unload --help` must list the option the 409 `slot.pinned` message tells the user to pass.
+
+17. **Doctor honesty.** The "passed with N warning(s)" count equals the number of distinct warnings (a continuation line was counted, N=5 vs 4); an installed live host prints no install-time advice (node missing, ports in use, "will build the memory-engine venv"); and `hal0 doctor` is not silent while `systemctl --failed` lists a failed podman healthcheck transient.
 
 ## Carry-forward
 

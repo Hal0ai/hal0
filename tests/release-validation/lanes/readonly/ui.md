@@ -96,6 +96,10 @@ Close the browser when done.
 14. **Services panel vs footer.** For any service with `state: "stopped"` in `/api/services/health` (ComfyUI on a fresh box) compare the Settings > Overview Services chip with the footer pip; the panel showing a warn "down" is #2705.
 15. **Tooling fallback.** If Playwright MCP tools are absent use the container: `docker run --rm --network host mcr.microsoft.com/playwright:v1.64.0-noble` with a script. Nav rail rows are `div.sb-row` hash routes, not links: take an `ariaSnapshot` and check each row exposes a role and is keyboard-focusable.
 
+16. **Overview percentages agree.** Settings > Overview "CPU/GPU utilization" within 5 points of the dashboard igpu/cpu tiles read in the same second from `/api/stats/hardware` (#2726: fractions rendered as 0%/1%).
+
+17. **Counts on one screen.** The Slots Inference tab badge equals rendered rows plus the cordoned flm slot, or is labelled; the Overview SLOTS denominator (1/10) and the footer denominator (1 / 1) are equal or labelled. Observation unless two numbers contradict without a label.
+
 ## Carry-forward
 
 Anything found here that can be expressed against fixtures should be promoted into

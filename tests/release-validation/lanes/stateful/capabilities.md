@@ -107,6 +107,18 @@ snapshot, residue accumulates anonymously across a serialised run unless each la
 11. **Leftovers after `hal0 model rm`.** For each capability type pull then remove a small model and `find` the store for leftover `meta.json` and empty dirs (#2706). `model add`: try a root-owned mode-700 dir against a nonexistent file (compare errors), and re-add an already registered path (#2703).
 12. **Mechanical anti-scar greps.** `grep -rnE '/mnt/ai-models|/root|/home' installer/etc-hal0 src/hal0/config/data` for operator-local paths in shipped seeds. Say explicitly whether the memory reranker config is dead on Hindsight 1.0.0: compare the rerank slot's `/metrics` `prompt_tokens_total` before and after a `hal0 memory recall`.
 
+13. **Apply every advertised row after a pull.** Diff `catalogs.voice.tts[].backends` before and after `hal0 model pull kokoro-v1`, then apply every advertised backend; each must reach ready or return a typed 4xx BEFORE touching `capabilities.toml`/`tts.toml` (#2718: gpu-vulkan with the qwen3-tts profile). Back both files up first and restore them.
+
+14. **Scan vs add on the same bytes.** Put an embed/rerank gguf with a neutral name (`<store>/embed/<id>/model.gguf`) in the store, run `hal0 model scan`, and diff capability and id against `hal0 model add` of the same bytes (#2725). Remove the test rows.
+
+15. **Reranker reachable from recall?** Compare the rerank slot's `/metrics` prompt_tokens_total before and after `hal0 memory recall` and say whether `Hal0Reranker` is reachable on the running Hindsight (#2721; expected: not).
+
+16. **`model rm` of a bound model.** With voice/tts enabled, `hal0 model rm <id> -f --keep-files` must refuse, warn naming the capability, or disable the selection; `enabled=true` with an empty slot default is #2724. Same for embed/rerank/stt/img rows.
+
+17. **Pull every un-pullable row.** `POST /api/models/<id>/pull` for each catalogue row with `pullable:false` (qwen3-4b-npu, moonshine-base-en, jina-tiny): expect a typed 4xx, not 202 and a job stuck `queued` (#2723). Also `POST voice/stt {"model":"","enabled":true}` must be a typed 4xx and write no `stt.toml`.
+
+18. **`systemctl --failed` at entry and exit**, classifying every new unit as a podman healthcheck transient or real.
+
 ## Leave behind
 
 Capabilities left enabled on the backend this box supports; defaults set; scratch model files

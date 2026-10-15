@@ -35,10 +35,12 @@ chat messages — that is the `hermes-e2e` stateful lane.
    is silently dead behind a green `hermes tools list`/`hermes mcp list`. This is a standing
    check now -- regression `hermes-venv-missing-mcp-extra` found it reproduces on fresh AND
    upgraded boxes alike, so run it everywhere, not just on fresh installs.
-3. **Bundled skills actually landed.** Every directory listed in `skills.external_dirs` in
-   `/var/lib/hal0/.hermes/config.yaml` must be non-empty, every skill shipped under
-   `/usr/share/hal0/skills` must be reachable from one of them, and
-   `.skills_prompt_snapshot.json` must carry a non-empty manifest. Then check the mechanism, not
+3. **Bundled skills actually landed.** Every skill shipped under `/usr/share/hal0/skills` (four
+   in 1.4.0) must be reachable from one of the `skills.external_dirs` in
+   `/var/lib/hal0/.hermes/config.yaml`, and `hal0 agent status hermes --json`
+   `.phases.context_link.details.bundled_skills_linked` must list exactly that set. An empty
+   `/var/lib/hal0/skills` is NORMAL on a fresh box (bundled skills land in
+   `/etc/hal0/agent-skills`), so do not require every external dir to be non-empty. Then check the mechanism, not
    just the outcome: `ls -ld` each target directory against the `User=` of whatever writes it —
    a `User=hal0` writer against a `root:root` directory is the shape of #1828.
 4. **Local endpoints.** The gateway listens on loopback (ports in `CONTEXT.md`; rc.5 used 9119
@@ -85,9 +87,8 @@ chat messages — that is the `hermes-e2e` stateful lane.
 10. **Which `/api/status`?** `:8080/api/status` is hal0's; `gateways[].ports` exists only on the
    hermes dashboard `:9119/api/status`. Use the right one for the wiring check, and note `:9119/`
    itself 404s by design (`hermes-wheel-missing-web-dist`).
-11. **Prompt snapshot.** After the first hermes prompt build, `.skills_prompt_snapshot.json` should
-   exist under the hermes home. Read-only, so check presence only; if the lane cannot cause a
-   prompt build, record `skipped`.
+11. **(retired in kit 13)** The `.skills_prompt_snapshot.json` check is obsolete (regressions
+   `rc6_note`); item 3's `bundled_skills_linked` comparison replaces it.
 
 12. **Two views of one gateway.** Compare `:9119/api/status` `gateway_platforms` (`{}`) with `gateway_state.json` platforms (`api_server` connected). Probably upstream hermes behaviour; one line in the report, not a finding.
 13. **Smoke marker needs the retain op.** For the `memory_roundtrip` warn or pass, also read the marker's retain op: `status` `completed` with `facts_committed=0` and no error is a silent zero-fact extraction and explains a warn on a healthy box (#2671).
