@@ -75,6 +75,14 @@ applying. Add those subsections to a version's section to surface them; see
   zero tool calls and an invented answer on the shipped 1.1B steward; they are
   now rerouted to the tool model like any other ungrounded live-state answer
   (#2675).
+- `hal0 update --rollback` now waits up to 300 s for the server instead of
+  giving up after 10 s. The route re-pips the prior tree synchronously (13 s on
+  a 32-core box), so the CLI used to print `did not respond within 10s` and
+  exit 1 while the rollback completed and `hal0.previous` flipped, hiding the
+  reverted-to version and restart panel and inviting a second `--rollback` that
+  undid the first. If the wait still expires, the CLI says the server may still
+  be rolling back, how to check, and that re-running `--rollback` would flip
+  back (#2661).
 - A stack row whose slot the profile-centric conversion blocks now still drops
   the retired tuning keys (`vision`, `mtp`, `enable_thinking`,
   `server_extra_args`). Only the profile re-point is reverted. Before, the

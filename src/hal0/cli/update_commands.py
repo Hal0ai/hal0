@@ -44,6 +44,14 @@ from hal0.slot_lifecycle_budget import slot_lifecycle_timeout_s
 
 console = Console()
 
+#: Client read budget for ``POST /api/updates/rollback`` (#2661). The route is
+#: synchronous and always re-pips the prior tree into the venv (13 s on a
+#: 32-core box, 15 s end to end), so ``api_post``'s 10 s default reported a
+#: failure while the server finished the rollback and flipped ``hal0.previous``.
+#: 300 s matches the long-running-POST precedent of ``--restart-slots`` (#1832)
+#: and leaves ~20x headroom for a slow disk, a cold pip cache or a loaded box.
+_ROLLBACK_TIMEOUT_S = 300.0
+
 #: The `hal0 update` surface. The group callback runs the hal0 self-update
 #: (the historical behaviour of the bare `hal0 update`); `owui` is a sibling
 #: verb that updates the OpenWebUI companion image. Registered in main.py via
@@ -754,7 +762,26 @@ def update(
             console.print("[dim]rollback cancelled.[/dim]")
             return
         try:
-            body = api_post("/api/updates/rollback")
+            body = api_post("/api/updates/rollback", timeout=_ROLLBACK_TIMEOUT_S)
+        except CliApiTimeout as exc:
+            # The server may still be reinstalling, or may have finished after
+            # we stopped listening. Either way `hal0.previous` can already have
+            # flipped, so a second --rollback would undo this one (#2661).
+            console.print(f"[bold red]Error:[/bold red] {exc}")
+            console.print(
+                "[yellow]the server may still be rolling back, or may have finished "
+                "after the CLI stopped waiting.[/yellow]"
+            )
+            console.print(
+                "[dim]check with `hal0 update --check`, `cat current/VERSION` (under the "
+                "install root, e.g. /usr/lib/hal0) or `journalctl -u hal0-api | grep "
+                "updater.rollback`.[/dim]"
+            )
+            console.print(
+                "[bold yellow]do not re-run `--rollback` until you have checked: "
+                "it would flip back to the version you were leaving.[/bold yellow]"
+            )
+            raise typer.Exit(1) from exc
         except CliApiError as exc:
             die(str(exc))
             return
