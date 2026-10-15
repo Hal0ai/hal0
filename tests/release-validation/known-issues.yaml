@@ -17,70 +17,77 @@
 
 schema: 1
 updated: 2026-10-15
-updated_for: v1.4.0-nightly.20261014214325
+updated_for: v1.4.0-nightly.20261015021622
 
 known_issues:
   # ── Open defects, already tracked ───────────────────────────────────────────
 
   - id: profile-centric-blocked-profile-stripped
-    status: open
+    status: fixed
+    fixed_in: v1.4.0-nightly.20261015021622
     issue: 2648
     summary: >-
       A custom profile carrying --mmproj / --chat-template[-file] is reported BLOCKED by the
       profile-centric conversion but profiles.toml is rewritten without the flag on run 1, and
       run 2 converts the slot as unchanged, so the slot launches without the projector/template.
     review_at: v1.4.0
-    review_due: false
+    review_due: true
 
   - id: stacks-toml-invalid-after-reverted-row
-    status: open
+    status: fixed
+    fixed_in: v1.4.0-nightly.20261015021622
     issue: 2649
     summary: >-
       After upgrade, a stack row for a slot the conversion blocked keeps `vision = false`
       (retired key), so stacks.toml fails validation and every /api/stacks call errors until
       the block clears.
     review_at: v1.4.0
-    review_due: false
+    review_due: true
 
   - id: omni-pin-checked-after-queue-wait
-    status: open
+    status: fixed
+    fixed_in: v1.4.0-nightly.20261015021622
     issue: 2639
     summary: >-
       With image mode pinned and ComfyUI busy, an omni request blocks up to 600 s and then
       reports gpu.queue_busy instead of pinned; a hanging /queue blocks every image-tool request.
     review_at: v1.4.0
-    review_due: false
+    review_due: true
 
   - id: reset-key-remote-rotates-prints-local
-    status: open
+    status: fixed
+    fixed_in: v1.4.0-nightly.20261015021622
     issue: 2640
     summary: >-
       `hal0 auth reset-key` with HAL0_API_URL set rotates the remote box's key and prints the
       local api.env key as the new one.
     review_at: v1.4.0
-    review_due: false
+    review_due: true
 
   - id: hermes-primary-pick-ignores-chat-primary
-    status: open
+    status: fixed
+    fixed_in: v1.4.0-nightly.20261015021622
     issue: 2635
     summary: >-
       On a box with no `agent` slot, Hermes's main model is the alphabetically first llm slot
       while the auxiliary role map still picks `chat`/`primary`. Upgrade regression from #2550.
     review_at: v1.4.0
-    review_due: false
+    review_due: true
 
   - id: boot-drift-restart-bounces-nonllama-busy-slots
-    status: open
+    status: fixed
+    fixed_in: v1.4.0-nightly.20261015021622
     issue: 2634
     summary: >-
       The automatic post-start image-drift restart treats slots without a llama `/metrics`
       reading (ComfyUI, Kokoro, Qwen3-TTS, Moonshine, FLM, metrics=false, timeouts) as idle and
       restarts them mid-request.
     review_at: v1.4.0
-    review_due: false
+    review_due: true
 
   - id: shadowed-toml-marks-catalogue-partial
-    status: open
+    status: fixed
+    fixed_in: v1.4.0-nightly.20261015021622
     issue: 2631
     summary: >-
       With a stale same-named slot TOML beside the id-keyed file (e.g. `agent.toml` next to
@@ -88,10 +95,11 @@ known_issues:
       `slot.duplicate_toml` is logged on every enumeration. Regression from #2623 in this
       nightly. Record as `known`.
     review_at: v1.4.0
-    review_due: false
+    review_due: true
 
   - id: nightly-self-update-loop
-    status: open
+    status: fixed
+    fixed_in: v1.4.0-nightly.20261015021622
     issue: 2629
     summary: >-
       On a nightly build, `hal0 update --check`, the dashboard update badge and
@@ -100,7 +108,7 @@ known_issues:
       `__version__` instead of `installed_version()` (`current/VERSION`). Record as `known`;
       judge the installed build by `/usr/lib/hal0/current/VERSION` and `release.json`.
     review_at: v1.4.0
-    review_due: false
+    review_due: true
 
   - id: slot-logs-empty
     status: open
@@ -557,6 +565,10 @@ known_issues:
     review_due: true
 
   # ── Adjudicated by-design: MCP, CLI, UI ─────────────────────────────────────
+    v1_4_0_nightly_20261015_note: >-
+      Adjudicated again on 20261015021622: a malformed body is the same as a well-formed empty one
+      (6/6 runs read-only). Causal still_report_if is in brain-chat-malformed-body-is-empty-turn;
+      make the escalation clause causal (executed mutation on read_only=true), not a correlation.
 
   - id: mcp-lan-421-invalid-host
     status: by-design
@@ -599,6 +611,8 @@ known_issues:
       mutation); OR an MCP tool accepts an arg shape the equivalent REST call rejects.
     review_at: v1.1.0
     review_due: true
+    v1_4_0_nightly_20261015021622_note: >-
+      Stringified non-string path args are covered by mcp-admin-path-args-are-stringified.
 
   - id: cli-model-list-default-marker-column
     status: by-design
@@ -782,6 +796,9 @@ known_issues:
       recording it against both entries every release until it is fixed.
     review_at: v1.1.0
     review_due: true
+    v1_4_0_nightly_20261015021622_note: >-
+      Did not reproduce on 20261015021622 (crash-loop-lifecycle probe): delete left no failed
+      unit. Retire or re-adjudicate at the next release.
 
   - id: hermes-wheel-missing-web-dist
     status: by-design
@@ -1546,6 +1563,10 @@ known_issues:
       client-supplied name after #2663 ships; OR a chat-capable model is served by the
       embed/rerank slot.
     review_at: v1.5.0
+    v1_4_0_nightly_20261015021622_note: >-
+      A REGISTERED embedding/rerank id that no slot advertises also takes legacy_slot and gets the
+      default slot vectors under the requested label. Same #2663 line, not a separate finding; its
+      clause fires only after #2663 ships.
 
   - id: v1-malformed-body-404-agent
     status: by-design
@@ -1685,6 +1706,10 @@ known_issues:
       the slot lands anywhere but terminal `error` with slot.output_sanity_failed; OR the two
       test files above fail.
     review_at: v1.5.0
+    v1_4_0_nightly_20261015_note: >-
+      The second non-FPX gguf (ct150 utility qwen3.5-0.8b) and a kfd-visible ROCm-available lane
+      (ct150) both returned Paris on 20261015021622. Only 8e (garbage-backend conviction) remains
+      skipped. Do not file a coverage-gap finding for the other halves.
 
   - id: hermes-stream-stall-guard-exercised
     status: by-design
@@ -1709,4 +1734,217 @@ known_issues:
       past 4x the bound plus 60 s, or exits without the "[hal0] stall guard:" line; OR a stall
       frame is emitted on a stream that terminated normally; OR either [dispatcher] default is 0
       on a fresh install.
+    review_at: v1.5.0
+    v1_4_0_nightly_20261015_note: >-
+      Re-verified on 20261015021622 with an in-process Dispatcher against a TCP SSE stub (total 4
+      s -> 4.07 s, idle 2 s -> 2.07 s, normal stream 0 stall frames). Do not file the live-stall
+      run as a coverage gap; run the harness.
+
+  # ── Adjudicated on v1.4.0-nightly.20261015021622 ────────────────────────────────────────────
+
+  - id: slot-list-rest-includes-synthetic-hal0
+    status: by-design
+    adjudicated: v1.4.0-nightly.20261015021622
+    summary: >-
+      GET /api/slots (and /api/status .slots) merge a read-only pseudo-entry per configured
+      upstream, including the reserved `hal0` composite: kind "slot" (real slots are "local"),
+      id/state null, status "serving" while any catalogue model is loaded, _synthetic true, plus
+      _synthetic_reason.
+    why: >-
+      Deliberate for the dashboard's upstream-visibility feature; ui/src/dash/slots.jsx filters
+      by kind and tests/api/test_slots_routes.py::test_list_merges_real_and_synthetic pins the
+      merge. A REST consumer counts lifecycle slots with kind=="local". The AGENT-FACING count in
+      the MCP slot_list tool is a separate filed defect (#2697); do not re-file the REST shape.
+    still_report_if: >-
+      A synthetic entry carries kind "local" or a non-null id/state; OR a real slot carries
+      _synthetic true; OR a synthetic row appears in the dashboard slot grid or in `hal0 slot
+      list`'s loaded count; OR the composite reports status "serving" while none of its
+      advertised models is loaded.
+    review_at: v1.5.0
+
+  - id: hal0-agent-alias-lands-on-utility-when-agent-offline
+    status: by-design
+    adjudicated: v1.4.0-nightly.20261015021622
+    related_issue: 2665
+    summary: >-
+      With the agent slot model-less or offline, `hal0/agent` resolves to its per-type fallback
+      model id and, if several ready slots serve that id, is dispatched to one of them (e.g.
+      passthrough:utility). Same for a raw model id.
+    why: >-
+      Documented #1418 order (lane pin, then health, then declaration order) and ADR-0023 line
+      94 (Hermes main model: agent, else the first ready LLM slot in pool order). #2665's own "Not
+      part of this issue" section excludes it. Only the BARE slot alias (`model="brain"`) ignoring
+      the lane pin is the open defect (regression dispatch-slot-alias-ignores-lane-pin).
+    still_report_if: >-
+      The agent slot is itself READY and serving the requested model yet `hal0/agent` gets
+      passthrough:<other slot>; OR agent is bound to a model DIFFERENT from utility's and
+      `hal0/agent` lands on utility; OR the dispatch.decision line for a `hal0/agent` request does
+      not name the upstream that served it.
+    review_at: v1.5.0
+
+  - id: moonshine-weights-operator-staged
+    status: by-design
+    adjudicated: v1.4.0-nightly.20261015021622
+    related_issue: 2691
+    summary: >-
+      Applying a Moonshine STT selection returns 409 slot.weights_missing "moonshine weights
+      directory not found: /mnt/ai-models/local/moonshine"; moonshine-base-en is pullable:false.
+    why: >-
+      ADR-0001 decision 3 and docs/guides/voice-stt-tts.mdx make Moonshine weights
+      operator-staged at that default path with a loud preflight. The Whisper row advertised with
+      no runtime and the empty-device gpu-rocm fallback are separate filed defects (#2691, #2690).
+    still_report_if: >-
+      The preflight is silent (slot starts and serves nothing), or names a path other than the
+      configured weights dir, or a staged non-streaming bundle at the documented path still
+      fails with weights_missing.
+    review_at: v1.5.0
+
+  - id: brain-chat-malformed-body-is-empty-turn
+    status: by-design
+    adjudicated: v1.4.0-nightly.20261015021622
+    related_issue: 1840
+    summary: >-
+      POST /api/brain/chat with an unparseable body answers 200, no error frame, and the model
+      treats it as an empty user turn and makes read-only tool calls. In 6/6 runs no mutating or
+      admin tool was called; '{}' and an empty-content message behave identically.
+    why: >-
+      run_brain_chat turns a ValueError from json.loads into payload={} which _frame_messages
+      frames as the O18 empty user turn (see brain-chat-hand-parsed-body). A single create_task
+      attempt is model improvisation on an empty turn, refused by the shipped [brain_chat]
+      read_only=true. The shipped UI never sends such a body. Side question for an ADR check, not
+      a finding: with read_only=false board mutations (create_task etc.) run with only an audit
+      row and bypass the persona approval queue.
+    still_report_if: >-
+      An unparseable body reaches the model as anything OTHER than the framing of a well-formed
+      '{}' (raw bytes or partial JSON in the user turn); OR a mutating/admin tool call from such a
+      turn EXECUTES (board.chat.turn audit row, created task, slot/config change) on a box with
+      read_only=true; OR the shipped default of [brain_chat] read_only stops being true; OR a
+      shipped client is seen sending a body that hits the coercion path. A refused attempt is not
+      a finding.
+    review_at: v1.5.0
+
+  - id: update-job-record-is-a-snapshot
+    status: by-design
+    adjudicated: v1.4.0-nightly.20261015021622
+    summary: >-
+      /var/lib/hal0/update-jobs/<id>.json for a commit job whose post-activation migrations failed
+      (#2657) still reads converged=false / post_activation_migrations.ok=false after the
+      operator repaired the directory and restarted, even though the box converged.
+    why: >-
+      A job file is the durable snapshot of ONE attempt (api/routes/updater.py, #509), read only
+      by GET /api/updates/status/{job_id} for the poller that started it. It truthfully records
+      that attempt. Live convergence is `hal0 update status`, `hal0 runner-images migrate` /
+      `hal0 profile migrate` ("nothing to convert") and the boot-time updater.boot_migration_check
+      events; re-running `hal0 update --yes` creates a new job with converged=true.
+    still_report_if: >-
+      An operator-facing surface (hal0 update status, hal0 doctor, dashboard Updates/Overview,
+      /api/updates/state or /check) reads a historical job and reports the box not converged
+      after the boot retry or a re-run converted it; OR a job reports ok/converged true while its
+      own post-swap migration logged updater.post_swap_migration_failed; OR the boot retry still
+      fails to convert after `doctor perms --fix` + restart.
+    review_at: v1.5.0
+
+  - id: memory-extraction-retry-ladder-is-bounded
+    status: by-design
+    adjudicated: v1.4.0-nightly.20261015021622
+    related_issue: 1834
+    summary: >-
+      Probe gap, not a defect: regression memory-extraction-never-lands shows `partial` only
+      because a healthy box never provokes the retry ladder. The "attempt=4/4" string it looks
+      for no longer exists.
+    why: >-
+      The shipped caps (HINDSIGHT_API_LLM_TIMEOUT=300, RETAIN_LLM_MAX_CONCURRENT=1,
+      RETAIN_MAX_COMPLETION_TOKENS=4096, RETAIN_LLM_MAX_RETRIES=1, WORKER_MAX_RETRIES=2, backoff
+      120 s) are live in /proc/<hindsight pid>/environ on ct150 and ct151, and the vendored
+      poller/engine enforce them: ct150's failed extractions ended `failed` with retry_count=2 and
+      created_at preserved. Only consolidation retries indefinitely (upstream design; uncapped
+      output is #2669).
+    still_report_if: >-
+      A retain op returns to pending/processing after retry_count reached the effective
+      WORKER_MAX_RETRIES, or its age resets with hindsight-api NRestarts unchanged; OR an
+      extraction call on the utility slot shows n_predict above RETAIN_MAX_COMPLETION_TOKENS; OR a
+      retain stays processing longer than (WORKER_MAX_RETRIES+1) x (LLM_TIMEOUT + backoff), about
+      21 min, with no terminal state; OR the running environ lacks the RETAIN_*/WORKER_* caps the
+      shipped unit sets; OR requests_deferred stays non-zero across two 10-minute samples while
+      an interactive request to the slot is starved.
+    review_at: v1.5.0
+
+  - id: brain-fabrication-not-reproducible-on-shipped-default
+    status: by-design      # coverage gap in the regression, not a product defect
+    adjudicated: v1.4.0-nightly.20261015021622
+    related_issue: 2022
+    summary: >-
+      Regression brain-steward-fabricates-live-platform-state shows `partial` because the model
+      class it was filed against (hal0-brain-sft, ROCmFPX builds) is not installed anywhere in
+      the fleet; on the shipped default lfm2.5-2.6b every live-state probe made a grounded tool
+      call.
+    why: >-
+      Since rc.10 the installer default is lfm2.5-2.6b (install/brain_model.py BRAIN_MODEL_DEFAULT);
+      hal0-brain-sft is only the opt-in HAL0_BRAIN_MODEL override. A single prose miscount after a
+      correct, matching tool call (e.g. "5 models" listing a model not in /api/models) is
+      prose-vs-tool_result, not #2022.
+    still_report_if: >-
+      On the shipped default brain model (or an HAL0_BRAIN_MODEL override still in
+      BRAIN_MODEL_IDS) with the coherence canary passing, POST /api/brain/chat answers a
+      live-state question (port, slot state, model count, service health) with a specific wrong
+      value and ZERO tool_call frames, or calls a non-matching tool and reports that tool's result
+      as the answer, in >=2 of 3 tries. Guard-keyword misses on why/health phrasings stay with
+      #2675.
+    review_at: v1.5.0
+
+  - id: capability-apply-undownloaded-409-holds
+    status: by-design
+    adjudicated: v1.4.0-nightly.20261015021622
+    related_issue: 2026
+    summary: >-
+      #2026 is fixed: applying an undownloaded catalog row returns a typed 409
+      capability.model_not_downloaded with pull_endpoint before anything is written, and the
+      picker marks such rows "not downloaded" (rowNeedsPull in the served bundle).
+    why: >-
+      Verified live (409 in 0.05 s; capabilities.toml, slot TOML and pull-job count unchanged) and
+      in the served bundle. The crash-loop 200-vs-typed-500 question was carved out of #2026 by
+      the fix commit and belongs to capability-apply-persists-intent-on-lifecycle-failure.
+    still_report_if: >-
+      An enabled apply naming a row whose backends are all downloaded:false returns anything but
+      the typed 409; OR it changes capabilities.toml or a slot TOML, starts a hal0-slot@ unit or
+      creates a pull job; OR the 409 omits pull_endpoint/remediation for a pullable row; OR the
+      bundle stops rendering the "not downloaded" suffix; OR a shipped capability default names a
+      model the installer does not place on disk.
+    review_at: v1.5.0
+
+  - id: footer-slots-chip-counts-configured-slots
+    status: by-design
+    adjudicated: v1.4.0-nightly.20261015021622
+    related_issue: 1369
+    summary: >-
+      The footer SLOTS chip "N / M ready" varies between samples on a shared box.
+    why: >-
+      M counts CONFIGURED slots (model, model_default or model_id set; useRuntime.ts, #1369);
+      model-less slots are excluded on purpose. The chip reads one shared ['slots'] query, so it
+      cannot differ by page; it changes only when slots change (other lanes create, bind, load,
+      reap). It is amber whenever N < M. Relabelling it "configured" is cosmetic, not a finding.
+    still_report_if: >-
+      Two pages sampled within one 5 s poll, with /api/slots unchanged between them (prove it
+      with a fetch inside each page), show different N / M on
+      [data-testid=foot-health-runtimes]; OR M differs from the count of non-synthetic entries
+      with a model bound; OR the chip is green while N < M; OR a model-less slot is counted.
+    review_at: v1.5.0
+
+  - id: mcp-admin-path-args-are-stringified
+    status: by-design
+    adjudicated: v1.4.0-nightly.20261015021622
+    summary: >-
+      A non-string path arg to an admin MCP tool (slot_status name=123, ["x"], true, null)
+      comes back isError=true with slot.not_found quoting the stringified value, not a type error.
+    why: >-
+      _split_args (mcp/admin.py ~1704) applies str() on purpose: admin tools are a generated
+      proxy over REST routes and path params cannot carry a JSON type. The result matches the
+      direct REST call byte for byte (GET /api/slots/123, /api/slots/['x']). Slot names are
+      lowercase-only so a stringified bool/None/list/dict can never resolve a real slot. Only the
+      error-code wording is left: cosmetic. slot_by_id slot_id=123 is a valid integer id.
+    still_report_if: >-
+      A non-string path arg returns isError=false; OR the stringified value resolves a resource
+      the caller did not name and a mutating tool acts on it; OR it contains URL-structural
+      characters (? # % ..) and routes to a different endpoint than the tool's template; OR the
+      direct REST call with the same string returns a different status or code.
     review_at: v1.5.0

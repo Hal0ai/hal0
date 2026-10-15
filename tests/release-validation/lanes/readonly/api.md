@@ -115,6 +115,10 @@ Probe the REST surface from the workstation with curl against `$API` (from `CONT
    advertise (35 npu-only rows on ct151/ct150). Read-only: do not apply anything here, the
    capabilities lane does.
 
+16. **Security headers baseline.** Record which of `Content-Security-Policy`, `X-Frame-Options`, `X-Content-Type-Options` come back on `/` and `/api/status` (none on 1.4.0 nightlies). Observation, not a finding; report only a change against the previous report.
+17. **Empty-body 404 sweep.** List every GET under `/api` that answers 404 with `content-length: 0`, not only unknown paths.
+18. **Brief routes against the spec.** Assert every route this brief names is in `openapi.json`; a stale name is a kit defect, report it under kit feedback, not as a product finding. On a box with auth enabled (ct150 after the update, prod) an anonymous GET gets 401 `auth.required` before any body parse: use the key from `CONTEXT.md` or record `skipped`.
+
 ## Carry-forward
 
 Add a check here whenever an API defect is found by another lane or by a user. This lane is the

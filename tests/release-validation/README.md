@@ -135,6 +135,33 @@ known-issues, or regressions, and add a line to the changelog below. A report re
 
 ### Kit changelog
 
+* **12** (2026-10-15) — Curation from the v1.4.0-nightly.20261015021622 run (verified findings:
+  17 filed as #2690-#2706, 13 already tracked and commented, the rest refuted or ruled by-design).
+  `regressions.yaml`: 17 new entries (voice STT gpu-rocm fallback and Whisper row, utility
+  4-sequence KV pool, `heal_missing_llm_type` gating rerank/embed/tts, silent model unassign on
+  upgrade plus its two companions, MCP `slot_list` synthetic count, root-owned tombstone lock,
+  cancelled-parent op, identity cards re-added every boot, invalid-JSON 500s, dead
+  qwen3-4b-npu row, duplicate `model add` rows, stale hermes aliases, Overview "stopped" shown as
+  down, and a four-item polish rollup #2706); EVERY existing probe now carries this run's
+  `last_result` and 31 carry a `v1_4_0_nightly_20261015_note` (stale repros, probes that cannot
+  discriminate, entries to retire). Two regressions are expected fails because the fix is not in
+  this nightly: `brain-steward-no-memory-path` (f6cc2218) and `hermes-slot-list-payload-truncated`
+  (a9328ebe, in 20261015032919): re-probe on the first nightly containing each, do not reopen
+  #2658/#2662. `known-issues.yaml`: 10 new by-design entries (synthetic `hal0` row in REST,
+  `hal0/agent` landing on utility, Moonshine weights operator-staged, malformed brain body,
+  update-job record is a snapshot, bounded retain ladder, brain fabrication on the shipped
+  default, #2026 held, footer SLOTS chip, stringified MCP path args) plus notes on six existing
+  ones, the 8 entries due at v1.4.0 flagged `review_due`, and the findings the previous curation
+  flipped to `fixed` kept. Lane briefs gained 40 checks, almost all generalisations of the
+  defects found (unknown-name exit codes, doctor-vs-`test -w`, fresh-install ownership sweep,
+  apply-every-row twice including the UI-shaped no-backend request, slot `type` audit against
+  seeds, unassignment visible in `hal0 update` output); the three that need a hot-path test
+  are flagged to announce first because they kill other lanes' requests. Budget watch: stateful
+  lanes grew by 3-4 checks each; if a lane misses its budget next release, drop its
+  oldest `fixed`-for-three-releases checks first. `boxes.toml`: ct150 auth is now on, ct150
+  residue to record not fix, ct151 facts. The mechanical checks that should stop needing an
+  agent are listed in the curation report's promotion list.
+
 * **11** (2026-10-15) — Curation from the v1.4.0-nightly.20261014214325 run (31 verified findings:
   20 filed as #2657-#2676, 11 refuted or ruled by-design/wontfix). `regressions.yaml`: 20 new
   entries — ga-blocker `upgrade-migration-backups-eacces` (an upgraded box whose

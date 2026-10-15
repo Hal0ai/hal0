@@ -74,6 +74,11 @@ Speak MCP streamable-HTTP JSON-RPC with curl from the box (`127.0.0.1`), not fro
    (`{"args":{"name":123}}`) and assert the error is a type/validation error, not a coercion into
    `slot.not_found`. Remember args must be wrapped in `args`.
 
+14. **Gated tools validate args before queuing approval.** Call `slot_logs` (and one other gated tool) with a wrong-typed arg and confirm the error comes back before an approval is queued.
+15. **Annotation counts.** Count `readOnlyHint: true` and `destructiveHint: true` in `tools/list` against the rc.5 baseline (108 and 13 at last count) and report the delta.
+16. **Docs at the release tag.** Compare `docs/reference/mcp-tools.mdx` names against the tool list at the exact release tag, not the working tree HEAD.
+17. **`slot_list` count.** `count` should equal the number of `kind=="local"` rows in `/api/slots`; the synthetic `hal0` row makes it +1 (#2697, regression `mcp-slot-list-counts-synthetic-hal0`). Every REAL slot entry must have `id` and `state`; the synthetic row has both null by design (`slot-list-rest-includes-synthetic-hal0`). Non-string path args being stringified is `mcp-admin-path-args-are-stringified`: record `known`.
+
 ## Carry-forward
 
 The MCP surface is how other agents consume hal0, so *silent* protocol wrongness here is worse

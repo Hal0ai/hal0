@@ -95,6 +95,11 @@ did not ask for?**
    runner-images ls` Store against the 'Runner images converged' line; Store=missing is by design
    (`runner-images-converged-is-catalogue-only`).
 
+10. **Slot `type` audit.** For each `/etc/hal0/slots/*.toml` compare `type` with the shipped seed (embed=embedding, rerank=reranking, tts=tts) and run `output_sanity.skip_reason(cfg)` from the venv; any embed/rerank/tts slot where it returns None cannot load (#2693). Record, do not fix.
+11. **Attribution guard.** At lane start and end run `journalctl -u hal0-api --since <start> | grep -E '"(POST|PUT|DELETE|PATCH) '` (excluding /mcp/ and /v1/) and `ls -la /root` for new dirs. Name any foreign actor in the report and stop diffing state after its first call.
+12. **Remedy consistency and drift capture.** When `hal0 update` prints 'Run hal0 update --restart-slots', run it once: it must succeed or its refusal must name the real cause (cross-check `skipped_render_error` in `updater.post_start_image_drift_restart`). Capture `/api/updates/slot-drift` and `image_mismatch` together immediately after the migration, before any slot reload.
+13. **Units and idempotency.** `systemctl list-unit-files 'hal0-slot@*' | grep masked` against slots with a bound model (hal0 should say 'unit masked', not 'systemctl restart failed'); diff `/etc/systemd/system/hal0*.service` against `/usr/lib/hal0/current/installer/systemd/`; dry-run `hal0 runner-images migrate` and `hal0 profile migrate` must both say 'nothing to convert'.
+
 ## Leave behind
 
 The box healthy on the new version, with its accumulated state intact — it is the input to the

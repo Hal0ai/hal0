@@ -124,6 +124,10 @@ declare `utility` off-limits — say in your report which of the two you got.
    unknown keys are tolerated (200, lands in `shared`), a bogus `dataset` is 400. `known` per
    `memory-add-ignores-unknown-body-keys`; report only its `still_report_if`.
 
+15. **Identity-card growth.** Count `agent-identity` facts/documents in `/api/memory/banks/shared` (tags endpoint plus document list) and note each healthy hal0-api boot in the journal; one new Hermes and one new hal0-brain card per boot is #2700. Only restart hal0-api if the lane owner allows it; otherwise compare against the boot count.
+16. **Cancel a child, retry the child.** Cancel a retain child, `hal0 memory ops retry --bank <b> --id <child>`, then assert the parent id from `/api/memory/add` converges to completed (#2699). Retry of a pending PARENT should refuse (409) like the child. Delete the probe document afterwards.
+17. **Invalid JSON.** POST `{bad` to `/api/memory/add`, `/search`, `/recall`, `/delete`; a 4xx is correct, 500 `system.internal` is #2701. Note that `/api/memory/list` ignores an undocumented `tags` param silently; decide whether unknown query params should be rejected. The API exposes `updated_at` only, so time ops with `updated_at` on `status=completed`.
+
 ## Leave behind
 
 Memory enabled, utility slot loaded, brain healthy. Note the marker you stored and the state of

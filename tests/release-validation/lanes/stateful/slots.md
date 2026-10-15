@@ -171,6 +171,10 @@ immediately before you name a new throwaway resource, not only at lane start.
    `[model].default`; also after `slot edit --model` + unload, compare list Model with the TOML
    (stale runtime id). Delete the slot afterwards.
 
+14. **Fresh-install ownership sweep.** Straight after install, `find /var/lib/hal0 -user root ! -path '*/secrets*' ! -path '*/python*' ! -path '*/openwebui*' -type f`: nothing hal0-api must read or write may be root-owned (catches `state/components.json` and `registry/ignored-paths.json.lock`, #2670 and #2698, which `hal0 doctor perms` misses). Cross-check `doctor perms` against `sudo -u hal0 test -r/-w`.
+15. **Crash-slot warming window.** During the 180 s warming window of the crash slot sample `hal0 doctor verify` and `hal0 status` every 20 s and note when the failed unit is first surfaced relative to the error flip. A second `slot load` on an already-failed unit: does it fast-fail or wait the full window? Stop at 100 s and say so.
+16. **Where the image_pin refusal shows.** The load response is the generic 500 (#1424); also read `GET /api/slots/<n>` `metadata.message` and `hal0 slot show <n>`, and record whether either renders the refusal. On a kfd-less box `slot create --hardware rocm` is accepted; record whether the load response or only the slot record carries the GpuPreflightError text.
+
 ## Leave behind
 
 Brain slot loaded and healthy on the CPU-viable chat model; embed slot loaded (the memory lane

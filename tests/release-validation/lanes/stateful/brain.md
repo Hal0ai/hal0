@@ -108,6 +108,11 @@ question (e.g. `model_catalogue`, the pullable-HuggingFace list, answering "how 
 registered" instead of the local `list_models`). A frame-type check alone will not catch this;
 read the tool_result payload and confirm it actually answers what was asked.
 
+12. **Malformed body, repeated.** Send `{bad` four or more times and list every tool name called. A mutating name (create_task) is only a finding if it EXECUTES with `read_only=true` (`brain-chat-malformed-body-is-empty-turn`).
+13. **Counts and units against the tool_result.** Ask 'how many slots do I have' and 'check how many slots I have' and compare both with `kind=="local"` rows (the synthetic hal0 row explains +1, #2697); check VRAM figures in prose against `vram_mb` in the result within rounding (118,784 MB was stated as ~114 GB).
+14. **tool_model offline.** With `tool_model` pointed at an offline model-less slot, the final reply must not discard a successful `tool_result` for a plain port or state question (#2673). Restore hal0.toml by sha256.
+15. **Concurrency.** Fire six simultaneous brain turns at one 65536-ctx slot and note any 'Context size has been exceeded' 500 that the steward renders as a 'tools can't run' message (cause: `utility-profile-shared-kv-pool-overflow`, #2692). Announce first: it kills other lanes' in-flight requests. Out of scope but worth an ADR check: with `read_only=false` board mutations bypass the persona approval queue.
+
 ## Leave behind
 
 Brain healthy. Note any slot you loaded for the tool-model test, and restore `brain_chat` config
