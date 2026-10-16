@@ -66,6 +66,17 @@ applying. Add those subsections to a version's section to surface them; see
   If the box is offline the update still succeeds, and the remedy
   (`hal0 model pull kokoro-v1`) is reported and named by the slot's error
   (ADR-0030, #2739).
+- **api:** `systemctl stop`/`restart hal0-api` no longer hangs until systemd's
+  SIGKILL when a chat request is in flight. Cancelling that request flips its
+  slot serving -> ready, so the model-cache refresher was usually mid
+  `/v1/models` fetch when shutdown cancelled it; the HTTP client swallowed the
+  cancel and the refresher went back to waiting for events forever, leaving the
+  API down for ~100 s on most restarts with memory on. The refresher now honours
+  a swallowed cancel, every lifespan teardown step is bounded at 3 s (a stuck
+  step is logged as `hal0.api.shutdown_step_timed_out` and the shutdown
+  continues), and the installer writes `TimeoutStopSec=30` into
+  `hal0-api.service` (fresh installs and installer re-runs; `hal0 update` does
+  not rewrite that unit) (#2727).
 - **slots:** a stopped slot whose state record kept a stale `model_id` no
   longer claims it is "still serving" a model after its `[model].default` was
   emptied; the "still serving" wording is now only used while the slot is live
