@@ -115,7 +115,7 @@ read the tool_result payload and confirm it actually answers what was asked.
 
 16. **Reroute wording.** After `hal0 config reload`, point `[brain_chat] tool_model` at an offline model-less slot (a bare toml edit alone does not take effect) and require the final reply not to claim the brain "can't emit tool calls" once a `tool_result` frame was streamed (#2673; a context-size error from the tool model gets the same prose).
 
-17. **Table row vs tool_result, every row.** Compare each per-slot state the steward writes (running/serving/offline) with the matching `list_slots` row; summary sentences miscount on the 2.6B model (known prose-vs-tool_result), a contradicting TABLE ROW in >= 2 of 3 tries is a finding.
+17. **Table row vs tool_result, every row.** Compare each per-slot state the steward writes (running/serving/offline) with the matching `list_slots` row; summary sentences miscount on the 2.6B model (known prose-vs-tool_result), a contradicting TABLE ROW in >= 2 of 3 tries is a finding. Compare the Model cell too, not just State (the 2.6B steward copied kokoro-v1 into the qwen3tts row). Copying an offline slot's stale `model_id` beside the word "offline" is faithful (`known-issues: slot-model-id-is-runtime-not-binding`).
 
 18. **Unit conversion.** Ask "how much VRAM does this machine have" 6 times; regex every GB figure and require it within 1% of `gpu_vram_total_mb`/1000 or /1024 (#2728: 114.5/114.8 GB for 118784 MB in 6 of 7 runs). Also run it on the unprompted hardware summary: the tenfold dropped digit (`11.9 GB`) appeared there and in a normal question. Judge conversions against the `tool_result` only; MB used/free are copied correctly and `gpu_util` is a 0..1 fraction.
 
@@ -125,7 +125,11 @@ read the tool_result payload and confirm it actually answers what was asked.
 
 21. **Reads must not write.** After any recall turn ('what is my X'), diff the memory bank fact/doc count before and after; a write on a read intent is a finding.
 
-22. **Slot registry vs slot TOML.** After a previous stage restores a slot TOML, compare `/api/slots/<n>` `model_id` with the TOML (`agent` showed `lfm2.5-2.6b` with `no model assigned`); attribute stale state to the stage that edited it before filing.
+22. **Slot registry vs slot TOML.** After a previous stage restores a slot TOML, compare `/api/slots/<n>` `model_default` with the TOML and `/var/lib/hal0/slots/<n>/state.json` with the API. `model_id` differing from the TOML is the last-loaded id, by design (`slot-model-id-is-runtime-not-binding`); only `model_default` disagreeing with the TOML is a finding. Attribute stale state to the stage that edited it before filing.
+
+23. **Queue depth at entry, and first-frame latency under consolidation.** Snapshot `hal0 memory ops list` pending/processing at lane entry (backlog from earlier stages made 3 of the first 4 turns take 94-283 s in 20261016003929; run this lane before anything wakes hermes or Hindsight where you can). Record first-frame latency while a consolidation runs: it must stay below `completion_timeout_s` (300 s) and the turn must end in `done` (188 s first frames were seen).
+
+24. **Clean up what the steward stored.** Delete the facts `memory_add` created through the shipped API, as the owner: `POST /api/memory/delete` with `X-hal0-Agent: hermes__hal0-brain` and the WORLD unit id (anonymous delete returns `{deleted:0}` by design, `memory-delete-private-withheld-silently`; an observation id returns 0 even as owner, #2747 filed). Otherwise the memory lane inherits the rows.
 
 ## Leave behind
 

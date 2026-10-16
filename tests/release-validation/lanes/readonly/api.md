@@ -3,6 +3,14 @@
 Probe the REST surface from the workstation with curl against `$API` (from `CONTEXT.md`).
 **GET only.** No POST/PUT/DELETE.
 
+## Shapes you will otherwise rediscover
+
+`/api/slots` and `/api/models` return top-level arrays (or `{models:[...]}` for some routes), so the
+`(.slots // .)` idiom fails on this build. Catalog row `backends` are objects, not strings: compare
+by `.backends[].id` (a single jq line makes check 15 mechanical). The slot payload has NO `device`
+key (use `declared_backend`; `known-issues: slot-view-has-no-device-key`), and the detail routes for
+`flm`, `img`, `tts` and `qwen3tts` carry no ctx fields: record them separately in check 4.
+
 ## Checks
 
 1. **Route inventory.** `GET $API/api/openapi.json` first — it is the source of truth for what
@@ -87,7 +95,7 @@ Probe the REST surface from the workstation with curl against `$API` (from `CONT
     claims. On an auth-enabled box, confirm anonymous requests are actually rejected.
 11. **Headers.** Record the response headers verbatim (CORS, security headers, server banner) so
     a silent change in exposure posture shows up in next release's diff.
-12. **Capabilities backend fan-out, local vs catalog** — regression
+12. **Capabilities backend fan-out, local vs catalog** (this check needs one `hal0 model add`, a mutation this GET-only lane does not allow: run it in the capabilities lane's check 1 unless CONTEXT.md allows it here) — regression
     `capabilities-catalog-advertises-unavailable-gpu-rocm-for-registry-models`. On a box whose
     `/api/hardware` shows every GPU `compute_capable: false`, compare the per-model `backends`
     list in `GET /api/capabilities` between a CATALOG/curated row and a LOCALLY-added model of
@@ -121,7 +129,7 @@ Probe the REST surface from the workstation with curl against `$API` (from `CONT
 
 19. **Redaction of count keys.** `jq '[paths(type=="object" and .value=="***REDACTED***")|join(".")]'` over `/api/settings`; the only masked leaf expected is `memory.graph.extraction_max_tokens` (known-issues `settings-redacts-token-count-keys`). A new masked leaf, or a masked number on any other surface, is a finding.
 
-20. **Missing field, not just invalid JSON.** POST `{"q":"x"}` to `/api/memory/add`, `/search`, `/recall`, `/delete`; add and recall answer 400 `validation.invalid`, search and delete answer 500 `system.internal` (#2701 scope). Any other route that 500s on a client mistake is the same class.
+20. **Missing field, not just invalid JSON.** POSTs are out of scope here; the memory lane's check 17 owns `{bad` and `{"q":"x"}` against `/api/memory/{add,search,recall,delete}` (#2701).
 
 21. **Bank sub-resource 404 uniformity.** Walk the 15 `/api/memory/banks/nosuchbank/*` subpaths; record the error codes (memory.engine_error on 14, memory.bank_not_found on profile). Observation; report only a change.
 

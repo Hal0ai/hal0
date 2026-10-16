@@ -83,13 +83,16 @@ Speak MCP streamable-HTTP JSON-RPC with curl from the box (`127.0.0.1`), not fro
 
 19. **Docs names are a subset of served names**, not only a superset: a renamed or removed tool still named in `mcp-tools.mdx` is a docs defect.
 
-20. **`slot_list` count and marker.** `count` equals the number of `kind: local` rows in `/api/slots`, or the composite `hal0` row is marked; count = real + 1 with no marker is #2697 (known, record it; #2688 also dropped `_synthetic`).
 
-21. **Classify the gated tools before sweeping them.** From the live `tools/list` split the GATED_TOOLS into (a) tools with PATH args, (b) tools whose required args are BODY fields only, (c) tools with no required args. Only (a) and (b) can queue a malformed call (26 and 7 of 55 on 200136); for (c) `{}` is schema-valid and `pending_approval` is correct (#2722). Type errors and `name=123` are excluded (`mcp-admin-path-args-are-stringified`). Assert the GATED_TOOLS list parsed from the release tag source matches the `gated` flag in `/api/mcp/servers` `tool_details`.
+21. **Classify the gated tools before sweeping them.** Parse the split mechanically from the live `tools/list` plus the release-tag source rather than by hand (the 33-with-required-args / 22-without count was done by hand and must stay reproducible); this is a pytest candidate. From the live `tools/list` split the GATED_TOOLS into (a) tools with PATH args, (b) tools whose required args are BODY fields only, (c) tools with no required args. Only (a) and (b) can queue a malformed call (26 and 7 of 55 on 200136); for (c) `{}` is schema-valid and `pending_approval` is correct (#2722). Type errors and `name=123` are excluded (`mcp-admin-path-args-are-stringified`). Assert the GATED_TOOLS list parsed from the release tag source matches the `gated` flag in `/api/mcp/servers` `tool_details`.
 
 22. **Leave the approvals inbox empty.** Every approval you queue, you deny (`POST /api/agent/approvals/<id>/deny`); record `GET /api/agent/approvals` empty at lane exit. Repeat calls dedupe (one row, `hit_count` grows), so count rows, not calls.
 
 23. **Annotation counts for both servers.** Report readOnly and destructive counts for memory as well as admin (13/3 for memory on 200136). When diffing docs names against served names, restrict the regex to the tool-column cells of the tables; an all-backticks regex pulls in field and error names.
+
+25. **Memory server argument contract.** `memory_search` accepts FLAT args while the admin tools require them wrapped in `args` and reject flat ones. Record both shapes with one call each and say whether the difference is documented in `connect-mcp.mdx`; unresolved whether it is intended, so report `warn` with the exact calls, not `fail`.
+
+26. **Annotation rationale.** Compare `destructiveHint` against the tool-name verb family (`npu_backend_unload` is `destructive=true` while `slot_unload` is `false`); list every family where sibling verbs disagree. Observation only until the rationale is written down.
 
 24. **Connect paths.** Probe `/mcp/admin/mcp` and `/mcp/memory/mcp` directly; bare `/mcp`, `/mcp/` and `/mcp/admin` return 405 and cost time-outs when probed blindly.
 

@@ -78,7 +78,11 @@ the fact otherwise:
      ActiveFPX model keeps its settings with an empty model, every change is in the
      `migrate.runner_system` journal lines, a `runners-<ts>.tar.gz` backup exists under
      `/var/lib/hal0/backups/`, and `hal0 runner-images migrate` then reports nothing to convert. See
-     `regressions.yaml: runner-system-conversion`.
+     `regressions.yaml: runner-system-conversion`. On an already-converted box (ct150 since
+     2026-10-14) only idempotence is observable (`nothing to convert`, `updater.migrations_noop`, no new
+     `runners-*.tar.gz`, backup 0600 without hal0.db); the old-shape remap needs a synthetic fixture
+     (unit test). Use `hal0 config show` (there is no `hal0 settings`) and the journal events
+     `updater.migrations_noop` / `migrate.runner_system.applied`.
    * **5c. Perf-row reference envelope, now inverted.** If bench numbers are captured for this
      upgrade (`hal0 bench` or the #1948 §3-C matrix commands), record decode/prefill for BOTH
      `gpu-rocm` and `gpu-vulkan` on this box (kfd present, so both lanes are reachable — Vulkan
@@ -117,7 +121,9 @@ the fact otherwise:
    (#2657). BEFORE the update record `stat -c '%U:%G %a' /var/lib/hal0/backups` and `su -s /bin/sh
    hal0 -c 'touch /var/lib/hal0/backups/.probe'`. root:hal0 2755 silently breaks the
    post-activation migration. Do not fix it by hand before the run; record it, then report what the
-   update does.
+   update does. On ct150 the precondition is GONE (repaired by an earlier `doctor perms --fix`, box
+   converted 2026-10-14): record the mode and move on; the EACCES repair branch (#2680) is a unit-test
+   job (regressions `upgrade-migration-backups-eacces`, promote_ready).
 9. **'applied' is not 'done'.** After `hal0 update --yes` assert `convergence.converged=true` in
    `/var/lib/hal0/update-jobs/*.json` and that `hal0 update status` exits 0. Then run `hal0
    runner-images migrate` and `hal0 profile migrate` as dry runs and assert 'nothing to convert',
@@ -126,13 +132,13 @@ the fact otherwise:
    `update-components-pending-no-guidance`.
 10. **Rollback timing and TOML diffs.** `time hal0 update --rollback --yes` and compare the CLI exit
    code with `updater.rollback_ok` in the journal (re-pip takes ~15 s against the CLI's 10 s cap:
-   `update-rollback-cli-timeout`, #2661); never run it twice. Diff `/etc/hal0/slots/*.toml`
+   `update-rollback-cli-timeout`, #2661); never run it twice (the real rollback on this 32-core box takes ~8 s, under the old 10 s cap, so only a stub that sleeps 13 s and answers `HEAD /api/status` plus `POST /api/updates/rollback` discriminates #2661: that belongs in a unit test; the live run only proves the restart panel prints). Diff `/etc/hal0/slots/*.toml`
    `[model].default` against `hal0 slot list` models to catch silent fallback substitution (agent
    v3-q8-ffneq-lateq6 vs lfm2-5-2-6b-q8-0). New slot TOMLs (flm-embed, flm-stt) can be created by a
    restart on the old tree; do not attribute them to the upgrade without the before-snapshot diff.
 
 11. **Brain survives the conversion.** After the conversions assert each slot's `[model].default` is non-empty and `model_id` equals it; if a slot lost its model (brain on a fork-only quant), `hal0 update --restart-slots` must succeed or the verdict must name the cause (#2694-#2696, regressions `upgrade-silent-model-unassign` etc.). Also assert installed=true models have their file on disk.
-12. **Version identity and roll-forward.** For nightly-vs-nightly rollback judge by `/usr/lib/hal0/current/VERSION`; `/api/health` and `hal0 --version` say `1.4.0`. Run the roll-forward as its own step and record its exit code. `hal0 doctor perms --fix` prompts on stdin and aborts over ssh: use `--force` or a pty.
+12. **Version identity and roll-forward.** For nightly-vs-nightly rollback judge by `/usr/lib/hal0/current/VERSION` read before and after each rollback and roll-forward; `/api/health` and `hal0 --version` say `1.4.0`. Run the roll-forward as its own step and record its exit code. `hal0 doctor perms --fix` prompts on stdin and aborts over ssh: use `--force` or a pty.
 13. **Log noise.** Count `profiles.unknown_keys_kept` journal lines per minute before and after the conversions (about 2000 multi-line entries in 9 minutes before the fix); after it must be 0. Do NOT file a stale update-job record after a repair (`update-job-record-is-a-snapshot`).
 
 14. **API downtime across the update.** Run a 1 s `/api/health` poller across `hal0 update --yes`; downtime < ~30 s and no `stop-sigterm timed out` / `Failed with result 'timeout'` for hal0-api (#2727). Time `systemctl restart hal0-api` THREE times with a request in flight: the stall is intermittent.
@@ -145,9 +151,14 @@ the fact otherwise:
 
 18. **Attribute concurrent clients first.** Before timing anything on ct150 list who else is using it: `ss -tn | grep :8080`, the hermes pid, whether the agent slot is serving. Record `uptime` load average and agent-slot state before every restart or downtime measurement (agent traffic pushed load to 190 and distorted a 69 s startup).
 
-19. **Version identity on nightlies.** `/api/health` and `hal0 --version` say `1.4.0` for every nightly, so `cat /usr/lib/hal0/current/VERSION` before and after each rollback and roll-forward; that file, not the health comparison, shows convergence.
 
 20. **Roll-forward waits for the API.** Poll `/api/health` for 200 before `hal0 update --yes` after a restart (an immediate attempt exited 1 while the API was starting), and after `--yes` returns 0 keep polling: the CLI exits 0 with `update applied` while hal0-api can be down up to ~100 s when the stop hangs (#2727). Record the outage length.
+
+21. **Make #2727 a numeric assertion.** On a nightly that contains the #2746 fix, three `systemctl restart hal0-api` with a streaming request in flight to a serving slot must each stop in < 30 s with no `stop-sigterm timed out` (the new tree took 20.3-20.5 s x3). The update's own restart runs the OLD process and still hangs, so take the proof from the SECOND restart onward. An in-flight stream gets a bare HTTP 500 ('Cancel N running task(s), timeout graceful shutdown exceeded') on every restart: note it, cosmetic.
+
+22. **Who woke the GPU slots.** Around the first `hal0-api` restart list `podman ps` and `dispatch.decision` `resolution_path` before and after, so a Hindsight-woken 27B agent (via `hal0/utility`, #2741) is attributed instead of blamed on the upgrade; box UTC-4.
+
+23. **Registry diff across the update.** Diff `/api/models` before and after: the first update to a build with the #2739 fix adds `kokoro-v1` (`updater.kokoro_bundle_pulled`) and nothing else should appear or vanish. Compare each slot TOML `[model].default` with the API `model_id` in the BEFORE snapshot so coder/flm-style mismatches are recorded as pre-existing (`known-issues: slot-model-id-is-runtime-not-binding`).
 
 ## Leave behind
 
