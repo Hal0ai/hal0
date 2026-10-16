@@ -3353,6 +3353,10 @@ smoke_structured_output() {
         key="$(grep -oP '(?<=^HAL0_CLIENT_KEY=).*' /etc/hal0/api.env 2>/dev/null | head -1 || true)"
         [[ -n "${key}" ]] && auth=(-H "Authorization: Bearer ${key}")
     fi
+    # `${auth[@]+"${auth[@]}"}` expands the (possibly empty) array under
+    # `set -u` on bash < 4.4; shellcheck reads the quoted element as a string
+    # whose quotes would be lost (SC2090), which does not apply to arrays.
+    # shellcheck disable=SC2090
     resp="$(curl -fsS -m 120 -X POST "http://127.0.0.1:${HAL0_PORT}/v1/chat/completions" \
         -H 'Content-Type: application/json' ${auth[@]+"${auth[@]}"} \
         -d "${body}" 2>/dev/null)" || return 1
