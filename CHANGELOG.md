@@ -30,207 +30,31 @@ applying. Add those subsections to a version's section to surface them; see
 
 ## [Unreleased]
 
-### Added
-
-- The dashboard steward now has a real memory. Brain chat offers it
-  `memory_add`, `memory_search` and `memory_list`, scoped server-side to the
-  `hal0-brain` persona's namespace (`private:hermes__hal0-brain`); the model
-  cannot name another bank, and every other `memory_*` tool stays hidden.
-  Before, every memory tool was filtered out and nothing stored, so "remember
-  that my cat is called Zorbo" got "I've noted that" with nothing saved. The
-  steward's own `memory_add` works under the default `[brain_chat]
-  read_only = true`, the persona and fallback prompts tell the model to call
-  `memory_add` before claiming it remembered anything, and a "remember ..." or
-  "what did I tell you ..." turn answered with no tool call is rerouted to
-  `[brain_chat] tool_model` (#2658).
-
-### Fixed
-
-- `hal0 doctor verify` and `GET /api/doctor` no longer report "3 active: embed, img,
-  voice" on a fresh install: a capability group now counts as active only when
-  at least one of its selections is enabled, so the "none active" warning and its
-  enable next step are reachable again (#2736).
-
-- A slot unload whose stop outlives the 30 s terminate budget now converges to `offline` once the teardown finishes (with a one-time "converged to offline" message) instead of sticking in `error`; the upstream is deregistered when the late teardown lands, and `_wake_capability_slot` runs the convergence so capability requests auto-load the slot after an api restart instead of 404ing `dispatch.no_route` (#2738).
-- **tts:** the Kokoro slot now launches from the bundle `hal0 model pull
-  kokoro-v1` installs, instead of a hardcoded `/mnt/ai-models/local/...`
-  path that a fresh install never has. Before, every tts start downloaded
-  about 354 MB from GitHub into the container's throwaway filesystem, and a
-  box without internet access could not speak. The pull now installs
-  `kokoro-v1.0.onnx` and `voices-v1.0.bin` under `<store>/tts/kokoro-v1/`,
-  the provider passes that directory as `--model_path` from the configured
-  store, and the seeded `kokoro` profile names no path. A missing bundle
-  fails the slot with `slot.weights_missing` naming the pull command. On
-  upgrade, `hal0 update` pulls the bundle once when kokoro is in use and the
-  store lacks it, replacing the mislabelled `model.gguf` an earlier pull left.
-  If the box is offline the update still succeeds, and the remedy
-  (`hal0 model pull kokoro-v1`) is reported and named by the slot's error
-  (ADR-0030, #2739).
-- **api:** `systemctl stop`/`restart hal0-api` no longer hangs until systemd's
-  SIGKILL when a chat request is in flight. Cancelling that request flips its
-  slot serving -> ready, so the model-cache refresher was usually mid
-  `/v1/models` fetch when shutdown cancelled it; the HTTP client swallowed the
-  cancel and the refresher went back to waiting for events forever, leaving the
-  API down for ~100 s on most restarts with memory on. The refresher now honours
-  a swallowed cancel, every lifespan teardown step is bounded at 3 s (a stuck
-  step is logged as `hal0.api.shutdown_step_timed_out` and the shutdown
-  continues), and the installer writes `TimeoutStopSec=30` into
-  `hal0-api.service` (fresh installs and installer re-runs; `hal0 update` does
-  not rewrite that unit) (#2727).
-- **slots:** a stopped slot whose state record kept a stale `model_id` no
-  longer claims it is "still serving" a model after its `[model].default` was
-  emptied; the "still serving" wording is now only used while the slot is live
-  (ready/idle/serving), and an offline slot gets the plain "no model assigned"
-  message (#2715, follow-up to #2694).
-- **catalog:** removed the three `whispercpp` STT rows (Whisper-Tiny, Whisper-Base,
-  Whisper-Large-v3-Turbo) and the `whispercpp` provider mapping: hal0 never
-  shipped a whisper.cpp runtime (ADR-0001), so the picker offered a model no
-  slot could serve. The omni bundle manifests no longer list them, and a
-  `voice.stt` selection whose provider has no runtime profile now fails with
-  `capability.no_engine_for_provider` instead of being rebound to the Moonshine
-  runner (#2691).
-- **normalize:** a `/v1` request carrying `response_format` (json_object/json_schema) or a llama.cpp `grammar`/`json_schema` now gets the default `chat_template_kwargs.enable_thinking=false` like any other request, so a Qwen3-family thinking-by-default model on the Hindsight extraction slot no longer spends the whole completion budget reasoning and returns 0 facts on every retain. The #2020 exemption now applies only to a model whose registry `chat_template` is `hal0-brain-sft`, and a profile's explicit `enable_thinking = false` is honoured on grammar requests on every template (#2713).
-- **slots:** healing a type-less slot TOML no longer stamps `type = "llm"` on a rerank/embed/tts slot: the type now follows the profile, then the slot name. The output-sanity gate also skips an `llm`-typed slot whose profile or launch flags carry `--reranking`/`--embedding`, and `hal0 doctor profiles --fix` rewrites an already-healed `type = "llm"` on a non-chat profile; the failure message now names that remedy (#2693).
-- **updater:** a slot whose model the runner-system conversion unassigned (a
-  ROCmFPX/ROCmFP4/IU4/ActiveFPX quant no runner can load, ADR-0028 §7) is now
-  reported where the operator sees it. `hal0 update` prints one line per slot
-  naming the slot, the dropped model and the fix (`hal0 slot edit <slot>
-  --model <id>`, with `lfm2.5-2.6b` as the brain example); before, the warning
-  reached only the hal0-api journal (#2694). A slot still serving a model
-  whose `[model].default` is empty now carries a `message` on `/api/slots`
-  saying so, instead of reading idle with `message` null. Its render error
-  says "has no model assigned ([model].default is empty)" with the same fix,
-  instead of blaming a registry lookup (#2695). The exit-2 verdict no longer
-  sends a slot whose launch command does not render to
-  `hal0 update --restart-slots`, which skips such a slot; it names the slot's
-  own fix instead (#2696).
-- **capabilities:** saving voice.stt with no device (the dashboard sends only `{model, enabled}` and a fresh install seeds `device=""`) no longer falls back to a `gpu-rocm` stt slot that 503s on a host without `/dev/kfd`. The device is now resolved server-side from the advertised backends (non-GPU, supported by the selected model), and a host where nothing fits gets 400 `capability.no_engine_for_device` before any slot file is written (#2690).
-- **slots:** the seed `utility` and `agent` profiles now launch llama-server with `--parallel 1`. Without it llama-server ran `-np auto` (4 sequences sharing one 65,536-cell unified KV pool), so one combined overflow returned HTTP 500 "Context size has been exceeded" to every in-flight request on the slot, including unrelated Hindsight extraction/consolidation calls and Hermes turns. Capacity is now deterministic; concurrent callers queue instead of failing each other (#2692).
-- **slots:** the seed `brain` profile now launches llama-server with `--parallel 1` too (#2692 pinned only `utility` and `agent`). Without it brain ran `-np auto`: 4 sequences on one 65,536-cell unified KV pool, so roughly four concurrent steward rounds (~16k tokens each) overflowed the pool and every in-flight brain request got HTTP 500 "Context size has been exceeded". Concurrent brain callers now queue instead (#2714).
-
-- **mcp:** the hal0-admin `slot_list` result is now a compact roster (name, id, state, `loaded`, model id, backend, port, container health, image tag) sent as one compact-JSON text block with no duplicate `structuredContent`, instead of ~2.9 KB per slot. Hermes 0.19.0 cuts any tool result over its per-result budget (39,321 chars at 65,536 ctx) to a 1,500-char preview on `hermes -z` turns, so a box with 14+ slots was answered from a truncated first slot. `resolved_command`, the full `image` ref and nested tuning are no longer in the list; `slot_status` / `slot_by_name` still return the full row (#2662).
-- **ui:** a vulkan-only GPU (render node passed through, no `/dev/kfd`) now counts as a GPU on the Overview utilization row and health strip and on the Settings Live-hardware and Power & thermal panels, instead of reading "no GPU access" while a vulkan slot is serving; the NPU rows gate on the NPU probe rather than the GPU one (#2674).
-- A profile whose `profiles.toml` entry fails validation is no longer
-  invisible. It is quarantined as before, but `GET /api/profiles` and
-  `hal0 profile list` now show it as a read-only row with the reason, the
-  Profiles page lists it under "Needs attention", and `hal0 profile delete`
-  (or the page) removes it. The `profiles.invalid` message on a slot bound to it
-  now says to recreate the profile under the same name or delete it, instead of
-  pointing at `hal0 profile edit`, which cannot see a quarantined entry (#2653).
-- A host with an NPU but no FLM runner image no longer lists NPU-only models
-  in the capability catalogs, and a capability apply naming backend `npu` on
-  it (API or `hal0 capabilities set ... --backend npu`) is refused with 400
-  `capability.backend_unavailable` instead of returning 200 `pending_reload`
-  and committing a selection that can never serve (#2659).
-- The post-update runner-system and profile-centric conversions no longer
-  fail on a box whose `/var/lib/hal0/backups` a root-run tool created as
-  `root:hal0 2755`. Before, `hal0-api` (`User=hal0`) could not write the
-  backup, reported "nothing was changed", and every restart hit the same
-  error, so the box stayed unconverted. The conversion now makes a
-  directory it owns `2775`, and otherwise fails with the directory, its
-  owner and mode, and the fix. `hal0 doctor perms` now reports and fixes the
-  directory (`hal0:hal0 2775`), `install.sh` creates it that way, and the
-  `hal0 update` "Migration incomplete" panel names the fix instead of only
-  saying to restart (#2657).
-
-- A running slot whose launch command no longer renders (for example a
-  profile-centric slot that still carries `[model].context_size`) now shows
-  up in `GET /api/updates/slot-drift` and the `hal0 update` summary with its
-  image drift and a `render_error` that says why. Before, the drift check
-  returned nothing for it, so the summary said "no slots need restart" while
-  `/api/slots` reported `image_mismatch`. The automatic image-drift restart,
-  the CLI's post-apply restart, `hal0 update --restart-slots`, `slot load`'s
-  re-converge, and an unnamed `POST /api/updates/restart-slots` leave such a
-  slot running and list it under `skipped_render_error`, since a restart
-  would fail to render and take it down. Naming the slot in
-  `POST /api/updates/restart-slots` (without `skip_busy`) still restarts it
-  (#2660).
-- The brain's live-state grounding guard (#2022) no longer lets "why is/are/do/does"
-  phrasing hide a live-state question, and now recognises services, health,
-  memory and hindsight as subjects. "Why is the agent slot offline?" and "Is the
-  hindsight memory service healthy?" under a brevity clause were answered with
-  zero tool calls and an invented answer on the shipped 1.1B steward; they are
-  now rerouted to the tool model like any other ungrounded live-state answer
-  (#2675).
-- `hal0 update --rollback` now waits up to 300 s for the server instead of
-  giving up after 10 s. The route re-pips the prior tree synchronously (13 s on
-  a 32-core box), so the CLI used to print `did not respond within 10s` and
-  exit 1 while the rollback completed and `hal0.previous` flipped, hiding the
-  reverted-to version and restart panel and inviting a second `--rollback` that
-  undid the first. If the wait still expires, the CLI says the server may still
-  be rolling back, how to check, and that re-running `--rollback` would flip
-  back (#2661).
-- A stack row whose slot the profile-centric conversion blocks now still drops
-  the retired tuning keys (`vision`, `mtp`, `enable_thinking`,
-  `server_extra_args`). Only the profile re-point is reverted. Before, the
-  row kept them, `StackSlotEntry` rejected the rewritten `stacks.toml`, and
-  every `/api/stacks` call failed until the block cleared. The migration plan
-  no longer reports a drop it reverted (#2649).
-- Hermes's main model and its auxiliary role map now agree on one slot. On a
-  box with no `agent` slot, `_resolve_primary_slot` and the role resolver both
-  take the first ready LLM slot in pool order (`chat`/`primary` are no longer
-  special, per ADR-0023), and log the fallback as
-  `hermes.primary_slot_fallback` / `role_slots.main_fallback` instead of
-  choosing silently (#2635).
-- **omni:** a pinned image mode is now reported at once instead of after the
-  ComfyUI queue wait, and a chat request waits at most 15 s for the caller
-  restore (the detached restore keeps its 600 s queue wait), so a busy or
-  unreadable `/queue` no longer holds a request for ten minutes and ends in
-  `gpu.queue_busy` (#2639).
-- The boot-time image-drift restart no longer bounces slots it cannot prove idle. A slot with no `/metrics` reading (ComfyUI, Kokoro, Qwen3-TTS, Moonshine, FLM, llama slots without `--metrics`, or a timed-out scrape) used to count as idle and could be restarted mid-request; it now lands under `skipped_busy`. The explicit `hal0 update --restart-slots` keeps its behaviour. The runner-catalogue boot sync task is also cancelled at shutdown. (#2634)
-
-- `hal0 auth reset-key` now refuses, with a non-zero exit, when `HAL0_API_URL`
-  points at a non-loopback host. It edits this box's `api.env`, so it used to
-  rotate the remote box's key (e.g. under `sudo -E`) while printing this box's
-  unchanged key as the new one (#2640).
-- A box already on the newest nightly no longer offers that same nightly to
-  itself as an update. `GET /api/updates/check` and `GET /api/updates/state`
-  now compare the release manifest against the installed release
-  (`current/VERSION`) instead of the wheel base version, so the dashboard and
-  API stop reporting `1.4.0` → `1.4.0-nightly.<stamp>` forever (#2629).
-- The Hindsight engine upgrade pass no longer downgrades the engine. When the
-  installed `hindsight-api` is newer than the version the running hal0 tree
-  pins (for example after `hal0 update --rollback`), the pass now stops with
-  status `ahead` and a remedy instead of rebuilding an older engine onto the
-  newer database schema, and the boot-time check logs the same. Update hal0 to
-  a release pinned at or above the installed engine, or restore
-  `.pg0.pre-<pin>` by hand with the matching venv (#2613).
-- Two slot TOMLs that declare the same `name` no longer both load. hal0
-  keeps one (the id-keyed `<id>.toml` when present, else the first by
-  filename), logs `slot.duplicate_toml` with both paths, and skips the other,
-  so `GET /api/slots` lists the slot once. Deleting a model that only the
-  skipped stale file referenced no longer unloads the live slot of the same
-  name (#2542). The skipped file is logged once per process and no longer
-  marks the slot enumeration partial, so `/v1/models` keeps refreshing while
-  the stale file is present (#2631).
-- The profile-centric conversion no longer strips a blocked custom profile.
-  A profile (or a stack's embedded profile) whose flags carry a model fact
-  with no profile home (`--mmproj`, `--chat-template`, `--chat-template-file`)
-  was reported as blocked but written back without that flag, so the next
-  start converted its slot as unchanged and launched it without the projector
-  or template. The entry now stays in `profiles.toml` (or `stacks.toml`)
-  exactly as stored, is never reused for another slot's generated profile,
-  and blocks on every run until the flag is moved to the model (#2648).
-
-### Removed
-
-- hal0 no longer builds runner or toolbox images. Those images are built
-  only in `Hal0ai/hal0-runner-images`. The in-repo builder (the `toolbox.yml`
-  workflow, `scripts/update-toolbox-digests.sh`, `packaging/toolbox/`,
-  `packaging/runner/` and their tests) is gone. The workflow had re-run on a
-  dependency bump and moved the published
-  `hal0-toolbox-qwen3tts:v1` tag to an image that had not passed the gate.
-- The container launch plan no longer has a free-form `extra_args` field
-  (ADR-0029 phase 4b). ComfyUI's host IPC and FLM's unlimited memlock are now
-  typed fields (`ipc`, `ulimits`) and render the same `PodmanArgs=` lines as
-  before, so slot units are unchanged. Every ComfyUI and FLM load used to log
-  a `container.extra_args_deprecated` warning; that warning is gone. No slot,
-  model or API setting ever reached this field, so no configuration changes.
-  The `ContainerSpec` alias and launch-plan mounts given as `(source, target)`
-  tuples are removed as well.
+## [1.4.0] — 2026-10-16
 
 ### Highlights
 
+- **Memory writes that were silently lost now land, or are refused
+  honestly.** Hindsight's extraction ran with its own defaults (32
+  concurrent calls, 64000 tokens) on a slot that serves one request at a
+  time, so on a slow box `POST /api/memory/add` returned 200 and nothing was
+  stored. Extraction now has operator-set limits under `[memory.graph]`
+  (Settings ▸ Memory), and a write whose extraction slot is too small for
+  the prompt is refused up front, over REST and `/mcp/memory` alike.
+  (#1834, #1903, #1930)
+- **Open WebUI works with auth on, and a lost admin key is recoverable.**
+  The installer mints a client key and Open WebUI presents it to hal0's
+  `/v1` (per connection, never to another service); `hal0 auth rotate
+  client` re-points it. `sudo hal0 auth reset-key` mints and prints a new
+  admin key, live or with the API down. (#2314)
+- **Open WebUI is fully pre-wired.** Document uploads go through RAG on
+  hal0's embeddings and the image button generates through ComfyUI as soon
+  as the matching slots are bound. (#2256)
+- **Installs leave evidence.** Every run writes an owner-only log, and a
+  failed run writes a redacted failure report you can attach to an issue.
+  (#2243, #2307)
+- **Loading a stack says what it will unload** before you confirm, and the
+  result names what was stopped. (#1511)
 - **A fresh runner system (ADR-0028).** Every runner has one name, used for
   its registry key, its pin, its catalogue row and its package
   (`ghcr.io/hal0ai/hal0-runner-<key>`). The AMD llama.cpp runner is now
@@ -243,144 +67,68 @@ applying. Add those subsections to a version's section to surface them; see
   first major release. `hal0 update` and an `install.sh` re-run upgrade it
   with the existing build-aside, snapshot, swap, verify and roll-back pass;
   see Migrations for what that does to the engine's database.
-
-### Security
-
-- hal0's own loopback calls (Hindsight memory, the Hermes gateway and kanban,
-  brain and realtime self-calls, MCP admin, profile generation, health
-  probes and the CLI) no longer go through `HTTP_PROXY`/`HTTPS_PROXY`/
-  `ALL_PROXY` when `NO_PROXY` does not cover loopback. Async clients use the
-  shared client's direct loopback route; sync clients turn the proxy
-  environment off for loopback URLs (#2526).
-
-- The `/v1` dispatcher no longer passes the caller's credentials to the
-  upstream it picks (#2538). It used to copy every request header except
-  `Authorization` and the hop-by-hop set, so a dashboard request routed to a
-  remote cloud provider sent that provider the operator's `hal0_session`
-  cookie, which hal0 accepts as an admin login, along with any `X-API-Key`
-  and `X-hal0-*` header. Forwarding is now an allowlist in
-  `hal0.forwarded_headers`: `content-type`, `accept`, `user-agent`,
-  `anthropic-version`, `anthropic-beta`, `openai-organization`,
-  `openai-project` and `openai-beta`. The upstream's own key from its
-  `auth_value_env` is still added, and multipart audio keeps its boundary.
-  The dispatcher now asks upstreams for an unencoded body
-  (`accept-encoding: identity`), because it relays streams byte for byte
-  without a `content-encoding` header. The Hermes dashboard plugin proxy uses
-  the same allowlist, plus `If-None-Match` and `If-Modified-Since`; it
-  already stripped cookies and `Authorization`, and now also drops
-  `X-API-Key` and any client `X-hal0-*` header.
-- The REST Origin gate no longer accepts a request just because its `Origin`
-  matches its `Host` (#2327). On a DNS name that match proves nothing: a page
-  on an attacker's domain can rebind its own name to the box and send both
-  headers (DNS rebinding). The fallback now accepts only the request's own
-  origin on an IP-literal `Host` (v4 or v6), the same rule the agent-chat
-  WebSocket gate already used (#2326); a named origin passes only through the
-  allowlist. `http://localhost:8080` joins the built-in default allowlist,
-  since browsers resolve `localhost` locally and no remote page can own it.
-- Log, Sentry and failure-report redaction now mask a second secret packed
-  after a `;` or `,` (#2529). In `X_KEY=abc;Bearer tok` or
-  `HAL0_BEARER_TOKEN=x,HF_TOKEN= hf_v` the first value used to run on to the
-  next space and take the second secret's name with it, so `tok` and `hf_v`
-  were left visible. A value now ends before a `;` or `,` that starts another
-  secret, and each secret is masked under its own name. A `;` or `,`
-  followed by anything else stays inside the masked value. The same rule
-  applies to the dashboard's Sentry scrubber, the doctor bundle and the
-  installer failure report.
-- Log, Sentry and failure-report redaction no longer leave a secret's value
-  visible when the value before it takes in its name (#2593, #2594, #2595):
-  after an empty value (`KEY=  X_KEY= v`), glued on with no separator
-  (`Bearer a.Authorization: Token b`, or concatenated headers such as
-  `Bearer abcX-Api-Key: def`), or past a quote that does not close where it
-  should (`--api-key="v, db-password": w`). Where the second name begins is
-  unknown (`abc` may be part of the token), so the first mask now runs on
-  over the second secret's value instead of cutting the name out:
-  `KEY=  ***REDACTED***`. A quoted secret value that never closes is masked
-  to the end of its line, a secret after a space in a raw `Authorization`
-  value is masked with it, and a value of a name that is not secret, such as
-  `max_tokens=`, ends before a secret inside it. The same applies to the
-  dashboard's Sentry scrubber, the doctor bundle and the installer failure
-  report, which now also masks a raw `Authorization` value on a line that
-  holds another header with a known scheme.
-- Log and Sentry redaction now mask the whole quoted value of a `*_KEY=`,
-  `HAL0_BEARER_TOKEN=` or `Authorization: Bearer` field. A value that held
-  spaces was masked only up to the first one, so `api_key='a b'` rendered as
-  `api_key=***REDACTED*** b'` and the rest of the secret stayed visible
-  (#2598). The value now runs to its closing quote on the same line, or to
-  the end of its line if it never closes; a quote left open no longer pairs
-  with one on a later line, so the next line is not swallowed. The doctor
-  bundle and the installer failure report already masked a quoted `*_KEY=`
-  value whole.
-- Log, Sentry, doctor-bundle and installer failure-report redaction no longer
-  end a quoted secret at a backslash-escaped quote. `api_key="\"a b\"" z`
-  rendered as `api_key=***REDACTED*** b\"" z`, and a value such as
-  `'it\'s a b'` leaked everything after the escape (#2604). A backslash and
-  the character after it now count as one unit in both kinds of quote, so an
-  escaped quote does not close the value and an escaped backslash does not
-  escape the quote after it. A shell's single quotes have no escapes, but a
-  log or JSON dump of a value does, and reading one as an escape can only mask
-  more of the line.
-- Doctor-bundle and installer failure-report redaction now mask an
-  `Authorization` value that opens with a quote after a known scheme, such as
-  `Authorization: Bearer "abc def"` or `Authorization: Basic 'abc def'`
-  (`Proxy-Authorization` too). Their scheme rule needed a first character that
-  was no quote, so the line came out unchanged and the credential shipped in
-  clear (#2605). The quoted text is masked whole with its quotes kept, an
-  escaped quote does not close it, and one that never closes is masked to the
-  end of its line. The log pass and the dashboard's Sentry scrubber already
-  masked a quoted Bearer value; they now also mask a quoted Basic, Token or
-  other scheme value, which they left visible.
-- The doctor bundle's redaction no longer takes quadratic time on a long line
-  that holds one long secret in text that repeats its own start: 4.5 s for
-  320 KB of `X_KEY=a.` units and 4.7 s for a 120 KB `password="aaa…` that never
-  closes (#2600). Masking each harvested secret everywhere it appears scanned
-  for all of them at every position, and each try ran far into a long one. A
-  secret longer than 128 characters is now masked with one plain replace, ahead
-  of the scan, which is linear for one such secret; the output is unchanged.
-  The log redaction and the dashboard's Sentry scrubber were already linear.
-- Log, Sentry, doctor-bundle and installer failure-report redaction now mask a
-  secret whose value opens with a backslash-escaped quote, as in a JSON value
-  inside a log message or a command line inside a JSON field: `password=\"abc
-  def\"` leaked `abc def\"` after the first space or quote, and
-  `{\"password\": \"a b\"}` was not masked at all (#2616). The value is read
-  as quoted and closed by the same delimiter, the quote after exactly as many
-  backslashes, so `\\"` and `\\\"` are delimiters of their own and a longer run
-  inside the value does not close it. It is masked whole in every place a value
-  can start: `NAME=`, `NAME": `, `--flag value`, `*_KEY=`, `HAL0_BEARER_TOKEN=`
-  and an `Authorization` or `Proxy-Authorization` scheme (the header's own quotes
-  may be escaped too). A value that never closes is masked to the end of its
-  line. A plain quoted value after a `--secret` flag and a space, such as
-  `--token "abc def"`, is now masked to its closing quote too, instead of to the
-  first space. The installer report drops the escaped delimiters and the
-  backslashes in front of a secret name's closing quote when it masks.
-- The log redaction and the dashboard's Sentry scrubber now start a `*_KEY=`
-  name at the same place. The server tested a Unicode word boundary and the
-  browser an ASCII one, so a name that follows or starts with `ı`, `İ`, `ſ`
-  (long s) or the Kelvin sign was masked by one and not the other: the browser
-  left `İprivate_key=&secret` visible, and masked `ıapi_key='x y'` with its
-  quotes kept where the server drops them (#2599). Both now use the class the
-  other name rules already use: the ASCII word characters and those four
-  letters, which `re.I` folds onto `i`, `s` and `k`. A name after any other
-  character starts there, so `éapi_key=,secret` and `٣api_key=,secret` are masked
-  by both, where neither masked them. The browser also finds names once per run
-  now: a long run of `ıa` took quadratic time.
-- The installer failure report no longer takes quadratic time on a long line
-  of glued secrets: 1.2 s for 320 KB of `X_KEY=a.` units, 12 s for 1 MB, and
-  6 s for the whole report at 640 KB (#2618). Reading a harvested value took its
-  trailing carriage return off with a `${line%$'\r'}` suffix match, and bash
-  tries every suffix length against that, so a value as long as the line cost
-  time quadratic in its length whenever it did not end in a CR. It now checks
-  the last character and cuts it with a substring, which is linear; the report
-  is unchanged.
-- The installer failure report no longer takes quadratic time on a long value
-  of plain characters either: 1.3 s for 320 KB of `a` after `X_KEY=` and 12 s
-  for 1 MB (#2626). The check that a harvested value ends in a name and its
-  separator (`api_key=`) was a regex that bash backtracks over at every
-  position. A value longer than 8192 characters now goes to `grep -E` with the
-  same pattern, which runs in time linear in the value; shorter ones keep the
-  bash test, so the report is unchanged.
+- **Stopping `hal0-api` no longer hangs until systemd's SIGKILL.** With a
+  chat request in flight, a restart could leave the API down for about 100 s
+  while a model-cache refresher swallowed the shutdown cancel. Every
+  shutdown step is now bounded at 3 s, and the installer writes
+  `TimeoutStopSec=30` into `hal0-api.service`. (#2727)
+- **Text-to-speech runs from the model you pulled.** The Kokoro slot launches
+  from the bundle `hal0 model pull kokoro-v1` installs instead of
+  downloading about 354 MB on every start, so a box without internet access
+  can speak; `hal0 update` pulls the bundle once and names the remedy if it
+  is offline. (#2739)
+- **One overflow no longer fails every in-flight request on a slot.** The
+  seed `utility`, `brain` and `agent` profiles now serve one
+  sequence (`--parallel 1`), so concurrent callers queue instead of all
+  receiving "Context size has been exceeded", Hindsight extraction and
+  Hermes turns included. (#2692, #2714)
+- **An upgrade that unassigned a slot's model now says so.** `hal0 update`
+  prints one line per affected slot with a working remedy
+  (`hal0 slot edit <slot> --model <id>`), and `/api/slots` carries the
+  message instead of reading idle. (#2694, #2695, #2696)
+- **Upgraded boxes with a root-owned backups directory finish the runner
+  conversion.** The post-update conversions no longer fail on a
+  `root:hal0 2755` `/var/lib/hal0/backups`; `hal0 doctor perms` reports and
+  fixes it. (#2657)
 
 ### Breaking
 
+- **Exposing a user-installed MCP server to Hermes or the brain profile is
+  disabled until hal0's MCP proxy mount lands (#2303).** Both call a joined
+  server's URL directly, so hal0 enforces none of its `[tools]` policy on
+  that path, and the policy has no wildcard: a tool it does not list is
+  denied, yet the agent could call it. That covered every exposed server,
+  including allow-only and empty policies, not only the `gated`/`blocked`
+  case #2343 closed. `PATCH /api/mcp/{id}/exposure` (and
+  `hal0 mcp expose --hermes/--brain`) now refuses turning either target on
+  for any installed server with `409 mcp.exposure_policy_unenforced`;
+  withdrawing exposure still works, and `hal0 mcp test` says why the toggle
+  is unavailable. A server already exposed on an upgraded box is removed
+  from Hermes's config, the brain profile and the policy mirror at the
+  next hal0-api start or MCP change. hal0's built-in servers are
+  unaffected. (#2358)
+- **`hal0 update` restarts slots on its own and can exit 2 on an update that
+  applied.** When a release rolls the runner image, slots on the old image
+  are now restarted after the apply, both by `hal0-api` at every start
+  (`[updates].auto_restart_image_drift`, on by default) and by the CLI
+  (`--no-restart-slots` opts out). A slot with a request in flight is skipped.
+  While any slot still runs the old image, `hal0 update` exits **2** ("applied,
+  convergence outstanding") instead of 0, so a script that treats any
+  non-zero exit as a failed update needs to accept 2. Because `hal0-api`
+  does this at start, the upgrade to 1.4.0 itself can restart running
+  slots. (#2096)
+- **An installed MCP server that would send its `[secrets]` or `[env]`
+  headers in clear text no longer loads.** A `streamable-http`/`sse` record
+  whose url is plain `http://` to a non-loopback host, and that carries any
+  `[secrets]` key or non-empty `[env]` value, used to send those values
+  unencrypted on every probe and Hermes call. 1.4 refuses it: on upgrade such
+  a record is skipped (`hal0.mcp.installed.bad_record` in the journal, and
+  `mcp.record_malformed` when read directly), it drops out of `hal0 mcp
+  list`, and its Hermes entry is removed at the next hal0-api start or MCP
+  change. To keep it, point the url at `https://` or a loopback host, or set
+  `allow_insecure_http = true` in its TOML under `/etc/hal0/mcp-servers/` to
+  accept the risk. A `Proxy-Authorization` header value is refused on any url
+  and belongs in the proxy environment instead. (#2304)
 - **Reverse proxies and other DNS names need their origin allowed** wherever
   the Origin gate runs: `require_auth` on, or (#1822) ADMIN routes reached
   from a non-loopback peer on a LAN-bound box with an admin key (#2327). A browser reaching hal0 by a name the installer did
@@ -563,190 +311,141 @@ applying. Add those subsections to a version's section to surface them; see
   columns (`tokenizer_repo` stays in the row's `extra` blob), and launch
   commands are unchanged.
 
-### Migrations
-
-- **Seed `utility`/`agent` now `--parallel 1`** (#2692). Seeds are code-shipped, so slots on the plain `utility`/`agent` profile pick this up at their next restart (`sudo systemctl restart hal0-slot@utility hal0-slot@agent`). A slot the installer clamped to a small box runs a `utility-ctx<N>`/`agent-ctx<N>` profile that copied the old flags; add `--parallel 1` to that profile's flags, or re-run the installer. Profiles you edited yourself are never rewritten.
-
-- **Upgraded boxes with a `root:hal0 2755` backups directory** (#2657). If
-  `hal0 update` showed "Migration incomplete" with `Permission denied` on
-  `/var/lib/hal0/backups`, run `sudo hal0 doctor perms --fix` (or
-  `sudo chmod 2775 /var/lib/hal0/backups`), then
-  `sudo systemctl restart hal0-api`; the runner-system and profile-centric
-  conversions run again at that start.
-- **A slot that lost its model in the runner-system conversion** (#2694). A
-  box already upgraded before this fix was not told. To find such a slot, run
-  `grep -l '^default = ""' /etc/hal0/slots/*.toml`, or look for
-  `migrate.runner_system.applied` lines with "unassigned it" in
-  `journalctl -u hal0-api`. The container keeps serving the old model until
-  its next restart. Repair each slot with
-  `hal0 slot edit <slot> --model <id>`, using a plain GGUF build (for the
-  brain slot, `lfm2.5-2.6b`), then `hal0 update --restart-slots`.
-- **Profile-centric conversion** (`hal0.config.migrations.profile_centric_apply`,
-  ADR-0029). It runs automatically on `hal0 update` after the runner-system
-  conversion, and when `hal0 serve` starts `hal0-api`, before config is
-  validated.
-  - SQL migration 012 copies the model tunes into a holding table and leaves
-    the old `model` columns in place for a rollback; a later release drops
-    them.
-  - The conversion gives every slot the profile that keeps what it launches
-    today, generating one where needed, and reports every value that never
-    reached the launch (dropped, never applied).
-  - It backs up every file it changes, plus the model tunes, to
-    `/var/lib/hal0/backups/profiles-<ts>.tar.gz` before writing.
-  - It checks each converted slot's launch against the plan with a strict
-    render. A slot that does not match is put back and reported as blocked,
-    and the rest converts. Any error while checking, or while writing a
-    shared file, restores everything and is retried at the next start.
-  - The demoted-seed markers move from `profiles.toml` to
-    `/var/lib/hal0/profile-centric-ledger.json`. A profile entry that is
-    still invalid is set aside (`profiles.invalid` for the slots that name
-    it) instead of failing the whole catalog.
-  - A custom or stack-embedded profile that carries `--mmproj` or
-    `--chat-template[-file]` is left as it is and blocks, with the slots that
-    use it, until that flag is moved to the model.
-  - `hal0 update` lists every blocker with its fix and exits 2. A blocked
-    slot keeps launching the command it ran before the conversion until its
-    file is edited, and a run with nothing to write makes no backup. Run a
-    manual conversion as the service user:
-    `sudo -u hal0 hal0 profile migrate --apply`.
-
-  Four launch changes are reported, never silent:
-  - a slot without a usable profile gets its type's seed;
-  - `--jinja` is no longer added in embedding or reranking mode;
-  - the MTP draft device follows the slot's device;
-  - forced MTP stops on a runner without MTP support.
-
-  Preview it with `hal0 profile migrate`. A rerun converts nothing that is
-  already in the new shape. **Downgrading:** `hal0 update --rollback` to a
-  release before this one puts every conversion backup back before the swap
-  (the files, the model columns and migration 012's bookkeeping), in one
-  command; see "Rolling back past the profile-centric conversion" in
-  `docs/guides/update-and-rollback.mdx`. `hal0 profile migrate --restore
-  <archive>` (with `hal0-api` stopped) does it by hand.
-
-- **Runner-system conversion** (`hal0.config.migrations.runner_system`). Runs
-  automatically on `hal0 update`, on an `install.sh` re-run and when
-  `hal0 serve` starts `hal0-api`, before config is validated. It never runs on
-  import or from a read-only command. It rewrites slot runtimes, profile
-  runtimes and model `preferred_runner` values from the old default keys
-  (`rocmfpx`, `vulkanfpx`, `vulkan`, `rocm`) to `standard`. Image overrides
-  (`[slots].default_images`, `HAL0_TOOLBOX_IMAGE_*`) carry over to
-  `standard` only from `rocmfpx` and `vulkanfpx`; `vulkan` and `rocm`
-  overrides were already inert and are dropped with a warning. Settings for
-  the removed optional runners (`strix`, `promptforge`, `upstream`) are
-  dropped with a warning, never moved onto `standard`. Slots that name a
-  removed profile move to its replacement (`chadrock-moe` to `moe`,
-  `chadrock-dense` and `promptforge` to `dense`), and those definitions are
-  dropped from `profiles.toml`. It removes image pins that name an image hal0 shipped and
-  retired (`ghcr.io/hal0ai/` `hal0-combined*`, `hal0-rocmfpx` (and `localhost/hal0-rocmfpx`), `hal0-strix-vulkan`, `hal0-promptforge`, `hal0-toolbox-*`, `hal0-comfyui` and `amd-strix-halo-toolboxes`, the two kyuz0 Strix Halo images (`amd-strix-halo-toolboxes`, `amd-strix-halo-comfyui`), and the floating `ghcr.io/ggml-org/llama.cpp:server-cuda` tag) and keeps and reports pins to any other image, such
-  as your own build. It renames `HAL0_TOOLBOX_IMAGE_*` lines in `api.env`,
-  keeping each value's quoting, without duplicating a `HAL0_RUNNER_IMAGE_*`
-  line already there. For a slot
-  whose model is a ROCmFPX/IU4/ActiveFPX build, it keeps the slot's settings
-  but unassigns the model. Every change and every dropped pin is logged. A
-  file that does not parse is skipped with a warning and the rest still
-  converts. Before writing, it saves each file it changes, plus the old
-  `preferred_runner` values, to `/var/lib/hal0/backups/runners-<timestamp>.tar.gz`
-  (mode 0600; the database itself is never copied). If a write fails it rolls
-  back every write except `hal0.toml`, which stays converted so `hal0-api`
-  can start, and `hal0 update` reports the failure; a file it could not put
-  back is named in the error, with the backup to restore from. When it
-  converts at `hal0-api` startup it also re-renders the slot units, so
-  restarted slots run the converted image. Preview it with
-  `hal0 runner-images migrate` and run it with `--apply`. To downgrade, stop
-  `hal0-api` and run `hal0 runner-images migrate --restore <backup>`. The
-  restore leaves a marker that keeps this release's `hal0-api` from
-  converting again on boot; it holds only while the same hal0 version runs,
-  and the next `hal0 update` converts again.
-- Bundled agent skills hal0 no longer ships (`hal0-quantize`) are removed
-  from `/usr/share/hal0/skills` by `install.sh` and unlinked from
-  `/etc/hal0/agent-skills` on update. Only names on hal0's retired-skills list
-  are touched; your own skills are not.
-- The runner-image catalogue table is recreated (database migration 011) and
-  refilled by the next sync. Images already pulled into podman are not
-  touched; old packages stay in podman's store until you remove them.
-
-- `DELETE /api/models/{id}` now deletes the model's files by default:
-  the model file, any shards, the `mmproj` sidecar, and a pulled model's
-  file set. Pass `delete_files=false` to remove only the registry entry,
-  which was the old behaviour. `hal0 model rm` deletes files too unless you
-  pass `--keep-files`. The dashboard's Delete dialog has an "Also delete
-  files from disk" checkbox, ticked by default. hal0 never removes files
-  outside the model roots and the store, files another model uses,
-  directories, or its own config and state files. Each kept file is listed
-  in the response with its reason (ADR-0026).
-- The model registry is SQLite only. `hal0 model import-backup` (v0.1.x
-  backup restore) and the whole `hal0 registry` group (`registry import`,
-  `registry export`, `registry import-sqlite`) are removed.
-  `hal0 model list --json` shows the catalog. To keep a copy, take
-  a consistent snapshot with SQLite's online backup, not a plain copy of the
-  live WAL database:
-  `sqlite3 /var/lib/hal0/hal0.db ".backup '/root/hal0-db-backup.db'"` (the
-  Pull and register models guide has a Python equivalent for boxes without
-  the `sqlite3` CLI). A `registry.toml` left over from before the SQLite
-  registry is retired on update (see Migrations).
-
-- Removed the deprecated CLI aliases and no-op flags. Use the replacement
-  instead: `hal0 probe` -> `hal0 config hardware --refresh`;
-  `hal0 model register` -> `hal0 model add`; `hal0 model assign` ->
-  `hal0 slot edit --model`; `hal0 slot add` -> `hal0 slot create`;
-  `hal0 slot remove` -> `hal0 slot delete`; `hal0 upstream set-credentials`
-  -> `hal0 upstream credentials set`; `hal0 doctor --verify` ->
-  `hal0 doctor verify`. The `--backend`/`-b` flag on `slot create` and
-  `slot edit` (a stale alias for `--provider`) is gone, and so are the
-  no-op `--dry-run` flags on `capabilities migrate` and
-  `slot migrate-id-keying` (both already dry-run unless you pass `--apply`).
-
-- Removed dead dashboard surfaces. The flag-migration banner and resolution
-  view (their `GET /api/migrations/flag-report` endpoint was never built) are
-  gone, along with the unreachable old dashboard grid, the `ConnectionsView`
-  wrapper and the `#connections`, `#profiles`, `#slots/profiles`, `#peers`,
-  `#memory/graph` and `#memory/tools` hash redirects. Legacy
-  `#settings/<id>` section ids (`general`, `health`, `library`, `backend`,
-  `runtimes`, `hwtuning`, `about`, `voice`, `imagegen`, `npu`, `oauth`) no
-  longer resolve and fall back to Overview; use `#settings/capabilities`,
-  `#settings/accounts` and so on. `GET /api/user/dashboard-layout` now answers
-  `{}` for a pre-#1061 (v2) layout file left on disk instead of returning it
-  reconciled; the dashboard shows its default bands until the next save.
-
-- Removed deprecated API fields and aliases. The dashboard and the bundled
-  agents are updated in the same release; external clients must follow:
-  - `POST /api/board/chat` is gone; use `POST /api/brain/chat` (same SSE
-    contract). The dashboard's Board chat now calls the brain route.
-  - `GET /api/memory/graph/status` no longer returns the `route` mirror of
-    `extraction_slot`.
-  - `GET /api/meta/enums` no longer returns the deprecated `backends` list
-    (use `devices`, `selectable_backends` and `model_backends`).
-  - The `agent-hermes` slot alias no longer resolves to `agent`, and the
-    `chat` / `primary` slot-name fallbacks are gone from the first-run check
-    (`has_default_slot` looks for `agent.toml` only), the `hal0/*` fallback
-    anchor and the Hermes chat-model pick. Use `agent`.
-  - `GET /api/slots/by-name/{name}` now returns exactly what
-    `GET /api/slots/{name}` returns (it used to omit the config enrichment).
-
-- Removed dead and misleading code paths:
-  - The frozen haloai upstream seed (68 model ids routed into a predecessor
-    gateway, including `minimax` and `vibevoice` ids no hal0 provider can
-    serve) is gone. `GET /api/models/catalogue`, and the admin MCP
-    `model_catalogue` tool that wraps it, now return only
-    `{pullable, counts: {pullable, total}}`; the `upstream` list is removed.
-  - ComfyUI's `/api/comfyui/status` no longer falls back to `docker inspect`:
-    an unrelated docker container named `comfyui` used to flip the mode to
-    `generation`. The container state now comes only from the
-    `hal0-slot@img` unit, and the `COMFYUI_CONTAINER` environment variable is
-    gone (`container.name` always reads `hal0-slot-img`). The mode now comes
-    only from the GPU arbiter (the img unit stays up in inference mode too):
-    `/status` reports `mode: null` when the arbiter cannot answer, and
-    `POST /api/comfyui/switchover` answers 503 `comfyui.arbiter_unavailable`
-    instead of guessing "already there" from the unit.
-  - The `hal0-systemctl remove-unit` verb and `SystemCtlSeam.remove_unit`
-    (nothing called them), `hal0.memory.migrate` (a Cognee dry-run with no
-    caller), the legacy `HAL0_DOCKER_REQUIRED` installer variable (use
-    `HAL0_CONTAINER_REQUIRED`), the dead `docs/operate/tls.md` references in
-    `install.sh`, and the copy of the version-compare helpers in the updater
-    API route (it now shares `hal0.updater.updater._is_newer`).
-
 ### Security
+
+- hal0's own loopback calls (Hindsight memory, the Hermes gateway and kanban,
+  brain and realtime self-calls, MCP admin, profile generation, health
+  probes and the CLI) no longer go through `HTTP_PROXY`/`HTTPS_PROXY`/
+  `ALL_PROXY` when `NO_PROXY` does not cover loopback. Async clients use the
+  shared client's direct loopback route; sync clients turn the proxy
+  environment off for loopback URLs (#2526).
+
+- The `/v1` dispatcher no longer passes the caller's credentials to the
+  upstream it picks (#2538). It used to copy every request header except
+  `Authorization` and the hop-by-hop set, so a dashboard request routed to a
+  remote cloud provider sent that provider the operator's `hal0_session`
+  cookie, which hal0 accepts as an admin login, along with any `X-API-Key`
+  and `X-hal0-*` header. Forwarding is now an allowlist in
+  `hal0.forwarded_headers`: `content-type`, `accept`, `user-agent`,
+  `anthropic-version`, `anthropic-beta`, `openai-organization`,
+  `openai-project` and `openai-beta`. The upstream's own key from its
+  `auth_value_env` is still added, and multipart audio keeps its boundary.
+  The dispatcher now asks upstreams for an unencoded body
+  (`accept-encoding: identity`), because it relays streams byte for byte
+  without a `content-encoding` header. The Hermes dashboard plugin proxy uses
+  the same allowlist, plus `If-None-Match` and `If-Modified-Since`; it
+  already stripped cookies and `Authorization`, and now also drops
+  `X-API-Key` and any client `X-hal0-*` header.
+- The REST Origin gate no longer accepts a request just because its `Origin`
+  matches its `Host` (#2327). On a DNS name that match proves nothing: a page
+  on an attacker's domain can rebind its own name to the box and send both
+  headers (DNS rebinding). The fallback now accepts only the request's own
+  origin on an IP-literal `Host` (v4 or v6), the same rule the agent-chat
+  WebSocket gate already used (#2326); a named origin passes only through the
+  allowlist. `http://localhost:8080` joins the built-in default allowlist,
+  since browsers resolve `localhost` locally and no remote page can own it.
+- Log, Sentry and failure-report redaction now mask a second secret packed
+  after a `;` or `,` (#2529). In `X_KEY=abc;Bearer tok` or
+  `HAL0_BEARER_TOKEN=x,HF_TOKEN= hf_v` the first value used to run on to the
+  next space and take the second secret's name with it, so `tok` and `hf_v`
+  were left visible. A value now ends before a `;` or `,` that starts another
+  secret, and each secret is masked under its own name. A `;` or `,`
+  followed by anything else stays inside the masked value. The same rule
+  applies to the dashboard's Sentry scrubber, the doctor bundle and the
+  installer failure report.
+- Log, Sentry and failure-report redaction no longer leave a secret's value
+  visible when the value before it takes in its name (#2593, #2594, #2595):
+  after an empty value (`KEY=  X_KEY= v`), glued on with no separator
+  (`Bearer a.Authorization: Token b`, or concatenated headers such as
+  `Bearer abcX-Api-Key: def`), or past a quote that does not close where it
+  should (`--api-key="v, db-password": w`). Where the second name begins is
+  unknown (`abc` may be part of the token), so the first mask now runs on
+  over the second secret's value instead of cutting the name out:
+  `KEY=  ***REDACTED***`. A quoted secret value that never closes is masked
+  to the end of its line, a secret after a space in a raw `Authorization`
+  value is masked with it, and a value of a name that is not secret, such as
+  `max_tokens=`, ends before a secret inside it. The same applies to the
+  dashboard's Sentry scrubber, the doctor bundle and the installer failure
+  report, which now also masks a raw `Authorization` value on a line that
+  holds another header with a known scheme.
+- Log and Sentry redaction now mask the whole quoted value of a `*_KEY=`,
+  `HAL0_BEARER_TOKEN=` or `Authorization: Bearer` field. A value that held
+  spaces was masked only up to the first one, so `api_key='a b'` rendered as
+  `api_key=***REDACTED*** b'` and the rest of the secret stayed visible
+  (#2598). The value now runs to its closing quote on the same line, or to
+  the end of its line if it never closes; a quote left open no longer pairs
+  with one on a later line, so the next line is not swallowed. The doctor
+  bundle and the installer failure report already masked a quoted `*_KEY=`
+  value whole.
+- Log, Sentry, doctor-bundle and installer failure-report redaction no longer
+  end a quoted secret at a backslash-escaped quote. `api_key="\"a b\"" z`
+  rendered as `api_key=***REDACTED*** b\"" z`, and a value such as
+  `'it\'s a b'` leaked everything after the escape (#2604). A backslash and
+  the character after it now count as one unit in both kinds of quote, so an
+  escaped quote does not close the value and an escaped backslash does not
+  escape the quote after it. A shell's single quotes have no escapes, but a
+  log or JSON dump of a value does, and reading one as an escape can only mask
+  more of the line.
+- Doctor-bundle and installer failure-report redaction now mask an
+  `Authorization` value that opens with a quote after a known scheme, such as
+  `Authorization: Bearer "abc def"` or `Authorization: Basic 'abc def'`
+  (`Proxy-Authorization` too). Their scheme rule needed a first character that
+  was no quote, so the line came out unchanged and the credential shipped in
+  clear (#2605). The quoted text is masked whole with its quotes kept, an
+  escaped quote does not close it, and one that never closes is masked to the
+  end of its line. The log pass and the dashboard's Sentry scrubber already
+  masked a quoted Bearer value; they now also mask a quoted Basic, Token or
+  other scheme value, which they left visible.
+- The doctor bundle's redaction no longer takes quadratic time on a long line
+  that holds one long secret in text that repeats its own start: 4.5 s for
+  320 KB of `X_KEY=a.` units and 4.7 s for a 120 KB `password="aaa…` that never
+  closes (#2600). Masking each harvested secret everywhere it appears scanned
+  for all of them at every position, and each try ran far into a long one. A
+  secret longer than 128 characters is now masked with one plain replace, ahead
+  of the scan, which is linear for one such secret; the output is unchanged.
+  The log redaction and the dashboard's Sentry scrubber were already linear.
+- Log, Sentry, doctor-bundle and installer failure-report redaction now mask a
+  secret whose value opens with a backslash-escaped quote, as in a JSON value
+  inside a log message or a command line inside a JSON field: `password=\"abc
+  def\"` leaked `abc def\"` after the first space or quote, and
+  `{\"password\": \"a b\"}` was not masked at all (#2616). The value is read
+  as quoted and closed by the same delimiter, the quote after exactly as many
+  backslashes, so `\\"` and `\\\"` are delimiters of their own and a longer run
+  inside the value does not close it. It is masked whole in every place a value
+  can start: `NAME=`, `NAME": `, `--flag value`, `*_KEY=`, `HAL0_BEARER_TOKEN=`
+  and an `Authorization` or `Proxy-Authorization` scheme (the header's own quotes
+  may be escaped too). A value that never closes is masked to the end of its
+  line. A plain quoted value after a `--secret` flag and a space, such as
+  `--token "abc def"`, is now masked to its closing quote too, instead of to the
+  first space. The installer report drops the escaped delimiters and the
+  backslashes in front of a secret name's closing quote when it masks.
+- The log redaction and the dashboard's Sentry scrubber now start a `*_KEY=`
+  name at the same place. The server tested a Unicode word boundary and the
+  browser an ASCII one, so a name that follows or starts with `ı`, `İ`, `ſ`
+  (long s) or the Kelvin sign was masked by one and not the other: the browser
+  left `İprivate_key=&secret` visible, and masked `ıapi_key='x y'` with its
+  quotes kept where the server drops them (#2599). Both now use the class the
+  other name rules already use: the ASCII word characters and those four
+  letters, which `re.I` folds onto `i`, `s` and `k`. A name after any other
+  character starts there, so `éapi_key=,secret` and `٣api_key=,secret` are masked
+  by both, where neither masked them. The browser also finds names once per run
+  now: a long run of `ıa` took quadratic time.
+- The installer failure report no longer takes quadratic time on a long line
+  of glued secrets: 1.2 s for 320 KB of `X_KEY=a.` units, 12 s for 1 MB, and
+  6 s for the whole report at 640 KB (#2618). Reading a harvested value took its
+  trailing carriage return off with a `${line%$'\r'}` suffix match, and bash
+  tries every suffix length against that, so a value as long as the line cost
+  time quadratic in its length whenever it did not end in a CR. It now checks
+  the last character and cuts it with a substring, which is linear; the report
+  is unchanged.
+- The installer failure report no longer takes quadratic time on a long value
+  of plain characters either: 1.3 s for 320 KB of `a` after `X_KEY=` and 12 s
+  for 1 MB (#2626). The check that a harvested value ends in a name and its
+  separator (`api_key=`) was a regex that bash backtracks over at every
+  position. A value longer than 8192 characters now goes to `grep -E` with the
+  same pattern, which runs in time linear in the value; shorter ones keep the
+  bash test, so the report is unchanged.
+
 
 - **Local inference traffic no longer goes through your HTTP proxy.** With
   `HTTP_PROXY`, `HTTPS_PROXY` or `ALL_PROXY` set and `NO_PROXY` not covering
@@ -789,450 +488,6 @@ applying. Add those subsections to a version's section to surface them; see
   for an exposed server with a header value other than `Authorization`; the
   connect-mcp guide says exposed endpoints must not redirect. (#2330)
 
-### Fixed
-
-- A memory-engine upgrade that failed once no longer loses memories on a
-  second failure. The first failed attempt kept its `.pg0.pre-<version>`
-  snapshot. Every later attempt then reused that snapshot instead of taking
-  a new one, so a second rollback restored it and dropped everything written
-  since the first rollback. Each attempt now takes a fresh snapshot after
-  the old engine stops, and replaces the previous one only once the copy is
-  complete. A rollback that cannot copy the snapshot back no longer starts
-  the old engine on a half-restored `.pg0`, which could have initialised an
-  empty database and served it. It leaves the engine stopped and writes
-  `.pg0.restore-failed`. The next `hal0 update` restores the snapshot before
-  doing anything else. If that restore fails too, the engine stays stopped
-  and the update reports how to restore by hand.
-
-- A browser origin you allow now survives an installer re-run. The REST and
-  WebSocket origin checks only read `HAL0_ALLOWED_ORIGINS`, which sits in the
-  installer-managed block of `/etc/hal0/api.env`, so a reverse-proxy origin
-  added there by hand, or derived from an install-time `HAL0_PUBLIC_URL`, was
-  gone after the next run. A new `hal0.toml` `[network]` section holds
-  `public_url` and `extra_origins`. hal0 adds both on top of
-  `HAL0_ALLOWED_ORIGINS` on the next request, with no restart, and removing
-  one revokes it the same way. Set them with `hal0 network public-url
-  set|clear` and `hal0 network origins add|remove|list`, or on the new
-  Settings ▸ Network page. Each origin is validated and stored the way a
-  browser sends it (punycode for an internationalised name, the compressed
-  form of an IPv6 address); anything else is refused. An install-time
-  `HAL0_PUBLIC_URL`, including the bare-host form, is saved to
-  `[network].public_url` once, never over a set value. (#2382)
-- The seed stacks (`saber`, `forge`, `pi`) are now virtual, like the seed
-  profiles: hal0 takes them from code on every load, and a same-named entry
-  in `/etc/hal0/stacks.toml` is ignored. Before, the seeds were used only when
-  `stacks.toml` did not exist, so a box that had upgraded kept the copies an
-  older release wrote, which still named the retired `rocm`, `vulkan` and
-  `rocm-moe` profiles, and applying them failed. The API refuses to edit seed
-  stacks, so there was no way to fix them. Seed stacks are never written
-  back, so the next stack create, edit, delete, snapshot or import cleans
-  those copies out of `stacks.toml`. `hal0 profile migrate` no longer plans
-  or blocks on a seed-named stack in the file. Custom stacks are unchanged.
-  (#2584)
-
-- Deleting a custom profile is no longer allowed while a slot file still
-  names it but fails to load. A slot that is unconverted (`slot.unconverted`)
-  or otherwise invalid was left out of the profile in-use scan, so the delete
-  went through and the slot later failed with `slot.profile_missing`. The scan
-  now reads the profile name from the raw slot TOML (either layout) when the
-  typed load fails, so `profiles.in_use` and the Profiles tab's `used_by` list
-  include those slots. A slot file that is not valid TOML makes the delete
-  fail with 409 `profiles.slot_unreadable`, naming the file; the profile list
-  keeps working. (#2574)
-- An `image` (ComfyUI) slot that names a profile that does not exist no
-  longer launches silently with the built-in default flags. It now refuses
-  to launch with `slot.profile_missing`, as every llama-server slot already
-  does, so a typo in a profile name cannot quietly start a different tune.
-  A slot that names no profile still gets the default flags. The Kokoro,
-  Moonshine and Qwen3-TTS slots already refused, but with the profile
-  catalog's `profiles.not_found`; they now raise `slot.profile_missing` too,
-  so one condition has one code on the launch path (#2573).
-- The dashboard profile form called an unset Thinking default "Auto — the
-  model decides". hal0 treats it as off unless the request asks, so the
-  option, the profile card and the drawer preview now say "default (off)".
-
-- `GET /api/slots/{name}/resolved` no longer invents a llama-server command
-  for a slot that llama-server does not launch. Kokoro, Moonshine, Qwen3-TTS,
-  ComfyUI and FLM/NPU slots got a made-up `base`/`model`/`profile`/`slot`
-  argv, and the slot drawer showed it as the command they run. The endpoint
-  now asks the same provider selection the launch path uses and answers
-  `argv: null` with empty `provenance` for those slots, as ADR-0029 says; the
-  `resolved_command` field of `GET /api/slots` follows suit, and the drawer
-  says the command is not composed by llama-server. llama-server slots are
-  unchanged (#2577).
-- `SlotManager.create()` and `update_config()` now run the same write guard as
-  the HTTP routes. `create()` only screened `[server].env`, so an in-process
-  caller could write a profile-owned tuning key (`ctx_size`, `parallel`,
-  `mtp`, `[model].context_size`, `[server].extra_args`, ...) that the loader
-  then refused at launch as `slot.unconverted`; both methods also now refuse
-  the removed `enabled` key (`slot.removed_key_denied`). The NPU backend
-  install route no longer writes `enabled = true` into the slot it creates.
-  (#2578)
-- A profile, or the recorded tune of a slot the profile conversion blocked,
-  can no longer redirect a slot's model or reach outside it through a short
-  or alternative llama.cpp flag. The flag screen only knew one spelling of
-  each flag, so `-m /etc/shadow` replaced the slot's model (llama-server
-  keeps the last `-m`), and `-hf`, `--model-url`, `--api-key-file`,
-  `--ssl-key-file`, `--log-file`, `--path`, `--rpc`, `--tools`, the
-  `-ag`/`--agent` tools shortcut, the preset switches that download a model
-  (`--gpt-oss-20b-default`, `--embd-gemma-default`, …) and similar flags
-  passed unscreened. Every
-  spelling llama.cpp accepts is now screened (short and alternative forms,
-  `flag=value`, `_` for `-`). Flags that fetch a remote model, read or write
-  a host file, open or shape a listener, or set auth/TLS are refused
-  (`slot.host_owned_flag_denied`), as are bare positional arguments,
-  including one after a joined `--flag=value` or after a switch that takes no
-  value, such as `--metrics` (`slot.positional_arg_denied`).
-  The profile drawer shows the same refusals inline before Save. The seeds
-  and the shipped add-ons are unaffected.
-- A slot's `[server].env` can no longer set a llama-server launch option.
-  llama.cpp reads every option from an environment variable as well as from
-  its command line (`LLAMA_ARG_MODEL`, `LLAMA_ARG_AGENT`, `LLAMA_ARG_TOOLS`,
-  `LLAMA_API_KEY`, `HF_TOKEN`, …), so a slot env could redirect the model or
-  turn on the built-in tools past the profile flag screen. Every
-  `LLAMA_ARG_*` name, plus `LLAMA_API_KEY`, `HF_TOKEN` and
-  `MTMD_BACKEND_DEVICE`, is now refused with `slot.llama_env_denied` when a
-  slot is created or edited (API, stacks, in-process writers) and again when
-  it launches; tuning belongs on the slot's profile. The profile conversion
-  blocks a slot that carries one, naming the variable. Runtime variables such
-  as `HSA_OVERRIDE_GFX_VERSION` are unaffected.
-- The bundled agent's STATE.md capability summary now lists speech-to-text
-  and reranking slots. It matched slot types `stt` and `rerank`, but slots
-  are typed `transcription` and `reranking`, so a Moonshine STT slot or a
-  rerank slot never appeared in it. Every slot type other than `llm` now has
-  a label, and a test fails if a new type is added without one.
-- The runner-system migration no longer fails on a packaged install with
-  "could not write the runner-migration backup ([Errno 1] Operation not
-  permitted)". It tried to `chmod 0700` the shared `backups` directory, which
-  is root-owned and group-writable, so the `hal0` service user could not
-  change it. An existing directory is now left as the operator set it; the
-  archive itself is still `0600`.
-- The runner-image catalogue sync now reads the `runners` array that
-  hal0-runner-images publishes in `images.json` (schema
-  `hal0.runner-images.v2`). It looked for an `images` array, so every sync
-  failed with "images.json has no 'images' array" and the catalogue never
-  refreshed.
-- The runner-system migration now reads a slot's model file, not just its
-  name, before keeping it. A fork build (ROCmFPX and friends) renamed to a
-  plain file name used to keep its slot through the migration and was then
-  refused at launch; it is now unassigned with the same warning as a
-  name-detected one. Every shard of a split model is read. A missing,
-  unreadable or truncated file is never an error: the name check still
-  applies.
-
-- The runner-image catalogue sync no longer leaves cancelled probe tasks
-  pending when an unexpected error aborts it, which logged "Task was destroyed
-  but it is pending" noise.
-
-- The demoted workload profiles (`dense`, `moe`, `coding`, `chadrock-dense`,
-  `chadrock-moe`) no longer pass `--reasoning-format none`. Upstream llama.cpp
-  answers HTTP 400 "Failed to initialize samplers" to every `response_format`
-  (`json_object` / `json_schema`) request when the server runs with that flag,
-  so any slot still on one of these profiles lost structured output once it
-  moved to an upstream runner. `--reasoning off` stays, so the profiles still
-  mean "no thinking". The published addon envelopes under `community/addons/`
-  are regenerated without the flag. `hal0 slot migrate-flags` also drops the
-  flag instead of folding it into a model's defaults. Saving a profile or a
-  model's `defaults.extra_args` that adds `--reasoning-format none` is now
-  rejected with a 400 (`slot.reasoning_format_none_denied`) explaining why,
-  and the flag is dropped from the command line of every slot launch as a
-  backstop for anything already saved (#2545).
-
-- `hal0 update` now removes root-owned files older releases installed and
-  nothing replaces: the `hal0-slotctl` wrapper and its sudoers grant
-  (installed by 0.8.0-beta.1 to beta.3; it let the `hal0` user write a
-  root-owned slot unit), the `hal0-comfyui` sudoers grant (dropped in #984),
-  and a pre-quadlet static `hal0-slot@.service` template with its drop-ins,
-  which shadows every quadlet slot unit. Only install.sh and uninstall.sh
-  removed them before, so a box that had only ever been updated kept them.
-  The sweep runs on the activation of the next update after this one.
-- `installer/uninstall.sh` now removes the `hal0-update` and `hal0-slotctl`
-  sudoers grants. It left both behind.
-- The Runner Images page no longer lists niche runtimes (PromptForge,
-  Qwen3 TTS, Strix) under "Default runtime". It groups rows by each runtime's
-  registry tier — **Default runtimes**, **Optional runtimes**, **Frozen
-  runtimes** (when any) and **Other images** for catalogued images no
-  runtime ships — instead of by which image a runtime currently launches
-  (ADR-0027).
-
-- Deleting every model no longer brings them all back. The registry
-  re-imported `registry.toml` whenever its model table was empty, and
-  `hal0 registry export` and `hal0 model import-backup` wrote that same
-  file, so the next registry open after deleting the last model restored
-  every model in it. Nothing reads `registry.toml` now.
-- A deleted model no longer reappears after a restart. Files kept on disk
-  (by opting out, or because a safety check refused to remove them) are
-  recorded in `<var_lib>/registry/ignored-paths.json`, and the discovery
-  scan skips them. `hal0 model add`, scan commit and pulls clear that
-  record for the path they register.
-- The startup auto-scan now drops registry rows whose file is gone. These
-  rows are kept:
-  - rows that a slot, stack or `hal0.toml` field references
-  - rows with a pending pull
-  - FLM rows
-  - rows under a model root that is empty or missing, such as an unmounted
-    share
-
-  If any of those references fails to load, pruning is skipped for that
-  boot.
-- The scan no longer registers model files under dot directories inside a
-  model root, such as `.Trash-1000/`. It also no longer names a Hugging
-  Face shard set after its hash-named blob, and it no longer registers a
-  hardlinked copy of a model that is already registered.
-- Deleting a model while it is still downloading cancels the download
-  first, so the finished download can't bring the model back. If the
-  download doesn't stop within 30 seconds, the delete is refused with
-  `model.pull_active`.
-- The Delete dialog shows the model's real path and size. It used to claim
-  it removed the size "from /var/lib/hal0/models", whatever the model's
-  actual location.
-
-### Added
-
-- `hal0 profile migrate` previews the move to profile-centric config
-  (ADR-0029: the model keeps file facts, a profile holds every tune, a slot
-  holds placement). It reads this box's slots, profiles, stacks and model
-  registry and prints the profiles it would generate, the slots it would
-  re-point and every configured value that does not reach the launch today,
-  such as a slot's `[server].extra_args`. Those inert values are dropped and
-  reported, never applied: the conversion keeps what each slot launches.
-  `--apply` converts (it also runs by itself, see Migrations) and
-  `--restore <archive>` puts a conversion backup back for a downgrade.
-- `hal0 profile create` and `hal0 profile edit` manage custom profiles from
-  the CLI. They set `--flags`, `--ctx-size`, `--thinking`, `--vision`,
-  `--mtp`, `--runner` and `--intent`, and `--from` duplicates a seed or a
-  custom profile first. Seeds stay read-only.
-- Hermes command approvals can be switched between `smart` and `manual` from
-  the dashboard (Settings ▸ Security) or with
-  `hal0 agent command-approvals [smart|manual]`; with no argument it shows
-  the setting. This is Hermes' own `approvals.mode`, its gate on dangerous
-  shell commands and `execute_code` scripts while the terminal tool is on.
-  It is separate from hal0's approval queue for gated MCP tool calls
-  (`hal0 agent approvals`). `smart` stays the default: your `hal0/agent`
-  model approves a flagged command first, and if that call fails or answers
-  anything but APPROVE, Hermes falls back to asking you. `manual` asks you
-  every time. A change re-renders Hermes' config and restarts
-  `hal0-agent@hermes` if it is running; if a step fails, the previous
-  setting is restored. The setting is stored in the root-owned
-  `/etc/hal0/agents/hermes.toml` (`[hermes] command_approvals`), which the
-  agent cannot write, and the admin MCP tools never expose it. An
-  `approvals.mode` in `/etc/hal0/agents/hermes/overrides.yaml` still wins,
-  and both surfaces show it as the value in effect. When Hermes'
-  `config.yaml` drifts from the expected value, both surfaces say so and
-  `hal0 doctor all` shows a warning row. Known limits: Hermes reads the mode
-  from its own `config.yaml`, which the agent's user owns, so an agent with
-  the terminal tool on can edit it directly (re-provisioning restores your
-  choice). Until ADR-0024 ships, agents also authenticate with the box admin
-  key, so such an agent can call the API route
-  (`PUT /api/agents/hermes/command-approvals`) that changes the setting.
-
-### Changed
-
-- The pinned OpenWebUI image moves to upstream v0.12.0 (manifest-list digest
-  `sha256:156503890315…`, linux/amd64 and linux/arm64). The pin lives in the
-  same three places as before: `hal0.openwebui.image_pin`, the
-  `hal0-openwebui.service` unit and `installer/install.sh`. The v0.12.0
-  release notes list no breaking changes. The port, data path and every
-  environment variable hal0 writes into `openwebui.env` are unchanged. New
-  upstream options such as `ENABLE_MFA` default to off, so existing boxes
-  behave as before. Run `hal0 update owui` to move a running box.
-- The dashboard follows the profile-centric config (ADR-0029). A profile now
-  holds the whole tune: the profile drawer gains context size (128 to
-  16,777,216 tokens), thinking (Auto, On, Off), vision (Auto, Off) and MTP
-  (Auto, Off), and loses backend, device class and quant. The profile screen
-  also rejects the model-fact flags (`--jinja`, `--chat-template`,
-  `--chat-template-file`, `--mmproj`, `--no-mmproj`, `--mmproj-auto`),
-  `--spec-draft-device` and `--reasoning-format none`. The model drawer keeps
-  only file facts (chat template, jinja, MTP heads) and shows the native
-  context window read-only. Its flag editor, "Seed from profile", divergence
-  diff, context input and Thinking and Vision overrides are gone. The slot
-  drawer drops the context ceiling, shows the effective context and where it
-  came from, and adds "Edit profile" and "Duplicate & edit" next to the
-  profile picker. The stacks editor drops its per-row MTP control, and the
-  Updates page drops the pending-migrations panel. A slot the conversion
-  could not convert gets a "Conversion blocked" badge on its card and in its
-  drawer, with the reason, the fix, and a note when it is still running its
-  pre-conversion tune. This needs a server with the matching API change.
-- ADR-0027: `Runner.tier` (`default` / `optional` / `frozen`) replaces
-  `Runner.is_default` as the one record of whether a runtime is a default.
-  Default: ROCmFPX, CPU, NPU (FastFlowLM), Kokoro speech, Moonshine
-  transcription, ComfyUI. Optional: Strix Halo Vulkan, Qwen3 TTS, NVIDIA
-  CUDA, PromptForge (legacy). `GET /api/system-info` `backends[]` gains
-  `tier`, and its `is_default` now reads `tier == "default"` (so CPU, FLM,
-  Kokoro, Moonshine and ComfyUI also report `true`) until it is removed in
-  v2.0.0. `GET /api/runner-images` rows gain `runner`, `title`, `blurb` and
-  `tier`, and `families` gain `title` and `tier`. The slot and profile
-  drawers list default runtimes first.
-- Every runtime now has a plain-language title and one-line description
-  saying what it runs on and when to pick it. The AMD llama.cpp runtime is
-  titled **ROCmFPX** (it was **Standard**, a name now reserved for the
-  upstream runner ADR-0025 proposes). The Runner Images page shows these in
-  place of the `images.json` maintainer notes, which move to a collapsed
-  "maintainer notes" toggle.
-- The Runner Images page calls the per-runtime image choice the **launch
-  image** (`launch image` chip, **Launch images** strip, **Set as … launch
-  image** button, `release` source chip), so it can no longer be read as the
-  runtime's tier.
-- ADR-0025 open question 1 is answered: the agent slot moves to
-  Qwen3.8-27B on the `upstream` runner when that runner ships.
-- Hermes Agent moves from v2026.7.7.2 (0.18.2) to v2026.7.20 (0.19.0),
-  pinned at upstream commit `3ef6bbd2` (#2566). This is the newest release
-  hal0 can install. From 0.19.1 upstream no longer builds wheels outside its
-  Nix build, and from 0.21.6 it needs Python 3.14, so going further needs a
-  new Hermes install method. hal0 now writes `approvals.mode: smart`,
-  which is also the new upstream default. Before a dangerous terminal
-  command reaches you, a call to your `hal0/agent` model approves it, denies
-  it or asks you. If that call fails, returns anything unexpected or times
-  out (up to about 90 seconds), you are asked as before. Existing boxes switch
-  to smart approvals the next time Hermes is provisioned. To keep being asked
-  about every flagged command, run `hal0 agent command-approvals manual` (see
-  Added). The plugin contracts hal0 uses (memory
-  provider, provider profile, plugin context, voice registries, the API
-  server's runs, sessions and jobs routes, and the kanban schema and run
-  routes) are otherwise unchanged. Upstream Hermes now gives up on a memory
-  prefetch after 8 seconds, so a slow Hindsight recall skips that turn's
-  recalled context instead of delaying the reply.
-
-- ADR-0024: the "approval-route fix only" option is recorded as considered and
-  not shipped (an agent holding the admin key can log in for a cookie, and an
-  on-box caller passes the LAN gate); `tests/api/test_agent_self_approval.py`
-  pins agent self-approval as a strict xfail until the v1.5 tier lands.
-- The bundled Pi agent moves to current upstream: `@earendil-works/pi-coding-agent`
-  0.84.4 to 1.2.0, `pi-mcp-adapter` 2.31.0 to 5.3.0 and
-  `@vectorize-io/hindsight-coding-agents` 0.4.3 to 0.8.1. The `hal0-provider`
-  extension follows Pi's new custom-provider stream types, and the `hindsight`
-  extension now loads upstream's own Pi binding (`dist/pi.js`) instead of the
-  Prime Agent bundle, so memories retained from Pi are labelled `pi` rather
-  than `prime-agent` (the bank is unchanged) and the last turn's write-back is
-  flushed when Pi exits. The `hal0` Pi theme points at Pi's new schema URL.
-  Existing installs pick this up when the Pi agent is reinstalled; the first
-  Pi start after the bump turns Pi's built-in MCP off in
-  `~/.pi/agent/settings.json` (`"-builtin:mcp"` under `extensions`) because the
-  adapter replaces it.
-
-- `GET`/`PUT /api/memory/banks/{bank}/profile` no longer forward to the
-  memory engine's `/profile` endpoint, which answers `410 Gone` from
-  Hindsight 0.10.0 on. hal0 now builds the same response from the bank list
-  (name, mission, effective disposition), and a `PUT` writes the disposition
-  traits as bank-config overrides. A `PUT` may now name only some traits.
-  `hal0 memory bank profile set` writes traits and missions in one
-  bank-config PATCH. `hal0 memory mm list` and the dashboard ask for
-  mental-model content explicitly, because the engine's list now returns
-  metadata only by default. The `memory_mental_model_list` MCP tool keeps the
-  engine's new default. Pass `detail: "content"` to get each model's content.
-
-### Migrations
-
-- **A leftover `/var/lib/hal0/registry/registry.toml` is retired, not
-  imported.** Every box at the 1.3.0 upgrade floor already runs the SQLite
-  registry and already imported that file on its first boot, so the file
-  holds nothing the database needs. The first update or `hal0-api` start on
-  this release copies it to `/var/lib/hal0/backups/registry-toml-<UTC>/`,
-  renames it to `registry.toml.retired-<UTC>` and deletes the
-  `registry.toml.lock` sidecar. `hal0.db` is not touched. Nothing reads the
-  file any more, so this step never blocks `hal0 update` or `hal0-api`
-  start: if it cannot back up or rename the file (for example a root-owned
-  `0600` file left by a `sudo hal0 registry export`), it logs a warning,
-  `hal0 update` lists it among its pass warnings, and `hal0 doctor all`
-  reports a `registry-toml` warning until you delete the file.
-
-- **`--reasoning-format none` is stripped from existing config (#2545).** It
-  runs by itself on `hal0 update`, on an `install.sh` re-run and at `hal0-api`
-  start, with nothing for you to run. It removes the flag from the `flags` of
-  every profile in `/etc/hal0/profiles.toml`, from the `[server].extra_args` of
-  each slot file under `/etc/hal0/slots/`, and from each model's
-  `defaults.extra_args`. `--reasoning-format=none` is caught too;
-  `--reasoning-format deepseek` and every other value are left alone. Before
-  it rewrites anything it copies the file to `/var/lib/hal0/backups/`
-  (`profiles-<time>.toml`, `slot-<name>-<time>.toml`) and writes the old model
-  values to `model-extra-args-<time>.json`; backups are readable by their
-  owner only. Running slots keep their old
-  command line until their next restart.
-
-- **The Hindsight memory engine's database migrates one way to 1.0.0.** The
-  first start of hindsight-api 1.0.0 runs the engine's schema migrations for
-  0.10.0 through 1.0.0 on `/var/lib/hal0/memory/hindsight/.pg0`. Among other
-  changes they add bank aliases and attachments, and they drop the unused
-  `document_attachments` table and `memory_units_bm25` view. Before the new
-  engine starts, the upgrade stops the old engine and copies `.pg0` to
-  `.pg0.pre-0.9.2`, and it needs 1.5 times the size of `.pg0` free to do so.
-  If 1.0.0 does not answer `/health` and report its version, the old venv and
-  that copy are both restored. The copy is kept after a successful upgrade;
-  the next run that finds the engine on 1.0.0 deletes only older copies such
-  as `.pg0.pre-0.8.4`. Memories, documents, directives, mental models
-  and bank settings are carried over unchanged. A bank disposition set
-  through the old profile endpoint still applies. The embedded PostgreSQL
-  stays on 18.1, so the data directory itself is not upgraded.
-  `hal0 update --rollback` leaves the engine on 1.0.0, as it did for 0.9.2.
-  Memory keeps working on the older hal0, but two things the older hal0
-  calls changed in the engine: its `/api/memory/banks/{bank}/profile` route
-  and `hal0 memory bank profile` commands fail with `410 Gone`, and the
-  dashboard's mental-model rows lose their content preview.
-
-## [1.4.0] — 2026-10-08
-
-### Highlights
-
-- **Memory writes that were silently lost now land, or are refused
-  honestly.** Hindsight's extraction ran with its own defaults (32
-  concurrent calls, 64000 tokens) on a slot that serves one request at a
-  time, so on a slow box `POST /api/memory/add` returned 200 and nothing was
-  stored. Extraction now has operator-set limits under `[memory.graph]`
-  (Settings ▸ Memory), and a write whose extraction slot is too small for
-  the prompt is refused up front, over REST and `/mcp/memory` alike.
-  (#1834, #1903, #1930)
-- **Open WebUI works with auth on, and a lost admin key is recoverable.**
-  The installer mints a client key and Open WebUI presents it to hal0's
-  `/v1` (per connection, never to another service); `hal0 auth rotate
-  client` re-points it. `sudo hal0 auth reset-key` mints and prints a new
-  admin key, live or with the API down. (#2314)
-- **Open WebUI is fully pre-wired.** Document uploads go through RAG on
-  hal0's embeddings and the image button generates through ComfyUI as soon
-  as the matching slots are bound. (#2256)
-- **Installs leave evidence.** Every run writes an owner-only log, and a
-  failed run writes a redacted failure report you can attach to an issue.
-  (#2243, #2307)
-- **Loading a stack says what it will unload** before you confirm, and the
-  result names what was stopped. (#1511)
-
-### Breaking
-
-- **Exposing a user-installed MCP server to Hermes or the brain profile is
-  disabled until hal0's MCP proxy mount lands (#2303).** Both call a joined
-  server's URL directly, so hal0 enforces none of its `[tools]` policy on
-  that path, and the policy has no wildcard: a tool it does not list is
-  denied, yet the agent could call it. That covered every exposed server,
-  including allow-only and empty policies, not only the `gated`/`blocked`
-  case #2343 closed. `PATCH /api/mcp/{id}/exposure` (and
-  `hal0 mcp expose --hermes/--brain`) now refuses turning either target on
-  for any installed server with `409 mcp.exposure_policy_unenforced`;
-  withdrawing exposure still works, and `hal0 mcp test` says why the toggle
-  is unavailable. A server already exposed on an upgraded box is removed
-  from Hermes's config, the brain profile and the policy mirror at the
-  next hal0-api start or MCP change. hal0's built-in servers are
-  unaffected. (#2358)
-- **`hal0 update` restarts slots on its own and can exit 2 on an update that
-  applied.** When a release rolls the runner image, slots on the old image
-  are now restarted after the apply, both by `hal0-api` at every start
-  (`[updates].auto_restart_image_drift`, on by default) and by the CLI
-  (`--no-restart-slots` opts out). A slot with a request in flight is skipped.
-  While any slot still runs the old image, `hal0 update` exits **2** ("applied,
-  convergence outstanding") instead of 0, so a script that treats any
-  non-zero exit as a failed update needs to accept 2. Because `hal0-api`
-  does this at start, the upgrade to 1.4.0 itself can restart running
-  slots. (#2096)
-- **An installed MCP server that would send its `[secrets]` or `[env]`
-  headers in clear text no longer loads.** A `streamable-http`/`sse` record
-  whose url is plain `http://` to a non-loopback host, and that carries any
-  `[secrets]` key or non-empty `[env]` value, used to send those values
-  unencrypted on every probe and Hermes call. 1.4 refuses it: on upgrade such
-  a record is skipped (`hal0.mcp.installed.bad_record` in the journal, and
-  `mcp.record_malformed` when read directly), it drops out of `hal0 mcp
-  list`, and its Hermes entry is removed at the next hal0-api start or MCP
-  change. To keep it, point the url at `https://` or a loopback host, or set
-  `allow_insecure_http = true` in its TOML under `/etc/hal0/mcp-servers/` to
-  accept the risk. A `Proxy-Authorization` header value is refused on any url
-  and belongs in the proxy environment instead. (#2304)
 ### Added
 
 - **Memory extraction has limits now, and they are yours to set.** The
@@ -1387,6 +642,55 @@ applying. Add those subsections to a version's section to surface them; see
   (every config file hal0 generates or rewrites, its writer, and whether
   operator edits survive it); and an area→required-validation table in
   `CONTRIBUTING.md` mirroring the PR template's §14.1 high-risk map. (#2242)
+- The dashboard steward now has a real memory. Brain chat offers it
+  `memory_add`, `memory_search` and `memory_list`, scoped server-side to the
+  `hal0-brain` persona's namespace (`private:hermes__hal0-brain`); the model
+  cannot name another bank, and every other `memory_*` tool stays hidden.
+  Before, every memory tool was filtered out and nothing stored, so "remember
+  that my cat is called Zorbo" got "I've noted that" with nothing saved. The
+  steward's own `memory_add` works under the default `[brain_chat]
+  read_only = true`, the persona and fallback prompts tell the model to call
+  `memory_add` before claiming it remembered anything, and a "remember ..." or
+  "what did I tell you ..." turn answered with no tool call is rerouted to
+  `[brain_chat] tool_model` (#2658).
+
+
+- `hal0 profile migrate` previews the move to profile-centric config
+  (ADR-0029: the model keeps file facts, a profile holds every tune, a slot
+  holds placement). It reads this box's slots, profiles, stacks and model
+  registry and prints the profiles it would generate, the slots it would
+  re-point and every configured value that does not reach the launch today,
+  such as a slot's `[server].extra_args`. Those inert values are dropped and
+  reported, never applied: the conversion keeps what each slot launches.
+  `--apply` converts (it also runs by itself, see Migrations) and
+  `--restore <archive>` puts a conversion backup back for a downgrade.
+- `hal0 profile create` and `hal0 profile edit` manage custom profiles from
+  the CLI. They set `--flags`, `--ctx-size`, `--thinking`, `--vision`,
+  `--mtp`, `--runner` and `--intent`, and `--from` duplicates a seed or a
+  custom profile first. Seeds stay read-only.
+- Hermes command approvals can be switched between `smart` and `manual` from
+  the dashboard (Settings ▸ Security) or with
+  `hal0 agent command-approvals [smart|manual]`; with no argument it shows
+  the setting. This is Hermes' own `approvals.mode`, its gate on dangerous
+  shell commands and `execute_code` scripts while the terminal tool is on.
+  It is separate from hal0's approval queue for gated MCP tool calls
+  (`hal0 agent approvals`). `smart` stays the default: your `hal0/agent`
+  model approves a flagged command first, and if that call fails or answers
+  anything but APPROVE, Hermes falls back to asking you. `manual` asks you
+  every time. A change re-renders Hermes' config and restarts
+  `hal0-agent@hermes` if it is running; if a step fails, the previous
+  setting is restored. The setting is stored in the root-owned
+  `/etc/hal0/agents/hermes.toml` (`[hermes] command_approvals`), which the
+  agent cannot write, and the admin MCP tools never expose it. An
+  `approvals.mode` in `/etc/hal0/agents/hermes/overrides.yaml` still wins,
+  and both surfaces show it as the value in effect. When Hermes'
+  `config.yaml` drifts from the expected value, both surfaces say so and
+  `hal0 doctor all` shows a warning row. Known limits: Hermes reads the mode
+  from its own `config.yaml`, which the agent's user owns, so an agent with
+  the terminal tool on can edit it directly (re-provisioning restores your
+  choice). Until ADR-0024 ships, agents also authenticate with the box admin
+  key, so such an agent can call the API route
+  (`PUT /api/agents/hermes/command-approvals`) that changes the setting.
 
 ### Changed
 
@@ -1431,6 +735,98 @@ applying. Add those subsections to a version's section to surface them; see
   emptied) is removed from `ARCHITECTURE.md`'s module tree, and the
   "auth was removed" claims now describe the optional KB-1 key gate. No
   behavior change. (#2244)
+- The pinned OpenWebUI image moves to upstream v0.12.0 (manifest-list digest
+  `sha256:156503890315…`, linux/amd64 and linux/arm64). The pin lives in the
+  same three places as before: `hal0.openwebui.image_pin`, the
+  `hal0-openwebui.service` unit and `installer/install.sh`. The v0.12.0
+  release notes list no breaking changes. The port, data path and every
+  environment variable hal0 writes into `openwebui.env` are unchanged. New
+  upstream options such as `ENABLE_MFA` default to off, so existing boxes
+  behave as before. Run `hal0 update owui` to move a running box.
+- The dashboard follows the profile-centric config (ADR-0029). A profile now
+  holds the whole tune: the profile drawer gains context size (128 to
+  16,777,216 tokens), thinking (Auto, On, Off), vision (Auto, Off) and MTP
+  (Auto, Off), and loses backend, device class and quant. The profile screen
+  also rejects the model-fact flags (`--jinja`, `--chat-template`,
+  `--chat-template-file`, `--mmproj`, `--no-mmproj`, `--mmproj-auto`),
+  `--spec-draft-device` and `--reasoning-format none`. The model drawer keeps
+  only file facts (chat template, jinja, MTP heads) and shows the native
+  context window read-only. Its flag editor, "Seed from profile", divergence
+  diff, context input and Thinking and Vision overrides are gone. The slot
+  drawer drops the context ceiling, shows the effective context and where it
+  came from, and adds "Edit profile" and "Duplicate & edit" next to the
+  profile picker. The stacks editor drops its per-row MTP control, and the
+  Updates page drops the pending-migrations panel. A slot the conversion
+  could not convert gets a "Conversion blocked" badge on its card and in its
+  drawer, with the reason, the fix, and a note when it is still running its
+  pre-conversion tune. This needs a server with the matching API change.
+- ADR-0027: `Runner.tier` (`default` / `optional` / `frozen`) replaces
+  `Runner.is_default` as the one record of whether a runtime is a default.
+  Default: ROCmFPX, CPU, NPU (FastFlowLM), Kokoro speech, Moonshine
+  transcription, ComfyUI. Optional: Strix Halo Vulkan, Qwen3 TTS, NVIDIA
+  CUDA, PromptForge (legacy). `GET /api/system-info` `backends[]` gains
+  `tier`, and its `is_default` now reads `tier == "default"` (so CPU, FLM,
+  Kokoro, Moonshine and ComfyUI also report `true`) until it is removed in
+  v2.0.0. `GET /api/runner-images` rows gain `runner`, `title`, `blurb` and
+  `tier`, and `families` gain `title` and `tier`. The slot and profile
+  drawers list default runtimes first.
+- Every runtime now has a plain-language title and one-line description
+  saying what it runs on and when to pick it. The AMD llama.cpp runtime is
+  titled **ROCmFPX** (it was **Standard**, a name now reserved for the
+  upstream runner ADR-0025 proposes). The Runner Images page shows these in
+  place of the `images.json` maintainer notes, which move to a collapsed
+  "maintainer notes" toggle.
+- The Runner Images page calls the per-runtime image choice the **launch
+  image** (`launch image` chip, **Launch images** strip, **Set as … launch
+  image** button, `release` source chip), so it can no longer be read as the
+  runtime's tier.
+- ADR-0025 open question 1 is answered: the agent slot moves to
+  Qwen3.8-27B on the `upstream` runner when that runner ships.
+- Hermes Agent moves from v2026.7.7.2 (0.18.2) to v2026.7.20 (0.19.0),
+  pinned at upstream commit `3ef6bbd2` (#2566). This is the newest release
+  hal0 can install. From 0.19.1 upstream no longer builds wheels outside its
+  Nix build, and from 0.21.6 it needs Python 3.14, so going further needs a
+  new Hermes install method. hal0 now writes `approvals.mode: smart`,
+  which is also the new upstream default. Before a dangerous terminal
+  command reaches you, a call to your `hal0/agent` model approves it, denies
+  it or asks you. If that call fails, returns anything unexpected or times
+  out (up to about 90 seconds), you are asked as before. Existing boxes switch
+  to smart approvals the next time Hermes is provisioned. To keep being asked
+  about every flagged command, run `hal0 agent command-approvals manual` (see
+  Added). The plugin contracts hal0 uses (memory
+  provider, provider profile, plugin context, voice registries, the API
+  server's runs, sessions and jobs routes, and the kanban schema and run
+  routes) are otherwise unchanged. Upstream Hermes now gives up on a memory
+  prefetch after 8 seconds, so a slow Hindsight recall skips that turn's
+  recalled context instead of delaying the reply.
+
+- ADR-0024: the "approval-route fix only" option is recorded as considered and
+  not shipped (an agent holding the admin key can log in for a cookie, and an
+  on-box caller passes the LAN gate); `tests/api/test_agent_self_approval.py`
+  pins agent self-approval as a strict xfail until the v1.5 tier lands.
+- The bundled Pi agent moves to current upstream: `@earendil-works/pi-coding-agent`
+  0.84.4 to 1.2.0, `pi-mcp-adapter` 2.31.0 to 5.3.0 and
+  `@vectorize-io/hindsight-coding-agents` 0.4.3 to 0.8.1. The `hal0-provider`
+  extension follows Pi's new custom-provider stream types, and the `hindsight`
+  extension now loads upstream's own Pi binding (`dist/pi.js`) instead of the
+  Prime Agent bundle, so memories retained from Pi are labelled `pi` rather
+  than `prime-agent` (the bank is unchanged) and the last turn's write-back is
+  flushed when Pi exits. The `hal0` Pi theme points at Pi's new schema URL.
+  Existing installs pick this up when the Pi agent is reinstalled; the first
+  Pi start after the bump turns Pi's built-in MCP off in
+  `~/.pi/agent/settings.json` (`"-builtin:mcp"` under `extensions`) because the
+  adapter replaces it.
+
+- `GET`/`PUT /api/memory/banks/{bank}/profile` no longer forward to the
+  memory engine's `/profile` endpoint, which answers `410 Gone` from
+  Hindsight 0.10.0 on. hal0 now builds the same response from the bank list
+  (name, mission, effective disposition), and a `PUT` writes the disposition
+  traits as bank-config overrides. A `PUT` may now name only some traits.
+  `hal0 memory bank profile set` writes traits and missions in one
+  bank-config PATCH. `hal0 memory mm list` and the dashboard ask for
+  mental-model content explicitly, because the engine's list now returns
+  metadata only by default. The `memory_mental_model_list` MCP tool keeps the
+  engine's new default. Pass `detail: "content"` to get each model's content.
 
 ### Removed
 
@@ -1443,6 +839,20 @@ applying. Add those subsections to a version's section to surface them; see
   `docs/getting-started/` is the published path. Earlier CHANGELOG entries
   that cite these files describe history and are left as written. No
   behavior change.
+- hal0 no longer builds runner or toolbox images. Those images are built
+  only in `Hal0ai/hal0-runner-images`. The in-repo builder (the `toolbox.yml`
+  workflow, `scripts/update-toolbox-digests.sh`, `packaging/toolbox/`,
+  `packaging/runner/` and their tests) is gone. The workflow had re-run on a
+  dependency bump and moved the published
+  `hal0-toolbox-qwen3tts:v1` tag to an image that had not passed the gate.
+- The container launch plan no longer has a free-form `extra_args` field
+  (ADR-0029 phase 4b). ComfyUI's host IPC and FLM's unlimited memlock are now
+  typed fields (`ipc`, `ulimits`) and render the same `PodmanArgs=` lines as
+  before, so slot units are unchanged. Every ComfyUI and FLM load used to log
+  a `container.extra_args_deprecated` warning; that warning is gone. No slot,
+  model or API setting ever reached this field, so no configuration changes.
+  The `ContainerSpec` alias and launch-plan mounts given as `(source, target)`
+  tuples are removed as well.
 
 ### Fixed
 
@@ -1982,6 +1392,368 @@ applying. Add those subsections to a version's section to surface them; see
   the rest, fails on `failure`, `cancelled` or `timed_out`, counts only the
   latest run of each check, reads every page of results, and fails when the
   query errors or a required check is missing. (#2479)
+- `hal0 doctor verify` and `GET /api/doctor` no longer report "3 active: embed, img,
+  voice" on a fresh install: a capability group now counts as active only when
+  at least one of its selections is enabled, so the "none active" warning and its
+  enable next step are reachable again (#2736).
+
+- A slot unload whose stop outlives the 30 s terminate budget now converges to `offline` once the teardown finishes (with a one-time "converged to offline" message) instead of sticking in `error`; the upstream is deregistered when the late teardown lands, and `_wake_capability_slot` runs the convergence so capability requests auto-load the slot after an api restart instead of 404ing `dispatch.no_route` (#2738).
+- **tts:** the Kokoro slot now launches from the bundle `hal0 model pull
+  kokoro-v1` installs, instead of a hardcoded `/mnt/ai-models/local/...`
+  path that a fresh install never has. Before, every tts start downloaded
+  about 354 MB from GitHub into the container's throwaway filesystem, and a
+  box without internet access could not speak. The pull now installs
+  `kokoro-v1.0.onnx` and `voices-v1.0.bin` under `<store>/tts/kokoro-v1/`,
+  the provider passes that directory as `--model_path` from the configured
+  store, and the seeded `kokoro` profile names no path. A missing bundle
+  fails the slot with `slot.weights_missing` naming the pull command. On
+  upgrade, `hal0 update` pulls the bundle once when kokoro is in use and the
+  store lacks it, replacing the mislabelled `model.gguf` an earlier pull left.
+  If the box is offline the update still succeeds, and the remedy
+  (`hal0 model pull kokoro-v1`) is reported and named by the slot's error
+  (ADR-0030, #2739).
+- **api:** `systemctl stop`/`restart hal0-api` no longer hangs until systemd's
+  SIGKILL when a chat request is in flight. Cancelling that request flips its
+  slot serving -> ready, so the model-cache refresher was usually mid
+  `/v1/models` fetch when shutdown cancelled it; the HTTP client swallowed the
+  cancel and the refresher went back to waiting for events forever, leaving the
+  API down for ~100 s on most restarts with memory on. The refresher now honours
+  a swallowed cancel, every lifespan teardown step is bounded at 3 s (a stuck
+  step is logged as `hal0.api.shutdown_step_timed_out` and the shutdown
+  continues), and the installer writes `TimeoutStopSec=30` into
+  `hal0-api.service` (fresh installs and installer re-runs; `hal0 update` does
+  not rewrite that unit) (#2727).
+- **slots:** a stopped slot whose state record kept a stale `model_id` no
+  longer claims it is "still serving" a model after its `[model].default` was
+  emptied; the "still serving" wording is now only used while the slot is live
+  (ready/idle/serving), and an offline slot gets the plain "no model assigned"
+  message (#2715, follow-up to #2694).
+- **catalog:** removed the three `whispercpp` STT rows (Whisper-Tiny, Whisper-Base,
+  Whisper-Large-v3-Turbo) and the `whispercpp` provider mapping: hal0 never
+  shipped a whisper.cpp runtime (ADR-0001), so the picker offered a model no
+  slot could serve. The omni bundle manifests no longer list them, and a
+  `voice.stt` selection whose provider has no runtime profile now fails with
+  `capability.no_engine_for_provider` instead of being rebound to the Moonshine
+  runner (#2691).
+- **normalize:** a `/v1` request carrying `response_format` (json_object/json_schema) or a llama.cpp `grammar`/`json_schema` now gets the default `chat_template_kwargs.enable_thinking=false` like any other request, so a Qwen3-family thinking-by-default model on the Hindsight extraction slot no longer spends the whole completion budget reasoning and returns 0 facts on every retain. The #2020 exemption now applies only to a model whose registry `chat_template` is `hal0-brain-sft`, and a profile's explicit `enable_thinking = false` is honoured on grammar requests on every template (#2713).
+- **slots:** healing a type-less slot TOML no longer stamps `type = "llm"` on a rerank/embed/tts slot: the type now follows the profile, then the slot name. The output-sanity gate also skips an `llm`-typed slot whose profile or launch flags carry `--reranking`/`--embedding`, and `hal0 doctor profiles --fix` rewrites an already-healed `type = "llm"` on a non-chat profile; the failure message now names that remedy (#2693).
+- **updater:** a slot whose model the runner-system conversion unassigned (a
+  ROCmFPX/ROCmFP4/IU4/ActiveFPX quant no runner can load, ADR-0028 §7) is now
+  reported where the operator sees it. `hal0 update` prints one line per slot
+  naming the slot, the dropped model and the fix (`hal0 slot edit <slot>
+  --model <id>`, with `lfm2.5-2.6b` as the brain example); before, the warning
+  reached only the hal0-api journal (#2694). A slot still serving a model
+  whose `[model].default` is empty now carries a `message` on `/api/slots`
+  saying so, instead of reading idle with `message` null. Its render error
+  says "has no model assigned ([model].default is empty)" with the same fix,
+  instead of blaming a registry lookup (#2695). The exit-2 verdict no longer
+  sends a slot whose launch command does not render to
+  `hal0 update --restart-slots`, which skips such a slot; it names the slot's
+  own fix instead (#2696).
+- **capabilities:** saving voice.stt with no device (the dashboard sends only `{model, enabled}` and a fresh install seeds `device=""`) no longer falls back to a `gpu-rocm` stt slot that 503s on a host without `/dev/kfd`. The device is now resolved server-side from the advertised backends (non-GPU, supported by the selected model), and a host where nothing fits gets 400 `capability.no_engine_for_device` before any slot file is written (#2690).
+- **slots:** the seed `utility` and `agent` profiles now launch llama-server with `--parallel 1`. Without it llama-server ran `-np auto` (4 sequences sharing one 65,536-cell unified KV pool), so one combined overflow returned HTTP 500 "Context size has been exceeded" to every in-flight request on the slot, including unrelated Hindsight extraction/consolidation calls and Hermes turns. Capacity is now deterministic; concurrent callers queue instead of failing each other (#2692).
+- **slots:** the seed `brain` profile now launches llama-server with `--parallel 1` too (#2692 pinned only `utility` and `agent`). Without it brain ran `-np auto`: 4 sequences on one 65,536-cell unified KV pool, so roughly four concurrent steward rounds (~16k tokens each) overflowed the pool and every in-flight brain request got HTTP 500 "Context size has been exceeded". Concurrent brain callers now queue instead (#2714).
+
+- **mcp:** the hal0-admin `slot_list` result is now a compact roster (name, id, state, `loaded`, model id, backend, port, container health, image tag) sent as one compact-JSON text block with no duplicate `structuredContent`, instead of ~2.9 KB per slot. Hermes 0.19.0 cuts any tool result over its per-result budget (39,321 chars at 65,536 ctx) to a 1,500-char preview on `hermes -z` turns, so a box with 14+ slots was answered from a truncated first slot. `resolved_command`, the full `image` ref and nested tuning are no longer in the list; `slot_status` / `slot_by_name` still return the full row (#2662).
+- **ui:** a vulkan-only GPU (render node passed through, no `/dev/kfd`) now counts as a GPU on the Overview utilization row and health strip and on the Settings Live-hardware and Power & thermal panels, instead of reading "no GPU access" while a vulkan slot is serving; the NPU rows gate on the NPU probe rather than the GPU one (#2674).
+- A profile whose `profiles.toml` entry fails validation is no longer
+  invisible. It is quarantined as before, but `GET /api/profiles` and
+  `hal0 profile list` now show it as a read-only row with the reason, the
+  Profiles page lists it under "Needs attention", and `hal0 profile delete`
+  (or the page) removes it. The `profiles.invalid` message on a slot bound to it
+  now says to recreate the profile under the same name or delete it, instead of
+  pointing at `hal0 profile edit`, which cannot see a quarantined entry (#2653).
+- A host with an NPU but no FLM runner image no longer lists NPU-only models
+  in the capability catalogs, and a capability apply naming backend `npu` on
+  it (API or `hal0 capabilities set ... --backend npu`) is refused with 400
+  `capability.backend_unavailable` instead of returning 200 `pending_reload`
+  and committing a selection that can never serve (#2659).
+- The post-update runner-system and profile-centric conversions no longer
+  fail on a box whose `/var/lib/hal0/backups` a root-run tool created as
+  `root:hal0 2755`. Before, `hal0-api` (`User=hal0`) could not write the
+  backup, reported "nothing was changed", and every restart hit the same
+  error, so the box stayed unconverted. The conversion now makes a
+  directory it owns `2775`, and otherwise fails with the directory, its
+  owner and mode, and the fix. `hal0 doctor perms` now reports and fixes the
+  directory (`hal0:hal0 2775`), `install.sh` creates it that way, and the
+  `hal0 update` "Migration incomplete" panel names the fix instead of only
+  saying to restart (#2657).
+
+- A running slot whose launch command no longer renders (for example a
+  profile-centric slot that still carries `[model].context_size`) now shows
+  up in `GET /api/updates/slot-drift` and the `hal0 update` summary with its
+  image drift and a `render_error` that says why. Before, the drift check
+  returned nothing for it, so the summary said "no slots need restart" while
+  `/api/slots` reported `image_mismatch`. The automatic image-drift restart,
+  the CLI's post-apply restart, `hal0 update --restart-slots`, `slot load`'s
+  re-converge, and an unnamed `POST /api/updates/restart-slots` leave such a
+  slot running and list it under `skipped_render_error`, since a restart
+  would fail to render and take it down. Naming the slot in
+  `POST /api/updates/restart-slots` (without `skip_busy`) still restarts it
+  (#2660).
+- The brain's live-state grounding guard (#2022) no longer lets "why is/are/do/does"
+  phrasing hide a live-state question, and now recognises services, health,
+  memory and hindsight as subjects. "Why is the agent slot offline?" and "Is the
+  hindsight memory service healthy?" under a brevity clause were answered with
+  zero tool calls and an invented answer on the shipped 1.1B steward; they are
+  now rerouted to the tool model like any other ungrounded live-state answer
+  (#2675).
+- `hal0 update --rollback` now waits up to 300 s for the server instead of
+  giving up after 10 s. The route re-pips the prior tree synchronously (13 s on
+  a 32-core box), so the CLI used to print `did not respond within 10s` and
+  exit 1 while the rollback completed and `hal0.previous` flipped, hiding the
+  reverted-to version and restart panel and inviting a second `--rollback` that
+  undid the first. If the wait still expires, the CLI says the server may still
+  be rolling back, how to check, and that re-running `--rollback` would flip
+  back (#2661).
+- A stack row whose slot the profile-centric conversion blocks now still drops
+  the retired tuning keys (`vision`, `mtp`, `enable_thinking`,
+  `server_extra_args`). Only the profile re-point is reverted. Before, the
+  row kept them, `StackSlotEntry` rejected the rewritten `stacks.toml`, and
+  every `/api/stacks` call failed until the block cleared. The migration plan
+  no longer reports a drop it reverted (#2649).
+- Hermes's main model and its auxiliary role map now agree on one slot. On a
+  box with no `agent` slot, `_resolve_primary_slot` and the role resolver both
+  take the first ready LLM slot in pool order (`chat`/`primary` are no longer
+  special, per ADR-0023), and log the fallback as
+  `hermes.primary_slot_fallback` / `role_slots.main_fallback` instead of
+  choosing silently (#2635).
+- **omni:** a pinned image mode is now reported at once instead of after the
+  ComfyUI queue wait, and a chat request waits at most 15 s for the caller
+  restore (the detached restore keeps its 600 s queue wait), so a busy or
+  unreadable `/queue` no longer holds a request for ten minutes and ends in
+  `gpu.queue_busy` (#2639).
+- The boot-time image-drift restart no longer bounces slots it cannot prove idle. A slot with no `/metrics` reading (ComfyUI, Kokoro, Qwen3-TTS, Moonshine, FLM, llama slots without `--metrics`, or a timed-out scrape) used to count as idle and could be restarted mid-request; it now lands under `skipped_busy`. The explicit `hal0 update --restart-slots` keeps its behaviour. The runner-catalogue boot sync task is also cancelled at shutdown. (#2634)
+
+- `hal0 auth reset-key` now refuses, with a non-zero exit, when `HAL0_API_URL`
+  points at a non-loopback host. It edits this box's `api.env`, so it used to
+  rotate the remote box's key (e.g. under `sudo -E`) while printing this box's
+  unchanged key as the new one (#2640).
+- A box already on the newest nightly no longer offers that same nightly to
+  itself as an update. `GET /api/updates/check` and `GET /api/updates/state`
+  now compare the release manifest against the installed release
+  (`current/VERSION`) instead of the wheel base version, so the dashboard and
+  API stop reporting `1.4.0` → `1.4.0-nightly.<stamp>` forever (#2629).
+- The Hindsight engine upgrade pass no longer downgrades the engine. When the
+  installed `hindsight-api` is newer than the version the running hal0 tree
+  pins (for example after `hal0 update --rollback`), the pass now stops with
+  status `ahead` and a remedy instead of rebuilding an older engine onto the
+  newer database schema, and the boot-time check logs the same. Update hal0 to
+  a release pinned at or above the installed engine, or restore
+  `.pg0.pre-<pin>` by hand with the matching venv (#2613).
+- Two slot TOMLs that declare the same `name` no longer both load. hal0
+  keeps one (the id-keyed `<id>.toml` when present, else the first by
+  filename), logs `slot.duplicate_toml` with both paths, and skips the other,
+  so `GET /api/slots` lists the slot once. Deleting a model that only the
+  skipped stale file referenced no longer unloads the live slot of the same
+  name (#2542). The skipped file is logged once per process and no longer
+  marks the slot enumeration partial, so `/v1/models` keeps refreshing while
+  the stale file is present (#2631).
+- The profile-centric conversion no longer strips a blocked custom profile.
+  A profile (or a stack's embedded profile) whose flags carry a model fact
+  with no profile home (`--mmproj`, `--chat-template`, `--chat-template-file`)
+  was reported as blocked but written back without that flag, so the next
+  start converted its slot as unchanged and launched it without the projector
+  or template. The entry now stays in `profiles.toml` (or `stacks.toml`)
+  exactly as stored, is never reused for another slot's generated profile,
+  and blocks on every run until the flag is moved to the model (#2648).
+
+
+- A memory-engine upgrade that failed once no longer loses memories on a
+  second failure. The first failed attempt kept its `.pg0.pre-<version>`
+  snapshot. Every later attempt then reused that snapshot instead of taking
+  a new one, so a second rollback restored it and dropped everything written
+  since the first rollback. Each attempt now takes a fresh snapshot after
+  the old engine stops, and replaces the previous one only once the copy is
+  complete. A rollback that cannot copy the snapshot back no longer starts
+  the old engine on a half-restored `.pg0`, which could have initialised an
+  empty database and served it. It leaves the engine stopped and writes
+  `.pg0.restore-failed`. The next `hal0 update` restores the snapshot before
+  doing anything else. If that restore fails too, the engine stays stopped
+  and the update reports how to restore by hand.
+
+- A browser origin you allow now survives an installer re-run. The REST and
+  WebSocket origin checks only read `HAL0_ALLOWED_ORIGINS`, which sits in the
+  installer-managed block of `/etc/hal0/api.env`, so a reverse-proxy origin
+  added there by hand, or derived from an install-time `HAL0_PUBLIC_URL`, was
+  gone after the next run. A new `hal0.toml` `[network]` section holds
+  `public_url` and `extra_origins`. hal0 adds both on top of
+  `HAL0_ALLOWED_ORIGINS` on the next request, with no restart, and removing
+  one revokes it the same way. Set them with `hal0 network public-url
+  set|clear` and `hal0 network origins add|remove|list`, or on the new
+  Settings ▸ Network page. Each origin is validated and stored the way a
+  browser sends it (punycode for an internationalised name, the compressed
+  form of an IPv6 address); anything else is refused. An install-time
+  `HAL0_PUBLIC_URL`, including the bare-host form, is saved to
+  `[network].public_url` once, never over a set value. (#2382)
+- The seed stacks (`saber`, `forge`, `pi`) are now virtual, like the seed
+  profiles: hal0 takes them from code on every load, and a same-named entry
+  in `/etc/hal0/stacks.toml` is ignored. Before, the seeds were used only when
+  `stacks.toml` did not exist, so a box that had upgraded kept the copies an
+  older release wrote, which still named the retired `rocm`, `vulkan` and
+  `rocm-moe` profiles, and applying them failed. The API refuses to edit seed
+  stacks, so there was no way to fix them. Seed stacks are never written
+  back, so the next stack create, edit, delete, snapshot or import cleans
+  those copies out of `stacks.toml`. `hal0 profile migrate` no longer plans
+  or blocks on a seed-named stack in the file. Custom stacks are unchanged.
+  (#2584)
+
+- Deleting a custom profile is no longer allowed while a slot file still
+  names it but fails to load. A slot that is unconverted (`slot.unconverted`)
+  or otherwise invalid was left out of the profile in-use scan, so the delete
+  went through and the slot later failed with `slot.profile_missing`. The scan
+  now reads the profile name from the raw slot TOML (either layout) when the
+  typed load fails, so `profiles.in_use` and the Profiles tab's `used_by` list
+  include those slots. A slot file that is not valid TOML makes the delete
+  fail with 409 `profiles.slot_unreadable`, naming the file; the profile list
+  keeps working. (#2574)
+- An `image` (ComfyUI) slot that names a profile that does not exist no
+  longer launches silently with the built-in default flags. It now refuses
+  to launch with `slot.profile_missing`, as every llama-server slot already
+  does, so a typo in a profile name cannot quietly start a different tune.
+  A slot that names no profile still gets the default flags. The Kokoro,
+  Moonshine and Qwen3-TTS slots already refused, but with the profile
+  catalog's `profiles.not_found`; they now raise `slot.profile_missing` too,
+  so one condition has one code on the launch path (#2573).
+- The dashboard profile form called an unset Thinking default "Auto — the
+  model decides". hal0 treats it as off unless the request asks, so the
+  option, the profile card and the drawer preview now say "default (off)".
+
+- `GET /api/slots/{name}/resolved` no longer invents a llama-server command
+  for a slot that llama-server does not launch. Kokoro, Moonshine, Qwen3-TTS,
+  ComfyUI and FLM/NPU slots got a made-up `base`/`model`/`profile`/`slot`
+  argv, and the slot drawer showed it as the command they run. The endpoint
+  now asks the same provider selection the launch path uses and answers
+  `argv: null` with empty `provenance` for those slots, as ADR-0029 says; the
+  `resolved_command` field of `GET /api/slots` follows suit, and the drawer
+  says the command is not composed by llama-server. llama-server slots are
+  unchanged (#2577).
+- `SlotManager.create()` and `update_config()` now run the same write guard as
+  the HTTP routes. `create()` only screened `[server].env`, so an in-process
+  caller could write a profile-owned tuning key (`ctx_size`, `parallel`,
+  `mtp`, `[model].context_size`, `[server].extra_args`, ...) that the loader
+  then refused at launch as `slot.unconverted`; both methods also now refuse
+  the removed `enabled` key (`slot.removed_key_denied`). The NPU backend
+  install route no longer writes `enabled = true` into the slot it creates.
+  (#2578)
+- A profile, or the recorded tune of a slot the profile conversion blocked,
+  can no longer redirect a slot's model or reach outside it through a short
+  or alternative llama.cpp flag. The flag screen only knew one spelling of
+  each flag, so `-m /etc/shadow` replaced the slot's model (llama-server
+  keeps the last `-m`), and `-hf`, `--model-url`, `--api-key-file`,
+  `--ssl-key-file`, `--log-file`, `--path`, `--rpc`, `--tools`, the
+  `-ag`/`--agent` tools shortcut, the preset switches that download a model
+  (`--gpt-oss-20b-default`, `--embd-gemma-default`, …) and similar flags
+  passed unscreened. Every
+  spelling llama.cpp accepts is now screened (short and alternative forms,
+  `flag=value`, `_` for `-`). Flags that fetch a remote model, read or write
+  a host file, open or shape a listener, or set auth/TLS are refused
+  (`slot.host_owned_flag_denied`), as are bare positional arguments,
+  including one after a joined `--flag=value` or after a switch that takes no
+  value, such as `--metrics` (`slot.positional_arg_denied`).
+  The profile drawer shows the same refusals inline before Save. The seeds
+  and the shipped add-ons are unaffected.
+- A slot's `[server].env` can no longer set a llama-server launch option.
+  llama.cpp reads every option from an environment variable as well as from
+  its command line (`LLAMA_ARG_MODEL`, `LLAMA_ARG_AGENT`, `LLAMA_ARG_TOOLS`,
+  `LLAMA_API_KEY`, `HF_TOKEN`, …), so a slot env could redirect the model or
+  turn on the built-in tools past the profile flag screen. Every
+  `LLAMA_ARG_*` name, plus `LLAMA_API_KEY`, `HF_TOKEN` and
+  `MTMD_BACKEND_DEVICE`, is now refused with `slot.llama_env_denied` when a
+  slot is created or edited (API, stacks, in-process writers) and again when
+  it launches; tuning belongs on the slot's profile. The profile conversion
+  blocks a slot that carries one, naming the variable. Runtime variables such
+  as `HSA_OVERRIDE_GFX_VERSION` are unaffected.
+- The bundled agent's STATE.md capability summary now lists speech-to-text
+  and reranking slots. It matched slot types `stt` and `rerank`, but slots
+  are typed `transcription` and `reranking`, so a Moonshine STT slot or a
+  rerank slot never appeared in it. Every slot type other than `llm` now has
+  a label, and a test fails if a new type is added without one.
+- The runner-system migration no longer fails on a packaged install with
+  "could not write the runner-migration backup ([Errno 1] Operation not
+  permitted)". It tried to `chmod 0700` the shared `backups` directory, which
+  is root-owned and group-writable, so the `hal0` service user could not
+  change it. An existing directory is now left as the operator set it; the
+  archive itself is still `0600`.
+- The runner-image catalogue sync now reads the `runners` array that
+  hal0-runner-images publishes in `images.json` (schema
+  `hal0.runner-images.v2`). It looked for an `images` array, so every sync
+  failed with "images.json has no 'images' array" and the catalogue never
+  refreshed.
+- The runner-system migration now reads a slot's model file, not just its
+  name, before keeping it. A fork build (ROCmFPX and friends) renamed to a
+  plain file name used to keep its slot through the migration and was then
+  refused at launch; it is now unassigned with the same warning as a
+  name-detected one. Every shard of a split model is read. A missing,
+  unreadable or truncated file is never an error: the name check still
+  applies.
+
+- The runner-image catalogue sync no longer leaves cancelled probe tasks
+  pending when an unexpected error aborts it, which logged "Task was destroyed
+  but it is pending" noise.
+
+- The demoted workload profiles (`dense`, `moe`, `coding`, `chadrock-dense`,
+  `chadrock-moe`) no longer pass `--reasoning-format none`. Upstream llama.cpp
+  answers HTTP 400 "Failed to initialize samplers" to every `response_format`
+  (`json_object` / `json_schema`) request when the server runs with that flag,
+  so any slot still on one of these profiles lost structured output once it
+  moved to an upstream runner. `--reasoning off` stays, so the profiles still
+  mean "no thinking". The published addon envelopes under `community/addons/`
+  are regenerated without the flag. `hal0 slot migrate-flags` also drops the
+  flag instead of folding it into a model's defaults. Saving a profile or a
+  model's `defaults.extra_args` that adds `--reasoning-format none` is now
+  rejected with a 400 (`slot.reasoning_format_none_denied`) explaining why,
+  and the flag is dropped from the command line of every slot launch as a
+  backstop for anything already saved (#2545).
+
+- `hal0 update` now removes root-owned files older releases installed and
+  nothing replaces: the `hal0-slotctl` wrapper and its sudoers grant
+  (installed by 0.8.0-beta.1 to beta.3; it let the `hal0` user write a
+  root-owned slot unit), the `hal0-comfyui` sudoers grant (dropped in #984),
+  and a pre-quadlet static `hal0-slot@.service` template with its drop-ins,
+  which shadows every quadlet slot unit. Only install.sh and uninstall.sh
+  removed them before, so a box that had only ever been updated kept them.
+  The sweep runs on the activation of the next update after this one.
+- `installer/uninstall.sh` now removes the `hal0-update` and `hal0-slotctl`
+  sudoers grants. It left both behind.
+- The Runner Images page no longer lists niche runtimes (PromptForge,
+  Qwen3 TTS, Strix) under "Default runtime". It groups rows by each runtime's
+  registry tier — **Default runtimes**, **Optional runtimes**, **Frozen
+  runtimes** (when any) and **Other images** for catalogued images no
+  runtime ships — instead of by which image a runtime currently launches
+  (ADR-0027).
+
+- Deleting every model no longer brings them all back. The registry
+  re-imported `registry.toml` whenever its model table was empty, and
+  `hal0 registry export` and `hal0 model import-backup` wrote that same
+  file, so the next registry open after deleting the last model restored
+  every model in it. Nothing reads `registry.toml` now.
+- A deleted model no longer reappears after a restart. Files kept on disk
+  (by opting out, or because a safety check refused to remove them) are
+  recorded in `<var_lib>/registry/ignored-paths.json`, and the discovery
+  scan skips them. `hal0 model add`, scan commit and pulls clear that
+  record for the path they register.
+- The startup auto-scan now drops registry rows whose file is gone. These
+  rows are kept:
+  - rows that a slot, stack or `hal0.toml` field references
+  - rows with a pending pull
+  - FLM rows
+  - rows under a model root that is empty or missing, such as an unmounted
+    share
+
+  If any of those references fails to load, pruning is skipped for that
+  boot.
+- The scan no longer registers model files under dot directories inside a
+  model root, such as `.Trash-1000/`. It also no longer names a Hugging
+  Face shard set after its hash-named blob, and it no longer registers a
+  hardlinked copy of a model that is already registered.
+- Deleting a model while it is still downloading cancels the download
+  first, so the finished download can't bring the model back. If the
+  download doesn't stop within 30 seconds, the delete is refused with
+  `model.pull_active`.
+- The Delete dialog shows the model's real path and size. It used to claim
+  it removed the size "from /var/lib/hal0/models", whatever the model's
+  actual location.
 
 ### Migrations
 
@@ -2011,6 +1783,233 @@ applying. Add those subsections to a version's section to surface them; see
   last assignment wins, so your value stops applying. Afterwards, add it again
   at the **end** of `api.env` and run `sudo systemctl restart hal0-api`. A
   lasting fix is tracked in #2382.
+- **Seed `utility`/`agent` now `--parallel 1`** (#2692). Seeds are code-shipped, so slots on the plain `utility`/`agent` profile pick this up at their next restart (`sudo systemctl restart hal0-slot@utility hal0-slot@agent`). A slot the installer clamped to a small box runs a `utility-ctx<N>`/`agent-ctx<N>` profile that copied the old flags; add `--parallel 1` to that profile's flags, or re-run the installer. Profiles you edited yourself are never rewritten.
+
+- **Upgraded boxes with a `root:hal0 2755` backups directory** (#2657). If
+  `hal0 update` showed "Migration incomplete" with `Permission denied` on
+  `/var/lib/hal0/backups`, run `sudo hal0 doctor perms --fix` (or
+  `sudo chmod 2775 /var/lib/hal0/backups`), then
+  `sudo systemctl restart hal0-api`; the runner-system and profile-centric
+  conversions run again at that start.
+- **A slot that lost its model in the runner-system conversion** (#2694). A
+  box already upgraded before this fix was not told. To find such a slot, run
+  `grep -l '^default = ""' /etc/hal0/slots/*.toml`, or look for
+  `migrate.runner_system.applied` lines with "unassigned it" in
+  `journalctl -u hal0-api`. The container keeps serving the old model until
+  its next restart. Repair each slot with
+  `hal0 slot edit <slot> --model <id>`, using a plain GGUF build (for the
+  brain slot, `lfm2.5-2.6b`), then `hal0 update --restart-slots`.
+- **Profile-centric conversion** (`hal0.config.migrations.profile_centric_apply`,
+  ADR-0029). It runs automatically on `hal0 update` after the runner-system
+  conversion, and when `hal0 serve` starts `hal0-api`, before config is
+  validated.
+  - SQL migration 012 copies the model tunes into a holding table and leaves
+    the old `model` columns in place for a rollback; a later release drops
+    them.
+  - The conversion gives every slot the profile that keeps what it launches
+    today, generating one where needed, and reports every value that never
+    reached the launch (dropped, never applied).
+  - It backs up every file it changes, plus the model tunes, to
+    `/var/lib/hal0/backups/profiles-<ts>.tar.gz` before writing.
+  - It checks each converted slot's launch against the plan with a strict
+    render. A slot that does not match is put back and reported as blocked,
+    and the rest converts. Any error while checking, or while writing a
+    shared file, restores everything and is retried at the next start.
+  - The demoted-seed markers move from `profiles.toml` to
+    `/var/lib/hal0/profile-centric-ledger.json`. A profile entry that is
+    still invalid is set aside (`profiles.invalid` for the slots that name
+    it) instead of failing the whole catalog.
+  - A custom or stack-embedded profile that carries `--mmproj` or
+    `--chat-template[-file]` is left as it is and blocks, with the slots that
+    use it, until that flag is moved to the model.
+  - `hal0 update` lists every blocker with its fix and exits 2. A blocked
+    slot keeps launching the command it ran before the conversion until its
+    file is edited, and a run with nothing to write makes no backup. Run a
+    manual conversion as the service user:
+    `sudo -u hal0 hal0 profile migrate --apply`.
+
+  Four launch changes are reported, never silent:
+  - a slot without a usable profile gets its type's seed;
+  - `--jinja` is no longer added in embedding or reranking mode;
+  - the MTP draft device follows the slot's device;
+  - forced MTP stops on a runner without MTP support.
+
+  Preview it with `hal0 profile migrate`. A rerun converts nothing that is
+  already in the new shape. **Downgrading:** `hal0 update --rollback` to a
+  release before this one puts every conversion backup back before the swap
+  (the files, the model columns and migration 012's bookkeeping), in one
+  command; see "Rolling back past the profile-centric conversion" in
+  `docs/guides/update-and-rollback.mdx`. `hal0 profile migrate --restore
+  <archive>` (with `hal0-api` stopped) does it by hand.
+
+- **Runner-system conversion** (`hal0.config.migrations.runner_system`). Runs
+  automatically on `hal0 update`, on an `install.sh` re-run and when
+  `hal0 serve` starts `hal0-api`, before config is validated. It never runs on
+  import or from a read-only command. It rewrites slot runtimes, profile
+  runtimes and model `preferred_runner` values from the old default keys
+  (`rocmfpx`, `vulkanfpx`, `vulkan`, `rocm`) to `standard`. Image overrides
+  (`[slots].default_images`, `HAL0_TOOLBOX_IMAGE_*`) carry over to
+  `standard` only from `rocmfpx` and `vulkanfpx`; `vulkan` and `rocm`
+  overrides were already inert and are dropped with a warning. Settings for
+  the removed optional runners (`strix`, `promptforge`, `upstream`) are
+  dropped with a warning, never moved onto `standard`. Slots that name a
+  removed profile move to its replacement (`chadrock-moe` to `moe`,
+  `chadrock-dense` and `promptforge` to `dense`), and those definitions are
+  dropped from `profiles.toml`. It removes image pins that name an image hal0 shipped and
+  retired (`ghcr.io/hal0ai/` `hal0-combined*`, `hal0-rocmfpx` (and `localhost/hal0-rocmfpx`), `hal0-strix-vulkan`, `hal0-promptforge`, `hal0-toolbox-*`, `hal0-comfyui` and `amd-strix-halo-toolboxes`, the two kyuz0 Strix Halo images (`amd-strix-halo-toolboxes`, `amd-strix-halo-comfyui`), and the floating `ghcr.io/ggml-org/llama.cpp:server-cuda` tag) and keeps and reports pins to any other image, such
+  as your own build. It renames `HAL0_TOOLBOX_IMAGE_*` lines in `api.env`,
+  keeping each value's quoting, without duplicating a `HAL0_RUNNER_IMAGE_*`
+  line already there. For a slot
+  whose model is a ROCmFPX/IU4/ActiveFPX build, it keeps the slot's settings
+  but unassigns the model. Every change and every dropped pin is logged. A
+  file that does not parse is skipped with a warning and the rest still
+  converts. Before writing, it saves each file it changes, plus the old
+  `preferred_runner` values, to `/var/lib/hal0/backups/runners-<timestamp>.tar.gz`
+  (mode 0600; the database itself is never copied). If a write fails it rolls
+  back every write except `hal0.toml`, which stays converted so `hal0-api`
+  can start, and `hal0 update` reports the failure; a file it could not put
+  back is named in the error, with the backup to restore from. When it
+  converts at `hal0-api` startup it also re-renders the slot units, so
+  restarted slots run the converted image. Preview it with
+  `hal0 runner-images migrate` and run it with `--apply`. To downgrade, stop
+  `hal0-api` and run `hal0 runner-images migrate --restore <backup>`. The
+  restore leaves a marker that keeps this release's `hal0-api` from
+  converting again on boot; it holds only while the same hal0 version runs,
+  and the next `hal0 update` converts again.
+- Bundled agent skills hal0 no longer ships (`hal0-quantize`) are removed
+  from `/usr/share/hal0/skills` by `install.sh` and unlinked from
+  `/etc/hal0/agent-skills` on update. Only names on hal0's retired-skills list
+  are touched; your own skills are not.
+- The runner-image catalogue table is recreated (database migration 011) and
+  refilled by the next sync. Images already pulled into podman are not
+  touched; old packages stay in podman's store until you remove them.
+
+- `DELETE /api/models/{id}` now deletes the model's files by default:
+  the model file, any shards, the `mmproj` sidecar, and a pulled model's
+  file set. Pass `delete_files=false` to remove only the registry entry,
+  which was the old behaviour. `hal0 model rm` deletes files too unless you
+  pass `--keep-files`. The dashboard's Delete dialog has an "Also delete
+  files from disk" checkbox, ticked by default. hal0 never removes files
+  outside the model roots and the store, files another model uses,
+  directories, or its own config and state files. Each kept file is listed
+  in the response with its reason (ADR-0026).
+- The model registry is SQLite only. `hal0 model import-backup` (v0.1.x
+  backup restore) and the whole `hal0 registry` group (`registry import`,
+  `registry export`, `registry import-sqlite`) are removed.
+  `hal0 model list --json` shows the catalog. To keep a copy, take
+  a consistent snapshot with SQLite's online backup, not a plain copy of the
+  live WAL database:
+  `sqlite3 /var/lib/hal0/hal0.db ".backup '/root/hal0-db-backup.db'"` (the
+  Pull and register models guide has a Python equivalent for boxes without
+  the `sqlite3` CLI). A `registry.toml` left over from before the SQLite
+  registry is retired on update (see Migrations).
+
+- Removed the deprecated CLI aliases and no-op flags. Use the replacement
+  instead: `hal0 probe` -> `hal0 config hardware --refresh`;
+  `hal0 model register` -> `hal0 model add`; `hal0 model assign` ->
+  `hal0 slot edit --model`; `hal0 slot add` -> `hal0 slot create`;
+  `hal0 slot remove` -> `hal0 slot delete`; `hal0 upstream set-credentials`
+  -> `hal0 upstream credentials set`; `hal0 doctor --verify` ->
+  `hal0 doctor verify`. The `--backend`/`-b` flag on `slot create` and
+  `slot edit` (a stale alias for `--provider`) is gone, and so are the
+  no-op `--dry-run` flags on `capabilities migrate` and
+  `slot migrate-id-keying` (both already dry-run unless you pass `--apply`).
+
+- Removed dead dashboard surfaces. The flag-migration banner and resolution
+  view (their `GET /api/migrations/flag-report` endpoint was never built) are
+  gone, along with the unreachable old dashboard grid, the `ConnectionsView`
+  wrapper and the `#connections`, `#profiles`, `#slots/profiles`, `#peers`,
+  `#memory/graph` and `#memory/tools` hash redirects. Legacy
+  `#settings/<id>` section ids (`general`, `health`, `library`, `backend`,
+  `runtimes`, `hwtuning`, `about`, `voice`, `imagegen`, `npu`, `oauth`) no
+  longer resolve and fall back to Overview; use `#settings/capabilities`,
+  `#settings/accounts` and so on. `GET /api/user/dashboard-layout` now answers
+  `{}` for a pre-#1061 (v2) layout file left on disk instead of returning it
+  reconciled; the dashboard shows its default bands until the next save.
+
+- Removed deprecated API fields and aliases. The dashboard and the bundled
+  agents are updated in the same release; external clients must follow:
+  - `POST /api/board/chat` is gone; use `POST /api/brain/chat` (same SSE
+    contract). The dashboard's Board chat now calls the brain route.
+  - `GET /api/memory/graph/status` no longer returns the `route` mirror of
+    `extraction_slot`.
+  - `GET /api/meta/enums` no longer returns the deprecated `backends` list
+    (use `devices`, `selectable_backends` and `model_backends`).
+  - The `agent-hermes` slot alias no longer resolves to `agent`, and the
+    `chat` / `primary` slot-name fallbacks are gone from the first-run check
+    (`has_default_slot` looks for `agent.toml` only), the `hal0/*` fallback
+    anchor and the Hermes chat-model pick. Use `agent`.
+  - `GET /api/slots/by-name/{name}` now returns exactly what
+    `GET /api/slots/{name}` returns (it used to omit the config enrichment).
+
+- Removed dead and misleading code paths:
+  - The frozen haloai upstream seed (68 model ids routed into a predecessor
+    gateway, including `minimax` and `vibevoice` ids no hal0 provider can
+    serve) is gone. `GET /api/models/catalogue`, and the admin MCP
+    `model_catalogue` tool that wraps it, now return only
+    `{pullable, counts: {pullable, total}}`; the `upstream` list is removed.
+  - ComfyUI's `/api/comfyui/status` no longer falls back to `docker inspect`:
+    an unrelated docker container named `comfyui` used to flip the mode to
+    `generation`. The container state now comes only from the
+    `hal0-slot@img` unit, and the `COMFYUI_CONTAINER` environment variable is
+    gone (`container.name` always reads `hal0-slot-img`). The mode now comes
+    only from the GPU arbiter (the img unit stays up in inference mode too):
+    `/status` reports `mode: null` when the arbiter cannot answer, and
+    `POST /api/comfyui/switchover` answers 503 `comfyui.arbiter_unavailable`
+    instead of guessing "already there" from the unit.
+  - The `hal0-systemctl remove-unit` verb and `SystemCtlSeam.remove_unit`
+    (nothing called them), `hal0.memory.migrate` (a Cognee dry-run with no
+    caller), the legacy `HAL0_DOCKER_REQUIRED` installer variable (use
+    `HAL0_CONTAINER_REQUIRED`), the dead `docs/operate/tls.md` references in
+    `install.sh`, and the copy of the version-compare helpers in the updater
+    API route (it now shares `hal0.updater.updater._is_newer`).
+
+
+- **A leftover `/var/lib/hal0/registry/registry.toml` is retired, not
+  imported.** Every box at the 1.3.0 upgrade floor already runs the SQLite
+  registry and already imported that file on its first boot, so the file
+  holds nothing the database needs. The first update or `hal0-api` start on
+  this release copies it to `/var/lib/hal0/backups/registry-toml-<UTC>/`,
+  renames it to `registry.toml.retired-<UTC>` and deletes the
+  `registry.toml.lock` sidecar. `hal0.db` is not touched. Nothing reads the
+  file any more, so this step never blocks `hal0 update` or `hal0-api`
+  start: if it cannot back up or rename the file (for example a root-owned
+  `0600` file left by a `sudo hal0 registry export`), it logs a warning,
+  `hal0 update` lists it among its pass warnings, and `hal0 doctor all`
+  reports a `registry-toml` warning until you delete the file.
+
+- **`--reasoning-format none` is stripped from existing config (#2545).** It
+  runs by itself on `hal0 update`, on an `install.sh` re-run and at `hal0-api`
+  start, with nothing for you to run. It removes the flag from the `flags` of
+  every profile in `/etc/hal0/profiles.toml`, from the `[server].extra_args` of
+  each slot file under `/etc/hal0/slots/`, and from each model's
+  `defaults.extra_args`. `--reasoning-format=none` is caught too;
+  `--reasoning-format deepseek` and every other value are left alone. Before
+  it rewrites anything it copies the file to `/var/lib/hal0/backups/`
+  (`profiles-<time>.toml`, `slot-<name>-<time>.toml`) and writes the old model
+  values to `model-extra-args-<time>.json`; backups are readable by their
+  owner only. Running slots keep their old
+  command line until their next restart.
+
+- **The Hindsight memory engine's database migrates one way to 1.0.0.** The
+  first start of hindsight-api 1.0.0 runs the engine's schema migrations for
+  0.10.0 through 1.0.0 on `/var/lib/hal0/memory/hindsight/.pg0`. Among other
+  changes they add bank aliases and attachments, and they drop the unused
+  `document_attachments` table and `memory_units_bm25` view. Before the new
+  engine starts, the upgrade stops the old engine and copies `.pg0` to
+  `.pg0.pre-0.9.2`, and it needs 1.5 times the size of `.pg0` free to do so.
+  If 1.0.0 does not answer `/health` and report its version, the old venv and
+  that copy are both restored. The copy is kept after a successful upgrade;
+  the next run that finds the engine on 1.0.0 deletes only older copies such
+  as `.pg0.pre-0.8.4`. Memories, documents, directives, mental models
+  and bank settings are carried over unchanged. A bank disposition set
+  through the old profile endpoint still applies. The embedded PostgreSQL
+  stays on 18.1, so the data directory itself is not upgraded.
+  `hal0 update --rollback` leaves the engine on 1.0.0, as it did for 0.9.2.
+  Memory keeps working on the older hal0, but two things the older hal0
+  calls changed in the engine: its `/api/memory/banks/{bank}/profile` route
+  and `hal0 memory bank profile` commands fail with `410 Gone`, and the
+  dashboard's mental-model rows lose their content preview.
 
 ## [1.3.0] — 2026-09-16
 
