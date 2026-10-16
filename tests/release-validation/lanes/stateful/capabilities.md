@@ -97,7 +97,9 @@ snapshot, residue accumulates anonymously across a serialised run unless each la
    the slot, copy the backup, diff clean). The UI-shaped body (no backend) should 400
    `capability.illegal_backend_model_pair`.
 9. **Post-apply truth and leftovers.** After any capability apply compare `GET /api/slots/<slot>`
-   device, model and `resolved_command` with `capabilities.toml` (an apply that reports ready while
+   `declared_backend` (the payload has NO `device` key; `jq .device` printing null is a jq artefact,
+   `known-issues: slot-view-has-no-device-key`), `model_default` and `resolved_command` with
+   `capabilities.toml`, and `GET /api/slots/<slot>/config .device` with the slot TOML (an apply that reports ready while
    the container runs the previous config is silent wrongness). After `hal0 model rm` of a pulled
    model check no empty model dir or meta.json is left in the store. Verify the rerank slot
    actually receives requests during a multi-bank recall (counter on its `/metrics`) so
@@ -111,21 +113,21 @@ snapshot, residue accumulates anonymously across a serialised run unless each la
 
 14. **Scan vs add on the same bytes.** Put an embed/rerank gguf with a neutral name (`<store>/embed/<id>/model.gguf`) in the store, run `hal0 model scan`, and diff capability and id against `hal0 model add` of the same bytes (#2725). Remove the test rows.
 
-15. **Reranker reachable from recall?** Compare the rerank slot's `/metrics` prompt_tokens_total before and after `hal0 memory recall` and say whether `Hal0Reranker` is reachable on the running Hindsight (#2721; expected: not).
-
 16. **`model rm` of a bound model.** With voice/tts enabled, `hal0 model rm <id> -f --keep-files` must refuse, warn naming the capability, or disable the selection; `enabled=true` with an empty slot default is #2724. Same for embed/rerank/stt/img rows.
 
-17. **Pull every un-pullable row.** `POST /api/models/<id>/pull` for each catalogue row with `pullable:false` (qwen3-4b-npu, moonshine-base-en, jina-tiny): expect a typed 4xx, not 202 and a job stuck `queued` (#2723). Also `POST voice/stt {"model":"","enabled":true}` must be a typed 4xx and write no `stt.toml`.
-
-18. **`systemctl --failed` at entry and exit**, classifying every new unit as a podman healthcheck transient or real.
+17. **Pull every un-pullable row.** `POST /api/models/<id>/pull` for each catalogue row with `pullable:false` (qwen3-4b-npu, moonshine-base-en, jina-tiny): expect a typed 4xx, not 202 and a job stuck `queued` (#2723). Also `POST voice/stt {"model":"","enabled":true}` is a 200 with status `offline` BY DESIGN (the staged "unset" state,
+`known-issues: capability-enable-empty-model-is-staged-unset`): assert it loads nothing (no `hal0-slot@stt` start) and
+that a later POST naming a downloaded model on it swaps/loads. Take backups first and restore afterwards.
 
 19. **Slot argv paths exist.** `podman inspect <ctr> --format '{{.Config.Cmd}}'` for every running slot; any `/mnt`, `/root` or `/home` path that does not exist on the box is #2739 (kokoro `--model_path /mnt/ai-models/...`). With tts loaded, `journalctl -u hal0-slot@tts | grep -c 'downloading kokoro ONNX'` should not grow per start.
 
-20. **Recovery after `model rm --keep-files`.** After `rm` then `model add <kept path>`, the row registers as `chat` with a bad-magic warning (known `model-add-detection-surfacing`; do not file). What must hold: `capabilities set <slot> <child> --disabled` then `--model <id> --backend <dev> --enabled` reaches ready and serves 200. A no-op re-apply of an unchanged enabled selection returns 200/offline by design (#2724 is the dangling selection).
+20. **Recovery after `model rm --keep-files`.** Run the EXACT `model add <path>` the rm output prints, with the kept path as printed, for every kept file and for kokoro as well as the gguf types: since #2739 kokoro is `kokoro-v1.0.onnx` + `voices-v1.0.bin` and add refuses both (#2748, filed: the hint is false; `hal0 model pull kokoro-v1` is the only way back). For a gguf-layout row, add registers it as `chat` with a bad-magic warning (known `model-add-detection-surfacing`; do not file). What must hold: `capabilities set <slot> <child> --disabled` then `--model <id> --backend <dev> --enabled` reaches ready and serves 200. A no-op re-apply of an unchanged enabled selection returns 200/offline by design (#2724 is the dangling selection).
 
 21. **Pull cancel.** `POST /api/models/<id>/pull/cancel` should move a job out of `queued`; the qwen3-4b-npu stub staying queued is #2723 (known). On other ids, assert cancel works.
 
-22. **Disable restores the TOML.** After `POST voice/stt {model:'',enabled:true}` then disable, `capabilities.toml` stt should be byte-identical to its pre-state (device and provider back to empty); diff against a backup taken first.
+22. **Seed provider matches the catalog.** For each applied row assert `selections.<slot>.<child>.provider` equals the provider the catalog advertises for the chosen backend (voice/tts on cpu must say `kokoro`, not the seeded `llama-server`: #2749, filed), and that the slot TOML did not gain `provider = "llama-server"`. Disable never reverts device or model (by design: do NOT expect `capabilities.toml` byte-identical after enable+disable; `device = "cpu"` for stt is the #2690 resolved device).
+
+23. **Scan collisions and tombstones.** Put two files with the same name `model.gguf` but different capabilities under `<store>/<cap>/<id>/` and run `hal0 model scan`: each must register under its directory id with the right capability (#2725), none silently skipped. Take `sha256sum /var/lib/hal0/registry/ignored-paths.json` at lane entry and exit: `rm --keep-files` and `rm` of a scratch-path model both tombstone paths that later lanes trip over. Restore from a pre-probe copy, merging any tombstone another lane wrote.
 
 ## Leave behind
 

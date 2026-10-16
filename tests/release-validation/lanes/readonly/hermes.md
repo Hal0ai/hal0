@@ -99,6 +99,8 @@ chat messages — that is the `hermes-e2e` stateful lane.
 
 16. **Skip synthetic rows.** `/api/slots` carries a synthetic `hal0` composite entry (`_synthetic=true`, no `state`/`type`); scripts that iterate slots must skip it.
 
+17. **A warn names its probe.** `provision.json` `smoke_tests` with `status: warn` must carry a `failures[]` list whose names match the false entries in `details.results`; a warn with no named probe is a finding (20261016003929: 2 failures, both named). Also confirm `/var/lib/hal0/.hermes/.env` absence is expected: `/api/status` advertises an `env_path` there that does not exist on a fresh install (treated as upstream behaviour, unverified).
+
 ## Carry-forward
 
 Hermes findings have historically been *reporting* defects rather than functional ones. Treat

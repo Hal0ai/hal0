@@ -22,8 +22,8 @@
 # delete the entry. Moving work out of this kit and into CI is the goal, not a loss.
 
 schema: 1
-updated: 2026-10-15
-updated_for: v1.4.0-nightly.20261015200136
+updated: 2026-10-16
+updated_for: v1.4.0-nightly.20261016003929
 
 # NOTE on the v1.0.0-rc.6 entries: that run executed in mode=report, so nothing was filed.
 # Entries carry `issue: null` until the operator files them; replace null with the issue number
@@ -33,7 +33,7 @@ regressions:
 
   - id: kfd-gid-unprivileged-lxc-unverified
     issue: 1953
-    last_result: { release: v1.4.0-nightly.20261015200136, result: blocked }
+    last_result: { release: v1.4.0-nightly.20261016003929, result: blocked }
     from: v1.0.0-rc.7
     severity: minor
     tier: judgment
@@ -70,7 +70,7 @@ regressions:
 
   - id: profile-flags-argv
     issue: 1787
-    last_result: { release: v1.4.0-nightly.20261015200136, result: fixed }
+    last_result: { release: v1.4.0-nightly.20261016003929, result: fixed }
     from: v1.0.0-rc.4
     severity: ga-blocker
     tier: judgment
@@ -106,7 +106,11 @@ regressions:
 
   - id: ctx-advertised-vs-resolved
     issue: 1788
-    last_result: { release: v1.4.0-nightly.20261015200136, result: fixed }
+    last_result: { release: v1.4.0-nightly.20261016003929, result: fixed }
+    v1_4_0_nightly_20261016003929_note: >-
+      /v1/models context_length is null for non-chat ids (embed, rerank) by design.
+      Candidate for a pytest comparing slot_view ctx_effective with the rendered argv for
+      every seeded slot.
     from: v1.0.0-rc.4
     severity: major
     tier: mechanical
@@ -143,7 +147,7 @@ regressions:
 
   - id: brain-tools-image-gate
     issue: 1789
-    last_result: { release: v1.4.0-nightly.20261015200136, result: fixed }
+    last_result: { release: v1.4.0-nightly.20261016003929, result: fixed }
     from: v1.0.0-rc.4
     severity: major
     tier: judgment
@@ -180,7 +184,7 @@ regressions:
 
   - id: cpu-install-fpx-brain-default
     issue: 1790
-    last_result: { release: v1.4.0-nightly.20261015200136, result: fixed }
+    last_result: { release: v1.4.0-nightly.20261016003929, result: fixed }
     v1_4_0_nightly_20261015155017_note: >-
       Stale repro: the 422 now fires at `hal0 model add` (registration), so the load-time repro
       cannot be built; the "Vulkan=no with no /dev/dri" sub-claim belongs on a render-less box
@@ -231,7 +235,7 @@ regressions:
 
   - id: crash-loop-lifecycle
     issue: 1791
-    last_result: { release: v1.4.0-nightly.20261015200136, result: fixed }
+    last_result: { release: v1.4.0-nightly.20261016003929, result: fixed }
     v1_4_0_nightly_20261015155017_note: >-
       Result fixed (verifier-adjudicated): every clause of `expect` held. The unrelated 180 s
       load block on a unit that parked with exit 64 in ~1 s is its own entry, crash-loop-load-
@@ -291,7 +295,11 @@ regressions:
 
   - id: memory-retain-dead-letter
     issue: 1792
-    last_result: { release: v1.4.0-nightly.20261015200136, result: fixed }
+    last_result: { release: v1.4.0-nightly.20261016003929, result: partial }
+    v1_4_0_nightly_20261016003929_note: >-
+      Only the model-less utility half is runnable. Binding a chat model to utility for the
+      no_route half creates the #2716 shape and disturbs the memory lane; run it in the
+      memory lane's own binding step.
     from: v1.0.0-rc.4
     severity: minor
     tier: judgment
@@ -322,7 +330,7 @@ regressions:
 
   - id: hermes-smoke-ok-over-failures
     issue: 1793
-    last_result: { release: v1.4.0-nightly.20261015200136, result: fixed }
+    last_result: { release: v1.4.0-nightly.20261016003929, result: fixed }
     from: v1.0.0-rc.4
     severity: major
     tier: mechanical
@@ -356,7 +364,7 @@ regressions:
 
   - id: fact-extraction-strips-literals
     issue: 1794
-    last_result: { release: v1.4.0-nightly.20261015200136, result: fixed }
+    last_result: { release: v1.4.0-nightly.20261016003929, result: fixed }
     from: v1.0.0-rc.4
     severity: minor
     tier: judgment
@@ -384,7 +392,7 @@ regressions:
 
   - id: hermes-polish-rollup
     issue: 1795
-    last_result: { release: v1.4.0-nightly.20261015200136, result: fixed }
+    last_result: { release: v1.4.0-nightly.20261016003929, result: fixed }
     from: v1.0.0-rc.4
     severity: rollup
     tier: mechanical
@@ -416,7 +424,10 @@ regressions:
 
   - id: cli-api-polish-rollup
     issue: 1796
-    last_result: { release: v1.4.0-nightly.20261015200136, result: fixed }
+    last_result: { release: v1.4.0-nightly.20261016003929, result: fixed }
+    v1_4_0_nightly_20261016003929_note: >-
+      The entry still does not enumerate its fourteen items; promote the enumerable ones to
+      pytest and delete.
     from: v1.0.0-rc.4
     severity: rollup
     tier: mechanical
@@ -443,7 +454,7 @@ regressions:
 
   - id: ui-polish-rollup
     issue: 1797
-    last_result: { release: v1.4.0-nightly.20261015200136, result: fixed }
+    last_result: { release: v1.4.0-nightly.20261016003929, result: fixed }
     from: v1.0.0-rc.4
     severity: rollup
     tier: mechanical
@@ -475,7 +486,7 @@ regressions:
 
   - id: hermes-cannot-chat-64k-floor
     issue: 1827
-    last_result: { release: v1.4.0-nightly.20261015200136, result: fixed }
+    last_result: { release: v1.4.0-nightly.20261016003929, result: fixed }
     from: v1.0.0-rc.5
     severity: ga-blocker
     tier: mechanical
@@ -509,7 +520,7 @@ regressions:
 
   - id: bundled-skills-not-linked
     issue: 1828
-    last_result: { release: v1.4.0-nightly.20261015200136, result: fixed }
+    last_result: { release: v1.4.0-nightly.20261016003929, result: fixed }
     from: v1.0.0-rc.5
     severity: major
     tier: mechanical
@@ -539,7 +550,7 @@ regressions:
 
   - id: brain-board-tools-401
     issue: 1829
-    last_result: { release: v1.4.0-nightly.20261015200136, result: fixed }
+    last_result: { release: v1.4.0-nightly.20261016003929, result: fixed }
     from: v1.0.0-rc.5
     severity: major
     tier: mechanical
@@ -577,7 +588,7 @@ regressions:
 
   - id: slot-create-no-profile-501
     issue: 1830
-    last_result: { release: v1.4.0-nightly.20261015200136, result: fixed }
+    last_result: { release: v1.4.0-nightly.20261016003929, result: fixed }
     from: v1.0.0-rc.5
     severity: major
     tier: mechanical
@@ -613,7 +624,7 @@ regressions:
 
   - id: smoke-preflight-skips-chat-probes
     issue: 1831
-    last_result: { release: v1.4.0-nightly.20261015200136, result: fixed }
+    last_result: { release: v1.4.0-nightly.20261016003929, result: fixed }
     from: v1.0.0-rc.5
     severity: major
     tier: judgment
@@ -680,7 +691,12 @@ regressions:
 
   - id: slot-verbs-10s-client-timeout
     issue: 1832
-    last_result: { release: v1.4.0-nightly.20261015200136, result: fixed }
+    last_result: { release: v1.4.0-nightly.20261016003929, result: fixed }
+    v1_4_0_nightly_20261016003929_note: >-
+      REPRO FIX: the step 'hal0 slot unload brain' evicts the shared brain that other lanes
+      depend on; use a throwaway slot (hal0 slot create zz... then load/restart/unload).
+      Loads on a warm cache finish under 10 s, so the >10 s path is covered only by the
+      declared wait budget in the CLI banner.
     from: v1.0.0-rc.5
     severity: major
     tier: mechanical
@@ -711,7 +727,7 @@ regressions:
 
   - id: memory-status-green-while-empty
     issue: 1833
-    last_result: { release: v1.4.0-nightly.20261015200136, result: fixed }
+    last_result: { release: v1.4.0-nightly.20261016003929, result: fixed }
     from: v1.0.0-rc.5
     severity: major
     tier: mechanical
@@ -748,7 +764,7 @@ regressions:
 
   - id: memory-extraction-never-lands
     issue: 1834
-    last_result: { release: v1.4.0-nightly.20261015200136, result: fixed }
+    last_result: { release: v1.4.0-nightly.20261016003929, result: fixed }
     from: v1.0.0-rc.5
     severity: major
     tier: judgment
@@ -792,7 +808,7 @@ regressions:
 
   - id: slot-detail-ctx-max-raw
     issue: 1835
-    last_result: { release: v1.4.0-nightly.20261015200136, result: fixed }
+    last_result: { release: v1.4.0-nightly.20261016003929, result: fixed }
     from: v1.0.0-rc.5
     severity: major
     tier: mechanical
@@ -821,7 +837,7 @@ regressions:
 
   - id: ui-overview-services-widget-dead
     issue: 1836
-    last_result: { release: v1.4.0-nightly.20261015200136, result: fixed }
+    last_result: { release: v1.4.0-nightly.20261016003929, result: fixed }
     from: v1.0.0-rc.5
     severity: major
     tier: mechanical
@@ -846,7 +862,7 @@ regressions:
 
   - id: v1-models-never-evicts
     issue: 1837
-    last_result: { release: v1.4.0-nightly.20261015200136, result: fixed }
+    last_result: { release: v1.4.0-nightly.20261016003929, result: fixed }
     from: v1.0.0-rc.5
     severity: minor
     tier: mechanical
@@ -874,7 +890,10 @@ regressions:
 
   - id: model-add-detection-honesty
     issue: 1838
-    last_result: { release: v1.4.0-nightly.20261015200136, result: fixed }
+    last_result: { release: v1.4.0-nightly.20261016003929, result: fixed }
+    v1_4_0_nightly_20261016003929_note: >-
+      REPRO FIX: /mnt/ai-models/scratch does not exist on the fresh boxes; use
+      /var/tmp/zzdet and clean up (and remove tombstones).
     from: v1.0.0-rc.5
     severity: minor
     tier: mechanical
@@ -912,7 +931,7 @@ regressions:
 
   - id: slot-capacity-vram-attribution
     issue: 1839
-    last_result: { release: v1.4.0-nightly.20261015200136, result: fixed }
+    last_result: { release: v1.4.0-nightly.20261016003929, result: fixed }
     from: v1.0.0-rc.5
     severity: minor
     tier: mechanical
@@ -970,7 +989,11 @@ regressions:
 
   - id: cli-api-polish-rollup-rc5
     issue: 1840
-    last_result: { release: v1.4.0-nightly.20261015200136, result: partial }
+    last_result: { release: v1.4.0-nightly.20261016003929, result: partial }
+    v1_4_0_nightly_20261016003929_note: >-
+      Expected shape per known-issues cli-api-polish-rollup-1840-still-open. Items 1 and 4
+      need a processing memory op / a >300 s completion and were not run; do not spend
+      budget there.
     from: v1.0.0-rc.5
     severity: rollup
     tier: mechanical
@@ -1012,14 +1035,21 @@ regressions:
 
   - id: ui-polish-rollup-rc5
     issue: 1841
-    last_result: { release: v1.4.0-nightly.20261015200136, result: partial }
+    last_result: { release: v1.4.0-nightly.20261016003929, result: partial }
+    v1_4_0_nightly_20261016003929_note: >-
+      Item 2 (StatusDot title/aria-label carrying the raw CSS class) was NEVER fixed: the
+      code is byte-identical from v1.0.0-rc.5 to main, and the rc.6/rc.7 'fixed' scores were
+      probe misreads (rc.7 inspected a `.pip`, the dots are `.sdot`). Operator closed #1841
+      NOT_PLANNED; see known-issues ui-agents-card-dot-css-class-tooltip. Probe `.sdot` on
+      #agent and report as known, not regressed. The aria-label is not exposed to assistive
+      tech (the span has no role), so only the hover tooltip is user-visible.
     from: v1.0.0-rc.5
     severity: rollup
     tier: mechanical
     lane: ui
     v1_4_0_note: >-
       Item 1 is now filed as ui-no-gpu-on-vulkan-only-box (#2674); item 3 is known-issues
-      ui-rail-openwebui-link-unnamed (wontfix, #1841); item 2 fixed.
+      ui-rail-openwebui-link-unnamed (wontfix, #1841); item 2 was NEVER fixed (see v1_4_0_nightly_20261016003929_note; rc.6/rc.7 scores were probe misreads).
     summary: >-
       Three dashboard rough edges from the rc.5 sweep.
     repro: |
@@ -1047,7 +1077,7 @@ regressions:
 
   - id: brain-vulkan-backend-garbage-output
     issue: 1888   # GA-blocker — filed by rc.6 fix wave; folded into the rc.7 Vulkan restoration
-    last_result: { release: v1.4.0-nightly.20261015200136, result: fixed }
+    last_result: { release: v1.4.0-nightly.20261016003929, result: partial }
     v1_4_0_nightly_20261015155017_note: >-
       Held on two Vulkan models (lfm2.5-2.6b, qwen3.5-0.8b). Not run: ROCm lane (no kfd on
       ct151) and 8e (needs a garbage-producing image). The "then-pinned :0822" wording in the
@@ -1122,7 +1152,12 @@ regressions:
 
   - id: hermes-stream-no-stall-guard
     issue: 1893   # filed by rc.6 fix wave — residue of the hermes-cannot-chat candidate (dup of the garbage finding, merged into #1888)
-    last_result: { release: v1.4.0-nightly.20261015200136, result: fixed }
+    last_result: { release: v1.4.0-nightly.20261016003929, result: partial }
+    v1_4_0_nightly_20261016003929_note: >-
+      REPRO FIX: /usr/lib/hal0/venvs/hermes/bin/hermes does not exist; use
+      /usr/local/bin/hermes (run as `sudo -u hal0 HOME=/var/lib/hal0`). The never-
+      terminating stream cannot be induced on a live box, so the guard is only reachable by
+      unit test.
     from: v1.0.0-rc.6
     severity: minor
     tier: judgment
@@ -1156,7 +1191,7 @@ regressions:
 
   - id: image-status-wrong-podman-store
     issue: 1889   # filed by rc.6 fix wave
-    last_result: { release: v1.4.0-nightly.20261015200136, result: fixed }
+    last_result: { release: v1.4.0-nightly.20261016003929, result: fixed }
     from: v1.0.0-rc.6
     severity: major
     tier: mechanical
@@ -1195,7 +1230,10 @@ regressions:
 
   - id: fpx-quant-guard-dead-null-quant
     issue: 1890   # filed by rc.6 fix wave — root cause behind cpu-install-fpx-brain-default's rc.6 partial
-    last_result: { release: v1.4.0-nightly.20261015200136, result: partial }
+    last_result: { release: v1.4.0-nightly.20261016003929, result: partial }
+    v1_4_0_nightly_20261016003929_note: >-
+      The 422 slot.unsupported_quant half needs a synthetic FPX fixture or the update box;
+      unit test it.
     v1_4_0_nightly_20261015155017_note: >-
       Still blocked on ct151 (no FPX fixture). Needs a synthetic fixture; move the 422 half to a
       unit test (see promotion list).
@@ -1239,7 +1277,7 @@ regressions:
 
   - id: curated-reranker-base-row-unloadable
     issue: 1891   # filed by rc.6 fix wave
-    last_result: { release: v1.4.0-nightly.20261015200136, result: fixed }
+    last_result: { release: v1.4.0-nightly.20261016003929, result: fixed }
     from: v1.0.0-rc.6
     severity: major
     tier: mechanical
@@ -1269,7 +1307,7 @@ regressions:
 
   - id: hermes-state-chat-model-resolver
     issue: 1892   # filed by rc.6 fix wave
-    last_result: { release: v1.4.0-nightly.20261015200136, result: fixed }
+    last_result: { release: v1.4.0-nightly.20261016003929, result: fixed }
     from: v1.0.0-rc.6
     severity: major
     tier: judgment
@@ -1299,7 +1337,11 @@ regressions:
 
   - id: model-pull-jobs-root-owned
     issue: 1895   # filed by rc.6 fix wave
-    last_result: { release: v1.4.0-nightly.20261015200136, result: fixed }
+    last_result: { release: v1.4.0-nightly.20261016003929, result: fixed }
+    v1_4_0_nightly_20261016003929_note: >-
+      Held on fresh ct151 (installer perms pass heals it before first boot). Promotion:
+      pytest that perms.py has rows for model-pull-jobs/ and activity.db{,-wal,-shm} and
+      that the pull-job store survives a store reload.
     from: v1.0.0-rc.6
     severity: minor
     tier: mechanical
@@ -1333,7 +1375,7 @@ regressions:
 
   - id: doctor-perms-never-converges
     issue: 1896   # filed by rc.6 fix wave
-    last_result: { release: v1.4.0-nightly.20261015200136, result: fixed }
+    last_result: { release: v1.4.0-nightly.20261016003929, result: fixed }
     v1_4_0_nightly_20261015155017_note: >-
       Result partial (verifier-adjudicated): the pristine-install rc probe still passes; the
       drift is a NEW latent class, /var/lib/hal0/agents is created 0700 by _auth.py:121-123 on
@@ -1379,7 +1421,12 @@ regressions:
 
   - id: agents-bank-boot-writes-lost
     issue: 1897   # filed by rc.6 fix wave
-    last_result: { release: v1.4.0-nightly.20261015200136, result: fixed }
+    last_result: { release: v1.4.0-nightly.20261016003929, result: fixed }
+    v1_4_0_nightly_20261016003929_note: >-
+      REPRO FIX: there is no bank named 'agents'; identity cards land in bank 'shared'. Look
+      for boot_degraded / provider_healed / brain_lane.degraded_replay_armed in the hal0-api
+      journal and check the card tags (agent-identity) via GET
+      /api/memory/banks/shared/documents.
     from: v1.0.0-rc.6
     severity: minor
     tier: judgment
@@ -1414,7 +1461,7 @@ regressions:
 
   - id: container-health-readerror-unhandled
     issue: 1898   # filed by rc.6 fix wave
-    last_result: { release: v1.4.0-nightly.20261015200136, result: fixed }
+    last_result: { release: v1.4.0-nightly.20261016003929, result: fixed }
     from: v1.0.0-rc.6
     severity: minor
     tier: mechanical
@@ -1447,7 +1494,10 @@ regressions:
 
   - id: ui-footer-services-omits-comfyui
     issue: 1899   # filed by rc.6 fix wave
-    last_result: { release: v1.4.0-nightly.20261015200136, result: partial }
+    last_result: { release: v1.4.0-nightly.20261016003929, result: partial }
+    v1_4_0_nightly_20261016003929_note: >-
+      The down-case is not exercisable on a box without ComfyUI (stopped renders as off and
+      is excluded from the denominator); covered by the promoted spec.
     from: v1.0.0-rc.6
     severity: minor
     tier: mechanical
@@ -1478,7 +1528,7 @@ regressions:
 
   - id: ui-inference-card-free-memory-wrong
     issue: 1900   # filed by rc.6 fix wave
-    last_result: { release: v1.4.0-nightly.20261015200136, result: fixed }
+    last_result: { release: v1.4.0-nightly.20261016003929, result: fixed }
     from: v1.0.0-rc.6
     severity: minor
     tier: mechanical
@@ -1510,7 +1560,7 @@ regressions:
 
   - id: update-audit-trail-gaps
     issue: 1901   # filed by rc.6 fix wave
-    last_result: { release: v1.4.0-nightly.20261015200136, result: fixed }
+    last_result: { release: v1.4.0-nightly.20261016003929, result: fixed }
     from: v1.0.0-rc.6
     severity: minor
     tier: mechanical
@@ -1550,7 +1600,7 @@ regressions:
 
   - id: mcp-docs-connect-url-and-tool-tables
     issue: 1902   # filed by rc.6 fix wave
-    last_result: { release: v1.4.0-nightly.20261015200136, result: fixed }
+    last_result: { release: v1.4.0-nightly.20261016003929, result: fixed }
     from: v1.0.0-rc.6
     severity: minor
     tier: mechanical
@@ -1579,7 +1629,7 @@ regressions:
 
   - id: memory-extraction-ctx-preflight-missing
     issue: 1903   # filed by rc.6 fix wave
-    last_result: { release: v1.4.0-nightly.20261015200136, result: fixed }
+    last_result: { release: v1.4.0-nightly.20261016003929, result: partial }
     from: v1.0.0-rc.6
     severity: minor
     tier: judgment
@@ -1614,7 +1664,7 @@ regressions:
 
   - id: bench-history-blank-empty-state
     issue: 1904   # filed by rc.6 fix wave
-    last_result: { release: v1.4.0-nightly.20261015200136, result: fixed }
+    last_result: { release: v1.4.0-nightly.20261016003929, result: fixed }
     from: v1.0.0-rc.6
     severity: minor
     tier: mechanical
@@ -1637,7 +1687,7 @@ regressions:
 
   - id: rc6-polish-rollup
     issue: 1905   # filed by rc.6 fix wave — rollup of 4 residues
-    last_result: { release: v1.4.0-nightly.20261015200136, result: fixed }
+    last_result: { release: v1.4.0-nightly.20261016003929, result: fixed }
     from: v1.0.0-rc.6
     severity: rollup
     tier: mechanical
@@ -1672,7 +1722,7 @@ regressions:
 
   - id: chat-to-embed-slot-500-passthrough
     issue: 1894   # enhancement — typed capability-mismatch envelope, filed by rc.6 fix wave
-    last_result: { release: v1.4.0-nightly.20261015200136, result: fixed }
+    last_result: { release: v1.4.0-nightly.20261016003929, result: fixed }
     from: v1.0.0-rc.6
     severity: minor
     tier: mechanical
@@ -1705,7 +1755,14 @@ regressions:
 
   - id: runner-system-conversion
     issue: null   # fresh runner system (ADR-0028)
-    last_result: { release: v1.4.0-nightly.20261015200136, result: partial }
+    last_result: { release: v1.4.0-nightly.20261016003929, result: partial }
+    v1_4_0_nightly_20261016003929_note: >-
+      REPRO FIX: `hal0 settings` does not exist (use `hal0 config show`); the journal event
+      is updater.migrations_noop / migrate.runner_system.applied, not migrate.runner_system.
+      The old-shape remap (rocmfpx/vulkanfpx/strix/promptforge to standard,
+      HAL0_RUNNER_IMAGE_<KEY> rename, retired image pins, ROCmFP4 warning) cannot be
+      exercised on an already-converted box; it needs a synthetic old-shape fixture.
+      Idempotence, 0600 backup without hal0.db, and dry-run-changes-nothing held.
     from: v1.4.0
     severity: ga-blocker
     tier: judgment
@@ -1755,7 +1812,7 @@ regressions:
 
   - id: vulkan-lane-stale-image-preflight-refusal
     issue: 1973   # lane re-enable PR (3474ec03) — implements the checked gate
-    last_result: { release: v1.4.0-nightly.20261015200136, result: fixed }
+    last_result: { release: v1.4.0-nightly.20261016003929, result: fixed }
     v1_4_0_nightly_20261015155017_note: >-
       Result fixed (verifier-adjudicated; the probe agent said partial). The bare
       `system.internal` 500 on a GPU preflight refusal is the known load-restart-error-surfacing
@@ -1798,7 +1855,7 @@ regressions:
 
   - id: slot-drift-ignores-image-and-device
     issue: 2024
-    last_result: { release: v1.4.0-nightly.20261015200136, result: fixed }
+    last_result: { release: v1.4.0-nightly.20261016003929, result: fixed }
     from: v1.0.0-rc.7
     severity: major
     tier: judgment
@@ -1858,7 +1915,7 @@ regressions:
 
   - id: seeded-anchor-slots-rocm-on-kfd-less-box
     issue: 2023
-    last_result: { release: v1.4.0-nightly.20261015200136, result: fixed }
+    last_result: { release: v1.4.0-nightly.20261016003929, result: fixed }
     from: v1.0.0-rc.7
     severity: major
     tier: judgment
@@ -1900,7 +1957,7 @@ regressions:
 
   - id: brain-steward-fabricates-live-platform-state
     issue: 2022
-    last_result: { release: v1.4.0-nightly.20261015200136, result: fixed }
+    last_result: { release: v1.4.0-nightly.20261016003929, result: fixed }
     from: v1.0.0-rc.7
     severity: ga-blocker
     tier: judgment
@@ -1956,7 +2013,7 @@ regressions:
 
   - id: hermes-venv-missing-mcp-extra
     issue: 2021
-    last_result: { release: v1.4.0-nightly.20261015200136, result: fixed }
+    last_result: { release: v1.4.0-nightly.20261016003929, result: fixed }
     from: v1.0.0-rc.7
     severity: ga-blocker
     tier: mechanical
@@ -2009,7 +2066,12 @@ regressions:
 
   - id: capability-apply-skips-model-pull
     issue: 2026
-    last_result: { release: v1.4.0-nightly.20261015200136, result: fixed }
+    last_result: { release: v1.4.0-nightly.20261016003929, result: partial }
+    v1_4_0_nightly_20261016003929_note: >-
+      REPRO FIX: `downloaded` and `pullable` live under .catalogs.*[].backends[] in
+      /api/capabilities, not on /api/models. The typed 409 capability.model_not_downloaded
+      (names the pull URL) holds; the third clause (installer does not stage the shipped
+      embed/rerank defaults) still does not.
     from: v1.0.0-rc.7
     severity: major
     tier: judgment
@@ -2065,7 +2127,14 @@ regressions:
 
   - id: update-rollback-cli-silent-on-restart-need
     issue: 2027
-    last_result: { release: v1.4.0-nightly.20261015200136, result: fixed }
+    last_result: { release: v1.4.0-nightly.20261016003929, result: fixed }
+    v1_4_0_nightly_20261016003929_note: >-
+      REPRO FIX: the old 'expect: only rolled back (<channel>)' shape no longer applies. Use
+      the same stub procedure as update-rollback-cli-timeout (answers HEAD /api/status and
+      POST /api/updates/rollback with rolled_back_to, previous_now, schema_warning,
+      running_version) and assert the restart panel prints. On a nightly the restart panel
+      prints even after hal0-api restarts (running_version is the base 1.4.0): loud, not
+      silent, same seam as #2629.
     from: v1.0.0-rc.7
     severity: minor
     tier: mechanical
@@ -2112,7 +2181,7 @@ regressions:
 
   - id: hindsight-response-format-400-via-thinking-policy
     issue: 2020
-    last_result: { release: v1.4.0-nightly.20261015200136, result: fixed }
+    last_result: { release: v1.4.0-nightly.20261016003929, result: fixed }
     from: v1.0.0-rc.7
     severity: ga-blocker
     tier: judgment
@@ -2162,7 +2231,7 @@ regressions:
 
   - id: mcp-status-tools-iserror-on-error-state-resource
     issue: 2025
-    last_result: { release: v1.4.0-nightly.20261015200136, result: fixed }
+    last_result: { release: v1.4.0-nightly.20261016003929, result: fixed }
     from: v1.0.0-rc.7
     severity: major
     tier: mechanical
@@ -2208,7 +2277,7 @@ regressions:
 
   - id: services-health-omits-hindsight
     issue: 2028
-    last_result: { release: v1.4.0-nightly.20261015200136, result: fixed }
+    last_result: { release: v1.4.0-nightly.20261016003929, result: fixed }
     from: v1.0.0-rc.7
     severity: minor
     tier: mechanical
@@ -2244,7 +2313,7 @@ regressions:
 
   - id: capabilities-catalog-advertises-unavailable-gpu-rocm-for-registry-models
     issue: 2029
-    last_result: { release: v1.4.0-nightly.20261015200136, result: fixed }
+    last_result: { release: v1.4.0-nightly.20261016003929, result: fixed }
     from: v1.0.0-rc.7
     severity: minor
     tier: judgment
@@ -2283,7 +2352,12 @@ regressions:
 
   - id: memory-retain-zero-yield-reports-completed
     issue: 2030
-    last_result: { release: v1.4.0-nightly.20261015200136, result: fixed }
+    last_result: { release: v1.4.0-nightly.20261016003929, result: regressed }
+    v1_4_0_nightly_20261016003929_note: >-
+      REPRO FIX: GET /api/memory/operations/<id> is 404; the live path is
+      /api/memory/banks/<bank>/operations/<id>. The only trace of zero yield is
+      progress.detail.facts_committed=0 in `hal0 memory ops list --json`; the human table
+      and `hal0 memory status` show nothing.
     from: v1.0.0-rc.7
     severity: minor
     tier: judgment
@@ -2333,7 +2407,12 @@ regressions:
 
   - id: upgrade-migration-backups-eacces
     issue: 2657
-    last_result: { release: v1.4.0-nightly.20261015200136, result: fixed }
+    last_result: { release: v1.4.0-nightly.20261016003929, result: fixed }
+    v1_4_0_nightly_20261016003929_note: >-
+      The vulnerable precondition (root:hal0 2755) no longer exists on ct150: repaired by an
+      earlier doctor perms --fix and the box was converted 2026-10-14. The EACCES repair
+      branch (#2680) can only be re-tested with a unit test over a root:hal0 2755 backups
+      fixture. Flipped to promote_ready: true stop re-probing live.
     from: v1.4.0-nightly.20261014214325
     severity: ga-blocker
     tier: mechanical
@@ -2376,7 +2455,7 @@ regressions:
 
   - id: brain-steward-no-memory-path
     issue: 2658
-    last_result: { release: v1.4.0-nightly.20261015200136, result: fixed }
+    last_result: { release: v1.4.0-nightly.20261016003929, result: fixed }
     from: v1.4.0-nightly.20261014214325
     severity: major
     tier: judgment
@@ -2411,7 +2490,7 @@ regressions:
 
   - id: capabilities-npu-apply-accepted-dead
     issue: 2659
-    last_result: { release: v1.4.0-nightly.20261015200136, result: fixed }
+    last_result: { release: v1.4.0-nightly.20261016003929, result: fixed }
     from: v1.4.0-nightly.20261014214325
     severity: major
     tier: mechanical
@@ -2441,7 +2520,13 @@ regressions:
 
   - id: slot-drift-blind-when-render-fails
     issue: 2660
-    last_result: { release: v1.4.0-nightly.20261015200136, result: blocked }
+    last_result: { release: v1.4.0-nightly.20261016003929, result: blocked }
+    v1_4_0_nightly_20261016003929_note: >-
+      Blocked for the third run running: needs a RUNNING slot whose container_spec cannot
+      render, which exists only after a failed conversion. Flipped to promote_ready: true
+      Unit test: a provider whose container_spec raises, assert drift._render_error_reason
+      is copied into the /api/updates/slot-drift entry as render_error (routes/updater.py
+      ~1117). Retire the live probe.
     from: v1.4.0-nightly.20261014214325
     severity: major
     tier: mechanical
@@ -2468,7 +2553,12 @@ regressions:
 
   - id: update-rollback-cli-timeout
     issue: 2661
-    last_result: { release: v1.4.0-nightly.20261015200136, result: fixed }
+    last_result: { release: v1.4.0-nightly.20261016003929, result: fixed }
+    v1_4_0_nightly_20261016003929_note: >-
+      REPRO NOTE: the hardware-free stub must also answer HEAD /api/status with 200, or the
+      CLI exits 1 'hal0 API not running' before reaching the rollback path. A stub that only
+      serves POST /api/updates/rollback cannot run this probe. Real rollback on ct150 took 8
+      s, so only the 13 s stub discriminates. Promote as a unit test with the stub.
     from: v1.4.0-nightly.20261014214325
     severity: major
     tier: mechanical
@@ -2494,7 +2584,7 @@ regressions:
 
   - id: hermes-slot-list-payload-truncated
     issue: 2662
-    last_result: { release: v1.4.0-nightly.20261015200136, result: fixed }
+    last_result: { release: v1.4.0-nightly.20261016003929, result: fixed }
     from: v1.4.0-nightly.20261014214325
     severity: major
     tier: judgment
@@ -2528,7 +2618,10 @@ regressions:
 
   - id: embeddings-rerank-echo-client-model
     issue: 2663
-    last_result: { release: v1.4.0-nightly.20261015200136, result: regressed }
+    last_result: { release: v1.4.0-nightly.20261016003929, result: regressed }
+    v1_4_0_nightly_20261016003929_note: >-
+      Probe with a made-up model name on /v1/embeddings and /v1/rerank; the response must
+      name the served model.
     v1_4_0_nightly_20261015155017_note: >-
       Verifier: chat slot names echo only when that slot is not serving/advertising; with
       utility ready, `model=utility` goes passthrough:utility and returns the raw 501 (#2672),
@@ -2562,7 +2655,12 @@ regressions:
 
   - id: update-components-pending-no-guidance
     issue: 2664
-    last_result: { release: v1.4.0-nightly.20261015200136, result: blocked }
+    last_result: { release: v1.4.0-nightly.20261016003929, result: blocked }
+    v1_4_0_nightly_20261016003929_note: >-
+      Blocked a third release: needs a failed post-activation migration. Unit test with a
+      synthetic failed-migration fixture; do not induce a failure on the update box. Side
+      observation: job record 380afbbd96df shows restart_error='systemctl exited -15' with
+      restarted=null although hal0-api did restart.
     v1_4_0_nightly_20261015155017_note: >-
       Blocked again: only reachable after a failed post-activation migration. Move to a unit
       test with a synthetic failed-migration fixture.
@@ -2585,7 +2683,7 @@ regressions:
       Every pending component row carries a remedy, and the closing panel names the exact
       command. Pending rows with remedy=null beside a "Run the commands above" panel are the
       regression. Not testable on a box whose migrations succeed.
-    promote_ready: false
+    promote_ready: true
     v1_4_0_nightly_20261015_note: >-
       Only on an upgraded box whose post-activation migration failed (#2657 condition). boot retry
       uses converge_companions=False so rows have remedy=null; `hal0 update status` footer does
@@ -2594,7 +2692,10 @@ regressions:
 
   - id: dispatch-slot-alias-ignores-lane-pin
     issue: 2665
-    last_result: { release: v1.4.0-nightly.20261015200136, result: regressed }
+    last_result: { release: v1.4.0-nightly.20261016003929, result: regressed }
+    v1_4_0_nightly_20261016003929_note: >-
+      Probe the SECOND slot's bare alias, not the first: bare 'zzrg' -> passthrough:brain,
+      only hal0/zzrg pins.
     v1_4_0_nightly_20261015155017_note: >-
       Verifier correction: the tie is NOT won by the first-declared slot; it goes by health rank
       then upstream-list index (lane_pin.rank_slot_name, router.py:1642-1645). On ct151
@@ -2629,7 +2730,11 @@ regressions:
 
   - id: omitted-model-404-agent-bound-unloaded
     issue: 2666
-    last_result: { release: v1.4.0-nightly.20261015200136, result: regressed }
+    last_result: { release: v1.4.0-nightly.20261016003929, result: regressed }
+    v1_4_0_nightly_20261016003929_note: >-
+      Residue after the probe: /api/slots/agent model_id reads the last-loaded model with
+      model_default null. That is the by-design slot-model-id-is-runtime-not-binding, not a
+      new finding.
     v1_4_0_nightly_20261015155017_note: >-
       Re-observed on ct150 with agent bound to qwen3.8-27b and offline: no `model`, "" and
       "default" all 404 dispatch.no_route in <0.1 s without waking the anchor (v1.py:583 early
@@ -2663,7 +2768,11 @@ regressions:
 
   - id: hermes-reprovision-rotates-gateway-key
     issue: 2667
-    last_result: { release: v1.4.0-nightly.20261015200136, result: blocked }
+    last_result: { release: v1.4.0-nightly.20261016003929, result: regressed }
+    v1_4_0_nightly_20261016003929_note: >-
+      Repeats on Python 3.14 (ct151). Compare vault API_SERVER_KEY last4 with the gateway's
+      /proc/<pid>/environ right after every reprovision; restart hermes-gateway to heal. Run
+      last in the hermes-e2e lane: it restarts the gateway under other lanes.
     v1_4_0_nightly_20261015155017_note: >-
       Verifier: Python-version dependent. 3.14+ (ct151): Path.exists() returns False on EACCES,
       so the unreadable guard never fires and the key rotates (gateway_secrets_wire ok /
@@ -2702,7 +2811,7 @@ regressions:
 
   - id: slot-create-unregistered-model-substitution
     issue: 2668
-    last_result: { release: v1.4.0-nightly.20261015200136, result: regressed }
+    last_result: { release: v1.4.0-nightly.20261016003929, result: regressed }
     v1_4_0_nightly_20261015155017_note: >-
       Verifier addition for #2668: `hal0 slot edit <slot> --model typo-id` is also accepted (rc
       0) and substitutes the same way; `slot list` Model column shows the runtime model_id so it
@@ -2741,7 +2850,10 @@ regressions:
 
   - id: hindsight-consolidation-uncapped
     issue: 2669
-    last_result: { release: v1.4.0-nightly.20261015200136, result: regressed }
+    last_result: { release: v1.4.0-nightly.20261016003929, result: regressed }
+    v1_4_0_nightly_20261016003929_note: >-
+      Only an observation: no consolidation call was caught mid-flight, n_predict unread.
+      Evidence is output_tokens 489-1267 in 'slow llm call: scope=consolidation' lines.
     v1_4_0_nightly_20261015155017_note: >-
       Verifier: calls always target hal0/utility (they hit the brain llama-server only while
       utility was a passthrough alias to brain); not reproduced on ct150 (zero consolidation
@@ -2778,7 +2890,7 @@ regressions:
 
   - id: components-json-root-owned
     issue: 2670
-    last_result: { release: v1.4.0-nightly.20261015200136, result: regressed }
+    last_result: { release: v1.4.0-nightly.20261016003929, result: regressed }
     v1_4_0_nightly_20261015155017_note: >-
       Verifier: the EACCES is on mkstemp in state/ (root:root 0755) at hal0-api's first boot,
       not only on the file; it heals on the next hal0-api write, so probe it BEFORE any restart.
@@ -2812,7 +2924,7 @@ regressions:
 
   - id: hermes-smoke-memory-roundtrip-race
     issue: 2671
-    last_result: { release: v1.4.0-nightly.20261015200136, result: regressed }
+    last_result: { release: v1.4.0-nightly.20261016003929, result: regressed }
     v1_4_0_nightly_20261015155017_note: >-
       Both directions now shown on-box (ct151): first provision warns although memory works (op
       completed 105 s later); a reprovision passes in the same second on stale items from
@@ -2849,7 +2961,7 @@ regressions:
 
   - id: embeddings-to-chat-slot-raw-501
     issue: 2672
-    last_result: { release: v1.4.0-nightly.20261015200136, result: regressed }
+    last_result: { release: v1.4.0-nightly.20261016003929, result: regressed }
     v1_4_0_nightly_20261015155017_note: >-
       Sibling case with the same root cause (add to #2672): POST /v1/rerank naming the EMBED
       model id routes to the embed slot (--embedding, no --reranking) and returns the raw
@@ -2882,7 +2994,10 @@ regressions:
 
   - id: brain-tool-reroute-message-wrong
     issue: 2673
-    last_result: { release: v1.4.0-nightly.20261015200136, result: regressed }
+    last_result: { release: v1.4.0-nightly.20261016003929, result: blocked }
+    v1_4_0_nightly_20261016003929_note: >-
+      Blocked: needs a tool_model dispatch failure (bound but errored agent slot) which
+      cannot be forced without mutating shared state. Unit test.
     v1_4_0_nightly_20261015155017_note: >-
       Verifier: not linked to the KV overflow (the degrade only fires on the tool_model round);
       a context-size error from the tool_model gets the identical "no model behind it" prose.
@@ -2908,7 +3023,7 @@ regressions:
       error. "can't emit tool calls" after a streamed tool_call frame is the regression.
     v1_4_0_nightly_20261015200136_note: >-
       Probe result regressed: still failing, never fixed (#2673). Restore hal0.toml byte-for-byte after the probe (sha256 before/after); another actor changed it later in this run, which was not the probe.
-    promote_ready: false
+    promote_ready: true
     v1_4_0_nightly_20261015_note: >-
       Reproduce by setting [brain_chat] tool_model to an offline model-less slot (hal0/coder),
       `hal0 config reload`, then ask for a slot port; the brain emits a valid slot_by_name call,
@@ -2917,7 +3032,7 @@ regressions:
 
   - id: ui-no-gpu-on-vulkan-only-box
     issue: 2674
-    last_result: { release: v1.4.0-nightly.20261015200136, result: fixed }
+    last_result: { release: v1.4.0-nightly.20261016003929, result: fixed }
     from: v1.4.0-nightly.20261014214325
     severity: minor
     tier: mechanical
@@ -2945,7 +3060,7 @@ regressions:
 
   - id: brain-grounding-guard-misses-why-and-health
     issue: 2675
-    last_result: { release: v1.4.0-nightly.20261015200136, result: fixed }
+    last_result: { release: v1.4.0-nightly.20261016003929, result: fixed }
     from: v1.4.0-nightly.20261014214325
     severity: major
     tier: judgment
@@ -2972,7 +3087,7 @@ regressions:
 
   - id: virtual-model-entry-first-row-not-matched-slot
     issue: 2676
-    last_result: { release: v1.4.0-nightly.20261015200136, result: regressed }
+    last_result: { release: v1.4.0-nightly.20261016003929, result: regressed }
     v1_4_0_nightly_20261015155017_note: >-
       Verifier: fails in BOTH directions at the real 8192 floor. [earlier slot SMALLER] gives a
       false 503 naming the wrong slot; [earlier slot BIGGER, extraction slot below floor] is a
@@ -3008,7 +3123,7 @@ regressions:
   # ── Findings from v1.4.0-nightly.20261015021622 (filed #2690-#2706) ─────────────────────────
 
   - id: voice-stt-dashboard-save-gpu-rocm-fallback
-    last_result: { release: v1.4.0-nightly.20261015200136, result: fixed }
+    last_result: { release: v1.4.0-nightly.20261016003929, result: fixed }
     issue: 2690
     from: v1.4.0-nightly.20261015021622
     severity: major
@@ -3035,7 +3150,7 @@ regressions:
     promote_ready: true
 
   - id: voice-stt-whisper-row-no-runtime
-    last_result: { release: v1.4.0-nightly.20261015200136, result: fixed }
+    last_result: { release: v1.4.0-nightly.20261016003929, result: fixed }
     issue: 2691
     from: v1.4.0-nightly.20261015021622
     severity: major
@@ -3059,7 +3174,7 @@ regressions:
     promote_ready: false
 
   - id: utility-profile-shared-kv-pool-overflow
-    last_result: { release: v1.4.0-nightly.20261015200136, result: fixed }
+    last_result: { release: v1.4.0-nightly.20261016003929, result: fixed }
     v1_4_0_nightly_20261015155017_note: >-
       The --parallel 1 pin landed for utility and agent only; the seed BRAIN profile still has
       none (4 sequences over one 65536 pool) and that is now its own entry, brain-slot-4seq-
@@ -3089,7 +3204,7 @@ regressions:
     promote_ready: false
 
   - id: heal-missing-llm-type-gates-nonchat-slots
-    last_result: { release: v1.4.0-nightly.20261015200136, result: fixed }
+    last_result: { release: v1.4.0-nightly.20261016003929, result: fixed }
     v1_4_0_nightly_20261015155017_note: >-
       Verifier: the persisted type = "llm" is NOT self-corrected on upgrade BY DESIGN (#2710
       ships `hal0 doctor profiles --fix` as the repair); record the remainder under #2729: no
@@ -3123,7 +3238,12 @@ regressions:
     promote_ready: true
 
   - id: upgrade-silent-model-unassign
-    last_result: { release: v1.4.0-nightly.20261015200136, result: blocked }
+    last_result: { release: v1.4.0-nightly.20261016003929, result: blocked }
+    v1_4_0_nightly_20261016003929_note: >-
+      Cannot reproduce: no slot on the update box is bound to a fork-only-quant model.
+      Source-only evidence (update_commands.py:366-381 prints unassigned_models with the
+      remedy). Needs a unit test or a box seeded with a ROCmFPX-bound slot before the
+      upgrade.
     v1_4_0_nightly_20261015155017_note: >-
       Blocked: ct150 no longer has a fork-only-quant slot. Source read only:
       update_commands.py:366-381 prints unassigned_models with the remedy. Move to a unit test
@@ -3147,10 +3267,10 @@ regressions:
     expect: >-
       The unassigned slot, its former model and the remedy appear in the `hal0 update` output (and
       the job record). An unassignment visible only in the journal is the regression.
-    promote_ready: false
+    promote_ready: true
 
   - id: render-error-empty-model-blames-registry
-    last_result: { release: v1.4.0-nightly.20261015200136, result: fixed }
+    last_result: { release: v1.4.0-nightly.20261016003929, result: fixed }
     issue: 2695
     from: v1.4.0-nightly.20261015021622
     severity: minor
@@ -3170,7 +3290,10 @@ regressions:
     promote_ready: true
 
   - id: update-exit2-restart-slots-remedy-unreachable
-    last_result: { release: v1.4.0-nightly.20261015200136, result: blocked }
+    last_result: { release: v1.4.0-nightly.20261016003929, result: blocked }
+    v1_4_0_nightly_20261016003929_note: >-
+      Needs a render_error slot present during an apply; cannot be built under the
+      concurrent update lane. Unit test.
     v1_4_0_nightly_20261015155017_note: >-
       Blocked: needs a render_error slot during an apply. Source read:
       update_commands.py:923-925 excludes render_error from image_pending. Move to a unit test.
@@ -3196,7 +3319,10 @@ regressions:
     promote_ready: true
 
   - id: mcp-slot-list-counts-synthetic-hal0
-    last_result: { release: v1.4.0-nightly.20261015200136, result: regressed }
+    last_result: { release: v1.4.0-nightly.20261016003929, result: regressed }
+    v1_4_0_nightly_20261016003929_note: >-
+      REPRO FIX: slot_list returns structuredContent null; the payload is only in
+      content[0].text (JSON). Parse that, not structuredContent.count.
     v1_4_0_nightly_20261015155017_note: >-
       New in 20261015155017: commit a9328ebe (#2688) compacts slot_list rows through
       _SLOT_LIST_ROW_KEYS (mcp/admin.py:265-284), which drops `_synthetic` and
@@ -3224,7 +3350,7 @@ regressions:
     promote_ready: true
 
   - id: registry-tombstone-lock-root-owned
-    last_result: { release: v1.4.0-nightly.20261015200136, result: regressed }
+    last_result: { release: v1.4.0-nightly.20261016003929, result: regressed }
     v1_4_0_nightly_20261015155017_note: >-
       Verifier: ct150 is hal0:hal0 0644 (CONTEXT.md's "root:root" line was wrong); only fresh
       boxes hit it. The tombstone read-modify-write itself still succeeds, only the cross-
@@ -3252,7 +3378,7 @@ regressions:
     promote_ready: true
 
   - id: memory-parent-op-stuck-cancelled
-    last_result: { release: v1.4.0-nightly.20261015200136, result: regressed }
+    last_result: { release: v1.4.0-nightly.20261016003929, result: regressed }
     v1_4_0_nightly_20261015155017_note: >-
       Verifier narrowing: "cancelled forever" is overclaimed. Retrying the PARENT while the
       child is still pending/processing revives it and converges; retrying the parent instead of
@@ -3285,7 +3411,11 @@ regressions:
     promote_ready: false
 
   - id: identity-cards-duplicated-each-boot
-    last_result: { release: v1.4.0-nightly.20261015155017, result: regressed }
+    last_result: { release: v1.4.0-nightly.20261016003929, result: blocked }
+    v1_4_0_nightly_20261016003929_note: >-
+      Blocked again: the decisive step is a hal0-api restart, which is box-wide. Flagged
+      serialize: true so it runs in the serialized pass. Baseline on 003929: 2 agent-
+      identity documents after 1 boot (correct).
     v1_4_0_nightly_20261015155017_note: >-
       Probe was blocked (needs a second healthy boot). Verifier reproduced from history on
       ct151: every memory-on hal0-api boot adds exactly 2 new identity documents (hermes,
@@ -3298,6 +3428,7 @@ regressions:
     from: v1.4.0-nightly.20261015021622
     severity: minor
     tier: mechanical
+    serialize: true   # decisive step restarts hal0-api (box-wide); run in the serialized pass
     lane: memory
     summary: >-
       The boot brain lane's dedupe (hermes_provision.py ~4055 and ~4249) reads
@@ -3319,7 +3450,7 @@ regressions:
     promote_ready: true
 
   - id: api-invalid-json-body-500
-    last_result: { release: v1.4.0-nightly.20261015200136, result: regressed }
+    last_result: { release: v1.4.0-nightly.20261016003929, result: regressed }
     v1_4_0_nightly_20261015155017_note: >-
       Scope extended by #2701 comment: valid JSON that omits the required field also 500s on
       POST /api/memory/search (no `query`) and /api/memory/delete (no `ids`) with
@@ -3348,7 +3479,7 @@ regressions:
     promote_ready: true
 
   - id: catalog-qwen3-4b-npu-dead-first-row
-    last_result: { release: v1.4.0-nightly.20261015200136, result: regressed }
+    last_result: { release: v1.4.0-nightly.20261016003929, result: regressed }
     v1_4_0_nightly_20261015155017_note: >-
       The PULL half of the same stub is split out as pull-unpullable-curated-stub-stuck-queued
       (#2723): POST /api/models/qwen3-4b-npu/pull returns 202 and the job sits `queued` until
@@ -3373,7 +3504,11 @@ regressions:
     promote_ready: true
 
   - id: model-add-duplicate-registry-rows
-    last_result: { release: v1.4.0-nightly.20261015200136, result: regressed }
+    last_result: { release: v1.4.0-nightly.20261016003929, result: regressed }
+    v1_4_0_nightly_20261016003929_note: >-
+      The rm --keep-files step tombstones the LIVE store path of the serving model. Take a
+      copy of registry/ignored-paths.json before and restore afterwards, but beware another
+      lane's tombstones written in between.
     v1_4_0_nightly_20261015155017_note: >-
       Verifier: a third row also appears with NO --id (id from the file stem). The tombstone
       harm is latent, not runtime: tombstones are read only by discover.find_candidates and the
@@ -3400,7 +3535,7 @@ regressions:
     promote_ready: true
 
   - id: hermes-model-aliases-not-pruned
-    last_result: { release: v1.4.0-nightly.20261015200136, result: blocked }
+    last_result: { release: v1.4.0-nightly.20261016003929, result: regressed }
     issue: 2704
     from: v1.4.0-nightly.20261015021622
     severity: minor
@@ -3423,7 +3558,7 @@ regressions:
     promote_ready: true
 
   - id: ui-overview-services-stopped-shown-as-down
-    last_result: { release: v1.4.0-nightly.20261015200136, result: regressed }
+    last_result: { release: v1.4.0-nightly.20261016003929, result: regressed }
     v1_4_0_nightly_20261015155017_note: >-
       Third wording noted: the dashboard Services card reads GET /api/services (not
       /services/health) which returns state null / detail "unreachable" for a stopped comfyui,
@@ -3449,7 +3584,11 @@ regressions:
     promote_ready: true
 
   - id: polish-rollup-1-4-0-nightly-20261015
-    last_result: { release: v1.4.0-nightly.20261015200136, result: regressed }
+    last_result: { release: v1.4.0-nightly.20261016003929, result: regressed }
+    v1_4_0_nightly_20261016003929_note: >-
+      Items 3 and 4 (updater.restart_signalled / unit_rerender_done lines) are only testable
+      on the update box; items 1 and 2 on a fresh box. REPRO FIX: item 2 must pull its own
+      small model, not delete the shared kokoro-v1 files.
     issue: 2706
     from: v1.4.0-nightly.20261015021622
     severity: minor
@@ -3479,7 +3618,14 @@ regressions:
 
   - id: utility-qwen-structured-output-zero-facts
     issue: 2713
-    last_result: { release: v1.4.0-nightly.20261015200136, result: fixed }
+    last_result: { release: v1.4.0-nightly.20261016003929, result: partial }
+    v1_4_0_nightly_20261016003929_note: >-
+      On a fresh box the Qwen precondition is never met; the probe lands on lfm2.5-2.6b,
+      which is by-design (known-issues lfm25-structured-output-pays-think-tokens): its
+      template has no enable_thinking branch, so finish_reason=length with empty content
+      below the reasoning length is NOT this regression. Score #2713 only on a Qwen3/3.5
+      model bound to utility (ct150 as found). Use max_tokens >= 600 and compare with
+      enable_thinking absent/false.
     from: v1.4.0-nightly.20261015155017
     severity: major
     tier: judgment
@@ -3512,7 +3658,7 @@ regressions:
 
   - id: brain-slot-4seq-shared-kv-overflow
     issue: 2714
-    last_result: { release: v1.4.0-nightly.20261015200136, result: fixed }
+    last_result: { release: v1.4.0-nightly.20261016003929, result: fixed }
     from: v1.4.0-nightly.20261015155017
     severity: major
     tier: mechanical
@@ -3540,7 +3686,7 @@ regressions:
 
   - id: unassigned-model-message-on-offline-slot
     issue: 2715
-    last_result: { release: v1.4.0-nightly.20261015200136, result: fixed }
+    last_result: { release: v1.4.0-nightly.20261016003929, result: fixed }
     from: v1.4.0-nightly.20261015155017
     severity: minor
     tier: mechanical
@@ -3564,7 +3710,11 @@ regressions:
 
   - id: hermes-turns-blocked-behind-extraction
     issue: 2716
-    last_result: { release: v1.4.0-nightly.20261015200136, result: blocked }
+    last_result: { release: v1.4.0-nightly.20261016003929, result: partial }
+    v1_4_0_nightly_20261016003929_note: >-
+      Timing did not hold (10-100 s behind hindsight on a --parallel 1 brain); routing held
+      (passthrough:brain, never utility). Known memory-extraction-serializes-with-chat-on-
+      fresh-install.
     from: v1.4.0-nightly.20261015155017
     severity: minor
     tier: judgment
@@ -3590,7 +3740,11 @@ regressions:
 
   - id: crash-loop-load-no-fast-fail
     issue: 2717
-    last_result: { release: v1.4.0-nightly.20261015200136, result: regressed }
+    last_result: { release: v1.4.0-nightly.20261016003929, result: regressed }
+    v1_4_0_nightly_20261016003929_note: >-
+      CPU image crash-loops and returns 200 warming at ~181 s (known crash-loop-
+      warming-180s-window); only the vulkan/rocm runner-standard image parks at exit 64 and
+      hits #2717. Use a vulkan box.
     from: v1.4.0-nightly.20261015155017
     severity: minor
     tier: mechanical
@@ -3625,7 +3779,10 @@ regressions:
 
   - id: kokoro-tts-gpu-vulkan-advertised
     issue: 2718
-    last_result: { release: v1.4.0-nightly.20261015200136, result: regressed }
+    last_result: { release: v1.4.0-nightly.20261016003929, result: regressed }
+    v1_4_0_nightly_20261016003929_note: >-
+      Related but distinct: the seed provider on voice.tts is 'llama-server' on every fresh
+      install (#2749), independent of this catalog row.
     from: v1.4.0-nightly.20261015155017
     severity: minor
     tier: mechanical
@@ -3662,7 +3819,7 @@ regressions:
 
   - id: doctor-perms-agents-dir-0700-vs-0711
     issue: 2719
-    last_result: { release: v1.4.0-nightly.20261015200136, result: regressed }
+    last_result: { release: v1.4.0-nightly.20261016003929, result: regressed }
     from: v1.4.0-nightly.20261015155017
     severity: minor
     tier: mechanical
@@ -3687,7 +3844,7 @@ regressions:
 
   - id: config-validate-skips-slot-toml
     issue: 2720
-    last_result: { release: v1.4.0-nightly.20261015200136, result: regressed }
+    last_result: { release: v1.4.0-nightly.20261016003929, result: regressed }
     from: v1.4.0-nightly.20261015155017
     severity: minor
     tier: mechanical
@@ -3723,7 +3880,7 @@ regressions:
 
   - id: memory-reranker-config-dead
     issue: 2721
-    last_result: { release: v1.4.0-nightly.20261015200136, result: regressed }
+    last_result: { release: v1.4.0-nightly.20261016003929, result: partial }
     from: v1.4.0-nightly.20261015155017
     severity: minor
     tier: judgment
@@ -3752,7 +3909,7 @@ regressions:
 
   - id: mcp-gated-tools-queue-malformed-args
     issue: 2722
-    last_result: { release: v1.4.0-nightly.20261015200136, result: regressed }
+    last_result: { release: v1.4.0-nightly.20261016003929, result: regressed }
     from: v1.4.0-nightly.20261015155017
     severity: minor
     tier: mechanical
@@ -3787,7 +3944,7 @@ regressions:
 
   - id: pull-unpullable-curated-stub-stuck-queued
     issue: 2723
-    last_result: { release: v1.4.0-nightly.20261015200136, result: regressed }
+    last_result: { release: v1.4.0-nightly.20261016003929, result: regressed }
     from: v1.4.0-nightly.20261015155017
     severity: minor
     tier: mechanical
@@ -3821,7 +3978,11 @@ regressions:
 
   - id: model-rm-leaves-dangling-capability
     issue: 2724
-    last_result: { release: v1.4.0-nightly.20261015200136, result: regressed }
+    last_result: { release: v1.4.0-nightly.20261016003929, result: regressed }
+    v1_4_0_nightly_20261016003929_note: >-
+      Residue: re-pulled kokoro-v1 row has type=None raw (list serializer shows tts); `rm
+      --keep-files` also tombstones kept files, which `model add` cannot restore for
+      .onnx/.bin (#2748).
     from: v1.4.0-nightly.20261015155017
     severity: minor
     tier: mechanical
@@ -3855,7 +4016,7 @@ regressions:
 
   - id: auto-scan-ignores-gguf-header
     issue: 2725
-    last_result: { release: v1.4.0-nightly.20261015200136, result: regressed }
+    last_result: { release: v1.4.0-nightly.20261016003929, result: regressed }
     from: v1.4.0-nightly.20261015155017
     severity: minor
     tier: mechanical
@@ -3887,7 +4048,7 @@ regressions:
 
   - id: ui-settings-overview-util-fraction-as-percent
     issue: 2726
-    last_result: { release: v1.4.0-nightly.20261015200136, result: regressed }
+    last_result: { release: v1.4.0-nightly.20261016003929, result: regressed }
     from: v1.4.0-nightly.20261015155017
     severity: minor
     tier: mechanical
@@ -3914,10 +4075,17 @@ regressions:
 
   - id: hal0-api-shutdown-hang-90s
     issue: 2727
-    last_result: { release: v1.4.0-nightly.20261015200136, result: regressed }
+    last_result: { release: v1.4.0-nightly.20261016003929, result: blocked }
+    v1_4_0_nightly_20261016003929_note: >-
+      Not run on 003929 (shared box, concurrent lane). Post-#2746 proof must come from the
+      SECOND restart onward: the upgrade restart itself runs the OLD process. Numeric
+      target: three restarts with a streaming request in flight, each stop under 30 s, no
+      'stop-sigterm timed out' (the new tree stopped in 20.3-20.5 s x3). An in-flight stream
+      gets a bare HTTP 500 on restart; noted, cosmetic.
     from: v1.4.0-nightly.20261015155017
     severity: minor
     tier: judgment
+    serialize: true   # decisive step restarts hal0-api (box-wide); run in the serialized pass
     lane: upgrade
     summary: >-
       A hal0-api stop that begins with a /v1/chat/completions request in flight waits the bounded
@@ -3951,7 +4119,11 @@ regressions:
 
   - id: steward-vram-gb-conversion-wrong
     issue: 2728
-    last_result: { release: v1.4.0-nightly.20261015200136, result: regressed }
+    last_result: { release: v1.4.0-nightly.20261016003929, result: regressed }
+    v1_4_0_nightly_20261016003929_note: >-
+      2 of 6 correct, needs 5 of 6. hardware_stats.vram_mb=118784 (118.8 GB at /1000, 116.0
+      at /1024); runs stated 114.5-118.8. Also run the same 6 prompts through the table-row
+      Model-cell check in the brain lane.
     from: v1.4.0-nightly.20261015155017
     severity: minor
     tier: judgment
@@ -3982,7 +4154,10 @@ regressions:
 
   - id: polish-rollup-1-4-0-nightly-20261015155017
     issue: 2729
-    last_result: { release: v1.4.0-nightly.20261015200136, result: regressed }
+    last_result: { release: v1.4.0-nightly.20261016003929, result: regressed }
+    v1_4_0_nightly_20261016003929_note: >-
+      Item 3 (fresh install type residue) is upgrade-only residue and is not applicable on
+      fresh boxes.
     from: v1.4.0-nightly.20261015155017
     severity: minor
     tier: mechanical
@@ -4022,7 +4197,7 @@ regressions:
 
   - id: doctor-verify-capability-slots-false-pass
     issue: 2736
-    last_result: { release: v1.4.0-nightly.20261015200136, result: regressed }
+    last_result: { release: v1.4.0-nightly.20261016003929, result: fixed }
     from: v1.4.0-nightly.20261015200136
     severity: minor
     tier: mechanical
@@ -4050,7 +4225,10 @@ regressions:
 
   - id: brain-chat-non-list-messages-empty-stream
     issue: 2737
-    last_result: { release: v1.4.0-nightly.20261015200136, result: regressed }
+    last_result: { release: v1.4.0-nightly.20261016003929, result: regressed }
+    v1_4_0_nightly_20261016003929_note: >-
+      Only scalar messages (123, 1.5, true) run; string/dict cases were skipped (live turns
+      on a --parallel 1 brain).
     from: v1.4.0-nightly.20261015200136
     severity: minor
     tier: mechanical
@@ -4081,7 +4259,9 @@ regressions:
 
   - id: slot-error-after-slow-idle-stop
     issue: 2738
-    last_result: { release: v1.4.0-nightly.20261015200136, result: regressed }
+    last_result: { release: v1.4.0-nightly.20261016003929, result: blocked }
+    v1_4_0_nightly_20261016003929_note: >-
+      Blocked by design on a shared box (SIGSTOP + CPUQuota on hal0-api). Unit test only.
     from: v1.4.0-nightly.20261015200136
     severity: minor
     tier: judgment
@@ -4117,7 +4297,11 @@ regressions:
 
   - id: seed-profiles-legacy-model-path
     issue: 2739
-    last_result: { release: v1.4.0-nightly.20261015200136, result: regressed }
+    last_result: { release: v1.4.0-nightly.20261016003929, result: partial }
+    v1_4_0_nightly_20261016003929_note: >-
+      Held for kokoro; moonshine (seed_profiles.toml:101) and qwen3-tts (:105) still pass '
+      --model_path /mnt/ai-models/local/...' which a fresh install lacks. Promote the static
+      half as pytest now (see promotion list).
     from: v1.4.0-nightly.20261015200136
     severity: minor
     tier: mechanical
@@ -4152,7 +4336,7 @@ regressions:
 
   - id: polish-rollup-1-4-0-nightly-20261015200136
     issue: 2740
-    last_result: { release: v1.4.0-nightly.20261015200136, result: regressed }
+    last_result: { release: v1.4.0-nightly.20261016003929, result: regressed }
     from: v1.4.0-nightly.20261015200136
     severity: minor
     tier: mechanical
@@ -4187,3 +4371,187 @@ regressions:
       prompt, (7) help text matches the pinned-guard behaviour. Any one failing is the regression for
       that item. `slot create` needs -m/--model (rc 2 without it).
     promote_ready: true
+
+  # ── Filed from v1.4.0-nightly.20261016003929 ────────────────────────────────
+
+  - id: virtual-alias-falls-to-anchor-not-bound-slot
+    issue: 2741
+    last_result: { release: v1.4.0-nightly.20261016003929, result: regressed }
+    from: v1.4.0-nightly.20261016003929
+    severity: major
+    tier: mechanical
+    lane: post-upgrade
+    note: >-
+      Filed BEFORE the run (P1, ready-for-agent, v1.5.0; operator approved the fix 2026-10-15), found
+      again by the post-upgrade lane. Not a new filing: probe it, report `regressed` while open.
+    summary: >-
+      resolve_chain (normalize/resolver.py:103-127) counts a chain slot only when its model is
+      ALREADY LOADED. With agent bound and utility or brain bound-but-cold, `hal0/utility` and
+      `hal0/brain` resolve to the agent's model with fallback=True (nothing loaded: agent is loaded
+      on demand and the bound slot never wakes) or match agent as the chain's second link (agent warm).
+      Hindsight (HINDSIGHT_API_LLM_MODEL=hal0/utility) and the steward therefore run on the 17.5 GB
+      agent model, 200 OK, no resolver log line; the rewritten model id in dispatch.decision is the
+      only trace. Decided fix (#2741): the first chain entry with a BOUND model wins, loaded or not;
+      the anchor only when no entry can serve; every substitution logged.
+    repro: |
+      # box with agent bound (e.g. ct150: qwen3.8-27b) and utility or brain bound but cold
+      curl -s $API/api/slots | jq -c '.[]|select(.name=="agent" or .name=="utility" or .name=="brain")|{name,state,model_default}'
+      curl -s -X POST $API/v1/chat/completions -H 'content-type: application/json' \
+        -d '{"model":"hal0/utility","messages":[{"role":"user","content":"hi"}],"max_tokens":4}' >/dev/null
+      journalctl -u hal0-api --since -2min | grep dispatch.decision | tail -3   # note model= and upstream=
+      # non-destructive form (does not wake the agent): in the box venv call
+      #   hal0.normalize.resolver.resolve_chain over SlotViews built from /etc/hal0/slots/*.toml with
+      #   loaded=set() and again with loaded={agent model}
+    expect: >-
+      `hal0/utility` dispatches to utility (it is loaded, or woken) and `hal0/brain` to brain; the
+      journal shows upstream=utility / brain, never the agent's model for a bound utility or brain.
+      Landing on the agent while the aliased slot has a bound model is the defect. A fresh install
+      (agent model-less) falls back to brain by design: known memory-extraction-serializes-with-chat-
+      on-fresh-install. NEVER wake the 17.5 GB agent on ct150 just to probe (shared GPU): use the
+      in-process resolver form or the journal.
+    box_note: >-
+      ct150's utility half needs utility COLD: its utility.toml carries explicit pinned=false and
+      autoload=false from a scripted PUT /api/slots/*/config on 2026-10-15. A stock model-bound utility
+      is default-pinned and autoloaded (reaper._PINNED_BY_DEFAULT, activation.autoload_enabled), so it
+      is normally warm; the brain half reaches stock config because brain is idle-reaped after 300 s.
+    promote_ready: true
+    promote_note: >-
+      Unit test in tests/normalize/test_resolver.py: agent bound + loaded vs not, utility bound but
+      not loaded, expect the utility model and fallback=False. Must replace
+      test_full_miss_falls_back_to_configured_primary_unloaded and
+      test_generalized_custom_slot_falls_back_to_agent, which currently lock the defect.
+
+  - id: memory-delete-observation-id-returns-zero
+    issue: 2747
+    last_result: { release: v1.4.0-nightly.20261016003929, result: regressed }
+    from: v1.4.0-nightly.20261016003929
+    severity: minor
+    tier: mechanical
+    lane: memory
+    summary: >-
+      POST /api/memory/delete returns {deleted:0} for an OBSERVATION unit id (fact_type=observation,
+      document_id=null) even when called by the owning agent. Search, /units and the brain's
+      memory_search all hand these ids out as the item `id`. _deletable_ids falls back to the fact id
+      when document_id is null (hindsight_provider.py:1554), delete_document(<observation id>) gets a
+      404, and the 404 is swallowed as "not in this bank" (:1617-1619). No reason is returned.
+      Workaround: delete the source document (or the world unit) as owner; derived observations go
+      with it. NOT this defect: an anonymous or other-agent delete of a visibility:private unit
+      returning {deleted:0} is the fail-closed ACL (known memory-delete-private-withheld-silently).
+    repro: |
+      H='X-hal0-Agent: rvskeptic'
+      curl -s -XPOST $API/api/memory/add -H "$H" -H 'X-hal0-Private: 1' -H 'content-type: application/json' \
+        -d '{"text":"The rvskeptic probe owns a green bicycle and rides it on Sundays."}'
+      # wait until the retain op completes (GET /api/memory/banks/shared/operations), then:
+      curl -s $API/api/memory/banks/shared/units?limit=50 | jq -c '.items[]?|select((.tags//[])|index("agent:rvskeptic"))|{id,fact_type,document_id}'
+      OBS=<id of the fact_type=observation unit>; WORLD=<id of the fact_type=world unit>
+      curl -s -XPOST $API/api/memory/delete -H "$H" -H 'content-type: application/json' -d "{\"ids\":[\"$OBS\"]}"    # defect: {"deleted":0}
+      curl -s -XPOST $API/api/memory/delete -H "$H" -H 'content-type: application/json' -d "{\"ids\":[\"$WORLD\"]}"  # {"deleted":1}
+    expect: >-
+      Deleting an id that a read surface returned, as the owning agent, removes it (resolve the
+      observation to its source documents) or returns a typed reason; never a bare {deleted:0}.
+      Clean up: delete the world unit as owner (the observation cascades).
+    promote_ready: true
+    promote_note: >-
+      pytest on the unified-bank delete path with a stub engine returning 404 for an observation id:
+      assert the observation resolves to its source document(s) or the response carries a reason.
+
+  - id: model-rm-keep-files-hint-false-for-non-gguf
+    issue: 2748
+    last_result: { release: v1.4.0-nightly.20261016003929, result: regressed }
+    from: v1.4.0-nightly.20261016003929
+    severity: minor
+    tier: mechanical
+    lane: capabilities
+    summary: >-
+      `hal0 model rm kokoro-v1 -f --keep-files` prints "Kept files are hidden from future scans;
+      `hal0 model add <path>` brings one back." (cli/model_commands.py:318-321, printed
+      unconditionally). Since #2739 the pulled kokoro is kokoro-v1.0.onnx + voices-v1.0.bin and
+      `hal0 model add` refuses both (400 model.unsupported_format; default [models].file_extensions is
+      [.gguf, .safetensors], models_service.py:1846-1855). The tombstones stay, rm also drops the
+      store_blob rows so hardlink dedup misses, and the only way back is a full `hal0 model pull
+      kokoro-v1` (339 MB). Pull clears only entry_dest (pull.py:1745), so the voices-v1.0.bin
+      tombstone is left behind (harmless: the scanner never matches .bin). Same for any pulled model
+      outside .gguf/.safetensors (RealESRGAN_x4plus.pth, curated.py:766).
+    repro: |
+      cp -a /var/lib/hal0/registry/ignored-paths.json /var/tmp/ignored-paths.bak 2>/dev/null   # may not exist
+      hal0 model rm kokoro-v1 -f --keep-files          # prints "kept <path> (kept_by_request)" x2 + the hint
+      hal0 model add /var/lib/hal0/models/tts/kokoro-v1/kokoro-v1.0.onnx --id kokoro-v1 ; echo rc=$?
+      hal0 model add /var/lib/hal0/models/tts/kokoro-v1/voices-v1.0.bin --id kokoro-v1-v ; echo rc=$?
+      hal0 model pull kokoro-v1                        # restore; then compare ignored-paths.json to the backup
+    expect: >-
+      Either `model add` of the printed path registers it (and clears the tombstone), or the hint does
+      not promise it for files add cannot take. rc=1 "file extension '.onnx' not in .file_extensions"
+      is the defect. Restore the box with the pull and the backed-up ignored-paths.json (another lane's
+      tombstones may be in it: merge, do not overwrite blindly). Cosmetic side note: Rich markup eats
+      "[models]" in that error text.
+    promote_ready: true
+    promote_note: >-
+      pytest: for every curated entry whose hf_file/extra_files extension is outside the default
+      file_extensions, rm --keep-files must not print the add hint (or add must accept the extension).
+
+  - id: tts-selection-provider-seeded-llama-server
+    issue: 2749
+    last_result: { release: v1.4.0-nightly.20261016003929, result: regressed }
+    from: v1.4.0-nightly.20261016003929
+    severity: minor
+    tier: mechanical
+    lane: capabilities
+    summary: >-
+      On a fresh install the voice.tts selection is seeded with provider = "llama-server" (the
+      deprecated SlotConfig default, config/schema.py:420) because the shipped
+      installer/etc-hal0/slots/tts.toml has no `provider` key (initialize_if_missing,
+      orchestrator.py:291). The first enabled apply writes it into /etc/hal0/slots/tts.toml
+      (slot_config/__init__.py:688-689). `capabilities list` and GET /api/capabilities show
+      llama-server, while the catalog backend id=cpu says kokoro and GET /api/slots/tts says kokoro
+      (the slot view re-derives it, manager.py ~2447-2453). Serving is unaffected. UI effect read from
+      source only: TtsPanel's resolveProvider() falls back to selection.provider, so isKokoro is false
+      and the default-voice picker degrades to free text with the offline slot. Upgraded boxes seeded
+      from a provider-less tts.toml need a one-off heal; fixing the shipped TOML alone will not heal them.
+    repro: |
+      hal0 capabilities list | grep -E 'voice +\│? *tts'
+      curl -s $API/api/capabilities | jq -c '.selections.voice.tts.provider, ([.catalogs.voice.tts[].backends[]|select(.id=="cpu")|.provider]|unique)'
+      curl -s $API/api/slots/tts | jq -c '{provider,profile}'
+      grep -n provider /etc/hal0/capabilities.toml /etc/hal0/slots/tts.toml
+    expect: >-
+      selections.voice.tts.provider equals the provider the catalog advertises for the selected
+      backend (kokoro on cpu), and tts.toml never gains `provider = "llama-server"` after an apply.
+      Compare against img (ships provider = "comfyui" and reads comfyui correctly).
+    promote_ready: true
+    promote_note: >-
+      pytest: seed every capability child from the shipped slots/*.toml and assert the selection
+      provider is a member of the catalog's advertised providers for that child.
+
+  - id: slot-view-bare-llama-image-status-not-configured
+    issue: 2750
+    last_result: { release: v1.4.0-nightly.20261016003929, result: regressed }
+    from: v1.4.0-nightly.20261016003929
+    severity: minor
+    tier: judgment
+    lane: slots
+    note: >-
+      Filed ready-for-human: the fix reverses #2389's deliberate narrowing (7ed96e4b) and its pinning
+      test tests/providers/test_fixed_family_image_seams.py::test_slot_view_bare_llama_slot_stays_not_configured.
+      If the operator keeps the design, move this to known-issues with the still_report_if in #2750.
+    summary: >-
+      A llm slot created by the stock CLI with no --profile and no image_pin
+      (`hal0 slot create X --type llm --hardware vulkan --model lfm2.5-2.6b --port N`) has no profile
+      key. While it is ready and its container runs, GET /api/slots/X reports image_status
+      "not-configured", image null, resolved_command null, image_mismatch null, although actual_image
+      is the runner-standard digest and `_resolve_image_ref(cfg, None)` / `resolved_command_for_slot(cfg)`
+      resolve exactly that ref on the box. /api/slots/X/pull/status returns {"image":null,
+      "state":"missing"} for an image that is on disk. Cause: `_declares_image`
+      (slot_view/__init__.py:511-527, used at :675 and :787) rests on #1226's stale premise that such a
+      slot "runs on the default toolbox". Loading and serving work; slot-drift is argv-based and fine.
+    repro: |
+      hal0 slot create zzimg --type llm --hardware <vulkan|cpu> --model <registered chat id> --port 8097
+      hal0 slot load zzimg
+      curl -s $API/api/slots/zzimg | jq -c '{state,container_status,image_status,image,actual_image,resolved_command,image_mismatch,profile}'
+      curl -s $API/api/slots/zzimg/pull/status
+      curl -s $API/api/slots/coder/pull/status        # control: a profiled slot on the same image says "present"
+      hal0 slot unload zzimg; hal0 slot delete zzimg --force </dev/null; systemctl --failed
+    expect: >-
+      A running slot whose container image is resolvable reports image_status "present" (not
+      "not-configured"), a non-null image/resolved_command, and pull/status "present" when the image is
+      in the store. Seeded slots (profiles) are unaffected, so the defect only shows on a slot you create
+      without a profile.
+    promote_ready: false

@@ -6,6 +6,13 @@ tiny and their answers are irrelevant.
 
 ## Checks
 
+**Before check 1, poll `hal0 slot list` for non-shipped slot names (`zz*`).** Three foreign slots
+(`zzcr`, `zzbk`, `zzrg`) appeared mid-lane in 20261016003929 and perturbed `/v1/models`, the
+`dispatch.decision` upstreams and `doctor perms`. Wait or record them, and attribute before filing.
+Drive slow-brain calls (`--parallel 1`, 60-280 s while Hindsight consolidates) `nohup`'d with output
+to a file, never through a 120 s ssh tool timeout: killed foreground runs leave requests queued on
+the brain and inflate every later latency to ~90 s.
+
 **Pick your workhorse slot first — and run the coherence canary on it** (see `_shared.md`).
 Measure the generation rate of each ready chat slot and use the fastest for the wire-format
 checks. On a CPU box the brain F16 model needs ~98 s for eight tokens; using it naively consumes
@@ -109,7 +116,7 @@ by-design — rc.7 found `chat-to-embed-slot-500-passthrough`'s offline half had
 from an untyped 500 to a typed 404 since the entry was last checked; the entry's own
 `still_report_if` was written to catch exactly that but nothing had re-tested it since rc.6.
 
-15. **Set up #2666 explicitly.** The shipped `agent.toml` is model-less while `/api/slots` shows `model_id` from the per-type fallback. Back up `agent.toml`, add a `[model]` block, probe, restore with `cp -p`. Do not rely on the displayed model_id.
+15. **Set up #2666 explicitly.** The shipped `agent.toml` is model-less while `/api/slots` shows `model_id` from the per-type fallback. Back up `agent.toml`, add a `[model]` block, probe, restore with `cp -p`. Do not rely on the displayed model_id (it is the last-loaded id, `known-issues: slot-model-id-is-runtime-not-binding`); after editing, assert `hal0 slot show agent --json | jq .model` (or `model_default` in `GET /api/slots/agent`) shows the bind before asserting #2666 behaviour.
 16. **Second slot's bare alias (#2665).** With two ready slots on one model, probe the bare alias of the SECOND-declared slot, not the first (the first passes by order and cannot discriminate). Also decide whether the `hal0/agent` warm fallback (served by brain in one state, wakes agent in another) should be strict; record both states.
 17. **Wrong-model vectors.** Request an unloaded REGISTERED embedding id (qwen3-embedding-0-6b-q8-0, 1024-d) while another embed model is served; assert a typed error or matching dimension and `model` equal to `GET /api/slots/embed` `model_id` (#2663, #2672). State in the report that the `json_object` check ran on a non-Qwen3-templated brain (lfm2.5) and so did NOT exercise the collision case.
 
@@ -120,6 +127,10 @@ from an untyped 500 to a typed 404 since the entry was last checked; the entry's
 20. **Record `pinned` and slot state around every `hal0/agent` wake.** agent reported `pinned=true` after a wake, so a later `hal0 slot unload agent` 409s. Idle eviction (embed, rerank and agent were reaped within ~2 min of each other) flips outcomes between loaded and offline: reload first and write the slot-state line before each dependent check.
 
 21. **Budget and fixtures.** Check 4's crash-loop cold path does not fit the 12 min budget; it now lives in the slots lane (fast-crash load). Check 17 (wrong-model vectors) needs two embedding models; mark it `skipped` on ct151 unless a second small embedding gguf is staged.
+
+23. **Advertised means answerable.** For every id in `/v1/models`, a 1-token chat (or the matching non-chat route) must either answer or return a typed `dispatch.capability_mismatch`; a `downloaded:true` id whose unit is `failed` and which 404s "not found in registry" is the ghost-id shape (`zzcr` in 20261016003929; foreign-slot churn blocked a verdict, so re-test on a quiet box).
+
+24. **Small `max_tokens` on a reasoning model (record, do not file).** Chat with `max_tokens` 8-60 against brain on lfm2.5-2.6b returns `content:""`, `reasoning_content` set, `finish_reason=length`. Record whether a small-budget OpenAI client gets usable `content`; this is the model's documented think-token cost (`known-issues: lfm25-structured-output-pays-think-tokens`), only a changed default or a documented policy would make it a finding.
 
 22. **Slot NAME as model, for every ready slot.** Chat-complete naming each non-brain ready slot by NAME and diff the outcome against the `/v1/models` id list: an id advertised there but 404ing on chat is the #1837 ghost-id shape for a live slot. If another actor deletes a foreign slot mid-probe, record that and do not conclude.
 

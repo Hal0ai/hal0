@@ -89,7 +89,7 @@ did not ask for?**
 10. **Slot `type` audit.** For each `/etc/hal0/slots/*.toml` compare `type` with the shipped seed (embed=embedding, rerank=reranking, tts=tts) and run `output_sanity.skip_reason(cfg)` from the venv; any embed/rerank/tts slot where it returns None cannot load (#2693). Record, do not fix.
 11. **Attribution guard.** At lane start and end run `journalctl -u hal0-api --since <start> | grep -E '"(POST|PUT|DELETE|PATCH) '` (excluding /mcp/ and /v1/) and `ls -la /root` for new dirs. Name any foreign actor in the report and stop diffing state after its first call.
 12. **Remedy consistency and drift capture.** When `hal0 update` prints 'Run hal0 update --restart-slots', run it once: it must succeed or its refusal must name the real cause (cross-check `skipped_render_error` in `updater.post_start_image_drift_restart`). Capture `/api/updates/slot-drift` and `image_mismatch` together immediately after the migration, before any slot reload.
-13. **Units and idempotency.** `systemctl list-unit-files 'hal0-slot@*' | grep masked` against slots with a bound model (hal0 should say 'unit masked', not 'systemctl restart failed'); diff `/etc/systemd/system/hal0*.service` against `/usr/lib/hal0/current/installer/systemd/`; dry-run `hal0 runner-images migrate` and `hal0 profile migrate` must both say 'nothing to convert'.
+13. **Units and idempotency.** `systemctl list-unit-files 'hal0-slot@*' | grep masked` against slots with a bound model (hal0 should say 'unit masked', not 'systemctl restart failed'); diff `/etc/systemd/system/hal0*.service`, the `hal0-agent@hermes` drop-in and `hal0.target` against `/usr/lib/hal0/current/installer/systemd/` (only `hal0-gpu-perms.service` and slot quadlets are refreshed by `hal0 update`; the rest is installer-only, comment-only drift is cosmetic, and a functional hunk without a CHANGELOG `### Migrations` re-run note is what `known-issues: update-installs-only-gpu-perms-unit` says to report; on a box that crossed a functional unit change check `systemctl show hindsight-api -p Environment | grep RETAIN`); dry-run `hal0 runner-images migrate` and `hal0 profile migrate` must both say 'nothing to convert'.
 
 14. **Validators vs the daemon again** (same as upgrade check): after the update `hal0 config validate` against the boot-time load errors.
 
@@ -99,7 +99,6 @@ did not ask for?**
 
 17. **Retain yield since the upgrade.** Count hindsight `STREAMING RETAIN COMPLETE: N units` lines; a box where every retain yields 0 units has no working extraction although every health surface is green (ct150: 41 of 41 at 0 facts, #2713).
 
-18. **Unit files.** Diff `/etc/systemd/system/hal0*.service` against `installer/systemd`; only slot quadlets are re-rendered by the updater.
 
 19. **Idle-reap stop must converge.** After any idle-reap stop on a loaded host, assert slot state returns to `offline` (not `error`) and `hal0/<slot>` aliases keep resolving (embed after a stop over 30 s is #2738). Diff `/api/slots` states against `systemctl is-active hal0-slot@X` for every slot at lane exit to catch persisted false errors.
 
@@ -107,9 +106,15 @@ did not ask for?**
 
 21. **MCP initialize paths.** Use `/mcp/admin/mcp` and `/mcp/memory/mcp`; the bare `/mcp`, `/mcp/` and `/mcp/admin` return 405.
 
-22. **Snapshot profiles in the upgrade stage.** Capture `hal0 profile list --json` in the upgrade stage's before snapshot so the post-upgrade profile diff has a real baseline.
+22. **Snapshot baseline in the upgrade stage.** The before snapshot must include `hal0 profile list --json`, `GET /api/slots` `actual_image`, `/api/models`, `hal0 memory bank` counts, and every slot TOML `[model].default` beside the API `model_id` (so coder/flm style mismatches are recorded as pre-existing, not discovered after the update). The post-upgrade diff has no real baseline for check 22 of the previous release without them.
 
 23. **Steward answers carry the version.** Ask the steward for the system version and require the final prose, not only the `tool_result` frame, to contain the actual version string (one attempt showed the tool succeeding while the prose claimed it could not run tools).
+
+24. **Alias fallback lands on the bound slot** (#2741, filed P1, regression `virtual-alias-falls-to-anchor-not-bound-slot`). With agent bound and a bound-but-cold utility or brain, a `hal0/utility` / `hal0/brain` completion must dispatch to that slot, never the agent's model. DO NOT wake a 17.5 GB agent on a shared GPU to find out: read `dispatch.decision` (`model=` and `upstream=`) for Hindsight's own `openai/hal0/utility` calls since the upgrade and `podman events` starts, and run the non-destructive in-process `resolve_chain` over the live slot TOMLs with `loaded=set()` and again with the agent loaded. Record requested model and resolved upstream together so alias fallbacks can be audited without inferring them from a 503 body. Report `known (#2741)`; ct150's cold utility is its pinned=false/autoload=false residue, not the upgrade.
+
+25. **Starvation canary.** Time-to-first-byte of a `hal0/agent` chat while the Hindsight retain queue is non-empty; flag above 60 s and attribute to the anchor (a dense 27B decodes ~8 tok/s) and to background traffic before filing. Record queue depth first: the grounding probe in check 3 cannot finish inside the budget behind a backlog, so require pending <= 2 or stop Hindsight retains / bind it to a tiny model for the lane and say so.
+
+26. **Restart cost.** A hal0-api restart with the agent slot serving took ~20 s and added 2 failed memory ops per restart. Schedule restart-based checks (16, 20) last.
 
 ## Leave behind
 

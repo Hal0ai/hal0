@@ -16,8 +16,8 @@
 # Do not treat a review-due entry as automatically still valid.
 
 schema: 1
-updated: 2026-10-15
-updated_for: v1.4.0-nightly.20261015200136
+updated: 2026-10-16
+updated_for: v1.4.0-nightly.20261016003929
 
 known_issues:
   # ── Open defects, already tracked ───────────────────────────────────────────
@@ -2325,6 +2325,13 @@ known_issues:
       not clear the tombstone the keep-files delete wrote; OR add prints no bad-magic warning for a
       non-GGUF file. Do not re-report the [chat] label on a re-added kokoro file, meta.json being
       ignored by model add, or the enabled-but-offline selection after rm (#2724).
+    superseded_note: >-
+      SINCE #2739 (nightly 20261016003929) kokoro is stored as kokoro-v1.0.onnx + voices-v1.0.bin, not
+      model.gguf, so the premise above (add accepts the kept file) is gone: `hal0 model add` now
+      refuses both with 400 model.unsupported_format and the keep-files hint is false. That is
+      filed as #2748 (regression model-rm-keep-files-hint-false-for-non-gguf); the clause "model add
+      does not clear the tombstone" is met by it. Only the legacy tts/kokoro-v1/model.gguf layout
+      (upgraded boxes that never re-pulled) still behaves as adjudicated here.
     review_at: v1.5.0
 
   - id: tracked-open-defects-20261015200136
@@ -2350,4 +2357,259 @@ known_issues:
       build containing the fix commit (then it is a regression, say so); OR the defect is observed
       with a materially different cause or wider scope than the issue describes (comment with the
       evidence).
+    review_at: v1.5.0
+
+  # ── Added by kit curation after v1.4.0-nightly.20261016003929 ───────────────
+
+  - id: tracked-open-defects-20261016003929
+    status: open
+    summary: >-
+      Pointers, not adjudications. #2741 `hal0/utility` and `hal0/brain` resolve to the AGENT's model
+      when the aliased slot has a bound model but is not loaded (resolve_chain counts only loaded
+      slots; P1, v1.5.0, operator-approved fix; box-specific trigger on ct150 is an explicit
+      pinned=false/autoload=false in utility.toml, the brain half reaches stock config because brain is
+      idle-reaped after 300 s; a stock fresh install does not hit it, agent is model-less there). Filed
+      this run: #2747 memory delete of an observation unit id returns {deleted:0}; #2748 the
+      `model rm --keep-files` add hint is false for kokoro .onnx/.bin; #2749 voice.tts selection
+      seeded with provider "llama-server"; #2750 bare llama slot reports image_status not-configured
+      while running (ready-for-human; reverses #2389).
+    still_report_if: >-
+      The per-issue state changes: an issue is closed as fixed and the repro still reproduces on a
+      build containing the fix commit (then it is a regression, say so); OR the defect is observed
+      with a materially different cause or wider scope than the issue describes (comment with the
+      evidence). #2741 specifically: also report if the substitution happens with NO log line after
+      the fix (every substitution must be logged).
+    review_at: v1.5.0
+
+  - id: lfm25-structured-output-pays-think-tokens
+    status: by-design
+    adjudicated: v1.4.0-nightly.20261016003929
+    related_issue: 2713
+    summary: >-
+      On a box whose utility/brain is lfm2.5-2.6b, a json_schema (or any) request returns
+      finish_reason=length with content "" and only reasoning_content when max_tokens is small
+      (memory-lane prompt at max_tokens 600: length; at 2000: stop with valid JSON), and
+      chat_template_kwargs.enable_thinking=false has no effect. Looks like #2713 regressing.
+    why: >-
+      Not #2713. LFM2.5 reasons before every reply (about 60-800 completion tokens of
+      reasoning_content). Its embedded chat template (5443 bytes, GET :8090/props .chat_template) has
+      zero references to enable_thinking, so true / false / absent give byte-identical output, with
+      and without hal0 in the path. The #2713 fix (thinking.py:67 GRAMMAR_COLLIDING_TEMPLATES =
+      {"hal0-brain-sft"}, grammar exemption at :141 only for a colliding template) is installed and
+      correctly injects enable_thinking=false for this model (chat_template null). A request whose
+      max_tokens is below the reasoning length truncates before the JSON: that is the model's
+      documented contract (seed_profiles.toml [profile.brain] lines 115-120: "emits <think> from
+      weights ... enable_thinking=false does NOT suppress it ... that is the model's contract").
+      regressions utility-qwen-structured-output-zero-facts scopes #2713 to Qwen3/3.5 and says the
+      lfm2.5 default is not affected. Retains through lfm2.5 utility still yield facts (3 facts,
+      extraction_errors_count 0). The candidate's own repro prompt at max_tokens 400 gave stop 7/7.
+      Side finding (enhancement, not a defect): the runner honours per-request
+      "thinking_budget_tokens":0 on LFM2.5 (12-token valid JSON); hal0 does not use that lever and
+      neither profile.utility nor profile.brain sets a thinking budget.
+    still_report_if: >-
+      A model whose chat template reads enable_thinking (Qwen3/Qwen3.5) on utility returns
+      finish_reason=length with empty content on a json_schema request, kwarg absent or false, at
+      max_tokens >= 600 (that is #2713 regressing); OR thinking.py stops injecting
+      enable_thinking=false for grammar requests on a non-colliding template (chat_template null or
+      anything but hal0-brain-sft); OR an lfm2.5-2.6b retain via utility or brain logs "Output too
+      long" / 0 facts at the 4096 RETAIN_MAX_COMPLETION_TOKENS cap on a majority of retains of natural
+      memory-worthy content (beyond anchor variance); OR a profile or model fact starts setting a
+      thinking budget for LFM2.5 and reasoning_content still appears on structured-output requests.
+      Do not re-report small-max_tokens length/empty on lfm2.5.
+    review_at: v1.5.0
+
+  - id: slot-model-id-is-runtime-not-binding
+    status: by-design
+    adjudicated: v1.4.0-nightly.20261016003929
+    summary: >-
+      /api/slots, state.json and the `hal0 slot list` Model column show a model_id (e.g.
+      lfm2.5-2.6b) for an OFFLINE slot whose TOML has no [model] block (agent on a fresh install), or
+      null for a bound slot that never loaded (coder), or gemma3:1b for flm with default "".
+    why: >-
+      `model_id` is what the slot RUNS or LAST RAN; the TOML binding is the separate payload field
+      `model_default` (slot_view/__init__.py:249-270, the #1369 activation signal). The state record
+      keeps model_id across every state change on purpose (manager.py:1337-1339). The #2715 fix
+      chose to keep the stale id on offline slots and added the "no model assigned" metadata.message
+      instead of clearing it (manager.py:2354-2380; pinned by tests/slots/test_unassigned_model_message.py::
+      test_offline_slot_with_stale_model_id_is_not_said_to_be_serving). Loads resolve the model from
+      the TOML (`model_id or _model_default(cfg)`, manager.py:1708), routing matches [model].default
+      (v1.py:473), /v1/models does not advertise the stale id. The payload does not contradict itself
+      (model_default null plus the message state the empty binding), and the steward row
+      `agent | lfm2.5-2.6b | offline` copies it faithfully. Only the CLI Model column labelling is
+      cosmetic. Previously dropped as cosmetic in 20261014214325, 20261015155017, 20261015200136.
+    still_report_if: >-
+      A load, restart, autoload or swap without an explicit model serves the stale model_id instead of
+      [model].default, or starts a model when [model].default is empty and none was given; OR
+      /v1/models, omitted-model dispatch or hal0/<slot> resolution advertises or routes to an offline
+      slot's stale model_id, or skips a bound slot because its model_id is null; OR /api/slots omits
+      model_default for a slot whose TOML has a non-empty [model].default, or reports one that differs
+      from the TOML; OR an offline slot with an empty binding and a non-null model_id has no "no model
+      assigned" message, or says "still serving" (#2715 regressing); OR the brain steward, canary
+      passing, in at least 2 of 3 tries calls an offline slot serving/ready or names a running model
+      that is neither model_id nor model_default; OR the dashboard treats a slot as configured by
+      model_id alone.
+    review_at: v1.5.0
+
+  - id: capability-enable-empty-model-is-staged-unset
+    status: by-design
+    adjudicated: v1.4.0-nightly.20261016003929
+    summary: >-
+      POST /api/capabilities/voice/stt {"model":"","enabled":true} returns 200 ok, status offline,
+      writes /etc/hal0/slots/stt.toml (device cpu, empty [model].default) and loads nothing; a later
+      disable returns 200 and leaves device="cpu" in capabilities.toml and stt.toml in place. (Same on
+      embed/rerank.) Looks like "success while serving nothing" plus a non-restoring disable.
+    why: >-
+      An enabled selection with model="" is the documented "unset" staging state, not a failed apply:
+      orchestrator.py:547-548 skips model validation for it, the off->on branch calls
+      _ensure_slot_exists but loads only `if merged.model:`, and picking a model afterwards takes the
+      hot-swap branch (the dashboard's enable-then-pick flow: EnabledRow and ModelRow are independent
+      and ModelRow offers "— unset —"). Every surface reports it truthfully as offline (apply body,
+      GET /api/capabilities, GET /api/slots/stt, `hal0 capabilities list` "enabled yes, offline").
+      device="cpu" after disable is the #2690 fix resolving the empty STT device to the only legal
+      device and persisting it (tests/capabilities/test_stt_empty_device_resolution.py). Disable has
+      never reverted device or model on any child: it sets enabled=false and unloads. A lane check
+      that capabilities.toml is byte-identical after enable+disable asserts something the product
+      never promised.
+    still_report_if: >-
+      An enabled selection with model="" reports ready/warming/ok or dispatches a load/spawn (a
+      hal0-slot@<slot> start or container launch in the journal); OR the empty-model enable writes a
+      slot TOML whose device the host cannot run (gpu-rocm on a kfd-less box, or any gpu-* for stt:
+      #2690 regressing); OR a later POST naming a downloaded model on that already-enabled selection
+      fails to load or swap it (stays offline with no error); OR on an NPU-advertising box the
+      empty-model STT enable toggles the FLM anchor's asr modality (pending_reload:true) with no model;
+      OR GET /api/capabilities / `hal0 capabilities list` stop showing offline for such a selection. Do
+      not re-report the 200 ok, the model-less stt.toml, or device="cpu" surviving the disable. Side
+      observation, unchecked: an embed/rerank enable rewrites the shipped rerank.toml through the
+      store and drops its comment header.
+    review_at: v1.5.0
+
+  - id: memory-delete-private-withheld-silently
+    status: by-design
+    adjudicated: v1.4.0-nightly.20261016003929
+    related_issue: 2747
+    summary: >-
+      POST /api/memory/delete returns {deleted:0} and the unit stays when called with no
+      X-hal0-Agent header, or another agent's header, on a unit tagged visibility:private + agent:<owner>
+      (e.g. the steward's memory_add output).
+    why: >-
+      Fail-closed ACL (routes/memory.py memory_delete docstring; hindsight_provider.py:1505-1533 and
+      :1611): deletes are gated on the same predicate as reads (_is_visible_to / _is_in_scope), so no
+      caller can remove another agent's private memory by guessing an id, and the silent withhold
+      ({deleted:N} is the whole contract) leaves no existence oracle. Sending the owner's X-hal0-Agent
+      deletes the world/experience unit and its document ({deleted:1}) and the derived observations go
+      too. The dashboard document-delete proxy (memory_admin.py:1052, audited, no ACL) is the other
+      route. The OBSERVATION-id half (owner delete of an observation id returns 0) is NOT by design: it
+      is #2747.
+    still_report_if: >-
+      An owner-identity delete (X-hal0-Agent equal to the unit's agent: tag) of a world/experience unit
+      id or its document id returns {deleted:0}; OR a non-owner or anonymous delete removes a
+      visibility:private unit; OR any doc, UI, CLI or MCP schema tells callers that anonymous REST
+      delete works on agent-private memories; OR the dashboard offers a per-unit delete that routes
+      through /api/memory/delete without the owner header and reports success. Legacy multi-bank mode
+      skips the gate.
+    review_at: v1.5.0
+
+  - id: doctor-runners-healthy-counts-offline
+    status: by-design
+    adjudicated: v1.4.0-nightly.20261016003929
+    summary: >-
+      `hal0 doctor verify` prints `PASS Runners N/N slot(s) healthy` with N = every configured slot
+      (10/10 with 1 ready and 9 offline on ct151; 10/10 with all offline on ct163).
+    why: >-
+      The row counts slots that are configured and not in state=error (health_report.py:187-189,
+      healthy = total - len(errored); the errored list comes from SlotManager.list(), health.py:329-339;
+      doctor_verify.py:14 and health_report.py:162-166 document it as an "errored dots" check). The
+      critical condition is "zero healthy runners" (doctor_verify.py:22, verify.mdx:88, README:652).
+      Slots load lazily and the idle reaper takes them offline after 300 s, and guided setup runs
+      doctor verify while every slot is offline: counting only serving slots would exit 2 on every
+      fresh install and every idle box. The synthetic `hal0` composite and upstream rows are NOT
+      counted. Errored slots still give WARN `N/M healthy - errored: ...`, and a crash loop reaches
+      state=error by itself at ~183 s. The unit-in-systemd-failed gap is #1840 item 6 (known).
+    still_report_if: >-
+      The Runners row is PASS while GET /api/slots shows a real slot with state=error, or
+      /api/health/system .checks.slot_manager.errored is non-empty; OR the total exceeds the number of
+      real configured slots (composite or upstream rows counted); OR a slot's unit sits in systemd
+      `failed` and the slot does NOT reach state=error within ~185 s; OR the detail text claims slots
+      are serving/loaded/ready when they are offline; OR doctor verify exits 0 with Runners PASS when
+      slot_manager reports slots=0. Do not re-report offline, never-loaded or model-less slots counted
+      in "N/N healthy" (a copy tweak, not a defect).
+    review_at: v1.5.0
+
+  - id: slot-view-has-no-device-key
+    status: by-design
+    adjudicated: v1.4.0-nightly.20261016003929
+    summary: >-
+      `curl /api/slots/<n> | jq '{name,device,backend}'` shows `"device": null`, so the slot payload
+      looks like it reports no device.
+    why: >-
+      The payload has no `device` key at all; the null is jq building `{device}` for a missing key. The
+      configured placement is `declared_backend`, a lossless one-to-one normalisation via
+      model_meta.device_to_backend (slot_view/__init__.py:351-356; model_meta/__init__.py:523-553:
+      gpu-vulkan->vulkan, gpu-rocm->rocm, gpu-cuda->cuda, cpu->cpu, npu->flm). The verbatim TOML value is
+      at GET /api/slots/<n>/config `.device`. The UI knows this (ui/src/api/hooks/useSlots.ts:279-335
+      rebuilds `device` from backend) and shows the right device. Key list of the detail payload:
+      autoload, backend, binary, container_health, container_status, ctx_effective, ctx_source,
+      declared_backend, default, id, idle_timeout_s, image, image_pin, image_status, kind,
+      last_used_at, metadata, metrics, model_id, models, n_gpu_layers, name, pinned, port, priority,
+      profile, provider, resolved_command, runtime, state, status, threads, type.
+    still_report_if: >-
+      The slot payload actually contains a `device` key that is null or disagrees with the TOML; OR
+      `declared_backend` is missing for a slot whose TOML sets a non-empty device in {gpu-rocm,
+      gpu-vulkan, gpu-cuda, cpu, npu}; OR declared_backend != device_to_backend(TOML device) (needs a
+      gpu-vulkan/gpu-rocm box; ct163 has only cpu slots); OR /api/slots/<n>/config `.device` differs from
+      the slot TOML; OR the dashboard shows a device different from the TOML. Do not re-report the absence
+      of a `device` key or a `device: null` produced by a jq object filter.
+    review_at: v1.5.0
+
+  - id: ui-agents-card-dot-css-class-tooltip
+    status: by-design
+    adjudicated: v1.4.0-nightly.20261016003929
+    related_issue: 1841
+    summary: >-
+      On the Agents page the StatusDot spans of the Hermes card (4 dots) carry title/aria-label "stale"
+      and the Pi card (4 dots) "soon", the raw CSS class instead of a label.
+    why: >-
+      Real but accepted: #1841 item 2, closed NOT_PLANNED by the operator (same disposition as
+      ui-rail-openwebui-link-unnamed). Not a regression: cards-shell.jsx:84 (`tooltip = titleOverride ||
+      dotCls`) and the four `<StatusDot cls={statusCls} />` call sites in agents/agent-card.jsx
+      (lines 92/167/179/195) are byte-identical from v1.0.0-rc.5 to main; the rc.6/rc.7 "item 2 fixed"
+      scores were probe misreads (rc.7 inspected `.pip`, the dots are `.sdot`). The only user-visible
+      effect is a hover tooltip; the aria-label is not exposed (the span has no role; ariaSnapshot
+      of the cards contains neither word). Visible text is correct (READY / ON THE ROADMAP). Fix is XS:
+      pass title={statusLabel} at the four call sites; an agent already editing agent-card.jsx can fold
+      it in.
+    still_report_if: >-
+      Any StatusDot outside the Agents-page agent cards (slot list, opt-in cards, Overview services
+      widget) shows its raw CSS class as title/aria-label; OR the dot span gains a role (img/status)
+      so the class name reaches the accessibility tree; OR the card's VISIBLE status text (.fc-st)
+      shows a CSS class name or disagrees with the dot class; OR accessibility is declared a release
+      priority. Probe `.sdot`, never `.pip`, and report as known, not regressed.
+    review_at: v1.5.0
+
+  - id: update-installs-only-gpu-perms-unit
+    status: by-design
+    adjudicated: v1.4.0-nightly.20261016003929
+    related_issue: 2386
+    summary: >-
+      After `hal0 update`, installed systemd units (hal0-agent@.service, the hermes override.conf,
+      hindsight-api.service, hal0-bench*, hal0.target) differ from the shipped copies in the new tree, or a
+      1.3.0 box lacks the five #2352 hindsight extraction caps.
+    why: >-
+      `hal0 update` swaps the tree, re-pips the venv, refreshes /usr/lib/hal0/bin wrappers and PATH links,
+      re-renders slot quadlets and reinstalls ONLY hal0-gpu-perms.service (updater.py:3408-3411,
+      refresh_gpu_perms_unit :2980-3065, #1953). Every other installed unit is installer-only. Operator
+      decision 2026-10-08 in #2386 (closed): the per-release CHANGELOG `### Migrations` note tells
+      operators to re-run the installer once after `hal0 update` (1.4.0: CHANGELOG.md:1957-1966, names
+      hindsight-api.service and hal0-api.service; second remedy: save Settings > Memory once). The
+      Open WebUI pin runs through its own repin path (`hal0 update owui`). On ct150 the only drift is
+      comment-only hunks from #2521 (hal0-agent@.service lines 38-47, override.conf 33-42) because
+      install.sh last ran 2026-10-08, after #2352. Comment-only drift is cosmetic. Fresh installs never
+      hit this. Check an exposed box with `systemctl show hindsight-api -p Environment | grep RETAIN`.
+    still_report_if: >-
+      A release changes a NON-COMMENT line of a unit under installer/systemd/ or packaging/systemd/
+      (other than hal0-gpu-perms.service and the Open WebUI pin), the installer is the only way that
+      line reaches a box, and that release's CHANGELOG has no `### Migrations` re-run-the-installer
+      note naming it; OR a box that followed the documented remedy still runs old unit contents; OR
+      hal0-gpu-perms.service is left stale after `hal0 update`; OR `hal0 update` / `hal0 doctor` claims
+      units are up to date while a functional hunk differs.
     review_at: v1.5.0

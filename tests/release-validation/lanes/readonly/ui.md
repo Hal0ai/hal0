@@ -56,7 +56,9 @@ Load the Playwright MCP tools via ToolSearch: `browser_navigate`, `browser_snaps
    missing from `/api/services/health` itself, the gap is the API's, not the footer's, and a
    UI-only fix would not close it (regression `services-health-omits-hindsight`: hindsight is
    never in the health payload under any configuration). An amber "READY" dot on
-   the Hermes card is by design (`known-issues.yaml: ui-agents-card-amber-ready-dot`).
+   the Hermes card is by design (`known-issues.yaml: ui-agents-card-amber-ready-dot`), and the dot's
+   title/aria-label reading the raw class ("stale", "soon") is wontfix #1841 item 2
+   (`ui-agents-card-dot-css-class-tooltip`): probe the `.sdot` spans, not `.pip`, and record `known`.
    And where one screen shows the same quantity twice (the Slots page memory ruler vs the
    Inference Engine card footer's "N GB free"), assert they reconcile — rc.6's footer read the
    entire pool as free beside a ruler showing 6.3 GB (regression
@@ -85,7 +87,9 @@ Close the browser when done.
    warning 'down' while the footer counts 4/4 ready: both must classify 'stopped - starts on
    demand' the same way. (b) Doctor panel cards named like HAL0-API-UNREACHABLE /
    HAL0-RUNNERS-NONE-HEALTHY render with healthy evidence and '14/14 slot(s) healthy' while most
-   slots are offline: healthy counts must exclude offline slots or be labelled. (c) Footer 'N / M
+   slots are offline: this is the documented "configured and not errored" count
+   (`known-issues: doctor-runners-healthy-counts-offline`); report only if a label claims "serving" or an
+   errored slot is counted healthy. (c) Footer 'N / M
    ready' slots denominator changes between pages (3/3, 1/2, 2/7): assert it is stable or labelled.
    Record each as `warn` unless it contradicts a status the user acts on.
 12. **Known, record as `known`:** `svc-openwebui` rail link has no accessible name at 721-1080 px
@@ -99,6 +103,8 @@ Close the browser when done.
 16. **Overview percentages agree.** Settings > Overview "CPU/GPU utilization" within 5 points of the dashboard igpu/cpu tiles read in the same second from `/api/stats/hardware` (#2726: fractions rendered as 0%/1%).
 
 17. **Counts on one screen.** The Slots Inference tab badge equals rendered rows plus the cordoned flm slot, or is labelled; the Overview SLOTS denominator (1/10) and the footer denominator (1 / 1) are equal or labelled. Observation unless two numbers contradict without a label.
+
+18. **Selectors and ground truth.** Nav rail rows and service links are selected by `data-testid` (`nav-*`, `svc-*`), not `id`. The footer has only two aggregate chips (`foot-health-runtimes`, `foot-health-services`), so "diff the chip id set" is the wrong assertion: compare the services N/M with the key count of `/api/services/health`. For the dashboard iGPU tile, read `gpu_busy_percent` from sysfs on the box as ground truth to separate #2726 (fraction rendered as percent) from foreign telemetry. Playwright 1.64 removed `page.accessibility.snapshot()`: use `ariaSnapshot()` / `innerText` / aria attributes.
 
 ## Carry-forward
 

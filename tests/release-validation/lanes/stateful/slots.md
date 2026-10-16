@@ -15,7 +15,11 @@ at the ends. When staging a model for a check this lane has none pre-staged for,
 `ps aux` / `hal0 model list` / `hal0 slot list` for unexpected `zz*`-prefixed resources BEFORE
 creating your own, not just at the entry-snapshot diff — rc.7's contention with a concurrent
 lane first appeared 30+ minutes into the run, well after the initial baseline diff, so re-check
-immediately before you name a new throwaway resource, not only at lane start.
+immediately before you name a new throwaway resource, not only at lane start. Also run
+`hal0 doctor perms` at entry and exit and name any path that differs: in 20261016003929 it said
+"ownership clean" at entry and "path-ownership drift" at exit with no path in the summary line.
+Never background a timed probe on the box with `(cmd &)` or `ssh ... 'cmd &'`: the stray job becomes
+a second actor that mutates slots later (one swapped `zzsl-crash` after the lane ended).
 
 ## Checks
 
@@ -181,7 +185,7 @@ immediately before you name a new throwaway resource, not only at lane start.
 
 19. **State files writable.** `sudo -u hal0 test -w` on `state/components.json` and `registry/ignored-paths.json.lock` BEFORE any hal0-api restart; fail the check if `hal0 doctor perms` says "ownership clean" while they are not writable (#2670, #2698).
 
-20. **`image_status` on profile-less running slots.** For hand-created running LLM slots expect `present`; `not-configured` needs to be documented as intended or reported. Also read the `doctor verify` Capability line ("3 active: embed, img, voice") against reality: img was listed active while offline and model-less (uninvestigated).
+20. **`image_status` on profile-less running slots** (#2750, filed ready-for-human). `hal0 slot create zzimg --type llm --hardware <backend> --model <chat id> --port N` (no `--profile`), load, then `jq '{image_status,image,actual_image,resolved_command}'` on `GET /api/slots/zzimg` and `GET /api/slots/zzimg/pull/status`: `not-configured` / `image:null` / `state:"missing"` beside a populated `actual_image` is #2750, not a new finding (a profiled slot such as `coder` reads `present`). Also read the `doctor verify` Capability line against reality: img was listed active while offline and model-less (uninvestigated).
 
 21. **Pinned-slot unload from the CLI.** `hal0 slot unload utility` returns 409 `slot.pinned`; record whether any CLI option reaches `?force=true` (none in 1.4.0, #2729).
 

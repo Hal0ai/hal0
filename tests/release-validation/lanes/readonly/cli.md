@@ -8,8 +8,8 @@ command group is unfamiliar, run `--help` first and only run the verbs that clea
 1. **Surface walk.** `hal0 --version`, `status`, `system-info`, `ports`, `doctor`,
    `doctor perms`, `slot list|status|show <name>|metrics|capacity|logs <name>`,
    `model list|show <id>|store`, `memory status|bank list|ops list`, `config` (read
-   subcommands), `upstream list`, `capabilities list`, `agent list|status <name>`, `app`
-   (read-only status), `mcp list|status <server>`,
+   subcommands), `upstream list`, `capabilities list`, `agent list|status <name>`, `app list`
+   (the read verb; there is no `app status`), `mcp list|status <server>`,
    `auth status`, `board` (read-only verbs), `bench status|results|history` (`bench list` is not a verb), `profile list|show <name>`,
    `update --check` (checks only — never apply).
 2. **Exit codes, measured properly.** Capture them as `out=$(cmd); rc=$?` — **never through a
@@ -106,6 +106,8 @@ baseline diff, so don't stop checking after the first comparison.
 18. **`doctor verify` capability row against the selections.** `hal0 doctor verify | grep -i 'Capability slots'` vs `curl -s $API/api/capabilities | jq '[.selections[][]|select(.enabled==true)]|length'` (and `GET /api/doctor`, id `HAL0-CAPABILITIES-NONE`). `PASS 3 active: embed, img, voice` while every child is `enabled=false` is #2736; an enabled-but-idle on-demand selection may fairly count. Also compare with the set of slots actually ready and model-bound.
 
 19. **Non-interactive `slot delete`.** On a throwaway slot (`slot create ... -m <registered chat model>`; `-m` is required): `hal0 slot delete <n> </dev/null; echo rc=$?` (expect rc 1 "Aborted." and a hint, today none), `echo y | hal0 slot delete <n>` works, `echo y | hal0 slot delete utility` is refused 409 `slot.pinned`. There is no `--yes`, and `--force` has no help text and a stale seeded-slot docstring (#2740 items 6-7). Leave nothing behind.
+
+21. **`doctor verify` Runners row.** `PASS Runners N/N slot(s) healthy` counts every configured slot not in `state=error` (offline, model-less and never-loaded included; the synthetic `hal0` row is not counted): by design, `known-issues: doctor-runners-healthy-counts-offline`. Compare N with `curl -s $API/api/health/system | jq .checks.slot_manager`. Report only its `still_report_if` (PASS beside an errored slot, composite counted, detail text claiming "serving").
 
 20. **Doctor on a release tree.** `HAL0_PLAIN=1 hal0 doctor </dev/null` ends `passed with N warning(s)` on a healthy box. Count the distinct warnings yourself; node-missing and own-port warnings on a signed release tree (no `ui/package.json`) are #2740 items 1-3, not new findings. Also `hal0 doctor profiles; echo rc=$?` with a non-loading slot TOML present: rc 0 is item 5.
 

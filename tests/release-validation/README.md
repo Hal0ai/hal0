@@ -135,6 +135,43 @@ known-issues, or regressions, and add a line to the changelog below. A report re
 
 ### Kit changelog
 
+* **15** (2026-10-16) — Curation from the v1.4.0-nightly.20261016003929 run (verified findings:
+  4 filed, 1 duplicate of an open issue, 6 refuted or ruled by-design, 1 hint regression).
+  `regressions.yaml` grows by five entries: #2741 (`hal0/utility` and `hal0/brain` resolve to the
+  AGENT's model when the aliased slot is bound but cold, filed before the run and re-found by the
+  post-upgrade lane), #2747 (memory delete of an observation id returns `{deleted:0}`), #2748
+  (`model rm --keep-files` tells the user `model add <path>` restores a file that add refuses once
+  kokoro is stored as .onnx/.bin), #2749 (voice.tts selection seeded with the deprecated provider
+  "llama-server"), #2750 (profile-less llm slot reports image_status not-configured while running;
+  ready-for-human, reverses #2389). Every entry's `last_result` now records this run's outcome (117
+  re-scored), and 43 entries gained a dated note carrying the corrections the probes earned:
+  stale repros (`slot unload brain` evicts the shared brain; `/usr/lib/hal0/venvs/hermes/bin/hermes`
+  does not exist; there is no bank `agents`; `/api/memory/operations/<id>` is 404; `hal0 settings`
+  does not exist; the rollback stub must answer `HEAD /api/status`; `slot_list` has no
+  structuredContent), the `ui-polish-rollup-rc5` item 2 correction (the Agents-card dot title was
+  NEVER fixed; the rc.6/rc.7 "fixed" scores were probes reading `.pip` instead of `.sdot`), seven
+  entries flipped to `promote_ready: true` because their live preconditions no longer exist, and
+  `serialize: true` on #2700 and #2727 (their decisive step restarts hal0-api). `known-issues.yaml`
+  grows by nine: `lfm25-structured-output-pays-think-tokens` (LFM2.5's template has no
+  enable_thinking branch, so #2713 is only scoreable on a Qwen3/3.5 utility), `slot-model-id-is-
+  runtime-not-binding`, `capability-enable-empty-model-is-staged-unset`, `memory-delete-private-
+  withheld-silently`, `doctor-runners-healthy-counts-offline`, `slot-view-has-no-device-key`, `ui-agents-
+  card-dot-css-class-tooltip`, `update-installs-only-gpu-perms-unit`, and a pointer entry for #2741
+  and #2747-#2750; `model-rm-keep-files-recovery-loses-capability` gains a `superseded_note` (its
+  premise, that add accepts the kept file, ended with #2739). 60 entries remain `review_due` (the
+  fixed ones can be deleted once 1.4.0 is stable). Briefs: all 13 changed; they gained the checks agents invented
+  that paid (box-quiet gate and `nohup` for slow brain calls; the seed-provider and `declared_backend`
+  assertions; the exact printed `model add` after `rm --keep-files`; the alias-fallback probe and its
+  non-destructive in-process form; the numeric #2727 assertion from the second restart onward;
+  queue-depth-at-entry preconditions), and lost the checks that were by-design (empty-model STT enable
+  must 4xx, byte-identical TOML after disable, `GET /api/slots/<n> device`) or duplicated
+  (`systemctl --failed` twice in capabilities, duplicate reprovision/first-session perms checks in
+  hermes-e2e, the doubled unit-diff and slot_list-count checks). `boxes.toml` (operator-local) corrects
+  ct150's stale "unconverted / backups 2755 / utility qwen3.5-0.8b" facts and records, for the fourth run
+  running, that ct151 lanes were handed ct163's CONTEXT.md. Why: the same lesson as kit 14, which is
+  that the most expensive findings are the by-design ones re-derived; this release's refuted set (all
+  six) is now banked with its `still_report_if`. Mechanical checks that should become tests are listed in
+  the curation report, not in this kit.
 * **14** (2026-10-15) — Curation from the v1.4.0-nightly.20261015200136 run (verified findings:
   5 new issues filed as #2736-#2740, 12 already-open issues re-observed and commented, the rest
   refuted or ruled by-design). `regressions.yaml`: 5 new entries (doctor capability count false

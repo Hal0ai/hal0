@@ -24,7 +24,7 @@ Also verify each entrypoint verb EXISTS before planning around it (`hal0 agent -
 brief named `hal0 agent smoke <name>`, which does not ship (the re-run verb is `hal0 agent reprovision`) — a missing verb is a recorded finding,
 not something to improvise past.
 
-Then read the provision record's `completed_at` and `smoke_tests.details.failures` BEFORE any
+Record `hal0 agent reprovision hermes` `provision.json` `completed_at` at lane entry: an earlier lane's reprovision overwrites the install-time ground truth (it was already rewritten at 01:45 in 20261016003929). Record the hermes-agent version (dist-info) on every box in one table so the fresh versus update packaging comparison is automatic. Then read the provision record's `completed_at` and `smoke_tests.details.failures` BEFORE any
 live chat: it is install-time ground truth, and it distinguishes "broken out of the box" from
 "broken by lane leave-behind state" for free.
 
@@ -89,7 +89,7 @@ live chat: it is install-time ground truth, and it distinguishes "broken out of 
 10. **Reprovision idempotency of secrets** — regression `hermes-reprovision-rotates-gateway-key`
    (#2667). Record the last 4 chars of `API_SERVER_KEY` in the vault and in the running gateway's
    `/proc/<pid>/environ` before and after `hal0 agent reprovision hermes </dev/null` (it reads
-   stdin). They must be unchanged and the phase outcome `present`. Record the venv Python version
+   stdin). They must be unchanged, the phase outcome `present`, and `gateway_secrets_wire` must not read `ok` when the vault and gateway keys differ (no restart in between). Record the venv Python version
    (`/usr/lib/hal0/venv/bin/python -V`): the rotation needs 3.14+. Restore with `systemctl restart
    hermes-gateway`. Also diff `/var/lib/hal0/.hermes/config.yaml` around the reprovision (it adds
    model_aliases, plugins.enabled, _config_version).
@@ -115,17 +115,15 @@ live chat: it is install-time ground truth, and it distinguishes "broken out of 
 
 16. **Time-to-quiet per turn.** After your hermes turns sample utility `/metrics` requests_processing/deferred and `hal0 memory ops list` every 60 s for 10 min; record retain + consolidation ops per turn (2 retains plus a consolidation here). Also `-o short-iso-precise` journal timestamps per turn to split startup / MCP discovery / dispatch / post-turn memory/add. Makes the "GPU box turn > 120 s" clause measurable and catches #2716.
 
-17. **First-session perms.** `hal0 doctor perms; echo $?` and `stat -c '%U:%G %a' /var/lib/hal0/agents` before and after the first dashboard/agent-chat session call (expect 711, #2719).
+17. **First-session perms.** `hal0 doctor perms; echo $?` and `stat -c '%U:%G %a' /var/lib/hal0/agents` before and after the first dashboard/agent-chat session call (expect 711; `absent`/rc 0 before and `0700` DRIFT rc 1 after is #2719, the chmod runs only when `secret.bin` is first created).
 
 18. **Which store did the memory turn reach?** Assert whether the fact went to the builtin `/var/lib/hal0/.hermes/memories/MEMORY.md` or to Hindsight, and run the recall turn with MEMORY.md moved aside so a correct recall must come from the backend. Restore the file.
 
 19. **Fallback target vs smoke anchor.** Compare the `hal0/agent` fallback dispatch target (`dispatch.decision upstream=`) with the slot named in the provision smoke ("slot brain"); fail when they differ, and compare `hal0/brain` vs `hal0/agent` latency for an 8-token request when utility shares brain's model.
 
-20. **Gateway key after reprovision.** After `hal0 agent reprovision hermes`, assert the vault `API_SERVER_KEY` and the running gateway's key (`/proc/<pid>/environ`) match without a restart, and that `gateway_secrets_wire` is not `ok` when they differ (#2667 on Python 3.14).
+21. **Remember-then-recall timing.** Reply and wall time for a 'remember X' turn then an immediate recall turn with MEMORY.md moved aside, once on a quiet box and once with retains in `processing`; this gives a clean number for the 120 s GPU-box clause and separates `hermes-memory-turn-slow-on-cpu` from #2734. The recall answer must be correct or an explicit "not found", never a fluent wrong value; record whether the retain op was still pending. Assert the turn's queue drains: every `hermes -z` turn must leave an empty non-completed Hindsight ops queue within N minutes (record the retain created-to-updated series, 46-221 s seen) via `GET /api/memory/banks/shared/operations`; the post-turn `/api/memory/add` pair blocked hermes exit ~17 s behind Hindsight work on a shared utility slot.
 
-21. **Remember-then-recall timing.** Reply and wall time for a 'remember X' turn then an immediate recall turn with MEMORY.md moved aside, once on a quiet box and once with retains in `processing`; this gives a clean number for the 120 s GPU-box clause and separates `hermes-memory-turn-slow-on-cpu` from #2734.
-
-22. **`doctor perms` around the first agent session.** `hal0 doctor perms; echo rc=$?` and `stat -c '%U:%G %a' /var/lib/hal0/agents` before and after the first session handshake: `absent`/rc 0 before, `0700` DRIFT rc 1 after is #2719 (the chmod runs only when `secret.bin` is first created).
+Run order inside this lane: the reprovision checks (10) restart the gateway under any concurrent probe, so do them last; check 12's note about `[Truncated:` is read from `state.db`.
 
 ## Leave behind
 
