@@ -275,11 +275,14 @@ def preview_drafter_pairing(
     registry: ModelRegistry | None,
     rows: list[dict[str, Any]],
     drafters: list[_DrafterFile],
-) -> tuple[list[dict], list[dict]]:
-    """``(skipped, paired_drafts)`` for the scan preview; sets ``row["draft"]``.
+) -> tuple[list[dict], list[dict], list[dict]]:
+    """``(skipped, paired_drafts, drafter_rows)`` for the scan preview.
 
     ``rows`` are preview rows (``resolved_path``); ``drafters`` the drafter
-    files the preview walk set aside. No writes.
+    files the preview walk set aside. A drafter fitting a new row also sets
+    that row's ``draft``. ``drafter_rows`` are non-selectable
+    (``role="draft"``) rows carrying ``pairs_with`` (the model row's path, or
+    the registered model's id) or the skipped ``reason``. No writes.
     """
     by_dir: dict[Path, list[_DrafterFile]] = {}
     for d in drafters:
@@ -303,10 +306,38 @@ def preview_drafter_pairing(
     skipped: list[dict] = []
     pairs: list[tuple[str, Path]] = []
     _pair_drafters(cands, by_dir, skipped, registered, pairs)
+    partner: dict[Path, str] = {}
     for row, cand in zip(rows, cands, strict=True):
         if cand.draft is not None:
             row["draft"] = str(cand.draft)
-    return skipped, [{"model_id": mid, "draft": str(p)} for mid, p in pairs]
+            partner.setdefault(cand.draft, row["path"])
+    for mid, p in pairs:
+        partner.setdefault(p, mid)
+    reasons = {item["path"]: item["reason"] for item in skipped}
+    drafter_rows: list[dict] = []
+    for d in sorted(drafters, key=lambda d: str(d.path)):
+        with contextlib.suppress(OSError):
+            size = d.path.stat().st_size
+            drafter_rows.append(
+                {
+                    "path": str(d.path),
+                    "resolved_path": str(d.path),
+                    "size_bytes": size,
+                    "suggested_backends": [],
+                    "suggested_capabilities": [],
+                    "context_length": None,
+                    "confidence": "high" if d.info else "low",
+                    "suggested_name": d.path.stem,
+                    "kind": "drafter",
+                    "role": "draft",
+                    "draft_kind": d.info.kind if d.info else None,
+                    "variant": d.info.variant if d.info else None,
+                    "pairs_with": partner.get(d.path),
+                    "reason": reasons.get(str(d.path)),
+                    "raw_hints": {},
+                }
+            )
+    return skipped, [{"model_id": mid, "draft": str(p)} for mid, p in pairs], drafter_rows
 
 
 def draft_facts(draft: Path) -> tuple[str, dict[str, Any]] | None:

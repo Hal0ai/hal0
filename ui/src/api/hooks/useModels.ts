@@ -126,11 +126,18 @@ export interface ScanPreviewRow {
   suggested_name: string
   kind: string
   raw_hints: Record<string, unknown>
+  // A speculative-decoding drafter is listed but not selectable: role "draft",
+  // the model it pairs with, or why it does not pair (ADR-0031 §4 Scan).
+  role?: 'draft'
+  pairs_with?: string | null
+  reason?: string | null
 }
 
 export interface ScanPreviewResponse {
   preview: ScanPreviewRow[]
   count: number
+  skipped?: { path: string; reason: string }[]
+  paired_drafts?: { model_id: string; draft: string }[]
 }
 
 export interface ScanPreviewRequest {

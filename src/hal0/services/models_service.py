@@ -621,8 +621,9 @@ def preview_scan_rows(
     cache's reblobbed snapshots collapse to one row per distinct model.
 
     Speculative-decoding drafters (ADR-0031 §4 Scan) are not rows: a fitting one
-    sets ``draft`` on its model's row (or lands in ``paired_drafts`` for an
-    already-registered model) and the rest go to ``skipped`` as
+    gets a non-selectable ``role="draft"`` row naming the model it pairs with
+    and sets ``draft`` on that model's row (or lands in ``paired_drafts`` for an
+    already-registered model); unpaired ones also go to ``skipped`` as
     ``{path, reason}``.
     """
     from hal0.registry.discover import (
@@ -718,7 +719,8 @@ def preview_scan_rows(
         by_sig.add(sig)
         unique.append(row)
     if drafters:
-        drafter_skipped, pairs = preview_drafter_pairing(registry, unique, drafters)
+        drafter_skipped, pairs, drafter_rows = preview_drafter_pairing(registry, unique, drafters)
+        unique.extend(drafter_rows)
         if skipped is not None:
             skipped.extend(drafter_skipped)
         if paired_drafts is not None:
@@ -1556,7 +1558,7 @@ async def remove_model_draft(registry: Any, model_id: str) -> dict[str, Any]:
         )
     metadata = {k: v for k, v in model.metadata.items() if k != "draft"}
     registry.update(model_id, {"draft": None, "draft_kind": None, "metadata": metadata})
-    tombstones.add([draft])
+    _tombstone_unless_shared(registry, model_id, draft)
     outcome = delete_model_files_on_disk(
         registry,
         model,
@@ -2452,19 +2454,30 @@ def stamp_draft_fact(
     body["metadata"] = metadata
 
 
-def settle_draft_tombstone(previous: str | None, body: dict[str, Any]) -> None:
+def _tombstone_unless_shared(registry: Any, model_id: str, draft: str) -> None:
+    """Tombstone ``draft`` unless another model still pairs that file."""
+    for other in registry.list():
+        if other.id != model_id and other.draft == draft:
+            return
+    tombstones.add([draft])
+
+
+def settle_draft_tombstone(
+    registry: Any, model_id: str, previous: str | None, body: dict[str, Any]
+) -> None:
     """Keep scan from re-pairing a drafter the operator unpaired on purpose.
 
     Call after :func:`stamp_draft_fact`. A write that clears ``draft`` tombstones
     the drafter it had (ADR-0026's rule for a removed projector); a write that
-    pairs a path lifts any tombstone on that path.
+    pairs a path lifts any tombstone on that path. A drafter another model still
+    pairs is not tombstoned.
     """
     if "draft" not in body:
         return
     if body["draft"]:
         tombstones.clear(body["draft"])
     elif previous:
-        tombstones.add([previous])
+        _tombstone_unless_shared(registry, model_id, previous)
 
 
 def screen_model_write(

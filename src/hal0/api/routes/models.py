@@ -850,7 +850,7 @@ async def update_model(model_id: str, request: Request) -> dict[str, Any]:
     # with the same envelope the launch path raises.
     drafter = _svc.screen_model_write(body, runner_images=_RUNNER_IMAGES, existing=before)
     _svc.stamp_draft_fact(body, drafter, before.get("metadata"))
-    _svc.settle_draft_tombstone(before.get("draft"), body)
+    _svc.settle_draft_tombstone(registry, model_id, before.get("draft"), body)
 
     model = registry.update(model_id, body)
 

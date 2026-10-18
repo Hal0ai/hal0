@@ -16,6 +16,7 @@
 
 import { copyTextToClipboard } from "@/lib/clipboard";
 import { useModels, useModelInspect, useModelDelete, usePullJob, useScanPreview, useAddModelFromPath, fmtBytes, fmtSpeed, fmtEta, pullFileLabel } from '@/api/hooks/useModels'
+import { isDrafterRow, drafterNote } from '@/dash/scan-rows.js'
 import { useSlots } from '@/api/hooks/useSlots'
 import { useSettings } from '@/api/hooks/useSettings'
 import { useChatTemplates } from '@/api/hooks/useChatTemplates'
@@ -733,7 +734,7 @@ function ScanDirectoryModal({ open, onClose }) {
   };
 
   const togglePickAll = () => {
-    const allPickable = rows.filter(r => !knownPaths.has(r.resolved_path) && !knownPaths.has(r.path));
+    const allPickable = rows.filter(r => !isDrafterRow(r) && !knownPaths.has(r.resolved_path) && !knownPaths.has(r.path));
     if (picked.size === allPickable.length) {
       setPicked(new Set());
     } else {
@@ -853,7 +854,7 @@ function ScanDirectoryModal({ open, onClose }) {
                 onChange={togglePickAll}
                 checked={
                   rows.length > 0 &&
-                  picked.size === rows.filter(r => !knownPaths.has(r.resolved_path) && !knownPaths.has(r.path)).length
+                  picked.size === rows.filter(r => !isDrafterRow(r) && !knownPaths.has(r.resolved_path) && !knownPaths.has(r.path)).length
                 }
               />
             </span>
@@ -864,7 +865,8 @@ function ScanDirectoryModal({ open, onClose }) {
           </div>
           <div style={{maxHeight: 320, overflow: "auto"}}>
             {rows.map(r => {
-              const registered = knownPaths.has(r.resolved_path) || knownPaths.has(r.path);
+              const drafter = isDrafterRow(r);
+              const registered = !drafter && (knownPaths.has(r.resolved_path) || knownPaths.has(r.path));
               return (
                 <div
                   key={r.path}
@@ -883,21 +885,25 @@ function ScanDirectoryModal({ open, onClose }) {
                   <span>
                     <input
                       type="checkbox"
-                      disabled={registered}
-                      checked={picked.has(r.path)}
+                      disabled={registered || drafter}
+                      checked={!drafter && picked.has(r.path)}
                       onChange={() => togglePick(r.path)}
                     />
                   </span>
                   <span style={{wordBreak: "break-all", paddingRight: 8}}>
                     {r.path}
                     <div style={{fontSize: 10, color: "var(--fg-5)", marginTop: 2}}>
-                      {r.suggested_name || ""} · {(r.suggested_capabilities || []).join(", ") || "—"}
+                      {drafter
+                        ? drafterNote(r)
+                        : `${r.suggested_name || ""} · ${(r.suggested_capabilities || []).join(", ") || "—"}`}
                     </div>
                   </span>
                   <span style={{textAlign: "right", color: "var(--fg-3)"}}>{fmtBytes(r.size_bytes)}</span>
                   <span style={{color: "var(--fg-3)"}}>{r.kind}</span>
                   <span>
-                    {registered
+                    {drafter
+                      ? <span className="chip">{r.pairs_with ? "drafter" : "not paired"}</span>
+                      : registered
                       ? <span className="chip ok">registered</span>
                       : <span className="chip" style={{color: "var(--accent)", borderColor: "var(--accent-line)", background: "var(--accent-soft)"}}>new</span>}
                   </span>

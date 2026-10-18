@@ -1564,3 +1564,23 @@ def test_unpaired_drafter_is_tombstoned_and_not_repaired(
     # Pairing it again on purpose lifts the tombstone.
     assert crud_client.put("/api/models/tgt", json={"draft": str(draft)}).status_code == 200
     assert registry.get("tgt").draft == str(draft)
+
+
+def test_unpair_does_not_tombstone_a_drafter_another_model_pairs(
+    crud_client: TestClient, crud_models_root: Path
+) -> None:
+    from hal0.registry import tombstones
+
+    _register(crud_client, crud_models_root, "tgt")
+    _register(crud_client, crud_models_root, "tgt2")
+    shared = _drafter_gguf(crud_models_root)
+    for mid in ("tgt", "tgt2"):
+        assert crud_client.put(f"/api/models/{mid}", json={"draft": str(shared)}).status_code == 200
+
+    assert crud_client.put("/api/models/tgt", json={"draft": None}).status_code == 200
+    assert not tombstones.is_tombstoned(shared.resolve(), tombstones.load())
+    assert crud_client.get("/api/models/tgt2").json()["draft"] == str(shared)
+
+    # The last pairing going away does tombstone it.
+    assert crud_client.put("/api/models/tgt2", json={"draft": None}).status_code == 200
+    assert tombstones.is_tombstoned(shared.resolve(), tombstones.load())

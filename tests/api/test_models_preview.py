@@ -195,7 +195,9 @@ def test_preview_lone_drafter_is_skipped_not_a_row(
     client, root = preview_client
     drafter = _write_drafter(root / "lone-dflash.gguf")
     body = client.post("/api/models/scan/preview", json={"paths": [str(root)]}).json()
-    assert body["preview"] == []
+    assert [(r["role"], r["reason"], r["pairs_with"]) for r in body["preview"]] == [
+        ("draft", "drafter_without_target", None)
+    ]
     assert body["skipped"] == [{"path": str(drafter.resolve()), "reason": "drafter_without_target"}]
     assert body["paired_drafts"] == []
 
@@ -207,8 +209,12 @@ def test_preview_pairs_drafter_to_new_model_row(
     target = _write_target(root / "tgt.gguf")
     drafter = _write_drafter(root / "tgt-dflash.gguf")
     body = client.post("/api/models/scan/preview", json={"paths": [str(root)]}).json()
-    assert [r["path"] for r in body["preview"]] == [str(target)]
-    assert body["preview"][0]["draft"] == str(drafter.resolve())
+    rows = {r["path"]: r for r in body["preview"]}
+    assert rows[str(target)]["draft"] == str(drafter.resolve())
+    assert "role" not in rows[str(target)]
+    assert rows[str(drafter.resolve())]["role"] == "draft"
+    assert rows[str(drafter.resolve())]["pairs_with"] == str(target)
+    assert rows[str(drafter.resolve())]["reason"] is None
     assert body["skipped"] == []
 
 
@@ -222,6 +228,8 @@ def test_preview_reports_pairing_to_registered_model(
     body = client.post("/api/models/scan/preview", json={"paths": [str(root)]}).json()
     assert body["paired_drafts"] == [{"model_id": "tgt", "draft": str(drafter.resolve())}]
     assert body["skipped"] == []
+    draft_rows = [r for r in body["preview"] if r.get("role") == "draft"]
+    assert [r["pairs_with"] for r in draft_rows] == [str(target)]
     # Preview never writes.
     assert client.get("/api/models/tgt").json()["draft"] is None
 
