@@ -58,7 +58,7 @@ function buildDeviceMeta(enums) {
 // `NAME_RE` (slug regex) and `toast` are shared globals from primitives.jsx.
 
 // ADR-0029: a stack row is placement + which model + which profile. The tune
-// (MTP, vision, thinking, extra args) lives on the profile, so a row carries
+// (speculation, vision, thinking, extra args) lives on the profile, so a row carries
 // none of it. The row schema (config/schema.py StackSlotEntry, extra=forbid)
 // is slot, profile, model, device, provider and capabilities — nothing else,
 // so a `binary` or any tuning key on a row is a 422.

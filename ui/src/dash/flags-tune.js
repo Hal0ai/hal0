@@ -2,7 +2,7 @@
 //
 // Pure, dependency-free helpers for the profile drawer's flags field. A
 // profile's `flags` text is the freeform llama-server remainder (-fa / -b / -ub
-// / KV-quant / …); context window, thinking, vision, MTP and runner are typed
+// / KV-quant / …); context window, thinking, vision, speculation and runner are typed
 // profile fields, and the model carries file facts only. These helpers
 // tokenize the text and screen out the flags the server rejects with a 400, so
 // the drawer can say so inline before the PUT fires:

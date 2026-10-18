@@ -655,7 +655,7 @@ function ModelDetail({ model, onDelete, onEdit, onPullStarted }) {
   }
   // ADR-0029: a model carries FILE FACTS only — chat template, jinja, whether
   // the file has MTP heads — plus its native context window (read-only, from
-  // metadata). The tune (flags, context, thinking, vision, MTP on/off) lives
+  // metadata). The tune (flags, context, thinking, vision, speculation) lives
   // on a profile.
   const nativeCtx = Number(model.metadata?.context_length) || null;
   const RECIPE_FIELDS = [

@@ -258,8 +258,9 @@ function buildMetaEnums() {
 
 // ── Profiles — mirrors GET /api/profiles (list of ProfileConfig rows) ──
 // ADR-0029 shape: the profile owns the whole tune (flags, ctx_size,
-// enable_thinking, vision, mtp, runner). `device_class`, `backend`, `quant`
-// and the boolean `mtp` are gone. Grounded in config/schema.py SEED_PROFILES +
+// enable_thinking, vision, speculation, runner). `device_class`, `backend`,
+// `quant` and the profile's `mtp` (now `speculation`, ADR-0031) are gone.
+// Grounded in config/schema.py SEED_PROFILES +
 // PROFILE_BENCH, plus one custom profile so the "Custom profiles" section
 // renders in mock mode.
 function buildProfiles() {

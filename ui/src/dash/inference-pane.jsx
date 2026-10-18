@@ -329,7 +329,7 @@ function DevCell({ s, onProfile, profiles, backends, onPickProfile }) {
 // Both are reachable from any component, so Apply performs the write here, one
 // gesture, no half-applied state. The preview announces the consequences that
 // can reach a card pick — the runtime, a lane move, the typed tune fields
-// (context / thinking / vision / mtp) and how many flags differ — and never
+// (context / thinking / vision / speculation) and how many flags differ — and never
 // blocks (§4 warn-never-block).
 //
 // `pending` is `{ s, profile }` or null; null renders nothing.
