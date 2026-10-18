@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted (2026-10-18, #PR). It amends ADR-0029 decisions 1 and 2 (one more file
+Accepted (2026-10-18, #2765). It amends ADR-0029 decisions 1 and 2 (one more file
 fact on the model, one profile tune renamed, one more model-layer flag) and
 supersedes ADR-0025 §5, which planned `CuratedModel.draft_file` and was never
 built. It lands after the runner pin moves to llama.cpp b11716
