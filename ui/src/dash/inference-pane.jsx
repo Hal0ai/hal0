@@ -51,7 +51,7 @@ import { ConversionBlockedChip } from './conversion-blocked-chip.jsx'
 import { slotModelRow } from './slots/slot-shared.js'
 import { useCardReorder } from './slots/card-order.js'
 import { RichSelect } from './rich-select.jsx'
-import { FitChip, ModalityTag } from './fit-chip.jsx'
+import { FitChip, ModalityTag, SlotSpecBolt } from './fit-chip.jsx'
 import { draftTagValue } from './spec-state.js'
 import { feasibilityHint } from './feasibility-copy'
 // devKind — one shared, meta-aware helper (src/lib/deviceMeta.ts); replaces
@@ -622,6 +622,7 @@ function modelPickerOptions({ s, opts, cur, has, allSlots, verdictFor }) {
           {name}
           {quant && <span className="chip amber">{quant}</span>}
           <ModalityTag tag={modTag} draft={draftTagValue(m)} />
+          {m.id === cur && <SlotSpecBolt spec={s.metrics?.spec} model={m} />}
           {fit}
         </span>
       ),

@@ -64,11 +64,19 @@ describe('slotBolt', () => {
     expect(b?.title).toBe('drafting · MTP heads · 50% accepted')
   })
 
-  it('n-gram is a lit bolt', () => {
-    expect(slotBolt(spec({ mode: 'ngram' }), {})).toEqual({
+  it('n-gram is a lit bolt while active', () => {
+    expect(slotBolt(spec({ active: true, mode: 'ngram' }), {})).toEqual({
       state: 'lit',
       title: 'drafting · n-gram',
     })
+  })
+
+  it.each([
+    ['draft', 'drafter paired · not running'],
+    ['mtp', 'MTP heads · not running'],
+    ['ngram', 'n-gram · not running'],
+  ])('mode %s with no live scrape reads not running, not off', (mode, title) => {
+    expect(slotBolt(spec({ mode, active: false }), withDraft)).toEqual({ state: 'off', title })
   })
 
   it('off when a drafter is paired but speculation is off', () => {

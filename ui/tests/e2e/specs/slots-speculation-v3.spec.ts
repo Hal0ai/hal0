@@ -56,4 +56,20 @@ test.describe('Slot drawer speculation line', () => {
     await expect(page.getByTestId('slot-spec-line')).toHaveText(
       'Speculation: LiLiCorr · 78% accepted · 3.4 tok/step')
   })
+
+  test('slot card bolt shows lit / off / warn beside the model name, none without a drafter', async ({ page }) => {
+    await page.goto('/#slots')
+    const bolt = (name: string) =>
+      page.getByTestId(`infer-slot-${name}`).getByTestId('sl-spec-bolt')
+
+    await expect(bolt('lit')).toHaveAttribute('title', 'drafting · LiLiCorr · 78% accepted')
+    await expect(bolt('lit')).not.toHaveClass(/off|warn/)
+    await expect(bolt('off')).toHaveClass(/off/)
+    await expect(bolt('off')).toHaveAttribute('title', 'drafter paired · speculation off')
+    await expect(bolt('warn')).toHaveClass(/warn/)
+    await expect(bolt('warn')).toHaveAttribute(
+      'title', 'drafter unavailable on this runner: needs llama.cpp b11669')
+    await expect(page.getByTestId('infer-slot-plain')).toBeVisible()
+    await expect(bolt('plain')).toHaveCount(0)
+  })
 })

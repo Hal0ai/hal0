@@ -55,7 +55,6 @@ export function slotBolt(spec, model) {
       title: `drafter unavailable on this runner: ${spec.unavailable_reason}`,
     }
   }
-  if (spec.mode === 'ngram') return { state: 'lit', title: 'drafting · n-gram' }
   if (spec.active) {
     const rate = pct(spec.acceptance)
     return {
@@ -63,6 +62,9 @@ export function slotBolt(spec, model) {
       title: `drafting · ${specLabel(spec)}${rate ? ` · ${rate} accepted` : ''}`,
     }
   }
+  // A mode with no live scrape (slot idle/offline) is not "speculation off".
+  const IDLE = { draft: 'drafter paired', mtp: 'MTP heads', ngram: 'n-gram' }
+  if (IDLE[spec.mode]) return { state: 'off', title: `${IDLE[spec.mode]} · not running` }
   if (isDrafterModel(model) || (model && isMtpModel(model))) {
     return { state: 'off', title: 'drafter paired · speculation off' }
   }
