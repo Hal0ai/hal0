@@ -17,6 +17,9 @@
 
 import { useSlots } from '@/api/hooks/useSlots'
 import { useStatsHardware } from '@/api/hooks/useStatsHardware'
+import { useModels } from '@/api/hooks/useModels'
+import { SlotSpecBolt } from './fit-chip.jsx'
+import { slotModelRow } from './slots/slot-shared.js'
 import { slotIndicatorFromPhase } from './slot-status.js'
 // devKind — one shared, meta-aware helper (src/lib/deviceMeta.ts); replaces
 // the copy this file used to carry alongside npu-pane and inference-pane.
@@ -96,7 +99,7 @@ function PinBtn({ name, pinned, onToggle }) {
 }
 
 // ── SlotRow ───────────────────────────────────────────────────────────────────
-function SlotRow({ s, pinned, onTogglePin }) {
+function SlotRow({ s, model, pinned, onTogglePin }) {
   const ind = slotIndicatorFromPhase(s)
   const isServing = ind.cls === 'serving'
   const isDimmed = ind.cls === 'offline' || s.state === 'idle' || s.state === 'stopped'
@@ -132,7 +135,8 @@ function SlotRow({ s, pinned, onTogglePin }) {
 
       {/* col 3: model (minmax 120px, 1fr) */}
       <span className="smodel" title={s.model || ''}>
-        {s.model || '—'}
+        <span className="sl-mname">{s.model || '—'}</span>
+        <SlotSpecBolt spec={s.metrics?.spec} model={model} />
       </span>
 
       <span className="sl-detail-row">
@@ -192,6 +196,7 @@ function SlotRow({ s, pinned, onTogglePin }) {
 export function SlotList({ pinnedSet = new Set(), onTogglePin = () => {} }) {
   const slotsQ  = useSlots()
   const hwQ     = useStatsHardware()
+  const modelsQ = useModels()
 
   const slots   = slotsQ.data || []
   const loading = slotsQ.isLoading
@@ -253,6 +258,7 @@ export function SlotList({ pinnedSet = new Set(), onTogglePin = () => {} }) {
             <SlotRow
               key={s.name}
               s={s}
+              model={slotModelRow(s, modelsQ.data)}
               pinned={pinnedSet.has(s.name)}
               onTogglePin={onTogglePin}
             />

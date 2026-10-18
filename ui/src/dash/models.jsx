@@ -13,6 +13,7 @@ import { ENDPOINTS } from '@/api/endpoints'
 import { useSlots, useSlotSwap } from '@/api/hooks/useSlots'
 import { useMetaEnums } from '@/api/hooks/useMeta'
 import { isUpstreamModel } from '@/lib/normalizeApiModel'
+import { draftVariantLabel, isDrafterModel } from '@/dash/spec-state.js'
 import { MODEL_SORT_FIELDS, sortModels, fmtAdded, isMtpModel, isMoeModel } from '@/dash/model-sort.js'
 
 const { useState: useStateM, useMemo: useMemoM, useEffect: useEffectM } = React;
@@ -26,6 +27,7 @@ const { useState: useStateM, useMemo: useMemoM, useEffect: useEffectM } = React;
 // (never persisted on a registry row — #1649) or the retired `moe` tag.
 const FILTER_CHIPS = [
   { id: "mtp",    label: "MTP",   check: isMtpModel },
+  { id: "drafter", label: "Drafter", check: isDrafterModel },
   { id: "moe",    label: "MOE",   check: isMoeModel },
   { id: "dense",  label: "DENSE", check: m => !isMtpModel(m) && !isMoeModel(m) },
   { id: "embed",  label: "Embed",  check: m => m.type === "embedding" },
@@ -569,6 +571,11 @@ function ModelRow({ model, selected, onSelect, onEditModel, onDeleteModel }) {
         )}
         {model.type && <span className="chip">{model.type}</span>}
         {model.quant && <span className="chip quant" data-testid="mdl-row-quant">{model.quant}</span>}
+        {isDrafterModel(model) && (
+          <span className="chip amber" data-testid="mdl-row-drafter" title={`Paired drafter · ${draftVariantLabel(model.draftVariant)}`}>
+            ⚡ {draftVariantLabel(model.draftVariant)}
+          </span>
+        )}
         {backends.map(b => (
           <span key={b} className={"chip dev-" + b}>{b}</span>
         ))}

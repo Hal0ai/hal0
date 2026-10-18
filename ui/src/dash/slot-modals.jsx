@@ -43,6 +43,7 @@ import { formatProvenanceShort } from "./runner-images.jsx";
 import { runtimeChips, useRunnerPull, ProfileDrawer, ctxLabel } from "./profiles.jsx";
 import { RichSelect } from "./rich-select.jsx";
 import { FitChip, ModalityTag } from "./fit-chip.jsx";
+import { draftTagValue, slotSpecLine } from "./spec-state.js";
 // The profile apply preview + its lane-title table. Pure derivations, so they
 // live in their own module (profile-apply-preview.js) rather than in this view
 // file — the slot CARD's apply confirm asks the same question and must get the
@@ -271,7 +272,7 @@ function modelRichOptions({ compatible, cur, has, slotLong, allSlots, verdictChi
 			row: (
 				<span style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
 					{name}
-					<ModalityTag tag={modTag} />
+					<ModalityTag tag={modTag} draft={draftTagValue(m)} />
 				</span>
 			),
 			// closed trigger: everything inline on one line
@@ -279,7 +280,7 @@ function modelRichOptions({ compatible, cur, has, slotLong, allSlots, verdictChi
 				<span style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
 					{name}
 					{quant && <span className="chip amber">{quant}</span>}
-					<ModalityTag tag={modTag} />
+					<ModalityTag tag={modTag} draft={draftTagValue(m)} />
 					{fit}
 				</span>
 			),
@@ -701,6 +702,7 @@ function EditSlotDrawer({ open, slot, onClose }) {
 	// Resolved command provenance — only fetched while the drawer is open.
 	// Falls back gracefully when null (non-llama slots) or on error.
 	const resolvedQuery = useSlotResolved(slot?.name, { enabled: !!open });
+	const specLine = slotSpecLine(resolvedQuery.data?.speculation, slot?.metrics?.spec);
 
 	// Seed the form AND snapshot the baseline — deliberately the same effect, so
 	// the two can never come from different payloads (which is the #1398 class).
@@ -2441,6 +2443,14 @@ function EditSlotDrawer({ open, slot, onClose }) {
 							    llama-server does not launch (resolved-command.js). */}
 							{resolvedCommandText(resolvedQuery.data, slot)}
 						</div>
+						{specLine && (
+							<div
+								data-testid="slot-spec-line"
+								style={{ marginTop: 6, fontFamily: "var(--jbm)", fontSize: 11, color: "var(--fg-3)" }}
+							>
+								{specLine}
+							</div>
+						)}
 					</div>
 					{/* Provenance legend + per-flag badges — only when the /resolved endpoint
           returns data with at least one provenance entry. Gracefully absent for

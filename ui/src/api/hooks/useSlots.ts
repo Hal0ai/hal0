@@ -727,6 +727,13 @@ export interface SlotResolved {
   provenance: FlagProvenance[]
   /** Number of duplicate flags that were collapsed. */
   removed: number
+  /** What speculation is in effect for this slot's launch (ADR-0031). */
+  speculation?: {
+    mode: string | null
+    kind: string | null
+    variant: string | null
+    unavailable_reason: string | null
+  }
 }
 
 /**

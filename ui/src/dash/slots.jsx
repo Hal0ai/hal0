@@ -34,6 +34,7 @@ import { slotIndicatorFromPhase, slotButtonPhase, isSlotLive, imageStatusChip } 
 import { statusCopyForSlotState } from './status-copy'
 import { prettyProfile } from './profile-names.js'
 import { slotModelRow } from './slots/slot-shared.js'
+import { SlotSpecBolt } from './fit-chip.jsx'
 
 const { useState: useStateS, useRef, useEffect } = React;
 
@@ -475,7 +476,7 @@ function SlotCard({
 }
 
 // ─── SlotCard compact list variant ───
-function SlotListRow({ slot, onEdit }) {
+function SlotListRow({ slot, modelRow, onEdit }) {
   const { type, device, model, state, isDefault, metrics } = slot;
   // Restart + Edit were dead (stopPropagation-only) — wire them to the real
   // restart mutation and the Edit drawer (via the #slots/:name route, the
@@ -524,7 +525,7 @@ function SlotListRow({ slot, onEdit }) {
         {slot.name}
         {isDefault && <span className="chip outlined amber" style={{fontSize: 9, padding: "1px 4px"}}>def</span>}
       </span>
-      <span className="ml">{model}</span>
+      <span className="ml">{slot.model}<SlotSpecBolt spec={metrics.spec} model={modelRow} /></span>
       <span className="ch">
         <span className="chip">{type}</span>
         <span className={"chip dev-" + (device || "cpu").replace("gpu-", "")}>{device}</span>
@@ -968,7 +969,7 @@ function SlotsView({ slotVariant, slotParam, onGo }) {
               <span>metrics</span>
               <span style={{textAlign: "right"}}>actions</span>
             </div>
-            {items.map(s => <SlotListRow key={s.name} slot={s} />)}
+            {items.map(s => <SlotListRow key={s.name} slot={s} modelRow={slotModelRow(s, modelsQuery.data)} />)}
           </div>
         </section>
       );

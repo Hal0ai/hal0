@@ -4,7 +4,7 @@ import { createRoot } from 'react-dom/client'
 import { act } from 'react-dom/test-utils'
 import { describe, expect, it } from 'vitest'
 
-import { FitChip, VisionIcon } from '../fit-chip.jsx'
+import { FitChip, ModalityTag, VisionIcon } from '../fit-chip.jsx'
 
 ;(globalThis as any).IS_REACT_ACT_ENVIRONMENT = true
 
@@ -43,5 +43,22 @@ describe('VisionIcon', () => {
     expect(el.getAttribute('aria-label')).toBe('vision')
     expect(el.querySelector('svg')).not.toBeNull()
     expect(el.textContent).toBe('')
+  })
+})
+
+describe('ModalityTag drafter bolt', () => {
+  it('shows a bolt titled with the variant beside the eye', () => {
+    const host = render(<ModalityTag tag="vision" draft="lilicorr" />)
+    expect(host.querySelector('[title="vision"]')).not.toBeNull()
+    const bolt = host.querySelector('[data-testid="drafter-bolt"]')!
+    expect(bolt.getAttribute('title')).toBe('drafter · lilicorr')
+    expect(bolt.querySelector('svg')).not.toBeNull()
+  })
+  it('shows only the bolt when there is no modality tag', () => {
+    const host = render(<ModalityTag tag={null} draft="eagle3" />)
+    expect(host.querySelector('[data-testid="drafter-bolt"]')).not.toBeNull()
+  })
+  it('renders nothing without tag or draft', () => {
+    expect(render(<ModalityTag tag={null} draft={null} />).innerHTML).toBe('')
   })
 })

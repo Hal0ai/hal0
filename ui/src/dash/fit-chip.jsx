@@ -3,6 +3,7 @@
 // picker (inference-pane.jsx), so the two can never drift. Verdict word lives
 // in the title/aria-label; the chip itself is icon + estimated GB only.
 import React from 'react'
+import { slotBolt } from './spec-state.js'
 
 const svgProps = {
   width: 11,
@@ -56,9 +57,58 @@ export function VisionIcon() {
   )
 }
 
-/** Modality marker: eye for vision, the plain text tag for the rest. */
-export function ModalityTag({ tag }) {
-  if (!tag) return null
-  if (tag === 'vision') return <VisionIcon />
-  return <span className="chip info">{tag}</span>
+/** Bolt glyph for a model with a paired speculative-decoding drafter. */
+export function DrafterBolt({ variant }) {
+  const title = `drafter · ${variant}`
+  return (
+    <span
+      className="chip amber modality-icon"
+      title={title}
+      aria-label={title}
+      role="img"
+      data-testid="drafter-bolt"
+    >
+      <svg {...svgProps}>
+        <path d="M9 1.5L3.5 9H8l-1 5.5L12.5 7H8l1-5.5z" />
+      </svg>
+    </span>
+  )
+}
+
+/**
+ * Modality marker: eye for vision, the plain text tag for the rest, plus a
+ * bolt when the model carries a drafter (`draft` = its variant, from
+ * `draftTagValue`).
+ */
+export function ModalityTag({ tag, draft }) {
+  if (!tag && !draft) return null
+  return (
+    <>
+      {tag === 'vision' ? <VisionIcon /> : tag ? <span className="chip info">{tag}</span> : null}
+      {draft ? <DrafterBolt variant={draft} /> : null}
+    </>
+  )
+}
+
+/**
+ * Slots-row bolt after the model name (ADR-0031 §5): lit while the slot
+ * drafts, grey when a drafter is paired but speculation is off, amber when
+ * the running runner cannot use it. Nothing when the model has no drafter.
+ */
+export function SlotSpecBolt({ spec, model }) {
+  const bolt = slotBolt(spec, model)
+  if (!bolt) return null
+  return (
+    <span
+      className={'sl-bolt' + (bolt.state === 'lit' ? '' : ' ' + bolt.state)}
+      data-testid="sl-spec-bolt"
+      title={bolt.title}
+      aria-label={bolt.title}
+      role="img"
+    >
+      <svg width="10" height="10" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+        <path d="M9 1.5L3.5 9H8l-1 5.5L12.5 7H8l1-5.5z" />
+      </svg>
+    </span>
+  )
 }

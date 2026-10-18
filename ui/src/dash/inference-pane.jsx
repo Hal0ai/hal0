@@ -52,6 +52,7 @@ import { slotModelRow } from './slots/slot-shared.js'
 import { useCardReorder } from './slots/card-order.js'
 import { RichSelect } from './rich-select.jsx'
 import { FitChip, ModalityTag } from './fit-chip.jsx'
+import { draftTagValue } from './spec-state.js'
 import { feasibilityHint } from './feasibility-copy'
 // devKind — one shared, meta-aware helper (src/lib/deviceMeta.ts); replaces
 // the copy this file used to carry (and the verbatim clones in slot-list.jsx
@@ -612,7 +613,7 @@ function modelPickerOptions({ s, opts, cur, has, allSlots, verdictFor }) {
       row: (
         <span style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
           {name}
-          <ModalityTag tag={modTag} />
+          <ModalityTag tag={modTag} draft={draftTagValue(m)} />
         </span>
       ),
       // closed trigger: everything inline on one line
@@ -620,7 +621,7 @@ function modelPickerOptions({ s, opts, cur, has, allSlots, verdictFor }) {
         <span style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
           {name}
           {quant && <span className="chip amber">{quant}</span>}
-          <ModalityTag tag={modTag} />
+          <ModalityTag tag={modTag} draft={draftTagValue(m)} />
           {fit}
         </span>
       ),
