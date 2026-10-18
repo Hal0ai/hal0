@@ -5,7 +5,7 @@ profiles exist" and "what does this one resolve to". ``create`` / ``edit``
 write a custom profile through the same endpoints (and so the same
 ``ProfileCatalog`` + flag/window screens) the dashboard uses. A profile owns
 every tune a slot launches with (ADR-0029): ``--flags``, ``--ctx-size``,
-``--thinking``, ``--vision``, ``--mtp``, ``--runner``. Seed profiles are
+``--thinking``, ``--vision``, ``--speculation``, ``--runner``. Seed profiles are
 read-only: ``create <new> --from <seed>`` duplicates one, then ``edit`` the
 copy and point a slot at it (``hal0 slot edit <slot> --profile <new>``).
 """
@@ -72,7 +72,7 @@ def profile_list(
     table.add_column("Ctx", justify="right")
     table.add_column("Thinking")
     table.add_column("Vision")
-    table.add_column("MTP")
+    table.add_column("Speculation")
     table.add_column("Runner")
     table.add_column("Intent")
     table.add_column("tok/s", justify="right")
@@ -100,7 +100,7 @@ def profile_list(
             f"{p['ctx_size']:,}" if isinstance(p.get("ctx_size"), int) else "native",
             _tri(p.get("enable_thinking")),
             str(p.get("vision") or "auto"),
-            str(p.get("mtp") or "auto"),
+            str(p.get("speculation") or "auto"),
             p.get("runner") or "—",
             p.get("intent") or "—",
             f"{tps:.1f}" if isinstance(tps, (int, float)) else "—",
@@ -139,7 +139,7 @@ def profile_show(
         "ctx_size",
         "enable_thinking",
         "vision",
-        "mtp",
+        "speculation",
         "runner",
         "cloned_from",
         "intent",
@@ -156,6 +156,23 @@ def profile_show(
 
 
 _ONOFF = {"auto", "off"}
+
+
+_SPECULATION_MODES = ("auto", "off", "ngram")
+_MTP_RENAMED = "profile 'mtp' is now 'speculation' (auto | off | ngram)"
+
+
+def _check_speculation(value: str | None) -> str | None:
+    if value is not None and value not in _SPECULATION_MODES:
+        raise typer.BadParameter(f"--speculation must be 'auto', 'off' or 'ngram' (got {value!r})")
+    return value
+
+
+def _refuse_mtp(value: str | None) -> None:
+    """``--mtp`` is gone (ADR-0031 §7): refuse it with the rename, exit 2."""
+    if value is not None:
+        typer.echo(f"Error: {_MTP_RENAMED}", err=True)
+        raise typer.Exit(code=2)
 
 
 def _check_auto_off(option: str, value: str | None) -> str | None:
@@ -195,18 +212,23 @@ def profile_create(
     vision: str | None = typer.Option(
         None, "--vision", help="'auto' loads the model's mmproj when it has one; 'off' never does."
     ),
-    mtp: str | None = typer.Option(
+    speculation: str | None = typer.Option(
         None,
-        "--mtp",
-        help="'auto' drafts with the model's MTP heads when it has them; 'off' never.",
+        "--speculation",
+        help=(
+            "'auto' speculates with the model's drafter or MTP heads when it has "
+            "them; 'ngram' uses n-gram lookup; 'off' never."
+        ),
     ),
+    mtp: str | None = typer.Option(None, "--mtp", hidden=True, help="Removed: use --speculation."),
     runner: str | None = typer.Option(None, "--runner", help="Runner key this profile applies."),
     intent: str | None = typer.Option(None, "--intent", help="Human label for the profile."),
     json_out: bool = typer.Option(False, "--json", help="Emit the created profile as JSON."),
 ) -> None:
     """Create a custom profile (POST /api/profiles); ``--from`` duplicates one first."""
     _check_auto_off("--vision", vision)
-    _check_auto_off("--mtp", mtp)
+    _refuse_mtp(mtp)
+    _check_speculation(speculation)
     url = _api_base()
     if _api_unreachable(url):
         raise typer.Exit(1)
@@ -218,7 +240,15 @@ def profile_create(
         except CliApiError as exc:
             die(str(exc))
             return
-        for key in ("flags", "ctx_size", "enable_thinking", "vision", "mtp", "runner", "intent"):
+        for key in (
+            "flags",
+            "ctx_size",
+            "enable_thinking",
+            "vision",
+            "speculation",
+            "runner",
+            "intent",
+        ):
             if isinstance(source, dict) and source.get(key) is not None:
                 body[key] = source[key]
         body["cloned_from"] = from_profile
@@ -227,7 +257,7 @@ def profile_create(
         ("ctx_size", ctx_size),
         ("enable_thinking", thinking),
         ("vision", vision),
-        ("mtp", mtp),
+        ("speculation", speculation),
         ("runner", runner),
         ("intent", intent),
     ):
@@ -266,7 +296,8 @@ def profile_edit(
         False, "--clear-thinking", help="Unset the reasoning default."
     ),
     vision: str | None = typer.Option(None, "--vision", help="'auto' | 'off'."),
-    mtp: str | None = typer.Option(None, "--mtp", help="'auto' | 'off'."),
+    speculation: str | None = typer.Option(None, "--speculation", help="'auto' | 'off' | 'ngram'."),
+    mtp: str | None = typer.Option(None, "--mtp", hidden=True, help="Removed: use --speculation."),
     runner: str | None = typer.Option(
         None, "--runner", help="Runner key; pass '' to clear (back to the slot's own runner)."
     ),
@@ -275,7 +306,8 @@ def profile_edit(
 ) -> None:
     """Edit a custom profile (PUT /api/profiles/{name}); omitted options keep their value."""
     _check_auto_off("--vision", vision)
-    _check_auto_off("--mtp", mtp)
+    _refuse_mtp(mtp)
+    _check_speculation(speculation)
     if ctx_size is not None and clear_ctx_size:
         raise typer.BadParameter("--ctx-size and --clear-ctx-size are mutually exclusive")
     if thinking is not None and clear_thinking:
@@ -294,8 +326,8 @@ def profile_edit(
         payload["enable_thinking"] = None
     if vision is not None:
         payload["vision"] = vision
-    if mtp is not None:
-        payload["mtp"] = mtp
+    if speculation is not None:
+        payload["speculation"] = speculation
     if runner is not None:
         payload["runner"] = runner
     if intent is not None:
@@ -304,7 +336,7 @@ def profile_edit(
         console.print(
             "[bold yellow]No fields provided.[/bold yellow]  Pass at least one of --flags, "
             "--ctx-size/--clear-ctx-size, --thinking/--no-thinking/--clear-thinking, "
-            "--vision, --mtp, --runner, --intent."
+            "--vision, --speculation, --runner, --intent."
         )
         raise typer.Exit(code=2)
 

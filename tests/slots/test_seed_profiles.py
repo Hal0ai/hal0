@@ -121,7 +121,7 @@ def test_seed_validates_as_profile_config(name: str) -> None:
 
     cfg = ProfileConfig.model_validate(_load()[name])
     assert cfg.vision in ("auto", "off")
-    assert cfg.mtp in ("auto", "off")
+    assert cfg.speculation in ("auto", "off", "ngram")
 
 
 @pytest.mark.parametrize("name", SEED_PROFILE_NAMES)

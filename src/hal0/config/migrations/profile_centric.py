@@ -101,8 +101,9 @@ STATE_FILE = "profile-centric.json"
 PROFILE_DROP_KEYS: tuple[str, ...] = ("mtp", "device_class", "backend", "quant", "image")
 #: Keys only an old-shape profile carries (as does a boolean ``mtp``).
 OLD_PROFILE_KEYS: tuple[str, ...] = ("device_class", "backend", "quant", "image")
-#: Keys only a new-shape profile carries (as does a string ``mtp``).
-NEW_PROFILE_KEYS: tuple[str, ...] = ("ctx_size", "enable_thinking", "vision")
+#: Keys only a new-shape profile carries (as does a string ``mtp``, the 1.4.x
+#: spelling of ``speculation``; ADR-0031 §7).
+NEW_PROFILE_KEYS: tuple[str, ...] = ("ctx_size", "enable_thinking", "vision", "speculation")
 #: Stack-row keys that leave every row (inert today: stack apply never used them).
 STACK_ROW_TUNING_KEYS: tuple[str, ...] = ("vision", "mtp", "enable_thinking", "server_extra_args")
 #: Runner key a converted profile names for a non-llama engine.
@@ -505,7 +506,9 @@ def new_launch(
     )
     from hal0.config.schema import MTP_DRAFT_BUNDLE, mtp_draft_device
 
-    profile_layer = (shlex.split(MTP_DRAFT_BUNDLE) if mtp else []) + flags
+    profile_layer = (
+        ["--spec-type", "draft-mtp", *shlex.split(MTP_DRAFT_BUNDLE)] if mtp else []
+    ) + flags
 
     slot_layer: list[str] = []
     if slot.get("n_gpu_layers") is not None:
@@ -806,7 +809,7 @@ def profile_shape(entry: Mapping[str, Any]) -> tuple[ProfileShape, list[str]]:
     ``old``: it carries a key only the old shape has (a boolean ``mtp``,
     ``device_class``, ``backend``, ``quant``, ``image``) or flags the new
     shape does not accept. ``new``: it carries a key only the new shape has
-    (``ctx_size``, ``enable_thinking``, ``vision``, a string ``mtp``).
+    (``ctx_size``, ``enable_thinking``, ``vision``, ``speculation``, a string ``mtp``).
     ``either``: only the keys both shapes share, with flags already in the
     new form, so converting it changes nothing. ``mixed``: old and new keys
     together, which blocks. The list names the keys that decided it.

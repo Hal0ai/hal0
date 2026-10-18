@@ -84,10 +84,10 @@ def test_brain_clamps_to_the_hermes_floor_on_a_tiny_box(
     assert clone.cloned_from == "brain"
     assert clone.intent == "Installer: brain clamped to 64000 for this box"
     # Everything else is the seed's tune, verbatim.
-    assert (clone.flags, clone.vision, clone.mtp, clone.enable_thinking, clone.runner) == (
+    assert (clone.flags, clone.vision, clone.speculation, clone.enable_thinking, clone.runner) == (
         seed.flags,
         seed.vision,
-        seed.mtp,
+        seed.speculation,
         seed.enable_thinking,
         seed.runner,
     )

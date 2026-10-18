@@ -114,7 +114,7 @@ def test_mtp_bundle_present_for_tagged_model_on_rocm():
 
 
 def test_profile_mtp_off_never_drafts():
-    scalars = _resolve_llama_scalars(_ROCM_SLOT, _mtp_tagged_model(), _profile(mtp="off"))
+    scalars = _resolve_llama_scalars(_ROCM_SLOT, _mtp_tagged_model(), _profile(speculation="off"))
     assert scalars["mtp"] is False
     assert scalars["draft_device"] is None
 

@@ -12,6 +12,7 @@ import pytest
 
 from hal0.config.migrations.profile_centric_apply import ConversionReport
 from hal0.config.migrations.runner_system import RunnerMigrationReport
+from hal0.config.migrations.speculation_rename import RenameReport
 from hal0.errors import Hal0Error
 from hal0.updater.updater import check_outstanding_migrations, run_post_activation_migrations
 
@@ -76,6 +77,10 @@ def _stub_every_pass(monkeypatch: pytest.MonkeyPatch) -> dict[str, list[Any]]:
     monkeypatch.setattr(
         "hal0.config.migrations.profile_centric_apply.migrate_profile_centric", _profile_centric
     )
+    monkeypatch.setattr(
+        "hal0.config.migrations.speculation_rename.convert",
+        lambda path, *, dry_run: RenameReport(),
+    )
     monkeypatch.setattr("hal0.updater.updater._maybe_run_config_migrations", _config_migrations)
     monkeypatch.setattr("hal0.registry.toml_retirement.retire_registry_toml", _registry_toml)
     monkeypatch.setattr("hal0.updater.updater.relabel_stale_vulkan_slots", _vulkan_migration)
@@ -109,8 +114,19 @@ def test_runner_conversion_runs_before_schema_and_registry_retirement(
         "hal0.registry.toml_retirement.retire_registry_toml",
         lambda *, job_id=None: order.append("registry_toml") or {"outcome": "absent"},
     )
+    monkeypatch.setattr(
+        "hal0.config.migrations.speculation_rename.convert",
+        lambda path, *, dry_run: order.append("speculation_rename") or RenameReport(),
+    )
     run_post_activation_migrations(job_id="j0")
-    assert order == ["runner_system", "profile_centric", "schema", "registry_toml"]
+    # ADR-0031 §7: the mtp -> speculation rename follows the profile-centric conversion.
+    assert order == [
+        "runner_system",
+        "profile_centric",
+        "speculation_rename",
+        "schema",
+        "registry_toml",
+    ]
 
 
 @pytest.mark.parametrize(

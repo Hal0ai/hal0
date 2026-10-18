@@ -4,7 +4,7 @@ Every slot with ``profile`` set (or ``runtime="container"``) dispatches
 through this provider — the sole slot-lifecycle backend.
 
 Architecture (design doc §2):
-  - Profile supplies:    image + bench-tuned flags (+ MTP bundle if mtp=true).
+  - Profile supplies:    image + bench-tuned flags (+ MTP bundle if speculation drafts).
   - Slot supplies:       model path, context_size, port.
   - Container provides:  the running llama-server process.
 
@@ -413,11 +413,11 @@ def _effective_mtp(
 ) -> bool:
     """Whether the launch drafts with MTP (ADR-0029).
 
-    The profile decides (``mtp = "auto"`` / ``"off"``); ``auto`` drafts when the
-    model has MTP heads and the launching runner supports drafting, outside
-    embedding/reranking mode.
+    The profile decides (``speculation = "auto"`` / ``"off"`` / ``"ngram"``);
+    ``auto`` drafts when the model has MTP heads and the launching runner
+    supports drafting, outside embedding/reranking mode. ``ngram`` is not MTP.
     """
-    if str(getattr(profile, "mtp", "auto") or "auto") == "off" or embed_mode:
+    if str(getattr(profile, "speculation", "auto") or "auto") != "auto" or embed_mode:
         return False
     if not model_has_mtp_heads(model_info):
         if log_ineligible:
@@ -1075,7 +1075,9 @@ def _llama_argv_segments(
     if mmproj:
         model += ["--mmproj", mmproj]
 
-    profile: list[str] = shlex.split(MTP_DRAFT_BUNDLE) if mtp else []
+    # The bundle no longer carries ``--spec-type`` (ADR-0031: a model fact); until
+    # the model layer emits it, the MTP launch spells it here.
+    profile: list[str] = ["--spec-type", "draft-mtp", *shlex.split(MTP_DRAFT_BUNDLE)] if mtp else []
     profile += _profile_flag_tokens(profile_flags)
 
     slot: list[str] = []

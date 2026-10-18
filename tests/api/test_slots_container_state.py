@@ -235,7 +235,7 @@ def test_container_slot_has_runtime_profile_image_fields(
 
     fake_profile = ProfileConfig(
         flags="--flash-attn on",
-        mtp="off",
+        speculation="off",
     )
     fake_catalog = MagicMock(profile={"vulkan-radv": fake_profile})
     with (
@@ -283,7 +283,7 @@ def test_container_slot_has_runtime_profile_image_fields(
 def _resolved_command_with_profile_flags(client: TestClient, flags: str) -> Any:
     from hal0.config.schema import ProfileConfig
 
-    fake_catalog = MagicMock(profile={"vulkan-radv": ProfileConfig(flags=flags, mtp="off")})
+    fake_catalog = MagicMock(profile={"vulkan-radv": ProfileConfig(flags=flags, speculation="off")})
     with (
         patch(
             "hal0.providers.container.ContainerProvider.is_active",
@@ -373,7 +373,7 @@ def _fake_vulkan_catalog() -> MagicMock:
     """Fake profiles catalog whose 'vulkan-radv' profile declares _VULKAN_IMG."""
     from hal0.config.schema import ProfileConfig
 
-    prof = ProfileConfig(flags="--flash-attn on", mtp="off")
+    prof = ProfileConfig(flags="--flash-attn on", speculation="off")
     return MagicMock(profile={"vulkan-radv": prof})
 
 

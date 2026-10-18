@@ -34,7 +34,7 @@ def _profile() -> ProfileConfig:
         ctx_size=65536,
         enable_thinking=True,
         vision="off",
-        mtp="off",
+        speculation="off",
         cloned_from="chat",
         intent="My workload",
     )
@@ -70,7 +70,7 @@ class TestRoundTrip:
         assert imported.ctx_size == original.ctx_size == 65536
         assert imported.enable_thinking is True
         assert imported.vision == "off"
-        assert imported.mtp == "off"
+        assert imported.speculation == "off"
         assert imported.cloned_from == original.cloned_from
         assert imported.intent == original.intent
 
@@ -105,7 +105,7 @@ class TestExportEnvelope:
         assert body["ctx_size"] == 65536
         assert body["enable_thinking"] is True
         assert body["vision"] == "off"
-        assert body["mtp"] == "off"
+        assert body["speculation"] == "off"
         assert body["cloned_from"] == "chat"
 
     def test_body_carries_none_of_the_retired_fields(self, tmp_hal0_home: str) -> None:
@@ -122,7 +122,7 @@ class TestExportEnvelope:
         assert "enable_thinking" not in body
         assert "cloned_from" not in body
         assert body["vision"] == "auto"
-        assert body["mtp"] == "auto"
+        assert body["speculation"] == "auto"
 
 
 # ── checksum ─────────────────────────────────────────────────────────────────
@@ -437,7 +437,7 @@ class TestPublishedAddonRoundTrip:
                 ctx_size=r.ctx_size,
                 enable_thinking=r.enable_thinking,
                 vision=r.vision,  # type: ignore[arg-type]
-                mtp=r.mtp,  # type: ignore[arg-type]
+                speculation=r.speculation,  # type: ignore[arg-type]
                 runner=r.runner,
                 cloned_from=r.cloned_from,
                 intent=r.intent,

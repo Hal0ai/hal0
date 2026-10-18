@@ -65,7 +65,7 @@ class TestListProfiles:
         by_name = {item["name"]: item for item in client.get("/api/profiles").json()}
         for name in ("chat", "cpu-chat", "embedding", "reranking"):
             assert by_name[name]["seed"] is True
-            assert by_name[name]["mtp"] == "auto"
+            assert by_name[name]["speculation"] == "auto"
             assert by_name[name]["vision"] == "auto"
 
     def test_flm_seed_carries_its_real_window(self, client: TestClient) -> None:
@@ -78,7 +78,7 @@ class TestListProfiles:
     def test_kokoro_cpu_seed_present(self, client: TestClient) -> None:
         data = client.get("/api/profiles").json()
         kokoro = next(item for item in data if item["name"] == "kokoro")
-        assert kokoro["mtp"] == "auto"
+        assert kokoro["speculation"] == "auto"
         # The provider supplies --model_path from the store (#2739).
         assert "--model_path" not in kokoro["flags"]
 
@@ -108,7 +108,7 @@ class TestListProfiles:
                 "ctx_size",
                 "enable_thinking",
                 "vision",
-                "mtp",
+                "speculation",
                 "runner",
                 "seed",
                 "runtime_family",
@@ -126,7 +126,7 @@ class TestListProfiles:
         for item in data:
             assert not {"device_class", "backend", "quant", "image"} & set(item), item["name"]
             assert item["vision"] in {"auto", "off"}
-            assert item["mtp"] in {"auto", "off"}
+            assert item["speculation"] in {"auto", "off", "ngram"}
 
     def test_seed_flag_true_for_seeds(self, client: TestClient) -> None:
         """Phase C6: the UI keys immutability off the serialized seed flag."""
@@ -138,7 +138,7 @@ class TestListProfiles:
         """The profile list never MTP-expands: resolved_flags is just flags.
 
         The MTP draft bundle is composed at launch from the model + runner
-        (the profile's ``mtp`` switch only says whether it may be)."""
+        (the profile's ``speculation`` switch only says whether it may be)."""
         data = client.get("/api/profiles").json()
         for item in data:
             assert item["resolved_flags"] == item["flags"], item["name"]
@@ -151,7 +151,7 @@ class TestListProfiles:
         profiles_path = Path(tmp_hal0_home) / "etc" / "hal0" / "profiles.toml"
         profiles_path.parent.mkdir(parents=True, exist_ok=True)
         profiles_path.write_text(
-            '[profile.custom-only]\nflags = "-b 128"\nctx_size = 12288\nmtp = "off"\n',
+            '[profile.custom-only]\nflags = "-b 128"\nctx_size = 12288\nspeculation = "off"\n',
             encoding="utf-8",
         )
         app = create_app()
@@ -165,7 +165,7 @@ class TestListProfiles:
         custom = next(item for item in data if item["name"] == "custom-only")
         assert custom["seed"] is False
         assert custom["ctx_size"] == 12288
-        assert custom["mtp"] == "off"
+        assert custom["speculation"] == "off"
 
 
 # ── profiles overhaul: enriched card fields ─────────────────────────────────────
@@ -189,14 +189,14 @@ class TestEnrichedFields:
             "ctx_size": 24576,
             "enable_thinking": True,
             "vision": "off",
-            "mtp": "off",
+            "speculation": "off",
         }
         created = client.post("/api/profiles", json=body).json()
         assert created["intent"] == "My workload"
         assert created["ctx_size"] == 24576
         assert created["enable_thinking"] is True
         assert created["vision"] == "off"
-        assert created["mtp"] == "off"
+        assert created["speculation"] == "off"
         assert created["tps"] is None
         listed = {p["name"]: p for p in client.get("/api/profiles").json()}
         assert listed["my-tuned"]["intent"] == "My workload"

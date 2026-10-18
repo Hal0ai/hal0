@@ -26,16 +26,16 @@ from hal0.config.schema import (
 
 class TestProfileConfigValidation:
     def test_valid_profile(self) -> None:
-        p = ProfileConfig(flags="-fa on", mtp="off", ctx_size=16384, vision="off")
+        p = ProfileConfig(flags="-fa on", speculation="off", ctx_size=16384, vision="off")
         assert p.flags == "-fa on"
-        assert p.mtp == "off"
+        assert p.speculation == "off"
         assert p.ctx_size == 16384
         assert p.vision == "off"
 
     def test_defaults(self) -> None:
         p = ProfileConfig()
         assert p.flags == ""
-        assert p.mtp == "auto"
+        assert p.speculation == "auto"
         assert p.vision == "auto"
         assert p.ctx_size is None
         assert p.enable_thinking is None
@@ -82,7 +82,7 @@ class TestProfilesConfig:
 
     def test_parse_from_dict(self) -> None:
         cfg = ProfilesConfig.model_validate(
-            {"profile": {"test": {"flags": "-fa on", "mtp": "off", "ctx_size": 8192}}}
+            {"profile": {"test": {"flags": "-fa on", "speculation": "off", "ctx_size": 8192}}}
         )
         assert cfg.profile["test"].flags == "-fa on"
         assert cfg.profile["test"].ctx_size == 8192
@@ -102,8 +102,9 @@ class TestProfilesConfig:
 class TestMtpDraftBundle:
     def test_bundle_carries_the_draft_tuning(self) -> None:
         tokens = shlex.split(MTP_DRAFT_BUNDLE)
+        # --spec-type is a model fact now (ADR-0031): the bundle never carries it.
+        assert "--spec-type" not in tokens
         for flag, value in (
-            ("--spec-type", "draft-mtp"),
             ("--spec-draft-ngl", "all"),
             ("--spec-draft-n-max", "4"),
             ("--spec-draft-type-k", "q8_0"),
@@ -148,7 +149,7 @@ class TestLoadProfilesConfig:
         """No seed turns MTP off: ``auto`` drafts when the model has heads and
         the runner supports it."""
         cfg = load_profiles_config(path=tmp_path / "nonexistent.toml")
-        assert {name: cfg.profile[name].mtp for name in SEED_PROFILES} == dict.fromkeys(
+        assert {name: cfg.profile[name].speculation for name in SEED_PROFILES} == dict.fromkeys(
             SEED_PROFILES, "auto"
         )
 
@@ -333,7 +334,7 @@ class TestLoadProfilesConfig:
         p = tmp_path / "profiles.toml"
         cfg = load_profiles_config(path=p)
         cfg.profile["mine"] = ProfileConfig(
-            flags="-fa auto", ctx_size=32768, enable_thinking=False, vision="off", mtp="off"
+            flags="-fa auto", ctx_size=32768, enable_thinking=False, vision="off", speculation="off"
         )
         save_profiles_config(cfg, path=p)
 

@@ -112,7 +112,7 @@ def test_argv_builder_emits_exactly_the_four_layers_in_order() -> None:
         "/models/qwen-mmproj.gguf",
     ]
     # The MTP bundle first, then the profile's own flags.
-    bundle = shlex.split(MTP_DRAFT_BUNDLE)
+    bundle = ["--spec-type", "draft-mtp", *shlex.split(MTP_DRAFT_BUNDLE)]
     assert by_label["profile"][: len(bundle)] == bundle
     assert by_label["profile"][len(bundle) :] == [
         "-fa",
@@ -165,6 +165,8 @@ def test_agent_seed_on_a_vulkan_slot_golden_argv() -> None:
         "--ctx-size",
         "65536",
         "--jinja",
+        "--spec-type",
+        "draft-mtp",
         *shlex.split(MTP_DRAFT_BUNDLE),
         *shlex.split(str(SEED_PROFILES["agent"]["flags"])),
         "-ngl",
@@ -189,7 +191,7 @@ def test_the_draft_device_follows_the_slots_device(device: str, draft_device: st
 
 def test_a_runner_without_mtp_support_never_drafts() -> None:
     """The CUDA runner has no MTP support: a model with heads under an
-    ``mtp = "auto"`` profile launches without the bundle or a draft device."""
+    ``speculation = "auto"`` profile launches without the bundle or a draft device."""
     argv = resolve_argv(_launch(_slot("agent", device="gpu-cuda"), _model(), _seed("agent"))).argv
     assert "--spec-type" not in argv
     assert "--spec-draft-device" not in argv
@@ -200,7 +202,7 @@ def test_the_profile_is_read_live_so_one_model_runs_two_tunes() -> None:
     onto the model, so neither slot's tune leaks into the other."""
     model = _model()
     fast = _custom("fast", flags="-fa auto -ctk q8_0 -ctv q8_0", ctx_size=16384)
-    long = _custom("long", flags="-fa auto -b 4096", ctx_size=131072, mtp="off")
+    long = _custom("long", flags="-fa auto -b 4096", ctx_size=131072, speculation="off")
 
     fast_argv = resolve_argv(_launch(_slot("fast"), model, fast)).argv
     long_argv = resolve_argv(_launch(_slot("long"), model, long)).argv
@@ -208,8 +210,8 @@ def test_the_profile_is_read_live_so_one_model_runs_two_tunes() -> None:
     assert fast_argv[fast_argv.index("--ctx-size") + 1] == "16384"
     assert long_argv[long_argv.index("--ctx-size") + 1] == "131072"
     assert "-ctk" in fast_argv and "-ctk" not in long_argv
-    assert "--spec-type" in fast_argv  # model heads + mtp auto
-    assert "--spec-type" not in long_argv  # the profile's mtp = "off"
+    assert "--spec-type" in fast_argv  # model heads + speculation auto
+    assert "--spec-type" not in long_argv  # the profile's speculation = "off"
     assert "--spec-draft-device" not in long_argv
     assert "--mmproj" in fast_argv and "--mmproj" in long_argv  # vision auto
 

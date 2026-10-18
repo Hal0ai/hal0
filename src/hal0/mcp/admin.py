@@ -1532,7 +1532,7 @@ TOOL_PARAM_HINTS: dict[str, dict[str, Any]] = {
                 "type": ["boolean", "null"],
                 "description": (
                     "File fact: true = the file has MTP draft heads (null = the 'mtp' tag "
-                    "decides). Whether a slot drafts is its profile's mtp."
+                    "decides). Whether a slot drafts is its profile's speculation."
                 ),
             },
             "jinja": {
@@ -1570,12 +1570,13 @@ TOOL_PARAM_HINTS: dict[str, dict[str, Any]] = {
                 "enum": ["auto", "off"],
                 "description": "'auto' loads the model's mmproj when it has one; 'off' never does.",
             },
-            "mtp": {
+            "speculation": {
                 "type": "string",
-                "enum": ["auto", "off"],
+                "enum": ["auto", "off", "ngram"],
                 "description": (
-                    "'auto' drafts with the model's MTP heads when it has them and the "
-                    "runner supports it; 'off' never does."
+                    "'auto' speculates with the model's paired drafter or MTP heads when "
+                    "it has them and the runner supports it; 'ngram' uses n-gram lookup; "
+                    "'off' never speculates."
                 ),
             },
             "runner": {
@@ -1622,12 +1623,13 @@ TOOL_PARAM_HINTS: dict[str, dict[str, Any]] = {
                 "enum": ["auto", "off"],
                 "description": "'auto' loads the model's mmproj when it has one; 'off' never does.",
             },
-            "mtp": {
+            "speculation": {
                 "type": "string",
-                "enum": ["auto", "off"],
+                "enum": ["auto", "off", "ngram"],
                 "description": (
-                    "'auto' drafts with the model's MTP heads when it has them and the "
-                    "runner supports it; 'off' never does."
+                    "'auto' speculates with the model's paired drafter or MTP heads when "
+                    "it has them and the runner supports it; 'ngram' uses n-gram lookup; "
+                    "'off' never speculates."
                 ),
             },
             "runner": {
@@ -2846,7 +2848,7 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
     "stack_list": "List every stack, with the active stack + drift status.",
     "stack_status": "Get one stack's detail, active flag, and drift status.",
     "profile_list": "List every profile in the catalog (seed + custom).",
-    "profile_status": "Get one profile's resolved detail (flags, ctx_size, thinking, vision, mtp, runner, used-by).",
+    "profile_status": "Get one profile's resolved detail (flags, ctx_size, thinking, vision, speculation, runner, used-by).",
     "profile_export": (
         "Export a profile to a portable .hal0profile.json envelope (no secrets/host-paths)."
     ),
@@ -3012,7 +3014,7 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
     "stack_delete": "Delete a custom stack from the catalog (gated).",
     "profile_create": (
         "Create a custom profile — the tune a slot launches a model with: flags, ctx_size, "
-        "enable_thinking, vision (auto|off), mtp (auto|off), optional runner — e.g. "
+        "enable_thinking, vision (auto|off), speculation (auto|off|ngram), optional runner — e.g. "
         "authored from a model card's requirements (gated)."
     ),
     "profile_update": (
@@ -3089,7 +3091,7 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
     "mcp_client_list": "List MCP clients seen in the recent audit window.",
     "mcp_catalog": "The static installable-MCP-servers catalog.",
     "profile_generate": (
-        "Generate a draft profile (flags, ctx_size, enable_thinking, vision, mtp, runner) from "
+        "Generate a draft profile (flags, ctx_size, enable_thinking, vision, speculation, runner) from "
         "a registered model or a HuggingFace repo — compute-only, persists nothing. Args: exactly one of model_id / hf_repo (required), "
         "optional name, optional use_llm=true to summarize the model card via the platform "
         "utility LLM (degrades to heuristics on failure). Returns {profile, warnings, sources} "

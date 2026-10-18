@@ -24,7 +24,7 @@ def _stub_reachable(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_list_json_emits_raw_response(monkeypatch: pytest.MonkeyPatch) -> None:
-    payload = [{"name": "agent", "ctx_size": 65536, "vision": "auto", "mtp": "auto"}]
+    payload = [{"name": "agent", "ctx_size": 65536, "vision": "auto", "speculation": "auto"}]
     _stub_reachable(monkeypatch)
     monkeypatch.setattr(profile_commands, "api_get", lambda _p, **_k: payload)
 
@@ -40,7 +40,7 @@ def test_list_renders_table_with_names(monkeypatch: pytest.MonkeyPatch) -> None:
             "ctx_size": 65536,
             "enable_thinking": True,
             "vision": "auto",
-            "mtp": "off",
+            "speculation": "off",
             "runner": None,
             "intent": "Long-context agent",
             "tps": 52.8,
@@ -51,7 +51,7 @@ def test_list_renders_table_with_names(monkeypatch: pytest.MonkeyPatch) -> None:
             "ctx_size": None,
             "enable_thinking": None,
             "vision": "off",
-            "mtp": "auto",
+            "speculation": "auto",
             "runner": "vulkan",
             "intent": None,
             "tps": None,
@@ -75,7 +75,13 @@ def test_list_renders_table_with_names(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_list_renders_a_quarantined_row_with_its_error(monkeypatch: pytest.MonkeyPatch) -> None:
     payload = [
-        {"name": "agent", "ctx_size": 65536, "vision": "auto", "mtp": "auto", "used_by": []},
+        {
+            "name": "agent",
+            "ctx_size": 65536,
+            "vision": "auto",
+            "speculation": "auto",
+            "used_by": [],
+        },
         {
             "name": "broken",
             "quarantined": True,
@@ -121,7 +127,7 @@ def test_show_renders_fields(monkeypatch: pytest.MonkeyPatch) -> None:
         "ctx_size": 65536,
         "enable_thinking": None,
         "vision": "auto",
-        "mtp": "off",
+        "speculation": "off",
         "runner": None,
         "intent": "Long-context agent",
         "tps": 52.8,
@@ -177,7 +183,7 @@ def api(monkeypatch: pytest.MonkeyPatch) -> _Api:
                 "ctx_size": 65536,
                 "enable_thinking": True,
                 "vision": "auto",
-                "mtp": "auto",
+                "speculation": "auto",
                 "runner": None,
                 "intent": "Long-context agent",
             },
@@ -202,7 +208,7 @@ def test_create_sets_ctx_size(api: _Api) -> None:
             "--flags",
             "-b 512",
             "--no-thinking",
-            "--mtp",
+            "--speculation",
             "off",
         ],
     )
@@ -215,7 +221,7 @@ def test_create_sets_ctx_size(api: _Api) -> None:
                 "flags": "-b 512",
                 "ctx_size": 8192,
                 "enable_thinking": False,
-                "mtp": "off",
+                "speculation": "off",
             },
         )
     ]
@@ -306,3 +312,23 @@ def test_edit_surfaces_an_api_refusal(api: _Api, monkeypatch: pytest.MonkeyPatch
     result = runner.invoke(profile_commands.app, ["edit", "mine", "--flags", "-ngl 99"])
     assert result.exit_code == 1
     assert "slot.hardware_flag_denied" in result.output
+
+
+def test_create_accepts_speculation_ngram(api: _Api) -> None:
+    result = runner.invoke(profile_commands.app, ["create", "ng", "--speculation", "ngram"])
+    assert result.exit_code == 0, result.output
+    assert api.posts[0][1]["speculation"] == "ngram"
+
+
+def test_edit_sends_speculation(api: _Api) -> None:
+    result = runner.invoke(profile_commands.app, ["edit", "mine", "--speculation", "off"])
+    assert result.exit_code == 0, result.output
+    assert api.puts[0][1] == {"speculation": "off"}
+
+
+@pytest.mark.parametrize("verb", ["create", "edit"])
+def test_mtp_flag_exits_2_with_the_rename_message(api: _Api, verb: str) -> None:
+    result = runner.invoke(profile_commands.app, [verb, "mine", "--mtp", "off"])
+    assert result.exit_code == 2, result.output
+    assert "profile 'mtp' is now 'speculation' (auto | off | ngram)" in result.output
+    assert api.posts == [] and api.puts == []

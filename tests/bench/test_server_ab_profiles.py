@@ -36,7 +36,7 @@ class FakeApi:
                 "ctx_size": 65536,
                 "enable_thinking": True,
                 "vision": "off",
-                "mtp": "auto",
+                "speculation": "auto",
                 "runner": None,
             },
             "chat": {
@@ -45,7 +45,7 @@ class FakeApi:
                 "ctx_size": None,
                 "enable_thinking": None,
                 "vision": "auto",
-                "mtp": "auto",
+                "speculation": "auto",
                 "runner": None,
             },
         }
@@ -168,7 +168,7 @@ def test_ab_clones_the_slot_profile_per_arm_and_unwinds(api: FakeApi) -> None:
     # The arm's flags come AFTER the originals so last-wins lets them override.
     assert second["flags"] == "-fa on -ctk q8_0 -ub 256 -b 1024"
     assert second["ctx_size"] == 8192
-    assert second["mtp"] == "off"
+    assert second["speculation"] == "off"
 
     assert results["base"]["extra_args"] == "-fa on -ctk q8_0"
     assert results["ub"]["ctx_size"] == 8192 and results["ub"]["mtp"] == "off"
@@ -193,8 +193,8 @@ def test_run_wide_ctx_and_mtp_apply_to_every_arm_and_a_variant_overrides(api: Fa
     server_ab.mode_ab(_args(variant=["a:", "b;ctx=4096:"], ctx_size=16384, mtp="off"))
 
     a, b = api.posted_profiles()
-    assert (a["ctx_size"], a["mtp"]) == (16384, "off")
-    assert (b["ctx_size"], b["mtp"]) == (4096, "off")
+    assert (a["ctx_size"], a["speculation"]) == (16384, "off")
+    assert (b["ctx_size"], b["speculation"]) == (4096, "off")
 
 
 def test_ab_unwinds_when_a_measurement_fails(api: FakeApi, monkeypatch: pytest.MonkeyPatch) -> None:

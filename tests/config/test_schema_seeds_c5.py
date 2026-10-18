@@ -186,3 +186,42 @@ def test_brain_seed_defers_its_model_to_the_installer() -> None:
         )
         assert curated.hf_repo == expected_repo
         assert curated.hf_file.endswith(".gguf")
+
+
+# ── speculation (ADR-0031 §3) ──────────────────────────────────────────────────
+
+
+def test_profile_speculation_defaults_auto_and_refuses_mtp() -> None:
+    from pydantic import ValidationError
+
+    from hal0.config.schema import ProfileConfig
+
+    assert ProfileConfig().speculation == "auto"
+    assert ProfileConfig(speculation="ngram").speculation == "ngram"
+    with pytest.raises(ValidationError):
+        ProfileConfig.model_validate({"mtp": "off"})
+    with pytest.raises(ValidationError):
+        ProfileConfig.model_validate({"speculation": "dflash"})
+
+
+def test_slot_tuning_keys_refuse_both_mtp_and_speculation() -> None:
+    from hal0.config.schema import SLOT_TUNING_TOP_KEYS
+
+    assert {"mtp", "speculation"} <= set(SLOT_TUNING_TOP_KEYS)
+
+
+def test_draft_bundles_per_kind() -> None:
+    from hal0.config.schema import DRAFT_BUNDLE, MTP_DRAFT_BUNDLE, NGRAM_BUNDLE
+
+    assert set(DRAFT_BUNDLE) == {"dflash", "eagle3", "simple", "mtp"}
+    assert DRAFT_BUNDLE["mtp"] == MTP_DRAFT_BUNDLE
+    assert "--spec-type" not in MTP_DRAFT_BUNDLE
+    assert "--spec-draft-threads 16" in MTP_DRAFT_BUNDLE
+    assert DRAFT_BUNDLE["dflash"].startswith("--spec-draft-ngl all --spec-draft-n-max {n_max}")
+    assert DRAFT_BUNDLE["eagle3"].startswith("--spec-draft-ngl all --spec-draft-n-max 4")
+    assert "--spec-draft-p-min 0.75" in DRAFT_BUNDLE["simple"]
+    for kind in ("dflash", "eagle3", "simple"):
+        assert "--spec-draft-type-k q8_0 --spec-draft-type-v q8_0" in DRAFT_BUNDLE[kind]
+    assert NGRAM_BUNDLE == (
+        "--spec-type ngram-mod --spec-ngram-size-n 24 --spec-ngram-size-m 48 --spec-ngram-n-max 64"
+    )

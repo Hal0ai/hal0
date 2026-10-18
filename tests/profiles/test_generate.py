@@ -137,7 +137,7 @@ def test_generate_from_model_id_chat_gpu_clones_chat_seed(
     # the model row, and the retired hint fields never reach the draft.
     assert not {"quant", "device_class", "backend"} & set(body)
     assert body["vision"] == "auto"
-    assert body["mtp"] == "auto"
+    assert body["speculation"] == "auto"
     assert "Qwen3 4B" in body["intent"]
     assert "registry:qwen3-4b-q4_k_m" in result.sources
     assert result.warnings == ()

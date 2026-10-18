@@ -117,7 +117,7 @@ them: path and file set, size, quantization, architecture, the native
 context window, the chat template (`auto` means the template embedded in the
 GGUF), the multimodal projector (`mmproj`), whether the file has MTP heads,
 and whether its chat template works with `--jinja`. Every tune — flags,
-context window, thinking default, vision on or off, MTP on or off — belongs
+context window, thinking default, vision on or off, speculation — belongs
 to a **profile**, and a slot names the profile it runs. To run one model at
 two context sizes, or with different sampling, make two profiles and point
 each slot at its own; see [Capabilities &
@@ -220,8 +220,8 @@ drawer's ledger is a tri-state: an explicit On or Off wins in either
 direction over the registry's legacy `mtp` tag, and leaving it at Auto falls
 back to that tag when present. There is no filename-based MTP sniff — an
 uncurated pull with neither the tag nor an explicit fact has no heads as far
-as hal0 knows. Whether a slot *uses* the heads is the profile's `mtp`
-(`auto` or `off`). The Models list's MTP filter **chip** is a plain OR of the
+as hal0 knows. Whether a slot *uses* the heads is the profile's `speculation`
+(`auto`, `off` or `ngram`). The Models list's MTP filter **chip** is a plain OR of the
 explicit fact being On and the legacy tag (`ui/src/dash/model-sort.js`), so a
 model tagged `mtp` still shows the chip even when its fact is explicitly Off.
 

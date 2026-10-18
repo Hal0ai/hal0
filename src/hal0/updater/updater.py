@@ -1961,6 +1961,22 @@ def run_post_activation_migrations(
     from hal0.config.migrations.profile_centric_apply import migrate_profile_centric
 
     profiles = migrate_profile_centric(job_id=job_id, honour_restore_marker=honour_restore_marker)
+    # The ``mtp`` -> ``speculation`` profile rename (ADR-0031 §7) runs right
+    # after, on the converted profiles. It writes a ``.bak-<stamp>`` copy beside
+    # ``profiles.toml`` and is idempotent; it stands down after a restore like
+    # the conversion before it.
+    from hal0.config.migrations import speculation_rename
+    from hal0.config.migrations.profile_centric_apply import restore_marker
+
+    if not (honour_restore_marker and restore_marker().exists()):
+        renamed = speculation_rename.convert(paths.profiles_toml(), dry_run=False)
+        if renamed.backup is not None:
+            log.info(
+                "updater.speculation_rename",
+                job_id=job_id,
+                profiles=renamed.changed,
+                backup=str(renamed.backup),
+            )
     if rerender_after_runner_conversion and (conversion.backup or profiles.backup):
         try:
             rerender_slot_units(job_id=job_id)

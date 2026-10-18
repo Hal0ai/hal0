@@ -87,8 +87,9 @@ INDEX_SCHEMA_VERSION = 1
 
 #: The oldest release that can install a row from this index.
 #:
-#: Profile envelope schema 2 (ctx_size / enable_thinking / vision / mtp
-#: "auto"|"off", ADR-0029) is read from 1.5.0; schema-1 envelopes are refused
+#: Profile envelope schema 2 (ctx_size / enable_thinking / vision / speculation
+#: "auto"|"off"|"ngram", ADR-0029,
+#: renamed from `mtp` by ADR-0031) is read from 1.5.0; schema-1 envelopes are refused
 #: there. The floor is a property of the CONTRACT, not of today's rows.
 MIN_HAL0_VERSION = "1.5.0"
 

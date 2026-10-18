@@ -419,7 +419,7 @@ class _ProfileArms:
             # Appended after the originals: last-wins dedup lets the arm override.
             "flags": f"{base_flags} {extra_flags}".strip(),
             "vision": self.base.get("vision") or "auto",
-            "mtp": mtp or self.base.get("mtp") or "auto",
+            "speculation": mtp or self.base.get("speculation") or "auto",
             "cloned_from": self.base.get("name") or None,
             "intent": _arm_intent(self.slot_name),
         }
@@ -556,7 +556,7 @@ def mode_ab(args: argparse.Namespace) -> dict:
             results[label] = {
                 "extra_args": arm["flags"],
                 "ctx_size": arm.get("ctx_size"),
-                "mtp": arm["mtp"],
+                "mtp": arm["speculation"],
                 "runs": runs,
                 "median": _summarize_runs(runs),
             }

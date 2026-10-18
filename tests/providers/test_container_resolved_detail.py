@@ -22,7 +22,7 @@ from hal0.providers.container import (
 
 def _profile() -> ProfileConfig:
     # A within-profile duplicate -b still dedups last-wins.
-    return ProfileConfig(flags="-b 512 -b 8192", ctx_size=4096, mtp="off")
+    return ProfileConfig(flags="-b 512 -b 8192", ctx_size=4096, speculation="off")
 
 
 def test_detail_dedups_and_attributes_provenance() -> None:

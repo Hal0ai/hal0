@@ -598,7 +598,7 @@ def slot_create(
         None,
         "--profile",
         help=(
-            "Profile (the tune: flags, context window, reasoning, vision, MTP). "
+            "Profile (the tune: flags, context window, reasoning, vision, speculation). "
             "The context window is a profile setting — see `hal0 profile create "
             "--ctx-size`. Default: inferred from "
             "--type/--hardware — embedding → embedding (--embedding), "

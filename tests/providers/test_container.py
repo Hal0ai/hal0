@@ -129,14 +129,14 @@ def _exec_line(unit_text: str) -> str:
 def _moe_profile() -> ProfileConfig:
     return ProfileConfig(
         flags="-fa on -ctk q8_0 -ctv q8_0 -b 512 -ub 512 --parallel 1 --no-mmap",
-        mtp="off",
+        speculation="off",
     )
 
 
 def _mtp_profile() -> ProfileConfig:
     return ProfileConfig(
         flags="-fa on -ctk q8_0 -ctv q8_0 -b 512 -ub 512 --parallel 1 --no-mmap",
-        mtp="auto",
+        speculation="auto",
     )
 
 
@@ -167,7 +167,8 @@ def _model_info(**overrides: Any) -> dict[str, Any]:
 
 class TestMtpDraftBundle:
     def test_bundle_constant_is_the_draft_mtp_tune_without_a_device(self) -> None:
-        assert "--spec-type draft-mtp" in MTP_DRAFT_BUNDLE
+        assert "--spec-type" not in MTP_DRAFT_BUNDLE  # a model fact (ADR-0031)
+        assert "--spec-draft-ngl all" in MTP_DRAFT_BUNDLE
         # The draft device is placement: the slot layer derives it.
         assert "--spec-draft-device" not in MTP_DRAFT_BUNDLE
 
@@ -207,7 +208,8 @@ class TestMtpDraftBundle:
             )
         )
         profile = segs["profile"]
-        assert profile[: len(shlex.split(MTP_DRAFT_BUNDLE))] == shlex.split(MTP_DRAFT_BUNDLE)
+        bundle = ["--spec-type", "draft-mtp", *shlex.split(MTP_DRAFT_BUNDLE)]
+        assert profile[: len(bundle)] == bundle
         assert profile[-2:] == ["-fa", "on"]
         assert segs["slot"][-2:] == ["--spec-draft-device", "Vulkan0"]
 
@@ -1351,7 +1353,7 @@ class TestGpuPassthroughGate:
         from types import SimpleNamespace
 
         return SimpleNamespace(
-            flags="-fa on", ctx_size=None, vision="auto", mtp="auto", runner=None, **hints
+            flags="-fa on", ctx_size=None, vision="auto", speculation="auto", runner=None, **hints
         )
 
     def _spec(self, cfg: dict[str, Any], profile: Any):
@@ -1801,7 +1803,7 @@ class TestFamilyDefaults:
         # the backend lacks the kernel.
         assert "-fa auto" in vseed["flags"]
 
-        profile = ProfileConfig(flags=vseed["flags"], mtp="off")
+        profile = ProfileConfig(flags=vseed["flags"], speculation="off")
         cfg = {"profile": "chat", "port": 8096, "model": {"default": "qwen3-27b"}}
         with patch("hal0.providers.container._resolve_profile", return_value=profile):
             argv = resolved_command_for_slot(cfg, model_path="/mnt/ai-models/qwen3-27b.gguf")

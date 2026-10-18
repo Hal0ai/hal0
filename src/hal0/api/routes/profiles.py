@@ -30,7 +30,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 from hal0.api._audit import record_action
 from hal0.config.schema import CTX_SIZE_MAX, CTX_SIZE_MIN, ProfileConfig
-from hal0.errors import BadRequest
+from hal0.errors import BadRequest, UnprocessableEntity
 from hal0.profiles import (
     UNSET,
     ProfileCatalog,
@@ -59,8 +59,21 @@ _PROFILE_NAME_RE = r"^[a-z0-9][a-z0-9_-]{0,31}$"
 # ── request models ────────────────────────────────────────────────────────────
 
 
+def _refuse_renamed_mtp(data: Any) -> Any:
+    """ADR-0031 §7: ``mtp`` left the profile; there is no alias, only this 422."""
+    if isinstance(data, dict) and "mtp" in data:
+        raise UnprocessableEntity(
+            "profile 'mtp' is now 'speculation' (auto | off | ngram)",
+            code="profiles.field_renamed",
+            details={"field": "mtp", "renamed_to": "speculation"},
+        )
+    return data
+
+
 class ProfileBody(BaseModel):
     """Body for POST /api/profiles (ADR-0029: a profile is a complete tune)."""
+
+    _refuse_mtp = model_validator(mode="before")(_refuse_renamed_mtp)
 
     name: str = Field(
         ...,
@@ -87,8 +100,12 @@ class ProfileBody(BaseModel):
     vision: Literal["auto", "off"] = Field(
         default="auto", description="'auto' loads the model's mmproj when it has one."
     )
-    mtp: Literal["auto", "off"] = Field(
-        default="auto", description="'auto' drafts with the model's MTP heads when it has them."
+    speculation: Literal["auto", "off", "ngram"] = Field(
+        default="auto",
+        description=(
+            "'auto' speculates with the model's drafter or MTP heads when it has "
+            "them; 'ngram' uses n-gram lookup; 'off' never speculates."
+        ),
     )
     runner: str | None = Field(
         default=None,
@@ -151,6 +168,8 @@ class ProfileUpdateBody(BaseModel):
     stored value (omitted ≠ null, told apart through ``model_fields_set``).
     """
 
+    _refuse_mtp = model_validator(mode="before")(_refuse_renamed_mtp)
+
     flags: str | None = Field(default=None, description="Free llama-server CLI flags.")
     ctx_size: int | None = Field(
         default=None,
@@ -166,8 +185,8 @@ class ProfileUpdateBody(BaseModel):
     vision: Literal["auto", "off"] | None = Field(
         default=None, description="'auto' | 'off'. Omit to leave alone."
     )
-    mtp: Literal["auto", "off"] | None = Field(
-        default=None, description="'auto' | 'off'. Omit to leave alone."
+    speculation: Literal["auto", "off", "ngram"] | None = Field(
+        default=None, description="'auto' | 'off' | 'ngram'. Omit to leave alone."
     )
     runner: str | None = Field(
         default=None,
@@ -209,7 +228,7 @@ def list_profiles() -> list[dict[str, Any]]:
             "ctx_size":             65536,       # int | null (null = model native, capped)
             "enable_thinking":      null,        # bool | null
             "vision":               "auto",      # auto | off
-            "mtp":                  "auto",      # auto | off
+            "speculation":          "auto",      # auto | off | ngram
             "runner":               null,        # RUNNER_IMAGES key | null
             "seed":                 true,
             "runtime_family":       "llama-server",
@@ -254,7 +273,8 @@ async def create_profile(body: ProfileBody, request: Request) -> dict[str, Any]:
 
     Raises:
         409 profiles.exists: name already exists (seed or custom).
-        422: pydantic validation failure (bad name, vision/mtp not auto|off, …).
+        422: pydantic validation failure (bad name, vision not auto|off, speculation not auto|off|ngram, a retired
+            ``mtp`` key (``profiles.field_renamed``), …).
         400 profiles.ctx_size_out_of_range: ctx_size outside 128..16777216.
         400 slot.hardware_flag_denied: flags carry a slot-owned hardware flag.
         400 slot.managed_arg_denied: flags carry a hal0-managed flag.
@@ -272,7 +292,7 @@ async def create_profile(body: ProfileBody, request: Request) -> dict[str, Any]:
                 ctx_size=body.ctx_size,
                 enable_thinking=body.enable_thinking,
                 vision=body.vision,
-                mtp=body.mtp,
+                speculation=body.speculation,
                 runner=body.runner,
                 cloned_from=body.cloned_from,
                 intent=body.intent,
@@ -283,7 +303,7 @@ async def create_profile(body: ProfileBody, request: Request) -> dict[str, Any]:
             "ctx_size": body.ctx_size,
             "enable_thinking": body.enable_thinking,
             "vision": body.vision,
-            "mtp": body.mtp,
+            "speculation": body.speculation,
         }
     return profile.to_dict()
 
@@ -515,7 +535,7 @@ def export_profile(name: str) -> dict[str, Any]:
         ctx_size=resolved.ctx_size,
         enable_thinking=resolved.enable_thinking,
         vision=resolved.vision,  # type: ignore[arg-type]  # ResolvedProfile carries the validated literal
-        mtp=resolved.mtp,  # type: ignore[arg-type]
+        speculation=resolved.speculation,  # type: ignore[arg-type]
         # The envelope is the import preview's only source of runtime truth,
         # so the export has to actually carry `runner` — it was omitted here
         # while every other ProfileConfig field was copied across.
@@ -541,7 +561,8 @@ async def update_profile(name: str, body: ProfileUpdateBody, request: Request) -
     Raises:
         409 profiles.seed_immutable: name is a seed profile.
         404 profiles.not_found: custom profile not found.
-        422: pydantic validation failure (vision/mtp not auto|off).
+        422: pydantic validation failure (vision not auto|off, speculation not auto|off|ngram, a retired
+            ``mtp`` key: ``profiles.field_renamed``).
         400 profiles.ctx_size_out_of_range: ctx_size outside 128..16777216.
         422 profiles.unknown_runner: `runner` CHANGES to a key this box's
             registry does not carry. Re-sending the profile's own stored key is
@@ -576,7 +597,7 @@ async def update_profile(name: str, body: ProfileUpdateBody, request: Request) -
                 ctx_size=ctx_size,
                 enable_thinking=enable_thinking,
                 vision=body.vision,
-                mtp=body.mtp,
+                speculation=body.speculation,
                 runner=body.runner,
                 intent=body.intent,
             ),

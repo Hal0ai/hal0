@@ -124,7 +124,7 @@ A launch is described by three objects. A **model** row holds facts about its
 file: path, architecture, native context window, chat template, multimodal
 projector, and whether the file has MTP heads. A **profile** holds every tune:
 free llama-server flags, `ctx_size`, `enable_thinking`, `vision` (`auto` or
-`off`) and `mtp` (`auto` or `off`). A **slot** holds placement (`device`,
+`off`) and `speculation` (`auto`, `off` or `ngram`). A **slot** holds placement (`device`,
 `gpu_index`, `n_gpu_layers`, `threads`, `binary`, `image_pin`) and names its
 model and its profile. See
 [Slots](/docs/concepts/slots#who-owns-what-slot-model-profile) for how the
@@ -132,7 +132,7 @@ launch command is assembled from the three.
 
 A slot write that carries a tuning key is refused with
 `slot.tuning_key_denied`: `[model].context_size` / `ctx_size`, `parallel`,
-`chat_template`, `workers`, `mtp`, `enable_thinking`, `vision`, or
+`chat_template`, `workers`, `mtp`, `speculation`, `enable_thinking`, `vision`, or
 `[server].extra_args`. Set the window and flags with `hal0 profile
 create|edit` and point the slot at that profile. A slot file that still
 carries one of those keys fails to load with `slot.unconverted`; `hal0 update`

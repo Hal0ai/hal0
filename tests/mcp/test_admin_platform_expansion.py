@@ -525,13 +525,14 @@ def test_model_edit_hint_documents_the_top_level_file_facts() -> None:
 
 @pytest.mark.parametrize("tool", ["profile_create", "profile_update"])
 def test_profile_write_hints_carry_the_profile_tune(tool: str) -> None:
-    """The profile owns every tune: ctx_size, thinking, vision/mtp (auto|off)
+    """The profile owns every tune: ctx_size, thinking, vision (auto|off), speculation (auto|off|ngram)
     and the runner — and no longer device_class / backend / quant / image."""
     props = admin.tool_param_schema(tool)["properties"]
-    for field in ("flags", "ctx_size", "enable_thinking", "vision", "mtp", "runner"):
+    for field in ("flags", "ctx_size", "enable_thinking", "vision", "speculation", "runner"):
         assert field in props, field
     assert props["vision"]["enum"] == ["auto", "off"]
-    assert props["mtp"]["enum"] == ["auto", "off"]
+    assert props["speculation"]["enum"] == ["auto", "off", "ngram"]
+    assert "mtp" not in props
     for gone in ("device_class", "backend", "quant", "image"):
         assert gone not in props, gone
     desc = admin.TOOL_DESCRIPTIONS[tool]
@@ -546,7 +547,7 @@ def test_profile_create_requires_a_name() -> None:
 
 def test_profile_generate_description_names_the_new_fields() -> None:
     desc = admin.TOOL_DESCRIPTIONS["profile_generate"]
-    for field in ("ctx_size", "enable_thinking", "vision", "mtp"):
+    for field in ("ctx_size", "enable_thinking", "vision", "speculation"):
         assert field in desc
 
 

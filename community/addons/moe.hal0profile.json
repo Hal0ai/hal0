@@ -1,5 +1,5 @@
 {
-  "checksum": "sha256:7ac4f0f09c20e7f5febd4210732d3f67fc3ef2f81e3993611d9a5ac48863663c",
+  "checksum": "sha256:93c3d70c98b480b7c6bcbbd76211a0519a428ef6f67adafeadfbff6db84134dd",
   "exported_at": "2026-09-01T00:00:00Z",
   "hal0_version": "1.4.0",
   "kind": "hal0.profile",
@@ -8,7 +8,7 @@
     "ctx_size": 32768,
     "flags": "-fa auto -b 2048 -ub 512 --reasoning off --reasoning-budget -1 --no-context-shift --temp 0 --top-p 0.95 --top-k 20 --seed 123",
     "intent": "Generic MoE workload · tuned for 32K ctx",
-    "mtp": "auto",
+    "speculation": "auto",
     "vision": "off"
   },
   "schema_version": 2

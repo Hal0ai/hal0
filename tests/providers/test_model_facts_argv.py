@@ -115,7 +115,7 @@ def test_top_level_facts_launch_the_pre_adr_argv(name: str, tmp_path: Path) -> N
         "n_gpu_layers": 99,
         "model": {"default": stored.id},
     }
-    profile = ProfileConfig(flags="-fa on --parallel 1", mtp="auto", ctx_size=32768)
+    profile = ProfileConfig(flags="-fa on --parallel 1", speculation="auto", ctx_size=32768)
     with patch("hal0.providers.container._resolve_profile", return_value=profile):
         plan = ContainerProvider().container_spec(cfg, model_info)
 

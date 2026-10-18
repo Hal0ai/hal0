@@ -36,7 +36,7 @@ def _render_from_plan(token, plan, *, runtime_bin=None, publish_host="127.0.0.1"
 
 
 def _gpu_profile(**overrides: Any) -> ProfileConfig:
-    base: dict[str, Any] = dict(flags="-fa on -ctk q8_0 -b 512 --parallel 1", mtp="off")
+    base: dict[str, Any] = dict(flags="-fa on -ctk q8_0 -b 512 --parallel 1", speculation="off")
     base.update(overrides)
     return ProfileConfig(**base)
 
@@ -67,7 +67,7 @@ def test_preview_equals_launch_full_slot() -> None:
         "metadata": {"context_length": 262144},
     }
 
-    profile = _gpu_profile(mtp="auto", ctx_size=40000)
+    profile = _gpu_profile(speculation="auto", ctx_size=40000)
 
     with (
         patch("hal0.providers.container._resolve_profile", return_value=profile),
@@ -281,7 +281,8 @@ def test_env_empty_when_no_server_env() -> None:
 # fully-ordered argv. Any reorder, insertion, removal, or renaming of a
 # segment fails them with a readable diff.
 
-_BUNDLE = shlex.split(MTP_DRAFT_BUNDLE)
+# The model layer will own --spec-type (ADR-0031); until then the launch spells it first.
+_BUNDLE = ["--spec-type", "draft-mtp", *shlex.split(MTP_DRAFT_BUNDLE)]
 
 #: Every layer populated, with a deliberate profile-over-bundle collision
 #: (`--spec-draft-n-max`: bundle 4, profile 8). Update this literal ONLY

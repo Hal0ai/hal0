@@ -17,7 +17,7 @@ model. Behind every slot is a single podman container, and around every slot is
 a lifecycle the platform manages for you. Slots are what the dispatcher routes
 to and what the GPU arbiter coordinates. A slot owns *where* a model runs —
 device, GPU layers, threads, runner — and names the model and the profile it
-runs with. The tune itself (flags, context window, thinking, vision, MTP)
+runs with. The tune itself (flags, context window, thinking, vision, speculation)
 belongs to the profile; see Who owns what, below.
 
 ## One slot, one container
@@ -55,7 +55,7 @@ owner:
 | Object | Holds |
 |---|---|
 | **Model** (registry row) | Facts about its file: path and file set, size, quantization, architecture, native context window, chat template, multimodal projector (`mmproj`), whether the file has MTP heads, and whether its chat template works with `--jinja`. |
-| **Profile** | Every tune: free llama-server `flags` (KV-cache types, batch size, sampling, reasoning, `--parallel`), `ctx_size`, `enable_thinking`, `vision` (`auto` or `off`), `mtp` (`auto` or `off`), and an optional `runner`. |
+| **Profile** | Every tune: free llama-server `flags` (KV-cache types, batch size, sampling, reasoning, `--parallel`), `ctx_size`, `enable_thinking`, `vision` (`auto` or `off`), `speculation` (`auto`, `off` or `ngram`), and an optional `runner`. |
 | **Slot** | Placement and lifecycle: `device`, `gpu_index`, `n_gpu_layers`, `threads`, `binary` (a key into the `RUNNER_IMAGES` registry — the dashboard's slot drawer calls this the slot's **Runtime**), the `image_pin` escape hatch, and the port. Plus which model and which profile it runs. This is the "hardware grid": `[device · NGL · THREADS · BINARY]`. |
 
 A slot carries no llama-server flags and no context size. To run one model
@@ -79,7 +79,7 @@ picker and how a profile can carry one.
 
 The split is enforced at every write path, not just documented. A slot write
 that carries a tuning key — `[model].context_size` / `ctx_size`, `parallel`,
-`chat_template`, `workers`, `mtp`, `enable_thinking`, `vision` or
+`chat_template`, `workers`, `mtp`, `speculation`, `enable_thinking`, `vision` or
 `[server].extra_args` — is rejected with `slot.tuning_key_denied`, whose
 message says the key belongs on a profile. The guard runs the other way too:
 a profile's flags may not set what the slot owns (`--n-gpu-layers`/`-ngl`,
@@ -323,14 +323,17 @@ heads) takes two inputs, one from the model and one from the profile:
   fact is simply not MTP-eligible. The dashboard's model drawer records this
   as the **MTP heads** file fact; it is not a switch for whether a slot
   drafts.
-- **The profile's choice: `mtp = "auto"` or `"off"`.** `auto` (the default)
-  drafts when the model has heads and the runner supports MTP; `off` never
-  does.
+- **The profile's choice: `speculation = "auto"`, `"off"` or `"ngram"`.**
+  `auto` (the default) drafts when the model has heads and the runner supports
+  MTP; `off` never speculates; `ngram` uses n-gram lookup and needs no heads.
+  This field used to be `mtp`; `hal0 update` rewrites it once, and an API
+  or CLI write that still sends `mtp` is refused with a 422 naming
+  `speculation`.
 
-A slot has no MTP setting of its own (`mtp` is one of the keys
-`slot.tuning_key_denied` refuses). To turn MTP off for one slot, give it a
-profile with `mtp = "off"` (`hal0 profile create <name> --from <profile>
---mtp off`). Under `auto`, a model without MTP heads simply doesn't draft;
+A slot has no MTP setting of its own (`mtp` and `speculation` are among the
+keys `slot.tuning_key_denied` refuses). To turn MTP off for one slot, give it a
+profile with `speculation = "off"` (`hal0 profile create <name> --from <profile>
+--speculation off`). Under `auto`, a model without MTP heads simply doesn't draft;
 hal0 logs `mtp.auto_off_model_ineligible` rather than launching a draft that
 would crash llama-server (`context type MTP requested but model doesn't
 contain MTP layers`).

@@ -1,5 +1,5 @@
 {
-  "checksum": "sha256:11944623612f84aaa4f2a4d13f6425f385df1bf5818160a53f78d8ddd2ac8916",
+  "checksum": "sha256:7151d0c5c4fb3a927ac267ab225a25bf481f2b73517b9a8deb26d46adee9091a",
   "exported_at": "2026-09-01T00:00:00Z",
   "hal0_version": "1.4.0",
   "kind": "hal0.profile",
@@ -8,7 +8,7 @@
     "ctx_size": 131072,
     "flags": "-fa auto -b 2048 -ub 512 --reasoning off --reasoning-budget -1 --no-context-shift --temp 0 --top-p 0.95 --top-k 20 --seed 123",
     "intent": "Generic dense workload · tuned for 128K ctx",
-    "mtp": "auto",
+    "speculation": "auto",
     "vision": "off"
   },
   "schema_version": 2

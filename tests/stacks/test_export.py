@@ -90,7 +90,7 @@ class TestEmbedReferences:
             ProfilesConfig(
                 profile={
                     "custom-moe": ProfileConfig(
-                        flags="-fa on", ctx_size=32768, vision="off", mtp="off"
+                        flags="-fa on", ctx_size=32768, vision="off", speculation="off"
                     )
                 }
             )
@@ -103,7 +103,7 @@ class TestEmbedReferences:
         assert "custom-moe" in out.profiles
         embedded = out.profiles["custom-moe"]
         assert (embedded.flags, embedded.ctx_size) == ("-fa on", 32768)
-        assert (embedded.vision, embedded.mtp) == ("off", "off")
+        assert (embedded.vision, embedded.speculation) == ("off", "off")
 
     def test_embeds_derived_provider_from_backends(
         self, reg: ModelRegistry, tmp_hal0_home: str

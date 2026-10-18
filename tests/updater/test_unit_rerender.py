@@ -26,7 +26,7 @@ from hal0.slots.manager import SlotManager
 from hal0.updater import updater as updater_mod
 from hal0.updater.updater import rerender_slot_units
 
-_PROFILE = ProfileConfig(flags="-fa on -b 1024", mtp="off")
+_PROFILE = ProfileConfig(flags="-fa on -b 1024", speculation="off")
 
 
 @pytest.fixture

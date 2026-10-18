@@ -9,7 +9,7 @@ import { Aside, Card, CardGrid, LinkCard } from '@astrojs/starlight/components';
 
 Three distinct ideas shape every slot in hal0: **capabilities** describe what
 you want a slot to do, **profiles** describe the whole tune it runs with
-(flags, context window, thinking default, vision, MTP), and the **slot itself**
+(flags, context window, thinking default, vision, speculation), and the **slot itself**
 describes where it runs. The model row sits beside them and records only
 facts about its file. Each setting has exactly one owner, and the boundary is
 enforced at every write path, not just a naming convention.
@@ -64,7 +64,7 @@ decides *how* a model runs in a slot, and nothing about *where*:
 | `ctx_size` | The context window in tokens (128 to 16,777,216). Unset means the model's native window, capped at 32768, or 8192 when the model reports none. |
 | `enable_thinking` | The request-time reasoning default for requests the slot serves. A request can always override it; unset means off unless the request asks. |
 | `vision` | `auto` loads the model's multimodal projector when it has one; `off` never does. |
-| `mtp` | `auto` drafts with the model's MTP heads when it has them and the runner supports it; `off` never does. |
+| `speculation` | `auto` drafts with the model's MTP heads when it has them and the runner supports it; `ngram` uses n-gram lookup and needs no heads; `off` never speculates. This field used to be `mtp`; `hal0 update` rewrites it once, and a write that still sends `mtp` is refused with a 422 naming `speculation`. |
 | `runner` | Optional runtime, a `RUNNER_IMAGES` registry key. See "Profiles can carry a runtime" below. |
 | `intent`, `cloned_from` | Informational: the card headline, and the profile this one was copied from. |
 
@@ -92,9 +92,9 @@ hal0 slot restart scratch
 `hal0 profile create <name> --from <profile>` duplicates a seed or a custom
 profile and applies any other options on top; `hal0 profile edit <name>`
 changes a custom profile (`--flags`, `--ctx-size` / `--clear-ctx-size`,
-`--thinking` / `--no-thinking` / `--clear-thinking`, `--vision`, `--mtp`,
+`--thinking` / `--no-thinking` / `--clear-thinking`, `--vision`, `--speculation`,
 `--runner`, `--intent`). Slots running an edited profile pick up its flags,
-`ctx_size`, `vision` and `mtp` at their next restart. The one exception is
+`ctx_size`, `vision` and `speculation` at their next restart. The one exception is
 `runner`: a slot's runtime is its own `binary` field, which a profile's
 `runner` is copied into only when the profile is selected for that slot. After
 editing `--runner`, re-apply the profile to each slot that runs it
@@ -312,12 +312,12 @@ MTP (multi-token prediction / speculative decoding) takes two inputs:
 1. **Model: does the file have MTP heads?** An explicit `mtp` fact on the
    model row wins in either direction. Left unset, the registry `mtp` tag
    decides. There is no filename-based sniff.
-2. **Profile: `mtp = "auto"` or `"off"`.** `auto` (the default) drafts when
-   the model has heads *and* the launching runner declares MTP support; `off`
-   never drafts. MTP is also never used in embedding or reranking mode.
+2. **Profile: `speculation = "auto"`, `"off"` or `"ngram"`.** `auto` (the
+   default) drafts when the model has heads *and* the launching runner declares
+   MTP support; `ngram` uses n-gram lookup; `off` never drafts. MTP is also never used in embedding or reranking mode.
 
 A slot has no MTP setting. To stop one slot drafting, give it a profile with
-`mtp = "off"`. Under `auto`, a model without heads launches without a draft
+`speculation = "off"`. Under `auto`, a model without heads launches without a draft
 (hal0 logs `mtp.auto_off_model_ineligible`), so there is no way to force
 llama-server into the "model doesn't contain MTP layers" refusal.
 

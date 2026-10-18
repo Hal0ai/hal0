@@ -45,7 +45,9 @@ def _profile(image: str | None = None, *, backend: str = "vulkan") -> SimpleName
     """A profile stand-in carrying hints real profiles no longer have. ``image``
     is set only to prove it is IGNORED; ``backend``/``device_class`` are the
     last-resort lane hint for a slot dict that declares no device."""
-    return SimpleNamespace(image=image, backend=backend, device_class="gpu", flags="", mtp="auto")
+    return SimpleNamespace(
+        image=image, backend=backend, device_class="gpu", flags="", speculation="auto"
+    )
 
 
 # --- image_pin escape hatch (tier 1) --------------------------------------- #

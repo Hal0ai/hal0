@@ -94,7 +94,7 @@ def test_create_profile_201_and_listed(client: TestClient) -> None:
             "ctx_size": 32768,
             "enable_thinking": False,
             "vision": "off",
-            "mtp": "off",
+            "speculation": "off",
         },
     )
     assert r.status_code == 201
@@ -104,7 +104,7 @@ def test_create_profile_201_and_listed(client: TestClient) -> None:
     assert body["ctx_size"] == 32768
     assert body["enable_thinking"] is False
     assert body["vision"] == "off"
-    assert body["mtp"] == "off"
+    assert body["speculation"] == "off"
     assert "resolved_flags" in body
     assert body["seed"] is False
     assert not {"device_class", "backend", "quant"} & set(body)
@@ -117,7 +117,7 @@ def test_create_defaults_are_auto_and_unset(client: TestClient) -> None:
     assert body["ctx_size"] is None
     assert body["enable_thinking"] is None
     assert body["vision"] == "auto"
-    assert body["mtp"] == "auto"
+    assert body["speculation"] == "auto"
     assert body["runner"] is None
 
 
@@ -329,10 +329,10 @@ def test_create_seed_name_409(client: TestClient) -> None:
 def test_create_resolved_flags_equals_flags(client: TestClient) -> None:
     """resolved_flags is the profile's own flags: the MTP draft bundle is
     composed at launch from the model + runner, never shown here."""
-    for mtp in ("auto", "off"):
+    for mode in ("auto", "off", "ngram"):
         r = client.post(
             "/api/profiles",
-            json={"name": f"mtp-{mtp}", "flags": "-fa on", "mtp": mtp},
+            json={"name": f"spec-{mode}", "flags": "-fa on", "speculation": mode},
         )
         assert r.status_code == 201
         body = r.json()
@@ -340,12 +340,12 @@ def test_create_resolved_flags_equals_flags(client: TestClient) -> None:
         assert "--spec-type" not in body["resolved_flags"]
 
 
-@pytest.mark.parametrize("field", ["vision", "mtp"])
+@pytest.mark.parametrize("field", ["vision", "speculation"])
 @pytest.mark.parametrize("value", [True, False, "on", "yes", ""])
-def test_create_vision_and_mtp_accept_only_auto_or_off(
+def test_create_vision_and_speculation_accept_only_auto_or_off(
     client: TestClient, field: str, value: object
 ) -> None:
-    """``mtp`` used to be a bool; a schema-1 style ``true`` is a 422, not coerced."""
+    """a bool or free text is a 422, not coerced."""
     r = client.post("/api/profiles", json={"name": "bad-switch", field: value})
     assert r.status_code == 422, r.text
 
@@ -474,7 +474,7 @@ def test_update_sparse_preserves_other_fields(client: TestClient) -> None:
             "ctx_size": 16384,
             "enable_thinking": True,
             "vision": "off",
-            "mtp": "off",
+            "speculation": "off",
         },
     )
     r = client.put("/api/profiles/my-vulkan", json={"vision": "auto"})
@@ -484,10 +484,10 @@ def test_update_sparse_preserves_other_fields(client: TestClient) -> None:
     assert body["flags"] == "-fa on"
     assert body["ctx_size"] == 16384
     assert body["enable_thinking"] is True
-    assert body["mtp"] == "off"
+    assert body["speculation"] == "off"
     # Persisted view agrees.
     item = next(p for p in client.get("/api/profiles").json() if p["name"] == "my-vulkan")
-    assert (item["vision"], item["ctx_size"], item["mtp"]) == ("auto", 16384, "off")
+    assert (item["vision"], item["ctx_size"], item["speculation"]) == ("auto", 16384, "off")
 
 
 def test_update_ctx_size_null_clears_but_omitting_leaves_alone(client: TestClient) -> None:
@@ -522,8 +522,10 @@ def test_update_ctx_size_out_of_range_400(client: TestClient, ctx: int) -> None:
     assert client.get("/api/profiles/ctx-bad").json()["ctx_size"] == 4096
 
 
-@pytest.mark.parametrize("field", ["vision", "mtp"])
-def test_update_vision_and_mtp_reject_non_switch_values(client: TestClient, field: str) -> None:
+@pytest.mark.parametrize("field", ["vision", "speculation"])
+def test_update_vision_and_speculation_reject_non_switch_values(
+    client: TestClient, field: str
+) -> None:
     client.post("/api/profiles", json={"name": "sw-edit"})
     for value in (True, "on", ""):
         r = client.put("/api/profiles/sw-edit", json={field: value})
@@ -754,7 +756,7 @@ def _seed_stale_profiles_toml(home: str, name: str, flags: str) -> Path:
     root.mkdir(parents=True, exist_ok=True)
     path = root / "profiles.toml"
     path.write_text(
-        f'[profile.{name}]\nflags = "{flags}"\nmtp = "auto"\nintent = "Stale"\n',
+        f'[profile.{name}]\nflags = "{flags}"\nspeculation = "auto"\nintent = "Stale"\n',
         encoding="utf-8",
     )
     return path
@@ -922,3 +924,42 @@ def test_ghost_profile_can_be_cleared_to_auto(ghost_client: TestClient) -> None:
     r = ghost_client.put("/api/profiles/ghosted", json={"runner": ""})
     assert r.status_code == 200, r.text
     assert r.json()["runner"] is None
+
+
+# ── speculation replaces mtp (ADR-0031 §7) ────────────────────────────────────
+
+
+def test_profile_create_accepts_speculation_ngram(client: TestClient) -> None:
+    r = client.post(
+        "/api/profiles", json={"name": "spec-ngram", "flags": "-fa on", "speculation": "ngram"}
+    )
+    assert r.status_code == 201
+    assert r.json()["speculation"] == "ngram"
+
+
+@pytest.mark.parametrize("method", ["post", "put"])
+def test_profile_body_mtp_is_refused_422_naming_speculation(
+    client: TestClient, method: str
+) -> None:
+    client.post("/api/profiles", json={"name": "has-spec", "flags": "-fa on"})
+    if method == "post":
+        r = client.post("/api/profiles", json={"name": "old-shape", "mtp": "off"})
+    else:
+        r = client.put("/api/profiles/has-spec", json={"mtp": "off"})
+    assert r.status_code == 422
+    err = r.json()["error"]
+    assert err["code"] == "profiles.field_renamed"
+    assert err["message"] == "profile 'mtp' is now 'speculation' (auto | off | ngram)"
+
+
+def test_profile_detail_reports_speculation(client: TestClient) -> None:
+    client.post("/api/profiles", json={"name": "spec-off", "speculation": "off"})
+    body = client.get("/api/profiles/spec-off").json()
+    assert body["speculation"] == "off"
+    assert "mtp" not in body
+    assert client.get("/api/profiles/agent").json()["speculation"] == "auto"
+
+
+def test_profile_speculation_rejects_unknown_value(client: TestClient) -> None:
+    r = client.post("/api/profiles", json={"name": "bad-spec", "speculation": "turbo"})
+    assert r.status_code == 422

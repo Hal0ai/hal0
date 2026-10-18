@@ -528,6 +528,7 @@ def test_target_seeds_are_in_the_new_shape() -> None:
         "enable_thinking",
         "vision",
         "mtp",
+        "speculation",
         "runner",
         "intent",
         "cloned_from",
@@ -539,3 +540,9 @@ def test_target_seeds_are_in_the_new_shape() -> None:
         if "--model_path" in seed.get("flags", ""):
             assert name in {"kokoro", "moonshine", "qwen3-tts"}, name
     assert pc.target_seeds()["agent"]["ctx_size"] >= 64000
+
+
+def test_new_shape_detection_knows_speculation() -> None:
+    assert pc.profile_shape({"flags": "-b 1", "speculation": "off"}) == ("new", ["speculation"])
+    shape, _keys = pc.profile_shape({"flags": "-b 1", "speculation": "ngram", "quant": "Q4"})
+    assert shape == "mixed"

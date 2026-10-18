@@ -211,7 +211,7 @@ class TestLoadSyncNpuBranch:
         provider = ContainerProvider()
         profile = ProfileConfig(
             flags="-fa on",
-            mtp="off",
+            speculation="off",
         )
         unit_file = tmp_path / "hal0-slot@chat.service"
 
