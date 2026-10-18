@@ -58,14 +58,15 @@ function AddByHfModal({ open, onClose, initialRepo = "" }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, initialRepo]);
 
+  // One row per quant: the inspect route groups a split
+  // GGUF's parts into a single variant whose id is the first part, and the
+  // pull fetches the rest itself. Projectors come back on their own list.
   const variants = inspect.data?.variants ?? [];
-  // mmproj affordance — HF repos often ship an mmproj-Q8.gguf next to
-  // the main quants. Pick those out of the same variant list so the
-  // dropdown reflects what's actually in the repo.
   const mmprojChoices = useMemoMM(
-    () => variants.filter(v => /mmproj/i.test(v.id)).map(v => v.id),
-    [variants],
+    () => (inspect.data?.mmproj ?? []).map(v => v.id),
+    [inspect.data],
   );
+  const drafts = inspect.data?.drafts ?? [];
 
   // mmproj-first pairing (#2193): when the repo ships projector files, offer
   // them immediately and pre-select the first — vision is derived from this
@@ -95,7 +96,9 @@ function AddByHfModal({ open, onClose, initialRepo = "" }) {
 
   const inspected = inspect.isSuccess && !!inspect.data;
   const sel = variants.find(v => v.id === variant);
-  const canPull = inspected && variant && name && !pullJob.inFlight;
+  const selMmproj = (inspect.data?.mmproj ?? []).find(v => v.id === mmproj);
+  const totalBytes = (sel?.size_bytes || 0) + (selMmproj?.size_bytes || 0);
+  const canPull = inspected && sel && sel.complete !== false && name && !pullJob.inFlight;
 
   const onPull = async () => {
     if (!canPull) return;
@@ -117,7 +120,7 @@ function AddByHfModal({ open, onClose, initialRepo = "" }) {
         chat_template: chatTemplate && chatTemplate !== "auto" ? chatTemplate : undefined,
       });
       window.__hal0Toast && window.__hal0Toast(
-        `Pulling ${name} · ${sel?.size ?? ""}`, "info",
+        `Pulling ${name} · ${fmtBytes(totalBytes)}`, "info",
       );
       onClose();
     } catch (e) {
@@ -140,7 +143,7 @@ function AddByHfModal({ open, onClose, initialRepo = "" }) {
           <span style={{display: "inline-flex", gap: 8}}>
             <button className="btn ghost sm" onClick={onClose}>Cancel</button>
             <button className="btn sm" disabled={!canPull} onClick={onPull}>
-              {Icons.download} Pull{sel ? ` (${sel.size})` : ""}
+              {Icons.download} Pull{sel ? ` (${fmtBytes(totalBytes)})` : ""}
             </button>
           </span>
         </>
@@ -178,9 +181,9 @@ function AddByHfModal({ open, onClose, initialRepo = "" }) {
         <>
           <div className="form-row">
             <div className="form-lbl">
-              <span>Variants <span className="req">*</span></span>
+              <span>Quant <span className="req">*</span></span>
               <span className="sub">
-                {variants.length} available · pick a quant
+                {variants.length} available · split models pull every part
               </span>
             </div>
             <div className="form-ctl" style={{display: "flex", flexDirection: "column", gap: 6}}>
@@ -188,20 +191,33 @@ function AddByHfModal({ open, onClose, initialRepo = "" }) {
                 <div className="mono" style={{fontSize: 12, color: "var(--fg-4)", fontStyle: "italic"}}>
                   No .gguf files found in this repo.
                 </div>
-              ) : variants.filter(v => !/mmproj/i.test(v.id)).map(v => (
-                <div
-                  key={v.id}
-                  className={"variant-row" + (variant === v.id ? " sel" : "")}
-                  onClick={() => setVariant(v.id)}
-                >
-                  <span className="rad" />
-                  <span className="nm">
-                    {v.id}
-                    <span className="sub">{v.info}</span>
-                  </span>
-                  <span className="sz num">{v.size}</span>
+              ) : variants.map(v => {
+                const incomplete = v.complete === false;
+                return (
+                  <div
+                    key={v.id}
+                    data-testid="hf-add-variant"
+                    className={"variant-row" + (variant === v.id ? " sel" : "")}
+                    onClick={() => { if (!incomplete) setVariant(v.id); }}
+                    title={(v.files || [v.id]).join("\n")}
+                    style={incomplete ? {opacity: 0.5, cursor: "not-allowed"} : undefined}
+                  >
+                    <span className="rad" />
+                    <span className="nm">
+                      {v.quant || v.id}
+                      <span className="sub">
+                        {v.flm ? v.info : v.parts > 1 ? (incomplete ? v.info : `${v.parts} parts`) : "single file"}
+                      </span>
+                    </span>
+                    <span className="sz num">{v.size}</span>
+                  </div>
+                );
+              })}
+              {drafts.length > 0 && (
+                <div className="mono" style={{fontSize: 11.5, color: "var(--fg-4)"}}>
+                  Also in this repo: {drafts.map(d => d.id).join(", ")} — speculative-decoding draft model, not pulled with the quant.
                 </div>
-              ))}
+              )}
             </div>
           </div>
 
@@ -229,7 +245,9 @@ function AddByHfModal({ open, onClose, initialRepo = "" }) {
                   onChange={e => setMmproj(e.target.value)}
                 >
                   <option value="">None — text only</option>
-                  {mmprojChoices.map(id => <option key={id} value={id}>{id}</option>)}
+                  {(inspect.data?.mmproj ?? []).map(v => (
+                    <option key={v.id} value={v.id}>{v.id} · {v.size}</option>
+                  ))}
                 </select>
               </div>
             </div>
@@ -261,8 +279,12 @@ function AddByHfModal({ open, onClose, initialRepo = "" }) {
           <div className="form-section">Pre-flight</div>
           <div style={{padding: 12, background: "var(--bg)", border: "1px solid var(--line-soft)", borderRadius: "var(--rad-sm)", fontFamily: "var(--jbm)", fontSize: 11.5, lineHeight: 1.7}}>
             <div>repo · <span style={{color: "var(--fg)"}}>{inspect.data?.repo || repo}</span></div>
-            <div>variant · <span style={{color: "var(--fg)"}}>{variant || "—"}</span></div>
-            <div>size · <span style={{color: "var(--fg)"}}>{sel ? sel.size : "—"}</span></div>
+            <div>quant · <span style={{color: "var(--fg)"}}>{sel ? (sel.quant || sel.id) : "—"}</span></div>
+            {(sel?.files || []).map(f => (
+              <div key={f}>file · <span style={{color: "var(--fg)"}}>{f}</span></div>
+            ))}
+            {mmproj && <div>mmproj · <span style={{color: "var(--fg)"}}>{mmproj}</span></div>}
+            <div>size · <span style={{color: "var(--fg)"}}>{sel ? fmtBytes(totalBytes) : "—"}</span></div>
             {pullJob.inFlight && (
               <div>pull · <span style={{color: "var(--accent)"}}>{pullJob.state} {pullJob.pct != null ? `${pullJob.pct}%` : ""}</span></div>
             )}

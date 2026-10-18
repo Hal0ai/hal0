@@ -687,8 +687,7 @@ export function ModelDrawer({ open, onClose, model, onOpenSlot = undefined }) {
 	// draft would make the picker's own options disappear mid-interaction.
 	const mmprojDir = mmprojDirOf(baseline?.mmproj, model?.path);
 	const mmprojVariants = useMemoMD(() => {
-		const rows = Array.isArray(inspect.data?.variants) ? inspect.data.variants : [];
-		return rows.filter((v) => /mmproj/i.test(String(v?.id || "")));
+		return Array.isArray(inspect.data?.mmproj) ? inspect.data.mmproj : [];
 	}, [inspect.data]);
 	// Four ways to have nothing to pick FROM — no repo, a failed probe, a repo
 	// that ships no projector, or no directory to resolve a filename against.

@@ -60,6 +60,23 @@ curl -X POST http://localhost:8080/api/models/my-qwen-build/pull \
   -d '{"hf_repo":"unsloth/Qwen3.8-27B-GGUF","hf_filename":"Qwen3.8-27B-UD-Q4_K_XL.gguf","labels":["chat"]}'
 ```
 
+The dashboard's **Add by HF coords** dialog does the same thing. It
+inspects the repo and lists one row per quant. To pull a vision model, add
+`"mmproj_filename"` (a projector file in the same repo) and the label
+`"vision"`. The projector is downloaded into the model's directory and
+paired with the model.
+
+#### Split models
+
+Large quants are often uploaded as a split GGUF: several files named
+`…-00001-of-00003.gguf`, `…-00002-of-00003.gguf` and so on, usually in a
+folder named after the quant. Pull a split model by its **first part**,
+for example
+`"hf_filename":"UD-Q4_K_XL/Model-UD-Q4_K_XL-00001-of-00003.gguf"`. hal0
+downloads every part into one directory and keeps the part-numbered names,
+because llama.cpp opens a split model from its first part and finds the
+other parts by name. Naming any part other than the first returns `422`.
+
 ## Check for and apply weight updates
 
 ```sh

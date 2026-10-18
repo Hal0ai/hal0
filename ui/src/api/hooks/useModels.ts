@@ -61,17 +61,35 @@ export function useModel(id: string | null | undefined) {
   })
 }
 
+// One pullable quant. A split GGUF is ONE variant: ``id`` is its first part
+// (the pull's ``hf_filename``), ``files`` every part, ``size_bytes`` the set.
 export interface ModelInspectVariant {
   id: string
+  quant?: string
+  files?: string[]
+  parts?: number
+  complete?: boolean
+  flm?: boolean
   size_bytes: number
   size: string
   info: string
+}
+
+export interface ModelInspectFile {
+  id: string
+  quant?: string
+  size_bytes: number
+  size: string
 }
 
 export interface ModelInspectResponse {
   repo: string
   cached: boolean
   variants: ModelInspectVariant[]
+  // Vision projectors, offered beside the quant (never as one).
+  mmproj: ModelInspectFile[]
+  // Speculative-decoding draft models shipped in the repo.
+  drafts: ModelInspectFile[]
   tags: string[]
   metadata: {
     license: string

@@ -16,10 +16,40 @@ const VISION_REPO = 'org/vision-GGUF'
 const TEXT_REPO = 'org/text-GGUF'
 
 const VISION_VARIANTS = [
-  { id: 'vision-Q4_K_M.gguf', size: '4.1 GB', info: 'Q4_K_M · 4.1 GB' },
-  { id: 'mmproj-F16.gguf', size: '0.6 GB', info: 'mmproj · 0.6 GB' },
+  {
+    id: 'vision-Q4_K_M.gguf',
+    quant: 'Q4_K_M',
+    files: ['vision-Q4_K_M.gguf'],
+    parts: 1,
+    complete: true,
+    size_bytes: 4_400_000_000,
+    size: '4.1 GB',
+    info: '4.1 GB · single file',
+  },
+  {
+    id: 'Q8_0/vision-Q8_0-00001-of-00002.gguf',
+    quant: 'Q8_0',
+    files: ['Q8_0/vision-Q8_0-00001-of-00002.gguf', 'Q8_0/vision-Q8_0-00002-of-00002.gguf'],
+    parts: 2,
+    complete: true,
+    size_bytes: 8_600_000_000,
+    size: '8.01 GB',
+    info: '8.01 GB · 2 parts',
+  },
 ]
-const TEXT_VARIANTS = [{ id: 'text-Q4_K_M.gguf', size: '4.1 GB', info: 'Q4_K_M · 4.1 GB' }]
+const VISION_MMPROJ = [{ id: 'mmproj-F16.gguf', quant: 'F16', size_bytes: 644_245_094, size: '0.6 GB' }]
+const TEXT_VARIANTS = [
+  {
+    id: 'text-Q4_K_M.gguf',
+    quant: 'Q4_K_M',
+    files: ['text-Q4_K_M.gguf'],
+    parts: 1,
+    complete: true,
+    size_bytes: 4_400_000_000,
+    size: '4.1 GB',
+    info: '4.1 GB · single file',
+  },
+]
 
 /** Stub POST /api/models/inspect and capture any pull that escapes the gate. */
 async function mockInspectAndPulls(page: import('@playwright/test').Page) {
@@ -32,6 +62,8 @@ async function mockInspectAndPulls(page: import('@playwright/test').Page) {
       body: JSON.stringify({
         repo,
         variants: repo === VISION_REPO ? VISION_VARIANTS : TEXT_VARIANTS,
+        mmproj: repo === VISION_REPO ? VISION_MMPROJ : [],
+        drafts: [],
       }),
     })
   })
@@ -72,7 +104,7 @@ test.describe('Add-by-HF modal — mmproj pairing is first-class (#2193)', () =>
     await expect(sel).toHaveValue('mmproj-F16.gguf')
 
     // Pick the main quant — name is already auto-derived from the repo tail.
-    await page.locator('.variant-row:has-text("vision-Q4_K_M.gguf")').click()
+    await page.locator('.variant-row:has-text("Q4_K_M")').click()
     await expect(pullButton(page)).toBeEnabled()
 
     await pullButton(page).click()
@@ -85,7 +117,7 @@ test.describe('Add-by-HF modal — mmproj pairing is first-class (#2193)', () =>
     const pulls = await mockInspectAndPulls(page)
     await openAndInspect(page, VISION_REPO)
 
-    await page.locator('.variant-row:has-text("vision-Q4_K_M.gguf")').click()
+    await page.locator('.variant-row:has-text("Q4_K_M")').click()
     await page.getByTestId('hf-add-mmproj-select').selectOption('')
     await expect(pullButton(page)).toBeEnabled()
 
@@ -102,12 +134,32 @@ test.describe('Add-by-HF modal — mmproj pairing is first-class (#2193)', () =>
     await expect(page.getByTestId('hf-add-mmproj-select')).toHaveCount(0)
 
     // Pull is not gated on anything projector-related:
-    await page.locator('.variant-row:has-text("text-Q4_K_M.gguf")').click()
+    await page.locator('.variant-row:has-text("Q4_K_M")').click()
     await expect(pullButton(page)).toBeEnabled()
 
     await pullButton(page).click()
     await expect.poll(() => pulls.length).toBe(1)
     expect(pulls[0].body.mmproj_filename).toBeUndefined()
     expect(pulls[0].body.labels).toEqual(['chat'])
+  })
+})
+
+test.describe('Add-by-HF modal — one row per quant', () => {
+  test('a split quant is one row and pulls by its first part', async ({ page }) => {
+    const pulls = await mockInspectAndPulls(page)
+    await openAndInspect(page, VISION_REPO)
+
+    // One row per quant: the projector is never offered as a quant, and the
+    // two-part Q8_0 is a single row labelled with its part count.
+    await expect(page.getByTestId('hf-add-variant')).toHaveCount(2)
+    const split = page.locator('.variant-row', { hasText: 'Q8_0' })
+    await expect(split).toContainText('2 parts')
+
+    await split.click()
+    await expect(pullButton(page)).toContainText('8.61 GB')
+    await pullButton(page).click()
+    await expect.poll(() => pulls.length).toBe(1)
+    expect(pulls[0].body.hf_filename).toBe('Q8_0/vision-Q8_0-00001-of-00002.gguf')
+    expect(pulls[0].body.mmproj_filename).toBe('mmproj-F16.gguf')
   })
 })

@@ -30,7 +30,7 @@ import shutil
 import tempfile
 import time
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, NamedTuple
 
 import httpx
@@ -42,7 +42,7 @@ from hal0.errors import Hal0Error
 from hal0.install.perms import ensure_shared_dir
 from hal0.model_meta import derive_model_provider
 from hal0.registry import tombstones
-from hal0.registry.fileset import FileSetEntry, FileSetPlan
+from hal0.registry.fileset import SHARD_RE, FileSetEntry, FileSetPlan
 from hal0.registry.model import Model, ModelCapabilities
 from hal0.registry.store import ModelNotFound, ModelRegistry
 
@@ -338,6 +338,43 @@ def _canonical_name(filename: str) -> str:
     if _is_gguf(filename):
         return _CANONICAL_GGUF_NAME
     return Path(filename).name or _CANONICAL_GGUF_NAME
+
+
+def _shard_set(hf_file: str) -> list[str]:
+    """Every part of the split GGUF ``hf_file`` opens, in order, or ``[]``.
+
+    llama.cpp's ``gguf-split`` names parts ``<stem>-00001-of-0000N.gguf`` in
+    one directory, so the whole set follows from the first part's name — the
+    Add-from-HF modal sends only that one. A later part is refused: llama.cpp
+    can only open a split model from its first part.
+    """
+    path = PurePosixPath(hf_file)
+    m = SHARD_RE.match(path.name)
+    if m is None:
+        return []
+    if int(m.group("idx")) != 1:
+        raise PullInvalidSource(
+            f"{hf_file!r} is part {int(m.group('idx'))} of a split model — "
+            "pull it by its first part (-00001-of-…)",
+            details={"hf_file": hf_file},
+        )
+    tot = int(m.group("tot"))
+    return [
+        str(path.with_name(f"{m.group('stem')}-{i:05d}-of-{tot:05d}.{m.group('ext')}"))
+        for i in range(1, tot + 1)
+    ]
+
+
+def _shard_dests(final: Path, total: int) -> list[Path]:
+    """Installed paths for a ``total``-part split model whose first part is ``final``.
+
+    A capability-grouped install names the first part ``model.gguf``; the
+    parts become ``model-00001-of-0000N.gguf`` … instead, because llama.cpp
+    finds parts 2..N by the first part's ``-00001-of-`` name.
+    """
+    m = SHARD_RE.match(final.name)
+    stem, ext = (m.group("stem"), m.group("ext")) if m else (final.stem, final.suffix.lstrip("."))
+    return [final.with_name(f"{stem}-{i:05d}-of-{total:05d}.{ext}") for i in range(1, total + 1)]
 
 
 def _curated_extra_files(model_id: str, hf_repo: str) -> list[str]:
@@ -1173,14 +1210,24 @@ async def run_pull(
             details={"model_id": job.model_id},
         )
 
+    # A split GGUF pulls every part; ``hf_file`` names the first.
+    shard_names = _shard_set(hf_file)
+
     job.state = "running"
     job.started_at = time.time()
-    # Per-file manifest — main model first, optional mmproj sidecar second.
+    # Per-file manifest — main model (every part of a split one) first, then
+    # the optional mmproj sidecar, then engine sidecars.
     if extra_files is None:
         extra_files = _curated_extra_files(job.model_id, hf_repo)
-    job.files = [PullFile(hf_filename=hf_file, kind="model")]
+    if shard_names:
+        job.files = [PullFile(hf_filename=name, kind="shard") for name in shard_names]
+    else:
+        job.files = [PullFile(hf_filename=hf_file, kind="model")]
+    model_recs = list(job.files)
+    mm_rec: PullFile | None = None
     if mmproj_file:
-        job.files.append(PullFile(hf_filename=mmproj_file, kind="mmproj"))
+        mm_rec = PullFile(hf_filename=mmproj_file, kind="mmproj")
+        job.files.append(mm_rec)
     sidecar_recs = [PullFile(hf_filename=name, kind="sidecar") for name in extra_files]
     job.files.extend(sidecar_recs)
     job._signal()
@@ -1197,8 +1244,7 @@ async def run_pull(
         )
 
     try:
-        # ── Main model file ────────────────────────────────────────────────
-        main_rec = job.files[0]
+        # ── Main model file (every part of a split one) ───────────────────
         if dest_override:
             final = Path(dest_override)
             # A pre-#2739 non-GGUF row records ``.../model.gguf``; re-pulling
@@ -1207,24 +1253,29 @@ async def run_pull(
                 final = final.parent / _canonical_name(hf_file)
         else:
             final = _final_path_for_entry(job.model_id, hf_file, comfyui_subdir, capability)
-        digest = await _download_one(
-            job,
-            main_rec,
-            client=client,
-            hf_repo=hf_repo,
-            base_headers=base_headers,
-            final=final,
-            base_done=0,
-            base_total=0,
-        )
-        size_bytes = main_rec.bytes_done
+        model_finals = _shard_dests(final, len(model_recs)) if shard_names else [final]
+        final = model_finals[0]
+        digest = ""
+        for idx, (rec, rec_final) in enumerate(zip(model_recs, model_finals, strict=True)):
+            part_digest = await _download_one(
+                job,
+                rec,
+                client=client,
+                hf_repo=hf_repo,
+                base_headers=base_headers,
+                final=rec_final,
+                base_done=sum(f.bytes_done for f in job.files),
+                base_total=sum(f.bytes_total for f in job.files),
+            )
+            if idx == 0:
+                digest = part_digest
+        size_bytes = sum(rec.bytes_done for rec in model_recs)
 
         # ── Optional mmproj sidecar (WS-11) ────────────────────────────────
         # Same directory as the main model, so the association survives the
         # discover scan's same-directory heuristic AND is set directly below.
         mmproj_final: Path | None = None
-        if mmproj_file:
-            mm_rec = job.files[1]
+        if mm_rec is not None:
             mmproj_final = final.parent / Path(mm_rec.hf_filename).name
             await _download_one(
                 job,
@@ -1233,8 +1284,8 @@ async def run_pull(
                 hf_repo=hf_repo,
                 base_headers=base_headers,
                 final=mmproj_final,
-                base_done=main_rec.bytes_done,
-                base_total=main_rec.bytes_total,
+                base_done=sum(f.bytes_done for f in job.files),
+                base_total=sum(f.bytes_total for f in job.files),
             )
 
         # ── Engine sidecars (#2739) ────────────────────────────────────────
@@ -1279,15 +1330,21 @@ async def run_pull(
             capability=capability,
             comfyui_subdir=comfyui_subdir,
             mmproj=str(mmproj_final) if mmproj_final is not None else None,
+            shards=[str(p) for p in model_finals] if shard_names else None,
         )
 
         # Blob/file accounting — the SAME bookkeeping the fileset branch does
         # (#1412). Without it `store_blob`/`model_file` stay empty on every box
         # that pulls through HF coords, which silently disables refcounting,
         # hardlink dedup, and the store GC.
-        installed_rows = [InstalledFile(hf_file, final, size_bytes, digest, "model")]
-        if mmproj_final is not None:
-            mm_rec = job.files[1]
+        if shard_names:
+            installed_rows = [
+                InstalledFile(rec.hf_filename, p, rec.bytes_done, rec.sha256, "shard", idx)
+                for idx, (rec, p) in enumerate(zip(model_recs, model_finals, strict=True), 1)
+            ]
+        else:
+            installed_rows = [InstalledFile(hf_file, final, size_bytes, digest, "model")]
+        if mm_rec is not None and mmproj_final is not None:
             installed_rows.append(
                 InstalledFile(
                     mmproj_file or mmproj_final.name,
@@ -1376,6 +1433,7 @@ def _register_pulled(
     capability: str | None = None,
     comfyui_subdir: str | None = None,
     mmproj: str | None = None,
+    shards: list[str] | None = None,
 ) -> None:
     """Upsert the registry entry after a successful pull.
 
@@ -1391,6 +1449,11 @@ def _register_pulled(
     projector sidecar. Set directly so vision works right after the pull —
     no directory scan needed. ``None`` leaves any existing association
     (e.g. one a prior scan discovered) untouched.
+
+    ``shards`` lists every installed part of a split GGUF, first part
+    first (``path`` is that first part), stamped as ``metadata["shards"]`` —
+    the same record the discover scan writes, which the delete and store
+    accounting read. A single-file pull clears a stale list.
     """
     # ``pulled_at`` provenance lets the dashboard show when the installed
     # bytes were fetched — and thereby how stale they are vs an available
@@ -1398,7 +1461,9 @@ def _register_pulled(
     # A pull is an explicit request for these bytes: drop any tombstone a
     # keep-files delete left on the path (ADR-0026).
     tombstones.clear(path)
-    fresh_meta = {"sha256": sha256, "pulled_at": int(time.time())}
+    fresh_meta: dict[str, Any] = {"sha256": sha256, "pulled_at": int(time.time())}
+    if shards:
+        fresh_meta["shards"] = list(shards)
     # Curated template override: some artifacts ship an embedded chat template
     # the runner's jinja engine can't execute (hal0-brain-sft's ``|min``), so
     # their catalogue entry names a bundled replacement. Stamped as the model's
@@ -1549,6 +1614,8 @@ def _register_pulled(
     # before kicking off the pull).
     merged_meta = dict(existing.metadata)
     merged_meta.update(fresh_meta)
+    if not shards:
+        merged_meta.pop("shards", None)
     # An operator-provided window outranks this pull's read — but a value
     # THIS SAME PATH auto-stamped on a prior pull (context_length_detected)
     # must NOT outrank a fresh re-pull's own detection, or an in-place
@@ -1600,6 +1667,7 @@ class InstalledFile(NamedTuple):
     size_bytes: int
     sha256: str | None
     role: str
+    shard_index: int | None = None
 
 
 def _register_installed_files(
@@ -1664,6 +1732,7 @@ def _register_installed_files(
                 sha256=rec.sha256,
                 lfs=rec.sha256 is not None,
                 role=rec.role,
+                shard_index=rec.shard_index,
             )
 
 

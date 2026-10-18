@@ -320,12 +320,11 @@ def test_inspect_surfaces_bare_mmproj_sidecar(
         json={"hf_repo": "jcbtc/chadrock-35b-ace-saber-rocmfp4-mtp"},
     )
     assert r.status_code == 200, r.text
-    variants = {v["id"]: v for v in r.json()["variants"]}
-    # Both the main quant and the bare .mmproj sidecar are surfaced.
-    assert "CHADROCK-35B-MoEQuality-7.07BPW.gguf" in variants
-    assert "mmproj-CHADROCK-35B-Ace-Saber-F32.mmproj" in variants
-    # The sidecar is labelled so the modal (and operator) can tell it apart.
-    assert "mmproj" in variants["mmproj-CHADROCK-35B-Ace-Saber-F32.mmproj"]["info"]
+    body = r.json()
+    # The main quant is a variant; the bare .mmproj sidecar is a projector,
+    # listed on its own so the modal never offers it as a quant.
+    assert [v["id"] for v in body["variants"]] == ["CHADROCK-35B-MoEQuality-7.07BPW.gguf"]
+    assert [m["id"] for m in body["mmproj"]] == ["mmproj-CHADROCK-35B-Ace-Saber-F32.mmproj"]
 
 
 def test_inspect_lists_tree_recursively_and_surfaces_nested_mmproj(
@@ -374,12 +373,61 @@ def test_inspect_lists_tree_recursively_and_surfaces_nested_mmproj(
     )
     assert r.status_code == 200, r.text
     assert seen_tree_urls and seen_tree_urls[0].params.get("recursive") == "true"
-    variants = {v["id"]: v for v in r.json()["variants"]}
-    assert "Ornith1.0-35b-CIRU-DUALVIEW-FPX7+Q8-MTP.gguf" in variants
+    body = r.json()
+    assert [v["id"] for v in body["variants"]] == ["Ornith1.0-35b-CIRU-DUALVIEW-FPX7+Q8-MTP.gguf"]
     # The nested sidecar keeps its repo-relative path — that's what the pull
-    # endpoint resolves against (hf_filename).
-    assert "vision/Ornith-1.0-35B-F32.mmproj" in variants
-    assert "mmproj" in variants["vision/Ornith-1.0-35B-F32.mmproj"]["info"]
+    # endpoint resolves against (mmproj_filename).
+    assert [m["id"] for m in body["mmproj"]] == ["vision/Ornith-1.0-35B-F32.mmproj"]
+
+
+def test_inspect_groups_split_gguf_into_one_variant_per_quant(
+    inspect_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A split quant is ONE variant (id = first part, size = the set), a set
+    missing a part is flagged incomplete, and drafters are listed apart.
+
+    Shape of ``unsloth/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-GGUF``: single-file
+    low quants at the root, 3- and 4-part quants in per-quant folders, one
+    root ``mmproj-BF16.gguf`` and a ``dflash-…`` drafter.
+    """
+
+    def lfs(path: str, size: int) -> dict[str, Any]:
+        return {"path": path, "type": "file", "lfs": {"size": size}, "size": 134}
+
+    tree = [
+        {"path": "UD-Q4_K_XL", "type": "directory"},
+        lfs("M-UD-Q2_K_XL.gguf", 26_000),
+        lfs("UD-Q4_K_XL/M-UD-Q4_K_XL-00001-of-00003.gguf", 20_000),
+        lfs("UD-Q4_K_XL/M-UD-Q4_K_XL-00002-of-00003.gguf", 20_000),
+        lfs("UD-Q4_K_XL/M-UD-Q4_K_XL-00003-of-00003.gguf", 7_000),
+        lfs("BF16/M-BF16-00001-of-00004.gguf", 40_000),
+        lfs("BF16/M-BF16-00002-of-00004.gguf", 40_000),
+        lfs("BF16/M-BF16-00004-of-00004.gguf", 40_000),
+        lfs("mmproj-BF16.gguf", 1_700),
+        lfs("dflash-M-NVFP4.gguf", 950),
+        {"path": "README.md", "type": "file", "size": 4096},
+    ]
+    _patch_httpx_transport(monkeypatch, _hf_handler(meta_body={"tags": []}, tree_body=tree))
+
+    r = inspect_client.post("/api/models/inspect", json={"hf_repo": "unsloth/M-GGUF"})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    variants = {v["quant"]: v for v in body["variants"]}
+    assert list(variants) == ["UD-Q2_K_XL", "UD-Q4_K_XL", "BF16"]
+
+    q4 = variants["UD-Q4_K_XL"]
+    assert q4["id"] == "UD-Q4_K_XL/M-UD-Q4_K_XL-00001-of-00003.gguf"
+    assert q4["parts"] == 3
+    assert q4["complete"] is True
+    assert q4["size_bytes"] == 47_000
+    assert len(q4["files"]) == 3
+
+    assert variants["UD-Q2_K_XL"]["parts"] == 1
+    assert variants["BF16"]["complete"] is False  # part 3 of 4 is missing
+
+    assert [m["id"] for m in body["mmproj"]] == ["mmproj-BF16.gguf"]
+    assert [d["id"] for d in body["drafts"]] == ["dflash-M-NVFP4.gguf"]
 
 
 def test_inspect_surfaces_flm_npu_repo(
