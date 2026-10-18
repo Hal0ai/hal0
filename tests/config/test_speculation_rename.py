@@ -105,3 +105,54 @@ def test_convert_names_an_unreadable_file(tmp_path: Path) -> None:
         speculation_rename.convert(path, dry_run=False)
     assert exc.value.code == "profiles.conversion_failed"
     assert path.read_text(encoding="utf-8") == "[profile.broken\nnot toml"
+
+
+# ── --spec-type in a profile's flags (ADR-0031 §3: hal0 owns it now) ────────
+
+
+def test_convert_turns_a_spec_type_ngram_flag_into_speculation_ngram(tmp_path: Path) -> None:
+    path = _write(tmp_path, '[profile.ng]\nflags = "-fa on --spec-type ngram-mod -b 64"\n')
+    report = speculation_rename.convert(path, dry_run=False)
+    assert _profiles(path)["ng"] == {"flags": "-fa on -b 64", "speculation": "ngram"}
+    assert report.changed == ["ng"]
+    assert report.backup is not None
+
+
+def test_convert_ngram_flag_wins_over_a_renamed_mtp_off(tmp_path: Path) -> None:
+    """The flag is what launched: ``mtp = "off"`` + ``--spec-type ngram-mod`` ran n-gram."""
+    path = _write(tmp_path, '[profile.ng]\nflags = "--spec-type=ngram-simple"\nmtp = "off"\n')
+    speculation_rename.convert(path, dry_run=False)
+    assert _profiles(path)["ng"] == {"flags": "", "speculation": "ngram"}
+
+
+def test_convert_drops_a_spec_type_draft_mtp_flag(tmp_path: Path) -> None:
+    path = _write(
+        tmp_path, '[profile.m]\nflags = "--spec-type draft-mtp --spec-draft-n-max 8 -fa on"\n'
+    )
+    report = speculation_rename.convert(path, dry_run=False)
+    assert _profiles(path)["m"] == {"flags": "--spec-draft-n-max 8 -fa on"}
+    assert report.changed == ["m"]
+
+
+def test_convert_drops_any_other_spec_type_flag_and_logs_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    events: list[tuple[str, dict[str, object]]] = []
+    monkeypatch.setattr(
+        speculation_rename.log, "warning", lambda event, **kw: events.append((event, kw))
+    )
+    path = _write(tmp_path, '[profile.x]\nflags = "-b 32 --spec_type draft-eagle3"\n')
+    report = speculation_rename.convert(path, dry_run=False)
+    assert _profiles(path)["x"] == {"flags": "-b 32"}
+    assert report.changed == ["x"]
+    assert events == [
+        ("migrate.speculation_rename.spec_type_dropped", {"profile": "x", "value": "draft-eagle3"})
+    ]
+
+
+def test_convert_leaves_flags_without_spec_type_alone(tmp_path: Path) -> None:
+    text = '[profile.clean]\nflags = "-fa on --spec-draft-n-max 8"\n\n[stack.s]\nflags = "--spec-type ngram-mod"\n'
+    path = _write(tmp_path, text)
+    report = speculation_rename.convert(path, dry_run=False)
+    assert report.changed == [] and report.backup is None
+    assert path.read_text(encoding="utf-8") == text

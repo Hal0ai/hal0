@@ -11,6 +11,18 @@ The rewrite, per ``[profile.<name>]`` entry holding a string ``mtp``:
 * ``mtp = "auto"`` is dropped (``auto`` is the default);
 * a ``speculation`` already present wins and the stale ``mtp`` is dropped.
 
+ADR-0031 §3 also makes ``--spec-type`` hal0's (the model layer emits it), so
+the launch refuses it in a profile's ``flags``. Each ``--spec-type <value>`` in
+``flags`` is removed:
+
+* ``ngram-*``    sets ``speculation = "ngram"`` (it wins over a renamed
+  ``mtp = "off"``: the flag is what launched);
+* ``draft-mtp``  is dropped (``auto`` drafts with the heads);
+* anything else is dropped and logged
+  (``migrate.speculation_rename.spec_type_dropped``).
+
+Only ``[profile.*]`` entries are touched; ``[stack]`` rows are left alone.
+
 A boolean ``mtp`` is the pre-ADR-0029 shape: the profile-centric converter owns
 it, so it is left alone here. There is no alias period: after the rewrite
 ``ProfileConfig`` (``extra="forbid"``) and the API refuse ``mtp``. The original
@@ -23,6 +35,7 @@ HAL0-SUNSET: v1.7.0 — goes with the profile-centric conversion chain.
 
 from __future__ import annotations
 
+import re
 import time
 import tomllib
 from dataclasses import dataclass, field
@@ -52,8 +65,12 @@ class RenameReport:
     backup: Path | None = None
 
 
-def _rewrite(entry: dict[str, Any]) -> bool:
-    """Rewrite one profile entry in place; True when it changed."""
+#: ``--spec-type <v>`` / ``--spec-type=<v>`` (``_`` reads as ``-``, as in
+#: llama.cpp), with the whitespace after it, so removal leaves single spaces.
+_SPEC_TYPE_RE = re.compile(r"(?<!\S)--spec[-_]type(?:=|\s+)(\S+)\s*")
+
+
+def _rename_mtp(entry: dict[str, Any]) -> bool:
     mtp = entry.get("mtp")
     if not isinstance(mtp, str):
         return False
@@ -66,6 +83,27 @@ def _rewrite(entry: dict[str, Any]) -> bool:
     if mtp == "off" and "speculation" not in entry:
         entry["speculation"] = "off"
     return True
+
+
+def _strip_spec_type(name: str, entry: dict[str, Any]) -> bool:
+    flags = entry.get("flags")
+    if not isinstance(flags, str) or not _SPEC_TYPE_RE.search(flags):
+        return False
+    for match in _SPEC_TYPE_RE.finditer(flags):
+        value = match.group(1).strip("'\"")
+        if value.startswith("ngram-"):
+            entry["speculation"] = "ngram"
+        elif value != "draft-mtp":
+            log.warning("migrate.speculation_rename.spec_type_dropped", profile=name, value=value)
+    entry["flags"] = _SPEC_TYPE_RE.sub("", flags).strip()
+    return True
+
+
+def _rewrite(name: str, entry: dict[str, Any]) -> bool:
+    """Rewrite one profile entry in place; True when it changed."""
+    renamed = _rename_mtp(entry)
+    stripped = _strip_spec_type(name, entry)
+    return renamed or stripped
 
 
 def _backup_path(path: Path) -> Path:
@@ -92,7 +130,9 @@ def convert(path: Path, *, dry_run: bool) -> RenameReport:
     if not isinstance(profiles, dict):
         return RenameReport()
     changed = sorted(
-        name for name, entry in profiles.items() if isinstance(entry, dict) and _rewrite(entry)
+        name
+        for name, entry in profiles.items()
+        if isinstance(entry, dict) and _rewrite(name, entry)
     )
     if not changed or dry_run:
         return RenameReport(changed=changed)

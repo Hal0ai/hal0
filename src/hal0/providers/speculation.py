@@ -74,13 +74,16 @@ def _draft_bundle(kind: str, meta: Mapping[str, Any]) -> str:
     bundle = DRAFT_BUNDLE[kind]
     if kind != "dflash":
         return bundle
-    block_size = meta.get("block_size")
     try:
-        n_max = min(int(block_size) - 1, _DFLASH_N_MAX_CAP) if block_size else None
+        block_size = int(meta.get("block_size") or 0)
     except (TypeError, ValueError):
-        n_max = None
-    if n_max is None or n_max < 1:
+        block_size = 0
+    if block_size < 1:  # unknown (or nonsense): the default draft length
         n_max = _DFLASH_DEFAULT_N_MAX
+    else:
+        # block_size - 1 drafted tokens, capped where llama.cpp clamps; at least
+        # one, so a block of 1 still drafts a token rather than none.
+        n_max = max(1, min(block_size - 1, _DFLASH_N_MAX_CAP))
     return bundle.format(n_max=n_max)
 
 
@@ -123,29 +126,34 @@ def effective_speculation(
     unavailable: str | None = None
     draft = model_info.get("draft")
     kind = model_info.get("draft_kind")
-    if draft and kind in DRAFT_BUNDLE:
+    if draft:
         meta = (model_info.get("metadata") or {}).get("draft")
         if not isinstance(meta, Mapping):
             meta = {}
         variant = meta.get("variant")
-        kinds = runner_draft_kinds(runner, image_tag)
-        needed = "lilicorr" if kind in kinds and variant == "lilicorr" else str(kind)
-        if needed in kinds:
-            return SpecPlan(
-                mode="draft",
-                spec_type=f"draft-{kind}",
-                draft_model=str(draft),
-                bundle=_draft_bundle(str(kind), meta),
-                kind=str(kind),
-                variant=str(variant) if variant else None,
-            )
-        unavailable = _unavailable_reason(runner, needed, image_tag)
+        if kind not in DRAFT_BUNDLE:
+            # A row written without a classified kind: nothing says which
+            # --spec-type the file needs, so it is never guessed.
+            unavailable = "drafter kind unknown; re-pair the drafter"
+        else:
+            kinds = runner_draft_kinds(runner, image_tag)
+            needed = "lilicorr" if kind in kinds and variant == "lilicorr" else str(kind)
+            if needed in kinds:
+                return SpecPlan(
+                    mode="draft",
+                    spec_type=f"draft-{kind}",
+                    draft_model=str(draft),
+                    bundle=_draft_bundle(str(kind), meta),
+                    kind=str(kind),
+                    variant=str(variant) if variant else None,
+                )
+            unavailable = _unavailable_reason(runner, needed, image_tag)
         if log_launch:
             log.info(
                 "speculation.draft_unsupported",
                 extra={
                     "model": _model_name(model_info),
-                    "kind": str(kind),
+                    "kind": str(kind) if kind else None,
                     "variant": str(variant) if variant else None,
                     "reason": unavailable,
                 },

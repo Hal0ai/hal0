@@ -373,6 +373,7 @@ def test_every_shipped_addon_passes_the_screen(name: str, flags: str) -> None:
         "--reasoning off --reasoning-budget -1 --reasoning-format deepseek",
         "--parallel 2 -kvu --cache-reuse 256 --rope-scaling yarn --rope-freq-base 1e6",
         "--spec-draft-n-max 8 --spec-draft-p-min 0.0 -ngld all",
+        "--spec-draft-n-max 8",
         "--override-kv tokenizer.ggml.add_bos_token=bool:false --no-warmup --cont-batching",
         "--metrics --no-context-shift --cache-reuse 256 --mtp",
     ],

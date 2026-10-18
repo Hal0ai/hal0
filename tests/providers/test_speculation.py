@@ -65,7 +65,9 @@ def test_draft_wins_over_embedded_mtp() -> None:
     assert plan.unavailable_reason is None
 
 
-@pytest.mark.parametrize(("block_size", "n_max"), [(16, 8), (None, 6), (4, 3)])
+@pytest.mark.parametrize(
+    ("block_size", "n_max"), [(16, 8), (None, 6), (4, 3), (2, 1), (1, 1), (0, 6)]
+)
 def test_dflash_n_max_follows_block_size(block_size: int | None, n_max: int) -> None:
     meta = {"block_size": block_size} if block_size is not None else {}
     plan = _plan(_model(**meta))
@@ -114,7 +116,7 @@ def test_embed_mode_never_drafts() -> None:
 
 def test_lilicorr_on_b11596_image_is_unavailable() -> None:
     plan = _plan(_model(variant="lilicorr", block_size=8), image_tag=_OLD_TAG)
-    assert plan.mode in ("mtp", "none")
+    assert plan.mode == "none"  # the fixture has no MTP heads to fall back to
     assert plan.draft_model is None
     assert plan.unavailable_reason is not None
     assert "b11669" in plan.unavailable_reason
@@ -142,6 +144,16 @@ def test_cuda_runner_has_no_draft() -> None:
     assert plan.mode == "none"
     assert plan.draft_model is None
     assert plan.unavailable_reason == "runner cuda does not support dflash drafters"
+
+
+def test_a_drafter_of_unknown_kind_is_unavailable(caplog: pytest.LogCaptureFixture) -> None:
+    with caplog.at_level(logging.INFO, logger="hal0.providers.speculation"):
+        plan = _plan(_model(kind=None), log_launch=True)
+    assert plan.mode == "none"
+    assert plan.draft_model is None
+    assert plan.unavailable_reason == "drafter kind unknown; re-pair the drafter"
+    (rec,) = [r for r in caplog.records if r.getMessage() == "speculation.draft_unsupported"]
+    assert rec.kind is None  # type: ignore[attr-defined]
 
 
 def test_unsupported_drafter_logs_once_when_asked(caplog: pytest.LogCaptureFixture) -> None:

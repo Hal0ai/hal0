@@ -25,9 +25,7 @@ import shlex
 import pytest
 
 from hal0.config.schema import (
-    DRAFT_BUNDLE,
     MTP_DRAFT_BUNDLE,
-    NGRAM_BUNDLE,
     SEED_PROFILES,
     ProfileConfig,
 )
@@ -191,6 +189,26 @@ def test_agent_seed_on_a_vulkan_slot_golden_argv() -> None:
     assert "--mmproj" not in argv  # the agent seed's vision = "off"
 
 
+_GOLDEN_BASE = [
+    "--host", "0.0.0.0",
+    "--port", "8081",
+    "--model", _MODEL_PATH,
+    "--alias", "qwen-mtp",
+    "--ctx-size", "65536",
+]  # fmt: skip
+_GOLDEN_SLOT = ["-ngl", "99", "--threads", "8", "--metrics"]
+
+
+def _golden_profile(name: str, **fields: object) -> ResolvedProfile:
+    return _custom(name, flags="-fa auto", ctx_size=65536, **fields)
+
+
+def _spec_type_count(segments: list[tuple[str, list[str]]]) -> int:
+    """``--spec-type`` across the RAW segments: llama.cpp appends its values,
+    so a second one anywhere would launch a mixed type (dedupe would hide it)."""
+    return sum(tokens.count("--spec-type") for _, tokens in segments)
+
+
 def test_dflash_layering() -> None:
     """A paired DFlash drafter: the model layer names the type and the file,
     the profile layer opens with the dflash bundle (n-max = block_size - 1),
@@ -200,29 +218,51 @@ def test_dflash_layering() -> None:
         draft_kind="dflash",
         metadata={"context_length": 262144, "draft": {"block_size": 8}},
     )
-    by_label = dict(_launch(_slot("agent"), model, _seed("agent")))
-    assert by_label["model"][-4:] == [
-        "--spec-type",
-        "draft-dflash",
-        "--spec-draft-model",
-        "/p/d.gguf",
-    ]
-    bundle = shlex.split(DRAFT_BUNDLE["dflash"].format(n_max=7))
-    assert by_label["profile"][: len(bundle)] == bundle
-    assert "--spec-draft-n-max" in bundle and bundle[bundle.index("--spec-draft-n-max") + 1] == "7"
-    assert by_label["slot"][-2:] == ["--spec-draft-device", "Vulkan0"]
-    argv = resolve_argv(list(by_label.items())).argv
-    assert argv.count("--spec-type") == 1
+    segments = _launch(_slot("tune"), model, _golden_profile("tune"))
+    by_label = dict(segments)
+    assert by_label["base"] == _GOLDEN_BASE
+    assert by_label["model"] == [
+        "--jinja",
+        "--mmproj", "/models/qwen-mmproj.gguf",
+        "--spec-type", "draft-dflash",
+        "--spec-draft-model", "/p/d.gguf",
+    ]  # fmt: skip
+    assert by_label["profile"] == [
+        "--spec-draft-ngl", "all",
+        "--spec-draft-n-max", "7",
+        "--spec-draft-type-k", "q8_0",
+        "--spec-draft-type-v", "q8_0",
+        "-fa", "auto",
+    ]  # fmt: skip
+    assert by_label["slot"] == [*_GOLDEN_SLOT, "--spec-draft-device", "Vulkan0"]
+    assert _spec_type_count(segments) == 1
 
 
 def test_mtp_layering_spec_type_moved_to_model_layer() -> None:
-    by_label = dict(_launch(_slot("agent"), _model(), _seed("agent")))
-    assert by_label["model"][-2:] == ["--spec-type", "draft-mtp"]
-    assert "--spec-draft-model" not in by_label["model"]
-    assert "--spec-type" not in by_label["profile"]
-    bundle = shlex.split(MTP_DRAFT_BUNDLE)
-    assert by_label["profile"][: len(bundle)] == bundle
-    assert by_label["slot"][-2:] == ["--spec-draft-device", "Vulkan0"]
+    segments = _launch(_slot("tune"), _model(), _golden_profile("tune"))
+    by_label = dict(segments)
+    assert by_label["base"] == _GOLDEN_BASE
+    assert by_label["model"] == [
+        "--jinja",
+        "--mmproj", "/models/qwen-mmproj.gguf",
+        "--spec-type", "draft-mtp",
+    ]  # fmt: skip
+    assert by_label["profile"] == [
+        "--spec-draft-ngl", "all",
+        "--spec-draft-n-max", "4",
+        "--spec-draft-n-min", "0",
+        "--spec-draft-p-min", "0.0",
+        "--spec-draft-p-split", "0.10",
+        "--spec-draft-type-k", "q8_0",
+        "--spec-draft-type-v", "q8_0",
+        "--spec-draft-threads", "16",
+        "--spec-draft-threads-batch", "32",
+        "--spec-draft-poll", "1",
+        "--spec-draft-poll-batch", "1",
+        "-fa", "auto",
+    ]  # fmt: skip
+    assert by_label["slot"] == [*_GOLDEN_SLOT, "--spec-draft-device", "Vulkan0"]
+    assert _spec_type_count(segments) == 1
 
 
 def test_ngram_layering() -> None:
@@ -230,15 +270,22 @@ def test_ngram_layering() -> None:
     layer carries ``--spec-type ngram-mod``, the profile layer the n-gram tune,
     and no draft device is placed."""
     model = _model(draft="/p/d.gguf", draft_kind="dflash")
-    ngram = _custom("ngram", flags="-fa auto", speculation="ngram")
-    by_label = dict(_launch(_slot("ngram"), model, ngram))
-    assert by_label["model"][-2:] == ["--spec-type", "ngram-mod"]
-    assert "--spec-draft-model" not in by_label["model"]
-    tune = shlex.split(NGRAM_BUNDLE)[2:]
-    assert by_label["profile"] == [*tune, "-fa", "auto"]
-    assert "--spec-draft-device" not in by_label["slot"]
-    argv = resolve_argv(list(by_label.items())).argv
-    assert argv[argv.index("--spec-type") + 1] == "ngram-mod"
+    segments = _launch(_slot("ngram"), model, _golden_profile("ngram", speculation="ngram"))
+    by_label = dict(segments)
+    assert by_label["base"] == _GOLDEN_BASE
+    assert by_label["model"] == [
+        "--jinja",
+        "--mmproj", "/models/qwen-mmproj.gguf",
+        "--spec-type", "ngram-mod",
+    ]  # fmt: skip
+    assert by_label["profile"] == [
+        "--spec-ngram-size-n", "24",
+        "--spec-ngram-size-m", "48",
+        "--spec-ngram-n-max", "64",
+        "-fa", "auto",
+    ]  # fmt: skip
+    assert by_label["slot"] == _GOLDEN_SLOT
+    assert _spec_type_count(segments) == 1
 
 
 @pytest.mark.parametrize(
