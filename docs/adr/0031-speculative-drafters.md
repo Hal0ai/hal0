@@ -84,8 +84,10 @@ decides, from the two GGUF headers alone:
 | `simple` | same `tokenizer.ggml.model`, same `bos_token_id` and `eos_token_id`, `abs(vocab_size delta) <= 128` (the first part of llama.cpp's own check; the token-string comparison needs the vocab block and is left to llama.cpp) |
 | anything else | refused: `model.draft_not_a_drafter` (the file is a plain model whose tokenizer does not match, or an mmproj, or not a GGUF) |
 
-Refusals are 422 `model.draft_mismatch` with the two values that differ in
-`details`. The check runs in three places, exactly where `screen_vision_mmproj`
+Refusals on a write are 422 `model.draft_mismatch` with the two values that
+differ in `details`: `PUT /api/models/{id}` and `POST /api/models/{id}/pull`
+refuse; `POST /api/models/inspect-draft` only reports the verdict (a 200 with
+`fit.ok` false and the reasons). The check runs in three places, exactly where `screen_vision_mmproj`
 runs today: `PUT /api/models/{id}` with `draft` in the body (headers read from
 disk), `POST /api/models/{id}/pull` with `draft_filename` (both headers read
 from Hugging Face by HTTP range before any download starts), and the discover scan when it pairs a file it found
@@ -235,8 +237,8 @@ offered, with an amber note naming the runner build it needs.
 **Model drawer.** Beside MMProj, a **Drafter** field: a RichSelect over the
 repo's `drafts` (plus the stored value), a path input when the repo lists
 none, a Pull action when the chosen file is not on disk, the variant/size/fit
-band underneath, and a "Measure" button that enqueues the bench pair in
-section 6. The facts band shows the variant.
+band underneath. A "Measure" button arrives with the bench pair (the §6
+follow-up). The facts band shows the variant.
 
 **Profile editor.** The MTP select becomes **Speculation**:
 `auto | off | ngram`, with the same inline description style as Vision.
@@ -305,7 +307,10 @@ counter; on `/slots`, `speculative: true|false`.
   shims). The converter's shape detection learns `speculation` as a
   new-shape key. Consequence for rollback: a `hal0 update --rollback` to
   1.4.x quarantines every profile that carries `speculation` into
-  `profiles.invalid`; the rollback notes name the backup file to restore.
+  `profiles.invalid`. The backup is `profiles.toml.bak-<stamp>` beside the file;
+  the "Rolling back past the speculation rename" section of the update and
+  rollback guide tells the operator to copy it back before `hal0 update
+  --rollback` to 1.4.x.
   Seeds set neither key.
 - `MTP_DRAFT_BUNDLE` loses its `--spec-type draft-mtp` token (now emitted in
   the model layer); the frozen converter keeps the old bundle for the

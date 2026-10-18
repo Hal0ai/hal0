@@ -185,9 +185,21 @@ and `unavailable_reason`. `active` comes from the server itself, so a drafter
 that loaded but never drafts shows as inactive. When the runner image cannot
 run the paired drafter (a LiLiCorr file needs llama.cpp build b11669 or newer),
 `unavailable_reason` says so and the slot falls back to the model's MTP heads
-if it has them, else to no speculation. The Slots list shows a bolt after the
-model name: lit while the slot drafts, grey when a drafter is paired but the
-profile has `speculation` off, amber when the runner cannot use the drafter.
+if it has them, else to no speculation.
+
+The Slots list shows a bolt after the model name, with a hover title:
+
+| Bolt | Title |
+|---|---|
+| Lit | `drafting · <drafter or MTP heads or n-gram> · <n>% accepted` (the percentage appears once the slot has drafted) |
+| Grey | `drafter paired · speculation off` when the model has a drafter (or MTP heads) and the profile's `speculation` is `off`; `<drafter paired, MTP heads or n-gram> · not running` when the plan uses one but the slot is not drafting right now |
+| Amber | `drafter unavailable on this runner: <reason>` |
+
+A model with nothing to draft with shows no bolt. The slot drawer carries the
+full line, `Speculation: <what is in use> · <n>% accepted · <x> tok/step`, or
+`Speculation: off`, or `Speculation: drafter unavailable — <reason>`. In the
+model catalog a model with a paired drafter carries a **Drafter** chip
+(hover: `Paired drafter · <variant>`), and the filter chips include **Drafter**.
 
 hal0 does not estimate a speed-up from the acceptance rate. A with and
 without comparison through the benchmark queue is planned for a later
