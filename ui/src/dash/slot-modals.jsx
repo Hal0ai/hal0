@@ -42,6 +42,7 @@ import { formatProvenanceShort } from "./runner-images.jsx";
 // hook that could resolve a pull target differently.
 import { runtimeChips, useRunnerPull, ProfileDrawer, ctxLabel } from "./profiles.jsx";
 import { RichSelect } from "./rich-select.jsx";
+import { FitChip, ModalityTag } from "./fit-chip.jsx";
 // The profile apply preview + its lane-title table. Pure derivations, so they
 // live in their own module (profile-apply-preview.js) rather than in this view
 // file — the slot CARD's apply confirm asks the same question and must get the
@@ -241,7 +242,7 @@ function modelModalityTag(m) {
 
 // Build the Model RichSelect's options from the already-filtered compatible
 // list. `verdictChipFor(modelId)` returns the right-aligned GTT feasibility
-// chip (`● fits · ~N GB` / `◐ tight` / `○ won't fit`, or null for an
+// chip (a `FitChip`, or null for an
 // unverdicted/unknown row) — a no-op placeholder here; Task 11d wires it to
 // the batch `useModelsFeasibility` call fired on dropdown open. `usedByCount`
 // is read from the slots list already queried in this drawer (`slotsQuery`),
@@ -254,26 +255,41 @@ function modelRichOptions({ compatible, cur, has, slotLong, allSlots, verdictChi
 	if (!cur) {
 		opts.push({ id: "", row: "—" });
 	}
-	const countUsedBy = (id) =>
-		(allSlots || []).filter((s) => (s.model_id || s.model) === id).length;
 	for (const m of compatible) {
 		const quant = m.quant || null;
 		const modTag = modelModalityTag(m);
 		const caps = Array.isArray(m.capabilities) ? m.capabilities : [];
-		const usedBy = countUsedBy(m.id);
+		const fit = verdictChipFor ? verdictChipFor(m.id) : null;
+		const name = (
+			<span style={{ overflow: "hidden", textOverflow: "ellipsis" }}>
+				{m.longName || m.id}
+			</span>
+		);
 		opts.push({
 			id: m.id,
+			// open list: line 1 = name + modality, line 2 (desc) = quant · facts · fit
 			row: (
 				<span style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
-					<span style={{ overflow: "hidden", textOverflow: "ellipsis" }}>
-						{m.longName || m.id}
-					</span>
-					{quant && <span className="chip amber">{quant}</span>}
-					{modTag && <span className="chip info">{modTag}</span>}
+					{name}
+					<ModalityTag tag={modTag} />
 				</span>
 			),
-			right: verdictChipFor ? verdictChipFor(m.id) : null,
-			desc: `${m.params || "—"} · ${caps.length ? caps.join(" + ") : "—"} · used by ${usedBy} slot${usedBy === 1 ? "" : "s"}`,
+			// closed trigger: everything inline on one line
+			trigger: (
+				<span style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
+					{name}
+					{quant && <span className="chip amber">{quant}</span>}
+					<ModalityTag tag={modTag} />
+					{fit}
+				</span>
+			),
+			desc: (
+				<span className="rsel-desc-line">
+					{quant && <span className="chip amber">{quant}</span>}
+					<span>{`${m.params || "—"} · ${caps.length ? caps.join(" + ") : "—"}`}</span>
+					{fit}
+				</span>
+			),
 		});
 	}
 	return opts;
@@ -776,12 +792,7 @@ function EditSlotDrawer({ open, slot, onClose }) {
 	const modelFeasibilityChipFor = (id) => {
 		const row = (modelListFeasibility.data?.results || []).find((r) => r.model_id === id);
 		if (!row) return null;
-		const gb = Math.round((row.needed_mb ?? 0) / 1024);
-		if (row.verdict === "fits") return <span className="chip ok">● fits · ~{gb} GB</span>;
-		if (row.verdict === "tight") return <span className="chip warn">◐ tight</span>;
-		if (row.verdict === "exceeds" || row.verdict === "exceeds_total")
-			return <span className="chip err">○ won't fit</span>;
-		return null;
+		return <FitChip verdict={row.verdict} neededMb={row.needed_mb} />;
 	};
 
 	// Screen-reader descriptions for the header toggles — the hover `title`

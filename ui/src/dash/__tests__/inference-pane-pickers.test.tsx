@@ -324,7 +324,7 @@ afterEach(() => {
 })
 
 describe('ModelPicker (card-dropdowns Task 1)', () => {
-  it('renders rich rows: quant tag, size desc, used-by', () => {
+  it('renders two-line rows: name + modality, then quant · size · runtime (no used-by)', () => {
     const { host } = mount(
       <ModelPicker s={SLOT} models={MODELS} allSlots={ALL_SLOTS} disabled={false} onSwap={() => {}} />,
     )
@@ -332,8 +332,15 @@ describe('ModelPicker (card-dropdowns Task 1)', () => {
     const row = optionById(host, 'm1')!
     expect(row.textContent).toContain('Q8_0')
     expect(row.querySelector('.rsel-option-desc')!.textContent).toContain('2.6 GB')
-    expect(row.querySelector('.rsel-option-desc')!.textContent).toContain('used by 1 slot')
-    expect(row.querySelector('.rsel-option-desc')!.textContent).toContain('other')
+    expect(row.querySelector('.rsel-option-desc')!.textContent).toContain('Q8_0')
+    expect(row.textContent).not.toContain('used by')
+    // vision renders as an eye icon, not text, on line 1.
+    const m2 = optionById(host, 'm2')!
+    const eye = m2.querySelector('.rsel-option-row .modality-icon')!
+    expect(eye.getAttribute('title')).toBe('vision')
+    expect(eye.getAttribute('aria-label')).toBe('vision')
+    expect(m2.querySelector('.rsel-option-row')!.textContent).not.toContain('vision')
+    expect(m2.querySelector('.rsel-option-desc')!.textContent).toContain('vllm')
     // upstream-only row never appears at all.
     expect(optionById(host, 'm3')).toBeNull()
   })
@@ -393,9 +400,11 @@ describe('ModelPicker (card-dropdowns Task 1)', () => {
     )
     openMenu(host, 'chat')
     const row1 = optionById(host, 'm1')!
-    expect(row1.querySelector('.rsel-option-right')!.textContent).toContain('fits')
+    const chip = row1.querySelector('.rsel-option-desc .fit-chip')!
+    expect(chip.textContent).toBe('~3 GB')
+    expect(chip.getAttribute('title')).toBe('fits · needs ~3 GB')
     const row2 = optionById(host, 'm2')!
-    expect(row2.querySelector('.rsel-option-right')).toBeNull()
+    expect(row2.querySelector('.fit-chip')).toBeNull()
   })
 
   it('pick calls onSwap(id); picking current is a no-op', () => {
