@@ -1364,7 +1364,8 @@ def test_scan_leaves_an_already_paired_registered_model_alone(
     first = _dflash(root / "X-lilicorr.gguf", lilicorr=True)
     _register_plain(registry, root)
     assert registry.get("x").draft == str(first.resolve())
-    _dflash(root / "X-plain.gguf")
+    extra = _dflash(root / "X-plain.gguf")
     result = scan_and_register(registry, ModelsConfig(roots=[str(root)]))
     assert result["paired_drafts"] == []
     assert registry.get("x").draft == str(first.resolve())
+    assert {"path": str(extra.resolve()), "reason": "drafter_unpaired"} in result["skipped"]

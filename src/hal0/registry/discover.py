@@ -225,8 +225,13 @@ def _pair_drafters(
     skipped: list[dict] | None,
     registered: list[tuple[str, Path]] | None = None,
     registered_pairs: list[tuple[str, Path]] | None = None,
+    occupied: list[Path] | None = None,
 ) -> None:
     """Pair each directory's best fitting drafter onto its models.
+
+    ``occupied`` are registered models that already have a drafter: they are
+    targets (so a spare drafter is ``drafter_unpaired`` / ``drafter_mismatch``,
+    not ``drafter_without_target``) but take no second pairing.
 
     Targets are the new candidates in ``out`` and the already-registered
     models in ``registered`` (``(model_id, path)`` of rows with no drafter);
@@ -238,6 +243,7 @@ def _pair_drafters(
         regs = [(mid, p) for mid, p in registered if p.parent == directory]
         paired: set[Path] = set()
         fitting: set[Path] = set()
+        busy = [p for p in (occupied or []) if p.parent == directory]
         targets: list[tuple[Path, str | None, CandidateModel | None]] = [
             (c.path, None, c) for c in cands
         ] + [(p, mid, None) for mid, p in regs]
@@ -257,12 +263,20 @@ def _pair_drafters(
                 cand.draft = best.path
             elif registered_pairs is not None and model_id is not None:
                 registered_pairs.append((model_id, best.path))
+        for path in busy:
+            header = read_gguf_header(path)
+            if header is not None:
+                fitting.update(
+                    d.path
+                    for d in drafters
+                    if d.info is not None and not draft_fit_errors(header, d.info)
+                )
         for d in sorted(drafters, key=lambda d: d.path.name):
             if d.path in paired or skipped is None:
                 continue
             if d.info is None:
                 reason = "drafter_unreadable"
-            elif not targets:
+            elif not targets and not busy:
                 reason = "drafter_without_target"
             elif d.path in fitting:
                 reason = "drafter_unpaired"
@@ -444,6 +458,7 @@ def find_candidates(
     skipped: list[dict] | None = None,
     unpaired_models: list[tuple[str, Path]] | None = None,
     registered_pairs: list[tuple[str, Path]] | None = None,
+    paired_models: list[Path] | None = None,
 ) -> list[CandidateModel]:
     """Walk each root and return :class:`CandidateModel`s not already registered.
 
@@ -632,7 +647,7 @@ def find_candidates(
         sidecar = mmproj_by_dir.get(cand.path.parent)
         if sidecar is not None:
             cand.mmproj = sidecar
-    _pair_drafters(out, drafters_by_dir, skipped, unpaired_models, registered_pairs)
+    _pair_drafters(out, drafters_by_dir, skipped, unpaired_models, registered_pairs, paired_models)
     return out
 
 
@@ -1310,6 +1325,7 @@ def _scan_and_register_locked(
     known_paths: set[str] = set()
     known_inodes: set[tuple[int, int]] = set()
     unpaired_models: list[tuple[str, Path]] = []
+    paired_models: list[Path] = []
     for existing in registry.list():
         try:
             known_paths.add(str(Path(existing.path).resolve()))
@@ -1319,6 +1335,9 @@ def _scan_and_register_locked(
         if existing.draft:
             # A paired drafter is not a lone drafter on the next scan.
             known_paths.add(existing.draft)
+            if existing.path.lower().endswith(".gguf"):
+                with contextlib.suppress(OSError):
+                    paired_models.append(Path(existing.path).resolve())
         elif existing.path.lower().endswith(".gguf"):
             with contextlib.suppress(OSError):
                 unpaired_models.append((existing.id, Path(existing.path).resolve()))
@@ -1337,6 +1356,7 @@ def _scan_and_register_locked(
         skipped=drafter_skipped,
         unpaired_models=unpaired_models,
         registered_pairs=registered_pairs,
+        paired_models=paired_models,
     )
     paired_drafts: list[dict] = []
     for model_id, draft_path in registered_pairs:

@@ -2455,11 +2455,23 @@ def stamp_draft_fact(
 
 
 def _tombstone_unless_shared(registry: Any, model_id: str, draft: str) -> None:
-    """Tombstone ``draft`` unless another model still pairs that file."""
+    """Tombstone ``draft`` unless another model still pairs that file.
+
+    Paths are compared resolved (the tombstone store and the scan both key on
+    the resolved path, so a symlinked pairing and its target are one file).
+    """
+
+    def _resolved(p: str) -> Path:
+        try:
+            return Path(p).expanduser().resolve()
+        except OSError:
+            return Path(p)
+
+    target = _resolved(draft)
     for other in registry.list():
-        if other.id != model_id and other.draft == draft:
+        if other.id != model_id and other.draft and _resolved(other.draft) == target:
             return
-    tombstones.add([draft])
+    tombstones.add([target])
 
 
 def settle_draft_tombstone(

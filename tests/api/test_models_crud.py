@@ -1584,3 +1584,43 @@ def test_unpair_does_not_tombstone_a_drafter_another_model_pairs(
     # The last pairing going away does tombstone it.
     assert crud_client.put("/api/models/tgt2", json={"draft": None}).status_code == 200
     assert tombstones.is_tombstoned(shared.resolve(), tombstones.load())
+
+
+def test_delete_draft_is_tombstoned_and_not_repaired(
+    crud_client: TestClient, crud_models_root: Path
+) -> None:
+    from hal0.config.schema import ModelsConfig
+    from hal0.registry.discover import scan_and_register
+
+    _register(crud_client, crud_models_root)
+    draft = _drafter_gguf(crud_models_root)
+    assert crud_client.put("/api/models/tgt", json={"draft": str(draft)}).status_code == 200
+    assert crud_client.delete("/api/models/tgt/draft").status_code == 200
+    assert not draft.exists()
+
+    # The file comes back (a re-download); the deliberate removal still holds.
+    _drafter_gguf(crud_models_root)
+    registry = crud_client.app.state.model_registry
+    result = scan_and_register(registry, ModelsConfig(roots=[str(crud_models_root)]))
+    assert result["paired_drafts"] == []
+    assert registry.get("tgt").draft is None
+
+
+def test_unpair_via_symlinked_path_is_not_repaired_by_scan(
+    crud_client: TestClient, crud_models_root: Path, tmp_path: Path
+) -> None:
+    from hal0.config.schema import ModelsConfig
+    from hal0.registry.discover import scan_and_register
+
+    _register(crud_client, crud_models_root)
+    draft = _drafter_gguf(crud_models_root)
+    link = tmp_path / "elsewhere" / "link-dflash.gguf"
+    link.parent.mkdir()
+    link.symlink_to(draft)
+    assert crud_client.put("/api/models/tgt", json={"draft": str(link)}).status_code == 200
+    assert crud_client.put("/api/models/tgt", json={"draft": None}).status_code == 200
+
+    registry = crud_client.app.state.model_registry
+    result = scan_and_register(registry, ModelsConfig(roots=[str(crud_models_root)]))
+    assert result["paired_drafts"] == []
+    assert registry.get("tgt").draft is None
