@@ -212,14 +212,31 @@ def _hf_handler(
     meta_body: dict[str, Any] | None = None,
     tree_body: list[dict[str, Any]] | None = None,
     fail_with: type[Exception] | None = None,
+    search_status: int = 200,
+    search_body: list[dict[str, Any]] | None = None,
+    companion_trees: dict[str, list[dict[str, Any]]] | None = None,
+    search_calls: list[httpx.URL] | None = None,
 ):
-    """Build an httpx MockTransport handler for the inspect tests."""
+    """Build an httpx MockTransport handler for the inspect tests.
+
+    ``/api/models?author=…`` answers the companion-repo search; a companion
+    repo's ``/tree/main`` answers from ``companion_trees`` keyed by repo id.
+    """
 
     def handler(req: httpx.Request) -> httpx.Response:
         if fail_with is not None:
             raise fail_with("simulated transport failure")
         path = req.url.path
+        if path == "/api/models" and "author" in req.url.params:
+            if search_calls is not None:
+                search_calls.append(req.url)
+            return httpx.Response(
+                search_status, json=search_body if search_body is not None else []
+            )
         if path.endswith("/tree/main"):
+            repo = path.removeprefix("/api/models/").removesuffix("/tree/main")
+            if companion_trees is not None and repo in companion_trees:
+                return httpx.Response(200, json=companion_trees[repo])
             return httpx.Response(tree_status, json=tree_body or [])
         # Meta endpoint
         return httpx.Response(meta_status, json=meta_body or {})
@@ -430,6 +447,105 @@ def test_inspect_groups_split_gguf_into_one_variant_per_quant(
     assert [d["id"] for d in body["drafts"]] == ["dflash-M-NVFP4.gguf"]
 
 
+def _lfs(path: str, size: int) -> dict[str, Any]:
+    return {"path": path, "type": "file", "lfs": {"size": size}, "size": 134}
+
+
+def test_inspect_drafts_carry_hints_and_order(
+    inspect_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """In-repo drafters carry kind/variant hints and sort best-first."""
+    tree = [
+        _lfs("X-Q4_K_M.gguf", 9_000),
+        _lfs("mtp-X.gguf", 500),
+        _lfs("dflash-X-Q8_0.gguf", 900),
+        _lfs("X-LiLiCorr.gguf", 700),
+        _lfs("X-speculator.gguf", 600),
+    ]
+    _patch_httpx_transport(monkeypatch, _hf_handler(meta_body={"tags": []}, tree_body=tree))
+
+    r = inspect_client.post("/api/models/inspect", json={"hf_repo": "acme/X-GGUF"})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert [v["id"] for v in body["variants"]] == ["X-Q4_K_M.gguf"]
+    got = [(d["id"], d["kind_hint"], d["variant_hint"]) for d in body["drafts"]]
+    assert got == [
+        ("X-LiLiCorr.gguf", "dflash", "lilicorr"),
+        ("dflash-X-Q8_0.gguf", "dflash", "dflash"),
+        ("mtp-X.gguf", "mtp", "mtp"),
+        ("X-speculator.gguf", None, None),
+    ]
+    assert {d["source"] for d in body["drafts"]} == {"repo"}
+    assert {d["repo"] for d in body["drafts"]} == {"acme/X-GGUF"}
+    assert body["companion_repos"] == []
+
+
+def test_inspect_lists_companion_repo_drafters(
+    inspect_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A same-author sibling repo's GGUFs are listed as ``source == companion``."""
+    searches: list[httpx.URL] = []
+    handler = _hf_handler(
+        meta_body={"tags": []},
+        tree_body=[_lfs("X-Q4_K_M.gguf", 9_000)],
+        search_body=[
+            {"id": "nvidia/X-LiLiCorr-GGUF"},
+            {"id": "nvidia/X-GGUF"},
+            {"id": "nvidia/X-LiLiCorr-Other"},
+            {"id": "someone/X-LiLiCorr-GGUF"},
+            {"id": "nvidia/X-EAGLE3"},
+        ],
+        companion_trees={
+            "nvidia/X-LiLiCorr-GGUF": [_lfs("X-LiLiCorr-Q8_0.gguf", 800), _lfs("README.md", 1)],
+            "nvidia/X-EAGLE3": [{"path": "README.md", "type": "file", "size": 1}],
+        },
+        search_calls=searches,
+    )
+    _patch_httpx_transport(monkeypatch, handler)
+
+    r = inspect_client.post("/api/models/inspect", json={"hf_repo": "nvidia/X-GGUF"})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert len(searches) == 1
+    assert searches[0].params["author"] == "nvidia"
+    assert searches[0].params["search"] == "X"
+    assert [d["id"] for d in body["drafts"]] == ["X-LiLiCorr-Q8_0.gguf"]
+    draft = body["drafts"][0]
+    assert draft["source"] == "companion"
+    assert draft["repo"] == "nvidia/X-LiLiCorr-GGUF"
+    assert (draft["kind_hint"], draft["variant_hint"]) == ("dflash", "lilicorr")
+    # a matching repo with no GGUF contributes nothing and is not listed
+    assert body["companion_repos"] == ["nvidia/X-LiLiCorr-GGUF"]
+
+    # second inspect is served from the cache: no extra Hub search
+    r2 = inspect_client.post("/api/models/inspect", json={"hf_repo": "nvidia/X-GGUF"})
+    assert r2.json()["cached"] is True
+    assert r2.json()["companion_repos"] == ["nvidia/X-LiLiCorr-GGUF"]
+    assert len(searches) == 1
+
+
+def test_inspect_companion_search_failure_is_soft(
+    inspect_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failing companion search leaves the repo's own drafters, still a 200."""
+    _patch_httpx_transport(
+        monkeypatch,
+        _hf_handler(
+            meta_body={"tags": []},
+            tree_body=[_lfs("X-Q4_K_M.gguf", 9_000), _lfs("mtp-X.gguf", 500)],
+            search_status=500,
+        ),
+    )
+    r = inspect_client.post("/api/models/inspect", json={"hf_repo": "nvidia/X-GGUF"})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert [d["id"] for d in body["drafts"]] == ["mtp-X.gguf"]
+    assert body["companion_repos"] == []
+
+
 def test_inspect_reads_every_tree_page(
     inspect_client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
@@ -580,9 +696,9 @@ def test_inspect_caches_response_for_repeated_calls(
     assert r1.status_code == 200
     assert r2.status_code == 200
     assert r2.json()["cached"] is True
-    # Each fresh fetch issues two requests (meta + tree); a cached call
-    # issues none.
-    assert hits["count"] == 2
+    # Each fresh fetch issues three requests (meta, tree, companion search);
+    # a cached call issues none.
+    assert hits["count"] == 3
 
 
 def test_inspect_returns_502_when_hf_unreachable(

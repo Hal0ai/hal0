@@ -82,14 +82,30 @@ export interface ModelInspectFile {
   size: string
 }
 
+// A speculative-decoding drafter candidate. The hints come from the file name;
+// the real kind and the fit verdict come from the header (inspect-draft).
+export interface ModelInspectDraft {
+  id: string
+  // The repo holding the file: the inspected repo, or a companion repo.
+  repo: string
+  kind_hint: 'mtp' | 'dflash' | 'eagle3' | null
+  variant_hint: 'lilicorr' | 'dflash2' | 'dspark' | 'dflash' | 'eagle3' | 'mtp' | null
+  size_bytes: number
+  size: string
+  source: 'repo' | 'companion'
+}
+
 export interface ModelInspectResponse {
   repo: string
   cached: boolean
   variants: ModelInspectVariant[]
   // Vision projectors, offered beside the quant (never as one).
   mmproj: ModelInspectFile[]
-  // Speculative-decoding draft models shipped in the repo.
-  drafts: ModelInspectFile[]
+  // Speculative-decoding drafters, best first: in the repo and in same-author
+  // companion repos.
+  drafts: ModelInspectDraft[]
+  // Companion repos that held at least one drafter ("found in <repo>").
+  companion_repos: string[]
   tags: string[]
   metadata: {
     license: string
