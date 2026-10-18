@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed (2026-10-18). It amends ADR-0029 decisions 1 and 2 (one more file
+Accepted (2026-10-18, #PR). It amends ADR-0029 decisions 1 and 2 (one more file
 fact on the model, one profile tune renamed, one more model-layer flag) and
 supersedes ADR-0025 §5, which planned `CuratedModel.draft_file` and was never
 built. It lands after the runner pin moves to llama.cpp b11716
@@ -189,7 +189,8 @@ first, where:
 
 `kind_hint`/`variant_hint` come from the filename; the real kind and the fit
 verdict come from the header, which the dialog fetches (through
-`POST /api/models/inspect-draft {hf_repo, hf_filename, target_repo, target_filename}`)
+`POST /api/models/inspect-draft {hf_repo, hf_filename, draft_repo, draft_filename}`,
+where `hf_*` name the target and `draft_*` the drafter)
 only for the drafter actually selected, so changing the quant re-checks one
 pair of headers, not every candidate. Best-first order:
 `lilicorr > dflash2 > dspark > dflash > eagle3 > mtp > simple`, larger
@@ -215,7 +216,9 @@ take a host path and run the same check with `require_on_disk`.
 `metadata.draft` and keeps the file; `DELETE /api/models/{id}` removes the
 drafter with the model's other files (ADR-0026 adds `draft` to the file set it
 removes and tombstones); `DELETE /api/models/{id}/draft` removes only the
-drafter file and clears the fact.
+drafter file and clears the fact. An explicit unpair (`PUT {"draft": null}`)
+tombstones the drafter path (ADR-0026's rule for a removed projector), so a
+later scan does not pair it again; pairing the path lifts the tombstone.
 
 ### 5. What the operator sees
 
@@ -285,7 +288,9 @@ counter; on `/slots`, `speculative: true|false`.
   differ only in that override; the drawer shows `tok/s with / without` and
   the ratio from the results. Nothing estimates a multiplier from the
   acceptance rate. This is the last part to land and may ship in a
-  follow-up PR; everything else in this ADR stands without it.
+  follow-up PR; everything else in this ADR stands without it. Shipped state:
+  the bench pair is in that follow-up (it needs a harness capability that does
+  not exist yet), so the model drawer has no Measure button.
 
 ### 7. The conversion (ADR-0029 §7 pattern, one minor release)
 

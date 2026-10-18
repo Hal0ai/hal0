@@ -45,7 +45,7 @@ overrides for the handful that don't map 1:1 onto their route live in
 
 ### Slot, model and profile tools
 
-The tune lives on the profile. `slot_create` and `slot_edit` take a `profile` name, the model and placement; a tuning key is refused with `slot.tuning_key_denied`. `model_edit`, `model_register` and `model_validate` take the file facts as top-level fields — `chat_template`, `tokenizer_repo`, `mtp` (the file has MTP heads) and `jinja`; a `defaults` object is `422 model.defaults_removed` and a tuning key is `422 model.tune_key_removed`. `profile_create`, `profile_update` and `profile_generate` carry `flags`, `ctx_size`, `enable_thinking`, `vision` (`auto`/`off`), `mtp` (`auto`/`off`) and `runner`. There is no tool that sets a slot's context window or flags.
+The tune lives on the profile. `slot_create` and `slot_edit` take a `profile` name, the model and placement; a tuning key is refused with `slot.tuning_key_denied`. `model_edit`, `model_register` and `model_validate` take the file facts as top-level fields — `chat_template`, `tokenizer_repo`, `mtp` (the file has MTP heads) and `jinja`; a `defaults` object is `422 model.defaults_removed` and a tuning key is `422 model.tune_key_removed`. `profile_create`, `profile_update` and `profile_generate` carry `flags`, `ctx_size`, `enable_thinking`, `vision` (`auto`/`off`), `speculation` (`auto`/`off`/`ngram`) and `runner`. A model's drafter is the file fact `draft` on `model_edit` (a path, or null to unpair); `model_pull` takes `draft_filename` and `draft_repo`, and `model_inspect` returns `drafts`. There is no tool that sets a slot's context window or flags.
 
 ### Autonomous — read (no approval)
 

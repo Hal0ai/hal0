@@ -92,7 +92,7 @@ profiles slots run under. A profile is the whole tune, so its create/edit
 form has a field for each part: **Context** (tokens; empty means the model's
 native window, capped at 32768, or 8192 when the model reports no native
 window), **Thinking** (Default, On or Off; Default is off unless the request
-asks), **Vision** (Auto or Off), **MTP** (Auto or Off), **Flags**, and an
+asks), **Vision** (Auto or Off), **Speculation** (Auto, Off or N-gram), **Flags**, and an
 optional **Runtime**. See
 [Capabilities & profiles](/docs/concepts/capabilities-and-profiles) for what
 each field does and how a launch command is assembled from them.
@@ -193,7 +193,7 @@ The drawer edits facts only. It is organized top to bottom as:
   paths.
 
 A note at the top of the drawer says where the rest went: flags, context
-window, thinking, vision and MTP on/off are set on a profile, and a slot
+window, thinking, vision and speculation are set on a profile, and a slot
 picks the profile.
 
 Saving writes only the fields that changed. The drawer's footer warns that
@@ -221,7 +221,9 @@ direction over the registry's legacy `mtp` tag, and leaving it at Auto falls
 back to that tag when present. There is no filename-based MTP sniff — an
 uncurated pull with neither the tag nor an explicit fact has no heads as far
 as hal0 knows. Whether a slot *uses* the heads is the profile's `speculation`
-(`auto`, `off` or `ngram`). The Models list's MTP filter **chip** is a plain OR of the
+(`auto`, `off` or `ngram`). A model can also carry a paired drafter file, which
+`auto` prefers over the heads; see
+[Drafters](/docs/guides/pull-and-register-models#drafters). The Models list's MTP filter **chip** is a plain OR of the
 explicit fact being On and the legacy tag (`ui/src/dash/model-sort.js`), so a
 model tagged `mtp` still shows the chip even when its fact is explicitly Off.
 

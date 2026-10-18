@@ -123,11 +123,11 @@ first, then deduplicated last-wins per flag:
    `auto`), `--jinja` (added when the runner supports it, unless the model's
    `jinja` fact is `false` or the profile is an embedding or reranking one),
    and any family quirks.
-3. **profile** — the MTP draft bundle when MTP is in effect, then the
-   profile's `flags`. A profile's own `--spec-draft-*` values follow the
+3. **profile** — the draft bundle for the speculation kind in effect, then
+   the profile's `flags`. A profile's own `--spec-draft-*` values follow the
    bundle, so they win.
-4. **slot** — `-ngl`, `--threads`, `--metrics`, and, when MTP is in effect,
-   the draft device derived from the slot's own device.
+4. **slot** — `-ngl`, `--threads`, `--metrics`, and, when a draft type is in
+   effect, the draft device derived from the slot's own device.
 
 `GET /api/slots/{name}/resolved` returns the resolved argv with each flag
 labelled `base`, `model`, `profile` or `slot`, and the slot drawer's
@@ -311,12 +311,14 @@ matches their batch size because a pooled embedding or rerank pass has to run
 the whole input in one physical micro-batch — a smaller ubatch truncates or
 fails on longer inputs.
 
-## MTP: the model has heads, the profile decides
+## Speculation: the model carries the draft, the profile decides
 
-Multi-token prediction (speculative decoding against the model's own draft
-heads) takes two inputs, one from the model and one from the profile:
+Speculative decoding (a drafter, or the model's own MTP draft heads) takes two
+inputs, one from the model and one from the profile:
 
-- **The model's fact: does this file have MTP heads?** An explicit `mtp`
+- **The model's facts: a paired drafter, and whether the file has MTP
+  heads.** A drafter is a separate file paired like the projector (see
+  [Drafters](/docs/guides/pull-and-register-models#drafters)). For the heads, an explicit `mtp`
   fact on the model row wins in either direction; left unset, hal0 falls
   back to the registry's `mtp` tag when present. There is no filename- or
   id-based sniff — an uncurated pull with neither the tag nor an explicit
@@ -324,8 +326,9 @@ heads) takes two inputs, one from the model and one from the profile:
   as the **MTP heads** file fact; it is not a switch for whether a slot
   drafts.
 - **The profile's choice: `speculation = "auto"`, `"off"` or `"ngram"`.**
-  `auto` (the default) drafts when the model has heads and the runner supports
-  MTP; `off` never speculates; `ngram` uses n-gram lookup and needs no heads.
+  `auto` (the default) drafts with the paired drafter when the runner can run
+  it, else with the heads when the model has them and the runner supports MTP;
+  `off` never speculates; `ngram` uses n-gram lookup and needs no file.
   This field used to be `mtp`; `hal0 update` rewrites it once, and an API
   or CLI write that still sends `mtp` is refused with a 422 naming
   `speculation`.
@@ -338,8 +341,8 @@ hal0 logs `mtp.auto_off_model_ineligible` rather than launching a draft that
 would crash llama-server (`context type MTP requested but model doesn't
 contain MTP layers`).
 
-When MTP is in effect, hal0 adds a tuned draft-flag bundle to the profile
-layer of the launch command, and the draft device comes from the slot's own
+When speculation is in effect, hal0 adds a tuned draft-flag bundle for the kind
+in use to the profile layer of the launch command, and the draft device comes from the slot's own
 device. A profile's own `--spec-draft-*` flags override the bundle's values.
 
 ## Seeded slots and aliases

@@ -108,13 +108,13 @@ hal0 slot create embed \
    `cpu → cpu`) — as of v1.0, **the slot owns its hardware grid**
    (`device`, `n_gpu_layers`, `threads`, `binary`, `image_pin`), not the
    profile it references. The profile supplies the tune: flags, context
-   window, thinking default, vision and MTP.
+   window, thinking default, vision and speculation.
 
 5. **`--port` / `-p`** — the slot's port. Omit it and hal0 auto-assigns
    the next free port.
 
 6. **`--profile`** — the profile: the slot's whole tune (flags, context
-   window, thinking, vision, MTP). Omit it and hal0 infers the profile the
+   window, thinking, vision, speculation). Omit it and hal0 infers the profile the
    slot's `--type` implies: `embedding` → `embedding` (`--embedding`),
    `reranking` → `reranking` (`--reranking`), `tts`/`transcription` → the
    engine hal0 ships for the chosen device (Kokoro on CPU, Qwen3-TTS on ROCm,
@@ -301,7 +301,7 @@ hardware grid, profile) take effect on the next `restart`. A slot has no
 flags or context size of its own to edit; to change them, edit the profile it
 runs (`hal0 profile edit <name> --ctx-size N`) or point the slot at another
 one. Editing a profile affects every slot that runs it, and each picks up
-changed flags, context window, vision or MTP at its next restart. A changed
+changed flags, context window, vision or speculation at its next restart. A changed
 profile `runner` does not reach a slot that way: re-apply the profile to each
 slot with `hal0 slot edit <slot> --profile <name>`, then restart it.
 

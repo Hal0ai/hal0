@@ -88,7 +88,7 @@ copy — they can't be edited or deleted, only cloned.
 | `ctx_size` | int \| null | `null` | `128`–`16777216`. `null` = the model's native window, dense-capped at 32768, else 8192. |
 | `enable_thinking` | bool \| null | `null` | request-time reasoning default for slots running this profile |
 | `vision` | `"auto"\|"off"` | `"auto"` | `auto` loads the model's mmproj when it has one |
-| `mtp` | `"auto"\|"off"` | `"auto"` | `auto` drafts when the model has MTP heads and the runner supports it |
+| `speculation` | `"auto"\|"off"\|"ngram"` | `"auto"` | `auto` drafts with the model's paired drafter when the runner can run it, else with its MTP heads when it has them and the runner supports it; `ngram` uses n-gram lookup and needs no file; `off` never speculates. Replaces `mtp`: a stored or posted `mtp` is refused (`422 profiles.field_renamed` over the API) |
 | `runner` | str \| null | `null` | optional `RUNNER_IMAGES` registry key; applying the profile sets the slot's `binary` to this key and, for a single-backend runner, also derives the slot's `device` (profile wins). Validated on write — an unknown key 422s `profiles.unknown_runner`. `null` = flags-only tune (every seed profile). |
 | `cloned_from` | str \| null | `null` | provenance |
 | `intent` | str | `""` | dashboard card headline |
@@ -151,7 +151,7 @@ slug. `STACK_SCHEMA_VERSION_CURRENT = 3`.
 | `provider` | str \| null | `null` | — | — |
 | `capabilities` | list[table] | `[]` | — | see `StackCapabilityRow` below |
 
-A slot entry names a model, a profile and placement. It carries no tuning: the profile owns `vision`, `mtp`, `enable_thinking` and the flags.
+A slot entry names a model, a profile and placement. It carries no tuning: the profile owns `vision`, `speculation`, `enable_thinking` and the flags.
 
 ### `StackCapabilityRow`
 

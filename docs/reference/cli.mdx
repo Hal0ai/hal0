@@ -159,7 +159,7 @@ hardware backend. The hardware backend is selected with `--hardware`, and stored
 | Command | Args | Flags |
 |---|---|---|
 | `model list` | — | `--json` |
-| `model pull <ref>` | `ref` | `--cancel` |
+| `model pull <ref>` | `ref` | `--cancel`, `--draft` (a drafter .gguf to download with the model), `--draft-repo` (the repo holding `--draft`; default the model's own) |
 | `model default <ref>` | `ref` | `--clear` |
 | `model update [ref]` | optional `ref` | `--check`, `--refresh` (only meaningful with `--check`) |
 | `model rm <ref>` | `ref` | `--force`/`-f`, `--keep-files` (remove only the registry entry; files stay on disk, hidden from scans) |

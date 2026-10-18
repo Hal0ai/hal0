@@ -54,7 +54,7 @@ fields:
 | `capabilities` | Embed/rerank/stt/tts/vision capability children carried by this row, each with its own `device`/`provider`/`model`/`enabled`. |
 
 A row carries no tuning. The context window, flags, thinking default, vision
-and MTP all belong to the profile the row names; to run one model with
+and speculation all belong to the profile the row names; to run one model with
 different tuning, name a different profile.
 
 A stack also embeds a transport-safe copy of every profile and model it

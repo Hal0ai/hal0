@@ -64,7 +64,7 @@ decides *how* a model runs in a slot, and nothing about *where*:
 | `ctx_size` | The context window in tokens (128 to 16,777,216). Unset means the model's native window, capped at 32768, or 8192 when the model reports none. |
 | `enable_thinking` | The request-time reasoning default for requests the slot serves. A request can always override it; unset means off unless the request asks. |
 | `vision` | `auto` loads the model's multimodal projector when it has one; `off` never does. |
-| `speculation` | `auto` drafts with the model's MTP heads when it has them and the runner supports it; `ngram` uses n-gram lookup and needs no heads; `off` never speculates. This field used to be `mtp`; `hal0 update` rewrites it once, and a write that still sends `mtp` is refused with a 422 naming `speculation`. |
+| `speculation` | `auto` drafts with the model's paired drafter when it has one and the runner can run it, else with its MTP heads when it has them and the runner supports it; `ngram` uses n-gram lookup and needs no file; `off` never speculates. This field used to be `mtp`; `hal0 update` rewrites it once, and a write that still sends `mtp` is refused with a 422 naming `speculation`. |
 | `runner` | Optional runtime, a `RUNNER_IMAGES` registry key. See "Profiles can carry a runtime" below. |
 | `intent`, `cloned_from` | Informational: the card headline, and the profile this one was copied from. |
 
@@ -276,14 +276,18 @@ never deduped, since llama-server treats repeats of those additively):
    from the profile" in [Slots](/docs/concepts/slots#who-owns-what-slot-model-profile).
 2. **model** — facts about the file: family quirks, `--jinja` (added when the
    runner supports it, unless the model's `jinja` fact is `false` or the
-   profile is an embedding or reranking one), `--chat-template-file`, and
-   `--mmproj` (only when the profile's `vision` is `auto`).
-3. **profile** — the MTP draft bundle when MTP is in effect, then the
-   profile's `flags`. Because the flags come second, a profile's own
-   `--spec-draft-*` values win over the bundle.
+   profile is an embedding or reranking one), `--chat-template-file`,
+   `--mmproj` (only when the profile's `vision` is `auto`), and, when
+   speculation is in effect, `--spec-type` (`draft-<kind>` with
+   `--spec-draft-model <drafter>` for a paired drafter, `draft-mtp` for MTP
+   heads).
+3. **profile** — the draft bundle for the kind in effect (or the n-gram
+   bundle for `speculation = "ngram"`), then the profile's `flags`. Because
+   the flags come second, a profile's own `--spec-draft-*` values win over the
+   bundle. `--spec-type` itself is never allowed in `flags`.
 4. **slot** — the hardware grid: `-ngl` and `--threads` from
-   `n_gpu_layers`/`threads`, `--metrics`, and, when MTP is in effect,
-   `--spec-draft-device` derived from the slot's own device.
+   `n_gpu_layers`/`threads`, `--metrics`, and, when a draft type is in
+   effect, `--spec-draft-device` derived from the slot's own device.
 
 The slot Edit drawer's **resolved command** panel shows the fully assembled
 argv with a per-flag provenance badge (`base`, `model`, `profile` or `slot`),
@@ -305,28 +309,43 @@ about. The model layer carries a code-shipped table of per-family overrides
 to the model layer. It ships empty today, so no family currently adds flags;
 a family-specific recipe is a profile you pick.
 
-## MTP: the model has heads, the profile decides
+## Speculation: the model carries the draft, the profile decides
 
-MTP (multi-token prediction / speculative decoding) takes two inputs:
+Speculative decoding takes two inputs, one from the model and one from the
+profile:
 
-1. **Model: does the file have MTP heads?** An explicit `mtp` fact on the
-   model row wins in either direction. Left unset, the registry `mtp` tag
-   decides. There is no filename-based sniff.
+1. **Model: what does the file carry?** Two file facts. `draft` is the path
+   of a paired drafter file (hal0 records its `draft_kind` and variant from the
+   file's header), see [Drafters](/docs/guides/pull-and-register-models#drafters).
+   `mtp` says the file has MTP heads: an explicit `mtp` fact on the model row
+   wins in either direction, and left unset the registry `mtp` tag decides.
+   There is no filename-based sniff.
 2. **Profile: `speculation = "auto"`, `"off"` or `"ngram"`.** `auto` (the
-   default) drafts when the model has heads *and* the launching runner declares
-   MTP support; `ngram` uses n-gram lookup; `off` never drafts. MTP is also never used in embedding or reranking mode.
+   default) drafts with the paired drafter when the launching runner can run
+   it, else with the MTP heads when the model has them *and* the runner
+   declares MTP support, else not at all. `ngram` uses llama.cpp's n-gram
+   lookup, needs no file and ignores any drafter; `off` never drafts.
+   Speculation is never used in embedding or reranking mode.
 
-A slot has no MTP setting. To stop one slot drafting, give it a profile with
-`speculation = "off"`. Under `auto`, a model without heads launches without a draft
+The order is fixed: a paired drafter beats embedded MTP heads, which beat
+nothing. A drafter the runner image cannot run (a LiLiCorr drafter needs
+llama.cpp build b11669 or newer) is reported as `unavailable_reason` on the
+slot's `metrics.spec`, and the launch falls back as above.
+
+A slot has no speculation setting. To stop one slot drafting, give it a profile
+with `speculation = "off"`. Under `auto`, a model without heads launches without a draft
 (hal0 logs `mtp.auto_off_model_ineligible`), so there is no way to force
 llama-server into the "model doesn't contain MTP layers" refusal.
 
 <Aside type="tip">
-When MTP is in effect, hal0 merges a tuned speculative-decoding flag
-bundle into the profile layer as **defaults only** — any `--spec-draft-*`
-flag in the profile's own `flags` wins over the bundle. The bundle's draft
-device (`--spec-draft-device`) is set by the slot layer from the slot's own
-device, and a profile may not set it.
+When speculation is in effect, hal0 merges a tuned flag bundle for the
+kind in use into the profile layer as **defaults only** — any `--spec-draft-*`
+flag in the profile's own `flags` wins over the bundle. The draft device
+(`--spec-draft-device`) is set by the slot layer from the slot's own device,
+and a profile may not set it. A profile may not carry `--spec-type` either:
+the write is refused with `profiles.model_fact_flag_denied` and a hint to use
+`speculation`. `hal0 update` removes a `--spec-type` it finds in an existing
+profile's `flags` (an `ngram-*` value becomes `speculation = "ngram"`).
 </Aside>
 
 In the dashboard, the MTP choice is the **MTP** row of the profile form
