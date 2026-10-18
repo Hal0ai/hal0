@@ -260,13 +260,53 @@ def _pair_drafters(
         for d in sorted(drafters, key=lambda d: d.path.name):
             if d.path in paired or skipped is None:
                 continue
-            if not targets:
+            if d.info is None:
+                reason = "drafter_unreadable"
+            elif not targets:
                 reason = "drafter_without_target"
             elif d.path in fitting:
                 reason = "drafter_unpaired"
             else:
                 reason = "drafter_mismatch"
             skipped.append({"path": str(d.path), "reason": reason})
+
+
+def preview_drafter_pairing(
+    registry: ModelRegistry | None,
+    rows: list[dict[str, Any]],
+    drafters: list[_DrafterFile],
+) -> tuple[list[dict], list[dict]]:
+    """``(skipped, paired_drafts)`` for the scan preview; sets ``row["draft"]``.
+
+    ``rows`` are preview rows (``resolved_path``); ``drafters`` the drafter
+    files the preview walk set aside. No writes.
+    """
+    by_dir: dict[Path, list[_DrafterFile]] = {}
+    for d in drafters:
+        by_dir.setdefault(d.path.parent, []).append(d)
+    cands = [
+        CandidateModel(
+            path=Path(r["resolved_path"]),
+            size_bytes=0,
+            suggested_id="",
+            curated_match=None,
+            capability_guess="",
+        )
+        for r in rows
+    ]
+    registered: list[tuple[str, Path]] = []
+    if registry is not None:
+        for m in registry.list():
+            if not m.draft and m.path.lower().endswith(".gguf"):
+                with contextlib.suppress(OSError):
+                    registered.append((m.id, Path(m.path).resolve()))
+    skipped: list[dict] = []
+    pairs: list[tuple[str, Path]] = []
+    _pair_drafters(cands, by_dir, skipped, registered, pairs)
+    for row, cand in zip(rows, cands, strict=True):
+        if cand.draft is not None:
+            row["draft"] = str(cand.draft)
+    return skipped, [{"model_id": mid, "draft": str(p)} for mid, p in pairs]
 
 
 def draft_facts(draft: Path) -> tuple[str, dict[str, Any]] | None:
@@ -623,6 +663,8 @@ def register_candidate(registry: ModelRegistry, candidate: CandidateModel) -> Mo
             model.draft = str(candidate.draft)
             model.draft_kind = facts[0]
             model.metadata = {**model.metadata, "draft": facts[1]}
+        else:
+            log.warning("discover.draft_unclassified path=%s", candidate.draft)
     # Multi-shard group (plan §7.1c a4): the shard list rides in metadata as
     # the lossless fallback for any registry backend, plus a best-effort
     # `model_file` row per shard/mmproj on the SQLite backend (see

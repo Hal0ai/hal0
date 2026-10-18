@@ -606,15 +606,32 @@ def missing_registry_rows(
 
 
 def preview_scan_rows(
-    raw_paths: list[Any], recursive: bool, extensions: set[str]
+    raw_paths: list[Any],
+    recursive: bool,
+    extensions: set[str],
+    *,
+    registry: Any = None,
+    skipped: list[dict[str, Any]] | None = None,
+    paired_drafts: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """Walk ``raw_paths`` and return :class:`DetectionResult` rows (no mutation).
 
     Inspection-only: selects files matching ``extensions`` when walking dirs,
     detects each, and dedups by resolved path then by (name, size, kind) so HF
     cache's reblobbed snapshots collapse to one row per distinct model.
+
+    Speculative-decoding drafters (ADR-0031 §4 Scan) are not rows: a fitting one
+    sets ``draft`` on its model's row (or lands in ``paired_drafts`` for an
+    already-registered model) and the rest go to ``skipped`` as
+    ``{path, reason}``.
     """
-    from hal0.registry.discover import is_skippable
+    from hal0.registry.discover import (
+        _scan_drafter,
+        is_skippable,
+        preview_drafter_pairing,
+    )
+
+    drafters = []
 
     preview: list[dict[str, Any]] = []
     seen: set[Path] = set()
@@ -660,6 +677,10 @@ def preview_scan_rows(
             if resolved in seen:
                 continue
             seen.add(resolved)
+            drafter = _scan_drafter(p, resolved)
+            if drafter is not None:
+                drafters.append(drafter)
+                continue
             result: DetectionResult = detect(p)
             try:
                 size_bytes = resolved.stat().st_size
@@ -696,6 +717,12 @@ def preview_scan_rows(
             continue
         by_sig.add(sig)
         unique.append(row)
+    if drafters:
+        drafter_skipped, pairs = preview_drafter_pairing(registry, unique, drafters)
+        if skipped is not None:
+            skipped.extend(drafter_skipped)
+        if paired_drafts is not None:
+            paired_drafts.extend(pairs)
     return unique
 
 

@@ -252,16 +252,31 @@ async def scan_preview(request: Request) -> dict[str, Any]:
     cfg = load_hal0_config()
     extensions = {e.lower() for e in cfg.models.file_extensions}
 
-    preview = _svc.preview_scan_rows(raw_paths, recursive, extensions)
+    registry = request.app.state.model_registry
+    skipped: list[dict[str, Any]] = []
+    paired_drafts: list[dict[str, Any]] = []
+    preview = _svc.preview_scan_rows(
+        raw_paths,
+        recursive,
+        extensions,
+        registry=registry,
+        skipped=skipped,
+        paired_drafts=paired_drafts,
+    )
 
     # Drift view: existing registry rows whose backing file is now absent.
     # Surfaced so the operator/UI can see what a `{"prune": true}` scan would
     # remove BEFORE committing. ``referenced`` flags rows a slot/stack still
     # points at — those are protected from prune (repair, don't delete).
-    registry = request.app.state.model_registry
     missing = _svc.missing_registry_rows(registry)
 
-    return {"preview": preview, "count": len(preview), "missing": missing}
+    return {
+        "preview": preview,
+        "count": len(preview),
+        "missing": missing,
+        "skipped": skipped,
+        "paired_drafts": paired_drafts,
+    }
 
 
 @router.post("/scan")
