@@ -10,6 +10,7 @@ and injects the registry, so there is no clock or hidden global here.
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import tomllib
@@ -193,6 +194,23 @@ def _refuse_old_schema(data: dict[str, Any]) -> None:
         )
 
 
+def _convert_profiles(data: dict[str, Any]) -> dict[str, Any]:
+    """A copy of ``data`` whose embedded profiles have had the ADR-0031 §7
+    rename applied (a hal0 1.4.0 stack export embeds profiles with ``mtp``).
+    The checksum is still verified against the stack body as exported."""
+    from hal0.config.migrations.speculation_rename import convert_profile_body
+
+    stack = data.get("stack")
+    profiles = stack.get("profiles") if isinstance(stack, dict) else None
+    if not isinstance(profiles, dict):
+        return data
+    converted = copy.deepcopy(profiles)
+    for name, body in converted.items():
+        if isinstance(body, dict):
+            convert_profile_body(str(name), body)
+    return {**data, "stack": {**stack, "profiles": converted}}
+
+
 def parse_envelope(data: Any) -> StackEnvelope:
     """Validate the wire shape. Raises BadRequest on a non-envelope/invalid input."""
     if not isinstance(data, dict) or data.get("kind") != ENVELOPE_KIND:
@@ -203,7 +221,7 @@ def parse_envelope(data: Any) -> StackEnvelope:
         )
     _refuse_old_schema(data)
     try:
-        return StackEnvelope.model_validate(data)
+        return StackEnvelope.model_validate(_convert_profiles(data))
     except Exception as exc:
         raise BadRequest(
             f"invalid stack envelope: {exc}",

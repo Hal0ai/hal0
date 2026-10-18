@@ -1129,3 +1129,21 @@ def test_conversion_ends_on_speculation_through_the_real_chain() -> None:
     assert all("mtp" not in entry for entry in profiles.values())
     assert str(path) in report.written
     assert list(path.parent.glob("profiles.toml.bak-*"))
+
+
+def test_dry_run_previews_the_speculation_rename_without_writing() -> None:
+    """``hal0 profile migrate`` (no ``--apply``) names the profiles the rename
+    would change and leaves profiles.toml alone."""
+    production_install()
+    path = paths.profiles_toml()
+    data = tomllib.loads(path.read_text()) if path.exists() else {}
+    data.setdefault("profile", {})["quiet"] = {"flags": "-fa on", "mtp": "off"}
+    write_toml(path, data)
+    before = path.read_bytes()
+
+    report = pca.migrate_profile_centric(dry_run=True)
+
+    assert "quiet" in report.speculation_renamed
+    assert any("quiet" in line for line in report.lines() if "speculation" in line)
+    assert path.read_bytes() == before
+    assert not list(path.parent.glob("profiles.toml.bak-*"))

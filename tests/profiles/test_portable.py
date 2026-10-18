@@ -445,3 +445,37 @@ class TestPublishedAddonRoundTrip:
             exported_at="t",
         )
         assert again["checksum"] == published["checksum"]
+
+
+# ── a v1.4.0 envelope (schema 2, profile ``mtp``) imports, converted ───────
+
+
+def _v140_envelope(**body: object) -> dict:
+    """What hal0 1.4.0 exported: schema 2 with the profile's ``mtp`` tune."""
+    return {
+        "kind": ENVELOPE_KIND,
+        "schema_version": 2,
+        "hal0_version": "1.4.0",
+        "exported_at": "t",
+        "name": "old",
+        "profile": {"flags": "-fa on", **body},
+    }
+
+
+class TestV140EnvelopeImport:
+    def test_mtp_off_lands_as_speculation_off(self, tmp_hal0_home: str) -> None:
+        cat = _catalog(tmp_hal0_home)
+        import_profile(_v140_envelope(mtp="off"), "old", cat)
+        assert cat.resolve("old").speculation == "off"
+
+    def test_mtp_auto_lands_as_the_auto_default(self, tmp_hal0_home: str) -> None:
+        cat = _catalog(tmp_hal0_home)
+        import_profile(_v140_envelope(mtp="auto"), "old", cat)
+        assert cat.resolve("old").speculation == "auto"
+
+    def test_a_spec_type_flag_converts_too(self, tmp_hal0_home: str) -> None:
+        env = _v140_envelope(flags="-fa on --spec-type ngram-mod")
+        parsed = parse_envelope(env)
+        assert parsed.profile.speculation == "ngram"
+        assert parsed.profile.flags == "-fa on"
+        assert env["profile"]["flags"] == "-fa on --spec-type ngram-mod"  # input untouched

@@ -110,7 +110,10 @@ fact — except that a `runner`-carrying profile CAN flip a GPU slot's `device` 
 time (the profile wins within a device class): see
 [Providers, profiles & devices](/docs/reference/providers-profiles-devices/).
 The `.hal0profile.json` export envelope is schema 2; a schema-1 envelope is refused
-(`profiles.envelope_schema_unsupported`) — re-export it.
+(`profiles.envelope_schema_unsupported`) — re-export it. A schema-2 envelope
+exported by hal0 1.4.0 still carries `mtp`; import converts it the way the
+upgrade converts `profiles.toml` (`mtp = "off"` becomes `speculation = "off"`,
+`--spec-type` leaves `flags`), and so does a stack import's embedded profiles.
 </Aside>
 
 Profiles no longer carry an `image` field — image resolution is slot-owned

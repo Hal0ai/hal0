@@ -99,8 +99,13 @@ def _strip_spec_type(name: str, entry: dict[str, Any]) -> bool:
     return True
 
 
-def _rewrite(name: str, entry: dict[str, Any]) -> bool:
-    """Rewrite one profile entry in place; True when it changed."""
+def convert_profile_body(name: str, entry: dict[str, Any]) -> bool:
+    """Rewrite one profile body in place; True when it changed.
+
+    The per-profile mapping this converter applies to ``profiles.toml``,
+    shared with the profile and stack envelope import (a 1.4.0 export carries
+    ``mtp``), so the file and the envelope convert identically.
+    """
     renamed = _rename_mtp(entry)
     stripped = _strip_spec_type(name, entry)
     return renamed or stripped
@@ -132,7 +137,7 @@ def convert(path: Path, *, dry_run: bool) -> RenameReport:
     changed = sorted(
         name
         for name, entry in profiles.items()
-        if isinstance(entry, dict) and _rewrite(name, entry)
+        if isinstance(entry, dict) and convert_profile_body(name, entry)
     )
     if not changed or dry_run:
         return RenameReport(changed=changed)
