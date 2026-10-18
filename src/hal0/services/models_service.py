@@ -2299,13 +2299,19 @@ def stamp_draft_fact(
     """Write the derived drafter facts into a model write body, in place.
 
     Call after :func:`screen_draft_write` (``info`` is its result). A body that
-    does not mention ``draft`` is untouched. Setting a path writes
+    does not mention ``draft`` is untouched, except that a replacing
+    ``metadata`` keeps the stored ``metadata["draft"]``. Setting a path writes
     ``draft_kind`` and ``metadata["draft"]`` (the header facts plus the file's
     ``size_bytes``); clearing it (``null``) clears both. ``metadata`` is a flat
     replace in the registry, so it is rebuilt from the body's own, else the
     stored one.
     """
     if "draft" not in body:
+        # ``metadata`` is a flat replace: keep the drafter facts the caller
+        # did not mention so they stay in step with the draft columns.
+        kept = (stored_metadata or {}).get("draft")
+        if isinstance(body.get("metadata"), dict) and kept is not None:
+            body["metadata"] = {**body["metadata"], "draft": kept}
         return
     metadata = dict(body.get("metadata") or stored_metadata or {})
     draft = body["draft"]

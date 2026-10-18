@@ -1341,6 +1341,18 @@ def test_put_draft_null_unpairs_and_keeps_file(
     assert draft.is_file()
 
 
+def test_put_metadata_keeps_draft_metadata(crud_client: TestClient, crud_models_root: Path) -> None:
+    _register(crud_client, crud_models_root)
+    draft = _drafter_gguf(crud_models_root)
+    assert crud_client.put("/api/models/tgt", json={"draft": str(draft)}).status_code == 200
+    r = crud_client.put("/api/models/tgt", json={"metadata": {"note": "x"}})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["metadata"]["note"] == "x"
+    assert body["metadata"]["draft"]["variant"] == "dflash"
+    assert body["draft"] == str(draft)
+
+
 def test_delete_draft_route_removes_file_and_clears_fact(
     crud_client: TestClient, crud_models_root: Path
 ) -> None:
