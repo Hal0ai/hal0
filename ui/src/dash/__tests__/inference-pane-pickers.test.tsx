@@ -324,14 +324,17 @@ afterEach(() => {
 })
 
 describe('ModelPicker (card-dropdowns Task 1)', () => {
-  it('renders two-line rows: name + modality, then quant · size · runtime (no used-by)', () => {
+  it('renders two-line rows: name + modality, then quant · runtime (no size text, no used-by)', () => {
     const { host } = mount(
       <ModelPicker s={SLOT} models={MODELS} allSlots={ALL_SLOTS} disabled={false} onSwap={() => {}} />,
     )
     openMenu(host, 'chat')
     const row = optionById(host, 'm1')!
     expect(row.textContent).toContain('Q8_0')
-    expect(row.querySelector('.rsel-option-desc')!.textContent).toContain('2.6 GB')
+    // The file size is NOT repeated as plain text: the fit chip (`~N GB`)
+    // already says how much memory the row needs, and two sizes side by side
+    // read as a duplicate.
+    expect(row.querySelector('.rsel-option-desc')!.textContent).not.toContain('2.6 GB')
     expect(row.querySelector('.rsel-option-desc')!.textContent).toContain('Q8_0')
     expect(row.textContent).not.toContain('used by')
     // vision renders as an eye icon, not text, on line 1.

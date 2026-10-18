@@ -89,6 +89,10 @@ applying. Add those subsections to a version's section to surface them; see
 ### Fixed
 
 - **A paired DFlash or EAGLE-3 drafter no longer aborts the slot at load.** The slot layer pinned the drafter to one device while the model itself was free to span every device the runner sees, and those drafter kinds borrow the model's embedding and output tensors, so llama-server stopped with `pre-allocated tensor (output.weight) in a buffer ... that cannot run the operation`. A drafter file now follows the model's devices; only embedded MTP heads still get `--spec-draft-device` (ADR-0031, amended) (#2766).
+- **The slot card's model picker no longer shows the file size twice.** Each
+  row listed the model's size as plain text right beside the fit chip, which
+  already reads `~N GB`. The plain figure is gone; the fit chip stays, and the
+  model drawer's facts band still shows the exact size.
 
 ## [1.4.0] — 2026-10-16
 
