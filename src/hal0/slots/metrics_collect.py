@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from typing import Any
 
 from hal0.slots.naming import slot_container_name, slot_token_for, slot_unit_name
@@ -103,6 +104,29 @@ def local_tps(app_state: Any, window_s: float = 5.0) -> dict[str, float]:
     if not store:
         return {}
     return {name: tps_from_events(events, window_s) for name, events in store.items()}
+
+
+def local_spec_acceptance(app_state: Any, window_s: float = 30.0) -> dict[str, float]:
+    """Per-slot draft acceptance over the last ``window_s`` seconds.
+
+    Reads the ``spec_events`` deques of ``(monotonic_ts, draft_n, accepted_n)``
+    the v1 proxy fills from each completion's ``timings``. A slot with no draft
+    in the window is absent, so the UI shows '—' rather than a made-up 0.
+    """
+    store = getattr(app_state, "spec_events", None)
+    if not store:
+        return {}
+    cutoff = time.monotonic() - window_s
+    out: dict[str, float] = {}
+    for name, events in store.items():
+        drafted = accepted = 0
+        for ts, d, a in list(events):
+            if ts >= cutoff:
+                drafted += d
+                accepted += a
+        if drafted > 0:
+            out[name] = accepted / drafted
+    return out
 
 
 def local_ttft(app_state: Any) -> dict[str, dict[str, float]]:
@@ -222,6 +246,11 @@ async def llama_metrics(port: int) -> dict[str, Any]:
         # Kept for completeness in case a future llama.cpp reintroduces it;
         # current master (b9279) does not emit this gauge.
         "llamacpp:kv_cache_usage_ratio": ("kv_cache_usage", float),
+        # Speculative decoding totals (ADR-0031 §6); absent on a server that
+        # never drafted.
+        "llamacpp:spec_decode_num_draft_tokens_total": ("spec_draft_tokens", int),
+        "llamacpp:spec_decode_num_accepted_tokens_total": ("spec_accepted_tokens", int),
+        "llamacpp:spec_decode_num_drafts_total": ("spec_drafts", int),
     }
     # Duck-typed: any object with a status_code + text attr (real httpx
     # Response or a test stub) passes; exceptions returned by gather()
@@ -265,6 +294,8 @@ async def llama_metrics(port: int) -> dict[str, Any]:
     # (not only as a kv fallback): ``ctx`` — the fullest sub-slot's used
     # tokens — feeds the card's "used / max" context readout, which sat
     # permanently at '—' because nothing ever produced the key.
+    speculative_seen = False
+    speculative_active = False
     if not isinstance(slots_resp, BaseException) and getattr(slots_resp, "status_code", 0) == 200:
         try:
             payload = slots_resp.json()
@@ -276,6 +307,9 @@ async def llama_metrics(port: int) -> dict[str, Any]:
             for slot in payload:
                 if not isinstance(slot, dict):
                     continue
+                if "speculative" in slot:
+                    speculative_seen = True
+                    speculative_active = speculative_active or bool(slot["speculative"])
                 try:
                     ctx = int(slot.get("n_ctx", 0) or 0)
                 except (ValueError, TypeError):
@@ -305,6 +339,26 @@ async def llama_metrics(port: int) -> dict[str, Any]:
                 # Clamp — n_prompt_tokens can briefly exceed n_ctx during
                 # shift; surfacing >1.0 would look broken in the UI.
                 out["kv_cache_usage"] = min(max(ratio, 0.0), 1.0)
+
+    counters = {
+        k: out.pop(k)
+        for k in ("spec_draft_tokens", "spec_accepted_tokens", "spec_drafts")
+        if k in out
+    }
+    if counters or speculative_seen:
+        drafted = counters.get("spec_draft_tokens", 0)
+        accepted = counters.get("spec_accepted_tokens", 0)
+        drafts = counters.get("spec_drafts", 0)
+        out["spec"] = {
+            # /slots[].speculative is the guard against a loaded-but-never-
+            # drafting server: counters alone never light the bolt.
+            "active": speculative_active,
+            "draft_tokens": drafted,
+            "accepted_tokens": accepted,
+            "drafts": drafts,
+            "acceptance": accepted / drafted if drafted > 0 else None,
+            "mean_accepted_len": 1 + accepted / drafts if drafts > 0 else None,
+        }
     return out
 
 
@@ -437,6 +491,8 @@ async def collect_local(sm: Any) -> dict[str, dict[str, Any]]:
                 out["kv_cache_usage"] = float(llm_metrics["kv_cache_usage"])
             if "ctx" in llm_metrics:
                 out["ctx"] = int(llm_metrics["ctx"])
+            if "spec" in llm_metrics:
+                out["spec"] = dict(llm_metrics["spec"])
         return slot.name, out
 
     pairs = await asyncio.gather(*(_one(s) for s in slots), return_exceptions=True)

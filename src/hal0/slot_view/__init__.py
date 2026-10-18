@@ -91,15 +91,21 @@ class SlotMetricsView:
     ctx: int = 0
     kv: float | None = None
     mem: float = 0.0
+    #: Speculative-decoding view (ADR-0031 §6); ``None`` — and the key
+    #: omitted on the wire — when the slot has no model to speculate for.
+    spec: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        out: dict[str, Any] = {
             "toks": self.toks,
             "ttft": self.ttft,
             "ctx": self.ctx,
             "kv": self.kv,
             "mem": self.mem,
         }
+        if self.spec is not None:
+            out["spec"] = self.spec
+        return out
 
 
 @dataclass(slots=True)
@@ -1091,7 +1097,12 @@ class SlotViewAggregator:
                     status=str(payload.get("status", "")),
                     synthetic=False,
                     mem_mb=mem_mb,
-                    metrics=_metrics_view(raw_metrics, slot_name, mem_mb),
+                    metrics=_metrics_view(
+                        raw_metrics,
+                        slot_name,
+                        mem_mb,
+                        plan=_speculation_plan(cfg_by_name.get(slot_name)),
+                    ),
                     payload=payload,
                 )
             )
@@ -1140,7 +1151,55 @@ class SlotViewAggregator:
         return raw if isinstance(raw, dict) else {}
 
 
-def _metrics_view(raw_metrics: dict[str, Any], name: str, mem_mb: float | int) -> SlotMetricsView:
+def _speculation_plan(cfg: dict[str, Any] | None) -> dict[str, Any] | None:
+    """``{mode, kind, variant, unavailable_reason}`` for a slot's current model.
+
+    Same inputs and resolver as the resolved-argv route
+    (``resolved_argv_detail_for_slot``), so no container call. ``None`` for a
+    slot with no model, one llama-server does not compose, or any failure —
+    the list must never break on a plan.
+    """
+    if not isinstance(cfg, dict):
+        return None
+    model = cfg.get("model")
+    if not (isinstance(model, dict) and model.get("default")):
+        return None
+    try:
+        from hal0.providers.container import resolved_argv_detail_for_slot
+
+        detail = resolved_argv_detail_for_slot(cfg)
+    except Exception:
+        return None
+    plan = (detail or {}).get("speculation")
+    return dict(plan) if isinstance(plan, dict) else None
+
+
+def _spec_view(rm: dict[str, Any], plan: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Merge the scraped counters with the plan into ``metrics.spec``."""
+    scraped = rm.get("spec")
+    if plan is None and not scraped:
+        return None
+    scraped = scraped if isinstance(scraped, dict) else {}
+    out: dict[str, Any] = {
+        "active": bool(scraped.get("active", False)),
+        "draft_tokens": int(scraped.get("draft_tokens") or 0),
+        "accepted_tokens": int(scraped.get("accepted_tokens") or 0),
+        "drafts": int(scraped.get("drafts") or 0),
+        "acceptance": scraped.get("acceptance"),
+        "mean_accepted_len": scraped.get("mean_accepted_len"),
+        "live_acceptance": scraped.get("live_acceptance"),
+    }
+    for key in ("mode", "kind", "variant", "unavailable_reason"):
+        out[key] = (plan or {}).get(key)
+    return out
+
+
+def _metrics_view(
+    raw_metrics: dict[str, Any],
+    name: str,
+    mem_mb: float | int,
+    plan: dict[str, Any] | None = None,
+) -> SlotMetricsView:
     """Remap one raw metrics row to the card-expected shape (#26 / BE-METRICS).
 
     The dashboard reads ``slot.metrics.{toks,ttft,ctx,kv,mem}``. Absent
@@ -1155,4 +1214,5 @@ def _metrics_view(raw_metrics: dict[str, Any], name: str, mem_mb: float | int) -
         ctx=int(rm.get("ctx") or 0),
         kv=round(float(kv) * 100, 1) if kv is not None else None,
         mem=round(float(mem_mb or 0) / 1024.0, 2),
+        spec=_spec_view(rm, plan),
     )

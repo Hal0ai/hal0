@@ -1106,6 +1106,7 @@ class BootState:
     last_used_model: dict[str, str] = field(default_factory=dict)
     tps_events: Any = None
     ttft_events: Any = None
+    spec_events: Any = None
     slot_throughput: dict[str, float] = field(default_factory=dict)
     slot_kv_occupancy: dict[str, float] = field(default_factory=dict)
     slot_request_count: dict[str, int] = field(default_factory=dict)
@@ -1816,6 +1817,14 @@ async def _boot_metrics_state(app: FastAPI, ctx: BootState) -> None:
 
     ctx.ttft_events = collections.defaultdict(_new_ttft_deque)
     app.state.ttft_events = ctx.ttft_events
+
+    # Per-slot (monotonic_ts, draft_n, accepted_n) from proxied completions'
+    # llama-server ``timings`` — feeds metrics.spec.live_acceptance.
+    def _new_spec_deque() -> collections.deque[tuple[float, int, int]]:
+        return collections.deque(maxlen=1024)
+
+    ctx.spec_events = collections.defaultdict(_new_spec_deque)
+    app.state.spec_events = ctx.spec_events
 
     # FLM / NPU per-slot metrics — updated by v1._record_nonstreaming_throughput
     # when the upstream (FLM container) returns decoding_speed_tps and

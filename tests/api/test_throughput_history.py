@@ -262,3 +262,63 @@ async def test_stall_guard_frame_alone_records_nothing() -> None:
 
     assert len(app_state.tps_events["primary"]) == 0
     assert len(app_state.ttft_events["primary"]) == 0
+
+
+def test_v1_records_draft_timings_nonstreaming() -> None:
+    from types import SimpleNamespace
+
+    from hal0.api.routes.v1 import _record_nonstreaming_throughput
+
+    app_state = SimpleNamespace(
+        tps_events=defaultdict(lambda: deque(maxlen=64)),
+        spec_events=defaultdict(lambda: deque(maxlen=64)),
+    )
+    body = b'{"usage":{"completion_tokens":20},"timings":{"draft_n":12,"draft_n_accepted":9}}'
+    _record_nonstreaming_throughput(body, app_state, "primary")
+    ((_, drafted, accepted),) = app_state.spec_events["primary"]
+    assert (drafted, accepted) == (12, 9)
+
+
+def test_v1_no_draft_timings_records_nothing() -> None:
+    from types import SimpleNamespace
+
+    from hal0.api.routes.v1 import _record_nonstreaming_throughput
+
+    app_state = SimpleNamespace(
+        tps_events=defaultdict(lambda: deque(maxlen=64)),
+        spec_events=defaultdict(lambda: deque(maxlen=64)),
+    )
+    _record_nonstreaming_throughput(
+        b'{"usage":{"completion_tokens":20},"timings":{"predicted_n":20}}',
+        app_state,
+        "primary",
+    )
+    assert len(app_state.spec_events["primary"]) == 0
+
+
+@pytest.mark.asyncio
+async def test_v1_records_draft_timings_streaming() -> None:
+    from types import SimpleNamespace
+
+    from starlette.responses import StreamingResponse
+
+    from hal0.api.routes.v1 import _instrument_streaming_throughput
+
+    async def _gen():
+        yield b'data: {"choices":[{"delta":{"content":"hi"}}]}\n\n'
+        yield (
+            b'data: {"choices":[{"delta":{}}],'
+            b'"timings":{"draft_n":8,"draft_n_accepted":5}}\n\ndata: [DONE]\n\n'
+        )
+
+    app_state = SimpleNamespace(
+        tps_events=defaultdict(lambda: deque(maxlen=64)),
+        spec_events=defaultdict(lambda: deque(maxlen=64)),
+    )
+    wrapped = _instrument_streaming_throughput(
+        StreamingResponse(_gen(), media_type="text/event-stream"), app_state, "primary"
+    )
+    async for _ in wrapped.body_iterator:
+        pass
+    ((_, drafted, accepted),) = app_state.spec_events["primary"]
+    assert (drafted, accepted) == (8, 5)
