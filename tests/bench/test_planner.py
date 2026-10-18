@@ -453,3 +453,30 @@ def test_cell_spec_carries_a_non_default_speculation():
     default = _resolve_profile({"profile": {"flags": "-fa on", "speculation": "auto"}}, 4096)
     assert off.spec == {"profile": {"speculation": "off"}}
     assert default.spec == plain.spec
+
+
+def _speculation_cells(store, overrides):
+    models = [{**_registry()[0], "profile": {"flags": "-fa on", "ctx_size": 4096}}]
+    return plan(_suite(), models, store, tune_overrides=overrides)
+
+
+def test_planner_tune_override_changes_cell_identity_only_by_speculation(store):
+    plain = _speculation_cells(store, None)
+    auto = _speculation_cells(store, {"speculation": "auto"})
+    off = _speculation_cells(store, {"speculation": "off"})
+    assert [c.cell_key for c in auto] == [c.cell_key for c in plain]
+    assert len(off) == len(plain) == 1
+    assert off[0].cell_key != plain[0].cell_key
+    assert off[0].identity.config.spec == {"profile": {"speculation": "off"}}
+    # nothing else in the identity moved
+    assert off[0].identity.config.argv == plain[0].identity.config.argv
+    assert off[0].identity.config.ctx == plain[0].identity.config.ctx
+
+
+@pytest.mark.parametrize("bad", [{"vision": "off"}, {"speculation": "ngram"}])
+def test_planner_refuses_an_unsupported_tune_override(store, bad):
+    from hal0.errors import UnprocessableEntity
+
+    with pytest.raises(UnprocessableEntity) as exc:
+        _speculation_cells(store, bad)
+    assert exc.value.code == "bench.override_unsupported"

@@ -59,8 +59,9 @@ const { inspectCalls, inspectHandler } = vi.hoisted(() => ({
 // (usePullJob). `draftFit.current` is what inspect-draft resolves to;
 // `pullBox` is the stand-in job the drawer watches for completion;
 // `updateError.current` makes the next PUT reject like the server's 422.
-const { inspectDraftCalls, draftFit, pullCalls, pullBox, updateError } = vi.hoisted(() => ({
+const { inspectDraftCalls, draftFit, pullCalls, pullBox, updateError, measureCalls } = vi.hoisted(() => ({
   inspectDraftCalls: [] as unknown[],
+  measureCalls: [] as string[],
   draftFit: { current: undefined as Record<string, unknown> | undefined },
   pullCalls: [] as unknown[],
   pullBox: { current: { state: 'idle', modelId: null as string | null, jobId: null as string | null } },
@@ -68,6 +69,13 @@ const { inspectDraftCalls, draftFit, pullCalls, pullBox, updateError } = vi.hois
 }))
 
 vi.mock('@/api/hooks/useModels', () => ({
+  useMeasureSpeculation: () => ({
+    mutateAsync: async (id: string) => {
+      measureCalls.push(id)
+      return { queued: [{}, {}] }
+    },
+    isPending: false,
+  }),
   useModelUpdate: () => ({
     mutateAsync: async (b: unknown) => {
       updateCalls.push(b)
@@ -209,6 +217,7 @@ beforeEach(() => {
   pullCalls.length = 0
   pullBox.current = { state: 'idle', modelId: null, jobId: null }
   updateError.current = undefined
+  measureCalls.length = 0
 })
 
 afterEach(() => {
@@ -1260,6 +1269,38 @@ describe('ModelDrawer Drafter field (ADR-0031 §5)', () => {
     expect(updateCalls).toEqual([{ id: 'm1', body: { draft: null } }])
     expect(q(host, 'model-draft-unpair')).toBeNull()
     act(() => root.unmount())
+  })
+
+  it('renders the measure button only when a drafter is paired and a slot runs the model', async () => {
+    withDrafts()
+    const toasts: string[] = []
+    ;(window as unknown as { __hal0Toast: (m: string) => void }).__hal0Toast = (m) => toasts.push(m)
+    const paired = { ...DRAFT_MODEL, draft: `${MODEL_DIR}/d.gguf`, draftVariant: 'dflash' }
+    const mountDrawer = (model: Record<string, unknown>) =>
+      mount(React.createElement(ModelDrawer, { open: true, onClose: () => {}, model }))
+
+    slotsBox.current = []
+    let m = mountDrawer(paired)
+    openSource(m.host)
+    expect(q(m.host, 'model-draft-measure')).toBeNull() // no slot runs it
+    act(() => m.root.unmount())
+
+    slotsBox.current = [{ name: 'agent', model_default: 'm1' }]
+    m = mountDrawer(DRAFT_MODEL)
+    openSource(m.host)
+    expect(q(m.host, 'model-draft-measure')).toBeNull() // nothing paired
+    act(() => m.root.unmount())
+
+    m = mountDrawer(paired)
+    openSource(m.host)
+    await act(async () => {
+      q<HTMLButtonElement>(m.host, 'model-draft-measure').click()
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+    expect(measureCalls).toEqual(['m1'])
+    expect(toasts).toContain('Measuring m1: two bench cells queued')
+    act(() => m.root.unmount())
   })
 
   it('no unpair action without a pairing', () => {

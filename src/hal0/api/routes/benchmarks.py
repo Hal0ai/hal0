@@ -38,6 +38,7 @@ from hal0.bench.planner import (
     attach_slot_profiles,
     fetch_registry_models,
     plan,
+    validate_tune_overrides,
 )
 from hal0.bench.publish import build_roster, store_physical_models
 from hal0.bench.store import Store
@@ -431,9 +432,12 @@ def post_queue(body: dict[str, Any]) -> dict[str, Any]:
     # a lane sweep — the dashboard's Tool Bench).
     lanes = body.get("lanes")
     configs = body.get("configs")
+    overrides = validate_tune_overrides(body.get("tune_overrides"))
     label = suite or model
     if kind == "eval":
         label += " [tools]"
+    if overrides:
+        label += " [" + ",".join(f"{k}={v}" for k, v in overrides.items()) + "]"
     if lanes and len(lanes) > 1:
         label += f" [{'+'.join(lanes)}]"
     if configs and len(configs) > 1:
@@ -446,9 +450,48 @@ def post_queue(body: dict[str, Any]) -> dict[str, Any]:
         "kind": kind,
         "lanes": lanes,
         "configs": configs,
+        **({"tune_overrides": overrides} if overrides else {}),
         "enqueued": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
     }
     return {"queued": item, "items": control.enqueue(item)}
+
+
+@router.post("/measure-speculation")
+def post_measure_speculation(body: dict[str, Any], request: Request) -> dict[str, Any]:
+    """Queue the with/without pair that measures a model's speculative decoding
+    (ADR-0031 §6): two cells under the real profile of the slot that runs the
+    model, differing only in ``speculation=auto`` vs ``speculation=off``.
+
+    Errors: ``409 bench.model_has_no_speculation`` (no drafter, no MTP heads),
+    ``404 bench.no_slot_for_model`` (no slot runs the model)."""
+    from hal0.bench.planner import _read_slot_cfgs
+    from hal0.errors import Conflict
+    from hal0.model_meta import model_is_mtp_eligible
+
+    model_id = body.get("model_id")
+    if not isinstance(model_id, str) or not model_id:
+        raise BadRequest("body.model_id is required", code="bench.invalid_envelope")
+    model = request.app.state.model_registry.get(model_id)
+    if not model.draft and not model_is_mtp_eligible(model.model_dump(mode="python")):
+        raise Conflict(
+            f"model {model_id!r} has neither a drafter nor MTP heads to measure",
+            code="bench.model_has_no_speculation",
+            details={"model_id": model_id},
+        )
+    if not any(
+        isinstance(cfg.get("model"), dict) and cfg["model"].get("default") == model_id
+        for cfg in _read_slot_cfgs()
+    ):
+        raise NotFound(
+            f"no slot runs model {model_id!r}; the cells are measured under a slot's profile",
+            code="bench.no_slot_for_model",
+            details={"model_id": model_id},
+        )
+    queued = [
+        post_queue({"model": model_id, "tune_overrides": {"speculation": mode}})["queued"]
+        for mode in ("auto", "off")
+    ]
+    return {"queued": queued}
 
 
 @router.delete("/queue/{item_id}")

@@ -216,6 +216,17 @@ export function useInspectDraft() {
   })
 }
 
+export function useMeasureSpeculation() {
+  // POST a model id; the server queues the with/without-speculation bench pair
+  // under the profile of the slot that runs it (ADR-0031 §6).
+  return useMutation<{ queued: Record<string, unknown>[] }, Hal0Error, string>({
+    mutationFn: (modelId) =>
+      apiPost<{ queued: Record<string, unknown>[] }>(ENDPOINTS.benchMeasureSpeculation, {
+        model_id: modelId,
+      }),
+  })
+}
+
 export function useModelInspect() {
   // POST a HF coord and get back the repo's pullable GGUF variants
   // plus tags + license + a short README excerpt. Accepts either an

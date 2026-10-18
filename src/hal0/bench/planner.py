@@ -667,11 +667,34 @@ def _validated_configs(configs: list[dict]) -> list[dict]:
     return out or [{"label": "default", "flags": {}}]
 
 
+#: The one tune a cell request may override on top of the slot's real profile,
+#: and the values it may take (ADR-0031 §6: "Measure" pairs `auto` with `off`).
+_TUNE_OVERRIDES: dict[str, tuple[str, ...]] = {"speculation": ("auto", "off")}
+
+
+def validate_tune_overrides(overrides: dict[str, Any] | None) -> dict[str, str]:
+    """Return ``overrides`` if every key/value is supported, else raise
+    ``422 bench.override_unsupported``. ``None`` is the empty override."""
+    from hal0.errors import UnprocessableEntity
+
+    out: dict[str, str] = {}
+    for key, value in (overrides or {}).items():
+        if key not in _TUNE_OVERRIDES or value not in _TUNE_OVERRIDES[key]:
+            raise UnprocessableEntity(
+                f"tune override {key}={value!r} is not supported (supported: speculation=auto|off)",
+                code="bench.override_unsupported",
+                details={"key": key, "value": value},
+            )
+        out[key] = value
+    return out
+
+
 def plan(
     suite: Suite,
     registry_models: list[dict[str, Any]],
     store: Store,
     now: datetime | None = None,
+    tune_overrides: dict[str, Any] | None = None,
 ) -> list[Cell]:
     """Expand ``suite.selector x matrix x cells`` into candidate cells, compute
     each cell_key, and return only the stale ones (DESIGN §6), ordered by value.
@@ -679,6 +702,10 @@ def plan(
     ``registry_models`` is passed in (not fetched here) so the function stays
     pure/testable; the CLI calls ``fetch_registry_models`` and hands the result
     in. ``now`` is injectable for deterministic staleness tests.
+
+    ``tune_overrides`` (see :func:`validate_tune_overrides`) is applied on top
+    of each selected model's attached profile, so it lands in the cell identity
+    (``_resolve_profile``) and the cell is distinct from the un-overridden one.
     """
     now = now or datetime.now(UTC)
     unknown = [k for k in suite.cells.kinds if k not in KNOWN_KINDS]
@@ -708,7 +735,12 @@ def plan(
     known_lanes = set(harness.lane_specs())
 
     configs = _validated_configs(suite.matrix.configs)
+    overrides = validate_tune_overrides(tune_overrides)
     selected_models = _select_models(suite, registry_models)
+    if overrides:
+        selected_models = [
+            {**m, "profile": {**(m.get("profile") or {}), **overrides}} for m in selected_models
+        ]
 
     # #1773: a "chat" cell's GuideLLM run needs a resolvable tokenizer (a
     # local-only model id like "chadrock-35b-ace-saber-rocmfp4-mtp" is not

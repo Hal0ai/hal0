@@ -20,6 +20,7 @@ import {
 	useModelSetDefault,
 	useModelInspect,
 	useInspectDraft,
+	useMeasureSpeculation,
 	usePullJob,
 } from "@/api/hooks/useModels";
 import { useChatTemplates } from "@/api/hooks/useChatTemplates";
@@ -864,6 +865,22 @@ export function ModelDrawer({ open, onClose, model, onOpenSlot = undefined }) {
 		setDraft(v);
 		setDraftMismatch(null);
 	};
+	const measure = useMeasureSpeculation();
+	// "Measure" needs something to speculate with (a paired drafter or MTP heads)
+	// and a slot whose profile the two bench cells can be measured under.
+	const canMeasure =
+		!!(baseline?.draft || model.draft || model.mtp) &&
+		slotsUsingModel(slotsQuery.data, model.id).length > 0;
+	const onMeasure = async () => {
+		try {
+			await measure.mutateAsync(model.id);
+			window.__hal0Toast &&
+				window.__hal0Toast(`Measuring ${model.id}: two bench cells queued`, "ok");
+		} catch (e) {
+			window.__hal0Toast &&
+				window.__hal0Toast(`Measure failed — ${e?.message || "see logs"}`, "err");
+		}
+	};
 	const onUnpair = async () => {
 		setUnpairing(true);
 		try {
@@ -1556,6 +1573,17 @@ export function ModelDrawer({ open, onClose, model, onOpenSlot = undefined }) {
 											onClick={onUnpair}
 										>
 											Unpair
+										</button>
+									)}
+									{canMeasure && (
+										<button
+											type="button"
+											className="btn ghost sm"
+											data-testid="model-draft-measure"
+											disabled={measure.isPending}
+											onClick={onMeasure}
+										>
+											Measure
 										</button>
 									)}
 								</div>

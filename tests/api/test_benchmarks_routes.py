@@ -223,3 +223,51 @@ def test_queue_view_lists_items_the_worker_could_not_run(isolated_client: TestCl
     assert [(f["id"], f["outcome"], f["note"]) for f in body["failed"]] == [
         ("u1", "failed", "unknown model 'nope.gguf'")
     ]
+
+
+def _measure_setup(client: TestClient, monkeypatch, *, draft=None, mtp=None, slot=True):
+    from hal0.bench import planner
+    from hal0.registry.model import Model
+
+    client.app.state.model_registry.add(Model(id="tgt", path="/m/tgt.gguf", draft=draft, mtp=mtp))
+    cfgs = [{"name": "agent", "model": {"default": "tgt"}}] if slot else []
+    monkeypatch.setattr(planner, "_read_slot_cfgs", lambda: cfgs)
+
+
+def test_measure_route_enqueues_two_cells(isolated_client: TestClient, monkeypatch) -> None:
+    _measure_setup(isolated_client, monkeypatch, draft="/m/d.gguf")
+    r = isolated_client.post("/api/benchmarks/measure-speculation", json={"model_id": "tgt"})
+    assert r.status_code == 200, r.text
+    a, b = r.json()["queued"]
+    assert (a["model"], a["tune_overrides"]) == ("tgt", {"speculation": "auto"})
+    assert (b["model"], b["tune_overrides"]) == ("tgt", {"speculation": "off"})
+    assert a["id"] != b["id"]
+    items = isolated_client.get("/api/benchmarks/queue").json()["items"]
+    assert [i["id"] for i in items] == [a["id"], b["id"]]
+
+
+def test_measure_route_accepts_mtp_heads_without_a_drafter(
+    isolated_client: TestClient, monkeypatch
+) -> None:
+    _measure_setup(isolated_client, monkeypatch, mtp=True)
+    r = isolated_client.post("/api/benchmarks/measure-speculation", json={"model_id": "tgt"})
+    assert r.status_code == 200, r.text
+
+
+def test_measure_route_refusals(isolated_client: TestClient, monkeypatch) -> None:
+    _measure_setup(isolated_client, monkeypatch)
+    r = isolated_client.post("/api/benchmarks/measure-speculation", json={"model_id": "tgt"})
+    assert (r.status_code, r.json()["error"]["code"]) == (409, "bench.model_has_no_speculation")
+    from hal0.bench import planner
+
+    monkeypatch.setattr(planner, "_read_slot_cfgs", lambda: [])
+    isolated_client.put("/api/models/tgt", json={"mtp": True})
+    r = isolated_client.post("/api/benchmarks/measure-speculation", json={"model_id": "tgt"})
+    assert (r.status_code, r.json()["error"]["code"]) == (404, "bench.no_slot_for_model")
+
+
+def test_queue_refuses_an_unsupported_tune_override(isolated_client: TestClient) -> None:
+    r = isolated_client.post(
+        "/api/benchmarks/queue", json={"model": "m", "tune_overrides": {"vision": "off"}}
+    )
+    assert (r.status_code, r.json()["error"]["code"]) == (422, "bench.override_unsupported")

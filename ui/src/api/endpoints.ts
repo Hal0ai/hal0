@@ -73,6 +73,7 @@ export const ENDPOINTS = {
   modelInspect: '/api/models/inspect',
   // Header-level drafter fit check (ADR-0031 §2): POST the target + drafter coords.
   modelInspectDraft: '/api/models/inspect-draft',
+  benchMeasureSpeculation: '/api/benchmarks/measure-speculation',
   // Per-type default MODEL marker: POST {default:true} promotes (demoting the
   // current holder of the type), {default:false} clears. Server enforces the
   // single-holder invariant in one chokepoint.

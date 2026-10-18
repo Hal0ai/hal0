@@ -503,7 +503,7 @@ def cmd_worker(args: argparse.Namespace) -> int:
                 control.write_status(None, _now_stamp())
                 continue
 
-            cells = plan(suite, models, store)
+            cells = plan(suite, models, store, tune_overrides=item.get("tune_overrides"))
             control.write_status(
                 {
                     "item": item,

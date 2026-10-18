@@ -240,7 +240,7 @@ def test_worker_drains_a_queued_model_on_an_auth_required_box(
 
     seen: dict[str, object] = {}
 
-    def fake_plan(suite, models, store):
+    def fake_plan(suite, models, store, **_kw):
         seen["models"] = models
         return []
 
