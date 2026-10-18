@@ -458,6 +458,7 @@ def test_inspect_drafts_carry_hints_and_order(
     """In-repo drafters carry kind/variant hints and sort best-first."""
     tree = [
         _lfs("X-Q4_K_M.gguf", 9_000),
+        _lfs("X-Q4_K_M-MTP.gguf", 9_100),
         _lfs("mtp-X.gguf", 500),
         _lfs("dflash-X-Q8_0.gguf", 900),
         _lfs("X-LiLiCorr.gguf", 700),
@@ -468,7 +469,8 @@ def test_inspect_drafts_carry_hints_and_order(
     r = inspect_client.post("/api/models/inspect", json={"hf_repo": "acme/X-GGUF"})
     assert r.status_code == 200, r.text
     body = r.json()
-    assert [v["id"] for v in body["variants"]] == ["X-Q4_K_M.gguf"]
+    # a quant that merely ends in -MTP carries its heads inside: still a quant
+    assert [v["id"] for v in body["variants"]] == ["X-Q4_K_M.gguf", "X-Q4_K_M-MTP.gguf"]
     got = [(d["id"], d["kind_hint"], d["variant_hint"]) for d in body["drafts"]]
     assert got == [
         ("X-LiLiCorr.gguf", "dflash", "lilicorr"),
@@ -524,6 +526,31 @@ def test_inspect_lists_companion_repo_drafters(
     assert r2.json()["cached"] is True
     assert r2.json()["companion_repos"] == ["nvidia/X-LiLiCorr-GGUF"]
     assert len(searches) == 1
+
+
+def test_inspect_companion_tree_timeout_keeps_the_other_companions(
+    inspect_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One companion whose tree times out is skipped; the rest are still listed."""
+    inner = _hf_handler(
+        meta_body={"tags": []},
+        tree_body=[_lfs("X-Q4_K_M.gguf", 9_000)],
+        search_body=[{"id": "nvidia/X-DFlash"}, {"id": "nvidia/X-LiLiCorr-GGUF"}],
+        companion_trees={"nvidia/X-LiLiCorr-GGUF": [_lfs("X-LiLiCorr-Q8_0.gguf", 800)]},
+    )
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        if req.url.path == "/api/models/nvidia/X-DFlash/tree/main":
+            raise httpx.ReadTimeout("slow companion")
+        return inner(req)
+
+    _patch_httpx_transport(monkeypatch, handler)
+    r = inspect_client.post("/api/models/inspect", json={"hf_repo": "nvidia/X-GGUF"})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert [d["id"] for d in body["drafts"]] == ["X-LiLiCorr-Q8_0.gguf"]
+    assert body["companion_repos"] == ["nvidia/X-LiLiCorr-GGUF"]
 
 
 def test_inspect_companion_search_failure_is_soft(

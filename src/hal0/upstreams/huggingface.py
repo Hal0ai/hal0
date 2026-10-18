@@ -558,10 +558,16 @@ async def _companion_drafts(
         ) as client:
             companions = await search_companion_repos(repo, client=client)
             for comp in companions:
-                tree_res = await client.get(f"{_HF_MODELS_URL}/{comp}/tree/main?recursive=true")
-                if tree_res.status_code >= 400:
+                try:
+                    tree_res = await client.get(f"{_HF_MODELS_URL}/{comp}/tree/main?recursive=true")
+                    if tree_res.status_code >= 400:
+                        continue
+                    payload = await _read_tree_pages(tree_res, headers, _next_link)
+                except (httpx.TimeoutException, httpx.HTTPError, ValueError) as exc:
+                    logger.debug(
+                        "hf_companion_tree_failed", repo=comp, error=exc.__class__.__name__
+                    )
                     continue
-                payload = await _read_tree_pages(tree_res, headers, _next_link)
                 files, _, _ = _tree_files(payload)
                 comp_name = comp.partition("/")[2]
                 found = [
