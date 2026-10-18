@@ -130,7 +130,7 @@ def _args(**kw: Any) -> argparse.Namespace:
         "n": 2,
         "max_tokens": 8,
         "ctx_size": None,
-        "mtp": None,
+        "speculation": None,
         "np": "1,2",
         "concurrency": 0,
         "depth": 100,
@@ -156,7 +156,7 @@ def _assert_unwound(api: FakeApi, original: str = "agent") -> None:
 
 def test_ab_clones_the_slot_profile_per_arm_and_unwinds(api: FakeApi) -> None:
     results = server_ab.mode_ab(
-        _args(variant=["base:", "ub;ctx=8192;mtp=off:-ub 256 -b 1024"], mtp=None)
+        _args(variant=["base:", "ub;ctx=8192;speculation=off:-ub 256 -b 1024"], speculation=None)
     )
 
     first, second = api.posted_profiles()
@@ -171,7 +171,7 @@ def test_ab_clones_the_slot_profile_per_arm_and_unwinds(api: FakeApi) -> None:
     assert second["speculation"] == "off"
 
     assert results["base"]["extra_args"] == "-fa on -ctk q8_0"
-    assert results["ub"]["ctx_size"] == 8192 and results["ub"]["mtp"] == "off"
+    assert results["ub"]["ctx_size"] == 8192 and results["ub"]["speculation"] == "off"
 
     # Each arm was measured under its own profile; then the original came back.
     assert api.slot_profile_writes() == [first["name"], second["name"], "agent"]
@@ -189,8 +189,10 @@ def test_ab_slot_config_writes_carry_the_profile_key_only(api: FakeApi) -> None:
     assert "parallel" not in repr(api.slot_config_bodies())
 
 
-def test_run_wide_ctx_and_mtp_apply_to_every_arm_and_a_variant_overrides(api: FakeApi) -> None:
-    server_ab.mode_ab(_args(variant=["a:", "b;ctx=4096:"], ctx_size=16384, mtp="off"))
+def test_run_wide_ctx_and_speculation_apply_to_every_arm_and_a_variant_overrides(
+    api: FakeApi,
+) -> None:
+    server_ab.mode_ab(_args(variant=["a:", "b;ctx=4096:"], ctx_size=16384, speculation="off"))
 
     a, b = api.posted_profiles()
     assert (a["ctx_size"], a["speculation"]) == (16384, "off")
@@ -337,7 +339,7 @@ def test_resolved_command_is_none_when_the_route_has_no_argv(
 
 def test_parse_variant() -> None:
     assert server_ab._parse_variant("a:-b 512") == ("a", "-b 512", None, None)
-    assert server_ab._parse_variant("big;ctx=32768;mtp=off:-fa on") == (
+    assert server_ab._parse_variant("big;ctx=32768;speculation=off:-fa on") == (
         "big",
         "-fa on",
         32768,

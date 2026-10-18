@@ -459,7 +459,7 @@ def new_launch(
     """What a llama-server slot launches under ADR-0029: base, model, profile, slot.
 
     ``profile`` is new-shape content (flags, ctx_size, enable_thinking,
-    vision, mtp). The launch-path change implements exactly this order and is
+    vision, speculation). The launch-path change implements exactly this order and is
     pinned to this function by its parity test.
     """
     runner = frozen.effective_runner(slot, frozen.Profile(name=""))
@@ -499,7 +499,7 @@ def new_launch(
         model_layer += ["--mmproj", str(mmproj)]
 
     mtp = (
-        profile.get("mtp", "auto") != "off"
+        profile.get("speculation", "auto") == "auto"
         and has_mtp_heads(model)
         and bool(getattr(supports, "mtp", False))
         and not embed
@@ -546,7 +546,7 @@ def _identity(content: Mapping[str, Any]) -> dict[str, Any]:
     """A profile's tune: what launches, without informational fields."""
     out = {k: v for k, v in content.items() if k not in ("intent", "cloned_from")}
     out.setdefault("vision", "auto")
-    out.setdefault("mtp", "auto")
+    out.setdefault("speculation", "auto")
     out["flags"] = effective_map(shlex.split(str(out.get("flags") or "")))
     return {k: v for k, v in out.items() if v not in (None, "")}
 
@@ -767,7 +767,7 @@ def convert_profile(entry: Mapping[str, Any], family: str) -> ProfileConversion:
             content[key] = entry[key]
     vision = entry.get("vision")
     content["vision"] = "off" if conv.vision_off or vision == "off" else "auto"
-    content["mtp"] = "off" if entry.get("mtp") == "off" else "auto"
+    content["speculation"] = "off" if entry.get("mtp") == "off" else "auto"
     runner = entry.get("runner")
     if isinstance(runner, str) and runner.strip():
         content["runner"] = runner
@@ -795,8 +795,8 @@ def _tidy(content: Mapping[str, Any]) -> dict[str, Any]:
     out = {k: v for k, v in content.items() if v not in (None, "")}
     if out.get("vision") == "auto":
         out.pop("vision")
-    if out.get("mtp") == "auto":
-        out.pop("mtp")
+    if out.get("speculation") == "auto":
+        out.pop("speculation")
     return out
 
 
@@ -1263,7 +1263,7 @@ class _Planner:
             "ctx_size": ctx_size,
             "enable_thinking": old.enable_thinking,
             "vision": "off" if vision_off else "auto",
-            "mtp": "off" if (auto_drafts and not old.mtp) else "auto",
+            "speculation": "off" if (auto_drafts and not old.mtp) else "auto",
         }
         want = {**target, "runner": base_content.get("runner")}
         if _identity(_tidy(want)) == _identity(base_content):
@@ -1395,7 +1395,7 @@ class _Planner:
             "flags": _join(tokens),
             "runner": ENGINE_RUNNER.get(engine),
             "vision": base_content.get("vision"),
-            "mtp": base_content.get("mtp"),
+            "speculation": base_content.get("speculation"),
             "ctx_size": base_content.get("ctx_size"),
         }
         table = slot.get("model") if isinstance(slot.get("model"), Mapping) else {}

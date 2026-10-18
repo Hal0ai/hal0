@@ -1110,3 +1110,22 @@ def test_generated_profile_never_takes_a_blocked_name() -> None:
     stored = tomllib.loads(paths.profiles_toml().read_text())["profile"]
     assert stored["chat-n"] == {"flags": _VIS_FLAGS}
     assert "--mmproj" not in plain.argv_after
+
+
+def test_conversion_ends_on_speculation_through_the_real_chain() -> None:
+    """ADR-0031 §7: every caller of ``migrate_profile_centric`` (update, boot
+    self-heal, ``hal0 profile migrate --apply``, rollback re-convert) ends on
+    the current profile shape; no stub stands in for the rename."""
+    production_install()
+    path = paths.profiles_toml()
+    data = tomllib.loads(path.read_text()) if path.exists() else {}
+    data.setdefault("profile", {})["quiet"] = {"flags": "-fa on", "mtp": "off"}
+    write_toml(path, data)
+
+    report = pca.migrate_profile_centric()
+
+    profiles = tomllib.loads(path.read_text())["profile"]
+    assert profiles["quiet"] == {"flags": "-fa on", "speculation": "off"}
+    assert all("mtp" not in entry for entry in profiles.values())
+    assert str(path) in report.written
+    assert list(path.parent.glob("profiles.toml.bak-*"))

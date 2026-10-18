@@ -93,7 +93,7 @@ def test_explicit_mtp_false_moves_to_the_profile() -> None:
     _db([_model(tags=["mtp"], defaults={"mtp": False})])
     plan = pc.plan_conversion()
     sp = _one(plan)
-    assert plan.profiles[sp.profile_after]["mtp"] == "off"
+    assert plan.profiles[sp.profile_after]["speculation"] == "off"
     assert {m.model_id: m.clear for m in plan.models}["m"] == {"mtp": False}
     assert not sp.launch_changes
 

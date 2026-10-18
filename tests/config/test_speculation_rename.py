@@ -5,6 +5,8 @@ from __future__ import annotations
 import tomllib
 from pathlib import Path
 
+import pytest
+
 from hal0.config.migrations import speculation_rename
 
 _OLD = """\
@@ -88,3 +90,18 @@ def test_convert_leaves_old_shape_boolean_mtp_to_the_profile_centric_converter(
     report = speculation_rename.convert(path, dry_run=False)
     assert report.changed == []
     assert _profiles(path)["legacy"]["mtp"] is False
+
+
+def test_convert_leaves_an_unrecognised_mtp_for_the_schema_to_quarantine(tmp_path: Path) -> None:
+    path = _write(tmp_path, '[profile.odd]\nflags = "-b 1"\nmtp = "maybe"\n')
+    report = speculation_rename.convert(path, dry_run=False)
+    assert report.changed == [] and report.backup is None
+    assert _profiles(path)["odd"]["mtp"] == "maybe"
+
+
+def test_convert_names_an_unreadable_file(tmp_path: Path) -> None:
+    path = _write(tmp_path, "[profile.broken\nnot toml")
+    with pytest.raises(speculation_rename.SpeculationRenameError) as exc:
+        speculation_rename.convert(path, dry_run=False)
+    assert exc.value.code == "profiles.conversion_failed"
+    assert path.read_text(encoding="utf-8") == "[profile.broken\nnot toml"

@@ -33,8 +33,15 @@ import structlog
 import tomli_w
 
 from hal0.config.migrations.runner_system import _replace_file
+from hal0.errors import Hal0Error
 
 log = structlog.get_logger(__name__)
+
+
+class SpeculationRenameError(Hal0Error):
+    """profiles.toml could not be read for the rename (nothing was changed)."""
+
+    code = "profiles.conversion_failed"
 
 
 @dataclass
@@ -49,6 +56,11 @@ def _rewrite(entry: dict[str, Any]) -> bool:
     """Rewrite one profile entry in place; True when it changed."""
     mtp = entry.get("mtp")
     if not isinstance(mtp, str):
+        return False
+    if mtp not in ("auto", "off"):
+        # Not a value hal0 ever wrote: leave it for the schema to quarantine
+        # rather than silently reading it as auto.
+        log.warning("migrate.speculation_rename.unknown_mtp", value=mtp)
         return False
     del entry["mtp"]
     if mtp == "off" and "speculation" not in entry:
@@ -72,7 +84,10 @@ def convert(path: Path, *, dry_run: bool) -> RenameReport:
         original = path.read_bytes()
     except FileNotFoundError:
         return RenameReport()
-    data = tomllib.loads(original.decode("utf-8"))
+    try:
+        data = tomllib.loads(original.decode("utf-8"))
+    except (tomllib.TOMLDecodeError, UnicodeDecodeError) as exc:
+        raise SpeculationRenameError(f"cannot read {path} ({exc}); nothing was changed") from exc
     profiles = data.get("profile")
     if not isinstance(profiles, dict):
         return RenameReport()

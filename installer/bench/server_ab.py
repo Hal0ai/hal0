@@ -34,8 +34,9 @@ Modes
           run N timed /completion calls. Reports prefill+decode t/s medians and
           draft-acceptance when the server exposes it in timings. One variant =
           a plain labelled measurement; two or more = a side-by-side A/B.
-          A label may carry profile settings: "label;ctx=8192;mtp=off:<flags>"
-          (ctx = the profile's ctx_size, mtp = auto|off). --ctx-size / --mtp
+          A label may carry profile settings: "label;ctx=8192;speculation=off:<flags>"
+          (ctx = the profile's ctx_size, speculation = auto|off|ngram). --ctx-size /
+          --speculation
           set the same for every arm.
   reuse   Built-in A/B of --cache-reuse 256 vs 0 on a shared-prefix trace:
           per variant, two /completion calls with the same long prefix and
@@ -386,7 +387,7 @@ class _ProfileArms:
     """Temporary custom profiles for the arms of one measurement, always unwound.
 
     ``apply`` clones the slot's current profile with the arm's flags / ctx_size /
-    mtp (POST /api/profiles), points the slot at the clone and restarts it.
+    speculation (POST /api/profiles), points the slot at the clone and restarts it.
     ``restore`` (call it from ``finally``) points the slot back at its original
     profile, restarts, then deletes every temporary profile. Each restore step
     is attempted even if an earlier one failed, and failures are reported
@@ -410,7 +411,7 @@ class _ProfileArms:
         extra_flags: str = "",
         *,
         ctx_size: int | None = None,
-        mtp: str | None = None,
+        speculation: str | None = None,
     ) -> dict:
         """Create the arm's profile, point the slot at it and restart. Returns its body."""
         base_flags = str(self.base.get("flags") or "")
@@ -419,7 +420,7 @@ class _ProfileArms:
             # Appended after the originals: last-wins dedup lets the arm override.
             "flags": f"{base_flags} {extra_flags}".strip(),
             "vision": self.base.get("vision") or "auto",
-            "speculation": mtp or self.base.get("speculation") or "auto",
+            "speculation": speculation or self.base.get("speculation") or "auto",
             "cloned_from": self.base.get("name") or None,
             "intent": _arm_intent(self.slot_name),
         }
@@ -509,42 +510,45 @@ def sweep_stale_arm_profiles(api: str, slot_name: str) -> list[str]:
 
 
 def _parse_variant(raw: str) -> tuple[str, str, int | None, str | None]:
-    """``"label[;ctx=N][;mtp=auto|off]:<flags>"`` -> (label, flags, ctx_size, mtp)."""
+    """``"label[;ctx=N][;speculation=auto|off|ngram]:<flags>"`` ->
+    (label, flags, ctx_size, speculation)."""
     head, _, flags = raw.partition(":")
     label, *opts = [part.strip() for part in head.split(";")]
     ctx_size: int | None = None
-    mtp: str | None = None
+    speculation: str | None = None
     for opt in opts:
         key, _, value = opt.partition("=")
         if key == "ctx" and value.strip().isdigit():
             ctx_size = int(value)
-        elif key == "mtp" and value.strip() in ("auto", "off"):
-            mtp = value.strip()
+        elif key == "speculation" and value.strip() in ("auto", "off", "ngram"):
+            speculation = value.strip()
         else:
-            sys.exit(f"bad variant option {opt!r} in {raw!r} (use ctx=N or mtp=auto|off)")
+            sys.exit(
+                f"bad variant option {opt!r} in {raw!r} (use ctx=N or speculation=auto|off|ngram)"
+            )
     flags = flags.strip()
-    return (label or flags or "variant", flags, ctx_size, mtp)
+    return (label or flags or "variant", flags, ctx_size, speculation)
 
 
 def _arm_settings(args: argparse.Namespace) -> tuple[int | None, str | None]:
-    """The run-wide --ctx-size / --mtp (a variant's own settings win over them)."""
-    return getattr(args, "ctx_size", None), getattr(args, "mtp", None)
+    """The run-wide --ctx-size / --speculation (a variant's own settings win over them)."""
+    return getattr(args, "ctx_size", None), getattr(args, "speculation", None)
 
 
 def mode_ab(args: argparse.Namespace) -> dict:
     slot = _get_slot(args.api, args.slot)
     port = int(slot["port"])
     arms = _ProfileArms(args.api, args.slot, slot)
-    run_ctx, run_mtp = _arm_settings(args)
+    run_ctx, run_speculation = _arm_settings(args)
     variants = [_parse_variant(v) for v in args.variant]
 
     results: dict[str, Any] = {}
     try:
-        for label, flags, v_ctx, v_mtp in variants:
+        for label, flags, v_ctx, v_speculation in variants:
             arm = arms.apply(
                 flags,
                 ctx_size=v_ctx if v_ctx is not None else run_ctx,
-                mtp=v_mtp or run_mtp,
+                speculation=v_speculation or run_speculation,
             )
             print(f"[ab] {label}: profile {arm['name']} flags = {arm['flags']!r}", flush=True)
             _wait_ready(port)
@@ -556,7 +560,7 @@ def mode_ab(args: argparse.Namespace) -> dict:
             results[label] = {
                 "extra_args": arm["flags"],
                 "ctx_size": arm.get("ctx_size"),
-                "mtp": arm["speculation"],
+                "speculation": arm["speculation"],
                 "runs": runs,
                 "median": _summarize_runs(runs),
             }
@@ -569,7 +573,7 @@ def mode_reuse(args: argparse.Namespace) -> dict:
     slot = _get_slot(args.api, args.slot)
     port = int(slot["port"])
     arms = _ProfileArms(args.api, args.slot, slot)
-    run_ctx, run_mtp = _arm_settings(args)
+    run_ctx, run_speculation = _arm_settings(args)
 
     results: dict[str, Any] = {}
     try:
@@ -577,7 +581,7 @@ def mode_reuse(args: argparse.Namespace) -> dict:
             ("cache-reuse-256", "--cache-reuse 256"),
             ("cache-reuse-0", "--cache-reuse 0"),
         ):
-            arm = arms.apply(flags, ctx_size=run_ctx, mtp=run_mtp)
+            arm = arms.apply(flags, ctx_size=run_ctx, speculation=run_speculation)
             merged = arm["flags"]
             print(f"[reuse] {label}: profile {arm['name']} flags = {merged!r}", flush=True)
             _wait_ready(port)
@@ -674,7 +678,7 @@ def mode_batch(args: argparse.Namespace) -> dict:
     slot = _get_slot(args.api, args.slot)
     port = int(slot["port"])
     arms = _ProfileArms(args.api, args.slot, slot)
-    run_ctx, run_mtp = _arm_settings(args)
+    run_ctx, run_speculation = _arm_settings(args)
     np_values = [int(x) for x in str(args.np).split(",") if x.strip()]
 
     results: dict[str, Any] = {}
@@ -682,7 +686,7 @@ def mode_batch(args: argparse.Namespace) -> dict:
         for np in np_values:
             conc = args.concurrency or np  # default: saturate the slots
             print(f"[batch] parallel={np}, concurrency={conc}", flush=True)
-            arms.apply(f"--parallel {np}", ctx_size=run_ctx, mtp=run_mtp)
+            arms.apply(f"--parallel {np}", ctx_size=run_ctx, speculation=run_speculation)
             _wait_ready(port)
             rounds: list[dict] = []
             for r in range(args.n):
@@ -754,7 +758,7 @@ def mode_mtp(args: argparse.Namespace) -> dict:
     slot = _get_slot(args.api, args.slot)
     port = int(slot["port"])
     arms = _ProfileArms(args.api, args.slot, slot)
-    run_ctx, run_mtp = _arm_settings(args)
+    run_ctx, run_speculation = _arm_settings(args)
     prompt = _build_prompt(args.depth)
     sampler = _sampler_body(args)
     n_maxes = _csv_ints(args.spec_nmax)
@@ -783,7 +787,7 @@ def mode_mtp(args: argparse.Namespace) -> dict:
                         f"--spec-draft-n-max {n_max} --spec-draft-n-min {n_min} "
                         f"--spec-draft-p-min {p_min}"
                     )
-                    arms.apply(flags, ctx_size=run_ctx, mtp=run_mtp)
+                    arms.apply(flags, ctx_size=run_ctx, speculation=run_speculation)
                     _wait_ready(port)
                     spec = None
                 print(
@@ -848,7 +852,7 @@ def main() -> None:
         "--variant",
         action="append",
         default=[],
-        help='ab mode: "label[;ctx=N][;mtp=auto|off]:<extra llama-server args>" (repeatable)',
+        help='ab mode: "label[;ctx=N][;speculation=auto|off|ngram]:<extra llama-server args>" (repeatable)',
     )
     ap.add_argument(
         "--np",
@@ -869,10 +873,10 @@ def main() -> None:
         help="every arm's profile ctx_size (default: the slot's current profile window)",
     )
     ap.add_argument(
-        "--mtp",
-        choices=["auto", "off"],
+        "--speculation",
+        choices=["auto", "off", "ngram"],
         default=None,
-        help="every arm's profile mtp (default: the slot's current profile setting)",
+        help="every arm's profile speculation (default: the slot's current profile setting)",
     )
     ap.add_argument("--n", type=int, default=3, help="timed runs/rounds (default 3)")
     ap.add_argument("--max-tokens", type=int, default=256, help="decode length per run")

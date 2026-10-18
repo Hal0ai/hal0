@@ -667,7 +667,33 @@ def migrate_profile_centric(
             locks.enter_context(hal0_config_file_lock(paths.hal0_toml()))
             if paths.slots_config_dir().is_dir():
                 locks.enter_context(slot_write_lock())
-        return _migrate(dry_run=dry_run, job_id=job_id, verify=verify)
+        report = _migrate(dry_run=dry_run, job_id=job_id, verify=verify)
+        return _rename_speculation(report, job_id=job_id)
+
+
+def _rename_speculation(report: ConversionReport, *, job_id: str | None) -> ConversionReport:
+    """ADR-0031 §7: finish with the ``mtp`` -> ``speculation`` profile rename.
+
+    Every caller of the conversion (update, boot self-heal, ``hal0 profile
+    migrate --apply``, the rollback re-convert) ends on the current profile
+    shape. A rename that wrote anything counts as a write, so the caller
+    re-renders the slot units.
+    """
+    from hal0.config import paths
+    from hal0.config.migrations import speculation_rename
+
+    renamed = speculation_rename.convert(paths.profiles_toml(), dry_run=False)
+    if renamed.backup is not None:
+        report.written.append(str(paths.profiles_toml()))
+        if report.backup is None:
+            report.backup = str(renamed.backup)
+        log.warning(
+            "migrate.speculation_rename.applied",
+            job_id=job_id,
+            profiles=renamed.changed,
+            backup=str(renamed.backup),
+        )
+    return report
 
 
 def _block_mismatched_slots(
