@@ -761,6 +761,12 @@ SpeculationMode = Literal["auto", "off", "ngram"]
 #: Shared tail of every draft bundle: the KV cache types for the draft context.
 _DRAFT_KV = " --spec-draft-type-k q8_0 --spec-draft-type-v q8_0"
 
+#: Shared draft scheduling tail (ADR-0031 §3: it applies to every kind).
+_DRAFT_SCHED = (
+    " --spec-draft-threads 16 --spec-draft-threads-batch 32"
+    " --spec-draft-poll 1 --spec-draft-poll-batch 1"
+)
+
 #: Bench-tuned draft-speculation defaults per draft kind (profile layer; the
 #: draft device is placement and comes from the slot, and ``--spec-type`` is a
 #: model fact emitted in the model layer). A profile may override any of them
@@ -768,24 +774,18 @@ _DRAFT_KV = " --spec-draft-type-k q8_0 --spec-draft-type-v q8_0"
 #: ``dflash`` ``--spec-draft-n-max`` is a ``{n_max}`` placeholder the launch
 #: path fills from the drafter's block size (capped at 8).
 DRAFT_BUNDLE: dict[str, str] = {
-    "dflash": "--spec-draft-ngl all --spec-draft-n-max {n_max}" + _DRAFT_KV,
-    "eagle3": "--spec-draft-ngl all --spec-draft-n-max 4" + _DRAFT_KV,
+    "dflash": "--spec-draft-ngl all --spec-draft-n-max {n_max}" + _DRAFT_KV + _DRAFT_SCHED,
+    "eagle3": "--spec-draft-ngl all --spec-draft-n-max 4" + _DRAFT_KV + _DRAFT_SCHED,
     "simple": (
         "--spec-draft-ngl all --spec-draft-n-max 8 --spec-draft-n-min 0"
-        " --spec-draft-p-min 0.75" + _DRAFT_KV
+        " --spec-draft-p-min 0.75" + _DRAFT_KV + _DRAFT_SCHED
     ),
     "mtp": (
         "--spec-draft-ngl all"
         " --spec-draft-n-max 4"
         " --spec-draft-n-min 0"
         " --spec-draft-p-min 0.0"
-        " --spec-draft-p-split 0.10"
-        " --spec-draft-type-k q8_0"
-        " --spec-draft-type-v q8_0"
-        " --spec-draft-threads 16"
-        " --spec-draft-threads-batch 32"
-        " --spec-draft-poll 1"
-        " --spec-draft-poll-batch 1"
+        " --spec-draft-p-split 0.10" + _DRAFT_KV + _DRAFT_SCHED
     ),
 }
 

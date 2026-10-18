@@ -222,6 +222,16 @@ def test_draft_bundles_per_kind() -> None:
     assert "--spec-draft-p-min 0.75" in DRAFT_BUNDLE["simple"]
     for kind in ("dflash", "eagle3", "simple"):
         assert "--spec-draft-type-k q8_0 --spec-draft-type-v q8_0" in DRAFT_BUNDLE[kind]
+    # ADR-0031 §3: the scheduling tail is shared by every kind, exactly once,
+    # after the KV-cache types.
+    sched = (
+        "--spec-draft-type-k q8_0 --spec-draft-type-v q8_0"
+        " --spec-draft-threads 16 --spec-draft-threads-batch 32"
+        " --spec-draft-poll 1 --spec-draft-poll-batch 1"
+    )
+    for kind, bundle in DRAFT_BUNDLE.items():
+        assert bundle.endswith(sched), kind
+        assert bundle.count("--spec-draft-threads ") == 1, kind
     assert NGRAM_BUNDLE == (
         "--spec-type ngram-mod --spec-ngram-size-n 24 --spec-ngram-size-m 48 --spec-ngram-n-max 64"
     )
