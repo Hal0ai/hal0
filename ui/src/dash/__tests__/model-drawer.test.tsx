@@ -637,11 +637,16 @@ describe('ModelDrawer source disclosure (Task 9)', () => {
     mmproj: null,
   }
   const VARIANTS = [
-    { id: 'mmproj-Q8_0.gguf', size_bytes: 966367641, size: '0.9 GB', info: 'mmproj' },
     { id: 'model-q8.gguf', size_bytes: 9771050700, size: '9.1 GB', info: 'weights' },
   ]
+  const MMPROJ = [{ id: 'mmproj-Q8_0.gguf', size_bytes: 966367641, size: '0.9 GB' }]
   const withVariants = () => {
-    inspectHandler.current = () => ({ repo: 'org/qwen-gguf', variants: VARIANTS })
+    inspectHandler.current = () => ({
+      repo: 'org/qwen-gguf',
+      variants: VARIANTS,
+      mmproj: MMPROJ,
+      drafts: [],
+    })
   }
   const openSource = (host: HTMLElement) =>
     act(() => q<HTMLElement>(host, 'model-source-disclosure').click())
@@ -737,14 +742,9 @@ describe('ModelDrawer source disclosure (Task 9)', () => {
     // screen_vision_mmproj's on-disk check.
     inspectHandler.current = () => ({
       repo: 'org/qwen-gguf',
-      variants: [
-        {
-          id: 'UD-Q4_K_XL/mmproj-F16.gguf',
-          size_bytes: 644245094,
-          size: '0.6 GB',
-          info: 'mmproj sidecar',
-        },
-      ],
+      variants: [],
+      mmproj: [{ id: 'UD-Q4_K_XL/mmproj-F16.gguf', size_bytes: 644245094, size: '0.6 GB' }],
+      drafts: [],
     })
     const { host, root } = mount(
       React.createElement(ModelDrawer, { open: true, onClose: () => {}, model: SOURCE_MODEL }),
@@ -880,7 +880,12 @@ describe('ModelDrawer source disclosure (Task 9)', () => {
   })
 
   it('a repo with no projector files falls back to the text input too', () => {
-    inspectHandler.current = () => ({ repo: 'org/qwen-gguf', variants: [VARIANTS[1]] })
+    inspectHandler.current = () => ({
+      repo: 'org/qwen-gguf',
+      variants: VARIANTS,
+      mmproj: [],
+      drafts: [],
+    })
     const { host, root } = mount(
       React.createElement(ModelDrawer, { open: true, onClose: () => {}, model: SOURCE_MODEL }),
     )

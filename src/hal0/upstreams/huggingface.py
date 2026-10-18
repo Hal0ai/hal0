@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 from typing import Any
 
 import httpx
@@ -255,10 +256,152 @@ def _format_size(size_bytes: int | None) -> str:
     return f"{size_bytes / 1024**3:.2f} GB"
 
 
+def _quant_label(name: str, stem: str) -> str:
+    """The quant a GGUF filename carries (``UD-Q4_K_XL``, ``Q8_0``), else its stem.
+
+    Keeps unsloth's ``UD-`` (dynamic) prefix: ``UD-Q4_K_XL`` and ``Q4_K_XL``
+    are different files, and a repo can ship both.
+    """
+    from hal0.registry.detect import quant_from_filename
+
+    quant = quant_from_filename(name)
+    if not quant:
+        return stem
+    if f"ud-{quant}".lower() in name.lower():
+        return f"UD-{quant}"
+    return quant
+
+
+#: A speculative-decoding draft model shipped beside the main quants
+#: (``dflash-Foo-NVFP4.gguf``, ``Foo-draft-Q8_0.gguf``). It is a sidecar to a
+#: quant, not a model to serve, so it never appears as a quant.
+_DRAFTER_RE = re.compile(r"(?:^|[-_.])(?:dflash|draft)(?:[-_.]|$)", re.IGNORECASE)
+
+
+def group_quant_variants(
+    files: list[tuple[str, int]],
+) -> dict[str, list[dict[str, Any]]]:
+    """Group a repo's files into pullable quants, projectors and drafters.
+
+    ``files`` is ``(repo-relative path, size in bytes)`` per tree entry.
+    Each quant is ONE variant however many files it spans: the parts of a
+    split GGUF (``<stem>-00001-of-0000N.gguf``, often in a per-quant folder)
+    collapse into a single row whose ``id`` is the first part (what the pull
+    endpoint takes as ``hf_filename``; it fetches the other parts itself) and
+    whose size is the whole set. A set with a missing part comes back
+    ``complete: False`` — llama.cpp cannot open it.
+
+    Projectors (any file with ``mmproj`` in its name, ``.gguf`` or a bare
+    ``.mmproj``) are returned separately: they pair with a quant, they are
+    never one. Speculative draft models (:data:`_DRAFTER_RE`) are listed
+    under ``drafts`` for the same reason. Returns ``{"variants", "mmproj",
+    "drafts"}``, each sorted smallest first.
+    """
+    from pathlib import PurePosixPath
+
+    from hal0.registry.fileset import SHARD_RE
+
+    variants: list[dict[str, Any]] = []
+    mmproj: list[dict[str, Any]] = []
+    drafts: list[dict[str, Any]] = []
+    split_sets: dict[tuple[str, str, int], dict[int, tuple[str, int]]] = {}
+    for rel, size_bytes in files:
+        name = PurePosixPath(rel).name
+        lowered = name.lower()
+        if "mmproj" in lowered:
+            if lowered.endswith((_INSPECT_GGUF_SUFFIX, _INSPECT_MMPROJ_SUFFIX)):
+                mmproj.append(
+                    {
+                        "id": rel,
+                        "quant": _quant_label(name, PurePosixPath(name).stem),
+                        "size_bytes": size_bytes,
+                        "size": _format_size(size_bytes),
+                    }
+                )
+            continue
+        if not lowered.endswith(_INSPECT_GGUF_SUFFIX):
+            continue
+        if _DRAFTER_RE.search(PurePosixPath(name).stem):
+            drafts.append({"id": rel, "size_bytes": size_bytes, "size": _format_size(size_bytes)})
+            continue
+        m = SHARD_RE.match(name)
+        if m is not None:
+            key = (str(PurePosixPath(rel).parent), m.group("stem"), int(m.group("tot")))
+            split_sets.setdefault(key, {})[int(m.group("idx"))] = (rel, size_bytes)
+            continue
+        variants.append(
+            {
+                "id": rel,
+                "quant": _quant_label(name, PurePosixPath(name).stem),
+                "files": [rel],
+                "parts": 1,
+                "complete": True,
+                "size_bytes": size_bytes,
+                "size": _format_size(size_bytes),
+                "info": _format_size(size_bytes) + " · single file",
+            }
+        )
+    for (dirname, stem, total), parts in split_sets.items():
+        ordered = [parts[i] for i in sorted(parts)]
+        size_bytes = sum(size for _, size in ordered)
+        complete = sorted(parts) == list(range(1, total + 1))
+        first_name = f"{stem}-00001-of-{total:05d}.gguf"
+        first = parts[1][0] if 1 in parts else str(PurePosixPath(dirname) / first_name)
+        detail = f"{total} parts" if complete else f"{len(parts)} of {total} parts — incomplete"
+        variants.append(
+            {
+                "id": first,
+                "quant": _quant_label(first_name, stem),
+                "files": [rel for rel, _ in ordered],
+                "parts": total,
+                "complete": complete,
+                "size_bytes": size_bytes,
+                "size": _format_size(size_bytes),
+                "info": f"{_format_size(size_bytes)} · {detail}",
+            }
+        )
+    variants.sort(key=lambda v: (v["size_bytes"], v["id"]))
+    for rows in (mmproj, drafts):
+        rows.sort(key=lambda v: (v["size_bytes"], v["id"]))
+    return {"variants": variants, "mmproj": mmproj, "drafts": drafts}
+
+
+async def _read_tree_pages(
+    first: httpx.Response, headers: dict[str, str], next_link: Any
+) -> list[Any]:
+    """Rows of ``first`` plus every page its ``Link: rel="next"`` chain names.
+
+    Fail-soft like the single-page read it replaces: a page that errors or
+    isn't JSON ends the walk with the rows read so far.
+    """
+    rows: list[Any] = []
+    res: httpx.Response | None = first
+    async with httpx.AsyncClient(
+        timeout=httpx.Timeout(_INSPECT_TIMEOUT_SECONDS), follow_redirects=True, headers=headers
+    ) as client:
+        while res is not None:
+            try:
+                page = res.json() or []
+            except ValueError:
+                break
+            if isinstance(page, list):
+                rows.extend(page)
+            url = next_link(res.headers)
+            if not url:
+                break
+            try:
+                res = await client.get(url)
+            except (httpx.TimeoutException, httpx.HTTPError):
+                break
+            if res.status_code >= 400:
+                break
+    return rows
+
+
 async def fetch_repo(repo: str) -> dict[str, Any]:
     """Fetch HF model metadata + tree listing for ``repo``.
 
-    Returns ``{"variants", "tags", "metadata"}`` — see
+    Returns ``{"variants", "mmproj", "drafts", "tags", "metadata"}`` — see
     :func:`hal0.api.routes.models.inspect_model` for the full response
     shape this feeds. Raises a typed :class:`hal0.errors.Hal0Error`
     subclass on transport failure or 404 so the route maps it to the
@@ -302,22 +445,22 @@ async def fetch_repo(repo: str) -> dict[str, Any]:
             code="hf.upstream_error",
             details={"repo": repo, "status": meta_res.status_code},
         )
-    if tree_res.status_code >= 400:
-        # A missing tree (private repo, gated, etc.) is recoverable —
-        # we still surface tags + metadata, just with no variants.
-        tree_payload: list[Any] = []
-    else:
-        try:
-            tree_payload = tree_res.json() or []
-        except ValueError:
-            tree_payload = []
+    # A missing tree (private repo, gated, etc.) is recoverable — we still
+    # surface tags + metadata, just with no variants. The listing is paginated
+    # (``Link: rel="next"``); a split quant's parts can straddle pages, so
+    # every page is read before grouping.
+    tree_payload: list[Any] = []
+    if tree_res.status_code < 400:
+        from hal0.registry.fileset import _next_link
+
+        tree_payload = await _read_tree_pages(tree_res, headers, _next_link)
 
     try:
         meta_payload = meta_res.json() or {}
     except ValueError:
         meta_payload = {}
 
-    variants: list[dict[str, Any]] = []
+    files: list[tuple[str, int]] = []
     rel_basenames: set[str] = set()
     flm_total_bytes = 0
     for entry in tree_payload:
@@ -326,8 +469,7 @@ async def fetch_repo(repo: str) -> dict[str, Any]:
         rel = entry.get("path") or entry.get("rfilename")
         if not isinstance(rel, str):
             continue
-        rel_low = rel.lower()
-        rel_basenames.add(rel_low.rsplit("/", 1)[-1])
+        rel_basenames.add(rel.lower().rsplit("/", 1)[-1])
         # HF's tree API reports the *pointer file* size in ``size`` for
         # LFS objects; the real bytes live under ``lfs.size``. Prefer
         # the LFS size when present so the modal shows the real
@@ -343,26 +485,9 @@ async def fetch_repo(repo: str) -> dict[str, Any]:
         except (TypeError, ValueError):
             size_bytes = 0
         flm_total_bytes += size_bytes
-        is_gguf = rel_low.endswith(_INSPECT_GGUF_SUFFIX)
-        # A ``.mmproj`` sidecar is pullable even though it isn't a GGUF quant —
-        # the modal filters it out of the main variant dropdown (by the
-        # "mmproj" token) and into the vision picker. Guard on the token too so
-        # an unrelated ``.mmproj`` never slips into the main list.
-        is_mmproj = "mmproj" in rel_low and rel_low.endswith(_INSPECT_MMPROJ_SUFFIX)
-        if not (is_gguf or is_mmproj):
-            continue
-        # Use the GGUF filename as the canonical variant id — that's
-        # also what the pull endpoint resolves against (hf_filename).
-        kind_label = "mmproj sidecar" if (is_mmproj and not is_gguf) else "single file"
-        variants.append(
-            {
-                "id": rel,
-                "size_bytes": size_bytes,
-                "size": _format_size(size_bytes),
-                "info": _format_size(size_bytes) + " · " + kind_label,
-            }
-        )
-    variants.sort(key=lambda v: v.get("size_bytes") or 0)
+        files.append((rel, size_bytes))
+    grouped = group_quant_variants(files)
+    variants = grouped["variants"]
     # FLM/NPU repos carry no GGUF variant but a config.json + tokenizer +
     # ``…nx`` NPU-weight shape. Surface one whole-repo variant flagged
     # ``flm`` so the dashboard routes the pull through the FLM path
@@ -396,6 +521,8 @@ async def fetch_repo(repo: str) -> dict[str, Any]:
 
     return {
         "variants": variants,
+        "mmproj": grouped["mmproj"],
+        "drafts": grouped["drafts"],
         "tags": tags,
         "metadata": {
             "license": license_label,

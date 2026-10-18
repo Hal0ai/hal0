@@ -83,12 +83,19 @@ async function openSource(page: import('@playwright/test').Page) {
 }
 
 /** Stub the repo listing behind the mmproj picker (default: no projectors). */
-async function mockInspect(page: import('@playwright/test').Page, variants: any[] = []) {
+async function mockInspect(page: import('@playwright/test').Page, mmproj: any[] = []) {
   await page.route('**/api/models/inspect', (route) =>
     route.fulfill({
       status: 200,
       contentType: 'application/json',
-      body: JSON.stringify({ repo: 'org/original-repo', cached: true, variants, tags: [] }),
+      body: JSON.stringify({
+        repo: 'org/original-repo',
+        cached: true,
+        variants: [{ id: 'model-q8.gguf', size_bytes: 9771050700, size: '9.1 GB', info: 'weights' }],
+        mmproj,
+        drafts: [],
+        tags: [],
+      }),
     }),
   )
 }
@@ -134,10 +141,7 @@ test.describe('Model drawer — inline errors gate the save (#1380, #1381)', () 
     // absolute host path (registry/model.py:249, pull.py:1071), so the
     // filename the repo lists resolves against the stored sidecar's own
     // directory (`/models` here) before it is offered.
-    await mockInspect(page, [
-      { id: 'mmproj-F16.gguf', size_bytes: 644245094, size: '0.6 GB', info: 'mmproj · 0.6 GB' },
-      { id: 'model-q8.gguf', size_bytes: 9771050700, size: '9.1 GB', info: 'weights' },
-    ])
+    await mockInspect(page, [{ id: 'mmproj-F16.gguf', size_bytes: 644245094, size: '0.6 GB' }])
     const puts = await capturePut(page)
     await openDrawer(page)
     await openSource(page)

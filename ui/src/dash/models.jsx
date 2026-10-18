@@ -7,7 +7,7 @@
 // /api/models/{id}, and the Downloads pane is a thin shell around
 // per-row usePullJob() instances tracked by model_id.
 
-import { useModels, usePullsList, useClearPullJob, usePullJob, useHfSearch, useModelUpdatesCheck, useModelUpdatesForceCheck, useModelUpdateApply, useModelUpdateAll, fmtBytes, fmtSpeed, fmtEta } from '@/api/hooks/useModels'
+import { useModels, usePullsList, useClearPullJob, usePullJob, useHfSearch, useModelUpdatesCheck, useModelUpdatesForceCheck, useModelUpdateApply, useModelUpdateAll, fmtBytes, fmtSpeed, fmtEta, pullFileLabel } from '@/api/hooks/useModels'
 import { apiPost } from '@/api/client'
 import { ENDPOINTS } from '@/api/endpoints'
 import { useSlots, useSlotSwap } from '@/api/hooks/useSlots'
@@ -889,7 +889,10 @@ function DownloadRow({ job, clearJob }) {
       )}
       {isRunning && (
         <div style={{display: "flex", justifyContent: "space-between", fontFamily: "var(--jbm)", fontSize: 10, color: "var(--fg-4)", marginBottom: 4}}>
-          <span>{fmtBytes(j.bytes_downloaded)} / {fmtBytes(j.bytes_total)}</span>
+          <span>
+            {fmtBytes(j.bytes_downloaded)} / {fmtBytes(j.bytes_total)}
+            {pullFileLabel(j.files || []) && ` · ${pullFileLabel(j.files || [])}`}
+          </span>
           <span>{fmtSpeed(j.speed_bps)} · {fmtEta(j.eta_s)}</span>
         </div>
       )}

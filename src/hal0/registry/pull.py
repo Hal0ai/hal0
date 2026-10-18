@@ -30,7 +30,7 @@ import shutil
 import tempfile
 import time
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, NamedTuple
 
 import httpx
@@ -42,7 +42,7 @@ from hal0.errors import Hal0Error
 from hal0.install.perms import ensure_shared_dir
 from hal0.model_meta import derive_model_provider
 from hal0.registry import tombstones
-from hal0.registry.fileset import FileSetEntry, FileSetPlan
+from hal0.registry.fileset import SHARD_RE, FileSetEntry, FileSetPlan
 from hal0.registry.model import Model, ModelCapabilities
 from hal0.registry.store import ModelNotFound, ModelRegistry
 
@@ -340,6 +340,43 @@ def _canonical_name(filename: str) -> str:
     return Path(filename).name or _CANONICAL_GGUF_NAME
 
 
+def _shard_set(hf_file: str) -> list[str]:
+    """Every part of the split GGUF ``hf_file`` opens, in order, or ``[]``.
+
+    llama.cpp's ``gguf-split`` names parts ``<stem>-00001-of-0000N.gguf`` in
+    one directory, so the whole set follows from the first part's name — the
+    Add-from-HF modal sends only that one. A later part is refused: llama.cpp
+    can only open a split model from its first part.
+    """
+    path = PurePosixPath(hf_file)
+    m = SHARD_RE.match(path.name)
+    if m is None:
+        return []
+    if int(m.group("idx")) != 1:
+        raise PullInvalidSource(
+            f"{hf_file!r} is part {int(m.group('idx'))} of a split model — "
+            "pull it by its first part (-00001-of-…)",
+            details={"hf_file": hf_file},
+        )
+    tot = int(m.group("tot"))
+    return [
+        str(path.with_name(f"{m.group('stem')}-{i:05d}-of-{tot:05d}.{m.group('ext')}"))
+        for i in range(1, tot + 1)
+    ]
+
+
+def _shard_dests(final: Path, total: int) -> list[Path]:
+    """Installed paths for a ``total``-part split model whose first part is ``final``.
+
+    A capability-grouped install names the first part ``model.gguf``; the
+    parts become ``model-00001-of-0000N.gguf`` … instead, because llama.cpp
+    finds parts 2..N by the first part's ``-00001-of-`` name.
+    """
+    m = SHARD_RE.match(final.name)
+    stem, ext = (m.group("stem"), m.group("ext")) if m else (final.stem, final.suffix.lstrip("."))
+    return [final.with_name(f"{stem}-{i:05d}-of-{total:05d}.{ext}") for i in range(1, total + 1)]
+
+
 def _curated_extra_files(model_id: str, hf_repo: str) -> list[str]:
     """The curated row's ``extra_files`` for this pull, or ``[]``.
 
@@ -477,6 +514,19 @@ def sweep_orphaned_partials(max_age_s: float = _PARTIAL_MAX_AGE_S) -> int:
             removed += 1
         except OSError as exc:
             log.warning("model.partial_sweep_failed path=%s error=%s", p, exc)
+    # Split pulls stage finished parts in ``<id>--parts/`` (see
+    # :func:`_split_staging_dir`); reap a set nobody has touched for as long.
+    with contextlib.suppress(OSError):
+        for stage in tmp_dir.glob("*--parts"):
+            try:
+                newest = max(
+                    (p.stat().st_mtime for p in stage.iterdir()), default=stage.stat().st_mtime
+                )
+                if stage.is_dir() and (now - newest) >= max_age_s:
+                    shutil.rmtree(stage)
+                    removed += 1
+            except OSError as exc:
+                log.warning("model.partial_sweep_failed path=%s error=%s", stage, exc)
     if removed:
         log.info("model.partial_sweep removed=%d dir=%s", removed, tmp_dir)
     return removed
@@ -1101,6 +1151,134 @@ async def _download_one(
         raise
 
 
+def _others_total(job: PullJob, rec: PullFile) -> int:
+    """Known ``bytes_total`` of every file of ``job`` except ``rec``.
+
+    :func:`_download_one` reports ``job.bytes_total`` as this plus ``rec``'s
+    own total, so when a split pull knows every part's size up front the
+    job's total stays the whole set instead of shrinking to "files so far".
+    """
+    return sum(f.bytes_total for f in job.files if f is not rec)
+
+
+def _split_staging_dir(model_id: str) -> Path:
+    """Where a split pull holds verified parts until the whole set is in."""
+    return _tmp_dir() / f"{_sanitise_id(model_id)}--parts"
+
+
+async def _plan_split_parts(
+    job: PullJob,
+    hf_repo: str,
+    *,
+    hf_token: str | None,
+    client: httpx.AsyncClient,
+    recs: list[PullFile | None],
+) -> str:
+    """Pin a split pull to one commit and fill in each file's size and hash.
+
+    Resolves ``main`` once and lists the repo tree at that sha, so a push to
+    the repo mid-download can never mix parts from two revisions. Returns the
+    sha. A part the tree does not list fails the pull before any download.
+    """
+    from hal0.registry.fileset import enumerate_repo, resolve_revision
+
+    revision = await resolve_revision(hf_repo, token=hf_token, client=client)
+    tree = {
+        e.path: e
+        for e in await enumerate_repo(hf_repo, revision=revision, token=hf_token, client=client)
+    }
+    missing = [r.hf_filename for r in recs if r is not None and r.hf_filename not in tree]
+    if missing:
+        raise PullInvalidSource(
+            f"{hf_repo}@{revision[:12]} has no {', '.join(missing)} — the split set is incomplete",
+            details={"repo": hf_repo, "revision": revision, "missing": missing},
+        )
+    for rec in recs:
+        if rec is None:
+            continue
+        entry = tree[rec.hf_filename]
+        rec.bytes_total = entry.lfs_size if entry.lfs_size is not None else entry.size
+        rec.expected_sha256 = entry.lfs_oid
+    job.bytes_total = sum(f.bytes_total for f in job.files)
+    job._signal()
+    return revision
+
+
+def _staged_part_ok(path: Path, rec: PullFile) -> bool:
+    """True when ``path`` already holds ``rec``'s verified bytes."""
+    try:
+        if not path.is_file() or path.stat().st_size != rec.bytes_total:
+            return False
+    except OSError:
+        return False
+    if not rec.expected_sha256:
+        return True
+    hasher = hashlib.sha256()
+    _rehash_prefix(path, hasher)
+    return hasher.hexdigest() == rec.expected_sha256
+
+
+async def _pull_split_parts(
+    job: PullJob,
+    recs: list[PullFile],
+    finals: list[Path],
+    *,
+    client: httpx.AsyncClient,
+    hf_repo: str,
+    base_headers: dict[str, str],
+    revision: str,
+) -> None:
+    """Download every part of a split GGUF into the staging directory.
+
+    Nothing at the install path changes until :func:`_install_split_parts`
+    runs, so a failure on part N leaves an already-installed set whole. A
+    part a previous attempt finished (and that still verifies) is kept, so
+    a retry resumes at the first missing part. A cancel discards the lot.
+    """
+    stage = _split_staging_dir(job.model_id)
+    ensure_shared_dir(stage)
+    try:
+        for rec, final in zip(recs, finals, strict=True):
+            staged = stage / final.name
+            if await asyncio.to_thread(_staged_part_ok, staged, rec):
+                rec.bytes_done = rec.bytes_total
+                rec.sha256 = rec.expected_sha256 or await asyncio.to_thread(_sha256_of, staged)
+                rec.dest = str(staged)
+                job.bytes_downloaded = sum(f.bytes_done for f in job.files)
+                job._signal()
+                continue
+            await _download_one(
+                job,
+                rec,
+                client=client,
+                hf_repo=hf_repo,
+                base_headers=base_headers,
+                final=staged,
+                base_done=sum(f.bytes_done for f in job.files if f is not rec),
+                base_total=_others_total(job, rec),
+                revision=revision,
+            )
+    except _PullCancelled:
+        shutil.rmtree(stage, ignore_errors=True)
+        raise
+
+
+def _install_split_parts(job: PullJob, recs: list[PullFile], finals: list[Path]) -> None:
+    """Move a fully staged split set into place, then drop the staging dir."""
+    stage = _split_staging_dir(job.model_id)
+    for rec, final in zip(recs, finals, strict=True):
+        ensure_shared_dir(final.parent)  # 2775, umask-proof (#1896)
+        os.replace(stage / final.name, final)
+        rec.dest = str(final)
+    shutil.rmtree(stage, ignore_errors=True)
+
+
+def _sha256_of(path: Path) -> str:
+    hasher = hashlib.sha256()
+    _rehash_prefix(path, hasher)
+    return hasher.hexdigest()
+
+
 async def run_pull(
     job: PullJob,
     *,
@@ -1173,14 +1351,24 @@ async def run_pull(
             details={"model_id": job.model_id},
         )
 
+    # A split GGUF pulls every part; ``hf_file`` names the first.
+    shard_names = _shard_set(hf_file)
+
     job.state = "running"
     job.started_at = time.time()
-    # Per-file manifest — main model first, optional mmproj sidecar second.
+    # Per-file manifest — main model (every part of a split one) first, then
+    # the optional mmproj sidecar, then engine sidecars.
     if extra_files is None:
         extra_files = _curated_extra_files(job.model_id, hf_repo)
-    job.files = [PullFile(hf_filename=hf_file, kind="model")]
+    if shard_names:
+        job.files = [PullFile(hf_filename=name, kind="shard") for name in shard_names]
+    else:
+        job.files = [PullFile(hf_filename=hf_file, kind="model")]
+    model_recs = list(job.files)
+    mm_rec: PullFile | None = None
     if mmproj_file:
-        job.files.append(PullFile(hf_filename=mmproj_file, kind="mmproj"))
+        mm_rec = PullFile(hf_filename=mmproj_file, kind="mmproj")
+        job.files.append(mm_rec)
     sidecar_recs = [PullFile(hf_filename=name, kind="sidecar") for name in extra_files]
     job.files.extend(sidecar_recs)
     job._signal()
@@ -1197,8 +1385,7 @@ async def run_pull(
         )
 
     try:
-        # ── Main model file ────────────────────────────────────────────────
-        main_rec = job.files[0]
+        # ── Main model file (every part of a split one) ───────────────────
         if dest_override:
             final = Path(dest_override)
             # A pre-#2739 non-GGUF row records ``.../model.gguf``; re-pulling
@@ -1207,24 +1394,44 @@ async def run_pull(
                 final = final.parent / _canonical_name(hf_file)
         else:
             final = _final_path_for_entry(job.model_id, hf_file, comfyui_subdir, capability)
-        digest = await _download_one(
-            job,
-            main_rec,
-            client=client,
-            hf_repo=hf_repo,
-            base_headers=base_headers,
-            final=final,
-            base_done=0,
-            base_total=0,
-        )
-        size_bytes = main_rec.bytes_done
+        model_finals = _shard_dests(final, len(model_recs)) if shard_names else [final]
+        final = model_finals[0]
+        revision = "main"
+        if shard_names:
+            # Every part (and the projector) from ONE commit, with sizes and
+            # LFS hashes known up front: progress has its real total from the
+            # first byte, and a later part is verified like the first.
+            revision = await _plan_split_parts(
+                job, hf_repo, hf_token=hf_token, client=client, recs=[*model_recs, mm_rec]
+            )
+            await _pull_split_parts(
+                job,
+                model_recs,
+                model_finals,
+                client=client,
+                hf_repo=hf_repo,
+                base_headers=base_headers,
+                revision=revision,
+            )
+        else:
+            await _download_one(
+                job,
+                model_recs[0],
+                client=client,
+                hf_repo=hf_repo,
+                base_headers=base_headers,
+                final=final,
+                base_done=0,
+                base_total=_others_total(job, model_recs[0]),
+            )
+        digest = model_recs[0].sha256 or ""
+        size_bytes = sum(rec.bytes_done for rec in model_recs)
 
         # ── Optional mmproj sidecar (WS-11) ────────────────────────────────
         # Same directory as the main model, so the association survives the
         # discover scan's same-directory heuristic AND is set directly below.
         mmproj_final: Path | None = None
-        if mmproj_file:
-            mm_rec = job.files[1]
+        if mm_rec is not None:
             mmproj_final = final.parent / Path(mm_rec.hf_filename).name
             await _download_one(
                 job,
@@ -1233,9 +1440,13 @@ async def run_pull(
                 hf_repo=hf_repo,
                 base_headers=base_headers,
                 final=mmproj_final,
-                base_done=main_rec.bytes_done,
-                base_total=main_rec.bytes_total,
+                base_done=sum(f.bytes_done for f in job.files if f is not mm_rec),
+                base_total=_others_total(job, mm_rec),
+                revision=revision,
             )
+
+        if shard_names:
+            _install_split_parts(job, model_recs, model_finals)
 
         # ── Engine sidecars (#2739) ────────────────────────────────────────
         # Same directory as the main file, upstream basename: the engine
@@ -1279,15 +1490,21 @@ async def run_pull(
             capability=capability,
             comfyui_subdir=comfyui_subdir,
             mmproj=str(mmproj_final) if mmproj_final is not None else None,
+            shards=[str(p) for p in model_finals] if shard_names else None,
         )
 
         # Blob/file accounting — the SAME bookkeeping the fileset branch does
         # (#1412). Without it `store_blob`/`model_file` stay empty on every box
         # that pulls through HF coords, which silently disables refcounting,
         # hardlink dedup, and the store GC.
-        installed_rows = [InstalledFile(hf_file, final, size_bytes, digest, "model")]
-        if mmproj_final is not None:
-            mm_rec = job.files[1]
+        if shard_names:
+            installed_rows = [
+                InstalledFile(rec.hf_filename, p, rec.bytes_done, rec.sha256, "shard", idx)
+                for idx, (rec, p) in enumerate(zip(model_recs, model_finals, strict=True), 1)
+            ]
+        else:
+            installed_rows = [InstalledFile(hf_file, final, size_bytes, digest, "model")]
+        if mm_rec is not None and mmproj_final is not None:
             installed_rows.append(
                 InstalledFile(
                     mmproj_file or mmproj_final.name,
@@ -1376,6 +1593,7 @@ def _register_pulled(
     capability: str | None = None,
     comfyui_subdir: str | None = None,
     mmproj: str | None = None,
+    shards: list[str] | None = None,
 ) -> None:
     """Upsert the registry entry after a successful pull.
 
@@ -1391,6 +1609,11 @@ def _register_pulled(
     projector sidecar. Set directly so vision works right after the pull —
     no directory scan needed. ``None`` leaves any existing association
     (e.g. one a prior scan discovered) untouched.
+
+    ``shards`` lists every installed part of a split GGUF, first part
+    first (``path`` is that first part), stamped as ``metadata["shards"]`` —
+    the same record the discover scan writes, which the delete and store
+    accounting read. A single-file pull clears a stale list.
     """
     # ``pulled_at`` provenance lets the dashboard show when the installed
     # bytes were fetched — and thereby how stale they are vs an available
@@ -1398,7 +1621,9 @@ def _register_pulled(
     # A pull is an explicit request for these bytes: drop any tombstone a
     # keep-files delete left on the path (ADR-0026).
     tombstones.clear(path)
-    fresh_meta = {"sha256": sha256, "pulled_at": int(time.time())}
+    fresh_meta: dict[str, Any] = {"sha256": sha256, "pulled_at": int(time.time())}
+    if shards:
+        fresh_meta["shards"] = list(shards)
     # Curated template override: some artifacts ship an embedded chat template
     # the runner's jinja engine can't execute (hal0-brain-sft's ``|min``), so
     # their catalogue entry names a bundled replacement. Stamped as the model's
@@ -1549,6 +1774,8 @@ def _register_pulled(
     # before kicking off the pull).
     merged_meta = dict(existing.metadata)
     merged_meta.update(fresh_meta)
+    if not shards:
+        merged_meta.pop("shards", None)
     # An operator-provided window outranks this pull's read — but a value
     # THIS SAME PATH auto-stamped on a prior pull (context_length_detected)
     # must NOT outrank a fresh re-pull's own detection, or an in-place
@@ -1600,6 +1827,7 @@ class InstalledFile(NamedTuple):
     size_bytes: int
     sha256: str | None
     role: str
+    shard_index: int | None = None
 
 
 def _register_installed_files(
@@ -1664,7 +1892,43 @@ def _register_installed_files(
                 sha256=rec.sha256,
                 lfs=rec.sha256 is not None,
                 role=rec.role,
+                shard_index=rec.shard_index,
             )
+        _drop_superseded_model_files(conn, model_id=model_id, prior=prior, installed=installed)
+
+
+def _drop_superseded_model_files(
+    conn: Any,
+    *,
+    model_id: str,
+    prior: dict[str, Any],
+    installed: list[InstalledFile],
+) -> None:
+    """Forget the weights a re-pull replaced with a differently named set.
+
+    Re-pulling an id with another quant (``seed_registry_from_body``) or a
+    different part count leaves ``model_file`` rows, blob references and
+    files from the old set that nothing will read again. Drop the old
+    ``model``/``shard`` rows this pull did not write, release their blob
+    references, and delete their files unless the new set reuses the path
+    (a capability-grouped install names every 3-part set
+    ``model-0000i-of-00003.gguf``). Projector and sidecar rows are left
+    alone: a pull without ``mmproj`` keeps the row's existing pairing.
+    """
+    from hal0.registry.gc import release_blob_ref
+
+    new_rels = {rec.rel for rec in installed}
+    new_dests = {str(rec.dest) for rec in installed}
+    for rel, row in prior.items():
+        if rel in new_rels or row["role"] not in ("model", "shard"):
+            continue
+        dest = row["dest"]
+        reused = dest in new_dests
+        conn.execute("DELETE FROM model_file WHERE model_id = ? AND rel = ?", (model_id, rel))
+        release_blob_ref(conn, row["sha256"], dest, model_id=model_id, keep_bytes=reused)
+        if dest and not reused:
+            with contextlib.suppress(Exception):
+                store.assert_under_store(dest, severity="fail").unlink(missing_ok=True)
 
 
 # ── file-SET pulling (ML-2/ML-3) ──────────────────────────────────────────

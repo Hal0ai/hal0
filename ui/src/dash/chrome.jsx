@@ -7,7 +7,7 @@
 import { useRuntimeRollup, useHealthSystem, failingChecks } from '@/api/hooks/useRuntime'
 import { useLogsStream } from '@/api/hooks/useLogs'
 import { useSlots } from '@/api/hooks/useSlots'
-import { useModels, usePullsList, useClearPullJob, fmtSpeed, fmtEta } from '@/api/hooks/useModels'
+import { useModels, usePullsList, useClearPullJob, fmtSpeed, fmtEta, pullFileLabel } from '@/api/hooks/useModels'
 import { apiPost } from '@/api/client'
 import { ENDPOINTS } from '@/api/endpoints'
 import { useMemoryEnabled } from '@/api/hooks/useMemory'
@@ -255,7 +255,7 @@ function NotificationBell() {
                 <span className="mono">{j.hf_repo || j.model_id}</span>
                 {j.state === "queued"
                   ? " — queued"
-                  : <> — {pct}%{j.speed_bps > 0 && <> · {fmtSpeed(j.speed_bps)}</>}{j.eta_s > 0 && <> · {fmtEta(j.eta_s)} left</>}</>}
+                  : <> — {pct}%{pullFileLabel(j.files || []) && <> · {pullFileLabel(j.files || [])}</>}{j.speed_bps > 0 && <> · {fmtSpeed(j.speed_bps)}</>}{j.eta_s > 0 && <> · {fmtEta(j.eta_s)} left</>}</>}
               </span>
               <button
                 className="notif-act"
@@ -987,6 +987,7 @@ function Footer({ updateAvailable, expanded = false, onToggle }) {
                           </div>
                           <span className="foot-dl-stats">
                             <span>{pct}%</span>
+                            {isRunning && pullFileLabel(j.files || []) && <span>{pullFileLabel(j.files || [])}</span>}
                             {isRunning && (j.speed_bps > 0 ? <span>{fmtSpeed(j.speed_bps)}</span> : <span>calculating…</span>)}
                             {isRunning && j.eta_s > 0 && <span>{fmtEta(j.eta_s)} left</span>}
                           </span>

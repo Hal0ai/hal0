@@ -661,6 +661,11 @@ async def enqueue(
     from hal0.services.models_service import refuse_unsupported_quant
 
     refuse_unsupported_quant(model_id, None, hf_file)
+    # A split GGUF is pulled by its first part; refuse a later one up front
+    # (422) rather than failing inside the background task.
+    from hal0.registry.pull import _shard_set
+
+    _shard_set(hf_file)
     if from_body:
         labels = body.get("labels") if isinstance(body, dict) else None
         if not isinstance(labels, list):

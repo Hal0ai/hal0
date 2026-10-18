@@ -30,6 +30,18 @@ applying. Add those subsections to a version's section to surface them; see
 
 ## [Unreleased]
 
+### Changed
+
+- **Add from Hugging Face lists quants, not files.** Inspecting a repo now
+  shows one row per quant (`UD-Q4_K_XL`, `Q8_0`, …) with its total size. A
+  split GGUF (`…-00001-of-00003.gguf`, usually in a per-quant folder) is one
+  row, and pulling it downloads every part into the model's directory under
+  names llama.cpp can open, so the slot loads the whole model from the
+  first part. The vision projector is offered beside the quant instead of
+  among them, and speculative-decoding draft files are listed separately.
+  `POST /api/models/inspect` returns projectors under `mmproj` and drafters
+  under `drafts`; `variants` now holds only quants.
+
 ## [1.4.0] — 2026-10-16
 
 ### Highlights
