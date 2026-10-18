@@ -99,8 +99,37 @@ _INTERESTING_KEYS_STATIC: frozenset[str] = frozenset(
         # pooling key still tends to carry these. general.tags is an array
         # of free-text strings (e.g. ["reranker", "cross-encoder"]).
         "general.tags",
+        # Speculative-decoding drafter facts (ADR-0031 §2). The two
+        # ``target_layers`` keys are int32 arrays; _read_value materialises
+        # them as list[int].
+        "dflash.embedding_length",
+        "dflash.block_size",
+        "dflash.target_layers",
+        "dflash.selector_top_k",
+        "eagle3.target_hidden_size",
+        "eagle3.target_layers",
+        "lilicorr.candidate_topk",
+        "tokenizer.ggml.model",
+        "tokenizer.ggml.bos_token_id",
+        "tokenizer.ggml.eos_token_id",
+        "general.base_model.0.name",
+        "general.base_model.0.repo_url",
     }
 )
+
+#: ``<arch>.<suffix>`` keys collected for whatever architecture the file names.
+_ARCH_KEY_SUFFIXES: tuple[str, ...] = (
+    "context_length",
+    "pooling_type",
+    "attention.causal",
+    "block_count",
+    "vocab_size",
+    "nextn_predict_layers",
+    "embedding_length",
+)
+
+#: How many tensor names ``tensor_names_prefix`` carries at most.
+_TENSOR_NAME_PREFIX_COUNT = 64
 
 
 class GGUFParseError(Exception):
@@ -215,14 +244,8 @@ def read_gguf_header(path: str | Path) -> dict[str, Any] | None:
     Returns ``None`` if the file is missing, is not GGUF (bad magic), or
     is so truncated/malformed that no keys can be extracted. The returned
     dict always contains ``"version"`` and ``"tensor_count"`` on success;
-    other keys are present only if the underlying KV block carried them.
-
-    Specifically extracts:
-        * ``general.architecture``
-        * ``general.embedding_length``
-        * ``general.file_type``
-        * ``<arch>.context_length``
-        * ``<arch>.pooling_type``
+    other keys are present only if the underlying KV block carried them
+    (see :func:`read_gguf_header_bytes`).
 
     The file is mmap'd read-only over a small leading window; no tensor
     weights are touched.
@@ -253,104 +276,7 @@ def read_gguf_header(path: str | Path) -> dict[str, Any] | None:
         else:
             buf = mm
         try:
-            r = _Reader(buf, window)
-
-            magic = r.read(4)
-            if magic != _GGUF_MAGIC:
-                return None
-
-            version = r.u32()
-            tensor_count = r.u64()
-            kv_count = r.u64()
-
-            out: dict[str, Any] = {
-                "version": version,
-                "tensor_count": tensor_count,
-            }
-
-            arch: str | None = None
-            # First pass: scan KVs, capturing static keys (general.*) and
-            # any <arch>.context_length / <arch>.pooling_type we can match
-            # once we know the arch string. Because keys aren't guaranteed
-            # to be ordered, we capture the arch first if it appears
-            # later by doing a single linear scan with on-the-fly match.
-            #
-            # The spec doesn't promise ordering; in practice general.architecture
-            # is the first or second KV in every model I've seen, so single-pass
-            # is fine. We never load tensor data either way.
-            try:
-                for _ in range(kv_count):
-                    key = r.gguf_string()
-                    vtype = r.u32()
-
-                    want = key in _INTERESTING_KEYS_STATIC
-                    if not want and arch is not None:
-                        want = key in (
-                            f"{arch}.context_length",
-                            f"{arch}.pooling_type",
-                            f"{arch}.attention.causal",
-                        )
-                    if (
-                        not want
-                        and arch is None
-                        and (
-                            key.endswith(".context_length")
-                            or key.endswith(".pooling_type")
-                            or key.endswith(".attention.causal")
-                        )
-                    ):
-                        # Capture arch-prefixed context_length/pooling_type/
-                        # attention.causal even if we haven't seen
-                        # general.architecture yet (rare but legal — the
-                        # spec doesn't promise ordering, #1838 codex
-                        # review). We stash the value under its own
-                        # <prefix>.<key> and promote it below once/if the
-                        # matching arch turns up (or, absent that, take
-                        # the first one we saw).
-                        want = True
-
-                    if want:
-                        value = _read_value(r, vtype)
-                        out[key] = value
-                        if key == "general.architecture" and isinstance(value, str):
-                            arch = value
-                    else:
-                        _skip_value(r, vtype)
-            except GGUFParseError:
-                # Partial-read is OK: return whatever we already collected.
-                # An empty `out` (no real keys) still carries version +
-                # tensor_count which is enough to confirm "yes, this is GGUF".
-                pass
-
-            # Promote arch-prefixed keys into stable aliases so callers
-            # don't have to know the architecture name.
-            if arch:
-                ctx_key = f"{arch}.context_length"
-                pool_key = f"{arch}.pooling_type"
-                causal_key = f"{arch}.attention.causal"
-                if ctx_key in out:
-                    out["context_length"] = out[ctx_key]
-                if pool_key in out:
-                    out["pooling_type"] = out[pool_key]
-                if causal_key in out:
-                    out["attention_causal"] = out[causal_key]
-            else:
-                # No arch but we may have captured a *.context_length /
-                # *.pooling_type / *.attention.causal on the speculative
-                # branch above. Promote the first one of each.
-                for suffix, alias in (
-                    (".context_length", "context_length"),
-                    (".pooling_type", "pooling_type"),
-                    (".attention.causal", "attention_causal"),
-                ):
-                    if alias in out:
-                        continue
-                    for k, v in out.items():
-                        if k.endswith(suffix) and k != alias:
-                            out[alias] = v
-                            break
-
-            return out
+            return _parse_header(buf, window)
         finally:
             if mm is not None:
                 with _suppress_close():
@@ -358,6 +284,111 @@ def read_gguf_header(path: str | Path) -> dict[str, Any] | None:
     finally:
         with _suppress_close():
             f.close()
+
+
+def read_gguf_header_bytes(buf: bytes) -> dict[str, Any] | None:
+    """Parse a GGUF header out of an in-memory byte window.
+
+    Same result shape as :func:`read_gguf_header` (which delegates here after
+    reading its window). Used for headers fetched by HTTP range. ``None``
+    when ``buf`` is not GGUF.
+    """
+    if len(buf) < 24:
+        return None
+    return _parse_header(buf, len(buf))
+
+
+def _is_arch_key(key: str, arch: str | None) -> bool:
+    if arch is not None:
+        return any(key == f"{arch}.{s}" for s in _ARCH_KEY_SUFFIXES)
+    # Arch not seen yet (the spec doesn't promise ordering, #1838 codex
+    # review): capture by suffix and promote below once/if arch turns up.
+    return any(key.endswith(f".{s}") for s in _ARCH_KEY_SUFFIXES)
+
+
+def _parse_header(buf: bytes | mmap.mmap, window: int) -> dict[str, Any] | None:
+    r = _Reader(buf, window)
+
+    magic = r.read(4)
+    if magic != _GGUF_MAGIC:
+        return None
+
+    version = r.u32()
+    tensor_count = r.u64()
+    kv_count = r.u64()
+
+    out: dict[str, Any] = {
+        "version": version,
+        "tensor_count": tensor_count,
+    }
+
+    arch: str | None = None
+    kv_complete = False
+    # Single linear scan; the spec doesn't promise ordering, but
+    # general.architecture is first or second in every model seen.
+    # Tensor data is never loaded.
+    try:
+        for _ in range(kv_count):
+            key = r.gguf_string()
+            vtype = r.u32()
+
+            if key in _INTERESTING_KEYS_STATIC or _is_arch_key(key, arch):
+                value = _read_value(r, vtype)
+                out[key] = value
+                if key == "general.architecture" and isinstance(value, str):
+                    arch = value
+            else:
+                _skip_value(r, vtype)
+        kv_complete = True
+    except GGUFParseError:
+        # Partial-read is OK: return whatever we already collected.
+        # An empty `out` (no real keys) still carries version +
+        # tensor_count which is enough to confirm "yes, this is GGUF".
+        pass
+
+    if kv_complete and tensor_count:
+        names = _read_tensor_names(r, min(tensor_count, _TENSOR_NAME_PREFIX_COUNT))
+        if names is not None:
+            out["tensor_names_prefix"] = names
+
+    # Promote arch-prefixed keys into stable aliases so callers
+    # don't have to know the architecture name.
+    aliases = (
+        ("context_length", "context_length"),
+        ("pooling_type", "pooling_type"),
+        ("attention.causal", "attention_causal"),
+    )
+    if arch:
+        for suffix, alias in aliases:
+            if f"{arch}.{suffix}" in out:
+                out[alias] = out[f"{arch}.{suffix}"]
+    else:
+        # No arch but we may have captured a *.context_length etc. on the
+        # speculative branch above. Promote the first one of each.
+        for suffix, alias in aliases:
+            if alias in out:
+                continue
+            for k, v in out.items():
+                if k.endswith(f".{suffix}") and k != alias:
+                    out[alias] = v
+                    break
+
+    return out
+
+
+def _read_tensor_names(r: _Reader, count: int) -> list[str] | None:
+    """First ``count`` tensor names, or ``None`` if the block is cut off."""
+    names: list[str] = []
+    try:
+        for _ in range(count):
+            names.append(r.gguf_string())
+            n_dims = r.u32()
+            if n_dims > 8:
+                return None
+            r.skip(8 * n_dims + 4 + 8)  # dims, type, data offset
+    except GGUFParseError:
+        return None
+    return names
 
 
 #: How far into a file :func:`read_gguf_tensor_types` reads. The tensor-info
@@ -439,5 +470,6 @@ class _suppress_close:
 __all__ = [
     "GGUFParseError",
     "read_gguf_header",
+    "read_gguf_header_bytes",
     "read_gguf_tensor_types",
 ]
