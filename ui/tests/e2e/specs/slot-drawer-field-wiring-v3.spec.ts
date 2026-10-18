@@ -233,8 +233,8 @@ test.describe('Slot drawer — GTT feasibility (model-row fit chips)', () => {
       expect(m.profile).toBe('rocm')
       expect(m).not.toHaveProperty('ctx')
     }
-    await expect(listbox.locator('[data-option-id="qwen3.6-27b-mtp"]')).toContainText('● fits · ~14 GB')
-    await expect(listbox.locator(`[data-option-id="${SWAP_TARGET}"]`)).toContainText("○ won't fit")
+    await expect(listbox.locator('[data-option-id="qwen3.6-27b-mtp"]')).toContainText('~14 GB')
+    await expect(listbox.locator(`[data-option-id="${SWAP_TARGET}"] .fit-chip`)).toHaveAttribute('title', expect.stringContaining("won't fit"))
     // Each fresh open→true transition fires exactly one more probe (still
     // never per keystroke/per row); closing itself fires nothing. Close via
     // a click on a plain label (RichSelect's click-outside listener);

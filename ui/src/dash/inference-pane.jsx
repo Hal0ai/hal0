@@ -51,8 +51,8 @@ import { ConversionBlockedChip } from './conversion-blocked-chip.jsx'
 import { slotModelRow } from './slots/slot-shared.js'
 import { useCardReorder } from './slots/card-order.js'
 import { RichSelect } from './rich-select.jsx'
+import { FitChip, ModalityTag } from './fit-chip.jsx'
 import { feasibilityHint } from './feasibility-copy'
-import { slotsUsingModel } from './model-usage.js'
 // devKind — one shared, meta-aware helper (src/lib/deviceMeta.ts); replaces
 // the copy this file used to carry (and the verbatim clones in slot-list.jsx
 // and npu-pane.jsx).
@@ -580,10 +580,7 @@ function modelFitChip(row) {
   if (!row) return null
   const hint = feasibilityHint(row)
   if (!hint.tone) return null
-  const gb = Math.round((row.needed_mb ?? 0) / 1024)
-  if (hint.tone === 'ok') return <span className="chip ok">● fits · ~{gb} GB</span>
-  if (hint.tone === 'warn') return <span className="chip warn">◐ tight · ~{gb} GB</span>
-  return <span className="chip err">○ won't fit · ~{gb} GB</span>
+  return <FitChip verdict={row.verdict} neededMb={row.needed_mb} />
 }
 
 // Build the card model picker's RichSelect options from the already-filtered
@@ -602,36 +599,39 @@ function modelPickerOptions({ s, opts, cur, has, allSlots, verdictFor }) {
   for (const m of opts) {
     const quant = m.quant || null
     const modTag = modelModalityTag(m)
-    const usedBy = slotsUsingModel(allSlots, m.id).filter((u) => u.name !== s.name)
-    const isCurrent = m.id === cur
-    const names = usedBy.map((u) => u.name).join(', ')
-    const usedByText = isCurrent
-      ? usedBy.length > 0
-        ? `used by this slot + ${usedBy.length} other${usedBy.length === 1 ? '' : 's'} (${names})`
-        : 'used by this slot'
-      : usedBy.length > 0
-        ? `used by ${usedBy.length} slot${usedBy.length === 1 ? '' : 's'} (${names})`
-        : 'used by 0 slots'
+    const fit = verdictFor ? verdictFor(m.id) : null
     const sizeGb = modelSizeGb(m)
-    const descBits = []
-    if (sizeGb) descBits.push(`${sizeGb} GB`)
-    descBits.push(usedByText)
-    if (m.provider_effective && m.provider_effective !== 'llama-server') {
-      descBits.push(m.provider_effective)
-    }
+    const name = (
+      <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>{m.longName || m.id}</span>
+    )
+    const runtime =
+      m.provider_effective && m.provider_effective !== 'llama-server' ? m.provider_effective : null
     list.push({
       id: m.id,
+      // open list: line 1 = name + modality, line 2 (desc) = quant · size · runtime · fit
       row: (
         <span style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
-          <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>
-            {m.longName || m.id}
-          </span>
-          {quant && <span className="chip amber">{quant}</span>}
-          {modTag && <span className="chip info">{modTag}</span>}
+          {name}
+          <ModalityTag tag={modTag} />
         </span>
       ),
-      right: verdictFor ? verdictFor(m.id) : null,
-      desc: descBits.join(' · '),
+      // closed trigger: everything inline on one line
+      trigger: (
+        <span style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
+          {name}
+          {quant && <span className="chip amber">{quant}</span>}
+          <ModalityTag tag={modTag} />
+          {fit}
+        </span>
+      ),
+      desc: (
+        <span className="rsel-desc-line">
+          {quant && <span className="chip amber">{quant}</span>}
+          {sizeGb && <span>{sizeGb} GB</span>}
+          {runtime && <span>{runtime}</span>}
+          {fit}
+        </span>
+      ),
     })
   }
   return list

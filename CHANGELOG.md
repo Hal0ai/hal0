@@ -32,6 +32,14 @@ applying. Add those subsections to a version's section to surface them; see
 
 ### Changed
 
+- **Model picker rows are compact and consistent.** In the slot drawer and
+  the inference cards, the fit estimate now shows as an icon plus the GB
+  figure in every state (a check, an exclamation mark or an X; hover for
+  "fits", "tight" or "won't fit"). Vision models carry an eye glyph instead of
+  the word. Each dropdown row is two lines: the name and modality on top,
+  then quant, size and fit. "Used by N slots" left the row; it stays in the
+  model drawer's Used-by panel.
+
 - **Add from Hugging Face lists quants, not files.** Inspecting a repo now
   shows one row per quant (`UD-Q4_K_XL`, `Q8_0`, …) with its total size. A
   split GGUF (`…-00001-of-00003.gguf`, usually in a per-quant folder) is one

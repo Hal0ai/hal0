@@ -29,7 +29,7 @@ const { useEffect, useId, useRef, useState } = React
 /**
  * @param {{
  *   value: string|null,
- *   options: Array<{id: string, disabled?: boolean, row?: unknown, desc?: unknown, right?: unknown}>,
+ *   options: Array<{id: string, disabled?: boolean, row?: unknown, desc?: unknown, right?: unknown, trigger?: unknown}>,
  *   onChange: (id: string) => void,
  *   disabled?: boolean,
  *   onOpenChange?: (open: boolean) => void,
@@ -141,12 +141,14 @@ export function RichSelect({
         onKeyDown={onKeyDown}
       >
         <span className="rsel-trigger-row">
-          {selected ? (
+          {selected && selected.trigger ? (
+            <span className="rsel-trigger-row-main">{selected.trigger}</span>
+          ) : selected ? (
             <span className="rsel-trigger-row-main">{selected.row}</span>
           ) : (
             <span className="rsel-trigger-placeholder">— select —</span>
           )}
-          {selected && selected.right}
+          {selected && !selected.trigger && selected.right}
         </span>
         <span className="rsel-trigger-caret" aria-hidden="true">▾</span>
       </button>

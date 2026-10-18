@@ -3590,6 +3590,10 @@ select.npu-sel {
 .rsel-option-row-main { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .rsel-option-right { flex-shrink: 0; display: flex; align-items: center; gap: 6px; }
 .rsel-option-desc { font-size: 10.5px; color: var(--fg-4); line-height: 1.35; }
+.rsel-desc-line { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 6px; }
+.rsel-desc-line > span + span:not(.chip)::before { content: "·"; margin-right: 6px; color: var(--fg-4); }
+.chip.fit-chip { gap: 3px; }
+.chip.fit-chip svg, .chip.modality-icon svg { flex-shrink: 0; display: block; }
 .rsel-option:hover, .rsel-option[data-active="true"] { background: var(--bg-3); }
 .rsel-option[aria-selected="true"] { background: var(--accent-bg); }
 .rsel-option[aria-selected="true"] .rsel-option-row { color: var(--accent); }

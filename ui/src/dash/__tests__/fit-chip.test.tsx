@@ -1,0 +1,47 @@
+// @vitest-environment happy-dom
+import React from 'react'
+import { createRoot } from 'react-dom/client'
+import { act } from 'react-dom/test-utils'
+import { describe, expect, it } from 'vitest'
+
+import { FitChip, VisionIcon } from '../fit-chip.jsx'
+
+;(globalThis as any).IS_REACT_ACT_ENVIRONMENT = true
+
+function render(node: React.ReactElement) {
+  const host = document.createElement('div')
+  act(() => {
+    createRoot(host).render(node)
+  })
+  return host
+}
+
+describe('FitChip', () => {
+  it.each([
+    ['fits', 'ok', 'fits · needs ~3 GB', 3 * 1024],
+    ['tight', 'warn', 'tight · needs ~16 GB', 16 * 1024],
+    ['exceeds', 'err', "won't fit · needs ~34 GB", 34 * 1024],
+    ['exceeds_total', 'err', "won't fit · needs ~34 GB", 34 * 1024],
+  ])('%s → icon + GB, verdict word in title', (verdict, tone, title, mb) => {
+    const chip = render(<FitChip verdict={verdict} neededMb={mb} />).querySelector('.chip')!
+    expect(chip.classList.contains(tone)).toBe(true)
+    expect(chip.getAttribute('title')).toBe(title)
+    expect(chip.getAttribute('aria-label')).toBe(title)
+    expect(chip.querySelector('svg')).not.toBeNull()
+    expect(chip.textContent).toBe(`~${Math.round(mb / 1024)} GB`)
+  })
+
+  it('renders nothing for an unknown verdict', () => {
+    expect(render(<FitChip verdict="unknown" neededMb={1} />).innerHTML).toBe('')
+  })
+})
+
+describe('VisionIcon', () => {
+  it('is an eye svg labelled vision', () => {
+    const el = render(<VisionIcon />).querySelector('.chip')!
+    expect(el.getAttribute('title')).toBe('vision')
+    expect(el.getAttribute('aria-label')).toBe('vision')
+    expect(el.querySelector('svg')).not.toBeNull()
+    expect(el.textContent).toBe('')
+  })
+})
