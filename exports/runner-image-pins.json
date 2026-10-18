@@ -1,13 +1,13 @@
 {
   "pins": [
-    "ghcr.io/ggml-org/llama.cpp:server-cuda-b11580@sha256:c4348afb91499b10fad12f92626c7a8ca8b69d6475d10c793b810cb61237ce00",
+    "ghcr.io/ggml-org/llama.cpp:server-cuda-b11706@sha256:b01e2d9a95a4d2d27b1d74e0b6668da9cff2e050b9ea53b2b549652d6098c6f0",
     "ghcr.io/hal0ai/hal0-runner-comfyui:0.28.0-r6996d85@sha256:8c1dd5d7586893a8e27ec2f9fd11623a750b6a4c2ab098e62f9dcd32ec49cfa2",
-    "ghcr.io/hal0ai/hal0-runner-cpu:b11596-r6d1fb9e@sha256:6df2edf6f2b5da304e4d9d8e3d0e1a9a60768253126ac6d35edf13cfe02d7d35",
+    "ghcr.io/hal0ai/hal0-runner-cpu:b11716-r52bc433@sha256:9ac03393a1a7dd2e552a9177f3928a41240feb83aeac32b05a21ad1a8fd3b28a",
     "ghcr.io/hal0ai/hal0-runner-flm:0.9.44-re14329d@sha256:ba7f7edafc07ae2bb96eb94b519b8ab46a8564cdfb9d77372bef611811aa8643",
     "ghcr.io/hal0ai/hal0-runner-kokoro:0.4.9-re14329d@sha256:0df4b132be5a5be04f4481940db36365bb95b50aaa0940af0b6f1f5792428325",
     "ghcr.io/hal0ai/hal0-runner-moonshine:20251121-re14329d@sha256:341b64a5c60496c57407a75077a746ff40bbc2eedbc8ddba1e661094d6818766",
     "ghcr.io/hal0ai/hal0-runner-qwen3tts:0.1.1-re14329d@sha256:81a914c9622fe35d11d8c0d2f81eee5a882faaad1556ac42a8db6856ad225698",
-    "ghcr.io/hal0ai/hal0-runner-standard:b11596-r6d1fb9e@sha256:fc3d6cc50d618e7377570487fa7d8c9a888470b3c46fc9fc944dbd0b0f2fd840"
+    "ghcr.io/hal0ai/hal0-runner-standard:b11716-r52bc433@sha256:76c2c49f15a3931639a530e6167abbd78a2a92ea3f746b0cec3d96ac3b4e63f2"
   ],
   "source": "manifest.json"
 }
