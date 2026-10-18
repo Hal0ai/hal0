@@ -43,6 +43,9 @@ class DrafterInfo:
     tokenizer_model: str | None = field(default=None, compare=False)
     bos_token_id: int | None = field(default=None, compare=False)
     eos_token_id: int | None = field(default=None, compare=False)
+    #: The drafter file's size, stamped by the write screen from its sanitised
+    #: path (``metadata.draft.size_bytes``); ``None`` from a bare header read.
+    size_bytes: int | None = field(default=None, compare=False)
 
     def as_metadata(self) -> dict[str, Any]:
         """The ``metadata.draft`` shape (ADR-0031 §1), without size/sha."""

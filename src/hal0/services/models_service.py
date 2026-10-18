@@ -2339,27 +2339,38 @@ def _prior(existing: Any, key: str) -> Any:
     return getattr(existing, key, None)
 
 
-def _require_draft_inside_store(draft: str, draft_path: Any, target_path: Any) -> None:
-    """Refuse a drafter path a slot container could not open
-    (``model.draft_outside_store``): it must be absolute and resolve inside a
-    model-store root (:func:`hal0.config.paths.model_mount_roots`) or inside
-    the model's own directory."""
-    from pathlib import Path
+def _require_draft_inside_store(draft: str, target_path: Any) -> str:
+    """The sanitised drafter path, or ``422 model.draft_outside_store``.
 
+    The candidate is ``normpath(expanduser(draft))``; it must be absolute and
+    sit inside a model-store root (:func:`hal0.config.paths.model_mount_roots`)
+    or the model's own directory, lexically or once symlinks are resolved. Every
+    later file operation on the drafter uses ONLY the returned value. The
+    target path is normalised lexically to derive its directory and is never
+    touched on disk here.
+    """
     from hal0.config.paths import model_mount_roots
     from hal0.errors import UnprocessableEntity
 
-    allowed = [Path(r) for r in model_mount_roots()]
+    roots = [os.path.normpath(str(r)) for r in model_mount_roots()]
     if target_path:
-        allowed.append(Path(str(target_path)).expanduser().parent)
-    if draft_path.is_absolute():
-        resolved = draft_path.resolve()
-        if any(resolved.is_relative_to(root.resolve()) for root in allowed):
-            return
+        roots.append(os.path.dirname(os.path.normpath(os.path.expanduser(str(target_path)))))
+    roots = [r for r in roots if os.path.isabs(r)]
+
+    candidate = os.path.normpath(os.path.expanduser(draft))
+    if os.path.isabs(candidate):
+        for root in roots:
+            if candidate == root or candidate.startswith(root + os.sep):
+                return candidate
+        real = os.path.realpath(candidate)
+        for root in roots:
+            real_root = os.path.realpath(root)
+            if real == real_root or real.startswith(real_root + os.sep):
+                return candidate
     raise UnprocessableEntity(
         f"draft must be an absolute path inside the model store or beside the model: {draft}",
         code="model.draft_outside_store",
-        details={"draft": draft, "allowed_roots": [str(r) for r in allowed]},
+        details={"draft": draft, "allowed_roots": roots},
     )
 
 
@@ -2390,7 +2401,7 @@ def screen_draft_write(
       header. A ``mtp`` drafter is also refused when the target's ``mtp`` fact
       is ``false`` — the header carries no such fact, so the check is here.
     """
-    from pathlib import Path
+    import dataclasses
 
     from hal0.errors import UnprocessableEntity
     from hal0.registry.drafters import screen_draft_fit
@@ -2413,10 +2424,11 @@ def screen_draft_write(
             code="model.fact_invalid",
             details={"field": "draft"},
         )
-    draft_path = Path(draft).expanduser()
     target_path = body.get("path", _prior(existing, "path"))
-    _require_draft_inside_store(draft, draft_path, target_path)
-    if not draft_path.is_file():
+    safe_draft = _require_draft_inside_store(draft, target_path)
+    # The normalised path is the stored fact; nothing below reads the raw value.
+    body["draft"] = safe_draft
+    if not os.path.isfile(safe_draft):
         if not require_on_disk:
             return None
         raise UnprocessableEntity(
@@ -2431,8 +2443,11 @@ def screen_draft_write(
             code="model.draft_mismatch",
             details={"reasons": ["target model header unreadable"]},
         )
-    draft_header = read_gguf_header(draft_path) or {}
-    info = screen_draft_fit(target_header, draft_header)
+    draft_header = read_gguf_header(safe_draft) or {}
+    info = dataclasses.replace(
+        screen_draft_fit(target_header, draft_header),
+        size_bytes=os.path.getsize(safe_draft),
+    )
     mtp = body["mtp"] if "mtp" in body else _prior(existing, "mtp")
     if info.kind == "mtp" and mtp is False:
         raise UnprocessableEntity(
@@ -2472,13 +2487,10 @@ def stamp_draft_fact(
         body["draft_kind"] = None
         metadata.pop("draft", None)
     else:
-        from pathlib import Path
-
         body["draft_kind"] = info.kind
-        metadata["draft"] = {
-            **info.as_metadata(),
-            "size_bytes": Path(draft).expanduser().stat().st_size,
-        }
+        metadata["draft"] = info.as_metadata()
+        if info.size_bytes is not None:
+            metadata["draft"]["size_bytes"] = info.size_bytes
     body["metadata"] = metadata
 
 
