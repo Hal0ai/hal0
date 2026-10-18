@@ -152,6 +152,47 @@ export function useAddModelFromPath() {
   })
 }
 
+export interface InspectDraftRequest {
+  // The target model's main quant and the candidate drafter, each as repo + file.
+  hf_repo: string
+  hf_filename: string
+  draft_repo: string
+  draft_filename: string
+}
+
+export interface InspectDraftResponse {
+  kind: 'dflash' | 'eagle3' | 'mtp' | 'simple'
+  variant: string
+  fit: { ok: boolean; reasons: string[] }
+  // metadata.draft shape (ADR-0031 §1), nulls omitted.
+  draft: {
+    variant: string
+    block_size?: number
+    embedding_length?: number
+    target_layers?: number[]
+    vocab_size?: number
+    base_model?: string
+  }
+  target: {
+    architecture: string
+    embedding_length: number | null
+    block_count: number | null
+  }
+}
+
+export function useInspectDraft() {
+  // POST both coordinates and get the drafter's kind plus a fit verdict read
+  // from the two GGUF headers (tens of MB), before any download. A header that
+  // cannot be read is a 422 ``hf.header_unreadable``.
+  return useMutation<InspectDraftResponse, Hal0Error, InspectDraftRequest>({
+    mutationFn: (body) =>
+      apiPost<InspectDraftResponse>(
+        ENDPOINTS.modelInspectDraft,
+        body as unknown as Record<string, unknown>,
+      ),
+  })
+}
+
 export function useModelInspect() {
   // POST a HF coord and get back the repo's pullable GGUF variants
   // plus tags + license + a short README excerpt. Accepts either an

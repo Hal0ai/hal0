@@ -275,7 +275,8 @@ def test_open_world_tools_are_the_documented_set() -> None:
     slot_pull_image (container-image pull from a registry),
     runner_image_sync (GHCR discovery probe), mcp_server_install
     (may fetch a manifest from an arbitrary URL), and profile_generate
-    (reaches HuggingFace when given hf_repo, like model_inspect).
+    (reaches HuggingFace when given hf_repo, like model_inspect). model_inspect_draft
+    reads GGUF headers from the Hub by range (ADR-0031 §2).
     Component-updates spec (2026-08-30 §1b) adds update_check — same
     GET /api/updates/check route as updater_check, so the same release-
     manifest fetch applies.
@@ -285,6 +286,7 @@ def test_open_world_tools_are_the_documented_set() -> None:
         "model_pull",
         "model_update",
         "model_inspect",
+        "model_inspect_draft",
         "updater_check",
         "update_check",
         "hf_search",

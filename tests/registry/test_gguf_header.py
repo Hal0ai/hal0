@@ -263,3 +263,12 @@ class TestDrafterKeys:
     def test_bytes_reader_rejects_non_gguf(self) -> None:
         assert read_gguf_header_bytes(b"NOTGGUF" + b"\x00" * 64) is None
         assert read_gguf_header_bytes(b"GGUF") is None
+
+
+def test_read_gguf_header_bytes_require_complete_rejects_cut_kv_block(tmp_path: Path) -> None:
+    from tests.registry.gguf_fixtures import write_gguf
+
+    payload = write_gguf(tmp_path / "c.gguf", "llama", uints={"llama.block_count": 4}).read_bytes()
+    assert read_gguf_header_bytes(payload[:-6], require_complete=True) is None
+    assert read_gguf_header_bytes(payload[:-6]) is not None  # lenient default unchanged
+    assert read_gguf_header_bytes(payload, require_complete=True)["llama.block_count"] == 4

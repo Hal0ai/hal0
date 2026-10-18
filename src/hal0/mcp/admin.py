@@ -52,7 +52,7 @@ Autonomous read::
     slot_by_name, slot_by_id, slot_resolved, slot_state,
     model_list, model_show, model_scan_preview,
     model_catalogue, model_update_check, model_pulls_list,
-    model_pull_status, model_inspect, model_store,
+    model_pull_status, model_inspect, model_inspect_draft, model_store,
     hardware_probe, system_info, capability_list, provider_list, version_info,
     stack_list, stack_status, profile_list, profile_status,
     profile_export, upstream_list, upstream_get, upstream_test,
@@ -389,6 +389,7 @@ AUTONOMOUS_READ_TOOLS: frozenset[str] = frozenset(
         "model_pulls_list",
         "model_pull_status",
         "model_inspect",
+        "model_inspect_draft",
         "model_store",
         # Hardware / system. logs_tail / slot_logs are intentionally NOT
         # here — journald output can carry secrets, so they stay in
@@ -755,6 +756,7 @@ TOOL_NAME_ALIASES: dict[str, tuple[str, ...]] = {
     "GET:/api/models/pulls": ("model_pulls_list",),
     "GET:/api/models/{model_id}/pull/status": ("model_pull_status",),
     "POST:/api/models/inspect": ("model_inspect",),
+    "POST:/api/models/inspect-draft": ("model_inspect_draft",),
     "GET:/api/settings/models/store": ("model_store",),
     "DELETE:/api/models/pulls/{model_id}": ("model_pull_delete",),
     "POST:/api/models/{model_id}/default": ("model_set_default",),
@@ -1188,6 +1190,15 @@ TOOL_PARAM_HINTS: dict[str, dict[str, Any]] = {
                 "description": "Alternative: full https://huggingface.co/... URL",
             },
         },
+    },
+    "model_inspect_draft": {
+        "properties": {
+            "hf_repo": {"type": "string", "description": "Target repo as 'org/name'"},
+            "hf_filename": {"type": "string", "description": "Target main-quant .gguf filename"},
+            "draft_repo": {"type": "string", "description": "Drafter repo as 'org/name'"},
+            "draft_filename": {"type": "string", "description": "Drafter .gguf filename"},
+        },
+        "required": ["hf_repo", "hf_filename", "draft_repo", "draft_filename"],
     },
     "model_pull": {
         "properties": {
@@ -2311,6 +2322,9 @@ _ANNOTATIONS: dict[str, ToolAnnotations] = {
     "model_inspect": ToolAnnotations(
         readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True
     ),
+    "model_inspect_draft": ToolAnnotations(
+        readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True
+    ),
     "model_store": ToolAnnotations(
         readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
     ),
@@ -2824,6 +2838,11 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
         "Inspect a HuggingFace repo — returns detected .gguf/.mmproj files, quants and "
         "capabilities WITHOUT registering anything. Use before model_register/model_pull. "
         "Args: hf_repo='org/name' (or hf_url='https://huggingface.co/org/name')."
+    ),
+    "model_inspect_draft": (
+        "Check a speculative-decoding drafter against a target model BEFORE downloading: reads "
+        "both GGUF headers from the Hub by range request and returns kind, variant, "
+        "fit {ok, reasons}. Args: hf_repo + hf_filename (target), draft_repo + draft_filename."
     ),
     "model_store": (
         "Show the operator's configured model-store directory ([models].store) and "

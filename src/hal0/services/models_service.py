@@ -2058,6 +2058,83 @@ async def inspect_hf_repo(body: dict[str, Any]) -> dict[str, Any]:
     return {"repo": repo, "cached": False, **result}
 
 
+# ── Drafter fit check (POST /api/models/inspect-draft, ADR-0031 §2) ─────────
+
+#: Same 5 minute TTL as :data:`INSPECT_CACHE`; keyed by the four coordinates
+#: ``(hf_repo, hf_filename, draft_repo, draft_filename)``. Failures are not cached.
+INSPECT_DRAFT_CACHE: dict[tuple[str, str, str, str], tuple[float, dict[str, Any]]] = {}
+
+
+async def inspect_draft(body: dict[str, Any]) -> dict[str, Any]:
+    """Read a target's and a drafter's GGUF headers from the Hub and check the fit.
+
+    Body: ``{"hf_repo", "hf_filename", "draft_repo", "draft_filename"}`` (the
+    target's main quant and the candidate drafter). Reads the leading bytes of
+    each file by HTTP range, so a check costs tens of MB. A fit failure is a
+    200 with ``fit.ok = false`` and the reasons; a file whose header cannot be
+    read is ``422 hf.header_unreadable`` naming it; a file that is not a
+    drafter is ``422 model.draft_not_a_drafter``.
+    """
+    import time
+
+    from hal0.errors import BadRequest, UnprocessableEntity
+    from hal0.registry.drafters import classify_drafter, draft_fit_errors
+    from hal0.upstreams.hf_header import fetch_gguf_header
+    from hal0.upstreams.huggingface import normalise_repo_slug
+
+    coords: list[str] = []
+    for key in ("hf_repo", "hf_filename", "draft_repo", "draft_filename"):
+        value = body.get(key)
+        if not isinstance(value, str) or not value.strip():
+            raise BadRequest(f"'{key}' is required", code="hf.bad_request")
+        coords.append(value.strip())
+    target_repo = normalise_repo_slug(coords[0])
+    draft_repo = normalise_repo_slug(coords[2])
+    key4 = (target_repo, coords[1], draft_repo, coords[3])
+
+    now = time.time()
+    cached = INSPECT_DRAFT_CACHE.get(key4)
+    if cached is not None and now - cached[0] < INSPECT_TTL_SECONDS:
+        return cached[1]
+
+    async def header(repo: str, filename: str) -> dict[str, Any]:
+        found = await fetch_gguf_header(repo, filename)
+        if found is None:
+            raise UnprocessableEntity(
+                f"could not read the GGUF header of {repo}/{filename}",
+                code="hf.header_unreadable",
+                details={"repo": repo, "filename": filename},
+            )
+        return found
+
+    target = await header(target_repo, coords[1])
+    draft_header = await header(draft_repo, coords[3])
+
+    info = classify_drafter(draft_header)
+    if info is None:
+        arch = draft_header.get("general.architecture")
+        raise UnprocessableEntity(
+            f"not a speculative-decoding drafter (architecture {arch!r})",
+            code="model.draft_not_a_drafter",
+            details={"reasons": [f"architecture {arch!r} is not a drafter"]},
+        )
+    reasons = draft_fit_errors(target, info)
+    t_arch = target.get("general.architecture")
+    result = {
+        "kind": info.kind,
+        "variant": info.variant,
+        "fit": {"ok": not reasons, "reasons": reasons},
+        "draft": info.as_metadata(),
+        "target": {
+            "architecture": t_arch,
+            "embedding_length": target.get(f"{t_arch}.embedding_length"),
+            "block_count": target.get(f"{t_arch}.block_count"),
+        },
+    }
+    INSPECT_DRAFT_CACHE[key4] = (now, result)
+    return result
+
+
 # ── the model-facts screen (ADR-0029 §6) ─────────────────────────────────────
 #
 # A model row holds file facts only — ``chat_template``, ``tokenizer_repo``,

@@ -1083,3 +1083,130 @@ def test_screen_model_write_facts_pass_and_bad_fact_is_bad_request() -> None:
         screen_model_write({"mtp": "maybe"})
     assert exc.value.code == "model.fact_invalid"
     assert exc.value.details["field"] == "mtp"
+
+
+# ── POST /api/models/inspect-draft (ADR-0031 §2) ────────────────────────────
+
+
+def _draft_files(tmp_path: Path, **draft_overrides: Any) -> dict[str, bytes]:
+    from tests.registry.gguf_fixtures import write_gguf
+
+    target = write_gguf(
+        tmp_path / "t.gguf",
+        "qwen35",
+        uints={"qwen35.embedding_length": 4096, "qwen35.block_count": 32},
+    ).read_bytes()
+    uints = {"dflash.embedding_length": 4096, "dflash.block_size": 8}
+    uints.update(draft_overrides)
+    draft = write_gguf(
+        tmp_path / "d.gguf", "dflash", uints=uints, int_arrays={"dflash.target_layers": [2, 10]}
+    ).read_bytes()
+    return {"/org/main/resolve/main/m.gguf": target, "/org/draft/resolve/main/d.gguf": draft}
+
+
+def _draft_handler(files: dict[str, bytes], seen: list[httpx.Request]):
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        data = files.get(request.url.path)
+        if data is None:
+            return httpx.Response(404)
+        return httpx.Response(206, content=data)
+
+    return handler
+
+
+_DRAFT_BODY = {
+    "hf_repo": "org/main",
+    "hf_filename": "m.gguf",
+    "draft_repo": "org/draft",
+    "draft_filename": "d.gguf",
+}
+
+
+@pytest.fixture(autouse=True)
+def _clear_draft_cache() -> Iterator[None]:
+    from hal0.services import models_service
+
+    models_service.INSPECT_DRAFT_CACHE.clear()
+    yield
+    models_service.INSPECT_DRAFT_CACHE.clear()
+
+
+def _patch_header_transport(monkeypatch: pytest.MonkeyPatch, handler) -> None:
+    real_cls = httpx.AsyncClient
+
+    def factory(*args: Any, **kwargs: Any) -> httpx.AsyncClient:
+        kwargs["transport"] = httpx.MockTransport(handler)
+        return real_cls(*args, **kwargs)
+
+    monkeypatch.setattr("hal0.upstreams.hf_header.httpx.AsyncClient", factory)
+
+
+def test_inspect_draft_reports_fit_ok(
+    inspect_client: TestClient, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    seen: list[httpx.Request] = []
+    _patch_header_transport(monkeypatch, _draft_handler(_draft_files(tmp_path), seen))
+    r = inspect_client.post("/api/models/inspect-draft", json=_DRAFT_BODY)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["kind"] == "dflash"
+    assert body["variant"] == "dflash"
+    assert body["fit"] == {"ok": True, "reasons": []}
+    assert body["draft"]["embedding_length"] == 4096
+    assert body["draft"]["block_size"] == 8
+    assert body["target"] == {"architecture": "qwen35", "embedding_length": 4096, "block_count": 32}
+    assert len(seen) == 2
+
+
+def test_inspect_draft_mismatch_reasons(
+    inspect_client: TestClient, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    files = _draft_files(tmp_path, **{"dflash.embedding_length": 2048})
+    _patch_header_transport(monkeypatch, _draft_handler(files, []))
+    r = inspect_client.post("/api/models/inspect-draft", json=_DRAFT_BODY)
+    assert r.status_code == 200, r.text
+    fit = r.json()["fit"]
+    assert fit["ok"] is False
+    assert any("2048" in reason and "4096" in reason for reason in fit["reasons"])
+
+
+def test_inspect_draft_unreadable_422(
+    inspect_client: TestClient, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    files = _draft_files(tmp_path)
+    del files["/org/draft/resolve/main/d.gguf"]
+    _patch_header_transport(monkeypatch, _draft_handler(files, []))
+    r = inspect_client.post("/api/models/inspect-draft", json=_DRAFT_BODY)
+    assert r.status_code == 422, r.text
+    err = r.json()["error"]
+    assert err["code"] == "hf.header_unreadable"
+    assert err["details"] == {"repo": "org/draft", "filename": "d.gguf"}
+
+
+def test_inspect_draft_not_a_drafter_422(
+    inspect_client: TestClient, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    files = _draft_files(tmp_path)
+    files["/org/draft/resolve/main/d.gguf"] = files["/org/main/resolve/main/m.gguf"]
+    _patch_header_transport(monkeypatch, _draft_handler(files, []))
+    r = inspect_client.post("/api/models/inspect-draft", json=_DRAFT_BODY)
+    assert r.status_code == 422, r.text
+    assert r.json()["error"]["code"] == "model.draft_not_a_drafter"
+
+
+def test_inspect_draft_missing_field_400(inspect_client: TestClient) -> None:
+    r = inspect_client.post("/api/models/inspect-draft", json={"hf_repo": "org/main"})
+    assert r.status_code == 400, r.text
+    assert r.json()["error"]["code"] == "hf.bad_request"
+
+
+def test_inspect_draft_caches_by_four_coords(
+    inspect_client: TestClient, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    seen: list[httpx.Request] = []
+    _patch_header_transport(monkeypatch, _draft_handler(_draft_files(tmp_path), seen))
+    first = inspect_client.post("/api/models/inspect-draft", json=_DRAFT_BODY)
+    second = inspect_client.post("/api/models/inspect-draft", json=_DRAFT_BODY)
+    assert first.json() == second.json()
+    assert len(seen) == 2  # one ranged GET per file, the second call is cached

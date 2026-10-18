@@ -286,16 +286,18 @@ def read_gguf_header(path: str | Path) -> dict[str, Any] | None:
             f.close()
 
 
-def read_gguf_header_bytes(buf: bytes) -> dict[str, Any] | None:
+def read_gguf_header_bytes(buf: bytes, *, require_complete: bool = False) -> dict[str, Any] | None:
     """Parse a GGUF header out of an in-memory byte window.
 
     Same result shape as :func:`read_gguf_header` (which delegates here after
     reading its window). Used for headers fetched by HTTP range. ``None``
-    when ``buf`` is not GGUF.
+    when ``buf`` is not GGUF. With ``require_complete`` it is also ``None``
+    when the window ends inside the KV block, so a ranged reader knows to
+    fetch more instead of accepting a partial dict.
     """
     if len(buf) < 24:
         return None
-    return _parse_header(buf, len(buf))
+    return _parse_header(buf, len(buf), require_complete=require_complete)
 
 
 def _is_arch_key(key: str, arch: str | None) -> bool:
@@ -306,7 +308,9 @@ def _is_arch_key(key: str, arch: str | None) -> bool:
     return any(key.endswith(f".{s}") for s in _ARCH_KEY_SUFFIXES)
 
 
-def _parse_header(buf: bytes | mmap.mmap, window: int) -> dict[str, Any] | None:
+def _parse_header(
+    buf: bytes | mmap.mmap, window: int, *, require_complete: bool = False
+) -> dict[str, Any] | None:
     r = _Reader(buf, window)
 
     magic = r.read(4)
@@ -345,6 +349,9 @@ def _parse_header(buf: bytes | mmap.mmap, window: int) -> dict[str, Any] | None:
         # An empty `out` (no real keys) still carries version +
         # tensor_count which is enough to confirm "yes, this is GGUF".
         pass
+
+    if require_complete and not kv_complete:
+        return None
 
     if kv_complete and tensor_count:
         names = _read_tensor_names(r, min(tensor_count, _TENSOR_NAME_PREFIX_COUNT))

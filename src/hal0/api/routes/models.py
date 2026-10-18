@@ -1199,6 +1199,26 @@ async def inspect_model(request: Request) -> dict[str, Any]:
     return await _svc.inspect_hf_repo(body)
 
 
+@router.post("/inspect-draft")
+async def inspect_draft(request: Request) -> dict[str, Any]:
+    """Check a speculative-decoding drafter against a target before download.
+
+    Body: ``{"hf_repo", "hf_filename", "draft_repo", "draft_filename"}``.
+    Reads both GGUF headers from the Hub by HTTP range (tens of MB) and
+    returns ``{kind, variant, fit: {ok, reasons}, draft, target}``. A header
+    that cannot be read is ``422 hf.header_unreadable``. Cached ~5 minutes per
+    coordinate set. Logic lives in
+    :func:`hal0.services.models_service.inspect_draft`.
+    """
+    try:
+        body = await request.json()
+    except Exception as exc:
+        raise BadRequest("body must be valid JSON", details={"error": str(exc)}) from exc
+    if not isinstance(body, dict):
+        raise BadRequest("body must be a JSON object")
+    return await _svc.inspect_draft(body)
+
+
 @router.post("/{model_id}/pull/cancel")
 async def pull_cancel(model_id: str, request: Request) -> dict[str, object]:
     """Request cancellation of an in-flight pull.
