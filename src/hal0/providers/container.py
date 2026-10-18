@@ -1017,7 +1017,9 @@ def _llama_argv_segments(
                  --spec-type, --spec-draft-model
                  (model facts; quirks from family_defaults.toml)
         profile  the speculation bundle, then the profile's flags
-        slot     -ngl, --threads, --metrics, --spec-draft-device (placement)
+        slot     -ngl, --threads, --metrics, --spec-draft-device (placement;
+                 embedded MTP heads only — an external drafter follows the
+                 model's devices)
 
     ``spec_type`` / ``draft_model`` / ``spec_bundle`` come from one
     :class:`~hal0.providers.speculation.SpecPlan` (ADR-0031 §3); the profile's
@@ -1058,7 +1060,7 @@ def _llama_argv_segments(
     # hal0.slots.metrics_collect scrapes. Loopback-only, so on by default.
     if slot_metrics:
         slot += ["--metrics"]
-    if draft_device and (spec_type or "").startswith("draft-"):
+    if draft_device and spec_type == "draft-mtp":
         slot += ["--spec-draft-device", draft_device]
 
     return [("base", base), ("model", model), ("profile", profile), ("slot", slot)]
@@ -1513,7 +1515,7 @@ def _pinned_segments(
             return None
 
     ctx = ngl = threads = None
-    jinja = no_jinja = template = projector = no_projector = draft = speculate = False
+    jinja = no_jinja = template = projector = no_projector = speculate = False
     tune: list[str] = []
     for pair in _split_pairs(list(argv)):
         canon = pair.canon
@@ -1546,7 +1548,8 @@ def _pinned_segments(
         elif canon == "--threads":
             threads = _int(_value(pair))
         elif canon == "--spec-draft-device":
-            draft = True
+            # Consumed: the slot layer re-derives it (MTP only) below.
+            continue
         elif canon == "--spec-type":
             speculate = True
         else:
@@ -1582,7 +1585,9 @@ def _pinned_segments(
     if scalars.get("slot_metrics", True):
         slot += ["--metrics"]
     device = mtp_draft_device(scalars["backend"]) if scalars.get("backend") else None
-    if (draft or spec_type.startswith("draft-")) and device:
+    # Only embedded MTP heads are pinned; a recorded device on an external
+    # drafter type (or with no --spec-type at all) is dropped.
+    if spec_type == "draft-mtp" and device:
         slot += ["--spec-draft-device", device]
     return [("base", base), ("model", model), ("profile", tune), ("slot", slot)]
 
@@ -1711,9 +1716,7 @@ def _resolve_llama_scalars(
         "draft_model": spec.draft_model,
         "spec_bundle": spec.bundle,
         "spec_plan": spec.as_dict(),
-        "draft_device": (
-            mtp_draft_device(effective_backend) if spec.mode in ("draft", "mtp") else None
-        ),
+        "draft_device": (mtp_draft_device(effective_backend) if spec.mode == "mtp" else None),
         "slot_n_gpu_layers": slot_cfg.get("n_gpu_layers"),
         "slot_threads": slot_cfg.get("threads"),
         "slot_metrics": True if slot_metrics_raw is None else bool(slot_metrics_raw),

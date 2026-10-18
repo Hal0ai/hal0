@@ -86,6 +86,10 @@ applying. Add those subsections to a version's section to surface them; see
   `POST /api/models/inspect` returns projectors under `mmproj` and drafters
   under `drafts`; `variants` now holds only quants.
 
+### Fixed
+
+- **A paired DFlash or EAGLE-3 drafter no longer aborts the slot at load.** The slot layer pinned the drafter to one device while the model itself was free to span every device the runner sees, and those drafter kinds borrow the model's embedding and output tensors, so llama-server stopped with `pre-allocated tensor (output.weight) in a buffer ... that cannot run the operation`. A drafter file now follows the model's devices; only embedded MTP heads still get `--spec-draft-device` (ADR-0031, amended) (#2766).
+
 ## [1.4.0] — 2026-10-16
 
 ### Highlights

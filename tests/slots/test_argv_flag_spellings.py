@@ -506,7 +506,17 @@ def test_pinned_tune_spec_type_moves_to_the_model_layer_from_todays_plan() -> No
     ]
     assert "--spec-type" not in segs["profile"]
     assert segs["profile"][-2:] == ["--spec-draft-n-max", "4"]  # the recorded tune
-    assert segs["slot"][-2:] == ["--spec-draft-device", "Vulkan0"]
+    # An external drafter follows the model's devices: the recorded device is dropped.
+    assert "--spec-draft-device" not in segs["slot"]
+
+
+def test_pinned_draft_device_is_kept_for_mtp_and_dropped_without_a_spec_type() -> None:
+    mtp = _pinned(_MTP_PIN, spec_type="draft-mtp", draft_model=None)
+    assert mtp[mtp.index("--spec-draft-device") + 1] == "ROCm0"
+    bare = _pinned(
+        ["-fa", "auto", "--spec-draft-device", "Vulkan0"], spec_type="draft-mtp", draft_model=None
+    )
+    assert "--spec-draft-device" not in bare
 
 
 def test_pinned_tune_spec_type_is_dropped_when_today_does_not_speculate() -> None:

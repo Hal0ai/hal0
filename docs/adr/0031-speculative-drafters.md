@@ -133,6 +133,13 @@ ADR-0029 §2 gains these lines, in the same four layers:
 4. **slot**: `--spec-draft-device <device>` whenever any draft type is in
    effect (today only for MTP).
 
+   *Amended 2026-10-18.* External drafters follow the target's device list.
+   DFlash and EAGLE-3 drafters borrow the target's embedding and output
+   tensors, and a draft context pinned to one device cannot reach them when
+   the target spans several (llama.cpp aborts with the ggml-backend
+   "pre-allocated tensor ... cannot run the operation" check).
+   `--spec-draft-device` is now emitted only for embedded MTP heads.
+
 Flag ownership (`slots/argv.py`): `--spec-type` joins `MODEL_FACT_FLAGS`
 (hal0 derives it from the model's drafter or heads; a profile that wants
 n-gram speculation sets `speculation = "ngram"`, not the flag).
