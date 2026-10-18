@@ -798,9 +798,16 @@ NGRAM_BUNDLE: str = (
 )
 
 
-def mtp_draft_device(backend: str | None) -> str:
-    """The ``--spec-draft-device`` for a slot whose device maps to *backend*."""
-    return _MTP_DRAFT_DEVICE.get((backend or "").lower(), "ROCm0")
+def mtp_draft_device(backend: str | None) -> str | None:
+    """The ``--spec-draft-device`` for a slot whose device maps to *backend*.
+
+    ``None`` for a ``cpu`` slot: its drafter runs on the host CPU, so the slot
+    layer emits no draft device at all (there is no GPU to place it on).
+    """
+    key = (backend or "").lower()
+    if key == "cpu":
+        return None
+    return _MTP_DRAFT_DEVICE.get(key, "ROCm0")
 
 
 #: Seed profile catalog — externalized to shipped TOML (P3-schema, spec

@@ -519,12 +519,13 @@ def new_launch(
         slot_layer += ["--threads", str(int(threads))]
     if slot.get("metrics") is None or bool(slot.get("metrics")):
         slot_layer += ["--metrics"]
-    if mtp:
-        backend = frozen._backend_and_class(slot, frozen.Profile(name=""))[0]
-        slot_layer += [
-            "--spec-draft-device",
-            mtp_draft_device(backend),
-        ]
+    draft_device = (
+        mtp_draft_device(frozen._backend_and_class(slot, frozen.Profile(name=""))[0])
+        if mtp
+        else None
+    )
+    if draft_device:
+        slot_layer += ["--spec-draft-device", draft_device]
 
     from hal0.slots.argv import _dedup, _split_pairs
 

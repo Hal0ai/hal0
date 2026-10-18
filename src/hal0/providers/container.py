@@ -1581,8 +1581,9 @@ def _pinned_segments(
         slot += ["--threads", str(int(slot_threads))]
     if scalars.get("slot_metrics", True):
         slot += ["--metrics"]
-    if (draft or spec_type.startswith("draft-")) and scalars.get("backend"):
-        slot += ["--spec-draft-device", mtp_draft_device(scalars["backend"])]
+    device = mtp_draft_device(scalars["backend"]) if scalars.get("backend") else None
+    if (draft or spec_type.startswith("draft-")) and device:
+        slot += ["--spec-draft-device", device]
     return [("base", base), ("model", model), ("profile", tune), ("slot", slot)]
 
 

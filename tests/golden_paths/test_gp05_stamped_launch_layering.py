@@ -242,6 +242,33 @@ def test_dflash_layering() -> None:
     assert _spec_type_count(segments) == 1
 
 
+@pytest.mark.parametrize(
+    ("device", "slot_layer"),
+    [
+        ("gpu-rocm", [*_GOLDEN_SLOT, "--spec-draft-device", "ROCm0"]),
+        ("gpu-vulkan", [*_GOLDEN_SLOT, "--spec-draft-device", "Vulkan0"]),
+        # A CPU slot's drafter runs on the host CPU: no draft device at all
+        # (there is no ROCm0 to place it on).
+        ("cpu", _GOLDEN_SLOT),
+    ],
+)
+def test_a_paired_drafter_slot_layer_per_device(device: str, slot_layer: list[str]) -> None:
+    model = _model(
+        draft="/p/d.gguf",
+        draft_kind="dflash",
+        metadata={"context_length": 262144, "draft": {"block_size": 8}},
+    )
+    segments = _launch(_slot("tune", device=device), model, _golden_profile("tune"))
+    by_label = dict(segments)
+    assert by_label["model"][-4:] == [
+        "--spec-type",
+        "draft-dflash",
+        "--spec-draft-model",
+        "/p/d.gguf",
+    ]
+    assert by_label["slot"] == slot_layer
+
+
 def test_mtp_layering_spec_type_moved_to_model_layer() -> None:
     segments = _launch(_slot("tune"), _model(), _golden_profile("tune"))
     by_label = dict(segments)
