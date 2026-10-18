@@ -2339,6 +2339,15 @@ def _prior(existing: Any, key: str) -> Any:
     return getattr(existing, key, None)
 
 
+# CodeQL note: the two drafter sinks in screen_draft_write, `os.path.isfile` and
+# `os.path.getsize`, still report py/path-injection (the rule this repo already
+# carries standing alerts for). Both take ONLY the value this guard returns,
+# which is confined to a model-store mount root or the model's own directory
+# by the lexical and the realpath `startswith` checks below. The model-directory
+# root is derived from the model row's `path`, which CodeQL counts as user
+# input, so the analyser cannot see the guard as a sanitiser. No new
+# capability: screen_vision_mmproj already checks the projector path on disk
+# the same way.
 def _require_draft_inside_store(draft: str, target_path: Any) -> str:
     """The sanitised drafter path, or ``422 model.draft_outside_store``.
 
