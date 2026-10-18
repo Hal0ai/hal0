@@ -1336,6 +1336,91 @@ describe('ModelDrawer Drafter field (ADR-0031 §5)', () => {
     act(() => root.unmount())
   })
 
+  it('the kept file also listed in the repo still reads "on disk, not paired" and re-pairs by PUT', async () => {
+    withDrafts()
+    const kept = `${MODEL_DIR}/Qwen-LiLiCorr-Q8.gguf`
+    const { host, root } = mount(
+      React.createElement(ModelDrawer, {
+        open: true,
+        onClose: () => {},
+        model: { ...DRAFT_MODEL, draft: kept, draftVariant: 'lilicorr' },
+      }),
+    )
+    openSource(host)
+    await act(async () => {
+      q<HTMLButtonElement>(host, 'model-draft-unpair').click()
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+    updateCalls.length = 0
+    act(() => q<HTMLButtonElement>(host, 'model-draft-select').click())
+    const row = host.querySelector(`[data-option-id="${kept}"]`) as HTMLElement
+    expect(row.textContent).toContain('on disk, not paired')
+    act(() => row.click())
+    expect(q(host, 'model-draft-pull')).toBeNull()
+    await save(host)
+    expect(updateCalls).toEqual([{ id: 'm1', body: { draft: kept } }])
+    act(() => root.unmount())
+  })
+
+  it('pull → adopted → Unpair → re-pair by PUT → a later pull (new job) is adopted too', async () => {
+    inspectHandler.current = () => ({
+      repo: 'org/qwen-gguf',
+      variants: [],
+      mmproj: [],
+      drafts: [
+        DRAFTS[0],
+        { ...DRAFTS[0], id: 'Qwen-Other-Q8.gguf', variant_hint: 'dflash' },
+      ],
+    })
+    const rerender = () =>
+      act(() => {
+        root.render(
+          React.createElement(
+            QueryClientProvider,
+            { client: new QueryClient() },
+            React.createElement(ModelDrawer, { open: true, onClose: () => {}, model: DRAFT_MODEL }),
+          ),
+        )
+      })
+    const { host, root } = mount(
+      React.createElement(ModelDrawer, { open: true, onClose: () => {}, model: DRAFT_MODEL }),
+    )
+    openSource(host)
+    pickRepoDraft(host) // X
+    await act(async () => {
+      q<HTMLButtonElement>(host, 'model-draft-pull').click()
+      await Promise.resolve()
+    })
+    pullBox.current = { state: 'completed', modelId: 'm1', jobId: 'j1' }
+    rerender()
+    expect(q(host, 'model-draft-pull')).toBeNull()
+    await act(async () => {
+      q<HTMLButtonElement>(host, 'model-draft-unpair').click()
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+    expect(q(host, 'model-draft-unpair')).toBeNull()
+    // X is on disk now: picking it again is a plain re-pair, no Pull.
+    pickRepoDraft(host)
+    expect(q(host, 'model-draft-pull')).toBeNull()
+    // A different drafter pulled under a NEW job id is adopted as well.
+    pullBox.current = { state: 'idle', modelId: null, jobId: null }
+    act(() => q<HTMLButtonElement>(host, 'model-draft-select').click())
+    act(() =>
+      (host.querySelector(`[data-option-id="${MODEL_DIR}/Qwen-Other-Q8.gguf"]`) as HTMLElement).click(),
+    )
+    await act(async () => {
+      q<HTMLButtonElement>(host, 'model-draft-pull').click()
+      await Promise.resolve()
+    })
+    pullBox.current = { state: 'completed', modelId: 'm1', jobId: 'j2' }
+    rerender()
+    expect(q(host, 'model-draft-pull')).toBeNull()
+    expect(q(host, 'model-draft-unpair')).toBeTruthy()
+    act(() => root.unmount())
+  })
+
   it('a pending repo pick disables Save with a hint, even beside other edits', async () => {
     withDrafts()
     const { host, root } = mount(

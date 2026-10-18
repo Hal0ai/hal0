@@ -553,7 +553,10 @@ function draftRichOptions(dir, drafts, extras, unpaired) {
 			id,
 			row: d.id,
 			right: chip ? mutedChip(chip) : null,
-			desc: [draftVariantLabel(d.variant_hint), d.repo].filter(Boolean).join(" · "),
+			desc:
+				id === unpaired
+					? "on disk, not paired · unpaired from this model, the file is kept"
+					: [draftVariantLabel(d.variant_hint), d.repo].filter(Boolean).join(" · "),
 		});
 	}
 	for (const extra of extras) {
@@ -1000,6 +1003,7 @@ export function ModelDrawer({ open, onClose, model, onOpenSlot = undefined }) {
 		if (Object.keys(body).length === 0) return;
 		try {
 			await update.mutateAsync({ id: model.id, body });
+			if (body.draft) setUnpairedPath("");
 			window.__hal0Toast &&
 				window.__hal0Toast(`Updated ${model.longName || model.id}`, "ok");
 			onClose();
