@@ -621,7 +621,8 @@ function modelPickerOptions({ s, opts, cur, has, allSlots, verdictFor }) {
         <span style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
           {name}
           {quant && <span className="chip amber">{quant}</span>}
-          <ModalityTag tag={modTag} draft={draftTagValue(m)} />
+          {/* the current model's state bolt replaces the static drafter bolt */}
+          <ModalityTag tag={modTag} draft={m.id === cur ? null : draftTagValue(m)} />
           {m.id === cur && <SlotSpecBolt spec={s.metrics?.spec} model={m} />}
           {fit}
         </span>

@@ -51,7 +51,7 @@ describe('ModalityTag drafter bolt', () => {
     const host = render(<ModalityTag tag="vision" draft="lilicorr" />)
     expect(host.querySelector('[title="vision"]')).not.toBeNull()
     const bolt = host.querySelector('[data-testid="drafter-bolt"]')!
-    expect(bolt.getAttribute('title')).toBe('drafter · lilicorr')
+    expect(bolt.getAttribute('title')).toBe('drafter · LiLiCorr')
     expect(bolt.querySelector('svg')).not.toBeNull()
   })
   it('shows only the bolt when there is no modality tag', () => {

@@ -572,7 +572,7 @@ function ModelRow({ model, selected, onSelect, onEditModel, onDeleteModel }) {
         {model.type && <span className="chip">{model.type}</span>}
         {model.quant && <span className="chip quant" data-testid="mdl-row-quant">{model.quant}</span>}
         {isDrafterModel(model) && (
-          <span className="chip amber" data-testid="mdl-row-drafter" title={`Paired drafter · ${draftVariantLabel(model.draftVariant)}`}>
+          <span className="chip info" data-testid="mdl-row-drafter" title={`Paired drafter · ${draftVariantLabel(model.draftVariant)}`}>
             ⚡ {draftVariantLabel(model.draftVariant)}
           </span>
         )}

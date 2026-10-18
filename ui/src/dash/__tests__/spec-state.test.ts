@@ -60,7 +60,7 @@ describe('slotBolt', () => {
   })
 
   it('labels embedded MTP heads', () => {
-    const b = slotBolt(spec({ active: true, mode: 'mtp', acceptance: 0.5 }), { mtp: true })
+    const b = slotBolt(spec({ active: true, mode: 'mtp', kind: 'mtp', acceptance: 0.5 }), { mtp: true })
     expect(b?.title).toBe('drafting · MTP heads · 50% accepted')
   })
 
@@ -115,8 +115,16 @@ describe('slotSpecLine', () => {
   })
   it('omits numbers that do not exist', () => {
     expect(
-      slotSpecLine({ mode: 'mtp', kind: null, variant: null, unavailable_reason: null }, undefined),
+      slotSpecLine({ mode: 'mtp', kind: 'mtp', variant: null, unavailable_reason: null }, undefined),
     ).toBe('Speculation: MTP heads')
+  })
+  it('names embedded MTP heads (kind mtp) apart from a paired MTP sidecar', () => {
+    expect(
+      slotSpecLine({ mode: 'mtp', kind: 'mtp', variant: null, unavailable_reason: null }, undefined),
+    ).toBe('Speculation: MTP heads')
+    expect(
+      slotSpecLine({ mode: 'draft', kind: 'mtp', variant: 'mtp', unavailable_reason: null }, undefined),
+    ).toBe('Speculation: MTP sidecar')
   })
   it('off', () => {
     expect(

@@ -32,6 +32,8 @@ export function draftTagValue(m) {
 // What is speculating, in words: a drafter variant, MTP heads, or n-gram.
 function specLabel(s) {
   if (s?.mode === 'ngram') return 'n-gram'
+  // Embedded heads arrive as mode mtp + kind mtp; only a paired file is a sidecar.
+  if (s?.mode === 'mtp') return 'MTP heads'
   const variant = s?.variant || s?.kind
   if (variant) return draftVariantLabel(variant)
   if (s?.mode === 'mtp') return 'MTP heads'
@@ -39,7 +41,7 @@ function specLabel(s) {
 }
 
 function pct(n) {
-  return typeof n === 'number' ? `${Math.round(n * 100)}%` : null
+  return Number.isFinite(n) ? `${Math.round(n * 100)}%` : null
 }
 
 /**
@@ -84,7 +86,7 @@ export function slotSpecLine(resolved, live) {
   let line = `Speculation: ${specLabel(resolved)}`
   const rate = pct(live?.acceptance)
   if (rate) line += ` · ${rate} accepted`
-  if (typeof live?.mean_accepted_len === 'number') {
+  if (Number.isFinite(live?.mean_accepted_len)) {
     line += ` · ${live.mean_accepted_len.toFixed(1)} tok/step`
   }
   return line

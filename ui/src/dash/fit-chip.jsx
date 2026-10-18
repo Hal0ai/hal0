@@ -3,7 +3,7 @@
 // picker (inference-pane.jsx), so the two can never drift. Verdict word lives
 // in the title/aria-label; the chip itself is icon + estimated GB only.
 import React from 'react'
-import { slotBolt } from './spec-state.js'
+import { draftVariantLabel, slotBolt } from './spec-state.js'
 
 const svgProps = {
   width: 11,
@@ -59,10 +59,10 @@ export function VisionIcon() {
 
 /** Bolt glyph for a model with a paired speculative-decoding drafter. */
 export function DrafterBolt({ variant }) {
-  const title = `drafter · ${variant}`
+  const title = `drafter · ${draftVariantLabel(variant)}`
   return (
     <span
-      className="chip amber modality-icon"
+      className="chip info modality-icon"
       title={title}
       aria-label={title}
       role="img"
