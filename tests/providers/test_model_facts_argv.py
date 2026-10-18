@@ -154,4 +154,5 @@ def test_a_paired_drafter_launches_from_the_registry_row(tmp_path: Path) -> None
     assert argv[argv.index("--spec-type") + 1] == "draft-dflash"
     assert argv[argv.index("--spec-draft-model") + 1] == "/models/m-draft-dflash.gguf"
     assert argv[argv.index("--spec-draft-n-max") + 1] == "7"
-    assert argv[argv.index("--spec-draft-device") + 1] == "ROCm0"
+    # An external drafter follows the model's devices: no pin.
+    assert "--spec-draft-device" not in argv

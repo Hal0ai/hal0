@@ -12,7 +12,7 @@ deduplicated last-wins by :func:`hal0.slots.argv.resolve_argv`:
 3. ``profile`` — the bundle for the speculation kind in effect, then the
    profile's own ``flags`` (so its ``--spec-draft-*`` values win);
 4. ``slot``    — ``-ngl``, ``--threads``, ``--metrics`` and the
-   ``--spec-draft-device`` derived from the slot's device.
+   ``--spec-draft-device`` derived from the slot's device (embedded MTP heads only).
 
 The profile is read live at every launch — there is no copy-on-stamp — so two
 slots running one model under two profiles launch two different tunes.
@@ -238,17 +238,17 @@ def test_dflash_layering() -> None:
         "--spec-draft-poll-batch", "1",
         "-fa", "auto",
     ]  # fmt: skip
-    assert by_label["slot"] == [*_GOLDEN_SLOT, "--spec-draft-device", "Vulkan0"]
+    # The drafter follows the model's devices: no --spec-draft-device pin.
+    assert by_label["slot"] == _GOLDEN_SLOT
     assert _spec_type_count(segments) == 1
 
 
 @pytest.mark.parametrize(
     ("device", "slot_layer"),
     [
-        ("gpu-rocm", [*_GOLDEN_SLOT, "--spec-draft-device", "ROCm0"]),
-        ("gpu-vulkan", [*_GOLDEN_SLOT, "--spec-draft-device", "Vulkan0"]),
-        # A CPU slot's drafter runs on the host CPU: no draft device at all
-        # (there is no ROCm0 to place it on).
+        # An external drafter is never pinned: it follows the model's devices.
+        ("gpu-rocm", _GOLDEN_SLOT),
+        ("gpu-vulkan", _GOLDEN_SLOT),
         ("cpu", _GOLDEN_SLOT),
     ],
 )
@@ -267,6 +267,7 @@ def test_a_paired_drafter_slot_layer_per_device(device: str, slot_layer: list[st
         "/p/d.gguf",
     ]
     assert by_label["slot"] == slot_layer
+    assert "--spec-draft-device" not in by_label["slot"]
 
 
 def test_mtp_layering_spec_type_moved_to_model_layer() -> None:

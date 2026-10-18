@@ -2,7 +2,7 @@
 
 ``effective_speculation`` is the one decision behind the model layer's
 ``--spec-type``/``--spec-draft-model``, the profile layer's per-kind bundle and
-the slot layer's ``--spec-draft-device``. A paired drafter wins over embedded
+the slot layer's ``--spec-draft-device`` (embedded MTP heads only). A paired drafter wins over embedded
 MTP heads; ``off`` and embedding mode never draft; ``ngram`` ignores the
 drafter; a drafter the runner image cannot run falls back (and says why).
 """
