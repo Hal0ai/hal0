@@ -70,7 +70,7 @@ def box(tmp_hal0_home: str) -> Path:
         "ctx_size = 65536\n"
         "enable_thinking = true\n"
         'vision = "off"\n'
-        'mtp = "off"\n',
+        'speculation = "off"\n',
         encoding="utf-8",
     )
     (etc / "slots" / "chat.toml").write_text(
@@ -95,7 +95,7 @@ def test_attach_carries_every_profile_tune(box: Path) -> None:
     assert profile["ctx_source"] == "profile"
     assert profile["enable_thinking"] is True
     assert profile["vision"] == "off"
-    assert profile["mtp"] == "off"
+    assert profile["speculation"] == "off"
 
 
 def test_attach_leaves_an_unserved_model_and_the_input_alone(box: Path) -> None:
@@ -150,7 +150,7 @@ def test_a_planned_cell_carries_the_profile_flags_and_window(box: Path, tmp_path
     cfg = cell.identity.config
     assert cfg.argv == PROFILE_FLAGS.split()
     assert cfg.ctx == 65536
-    assert cfg.spec == {"profile": {"enable_thinking": True, "vision": "off", "mtp": "off"}}
+    assert cfg.spec == {"profile": {"enable_thinking": True, "vision": "off", "speculation": "off"}}
     assert "reasoning" in cell.identity.model.caps
 
     bare = next(c for c in cells if c.model_id == "unserved")
@@ -164,7 +164,7 @@ def test_a_profile_tune_change_moves_the_cell_key(box: Path, tmp_path: Path) -> 
     before = next(c for c in plan(_suite(), attach_slot_profiles(_registry()), store))
     (box / "profiles.toml").write_text(
         f'[profile.bench-tuned]\nflags = "{PROFILE_FLAGS}"\nctx_size = 65536\n'
-        'enable_thinking = true\nvision = "off"\nmtp = "auto"\n',
+        'enable_thinking = true\nvision = "off"\nspeculation = "auto"\n',
         encoding="utf-8",
     )
     after = next(c for c in plan(_suite(), attach_slot_profiles(_registry()), store))

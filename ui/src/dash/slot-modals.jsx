@@ -43,6 +43,7 @@ import { formatProvenanceShort } from "./runner-images.jsx";
 import { runtimeChips, useRunnerPull, ProfileDrawer, ctxLabel } from "./profiles.jsx";
 import { RichSelect } from "./rich-select.jsx";
 import { FitChip, ModalityTag } from "./fit-chip.jsx";
+import { draftTagValue, slotSpecLine } from "./spec-state.js";
 // The profile apply preview + its lane-title table. Pure derivations, so they
 // live in their own module (profile-apply-preview.js) rather than in this view
 // file — the slot CARD's apply confirm asks the same question and must get the
@@ -271,7 +272,7 @@ function modelRichOptions({ compatible, cur, has, slotLong, allSlots, verdictChi
 			row: (
 				<span style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
 					{name}
-					<ModalityTag tag={modTag} />
+					<ModalityTag tag={modTag} draft={draftTagValue(m)} />
 				</span>
 			),
 			// closed trigger: everything inline on one line
@@ -279,7 +280,7 @@ function modelRichOptions({ compatible, cur, has, slotLong, allSlots, verdictChi
 				<span style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
 					{name}
 					{quant && <span className="chip amber">{quant}</span>}
-					<ModalityTag tag={modTag} />
+					<ModalityTag tag={modTag} draft={draftTagValue(m)} />
 					{fit}
 				</span>
 			),
@@ -509,7 +510,7 @@ function EditSlotDrawer({ open, slot, onClose }) {
 	// while a debug pin is active.
 	const [advOpen, setAdvOpen] = useStateSM(false);
 	// Profile (SlotConfig.profile) — THE tune for this slot (ADR-0029): flags,
-	// context window, thinking, vision, MTP and runtime all live on it. Rides
+	// context window, thinking, vision, speculation and runtime all live on it. Rides
 	// Save (PUT /config {profile}), restart-required. A profile that pins a
 	// runner moves the slot's binary (+ device for a single-lane runner) via
 	// the server's profile-wins reconcile.
@@ -701,6 +702,7 @@ function EditSlotDrawer({ open, slot, onClose }) {
 	// Resolved command provenance — only fetched while the drawer is open.
 	// Falls back gracefully when null (non-llama slots) or on error.
 	const resolvedQuery = useSlotResolved(slot?.name, { enabled: !!open });
+	const specLine = slotSpecLine(resolvedQuery.data?.speculation, slot?.metrics?.spec);
 
 	// Seed the form AND snapshot the baseline — deliberately the same effect, so
 	// the two can never come from different payloads (which is the #1398 class).
@@ -1131,7 +1133,7 @@ function EditSlotDrawer({ open, slot, onClose }) {
 	};
 
 	// Profile row — the slot's SlotConfig.profile, THE tune (ADR-0029): the
-	// profile carries the flags, context window, thinking, vision, MTP and
+	// profile carries the flags, context window, thinking, vision, speculation and
 	// runtime. Nothing is layered underneath from the model (it holds file
 	// facts only) and nothing is stamped into the model.
 	// Rendered inside the Model group right under the model select (it rides
@@ -1210,7 +1212,7 @@ function EditSlotDrawer({ open, slot, onClose }) {
 				<div className="form-lbl">
 					<span>Profile</span>
 					<FieldInfoIcon description="⟳ The profile is this slot's whole tune: flags, context
-						window, thinking, vision, MTP and runtime. The model only records
+						window, thinking, vision, speculation and runtime. The model only records
 						facts about its file. A profile that pins a runtime also moves
 						the slot's runtime on save." />
 				</div>
@@ -1260,7 +1262,7 @@ function EditSlotDrawer({ open, slot, onClose }) {
 									? "Pick a profile to edit"
 									: isSeedSel
 										? "Seed profiles are read-only — fork a custom copy and edit that"
-										: "Edit this profile's tune (flags, context, thinking, vision, MTP, runtime)"
+										: "Edit this profile's tune (flags, context, thinking, vision, speculation, runtime)"
 							}
 							onClick={(e) => {
 								e.stopPropagation();
@@ -1727,11 +1729,11 @@ function EditSlotDrawer({ open, slot, onClose }) {
 
 							{/* ADR-0029: Template / Parallel / Extra Args / Context are not
           slot config. The launch tune is the PROFILE's (flags, context,
-          thinking, vision, MTP, runtime); the model records file facts only
+          thinking, vision, speculation, runtime); the model records file facts only
           (chat template, jinja, MTP heads). The server rejects tuning keys on
           a slot write with slot.tuning_key_denied. */}
 							<div className="hint" data-testid="slot-launch-tune-note">
-								The launch tune — flags, context, thinking, vision, MTP — is
+								The launch tune — flags, context, thinking, vision, speculation — is
 								the profile's: use “Edit profile” above. The model only holds
 								facts about its file (chat template, jinja, MTP heads): use
 								“Edit model…”.
@@ -2441,6 +2443,14 @@ function EditSlotDrawer({ open, slot, onClose }) {
 							    llama-server does not launch (resolved-command.js). */}
 							{resolvedCommandText(resolvedQuery.data, slot)}
 						</div>
+						{specLine && (
+							<div
+								data-testid="slot-spec-line"
+								style={{ marginTop: 6, fontFamily: "var(--jbm)", fontSize: 11, color: "var(--fg-3)" }}
+							>
+								{specLine}
+							</div>
+						)}
 					</div>
 					{/* Provenance legend + per-flag badges — only when the /resolved endpoint
           returns data with at least one provenance entry. Gracefully absent for

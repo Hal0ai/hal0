@@ -82,14 +82,30 @@ export interface ModelInspectFile {
   size: string
 }
 
+// A speculative-decoding drafter candidate. The hints come from the file name;
+// the real kind and the fit verdict come from the header (inspect-draft).
+export interface ModelInspectDraft {
+  id: string
+  // The repo holding the file: the inspected repo, or a companion repo.
+  repo: string
+  kind_hint: 'mtp' | 'dflash' | 'eagle3' | null
+  variant_hint: 'lilicorr' | 'dflash2' | 'dspark' | 'dflash' | 'eagle3' | 'mtp' | null
+  size_bytes: number
+  size: string
+  source: 'repo' | 'companion'
+}
+
 export interface ModelInspectResponse {
   repo: string
   cached: boolean
   variants: ModelInspectVariant[]
   // Vision projectors, offered beside the quant (never as one).
   mmproj: ModelInspectFile[]
-  // Speculative-decoding draft models shipped in the repo.
-  drafts: ModelInspectFile[]
+  // Speculative-decoding drafters, best first: in the repo and in same-author
+  // companion repos.
+  drafts: ModelInspectDraft[]
+  // Companion repos that held at least one drafter ("found in <repo>").
+  companion_repos: string[]
   tags: string[]
   metadata: {
     license: string
@@ -110,11 +126,18 @@ export interface ScanPreviewRow {
   suggested_name: string
   kind: string
   raw_hints: Record<string, unknown>
+  // A speculative-decoding drafter is listed but not selectable: role "draft",
+  // the model it pairs with, or why it does not pair (ADR-0031 §4 Scan).
+  role?: 'draft'
+  pairs_with?: string | null
+  reason?: string | null
 }
 
 export interface ScanPreviewResponse {
   preview: ScanPreviewRow[]
   count: number
+  skipped?: { path: string; reason: string }[]
+  paired_drafts?: { model_id: string; draft: string }[]
 }
 
 export interface ScanPreviewRequest {
@@ -149,6 +172,47 @@ export function useAddModelFromPath() {
     mutationFn: (body) =>
       apiPost<Model>(ENDPOINTS.modelAddFromPath, body as unknown as Record<string, unknown>),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['models'] }),
+  })
+}
+
+export interface InspectDraftRequest {
+  // The target model's main quant and the candidate drafter, each as repo + file.
+  hf_repo: string
+  hf_filename: string
+  draft_repo: string
+  draft_filename: string
+}
+
+export interface InspectDraftResponse {
+  kind: 'dflash' | 'eagle3' | 'mtp' | 'simple'
+  variant: string
+  fit: { ok: boolean; reasons: string[] }
+  // metadata.draft shape (ADR-0031 §1), nulls omitted.
+  draft: {
+    variant: string
+    block_size?: number
+    embedding_length?: number
+    target_layers?: number[]
+    vocab_size?: number
+    base_model?: string
+  }
+  target: {
+    architecture: string
+    embedding_length: number | null
+    block_count: number | null
+  }
+}
+
+export function useInspectDraft() {
+  // POST both coordinates and get the drafter's kind plus a fit verdict read
+  // from the two GGUF headers (tens of MB), before any download. A header that
+  // cannot be read is a 422 ``hf.header_unreadable``.
+  return useMutation<InspectDraftResponse, Hal0Error, InspectDraftRequest>({
+    mutationFn: (body) =>
+      apiPost<InspectDraftResponse>(
+        ENDPOINTS.modelInspectDraft,
+        body as unknown as Record<string, unknown>,
+      ),
   })
 }
 
@@ -399,7 +463,7 @@ const TERMINAL = new Set<PullState>(['completed', 'failed', 'cancelled'])
 // ``shard`` per part, then the optional ``mmproj`` and engine ``sidecar``s.
 export interface PullFileSnapshot {
   hf_filename: string
-  kind: 'model' | 'shard' | 'mmproj' | 'sidecar' | string
+  kind: 'model' | 'shard' | 'mmproj' | 'draft' | 'sidecar' | string
   bytes_total: number
   bytes_done: number
 }
@@ -418,6 +482,7 @@ export function pullFileLabel(files: PullFileSnapshot[]): string | null {
     return `part ${shards.indexOf(active) + 1} of ${shards.length}`
   }
   if (active.kind === 'mmproj') return 'vision projector'
+  if (active.kind === 'draft') return 'drafter'
   return active.hf_filename.split('/').pop() || active.hf_filename
 }
 

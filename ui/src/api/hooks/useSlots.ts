@@ -27,6 +27,25 @@ const slotPatch = <T = unknown>(path: string, body?: unknown) =>
 const slotDelete = <T = unknown>(path: string) =>
   api<T>(path, { method: 'DELETE', raw: true })
 
+/** Speculative decoding on a slot (ADR-0031 §6). Absent when the slot has no
+ *  model. `active` is true only while llama-server reports it is drafting. */
+export interface SlotSpec {
+  active: boolean
+  draft_tokens: number
+  accepted_tokens: number
+  drafts: number
+  /** accepted / drafted over the server's lifetime; null before any draft. */
+  acceptance: number | null
+  /** 1 + accepted / drafts. */
+  mean_accepted_len: number | null
+  /** Acceptance over the last 30 s of proxied completions. */
+  live_acceptance: number | null
+  mode: string | null
+  kind: string | null
+  variant: string | null
+  unavailable_reason: string | null
+}
+
 export interface SlotMetrics {
   toks?: number
   /** FLM / metrics-backed tok/s (preferred over local toks count). */
@@ -44,6 +63,7 @@ export interface SlotMetrics {
   secs?: number
   voice?: string
   res?: string
+  spec?: SlotSpec
 }
 
 /** #2012 crash-loop breaker snapshot view — see Slot.metadata.breaker. */
@@ -707,6 +727,13 @@ export interface SlotResolved {
   provenance: FlagProvenance[]
   /** Number of duplicate flags that were collapsed. */
   removed: number
+  /** What speculation is in effect for this slot's launch (ADR-0031). */
+  speculation?: {
+    mode: string | null
+    kind: string | null
+    variant: string | null
+    unavailable_reason: string | null
+  }
 }
 
 /**

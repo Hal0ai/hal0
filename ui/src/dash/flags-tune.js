@@ -2,7 +2,7 @@
 //
 // Pure, dependency-free helpers for the profile drawer's flags field. A
 // profile's `flags` text is the freeform llama-server remainder (-fa / -b / -ub
-// / KV-quant / …); context window, thinking, vision, MTP and runner are typed
+// / KV-quant / …); context window, thinking, vision, speculation and runner are typed
 // profile fields, and the model carries file facts only. These helpers
 // tokenize the text and screen out the flags the server rejects with a 400, so
 // the drawer can say so inline before the PUT fires:
@@ -65,8 +65,11 @@ export function findSlotHardwareFlags(text) {
 
 // Model-fact flags (ADR-0029): the chat template and projector are properties
 // of the FILE, recorded on the model row, so a profile must not carry them.
-// Mirrors the server's profiles.model_fact_flag_denied screen.
+// `--spec-type` follows the model's drafter or MTP heads and the profile's
+// Speculation (ADR-0031). Mirrors the server's profiles.model_fact_flag_denied
+// screen (hal0.slots.argv.MODEL_FACT_FLAGS).
 export const MODEL_FACT_FLAGS = [
+  "--spec-type",
   "--jinja",
   "--no-jinja",
   "--chat-template",
@@ -90,6 +93,11 @@ export const MODEL_FACT_FLAG_SOURCE = {
   "--mmproj-auto": "this profile's Vision field",
   "--no-mmproj-auto": "this profile's Vision field (set it to off)",
 };
+
+// Why `--spec-type` is refused: it is not a file fact the operator sets on the
+// model row, so it gets its own copy rather than a MODEL_FACT_FLAG_SOURCE entry.
+export const SPEC_TYPE_REFUSAL =
+  "hal0 sets it from the model's drafter or MTP heads; set the profile's Speculation instead";
 
 // Other flags the profile screen refuses outright: the draft-model device is
 // derived from the slot's device, and `--reasoning-format none` would break

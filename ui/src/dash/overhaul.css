@@ -232,7 +232,18 @@
   overflow: hidden;
   text-overflow: ellipsis;
   min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 5px;
 }
+.sl-mname { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+
+/* Speculation bolt after the model name: lit = drafting, off = drafter paired
+   but speculation off, warn = drafter paired but this runner cannot use it. */
+.sl-bolt { display: inline-flex; flex-shrink: 0; color: var(--accent); line-height: 1; }
+.sl-bolt.off { color: var(--fg-4); }
+.sl-bolt.warn { color: var(--warn); }
+.slot-list-row .ml .sl-bolt { margin-left: 5px; vertical-align: middle; }
 
 .sl-detail-row {
   display: contents;

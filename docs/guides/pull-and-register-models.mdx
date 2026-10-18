@@ -77,6 +77,136 @@ downloads every part into one directory and keeps the part-numbered names,
 because llama.cpp opens a split model from its first part and finds the
 other parts by name. Naming any part other than the first returns `422`.
 
+## Drafters
+
+A drafter is a small file that guesses the next few tokens so the main model
+can check them in one pass. The answer is the same; only the speed changes.
+A drafter pairs with one model, the way a vision projector does, and the
+slot uses it when the profile's `speculation` is `auto`.
+
+| Kind | What it is | Needs a file |
+|---|---|---|
+| `dflash` | A drafter trained for one model (DFlash, DFlash2, DSpark and LiLiCorr all land here; the variant is shown in the drawer) | Yes |
+| `eagle3` | An EAGLE3 drafter trained for one model | Yes |
+| `simple` | Any small model that shares the main model's tokenizer | Yes |
+| `mtp` | The main model's own MTP heads | No, unless the heads ship as a separate `mtp-*.gguf` file |
+
+hal0 reads the kind from the drafter's GGUF header; you never set it by hand
+(a `draft_kind` in a model write is `422 model.draft_kind_readonly`). A model
+with a drafter uses it before its embedded MTP heads. The profile's
+`speculation: ngram` needs no file at all.
+
+### Add a drafter from Hugging Face
+
+In **Add from Hugging Face**, Inspect lists drafter files beside the quants
+and the projector. The list holds files in the repo itself and files in
+companion repos by the same author whose name is the model's name plus a
+suffix such as `-LiLiCorr`, `-DFlash`, `-DFlash2`, `-DSpark`, `-EAGLE3` or
+`-draft`. If nothing turns up, paste a repo into the **Drafter** row and choose
+**Find drafters**. Pick one, or leave it on **None**.
+
+Before anything downloads, hal0 reads the headers of the quant and the drafter
+over HTTP range requests (tens of megabytes, not the files) and shows whether
+they fit. A drafter that does not fit, or whose header cannot be read, holds
+the Pull button until you set the row back to **None**. The same check is
+available to scripts:
+
+```sh
+curl -s -X POST http://127.0.0.1:8080/api/models/inspect-draft \
+  -H 'Content-Type: application/json' \
+  -d '{"hf_repo":"org/Model-GGUF","hf_filename":"Model-Q4_K_M.gguf",
+       "draft_repo":"org/Model-LiLiCorr-GGUF","draft_filename":"drafter-Q8_0.gguf"}'
+```
+
+`hf_*` name the target model and `draft_*` the drafter. The response carries
+`kind`, `variant`, `fit` (`ok` and `reasons`), and the two headers' facts. A
+file that does not fit is still a `200` with `fit.ok` false; a header that
+cannot be read is `422 hf.header_unreadable`. The result is cached for about
+five minutes.
+
+`POST /api/models/inspect` also returns `drafts` (each with `id`, `repo`,
+`kind_hint`, `variant_hint`, `size_bytes` and `source` of `repo`, `companion`)
+and `companion_repos`, the repos that held drafters.
+
+### Pull with a drafter
+
+The pull body takes `draft_filename` and, when the drafter lives in another
+repo, `draft_repo` (it defaults to the model's own):
+
+```sh
+curl -s -X POST http://127.0.0.1:8080/api/models/my-model/pull \
+  -H 'Content-Type: application/json' \
+  -d '{"hf_repo":"org/Model-GGUF","hf_filename":"Model-Q4_K_M.gguf",
+       "draft_repo":"org/Model-LiLiCorr-GGUF","draft_filename":"drafter-Q8_0.gguf"}'
+```
+
+```sh
+hal0 model pull my-model --draft drafter-Q8_0.gguf --draft-repo org/Model-LiLiCorr-GGUF
+```
+
+A drafter you name is fit-checked before anything downloads; one that does not
+fit refuses the pull with `422 model.draft_mismatch`. The drafter lands in the
+model's directory and is paired when the pull finishes, and its bytes count
+toward the model's size.
+A pull without `draft_filename` leaves an existing pairing alone.
+
+### Pair or unpair a model you already have
+
+- **Dashboard.** The model drawer has a **Drafter** field beside **MMProj**:
+  choose a drafter from the repo's list or type an absolute path, and use
+  **Pull drafter** when the chosen file is not on disk yet.
+- **CLI.** `hal0 model set <id> --draft <path>` pairs a file that is already
+  on disk and runs the same fit check; `hal0 model set <id> --draft none`
+  unpairs it and keeps the file. `hal0 model add --draft <path>` pairs while
+  registering.
+- **API.** `PUT /api/models/<id>` with `{"draft": "<path>"}` pairs and
+  `{"draft": null}` unpairs and keeps the file. `DELETE /api/models/<id>/draft`
+  unpairs and deletes the drafter file; it answers `404 model.draft_not_found`
+  when none is paired.
+
+A drafter that fails the check is refused with `422 model.draft_mismatch`
+(the two values that differ are in `details`), `model.draft_not_a_drafter`
+(the file is not a drafter, or is a plain model whose tokenizer is not this
+model's), `model.draft_not_found` (the path is not on disk) or
+`model.draft_outside_store` (the path is not absolute, or lies outside the
+model store and the model's own directory, where a slot could not open it).
+
+A rescan pairs a drafter it finds in a model's directory when it fits. A
+drafter it cannot pair is listed as skipped with a reason:
+`drafter_without_target` (no model beside it), `drafter_unpaired` (it fits a
+model that already has a drafter), `drafter_mismatch` (it fits none of them)
+or `drafter_unreadable` (its header cannot be read). A drafter you unpaired on
+purpose is not paired again by a later scan; pairing a path lifts that.
+
+### See whether it is in use
+
+The slot's metrics carry a `spec` block: `active`, `mode` (`draft`, `mtp`,
+`ngram` or `none`), `kind`, `variant`, `draft_tokens`, `accepted_tokens`,
+`acceptance` (accepted over drafted), `mean_accepted_len`, `live_acceptance`
+and `unavailable_reason`. `active` comes from the server itself, so a drafter
+that loaded but never drafts shows as inactive. When the runner image cannot
+run the paired drafter (a LiLiCorr file needs llama.cpp build b11669 or newer),
+`unavailable_reason` says so and the slot falls back to the model's MTP heads
+if it has them, else to no speculation.
+
+The Slots list shows a bolt after the model name, with a hover title:
+
+| Bolt | Title |
+|---|---|
+| Lit | `drafting · <drafter or MTP heads or n-gram> · <n>% accepted` (the percentage appears once the slot has drafted) |
+| Grey | `drafter paired · speculation off` when the model has a drafter (or MTP heads) and the profile's `speculation` is `off`; `<drafter paired, MTP heads or n-gram> · not running` when the plan uses one but the slot is not drafting right now |
+| Amber | `drafter unavailable on this runner: <reason>` |
+
+A model with nothing to draft with shows no bolt. The slot drawer carries the
+full line, `Speculation: <what is in use> · <n>% accepted · <x> tok/step`, or
+`Speculation: off`, or `Speculation: drafter unavailable — <reason>`. In the
+model catalog a model with a paired drafter carries a **Drafter** chip
+(hover: `Paired drafter · <variant>`), and the filter chips include **Drafter**.
+
+hal0 does not estimate a speed-up from the acceptance rate. A with and
+without comparison through the benchmark queue is planned for a later
+release.
+
 ## Check for and apply weight updates
 
 ```sh
@@ -162,7 +292,7 @@ on) and `sources` (where each fact came from):
     "profile": {
       "flags": "-fa auto -b 2048 -ub 512",
       "vision": "auto",
-      "mtp": "auto",
+      "speculation": "auto",
       "cloned_from": "chat",
       "intent": "Qwen3 4B · qwen3 · 32K ctx · chat · gpu-rocm"
     }

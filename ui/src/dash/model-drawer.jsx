@@ -1,7 +1,7 @@
 // hal0 dashboard — Model editor drawer (ADR-0029, profile-centric config).
 //
 // The model is a FILE: this drawer edits only facts about it. Every tune
-// (flags, context window, thinking, vision, MTP on/off) lives on a profile,
+// (flags, context window, thinking, vision, speculation) lives on a profile,
 // and placement lives on the slot.
 //
 // What the drawer owns:
@@ -19,6 +19,8 @@ import {
 	useModelUpdate,
 	useModelSetDefault,
 	useModelInspect,
+	useInspectDraft,
+	usePullJob,
 } from "@/api/hooks/useModels";
 import { useChatTemplates } from "@/api/hooks/useChatTemplates";
 import { useMetaEnums } from "@/api/hooks/useMeta";
@@ -290,6 +292,7 @@ function modelBaseline(model, enums) {
 		// (derived, read-only) is served alongside it on every row.
 		provider: model.provider || "",
 		mmproj: model.mmproj || "",
+		draft: model.draft || "",
 		hfRepo: model.hf_repo || "",
 		hfFilename: model.hf_filename || "",
 		chatTemplate: init.chat_template ?? "auto",
@@ -314,6 +317,8 @@ function deriveModelChanges(baseline, form) {
 		provider: form.provider !== baseline.provider,
 		mmproj: form.mmproj.trim() !== baseline.mmproj,
 		trimmedMmproj: form.mmproj.trim(),
+		draft: form.draft.trim() !== baseline.draft,
+		trimmedDraft: form.draft.trim(),
 		hfRepo: form.hfRepo.trim() !== baseline.hfRepo,
 		trimmedRepo: form.hfRepo.trim(),
 		hfFilename: form.hfFilename.trim() !== baseline.hfFilename,
@@ -326,6 +331,7 @@ function deriveModelChanges(baseline, form) {
 		c.name ||
 		c.provider ||
 		c.mmproj ||
+		c.draft ||
 		c.hfRepo ||
 		c.hfFilename ||
 		c.chatTemplate ||
@@ -513,6 +519,71 @@ function mmprojRichOptions(dir, variants, extras) {
 	return opts;
 }
 
+// ADR-0031 §5 — the Drafter field mirrors the projector's: the same absolute
+// host path (`Model.draft`), the same directory rule (a pull lands the drafter
+// beside the model under its upstream basename), so a repo file resolves with
+// `joinMmprojPath(dir, basenameOf(id))`. Unlike the projector, a repo option
+// remembers WHICH repo and file it came from (`byPath`): the drafter often
+// lives in a companion repo, and Pull / the fit check need both coordinates.
+const DRAFT_VARIANT_LABELS = {
+	lilicorr: "LiLiCorr",
+	dflash: "DFlash",
+	dflash2: "DFlash2",
+	dspark: "DSpark",
+	eagle3: "EAGLE3",
+	mtp: "MTP",
+};
+
+function draftVariantLabel(variant) {
+	const v = String(variant || "");
+	return DRAFT_VARIANT_LABELS[v.toLowerCase()] || v;
+}
+
+function draftRichOptions(dir, drafts, extras, unpaired) {
+	const opts = [
+		{ id: "", row: "— none —", desc: "no drafter paired — speculative decoding stays off" },
+	];
+	const byPath = new Map();
+	for (const d of drafts) {
+		const id = joinMmprojPath(dir, basenameOf(d.id));
+		if (byPath.has(id)) continue;
+		byPath.set(id, d);
+		const chip = sizeChipText(d);
+		opts.push({
+			id,
+			row: d.id,
+			right: chip ? mutedChip(chip) : null,
+			desc:
+				id === unpaired
+					? "on disk, not paired · unpaired from this model, the file is kept"
+					: [draftVariantLabel(d.variant_hint), d.repo].filter(Boolean).join(" · "),
+		});
+	}
+	for (const extra of extras) {
+		const cur = String(extra || "").trim();
+		if (!cur || byPath.has(cur) || opts.some((o) => o.id === cur)) continue;
+		opts.push({
+			id: cur,
+			row: basenameOf(cur),
+			right: mutedChip(cur === unpaired ? "on disk, not paired" : "stored"),
+			desc:
+				cur === unpaired
+					? "unpaired from this model · the file is kept"
+					: "paired on this model · not among this repo's files",
+		});
+	}
+	return { opts, byPath };
+}
+
+// The fit verdict copy, shared with the Add dialog: what matched, or why not.
+function draftFitText(res) {
+	if (!res || !res.fit) return null;
+	if (!res.fit.ok) return (res.fit.reasons && res.fit.reasons[0]) || "does not fit this model";
+	const d = res.draft || {};
+	const layers = Array.isArray(d.target_layers) ? d.target_layers.length : 0;
+	return `matches: hidden ${d.embedding_length ?? "?"}, ${layers} target layers, block ${d.block_size ?? "?"}`;
+}
+
 // One read-only path line for the Source disclosure's paths block: mono text
 // that wraps mid-token (#2210's overflow-wrap:anywhere pattern — a projector
 // path is long, unbreakable, and must not push the drawer sideways) plus the
@@ -580,6 +651,10 @@ export function ModelDrawer({ open, onClose, model, onOpenSlot = undefined }) {
 	// Repo listing behind the Source disclosure's mmproj picker (Task 9) —
 	// POST /api/models/inspect, server-cached, fired lazily (see srcOpen below).
 	const inspect = useModelInspect();
+	// Drafter field (ADR-0031 §5): header-level fit check for a repo pick before
+	// anything downloads, and the pull that fetches + registers the pairing.
+	const inspectDraft = useInspectDraft();
+	const pull = usePullJob();
 
 	// Identity + typed fields (preserve the full RecipeEditor save surface).
 	const [name, setName] = useStateMD("");
@@ -588,6 +663,14 @@ export function ModelDrawer({ open, onClose, model, onOpenSlot = undefined }) {
 	// client-sent `backends` silently). Empty string = derive server-side.
 	const [provider, setProvider] = useStateMD("");
 	const [mmproj, setMmproj] = useStateMD("");
+	const [draft, setDraft] = useStateMD("");
+	// The server's refusal of a typed path on Save (model.draft_mismatch) — its
+	// first reason, shown in the fit band until the path changes.
+	const [draftMismatch, setDraftMismatch] = useStateMD(null);
+	const [unpairing, setUnpairing] = useStateMD(false);
+	// The path the operator just unpaired: the file is kept, so it stays a row in
+	// the picker and re-pairing it is a plain PUT, never a re-download.
+	const [unpairedPath, setUnpairedPath] = useStateMD("");
 	const [hfRepo, setHfRepo] = useStateMD("");
 	const [hfFilename, setHfFilename] = useStateMD("");
 	// File facts (ADR-0029): chat template, jinja and "the file has MTP heads".
@@ -602,6 +685,8 @@ export function ModelDrawer({ open, onClose, model, onOpenSlot = undefined }) {
 	// lazy — one POST on the disclosure's first open, never on drawer mount —
 	// and this guards the re-open from re-firing it for the same coord.
 	const inspectedRepo = useRefMD(null);
+	// The pull job whose completion has already been adopted into the baseline.
+	const pullDoneFor = useRefMD(null);
 	// Inline title editor (Task 3): the ✎ button swaps the name span for an
 	// input seeded from the CURRENT draft (`name`), never from the live model
 	// prop, so a prior uncommitted edit survives reopening the editor. Escape
@@ -643,6 +728,11 @@ export function ModelDrawer({ open, onClose, model, onOpenSlot = undefined }) {
 		setName(b.name);
 		setProvider(b.provider);
 		setMmproj(b.mmproj);
+		setDraft(b.draft);
+		setDraftMismatch(null);
+		setUnpairedPath("");
+		pullDoneFor.current = null;
+		inspectDraft.reset();
 		setHfRepo(b.hfRepo);
 		setHfFilename(b.hfFilename);
 		setChatTemplate(b.chatTemplate);
@@ -706,10 +796,97 @@ export function ModelDrawer({ open, onClose, model, onOpenSlot = undefined }) {
 		[mmprojPicker, mmprojDir, mmprojVariants, baseline?.mmproj, mmproj],
 	);
 
+	// Drafter picker feed — same shape as the projector's. The directory comes
+	// off the BASELINE so the options don't vanish when the pick is cleared.
+	const draftDir = mmprojDirOf(baseline?.draft, model?.path);
+	const draftList = useMemoMD(
+		() => (Array.isArray(inspect.data?.drafts) ? inspect.data.drafts : []),
+		[inspect.data],
+	);
+	const draftPicker =
+		!!hfRepo.trim() && !inspect.isError && !!draftDir && draftList.length > 0;
+	const { opts: draftOptions, byPath: draftByPath } = useMemoMD(
+		() =>
+			draftPicker
+				? draftRichOptions(draftDir, draftList, [baseline?.draft, unpairedPath, draft], unpairedPath)
+				: { opts: [], byPath: new Map() },
+		[draftPicker, draftDir, draftList, baseline?.draft, unpairedPath, draft],
+	);
+	// The chosen option is a repo file that is not the pairing already stored.
+	const draftRepoPick =
+		draftPicker && draft.trim() !== baseline?.draft && draft.trim() !== unpairedPath
+			? draftByPath.get(draft.trim())
+			: null;
+	const draftPullBody = draftRepoPick
+		? {
+				hf_repo: hfRepo.trim(),
+				hf_filename: model?.hf_filename,
+				draft_filename: draftRepoPick.id,
+				draft_repo: draftRepoPick.repo,
+			}
+		: null;
+	const draftPullKey = draftPullBody
+		? `${draftPullBody.draft_repo}|${draftPullBody.draft_filename}`
+		: "";
+	// Fit check for a repo pick: reads the two GGUF headers, downloads nothing.
+	useEffectMD(() => {
+		if (!draftPullBody) {
+			inspectDraft.reset();
+			return;
+		}
+		inspectDraft.mutate({
+			hf_repo: draftPullBody.hf_repo,
+			hf_filename: draftPullBody.hf_filename,
+			draft_repo: draftPullBody.draft_repo,
+			draft_filename: draftPullBody.draft_filename,
+		});
+		// eslint-disable-next-line react-hooks/exhaustive-deps
+	}, [draftPullKey]);
+	// The pull registers draft / draft_kind / metadata.draft server-side, so the
+	// drawer must not PUT `draft` too: when the job lands, adopt the pulled path
+	// as the new baseline and let the live row's facts refresh on their own.
+	useEffectMD(() => {
+		if (pull.state !== "completed" || pull.modelId !== model?.id) return;
+		if (!draftRepoPick || pullDoneFor.current === pull.jobId) return;
+		pullDoneFor.current = pull.jobId;
+		const landed = draft.trim();
+		setBaseline((b) => (b ? { ...b, draft: landed } : b));
+		inspectDraft.reset();
+		// eslint-disable-next-line react-hooks/exhaustive-deps
+	}, [pull.state, pull.modelId, pull.jobId]);
+	const draftFitMessage = draftMismatch
+		? draftMismatch
+		: draftRepoPick
+			? draftFitText(inspectDraft.data)
+			: null;
+	const draftFitOk = !draftMismatch && inspectDraft.data?.fit?.ok !== false;
+	const setDraftValue = (v) => {
+		setDraft(v);
+		setDraftMismatch(null);
+	};
+	const onUnpair = async () => {
+		setUnpairing(true);
+		try {
+			await update.mutateAsync({ id: model.id, body: { draft: null } });
+			setUnpairedPath(baseline?.draft || "");
+			setDraft("");
+			setDraftMismatch(null);
+			setBaseline((b) => (b ? { ...b, draft: "" } : b));
+			window.__hal0Toast &&
+				window.__hal0Toast(`Unpaired the drafter (file kept)`, "ok");
+		} catch (e) {
+			window.__hal0Toast &&
+				window.__hal0Toast(`Unpair failed — ${e?.message || "see logs"}`, "err");
+		} finally {
+			setUnpairing(false);
+		}
+	};
+
 	// One gate for every inline error. Today that is the vision↔mmproj invariant
 	// (#1380); `onSave` and the Save button both consult it, so a new validation
 	// can never be enforced in one place and forgotten in the other.
-	const saveBlocked = !!mmprojError;
+	// An unpulled repo pick is not a saveable change — Pull is its only write path.
+	const saveBlocked = !!mmprojError || !!draftRepoPick;
 
 	// Return null when closed — matching the Modal contract the deleted
 	// RecipeEditorModal honoured (Modal returns null when !open). The <Drawer>
@@ -782,6 +959,7 @@ export function ModelDrawer({ open, onClose, model, onOpenSlot = undefined }) {
 		name,
 		provider,
 		mmproj,
+		draft,
 		hfRepo,
 		hfFilename,
 		chatTemplate,
@@ -816,14 +994,28 @@ export function ModelDrawer({ open, onClose, model, onOpenSlot = undefined }) {
 		if (changes.name) body.name = changes.trimmedName;
 		if (changes.provider) body.provider = provider || null;
 		if (changes.mmproj) body.mmproj = changes.trimmedMmproj || null;
+		// A repo pick is NOT written here: Pull fetches the file and registers the
+		// pairing server-side. Only a typed / stored path ships as `draft`.
+		if (changes.draft && !draftRepoPick) body.draft = changes.trimmedDraft || null;
 		if (changes.hfRepo) body.hf_repo = changes.trimmedRepo;
 		if (changes.hfFilename) body.hf_filename = changes.trimmedFile;
+		// A pending repo pick alone leaves nothing to PUT — Pull is its write path.
+		if (Object.keys(body).length === 0) return;
 		try {
 			await update.mutateAsync({ id: model.id, body });
+			if (body.draft) setUnpairedPath("");
 			window.__hal0Toast &&
 				window.__hal0Toast(`Updated ${model.longName || model.id}`, "ok");
 			onClose();
 		} catch (e) {
+			// A typed drafter path the on-disk fit check refused: the reasons ride the
+			// fit band under the field, not just the toast.
+			if (e?.code === "model.draft_mismatch") {
+				const reasons = e?.details?.reasons;
+				setDraftMismatch(
+					(Array.isArray(reasons) && reasons[0]) || "this drafter does not fit the model",
+				);
+			}
 			// Surface the server envelope inline (managed-arg rejection etc.).
 			window.__hal0Toast &&
 				window.__hal0Toast(`Save failed — ${e?.message || "see logs"}`, "err");
@@ -1009,6 +1201,14 @@ export function ModelDrawer({ open, onClose, model, onOpenSlot = undefined }) {
 					</div>
 				</div>
 			)}
+			{model.draft && model.draftVariant && (
+				<div style={factCellStyle} data-testid="model-facts-drafter">
+					<div style={factLabelStyle}>Drafter</div>
+					<div className="mono" style={factValueStyle}>
+						{draftVariantLabel(model.draftVariant)}
+					</div>
+				</div>
+			)}
 			<div style={factCellStyle} data-testid="model-facts-usedby">
 				<div style={factLabelStyle}>Used by</div>
 				<div className="mono" style={factValueStyle}>
@@ -1093,7 +1293,7 @@ export function ModelDrawer({ open, onClose, model, onOpenSlot = undefined }) {
 					data-testid="model-tune-note"
 					style={{ margin: "16px 0 4px" }}
 				>
-					Flags, context window, thinking, vision and MTP on/off are set on a
+					Flags, context window, thinking, vision and speculation are set on a
 					profile, and a slot picks the profile. This drawer only records facts
 					about the file.
 				</div>
@@ -1296,6 +1496,69 @@ export function ModelDrawer({ open, onClose, model, onOpenSlot = undefined }) {
 										{mmprojError}
 									</div>
 								)}
+							</div>
+						</div>
+						<div className="form-row">
+							<div className="form-lbl">
+								<span>Drafter</span>
+								<FieldInfoIcon description="speculative-decoding drafter GGUF · absolute path beside the model · a repo file is pulled, a typed path must already be on disk and is fit-checked on Save" />
+							</div>
+							<div className="form-ctl">
+								{draftPicker ? (
+									<RichSelect
+										data-testid="model-draft-select"
+										aria-label="Drafter"
+										value={draft}
+										options={draftOptions}
+										onChange={setDraftValue}
+									/>
+								) : (
+									<input
+										className="input mono"
+										data-testid="model-draft-input"
+										placeholder="/var/lib/hal0/models/…/drafter.gguf"
+										value={draft}
+										onChange={(e) => setDraftValue(e.target.value)}
+									/>
+								)}
+								{draftFitMessage && (
+									<div
+										className={draftFitOk ? "hint" : "err"}
+										data-testid="model-draft-fit"
+										style={{ marginTop: 6 }}
+									>
+										{draftFitMessage}
+									</div>
+								)}
+								{draftRepoPick && (
+									<div className="hint" data-testid="model-draft-pending" style={{ marginTop: 6 }}>
+										pull the drafter first (or set it back)
+									</div>
+								)}
+								<div style={{ display: "flex", gap: 8, marginTop: 6 }}>
+									{draftRepoPick && (
+										<button
+											type="button"
+											className="btn sm"
+											data-testid="model-draft-pull"
+											disabled={pull.inFlight || !draftFitOk}
+											onClick={() => pull.start(model.id, draftPullBody).catch(() => {})}
+										>
+											{pull.inFlight ? "Pulling…" : "Pull drafter"}
+										</button>
+									)}
+									{baseline?.draft && (
+										<button
+											type="button"
+											className="btn ghost sm"
+											data-testid="model-draft-unpair"
+											disabled={unpairing}
+											onClick={onUnpair}
+										>
+											Unpair
+										</button>
+									)}
+								</div>
 							</div>
 						</div>
 						<div className="form-row">

@@ -124,7 +124,7 @@ A launch is described by three objects. A **model** row holds facts about its
 file: path, architecture, native context window, chat template, multimodal
 projector, and whether the file has MTP heads. A **profile** holds every tune:
 free llama-server flags, `ctx_size`, `enable_thinking`, `vision` (`auto` or
-`off`) and `mtp` (`auto` or `off`). A **slot** holds placement (`device`,
+`off`) and `speculation` (`auto`, `off` or `ngram`). A **slot** holds placement (`device`,
 `gpu_index`, `n_gpu_layers`, `threads`, `binary`, `image_pin`) and names its
 model and its profile. See
 [Slots](/docs/concepts/slots#who-owns-what-slot-model-profile) for how the
@@ -132,7 +132,7 @@ launch command is assembled from the three.
 
 A slot write that carries a tuning key is refused with
 `slot.tuning_key_denied`: `[model].context_size` / `ctx_size`, `parallel`,
-`chat_template`, `workers`, `mtp`, `enable_thinking`, `vision`, or
+`chat_template`, `workers`, `mtp`, `speculation`, `enable_thinking`, `vision`, or
 `[server].extra_args`. Set the window and flags with `hal0 profile
 create|edit` and point the slot at that profile. A slot file that still
 carries one of those keys fails to load with `slot.unconverted`; `hal0 update`
@@ -151,9 +151,10 @@ check refuses, in every spelling llama.cpp accepts:
 - hal0-managed flags (`--model`, `--host`, `--port`, `--alias`, `--ctx-size`),
   where the context window is the profile's `ctx_size` field
   (`slot.managed_arg_denied`);
-- model-fact flags (`--jinja`, `--chat-template*`, `--mmproj`, `--no-mmproj`),
-  plus `--spec-draft-device` and `--mmproj-device`, which hal0 sets from the
-  model and the slot (`profiles.model_fact_flag_denied`);
+- model-fact flags (`--jinja`, `--chat-template*`, `--mmproj`, `--no-mmproj`,
+  and `--spec-type`, which follows the model's drafter or MTP heads and the
+  profile's `speculation`), plus `--spec-draft-device` and `--mmproj-device`,
+  which hal0 sets from the model and the slot (`profiles.model_fact_flag_denied`);
 - host-owned flags: remote model fetches such as `-hf` and `--model-url`, host
   file reads and writes such as `--api-key-file` and `--log-file`, and
   listener, auth and TLS settings (`slot.host_owned_flag_denied`);

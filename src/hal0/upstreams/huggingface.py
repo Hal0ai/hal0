@@ -272,14 +272,88 @@ def _quant_label(name: str, stem: str) -> str:
     return quant
 
 
-#: A speculative-decoding draft model shipped beside the main quants
-#: (``dflash-Foo-NVFP4.gguf``, ``Foo-draft-Q8_0.gguf``). It is a sidecar to a
-#: quant, not a model to serve, so it never appears as a quant.
-_DRAFTER_RE = re.compile(r"(?:^|[-_.])(?:dflash|draft)(?:[-_.]|$)", re.IGNORECASE)
+#: A speculative-decoding draft model shipped beside the main quants (ADR-0031
+#: §4): llama.cpp's own sidecar names (``mtp-X.gguf`` leads the name;
+#: ``dflash-``/``eagle3-``/``dspark-`` lead or trail it) plus the vendor
+#: patterns (``X-LiLiCorr``, ``X-DFlash2-Q4_K_M``, ``X-speculator.eagle3``,
+#: ``X-draft-Q8_0``). A sidecar to a quant, not a model to serve, so it never
+#: appears as a quant. ``mtp`` only counts as a leading ``mtp-``: a main quant
+#: that merely ends in ``-MTP`` carries its heads inside.
+_DRAFTER_RE = re.compile(
+    r"^mtp-|(?:^|[-_.])(?:dflash2?|dspark|eagle3|lilicorr|speculator|draft)(?:[-_.]|$)",
+    re.IGNORECASE,
+)
+
+#: Best-first rank of a drafter's ``variant_hint`` (ADR-0031 §4); a name that
+#: gives no hint sorts after ``mtp`` (the last of these).
+_DRAFTER_VARIANT_RANK = {
+    "lilicorr": 0,
+    "dflash2": 1,
+    "dspark": 2,
+    "dflash": 3,
+    "eagle3": 4,
+    "mtp": 5,
+}
+
+
+def drafter_hint_from_name(name: str) -> tuple[str | None, str | None]:
+    """``(kind_hint, variant_hint)`` a drafter's file or repo name suggests.
+
+    A hint only: the real kind comes from the GGUF header, which Inspect reads
+    for the one drafter the operator picks. ``speculator``/``draft`` alone say
+    nothing about the kind, so they return ``(None, None)``.
+    """
+    lowered = name.lower()
+    if lowered.startswith("mtp-"):
+        return "mtp", "mtp"
+    if "lilicorr" in lowered:
+        return "dflash", "lilicorr"
+    if "dflash2" in lowered:
+        return "dflash", "dflash2"
+    if "dspark" in lowered:
+        return "dflash", "dspark"
+    if "dflash" in lowered:
+        return "dflash", "dflash"
+    if "eagle3" in lowered:
+        return "eagle3", "eagle3"
+    return None, None
+
+
+def _draft_row(
+    rel: str, size_bytes: int, *, repo: str, source: str, fallback_name: str = ""
+) -> dict[str, Any]:
+    """One ``drafts`` row; ``fallback_name`` (a companion's repo name) supplies
+    the hint when the file name carries none."""
+    from pathlib import PurePosixPath
+
+    kind, variant = drafter_hint_from_name(PurePosixPath(rel).name)
+    if kind is None and fallback_name:
+        kind, variant = drafter_hint_from_name(fallback_name)
+    return {
+        "id": rel,
+        "repo": repo,
+        "kind_hint": kind,
+        "variant_hint": variant,
+        "size_bytes": size_bytes,
+        "size": _format_size(size_bytes),
+        "source": source,
+    }
+
+
+def _sort_drafts(rows: list[dict[str, Any]]) -> None:
+    """Best variant first, larger file (higher precision) first within one."""
+    rows.sort(
+        key=lambda d: (
+            _DRAFTER_VARIANT_RANK.get(d["variant_hint"], len(_DRAFTER_VARIANT_RANK)),
+            -d["size_bytes"],
+            d["id"],
+        )
+    )
 
 
 def group_quant_variants(
     files: list[tuple[str, int]],
+    repo: str = "",
 ) -> dict[str, list[dict[str, Any]]]:
     """Group a repo's files into pullable quants, projectors and drafters.
 
@@ -294,8 +368,9 @@ def group_quant_variants(
     Projectors (any file with ``mmproj`` in its name, ``.gguf`` or a bare
     ``.mmproj``) are returned separately: they pair with a quant, they are
     never one. Speculative draft models (:data:`_DRAFTER_RE`) are listed
-    under ``drafts`` for the same reason. Returns ``{"variants", "mmproj",
-    "drafts"}``, each sorted smallest first.
+    under ``drafts`` for the same reason, with filename hints, best variant
+    first. Returns ``{"variants", "mmproj", "drafts"}``; variants and
+    projectors are sorted smallest first.
     """
     from pathlib import PurePosixPath
 
@@ -322,7 +397,7 @@ def group_quant_variants(
         if not lowered.endswith(_INSPECT_GGUF_SUFFIX):
             continue
         if _DRAFTER_RE.search(PurePosixPath(name).stem):
-            drafts.append({"id": rel, "size_bytes": size_bytes, "size": _format_size(size_bytes)})
+            drafts.append(_draft_row(rel, size_bytes, repo=repo, source="repo"))
             continue
         m = SHARD_RE.match(name)
         if m is not None:
@@ -361,8 +436,8 @@ def group_quant_variants(
             }
         )
     variants.sort(key=lambda v: (v["size_bytes"], v["id"]))
-    for rows in (mmproj, drafts):
-        rows.sort(key=lambda v: (v["size_bytes"], v["id"]))
+    mmproj.sort(key=lambda v: (v["size_bytes"], v["id"]))
+    _sort_drafts(drafts)
     return {"variants": variants, "mmproj": mmproj, "drafts": drafts}
 
 
@@ -398,10 +473,121 @@ async def _read_tree_pages(
     return rows
 
 
+def _tree_files(tree_payload: list[Any]) -> tuple[list[tuple[str, int]], set[str], int]:
+    """``(files, lowercase basenames, total bytes)`` of a tree listing's file rows."""
+    files: list[tuple[str, int]] = []
+    basenames: set[str] = set()
+    total = 0
+    for entry in tree_payload:
+        if not isinstance(entry, dict):
+            continue
+        rel = entry.get("path") or entry.get("rfilename")
+        if not isinstance(rel, str):
+            continue
+        basenames.add(rel.lower().rsplit("/", 1)[-1])
+        # HF's tree API reports the *pointer file* size in ``size`` for
+        # LFS objects; the real bytes live under ``lfs.size``. Prefer
+        # the LFS size when present so the modal shows the real
+        # download size, not the 100-byte pointer.
+        size_raw: Any = None
+        lfs = entry.get("lfs")
+        if isinstance(lfs, dict):
+            size_raw = lfs.get("size")
+        if size_raw is None:
+            size_raw = entry.get("size")
+        try:
+            size_bytes = int(size_raw) if size_raw is not None else 0
+        except (TypeError, ValueError):
+            size_bytes = 0
+        total += size_bytes
+        files.append((rel, size_bytes))
+    return files, basenames, total
+
+
+_COMPANION_SUFFIX = (
+    r"(?:-GGUF)?-(?:LiLiCorr|DFlash2?|DSpark|EAGLE3|eagle3|speculator|draft)(?:-GGUF)?"
+)
+
+
+async def search_companion_repos(repo: str, *, client: httpx.AsyncClient) -> list[str]:
+    """Same-author sibling repos that look like drafters for ``repo`` (ADR-0031 §4).
+
+    One Hub search (``author=<org>&search=<name minus -GGUF>``), filtered to
+    ``<name>[-GGUF]-<LiLiCorr|DFlash[2]|DSpark|EAGLE3|eagle3|speculator|draft>[-GGUF]``
+    case-insensitively. Cross-author drafters are out of scope. Raises on
+    transport or HTTP errors; the caller decides that is soft.
+    """
+    org, _, name = repo.partition("/")
+    base = re.sub(r"-GGUF$", "", name, flags=re.IGNORECASE)
+    if not org or not base:
+        return []
+    pattern = re.compile(rf"^{re.escape(base)}{_COMPANION_SUFFIX}$", re.IGNORECASE)
+    resp = await client.get(_HF_MODELS_URL, params={"author": org, "search": base, "limit": 50})
+    resp.raise_for_status()
+    rows = resp.json()
+    if not isinstance(rows, list):
+        return []
+    found: list[str] = []
+    for row in rows:
+        rid = row.get("id") if isinstance(row, dict) else None
+        if not isinstance(rid, str):
+            continue
+        r_org, _, r_name = rid.partition("/")
+        if r_org.lower() == org.lower() and pattern.match(r_name) and rid not in found:
+            found.append(rid)
+    return found
+
+
+async def _companion_drafts(
+    repo: str, headers: dict[str, str]
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """Drafter rows from ``repo``'s companion repos, and the repos that held any.
+
+    Best-effort: any Hub error or timeout yields ``([], [])`` (debug-logged);
+    one companion whose tree fails is skipped, not fatal.
+    """
+    from hal0.registry.fileset import _next_link
+
+    rows: list[dict[str, Any]] = []
+    listed: list[str] = []
+    try:
+        async with httpx.AsyncClient(
+            timeout=httpx.Timeout(_INSPECT_TIMEOUT_SECONDS),
+            follow_redirects=True,
+            headers=headers,
+        ) as client:
+            companions = await search_companion_repos(repo, client=client)
+            for comp in companions:
+                try:
+                    tree_res = await client.get(f"{_HF_MODELS_URL}/{comp}/tree/main?recursive=true")
+                    if tree_res.status_code >= 400:
+                        continue
+                    payload = await _read_tree_pages(tree_res, headers, _next_link)
+                except (httpx.TimeoutException, httpx.HTTPError, ValueError) as exc:
+                    logger.debug(
+                        "hf_companion_tree_failed", repo=comp, error=exc.__class__.__name__
+                    )
+                    continue
+                files, _, _ = _tree_files(payload)
+                comp_name = comp.partition("/")[2]
+                found = [
+                    _draft_row(rel, size, repo=comp, source="companion", fallback_name=comp_name)
+                    for rel, size in files
+                    if rel.lower().endswith(_INSPECT_GGUF_SUFFIX) and "mmproj" not in rel.lower()
+                ]
+                if found:
+                    rows.extend(found)
+                    listed.append(comp)
+    except (httpx.TimeoutException, httpx.HTTPError, ValueError) as exc:
+        logger.debug("hf_companion_search_failed", repo=repo, error=exc.__class__.__name__)
+        return [], []
+    return rows, listed
+
+
 async def fetch_repo(repo: str) -> dict[str, Any]:
     """Fetch HF model metadata + tree listing for ``repo``.
 
-    Returns ``{"variants", "mmproj", "drafts", "tags", "metadata"}`` — see
+    Returns ``{"variants", "mmproj", "drafts", "companion_repos", "tags", "metadata"}`` — see
     :func:`hal0.api.routes.models.inspect_model` for the full response
     shape this feeds. Raises a typed :class:`hal0.errors.Hal0Error`
     subclass on transport failure or 404 so the route maps it to the
@@ -460,33 +646,13 @@ async def fetch_repo(repo: str) -> dict[str, Any]:
     except ValueError:
         meta_payload = {}
 
-    files: list[tuple[str, int]] = []
-    rel_basenames: set[str] = set()
-    flm_total_bytes = 0
-    for entry in tree_payload:
-        if not isinstance(entry, dict):
-            continue
-        rel = entry.get("path") or entry.get("rfilename")
-        if not isinstance(rel, str):
-            continue
-        rel_basenames.add(rel.lower().rsplit("/", 1)[-1])
-        # HF's tree API reports the *pointer file* size in ``size`` for
-        # LFS objects; the real bytes live under ``lfs.size``. Prefer
-        # the LFS size when present so the modal shows the real
-        # download size, not the 100-byte pointer.
-        size_raw: Any = None
-        lfs = entry.get("lfs")
-        if isinstance(lfs, dict):
-            size_raw = lfs.get("size")
-        if size_raw is None:
-            size_raw = entry.get("size")
-        try:
-            size_bytes = int(size_raw) if size_raw is not None else 0
-        except (TypeError, ValueError):
-            size_bytes = 0
-        flm_total_bytes += size_bytes
-        files.append((rel, size_bytes))
-    grouped = group_quant_variants(files)
+    files, rel_basenames, flm_total_bytes = _tree_files(tree_payload)
+    grouped = group_quant_variants(files, repo)
+    drafts = grouped["drafts"]
+    companion_drafts, companion_repos = await _companion_drafts(repo, headers)
+    if companion_drafts:
+        drafts = [*drafts, *companion_drafts]
+        _sort_drafts(drafts)
     variants = grouped["variants"]
     # FLM/NPU repos carry no GGUF variant but a config.json + tokenizer +
     # ``…nx`` NPU-weight shape. Surface one whole-repo variant flagged
@@ -522,7 +688,8 @@ async def fetch_repo(repo: str) -> dict[str, Any]:
     return {
         "variants": variants,
         "mmproj": grouped["mmproj"],
-        "drafts": grouped["drafts"],
+        "drafts": drafts,
+        "companion_repos": companion_repos,
         "tags": tags,
         "metadata": {
             "license": license_label,

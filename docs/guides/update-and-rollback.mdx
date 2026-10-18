@@ -166,7 +166,7 @@ Settings → Updates page shows next to the channel.
 ## Profile-centric config conversion
 
 Slot files carry placement only; every tune (flags, context window, thinking
-default, vision, MTP) lives on a profile ([ADR-0029](/docs/adr/0029-profile-centric-config)).
+default, vision, speculation) lives on a profile ([ADR-0029](/docs/adr/0029-profile-centric-config)).
 `hal0 update` converts an older install once, automatically, after the
 runner-system conversion; `hal0 serve` also runs it when it starts `hal0-api`,
 before config is validated. The conversion gives every slot the profile that
@@ -387,6 +387,30 @@ hal0 update --rollback
 ```
 
 Updating forward again converts the files again.
+
+### Rolling back past the speculation rename
+
+The release that adds speculative-decoding drafters renames the profile field
+`mtp` to `speculation` (`auto`, `off` or `ngram`). `hal0 update` rewrites
+`profiles.toml` once: `mtp = "off"` becomes `speculation = "off"`, `mtp = "auto"`
+is dropped (auto is the default), and a `--spec-type` found in a profile's
+`flags` is removed (an `ngram-*` value becomes `speculation = "ngram"`). Before
+it writes, it copies the file beside itself as `profiles.toml.bak-<UTC
+stamp>`, in the same directory as `profiles.toml`.
+
+An older release does not know `speculation`, so it quarantines every profile
+that carries the field (a slot that names one fails with `profiles.invalid`). Before `hal0 update --rollback`
+to such a release, put the backup back:
+
+```sh
+sudo systemctl stop hal0-api
+sudo cp /etc/hal0/profiles.toml.bak-<UTC stamp> /etc/hal0/profiles.toml
+hal0 update --rollback
+```
+
+Profiles you created or edited after the update are lost with the copy. After
+the update, the API and CLI refuse `mtp` on a profile (`422
+profiles.field_renamed`, `hal0 profile ... --mtp` exits 2); there is no alias.
 
 ## Repin the OpenWebUI companion container
 

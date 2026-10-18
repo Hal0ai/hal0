@@ -51,7 +51,8 @@ import { ConversionBlockedChip } from './conversion-blocked-chip.jsx'
 import { slotModelRow } from './slots/slot-shared.js'
 import { useCardReorder } from './slots/card-order.js'
 import { RichSelect } from './rich-select.jsx'
-import { FitChip, ModalityTag } from './fit-chip.jsx'
+import { FitChip, ModalityTag, SlotSpecBolt } from './fit-chip.jsx'
+import { draftTagValue } from './spec-state.js'
 import { feasibilityHint } from './feasibility-copy'
 // devKind — one shared, meta-aware helper (src/lib/deviceMeta.ts); replaces
 // the copy this file used to carry (and the verbatim clones in slot-list.jsx
@@ -328,7 +329,7 @@ function DevCell({ s, onProfile, profiles, backends, onPickProfile }) {
 // Both are reachable from any component, so Apply performs the write here, one
 // gesture, no half-applied state. The preview announces the consequences that
 // can reach a card pick — the runtime, a lane move, the typed tune fields
-// (context / thinking / vision / mtp) and how many flags differ — and never
+// (context / thinking / vision / speculation) and how many flags differ — and never
 // blocks (§4 warn-never-block).
 //
 // `pending` is `{ s, profile }` or null; null renders nothing.
@@ -612,7 +613,7 @@ function modelPickerOptions({ s, opts, cur, has, allSlots, verdictFor }) {
       row: (
         <span style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
           {name}
-          <ModalityTag tag={modTag} />
+          <ModalityTag tag={modTag} draft={draftTagValue(m)} />
         </span>
       ),
       // closed trigger: everything inline on one line
@@ -620,7 +621,9 @@ function modelPickerOptions({ s, opts, cur, has, allSlots, verdictFor }) {
         <span style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
           {name}
           {quant && <span className="chip amber">{quant}</span>}
-          <ModalityTag tag={modTag} />
+          {/* the current model's state bolt replaces the static drafter bolt */}
+          <ModalityTag tag={modTag} draft={m.id === cur ? null : draftTagValue(m)} />
+          {m.id === cur && <SlotSpecBolt spec={s.metrics?.spec} model={m} />}
           {fit}
         </span>
       ),

@@ -8,7 +8,7 @@
       "description": "Long-context chat · tuned for 128K ctx",
       "runtime_family": "llama-server",
       "runner": null,
-      "checksum": "sha256:0e9ac389e9bc238971e5a479b72b1f577b69e2257811ad06d706e1b1068f3985",
+      "checksum": "sha256:f3149e0100c69e729587e5c1f5799500c8d10a439af1e6559e53cc13ccb12e2a",
       "file": "chat-long-context.hal0profile.json",
       "min_hal0_version": "1.5.0"
     },
@@ -18,7 +18,7 @@
       "description": "Generic dense workload · tuned for 128K ctx",
       "runtime_family": "llama-server",
       "runner": null,
-      "checksum": "sha256:11944623612f84aaa4f2a4d13f6425f385df1bf5818160a53f78d8ddd2ac8916",
+      "checksum": "sha256:7151d0c5c4fb3a927ac267ab225a25bf481f2b73517b9a8deb26d46adee9091a",
       "file": "dense.hal0profile.json",
       "min_hal0_version": "1.5.0"
     },
@@ -28,7 +28,7 @@
       "description": "Generic MoE workload · tuned for 32K ctx",
       "runtime_family": "llama-server",
       "runner": null,
-      "checksum": "sha256:7ac4f0f09c20e7f5febd4210732d3f67fc3ef2f81e3993611d9a5ac48863663c",
+      "checksum": "sha256:93c3d70c98b480b7c6bcbbd76211a0519a428ef6f67adafeadfbff6db84134dd",
       "file": "moe.hal0profile.json",
       "min_hal0_version": "1.5.0"
     },
@@ -38,7 +38,7 @@
       "description": "Reasoning-ON workload (qwen3-deepseek, ace-saber thinking) · 32K ctx",
       "runtime_family": "llama-server",
       "runner": null,
-      "checksum": "sha256:c6268cee22b1e0470e64378874ebbf719201fb393c869e1ab5d5184f06735585",
+      "checksum": "sha256:c3bc105dbf9af3a46f018915d1b5a0d14d7027c5c14012e2dbc51fcbb6028d98",
       "file": "thinking.hal0profile.json",
       "min_hal0_version": "1.5.0"
     }

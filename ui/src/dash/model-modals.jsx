@@ -15,7 +15,10 @@
 // live on only as cosmetic fixtures (host RAM, /var disk hint).
 
 import { copyTextToClipboard } from "@/lib/clipboard";
-import { useModels, useModelInspect, useModelDelete, usePullJob, useScanPreview, useAddModelFromPath, fmtBytes, fmtSpeed, fmtEta, pullFileLabel } from '@/api/hooks/useModels'
+import { useModels, useModelInspect, useInspectDraft, useModelDelete, usePullJob, useScanPreview, useAddModelFromPath, fmtBytes, fmtSpeed, fmtEta, pullFileLabel } from '@/api/hooks/useModels'
+import { isDrafterRow, drafterNote } from '@/dash/scan-rows.js'
+import { useSystemInfo } from '@/api/hooks/useRuntimes'
+import { draftKey, mergeDrafts, draftSourceLine, draftVerdict, draftKindNeeded, missingRunnerNote } from '@/dash/draft-pick.js'
 import { useSlots } from '@/api/hooks/useSlots'
 import { useSettings } from '@/api/hooks/useSettings'
 import { useChatTemplates } from '@/api/hooks/useChatTemplates'
@@ -38,8 +41,15 @@ function AddByHfModal({ open, onClose, initialRepo = "" }) {
   // Optional chat-template pin, applied at pull time (WS-6). "auto" = use the
   // GGUF-embedded template — the common case, so it's the default.
   const [chatTemplate, setChatTemplate] = useStateMM("auto");
+  // Speculative-decoding drafter (ADR-0031 §5): the chosen candidate's key
+  // ("<repo>::<file>", "" = None) and an optional pasted drafter repo.
+  const [draftSel, setDraftSel] = useStateMM("");
+  const [draftRepo, setDraftRepo] = useStateMM("");
 
   const inspect = useModelInspect();
+  const draftLookup = useModelInspect();
+  const draftCheck = useInspectDraft();
+  const sysInfo = useSystemInfo();
   const pullJob = usePullJob();
   // Chat-template catalogue — gated on `open` like the Recipe editor so the
   // request only fires while the modal is visible.
@@ -52,6 +62,10 @@ function AddByHfModal({ open, onClose, initialRepo = "" }) {
       setName("");
       setMmproj("");
       setChatTemplate("auto");
+      setDraftSel("");
+      setDraftRepo("");
+      draftLookup.reset();
+      draftCheck.reset();
       inspect.reset();
       pullJob.reset();
     }
@@ -66,15 +80,49 @@ function AddByHfModal({ open, onClose, initialRepo = "" }) {
     () => (inspect.data?.mmproj ?? []).map(v => v.id),
     [inspect.data],
   );
-  const drafts = inspect.data?.drafts ?? [];
+  const drafts = useMemoMM(
+    () => mergeDrafts(draftLookup.data?.drafts, inspect.data?.drafts),
+    [inspect.data, draftLookup.data],
+  );
+  const selDraft = drafts.find(d => draftKey(d) === draftSel);
 
   // mmproj-first pairing (#2193): when the repo ships projector files, offer
   // them immediately and pre-select the first — vision is derived from this
   // choice, not hand-ticked. One projector per repo is the overwhelming case.
   useEffectMM(() => {
-    if (inspect.isSuccess) setMmproj(mmprojChoices[0] || "");
+    if (inspect.isSuccess) {
+      setMmproj(mmprojChoices[0] || "");
+      // The best candidate is pre-selected; "None" stays one click away.
+      setDraftSel(draftKey((inspect.data?.drafts ?? [])[0]));
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [inspect.isSuccess]);
+
+  // The fit verdict is read from the two GGUF headers, so it is re-asked whenever
+  // the target quant or the drafter changes.
+  useEffectMM(() => {
+    if (variant && selDraft) {
+      draftCheck.mutate({
+        hf_repo: inspect.data?.repo ?? repo,
+        hf_filename: variant,
+        draft_repo: selDraft.repo,
+        draft_filename: selDraft.id,
+      });
+    } else {
+      draftCheck.reset();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [variant, draftSel, !!selDraft]);
+
+  const onFindDrafters = async () => {
+    if (!draftRepo) return;
+    try {
+      const result = await draftLookup.mutateAsync({ hf_repo: draftRepo });
+      if (result?.drafts?.length) setDraftSel(draftKey(result.drafts[0]));
+    } catch (e) {
+      // draftLookup.isError renders the message in the row.
+    }
+  };
 
   const onInspect = async () => {
     if (!repo) return;
@@ -97,8 +145,14 @@ function AddByHfModal({ open, onClose, initialRepo = "" }) {
   const inspected = inspect.isSuccess && !!inspect.data;
   const sel = variants.find(v => v.id === variant);
   const selMmproj = (inspect.data?.mmproj ?? []).find(v => v.id === mmproj);
-  const totalBytes = (sel?.size_bytes || 0) + (selMmproj?.size_bytes || 0);
-  const canPull = inspected && sel && sel.complete !== false && name && !pullJob.inFlight;
+  const totalBytes = (sel?.size_bytes || 0) + (selMmproj?.size_bytes || 0) + (selDraft?.size_bytes || 0);
+  // A chosen drafter gates Pull on its fit check: pending, refused and
+  // unreadable all hold it until the drafter is set to None.
+  const draftBlocks = !!selDraft && (!draftCheck.isSuccess || draftCheck.data?.fit?.ok === false);
+  const draftNote = selDraft && draftCheck.isSuccess
+    ? missingRunnerNote(sysInfo.data?.backends, draftKindNeeded(draftCheck.data))
+    : "";
+  const canPull = inspected && sel && sel.complete !== false && name && !pullJob.inFlight && !draftBlocks;
 
   const onPull = async () => {
     if (!canPull) return;
@@ -116,6 +170,8 @@ function AddByHfModal({ open, onClose, initialRepo = "" }) {
         hf_repo: inspect.data?.repo ?? repo,
         hf_filename: variant,
         mmproj_filename: mmproj || undefined,
+        draft_filename: selDraft ? selDraft.id : undefined,
+        draft_repo: selDraft ? selDraft.repo : undefined,
         labels: labelList,
         chat_template: chatTemplate && chatTemplate !== "auto" ? chatTemplate : undefined,
       });
@@ -213,11 +269,6 @@ function AddByHfModal({ open, onClose, initialRepo = "" }) {
                   </div>
                 );
               })}
-              {drafts.length > 0 && (
-                <div className="mono" style={{fontSize: 11.5, color: "var(--fg-4)"}}>
-                  Also in this repo: {drafts.map(d => d.id).join(", ")} — speculative-decoding draft model, not pulled with the quant.
-                </div>
-              )}
             </div>
           </div>
 
@@ -255,6 +306,68 @@ function AddByHfModal({ open, onClose, initialRepo = "" }) {
 
           <div className="form-row">
             <div className="form-lbl">
+              <span>Drafter</span>
+              <span className="sub" data-testid="hf-add-draft-source">
+                {draftSourceLine(selDraft || drafts[0], inspect.data?.repo ?? repo)} · speculative decoding, pulled alongside the model
+              </span>
+            </div>
+            <div className="form-ctl" style={{display: "flex", flexDirection: "column", gap: 6}}>
+              {drafts.length > 0 && (
+                <select
+                  className="input mono"
+                  data-testid="hf-add-draft-select"
+                  value={draftSel}
+                  onChange={e => setDraftSel(e.target.value)}
+                >
+                  <option value="">None</option>
+                  {drafts.map(d => (
+                    <option key={draftKey(d)} value={draftKey(d)}>
+                      {d.id}{d.variant_hint ? ` · ${d.variant_hint}` : ""} · {d.size}
+                    </option>
+                  ))}
+                </select>
+              )}
+              {selDraft && variant && (
+                <div
+                  className="mono"
+                  data-testid="hf-add-draft-fit"
+                  style={{fontSize: 11.5, color: draftCheck.isError || draftCheck.data?.fit?.ok === false ? "var(--err)" : "var(--fg-4)"}}
+                >
+                  {draftCheck.isPending ? "checking fit…"
+                    : draftCheck.isError ? (draftCheck.error?.message || "drafter header unreadable")
+                    : draftVerdict(draftCheck.data)}
+                </div>
+              )}
+              {draftNote && (
+                <div className="mono" data-testid="hf-add-draft-note" style={{fontSize: 11.5, color: "var(--warn)"}}>
+                  {draftNote}
+                </div>
+              )}
+              <div style={{display: "flex", gap: 8}}>
+                <input
+                  className="input mono"
+                  data-testid="hf-add-draft-repo"
+                  value={draftRepo}
+                  onChange={e => { setDraftRepo(e.target.value); draftLookup.reset(); }}
+                  onKeyDown={e => { if (e.key === "Enter") onFindDrafters(); }}
+                  placeholder="drafter repo (org/repo)"
+                  style={{flex: 1}}
+                />
+                <button className="btn ghost sm" disabled={!draftRepo || draftLookup.isPending} onClick={onFindDrafters}>
+                  {draftLookup.isPending ? "Looking…" : "Find drafters"}
+                </button>
+              </div>
+              {draftLookup.isError && (
+                <div className="err">Drafter repo lookup failed: {draftLookup.error?.message || "unreachable"}</div>
+              )}
+              {draftLookup.isSuccess && (draftLookup.data?.drafts ?? []).length === 0 && (
+                <div className="mono" style={{fontSize: 11.5, color: "var(--fg-4)"}}>No drafter files found in {draftLookup.data?.repo || draftRepo}.</div>
+              )}
+            </div>
+          </div>
+
+          <div className="form-row">
+            <div className="form-lbl">
               <span>chat template</span>
               <span className="sub">auto = use template embedded in the GGUF · applied on pull</span>
             </div>
@@ -283,6 +396,7 @@ function AddByHfModal({ open, onClose, initialRepo = "" }) {
             {(sel?.files || []).map(f => (
               <div key={f}>file · <span style={{color: "var(--fg)"}}>{f}</span></div>
             ))}
+            {selDraft && <div>drafter · <span style={{color: "var(--fg)"}}>{selDraft.id}</span></div>}
             {mmproj && <div>mmproj · <span style={{color: "var(--fg)"}}>{mmproj}</span></div>}
             <div>size · <span style={{color: "var(--fg)"}}>{sel ? fmtBytes(totalBytes) : "—"}</span></div>
             {pullJob.inFlight && (
@@ -733,7 +847,7 @@ function ScanDirectoryModal({ open, onClose }) {
   };
 
   const togglePickAll = () => {
-    const allPickable = rows.filter(r => !knownPaths.has(r.resolved_path) && !knownPaths.has(r.path));
+    const allPickable = rows.filter(r => !isDrafterRow(r) && !knownPaths.has(r.resolved_path) && !knownPaths.has(r.path));
     if (picked.size === allPickable.length) {
       setPicked(new Set());
     } else {
@@ -853,7 +967,7 @@ function ScanDirectoryModal({ open, onClose }) {
                 onChange={togglePickAll}
                 checked={
                   rows.length > 0 &&
-                  picked.size === rows.filter(r => !knownPaths.has(r.resolved_path) && !knownPaths.has(r.path)).length
+                  picked.size === rows.filter(r => !isDrafterRow(r) && !knownPaths.has(r.resolved_path) && !knownPaths.has(r.path)).length
                 }
               />
             </span>
@@ -864,7 +978,8 @@ function ScanDirectoryModal({ open, onClose }) {
           </div>
           <div style={{maxHeight: 320, overflow: "auto"}}>
             {rows.map(r => {
-              const registered = knownPaths.has(r.resolved_path) || knownPaths.has(r.path);
+              const drafter = isDrafterRow(r);
+              const registered = !drafter && (knownPaths.has(r.resolved_path) || knownPaths.has(r.path));
               return (
                 <div
                   key={r.path}
@@ -883,21 +998,25 @@ function ScanDirectoryModal({ open, onClose }) {
                   <span>
                     <input
                       type="checkbox"
-                      disabled={registered}
-                      checked={picked.has(r.path)}
+                      disabled={registered || drafter}
+                      checked={!drafter && picked.has(r.path)}
                       onChange={() => togglePick(r.path)}
                     />
                   </span>
                   <span style={{wordBreak: "break-all", paddingRight: 8}}>
                     {r.path}
                     <div style={{fontSize: 10, color: "var(--fg-5)", marginTop: 2}}>
-                      {r.suggested_name || ""} · {(r.suggested_capabilities || []).join(", ") || "—"}
+                      {drafter
+                        ? drafterNote(r)
+                        : `${r.suggested_name || ""} · ${(r.suggested_capabilities || []).join(", ") || "—"}`}
                     </div>
                   </span>
                   <span style={{textAlign: "right", color: "var(--fg-3)"}}>{fmtBytes(r.size_bytes)}</span>
                   <span style={{color: "var(--fg-3)"}}>{r.kind}</span>
                   <span>
-                    {registered
+                    {drafter
+                      ? <span className="chip">{r.pairs_with ? "drafter" : "not paired"}</span>
+                      : registered
                       ? <span className="chip ok">registered</span>
                       : <span className="chip" style={{color: "var(--accent)", borderColor: "var(--accent-line)", background: "var(--accent-soft)"}}>new</span>}
                   </span>

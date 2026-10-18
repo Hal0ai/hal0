@@ -10,6 +10,7 @@ model resolution (unlike stacks).
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 from pathlib import Path
@@ -76,6 +77,21 @@ class ProfileEnvelope(BaseModel):
 ENVELOPE_SCHEMA_MIN = 2
 
 
+def _convert_body(data: dict[str, Any]) -> dict[str, Any]:
+    """A copy of ``data`` whose profile body has had the ADR-0031 §7 rename
+    applied: a hal0 1.4.0 export carries ``mtp`` (and maybe ``--spec-type`` in
+    ``flags``), which ``ProfileConfig`` refuses. A conversion at import, not an
+    alias; the checksum is still verified against the body as exported."""
+    from hal0.config.migrations.speculation_rename import convert_profile_body
+
+    body = data.get("profile")
+    if not isinstance(body, dict):
+        return data
+    body = copy.deepcopy(body)
+    convert_profile_body(str(data.get("name") or ""), body)
+    return {**data, "profile": body}
+
+
 def parse_envelope(data: Any) -> ProfileEnvelope:
     """Validate the wire shape. Raises BadRequest on a non-envelope/invalid input."""
     if not isinstance(data, dict) or data.get("kind") != ENVELOPE_KIND:
@@ -97,7 +113,7 @@ def parse_envelope(data: Any) -> ProfileEnvelope:
             details={"got": declared, "supported_min": ENVELOPE_SCHEMA_MIN},
         )
     try:
-        return ProfileEnvelope.model_validate(data)
+        return ProfileEnvelope.model_validate(_convert_body(data))
     except Exception as exc:
         raise BadRequest(
             f"invalid profile envelope: {exc}",

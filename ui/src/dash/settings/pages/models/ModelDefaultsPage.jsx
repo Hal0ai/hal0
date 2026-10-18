@@ -1,6 +1,6 @@
 // MODELS ▸ Model Defaults — per-model FILE FACTS (chat template) plus the
 // arch/runner resolution reference. ADR-0029: a model carries facts about its
-// file only. Every tune — context window, flags, thinking, vision, MTP on/off,
+// file only. Every tune — context window, flags, thinking, vision, speculation,
 // GPU layers — lives on a profile (Profiles page) and is picked by the slot,
 // so this page no longer edits a context size or GPU layers.
 //

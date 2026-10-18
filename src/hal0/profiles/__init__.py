@@ -1,7 +1,7 @@
 """ProfileCatalog — deep module for runtime profile lookup and mutation.
 
 ADR-0029: a profile is the whole tune a slot launches with — free flags, the
-context window, the reasoning default, vision, MTP and an optional runner.
+context window, the reasoning default, vision, speculation and an optional runner.
 This module concentrates the profile interface:
 
 * seed/custom catalog reads and full-catalog atomic writes;
@@ -63,7 +63,7 @@ class ResolvedProfile:
     ctx_size: int | None = None
     enable_thinking: bool | None = None
     vision: str = "auto"
-    mtp: str = "auto"
+    speculation: str = "auto"
     runner: str | None = None
     cloned_from: str | None = None
     #: Card display facts. The bench metrics are static for seeds and ``None``
@@ -86,7 +86,7 @@ class ResolvedProfile:
             "ctx_size": self.ctx_size,
             "enable_thinking": self.enable_thinking,
             "vision": self.vision,
-            "mtp": self.mtp,
+            "speculation": self.speculation,
             "runner": self.runner,
             "seed": self.seed,
             "runtime_family": self.runtime_family,
@@ -144,7 +144,7 @@ class ProfilePatch:
     ctx_size: Any = field(default=UNSET)
     enable_thinking: Any = field(default=UNSET)
     vision: Literal["auto", "off"] | None = None
-    mtp: Literal["auto", "off"] | None = None
+    speculation: Literal["auto", "off", "ngram"] | None = None
     runner: str | None = None
     intent: str | None = None
 
@@ -285,7 +285,9 @@ class ProfileCatalog:
                     else patch.enable_thinking
                 ),
                 vision=patch.vision if patch.vision is not None else existing.vision,
-                mtp=patch.mtp if patch.mtp is not None else existing.mtp,
+                speculation=(
+                    patch.speculation if patch.speculation is not None else existing.speculation
+                ),
                 runner=_merge_runner(patch.runner, existing.runner),
                 cloned_from=existing.cloned_from,
                 intent=patch.intent if patch.intent is not None else existing.intent,
@@ -436,7 +438,7 @@ def resolve_loaded_profile(
         ctx_size=profile.ctx_size,
         enable_thinking=profile.enable_thinking,
         vision=profile.vision,
-        mtp=profile.mtp,
+        speculation=profile.speculation,
         runner=profile.runner,
         seed=name in SEED_PROFILES,
         runtime_family=runtime,

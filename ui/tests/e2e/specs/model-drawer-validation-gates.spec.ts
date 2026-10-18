@@ -83,7 +83,11 @@ async function openSource(page: import('@playwright/test').Page) {
 }
 
 /** Stub the repo listing behind the mmproj picker (default: no projectors). */
-async function mockInspect(page: import('@playwright/test').Page, mmproj: any[] = []) {
+async function mockInspect(
+  page: import('@playwright/test').Page,
+  mmproj: any[] = [],
+  drafts: any[] = [],
+) {
   await page.route('**/api/models/inspect', (route) =>
     route.fulfill({
       status: 200,
@@ -93,7 +97,7 @@ async function mockInspect(page: import('@playwright/test').Page, mmproj: any[] 
         cached: true,
         variants: [{ id: 'model-q8.gguf', size_bytes: 9771050700, size: '9.1 GB', info: 'weights' }],
         mmproj,
-        drafts: [],
+        drafts,
         tags: [],
       }),
     }),
@@ -226,5 +230,36 @@ test.describe('Model drawer — inline errors gate the save (#1380, #1381)', () 
     // opening it shows the stored empty string, not a fabricated value.
     await page.getByTestId('model-title-edit').click()
     await expect(page.getByTestId('model-title-input')).toHaveValue('')
+  })
+})
+
+test.describe('Model drawer — drafter field (ADR-0031 §5)', () => {
+  test('a mismatched drafter path blocks Save with the server\'s reasons', async ({ page }) => {
+    await seedModel(page)
+    await mockInspect(page)
+    await page.route(`**/api/models/${MODEL_ID}`, async (route) => {
+      if (route.request().method() !== 'PUT') return route.fallback()
+      return route.fulfill({
+        status: 422,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          error: {
+            code: 'model.draft_mismatch',
+            message: 'drafter does not fit',
+            details: { reasons: ['hidden size 2048 != target 5120'] },
+          },
+        }),
+      })
+    })
+    await openDrawer(page)
+    await openSource(page)
+
+    await expect(page.getByTestId('model-draft-fit')).toHaveCount(0)
+    await page.getByTestId('model-draft-input').fill('/models/wrong-drafter.gguf')
+    await page.getByTestId('model-save').click()
+
+    await expect(page.getByTestId('model-draft-fit')).toContainText('hidden size 2048 != target 5120')
+    // The drawer stays open: the refusal did not save anything.
+    await expect(page.locator('.drawer.open')).toHaveCount(1)
   })
 })

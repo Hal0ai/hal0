@@ -246,7 +246,7 @@ def attach_slot_profiles(
                             "ctx_source": ctx_source,
                             "enable_thinking": getattr(profile, "enable_thinking", None),
                             "vision": getattr(profile, "vision", "auto"),
-                            "mtp": getattr(profile, "mtp", "auto"),
+                            "speculation": getattr(profile, "speculation", "auto"),
                             "runner": getattr(profile, "runner", None),
                         },
                     }
@@ -550,7 +550,11 @@ def _resolve_profile(model: dict[str, Any], depth: int) -> Config:
         # plain profile hashes the same as one that never named them).
         tunes = {
             key: profile[key]
-            for key, default in (("mtp", "auto"), ("vision", "auto"), ("enable_thinking", None))
+            for key, default in (
+                ("speculation", "auto"),
+                ("vision", "auto"),
+                ("enable_thinking", None),
+            )
             if key in profile and profile[key] != default
         }
         spec = {"profile": tunes} if tunes else None

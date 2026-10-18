@@ -79,6 +79,7 @@ function thinkingText(p) {
 	return p?.enable_thinking === true ? "on" : p?.enable_thinking === false ? "off" : "auto";
 }
 const offAuto = (v) => (v === "off" ? "off" : "auto");
+const specText = (p) => (p?.speculation === "off" || p?.speculation === "ngram" ? p.speculation : "auto");
 
 // The typed tune fields that differ between the outgoing and incoming profile,
 // as [{ label, from, to }] — only the ones that actually change.
@@ -87,7 +88,7 @@ function tuneChanges(next, prev) {
 		["context", ctxText(prev), ctxText(next)],
 		["thinking", thinkingText(prev), thinkingText(next)],
 		["vision", offAuto(prev?.vision), offAuto(next?.vision)],
-		["mtp", offAuto(prev?.mtp), offAuto(next?.mtp)],
+		["speculation", specText(prev), specText(next)],
 	];
 	return rows
 		.filter(([, from, to]) => from !== to)
@@ -99,7 +100,7 @@ function tuneChanges(next, prev) {
  * another profile, in one structure, computed BEFORE anything is written
  * (mockup panel 12 for the drawer's Save; panel 02 for the slot card's apply
  * confirm). ADR-0029: the profile IS the tune, so a swap replaces the whole
- * tune — flags, context, thinking, vision, MTP and runtime — and nothing from
+ * tune — flags, context, thinking, vision, speculation and runtime — and nothing from
  * the model is layered underneath.
  *
  * The lines are DERIVED, never re-guessed: the runtime and lane come out of
@@ -122,7 +123,7 @@ function tuneChanges(next, prev) {
  *
  * Returns `{ runtime: { unchanged, title, lanes }, lane, flags, tune,
  * restart }` or null. `flags` counts the flag pairs the swap adds, changes or
- * drops; `tune` lists the typed fields (context / thinking / vision / mtp)
+ * drops; `tune` lists the typed fields (context / thinking / vision / speculation)
  * that differ.
  */
 export function profileApplyPreview({

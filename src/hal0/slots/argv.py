@@ -446,9 +446,12 @@ PROFILE_SEGMENT_LABELS: frozenset[str] = frozenset({"profile"})
 
 #: Flags that are facts about the model file (ADR-0029): hal0 adds ``--jinja``
 #: and ``--chat-template-file`` from the model, the projector follows the
-#: model's mmproj and the profile's ``vision``.
+#: model's mmproj and the profile's ``vision``, and ``--spec-type`` follows the
+#: model's drafter or MTP heads and the profile's ``speculation`` (ADR-0031 §3;
+#: llama.cpp appends ``--spec-type`` values, so it has exactly one owner).
 MODEL_FACT_FLAGS: frozenset[str] = frozenset(
     {
+        "--spec-type",
         "--jinja",
         "--no-jinja",
         "--chat-template",
@@ -763,9 +766,15 @@ def _deny_profile_owned_elsewhere(tokens: list[str], *, segment: str) -> None:
         if p.canon is not None and p.canon in (MODEL_FACT_FLAGS | DERIVED_PLACEMENT_FLAGS)
     ]
     if offenders:
+        hint = (
+            "; for speculative decoding set the profile's speculation field "
+            "(auto, off or ngram) instead of --spec-type"
+            if any(_canon(f) == "--spec-type" for f in offenders)
+            else ""
+        )
         raise BadRequest(
             f"{segment} may not set {', '.join(map(repr, offenders))}: hal0 derives "
-            "these from the model file and the slot's device (ADR-0029)",
+            f"these from the model file and the slot's device (ADR-0029){hint}",
             code="profiles.model_fact_flag_denied",
             details={"segment": segment, "flags": offenders},
         )

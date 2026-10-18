@@ -88,7 +88,7 @@ copy — they can't be edited or deleted, only cloned.
 | `ctx_size` | int \| null | `null` | `128`–`16777216`. `null` = the model's native window, dense-capped at 32768, else 8192. |
 | `enable_thinking` | bool \| null | `null` | request-time reasoning default for slots running this profile |
 | `vision` | `"auto"\|"off"` | `"auto"` | `auto` loads the model's mmproj when it has one |
-| `mtp` | `"auto"\|"off"` | `"auto"` | `auto` drafts when the model has MTP heads and the runner supports it |
+| `speculation` | `"auto"\|"off"\|"ngram"` | `"auto"` | `auto` drafts with the model's paired drafter when the runner can run it, else with its MTP heads when it has them and the runner supports it; `ngram` uses n-gram lookup and needs no file; `off` never speculates. Replaces `mtp`: a stored or posted `mtp` is refused (`422 profiles.field_renamed` over the API) |
 | `runner` | str \| null | `null` | optional `RUNNER_IMAGES` registry key; applying the profile sets the slot's `binary` to this key and, for a single-backend runner, also derives the slot's `device` (profile wins). Validated on write — an unknown key 422s `profiles.unknown_runner`. `null` = flags-only tune (every seed profile). |
 | `cloned_from` | str \| null | `null` | provenance |
 | `intent` | str | `""` | dashboard card headline |
@@ -99,7 +99,7 @@ copy — they can't be edited or deleted, only cloned.
 |---|---|---|
 | Hardware (the slot owns it) | `-ngl`, `-dev`, `-t` | `slot.hardware_flag_denied` |
 | Managed by hal0 | `--model`, `--host`, `--port`, `--alias`, `--ctx-size` | `slot.managed_arg_denied` |
-| Model facts, derived placement | `--jinja`, `--chat-template*`, `--mmproj`, `--no-mmproj`, `--mmproj-auto`, `--spec-draft-device`, `--mmproj-device` | `profiles.model_fact_flag_denied` |
+| Model facts, derived placement | `--jinja`, `--chat-template*`, `--mmproj`, `--no-mmproj`, `--mmproj-auto`, `--spec-type` (set `speculation` instead), `--spec-draft-device`, `--mmproj-device` | `profiles.model_fact_flag_denied` |
 | Host-owned | remote model fetches (`-hf`, `--model-url`), host file reads and writes (`--api-key-file`, `--log-file`, `--lora`), listener and auth/TLS settings (`--rpc`, `--api-key`), llama.cpp's built-in preset switches (`--gpt-oss-20b-default`, `--spec-default`) | `slot.host_owned_flag_denied` |
 | Bare positional arguments | a value with no flag in front of it | `slot.positional_arg_denied` |
 | `--reasoning-format none` | — | `slot.reasoning_format_none_denied` on save; stripped, not refused, at launch |
@@ -110,7 +110,10 @@ fact — except that a `runner`-carrying profile CAN flip a GPU slot's `device` 
 time (the profile wins within a device class): see
 [Providers, profiles & devices](/docs/reference/providers-profiles-devices/).
 The `.hal0profile.json` export envelope is schema 2; a schema-1 envelope is refused
-(`profiles.envelope_schema_unsupported`) — re-export it.
+(`profiles.envelope_schema_unsupported`) — re-export it. A schema-2 envelope
+exported by hal0 1.4.0 still carries `mtp`; import converts it the way the
+upgrade converts `profiles.toml` (`mtp = "off"` becomes `speculation = "off"`,
+`--spec-type` leaves `flags`), and so does a stack import's embedded profiles.
 </Aside>
 
 Profiles no longer carry an `image` field — image resolution is slot-owned
@@ -151,7 +154,7 @@ slug. `STACK_SCHEMA_VERSION_CURRENT = 3`.
 | `provider` | str \| null | `null` | — | — |
 | `capabilities` | list[table] | `[]` | — | see `StackCapabilityRow` below |
 
-A slot entry names a model, a profile and placement. It carries no tuning: the profile owns `vision`, `mtp`, `enable_thinking` and the flags.
+A slot entry names a model, a profile and placement. It carries no tuning: the profile owns `vision`, `speculation`, `enable_thinking` and the flags.
 
 ### `StackCapabilityRow`
 

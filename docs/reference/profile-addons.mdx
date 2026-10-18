@@ -21,7 +21,7 @@ An addon is **a portable profile envelope and nothing else**:
 - **A profile, not an image.** Profiles carry no image reference at all —
   hardware and image are [slot-owned](/docs/concepts/slots), not profile-owned.
   `ProfileConfig` is a complete tune — `flags`, `ctx_size`, `enable_thinking`,
-  `vision`, `mtp`, `runner`, `intent`, `cloned_from` (`src/hal0/config/schema.py`,
+  `vision`, `speculation`, `runner`, `intent`, `cloned_from` (`src/hal0/config/schema.py`,
   `ProfileConfig`).
 - **No secrets, no host paths.** `export_envelope` serializes the profile
   template only (`src/hal0/profiles/portable.py`).
@@ -72,7 +72,7 @@ A real published addon, `community/addons/dense.hal0profile.json`, verbatim:
     "ctx_size": 131072,
     "flags": "-fa auto -b 2048 -ub 512 --reasoning off --reasoning-budget -1 --no-context-shift --temp 0 --top-p 0.95 --top-k 20 --seed 123",
     "intent": "Generic dense workload · tuned for 128K ctx",
-    "mtp": "auto",
+    "speculation": "auto",
     "vision": "off"
   },
   "schema_version": 2

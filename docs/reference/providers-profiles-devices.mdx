@@ -87,7 +87,7 @@ Verify which one a given feature actually reads before documenting behavior.
 
 `hal0.profiles` + `ProfileConfig` — a profile is a reusable, device-agnostic backend
 tune: the free llama-server flags, the context window, the reasoning default, whether
-the model's mmproj loads and whether MTP drafts — **not** a runtime image reference. The
+the model's mmproj loads and how it speculates — **not** a runtime image reference. The
 model row holds only file facts (ADR-0029); a model runs differently by running under a
 different profile.
 
@@ -97,7 +97,7 @@ different profile.
 | `ctx_size` | Context window (128–16777216), or unset: the model's native window dense-capped at 32768, else 8192. |
 | `enable_thinking` | Request-time reasoning default for slots running this profile (`true`/`false`/unset). |
 | `vision` | `auto` (default; loads the model's mmproj when it has one) or `off`. |
-| `mtp` | `auto` (default; drafts when the model has MTP heads and the runner supports it) or `off`. Whether the file *has* heads is a model fact (the model's `mtp` field, else the `mtp` tag). |
+| `speculation` | `auto` (default; drafts with the model's paired drafter when the runner can run it, else with its MTP heads when it has them and the runner supports it), `ngram` (n-gram lookup, no file needed) or `off`. Replaces `mtp`. Whether the file *has* heads is a model fact (the model's `mtp` field, else the `mtp` tag); the paired drafter is the model's `draft` field. |
 | `runner` | Optional `RUNNER_IMAGES` registry key (str \| null, default null). Applying this profile to a slot sets the slot's `binary` to this runner key, and — only for a single-backend runner — derives the slot's `device` too (the profile wins over the slot's prior device within a device class). `null` (the default; every seed profile) means a flags-only tune that never touches the slot's runtime/device. |
 | `cloned_from` | Provenance — set when a profile was cloned from a seed. |
 | `intent` | Dashboard card headline. |
@@ -148,15 +148,15 @@ A llama-server slot's command is built from four layers, lowest precedence first
 | Layer | Contributes |
 |---|---|
 | `base` | `--host`, `--port`, `--model`, `--alias`, `--ctx-size` (from the profile's `ctx_size`) |
-| `model` | family quirks, `--jinja`, `--chat-template-file`, and `--mmproj` when the profile's `vision` is `auto` |
-| `profile` | the MTP draft bundle when MTP is in effect, then the profile's `flags` (its own `--spec-draft-*` values win over the bundle) |
-| `slot` | `-ngl`, `--threads`, `--metrics`, and for MTP `--spec-draft-device` taken from the slot's device |
+| `model` | family quirks, `--jinja`, `--chat-template-file`, `--mmproj` when the profile's `vision` is `auto`, and, when speculation is in effect, `--spec-type` (`draft-<kind>` plus `--spec-draft-model` for a paired drafter, `draft-mtp` for MTP heads) |
+| `profile` | the draft bundle for the kind in effect (the n-gram bundle for `speculation = "ngram"`), then the profile's `flags` (its own `--spec-draft-*` values win over the bundle; `--spec-type` is refused in `flags`) |
+| `slot` | `-ngl`, `--threads`, `--metrics`, and, whenever a draft type is in effect, `--spec-draft-device` taken from the slot's device (none on a `cpu` slot, whose drafter runs on the host CPU) |
 
 `GET /api/slots/{name}/resolved` returns the deduplicated `argv` and, for each surviving flag, the layer (`base`, `model`, `profile` or `slot`) that set its final value. Repeatable flags (`--override-kv`, `--draft-model`) are kept at every occurrence and have no provenance entry, because no single occurrence wins. A llama-server slot with no profile runs its type's seed (`embedding` or `reranking`), else `chat`; a profileless `tts`, `transcription` or `image` slot uses its engine's default (see [Config schema](/docs/reference/config-schema/#slotsnametoml)). A slot that names a profile the catalog does not have refuses to launch with `slot.profile_missing`.
 
 ### Seed profiles
 
-The code-shipped seeds are `chat`, `agent`, `utility`, `coding`, `embedding`, `reranking`, `cpu-chat`, `flm`, `kokoro`, `moonshine`, `qwen3-tts`, `comfyui` and `brain`. `ctx_size` is set by `agent`, `utility` and `brain` (`65536`), `embedding` and `reranking` (`4096`) and `flm` (`16384`). `vision = "off"` is set by `agent`, `coding` and `brain`. No seed sets `mtp`, `enable_thinking` or `runner`. A seed with no `ctx_size` follows the model's native window, capped at 32768 (8192 when the native window is unknown). The shipped slots point at these seeds.
+The code-shipped seeds are `chat`, `agent`, `utility`, `coding`, `embedding`, `reranking`, `cpu-chat`, `flm`, `kokoro`, `moonshine`, `qwen3-tts`, `comfyui` and `brain`. `ctx_size` is set by `agent`, `utility` and `brain` (`65536`), `embedding` and `reranking` (`4096`) and `flm` (`16384`). `vision = "off"` is set by `agent`, `coding` and `brain`. No seed sets `speculation`, `enable_thinking` or `runner`. A seed with no `ctx_size` follows the model's native window, capped at 32768 (8192 when the native window is unknown). The shipped slots point at these seeds.
 
 ## Runner images
 

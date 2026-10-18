@@ -421,3 +421,67 @@ def test_add_from_path_extensionless_literal_falls_back_to_resolved(
 
     r = client.post("/api/models/add-from-path", json={"path": str(link)})
     assert r.status_code == 201, r.text
+
+
+# ── speculative-decoding drafter (ADR-0031) ──────────────────────────────────
+
+
+def _qwen3_target(path: Path) -> Path:
+    from tests.registry.gguf_fixtures import write_gguf
+
+    return write_gguf(
+        path,
+        "qwen3",
+        uints={"qwen3.embedding_length": 4096, "qwen3.block_count": 36},
+    )
+
+
+def _dflash_drafter(path: Path, *, width: int = 4096) -> Path:
+    from tests.registry.gguf_fixtures import write_gguf
+
+    return write_gguf(
+        path,
+        "dflash",
+        uints={"dflash.embedding_length": width, "dflash.block_size": 8},
+        int_arrays={"dflash.target_layers": [2, 19, 35]},
+    )
+
+
+def test_add_from_path_with_draft(add_path_client: tuple[TestClient, Path]) -> None:
+    client, drop = add_path_client
+    target = _qwen3_target(drop / "tgt.gguf")
+    drafter = _dflash_drafter(drop / "tgt-dflash.gguf")
+
+    r = client.post("/api/models/add-from-path", json={"path": str(target), "draft": str(drafter)})
+    assert r.status_code == 201, r.text
+    body = r.json()
+    assert body["draft"] == str(drafter)
+    assert body["draft_kind"] == "dflash"
+    assert body["metadata"]["draft"]["variant"] == "dflash"
+    assert body["metadata"]["draft"]["size_bytes"] == drafter.stat().st_size
+    stored = client.get(f"/api/models/{body['id']}").json()
+    assert stored["draft_kind"] == "dflash"
+
+
+def test_add_from_path_draft_mismatch_422_and_registers_nothing(
+    add_path_client: tuple[TestClient, Path],
+) -> None:
+    client, drop = add_path_client
+    target = _qwen3_target(drop / "tgt.gguf")
+    drafter = _dflash_drafter(drop / "tgt-dflash.gguf", width=2048)
+
+    r = client.post("/api/models/add-from-path", json={"path": str(target), "draft": str(drafter)})
+    assert r.status_code == 422, r.text
+    assert r.json()["error"]["code"] == "model.draft_mismatch"
+    assert client.get("/api/models/tgt").status_code == 404
+
+
+def test_add_from_path_draft_not_found_422(add_path_client: tuple[TestClient, Path]) -> None:
+    client, drop = add_path_client
+    target = _qwen3_target(drop / "tgt.gguf")
+    r = client.post(
+        "/api/models/add-from-path",
+        json={"path": str(target), "draft": str(drop / "missing.gguf")},
+    )
+    assert r.status_code == 422, r.text
+    assert r.json()["error"]["code"] == "model.draft_not_found"

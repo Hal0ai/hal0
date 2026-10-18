@@ -3,7 +3,7 @@
 // the registry `mtp` tag) instead of the retired tag+filename-sniff rule.
 import { describe, expect, it } from 'vitest'
 
-import { isMtpEligibleModel } from './normalizeApiModel'
+import { isMtpEligibleModel, normalizeApiModel } from './normalizeApiModel'
 
 describe('isMtpEligibleModel', () => {
   it('is eligible when mtp is explicitly true, even with no mtp tag and no name marker', () => {
@@ -39,5 +39,26 @@ describe('isMtpEligibleModel', () => {
   it('handles null/undefined models', () => {
     expect(isMtpEligibleModel(null)).toBe(false)
     expect(isMtpEligibleModel(undefined)).toBe(false)
+  })
+})
+
+describe('normalizeApiModel drafter facts', () => {
+  it('surfaces the paired drafter path, kind and variant', () => {
+    const m = normalizeApiModel({
+      id: 'qwen3-27b',
+      draft: '/models/qwen3-dflash.gguf',
+      draft_kind: 'dflash',
+      metadata: { draft: { variant: 'dspark', block_size: 8 } },
+    })
+    expect(m.draft).toBe('/models/qwen3-dflash.gguf')
+    expect(m.draftKind).toBe('dflash')
+    expect(m.draftVariant).toBe('dspark')
+  })
+
+  it('reads null for a model with no drafter', () => {
+    const m = normalizeApiModel({ id: 'plain', draft: null, draft_kind: null })
+    expect([m.draft, m.draftKind, m.draftVariant]).toEqual([null, null, null])
+    const bare = normalizeApiModel({ id: 'bare' })
+    expect([bare.draft, bare.draftKind, bare.draftVariant]).toEqual([null, null, null])
   })
 })

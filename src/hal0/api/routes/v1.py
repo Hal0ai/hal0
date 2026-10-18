@@ -76,6 +76,25 @@ def _slot_ttft_events(app_state: Any, slot_name: str | None) -> Any:
     return events_store[slot_name]
 
 
+def _slot_spec_events(app_state: Any, slot_name: str | None) -> Any:
+    """Per-slot spec_events deque of ``(ts, draft_n, accepted_n)`` (or None)."""
+    events_store = getattr(app_state, "spec_events", None)
+    if events_store is None or not slot_name:
+        return None
+    return events_store[slot_name]
+
+
+def _record_spec_timings(events: Any, drafted: Any, accepted: Any) -> None:
+    """Append one completion's draft counters; no draft, nothing recorded."""
+    if events is None or not isinstance(drafted, int) or drafted <= 0:
+        return
+    events.append((time.monotonic(), drafted, accepted if isinstance(accepted, int) else 0))
+
+
+_DRAFT_N_RE = re.compile(rb'"draft_n"\s*:\s*(\d+)')
+_DRAFT_ACCEPTED_RE = re.compile(rb'"draft_n_accepted"\s*:\s*(\d+)')
+
+
 def _update_slot_throughput(app_state: Any, slot_name: str | None, tps: float) -> None:
     """Record a FLM decoding-speed sample (tok/s) for the slot.
 
@@ -126,7 +145,8 @@ def _instrument_streaming_throughput(
     original = response.body_iterator
     events = _slot_events(app_state, slot_name)
     ttft_events = _slot_ttft_events(app_state, slot_name) if dispatch_started is not None else None
-    if events is None and ttft_events is None:
+    spec_events = _slot_spec_events(app_state, slot_name)
+    if events is None and ttft_events is None and spec_events is None:
         return response
     ttft_pending = ttft_events is not None  # one-shot per response
 
@@ -145,6 +165,15 @@ def _instrument_streaming_throughput(
                 tokens = 0 if '"x_hal0_stall"' in chunk else chunk.count('"delta":')
             else:
                 tokens = 0
+            if spec_events is not None and isinstance(chunk, (bytes, bytearray)):
+                # llama-server puts draft_n / draft_n_accepted in the final
+                # chunk's timings, and only when a draft happened.
+                m = _DRAFT_N_RE.search(chunk)
+                if m is not None:
+                    acc = _DRAFT_ACCEPTED_RE.search(chunk)
+                    _record_spec_timings(
+                        spec_events, int(m.group(1)), int(acc.group(1)) if acc else 0
+                    )
             if tokens > 0:
                 now = time.monotonic()
                 if events is not None:
@@ -175,8 +204,6 @@ def _record_nonstreaming_throughput(
     if req_store is not None and slot_name:
         req_store[slot_name] = req_store.get(slot_name, 0) + 1
         # Also record last-use timestamp for recency-based animation
-        import time
-
         last_used = getattr(app_state, "slot_last_used", None)
         if last_used is not None:
             last_used[slot_name] = time.monotonic()
@@ -186,6 +213,13 @@ def _record_nonstreaming_throughput(
         return
     if not isinstance(data, dict):
         return
+    timings = data.get("timings")
+    if isinstance(timings, dict):
+        _record_spec_timings(
+            _slot_spec_events(app_state, slot_name),
+            timings.get("draft_n"),
+            timings.get("draft_n_accepted"),
+        )
     usage = data.get("usage") or {}
     completion = usage.get("completion_tokens") or 0
     if not isinstance(completion, (int, float)) or completion <= 0:

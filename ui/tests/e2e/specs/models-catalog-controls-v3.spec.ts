@@ -55,6 +55,23 @@ const ROWS = [
     tags: ['coder', 'moe'],
     created: 1_650_000_000,
   },
+  {
+    id: 'local.bolt-3b',
+    name: 'bolt-3b',
+    longName: 'Bolt 3B',
+    installed: true,
+    ns: 'pulled',
+    capabilities: ['chat'],
+    backends: ['rocm'],
+    size_bytes: 2_000_000_000,
+    params: '3B',
+    quant: 'Q4_K_M',
+    tags: [],
+    created: 1_550_000_000,
+    draft: '/models/bolt-draft.gguf',
+    draft_kind: 'dflash',
+    metadata: { draft: { variant: 'lilicorr' } },
+  },
 ]
 
 test.beforeEach(async ({ page }) => {
@@ -106,6 +123,14 @@ test.describe('Models v3 — catalog controls (/models)', () => {
     await expect(page.locator('.mdl-row', { hasText: 'Mid 13B' })).toBeVisible()
     // Alpha is not moe-tagged, should be absent
     await expect(page.locator('.mdl-row', { hasText: 'Alpha 7B' })).toHaveCount(0)
+  })
+
+  test('drafter chip names the variant and the drafter filter narrows to it', async ({ page }) => {
+    await page.goto('/#models')
+    await page.getByTestId('mdl-filter-drafter').click()
+    await expect(page.locator('.mdl-row', { hasText: 'Bolt 3B' })).toBeVisible()
+    await expect(page.locator('.mdl-row', { hasText: 'Alpha 7B' })).toHaveCount(0)
+    await expect(page.getByTestId('mdl-row-drafter')).toHaveText('⚡ LiLiCorr')
   })
 
   test('quant chip renders on rows and in the detail meta grid', async ({ page }) => {

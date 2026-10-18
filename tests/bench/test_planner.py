@@ -443,3 +443,13 @@ class TestResolveLaneWithoutRocm:
         assert _resolve_lane({"backends": ["vulkan"]}, "rocm") == "rocm"
         assert _resolve_lane({}, "vulkan_radv") == "vulkan_radv"
         assert _resolve_lane({"default_lane": "rocm"}, "default") == "rocm"
+
+
+def test_cell_spec_carries_a_non_default_speculation():
+    from hal0.bench.planner import _resolve_profile
+
+    plain = _resolve_profile({"profile": {"flags": "-fa on"}}, 4096)
+    off = _resolve_profile({"profile": {"flags": "-fa on", "speculation": "off"}}, 4096)
+    default = _resolve_profile({"profile": {"flags": "-fa on", "speculation": "auto"}}, 4096)
+    assert off.spec == {"profile": {"speculation": "off"}}
+    assert default.spec == plain.spec

@@ -212,14 +212,31 @@ def _hf_handler(
     meta_body: dict[str, Any] | None = None,
     tree_body: list[dict[str, Any]] | None = None,
     fail_with: type[Exception] | None = None,
+    search_status: int = 200,
+    search_body: list[dict[str, Any]] | None = None,
+    companion_trees: dict[str, list[dict[str, Any]]] | None = None,
+    search_calls: list[httpx.URL] | None = None,
 ):
-    """Build an httpx MockTransport handler for the inspect tests."""
+    """Build an httpx MockTransport handler for the inspect tests.
+
+    ``/api/models?author=…`` answers the companion-repo search; a companion
+    repo's ``/tree/main`` answers from ``companion_trees`` keyed by repo id.
+    """
 
     def handler(req: httpx.Request) -> httpx.Response:
         if fail_with is not None:
             raise fail_with("simulated transport failure")
         path = req.url.path
+        if path == "/api/models" and "author" in req.url.params:
+            if search_calls is not None:
+                search_calls.append(req.url)
+            return httpx.Response(
+                search_status, json=search_body if search_body is not None else []
+            )
         if path.endswith("/tree/main"):
+            repo = path.removeprefix("/api/models/").removesuffix("/tree/main")
+            if companion_trees is not None and repo in companion_trees:
+                return httpx.Response(200, json=companion_trees[repo])
             return httpx.Response(tree_status, json=tree_body or [])
         # Meta endpoint
         return httpx.Response(meta_status, json=meta_body or {})
@@ -430,6 +447,132 @@ def test_inspect_groups_split_gguf_into_one_variant_per_quant(
     assert [d["id"] for d in body["drafts"]] == ["dflash-M-NVFP4.gguf"]
 
 
+def _lfs(path: str, size: int) -> dict[str, Any]:
+    return {"path": path, "type": "file", "lfs": {"size": size}, "size": 134}
+
+
+def test_inspect_drafts_carry_hints_and_order(
+    inspect_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """In-repo drafters carry kind/variant hints and sort best-first."""
+    tree = [
+        _lfs("X-Q4_K_M.gguf", 9_000),
+        _lfs("X-Q4_K_M-MTP.gguf", 9_100),
+        _lfs("mtp-X.gguf", 500),
+        _lfs("dflash-X-Q8_0.gguf", 900),
+        _lfs("X-LiLiCorr.gguf", 700),
+        _lfs("X-speculator.gguf", 600),
+    ]
+    _patch_httpx_transport(monkeypatch, _hf_handler(meta_body={"tags": []}, tree_body=tree))
+
+    r = inspect_client.post("/api/models/inspect", json={"hf_repo": "acme/X-GGUF"})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    # a quant that merely ends in -MTP carries its heads inside: still a quant
+    assert [v["id"] for v in body["variants"]] == ["X-Q4_K_M.gguf", "X-Q4_K_M-MTP.gguf"]
+    got = [(d["id"], d["kind_hint"], d["variant_hint"]) for d in body["drafts"]]
+    assert got == [
+        ("X-LiLiCorr.gguf", "dflash", "lilicorr"),
+        ("dflash-X-Q8_0.gguf", "dflash", "dflash"),
+        ("mtp-X.gguf", "mtp", "mtp"),
+        ("X-speculator.gguf", None, None),
+    ]
+    assert {d["source"] for d in body["drafts"]} == {"repo"}
+    assert {d["repo"] for d in body["drafts"]} == {"acme/X-GGUF"}
+    assert body["companion_repos"] == []
+
+
+def test_inspect_lists_companion_repo_drafters(
+    inspect_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A same-author sibling repo's GGUFs are listed as ``source == companion``."""
+    searches: list[httpx.URL] = []
+    handler = _hf_handler(
+        meta_body={"tags": []},
+        tree_body=[_lfs("X-Q4_K_M.gguf", 9_000)],
+        search_body=[
+            {"id": "nvidia/X-LiLiCorr-GGUF"},
+            {"id": "nvidia/X-GGUF"},
+            {"id": "nvidia/X-LiLiCorr-Other"},
+            {"id": "someone/X-LiLiCorr-GGUF"},
+            {"id": "nvidia/X-EAGLE3"},
+        ],
+        companion_trees={
+            "nvidia/X-LiLiCorr-GGUF": [_lfs("X-LiLiCorr-Q8_0.gguf", 800), _lfs("README.md", 1)],
+            "nvidia/X-EAGLE3": [{"path": "README.md", "type": "file", "size": 1}],
+        },
+        search_calls=searches,
+    )
+    _patch_httpx_transport(monkeypatch, handler)
+
+    r = inspect_client.post("/api/models/inspect", json={"hf_repo": "nvidia/X-GGUF"})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert len(searches) == 1
+    assert searches[0].params["author"] == "nvidia"
+    assert searches[0].params["search"] == "X"
+    assert [d["id"] for d in body["drafts"]] == ["X-LiLiCorr-Q8_0.gguf"]
+    draft = body["drafts"][0]
+    assert draft["source"] == "companion"
+    assert draft["repo"] == "nvidia/X-LiLiCorr-GGUF"
+    assert (draft["kind_hint"], draft["variant_hint"]) == ("dflash", "lilicorr")
+    # a matching repo with no GGUF contributes nothing and is not listed
+    assert body["companion_repos"] == ["nvidia/X-LiLiCorr-GGUF"]
+
+    # second inspect is served from the cache: no extra Hub search
+    r2 = inspect_client.post("/api/models/inspect", json={"hf_repo": "nvidia/X-GGUF"})
+    assert r2.json()["cached"] is True
+    assert r2.json()["companion_repos"] == ["nvidia/X-LiLiCorr-GGUF"]
+    assert len(searches) == 1
+
+
+def test_inspect_companion_tree_timeout_keeps_the_other_companions(
+    inspect_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One companion whose tree times out is skipped; the rest are still listed."""
+    inner = _hf_handler(
+        meta_body={"tags": []},
+        tree_body=[_lfs("X-Q4_K_M.gguf", 9_000)],
+        search_body=[{"id": "nvidia/X-DFlash"}, {"id": "nvidia/X-LiLiCorr-GGUF"}],
+        companion_trees={"nvidia/X-LiLiCorr-GGUF": [_lfs("X-LiLiCorr-Q8_0.gguf", 800)]},
+    )
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        if req.url.path == "/api/models/nvidia/X-DFlash/tree/main":
+            raise httpx.ReadTimeout("slow companion")
+        return inner(req)
+
+    _patch_httpx_transport(monkeypatch, handler)
+    r = inspect_client.post("/api/models/inspect", json={"hf_repo": "nvidia/X-GGUF"})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert [d["id"] for d in body["drafts"]] == ["X-LiLiCorr-Q8_0.gguf"]
+    assert body["companion_repos"] == ["nvidia/X-LiLiCorr-GGUF"]
+
+
+def test_inspect_companion_search_failure_is_soft(
+    inspect_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failing companion search leaves the repo's own drafters, still a 200."""
+    _patch_httpx_transport(
+        monkeypatch,
+        _hf_handler(
+            meta_body={"tags": []},
+            tree_body=[_lfs("X-Q4_K_M.gguf", 9_000), _lfs("mtp-X.gguf", 500)],
+            search_status=500,
+        ),
+    )
+    r = inspect_client.post("/api/models/inspect", json={"hf_repo": "nvidia/X-GGUF"})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert [d["id"] for d in body["drafts"]] == ["mtp-X.gguf"]
+    assert body["companion_repos"] == []
+
+
 def test_inspect_reads_every_tree_page(
     inspect_client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
@@ -580,9 +723,9 @@ def test_inspect_caches_response_for_repeated_calls(
     assert r1.status_code == 200
     assert r2.status_code == 200
     assert r2.json()["cached"] is True
-    # Each fresh fetch issues two requests (meta + tree); a cached call
-    # issues none.
-    assert hits["count"] == 2
+    # Each fresh fetch issues three requests (meta, tree, companion search);
+    # a cached call issues none.
+    assert hits["count"] == 3
 
 
 def test_inspect_returns_502_when_hf_unreachable(
@@ -1083,3 +1226,130 @@ def test_screen_model_write_facts_pass_and_bad_fact_is_bad_request() -> None:
         screen_model_write({"mtp": "maybe"})
     assert exc.value.code == "model.fact_invalid"
     assert exc.value.details["field"] == "mtp"
+
+
+# ── POST /api/models/inspect-draft (ADR-0031 §2) ────────────────────────────
+
+
+def _draft_files(tmp_path: Path, **draft_overrides: Any) -> dict[str, bytes]:
+    from tests.registry.gguf_fixtures import write_gguf
+
+    target = write_gguf(
+        tmp_path / "t.gguf",
+        "qwen35",
+        uints={"qwen35.embedding_length": 4096, "qwen35.block_count": 32},
+    ).read_bytes()
+    uints = {"dflash.embedding_length": 4096, "dflash.block_size": 8}
+    uints.update(draft_overrides)
+    draft = write_gguf(
+        tmp_path / "d.gguf", "dflash", uints=uints, int_arrays={"dflash.target_layers": [2, 10]}
+    ).read_bytes()
+    return {"/org/main/resolve/main/m.gguf": target, "/org/draft/resolve/main/d.gguf": draft}
+
+
+def _draft_handler(files: dict[str, bytes], seen: list[httpx.Request]):
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        data = files.get(request.url.path)
+        if data is None:
+            return httpx.Response(404)
+        return httpx.Response(206, content=data)
+
+    return handler
+
+
+_DRAFT_BODY = {
+    "hf_repo": "org/main",
+    "hf_filename": "m.gguf",
+    "draft_repo": "org/draft",
+    "draft_filename": "d.gguf",
+}
+
+
+@pytest.fixture(autouse=True)
+def _clear_draft_cache() -> Iterator[None]:
+    from hal0.services import models_service
+
+    models_service.INSPECT_DRAFT_CACHE.clear()
+    yield
+    models_service.INSPECT_DRAFT_CACHE.clear()
+
+
+def _patch_header_transport(monkeypatch: pytest.MonkeyPatch, handler) -> None:
+    real_cls = httpx.AsyncClient
+
+    def factory(*args: Any, **kwargs: Any) -> httpx.AsyncClient:
+        kwargs["transport"] = httpx.MockTransport(handler)
+        return real_cls(*args, **kwargs)
+
+    monkeypatch.setattr("hal0.upstreams.hf_header.httpx.AsyncClient", factory)
+
+
+def test_inspect_draft_reports_fit_ok(
+    inspect_client: TestClient, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    seen: list[httpx.Request] = []
+    _patch_header_transport(monkeypatch, _draft_handler(_draft_files(tmp_path), seen))
+    r = inspect_client.post("/api/models/inspect-draft", json=_DRAFT_BODY)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["kind"] == "dflash"
+    assert body["variant"] == "dflash"
+    assert body["fit"] == {"ok": True, "reasons": []}
+    assert body["draft"]["embedding_length"] == 4096
+    assert body["draft"]["block_size"] == 8
+    assert body["target"] == {"architecture": "qwen35", "embedding_length": 4096, "block_count": 32}
+    assert len(seen) == 2
+
+
+def test_inspect_draft_mismatch_reasons(
+    inspect_client: TestClient, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    files = _draft_files(tmp_path, **{"dflash.embedding_length": 2048})
+    _patch_header_transport(monkeypatch, _draft_handler(files, []))
+    r = inspect_client.post("/api/models/inspect-draft", json=_DRAFT_BODY)
+    assert r.status_code == 200, r.text
+    fit = r.json()["fit"]
+    assert fit["ok"] is False
+    assert any("2048" in reason and "4096" in reason for reason in fit["reasons"])
+
+
+def test_inspect_draft_unreadable_422(
+    inspect_client: TestClient, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    files = _draft_files(tmp_path)
+    del files["/org/draft/resolve/main/d.gguf"]
+    _patch_header_transport(monkeypatch, _draft_handler(files, []))
+    r = inspect_client.post("/api/models/inspect-draft", json=_DRAFT_BODY)
+    assert r.status_code == 422, r.text
+    err = r.json()["error"]
+    assert err["code"] == "hf.header_unreadable"
+    assert err["details"] == {"repo": "org/draft", "filename": "d.gguf"}
+
+
+def test_inspect_draft_not_a_drafter_422(
+    inspect_client: TestClient, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    files = _draft_files(tmp_path)
+    files["/org/draft/resolve/main/d.gguf"] = files["/org/main/resolve/main/m.gguf"]
+    _patch_header_transport(monkeypatch, _draft_handler(files, []))
+    r = inspect_client.post("/api/models/inspect-draft", json=_DRAFT_BODY)
+    assert r.status_code == 422, r.text
+    assert r.json()["error"]["code"] == "model.draft_not_a_drafter"
+
+
+def test_inspect_draft_missing_field_400(inspect_client: TestClient) -> None:
+    r = inspect_client.post("/api/models/inspect-draft", json={"hf_repo": "org/main"})
+    assert r.status_code == 400, r.text
+    assert r.json()["error"]["code"] == "hf.bad_request"
+
+
+def test_inspect_draft_caches_by_four_coords(
+    inspect_client: TestClient, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    seen: list[httpx.Request] = []
+    _patch_header_transport(monkeypatch, _draft_handler(_draft_files(tmp_path), seen))
+    first = inspect_client.post("/api/models/inspect-draft", json=_DRAFT_BODY)
+    second = inspect_client.post("/api/models/inspect-draft", json=_DRAFT_BODY)
+    assert first.json() == second.json()
+    assert len(seen) == 2  # one ranged GET per file, the second call is cached

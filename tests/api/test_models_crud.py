@@ -25,6 +25,7 @@ from fastapi.testclient import TestClient
 from hal0.api import create_app
 from hal0.providers.container import ContainerProvider
 from tests.fixtures.slot_probe import probe_slot_name
+from tests.registry.gguf_fixtures import write_gguf
 
 # ── Container-provider stub ──────────────────────────────────────────────────
 
@@ -1231,6 +1232,202 @@ def test_put_explicit_null_provider_rederives_from_backends_2199(
     assert row["provider"] == "kokoro"
 
 
+# ── speculative-decoding drafter pairing (ADR-0031) ─────────────────────────
+
+
+def _target_gguf(root: Path, name: str = "tgt.gguf") -> Path:
+    return write_gguf(
+        root / name,
+        "qwen3",
+        uints={"qwen3.embedding_length": 4096, "qwen3.block_count": 36},
+    )
+
+
+def _drafter_gguf(root: Path, name: str = "tgt-dflash.gguf", *, width: int = 4096) -> Path:
+    return write_gguf(
+        root / name,
+        "dflash",
+        uints={"dflash.embedding_length": width, "dflash.block_size": 8},
+        int_arrays={"dflash.target_layers": [2, 19, 35]},
+    )
+
+
+def _register(client: TestClient, root: Path, model_id: str = "tgt") -> Path:
+    fpath = _target_gguf(root, f"{model_id}.gguf")
+    r = client.post("/api/models", json={"id": model_id, "path": str(fpath)})
+    assert r.status_code == 201, r.text
+    return fpath
+
+
+def test_put_draft_pairs_and_classifies(crud_client: TestClient, crud_models_root: Path) -> None:
+    _register(crud_client, crud_models_root)
+    draft = _drafter_gguf(crud_models_root)
+    r = crud_client.put("/api/models/tgt", json={"draft": str(draft)})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["draft"] == str(draft)
+    assert body["draft_kind"] == "dflash"
+    meta = body["metadata"]["draft"]
+    assert meta["variant"] == "dflash"
+    assert meta["block_size"] == 8
+    assert meta["size_bytes"] == draft.stat().st_size
+    stored = crud_client.get("/api/models/tgt").json()
+    assert (stored["draft"], stored["draft_kind"]) == (str(draft), "dflash")
+
+
+def test_put_draft_relative_path_refused(crud_client: TestClient, crud_models_root: Path) -> None:
+    _register(crud_client, crud_models_root)
+    r = crud_client.put("/api/models/tgt", json={"draft": "tgt-dflash.gguf"})
+    assert r.status_code == 422, r.text
+    err = r.json()["error"]
+    assert err["code"] == "model.draft_outside_store"
+    assert err["details"]["draft"] == "tgt-dflash.gguf"
+
+
+def test_put_draft_outside_the_store_and_the_models_dir_refused(
+    crud_client: TestClient, crud_models_root: Path, tmp_path_factory: pytest.TempPathFactory
+) -> None:
+    """A slot container mounts only the model-store roots (and the model's own
+    directory), so a drafter anywhere else would never be reachable."""
+    _register(crud_client, crud_models_root)
+    for draft in (
+        "/tmp/elsewhere/d.gguf",
+        str(_drafter_gguf(tmp_path_factory.mktemp("elsewhere"))),
+    ):
+        r = crud_client.put("/api/models/tgt", json={"draft": draft})
+        assert r.status_code == 422, r.text
+        err = r.json()["error"]
+        assert err["code"] == "model.draft_outside_store"
+        assert err["details"]["draft"] == draft
+    assert crud_client.get("/api/models/tgt").json()["draft"] is None
+
+
+def test_put_draft_mismatch_422(crud_client: TestClient, crud_models_root: Path) -> None:
+    _register(crud_client, crud_models_root)
+    draft = _drafter_gguf(crud_models_root, width=2048)
+    r = crud_client.put("/api/models/tgt", json={"draft": str(draft)})
+    assert r.status_code == 422, r.text
+    assert r.json()["error"]["code"] == "model.draft_mismatch"
+    assert crud_client.get("/api/models/tgt").json()["draft"] is None
+
+
+def test_put_draft_that_is_not_a_drafter_422(
+    crud_client: TestClient, crud_models_root: Path
+) -> None:
+    _register(crud_client, crud_models_root)
+    clip = write_gguf(crud_models_root / "clip.gguf", "clip")
+    r = crud_client.put("/api/models/tgt", json={"draft": str(clip)})
+    assert r.status_code == 422, r.text
+    assert r.json()["error"]["code"] == "model.draft_not_a_drafter"
+
+
+def test_put_mtp_draft_refused_when_target_mtp_is_false(
+    crud_client: TestClient, crud_models_root: Path
+) -> None:
+    _register(crud_client, crud_models_root)
+    assert crud_client.put("/api/models/tgt", json={"mtp": False}).status_code == 200
+    mtp = write_gguf(
+        crud_models_root / "tgt-mtp.gguf",
+        "qwen3",
+        uints={"qwen3.nextn_predict_layers": 1},
+        tensor_names=["blk.36.nextn.eh_proj.weight"],
+    )
+    r = crud_client.put("/api/models/tgt", json={"draft": str(mtp)})
+    assert r.status_code == 422, r.text
+    err = r.json()["error"]
+    assert err["code"] == "model.draft_mismatch"
+    assert "target mtp fact is false" in err["details"]["reasons"]
+
+
+def test_put_draft_not_found_422(crud_client: TestClient, crud_models_root: Path) -> None:
+    _register(crud_client, crud_models_root)
+    r = crud_client.put("/api/models/tgt", json={"draft": str(crud_models_root / "nope.gguf")})
+    assert r.status_code == 422, r.text
+    assert r.json()["error"]["code"] == "model.draft_not_found"
+
+
+def test_put_draft_kind_is_readonly_422(crud_client: TestClient, crud_models_root: Path) -> None:
+    _register(crud_client, crud_models_root)
+    r = crud_client.put("/api/models/tgt", json={"draft_kind": "mtp"})
+    assert r.status_code == 422, r.text
+    assert r.json()["error"]["code"] == "model.draft_kind_readonly"
+
+
+def test_put_draft_null_unpairs_and_keeps_file(
+    crud_client: TestClient, crud_models_root: Path
+) -> None:
+    _register(crud_client, crud_models_root)
+    draft = _drafter_gguf(crud_models_root)
+    assert crud_client.put("/api/models/tgt", json={"draft": str(draft)}).status_code == 200
+    r = crud_client.put("/api/models/tgt", json={"draft": None})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["draft"] is None
+    assert body["draft_kind"] is None
+    assert "draft" not in body["metadata"]
+    assert draft.is_file()
+
+
+def test_put_metadata_keeps_draft_metadata(crud_client: TestClient, crud_models_root: Path) -> None:
+    _register(crud_client, crud_models_root)
+    draft = _drafter_gguf(crud_models_root)
+    assert crud_client.put("/api/models/tgt", json={"draft": str(draft)}).status_code == 200
+    r = crud_client.put("/api/models/tgt", json={"metadata": {"note": "x"}})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["metadata"]["note"] == "x"
+    assert body["metadata"]["draft"]["variant"] == "dflash"
+    assert body["draft"] == str(draft)
+
+
+def test_delete_draft_route_removes_file_and_clears_fact(
+    crud_client: TestClient, crud_models_root: Path
+) -> None:
+    _register(crud_client, crud_models_root)
+    draft = _drafter_gguf(crud_models_root)
+    size = draft.stat().st_size
+    assert crud_client.put("/api/models/tgt", json={"draft": str(draft)}).status_code == 200
+    r = crud_client.delete("/api/models/tgt/draft")
+    assert r.status_code == 200, r.text
+    assert r.json() == {"model_id": "tgt", "removed": str(draft), "bytes_freed": size}
+    assert not draft.exists()
+    row = crud_client.get("/api/models/tgt").json()
+    assert row["draft"] is None
+    assert row["draft_kind"] is None
+    assert "draft" not in row["metadata"]
+    # nothing paired any more -> 404
+    assert crud_client.delete("/api/models/tgt/draft").status_code == 404
+
+
+def test_delete_draft_keeps_a_file_another_model_still_pairs(
+    crud_client: TestClient, crud_models_root: Path
+) -> None:
+    _register(crud_client, crud_models_root, "tgt")
+    _register(crud_client, crud_models_root, "tgt2")
+    draft = _drafter_gguf(crud_models_root)
+    for mid in ("tgt", "tgt2"):
+        assert crud_client.put(f"/api/models/{mid}", json={"draft": str(draft)}).status_code == 200
+    r = crud_client.delete("/api/models/tgt/draft")
+    assert r.status_code == 200, r.text
+    assert r.json()["bytes_freed"] == 0
+    assert draft.is_file()
+    assert crud_client.get("/api/models/tgt").json()["draft"] is None
+    assert crud_client.get("/api/models/tgt2").json()["draft"] == str(draft)
+
+
+def test_delete_model_cascade_removes_draft(
+    crud_client: TestClient, crud_models_root: Path
+) -> None:
+    fpath = _register(crud_client, crud_models_root)
+    draft = _drafter_gguf(crud_models_root)
+    assert crud_client.put("/api/models/tgt", json={"draft": str(draft)}).status_code == 200
+    r = crud_client.delete("/api/models/tgt")
+    assert r.status_code == 200, r.text
+    removed = {f["path"] for f in r.json()["files_removed"]}
+    assert removed == {str(fpath), str(draft)}
+    assert not draft.exists()
+
+
 # ── DELETE removes files by default (ADR-0026) ─────────────────────────────
 
 
@@ -1370,3 +1567,87 @@ def test_startup_scan_does_not_prune_under_an_empty_root(tmp_hal0_home: str) -> 
         pass
 
     assert reg.has("ghost")
+
+
+def test_unpaired_drafter_is_tombstoned_and_not_repaired(
+    crud_client: TestClient, crud_models_root: Path
+) -> None:
+    from hal0.config.schema import ModelsConfig
+    from hal0.registry.discover import scan_and_register
+
+    fpath = _register(crud_client, crud_models_root)
+    draft = _drafter_gguf(crud_models_root)
+    assert crud_client.put("/api/models/tgt", json={"draft": str(draft)}).status_code == 200
+    r = crud_client.put("/api/models/tgt", json={"draft": None})
+    assert r.status_code == 200, r.text
+
+    registry = crud_client.app.state.model_registry
+    cfg = ModelsConfig(roots=[str(crud_models_root)])
+    result = scan_and_register(registry, cfg)
+    assert result["paired_drafts"] == []
+    assert registry.get("tgt").draft is None
+    assert fpath.exists() and draft.exists()
+
+    # Pairing it again on purpose lifts the tombstone.
+    assert crud_client.put("/api/models/tgt", json={"draft": str(draft)}).status_code == 200
+    assert registry.get("tgt").draft == str(draft)
+
+
+def test_unpair_does_not_tombstone_a_drafter_another_model_pairs(
+    crud_client: TestClient, crud_models_root: Path
+) -> None:
+    from hal0.registry import tombstones
+
+    _register(crud_client, crud_models_root, "tgt")
+    _register(crud_client, crud_models_root, "tgt2")
+    shared = _drafter_gguf(crud_models_root)
+    for mid in ("tgt", "tgt2"):
+        assert crud_client.put(f"/api/models/{mid}", json={"draft": str(shared)}).status_code == 200
+
+    assert crud_client.put("/api/models/tgt", json={"draft": None}).status_code == 200
+    assert not tombstones.is_tombstoned(shared.resolve(), tombstones.load())
+    assert crud_client.get("/api/models/tgt2").json()["draft"] == str(shared)
+
+    # The last pairing going away does tombstone it.
+    assert crud_client.put("/api/models/tgt2", json={"draft": None}).status_code == 200
+    assert tombstones.is_tombstoned(shared.resolve(), tombstones.load())
+
+
+def test_delete_draft_is_tombstoned_and_not_repaired(
+    crud_client: TestClient, crud_models_root: Path
+) -> None:
+    from hal0.config.schema import ModelsConfig
+    from hal0.registry.discover import scan_and_register
+
+    _register(crud_client, crud_models_root)
+    draft = _drafter_gguf(crud_models_root)
+    assert crud_client.put("/api/models/tgt", json={"draft": str(draft)}).status_code == 200
+    assert crud_client.delete("/api/models/tgt/draft").status_code == 200
+    assert not draft.exists()
+
+    # The file comes back (a re-download); the deliberate removal still holds.
+    _drafter_gguf(crud_models_root)
+    registry = crud_client.app.state.model_registry
+    result = scan_and_register(registry, ModelsConfig(roots=[str(crud_models_root)]))
+    assert result["paired_drafts"] == []
+    assert registry.get("tgt").draft is None
+
+
+def test_unpair_via_symlinked_path_is_not_repaired_by_scan(
+    crud_client: TestClient, crud_models_root: Path, tmp_path: Path
+) -> None:
+    from hal0.config.schema import ModelsConfig
+    from hal0.registry.discover import scan_and_register
+
+    _register(crud_client, crud_models_root)
+    draft = _drafter_gguf(crud_models_root)
+    link = tmp_path / "elsewhere" / "link-dflash.gguf"
+    link.parent.mkdir()
+    link.symlink_to(draft)
+    assert crud_client.put("/api/models/tgt", json={"draft": str(link)}).status_code == 200
+    assert crud_client.put("/api/models/tgt", json={"draft": None}).status_code == 200
+
+    registry = crud_client.app.state.model_registry
+    result = scan_and_register(registry, ModelsConfig(roots=[str(crud_models_root)]))
+    assert result["paired_drafts"] == []
+    assert registry.get("tgt").draft is None

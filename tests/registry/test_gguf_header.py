@@ -11,39 +11,17 @@ import struct
 from pathlib import Path
 
 from hal0.registry.gguf_header import (
+    _GGUF_TYPE_ARRAY,
     _GGUF_TYPE_BOOL,
     _GGUF_TYPE_FLOAT32,
     _GGUF_TYPE_STRING,
     _GGUF_TYPE_UINT32,
     read_gguf_header,
+    read_gguf_header_bytes,
 )
+from tests.registry.gguf_fixtures import _build_gguf, _enc_kv, _enc_str, _i32_array, _u32
 
-# ── fixture builders ─────────────────────────────────────────────────────
-
-
-def _enc_str(s: str) -> bytes:
-    raw = s.encode("utf-8")
-    return struct.pack("<Q", len(raw)) + raw
-
-
-def _enc_kv(key: str, vtype: int, value_bytes: bytes) -> bytes:
-    return _enc_str(key) + struct.pack("<I", vtype) + value_bytes
-
-
-def _build_gguf(version: int, kvs: list[tuple[str, int, bytes]], tensor_count: int = 0) -> bytes:
-    """Assemble a GGUF header with the given KV list.
-
-    Tensor info / data sections are omitted — the parser stops after the
-    KV block, so trailing bytes don't matter for these tests.
-    """
-    out = bytearray()
-    out += b"GGUF"
-    out += struct.pack("<I", version)
-    out += struct.pack("<Q", tensor_count)
-    out += struct.pack("<Q", len(kvs))
-    for key, vtype, vbytes in kvs:
-        out += _enc_kv(key, vtype, vbytes)
-    return bytes(out)
+# ── fixture builders (shared: tests/registry/gguf_fixtures.py) ───────────
 
 
 def _write_fixture(tmp_path: Path, name: str, payload: bytes) -> Path:
@@ -212,3 +190,85 @@ class TestMalformed:
         out = read_gguf_header(p)
         assert out is not None
         assert out["general.architecture"] == "llama"
+
+
+class TestDrafterKeys:
+    def test_header_collects_drafter_keys(self, tmp_path: Path) -> None:
+        kvs = [
+            ("general.architecture", _GGUF_TYPE_STRING, _enc_str("dflash")),
+            ("dflash.embedding_length", _GGUF_TYPE_UINT32, _u32(4096)),
+            ("dflash.block_size", _GGUF_TYPE_UINT32, _u32(8)),
+            ("dflash.target_layers", _GGUF_TYPE_ARRAY, _i32_array([2, 19])),
+            ("lilicorr.candidate_topk", _GGUF_TYPE_UINT32, _u32(4)),
+            ("dflash.unrelated", _GGUF_TYPE_UINT32, _u32(1)),
+        ]
+        p = _write_fixture(tmp_path, "dflash.gguf", _build_gguf(3, kvs))
+        out = read_gguf_header(p)
+        assert out is not None
+        assert out["dflash.embedding_length"] == 4096
+        assert out["dflash.block_size"] == 8
+        assert out["dflash.target_layers"] == [2, 19]
+        assert out["lilicorr.candidate_topk"] == 4
+        assert "dflash.unrelated" not in out
+
+    def test_header_collects_tokenizer_and_arch_counts(self, tmp_path: Path) -> None:
+        kvs = [
+            ("general.architecture", _GGUF_TYPE_STRING, _enc_str("qwen3")),
+            ("qwen3.block_count", _GGUF_TYPE_UINT32, _u32(36)),
+            ("qwen3.vocab_size", _GGUF_TYPE_UINT32, _u32(151936)),
+            ("qwen3.embedding_length", _GGUF_TYPE_UINT32, _u32(4096)),
+            ("qwen3.nextn_predict_layers", _GGUF_TYPE_UINT32, _u32(1)),
+            ("tokenizer.ggml.model", _GGUF_TYPE_STRING, _enc_str("gpt2")),
+            ("tokenizer.ggml.bos_token_id", _GGUF_TYPE_UINT32, _u32(11)),
+            ("tokenizer.ggml.eos_token_id", _GGUF_TYPE_UINT32, _u32(12)),
+            ("general.base_model.0.name", _GGUF_TYPE_STRING, _enc_str("Qwen3-8B")),
+        ]
+        p = _write_fixture(tmp_path, "qwen3.gguf", _build_gguf(3, kvs))
+        out = read_gguf_header(p)
+        assert out is not None
+        assert out["qwen3.block_count"] == 36
+        assert out["qwen3.vocab_size"] == 151936
+        assert out["qwen3.embedding_length"] == 4096
+        assert out["qwen3.nextn_predict_layers"] == 1
+        assert out["tokenizer.ggml.model"] == "gpt2"
+        assert out["tokenizer.ggml.bos_token_id"] == 11
+        assert out["tokenizer.ggml.eos_token_id"] == 12
+        assert out["general.base_model.0.name"] == "Qwen3-8B"
+
+    def test_tensor_names_prefix_capped_at_64(self, tmp_path: Path) -> None:
+        kvs = [("general.architecture", _GGUF_TYPE_STRING, _enc_str("qwen35"))]
+        names = [f"blk.{i}.nextn.eh_proj.weight" for i in range(70)]
+        payload = _build_gguf(3, kvs, tensor_names=names)
+        out = read_gguf_header_bytes(payload)
+        assert out is not None
+        assert out["tensor_names_prefix"] == names[:64]
+
+    def test_tensor_names_prefix_absent_when_block_outside_window(self) -> None:
+        kvs = [("general.architecture", _GGUF_TYPE_STRING, _enc_str("qwen35"))]
+        payload = _build_gguf(3, kvs, tensor_names=["a.weight", "b.weight"])
+        out = read_gguf_header_bytes(payload[:-10])  # cut inside tensor info
+        assert out is not None
+        assert "tensor_names_prefix" not in out
+
+    def test_read_gguf_header_bytes_matches_file_reader(self, tmp_path: Path) -> None:
+        kvs = [
+            ("general.architecture", _GGUF_TYPE_STRING, _enc_str("eagle3")),
+            ("eagle3.target_layers", _GGUF_TYPE_ARRAY, _i32_array([2, 18, 33])),
+            ("eagle3.vocab_size", _GGUF_TYPE_UINT32, _u32(32000)),
+        ]
+        payload = _build_gguf(3, kvs, tensor_names=["fc.weight"])
+        p = _write_fixture(tmp_path, "e.gguf", payload)
+        assert read_gguf_header_bytes(payload) == read_gguf_header(p)
+
+    def test_bytes_reader_rejects_non_gguf(self) -> None:
+        assert read_gguf_header_bytes(b"NOTGGUF" + b"\x00" * 64) is None
+        assert read_gguf_header_bytes(b"GGUF") is None
+
+
+def test_read_gguf_header_bytes_require_complete_rejects_cut_kv_block(tmp_path: Path) -> None:
+    from tests.registry.gguf_fixtures import write_gguf
+
+    payload = write_gguf(tmp_path / "c.gguf", "llama", uints={"llama.block_count": 4}).read_bytes()
+    assert read_gguf_header_bytes(payload[:-6], require_complete=True) is None
+    assert read_gguf_header_bytes(payload[:-6]) is not None  # lenient default unchanged
+    assert read_gguf_header_bytes(payload, require_complete=True)["llama.block_count"] == 4

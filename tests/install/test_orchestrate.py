@@ -575,7 +575,11 @@ async def test_apply_setup_clamps_the_window_by_pointing_the_slot_at_a_clamped_p
     assert clone.ctx_size < 32768
     assert clone.cloned_from == "chat"
     assert clone.intent == f"Installer: chat clamped to {clone.ctx_size} for this box"
-    assert (clone.flags, clone.vision, clone.mtp) == (seed.flags, seed.vision, seed.mtp)
+    assert (clone.flags, clone.vision, clone.speculation) == (
+        seed.flags,
+        seed.vision,
+        seed.speculation,
+    )
 
 
 async def test_apply_setup_keeps_the_profile_when_the_budget_fits(tmp_hal0_home):

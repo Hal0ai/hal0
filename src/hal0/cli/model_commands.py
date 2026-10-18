@@ -121,11 +121,31 @@ def _poll_pull_progress(ref: str, *, done_verb: str = "Done") -> None:
         time.sleep(0.5)
 
 
+def _pull_body(draft: str | None, draft_repo: str | None) -> dict[str, str] | None:
+    """The pull request body for the drafter options; ``None`` for a plain pull."""
+    if not draft:
+        return None
+    body = {"draft_filename": draft}
+    if draft_repo:
+        body["draft_repo"] = draft_repo
+    return body
+
+
 @app.command("pull")
 def model_pull(
     ref: str = typer.Argument(..., help="Curated alias (e.g. qwen3-4b) or registered model id"),
     cancel: bool = typer.Option(
         False, "--cancel", help="Cancel an in-flight pull instead of starting one."
+    ),
+    draft: str | None = typer.Option(
+        None,
+        "--draft",
+        help="Speculative-decoding drafter .gguf to download with the model (ADR-0031).",
+    ),
+    draft_repo: str | None = typer.Option(
+        None,
+        "--draft-repo",
+        help="HF repo holding --draft (default: the model's own repo).",
     ),
 ) -> None:
     """Download a model from Hugging Face into the local registry.
@@ -141,6 +161,10 @@ def model_pull(
     if _api_unreachable(url):
         raise typer.Exit(1)
 
+    if draft_repo and not draft:
+        die("--draft-repo needs --draft")
+        return
+
     if cancel:
         try:
             job = api_post(f"/api/models/{ref}/pull/cancel")
@@ -151,7 +175,7 @@ def model_pull(
         return
 
     try:
-        start = api_post(f"/api/models/{ref}/pull")
+        start = api_post(f"/api/models/{ref}/pull", json=_pull_body(draft, draft_repo))
     except CliApiError as exc:
         die(str(exc))
         return
@@ -402,6 +426,11 @@ def model_add(
         "", "--license", help="SPDX license id (optional; default: 'unknown')."
     ),
     overwrite: bool = typer.Option(False, "--overwrite", help="Replace an existing entry."),
+    draft: str = typer.Option(
+        "",
+        "--draft",
+        help="Absolute path to a speculative-decoding drafter GGUF to pair with this model.",
+    ),
 ) -> None:
     """Register an already-downloaded model file — capabilities auto-detected.
 
@@ -422,6 +451,8 @@ def model_add(
         payload["id"] = model_id
     if name:
         payload["name"] = name
+    if draft:
+        payload["draft"] = draft
     try:
         from hal0.cli._shared import api_post
 
@@ -439,6 +470,8 @@ def model_add(
     console.print(f"Registered [bold]{mid}[/bold] → {m.get('path', path)}")
     caps = ", ".join(m.get("capabilities", []) or []) or "—"
     console.print(f"  capabilities: {caps}")
+    if m.get("draft"):
+        console.print(f"  drafter: {m['draft']} ({m.get('draft_kind') or '?'})")
     # #1838: detect() may have guessed capabilities/backends from the
     # filename alone (confidence != "high") or failed to read a valid GGUF
     # header at all — both cases used to print the same confident success
@@ -461,6 +494,42 @@ def model_add(
     console.print(
         f"[dim]Next: hal0 model run {mid}   (or: hal0 slot edit <slot> --model {mid})[/dim]"
     )
+
+
+@app.command("set")
+def model_set(
+    ref: str = typer.Argument(..., help="Model id"),
+    draft: str = typer.Option(
+        "",
+        "--draft",
+        help="Absolute path to a drafter GGUF to pair, or 'none' to unpair (the file is kept).",
+    ),
+) -> None:
+    """Change a registered model's facts. Today: pair or unpair a drafter.
+
+    ``--draft <path>`` runs the same fit check as a pull or a scan and
+    refuses a drafter that does not fit; ``--draft none`` clears the pairing
+    and keeps the file.
+    """
+    if not draft:
+        die("nothing to set — pass --draft <path|none>.")
+        return
+    url = _api_base()
+    if _api_unreachable(url):
+        raise typer.Exit(1)
+    unpair = draft.lower() == "none"
+    try:
+        m = api_put(f"/api/models/{ref}", json={"draft": None if unpair else draft})
+    except CliApiError as exc:
+        die(str(exc))
+        return
+    if unpair:
+        console.print(f"Unpaired the drafter from [bold]{ref}[/bold] (file kept).")
+    else:
+        console.print(
+            f"Paired [bold]{ref}[/bold] with drafter {m.get('draft', draft)} "
+            f"({m.get('draft_kind') or '?'})."
+        )
 
 
 @app.command("store")

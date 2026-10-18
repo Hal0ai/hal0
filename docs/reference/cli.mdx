@@ -159,13 +159,14 @@ hardware backend. The hardware backend is selected with `--hardware`, and stored
 | Command | Args | Flags |
 |---|---|---|
 | `model list` | — | `--json` |
-| `model pull <ref>` | `ref` | `--cancel` |
+| `model pull <ref>` | `ref` | `--cancel`, `--draft` (a drafter .gguf to download with the model), `--draft-repo` (the repo holding `--draft`; default the model's own) |
 | `model default <ref>` | `ref` | `--clear` |
 | `model update [ref]` | optional `ref` | `--check`, `--refresh` (only meaningful with `--check`) |
 | `model rm <ref>` | `ref` | `--force`/`-f`, `--keep-files` (remove only the registry entry; files stay on disk, hidden from scans) |
 | `model show <ref>` | `ref` | `--json` |
 | `model scan` | — | — |
-| `model add <path>` | `path` | `--id` (default `""`), `--name`, `--license` (default `""`), `--overwrite` |
+| `model add <path>` | `path` | `--id` (default `""`), `--name`, `--license` (default `""`), `--overwrite`, `--draft` (a drafter GGUF to pair; fit-checked) |
+| `model set <ref>` | `ref` | `--draft` (a drafter path to pair, or `none` to unpair and keep the file) |
 | `model store [path]` | optional `path` | `--migrate` |
 | `model run <ref>` | `ref` | `--slot`/`-s` (default `""`), `--timeout` (default: the derived slot-load budget from `hal0.slot_lifecycle_budget`, `622` at time of writing — see [Slot lifecycle timeouts](/docs/reference/cli-operator/#slot-lifecycle-timeouts)) |
 

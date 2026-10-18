@@ -249,6 +249,7 @@ SLOT_TUNING_TOP_KEYS: tuple[str, ...] = (
     "workers",
     "ctx_size",
     "mtp",
+    "speculation",
     "enable_thinking",
     "vision",
 )
@@ -752,28 +753,61 @@ class ProvidersConfig(BaseModel):
 #: Placement, so it is emitted in the slot layer of the launch argv.
 _MTP_DRAFT_DEVICE: dict[str, str] = {"rocm": "ROCm0", "vulkan": "Vulkan0", "cuda": "CUDA0"}
 
-#: Bench-tuned MTP draft-speculation defaults (profile layer; the draft device
-#: is placement and comes from the slot). A profile may override any of them
-#: in its own ``flags``, which follow the bundle and so win (last-wins).
-MTP_DRAFT_BUNDLE: str = (
-    "--spec-type draft-mtp"
-    " --spec-draft-ngl all"
-    " --spec-draft-n-max 4"
-    " --spec-draft-n-min 0"
-    " --spec-draft-p-min 0.0"
-    " --spec-draft-p-split 0.10"
-    " --spec-draft-type-k q8_0"
-    " --spec-draft-type-v q8_0"
-    " --spec-draft-threads 16"
-    " --spec-draft-threads-batch 32"
-    " --spec-draft-poll 1"
-    " --spec-draft-poll-batch 1"
+#: ``speculation`` on a profile (ADR-0031): ``auto`` drafts through whatever the
+#: model carries (a drafter file, else MTP heads), ``off`` never speculates,
+#: ``ngram`` uses n-gram lookup and needs no extra file.
+SpeculationMode = Literal["auto", "off", "ngram"]
+
+#: Shared tail of every draft bundle: the KV cache types for the draft context.
+_DRAFT_KV = " --spec-draft-type-k q8_0 --spec-draft-type-v q8_0"
+
+#: Shared draft scheduling tail (ADR-0031 §3: it applies to every kind).
+_DRAFT_SCHED = (
+    " --spec-draft-threads 16 --spec-draft-threads-batch 32"
+    " --spec-draft-poll 1 --spec-draft-poll-batch 1"
+)
+
+#: Bench-tuned draft-speculation defaults per draft kind (profile layer; the
+#: draft device is placement and comes from the slot, and ``--spec-type`` is a
+#: model fact emitted in the model layer). A profile may override any of them
+#: in its own ``flags``, which follow the bundle and so win (last-wins). The
+#: ``dflash`` ``--spec-draft-n-max`` is a ``{n_max}`` placeholder the launch
+#: path fills from the drafter's block size (capped at 8).
+DRAFT_BUNDLE: dict[str, str] = {
+    "dflash": "--spec-draft-ngl all --spec-draft-n-max {n_max}" + _DRAFT_KV + _DRAFT_SCHED,
+    "eagle3": "--spec-draft-ngl all --spec-draft-n-max 4" + _DRAFT_KV + _DRAFT_SCHED,
+    "simple": (
+        "--spec-draft-ngl all --spec-draft-n-max 8 --spec-draft-n-min 0"
+        " --spec-draft-p-min 0.75" + _DRAFT_KV + _DRAFT_SCHED
+    ),
+    "mtp": (
+        "--spec-draft-ngl all"
+        " --spec-draft-n-max 4"
+        " --spec-draft-n-min 0"
+        " --spec-draft-p-min 0.0"
+        " --spec-draft-p-split 0.10" + _DRAFT_KV + _DRAFT_SCHED
+    ),
+}
+
+#: The MTP-heads bundle (no ``--spec-type`` token: the model layer owns it).
+MTP_DRAFT_BUNDLE: str = DRAFT_BUNDLE["mtp"]
+
+#: ``speculation = "ngram"``: llama.cpp's ``--spec-default`` n-gram lookup.
+NGRAM_BUNDLE: str = (
+    "--spec-type ngram-mod --spec-ngram-size-n 24 --spec-ngram-size-m 48 --spec-ngram-n-max 64"
 )
 
 
-def mtp_draft_device(backend: str | None) -> str:
-    """The ``--spec-draft-device`` for a slot whose device maps to *backend*."""
-    return _MTP_DRAFT_DEVICE.get((backend or "").lower(), "ROCm0")
+def mtp_draft_device(backend: str | None) -> str | None:
+    """The ``--spec-draft-device`` for a slot whose device maps to *backend*.
+
+    ``None`` for a ``cpu`` slot: its drafter runs on the host CPU, so the slot
+    layer emits no draft device at all (there is no GPU to place it on).
+    """
+    key = (backend or "").lower()
+    if key == "cpu":
+        return None
+    return _MTP_DRAFT_DEVICE.get(key, "ROCm0")
 
 
 #: Seed profile catalog — externalized to shipped TOML (P3-schema, spec
@@ -897,11 +931,12 @@ class ProfileConfig(BaseModel):
         default="auto",
         description="'auto' loads the model's mmproj when it has one; 'off' never does.",
     )
-    mtp: Literal["auto", "off"] = Field(
+    speculation: SpeculationMode = Field(
         default="auto",
         description=(
-            "'auto' drafts with the model's MTP heads when it has them and the "
-            "runner supports it; 'off' never does."
+            "'auto' speculates with whatever the model carries (a paired drafter, "
+            "else its MTP heads) when the runner supports it; 'ngram' uses n-gram "
+            "lookup and needs no extra file; 'off' never speculates."
         ),
     )
     runner: str | None = Field(
@@ -3366,9 +3401,11 @@ __all__ = [
     "CURRENT_SCHEMA_VERSION",
     "DEFAULT_DEVICE",
     "DEVICE_DEFAULT_PROFILES",
+    "DRAFT_BUNDLE",
     "FAMILY_DEFAULTS",
     "HERMES_COMMAND_APPROVALS_MODES",
     "MTP_DRAFT_BUNDLE",
+    "NGRAM_BUNDLE",
     "PROFILE_BENCH",
     "PROFILE_SCHEMA_VERSION_CURRENT",
     "REMOVED_SLOT_KEYS",
@@ -3406,6 +3443,7 @@ __all__ = [
     "ServerConfig",
     "SlotConfig",
     "SlotsConfig",
+    "SpeculationMode",
     "TelemetryConfig",
     "ToolPolicy",
     "UpdatesConfig",

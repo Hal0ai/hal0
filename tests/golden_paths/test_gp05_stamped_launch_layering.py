@@ -7,9 +7,10 @@ deduplicated last-wins by :func:`hal0.slots.argv.resolve_argv`:
    ``--ctx-size`` is the profile's ``ctx_size`` rule);
 2. ``model``   — ``--jinja``, ``--chat-template-file``, ``--mmproj`` (facts
    about the file; the projector only when the profile's ``vision`` is
-   ``auto``);
-3. ``profile`` — the MTP draft bundle when the profile's MTP is in effect,
-   then the profile's own ``flags`` (so its ``--spec-draft-*`` values win);
+   ``auto``), then ``--spec-type`` and the drafter's ``--spec-draft-model``
+   when speculation is in effect (ADR-0031 §3);
+3. ``profile`` — the bundle for the speculation kind in effect, then the
+   profile's own ``flags`` (so its ``--spec-draft-*`` values win);
 4. ``slot``    — ``-ngl``, ``--threads``, ``--metrics`` and the
    ``--spec-draft-device`` derived from the slot's device.
 
@@ -23,7 +24,11 @@ import shlex
 
 import pytest
 
-from hal0.config.schema import MTP_DRAFT_BUNDLE, SEED_PROFILES, ProfileConfig
+from hal0.config.schema import (
+    MTP_DRAFT_BUNDLE,
+    SEED_PROFILES,
+    ProfileConfig,
+)
 from hal0.errors import UnprocessableEntity
 from hal0.profiles import ResolvedProfile, resolve_loaded_profile
 from hal0.providers.container import (
@@ -83,7 +88,8 @@ def test_argv_builder_emits_exactly_the_four_layers_in_order() -> None:
         jinja=True,
         chat_template_path="/models/chat-templates/qwen.jinja",
         mmproj="/models/qwen-mmproj.gguf",
-        mtp=True,
+        spec_type="draft-mtp",
+        spec_bundle=MTP_DRAFT_BUNDLE,
         profile_flags="-fa auto -ctk q8_0 --parallel 2 --spec-draft-n-max 8",
         slot_n_gpu_layers=99,
         slot_threads=8,
@@ -110,6 +116,8 @@ def test_argv_builder_emits_exactly_the_four_layers_in_order() -> None:
         "/models/chat-templates/qwen.jinja",
         "--mmproj",
         "/models/qwen-mmproj.gguf",
+        "--spec-type",
+        "draft-mtp",
     ]
     # The MTP bundle first, then the profile's own flags.
     bundle = shlex.split(MTP_DRAFT_BUNDLE)
@@ -138,6 +146,7 @@ def test_argv_builder_emits_exactly_the_four_layers_in_order() -> None:
     prov = {p.flag: p.source for p in resolved.provenance}
     assert prov["--ctx-size"] == "base"
     assert prov["--mmproj"] == "model"
+    assert prov["--spec-type"] == "model"
     assert prov["--parallel"] == "profile"
     assert prov["-ngl"] == "slot"
     assert prov["--spec-draft-device"] == "slot"
@@ -165,6 +174,8 @@ def test_agent_seed_on_a_vulkan_slot_golden_argv() -> None:
         "--ctx-size",
         "65536",
         "--jinja",
+        "--spec-type",
+        "draft-mtp",
         *shlex.split(MTP_DRAFT_BUNDLE),
         *shlex.split(str(SEED_PROFILES["agent"]["flags"])),
         "-ngl",
@@ -178,6 +189,136 @@ def test_agent_seed_on_a_vulkan_slot_golden_argv() -> None:
     assert "--mmproj" not in argv  # the agent seed's vision = "off"
 
 
+_GOLDEN_BASE = [
+    "--host", "0.0.0.0",
+    "--port", "8081",
+    "--model", _MODEL_PATH,
+    "--alias", "qwen-mtp",
+    "--ctx-size", "65536",
+]  # fmt: skip
+_GOLDEN_SLOT = ["-ngl", "99", "--threads", "8", "--metrics"]
+
+
+def _golden_profile(name: str, **fields: object) -> ResolvedProfile:
+    return _custom(name, flags="-fa auto", ctx_size=65536, **fields)
+
+
+def _spec_type_count(segments: list[tuple[str, list[str]]]) -> int:
+    """``--spec-type`` across the RAW segments: llama.cpp appends its values,
+    so a second one anywhere would launch a mixed type (dedupe would hide it)."""
+    return sum(tokens.count("--spec-type") for _, tokens in segments)
+
+
+def test_dflash_layering() -> None:
+    """A paired DFlash drafter: the model layer names the type and the file,
+    the profile layer opens with the dflash bundle (n-max = block_size - 1),
+    the slot layer places the drafter on the slot's device."""
+    model = _model(
+        draft="/p/d.gguf",
+        draft_kind="dflash",
+        metadata={"context_length": 262144, "draft": {"block_size": 8}},
+    )
+    segments = _launch(_slot("tune"), model, _golden_profile("tune"))
+    by_label = dict(segments)
+    assert by_label["base"] == _GOLDEN_BASE
+    assert by_label["model"] == [
+        "--jinja",
+        "--mmproj", "/models/qwen-mmproj.gguf",
+        "--spec-type", "draft-dflash",
+        "--spec-draft-model", "/p/d.gguf",
+    ]  # fmt: skip
+    assert by_label["profile"] == [
+        "--spec-draft-ngl", "all",
+        "--spec-draft-n-max", "7",
+        "--spec-draft-type-k", "q8_0",
+        "--spec-draft-type-v", "q8_0",
+        "--spec-draft-threads", "16",
+        "--spec-draft-threads-batch", "32",
+        "--spec-draft-poll", "1",
+        "--spec-draft-poll-batch", "1",
+        "-fa", "auto",
+    ]  # fmt: skip
+    assert by_label["slot"] == [*_GOLDEN_SLOT, "--spec-draft-device", "Vulkan0"]
+    assert _spec_type_count(segments) == 1
+
+
+@pytest.mark.parametrize(
+    ("device", "slot_layer"),
+    [
+        ("gpu-rocm", [*_GOLDEN_SLOT, "--spec-draft-device", "ROCm0"]),
+        ("gpu-vulkan", [*_GOLDEN_SLOT, "--spec-draft-device", "Vulkan0"]),
+        # A CPU slot's drafter runs on the host CPU: no draft device at all
+        # (there is no ROCm0 to place it on).
+        ("cpu", _GOLDEN_SLOT),
+    ],
+)
+def test_a_paired_drafter_slot_layer_per_device(device: str, slot_layer: list[str]) -> None:
+    model = _model(
+        draft="/p/d.gguf",
+        draft_kind="dflash",
+        metadata={"context_length": 262144, "draft": {"block_size": 8}},
+    )
+    segments = _launch(_slot("tune", device=device), model, _golden_profile("tune"))
+    by_label = dict(segments)
+    assert by_label["model"][-4:] == [
+        "--spec-type",
+        "draft-dflash",
+        "--spec-draft-model",
+        "/p/d.gguf",
+    ]
+    assert by_label["slot"] == slot_layer
+
+
+def test_mtp_layering_spec_type_moved_to_model_layer() -> None:
+    segments = _launch(_slot("tune"), _model(), _golden_profile("tune"))
+    by_label = dict(segments)
+    assert by_label["base"] == _GOLDEN_BASE
+    assert by_label["model"] == [
+        "--jinja",
+        "--mmproj", "/models/qwen-mmproj.gguf",
+        "--spec-type", "draft-mtp",
+    ]  # fmt: skip
+    assert by_label["profile"] == [
+        "--spec-draft-ngl", "all",
+        "--spec-draft-n-max", "4",
+        "--spec-draft-n-min", "0",
+        "--spec-draft-p-min", "0.0",
+        "--spec-draft-p-split", "0.10",
+        "--spec-draft-type-k", "q8_0",
+        "--spec-draft-type-v", "q8_0",
+        "--spec-draft-threads", "16",
+        "--spec-draft-threads-batch", "32",
+        "--spec-draft-poll", "1",
+        "--spec-draft-poll-batch", "1",
+        "-fa", "auto",
+    ]  # fmt: skip
+    assert by_label["slot"] == [*_GOLDEN_SLOT, "--spec-draft-device", "Vulkan0"]
+    assert _spec_type_count(segments) == 1
+
+
+def test_ngram_layering() -> None:
+    """``speculation = "ngram"`` ignores the drafter and MTP heads: the model
+    layer carries ``--spec-type ngram-mod``, the profile layer the n-gram tune,
+    and no draft device is placed."""
+    model = _model(draft="/p/d.gguf", draft_kind="dflash")
+    segments = _launch(_slot("ngram"), model, _golden_profile("ngram", speculation="ngram"))
+    by_label = dict(segments)
+    assert by_label["base"] == _GOLDEN_BASE
+    assert by_label["model"] == [
+        "--jinja",
+        "--mmproj", "/models/qwen-mmproj.gguf",
+        "--spec-type", "ngram-mod",
+    ]  # fmt: skip
+    assert by_label["profile"] == [
+        "--spec-ngram-size-n", "24",
+        "--spec-ngram-size-m", "48",
+        "--spec-ngram-n-max", "64",
+        "-fa", "auto",
+    ]  # fmt: skip
+    assert by_label["slot"] == _GOLDEN_SLOT
+    assert _spec_type_count(segments) == 1
+
+
 @pytest.mark.parametrize(
     ("device", "draft_device"),
     [("gpu-rocm", "ROCm0"), ("gpu-vulkan", "Vulkan0")],
@@ -189,7 +330,7 @@ def test_the_draft_device_follows_the_slots_device(device: str, draft_device: st
 
 def test_a_runner_without_mtp_support_never_drafts() -> None:
     """The CUDA runner has no MTP support: a model with heads under an
-    ``mtp = "auto"`` profile launches without the bundle or a draft device."""
+    ``speculation = "auto"`` profile launches without the bundle or a draft device."""
     argv = resolve_argv(_launch(_slot("agent", device="gpu-cuda"), _model(), _seed("agent"))).argv
     assert "--spec-type" not in argv
     assert "--spec-draft-device" not in argv
@@ -200,7 +341,7 @@ def test_the_profile_is_read_live_so_one_model_runs_two_tunes() -> None:
     onto the model, so neither slot's tune leaks into the other."""
     model = _model()
     fast = _custom("fast", flags="-fa auto -ctk q8_0 -ctv q8_0", ctx_size=16384)
-    long = _custom("long", flags="-fa auto -b 4096", ctx_size=131072, mtp="off")
+    long = _custom("long", flags="-fa auto -b 4096", ctx_size=131072, speculation="off")
 
     fast_argv = resolve_argv(_launch(_slot("fast"), model, fast)).argv
     long_argv = resolve_argv(_launch(_slot("long"), model, long)).argv
@@ -208,8 +349,8 @@ def test_the_profile_is_read_live_so_one_model_runs_two_tunes() -> None:
     assert fast_argv[fast_argv.index("--ctx-size") + 1] == "16384"
     assert long_argv[long_argv.index("--ctx-size") + 1] == "131072"
     assert "-ctk" in fast_argv and "-ctk" not in long_argv
-    assert "--spec-type" in fast_argv  # model heads + mtp auto
-    assert "--spec-type" not in long_argv  # the profile's mtp = "off"
+    assert "--spec-type" in fast_argv  # model heads + speculation auto
+    assert "--spec-type" not in long_argv  # the profile's speculation = "off"
     assert "--spec-draft-device" not in long_argv
     assert "--mmproj" in fast_argv and "--mmproj" in long_argv  # vision auto
 

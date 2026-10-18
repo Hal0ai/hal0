@@ -1,5 +1,5 @@
 {
-  "checksum": "sha256:0e9ac389e9bc238971e5a479b72b1f577b69e2257811ad06d706e1b1068f3985",
+  "checksum": "sha256:f3149e0100c69e729587e5c1f5799500c8d10a439af1e6559e53cc13ccb12e2a",
   "exported_at": "2026-09-01T00:00:00Z",
   "hal0_version": "1.4.0",
   "kind": "hal0.profile",
@@ -8,7 +8,7 @@
     "ctx_size": 131072,
     "flags": "-fa auto -ctk q8_0 -ctv q8_0 -b 2048 -ub 512 --no-context-shift",
     "intent": "Long-context chat · tuned for 128K ctx",
-    "mtp": "auto",
+    "speculation": "auto",
     "vision": "auto"
   },
   "schema_version": 2

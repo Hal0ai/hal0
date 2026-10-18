@@ -19,7 +19,7 @@ Interface contract (the only names route handlers / callers should use):
     resolve_pull_capability(request, model_id, body) -> (capability, subdir)
         body → registry → curated; (None, None) for ad-hoc → flat layout.
     resolve_pull_source_with_body(request, model_id, body)
-        -> (hf_repo, hf_file, mmproj_file, from_body)
+        -> PullSource(repo, file, mmproj_file, from_body, draft_file, draft_repo)
     seed_registry_from_body(request, model_id, hf_repo, hf_file, labels, chat_template=None)
         Idempotent upsert of a registry row from body-supplied HF coords.
     schedule_pull_task(app_state, model_id, coro) -> asyncio.Task
@@ -75,7 +75,7 @@ import os
 import time
 from collections.abc import Coroutine
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 from fastapi import Request
 from fastapi.responses import StreamingResponse
@@ -298,46 +298,75 @@ def seed_registry_from_body(
         registry.add(entry)
 
 
+class PullSource(NamedTuple):
+    """Where a pull reads from: the model, its optional projector and drafter."""
+
+    repo: str
+    file: str
+    mmproj_file: str | None
+    from_body: bool
+    draft_file: str | None = None
+    draft_repo: str | None = None
+
+
 def resolve_pull_source_with_body(
     request: Request,
     model_id: str,
     body: dict[str, Any] | None,
-) -> tuple[str, str, str | None, bool]:
-    """Resolve (hf_repo, hf_file, mmproj_file) with an optional body override.
+) -> PullSource:
+    """Resolve the pull's source coordinates with an optional body override.
 
-    Returns ``(repo, file, mmproj_file, from_body)`` where ``from_body=True``
-    means the caller supplied both coordinate fields in the request payload —
-    the pull route uses that flag to decide whether to seed a registry row.
+    Returns a :class:`PullSource` where ``from_body=True`` means the caller
+    supplied both coordinate fields in the request payload — the pull route
+    uses that flag to decide whether to seed a registry row.
 
     ``mmproj_file`` (WS-11) resolves body-first (the Add-by-HF modal sends
     ``mmproj_filename`` for vision models), then the curated entry's
     ``mmproj_file``; ``None`` means single-file pull.
+
+    ``draft_file``/``draft_repo`` (ADR-0031 §4) resolve the same way from the
+    body's ``draft_filename``/``draft_repo`` and the curated entry's
+    ``draft_file``/``draft_repo``; the repo defaults to the model's own.
+    ``None`` means no drafter.
 
     A partial body (only one of the two coordinate fields) is ignored to
     avoid silently mixing a body coord with a stale registry coord; the
     fallback path raises 422 with the existing message so the caller
     gets the same hint they would on an empty body.
     """
+
+    def _text(value: Any) -> str | None:
+        return value.strip() if isinstance(value, str) and value.strip() else None
+
     mmproj: str | None = None
+    draft: str | None = None
+    draft_repo: str | None = None
     if isinstance(body, dict):
-        mm_raw = body.get("mmproj_filename") or body.get("mmproj_file")
-        if isinstance(mm_raw, str) and mm_raw.strip():
-            mmproj = mm_raw.strip()
+        mmproj = _text(body.get("mmproj_filename") or body.get("mmproj_file"))
+        draft = _text(body.get("draft_filename"))
+        draft_repo = _text(body.get("draft_repo"))
         repo_raw = body.get("hf_repo")
         file_raw = body.get("hf_filename") or body.get("hf_file")
         if isinstance(repo_raw, str) and isinstance(file_raw, str):
             repo = repo_raw.strip()
             file = file_raw.strip()
             if repo and file:
-                return repo, file, mmproj, True
+                return PullSource(
+                    repo, file, mmproj, True, draft, (draft_repo or repo) if draft else None
+                )
     repo, file = resolve_pull_source(request, model_id)
-    if mmproj is None:
-        # Curated vision picks carry their mmproj alongside the main GGUF.
-        curated = get_curated(model_id)
-        if curated is not None:
-            mm = (getattr(curated, "mmproj_file", "") or "").strip()
-            mmproj = mm or None
-    return repo, file, mmproj, False
+    curated = get_curated(model_id)
+    if curated is not None:
+        if mmproj is None:
+            # Curated vision picks carry their mmproj alongside the main GGUF.
+            mmproj = (getattr(curated, "mmproj_file", "") or "").strip() or None
+        if draft is None:
+            draft = (getattr(curated, "draft_file", "") or "").strip() or None
+            if draft:
+                draft_repo = (
+                    draft_repo or (getattr(curated, "draft_repo", "") or "").strip() or None
+                )
+    return PullSource(repo, file, mmproj, False, draft, (draft_repo or repo) if draft else None)
 
 
 def schedule_pull_task(
@@ -382,6 +411,8 @@ async def run_pull_with_events(
     capability: str | None = None,
     comfyui_subdir: str | None = None,
     mmproj_file: str | None = None,
+    draft_file: str | None = None,
+    draft_repo: str | None = None,
     dest_override: str | None = None,
 ) -> None:
     """Wrap ``run_pull`` so footer-visible progress events fan out.
@@ -406,6 +437,8 @@ async def run_pull_with_events(
                 capability=capability,
                 comfyui_subdir=comfyui_subdir,
                 mmproj_file=mmproj_file,
+                draft_file=draft_file,
+                draft_repo=draft_repo,
                 dest_override=dest_override,
             )
         finally:
@@ -457,6 +490,8 @@ async def run_pull_with_events(
             capability=capability,
             comfyui_subdir=comfyui_subdir,
             mmproj_file=mmproj_file,
+            draft_file=draft_file,
+            draft_repo=draft_repo,
             dest_override=dest_override,
         )
     except asyncio.CancelledError:
@@ -650,9 +685,14 @@ async def enqueue(
     except Exception:
         body = None
 
-    hf_repo, hf_file, mmproj_file, from_body = resolve_pull_source_with_body(
-        request, model_id, body
+    source = resolve_pull_source_with_body(request, model_id, body)
+    hf_repo, hf_file, mmproj_file, from_body = (
+        source.repo,
+        source.file,
+        source.mmproj_file,
+        source.from_body,
     )
+    draft_file, draft_repo = source.draft_file, source.draft_repo
     # Fork-only quants (ROCmFPX family, IU4, ActiveFPX) have no runner to load
     # them (ADR-0028): refuse before seeding a row or downloading a byte. The
     # selected file name decides, never the registry id: the operator picks
@@ -666,6 +706,28 @@ async def enqueue(
     from hal0.registry.pull import _shard_set
 
     _shard_set(hf_file)
+    if draft_file and isinstance(body, dict) and body.get("draft_filename"):
+        # ADR-0031 §4: a drafter the operator picked is checked against this
+        # target from the two Hub headers BEFORE a row is seeded or a byte
+        # downloaded. A curated ``draft_file`` is trusted like ``mmproj_file``;
+        # the post-download classification still fills the facts.
+        from hal0.errors import UnprocessableEntity
+        from hal0.services.models_service import inspect_draft
+
+        verdict = await inspect_draft(
+            {
+                "hf_repo": hf_repo,
+                "hf_filename": hf_file,
+                "draft_repo": draft_repo or hf_repo,
+                "draft_filename": draft_file,
+            }
+        )
+        if not verdict["fit"]["ok"]:
+            raise UnprocessableEntity(
+                f"drafter {draft_file} does not fit {hf_file}",
+                code="model.draft_mismatch",
+                details={"reasons": verdict["fit"]["reasons"]},
+            )
     if from_body:
         labels = body.get("labels") if isinstance(body, dict) else None
         if not isinstance(labels, list):
@@ -720,6 +782,8 @@ async def enqueue(
             capability=capability,
             comfyui_subdir=comfyui_subdir,
             mmproj_file=mmproj_file,
+            draft_file=draft_file,
+            draft_repo=draft_repo,
         ),
     )
     out: dict[str, object] = {
@@ -731,6 +795,8 @@ async def enqueue(
     }
     if mmproj_file:
         out["mmproj_file"] = mmproj_file
+    if draft_file:
+        out["draft_file"] = draft_file
     return out
 
 

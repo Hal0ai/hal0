@@ -106,9 +106,9 @@ A slot's behavior is shaped by two more ideas that sit on top of it:
   slot fields.
 - A **profile** is a reusable, complete *tune*: llama-server flags (sampler
   settings, KV-cache types, batch size), the context window (`ctx_size`), the
-  reasoning default, whether the model's vision projector loads, and whether
-  MTP drafts. It carries no placement: device, GPU layers and threads belong
-  to the slot. It may optionally name a **Runtime** by registry key (never an
+  reasoning default, whether the model's vision projector loads, and how it
+  speculates (`speculation`). It carries no placement: device, GPU layers and
+  threads belong to the slot. It may optionally name a **Runtime** by registry key (never an
   image ref); applying such a profile switches the slot's runtime, and for a
   single-lane runtime its device, on save.
 

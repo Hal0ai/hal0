@@ -30,6 +30,41 @@ applying. Add those subsections to a version's section to surface them; see
 
 ## [Unreleased]
 
+### Added
+
+- **Speculative-decoding drafters.** A model can now carry a drafter, a small
+  file that proposes tokens the main model checks in one pass, so replies
+  come faster with the same output. Add from Hugging Face lists drafters found
+  in the repo or in a companion repo by the same author (`-LiLiCorr`,
+  `-DFlash`, `-DFlash2`, `-DSpark`, `-EAGLE3`, `-draft`) and checks that the
+  drafter fits the quant from the two file headers before anything downloads;
+  `hal0 model pull <id> --draft <file> [--draft-repo <repo>]`, `hal0 model add
+  --draft <path>` and `hal0 model set <id> --draft <path|none>` do the same
+  from the terminal, the model drawer has a Drafter field, and a rescan pairs
+  a fitting drafter it finds beside a model (one you unpair on purpose stays
+  unpaired). A paired drafter is used before the model's own MTP heads. A
+  drafter the runner image is too old to run (LiLiCorr needs llama.cpp
+  b11669 or newer) is reported on the slot instead of crashing the launch, and
+  each slot reports its draft acceptance rate. `DELETE
+  /api/models/{id}/draft` removes the file; `POST /api/models/inspect-draft`
+  checks a pair. The benchmark with/without comparison comes in a later release.
+
+### Breaking
+
+- **The profile field `mtp` is now `speculation` (`auto`, `off` or `ngram`).**
+  `hal0 update` rewrites `profiles.toml` once: `mtp = "off"` becomes
+  `speculation = "off"` and `mtp = "auto"` is dropped, after copying the file
+  to `profiles.toml.bak-<UTC stamp>` beside it. After that the API, the CLI
+  (`--mtp`, which exits 2) and the MCP tools refuse `mtp` on a profile with a
+  422 `profiles.field_renamed` that names `speculation`; there is no alias.
+  The model's own `mtp` fact (the file has MTP heads) is unchanged. A profile
+  may no longer carry `--spec-type` in its `flags` (hal0 derives it from the
+  model's drafter or heads); the update removes one it finds, turning an
+  `ngram-*` value into `speculation = "ngram"`. Rolling back to 1.4.x
+  quarantines every profile that carries `speculation`: restore the
+  `profiles.toml.bak-<UTC stamp>` copy before `hal0 update --rollback` (see
+  the rollback guide).
+
 ### Changed
 
 - **Model picker rows are compact and consistent.** In the slot drawer and
@@ -46,7 +81,8 @@ applying. Add those subsections to a version's section to surface them; see
   row, and pulling it downloads every part into the model's directory under
   names llama.cpp can open, so the slot loads the whole model from the
   first part. The vision projector is offered beside the quant instead of
-  among them, and speculative-decoding draft files are listed separately.
+  among them, and speculative-decoding draft files are listed separately (and
+  pairable: see Added).
   `POST /api/models/inspect` returns projectors under `mmproj` and drafters
   under `drafts`; `variants` now holds only quants.
 

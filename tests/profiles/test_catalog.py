@@ -33,7 +33,7 @@ def test_resolved_profile_items_carry_the_profile_centric_fields(tmp_hal0_home: 
     item = ProfileCatalog().resolve("agent").to_dict()
     assert item["ctx_size"] == 65536
     assert item["vision"] == "off"
-    assert item["mtp"] == "auto"
+    assert item["speculation"] == "auto"
     assert item["enable_thinking"] is None
     assert item["resolved_flags"] == item["flags"]
     assert not {"device_class", "backend", "quant"} & set(item)
@@ -51,7 +51,7 @@ def test_create_update_delete_profile(tmp_hal0_home: str) -> None:
 
     created = catalog.create(
         "my-rocm",
-        ProfileConfig(flags="-fa on", ctx_size=32768, enable_thinking=False, mtp="off"),
+        ProfileConfig(flags="-fa on", ctx_size=32768, enable_thinking=False, speculation="off"),
     )
     assert created.seed is False
     assert created.runtime_family == "llama-server"
@@ -60,12 +60,12 @@ def test_create_update_delete_profile(tmp_hal0_home: str) -> None:
     assert created.resolved_flags == "-fa on"
     assert created.ctx_size == 32768
     assert created.enable_thinking is False
-    assert created.mtp == "off"
+    assert created.speculation == "off"
 
-    updated = catalog.update("my-rocm", ProfilePatch(flags="-fa off", mtp="auto"))
+    updated = catalog.update("my-rocm", ProfilePatch(flags="-fa off", speculation="auto"))
     assert updated.flags == "-fa off"
     assert updated.resolved_flags == "-fa off"
-    assert updated.mtp == "auto"
+    assert updated.speculation == "auto"
     # Unpatched tune fields keep their stored value.
     assert updated.ctx_size == 32768
     assert updated.enable_thinking is False

@@ -270,13 +270,13 @@ test.describe('slot drawer profile row (ADR-0029)', () => {
 
   const MY_TUNE = {
     name: 'my-tune', flags: '-fa on -b 2048', resolved_flags: '-fa on -b 2048',
-    ctx_size: 65536, enable_thinking: false, vision: 'auto', mtp: 'auto',
+    ctx_size: 65536, enable_thinking: false, vision: 'auto', speculation: 'auto',
     seed: false, cloned_from: null, intent: 'My tune', tps: null, rtf: null,
     used_by: ['chat'], supported_slot_types: ['llm'],
   }
   const SEED = {
     name: 'rocm', flags: '-fa on', resolved_flags: '-fa on',
-    ctx_size: 32768, enable_thinking: true, vision: 'auto', mtp: 'auto',
+    ctx_size: 32768, enable_thinking: true, vision: 'auto', speculation: 'auto',
     seed: true, cloned_from: null, intent: 'MoE agents', tps: null, rtf: null,
     used_by: [], supported_slot_types: ['llm'],
   }
@@ -423,7 +423,7 @@ test.describe('profile apply flow — runner-carrying profile applies a new runt
   // `runner` cascade under test is the only thing that can move the device.
   const RUNNER_PROFILE = {
     name: 'single-lane-apply',
-    flags: '', ctx_size: null, enable_thinking: null, vision: 'auto', mtp: 'auto',
+    flags: '', ctx_size: null, enable_thinking: null, vision: 'auto', speculation: 'auto',
     resolved_flags: '', seed: false, used_by: [],
     intent: 'Qwen3 TTS — single-lane ROCm runtime',
     supported_slot_types: ['llm'],

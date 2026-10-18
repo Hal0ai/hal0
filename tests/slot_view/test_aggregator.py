@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, ClassVar
 
 import pytest
 
@@ -1219,6 +1219,96 @@ class TestMetricInjection:
         agg = _agg(FakeSlotManager(slots=[_slot()]), metrics=boom)
         views = await agg.snapshot()
         assert views[0].to_dict()["metrics"]["toks"] == 0.0
+
+
+class TestSpecMetrics:
+    """metrics.spec: counters from the scrape + the plan fields (ADR-0031 §6)."""
+
+    _PLAN: ClassVar[dict[str, Any]] = {
+        "speculation": {
+            "mode": "draft",
+            "kind": "dflash",
+            "variant": "q8",
+            "unavailable_reason": None,
+        }
+    }
+
+    def _cfg(self, model: str | None) -> dict[str, Any]:
+        return {"name": "chat", "model": {"default": model} if model else {}}
+
+    async def test_spec_carries_plan_and_counters(
+        self, monkeypatch: pytest.MonkeyPatch, no_mem: None
+    ) -> None:
+        monkeypatch.setattr(
+            "hal0.providers.container.resolved_argv_detail_for_slot", lambda cfg: self._PLAN
+        )
+
+        async def fake_metrics() -> dict[str, Any]:
+            return {
+                "chat": {
+                    "spec": {
+                        "active": True,
+                        "draft_tokens": 300,
+                        "accepted_tokens": 210,
+                        "drafts": 80,
+                        "acceptance": 0.7,
+                        "mean_accepted_len": 3.6,
+                        "live_acceptance": 0.5,
+                    }
+                }
+            }
+
+        agg = _agg(
+            FakeSlotManager(slots=[_slot()], configs=[self._cfg("qwen3-4b")]),
+            metrics=fake_metrics,
+        )
+        spec = (await agg.snapshot())[0].to_dict()["metrics"]["spec"]
+        assert spec == {
+            "active": True,
+            "draft_tokens": 300,
+            "accepted_tokens": 210,
+            "drafts": 80,
+            "acceptance": 0.7,
+            "mean_accepted_len": 3.6,
+            "live_acceptance": 0.5,
+            "mode": "draft",
+            "kind": "dflash",
+            "variant": "q8",
+            "unavailable_reason": None,
+        }
+
+    async def test_loaded_but_not_drafting_is_inactive(
+        self, monkeypatch: pytest.MonkeyPatch, no_mem: None
+    ) -> None:
+        monkeypatch.setattr(
+            "hal0.providers.container.resolved_argv_detail_for_slot", lambda cfg: self._PLAN
+        )
+        agg = _agg(FakeSlotManager(slots=[_slot()], configs=[self._cfg("qwen3-4b")]))
+        spec = (await agg.snapshot())[0].to_dict()["metrics"]["spec"]
+        assert spec["active"] is False
+        assert spec["draft_tokens"] == 0
+        assert spec["acceptance"] is None
+        assert spec["live_acceptance"] is None
+        assert spec["mode"] == "draft"
+
+    async def test_spec_absent_when_slot_has_no_model(
+        self, monkeypatch: pytest.MonkeyPatch, no_mem: None
+    ) -> None:
+        monkeypatch.setattr(
+            "hal0.providers.container.resolved_argv_detail_for_slot", lambda cfg: self._PLAN
+        )
+        agg = _agg(FakeSlotManager(slots=[_slot(model_id=None)], configs=[self._cfg(None)]))
+        assert "spec" not in (await agg.snapshot())[0].to_dict()["metrics"]
+
+    async def test_plan_failure_never_breaks_snapshot(
+        self, monkeypatch: pytest.MonkeyPatch, no_mem: None
+    ) -> None:
+        def boom(cfg: Any) -> Any:
+            raise RuntimeError("plan exploded")
+
+        monkeypatch.setattr("hal0.providers.container.resolved_argv_detail_for_slot", boom)
+        agg = _agg(FakeSlotManager(slots=[_slot()], configs=[self._cfg("qwen3-4b")]))
+        assert "spec" not in (await agg.snapshot())[0].to_dict()["metrics"]
 
 
 # ── synthetic upstream entries + composition ───────────────────────────────

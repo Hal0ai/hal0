@@ -192,3 +192,18 @@ class TestImportStack:
         assert exc.value.code == "profiles.model_fact_flag_denied"
         assert "custom-bad" not in load_profiles_config().profile
         assert not any(r.slug == "s3" for r in catalog.list())
+
+
+def test_a_v140_stack_envelope_with_embedded_mtp_profiles_imports_converted(
+    reg: ModelRegistry, tmp_hal0_home: str
+) -> None:
+    """Stack schema 3 from hal0 1.4.0 embedded profiles still carrying ``mtp``."""
+    env = export_envelope(_stack(), exported_at="t", registry=reg)
+    env["stack"]["profiles"] = {
+        "quiet": {"flags": "-fa on", "mtp": "off"},
+        "loud": {"flags": "-b 64", "mtp": "auto"},
+    }
+    parsed = parse_envelope(env)
+    assert parsed.stack.profiles["quiet"].speculation == "off"
+    assert parsed.stack.profiles["loud"].speculation == "auto"
+    assert env["stack"]["profiles"]["quiet"] == {"flags": "-fa on", "mtp": "off"}

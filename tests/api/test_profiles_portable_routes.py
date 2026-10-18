@@ -45,7 +45,7 @@ def _create_custom(client: TestClient, name: str = "my-custom") -> None:
             "ctx_size": 49152,
             "enable_thinking": True,
             "vision": "off",
-            "mtp": "off",
+            "speculation": "off",
             "intent": "My workload",
         },
     )
@@ -79,7 +79,7 @@ class TestExportRoute:
         assert body["ctx_size"] == 49152
         assert body["enable_thinking"] is True
         assert body["vision"] == "off"
-        assert body["mtp"] == "off"
+        assert body["speculation"] == "off"
         assert not {"device_class", "backend", "quant"} & set(body)
 
     def test_export_unknown_404(self, client: TestClient) -> None:
@@ -390,4 +390,4 @@ class TestRoundTripHttp:
         assert imported["ctx_size"] == 49152
         assert imported["enable_thinking"] is True
         assert imported["vision"] == "off"
-        assert imported["mtp"] == "off"
+        assert imported["speculation"] == "off"

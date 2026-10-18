@@ -617,7 +617,7 @@ def model_is_mtp_eligible(model_info: Mapping[str, Any]) -> bool:
     simply not eligible; tag the model (or set its ``mtp`` fact to true)
     instead.
 
-    Gates **auto** MTP in :func:`hal0.providers.container._effective_mtp` and the
+    Gates **auto** MTP in :func:`hal0.providers.speculation.effective_speculation` and the
     swap-time / upgrade-migration MTP-defuse helpers
     (:mod:`hal0.slots.profile_adopt`, :mod:`hal0.updater.updater`), which
     both call this directly. ``model_info`` is the registry ``model_dump``

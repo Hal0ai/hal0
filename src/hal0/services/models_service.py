@@ -606,15 +606,33 @@ def missing_registry_rows(
 
 
 def preview_scan_rows(
-    raw_paths: list[Any], recursive: bool, extensions: set[str]
+    raw_paths: list[Any],
+    recursive: bool,
+    extensions: set[str],
+    *,
+    registry: Any = None,
+    skipped: list[dict[str, Any]] | None = None,
+    paired_drafts: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """Walk ``raw_paths`` and return :class:`DetectionResult` rows (no mutation).
 
     Inspection-only: selects files matching ``extensions`` when walking dirs,
     detects each, and dedups by resolved path then by (name, size, kind) so HF
     cache's reblobbed snapshots collapse to one row per distinct model.
+
+    Speculative-decoding drafters (ADR-0031 §4 Scan) are not rows: a fitting one
+    gets a non-selectable ``role="draft"`` row naming the model it pairs with
+    and sets ``draft`` on that model's row (or lands in ``paired_drafts`` for an
+    already-registered model); unpaired ones also go to ``skipped`` as
+    ``{path, reason}``.
     """
-    from hal0.registry.discover import is_skippable
+    from hal0.registry.discover import (
+        _scan_drafter,
+        is_skippable,
+        preview_drafter_pairing,
+    )
+
+    drafters = []
 
     preview: list[dict[str, Any]] = []
     seen: set[Path] = set()
@@ -660,6 +678,10 @@ def preview_scan_rows(
             if resolved in seen:
                 continue
             seen.add(resolved)
+            drafter = _scan_drafter(p, resolved)
+            if drafter is not None:
+                drafters.append(drafter)
+                continue
             result: DetectionResult = detect(p)
             try:
                 size_bytes = resolved.stat().st_size
@@ -696,6 +718,13 @@ def preview_scan_rows(
             continue
         by_sig.add(sig)
         unique.append(row)
+    if drafters:
+        drafter_skipped, pairs, drafter_rows = preview_drafter_pairing(registry, unique, drafters)
+        unique.extend(drafter_rows)
+        if skipped is not None:
+            skipped.extend(drafter_skipped)
+        if paired_drafts is not None:
+            paired_drafts.extend(pairs)
     return unique
 
 
@@ -1005,7 +1034,7 @@ def _model_file_rows(
 
 
 def _model_paths(model: Any) -> list[str]:
-    """The paths a registry row itself records: path, shards, mmproj."""
+    """The paths a registry row itself records: path, shards, mmproj, draft."""
     out: list[str] = []
     if getattr(model, "path", ""):
         out.append(str(model.path))
@@ -1014,14 +1043,16 @@ def _model_paths(model: Any) -> list[str]:
         out.extend(str(s) for s in shards if isinstance(s, str) and s)
     if getattr(model, "mmproj", None):
         out.append(str(model.mmproj))
+    if getattr(model, "draft", None):
+        out.append(str(model.draft))
     return out
 
 
 def plan_model_files(registry: Any, model: Any) -> list[tuple[str, str | None]]:
     """The file set a delete would remove, as ``(path, sha256 | None)``.
 
-    Union, deduped, of the row's ``path``, ``metadata["shards"]``, ``mmproj``
-    and every ``model_file`` row's ``dest`` (pulled filesets record config,
+    Union, deduped, of the row's ``path``, ``metadata["shards"]``, ``mmproj``,
+    ``draft`` and every ``model_file`` row's ``dest`` (pulled filesets record config,
     tokenizer and shard files there; ``sha256`` drives the ``store_blob``
     refcount). Must be called BEFORE ``registry.remove`` — the ``model_file``
     rows cascade away with the model row.
@@ -1507,6 +1538,37 @@ def delete_model_files_on_disk(
     return out
 
 
+async def remove_model_draft(registry: Any, model_id: str) -> dict[str, Any]:
+    """Unpair and delete a model's drafter file (``DELETE /api/models/{id}/draft``).
+
+    The row is cleared first, so the delete guards (:func:`delete_model_files_on_disk`)
+    see the file's remaining owners only: a drafter another model still pairs is
+    kept (``bytes_freed`` 0). Raises ``404 model.draft_not_found`` when nothing
+    is paired. Returns ``{"model_id", "removed", "bytes_freed"}``.
+    """
+    from hal0.errors import NotFound
+
+    model = registry.get(model_id)
+    draft = model.draft
+    if not draft:
+        raise NotFound(
+            f"model {model_id!r} has no drafter paired",
+            code="model.draft_not_found",
+            details={"model_id": model_id},
+        )
+    metadata = {k: v for k, v in model.metadata.items() if k != "draft"}
+    registry.update(model_id, {"draft": None, "draft_kind": None, "metadata": metadata})
+    _tombstone_unless_shared(registry, model_id, draft)
+    outcome = delete_model_files_on_disk(
+        registry,
+        model,
+        [(draft, None)],
+        delete_files=True,
+        roots=deletion_roots(),
+    )
+    return {"model_id": model_id, "removed": draft, "bytes_freed": outcome["bytes_freed"]}
+
+
 # ── catalog aggregation (GET /api/models) ─────────────────────────────────────
 
 
@@ -1899,6 +1961,16 @@ async def add_from_path(body: dict[str, Any], *, registry: Any, event_bus: Any) 
 
     overwrite = bool(body.get("overwrite", False))
 
+    # Optional drafter (ADR-0031 §4): screened against the target's header
+    # before anything is written, so a refusal registers nothing.
+    draft_body: dict[str, Any] = {}
+    drafter = None
+    if body.get("draft") not in (None, ""):
+        draft_body = {"draft": body["draft"], "path": str(resolved)}
+        if "draft_kind" in body:
+            draft_body["draft_kind"] = body["draft_kind"]
+        drafter = screen_draft_write(None, draft_body, require_on_disk=True)
+
     try:
         size_bytes = resolved.stat().st_size
     except OSError:
@@ -1925,6 +1997,12 @@ async def add_from_path(body: dict[str, Any], *, registry: Any, event_bus: Any) 
             "capabilities/backends are a filename guess"
         )
 
+    draft_facts: dict[str, Any] = {}
+    if drafter is not None:
+        stamp_draft_fact(draft_body, drafter, metadata)
+        metadata = draft_body["metadata"]
+        draft_facts = {"draft": draft_body["draft"], "draft_kind": draft_body["draft_kind"]}
+
     try:
         model = Model(
             id=model_id,
@@ -1932,6 +2010,7 @@ async def add_from_path(body: dict[str, Any], *, registry: Any, event_bus: Any) 
             path=str(resolved),
             size_bytes=size_bytes,
             quant=detection.quant,
+            **draft_facts,
             capabilities=capabilities,
             backends=list(detection.suggested_backends),
             # Task 3: stamp provider alongside the detected backends on this
@@ -2024,6 +2103,83 @@ async def inspect_hf_repo(body: dict[str, Any]) -> dict[str, Any]:
     result = await fetch_repo(repo)
     INSPECT_CACHE[repo] = (now, result)
     return {"repo": repo, "cached": False, **result}
+
+
+# ── Drafter fit check (POST /api/models/inspect-draft, ADR-0031 §2) ─────────
+
+#: Same 5 minute TTL as :data:`INSPECT_CACHE`; keyed by the four coordinates
+#: ``(hf_repo, hf_filename, draft_repo, draft_filename)``. Failures are not cached.
+INSPECT_DRAFT_CACHE: dict[tuple[str, str, str, str], tuple[float, dict[str, Any]]] = {}
+
+
+async def inspect_draft(body: dict[str, Any]) -> dict[str, Any]:
+    """Read a target's and a drafter's GGUF headers from the Hub and check the fit.
+
+    Body: ``{"hf_repo", "hf_filename", "draft_repo", "draft_filename"}`` (the
+    target's main quant and the candidate drafter). Reads the leading bytes of
+    each file by HTTP range, so a check costs tens of MB. A fit failure is a
+    200 with ``fit.ok = false`` and the reasons; a file whose header cannot be
+    read is ``422 hf.header_unreadable`` naming it; a file that is not a
+    drafter is ``422 model.draft_not_a_drafter``.
+    """
+    import time
+
+    from hal0.errors import BadRequest, UnprocessableEntity
+    from hal0.registry.drafters import classify_drafter, draft_fit_errors
+    from hal0.upstreams.hf_header import fetch_gguf_header
+    from hal0.upstreams.huggingface import normalise_repo_slug
+
+    coords: list[str] = []
+    for key in ("hf_repo", "hf_filename", "draft_repo", "draft_filename"):
+        value = body.get(key)
+        if not isinstance(value, str) or not value.strip():
+            raise BadRequest(f"'{key}' is required", code="hf.bad_request")
+        coords.append(value.strip())
+    target_repo = normalise_repo_slug(coords[0])
+    draft_repo = normalise_repo_slug(coords[2])
+    key4 = (target_repo, coords[1], draft_repo, coords[3])
+
+    now = time.time()
+    cached = INSPECT_DRAFT_CACHE.get(key4)
+    if cached is not None and now - cached[0] < INSPECT_TTL_SECONDS:
+        return cached[1]
+
+    async def header(repo: str, filename: str) -> dict[str, Any]:
+        found = await fetch_gguf_header(repo, filename)
+        if found is None:
+            raise UnprocessableEntity(
+                f"could not read the GGUF header of {repo}/{filename}",
+                code="hf.header_unreadable",
+                details={"repo": repo, "filename": filename},
+            )
+        return found
+
+    target = await header(target_repo, coords[1])
+    draft_header = await header(draft_repo, coords[3])
+
+    info = classify_drafter(draft_header)
+    if info is None:
+        arch = draft_header.get("general.architecture")
+        raise UnprocessableEntity(
+            f"not a speculative-decoding drafter (architecture {arch!r})",
+            code="model.draft_not_a_drafter",
+            details={"reasons": [f"architecture {arch!r} is not a drafter"]},
+        )
+    reasons = draft_fit_errors(target, info)
+    t_arch = target.get("general.architecture")
+    result = {
+        "kind": info.kind,
+        "variant": info.variant,
+        "fit": {"ok": not reasons, "reasons": reasons},
+        "draft": info.as_metadata(),
+        "target": {
+            "architecture": t_arch,
+            "embedding_length": target.get(f"{t_arch}.embedding_length"),
+            "block_count": target.get(f"{t_arch}.block_count"),
+        },
+    }
+    INSPECT_DRAFT_CACHE[key4] = (now, result)
+    return result
 
 
 # ── the model-facts screen (ADR-0029 §6) ─────────────────────────────────────
@@ -2171,12 +2327,226 @@ def screen_vision_mmproj(
         )
 
 
+# ── the drafter pairing (ADR-0031) ───────────────────────────────────────────
+
+
+def _prior(existing: Any, key: str) -> Any:
+    """``key`` from the stored row, whether it is a ``Model`` or its dump."""
+    if existing is None:
+        return None
+    if isinstance(existing, dict):
+        return existing.get(key)
+    return getattr(existing, key, None)
+
+
+# CodeQL note: the two drafter sinks in screen_draft_write, `os.path.isfile` and
+# `os.path.getsize`, still report py/path-injection (the rule this repo already
+# carries standing alerts for). Both take ONLY the value this guard returns,
+# which is confined to a model-store mount root or the model's own directory
+# by the lexical and the realpath `startswith` checks below. The model-directory
+# root is derived from the model row's `path`, which CodeQL counts as user
+# input, so the analyser cannot see the guard as a sanitiser. No new
+# capability: screen_vision_mmproj already checks the projector path on disk
+# the same way.
+def _require_draft_inside_store(draft: str, target_path: Any) -> str:
+    """The sanitised drafter path, or ``422 model.draft_outside_store``.
+
+    The candidate is ``normpath(expanduser(draft))``; it must be absolute and
+    sit inside a model-store root (:func:`hal0.config.paths.model_mount_roots`)
+    or the model's own directory, lexically or once symlinks are resolved. Every
+    later file operation on the drafter uses ONLY the returned value. The
+    target path is normalised lexically to derive its directory and is never
+    touched on disk here.
+    """
+    from hal0.config.paths import model_mount_roots
+    from hal0.errors import UnprocessableEntity
+
+    roots = [os.path.normpath(str(r)) for r in model_mount_roots()]
+    if target_path:
+        roots.append(os.path.dirname(os.path.normpath(os.path.expanduser(str(target_path)))))
+    roots = [r for r in roots if os.path.isabs(r)]
+
+    candidate = os.path.normpath(os.path.expanduser(draft))
+    if os.path.isabs(candidate):
+        for root in roots:
+            if candidate == root or candidate.startswith(root + os.sep):
+                return candidate
+        real = os.path.realpath(candidate)
+        for root in roots:
+            real_root = os.path.realpath(root)
+            if real == real_root or real.startswith(real_root + os.sep):
+                return candidate
+    raise UnprocessableEntity(
+        f"draft must be an absolute path inside the model store or beside the model: {draft}",
+        code="model.draft_outside_store",
+        details={"draft": draft, "allowed_roots": roots},
+    )
+
+
+def screen_draft_write(
+    existing: Any,
+    body: dict[str, Any],
+    *,
+    require_on_disk: bool,
+) -> Any:
+    """Screen the ``draft`` fact of a model write; classify the drafter.
+
+    ``existing`` is the stored row (a ``Model`` or its dump; ``None`` on
+    create). Returns the :class:`~hal0.registry.drafters.DrafterInfo` when the
+    body sets a drafter path, else ``None`` (the body leaves ``draft`` alone or
+    clears it). Raises:
+
+    * ``422 model.draft_kind_readonly`` — the body carries ``draft_kind``; it is
+      derived from the file, never set.
+    * ``422 model.draft_outside_store`` — the path is not absolute, or resolves
+      outside every model-store root and outside the model's own directory, so
+      a slot container (which mounts only those) could never open it.
+    * ``422 model.draft_not_found`` — ``require_on_disk`` and the path is not a
+      file. With ``require_on_disk=False`` (the pull route, whose drafter is
+      not downloaded yet) a missing file is not screened and nothing is
+      classified.
+    * ``422 model.draft_not_a_drafter`` / ``422 model.draft_mismatch`` — from
+      :func:`hal0.registry.drafters.screen_draft_fit`, against the target's
+      header. A ``mtp`` drafter is also refused when the target's ``mtp`` fact
+      is ``false`` — the header carries no such fact, so the check is here.
+    """
+    import dataclasses
+
+    from hal0.errors import UnprocessableEntity
+    from hal0.registry.drafters import screen_draft_fit
+    from hal0.registry.gguf_header import read_gguf_header
+
+    if "draft_kind" in body:
+        raise UnprocessableEntity(
+            "draft_kind is derived from the drafter file's header and cannot be "
+            "set. Send draft (a path) and it is classified.",
+            code="model.draft_kind_readonly",
+        )
+    if "draft" not in body:
+        return None
+    draft = body["draft"]
+    if draft is None or (isinstance(draft, str) and not draft.strip()):
+        return None
+    if not isinstance(draft, str):
+        raise UnprocessableEntity(
+            "draft must be an absolute path string or null",
+            code="model.fact_invalid",
+            details={"field": "draft"},
+        )
+    target_path = body.get("path", _prior(existing, "path"))
+    safe_draft = _require_draft_inside_store(draft, target_path)
+    # The normalised path is the stored fact; nothing below reads the raw value.
+    body["draft"] = safe_draft
+    if not os.path.isfile(safe_draft):
+        if not require_on_disk:
+            return None
+        raise UnprocessableEntity(
+            f"draft path does not exist on this host: {draft}",
+            code="model.draft_not_found",
+            details={"draft": draft},
+        )
+    target_header = read_gguf_header(target_path) if target_path else None
+    if target_header is None:
+        raise UnprocessableEntity(
+            "a drafter pairs only with a GGUF model whose header can be read",
+            code="model.draft_mismatch",
+            details={"reasons": ["target model header unreadable"]},
+        )
+    draft_header = read_gguf_header(safe_draft) or {}
+    info = dataclasses.replace(
+        screen_draft_fit(target_header, draft_header),
+        size_bytes=os.path.getsize(safe_draft),
+    )
+    mtp = body["mtp"] if "mtp" in body else _prior(existing, "mtp")
+    if info.kind == "mtp" and mtp is False:
+        raise UnprocessableEntity(
+            "drafter does not fit this model: target mtp fact is false",
+            code="model.draft_mismatch",
+            details={"reasons": ["target mtp fact is false"]},
+        )
+    return info
+
+
+def stamp_draft_fact(
+    body: dict[str, Any],
+    info: Any,
+    stored_metadata: dict[str, Any] | None = None,
+) -> None:
+    """Write the derived drafter facts into a model write body, in place.
+
+    Call after :func:`screen_draft_write` (``info`` is its result). A body that
+    does not mention ``draft`` is untouched, except that a replacing
+    ``metadata`` keeps the stored ``metadata["draft"]``. Setting a path writes
+    ``draft_kind`` and ``metadata["draft"]`` (the header facts plus the file's
+    ``size_bytes``); clearing it (``null``) clears both. ``metadata`` is a flat
+    replace in the registry, so it is rebuilt from the body's own, else the
+    stored one.
+    """
+    if "draft" not in body:
+        # ``metadata`` is a flat replace: keep the drafter facts the caller
+        # did not mention so they stay in step with the draft columns.
+        kept = (stored_metadata or {}).get("draft")
+        if isinstance(body.get("metadata"), dict) and kept is not None:
+            body["metadata"] = {**body["metadata"], "draft": kept}
+        return
+    metadata = dict(body.get("metadata") or stored_metadata or {})
+    draft = body["draft"]
+    if info is None or not draft:
+        body["draft"] = None
+        body["draft_kind"] = None
+        metadata.pop("draft", None)
+    else:
+        body["draft_kind"] = info.kind
+        metadata["draft"] = info.as_metadata()
+        if info.size_bytes is not None:
+            metadata["draft"]["size_bytes"] = info.size_bytes
+    body["metadata"] = metadata
+
+
+def _tombstone_unless_shared(registry: Any, model_id: str, draft: str) -> None:
+    """Tombstone ``draft`` unless another model still pairs that file.
+
+    Paths are compared resolved (the tombstone store and the scan both key on
+    the resolved path, so a symlinked pairing and its target are one file).
+    """
+
+    def _resolved(p: str) -> Path:
+        try:
+            return Path(p).expanduser().resolve()
+        except OSError:
+            return Path(p)
+
+    target = _resolved(draft)
+    for other in registry.list():
+        if other.id != model_id and other.draft and _resolved(other.draft) == target:
+            return
+    tombstones.add([target])
+
+
+def settle_draft_tombstone(
+    registry: Any, model_id: str, previous: str | None, body: dict[str, Any]
+) -> None:
+    """Keep scan from re-pairing a drafter the operator unpaired on purpose.
+
+    Call after :func:`stamp_draft_fact`. A write that clears ``draft`` tombstones
+    the drafter it had (ADR-0026's rule for a removed projector); a write that
+    pairs a path lifts any tombstone on that path. A drafter another model still
+    pairs is not tombstoned.
+    """
+    if "draft" not in body:
+        return
+    if body["draft"]:
+        tombstones.clear(body["draft"])
+    elif previous:
+        _tombstone_unless_shared(registry, model_id, previous)
+
+
 def screen_model_write(
     body: dict[str, Any],
     *,
     runner_images: Any = None,
     existing: dict[str, Any] | None = None,
-) -> None:
+) -> Any:
     """Validate a model create/update/validate body.
 
     Raises :class:`~hal0.errors.BadRequest` (or :class:`~hal0.errors.UnprocessableEntity`
@@ -2199,6 +2569,10 @@ def screen_model_write(
       worker — stay editable, so an unrelated rename does not have to fix an
       invariant it never violated. Every write that could CREATE or PRESERVE the
       broken pairing is still screened.
+    * ``draft`` / ``draft_kind`` — the speculative-decoding drafter pairing
+      (ADR-0031), via :func:`screen_draft_write`. Returns its classification
+      (``DrafterInfo``) so the write routes can stamp ``draft_kind`` without
+      reading the headers twice; ``None`` when the body sets no drafter.
     * ``provider`` — must be a ``hal0.model_meta.RUNTIME_FAMILIES`` member when
       present, else ``400 model.provider_invalid``. ``None``/absent means
       "derive" and is never screened here.
@@ -2216,6 +2590,7 @@ def screen_model_write(
         )
 
     screen_model_facts(body)
+    drafter = screen_draft_write(existing, body, require_on_disk=True)
 
     provider = body.get("provider")
     if provider is not None:
@@ -2226,6 +2601,7 @@ def screen_model_write(
                 f"provider must be one of {', '.join(RUNTIME_FAMILIES)} (got {provider!r})",
                 code="model.provider_invalid",
             )
+    return drafter
 
 
 # (The duplicate-model service — ``POST /api/models/{id}/duplicate`` — was

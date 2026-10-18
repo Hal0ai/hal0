@@ -943,6 +943,19 @@ async def slot_metrics(request: Request) -> dict[str, Any]:
             entry["kv_cache_usage"] = local["kv_cache_usage"]
         if local.get("ctx"):
             entry["ctx"] = local["ctx"]
+        if local.get("spec"):
+            entry["spec"] = {**local["spec"], **(entry.get("spec") or {})}
+    # Live draft acceptance over the same 30 s window as tok/s.
+    for name, live in _metrics_collect.local_spec_acceptance(
+        request.app.state, window_s=30.0
+    ).items():
+        entry = merged.get(name)
+        if not isinstance(entry, dict):
+            entry = {"name": name}
+            merged[name] = entry
+        spec = dict(entry.get("spec") or {})
+        spec["live_acceptance"] = round(live, 4)
+        entry["spec"] = spec
     # TTFT samples are captured on the dispatcher's streaming wrapper
     # and only exist locally — fold them in last so they win.
     for name, ttft in _per_slot_ttft(request).items():

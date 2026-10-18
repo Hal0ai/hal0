@@ -101,8 +101,9 @@ STATE_FILE = "profile-centric.json"
 PROFILE_DROP_KEYS: tuple[str, ...] = ("mtp", "device_class", "backend", "quant", "image")
 #: Keys only an old-shape profile carries (as does a boolean ``mtp``).
 OLD_PROFILE_KEYS: tuple[str, ...] = ("device_class", "backend", "quant", "image")
-#: Keys only a new-shape profile carries (as does a string ``mtp``).
-NEW_PROFILE_KEYS: tuple[str, ...] = ("ctx_size", "enable_thinking", "vision")
+#: Keys only a new-shape profile carries (as does a string ``mtp``, the 1.4.x
+#: spelling of ``speculation``; ADR-0031 §7).
+NEW_PROFILE_KEYS: tuple[str, ...] = ("ctx_size", "enable_thinking", "vision", "speculation")
 #: Stack-row keys that leave every row (inert today: stack apply never used them).
 STACK_ROW_TUNING_KEYS: tuple[str, ...] = ("vision", "mtp", "enable_thinking", "server_extra_args")
 #: Runner key a converted profile names for a non-llama engine.
@@ -458,7 +459,7 @@ def new_launch(
     """What a llama-server slot launches under ADR-0029: base, model, profile, slot.
 
     ``profile`` is new-shape content (flags, ctx_size, enable_thinking,
-    vision, mtp). The launch-path change implements exactly this order and is
+    vision, speculation). The launch-path change implements exactly this order and is
     pinned to this function by its parity test.
     """
     runner = frozen.effective_runner(slot, frozen.Profile(name=""))
@@ -498,13 +499,16 @@ def new_launch(
         model_layer += ["--mmproj", str(mmproj)]
 
     mtp = (
-        profile.get("mtp", "auto") != "off"
+        profile.get("speculation", "auto") == "auto"
         and has_mtp_heads(model)
         and bool(getattr(supports, "mtp", False))
         and not embed
     )
     from hal0.config.schema import MTP_DRAFT_BUNDLE, mtp_draft_device
 
+    # ADR-0031 §3: --spec-type is a model-layer flag, the bundle a profile one.
+    if mtp:
+        model_layer += ["--spec-type", "draft-mtp"]
     profile_layer = (shlex.split(MTP_DRAFT_BUNDLE) if mtp else []) + flags
 
     slot_layer: list[str] = []
@@ -515,12 +519,13 @@ def new_launch(
         slot_layer += ["--threads", str(int(threads))]
     if slot.get("metrics") is None or bool(slot.get("metrics")):
         slot_layer += ["--metrics"]
-    if mtp:
-        backend = frozen._backend_and_class(slot, frozen.Profile(name=""))[0]
-        slot_layer += [
-            "--spec-draft-device",
-            mtp_draft_device(backend),
-        ]
+    draft_device = (
+        mtp_draft_device(frozen._backend_and_class(slot, frozen.Profile(name=""))[0])
+        if mtp
+        else None
+    )
+    if draft_device:
+        slot_layer += ["--spec-draft-device", draft_device]
 
     from hal0.slots.argv import _dedup, _split_pairs
 
@@ -543,7 +548,7 @@ def _identity(content: Mapping[str, Any]) -> dict[str, Any]:
     """A profile's tune: what launches, without informational fields."""
     out = {k: v for k, v in content.items() if k not in ("intent", "cloned_from")}
     out.setdefault("vision", "auto")
-    out.setdefault("mtp", "auto")
+    out.setdefault("speculation", "auto")
     out["flags"] = effective_map(shlex.split(str(out.get("flags") or "")))
     return {k: v for k, v in out.items() if v not in (None, "")}
 
@@ -764,7 +769,7 @@ def convert_profile(entry: Mapping[str, Any], family: str) -> ProfileConversion:
             content[key] = entry[key]
     vision = entry.get("vision")
     content["vision"] = "off" if conv.vision_off or vision == "off" else "auto"
-    content["mtp"] = "off" if entry.get("mtp") == "off" else "auto"
+    content["speculation"] = "off" if entry.get("mtp") == "off" else "auto"
     runner = entry.get("runner")
     if isinstance(runner, str) and runner.strip():
         content["runner"] = runner
@@ -792,8 +797,8 @@ def _tidy(content: Mapping[str, Any]) -> dict[str, Any]:
     out = {k: v for k, v in content.items() if v not in (None, "")}
     if out.get("vision") == "auto":
         out.pop("vision")
-    if out.get("mtp") == "auto":
-        out.pop("mtp")
+    if out.get("speculation") == "auto":
+        out.pop("speculation")
     return out
 
 
@@ -806,7 +811,7 @@ def profile_shape(entry: Mapping[str, Any]) -> tuple[ProfileShape, list[str]]:
     ``old``: it carries a key only the old shape has (a boolean ``mtp``,
     ``device_class``, ``backend``, ``quant``, ``image``) or flags the new
     shape does not accept. ``new``: it carries a key only the new shape has
-    (``ctx_size``, ``enable_thinking``, ``vision``, a string ``mtp``).
+    (``ctx_size``, ``enable_thinking``, ``vision``, ``speculation``, a string ``mtp``).
     ``either``: only the keys both shapes share, with flags already in the
     new form, so converting it changes nothing. ``mixed``: old and new keys
     together, which blocks. The list names the keys that decided it.
@@ -1260,7 +1265,7 @@ class _Planner:
             "ctx_size": ctx_size,
             "enable_thinking": old.enable_thinking,
             "vision": "off" if vision_off else "auto",
-            "mtp": "off" if (auto_drafts and not old.mtp) else "auto",
+            "speculation": "off" if (auto_drafts and not old.mtp) else "auto",
         }
         want = {**target, "runner": base_content.get("runner")}
         if _identity(_tidy(want)) == _identity(base_content):
@@ -1392,7 +1397,7 @@ class _Planner:
             "flags": _join(tokens),
             "runner": ENGINE_RUNNER.get(engine),
             "vision": base_content.get("vision"),
-            "mtp": base_content.get("mtp"),
+            "speculation": base_content.get("speculation"),
             "ctx_size": base_content.get("ctx_size"),
         }
         table = slot.get("model") if isinstance(slot.get("model"), Mapping) else {}

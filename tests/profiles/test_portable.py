@@ -34,7 +34,7 @@ def _profile() -> ProfileConfig:
         ctx_size=65536,
         enable_thinking=True,
         vision="off",
-        mtp="off",
+        speculation="off",
         cloned_from="chat",
         intent="My workload",
     )
@@ -70,7 +70,7 @@ class TestRoundTrip:
         assert imported.ctx_size == original.ctx_size == 65536
         assert imported.enable_thinking is True
         assert imported.vision == "off"
-        assert imported.mtp == "off"
+        assert imported.speculation == "off"
         assert imported.cloned_from == original.cloned_from
         assert imported.intent == original.intent
 
@@ -105,7 +105,7 @@ class TestExportEnvelope:
         assert body["ctx_size"] == 65536
         assert body["enable_thinking"] is True
         assert body["vision"] == "off"
-        assert body["mtp"] == "off"
+        assert body["speculation"] == "off"
         assert body["cloned_from"] == "chat"
 
     def test_body_carries_none_of_the_retired_fields(self, tmp_hal0_home: str) -> None:
@@ -122,7 +122,7 @@ class TestExportEnvelope:
         assert "enable_thinking" not in body
         assert "cloned_from" not in body
         assert body["vision"] == "auto"
-        assert body["mtp"] == "auto"
+        assert body["speculation"] == "auto"
 
 
 # ── checksum ─────────────────────────────────────────────────────────────────
@@ -437,7 +437,7 @@ class TestPublishedAddonRoundTrip:
                 ctx_size=r.ctx_size,
                 enable_thinking=r.enable_thinking,
                 vision=r.vision,  # type: ignore[arg-type]
-                mtp=r.mtp,  # type: ignore[arg-type]
+                speculation=r.speculation,  # type: ignore[arg-type]
                 runner=r.runner,
                 cloned_from=r.cloned_from,
                 intent=r.intent,
@@ -445,3 +445,37 @@ class TestPublishedAddonRoundTrip:
             exported_at="t",
         )
         assert again["checksum"] == published["checksum"]
+
+
+# ── a v1.4.0 envelope (schema 2, profile ``mtp``) imports, converted ───────
+
+
+def _v140_envelope(**body: object) -> dict:
+    """What hal0 1.4.0 exported: schema 2 with the profile's ``mtp`` tune."""
+    return {
+        "kind": ENVELOPE_KIND,
+        "schema_version": 2,
+        "hal0_version": "1.4.0",
+        "exported_at": "t",
+        "name": "old",
+        "profile": {"flags": "-fa on", **body},
+    }
+
+
+class TestV140EnvelopeImport:
+    def test_mtp_off_lands_as_speculation_off(self, tmp_hal0_home: str) -> None:
+        cat = _catalog(tmp_hal0_home)
+        import_profile(_v140_envelope(mtp="off"), "old", cat)
+        assert cat.resolve("old").speculation == "off"
+
+    def test_mtp_auto_lands_as_the_auto_default(self, tmp_hal0_home: str) -> None:
+        cat = _catalog(tmp_hal0_home)
+        import_profile(_v140_envelope(mtp="auto"), "old", cat)
+        assert cat.resolve("old").speculation == "auto"
+
+    def test_a_spec_type_flag_converts_too(self, tmp_hal0_home: str) -> None:
+        env = _v140_envelope(flags="-fa on --spec-type ngram-mod")
+        parsed = parse_envelope(env)
+        assert parsed.profile.speculation == "ngram"
+        assert parsed.profile.flags == "-fa on"
+        assert env["profile"]["flags"] == "-fa on --spec-type ngram-mod"  # input untouched

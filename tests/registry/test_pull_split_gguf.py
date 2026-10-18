@@ -177,7 +177,7 @@ async def test_split_pull_lands_every_part_and_the_projector(
 
     entry = registry.get("nemo")
     assert entry.path == str(finals[0])
-    assert entry.size_bytes == parts_bytes
+    assert entry.size_bytes == parts_bytes + len(bodies[_MMPROJ])  # every installed byte
     assert entry.mmproj == str(model_dir / _MMPROJ)
     assert entry.hf_filename == _PARTS[0]
     assert entry.metadata["shards"] == [str(p) for p in finals]

@@ -38,6 +38,23 @@ def test_model_registry_is_sqlite_backed() -> None:
     assert ModelRegistry is SqliteModelRegistry
 
 
+def test_sqlite_store_roundtrips_draft(reg: ModelRegistry, tmp_path: Path) -> None:
+    """``draft`` / ``draft_kind`` get columns; ``metadata.draft`` rides in extra."""
+    reg.add(
+        _model(
+            "qwen3-27b",
+            draft="/models/qwen3-dflash.gguf",
+            draft_kind="dflash",
+            metadata={"draft": {"variant": "dspark", "size_bytes": 7}},
+        )
+    )
+    got = ModelRegistry(registry_dir=tmp_path / "registry").get("qwen3-27b")
+    assert got.draft == "/models/qwen3-dflash.gguf"
+    assert got.draft_kind == "dflash"
+    assert got.metadata["draft"] == {"variant": "dspark", "size_bytes": 7}
+    assert _model("plain").draft is None
+
+
 # ── reads on empty registry ──────────────────────────────────────────────────
 
 

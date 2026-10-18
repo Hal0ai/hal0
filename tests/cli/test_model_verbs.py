@@ -65,7 +65,21 @@ def captured(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
 
     monkeypatch.setattr(model_commands, "_api_unreachable", fake_unreachable)
     monkeypatch.setattr(model_commands, "api_get", fake_get)
+
+    def fake_put(path: str, *, json: dict[str, Any] | None = None, **kw: Any) -> dict[str, Any]:
+        captured["method"] = "PUT"
+        captured["path"] = path
+        captured["body"] = json or {}
+        return {
+            "id": path.rsplit("/", 1)[-1],
+            "draft": (json or {}).get("draft"),
+            "draft_kind": "dflash",
+        }
+
     monkeypatch.setattr(model_commands, "api_post", fake_post)
+    # `model add` imports api_post from the shared module at call time.
+    monkeypatch.setattr("hal0.cli._shared.api_post", fake_post)
+    monkeypatch.setattr(model_commands, "api_put", fake_put)
     return captured
 
 
@@ -105,6 +119,22 @@ def test_model_pull_starts_and_polls(captured: dict[str, Any]) -> None:
     assert result.exit_code == 0, result.output
     assert captured["path"] == "/api/models/qwen3-4b/pull"
     assert any(p.endswith("/pull/status") for p, _ in captured["gets"])
+
+
+def test_model_pull_draft_sends_draft_coordinates(captured: dict[str, Any]) -> None:
+    result = runner.invoke(
+        model_commands.app,
+        ["pull", "qwen3-4b", "--draft", "d-Q8_0.gguf", "--draft-repo", "org/drafters"],
+    )
+    assert result.exit_code == 0, result.output
+    assert captured["path"] == "/api/models/qwen3-4b/pull"
+    assert captured["body"] == {"draft_filename": "d-Q8_0.gguf", "draft_repo": "org/drafters"}
+
+
+def test_model_pull_draft_repo_needs_draft(captured: dict[str, Any]) -> None:
+    result = runner.invoke(model_commands.app, ["pull", "qwen3-4b", "--draft-repo", "org/x"])
+    assert result.exit_code != 0
+    assert "path" not in captured
 
 
 # ── model update [--check] ──────────────────────────────────────────────────
@@ -200,3 +230,41 @@ def test_model_rm_timeout_outlasts_the_server_pull_cancel_wait() -> None:
     from hal0.services.models_service import PULL_CANCEL_WAIT_S
 
     assert model_commands._RM_TIMEOUT_S > PULL_CANCEL_WAIT_S
+
+
+# ── model add --draft / model set --draft ───────────────────────────────────
+
+
+def test_model_add_draft_flag(captured: dict[str, Any]) -> None:
+    result = runner.invoke(
+        model_commands.app, ["add", "/m/tgt.gguf", "--draft", "/m/tgt-dflash.gguf"]
+    )
+    assert result.exit_code == 0, result.output
+    assert captured["path"] == "/api/models/add-from-path"
+    assert captured["body"]["draft"] == "/m/tgt-dflash.gguf"
+
+
+def test_model_add_without_draft_sends_none(captured: dict[str, Any]) -> None:
+    result = runner.invoke(model_commands.app, ["add", "/m/tgt.gguf"])
+    assert result.exit_code == 0, result.output
+    assert "draft" not in captured["body"]
+
+
+def test_model_set_draft_pairs(captured: dict[str, Any]) -> None:
+    result = runner.invoke(model_commands.app, ["set", "tgt", "--draft", "/m/tgt-dflash.gguf"])
+    assert result.exit_code == 0, result.output
+    assert captured["method"] == "PUT"
+    assert captured["path"] == "/api/models/tgt"
+    assert captured["body"] == {"draft": "/m/tgt-dflash.gguf"}
+
+
+def test_model_set_draft_none_unpairs(captured: dict[str, Any]) -> None:
+    result = runner.invoke(model_commands.app, ["set", "tgt", "--draft", "none"])
+    assert result.exit_code == 0, result.output
+    assert captured["body"] == {"draft": None}
+
+
+def test_model_set_needs_a_field(captured: dict[str, Any]) -> None:
+    result = runner.invoke(model_commands.app, ["set", "tgt"])
+    assert result.exit_code != 0
+    assert "path" not in captured

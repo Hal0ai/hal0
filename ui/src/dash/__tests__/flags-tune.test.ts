@@ -10,6 +10,7 @@ import { describe, expect, it } from 'vitest'
 import {
   MANAGED_FLAGS,
   MODEL_FACT_FLAGS,
+  SPEC_TYPE_REFUSAL,
   SLOT_HARDWARE_FLAGS,
   canonFlag,
   diffFlags,
@@ -136,6 +137,11 @@ describe('findModelFactFlags (ADR-0029: the model owns the chat template and pro
     expect(
       findModelFactFlags('-fa on --jinja --chat-template chatml --mmproj m.gguf --no-mmproj'),
     ).toEqual(['--jinja', '--chat-template', '--mmproj', '--no-mmproj'])
+  })
+  it('flags --spec-type, which the profile sets through Speculation (ADR-0031)', () => {
+    expect(findModelFactFlags('--spec-type ngram-mod')).toEqual(['--spec-type'])
+    expect(findModelFactFlags('--spec-type=draft-mtp')).toEqual(['--spec-type'])
+    expect(SPEC_TYPE_REFUSAL).toContain("set the profile's Speculation instead")
   })
   it('flags --spec-draft-device', () => {
     expect(findModelFactFlags('--spec-draft-device ROCm0')).toEqual(['--spec-draft-device'])

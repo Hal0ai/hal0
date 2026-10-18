@@ -55,13 +55,46 @@ const { inspectCalls, inspectHandler } = vi.hoisted(() => ({
   },
 }))
 
+// Task 13: the Drafter field's fit check (useInspectDraft) and Pull action
+// (usePullJob). `draftFit.current` is what inspect-draft resolves to;
+// `pullBox` is the stand-in job the drawer watches for completion;
+// `updateError.current` makes the next PUT reject like the server's 422.
+const { inspectDraftCalls, draftFit, pullCalls, pullBox, updateError } = vi.hoisted(() => ({
+  inspectDraftCalls: [] as unknown[],
+  draftFit: { current: undefined as Record<string, unknown> | undefined },
+  pullCalls: [] as unknown[],
+  pullBox: { current: { state: 'idle', modelId: null as string | null, jobId: null as string | null } },
+  updateError: { current: undefined as Error | undefined },
+}))
+
 vi.mock('@/api/hooks/useModels', () => ({
   useModelUpdate: () => ({
     mutateAsync: async (b: unknown) => {
       updateCalls.push(b)
+      if (updateError.current) throw updateError.current
       return b
     },
     isPending: false,
+  }),
+  useInspectDraft: () => {
+    const [data, setData] = React.useState<Record<string, unknown> | undefined>()
+    return {
+      data,
+      isPending: false,
+      mutate: (body: unknown) => {
+        inspectDraftCalls.push(body)
+        setData(draftFit.current)
+      },
+      reset: () => setData(undefined),
+    }
+  },
+  usePullJob: () => ({
+    ...pullBox.current,
+    inFlight: pullBox.current.state === 'queued' || pullBox.current.state === 'running',
+    start: async (id: string, body: unknown) => {
+      pullCalls.push({ id, body })
+    },
+    reset: () => {},
   }),
   useModelSetDefault: () => ({
     mutateAsync: async (b: unknown) => {
@@ -171,6 +204,11 @@ beforeEach(() => {
   enumsBox.current = undefined
   inspectCalls.length = 0
   inspectHandler.current = undefined
+  inspectDraftCalls.length = 0
+  draftFit.current = undefined
+  pullCalls.length = 0
+  pullBox.current = { state: 'idle', modelId: null, jobId: null }
+  updateError.current = undefined
 })
 
 afterEach(() => {
@@ -1036,6 +1074,383 @@ describe('footer summary', () => {
     expect(footer.textContent).toContain('1 change')
     expect(footer.textContent).toContain('overrides')
     expect(footer.textContent).not.toContain('restarts')
+    act(() => root.unmount())
+  })
+})
+
+describe('ModelDrawer Drafter field (ADR-0031 §5)', () => {
+  const MODEL_DIR = '/var/lib/hal0/models/qwen'
+  const DRAFT_MODEL = {
+    ...MODEL,
+    path: `${MODEL_DIR}/qwen-q8.gguf`,
+    hf_repo: 'org/qwen-gguf',
+    hf_filename: 'qwen-q8.gguf',
+    mmproj: null,
+    draft: null,
+    draftVariant: null,
+  }
+  const DRAFTS = [
+    {
+      id: 'Qwen-LiLiCorr-Q8.gguf',
+      repo: 'org/qwen-gguf-LiLiCorr',
+      kind_hint: 'dflash',
+      variant_hint: 'lilicorr',
+      size_bytes: 1073741824,
+      size: '1.0 GB',
+      source: 'companion',
+    },
+  ]
+  const withDrafts = () => {
+    inspectHandler.current = () => ({
+      repo: 'org/qwen-gguf',
+      variants: [],
+      mmproj: [],
+      drafts: DRAFTS,
+    })
+  }
+  const openSource = (host: HTMLElement) =>
+    act(() => q<HTMLElement>(host, 'model-source-disclosure').click())
+  const save = async (host: HTMLElement) =>
+    act(async () => {
+      q<HTMLButtonElement>(host, 'model-save').click()
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+
+  it('the picker lists the repo drafters, the stored row and a none row', () => {
+    withDrafts()
+    const stored = `${MODEL_DIR}/hand-placed-draft.gguf`
+    const { host, root } = mount(
+      React.createElement(ModelDrawer, {
+        open: true,
+        onClose: () => {},
+        model: { ...DRAFT_MODEL, draft: stored, draftVariant: 'dflash' },
+      }),
+    )
+    openSource(host)
+    expect(q(host, 'model-draft-input')).toBeNull()
+    act(() => q<HTMLButtonElement>(host, 'model-draft-select').click())
+    expect((host.querySelector('[data-option-id=""]') as HTMLElement).textContent).toContain('— none —')
+    const pick = host.querySelector(`[data-option-id="${MODEL_DIR}/Qwen-LiLiCorr-Q8.gguf"]`) as HTMLElement
+    expect(pick.textContent).toContain('Qwen-LiLiCorr-Q8.gguf')
+    expect(pick.textContent).toContain('1.0 GB')
+    const row = host.querySelector(`[data-option-id="${stored}"]`) as HTMLElement
+    expect(row.textContent).toContain('stored')
+    act(() => root.unmount())
+  })
+
+  it('no drafters in the repo → a path input; typing a path and saving sends draft', async () => {
+    inspectHandler.current = () => ({ repo: 'org/qwen-gguf', variants: [], mmproj: [], drafts: [] })
+    const { host, root } = mount(
+      React.createElement(ModelDrawer, { open: true, onClose: () => {}, model: DRAFT_MODEL }),
+    )
+    openSource(host)
+    expect(q(host, 'model-draft-select')).toBeNull()
+    act(() => typeInto(q<HTMLInputElement>(host, 'model-draft-input'), `  ${MODEL_DIR}/d.gguf `))
+    await save(host)
+    expect((updateCalls[0] as { body: { draft?: string } }).body.draft).toBe(`${MODEL_DIR}/d.gguf`)
+    act(() => root.unmount())
+  })
+
+  it('a draft_mismatch refusal shows the first reason in the fit band', async () => {
+    inspectHandler.current = () => ({ repo: 'org/qwen-gguf', variants: [], mmproj: [], drafts: [] })
+    const err = Object.assign(new Error('mismatch'), {
+      code: 'model.draft_mismatch',
+      details: { reasons: ['hidden size 2048 != target 5120', 'second'] },
+    })
+    updateError.current = err
+    const { host, root } = mount(
+      React.createElement(ModelDrawer, { open: true, onClose: () => {}, model: DRAFT_MODEL }),
+    )
+    openSource(host)
+    expect(q(host, 'model-draft-fit')).toBeNull()
+    act(() => typeInto(q<HTMLInputElement>(host, 'model-draft-input'), `${MODEL_DIR}/d.gguf`))
+    await save(host)
+    const band = q<HTMLElement>(host, 'model-draft-fit')
+    expect(band.textContent).toContain('hidden size 2048 != target 5120')
+    expect(band.textContent).not.toContain('second')
+    // Editing the path retires the stale verdict.
+    act(() => typeInto(q<HTMLInputElement>(host, 'model-draft-input'), `${MODEL_DIR}/e.gguf`))
+    expect(q(host, 'model-draft-fit')).toBeNull()
+    act(() => root.unmount())
+  })
+
+  it('a repo pick is fit-checked, then pulled — never PUT', async () => {
+    withDrafts()
+    draftFit.current = {
+      kind: 'dflash',
+      variant: 'lilicorr',
+      fit: { ok: true, reasons: [] },
+      draft: { variant: 'lilicorr', block_size: 8, embedding_length: 5120, target_layers: [1, 2, 3, 4, 5, 6] },
+    }
+    const { host, root } = mount(
+      React.createElement(ModelDrawer, { open: true, onClose: () => {}, model: DRAFT_MODEL }),
+    )
+    openSource(host)
+    expect(q(host, 'model-draft-pull')).toBeNull()
+    act(() => q<HTMLButtonElement>(host, 'model-draft-select').click())
+    act(() =>
+      (host.querySelector(`[data-option-id="${MODEL_DIR}/Qwen-LiLiCorr-Q8.gguf"]`) as HTMLElement).click(),
+    )
+    expect(inspectDraftCalls).toEqual([
+      {
+        hf_repo: 'org/qwen-gguf',
+        hf_filename: 'qwen-q8.gguf',
+        draft_repo: 'org/qwen-gguf-LiLiCorr',
+        draft_filename: 'Qwen-LiLiCorr-Q8.gguf',
+      },
+    ])
+    expect(q<HTMLElement>(host, 'model-draft-fit').textContent).toContain(
+      'matches: hidden 5120, 6 target layers, block 8',
+    )
+    await act(async () => {
+      q<HTMLButtonElement>(host, 'model-draft-pull').click()
+      await Promise.resolve()
+    })
+    expect(pullCalls).toEqual([
+      {
+        id: 'm1',
+        body: {
+          hf_repo: 'org/qwen-gguf',
+          hf_filename: 'qwen-q8.gguf',
+          draft_filename: 'Qwen-LiLiCorr-Q8.gguf',
+          draft_repo: 'org/qwen-gguf-LiLiCorr',
+        },
+      },
+    ])
+    expect(updateCalls).toEqual([])
+    act(() => root.unmount())
+  })
+
+  it('a refused repo pick shows the first reason', () => {
+    withDrafts()
+    draftFit.current = {
+      kind: 'dflash',
+      variant: 'lilicorr',
+      fit: { ok: false, reasons: ['hidden size 2048 != target 5120'] },
+      draft: { variant: 'lilicorr' },
+    }
+    const { host, root } = mount(
+      React.createElement(ModelDrawer, { open: true, onClose: () => {}, model: DRAFT_MODEL }),
+    )
+    openSource(host)
+    act(() => q<HTMLButtonElement>(host, 'model-draft-select').click())
+    act(() =>
+      (host.querySelector(`[data-option-id="${MODEL_DIR}/Qwen-LiLiCorr-Q8.gguf"]`) as HTMLElement).click(),
+    )
+    expect(q<HTMLElement>(host, 'model-draft-fit').textContent).toContain('hidden size 2048 != target 5120')
+    act(() => root.unmount())
+  })
+
+  it('unpair sends draft: null and keeps the drawer open', async () => {
+    withDrafts()
+    const { host, root } = mount(
+      React.createElement(ModelDrawer, {
+        open: true,
+        onClose: () => {},
+        model: { ...DRAFT_MODEL, draft: `${MODEL_DIR}/d.gguf`, draftVariant: 'dflash' },
+      }),
+    )
+    openSource(host)
+    await act(async () => {
+      q<HTMLButtonElement>(host, 'model-draft-unpair').click()
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+    expect(updateCalls).toEqual([{ id: 'm1', body: { draft: null } }])
+    expect(q(host, 'model-draft-unpair')).toBeNull()
+    act(() => root.unmount())
+  })
+
+  it('no unpair action without a pairing', () => {
+    withDrafts()
+    const { host, root } = mount(
+      React.createElement(ModelDrawer, { open: true, onClose: () => {}, model: DRAFT_MODEL }),
+    )
+    openSource(host)
+    expect(q(host, 'model-draft-unpair')).toBeNull()
+    act(() => root.unmount())
+  })
+
+  const pickRepoDraft = (host: HTMLElement) => {
+    act(() => q<HTMLButtonElement>(host, 'model-draft-select').click())
+    act(() =>
+      (host.querySelector(`[data-option-id="${MODEL_DIR}/Qwen-LiLiCorr-Q8.gguf"]`) as HTMLElement).click(),
+    )
+  }
+
+  it('a completed pull is adopted: Pull and the pending hint go, Unpair appears', async () => {
+    withDrafts()
+    const { host, root } = mount(
+      React.createElement(ModelDrawer, { open: true, onClose: () => {}, model: DRAFT_MODEL }),
+    )
+    openSource(host)
+    pickRepoDraft(host)
+    await act(async () => {
+      q<HTMLButtonElement>(host, 'model-draft-pull').click()
+      await Promise.resolve()
+    })
+    expect(q(host, 'model-draft-unpair')).toBeNull()
+    pullBox.current = { state: 'completed', modelId: 'm1', jobId: 'j1' }
+    act(() => {
+      root.render(
+        React.createElement(
+          QueryClientProvider,
+          { client: new QueryClient() },
+          React.createElement(ModelDrawer, { open: true, onClose: () => {}, model: DRAFT_MODEL }),
+        ),
+      )
+    })
+    expect(q(host, 'model-draft-pull')).toBeNull()
+    expect(q(host, 'model-draft-pending')).toBeNull()
+    expect(q(host, 'model-draft-unpair')).toBeTruthy()
+    expect(updateCalls).toEqual([])
+    act(() => root.unmount())
+  })
+
+  it('an unpaired file stays pickable and re-pairs with a plain PUT, no pull', async () => {
+    withDrafts()
+    const kept = `${MODEL_DIR}/kept-draft.gguf`
+    const { host, root } = mount(
+      React.createElement(ModelDrawer, {
+        open: true,
+        onClose: () => {},
+        model: { ...DRAFT_MODEL, draft: kept, draftVariant: 'dflash' },
+      }),
+    )
+    openSource(host)
+    await act(async () => {
+      q<HTMLButtonElement>(host, 'model-draft-unpair').click()
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+    updateCalls.length = 0
+    act(() => q<HTMLButtonElement>(host, 'model-draft-select').click())
+    const row = host.querySelector(`[data-option-id="${kept}"]`) as HTMLElement
+    expect(row.textContent).toContain('on disk, not paired')
+    act(() => row.click())
+    expect(q(host, 'model-draft-pull')).toBeNull()
+    expect(q(host, 'model-draft-pending')).toBeNull()
+    await save(host)
+    expect(updateCalls).toEqual([{ id: 'm1', body: { draft: kept } }])
+    act(() => root.unmount())
+  })
+
+  it('the kept file also listed in the repo still reads "on disk, not paired" and re-pairs by PUT', async () => {
+    withDrafts()
+    const kept = `${MODEL_DIR}/Qwen-LiLiCorr-Q8.gguf`
+    const { host, root } = mount(
+      React.createElement(ModelDrawer, {
+        open: true,
+        onClose: () => {},
+        model: { ...DRAFT_MODEL, draft: kept, draftVariant: 'lilicorr' },
+      }),
+    )
+    openSource(host)
+    await act(async () => {
+      q<HTMLButtonElement>(host, 'model-draft-unpair').click()
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+    updateCalls.length = 0
+    act(() => q<HTMLButtonElement>(host, 'model-draft-select').click())
+    const row = host.querySelector(`[data-option-id="${kept}"]`) as HTMLElement
+    expect(row.textContent).toContain('on disk, not paired')
+    act(() => row.click())
+    expect(q(host, 'model-draft-pull')).toBeNull()
+    await save(host)
+    expect(updateCalls).toEqual([{ id: 'm1', body: { draft: kept } }])
+    act(() => root.unmount())
+  })
+
+  it('pull → adopted → Unpair → re-pair by PUT → a later pull (new job) is adopted too', async () => {
+    inspectHandler.current = () => ({
+      repo: 'org/qwen-gguf',
+      variants: [],
+      mmproj: [],
+      drafts: [
+        DRAFTS[0],
+        { ...DRAFTS[0], id: 'Qwen-Other-Q8.gguf', variant_hint: 'dflash' },
+      ],
+    })
+    const rerender = () =>
+      act(() => {
+        root.render(
+          React.createElement(
+            QueryClientProvider,
+            { client: new QueryClient() },
+            React.createElement(ModelDrawer, { open: true, onClose: () => {}, model: DRAFT_MODEL }),
+          ),
+        )
+      })
+    const { host, root } = mount(
+      React.createElement(ModelDrawer, { open: true, onClose: () => {}, model: DRAFT_MODEL }),
+    )
+    openSource(host)
+    pickRepoDraft(host) // X
+    await act(async () => {
+      q<HTMLButtonElement>(host, 'model-draft-pull').click()
+      await Promise.resolve()
+    })
+    pullBox.current = { state: 'completed', modelId: 'm1', jobId: 'j1' }
+    rerender()
+    expect(q(host, 'model-draft-pull')).toBeNull()
+    await act(async () => {
+      q<HTMLButtonElement>(host, 'model-draft-unpair').click()
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+    expect(q(host, 'model-draft-unpair')).toBeNull()
+    // X is on disk now: picking it again is a plain re-pair, no Pull.
+    pickRepoDraft(host)
+    expect(q(host, 'model-draft-pull')).toBeNull()
+    // A different drafter pulled under a NEW job id is adopted as well.
+    pullBox.current = { state: 'idle', modelId: null, jobId: null }
+    act(() => q<HTMLButtonElement>(host, 'model-draft-select').click())
+    act(() =>
+      (host.querySelector(`[data-option-id="${MODEL_DIR}/Qwen-Other-Q8.gguf"]`) as HTMLElement).click(),
+    )
+    await act(async () => {
+      q<HTMLButtonElement>(host, 'model-draft-pull').click()
+      await Promise.resolve()
+    })
+    pullBox.current = { state: 'completed', modelId: 'm1', jobId: 'j2' }
+    rerender()
+    expect(q(host, 'model-draft-pull')).toBeNull()
+    expect(q(host, 'model-draft-unpair')).toBeTruthy()
+    act(() => root.unmount())
+  })
+
+  it('a pending repo pick disables Save with a hint, even beside other edits', async () => {
+    withDrafts()
+    const { host, root } = mount(
+      React.createElement(ModelDrawer, { open: true, onClose: () => {}, model: DRAFT_MODEL }),
+    )
+    openSource(host)
+    pickRepoDraft(host)
+    expect(q<HTMLElement>(host, 'model-draft-pending').textContent).toContain(
+      'pull the drafter first (or set it back)',
+    )
+    expect(q<HTMLButtonElement>(host, 'model-save').disabled).toBe(true)
+    act(() => typeInto(q<HTMLInputElement>(host, 'model-hffile-input'), 'other.gguf'))
+    expect(q<HTMLButtonElement>(host, 'model-save').disabled).toBe(true)
+    // Setting the pick back clears the block; the other edit can now save.
+    act(() => q<HTMLButtonElement>(host, 'model-draft-select').click())
+    act(() => (host.querySelector('[data-option-id=""]') as HTMLElement).click())
+    expect(q(host, 'model-draft-pending')).toBeNull()
+    expect(q<HTMLButtonElement>(host, 'model-save').disabled).toBe(false)
+    act(() => root.unmount())
+  })
+
+  it('the facts band shows the drafter variant', () => {
+    const { host, root } = mount(
+      React.createElement(ModelDrawer, {
+        open: true,
+        onClose: () => {},
+        model: { ...DRAFT_MODEL, draft: `${MODEL_DIR}/d.gguf`, draftVariant: 'lilicorr' },
+      }),
+    )
+    expect(q<HTMLElement>(host, 'model-facts').textContent).toContain('LiLiCorr')
     act(() => root.unmount())
   })
 })

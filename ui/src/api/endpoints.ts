@@ -69,6 +69,8 @@ export const ENDPOINTS = {
   modelPulls: '/api/models/pulls',
   modelPullDelete: (id: string) => `/api/models/pulls/${encodeURIComponent(id)}`,
   modelInspect: '/api/models/inspect',
+  // Header-level drafter fit check (ADR-0031 §2): POST the target + drafter coords.
+  modelInspectDraft: '/api/models/inspect-draft',
   // Per-type default MODEL marker: POST {default:true} promotes (demoting the
   // current holder of the type), {default:false} clears. Server enforces the
   // single-holder invariant in one chokepoint.

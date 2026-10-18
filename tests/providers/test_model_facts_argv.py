@@ -115,8 +115,43 @@ def test_top_level_facts_launch_the_pre_adr_argv(name: str, tmp_path: Path) -> N
         "n_gpu_layers": 99,
         "model": {"default": stored.id},
     }
-    profile = ProfileConfig(flags="-fa on --parallel 1", mtp="auto", ctx_size=32768)
+    profile = ProfileConfig(flags="-fa on --parallel 1", speculation="auto", ctx_size=32768)
     with patch("hal0.providers.container._resolve_profile", return_value=profile):
         plan = ContainerProvider().container_spec(cfg, model_info)
 
     assert plan.command == _golden(name)
+
+
+def test_a_paired_drafter_launches_from_the_registry_row(tmp_path: Path) -> None:
+    """ADR-0031 §3 through the real row: ``draft`` / ``draft_kind`` and
+    ``metadata.draft`` survive the registry round trip and launch the drafter
+    in the model layer, the per-kind bundle in the profile layer."""
+    registry = ModelRegistry(registry_dir=tmp_path / "registry")
+    registry.add(
+        Model(
+            id="m-draft",
+            path="/models/m-draft.gguf",
+            tags=["mtp"],
+            draft="/models/m-draft-dflash.gguf",
+            draft_kind="dflash",
+            metadata={"context_length": 131072, "draft": {"variant": "dflash", "block_size": 8}},
+        )
+    )
+    model_info = {"_model_key": "m-draft", **registry.get("m-draft").model_dump()}
+    cfg = {
+        "name": "chat",
+        "port": 8101,
+        "profile": "p",
+        "device": "gpu-rocm",
+        "n_gpu_layers": 99,
+        "model": {"default": "m-draft"},
+    }
+    profile = ProfileConfig(flags="-fa on", speculation="auto", ctx_size=32768)
+    with patch("hal0.providers.container._resolve_profile", return_value=profile):
+        argv = list(ContainerProvider().container_spec(cfg, model_info).command)
+
+    assert argv.count("--spec-type") == 1
+    assert argv[argv.index("--spec-type") + 1] == "draft-dflash"
+    assert argv[argv.index("--spec-draft-model") + 1] == "/models/m-draft-dflash.gguf"
+    assert argv[argv.index("--spec-draft-n-max") + 1] == "7"
+    assert argv[argv.index("--spec-draft-device") + 1] == "ROCm0"

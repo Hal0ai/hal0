@@ -8,6 +8,7 @@ redirect handling, and partial downloads / cancellation.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import json
 import os
@@ -21,6 +22,7 @@ import pytest
 
 from hal0.registry.pull import (
     _CHUNK_BYTES,
+    PullJob,
     _pull_root,
     _register_flm_pulled,
     _register_pulled,
@@ -2148,3 +2150,211 @@ async def test_run_pull_created_after_a_delete_registers(
 
     assert job.state == "completed"
     assert registry.has("re-pulled")
+
+
+# ── ADR-0031 §4: a paired drafter is pulled with the model ──────────────────
+
+_DRAFT_NAME = "model-dflash-lilicorr-Q8_0.gguf"
+
+
+def _drafter_bytes(tmp_path: Path) -> bytes:
+    """A real header-only dflash/lilicorr drafter GGUF, as bytes."""
+    from tests.registry.gguf_fixtures import write_gguf
+
+    path = write_gguf(
+        tmp_path / "src-drafter.gguf",
+        "dflash",
+        uints={
+            "dflash.embedding_length": 4096,
+            "dflash.block_size": 8,
+            "lilicorr.candidate_topk": 4,
+        },
+        int_arrays={"dflash.target_layers": [2, 19, 36]},
+    )
+    return path.read_bytes() + b"d" * 512
+
+
+def _three_file_transport(
+    main: bytes, mmproj: bytes, draft: bytes, seen: list[httpx.Request] | None = None
+) -> httpx.MockTransport:
+    def handler(req: httpx.Request) -> httpx.Response:
+        if seen is not None:
+            seen.append(req)
+        path = req.url.path
+        for name, body in (
+            (_MAIN_NAME, main),
+            (_MMPROJ_NAME, mmproj),
+            (_DRAFT_NAME, draft),
+        ):
+            if path.endswith(name):
+                return httpx.Response(200, content=body, headers={"Content-Length": str(len(body))})
+        return httpx.Response(404, content=b"")
+
+    return httpx.MockTransport(handler)
+
+
+@pytest.mark.asyncio
+async def test_run_pull_fetches_draft_after_mmproj_and_sets_facts(
+    tmp_hal0_home: str, tmp_path: Path
+) -> None:
+    main, mmproj, draft = _payload(4096), b"m" * 1024, _drafter_bytes(tmp_path)
+    job = make_job("vision-model")
+    registry = ModelRegistry()
+    client = httpx.AsyncClient(transport=_three_file_transport(main, mmproj, draft))
+    try:
+        await run_pull(
+            job,
+            hf_repo="Org/Vision-GGUF",
+            hf_file=_MAIN_NAME,
+            registry=registry,
+            client=client,
+            mmproj_file=_MMPROJ_NAME,
+            draft_file=_DRAFT_NAME,
+        )
+    finally:
+        await client.aclose()
+
+    assert job.state == "completed", f"got {job.state}: {job.error}"
+    assert [f["kind"] for f in job.as_dict()["files"]] == ["model", "mmproj", "draft"]
+    final = Path(job.path)  # type: ignore[arg-type]
+    draft_path = final.parent / _DRAFT_NAME
+    assert draft_path.read_bytes() == draft
+
+    entry = registry.get("vision-model")
+    assert entry.draft == str(draft_path)
+    assert entry.draft_kind == "dflash"
+    meta = entry.metadata["draft"]
+    assert meta["variant"] == "lilicorr"
+    assert meta["size_bytes"] == len(draft)
+    assert meta["sha256"] == hashlib.sha256(draft).hexdigest()
+    assert entry.size_bytes == len(main) + len(mmproj) + len(draft)
+
+    from hal0.db import repository
+    from hal0.db.connection import connect
+
+    with connect(registry.db_path) as conn:
+        roles = {r["rel"]: r["role"] for r in repository.list_model_files(conn, "vision-model")}
+    assert roles[_DRAFT_NAME] == "draft"
+    with connect(registry.db_path) as conn:
+        blob = repository.get_blob(conn, hashlib.sha256(draft).hexdigest())
+    assert blob is not None
+    assert blob["refcount"] == 1
+
+
+@pytest.mark.asyncio
+async def test_run_pull_draft_from_other_repo(tmp_hal0_home: str, tmp_path: Path) -> None:
+    main, draft = _payload(2048), _drafter_bytes(tmp_path)
+    seen: list[httpx.Request] = []
+    job = make_job("vision-model")
+    registry = ModelRegistry()
+    client = httpx.AsyncClient(transport=_three_file_transport(main, b"", draft, seen))
+    try:
+        await run_pull(
+            job,
+            hf_repo="Org/Vision-GGUF",
+            hf_file=_MAIN_NAME,
+            registry=registry,
+            client=client,
+            draft_file=_DRAFT_NAME,
+            draft_repo="Other/Drafters-GGUF",
+        )
+    finally:
+        await client.aclose()
+
+    assert job.state == "completed", f"got {job.state}: {job.error}"
+    by_name = {Path(r.url.path).name: r.url.path for r in seen}
+    assert by_name[_DRAFT_NAME].startswith("/Other/Drafters-GGUF/")
+    assert by_name[_MAIN_NAME].startswith("/Org/Vision-GGUF/")
+
+
+@pytest.mark.asyncio
+async def test_run_pull_without_draft_keeps_existing_pairing(
+    tmp_hal0_home: str, tmp_path: Path
+) -> None:
+    main, draft = _payload(2048), _drafter_bytes(tmp_path)
+    registry = ModelRegistry()
+    client = httpx.AsyncClient(transport=_three_file_transport(main, b"", draft))
+    try:
+        first = make_job("vision-model")
+        await run_pull(
+            first,
+            hf_repo="Org/V",
+            hf_file=_MAIN_NAME,
+            registry=registry,
+            client=client,
+            draft_file=_DRAFT_NAME,
+        )
+        second = make_job("vision-model")
+        await run_pull(
+            second, hf_repo="Org/V", hf_file=_MAIN_NAME, registry=registry, client=client
+        )
+    finally:
+        await client.aclose()
+    entry = registry.get("vision-model")
+    assert second.state == "completed", second.error
+    assert entry.draft is not None
+    assert entry.draft_kind == "dflash"
+    assert entry.metadata["draft"]["variant"] == "lilicorr"
+
+
+@pytest.mark.asyncio
+async def test_run_pull_fails_when_downloaded_draft_is_not_a_drafter(
+    tmp_hal0_home: str,
+) -> None:
+    main = _payload(2048)
+    job = make_job("vision-model")
+    registry = ModelRegistry()
+    client = httpx.AsyncClient(
+        transport=_three_file_transport(main, b"", b"not a gguf at all" * 40)
+    )
+    try:
+        await run_pull(
+            job,
+            hf_repo="Org/V",
+            hf_file=_MAIN_NAME,
+            registry=registry,
+            client=client,
+            draft_file=_DRAFT_NAME,
+        )
+    finally:
+        await client.aclose()
+    assert job.state == "failed"
+    assert job.error_code == "model.draft_not_a_drafter"
+    _assert_no_pairing(registry, job)
+
+
+def _assert_no_pairing(registry: ModelRegistry, job: PullJob) -> None:
+    """A failed drafter leaves no draft fact, no draft file row, no file on disk."""
+    from hal0.db import repository
+    from hal0.db.connection import connect
+    from hal0.registry.store import ModelNotFound
+
+    with contextlib.suppress(ModelNotFound):
+        assert registry.get("vision-model").draft is None
+    with connect(registry.db_path) as conn:
+        roles = [r["role"] for r in repository.list_model_files(conn, "vision-model")]
+    assert "draft" not in roles
+    assert job.files[0].dest is not None
+    assert not (Path(job.files[0].dest).parent / _DRAFT_NAME).exists()
+
+
+@pytest.mark.asyncio
+async def test_run_pull_draft_404_leaves_no_pairing(tmp_hal0_home: str) -> None:
+    main, mmproj = _payload(2048), b"m" * 256
+    job = make_job("vision-model")
+    registry = ModelRegistry()
+    client = httpx.AsyncClient(transport=_two_file_transport(main, mmproj))
+    try:
+        await run_pull(
+            job,
+            hf_repo="Org/V",
+            hf_file=_MAIN_NAME,
+            registry=registry,
+            client=client,
+            mmproj_file=_MMPROJ_NAME,
+            draft_file=_DRAFT_NAME,
+        )
+    finally:
+        await client.aclose()
+    assert job.state == "failed"
+    _assert_no_pairing(registry, job)

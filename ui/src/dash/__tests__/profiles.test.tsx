@@ -430,7 +430,7 @@ describe('ProfileCard runtime facts (U3)', () => {
     const { host, root } = card({
       name: 'coding', intent: 'Coder tune', runner: 'standard',
       runtime_family: 'llama-server', flags: '-fa on', ctx_size: 65536,
-      enable_thinking: false, vision: 'off', mtp: 'off', used_by: ['agent'],
+      enable_thinking: false, vision: 'off', speculation: 'off', used_by: ['agent'],
     })
     const chips = Array.from(
       host.querySelectorAll('[data-testid="pf-runner-badge-coding"] .pf-be'),
@@ -571,12 +571,12 @@ describe('ProfileDrawer tune fields (ADR-0029)', () => {
   const drawer = (mode: string, source?: Record<string, unknown>) =>
     mount(React.createElement(ProfileDrawer, { mode, source, onClose: () => {}, onSaved: () => {} }))
 
-  it('a new profile defaults to context native, thinking auto, vision auto, MTP auto', () => {
+  it('a new profile defaults to context native, thinking auto, vision auto, speculation auto', () => {
     const { host, root } = drawer('create')
     expect((field(host, 'pf-input-ctx') as HTMLInputElement).value).toBe('')
     expect((field(host, 'pf-select-thinking') as HTMLSelectElement).value).toBe('auto')
     expect((field(host, 'pf-select-vision') as HTMLSelectElement).value).toBe('auto')
-    expect((field(host, 'pf-select-mtp') as HTMLSelectElement).value).toBe('auto')
+    expect((field(host, 'pf-select-speculation') as HTMLSelectElement).value).toBe('auto')
     act(() => root.unmount())
   })
 
@@ -590,22 +590,44 @@ describe('ProfileDrawer tune fields (ADR-0029)', () => {
 
   it('prefills every tune field on edit', () => {
     const { host, root } = drawer('edit', {
-      name: 'tuned', flags: '-fa on', ctx_size: 65536, enable_thinking: true, vision: 'off', mtp: 'off',
+      name: 'tuned', flags: '-fa on', ctx_size: 65536, enable_thinking: true, vision: 'off', speculation: 'off',
     })
     expect((field(host, 'pf-input-ctx') as HTMLInputElement).value).toBe('65536')
     expect((field(host, 'pf-select-thinking') as HTMLSelectElement).value).toBe('on')
     expect((field(host, 'pf-select-vision') as HTMLSelectElement).value).toBe('off')
-    expect((field(host, 'pf-select-mtp') as HTMLSelectElement).value).toBe('off')
+    expect((field(host, 'pf-select-speculation') as HTMLSelectElement).value).toBe('off')
     act(() => root.unmount())
   })
 
-  it('maps the fields onto the wire shape: ctx_size int, enable_thinking tri-state, vision/mtp auto|off', async () => {
+  it('the Speculation select offers auto, off and ngram with the ADR-0031 copy', () => {
+    const { host, root } = drawer('create')
+    const sel = field(host, 'pf-select-speculation') as HTMLSelectElement
+    expect(Array.from(sel.options).map(o => [o.value, o.text])).toEqual([
+      ['auto', "Auto — use the model's drafter or MTP heads when it has them"],
+      ['off', 'Off — never draft'],
+      ['ngram', 'N-gram — model-free speculation, no drafter needed'],
+    ])
+    expect(field(host, 'pf-select-mtp')).toBeFalsy()
+    act(() => root.unmount())
+  })
+
+  it('prefills and saves ngram speculation', async () => {
+    const { host, root } = drawer('edit', { name: 'ng', flags: '', speculation: 'ngram' })
+    expect((field(host, 'pf-select-speculation') as HTMLSelectElement).value).toBe('ngram')
+    await submit(host)
+    const call = updateCalls[0] as { body: Record<string, unknown> }
+    expect(call.body.speculation).toBe('ngram')
+    expect(call.body).not.toHaveProperty('mtp')
+    act(() => root.unmount())
+  })
+
+  it('maps the fields onto the wire shape: ctx_size int, enable_thinking tri-state, vision auto|off, speculation auto|off|ngram', async () => {
     const { host, root } = drawer('create')
     setValue(field(host, 'pf-input-name') as HTMLInputElement, 'my-tune')
     setValue(field(host, 'pf-input-ctx') as HTMLInputElement, '32768')
     setValue(field(host, 'pf-select-thinking') as HTMLSelectElement, 'off')
     setValue(field(host, 'pf-select-vision') as HTMLSelectElement, 'off')
-    setValue(field(host, 'pf-select-mtp') as HTMLSelectElement, 'off')
+    setValue(field(host, 'pf-select-speculation') as HTMLSelectElement, 'off')
     setValue(field(host, 'pf-input-flags') as HTMLTextAreaElement, '-fa on -b 2048')
     await submit(host)
     expect(createCalls).toHaveLength(1)
@@ -615,20 +637,21 @@ describe('ProfileDrawer tune fields (ADR-0029)', () => {
       ctx_size: 32768,
       enable_thinking: false,
       vision: 'off',
-      mtp: 'off',
+      speculation: 'off',
       intent: '',
       runner: '',
     })
     act(() => root.unmount())
   })
 
-  it('never sends the removed fields (backend, device_class, quant, boolean mtp)', async () => {
+  it('never sends the removed fields (backend, device_class, quant, boolean mtp, the old profile mtp key)', async () => {
     const { host, root } = drawer('create')
     setValue(field(host, 'pf-input-name') as HTMLInputElement, 'plain')
     await submit(host)
     const body = createCalls[0] as Record<string, unknown>
     for (const k of ['backend', 'device_class', 'quant']) expect(body).not.toHaveProperty(k)
-    expect(typeof body.mtp).toBe('string')
+    expect(body).not.toHaveProperty('mtp')
+    expect(body.speculation).toBe('auto')
     // An empty context on a create is simply omitted (native window).
     expect(body).not.toHaveProperty('ctx_size')
     act(() => root.unmount())
@@ -636,7 +659,7 @@ describe('ProfileDrawer tune fields (ADR-0029)', () => {
 
   it('clearing the context on an edit sends ctx_size: null; thinking Auto sends null', async () => {
     const { host, root } = drawer('edit', {
-      name: 'tuned', flags: '', ctx_size: 65536, enable_thinking: true, vision: 'auto', mtp: 'auto',
+      name: 'tuned', flags: '', ctx_size: 65536, enable_thinking: true, vision: 'auto', speculation: 'auto',
     })
     setValue(field(host, 'pf-input-ctx') as HTMLInputElement, '')
     setValue(field(host, 'pf-select-thinking') as HTMLSelectElement, 'auto')
@@ -771,23 +794,23 @@ describe('ProfileDrawer tune fields (ADR-0029)', () => {
 })
 
 describe('ProfileCard tune rows (ADR-0029)', () => {
-  it('shows ctx, thinking, vision, MTP, runner and flags', () => {
+  it('shows ctx, thinking, vision, speculation, runner and flags', () => {
     const { host, root } = card({
       name: 'tuned', flags: '-fa on', resolved_flags: '-fa on', ctx_size: 65536,
-      enable_thinking: false, vision: 'off', mtp: 'off', runner: 'standard',
+      enable_thinking: false, vision: 'off', speculation: 'off', runner: 'standard',
     })
     const rows = (host.querySelector('[data-testid="pf-tune-tuned"]') as HTMLElement).textContent || ''
     expect(rows).toContain('ctx64K')
     expect(rows).toContain('thinkingoff')
     expect(rows).toContain('visionoff')
-    expect(rows).toContain('mtpoff')
+    expect(rows).toContain('specoff')
     expect(rows).toContain('runnerStandard')
     expect(rows).toContain('-fa on')
     act(() => root.unmount())
   })
 
   it('a profile with no ctx_size says it defers to the model, unset thinking reads default (off), other auto fields read auto', () => {
-    const { host, root } = card({ name: 'plain', flags: '', ctx_size: null, enable_thinking: null, vision: 'auto', mtp: 'auto' })
+    const { host, root } = card({ name: 'plain', flags: '', ctx_size: null, enable_thinking: null, vision: 'auto', speculation: 'auto' })
     const rows = (host.querySelector('[data-testid="pf-tune-plain"]') as HTMLElement).textContent || ''
     expect(rows).toContain('ctxmodel native')
     expect(rows).toContain('thinkingdefault (off)')

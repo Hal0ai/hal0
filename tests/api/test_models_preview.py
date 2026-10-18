@@ -165,3 +165,80 @@ def test_preview_emits_no_events(
 
     post = client.get(f"/api/events?since={pre_max}&type=model.*&limit=100").json()
     assert post.get("events", []) == []
+
+
+# ── speculative-decoding drafters in the preview (ADR-0031 §4 Scan) ─────────
+
+
+def _write_target(path: Path) -> Path:
+    from tests.registry.gguf_fixtures import write_gguf
+
+    return write_gguf(
+        path, "qwen3", uints={"qwen3.embedding_length": 4096, "qwen3.block_count": 36}
+    )
+
+
+def _write_drafter(path: Path, *, width: int = 4096) -> Path:
+    from tests.registry.gguf_fixtures import write_gguf
+
+    return write_gguf(
+        path,
+        "dflash",
+        uints={"dflash.embedding_length": width, "dflash.block_size": 8},
+        int_arrays={"dflash.target_layers": [2, 19, 35]},
+    )
+
+
+def test_preview_lone_drafter_is_skipped_not_a_row(
+    preview_client: tuple[TestClient, Path],
+) -> None:
+    client, root = preview_client
+    drafter = _write_drafter(root / "lone-dflash.gguf")
+    body = client.post("/api/models/scan/preview", json={"paths": [str(root)]}).json()
+    assert [(r["role"], r["reason"], r["pairs_with"]) for r in body["preview"]] == [
+        ("draft", "drafter_without_target", None)
+    ]
+    assert body["skipped"] == [{"path": str(drafter.resolve()), "reason": "drafter_without_target"}]
+    assert body["paired_drafts"] == []
+
+
+def test_preview_pairs_drafter_to_new_model_row(
+    preview_client: tuple[TestClient, Path],
+) -> None:
+    client, root = preview_client
+    target = _write_target(root / "tgt.gguf")
+    drafter = _write_drafter(root / "tgt-dflash.gguf")
+    body = client.post("/api/models/scan/preview", json={"paths": [str(root)]}).json()
+    rows = {r["path"]: r for r in body["preview"]}
+    assert rows[str(target)]["draft"] == str(drafter.resolve())
+    assert "role" not in rows[str(target)]
+    assert rows[str(drafter.resolve())]["role"] == "draft"
+    assert rows[str(drafter.resolve())]["pairs_with"] == str(target)
+    assert rows[str(drafter.resolve())]["reason"] is None
+    assert body["skipped"] == []
+
+
+def test_preview_reports_pairing_to_registered_model(
+    preview_client: tuple[TestClient, Path],
+) -> None:
+    client, root = preview_client
+    target = _write_target(root / "tgt.gguf")
+    assert client.post("/api/models", json={"id": "tgt", "path": str(target)}).status_code == 201
+    drafter = _write_drafter(root / "tgt-dflash.gguf")
+    body = client.post("/api/models/scan/preview", json={"paths": [str(root)]}).json()
+    assert body["paired_drafts"] == [{"model_id": "tgt", "draft": str(drafter.resolve())}]
+    assert body["skipped"] == []
+    draft_rows = [r for r in body["preview"] if r.get("role") == "draft"]
+    assert [r["pairs_with"] for r in draft_rows] == [str(target)]
+    # Preview never writes.
+    assert client.get("/api/models/tgt").json()["draft"] is None
+
+
+def test_preview_mismatched_drafter_is_skipped(
+    preview_client: tuple[TestClient, Path],
+) -> None:
+    client, root = preview_client
+    _write_target(root / "tgt.gguf")
+    drafter = _write_drafter(root / "tgt-dflash.gguf", width=2048)
+    body = client.post("/api/models/scan/preview", json={"paths": [str(root)]}).json()
+    assert body["skipped"] == [{"path": str(drafter.resolve()), "reason": "drafter_mismatch"}]

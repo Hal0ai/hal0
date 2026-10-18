@@ -252,16 +252,31 @@ async def scan_preview(request: Request) -> dict[str, Any]:
     cfg = load_hal0_config()
     extensions = {e.lower() for e in cfg.models.file_extensions}
 
-    preview = _svc.preview_scan_rows(raw_paths, recursive, extensions)
+    registry = request.app.state.model_registry
+    skipped: list[dict[str, Any]] = []
+    paired_drafts: list[dict[str, Any]] = []
+    preview = _svc.preview_scan_rows(
+        raw_paths,
+        recursive,
+        extensions,
+        registry=registry,
+        skipped=skipped,
+        paired_drafts=paired_drafts,
+    )
 
     # Drift view: existing registry rows whose backing file is now absent.
     # Surfaced so the operator/UI can see what a `{"prune": true}` scan would
     # remove BEFORE committing. ``referenced`` flags rows a slot/stack still
     # points at — those are protected from prune (repair, don't delete).
-    registry = request.app.state.model_registry
     missing = _svc.missing_registry_rows(registry)
 
-    return {"preview": preview, "count": len(preview), "missing": missing}
+    return {
+        "preview": preview,
+        "count": len(preview),
+        "missing": missing,
+        "skipped": skipped,
+        "paired_drafts": paired_drafts,
+    }
 
 
 @router.post("/scan")
@@ -330,7 +345,8 @@ async def add_model_from_path(request: Request) -> dict[str, Any]:
           "id":        "optional explicit registry id",
           "name":      "optional display name",
           "labels":    ["llm", "chat", ...],       # optional capabilities override
-          "overwrite": false                       # default false
+          "overwrite": false,                      # default false
+          "draft":     "/abs/path/to/drafter.gguf" # optional; fit-checked, 422 on mismatch
         }
 
     Errors:
@@ -410,7 +426,8 @@ async def create_model(request: Request) -> dict[str, Any]:
     # Screen at CREATE time too, with the same helper the PUT/validate paths
     # use: a body carrying a ``defaults`` table or a tuning key is a 422 here
     # instead of a generic "invalid Model payload".
-    _svc.screen_model_write(body, runner_images=_RUNNER_IMAGES)
+    drafter = _svc.screen_model_write(body, runner_images=_RUNNER_IMAGES)
+    _svc.stamp_draft_fact(body, drafter)
     try:
         model = Model(**body)
     except (TypeError, ValueError) as exc:
@@ -780,6 +797,11 @@ async def update_model(model_id: str, request: Request) -> dict[str, Any]:
         its type (``{"mtp": "maybe"}``, #1414).
       * ``400 model.provider_invalid`` — ``provider`` not a
         ``hal0.model_meta.RUNTIME_FAMILIES`` member.
+      * ``422 model.draft_not_found`` / ``model.draft_not_a_drafter`` /
+        ``model.draft_mismatch`` — ``draft`` (a drafter GGUF path, ADR-0031) is
+        missing, is not a drafter, or does not fit this model.
+      * ``422 model.draft_kind_readonly`` — the body carries ``draft_kind``;
+        it is classified from the file.
       * ``404 model.not_found`` — ``model_id`` not registered.
     """
     registry = request.app.state.model_registry
@@ -826,7 +848,9 @@ async def update_model(model_id: str, request: Request) -> dict[str, Any]:
     # time (UI-API-1 items 1/2, #1393). Shared
     # with create + /validate so the three paths never drift; fails the write
     # with the same envelope the launch path raises.
-    _svc.screen_model_write(body, runner_images=_RUNNER_IMAGES, existing=before)
+    drafter = _svc.screen_model_write(body, runner_images=_RUNNER_IMAGES, existing=before)
+    _svc.stamp_draft_fact(body, drafter, before.get("metadata"))
+    _svc.settle_draft_tombstone(registry, model_id, before.get("draft"), body)
 
     model = registry.update(model_id, body)
 
@@ -848,6 +872,36 @@ async def update_model(model_id: str, request: Request) -> dict[str, Any]:
             data={"id": model.id, "changed_fields": changed},
         )
     return _model_to_dict(model)
+
+
+@router.delete("/{model_id}/draft")
+async def delete_model_draft(model_id: str, request: Request) -> dict[str, Any]:
+    """Unpair a model's speculative-decoding drafter and delete the file.
+
+    Clears ``draft`` / ``draft_kind`` / ``metadata.draft`` and removes the
+    drafter file under the same guards a model delete uses (inside the model
+    roots, not a file another model still uses). Unpairing without deleting is
+    ``PUT {"draft": null}``. Response: ``{"model_id", "removed", "bytes_freed"}``.
+
+    Errors: ``404 model.not_found`` (unknown model), ``404 model.draft_not_found``
+    (no drafter paired).
+    """
+    registry = request.app.state.model_registry
+    async with record_action(
+        request, category="model", action="model.draft_delete", target=model_id
+    ) as rec:
+        result = await _svc.remove_model_draft(registry, model_id)
+        rec.after = result
+    event_bus = getattr(request.app.state, "events", None)
+    if event_bus is not None:
+        await event_bus.emit(
+            "model.updated",
+            "info",
+            f"model:{model_id}",
+            f"{model_id}: updated (draft)",
+            data={"id": model_id, "changed_fields": ["draft", "draft_kind", "metadata"]},
+        )
+    return result
 
 
 @router.post("/{model_id}/default")
@@ -1160,6 +1214,26 @@ async def inspect_model(request: Request) -> dict[str, Any]:
     if not isinstance(body, dict):
         raise BadRequest("body must be a JSON object")
     return await _svc.inspect_hf_repo(body)
+
+
+@router.post("/inspect-draft")
+async def inspect_draft(request: Request) -> dict[str, Any]:
+    """Check a speculative-decoding drafter against a target before download.
+
+    Body: ``{"hf_repo", "hf_filename", "draft_repo", "draft_filename"}``.
+    Reads both GGUF headers from the Hub by HTTP range (tens of MB) and
+    returns ``{kind, variant, fit: {ok, reasons}, draft, target}``. A header
+    that cannot be read is ``422 hf.header_unreadable``. Cached ~5 minutes per
+    coordinate set. Logic lives in
+    :func:`hal0.services.models_service.inspect_draft`.
+    """
+    try:
+        body = await request.json()
+    except Exception as exc:
+        raise BadRequest("body must be valid JSON", details={"error": str(exc)}) from exc
+    if not isinstance(body, dict):
+        raise BadRequest("body must be a JSON object")
+    return await _svc.inspect_draft(body)
 
 
 @router.post("/{model_id}/pull/cancel")

@@ -52,7 +52,7 @@ Autonomous read::
     slot_by_name, slot_by_id, slot_resolved, slot_state,
     model_list, model_show, model_scan_preview,
     model_catalogue, model_update_check, model_pulls_list,
-    model_pull_status, model_inspect, model_store,
+    model_pull_status, model_inspect, model_inspect_draft, model_store,
     hardware_probe, system_info, capability_list, provider_list, version_info,
     stack_list, stack_status, profile_list, profile_status,
     profile_export, upstream_list, upstream_get, upstream_test,
@@ -389,6 +389,7 @@ AUTONOMOUS_READ_TOOLS: frozenset[str] = frozenset(
         "model_pulls_list",
         "model_pull_status",
         "model_inspect",
+        "model_inspect_draft",
         "model_store",
         # Hardware / system. logs_tail / slot_logs are intentionally NOT
         # here — journald output can carry secrets, so they stay in
@@ -755,6 +756,7 @@ TOOL_NAME_ALIASES: dict[str, tuple[str, ...]] = {
     "GET:/api/models/pulls": ("model_pulls_list",),
     "GET:/api/models/{model_id}/pull/status": ("model_pull_status",),
     "POST:/api/models/inspect": ("model_inspect",),
+    "POST:/api/models/inspect-draft": ("model_inspect_draft",),
     "GET:/api/settings/models/store": ("model_store",),
     "DELETE:/api/models/pulls/{model_id}": ("model_pull_delete",),
     "POST:/api/models/{model_id}/default": ("model_set_default",),
@@ -1189,6 +1191,15 @@ TOOL_PARAM_HINTS: dict[str, dict[str, Any]] = {
             },
         },
     },
+    "model_inspect_draft": {
+        "properties": {
+            "hf_repo": {"type": "string", "description": "Target repo as 'org/name'"},
+            "hf_filename": {"type": "string", "description": "Target main-quant .gguf filename"},
+            "draft_repo": {"type": "string", "description": "Drafter repo as 'org/name'"},
+            "draft_filename": {"type": "string", "description": "Drafter .gguf filename"},
+        },
+        "required": ["hf_repo", "hf_filename", "draft_repo", "draft_filename"],
+    },
     "model_pull": {
         "properties": {
             "model_id": {
@@ -1203,6 +1214,14 @@ TOOL_PARAM_HINTS: dict[str, dict[str, Any]] = {
                 "description": "Exact .gguf filename in the repo (from model_inspect)",
             },
             "mmproj_filename": {"type": "string", "description": "Optional vision sidecar"},
+            "draft_filename": {
+                "type": "string",
+                "description": "Optional speculative-decoding drafter .gguf (checked against the model first)",
+            },
+            "draft_repo": {
+                "type": "string",
+                "description": "Repo holding draft_filename; defaults to hf_repo",
+            },
         },
     },
     "model_scan": {
@@ -1508,6 +1527,15 @@ TOOL_PARAM_HINTS: dict[str, dict[str, Any]] = {
                 "type": "string",
                 "description": "Absolute path to the vision projector sidecar",
             },
+            "draft": {
+                "type": ["string", "null"],
+                "description": (
+                    "File fact: absolute path to a speculative-decoding drafter GGUF "
+                    "(dflash, eagle3, mtp or simple) that fits this model; null unpairs it "
+                    "and keeps the file. The drafter kind is read from the file. Whether a "
+                    "slot uses it is its profile's choice."
+                ),
+            },
             "chat_template": {
                 "type": ["string", "null"],
                 "description": (
@@ -1523,7 +1551,7 @@ TOOL_PARAM_HINTS: dict[str, dict[str, Any]] = {
                 "type": ["boolean", "null"],
                 "description": (
                     "File fact: true = the file has MTP draft heads (null = the 'mtp' tag "
-                    "decides). Whether a slot drafts is its profile's mtp."
+                    "decides). Whether a slot drafts is its profile's speculation."
                 ),
             },
             "jinja": {
@@ -1561,12 +1589,13 @@ TOOL_PARAM_HINTS: dict[str, dict[str, Any]] = {
                 "enum": ["auto", "off"],
                 "description": "'auto' loads the model's mmproj when it has one; 'off' never does.",
             },
-            "mtp": {
+            "speculation": {
                 "type": "string",
-                "enum": ["auto", "off"],
+                "enum": ["auto", "off", "ngram"],
                 "description": (
-                    "'auto' drafts with the model's MTP heads when it has them and the "
-                    "runner supports it; 'off' never does."
+                    "'auto' speculates with the model's paired drafter or MTP heads when "
+                    "it has them and the runner supports it; 'ngram' uses n-gram lookup; "
+                    "'off' never speculates."
                 ),
             },
             "runner": {
@@ -1613,12 +1642,13 @@ TOOL_PARAM_HINTS: dict[str, dict[str, Any]] = {
                 "enum": ["auto", "off"],
                 "description": "'auto' loads the model's mmproj when it has one; 'off' never does.",
             },
-            "mtp": {
+            "speculation": {
                 "type": "string",
-                "enum": ["auto", "off"],
+                "enum": ["auto", "off", "ngram"],
                 "description": (
-                    "'auto' drafts with the model's MTP heads when it has them and the "
-                    "runner supports it; 'off' never does."
+                    "'auto' speculates with the model's paired drafter or MTP heads when "
+                    "it has them and the runner supports it; 'ngram' uses n-gram lookup; "
+                    "'off' never speculates."
                 ),
             },
             "runner": {
@@ -2300,6 +2330,9 @@ _ANNOTATIONS: dict[str, ToolAnnotations] = {
     "model_inspect": ToolAnnotations(
         readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True
     ),
+    "model_inspect_draft": ToolAnnotations(
+        readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True
+    ),
     "model_store": ToolAnnotations(
         readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
     ),
@@ -2814,6 +2847,11 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
         "capabilities WITHOUT registering anything. Use before model_register/model_pull. "
         "Args: hf_repo='org/name' (or hf_url='https://huggingface.co/org/name')."
     ),
+    "model_inspect_draft": (
+        "Check a speculative-decoding drafter against a target model BEFORE downloading: reads "
+        "both GGUF headers from the Hub by range request and returns kind, variant, "
+        "fit {ok, reasons}. Args: hf_repo + hf_filename (target), draft_repo + draft_filename."
+    ),
     "model_store": (
         "Show the operator's configured model-store directory ([models].store) and "
         "candidate paths. Pulls always download into this store."
@@ -2837,7 +2875,7 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
     "stack_list": "List every stack, with the active stack + drift status.",
     "stack_status": "Get one stack's detail, active flag, and drift status.",
     "profile_list": "List every profile in the catalog (seed + custom).",
-    "profile_status": "Get one profile's resolved detail (flags, ctx_size, thinking, vision, mtp, runner, used-by).",
+    "profile_status": "Get one profile's resolved detail (flags, ctx_size, thinking, vision, speculation, runner, used-by).",
     "profile_export": (
         "Export a profile to a portable .hal0profile.json envelope (no secrets/host-paths)."
     ),
@@ -2958,7 +2996,8 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
         "model_id is the LOCAL id — a short name with NO slashes (for a new model, "
         "invent one, e.g. 'Qwythos-9B-bf16-mtp'). The HF source goes in the body: "
         "hf_repo='org/name' + hf_filename='file.gguf' (find the exact filename via "
-        "model_inspect first; optional mmproj_filename for vision). "
+        "model_inspect first; optional mmproj_filename for vision; optional draft_filename "
+        "(+ draft_repo) for a speculative-decoding drafter). "
         "Async: returns a job id immediately. Check model_pull_status once and report "
         "progress — do NOT poll in a loop; downloads run for minutes in the background."
     ),
@@ -3003,7 +3042,7 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
     "stack_delete": "Delete a custom stack from the catalog (gated).",
     "profile_create": (
         "Create a custom profile — the tune a slot launches a model with: flags, ctx_size, "
-        "enable_thinking, vision (auto|off), mtp (auto|off), optional runner — e.g. "
+        "enable_thinking, vision (auto|off), speculation (auto|off|ngram), optional runner — e.g. "
         "authored from a model card's requirements (gated)."
     ),
     "profile_update": (
@@ -3080,7 +3119,7 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
     "mcp_client_list": "List MCP clients seen in the recent audit window.",
     "mcp_catalog": "The static installable-MCP-servers catalog.",
     "profile_generate": (
-        "Generate a draft profile (flags, ctx_size, enable_thinking, vision, mtp, runner) from "
+        "Generate a draft profile (flags, ctx_size, enable_thinking, vision, speculation, runner) from "
         "a registered model or a HuggingFace repo — compute-only, persists nothing. Args: exactly one of model_id / hf_repo (required), "
         "optional name, optional use_llm=true to summarize the model card via the platform "
         "utility LLM (degrades to heuristics on failure). Returns {profile, warnings, sources} "

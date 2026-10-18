@@ -549,7 +549,7 @@ async def generate_draft_profile(
         ctx_size=seed.ctx_size,
         enable_thinking=seed.enable_thinking,
         vision=seed.vision,
-        mtp=seed.mtp,
+        speculation=seed.speculation,
         runner=seed.runner,
         cloned_from=seed.name,
         intent=intent,

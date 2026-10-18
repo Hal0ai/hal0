@@ -139,7 +139,8 @@ def test_envelopes_are_schema_2_in_the_profile_centric_shape() -> None:
         assert env["schema_version"] == 2
         body = env["profile"]
         assert not retired & set(body)
-        assert body["mtp"] in {"auto", "off"}
+        assert body.get("speculation", "auto") in {"auto", "off", "ngram"}
+        assert "mtp" not in body
         for model_fact in ("--jinja", "--no-mmproj", "--mmproj", "--chat-template"):
             assert model_fact not in body["flags"].split()
 

@@ -4,9 +4,11 @@
 # (KV cache types, batch sizes, sampling, reasoning, --parallel, ...),
 # `ctx_size` (the context window), `enable_thinking` (the request-time
 # reasoning default), `vision` ("auto" loads the model's mmproj when it has
-# one, "off" never does), `mtp` ("auto" drafts with the model's MTP heads
-# when it has them and the runner supports it, "off" never does) and an
-# optional `runner` (the profile-carried runtime).
+# one, "off" never does), `speculation` ("auto" drafts with whatever the
+# model carries (a paired drafter, else its MTP heads) when the runner
+# supports it, "ngram" uses n-gram lookup, "off" never speculates) and an
+# optional `runner` (the profile-carried runtime). No seed sets
+# `speculation`: the default is "auto".
 #
 # What a profile never carries:
 #   * placement — `-ngl`, `-dev`, `--threads`: the slot's typed fields;

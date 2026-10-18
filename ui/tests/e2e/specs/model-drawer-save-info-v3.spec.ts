@@ -191,18 +191,18 @@ test.describe('Model drawer — complete save and compact field help', () => {
     // model-drawer-2 Task 9: the three Source rows (MMProj / HF repo / HF
     // filename) moved behind the Source disclosure and a read-only "Paths" row
     // joined them there, so the RESTING drawer shows 9 − 3 = 6 rows and the
-    // opened disclosure adds 4 back for 10. Both counts are asserted, because
+    // opened disclosure adds 5 back for 11. Both counts are asserted, because
     // the rule under test ("every described label carries the info icon, and
     // nothing carries a .sub subtitle") has to hold on either side of it.
     await expect(labels).toHaveCount(6)
     await openSource(page)
     // Resting rows: Chat template, File facts (the overrides ledger),
     // Capabilities, Native context (read-only, replaces the editable Context
-    // size), Engine, Runs on. The disclosure adds MMProj, HF repo, HF filename
-    // and the read-only Paths row.
-    await expect(labels).toHaveCount(10)
+    // size), Engine, Runs on. The disclosure adds MMProj, Drafter (ADR-0031),
+    // HF repo, HF filename and the read-only Paths row.
+    await expect(labels).toHaveCount(11)
     await expect(drawer.locator('.form-lbl .sub')).toHaveCount(0)
-    await expect(drawer.locator('.form-lbl .field-info-btn')).toHaveCount(10)
+    await expect(drawer.locator('.form-lbl .field-info-btn')).toHaveCount(11)
 
     // Display name no longer has a form row (Task 3) — MMProj is a plain
     // text-input row with the same FieldInfoIcon shape, so it stands in for

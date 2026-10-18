@@ -372,7 +372,8 @@ def test_every_shipped_addon_passes_the_screen(name: str, flags: str) -> None:
         "--temp 0.7 --top-p 0.95 --top-k 40 --min-p 0 --presence-penalty 0 --seed 123",
         "--reasoning off --reasoning-budget -1 --reasoning-format deepseek",
         "--parallel 2 -kvu --cache-reuse 256 --rope-scaling yarn --rope-freq-base 1e6",
-        "--spec-type draft-mtp --spec-draft-n-max 8 --spec-draft-p-min 0.0 -ngld all",
+        "--spec-draft-n-max 8 --spec-draft-p-min 0.0 -ngld all",
+        "--spec-draft-n-max 8",
         "--override-kv tokenizer.ggml.add_bos_token=bool:false --no-warmup --cont-batching",
         "--metrics --no-context-shift --cache-reuse 256 --mtp",
     ],
@@ -387,7 +388,7 @@ def test_legitimate_tuning_flags_still_pass(flags: str) -> None:
 # ── the blocked-slot pinned path ────────────────────────────────────────────
 
 
-def _pinned(argv: list[str], *, jinja: bool = True) -> list[str]:
+def _pinned(argv: list[str], *, jinja: bool = True, **extra: object) -> list[str]:
     """Resolve a blocked slot's recorded tune the way the launch does."""
     from hal0.providers.container import _pinned_segments
 
@@ -401,6 +402,7 @@ def _pinned(argv: list[str], *, jinja: bool = True) -> list[str]:
         "slot_metrics": True,
         "backend": "rocm",
         "jinja": jinja,
+        **extra,
     }
     segments = _pinned_segments(
         {"argv": argv}, {"name": "agent"}, 8081, "/models/real.gguf", scalars
@@ -471,3 +473,43 @@ def test_pinned_tune_with_a_projector_device_still_launches(spelling: list[str])
     argv = _pinned(["-fa", "auto", *spelling])
     assert "-mmdev" not in argv
     assert not any(t.startswith("--mmproj-device") for t in argv)
+
+
+_MTP_PIN = ["-fa", "auto", "--spec-type", "draft-mtp", "--spec-draft-n-max", "4"]
+
+
+def test_pinned_tune_spec_type_moves_to_the_model_layer_from_todays_plan() -> None:
+    """ADR-0031 §3: a recorded ``--spec-type`` (every pre-conversion MTP tune
+    carries one) is consumed, not refused; today's speculation plan spells it
+    in the model layer, with its drafter and the slot's draft device."""
+    from hal0.providers.container import _pinned_segments
+
+    scalars = {
+        "model_alias": "real-model",
+        "context_size": 8192,
+        "chat_template_path": None,
+        "mmproj": None,
+        "slot_n_gpu_layers": 99,
+        "slot_threads": None,
+        "slot_metrics": True,
+        "backend": "vulkan",
+        "jinja": True,
+        "spec_type": "draft-dflash",
+        "draft_model": "/models/d.gguf",
+    }
+    segs = dict(_pinned_segments({"argv": _MTP_PIN}, {"name": "a"}, 8081, "/m.gguf", scalars))
+    assert segs["model"][-4:] == [
+        "--spec-type",
+        "draft-dflash",
+        "--spec-draft-model",
+        "/models/d.gguf",
+    ]
+    assert "--spec-type" not in segs["profile"]
+    assert segs["profile"][-2:] == ["--spec-draft-n-max", "4"]  # the recorded tune
+    assert segs["slot"][-2:] == ["--spec-draft-device", "Vulkan0"]
+
+
+def test_pinned_tune_spec_type_is_dropped_when_today_does_not_speculate() -> None:
+    argv = _pinned(_MTP_PIN, spec_type=None, draft_model=None)
+    assert "--spec-type" not in argv
+    assert "--spec-draft-device" not in argv
