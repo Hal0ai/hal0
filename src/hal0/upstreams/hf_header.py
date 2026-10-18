@@ -48,18 +48,30 @@ async def fetch_gguf_header(
         while True:
             n = min(n, max_bytes)
             try:
-                resp = await http.get(
-                    url, headers={**headers, "Range": f"bytes=0-{n - 1}"}, follow_redirects=True
-                )
+                async with http.stream(
+                    "GET",
+                    url,
+                    headers={**headers, "Range": f"bytes=0-{n - 1}"},
+                    follow_redirects=True,
+                ) as resp:
+                    if resp.status_code not in (200, 206):
+                        return None
+                    # A 200 means the server ignored the range and is sending the
+                    # whole file: read up to the cap once, never re-request.
+                    ranged = resp.status_code == 206
+                    want = n if ranged else max_bytes
+                    body = bytearray()
+                    async for chunk in resp.aiter_bytes():
+                        body += chunk
+                        if len(body) >= want:
+                            break
             except httpx.HTTPError:
                 return None
-            if resp.status_code not in (200, 206):
-                return None
-            body = resp.content if resp.status_code == 206 else resp.content[:n]
-            header = read_gguf_header_bytes(body, require_complete=True)
+            header = read_gguf_header_bytes(bytes(body[:want]), require_complete=True)
             if header is not None:
                 return header
-            if n >= max_bytes:
+            # Unparsed and no more to ask for: unranged, short file, or at the cap.
+            if not ranged or len(body) < n or n >= max_bytes:
                 return None
             n += step_bytes
     finally:

@@ -85,7 +85,7 @@ async def test_fetch_header_ignored_range_uses_first_n_bytes(tmp_path: Path) -> 
     seen: list[httpx.Request] = []
     header = await _fetch(_range_handler(data, seen, honour_range=False))
     assert header is not None
-    assert len(seen) == 2
+    assert len(seen) == 1  # a 200 is never retried with a larger range
 
 
 @pytest.mark.asyncio
@@ -115,3 +115,36 @@ async def test_fetch_header_follows_redirect(tmp_path: Path) -> None:
         return httpx.Response(206, content=data)
 
     assert (await _fetch(handler)) is not None
+
+
+@pytest.mark.asyncio
+async def test_fetch_header_ignored_range_reads_at_most_cap() -> None:
+    """A 200 for a huge file must not be buffered: pull <= max_bytes + one chunk."""
+    chunk = 64 * 1024
+    pulled = 0
+
+    async def body():
+        nonlocal pulled
+        for _ in range(100_000):  # ~6 GB if fully consumed
+            pulled += chunk
+            yield b"\0" * chunk
+
+    reqs = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal reqs
+        reqs += 1
+        return httpx.Response(200, content=body())
+
+    header = await _fetch(handler, step_bytes=_MB, max_bytes=2 * _MB)
+    assert header is None
+    assert reqs == 1
+    assert pulled <= 2 * _MB + chunk
+
+
+@pytest.mark.asyncio
+async def test_fetch_header_short_file_stops_after_one_request(tmp_path: Path) -> None:
+    data = write_gguf(tmp_path / "s.gguf", "llama").read_bytes()[:-6]  # whole file, cut KV
+    seen: list[httpx.Request] = []
+    assert await _fetch(_range_handler(data, seen)) is None
+    assert len(seen) == 1
