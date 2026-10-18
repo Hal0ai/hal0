@@ -215,6 +215,10 @@ def test_llama_build_from_tag() -> None:
     assert llama_build_from_tag("b11716-r52bc433") == 11716
     assert llama_build_from_tag("b11716") == 11716
     assert llama_build_from_tag("ghcr.io/x/y:b11596-r6d1fb9e") == 11596
+    assert llama_build_from_tag("ghcr.io/x/llama:rocm-b11596") == 11596
+    assert llama_build_from_tag("ghcr.io/x/b2:latest") is None
+    assert llama_build_from_tag("ghcr.io/x/b2") is None
+    assert llama_build_from_tag("host:5000/x/b2") is None
     assert llama_build_from_tag("0.9.44-re14329d") is None
     assert llama_build_from_tag(None) is None
 
@@ -225,4 +229,6 @@ def test_runner_draft_kinds_drops_lilicorr_below_floor() -> None:
     assert "lilicorr" not in old
     assert "dflash" in old
     assert "lilicorr" in runner_draft_kinds(runner, "b11716-r52bc433")
+    assert "lilicorr" not in runner_draft_kinds(runner, "ghcr.io/x/llama:rocm-b11596")
     assert runner_draft_kinds(runner, None) == _ALL_DRAFT_KINDS
+    assert runner_draft_kinds(runner, "0.9.44-re14329d") == _ALL_DRAFT_KINDS

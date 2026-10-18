@@ -54,7 +54,7 @@ class RunnerSupports:
 #: Minimum llama.cpp build number (``b<N>``) a drafter kind needs.
 DRAFT_KIND_MIN_BUILD: dict[str, int] = {"lilicorr": 11669}
 
-_LLAMA_BUILD_RE = re.compile(r"(?:^|[:/])b(\d+)(?![\w])")
+_LLAMA_BUILD_RE = re.compile(r"(?<![A-Za-z0-9])b(\d+)(?![A-Za-z0-9])")
 
 
 def llama_build_from_tag(tag: str | None) -> int | None:
@@ -63,6 +63,14 @@ def llama_build_from_tag(tag: str | None) -> int | None:
     ``b11716-r52bc433`` -> 11716; ``None`` when the tag carries no ``b<N>``.
     """
     if not tag:
+        return None
+    # Only the tag part is searched: a path segment such as ``…/b2`` is not a
+    # build. ``image:tag`` -> after the last ``:`` (unless that colon is a
+    # registry port); a bare tag is searched whole; a tagless path has none.
+    _, sep, tail = tag.rpartition(":")
+    if sep and "/" not in tail:
+        tag = tail
+    elif "/" in tag:
         return None
     m = _LLAMA_BUILD_RE.search(tag)
     return int(m.group(1)) if m else None
