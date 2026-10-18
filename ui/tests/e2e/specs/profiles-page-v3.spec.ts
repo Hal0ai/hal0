@@ -4,7 +4,7 @@
  * Also covers the container-slot edit drawer changes:
  *   - Profile picker replaces Device/Backend selectors for runtime=container
  *   - ADR-0029: the profile owns the whole tune; cards show ctx, thinking,
- *     vision, MTP, runner and flags
+ *     vision, speculation, runner and flags
  *   - Resolved command displayed instead of effectiveFlagsFor() preview
  *
  * Routes: /api/profiles fulfilled with MOCK_DATA.profiles via default mock.
@@ -122,13 +122,13 @@ test.describe('Profiles page (#658)', () => {
     await expect(firstCard).not.toContainText('hal0-runner-standard')
   })
 
-  test('Profile card shows the whole tune: ctx, thinking, vision, MTP, runner, flags (ADR-0029)', async ({ page }) => {
+  test('Profile card shows the whole tune: ctx, thinking, vision, speculation, runner, flags (ADR-0029)', async ({ page }) => {
     await page.waitForSelector('.stk-lib-card', { timeout: 10_000 })
     const rows = page.locator('[data-testid="pf-tune-rocm"]')
     await expect(rows).toContainText('64K')
     await expect(rows).toContainText('thinking')
     await expect(rows).toContainText('vision')
-    await expect(rows).toContainText('mtp')
+    await expect(rows).toContainText('spec')
     await expect(rows).toContainText('runner')
     await expect(rows).toContainText('--flash-attn')
     // quant / device class left the profile.

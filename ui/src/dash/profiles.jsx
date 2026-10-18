@@ -1,11 +1,11 @@
 // hal0 dashboard — Profiles view (issue #658; ADR-0029 profile-centric config).
 //
 // A profile is the whole TUNE for a slot: llama-server flags, context window,
-// thinking default, vision, MTP and runtime. The model carries file facts
+// thinking default, vision, speculation and runtime. The model carries file facts
 // only and the slot carries placement, so "what does this slot launch with"
 // is answered by one profile. This view is a structured surface: a summary
 // strip, seed/custom grouping, cards that show the tune (ctx, thinking,
-// vision, MTP, runtime, flags) and the "used by" slot binding, a slide-in form
+// vision, speculation, runtime, flags) and the "used by" slot binding, a slide-in form
 // drawer, and a styled delete confirm with an in-use guard.
 //
 // Data comes from GET /api/profiles (useProfiles).
@@ -46,10 +46,10 @@ const PROFILE_CTX_MIN = 128;
 const PROFILE_CTX_MAX = 16777216;
 
 // ctx is held as text in the form ('' = defer to the model's native window);
-// thinking is 'auto' | 'on' | 'off'; vision and mtp are 'auto' | 'off'.
+// thinking is 'auto' | 'on' | 'off'; vision is 'auto' | 'off'; speculation is 'auto' | 'off' | 'ngram'.
 const BLANK = {
   name: '', intent: '', flags: '', runner: '',
-  ctx: '', thinking: 'auto', vision: 'auto', mtp: 'auto',
+  ctx: '', thinking: 'auto', vision: 'auto', speculation: 'auto',
 };
 
 // ── typed tune fields ────────────────────────────────────────────────────────
@@ -62,6 +62,7 @@ export function thinkingFromForm(v) { return v === 'on' ? true : v === 'off' ? f
 // card and preview say so instead of implying the model decides.
 export function thinkingLabel(v) { return v === 'on' ? 'on' : v === 'off' ? 'off' : 'default (off)'; }
 const switchOf = (v) => (v === 'off' ? 'off' : 'auto');
+const specOf = (v) => (v === 'off' || v === 'ngram' ? v : 'auto');
 
 // 32768 → "32K"; non-round values keep the exact count.
 export function ctxLabel(n) {
@@ -372,7 +373,7 @@ function TunedProfileCard({ p, index, onEdit, onClone, onDelete, onExport }) {
         <PfRow label="ctx" value={p.ctx_size != null ? ctxLabel(p.ctx_size) : 'model native'} />
         <PfRow label="thinking" value={thinkingLabel(thinkingToForm(p.enable_thinking))} />
         <PfRow label="vision" value={p.vision === 'off' ? 'off' : 'auto'} />
-        <PfRow label="mtp" value={p.mtp === 'off' ? 'off' : 'auto'} />
+        <PfRow label="spec" value={specOf(p.speculation)} />
         <PfRow label="runner" value={p.runner ? runnerTitleFor(p.runner, backends) : 'auto'} />
         <PfRow label="flags" value={p.resolved_flags || p.flags || '—'} />
       </div>
@@ -562,7 +563,7 @@ export function ProfileDrawer({ mode, source, existing = [], onClose, onSaved })
       ctx: source.ctx_size != null ? String(source.ctx_size) : '',
       thinking: thinkingToForm(source.enable_thinking),
       vision: switchOf(source.vision),
-      mtp: switchOf(source.mtp),
+      speculation: specOf(source.speculation),
       runner: source.runner || '',
     };
     if (mode === 'clone') {
@@ -615,7 +616,7 @@ export function ProfileDrawer({ mode, source, existing = [], onClose, onSaved })
       ...(ctxText ? { ctx_size: Number(ctxText) } : isEdit ? { ctx_size: null } : {}),
       enable_thinking: thinkingFromForm(form.thinking),
       vision: switchOf(form.vision),
-      mtp: switchOf(form.mtp),
+      speculation: specOf(form.speculation),
       intent: form.intent ?? '',
       // '' is the API's CLEAR sentinel for runner (#2186), NOT null: on a PUT
       // null means "leave the stored runtime alone", so sending it for the
@@ -665,7 +666,7 @@ export function ProfileDrawer({ mode, source, existing = [], onClose, onSaved })
         <>
           <div className="pf-drawer-preview mono" data-testid="pf-drawer-preview">
             <span className="pf-chip-dot" />
-            ctx {ctxLabel(String(form.ctx ?? '').trim() || null)} · thinking {thinkingLabel(form.thinking)} · vision {form.vision} · mtp {form.mtp}
+            ctx {ctxLabel(String(form.ctx ?? '').trim() || null)} · thinking {thinkingLabel(form.thinking)} · vision {form.vision} · speculation {form.speculation}
           </div>
           <span className="pf-grow" />
           {f.submitted && blocking && (
@@ -766,11 +767,12 @@ export function ProfileDrawer({ mode, source, existing = [], onClose, onSaved })
           </select>
         </FormRow>
 
-        <FormRow label="MTP" sub="Multi-Token Prediction speculative decode">
-          <select className="pf-input mono" value={form.mtp}
-            onChange={e => set('mtp', e.target.value)} data-testid="pf-select-mtp">
-            <option value="auto">Auto — use the file's MTP heads when it has them</option>
+        <FormRow label="Speculation" sub="speculative decoding (drafter, MTP heads or n-gram)">
+          <select className="pf-input mono" value={form.speculation}
+            onChange={e => set('speculation', e.target.value)} data-testid="pf-select-speculation">
+            <option value="auto">Auto — use the model's drafter or MTP heads when it has them</option>
             <option value="off">Off — never draft</option>
+            <option value="ngram">N-gram — model-free speculation, no drafter needed</option>
           </select>
         </FormRow>
 
@@ -966,7 +968,7 @@ function ProfilesHeader({ count, onNew, onImport }) {
         <span className="dim">·</span>
         <span className="meta">launch profiles</span>
         <span className="dim">·</span>
-        <span className="meta">the whole tune: flags, context, thinking, vision, MTP, runtime</span>
+        <span className="meta">the whole tune: flags, context, thinking, vision, speculation, runtime</span>
       </span>
       {count != null && (
         <span className="cpill">

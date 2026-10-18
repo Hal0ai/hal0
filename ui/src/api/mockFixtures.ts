@@ -267,7 +267,7 @@ function buildProfiles() {
     {
       name: 'rocm',
       flags: '-fa on -ctk q8_0 -ctv q8_0 -b 512 -ub 512 --parallel 1 --no-mmap',
-      mtp: 'auto',
+      speculation: 'auto',
       resolved_flags: '-fa on -ctk q8_0 -ctv q8_0 -b 512 -ub 512 --parallel 1 --no-mmap',
       ctx_size: 65536,
       enable_thinking: null,
@@ -289,7 +289,7 @@ function buildProfiles() {
     {
       name: 'vulkan',
       flags: '-fa on -b 512 -ub 512 --parallel 1 --no-mmap',
-      mtp: 'auto',
+      speculation: 'auto',
       resolved_flags: '-fa on -b 512 -ub 512 --parallel 1 --no-mmap',
       ctx_size: 32768,
       enable_thinking: null,
@@ -304,7 +304,7 @@ function buildProfiles() {
     {
       name: 'flm',
       flags: '',
-      mtp: 'auto',
+      speculation: 'auto',
       resolved_flags: '',
       ctx_size: null,
       enable_thinking: null,
@@ -319,7 +319,7 @@ function buildProfiles() {
     {
       name: 'tts',
       flags: '',
-      mtp: 'auto',
+      speculation: 'auto',
       resolved_flags: '',
       ctx_size: null,
       enable_thinking: null,
@@ -334,7 +334,7 @@ function buildProfiles() {
     {
       name: 'cpu-llm',
       flags: '--threads-batch 8 -b 256 -ub 256 --parallel 1 --no-mmap',
-      mtp: 'auto',
+      speculation: 'auto',
       resolved_flags: '--threads-batch 8 -b 256 -ub 256 --parallel 1 --no-mmap',
       ctx_size: 8192,
       enable_thinking: false,
@@ -349,7 +349,7 @@ function buildProfiles() {
     {
       name: 'comfyui',
       flags: '--disable-mmap --bf16-vae --cache-none',
-      mtp: 'auto',
+      speculation: 'auto',
       resolved_flags: '--disable-mmap --bf16-vae --cache-none',
       ctx_size: null,
       enable_thinking: null,
@@ -364,7 +364,7 @@ function buildProfiles() {
     {
       name: 'rocm-fast',
       flags: '-fa on -b 8192 -ub 2048 --no-mmap',
-      mtp: 'auto',
+      speculation: 'auto',
       resolved_flags: '-fa on -b 8192 -ub 2048 --no-mmap',
       ctx_size: 131072,
       enable_thinking: true,

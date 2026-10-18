@@ -59,7 +59,7 @@ type ProfileRow = {
   ctx_size?: number | null
   enable_thinking?: boolean | null
   vision?: string
-  mtp?: string
+  speculation?: string
 }
 
 type PreviewArgs = {
@@ -230,18 +230,18 @@ describe('profileApplyPreview — flag delta (profile vs outgoing profile, nothi
 
 describe('profileApplyPreview — typed tune fields', () => {
   const base = { runner: '', flags: '' }
-  it('lists context, thinking, vision and mtp that differ, in that order', () => {
+  it('lists context, thinking, vision and speculation that differ, in that order', () => {
     const p = preview({
-      profile: { name: 'next', ...base, ctx_size: 65536, enable_thinking: false, vision: 'off', mtp: 'off' },
+      profile: { name: 'next', ...base, ctx_size: 65536, enable_thinking: false, vision: 'off', speculation: 'off' },
       baselineRunner: '',
       currentDevice: 'cpu',
-      currentProfile: { name: 'old', ...base, ctx_size: 32768, enable_thinking: null, vision: 'auto', mtp: 'auto' },
+      currentProfile: { name: 'old', ...base, ctx_size: 32768, enable_thinking: null, vision: 'auto', speculation: 'auto' },
     })
     expect(p!.tune).toEqual([
       { label: 'context', from: '32K', to: '64K' },
       { label: 'thinking', from: 'auto', to: 'off' },
       { label: 'vision', from: 'auto', to: 'off' },
-      { label: 'mtp', from: 'auto', to: 'off' },
+      { label: 'speculation', from: 'auto', to: 'off' },
     ])
   })
 

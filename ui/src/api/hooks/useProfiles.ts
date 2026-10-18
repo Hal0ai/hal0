@@ -2,7 +2,7 @@
 //
 // Fetches /api/profiles — the list of named tunes seeded by profiles.toml.
 // ADR-0029: a profile owns EVERY tune — llama-server flags, context window,
-// thinking default, vision, MTP and runner. The model carries file facts only,
+// thinking default, vision, speculation and runner. The model carries file facts only,
 // the slot carries placement. `device_class`, `backend` and `quant` are gone.
 //
 // CRUD mutations (Phase C6): create (POST), update (PUT), delete (DELETE).
@@ -14,7 +14,7 @@ import { api, apiGet } from '../client'
 import { ENDPOINTS } from '../endpoints'
 
 export type ProfileVision = 'auto' | 'off'
-export type ProfileMtp = 'auto' | 'off'
+export type ProfileSpeculation = 'auto' | 'off' | 'ngram'
 
 export interface Profile {
   name: string
@@ -28,8 +28,9 @@ export interface Profile {
   enable_thinking?: boolean | null
   /** Vision: "auto" loads the model's mmproj when present, "off" never does. */
   vision?: ProfileVision
-  /** MTP: "auto" uses the file's MTP heads when it has them, "off" never. */
-  mtp?: ProfileMtp
+  /** Speculative decoding (ADR-0031): "auto" uses the model's drafter or MTP
+   *  heads when it has them, "off" never drafts, "ngram" is model-free. */
+  speculation?: ProfileSpeculation
   resolved_flags: string
   /** Emitted by the API: true when the profile is one of the immutable
    *  SEED_PROFILES (server rejects PUT/DELETE with 409 seed_immutable). */
@@ -71,7 +72,7 @@ export interface ProfileBody {
   ctx_size?: number | null
   enable_thinking?: boolean | null
   vision?: ProfileVision
-  mtp?: ProfileMtp
+  speculation?: ProfileSpeculation
   /** Optional runtime binding — a RUNNER_IMAGES key (D4). On PUT, "" clears
    *  it and omitting leaves it alone. */
   runner?: string | null

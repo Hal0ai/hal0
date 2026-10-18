@@ -1,7 +1,7 @@
 // hal0 dashboard — Model editor drawer (ADR-0029, profile-centric config).
 //
 // The model is a FILE: this drawer edits only facts about it. Every tune
-// (flags, context window, thinking, vision, MTP on/off) lives on a profile,
+// (flags, context window, thinking, vision, speculation) lives on a profile,
 // and placement lives on the slot.
 //
 // What the drawer owns:
@@ -1093,7 +1093,7 @@ export function ModelDrawer({ open, onClose, model, onOpenSlot = undefined }) {
 					data-testid="model-tune-note"
 					style={{ margin: "16px 0 4px" }}
 				>
-					Flags, context window, thinking, vision and MTP on/off are set on a
+					Flags, context window, thinking, vision and speculation are set on a
 					profile, and a slot picks the profile. This drawer only records facts
 					about the file.
 				</div>

@@ -8,7 +8,7 @@
  *   - "New profile" button opens the form
  *   - Create flow: fill name + tune fields → submit → POST body asserted → card appears
  *   - Tune fields (ADR-0029): ctx_size 128..16777216, enable_thinking null|true|false,
- *     vision auto|off, mtp auto|off; model-fact flags (--jinja, --mmproj, …) rejected inline
+ *     vision auto|off, speculation auto|off|ngram; model-fact flags (--jinja, --mmproj, …) rejected inline
  *   - Seed cards: seed badge, Delete disabled, single "Edit a copy" action
  *     (no plain Edit/Clone) — seeds stay immutable, editing forks a custom copy
  *   - Edit-a-copy flow: prefills name "<seed>-custom", POST carries cloned_from
@@ -28,7 +28,7 @@ const CUSTOM_PROFILE = {
   ctx_size: 32768,
   enable_thinking: false,
   vision: 'off',
-  mtp: 'off',
+  speculation: 'off',
   resolved_flags: '--flash-attn on',
   seed: false,
   cloned_from: 'vulkan',
@@ -89,7 +89,7 @@ test.describe('Profiles CRUD — Phase C6', () => {
       ctx_size: null,
       enable_thinking: null,
       vision: 'auto',
-      mtp: 'auto',
+      speculation: 'auto',
       resolved_flags: '',
       seed: false,
     }
@@ -133,7 +133,7 @@ test.describe('Profiles CRUD — Phase C6', () => {
 
   // ── Tune fields (ADR-0029) ───────────────────────────────────────────────────
 
-  test('create: ctx / thinking / vision / MTP ride the POST body in the wire shape', async ({ page }) => {
+  test('create: ctx / thinking / vision / speculation ride the POST body in the wire shape', async ({ page }) => {
     const posts: any[] = []
     await page.route('**/api/profiles', async (route) => {
       if (route.request().method() === 'POST') {
@@ -149,7 +149,7 @@ test.describe('Profiles CRUD — Phase C6', () => {
     await page.fill('[data-testid="pf-input-ctx"]', '65536')
     await page.selectOption('[data-testid="pf-select-thinking"]', 'on')
     await page.selectOption('[data-testid="pf-select-vision"]', 'off')
-    await page.selectOption('[data-testid="pf-select-mtp"]', 'off')
+    await page.selectOption('[data-testid="pf-select-speculation"]', 'off')
     await page.fill('[data-testid="pf-input-flags"]', '-fa on -b 2048')
     await page.click('[data-testid="pf-btn-submit"]')
     await expect(page.locator('.pf-form-panel')).not.toBeVisible({ timeout: 5_000 })
@@ -161,7 +161,7 @@ test.describe('Profiles CRUD — Phase C6', () => {
       ctx_size: 65536,
       enable_thinking: true,
       vision: 'off',
-      mtp: 'off',
+      speculation: 'off',
     })
     for (const gone of ['backend', 'device_class', 'quant', 'image']) {
       expect(posts[0]).not.toHaveProperty(gone)
