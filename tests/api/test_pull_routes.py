@@ -605,3 +605,144 @@ def test_pull_status_reports_failed_when_model_not_installed(
     body = s.json()
     assert body["state"] == "failed"
     assert body["error_code"] == "pull.interrupted"
+
+
+# ── ADR-0031 §4: a paired drafter is screened before it is downloaded ───────
+
+_TARGET_HEADER: dict[str, Any] = {
+    "general.architecture": "qwen3",
+    "qwen3.embedding_length": 4096,
+    "qwen3.block_count": 36,
+}
+_DRAFT_HEADER: dict[str, Any] = {
+    "general.architecture": "dflash",
+    "dflash.embedding_length": 4096,
+    "dflash.block_size": 8,
+    "dflash.target_layers": [2, 19, 35],
+    "lilicorr.candidate_topk": 4,
+}
+_DRAFT_BODY: dict[str, Any] = {
+    "hf_repo": "org/target-GGUF",
+    "hf_filename": "target-Q4_K_M.gguf",
+    "draft_repo": "org/drafters-GGUF",
+    "draft_filename": "drafter-lilicorr-Q8_0.gguf",
+}
+
+
+def _stub_headers(
+    monkeypatch: pytest.MonkeyPatch, by_file: dict[str, dict[str, Any] | None]
+) -> list[tuple[str, str]]:
+    from hal0.services import models_service
+    from hal0.upstreams import hf_header
+
+    models_service.INSPECT_DRAFT_CACHE.clear()
+    reads: list[tuple[str, str]] = []
+
+    async def fake(repo: str, filename: str, **_kw: Any) -> dict[str, Any] | None:
+        reads.append((repo, filename))
+        return by_file.get(filename)
+
+    monkeypatch.setattr(hf_header, "fetch_gguf_header", fake)
+    return reads
+
+
+def test_pull_route_threads_draft_to_run_pull(
+    client_isolated: TestClient,
+    fake_run_pull: list[dict[str, Any]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _stub_headers(
+        monkeypatch,
+        {"target-Q4_K_M.gguf": _TARGET_HEADER, "drafter-lilicorr-Q8_0.gguf": _DRAFT_HEADER},
+    )
+    r = client_isolated.post(
+        "/api/models/user.Draftee/pull",
+        json={
+            "hf_repo": "org/target-GGUF",
+            "hf_filename": "target-Q4_K_M.gguf",
+            "draft_repo": "org/drafters-GGUF",
+            "draft_filename": "drafter-lilicorr-Q8_0.gguf",
+        },
+    )
+    assert r.status_code == 202, r.text
+    assert r.json()["draft_file"] == "drafter-lilicorr-Q8_0.gguf"
+    assert fake_run_pull[0]["draft_file"] == "drafter-lilicorr-Q8_0.gguf"
+    assert fake_run_pull[0]["draft_repo"] == "org/drafters-GGUF"
+
+
+def test_pull_without_draft_passes_none(
+    client_isolated: TestClient, fake_run_pull: list[dict[str, Any]]
+) -> None:
+    r = client_isolated.post("/api/models/qwen3-4b/pull")
+    assert r.status_code == 202, r.text
+    assert "draft_file" not in r.json()
+    assert fake_run_pull[0]["draft_file"] is None
+    assert fake_run_pull[0]["draft_repo"] is None
+
+
+def test_pull_route_screens_draft_fit_before_download(
+    client_isolated: TestClient,
+    fake_run_pull: list[dict[str, Any]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    wrong_target = {**_TARGET_HEADER, "qwen3.embedding_length": 2048}
+    _stub_headers(
+        monkeypatch,
+        {"target-Q4_K_M.gguf": wrong_target, "drafter-lilicorr-Q8_0.gguf": _DRAFT_HEADER},
+    )
+    r = client_isolated.post(
+        "/api/models/user.Draftee/pull",
+        json={
+            "hf_repo": "org/target-GGUF",
+            "hf_filename": "target-Q4_K_M.gguf",
+            "draft_repo": "org/drafters-GGUF",
+            "draft_filename": "drafter-lilicorr-Q8_0.gguf",
+        },
+    )
+    assert r.status_code == 422, r.text
+    err = r.json()["error"]
+    assert err["code"] == "model.draft_mismatch"
+    assert err["details"]["reasons"]
+    assert fake_run_pull == [], "no download may be scheduled on a mismatch"
+
+
+def test_pull_refuses_when_draft_header_unreadable(
+    client_isolated: TestClient,
+    fake_run_pull: list[dict[str, Any]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _stub_headers(monkeypatch, {"target-Q4_K_M.gguf": _TARGET_HEADER})
+    r = client_isolated.post(
+        "/api/models/user.Draftee/pull",
+        json={
+            "hf_repo": "org/target-GGUF",
+            "hf_filename": "target-Q4_K_M.gguf",
+            "draft_repo": "org/drafters-GGUF",
+            "draft_filename": "drafter-lilicorr-Q8_0.gguf",
+        },
+    )
+    assert r.status_code == 422, r.text
+    assert r.json()["error"]["code"] == "hf.header_unreadable"
+    assert fake_run_pull == []
+
+
+def test_pull_draft_repo_defaults_to_hf_repo(
+    client_isolated: TestClient,
+    fake_run_pull: list[dict[str, Any]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reads = _stub_headers(
+        monkeypatch,
+        {"target-Q4_K_M.gguf": _TARGET_HEADER, "drafter-lilicorr-Q8_0.gguf": _DRAFT_HEADER},
+    )
+    r = client_isolated.post(
+        "/api/models/user.Draftee/pull",
+        json={
+            "hf_repo": "org/target-GGUF",
+            "hf_filename": "target-Q4_K_M.gguf",
+            "draft_filename": "drafter-lilicorr-Q8_0.gguf",
+        },
+    )
+    assert r.status_code == 202, r.text
+    assert ("org/target-GGUF", "drafter-lilicorr-Q8_0.gguf") in reads
+    assert fake_run_pull[0]["draft_repo"] == "org/target-GGUF"

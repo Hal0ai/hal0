@@ -119,3 +119,39 @@ def test_no_duplicate_ids() -> None:
     assert len(CURATED_BY_ID) == len(CURATED_MODELS), "duplicate curated id detected"
     for model_id, _, _ in _EXPECTED:
         assert model_id in CURATED_BY_ID
+
+
+def test_curated_draft_file_resolves_like_mmproj(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A curated ``draft_file``/``draft_repo`` is read like ``mmproj_file`` (ADR-0031 §4)."""
+    from hal0.registry import pull_jobs
+    from hal0.registry.curated import CuratedModel
+
+    curated = CuratedModel(
+        id="drafted-pick",
+        display_name="Drafted Pick",
+        description="test",
+        family="qwen",
+        size_gb=1.0,
+        vram_gb_min=1.0,
+        license="Apache-2.0",
+        license_url="https://www.apache.org/licenses/LICENSE-2.0",
+        hf_repo="org/target-GGUF",
+        hf_file="target-Q4_K_M.gguf",
+        draft_file="drafter-Q8_0.gguf",
+        draft_repo="org/drafters-GGUF",
+    )
+    monkeypatch.setattr(
+        pull_jobs, "get_curated", lambda mid: curated if mid == "drafted-pick" else None
+    )
+    monkeypatch.setattr(
+        pull_jobs,
+        "resolve_pull_source",
+        lambda request, mid: ("org/target-GGUF", "target-Q4_K_M.gguf"),
+    )
+    src = pull_jobs.resolve_pull_source_with_body(None, "drafted-pick", None)  # type: ignore[arg-type]
+    assert src.draft_file == "drafter-Q8_0.gguf"
+    assert src.draft_repo == "org/drafters-GGUF"
+
+    body = {"hf_repo": "x/y", "hf_filename": "z.gguf", "draft_filename": "d.gguf"}
+    src = pull_jobs.resolve_pull_source_with_body(None, "drafted-pick", body)  # type: ignore[arg-type]
+    assert (src.draft_file, src.draft_repo, src.from_body) == ("d.gguf", "x/y", True)

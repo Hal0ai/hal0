@@ -153,7 +153,7 @@ class PullFile:
     """
 
     hf_filename: str
-    kind: str = "model"  # "model" | "mmproj"
+    kind: str = "model"  # "model" | "shard" | "mmproj" | "draft" | "sidecar"
     dest: str | None = None  # final installed path, once known
     bytes_total: int = 0
     bytes_done: int = 0
@@ -1290,6 +1290,8 @@ async def run_pull(
     comfyui_subdir: str | None = None,
     capability: str | None = None,
     mmproj_file: str | None = None,
+    draft_file: str | None = None,
+    draft_repo: str | None = None,
     dest_override: str | None = None,
     fileset: FileSetPlan | None = None,
     extra_files: list[str] | None = None,
@@ -1325,6 +1327,11 @@ async def run_pull(
         mmproj_file: Optional multimodal-projector filename within the same
             HF repo (the Add-by-HF modal's vision pick, or a curated
             entry's ``mmproj_file``). Downloaded after the main file.
+        draft_file: Optional speculative-decoding drafter GGUF (ADR-0031 §4),
+            downloaded after the projector into the model's directory and
+            registered as the row's ``draft`` fact. ``None`` leaves an
+            existing pairing alone.
+        draft_repo: HF repo holding ``draft_file``; defaults to ``hf_repo``.
         dest_override: Absolute final path for the MAIN file. The update
             flow (``POST /api/models/{id}/update``) pins this to the
             registry row's existing ``path`` so a re-pull replaces the
@@ -1369,6 +1376,11 @@ async def run_pull(
     if mmproj_file:
         mm_rec = PullFile(hf_filename=mmproj_file, kind="mmproj")
         job.files.append(mm_rec)
+    draft_rec: PullFile | None = None
+    draft_src_repo = draft_repo or hf_repo
+    if draft_file:
+        draft_rec = PullFile(hf_filename=draft_file, kind="draft")
+        job.files.append(draft_rec)
     sidecar_recs = [PullFile(hf_filename=name, kind="sidecar") for name in extra_files]
     job.files.extend(sidecar_recs)
     job._signal()
@@ -1402,7 +1414,16 @@ async def run_pull(
             # LFS hashes known up front: progress has its real total from the
             # first byte, and a later part is verified like the first.
             revision = await _plan_split_parts(
-                job, hf_repo, hf_token=hf_token, client=client, recs=[*model_recs, mm_rec]
+                job,
+                hf_repo,
+                hf_token=hf_token,
+                client=client,
+                recs=[
+                    *model_recs,
+                    mm_rec,
+                    # A drafter from another repo is not in this tree.
+                    draft_rec if draft_src_repo == hf_repo else None,
+                ],
             )
             await _pull_split_parts(
                 job,
@@ -1445,6 +1466,26 @@ async def run_pull(
                 revision=revision,
             )
 
+        # ── Optional speculative-decoding drafter (ADR-0031 §4) ────────────
+        # Same directory, upstream basename, like the projector. A drafter
+        # from another repo is read from that repo's ``main``.
+        draft_final: Path | None = None
+        draft_info: Any = None
+        if draft_rec is not None:
+            draft_final = final.parent / Path(draft_rec.hf_filename).name
+            await _download_one(
+                job,
+                draft_rec,
+                client=client,
+                hf_repo=draft_src_repo,
+                base_headers=base_headers,
+                final=draft_final,
+                base_done=sum(f.bytes_done for f in job.files if f is not draft_rec),
+                base_total=_others_total(job, draft_rec),
+                revision=revision if draft_src_repo == hf_repo else "main",
+            )
+            draft_info = _classify_downloaded_drafter(draft_final)
+
         if shard_names:
             _install_split_parts(job, model_recs, model_finals)
 
@@ -1483,7 +1524,8 @@ async def run_pull(
             registry,
             model_id=job.model_id,
             path=str(final),
-            size_bytes=size_bytes,
+            # The drafter's bytes count toward the row, as capacity.py documents.
+            size_bytes=size_bytes + (draft_rec.bytes_done if draft_rec is not None else 0),
             sha256=digest,
             hf_repo=hf_repo,
             hf_filename=hf_file,
@@ -1491,6 +1533,10 @@ async def run_pull(
             comfyui_subdir=comfyui_subdir,
             mmproj=str(mmproj_final) if mmproj_final is not None else None,
             shards=[str(p) for p in model_finals] if shard_names else None,
+            draft=str(draft_final) if draft_final is not None else None,
+            draft_info=draft_info,
+            draft_size_bytes=draft_rec.bytes_done if draft_rec is not None else 0,
+            draft_sha256=draft_rec.sha256 if draft_rec is not None else None,
         )
 
         # Blob/file accounting — the SAME bookkeeping the fileset branch does
@@ -1512,6 +1558,16 @@ async def run_pull(
                     mm_rec.bytes_done,
                     mm_rec.sha256,
                     "mmproj",
+                )
+            )
+        if draft_rec is not None and draft_final is not None:
+            installed_rows.append(
+                InstalledFile(
+                    draft_rec.hf_filename,
+                    draft_final,
+                    draft_rec.bytes_done,
+                    draft_rec.sha256,
+                    "draft",
                 )
             )
         for sc_rec, sc_final in zip(sidecar_recs, sidecar_finals, strict=True):
@@ -1581,6 +1637,31 @@ async def run_pull(
             await client.aclose()
 
 
+def _classify_downloaded_drafter(path: Path) -> Any:
+    """Read a downloaded drafter's GGUF header and classify it (ADR-0031 §4).
+
+    A file that is not a drafter fails the pull with
+    ``model.draft_not_a_drafter`` before anything is registered.
+    """
+    from hal0.errors import UnprocessableEntity
+    from hal0.registry.drafters import classify_drafter
+    from hal0.registry.gguf_header import read_gguf_header
+
+    header = read_gguf_header(path)
+    info = classify_drafter(header) if header else None
+    if info is None:
+        arch = (header or {}).get("general.architecture")
+        # Don't leave a non-drafter beside the model for a scan to pair.
+        with contextlib.suppress(OSError):
+            path.unlink()
+        raise UnprocessableEntity(
+            f"{path.name} is not a speculative-decoding drafter (architecture {arch!r})",
+            code="model.draft_not_a_drafter",
+            details={"filename": path.name},
+        )
+    return info
+
+
 def _register_pulled(
     registry: ModelRegistry,
     *,
@@ -1594,6 +1675,10 @@ def _register_pulled(
     comfyui_subdir: str | None = None,
     mmproj: str | None = None,
     shards: list[str] | None = None,
+    draft: str | None = None,
+    draft_info: Any = None,
+    draft_size_bytes: int = 0,
+    draft_sha256: str | None = None,
 ) -> None:
     """Upsert the registry entry after a successful pull.
 
@@ -1614,6 +1699,12 @@ def _register_pulled(
     first (``path`` is that first part), stamped as ``metadata["shards"]`` —
     the same record the discover scan writes, which the delete and store
     accounting read. A single-file pull clears a stale list.
+
+    ``draft`` (ADR-0031 §4) is the absolute path of a co-downloaded
+    speculative-decoding drafter and ``draft_info`` its header classification
+    (:class:`hal0.registry.drafters.DrafterInfo`): they write ``draft``,
+    ``draft_kind`` and ``metadata["draft"]`` together. ``None`` leaves any
+    existing pairing untouched, as ``mmproj`` does.
     """
     # ``pulled_at`` provenance lets the dashboard show when the installed
     # bytes were fetched — and thereby how stale they are vs an available
@@ -1728,6 +1819,16 @@ def _register_pulled(
         updates["architecture"] = detected_arch
     if mmproj is not None:
         updates["mmproj"] = mmproj
+    draft_meta: dict[str, Any] | None = None
+    if draft is not None and draft_info is not None:
+        updates["draft"] = draft
+        updates["draft_kind"] = draft_info.kind
+        draft_meta = {
+            **draft_info.as_metadata(),
+            "size_bytes": draft_size_bytes,
+            "sha256": draft_sha256,
+        }
+        fresh_meta["draft"] = draft_meta
     try:
         existing = registry.get(model_id)
     except ModelNotFound:
@@ -1759,6 +1860,8 @@ def _register_pulled(
                 # is the write-path source of truth.
                 provider=derive_model_provider(backends),
                 mmproj=mmproj,
+                draft=updates.get("draft"),
+                draft_kind=updates.get("draft_kind"),
                 metadata=dict(fresh_meta),
                 architecture=detected_arch,
                 chat_template=curated_template or None,

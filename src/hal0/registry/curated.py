@@ -79,6 +79,19 @@ class CuratedModel(BaseModel):
             "Empty for non-vision entries."
         ),
     )
+    draft_file: str = Field(
+        default="",
+        description=(
+            "Optional speculative-decoding drafter GGUF filename (ADR-0031). When "
+            "set, the pull layer downloads it after the model and projector and "
+            "registers it as the row's ``draft`` fact. Empty for entries with no "
+            "paired drafter."
+        ),
+    )
+    draft_repo: str = Field(
+        default="",
+        description="HF repo holding ``draft_file``; empty means the model's own ``hf_repo``.",
+    )
     extra_files: list[str] = Field(
         default_factory=list,
         description=(

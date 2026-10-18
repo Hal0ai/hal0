@@ -121,11 +121,31 @@ def _poll_pull_progress(ref: str, *, done_verb: str = "Done") -> None:
         time.sleep(0.5)
 
 
+def _pull_body(draft: str | None, draft_repo: str | None) -> dict[str, str] | None:
+    """The pull request body for the drafter options; ``None`` for a plain pull."""
+    if not draft:
+        return None
+    body = {"draft_filename": draft}
+    if draft_repo:
+        body["draft_repo"] = draft_repo
+    return body
+
+
 @app.command("pull")
 def model_pull(
     ref: str = typer.Argument(..., help="Curated alias (e.g. qwen3-4b) or registered model id"),
     cancel: bool = typer.Option(
         False, "--cancel", help="Cancel an in-flight pull instead of starting one."
+    ),
+    draft: str | None = typer.Option(
+        None,
+        "--draft",
+        help="Speculative-decoding drafter .gguf to download with the model (ADR-0031).",
+    ),
+    draft_repo: str | None = typer.Option(
+        None,
+        "--draft-repo",
+        help="HF repo holding --draft (default: the model's own repo).",
     ),
 ) -> None:
     """Download a model from Hugging Face into the local registry.
@@ -141,6 +161,10 @@ def model_pull(
     if _api_unreachable(url):
         raise typer.Exit(1)
 
+    if draft_repo and not draft:
+        die("--draft-repo needs --draft")
+        return
+
     if cancel:
         try:
             job = api_post(f"/api/models/{ref}/pull/cancel")
@@ -151,7 +175,7 @@ def model_pull(
         return
 
     try:
-        start = api_post(f"/api/models/{ref}/pull")
+        start = api_post(f"/api/models/{ref}/pull", json=_pull_body(draft, draft_repo))
     except CliApiError as exc:
         die(str(exc))
         return

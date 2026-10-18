@@ -1214,6 +1214,14 @@ TOOL_PARAM_HINTS: dict[str, dict[str, Any]] = {
                 "description": "Exact .gguf filename in the repo (from model_inspect)",
             },
             "mmproj_filename": {"type": "string", "description": "Optional vision sidecar"},
+            "draft_filename": {
+                "type": "string",
+                "description": "Optional speculative-decoding drafter .gguf (checked against the model first)",
+            },
+            "draft_repo": {
+                "type": "string",
+                "description": "Repo holding draft_filename; defaults to hf_repo",
+            },
         },
     },
     "model_scan": {
@@ -2988,7 +2996,8 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
         "model_id is the LOCAL id — a short name with NO slashes (for a new model, "
         "invent one, e.g. 'Qwythos-9B-bf16-mtp'). The HF source goes in the body: "
         "hf_repo='org/name' + hf_filename='file.gguf' (find the exact filename via "
-        "model_inspect first; optional mmproj_filename for vision). "
+        "model_inspect first; optional mmproj_filename for vision; optional draft_filename "
+        "(+ draft_repo) for a speculative-decoding drafter). "
         "Async: returns a job id immediately. Check model_pull_status once and report "
         "progress — do NOT poll in a loop; downloads run for minutes in the background."
     ),
