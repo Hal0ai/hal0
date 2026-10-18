@@ -563,15 +563,6 @@ function modelModalityTag(m) {
   return MODEL_MODALITY_CAPS.find((c) => c !== 'asr' && caps.includes(c)) || null
 }
 
-// Size in whole-tenth GB from `size_bytes`, matching model-drawer's facts-band
-// rounding (Number(size_bytes) / 1024**3, one decimal) — one authority for
-// "how big is this model" so the two surfaces can't disagree. null when the
-// row carries no size at all (never fabricate a 0.0 GB).
-function modelSizeGb(m) {
-  const b = Number(m?.size_bytes)
-  return b > 0 ? (b / 1024 ** 3).toFixed(1) : null
-}
-
 // Right-aligned GTT fit chip for a `/api/models/feasibility` result row — tone
 // comes from the shared `feasibilityHint` mapper (one source of truth for
 // verdict→tone), so this can't drift from the drawer's own hint copy. An
@@ -601,7 +592,6 @@ function modelPickerOptions({ s, opts, cur, has, allSlots, verdictFor }) {
     const quant = m.quant || null
     const modTag = modelModalityTag(m)
     const fit = verdictFor ? verdictFor(m.id) : null
-    const sizeGb = modelSizeGb(m)
     const name = (
       <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>{m.longName || m.id}</span>
     )
@@ -609,7 +599,10 @@ function modelPickerOptions({ s, opts, cur, has, allSlots, verdictFor }) {
       m.provider_effective && m.provider_effective !== 'llama-server' ? m.provider_effective : null
     list.push({
       id: m.id,
-      // open list: line 1 = name + modality, line 2 (desc) = quant · size · runtime · fit
+      // open list: line 1 = name + modality, line 2 (desc) = quant · runtime · fit.
+      // The fit chip already carries the size the slot would need (`~N GB`),
+      // so the file size is not repeated as plain text beside it — the model
+      // drawer's facts band remains the place for the exact figure.
       row: (
         <span style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
           {name}
@@ -630,7 +623,6 @@ function modelPickerOptions({ s, opts, cur, has, allSlots, verdictFor }) {
       desc: (
         <span className="rsel-desc-line">
           {quant && <span className="chip amber">{quant}</span>}
-          {sizeGb && <span>{sizeGb} GB</span>}
           {runtime && <span>{runtime}</span>}
           {fit}
         </span>
