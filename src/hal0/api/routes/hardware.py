@@ -952,6 +952,7 @@ async def system_info_endpoint(request: Request) -> dict[str, Any]:
                 "mtp": runner.supports.mtp,
                 "jinja": runner.supports.jinja,
                 "mmproj": runner.supports.mmproj,
+                "draft_kinds": sorted(runner.supports.draft_kinds),
             },
             # llama.cpp build provenance of the runner's effective image
             # ({"source_repo", "revision", "patch_count"} | null) — see the

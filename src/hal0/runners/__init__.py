@@ -18,6 +18,7 @@ the single-purpose runtimes).
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Literal
 
@@ -43,6 +44,28 @@ class RunnerSupports:
     mtp: bool = False
     jinja: bool = False
     mmproj: bool = False
+    #: Speculative-decoding drafter kinds (ADR-0031) this runner's binary can
+    #: use. Empty = none. A kind with a build floor in
+    #: :data:`DRAFT_KIND_MIN_BUILD` is further trimmed by
+    #: :func:`runner_draft_kinds` against the running image tag.
+    draft_kinds: frozenset[str] = frozenset()
+
+
+#: Minimum llama.cpp build number (``b<N>``) a drafter kind needs.
+DRAFT_KIND_MIN_BUILD: dict[str, int] = {"lilicorr": 11669}
+
+_LLAMA_BUILD_RE = re.compile(r"(?:^|[:/])b(\d+)(?![\w])")
+
+
+def llama_build_from_tag(tag: str | None) -> int | None:
+    """Parse the llama.cpp build number from an image tag or ``image:tag`` ref.
+
+    ``b11716-r52bc433`` -> 11716; ``None`` when the tag carries no ``b<N>``.
+    """
+    if not tag:
+        return None
+    m = _LLAMA_BUILD_RE.search(tag)
+    return int(m.group(1)) if m else None
 
 
 @dataclass(frozen=True, slots=True)
@@ -84,11 +107,13 @@ class Runner:
         return pin_for(self.key).ref
 
 
+_LLAMA_DRAFT_KINDS = frozenset({"simple", "mtp", "dflash", "eagle3", "lilicorr"})
+
 RUNNER_IMAGES: dict[str, Runner] = {
     "standard": Runner(
         key="standard",
         runtime_family="llama-server",
-        supports=RunnerSupports(mtp=True, jinja=True, mmproj=True),
+        supports=RunnerSupports(mtp=True, jinja=True, mmproj=True, draft_kinds=_LLAMA_DRAFT_KINDS),
         device_class="gpu",
         backend="rocm",
         # The one AMD GPU image serves both lanes: HIP for gpu-rocm, RADV for
@@ -105,7 +130,7 @@ RUNNER_IMAGES: dict[str, Runner] = {
     "cpu": Runner(
         key="cpu",
         runtime_family="llama-server",
-        supports=RunnerSupports(mtp=False, jinja=True, mmproj=True),
+        supports=RunnerSupports(mtp=False, jinja=True, mmproj=True, draft_kinds=_LLAMA_DRAFT_KINDS),
         device_class="cpu",
         backend=None,
         supported_backends=("cpu",),
@@ -187,6 +212,20 @@ RUNNER_IMAGES: dict[str, Runner] = {
         blurb="llama.cpp for NVIDIA GPUs. Pick it on a box with an NVIDIA card.",
     ),
 }
+
+
+def runner_draft_kinds(runner: Runner, image_tag: str | None) -> frozenset[str]:
+    """Drafter kinds usable on ``runner`` running ``image_tag``.
+
+    The static set minus kinds whose build floor the parsed build misses; an
+    unparseable tag keeps the full set.
+    """
+    build = llama_build_from_tag(image_tag)
+    if build is None:
+        return runner.supports.draft_kinds
+    return frozenset(
+        k for k in runner.supports.draft_kinds if build >= DRAFT_KIND_MIN_BUILD.get(k, 0)
+    )
 
 
 def get_runner(key: str) -> Runner:

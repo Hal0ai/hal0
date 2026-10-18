@@ -65,6 +65,7 @@ def test_system_info_backends_expose_runner_supports_metadata(
             "mtp": runner.supports.mtp,
             "jinja": runner.supports.jinja,
             "mmproj": runner.supports.mmproj,
+            "draft_kinds": sorted(runner.supports.draft_kinds),
         }
 
 

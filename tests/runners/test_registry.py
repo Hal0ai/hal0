@@ -20,6 +20,8 @@ from hal0.runners import (
     Runner,
     RunnerSupports,
     get_runner,
+    llama_build_from_tag,
+    runner_draft_kinds,
     runner_for_backend,
     runner_matches,
 )
@@ -193,3 +195,34 @@ def test_hw_gate_lands_on_a_default_runtime(backend: str | None, device_class: s
     """A slot with no ``binary`` on AMD or CPU hardware launches a default-tier
     runtime; only the explicit ``cuda`` backend reaches an optional one."""
     assert runner_for_backend(backend, device_class).tier == "default"
+
+
+_ALL_DRAFT_KINDS = {"simple", "mtp", "dflash", "eagle3", "lilicorr"}
+
+
+def test_standard_and_cpu_draft_kinds() -> None:
+    for key in ("standard", "cpu"):
+        assert RUNNER_IMAGES[key].supports.draft_kinds == _ALL_DRAFT_KINDS
+
+
+def test_cuda_and_non_llama_have_no_draft_kinds() -> None:
+    for key, runner in RUNNER_IMAGES.items():
+        if key not in ("standard", "cpu"):
+            assert runner.supports.draft_kinds == frozenset(), key
+
+
+def test_llama_build_from_tag() -> None:
+    assert llama_build_from_tag("b11716-r52bc433") == 11716
+    assert llama_build_from_tag("b11716") == 11716
+    assert llama_build_from_tag("ghcr.io/x/y:b11596-r6d1fb9e") == 11596
+    assert llama_build_from_tag("0.9.44-re14329d") is None
+    assert llama_build_from_tag(None) is None
+
+
+def test_runner_draft_kinds_drops_lilicorr_below_floor() -> None:
+    runner = RUNNER_IMAGES["standard"]
+    old = runner_draft_kinds(runner, "b11596-r6d1fb9e")
+    assert "lilicorr" not in old
+    assert "dflash" in old
+    assert "lilicorr" in runner_draft_kinds(runner, "b11716-r52bc433")
+    assert runner_draft_kinds(runner, None) == _ALL_DRAFT_KINDS
