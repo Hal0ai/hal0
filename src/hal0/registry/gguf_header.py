@@ -47,7 +47,7 @@ from typing import Any
 _GGUF_MAGIC = b"GGUF"
 
 # Hard cap on how much of the file we'll mmap to find KV metadata. GGUF
-# headers are typically a few KB; a 1 MiB window covers even very large
+# headers are typically a few KB; a 16 MiB window covers even very large
 # tokenizer vocabs.  Beyond this we treat the file as
 # malformed-or-unknown and return ``None``.
 _HEADER_WINDOW_BYTES = 16 * 2**20

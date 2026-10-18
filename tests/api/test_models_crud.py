@@ -1275,6 +1275,33 @@ def test_put_draft_pairs_and_classifies(crud_client: TestClient, crud_models_roo
     assert (stored["draft"], stored["draft_kind"]) == (str(draft), "dflash")
 
 
+def test_put_draft_relative_path_refused(crud_client: TestClient, crud_models_root: Path) -> None:
+    _register(crud_client, crud_models_root)
+    r = crud_client.put("/api/models/tgt", json={"draft": "tgt-dflash.gguf"})
+    assert r.status_code == 422, r.text
+    err = r.json()["error"]
+    assert err["code"] == "model.draft_outside_store"
+    assert err["details"]["draft"] == "tgt-dflash.gguf"
+
+
+def test_put_draft_outside_the_store_and_the_models_dir_refused(
+    crud_client: TestClient, crud_models_root: Path, tmp_path_factory: pytest.TempPathFactory
+) -> None:
+    """A slot container mounts only the model-store roots (and the model's own
+    directory), so a drafter anywhere else would never be reachable."""
+    _register(crud_client, crud_models_root)
+    for draft in (
+        "/tmp/elsewhere/d.gguf",
+        str(_drafter_gguf(tmp_path_factory.mktemp("elsewhere"))),
+    ):
+        r = crud_client.put("/api/models/tgt", json={"draft": draft})
+        assert r.status_code == 422, r.text
+        err = r.json()["error"]
+        assert err["code"] == "model.draft_outside_store"
+        assert err["details"]["draft"] == draft
+    assert crud_client.get("/api/models/tgt").json()["draft"] is None
+
+
 def test_put_draft_mismatch_422(crud_client: TestClient, crud_models_root: Path) -> None:
     _register(crud_client, crud_models_root)
     draft = _drafter_gguf(crud_models_root, width=2048)

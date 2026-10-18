@@ -80,7 +80,7 @@ async def test_fetch_header_network_error_returns_none() -> None:
 
 
 @pytest.mark.asyncio
-async def test_fetch_header_ignored_range_uses_first_n_bytes(tmp_path: Path) -> None:
+async def test_fetch_header_ignored_range_reads_one_capped_response(tmp_path: Path) -> None:
     data = _padded_header(tmp_path, kv_end_at=5 * _MB, total=6 * _MB)
     seen: list[httpx.Request] = []
     header = await _fetch(_range_handler(data, seen, honour_range=False))

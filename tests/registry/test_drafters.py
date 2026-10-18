@@ -125,6 +125,18 @@ class TestFit:
         assert len(errs) == 1
         assert "embedding_length" in errs[0]
 
+    def test_fit_dflash_refuses_when_neither_side_knows_the_embedding(self) -> None:
+        """``None != None`` is False: an unknown width on both sides must not pass."""
+        target = {k: v for k, v in NEMOTRON.items() if not k.endswith("embedding_length")}
+        draft = {k: v for k, v in LILICORR.items() if k != "dflash.embedding_length"}
+        errs = draft_fit_errors(target, _info(draft))
+        assert any("embedding_length" in e for e in errs)
+
+    def test_fit_eagle3_refuses_an_unknown_target_embedding(self) -> None:
+        target = {k: v for k, v in QWEN3.items() if k != "qwen3.embedding_length"}
+        errs = draft_fit_errors(target, _info(EAGLE3))
+        assert any("target_hidden_size" in e for e in errs)
+
     def test_fit_dflash_target_layers_beyond_block_count(self) -> None:
         target = {**NEMOTRON, "nemotron_h_moe.block_count": 30}
         errs = draft_fit_errors(target, _info(LILICORR))
@@ -184,8 +196,17 @@ class TestScreen:
         }
         with pytest.raises(UnprocessableEntity) as exc:
             screen_draft_fit(QWEN3, llama_plain)
-        assert exc.value.code == "model.draft_mismatch"
+        # A plain model with another tokenizer is not a drafter for this
+        # model at all, not a drafter that fits badly.
+        assert exc.value.code == "model.draft_not_a_drafter"
         assert exc.value.details["reasons"]
+
+    def test_simple_with_matching_tokenizer_but_far_vocab_is_a_mismatch(self) -> None:
+        near = {**QWEN3, "qwen3.vocab_size": 151936 - 129}
+        with pytest.raises(UnprocessableEntity) as exc:
+            screen_draft_fit(QWEN3, near)
+        assert exc.value.code == "model.draft_mismatch"
+        assert any("vocab_size" in r for r in exc.value.details["reasons"])
 
     def test_screen_mmproj_is_not_a_drafter(self) -> None:
         with pytest.raises(UnprocessableEntity) as exc:

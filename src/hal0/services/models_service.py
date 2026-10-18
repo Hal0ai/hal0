@@ -2339,6 +2339,30 @@ def _prior(existing: Any, key: str) -> Any:
     return getattr(existing, key, None)
 
 
+def _require_draft_inside_store(draft: str, draft_path: Any, target_path: Any) -> None:
+    """Refuse a drafter path a slot container could not open
+    (``model.draft_outside_store``): it must be absolute and resolve inside a
+    model-store root (:func:`hal0.config.paths.model_mount_roots`) or inside
+    the model's own directory."""
+    from pathlib import Path
+
+    from hal0.config.paths import model_mount_roots
+    from hal0.errors import UnprocessableEntity
+
+    allowed = [Path(r) for r in model_mount_roots()]
+    if target_path:
+        allowed.append(Path(str(target_path)).expanduser().parent)
+    if draft_path.is_absolute():
+        resolved = draft_path.resolve()
+        if any(resolved.is_relative_to(root.resolve()) for root in allowed):
+            return
+    raise UnprocessableEntity(
+        f"draft must be an absolute path inside the model store or beside the model: {draft}",
+        code="model.draft_outside_store",
+        details={"draft": draft, "allowed_roots": [str(r) for r in allowed]},
+    )
+
+
 def screen_draft_write(
     existing: Any,
     body: dict[str, Any],
@@ -2354,6 +2378,9 @@ def screen_draft_write(
 
     * ``422 model.draft_kind_readonly`` — the body carries ``draft_kind``; it is
       derived from the file, never set.
+    * ``422 model.draft_outside_store`` — the path is not absolute, or resolves
+      outside every model-store root and outside the model's own directory, so
+      a slot container (which mounts only those) could never open it.
     * ``422 model.draft_not_found`` — ``require_on_disk`` and the path is not a
       file. With ``require_on_disk=False`` (the pull route, whose drafter is
       not downloaded yet) a missing file is not screened and nothing is
@@ -2387,6 +2414,8 @@ def screen_draft_write(
             details={"field": "draft"},
         )
     draft_path = Path(draft).expanduser()
+    target_path = body.get("path", _prior(existing, "path"))
+    _require_draft_inside_store(draft, draft_path, target_path)
     if not draft_path.is_file():
         if not require_on_disk:
             return None
@@ -2395,7 +2424,6 @@ def screen_draft_write(
             code="model.draft_not_found",
             details={"draft": draft},
         )
-    target_path = body.get("path", _prior(existing, "path"))
     target_header = read_gguf_header(target_path) if target_path else None
     if target_header is None:
         raise UnprocessableEntity(

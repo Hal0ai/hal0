@@ -125,6 +125,19 @@ def classify_drafter(header: dict[str, Any]) -> DrafterInfo | None:
     return None
 
 
+def _simple_identity_errors(target: dict[str, Any], draft: DrafterInfo) -> list[str]:
+    """Tokenizer identity a ``simple`` drafter must share with its target."""
+    return [
+        f"{label} {mine} != target {theirs}"
+        for label, mine, theirs in (
+            ("tokenizer.ggml.model", draft.tokenizer_model, target.get("tokenizer.ggml.model")),
+            ("bos_token_id", draft.bos_token_id, target.get("tokenizer.ggml.bos_token_id")),
+            ("eos_token_id", draft.eos_token_id, target.get("tokenizer.ggml.eos_token_id")),
+        )
+        if mine != theirs
+    ]
+
+
 def draft_fit_errors(target: dict[str, Any], draft: DrafterInfo) -> list[str]:
     """Reasons ``draft`` does not fit ``target`` (empty = fits)."""
     t_arch = target.get("general.architecture")
@@ -150,7 +163,12 @@ def draft_fit_errors(target: dict[str, Any], draft: DrafterInfo) -> list[str]:
 
     if draft.kind in ("dflash", "eagle3"):
         key = "dflash.embedding_length" if draft.kind == "dflash" else "eagle3.target_hidden_size"
-        if draft.embedding_length != t_emb:
+        # Both widths must be known ints: an unknown on both sides is not a match.
+        if not (
+            isinstance(draft.embedding_length, int)
+            and isinstance(t_emb, int)
+            and draft.embedding_length == t_emb
+        ):
             errors.append(f"{key} {draft.embedding_length} != target embedding_length {t_emb}")
         check_layers(f"{draft.kind}.target_layers")
         if draft.kind == "eagle3":
@@ -159,13 +177,7 @@ def draft_fit_errors(target: dict[str, Any], draft: DrafterInfo) -> list[str]:
         if draft.architecture != t_arch:
             errors.append(f"architecture {draft.architecture} != target architecture {t_arch}")
     elif draft.kind == "simple":
-        for label, mine, theirs in (
-            ("tokenizer.ggml.model", draft.tokenizer_model, target.get("tokenizer.ggml.model")),
-            ("bos_token_id", draft.bos_token_id, target.get("tokenizer.ggml.bos_token_id")),
-            ("eos_token_id", draft.eos_token_id, target.get("tokenizer.ggml.eos_token_id")),
-        ):
-            if mine != theirs:
-                errors.append(f"{label} {mine} != target {theirs}")
+        errors += _simple_identity_errors(target, draft)
         check_vocab()
     return errors
 
@@ -184,6 +196,17 @@ def screen_draft_fit(target: dict[str, Any], draft_header: dict[str, Any]) -> Dr
             code="model.draft_not_a_drafter",
             details={"reasons": [f"architecture {arch!r} is not a drafter"]},
         )
+    if info.kind == "simple":
+        # Any arch-plus-tokenizer header classifies as ``simple``; one whose
+        # tokenizer is not the target's is not a drafter for this model at
+        # all. Only a vocab delta between same-tokenizer models is a mismatch.
+        identity = _simple_identity_errors(target, info)
+        if identity:
+            raise UnprocessableEntity(
+                "not a speculative-decoding drafter for this model: " + "; ".join(identity),
+                code="model.draft_not_a_drafter",
+                details={"reasons": identity},
+            )
     reasons = draft_fit_errors(target, info)
     if reasons:
         raise UnprocessableEntity(

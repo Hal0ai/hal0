@@ -166,8 +166,10 @@ A pull without `draft_filename` leaves an existing pairing alone.
 
 A drafter that fails the check is refused with `422 model.draft_mismatch`
 (the two values that differ are in `details`), `model.draft_not_a_drafter`
-(the file is not a drafter) or `model.draft_not_found` (the path is not on
-disk).
+(the file is not a drafter, or is a plain model whose tokenizer is not this
+model's), `model.draft_not_found` (the path is not on disk) or
+`model.draft_outside_store` (the path is not absolute, or lies outside the
+model store and the model's own directory, where a slot could not open it).
 
 A rescan pairs a drafter it finds in a model's directory when it fits. A
 drafter it cannot pair is listed as skipped with a reason:
