@@ -1524,8 +1524,10 @@ async def run_pull(
             registry,
             model_id=job.model_id,
             path=str(final),
-            # The drafter's bytes count toward the row, as capacity.py documents.
-            size_bytes=size_bytes + (draft_rec.bytes_done if draft_rec is not None else 0),
+            # Every installed byte — parts, projector, drafter — as capacity.py documents.
+            size_bytes=size_bytes
+            + (mm_rec.bytes_done if mm_rec is not None else 0)
+            + (draft_rec.bytes_done if draft_rec is not None else 0),
             sha256=digest,
             hf_repo=hf_repo,
             hf_filename=hf_file,

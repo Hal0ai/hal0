@@ -8,6 +8,7 @@ redirect handling, and partial downloads / cancellation.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import json
 import os
@@ -21,6 +22,7 @@ import pytest
 
 from hal0.registry.pull import (
     _CHUNK_BYTES,
+    PullJob,
     _pull_root,
     _register_flm_pulled,
     _register_pulled,
@@ -2225,7 +2227,7 @@ async def test_run_pull_fetches_draft_after_mmproj_and_sets_facts(
     assert meta["variant"] == "lilicorr"
     assert meta["size_bytes"] == len(draft)
     assert meta["sha256"] == hashlib.sha256(draft).hexdigest()
-    assert entry.size_bytes == len(main) + len(draft)
+    assert entry.size_bytes == len(main) + len(mmproj) + len(draft)
 
     from hal0.db import repository
     from hal0.db.connection import connect
@@ -2233,6 +2235,10 @@ async def test_run_pull_fetches_draft_after_mmproj_and_sets_facts(
     with connect(registry.db_path) as conn:
         roles = {r["rel"]: r["role"] for r in repository.list_model_files(conn, "vision-model")}
     assert roles[_DRAFT_NAME] == "draft"
+    with connect(registry.db_path) as conn:
+        blob = repository.get_blob(conn, hashlib.sha256(draft).hexdigest())
+    assert blob is not None
+    assert blob["refcount"] == 1
 
 
 @pytest.mark.asyncio
@@ -2314,3 +2320,41 @@ async def test_run_pull_fails_when_downloaded_draft_is_not_a_drafter(
         await client.aclose()
     assert job.state == "failed"
     assert job.error_code == "model.draft_not_a_drafter"
+    _assert_no_pairing(registry, job)
+
+
+def _assert_no_pairing(registry: ModelRegistry, job: PullJob) -> None:
+    """A failed drafter leaves no draft fact, no draft file row, no file on disk."""
+    from hal0.db import repository
+    from hal0.db.connection import connect
+    from hal0.registry.store import ModelNotFound
+
+    with contextlib.suppress(ModelNotFound):
+        assert registry.get("vision-model").draft is None
+    with connect(registry.db_path) as conn:
+        roles = [r["role"] for r in repository.list_model_files(conn, "vision-model")]
+    assert "draft" not in roles
+    assert job.files[0].dest is not None
+    assert not (Path(job.files[0].dest).parent / _DRAFT_NAME).exists()
+
+
+@pytest.mark.asyncio
+async def test_run_pull_draft_404_leaves_no_pairing(tmp_hal0_home: str) -> None:
+    main, mmproj = _payload(2048), b"m" * 256
+    job = make_job("vision-model")
+    registry = ModelRegistry()
+    client = httpx.AsyncClient(transport=_two_file_transport(main, mmproj))
+    try:
+        await run_pull(
+            job,
+            hf_repo="Org/V",
+            hf_file=_MAIN_NAME,
+            registry=registry,
+            client=client,
+            mmproj_file=_MMPROJ_NAME,
+            draft_file=_DRAFT_NAME,
+        )
+    finally:
+        await client.aclose()
+    assert job.state == "failed"
+    _assert_no_pairing(registry, job)

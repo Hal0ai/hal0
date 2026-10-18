@@ -629,6 +629,13 @@ _DRAFT_BODY: dict[str, Any] = {
 }
 
 
+def _assert_nothing_seeded(client: TestClient, model_id: str) -> None:
+    from hal0.registry.store import ModelNotFound
+
+    with pytest.raises(ModelNotFound):
+        client.app.state.model_registry.get(model_id)  # type: ignore[attr-defined]
+
+
 def _stub_headers(
     monkeypatch: pytest.MonkeyPatch, by_file: dict[str, dict[str, Any] | None]
 ) -> list[tuple[str, str]]:
@@ -686,7 +693,7 @@ def test_pull_route_screens_draft_fit_before_download(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     wrong_target = {**_TARGET_HEADER, "qwen3.embedding_length": 2048}
-    _stub_headers(
+    reads = _stub_headers(
         monkeypatch,
         {"target-Q4_K_M.gguf": wrong_target, "drafter-lilicorr-Q8_0.gguf": _DRAFT_HEADER},
     )
@@ -704,6 +711,8 @@ def test_pull_route_screens_draft_fit_before_download(
     assert err["code"] == "model.draft_mismatch"
     assert err["details"]["reasons"]
     assert fake_run_pull == [], "no download may be scheduled on a mismatch"
+    assert len(reads) == 2, "only the two header reads may touch the Hub"
+    _assert_nothing_seeded(client_isolated, "user.Draftee")
 
 
 def test_pull_refuses_when_draft_header_unreadable(
@@ -711,7 +720,7 @@ def test_pull_refuses_when_draft_header_unreadable(
     fake_run_pull: list[dict[str, Any]],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _stub_headers(monkeypatch, {"target-Q4_K_M.gguf": _TARGET_HEADER})
+    reads = _stub_headers(monkeypatch, {"target-Q4_K_M.gguf": _TARGET_HEADER})
     r = client_isolated.post(
         "/api/models/user.Draftee/pull",
         json={
@@ -724,6 +733,8 @@ def test_pull_refuses_when_draft_header_unreadable(
     assert r.status_code == 422, r.text
     assert r.json()["error"]["code"] == "hf.header_unreadable"
     assert fake_run_pull == []
+    assert len(reads) == 2, "only the two header reads may touch the Hub"
+    _assert_nothing_seeded(client_isolated, "user.Draftee")
 
 
 def test_pull_draft_repo_defaults_to_hf_repo(

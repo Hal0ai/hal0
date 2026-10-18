@@ -107,6 +107,22 @@ def test_model_pull_starts_and_polls(captured: dict[str, Any]) -> None:
     assert any(p.endswith("/pull/status") for p, _ in captured["gets"])
 
 
+def test_model_pull_draft_sends_draft_coordinates(captured: dict[str, Any]) -> None:
+    result = runner.invoke(
+        model_commands.app,
+        ["pull", "qwen3-4b", "--draft", "d-Q8_0.gguf", "--draft-repo", "org/drafters"],
+    )
+    assert result.exit_code == 0, result.output
+    assert captured["path"] == "/api/models/qwen3-4b/pull"
+    assert captured["body"] == {"draft_filename": "d-Q8_0.gguf", "draft_repo": "org/drafters"}
+
+
+def test_model_pull_draft_repo_needs_draft(captured: dict[str, Any]) -> None:
+    result = runner.invoke(model_commands.app, ["pull", "qwen3-4b", "--draft-repo", "org/x"])
+    assert result.exit_code != 0
+    assert "path" not in captured
+
+
 # ── model update [--check] ──────────────────────────────────────────────────
 
 
