@@ -26,3 +26,9 @@ describe('pullFileLabel', () => {
     expect(pullFileLabel([f('shard', 9, 9), f('shard', 9, 9)])).toBeNull()
   })
 })
+
+describe('pullFileLabel drafter', () => {
+  it('names the drafter once the model is in', () => {
+    expect(pullFileLabel([f('model', 9, 9), f('draft', 3, 10, 'drafter.gguf')])).toBe('drafter')
+  })
+})

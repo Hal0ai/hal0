@@ -463,7 +463,7 @@ const TERMINAL = new Set<PullState>(['completed', 'failed', 'cancelled'])
 // ``shard`` per part, then the optional ``mmproj`` and engine ``sidecar``s.
 export interface PullFileSnapshot {
   hf_filename: string
-  kind: 'model' | 'shard' | 'mmproj' | 'sidecar' | string
+  kind: 'model' | 'shard' | 'mmproj' | 'draft' | 'sidecar' | string
   bytes_total: number
   bytes_done: number
 }
@@ -482,6 +482,7 @@ export function pullFileLabel(files: PullFileSnapshot[]): string | null {
     return `part ${shards.indexOf(active) + 1} of ${shards.length}`
   }
   if (active.kind === 'mmproj') return 'vision projector'
+  if (active.kind === 'draft') return 'drafter'
   return active.hf_filename.split('/').pop() || active.hf_filename
 }
 
