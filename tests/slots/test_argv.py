@@ -614,3 +614,14 @@ def test_resolve_argv_strips_reasoning_format_none_from_every_segment() -> None:
         assert _value_after(out.argv, "-b") == "2048"
     only = resolve_argv([("profile", ["--reasoning-format=none", "-b", "2048"])])
     assert only.argv == ["-b", "2048"]
+
+
+def test_profile_flags_spec_type_refused() -> None:
+    """ADR-0031 §3: ``--spec-type`` is hal0's (the model's drafter or heads,
+    or the profile's ``speculation = "ngram"``), never a profile flag."""
+    from hal0.slots.argv import screen_profile_segment
+
+    with pytest.raises(BadRequest) as exc_info:
+        screen_profile_segment(["--spec-type", "ngram-mod"], segment="profile")
+    assert exc_info.value.code == "profiles.model_fact_flag_denied"
+    assert "speculation" in str(exc_info.value)

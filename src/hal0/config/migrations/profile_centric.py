@@ -506,9 +506,10 @@ def new_launch(
     )
     from hal0.config.schema import MTP_DRAFT_BUNDLE, mtp_draft_device
 
-    profile_layer = (
-        ["--spec-type", "draft-mtp", *shlex.split(MTP_DRAFT_BUNDLE)] if mtp else []
-    ) + flags
+    # ADR-0031 §3: --spec-type is a model-layer flag, the bundle a profile one.
+    if mtp:
+        model_layer += ["--spec-type", "draft-mtp"]
+    profile_layer = (shlex.split(MTP_DRAFT_BUNDLE) if mtp else []) + flags
 
     slot_layer: list[str] = []
     if slot.get("n_gpu_layers") is not None:

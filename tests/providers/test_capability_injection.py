@@ -3,8 +3,8 @@
 
 ``--jinja`` is a model-layer fact: hal0 adds it when the launching runner
 supports it, unless the model file's ``jinja`` is ``False`` or the profile
-runs in embedding/reranking mode. MTP drafting is the profile's ``mtp``
-(``auto``/``off``): ``auto`` drafts when the model has MTP heads (an explicit
+runs in embedding/reranking mode. MTP drafting is the profile's
+``speculation`` (``auto``/``off``/``ngram``, ADR-0031): ``auto`` drafts when the model has MTP heads (an explicit
 ``mtp`` fact, else the registry ``mtp`` tag) AND the runner supports
 drafting. The runner is the slot's (``binary``, else derived from its
 ``device``).
@@ -73,7 +73,7 @@ def test_a_stale_defaults_table_is_never_read_for_jinja_or_mtp():
     model = _mtp_tagged_model(defaults={"jinja": False, "mtp": False})
     scalars = _resolve_llama_scalars(_ROCM_SLOT, model, _profile())
     assert scalars["jinja"] is True
-    assert scalars["mtp"] is True  # the registry 'mtp' tag still decides
+    assert scalars["spec_plan"]["mode"] == "mtp"  # the registry 'mtp' tag still decides
 
 
 @pytest.mark.parametrize("mode", ["--embedding", "--reranking"])
@@ -115,13 +115,13 @@ def test_mtp_bundle_present_for_tagged_model_on_rocm():
 
 def test_profile_mtp_off_never_drafts():
     scalars = _resolve_llama_scalars(_ROCM_SLOT, _mtp_tagged_model(), _profile(speculation="off"))
-    assert scalars["mtp"] is False
+    assert scalars["spec_plan"]["mode"] == "none"
     assert scalars["draft_device"] is None
 
 
 def test_mtp_bundle_absent_for_untagged_model():
     scalars = _resolve_llama_scalars(_ROCM_SLOT, _plain_model(), _profile())
-    assert scalars["mtp"] is False
+    assert scalars["spec_plan"]["mode"] == "none"
     assert "--spec-type" not in _argv(_ROCM_SLOT, _plain_model(), _profile())
 
 
@@ -147,13 +147,13 @@ def test_mtp_fact_true_is_the_heads_fact_but_the_runner_still_gates():
     heads" — it no longer forces drafting. It drafts on a runner that
     supports MTP and stops drafting on one that does not."""
     model = _plain_model(mtp=True)
-    assert _resolve_llama_scalars(_ROCM_SLOT, model, _profile())["mtp"] is True
-    assert _resolve_llama_scalars(_CUDA_SLOT, model, _profile())["mtp"] is False
+    assert _resolve_llama_scalars(_ROCM_SLOT, model, _profile())["spec_plan"]["mode"] == "mtp"
+    assert _resolve_llama_scalars(_CUDA_SLOT, model, _profile())["spec_plan"]["mode"] == "none"
 
 
 def test_mtp_fact_false_overrides_the_tag():
     model = _mtp_tagged_model(mtp=False)
-    assert _resolve_llama_scalars(_ROCM_SLOT, model, _profile())["mtp"] is False
+    assert _resolve_llama_scalars(_ROCM_SLOT, model, _profile())["spec_plan"]["mode"] == "none"
 
 
 # ── slot owns -ngl ────────────────────────────────────────────────────────────

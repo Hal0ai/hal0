@@ -36,6 +36,7 @@ import {
   tokenizeFlags,
   MANAGED_FLAG_SOURCE,
   MODEL_FACT_FLAG_SOURCE,
+  SPEC_TYPE_REFUSAL,
 } from './flags-tune.js'
 
 // `NAME_RE` (name regex) and `toast` are shared globals from primitives.jsx.
@@ -446,7 +447,9 @@ function modelFactFlagError(offenders) {
   const first = offenders[0];
   const name = screenCanon(first.split(/[ =]/)[0]);
   const where = MODEL_FACT_FLAG_SOURCE[name];
-  const why = where
+  const why = name === '--spec-type'
+    ? SPEC_TYPE_REFUSAL
+    : where
     ? `it is a fact about the model file, set on ${where}, not on the profile`
     : name === '--spec-draft-device' || name === '--mmproj-device'
       ? 'hal0 derives it from the slot\'s device'

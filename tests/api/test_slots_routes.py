@@ -2604,3 +2604,36 @@ def test_resolved_for_a_llama_slot_still_returns_argv_and_provenance(
     assert isinstance(body["argv"], list) and "--model" in body["argv"]
     assert body["provenance"]
     assert {"base", "profile"} <= {p["source"] for p in body["provenance"]}
+
+
+def test_resolved_states_the_speculation_in_effect(
+    slot_root: Path,
+    container_stub: dict[str, Any],
+    isolated_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ADR-0031 §5: the drawer's Speculation line reads ``speculation`` —
+    here a LiLiCorr drafter the pinned runner image is too old to run."""
+    monkeypatch.setenv(
+        "HAL0_RUNNER_IMAGE_STANDARD", "ghcr.io/hal0ai/hal0-runner-standard:b11596-r6d1fb9e"
+    )
+    info = {
+        "_model_key": "qwen3-4b-q4_k_m",
+        "path": "/models/qwen.gguf",
+        "draft": "/models/qwen-dflash.gguf",
+        "draft_kind": "dflash",
+        "metadata": {"draft": {"variant": "lilicorr", "block_size": 8}},
+    }
+    monkeypatch.setattr(
+        "hal0.providers.container._best_effort_model_info", lambda *_a, **_k: dict(info)
+    )
+    r = isolated_client.get("/api/slots/chat/resolved")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["speculation"] == {
+        "mode": "none",
+        "kind": None,
+        "variant": None,
+        "unavailable_reason": "drafter needs llama.cpp b11669 or newer; this runner image is b11596",
+    }
+    assert "--spec-type" not in body["argv"]

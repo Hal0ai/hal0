@@ -66,16 +66,14 @@ from hal0.config.paths import (
     model_store_root,
 )
 from hal0.config.schema import (
-    MTP_DRAFT_BUNDLE,
+    family_flags as _family_flags,
+)
+from hal0.config.schema import (
     mtp_draft_device,
     resolve_chat_template,
 )
-from hal0.config.schema import (
-    family_flags as _family_flags,
-)
 from hal0.errors import Hal0Error, UnprocessableEntity
 from hal0.http_client import async_client
-from hal0.model_meta import model_is_mtp_eligible
 from hal0.profiles import ProfileCatalog
 from hal0.providers import podman_introspect
 from hal0.providers._gpu import (
@@ -90,6 +88,7 @@ from hal0.providers._gpu import (
 )
 from hal0.providers.base import HealthCheck, Provider, RuntimeLaunchPlan
 from hal0.providers.podman_mutate import PullLineParser
+from hal0.providers.speculation import effective_speculation
 from hal0.slot_lifecycle_budget import (
     HEALTH_TIMEOUT_S,
     UNIT_ADMIN_CALLS_ALLOWANCE_S,
@@ -275,8 +274,9 @@ def _effective_runner(
     """The :class:`~hal0.runners.Runner` that actually applies to this launch.
 
     SINGLE SOURCE for "which runner's capabilities gate this slot" — shared by
-    :func:`_resolve_image_ref` (the runner-derived image) and the mtp/jinja
-    capability gates in :func:`_effective_mtp` / :func:`_resolve_llama_scalars`,
+    :func:`_resolve_image_ref` (the runner-derived image) and the speculation/jinja
+    capability gates in :func:`~hal0.providers.speculation.effective_speculation`
+    / :func:`_resolve_llama_scalars`,
     so the image that launches and the capabilities that gate its flags can
     never drift onto two different runners.
 
@@ -392,44 +392,6 @@ def _fixed_family_provider(slot_cfg: Mapping[str, Any] | None, profile: Any) -> 
     if not isinstance(family, str):
         family = _profile_runtime_family(cfg)
     return _provider_for_family(cfg, family)
-
-
-def model_has_mtp_heads(model_info: Mapping[str, Any]) -> bool:
-    """The model fact: does the file carry MTP draft heads?
-
-    The registry row's ``mtp`` fact when set; otherwise the registry ``mtp``
-    tag (both via :func:`hal0.model_meta.model_is_mtp_eligible`).
-    """
-    return model_is_mtp_eligible(model_info)
-
-
-def _effective_mtp(
-    model_info: Mapping[str, Any],
-    runner: Any,
-    profile: Any,
-    *,
-    embed_mode: bool = False,
-    log_ineligible: bool = False,
-) -> bool:
-    """Whether the launch drafts with MTP (ADR-0029).
-
-    The profile decides (``speculation = "auto"`` / ``"off"`` / ``"ngram"``);
-    ``auto`` drafts when the model has MTP heads and the launching runner
-    supports drafting, outside embedding/reranking mode. ``ngram`` is not MTP.
-    """
-    if str(getattr(profile, "speculation", "auto") or "auto") != "auto" or embed_mode:
-        return False
-    if not model_has_mtp_heads(model_info):
-        if log_ineligible:
-            log.info(
-                "mtp.auto_off_model_ineligible",
-                extra={
-                    "model": str(model_info.get("_model_key") or model_info.get("path") or ""),
-                    "hint": "tag the model 'mtp' (or set its MTP heads fact) to draft",
-                },
-            )
-        return False
-    return bool(getattr(getattr(runner, "supports", None), "mtp", False))
 
 
 log = logging.getLogger(__name__)
@@ -1034,7 +996,9 @@ def _llama_argv_segments(
     jinja: bool = False,
     chat_template_path: str | None = None,
     mmproj: str | None = None,
-    mtp: bool = False,
+    spec_type: str | None = None,
+    draft_model: str | None = None,
+    spec_bundle: str = "",
     profile_flags: str = "",
     slot_n_gpu_layers: int | None = None,
     slot_threads: int | None = None,
@@ -1049,12 +1013,15 @@ def _llama_argv_segments(
     (``resolve_argv`` keeps the LAST occurrence of each flag)::
 
         base     --host --port --model --alias --ctx-size   (hal0-managed)
-        model    family quirks, --jinja, --chat-template-file, --mmproj
+        model    family quirks, --jinja, --chat-template-file, --mmproj,
+                 --spec-type, --spec-draft-model
                  (model facts; quirks from family_defaults.toml)
-        profile  the MTP draft bundle, then the profile's flags
+        profile  the speculation bundle, then the profile's flags
         slot     -ngl, --threads, --metrics, --spec-draft-device (placement)
 
-    The profile's own ``--spec-draft-*`` values follow the bundle and win.
+    ``spec_type`` / ``draft_model`` / ``spec_bundle`` come from one
+    :class:`~hal0.providers.speculation.SpecPlan` (ADR-0031 §3); the profile's
+    own ``--spec-draft-*`` values follow the bundle and win.
     ``resolve_argv`` screens the profile segment (managed, hardware and
     model-fact flags refuse to launch).
     """
@@ -1074,10 +1041,12 @@ def _llama_argv_segments(
         model += ["--chat-template-file", chat_template_path]
     if mmproj:
         model += ["--mmproj", mmproj]
+    if spec_type:
+        model += ["--spec-type", spec_type]
+    if draft_model:
+        model += ["--spec-draft-model", draft_model]
 
-    # The bundle no longer carries ``--spec-type`` (ADR-0031: a model fact); until
-    # the model layer emits it, the MTP launch spells it here.
-    profile: list[str] = ["--spec-type", "draft-mtp", *shlex.split(MTP_DRAFT_BUNDLE)] if mtp else []
+    profile: list[str] = shlex.split(spec_bundle) if spec_bundle.strip() else []
     profile += _profile_flag_tokens(profile_flags)
 
     slot: list[str] = []
@@ -1089,7 +1058,7 @@ def _llama_argv_segments(
     # hal0.slots.metrics_collect scrapes. Loopback-only, so on by default.
     if slot_metrics:
         slot += ["--metrics"]
-    if mtp and draft_device:
+    if draft_device and (spec_type or "").startswith("draft-"):
         slot += ["--spec-draft-device", draft_device]
 
     return [("base", base), ("model", model), ("profile", profile), ("slot", slot)]
@@ -1108,7 +1077,9 @@ def _llama_launch_plan(
     jinja: bool = False,
     chat_template_path: str | None = None,
     mmproj: str | None = None,
-    mtp: bool = False,
+    spec_type: str | None = None,
+    draft_model: str | None = None,
+    spec_bundle: str = "",
     profile_flags: str = "",
     slot_n_gpu_layers: int | None = None,
     slot_threads: int | None = None,
@@ -1131,7 +1102,9 @@ def _llama_launch_plan(
         jinja=jinja,
         chat_template_path=chat_template_path,
         mmproj=mmproj,
-        mtp=mtp,
+        spec_type=spec_type,
+        draft_model=draft_model,
+        spec_bundle=spec_bundle,
         profile_flags=profile_flags,
         slot_n_gpu_layers=slot_n_gpu_layers,
         slot_threads=slot_threads,
@@ -1510,8 +1483,10 @@ def _pinned_segments(
     applies). The base (host, port, model, alias), the model facts (template,
     projector) and the placement are rebuilt from today's slot and model, so a
     moved model file or an edited ledger can neither stale nor redirect the
-    launch. Raises ``slot.unconverted`` when the record is not a list of
-    strings.
+    launch. A recorded ``--spec-type`` is consumed the same way (ADR-0031 §3:
+    hal0 owns it): the slot speculates with today's plan for the model, in the
+    model layer, or not at all when today's plan is none. Raises
+    ``slot.unconverted`` when the record is not a list of strings.
     """
     from hal0.slots.argv import _split_pairs
 
@@ -1538,7 +1513,7 @@ def _pinned_segments(
             return None
 
     ctx = ngl = threads = None
-    jinja = no_jinja = template = projector = no_projector = draft = False
+    jinja = no_jinja = template = projector = no_projector = draft = speculate = False
     tune: list[str] = []
     for pair in _split_pairs(list(argv)):
         canon = pair.canon
@@ -1572,6 +1547,8 @@ def _pinned_segments(
             threads = _int(_value(pair))
         elif canon == "--spec-draft-device":
             draft = True
+        elif canon == "--spec-type":
+            speculate = True
         else:
             tune += [str(pair.flag), *pair.values] if pair.flag else list(pair.values)
 
@@ -1590,6 +1567,11 @@ def _pinned_segments(
         model += ["--chat-template-file", str(scalars["chat_template_path"])]
     if projector and not no_projector and scalars.get("mmproj"):
         model += ["--mmproj", str(scalars["mmproj"])]
+    spec_type = str(scalars.get("spec_type") or "") if speculate else ""
+    if spec_type:
+        model += ["--spec-type", spec_type]
+        if scalars.get("draft_model"):
+            model += ["--spec-draft-model", str(scalars["draft_model"])]
     slot: list[str] = []
     slot_ngl = scalars.get("slot_n_gpu_layers")
     if slot_ngl is not None or ngl is not None:
@@ -1599,7 +1581,7 @@ def _pinned_segments(
         slot += ["--threads", str(int(slot_threads))]
     if scalars.get("slot_metrics", True):
         slot += ["--metrics"]
-    if draft and scalars.get("backend"):
+    if (draft or spec_type.startswith("draft-")) and scalars.get("backend"):
         slot += ["--spec-draft-device", mtp_draft_device(scalars["backend"])]
     return [("base", base), ("model", model), ("profile", tune), ("slot", slot)]
 
@@ -1688,8 +1670,13 @@ def _resolve_llama_scalars(
         and model_info.get("jinja") is not False
         and not embed_mode
     )
-    mtp = _effective_mtp(
-        model_info, runner, profile, embed_mode=embed_mode, log_ineligible=for_launch
+    spec = effective_speculation(
+        model_info,
+        runner,
+        profile,
+        embed_mode=embed_mode,
+        image_tag=str(image),
+        log_launch=for_launch,
     )
 
     slot_metrics_raw = slot_cfg.get("metrics")
@@ -1719,8 +1706,13 @@ def _resolve_llama_scalars(
         "jinja": jinja,
         "chat_template_path": chat_template_path,
         "mmproj": str(mmproj) if mmproj else None,
-        "mtp": mtp,
-        "draft_device": mtp_draft_device(effective_backend) if mtp else None,
+        "spec_type": spec.spec_type,
+        "draft_model": spec.draft_model,
+        "spec_bundle": spec.bundle,
+        "spec_plan": spec.as_dict(),
+        "draft_device": (
+            mtp_draft_device(effective_backend) if spec.mode in ("draft", "mtp") else None
+        ),
         "slot_n_gpu_layers": slot_cfg.get("n_gpu_layers"),
         "slot_threads": slot_cfg.get("threads"),
         "slot_metrics": True if slot_metrics_raw is None else bool(slot_metrics_raw),
@@ -1746,7 +1738,9 @@ def _segments_from_scalars(
         jinja=sc["jinja"],
         chat_template_path=sc["chat_template_path"],
         mmproj=sc["mmproj"],
-        mtp=sc["mtp"],
+        spec_type=sc["spec_type"],
+        draft_model=sc["draft_model"],
+        spec_bundle=sc["spec_bundle"],
         profile_flags=sc["profile_flags"],
         slot_n_gpu_layers=sc["slot_n_gpu_layers"],
         slot_threads=sc["slot_threads"],
@@ -1885,7 +1879,9 @@ class ContainerProvider(Provider):
             jinja=scalars["jinja"],
             chat_template_path=scalars["chat_template_path"],
             mmproj=scalars["mmproj"],
-            mtp=scalars["mtp"],
+            spec_type=scalars["spec_type"],
+            draft_model=scalars["draft_model"],
+            spec_bundle=scalars["spec_bundle"],
             profile_flags=scalars["profile_flags"],
             slot_n_gpu_layers=scalars["slot_n_gpu_layers"],
             slot_threads=scalars["slot_threads"],
@@ -2861,7 +2857,7 @@ def resolved_command_for_slot(
     resolved = _resolve_slot_argv(slot_cfg, model_path)
     if resolved is None:
         return None
-    image, result = resolved
+    image, result, _spec = resolved
     return [image, *result.argv]
 
 
@@ -2964,11 +2960,13 @@ def strict_slot_argv(slot_cfg: dict[str, Any]) -> ResolvedArgv:
 def _resolve_slot_argv(
     slot_cfg: dict[str, Any],
     model_path: str | None = None,
-) -> tuple[str, ResolvedArgv] | None:
+) -> tuple[str, ResolvedArgv, dict[str, Any]] | None:
     """Build the labelled argv segments for a slot and resolve them.
 
-    Returns ``(image, ResolvedArgv)`` — the deduped flag portion (image
-    excluded) plus per-flag provenance — or ``None`` when the slot cannot
+    Returns ``(image, ResolvedArgv, spec_plan)`` — the deduped flag portion
+    (image excluded) plus per-flag provenance, and the speculation plan the
+    argv spells (a :class:`~hal0.providers.speculation.SpecPlan` dict) — or
+    ``None`` when the slot cannot
     launch (a missing profile, an unconverted slot) or when llama-server does
     not compose its launch at all. The last case asks
     :func:`_spec_provider_for`, the one dispatch rule the launch path uses: a
@@ -2977,7 +2975,7 @@ def _resolve_slot_argv(
     here would be fiction (ADR-0029). Consumes the SAME
     :func:`_llama_argv_segments` builder and :func:`_resolve_llama_scalars`
     resolver (via :func:`_resolve_preview_bundle`) the launch path uses, so
-    the previewed argv (including the mtp override, model-registry defaults,
+    the previewed argv (including the speculation plan, model-registry defaults,
     chat-template file, mmproj, slot ngl override, and the always-resolved
     ctx-size) is byte-identical to what :meth:`ContainerProvider.container_spec`
     would launch.
@@ -3002,7 +3000,7 @@ def _resolve_slot_argv(
         port = int(placement.get("port") or placement.get("slot", {}).get("port") or 0)
         try:
             segments = _pinned_segments(pin, placement, port, str(info.get("path") or ""), sc)
-            return str(sc["image"]), resolve_argv(segments)
+            return str(sc["image"]), resolve_argv(segments), sc["spec_plan"]
         except Hal0Error:
             return None
     resolved = _resolve_preview_bundle(slot_cfg, model_path)
@@ -3014,7 +3012,7 @@ def _resolve_slot_argv(
     port = int(slot_cfg.get("port") or slot_cfg.get("slot", {}).get("port") or 0)
 
     segments = _segments_from_scalars(port, str(model_info.get("path") or ""), scalars)
-    return str(scalars["image"]), resolve_argv(segments)
+    return str(scalars["image"]), resolve_argv(segments), scalars["spec_plan"]
 
 
 def resolved_argv_detail_for_slot(
@@ -3023,7 +3021,9 @@ def resolved_argv_detail_for_slot(
 ) -> dict[str, Any] | None:
     """Structured resolution for the dashboard's "resolved command" drawer.
 
-    Returns ``{"argv", "provenance", "removed"}`` where ``provenance`` lists each
+    Returns ``{"argv", "provenance", "removed", "speculation"}`` where
+    ``speculation`` is ``{mode, kind, variant, unavailable_reason}`` (ADR-0031
+    §5: what the slot drawer's Speculation line states) and ``provenance`` lists each
     surviving flag with the layer that set its final value (``base`` /
     ``model`` / ``profile`` / ``slot``) —
     so an operator can see exactly which
@@ -3036,13 +3036,14 @@ def resolved_argv_detail_for_slot(
     resolved = _resolve_slot_argv(slot_cfg, model_path)
     if resolved is None:
         return None
-    image, result = resolved
+    image, result, spec = resolved
     return {
         "argv": [image, *result.argv],
         "provenance": [
             {"flag": p.flag, "value": p.value, "source": p.source} for p in result.provenance
         ],
         "removed": result.removed,
+        "speculation": {k: spec.get(k) for k in ("mode", "kind", "variant", "unavailable_reason")},
     }
 
 

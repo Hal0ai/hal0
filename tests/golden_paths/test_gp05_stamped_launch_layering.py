@@ -7,9 +7,10 @@ deduplicated last-wins by :func:`hal0.slots.argv.resolve_argv`:
    ``--ctx-size`` is the profile's ``ctx_size`` rule);
 2. ``model``   — ``--jinja``, ``--chat-template-file``, ``--mmproj`` (facts
    about the file; the projector only when the profile's ``vision`` is
-   ``auto``);
-3. ``profile`` — the MTP draft bundle when the profile's MTP is in effect,
-   then the profile's own ``flags`` (so its ``--spec-draft-*`` values win);
+   ``auto``), then ``--spec-type`` and the drafter's ``--spec-draft-model``
+   when speculation is in effect (ADR-0031 §3);
+3. ``profile`` — the bundle for the speculation kind in effect, then the
+   profile's own ``flags`` (so its ``--spec-draft-*`` values win);
 4. ``slot``    — ``-ngl``, ``--threads``, ``--metrics`` and the
    ``--spec-draft-device`` derived from the slot's device.
 
@@ -23,7 +24,13 @@ import shlex
 
 import pytest
 
-from hal0.config.schema import MTP_DRAFT_BUNDLE, SEED_PROFILES, ProfileConfig
+from hal0.config.schema import (
+    DRAFT_BUNDLE,
+    MTP_DRAFT_BUNDLE,
+    NGRAM_BUNDLE,
+    SEED_PROFILES,
+    ProfileConfig,
+)
 from hal0.errors import UnprocessableEntity
 from hal0.profiles import ResolvedProfile, resolve_loaded_profile
 from hal0.providers.container import (
@@ -83,7 +90,8 @@ def test_argv_builder_emits_exactly_the_four_layers_in_order() -> None:
         jinja=True,
         chat_template_path="/models/chat-templates/qwen.jinja",
         mmproj="/models/qwen-mmproj.gguf",
-        mtp=True,
+        spec_type="draft-mtp",
+        spec_bundle=MTP_DRAFT_BUNDLE,
         profile_flags="-fa auto -ctk q8_0 --parallel 2 --spec-draft-n-max 8",
         slot_n_gpu_layers=99,
         slot_threads=8,
@@ -110,9 +118,11 @@ def test_argv_builder_emits_exactly_the_four_layers_in_order() -> None:
         "/models/chat-templates/qwen.jinja",
         "--mmproj",
         "/models/qwen-mmproj.gguf",
+        "--spec-type",
+        "draft-mtp",
     ]
     # The MTP bundle first, then the profile's own flags.
-    bundle = ["--spec-type", "draft-mtp", *shlex.split(MTP_DRAFT_BUNDLE)]
+    bundle = shlex.split(MTP_DRAFT_BUNDLE)
     assert by_label["profile"][: len(bundle)] == bundle
     assert by_label["profile"][len(bundle) :] == [
         "-fa",
@@ -138,6 +148,7 @@ def test_argv_builder_emits_exactly_the_four_layers_in_order() -> None:
     prov = {p.flag: p.source for p in resolved.provenance}
     assert prov["--ctx-size"] == "base"
     assert prov["--mmproj"] == "model"
+    assert prov["--spec-type"] == "model"
     assert prov["--parallel"] == "profile"
     assert prov["-ngl"] == "slot"
     assert prov["--spec-draft-device"] == "slot"
@@ -178,6 +189,56 @@ def test_agent_seed_on_a_vulkan_slot_golden_argv() -> None:
         "Vulkan0",
     ]
     assert "--mmproj" not in argv  # the agent seed's vision = "off"
+
+
+def test_dflash_layering() -> None:
+    """A paired DFlash drafter: the model layer names the type and the file,
+    the profile layer opens with the dflash bundle (n-max = block_size - 1),
+    the slot layer places the drafter on the slot's device."""
+    model = _model(
+        draft="/p/d.gguf",
+        draft_kind="dflash",
+        metadata={"context_length": 262144, "draft": {"block_size": 8}},
+    )
+    by_label = dict(_launch(_slot("agent"), model, _seed("agent")))
+    assert by_label["model"][-4:] == [
+        "--spec-type",
+        "draft-dflash",
+        "--spec-draft-model",
+        "/p/d.gguf",
+    ]
+    bundle = shlex.split(DRAFT_BUNDLE["dflash"].format(n_max=7))
+    assert by_label["profile"][: len(bundle)] == bundle
+    assert "--spec-draft-n-max" in bundle and bundle[bundle.index("--spec-draft-n-max") + 1] == "7"
+    assert by_label["slot"][-2:] == ["--spec-draft-device", "Vulkan0"]
+    argv = resolve_argv(list(by_label.items())).argv
+    assert argv.count("--spec-type") == 1
+
+
+def test_mtp_layering_spec_type_moved_to_model_layer() -> None:
+    by_label = dict(_launch(_slot("agent"), _model(), _seed("agent")))
+    assert by_label["model"][-2:] == ["--spec-type", "draft-mtp"]
+    assert "--spec-draft-model" not in by_label["model"]
+    assert "--spec-type" not in by_label["profile"]
+    bundle = shlex.split(MTP_DRAFT_BUNDLE)
+    assert by_label["profile"][: len(bundle)] == bundle
+    assert by_label["slot"][-2:] == ["--spec-draft-device", "Vulkan0"]
+
+
+def test_ngram_layering() -> None:
+    """``speculation = "ngram"`` ignores the drafter and MTP heads: the model
+    layer carries ``--spec-type ngram-mod``, the profile layer the n-gram tune,
+    and no draft device is placed."""
+    model = _model(draft="/p/d.gguf", draft_kind="dflash")
+    ngram = _custom("ngram", flags="-fa auto", speculation="ngram")
+    by_label = dict(_launch(_slot("ngram"), model, ngram))
+    assert by_label["model"][-2:] == ["--spec-type", "ngram-mod"]
+    assert "--spec-draft-model" not in by_label["model"]
+    tune = shlex.split(NGRAM_BUNDLE)[2:]
+    assert by_label["profile"] == [*tune, "-fa", "auto"]
+    assert "--spec-draft-device" not in by_label["slot"]
+    argv = resolve_argv(list(by_label.items())).argv
+    assert argv[argv.index("--spec-type") + 1] == "ngram-mod"
 
 
 @pytest.mark.parametrize(

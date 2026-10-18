@@ -281,8 +281,8 @@ def test_env_empty_when_no_server_env() -> None:
 # fully-ordered argv. Any reorder, insertion, removal, or renaming of a
 # segment fails them with a readable diff.
 
-# The model layer will own --spec-type (ADR-0031); until then the launch spells it first.
-_BUNDLE = ["--spec-type", "draft-mtp", *shlex.split(MTP_DRAFT_BUNDLE)]
+# The model layer owns --spec-type (ADR-0031 §3); the profile layer opens with the bundle.
+_BUNDLE = shlex.split(MTP_DRAFT_BUNDLE)
 
 #: Every layer populated, with a deliberate profile-over-bundle collision
 #: (`--spec-draft-n-max`: bundle 4, profile 8). Update this literal ONLY
@@ -298,8 +298,8 @@ GOLDEN_MAXIMAL_ARGV: list[str] = [
     "--jinja",
     "--chat-template-file", "/etc/hal0/templates/qwen3.jinja",
     "--mmproj", "/var/lib/hal0/models/qwen3-4b/mmproj.gguf",
-    # profile: the MTP bundle (its --spec-draft-n-max 4 lost) ...
     "--spec-type", "draft-mtp",
+    # profile: the MTP bundle (its --spec-draft-n-max 4 lost) ...
     "--spec-draft-ngl", "all",
     "--spec-draft-n-min", "0",
     "--spec-draft-p-min", "0.0",
@@ -330,7 +330,8 @@ _MAXIMAL_KW: dict[str, Any] = dict(
     jinja=True,
     chat_template_path="/etc/hal0/templates/qwen3.jinja",
     mmproj="/var/lib/hal0/models/qwen3-4b/mmproj.gguf",
-    mtp=True,
+    spec_type="draft-mtp",
+    spec_bundle=MTP_DRAFT_BUNDLE,
     profile_flags="-fa on -b 2048 -ub 512 --spec-draft-n-max 8",
     slot_n_gpu_layers=99,
     slot_threads=16,
@@ -372,6 +373,7 @@ def test_golden_provenance_pins_which_segment_won_each_flag() -> None:
         ("--jinja", None, "model"),
         ("--chat-template-file", "/etc/hal0/templates/qwen3.jinja", "model"),
         ("--mmproj", "/var/lib/hal0/models/qwen3-4b/mmproj.gguf", "model"),
+        ("--spec-type", "draft-mtp", "model"),
         *bundle_pairs,
         ("-fa", "on", "profile"),
         ("-b", "2048", "profile"),

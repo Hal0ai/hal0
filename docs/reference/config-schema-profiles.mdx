@@ -99,7 +99,7 @@ copy — they can't be edited or deleted, only cloned.
 |---|---|---|
 | Hardware (the slot owns it) | `-ngl`, `-dev`, `-t` | `slot.hardware_flag_denied` |
 | Managed by hal0 | `--model`, `--host`, `--port`, `--alias`, `--ctx-size` | `slot.managed_arg_denied` |
-| Model facts, derived placement | `--jinja`, `--chat-template*`, `--mmproj`, `--no-mmproj`, `--mmproj-auto`, `--spec-draft-device`, `--mmproj-device` | `profiles.model_fact_flag_denied` |
+| Model facts, derived placement | `--jinja`, `--chat-template*`, `--mmproj`, `--no-mmproj`, `--mmproj-auto`, `--spec-type` (set `speculation` instead), `--spec-draft-device`, `--mmproj-device` | `profiles.model_fact_flag_denied` |
 | Host-owned | remote model fetches (`-hf`, `--model-url`), host file reads and writes (`--api-key-file`, `--log-file`, `--lora`), listener and auth/TLS settings (`--rpc`, `--api-key`), llama.cpp's built-in preset switches (`--gpt-oss-20b-default`, `--spec-default`) | `slot.host_owned_flag_denied` |
 | Bare positional arguments | a value with no flag in front of it | `slot.positional_arg_denied` |
 | `--reasoning-format none` | — | `slot.reasoning_format_none_denied` on save; stripped, not refused, at launch |

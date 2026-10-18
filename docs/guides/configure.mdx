@@ -151,9 +151,10 @@ check refuses, in every spelling llama.cpp accepts:
 - hal0-managed flags (`--model`, `--host`, `--port`, `--alias`, `--ctx-size`),
   where the context window is the profile's `ctx_size` field
   (`slot.managed_arg_denied`);
-- model-fact flags (`--jinja`, `--chat-template*`, `--mmproj`, `--no-mmproj`),
-  plus `--spec-draft-device` and `--mmproj-device`, which hal0 sets from the
-  model and the slot (`profiles.model_fact_flag_denied`);
+- model-fact flags (`--jinja`, `--chat-template*`, `--mmproj`, `--no-mmproj`,
+  and `--spec-type`, which follows the model's drafter or MTP heads and the
+  profile's `speculation`), plus `--spec-draft-device` and `--mmproj-device`,
+  which hal0 sets from the model and the slot (`profiles.model_fact_flag_denied`);
 - host-owned flags: remote model fetches such as `-hf` and `--model-url`, host
   file reads and writes such as `--api-key-file` and `--log-file`, and
   listener, auth and TLS settings (`slot.host_owned_flag_denied`);

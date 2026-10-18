@@ -108,7 +108,8 @@ def _render_llama(
         group_ids=[str(g) for g in resolve_gpu_group_ids()],
         context_size=context_size if context_size is not None else _CTX_SAFE_FALLBACK,
         model_alias=model_alias,
-        mtp=mtp,
+        spec_type="draft-mtp" if mtp else None,
+        spec_bundle=MTP_DRAFT_BUNDLE if mtp else "",
         profile_flags=merged_tune,
         draft_device=draft_device,
     )
@@ -202,14 +203,18 @@ class TestMtpDraftBundle:
                 port=8081,
                 model_path="/m.gguf",
                 context_size=8192,
-                mtp=True,
+                spec_type="draft-mtp",
+                spec_bundle=MTP_DRAFT_BUNDLE,
                 profile_flags="-fa on",
                 draft_device="Vulkan0",
             )
         )
         profile = segs["profile"]
-        bundle = ["--spec-type", "draft-mtp", *shlex.split(MTP_DRAFT_BUNDLE)]
+        bundle = shlex.split(MTP_DRAFT_BUNDLE)
         assert profile[: len(bundle)] == bundle
+        # ADR-0031 §3: the type is the model layer's, never the profile's.
+        assert segs["model"] == ["--spec-type", "draft-mtp"]
+        assert "--spec-type" not in profile
         assert profile[-2:] == ["-fa", "on"]
         assert segs["slot"][-2:] == ["--spec-draft-device", "Vulkan0"]
 
@@ -219,7 +224,8 @@ class TestMtpDraftBundle:
                 port=8081,
                 model_path="/m.gguf",
                 context_size=8192,
-                mtp=True,
+                spec_type="draft-mtp",
+                spec_bundle=MTP_DRAFT_BUNDLE,
                 profile_flags="--spec-draft-n-max 8",
                 draft_device="ROCm0",
             )
