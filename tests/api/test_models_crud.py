@@ -25,6 +25,7 @@ from fastapi.testclient import TestClient
 from hal0.api import create_app
 from hal0.providers.container import ContainerProvider
 from tests.fixtures.slot_probe import probe_slot_name
+from tests.registry.gguf_fixtures import write_gguf
 
 # ── Container-provider stub ──────────────────────────────────────────────────
 
@@ -1229,6 +1230,163 @@ def test_put_explicit_null_provider_rederives_from_backends_2199(
 
     row = crud_client.get("/api/models/null-provider").json()
     assert row["provider"] == "kokoro"
+
+
+# ── speculative-decoding drafter pairing (ADR-0031) ─────────────────────────
+
+
+def _target_gguf(root: Path, name: str = "tgt.gguf") -> Path:
+    return write_gguf(
+        root / name,
+        "qwen3",
+        uints={"qwen3.embedding_length": 4096, "qwen3.block_count": 36},
+    )
+
+
+def _drafter_gguf(root: Path, name: str = "tgt-dflash.gguf", *, width: int = 4096) -> Path:
+    return write_gguf(
+        root / name,
+        "dflash",
+        uints={"dflash.embedding_length": width, "dflash.block_size": 8},
+        int_arrays={"dflash.target_layers": [2, 19, 35]},
+    )
+
+
+def _register(client: TestClient, root: Path, model_id: str = "tgt") -> Path:
+    fpath = _target_gguf(root, f"{model_id}.gguf")
+    r = client.post("/api/models", json={"id": model_id, "path": str(fpath)})
+    assert r.status_code == 201, r.text
+    return fpath
+
+
+def test_put_draft_pairs_and_classifies(crud_client: TestClient, crud_models_root: Path) -> None:
+    _register(crud_client, crud_models_root)
+    draft = _drafter_gguf(crud_models_root)
+    r = crud_client.put("/api/models/tgt", json={"draft": str(draft)})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["draft"] == str(draft)
+    assert body["draft_kind"] == "dflash"
+    meta = body["metadata"]["draft"]
+    assert meta["variant"] == "dflash"
+    assert meta["block_size"] == 8
+    assert meta["size_bytes"] == draft.stat().st_size
+    stored = crud_client.get("/api/models/tgt").json()
+    assert (stored["draft"], stored["draft_kind"]) == (str(draft), "dflash")
+
+
+def test_put_draft_mismatch_422(crud_client: TestClient, crud_models_root: Path) -> None:
+    _register(crud_client, crud_models_root)
+    draft = _drafter_gguf(crud_models_root, width=2048)
+    r = crud_client.put("/api/models/tgt", json={"draft": str(draft)})
+    assert r.status_code == 422, r.text
+    assert r.json()["error"]["code"] == "model.draft_mismatch"
+    assert crud_client.get("/api/models/tgt").json()["draft"] is None
+
+
+def test_put_draft_that_is_not_a_drafter_422(
+    crud_client: TestClient, crud_models_root: Path
+) -> None:
+    _register(crud_client, crud_models_root)
+    clip = write_gguf(crud_models_root / "clip.gguf", "clip")
+    r = crud_client.put("/api/models/tgt", json={"draft": str(clip)})
+    assert r.status_code == 422, r.text
+    assert r.json()["error"]["code"] == "model.draft_not_a_drafter"
+
+
+def test_put_mtp_draft_refused_when_target_mtp_is_false(
+    crud_client: TestClient, crud_models_root: Path
+) -> None:
+    _register(crud_client, crud_models_root)
+    assert crud_client.put("/api/models/tgt", json={"mtp": False}).status_code == 200
+    mtp = write_gguf(
+        crud_models_root / "tgt-mtp.gguf",
+        "qwen3",
+        uints={"qwen3.nextn_predict_layers": 1},
+        tensor_names=["blk.36.nextn.eh_proj.weight"],
+    )
+    r = crud_client.put("/api/models/tgt", json={"draft": str(mtp)})
+    assert r.status_code == 422, r.text
+    err = r.json()["error"]
+    assert err["code"] == "model.draft_mismatch"
+    assert "target mtp fact is false" in err["details"]["reasons"]
+
+
+def test_put_draft_not_found_422(crud_client: TestClient, crud_models_root: Path) -> None:
+    _register(crud_client, crud_models_root)
+    r = crud_client.put("/api/models/tgt", json={"draft": str(crud_models_root / "nope.gguf")})
+    assert r.status_code == 422, r.text
+    assert r.json()["error"]["code"] == "model.draft_not_found"
+
+
+def test_put_draft_kind_is_readonly_422(crud_client: TestClient, crud_models_root: Path) -> None:
+    _register(crud_client, crud_models_root)
+    r = crud_client.put("/api/models/tgt", json={"draft_kind": "mtp"})
+    assert r.status_code == 422, r.text
+    assert r.json()["error"]["code"] == "model.draft_kind_readonly"
+
+
+def test_put_draft_null_unpairs_and_keeps_file(
+    crud_client: TestClient, crud_models_root: Path
+) -> None:
+    _register(crud_client, crud_models_root)
+    draft = _drafter_gguf(crud_models_root)
+    assert crud_client.put("/api/models/tgt", json={"draft": str(draft)}).status_code == 200
+    r = crud_client.put("/api/models/tgt", json={"draft": None})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["draft"] is None
+    assert body["draft_kind"] is None
+    assert "draft" not in body["metadata"]
+    assert draft.is_file()
+
+
+def test_delete_draft_route_removes_file_and_clears_fact(
+    crud_client: TestClient, crud_models_root: Path
+) -> None:
+    _register(crud_client, crud_models_root)
+    draft = _drafter_gguf(crud_models_root)
+    size = draft.stat().st_size
+    assert crud_client.put("/api/models/tgt", json={"draft": str(draft)}).status_code == 200
+    r = crud_client.delete("/api/models/tgt/draft")
+    assert r.status_code == 200, r.text
+    assert r.json() == {"model_id": "tgt", "removed": str(draft), "bytes_freed": size}
+    assert not draft.exists()
+    row = crud_client.get("/api/models/tgt").json()
+    assert row["draft"] is None
+    assert row["draft_kind"] is None
+    assert "draft" not in row["metadata"]
+    # nothing paired any more -> 404
+    assert crud_client.delete("/api/models/tgt/draft").status_code == 404
+
+
+def test_delete_draft_keeps_a_file_another_model_still_pairs(
+    crud_client: TestClient, crud_models_root: Path
+) -> None:
+    _register(crud_client, crud_models_root, "tgt")
+    _register(crud_client, crud_models_root, "tgt2")
+    draft = _drafter_gguf(crud_models_root)
+    for mid in ("tgt", "tgt2"):
+        assert crud_client.put(f"/api/models/{mid}", json={"draft": str(draft)}).status_code == 200
+    r = crud_client.delete("/api/models/tgt/draft")
+    assert r.status_code == 200, r.text
+    assert r.json()["bytes_freed"] == 0
+    assert draft.is_file()
+    assert crud_client.get("/api/models/tgt").json()["draft"] is None
+    assert crud_client.get("/api/models/tgt2").json()["draft"] == str(draft)
+
+
+def test_delete_model_cascade_removes_draft(
+    crud_client: TestClient, crud_models_root: Path
+) -> None:
+    fpath = _register(crud_client, crud_models_root)
+    draft = _drafter_gguf(crud_models_root)
+    assert crud_client.put("/api/models/tgt", json={"draft": str(draft)}).status_code == 200
+    r = crud_client.delete("/api/models/tgt")
+    assert r.status_code == 200, r.text
+    removed = {f["path"] for f in r.json()["files_removed"]}
+    assert removed == {str(fpath), str(draft)}
+    assert not draft.exists()
 
 
 # ── DELETE removes files by default (ADR-0026) ─────────────────────────────

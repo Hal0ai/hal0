@@ -18,6 +18,9 @@ export type SlotType =
   | 'image'
   | ''
 
+/** What a paired speculative-decoding drafter is (ADR-0031), read from its file. */
+export type DraftKind = 'dflash' | 'eagle3' | 'mtp' | 'simple'
+
 export interface ApiModelRaw {
   id: string
   name?: string
@@ -42,6 +45,11 @@ export interface ApiModelRaw {
   /** The file has MTP draft heads. An explicit value wins over the registry
    * `mtp` tag; null defers to it — see `isMtpEligibleModel`. */
   mtp?: boolean | null
+  /** Absolute path of the speculative-decoding drafter GGUF paired with this
+   * model (ADR-0031), or null. `draft_kind` is classified by the server from
+   * the file and is read-only. */
+  draft?: string | null
+  draft_kind?: DraftKind | null
   /** false = this file's chat template breaks --jinja; null/true = hal0 adds
    * --jinja. */
   jinja?: boolean | null
@@ -96,6 +104,11 @@ export interface NormalizedModel extends ApiModelRaw {
   longName: string
   size: string
   repo: string
+  /** Paired drafter path (null when none), its kind, and its variant
+   * (`metadata.draft.variant`: dflash | dflash2 | dspark | lilicorr | …). */
+  draft: string | null
+  draftKind: DraftKind | null
+  draftVariant: string | null
 }
 
 function deriveType(caps: string[]): SlotType {
@@ -182,6 +195,10 @@ export function normalizeApiModel(m: ApiModelRaw): NormalizedModel {
     ? m.capabilities
     : Array.isArray(m.labels) ? m.labels : []
   const backends = Array.isArray(m.backends) ? m.backends : []
+  const draft = typeof m.draft === 'string' && m.draft ? m.draft : null
+  const variant = m.metadata?.draft && typeof m.metadata.draft === 'object'
+    ? (m.metadata.draft as { variant?: unknown }).variant
+    : null
   return {
     ...m,
     type: typeof m.type === 'string' && m.type ? (m.type as SlotType) : deriveType(caps),
@@ -189,5 +206,8 @@ export function normalizeApiModel(m: ApiModelRaw): NormalizedModel {
     longName: (typeof m.longName === 'string' && m.longName) || m.name || m.id,
     size: typeof m.size === 'string' && m.size ? m.size : formatSize(m.size_bytes || 0),
     repo: (typeof m.repo === 'string' && m.repo) || deriveRepo(m),
+    draft,
+    draftKind: draft ? m.draft_kind ?? null : null,
+    draftVariant: draft && typeof variant === 'string' ? variant : null,
   }
 }

@@ -1508,6 +1508,15 @@ TOOL_PARAM_HINTS: dict[str, dict[str, Any]] = {
                 "type": "string",
                 "description": "Absolute path to the vision projector sidecar",
             },
+            "draft": {
+                "type": ["string", "null"],
+                "description": (
+                    "File fact: absolute path to a speculative-decoding drafter GGUF "
+                    "(dflash, eagle3, mtp or simple) that fits this model; null unpairs it "
+                    "and keeps the file. The drafter kind is read from the file. Whether a "
+                    "slot uses it is its profile's choice."
+                ),
+            },
             "chat_template": {
                 "type": ["string", "null"],
                 "description": (

@@ -12,7 +12,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
-from hal0.errors import BadRequest
+from hal0.errors import UnprocessableEntity
 
 #: Maximum ``vocab_size`` difference a classic drafter may have against its
 #: target. The first part of llama.cpp's own check; the token-string
@@ -173,20 +173,20 @@ def draft_fit_errors(target: dict[str, Any], draft: DrafterInfo) -> list[str]:
 def screen_draft_fit(target: dict[str, Any], draft_header: dict[str, Any]) -> DrafterInfo:
     """Classify ``draft_header`` and refuse it unless it fits ``target``.
 
-    Raises :class:`BadRequest` with ``model.draft_not_a_drafter`` or
+    Raises :class:`UnprocessableEntity` with ``model.draft_not_a_drafter`` or
     ``model.draft_mismatch`` (``details["reasons"]``).
     """
     info = classify_drafter(draft_header)
     if info is None:
         arch = draft_header.get("general.architecture")
-        raise BadRequest(
+        raise UnprocessableEntity(
             f"not a speculative-decoding drafter (architecture {arch!r})",
             code="model.draft_not_a_drafter",
             details={"reasons": [f"architecture {arch!r} is not a drafter"]},
         )
     reasons = draft_fit_errors(target, info)
     if reasons:
-        raise BadRequest(
+        raise UnprocessableEntity(
             "drafter does not fit this model: " + "; ".join(reasons),
             code="model.draft_mismatch",
             details={"reasons": reasons},

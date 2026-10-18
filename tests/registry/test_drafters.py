@@ -6,7 +6,7 @@ from typing import Any
 
 import pytest
 
-from hal0.errors import BadRequest
+from hal0.errors import UnprocessableEntity
 from hal0.registry.drafters import (
     DrafterInfo,
     classify_drafter,
@@ -182,12 +182,12 @@ class TestScreen:
             "tokenizer.ggml.bos_token_id": 1,
             "tokenizer.ggml.eos_token_id": 2,
         }
-        with pytest.raises(BadRequest) as exc:
+        with pytest.raises(UnprocessableEntity) as exc:
             screen_draft_fit(QWEN3, llama_plain)
         assert exc.value.code == "model.draft_mismatch"
         assert exc.value.details["reasons"]
 
     def test_screen_mmproj_is_not_a_drafter(self) -> None:
-        with pytest.raises(BadRequest) as exc:
+        with pytest.raises(UnprocessableEntity) as exc:
             screen_draft_fit(QWEN3, {"general.architecture": "clip"})
         assert exc.value.code == "model.draft_not_a_drafter"

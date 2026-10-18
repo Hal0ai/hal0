@@ -9,7 +9,7 @@ to a pydantic v2 model).  See PLAN.md §3.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -143,6 +143,26 @@ class Model(BaseModel):
             "sits beside this model, or None. Surfaced verbatim to the "
             "llama-server provider as --mmproj to enable vision; the sidecar is "
             "never registered as a standalone routable model."
+        ),
+    )
+
+    draft: str | None = Field(
+        default=None,
+        description=(
+            "Absolute path to a speculative-decoding drafter GGUF paired with "
+            "this model, or None (ADR-0031). A file fact like ``mmproj``: it "
+            "sits beside the model, is screened for fit against this model's "
+            "header when written, and is never registered as a standalone "
+            "routable model. Whether a slot uses it is the profile's choice."
+        ),
+    )
+
+    draft_kind: Literal["dflash", "eagle3", "mtp", "simple"] | None = Field(
+        default=None,
+        description=(
+            "What the paired drafter is, classified from its GGUF header when "
+            "``draft`` is written. Read-only over the API: it is derived from "
+            "the file, never set by a caller."
         ),
     )
 

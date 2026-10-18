@@ -410,7 +410,8 @@ async def create_model(request: Request) -> dict[str, Any]:
     # Screen at CREATE time too, with the same helper the PUT/validate paths
     # use: a body carrying a ``defaults`` table or a tuning key is a 422 here
     # instead of a generic "invalid Model payload".
-    _svc.screen_model_write(body, runner_images=_RUNNER_IMAGES)
+    drafter = _svc.screen_model_write(body, runner_images=_RUNNER_IMAGES)
+    _svc.stamp_draft_fact(body, drafter)
     try:
         model = Model(**body)
     except (TypeError, ValueError) as exc:
@@ -780,6 +781,11 @@ async def update_model(model_id: str, request: Request) -> dict[str, Any]:
         its type (``{"mtp": "maybe"}``, #1414).
       * ``400 model.provider_invalid`` — ``provider`` not a
         ``hal0.model_meta.RUNTIME_FAMILIES`` member.
+      * ``422 model.draft_not_found`` / ``model.draft_not_a_drafter`` /
+        ``model.draft_mismatch`` — ``draft`` (a drafter GGUF path, ADR-0031) is
+        missing, is not a drafter, or does not fit this model.
+      * ``422 model.draft_kind_readonly`` — the body carries ``draft_kind``;
+        it is classified from the file.
       * ``404 model.not_found`` — ``model_id`` not registered.
     """
     registry = request.app.state.model_registry
@@ -826,7 +832,8 @@ async def update_model(model_id: str, request: Request) -> dict[str, Any]:
     # time (UI-API-1 items 1/2, #1393). Shared
     # with create + /validate so the three paths never drift; fails the write
     # with the same envelope the launch path raises.
-    _svc.screen_model_write(body, runner_images=_RUNNER_IMAGES, existing=before)
+    drafter = _svc.screen_model_write(body, runner_images=_RUNNER_IMAGES, existing=before)
+    _svc.stamp_draft_fact(body, drafter, before.get("metadata"))
 
     model = registry.update(model_id, body)
 
@@ -848,6 +855,36 @@ async def update_model(model_id: str, request: Request) -> dict[str, Any]:
             data={"id": model.id, "changed_fields": changed},
         )
     return _model_to_dict(model)
+
+
+@router.delete("/{model_id}/draft")
+async def delete_model_draft(model_id: str, request: Request) -> dict[str, Any]:
+    """Unpair a model's speculative-decoding drafter and delete the file.
+
+    Clears ``draft`` / ``draft_kind`` / ``metadata.draft`` and removes the
+    drafter file under the same guards a model delete uses (inside the model
+    roots, not a file another model still uses). Unpairing without deleting is
+    ``PUT {"draft": null}``. Response: ``{"model_id", "removed", "bytes_freed"}``.
+
+    Errors: ``404 model.not_found`` (unknown model), ``404 model.draft_not_found``
+    (no drafter paired).
+    """
+    registry = request.app.state.model_registry
+    async with record_action(
+        request, category="model", action="model.draft_delete", target=model_id
+    ) as rec:
+        result = await _svc.remove_model_draft(registry, model_id)
+        rec.after = result
+    event_bus = getattr(request.app.state, "events", None)
+    if event_bus is not None:
+        await event_bus.emit(
+            "model.updated",
+            "info",
+            f"model:{model_id}",
+            f"{model_id}: updated (draft)",
+            data={"id": model_id, "changed_fields": ["draft", "draft_kind", "metadata"]},
+        )
+    return result
 
 
 @router.post("/{model_id}/default")

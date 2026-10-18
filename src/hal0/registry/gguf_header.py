@@ -48,9 +48,9 @@ _GGUF_MAGIC = b"GGUF"
 
 # Hard cap on how much of the file we'll mmap to find KV metadata. GGUF
 # headers are typically a few KB; a 1 MiB window covers even very large
-# tokenizer vocabs we'd skim past.  Beyond this we treat the file as
+# tokenizer vocabs.  Beyond this we treat the file as
 # malformed-or-unknown and return ``None``.
-_HEADER_WINDOW_BYTES = 8 * 1024 * 1024
+_HEADER_WINDOW_BYTES = 16 * 2**20
 
 # Value-type enum (per spec).
 _GGUF_TYPE_UINT8 = 0

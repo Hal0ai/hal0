@@ -175,7 +175,7 @@ class TestPackagedRegistryMigration:
             )
             conn.execute("INSERT INTO model (id, path) VALUES ('plain', '/m/p.gguf')")
 
-            assert migrate(conn) == [12]
+            assert migrate(conn) == [12, 13]
 
             held = conn.execute("SELECT * FROM legacy_model_tuning").fetchall()
             assert [row["id"] for row in held] == ["tuned"]
