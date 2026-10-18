@@ -330,7 +330,8 @@ async def add_model_from_path(request: Request) -> dict[str, Any]:
           "id":        "optional explicit registry id",
           "name":      "optional display name",
           "labels":    ["llm", "chat", ...],       # optional capabilities override
-          "overwrite": false                       # default false
+          "overwrite": false,                      # default false
+          "draft":     "/abs/path/to/drafter.gguf" # optional; fit-checked, 422 on mismatch
         }
 
     Errors:

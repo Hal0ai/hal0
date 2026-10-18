@@ -1931,6 +1931,16 @@ async def add_from_path(body: dict[str, Any], *, registry: Any, event_bus: Any) 
 
     overwrite = bool(body.get("overwrite", False))
 
+    # Optional drafter (ADR-0031 §4): screened against the target's header
+    # before anything is written, so a refusal registers nothing.
+    draft_body: dict[str, Any] = {}
+    drafter = None
+    if body.get("draft") not in (None, ""):
+        draft_body = {"draft": body["draft"], "path": str(resolved)}
+        if "draft_kind" in body:
+            draft_body["draft_kind"] = body["draft_kind"]
+        drafter = screen_draft_write(None, draft_body, require_on_disk=True)
+
     try:
         size_bytes = resolved.stat().st_size
     except OSError:
@@ -1957,6 +1967,12 @@ async def add_from_path(body: dict[str, Any], *, registry: Any, event_bus: Any) 
             "capabilities/backends are a filename guess"
         )
 
+    draft_facts: dict[str, Any] = {}
+    if drafter is not None:
+        stamp_draft_fact(draft_body, drafter, metadata)
+        metadata = draft_body["metadata"]
+        draft_facts = {"draft": draft_body["draft"], "draft_kind": draft_body["draft_kind"]}
+
     try:
         model = Model(
             id=model_id,
@@ -1964,6 +1980,7 @@ async def add_from_path(body: dict[str, Any], *, registry: Any, event_bus: Any) 
             path=str(resolved),
             size_bytes=size_bytes,
             quant=detection.quant,
+            **draft_facts,
             capabilities=capabilities,
             backends=list(detection.suggested_backends),
             # Task 3: stamp provider alongside the detected backends on this

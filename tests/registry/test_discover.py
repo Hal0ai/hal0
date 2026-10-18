@@ -16,6 +16,7 @@ from hal0.registry.discover import (
 )
 from hal0.registry.model import Model
 from hal0.registry.store import ModelRegistry
+from tests.registry.gguf_fixtures import write_gguf
 
 
 def test_model_mmproj_defaults_none() -> None:
@@ -1151,3 +1152,163 @@ def test_prune_preview_leaves_out_rows_prune_would_keep_unverified(
     rows = missing_registry_rows(registry, roots=[live, empty])
 
     assert [r["id"] for r in rows] == ["gone"]
+
+
+# ── speculative-decoding drafters (ADR-0031 §4 Scan) ─────────────────────────
+
+_EXTS = [".gguf", ".safetensors"]
+
+
+def _target(path: Path) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return write_gguf(
+        path,
+        "qwen3",
+        uints={"qwen3.embedding_length": 4096, "qwen3.block_count": 36},
+    )
+
+
+def _dflash(path: Path, *, width: int = 4096, lilicorr: bool = False) -> Path:
+    return write_gguf(
+        path,
+        "dflash",
+        uints={
+            "dflash.embedding_length": width,
+            "dflash.block_size": 8,
+            **({"lilicorr.candidate_topk": 4} if lilicorr else {}),
+        },
+        int_arrays={"dflash.target_layers": [2, 19, 35]},
+    )
+
+
+def _scan(root: Path) -> tuple[list, list[dict]]:
+    skipped: list[dict] = []
+    found = find_candidates([root], _EXTS, set(), skipped=skipped)
+    return found, skipped
+
+
+def test_scan_pairs_drafter_in_same_dir(tmp_path: Path, registry: ModelRegistry) -> None:
+    root = tmp_path / "models"
+    d = root / "x"
+    target = _target(d / "X.gguf")
+    drafter = _dflash(d / "X-LiLiCorr.gguf", lilicorr=True)
+    (d / "mmproj-X.gguf").write_bytes(b"p" * 16)
+
+    found, skipped = _scan(root)
+    assert [c.path.name for c in found] == ["X.gguf"]
+    assert found[0].draft == drafter.resolve()
+    assert found[0].mmproj is not None
+    assert skipped == []
+
+    model = register_candidate(registry, found[0])
+    assert model.path == str(target.resolve())
+    assert model.draft == str(drafter.resolve())
+    assert model.draft_kind == "dflash"
+    meta = model.metadata["draft"]
+    assert meta["variant"] == "lilicorr"
+    assert meta["size_bytes"] == drafter.stat().st_size
+    stored = registry.get("x")
+    assert stored.draft_kind == "dflash"
+
+
+def test_scan_registers_draft_model_file_row(tmp_path: Path, registry: ModelRegistry) -> None:
+    from hal0.db import repository
+    from hal0.db.connection import connect
+
+    root = tmp_path / "models"
+    _target(root / "X.gguf")
+    drafter = _dflash(root / "X-dflash.gguf")
+    found, _ = _scan(root)
+    model = register_candidate(registry, found[0])
+    with connect(registry.db_path) as conn:
+        rows = repository.list_model_files(conn, model.id)
+    roles = {r["role"]: r["dest"] for r in rows}
+    assert roles["draft"] == str(drafter.resolve())
+
+
+def test_scan_never_registers_drafter_alone(tmp_path: Path) -> None:
+    root = tmp_path / "models"
+    root.mkdir()
+    drafter = _dflash(root / "lonely-dflash.gguf")
+    found, skipped = _scan(root)
+    assert found == []
+    assert skipped == [{"path": str(drafter.resolve()), "reason": "drafter_without_target"}]
+
+
+def test_scan_unnamed_drafter_is_found_by_header(tmp_path: Path) -> None:
+    """A dflash header is a drafter whatever the file is called."""
+    root = tmp_path / "models"
+    _target(root / "X.gguf")
+    drafter = _dflash(root / "weights.gguf")
+    found, skipped = _scan(root)
+    assert [c.path.name for c in found] == ["X.gguf"]
+    assert found[0].draft == drafter.resolve()
+    assert skipped == []
+
+
+def test_scan_unpaired_drafter_fit_failure_is_separate(tmp_path: Path) -> None:
+    root = tmp_path / "models"
+    _target(root / "X.gguf")
+    drafter = _dflash(root / "X-dflash.gguf", width=2048)
+    found, skipped = _scan(root)
+    assert [c.path.name for c in found] == ["X.gguf"]
+    assert found[0].draft is None
+    assert skipped == [{"path": str(drafter.resolve()), "reason": "drafter_mismatch"}]
+
+
+def test_scan_best_variant_wins_other_is_unpaired(tmp_path: Path) -> None:
+    root = tmp_path / "models"
+    _target(root / "X.gguf")
+    best = _dflash(root / "X-lilicorr.gguf", lilicorr=True)
+    other = _dflash(root / "X-plain.gguf")
+    found, skipped = _scan(root)
+    assert found[0].draft == best.resolve()
+    assert skipped == [{"path": str(other.resolve()), "reason": "drafter_unpaired"}]
+
+
+def test_scan_simple_drafter_stays_a_model(tmp_path: Path) -> None:
+    root = tmp_path / "models"
+    _target(root / "X.gguf")
+    small = write_gguf(
+        root / "tiny-llm.gguf",
+        "qwen3",
+        uints={"qwen3.embedding_length": 512, "qwen3.block_count": 4},
+        strings={"tokenizer.ggml.model": "gpt2"},
+    )
+    found, skipped = _scan(root)
+    assert {c.path.name for c in found} == {"X.gguf", small.name}
+    assert all(c.draft is None for c in found)
+    assert skipped == []
+
+
+def test_scan_mtp_sidecar_pairs_by_name_and_header(tmp_path: Path) -> None:
+    root = tmp_path / "models"
+    _target(root / "X.gguf")
+    mtp = write_gguf(
+        root / "mtp-X.gguf",
+        "qwen3",
+        uints={
+            "qwen3.embedding_length": 4096,
+            "qwen3.block_count": 1,
+            "qwen3.nextn_predict_layers": 1,
+        },
+        tensor_names=["blk.0.nextn.eh_proj.weight"],
+    )
+    found, skipped = _scan(root)
+    assert [c.path.name for c in found] == ["X.gguf"]
+    assert found[0].draft == mtp.resolve()
+    assert skipped == []
+
+
+def test_scan_drafter_already_paired_is_not_reported_again(
+    tmp_path: Path, registry: ModelRegistry
+) -> None:
+    root = tmp_path / "models"
+    _target(root / "X.gguf")
+    _dflash(root / "X-dflash.gguf")
+    cfg = ModelsConfig(roots=[str(root)])
+    first = scan_and_register(registry, cfg)
+    assert first["added"] == ["x"]
+    second = scan_and_register(registry, cfg)
+    assert second["added"] == []
+    assert all(not s["reason"].startswith("drafter_") for s in second["skipped"])
