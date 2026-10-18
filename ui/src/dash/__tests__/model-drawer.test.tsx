@@ -63,7 +63,7 @@ const { inspectDraftCalls, draftFit, pullCalls, pullBox, updateError } = vi.hois
   inspectDraftCalls: [] as unknown[],
   draftFit: { current: undefined as Record<string, unknown> | undefined },
   pullCalls: [] as unknown[],
-  pullBox: { current: { state: 'idle', modelId: null as string | null } },
+  pullBox: { current: { state: 'idle', modelId: null as string | null, jobId: null as string | null } },
   updateError: { current: undefined as Error | undefined },
 }))
 
@@ -207,7 +207,7 @@ beforeEach(() => {
   inspectDraftCalls.length = 0
   draftFit.current = undefined
   pullCalls.length = 0
-  pullBox.current = { state: 'idle', modelId: null }
+  pullBox.current = { state: 'idle', modelId: null, jobId: null }
   updateError.current = undefined
 })
 
@@ -1269,6 +1269,91 @@ describe('ModelDrawer Drafter field (ADR-0031 §5)', () => {
     )
     openSource(host)
     expect(q(host, 'model-draft-unpair')).toBeNull()
+    act(() => root.unmount())
+  })
+
+  const pickRepoDraft = (host: HTMLElement) => {
+    act(() => q<HTMLButtonElement>(host, 'model-draft-select').click())
+    act(() =>
+      (host.querySelector(`[data-option-id="${MODEL_DIR}/Qwen-LiLiCorr-Q8.gguf"]`) as HTMLElement).click(),
+    )
+  }
+
+  it('a completed pull is adopted: Pull and the pending hint go, Unpair appears', async () => {
+    withDrafts()
+    const { host, root } = mount(
+      React.createElement(ModelDrawer, { open: true, onClose: () => {}, model: DRAFT_MODEL }),
+    )
+    openSource(host)
+    pickRepoDraft(host)
+    await act(async () => {
+      q<HTMLButtonElement>(host, 'model-draft-pull').click()
+      await Promise.resolve()
+    })
+    expect(q(host, 'model-draft-unpair')).toBeNull()
+    pullBox.current = { state: 'completed', modelId: 'm1', jobId: 'j1' }
+    act(() => {
+      root.render(
+        React.createElement(
+          QueryClientProvider,
+          { client: new QueryClient() },
+          React.createElement(ModelDrawer, { open: true, onClose: () => {}, model: DRAFT_MODEL }),
+        ),
+      )
+    })
+    expect(q(host, 'model-draft-pull')).toBeNull()
+    expect(q(host, 'model-draft-pending')).toBeNull()
+    expect(q(host, 'model-draft-unpair')).toBeTruthy()
+    expect(updateCalls).toEqual([])
+    act(() => root.unmount())
+  })
+
+  it('an unpaired file stays pickable and re-pairs with a plain PUT, no pull', async () => {
+    withDrafts()
+    const kept = `${MODEL_DIR}/kept-draft.gguf`
+    const { host, root } = mount(
+      React.createElement(ModelDrawer, {
+        open: true,
+        onClose: () => {},
+        model: { ...DRAFT_MODEL, draft: kept, draftVariant: 'dflash' },
+      }),
+    )
+    openSource(host)
+    await act(async () => {
+      q<HTMLButtonElement>(host, 'model-draft-unpair').click()
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+    updateCalls.length = 0
+    act(() => q<HTMLButtonElement>(host, 'model-draft-select').click())
+    const row = host.querySelector(`[data-option-id="${kept}"]`) as HTMLElement
+    expect(row.textContent).toContain('on disk, not paired')
+    act(() => row.click())
+    expect(q(host, 'model-draft-pull')).toBeNull()
+    expect(q(host, 'model-draft-pending')).toBeNull()
+    await save(host)
+    expect(updateCalls).toEqual([{ id: 'm1', body: { draft: kept } }])
+    act(() => root.unmount())
+  })
+
+  it('a pending repo pick disables Save with a hint, even beside other edits', async () => {
+    withDrafts()
+    const { host, root } = mount(
+      React.createElement(ModelDrawer, { open: true, onClose: () => {}, model: DRAFT_MODEL }),
+    )
+    openSource(host)
+    pickRepoDraft(host)
+    expect(q<HTMLElement>(host, 'model-draft-pending').textContent).toContain(
+      'pull the drafter first (or set it back)',
+    )
+    expect(q<HTMLButtonElement>(host, 'model-save').disabled).toBe(true)
+    act(() => typeInto(q<HTMLInputElement>(host, 'model-hffile-input'), 'other.gguf'))
+    expect(q<HTMLButtonElement>(host, 'model-save').disabled).toBe(true)
+    // Setting the pick back clears the block; the other edit can now save.
+    act(() => q<HTMLButtonElement>(host, 'model-draft-select').click())
+    act(() => (host.querySelector('[data-option-id=""]') as HTMLElement).click())
+    expect(q(host, 'model-draft-pending')).toBeNull()
+    expect(q<HTMLButtonElement>(host, 'model-save').disabled).toBe(false)
     act(() => root.unmount())
   })
 

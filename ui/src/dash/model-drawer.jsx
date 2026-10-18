@@ -539,7 +539,7 @@ function draftVariantLabel(variant) {
 	return DRAFT_VARIANT_LABELS[v.toLowerCase()] || v;
 }
 
-function draftRichOptions(dir, drafts, extras) {
+function draftRichOptions(dir, drafts, extras, unpaired) {
 	const opts = [
 		{ id: "", row: "— none —", desc: "no drafter paired — speculative decoding stays off" },
 	];
@@ -562,8 +562,11 @@ function draftRichOptions(dir, drafts, extras) {
 		opts.push({
 			id: cur,
 			row: basenameOf(cur),
-			right: mutedChip("stored"),
-			desc: "paired on this model · not among this repo's files",
+			right: mutedChip(cur === unpaired ? "on disk, not paired" : "stored"),
+			desc:
+				cur === unpaired
+					? "unpaired from this model · the file is kept"
+					: "paired on this model · not among this repo's files",
 		});
 	}
 	return { opts, byPath };
@@ -662,6 +665,9 @@ export function ModelDrawer({ open, onClose, model, onOpenSlot = undefined }) {
 	// first reason, shown in the fit band until the path changes.
 	const [draftMismatch, setDraftMismatch] = useStateMD(null);
 	const [unpairing, setUnpairing] = useStateMD(false);
+	// The path the operator just unpaired: the file is kept, so it stays a row in
+	// the picker and re-pairing it is a plain PUT, never a re-download.
+	const [unpairedPath, setUnpairedPath] = useStateMD("");
 	const [hfRepo, setHfRepo] = useStateMD("");
 	const [hfFilename, setHfFilename] = useStateMD("");
 	// File facts (ADR-0029): chat template, jinja and "the file has MTP heads".
@@ -676,6 +682,8 @@ export function ModelDrawer({ open, onClose, model, onOpenSlot = undefined }) {
 	// lazy — one POST on the disclosure's first open, never on drawer mount —
 	// and this guards the re-open from re-firing it for the same coord.
 	const inspectedRepo = useRefMD(null);
+	// The pull job whose completion has already been adopted into the baseline.
+	const pullDoneFor = useRefMD(null);
 	// Inline title editor (Task 3): the ✎ button swaps the name span for an
 	// input seeded from the CURRENT draft (`name`), never from the live model
 	// prop, so a prior uncommitted edit survives reopening the editor. Escape
@@ -719,6 +727,8 @@ export function ModelDrawer({ open, onClose, model, onOpenSlot = undefined }) {
 		setMmproj(b.mmproj);
 		setDraft(b.draft);
 		setDraftMismatch(null);
+		setUnpairedPath("");
+		pullDoneFor.current = null;
 		inspectDraft.reset();
 		setHfRepo(b.hfRepo);
 		setHfFilename(b.hfFilename);
@@ -795,13 +805,15 @@ export function ModelDrawer({ open, onClose, model, onOpenSlot = undefined }) {
 	const { opts: draftOptions, byPath: draftByPath } = useMemoMD(
 		() =>
 			draftPicker
-				? draftRichOptions(draftDir, draftList, [baseline?.draft, draft])
+				? draftRichOptions(draftDir, draftList, [baseline?.draft, unpairedPath, draft], unpairedPath)
 				: { opts: [], byPath: new Map() },
-		[draftPicker, draftDir, draftList, baseline?.draft, draft],
+		[draftPicker, draftDir, draftList, baseline?.draft, unpairedPath, draft],
 	);
 	// The chosen option is a repo file that is not the pairing already stored.
 	const draftRepoPick =
-		draftPicker && draft.trim() !== baseline?.draft ? draftByPath.get(draft.trim()) : null;
+		draftPicker && draft.trim() !== baseline?.draft && draft.trim() !== unpairedPath
+			? draftByPath.get(draft.trim())
+			: null;
 	const draftPullBody = draftRepoPick
 		? {
 				hf_repo: hfRepo.trim(),
@@ -830,16 +842,15 @@ export function ModelDrawer({ open, onClose, model, onOpenSlot = undefined }) {
 	// The pull registers draft / draft_kind / metadata.draft server-side, so the
 	// drawer must not PUT `draft` too: when the job lands, adopt the pulled path
 	// as the new baseline and let the live row's facts refresh on their own.
-	const pullDoneFor = useRefMD(null);
 	useEffectMD(() => {
 		if (pull.state !== "completed" || pull.modelId !== model?.id) return;
-		if (!draftRepoPick || pullDoneFor.current === draftPullKey) return;
-		pullDoneFor.current = draftPullKey;
+		if (!draftRepoPick || pullDoneFor.current === pull.jobId) return;
+		pullDoneFor.current = pull.jobId;
 		const landed = draft.trim();
 		setBaseline((b) => (b ? { ...b, draft: landed } : b));
 		inspectDraft.reset();
 		// eslint-disable-next-line react-hooks/exhaustive-deps
-	}, [pull.state, pull.modelId]);
+	}, [pull.state, pull.modelId, pull.jobId]);
 	const draftFitMessage = draftMismatch
 		? draftMismatch
 		: draftRepoPick
@@ -854,6 +865,7 @@ export function ModelDrawer({ open, onClose, model, onOpenSlot = undefined }) {
 		setUnpairing(true);
 		try {
 			await update.mutateAsync({ id: model.id, body: { draft: null } });
+			setUnpairedPath(baseline?.draft || "");
 			setDraft("");
 			setDraftMismatch(null);
 			setBaseline((b) => (b ? { ...b, draft: "" } : b));
@@ -870,7 +882,8 @@ export function ModelDrawer({ open, onClose, model, onOpenSlot = undefined }) {
 	// One gate for every inline error. Today that is the vision↔mmproj invariant
 	// (#1380); `onSave` and the Save button both consult it, so a new validation
 	// can never be enforced in one place and forgotten in the other.
-	const saveBlocked = !!mmprojError;
+	// An unpulled repo pick is not a saveable change — Pull is its only write path.
+	const saveBlocked = !!mmprojError || !!draftRepoPick;
 
 	// Return null when closed — matching the Modal contract the deleted
 	// RecipeEditorModal honoured (Modal returns null when !open). The <Drawer>
@@ -1511,6 +1524,11 @@ export function ModelDrawer({ open, onClose, model, onOpenSlot = undefined }) {
 										style={{ marginTop: 6 }}
 									>
 										{draftFitMessage}
+									</div>
+								)}
+								{draftRepoPick && (
+									<div className="hint" data-testid="model-draft-pending" style={{ marginTop: 6 }}>
+										pull the drafter first (or set it back)
 									</div>
 								)}
 								<div style={{ display: "flex", gap: 8, marginTop: 6 }}>
