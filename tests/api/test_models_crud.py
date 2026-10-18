@@ -1540,3 +1540,27 @@ def test_startup_scan_does_not_prune_under_an_empty_root(tmp_hal0_home: str) -> 
         pass
 
     assert reg.has("ghost")
+
+
+def test_unpaired_drafter_is_tombstoned_and_not_repaired(
+    crud_client: TestClient, crud_models_root: Path
+) -> None:
+    from hal0.config.schema import ModelsConfig
+    from hal0.registry.discover import scan_and_register
+
+    fpath = _register(crud_client, crud_models_root)
+    draft = _drafter_gguf(crud_models_root)
+    assert crud_client.put("/api/models/tgt", json={"draft": str(draft)}).status_code == 200
+    r = crud_client.put("/api/models/tgt", json={"draft": None})
+    assert r.status_code == 200, r.text
+
+    registry = crud_client.app.state.model_registry
+    cfg = ModelsConfig(roots=[str(crud_models_root)])
+    result = scan_and_register(registry, cfg)
+    assert result["paired_drafts"] == []
+    assert registry.get("tgt").draft is None
+    assert fpath.exists() and draft.exists()
+
+    # Pairing it again on purpose lifts the tombstone.
+    assert crud_client.put("/api/models/tgt", json={"draft": str(draft)}).status_code == 200
+    assert registry.get("tgt").draft == str(draft)

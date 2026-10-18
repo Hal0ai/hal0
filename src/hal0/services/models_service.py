@@ -1529,6 +1529,7 @@ async def remove_model_draft(registry: Any, model_id: str) -> dict[str, Any]:
         )
     metadata = {k: v for k, v in model.metadata.items() if k != "draft"}
     registry.update(model_id, {"draft": None, "draft_kind": None, "metadata": metadata})
+    tombstones.add([draft])
     outcome = delete_model_files_on_disk(
         registry,
         model,
@@ -2422,6 +2423,21 @@ def stamp_draft_fact(
             "size_bytes": Path(draft).expanduser().stat().st_size,
         }
     body["metadata"] = metadata
+
+
+def settle_draft_tombstone(previous: str | None, body: dict[str, Any]) -> None:
+    """Keep scan from re-pairing a drafter the operator unpaired on purpose.
+
+    Call after :func:`stamp_draft_fact`. A write that clears ``draft`` tombstones
+    the drafter it had (ADR-0026's rule for a removed projector); a write that
+    pairs a path lifts any tombstone on that path.
+    """
+    if "draft" not in body:
+        return
+    if body["draft"]:
+        tombstones.clear(body["draft"])
+    elif previous:
+        tombstones.add([previous])
 
 
 def screen_model_write(

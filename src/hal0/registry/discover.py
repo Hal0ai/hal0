@@ -223,24 +223,40 @@ def _pair_drafters(
     out: list[CandidateModel],
     drafters_by_dir: dict[Path, list[_DrafterFile]],
     skipped: list[dict] | None,
+    registered: list[tuple[str, Path]] | None = None,
+    registered_pairs: list[tuple[str, Path]] | None = None,
 ) -> None:
-    """Pair each directory's best fitting drafter onto its model candidates."""
+    """Pair each directory's best fitting drafter onto its models.
+
+    Targets are the new candidates in ``out`` and the already-registered
+    models in ``registered`` (``(model_id, path)`` of rows with no drafter);
+    a registered model's pairing lands in ``registered_pairs``.
+    """
+    registered = registered or []
     for directory, drafters in drafters_by_dir.items():
-        targets = [c for c in out if c.path.parent == directory]
+        cands = [c for c in out if c.path.parent == directory]
+        regs = [(mid, p) for mid, p in registered if p.parent == directory]
         paired: set[Path] = set()
         fitting: set[Path] = set()
-        for cand in targets:
-            header = read_gguf_header(cand.path)
+        targets: list[tuple[Path, str | None, CandidateModel | None]] = [
+            (c.path, None, c) for c in cands
+        ] + [(p, mid, None) for mid, p in regs]
+        for path, model_id, cand in targets:
+            header = read_gguf_header(path)
             if header is None:
                 continue
             fits = [
                 d for d in drafters if d.info is not None and not draft_fit_errors(header, d.info)
             ]
             fitting.update(d.path for d in fits)
-            if fits:
-                best = min(fits, key=lambda d: (d.rank, d.path.name))
+            if not fits:
+                continue
+            best = min(fits, key=lambda d: (d.rank, d.path.name))
+            paired.add(best.path)
+            if cand is not None:
                 cand.draft = best.path
-                paired.add(best.path)
+            elif registered_pairs is not None and model_id is not None:
+                registered_pairs.append((model_id, best.path))
         for d in sorted(drafters, key=lambda d: d.path.name):
             if d.path in paired or skipped is None:
                 continue
@@ -251,6 +267,55 @@ def _pair_drafters(
             else:
                 reason = "drafter_mismatch"
             skipped.append({"path": str(d.path), "reason": reason})
+
+
+def draft_facts(draft: Path) -> tuple[str, dict[str, Any]] | None:
+    """``(draft_kind, metadata["draft"])`` read from a drafter file's header."""
+    info = classify_drafter(read_gguf_header(draft) or {})
+    if info is None:
+        return None
+    meta = info.as_metadata()
+    with contextlib.suppress(OSError):
+        meta["size_bytes"] = draft.stat().st_size
+    return info.kind, meta
+
+
+def pair_registered_drafter(registry: ModelRegistry, model_id: str, draft: Path) -> bool:
+    """Pair ``draft`` onto an already-registered model (row + ``model_file``)."""
+    facts = draft_facts(draft)
+    if facts is None:
+        return False
+    kind, meta = facts
+    model = registry.get(model_id)
+    registry.update(
+        model_id,
+        {
+            "draft": str(draft),
+            "draft_kind": kind,
+            "metadata": {**model.metadata, "draft": meta},
+        },
+    )
+    db_path = getattr(registry, "db_path", None)
+    if db_path is not None:
+        from hal0.db import repository
+        from hal0.db.connection import connect, tx
+
+        try:
+            with connect(db_path) as conn, tx(conn):
+                repository.insert_model_file(
+                    conn,
+                    model_id=model_id,
+                    rel=draft.name,
+                    dest=str(draft),
+                    size_bytes=meta.get("size_bytes"),
+                    role="draft",
+                    shard_index=None,
+                )
+        except Exception:
+            log.warning(
+                "discover.draft_model_file_write_failed model_id=%s", model_id, exc_info=True
+            )
+    return True
 
 
 def _shard_key(p: Path) -> tuple[str, str, str] | None:
@@ -306,6 +371,8 @@ def find_candidates(
     ignored_paths: set[str] | None = None,
     known_inodes: set[tuple[int, int]] | None = None,
     skipped: list[dict] | None = None,
+    unpaired_models: list[tuple[str, Path]] | None = None,
+    registered_pairs: list[tuple[str, Path]] | None = None,
 ) -> list[CandidateModel]:
     """Walk each root and return :class:`CandidateModel`s not already registered.
 
@@ -313,6 +380,9 @@ def find_candidates(
     fitting one in a model's directory rides on ``CandidateModel.draft`` and
     the rest are appended to ``skipped`` (``{"path", "reason"}``) as
     ``drafter_without_target``, ``drafter_mismatch`` or ``drafter_unpaired``.
+    ``unpaired_models`` are registered ``(id, resolved path)`` rows with no
+    drafter: a fitting drafter beside one is reported in ``registered_pairs``
+    for the caller to apply.
 
     Files whose absolute path is in ``known_paths`` are skipped silently
     so a re-scan after a manual registry add doesn't fight itself. The
@@ -491,7 +561,7 @@ def find_candidates(
         sidecar = mmproj_by_dir.get(cand.path.parent)
         if sidecar is not None:
             cand.mmproj = sidecar
-    _pair_drafters(out, drafters_by_dir, skipped)
+    _pair_drafters(out, drafters_by_dir, skipped, unpaired_models, registered_pairs)
     return out
 
 
@@ -548,21 +618,11 @@ def register_candidate(registry: ModelRegistry, candidate: CandidateModel) -> Mo
         model.mmproj = str(candidate.mmproj)
     # Carry a paired drafter the same way, with the facts read from its header.
     if candidate.draft is not None:
-        info = classify_drafter(read_gguf_header(candidate.draft) or {})
-        if info is not None:
+        facts = draft_facts(candidate.draft)
+        if facts is not None:
             model.draft = str(candidate.draft)
-            model.draft_kind = info.kind
-            try:
-                draft_size = candidate.draft.stat().st_size
-            except OSError:
-                draft_size = None
-            model.metadata = {
-                **model.metadata,
-                "draft": {
-                    **info.as_metadata(),
-                    **({"size_bytes": draft_size} if draft_size is not None else {}),
-                },
-            }
+            model.draft_kind = facts[0]
+            model.metadata = {**model.metadata, "draft": facts[1]}
     # Multi-shard group (plan §7.1c a4): the shard list rides in metadata as
     # the lossless fallback for any registry backend, plus a best-effort
     # `model_file` row per shard/mmproj on the SQLite backend (see
@@ -1176,6 +1236,7 @@ def _scan_and_register_locked(
 
     known_paths: set[str] = set()
     known_inodes: set[tuple[int, int]] = set()
+    unpaired_models: list[tuple[str, Path]] = []
     for existing in registry.list():
         try:
             known_paths.add(str(Path(existing.path).resolve()))
@@ -1185,11 +1246,15 @@ def _scan_and_register_locked(
         if existing.draft:
             # A paired drafter is not a lone drafter on the next scan.
             known_paths.add(existing.draft)
+        elif existing.path.lower().endswith(".gguf"):
+            with contextlib.suppress(OSError):
+                unpaired_models.append((existing.id, Path(existing.path).resolve()))
         ino = _inode(Path(existing.path))
         if ino is not None:
             known_inodes.add(ino)
 
     drafter_skipped: list[dict] = []
+    registered_pairs: list[tuple[str, Path]] = []
     candidates = find_candidates(
         roots=list(roots),
         extensions=list(cfg.file_extensions),
@@ -1197,7 +1262,16 @@ def _scan_and_register_locked(
         ignored_paths=tombstones.load(),
         known_inodes=known_inodes,
         skipped=drafter_skipped,
+        unpaired_models=unpaired_models,
+        registered_pairs=registered_pairs,
     )
+    paired_drafts: list[dict] = []
+    for model_id, draft_path in registered_pairs:
+        try:
+            if pair_registered_drafter(registry, model_id, draft_path):
+                paired_drafts.append({"model_id": model_id, "draft": str(draft_path)})
+        except Exception as exc:  # pragma: no cover — defensive
+            log.warning("discover.pair_draft_failed model=%s err=%s", model_id, exc)
 
     added: list[str] = []
     skipped: list[dict] = list(drafter_skipped)
@@ -1246,6 +1320,7 @@ def _scan_and_register_locked(
     return {
         "added": added,
         "backfilled": backfilled,
+        "paired_drafts": paired_drafts,
         "skipped": skipped,
         "scanned_roots": [str(r) for r in roots],
         "pruned": pruned,

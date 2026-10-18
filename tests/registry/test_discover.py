@@ -1312,3 +1312,59 @@ def test_scan_drafter_already_paired_is_not_reported_again(
     second = scan_and_register(registry, cfg)
     assert second["added"] == []
     assert all(not s["reason"].startswith("drafter_") for s in second["skipped"])
+
+
+def _register_plain(registry: ModelRegistry, root: Path) -> None:
+    scan_and_register(registry, ModelsConfig(roots=[str(root)]))
+
+
+def test_scan_pairs_drafter_to_registered_model(tmp_path: Path, registry: ModelRegistry) -> None:
+    from hal0.db import repository
+    from hal0.db.connection import connect
+
+    root = tmp_path / "models"
+    _target(root / "X.gguf")
+    _register_plain(registry, root)
+    assert registry.get("x").draft is None
+
+    drafter = _dflash(root / "X-dflash.gguf")
+    result = scan_and_register(registry, ModelsConfig(roots=[str(root)]))
+    assert result["paired_drafts"] == [{"model_id": "x", "draft": str(drafter.resolve())}]
+    assert result["added"] == []
+    assert not any(s["reason"].startswith("drafter_") for s in result["skipped"])
+    row = registry.get("x")
+    assert (row.draft, row.draft_kind) == (str(drafter.resolve()), "dflash")
+    assert row.metadata["draft"]["variant"] == "dflash"
+    with connect(registry.db_path) as conn:
+        roles = {r["role"] for r in repository.list_model_files(conn, "x")}
+    assert "draft" in roles
+    # Next scan is quiet.
+    again = scan_and_register(registry, ModelsConfig(roots=[str(root)]))
+    assert again["paired_drafts"] == []
+
+
+def test_scan_reports_mismatch_for_registered_model(
+    tmp_path: Path, registry: ModelRegistry
+) -> None:
+    root = tmp_path / "models"
+    _target(root / "X.gguf")
+    _register_plain(registry, root)
+    drafter = _dflash(root / "X-dflash.gguf", width=2048)
+    result = scan_and_register(registry, ModelsConfig(roots=[str(root)]))
+    assert result["paired_drafts"] == []
+    assert {"path": str(drafter.resolve()), "reason": "drafter_mismatch"} in result["skipped"]
+    assert registry.get("x").draft is None
+
+
+def test_scan_leaves_an_already_paired_registered_model_alone(
+    tmp_path: Path, registry: ModelRegistry
+) -> None:
+    root = tmp_path / "models"
+    _target(root / "X.gguf")
+    first = _dflash(root / "X-lilicorr.gguf", lilicorr=True)
+    _register_plain(registry, root)
+    assert registry.get("x").draft == str(first.resolve())
+    _dflash(root / "X-plain.gguf")
+    result = scan_and_register(registry, ModelsConfig(roots=[str(root)]))
+    assert result["paired_drafts"] == []
+    assert registry.get("x").draft == str(first.resolve())
