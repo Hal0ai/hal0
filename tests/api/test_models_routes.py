@@ -430,6 +430,33 @@ def test_inspect_groups_split_gguf_into_one_variant_per_quant(
     assert [d["id"] for d in body["drafts"]] == ["dflash-M-NVFP4.gguf"]
 
 
+def test_inspect_reads_every_tree_page(
+    inspect_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The tree listing is paginated; a split quant whose parts straddle the
+    page boundary must still come back complete."""
+    page2 = "https://huggingface.co/api/models/org/big-GGUF/tree/main?recursive=true&cursor=p2"
+
+    def part(i: int) -> dict[str, Any]:
+        return {"path": f"Q8_0/big-Q8_0-{i:05d}-of-00002.gguf", "type": "file", "lfs": {"size": 10}}
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        if "/tree/main" in req.url.path:
+            if req.url.params.get("cursor") == "p2":
+                return httpx.Response(200, json=[part(2)])
+            return httpx.Response(200, json=[part(1)], headers={"Link": f'<{page2}>; rel="next"'})
+        return httpx.Response(200, json={"tags": []})
+
+    _patch_httpx_transport(monkeypatch, handler)
+    r = inspect_client.post("/api/models/inspect", json={"hf_repo": "org/big-GGUF"})
+    assert r.status_code == 200, r.text
+    (variant,) = r.json()["variants"]
+    assert variant["parts"] == 2
+    assert variant["complete"] is True
+    assert variant["size_bytes"] == 20
+
+
 def test_inspect_surfaces_flm_npu_repo(
     inspect_client: TestClient,
     monkeypatch: pytest.MonkeyPatch,

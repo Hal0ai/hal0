@@ -366,6 +366,38 @@ def group_quant_variants(
     return {"variants": variants, "mmproj": mmproj, "drafts": drafts}
 
 
+async def _read_tree_pages(
+    first: httpx.Response, headers: dict[str, str], next_link: Any
+) -> list[Any]:
+    """Rows of ``first`` plus every page its ``Link: rel="next"`` chain names.
+
+    Fail-soft like the single-page read it replaces: a page that errors or
+    isn't JSON ends the walk with the rows read so far.
+    """
+    rows: list[Any] = []
+    res: httpx.Response | None = first
+    async with httpx.AsyncClient(
+        timeout=httpx.Timeout(_INSPECT_TIMEOUT_SECONDS), follow_redirects=True, headers=headers
+    ) as client:
+        while res is not None:
+            try:
+                page = res.json() or []
+            except ValueError:
+                break
+            if isinstance(page, list):
+                rows.extend(page)
+            url = next_link(res.headers)
+            if not url:
+                break
+            try:
+                res = await client.get(url)
+            except (httpx.TimeoutException, httpx.HTTPError):
+                break
+            if res.status_code >= 400:
+                break
+    return rows
+
+
 async def fetch_repo(repo: str) -> dict[str, Any]:
     """Fetch HF model metadata + tree listing for ``repo``.
 
@@ -413,15 +445,15 @@ async def fetch_repo(repo: str) -> dict[str, Any]:
             code="hf.upstream_error",
             details={"repo": repo, "status": meta_res.status_code},
         )
-    if tree_res.status_code >= 400:
-        # A missing tree (private repo, gated, etc.) is recoverable —
-        # we still surface tags + metadata, just with no variants.
-        tree_payload: list[Any] = []
-    else:
-        try:
-            tree_payload = tree_res.json() or []
-        except ValueError:
-            tree_payload = []
+    # A missing tree (private repo, gated, etc.) is recoverable — we still
+    # surface tags + metadata, just with no variants. The listing is paginated
+    # (``Link: rel="next"``); a split quant's parts can straddle pages, so
+    # every page is read before grouping.
+    tree_payload: list[Any] = []
+    if tree_res.status_code < 400:
+        from hal0.registry.fileset import _next_link
+
+        tree_payload = await _read_tree_pages(tree_res, headers, _next_link)
 
     try:
         meta_payload = meta_res.json() or {}

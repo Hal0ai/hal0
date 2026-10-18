@@ -305,6 +305,9 @@ def pull_entry(data: dict[str, Any], model_id: str, registry: Any) -> dict[str, 
         "error": data.get("error"),
         "started_at": data.get("started_at"),
         "finished_at": data.get("finished_at"),
+        # Per-file progress (``PullFile.as_dict``) so the downloads pane can
+        # say which part of a split model, or the projector, is in flight.
+        "files": data.get("files") or [],
     }
 
 

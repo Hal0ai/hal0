@@ -15,7 +15,7 @@
 // live on only as cosmetic fixtures (host RAM, /var disk hint).
 
 import { copyTextToClipboard } from "@/lib/clipboard";
-import { useModels, useModelInspect, useModelDelete, usePullJob, useScanPreview, useAddModelFromPath, fmtBytes, fmtSpeed, fmtEta } from '@/api/hooks/useModels'
+import { useModels, useModelInspect, useModelDelete, usePullJob, useScanPreview, useAddModelFromPath, fmtBytes, fmtSpeed, fmtEta, pullFileLabel } from '@/api/hooks/useModels'
 import { useSlots } from '@/api/hooks/useSlots'
 import { useSettings } from '@/api/hooks/useSettings'
 import { useChatTemplates } from '@/api/hooks/useChatTemplates'
@@ -515,7 +515,10 @@ function DownloadRow({ modelId, onRemove }) {
       </div>
       {state === "running" && (
         <div style={{display: "flex", justifyContent: "space-between", fontFamily: "var(--jbm)", fontSize: 10, color: "var(--fg-4)", marginTop: 4}}>
-          <span>{fmtBytes(job.downloaded)} / {fmtBytes(job.total)}</span>
+          <span data-testid="pull-row-bytes">
+            {fmtBytes(job.downloaded)} / {fmtBytes(job.total)}
+            {pullFileLabel(job.files) && ` · ${pullFileLabel(job.files)}`}
+          </span>
           <span>{fmtSpeed(job.speedBps)} · {fmtEta(job.etaS)}</span>
         </div>
       )}

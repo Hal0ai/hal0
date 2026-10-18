@@ -395,6 +395,32 @@ export type PullState =
 
 const TERMINAL = new Set<PullState>(['completed', 'failed', 'cancelled'])
 
+// One file of a pull job (``PullFile.as_dict``): a split GGUF pulls one
+// ``shard`` per part, then the optional ``mmproj`` and engine ``sidecar``s.
+export interface PullFileSnapshot {
+  hf_filename: string
+  kind: 'model' | 'shard' | 'mmproj' | 'sidecar' | string
+  bytes_total: number
+  bytes_done: number
+}
+
+/**
+ * What a multi-file pull is fetching right now — "part 2 of 3", "vision
+ * projector" — or null for a single-file pull (the bar already says it all)
+ * and once every file is in.
+ */
+export function pullFileLabel(files: PullFileSnapshot[]): string | null {
+  if (files.length < 2) return null
+  const active = files.find((f) => !(f.bytes_total > 0 && f.bytes_done >= f.bytes_total))
+  if (!active) return null
+  if (active.kind === 'shard') {
+    const shards = files.filter((f) => f.kind === 'shard')
+    return `part ${shards.indexOf(active) + 1} of ${shards.length}`
+  }
+  if (active.kind === 'mmproj') return 'vision projector'
+  return active.hf_filename.split('/').pop() || active.hf_filename
+}
+
 export interface PullSnapshot {
   modelId: string | null
   jobId: string | null
@@ -403,6 +429,7 @@ export interface PullSnapshot {
   total: number
   speedBps: number
   etaS: number
+  files: PullFileSnapshot[]
   error: { code: string; message: string; details?: Record<string, unknown> } | null
   pct: number | null
   inFlight: boolean
@@ -426,6 +453,7 @@ export function usePullJob(): PullSnapshot {
   const [total, setTotal] = useState(0)
   const [speedBps, setSpeedBps] = useState(0)
   const [etaS, setEtaS] = useState(0)
+  const [files, setFiles] = useState<PullFileSnapshot[]>([])
   const [error, setError] = useState<PullSnapshot['error']>(null)
   const esRef = useRef<EventSource | null>(null)
   const qc = useQueryClient()
@@ -448,6 +476,7 @@ export function usePullJob(): PullSnapshot {
     if (typeof tot === 'number') setTotal(tot)
     if (typeof payload.speed_bps === 'number') setSpeedBps(payload.speed_bps)
     if (typeof payload.eta_s === 'number') setEtaS(payload.eta_s)
+    if (Array.isArray(payload.files)) setFiles(payload.files)
     if (payload.error) {
       setError(
         typeof payload.error === 'string'
@@ -512,6 +541,7 @@ export function usePullJob(): PullSnapshot {
     setTotal(0)
     setSpeedBps(0)
     setEtaS(0)
+    setFiles([])
     setError(null)
   }
 
@@ -590,6 +620,7 @@ export function usePullJob(): PullSnapshot {
     total,
     speedBps,
     etaS,
+    files,
     error,
     pct,
     inFlight: state === 'queued' || state === 'running',
@@ -616,6 +647,7 @@ export interface PullJob {
   error: { code: string; message: string } | null
   started_at: number | null
   finished_at: number | null
+  files?: PullFileSnapshot[]
 }
 
 export function usePullsList({ enabled = true }: { enabled?: boolean } = {}) {
