@@ -30,6 +30,29 @@ applying. Add those subsections to a version's section to surface them; see
 
 ## [Unreleased]
 
+## [1.5.0] — 2026-10-19
+
+### Highlights
+
+- **Speculative-decoding drafters.** A model can carry a small drafter file
+  (`-LiLiCorr`, `-DFlash`, `-DFlash2`, `-DSpark`, `-EAGLE3`, `-draft`) that
+  llama-server checks in one pass, so replies come faster with the same
+  output. Add from Hugging Face finds and fit-checks drafters before anything
+  downloads, the model drawer has a Drafter field, and a rescan pairs a
+  fitting drafter it finds beside a model. (#2765, #2768, ADR-0031)
+- **A slot now tells llama-server which device to use.** The slot layer
+  passes `--device` from the slot's selected device, so a runner image that
+  lists both ROCm and Vulkan for one GPU no longer splits every model across
+  both backends and no longer leaves an idle GPU at 100 % busy. (#2772)
+- **Add from Hugging Face lists quants, not files.** One row per quant, split
+  GGUFs pulled whole, the projector and drafters offered beside the quant.
+  (#2760)
+- **Compact, consistent model pickers.** Fit icon plus GB figure in every
+  state, modality glyphs after the name, runtime as a chip, two-line rows.
+  (#2762, #2771, #2773)
+- **Runner images move to llama.cpp b11716** (standard, cpu, cuda), past
+  the b11669 floor the LiLiCorr drafter kind needs. (#2763)
+
 ### Added
 
 - **Speculative-decoding drafters.** A model can now carry a drafter, a small
