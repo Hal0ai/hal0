@@ -18,7 +18,7 @@ from hal0.config.schema import (
     SEED_PROFILES,
     ProfileConfig,
     ProfilesConfig,
-    mtp_draft_device,
+    lane_device,
 )
 
 # ── ProfileConfig validation (ADR-0029: the profile is the whole tune) ────────
@@ -123,12 +123,13 @@ class TestMtpDraftBundle:
         ("backend", "device"),
         [("rocm", "ROCm0"), ("vulkan", "Vulkan0"), ("cuda", "CUDA0"), ("CUDA", "CUDA0")],
     )
-    def test_draft_device_follows_the_slot_backend(self, backend: str, device: str) -> None:
-        assert mtp_draft_device(backend) == device
+    def test_lane_device_follows_the_slot_backend(self, backend: str, device: str) -> None:
+        assert lane_device(backend) == device
 
-    def test_unknown_backend_drafts_on_rocm0(self) -> None:
-        assert mtp_draft_device(None) == "ROCm0"
-        assert mtp_draft_device("") == "ROCm0"
+    def test_lane_device_cpu_is_none_and_unknown_has_no_device(self) -> None:
+        assert lane_device("cpu") == "none"
+        assert lane_device(None) is None
+        assert lane_device("") is None
 
 
 # ── load_profiles_config ──────────────────────────────────────────────────────

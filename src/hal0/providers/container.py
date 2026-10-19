@@ -69,7 +69,7 @@ from hal0.config.schema import (
     family_flags as _family_flags,
 )
 from hal0.config.schema import (
-    mtp_draft_device,
+    lane_device,
     resolve_chat_template,
 )
 from hal0.errors import Hal0Error, UnprocessableEntity
@@ -1004,6 +1004,7 @@ def _llama_argv_segments(
     slot_threads: int | None = None,
     slot_metrics: bool = True,
     draft_device: str | None = None,
+    lane_device: str | None = None,
 ) -> list[tuple[str, list[str]]]:
     """The labelled llama-server argv segments (SINGLE SOURCE, ADR-0029).
 
@@ -1017,7 +1018,7 @@ def _llama_argv_segments(
                  --spec-type, --spec-draft-model
                  (model facts; quirks from family_defaults.toml)
         profile  the speculation bundle, then the profile's flags
-        slot     -ngl, --threads, --metrics, --spec-draft-device (placement;
+        slot     --device, -ngl, --threads, --metrics, --spec-draft-device (placement;
                  embedded MTP heads only — an external drafter follows the
                  model's devices)
 
@@ -1052,6 +1053,10 @@ def _llama_argv_segments(
     profile += _profile_flag_tokens(profile_flags)
 
     slot: list[str] = []
+    # DEVICE (#2767): the runner image may register several backends for one
+    # GPU; name the slot's own so the model is not split across them.
+    if lane_device:
+        slot += ["--device", lane_device]
     if slot_n_gpu_layers is not None:
         slot += ["-ngl", str(int(slot_n_gpu_layers))]
     if slot_threads is not None and int(slot_threads) > 0:
@@ -1087,6 +1092,7 @@ def _llama_launch_plan(
     slot_threads: int | None = None,
     slot_metrics: bool = True,
     draft_device: str | None = None,
+    lane_device: str | None = None,
     env: dict[str, str] | None = None,
 ) -> RuntimeLaunchPlan:
     """Build the GPU/llama-server :class:`RuntimeLaunchPlan`.
@@ -1112,6 +1118,7 @@ def _llama_launch_plan(
         slot_threads=slot_threads,
         slot_metrics=slot_metrics,
         draft_device=draft_device,
+        lane_device=lane_device,
     )
     command = resolve_argv(segments).argv
 
@@ -1576,6 +1583,10 @@ def _pinned_segments(
         if scalars.get("draft_model"):
             model += ["--spec-draft-model", str(scalars["draft_model"])]
     slot: list[str] = []
+    device = lane_device(scalars["backend"]) if scalars.get("backend") else None
+    # A recorded --device is skipped above; today's slot decides it.
+    if device:
+        slot += ["--device", device]
     slot_ngl = scalars.get("slot_n_gpu_layers")
     if slot_ngl is not None or ngl is not None:
         slot += ["-ngl", str(int(slot_ngl if slot_ngl is not None else ngl))]
@@ -1584,10 +1595,10 @@ def _pinned_segments(
         slot += ["--threads", str(int(slot_threads))]
     if scalars.get("slot_metrics", True):
         slot += ["--metrics"]
-    device = mtp_draft_device(scalars["backend"]) if scalars.get("backend") else None
     # Only embedded MTP heads are pinned; a recorded device on an external
-    # drafter type (or with no --spec-type at all) is dropped.
-    if spec_type == "draft-mtp" and device:
+    # drafter type (or with no --spec-type at all) is dropped. A CPU slot's
+    # drafter runs on the host CPU: no draft device.
+    if spec_type == "draft-mtp" and device and device != "none":
         slot += ["--spec-draft-device", device]
     return [("base", base), ("model", model), ("profile", tune), ("slot", slot)]
 
@@ -1716,7 +1727,12 @@ def _resolve_llama_scalars(
         "draft_model": spec.draft_model,
         "spec_bundle": spec.bundle,
         "spec_plan": spec.as_dict(),
-        "draft_device": (mtp_draft_device(effective_backend) if spec.mode == "mtp" else None),
+        "lane_device": lane_device(effective_backend),
+        "draft_device": (
+            lane_device(effective_backend)
+            if spec.mode == "mtp" and lane_device(effective_backend) != "none"
+            else None
+        ),
         "slot_n_gpu_layers": slot_cfg.get("n_gpu_layers"),
         "slot_threads": slot_cfg.get("threads"),
         "slot_metrics": True if slot_metrics_raw is None else bool(slot_metrics_raw),
@@ -1750,6 +1766,7 @@ def _segments_from_scalars(
         slot_threads=sc["slot_threads"],
         slot_metrics=sc["slot_metrics"],
         draft_device=sc["draft_device"],
+        lane_device=sc["lane_device"],
     )
 
 
@@ -1891,6 +1908,7 @@ class ContainerProvider(Provider):
             slot_threads=scalars["slot_threads"],
             slot_metrics=scalars["slot_metrics"],
             draft_device=scalars["draft_device"],
+            lane_device=scalars["lane_device"],
             env=merged_env or None,
         )
         if pin is not None:

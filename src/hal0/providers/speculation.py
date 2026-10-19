@@ -5,7 +5,8 @@ and returns a :class:`SpecPlan` that every layer of the argv reads:
 
 * model layer   ``--spec-type <spec_type>`` and ``--spec-draft-model <draft_model>``
 * profile layer the per-kind ``bundle`` (before the profile's own flags)
-* slot layer    ``--spec-draft-device`` for embedded MTP heads only; an external
+* slot layer    ``--device`` (the slot's device), and ``--spec-draft-device`` for
+                embedded MTP heads only; an external
                 drafter follows the model's devices (no pin)
 
 The order is the ADR's::

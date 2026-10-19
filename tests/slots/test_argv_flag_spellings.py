@@ -510,6 +510,12 @@ def test_pinned_tune_spec_type_moves_to_the_model_layer_from_todays_plan() -> No
     assert "--spec-draft-device" not in segs["slot"]
 
 
+def test_pinned_device_comes_from_todays_slot_not_the_ledger() -> None:
+    argv = _pinned(["--device", "ROCm0", "-fa", "auto"], backend="vulkan")
+    assert argv[argv.index("--device") + 1] == "Vulkan0"
+    assert argv.count("--device") == 1
+
+
 def test_pinned_draft_device_is_kept_for_mtp_and_dropped_without_a_spec_type() -> None:
     mtp = _pinned(_MTP_PIN, spec_type="draft-mtp", draft_model=None)
     assert mtp[mtp.index("--spec-draft-device") + 1] == "ROCm0"
