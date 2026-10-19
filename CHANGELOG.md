@@ -108,6 +108,17 @@ applying. Add those subsections to a version's section to surface them; see
   demand, NPU (FLM) slots included; `agent` is used only when no slot in the
   chain has a model bound. Each substitution is logged as `resolver.fallback`
   (ADR-0023, amended) (#2741).
+- **Deleting a memory by an observation id now works instead of silently
+  doing nothing.** Search, the units list and the brain's `memory_search`
+  hand out an observation's own id, but `POST /api/memory/delete` and the
+  `memory_delete` tool answered `{"deleted": 0}` for it, even for the owning
+  agent. An observation has no document of its own, so its id now deletes the
+  one document it was derived from, which removes the observation with it.
+  An observation derived from more than one document is refused with
+  `memory.delete.observation_multi_source`, which lists those document ids:
+  a single-id delete runs without approval, so it never removes several
+  documents at once, and deleting the listed ids together goes through the
+  usual bulk-delete approval (#2747).
 
 ## [1.4.0] — 2026-10-16
 

@@ -485,6 +485,14 @@ async def _memory_delete(
     non-empty. ``dataset`` optionally directs the engine's bank sweep
     (``shared`` or your own ``private:<client_id>``; ADR 0005).
 
+    An id may be an observation's unit id (#2747). An observation has no
+    document, so it deletes its single source document, which cascades the
+    observation. An observation derived from more than one document is
+    refused with the typed error ``memory.delete.observation_multi_source``,
+    whose ``details.document_ids`` lists those documents, so a single
+    autonomous id never deletes several documents; delete the listed ids
+    explicitly, which goes through the multi-id approval gate.
+
     Approval-gating for bulk deletes (>1 id) is classified by
     :func:`hal0.mcp.admin.is_gated` and enforced one layer up — by
     ``admin.dispatch`` when the call arrives on ``/mcp/admin``, and by
@@ -1575,8 +1583,11 @@ def build_server(
         description=(
             "Delete one or more memory items by id. Deleting >1 id is a bulk "
             "delete and returns {status: pending_approval} — it runs only "
-            "after the operator approves it. dataset optionally directs the "
-            "sweep (shared or your own private:<client_id>)."
+            "after the operator approves it. An observation id deletes its "
+            "single source document; an observation derived from several "
+            "documents is refused with error memory.delete.observation_multi_source "
+            "listing their document_ids, to delete explicitly. dataset optionally "
+            "directs the sweep (shared or your own private:<client_id>)."
         ),
         annotations=_ANNOTATIONS["memory_delete"],
     )

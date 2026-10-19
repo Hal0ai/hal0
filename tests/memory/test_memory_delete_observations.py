@@ -10,7 +10,11 @@ answer ``{"deleted": 0}``, even for the owning agent.
 The engine has no per-observation delete, but deleting a source fact's
 document cascades every observation built on it. The fix resolves an
 observation id to the documents of all its ``source_memory_ids`` and runs
-the visibility/project ACL against the observation and every source.
+the visibility/project ACL against the observation and every source. An
+observation with one source document deletes it; one derived from several
+documents is refused with ``memory.delete.observation_multi_source`` and the
+document ids, because a single-id delete runs without approval
+(``hal0.mcp.admin.is_gated``) and must not reach several documents.
 
 The fake below mirrors the engine shape that matters: distinct fact and
 document ids, ``document_id: null`` plus ``source_memory_ids`` on the
@@ -20,14 +24,20 @@ observation, a 404 for a non-document id, and the observation cascade.
 from __future__ import annotations
 
 import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 
+from hal0.api.middleware import error_codes
+from hal0.api.routes import memory as memory_routes
+from hal0.mcp import memory as mcp_memory
 from hal0.memory import hindsight_provider as hp
-from hal0.memory.hindsight_provider import HindsightProvider
+from hal0.memory.hindsight_provider import HindsightProvider, ObservationMultiSourceDelete
 
 DOC_A = "3c533a7a-0000-4000-8000-00000000000a"
 DOC_B = "3c533a7a-0000-4000-8000-00000000000b"
 WORLD_A = "060ad4de-0000-4000-8000-00000000000a"
 WORLD_B = "060ad4de-0000-4000-8000-00000000000b"
+WORLD_A2 = "060ad4de-0000-4000-8000-0000000000a2"
 OBS = "53ec96b7-0000-4000-8000-000000000001"
 
 OWNER_PRIVATE = ["visibility:private", "agent:rvskeptic"]
@@ -114,20 +124,136 @@ async def test_owner_deletes_observation_by_its_unit_id() -> None:
 
 
 @pytest.mark.asyncio
-async def test_observation_with_several_sources_deletes_every_source_document() -> None:
-    """Deleting only one source would let consolidation re-derive the
-    observation from the rest."""
+async def test_observation_with_several_facts_from_one_document_deletes_it() -> None:
+    """Two source facts that share one document are still a single-document
+    radius, so the observation resolves."""
     client = EngineShapeClient(
         [
             _world(WORLD_A, DOC_A, OWNER_PRIVATE),
-            _world(WORLD_B, DOC_B, OWNER_PRIVATE),
-            _observation([WORLD_A, WORLD_B], OWNER_PRIVATE),
+            _world(WORLD_A2, DOC_A, OWNER_PRIVATE),
+            _observation([WORLD_A, WORLD_A2], OWNER_PRIVATE),
         ]
     )
     p = _provider(client)
     assert await p.delete([OBS], client_id="rvskeptic", dataset="shared") == {"deleted": 1}
-    assert sorted(client.deleted) == sorted([DOC_A, DOC_B])
+    assert client.deleted == [DOC_A]
     assert client.ids() == set()
+
+
+def _multi_source_units() -> list[dict]:
+    return [
+        _world(WORLD_A, DOC_A, OWNER_PRIVATE),
+        _world(WORLD_B, DOC_B, OWNER_PRIVATE),
+        _observation([WORLD_A, WORLD_B], OWNER_PRIVATE),
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("unified", [True, False])
+async def test_multi_source_observation_is_refused_with_its_document_ids(unified: bool) -> None:
+    """One id, which runs without approval, must not delete several documents.
+    Nothing is deleted; the refusal names the documents to delete instead."""
+    client = EngineShapeClient(_multi_source_units())
+    p = _provider(client, unified=unified)
+    with pytest.raises(ObservationMultiSourceDelete) as exc_info:
+        await p.delete([OBS], client_id="rvskeptic", dataset="shared")
+    exc = exc_info.value
+    assert exc.code == "memory.delete.observation_multi_source"
+    assert exc.status == 400
+    assert exc.details["document_ids"] == [DOC_A, DOC_B]
+    assert exc.details["observations"] == {OBS: [DOC_A, DOC_B]}
+    assert client.deleted == []
+    assert OBS in client.ids()
+
+
+@pytest.mark.asyncio
+async def test_multi_source_refusal_deletes_nothing_else_in_the_call() -> None:
+    """The refusal comes before any delete, so an approved bulk call that
+    includes a multi-source observation does not half-apply."""
+    client = EngineShapeClient(
+        [*_multi_source_units(), _world("060ad4de-0000-4000-8000-00000000000c", "doc-c", [])]
+    )
+    p = _provider(client)
+    with pytest.raises(ObservationMultiSourceDelete):
+        await p.delete(["doc-c", OBS], client_id="rvskeptic", dataset="shared")
+    assert client.deleted == []
+
+
+@pytest.mark.asyncio
+async def test_listed_document_ids_delete_the_multi_source_observation() -> None:
+    """The documented way out: delete the listed ids explicitly."""
+    client = EngineShapeClient(_multi_source_units())
+    p = _provider(client)
+    out = await p.delete([DOC_A, DOC_B], client_id="rvskeptic", dataset="shared")
+    assert out == {"deleted": 2}
+    assert client.ids() == set()
+
+
+def test_multi_source_refusal_over_rest() -> None:
+    client = EngineShapeClient(_multi_source_units())
+    app = FastAPI()
+    error_codes.install(app)
+    app.include_router(memory_routes.router, prefix="/api/memory")
+    app.state.memory_provider = _provider(client)
+    with TestClient(app) as c:
+        r = c.post(
+            "/api/memory/delete",
+            json={"ids": [OBS]},
+            headers={"X-hal0-Agent": "rvskeptic"},
+        )
+    assert r.status_code == 400, r.text
+    err = r.json()["error"]
+    assert err["code"] == "memory.delete.observation_multi_source"
+    assert err["details"]["document_ids"] == [DOC_A, DOC_B]
+    assert client.deleted == []
+
+
+def test_single_source_observation_over_rest() -> None:
+    client = EngineShapeClient(
+        [_world(WORLD_A, DOC_A, OWNER_PRIVATE), _observation([WORLD_A], OWNER_PRIVATE)]
+    )
+    app = FastAPI()
+    error_codes.install(app)
+    app.include_router(memory_routes.router, prefix="/api/memory")
+    app.state.memory_provider = _provider(client)
+    with TestClient(app) as c:
+        r = c.post(
+            "/api/memory/delete",
+            json={"ids": [OBS]},
+            headers={"X-hal0-Agent": "rvskeptic"},
+        )
+    assert r.status_code == 200, r.text
+    assert r.json() == {"deleted": 1}
+    assert client.deleted == [DOC_A]
+
+
+def _mcp_dispatcher(client):
+    return mcp_memory.make_dispatcher(
+        _provider(client),
+        client_id_resolver=lambda: "rvskeptic",
+        private_resolver=lambda: False,
+    )
+
+
+@pytest.mark.asyncio
+async def test_multi_source_refusal_over_mcp() -> None:
+    client = EngineShapeClient(_multi_source_units())
+    out = await _mcp_dispatcher(client)("memory_delete", {"ids": [OBS]})
+    assert out["status"] == "error"
+    assert out["error"]["code"] == "memory.delete.observation_multi_source"
+    assert out["error"]["details"]["document_ids"] == [DOC_A, DOC_B]
+    assert client.deleted == []
+
+
+@pytest.mark.asyncio
+async def test_single_source_observation_over_mcp() -> None:
+    client = EngineShapeClient(
+        [_world(WORLD_A, DOC_A, OWNER_PRIVATE), _observation([WORLD_A], OWNER_PRIVATE)]
+    )
+    out = await _mcp_dispatcher(client)("memory_delete", {"ids": [OBS]})
+    assert out["status"] == "ok"
+    assert out["deleted"] == 1
+    assert client.deleted == [DOC_A]
 
 
 @pytest.mark.asyncio

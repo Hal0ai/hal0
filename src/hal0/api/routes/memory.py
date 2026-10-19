@@ -1018,10 +1018,15 @@ async def memory_delete(request: Request) -> dict[str, int]:
     **document id** for a world/experience fact, and the unit's own id for an
     **observation**, which has no document. The engine only ever deletes
     documents, so a per-fact id (``metadata.fact_id``) resolves to its owning
-    document (#1456) and an observation id resolves to the documents of all
-    its source facts, whose deletion cascades the observation (#2747). The
-    ACL below runs against the observation and every source; one source the
-    caller could not read withholds the whole observation.
+    document (#1456) and an observation id resolves to the documents of its
+    source facts, whose deletion cascades the observation (#2747). An
+    observation with a single source document deletes that document. One
+    derived from more than one document is refused with a 400
+    ``memory.delete.observation_multi_source`` whose ``details.document_ids``
+    lists them, so one id never deletes several documents; the caller deletes
+    those ids explicitly instead. The ACL below runs against the observation
+    and every source; one source the caller could not read withholds the
+    whole observation.
 
     ``dataset`` optionally directs the engine's bank sweep (``shared`` or
     the caller's own ``private:<client_id>``; ADR 0005). It goes through

@@ -2942,7 +2942,9 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
         "types defaults to world+experience+observation."
     ),
     "memory_delete": (
-        "Delete one or more memory items (autonomous when len(ids)==1, gated otherwise)."
+        "Delete one or more memory items (autonomous when len(ids)==1, gated otherwise). "
+        "An observation id deletes its single source document; one derived from several "
+        "documents is refused (memory.delete.observation_multi_source) with their document_ids."
     ),
     # ── Memory extended toolset (Hindsight 0.8.4 parity, §mcp-hal0-integration) ──
     "memory_reflect": (

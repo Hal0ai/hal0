@@ -38,6 +38,7 @@ from typing import Any
 
 import structlog
 
+from hal0.errors import BadRequest
 from hal0.memory.provider import MemoryProvider
 
 log = structlog.get_logger(__name__)
@@ -255,6 +256,40 @@ def _decode_cursor(cursor: str | None, banks: list[str]) -> tuple[str | None, in
     except ValueError:
         offset = 0
     return bank, offset
+
+
+class ObservationMultiSourceDelete(BadRequest):
+    """A delete named an observation derived from more than one document (#2747).
+
+    An observation has no document of its own; the engine only removes it by
+    deleting the documents of its source facts. One source document is the
+    same blast radius as an ordinary single-id delete, so that resolves. More
+    than one would let a single id, which :func:`hal0.mcp.admin.is_gated` runs
+    without approval, wipe several documents and everything derived from
+    them. The refusal lists those document ids instead, so the caller deletes
+    them explicitly and the multi-id approval gate applies. ``details`` is
+    ``{"document_ids": [...], "observations": {observation_id: [...]}}``.
+    """
+
+    code = "memory.delete.observation_multi_source"
+
+
+def _refuse_multi_source(ids: list[str], resolved: dict[str, list[str]]) -> None:
+    """Raise :class:`ObservationMultiSourceDelete` if any of ``ids`` resolved
+    to more than one document. Only an observation can: a document id or a
+    per-fact id always names exactly one. ``resolved`` holds only ids that
+    passed the ACL, so the listed document ids are ones the caller may read.
+    """
+    multi = {i: resolved[i] for i in dict.fromkeys(ids) if len(resolved.get(i, [])) > 1}
+    if not multi:
+        return
+    document_ids = list(dict.fromkeys(d for docs in multi.values() for d in docs))
+    raise ObservationMultiSourceDelete(
+        f"observation {', '.join(multi)} is derived from {len(document_ids)} documents; "
+        "deleting it would delete all of them. Delete those document ids explicitly "
+        "instead (a multi-id delete needs approval).",
+        details={"document_ids": document_ids, "observations": multi},
+    )
 
 
 def _http_status(exc: Exception) -> int | None:
@@ -1662,8 +1697,12 @@ class HindsightProvider(MemoryProvider):
         """Delete by id; ``deleted`` counts the given ids that removed something.
 
         An id may be a document id, a per-fact id, or an observation's unit
-        id; an observation resolves to its source documents, whose deletion
-        cascades it (:meth:`_deletable_ids`, #2747).
+        id. An observation resolves to its source documents, whose deletion
+        cascades it (:meth:`_deletable_ids`, #2747). One that maps to exactly
+        one source document deletes that document; one that maps to more is
+        refused whole with :class:`ObservationMultiSourceDelete`, before
+        anything in the call is deleted, so a single id never reaches more
+        than one document.
         """
         deleted = 0
         # We don't know which bank each document_id lives in without a
@@ -1681,6 +1720,7 @@ class HindsightProvider(MemoryProvider):
             # private doc by id, and a project-scoped delete can't reach
             # outside its project.
             deletable = await self._deletable_ids(set(ids), banks, client_id, dataset)
+            _refuse_multi_source(ids, deletable)
             for given_id in ids:
                 if given_id not in deletable:
                     continue  # withheld: not visible to this caller (fail-closed)
@@ -1705,8 +1745,12 @@ class HindsightProvider(MemoryProvider):
             resolved = await self._deletable_ids(
                 set(missed), banks, client_id, dataset, enforce_acl=False
             )
+            resolved = {
+                given_id: [d for d in docs if d != given_id] for given_id, docs in resolved.items()
+            }
+            _refuse_multi_source(missed, resolved)
             for given_id in missed:
-                docs = [d for d in resolved.get(given_id, []) if d != given_id]
+                docs = resolved.get(given_id, [])
                 removed = [await self._delete_document_anywhere(doc, banks) for doc in docs]
                 if any(removed):
                     deleted += 1
