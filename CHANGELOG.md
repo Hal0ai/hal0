@@ -93,6 +93,11 @@ applying. Add those subsections to a version's section to surface them; see
   row listed the model's size as plain text right beside the fit chip, which
   already reads `~N GB`. The plain figure is gone; the fit chip stays, and the
   model drawer's facts band still shows the exact size.
+- **Model picker rows: bare modality glyphs, runtime as a chip.** The eye
+  (vision) and bolt (drafter) glyphs no longer wear a chip box; they follow
+  the model name directly, ahead of the quant and fit chips, on both the open
+  list and the closed trigger. The runtime named on a row's second line is a
+  chip too, purple for the NPU runtime (`flm`) to match the device chips.
 
 ## [1.4.0] — 2026-10-16
 
