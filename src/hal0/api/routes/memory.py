@@ -1013,11 +1013,15 @@ async def memory_list(
 async def memory_delete(request: Request) -> dict[str, int]:
     """Delete by id. Body: ``{ids: [...], dataset?}``. Returns ``{deleted: int}``.
 
-    ``ids`` are **document ids** — the ``id`` field every read surface
-    returns (``/api/memory/list``, ``/api/memory/search``, recall). In
-    unified-bank mode a per-fact id (``metadata.fact_id``) is accepted as
-    an alias and resolved to its owning document; the engine only ever
-    deletes documents. See #1456.
+    ``ids`` are the ``id`` field every read surface returns
+    (``/api/memory/list``, ``/api/memory/search``, ``/units``, recall): the
+    **document id** for a world/experience fact, and the unit's own id for an
+    **observation**, which has no document. The engine only ever deletes
+    documents, so a per-fact id (``metadata.fact_id``) resolves to its owning
+    document (#1456) and an observation id resolves to the documents of all
+    its source facts, whose deletion cascades the observation (#2747). The
+    ACL below runs against the observation and every source; one source the
+    caller could not read withholds the whole observation.
 
     ``dataset`` optionally directs the engine's bank sweep (``shared`` or
     the caller's own ``private:<client_id>``; ADR 0005). It goes through

@@ -1508,19 +1508,35 @@ class HindsightProvider(MemoryProvider):
         banks: list[str],
         client_id: str | None,
         requested: str | list[str] | None = None,
-    ) -> dict[str, str]:
+        *,
+        enforce_acl: bool = True,
+    ) -> dict[str, list[str]]:
         """Map each of ``ids`` the caller is allowed to delete to the
-        **document_id** the engine deletes by, under unified-bank visibility.
+        **document_id(s)** the engine deletes by, under unified-bank visibility.
 
         The return type is a mapping, not a set, because the caller-supplied
         id and the engine-addressable id are not always the same string
-        (#1456). ``id`` on every read surface is now the document_id, but a
-        caller may still hold a per-fact id — from a pre-fix ``list``
-        response or from ``metadata.fact_id`` — and the resolution scan below
-        already has both fields in hand, so accepting either costs nothing.
-        The engine is addressed by document_id in every case; matching on the
-        fact-id field is what made a *correct* document_id fail-closed
-        withheld and left ``POST /api/memory/delete`` deleting nothing.
+        (#1456). ``id`` on every read surface is the document_id when the unit
+        has one, but a caller may still hold a per-fact id — from a pre-fix
+        ``list`` response or from ``metadata.fact_id`` — and the resolution
+        scan below already has both fields in hand, so accepting either costs
+        nothing. The engine is addressed by document_id in every case;
+        matching on the fact-id field is what made a *correct* document_id
+        fail-closed withheld and left ``POST /api/memory/delete`` deleting
+        nothing.
+
+        **Observations** (#2747) have no document: consolidation derives them
+        from one or more source facts, so ``document_id`` is null and every
+        read surface hands out the observation's own unit id. The engine has
+        no per-observation delete — ``DELETE /documents/{id}`` 404s on it —
+        but deleting a source fact's document cascades every observation
+        built on it. So an observation id resolves to the documents of *all*
+        its ``source_memory_ids`` (deleting only one would let consolidation
+        re-derive it from the rest). The ACL runs against the observation
+        **and every source fact**: an observation that merges a document the
+        caller could not read is withheld whole, so deleting a derived unit
+        can never reach into another agent's private memory or out of the
+        addressed project. A source the scan cannot find is withheld too.
 
         In unified mode the single ``shared`` bank holds every agent's
         ``visibility:private`` docs and every project's docs, so a blind
@@ -1531,18 +1547,39 @@ class HindsightProvider(MemoryProvider):
         the exact predicates the read paths use (:meth:`_is_visible_to` and
         :meth:`_is_in_scope`). An id we cannot resolve to a doc in the caller's
         banks is **withheld** (fail-closed), matching the read filter's posture.
+
+        ``enforce_acl=False`` is the legacy multi-bank path, where bank
+        isolation already does the ACL's job and this scan only translates
+        fact and observation ids into document ids.
         """
         if not ids:
             return {}
         caller = self._caller_agent(client_id)
         projects, wants_unscoped = self._requested_scope(requested)
+
+        def allowed(fact: dict[str, Any]) -> bool:
+            if not enforce_acl:
+                return True
+            return self._is_visible_to(fact, caller) and self._is_in_scope(
+                fact, projects, wants_unscoped
+            )
+
         wanted = set(ids)
-        out: dict[str, str] = {}
+        out: dict[str, list[str]] = {}
+        # Observation ids already refused (an invisible, missing or
+        # document-less source): they stop the scan paging the bank for them.
+        refused: set[str] = set()
         for bank in banks:
-            if not wanted - out.keys():
+            if not wanted - out.keys() - refused:
                 break
+            # Per-bank index of every unit scanned: id -> (document_id,
+            # allowed). An observation's sources can sit on an earlier page
+            # than the observation itself, so it is kept for the whole bank.
+            seen: dict[str, tuple[str | None, bool]] = {}
+            # Observation ids waiting for their sources to turn up.
+            pending: dict[str, list[str]] = {}
             offset = 0
-            while wanted - out.keys():
+            while wanted - out.keys() - refused:
                 try:
                     resp = await self._call(
                         "list_memories", bank_id=bank, limit=_DELETE_SCAN_PAGE, offset=offset
@@ -1551,24 +1588,69 @@ class HindsightProvider(MemoryProvider):
                     break  # fail-soft per bank; unresolved ids stay withheld
                 items = resp.get("items", [])
                 for fact in items:
-                    document_id = fact.get("document_id") or fact.get("id")
+                    fact_id = fact.get("id")
+                    document_id = fact.get("document_id")
+                    ok = allowed(fact)
+                    if fact_id:
+                        seen[fact_id] = (document_id, ok)
                     # Either handle resolves to the same document. Ordered so
                     # the canonical id wins when a caller passes both.
                     matches = (
-                        wanted.intersection({i for i in (document_id, fact.get("id")) if i})
+                        wanted.intersection({i for i in (document_id, fact_id) if i})
                         - out.keys()
+                        - refused
+                        - pending.keys()
                     )
-                    if not matches:
+                    if not matches or not ok:
                         continue
-                    if self._is_visible_to(fact, caller) and self._is_in_scope(
-                        fact, projects, wants_unscoped
-                    ):
+                    if document_id:
                         for given in matches:
-                            out[given] = document_id
+                            out[given] = [document_id]
+                        continue
+                    sources = [s for s in fact.get("source_memory_ids") or [] if s]
+                    for given in matches:
+                        if sources:
+                            pending[given] = sources
+                        elif fact.get("fact_type") == "observation":
+                            refused.add(given)  # derived from nothing we can address
+                        elif fact_id:
+                            # A document-less, source-less unit: the fact id is
+                            # the only handle there is (older engine / fixture).
+                            out[given] = [fact_id]
+                for given, sources in list(pending.items()):
+                    if not all(s in seen for s in sources):
+                        continue
+                    del pending[given]
+                    resolved = [seen[s] for s in sources]
+                    if all(ok and doc for doc, ok in resolved):
+                        out[given] = list(dict.fromkeys(doc for doc, _ in resolved if doc))
+                    else:
+                        refused.add(given)
                 if len(items) < _DELETE_SCAN_PAGE:
                     break  # last page
                 offset += _DELETE_SCAN_PAGE
+            # A source that never turned up in this bank fails closed.
+            refused.update(pending)
         return out
+
+    async def _delete_document_anywhere(self, document_id: str, banks: list[str]) -> bool:
+        """Delete ``document_id`` from the first of ``banks`` that holds it.
+
+        Hindsight 404s a missing document (NOT idempotent-200), so a per-bank
+        probe that misses must continue the sweep — previously the first 404
+        aborted the whole call, which made every private-bank item
+        undeletable (the shared bank is probed first and always 404'd).
+        """
+        for bank in banks:
+            try:
+                res = await self._call("delete_document", bank_id=bank, document_id=document_id)
+            except Exception as exc:
+                if _http_status(exc) == 404:
+                    continue  # not in this bank — keep sweeping
+                raise
+            if int(res.get("memory_units_deleted", 0)) > 0:
+                return True
+        return False
 
     async def delete(
         self,
@@ -1577,13 +1659,15 @@ class HindsightProvider(MemoryProvider):
         client_id: str | None = None,
         dataset: str | list[str] | None = None,
     ) -> dict[str, int]:
+        """Delete by id; ``deleted`` counts the given ids that removed something.
+
+        An id may be a document id, a per-fact id, or an observation's unit
+        id; an observation resolves to its source documents, whose deletion
+        cascades it (:meth:`_deletable_ids`, #2747).
+        """
         deleted = 0
         # We don't know which bank each document_id lives in without a
-        # lookup; try the caller's allowed banks. Hindsight 404s a missing
-        # document (NOT idempotent-200), so a per-bank probe that misses
-        # must continue the sweep — previously the first 404 aborted the
-        # whole call, which made every private-bank item undeletable
-        # (the shared bank is probed first and always 404'd).
+        # lookup; try the caller's allowed banks.
         # ``dataset`` is passed through verbatim: an empty list is an
         # unaddressable scope, NOT an unset one, and must sweep no banks
         # (#1451 — ``dataset or _SHARED`` here is what turned an approved
@@ -1591,34 +1675,41 @@ class HindsightProvider(MemoryProvider):
         banks = [namespace_to_bank(ns) for ns in self._allowed_namespaces(dataset, client_id)]
         if not banks:
             return {"deleted": 0}
-        # Unified mode: gate deletes on the same visibility + project ACL the
-        # read paths enforce, so one agent can't delete another's private doc
-        # by id, and a project-scoped delete can't reach outside its project.
+        if self._unified_bank:
+            # Unified mode: gate deletes on the same visibility + project ACL
+            # the read paths enforce, so one agent can't delete another's
+            # private doc by id, and a project-scoped delete can't reach
+            # outside its project.
+            deletable = await self._deletable_ids(set(ids), banks, client_id, dataset)
+            for given_id in ids:
+                if given_id not in deletable:
+                    continue  # withheld: not visible to this caller (fail-closed)
+                removed = [
+                    await self._delete_document_anywhere(doc, banks) for doc in deletable[given_id]
+                ]
+                if any(removed):
+                    deleted += 1
+            return {"deleted": deleted}
         # Legacy multi-bank mode needs no gate — _allowed_namespaces never
         # yields a foreign private bank and each project has its own bank, so
-        # bank isolation already protects both.
-        deletable = (
-            await self._deletable_ids(set(ids), banks, client_id, dataset)
-            if self._unified_bank
-            else None
-        )
+        # bank isolation already protects both. The id is tried as a document
+        # id first (no scan on the common path); only an id that misses every
+        # bank is resolved, so a fact or observation id still deletes.
+        missed: list[str] = []
         for given_id in ids:
-            if deletable is None:
-                document_id = given_id
-            elif given_id in deletable:
-                document_id = deletable[given_id]
+            if await self._delete_document_anywhere(given_id, banks):
+                deleted += 1
             else:
-                continue  # withheld: not visible to this caller (fail-closed)
-            for bank in banks:
-                try:
-                    res = await self._call("delete_document", bank_id=bank, document_id=document_id)
-                except Exception as exc:
-                    if _http_status(exc) == 404:
-                        continue  # not in this bank — keep sweeping
-                    raise
-                if int(res.get("memory_units_deleted", 0)) > 0:
+                missed.append(given_id)
+        if missed:
+            resolved = await self._deletable_ids(
+                set(missed), banks, client_id, dataset, enforce_acl=False
+            )
+            for given_id in missed:
+                docs = [d for d in resolved.get(given_id, []) if d != given_id]
+                removed = [await self._delete_document_anywhere(doc, banks) for doc in docs]
+                if any(removed):
                     deleted += 1
-                    break
         return {"deleted": deleted}
 
     # ── recall (fan-out added in Task P1-3) ────────────────────────────
