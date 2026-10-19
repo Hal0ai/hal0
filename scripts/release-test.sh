@@ -192,12 +192,18 @@ since_ms() {
 # This is a safety net only: the `unload` row is what asserts unload (#2351).
 CREATED_SLOTS=()
 LOADED_SEEDED_SLOTS=()
+# Set when the kokoro row switched the voice.tts selection on (cleanup turns it off).
+TTS_SELECTED=0
 # Slots whose `slot load` exited 0 this run — the `unload` row's work list.
 LOADED_SLOTS=()
 # shellcheck disable=SC2329  # invoked via the EXIT trap below
 cleanup() {
     if [[ ${#CREATED_SLOTS[@]} -eq 0 && ${#LOADED_SEEDED_SLOTS[@]} -eq 0 ]]; then return; fi
     log_step "Cleanup"
+    if [[ "${TTS_SELECTED}" == 1 ]]; then
+        ssh_exec "${REMOTE_HAL0_BIN} capabilities set voice tts --disabled 2>/dev/null || true" || true
+        log_info "voice tts selection disabled again"
+    fi
     if [[ ${#LOADED_SEEDED_SLOTS[@]} -gt 0 ]]; then
         for slot in "${LOADED_SEEDED_SLOTS[@]}"; do
             ssh_exec "${REMOTE_HAL0_BIN} slot unload ${slot} 2>/dev/null || true" || true
@@ -315,6 +321,18 @@ for s in slots if isinstance(slots, list) else []:
 # Lifecycle state of an existing slot (empty if absent or unparsable). The
 # /api/slots rows carry it as `status` (slot_view/__init__.py::serialize_slot);
 # `state` is read as a fallback the same way slot_commands.py::slot_list does.
+# Poll `slot list --json` until <slot> reports <state>, for up to <seconds>.
+remote_wait_state() {
+    # remote_wait_state <slot> <state> <seconds>
+    local deadline=$(( $(date +%s) + $3 )) cur=""
+    while (( $(date +%s) < deadline )); do
+        cur="$(remote_slot_state "$1" || true)"
+        [[ "${cur}" == "$2" ]] && return 0
+        sleep 5
+    done
+    return 1
+}
+
 remote_slot_state() {
     ssh_exec "${REMOTE_HAL0_BIN} slot list --json 2>/dev/null" 2>/dev/null \
         | python3 -c '
@@ -465,14 +483,22 @@ if [[ -z "${DIGEST}" ]]; then
 elif [[ -z "${MODEL}" ]]; then
     add_row "kokoro" "skip" "$(since_ms "${start}")" "no installed tts model in the registry — pull/register a kokoro model first"
 else
-    # A tts+cpu slot infers the kokoro profile (install/profile_derive.py:
-    # cpu + tts → kokoro). The gateway requires `model` in the body
-    # (v1.py::audio_speech) and routes it to the tts slot bound to that id.
-    # `voice` is optional (the kokoro server falls back to its default
-    # voice); response_format must be requested as wav explicitly — the
-    # kokoro server's default is mp3, which would fail the RIFF check.
-    remote_slot_create kokoro tts cpu "${MODEL}"
-    if remote_slot_load "${SLOT}" \
+    # /v1/audio/speech is path-pinned to the slot NAMED `tts`
+    # (dispatcher/_capability_resolve.py rule 3 + the name-keyed acceptance
+    # below it, #2784): a tts slot under any other name loads and registers
+    # but never routes. So this row drives the SEEDED tts slot through the
+    # capability selection, the same path the dashboard's voice panel takes
+    # (`capabilities set voice tts` applies the selection and loads the slot;
+    # cpu + tts -> the kokoro profile). The gateway requires `model` in the
+    # body (v1.py::audio_speech); `voice` is optional (the kokoro server
+    # falls back to its default voice); response_format must be requested as
+    # wav explicitly — the kokoro server's default is mp3, which would fail
+    # the RIFF check.
+    LOADED_SEEDED_SLOTS+=("tts")
+    TTS_SELECTED=1
+    if ssh_exec "${REMOTE_HAL0_BIN} capabilities set voice tts --backend cpu --model '${MODEL}' --enabled" >/dev/null 2>&1 \
+        && remote_wait_state tts ready 180 \
+        && { LOADED_SLOTS+=("tts"); true; } \
         && ssh_exec '
         set -e
         TMP=$(mktemp -d)
@@ -487,9 +513,9 @@ else
         test "$(wc -c < "$TMP/out.wav")" -gt 1024
         rm -rf $TMP
     '; then
-        add_row "kokoro" "pass" "$(since_ms "${start}")" "tts slot loaded (${MODEL}) and audio/speech returned a non-empty RIFF WAV (>1KiB)"
+        add_row "kokoro" "pass" "$(since_ms "${start}")" "seeded tts slot loaded ${MODEL} via the voice selection and audio/speech returned a non-empty RIFF WAV (>1KiB)"
     else
-        add_row "kokoro" "fail" "$(since_ms "${start}")" "slot load or audio/speech smoke failed — check journalctl -u hal0-slot@${SLOT}"
+        add_row "kokoro" "fail" "$(since_ms "${start}")" "voice selection apply, tts slot load or audio/speech smoke failed — check journalctl -u hal0-slot@tts"
     fi
 fi
 
