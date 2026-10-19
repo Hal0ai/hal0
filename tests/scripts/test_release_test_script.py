@@ -14,6 +14,11 @@ Three regressions are pinned here:
 * #2351 — the gate never asserted unload: the only ``slot unload`` calls
   were in the EXIT-trap cleanup, failures swallowed, no row written. An
   ``unload`` row now requires every loaded slot to unload to ``offline``.
+* #2784 — ``/v1/audio/speech`` routes only to the slot named ``tts``, so the
+  kokoro row drives the seeded ``tts`` slot through ``capabilities set voice
+  tts`` instead of creating a ``<prefix>-kokoro`` slot that never routes;
+  the unload row and the cleanup must cover that slot and the cleanup must
+  switch the selection off again.
 
 The REAL script runs against a stubbed ``ssh`` on a hermetic PATH: the stub
 records every remote command and answers just enough of the CLI surface for
@@ -83,12 +88,18 @@ if "/dev/accel/accel0" in cmd:
 if "/v1/models" in cmd:
     print("1")
     sys.exit(0)
-fail = os.environ.get("STUB_FAIL_SUBSTR")
-if fail and fail in cmd:
-    sys.exit(1)
 words = cmd.split()
-if len(words) >= 4 and words[1:3] == ["slot", "load"]:
+is_slot_load = len(words) >= 4 and words[1:3] == ["slot", "load"]
+is_tts_enable = "capabilities set voice tts" in cmd and "--enabled" in cmd
+if os.environ.get("STUB_LOAD_FAIL") and (is_slot_load or is_tts_enable):
+    sys.exit(1)
+if is_slot_load:
     slots[words[3]] = "ready"
+elif is_tts_enable:
+    # Applying the voice selection loads the seeded `tts` slot (#2784).
+    slots["tts"] = "ready"
+elif "capabilities set voice tts" in cmd and "--disabled" in cmd:
+    slots["tts"] = "offline"
 elif len(words) >= 4 and words[1:3] == ["slot", "unload"]:
     if os.environ.get("STUB_UNLOAD_FAIL") and "|| true" not in cmd:
         sys.exit(1)
@@ -99,8 +110,12 @@ with open(state_path, "w", encoding="utf-8") as fh:
 sys.exit(0)
 """
 
-# macOS `date` has no %N; the script only ever calls `date +%s%N`.
-_DATE_STUB = "#!/usr/bin/env python3\nimport time\nprint(time.time_ns())\n"
+# macOS `date` has no %N; the script calls `date +%s%N` for row timing and
+# `date +%s` for the remote_wait_state deadline.
+_DATE_STUB = (
+    "#!/usr/bin/env python3\nimport sys, time\n"
+    "print(int(time.time()) if sys.argv[1:] == ['+%s'] else time.time_ns())\n"
+)
 
 
 def _write_exec(path: Path, body: str) -> None:
@@ -217,6 +232,7 @@ def test_unpinned_runners_skip_their_rows_as_image_not_available(tmp_path: Path)
         assert "image-not-available" in rows[name]["detail"]
         assert f"runners.{key}.digest is null" in rows[name]["detail"]
     assert not [c for c in cmds if c.startswith("/opt/test/hal0 slot create ")]
+    assert not [c for c in cmds if "capabilities set voice tts" in c]
 
 
 def test_vulkan_and_rocm_rows_read_the_standard_runner(tmp_path: Path) -> None:
@@ -237,29 +253,29 @@ def test_vulkan_and_rocm_rows_read_the_standard_runner(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(
-    ("fail_substr", "expected_rc"),
+    ("load_fail", "expected_rc"),
     [
-        (None, 0),  # every row passes → cleanup on a normal exit
-        ("slot load", 1),  # every slot load fails → cleanup on a failing exit
+        (False, 0),  # every row passes → cleanup on a normal exit
+        (True, 1),  # every load fails → cleanup on a failing exit
     ],
 )
 def test_cleanup_tears_down_every_created_slot(
-    tmp_path: Path, fail_substr: str | None, expected_rc: int
+    tmp_path: Path, load_fail: bool, expected_rc: int
 ) -> None:
     extra = {"HAL0_TEST_BIN": "/opt/test/hal0"}
-    if fail_substr:
-        extra["STUB_FAIL_SUBSTR"] = fail_substr
+    if load_fail:
+        extra["STUB_LOAD_FAIL"] = "1"
     proc, cmds = _run(tmp_path, **extra)
     assert proc.returncode == expected_rc, proc.stdout + proc.stderr
 
     created = [c.split()[3] for c in cmds if c.startswith("/opt/test/hal0 slot create ")]
     expected = [
-        f"{_PREFIX}-{suffix}"
-        for suffix in ("vulkan", "rocm", "moonshine", "kokoro")
-        if _manifest_has(suffix)
+        f"{_PREFIX}-{suffix}" for suffix in ("vulkan", "rocm", "moonshine") if _manifest_has(suffix)
     ]
     assert created == expected, cmds
     assert created, "manifest pins no slot-creating row; the test exercises nothing"
+    # The kokoro row never creates a slot: it drives the seeded `tts` slot (#2784).
+    assert not [c for c in created if c.endswith("-kokoro")]
 
     assert "── Cleanup" in proc.stdout
     for slot in created:
@@ -268,6 +284,17 @@ def test_cleanup_tears_down_every_created_slot(
         assert f"/opt/test/hal0 slot delete {slot} --force 2>/dev/null || true" in cmds[create_at:]
         assert f"/opt/test/hal0 slot unload {slot} 2>/dev/null || true" in cmds[create_at:]
         assert f"cleaned up {slot}" in proc.stdout
+
+    # The seeded tts slot: selection switched on, then off again and unloaded
+    # from the EXIT trap, whether or not the apply succeeded.
+    assert _manifest_has("kokoro")
+    enable_at = cmds.index(
+        "/opt/test/hal0 capabilities set voice tts --backend cpu --model 'tts-model' --enabled"
+    )
+    tail = cmds[enable_at:]
+    assert "/opt/test/hal0 capabilities set voice tts --disabled 2>/dev/null || true" in tail
+    assert "/opt/test/hal0 slot unload tts 2>/dev/null || true" in tail
+    assert "voice tts selection disabled again" in proc.stdout
 
 
 # ── #2477: the default llm pick never lands on an FLM (NPU) model ───────────
@@ -350,11 +377,11 @@ def _unload_row(tmp_path: Path) -> dict:
 
 
 def _loaded_slots() -> list[str]:
-    return [
-        f"{_PREFIX}-{suffix}"
-        for suffix in ("vulkan", "rocm", "moonshine", "kokoro")
-        if _manifest_has(suffix)
+    created = [
+        f"{_PREFIX}-{suffix}" for suffix in ("vulkan", "rocm", "moonshine") if _manifest_has(suffix)
     ]
+    # The kokoro row loads the seeded `tts` slot through the selection (#2784).
+    return created + (["tts"] if _manifest_has("kokoro") else [])
 
 
 def test_unload_row_passes_when_every_loaded_slot_goes_offline(tmp_path: Path) -> None:
@@ -397,9 +424,10 @@ def test_unload_row_fails_when_slot_is_still_loaded(tmp_path: Path) -> None:
 
 
 def test_unload_row_skips_when_nothing_was_loaded(tmp_path: Path) -> None:
-    # Every `slot load` fails, so no slot reached ready and there is nothing
-    # to unload: the row is a skip (the load rows already carry the failure).
-    proc, cmds = _run(tmp_path, HAL0_TEST_BIN="/opt/test/hal0", STUB_FAIL_SUBSTR="slot load")
+    # Every load fails (slot load and the voice selection apply alike), so no
+    # slot reached ready and there is nothing to unload: the row is a skip
+    # (the load rows already carry the failure).
+    proc, cmds = _run(tmp_path, HAL0_TEST_BIN="/opt/test/hal0", STUB_LOAD_FAIL="1")
     assert proc.returncode == 1, proc.stdout + proc.stderr
     row = _unload_row(tmp_path)
     assert row["status"] == "skip", row
