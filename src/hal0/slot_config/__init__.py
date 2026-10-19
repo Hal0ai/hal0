@@ -728,6 +728,19 @@ class SlotConfigStore:
         """
         if slot_selection.child not in cls._ENGINE_SWITCH_CHILDREN:
             return None
+        if slot_selection.child == "tts":
+            # Same vetoed answer the capability label uses (#2749): the shared
+            # rule says qwen3-tts for every GPU, but the qwen3tts runner is
+            # ROCm-only and a written ``profile`` is NOT re-vetoed at launch
+            # (providers/container.py _provider_for_family dispatches on the
+            # family alone). A vetoed device (gpu-vulkan) gets the Kokoro CPU
+            # engine, which is also what the profile-less fallback runs.
+            from hal0.capabilities.catalog import tts_profile_for_device
+            from hal0.slots.profile_adopt import type_implied_profile
+
+            return type_implied_profile(
+                {"type": "tts", "device": slot_selection.selection.device}
+            ) or tts_profile_for_device("cpu")
         from hal0.capabilities.profile_fit import profile_name_for_fit
 
         return profile_name_for_fit(

@@ -154,3 +154,18 @@ async def test_partial_apply_heals_llama_server_provider(
     assert out["provider"] == "kokoro"
     assert apply_orch._load().selections["voice"]["tts"].provider == "kokoro"
     assert _tts_toml(tmp_hal0_home)["provider"] == "kokoro"
+
+
+@pytest.mark.asyncio
+async def test_vulkan_selection_label_and_profile_agree(
+    apply_orch: CapabilityOrchestrator, tmp_hal0_home: str
+) -> None:
+    """gpu-vulkan has no qwen3tts runner (ROCm-only): label and profile are both Kokoro."""
+    await apply_orch.initialize_if_missing()
+    out = await apply_orch.apply(
+        "voice", "tts", {"device": "gpu-vulkan", "model": "kokoro-v1", "enabled": True}
+    )
+    written = _tts_toml(tmp_hal0_home)
+    assert out["provider"] == "kokoro"
+    assert written["provider"] == "kokoro"
+    assert written["profile"] == "kokoro"
