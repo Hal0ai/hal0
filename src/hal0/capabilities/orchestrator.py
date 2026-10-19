@@ -79,14 +79,13 @@ _CHILD_TO_SLOT: dict[tuple[str, str], str] = {
 def _engine_provider_for_tts(device: str, provider: str) -> str:
     """Provider label for a voice.tts selection (#2749).
 
-    The shipped ``tts.toml`` carries no ``provider`` key, so the seed used to
-    inherit ``SlotConfig``'s deprecated ``llama-server`` default. A tts
-    selection never runs llama-server: the engine comes from the profile the
-    device implies (cpu -> kokoro, gpu-rocm -> qwen3tts), the same dispatch
-    the slot view reports. Any other explicit provider is left alone.
+    A tts selection's provider is never an input: ``profile_name_for_fit``
+    resolves the engine from the device alone (cpu -> kokoro, gpu-rocm ->
+    qwen3tts) and the container dispatch ignores the stored value. So the
+    label is always re-derived from the device; keeping a stored value would
+    leave the previous engine's name behind after a device switch. Falls back
+    to ``provider`` only when no engine resolves.
     """
-    if provider and provider != "llama-server":
-        return provider
     from hal0.slots.config_write import _cfg_effective_provider
 
     cfg: dict[str, Any] = {"type": "tts", "device": device}
@@ -335,8 +334,8 @@ class CapabilityOrchestrator:
         slot_bucket = cfg.selections.setdefault(slot, {})
         selection = slot_bucket.setdefault(child, CapabilitySelection())
         if child == "tts":
-            # Heal a selection seeded before #2749 with the deprecated
-            # ``llama-server`` default (runtime re-derive, no migration).
+            # The tts provider is derived from the device, never stored as a
+            # pick; this also heals pre-#2749 ``llama-server`` seeds.
             selection.provider = _engine_provider_for_tts(selection.device, selection.provider)
         return selection
 
@@ -497,6 +496,12 @@ class CapabilityOrchestrator:
                     merged_data["device"] = canonical_device(str(partial[key]))
                 else:
                     merged_data[key] = partial[key]
+        if child == "tts":
+            # Provider follows the device (#2749); a device switch must not
+            # keep the previous engine's label in the selection or tts.toml.
+            merged_data["provider"] = _engine_provider_for_tts(
+                str(merged_data.get("device", "")), str(merged_data.get("provider", ""))
+            )
         try:
             merged = CapabilitySelection.model_validate(merged_data)
         except Exception as exc:

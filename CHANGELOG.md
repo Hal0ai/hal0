@@ -88,6 +88,8 @@ applying. Add those subsections to a version's section to surface them; see
 
 ### Fixed
 
+- **The text-to-speech selection now names the engine that actually runs.** A fresh install showed `llama-server` as the voice.tts provider, and after switching the device (CPU to GPU or back) the selection and `tts.toml` kept the previous engine's name, so the dashboard could offer Kokoro voices for a Qwen3-TTS engine. The provider is now always derived from the device (`kokoro` on CPU, `qwen3tts` on GPU), on read and on every apply (#2749).
+
 - **A slot now tells llama-server which device to use.** The slot layer passes `--device` from the slot's device (`ROCm0`, `Vulkan0`, `CUDA0`, or `none` for a CPU slot). Before, a runner image that lists both ROCm and Vulkan for the same GPU split every model across both backends; each idle server then held compute queues on both, and with two or more slots loaded the GPU sat at 100 % busy and full clock around the clock (#2767).
 
 - **A paired DFlash or EAGLE-3 drafter no longer aborts the slot at load.** The slot layer pinned the drafter to one device while the model itself was free to span every device the runner sees, and those drafter kinds borrow the model's embedding and output tensors, so llama-server stopped with `pre-allocated tensor (output.weight) in a buffer ... that cannot run the operation`. A drafter file now follows the model's devices; only embedded MTP heads still get `--spec-draft-device` (ADR-0031, amended) (#2766).
