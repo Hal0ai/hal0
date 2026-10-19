@@ -1,4 +1,5 @@
 import pytest
+from structlog.testing import capture_logs
 
 from hal0.normalize.resolver import (
     DEFAULT_CHAINS,
@@ -63,19 +64,42 @@ def test_npu_picks_npu_first_never_commandeers_agent():
 
 
 def test_npu_falls_to_utility_before_agent():
-    r = resolve_chain("hal0/npu", _slots(), loaded={"tiny-0.8b", "big-35b"})
+    """With no npu-device slot at all, hal0/npu walks on to utility, not agent."""
+    slots = [s for s in _slots() if s.device != "npu"]
+    r = resolve_chain("hal0/npu", slots, loaded={"tiny-0.8b", "big-35b"})
     assert r.model_id == "tiny-0.8b"
     assert r.matched_name == "utility"
 
 
-def test_utility_falls_back_to_agent_anchor():
-    """hal0/utility chain is (utility, agent): when utility is unloaded but the
-    agent anchor is loaded, it resolves to agent (NOT npu — npu is not in the
-    utility chain anymore)."""
+def test_npu_cold_bound_npu_slot_wins_over_warm_utility():
+    """#2741: a model-bound npu slot is loaded on demand; a warm utility further
+    down the chain does not capture the alias."""
+    r = resolve_chain("hal0/npu", _slots(), loaded={"tiny-0.8b", "big-35b"})
+    assert r.model_id == "qwen3-4b-FLM"
+    assert r.matched_name == "npu"
+    assert r.fallback is False
+    assert r.needs_load is True
+
+
+def test_utility_cold_bound_slot_wins_over_warm_agent():
+    """#2741: hal0/utility chain is (utility, agent). A model-bound utility that
+    is unloaded is loaded on demand; a warm agent anchor does NOT capture it."""
     r = resolve_chain("hal0/utility", _slots(), loaded={"big-35b"})
+    assert r.model_id == "tiny-0.8b"
+    assert r.matched_name == "utility"
+    assert r.fallback is False
+    assert r.needs_load is True
+
+
+def test_utility_without_bound_slot_falls_to_agent_anchor():
+    """No model-bound utility in the views: the chain walks on to agent (NOT npu
+    — npu is not in the utility chain)."""
+    slots = [s for s in _slots() if s.name != "utility"]
+    r = resolve_chain("hal0/utility", slots, loaded={"big-35b"})
     assert r.model_id == "big-35b"
     assert r.matched_name == "agent"
     assert r.fallback is False
+    assert r.needs_load is False
 
 
 def test_utility_prefers_utility_when_loaded():
@@ -124,10 +148,77 @@ def test_utility_chain_does_not_pick_non_utility_named_slot():
     assert r.matched_name == "agent"
 
 
-def test_full_miss_falls_back_to_configured_primary_unloaded():
-    r = resolve_chain("hal0/utility", _slots(), loaded=set())
-    assert r.model_id == "big-35b"  # the `agent` anchor
+def _utility_and_agent():
+    return [
+        SlotView(name="utility", device="gpu-vulkan", model_id="a", context_length=8192),
+        SlotView(name="agent", device="gpu-vulkan", model_id="b", context_length=65536),
+    ]
+
+
+def test_cold_utility_resolves_to_utility_not_agent():
+    """#2741 acceptance: nothing loaded, utility bound to its own model -> the
+    utility slot is the answer (loaded on demand), never the agent anchor."""
+    r = resolve_chain("hal0/utility", _utility_and_agent(), loaded=set())
+    assert r.model_id == "a"
+    assert r.context_length == 8192
+    assert r.matched_name == "utility"
+    assert r.fallback is False
+    assert r.needs_load is True
+
+
+def test_cold_utility_logs_load_substitution():
+    with capture_logs() as logs:
+        resolve_chain("hal0/utility", _utility_and_agent(), loaded=set())
+    recs = [e for e in logs if e.get("event") == "resolver.fallback"]
+    assert len(recs) == 1
+    assert recs[0]["log_level"] == "info"
+    assert recs[0]["requested"] == "hal0/utility"
+    assert recs[0]["chain"] == ["utility", "agent"]
+    assert recs[0]["resolved_slot"] == "utility"
+    assert recs[0]["reason"] == "not_loaded_loading"
+
+
+def test_loaded_utility_unchanged():
+    """#2741 acceptance: utility loaded -> same answer as before the fix."""
+    with capture_logs() as logs:
+        r = resolve_chain("hal0/utility", _utility_and_agent(), loaded={"a", "b"})
+    assert r.model_id == "a"
+    assert r.matched_name == "utility"
+    assert r.fallback is False
+    assert r.needs_load is False
+    assert not [e for e in logs if e.get("event") == "resolver.fallback"]
+
+
+def test_modelless_utility_falls_back_to_agent_and_logs():
+    """#2741 acceptance: a model-less utility is absent from the views
+    (hal0_llm_slot_views drops unbound slots), so the request lands on the
+    agent's model. Agent is the chain's own second link, so it matches by name
+    and carries the agent lane pin."""
+    slots = [SlotView(name="agent", device="gpu-vulkan", model_id="b", context_length=65536)]
+    with capture_logs() as logs:
+        r = resolve_chain("hal0/utility", slots, loaded=set())
+    assert r.model_id == "b"
+    assert r.matched_name == "agent"
+    assert r.needs_load is True
+    recs = [e for e in logs if e.get("event") == "resolver.fallback"]
+    assert [e["reason"] for e in recs] == ["not_loaded_loading"]
+    assert recs[0]["resolved_slot"] == "agent"
+
+
+def test_full_miss_falls_back_to_configured_primary():
+    """No chain entry has a bound model: fall back to the configured primary
+    with ``fallback=True`` and log ``no_model_bound_using_anchor``. Fresh
+    install (#2716): agent and utility are model-less, only brain is bound."""
+    slots = [SlotView(name="brain", device="gpu-vulkan", model_id="lfm", context_length=32768)]
+    with capture_logs() as logs:
+        r = resolve_chain("hal0/utility", slots, loaded=set())
+    assert r.model_id == "lfm"
+    assert r.matched_name is None
     assert r.fallback is True
+    recs = [e for e in logs if e.get("event") == "resolver.fallback"]
+    assert len(recs) == 1
+    assert recs[0]["reason"] == "no_model_bound_using_anchor"
+    assert recs[0]["resolved_slot"] == "brain"
 
 
 def test_empty_slots_degrades_to_blank_resolution():
@@ -155,19 +246,19 @@ def test_generalized_custom_slot_resolves():
     assert r.fallback is False
 
 
-def test_generalized_custom_slot_falls_back_to_agent():
-    """A generalized hal0/<slot> falls back to the agent anchor when the slot's
-    own model isn't loaded."""
+@pytest.mark.parametrize("loaded", [set(), {"big"}])
+def test_generalized_cold_custom_slot_loads_that_slot(loaded):
+    """#2741: a generalized hal0/<slot> whose slot is model-bound but cold
+    resolves to that slot (loaded on demand), whether or not agent is warm."""
     slots = [
         SlotView(name="agent", device="gpu-vulkan", model_id="big", context_length=65536),
         SlotView(name="coder", device="gpu-vulkan", model_id="coder-30b", context_length=32768),
     ]
-    r = resolve_chain("hal0/coder", slots, loaded={"big"})
-    # agent is the second link in the (coder, agent) chain; it's loaded, so this
-    # is a genuine chain match on the anchor (not a no-load fallback).
-    assert r.model_id == "big"
-    assert r.matched_name == "agent"
+    r = resolve_chain("hal0/coder", slots, loaded=loaded)
+    assert r.model_id == "coder-30b"
+    assert r.matched_name == "coder"
     assert r.fallback is False
+    assert r.needs_load is True
 
 
 def test_default_chains_shape():

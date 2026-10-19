@@ -2099,8 +2099,8 @@ async def _resolved_slot_image(request: Request, model: Any) -> str | None:
         if res is None:
             return None
 
-        # A chain match names the slot directly; a fallback (nothing in the
-        # chain loaded) still resolves to a real slot via the same
+        # A chain match names the slot directly; a fallback (no chain entry
+        # has a model-bound slot) still resolves to a real slot via the same
         # `_configured_primary` tie-break `resolve_chain` uses internally.
         slot_name = res.matched_name
         if slot_name is None:

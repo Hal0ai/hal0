@@ -72,7 +72,8 @@ def rank_slot_name(
     """Selection key for one slot — lower sorts first.
 
     ``(lane-miss, health-rank)``: the lane-pinned slot wins outright (the pin is
-    only set for a slot the resolver already saw live), then health ordering
+    only set for a model-bound slot the resolver matched in the chain, which the
+    route layer loads before dispatch — #2741), then health ordering
     from :func:`hal0.slots.state.slot_selection_rank`. Callers append their own
     final tiebreak (declaration index) to keep the ordering deterministic.
     """

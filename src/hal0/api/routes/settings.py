@@ -428,7 +428,11 @@ async def get_apply_plan() -> dict[str, Any]:
 
 
 async def _live_target_for(request: Request, value: Any) -> bool | None:
-    """Whether a ``hal0/<slot>``-style value currently resolves to a loaded slot.
+    """Whether a ``hal0/<slot>``-style value resolves to a model-bound chain slot.
+
+    A cold but model-bound slot counts: the route layer loads it on demand
+    (#2741). Only the anchor fallback (no chain entry has a bound model) is
+    reported as ``False``.
 
     Returns ``None`` when ``value`` isn't a virtual model reference (nothing
     to say), ``True``/``False`` otherwise. Used to flag #2108's fresh-install

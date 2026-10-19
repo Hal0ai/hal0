@@ -10,6 +10,10 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 
+import structlog
+
+log = structlog.get_logger("hal0-normalize")
+
 # ADR-0023: `agent` is the canonical default/anchor slot (replaces `chat`); every
 # fallback chain ends in `agent`. `utility` is the explicitly-targeted cheap helper
 # and is NEVER the fallback for general chat.
@@ -19,13 +23,14 @@ from dataclasses import dataclass
 _ANCHOR_NAME = "agent"
 _VIRTUAL_PREFIX = "hal0/"
 
-# Canonical virtual names -> ordered chain of slot names to try against loaded slots.
+# Canonical virtual names -> ordered chain of slot names; the first model-bound one wins.
 # These three are the *advertised* names (the Hermes / OpenWebUI picker). ANY other
 # enabled llm slot `X` is still addressable as `hal0/X` via the generalized chain
 # built in `_chain_for` — the mapping is read from the live slot set, not frozen here.
 DEFAULT_CHAINS: dict[str, tuple[str, ...]] = {
     "hal0/agent": (_ANCHOR_NAME,),
-    # hal0/utility → the cheap helper slot; falls back to the anchor when unloaded.
+    # hal0/utility → the cheap helper slot (loaded on demand when cold); falls
+    # back to the anchor only when utility has no bound model (#2741).
     "hal0/utility": ("utility", _ANCHOR_NAME),
     "hal0/npu": ("npu", "utility", _ANCHOR_NAME),
     # hal0/brain → the dashboard agent-chat persona. No installer seeds a `brain`
@@ -74,8 +79,15 @@ class SlotView:
 class Resolution:
     model_id: str
     context_length: int
-    matched_name: str | None  # slot name that matched a loaded slot, or None on fallback
-    fallback: bool  # True => nothing in the chain was loaded; caller should ensure-load
+    # Chain entry that matched a model-bound slot (loaded or not), or None when
+    # no chain entry could serve and the configured primary was substituted.
+    matched_name: str | None
+    # True => no chain entry has a model-bound slot; the configured primary
+    # (normally the `agent` anchor) was substituted.
+    fallback: bool
+    # True => the resolved slot's model is not currently loaded; the route
+    # layer's backend-aware load brings it up (#2741).
+    needs_load: bool = False
 
 
 def _slot_matches_name(slot: SlotView, name: str) -> bool:
@@ -109,24 +121,64 @@ def resolve_chain(
     """Resolve a virtual name to a live slot's physical model id.
 
     Returns ``None`` if ``virtual_name`` is not a known virtual name. Otherwise
-    always returns a ``Resolution`` (falling back to the configured primary,
-    ``fallback=True``, when no chain role is currently loaded).
+    always returns a ``Resolution``: the first chain entry with a model-bound
+    slot (``needs_load=True`` when that model is not loaded yet), or the
+    configured primary with ``fallback=True`` when no chain entry has a
+    model-bound slot. Every substitution is logged as ``resolver.fallback``.
     """
     chain = _chain_for(virtual_name, slots)
     if chain is None:
         return None
 
+    # #2741 (ADR-0023 §2 amendment): the first chain entry whose slot has a
+    # bound model wins, LOADED OR NOT. Counting only loaded entries let a warm
+    # (or merely configured) agent anchor capture `hal0/utility` /
+    # `hal0/brain` / `hal0/<slot>` whenever that slot was cold, so the
+    # backend-aware load woke the agent instead of the slot the caller named.
+    # A cold match returns ``needs_load=True`` with ``matched_name`` set, so the
+    # route layer pins the lane and loads exactly that slot.
     for name in chain:
         for slot in slots:
+            if not (_slot_matches_name(slot, name) and slot.model_id):
+                continue
             # Contract: both sides are the canonical model_id, compared exactly.
             # The async wrapper passes the loaded model ids verbatim — exact
             # match is intended, do NOT lowercase.
-            if _slot_matches_name(slot, name) and slot.model_id in loaded:
-                return Resolution(slot.model_id, slot.context_length, name, fallback=False)
+            needs_load = slot.model_id not in loaded
+            if needs_load:
+                log.info(
+                    "resolver.fallback",
+                    requested=virtual_name,
+                    chain=list(chain),
+                    resolved_slot=slot.name,
+                    reason="not_loaded_loading",
+                )
+            return Resolution(
+                slot.model_id,
+                slot.context_length,
+                name,
+                fallback=False,
+                needs_load=needs_load,
+            )
 
+    # No chain entry has a model-bound slot (e.g. a model-less utility on a
+    # fresh install, #2716): fall back to the configured primary.
     primary = _configured_primary(slots)
     if primary is not None:
-        return Resolution(primary.model_id, primary.context_length, None, fallback=True)
+        log.info(
+            "resolver.fallback",
+            requested=virtual_name,
+            chain=list(chain),
+            resolved_slot=primary.name,
+            reason="no_model_bound_using_anchor",
+        )
+        return Resolution(
+            primary.model_id,
+            primary.context_length,
+            None,
+            fallback=True,
+            needs_load=primary.model_id not in loaded,
+        )
     # No slots at all: degrade to a bare model id so the caller can still 503 cleanly.
     return Resolution("", 0, None, fallback=True)
 

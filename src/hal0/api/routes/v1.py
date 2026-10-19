@@ -598,9 +598,12 @@ async def _normalize_chat_body(request: Request, body: dict[str, Any]) -> dict[s
             # hal0-brain-sft-fpx8) the lane silently landed on the wrong slot.
             # Carry the matched slot forward as a request-scoped pin so the
             # backend-aware load and the dispatcher's upstream ordering can
-            # honour the lane the caller actually asked for. Set only when the
-            # resolver matched a LIVE slot in the chain (`fallback=False`), so a
-            # pin never points at a slot that cannot serve.
+            # honour the lane the caller actually asked for. Set whenever the
+            # resolver matched a model-bound slot in the chain (`fallback=False`),
+            # loaded or not (#2741): for a cold match the pin is what makes
+            # `_ensure_backend_for_model` load THAT slot rather than the agent
+            # anchor or another slot sharing the model id. On the anchor
+            # fallback (no chain entry has a bound model) no pin is set.
             if res.matched_name and not res.fallback:
                 set_lane_pin(request, res.matched_name)
                 pinned = res.matched_name
@@ -1167,10 +1170,10 @@ async def _resolve_virtual_model_entry(
     # The aggregated catalog lists a co-resident chat slot under its ALIAS
     # (e.g. "agent"), not its physical model id (e.g. "big") — see
     # ``hal0_slot_alias_models`` / the test_virtual_models module docstring.
-    # ``res.matched_name`` is that alias when the resolver matched a LIVE
-    # slot in the chain. On the ``fallback=True`` path (nothing in the chain
-    # currently loaded — the common case right after a fresh boot, which is
-    # exactly when hermes probes this route) the resolver deliberately
+    # ``res.matched_name`` is that alias when the resolver matched a
+    # model-bound slot in the chain (loaded or not, #2741). On the
+    # ``fallback=True`` path (no chain entry has a bound model, so the
+    # configured primary was substituted) the resolver deliberately
     # returns ``matched_name=None``, so fall back to scanning the same slot
     # views for whichever slot owns ``res.model_id`` and use ITS alias.
     candidate_ids: list[str] = []
