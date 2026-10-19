@@ -622,6 +622,47 @@ def test_register_pulled_fileset_stamps_and_clears_quant(tmp_hal0_home: str) -> 
     assert entry.hf_filename == "plainmodel.gguf"
 
 
+def test_register_pulled_fileset_clears_tombstones_for_extra_files(tmp_hal0_home: str) -> None:
+    """A pull un-ignores every path it installs (#2748): clearing only the
+    entry file left an extra_files tombstone behind, hiding a kept
+    voices-v1.0.bin from scans even though the pull had brought it back."""
+    from hal0.registry import tombstones
+    from hal0.registry.fileset import FileSetEntry, FileSetPlan
+    from hal0.registry.pull import _register_pulled_fileset
+
+    registry = ModelRegistry()
+    root = Path(tmp_hal0_home) / "tts" / "kokoro-v1"
+    root.mkdir(parents=True, exist_ok=True)
+    entry_dest = root / "kokoro-v1.0.gguf"
+    extra_dest = root / "voices-v1.0.bin"
+    entry_dest.write_bytes(_payload(2048))
+    extra_dest.write_bytes(_payload(1024))
+
+    added = tombstones.add([entry_dest, extra_dest])
+    assert len(added) == 2
+    assert set(tombstones.load()) >= set(added)
+
+    plan = FileSetPlan(
+        repo="hexgrad/kokoro-v1",
+        revision="deadbeef",
+        entry_rel="kokoro-v1.0.gguf",
+        files=[
+            FileSetEntry(rel="kokoro-v1.0.gguf", role="model"),
+            FileSetEntry(rel="voices-v1.0.bin", role="config"),
+        ],
+    )
+    _register_pulled_fileset(
+        registry,
+        model_id="kokoro-v1",
+        fileset=plan,
+        installed=[(plan.files[0], entry_dest), (plan.files[1], extra_dest)],
+        entry_dest=entry_dest,
+        mmproj_dest=None,
+    )
+
+    assert set(tombstones.load()).isdisjoint(added)
+
+
 # ── MR-1: run_pull persists a durable snapshot for ALL callers ────────────────
 
 

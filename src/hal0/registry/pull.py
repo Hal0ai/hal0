@@ -2110,8 +2110,11 @@ def _register_pulled_fileset(
     installed file (ML-2 is the first writer of that table — ML-1 imports
     it EMPTY).
     """
-    # Explicit pull: un-ignore the entry path (ADR-0026).
-    tombstones.clear(entry_dest)
+    # An explicit pull un-ignores every path it installs (#2748): clearing
+    # only the entry file left an extra_files tombstone behind — a kept
+    # voices-v1.0.bin stayed hidden after the pull brought it back.
+    for _entry, dest in installed:
+        tombstones.clear(dest)
     entry_sha = next((e.lfs_sha256 for e, dest in installed if dest == entry_dest), None)
     total_size = sum(dest.stat().st_size for _, dest in installed if dest.exists())
     fresh_meta: dict[str, Any] = {"pulled_at": int(time.time())}
