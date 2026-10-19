@@ -1700,9 +1700,11 @@ class HindsightProvider(MemoryProvider):
         id. An observation resolves to its source documents, whose deletion
         cascades it (:meth:`_deletable_ids`, #2747). One that maps to exactly
         one source document deletes that document; one that maps to more is
-        refused whole with :class:`ObservationMultiSourceDelete`, before
-        anything in the call is deleted, so a single id never reaches more
-        than one document.
+        refused whole with :class:`ObservationMultiSourceDelete`, so a single
+        id never reaches more than one document. In unified mode the refusal
+        comes before anything in the call is deleted; legacy multi-bank mode
+        deletes the call's plain document ids first and resolves observation
+        ids after (#2780).
         """
         deleted = 0
         # We don't know which bank each document_id lives in without a
