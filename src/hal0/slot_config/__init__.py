@@ -685,7 +685,12 @@ class SlotConfigStore:
             slot_device = canonical_device(selection.device)
             if slot_device:
                 updates["device"] = slot_device
-            if selection.provider:
+            # ``llama-server`` is the deprecated SlotConfig default, never a
+            # real pick for a tts/stt engine switch (#2749): don't stamp it.
+            if selection.provider and not (
+                slot_selection.child in self._ENGINE_SWITCH_CHILDREN
+                and selection.provider == "llama-server"
+            ):
                 updates["provider"] = selection.provider
             if selection.model:
                 updates["model"] = {"default": selection.model}

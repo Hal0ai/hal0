@@ -75,6 +75,27 @@ _CHILD_TO_SLOT: dict[tuple[str, str], str] = {
     ("img", "img"): "img",
 }
 
+
+def _engine_provider_for_tts(device: str, provider: str) -> str:
+    """Provider label for a voice.tts selection (#2749).
+
+    The shipped ``tts.toml`` carries no ``provider`` key, so the seed used to
+    inherit ``SlotConfig``'s deprecated ``llama-server`` default. A tts
+    selection never runs llama-server: the engine comes from the profile the
+    device implies (cpu -> kokoro, gpu-rocm -> qwen3tts), the same dispatch
+    the slot view reports. Any other explicit provider is left alone.
+    """
+    if provider and provider != "llama-server":
+        return provider
+    from hal0.slots.config_write import _cfg_effective_provider
+
+    cfg: dict[str, Any] = {"type": "tts", "device": device}
+    profile = type_implied_profile(cfg)
+    if profile:
+        cfg["profile"] = profile
+    return _cfg_effective_provider(cfg) or provider
+
+
 # Inverse for status surfacing ("which child is this slot serving").
 _SLOT_TO_CHILD: dict[str, tuple[str, str]] = {
     slot_name: key for key, slot_name in _CHILD_TO_SLOT.items()
@@ -289,6 +310,10 @@ class CapabilityOrchestrator:
                 # right v0.2 surface here.
                 selection.device = canonical_device(slot_cfg.device)
                 selection.provider = slot_cfg.provider
+                if child == "tts":
+                    selection.provider = _engine_provider_for_tts(
+                        selection.device, selection.provider
+                    )
                 selection.model = slot_cfg.model.default or ""
                 selection.enabled = bool(selection.model)
                 cfg.selections[slot][child] = selection
@@ -308,7 +333,12 @@ class CapabilityOrchestrator:
     ) -> CapabilitySelection:
         """Return the persisted selection for (slot, child), filling defaults."""
         slot_bucket = cfg.selections.setdefault(slot, {})
-        return slot_bucket.setdefault(child, CapabilitySelection())
+        selection = slot_bucket.setdefault(child, CapabilitySelection())
+        if child == "tts":
+            # Heal a selection seeded before #2749 with the deprecated
+            # ``llama-server`` default (runtime re-derive, no migration).
+            selection.provider = _engine_provider_for_tts(selection.device, selection.provider)
+        return selection
 
     # ── public reads ─────────────────────────────────────────────────────────
 
