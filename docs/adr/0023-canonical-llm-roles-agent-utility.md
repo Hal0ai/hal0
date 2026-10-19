@@ -59,6 +59,25 @@ the normal slot-alias machinery.**
   resolved by the dispatcher to that slot's live model
   (`src/hal0/memory/extraction_env.py`, `apply_extraction_slot`).
 
+### Amendment (2026-10, #2741): bound chain entries load on demand
+
+A chain entry with a bound model is loaded on demand. `resolve_chain`
+walks the chain in order and takes the first entry whose slot has a bound
+model, whether that model is loaded or not. When it is not loaded, the
+result carries `needs_load=True` and the matched slot name, and the
+`/v1` route pins the request to that slot so the backend-aware load
+wakes it. The `agent` anchor is the fallback only when no chain entry
+has a model-bound slot (for example a model-less `utility` on a fresh
+install). Each substitution is logged at INFO as `resolver.fallback`
+with `requested`, `chain`, `resolved_slot` and `reason`
+(`not_loaded_loading` or `no_model_bound_using_anchor`).
+
+Before this amendment a chain entry counted only when its model was
+already loaded. A cold `utility` (or `brain`, `npu`, or any operator-named
+`hal0/<slot>`) therefore fell through to `agent`. That cold-loaded the
+largest model on the box for every Hindsight extraction call meant for
+the cheap helper.
+
 ## Consequences
 
 - One naming vocabulary (`agent`/`utility`, plus any operator-named slot)
