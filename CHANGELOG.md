@@ -100,6 +100,14 @@ applying. Add those subsections to a version's section to surface them; see
   the model name directly, ahead of the quant and fit chips, on both the open
   list and the closed trigger. The runtime named on a row's second line is a
   chip too, purple for the NPU runtime (`flm`) to match the device chips.
+- **`hal0/utility`, `hal0/brain`, `hal0/npu` and `hal0/<slot>` load their own
+  slot when it is cold.** A slot with a bound model counted for its virtual
+  name only while that model was already loaded, so a cold `utility` fell
+  through to `agent` and every Hindsight extraction call cold-loaded the
+  largest model on the box. The slot the name points at is now loaded on
+  demand, NPU (FLM) slots included; `agent` is used only when no slot in the
+  chain has a model bound. Each substitution is logged as `resolver.fallback`
+  (ADR-0023, amended) (#2741).
 
 ## [1.4.0] — 2026-10-16
 

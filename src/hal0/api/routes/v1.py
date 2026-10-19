@@ -669,6 +669,17 @@ async def _ensure_backend_for_model(request: Request, body: dict[str, Any]) -> N
         return
     # Reverse the alias→model_id map: every chat slot that owns this model.
     candidates = [slot for slot, mid in alias_to_model.items() if mid == model_id]
+    if not candidates:
+        # An FLM slot's configured id is hal0's ``-FLM`` catalog id, but the
+        # body by now carries the native colon tag (``gemma4-it:e2b``): the
+        # resolver's slot views and step 2 of ``_rewrite_chat_slot_alias`` both
+        # translate it. Compare through the same translation, so a cold
+        # ``hal0/npu`` (or ``hal0/<flm-slot>``) still loads its slot (#2741).
+        from hal0.providers.flm import flm_id_to_tag_async
+
+        for slot, mid in alias_to_model.items():
+            if mid.endswith("-FLM") and await flm_id_to_tag_async(mid) == model_id:
+                candidates.append(slot)
     slot_name = preferred_slot(slot_manager, candidates, lane_slot=lane_slot_pin(request))
     if slot_name is None:
         # No backing chat slot — nothing to honor.
