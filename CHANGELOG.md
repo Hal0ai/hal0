@@ -88,7 +88,7 @@ applying. Add those subsections to a version's section to surface them; see
 
 ### Fixed
 
-- **The text-to-speech selection now names the engine that actually runs.** A fresh install showed `llama-server` as the voice.tts provider, and after switching the device (CPU to GPU or back) the selection and `tts.toml` kept the previous engine's name, so the dashboard could offer Kokoro voices for a Qwen3-TTS engine. The provider is now always derived from the device (`kokoro` on CPU, `qwen3tts` on GPU), on read and on every apply (#2749).
+- **The text-to-speech selection now names the engine that actually runs.** A fresh install showed `llama-server` as the voice.tts provider, and after switching the device (CPU to GPU or back) the selection and `tts.toml` kept the previous engine's name, so the dashboard could offer Kokoro voices for a Qwen3-TTS engine. The provider is now always derived from the device (`kokoro` on CPU, `qwen3tts` on a ROCm GPU), on read and on every apply. A Vulkan GPU keeps Kokoro, and `tts.toml` now gets the `kokoro` profile there too: the Qwen3-TTS runner is ROCm-only, and a written `qwen3-tts` profile is not re-checked at launch (#2749).
 
 - **A slot now tells llama-server which device to use.** The slot layer passes `--device` from the slot's device (`ROCm0`, `Vulkan0`, `CUDA0`, or `none` for a CPU slot). Before, a runner image that lists both ROCm and Vulkan for the same GPU split every model across both backends; each idle server then held compute queues on both, and with two or more slots loaded the GPU sat at 100 % busy and full clock around the clock (#2767).
 
