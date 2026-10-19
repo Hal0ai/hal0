@@ -58,7 +58,7 @@ def _one(plan: pc.ConversionPlan) -> pc.SlotPlan:
 # ── launch changes that are reported, never silent ───────────────────────────
 
 
-def test_mtp_draft_device_follows_the_slot_device() -> None:
+def test_lane_device_follows_the_slot_device() -> None:
     _slot(profile="chat", device="gpu-vulkan")
     _db([_model(tags=["mtp"])])
     sp = _one(pc.plan_conversion())
