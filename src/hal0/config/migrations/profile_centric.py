@@ -504,7 +504,7 @@ def new_launch(
         and bool(getattr(supports, "mtp", False))
         and not embed
     )
-    from hal0.config.schema import MTP_DRAFT_BUNDLE, mtp_draft_device
+    from hal0.config.schema import MTP_DRAFT_BUNDLE, lane_device
 
     # ADR-0031 §3: --spec-type is a model-layer flag, the bundle a profile one.
     if mtp:
@@ -512,6 +512,10 @@ def new_launch(
     profile_layer = (shlex.split(MTP_DRAFT_BUNDLE) if mtp else []) + flags
 
     slot_layer: list[str] = []
+    backend = frozen._backend_and_class(slot, frozen.Profile(name=""))[0]
+    # The live launch names the slot's device (#2767); the plan must match it.
+    if lane_device(backend):
+        slot_layer += ["--device", str(lane_device(backend))]
     if slot.get("n_gpu_layers") is not None:
         slot_layer += ["-ngl", str(int(slot["n_gpu_layers"]))]
     threads = slot.get("threads")
@@ -519,12 +523,8 @@ def new_launch(
         slot_layer += ["--threads", str(int(threads))]
     if slot.get("metrics") is None or bool(slot.get("metrics")):
         slot_layer += ["--metrics"]
-    draft_device = (
-        mtp_draft_device(frozen._backend_and_class(slot, frozen.Profile(name=""))[0])
-        if mtp
-        else None
-    )
-    if draft_device:
+    draft_device = lane_device(backend) if mtp else None
+    if draft_device and draft_device != "none":
         slot_layer += ["--spec-draft-device", draft_device]
 
     from hal0.slots.argv import _dedup, _split_pairs
@@ -1295,6 +1295,8 @@ class _Planner:
             if key in _PROJECTOR_FLAGS:
                 continue  # compared as "projector loaded" below
 
+            if key == "--device" and key not in before:
+                continue  # every launch names the slot's device now (#2767), not a per-slot change
             if key == "--spec-draft-device" and old.mtp and after.mtp:
                 sp.launch_changes.append(
                     f"MTP draft device {before.get(key)} -> {now.get(key)} (from the slot's device)"

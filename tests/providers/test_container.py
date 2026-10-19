@@ -29,8 +29,8 @@ from hal0.config.schema import (
     SEED_PROFILES,
     ProfileConfig,
     family_flags,
+    lane_device,
     model_family,
-    mtp_draft_device,
 )
 from hal0.errors import BadRequest, UnprocessableEntity
 from hal0.providers import container as _container_mod
@@ -177,12 +177,14 @@ class TestMtpDraftBundle:
         ("backend", "device"),
         [("rocm", "ROCm0"), ("vulkan", "Vulkan0"), ("cuda", "CUDA0"), ("ROCM", "ROCm0")],
     )
-    def test_draft_device_follows_the_slot_backend(self, backend: str, device: str) -> None:
-        assert mtp_draft_device(backend) == device
+    def test_lane_device_follows_the_slot_backend(self, backend: str, device: str) -> None:
+        assert lane_device(backend) == device
 
-    def test_draft_device_defaults_to_rocm0_for_an_unknown_backend(self) -> None:
-        assert mtp_draft_device(None) == "ROCm0"
-        assert mtp_draft_device("cpu") is None  # a CPU drafter has no device to name
+    def test_lane_device_cpu_is_none_and_unknown_has_no_device(self) -> None:
+        assert lane_device("cpu") == "none"
+        assert lane_device(None) is None
+        assert lane_device("") is None
+        assert lane_device("tpu") is None
 
     def test_no_mtp_means_no_bundle_and_no_draft_device(self) -> None:
         segs = dict(

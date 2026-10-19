@@ -95,6 +95,7 @@ def test_argv_builder_emits_exactly_the_four_layers_in_order() -> None:
         slot_threads=8,
         slot_metrics=True,
         draft_device="Vulkan0",
+        lane_device="Vulkan0",
     )
     assert [label for label, _ in segments] == ["base", "model", "profile", "slot"]
     by_label = dict(segments)
@@ -133,6 +134,8 @@ def test_argv_builder_emits_exactly_the_four_layers_in_order() -> None:
         "8",
     ]
     assert by_label["slot"] == [
+        "--device",
+        "Vulkan0",
         "-ngl",
         "99",
         "--threads",
@@ -149,6 +152,7 @@ def test_argv_builder_emits_exactly_the_four_layers_in_order() -> None:
     assert prov["--spec-type"] == "model"
     assert prov["--parallel"] == "profile"
     assert prov["-ngl"] == "slot"
+    assert prov["--device"] == "slot"
     assert prov["--spec-draft-device"] == "slot"
     # The profile's --spec-draft-n-max follows the bundle's 4 and wins.
     argv = resolved.argv
@@ -178,6 +182,8 @@ def test_agent_seed_on_a_vulkan_slot_golden_argv() -> None:
         "draft-mtp",
         *shlex.split(MTP_DRAFT_BUNDLE),
         *shlex.split(str(SEED_PROFILES["agent"]["flags"])),
+        "--device",
+        "Vulkan0",
         "-ngl",
         "99",
         "--threads",
@@ -196,7 +202,8 @@ _GOLDEN_BASE = [
     "--alias", "qwen-mtp",
     "--ctx-size", "65536",
 ]  # fmt: skip
-_GOLDEN_SLOT = ["-ngl", "99", "--threads", "8", "--metrics"]
+_GOLDEN_TAIL = ["-ngl", "99", "--threads", "8", "--metrics"]
+_GOLDEN_SLOT = ["--device", "Vulkan0", *_GOLDEN_TAIL]
 
 
 def _golden_profile(name: str, **fields: object) -> ResolvedProfile:
@@ -247,9 +254,9 @@ def test_dflash_layering() -> None:
     ("device", "slot_layer"),
     [
         # An external drafter is never pinned: it follows the model's devices.
-        ("gpu-rocm", _GOLDEN_SLOT),
-        ("gpu-vulkan", _GOLDEN_SLOT),
-        ("cpu", _GOLDEN_SLOT),
+        ("gpu-rocm", ["--device", "ROCm0", *_GOLDEN_TAIL]),
+        ("gpu-vulkan", ["--device", "Vulkan0", *_GOLDEN_TAIL]),
+        ("cpu", ["--device", "none", *_GOLDEN_TAIL]),
     ],
 )
 def test_a_paired_drafter_slot_layer_per_device(device: str, slot_layer: list[str]) -> None:
@@ -327,6 +334,42 @@ def test_ngram_layering() -> None:
 def test_the_draft_device_follows_the_slots_device(device: str, draft_device: str) -> None:
     argv = resolve_argv(_launch(_slot("agent", device=device), _model(), _seed("agent"))).argv
     assert argv[argv.index("--spec-draft-device") + 1] == draft_device
+
+
+@pytest.mark.parametrize(
+    ("device", "lane"),
+    [
+        ("gpu-rocm", "ROCm0"),
+        ("gpu-vulkan", "Vulkan0"),
+        ("gpu-cuda", "CUDA0"),
+        ("cpu", "none"),
+    ],
+)
+def test_the_slot_layer_names_the_slots_device(device: str, lane: str) -> None:
+    """``--device`` comes first in the slot layer, from the slot's device."""
+    segments = _launch(_slot("agent", device=device), _model(), _seed("agent"))
+    by_label = dict(segments)
+    assert by_label["slot"][:2] == ["--device", lane]
+    resolved = resolve_argv(segments)
+    assert {p.flag: p.source for p in resolved.provenance}["--device"] == "slot"
+
+
+def test_the_gpu_index_goes_to_the_environment_never_the_device_flag() -> None:
+    slot = {**_slot("agent"), "gpu_index": 1}
+    segments = _launch(slot, _model(), _seed("agent"))
+    assert dict(segments)["slot"][:2] == ["--device", "Vulkan0"]
+
+
+def test_mtp_on_a_cpu_slot_has_a_device_but_no_draft_device() -> None:
+    argv = resolve_argv(_launch(_slot("agent", device="cpu"), _model(), _seed("agent"))).argv
+    assert argv[argv.index("--device") + 1] == "none"
+    assert "--spec-draft-device" not in argv
+
+
+def test_mtp_on_a_vulkan_slot_pins_both_the_device_and_the_draft_device() -> None:
+    argv = resolve_argv(_launch(_slot("agent"), _model(), _seed("agent"))).argv
+    assert argv[argv.index("--device") + 1] == "Vulkan0"
+    assert argv[argv.index("--spec-draft-device") + 1] == "Vulkan0"
 
 
 def test_a_runner_without_mtp_support_never_drafts() -> None:

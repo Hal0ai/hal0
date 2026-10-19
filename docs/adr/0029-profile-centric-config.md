@@ -115,6 +115,13 @@ deduplicated last-wins by `slots/argv.py` (`resolve_argv`):
    that hint, so every MTP slot, Vulkan and CUDA included, is told to draft on
    `ROCm0` (`config/schema.py:957,970`).
 
+   *Amended 2026-10-19.* The slot layer now also emits `--device` from the
+   slot's device (`gpu-rocm` → `ROCm0`, `gpu-vulkan` → `Vulkan0`, `gpu-cuda` →
+   `CUDA0`, `cpu` → `none`). A runner image that registers more than one
+   backend for the same GPU otherwise splits the model across them, keeps idle
+   compute queues on both, and left the GPU at full clock whenever two slots
+   were loaded.
+
 Profile flags may not set what another layer owns. Hardware flags
 (`slots/argv.py` `SLOT_HARDWARE_FLAGS`), managed flags
 (`MANAGED_ARGS_DENYLIST`, which covers `--ctx-size`), model-fact flags

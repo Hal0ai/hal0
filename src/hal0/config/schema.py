@@ -749,9 +749,16 @@ class ProvidersConfig(BaseModel):
 
 # ── ProfileConfig + ProfilesConfig ────────────────────────────────────────────
 
-#: MTP draft-speculation draft device, per slot backend (the slot's device).
-#: Placement, so it is emitted in the slot layer of the launch argv.
-_MTP_DRAFT_DEVICE: dict[str, str] = {"rocm": "ROCm0", "vulkan": "Vulkan0", "cuda": "CUDA0"}
+#: llama.cpp device name per slot backend (the slot's device). The container
+#: always sees the chosen GPU as index 0, so the name never carries
+#: ``gpu_index``. Placement, so it is emitted in the slot layer of the launch
+#: argv (``--device``, and ``--spec-draft-device`` for embedded MTP heads).
+_LANE_DEVICE: dict[str, str] = {
+    "rocm": "ROCm0",
+    "vulkan": "Vulkan0",
+    "cuda": "CUDA0",
+    "cpu": "none",
+}
 
 #: ``speculation`` on a profile (ADR-0031): ``auto`` drafts through whatever the
 #: model carries (a drafter file, else MTP heads), ``off`` never speculates,
@@ -798,16 +805,13 @@ NGRAM_BUNDLE: str = (
 )
 
 
-def mtp_draft_device(backend: str | None) -> str | None:
-    """The ``--spec-draft-device`` for a slot whose device maps to *backend*.
+def lane_device(backend: str | None) -> str | None:
+    """The llama-server ``--device`` for a slot whose device maps to *backend*.
 
-    ``None`` for a ``cpu`` slot: its drafter runs on the host CPU, so the slot
-    layer emits no draft device at all (there is no GPU to place it on).
+    ``rocm`` -> ``ROCm0``, ``vulkan`` -> ``Vulkan0``, ``cuda`` -> ``CUDA0`` and
+    ``cpu`` -> ``none``; ``None`` for an unknown or empty backend.
     """
-    key = (backend or "").lower()
-    if key == "cpu":
-        return None
-    return _MTP_DRAFT_DEVICE.get(key, "ROCm0")
+    return _LANE_DEVICE.get((backend or "").lower())
 
 
 #: Seed profile catalog — externalized to shipped TOML (P3-schema, spec
@@ -3450,9 +3454,9 @@ __all__ = [
     "UpstreamEntry",
     "UpstreamsConfig",
     "family_flags",
+    "lane_device",
     "map_backend_to_device",
     "model_family",
-    "mtp_draft_device",
     "normalise_origin",
     "resolve_chat_template",
 ]

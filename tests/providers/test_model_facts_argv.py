@@ -81,7 +81,7 @@ def _golden(name: str) -> list[str]:
         "--ctx-size", "32768",
     ]  # fmt: skip
     profile = [*(_MTP_DRAFT if case["drafts"] else []), "-fa", "on", "--parallel", "1"]
-    slot = ["-ngl", "99", "--metrics"]
+    slot = ["--device", "ROCm0", "-ngl", "99", "--metrics"]
     if case["drafts"]:
         slot += ["--spec-draft-device", "ROCm0"]
     return [*base, *model_layer, *profile, *slot]
