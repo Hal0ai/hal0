@@ -563,6 +563,13 @@ function modelModalityTag(m) {
   return MODEL_MODALITY_CAPS.find((c) => c !== 'asr' && caps.includes(c)) || null
 }
 
+// Chip tone for a non-default runtime on the row's second line: the NPU
+// runtime (flm) takes the NPU lane's purple so it matches the device chips
+// elsewhere; any other runtime stays the neutral info tone.
+function runtimeChipTone(runtime) {
+  return runtime === 'flm' ? 'dev-npu' : 'info'
+}
+
 // Right-aligned GTT fit chip for a `/api/models/feasibility` result row — tone
 // comes from the shared `feasibilityHint` mapper (one source of truth for
 // verdict→tone), so this can't drift from the drawer's own hint copy. An
@@ -609,21 +616,22 @@ function modelPickerOptions({ s, opts, cur, has, allSlots, verdictFor }) {
           <ModalityTag tag={modTag} draft={draftTagValue(m)} />
         </span>
       ),
-      // closed trigger: everything inline on one line
+      // closed trigger: everything inline on one line — the modality glyphs
+      // follow the name directly, then the chips (quant, fit).
       trigger: (
         <span style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
           {name}
-          {quant && <span className="chip amber">{quant}</span>}
           {/* the current model's state bolt replaces the static drafter bolt */}
           <ModalityTag tag={modTag} draft={m.id === cur ? null : draftTagValue(m)} />
           {m.id === cur && <SlotSpecBolt spec={s.metrics?.spec} model={m} />}
+          {quant && <span className="chip amber">{quant}</span>}
           {fit}
         </span>
       ),
       desc: (
         <span className="rsel-desc-line">
           {quant && <span className="chip amber">{quant}</span>}
-          {runtime && <span>{runtime}</span>}
+          {runtime && <span className={`chip ${runtimeChipTone(runtime)}`}>{runtime}</span>}
           {fit}
         </span>
       ),

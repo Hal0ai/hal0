@@ -343,9 +343,24 @@ describe('ModelPicker (card-dropdowns Task 1)', () => {
     expect(eye.getAttribute('title')).toBe('vision')
     expect(eye.getAttribute('aria-label')).toBe('vision')
     expect(m2.querySelector('.rsel-option-row')!.textContent).not.toContain('vision')
-    expect(m2.querySelector('.rsel-option-desc')!.textContent).toContain('vllm')
+    // The glyph is bare (no chip box) and the runtime on line 2 is a chip.
+    expect(eye.classList.contains('chip')).toBe(false)
+    const rt = m2.querySelector('.rsel-option-desc .chip.info')!
+    expect(rt.textContent).toBe('vllm')
     // upstream-only row never appears at all.
     expect(optionById(host, 'm3')).toBeNull()
+  })
+
+  it('shows the flm runtime as a purple (NPU-lane) chip on line 2', () => {
+    const flm = { ...M2, id: 'm2flm', provider_effective: 'flm' }
+    const { host } = mount(
+      <ModelPicker s={SLOT} models={[flm]} allSlots={ALL_SLOTS} disabled={false} onSwap={() => {}} />,
+    )
+    openMenu(host, 'chat')
+    const row = optionById(host, 'm2flm')!
+    const rt = row.querySelector('.rsel-option-desc .chip.dev-npu')!
+    expect(rt.textContent).toBe('flm')
+    expect(row.querySelector('.rsel-option-desc .chip.info')).toBeNull()
   })
 
   it('fires one lazy feasibility batch on first open with slot ctx, not on render', () => {

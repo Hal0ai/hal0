@@ -37,8 +37,9 @@ describe('FitChip', () => {
 })
 
 describe('VisionIcon', () => {
-  it('is an eye svg labelled vision', () => {
-    const el = render(<VisionIcon />).querySelector('.chip')!
+  it('is a bare eye svg labelled vision, not a chip', () => {
+    const el = render(<VisionIcon />).querySelector('.modality-icon')!
+    expect(el.classList.contains('chip')).toBe(false)
     expect(el.getAttribute('title')).toBe('vision')
     expect(el.getAttribute('aria-label')).toBe('vision')
     expect(el.querySelector('svg')).not.toBeNull()
@@ -47,10 +48,12 @@ describe('VisionIcon', () => {
 })
 
 describe('ModalityTag drafter bolt', () => {
-  it('shows a bolt titled with the variant beside the eye', () => {
+  it('shows a bare bolt titled with the variant beside the eye', () => {
     const host = render(<ModalityTag tag="vision" draft="lilicorr" />)
     expect(host.querySelector('[title="vision"]')).not.toBeNull()
     const bolt = host.querySelector('[data-testid="drafter-bolt"]')!
+    expect(bolt.classList.contains('chip')).toBe(false)
+    expect(bolt.classList.contains('modality-icon')).toBe(true)
     expect(bolt.getAttribute('title')).toBe('drafter · LiLiCorr')
     expect(bolt.querySelector('svg')).not.toBeNull()
   })

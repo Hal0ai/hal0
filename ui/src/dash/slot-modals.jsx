@@ -275,12 +275,13 @@ function modelRichOptions({ compatible, cur, has, slotLong, allSlots, verdictChi
 					<ModalityTag tag={modTag} draft={draftTagValue(m)} />
 				</span>
 			),
-			// closed trigger: everything inline on one line
+			// closed trigger: everything inline on one line — modality glyphs
+			// right after the name, then the chips (quant, fit).
 			trigger: (
 				<span style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
 					{name}
-					{quant && <span className="chip amber">{quant}</span>}
 					<ModalityTag tag={modTag} draft={draftTagValue(m)} />
+					{quant && <span className="chip amber">{quant}</span>}
 					{fit}
 				</span>
 			),

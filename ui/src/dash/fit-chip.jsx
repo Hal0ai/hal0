@@ -45,10 +45,11 @@ export function FitChip({ verdict, neededMb }) {
   )
 }
 
-/** Eye glyph for the `vision` modality. */
+/** Eye glyph for the `vision` modality: a bare icon, not a chip, so it reads
+ * as part of the model's name rather than as another tag. */
 export function VisionIcon() {
   return (
-    <span className="chip info modality-icon" title="vision" aria-label="vision" role="img">
+    <span className="modality-icon" title="vision" aria-label="vision" role="img">
       <svg {...svgProps}>
         <path d="M1.5 8S4 3.5 8 3.5 14.5 8 14.5 8 12 12.5 8 12.5 1.5 8 1.5 8z" />
         <circle cx="8" cy="8" r="1.8" />
@@ -57,12 +58,13 @@ export function VisionIcon() {
   )
 }
 
-/** Bolt glyph for a model with a paired speculative-decoding drafter. */
+/** Bolt glyph for a model with a paired speculative-decoding drafter (bare
+ * icon, like the eye). */
 export function DrafterBolt({ variant }) {
   const title = `drafter · ${draftVariantLabel(variant)}`
   return (
     <span
-      className="chip info modality-icon"
+      className="modality-icon"
       title={title}
       aria-label={title}
       role="img"

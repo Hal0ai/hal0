@@ -3593,7 +3593,10 @@ select.npu-sel {
 .rsel-desc-line { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 6px; }
 .rsel-desc-line > span + span:not(.chip)::before { content: "·"; margin-right: 6px; color: var(--fg-4); }
 .chip.fit-chip { gap: 3px; }
-.chip.fit-chip svg, .chip.modality-icon svg { flex-shrink: 0; display: block; }
+/* Modality glyphs (eye, drafter bolt) sit bare right after the model name —
+   no chip box — so the chips that follow (quant, runtime, fit) stay the tags. */
+.modality-icon { display: inline-flex; align-items: center; flex-shrink: 0; color: var(--info); }
+.chip.fit-chip svg, .modality-icon svg { flex-shrink: 0; display: block; }
 .rsel-option:hover, .rsel-option[data-active="true"] { background: var(--bg-3); }
 .rsel-option[aria-selected="true"] { background: var(--accent-bg); }
 .rsel-option[aria-selected="true"] .rsel-option-row { color: var(--accent); }
