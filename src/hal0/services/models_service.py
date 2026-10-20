@@ -1907,6 +1907,19 @@ async def add_from_path(body: dict[str, Any], *, registry: Any, event_bus: Any) 
     # The resolved path is still what gets detected and stored. The scan
     # walker (``registry.discover.find_candidates``) already tests the
     # un-resolved walk entry, so it needs no matching change.
+    from hal0.registry.detect import (
+        unsupported_moonshine_layout,
+        unsupported_moonshine_layout_message,
+    )
+
+    if unsupported_moonshine_layout(path):
+        from hal0.errors import UnprocessableEntity
+
+        raise UnprocessableEntity(
+            unsupported_moonshine_layout_message(path),
+            code="models.unsupported_moonshine_layout",
+            details={"path": str(path)},
+        )
     cfg = load_hal0_config()
     allowed_exts = {e.lower() for e in cfg.models.file_extensions}
     suffix = path.suffix.lower() or resolved.suffix.lower()

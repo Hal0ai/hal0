@@ -192,6 +192,16 @@ def check_moonshine_weights(model_path: str) -> None:
             details={"model_path": model_path},
         )
     if _find_loadable_bundle(root) is None:
+        from hal0.registry.detect import (
+            unsupported_moonshine_layout,
+            unsupported_moonshine_layout_message,
+        )
+
+        if unsupported_moonshine_layout(root):
+            raise MoonshineWeightsMissingError(
+                unsupported_moonshine_layout_message(model_path),
+                details={"model_path": model_path, "layout": "streaming"},
+            )
         raise MoonshineWeightsMissingError(
             f"moonshine weights directory {model_path} holds no loadable bundle "
             "— the server resolves encoder_model.ort / encoder_model.onnx, and "

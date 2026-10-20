@@ -294,3 +294,18 @@ def test_named_missing_profile_refuses_to_launch() -> None:
         MoonshineProvider().container_spec(_slot_cfg(profile="no-such-profile"), {})
     assert exc_info.value.code == "slot.profile_missing"
     assert exc_info.value.details["profile"] == "no-such-profile"
+
+
+def test_preflight_streaming_message_names_supported_layout(tmp_path) -> None:
+    """#2556: the refusal names the loadable files and the ids that ship in them."""
+    streaming = tmp_path / "moonshine" / "quantized"
+    streaming.mkdir(parents=True)
+    for name in ("encoder.ort", "frontend.ort"):
+        (streaming / name).write_bytes(b"\0")
+    with pytest.raises(MoonshineWeightsMissingError) as exc_info:
+        check_moonshine_weights(str(tmp_path / "moonshine"))
+    msg = str(exc_info.value)
+    assert "encoder_model.ort" in msg
+    assert "decoder_model_merged.ort" in msg
+    assert "base-en" in msg
+    assert exc_info.value.details["layout"] == "streaming"

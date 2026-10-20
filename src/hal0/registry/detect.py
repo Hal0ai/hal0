@@ -261,6 +261,52 @@ def unsupported_gguf_contents(path: str | Path) -> str | None:
     return f"custom-weight GGUF (ggml type {', '.join(str(t) for t in unknown)})"
 
 
+#: Files that mark Moonshine's streaming ``.ort`` layout. The non-streaming
+#: layout the runner loads is ``encoder_model.ort`` + ``decoder_model_merged.ort``.
+STREAMING_MOONSHINE_FILES: frozenset[str] = frozenset(
+    {"encoder.ort", "frontend.ort", "adapter.ort", "cross_kv.ort", "decoder_kv.ort"}
+)
+
+#: Model ids that ship in the loadable non-streaming layout.
+SUPPORTED_MOONSHINE_IDS: tuple[str, ...] = ("tiny-en", "base-en")
+
+_MOONSHINE_ENCODERS: tuple[str, ...] = ("encoder_model.ort", "encoder_model.onnx")
+
+
+def unsupported_moonshine_layout(path: str | Path) -> bool:
+    """True when ``path`` is (or sits in) a streaming-only Moonshine ``.ort`` set.
+
+    A file counts when its name is a streaming marker and no
+    ``encoder_model.{ort,onnx}`` sits beside it; a directory counts when it
+    holds a marker and no ``encoder_model.{ort,onnx}`` anywhere below it.
+    Never raises on unreadable paths.
+    """
+    p = Path(path)
+    try:
+        if p.is_file():
+            if p.name.lower() not in STREAMING_MOONSHINE_FILES:
+                return False
+            return not any((p.parent / n).is_file() for n in _MOONSHINE_ENCODERS)
+        if not p.is_dir():
+            return False
+        if any(any(p.rglob(n)) for n in _MOONSHINE_ENCODERS):
+            return False
+        return any(any(p.rglob(n)) for n in STREAMING_MOONSHINE_FILES)
+    except OSError:
+        return False
+
+
+def unsupported_moonshine_layout_message(path: str | Path) -> str:
+    """The one operator-facing refusal for a streaming Moonshine bundle."""
+    return (
+        f"{str(path)!r} is a Moonshine streaming .ort bundle (encoder.ort, "
+        "frontend.ort, ...). The hal0 Moonshine runner cannot load it and would "
+        "run different weights than the ones you picked. Stage the non-streaming "
+        "layout instead: encoder_model.ort and decoder_model_merged.ort, as "
+        f"shipped for {' and '.join(SUPPORTED_MOONSHINE_IDS)}."
+    )
+
+
 def unsupported_quant_message(model: str, quant: str) -> str:
     """The one operator-facing refusal for a fork-only quant."""
     return (

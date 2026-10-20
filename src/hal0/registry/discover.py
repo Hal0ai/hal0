@@ -28,6 +28,7 @@ from hal0.config.schema import ModelsConfig
 from hal0.model_meta import capability_from_filename, derive_model_provider
 from hal0.registry import tombstones
 from hal0.registry.curated import CURATED_MODELS, CuratedModel
+from hal0.registry.detect import unsupported_moonshine_layout
 from hal0.registry.drafters import DrafterInfo, classify_drafter, draft_fit_errors
 from hal0.registry.fileset import SHARD_RE
 from hal0.registry.gguf_header import read_gguf_header
@@ -566,6 +567,14 @@ def find_candidates(
             if _is_skippable(candidate):
                 continue
             if candidate.suffix.lower() not in exts:
+                continue
+            # Streaming Moonshine .ort files are never registered: the runner
+            # cannot load them (surfaced in ``skipped`` for the operator).
+            if unsupported_moonshine_layout(candidate):
+                if skipped is not None:
+                    skipped.append(
+                        {"path": str(candidate), "reason": "unsupported_moonshine_layout"}
+                    )
                 continue
             abs_path = candidate.resolve()
             # Re-check on the resolved path so HF snapshot symlinks that
