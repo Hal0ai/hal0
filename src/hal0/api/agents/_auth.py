@@ -158,8 +158,11 @@ def regenerate_secret() -> bool:
     tmp = Path(tmp_name)
     try:
         os.fchmod(fd, 0o600)
-        if (st.st_uid, st.st_gid) != (os.geteuid(), os.getegid()):
+        if os.geteuid() == 0 and (st.st_uid, st.st_gid) != (0, os.getegid()):
             # Keep the service user's ownership when root rotates from the CLI.
+            # Only root may chown; the service user rotating its own secret
+            # keeps the file as its own even if the old gid was one it is not
+            # a member of, rather than failing the whole rotation.
             os.fchown(fd, st.st_uid, st.st_gid)
         os.write(fd, secrets.token_bytes(32))
         os.fsync(fd)

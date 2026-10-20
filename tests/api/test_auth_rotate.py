@@ -464,3 +464,28 @@ def test_admin_rotate_secret_failure_leaves_key_and_sessions_alone(
         assert resp.status_code >= 500
     assert auth_mod.verify_admin_key("old-admin-key") is True
     assert verify_session_cookie(other) is True
+
+
+def test_admin_rotate_as_non_root_with_foreign_gid_succeeds(
+    rotate_client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """hal0-api runs as the service user. A secret.bin whose gid it is not a
+    member of must not turn every default admin rotation into a 500."""
+    from hal0.api.agents import _auth as agents_auth
+    from hal0.api.agents._auth import mint_session_cookie, verify_session_cookie
+
+    monkeypatch.setenv("HAL0_ADMIN_KEY", "old-admin-key")
+    other = mint_session_cookie()
+    real_gid = (tmp_path / "secret.bin").stat().st_gid
+
+    def refuse(*_a: object) -> None:
+        raise PermissionError("Operation not permitted")
+
+    monkeypatch.setattr(agents_auth.os, "geteuid", lambda: 1000)
+    monkeypatch.setattr(agents_auth.os, "getegid", lambda: real_gid + 1)
+    monkeypatch.setattr(agents_auth.os, "fchown", refuse)
+
+    resp = rotate_client.post("/api/auth/rotate", json={"tier": "admin"})
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["session_preserved"] is False
+    assert verify_session_cookie(other) is False
