@@ -79,6 +79,13 @@ def test_failed_probe_is_build_failed_and_unstamped(tmp_path) -> None:
         res = hermes_arm.converge_hermes(venv=venv, is_hal0_user=lambda: False)
     assert res["status"] == "build_failed"
     assert hermes_arm.installed_hermes_pin() is None
+    # The remedy must name a real `hal0 agent` subcommand (it once named a
+    # non-existent `provision`).
+    from hal0.cli.agent_commands import app as agent_app
+
+    subcommand = res["remedy"].split("hal0 agent ", 1)[1].split()[0]
+    registered = {c.name or c.callback.__name__ for c in agent_app.registered_commands}
+    assert subcommand in registered
 
 
 def test_deprovisioned_with_stale_stamp_reads_none(tmp_path) -> None:

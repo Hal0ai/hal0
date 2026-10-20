@@ -151,7 +151,7 @@ def converge_hermes(
             **result,
             "status": "build_failed",
             "error": f"rebuilt venv fails its own probe: {probe.get('error')}",
-            "remedy": "run 'sudo hal0 agent provision hermes --repair'",
+            "remedy": "run 'sudo hal0 agent reprovision hermes --repair'",
         }
 
     try:
