@@ -31,6 +31,9 @@ from hal0.slots.state import SlotState, slot_selection_rank
 #: dispatcher) can never drift onto different keys.
 LANE_PIN_ATTR = "hal0_lane_slot"
 
+#: The cheap-helper slot (ADR-0023); ranked behind equally healthy siblings.
+UTILITY_SLOT_NAME = "utility"
+
 __all__ = [
     "LANE_PIN_ATTR",
     "lane_slot_pin",
@@ -68,14 +71,19 @@ def rank_slot_name(
     slot_name: str,
     *,
     lane_slot: str = "",
-) -> tuple[int, int]:
+) -> tuple[int, int, int]:
     """Selection key for one slot — lower sorts first.
 
-    ``(lane-miss, health-rank)``: the lane-pinned slot wins outright (the pin is
-    only set for a model-bound slot the resolver matched in the chain, which the
-    route layer loads before dispatch — #2741), then health ordering
-    from :func:`hal0.slots.state.slot_selection_rank`. Callers append their own
-    final tiebreak (declaration index) to keep the ordering deterministic.
+    ``(lane-miss, health-rank, utility-penalty)``: the lane-pinned slot wins
+    outright (the pin is only set for a model-bound slot the resolver matched in
+    the chain, which the route layer loads before dispatch — #2741), then health
+    ordering from :func:`hal0.slots.state.slot_selection_rank`, then the
+    ``utility`` helper slot ranks behind any equally healthy sibling (#2716,
+    ADR-0023: utility is never the fallback for general chat). Utility runs
+    ``--parallel 1`` and also serves memory extraction, so a chat turn that
+    lands there queues behind it while a sibling serving the same model id sits
+    idle. A ``hal0/utility`` lane still wins via the pin. Callers append their
+    own final tiebreak (declaration index) to keep the ordering deterministic.
     """
     lane_miss = 0 if (lane_slot and slot_name == lane_slot) else 1
     try:
@@ -84,7 +92,8 @@ def rank_slot_name(
         # A slot whose state cannot be read is not evidence of health; rank it
         # with the last resort rather than ahead of a slot we know is serving.
         state = SlotState.ERROR
-    return (lane_miss, slot_selection_rank(state))
+    utility_penalty = 1 if slot_name == UTILITY_SLOT_NAME else 0
+    return (lane_miss, slot_selection_rank(state), utility_penalty)
 
 
 def preferred_slot(

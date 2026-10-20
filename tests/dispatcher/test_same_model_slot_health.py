@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import json
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, ClassVar
 
 import pytest
 from starlette.requests import Request
@@ -289,3 +289,56 @@ class TestDispatchPrefersAHealthySlotUpstream:
 
         assert call.upstream_name == "brain"
         assert json.loads(call.body)["model"] == _MODEL
+
+
+class TestUtilitySlotIsNotPreferredForGeneralChat:
+    """#2716: utility (``--parallel 1``, shared with memory extraction) must lose
+    a tie against an equally healthy sibling serving the same model id."""
+
+    _upstreams = (_container_upstream("utility", 8086), _container_upstream("brain", 8087))
+    _states: ClassVar[dict[str, SlotState]] = {
+        "utility": SlotState.READY,
+        "brain": SlotState.READY,
+    }
+    _advertised: ClassVar[dict[str, list[str]]] = {"utility": [_MODEL], "brain": [_MODEL]}
+
+    async def test_unpinned_request_prefers_brain_over_utility(self) -> None:
+        dispatcher = _dispatcher(
+            list(self._upstreams), states=self._states, advertised=self._advertised
+        )
+
+        call = await dispatcher.dispatch(_request(), body={"model": _MODEL})
+
+        assert call.upstream_name == "brain", call.resolution_path
+
+    async def test_registry_binding_to_utility_yields_to_ready_sibling(self) -> None:
+        dispatcher = _dispatcher(
+            list(self._upstreams),
+            states=self._states,
+            advertised=self._advertised,
+            routes={_MODEL: "utility"},
+        )
+
+        call = await dispatcher.dispatch(_request(), body={"model": _MODEL})
+
+        assert call.upstream_name == "brain", call.resolution_path
+
+    async def test_utility_lane_pin_still_wins(self) -> None:
+        dispatcher = _dispatcher(
+            list(self._upstreams), states=self._states, advertised=self._advertised
+        )
+
+        call = await dispatcher.dispatch(_request(lane_slot="utility"), body={"model": _MODEL})
+
+        assert call.upstream_name == "utility", call.resolution_path
+
+    async def test_utility_serves_when_it_is_the_only_ready_slot(self) -> None:
+        dispatcher = _dispatcher(
+            list(self._upstreams),
+            states={"utility": SlotState.READY, "brain": SlotState.OFFLINE},
+            advertised=self._advertised,
+        )
+
+        call = await dispatcher.dispatch(_request(), body={"model": _MODEL})
+
+        assert call.upstream_name == "utility", call.resolution_path
