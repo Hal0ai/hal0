@@ -1759,9 +1759,11 @@ def repair_hermes_mcp_client(
     if restart_gateway:
         # Same reason as the header repair: hermes builds its MCP client at
         # start, so a running gateway keeps the broken one until it bounces.
+        # try-restart, not restart: a gateway the operator disabled and
+        # stopped must stay stopped (#2822); only a running unit is bounced.
         try:
             subprocess.run(
-                ["systemctl", "restart", "hermes-gateway.service"],
+                ["systemctl", "try-restart", "hermes-gateway.service"],
                 check=False,
                 capture_output=True,
                 timeout=120,
