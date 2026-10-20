@@ -26,7 +26,7 @@ import pytest
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _TEMPLATE = _REPO_ROOT / "installer" / "systemd" / "hal0-agent@.service"
 _HERMES_OVERRIDE = (
-    _REPO_ROOT / "installer" / "systemd" / "hal0-agent@hermes.service.d" / "override.conf"
+    _REPO_ROOT / "installer" / "systemd" / "hal0-agent@hermes.service.d" / "10-hal0.conf"
 )
 
 
@@ -233,7 +233,7 @@ class TestHermesOverride:
         # resolved at runtime by the shim — the override must not hardcode a
         # `python3.<minor>` web_dist path anymore.
         assert not re.search(r"python3\.\d+.*web_dist", override_text), (
-            "override.conf still pins a python3.<minor> web_dist path — resolve it "
+            "10-hal0.conf still pins a python3.<minor> web_dist path — resolve it "
             "at runtime in agent_shim._resolve_web_dist instead"
         )
 
