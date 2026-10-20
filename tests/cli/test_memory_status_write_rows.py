@@ -133,3 +133,29 @@ def test_json_output_carries_the_write_fields(monkeypatch: pytest.MonkeyPatch) -
     assert body["memory_write_health"]["operations"]["failed"] == 173
     # #1301's field is untouched.
     assert body["memory_degraded"] is False
+
+
+def test_no_write_ever_landed_names_the_counts_and_the_remedy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#2404: a static failed backlog with zero facts is not "landing"."""
+    payload = {
+        "memory_enabled": True,
+        "memory_degraded": False,
+        "memory_write_degraded": True,
+        "memory_write_health": {
+            "degraded": True,
+            "reason": "no_write_ever_landed",
+            "last_error": "No write has landed: 7 failed, 0 facts stored on bank shared",
+            "operations": {"failed": 7, "pending": 0, "processing": 0},
+            "bank": "shared",
+            "fact_count": 0,
+        },
+    }
+    _stub(monkeypatch, payload)
+    result = runner.invoke(_test_app, [])
+    assert result.exit_code == 0, result.output
+    out = " ".join(result.output.split())
+    assert "No write has landed: 7 failed, 0 facts stored." in out
+    assert "hal0 memory ops retry --all-failed" in out
+    assert "landing" not in out.replace("No write has landed", "")
