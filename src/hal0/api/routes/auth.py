@@ -250,10 +250,11 @@ async def rotate_key(
     The secret is replaced before the key, so a failure there aborts the
     rotation with nothing changed, and a success is never reported while the
     old sessions still verify. Bearer/API clients using the OLD key stop
-    working immediately and must switch to the new key. Open WebSockets are
-    checked only at their upgrade, so the rotation then closes (4401) every
-    one whose cookie or key no longer passes its gate
-    (:func:`hal0.api.live_sockets.revalidate`, #2801).
+    working immediately and must switch to the new key. Open WebSockets and
+    streaming responses (SSE) are checked only when they open, so the
+    rotation then ends every one whose cookie or key no longer passes its
+    gate: a socket closes with 4401, a stream ends after an ``event:
+    revoked`` frame (:func:`hal0.api.live_sockets.revalidate`, #2801, #2816).
 
     Brute-force guard: metered by the shared per-IP login limiter (``login``
     reuses the same ``app.state.login_limiter``) BEFORE any work happens.
@@ -280,10 +281,11 @@ async def rotate_key(
         # status = {tier, key_len, fingerprint} — NEVER the key value.
         status_only = rotate_api_env_key(tier)
     finally:
-        # Open WebSockets were admitted once, at their upgrade (#2801): close
-        # every one whose cookie or key no longer passes its gate. In a
-        # ``finally`` so a key write that fails after the secret was replaced
-        # still ends the sockets of the sessions that just stopped verifying.
+        # Open WebSockets and streams were admitted once, when they opened
+        # (#2801, #2816): end every one whose cookie or key no longer passes
+        # its gate. In a ``finally`` so a key write that fails after the
+        # secret was replaced still ends the sockets and streams of the
+        # sessions that just stopped verifying.
         sockets_closed = live_sockets.revalidate()
     reissued = False
     if caller_expiry is not None:

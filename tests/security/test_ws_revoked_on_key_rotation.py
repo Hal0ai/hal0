@@ -16,12 +16,14 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import time
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
+from starlette.responses import Response
 from starlette.websockets import WebSocketDisconnect
 
 from hal0.api import auth as auth_mod
@@ -129,6 +131,27 @@ def test_board_socket_is_closed_when_the_secret_is_replaced(
     with app_client.websocket_connect("/api/board/events", headers=ORIGIN) as ws:
         assert _auth.regenerate_secret() is True
         assert live_sockets.revalidate() == 1
+
+        _assert_closed_revoked(ws)
+
+
+def test_board_socket_is_closed_when_its_session_expires(
+    app_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The process-wide ticker closes a socket whose cookie expired (#2816).
+
+    No rotation announces an expiry, so before the ticker such a socket
+    stayed open until it dropped on its own.
+    """
+    monkeypatch.setattr(live_sockets, "REVALIDATE_INTERVAL_S", 0.1)
+    live_sockets._ticker_wake.set()  # a ticker already sleeping picks up the new interval
+    cookie = _auth.set_session_cookie(Response(), ttl_seconds=2)
+    headers = {**ORIGIN, "cookie": f"{_auth.SESSION_COOKIE_NAME}={cookie}"}
+    with app_client.websocket_connect("/api/board/events", headers=headers) as ws:
+        deadline = time.monotonic() + 10
+        while live_sockets.open_count():
+            assert time.monotonic() < deadline, "expired socket still registered"
+            time.sleep(0.05)
 
         _assert_closed_revoked(ws)
 

@@ -35,7 +35,7 @@ import structlog
 from fastapi import APIRouter, Request
 from fastapi.responses import Response, StreamingResponse
 
-from hal0.api import image_cache
+from hal0.api import image_cache, live_sockets
 from hal0.api.deps import DispatcherDep
 from hal0.dispatcher.lane_pin import lane_slot_pin, preferred_slot, set_lane_pin
 from hal0.upstreams.filters import apply_filters
@@ -843,6 +843,10 @@ async def _dispatch_and_forward(
         # — anything before this point (auth, body parse, dispatcher
         # routing) is local overhead, not prefill cost.
         dispatch_started = time.monotonic()
+        if call.streaming:
+            # The relay keeps the upstream's content type, which need not be
+            # text/event-stream; register it for revocation either way (#2816).
+            live_sockets.mark_long_lived(request.scope)
         response = await dispatcher.forward(call)
     except Exception as exc:
         if seam is not None:

@@ -463,7 +463,7 @@ class _NonChatRequest:
 
 class _FakeDispatcher:
     async def dispatch(self, request, body=None):
-        return SimpleNamespace(upstream_name="embed", resolved_model="bge")
+        return SimpleNamespace(upstream_name="embed", resolved_model="bge", streaming=False)
 
     async def forward(self, call):
         from fastapi.responses import Response as _Resp
