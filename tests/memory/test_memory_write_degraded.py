@@ -57,6 +57,14 @@ class _FakeClient:
         #: land new rows between two requests.
         self.before_list: Any = None
         self.typed_calls: list[dict[str, Any]] = []
+        #: bank -> the engine's ``GET /banks/{bank}/stats`` payload (#2404).
+        self.stats: dict[str, dict[str, Any]] = {}
+        self.stats_error: Exception | None = None
+
+    async def bank_stats(self, *, bank_id: str, refresh: bool | None = None) -> dict[str, Any]:
+        if self.stats_error is not None:
+            raise self.stats_error
+        return self.stats.get(bank_id, {"bank_id": bank_id, "total_nodes": 0})
 
     async def retain(self, **_kwargs: Any) -> dict[str, str]:
         if self.retain_error is not None:
@@ -170,6 +178,7 @@ async def test_growing_failed_operation_count_degrades_writes_despite_200s() -> 
     client = _FakeClient()
     p = _provider(client)
 
+    client.stats["shared"] = {"bank_id": "shared", "total_nodes": 900}
     client.operations["shared"] = {"failed": 170, "pending": 2, "processing": 0}
     first = await p.write_health()
     assert first["degraded"] is False, "first sample has no delta yet — no verdict"
@@ -191,6 +200,7 @@ async def test_stable_failed_count_is_not_degraded() -> None:
     counter is cumulative, so an absolute threshold would never recover."""
     client = _FakeClient()
     p = _provider(client)
+    client.stats["shared"] = {"bank_id": "shared", "total_nodes": 900}
     client.operations["shared"] = {"failed": 170, "pending": 0, "processing": 0}
 
     await p.write_health()
@@ -626,3 +636,79 @@ async def test_auto_retry_stops_after_the_sweep_budget(monkeypatch: pytest.Monke
     client.operations["shared"] = {"failed": 1, "pending": 0, "processing": 0}
     assert await p.maybe_auto_retry_dead_letters() is None
     assert "op-final" not in client.retried
+
+
+# ── #2404: a static failed backlog on a store that never landed a write ─────
+#
+# After a restart the in-memory ``failed`` delta is gone, so a bank holding a
+# static failed backlog, zero facts and nothing in flight read "ok". The
+# verdict needs the three-way guard: failed > 0, facts == 0, and no retain
+# ever completed. A fresh install (failed == 0) must stay neutral.
+
+
+@pytest.mark.asyncio
+async def test_static_failed_backlog_with_no_facts_reads_no_write_ever_landed() -> None:
+    client = _FakeClient()
+    p = _provider(client)
+    client.operations["shared"] = {"failed": 7, "pending": 0, "processing": 0}
+    client.stats["shared"] = {"bank_id": "shared", "total_nodes": 0}
+
+    out = await p.write_health()
+
+    assert out["degraded"] is True
+    assert out["reason"] == "no_write_ever_landed"
+    assert out["fact_count"] == 0
+    assert out["operations"]["failed"] == 7
+
+
+@pytest.mark.asyncio
+async def test_fresh_install_with_no_failures_stays_ok() -> None:
+    client = _FakeClient()
+    p = _provider(client)
+    client.operations["shared"] = {"failed": 0, "pending": 0, "processing": 0}
+    client.stats["shared"] = {"bank_id": "shared", "total_nodes": 0}
+
+    out = await p.write_health()
+
+    assert out["degraded"] is False
+    assert out["reason"] == "ok"
+
+
+@pytest.mark.asyncio
+async def test_failed_backlog_with_stored_facts_stays_ok() -> None:
+    client = _FakeClient()
+    p = _provider(client)
+    client.operations["shared"] = {"failed": 7, "pending": 0, "processing": 0}
+    client.stats["shared"] = {"bank_id": "shared", "total_nodes": 120}
+
+    out = await p.write_health()
+
+    assert out["degraded"] is False
+    assert out["reason"] == "ok"
+
+
+@pytest.mark.asyncio
+async def test_failed_backlog_with_a_completed_retain_stays_ok() -> None:
+    client = _FakeClient()
+    p = _provider(client)
+    client.operations["shared"] = {"failed": 7, "pending": 0, "processing": 0}
+    client.stats["shared"] = {"bank_id": "shared", "total_nodes": 0}
+    _completed(client, 5000.0, 4000.0)
+
+    out = await p.write_health()
+
+    assert out["degraded"] is False
+    assert out["reason"] == "ok"
+
+
+@pytest.mark.asyncio
+async def test_unreadable_bank_stats_is_not_read_as_no_write_ever_landed() -> None:
+    client = _FakeClient()
+    p = _provider(client)
+    client.operations["shared"] = {"failed": 7, "pending": 0, "processing": 0}
+    client.stats_error = RuntimeError("stats down")
+
+    out = await p.write_health()
+
+    assert out["degraded"] is False
+    assert out["reason"] == "ok"

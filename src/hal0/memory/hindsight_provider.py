@@ -832,6 +832,26 @@ class HindsightProvider(MemoryProvider):
             f"{int(_WRITE_STALL_AGE_S)}s (oldest {int(oldest)}s) with none completing"
         )
 
+    async def _fact_count(self, bank: str) -> int | None:
+        """Facts stored in ``bank`` per the engine's stats, or None if unreadable.
+
+        The stats payload reports ``total_nodes`` (memory units); a
+        ``fact_count`` key, as the banks listing uses, is honoured too.
+        Fail-soft like :meth:`_sample_operations`: no answer is no evidence.
+        """
+        try:
+            stats = await self._client.bank_stats(bank_id=bank)
+        except Exception as exc:
+            log.debug("hal0.memory.bank_stats_probe_failed", error=str(exc))
+            return None
+        if not isinstance(stats, dict):
+            return None
+        for key in ("total_nodes", "fact_count"):
+            val = stats.get(key)
+            if isinstance(val, int) and not isinstance(val, bool):
+                return val
+        return None
+
     async def write_health(self, *, max_age_s: float | None = None) -> dict[str, Any]:
         """Retain-pipeline health for ``/api/status`` and ``hal0 memory status``.
 
@@ -848,6 +868,11 @@ class HindsightProvider(MemoryProvider):
             An op has sat ``pending``/``processing`` past
             :data:`_WRITE_STALL_AGE_S` and none has completed in that window
             (#1833). Live, not held: it clears on the first completed op.
+        ``no_write_ever_landed``
+            The bank holds failed ops, zero facts, and no retain has ever
+            completed (#2404). Catches a static backlog after a restart,
+            when the ``failed`` delta above has no history. A fresh install
+            (``failed == 0``) is not this.
         ``ok``
             Two clean samples, nothing failing.
         ``unknown``
@@ -889,11 +914,23 @@ class HindsightProvider(MemoryProvider):
                 log.info("hal0.memory.retain_pipeline_unstalled", bank=bank)
 
         held = self.write_degraded
-        degraded = held or stall is not None
+        never_landed: str | None = None
+        fact_count: int | None = None
+        if counts is not None and not held and stall is None and counts["failed"] > 0:
+            fact_count = await self._fact_count(bank)
+            if fact_count == 0 and await self._latest_completion_age(
+                bank, datetime.now(UTC)
+            ) == float("inf"):
+                never_landed = (
+                    f"No write has landed: {counts['failed']} failed, 0 facts stored on bank {bank}"
+                )
+        degraded = held or stall is not None or never_landed is not None
         if held:
             reason = self._last_write_reason or "retain_failed"
         elif stall is not None:
             reason = "retain_operations_stalled"
+        elif never_landed is not None:
+            reason = "no_write_ever_landed"
         elif counts is None:
             reason = "unknown"
         else:
@@ -902,9 +939,10 @@ class HindsightProvider(MemoryProvider):
         out: dict[str, Any] = {
             "degraded": degraded,
             "reason": reason,
-            "last_error": self._last_write_error if held else stall,
+            "last_error": self._last_write_error if held else (stall or never_landed),
             "operations": dict(counts) if counts is not None else None,
             "bank": bank,
+            "fact_count": fact_count,
         }
         self._write_health = out
         self._write_health_at = now

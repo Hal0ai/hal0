@@ -148,6 +148,13 @@ def _add_write_rows(t: Table, s: dict) -> None:
             "[yellow]waiting[/yellow] — no chat model loaded: retains will "
             "process once one is available",
         )
+    elif reason == "no_write_ever_landed":
+        failed = int(((health or {}).get("operations") or {}).get("failed") or 0)
+        t.add_row(
+            "Writes",
+            f"[red]FAILING[/red] — No write has landed: {failed} failed, 0 facts stored. "
+            "Run `hal0 memory ops retry --all-failed` or check the extraction slot.",
+        )
     elif write_degraded is True:
         detail = (health or {}).get("last_error") or reason or "unknown"
         t.add_row("Writes", f"[red]FAILING[/red] — {reason}: {detail}")
