@@ -231,6 +231,18 @@ def test_bench_state_is_captured_before_the_unit_copy(tmp_path: Path) -> None:
     assert box.state_of("hal0-bench-worker.service") == "enabled"
 
 
+def test_bench_masked_runtime_note_names_runtime_unmask(tmp_path: Path) -> None:
+    box = Box(tmp_path)
+    box.set_state("hal0-bench.timer", "masked-runtime")
+    res = box.run(BENCH_BLOCK)
+    assert res.returncode == 0, res.stderr
+    assert box.state_of("hal0-bench.timer") == "masked-runtime"
+    assert (
+        "hal0-bench.timer is masked-runtime; left as is (run 'systemctl unmask --runtime "
+        "hal0-bench.timer && systemctl enable --now hal0-bench.timer'" in res.stdout
+    )
+
+
 def test_bench_only_disabled_one_is_respected(tmp_path: Path) -> None:
     box = Box(tmp_path)
     box.set_state("hal0-bench.timer", "disabled")
@@ -305,6 +317,10 @@ def test_gateway_masked_generator_is_skipped(tmp_path: Path) -> None:
     assert not [c for c in box.log() if c.startswith("hermes ")]
     assert link.is_symlink() and os.readlink(link) == "/dev/null"
     assert box.state_of("hermes-gateway.service") == "masked"
+    assert (
+        "(run 'systemctl unmask hermes-gateway.service && systemctl enable --now "
+        "hermes-gateway.service'" in res.stdout
+    )
 
 
 def test_gateway_fresh_install_enables(tmp_path: Path) -> None:

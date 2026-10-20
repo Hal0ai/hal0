@@ -166,7 +166,11 @@ unit_state_off() {
 unit_left_off_note() {
     local unit="$1" state="$2"
     local turn_on="systemctl enable --now ${unit}"
-    [[ "${state}" == masked* ]] && turn_on="systemctl unmask ${unit} && ${turn_on}"
+    # A runtime mask lives under /run; only `unmask --runtime` removes it.
+    case "${state}" in
+        masked) turn_on="systemctl unmask ${unit} && ${turn_on}" ;;
+        masked-runtime) turn_on="systemctl unmask --runtime ${unit} && ${turn_on}" ;;
+    esac
     info "${unit} is ${state}; left as is (run '${turn_on}' to turn it on)"
 }
 
