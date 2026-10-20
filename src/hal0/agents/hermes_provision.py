@@ -5612,20 +5612,22 @@ _HAL0_SYSTEMCTL = os.environ.get("HAL0_SYSTEMCTL", "/usr/lib/hal0/bin/hal0-syste
 #
 # systemd merges EVERY *.conf under hal0-agent@<id>.service.d/, so a drop-in an
 # OLD installer left behind still applies even after the current template
-# overwrites override.conf. halo150 O3: a stale `ConfigurationDirectory=`
+# ships its own 10-hal0.conf. halo150 O3: a stale `ConfigurationDirectory=`
 # drop-in brick-loops the unit with status=241/CONFIGURATION_DIRECTORY (the
-# current template ships no such directive). Convergent cleanup — mirrors the
-# stale static slot-unit removal already in install.sh: scan the drop-in dirs,
-# remove any NON-shipped fragment carrying a directive the template doesn't
-# ship, report what was removed, no-op otherwise.
+# current template ships no such directive). Convergent cleanup: scan the
+# drop-in dirs and DISABLE (rename to ``<name>.hal0-disabled``, which systemd
+# does not load) any NON-shipped fragment carrying a directive the template
+# doesn't ship. Renamed, never deleted: no shipped version ever carried that
+# directive, so a hit is operator content and hal0 must not destroy a file it
+# cannot prove it wrote (#2391).
 
 SYSTEMD_SYSTEM_DIR = Path("/etc/systemd/system")
 
-#: Drop-in filenames the CURRENT template legitimately ships (never removed).
+#: Drop-in filenames the CURRENT template legitimately ships (never disabled).
 _SHIPPED_AGENT_DROPINS: frozenset[str] = frozenset({"10-hal0.conf"})
 
 #: Directives the current hal0-agent@ template does NOT set; a drop-in that
-#: carries one is stale debris from an old install and is removed. The 241
+#: carries one is stale debris from an old install and is disabled. The 241
 #: brick-loop class is ConfigurationDirectory= (halo150 O3).
 _STALE_AGENT_DIRECTIVES: tuple[str, ...] = ("ConfigurationDirectory=",)
 
@@ -5634,7 +5636,7 @@ _STALE_AGENT_DIRECTIVES: tuple[str, ...] = ("ConfigurationDirectory=",)
 class StaleDropinCleanupResult:
     """Outcome of :func:`cleanup_stale_agent_dropins`."""
 
-    removed: list[str] = field(default_factory=list)
+    disabled: list[str] = field(default_factory=list)
     daemon_reloaded: bool = False
 
 
@@ -5643,15 +5645,16 @@ def cleanup_stale_agent_dropins(
     systemd_dir: Path = SYSTEMD_SYSTEM_DIR,
     shipped: frozenset[str] = _SHIPPED_AGENT_DROPINS,
     stale_directives: tuple[str, ...] = _STALE_AGENT_DIRECTIVES,
-    unlink: Callable[[Path], None] | None = None,
+    rename: Callable[[Path, Path], None] | None = None,
     run: Callable[..., Any] = subprocess.run,
 ) -> StaleDropinCleanupResult:
-    """Remove stale hal0-agent@ drop-in fragments the template doesn't ship.
+    """Disable stale hal0-agent@ drop-in fragments the template doesn't ship.
 
-    Scans every ``hal0-agent@*.service.d/`` under ``systemd_dir`` and deletes
+    Scans every ``hal0-agent@*.service.d/`` under ``systemd_dir`` and renames
     any ``*.conf`` that is (a) NOT a shipped drop-in name and (b) carries a
-    ``stale_directives`` directive (the 241/CONFIGURATION_DIRECTORY class).
-    Runs ``daemon-reload`` only if something was removed. Idempotent: a clean
+    ``stale_directives`` directive (the 241/CONFIGURATION_DIRECTORY class) to
+    ``<name>.hal0-disabled`` so systemd stops loading it but the operator keeps
+    the content. Runs ``daemon-reload`` only if something was disabled. Idempotent: a clean
     box removes nothing and never reloads. Every seam is injectable for tests.
     """
     # Host-safety guard (mirrors write_gateway_secrets_dropin): under pytest with
@@ -5660,8 +5663,8 @@ def cleanup_stale_agent_dropins(
     if os.environ.get("PYTEST_CURRENT_TEST") and str(systemd_dir).startswith("/etc/"):
         return StaleDropinCleanupResult()
 
-    do_unlink = unlink if unlink is not None else (lambda p: p.unlink())
-    removed: list[str] = []
+    do_rename = rename if rename is not None else (lambda src, dst: src.rename(dst))
+    disabled: list[str] = []
     for dropin_dir in sorted(systemd_dir.glob("hal0-agent@*.service.d")):
         if not dropin_dir.is_dir():
             continue
@@ -5673,26 +5676,31 @@ def cleanup_stale_agent_dropins(
             except OSError:
                 continue
             if any(directive in text for directive in stale_directives):
+                target = conf.with_name(conf.name + ".hal0-disabled")
                 try:
-                    do_unlink(conf)
+                    do_rename(conf, target)
                 except OSError as exc:
                     log.warning(
-                        "hermes_provision.stale_dropin_unlink_failed",
+                        "hermes_provision.stale_dropin_disable_failed",
                         path=str(conf),
                         error=str(exc),
                     )
                     continue
-                removed.append(str(conf))
-                log.info("hermes_provision.removed_stale_agent_dropin", path=str(conf))
+                disabled.append(str(conf))
+                log.warning(
+                    "hermes_provision.disabled_stale_agent_dropin",
+                    path=str(conf),
+                    renamed_to=str(target),
+                )
 
     reloaded = False
-    if removed:
+    if disabled:
         try:
             run(["systemctl", "daemon-reload"], check=True)  # nosec B603 B607
             reloaded = True
         except (subprocess.SubprocessError, OSError) as exc:
             log.warning("hermes_provision.stale_dropin_daemon_reload_failed", error=str(exc))
-    return StaleDropinCleanupResult(removed=removed, daemon_reloaded=reloaded)
+    return StaleDropinCleanupResult(disabled=disabled, daemon_reloaded=reloaded)
 
 
 def _privileged_systemctl(verb: str, body: str | None = None) -> None:
@@ -7213,8 +7221,15 @@ def install_hermes(
     if os.geteuid() == 0:
         try:
             cleanup = cleanup_stale_agent_dropins()
-            if cleanup.removed and verbose:
-                print(f"[cleanup] removed stale agent drop-ins: {', '.join(cleanup.removed)}")
+            if cleanup.disabled:
+                # Unconditional (not verbose-gated): an operator file was taken out of service.
+                print(
+                    "[cleanup] WARNING: disabled agent drop-in(s) declaring "
+                    "ConfigurationDirectory= (crash-loops the unit with status=241): "
+                    + ", ".join(f"{p} -> {p}.hal0-disabled" for p in cleanup.disabled)
+                    + ". Re-add your other settings via `systemctl edit "
+                    "--drop-in=local hal0-agent@hermes`."
+                )
         except (OSError, subprocess.SubprocessError) as exc:
             log.warning("hermes_provision.stale_dropin_cleanup_failed", error=str(exc))
 

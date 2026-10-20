@@ -29,11 +29,12 @@ def test_removes_stale_configuration_directory_dropin(tmp_path: Path) -> None:
     reloads: list[list[str]] = []
     result = hp.cleanup_stale_agent_dropins(
         systemd_dir=tmp_path,
-        unlink=lambda p: p.unlink(),
         run=lambda argv, **_kw: reloads.append(list(argv)),
     )
-    assert str(stale) in result.removed
+    assert str(stale) in result.disabled
     assert not stale.exists()
+    # renamed, not deleted: operator content survives
+    assert stale.with_name("10-legacy.conf.hal0-disabled").read_text().startswith("[Service]")
     assert result.daemon_reloaded
     assert reloads == [["systemctl", "daemon-reload"]]
 
@@ -44,7 +45,7 @@ def test_keeps_shipped_10_hal0_conf(tmp_path: Path) -> None:
     )
     result = hp.cleanup_stale_agent_dropins(systemd_dir=tmp_path, run=lambda *a, **k: None)
     assert shipped.exists()
-    assert result.removed == []
+    assert result.disabled == []
     assert not result.daemon_reloaded
 
 
@@ -53,20 +54,34 @@ def test_keeps_nonshipped_dropin_without_stale_directive(tmp_path: Path) -> None
     op = _mk_dropin(tmp_path, "hermes", "50-operator.conf", "[Service]\nNice=5\n")
     result = hp.cleanup_stale_agent_dropins(systemd_dir=tmp_path, run=lambda *a, **k: None)
     assert op.exists()
-    assert result.removed == []
+    assert result.disabled == []
 
 
 def test_clean_box_is_noop(tmp_path: Path) -> None:
     result = hp.cleanup_stale_agent_dropins(systemd_dir=tmp_path, run=lambda *a, **k: None)
-    assert result.removed == []
+    assert result.disabled == []
     assert not result.daemon_reloaded
 
 
 def test_convergent_second_run_after_cleanup(tmp_path: Path) -> None:
     _mk_dropin(tmp_path, "hermes", "10-legacy.conf", "ConfigurationDirectory=hal0\n")
-    hp.cleanup_stale_agent_dropins(
-        systemd_dir=tmp_path, unlink=lambda p: p.unlink(), run=lambda *a, **k: None
-    )
+    hp.cleanup_stale_agent_dropins(systemd_dir=tmp_path, run=lambda *a, **k: None)
     result = hp.cleanup_stale_agent_dropins(systemd_dir=tmp_path, run=lambda *a, **k: None)
-    assert result.removed == []
+    assert result.disabled == []
     assert not result.daemon_reloaded
+
+
+def test_operator_override_conf_with_stale_directive_is_renamed_not_deleted(
+    tmp_path: Path,
+) -> None:
+    body = "[Service]\nConfigurationDirectory=hal0\nEnvironment=MINE=1\n"
+    op = _mk_dropin(tmp_path, "hermes", "override.conf", body)
+    result = hp.cleanup_stale_agent_dropins(systemd_dir=tmp_path, run=lambda *a, **k: None)
+    assert result.disabled == [str(op)]
+    assert not op.exists()
+    assert op.with_name("override.conf.hal0-disabled").read_text() == body
+    # systemd loads only *.conf, so the renamed file is out of service
+    assert not list(op.parent.glob("*.conf"))
+    # convergent: second run finds nothing
+    again = hp.cleanup_stale_agent_dropins(systemd_dir=tmp_path, run=lambda *a, **k: None)
+    assert again.disabled == []

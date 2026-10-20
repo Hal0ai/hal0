@@ -2015,7 +2015,35 @@ if [[ -f "${AGENT_UNIT_SRC}" ]]; then
                 info "removed legacy ${LEGACY_OVERRIDE} (hal0-shipped; replaced by 10-hal0.conf)"
                 ;;
             *)
+                # Warns once per installer run (not once per file lifetime); the
+                # installer is idempotent, so a re-run repeats the warning until
+                # the operator trims or removes the file.
+                # An operator-edited override.conf is the stock file plus their
+                # edits (`systemctl edit` opens the existing content), so it
+                # usually re-declares hal0-owned directives that now ALSO come
+                # from 10-hal0.conf: list directives (ExecStartPre=) run twice and
+                # stale values in the operator copy beat hal0's. Name them.
+                # Best-effort and never fatal: every probe sits in an `if`.
+                LEGACY_DUPES=""
+                while IFS= read -r dline || [[ -n "${dline}" ]]; do
+                    case "${dline}" in "" | \#* | \[*) continue ;; esac
+                    dkey="${dline%%=*}"
+                    if [[ "${dkey}" == "Environment" ]]; then
+                        dval="${dline#*=}"
+                        dval="${dval#\"}"
+                        dkey="Environment=${dval%%=*}"
+                        dpat="^[[:space:]]*Environment=[\"']?${dval%%=*}="
+                    else
+                        dpat="^[[:space:]]*${dkey}="
+                    fi
+                    if grep -Eq "${dpat}" "${LEGACY_OVERRIDE}" 2>/dev/null; then
+                        LEGACY_DUPES="${LEGACY_DUPES:+${LEGACY_DUPES}, }${dkey}"
+                    fi
+                done <"${AGENT_DROPIN_DST_DIR}/10-hal0.conf" 2>/dev/null || true
                 warn "${LEGACY_OVERRIDE} is not a hal0-shipped file: leaving it in place. It is operator-owned and now layers over 10-hal0.conf."
+                if [[ -n "${LEGACY_DUPES}" ]]; then
+                    warn "${LEGACY_OVERRIDE} re-declares hal0-owned directives: ${LEGACY_DUPES}. Duplicated ExecStartPre=/EnvironmentFile= run or load twice, and stale values in your copy override hal0's. Trim it to your own lines (edit with: systemctl edit --drop-in=local hal0-agent@hermes)."
+                fi
                 ;;
         esac
     fi

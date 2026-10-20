@@ -245,6 +245,20 @@ owning unit, its probe strategy, and which lifecycle verbs it permits:
 | Hermes | Bundled agent + its own dashboard (loopback `:9119`) | `hal0-agent@hermes.service` | start, stop, restart, enable, disable |
 | Hindsight | Memory engine — this is the same unit documented above | `hindsight-api.service` | start, stop, restart, enable, disable |
 
+#### Hermes systemd drop-in
+
+hal0 ships its Hermes unit settings as
+`/etc/systemd/system/hal0-agent@hermes.service.d/10-hal0.conf`. Put your own
+changes in a separate drop-in with `systemctl edit --drop-in=local
+hal0-agent@hermes` (it lands as `local.conf` and sorts after `10-hal0.conf`, so
+your values win). Earlier releases shipped this file as `override.conf`, the
+name `systemctl edit` uses by default. Re-running the installer deletes an
+`override.conf` that still matches a hal0-shipped version. An `override.conf`
+you edited is kept and the installer warns, naming the hal0-owned directives it
+repeats. Trim it to your own lines. A drop-in carrying `ConfigurationDirectory=`
+is renamed to `<name>.hal0-disabled`, because that directive crash-loops the
+unit (status 241); the file is kept, not deleted.
+
 Hindsight's entry here isn't a second thing to learn: the Services page's
 buttons for it run through the identical `unit_action` → `hal0-systemctl`
 path already described in hindsight-api.service above.

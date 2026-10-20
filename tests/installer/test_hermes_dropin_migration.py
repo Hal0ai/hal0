@@ -56,4 +56,33 @@ def test_operator_edited_override_conf_is_kept_with_warning(tmp_path: Path) -> N
     d, out = _run(tmp_path, edited)
     assert (d / "override.conf").read_text() == edited
     assert (d / "10-hal0.conf").exists()
-    assert out.count("WARN") == 1 and "operator-owned" in out
+    assert "operator-owned" in out and "re-declares" in out
+
+
+def test_warning_names_redeclared_hal0_directives(tmp_path: Path) -> None:
+    # Stock file plus an operator line, as `systemctl edit` would leave it.
+    edited = SHIPPED.read_text() + "\nEnvironment=OPERATOR_TWEAK=1\n"
+    _, out = _run(tmp_path, edited)
+    assert "re-declares hal0-owned directives" in out
+    for name in ("ExecStartPre", "EnvironmentFile", "Environment=HERMES_HOME"):
+        assert name in out
+    assert "OPERATOR_TWEAK" not in out.split("re-declares")[1]
+
+
+def test_warning_omits_directive_list_when_no_overlap(tmp_path: Path) -> None:
+    _, out = _run(tmp_path, "[Service]\nNice=5\n")
+    assert out.count("WARN") == 1
+    assert "re-declares" not in out
+
+
+def test_quoted_environment_form_is_detected(tmp_path: Path) -> None:
+    _, out = _run(tmp_path, '[Service]\nEnvironment="HAL0_INFERENCE_BASE=http://x"\n')
+    listed = out.split("re-declares hal0-owned directives:")[1].split(".")[0]
+    assert listed.strip() == "Environment=HAL0_INFERENCE_BASE"
+
+
+def test_unreadable_override_does_not_fail_install(tmp_path: Path) -> None:
+    # Non-UTF8 / odd content must never abort the install under set -euo pipefail.
+    d, out = _run(tmp_path, "\xff\xfe[Service\n")
+    assert (d / "10-hal0.conf").exists()
+    assert "WARN" in out
