@@ -4,28 +4,59 @@
 
 Proposed (2026-10-20). The operator chose option (a) on #2615 (2026-10-19): a
 pinned source checkout plus an editable install on Python 3.14. This record
-turns that choice into a design, and in two places it departs from the sketch
-in that decision comment:
+turns that choice into a design. On 2026-10-20 the operator cut two pieces
+from it: the manual rollback command with its `hold` marker (deferred to
+#2805, decision 8) and a rename of the `HAL0_HERMES_PYTHON` variable
+(decision 9). The implementation on #2615 starts after this record merges and
+lands as the four PRs in decision 14.
 
-- The sketch had `_install_venv` build the new venv beside the old one and
-  swap it into place. This record instead gives every build its own release
-  directory and moves a symlink. A venv renamed after it is built keeps
-  shebangs that point at the build directory, and an editable venv needs its
-  checkout to move with it.
-- The sketch had the unit's `ReadWritePaths` cover the checkout. The unit
-  already grants `/var/lib/hal0`, so it does not change.
+Merging this record accepts every departure from the sketch in that
+decision comment, so it needs the operator's sign-off. After the cuts these
+departures remain:
 
-Merging this record accepts both departures, so it needs the operator's
-sign-off. It replaces the install posture that ADR-0018 recorded: a
-`python3.12 -m venv` followed by a `git+` requirement line. The
-`VETTED_HERMES_REFS` freeze that ADR-0018 introduced stays. The implementation
-on #2615 starts after this record merges and lands as the slices in decision
-14.
+1. **Release directories behind a `current` symlink, not build beside and
+   swap.** The sketch had `_install_venv` build the new venv beside the old
+   one and swap it into place. A venv renamed after it is built keeps
+   shebangs that point at the build directory, and an editable venv needs its
+   checkout to move with it. So every build gets its own release directory
+   and only a symlink moves (decision 4). Upgrades fetch into a shared bare
+   mirror and add one worktree per release, rather than updating one
+   checkout in place.
+2. **`ReadWritePaths` does not change.** The sketch had the unit's
+   `ReadWritePaths` cover the checkout. The unit already grants
+   `/var/lib/hal0`.
+3. **uv becomes a dependency of hal0 itself.** The sketch said "uv-managed
+   3.14" and nothing about where uv comes from. It is now a pinned dependency
+   in `pyproject.toml`, and a system `python3.14` is preferred over a
+   uv-managed one (decision 9). `--offline` can no longer install Hermes.
+4. **`hal0 agent upgrade hermes --to` takes only a vetted sha.** A version
+   string, an `==X.Y.Z` spec and the `>= HERMES_MIN_VERSION` floor are
+   rejected, and `upgrade_hermes_runtime` is deleted (decisions 3 and 6).
+   This is a breaking CLI change.
+5. **hal0 post-edits the gateway unit that upstream generates.**
+   `install.sh` and `hal0 agent install hermes` both run upstream's
+   `hermes gateway install --system` as root, and one shared helper then
+   rewrites the release path baked into the unit (decision 12).
+6. **Every activation stops the agent and the gateway briefly.** The units
+   are stopped across the switch and started again (decision 7), and every
+   existing host migrates on its next `hal0 update` after PR 2 (decision 11).
+7. **Only an automatic rollback.** The sketch said to keep the old venv for
+   rollback. The old release is kept as `previous`, and a failed activation
+   flips back to it by itself. There is no manual rollback command, so a
+   manual rollback lasts only until the next `hal0 update` (decision 8,
+   #2805).
+8. **An invalid `HAL0_HERMES_PYTHON` is discarded, not refused.** Today a
+   value that fails validation stops the build. It is now discarded with a
+   warning and the interpreter is re-probed (decision 9).
+9. **Four PRs instead of one L PR plus a pin bump.** Python 3.14 is split
+   out from the layout work (decision 14). PRs 2 and 3 need the upgrade lane
+   on the test fleet and a human merge.
 
-ADR-0018 is cited by `pyproject.toml` (`[tool.hal0.upstream-hermes]`) and
-`scripts/hermes-sdk-diff.sh`, but no `docs/adr/0018-*` file is present in
-this tree or its history. This record therefore restates the posture it
-replaces instead of linking to it.
+`pyproject.toml` (`[tool.hal0.upstream-hermes]`) and
+`scripts/hermes-sdk-diff.sh` cite an ADR-0018, but no `docs/adr/0018-*` file
+is present in this tree or its history. This record therefore restates the
+install posture it replaces (a `python3.12 -m venv` followed by a `git+`
+requirement line) instead of linking to it.
 
 ## Context
 
@@ -89,8 +120,9 @@ Facts about today's code that constrain the design:
   `EnvironmentFile=-/etc/hal0/hermes-python.env`, so every process systemd
   starts sees the persisted path as the variable `HAL0_HERMES_PYTHON`, the
   same name an operator uses to pin an interpreter. The resolvers cannot tell
-  the two apart, and the file parser rejects anything but exactly one
-  `HAL0_HERMES_PYTHON=` line.
+  the two apart. The file parser rejects anything but exactly one
+  `HAL0_HERMES_PYTHON=` line, and a value that fails validation stops the
+  build.
 - `hermes config migrate` runs against the shared `HERMES_HOME`, from
   `upgrade_hermes_runtime` and from provisioning.
 - uv is optional today. `hermes-prereqs.sh` installs it through pipx only when
@@ -101,8 +133,12 @@ Facts about today's code that constrain the design:
   `hal0_config_file_lock` in `updater/updater.py`, which guards the config
   TOML.
 - `hermes-gateway.service` is written by upstream's
-  `hermes gateway install --system`, which `install.sh` runs as root. hal0
-  does not write it. Its `ExecStart` comes from the running interpreter:
+  `hermes gateway install --system`. hal0 runs it as root in two places:
+  `install.sh`, and `_install_hermes_gateway` in `cli/agent_commands.py`,
+  which the default `--gateway` path of `hal0 agent install hermes` reaches
+  (the deferred install after `HAL0_SKIP_HERMES=1`, #1102). hal0 does not
+  write the unit, and the generator starts it at once. Its `ExecStart` comes
+  from the running interpreter:
   - At `3ef6bbd2` it is `sys.prefix/bin/python -m hermes_cli.main … gateway run`,
     with `VIRTUAL_ENV` set to the same prefix (`hermes_cli/gateway.py`,
     `get_python_path`).
@@ -115,11 +151,18 @@ Facts about today's code that constrain the design:
 - A uv console script execs the absolute path of the python in the venv it
   was built in. Python started through a symlinked venv path reports that
   symlink path as `sys.prefix`. Both were checked in scratch venvs on
-  2026-10-20.
+  2026-10-20. So a process started through a path that a switch moves (the
+  gateway's `ExecStart`, or any console script of the legacy venv in
+  decision 11) resolves its later imports into whatever release the link
+  names by then.
 - Checked on 2026-10-20 in scratch venvs: `3ef6bbd2` (the current pin) installs
   editable with `uv pip install -e "<checkout>[web,mcp]"` on both Python 3.12
-  and Python 3.14. `hermes --version` runs, and `openai`, `httpx`, `fastapi`,
-  `pydantic` and `mcp.client.streamable_http` import.
+  and Python 3.14. `hermes --version` runs (whether it prints the commit at
+  that ref was not checked), and `openai`, `httpx`, `fastapi`, `pydantic` and
+  `mcp.client.streamable_http` import.
+- hal0's own updater already installs into a release directory behind a
+  `current` symlink and swaps the link (`apply()` in `updater/updater.py`,
+  as the `_reinstall_into_venv` docstring describes). Decision 4 follows that pattern.
 
 ## Decision
 
@@ -162,8 +205,7 @@ Facts about today's code that constrain the design:
        release.json              ref, interpreter path and minor, hal0 version;
                                  written last
      current  -> releases/<id>   the live release; the only link a switch moves
-     previous -> releases/<id>   the rollback target
-     hold                        present after a rollback (decision 8)
+     previous -> releases/<id>   the flip-back target (decision 7)
    /var/lib/hal0/venvs/hermes -> /var/lib/hal0/hermes/current/venv
    ```
 
@@ -188,24 +230,47 @@ Facts about today's code that constrain the design:
      1. fetches the sha into `mirror.git`;
      2. adds the worktree;
      3. builds the venv at its final path;
-     4. verifies the release in place: it imports, `venv/bin/hermes --version`
-        reports the ref, and the `mcp_wire` client probe passes;
+     4. verifies the release in place:
+        - `git -C src rev-parse HEAD` equals the ref;
+        - the package imports;
+        - `venv/bin/hermes --version` exits 0. This is a smoke test only.
+          Its output is not compared with the ref, because at `3ef6bbd2` it
+          may print a package version rather than the commit;
+        - the `mcp_wire` client probe passes;
      5. writes `release.json`.
 
      `activate_release(id)` then switches the live release (decision 7).
    - **The lock.** Every builder operation holds an exclusive `flock` on
      `/var/lib/hal0/hermes/.lock` from start to finish. That covers build,
-     activation, the first migration, rollback and prune. Only a lock holder
-     deletes an incomplete release, so a release without `release.json` seen
-     under the lock was left by a builder that died, and it is removed.
-     - CLI callers (`provision`, `upgrade`, `rollback`) wait for the lock, and
-       print who holds it.
-     - `converge_hermes` and `repair_hermes_mcp_client` do not wait. They
-       report `busy`, and the next `hal0 update` retries.
+     activation, the first migration and prune.
+     - Once it holds the lock, the holder truncates the lock file and writes
+       its pid, its caller name and its start time into it. `flock` cannot
+       name its holder, so this record is how a waiter does. The record is
+       advisory: a holder that dies releases the lock, and the next holder
+       overwrites the record.
+     - Only a lock holder deletes an incomplete release, so a release without
+       `release.json` seen under the lock was left by a builder that died,
+       and it is removed.
+     - CLI callers (`hal0 agent install`, `reprovision` and `upgrade`) wait
+       for the lock. While they wait they print the recorded pid, caller and
+       start time.
+     - `converge_hermes` and `repair_hermes_mcp_client` do not wait, and the
+       next `hal0 update` retries them. `converge_hermes` returns the
+       component status `busy` with the recorded pid and logs
+       `components.hermes_busy` as a warning. The component runner records
+       it in `components.json` like every other arm result. `busy` is not a
+       failure status, so the component row derives `pending` (the live ref
+       still differs from the pin) and never `build_failed`, and
+       `hal0 update` does not fail: the component pass is non-fatal and the
+       update result does not carry arm results. `repair_hermes_mcp_client`
+       returns `False` and logs the same warning, as it does for any repair
+       that does not run.
    - **When a build is needed.** Three triggers apply. The builder targets
      the pinned ref unless a caller names another vetted one.
      - the live ref differs from the pinned ref;
-     - `venvs/hermes` is a real directory (the legacy layout, decision 11);
+     - the legacy layout (decision 11): `venvs/hermes` is a real directory,
+       or the live release is the legacy one, which a flip-back during the
+       first migration leaves live;
      - the live `release.json` interpreter minor differs from the target minor
        (decision 9).
    - **The callers.**
@@ -220,9 +285,8 @@ Facts about today's code that constrain the design:
        string or an `==X.Y.Z` spec is rejected. `upgrade_hermes_runtime` and
        its in-place `pip install --upgrade` are deleted. A root caller drops to
        `hal0` through `_provision_hermes`, like every other provisioning entry
-       point.
-
-     `hold` changes what these callers build (decision 8).
+       point. A ref other than the pin lasts only until the next
+       `hal0 update`, which converges back to the pin (decision 8).
    - **Repairs.** Repairing the live ref means building a fresh release of
      the same ref and activating it. Nothing writes into a release after
      `release.json` exists, and `_install_venv` and its in-place
@@ -230,51 +294,63 @@ Facts about today's code that constrain the design:
    - **Offline.** `--offline` never builds. When a build is needed offline,
      the builder refuses and names the step that needs the network. A host
      that is already running keeps its live release.
-7. **Activation: switch, migrate, restart, verify, and flip back on failure.**
-   1. Copy `$HERMES_HOME/config.yaml` into the outgoing release as
+7. **Activation: stop, switch, migrate, start, verify, and flip back on
+   failure.** The units are stopped across the switch. The gateway's
+   `ExecStart` runs Python through `current` (decision 12), so a gateway
+   still running when `current` moves resolves its later imports into the
+   new release; on PR 3's 3.12-to-3.14 rebuild its `lib/python3.12` vanishes
+   under it. Running `hermes config migrate` from the new release's own path
+   before the switch would shorten that window but not close it, since the
+   switch and the restart are still two steps apart. Stopping closes it, and
+   the restart this replaces already took the units down, so the only added
+   downtime is the time `config migrate` takes.
+   1. Record whether `hal0-agent@hermes` and `hermes-gateway` are active
+      (`systemctl show -p ActiveState`, which needs no privilege). These are
+      "the recorded units" for the rest of this decision.
+   2. Stop the recorded units: `stop-agent hermes` and
+      `svc-stop hermes-gateway` through `hal0-systemctl` when running as
+      `hal0`, or `systemctl stop` directly as root, the same split
+      `converge_hermes` makes today.
+   3. Copy `$HERMES_HOME/config.yaml` into the outgoing release as
       `config.yaml.before-<new id>`.
-   2. Create the new `current` link at a temporary name and `rename()` it
+   4. Create the new `current` link at a temporary name and `rename()` it
       over `current`, so `venvs/hermes` always resolves. Point `previous` at
       the outgoing release the same way.
-   3. Run provisioning against the new release, including
-      `hermes config migrate`. Units still running finish on their old
-      release, because their console scripts exec that release's python by
-      absolute path.
-   4. Restart the units that were active before the switch, with the verbs
-      `converge_hermes` uses today: `try-restart-agent` for the agent and
-      `svc-restart` for the gateway.
-   5. Re-verify. Decision 6's checks run through `venvs/hermes`, and every
-      unit that was active before the switch must be active again after a
-      settle period, with no new restart in it (`systemctl show` of
-      `ActiveState` and `NRestarts`, which needs no privilege). A
+   5. Run provisioning against the new release, including
+      `hermes config migrate`. Nothing from the old release is running.
+   6. Start the recorded units with `start-agent hermes` and
+      `svc-start hermes-gateway` (or `systemctl start` as root). Both start a
+      stopped unit. The `try-restart-agent` verb `converge_hermes` uses
+      today would not: it is a no-op on a stopped unit.
+   7. Re-verify. Decision 6's checks run through `venvs/hermes`, and every
+      recorded unit must be active after a settle period, with no new restart
+      in it (`systemctl show` of `ActiveState` and `NRestarts`). A
       crash-looping unit therefore fails the re-verify.
-   6. If the re-verify fails, switch `current` back, restore the copied
-      `config.yaml`, restart the same units, and report `activation_failed`
-      with the `hal0 agent rollback hermes` and `--repair` remedies.
-   7. On success, write the stamp from `release.json` and prune
+   8. If the re-verify fails, stop the recorded units, switch `current` and
+      `previous` back, restore the copied `config.yaml`, start the recorded
+      units with the step-6 verbs, and report `activation_failed` with the
+      `sudo hal0 agent reprovision hermes --repair` remedy.
+      `activation_failed` joins the component failure statuses, so the
+      component row shows it until a later activation succeeds.
+   9. On success, write the stamp from `release.json` and prune
       (decision 10).
 
    The automatic flip back restores the config only because the copy was
    taken moments earlier. Apart from that, a flip back covers code and venv,
    not `HERMES_HOME`.
-8. **Rollback is `hal0 agent rollback hermes`, and `hold` keeps it.**
-   - The command swaps `current` and `previous` (decision 7's rename),
-     restarts and re-verifies as in decision 7, and creates
-     `/var/lib/hal0/hermes/hold`. It restores code and venv, not
-     `HERMES_HOME`. The `config.yaml` copy is left for a manual restore, and
-     the command says so in its output.
-   - **While `hold` exists:**
-     - `converge_hermes` reports `held` instead of building, for every
-       trigger. When the pinned ref differs from the held ref, the
-       `hal0 update` result carries a warning that names both refs.
-     - `repair_hermes_mcp_client`, `--repair` and the MCP-probe-failure path
-       in `_phase_install` rebuild the held ref, not the pin. A repair never
-       moves a held host to a different ref.
-     - `hal0 agent status hermes` shows the install as held.
-   - **Clearing it.** Only `hal0 agent upgrade hermes` removes `hold`, and
-     then it converges to the pin. Uninstall removes it with the tree.
-9. **Interpreter: 3.14, uv shipped with hal0, and hal0's own selection told
-   apart from an operator's.**
+8. **No manual rollback command; the deferred design is #2805.** `previous`
+   exists only as decision 7's flip-back target and as the second release
+   decision 10 keeps. hal0 adds no `hal0 agent rollback hermes` command and
+   no `hold` marker, so nothing freezes a host against `hal0 update`.
+   - **The cost.** A manual rollback lasts only until the next `hal0 update`.
+     An operator who finds a regression after an activation passed its
+     re-verify can swap `current` and `previous` by hand and restart the
+     units, or run `hal0 agent upgrade hermes --to=<older vetted sha>`.
+     Either way, the next `hal0 update` sees the live ref differ from the pin
+     and builds the pin again. The lasting fix is a hal0 patch that reverts
+     the pin.
+   - #2805 tracks the command and the hold, with the caller rules they need.
+9. **Interpreter: 3.14, uv shipped with hal0, and a stale value re-probed.**
    - `PYTHON_MIN`, `PYTHON_MAX_EXCLUSIVE`, `UV_PYTHON_FALLBACK` and the
      exact-minor check in `_validate_hermes_python` move to 3.14. A system
      `python3.14` wins. Otherwise uv installs a managed 3.14 under
@@ -289,36 +365,25 @@ Facts about today's code that constrain the design:
      the pipx fallback lookup in `_uv_available` are removed.
    - A host with no system 3.14 needs the network to fetch one, as decision 6
      says for `--offline`.
-   - **The operator override moves to its own variable,
-     `HAL0_HERMES_PYTHON_OVERRIDE`.** `HAL0_HERMES_PYTHON` becomes a value only
-     hal0 writes, whether it arrives from the file directly or through
-     `EnvironmentFile=`. The resolver takes `HAL0_HERMES_PYTHON_OVERRIDE`
-     first, from the environment and then from the file, and rejects one that
-     fails validation, as today.
-   - **A `HAL0_HERMES_PYTHON` value that fails validation is discarded and
-     re-probed.** This covers the environment and the file, and both the new
-     format and a legacy one-line file, which is the 3.12 path every existing
-     install holds.
+   - **`HAL0_HERMES_PYTHON` keeps its name and its file format.** It stays
+     both the value hal0 persists and the operator's pin.
+   - **A value that fails validation is discarded with a warning, then the
+     interpreter is re-probed.** This applies to a value from the
+     environment, a value from the file, and a file the parser rejects. Every
+     existing install holds a 3.12 path, so after PR 3 every host takes this
+     path once. The warning names the discarded value, why it failed, and the
+     interpreter chosen instead.
    - **After re-probing.** The resolver persists the new value when it can
      write the file. It also sets the value in its own environment, as the
      prelude does today, so later calls in the same process agree. When it
      cannot write the file (a build running as `hal0` against a root-owned
      file), it uses the re-probed interpreter for this build and leaves the
      file for the next root-run provision.
-   - **The file format.** `_read_hermes_python_env` changes to accept the two
-     keys, each at most once, and nothing else. `_persist_hermes_python`
-     rewrites only the `HAL0_HERMES_PYTHON` line and keeps an operator's
-     override line.
-   - **Operators who pinned an interpreter through `HAL0_HERMES_PYTHON`**
-     have to move the pin to the new variable.
-     - A value that still validates is kept. A legacy file carries no marker,
-       so hal0 cannot tell a hand-set value from its own and cannot warn about
-       it. The release note for PR 1 carries that warning instead.
-     - A value that fails validation is replaced, with a warning that names
-       `HAL0_HERMES_PYTHON_OVERRIDE`.
-     - A value set in a unit drop-in rather than in the file is re-probed,
-       and the warning is repeated, on every build that sees it.
-     - `docs/reference/env-vars.mdx` documents the new variable.
+   - **The cost.** hal0 cannot tell its own stale value from an operator's
+     bad pin, so a bad pin no longer stops the build. The operator learns
+     about it from the warning, not from a failure. A pin set in a unit
+     drop-in rather than the file is re-probed, and the warning repeated, on
+     every build that sees it.
 10. **Retention: the live release and `previous`, nothing else.** After a
     successful activation, still under the lock, the builder:
     - deletes every other release, running `git worktree remove` on its
@@ -327,66 +392,90 @@ Facts about today's code that constrain the design:
     - runs `uv python uninstall 3.12` under `/var/lib/hal0/python` once no
       remaining release's `release.json` names a 3.12 interpreter there.
 
-    A re-upgrade to a ref that already has a release directory, such as an
-    upgrade after a rollback, builds a fresh release; the builder never reuses
-    an old one. The shared bare mirror keeps the second release's checkout to
-    a worktree, not a second clone.
-11. **The first migration stops the agent while the venv directory moves.**
-    On an existing install, `venvs/hermes` is a real directory, the 3.12 venv
-    built from the `git+` line. Decision 6's layout trigger starts the
-    migration on the next `hal0 update` or provision.
+    **Backstop for the gateway.** Before deleting a release, the builder
+    reads `/etc/systemd/system/hermes-gateway.service`, which needs no
+    privilege. It keeps any release whose `releases/<id>/` path the unit
+    still names, and the activation result carries a warning with the
+    `sudo hal0 agent install hermes` remedy, which regenerates and
+    normalises the unit (decision 12). This covers a unit decision 12 never
+    saw, for example one an operator regenerated by hand.
+
+    A re-upgrade to a ref that already has a release directory builds a
+    fresh release; the builder never reuses an old one. The shared bare
+    mirror keeps the second release's checkout to a worktree, not a second
+    clone.
+11. **The first migration moves the venv directory with both units
+    stopped.** On an existing install, `venvs/hermes` is a real directory, the
+    3.12 venv built from the `git+` line. Decision 6's layout trigger starts
+    the migration on the next `hal0 update` or provision.
     1. The builder takes the lock, then builds and verifies the new release
        with the old venv still serving.
-    2. It records whether `hal0-agent@hermes` and `hermes-gateway` are
-       active, then stops both (`stop-agent`, `svc-stop`). A running process
-       was started with `sys.prefix` at that path, and after the move its
-       `lib/python3.12/site-packages` would resolve into the new release.
-    3. It `rename()`s the directory to `releases/legacy-<sha12>/venv` (the
-       two paths are on one filesystem). It writes that release's
-       `release.json` with `legacy: true`, the ref from the stamp, and the
-       interpreter from the venv's `pyvenv.cfg` (`home` and `version`).
-    4. It creates `current` pointing at the new release and `previous`
-       pointing at the legacy release, then `rename()`s the
-       `venvs/hermes -> /var/lib/hal0/hermes/current/venv` symlink into
-       place.
-    5. It continues with decision 7 from step 3. Only the units that were
-       active are started again.
+    2. It runs decision 7 from step 1, so the units are recorded and stopped.
+       A running process was started with `sys.prefix` at the old path, and
+       after the move its `lib/python3.12/site-packages` would resolve into
+       the new release.
+    3. Between decision 7's steps 2 and 3, it `rename()`s the directory to
+       `releases/legacy-<sha12>/venv` (the two paths are on one filesystem).
+       It writes that release's `release.json` with `legacy: true`, the ref
+       from the stamp, and the interpreter from the venv's `pyvenv.cfg`
+       (`home` and `version`).
+    4. Decision 7's step 3 then copies `config.yaml` into the legacy release,
+       and its step 4 creates `current` pointing at the new release and
+       `previous` pointing at the legacy release. The builder then
+       `rename()`s the `venvs/hermes -> /var/lib/hal0/hermes/current/venv`
+       symlink into place.
+    5. Decision 7 continues from step 5. Only the recorded units are started
+       again, with `start-agent` and `svc-start`, and a failed re-verify
+       flips back to the legacy release with the config restored.
 
     Between the two renames the path is missing for a moment. With both units
     stopped, only a `hermes` CLI call started in that moment can see it, and
     the wrapper fails loudly ("venv binary missing") rather than running the
-    wrong code. A build or migration failure before step 2 leaves the host
+    wrong code. A build failure before decision 7's step 2 leaves the host
     exactly as it was.
 
     **The legacy release** is the one exception to "a release is `src/` plus
     `venv/`": it has no `src/`, because the 3.12 venv was a non-editable
-    install. It is still a valid rollback target. Its console scripts exec
-    `/var/lib/hal0/venvs/hermes/bin/python`, the path it was built at. While
-    legacy is live, that path resolves back into the legacy venv. While it is
-    not, nothing runs it, because it is reachable only as `previous`. It stays
-    until the next successful activation prunes it, and decision 8's `hold`
-    keeps it live across `hal0 update`.
-12. **The gateway unit is normalised once, as root, when it is generated.**
-    No seam change is needed.
-    - `install.sh` already runs `hermes gateway install --system` as root.
-      Straight after it, still as root, it rewrites every
-      `/var/lib/hal0/hermes/releases/<live id>/` prefix in the generated unit
-      to `/var/lib/hal0/hermes/current/`, and runs `daemon-reload`. The
-      prefixes are in the `ExecStart` interpreter, the baked checkout path,
-      and `VIRTUAL_ENV`.
-    - If any `releases/` path remains, `install.sh` warns and leaves the
-      gateway disabled, the same posture it takes today when the generator
-      fails.
+    install. It is still a valid flip-back target. Its console scripts exec
+    `/var/lib/hal0/venvs/hermes/bin/python`, the path it was built at, which
+    resolves back into the legacy venv while legacy is live. That path moves
+    on a switch, which is a second reason decision 7 stops the units. While
+    legacy is not live, nothing runs it, because it is reachable only as
+    `previous`. A legacy release left live by a flip-back triggers a fresh
+    migration attempt on the next `hal0 update` (decision 6). It stays until
+    the next successful activation prunes it.
+12. **The gateway unit is normalised by one helper, as root, after every
+    generator run.** No seam change is needed.
+    - **The helper.** `normalise_gateway_unit()` in a new
+      `hal0.agents.hermes_gateway_unit` module. `_install_hermes_gateway`
+      imports it, and `install.sh` runs it as
+      `"${VENV_DIR}/bin/python" -m hal0.agents.hermes_gateway_unit`, the
+      pattern `install.sh` already uses for other hal0 modules. As root, it:
+      1. rewrites every `/var/lib/hal0/hermes/releases/<id>/` prefix in
+         `/etc/systemd/system/hermes-gateway.service` to
+         `/var/lib/hal0/hermes/current/`. The prefixes are in the `ExecStart`
+         interpreter, the baked checkout path, and `VIRTUAL_ENV`;
+      2. runs `daemon-reload`;
+      3. runs `systemctl try-restart hermes-gateway`. The generator already
+         started the unit from the un-normalised path, and the callers'
+         `enable --now` does not restart an active unit, so without this the
+         gateway keeps running from `releases/<id>` until its next restart.
+    - **Its callers.** Both root runs of the generator call it straight
+      after the generator and before their `enable --now`: `install.sh`, and
+      `_install_hermes_gateway` behind `hal0 agent install hermes`.
+    - If any `releases/` path remains, the helper reports it, and the caller
+      warns and leaves the gateway disabled, the posture both callers take
+      today when the generator fails.
     - After that the unit names only stable paths. A switch of `current` plus
-      the restart in decision 7 moves the gateway, and `hal0 update` never
-      has to touch the unit.
+      the stop and start in decision 7 moves the gateway, and `hal0 update`
+      never has to touch the unit. Decision 10's backstop catches a unit that
+      did not pass through the helper.
     - Existing hosts need nothing. Their unit was generated with the venv at
       `/var/lib/hal0/venvs/hermes`, which stays valid as a symlink.
-    - PR 5 must check that a unit generated at `3ef6bbd2`
+    - PR 4 must check that a unit generated at `3ef6bbd2`
       (`python -m hermes_cli.main … gateway run`) still starts the new pin. If
-      it does not, PR 5 adds the same normalised regeneration to the root
-      prelude and names `sudo hal0 agent provision hermes` in its release
-      note.
+      it does not, PR 4 adds the same normalised regeneration to the root
+      prelude and names `sudo hal0 agent install hermes` in its release note.
 13. **Teardown and audit cover the new tree.**
     - `hal0 agent uninstall hermes` removes the `venvs/hermes` symlink and
       all of `/var/lib/hal0/hermes`. The driver's `_remove_venv` refuses a
@@ -398,16 +487,20 @@ Facts about today's code that constrain the design:
       `/var/lib/hal0/python` to its `hal0`-owned rows. Its existing
       `hermes venv` row keeps passing, because it follows the symlinks to a
       `hal0`-owned release.
-14. **#2615 lands as five PRs, in order, and each one ships on its own.**
-    1. **Interpreter provenance.** Decision 9's override variable, the
-       two-key file format and parser, re-probing a stale hal0-written value,
-       the env-vars doc and the release note. The target stays 3.12. Unit
-       tests only. Size M.
-    2. **Release layout, builder and everything the symlink needs.**
-       - Decisions 4 to 7 and 11 to 13, with every build path in decision 6
+14. **#2615 lands as four PRs, in order, and each one ships on its own.**
+    1. **Stale interpreter re-probe.** Decision 9's discard, warning and
+       re-probe for an invalid `HAL0_HERMES_PYTHON`, and persisting the
+       re-probed value. The target stays 3.12, the variable name and the file
+       format do not change. Unit tests only. Size S.
+    2. **Release layout, builder, retention and everything the symlink
+       needs.**
+       - Decisions 4 to 7 and 10 to 13, with every build path in decision 6
          rerouted in the same PR. A path left on `_install_venv` would write
          into a live release.
        - The lock, the layout trigger and uv shipped in hal0's venv.
+       - Retention, including the gateway backstop, so releases never
+         accumulate.
+       - The gateway helper and both of its callers.
        - The teardown and audit, because the symlink lands here.
        - The pin stays `3ef6bbd2` and the interpreter 3.12.
 
@@ -415,14 +508,12 @@ Facts about today's code that constrain the design:
        PR proves the editable install of `3ef6bbd2` on 3.12 in CI or a scratch
        venv before the operator runs the upgrade lane on the test fleet. A
        human merges. Size L.
-    3. **Rollback, hold and retention.** Decisions 8 and 10. Until this PR,
-       releases accumulate but nothing breaks. Size M.
-    4. **Python 3.14.** Decision 9's interpreter move. The interpreter-minor
+    3. **Python 3.14.** Decision 9's interpreter move. The interpreter-minor
        trigger rebuilds every host on its next `hal0 update`, as an ordinary
        new release on the same pin. `3ef6bbd2` installs on 3.14 (Context), so
-       this PR does not wait for PR 5. The upgrade lane runs again, and a
+       this PR does not wait for PR 4. The upgrade lane runs again, and a
        human merges. Size S to M.
-    5. **Pin bump.** A newer vetted ref, the re-vendored contract fixtures
+    4. **Pin bump.** A newer vetted ref, the re-vendored contract fixtures
        (decision 15), the gateway check in decision 12, and the
        watched-surface review #2615 started. Size M.
 15. **Contract tests are re-vendored at each pin bump.** The fixtures under
@@ -452,15 +543,20 @@ Facts about today's code that constrain the design:
     `--offline` can no longer install Hermes from scratch.
 - The Hermes venv is on Python 3.14 while the rest of hal0 stays on its own
   interpreter. The two are independent.
-- Every existing install migrates on its first `hal0 update` after PR 2, with
-  a short agent and gateway stop, and rebuilds once more after PR 4.
+- Every activation stops the agent and the gateway for the length of a
+  `config migrate`, in place of today's restart. Every existing install
+  migrates on its first `hal0 update` after PR 2 and rebuilds once more
+  after PR 3.
 - At steady state the disk holds two releases (two venvs, two worktrees of
   one bare mirror), plus the uv cache. Nothing else is kept.
-- A rollback is a symlink swap and a restart. It covers code and venv, not
-  `HERMES_HOME`, and it holds the install until the next
-  `hal0 agent upgrade hermes`.
-- `HAL0_HERMES_PYTHON` stops being an operator knob. Operators who set it
-  move to `HAL0_HERMES_PYTHON_OVERRIDE`.
+- A failed activation flips back by itself, and that covers code and venv,
+  not `HERMES_HOME` beyond the config copy. There is no manual rollback
+  command: a rollback done by hand lasts only until the next `hal0 update`
+  (decision 8, #2805).
+- `HAL0_HERMES_PYTHON` keeps its name. A value that fails validation is
+  discarded with a warning instead of stopping the build.
+- hal0 post-edits the gateway unit upstream generates, through one helper
+  that both root generator runs call.
 - `--to=<version>` and the version-floor path stop working. `--to` takes a
   vetted sha.
 - The version stamp is hal0's own record, written from `release.json`. A
@@ -472,7 +568,7 @@ Facts about today's code that constrain the design:
 
 - #2615 (the implementation and the decision), #2566 (upstream drift watch),
   PR #2614 (moves the pin to 0.19.0, the ceiling until this lands), #2787
-  (this record).
+  (this record), #2805 (the deferred manual rollback and hold).
 - NousResearch/hermes-agent d84e11af (#68217), `setup.py` guard; v2026.7.20
   `3ef6bbd2`; v0.21.7 `71d34bad`.
 - `src/hal0/agents/hermes_provision.py` (`VETTED_HERMES_REFS`,
@@ -484,8 +580,12 @@ Facts about today's code that constrain the design:
   `src/hal0/cli/agent_commands.py` (`_hermes_root_prelude`,
   `_provision_hermes`), `src/hal0/agents/hermes/driver.py` (`_remove_venv`),
   `src/hal0/cli/doctor_commands.py` (`check_hermes_ownership`),
+  `src/hal0/cli/agent_commands.py` (`_install_hermes_gateway`),
+  `src/hal0/components/runner.py` and `src/hal0/components/status.py`
+  (component failure statuses),
   `installer/agents/hermes-prereqs.sh`, `installer/wrappers/hal0-systemctl`
-  (`test_gateway_rejects_execstart` in
+  (`stop-agent`, `start-agent`, `try-restart-agent`, `svc-start`, `svc-stop`;
+  `test_gateway_rejects_execstart` in
   `tests/installer/test_systemctl_dropin_validation.py`), `installer/install.sh`
   (`hermes gateway install --system`), `installer/agents/hermes/requirements.txt`.
 - Upstream unit generator: `hermes_cli/gateway.py` (`get_python_path`,
