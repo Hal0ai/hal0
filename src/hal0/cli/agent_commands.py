@@ -891,13 +891,15 @@ def _install_hermes_gateway() -> None:
     unit = "hermes-gateway.service"
     has_systemctl = _shutil.which("systemctl") is not None
     state = _gateway_enable_state(unit) if has_systemctl else "not-found"
-    was_active = has_systemctl and state == "disabled" and _gateway_unit_active(unit)
-    if state in ("masked", "masked-runtime"):
-        # Never run the generator over a mask: it would write through the
-        # /dev/null symlink or fail its own enable.
+    disabled = state in ("disabled", "masked-runtime")
+    was_active = has_systemctl and disabled and _gateway_unit_active(unit)
+    if state == "masked":
+        # Never run the generator over a persistent mask: the unit path is a
+        # /dev/null symlink, and writing through it would unmask the unit.
+        # (masked-runtime lives under /run, so the /etc unit file the
+        # generator writes is safe to refresh: treated like disabled.)
         _gateway_left_off_note(unit, state)
         return
-    disabled = state == "disabled"
 
     console.print("[bold]Installing hermes gateway[/bold] (Telegram/Discord bridge)…")
 
@@ -954,11 +956,11 @@ def _install_hermes_gateway() -> None:
         check=False,
     ).returncode
     if rc != 0 and disabled:
-        # An older/newer hermes may not know the no-start flags. Don't retry
+        # Possibly a hermes that doesn't know the no-start flags. Never retry
         # without them (that would enable and start it): keep the unit off.
         console.print(
-            "[yellow]hermes gateway install rejected --no-start-now/--no-start-on-login — "
-            "unit not refreshed; hermes-gateway stays disabled.[/yellow]"
+            f"[yellow]hermes gateway install failed (exit {rc}); unit not refreshed, "
+            "stays disabled.[/yellow]"
         )
     elif rc != 0:
         console.print(
@@ -971,6 +973,10 @@ def _install_hermes_gateway() -> None:
         # running gateway (started by hand) is left running.
         if has_systemctl:
             _subprocess.run(["systemctl", "daemon-reload"], check=False)  # nosec B603 B607
+            # Backstop for a generator that enabled or started it anyway
+            # (install.sh): a disabled-but-running gateway keeps running.
+            off_argv = ["systemctl", "disable"] + ([] if was_active else ["--now"]) + [unit]
+            _subprocess.run(off_argv, check=False)  # nosec B603 B607
             _gateway_left_off_note(unit, state)
             if was_active:
                 console.print(f"[dim]{unit} was running; left running[/dim]")

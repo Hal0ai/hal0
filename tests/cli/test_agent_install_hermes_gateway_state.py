@@ -31,6 +31,7 @@ def _setup(
     active: bool = False,
     generator_rc: int = 0,
     generator_rejects_flags: bool = False,
+    which: str | None = "/usr/bin/systemctl",
 ) -> list[list[str]]:
     gateway_unit = tmp_path / UNIT
     calls: list[list[str]] = []
@@ -55,7 +56,7 @@ def _setup(
     monkeypatch.setattr(ac, "_hermes_venv_ready", lambda: True)
     monkeypatch.setattr(ac, "_HERMES_GATEWAY_UNIT", str(gateway_unit))
     monkeypatch.setattr(subprocess, "run", _fake_run)
-    monkeypatch.setattr("shutil.which", lambda _n: "/usr/bin/systemctl")
+    monkeypatch.setattr("shutil.which", lambda _n: which)
     monkeypatch.setattr(ac, "_wait_active_unit", lambda _u, timeout=15.0: True)
     monkeypatch.setattr("hal0.agents.hermes_provision._detect_foreign_gateways", lambda **_k: [])
     monkeypatch.setattr(
@@ -103,7 +104,9 @@ def test_disabled_but_active_is_left_running(monkeypatch, tmp_path, capsys) -> N
     calls = _setup(monkeypatch, tmp_path, state="disabled", active=True)
     ac._install_hermes_gateway()
     assert _enables(calls) == []
-    assert not any(c[0] == "systemctl" and c[1] in ("stop", "disable", "restart") for c in calls)
+    # Never stopped: only a plain `disable` backstop, no --now.
+    assert not any(c[0] == "systemctl" and c[1] in ("stop", "restart") for c in calls)
+    assert ["systemctl", "disable", "--now", UNIT] not in calls
     assert "left running" in _out(capsys)
 
 
@@ -111,10 +114,6 @@ def test_disabled_but_active_is_left_running(monkeypatch, tmp_path, capsys) -> N
     ("state", "hint"),
     [
         ("masked", "systemctl unmask hermes-gateway.service && systemctl enable --now"),
-        (
-            "masked-runtime",
-            "systemctl unmask --runtime hermes-gateway.service && systemctl enable --now",
-        ),
     ],
 )
 def test_masked_never_runs_generator(monkeypatch, tmp_path, capsys, state, hint) -> None:
@@ -134,4 +133,67 @@ def test_flag_rejected_keeps_unit_off_and_does_not_raise(monkeypatch, tmp_path, 
     (gen,) = _generator(calls)
     assert gen[-2:] == NO_START
     assert _enables(calls) == []
-    assert "rejected" in _out(capsys)
+    assert "failed (exit 2)" in _out(capsys)
+
+
+def test_masked_runtime_refreshes_unit_without_enabling(monkeypatch, tmp_path, capsys) -> None:
+    calls = _setup(monkeypatch, tmp_path, state="masked-runtime")
+    ac._install_hermes_gateway()
+    (gen,) = _generator(calls)
+    assert gen[-2:] == NO_START
+    assert _enables(calls) == []
+    out = _out(capsys)
+    assert "is masked-runtime; left as is" in out
+    assert "systemctl unmask --runtime hermes-gateway.service && systemctl enable --now" in out
+
+
+def test_non_flag_generator_failure_message_is_neutral(monkeypatch, tmp_path, capsys) -> None:
+    calls = _setup(monkeypatch, tmp_path, state="disabled", generator_rc=1)
+    ac._install_hermes_gateway()
+    assert _enables(calls) == []
+    out = _out(capsys)
+    assert "failed (exit 1)" in out
+    assert "rejected" not in out
+
+
+def test_disabled_backstop_disables_now_when_inactive(monkeypatch, tmp_path) -> None:
+    calls = _setup(monkeypatch, tmp_path, state="disabled", active=False)
+    ac._install_hermes_gateway()
+    assert ["systemctl", "disable", "--now", UNIT] in calls
+
+
+def test_disabled_backstop_keeps_running_unit_up(monkeypatch, tmp_path) -> None:
+    calls = _setup(monkeypatch, tmp_path, state="disabled", active=True)
+    ac._install_hermes_gateway()
+    assert ["systemctl", "disable", UNIT] in calls
+    assert ["systemctl", "disable", "--now", UNIT] not in calls
+
+
+def test_unknown_state_behaves_like_today(monkeypatch, tmp_path) -> None:
+    calls = _setup(monkeypatch, tmp_path, state="static")
+    ac._install_hermes_gateway()
+    (gen,) = _generator(calls)
+    assert not any(f in gen for f in NO_START)
+    assert ["systemctl", "enable", "--now", UNIT] in calls
+
+
+def test_no_systemctl_installs_unit_only(monkeypatch, tmp_path) -> None:
+    calls = _setup(monkeypatch, tmp_path, state="disabled", which=None)
+    ac._install_hermes_gateway()
+    (gen,) = _generator(calls)
+    assert not any(f in gen for f in NO_START)
+    assert not any(c[0] == "systemctl" for c in calls)
+
+
+def test_systemctl_oserror_is_treated_as_not_found(monkeypatch, tmp_path) -> None:
+    calls = _setup(monkeypatch, tmp_path, state="enabled")
+    inner = subprocess.run
+
+    def _boom(argv, *a, **k):  # type: ignore[no-untyped-def]
+        if list(argv)[:2] in (["systemctl", "is-enabled"], ["systemctl", "is-active"]):
+            raise OSError("no systemctl")
+        return inner(argv, *a, **k)
+
+    monkeypatch.setattr(subprocess, "run", _boom)
+    ac._install_hermes_gateway()
+    assert ["systemctl", "enable", "--now", UNIT] in calls
