@@ -9,7 +9,7 @@ seam. The driver now delegates to ``hermes_provision.refresh_driver_env``.
 
 The file is regenerated whole on every reprovision and OAuth refresh, so its
 header must not invite edits (#2373). It names the systemd drop-in instead,
-which is also where ``override.conf`` sends an operator's ``HERMES_WEB_DIST``.
+which is also where ``10-hal0.conf`` sends an operator's ``HERMES_WEB_DIST``.
 """
 
 from __future__ import annotations
@@ -24,7 +24,7 @@ from hal0.agents.hermes.driver import HermesDriver
 from hal0.config import paths as _paths
 
 _REPO = Path(__file__).resolve().parents[2]
-_OVERRIDE_CONF = _REPO / "installer" / "systemd" / "hal0-agent@hermes.service.d" / "override.conf"
+_OVERRIDE_CONF = _REPO / "installer" / "systemd" / "hal0-agent@hermes.service.d" / "10-hal0.conf"
 
 
 class _FakeRunner:
@@ -181,7 +181,7 @@ def test_reprovision_and_oauth_refresh_update_managed_keys(
     assert (driver_env.stat().st_mode & 0o777) == 0o600
 
 
-# ── #2373: header, override.conf and the writer agree ───────────────────────
+# ── #2373: header, 10-hal0.conf and the writer agree ───────────────────────
 
 
 def test_header_says_do_not_edit_and_names_the_drop_in(driver_env: Path) -> None:
@@ -195,7 +195,7 @@ def test_header_says_do_not_edit_and_names_the_drop_in(driver_env: Path) -> None
 
 def test_header_names_the_override_file_for_managed_keys(driver_env: Path) -> None:
     """systemd ranks EnvironmentFile= above Environment=, so managed keys need
-    a later EnvironmentFile=; header, unit and override.conf must name one file."""
+    a later EnvironmentFile=; header, unit and 10-hal0.conf must name one file."""
     hp.refresh_driver_env()
     header = "\n".join(
         line for line in driver_env.read_text(encoding="utf-8").splitlines() if line.startswith("#")
@@ -217,7 +217,7 @@ def test_an_operator_line_in_the_env_file_is_not_kept(driver_env: Path) -> None:
     assert "HERMES_WEB_DIST" not in driver_env.read_text(encoding="utf-8")
 
 
-def test_override_conf_points_web_dist_at_a_drop_in() -> None:
+def test_dropin_points_web_dist_at_a_drop_in() -> None:
     text = _OVERRIDE_CONF.read_text(encoding="utf-8")
     flat = " ".join(line.lstrip("# ").strip() for line in text.splitlines())
     assert "set HERMES_WEB_DIST in /etc/hal0/agents/hermes.env" not in flat

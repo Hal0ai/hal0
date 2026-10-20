@@ -38,9 +38,9 @@ def test_removes_stale_configuration_directory_dropin(tmp_path: Path) -> None:
     assert reloads == [["systemctl", "daemon-reload"]]
 
 
-def test_keeps_shipped_override_conf(tmp_path: Path) -> None:
+def test_keeps_shipped_10_hal0_conf(tmp_path: Path) -> None:
     shipped = _mk_dropin(
-        tmp_path, "hermes", "override.conf", "[Service]\nEnvironment=HERMES_HOME=/x\n"
+        tmp_path, "hermes", "10-hal0.conf", "[Service]\nEnvironment=HERMES_HOME=/x\n"
     )
     result = hp.cleanup_stale_agent_dropins(systemd_dir=tmp_path, run=lambda *a, **k: None)
     assert shipped.exists()

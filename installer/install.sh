@@ -1987,12 +1987,37 @@ if [[ -f "${AGENT_UNIT_SRC}" ]]; then
     cp "${AGENT_UNIT_SRC}" "${AGENT_UNIT_DST}"
     info "wrote ${AGENT_UNIT_DST}"
 
-    AGENT_OVERRIDE_SRC="${REPO_ROOT}/installer/systemd/hal0-agent@hermes.service.d/override.conf"
-    AGENT_OVERRIDE_DST_DIR="${UNIT_DIR}/hal0-agent@hermes.service.d"
-    if [[ -f "${AGENT_OVERRIDE_SRC}" ]]; then
-        mkdir -p "${AGENT_OVERRIDE_DST_DIR}"
-        cp "${AGENT_OVERRIDE_SRC}" "${AGENT_OVERRIDE_DST_DIR}/override.conf"
-        info "wrote ${AGENT_OVERRIDE_DST_DIR}/override.conf"
+    AGENT_DROPIN_SRC="${REPO_ROOT}/installer/systemd/hal0-agent@hermes.service.d/10-hal0.conf"
+    AGENT_DROPIN_DST_DIR="${UNIT_DIR}/hal0-agent@hermes.service.d"
+    if [[ -f "${AGENT_DROPIN_SRC}" ]]; then
+        mkdir -p "${AGENT_DROPIN_DST_DIR}"
+        cp "${AGENT_DROPIN_SRC}" "${AGENT_DROPIN_DST_DIR}/10-hal0.conf"
+        info "wrote ${AGENT_DROPIN_DST_DIR}/10-hal0.conf"
+    fi
+
+    # #2391: hal0 used to ship this drop-in as override.conf, the name
+    # `systemctl edit` hands to the operator. Remove a legacy override.conf
+    # ONLY when its sha256 matches a version hal0 shipped (git history of
+    # installer/systemd/hal0-agent@hermes.service.d/override.conf); an edited
+    # or foreign file is operator-owned: warn, leave it alone.
+    LEGACY_OVERRIDE="${AGENT_DROPIN_DST_DIR}/override.conf"
+    if [[ -f "${LEGACY_OVERRIDE}" ]]; then
+        LEGACY_SHA="$(sha256sum "${LEGACY_OVERRIDE}" | cut -d' ' -f1)"
+        case "${LEGACY_SHA}" in
+            9ef07ea4885c836d70198e7b47fb1a12a64c7ba2a4031b1d47ad8fa2b70c3671 | \
+            da503fa16d7ed88f89756737c496701d00f3e1c931083cae2a56d568b438562b | \
+            a536d3603a13472e6e52cb6c46370af4c877871775ef65c4d89474e0d1ab04f3 | \
+            23256e90ff9d5786edb5453b0ca6fafbca9e6389672e0af1dba8098fe0d86aa3 | \
+            1918aecb9677f0f878cb9719eb52d86ce850f291a52c6c5e245a3c7fefed7da9 | \
+            46368b5a42316337affc43723de6def6ff31ee446e2952645c481fc9d97e32af | \
+            c31b0aab66af9f51e3fbb6ce7373c829f74f8a806c989bf31e21c53378a12842)
+                rm -f "${LEGACY_OVERRIDE}"
+                info "removed legacy ${LEGACY_OVERRIDE} (hal0-shipped; replaced by 10-hal0.conf)"
+                ;;
+            *)
+                warn "${LEGACY_OVERRIDE} is not a hal0-shipped file: leaving it in place. It is operator-owned and now layers over 10-hal0.conf."
+                ;;
+        esac
     fi
 
     # Session-start hook: inject-system-state.sh cats /var/lib/hal0/STATE.md into

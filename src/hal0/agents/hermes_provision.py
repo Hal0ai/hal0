@@ -5622,7 +5622,7 @@ _HAL0_SYSTEMCTL = os.environ.get("HAL0_SYSTEMCTL", "/usr/lib/hal0/bin/hal0-syste
 SYSTEMD_SYSTEM_DIR = Path("/etc/systemd/system")
 
 #: Drop-in filenames the CURRENT template legitimately ships (never removed).
-_SHIPPED_AGENT_DROPINS: frozenset[str] = frozenset({"override.conf"})
+_SHIPPED_AGENT_DROPINS: frozenset[str] = frozenset({"10-hal0.conf"})
 
 #: Directives the current hal0-agent@ template does NOT set; a drop-in that
 #: carries one is stale debris from an old install and is removed. The 241
@@ -6771,7 +6771,7 @@ def _write_driver_env(
     The whole file is regenerated on every call, so it is not an operator
     override location (#2373). Its header says so and names the systemd
     drop-in (``systemctl edit hal0-agent@hermes``), the same place
-    ``installer/systemd/hal0-agent@hermes.service.d/override.conf`` points
+    ``installer/systemd/hal0-agent@hermes.service.d/10-hal0.conf`` points
     operators to. A key this file sets cannot be overridden by ``Environment=``
     there (systemd ranks ``EnvironmentFile=`` higher), so the header also names
     a later, operator-owned ``EnvironmentFile=`` for those keys.

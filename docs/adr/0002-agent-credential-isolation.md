@@ -309,7 +309,7 @@ State plainly: **this design cannot make the agent credential-free, and does
 not try to.**
 
 `$HERMES_HOME` (`/var/lib/hal0/.hermes`, set at
-`installer/systemd/hal0-agent@hermes.service.d/override.conf`) must stay
+`installer/systemd/hal0-agent@hermes.service.d/10-hal0.conf`) must stay
 agent-writable. It contains:
 
 - `config.yaml` with `providers.custom.api_key`
