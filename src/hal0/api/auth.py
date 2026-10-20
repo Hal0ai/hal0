@@ -16,7 +16,10 @@ Three-tier, deny-by-default auth built around one classification table
   ``create_app()`` right after ``log_scrub.install(app)``. Handles both
   ``http`` (incl. SSE, which is just a long-lived GET) and ``websocket``
   scopes; a denied WebSocket is rejected pre-accept with close code 4403
-  (matching :mod:`hal0.api.agents.chat_proxy`'s existing convention).
+  (matching :mod:`hal0.api.agents.chat_proxy`'s existing convention). An
+  admitted one stays registered with :mod:`hal0.api.live_sockets`, which
+  closes it with 4401 once a key rotation means its credential would no
+  longer pass this gate (#2801).
 
 Posture-coupled ADMIN gate (#1822, H1/H3)
 ------------------------------------------
@@ -75,6 +78,7 @@ from urllib.parse import parse_qs
 
 import structlog
 
+from hal0.api import live_sockets
 from hal0.api.agents._auth import SESSION_COOKIE_NAME, verify_session_cookie
 from hal0.config.network import is_loopback_bind
 from hal0.security.exposure import AuthClass, classify
@@ -544,6 +548,21 @@ def admin_sign_in_required(scope: Any) -> bool:
     return not allowed
 
 
+def _still_admitted(auth_class: AuthClass, scope: dict[str, Any]) -> bool:
+    """Would this open WebSocket's upgrade pass the tier gate right now?
+
+    Re-runs the middleware's own posture + :func:`_decide` against the
+    credential the upgrade carried (a WebSocket cannot change its cookie,
+    bearer or ``api_key`` later), so a rotated key or a replaced session
+    secret revokes exactly the sockets it would refuse to open today. The
+    Origin half is not repeated: it cannot change for an open socket.
+    """
+    if not require_auth_enabled() and not _lan_admin_gate(auth_class, scope):
+        return True
+    allowed, _status, _code = _decide(auth_class, resolve_principal(scope))
+    return allowed
+
+
 # ---------------------------------------------------------------------------
 # Pure-ASGI enforcement middleware
 
@@ -622,6 +641,17 @@ class AuthEnforcementMiddleware:
         allowed, status, code = _decide(auth_class, principal)
 
         if allowed:
+            if scope_type == "websocket":
+                # The upgrade was the only check; keep the socket only while
+                # its credential still passes this same gate (#2801).
+                await live_sockets.guard_websocket(
+                    self.app,
+                    scope,
+                    receive,
+                    send,
+                    lambda: _still_admitted(auth_class, scope),
+                )
+                return
             await self.app(scope, receive, send)
             return
 

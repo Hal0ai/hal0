@@ -17,6 +17,7 @@ import structlog
 from fastapi import APIRouter, BackgroundTasks, Request, Response
 from pydantic import BaseModel
 
+from hal0.api import live_sockets
 from hal0.api.agents import _auth as agent_auth
 from hal0.api.agents._auth import (
     SESSION_COOKIE_NAME,
@@ -250,7 +251,10 @@ async def rotate_key(
     The secret is replaced before the key, so a failure there aborts the
     rotation with nothing changed, and a success is never reported while the
     old sessions still verify. Bearer/API clients using the OLD key stop
-    working immediately and must switch to the new key.
+    working immediately and must switch to the new key. Open WebSockets are
+    checked only at their upgrade, so the rotation then closes (4401) every
+    one whose cookie or key no longer passes its gate
+    (:func:`hal0.api.live_sockets.revalidate`, #2801).
 
     Brute-force guard: metered by the shared per-IP login limiter (``login``
     reuses the same ``app.state.login_limiter``) BEFORE any work happens.
@@ -269,12 +273,19 @@ async def rotate_key(
     tier = body.tier
     sign_out = tier == "admin" and not body.keep_sessions
     caller_expiry: int | None = None
-    if sign_out:
-        # Read the caller's session before its signing secret changes.
-        caller_expiry = session_cookie_expiry(request.cookies.get(SESSION_COOKIE_NAME, ""))
-        agent_auth.regenerate_secret()
-    # status = {tier, key_len, fingerprint} — NEVER the key value.
-    status_only = rotate_api_env_key(tier)
+    try:
+        if sign_out:
+            # Read the caller's session before its signing secret changes.
+            caller_expiry = session_cookie_expiry(request.cookies.get(SESSION_COOKIE_NAME, ""))
+            agent_auth.regenerate_secret()
+        # status = {tier, key_len, fingerprint} — NEVER the key value.
+        status_only = rotate_api_env_key(tier)
+    finally:
+        # Open WebSockets were admitted once, at their upgrade (#2801): close
+        # every one whose cookie or key no longer passes its gate. In a
+        # ``finally`` so a key write that fails after the secret was replaced
+        # still ends the sockets of the sessions that just stopped verifying.
+        sockets_closed = live_sockets.revalidate()
     reissued = False
     if caller_expiry is not None:
         # Fresh session id under the new secret; never a longer life than the
@@ -293,6 +304,7 @@ async def rotate_key(
         fingerprint=status_only["fingerprint"],
         key_len=status_only["key_len"],
         sessions_signed_out=sign_out,
+        sockets_closed=sockets_closed,
     )
 
     if tier == "admin":

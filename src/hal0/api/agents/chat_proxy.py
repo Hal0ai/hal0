@@ -18,7 +18,9 @@ Security baseline (DA-sec-ops MUST-FIX #2 + #3):
 
 * Hermes is loopback-only. The browser cannot talk to it directly.
 * WS upgrades are gated by an Origin allowlist + an HMAC session cookie
-  (see :mod:`hal0.api.agents._auth`). 403 on any failure.
+  (see :mod:`hal0.api.agents._auth`). 403 on any failure. An open socket
+  re-verifies that cookie on every browser frame and is closed (4401) when a
+  key rotation replaces the secret that signed it (#2801).
 * Outbound to hermes carries the embed token in ``Authorization:
   Bearer <token>`` — NEVER as a query string. Token comes from
   ``runtime.json`` (chmod 0600). Reload on file change is handled
@@ -55,6 +57,7 @@ import websockets
 from fastapi import APIRouter, HTTPException, Request, Response, WebSocket, status
 from starlette.websockets import WebSocketDisconnect, WebSocketState
 
+from hal0.api import live_sockets
 from hal0.api.agents._auth import (
     SESSION_COOKIE_NAME,
     SESSION_COOKIE_TTL_SECONDS,
@@ -63,6 +66,7 @@ from hal0.api.agents._auth import (
     require_browser_auth,
     session_cookie_expiry,
     set_session_cookie,
+    verify_session_cookie,
 )
 from hal0.http_client import async_client
 
@@ -288,6 +292,10 @@ def _outbound_headers(agent_id: str, token: str | None) -> list[tuple[str, str]]
 # Bidirectional WS pump
 
 
+class _SessionRevoked(Exception):
+    """The browser's session cookie stopped verifying mid-socket (#2801)."""
+
+
 async def _pump(
     source_recv: Callable[[], Awaitable[str]],
     sink_send: Callable[[str], Awaitable[None]],
@@ -303,7 +311,7 @@ async def _pump(
         while True:
             frame = await source_recv()
             await sink_send(frame)
-    except (WebSocketDisconnect, websockets.ConnectionClosed):
+    except (WebSocketDisconnect, websockets.ConnectionClosed, _SessionRevoked):
         log.debug("hal0.chat_proxy.pump_closed", direction=direction)
     except Exception as exc:  # pragma: no cover — defensive
         log.warning("hal0.chat_proxy.pump_error", direction=direction, error=str(exc))
@@ -382,25 +390,58 @@ async def _proxy_ws(
         upstream_recv = _recv_text
         upstream_to_browser_sink = to_browser
 
+    # The upgrade's cookie is the socket's credential for its whole life
+    # (#2801): re-verify it on every frame the browser sends, so nothing
+    # reaches hermes once the session secret is replaced (even by a process
+    # other than this one), and close the socket as soon as a rotation in
+    # this process revalidates it.
+    cookie = browser_ws.cookies.get(SESSION_COOKIE_NAME, "")
+    revoked_frame = False
+
+    def cookie_still_valid() -> bool:
+        return bool(cookie) and verify_session_cookie(cookie)
+
     async def from_browser() -> str:
         return await browser_ws.receive_text()
 
     async def to_upstream(raw: str) -> None:
+        nonlocal revoked_frame
+        if not cookie_still_valid():
+            revoked_frame = True
+            raise _SessionRevoked
         await upstream.send(raw)
 
-    try:
-        await asyncio.gather(
-            _pump(upstream_recv, upstream_to_browser_sink, direction="upstream→browser"),
-            _pump(from_browser, to_upstream, direction="browser→upstream"),
-        )
-    finally:
-        if coalescer is not None:
-            await coalescer.close()
-        with contextlib.suppress(Exception):
-            await upstream.close()
-        if browser_ws.application_state == WebSocketState.CONNECTED:
+    with live_sockets.track(cookie_still_valid) as revoked:
+        pumps = [
+            asyncio.ensure_future(
+                _pump(upstream_recv, upstream_to_browser_sink, direction="upstream→browser")
+            ),
+            asyncio.ensure_future(_pump(from_browser, to_upstream, direction="browser→upstream")),
+            asyncio.ensure_future(revoked.wait()),
+        ]
+        try:
+            # Either hop ending ends the bridge; waiting for both left the
+            # upstream socket open until hermes happened to send a frame.
+            await asyncio.wait(pumps, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            for task in pumps:
+                task.cancel()
+            await asyncio.wait(pumps)
+            if coalescer is not None:
+                await coalescer.close()
             with contextlib.suppress(Exception):
-                await browser_ws.close()
+                await upstream.close()
+            if browser_ws.application_state == WebSocketState.CONNECTED:
+                if revoked.is_set() or revoked_frame:
+                    log.info("hal0.chat_proxy.session_revoked", agent_id=agent_id)
+                    close_kwargs: dict[str, Any] = {
+                        "code": live_sockets.CLOSE_CREDENTIAL_REVOKED,
+                        "reason": live_sockets.CLOSE_REASON,
+                    }
+                else:
+                    close_kwargs = {}
+                with contextlib.suppress(Exception):
+                    await browser_ws.close(**close_kwargs)
 
 
 # ---------------------------------------------------------------------------

@@ -204,12 +204,14 @@ returned or logged**:
 
 `fingerprint` is the first 8 hex characters of `sha256(key)` — enough to
 confirm which key is live without exposing it. Any Bearer/`api_key` caller on
-the old key stops working immediately.
+the old key stops working immediately, including a WebSocket it already has
+open (for example `/v1/realtime`): the rotation closes it with code `4401`.
 
 An admin rotation also **signs out every browser session**: it replaces the
 session signing secret, so every existing `hal0_session` cookie stops
-verifying (see [Sessions](#sessions)). The browser that made the call is not
-locked out. If it sent a valid session, the same response sets a fresh cookie
+verifying (see [Sessions](#sessions)), and every WebSocket opened with one of
+those cookies — agent chat included — is closed with code `4401`. The browser
+that made the call is not locked out. If it sent a valid session, the same response sets a fresh cookie
 that expires no later than the one it replaced. A Bearer caller gets no cookie.
 Send `"keep_sessions": true` to leave other sessions signed in, for routine
 hygiene when you do not suspect the old key leaked. `session_preserved` says
@@ -278,7 +280,11 @@ hal0 auth rotate admin    # or: sudo hal0 auth reset-key, or Rotate in Settings
 ```
 
 The rotation replaces the signing secret, so every existing cookie stops
-verifying on its next request, with no restart. The browser you rotate from
+verifying on its next request, with no restart. WebSockets are checked only
+when they open, so the rotation also closes every open one whose cookie or key
+no longer verifies (close code `4401`); the agent chat socket additionally
+re-checks its cookie on every frame the browser sends. A browser that stays
+signed in reconnects with its fresh cookie. The browser you rotate from
 stays signed in. Pass `--keep-sessions` (`"keep_sessions": true` in the API)
 to rotate the key without signing anyone out.
 
