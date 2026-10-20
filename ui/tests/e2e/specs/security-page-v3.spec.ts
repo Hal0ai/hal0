@@ -145,8 +145,10 @@ test.describe('Settings → Security', () => {
   }) => {
     await mockAuthStatus(page, { auth_required: true, has_admin_key: true, tier: 'admin' })
     // The endpoint returns STATUS ONLY — no key value ever crosses the wire.
-    await page.route('**/api/auth/rotate', (route) =>
-      route.fulfill({
+    let rotateBody: any = null
+    await page.route('**/api/auth/rotate', (route) => {
+      rotateBody = route.request().postDataJSON()
+      return route.fulfill({
         status: 200,
         contentType: 'application/json',
         body: JSON.stringify({
@@ -156,11 +158,11 @@ test.describe('Settings → Security', () => {
           fingerprint: 'ab12cd34',
           applies_live: true,
           restart_required: false,
-          session_preserved: true,
-          note: 'New admin key written to /etc/hal0/api.env — retrieve it there; it is never shown in the dashboard.',
+          session_preserved: false,
+          note: 'New admin key written to /etc/hal0/api.env — retrieve it there; it is never shown in the dashboard. Other sessions were signed out; this browser stays signed in.',
         }),
-      }),
-    )
+      })
+    })
     await openSecurity(page)
 
     await page.getByTestId('security-rotate-admin').click()
@@ -171,12 +173,47 @@ test.describe('Settings → Security', () => {
     await expect(page.getByTestId('rotate-result')).toBeVisible()
     await expect(page.getByTestId('rotate-fingerprint')).toContainText('ab12cd34')
     await expect(page.getByTestId('rotate-note')).toContainText(/never shown/i)
+    // #2633: an admin rotation signs out other sessions unless the box is ticked.
+    expect(rotateBody).toEqual({ tier: 'admin', keep_sessions: false })
+    await expect(page.getByTestId('rotate-note')).toContainText(/other sessions were signed out/i)
     // No revealed value; the dialog renders no <code> value block or input now.
     await expect(page.getByTestId('rotate-result').locator('input')).toHaveCount(0)
 
     // After Done, the admin key row shows the fingerprint (status-only), no value.
     await page.getByTestId('rotate-done').click()
     await expect(page.getByTestId('security-key-admin')).toContainText('ab12cd34')
+  })
+
+  test('admin rotate can keep other sessions signed in', async ({ page }) => {
+    await mockAuthStatus(page, { auth_required: true, has_admin_key: true, tier: 'admin' })
+    let rotateBody: any = null
+    await page.route('**/api/auth/rotate', (route) => {
+      rotateBody = route.request().postDataJSON()
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          tier: 'admin',
+          rotated_at: '2026-07-19T06:00:00Z',
+          key_len: 43,
+          fingerprint: 'ab12cd34',
+          applies_live: true,
+          restart_required: false,
+          session_preserved: true,
+          note: 'New admin key written to /etc/hal0/api.env. Other sessions stay signed in, as requested.',
+        }),
+      })
+    })
+    await openSecurity(page)
+
+    await page.getByTestId('security-rotate-admin').click()
+    await expect(page.getByTestId('rotate-keep-sessions')).not.toBeChecked()
+    await page.getByTestId('rotate-keep-sessions').check()
+    await page.getByTestId('rotate-confirm-input').fill('rotate admin')
+    await page.getByTestId('rotate-confirm').click()
+
+    await expect(page.getByTestId('rotate-result')).toBeVisible()
+    expect(rotateBody).toEqual({ tier: 'admin', keep_sessions: true })
   })
 
   // #1467 item 2: POST /api/auth/rotate {tier:'client'} is live (routes/

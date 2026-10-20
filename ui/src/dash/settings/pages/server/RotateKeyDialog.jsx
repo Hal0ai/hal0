@@ -6,6 +6,11 @@
 // ONLY: { tier, rotated_at, key_len, fingerprint, applies_live,
 // restart_required, session_preserved, note }.
 //
+// An admin rotation signs out every other browser session by default (#2633):
+// rotation usually follows a suspected leak, so the old holder must be cut
+// off. "Keep other sessions signed in" opts out for routine hygiene. This
+// browser stays signed in either way.
+//
 // Two non-negotiables the copy + code encode:
 //   1. The confirm is blunt about breakage — rotating a key logs out every
 //      client using the old one the moment you rotate. Type-to-confirm gate so
@@ -28,12 +33,14 @@ function confirmPhrase(tier) {
 export function RotateKeyDialog({ open, tier = 'admin', onClose, onRotated }) {
   const [typed, setTyped] = useStateK('')
   const [result, setResult] = useStateK(null)
+  const [keepSessions, setKeepSessions] = useStateK(false)
   const rotate = useRotateKey()
 
   useEffectK(() => {
     if (open) {
       setTyped('')
       setResult(null)
+      setKeepSessions(false)
       rotate.reset()
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -48,7 +55,7 @@ export function RotateKeyDialog({ open, tier = 'admin', onClose, onRotated }) {
 
   const doRotate = () => {
     if (!canRotate) return
-    rotate.mutate(tier, {
+    rotate.mutate({ tier, keepSessions }, {
       onSuccess: (data) => {
         setResult(data)
         onRotated?.(data)
@@ -107,9 +114,25 @@ export function RotateKeyDialog({ open, tier = 'admin', onClose, onRotated }) {
           <p style={{ fontSize: 12.5, lineHeight: 1.6, color: 'var(--fg-2)', margin: 0 }}>
             Every client using the current {tier} key stops working the moment you rotate. The new key
             is written to <span className="mono">/etc/hal0/api.env</span> on the box and applied live —
-            it is <b>never shown in the dashboard</b>. Retrieve it there; a browser session stays signed
-            in (cookie-based).
+            it is <b>never shown in the dashboard</b>. Retrieve it there.
+            {tier === 'admin' &&
+              (keepSessions
+                ? ' Other browser sessions stay signed in.'
+                : ' Every other browser session is signed out; this one stays signed in.')}
           </p>
+
+          {tier === 'admin' && (
+            <label style={{ display: 'flex', gap: 8, alignItems: 'center', fontSize: 12, color: 'var(--fg-2)' }}>
+              <input
+                type="checkbox"
+                data-testid="rotate-keep-sessions"
+                checked={keepSessions}
+                onChange={(e) => setKeepSessions(e.target.checked)}
+                style={{ accentColor: 'var(--accent)' }}
+              />
+              Keep other sessions signed in (routine rotation, no suspected leak)
+            </label>
+          )}
 
           <label className="mono" style={{ fontSize: 11, color: 'var(--fg-4)' }}>
             Type <span style={{ color: 'var(--fg-2)' }}>{phrase}</span> to confirm

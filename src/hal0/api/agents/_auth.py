@@ -47,6 +47,7 @@ import ipaddress
 import json
 import os
 import secrets
+import tempfile
 import time
 import uuid
 from pathlib import Path
@@ -83,9 +84,9 @@ SESSION_COOKIE_TTL_SECONDS: Final[int] = 8 * 60 * 60
 # "Remember me" lifetime (``POST /api/auth/login`` with ``remember: true``).
 # Same cookie, same signature, later ``expires_at`` -- an operator who ticks
 # it is not sent back to the login every morning. There is no server-side
-# session table, so a cookie cannot be revoked one at a time: deleting the
-# HMAC secret file (``_secret_path()``) invalidates every session at once,
-# and a fresh secret is generated on the next request.
+# session table, so a cookie cannot be revoked one at a time: replacing the
+# HMAC secret (:func:`regenerate_secret`, run by an admin key rotation)
+# invalidates every session at once.
 SESSION_COOKIE_REMEMBER_TTL_SECONDS: Final[int] = 30 * 24 * 60 * 60
 
 # Secret file location. Lives under /var/lib/hal0 so the systemd unit's
@@ -129,6 +130,52 @@ def _load_or_create_secret() -> bytes:
     os.chmod(tmp, 0o600)
     tmp.replace(path)
     return secret
+
+
+def regenerate_secret() -> bool:
+    """Replace the HMAC secret, which signs out every session at once (#2633).
+
+    Every ``hal0_session`` cookie is signed with this secret and nothing else,
+    so a new secret makes all of them stop verifying on their next request.
+    The new value is written to a unique tmpfile beside the old one (mode
+    0600, same owner and group as the file it replaces, fsynced) and swapped
+    in with ``os.replace``, so a reader sees the old secret or the new one and
+    never a torn or empty file. A failure before the rename leaves the old
+    secret in place and raises.
+
+    Returns ``False`` without writing when no secret exists yet: then no
+    cookie can verify anyway, and creating the file here (``hal0 auth
+    reset-key`` runs as root) could leave one the service user cannot read.
+    The next mint creates it as usual.
+    """
+    path = _secret_path()
+    try:
+        st = path.stat()
+    except FileNotFoundError:
+        return False
+
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    tmp = Path(tmp_name)
+    try:
+        os.fchmod(fd, 0o600)
+        if os.geteuid() == 0 and (st.st_uid, st.st_gid) != (0, os.getegid()):
+            # Keep the service user's ownership when root rotates from the CLI.
+            # Only root may chown; the service user rotating its own secret
+            # keeps the file as its own even if the old gid was one it is not
+            # a member of, rather than failing the whole rotation.
+            os.fchown(fd, st.st_uid, st.st_gid)
+        os.write(fd, secrets.token_bytes(32))
+        os.fsync(fd)
+        os.close(fd)
+        fd = -1
+        os.replace(tmp, path)
+    except BaseException:
+        if fd >= 0:
+            os.close(fd)
+        with contextlib.suppress(OSError):
+            tmp.unlink()
+        raise
+    return True
 
 
 def _b64url_encode(data: bytes) -> str:

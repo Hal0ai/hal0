@@ -969,3 +969,70 @@ def test_posture_gate_covers_approvals_route(
 
         allowed = c.get("/api/agent/approvals")
         assert allowed.status_code not in (401, 403), allowed.text
+
+
+# ---------------------------------------------------------------------------
+# #2633: regenerate_secret — the "sign out every session" primitive
+
+
+def test_regenerate_secret_invalidates_every_cookie(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("HAL0_AGENT_SECRET_PATH", str(tmp_path / "secret.bin"))
+    cookie = agents_auth.mint_session_cookie()
+    assert agents_auth.verify_session_cookie(cookie)
+
+    assert agents_auth.regenerate_secret() is True
+
+    assert agents_auth.verify_session_cookie(cookie) is False
+    assert agents_auth.verify_session_cookie(agents_auth.mint_session_cookie())
+    assert oct((tmp_path / "secret.bin").stat().st_mode & 0o777) == "0o600"
+    assert [p.name for p in tmp_path.iterdir()] == ["secret.bin"]
+
+
+def test_regenerate_secret_without_a_secret_is_a_no_op(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No secret on disk means no session can verify; creating one here (as
+    root, from the CLI) would leave a file the service user cannot read."""
+    monkeypatch.setenv("HAL0_AGENT_SECRET_PATH", str(tmp_path / "agents" / "secret.bin"))
+    assert agents_auth.regenerate_secret() is False
+    assert not (tmp_path / "agents").exists()
+
+
+def test_regenerate_secret_as_non_root_never_chowns(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The service user cannot chown to a gid it is not in; a non-root rotation
+    must not try, or every default admin rotation from the API would fail."""
+    monkeypatch.setenv("HAL0_AGENT_SECRET_PATH", str(tmp_path / "secret.bin"))
+    cookie = agents_auth.mint_session_cookie()
+    real_gid = (tmp_path / "secret.bin").stat().st_gid
+
+    def refuse(*_a: object) -> None:
+        raise PermissionError("Operation not permitted")
+
+    monkeypatch.setattr(agents_auth.os, "geteuid", lambda: 1000)
+    monkeypatch.setattr(agents_auth.os, "getegid", lambda: real_gid + 1)
+    monkeypatch.setattr(agents_auth.os, "fchown", refuse)
+
+    assert agents_auth.regenerate_secret() is True
+    assert agents_auth.verify_session_cookie(cookie) is False
+    assert [p.name for p in tmp_path.iterdir()] == ["secret.bin"]
+
+
+def test_regenerate_secret_as_root_keeps_the_owner(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Root (``sudo hal0 auth reset-key``) hands the new file back to its owner."""
+    monkeypatch.setenv("HAL0_AGENT_SECRET_PATH", str(tmp_path / "secret.bin"))
+    agents_auth.mint_session_cookie()
+    st = (tmp_path / "secret.bin").stat()
+
+    calls: list[tuple[int, int]] = []
+    monkeypatch.setattr(agents_auth.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(agents_auth.os, "getegid", lambda: 0)
+    monkeypatch.setattr(agents_auth.os, "fchown", lambda _fd, uid, gid: calls.append((uid, gid)))
+
+    assert agents_auth.regenerate_secret() is True
+    assert calls == [(st.st_uid, st.st_gid)]
