@@ -817,6 +817,54 @@ def _hermes_venv_ready() -> bool:
     return _Path(_HERMES_BIN).is_file()
 
 
+def _gateway_enable_state(unit: str) -> str:
+    """``systemctl is-enabled <unit>``: the state word, or ``not-found``.
+
+    Read BEFORE anything lays down, refreshes or enables the unit, so a re-run
+    can tell an operator's off switch from a first install (#2815, mirrors
+    installer/install.sh ``unit_enable_state``). ``is-enabled`` is read-only
+    and needs no privilege, so it stays a bare call like the rest of this
+    section; the hal0-systemctl seam (and its allow-list) is untouched.
+    """
+    import subprocess as _subprocess
+
+    try:
+        proc = _subprocess.run(  # nosec B603 B607 — fixed argv
+            ["systemctl", "is-enabled", unit],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError:
+        return "not-found"
+    out = (getattr(proc, "stdout", "") or "").strip()
+    return out.splitlines()[0] if out else "not-found"
+
+
+def _gateway_unit_active(unit: str) -> bool:
+    import subprocess as _subprocess
+
+    try:
+        rc = _subprocess.run(  # nosec B603 B607 — fixed argv
+            ["systemctl", "is-active", "--quiet", unit], check=False
+        ).returncode
+    except OSError:
+        return False
+    return rc == 0
+
+
+def _gateway_left_off_note(unit: str, state: str) -> None:
+    """Report that ``unit`` was left off and how to turn it on (install.sh
+    ``unit_left_off_note``). A runtime mask lives under /run, so only
+    ``unmask --runtime`` removes it."""
+    turn_on = f"systemctl enable --now {unit}"
+    if state == "masked":
+        turn_on = f"systemctl unmask {unit} && {turn_on}"
+    elif state == "masked-runtime":
+        turn_on = f"systemctl unmask --runtime {unit} && {turn_on}"
+    console.print(f"[yellow]{unit} is {state}; left as is (run '{turn_on}' to turn it on)[/yellow]")
+
+
 def _install_hermes_gateway() -> None:
     """`hermes gateway install --system --run-as-user hal0` + enable the unit.
 
@@ -836,6 +884,20 @@ def _install_hermes_gateway() -> None:
         # Provisioning didn't complete (or failed upstream) — nothing to
         # wire the gateway onto. The caller already surfaced that failure.
         return
+
+    # The operator's on/off choice, captured BEFORE the generator runs or the
+    # unit is enabled (#2815): re-running this command (e.g. to repair the
+    # venv) must not reconnect a gateway that was turned off.
+    unit = "hermes-gateway.service"
+    has_systemctl = _shutil.which("systemctl") is not None
+    state = _gateway_enable_state(unit) if has_systemctl else "not-found"
+    was_active = has_systemctl and state == "disabled" and _gateway_unit_active(unit)
+    if state in ("masked", "masked-runtime"):
+        # Never run the generator over a mask: it would write through the
+        # /dev/null symlink or fail its own enable.
+        _gateway_left_off_note(unit, state)
+        return
+    disabled = state == "disabled"
 
     console.print("[bold]Installing hermes gateway[/bold] (Telegram/Discord bridge)…")
 
@@ -875,6 +937,9 @@ def _install_hermes_gateway() -> None:
     # /var/lib/hal0, never /root. `--run-as-user hal0` only names the
     # runtime user baked into the unit; it is not a privilege drop.
     gateway_argv = [_HERMES_BIN, "gateway", "install", "--system", "--run-as-user", "hal0"]
+    if disabled:
+        # Refresh the unit file only: neither enable on login nor start now.
+        gateway_argv += ["--no-start-now", "--no-start-on-login"]
     # `hermes gateway install` prompts interactively with no bypass flag;
     # stdin=DEVNULL gives a clean EOF so it falls back to its built-in
     # defaults (install + enable on boot + start now) instead of blocking.
@@ -888,11 +953,28 @@ def _install_hermes_gateway() -> None:
         env=env,
         check=False,
     ).returncode
-    if rc != 0:
+    if rc != 0 and disabled:
+        # An older/newer hermes may not know the no-start flags. Don't retry
+        # without them (that would enable and start it): keep the unit off.
+        console.print(
+            "[yellow]hermes gateway install rejected --no-start-now/--no-start-on-login — "
+            "unit not refreshed; hermes-gateway stays disabled.[/yellow]"
+        )
+    elif rc != 0:
         console.print(
             "[yellow]hermes gateway install failed — Telegram/Discord bridge "
             "unavailable; continuing.[/yellow]"
         )
+
+    if disabled:
+        # Operator turned it off: refresh done, enable skipped. A disabled but
+        # running gateway (started by hand) is left running.
+        if has_systemctl:
+            _subprocess.run(["systemctl", "daemon-reload"], check=False)  # nosec B603 B607
+            _gateway_left_off_note(unit, state)
+            if was_active:
+                console.print(f"[dim]{unit} was running; left running[/dim]")
+        return
 
     if not _Path(_HERMES_GATEWAY_UNIT).is_file():
         console.print(
