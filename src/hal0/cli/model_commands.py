@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json as jsonlib
+from pathlib import Path
 
 import typer
 from rich.console import Console
@@ -288,6 +289,44 @@ def model_update(
 _RM_TIMEOUT_S = 60.0
 
 
+def _add_would_accept(tombstoned: list[str]) -> bool:
+    """Whether ``hal0 model add`` could re-register every tombstoned kept file.
+
+    The add path refuses extensions outside ``[models].file_extensions``
+    (``model.unsupported_format``), so the ``rm --keep-files`` hint may only
+    promise ``add`` when each kept file carries an allowed extension (#2748:
+    a pulled model's ``.onnx``/``.bin`` files are not addable by default).
+    An unreadable config falls back to the schema defaults, which are the
+    extensions the add path itself compares against when no config loads.
+    """
+    try:
+        from hal0.config.loader import load_hal0_config
+
+        allowed = {e.lower() for e in load_hal0_config().models.file_extensions}
+    except Exception:
+        from hal0.config.schema import ModelsConfig
+
+        allowed = {e.lower() for e in ModelsConfig().file_extensions}
+    return all(Path(p).suffix.lower() in allowed for p in tombstoned)
+
+
+def _is_curated(model_id: str) -> bool:
+    """Whether the pull resolver can find this id in the curated catalogue.
+
+    A deleted non-curated model loses the registry row — and with it the
+    Hugging Face coordinates a bare ``model pull <id>`` would need — so
+    only a curated id stays resolvable after ``rm`` (#2748). When the
+    lookup itself fails, ``False`` is the safe answer: it avoids promising
+    a pull the resolver may not be able to satisfy.
+    """
+    try:
+        from hal0.registry.curated import get_curated
+
+        return get_curated(model_id) is not None
+    except Exception:
+        return False
+
+
 @app.command("rm")
 def model_rm(
     ref: str = typer.Argument(..., help="Model ref to remove"),
@@ -339,10 +378,22 @@ def model_rm(
         )
     for warning in result.get("warnings") or []:
         console.print(f"  [yellow]warning:[/yellow] {warning}")
-    if result.get("tombstoned"):
-        console.print(
-            "  [dim]Kept files are hidden from future scans; `hal0 model add <path>` brings one back.[/dim]"
-        )
+    tombstoned = result.get("tombstoned") or []
+    if tombstoned:
+        if _add_would_accept(tombstoned):
+            console.print(
+                "  [dim]Kept files are hidden from future scans; `hal0 model add <path>` brings one back.[/dim]"
+            )
+        elif _is_curated(ref):
+            console.print(
+                f"  [dim]Kept files are hidden from future scans; `hal0 model add` refuses their "
+                f"extension(s), so `hal0 model pull {ref}` is the way back.[/dim]"
+            )
+        else:
+            console.print(
+                "  [dim]Kept files are hidden from future scans; `hal0 model add` refuses their "
+                "extension(s).[/dim]"
+            )
 
 
 @app.command("show")

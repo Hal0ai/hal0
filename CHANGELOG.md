@@ -162,6 +162,16 @@ applying. Add those subsections to a version's section to surface them; see
   a single-id delete runs without approval, so it never removes several
   documents at once, and deleting the listed ids together goes through the
   usual bulk-delete approval (#2747).
+- **`hal0 model rm --keep-files` no longer promises a way back that cannot
+  work.** When a kept file's extension is outside `[models].file_extensions`,
+  the closing hint names `hal0 model pull <id>` for a curated model instead
+  of `hal0 model add`; for a model with no curated entry it names no recovery
+  command, because removing the registry row also removed the Hugging Face
+  coordinates a bare re-pull needs. An unreadable config is compared against
+  the schema's default extensions rather than assumed addable (#2748).
+- **A file-set pull clears every installed file's tombstone.** A kept voice
+  or projector file no longer stays hidden from scans after the pull that
+  reinstalls it; before, only the entry file's tombstone was cleared (#2748).
 
 ## [1.4.0] — 2026-10-16
 
