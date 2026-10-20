@@ -30,7 +30,7 @@ from hal0.memory.extraction_env import (
 
 
 class FakeSlot:
-    """A llama-server stand-in: ``/metrics`` plus a timed ``/v1/completions``."""
+    """A llama-server stand-in: ``/metrics`` plus a timed ``/v1/chat/completions``."""
 
     def __init__(
         self,
@@ -57,7 +57,7 @@ class FakeSlot:
             if self.metrics is None:
                 return httpx.Response(501, text="metrics disabled")
             return httpx.Response(200, text=self.metrics)
-        if request.url.path == "/v1/completions":
+        if request.url.path == "/v1/chat/completions":
             self.probe_bodies.append(json.loads(request.content))
             if self.timeout:
                 raise httpx.ReadTimeout("probe timed out", request=request)
@@ -152,7 +152,7 @@ async def test_zero_metrics_fall_back_to_one_bounded_probe() -> None:
     body = slot.probe_bodies[0]
     assert body["max_tokens"] <= PROBE_DECODE_TOKENS
     # Under the 512-token prompt cap at English's ~4 characters a token.
-    assert len(body["prompt"]) // 4 <= PROBE_PROMPT_TOKENS
+    assert len(body["messages"][0]["content"]) // 4 <= PROBE_PROMPT_TOKENS
     # A prompt cached by an earlier probe would read as a fast slot.
     assert body["cache_prompt"] is False
 
@@ -242,3 +242,33 @@ def test_parse_throughput_metrics_ignores_missing_and_zero() -> None:
     assert parse_throughput_metrics(
         "llamacpp:prompt_tokens_seconds 12.5\nllamacpp:predicted_tokens_seconds nan-ish\n"
     ) == (12.5, None)
+
+
+async def test_probe_uses_the_chat_completions_route() -> None:
+    slot = FakeSlot(**SLOW)
+    await _measure(slot)
+
+    assert [r.url.path for r in slot.requests] == ["/metrics", "/v1/chat/completions"]
+    body = slot.probe_bodies[0]
+    assert body["messages"][0]["role"] == "user"
+    assert body["max_tokens"] == PROBE_DECODE_TOKENS
+
+
+async def test_busy_slot_is_not_probed_and_not_called_too_slow() -> None:
+    # Queued behind a running extraction: a probe timeout here would be a lie.
+    slot = FakeSlot(
+        **SLOW,
+        timeout=True,
+        metrics=(
+            "llamacpp:prompt_tokens_seconds 0\n"
+            "llamacpp:predicted_tokens_seconds 0\n"
+            "llamacpp:requests_processing 1\n"
+            "llamacpp:requests_deferred 0\n"
+        ),
+    )
+
+    est = await _measure(slot, timeout_s=60)
+
+    assert est.verdict == "unknown"
+    assert "busy" in est.detail
+    assert [r.url.path for r in slot.requests] == ["/metrics"]

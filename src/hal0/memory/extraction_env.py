@@ -562,6 +562,7 @@ _PROBE_REPEATS = 45
 
 _PROMPT_TPS_METRIC = "llamacpp:prompt_tokens_seconds"
 _DECODE_TPS_METRIC = "llamacpp:predicted_tokens_seconds"
+_BUSY_METRICS = ("llamacpp:requests_processing", "llamacpp:requests_deferred")
 
 
 @dataclass(frozen=True)
@@ -696,9 +697,25 @@ def parse_throughput_metrics(text: str) -> tuple[float | None, float | None]:
     return found.get(_PROMPT_TPS_METRIC), found.get(_DECODE_TPS_METRIC)
 
 
+def parse_busy_requests(text: str) -> int:
+    """Requests a llama-server ``/metrics`` body says are running or queued."""
+    busy = 0.0
+    for line in text.splitlines():
+        parts = line.strip().split()
+        if len(parts) < 2 or parts[0] not in _BUSY_METRICS:
+            continue
+        try:
+            busy += max(float(parts[1]), 0.0)
+        except ValueError:
+            continue
+    return int(busy)
+
+
 def _probe_body() -> dict[str, Any]:
+    # /v1/chat/completions: the route extraction itself uses, and the only one
+    # FLM slots serve.
     return {
-        "prompt": _PROBE_SENTENCE * _PROBE_REPEATS,
+        "messages": [{"role": "user", "content": _PROBE_SENTENCE * _PROBE_REPEATS}],
         "max_tokens": PROBE_DECODE_TOKENS,
         "temperature": 0,
         "stream": False,
@@ -786,13 +803,21 @@ async def measure_extraction_throughput(
                 p_tps, d_tps = parse_throughput_metrics(resp.text)
                 if p_tps and d_tps:
                     return _result(prompt_tps=p_tps, decode_tps=d_tps, source="metrics")
+                busy = parse_busy_requests(resp.text)
+                if busy > 0:
+                    # A one-request slot working through an extraction would
+                    # queue the probe, and a timeout there would read as a
+                    # slow slot. Measure nothing rather than mislead.
+                    return _result(
+                        detail=f"the slot is busy with {busy} request(s), so no probe was run"
+                    )
         except (httpx.HTTPError, OSError):
             pass
 
         started = clock()
         try:
             resp = await client.post(
-                f"{base}/v1/completions",
+                f"{base}/v1/chat/completions",
                 json=_probe_body(),
                 timeout=httpx.Timeout(PROBE_TIMEOUT_S),
             )
@@ -835,6 +860,7 @@ __all__ = [
     "extraction_floor",
     "extraction_model_name",
     "measure_extraction_throughput",
+    "parse_busy_requests",
     "parse_throughput_metrics",
     "render_drop_in",
     "resolve_extraction_window",

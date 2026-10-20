@@ -732,17 +732,19 @@ async def update_graph_config(request: Request) -> dict[str, Any]:
         if propagation is not None:
             out["propagation"] = propagation
 
+    # Extraction dispatches to hal0/<extraction_slot> whether or not the
+    # reporting gate is on, so a slot change measures regardless of it.
     # Throughput preflight (#2353), outside the config lock: the probe can take
     # up to 30 s and must not hold every other hal0.toml writer. Enabling the
     # gate or changing the slot measures; a timeout / limit change re-projects
     # the cached measurement without touching the slot. A slow slot is a
     # warning in the response, never a refusal.
     throughput: dict[str, Any] | None = None
-    if new_cfg.enabled and (slot_changed or not was_enabled):
+    if slot_changed or (new_cfg.enabled and not was_enabled):
         throughput = (
             await _measure_throughput(request, new_cfg.extraction_slot, new_cfg)
         ).as_dict()
-    elif new_cfg.enabled and (timeout_changed or limits_changed):
+    elif timeout_changed or limits_changed:
         throughput = _cached_throughput(request, new_cfg.extraction_slot, new_cfg)
     if throughput is not None:
         out["throughput"] = throughput

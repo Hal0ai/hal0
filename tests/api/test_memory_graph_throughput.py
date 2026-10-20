@@ -149,6 +149,34 @@ def test_slot_change_measures_the_new_slot(
     assert body["throughput"]["verdict"] == "too_slow"
 
 
+def test_slot_change_with_the_gate_off_still_measures(
+    client: TestClient, stub: StubWrapper, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # [memory.graph].enabled is a reporting gate only; extraction goes to
+    # hal0/<extraction_slot> either way (#2353 decision: slot change is a trigger).
+    probed = _fake_slots(monkeypatch, p8081=SLOW)
+    assert stub.enabled is False
+
+    body = client.put("/api/memory/graph", json={"extraction_slot": "agent"}).json()
+
+    assert probed == [8081]
+    assert body["throughput"]["slot"] == "agent"
+    assert body["throughput"]["verdict"] == "too_slow"
+    assert len(body["warnings"]) == 1
+
+
+def test_timeout_change_with_the_gate_off_reprojects_the_cache(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    probed = _fake_slots(monkeypatch, p8082={"prompt_tps": 100.0, "decode_tps": 20.0})
+    client.post("/api/memory/graph/throughput")
+
+    body = client.put("/api/memory/graph", json={"llm_timeout_s": 120}).json()
+
+    assert probed == [8082]
+    assert body["throughput"]["verdict"] == "too_slow"
+
+
 def test_disable_never_probes(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     probed = _fake_slots(monkeypatch, p8082=SLOW)
 
