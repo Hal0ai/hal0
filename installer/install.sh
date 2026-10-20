@@ -142,6 +142,38 @@ wait_http_ready() {
     return 1
 }
 
+# Print systemd's enablement state for `unit` (enabled, disabled, masked,
+# masked-runtime, static, ...), or `not-found` when systemd doesn't know it
+# (a fresh install). Callers MUST capture this BEFORE anything lays down or
+# refreshes the unit file, or enables it, so a re-run can tell an operator's
+# off switch from a first install (#2807).
+unit_enable_state() {
+    local state
+    state="$(systemctl is-enabled "$1" 2>/dev/null || true)"
+    printf '%s\n' "${state:-not-found}"
+}
+
+# True (0) when a captured state means the unit is turned off: disabled, or
+# masked (persistently or for this boot). The installer must not enable it.
+unit_state_off() {
+    case "$1" in
+        disabled | masked | masked-runtime) return 0 ;;
+    esac
+    return 1
+}
+
+# Report that `unit` (captured `state`) was left off, and how to turn it on.
+unit_left_off_note() {
+    local unit="$1" state="$2"
+    local turn_on="systemctl enable --now ${unit}"
+    # A runtime mask lives under /run; only `unmask --runtime` removes it.
+    case "${state}" in
+        masked) turn_on="systemctl unmask ${unit} && ${turn_on}" ;;
+        masked-runtime) turn_on="systemctl unmask --runtime ${unit} && ${turn_on}" ;;
+    esac
+    info "${unit} is ${state}; left as is (run '${turn_on}' to turn it on)"
+}
+
 DEV_MODE=0
 NO_START=0
 # ROCmFP4 + MTP note: the old `--rocmfp4` power pack (a host-side fork
@@ -2194,16 +2226,38 @@ if [[ -f "${AGENT_UNIT_SRC}" ]]; then
         # binary against the prefix's state dir. Rewritten in python (not
         # sed) so a prefix containing sed metacharacters can't corrupt the
         # substitution.
+        # Capture the operator's on/off choice BEFORE the unit files are
+        # (re)written (#2807): a re-run must not re-enable what was disabled.
+        # A persistently masked unit is `${UNIT_DIR}/<unit> -> /dev/null`;
+        # copying over it would replace the symlink and silently unmask it
+        # (GNU install) or fail with "invalid target" and abort the whole
+        # installer under `set -e` (uutils install), so a masked unit's file
+        # is left alone. Dev installs write a private UNIT_DIR and never
+        # enable anything, so the system-wide state doesn't apply there.
+        declare -A _bench_state=()
+        _bench_write=()
         for _bench_unit in hal0-bench.service hal0-bench.timer hal0-bench-worker.service; do
+            if [[ "${DEV_MODE}" -eq 0 ]]; then
+                _bench_state[${_bench_unit}]="$(unit_enable_state "${_bench_unit}")"
+            else
+                _bench_state[${_bench_unit}]="not-found"
+            fi
+            if [[ "${_bench_state[${_bench_unit}]}" == "masked" ]]; then
+                info "${_bench_unit} is masked; unit file left as is (run 'systemctl unmask ${_bench_unit}' and re-run the installer to refresh it)"
+                continue
+            fi
             install -m 0644 "${REPO_ROOT}/installer/systemd/${_bench_unit}" "${UNIT_DIR}/${_bench_unit}"
+            _bench_write+=("${_bench_unit}")
         done
-        if [[ "${VENV_DIR}" != "/usr/lib/hal0/venv" || "${BENCH_STATE_DIR}" != "/var/lib/hal0-bench" ]]; then
-            "${PY}" - "${UNIT_DIR}" "${VENV_DIR}" "${BENCH_STATE_DIR}" <<'PYEOF'
+        if [[ ${#_bench_write[@]} -gt 0 && ( "${VENV_DIR}" != "/usr/lib/hal0/venv" || "${BENCH_STATE_DIR}" != "/var/lib/hal0-bench" ) ]]; then
+            "${PY}" - "${UNIT_DIR}" "${VENV_DIR}" "${BENCH_STATE_DIR}" "${_bench_write[@]}" <<'PYEOF'
 import sys
 from pathlib import Path
 
 unit_dir, venv, state = sys.argv[1], sys.argv[2], sys.argv[3]
-for name in ("hal0-bench.service", "hal0-bench.timer", "hal0-bench-worker.service"):
+# Only the units copied above: a masked unit's /dev/null symlink is never
+# written through.
+for name in sys.argv[4:]:
     p = Path(unit_dir) / name
     text = p.read_text(encoding="utf-8").replace("/usr/lib/hal0/venv", venv)
     if name.endswith(".service") and state != "/var/lib/hal0-bench":
@@ -2215,8 +2269,13 @@ PYEOF
         fi
         if [[ "${DEV_MODE}" -eq 0 ]]; then
             systemctl daemon-reload 2>/dev/null || true
-            systemctl enable --now hal0-bench-worker.service >/dev/null 2>&1 || true
-            systemctl enable --now hal0-bench.timer >/dev/null 2>&1 || true
+            for _bench_unit in hal0-bench-worker.service hal0-bench.timer; do
+                if unit_state_off "${_bench_state[${_bench_unit}]}"; then
+                    unit_left_off_note "${_bench_unit}" "${_bench_state[${_bench_unit}]}"
+                else
+                    systemctl enable --now "${_bench_unit}" >/dev/null 2>&1 || true
+                fi
+            done
         fi
         info "wrote ${ETC_DIR}/bench + ${BENCH_STATE_DIR} + bench units"
     else
@@ -3832,6 +3891,20 @@ else
         fi
     fi
 
+    # hermes-gateway's on/off state, captured BEFORE anything below can
+    # enable it (#2807). On the repair path (unit present, venv missing)
+    # `hal0 agent install hermes` runs its own gateway install, which ends in
+    # `systemctl enable --now hermes-gateway.service`
+    # (src/hal0/cli/agent_commands.py, _install_hermes_gateway), and the
+    # gateway block further down runs the upstream generator. Both consult
+    # this one capture. `_gateway_was_active` records a unit that is disabled
+    # but running, so the installer doesn't stop it.
+    _gateway_state="$(unit_enable_state hermes-gateway.service)"
+    _gateway_was_active=0
+    systemctl is-active --quiet hermes-gateway.service 2>/dev/null && _gateway_was_active=1
+    _hermes_install_args=()
+    unit_state_off "${_gateway_state}" && _hermes_install_args+=(--no-gateway)
+
     if [[ -f "${AGENT_UNIT_DST}" && ! -x "/var/lib/hal0/venvs/hermes/bin/hermes" ]]; then
         if [[ "${HAL0_SKIP_HERMES:-0}" -eq 1 ]]; then
             info "skipping hermes provisioning (HAL0_SKIP_HERMES=1) — run '${HAL0_BIN} agent install hermes' later"
@@ -3858,7 +3931,7 @@ else
             warn "  install git manually ($(pkg_install_cmd git 2>/dev/null || echo 'via your distro package manager')), then run '${HAL0_BIN} agent install hermes'"
         else
             info "provisioning Hermes agent (toolchain + bootstrap) — this can take a few minutes…"
-            if "${HAL0_BIN}" agent install hermes; then
+            if "${HAL0_BIN}" agent install hermes "${_hermes_install_args[@]}"; then
                 info "hermes provisioned — config.yaml + MCP servers + skills wired"
             else
                 warn "hermes provisioning failed — run '${HAL0_BIN} agent install hermes' manually"
@@ -3921,14 +3994,48 @@ else
         # #843 safeguard for /root/.hermes is satisfied by the
         # $HOME=/var/lib/hal0 override and the fact that 'pip install'
         # was already done as hal0 earlier in the provisioning block).
-        env -u HERMES_HOME HOME=/var/lib/hal0 \
-            /var/lib/hal0/venvs/hermes/bin/hermes gateway install --system --run-as-user hal0 </dev/null \
-            || warn "hermes gateway install failed — Telegram/Discord bridge unavailable; continuing"
-        # Only enable/start if hermes actually laid down the unit. If the
-        # install genuinely failed the file is absent; `systemctl enable` would
-        # otherwise emit a scary "Unit file … does not exist" error and trip
-        # the ERR trap. Skip honestly with a warning instead.
-        if [[ -f "${GATEWAY_UNIT_DST}" ]]; then
+        #
+        # Off switch (#2807, using the capture above the provisioning block):
+        #   - masked: the unit file is a /dev/null symlink. Never write through
+        #     a mask, so the generator does not run at all.
+        #   - disabled (or runtime-masked): refresh the unit file but pass
+        #     --no-start-now --no-start-on-login (both in the pinned
+        #     hermes-agent's `gateway install`), so the generator neither
+        #     enables nor starts it. That closes the window in which a stopped
+        #     gateway would come up and connect with the platform tokens. A
+        #     `systemctl mask --runtime` bracket was the alternative; the flags
+        #     are preferred because the generator's `enable` runs with
+        #     check=True and would fail against a mask, reporting a failed
+        #     install, and an interrupted run would leave the runtime mask
+        #     behind until reboot.
+        if [[ "${_gateway_state}" == "masked" ]]; then
+            unit_left_off_note hermes-gateway.service "${_gateway_state}"
+        else
+            _gateway_gen_args=(--system --run-as-user hal0)
+            unit_state_off "${_gateway_state}" && _gateway_gen_args+=(--no-start-now --no-start-on-login)
+            env -u HERMES_HOME HOME=/var/lib/hal0 \
+                /var/lib/hal0/venvs/hermes/bin/hermes gateway install "${_gateway_gen_args[@]}" </dev/null \
+                || warn "hermes gateway install failed — Telegram/Discord bridge unavailable; continuing"
+        fi
+        if unit_state_off "${_gateway_state}"; then
+            if [[ "${_gateway_state}" != "masked" ]]; then
+                systemctl daemon-reload
+                # Belt and braces for a generator that enables or starts it
+                # anyway. A gateway that was disabled but running (started by
+                # hand) keeps running: plain `disable`. Otherwise `--now` also
+                # stops anything this run started.
+                if [[ "${_gateway_was_active}" -eq 1 ]]; then
+                    systemctl disable hermes-gateway.service >/dev/null 2>&1 || true
+                else
+                    systemctl disable --now hermes-gateway.service >/dev/null 2>&1 || true
+                fi
+                unit_left_off_note hermes-gateway.service "${_gateway_state}"
+            fi
+        elif [[ -f "${GATEWAY_UNIT_DST}" ]]; then
+            # Only enable/start if hermes actually laid down the unit. If the
+            # install genuinely failed the file is absent; `systemctl enable`
+            # would otherwise emit a scary "Unit file … does not exist" error
+            # and trip the ERR trap. Skip honestly with a warning instead.
             systemctl daemon-reload
             systemctl enable --now hermes-gateway.service \
                 || warn "hermes-gateway enable returned non-zero — continuing (check 'journalctl -u hermes-gateway -n 40')"
