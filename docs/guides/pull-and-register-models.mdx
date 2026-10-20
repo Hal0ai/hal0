@@ -250,6 +250,15 @@ pull answer 422 `models.unsupported_quant`; a scan skips the file with reason
 example a `Q4_K_M` or `UD-Q4_K_XL` file).
 </Aside>
 
+<Aside type="note" title="Moonshine streaming bundles are refused">
+The Moonshine runner loads `encoder_model.ort` and `decoder_model_merged.ort`
+(the `tiny-en` and `base-en` ids). The streaming layout (`encoder.ort`,
+`frontend.ort`, ...) is not supported. `hal0 model add` answers 422
+`models.unsupported_moonshine_layout`, a scan skips the file with reason
+`unsupported_moonshine_layout`, and a slot pointed at one fails to launch
+with `slot.weights_missing` instead of silently running other weights.
+</Aside>
+
 ## Generate a draft profile from a model
 
 Picking a runtime [profile](/docs/concepts/capabilities-and-profiles) by hand

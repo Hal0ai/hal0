@@ -294,3 +294,59 @@ def test_named_missing_profile_refuses_to_launch() -> None:
         MoonshineProvider().container_spec(_slot_cfg(profile="no-such-profile"), {})
     assert exc_info.value.code == "slot.profile_missing"
     assert exc_info.value.details["profile"] == "no-such-profile"
+
+
+def test_preflight_streaming_message_names_supported_layout(tmp_path) -> None:
+    """#2556: the refusal names the loadable files and the ids that ship in them."""
+    streaming = tmp_path / "moonshine" / "quantized"
+    streaming.mkdir(parents=True)
+    for name in ("encoder.ort", "frontend.ort"):
+        (streaming / name).write_bytes(b"\0")
+    with pytest.raises(MoonshineWeightsMissingError) as exc_info:
+        check_moonshine_weights(str(tmp_path / "moonshine"))
+    msg = str(exc_info.value)
+    assert "encoder_model.ort" in msg
+    assert "decoder_model_merged.ort" in msg
+    assert "base-en" in msg
+    assert exc_info.value.details["layout"] == "streaming"
+
+
+def _mixed_tree(tmp_path) -> Any:
+    """lxc105 shape: base-en is loadable, small-streaming-en is streaming-only."""
+    root = tmp_path / "moonshine"
+    base = root / "base-en" / "quantized" / "base-en"
+    base.mkdir(parents=True)
+    (base / "encoder_model.ort").write_bytes(b"\0")
+    (base / "decoder_model_merged.ort").write_bytes(b"\0")
+    stream = root / "small-streaming-en" / "quantized" / "small-streaming-en"
+    stream.mkdir(parents=True)
+    for name in ("encoder.ort", "frontend.ort"):
+        (stream / name).write_bytes(b"\0")
+    return root
+
+
+def test_mixed_tree_streaming_variant_is_refused_not_substituted(tmp_path) -> None:
+    """#2556: variant small-streaming-en must not silently load base-en."""
+    root = _mixed_tree(tmp_path)
+    info = {"path": str(root), "metadata": {"variant": "small-streaming-en"}}
+    with pytest.raises(MoonshineWeightsMissingError) as exc_info:
+        MoonshineProvider().container_spec(_slot_cfg(), info)
+    assert exc_info.value.details["layout"] == "streaming"
+    assert "decoder_model_merged.ort" in str(exc_info.value)
+
+
+def test_mixed_tree_loadable_variant_still_resolves(tmp_path) -> None:
+    root = _mixed_tree(tmp_path)
+    info = {"path": str(root), "metadata": {"variant": "base-en"}}
+    c = MoonshineProvider().container_spec(_slot_cfg(), info).command
+    assert c[c.index("--model_path") + 1] == str(root / "base-en" / "quantized" / "base-en")
+    assert c[c.index("--model_arch") + 1] == "base"
+
+
+def test_streaming_only_registry_path_raises_not_ignored(tmp_path) -> None:
+    """#2556: a streaming-only registry path must not fall back to the profile."""
+    stream = _mixed_tree(tmp_path) / "small-streaming-en"
+    info = {"path": str(stream), "metadata": {"variant": "small-streaming-en"}}
+    with pytest.raises(MoonshineWeightsMissingError) as exc_info:
+        MoonshineProvider().container_spec(_slot_cfg(), info)
+    assert exc_info.value.details["layout"] == "streaming"
