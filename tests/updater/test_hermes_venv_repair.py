@@ -135,3 +135,22 @@ def test_a_reinstall_that_does_not_heal_reports_false(
     monkeypatch.setattr(hp, "_install_venv", lambda *_a, **_kw: None)
 
     assert repair_hermes_mcp_client(venv=venv, restart_gateway=False) is False
+
+
+def test_gateway_bounce_uses_try_restart_so_a_stopped_unit_stays_stopped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#2822: ``restart`` would start a gateway the operator disabled."""
+    venv = _venv(tmp_path)
+    calls: list[list[str]] = []
+
+    def _run(cmd: list[str], **_kw: Any) -> Any:
+        calls.append(list(cmd))
+        return None
+
+    monkeypatch.setattr(hp, "_probe_mcp_client", _probe([BROKEN, OK], []))
+    monkeypatch.setattr(hp, "_install_venv", lambda *a, **k: None)
+    monkeypatch.setattr("hal0.updater.updater.subprocess.run", _run)
+
+    assert repair_hermes_mcp_client(venv=venv, restart_gateway=True) is True
+    assert calls == [["systemctl", "try-restart", "hermes-gateway.service"]]
