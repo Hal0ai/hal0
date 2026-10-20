@@ -10,6 +10,7 @@ hal0 API. The ``graph`` sub-sub-app maps 1:1 to the routes in
     hal0 memory graph status                            → GET  /api/memory/graph/status
     hal0 memory graph enable [--slot …]                 → PUT  /api/memory/graph (enabled=true …)
     hal0 memory graph disable                           → PUT  /api/memory/graph (enabled=false)
+    hal0 memory graph check                             → POST /api/memory/graph/throughput
 
 ``hal0 memory enable``/``disable`` replace the old ``HAL0_MEMORY_ENABLED``
 env var (removed) — the whole subsystem (Hindsight engine, /mcp/memory,
@@ -28,6 +29,7 @@ from typing import Any
 
 import typer
 from rich.console import Console
+from rich.markup import escape
 from rich.panel import Panel
 from rich.table import Table
 
@@ -36,6 +38,7 @@ from hal0.cli._shared import (
     _api_base,
     _api_unreachable,
     api_get,
+    api_post,
     api_put,
     die,
 )
@@ -62,6 +65,24 @@ app.add_typer(ops_app, name="ops")
 app.add_typer(mm_app, name="mm")
 app.command("recall")(recall_cmd)
 
+#: ``PUT /api/memory/graph`` can restart hindsight-api (daemon-reload + restart,
+#: each bounded at 60 s server-side) and then run the extraction throughput probe
+#: (#2353: <= 30 s plus a 2 s metrics read). The shared 10 s default timed out
+#: on any real slot change.
+_GRAPH_PUT_TIMEOUT_S = 160.0
+#: ``POST /api/memory/graph/throughput``: the 30 s probe cap plus the metrics read.
+_THROUGHPUT_POST_TIMEOUT_S = 45.0
+
+
+def _throughput_row(est: Any) -> str | None:
+    """One rich-markup line for an extraction throughput estimate (#2353)."""
+    if not isinstance(est, dict) or not est.get("message"):
+        return None
+    color = {"ok": "green", "too_slow": "yellow"}.get(str(est.get("verdict")), "dim")
+    # escape(): the message names ``[memory.graph].llm_timeout_s``, which rich
+    # would otherwise read as a markup tag.
+    return f"[{color}]{escape(str(est['message']))}[/{color}]"
+
 
 # ── ``hal0 memory status`` ─────────────────────────────────────────────────
 
@@ -86,6 +107,7 @@ def status_cmd(
     if not isinstance(s, dict):
         die(f"unexpected status payload: {s!r}")
         return
+    throughput = _cached_throughput() if s.get("memory_enabled") else None
     if json_out:
         typer.echo(
             jsonlib.dumps(
@@ -94,6 +116,7 @@ def status_cmd(
                     "memory_degraded": s.get("memory_degraded"),
                     "memory_write_degraded": s.get("memory_write_degraded"),
                     "memory_write_health": s.get("memory_write_health"),
+                    "extraction_throughput": throughput,
                 },
                 indent=2,
                 sort_keys=True,
@@ -127,7 +150,24 @@ def status_cmd(
         # engine's own operation counters so the size of the backlog is visible
         # without shelling into the daemon.
         _add_write_rows(t, s)
+        row = _throughput_row(throughput)
+        if row:
+            t.add_row("Extraction speed", row)
     console.print(Panel(t, title="memory · status", border_style="dim"))
+
+
+def _cached_throughput() -> dict[str, Any] | None:
+    """The API's last extraction throughput estimate (#2353), without probing.
+
+    Best-effort: an older API without the route, or a key without admin
+    scope, just leaves the row out.
+    """
+    try:
+        payload = api_get("/api/memory/graph/throughput")
+    except CliApiError:
+        return None
+    est = payload.get("throughput") if isinstance(payload, dict) else None
+    return est if isinstance(est, dict) else None
 
 
 def _add_write_rows(t: Table, s: dict) -> None:
@@ -270,6 +310,9 @@ def graph_status_cmd(
     t.add_row("Last build", str(last))
     if s.get("last_error"):
         t.add_row("Last error", f"[red]{s['last_error']}[/red]")
+    speed = _throughput_row(s.get("throughput"))
+    if speed:
+        t.add_row("Extraction speed", speed)
     console.print(Panel(t, title="memory · graph", border_style="dim"))
 
 
@@ -299,7 +342,7 @@ def graph_enable_cmd(
     if _api_unreachable(url):
         raise typer.Exit(1)
     try:
-        result = api_put("/api/memory/graph", json=payload)
+        result = api_put("/api/memory/graph", json=payload, timeout=_GRAPH_PUT_TIMEOUT_S)
     except CliApiError as exc:
         die(str(exc))
         return
@@ -313,11 +356,55 @@ def graph_enable_cmd(
             prop_line = f"\n[red]hindsight-api restart: {prop['error']}[/red]"
         elif prop.get("restarted"):
             prop_line = "\n[dim]hindsight-api restarted on the new slot.[/dim]"
+    # #2353: a slot too slow for one extraction is a warning, never a refusal —
+    # the gate is on either way, so say so in the same panel.
+    speed = _throughput_row(result.get("throughput"))
+    speed_line = f"\n{speed}" if speed else ""
+    too_slow = bool(result.get("warnings"))
     console.print(
         Panel(
             f"[bold green]Graph extraction enabled[/bold green]\n"
-            f"extraction slot = [bold]{result.get('extraction_slot')}[/bold]{prop_line}",
-            border_style="green",
+            f"extraction slot = [bold]{result.get('extraction_slot')}[/bold]"
+            f"{prop_line}{speed_line}",
+            border_style="yellow" if too_slow else "green",
+        )
+    )
+
+
+# ── ``hal0 memory graph check`` ───────────────────────────────────────────────
+
+
+@graph_app.command("check")
+def graph_check_cmd(
+    json_out: bool = typer.Option(
+        False, "--json", help="Emit the raw JSON estimate instead of a panel."
+    ),
+) -> None:
+    """Measure whether the extraction slot finishes one extraction inside llm_timeout_s.
+
+    Reads the slot's llama-server metrics, or runs one completion of at most
+    512 prompt + 32 decode tokens (capped at 30 s). A slow slot is reported,
+    not refused: this always exits 0 once the API answered.
+    """
+    url = _api_base()
+    if _api_unreachable(url):
+        raise typer.Exit(1)
+    try:
+        result = api_post("/api/memory/graph/throughput", timeout=_THROUGHPUT_POST_TIMEOUT_S)
+    except CliApiError as exc:
+        die(str(exc))
+        return
+    est = result.get("throughput") if isinstance(result, dict) else None
+    if json_out:
+        typer.echo(jsonlib.dumps(est, indent=2, sort_keys=True))
+        return
+    row = _throughput_row(est) or "[dim]no estimate returned[/dim]"
+    verdict = est.get("verdict") if isinstance(est, dict) else None
+    console.print(
+        Panel(
+            row,
+            title="memory · extraction speed",
+            border_style={"ok": "green", "too_slow": "yellow"}.get(str(verdict), "dim"),
         )
     )
 

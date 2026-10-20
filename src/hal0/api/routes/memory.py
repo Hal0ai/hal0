@@ -278,8 +278,95 @@ async def graph_status(request: Request) -> dict[str, Any]:
     graph_cfg = load_hal0_config().memory.graph
     status["llm_timeout_s"] = graph_cfg.llm_timeout_s
     status["extraction_limits"] = ExtractionLimits.from_config(graph_cfg).as_dict()
+    status["throughput"] = _cached_throughput(request, status.get("extraction_slot"), graph_cfg)
     await _augment_build_counters(request, status)
     return status
+
+
+# ── extraction throughput preflight (#2353) ────────────────────────────────
+
+
+async def _extraction_slot_port(request: Request, slot: str) -> int:
+    """The loopback port of ``slot`` (or the slot an alias names), 0 when unknown."""
+    slot_manager = getattr(request.app.state, "slot_manager", None)
+    if slot_manager is None:
+        return 0
+    from hal0.slots._cfg_helpers import _cfg_port
+    from hal0.slots.manager import SLOT_ALIASES
+
+    try:
+        cfgs = await slot_manager.iter_configs()
+    except Exception:
+        return 0
+    for name in (slot, SLOT_ALIASES.get(slot)):
+        for cfg in cfgs:
+            if name and cfg.get("name") == name:
+                try:
+                    return _cfg_port(cfg)
+                except (TypeError, ValueError):
+                    return 0
+    return 0
+
+
+async def _measure_throughput(request: Request, slot: str, graph_cfg: MemoryGraphConfig) -> Any:
+    """Run the bounded measurement against ``slot`` and cache the result.
+
+    One estimate is cached per process (``app.state.extraction_throughput``),
+    for the slot it measured; :func:`_cached_throughput` reports it only while
+    that slot is still the extraction slot.
+    """
+    from hal0.memory import extraction_env
+
+    estimate = await extraction_env.measure_extraction_throughput(
+        slot,
+        await _extraction_slot_port(request, slot),
+        timeout_s=graph_cfg.llm_timeout_s,
+        max_tokens=graph_cfg.extraction_max_tokens,
+    )
+    request.app.state.extraction_throughput = estimate
+    if estimate.verdict == "too_slow":
+        log.warning("memory.extraction_slot_too_slow %s", estimate.message())
+    return estimate
+
+
+def _cached_throughput(
+    request: Request, slot: str | None, graph_cfg: MemoryGraphConfig
+) -> dict[str, Any] | None:
+    """The cached estimate for ``slot``, projected onto the current config, or ``None``."""
+    cached = getattr(request.app.state, "extraction_throughput", None)
+    if cached is None or not slot or cached.slot != slot:
+        return None
+    return cached.reproject(
+        timeout_s=graph_cfg.llm_timeout_s, max_tokens=graph_cfg.extraction_max_tokens
+    ).as_dict()
+
+
+@router.get("/graph/throughput")
+async def graph_throughput(request: Request) -> dict[str, Any]:
+    """The last extraction-throughput estimate (#2353). Never probes the slot.
+
+    ``{"throughput": null}`` until something has measured the current
+    extraction slot (``PUT /graph`` enabling it, or ``POST`` here).
+    """
+    wrapper = _wrapper(request)
+    graph_cfg = load_hal0_config().memory.graph
+    slot = getattr(wrapper, "extraction_slot", None) or graph_cfg.extraction_slot
+    return {"throughput": _cached_throughput(request, slot, graph_cfg)}
+
+
+@router.post("/graph/throughput")
+async def measure_graph_throughput(request: Request) -> dict[str, Any]:
+    """Measure whether the extraction slot finishes one extraction in time (#2353).
+
+    Reads the slot's llama-server metrics, else runs one completion of at most
+    512 prompt + 32 decode tokens capped at 30 s. Caches and returns the
+    estimate; a ``too_slow`` verdict is a warning, never a refusal.
+    """
+    wrapper = _wrapper(request)
+    graph_cfg = load_hal0_config().memory.graph
+    slot = getattr(wrapper, "extraction_slot", None) or graph_cfg.extraction_slot
+    estimate = await _measure_throughput(request, slot, graph_cfg)
+    return {"throughput": estimate.as_dict()}
 
 
 async def _all_banks(client: Any) -> list[Any] | None:
@@ -551,6 +638,7 @@ async def update_graph_config(request: Request) -> dict[str, Any]:
             ) from exc
 
         slot_changed = new_cfg.extraction_slot != cfg.memory.graph.extraction_slot
+        was_enabled = cfg.memory.graph.enabled
         timeout_changed = new_cfg.llm_timeout_s != cfg.memory.graph.llm_timeout_s
         new_limits = ExtractionLimits.from_config(new_cfg)
         limits_changed = new_limits != ExtractionLimits.from_config(cfg.memory.graph)
@@ -643,7 +731,24 @@ async def update_graph_config(request: Request) -> dict[str, Any]:
         out["status"] = wrapper.graph_status()
         if propagation is not None:
             out["propagation"] = propagation
-        return out
+
+    # Throughput preflight (#2353), outside the config lock: the probe can take
+    # up to 30 s and must not hold every other hal0.toml writer. Enabling the
+    # gate or changing the slot measures; a timeout / limit change re-projects
+    # the cached measurement without touching the slot. A slow slot is a
+    # warning in the response, never a refusal.
+    throughput: dict[str, Any] | None = None
+    if new_cfg.enabled and (slot_changed or not was_enabled):
+        throughput = (
+            await _measure_throughput(request, new_cfg.extraction_slot, new_cfg)
+        ).as_dict()
+    elif new_cfg.enabled and (timeout_changed or limits_changed):
+        throughput = _cached_throughput(request, new_cfg.extraction_slot, new_cfg)
+    if throughput is not None:
+        out["throughput"] = throughput
+        if throughput["verdict"] == "too_slow":
+            out["warnings"] = [throughput["message"]]
+    return out
 
 
 # ── REST shims for /api/memory/{add,search,list,delete} (#302) ─────────────

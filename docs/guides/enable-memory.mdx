@@ -131,6 +131,28 @@ hal0 memory graph enable --slot agent
 server validates the choice against the live enabled-slot set and rejects
 an unknown or non-llm slot before it ever reaches `hal0.toml`.
 
+Enabling also measures whether the extraction slot can finish one
+extraction inside `[memory.graph].llm_timeout_s`. hal0 reads the slot's
+prompt and decode rates from its llama-server metrics, or runs one short
+timed completion (at most 512 prompt and 32 decode tokens, capped at 30 s),
+and projects `~3500 / prompt tok/s + extraction_max_tokens / decode tok/s`.
+When that exceeds the timeout, the enable still goes through and prints a
+warning that names the measured rates. Point extraction at a faster slot,
+raise `llm_timeout_s`, or lower `extraction_max_tokens`.
+
+</TabItem>
+<TabItem label="Check speed">
+
+```sh
+hal0 memory graph check
+hal0 memory graph check --json
+```
+
+Runs the same measurement on demand. `hal0 doctor all` runs it too, and
+the installer runs it once the memory engine is up. `hal0 memory status`
+and `hal0 memory graph status` show the last estimate without measuring
+again.
+
 </TabItem>
 <TabItem label="Disable">
 

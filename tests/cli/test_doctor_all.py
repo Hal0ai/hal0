@@ -1251,8 +1251,8 @@ def test_build_all_checks_composes_verify_plus_extras(monkeypatch: pytest.Monkey
 
     checks = da.build_all_checks()
     keys = [c.key for c in checks]
-    # 7 verify rows + 21 extras.
-    assert keys[-21:] == [
+    # 7 verify rows + 22 extras.
+    assert keys[-22:] == [
         "auth",
         "models",
         "registry-toml",
@@ -1274,6 +1274,7 @@ def test_build_all_checks_composes_verify_plus_extras(monkeypatch: pytest.Monkey
         "hermes_anchor_window",
         "hindsight_llm_auth",
         "memory_engine_version",
+        "memory_extraction_throughput",
     ]
     assert "api" in keys and "runners" in keys
     assert da.overall_verdict(checks) == "ok"
@@ -1369,6 +1370,50 @@ def test_memory_engine_version_passes_when_memory_disabled_or_unreachable() -> N
     )
     assert check.status == "pass"
     assert da.check_memory_engine_version(memory=None).status == "warn"
+
+
+# ── memory extraction speed (#2353, advisory) ───────────────────────────────
+
+_LIVE_MEMORY = {"enabled": True, "engine": "hindsight", "reachable": True}
+
+
+def test_extraction_throughput_warns_on_a_slow_slot() -> None:
+    from hal0.memory.extraction_env import ExtractionThroughput
+
+    slow = ExtractionThroughput(
+        slot="utility", timeout_s=300, max_tokens=4096, prompt_tps=12.0, decode_tps=4.0
+    ).as_dict()
+    check = da.check_memory_extraction_throughput(memory=_LIVE_MEMORY, measure=lambda _b: slow)
+    assert check.status == "warn"  # warn, never fail: the enable path never refuses either
+    assert "12.0 prompt tok/s" in check.detail
+    assert "llm_timeout_s = 300 s" in check.detail
+
+
+def test_extraction_throughput_passes_on_a_fast_slot() -> None:
+    from hal0.memory.extraction_env import ExtractionThroughput
+
+    fast = ExtractionThroughput(
+        slot="utility", timeout_s=300, max_tokens=4096, prompt_tps=800.0, decode_tps=45.0
+    ).as_dict()
+    check = da.check_memory_extraction_throughput(memory=_LIVE_MEMORY, measure=lambda _b: fast)
+    assert check.status == "pass"
+
+
+def test_extraction_throughput_unmeasurable_is_a_warn_not_a_pass() -> None:
+    check = da.check_memory_extraction_throughput(memory=_LIVE_MEMORY, measure=lambda _b: None)
+    assert check.status == "warn"
+
+
+def test_extraction_throughput_skips_the_probe_without_a_live_engine() -> None:
+    def _never(_b: object) -> None:  # pragma: no cover — a call here is the bug
+        raise AssertionError("no probe without a reachable memory engine")
+
+    for memory in (
+        {"enabled": True, "engine": None},
+        {"enabled": False, "engine": "hindsight"},
+        {"enabled": True, "engine": "hindsight", "reachable": False},
+    ):
+        assert da.check_memory_extraction_throughput(memory=memory, measure=_never).status == "pass"
 
 
 # ── command ───────────────────────────────────────────────────────────────────

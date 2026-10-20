@@ -3610,6 +3610,16 @@ else
                 else
                     warn "memory bank seeding incomplete — banks also lazy-create on first write"
                 fi
+                # #2353: say up front when the extraction slot cannot finish one
+                # extraction inside [memory.graph].llm_timeout_s, instead of the
+                # operator finding out from an empty bank once the retries run
+                # out. One bounded probe (<= 512 prompt + 32 decode tokens, 30 s)
+                # when the slot's metrics have no reading. A warning, never a
+                # failure: a fresh box usually has no model loaded yet, which
+                # the check reports as "could not measure".
+                info "checking the memory extraction slot's throughput…"
+                "${HAL0_BIN}" memory graph check \
+                    || warn "could not check the extraction slot's throughput; run '${HAL0_BIN} memory graph check' once a model is loaded"
             else
                 warn "hindsight-api not healthy yet; check 'journalctl -u hindsight-api -n 40'"
             fi

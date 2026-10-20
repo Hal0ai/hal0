@@ -41,8 +41,9 @@ from __future__ import annotations
 
 import os
 import subprocess
-from collections.abc import Mapping, Sequence
-from dataclasses import asdict, dataclass
+import time
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -526,15 +527,315 @@ def resolve_extraction_window(
     )
 
 
+# ── extraction throughput preflight (#2353) ────────────────────────────────────
+#
+# The context-window floor above answers "can the slot fit the prompt at all";
+# this answers "can it finish one extraction before hindsight-api gives up".
+# A CPU-only slot at ~12 prompt tok/s needs ~270 s just to prefill the ~3.2k-
+# token extraction prompt (#1834), so against the 300 s default
+# ``[memory.graph].llm_timeout_s`` every attempt times out, and the operator
+# only finds out after the retry ladder has run dry, from an empty bank.
+#
+# Operator decision on #2353: warn, never refuse; at most one bounded probe.
+# Prefer the slot's own llama-server metrics; only when they carry no reading,
+# run one completion of at most 512 prompt + 32 decode tokens, capped at 30 s.
+
+#: Prompt-token cost the projection charges one extraction call. Same
+#: rationale as :data:`EXTRACTION_MIN_CONTEXT_TOKENS` (hal0 never sees the
+#: vendored prompt template): rc.6 observed ~3-4k tokens for the prompt alone
+#: and #1834 measured ~3.2k. The round figure the issue's formula names.
+EXTRACTION_PROMPT_TOKENS = 3500
+
+#: Probe budget (#2353 decision): one completion, these caps, nothing more.
+PROBE_PROMPT_TOKENS = 512
+PROBE_DECODE_TOKENS = 32
+PROBE_TIMEOUT_S = 30.0
+
+#: Bound on the ``/metrics`` read that may let the probe be skipped.
+_METRICS_TIMEOUT_S = 2.0
+
+#: Filler for the probe prompt: ~10 tokens a sentence on common tokenizers, so
+#: 45 repeats stays under the 512-token cap. The projection uses the rate the
+#: server reports, not this estimate.
+_PROBE_SENTENCE = "The quick brown fox jumps over the lazy dog. "
+_PROBE_REPEATS = 45
+
+_PROMPT_TPS_METRIC = "llamacpp:prompt_tokens_seconds"
+_DECODE_TPS_METRIC = "llamacpp:predicted_tokens_seconds"
+
+
+@dataclass(frozen=True)
+class ExtractionThroughput:
+    """Measured slot throughput projected onto one extraction call (#2353).
+
+    ``prompt_tps`` / ``decode_tps`` are what the slot measured; ``source``
+    says where from (``metrics``, ``probe``, or ``none`` when nothing could be
+    read, with the reason in ``detail``). ``probe_timed_out`` marks a probe
+    that hit :data:`PROBE_TIMEOUT_S`: the slot then prefilled fewer than
+    ``PROBE_PROMPT_TOKENS / PROBE_TIMEOUT_S`` tokens a second, and
+    ``prompt_tps`` holds that upper bound.
+
+    The projection is ``EXTRACTION_PROMPT_TOKENS / prompt_tps + max_tokens /
+    decode_tps`` against ``timeout_s``, the formula on the issue.
+    ``max_tokens`` is ``[memory.graph].extraction_max_tokens``, the completion
+    cap hindsight-api runs under, so the decode term is the worst case.
+    """
+
+    slot: str
+    timeout_s: int
+    max_tokens: int
+    prompt_tps: float | None = None
+    decode_tps: float | None = None
+    source: str = "none"
+    probe_timed_out: bool = False
+    measured_at: float = 0.0
+    detail: str = ""
+
+    @property
+    def projected_s(self) -> float | None:
+        """Projected seconds for one extraction, or ``None`` when unmeasured.
+
+        After a timed-out probe only the prefill term is known (and only as a
+        lower bound), so the projection is that lower bound alone.
+        """
+        if not self.prompt_tps or self.prompt_tps <= 0:
+            return None
+        prefill = EXTRACTION_PROMPT_TOKENS / self.prompt_tps
+        if self.probe_timed_out:
+            return prefill
+        if not self.decode_tps or self.decode_tps <= 0:
+            return None
+        return prefill + self.max_tokens / self.decode_tps
+
+    @property
+    def verdict(self) -> str:
+        """``ok`` | ``too_slow`` | ``unknown``."""
+        projected = self.projected_s
+        if projected is None:
+            return "unknown"
+        if projected > self.timeout_s:
+            return "too_slow"
+        return "unknown" if self.probe_timed_out else "ok"
+
+    def reproject(self, *, timeout_s: int, max_tokens: int) -> ExtractionThroughput:
+        """The same measurement projected against a new timeout / completion cap."""
+        return replace(self, timeout_s=int(timeout_s), max_tokens=int(max_tokens))
+
+    def _remedy(self) -> str:
+        return (
+            "Point extraction at a faster slot (`hal0 memory graph enable --slot "
+            "<name>`), raise [memory.graph].llm_timeout_s, or lower "
+            "[memory.graph].extraction_max_tokens."
+        )
+
+    def message(self) -> str:
+        """One operator-facing sentence naming the measured rates and the timeout."""
+        timeout = f"[memory.graph].llm_timeout_s = {self.timeout_s} s"
+        projected = self.projected_s
+        if projected is None:
+            why = f" ({self.detail})" if self.detail else ""
+            return (
+                f"could not measure extraction slot {self.slot!r}'s throughput{why}, "
+                f"so hal0 cannot tell whether one extraction fits inside {timeout}"
+            )
+        consequence = (
+            "Retains will be accepted, time out in extraction and land under Retry "
+            f"failed once the retries run out. {self._remedy()}"
+        )
+        if self.probe_timed_out:
+            head = (
+                f"extraction slot {self.slot!r} did not finish a "
+                f"{PROBE_PROMPT_TOKENS}-token probe inside {PROBE_TIMEOUT_S:.0f} s "
+                f"(under {self.prompt_tps:.1f} prompt tok/s), so prefilling the "
+                f"~{EXTRACTION_PROMPT_TOKENS}-token extraction prompt alone takes "
+                f"over {projected:.0f} s"
+            )
+            if self.verdict == "too_slow":
+                return f"{head}, more than {timeout}. {consequence}"
+            return (
+                f"{head}; with decoding on top, one extraction may not fit inside "
+                f"{timeout} (or the slot was busy during the probe). {self._remedy()}"
+            )
+        rates = (
+            f"extraction slot {self.slot!r} measured {self.prompt_tps:.1f} prompt tok/s "
+            f"and {self.decode_tps:.1f} decode tok/s (from {self.source}); one "
+            f"extraction (~{EXTRACTION_PROMPT_TOKENS} prompt + up to {self.max_tokens} "
+            f"completion tokens) projects to ~{projected:.0f} s"
+        )
+        if self.verdict == "too_slow":
+            return f"{rates}, over {timeout}. {consequence}"
+        return f"{rates}, inside {timeout}"
+
+    def as_dict(self) -> dict[str, Any]:
+        out = asdict(self)
+        projected = self.projected_s
+        out["projected_s"] = round(projected, 1) if projected is not None else None
+        out["prompt_tokens"] = EXTRACTION_PROMPT_TOKENS
+        out["verdict"] = self.verdict
+        out["message"] = self.message()
+        return out
+
+
+def parse_throughput_metrics(text: str) -> tuple[float | None, float | None]:
+    """``(prompt_tps, decode_tps)`` from a llama-server ``/metrics`` body.
+
+    A gauge that is absent, unparseable or zero (llama-server reports 0 for a
+    window with no work in it) comes back ``None``.
+    """
+    found: dict[str, float] = {}
+    for line in text.splitlines():
+        parts = line.strip().split()
+        if len(parts) < 2 or parts[0] not in (_PROMPT_TPS_METRIC, _DECODE_TPS_METRIC):
+            continue
+        try:
+            value = float(parts[1])
+        except ValueError:
+            continue
+        if value > 0:
+            found[parts[0]] = value
+    return found.get(_PROMPT_TPS_METRIC), found.get(_DECODE_TPS_METRIC)
+
+
+def _probe_body() -> dict[str, Any]:
+    return {
+        "prompt": _PROBE_SENTENCE * _PROBE_REPEATS,
+        "max_tokens": PROBE_DECODE_TOKENS,
+        "temperature": 0,
+        "stream": False,
+        # Decode the whole budget, and prefill the whole prompt every time: a
+        # prompt cached by an earlier probe would read as a fast slot.
+        "ignore_eos": True,
+        "cache_prompt": False,
+    }
+
+
+def _rates_from_probe(payload: Any, elapsed_s: float) -> tuple[float | None, float | None]:
+    """Prompt and decode tok/s from a completion response.
+
+    llama-server's ``timings`` split the two phases. Without them (another
+    engine) fall back to the usage counts over wall-clock time, which charges
+    each phase the whole elapsed time: conservative, never optimistic.
+    """
+    if not isinstance(payload, dict):
+        return (None, None)
+    timings = payload.get("timings")
+    if isinstance(timings, dict):
+        try:
+            p_tps = float(timings.get("prompt_per_second") or 0)
+            d_tps = float(timings.get("predicted_per_second") or 0)
+        except (TypeError, ValueError):
+            p_tps = d_tps = 0.0
+        if p_tps > 0 and d_tps > 0:
+            return (p_tps, d_tps)
+    usage = payload.get("usage")
+    if isinstance(usage, dict) and elapsed_s > 0:
+        try:
+            p_n = int(usage.get("prompt_tokens") or 0)
+            d_n = int(usage.get("completion_tokens") or 0)
+        except (TypeError, ValueError):
+            p_n = d_n = 0
+        if p_n > 0 and d_n > 0:
+            return (p_n / elapsed_s, d_n / elapsed_s)
+    return (None, None)
+
+
+async def measure_extraction_throughput(
+    slot: str,
+    port: int,
+    *,
+    timeout_s: int = DEFAULT_LLM_TIMEOUT_S,
+    max_tokens: int = ExtractionLimits.max_tokens,
+    host: str = "127.0.0.1",
+    transport: Any = None,
+    clock: Callable[[], float] = time.monotonic,
+) -> ExtractionThroughput:
+    """Measure ``slot``'s throughput and project one extraction onto it (#2353).
+
+    Reads the slot's llama-server ``/metrics`` first. Only when that carries
+    no non-zero prompt AND decode rate does it run the one bounded probe:
+    ``PROBE_PROMPT_TOKENS`` prompt + ``PROBE_DECODE_TOKENS`` decode tokens,
+    capped at ``PROBE_TIMEOUT_S``. Never raises: an unreachable slot comes back
+    as an ``unknown`` estimate with the reason in ``detail``.
+
+    ``transport`` is an ``httpx`` transport injection point for tests.
+    """
+    import httpx
+
+    from hal0.http_client import async_client
+
+    def _result(**kw: Any) -> ExtractionThroughput:
+        return ExtractionThroughput(
+            slot=slot,
+            timeout_s=int(timeout_s),
+            max_tokens=int(max_tokens),
+            measured_at=time.time(),
+            **kw,
+        )
+
+    if port <= 0:
+        return _result(detail="the slot has no port to measure")
+
+    base = f"http://{host}:{port}"
+    kwargs: dict[str, Any] = {"timeout": httpx.Timeout(_METRICS_TIMEOUT_S)}
+    if transport is not None:
+        kwargs["transport"] = transport
+    async with async_client(**kwargs) as client:
+        try:
+            resp = await client.get(f"{base}/metrics")
+            if resp.status_code == 200:
+                p_tps, d_tps = parse_throughput_metrics(resp.text)
+                if p_tps and d_tps:
+                    return _result(prompt_tps=p_tps, decode_tps=d_tps, source="metrics")
+        except (httpx.HTTPError, OSError):
+            pass
+
+        started = clock()
+        try:
+            resp = await client.post(
+                f"{base}/v1/completions",
+                json=_probe_body(),
+                timeout=httpx.Timeout(PROBE_TIMEOUT_S),
+            )
+        except httpx.TimeoutException:
+            return _result(
+                prompt_tps=PROBE_PROMPT_TOKENS / PROBE_TIMEOUT_S,
+                source="probe",
+                probe_timed_out=True,
+                detail=f"probe exceeded {PROBE_TIMEOUT_S:.0f} s",
+            )
+        except (httpx.HTTPError, OSError) as exc:
+            return _result(detail=f"probe failed: {exc.__class__.__name__}")
+        elapsed = clock() - started
+        if resp.status_code != 200:
+            return _result(
+                detail=f"probe returned HTTP {resp.status_code}; is a model loaded on the slot?"
+            )
+        try:
+            payload = resp.json()
+        except ValueError:
+            payload = None
+        p_tps, d_tps = _rates_from_probe(payload, elapsed)
+        if p_tps is None or d_tps is None:
+            return _result(detail="the probe response carried no timings or token usage")
+        return _result(prompt_tps=p_tps, decode_tps=d_tps, source="probe")
+
+
 __all__ = [
     "DROP_IN_PATH",
     "EXTRACTION_FLOOR_ENV",
     "EXTRACTION_MIN_CONTEXT_TOKENS",
+    "EXTRACTION_PROMPT_TOKENS",
+    "PROBE_DECODE_TOKENS",
+    "PROBE_PROMPT_TOKENS",
+    "PROBE_TIMEOUT_S",
+    "ExtractionThroughput",
     "ExtractionWindow",
     "apply_extraction_slot",
     "drop_in_matches",
     "extraction_floor",
     "extraction_model_name",
+    "measure_extraction_throughput",
+    "parse_throughput_metrics",
     "render_drop_in",
     "resolve_extraction_window",
 ]

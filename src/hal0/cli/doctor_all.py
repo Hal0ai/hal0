@@ -20,8 +20,10 @@ upgrade, which is the only shape that defect survives in). It also flags a
 Hermes ``config.yaml`` whose ``approvals.mode`` drifted from the operator's
 command-approvals setting (advisory).
 
-Strictly read-only — there is no ``--fix`` here; the per-surface subcommands
-own repair. Exit codes:
+Read-only — there is no ``--fix`` here; the per-surface subcommands own
+repair. The one exception to pure reads is the memory extraction speed row
+(#2353), which may run one bounded completion against the extraction slot
+(<= 512 prompt + 32 decode tokens, capped at 30 s). Exit codes:
 
 * 0 — everything clean (advisory ``warn`` rows may still print)
 * 1 — at least one non-critical ``fail`` (actionable finding)
@@ -1438,6 +1440,54 @@ def check_memory_engine_version(*, memory: dict[str, Any] | None) -> Check:
     )
 
 
+#: ``POST /api/memory/graph/throughput`` may run the 30 s probe (#2353).
+THROUGHPUT_PROBE_TIMEOUT_S: float = 45.0
+
+
+def _measure_extraction_throughput(base: str | None) -> dict[str, Any] | None:
+    from hal0.cli._shared import CliApiError, api_post
+
+    try:
+        payload = api_post(
+            "/api/memory/graph/throughput", base=base, timeout=THROUGHPUT_PROBE_TIMEOUT_S
+        )
+    except CliApiError:
+        return None
+    est = payload.get("throughput") if isinstance(payload, dict) else None
+    return est if isinstance(est, dict) else None
+
+
+def check_memory_extraction_throughput(
+    *,
+    memory: dict[str, Any] | None,
+    base: str | None = None,
+    measure: Callable[[str | None], dict[str, Any] | None] | None = None,
+) -> Check:
+    """The extraction slot must finish one extraction inside ``llm_timeout_s`` (#2353).
+
+    A slot that fits the extraction prompt (the #1903 window floor) can still
+    be too slow to process it: the #1834 CPU box prefilled at ~12 tok/s, so
+    every attempt hit the 300 s timeout and the bank stayed empty with no
+    signal until the retries ran out. This row is the one place in ``doctor``
+    that is not a pure read: it asks the API for the bounded measurement
+    (the slot's metrics, else one <= 512 + 32 token completion capped at
+    30 s). A slow slot is advisory (``warn``), matching the enable path, which
+    warns and never refuses.
+    """
+    name, title = "memory_extraction_throughput", "Memory extraction speed"
+    if memory is None:
+        return Check(name, title, _WARN, "memory engine status unreachable")
+    if memory.get("engine") in (None, "") or not memory.get("enabled", True):
+        return Check(name, title, _PASS, "memory disabled — nothing to check")
+    if not memory.get("reachable"):
+        return Check(name, title, _PASS, "engine unreachable — see the memory row")
+    est = (measure or _measure_extraction_throughput)(base)
+    if est is None:
+        return Check(name, title, _WARN, "could not measure the extraction slot's throughput")
+    detail = str(est.get("message") or "no estimate")
+    return Check(name, title, _PASS if est.get("verdict") == "ok" else _WARN, detail)
+
+
 def check_hermes_anchor_window(
     *,
     base: str | None = None,
@@ -1582,6 +1632,7 @@ def build_all_checks(base: str | None = None) -> list[Check]:
         check_hermes_anchor_window(base=base),
         check_hindsight_llm_auth(auth=auth_payload),
         check_memory_engine_version(memory=payloads["memory"]),
+        check_memory_extraction_throughput(memory=payloads["memory"], base=base),
     ]
     return verify_rows + extra_rows
 
@@ -1670,6 +1721,7 @@ __all__ = [
     "check_hindsight_llm_auth",
     "check_mcp_mounts",
     "check_memory_engine_version",
+    "check_memory_extraction_throughput",
     "check_model_store",
     "check_ports",
     "check_seams",

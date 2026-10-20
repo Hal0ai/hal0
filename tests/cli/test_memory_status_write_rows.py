@@ -159,3 +159,37 @@ def test_no_write_ever_landed_names_the_counts_and_the_remedy(
     assert "No write has landed: 7 failed, 0 facts stored." in out
     assert "hal0 memory ops retry --all-failed" in out
     assert "landing" not in out.replace("No write has landed", "")
+
+
+# ── #2353: the cached extraction throughput estimate, never a probe ──────────
+
+
+def test_status_shows_the_cached_extraction_estimate(monkeypatch: pytest.MonkeyPatch) -> None:
+    from hal0.memory.extraction_env import ExtractionThroughput
+
+    est = ExtractionThroughput(
+        slot="utility", timeout_s=300, max_tokens=4096, prompt_tps=12.0, decode_tps=4.0
+    ).as_dict()
+    paths: list[str] = []
+
+    def fake_get(path: str) -> dict[str, Any]:
+        paths.append(path)
+        if path == "/api/memory/graph/throughput":
+            return {"throughput": est}
+        return _HEALTHY
+
+    def _no_probe(*_a: Any, **_k: Any) -> None:  # pragma: no cover — a call here is the bug
+        raise AssertionError("hal0 memory status must not probe the slot")
+
+    monkeypatch.setattr(mc, "_api_unreachable", lambda _url: False)
+    monkeypatch.setattr(mc, "api_get", fake_get)
+    monkeypatch.setattr(mc, "api_post", _no_probe)
+
+    result = runner.invoke(_test_app, [], terminal_width=400)
+    assert result.exit_code == 0, result.output
+    assert "Extraction speed" in result.output
+    assert "12.0 prompt tok/s" in result.output
+    assert paths == ["/api/status", "/api/memory/graph/throughput"]
+
+    as_json = runner.invoke(_test_app, ["--json"])
+    assert json.loads(as_json.output)["extraction_throughput"]["verdict"] == "too_slow"
