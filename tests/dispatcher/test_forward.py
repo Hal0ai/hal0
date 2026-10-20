@@ -6,7 +6,9 @@ real sockets — same approach the httpx docs recommend for tests.
 
 from __future__ import annotations
 
+import asyncio
 import json
+from collections.abc import AsyncIterator
 
 import httpx
 import pytest
@@ -278,3 +280,143 @@ async def test_aclose_is_idempotent() -> None:
     dispatcher = Dispatcher()  # lazy client never instantiated
     await dispatcher.aclose()
     await dispatcher.aclose()  # second call is a no-op
+
+
+_CTX_500 = {
+    "error": {
+        "code": 500,
+        "message": "Context size has been exceeded.",
+        "type": "server_error",
+    }
+}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streaming", [False, True])
+async def test_forward_llama_context_overflow_500_becomes_typed_4xx(streaming: bool) -> None:
+    """llama-server's shared-slot KV overflow 500 is a capacity error, not a crash (#2786)."""
+    from hal0.dispatcher.router import ContextExceeded
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        return httpx.Response(500, stream=httpx.ByteStream(json.dumps(_CTX_500).encode()))
+
+    dispatcher = _make_dispatcher(httpx.MockTransport(handler))
+    try:
+        with pytest.raises(ContextExceeded) as ei:
+            await dispatcher.forward(_call(streaming=streaming))
+        assert ei.value.status == 400
+        assert ei.value.code == "context.exceeded"
+        assert ei.value.details == {"upstream": "test-upstream"}
+    finally:
+        await dispatcher.aclose()
+
+
+@pytest.mark.asyncio
+async def test_forward_unrelated_500_still_passes_through() -> None:
+    def handler(req: httpx.Request) -> httpx.Response:
+        return httpx.Response(500, json={"error": {"message": "boom"}})
+
+    dispatcher = _make_dispatcher(httpx.MockTransport(handler))
+    try:
+        resp = await dispatcher.forward(_call())
+        assert resp.status_code == 500
+    finally:
+        await dispatcher.aclose()
+
+
+@pytest.mark.asyncio
+async def test_forward_streaming_unrelated_500_body_is_replayed_intact() -> None:
+    body = b'{"error":{"message":"boom"}}'
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            500, stream=httpx.ByteStream(body), headers={"content-type": "application/json"}
+        )
+
+    dispatcher = _make_dispatcher(httpx.MockTransport(handler))
+    try:
+        resp = await dispatcher.forward(_call(streaming=True))
+        assert resp.status_code == 500
+        received = b"".join([chunk async for chunk in resp.body_iterator])
+        assert received == body
+    finally:
+        await dispatcher.aclose()
+
+
+class _StalledBodyStream(httpx.AsyncByteStream):
+    """Sends a first chunk, then never sends the rest (or ends)."""
+
+    async def __aiter__(self) -> AsyncIterator[bytes]:  # type: ignore[override]
+        yield b'{"error":'
+        await asyncio.Event().wait()
+
+    async def aclose(self) -> None:
+        return None
+
+
+class _BrokenBodyStream(httpx.AsyncByteStream):
+    async def __aiter__(self) -> AsyncIterator[bytes]:  # type: ignore[override]
+        yield b'{"error":'
+        raise httpx.RemoteProtocolError("peer closed connection mid-body")
+
+    async def aclose(self) -> None:
+        return None
+
+
+@pytest.mark.asyncio
+async def test_forward_streaming_500_with_stalled_body_times_out() -> None:
+    """With the stall guard active the request has no httpx read timeout, so
+    the 500 error-body read must carry its own bound (#2786 review)."""
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        return httpx.Response(500, stream=_StalledBodyStream())
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    dispatcher = Dispatcher(
+        http_client=client,
+        direct_read_timeout_s=0.2,
+        stream_idle_timeout_s=30.0,
+        stream_total_timeout_s=60.0,
+    )
+    try:
+        with pytest.raises(UpstreamTimeout) as ei:
+            await asyncio.wait_for(dispatcher.forward(_call(streaming=True)), timeout=5.0)
+        assert ei.value.status == 504
+        assert ei.value.details["timeout_s"] == 0.2
+    finally:
+        await dispatcher.aclose()
+
+
+@pytest.mark.asyncio
+async def test_forward_streaming_500_body_transport_error_is_typed() -> None:
+    def handler(req: httpx.Request) -> httpx.Response:
+        return httpx.Response(500, stream=_BrokenBodyStream())
+
+    dispatcher = _make_dispatcher(httpx.MockTransport(handler))
+    try:
+        with pytest.raises(UpstreamUnavailable) as ei:
+            await dispatcher.forward(_call(streaming=True))
+        assert ei.value.details["upstream"] == "test-upstream"
+        assert "RemoteProtocolError" in ei.value.message
+    finally:
+        await dispatcher.aclose()
+
+
+@pytest.mark.asyncio
+async def test_forward_streaming_500_body_read_is_size_capped() -> None:
+    from hal0.dispatcher.router import _ERROR_BODY_CAP_BYTES
+
+    body = b"x" * (_ERROR_BODY_CAP_BYTES * 4)
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        return httpx.Response(500, stream=httpx.ByteStream(body))
+
+    dispatcher = _make_dispatcher(httpx.MockTransport(handler))
+    try:
+        resp = await dispatcher.forward(_call(streaming=True))
+        assert resp.status_code == 500
+        received = b"".join([chunk async for chunk in resp.body_iterator])
+        assert len(received) <= _ERROR_BODY_CAP_BYTES
+        assert received == body[: len(received)]
+    finally:
+        await dispatcher.aclose()
