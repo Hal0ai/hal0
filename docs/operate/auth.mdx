@@ -205,16 +205,17 @@ returned or logged**:
 `fingerprint` is the first 8 hex characters of `sha256(key)` — enough to
 confirm which key is live without exposing it. Any Bearer/`api_key` caller on
 the old key is refused from its next request, and the rotation closes any
-WebSocket it already has open (for example `/v1/realtime`) with code `4401`.
-An SSE stream it already has open (for example `/api/events/stream`) is not
-closed: it keeps streaming until it disconnects
-([#2816](https://github.com/Hal0ai/hal0/issues/2816)).
+WebSocket it already has open (for example `/v1/realtime`) with code `4401`,
+and ends any streaming response it already has open (for example
+`/api/events/stream`, or a streamed `/v1/chat/completions`). See
+[Revoked streams](#revoked-streams).
 
 An admin rotation also **signs out every browser session**: it replaces the
 session signing secret, so every existing `hal0_session` cookie stops
 verifying (see [Sessions](#sessions)), and every WebSocket opened with one of
 those cookies (for example the board's `/api/board/events` feed) is closed
-with code `4401`. The browser
+with code `4401`, and every stream opened with one (for example
+`/api/events/stream`) is ended. The browser
 that made the call is not locked out. If it sent a valid session, the same response sets a fresh cookie
 that expires no later than the one it replaced. A Bearer caller gets no cookie.
 Send `"keep_sessions": true` to leave other sessions signed in, for routine
@@ -283,10 +284,10 @@ hal0 auth rotate admin    # or: sudo hal0 auth reset-key, or Rotate in Settings
 ```
 
 The rotation replaces the signing secret, so every existing cookie stops
-verifying on its next request, with no restart. WebSockets are checked only
-when they open, so the rotation also closes every open one whose cookie or key
-no longer verifies (close code `4401`). Open SSE streams are not closed yet
-([#2816](https://github.com/Hal0ai/hal0/issues/2816)). The browser you rotate
+verifying on its next request, with no restart. WebSockets and streams are
+checked only when they open, so the rotation also closes every open socket
+whose cookie or key no longer verifies (close code `4401`) and ends every open
+stream in the same position. The browser you rotate
 from stays signed in. Pass `--keep-sessions` (`"keep_sessions": true` in the API) to
 rotate the key without signing anyone out.
 
@@ -299,16 +300,36 @@ reconnect with a cookie that no longer verifies is refused at the upgrade
 with `4403`.
 
 hal0 has two WebSockets, the board feed (`/api/board/events`) and
-`/v1/realtime`. Both are re-checked only when a key is rotated through the running API, so two cases
-do not close an open socket:
+`/v1/realtime`. Both are re-checked when a key is rotated through the running
+API, and every 30 seconds while they are open, so a socket opened with a
+session cookie that later **expires** is closed with `4401` within 30 seconds
+of the expiry. One case does not close an open socket:
 
-- **The session expires.** A socket opened with a cookie that later expires
-  stays open until it disconnects. The reconnect is refused at the upgrade
-  with `4403`.
 - **The secret is replaced outside the API.** `sudo hal0 auth reset-key`
   writes the new secret and key itself when its call to the running API
-  fails. Open WebSockets then stay open until the `systemctl restart hal0-api`
-  the command asks for.
+  fails. Open WebSockets and streams then stay open until the
+  `systemctl restart hal0-api` the command asks for.
+
+### Revoked streams
+
+A streaming response (the `text/event-stream` feeds such as
+`/api/events/stream`, `/api/journal` and `/api/activity`, and streamed
+`/v1` completions) follows the same rule as a WebSocket: it is re-checked on a
+rotation and every 30 seconds, and ends once its cookie, bearer or `api_key`
+would no longer be let in. Nothing more the server produces reaches the
+client. A `text/event-stream` response ends with one final frame:
+
+```text
+event: revoked
+data: {"reason": "credential revoked"}
+```
+
+It is a named event, so an `EventSource` `onmessage` handler does not see it;
+listen with `addEventListener("revoked", ...)` to tell a sign-out from a
+dropped connection. A reconnect with the old credential is refused with `401`.
+Only `text/event-stream` responses are held open this way; any other response
+is short and finishes on its own. Like sockets, streams are only re-checked
+while auth is enforced for the caller: with auth off nothing is revoked.
 
 ## Rate limiting
 

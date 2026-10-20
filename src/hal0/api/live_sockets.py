@@ -1,29 +1,36 @@
-"""Close open WebSockets whose credential stopped granting access (#2801).
+"""End open WebSockets and streams whose credential stopped granting access.
 
-A WebSocket gate checks the caller's credential once, at the upgrade:
-:class:`hal0.api.auth.AuthEnforcementMiddleware` does so for every
-classified route (the board feed, ``/v1/realtime``). A socket then lives for
-hours. Without a second
-look, replacing a credential (an admin key rotation, which also replaces the
-session-signing secret) left every already-open socket working until it
-dropped on its own, so the operator's response to a compromise did not reach
-an attacker who already held a socket.
+The enforcement middleware (:class:`hal0.api.auth.AuthEnforcementMiddleware`)
+checks a caller's credential once: at a WebSocket's upgrade (the board feed,
+``/v1/realtime``), or when a streaming HTTP response (a ``text/event-stream``
+feed such as ``/api/events/stream`` or ``/api/journal/stream``, a streamed
+``/v1/chat/completions``) is requested. Either then lives for hours. Without a
+second look, replacing a credential (an admin key rotation, which also
+replaces the session-signing secret) left every already-open socket and stream
+working until it dropped on its own, so the operator's response to a
+compromise did not reach an attacker who already held one (#2801, #2816).
 
-This module is the second look. A gate registers the sockets it admits
-here together with a ``still_authorized`` predicate that re-runs its own
-check against the credential the socket was opened with (the upgrade's
-cookie, bearer or ``api_key``, which a WebSocket cannot change later).
-:func:`revalidate` runs every predicate and signals the sockets that fail;
-``POST /api/auth/rotate`` calls it once the new key and secret are live.
-Each gate closes a signalled socket with :data:`CLOSE_CREDENTIAL_REVOKED`.
+This module is the second look. The middleware registers each socket it
+admits, and each ``text/event-stream`` response it lets through, here together with a
+``still_authorized`` predicate that re-runs its own gate against the
+credential the request carried (the cookie, bearer or ``api_key``, which a
+request cannot change later). :func:`revalidate` runs every predicate and
+signals the ones that fail. ``POST /api/auth/rotate`` calls it once the new
+key and secret are live, and a single process-wide ticker calls it every
+:data:`REVALIDATE_INTERVAL_S`, so a session cookie that *expires* ends its
+sockets and streams too, without a rotation.
 
-:func:`guard_websocket` is the generic ASGI-level close the middleware uses,
-so routes behind it need no code of their own.
+:func:`guard_websocket` closes a signalled socket with
+:data:`CLOSE_CREDENTIAL_REVOKED`. :func:`guard_http_stream` ends a signalled
+response: see its docstring for exactly what the client and the app see. Both
+are generic ASGI wrappers, so routes behind the middleware need no code of
+their own and a new stream is covered by default.
 
 The registry is process-local, like the credentials it re-checks: a rotation
 that bypasses the running API (``hal0 auth reset-key`` falling back to writing
 the secret and ``api.env`` itself when its API call fails) is not seen here,
-and the CLI tells the operator to restart hal0-api, which closes every socket.
+and the CLI tells the operator to restart hal0-api, which closes every socket
+and stream.
 """
 
 from __future__ import annotations
@@ -44,6 +51,20 @@ log = structlog.get_logger(__name__)
 CLOSE_CREDENTIAL_REVOKED: Final[int] = 4401
 CLOSE_REASON: Final[str] = "credential revoked"
 
+#: Last frame of a revoked ``text/event-stream`` response, so a client can
+#: tell "signed out" from a dropped connection. A named event: an
+#: ``EventSource`` ``onmessage`` handler ignores it, and the stream then ends.
+REVOKED_SSE_EVENT: Final[bytes] = b'event: revoked\ndata: {"reason": "credential revoked"}\n\n'
+
+#: How long a revoked stream's app may take to wind down (release its
+#: subscriptions, run its ``finally`` blocks) before it is cancelled.
+STREAM_DRAIN_TIMEOUT_S: float = 5.0
+
+#: How often the process-wide ticker re-checks every open socket and stream.
+#: Bounds how long one outlives the expiry of the session cookie it was
+#: opened with; a rotation does not wait for it.
+REVALIDATE_INTERVAL_S: float = 30.0
+
 Scope = MutableMapping[str, Any]
 Message = MutableMapping[str, Any]
 Receive = Callable[[], Awaitable[Message]]
@@ -59,6 +80,8 @@ class _Entry:
 
 _lock = threading.Lock()
 _entries: set[_Entry] = set()
+_ticker: threading.Thread | None = None
+_ticker_wake = threading.Event()
 
 
 @contextlib.contextmanager
@@ -75,6 +98,7 @@ def track(still_authorized: Callable[[], bool]) -> Iterator[asyncio.Event]:
     entry = _Entry(still_authorized=still_authorized, loop=asyncio.get_running_loop())
     with _lock:
         _entries.add(entry)
+        _ensure_ticker()
     if not _check(entry):
         entry.revoked.set()
     try:
@@ -121,6 +145,36 @@ def revalidate() -> int:
     if revoked:
         log.info("hal0.live_sockets.revoked", count=revoked)
     return revoked
+
+
+def _ensure_ticker() -> None:
+    """Start the process-wide re-check thread if none is running. Hold ``_lock``."""
+    global _ticker
+    if _ticker is None or not _ticker.is_alive():
+        _ticker = threading.Thread(target=_tick, name="hal0-live-revalidate", daemon=True)
+        _ticker.start()
+
+
+def _tick() -> None:
+    """Re-check every registered entry each interval; exit once none are left.
+
+    One thread for the whole process rather than a timer per connection. It
+    catches what no rotation announces: a session cookie that expired. Each
+    predicate already fails safe (:func:`_check`); this loop only guards
+    itself so one bad pass cannot end the re-checks for good.
+    """
+    global _ticker
+    while True:
+        _ticker_wake.wait(REVALIDATE_INTERVAL_S)
+        _ticker_wake.clear()
+        with _lock:
+            if not _entries:
+                _ticker = None
+                return
+        try:
+            revalidate()
+        except Exception as exc:
+            log.warning("hal0.live_sockets.tick_failed", error=str(exc))
 
 
 def open_count() -> int:
@@ -217,8 +271,149 @@ async def guard_websocket(
                 await watcher
 
 
+class _StreamRevoked(ConnectionError):
+    """Raised to the app when it sends on a stream this module ended.
+
+    An :class:`OSError`, which is what a send on a connection the client
+    closed raises, so apps and Starlette already treat it as a disconnect.
+    """
+
+
+async def guard_http_stream(
+    app: Callable[[Scope, Receive, Send], Awaitable[None]],
+    scope: Scope,
+    receive: Receive,
+    send: Send,
+    still_authorized: Callable[[], bool],
+) -> None:
+    """Run ``app`` for one HTTP request, ending its response once it is revoked.
+
+    Only a ``text/event-stream`` response is registered, from its start
+    until the request ends: that is the long-lived kind (the event, journal
+    and activity feeds, streamed completions). Any other response, a chunked
+    one included, is bounded and finishes on its own; registering those would
+    also catch the rotation request itself, whose body is chunked by the
+    middleware stack and whose own credential the rotation has just
+    replaced. An ordinary request therefore costs nothing here. Registering re-runs the check once (see :func:`track`), so a
+    rotation that landed while the route was setting up is not missed.
+
+    On revocation:
+
+    - nothing more the app sends reaches the client; a later body chunk
+      raises :class:`_StreamRevoked` (an ``OSError``, the same thing a send
+      on a closed connection raises) to stop a generator that is still
+      producing;
+    - the app's ``receive()`` returns ``http.disconnect``, a pending one
+      included, which is how Starlette's ``StreamingResponse`` and routes
+      polling ``request.is_disconnected()`` learn a client went away; their
+      normal disconnect path closes the generator and releases its
+      subscriptions;
+    - once the app returns, the response is ended with
+      :data:`REVOKED_SSE_EVENT` as its last frame;
+    - an app still running :data:`STREAM_DRAIN_TIMEOUT_S` after the
+      revocation is cancelled. Errors the app raises while winding down are
+      logged, not raised into the server.
+    """
+    loop = asyncio.get_running_loop()
+    stack = contextlib.ExitStack()
+    revoked: asyncio.Event | None = None
+    stop = asyncio.Event()  # set once ``revoked`` is; exists before arming
+    watcher: asyncio.Future[None] | None = None
+    body_done = False
+    event_stream = False
+    started = False
+    finished = False
+
+    def stopped() -> bool:
+        return revoked is not None and revoked.is_set()
+
+    async def guarded_receive() -> Message:
+        nonlocal body_done
+        if stopped():
+            return {"type": "http.disconnect"}
+        if not body_done:
+            # The request body is read before any response streams; only a
+            # receive after it (a disconnect listener) needs waking.
+            message = await receive()
+            if message.get("type") != "http.request" or not message.get("more_body", False):
+                body_done = True
+            return message
+        incoming = asyncio.ensure_future(receive())
+        waiter = asyncio.ensure_future(stop.wait())
+        try:
+            await asyncio.wait({incoming, waiter}, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            waiter.cancel()
+            if not incoming.done():
+                incoming.cancel()
+        if incoming.done() and not incoming.cancelled() and not stopped():
+            return incoming.result()
+        return {"type": "http.disconnect"}
+
+    async def guarded_send(message: Message) -> None:
+        nonlocal started, finished, event_stream
+        kind = message.get("type")
+        if kind == "http.response.start":
+            started = True
+            for name, value in message.get("headers") or ():
+                if bytes(name).lower() == b"content-type":
+                    event_stream = bytes(value).lower().startswith(b"text/event-stream")
+            if event_stream:
+                arm()
+        elif kind == "http.response.body":
+            if stopped():
+                if message.get("more_body", False):
+                    raise _StreamRevoked("stream credential revoked")
+                return  # the app ending its response: ours ends it instead
+            if not message.get("more_body", False):
+                finished = True
+        await send(message)
+
+    def arm() -> None:
+        nonlocal revoked, watcher
+        if revoked is None:
+            revoked = stack.enter_context(track(still_authorized))
+            watcher = asyncio.ensure_future(watch(revoked))
+
+    async def watch(event: asyncio.Event) -> None:
+        await event.wait()
+        stop.set()
+        with contextlib.suppress(RuntimeError):  # the app already returned
+            deadline.reschedule(loop.time() + STREAM_DRAIN_TIMEOUT_S)
+
+    try:
+        async with asyncio.timeout(None) as deadline:
+            await app(scope, guarded_receive, guarded_send)
+    except Exception as exc:
+        if not stopped():
+            raise
+        log.info(
+            "hal0.live_sockets.stream_wind_down",
+            path=scope.get("path", ""),
+            error=type(exc).__name__,
+        )
+    finally:
+        if watcher is not None:
+            watcher.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await watcher
+        stack.close()
+    if stopped() and started and not finished:
+        finished = True
+        with contextlib.suppress(Exception):
+            await send(
+                {
+                    "type": "http.response.body",
+                    "body": REVOKED_SSE_EVENT,
+                    "more_body": False,
+                }
+            )
+
+
 __all__ = [
     "CLOSE_CREDENTIAL_REVOKED",
+    "REVOKED_SSE_EVENT",
+    "guard_http_stream",
     "guard_websocket",
     "open_count",
     "revalidate",
