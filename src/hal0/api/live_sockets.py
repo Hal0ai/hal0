@@ -1,15 +1,15 @@
 """Close open WebSockets whose credential stopped granting access (#2801).
 
-Every WebSocket gate in hal0 checks the caller's credential once, at the
-upgrade: :class:`hal0.api.auth.AuthEnforcementMiddleware` for every
-classified route, and :func:`hal0.api.agents._auth.check_ws_origin_and_cookie`
-for the agent chat proxy. A socket then lives for hours. Without a second
+A WebSocket gate checks the caller's credential once, at the upgrade:
+:class:`hal0.api.auth.AuthEnforcementMiddleware` does so for every
+classified route (the board feed, ``/v1/realtime``). A socket then lives for
+hours. Without a second
 look, replacing a credential (an admin key rotation, which also replaces the
 session-signing secret) left every already-open socket working until it
 dropped on its own, so the operator's response to a compromise did not reach
 an attacker who already held a socket.
 
-This module is the second look. Each gate registers the sockets it admits
+This module is the second look. A gate registers the sockets it admits
 here together with a ``still_authorized`` predicate that re-runs its own
 check against the credential the socket was opened with (the upgrade's
 cookie, bearer or ``api_key``, which a WebSocket cannot change later).
@@ -24,8 +24,6 @@ The registry is process-local, like the credentials it re-checks: a rotation
 that bypasses the running API (``hal0 auth reset-key`` falling back to writing
 the secret and ``api.env`` itself when its API call fails) is not seen here,
 and the CLI tells the operator to restart hal0-api, which closes every socket.
-Until then the chat proxy covers its own sockets: it re-reads the secret on
-every browser frame and on an interval.
 """
 
 from __future__ import annotations
@@ -52,17 +50,10 @@ Receive = Callable[[], Awaitable[Message]]
 Send = Callable[[Message], Awaitable[None]]
 
 
-#: Scope key holding one identity per socket, so the gates that both track
-#: it (the middleware and the chat proxy) count as one socket in
-#: :func:`revalidate`'s return value.
-_SOCKET_ID_KEY: Final[str] = "hal0.live_sockets.socket_id"
-
-
 @dataclass(eq=False)
 class _Entry:
     still_authorized: Callable[[], bool]
     loop: asyncio.AbstractEventLoop
-    socket_id: object
     revoked: asyncio.Event = field(default_factory=asyncio.Event)
 
 
@@ -71,9 +62,7 @@ _entries: set[_Entry] = set()
 
 
 @contextlib.contextmanager
-def track(
-    still_authorized: Callable[[], bool], *, scope: Scope | None = None
-) -> Iterator[asyncio.Event]:
+def track(still_authorized: Callable[[], bool]) -> Iterator[asyncio.Event]:
     """Register one open socket for the life of the ``with`` block.
 
     Yields an :class:`asyncio.Event` that :func:`revalidate` sets once
@@ -81,15 +70,9 @@ def track(
     check also runs once on entry, after registering, so a rotation that
     landed between the gate's own check and this call is not missed: the
     event is then already set. Must be entered from the event loop serving
-    the socket. Pass the socket's ASGI ``scope`` when more than one gate may
-    track the same socket, so :func:`revalidate` counts it once.
+    the socket.
     """
-    socket_id = scope.setdefault(_SOCKET_ID_KEY, object()) if scope is not None else object()
-    entry = _Entry(
-        still_authorized=still_authorized,
-        loop=asyncio.get_running_loop(),
-        socket_id=socket_id,
-    )
+    entry = _Entry(still_authorized=still_authorized, loop=asyncio.get_running_loop())
     with _lock:
         _entries.add(entry)
     if not _check(entry):
@@ -124,21 +107,17 @@ def _signal(entry: _Entry) -> None:
 def revalidate() -> int:
     """Re-check every open socket; signal the ones that fail. Returns that count.
 
-    The count is of sockets, not registrations: a socket two gates track
-    under the same ``scope`` (see :func:`track`) counts once.
-
     Call it after a credential changes in this process (the key in
     ``os.environ``, the secret on disk), never before: each predicate reads
     the live credential state.
     """
     with _lock:
         entries = [e for e in _entries if not e.revoked.is_set()]
-    revoked_ids: set[int] = set()
+    revoked = 0
     for entry in entries:
         if not _check(entry):
             _signal(entry)
-            revoked_ids.add(id(entry.socket_id))
-    revoked = len(revoked_ids)
+            revoked += 1
     if revoked:
         log.info("hal0.live_sockets.revoked", count=revoked)
     return revoked
@@ -190,7 +169,7 @@ async def guard_websocket(
                 }
             )
 
-    with track(still_authorized, scope=scope) as revoked:
+    with track(still_authorized) as revoked:
 
         async def guarded_send(message: Message) -> None:
             nonlocal closed

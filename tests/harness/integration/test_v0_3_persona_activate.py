@@ -1,33 +1,15 @@
 """δ-harness: v0.3 persona-activate round-trip.
 
-MASTER-PLAN §4 PR-11 calls for an integration test that exercises the
-persona swap via the API + asserts the hot-reload nudge fires upstream.
-
-Scope
------
+Exercises the persona swap through the real API app:
 
 1. ``GET /api/agents/hermes/personas`` reflects the seeded persona TOMLs.
-2. ``POST /api/agents/hermes/personas/{id}/activate`` writes
-   ``active.txt`` AND sends a JSON-RPC reload nudge to hermes.
-3. The post-activate persona detail report shows the new ``active``
-   flag.
+2. ``POST /api/agents/hermes/personas/{id}/activate`` writes ``active.txt``
+   and reports whether the hot-reload nudge succeeded (``reloaded``).
+3. The post-activate persona detail report shows the new ``active`` flag.
 
-The hot-reload nudge is a JSON-RPC POST to hermes; the mock hermes
-records every POST so this test can assert the call went out.
-
-Why δ-harness rather than ``tests/api/test_agents_personas.py``
---------------------------------------------------------------
-The unit test (PR-4) already covers the persona store + route shape
-in isolation. This test is layered ON TOP — it spins up a real hermes
-mock so the reload nudge actually hits the wire, exercising the
-end-to-end shape PR-3 ``hermes_provision`` bootstraps. A regression in
-the hermes_reload helper (e.g. wrong port lookup, wrong JSON-RPC
-method name) silently passes the PR-4 unit tests but fails here.
-
-FINDINGS row
-------------
-First green run adds row §26 to ``tests/harness/FINDINGS.md``
-(``v0_3_persona_activate`` — info).
+The reload nudge's method name and payload are pinned by the unit tests in
+``tests/api/test_agents_personas.py``; no Hermes runs here, so this suite
+pins only that activation persists and answers either way.
 """
 
 from __future__ import annotations
@@ -37,7 +19,6 @@ from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
-from tests.harness.integration.conftest import FakeWsServer
 
 from hal0.agents import personas as personas_mod
 from hal0.api.agents import personas as personas_route
@@ -71,7 +52,6 @@ def test_persona_list_reflects_seeded_personas(
 def test_persona_activate_writes_active_txt(
     harness_client: TestClient,
     seeded_personas_root: Path,
-    fake_hermes: FakeWsServer,
 ) -> None:
     """The activate POST persists ``active.txt`` to the persona root."""
     # Hermes is already active per seed. Switch to hal0-brain.
@@ -94,29 +74,9 @@ def test_persona_activate_writes_active_txt(
 def test_persona_activate_with_reload_calls_hermes(
     harness_client: TestClient,
     seeded_personas_root: Path,
-    fake_hermes: FakeWsServer,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """``reload=true`` (the default) issues a hot-reload nudge to hermes.
-
-    The mock hermes records every REST POST it receives — we assert
-    SOMETHING was posted as part of activation. The exact method name
-    + payload shape is locked in PR-4's unit tests; this test only
-    pins "the call went out at all" so a regression in the helper's
-    network path surfaces.
-    """
-    # Override the hermes-reload URL so the helper posts to fake_hermes.
-    # The personas module reads HAL0_HERMES_HOST/PORT (set by the
-    # fake_hermes fixture) when computing the reload URL. The helper
-    # may also need an env var to point at the right port — set
-    # generously to cover both shapes.
-    import os
-
-    host = os.environ.get("HAL0_HERMES_HOST", "127.0.0.1")
-    port = int(os.environ.get("HAL0_HERMES_PORT", "9119"))
-    monkeypatch.setenv("HAL0_HERMES_HOST", host)
-    monkeypatch.setenv("HAL0_HERMES_PORT", str(port))
-
+    """``reload=true`` (the default) still persists the swap when no hermes answers."""
     r = harness_client.post(
         "/api/agents/hermes/personas/hal0-brain/activate",
         json={"reload": True},
@@ -124,12 +84,8 @@ def test_persona_activate_with_reload_calls_hermes(
     assert r.status_code == 200, r.text
     body = r.json()
     assert body["active"] == "hal0-brain"
-    # ``reloaded`` reflects whether the nudge succeeded. If the helper
-    # uses a different protocol or wasn't wired to use the env vars,
-    # the call still wrote active.txt and the endpoint returned 200 —
-    # the test still passes on the persistence side. We tolerate
-    # either reload outcome here because the network helper is what
-    # PR-4's unit tests pin.
+    # ``reloaded`` reflects whether the nudge succeeded; the network helper
+    # is pinned by the unit tests, so either outcome is accepted here.
     assert "reloaded" in body
 
 

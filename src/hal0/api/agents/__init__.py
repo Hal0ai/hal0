@@ -1,1 +1,1 @@
-"""Agent-scoped API routes (personas, chat proxy, plugin host). Submodules are imported by callers."""
+"""Agent-scoped API routes (personas, restart, memory stats, command approvals). Submodules are imported by callers."""

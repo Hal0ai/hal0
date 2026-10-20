@@ -32,10 +32,9 @@ dir, and a watchdog. Crucially, the agent's secret files stay root-owned and
 unreadable to the `hal0` user, so the agent can't read its own credential
 store even though it can write to hal0's data paths.
 
-The agent process binds to **loopback only**. The browser never talks to it
-directly — hal0-api proxies the chat connection, enforcing an origin
-allowlist and a session cookie on every WebSocket upgrade, and carrying the
-embed token in an `Authorization` header rather than a URL. The agent reaches
+The agent process binds to **loopback only**. Chatting with Hermes happens in
+Hermes's own dashboard (its Chat tab), which the hal0 dashboard links to once
+`HAL0_HERMES_PUBLIC_URL` is set; hal0 does not proxy it. The agent reaches
 hal0's own inference and admin surfaces through environment hal0 writes for
 it (the API URL and the admin/memory MCP URLs).
 

@@ -310,7 +310,7 @@ def _apply_network(doc: dict[str, Any]) -> dict[str, str] | None:
     derivation the installer uses to seed ``/etc/hal0/api.env`` — into the
     coherent triple ``HAL0_BIND_HOST`` (read by both the ``hal0-api`` unit and
     ``hal0 serve``), ``HAL0_HOSTNAME`` (mDNS), and ``HAL0_ALLOWED_ORIGINS`` (the
-    chat-proxy WS allowlist). The resolved values are exported into
+    browser-origin allowlist). The resolved values are exported into
     ``os.environ`` so the in-process apply run inherits the operator's bind
     choice; the answer file is authoritative over detected defaults (spec §2
     precedence). Returns the applied triple (or ``None`` when no ``network``

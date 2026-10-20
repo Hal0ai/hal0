@@ -34,7 +34,6 @@ from hal0.api.agents import (
 from hal0.api.agents import (
     restart as agents_restart_routes,
 )
-from hal0.api.agents.chat_proxy import router as chat_proxy_router
 from hal0.api.auth import AuthEnforcementMiddleware
 from hal0.api.middleware import error_codes, log_scrub, request_id
 from hal0.api.openrouter import router as openrouter_auth_router
@@ -2904,18 +2903,6 @@ def create_app() -> FastAPI:
         agents_memory_stats_routes.router,
         prefix="/api/agents",
         tags=["agents", "memory"],
-    )
-
-    # PR-9: chat WS proxy + session REST shim. Bridges the browser to
-    # the hermes dashboard process bound to 127.0.0.1:9119 (per PR-5's
-    # systemd ExecStart). Origin allowlist + HMAC session cookie
-    # enforced on every WS upgrade (DA-sec-ops MUST-FIX #2). Embed
-    # token rides outbound in Authorization: Bearer, never in a query
-    # string (MUST-FIX #3).
-    app.include_router(
-        chat_proxy_router,
-        prefix="/api/agents",
-        tags=["agents", "chat-proxy"],
     )
 
     # Approval inbox. The dashboard bell, the MCP admin

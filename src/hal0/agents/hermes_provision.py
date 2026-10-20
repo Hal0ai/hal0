@@ -230,7 +230,7 @@ REPO_ROOT_FOR_INSTALLER = _resolve_installer_root()
 #
 # ``hal0 agent bootstrap hermes`` is a separate install path from
 # ``AgentManager.install``; the provision pipeline writes data/state but
-# never wrote the three artifacts downstream components key off, each of
+# never wrote the two artifacts downstream components key off, each of
 # which falsely assumed "some other step writes it":
 #
 #   * the manager seed at /etc/hal0/agents/hermes.toml — without it
@@ -238,12 +238,9 @@ REPO_ROOT_FOR_INSTALLER = _resolve_installer_root()
 #     ever consults driver health;
 #   * the driver env file at /etc/hal0/agents/hermes.env — the path the
 #     Hermes driver sources (NOT the outbound secrets vault at
-#     HERMES_SECRETS_ENV, a different file);
-#   * runtime.json under $HERMES_HOME — the embed token chat_proxy sends as
-#     ``Authorization: Bearer`` on the browser→hermes hop; absent, every
-#     chat request reaches hermes unauthenticated.
+#     HERMES_SECRETS_ENV, a different file).
 #
-# All three constants live at module scope so tests can monkey-patch them
+# Both constants live at module scope so tests can monkey-patch them
 # onto a tmp path, same posture as HERMES_SECRETS_ENV / AGENT_ALLOWLIST_PATH.
 # INSTALL_SEED_PATH is the SAME file as AGENT_ALLOWLIST_PATH — the seed
 # write merges, never clobbers, any operator ``[mcp.servers.*]`` blocks.
@@ -262,8 +259,6 @@ DRIVER_ENV_HEADER: tuple[str, ...] = (
     "# Overrides: `systemctl edit hal0-agent@hermes`, then add Environment=KEY=value under [Service] (keys not set below)",
     "# To override a key set below, EnvironmentFile= beats Environment=: add EnvironmentFile=-/etc/hal0/agents/hermes.override.env under [Service] and put KEY=value in that file",
 )
-
-RUNTIME_JSON_NAME = "runtime.json"
 
 
 # ── Phase A: preflight ──────────────────────────────────────────────────────
@@ -6547,13 +6542,10 @@ def _phase_self_report(ctx: _StepCtx) -> PhaseResult:
 
 # ── Phase: install_artifacts (issue #432) ────────────────────────────────────
 #
-# Writes the three manager/proxy install artifacts the provision pipeline
-# used to leak (seed TOML, driver env file, runtime.json embed token). Runs
-# right after home_init so $HERMES_HOME exists for runtime.json, and before
-# the phases that read the seed/allowlist (mcp_wire) so a single bootstrap
-# converges. Idempotent: the embed token is generated once and re-used on
-# re-runs (so the secret doesn't rotate under a running proxy); ``--repair``
-# forces a fresh token + rewrites every artifact.
+# Writes the two manager install artifacts the provision pipeline used to
+# leak (seed TOML, driver env file). Runs before the phases that read the
+# seed/allowlist (mcp_wire) so a single bootstrap converges. Idempotent;
+# ``--repair`` rewrites every artifact.
 
 
 def _seed_payload(state: BootstrapState) -> dict[str, Any]:
@@ -6939,66 +6931,18 @@ def refresh_driver_env(
     return _write_driver_env(env_path=env_path, no_proxy_hosts=no_proxy_hosts)
 
 
-def _write_runtime_json(state: BootstrapState, *, repair: bool) -> tuple[Path, bool]:
-    """Write ``runtime.json`` (embed token) under ``$HERMES_HOME`` chmod 0600.
-
-    The embed token is the shared secret chat_proxy sends as
-    ``Authorization: Bearer`` on the browser→hermes hop. Generated once and
-    re-used on re-runs so the secret never rotates under a running proxy;
-    ``repair`` forces a fresh token. Returns ``(path, wrote)``.
-    """
-    import secrets as _secrets
-
-    path = Path(state.hermes_home) / RUNTIME_JSON_NAME
-    token: str | None = None
-    if path.exists() and not repair:
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-            existing = data.get("token") or data.get("embed_token")
-            if isinstance(existing, str) and existing:
-                token = existing
-        except (OSError, json.JSONDecodeError):
-            token = None
-    if token is not None:
-        # Re-tighten perms; the token is already on disk and unchanged.
-        with contextlib.suppress(OSError):
-            path.chmod(0o600)
-        return path, False
-
-    token = _secrets.token_urlsafe(32)
-    payload = {"token": token, "written_at": _utcnow()}
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    os.replace(tmp, path)
-    with contextlib.suppress(OSError):
-        path.chmod(0o600)
-    # Born-hal0 even on a root-run bootstrap (O16a): normally the CLI drops to
-    # hal0 before this pipeline, so runtime.json is born hal0:hal0. But a
-    # bootstrap invoked directly as root (no drop) would strand a root:root 0600
-    # runtime.json inside the hal0-owned HERMES_HOME — which the User=hal0
-    # chat-proxy then can't READ (embed token lost) AND uninstall can't rmtree
-    # (→ the O16 partial-removal). chown it to hal0 so the tree stays uniformly
-    # service-owned. Best-effort: no hal0 account (dev) → left as-is.
-    if os.geteuid() == 0:
-        with contextlib.suppress(OSError, KeyError):
-            os.chown(path, pwd.getpwnam("hal0").pw_uid, grp.getgrnam("hal0").gr_gid)
-    return path, True
-
-
 def _phase_install_artifacts(ctx: _StepCtx) -> PhaseResult:
-    """Write the seed TOML, driver env file, and runtime.json (issue #432).
+    """Write the seed TOML and driver env file (issue #432).
 
-    These three artifacts were previously only written by
+    These artifacts were previously only written by
     ``AgentManager.install``; the ``hal0 agent bootstrap hermes`` path skipped
-    them entirely, leaving the manager reporting ``broken`` and the chat proxy
-    sending no Bearer. Idempotent + ``--repair``-aware (mirrors persona_seed).
+    them entirely, leaving the manager reporting ``broken``. Idempotent +
+    ``--repair``-aware (mirrors persona_seed).
 
     Sandbox guard (mirrors gateway_secrets_wire): under pytest, refuse to
     write the seed/env when they still point at the real ``/etc/`` tree.
     A test that genuinely exercises these writes monkeypatches
-    INSTALL_SEED_PATH / DRIVER_ENV_PATH to tmp_path; the runtime.json write
-    is always tmp-safe because it tracks ``state.hermes_home``.
+    INSTALL_SEED_PATH / DRIVER_ENV_PATH to tmp_path.
     """
     state = ctx.state
     repair = ctx.repair
@@ -7007,8 +6951,6 @@ def _phase_install_artifacts(ctx: _StepCtx) -> PhaseResult:
     if under_pytest and (
         str(INSTALL_SEED_PATH).startswith("/etc/") or str(DRIVER_ENV_PATH).startswith("/etc/")
     ):
-        # Don't strand artifacts entirely — runtime.json is tmp-safe.
-        runtime_path, token_wrote = _write_runtime_json(state, repair=repair)
         return PhaseResult(
             status=PhaseStatus.SKIP,
             reason=(
@@ -7019,8 +6961,6 @@ def _phase_install_artifacts(ctx: _StepCtx) -> PhaseResult:
             details={
                 "seed_path": str(INSTALL_SEED_PATH),
                 "env_path": str(DRIVER_ENV_PATH),
-                "runtime_json_path": str(runtime_path),
-                "token_wrote": token_wrote,
             },
         )
 
@@ -7030,9 +6970,6 @@ def _phase_install_artifacts(ctx: _StepCtx) -> PhaseResult:
     # provisioner delegates the write to `sudo -n hal0-agentenv`.
     seed_path, seed_wrote = _write_seed_toml(state, repair=repair)
     env_path, env_wrote = _write_driver_env(state)
-    # ── hal0-owned artifact — runtime.json (0600) is born hal0:hal0 (§7.4 F.7:
-    #    provisioning runs as hal0, so the chat proxy can read it directly) ─────
-    runtime_path, token_wrote = _write_runtime_json(state, repair=repair)
 
     return PhaseResult(
         status=PhaseStatus.OK,
@@ -7041,8 +6978,6 @@ def _phase_install_artifacts(ctx: _StepCtx) -> PhaseResult:
             "seed_wrote": seed_wrote,
             "env_path": str(env_path),
             "env_wrote": env_wrote,
-            "runtime_json_path": str(runtime_path),
-            "token_wrote": token_wrote,
         },
     )
 
@@ -7182,7 +7117,7 @@ def _step_changed(name: str, result: PhaseResult) -> bool:
         return False
     d = result.details or {}
     if name == "install_artifacts":
-        return bool(d.get("seed_wrote") or d.get("env_wrote") or d.get("token_wrote"))
+        return bool(d.get("seed_wrote") or d.get("env_wrote"))
     return bool(d.get("changed"))
 
 

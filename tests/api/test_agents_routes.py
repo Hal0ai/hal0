@@ -111,7 +111,7 @@ def test_delete_agent_partial_removal_returns_207_not_500(
     from hal0.agents import AgentUninstallIncompleteError
 
     residual = [
-        {"path": "/var/lib/hal0/.hermes/runtime.json", "reason": "PermissionError: [Errno 13]"}
+        {"path": "/var/lib/hal0/.hermes/provision.json", "reason": "PermissionError: [Errno 13]"}
     ]
 
     class _FakeMgr:

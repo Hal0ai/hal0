@@ -115,8 +115,7 @@ def _client_ip(request: Request) -> str:
 async def login(body: LoginRequest, request: Request, response: Response) -> dict[str, object]:
     """Validate ``key`` against ``HAL0_ADMIN_KEY`` and mint the session cookie.
 
-    Reuses the exact HMAC cookie machinery ``agents/_auth.py`` already
-    ships for the chat-proxy WS gate (seam S9's cookie half) -- one
+    Reuses the HMAC cookie machinery in ``agents/_auth.py`` -- one
     cookie scheme, one verifier, admin-equivalent everywhere it's
     accepted. There is no client-key login: the client tier is
     Bearer/``?api_key=``-only by design (it's meant for programmatic /

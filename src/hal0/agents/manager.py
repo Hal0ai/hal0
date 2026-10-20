@@ -70,8 +70,8 @@ class AgentUninstallIncompleteError(AgentError):
     """Uninstall removed some artifacts but could not remove others.
 
     The canonical trigger is root-owned entries inside an otherwise
-    hal0-managed tree (e.g. a ``runtime.json`` written by a root-run bootstrap,
-    or files from an old root-clobbering installer): the User=hal0 API service
+    hal0-managed tree (e.g. a file written by a root-run bootstrap, or files
+    from an old root-clobbering installer): the User=hal0 API service
     cannot ``rmtree`` them, so ``shutil.rmtree`` raises ``PermissionError``.
     Before this class, that exception propagated uncaught through the DELETE
     route and became a bare 500 (O16). Now the manager degrades honestly —

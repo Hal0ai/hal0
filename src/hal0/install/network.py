@@ -7,8 +7,9 @@ same bind + hostname choice we derive:
 
 * ``HAL0_HOSTNAME`` — advertised over mDNS (``services/mdns.py`` reads it)
   and used to build the origin allowlist.
-* ``HAL0_ALLOWED_ORIGINS`` — the browser-origin allowlist the chat-proxy
-  WS gate (``api/agents/_auth.check_ws_origin_and_cookie``) checks. It is
+* ``HAL0_ALLOWED_ORIGINS`` — the browser-origin allowlist the API's Origin
+  gate (``api/auth._origin_allowed``, via ``api/agents/_auth.allowed_origins``)
+  checks. It is
   seeded with the chosen hostname, every detected LAN IP, and localhost —
   all on the API port — so that whatever host the operator typed into
   their browser (and therefore whatever ``GET /api/config/urls``
@@ -38,7 +39,7 @@ from pathlib import Path
 MDNS_ALIAS = "hal0.local"
 
 # Vite dev server — kept in the allowlist so UI hot-reload (`npm run dev`
-# on :5173) still upgrades the chat-proxy WS during development. This is
+# on :5173) still passes the Origin gate during development. This is
 # one of the three historical defaults in ``api/agents/_auth`` and must
 # survive the env override (which *replaces* rather than unions).
 DEV_ORIGINS: tuple[str, ...] = ("http://localhost:5173",)

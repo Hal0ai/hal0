@@ -1,40 +1,27 @@
-"""Origin allowlist + HMAC session-cookie helpers for the agent chat proxy.
+"""Origin allowlist + HMAC session-cookie helpers for the dashboard.
 
-Bearer auth was removed and now ``X-hal0-Agent`` is the only
-identity claim on hal0-api. DA-sec-ops review (MUST-FIX #2) raised that
-exposing a long-running JSON-RPC bridge to the hermes runtime over an
-unauthenticated ``0.0.0.0:8080`` is LAN-RCE: any host on the LAN sets
-``X-hal0-Agent: hal0-dashboard`` and gets an interactive shell through
-hermes's tool surface.
+Two browser-facing seams live here:
 
-This module fixes that for the chat-proxy WebSocket routes by:
+1. The Origin allowlist (:func:`allowed_origins`). Configured via
+   ``HAL0_ALLOWED_ORIGINS`` (comma-separated), seeded by the installer
+   (``hal0.install.network``) and extended by ``[network]`` in
+   ``hal0.toml``. :func:`_is_same_origin` is the IP-literal same-origin
+   fallback, so a LAN IP change never strands the dashboard (#2277).
+   ``hal0.api.auth._origin_allowed`` enforces both on every REST call and
+   WebSocket upgrade.
 
-1. Origin allowlist on every WS upgrade. Configured via
-   ``HAL0_ALLOWED_ORIGINS`` (comma-separated). Default covers the
-   hal0.local hostname and dev origins (``localhost:5173`` for Vite,
-   ``localhost:8080``/``127.0.0.1:8080`` for the bundled SPA). An Origin equal to the
-   request's own IP-literal origin (``Host`` header) also passes, so a
-   LAN IP change never strands the dashboard. The check is FREE; missing
-   it leaves the rest of this scheme
-   moot because any drive-by site could WebSocket into hal0-api from
-   the user's own browser session.
+2. The HMAC session cookie (``hal0_session``) that ``POST /api/auth/login``
+   mints and the enforcement middleware verifies. The cookie payload is
+   JSON ``{"session_id": "<uuid>", "expires_at": <unix-ts>}``. The
+   signature is ``HMAC-SHA256(<secret>, <base64url(payload)>)``. The secret
+   comes from ``/var/lib/hal0/agents/secret.bin`` (chmod 0600, generated on
+   first use). The cookie is set ``HttpOnly``, ``SameSite=Lax``, and
+   ``Secure`` whenever the request arrived over TLS (directly or via a
+   proxy's ``X-Forwarded-Proto``). Replacing the secret
+   (:func:`regenerate_secret`) signs every session out at once.
 
-2. An HMAC session cookie minted on first GET ``/agents/`` (or on the
-   first ``/api/agents/{id}/session/create`` REST call) and verified on
-   every WS upgrade after that. The cookie payload is JSON
-   ``{"session_id": "<uuid>", "expires_at": <unix-ts>}``. The signature
-   is ``HMAC-SHA256(<secret>, <base64url(payload)>)``. Secret comes from
-   ``/var/lib/hal0/agents/secret.bin`` (chmod 0600, generated on first
-   use). The cookie is set ``HttpOnly``, ``SameSite=Lax``, and ``Secure``
-   whenever the request arrived over TLS (directly or via a proxy's
-   ``X-Forwarded-Proto``).
-
-The cookie is the only authorisation seam — there is no Bearer header
-to spoof, and the secret never leaves the hal0 service user.
-
-Embed-token-to-hermes auth (the ``Authorization: Bearer <runtime.json
-embed_token>`` header on the upstream hop) is handled inside
-``chat_proxy.py``; this module only owns the browser-facing seam.
+The module sits under ``hal0.api.agents`` because the agent chat proxy
+introduced it; that proxy is gone (ADR-0033) and the seams outlived it.
 """
 
 from __future__ import annotations
@@ -54,11 +41,10 @@ from pathlib import Path
 from typing import Final
 from urllib.parse import urlsplit
 
-from fastapi import HTTPException, Request, Response
-from starlette.websockets import WebSocket
+from fastapi import Request, Response
 
-# Default-deny set of browser origins permitted to upgrade to chat-proxy
-# WebSockets. Operators can override at boot via ``HAL0_ALLOWED_ORIGINS``
+# Default-deny set of browser origins permitted to call hal0-api from a
+# browser. Operators can override at boot via ``HAL0_ALLOWED_ORIGINS``
 # (comma-separated). The default covers:
 #   - http://hal0.local         — mDNS / hosts-file alias
 #   - http://localhost:5173     — Vite dev server (UI hot-reload)
@@ -76,8 +62,7 @@ DEFAULT_ALLOWED_ORIGINS: Final[tuple[str, ...]] = (
     "http://127.0.0.1:8080",
 )
 
-# Cookie name + lifetime. 8h chosen so a workday session never expires
-# mid-conversation; the agent-chat handshake renews it on attach.
+# Cookie name + default lifetime. 8h covers a workday session.
 SESSION_COOKIE_NAME: Final[str] = "hal0_session"
 SESSION_COOKIE_TTL_SECONDS: Final[int] = 8 * 60 * 60
 
@@ -363,24 +348,11 @@ def set_session_cookie(
     return value
 
 
-def require_browser_auth(request: Request) -> None:
-    """Verify a fresh session cookie on REST endpoints.
-
-    Raises 403 if absent / signature-invalid / expired. Used by the
-    session-management REST shim so the same cookie that gates the WS
-    upgrade also gates ``session.create``.
-    """
-    cookie = request.cookies.get(SESSION_COOKIE_NAME)
-    if not cookie or not verify_session_cookie(cookie):
-        raise HTTPException(status_code=403, detail="session_cookie_invalid")
-
-
 def _is_same_origin(origin: str, host: str, request_scheme: str) -> bool:
     """True iff ``origin`` is this request's own origin on an IP-literal host.
 
-    The one same-origin fallback for both Origin gates: the chat-proxy WS
-    gate (:func:`check_ws_origin_and_cookie`) and the REST/WS enforcement
-    middleware (``hal0.api.auth._origin_allowed``, #2327).
+    The same-origin fallback of the REST/WS enforcement middleware's Origin
+    gate (``hal0.api.auth._origin_allowed``, #2327).
 
     This is the "box's LAN IP changed since install" case (#2277): the
     browser typed ``http://<ip>:<port>``, so it sends that as ``Origin``
@@ -388,7 +360,7 @@ def _is_same_origin(origin: str, host: str, request_scheme: str) -> bool:
 
     * ``Host`` must be an IP literal. A DNS name can be rebound to the box
       by an attacker page, which then sends a matching ``Origin``/``Host``
-      pair *and* can mint its own session cookie via the handshake; an IP
+      pair; an IP
       literal cannot be rebound. Named origins (``hal0.local``, the
       installer hostname, a reverse proxy's ``public_url``) are seeded into
       :func:`allowed_origins` by ``hal0.install.network`` and are stable
@@ -425,40 +397,14 @@ def _is_same_origin(origin: str, host: str, request_scheme: str) -> bool:
     return parts.netloc.lower() == host.lower()
 
 
-def check_ws_origin_and_cookie(ws: WebSocket) -> bool:
-    """Return ``True`` iff Origin is allowlisted AND cookie is valid.
-
-    Used as the gate on every WS upgrade in :mod:`chat_proxy`. Returning
-    ``False`` lets the caller send the policy-violation close code
-    (4403) before any frame is ever exchanged.
-
-    The Origin half passes when Origin is in :func:`allowed_origins` or is
-    the request's own IP-literal origin (:func:`_is_same_origin`), the
-    same fallback the REST Origin gate uses
-    (``hal0.api.auth._origin_allowed``). Without
-    it, a DHCP change to the box's LAN IP turns the install-time allowlist
-    stale and the dashboard's own WS upgrade gets 4403 (#2277). A missing
-    Origin is still denied: browsers always send one on a WS upgrade.
-    """
-    origin = ws.headers.get("origin", "")
-    if origin not in allowed_origins() and not _is_same_origin(
-        origin, ws.headers.get("host", ""), ws.url.scheme
-    ):
-        return False
-    cookie = ws.cookies.get(SESSION_COOKIE_NAME)
-    return bool(cookie and verify_session_cookie(cookie))
-
-
 __all__ = [
     "DEFAULT_ALLOWED_ORIGINS",
     "SESSION_COOKIE_NAME",
     "SESSION_COOKIE_REMEMBER_TTL_SECONDS",
     "SESSION_COOKIE_TTL_SECONDS",
     "allowed_origins",
-    "check_ws_origin_and_cookie",
     "mint_session_cookie",
     "request_uses_tls",
-    "require_browser_auth",
     "session_cookie_expiry",
     "set_session_cookie",
     "verify_session_cookie",

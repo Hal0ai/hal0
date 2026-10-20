@@ -28,7 +28,6 @@ def test_clean_install_reports_no_drift() -> None:
     owners = {
         _HOME: "hal0",
         _HOME / "config.yaml": "hal0",
-        _HOME / "runtime.json": "hal0",
         _VENV: "hal0",
     }
     rows = _check(owners, present=set(owners))
@@ -40,7 +39,6 @@ def test_root_owned_config_is_drift() -> None:
     owners = {
         _HOME: "hal0",
         _HOME / "config.yaml": "root",  # the clobber
-        _HOME / "runtime.json": "hal0",
         _VENV: "hal0",
     }
     rows = _check(owners, present=set(owners))

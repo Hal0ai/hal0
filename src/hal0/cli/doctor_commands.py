@@ -512,7 +512,6 @@ def check_hermes_ownership(
     checks = (
         (hermes_home, "HERMES_HOME tree"),
         (hermes_home / "config.yaml", "config.yaml"),
-        (hermes_home / "runtime.json", "runtime.json (embed token)"),
         (venv, "hermes venv"),
     )
     for path, label in checks:

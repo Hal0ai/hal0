@@ -1,10 +1,9 @@
 """uvicorn access-log query-string scrubber.
 
-DA-sec-ops MUST-FIX #3 (re-iterated by R1 §runtime.json risk): the
-hermes embed token MUST move from query string to ``Authorization``
-header. Even after the move, any *future* sensitive parameter could
-slip into a query string and end up in journald via the uvicorn access
-log line. The scrubber pre-empts that whole class of bug.
+DA-sec-ops MUST-FIX #3: a credential must never reach journald through a
+query string. Any sensitive parameter (``?api_key=`` on a WebSocket, a
+future one) could slip into a query string and land there via the uvicorn
+access log line. The scrubber pre-empts that whole class of bug.
 
 How it works
 ------------

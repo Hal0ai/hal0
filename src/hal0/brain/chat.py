@@ -35,7 +35,7 @@ A chat-driven board mutation surfaces on the board LIVE via the store's
 ``/events`` feed — chat is NOT the board transport.
 
 Transport contract (kept stable so the LLM backend can later swap to a
-different agent backend via chat_proxy WITHOUT any UI change):
+different agent backend WITHOUT any UI change):
 
     SSE events, one JSON object per ``data:`` line:
       {"type": "token",  "text": "..."}            assistant token delta

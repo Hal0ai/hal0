@@ -9,6 +9,11 @@
 records"); this file restates the decision as it stands today, not the
 v0.2 draft.
 
+Amended by ADR-0033 (2026-10-20, #2817): the "Sandboxed sibling unit"
+bullet used to say hal0-api proxies the agent's chat WebSocket. That proxy
+is gone: chat is the agent's own dashboard, and hal0 does not proxy it. The
+bundling rule and every other decision here are unchanged.
+
 ## Context
 
 hal0 previously carried a first-party agent runtime (`haloai`) that was
@@ -35,10 +40,9 @@ Concretely:
 - **Sandboxed sibling unit, not an in-process extension.** A daemon
   agent runs as `hal0-agent@<id>.service`
   (`installer/systemd/hal0-agent@.service`), `User=hal0`, loopback-only,
-  `NoNewPrivileges`/`ProtectSystem=strict`/`ProtectHome=yes`. The browser
-  never talks to it directly — `src/hal0/api/agents/chat_proxy.py`
-  proxies the chat WebSocket, enforcing an Origin allowlist and a session
-  cookie, carrying the embed token server-side only.
+  `NoNewPrivileges`/`ProtectSystem=strict`/`ProtectHome=yes`. Chat with
+  the agent is the agent's own dashboard; hal0 does not proxy it
+  (ADR-0033, which replaced the original chat proxy).
 - **One MCP tool catalog, mapped onto existing routes.** The admin MCP
   server's tool catalog (`src/hal0/mcp/admin.py`) started as the "a tool
   ships iff it maps to an existing `/api/*` route" rule; no privileged
@@ -82,7 +86,7 @@ Concretely:
   `BUNDLED_AGENTS` (`:117`), `AGENT_KINDS`, `AgentManager.install`
   (single-pick enforcement)
 - `installer/systemd/hal0-agent@.service` — sandboxed daemon unit
-- `src/hal0/api/agents/chat_proxy.py` — WS proxy, Origin allowlist
+- ADR-0033 — agent chat is the agent's own dashboard (amends this record)
 - `src/hal0/mcp/admin.py` — tool catalog, "Platform-management expansion"
   section citing this ADR
 - `src/hal0/api/routes/approvals.py` — approval inbox routes

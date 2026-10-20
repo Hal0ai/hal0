@@ -61,12 +61,11 @@ key layout.
 ├── models/                  # default model cache (unless overridden — see below)
 ├── slots/<name>/             # per-slot working dir
 ├── agents/
-│   ├── secret.bin            # 0600 HMAC secret for the agent chat proxy
+│   ├── secret.bin            # 0600 HMAC secret for dashboard session cookies
 │   └── <name>/workspace/     # per-agent sandbox root (chroot/bind-mount target)
 ├── stacks/state.json         # active-stack pointer + content hash
 ├── mcp/hermes-managed.json   # MCP server ids hal0 itself joined into Hermes config
 ├── openwebui/                 # OpenWebUI state
-├── .hermes/runtime.json      # Hermes runtime info (embed token, etc)
 └── .config/flm/models/       # default FLM (NPU) model cache
 ```
 

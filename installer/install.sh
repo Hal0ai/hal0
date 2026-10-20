@@ -1477,7 +1477,7 @@ fi
 API_ENV="${ETC_DIR}/api.env"
 # Network coherence (WS-C): derive HAL0_BIND_HOST + HAL0_HOSTNAME +
 # HAL0_ALLOWED_ORIGINS from ONE bind choice so the hal0-api unit, `hal0
-# serve`, mDNS, and the chat-proxy WS origin gate all agree. The unit's
+# serve`, mDNS, and the API's Origin gate all agree. The unit's
 # ExecStart no longer passes --host — it reads HAL0_BIND_HOST from this
 # file, the same var `hal0 serve` honours (main.py). HAL0_ALLOWED_ORIGINS
 # is seeded with the hostname + every LAN IP + localhost on the API port
@@ -1529,8 +1529,8 @@ NETWORK_BLOCK="$(cat <<NETBLOCK
 ${NETWORK_BEGIN_MARKER}
 # Network shape — derived from one bind choice (WS-C). HAL0_BIND_HOST is
 # read by BOTH this file's consumer (\`hal0 serve\`) and the hal0-api unit;
-# HAL0_HOSTNAME feeds mDNS; HAL0_ALLOWED_ORIGINS gates the chat-proxy WS
-# upgrade. This block is rewritten on every install.sh run — it's the only
+# HAL0_HOSTNAME feeds mDNS; HAL0_ALLOWED_ORIGINS gates browser Origins on
+# REST calls and WebSocket upgrades. This block is rewritten on every install.sh run — it's the only
 # way an existing install picks up a changed bind host / LAN IP set. Hand
 # edits inside the markers will be overwritten on the next run; edit
 # elsewhere in this file (or hal0.toml) to persist a change. To allow
@@ -3860,7 +3860,7 @@ else
     # itself drops the BOOTSTRAP step to the hal0 user (cli/_provision_hermes) —
     # a root-only prelude installs the /usr/local/bin wrapper + ensures the
     # setgid hal0-owned skeleton, then it re-execs `agent bootstrap hermes` as
-    # hal0 so config.yaml / personas / runtime.json / provision.json are all born
+    # hal0 so config.yaml / personas / provision.json are all born
     # hal0:hal0. Root:root artifacts (seed TOML, driver env, gateway drop-in) go
     # through the hal0-agentenv / hal0-systemctl sudo seams. The remaining root
     # orchestration here (toolchain prereqs, unit enable, gateway install) stays
@@ -3953,7 +3953,7 @@ else
         systemctl enable --now hal0-agent@hermes.service \
             || warn "hal0-agent@hermes enable returned non-zero — continuing (check 'journalctl -u hal0-agent@hermes -n 40')"
         if wait_active hal0-agent@hermes.service 20; then
-            info "hal0-agent@hermes is running (chat at 127.0.0.1:9119, proxied by hal0-api)"
+            info "hal0-agent@hermes is running (its dashboard and chat listen on 127.0.0.1:9119)"
         else
             warn "hal0-agent@hermes not yet active; check 'journalctl -u hal0-agent@hermes -n 40'"
         fi

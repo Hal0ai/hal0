@@ -2,35 +2,30 @@
 
 ``hal0 agent bootstrap hermes`` is a separate install path from
 ``AgentManager.install``. The provision pipeline wrote data/state but
-never the three artifacts downstream components key off:
+never the two artifacts downstream components key off:
 
   * the manager seed at ``/etc/hal0/agents/hermes.toml``,
-  * the driver env file at ``/etc/hal0/agents/hermes.env``,
-  * ``runtime.json`` (embed token) under ``$HERMES_HOME``.
+  * the driver env file at ``/etc/hal0/agents/hermes.env``.
 
-These tests pin the new ``install_artifacts`` phase: a fresh run writes
-all three; re-runs are idempotent (the embed token does NOT rotate);
-``--repair`` rewrites a fresh token; and the chat proxy's
-``_load_embed_token`` finds the token the phase wrote.
+These tests pin the ``install_artifacts`` phase: a fresh run writes both,
+and the seed write merges operator MCP servers rather than clobbering them.
 """
 
 from __future__ import annotations
 
-import json
 import tomllib
 from pathlib import Path
 
 import pytest
 
 from hal0.agents import hermes_provision as hp
-from hal0.api.agents import chat_proxy
 
 
 @pytest.fixture
 def artifact_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> hp.BootstrapState:
     """A BootstrapState + module path constants rooted under ``tmp_path``.
 
-    Redirects the three artifact destinations off the real /etc + /var
+    Redirects the artifact destinations off the real /etc + /var
     tree so the phase writes are hermetic.
     """
     hermes_home = tmp_path / "var" / "lib" / "hal0" / ".hermes"
@@ -42,10 +37,10 @@ def artifact_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> hp.Bootst
     return hp.BootstrapState(hermes_home=str(hermes_home), agent_id="hermes-agent")
 
 
-def test_phase_writes_all_three_artifacts(
+def test_phase_writes_both_artifacts(
     artifact_state: hp.BootstrapState, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A fresh run leaves seed TOML + driver env + runtime.json on disk."""
+    """A fresh run leaves the seed TOML + driver env on disk, nothing in $HERMES_HOME."""
     # Deterministic: this phase now branches on the box service key, so pin
     # the ambient auth posture rather than inheriting whatever the test
     # process/host happens to carry.
@@ -56,11 +51,12 @@ def test_phase_writes_all_three_artifacts(
 
     seed_path = hp.INSTALL_SEED_PATH
     env_path = hp.DRIVER_ENV_PATH
-    runtime_path = Path(artifact_state.hermes_home) / hp.RUNTIME_JSON_NAME
 
     assert seed_path.exists()
     assert env_path.exists()
-    assert runtime_path.exists()
+    # The phase writes nothing under $HERMES_HOME (ADR-0033 dropped the
+    # chat proxy's token file).
+    assert list(Path(artifact_state.hermes_home).iterdir()) == []
 
     # Seed parses + carries the manager-shape ``[agent]`` block.
     seed = tomllib.loads(seed_path.read_text(encoding="utf-8"))
@@ -86,11 +82,6 @@ def test_phase_writes_all_three_artifacts(
     assert "HAL0_MCP_ADMIN_URL=" in env_body
     assert "HAL0_MCP_MEMORY_URL=" in env_body
     assert "HAL0_MCP_TOKEN" not in env_body  # keyless box — see delenv above
-
-    # runtime.json carries a non-empty token + is 0600.
-    data = json.loads(runtime_path.read_text(encoding="utf-8"))
-    assert isinstance(data["token"], str) and data["token"]
-    assert (runtime_path.stat().st_mode & 0o777) == 0o600
 
 
 def test_phase_wires_builtin_mcp_auth_when_key_resolvable(
@@ -123,31 +114,6 @@ def test_phase_wires_builtin_mcp_auth_when_key_resolvable(
     assert client.token_for("hal0-memory") == "install-artifacts-admin-key"
 
 
-def test_token_is_stable_across_reruns(artifact_state: hp.BootstrapState) -> None:
-    """Re-running without --repair must NOT rotate the embed token —
-    otherwise a re-provision would break a running proxy mid-session."""
-    hp._phase_install_artifacts(hp._StepCtx(state=artifact_state))
-    runtime_path = Path(artifact_state.hermes_home) / hp.RUNTIME_JSON_NAME
-    token_1 = json.loads(runtime_path.read_text(encoding="utf-8"))["token"]
-
-    result_2 = hp._phase_install_artifacts(hp._StepCtx(state=artifact_state))
-    token_2 = json.loads(runtime_path.read_text(encoding="utf-8"))["token"]
-    assert token_1 == token_2
-    assert result_2.details["token_wrote"] is False
-
-
-def test_repair_rotates_token(artifact_state: hp.BootstrapState) -> None:
-    """``--repair`` explicitly resets to known-good — a fresh token."""
-    hp._phase_install_artifacts(hp._StepCtx(state=artifact_state))
-    runtime_path = Path(artifact_state.hermes_home) / hp.RUNTIME_JSON_NAME
-    token_1 = json.loads(runtime_path.read_text(encoding="utf-8"))["token"]
-
-    # The orchestrator's --repair flag arrives via ctx.repair (#702).
-    hp._phase_install_artifacts(hp._StepCtx(state=artifact_state, repair=True))
-    token_2 = json.loads(runtime_path.read_text(encoding="utf-8"))["token"]
-    assert token_1 != token_2
-
-
 def test_seed_write_preserves_operator_mcp_servers(artifact_state: hp.BootstrapState) -> None:
     """The seed TOML doubles as the MCP allow-list — the write must merge,
     never clobber, any operator-added ``[mcp.servers.*]`` blocks, and must
@@ -166,17 +132,3 @@ def test_seed_write_preserves_operator_mcp_servers(artifact_state: hp.BootstrapS
     assert seed["mcp"]["servers"]["hal0-memory"]["builtin"] is True
     # And the agent block was still written.
     assert seed["agent"]["name"] == "hermes"
-
-
-def test_chat_proxy_finds_token_after_provision(
-    artifact_state: hp.BootstrapState, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """End-to-end seam: chat_proxy._load_embed_token() resolves the token
-    the install_artifacts phase wrote (previously always None — runtime.json
-    had zero writers)."""
-    hp._phase_install_artifacts(hp._StepCtx(state=artifact_state))
-    runtime_path = Path(artifact_state.hermes_home) / hp.RUNTIME_JSON_NAME
-    expected = json.loads(runtime_path.read_text(encoding="utf-8"))["token"]
-
-    monkeypatch.setenv("HAL0_HERMES_RUNTIME_JSON", str(runtime_path))
-    assert chat_proxy._load_embed_token() == expected

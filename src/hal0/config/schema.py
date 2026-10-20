@@ -3139,8 +3139,8 @@ def normalise_origin(value: str) -> str:
 class NetworkConfig(BaseModel):
     """``[network]`` — how browsers reach this box, beyond the installer's view (#2382).
 
-    The origin gates (the REST Origin check in ``hal0.api.auth`` and the
-    chat-proxy WebSocket gate in ``hal0.api.agents._auth``) accept the
+    The Origin gate in ``hal0.api.auth`` (REST calls and WebSocket
+    upgrades alike) accepts the
     ``HAL0_ALLOWED_ORIGINS`` list the installer derives into the managed
     ``api.env`` block. That block is rewritten on every installer run, so an
     origin hand-added there was lost on the next re-run. These keys are the

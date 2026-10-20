@@ -213,7 +213,8 @@ closed: it keeps streaming until it disconnects
 An admin rotation also **signs out every browser session**: it replaces the
 session signing secret, so every existing `hal0_session` cookie stops
 verifying (see [Sessions](#sessions)), and every WebSocket opened with one of
-those cookies — agent chat included — is closed with code `4401`. The browser
+those cookies (for example the board's `/api/board/events` feed) is closed
+with code `4401`. The browser
 that made the call is not locked out. If it sent a valid session, the same response sets a fresh cookie
 that expires no later than the one it replaced. A Bearer caller gets no cookie.
 Send `"keep_sessions": true` to leave other sessions signed in, for routine
@@ -271,8 +272,7 @@ A session lasts **8 hours** by default. Ticking **Remember me** on the login
 screen (`"remember": true` on `POST /api/auth/login`) makes it **30 days**.
 The expiry is inside the signed payload, so a browser cannot extend its own
 session, and the cookie's `Max-Age` is set to match. The dashboard remembers
-only whether the box was ticked last time, never the key. Opening agent chat
-renews a session to a full 8 hours but never shortens a longer one.
+only whether the box was ticked last time, never the key.
 
 Sessions are not stored server-side, so one cannot be revoked on its own.
 Rotating the admin key ends **every** session at once, for example after
@@ -298,18 +298,17 @@ credential: sign in again (or switch to the new key), then reconnect. A
 reconnect with a cookie that no longer verifies is refused at the upgrade
 with `4403`.
 
-The agent chat sockets (`/api/agents/{id}/submit` and `/api/agents/{id}/events`)
-also re-check their own session cookie, on every frame the browser sends and
-every 30 seconds. So they close with `4401` in two more cases:
+hal0 has two WebSockets, the board feed (`/api/board/events`) and
+`/v1/realtime`. Both are re-checked only when a key is rotated through the running API, so two cases
+do not close an open socket:
 
-- **The session expires.** A chat socket outlives neither its cookie's 8 hours
-  nor, with **Remember me**, its 30 days. The `submit` frame that finds the
-  cookie expired is dropped, not forwarded to the agent, so the client should
-  resend it after signing in again.
+- **The session expires.** A socket opened with a cookie that later expires
+  stays open until it disconnects. The reconnect is refused at the upgrade
+  with `4403`.
 - **The secret is replaced outside the API.** `sudo hal0 auth reset-key`
-  writes the new secret itself when its call to the running API fails. The
-  chat sockets notice within 30 seconds; other open WebSockets stay open until
-  the `systemctl restart hal0-api` the command asks for.
+  writes the new secret and key itself when its call to the running API
+  fails. Open WebSockets then stay open until the `systemctl restart hal0-api`
+  the command asks for.
 
 ## Rate limiting
 

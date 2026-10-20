@@ -3,7 +3,7 @@
 Covers the invariant that closes the 4403 mismatch: whatever host the
 operator reaches the dashboard on — and therefore whatever URL
 ``GET /api/config/urls`` advertises — is present in the derived
-``HAL0_ALLOWED_ORIGINS`` that the chat-proxy WS gate checks.
+``HAL0_ALLOWED_ORIGINS`` that the API's Origin gate checks.
 """
 
 from __future__ import annotations
