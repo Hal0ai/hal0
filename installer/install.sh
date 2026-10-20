@@ -126,6 +126,22 @@ wait_active() {
     return 1
 }
 
+# Poll an HTTP URL until it answers 2xx, for up to `timeout` seconds. Returns
+# 0 on the first success, 1 on timeout. `systemctl is-active` only says the
+# process exists: after a restart hal0-api's graceful stop and Uvicorn's
+# bind can leave the port closed for several seconds (#2804), so probes that
+# talk HTTP must gate on this, not on wait_active.
+wait_http_ready() {
+    local url="$1"
+    local timeout="${2:-30}"
+    local deadline=$((SECONDS+timeout))
+    while (( SECONDS < deadline )); do
+        curl -fsS -m 3 -o /dev/null "${url}" >/dev/null 2>&1 && return 0
+        sleep 0.5
+    done
+    return 1
+}
+
 DEV_MODE=0
 NO_START=0
 # ROCmFP4 + MTP note: the old `--rocmfp4` power pack (a host-side fork
@@ -3498,6 +3514,12 @@ else
     start_or_restart_api
     if wait_active hal0-api 15; then
         info "hal0-api is running"
+        # #2804: active != listening. Hold the HTTP probes below (memory graph
+        # check, structured-output smoke) until /api/health answers. Bounded and
+        # fail-soft: a slow start warns, it never aborts the install.
+        if ! wait_http_ready "http://127.0.0.1:${HAL0_PORT}/api/health" 60; then
+            warn "hal0-api is active but /api/health did not answer within 60s; later probes may report false failures"
+        fi
     else
         warn "hal0-api failed to start; check 'journalctl -u hal0-api -n 40'"
     fi
