@@ -163,11 +163,13 @@ install missing the SDK still boots — the dashboard surfaces the
 from __future__ import annotations
 
 import fnmatch
+import functools
 import json
 import re
 import time
 from collections.abc import Awaitable, Callable, Iterator
 from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import Any
 
 import httpx
@@ -348,7 +350,10 @@ def _redact_logs_payload(payload: Any) -> Any:
 try:
     from mcp.server.fastmcp import FastMCP  # type: ignore[import-not-found]
     from mcp.server.fastmcp.exceptions import ToolError  # type: ignore[import-not-found]
+    from mcp.server.fastmcp.tools import Tool  # type: ignore[import-not-found]
     from mcp.types import ToolAnnotations  # type: ignore[import-not-found]
+
+    from hal0.mcp._binding import BoundFastMCP, ToolContext, bound_server
 except ImportError as _import_exc:  # pragma: no cover — exercised at install time
     raise ImportError(
         "hal0.mcp.admin requires the 'mcp' Python SDK. "
@@ -3435,17 +3440,136 @@ def _is_failure_envelope(result: Any) -> bool:
 
 
 # ── FastMCP server builder ───────────────────────────────────────────────────
+#
+# Definitions once per process, bindings per app (#2396). The tool
+# definitions are built ONCE (``Tool.from_function`` is the expensive part of
+# app construction) and shared by every server; each tool resolves its
+# per-app state — approval queue, memory dispatcher, REST base URL — off the
+# :class:`~hal0.mcp._binding.BoundFastMCP` handling the call, at call time.
+# Mounted servers carry ``app.state`` itself (see
+# :func:`hal0.api.mcp_mount.mount_mcp_servers`), so these are the same
+# ``app.state`` lookups the REST routes make.
+
+_DEFAULT_BASE_URL = "http://127.0.0.1:8080"
+
+
+def _make_admin_tool(tool_name: str, description: str) -> Tool:
+    """Build one shared admin tool definition. Captures no per-app state."""
+
+    async def _tool(
+        args: dict[str, Any] | None = None, ctx: ToolContext | None = None
+    ) -> dict[str, Any]:
+        server = bound_server(ctx)
+        state = server.hal0_state
+        bearer_resolver = server.hal0_hooks.get("bearer_resolver")
+        bearer, client_id = (
+            bearer_resolver() if bearer_resolver is not None else (None, "anonymous")
+        )
+        result = await dispatch(
+            tool=tool_name,
+            args=args or {},
+            client_id=client_id,
+            bearer=bearer,
+            base_url=getattr(state, "mcp_base_url", None) or _DEFAULT_BASE_URL,
+            approval_queue=state.approval_queue,
+            memory_dispatcher=getattr(state, "memory_dispatcher", None),
+        )
+        # dispatch()/_execute_tool() signal failure (bad/missing args,
+        # unknown tool, denied/refused policy, REST 4xx/5xx, ...) by
+        # returning ``{"status": "error", "error": {...}}`` rather than
+        # raising — a normal return, so FastMCP's CallToolResult came
+        # back ``isError: false`` with the error dict just sitting in
+        # the content as if it were a successful payload (#1796). Raise
+        # here so the lowlevel handler's ``except Exception`` path sets
+        # ``isError: true`` the way every MCP client expects to detect
+        # a failed call without string-sniffing the content. The check
+        # requires the FULL envelope shape (error dict + string code),
+        # not the bare ``status`` string — a successfully read slot in
+        # lifecycle state ``error`` shares that string and must come
+        # back isError:false with its payload intact (#2025).
+        if _is_failure_envelope(result):
+            raise ToolError(json.dumps(result["error"]))
+        if tool_name in _COMPACT_TEXT_TOOLS:
+            return CallToolResult(  # type: ignore[return-value]
+                content=[
+                    TextContent(
+                        type="text", text=json.dumps(result, separators=(",", ":"), default=str)
+                    )
+                ]
+            )
+        return result
+
+    _tool.__name__ = tool_name
+    _tool.__doc__ = description
+    return Tool.from_function(
+        _tool,
+        name=tool_name,
+        description=description,
+        annotations=_ANNOTATIONS.get(tool_name),
+        # No outputSchema for the compact-text tools: with one defined the
+        # SDK demands ``structuredContent`` and would reject the single
+        # compact text block.
+        structured_output=False if tool_name in _COMPACT_TEXT_TOOLS else None,
+    )
+
+
+@functools.cache
+def _admin_tool_definitions() -> dict[str, Tool]:
+    """The shared admin tool definitions, built on first use per process.
+
+    Registration iterates TOOL_DESCRIPTIONS verbatim, so tools/list is exactly
+    the validated catalog (dict keys are unique; _validate_catalog pins
+    keys == catalog). Takes no inputs: nothing per-app goes into a definition.
+    """
+    return {name: _make_admin_tool(name, desc) for name, desc in TOOL_DESCRIPTIONS.items()}
+
+
+def _advertised(tool: Tool) -> Tool:
+    """Per-server copy of ``tool`` advertising the shared per-tool schema.
+
+    The wrapper's ``args: dict`` signature is deliberate — it passes the
+    whole arg dict through to ``dispatch`` untouched (a flat signature
+    would make FastMCP silently drop undeclared body fields). But that
+    signature also advertises an opaque ``{args: object}`` in tools/list,
+    leaving the caller to guess every field. Override the ADVERTISED
+    schema (not the validation model, which stays permissive) so the
+    nested ``args`` object carries the SAME per-tool schema the dashboard
+    agent chat surfaces — one source of truth, two envelopes.
+
+    Computed when each server is built rather than baked into the shared
+    definition: the path args come from the route map
+    :func:`install_admin_route_map` installs for the live app just before.
+    A shallow copy — the expensive validation model stays shared.
+    """
+    schema = tool_param_schema(tool.name)
+    return tool.model_copy(
+        update={
+            "parameters": {
+                "type": "object",
+                "properties": {"args": schema},
+                "required": ["args"] if schema["required"] else [],
+            }
+        }
+    )
 
 
 def build_server(
     *,
     name: str = "hal0-admin",
-    approval_queue: ApprovalQueue,
-    base_url: str = "http://127.0.0.1:8080",
+    approval_queue: ApprovalQueue | None = None,
+    base_url: str = _DEFAULT_BASE_URL,
     memory_dispatcher: Callable[[str, dict[str, Any]], Awaitable[dict[str, Any]]] | None = None,
     bearer_resolver: Callable[[], tuple[str | None, str]] | None = None,
+    state: Any = None,
 ) -> FastMCP:
-    """Construct the hal0-admin FastMCP server.
+    """Construct a hal0-admin FastMCP server over the shared tool definitions.
+
+    Per-app state is read at call time from ``state``. Pass ``app.state``
+    (what :func:`hal0.api.mcp_mount.mount_mcp_servers` does): the tools look
+    up its ``approval_queue``, ``memory_dispatcher`` and ``mcp_base_url`` on
+    every call. Without ``state``, the explicit ``approval_queue`` /
+    ``base_url`` / ``memory_dispatcher`` are wrapped into a fixed namespace —
+    the direct-construction path the unit tests use.
 
     ``bearer_resolver`` is a hook the surrounding orchestrator uses to
     pull ``(bearer, client_id)`` out of the active MCP session's HTTP
@@ -3453,100 +3577,22 @@ def build_server(
     transport-agnostic — tests inject a fixed-value resolver and
     production wiring injects one that reads the request context.
 
-    Every tool is registered with FastMCP's ``@tool`` decorator pattern
-    so the SDK's standard discovery surface (``tools/list``) reports
-    them to the agent. The decorator wraps the underlying ``dispatch``
-    call so the same gating + audit pipeline runs regardless of which
-    tool the agent picked.
+    Every tool in the catalog dispatches into the same ``dispatch`` core, so
+    the same gating + audit pipeline runs regardless of which tool the agent
+    picked.
     """
-    server = FastMCP(name)
-    # FastMCP's constructor has no ``version`` kwarg, so the underlying
-    # ``mcp.server.lowlevel.Server`` defaults ``initialize``'s
-    # ``serverInfo.version`` to the ``mcp`` SDK package version (e.g.
-    # "1.28.1") — a client sees the FastMCP library version, not hal0's own
-    # (#1796). Stamp it post-construction on the wrapped server object.
-    from hal0 import __version__ as _hal0_version
-
-    server._mcp_server.version = _hal0_version
-
-    def _resolve() -> tuple[str | None, str]:
-        if bearer_resolver is None:
-            return None, "anonymous"
-        return bearer_resolver()
-
-    # Single tool factory — every tool in the catalog dispatches into
-    # the same ``dispatch`` core. Registration iterates TOOL_DESCRIPTIONS
-    # verbatim, so FastMCP's tools/list is exactly the validated catalog
-    # (dict keys are unique; _validate_catalog pins keys == catalog).
-    def _register(tool_name: str, description: str) -> None:
-        async def _tool(args: dict[str, Any] | None = None) -> dict[str, Any]:
-            bearer, client_id = _resolve()
-            result = await dispatch(
-                tool=tool_name,
-                args=args or {},
-                client_id=client_id,
-                bearer=bearer,
-                base_url=base_url,
-                approval_queue=approval_queue,
-                memory_dispatcher=memory_dispatcher,
-            )
-            # dispatch()/_execute_tool() signal failure (bad/missing args,
-            # unknown tool, denied/refused policy, REST 4xx/5xx, ...) by
-            # returning ``{"status": "error", "error": {...}}`` rather than
-            # raising — a normal return, so FastMCP's CallToolResult came
-            # back ``isError: false`` with the error dict just sitting in
-            # the content as if it were a successful payload (#1796). Raise
-            # here so the lowlevel handler's ``except Exception`` path sets
-            # ``isError: true`` the way every MCP client expects to detect
-            # a failed call without string-sniffing the content. The check
-            # requires the FULL envelope shape (error dict + string code),
-            # not the bare ``status`` string — a successfully read slot in
-            # lifecycle state ``error`` shares that string and must come
-            # back isError:false with its payload intact (#2025).
-            if _is_failure_envelope(result):
-                raise ToolError(json.dumps(result["error"]))
-            if tool_name in _COMPACT_TEXT_TOOLS:
-                return CallToolResult(  # type: ignore[return-value]
-                    content=[
-                        TextContent(
-                            type="text", text=json.dumps(result, separators=(",", ":"), default=str)
-                        )
-                    ]
-                )
-            return result
-
-        _tool.__name__ = tool_name
-        _tool.__doc__ = description
-        annotations = _ANNOTATIONS.get(tool_name)
-        server.tool(
-            name=tool_name,
-            description=description,
-            annotations=annotations,
-            # No outputSchema for the compact-text tools: with one defined the
-            # SDK demands ``structuredContent`` and would reject the single
-            # compact text block.
-            structured_output=False if tool_name in _COMPACT_TEXT_TOOLS else None,
-        )(_tool)
-
-        # The wrapper's ``args: dict`` signature is deliberate — it passes the
-        # whole arg dict through to ``dispatch`` untouched (a flat signature
-        # would make FastMCP silently drop undeclared body fields). But that
-        # signature also advertises an opaque ``{args: object}`` in tools/list,
-        # leaving the caller to guess every field. Override the ADVERTISED
-        # schema (not the validation model, which stays permissive) so the
-        # nested ``args`` object carries the SAME per-tool schema the dashboard
-        # agent chat surfaces — one source of truth, two envelopes.
-        schema = tool_param_schema(tool_name)
-        server._tool_manager.get_tool(tool_name).parameters = {
-            "type": "object",
-            "properties": {"args": schema},
-            "required": ["args"] if schema["required"] else [],
-        }
-
-    for _name, _description in TOOL_DESCRIPTIONS.items():
-        _register(_name, _description)
-
-    return server
+    if state is None:
+        if approval_queue is None:
+            raise TypeError("build_server() needs state= or approval_queue=")
+        state = SimpleNamespace(
+            approval_queue=approval_queue,
+            mcp_base_url=base_url,
+            memory_dispatcher=memory_dispatcher,
+        )
+    elif approval_queue is not None or memory_dispatcher is not None:
+        raise TypeError("build_server(): per-app values go on state=, not alongside it")
+    tools = [_advertised(t) for t in _admin_tool_definitions().values()]
+    return BoundFastMCP(name, tools=tools, state=state, hooks={"bearer_resolver": bearer_resolver})
 
 
 __all__ = [

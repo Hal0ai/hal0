@@ -246,9 +246,22 @@ def mount_mcp_servers(
     so its ``memory_*`` tools route through the memory MCP server's
     dispatcher without an HTTP round-trip — same in-process call path
     the memory MCP itself uses.
+
+    Cheap per app (#2396): the tool definitions are built once per process
+    and shared; each mounted server carries ``app.state``, and its tools read
+    the approval queue, memory provider, memory dispatcher and base URL off
+    it at call time. The arguments are therefore recorded on ``app.state``
+    here (``create_app`` already set the same values for all but
+    ``mcp_base_url``), never captured in a tool closure.
     """
     from hal0.mcp.admin import build_server as build_admin_server
     from hal0.mcp.admin import install_admin_route_map
+
+    # The per-app state every mounted tool resolves at call time.
+    app.state.approval_queue = approval_queue
+    app.state.memory_provider = memory_provider
+    app.state.memory_dispatcher = memory_dispatcher
+    app.state.mcp_base_url = base_url
 
     # Autogenerate the admin route map from the LIVE route table before the
     # server is built. ``build_admin_server`` reads ``_PATH_ARGS`` to advertise
@@ -265,12 +278,7 @@ def mount_mcp_servers(
     # default and rejects LAN / Traefik clients with a bare 421.
     transport_security = _mcp_transport_security()
 
-    admin_server = build_admin_server(
-        approval_queue=approval_queue,
-        base_url=base_url,
-        memory_dispatcher=memory_dispatcher,
-        bearer_resolver=bearer_resolver,
-    )
+    admin_server = build_admin_server(state=app.state, bearer_resolver=bearer_resolver)
     admin_server.settings.transport_security = transport_security
     # ``streamable_http_app()`` must be called BEFORE
     # ``session_manager`` is accessible — FastMCP creates the manager
@@ -295,18 +303,19 @@ def mount_mcp_servers(
 
         # The memory server is an outermost mount — no admin dispatcher
         # sits in front of it to classify calls — so it carries the
-        # approval queue itself and gates bulk deletes exactly like
-        # ``/mcp/admin`` does (#1302). The ``memory_dispatcher`` handed to
-        # the admin server above deliberately does NOT carry the queue:
-        # admin gates first, then runs the approved call through it.
+        # approval queue (``app.state.approval_queue``) itself and gates bulk
+        # deletes exactly like ``/mcp/admin`` does (#1302). The
+        # ``memory_dispatcher`` the admin server uses deliberately does NOT
+        # carry the queue: admin gates first, then runs the approved call
+        # through it.
+        #
+        # #1930: the same extraction-window preflight /api/memory/add runs
+        # (#1903) — this is the path agents actually retain through.
+        app.state.mcp_memory_add_preflight = make_add_preflight(app, memory_provider)
         memory_server = build_memory_server(
-            wrapper=memory_provider,
+            state=app.state,
             client_id_resolver=client_id_resolver,
             private_resolver=private_resolver,
-            approval_queue=approval_queue,
-            # #1930: the same extraction-window preflight /api/memory/add
-            # runs (#1903) — this is the path agents actually retain through.
-            add_preflight=make_add_preflight(app, memory_provider),
         )
         memory_server.settings.transport_security = transport_security
         memory_app: ASGIApp = memory_server.streamable_http_app()

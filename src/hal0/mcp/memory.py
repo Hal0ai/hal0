@@ -67,10 +67,12 @@ mounts at ``/mcp/memory`` via ``app.mount()``.
 
 from __future__ import annotations
 
+import functools
 import json
 import re
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from typing import Any
 
 import structlog
@@ -85,7 +87,10 @@ from hal0.memory.namespace import (
 try:
     from mcp.server.fastmcp import FastMCP  # type: ignore[import-not-found]
     from mcp.server.fastmcp.exceptions import ToolError  # type: ignore[import-not-found]
+    from mcp.server.fastmcp.tools import Tool  # type: ignore[import-not-found]
     from mcp.types import ToolAnnotations  # type: ignore[import-not-found]
+
+    from hal0.mcp._binding import BoundFastMCP, ToolContext, bound_server
 except ImportError as _import_exc:  # pragma: no cover — exercised at install time
     raise ImportError(
         "hal0.mcp.memory requires the 'mcp' Python SDK. "
@@ -1416,12 +1421,13 @@ _ANNOTATIONS: dict[str, ToolAnnotations] = {
 
 def build_server(
     *,
-    wrapper: Any,
+    wrapper: Any = None,
     name: str = "hal0-memory",
     client_id_resolver: Any = None,
     private_resolver: Any = None,
     approval_queue: Any = None,
     add_preflight: Callable[[], Awaitable[None]] | None = None,
+    state: Any = None,
 ) -> FastMCP:
     """Construct a focused memory-only FastMCP server.
 
@@ -1430,56 +1436,91 @@ def build_server(
     full admin tool surface — a smaller attack surface for narrow
     integrations.
 
+    The tool definitions are shared process-wide (#2396); per-app state is
+    read at call time from ``state``. Pass ``app.state`` (what
+    :func:`hal0.api.mcp_mount.mount_mcp_servers` does): each call looks up
+    its ``memory_provider``, ``approval_queue`` and
+    ``mcp_memory_add_preflight``. Without ``state``, the explicit
+    ``wrapper`` / ``approval_queue`` / ``add_preflight`` are wrapped into a
+    fixed namespace — the direct-construction path the unit tests use.
+
     ``client_id_resolver`` / ``private_resolver`` are wired the same
     way as :func:`hal0.mcp.admin.build_server`'s ``bearer_resolver`` —
     transport-layer hooks the orchestrator stitches into the active
     MCP session's HTTP headers.
 
     ``approval_queue`` is the process-wide :class:`ApprovalQueue`. This
-    server is an outermost mount (nothing gates in front of it), so pass
-    it — otherwise the narrow surface becomes a bypass around the admin
-    surface's bulk-delete gate (#1302).
+    server is an outermost mount (nothing gates in front of it), so it
+    must be armed — otherwise the narrow surface becomes a bypass around
+    the admin surface's bulk-delete gate (#1302).
 
     ``add_preflight`` is passed through to :func:`make_dispatcher` so
     ``memory_add`` refuses a write the extraction slot cannot fit (#1930).
     """
-    server = FastMCP(name)
-    # See hal0.mcp.admin's build_admin_mcp_server for why this is stamped
-    # post-construction (#1796): FastMCP has no ``version`` kwarg, so
-    # ``serverInfo.version`` otherwise defaults to the ``mcp`` SDK version.
-    from hal0 import __version__ as _hal0_version
-
-    server._mcp_server.version = _hal0_version
-    _raw_dispatcher = make_dispatcher(
-        wrapper,
-        client_id_resolver=client_id_resolver,
-        private_resolver=private_resolver,
-        approval_queue=approval_queue,
-        add_preflight=add_preflight,
+    if state is None:
+        state = SimpleNamespace(
+            memory_provider=wrapper,
+            approval_queue=approval_queue,
+            mcp_memory_add_preflight=add_preflight,
+        )
+    elif wrapper is not None or approval_queue is not None or add_preflight is not None:
+        raise TypeError("build_server(): per-app values go on state=, not alongside it")
+    return BoundFastMCP(
+        name,
+        tools=_memory_tool_definitions().values(),
+        state=state,
+        hooks={"client_id_resolver": client_id_resolver, "private_resolver": private_resolver},
     )
 
-    async def dispatcher(tool: str, args: dict[str, Any]) -> dict[str, Any]:
-        """Every ``@server.tool`` function below calls this, unchanged.
 
-        ``_raw_dispatcher`` signals failure (bad args, memory-schema error,
-        engine exception, ...) as a normal ``{"status": "error", ...}``
-        return, same convention as ``hal0.mcp.admin.dispatch`` — so every
-        one of this mount's tool calls came back ``isError: false`` even on
-        a hard validation failure (#1796; ``POST /api/memory/add`` with a
-        wrong field name is the concrete repro). Raise here, once, instead
-        of touching all ~20 ``@server.tool`` bodies below — FastMCP's
-        lowlevel handler catches the exception and flips ``isError: true``.
-        """
-        result = await _raw_dispatcher(tool, args)
-        if isinstance(result, dict) and result.get("status") == "error":
-            raise ToolError(json.dumps(result.get("error", result)))
-        return result
+async def _dispatch(ctx: ToolContext | None, tool: str, args: dict[str, Any]) -> dict[str, Any]:
+    """Run one memory tool against the per-app state of the calling server.
+
+    Every shared tool definition below calls this. The dispatcher is bound
+    per call from the server's ``state`` (#2396) — :func:`make_dispatcher`
+    only closes over its arguments, so this is cheap.
+
+    The dispatcher signals failure (bad args, memory-schema error, engine
+    exception, ...) as a normal ``{"status": "error", ...}`` return, same
+    convention as ``hal0.mcp.admin.dispatch`` — so every one of this mount's
+    tool calls came back ``isError: false`` even on a hard validation failure
+    (#1796; ``POST /api/memory/add`` with a wrong field name is the concrete
+    repro). Raise here, once, instead of touching every tool body —
+    FastMCP's lowlevel handler catches the exception and flips
+    ``isError: true``.
+    """
+    server = bound_server(ctx)
+    state = server.hal0_state
+    raw_dispatcher = make_dispatcher(
+        state.memory_provider,
+        client_id_resolver=server.hal0_hooks.get("client_id_resolver"),
+        private_resolver=server.hal0_hooks.get("private_resolver"),
+        approval_queue=getattr(state, "approval_queue", None),
+        add_preflight=getattr(state, "mcp_memory_add_preflight", None),
+    )
+    result: dict[str, Any] = await raw_dispatcher(tool, args)
+    if isinstance(result, dict) and result.get("status") == "error":
+        raise ToolError(json.dumps(result.get("error", result)))
+    return result
+
+
+@functools.cache
+def _memory_tool_definitions() -> dict[str, Tool]:
+    """The shared memory tool definitions, built on first use per process.
+
+    Registered on a scratch FastMCP that is never mounted — it only collects
+    the :class:`Tool` objects, which every :func:`build_server` then shares.
+    Takes no inputs: nothing per-app goes into a definition.
+    """
+    server = FastMCP("hal0-memory")
 
     # Typed signatures so FastMCP publishes real parameter schemas —
     # the old single ``args: dict`` param advertised an opaque object
     # and every client had to guess the call shape from docs. The
     # trailing ``args`` param keeps the legacy envelope working:
-    # explicit params win over same-named ``args`` keys.
+    # explicit params win over same-named ``args`` keys. ``ctx`` is the
+    # FastMCP-injected Context (never advertised) that leads each call
+    # back to its server's per-app state.
 
     def _merged(args: dict[str, Any] | None, **explicit: Any) -> dict[str, Any]:
         merged = dict(args or {})
@@ -1509,8 +1550,10 @@ def build_server(
         update_mode: str | None = None,
         sync: bool | None = None,
         args: dict[str, Any] | None = None,
+        ctx: ToolContext | None = None,
     ) -> dict[str, Any]:
-        return await dispatcher(
+        return await _dispatch(
+            ctx,
             "memory_add",
             _merged(
                 args,
@@ -1546,8 +1589,10 @@ def build_server(
         tag_groups: list[dict[str, Any]] | None = None,
         min_scores: dict[str, float] | None = None,
         args: dict[str, Any] | None = None,
+        ctx: ToolContext | None = None,
     ) -> dict[str, Any]:
-        return await dispatcher(
+        return await _dispatch(
+            ctx,
             "memory_search",
             _merged(
                 args,
@@ -1572,8 +1617,10 @@ def build_server(
         cursor: str | None = None,
         limit: int | None = None,
         args: dict[str, Any] | None = None,
+        ctx: ToolContext | None = None,
     ) -> dict[str, Any]:
-        return await dispatcher(
+        return await _dispatch(
+            ctx,
             "memory_list",
             _merged(args, dataset=dataset, cursor=cursor, limit=limit),
         )
@@ -1595,8 +1642,10 @@ def build_server(
         ids: list[str] | None = None,
         dataset: str | list[str] | None = None,
         args: dict[str, Any] | None = None,
+        ctx: ToolContext | None = None,
     ) -> dict[str, Any]:
-        return await dispatcher(
+        return await _dispatch(
+            ctx,
             "memory_delete",
             _merged(args, ids=ids, dataset=dataset),
         )
@@ -1623,8 +1672,10 @@ def build_server(
         query_timestamp: str | None = None,
         min_scores: dict[str, float] | None = None,
         args: dict[str, Any] | None = None,
+        ctx: ToolContext | None = None,
     ) -> dict[str, Any]:
-        return await dispatcher(
+        return await _dispatch(
+            ctx,
             "memory_recall",
             _merged(
                 args,
@@ -1668,8 +1719,10 @@ def build_server(
         include: dict[str, Any] | None = None,
         response_schema: dict[str, Any] | None = None,
         args: dict[str, Any] | None = None,
+        ctx: ToolContext | None = None,
     ) -> dict[str, Any]:
-        return await dispatcher(
+        return await _dispatch(
+            ctx,
             "memory_reflect",
             _merged(
                 args,
@@ -1710,8 +1763,10 @@ def build_server(
         state: str | None = None,
         reason: str | None = None,
         args: dict[str, Any] | None = None,
+        ctx: ToolContext | None = None,
     ) -> dict[str, Any]:
-        return await dispatcher(
+        return await _dispatch(
+            ctx,
             "memory_curate",
             _merged(
                 args,
@@ -1737,8 +1792,9 @@ def build_server(
         id: str | None = None,
         dataset: str | None = None,
         args: dict[str, Any] | None = None,
+        ctx: ToolContext | None = None,
     ) -> dict[str, Any]:
-        return await dispatcher("memory_history", _merged(args, id=id, dataset=dataset))
+        return await _dispatch(ctx, "memory_history", _merged(args, id=id, dataset=dataset))
 
     @server.tool(
         name="memory_mental_model_list",
@@ -1756,8 +1812,10 @@ def build_server(
         limit: int | None = None,
         offset: int | None = None,
         args: dict[str, Any] | None = None,
+        ctx: ToolContext | None = None,
     ) -> dict[str, Any]:
-        return await dispatcher(
+        return await _dispatch(
+            ctx,
             "memory_mental_model_list",
             _merged(
                 args,
@@ -1779,8 +1837,11 @@ def build_server(
         id: str | None = None,
         dataset: str | None = None,
         args: dict[str, Any] | None = None,
+        ctx: ToolContext | None = None,
     ) -> dict[str, Any]:
-        return await dispatcher("memory_mental_model_get", _merged(args, id=id, dataset=dataset))
+        return await _dispatch(
+            ctx, "memory_mental_model_get", _merged(args, id=id, dataset=dataset)
+        )
 
     @server.tool(
         name="memory_mental_model_create",
@@ -1801,8 +1862,10 @@ def build_server(
         max_tokens: int | None = None,
         trigger: dict[str, Any] | None = None,
         args: dict[str, Any] | None = None,
+        ctx: ToolContext | None = None,
     ) -> dict[str, Any]:
-        return await dispatcher(
+        return await _dispatch(
+            ctx,
             "memory_mental_model_create",
             _merged(
                 args,
@@ -1830,8 +1893,10 @@ def build_server(
         tags: list[str] | str | None = None,
         trigger: dict[str, Any] | None = None,
         args: dict[str, Any] | None = None,
+        ctx: ToolContext | None = None,
     ) -> dict[str, Any]:
-        return await dispatcher(
+        return await _dispatch(
+            ctx,
             "memory_mental_model_update",
             _merged(
                 args,
@@ -1854,8 +1919,11 @@ def build_server(
         id: str | None = None,
         dataset: str | None = None,
         args: dict[str, Any] | None = None,
+        ctx: ToolContext | None = None,
     ) -> dict[str, Any]:
-        return await dispatcher("memory_mental_model_delete", _merged(args, id=id, dataset=dataset))
+        return await _dispatch(
+            ctx, "memory_mental_model_delete", _merged(args, id=id, dataset=dataset)
+        )
 
     @server.tool(
         name="memory_mental_model_refresh",
@@ -1869,9 +1937,10 @@ def build_server(
         id: str | None = None,
         dataset: str | None = None,
         args: dict[str, Any] | None = None,
+        ctx: ToolContext | None = None,
     ) -> dict[str, Any]:
-        return await dispatcher(
-            "memory_mental_model_refresh", _merged(args, id=id, dataset=dataset)
+        return await _dispatch(
+            ctx, "memory_mental_model_refresh", _merged(args, id=id, dataset=dataset)
         )
 
     @server.tool(
@@ -1887,8 +1956,10 @@ def build_server(
         limit: int | None = None,
         offset: int | None = None,
         args: dict[str, Any] | None = None,
+        ctx: ToolContext | None = None,
     ) -> dict[str, Any]:
-        return await dispatcher(
+        return await _dispatch(
+            ctx,
             "memory_directive_list",
             _merged(
                 args,
@@ -1910,8 +1981,9 @@ def build_server(
         id: str | None = None,
         dataset: str | None = None,
         args: dict[str, Any] | None = None,
+        ctx: ToolContext | None = None,
     ) -> dict[str, Any]:
-        return await dispatcher("memory_directive_get", _merged(args, id=id, dataset=dataset))
+        return await _dispatch(ctx, "memory_directive_get", _merged(args, id=id, dataset=dataset))
 
     @server.tool(
         name="memory_directive_create",
@@ -1926,8 +1998,10 @@ def build_server(
         is_active: bool | None = None,
         tags: list[str] | str | None = None,
         args: dict[str, Any] | None = None,
+        ctx: ToolContext | None = None,
     ) -> dict[str, Any]:
-        return await dispatcher(
+        return await _dispatch(
+            ctx,
             "memory_directive_create",
             _merged(
                 args,
@@ -1954,8 +2028,10 @@ def build_server(
         is_active: bool | None = None,
         tags: list[str] | str | None = None,
         args: dict[str, Any] | None = None,
+        ctx: ToolContext | None = None,
     ) -> dict[str, Any]:
-        return await dispatcher(
+        return await _dispatch(
+            ctx,
             "memory_directive_update",
             _merged(
                 args,
@@ -1978,8 +2054,11 @@ def build_server(
         id: str | None = None,
         dataset: str | None = None,
         args: dict[str, Any] | None = None,
+        ctx: ToolContext | None = None,
     ) -> dict[str, Any]:
-        return await dispatcher("memory_directive_delete", _merged(args, id=id, dataset=dataset))
+        return await _dispatch(
+            ctx, "memory_directive_delete", _merged(args, id=id, dataset=dataset)
+        )
 
     @server.tool(
         name="memory_operation_list",
@@ -1994,8 +2073,10 @@ def build_server(
         offset: int | None = None,
         exclude_parents: bool | None = None,
         args: dict[str, Any] | None = None,
+        ctx: ToolContext | None = None,
     ) -> dict[str, Any]:
-        return await dispatcher(
+        return await _dispatch(
+            ctx,
             "memory_operation_list",
             _merged(
                 args,
@@ -2023,8 +2104,10 @@ def build_server(
         dataset: str | None = None,
         include_payload: bool | None = None,
         args: dict[str, Any] | None = None,
+        ctx: ToolContext | None = None,
     ) -> dict[str, Any]:
-        return await dispatcher(
+        return await _dispatch(
+            ctx,
             "memory_operation_get",
             _merged(args, id=id, dataset=dataset, include_payload=include_payload),
         )
@@ -2038,8 +2121,11 @@ def build_server(
         id: str | None = None,
         dataset: str | None = None,
         args: dict[str, Any] | None = None,
+        ctx: ToolContext | None = None,
     ) -> dict[str, Any]:
-        return await dispatcher("memory_operation_cancel", _merged(args, id=id, dataset=dataset))
+        return await _dispatch(
+            ctx, "memory_operation_cancel", _merged(args, id=id, dataset=dataset)
+        )
 
     @server.tool(
         name="memory_operation_retry",
@@ -2050,8 +2136,9 @@ def build_server(
         id: str | None = None,
         dataset: str | None = None,
         args: dict[str, Any] | None = None,
+        ctx: ToolContext | None = None,
     ) -> dict[str, Any]:
-        return await dispatcher("memory_operation_retry", _merged(args, id=id, dataset=dataset))
+        return await _dispatch(ctx, "memory_operation_retry", _merged(args, id=id, dataset=dataset))
 
     @server.tool(
         name="memory_tags_list",
@@ -2065,8 +2152,10 @@ def build_server(
         limit: int | None = None,
         offset: int | None = None,
         args: dict[str, Any] | None = None,
+        ctx: ToolContext | None = None,
     ) -> dict[str, Any]:
-        return await dispatcher(
+        return await _dispatch(
+            ctx,
             "memory_tags_list",
             _merged(args, dataset=dataset, q=q, source=source, limit=limit, offset=offset),
         )
@@ -2083,9 +2172,10 @@ def build_server(
         dataset: str | None = None,
         refresh: bool | None = None,
         args: dict[str, Any] | None = None,
+        ctx: ToolContext | None = None,
     ) -> dict[str, Any]:
-        return await dispatcher(
-            "memory_bank_stats", _merged(args, dataset=dataset, refresh=refresh)
+        return await _dispatch(
+            ctx, "memory_bank_stats", _merged(args, dataset=dataset, refresh=refresh)
         )
 
     @server.tool(
@@ -2100,10 +2190,11 @@ def build_server(
     async def memory_bank_consolidate(
         dataset: str | None = None,
         args: dict[str, Any] | None = None,
+        ctx: ToolContext | None = None,
     ) -> dict[str, Any]:
-        return await dispatcher("memory_bank_consolidate", _merged(args, dataset=dataset))
+        return await _dispatch(ctx, "memory_bank_consolidate", _merged(args, dataset=dataset))
 
-    return server
+    return {tool.name: tool for tool in server._tool_manager.list_tools()}
 
 
 __all__ = [

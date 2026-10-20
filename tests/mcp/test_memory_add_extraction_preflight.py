@@ -20,6 +20,7 @@ from typing import Any
 
 import pytest
 from fastapi import FastAPI
+from mcp.server.fastmcp.exceptions import ToolError
 
 from hal0.api import mcp_mount
 from hal0.api.routes import memory as memory_routes
@@ -125,14 +126,6 @@ def _mount_below_floor(monkeypatch: pytest.MonkeyPatch) -> tuple[dict[str, Any],
     from hal0.mcp import admin as admin_mod
 
     monkeypatch.setattr(admin_mod, "install_admin_route_map", lambda _app: None)
-    built: dict[str, Any] = {}
-    real_build = memory.build_server
-
-    def _spy(**kwargs: Any) -> Any:
-        built.update(kwargs)
-        return real_build(**kwargs)
-
-    monkeypatch.setattr(memory, "build_server", _spy)
 
     wrapper = StubHindsightWrapper()
     app = FastAPI()
@@ -143,6 +136,10 @@ def _mount_below_floor(monkeypatch: pytest.MonkeyPatch) -> tuple[dict[str, Any],
     mcp_mount.mount_mcp_servers(
         app, approval_queue=ApprovalQueue(), memory_provider=wrapper, memory_dispatcher=None
     )
+    # The mounted memory tools resolve the preflight off app.state at call
+    # time (#2396) — read the binding the server actually uses.
+    server = app.state.mcp_servers["hal0-memory"]
+    built = {"add_preflight": server.hal0_state.mcp_memory_add_preflight, "server": server}
     return built, wrapper
 
 
@@ -161,9 +158,9 @@ async def test_mounted_memory_server_preflights_against_live_app_state(
     with pytest.raises(MemoryExtractionCtxTooSmall):
         await preflight()
 
-    dispatch = memory.make_dispatcher(wrapper, add_preflight=preflight)
-    out = await dispatch("memory_add", {"text": "hello"})
-    assert out["error"]["code"] == "memory.extraction_ctx_too_small"
+    # End to end through the mounted server's memory_add tool.
+    with pytest.raises(ToolError, match=r"memory\.extraction_ctx_too_small"):
+        await built["server"].call_tool("memory_add", {"text": "hello"})
     assert wrapper.add_calls == []
 
 

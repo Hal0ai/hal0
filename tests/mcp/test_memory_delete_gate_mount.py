@@ -19,7 +19,6 @@ from typing import Any
 import pytest
 
 from hal0.api import mcp_mount
-from hal0.mcp import memory
 from hal0.mcp.approval_queue import ApprovalQueue
 
 
@@ -45,33 +44,20 @@ async def test_mounted_memory_server_gates_bulk_delete(monkeypatch: Any) -> None
     """The server ``mount_mcp_servers`` builds must carry the queue."""
     provider = _RecordingProvider()
     queue = ApprovalQueue()
-    built: dict[str, Any] = {}
-
-    real_build = memory.build_server
-
-    def _spy(**kwargs: Any) -> Any:
-        built.update(kwargs)
-        return real_build(**kwargs)
-
-    monkeypatch.setattr(memory, "build_server", _spy)
 
     app = _mount(queue=queue, provider=provider, monkeypatch=monkeypatch)
-    assert app is not None
+    server = app.state.mcp_servers["hal0-memory"]
 
-    assert built.get("approval_queue") is queue, (
+    # The mounted tools resolve the queue off app.state at call time (#2396).
+    assert server.hal0_state.approval_queue is queue, (
         "mount_mcp_servers must arm the memory server's approval gate — "
         "without the queue, /mcp/memory bypasses the admin bulk-delete gate"
     )
 
-    # And the armed server actually gates end-to-end.
-    dispatcher = memory.make_dispatcher(
-        provider,
-        client_id_resolver=lambda: "narrow-agent",
-        private_resolver=lambda: False,
-        approval_queue=queue,
-    )
-    out = await dispatcher("memory_delete", {"ids": ["a", "b", "c"]})
-    assert out["status"] == "pending_approval"
+    # And the armed server actually gates end-to-end, through the mount.
+    await server.call_tool("memory_delete", {"ids": ["a", "b", "c"]})
+    pending = queue.list_pending()
+    assert [entry["tool"] for entry in pending] == ["memory_delete"]
     assert provider.delete_calls == []
 
 
@@ -83,25 +69,17 @@ def test_admin_memory_dispatcher_is_not_double_gated(monkeypatch: Any) -> None:
     """
     provider = _RecordingProvider()
     queue = ApprovalQueue()
-    admin_kwargs: dict[str, Any] = {}
-
-    from hal0.mcp import admin as admin_mod
-
-    real_build = admin_mod.build_server
-
-    def _spy(**kwargs: Any) -> Any:
-        admin_kwargs.update(kwargs)
-        return real_build(**kwargs)
-
-    monkeypatch.setattr(admin_mod, "build_server", _spy)
 
     sentinel = object()
-    _mount(queue=queue, provider=provider, monkeypatch=monkeypatch, memory_dispatcher=sentinel)
+    app = _mount(
+        queue=queue, provider=provider, monkeypatch=monkeypatch, memory_dispatcher=sentinel
+    )
 
-    # The admin server receives the plain dispatcher it was given — the
+    # The admin server resolves the plain dispatcher it was given — the
     # gate lives in admin.dispatch, above this callable.
-    assert admin_kwargs.get("memory_dispatcher") is sentinel
-    assert admin_kwargs.get("approval_queue") is queue
+    state = app.state.mcp_servers["hal0-admin"].hal0_state
+    assert state.memory_dispatcher is sentinel
+    assert state.approval_queue is queue
 
 
 def _mount(
