@@ -533,7 +533,12 @@ def _hermes_root_prelude(terminal_env: dict[str, str] | None = None) -> None:
         _install_cli_wrapper,
         _persist_hermes_python,
         resolve_hermes_python,
+        sweep_stale_agent_dropins_as_root,
     )
+
+    # #2803: the stale hal0-agent@ drop-in sweep is root-only, and install_hermes
+    # runs as hal0 after the re-exec, so it must happen here, before the drop.
+    sweep_stale_agent_dropins_as_root()
 
     try:
         hermes_python = resolve_hermes_python()

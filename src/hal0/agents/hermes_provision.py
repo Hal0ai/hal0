@@ -5637,6 +5637,9 @@ class StaleDropinCleanupResult:
     """Outcome of :func:`cleanup_stale_agent_dropins`."""
 
     disabled: list[str] = field(default_factory=list)
+    #: original path -> the path it was actually renamed to (``.hal0-disabled``
+    #: or ``.hal0-disabled.N`` when an earlier disabled copy exists).
+    renamed_to: dict[str, str] = field(default_factory=dict)
     daemon_reloaded: bool = False
 
 
@@ -5665,6 +5668,7 @@ def cleanup_stale_agent_dropins(
 
     do_rename = rename if rename is not None else (lambda src, dst: src.rename(dst))
     disabled: list[str] = []
+    renamed_to: dict[str, str] = {}
     for dropin_dir in sorted(systemd_dir.glob("hal0-agent@*.service.d")):
         if not dropin_dir.is_dir():
             continue
@@ -5692,6 +5696,7 @@ def cleanup_stale_agent_dropins(
                     )
                     continue
                 disabled.append(str(conf))
+                renamed_to[str(conf)] = str(target)
                 log.warning(
                     "hermes_provision.disabled_stale_agent_dropin",
                     path=str(conf),
@@ -5705,7 +5710,38 @@ def cleanup_stale_agent_dropins(
             reloaded = True
         except (subprocess.SubprocessError, OSError) as exc:
             log.warning("hermes_provision.stale_dropin_daemon_reload_failed", error=str(exc))
-    return StaleDropinCleanupResult(disabled=disabled, daemon_reloaded=reloaded)
+    return StaleDropinCleanupResult(
+        disabled=disabled, renamed_to=renamed_to, daemon_reloaded=reloaded
+    )
+
+
+def sweep_stale_agent_dropins_as_root() -> None:
+    """Run :func:`cleanup_stale_agent_dropins` and tell the operator what moved.
+
+    Root-only and best-effort. Called from ``_provision_hermes``'s root prelude
+    (#2803): ``install_hermes`` itself runs re-exec'd as ``hal0`` on every CLI and
+    installer path, so its own euid guard never fires there. Safe to call twice
+    (idempotent).
+    """
+    if os.geteuid() != 0:
+        return
+    try:
+        cleanup = cleanup_stale_agent_dropins()
+    except (OSError, subprocess.SubprocessError) as exc:
+        log.warning("hermes_provision.stale_dropin_cleanup_failed", error=str(exc))
+        return
+    if cleanup.disabled:
+        # Unconditional (not verbose-gated): an operator file was taken out of service.
+        moves = ", ".join(
+            f"{p} -> {cleanup.renamed_to.get(p, p + '.hal0-disabled')}" for p in cleanup.disabled
+        )
+        print(
+            "[cleanup] WARNING: disabled agent drop-in(s) declaring "
+            "ConfigurationDirectory= (crash-loops the unit with status=241): "
+            + moves
+            + ". Re-add your other settings via `systemctl edit "
+            "--drop-in=local hal0-agent@hermes`."
+        )
 
 
 def _privileged_systemctl(verb: str, body: str | None = None) -> None:
@@ -7223,20 +7259,7 @@ def install_hermes(
     # RATIFIED 2026-07-18 (inc-1 deliverable 5): scrub stale hal0-agent@ drop-in
     # debris (the 241/CONFIGURATION_DIRECTORY brick-loop class) BEFORE the unit is
     # (re)enabled, on every install. Root-only, convergent, best-effort.
-    if os.geteuid() == 0:
-        try:
-            cleanup = cleanup_stale_agent_dropins()
-            if cleanup.disabled:
-                # Unconditional (not verbose-gated): an operator file was taken out of service.
-                print(
-                    "[cleanup] WARNING: disabled agent drop-in(s) declaring "
-                    "ConfigurationDirectory= (crash-loops the unit with status=241): "
-                    + ", ".join(f"{p} -> {p}.hal0-disabled" for p in cleanup.disabled)
-                    + ". Re-add your other settings via `systemctl edit "
-                    "--drop-in=local hal0-agent@hermes`."
-                )
-        except (OSError, subprocess.SubprocessError) as exc:
-            log.warning("hermes_provision.stale_dropin_cleanup_failed", error=str(exc))
+    sweep_stale_agent_dropins_as_root()
 
     report = InstallReport(
         hermes_home=state.hermes_home, venv=state.venv, agent_id=agent_id, repair=repair
