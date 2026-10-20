@@ -11,6 +11,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from hal0.agents import hermes_provision as hp
 
 
@@ -97,3 +99,29 @@ def test_second_disable_never_overwrites_earlier_copy(tmp_path: Path) -> None:
     assert len(texts) == 2
     assert any("# first" in t for t in texts) and any("# second" in t for t in texts)
     assert not list(d.glob("*.conf"))
+
+
+def test_result_reports_real_rename_target(tmp_path: Path) -> None:
+    d = tmp_path / "hal0-agent@hermes.service.d"
+    d.mkdir()
+    (d / "override.conf").write_text("[Service]\nConfigurationDirectory=foo\n")
+    (d / "override.conf.hal0-disabled").write_text("old")
+    result = hp.cleanup_stale_agent_dropins(systemd_dir=tmp_path, run=lambda *a, **k: None)
+    src = str(d / "override.conf")
+    assert result.renamed_to == {src: src + ".hal0-disabled.1"}
+
+
+def test_root_prelude_runs_sweep_before_privilege_drop(monkeypatch) -> None:
+    """#2803: install_hermes runs as hal0 post-reexec, so the root prelude must sweep."""
+    from hal0.cli import agent_commands as ac
+
+    calls: list[str] = []
+
+    def _stop() -> str:
+        raise RuntimeError("stop after sweep")
+
+    monkeypatch.setattr(hp, "sweep_stale_agent_dropins_as_root", lambda: calls.append("sweep"))
+    monkeypatch.setattr(hp, "resolve_hermes_python", _stop)
+    with pytest.raises(RuntimeError):
+        ac._hermes_root_prelude({})
+    assert calls == ["sweep"]
