@@ -30,7 +30,13 @@ applying. Add those subsections to a version's section to surface them; see
 
 ## [Unreleased]
 
+### Breaking
+
+- **Rotating a key now closes the open WebSockets that were using the old credential.** Before, every WebSocket checked its cookie or key only when it connected, so an agent chat socket, a realtime socket or a board socket opened before a rotation kept working afterwards. A rotation now closes those sockets with code 4401. That covers the default rotation that signs out other sessions, and client-key and admin-key rotations, including an admin-key rotation with `keep_sessions`. Agent chat sockets also re-check their cookie every 30 seconds and on every message, so they close with 4401 when the session expires (8 hours, or 30 days with Remember me), and the message that hit the expired cookie is dropped and has to be resent. A client that gets 4401 should sign in again and reconnect. Open Server-Sent Events streams, such as `/api/events/stream`, are not closed yet; that is tracked in #2816 (#2801).
+
 ### Fixed
+
+- **Re-running the installer leaves a disabled `hermes-gateway`, `hal0-bench.timer` or `hal0-bench-worker` off.** The installer ran `systemctl enable --now` on these units every time, so a re-run silently turned back on anything the operator had disabled. It now records each unit's state before touching it. A disabled unit is refreshed but left off, a masked unit is not written over at all, and the Hermes gateway generator runs without starting the gateway. The installer prints the command that turns each one back on. Fresh installs, and units that were already enabled, behave as before (#2807).
 
 - **`hal0 agent bootstrap hermes`, `--repair` and the installer now clear a stale Hermes agent drop-in.** The sweep that renames a leftover `hal0-agent@` drop-in (the kind that makes the unit fail with status 241 and restart in a loop) only ran as root, but every CLI and installer path had already switched to the `hal0` user before reaching it, so it never ran and the broken unit survived every bootstrap, reprovision and upgrade. The sweep now runs as root before that switch, and the warning names the file the drop-in was actually renamed to, including a numbered `.hal0-disabled.N` name (#2803).
 - **Re-running the installer no longer reports false memory-graph and structured-output failures.** After restarting hal0-api the installer only waited for systemd to call the service active, so its post-install checks could run before the API answered HTTP and print `hal0 API not running` or `structured-output probe FAILED`. It now waits up to 60 seconds for `/api/health` to answer before those checks, and prints a warning instead of stopping the install if it never does (#2804).
