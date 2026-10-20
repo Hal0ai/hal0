@@ -278,3 +278,72 @@ async def test_aclose_is_idempotent() -> None:
     dispatcher = Dispatcher()  # lazy client never instantiated
     await dispatcher.aclose()
     await dispatcher.aclose()  # second call is a no-op
+
+
+_CTX_500 = {
+    "error": {
+        "code": 500,
+        "message": "Context size has been exceeded.",
+        "type": "server_error",
+    }
+}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streaming", [False, True])
+async def test_forward_llama_context_overflow_500_becomes_typed_4xx(streaming: bool) -> None:
+    """llama-server's shared-slot KV overflow 500 is a capacity error, not a crash (#2786)."""
+    from hal0.dispatcher.router import ContextExceeded
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        return httpx.Response(500, json=_CTX_500)
+
+    dispatcher = _make_dispatcher(httpx.MockTransport(handler))
+    try:
+        with pytest.raises(ContextExceeded) as ei:
+            await dispatcher.forward(_call(streaming=streaming))
+        assert ei.value.status == 400
+        assert ei.value.code == "context.exceeded"
+        assert ei.value.details["upstream"] == "test-upstream"
+    finally:
+        await dispatcher.aclose()
+
+
+@pytest.mark.asyncio
+async def test_forward_context_overflow_carries_budget_fields() -> None:
+    from hal0.dispatcher.router import ContextExceeded
+
+    body = {
+        "error": {
+            "code": 500,
+            "message": "Context size has been exceeded.",
+            "type": "server_error",
+            "n_ctx": 4096,
+            "n_prompt_tokens": 5000,
+        }
+    }
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        return httpx.Response(500, json=body)
+
+    dispatcher = _make_dispatcher(httpx.MockTransport(handler))
+    try:
+        with pytest.raises(ContextExceeded) as ei:
+            await dispatcher.forward(_call())
+        assert ei.value.details["n_ctx"] == 4096
+        assert ei.value.details["n_prompt_tokens"] == 5000
+    finally:
+        await dispatcher.aclose()
+
+
+@pytest.mark.asyncio
+async def test_forward_unrelated_500_still_passes_through() -> None:
+    def handler(req: httpx.Request) -> httpx.Response:
+        return httpx.Response(500, json={"error": {"message": "boom"}})
+
+    dispatcher = _make_dispatcher(httpx.MockTransport(handler))
+    try:
+        resp = await dispatcher.forward(_call())
+        assert resp.status_code == 500
+    finally:
+        await dispatcher.aclose()

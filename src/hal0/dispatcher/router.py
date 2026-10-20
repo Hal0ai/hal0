@@ -212,6 +212,36 @@ _UPSTREAM_PATH_REWRITES: dict[str, str] = {
 # unaffected.
 
 
+_CONTEXT_EXCEEDED_MARKER = b"context size has been exceeded"
+
+
+def _context_exceeded_from_body(raw: bytes, call: UpstreamCall) -> ContextExceeded | None:
+    """Map llama-server's context-overflow 500 body to :class:`ContextExceeded`."""
+    if _CONTEXT_EXCEEDED_MARKER not in raw.lower():
+        return None
+    details: dict[str, Any] = {"upstream": call.upstream_name}
+    try:
+        parsed = json.loads(raw)
+    except ValueError:
+        parsed = None
+    err = parsed.get("error") if isinstance(parsed, dict) else None
+    if isinstance(err, dict):
+        for key in ("n_ctx", "n_prompt_tokens"):
+            val = err.get(key)
+            if isinstance(val, int) and not isinstance(val, bool):
+                details[key] = val
+    log.warning("dispatch.context_exceeded", **details)
+    return ContextExceeded(
+        f"request exceeds the context window of upstream {call.upstream_name!r}"
+        " (the slot's shared context pool overflowed)",
+        details=details,
+    )
+
+
+async def _replay_bytes(raw: bytes) -> AsyncIterator[bytes]:
+    yield raw
+
+
 # ── Typed errors ──────────────────────────────────────────────────────────────
 
 
@@ -277,6 +307,20 @@ class UpstreamTimeout(UpstreamUnavailable):
 
     code = "dispatch.upstream_timeout"
     status = 504
+
+
+class ContextExceeded(DispatchError):
+    """The request outgrew the slot's context pool (llama-server's 500).
+
+    llama-server reports a KV-pool overflow (``--parallel`` sequences sharing
+    ``--ctx-size``) as HTTP 500 ``Context size has been exceeded``.  That is a
+    capacity condition the caller can act on, not a crashed upstream, so it is
+    surfaced as a 400 with ``details`` carrying the budget when llama-server
+    supplied it (``n_ctx``, ``n_prompt_tokens``) (#2786).
+    """
+
+    code = "context.exceeded"
+    status = 400
 
 
 class DispatcherPoolExhausted(DispatchError):
@@ -1321,6 +1365,11 @@ class Dispatcher:
                 },
             ) from exc
 
+        if resp.status_code == 500:
+            exceeded = _context_exceeded_from_body(resp.content, call)
+            if exceeded is not None:
+                raise exceeded
+
         return Response(
             content=resp.content,
             status_code=resp.status_code,
@@ -1425,6 +1474,23 @@ class Dispatcher:
                     "error": str(exc) or type(exc).__name__,
                 },
             ) from exc
+
+        if resp.status_code == 500:
+            # A 500 here is a short JSON error body, not an event stream; read
+            # it so a context-pool overflow can be typed (#2786).
+            try:
+                raw = await resp.aread()
+            finally:
+                await resp.aclose()
+            exceeded = _context_exceeded_from_body(raw, call)
+            if exceeded is not None:
+                raise exceeded
+            return StreamingResponse(
+                _replay_bytes(raw),
+                status_code=resp.status_code,
+                headers=_filter_response_headers(resp.headers),
+                media_type=resp.headers.get("content-type"),
+            )
 
         return StreamingResponse(
             self._guarded_stream(resp, call),
@@ -1905,6 +1971,7 @@ def _stall_sse_frames(
 
 
 __all__ = [
+    "ContextExceeded",
     "DispatchError",
     "Dispatcher",
     "DispatcherPoolExhausted",
