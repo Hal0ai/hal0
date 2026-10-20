@@ -313,7 +313,7 @@ of the expiry. One case does not close an open socket:
 ### Revoked streams
 
 A streaming response (the `text/event-stream` feeds such as
-`/api/events/stream`, `/api/journal` and `/api/activity`, and streamed
+`/api/events/stream`, `/api/journal/stream` and `/api/activity/stream`, and streamed
 `/v1` completions) follows the same rule as a WebSocket: it is re-checked on a
 rotation and every 30 seconds, and ends once its cookie, bearer or `api_key`
 would no longer be let in. Nothing more the server produces reaches the
@@ -327,8 +327,10 @@ data: {"reason": "credential revoked"}
 It is a named event, so an `EventSource` `onmessage` handler does not see it;
 listen with `addEventListener("revoked", ...)` to tell a sign-out from a
 dropped connection. A reconnect with the old credential is refused with `401`.
-Only `text/event-stream` responses are held open this way; any other response
-is short and finishes on its own. Like sockets, streams are only re-checked
+Only `text/event-stream` responses and streamed `/v1` relays (whatever content
+type the upstream sends) are re-checked this way; a relay that is not
+`text/event-stream` just ends, with no final frame. Any other response is
+short and finishes on its own. Like sockets, streams are only re-checked
 while auth is enforced for the caller: with auth off nothing is revoked.
 
 ## Rate limiting

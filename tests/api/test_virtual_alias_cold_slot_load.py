@@ -119,7 +119,9 @@ class _RecordingDispatcher:
         from types import SimpleNamespace
 
         self.models.append(body.get("model"))
-        return SimpleNamespace(upstream_name="flm", resolved_model=body.get("model"))
+        return SimpleNamespace(
+            upstream_name="flm", resolved_model=body.get("model"), streaming=False
+        )
 
     async def forward(self, call: Any) -> Any:
         from fastapi.responses import JSONResponse

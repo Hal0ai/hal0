@@ -34,6 +34,8 @@ from starlette.responses import Response
 from hal0.api import auth as auth_mod
 from hal0.api import create_app, live_sockets
 from hal0.api.agents import _auth
+from hal0.dispatcher.router import Dispatcher
+from hal0.upstreams.registry import Upstream, UpstreamRegistry
 
 ADMIN_KEY = "test-admin-key-2816"
 CLIENT_KEY = "test-client-key-2816"
@@ -205,14 +207,24 @@ def _assert_ends_revoked(lines: Iterator[str]) -> None:
 # Admin streams: cookie and admin key.
 
 
-def test_event_stream_ends_when_rotation_signs_sessions_out(served: Served) -> None:
-    """A signed-in browser's event stream must not survive the sign-out."""
+def test_event_stream_ends_when_rotation_signs_sessions_out(
+    served: Served, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A signed-in browser's event stream must not survive the sign-out.
+
+    It must end through the graceful path (the app's ``receive()`` wakes with
+    a disconnect, and Starlette closes the generator), not by the drain
+    timeout's cancel: that timeout is made far longer than the bound here.
+    """
+    monkeypatch.setattr(live_sockets, "STREAM_DRAIN_TIMEOUT_S", 60.0)
     cookie = _sign_in(served)
     baseline = _subscribers(served)
     with _open_stream(served, "/api/events/stream", cookie) as lines:
         _rotate(served, tier="admin")
+        revoked_at = time.monotonic()
 
         _assert_ends_revoked(lines)
+        assert time.monotonic() - revoked_at < 3.0
     _assert_released(served, baseline)
 
 
@@ -432,3 +444,130 @@ def test_guard_leaves_a_plain_response_alone() -> None:
 
     sent, _ = asyncio.run(_drive(chunked, lambda: False, revoke_after=99))
     assert [m.get("body") for m in sent[1:]] == [b"{", b"}"]
+
+
+# ---------------------------------------------------------------------------
+# A real ``/v1`` ``stream: true`` relay through the dispatcher.
+
+
+class _Registry(UpstreamRegistry):
+    def __init__(self, upstreams: list[Upstream]) -> None:
+        super().__init__()
+        self._store = {u.name: u for u in upstreams}
+
+    def list(self) -> list[Upstream]:  # type: ignore[override]
+        return list(self._store.values())
+
+    def get(self, name: str) -> Upstream | None:  # type: ignore[override]
+        return self._store.get(name)
+
+    def __getitem__(self, name: str) -> Upstream:
+        return self._store[name]
+
+
+@pytest.mark.parametrize("upstream_type", ["text/event-stream", "application/octet-stream"])
+def test_v1_stream_relay_ends_when_client_key_rotates(
+    served: Served, monkeypatch: pytest.MonkeyPatch, upstream_type: str
+) -> None:
+    """A streamed completion is revoked whatever content type the upstream sends.
+
+    The relay passes the upstream's content type through, so coverage cannot
+    rest on it: the ``/v1`` route marks the request instead.
+    """
+    monkeypatch.setenv("TEST_2816_UPSTREAM_KEY", "sk-upstream")
+    model = "test-2816-model"
+    upstream = Upstream(
+        name="fake-upstream",
+        kind="remote",
+        url="https://upstream.invalid/v1",
+        auth_value_env="TEST_2816_UPSTREAM_KEY",
+    )
+    upstream_closed = threading.Event()
+
+    async def endless() -> Any:
+        try:
+            while True:
+                yield b'data: {"choices":[{"delta":{"content":"x"}}]}\n\n'
+                await asyncio.sleep(0.05)
+        finally:
+            upstream_closed.set()
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=endless(), headers={"content-type": upstream_type})
+
+    async def online(_u: Upstream) -> bool:
+        return True
+
+    served.app.state.dispatcher = Dispatcher(
+        upstream_registry=_Registry([upstream]),
+        is_online=online,
+        cached_models=lambda name: [model] if name == upstream.name else [],
+        http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+    )
+    headers = {"Authorization": f"Bearer {CLIENT_KEY}"}
+    body = {"model": model, "stream": True, "messages": [{"role": "user", "content": "hi"}]}
+    with (
+        httpx.Client(timeout=httpx.Timeout(_DEADLINE_S, read=_DEADLINE_S)) as client,
+        client.stream(
+            "POST", f"{served.url}/v1/chat/completions", json=body, headers=headers
+        ) as resp,
+    ):
+        assert resp.status_code == 200, resp.read()
+        assert resp.headers["content-type"].startswith(upstream_type)
+        lines = resp.iter_lines()
+        assert next(lines).startswith("data: ")
+        assert live_sockets.open_count() == 1
+
+        _rotate(served, tier="client")
+
+        seen = _read_to_end(lines)
+        if upstream_type == "text/event-stream":
+            assert seen[-3:-1] == REVOKED_LINES, seen[-5:]
+        else:
+            assert "event: revoked" not in seen
+    _wait_for(upstream_closed.is_set, "upstream stream was not closed")
+    _wait_for(lambda: live_sockets.open_count() == 0, "stream left registered")
+
+
+# ---------------------------------------------------------------------------
+# The ticker forgives one raising check; a rotation never does.
+
+
+def test_tick_revokes_only_after_consecutive_check_errors() -> None:
+    """One raising tick is forgiven, and a passing tick resets the count."""
+
+    async def _run() -> list[bool]:
+        plan: list[bool] = []  # True = raise; empty = pass (registration)
+
+        def check() -> bool:
+            if plan and plan.pop(0):
+                raise OSError("secret.bin: Too many open files")
+            return True
+
+        observed: list[bool] = []
+        with live_sockets.track(check) as revoked:
+            plan.extend([True, False, True, True])  # raise, pass, raise, raise
+            for _ in range(4):
+                live_sockets.revalidate(tick=True)
+                observed.append(revoked.is_set())
+        return observed
+
+    assert asyncio.run(_run()) == [False, False, False, True]
+    assert live_sockets.open_count() == 0
+
+
+def test_rotation_revokes_on_the_first_check_error() -> None:
+    async def _run() -> bool:
+        broken = False
+
+        def check() -> bool:
+            if broken:
+                raise OSError("secret.bin: Too many open files")
+            return True
+
+        with live_sockets.track(check) as revoked:
+            broken = True
+            assert live_sockets.revalidate() == 1
+            return revoked.is_set()
+
+    assert asyncio.run(_run()) is True

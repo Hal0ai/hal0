@@ -65,6 +65,16 @@ STREAM_DRAIN_TIMEOUT_S: float = 5.0
 #: opened with; a rotation does not wait for it.
 REVALIDATE_INTERVAL_S: float = 30.0
 
+#: Consecutive ticker passes whose check *raised* before an entry is revoked.
+#: One transient error (an ``OSError`` reading ``secret.bin``) must not end
+#: every cookie connection at once. A check that returns false, and every
+#: check a rotation runs, still revokes on the first failure.
+TICK_ERRORS_TO_REVOKE: Final[int] = 2
+
+#: Scope key a route sets (:func:`mark_long_lived`) to have its streaming
+#: response registered whatever its content type says.
+LONG_LIVED_SCOPE_KEY: Final[str] = "hal0.long_lived_stream"
+
 Scope = MutableMapping[str, Any]
 Message = MutableMapping[str, Any]
 Receive = Callable[[], Awaitable[Message]]
@@ -76,6 +86,7 @@ class _Entry:
     still_authorized: Callable[[], bool]
     loop: asyncio.AbstractEventLoop
     revoked: asyncio.Event = field(default_factory=asyncio.Event)
+    tick_errors: int = 0
 
 
 _lock = threading.Lock()
@@ -94,6 +105,14 @@ def track(still_authorized: Callable[[], bool]) -> Iterator[asyncio.Event]:
     landed between the gate's own check and this call is not missed: the
     event is then already set. Must be entered from the event loop serving
     the socket.
+
+    ``still_authorized`` runs on the event loop (on entry, and for a
+    rotation) and also on the ticker thread (:func:`_tick`), at the same
+    time as the loop. It must therefore be thread-safe and must not touch
+    loop state: read the credential state and the request's scope, nothing
+    else. The middleware's predicate (``_still_admitted``) does only that:
+    it reads ``os.environ``, the cached auth posture, the immutable scope
+    headers, query string and peer, and the session secret file.
     """
     entry = _Entry(still_authorized=still_authorized, loop=asyncio.get_running_loop())
     with _lock:
@@ -108,12 +127,30 @@ def track(still_authorized: Callable[[], bool]) -> Iterator[asyncio.Event]:
             _entries.discard(entry)
 
 
-def _check(entry: _Entry) -> bool:
+def _check(entry: _Entry, *, tick: bool = False) -> bool:
+    """Run one entry's predicate. Deny by default: a check that raises revokes.
+
+    On the ticker path (``tick``) a raising check is forgiven until it has
+    raised :data:`TICK_ERRORS_TO_REVOKE` times in a row, so one transient
+    error does not end every connection. Nothing else is forgiven.
+    """
     try:
-        return bool(entry.still_authorized())
-    except Exception as exc:  # deny by default: a broken check revokes
-        log.warning("hal0.live_sockets.check_failed", error=str(exc))
+        allowed = bool(entry.still_authorized())
+    except Exception as exc:
+        if tick:
+            entry.tick_errors += 1
+            if entry.tick_errors < TICK_ERRORS_TO_REVOKE:
+                log.warning(
+                    "hal0.live_sockets.check_failed",
+                    error=str(exc),
+                    consecutive=entry.tick_errors,
+                    revoked=False,
+                )
+                return True
+        log.warning("hal0.live_sockets.check_failed", error=str(exc), revoked=True)
         return False
+    entry.tick_errors = 0
+    return allowed
 
 
 def _signal(entry: _Entry) -> None:
@@ -128,18 +165,19 @@ def _signal(entry: _Entry) -> None:
             entry.loop.call_soon_threadsafe(entry.revoked.set)
 
 
-def revalidate() -> int:
-    """Re-check every open socket; signal the ones that fail. Returns that count.
+def revalidate(*, tick: bool = False) -> int:
+    """Re-check every open socket and stream; signal the ones that fail. Returns that count.
 
     Call it after a credential changes in this process (the key in
     ``os.environ``, the secret on disk), never before: each predicate reads
-    the live credential state.
+    the live credential state. ``tick`` is for the periodic ticker only (see
+    :func:`_check`); a rotation must stay strict.
     """
     with _lock:
         entries = [e for e in _entries if not e.revoked.is_set()]
     revoked = 0
     for entry in entries:
-        if not _check(entry):
+        if not _check(entry, tick=tick):
             _signal(entry)
             revoked += 1
     if revoked:
@@ -172,9 +210,20 @@ def _tick() -> None:
                 _ticker = None
                 return
         try:
-            revalidate()
+            revalidate(tick=True)
         except Exception as exc:
             log.warning("hal0.live_sockets.tick_failed", error=str(exc))
+
+
+def mark_long_lived(scope: Scope) -> None:
+    """Have this request's streaming response registered like an event stream.
+
+    For a route that streams for long under a content type it does not
+    control, such as a ``/v1`` ``stream: true`` relay, which passes through
+    whatever content type the upstream sent. The scope is the one the
+    middleware holds, so a route sets it on ``request.scope``.
+    """
+    scope[LONG_LIVED_SCOPE_KEY] = True
 
 
 def open_count() -> int:
@@ -288,9 +337,10 @@ async def guard_http_stream(
 ) -> None:
     """Run ``app`` for one HTTP request, ending its response once it is revoked.
 
-    Only a ``text/event-stream`` response is registered, from its start
-    until the request ends: that is the long-lived kind (the event, journal
-    and activity feeds, streamed completions). Any other response, a chunked
+    Only a ``text/event-stream`` response, or one whose route called
+    :func:`mark_long_lived`, is registered, from its start until the request
+    ends: that is the long-lived kind (the event, journal and activity feeds,
+    streamed completions). Any other response, a chunked
     one included, is bounded and finishes on its own; registering those would
     also catch the rotation request itself, whose body is chunked by the
     middleware stack and whose own credential the rotation has just
@@ -308,8 +358,9 @@ async def guard_http_stream(
       polling ``request.is_disconnected()`` learn a client went away; their
       normal disconnect path closes the generator and releases its
       subscriptions;
-    - once the app returns, the response is ended with
-      :data:`REVOKED_SSE_EVENT` as its last frame;
+    - once the app returns, the response is ended: a ``text/event-stream``
+      one with :data:`REVOKED_SSE_EVENT` as its last frame, a stream marked
+      by :func:`mark_long_lived` under another type with no extra bytes;
     - an app still running :data:`STREAM_DRAIN_TIMEOUT_S` after the
       revocation is cancelled. Errors the app raises while winding down are
       logged, not raised into the server.
@@ -358,7 +409,7 @@ async def guard_http_stream(
             for name, value in message.get("headers") or ():
                 if bytes(name).lower() == b"content-type":
                     event_stream = bytes(value).lower().startswith(b"text/event-stream")
-            if event_stream:
+            if event_stream or scope.get(LONG_LIVED_SCOPE_KEY):
                 arm()
         elif kind == "http.response.body":
             if stopped():
@@ -404,7 +455,7 @@ async def guard_http_stream(
             await send(
                 {
                     "type": "http.response.body",
-                    "body": REVOKED_SSE_EVENT,
+                    "body": REVOKED_SSE_EVENT if event_stream else b"",
                     "more_body": False,
                 }
             )
@@ -415,6 +466,7 @@ __all__ = [
     "REVOKED_SSE_EVENT",
     "guard_http_stream",
     "guard_websocket",
+    "mark_long_lived",
     "open_count",
     "revalidate",
     "track",
