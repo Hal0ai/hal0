@@ -64,37 +64,72 @@ upstream fixes after 2026-07-20 out of hal0.
    fetches) and with how the hal0 systemd unit, the wrapper and the plugins
    all reach one venv. Editable installs are an upstream-supported method, so
    option (a) is the smallest change that stays inside upstream's rules.
-3. **The vetted-ref freeze stays, and applies to the checkout.** hal0 checks
-   out only a commit in `VETTED_HERMES_REFS`, detached, and refuses a branch
-   or an unlisted ref exactly as it refuses an unlisted `git+` pin today.
+3. **The vetted-ref freeze stays, and applies to the checkout.** hal0
+   checks out only a commit in `VETTED_HERMES_REFS`, detached, and refuses a
+   branch or an unlisted ref as it refuses an unlisted `git+` pin today. One
+   thing narrows: `hermes_requirement_is_vetted` also accepts a
+   `>= HERMES_MIN_VERSION` floor today. That path goes away, because a floor
+   cannot name a commit to check out and package versions report `0.0.0`.
    `requirements.txt` keeps the pinned ref as data, but its format changes
    from a `git+` line to what the checkout step can consume, so
    `_hermes_requirement_line`, `hermes_pinned_ref` and `_hermes_version_pin`
-   change with it.
-4. **Checkout location and ownership.** The checkout lives under
-   `/var/lib/hal0/` beside the venv (`/var/lib/hal0/venvs/hermes`), owned by
-   the hal0 service user. The unit's `ReadWritePaths` gains it, because an
-   editable install imports from the checkout at run time. Nothing outside
-   the provisioner writes to it.
-5. **`hal0 agent upgrade hermes` moves the checkout.** An upgrade fetches
-   into the checkout, checks out the new vetted ref, and reinstalls editable
-   into a venv built beside the live one (decision 7). It never follows a
-   branch. Moving to a new ref is a code change that adds the ref to
-   `VETTED_HERMES_REFS`, as today.
-6. **The version stamp no longer comes from package metadata.** The stamp
-   read by `hermes_arm` (`hermes_version` in the provisioner's state file, and
-   the `venv.pin` stamp) is written from the vetted ref the provisioner
-   installed, not from `importlib.metadata`, which reports `0.0.0`. Status
-   and drift checks compare that recorded ref with `VETTED_HERMES_REFS`.
-7. **Migration of existing 3.12 venvs.** Build the 3.14 venv beside the
-   old one, install editable into it, verify it (import, `hermes --version`,
-   the existing `mcp_wire` check), then swap. Keep the old 3.12 venv in place
-   as the rollback target. Remove it at the next successful upgrade. If the
-   new venv fails verification, the old one is never touched.
-8. **Interpreter resolution targets 3.14 only.** `PYTHON_MAX_EXCLUSIVE`, the
-   exact-minor check and `resolve_hermes_python` move from 3.12 to 3.14, with
-   uv downloading a managed 3.14 when no system interpreter qualifies. The
-   probe result keeps being persisted in `/etc/hal0/hermes-python.env`.
+   get a parser for the new format.
+4. **Layout: one checkout and one venv per candidate ref.** Each vetted ref
+   gets its own release directory under `/var/lib/hal0/hermes/releases/`,
+   holding `src/` (the checkout at that ref) and `venv/` (built at that final
+   path, editable against that `src/`). The path the unit and the wrapper
+   already use, `/var/lib/hal0/venvs/hermes`, becomes a symlink to the live
+   release's `venv/`. The provisioner (root, via the CLI) owns the tree and
+   leaves it readable by the hal0 service user. The agent process only
+   imports from it, so it needs read access, which `ProtectSystem=strict`
+   already gives; `ReadWritePaths` in `hal0-agent@.service` already lists
+   `/var/lib/hal0` and does not change. Nothing outside the provisioner
+   writes to the tree.
+5. **`hal0 agent upgrade hermes` installs a new release beside the live
+   one.** An upgrade clones or fetches into a new release's `src/`, checks out
+   the new vetted ref there, builds `venv/` there, and never touches the live
+   release's checkout or venv. It never follows a branch. Moving to a new ref
+   is a code change that adds the ref to `VETTED_HERMES_REFS`, as today.
+   `--to=<version>` (`upgrade_hermes_runtime(version=...)`) changes meaning:
+   it accepts only a ref in `VETTED_HERMES_REFS`, and a bare version string
+   or an `==X.Y.Z` spec is rejected.
+6. **The version stamp comes from the recorded ref.** The stamp is not read
+   from `importlib.metadata`, which reports `0.0.0`. Today it already comes
+   from the `requirements.txt` pin (`_hermes_version_pin`,
+   `hermes_arm.py`); the change is the parser for the new requirements format
+   and recording the installed ref in the release directory. Status and drift
+   keep comparing the recorded ref with the single pinned ref from
+   `requirements.txt`, as `converge_hermes` does today
+   (`components/hermes_arm.py`), so a host on an older ref that is still in
+   `VETTED_HERMES_REFS` reads as stale, not converged.
+   `VETTED_HERMES_REFS` gates what may be installed; it is not the drift
+   reference.
+7. **Migration and swap are one unit, done by symlink.** The 3.14 venv is
+   built at its final release path, so console-script shebangs and the
+   editable `.pth` point at paths that survive the swap (renaming a venv built
+   elsewhere leaves every `bin/` entry point pointing at the deleted build
+   directory; `_retarget_scripts` in `memory/engine_upgrade.py` exists for
+   that reason). Steps: build the release, verify it in place (import,
+   `hermes --version`, the existing `mcp_wire` check), then flip the
+   `venvs/hermes` symlink to it atomically and re-verify through the symlink.
+   The previous release (checkout and venv together) stays as the rollback
+   target: rolling back is flipping the symlink back. The first migration
+   moves the existing 3.12 venv directory into `releases/` as the rollback
+   release, then creates the symlink. A release older than the previous one
+   is removed at the next successful upgrade. If verification fails, the
+   symlink is not flipped and the live release is untouched, source included.
+8. **Interpreter resolution targets 3.14 only, and replaces stale
+   selections.** `PYTHON_MAX_EXCLUSIVE`, the exact-minor check and
+   `resolve_hermes_python` move from 3.12 to 3.14, with uv downloading a
+   managed 3.14 when no system interpreter qualifies. Today a persisted path
+   in `/etc/hal0/hermes-python.env` is read and validated before any probe,
+   and the root prelude in `cli/agent_commands.py` raises on a failure before
+   it persists a replacement, so an upgraded host holding a 3.12 path would
+   never start the migration. The two sources are therefore treated
+   differently. A selection hal0 wrote itself (the file records provenance)
+   that no longer validates is discarded and re-probed, then overwritten. An
+   explicit `HAL0_HERMES_PYTHON`, or a file edited by hand, that fails
+   validation is still rejected with the error.
 9. **Contract tests are re-vendored at each pin bump.** The fixtures under
    `tests/fixtures/hermes/contracts/` and
    `tests/agents/hermes/test_contract_compatibility.py` are refreshed from the
@@ -109,12 +144,15 @@ upstream fixes after 2026-07-20 out of hal0.
 
 - hal0 can move past Hermes 0.19.0 again, and a pin bump becomes a routine
   vetted-ref change instead of a blocked one.
-- hal0 owns one more directory and its permissions, and the unit grants write
-  access to it.
+- hal0 owns one more directory tree. The unit's grants do not change, and the
+  agent process only reads it.
 - The Hermes venv is on Python 3.14 while the rest of hal0 stays on its own
   interpreter. The two are independent.
-- Every existing install goes through the venv migration once. The old venv
-  costs disk until the next successful upgrade.
+- Every existing install goes through the migration once. The previous
+  release (checkout and venv) costs disk until the next successful upgrade.
+- A release directory per ref means a rollback is a symlink flip, at the cost
+  of two checkouts and two venvs on disk at steady state.
+- `--to=<version>` and the version-floor path stop working.
 - The version stamp is hal0's own record. A venv edited outside the
   provisioner can disagree with it, and status trusts the stamp.
 - Pin bumps cost a contract-fixture refresh each time, as before.
