@@ -270,7 +270,9 @@ STREAMING_MOONSHINE_FILES: frozenset[str] = frozenset(
 #: Model ids that ship in the loadable non-streaming layout.
 SUPPORTED_MOONSHINE_IDS: tuple[str, ...] = ("tiny-en", "base-en")
 
-_MOONSHINE_ENCODERS: tuple[str, ...] = ("encoder_model.ort", "encoder_model.onnx")
+#: The encoder file the in-container loader resolves; its presence marks a
+#: loadable bundle (single source, imported by ``providers.moonshine``).
+MOONSHINE_ENCODER_FILES: tuple[str, ...] = ("encoder_model.ort", "encoder_model.onnx")
 
 
 def unsupported_moonshine_layout(path: str | Path) -> bool:
@@ -286,10 +288,10 @@ def unsupported_moonshine_layout(path: str | Path) -> bool:
         if p.is_file():
             if p.name.lower() not in STREAMING_MOONSHINE_FILES:
                 return False
-            return not any((p.parent / n).is_file() for n in _MOONSHINE_ENCODERS)
+            return not any((p.parent / n).is_file() for n in MOONSHINE_ENCODER_FILES)
         if not p.is_dir():
             return False
-        if any(any(p.rglob(n)) for n in _MOONSHINE_ENCODERS):
+        if any(any(p.rglob(n)) for n in MOONSHINE_ENCODER_FILES):
             return False
         return any(any(p.rglob(n)) for n in STREAMING_MOONSHINE_FILES)
     except OSError:

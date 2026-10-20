@@ -1863,6 +1863,8 @@ async def add_from_path(body: dict[str, Any], *, registry: Any, event_bus: Any) 
       * ``BadRequest`` ``model.unsupported_format`` — extension not allowed.
       * ``UnprocessableEntity`` ``models.unsupported_quant`` — a fork-only
         quant (ROCmFPX family, IU4, ActiveFPX) no hal0 runner can load.
+      * ``UnprocessableEntity`` ``models.unsupported_moonshine_layout`` — a
+        streaming Moonshine ``.ort`` set the runner cannot load.
       * ``ModelAlreadyExists`` (409) — id registered and ``overwrite=false``.
 
     Returns the serialised model dict (:func:`model_to_dict`).
@@ -1893,6 +1895,20 @@ async def add_from_path(body: dict[str, Any], *, registry: Any, event_bus: Any) 
     except OSError:
         resolved = path
 
+    from hal0.registry.detect import (
+        unsupported_moonshine_layout,
+        unsupported_moonshine_layout_message,
+    )
+
+    if unsupported_moonshine_layout(path):
+        from hal0.errors import UnprocessableEntity
+
+        raise UnprocessableEntity(
+            unsupported_moonshine_layout_message(path),
+            code="models.unsupported_moonshine_layout",
+            details={"path": str(path)},
+        )
+
     # Enforce the same extension allow-list the scan walker uses so
     # accidentally pointing at a tokenizer.json or a README.md fails
     # loudly rather than landing in the registry.
@@ -1907,19 +1923,6 @@ async def add_from_path(body: dict[str, Any], *, registry: Any, event_bus: Any) 
     # The resolved path is still what gets detected and stored. The scan
     # walker (``registry.discover.find_candidates``) already tests the
     # un-resolved walk entry, so it needs no matching change.
-    from hal0.registry.detect import (
-        unsupported_moonshine_layout,
-        unsupported_moonshine_layout_message,
-    )
-
-    if unsupported_moonshine_layout(path):
-        from hal0.errors import UnprocessableEntity
-
-        raise UnprocessableEntity(
-            unsupported_moonshine_layout_message(path),
-            code="models.unsupported_moonshine_layout",
-            details={"path": str(path)},
-        )
     cfg = load_hal0_config()
     allowed_exts = {e.lower() for e in cfg.models.file_extensions}
     suffix = path.suffix.lower() or resolved.suffix.lower()

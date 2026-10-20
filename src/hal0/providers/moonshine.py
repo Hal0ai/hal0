@@ -48,6 +48,11 @@ from hal0.config.paths import model_store_root
 from hal0.errors import Hal0Error
 from hal0.http_client import async_client
 from hal0.providers.base import Mount, Provider, RuntimeLaunchPlan
+from hal0.registry.detect import (
+    MOONSHINE_ENCODER_FILES,
+    unsupported_moonshine_layout,
+    unsupported_moonshine_layout_message,
+)
 
 log = logging.getLogger(__name__)
 
@@ -62,7 +67,9 @@ _DEFAULT_PORT = 8089
 # moonshine_server.py only accepts these arch tokens.
 _VALID_ARCHS = {"tiny", "tiny_streaming", "base", "small", "small_streaming"}
 
-_DEFAULT_MODEL_ARCH = "small_streaming"
+# Non-streaming: the streaming layout is rejected (#2556), so the fallback arch
+# must be one the loadable ``encoder_model.ort`` bundle matches.
+_DEFAULT_MODEL_ARCH = "base"
 
 # Health/infer timeouts. Transcription of a long upload is slow on CPU —
 # give the read leg headroom.
@@ -121,7 +128,7 @@ def _derive_arch_from_variant(variant: str) -> str:
 #: — a different, streaming-SDK file set this server cannot consume. Matching
 #: on any ``*.ort`` accepted those and produced a container that started and
 #: then failed every transcription.
-_ENCODER_STEMS: tuple[str, ...] = ("encoder_model.ort", "encoder_model.onnx")
+_ENCODER_STEMS: tuple[str, ...] = MOONSHINE_ENCODER_FILES
 
 
 def _is_loadable_bundle(directory: Path) -> bool:
@@ -143,6 +150,24 @@ def _find_loadable_bundle(root: Path) -> Path | None:
         if matches:
             return matches[0].parent
     return None
+
+
+def _reject_streaming_variant(root: str, variant: str) -> None:
+    """Refuse a variant whose own directory is a streaming-only bundle.
+
+    Without this, ``_resolve_model_leaf`` falls back to the first loadable
+    sibling (e.g. ``base-en``) while the arch still comes from the variant, so
+    the operator silently gets a different model than the one they chose.
+    """
+    base = Path(root)
+    if not variant or not base.is_dir():
+        return
+    for d in base.rglob(variant):
+        if d.is_dir() and not _is_loadable_bundle(d) and unsupported_moonshine_layout(d):
+            raise MoonshineWeightsMissingError(
+                unsupported_moonshine_layout_message(str(d)),
+                details={"model_path": str(d), "layout": "streaming", "variant": variant},
+            )
 
 
 def _resolve_model_leaf(model_path: str, variant: str) -> str:
@@ -192,11 +217,6 @@ def check_moonshine_weights(model_path: str) -> None:
             details={"model_path": model_path},
         )
     if _find_loadable_bundle(root) is None:
-        from hal0.registry.detect import (
-            unsupported_moonshine_layout,
-            unsupported_moonshine_layout_message,
-        )
-
         if unsupported_moonshine_layout(root):
             raise MoonshineWeightsMissingError(
                 unsupported_moonshine_layout_message(model_path),
@@ -348,12 +368,18 @@ class MoonshineProvider(Provider):
         variant = str(metadata.get("variant", ""))
         registry_path = str(model_info.get("path") or "")
         if registry_path and _find_loadable_bundle(Path(registry_path)) is None:
+            if unsupported_moonshine_layout(registry_path):
+                raise MoonshineWeightsMissingError(
+                    unsupported_moonshine_layout_message(registry_path),
+                    details={"model_path": registry_path, "layout": "streaming"},
+                )
             log.info(
                 "moonshine.registry_path_ignored path=%s reason=not_a_loadable_bundle",
                 registry_path,
             )
             registry_path = ""
         if registry_path:
+            _reject_streaming_variant(registry_path, variant)
             model_path = _resolve_model_leaf(registry_path, variant)
             arch = (
                 str(model_info.get("model_arch") or "")
