@@ -11,8 +11,8 @@ v0.2 draft.
 
 Amended by ADR-0033 (2026-10-20, #2817): the "Sandboxed sibling unit"
 bullet used to say hal0-api proxies the agent's chat WebSocket. That proxy
-is gone: chat is the agent's own dashboard, and hal0 does not proxy it. The bundling rule and every other decision here
-are unchanged.
+is gone: chat is the agent's own dashboard, and hal0 does not proxy it. The
+bundling rule and every other decision here are unchanged.
 
 ## Context
 

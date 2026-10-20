@@ -27,12 +27,15 @@ The proxy also cannot work against the pinned hermes-agent
 The line numbers below are in `hermes_cli/web_server.py` at that commit.
 
 1. **Wrong credential.** hal0 sent its own random token as
-   `Authorization: Bearer`. Hermes's WebSockets accept only
-   `?token=<_SESSION_TOKEN>` (`_ws_auth_reason`, `:16517`, comparing at
-   `:16596`), and Hermes generates `_SESSION_TOKEN` fresh at every start
-   unless `HERMES_DASHBOARD_SESSION_TOKEN` is set (`:281`). hal0 never set
-   it, so Hermes refused the upgrade and hal0's sockets closed with 1011
-   before any traffic. A validation run on nightly 1.5.0-nightly.20261020175722
+   `Authorization: Bearer`. On a loopback bind, which is how hal0 runs it,
+   Hermes's WebSockets accept only `?token=<_SESSION_TOKEN>`
+   (`_ws_auth_reason`, `:16517`, comparing at `:16596`). A gated (public)
+   bind takes `?ticket=` or `?internal=` instead and rejects `?token=`
+   (`:16527-16590`). Neither path reads a Bearer header. Hermes generates
+   `_SESSION_TOKEN` fresh at every start unless
+   `HERMES_DASHBOARD_SESSION_TOKEN` is set (`:281`), and hal0 never set it.
+   So Hermes refused the upgrade and hal0's sockets closed with 1011 before
+   any traffic. A validation run on nightly 1.5.0-nightly.20261020175722
    reproduced exactly that.
 2. **Missing channel.** `/api/events` (`:17738`) also requires a
    `?channel=<id>` (`_channel_or_close_code`, `:16876`) and closes with 4400

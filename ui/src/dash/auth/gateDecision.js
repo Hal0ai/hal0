@@ -101,8 +101,8 @@ export function canViewReadOnly(status) {
  *   - 'admin'  — signed in AND this caller is gated, so the session is what
  *     grants access and "log out" means something.
  *   - 'hidden' — nothing is gated for this caller. That includes an exempt
- *     caller that happens to hold a session cookie (the agent-chat handshake
- *     mints the same cookie): nothing to sign in to or out of.
+ *     caller that happens to hold a session cookie (one kept from an earlier
+ *     sign-in): nothing to sign in to or out of.
  */
 export function sessionChipState(status) {
   if (!status) return 'hidden'

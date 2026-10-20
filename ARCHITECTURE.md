@@ -412,7 +412,7 @@ and the composite `hal0` upstream config — all idempotently.
 | `src/hal0/api/routes/approvals.py`             | approval inbox                               |
 | `src/hal0/api/plugins/`                        | plugin host (manifest + static assets)       |
 | `src/hal0/cli/agent_shim.py`                   | `/usr/local/bin/hal0-agent` (unit ExecStart) |
-| `ui/src/dash/agents/`                          | v3 dashboard `<AgentView>` + Composer        |
+| `ui/src/dash/agents/`                          | v3 dashboard `<AgentView>`                   |
 
 ### Standing decisions
 
@@ -990,24 +990,6 @@ the per-slot container runtime (#687), (4) Admin/auth simplification
 (FastAPI owns auth, Caddy collapsed to TLS-only or removed), (5) Advanced
 memory + MCP client side (memory graph + Memify + federation + per-agent
 external MCP allow-list). See the planning doc §1 v0.3 + §15 Phase 10.
-
-### composer
-
-The browser-side input surface in the v3 dashboard's `<HermesChat>` tab. A
-React `<textarea>` + send button — NOT an xterm / PTY. Enter submits the
-current text as a `prompt.submit` JSON-RPC frame; Shift+Enter inserts a
-newline. Replaces the earlier "xterm-over-PTY" design (MASTER-PLAN §1
-pivot #1) — the PTY route was cut after DA-sec-ops flagged it as a LAN-RCE
-class problem. Lives in `ui/src/dash/agents/chat/Composer.jsx`.
-
-### transcript
-
-The rolling chat history rendered above the composer. Built by zustand
-store `useTranscript` from `message.delta` + `message.complete` events
-streamed off `/api/agents/{id}/events`. Tool-call deltas appear as inline
-collapsed cards. The store dedupes by `(session_id, message_id)` so the WS
-reconnect path (250ms → 4s backoff, owned by `use-hermes-session.js`)
-doesn't duplicate frames.
 
 ### plugin host
 

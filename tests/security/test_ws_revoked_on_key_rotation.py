@@ -206,3 +206,19 @@ def test_track_checks_once_on_entry() -> None:
 
     assert asyncio.run(_run()) is True
     assert live_sockets.open_count() == 0
+
+
+def test_revalidate_counts_only_the_sockets_it_revokes() -> None:
+    """The ``sockets_closed`` count in the rotation log is the failing sockets only."""
+
+    async def _run() -> tuple[int, bool, bool]:
+        rotated = False
+        with (
+            live_sockets.track(lambda: True) as kept,
+            live_sockets.track(lambda: not rotated) as dropped,
+        ):
+            rotated = True
+            return live_sockets.revalidate(), kept.is_set(), dropped.is_set()
+
+    assert asyncio.run(_run()) == (1, False, True)
+    assert live_sockets.open_count() == 0

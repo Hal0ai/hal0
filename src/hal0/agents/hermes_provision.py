@@ -7117,7 +7117,7 @@ def _step_changed(name: str, result: PhaseResult) -> bool:
         return False
     d = result.details or {}
     if name == "install_artifacts":
-        return bool(d.get("seed_wrote") or d.get("env_wrote") or d.get("token_wrote"))
+        return bool(d.get("seed_wrote") or d.get("env_wrote"))
     return bool(d.get("changed"))
 
 

@@ -50,16 +50,10 @@ Receive = Callable[[], Awaitable[Message]]
 Send = Callable[[Message], Awaitable[None]]
 
 
-#: Scope key holding one identity per socket, so gates that both track it
-#: count as one socket in :func:`revalidate`'s return value.
-_SOCKET_ID_KEY: Final[str] = "hal0.live_sockets.socket_id"
-
-
 @dataclass(eq=False)
 class _Entry:
     still_authorized: Callable[[], bool]
     loop: asyncio.AbstractEventLoop
-    socket_id: object
     revoked: asyncio.Event = field(default_factory=asyncio.Event)
 
 
@@ -68,9 +62,7 @@ _entries: set[_Entry] = set()
 
 
 @contextlib.contextmanager
-def track(
-    still_authorized: Callable[[], bool], *, scope: Scope | None = None
-) -> Iterator[asyncio.Event]:
+def track(still_authorized: Callable[[], bool]) -> Iterator[asyncio.Event]:
     """Register one open socket for the life of the ``with`` block.
 
     Yields an :class:`asyncio.Event` that :func:`revalidate` sets once
@@ -78,15 +70,9 @@ def track(
     check also runs once on entry, after registering, so a rotation that
     landed between the gate's own check and this call is not missed: the
     event is then already set. Must be entered from the event loop serving
-    the socket. Pass the socket's ASGI ``scope`` when more than one gate may
-    track the same socket, so :func:`revalidate` counts it once.
+    the socket.
     """
-    socket_id = scope.setdefault(_SOCKET_ID_KEY, object()) if scope is not None else object()
-    entry = _Entry(
-        still_authorized=still_authorized,
-        loop=asyncio.get_running_loop(),
-        socket_id=socket_id,
-    )
+    entry = _Entry(still_authorized=still_authorized, loop=asyncio.get_running_loop())
     with _lock:
         _entries.add(entry)
     if not _check(entry):
@@ -121,21 +107,17 @@ def _signal(entry: _Entry) -> None:
 def revalidate() -> int:
     """Re-check every open socket; signal the ones that fail. Returns that count.
 
-    The count is of sockets, not registrations: a socket two gates track
-    under the same ``scope`` (see :func:`track`) counts once.
-
     Call it after a credential changes in this process (the key in
     ``os.environ``, the secret on disk), never before: each predicate reads
     the live credential state.
     """
     with _lock:
         entries = [e for e in _entries if not e.revoked.is_set()]
-    revoked_ids: set[int] = set()
+    revoked = 0
     for entry in entries:
         if not _check(entry):
             _signal(entry)
-            revoked_ids.add(id(entry.socket_id))
-    revoked = len(revoked_ids)
+            revoked += 1
     if revoked:
         log.info("hal0.live_sockets.revoked", count=revoked)
     return revoked
@@ -187,7 +169,7 @@ async def guard_websocket(
                 }
             )
 
-    with track(still_authorized, scope=scope) as revoked:
+    with track(still_authorized) as revoked:
 
         async def guarded_send(message: Message) -> None:
             nonlocal closed

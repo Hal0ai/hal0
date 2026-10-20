@@ -1380,8 +1380,9 @@ regressions:
       Result partial (verifier-adjudicated): the pristine-install rc probe still passes; the
       drift is a NEW latent class, /var/lib/hal0/agents is created 0700 by _auth.py:121-123 on
       the first session-cookie mint while perms.py:770-781 wants 0711. Converges for good after
-      one `--fix` (#2719). To trigger it: POST /api/auth/login with the admin key (GET
-      /api/agents/<id>/personas does NOT create the dir). Re-run `hal0 doctor perms` AFTER that
+      one `--fix` (#2719). To trigger it: POST /api/auth/login with the admin key, which needs
+      HAL0_ADMIN_KEY set (GET /api/agents/<id>/personas does NOT create the dir). On a keyless
+      box the login answers 401 and mints nothing: record N/A, not a pass. Re-run `hal0 doctor perms` AFTER that
       call, not only at lane start.
     from: v1.0.0-rc.6
     severity: minor
@@ -3832,12 +3833,15 @@ regressions:
       secret.bin is deleted (the documented session-revoke). Latent since #408 / 8295a50a, not a
       #1896 regression. GET /api/agents/<id>/personas does NOT trigger it.
     repro: |
+      # Needs the box admin key: ADMIN_KEY=$(sudo sed -n 's/^HAL0_ADMIN_KEY=//p' /etc/hal0/api.env)
+      # No key on the box: the login prints 401 and mints nothing; record N/A.
       hal0 doctor perms >/dev/null; echo rc=$?                      # 0 on a pristine install
       curl -s -o /dev/null -w '%{http_code}\n' -X POST $API/api/auth/login \
-        -H 'content-type: application/json' -d "{\"key\":\"$ADMIN_KEY\"}"
+        -H 'content-type: application/json' -d "{\"key\":\"$ADMIN_KEY\"}"   # must print 200
       stat -c '%U:%G %a' /var/lib/hal0/agents; hal0 doctor perms >/dev/null; echo rc=$?
     expect: >-
-      agents/ is hal0:hal0 0711 after the login and doctor perms stays rc 0 with no --fix.
+      The login prints 200, then agents/ is hal0:hal0 0711 and doctor perms stays rc 0 with no
+      --fix. A 401 login means a keyless box: N/A, not a pass.
       0700 plus a DRIFT row is the regression. Promote as pytest: mint the secret then run the
       perms table check.
     promote_ready: true
