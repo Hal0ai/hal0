@@ -72,13 +72,13 @@ def test_auth_rotate_defaults_to_admin_tier(captured: dict[str, Any]) -> None:
     assert result.exit_code == 0, result.output
     assert captured["method"] == "POST"
     assert captured["path"] == "/api/auth/rotate"
-    assert captured["body"] == {"tier": "admin"}
+    assert captured["body"] == {"tier": "admin", "keep_sessions": False}
 
 
 def test_auth_rotate_client_tier(captured: dict[str, Any]) -> None:
     result = runner.invoke(auth_commands.app, ["rotate", "client", "--force"])
     assert result.exit_code == 0, result.output
-    assert captured["body"] == {"tier": "client"}
+    assert captured["body"] == {"tier": "client", "keep_sessions": False}
 
 
 def test_auth_rotate_prompts_without_force(captured: dict[str, Any]) -> None:
@@ -134,6 +134,8 @@ def _seed_api_env(tmp_path, monkeypatch: pytest.MonkeyPatch, content: str):
     etc.mkdir(parents=True)
     (etc / "api.env").write_text(content, encoding="utf-8")
     monkeypatch.setenv("HAL0_HOME", str(tmp_path))
+    # The local fallback regenerates the session secret; keep it in tmp.
+    monkeypatch.setenv("HAL0_AGENT_SECRET_PATH", str(tmp_path / "secret.bin"))
     from hal0.config import paths as cfg_paths
 
     monkeypatch.setattr(cfg_paths, "etc", lambda: etc)
@@ -165,7 +167,7 @@ def test_reset_key_rotates_via_api_and_prints_new_key(
     result = runner.invoke(auth_commands.app, ["reset-key", "--force"])
     assert result.exit_code == 0, result.output
     assert captured["path"] == "/api/auth/rotate"
-    assert captured["body"] == {"tier": "admin"}
+    assert captured["body"] == {"tier": "admin", "keep_sessions": False}
     assert "new-live-key" in result.output
     assert "Applied live" in result.output
 
@@ -239,3 +241,52 @@ def test_reset_key_prompt_warns_about_the_lan_admin_gate(
     assert result.exit_code != 0
     assert "need it from other devices" in " ".join(result.output.split())
     assert api_env.read_text() == "HAL0_BIND_HOST=0.0.0.0\n"
+
+
+# ── #2633: rotation signs out other sessions unless --keep-sessions ───────────
+
+
+def test_auth_rotate_keep_sessions_is_sent(captured: dict[str, Any]) -> None:
+    result = runner.invoke(auth_commands.app, ["rotate", "--force", "--keep-sessions"])
+    assert result.exit_code == 0, result.output
+    assert captured["body"] == {"tier": "admin", "keep_sessions": True}
+
+
+def test_reset_key_says_other_sessions_were_signed_out(
+    tmp_path, monkeypatch: pytest.MonkeyPatch, captured: dict[str, Any]
+) -> None:
+    _seed_api_env(tmp_path, monkeypatch, "HAL0_ADMIN_KEY=old-key\n")
+    monkeypatch.setattr(auth_commands.os, "geteuid", lambda: 0)
+    result = runner.invoke(auth_commands.app, ["reset-key", "--force"])
+    assert result.exit_code == 0, result.output
+    assert captured["body"] == {"tier": "admin", "keep_sessions": False}
+    assert "Other sessions were signed out." in result.output
+
+
+def test_reset_key_keep_sessions_is_sent_and_reported(
+    tmp_path, monkeypatch: pytest.MonkeyPatch, captured: dict[str, Any]
+) -> None:
+    _seed_api_env(tmp_path, monkeypatch, "HAL0_ADMIN_KEY=old-key\n")
+    monkeypatch.setattr(auth_commands.os, "geteuid", lambda: 0)
+    result = runner.invoke(auth_commands.app, ["reset-key", "--force", "--keep-sessions"])
+    assert result.exit_code == 0, result.output
+    assert captured["body"] == {"tier": "admin", "keep_sessions": True}
+    assert "Other sessions stay signed in (--keep-sessions)." in result.output
+
+
+@pytest.mark.parametrize("keep", [False, True])
+def test_reset_key_local_fallback_regenerates_the_session_secret(
+    tmp_path, monkeypatch: pytest.MonkeyPatch, keep: bool
+) -> None:
+    """API down: the local write signs sessions out too, unless --keep-sessions."""
+    from hal0.api.agents._auth import mint_session_cookie, verify_session_cookie
+
+    _seed_api_env(tmp_path, monkeypatch, "HAL0_ADMIN_KEY=old-key\n")
+    monkeypatch.setattr(auth_commands.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(auth_commands, "_api_unreachable", lambda _url: True)
+    cookie = mint_session_cookie()
+
+    args = ["reset-key", "--force", *(["--keep-sessions"] if keep else [])]
+    result = runner.invoke(auth_commands.app, args)
+    assert result.exit_code == 0, result.output
+    assert verify_session_cookie(cookie) is keep

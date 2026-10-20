@@ -84,14 +84,19 @@ def auth_status(
 def auth_rotate(
     tier: KeyTier = typer.Argument(KeyTier.admin, help="Which box key to rotate: admin | client."),
     force: bool = typer.Option(False, "--force", "-f", help="Skip the confirmation prompt."),
+    keep_sessions: bool = typer.Option(
+        False,
+        "--keep-sessions",
+        help="Admin key only: leave signed-in browser sessions signed in (default: sign them out).",
+    ),
 ) -> None:
     """Rotate the admin or client box key (POST /api/auth/rotate).
 
     Mints a fresh key on the daemon and writes it to /etc/hal0/api.env —
     the value is never returned, printed, or logged here; retrieve it
     on-box afterwards. Existing bearer/API callers on the OLD key stop
-    working immediately; the operator's own browser session survives
-    (see the route docstring for details).
+    working immediately. An admin rotation also signs out every browser
+    session unless ``--keep-sessions`` is given (#2633).
     """
     url = _api_base()
     if _api_unreachable(url):
@@ -103,7 +108,9 @@ def auth_rotate(
             abort=True,
         )
     try:
-        result = api_post("/api/auth/rotate", json={"tier": tier.value})
+        result = api_post(
+            "/api/auth/rotate", json={"tier": tier.value, "keep_sessions": keep_sessions}
+        )
     except CliApiError as exc:
         die(str(exc))
         return
@@ -135,6 +142,11 @@ def auth_require(
 @app.command("reset-key")
 def auth_reset_key(
     force: bool = typer.Option(False, "--force", "-f", help="Skip the confirmation prompt."),
+    keep_sessions: bool = typer.Option(
+        False,
+        "--keep-sessions",
+        help="Leave signed-in browser sessions signed in (default: sign them all out).",
+    ),
 ) -> None:
     """Mint a new admin key and print it once — the lost-key recovery path.
 
@@ -143,8 +155,9 @@ def auth_reset_key(
     through it (authenticated with the box's own key from api.env), so the
     new key applies live. When the API is down it is written straight to
     api.env and takes effect on the next ``systemctl restart hal0-api``.
-    Callers on the old key (scripts, bearer clients) stop working; an
-    already signed-in browser session stays signed in.
+    Callers on the old key (scripts, bearer clients) stop working, and every
+    signed-in browser session is signed out by replacing the session secret
+    (#2633), unless ``--keep-sessions`` is given.
 
     On a box with no admin key yet this mints the first one, which arms the
     LAN admin gate (:func:`hal0.api.auth._lan_admin_gate`) on a box bound past
@@ -181,13 +194,20 @@ def auth_reset_key(
     url = _api_base()
     if not _api_unreachable(url):
         try:
-            api_post("/api/auth/rotate", json={"tier": "admin"})
+            api_post("/api/auth/rotate", json={"tier": "admin", "keep_sessions": keep_sessions})
             applied_live = True
         except CliApiError as exc:
             console.print(
                 f"[yellow]API rotation failed ({exc}); writing api.env directly.[/yellow]"
             )
     if not applied_live:
+        if not keep_sessions:
+            # Secret before key, as the route does: a failure here stops the
+            # reset with nothing changed. Sessions are read per request, so
+            # this applies without a restart.
+            from hal0.api.agents._auth import regenerate_secret
+
+            regenerate_secret()
         rotate_api_env_key("admin")
 
     key = keys_from_api_env().get("HAL0_ADMIN_KEY")
@@ -197,6 +217,10 @@ def auth_reset_key(
     console.print("\n[bold]New hal0 admin key[/bold] (store it in a password manager):\n")
     # Plain print, not rich: the key must come out byte-exact for copy/paste.
     typer.echo(f"    {key}\n")
+    if keep_sessions:
+        console.print("Other sessions stay signed in (--keep-sessions).")
+    else:
+        console.print("Other sessions were signed out.")
     if applied_live:
         console.print("[dim]Applied live — no restart needed.[/dim]")
     else:

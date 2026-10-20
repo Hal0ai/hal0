@@ -9,6 +9,7 @@ Mounted at ``/api/auth`` in ``create_app()``.
 
 from __future__ import annotations
 
+import time
 from datetime import UTC, datetime
 from typing import Literal
 
@@ -16,11 +17,13 @@ import structlog
 from fastapi import APIRouter, BackgroundTasks, Request, Response
 from pydantic import BaseModel
 
+from hal0.api.agents import _auth as agent_auth
 from hal0.api.agents._auth import (
     SESSION_COOKIE_NAME,
     SESSION_COOKIE_REMEMBER_TTL_SECONDS,
     SESSION_COOKIE_TTL_SECONDS,
     request_uses_tls,
+    session_cookie_expiry,
     set_session_cookie,
 )
 from hal0.api.auth import (
@@ -57,6 +60,11 @@ class RequireAuthRequest(BaseModel):
 
 class RotateKeyRequest(BaseModel):
     tier: Literal["admin", "client"] = "admin"
+    # #2633: an admin rotation signs out every browser session unless this is
+    # set. Rotation usually follows a suspected compromise, and leaving the
+    # old sessions alive would make it look as if the old holder were cut off.
+    # Ignored for the client tier, which never touches sessions.
+    keep_sessions: bool = False
 
 
 class ExposureRule(BaseModel):
@@ -204,7 +212,10 @@ async def set_require_auth(body: RequireAuthRequest, request: Request) -> dict[s
 
 @router.post("/rotate")
 async def rotate_key(
-    body: RotateKeyRequest, request: Request, background_tasks: BackgroundTasks
+    body: RotateKeyRequest,
+    request: Request,
+    response: Response,
+    background_tasks: BackgroundTasks,
 ) -> dict[str, object]:
     """Rotate the ``admin`` or ``client`` box key. ADMIN-gated, status-only.
 
@@ -227,11 +238,19 @@ async def rotate_key(
     from ``/etc/hal0/api.env`` on the box. ``fingerprint`` is a one-way
     sha256 prefix that proves which key is live without exposing it.
 
-    Admin self-rotation: the caller's *browser session cookie* is HMAC-signed
-    independently of the admin key (minted by ``agents/_auth.py``), so it stays
-    valid across a rotation — the dashboard operator is NOT locked out
-    (``session_preserved`` for the admin tier). Bearer/API clients using the
-    OLD key stop working immediately and must switch to the new key.
+    Sessions (#2633): browser session cookies are HMAC-signed with
+    ``secret.bin``, not with the admin key, so a key change alone would leave
+    every signed-in browser signed in. An admin rotation therefore also
+    regenerates that secret (:func:`hal0.api.agents._auth.regenerate_secret`),
+    which signs out every session, unless the body sets ``keep_sessions``. The
+    caller's own browser is not locked out: if it presented a valid session it
+    gets a fresh cookie, signed with the new secret, in this same response,
+    expiring no later than the one it replaces. A bearer caller gets no
+    cookie. ``session_preserved`` is ``false`` when sessions were signed out.
+    The secret is replaced before the key, so a failure there aborts the
+    rotation with nothing changed, and a success is never reported while the
+    old sessions still verify. Bearer/API clients using the OLD key stop
+    working immediately and must switch to the new key.
 
     Brute-force guard: metered by the shared per-IP login limiter (``login``
     reuses the same ``app.state.login_limiter``) BEFORE any work happens.
@@ -248,8 +267,24 @@ async def rotate_key(
             )
 
     tier = body.tier
+    sign_out = tier == "admin" and not body.keep_sessions
+    caller_expiry: int | None = None
+    if sign_out:
+        # Read the caller's session before its signing secret changes.
+        caller_expiry = session_cookie_expiry(request.cookies.get(SESSION_COOKIE_NAME, ""))
+        agent_auth.regenerate_secret()
     # status = {tier, key_len, fingerprint} — NEVER the key value.
     status_only = rotate_api_env_key(tier)
+    reissued = False
+    if caller_expiry is not None:
+        # Fresh session id under the new secret; never a longer life than the
+        # cookie it replaces, so a rotation cannot extend a session.
+        set_session_cookie(
+            response,
+            ttl_seconds=max(1, caller_expiry - int(time.time())),
+            secure=request_uses_tls(request),
+        )
+        reissued = True
     rotated_at = datetime.now(UTC).isoformat().replace("+00:00", "Z")
     # Only the fingerprint / length are logged — never the key itself.
     log.info(
@@ -257,15 +292,23 @@ async def rotate_key(
         tier=tier,
         fingerprint=status_only["fingerprint"],
         key_len=status_only["key_len"],
+        sessions_signed_out=sign_out,
     )
 
     if tier == "admin":
         note = (
             "New admin key written to /etc/hal0/api.env — retrieve it there; it is never "
-            "shown in the dashboard. Your browser session stays signed in (cookie-based); "
-            "bearer/API clients must switch to the new key."
+            "shown in the dashboard. Bearer/API clients must switch to the new key."
         )
-        session_preserved = True
+        if sign_out:
+            note += " Other sessions were signed out"
+            note += "; this browser stays signed in." if reissued else "."
+        else:
+            note += (
+                " Other sessions stay signed in, as requested; rotate again without "
+                "keeping sessions to sign them out."
+            )
+        session_preserved = not sign_out
     else:
         note = (
             "New client key written to /etc/hal0/api.env — retrieve it there; it is never "

@@ -87,7 +87,8 @@ def test_rotate_admin_writes_api_env_status_only(
     assert len(body["fingerprint"]) == 8
     assert body["applies_live"] is True
     assert body["restart_required"] is False
-    assert body["session_preserved"] is True
+    # #2633: an admin rotation signs out every session unless keep_sessions.
+    assert body["session_preserved"] is False
     assert "note" in body
     # Never a value field.
     assert "key" not in body
@@ -315,3 +316,151 @@ def test_rotate_client_reconciles_openwebui(
     resp = rotate_client.post("/api/auth/rotate", json={"tier": "admin"})
     assert resp.status_code == 200, resp.text
     assert calls == [1]
+
+
+# ---------------------------------------------------------------------------
+# #2633: an admin rotation signs out every other browser session by default
+
+
+def _session_cookie_from(resp) -> str | None:
+    """The ``hal0_session`` value a response sets, or ``None``."""
+    from hal0.api.agents._auth import SESSION_COOKIE_NAME
+
+    for header in resp.headers.get_list("set-cookie"):
+        name, _, rest = header.partition("=")
+        if name.strip() == SESSION_COOKIE_NAME:
+            return rest.split(";", 1)[0]
+    return None
+
+
+def test_admin_rotate_signs_out_other_sessions_by_default(
+    rotate_client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from hal0.api.agents._auth import mint_session_cookie, verify_session_cookie
+
+    monkeypatch.setenv("HAL0_ADMIN_KEY", "old-admin-key")
+    other = mint_session_cookie()  # another browser, e.g. a stolen Remember-me cookie
+    assert verify_session_cookie(other)
+    secret_before = (tmp_path / "secret.bin").read_bytes()
+
+    resp = rotate_client.post("/api/auth/rotate", json={"tier": "admin"})
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+
+    assert verify_session_cookie(other) is False
+    assert body["session_preserved"] is False
+    assert "other sessions were signed out" in body["note"].lower()
+    # Regenerated in place: a new value, still 0600, no tmp file left beside it.
+    secret = tmp_path / "secret.bin"
+    assert secret.read_bytes() != secret_before
+    assert len(secret.read_bytes()) == 32
+    assert stat.S_IMODE(secret.stat().st_mode) == 0o600
+    assert sorted(p.name for p in tmp_path.iterdir() if p.name.startswith("secret")) == [
+        "secret.bin"
+    ]
+
+
+def test_admin_rotate_keep_sessions_leaves_other_sessions_valid(
+    rotate_client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from hal0.api.agents._auth import mint_session_cookie, verify_session_cookie
+
+    monkeypatch.setenv("HAL0_ADMIN_KEY", "old-admin-key")
+    other = mint_session_cookie()
+    secret_before = (tmp_path / "secret.bin").read_bytes()
+
+    resp = rotate_client.post("/api/auth/rotate", json={"tier": "admin", "keep_sessions": True})
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+
+    assert verify_session_cookie(other) is True
+    assert (tmp_path / "secret.bin").read_bytes() == secret_before
+    assert body["session_preserved"] is True
+    assert "other sessions stay signed in" in body["note"].lower()
+    assert _session_cookie_from(resp) is None
+
+
+def test_admin_rotate_keeps_the_calling_browser_signed_in(
+    rotate_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The caller's own session is reissued under the new secret in the same
+    response, with no longer a lifetime than it had."""
+    from hal0.api.agents._auth import (
+        SESSION_COOKIE_NAME,
+        session_cookie_expiry,
+        verify_session_cookie,
+    )
+
+    _arm_auth(rotate_client, monkeypatch)
+    login = rotate_client.post("/api/auth/login", json={"key": "the-admin-key", "remember": True})
+    assert login.status_code == 200, login.text
+    old_cookie = rotate_client.cookies.get(SESSION_COOKIE_NAME)
+    old_expiry = session_cookie_expiry(old_cookie)
+    assert old_expiry is not None
+
+    resp = rotate_client.post("/api/auth/rotate", json={"tier": "admin"})
+    assert resp.status_code == 200, resp.text
+
+    fresh = _session_cookie_from(resp)
+    assert fresh and fresh != old_cookie
+    assert verify_session_cookie(old_cookie) is False
+    new_expiry = session_cookie_expiry(fresh)
+    assert new_expiry is not None and new_expiry <= old_expiry
+    # Still an admin on the next request, with no re-login.
+    status = rotate_client.get("/api/auth/status")
+    assert status.json()["tier"] == "admin"
+    again = rotate_client.post("/api/auth/rotate", json={"tier": "client"})
+    assert again.status_code == 200, again.text
+
+
+def test_admin_rotate_by_bearer_mints_no_session(
+    rotate_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A CLI/bearer caller had no browser session, so it is not handed one."""
+    _arm_auth(rotate_client, monkeypatch)
+    resp = rotate_client.post(
+        "/api/auth/rotate",
+        json={"tier": "admin"},
+        headers={"Authorization": "Bearer the-admin-key"},
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["session_preserved"] is False
+    assert _session_cookie_from(resp) is None
+
+
+def test_client_rotate_never_touches_sessions(
+    rotate_client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from hal0.api.agents._auth import mint_session_cookie, verify_session_cookie
+
+    monkeypatch.setenv("HAL0_CLIENT_KEY", "old-client-key")
+    other = mint_session_cookie()
+    resp = rotate_client.post("/api/auth/rotate", json={"tier": "client"})
+    assert resp.status_code == 200, resp.text
+    assert verify_session_cookie(other) is True
+    assert resp.json()["session_preserved"] is True
+
+
+def test_admin_rotate_secret_failure_leaves_key_and_sessions_alone(
+    rotate_client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """If the secret cannot be regenerated, nothing is rotated: never a new key
+    reported as a success while the old sessions still verify."""
+    from hal0.api.agents import _auth as agents_auth
+    from hal0.api.agents._auth import mint_session_cookie, verify_session_cookie
+
+    monkeypatch.setenv("HAL0_ADMIN_KEY", "old-admin-key")
+    other = mint_session_cookie()
+
+    def boom() -> bool:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(agents_auth, "regenerate_secret", boom)
+    try:
+        resp = rotate_client.post("/api/auth/rotate", json={"tier": "admin"})
+    except OSError:
+        pass  # TestClient re-raises unhandled server errors
+    else:
+        assert resp.status_code >= 500
+    assert auth_mod.verify_admin_key("old-admin-key") is True
+    assert verify_session_cookie(other) is True

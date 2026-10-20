@@ -969,3 +969,32 @@ def test_posture_gate_covers_approvals_route(
 
         allowed = c.get("/api/agent/approvals")
         assert allowed.status_code not in (401, 403), allowed.text
+
+
+# ---------------------------------------------------------------------------
+# #2633: regenerate_secret — the "sign out every session" primitive
+
+
+def test_regenerate_secret_invalidates_every_cookie(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("HAL0_AGENT_SECRET_PATH", str(tmp_path / "secret.bin"))
+    cookie = agents_auth.mint_session_cookie()
+    assert agents_auth.verify_session_cookie(cookie)
+
+    assert agents_auth.regenerate_secret() is True
+
+    assert agents_auth.verify_session_cookie(cookie) is False
+    assert agents_auth.verify_session_cookie(agents_auth.mint_session_cookie())
+    assert oct((tmp_path / "secret.bin").stat().st_mode & 0o777) == "0o600"
+    assert [p.name for p in tmp_path.iterdir()] == ["secret.bin"]
+
+
+def test_regenerate_secret_without_a_secret_is_a_no_op(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No secret on disk means no session can verify; creating one here (as
+    root, from the CLI) would leave a file the service user cannot read."""
+    monkeypatch.setenv("HAL0_AGENT_SECRET_PATH", str(tmp_path / "agents" / "secret.bin"))
+    assert agents_auth.regenerate_secret() is False
+    assert not (tmp_path / "agents").exists()

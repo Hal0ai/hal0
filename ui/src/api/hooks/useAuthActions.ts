@@ -29,8 +29,15 @@ export interface RotateKeyResponse {
   fingerprint: string
   applies_live: boolean
   restart_required: boolean
+  /** false when an admin rotation signed out every other session (#2633). */
   session_preserved: boolean
   note: string
+}
+
+export interface RotateKeyArgs {
+  tier: KeyTier
+  /** Admin only: leave other browser sessions signed in. Default signs them out. */
+  keepSessions?: boolean
 }
 
 /** PUT /api/auth/require — flip the persisted [security].require_auth toggle. */
@@ -49,11 +56,19 @@ export function useSetRequireAuth() {
  * The response is status-only (fingerprint + rotated_at + notices); it NEVER
  * carries the key value. We invalidate 'auth-status' so the posture (and the
  * admin-key set/unset pip) re-reads after a rotation.
+ *
+ * An admin rotation signs out every other browser session unless
+ * `keepSessions` is set (#2633); this browser gets a fresh cookie in the
+ * same response, so it stays signed in.
  */
 export function useRotateKey() {
   const qc = useQueryClient()
   return useMutation({
-    mutationFn: (tier: KeyTier) => apiPost<RotateKeyResponse>(ENDPOINTS.authRotate, { tier }),
+    mutationFn: ({ tier, keepSessions = false }: RotateKeyArgs) =>
+      apiPost<RotateKeyResponse>(
+        ENDPOINTS.authRotate,
+        tier === 'admin' ? { tier, keep_sessions: keepSessions } : { tier },
+      ),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['auth-status'] }),
   })
 }
