@@ -123,3 +123,75 @@ def test_disable_json(stub_api) -> None:
     assert result.exit_code == 0
     payload = json.loads(result.output)
     assert payload["enabled"] is False
+
+
+# ── #2353: extraction throughput warning ─────────────────────────────────────
+
+
+def _slow_estimate() -> dict[str, Any]:
+    from hal0.memory.extraction_env import ExtractionThroughput
+
+    return ExtractionThroughput(
+        slot="utility", timeout_s=300, max_tokens=4096, prompt_tps=12.0, decode_tps=4.0
+    ).as_dict()
+
+
+def test_enable_prints_the_throughput_warning(stub_api, monkeypatch: pytest.MonkeyPatch) -> None:
+    est = _slow_estimate()
+    seen: dict[str, Any] = {}
+
+    def fake_put(path: str, **kw: Any) -> dict[str, Any]:
+        seen.update(kw)
+        return {
+            "enabled": True,
+            "extraction_slot": "utility",
+            "throughput": est,
+            "warnings": [est["message"]],
+        }
+
+    monkeypatch.setattr(memory_commands, "api_put", fake_put)
+    result = runner.invoke(memory_commands.app, ["graph", "enable"], terminal_width=400)
+
+    assert result.exit_code == 0, result.output  # a warning, never a refusal
+    assert "Graph extraction enabled" in result.output
+    assert "12.0 prompt tok/s" in result.output
+    # Rendered literally, not swallowed as a rich markup tag.
+    assert "[memory.graph].llm_timeout_s = 300 s" in result.output
+    # The PUT may restart hindsight-api and then probe: the 10 s default is too short.
+    assert seen["timeout"] > 60
+
+
+def test_graph_status_shows_the_cached_estimate(stub_api, monkeypatch: pytest.MonkeyPatch) -> None:
+    est = _slow_estimate()
+    monkeypatch.setattr(
+        memory_commands,
+        "api_get",
+        lambda path, **_kw: {"enabled": True, "extraction_slot": "utility", "throughput": est},
+    )
+    result = runner.invoke(memory_commands.app, ["graph", "status"], terminal_width=400)
+
+    assert result.exit_code == 0, result.output
+    assert "Extraction speed" in result.output
+    assert "12.0 prompt tok/s" in result.output
+
+
+def test_graph_check_posts_the_measurement_and_exits_zero_when_slow(
+    stub_api, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    est = _slow_estimate()
+    posts: list[tuple[str, dict[str, Any]]] = []
+
+    def fake_post(path: str, **kw: Any) -> dict[str, Any]:
+        posts.append((path, kw))
+        return {"throughput": est}
+
+    monkeypatch.setattr(memory_commands, "api_post", fake_post)
+    result = runner.invoke(memory_commands.app, ["graph", "check"], terminal_width=400)
+
+    assert result.exit_code == 0, result.output
+    assert posts[0][0] == "/api/memory/graph/throughput"
+    assert posts[0][1]["timeout"] > 30  # room for the 30 s probe cap
+    assert "12.0 prompt tok/s" in result.output
+
+    as_json = runner.invoke(memory_commands.app, ["graph", "check", "--json"])
+    assert json.loads(as_json.output)["verdict"] == "too_slow"

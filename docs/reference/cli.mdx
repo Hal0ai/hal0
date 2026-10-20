@@ -181,6 +181,7 @@ hardware backend. The hardware backend is selected with `--hardware`, and stored
 | `memory graph status` | — | `--json` |
 | `memory graph enable` | — | `--slot`, `--json` |
 | `memory graph disable` | — | `--json` |
+| `memory graph check` | — | `--json` |
 
 ### `memory bank`
 
@@ -253,13 +254,15 @@ Bare `hal0 doctor` (no subcommand) runs `installer/lib/preflight.sh`:
 | `doctor all` | `--json` |
 | `doctor bundle` | `--out`, `--no-rocm-smi`, `--include-logs` (default `auto`; `auto\|yes\|no`) |
 
-`doctor all` rolls up every read-only check into one report. Each row has a stable id
+`doctor all` rolls up every check into one report. All are read-only except
+`memory_extraction_throughput`, which sends one bounded probe to the extraction slot (at most 512
+prompt and 32 decode tokens, capped at 30 s) when the slot's metrics carry no reading. Each row has a stable id
 (`Check.key`) used in `--json` output and cross-referenced elsewhere in the docs: `api`,
 `dns`, `runners`, `capabilities`, `memory`, `openwebui`, `hermes`, `auth`, `models`,
 `migrations`, `ui-dist`, `ports`, `port_dnat`, `netns`, `hal0_target`, `secret-modes`,
 `hardware_freshness`, `seed_context_envelope`, `agent-uid`, `api-journal`, `stt-weights`, `seams`,
 `mcp_mounts`, `hermes_mcp_auth`, `hermes_anchor_window`, `hindsight_llm_auth`,
-`memory_engine_version`. There is no standalone `hal0 doctor seams`
+`memory_engine_version`, `memory_extraction_throughput`. There is no standalone `hal0 doctor seams`
 command — `seams` is one of these roll-up rows, surfaced by `hal0 doctor all`.
 
 ## `hal0 upstream` — manage upstream LLM providers
