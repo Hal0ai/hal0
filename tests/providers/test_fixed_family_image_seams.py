@@ -330,13 +330,14 @@ async def test_slot_view_timeout_profileless_fixed_family_slot_is_unknown(
     assert out[cfg["name"]]["image_status"] == "unknown"
 
 
-async def test_image_pull_bare_llama_slot_resolves_nothing() -> None:
+async def test_image_pull_bare_llama_slot_resolves_launch_image() -> None:
+    """A bare llama slot launches a runner image, so the pull resolves it (#2750)."""
     from hal0.slots.image_pull import resolve_slot_image
 
     cfg = _bare_llama_cfg()
     assert _spec_provider_for(cfg) is None
     sm = SimpleNamespace(iter_configs=AsyncMock(return_value=[cfg]))
-    assert await resolve_slot_image(sm, cfg["name"]) is None
+    assert await resolve_slot_image(sm, cfg["name"]) == _resolve_image_ref(cfg, None)
 
 
 async def test_image_pull_pin_only_llama_slot_pulls_its_pin() -> None:
@@ -348,12 +349,39 @@ async def test_image_pull_pin_only_llama_slot_pulls_its_pin() -> None:
     assert await resolve_slot_image(sm, cfg["name"]) == "ghcr.io/example/runner:pinned"
 
 
-async def test_slot_view_bare_llama_slot_stays_not_configured() -> None:
+async def test_slot_view_bare_llama_slot_reports_resolved_image() -> None:
+    """#2750: no profile, no pin, llama dispatch still launches a runner image."""
     from hal0.slot_view import container_enrichment
 
     cfg = _bare_llama_cfg()
+    launched = _resolve_image_ref(cfg, None)
     out = await container_enrichment([cfg], pull_jobs={}, provider=_status_provider(None))
     entry = out[cfg["name"]]
-    assert entry["image"] is None
-    assert entry["resolved_command"] is None
-    assert entry["image_status"] == "not-configured"
+    assert entry["image"] == launched
+    assert entry["resolved_command"] and entry["resolved_command"][0] == launched
+    assert entry["image_status"] == "present"
+
+
+async def test_slot_view_running_bare_llama_slot_reports_image_and_no_mismatch() -> None:
+    """#2750 repro: a running bare slot must not show image=null next to actual_image."""
+    from hal0.slot_view import container_enrichment
+
+    cfg = _bare_llama_cfg()
+    launched = _resolve_image_ref(cfg, None)
+    out = await container_enrichment([cfg], pull_jobs={}, provider=_status_provider(launched))
+    entry = out[cfg["name"]]
+    assert entry["actual_image"] == launched
+    assert entry["image"] == launched
+    assert entry["image_mismatch"] is False
+    assert entry["image_status"] == "present"
+
+
+async def test_slot_view_timeout_bare_llama_slot_is_unknown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from hal0 import slot_view
+
+    cfg = _bare_llama_cfg()
+    monkeypatch.setattr(slot_view, "_PROBE_TIMEOUT_S", 0.0)
+    out = await slot_view.container_enrichment([cfg], pull_jobs={}, provider=_status_provider(None))
+    assert out[cfg["name"]]["image_status"] == "unknown"
