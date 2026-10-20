@@ -5,8 +5,8 @@ default). That env var lives in the installer-managed api.env block, so a
 reverse-proxy origin added there by hand vanished on the next installer run.
 Now the allowlist is the env list plus the origin of ``[network].public_url``
 plus ``[network].extra_origins``, read live off hal0.toml. These tests cover
-the merge, its reload semantics, and both gates (REST middleware and the
-chat-proxy WebSocket) accepting a configured origin.
+the merge, its reload semantics, and the middleware's Origin gate (REST and
+WebSocket) accepting a configured origin.
 """
 
 from __future__ import annotations
@@ -17,7 +17,6 @@ from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
-from starlette.websockets import WebSocketDisconnect
 
 from hal0.api import auth as auth_mod
 from hal0.api.agents import _auth
@@ -349,55 +348,3 @@ def test_websocket_upgrade_accepts_configured_origin(home: Path, hardened_app: T
         headers={"origin": EXTRA, "authorization": "Bearer admin-xyz"},
     ):
         pass
-
-
-# ── chat-proxy WS gate (check_ws_origin_and_cookie) ───────────────────────
-
-
-@pytest.fixture
-def chat_client(
-    home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> Iterator[TestClient]:
-    from starlette.websockets import WebSocket
-
-    from hal0.api import create_app
-    from hal0.api.agents import chat_proxy
-
-    async def _stub_proxy_ws(browser_ws: WebSocket, **_: object) -> None:
-        await browser_ws.send_text("ok")
-        await browser_ws.close()
-
-    monkeypatch.setattr(chat_proxy, "_proxy_ws", _stub_proxy_ws)
-    monkeypatch.setenv("HAL0_AGENT_SECRET_PATH", str(tmp_path / "secret.bin"))
-    monkeypatch.setenv("HAL0_ALLOWED_ORIGINS", "http://127.0.0.1:8080")
-    with TestClient(create_app()) as c:
-        yield c
-
-
-def _chat_ws_close_code(client: TestClient, origin: str) -> int | None:
-    resp = client.get("/api/agents/hermes/session/handshake")
-    assert resp.status_code == 200, resp.text
-    client.cookies.set(_auth.SESSION_COOKIE_NAME, resp.cookies[_auth.SESSION_COOKIE_NAME])
-    try:
-        with client.websocket_connect(
-            "/api/agents/hermes/events", headers={"origin": origin, "host": "192.0.2.20:8080"}
-        ) as ws:
-            assert ws.receive_text() == "ok"
-    except WebSocketDisconnect as exc:
-        return exc.code
-    return None
-
-
-def test_chat_ws_gate_accepts_configured_extra_origin(home: Path, chat_client: TestClient) -> None:
-    _write_network(home, f'[network]\nextra_origins = ["{EXTRA}"]\n')
-    assert _chat_ws_close_code(chat_client, EXTRA) is None
-
-
-def test_chat_ws_gate_accepts_public_url_origin(home: Path, chat_client: TestClient) -> None:
-    _write_network(home, f'[network]\npublic_url = "{PROXY}/"\n')
-    assert _chat_ws_close_code(chat_client, PROXY) is None
-
-
-def test_chat_ws_gate_still_rejects_unlisted_origin(home: Path, chat_client: TestClient) -> None:
-    _write_network(home, f'[network]\nextra_origins = ["{EXTRA}"]\n')
-    assert _chat_ws_close_code(chat_client, "https://evil.example.com") == 4403

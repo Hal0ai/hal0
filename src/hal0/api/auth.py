@@ -15,9 +15,8 @@ Three-tier, deny-by-default auth built around one classification table
 - :class:`AuthEnforcementMiddleware` — the pure-ASGI gate wired into
   ``create_app()`` right after ``log_scrub.install(app)``. Handles both
   ``http`` (incl. SSE, which is just a long-lived GET) and ``websocket``
-  scopes; a denied WebSocket is rejected pre-accept with close code 4403
-  (matching :mod:`hal0.api.agents.chat_proxy`'s existing convention). An
-  admitted one stays registered with :mod:`hal0.api.live_sockets`, which
+  scopes; a denied WebSocket is rejected pre-accept with close code 4403.
+  An admitted one stays registered with :mod:`hal0.api.live_sockets`, which
   closes it with 4401 once a key rotation means its credential would no
   longer pass this gate (#2801).
 
@@ -52,8 +51,8 @@ for the key at the front door instead of rendering pages whose reads all
 401.
 
 The browser session cookie is **reused, not reimplemented**: minting and
-verification both delegate to :mod:`hal0.api.agents._auth` (the existing
-HMAC-SHA256 cookie already protecting the agent chat-proxy WS routes), so
+verification both delegate to :mod:`hal0.api.agents._auth` (one
+HMAC-SHA256 cookie scheme), so
 there is exactly one cookie scheme and one secret file in the whole app. A
 valid session cookie resolves to the ``admin`` tier — it's the local
 operator's browser dashboard session, per ``spec-kb1-auth.md``.
@@ -394,13 +393,11 @@ def _origin_allowed(scope: dict[str, Any]) -> bool:
       cross-origin/WS requests; its absence means a same-origin navigation or
       a non-browser client, neither of which is a cross-site vector.
     * ``Origin`` in the shared allowlist (``HAL0_ALLOWED_ORIGINS`` /
-      :func:`hal0.api.agents._auth.allowed_origins`) -> allow. One allowlist
-      for both this gate and the chat-proxy WS gate.
+      :func:`hal0.api.agents._auth.allowed_origins`) -> allow.
     * ``Origin`` equal to the request's own origin on an **IP-literal**
       ``Host`` -> allow (the dashboard reached by a LAN IP the install-time
-      allowlist doesn't know, e.g. after a DHCP change). This is the same
-      check the chat-proxy WS gate uses
-      (:func:`hal0.api.agents._auth._is_same_origin`). A DNS-name ``Host``
+      allowlist doesn't know, e.g. after a DHCP change), via
+      :func:`hal0.api.agents._auth._is_same_origin`. A DNS-name ``Host``
       never takes this path: an attacker page can rebind its own name to
       the box and send a matching ``Origin``/``Host`` pair (#2327). Named
       origins (``hal0.local``, the box hostname, a reverse proxy's
@@ -665,9 +662,8 @@ class AuthEnforcementMiddleware:
         )
 
         if scope_type == "websocket":
-            # Code 4403 = policy violation. Matches
-            # hal0.api.agents.chat_proxy's existing convention -- one
-            # rejection code for "you may not upgrade this socket".
+            # Code 4403 = policy violation: one rejection code for
+            # "you may not upgrade this socket".
             await send({"type": "websocket.close", "code": 4403})
             return
 

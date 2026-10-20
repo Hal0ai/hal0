@@ -99,9 +99,6 @@ See [Config schema](/docs/reference/config-schema/) for the `[metrics]` TOML tab
 
 | Variable | Default | Controls |
 |---|---|---|
-| `HAL0_HERMES_RUNTIME_JSON` | `/var/lib/hal0/.hermes/runtime.json` | Hermes runtime info file (embed token etc). |
-| `HAL0_HERMES_HOST` | `127.0.0.1` | Host the chat proxy dials to reach Hermes' own API. |
-| `HAL0_HERMES_PORT` | `9119` | Port the chat proxy dials to reach Hermes' own API. |
 | `HAL0_HERMES_PYTHON` | unset (auto-discovered interpreter) | Pins the interpreter used to run/re-provision the Hermes venv. |
 | `HAL0_HERMES_LIVE_RESOLVE` | `"1"` | `0` opts out of live model-discovery (Hermes' picker polling hal0-api's `/v1/models`) back into single-backend pinning. |
 | `HAL0_HERMES_TERMINAL` | unset (→ terminal tool OFF) | Opt the agent into a terminal tool at provisioning time. `1` enables it, `0` disables it. With it on, Hermes can run shell commands as the `hal0` user, which is root-equivalent on this box. A non-interactive install never enables it; see [Run agents](/docs/guides/run-agents/). |
@@ -109,7 +106,7 @@ See [Config schema](/docs/reference/config-schema/) for the `[metrics]` TOML tab
 | `HAL0_AGENTENV` | `/usr/lib/hal0/bin/hal0-agentenv` | Privileged-seam binary hal0-api (running unprivileged) delegates to for writing root:root agent secret/env files. Env-overridable for tests, not a normal operator knob. |
 | `HAL0_SYSTEMCTL` | `/usr/lib/hal0/bin/hal0-systemctl` | Privileged-seam binary hal0-api delegates to for the systemd writes/reloads it cannot do unprivileged. Env-overridable for tests, not a normal operator knob. |
 | `HAL0_INFERENCE_BASE` | `http://127.0.0.1:8080` | Base URL the Hermes provisioner records as hal0's inference endpoint. |
-| `HAL0_AGENT_SECRET_PATH` | `/var/lib/hal0/agents/secret.bin` | HMAC session-cookie secret for the agent chat proxy. |
+| `HAL0_AGENT_SECRET_PATH` | `/var/lib/hal0/agents/secret.bin` | HMAC secret that signs dashboard session cookies (`hal0_session`). |
 | `HAL0_AGENT_ID` | `"hermes"` everywhere (default constant + per-call-site fallback) | Identity a plugin/proxy presents as (`X-hal0-Agent` header to Hindsight, board/manifest-proxy routing target, the hal0-provider plugin's own id). Written into the shim's child env by `hal0-agent`; per-request overrides exist above it in some paths. |
 | `HERMES_HOME` | `~/.hermes` | — |
 | `HERMES_SESSION_TOKEN` | unset (harvested live from the dashboard HTML) | Pins a Hermes session bearer explicitly instead of the per-process token the client otherwise scrapes from the dashboard on each start. Mainly for tests or a non-standard deploy. |

@@ -42,7 +42,7 @@ runs **as root** (the hardened/non-root mode was removed, ADR-0023).
   - `_dispatch_via_npu_trio()` (L755) — NPU FLM-trio dispatch path.
   - `list_models()` (L479) — `/v1/models`. Plus embeddings, rerank, STT, TTS, image-gen handlers.
 - `api/routes/` — one router per concern: `slots.py`, `models.py`, `capabilities.py`, `profiles.py`, `providers.py`, `config.py`, `backends.py`, `stacks.py`, `memory.py`/`memory_admin.py`, `health.py`/`services_health.py`, `hardware.py`, `npu.py`, `updater.py`, `agents.py`, `installer.py`, `logs.py`, `journal.py`, `power.py`, `secrets.py`, `settings.py`, `events.py`, etc.
-- `api/agents/` — agent-facing endpoints (chat proxy, budget, personas, restart, memory stats).
+- `api/agents/` — agent-facing endpoints (budget, personas, restart, memory stats).
 - `api/middleware/` — request-id, log scrubbing, error-code mapping.
 - `api/mcp_mount.py` — mounts the MCP servers under the API.
 

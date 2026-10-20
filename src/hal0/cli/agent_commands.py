@@ -504,7 +504,7 @@ def _ensure_hermes_writable_or_die() -> None:
 # ── §7.4 privilege drop: provision as the hal0 service user ──────────────────
 #
 # The Hermes bootstrap pipeline writes $HERMES_HOME (config.yaml, personas,
-# context, runtime.json, provision.json) plus — through the sudo seams —
+# context, provision.json) plus — through the sudo seams —
 # root:root artifacts. To make those HERMES_HOME writes born hal0:hal0 (instead
 # of root-then-chown), the provisioning step drops to the hal0 user whenever it
 # is invoked as root: run the root-only prelude (install the /usr/local/bin

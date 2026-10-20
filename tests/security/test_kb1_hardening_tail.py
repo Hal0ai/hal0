@@ -195,8 +195,7 @@ def test_origin_default_allowlist_covers_localhost_dashboard(
 
 
 def test_origin_fallback_rejects_ws_downgrade_on_wss(monkeypatch: pytest.MonkeyPatch) -> None:
-    # Same rule as the chat-proxy WS gate: a wss upgrade hal0 terminated
-    # itself only matches an https page.
+    # A wss upgrade hal0 terminated itself only matches an https page.
     monkeypatch.setenv("HAL0_ALLOWED_ORIGINS", "http://hal0.local")
     headers = [(b"origin", b"http://192.168.1.50:8080"), (b"host", b"192.168.1.50:8080")]
     wss = _scope(scope_type="websocket", headers=headers)

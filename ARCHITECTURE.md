@@ -61,8 +61,8 @@ src/hal0/
 │   ├── routes/      # one APIRouter per concern (capabilities,
 │   │                #   backends, images, events, agents lifecycle,
 │   │                #   approvals, mcp, memory, …)
-│   ├── agents/      # v0.3 agent surface — personas, chat-proxy,
-│   │                #   restart, skills catalog, memory stats
+│   ├── agents/      # v0.3 agent surface — personas, restart,
+│   │                #   memory stats, session-cookie helpers
 │   ├── plugins/     # v0.3 dashboard plugin host (manifest proxy +
 │   │                #   shadow-DOM SDK shim for upstream Hermes plugins)
 │   ├── mcp_mount.py # mounts hal0-admin + hal0-memory MCP servers
@@ -355,10 +355,10 @@ and the composite `hal0` upstream config — all idempotently.
   (hal0-api, which fronts the per-slot inference containers) — a plain
   endpoint hint, not a hard systemd dependency, so the agent survives a
   slot container restart or GPU-cleanup hang.
-* **Chat proxy** — `src/hal0/api/agents/chat_proxy.py`. WS upgrades
-  gated by Origin allowlist + HMAC session cookie; outbound carries
-  the runtime.json embed token in `Authorization: Bearer …`. Browser
-  never sees the embed token.
+* **Chat** — Hermes's own dashboard (its Chat tab) is the agent chat
+  surface; hal0 does not proxy it (ADR-0033). The dashboard's
+  agent-chat slide-out talks to the hal0-brain steward at
+  `/api/brain/chat`, not to Hermes.
 * **Plugin host** — `src/hal0/api/plugins/`. Proxies upstream Hermes
   plugin manifests + serves plugin static assets so the dashboard can
   mount them in shadow-DOM iframes.
@@ -392,8 +392,8 @@ and the composite `hal0` upstream config — all idempotently.
   [`docs/reference/mcp-tools.mdx`](./docs/reference/mcp-tools.mdx).
 * **Identity** — an agent identity card is published once into the
   `agents` memory namespace during first-run bootstrap and cleaned on
-  uninstall. `X-hal0-Agent` is the header the proxy injects on every
-  outbound hop.
+  uninstall. `X-hal0-Agent` carries that identity on hops between hal0
+  and the agent.
 
 ### Module map
 
@@ -405,7 +405,6 @@ and the composite `hal0` upstream config — all idempotently.
 | `src/hal0/agents/mcp_client.py`                | MCP server-axis + tool-axis classifier       |
 | `src/hal0/agents/hermes/plugins/memory_hindsight/` | hal0-memory `MemoryProvider` plugin (canonical source; mirrored byte-for-byte into `installer/agents/hermes/plugins/hal0-memory/` at install time, guarded by `tests/agents/hermes_plugins/test_seed_parity.py`) |
 | `src/hal0/api/agents/personas.py`              | `/api/agents/{id}/personas[/{pid}/activate]` |
-| `src/hal0/api/agents/chat_proxy.py`            | WS proxy + session REST shim                 |
 | `src/hal0/api/agents/restart.py`               | `POST /api/agents/{id}/restart`              |
 | `src/hal0/api/agents/memory_stats.py`          | `GET /api/agents/{id}/memory/stats`          |
 | `src/hal0/api/routes/agents.py`                | list / persona-enums / `GET /skills` / install / uninstall / activity |
@@ -432,7 +431,7 @@ These decisions are settled. Some are recorded as ADRs in `docs/adr/`
 * **Auth** — hal0-api runs as `hal0` and binds open on the LAN; the
   shipped default is trusted-LAN-open, with the optional KB-1 key gate
   (`docs/operate/auth.mdx`) layered on when an operator configures an
-  admin key. The chat-proxy keeps its own HMAC session-cookie seam. TLS
+  admin key; a dashboard sign-in is an HMAC session cookie. TLS
   and user directories belong to an upstream reverse proxy.
 
 ### Upstream pin
@@ -1074,24 +1073,22 @@ human-gated path — never auto-merged.
 
 ### HMAC session cookie
 
-The browser-facing authn seam on hal0-api's chat-proxy surface
-(`/api/agents/{id}/{events,submit,session/*}`). Minted on first GET
-`/api/agents/{id}/session/handshake`, payload `{session_id, expires_at}`,
-signature `HMAC-SHA256(<secret>, base64url(payload))`. Secret lives at
-`/var/lib/hal0/agents/secret.bin` (chmod 0600, generated on first use).
-`HttpOnly` + `SameSite=Lax` + 8h TTL. Belongs to the chat-proxy
-specifically (the rest of the API uses the optional KB-1 key gate, off by
-default; agent identity on hal0-api is carried by the `X-hal0-Agent`
-header, below). See
-`src/hal0/api/agents/_auth.py`.
+The browser-facing authn seam of the KB-1 key gate. `POST /api/auth/login`
+mints it (`src/hal0/api/routes/auth.py`); the enforcement middleware
+verifies it and treats it as the admin tier. Payload
+`{session_id, expires_at}`, signature
+`HMAC-SHA256(<secret>, base64url(payload))`. Secret lives at
+`/var/lib/hal0/agents/secret.bin` (chmod 0600, generated on first use);
+replacing it signs every session out. `HttpOnly` + `SameSite=Lax`, 8h TTL
+(30 days with "remember me"). Agent identity on hal0-api is carried by the
+`X-hal0-Agent` header, below. See `src/hal0/api/agents/_auth.py`.
 
 ### X-hal0-Agent
 
 The HTTP header hal0-api sets on outbound hops to hermes (and that bundled
 agents set on inbound hops to hal0-api). Carries the agent's stable id
 (e.g. `hermes`, `pi`). It is the identity claim on hal0-api (NOT
-Bearer); per the security baseline the chat-proxy injects it, the browser
-never sees or sets it. The hal0-memory MCP resolver derives the per-agent
+Bearer); the browser never sees or sets it. The hal0-memory MCP resolver derives the per-agent
 private namespace from this header.
 
 ### composite hal0 upstream
@@ -1322,7 +1319,7 @@ in `CLAUDE.md`.
 the open-source repo, numbered independently of anything else. As of
 this writing: `0001` (Moonshine CPU STT reinstatement), `0002` (agent
 credential isolation), `0003` (ONNX text-generation via the NPU —
-deferred), `0004` (bundled agents), `0005` (memory namespace grammar),
+deferred), `0004` (bundled agents — chat surface amended by `0033`), `0005` (memory namespace grammar),
 `0006` (every shipped runner image is a registry runner), `0012`
 (auth + Caddy removal — partly superseded by the KB-1 key gate), `0013`
 (per-agent MCP client allow-list), `0015` (MCP process supervisor and

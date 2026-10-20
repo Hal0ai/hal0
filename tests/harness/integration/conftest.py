@@ -1,8 +1,6 @@
-"""Shared fixtures for the v0.3 chat + persona δ-harness integration tests.
+"""Shared fixtures for the v0.3 persona δ-harness integration tests.
 
-Reuses the FakeHermes uvicorn pattern from ``tests/api/test_chat_proxy.py``
-but elevates it to harness scope (one fake-hermes per test, the same
-client shape PR-9 / PR-10's production code talks to).
+One fake-hermes uvicorn server per test, plus an isolated hal0-api client.
 
 Lives in ``tests/harness/integration/`` so the δ-tier suite can be
 filtered out of the normal ``pytest tests/`` collection if needed —
@@ -137,8 +135,7 @@ class _ServerThread(threading.Thread):
 
 @pytest.fixture
 def fake_hermes(monkeypatch: pytest.MonkeyPatch) -> Iterator[FakeWsServer]:
-    """Spin up a FakeWsServer on a free 127.0.0.1 port + steer the
-    chat-proxy at it via env vars."""
+    """Spin up a FakeWsServer on a free 127.0.0.1 port."""
     port = _free_port()
     hermes = FakeWsServer()
     server = _ServerThread(hermes.app, port)
@@ -155,9 +152,6 @@ def fake_hermes(monkeypatch: pytest.MonkeyPatch) -> Iterator[FakeWsServer]:
         server.stop()
         raise RuntimeError("fake hermes didn't start")
 
-    monkeypatch.setenv("HAL0_HERMES_HOST", "127.0.0.1")
-    monkeypatch.setenv("HAL0_HERMES_PORT", str(port))
-
     try:
         yield hermes
     finally:
@@ -173,33 +167,14 @@ def harness_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[
       * ``HAL0_AGENT_SECRET_PATH`` — fresh HMAC secret per test
       * ``HAL0_HOME`` — fresh /etc/hal0 + /var/lib/hal0 surrogate
       * ``HAL0_ALLOWED_ORIGINS`` — only 127.0.0.1:8080 (tight default)
-      * ``HAL0_HERMES_RUNTIME_JSON`` — a chmod-0600 file the proxy reads
     """
     monkeypatch.setenv("HAL0_AGENT_SECRET_PATH", str(tmp_path / "secret.bin"))
     monkeypatch.setenv("HAL0_HOME", str(tmp_path / "hal0_home"))
     (tmp_path / "hal0_home" / "etc" / "hal0").mkdir(parents=True, exist_ok=True)
     monkeypatch.setenv("HAL0_ALLOWED_ORIGINS", "http://127.0.0.1:8080")
 
-    runtime = tmp_path / "runtime.json"
-    runtime.write_text(json.dumps({"host": "127.0.0.1", "port": 9119, "token": ""}))
-    runtime.chmod(0o600)
-    monkeypatch.setenv("HAL0_HERMES_RUNTIME_JSON", str(runtime))
-
     from hal0.api import create_app
 
     app = create_app()
     with TestClient(app) as c:
         yield c
-
-
-@pytest.fixture
-def authorised_client(harness_client: TestClient) -> TestClient:
-    """A TestClient with a valid HMAC session cookie attached."""
-    from hal0.api.agents import _auth
-
-    resp = harness_client.get("/api/agents/hermes/session/handshake")
-    assert resp.status_code == 200, resp.text
-    cookie = resp.cookies.get(_auth.SESSION_COOKIE_NAME)
-    assert cookie is not None
-    harness_client.cookies.set(_auth.SESSION_COOKIE_NAME, cookie)
-    return harness_client

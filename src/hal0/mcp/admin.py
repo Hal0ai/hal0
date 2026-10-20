@@ -3280,7 +3280,7 @@ EXCLUDED_TOOLS: dict[str, str] = {
         "to but distinct from agent_sessions above (which covers runtime session "
         "admin). Kept excluded as one policy area rather than split by verb; the "
         "hermes-specific sub-routers at the same prefix (personas/restart/memory-"
-        "stats/chat-proxy) are a sibling lane's surface, not aliased here either."
+        "stats) are a sibling lane's surface, not aliased here either."
     ),
 }
 

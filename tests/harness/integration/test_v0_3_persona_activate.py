@@ -105,18 +105,6 @@ def test_persona_activate_with_reload_calls_hermes(
     pins "the call went out at all" so a regression in the helper's
     network path surfaces.
     """
-    # Override the hermes-reload URL so the helper posts to fake_hermes.
-    # The personas module reads HAL0_HERMES_HOST/PORT (set by the
-    # fake_hermes fixture) when computing the reload URL. The helper
-    # may also need an env var to point at the right port — set
-    # generously to cover both shapes.
-    import os
-
-    host = os.environ.get("HAL0_HERMES_HOST", "127.0.0.1")
-    port = int(os.environ.get("HAL0_HERMES_PORT", "9119"))
-    monkeypatch.setenv("HAL0_HERMES_HOST", host)
-    monkeypatch.setenv("HAL0_HERMES_PORT", str(port))
-
     r = harness_client.post(
         "/api/agents/hermes/personas/hal0-brain/activate",
         json={"reload": True},

@@ -159,21 +159,19 @@ This is a host/origin gate, not the auth layer above — it stops a browser on
 another site from rebinding DNS to reach your loopback MCP server. It composes
 with the auth tiers, not instead of them.
 
-## Agent chat: origin allowlist + session cookie
+## Browser sessions: origin allowlist + session cookie
 
-The agent-chat WebSocket routes carry a second, narrower gate on top of the
-MCP allowlist above: every WS upgrade is checked against an **origin
-allowlist** (`HAL0_ALLOWED_ORIGINS`, comma-separated; the default covers
-`http://hal0.local`, `http://localhost:5173`, `http://localhost:8080`, and
-`http://127.0.0.1:8080`; the installer replaces it with a host-derived list),
-and an **HMAC-SHA256 session cookie** (`hal0_session`, `HttpOnly`,
-`SameSite=Lax`) is minted the first time the dashboard calls
-`GET /api/agents/{agent_id}/session/handshake` and verified on every
-WebSocket upgrade after that. This is the same cookie scheme the v1.0 auth
-layer reuses for the `admin` tier — one signing secret
+When the key gate is enforced, every WebSocket upgrade and every
+state-changing request that carries an `Origin` header is checked against an
+**origin allowlist** (`HAL0_ALLOWED_ORIGINS`, comma-separated; the default
+covers `http://hal0.local`, `http://localhost:5173`, `http://localhost:8080`,
+and `http://127.0.0.1:8080`; the installer replaces it with a host-derived
+list). A dashboard sign-in (`POST /api/auth/login`) mints an **HMAC-SHA256
+session cookie** (`hal0_session`, `HttpOnly`, `SameSite=Lax`) that the
+middleware treats as the `admin` tier: one signing secret
 (`/var/lib/hal0/agents/secret.bin`, mode `0600`), one cookie, one place it's
-verified. Caller identity still flows on `X-hal0-Agent` underneath either
-gate.
+verified. See [Authentication](/docs/operate/auth/). Caller identity still
+flows on `X-hal0-Agent` underneath.
 
 ## Agent identity and gated actions
 

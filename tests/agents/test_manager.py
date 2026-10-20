@@ -337,7 +337,7 @@ def test_uninstall_reports_residual_on_permission_error(
     manager.install("hermes")
     home = _seed_managed_home(manager, "hermes")
     state_dir = _seed_state_dir(manager, "hermes")
-    blocked = home / "runtime.json"
+    blocked = home / "config.yaml"
     blocked.write_text("{}\n")
 
     def _fake_rmtree(path: Path, *, onexc=None) -> None:  # type: ignore[no-untyped-def]

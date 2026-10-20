@@ -1475,7 +1475,7 @@ known_issues:
       hermes-gateway.service is observed with User=root or without HERMES_HOME/HOME pinned off
       /root; OR the audit reports the stray tree as ok/absent while /root/.hermes exists
       (detector false negative); OR the managed side drifts (HERMES_HOME tree, config.yaml,
-      runtime.json, or the hermes venv owned by anything other than hal0); OR
+      or the hermes venv owned by anything other than hal0); OR
       `sudo hal0 agent bootstrap hermes --repair` is made to claim it removed the stray tree and
       doctor perms still shows the row. Do NOT re-report: doctor perms exiting 1 solely because a
       validation agent, an operator, or HAL0_ALLOW_ROOT=1 ran the raw venv binary as root during

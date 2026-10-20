@@ -364,7 +364,7 @@ RULES: tuple[_Rule, ...] = (
     _Rule("chat-templates", _prefix("/api/chat-templates"), AuthClass.ADMIN, None),
     _Rule("agent approvals", _prefix("/api/agent/approvals"), AuthClass.ADMIN, None),
     _Rule(
-        "agents (lifecycle/personas/restart/chat-proxy)",
+        "agents (lifecycle/personas/restart/memory stats)",
         _prefix("/api/agents"),
         AuthClass.ADMIN,
         None,

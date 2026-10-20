@@ -1,15 +1,15 @@
 """Close open WebSockets whose credential stopped granting access (#2801).
 
-Every WebSocket gate in hal0 checks the caller's credential once, at the
-upgrade: :class:`hal0.api.auth.AuthEnforcementMiddleware` for every
-classified route, and :func:`hal0.api.agents._auth.check_ws_origin_and_cookie`
-for the agent chat proxy. A socket then lives for hours. Without a second
+A WebSocket gate checks the caller's credential once, at the upgrade:
+:class:`hal0.api.auth.AuthEnforcementMiddleware` does so for every
+classified route (the board feed, ``/v1/realtime``). A socket then lives for
+hours. Without a second
 look, replacing a credential (an admin key rotation, which also replaces the
 session-signing secret) left every already-open socket working until it
 dropped on its own, so the operator's response to a compromise did not reach
 an attacker who already held a socket.
 
-This module is the second look. Each gate registers the sockets it admits
+This module is the second look. A gate registers the sockets it admits
 here together with a ``still_authorized`` predicate that re-runs its own
 check against the credential the socket was opened with (the upgrade's
 cookie, bearer or ``api_key``, which a WebSocket cannot change later).
@@ -24,8 +24,6 @@ The registry is process-local, like the credentials it re-checks: a rotation
 that bypasses the running API (``hal0 auth reset-key`` falling back to writing
 the secret and ``api.env`` itself when its API call fails) is not seen here,
 and the CLI tells the operator to restart hal0-api, which closes every socket.
-Until then the chat proxy covers its own sockets: it re-reads the secret on
-every browser frame and on an interval.
 """
 
 from __future__ import annotations
@@ -52,9 +50,8 @@ Receive = Callable[[], Awaitable[Message]]
 Send = Callable[[Message], Awaitable[None]]
 
 
-#: Scope key holding one identity per socket, so the gates that both track
-#: it (the middleware and the chat proxy) count as one socket in
-#: :func:`revalidate`'s return value.
+#: Scope key holding one identity per socket, so gates that both track it
+#: count as one socket in :func:`revalidate`'s return value.
 _SOCKET_ID_KEY: Final[str] = "hal0.live_sockets.socket_id"
 
 
