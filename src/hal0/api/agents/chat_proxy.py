@@ -270,16 +270,26 @@ class ProgressCoalescer:
 
         A revoked socket passes ``flush=False``: its browser is no longer
         signed in, so buffered progress is dropped rather than delivered.
+
+        Never raises: it runs in the proxy's cleanup, ahead of the upstream
+        close and the browser close, and a delayed flush that already failed
+        (or a final flush to a browser that is gone) must not skip those.
         """
         self._closed = True
         if self._flush_task is not None:
             self._flush_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
+            try:
                 await self._flush_task
+            except asyncio.CancelledError:
+                pass
+            except Exception as exc:
+                log.debug("hal0.chat_proxy.coalescer_flush_failed", error=str(exc))
         if flush:
-            await self._flush_now()
-        else:
-            self._pending.clear()
+            try:
+                await self._flush_now()
+            except Exception as exc:
+                log.debug("hal0.chat_proxy.coalescer_flush_failed", error=str(exc))
+        self._pending.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -360,7 +370,13 @@ async def _proxy_ws(
     revoked_locally = False
 
     def cookie_still_valid() -> bool:
-        return bool(cookie) and verify_session_cookie(cookie)
+        # Deny by default: a secret that cannot be read revokes the socket
+        # (4401) rather than ending it with an unlogged task error.
+        try:
+            return bool(cookie) and verify_session_cookie(cookie)
+        except Exception as exc:
+            log.warning("hal0.chat_proxy.session_check_failed", agent_id=agent_id, error=str(exc))
+            return False
 
     with live_sockets.track(cookie_still_valid, scope=browser_ws.scope) as revoked:
         if revoked.is_set():

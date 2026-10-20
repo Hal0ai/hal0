@@ -451,3 +451,55 @@ def test_rotation_counts_a_doubly_registered_agent_socket_once(
         _assert_closed_revoked(ws)
 
     assert counts == [1]
+
+
+# ---------------------------------------------------------------------------
+# Round-3: failures inside the cleanup and the re-check paths.
+
+
+def test_coalescer_close_survives_a_failed_delayed_flush(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A delayed flush that already failed must not make ``close()`` raise.
+
+    ``close()`` runs in ``_proxy_ws``'s ``finally`` before the upstream close
+    and the 4401 close; a raise there leaked the hermes socket.
+    """
+    monkeypatch.setattr(chat_proxy, "PROGRESS_COALESCE_SECONDS", 0.0)
+    progress = json.dumps(
+        {"method": "event", "params": {"type": "tool.progress", "payload": {"tool_id": "t1"}}}
+    )
+
+    async def _run() -> None:
+        async def _broken_sink(_raw: str) -> None:
+            raise RuntimeError("browser gone")
+
+        coalescer = chat_proxy.ProgressCoalescer(_broken_sink)
+        await coalescer.handle(progress)
+        await asyncio.sleep(0.05)  # the delayed flush runs and fails
+        assert coalescer._flush_task is not None and coalescer._flush_task.done()
+        await coalescer.close(flush=False)
+        await coalescer.close()  # the final flush failing is swallowed too
+
+    asyncio.run(_run())
+
+
+def test_events_socket_closes_revoked_when_the_recheck_raises(
+    open_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Deny by default: a secret read that fails in the periodic re-check revokes."""
+    monkeypatch.setattr(chat_proxy, "SESSION_RECHECK_SECONDS", 0.05)
+    made = _connect_with(monkeypatch, [])
+    with open_client.websocket_connect("/api/agents/hermes/events", headers=ORIGIN) as ws:
+        assert made[0].drained.wait(timeout=5)
+
+        def _unreadable(_value: str, now: float | None = None) -> bool:
+            raise PermissionError("secret unreadable")
+
+        monkeypatch.setattr(chat_proxy, "verify_session_cookie", _unreadable)
+        time.sleep(0.5)
+        made[0].push('{"late": 1}')  # would reach the browser if the socket stayed open
+
+        with pytest.raises(WebSocketDisconnect) as exc_info:
+            ws.receive_text()
+        assert exc_info.value.code == live_sockets.CLOSE_CREDENTIAL_REVOKED
+
+    assert made[0].closed is True
