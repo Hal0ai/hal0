@@ -248,7 +248,7 @@ def test_container_spec_launches_the_resolved_image(
 # #2389: a slot with neither a profile nor an ``image_pin`` still launches a
 # fixed-family image when its ``type`` routes it to one (bare ``type=tts`` →
 # Kokoro, bare ``type=image`` → ComfyUI). Pull and status must report that
-# image, while a bare llama slot keeps its "not-configured" answer (#1226).
+# image, and (#2750) a bare llama slot reports its resolved runner image too.
 
 
 def _bare_tts_cfg() -> dict[str, Any]:

@@ -531,7 +531,8 @@ async def container_enrichment(
     ``image_mismatch`` against the declared profile image, and
     ``image_status`` (present | pulling | missing | unknown | not-configured —
     an in-flight job in ``pull_jobs`` wins without an inspect syscall;
-    ``not-configured`` marks a slot with no declared profile/image, #1226;
+    ``not-configured`` marks a slot whose image resolution raised, so there
+    is no ref to check (#1226; a profile-less slot resolves one, #2750);
     ``unknown`` marks a probe that could not be MADE, #1939, which is a
     different claim from ``missing``).
 

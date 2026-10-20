@@ -590,8 +590,13 @@ class TestContainerEnrichment:
         assert e["container_health"] is True
         assert e["runtime"] == "container"
         assert e["profile"] == ""
-        assert e["image"] is None
-        assert e["resolved_command"] is None
+        # #2750: a profile-less llm slot launches a resolved runner image, so
+        # the view reports the same ref the launch resolves.
+        from hal0.providers.container import _resolve_image_ref
+
+        assert e["image"] == _resolve_image_ref(_container_cfg(), None)
+        assert e["image"]
+        assert e["resolved_command"]
 
     async def test_a_profile_contributes_no_hardware_class(self, tmp_hal0_home: str) -> None:
         # ADR-0029: a profile selects no hardware (``device_class`` /
@@ -668,8 +673,10 @@ class TestContainerEnrichment:
         )
         e = out["gpu-chat"]
         assert e["actual_image"] == "ghcr.io/x/y:1"
-        # No declared image (no profile) → no mismatch verdict.
-        assert "image_mismatch" not in e
+        # #2750: the profile-less slot resolves a launch image, so the
+        # running ref is compared against it and a verdict is reported.
+        assert e["image"]
+        assert e["image_mismatch"] is True
 
     async def test_inflight_pull_job_wins_image_status(self) -> None:
         job = SimpleNamespace(state="pulling")
@@ -680,14 +687,36 @@ class TestContainerEnrichment:
         )
         assert out["gpu-chat"]["image_status"] == "pulling"
 
-    async def test_no_image_means_not_configured_status(self) -> None:
-        # #1226: no profile/image declared → "not-configured", not "missing"
-        # (a real missing-image fault). The slot runs on the default toolbox.
+    async def test_bare_llm_slot_reports_resolved_image_status(self) -> None:
+        # #2750: a bare llm slot (no profile, no pin) launches the runner
+        # default, so the view reports it and probes it like any other slot.
+        sv_mod._image_present_cache.clear()
+        out = await container_enrichment(
+            [_container_cfg()],
+            pull_jobs={},
+            provider=FakeContainerProvider(active=False, present=True),
+        )
+        assert out["gpu-chat"]["image"]
+        assert out["gpu-chat"]["image_status"] == "present"
+
+    async def test_unresolvable_image_means_not_configured_status(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # #1226: not-configured is now reachable only when image resolution
+        # itself raises (e.g. unreadable config) — "nothing to check", not a
+        # missing-image fault.
+        import hal0.providers.container as container_mod
+
+        def _boom(cfg: Any, prof: Any) -> str:
+            raise RuntimeError("config unreadable")
+
+        monkeypatch.setattr(container_mod, "_resolve_image_ref", _boom)
         out = await container_enrichment(
             [_container_cfg()],
             pull_jobs={},
             provider=FakeContainerProvider(active=False),
         )
+        assert out["gpu-chat"]["image"] is None
         assert out["gpu-chat"]["image_status"] == "not-configured"
 
     async def test_pin_only_slot_reports_pin_and_probed_status(self) -> None:

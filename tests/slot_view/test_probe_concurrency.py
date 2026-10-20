@@ -121,11 +121,9 @@ async def test_one_wedged_slot_cannot_hold_the_list(
     assert out["s3"]["container_status"] == "stopped"
     assert out["s3"]["container_health"] is False
     assert out["s2"]["container_status"] == "running"
-    # #1939: these configs are PROFILELESS, and "no profile → no declared
-    # image" is knowable from the config alone — the timeout does not make it
-    # any less true. So this case stays "not-configured" (#1226); see the
-    # profiled case below for the one the timeout really cannot answer.
-    assert out["s3"]["image_status"] == "not-configured"
+    # #1939/#2750: every container slot, profile-less included, resolves a
+    # runner image at launch, so a timeout means we never reached the store.
+    assert out["s3"]["image_status"] == "unknown"
 
 
 async def test_a_wedged_profiled_slot_reports_unknown_not_not_configured(
@@ -156,21 +154,21 @@ async def test_a_wedged_profiled_slot_reports_unknown_not_not_configured(
     assert "slot=s1" in caplog.text
 
 
-async def test_a_wedged_profileless_slot_logs_no_image_probe_failure(
+async def test_a_wedged_profileless_slot_reports_unknown_with_reason(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """The converse: a profileless timeout reports "not-configured", which is
-    a definitive answer, so it must NOT emit the unknown-diagnostic line — an
-    operator grepping for it would otherwise chase a seam that is fine."""
+    """#2750: a profileless slot launches a resolved image too, so its timeout
+    is an `unknown` and must carry the reason-bearing diagnostic line."""
     monkeypatch.setattr(sv_mod, "_PROBE_TIMEOUT_S", 0.4)
     provider = SlowProvider(delay=0.01, wedged={"s1"})
 
     with caplog.at_level("WARNING"):
         out = await container_enrichment(_configs(3), provider=provider)
 
-    assert out["s1"]["image_status"] == "not-configured"
+    assert out["s1"]["image_status"] == "unknown"
     assert "slot_view.container_probe_timeout" in caplog.text
-    assert "image_probe_failed" not in caplog.text
+    assert "slot_view.image_probe_failed" in caplog.text
+    assert "reason=probe-timeout" in caplog.text
 
 
 # ── the whole GET /api/slots path ────────────────────────────────────────────
