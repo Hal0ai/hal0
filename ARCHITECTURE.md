@@ -288,8 +288,9 @@ agents ship as first-class bundled agents —
 daemon-kind agents only (`AGENT_KINDS`: `hermes` is `daemon`, `pi` is
 `cli`), so installing `pi` never displaces Hermes; `hermes` is the
 default integration. The boundary is intentionally narrow: hal0 owns
-provisioning, identity, MCP wiring, and the chat-surface proxy. Runtime
-is whatever the bundled upstream does natively.
+provisioning, identity, and MCP wiring. Runtime, including chat in the
+agent's own dashboard, is whatever the bundled upstream does natively
+(ADR-0033).
 
 Standing decision — hal0 does **not** build its own agent runtime. It
 bundles third-party runtimes and runs them safely as sandboxed sibling
@@ -300,9 +301,9 @@ bundled agents are not a revival of it.)
 
 ```
         ┌────────────────────┐         ┌──────────────────────┐
-        │  hal0-api          │  proxy  │  hal0-agent@hermes   │
+        │  hal0-api          │  HTTP   │  hal0-agent@hermes   │
         │  :8080             │ ──────▶ │  127.0.0.1:9119      │
-        │                    │  WS/REST│  (hermes dashboard)  │
+        │                    │         │  (hermes dashboard)  │
         └─────────┬──────────┘         └──────────┬───────────┘
                   │                                │
        MCP /mcp/* │                                │ HTTP / config.yaml

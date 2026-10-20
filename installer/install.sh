@@ -3953,7 +3953,7 @@ else
         systemctl enable --now hal0-agent@hermes.service \
             || warn "hal0-agent@hermes enable returned non-zero — continuing (check 'journalctl -u hal0-agent@hermes -n 40')"
         if wait_active hal0-agent@hermes.service 20; then
-            info "hal0-agent@hermes is running (chat at 127.0.0.1:9119, proxied by hal0-api)"
+            info "hal0-agent@hermes is running (its dashboard and chat listen on 127.0.0.1:9119)"
         else
             warn "hal0-agent@hermes not yet active; check 'journalctl -u hal0-agent@hermes -n 40'"
         fi
