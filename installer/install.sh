@@ -142,6 +142,18 @@ wait_http_ready() {
     return 1
 }
 
+# True (0) when the operator has deliberately turned `unit` off: systemd
+# knows the unit and reports it `disabled` or `masked`. A unit that is not
+# installed yet (fresh install: `not-found`/empty) or that is enabled/static
+# returns 1. MUST be called BEFORE the installer (or an upstream generator)
+# lays down / refreshes the unit file, so a first install is never mistaken
+# for an operator opt-out (#2807).
+unit_operator_disabled() {
+    local state
+    state="$(systemctl is-enabled "$1" 2>/dev/null || true)"
+    [[ "${state}" == "disabled" || "${state}" == "masked" ]]
+}
+
 DEV_MODE=0
 NO_START=0
 # ROCmFP4 + MTP note: the old `--rocmfp4` power pack (a host-side fork
@@ -2194,6 +2206,11 @@ if [[ -f "${AGENT_UNIT_SRC}" ]]; then
         # binary against the prefix's state dir. Rewritten in python (not
         # sed) so a prefix containing sed metacharacters can't corrupt the
         # substitution.
+        # Capture the operator's on/off choice BEFORE the unit files are
+        # (re)written (#2807): a re-run must not re-enable what was disabled.
+        _bench_worker_off=0; _bench_timer_off=0
+        unit_operator_disabled hal0-bench-worker.service && _bench_worker_off=1
+        unit_operator_disabled hal0-bench.timer && _bench_timer_off=1
         for _bench_unit in hal0-bench.service hal0-bench.timer hal0-bench-worker.service; do
             install -m 0644 "${REPO_ROOT}/installer/systemd/${_bench_unit}" "${UNIT_DIR}/${_bench_unit}"
         done
@@ -2215,8 +2232,16 @@ PYEOF
         fi
         if [[ "${DEV_MODE}" -eq 0 ]]; then
             systemctl daemon-reload 2>/dev/null || true
-            systemctl enable --now hal0-bench-worker.service >/dev/null 2>&1 || true
-            systemctl enable --now hal0-bench.timer >/dev/null 2>&1 || true
+            if [[ "${_bench_worker_off}" -eq 1 ]]; then
+                info "hal0-bench-worker.service was disabled by the operator — left disabled"
+            else
+                systemctl enable --now hal0-bench-worker.service >/dev/null 2>&1 || true
+            fi
+            if [[ "${_bench_timer_off}" -eq 1 ]]; then
+                info "hal0-bench.timer was disabled by the operator — left disabled"
+            else
+                systemctl enable --now hal0-bench.timer >/dev/null 2>&1 || true
+            fi
         fi
         info "wrote ${ETC_DIR}/bench + ${BENCH_STATE_DIR} + bench units"
     else
@@ -3908,6 +3933,10 @@ else
         # Redirecting from /dev/null turns that crash into a clean EOF.
         GATEWAY_UNIT_DST="${UNIT_DIR}/hermes-gateway.service"
         info "installing system-scope hermes gateway (User=hal0)"
+        # Capture before the upstream generator runs: it enables + starts the
+        # unit itself, which would erase the operator's choice (#2807).
+        _gateway_off=0
+        unit_operator_disabled hermes-gateway.service && _gateway_off=1
         # m1 fix: this script runs as root, so a bare `env -u HERMES_HOME
         # hermes ...` here resolves `~/.hermes` to /root/.hermes — the exact
         # "split-brain" root-owned tree `hal0 doctor perms` flags as Hermes
@@ -3930,12 +3959,18 @@ else
         # the ERR trap. Skip honestly with a warning instead.
         if [[ -f "${GATEWAY_UNIT_DST}" ]]; then
             systemctl daemon-reload
-            systemctl enable --now hermes-gateway.service \
-                || warn "hermes-gateway enable returned non-zero — continuing (check 'journalctl -u hermes-gateway -n 40')"
-            if wait_active hermes-gateway.service 20; then
-                info "hermes-gateway is running (Telegram/Discord)"
+            if [[ "${_gateway_off}" -eq 1 ]]; then
+                # Upstream's generator may already have enabled + started it.
+                systemctl disable --now hermes-gateway.service >/dev/null 2>&1 || true
+                info "hermes-gateway was disabled by the operator — unit refreshed, left disabled"
             else
-                warn "hermes-gateway not yet active; check 'journalctl -u hermes-gateway -n 40'"
+                systemctl enable --now hermes-gateway.service \
+                    || warn "hermes-gateway enable returned non-zero — continuing (check 'journalctl -u hermes-gateway -n 40')"
+                if wait_active hermes-gateway.service 20; then
+                    info "hermes-gateway is running (Telegram/Discord)"
+                else
+                    warn "hermes-gateway not yet active; check 'journalctl -u hermes-gateway -n 40'"
+                fi
             fi
         else
             warn "hermes-gateway unit not installed (${GATEWAY_UNIT_DST} missing) — Telegram/Discord bridge unavailable"
