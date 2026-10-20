@@ -332,12 +332,12 @@ def test_container_slot_profile_carrying_a_hardware_flag_does_not_resolve(
     assert rc is None
 
 
-def test_profileless_slot_has_null_image_and_command(
+def test_profileless_slot_reports_resolved_image_and_command(
     client_with_container_slot: TestClient,
 ) -> None:
-    """A profile-less slot is still probed but carries no image facts:
-    profile='', image=None, resolved_command=None, image_status=not-configured
-    (#1226: no declared image is not a missing-image fault)."""
+    """A profile-less llm slot still launches a runner image (#2750), so the
+    view reports it: profile='', image + resolved_command resolved, and an
+    image_status that is a real probe answer rather than not-configured."""
     with (
         patch(
             "hal0.providers.container.ContainerProvider.is_active",
@@ -356,9 +356,9 @@ def test_profileless_slot_has_null_image_and_command(
 
     assert chat["runtime"] == "container"
     assert chat["profile"] == ""
-    assert chat["image"] is None
-    assert chat["resolved_command"] is None
-    assert chat["image_status"] == "not-configured"
+    assert chat["image"]
+    assert chat["resolved_command"] and chat["resolved_command"][0] == chat["image"]
+    assert chat["image_status"] in {"present", "missing", "unknown"}
 
 
 # ── #663: actual_image + image_mismatch via running_image (podman inspect) ──────
@@ -427,12 +427,11 @@ def test_container_image_mismatch_when_running_differs_from_profile(
     assert slot["image_mismatch"] is True
 
 
-def test_profileless_slot_actual_image_without_mismatch_key(
+def test_profileless_slot_actual_image_with_mismatch_key(
     client_with_container_slot: TestClient,
 ) -> None:
-    """#663: a slot with no declared profile image still surfaces actual_image
-    (the probe is universal) but carries NO image_mismatch key — there is no
-    declared image to compare against."""
+    """#663/#2750: a profile-less slot resolves an expected image from the launch
+    chain, so it surfaces actual_image AND an image_mismatch verdict against it."""
     with (
         patch("hal0.providers.container.ContainerProvider.is_active", return_value=True),
         patch(
@@ -449,4 +448,5 @@ def test_profileless_slot_actual_image_without_mismatch_key(
     assert r.status_code == 200, r.text
     chat = {e["name"]: e for e in r.json()}["chat"]
     assert chat["actual_image"] == _VULKAN_IMG
-    assert "image_mismatch" not in chat
+    assert chat["image"]
+    assert isinstance(chat["image_mismatch"], bool)

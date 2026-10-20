@@ -251,7 +251,7 @@ would launch actually present":
 | `present` | The resolved image is on disk. |
 | `pulling` | A pull job for this image is in flight. |
 | `missing` | podman was asked and the image is confirmed absent. |
-| `not-configured` | The slot has no profile/image to check — not a fault. |
+| `not-configured` | The slot's image could not be resolved from its config, so there is nothing to check — not a fault. |
 | `unknown` | The probe could not be made at all. |
 
 `unknown` (added by #1968, with two remaining gaps closed by #1980) exists
