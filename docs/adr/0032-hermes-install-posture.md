@@ -53,8 +53,10 @@ departures remain:
    on the test fleet and a human merge.
 
 `pyproject.toml` (`[tool.hal0.upstream-hermes]`) and
-`scripts/hermes-sdk-diff.sh` cite an ADR-0018, but no `docs/adr/0018-*` file
-is present in this tree or its history. This record therefore restates the
+`scripts/hermes-sdk-diff.sh` cite ADR-0018 (upstream Hermes pin and upgrade).
+That record lived at `docs/internal/adr/0018-upstream-hermes-pin-and-upgrade.md`
+(added in #408) and left the tracked tree when `docs/internal/` was untracked
+in #638, so it is only in the history. This record therefore restates the
 install posture it replaces (a `python3.12 -m venv` followed by a `git+`
 requirement line) instead of linking to it.
 
