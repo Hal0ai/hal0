@@ -30,6 +30,11 @@ applying. Add those subsections to a version's section to surface them; see
 
 ## [Unreleased]
 
+### Fixed
+
+- **`hal0 agent bootstrap hermes`, `--repair` and the installer now clear a stale Hermes agent drop-in.** The sweep that renames a leftover `hal0-agent@` drop-in (the kind that makes the unit fail with status 241 and restart in a loop) only ran as root, but every CLI and installer path had already switched to the `hal0` user before reaching it, so it never ran and the broken unit survived every bootstrap, reprovision and upgrade. The sweep now runs as root before that switch, and the warning names the file the drop-in was actually renamed to, including a numbered `.hal0-disabled.N` name (#2803).
+- **Re-running the installer no longer reports false memory-graph and structured-output failures.** After restarting hal0-api the installer only waited for systemd to call the service active, so its post-install checks could run before the API answered HTTP and print `hal0 API not running` or `structured-output probe FAILED`. It now waits up to 60 seconds for `/api/health` to answer before those checks, and prints a warning instead of stopping the install if it never does (#2804).
+
 ## [1.5.0] — 2026-10-19
 
 ### Highlights
