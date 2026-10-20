@@ -85,3 +85,15 @@ def test_operator_override_conf_with_stale_directive_is_renamed_not_deleted(
     # convergent: second run finds nothing
     again = hp.cleanup_stale_agent_dropins(systemd_dir=tmp_path, run=lambda *a, **k: None)
     assert again.disabled == []
+
+
+def test_second_disable_never_overwrites_earlier_copy(tmp_path: Path) -> None:
+    _mk_dropin(tmp_path, "hermes", "override.conf", "ConfigurationDirectory=a\n# first\n")
+    hp.cleanup_stale_agent_dropins(systemd_dir=tmp_path, run=lambda *a, **k: None)
+    _mk_dropin(tmp_path, "hermes", "override.conf", "ConfigurationDirectory=b\n# second\n")
+    hp.cleanup_stale_agent_dropins(systemd_dir=tmp_path, run=lambda *a, **k: None)
+    d = tmp_path / "hal0-agent@hermes.service.d"
+    texts = sorted(p.read_text() for p in d.glob("override.conf.hal0-disabled*"))
+    assert len(texts) == 2
+    assert any("# first" in t for t in texts) and any("# second" in t for t in texts)
+    assert not list(d.glob("*.conf"))

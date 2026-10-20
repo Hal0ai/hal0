@@ -2039,10 +2039,10 @@ if [[ -f "${AGENT_UNIT_SRC}" ]]; then
                     if grep -Eq "${dpat}" "${LEGACY_OVERRIDE}" 2>/dev/null; then
                         LEGACY_DUPES="${LEGACY_DUPES:+${LEGACY_DUPES}, }${dkey}"
                     fi
-                done <"${AGENT_DROPIN_DST_DIR}/10-hal0.conf" 2>/dev/null || true
+                done 2>/dev/null <"${AGENT_DROPIN_DST_DIR}/10-hal0.conf" || true
                 warn "${LEGACY_OVERRIDE} is not a hal0-shipped file: leaving it in place. It is operator-owned and now layers over 10-hal0.conf."
                 if [[ -n "${LEGACY_DUPES}" ]]; then
-                    warn "${LEGACY_OVERRIDE} re-declares hal0-owned directives: ${LEGACY_DUPES}. Duplicated ExecStartPre=/EnvironmentFile= run or load twice, and stale values in your copy override hal0's. Trim it to your own lines (edit with: systemctl edit --drop-in=local hal0-agent@hermes)."
+                    warn "${LEGACY_OVERRIDE} re-declares or resets hal0-owned directives: ${LEGACY_DUPES}. Duplicated ExecStartPre=/EnvironmentFile= run or load twice, an empty reset line (ExecStartPre=) clears hal0's hook, and stale values in your copy override hal0's. Trim it to your own lines (edit with: systemctl edit --drop-in=local hal0-agent@hermes)."
                 fi
                 ;;
         esac

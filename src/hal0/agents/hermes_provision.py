@@ -5677,6 +5677,11 @@ def cleanup_stale_agent_dropins(
                 continue
             if any(directive in text for directive in stale_directives):
                 target = conf.with_name(conf.name + ".hal0-disabled")
+                # Never overwrite an earlier disabled copy: pick a free suffix.
+                n = 1
+                while target.exists():
+                    target = conf.with_name(f"{conf.name}.hal0-disabled.{n}")
+                    n += 1
                 try:
                     do_rename(conf, target)
                 except OSError as exc:

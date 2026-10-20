@@ -63,7 +63,7 @@ def test_warning_names_redeclared_hal0_directives(tmp_path: Path) -> None:
     # Stock file plus an operator line, as `systemctl edit` would leave it.
     edited = SHIPPED.read_text() + "\nEnvironment=OPERATOR_TWEAK=1\n"
     _, out = _run(tmp_path, edited)
-    assert "re-declares hal0-owned directives" in out
+    assert "re-declares or resets hal0-owned directives" in out
     for name in ("ExecStartPre", "EnvironmentFile", "Environment=HERMES_HOME"):
         assert name in out
     assert "OPERATOR_TWEAK" not in out.split("re-declares")[1]
@@ -77,7 +77,7 @@ def test_warning_omits_directive_list_when_no_overlap(tmp_path: Path) -> None:
 
 def test_quoted_environment_form_is_detected(tmp_path: Path) -> None:
     _, out = _run(tmp_path, '[Service]\nEnvironment="HAL0_INFERENCE_BASE=http://x"\n')
-    listed = out.split("re-declares hal0-owned directives:")[1].split(".")[0]
+    listed = out.split("re-declares or resets hal0-owned directives:")[1].split(".")[0]
     assert listed.strip() == "Environment=HAL0_INFERENCE_BASE"
 
 
@@ -86,3 +86,9 @@ def test_unreadable_override_does_not_fail_install(tmp_path: Path) -> None:
     d, out = _run(tmp_path, "\xff\xfe[Service\n")
     assert (d / "10-hal0.conf").exists()
     assert "WARN" in out
+
+
+def test_empty_reset_line_is_named(tmp_path: Path) -> None:
+    _, out = _run(tmp_path, "[Service]\nExecStartPre=\n")
+    assert "re-declares or resets" in out
+    assert out.split("directives:")[1].split(".")[0].strip() == "ExecStartPre"
