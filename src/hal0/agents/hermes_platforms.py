@@ -160,11 +160,16 @@ def read_vault(
     keys that are set, never a value. Those come back as ``{name: "1"}``. An
     absent vault, or a seam that is missing or older than the verb, reads as
     ``{}``.
+
+    No existence check on the ``hal0`` side: the vault's directory is
+    ``0700 root``, so ``hal0`` cannot even stat the file, and on Python 3.12
+    ``Path.exists()`` raises ``PermissionError`` there instead of returning
+    False. The seam itself answers "no vault" with no output.
     """
     path = Path(path)
     if os.access(path, os.R_OK):
         return read_env_file(path)
-    if seam is None or not path.exists():
+    if seam is None:
         return {}
     try:
         proc = run(  # nosec B603 — fixed argv; the seam re-validates the agent name
