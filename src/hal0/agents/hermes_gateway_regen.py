@@ -29,8 +29,13 @@ template uses upstream's defaults instead, because root must not read
   ``Type=notify`` only when the config sets a watchdog);
 * ``TimeoutStopSec=70`` (upstream derives it from the config's drain
   timeouts; 70 is the value for the defaults);
-* no ``LD_LIBRARY_PATH`` line and no managed-Node ``PATH`` entry (both
-  depend on what is installed under the target user's home).
+* no ``LD_LIBRARY_PATH`` line, and none of the ``PATH`` entries upstream
+  adds under the target user's Hermes home (``~/.hermes/node/bin``,
+  ``~/.hermes/node_modules/.bin`` and pm's managed-Node dirs), because finding
+  them means reading that home. ``PATH`` does keep the checkout's
+  ``node_modules/.bin``: upstream prepends it whenever the checkout has it
+  (``_build_service_path_dirs``), every built release does, and it is a fixed
+  path under ``current/``. A missing ``PATH`` directory is harmless.
 
 ``sudo hal0 agent install hermes`` still runs upstream's generator. That is
 a root run the operator chose, not one ``hal0`` can trigger.
@@ -61,9 +66,12 @@ HERMES_HOME = f"{AGENT_HOME}/.hermes"
 CURRENT = HERMES_RELEASE_ROOT / "current"
 PYTHON = f"{CURRENT}/venv/bin/python"
 SRC = f"{CURRENT}/src"
+#: The checkout's node tools, which upstream puts first on ``PATH``.
+NODE_BIN = f"{SRC}/node_modules/.bin"
 #: The ``PATH`` the normalised v0.22.2 unit carries for ``hal0``.
 SERVICE_PATH = (
-    f"{AGENT_HOME}/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+    f"{NODE_BIN}:{AGENT_HOME}/.local/bin:"
+    "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 )
 #: Upstream's ``TimeoutStopSec`` for the default drain timeouts.
 TIMEOUT_STOP_SEC = 70
@@ -141,6 +149,7 @@ _ALLOWED_PATHS = frozenset(
     {
         PYTHON,
         SRC,
+        NODE_BIN,
         HERMES_HOME,
         AGENT_HOME,
         f"{AGENT_HOME}/.local/bin",

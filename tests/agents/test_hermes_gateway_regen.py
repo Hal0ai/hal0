@@ -41,13 +41,17 @@ def _norm(text: str) -> str:
 
 def test_render_matches_the_normalised_upstream_v0_22_2_unit() -> None:
     """The fixture is `hermes gateway install --system --run-as-user hal0` at
-    d923a5eb with the default config. Normalised to current/, it must equal
-    hal0's render line for line: the documented differences (watchdog,
-    TimeoutStopSec from config, LD_LIBRARY_PATH, managed Node) only appear when
-    the hal0 user's Hermes config or home asks for them, and the fixture has none.
+    d923a5eb with the default config, on a release whose checkout has
+    node_modules/.bin (upstream prepends it to PATH). Normalised to current/, it
+    must equal hal0's render line for line, PATH included. The documented
+    differences (watchdog, TimeoutStopSec from config, LD_LIBRARY_PATH, node
+    dirs under ~/.hermes) only appear when the hal0 user's Hermes config or
+    home asks for them, and the fixture has none.
     """
     upstream = gu.normalise_text((FIXTURES / "gateway-unit-v0.22.2.service").read_text())
     assert _norm(regen.render_unit(UID)) == _norm(upstream)
+    path_line = next(ln for ln in upstream.splitlines() if ln.startswith('Environment="PATH='))
+    assert path_line in regen.render_unit(UID).splitlines()
 
 
 def test_render_uses_only_fixed_current_paths_and_the_given_uid() -> None:
@@ -59,6 +63,10 @@ def test_render_uses_only_fixed_current_paths_and_the_given_uid() -> None:
     assert '"/var/lib/hal0/hermes/current/venv/bin/python" "-I" "-c"' in text
     assert "sys.path.insert(0, '/var/lib/hal0/hermes/current/src')" in text
     assert 'Environment="HERMES_HOME=/var/lib/hal0/.hermes"' in text
+    assert (
+        'Environment="PATH=/var/lib/hal0/hermes/current/src/node_modules/.bin:'
+        '/var/lib/hal0/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"'
+    ) in text.splitlines()
     assert regen.validate_unit(text, 1234) == []
 
 

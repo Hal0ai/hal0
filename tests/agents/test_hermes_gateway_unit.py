@@ -10,6 +10,8 @@ Fixtures:
   scratch venv, operator paths replaced with the release layout:
   ``ExecStart``/``ExecStop``/``ExecStopPost`` all run ``"<venv>/bin/python"
   "-I" "-c" "…sys.path.insert(0, '<checkout>')…"``, no ``VIRTUAL_ENV``.
+  ``PATH`` starts with ``<checkout>/node_modules/.bin``, which upstream adds
+  when the checkout has it (every built release does).
 """
 
 from __future__ import annotations
@@ -33,7 +35,7 @@ def _fixture(name: str) -> str:
 
 @pytest.mark.parametrize(
     ("name", "occurrences"),
-    [("gateway-unit-3ef6bbd2.service", 4), ("gateway-unit-v0.22.2.service", 6)],
+    [("gateway-unit-3ef6bbd2.service", 4), ("gateway-unit-v0.22.2.service", 7)],
 )
 def test_every_release_prefix_becomes_current(name: str, occurrences: int) -> None:
     text = _fixture(name)
