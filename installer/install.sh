@@ -3900,11 +3900,12 @@ else
     if [[ -f "${AGENT_UNIT_DST}" && ! -x "/var/lib/hal0/venvs/hermes/bin/hermes" ]]; then
         if [[ "${HAL0_SKIP_HERMES:-0}" -eq 1 ]]; then
             info "skipping hermes provisioning (HAL0_SKIP_HERMES=1) — run '${HAL0_BIN} agent install hermes' later"
-        # `hal0 agent install hermes` pip-installs hermes-agent straight from
-        # a git URL, which pip implements by shelling out to `git clone`. The
+        # `hal0 agent install hermes` checks the pinned hermes-agent commit
+        # out of a git mirror under /var/lib/hal0/hermes (ADR-0032), so it
+        # needs a working `git`. The
         # general preflight (above, ~L346) doesn't cover git, so a stock
         # minimal image without it sailed through every earlier check only to
-        # have this step die deep inside pip with "Cannot find command 'git'"
+        # have this step die deep inside the build with a missing `git`
         # (#1726). Gate here as a FAST, install.sh-local defense-in-depth
         # check: HAL0_GIT_REQUIRED=1 auto-installs it via the detected
         # package manager before we even shell out to the CLI. The
@@ -3919,7 +3920,7 @@ else
         # remediation line, exactly like any other Hermes provisioning
         # failure below.
         elif ! HAL0_GIT_REQUIRED=1 preflight_git; then
-            warn "hermes provisioning skipped — git is required (pip installs hermes-agent from a git URL) and could not be installed"
+            warn "hermes provisioning skipped — git is required (the Hermes release builder checks hermes-agent out of a git mirror) and could not be installed"
             warn "  install git manually ($(pkg_install_cmd git 2>/dev/null || echo 'via your distro package manager')), then run '${HAL0_BIN} agent install hermes'"
         else
             info "provisioning Hermes agent (toolchain + bootstrap) — this can take a few minutes…"
@@ -4008,6 +4009,22 @@ else
             env -u HERMES_HOME HOME=/var/lib/hal0 \
                 /var/lib/hal0/venvs/hermes/bin/hermes gateway install "${_gateway_gen_args[@]}" </dev/null \
                 || warn "hermes gateway install failed — Telegram/Discord bridge unavailable; continuing"
+            # ADR-0032 decision 12: the generator bakes the release it ran
+            # from (/var/lib/hal0/hermes/releases/<id>/…) into the unit, and
+            # the next activation prunes that release. Rewrite every such
+            # path to /var/lib/hal0/hermes/current/ before any enable; the
+            # helper also daemon-reloads and try-restarts the gateway. It runs
+            # even after a failed generator run, because a unit left from an
+            # earlier run can still name a release. A unit that still names a
+            # release path is left disabled, the same posture as a failed
+            # generator run; a gateway the operator disabled is left as is.
+            if ! "${VENV_DIR}/bin/python" -m hal0.agents.hermes_gateway_unit; then
+                warn "hermes-gateway unit still names a release path — leaving the gateway disabled; re-run '${HAL0_BIN} agent install hermes'"
+                if ! unit_state_off "${_gateway_state}"; then
+                    systemctl disable --now hermes-gateway.service >/dev/null 2>&1 || true
+                fi
+                _gateway_state="disabled"
+            fi
         fi
         if unit_state_off "${_gateway_state}"; then
             if [[ "${_gateway_state}" != "masked" ]]; then

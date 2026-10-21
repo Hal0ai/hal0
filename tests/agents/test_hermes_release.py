@@ -1,0 +1,1057 @@
+"""The Hermes release builder (ADR-0032 decisions 4, 6, 7, 10, 11; ADR-0034 1, 3, 4).
+
+Everything runs against a tmp release tree with a fake ``git``/``uv`` runner
+and fake unit controller, so no network, no real venv, no systemd.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+import threading
+from collections.abc import Callable
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+from hal0.agents import hermes_provision as hp
+from hal0.agents import hermes_release as rel
+
+PIN = "3ef6bbd201263d354fd83ec55b3c306ded2eb72a"
+URL = "https://github.com/NousResearch/hermes-agent.git"
+UV = "/fake/venv/bin/uv"
+OK_PROBE: Callable[[Path], dict[str, Any]] = lambda _py: {"ok": True}  # noqa: E731
+
+
+# ── fakes ────────────────────────────────────────────────────────────────────
+
+
+class FakeTools:
+    """Simulates the git / uv / venv-python commands the builder runs."""
+
+    def __init__(
+        self,
+        *,
+        head: str = PIN,
+        lock: bool = False,
+        web: str | None = None,
+        web_ok: bool = True,
+        fail: Callable[[list[str]], bool] | None = None,
+        minor: str = "3.12",
+    ) -> None:
+        self.head = head
+        self.lock = lock
+        self.web = web  # None | "old" (web/ only) | "new" (web/ + scripts/build/web.mjs)
+        self.web_ok = web_ok
+        self.fail = fail
+        self.minor = minor
+        self.calls: list[list[str]] = []
+        self.envs: list[dict[str, str]] = []
+
+    def __call__(self, argv: list[Any], **kw: Any) -> subprocess.CompletedProcess:
+        argv = [str(a) for a in argv]
+        self.calls.append(argv)
+        self.envs.append(dict(kw.get("env") or {}))
+        out = ""
+        if self.fail is not None and self.fail(argv):
+            return subprocess.CompletedProcess(argv, 1, "", f"simulated failure: {argv[:3]}")
+        if argv[0] == "git":
+            if "init" in argv:
+                mirror = Path(argv[-1])
+                mirror.mkdir(parents=True, exist_ok=True)
+                (mirror / "HEAD").write_text("ref: refs/heads/main\n")
+            elif "worktree" in argv and "add" in argv:
+                src = Path(argv[-2])
+                (src / "hermes_cli").mkdir(parents=True)
+                if self.lock:
+                    (src / "uv.lock").write_text("version = 1\n")
+                if self.web:
+                    (src / "web").mkdir()
+                    (src / "web" / "package.json").write_text("{}")
+                if self.web == "new":
+                    (src / "scripts" / "build").mkdir(parents=True)
+                    (src / "scripts" / "build" / "web.mjs").write_text("")
+            elif "rev-parse" in argv:
+                out = self.head + "\n"
+            elif "describe" in argv:
+                out = "v2026.7.20\n"
+        elif argv[0] == UV and argv[1] == "venv":
+            venv = Path(argv[-1])
+            (venv / "bin").mkdir(parents=True)
+            for name in ("python", "hermes"):
+                (venv / "bin" / name).write_text("#!/bin/sh\n")
+            (venv / "pyvenv.cfg").write_text(
+                f"home = /usr/bin\nversion_info = {self.minor}.9\n", encoding="utf-8"
+            )
+        elif (
+            argv[0].endswith("/bin/python")
+            and "-c" in argv
+            and "_build_web_ui" in argv[argv.index("-c") + 1]
+        ):
+            if self.web_ok:
+                dist = Path(kw["cwd"]) / "hermes_cli" / "web_dist"
+                dist.mkdir(parents=True)
+                (dist / "index.html").write_text("<html>")
+            else:
+                return subprocess.CompletedProcess(argv, 1, "", "npm: not found")
+        return subprocess.CompletedProcess(argv, 0, out, "")
+
+    def find(self, pred: Callable[[list[str]], bool]) -> list[list[str]]:
+        return [c for c in self.calls if pred(c)]
+
+
+class FakeUnits:
+    """In-memory unit controller: ``state`` is the unit's ActiveState."""
+
+    def __init__(self, active: set[str] | None = None, *, crash_on_start: set[str] | None = None):
+        self.state = {
+            u: ("active" if u in (active or set()) else "inactive") for u in rel.HERMES_UNITS
+        }
+        self.restart_count = dict.fromkeys(rel.HERMES_UNITS, 0)
+        self.crash_on_start = crash_on_start or set()
+        self.log: list[tuple[str, str]] = []
+
+    def active(self, unit: str) -> bool:
+        return self.state[unit] == "active"
+
+    def restarts(self, unit: str) -> int | None:
+        return self.restart_count[unit]
+
+    def stop(self, unit: str) -> bool:
+        self.log.append(("stop", unit))
+        self.state[unit] = "inactive"
+        return True
+
+    def start(self, unit: str) -> bool:
+        self.log.append(("start", unit))
+        self.state[unit] = "active"
+        return True
+
+    def settle(self, _seconds: float) -> None:
+        """The settle period: a crash-looping unit gets restarted by systemd."""
+        for unit in self.crash_on_start:
+            if self.state[unit] == "active":
+                self.restart_count[unit] += 1
+
+
+@pytest.fixture
+def tree(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Path]:
+    var_lib = tmp_path / "var" / "lib" / "hal0"
+    venv = var_lib / "venvs" / "hermes"
+    home = var_lib / ".hermes"
+    home.mkdir(parents=True)
+    req = tmp_path / "requirements.txt"
+    req.write_text(f"# comment\nhermes-agent[web,mcp] @ git+{URL}@{PIN}\n", encoding="utf-8")
+    monkeypatch.setattr(hp, "UV_CACHE_DIR", var_lib / ".cache" / "uv")
+    monkeypatch.setattr(hp, "UV_PYTHON_INSTALL_DIR", var_lib / "python")
+    monkeypatch.setattr(hp, "HERMES_PYTHON_ENV", tmp_path / "etc" / "hermes-python.env")
+    monkeypatch.delenv("HAL0_HERMES_PYTHON", raising=False)
+    return {
+        "venv": venv,
+        "home": home,
+        "req": req,
+        "stamp": var_lib / "state" / "agents" / "hermes" / "venv.pin",
+        "unit": tmp_path / "etc" / "systemd" / "system" / "hermes-gateway.service",
+        "root": var_lib / "hermes",
+    }
+
+
+def _ensure(
+    tree: dict[str, Path], tools: FakeTools, units: Any = None, **kw: Any
+) -> rel.ReleaseOutcome:
+    args: dict[str, Any] = {
+        "caller": "test",
+        "venv": tree["venv"],
+        "requirements": tree["req"],
+        "hermes_home": tree["home"],
+        "units": units if units is not None else FakeUnits(),
+        "run": tools,
+        "probe": OK_PROBE,
+        "python_resolver": lambda: "/usr/bin/python3.12",
+        "uv": UV,
+        "stamp_file": tree["stamp"],
+        "gateway_unit": tree["unit"],
+        "settle_s": 0,
+        "sleep": lambda _s: None,
+    }
+    args.update(kw)
+    return rel.ensure_release(**args)
+
+
+def _legacy_venv(tree: dict[str, Path]) -> Path:
+    venv = tree["venv"]
+    (venv / "bin").mkdir(parents=True)
+    (venv / "bin" / "python").write_text("legacy")
+    (venv / "pyvenv.cfg").write_text("home = /usr/bin\nversion = 3.12.3\n")
+    tree["stamp"].parent.mkdir(parents=True, exist_ok=True)
+    tree["stamp"].write_text(PIN[:12] + "\n")
+    return venv
+
+
+# ── pin, triggers, install commands ──────────────────────────────────────────
+
+
+def test_read_pin_takes_url_extras_and_ref_from_the_requirements_line(tree) -> None:
+    pin = rel.read_pin(tree["req"])
+    assert pin == rel.Pin(url=URL, extras=("web", "mcp"), ref=PIN)
+
+
+@pytest.mark.parametrize("ref", ["v2026.7.20", PIN[:12], "f" * 40, "0.19.0"])
+def test_only_a_vetted_40_hex_commit_is_accepted(ref: str) -> None:
+    with pytest.raises(rel.ReleaseError):
+        rel.require_vetted(ref)
+
+
+def test_lock_install_command_lines(tmp_path: Path) -> None:
+    """ADR-0034 decision 1: export with hashes, sync --require-hashes, then --no-deps -e."""
+    src, venv, export = tmp_path / "src", tmp_path / "venv", tmp_path / "req.lock"
+    src.mkdir()
+    (src / "uv.lock").write_text("")
+    lines = rel.install_command_lines(
+        uv="uv", src=src, venv=venv, extras=("web", "mcp"), export_file=export
+    )
+    py = str(venv / "bin" / "python")
+    assert lines == [
+        ["uv", "export", "--frozen", "--project", str(src), "--extra", "web", "--extra", "mcp",
+         "--no-emit-project", "--output-file", str(export)],
+        ["uv", "pip", "sync", "--python", py, "--require-hashes", str(export)],
+        ["uv", "pip", "install", "--python", py, "--no-deps", "-e", str(src)],
+    ]  # fmt: skip
+
+
+def test_no_lock_falls_back_to_an_editable_install_with_extras(tmp_path: Path) -> None:
+    src, venv = tmp_path / "src", tmp_path / "venv"
+    src.mkdir()
+    lines = rel.install_command_lines(
+        uv="uv", src=src, venv=venv, extras=("web", "mcp"), export_file=tmp_path / "x"
+    )
+    assert lines == [
+        ["uv", "pip", "install", "--python", str(venv / "bin" / "python"), "-e", f"{src}[web,mcp]"]
+    ]
+
+
+def test_triggers(tree) -> None:
+    layout = rel.Layout.for_venv(tree["venv"])
+    assert rel.build_trigger(layout, PIN, "3.12") == "no live release"
+    _legacy_venv(tree)
+    assert "pre-layout venv" in rel.build_trigger(layout, PIN, "3.12")
+
+
+# ── build ────────────────────────────────────────────────────────────────────
+
+
+def test_fresh_install_builds_activates_stamps_and_links(tree) -> None:
+    tools = FakeTools()
+    out = _ensure(tree, tools)
+    assert out.status == "activated", out.error
+    layout = rel.Layout.for_venv(tree["venv"])
+    live = rel.live_release(layout)
+    assert live is not None and live.ref == PIN and live.id == out.release_id
+    assert live.id.startswith(PIN[:12] + "-")
+    # venvs/hermes -> <root>/current/venv, current -> releases/<id> (relative)
+    assert os.readlink(tree["venv"]) == str(layout.current / "venv")
+    assert os.readlink(layout.current) == f"releases/{live.id}"
+    assert not layout.previous.exists()
+    data = live.data
+    assert data["describe"] == "v2026.7.20"
+    assert data["python_minor"] == "3.12" and data["python"] == "/usr/bin/python3.12"
+    assert data["lock"] is False and data["web_dist"] == "absent" and data["legacy"] is False
+    # Every activation path writes the stamp from release.json.
+    assert tree["stamp"].read_text() == PIN[:12] + "\n"
+    # The mirror fetched the sha WITH tags, and the worktree is detached at it.
+    assert tools.find(
+        lambda c: c[:2] == ["git", "-C"] and "fetch" in c and "--tags" in c and c[-1] == PIN
+    )
+    assert tools.find(lambda c: "worktree" in c and "--detach" in c and c[-1] == PIN)
+    # Fallback install path at 3ef6bbd2 (no uv.lock).
+    assert tools.find(lambda c: c[:3] == [UV, "pip", "install"] and c[-1].endswith("[web,mcp]"))
+
+
+def test_the_mirror_is_a_blobless_partial_clone(tree) -> None:
+    tools = FakeTools()
+    assert _ensure(tree, tools).ok
+    assert tools.find(lambda c: c[-2:] == ["remote.origin.promisor", "true"])
+    assert tools.find(lambda c: c[-2:] == ["remote.origin.partialclonefilter", "blob:none"])
+    assert tools.find(lambda c: "fetch" in c and "--filter=blob:none" in c)
+
+
+def test_the_offline_safe_release_check(tree) -> None:
+    """ADR-0034 d3: import check + --help + mcp probe; never ``hermes --version``."""
+    tools = FakeTools()
+    assert _ensure(tree, tools).ok
+    assert tools.find(
+        lambda c: c[-2:] == ["-c", "import hermes_cli.main, hermes_cli.web_server"] and "-I" in c
+    )
+    assert tools.find(lambda c: c[-1] == "--help" and c[0].endswith("/bin/hermes"))
+    assert not tools.find(lambda c: "--version" in c)
+
+
+def test_locked_ref_installs_from_the_lock(tree) -> None:
+    tools = FakeTools(lock=True)
+    out = _ensure(tree, tools)
+    assert out.ok
+    assert tools.find(lambda c: c[:2] == [UV, "export"] and "--frozen" in c)
+    assert tools.find(lambda c: c[:3] == [UV, "pip", "sync"] and "--require-hashes" in c)
+    assert tools.find(lambda c: c[:3] == [UV, "pip", "install"] and "--no-deps" in c)
+    assert rel.live_release(rel.Layout.for_venv(tree["venv"])).data["lock"] is True
+
+
+def test_a_checkout_at_the_wrong_commit_fails_the_build(tree) -> None:
+    out = _ensure(tree, FakeTools(head="e" * 40))
+    assert out.status == "build_failed"
+    assert "verify-ref" in out.error
+    layout = rel.Layout.for_venv(tree["venv"])
+    assert list(layout.releases.iterdir()) == []  # the half-built release is gone
+
+
+def test_a_failed_build_leaves_the_live_release_alone(tree) -> None:
+    assert _ensure(tree, FakeTools()).ok
+    layout = rel.Layout.for_venv(tree["venv"])
+    before = os.readlink(layout.current)
+    out = _ensure(tree, FakeTools(fail=lambda c: c[:3] == [UV, "pip", "install"]), force=True)
+    assert out.status == "build_failed" and "install" in out.error
+    assert os.readlink(layout.current) == before
+    assert [p.name for p in layout.releases.iterdir()] == [before.split("/")[-1]]
+
+
+def test_converged_host_builds_nothing(tree) -> None:
+    assert _ensure(tree, FakeTools()).ok
+    tools = FakeTools()
+    out = _ensure(tree, tools)
+    assert out.status == "converged"
+    assert tools.calls == []
+
+
+def test_a_repair_builds_a_fresh_release_of_the_same_ref(tree) -> None:
+    first = _ensure(tree, FakeTools())
+    second = _ensure(tree, FakeTools(), force=True, reason="--repair")
+    assert second.status == "activated"
+    assert second.release_id != first.release_id
+    assert second.previous_id == first.release_id
+
+
+# ── web UI build (ADR-0034 decision 4, #2837) ────────────────────────────────
+
+
+def test_web_ui_is_built_into_the_release_checkout(tree) -> None:
+    tools = FakeTools(web="new")
+    out = _ensure(tree, tools)
+    assert out.ok
+    live = rel.live_release(rel.Layout.for_venv(tree["venv"]))
+    assert live.data["web_dist"] == "built"
+    assert (live.src / "hermes_cli" / "web_dist" / "index.html").is_file()
+
+
+def test_web_build_failure_fails_a_ref_that_ships_the_build_script(tree) -> None:
+    out = _ensure(tree, FakeTools(web="new", web_ok=False))
+    assert out.status == "build_failed" and "web-build" in out.error
+
+
+def test_web_build_failure_at_the_old_pin_records_absent(tree) -> None:
+    """3ef6bbd2 has no scripts/build/web.mjs and needs a system npm: not fatal."""
+    out = _ensure(tree, FakeTools(web="old", web_ok=False))
+    assert out.ok
+    assert rel.live_release(rel.Layout.for_venv(tree["venv"])).data["web_dist"] == "absent"
+
+
+# ── offline (#2838) ──────────────────────────────────────────────────────────
+
+
+def test_offline_refuses_a_needed_build_and_names_the_step(tree) -> None:
+    tools = FakeTools()
+    out = _ensure(tree, tools, offline=True)
+    assert out.status == "offline"
+    assert "fetch" in out.error and "needs the network" in out.error and PIN[:12] in out.error
+    assert tools.calls == []
+    assert not tree["venv"].exists()
+
+
+def test_offline_is_fine_when_nothing_needs_building(tree) -> None:
+    assert _ensure(tree, FakeTools()).ok
+    assert _ensure(tree, FakeTools(), offline=True).status == "converged"
+
+
+def test_offline_keeps_the_live_release_on_a_legacy_host(tree) -> None:
+    venv = _legacy_venv(tree)
+    out = _ensure(tree, FakeTools(), offline=True)
+    assert out.status == "offline"
+    assert venv.is_dir() and not venv.is_symlink()
+
+
+# ── lock ─────────────────────────────────────────────────────────────────────
+
+
+def test_lock_contention_is_busy_with_the_holder_record(tree) -> None:
+    layout = rel.Layout.for_venv(tree["venv"])
+    with rel.builder_lock(layout, caller="provision", wait=False):
+        out = _ensure(tree, FakeTools(), wait=False)
+        assert out.status == "busy"
+        assert out.holder["pid"] == os.getpid()
+        assert out.holder["caller"] == "provision"
+        assert out.holder["started_at"].endswith("Z")
+    # Released: the next caller builds.
+    assert _ensure(tree, FakeTools(), wait=False).ok
+
+
+def test_a_waiting_caller_reports_the_holder_then_proceeds(tree) -> None:
+    layout = rel.Layout.for_venv(tree["venv"])
+    seen: list[dict[str, Any]] = []
+    entered = threading.Event()
+    release = threading.Event()
+
+    def _hold() -> None:
+        with rel.builder_lock(layout, caller="converge", wait=False):
+            entered.set()
+            release.wait(5)
+
+    t = threading.Thread(target=_hold)
+    t.start()
+    entered.wait(5)
+
+    def _on_wait(holder: dict[str, Any]) -> None:
+        seen.append(holder)
+        release.set()
+
+    with rel.builder_lock(layout, caller="provision", wait=True, on_wait=_on_wait):
+        assert rel.read_lock_holder(layout)["caller"] == "provision"
+    t.join(5)
+    assert seen and seen[0]["caller"] == "converge"
+
+
+def test_an_incomplete_release_is_swept_under_the_lock(tree) -> None:
+    layout = rel.Layout.for_venv(tree["venv"])
+    dead = layout.releases / f"{PIN[:12]}-20200101T000000Z"
+    (dead / "venv").mkdir(parents=True)  # no release.json: a builder died
+    assert _ensure(tree, FakeTools()).ok
+    assert not dead.exists()
+
+
+# ── first migration (decision 11) ────────────────────────────────────────────
+
+
+def test_first_migration_moves_the_legacy_venv_with_units_stopped(tree) -> None:
+    venv = _legacy_venv(tree)
+    units = FakeUnits(active={rel.AGENT_UNIT, rel.GATEWAY_UNIT})
+    (tree["home"] / "config.yaml").write_text("model: a\n")
+    out = _ensure(tree, FakeTools(), units)
+    assert out.status == "activated", out.error
+    assert out.migrated_legacy
+    layout = rel.Layout.for_venv(venv)
+    legacy = layout.releases / f"legacy-{PIN[:12]}"
+    assert (legacy / "venv" / "bin" / "python").read_text() == "legacy"
+    data = json.loads((legacy / "release.json").read_text())
+    assert data["legacy"] is True and data["ref"] == PIN[:12]
+    assert data["python_home"] == "/usr/bin" and data["python_minor"] == "3.12"
+    assert os.readlink(layout.previous) == f"releases/legacy-{PIN[:12]}"
+    assert venv.is_symlink() and os.readlink(venv) == str(layout.current / "venv")
+    # Config copied into the outgoing (legacy) release before the switch.
+    assert (legacy / f"config.yaml.before-{out.release_id}").read_text() == "model: a\n"
+    # Both units stopped across the switch and started again.
+    assert units.log == [
+        ("stop", rel.AGENT_UNIT), ("stop", rel.GATEWAY_UNIT),
+        ("start", rel.AGENT_UNIT), ("start", rel.GATEWAY_UNIT),
+    ]  # fmt: skip
+
+
+def test_a_failed_first_migration_flips_back_to_legacy(tree) -> None:
+    venv = _legacy_venv(tree)
+    (tree["home"] / "config.yaml").write_text("before\n")
+    units = FakeUnits(active={rel.AGENT_UNIT})
+    tools = FakeTools()
+    calls = {"n": 0}
+
+    def _probe(_py: Path) -> dict[str, Any]:
+        calls["n"] += 1  # build check passes, re-verify through venvs/hermes fails
+        return {"ok": calls["n"] == 1, "error": "no mcp"}
+
+    def _migrate_then_fail(argv: list[Any], **kw: Any) -> Any:
+        if [str(a) for a in argv][-2:] == ["config", "migrate"]:
+            (tree["home"] / "config.yaml").write_text("migrated\n")
+        return tools(argv, **kw)
+
+    out = _ensure(tree, tools, units, probe=_probe, run=_migrate_then_fail)
+    assert out.status == "activation_failed" and out.flipped_back
+    assert out.remedy == "sudo hal0 agent reprovision hermes --repair"
+    layout = rel.Layout.for_venv(venv)
+    assert os.readlink(layout.current) == f"releases/legacy-{PIN[:12]}"
+    assert not layout.previous.exists()
+    assert (venv / "bin" / "python").read_text() == "legacy"  # served through the link
+    assert (tree["home"] / "config.yaml").read_text() == "before\n"
+    # The failed release is gone, and no stamp was written for it.
+    assert [p.name for p in layout.releases.iterdir()] == [f"legacy-{PIN[:12]}"]
+    assert tree["stamp"].read_text() == PIN[:12] + "\n"
+    assert units.state[rel.AGENT_UNIT] == "active"
+    # A legacy release left live triggers a fresh migration attempt next time.
+    assert rel.build_trigger(layout, PIN, "3.12") == "the pre-layout release is live"
+
+
+def test_a_failed_switch_puts_the_legacy_venv_back(tree, monkeypatch) -> None:
+    """A rename that fails mid-migration leaves the host exactly as it was."""
+    venv = _legacy_venv(tree)
+    units = FakeUnits(active={rel.AGENT_UNIT})
+
+    def _boom(*_a: Any) -> None:
+        raise OSError("EXDEV: cross-device link")
+
+    monkeypatch.setattr(rel.os, "rename", _boom)
+    out = _ensure(tree, FakeTools(), units)
+    assert out.status == "activation_failed"
+    assert "switch failed" in out.error
+    assert venv.is_dir() and not venv.is_symlink()
+    assert (venv / "bin" / "python").read_text() == "legacy"
+    layout = rel.Layout.for_venv(venv)
+    assert not layout.current.exists() and not layout.previous.exists()
+    assert not (layout.releases / f"legacy-{PIN[:12]}").exists()
+    assert units.state[rel.AGENT_UNIT] == "active"
+
+
+# ── activation (decision 7) ──────────────────────────────────────────────────
+
+
+def test_only_units_that_were_active_are_stopped_and_started(tree) -> None:
+    """#2823: a gateway the operator stopped or disabled is never started."""
+    assert _ensure(tree, FakeTools()).ok
+    units = FakeUnits(active={rel.AGENT_UNIT})
+    assert _ensure(tree, FakeTools(), units, force=True).ok
+    assert units.log == [("stop", rel.AGENT_UNIT), ("start", rel.AGENT_UNIT)]
+    assert units.state[rel.GATEWAY_UNIT] == "inactive"
+
+
+def test_flip_back_on_a_crash_looping_unit_restores_config(tree) -> None:
+    first = _ensure(tree, FakeTools())
+    (tree["home"] / "config.yaml").write_text("good\n")
+    units = FakeUnits(active={rel.AGENT_UNIT, rel.GATEWAY_UNIT}, crash_on_start={rel.GATEWAY_UNIT})
+    tools = FakeTools()
+
+    def _run(argv: list[Any], **kw: Any) -> Any:
+        if [str(a) for a in argv][-2:] == ["config", "migrate"]:
+            (tree["home"] / "config.yaml").write_text("migrated-by-new\n")
+        return tools(argv, **kw)
+
+    out = _ensure(tree, tools, units, force=True, run=_run, sleep=units.settle)
+    assert out.status == "activation_failed" and out.flipped_back
+    assert "restarted" in out.error
+    layout = rel.Layout.for_venv(tree["venv"])
+    assert os.readlink(layout.current) == f"releases/{first.release_id}"
+    assert (tree["home"] / "config.yaml").read_text() == "good\n"
+    assert tree["stamp"].read_text() == PIN[:12] + "\n"
+
+
+def test_systemd_units_use_the_seam_as_hal0_and_systemctl_as_root() -> None:
+    from hal0.system.seam import SEAM_BIN
+
+    calls: list[list[str]] = []
+
+    def _run(argv: list[str], **_kw: Any) -> Any:
+        calls.append(list(argv))
+        return subprocess.CompletedProcess(argv, 0, "ActiveState=active\nNRestarts=2\n", "")
+
+    hal0 = rel.SystemdUnits(run=_run, use_seam=True)
+    assert hal0.active(rel.GATEWAY_UNIT) and hal0.restarts(rel.AGENT_UNIT) == 2
+    hal0.stop(rel.AGENT_UNIT)
+    hal0.start(rel.AGENT_UNIT)
+    hal0.stop(rel.GATEWAY_UNIT)
+    hal0.start(rel.GATEWAY_UNIT)
+    root = rel.SystemdUnits(run=_run, use_seam=False)
+    root.start(rel.GATEWAY_UNIT)
+    assert calls[0] == [
+        "systemctl",
+        "show",
+        "-p",
+        "ActiveState",
+        "-p",
+        "NRestarts",
+        rel.GATEWAY_UNIT,
+    ]
+    assert calls[2:] == [
+        ["sudo", "-n", SEAM_BIN, "stop-agent", "hermes"],
+        ["sudo", "-n", SEAM_BIN, "start-agent", "hermes"],
+        ["sudo", "-n", SEAM_BIN, "svc-stop", "hermes-gateway"],
+        ["sudo", "-n", SEAM_BIN, "svc-start", "hermes-gateway"],
+        ["systemctl", "start", rel.GATEWAY_UNIT],
+    ]
+
+
+# ── retention (decision 10) ──────────────────────────────────────────────────
+
+
+def test_retention_keeps_current_and_previous_only(tree) -> None:
+    ids = [_ensure(tree, FakeTools(), force=True).release_id for _ in range(4)]
+    layout = rel.Layout.for_venv(tree["venv"])
+    assert sorted(p.name for p in layout.releases.iterdir()) == sorted(ids[-2:])
+    assert os.readlink(layout.current) == f"releases/{ids[-1]}"
+    assert os.readlink(layout.previous) == f"releases/{ids[-2]}"
+
+
+def test_retention_honours_the_gateway_backstop(tree) -> None:
+    first = _ensure(tree, FakeTools()).release_id
+    layout = rel.Layout.for_venv(tree["venv"])
+    tree["unit"].parent.mkdir(parents=True)
+    tree["unit"].write_text(
+        f"ExecStart={layout.releases / first}/venv/bin/python -m hermes_cli.main gateway run\n"
+    )
+    _ensure(tree, FakeTools(), force=True)
+    out = _ensure(tree, FakeTools(), force=True)
+    assert out.ok
+    assert (layout.releases / first).is_dir(), "a release the gateway unit names is kept"
+    assert any("sudo hal0 agent install hermes" in w and first in w for w in out.warnings)
+
+
+def test_prune_runs_uv_cache_prune_and_keeps_an_in_use_interpreter(tree) -> None:
+    tools = FakeTools()
+    assert _ensure(tree, tools).ok
+    assert tools.find(lambda c: c == [UV, "cache", "prune"])
+    assert not tools.find(lambda c: c[:3] == [UV, "python", "uninstall"])
+
+
+def test_retired_interpreter_is_uninstalled_once_nothing_names_it(tree) -> None:
+    layout = rel.Layout.for_venv(tree["venv"])
+    assert _ensure(tree, FakeTools()).ok
+    (layout.python_dir / "cpython-3.11.9-linux-x86_64-gnu").mkdir(parents=True)
+    tools = FakeTools()
+    rel.prune_releases(
+        layout, run=tools, uv=UV, gateway_unit=tree["unit"], retired_minors=("3.11",)
+    )
+    assert tools.find(lambda c: c == [UV, "python", "uninstall", "3.11"])
+
+
+# ── ADR-0034 decision 2 amendment: uv's trees live inside the release tree ──
+
+
+def test_a_hal0_build_never_needs_the_root_owned_legacy_python_dir(tree) -> None:
+    """Existing hosts have /var/lib/hal0/python root:hal0 755; builds run as hal0.
+
+    The builder points uv's interpreters and cache into the hal0-owned
+    release tree, so an unwritable legacy dir cannot fail the build.
+    """
+    var_lib = tree["root"].parent
+    legacy = var_lib / "python"
+    (legacy / "cpython-3.12.15-linux-x86_64-gnu").mkdir(parents=True)
+    legacy.chmod(0o555)
+    stale_cache = var_lib / ".cache" / "uv"
+    stale_cache.mkdir(parents=True)
+    stale_cache.chmod(0o555)
+    try:
+        tools = FakeTools()
+        out = _ensure(tree, tools)
+        assert out.ok, out.error
+        layout = rel.Layout.for_venv(tree["venv"])
+        uv_envs = [e for c, e in zip(tools.calls, tools.envs, strict=True) if c[0] == UV]
+        assert uv_envs
+        for env in uv_envs:
+            assert env["UV_PYTHON_INSTALL_DIR"] == str(layout.python_dir)
+            assert env["UV_CACHE_DIR"] == str(layout.uv_cache)
+        assert layout.python_dir.parent == tree["root"]
+    finally:
+        legacy.chmod(0o755)
+        stale_cache.chmod(0o755)
+
+
+def test_production_uv_paths_sit_inside_the_release_tree() -> None:
+    from hal0.agents import hermes_layout as hl
+
+    assert hp.UV_PYTHON_INSTALL_DIR == hl.HERMES_PYTHON_ROOT == hl.HERMES_RELEASE_ROOT / "python"
+    assert hp.UV_CACHE_DIR == hl.HERMES_UV_CACHE == hl.HERMES_RELEASE_ROOT / ".cache" / "uv"
+    assert rel.Layout.for_venv(hl.HERMES_VENV_PATH).python_dir == hl.HERMES_PYTHON_ROOT
+
+
+def test_prune_never_touches_the_legacy_python_dir(tree) -> None:
+    var_lib = tree["root"].parent
+    legacy = var_lib / "python" / "cpython-3.12.15-linux-x86_64-gnu"
+    legacy.mkdir(parents=True)
+    tools = FakeTools()
+    assert _ensure(tree, tools).ok
+    assert legacy.is_dir()
+    assert not tools.find(lambda c: c[:3] == [UV, "python", "uninstall"])
+
+
+# ── legacy /var/lib/hal0/python removal (root paths only) ────────────────────
+
+
+def _legacy_root(tree) -> Path:
+    root = tree["root"].parent / "python"
+    (root / "cpython-3.12.15").mkdir(parents=True)
+    return root
+
+
+def test_legacy_python_is_kept_while_the_legacy_venv_uses_it(tree) -> None:
+    from hal0.agents import hermes_layout as hl
+
+    legacy = _legacy_root(tree)
+    venv = tree["venv"]
+    (venv / "bin").mkdir(parents=True)
+    (venv / "pyvenv.cfg").write_text(f"home = {legacy}/cpython-3.12.15/bin\nversion = 3.12.15\n")
+    assert hl.legacy_python_users(venv, legacy_root=legacy) == [str(venv)]
+    assert hl.remove_legacy_python_if_unused(venv, legacy_root=legacy) is False
+    assert legacy.is_dir()
+
+
+def test_legacy_python_is_kept_while_a_release_names_it(tree) -> None:
+    from hal0.agents import hermes_layout as hl
+
+    legacy = _legacy_root(tree)
+    rdir = tree["root"] / "releases" / "legacy-3ef6bbd20126"
+    rdir.mkdir(parents=True)
+    (rdir / "release.json").write_text(
+        json.dumps({"legacy": True, "python_home": f"{legacy}/cpython-3.12.15/bin"})
+    )
+    assert hl.remove_legacy_python_if_unused(tree["venv"], legacy_root=legacy) is False
+
+
+def test_legacy_python_is_kept_while_hal0_hermes_python_points_into_it(tree) -> None:
+    from hal0.agents import hermes_layout as hl
+
+    legacy = _legacy_root(tree)
+    configured = f"{legacy}/cpython-3.12.15/bin/python3.12"
+    assert (
+        hl.remove_legacy_python_if_unused(tree["venv"], legacy_root=legacy, configured=configured)
+        is False
+    )
+
+
+def test_unused_legacy_python_is_removed(tree) -> None:
+    from hal0.agents import hermes_layout as hl
+
+    legacy = _legacy_root(tree)
+    assert _ensure(tree, FakeTools()).ok  # a release on /usr/bin/python3.12
+    assert hl.remove_legacy_python_if_unused(tree["venv"], legacy_root=legacy) is True
+    assert not legacy.exists()
+
+
+def test_a_symlinked_legacy_python_is_never_followed(tree, tmp_path) -> None:
+    from hal0.agents import hermes_layout as hl
+
+    target = tmp_path / "elsewhere"
+    target.mkdir()
+    (target / "keep").write_text("x")
+    link = tree["root"].parent / "python"
+    link.parent.mkdir(parents=True, exist_ok=True)
+    link.symlink_to(target)
+    assert hl.remove_legacy_python_if_unused(tree["venv"], legacy_root=link) is False
+    assert (target / "keep").exists()
+
+
+# ── root callers drop to hal0 (§7.4) ─────────────────────────────────────────
+
+
+def test_a_root_caller_runs_the_builder_as_hal0(tree, monkeypatch) -> None:
+    seen: list[list[str]] = []
+
+    def _fake_run(cmd: list[str], **_kw: Any) -> subprocess.CompletedProcess:
+        seen.append(list(cmd))
+        payload = json.dumps({"status": "activated", "release_id": "r9", "unknown": 1})
+        return subprocess.CompletedProcess(cmd, 0, "log line\n" + payload + "\n", None)
+
+    monkeypatch.setattr(rel.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(rel, "_hal0_user_exists", lambda: True)
+    monkeypatch.setattr(
+        rel.shutil, "which", lambda name: "/usr/sbin/runuser" if name == "runuser" else None
+    )
+    monkeypatch.setattr(rel.subprocess, "run", _fake_run)
+    out = rel.ensure_release(caller="converge", venv=tree["venv"], wait=False, units=rel.NoUnits())
+    assert out.status == "activated" and out.release_id == "r9"
+    [cmd] = seen
+    assert cmd[:4] == ["runuser", "-u", "hal0", "--"]
+    assert cmd[-3:-1] == ["-m", "hal0.agents.hermes_release"]
+    kw = json.loads(cmd[-1])
+    assert kw["caller"] == "converge" and kw["wait"] is False and kw["no_units"] is True
+    assert kw["venv"] == str(tree["venv"])
+
+
+def test_the_child_entry_point_never_drops_again(tree, monkeypatch) -> None:
+    calls: list[dict[str, Any]] = []
+
+    def _fake_ensure(**kw: Any) -> rel.ReleaseOutcome:
+        calls.append(kw)
+        return rel.ReleaseOutcome(status="converged")
+
+    monkeypatch.setattr(rel, "ensure_release", _fake_ensure)
+    assert rel.main([json.dumps({"caller": "repair", "no_units": True})]) == 0
+    assert calls[0]["drop_root"] is False
+    assert isinstance(calls[0]["units"], rel.NoUnits)
+
+
+def test_a_first_install_that_fails_reverify_is_rebuilt_next_time(tree) -> None:
+    calls = {"n": 0}
+
+    def _probe(_py: Path) -> dict[str, Any]:
+        calls["n"] += 1
+        return {"ok": calls["n"] == 1, "error": "no mcp"}
+
+    out = _ensure(tree, FakeTools(), probe=_probe)
+    assert out.status == "activation_failed" and not out.flipped_back
+    layout = rel.Layout.for_venv(tree["venv"])
+    assert "failed its last re-verify" in rel.build_trigger(layout, PIN, "3.12")
+    again = _ensure(tree, FakeTools())
+    assert again.status == "activated"
+    assert rel.build_trigger(layout, PIN, "3.12") is None
+
+
+def test_a_flip_back_whose_link_swap_fails_still_restarts_units(tree, monkeypatch) -> None:
+    assert _ensure(tree, FakeTools()).ok
+    units = FakeUnits(active={rel.AGENT_UNIT})
+    real_swap = rel._swap_link
+    state = {"n": 0}
+
+    def _swap(link: Path, target: Any) -> None:
+        if link.name == "current":
+            state["n"] += 1
+            if state["n"] == 2:  # the flip-back's swap
+                raise OSError("ENOSPC")
+        real_swap(link, target)
+
+    monkeypatch.setattr(rel, "_swap_link", _swap)
+    n = {"p": 0}
+
+    def _probe(_py: Path) -> dict[str, Any]:
+        n["p"] += 1
+        return {"ok": n["p"] == 1, "error": "broken"}
+
+    out = _ensure(tree, FakeTools(), units, force=True, probe=_probe)
+    assert out.status == "activation_failed"
+    assert "flip-back failed" in out.error
+    assert units.state[rel.AGENT_UNIT] == "active"
+
+
+def test_prune_backstop_matches_a_bare_release_dir(tree) -> None:
+    first = _ensure(tree, FakeTools()).release_id
+    layout = rel.Layout.for_venv(tree["venv"])
+    tree["unit"].parent.mkdir(parents=True)
+    tree["unit"].write_text(f"WorkingDirectory={layout.releases / first}\n")
+    _ensure(tree, FakeTools(), force=True)
+    _ensure(tree, FakeTools(), force=True)
+    assert (layout.releases / first).is_dir()
+
+
+# ── review follow-ups on #2851 ───────────────────────────────────────────────
+
+
+class StopFails(FakeUnits):
+    def stop(self, unit: str) -> bool:
+        self.log.append(("stop", unit))
+        return False
+
+
+def test_failed_activations_never_leak_releases(tree) -> None:
+    """Each failed activation must drop its release, or every update adds one."""
+    first = _ensure(tree, FakeTools()).release_id
+    layout = rel.Layout.for_venv(tree["venv"])
+    for _ in range(3):
+        out = _ensure(tree, FakeTools(), StopFails(active={rel.AGENT_UNIT}), force=True)
+        assert out.status == "activation_failed" and "could not stop" in out.error
+    n = {"p": 0}
+
+    def _probe(_py: Path) -> dict[str, Any]:
+        n["p"] += 1
+        return {"ok": n["p"] % 2 == 1, "error": "broken"}  # build passes, re-verify fails
+
+    for _ in range(3):
+        out = _ensure(tree, FakeTools(), force=True, probe=_probe)
+        assert out.status == "activation_failed" and out.flipped_back
+    assert [p.name for p in layout.releases.iterdir()] == [first]
+    assert os.readlink(layout.current) == f"releases/{first}"
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root bypasses directory permissions")
+def test_an_unmovable_pre_layout_venv_refuses_before_building(tree) -> None:
+    venv = _legacy_venv(tree)
+    venv.chmod(0o555)
+    try:
+        tools = FakeTools()
+        out = _ensure(tree, tools)
+        assert out.status == "build_failed"
+        assert "not writable" in out.error
+        assert "doctor perms --fix" in out.remedy and "reprovision hermes" in out.remedy
+        assert not tools.find(lambda c: "fetch" in c), "refused before building"
+        assert venv.is_dir() and not venv.is_symlink()
+    finally:
+        venv.chmod(0o755)
+
+
+def test_a_missing_venv_link_is_relinked_without_a_rebuild(tree) -> None:
+    assert _ensure(tree, FakeTools()).ok
+    layout = rel.Layout.for_venv(tree["venv"])
+    tree["venv"].unlink()  # a builder that died between the rename and the swap
+    assert "does not point at current/venv" in rel.build_trigger(layout, PIN, "3.12")
+    tools = FakeTools()
+    out = _ensure(tree, tools)
+    assert out.status == "converged"
+    assert any("relinked" in w for w in out.warnings)
+    assert os.readlink(tree["venv"]) == str(layout.venv_target)
+    assert not tools.find(lambda c: "fetch" in c)
+
+
+def test_a_wrong_venv_link_is_relinked(tree, tmp_path) -> None:
+    assert _ensure(tree, FakeTools()).ok
+    tree["venv"].unlink()
+    tree["venv"].symlink_to(tmp_path)
+    assert _ensure(tree, FakeTools()).status == "converged"
+    assert os.readlink(tree["venv"]) == str(rel.Layout.for_venv(tree["venv"]).venv_target)
+
+
+def test_units_a_dead_builder_stopped_are_started_again(tree) -> None:
+    assert _ensure(tree, FakeTools()).ok
+    layout = rel.Layout.for_venv(tree["venv"])
+    (layout.root / rel.STOPPED_UNITS).write_text(
+        json.dumps({"units": [rel.AGENT_UNIT, "evil.service"]})
+    )
+    units = FakeUnits()
+    out = _ensure(tree, FakeTools(), units)
+    assert out.status == "converged"
+    assert units.log == [("start", rel.AGENT_UNIT)]  # never a unit outside HERMES_UNITS
+    assert not (layout.root / rel.STOPPED_UNITS).exists()
+
+
+def test_the_stopped_units_record_is_written_before_stopping_and_cleared_after(tree) -> None:
+    assert _ensure(tree, FakeTools()).ok
+    layout = rel.Layout.for_venv(tree["venv"])
+    seen: list[Any] = []
+
+    class Spy(FakeUnits):
+        def stop(self, unit: str) -> bool:
+            seen.append(json.loads((layout.root / rel.STOPPED_UNITS).read_text())["units"])
+            return super().stop(unit)
+
+    assert _ensure(tree, FakeTools(), Spy(active={rel.AGENT_UNIT}), force=True).ok
+    assert seen == [[rel.AGENT_UNIT]]
+    assert not (layout.root / rel.STOPPED_UNITS).exists()
+
+
+def test_a_half_initialised_mirror_gets_its_origin_back(tree) -> None:
+    layout = rel.Layout.for_venv(tree["venv"])
+    layout.mirror.mkdir(parents=True)
+    (layout.mirror / "HEAD").write_text("ref: refs/heads/main\n")  # init ran, remote add did not
+
+    class NoOrigin(FakeTools):
+        def __call__(self, argv: list[Any], **kw: Any) -> subprocess.CompletedProcess:
+            argv = [str(a) for a in argv]
+            if argv[-3:] == ["remote", "get-url", "origin"]:
+                self.calls.append(argv)
+                self.envs.append({})
+                return subprocess.CompletedProcess(argv, 2, "", "error: No such remote 'origin'")
+            return super().__call__(argv, **kw)
+
+    tools = NoOrigin()
+    assert _ensure(tree, tools).ok
+    assert tools.find(lambda c: c[-4:] == ["remote", "add", "origin", URL])
+    assert not tools.find(lambda c: "set-url" in c)
+    assert tools.find(lambda c: c[-2:] == ["remote.origin.promisor", "true"])
+
+
+def test_root_drop_forwards_the_wait_printer(tree, monkeypatch) -> None:
+    seen: list[list[str]] = []
+
+    def _fake_run(cmd: list[str], **_kw: Any) -> subprocess.CompletedProcess:
+        seen.append(list(cmd))
+        return subprocess.CompletedProcess(cmd, 0, json.dumps({"status": "converged"}), None)
+
+    monkeypatch.setattr(rel.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(rel, "_hal0_user_exists", lambda: True)
+    monkeypatch.setattr(rel.shutil, "which", lambda _n: None)
+    monkeypatch.setattr(rel.subprocess, "run", _fake_run)
+    rel.ensure_release(caller="provision", venv=tree["venv"], on_wait=lambda _h: None)
+    assert json.loads(seen[0][-1])["print_wait"] is True
+    assert seen[0][:5] == ["sudo", "-n", "-u", "hal0", "--"]
+
+    calls: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        rel,
+        "ensure_release",
+        lambda **kw: calls.append(kw) or rel.ReleaseOutcome(status="converged"),
+    )
+    rel.main([json.dumps({"caller": "provision", "print_wait": True})])
+    assert callable(calls[0]["on_wait"])
+
+
+# ── re-review follow-ups (a)-(c) ─────────────────────────────────────────────
+
+
+def _crashed_mid_migration(tree) -> rel.Layout:
+    """The state a builder leaves when it dies after the rename, before ``current``."""
+    layout = rel.Layout.for_venv(tree["venv"])
+    rdir = layout.releases / f"legacy-{PIN[:12]}"
+    (rdir / "venv" / "bin").mkdir(parents=True)
+    (rdir / "venv" / "bin" / "python").write_text("legacy")
+    (rdir / "release.json").write_text(
+        json.dumps({"id": rdir.name, "legacy": True, "ref": PIN[:12], "python_minor": "3.12"})
+    )
+    (layout.root / rel.STOPPED_UNITS).write_text(json.dumps({"units": [rel.AGENT_UNIT]}))
+    assert not tree["venv"].exists() and not layout.current.exists()
+    return layout
+
+
+def test_an_orphaned_pre_layout_release_is_adopted_and_the_migration_retried(tree) -> None:
+    layout = _crashed_mid_migration(tree)
+    units = FakeUnits()
+    out = _ensure(tree, FakeTools(), units)
+    assert out.status == "activated", out.error
+    assert out.previous_id == f"legacy-{PIN[:12]}"
+    assert os.readlink(layout.previous) == f"releases/legacy-{PIN[:12]}"
+    assert tree["venv"].is_symlink()
+    # The unit the dead builder stopped was started again.
+    assert ("start", rel.AGENT_UNIT) in units.log
+
+
+def test_adoption_alone_restores_the_pre_migration_host(tree) -> None:
+    layout = _crashed_mid_migration(tree)
+    assert rel.repair_venv_link(layout) is True
+    assert os.readlink(layout.current) == f"releases/legacy-{PIN[:12]}"
+    assert (tree["venv"] / "bin" / "python").read_text() == "legacy"
+    assert rel.build_trigger(layout, PIN, "3.12") == "the pre-layout release is live"
+
+
+def test_a_never_activated_release_is_not_adopted(tree) -> None:
+    layout = rel.Layout.for_venv(tree["venv"])
+    rdir = layout.releases / f"{PIN[:12]}-20261021T000000Z"
+    (rdir / "venv" / "bin").mkdir(parents=True)
+    (rdir / "venv" / "bin" / "python").write_text("")
+    (rdir / "release.json").write_text(json.dumps({"id": rdir.name, "ref": PIN}))
+    assert rel.repair_venv_link(layout) is False
+    assert not layout.current.exists()
+
+
+def test_the_link_is_repaired_before_stranded_units_start(tree) -> None:
+    assert _ensure(tree, FakeTools()).ok
+    layout = rel.Layout.for_venv(tree["venv"])
+    tree["venv"].unlink()
+    (layout.root / rel.STOPPED_UNITS).write_text(json.dumps({"units": [rel.AGENT_UNIT]}))
+    seen: list[bool] = []
+
+    class Spy(FakeUnits):
+        def start(self, unit: str) -> bool:
+            seen.append(tree["venv"].is_symlink())
+            return super().start(unit)
+
+    assert _ensure(tree, FakeTools(), Spy()).status == "converged"
+    assert seen == [True]
+
+
+@pytest.mark.parametrize("state", ["disabled", "masked", "masked-runtime"])
+def test_a_stranded_unit_the_operator_turned_off_stays_off(tree, state: str) -> None:
+    """#2823 holds for crash recovery too."""
+    assert _ensure(tree, FakeTools()).ok
+    layout = rel.Layout.for_venv(tree["venv"])
+    (layout.root / rel.STOPPED_UNITS).write_text(
+        json.dumps({"units": [rel.AGENT_UNIT, rel.GATEWAY_UNIT]})
+    )
+
+    class Off(FakeUnits):
+        def enabled_state(self, unit: str) -> str:
+            return state if unit == rel.GATEWAY_UNIT else "enabled"
+
+    units = Off()
+    _ensure(tree, FakeTools(), units)
+    assert units.log == [("start", rel.AGENT_UNIT)]
+
+
+def test_systemd_units_read_is_enabled_without_privilege() -> None:
+    calls: list[list[str]] = []
+
+    def _run(argv: list[str], **_kw: Any) -> Any:
+        calls.append(list(argv))
+        return subprocess.CompletedProcess(argv, 1, "disabled\n", "")
+
+    assert rel.SystemdUnits(run=_run, use_seam=True).enabled_state(rel.GATEWAY_UNIT) == "disabled"
+    assert calls == [["systemctl", "is-enabled", rel.GATEWAY_UNIT]]

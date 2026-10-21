@@ -205,6 +205,36 @@ def default_fake_slots() -> list[dict[str, Any]]:
     ]
 
 
+def fake_ensure_release(calls: list[dict[str, Any]] | None = None, *, status: str = "activated"):
+    """A stand-in for ``hermes_release.ensure_release`` (the real one builds).
+
+    Lays down ``bin/hermes`` + ``bin/python`` in the venv when a build is due
+    (forced, or the binary is missing) and reports ``status``; otherwise
+    ``converged``. Records each call's keyword arguments in ``calls``.
+    """
+    from pathlib import Path
+
+    from hal0.agents.hermes_release import ReleaseOutcome
+
+    def _ensure(**kw: Any) -> ReleaseOutcome:
+        if calls is not None:
+            calls.append(dict(kw))
+        venv = Path(kw["venv"])
+        if not kw.get("force") and (venv / "bin" / "hermes").exists():
+            return ReleaseOutcome(
+                status="converged", ref="3ef6bbd201263d354fd83ec55b3c306ded2eb72a"
+            )
+        if status != "activated":
+            return ReleaseOutcome(status=status, error=f"fake {status}", remedy="fake remedy")
+        (venv / "bin").mkdir(parents=True, exist_ok=True)
+        for name in ("hermes", "python"):
+            (venv / "bin" / name).write_text("#!/bin/sh\nexit 0\n")
+            (venv / "bin" / name).chmod(0o755)
+        return ReleaseOutcome(status="activated", release_id="3ef6bbd20126-20261021T000000Z")
+
+    return _ensure
+
+
 def install_io(hp, *, record: list[list[str]] | None = None, slots=None):
     """A deterministic :class:`hp.InstallIO` for hermetic ``install_hermes`` runs.
 
@@ -215,11 +245,7 @@ def install_io(hp, *, record: list[list[str]] | None = None, slots=None):
 
     slot_list = default_fake_slots() if slots is None else slots
 
-    def _install_venv(v, _req, **_kw):
-        (v / "bin").mkdir(parents=True, exist_ok=True)
-        for name in ("hermes", "python"):
-            (v / "bin" / name).write_text("#!/bin/sh\nexit 0\n")
-            (v / "bin" / name).chmod(0o755)
+    _ensure_release = fake_ensure_release()
 
     def _memory(method, params, **_kw):
         tool = (params or {}).get("name", "")
@@ -268,7 +294,7 @@ def install_io(hp, *, record: list[list[str]] | None = None, slots=None):
             "error": None,
         },
         mcp_memory_call=_memory,
-        install_venv=_install_venv,
+        ensure_release=_ensure_release,
         read_env_probe=lambda: {
             "env_report": {"cpu": {"strix_halo": True}},
             "gpu_target_version": {"gfx": "1151"},

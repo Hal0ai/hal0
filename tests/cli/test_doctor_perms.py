@@ -43,6 +43,8 @@ def test_root_owned_config_is_drift() -> None:
     }
     rows = _check(owners, present=set(owners))
     assert dc.has_ownership_drift(rows) is True
+    # The root-owned legacy dir is never audited (ADR-0034 d2 amendment).
+    assert not any(r["path"] == "/var/lib/hal0/python" for r in rows)
     drift = [r for r in rows if r["status"] == "drift"]
     assert any("config.yaml" in r["path"] for r in drift)
 
@@ -51,6 +53,8 @@ def test_stray_root_home_is_drift() -> None:
     owners = {_HOME: "hal0", _VENV: "hal0"}
     rows = _check(owners, present=set(owners) | {_STRAY})
     assert dc.has_ownership_drift(rows) is True
+    # The root-owned legacy dir is never audited (ADR-0034 d2 amendment).
+    assert not any(r["path"] == "/var/lib/hal0/python" for r in rows)
     assert any(str(_STRAY) in r["path"] and r["status"] == "drift" for r in rows)
 
 
@@ -99,6 +103,8 @@ def test_root_owned_tree_is_drift_on_every_axis() -> None:
     # The live CT105 state before the fix: group=root, 0755, sharedRepository unset.
     rows = _tree(group="root", mode=_CLOBBERED_MODE, shared=None)
     assert dc.has_ownership_drift(rows) is True
+    # The root-owned legacy dir is never audited (ADR-0034 d2 amendment).
+    assert not any(r["path"] == "/var/lib/hal0/python" for r in rows)
     drift = {r["label"] for r in rows if r["status"] == "drift"}
     assert "tree group == hal0" in drift
     assert "tree group-writable" in drift
@@ -111,6 +117,8 @@ def test_group_writable_but_no_setgid_still_drifts() -> None:
     # won't inherit the group, so the creep returns. Must still flag.
     rows = _tree(group="hal0", mode=_stat.S_IFDIR | 0o0775, shared="group")
     assert dc.has_ownership_drift(rows) is True
+    # The root-owned legacy dir is never audited (ADR-0034 d2 amendment).
+    assert not any(r["path"] == "/var/lib/hal0/python" for r in rows)
     assert {r["label"] for r in rows if r["status"] == "drift"} == {
         "dirs setgid (new files inherit group)"
     }
@@ -167,3 +175,46 @@ def test_repair_short_circuits_on_failure() -> None:
     assert ok is False
     assert "chgrp failed" in msg
     assert "operation not permitted" in msg
+
+
+def test_release_tree_and_managed_python_rows() -> None:
+    """ADR-0032 decision 13: the release tree and uv-managed Python are audited."""
+    root, python = Path("/var/lib/hal0/hermes"), Path("/var/lib/hal0/hermes/python")
+    owners = {
+        _HOME: "hal0",
+        _HOME / "config.yaml": "hal0",
+        _VENV: "hal0",
+        root: "hal0",
+        python: "root",
+    }
+    rows = _check(owners, present=set(owners))
+    labels = {r["label"]: r for r in rows}
+    assert labels["hermes release tree"]["status"] == "ok"
+    assert labels["uv-managed Python"]["status"] == "drift"
+    assert dc.has_ownership_drift(rows) is True
+    # The root-owned legacy dir is never audited (ADR-0034 d2 amendment).
+    assert not any(r["path"] == "/var/lib/hal0/python" for r in rows)
+
+
+def test_venv_row_follows_the_symlink_into_a_hal0_owned_release(tmp_path: Path) -> None:
+    """A migrated host's venvs/hermes is a symlink; Path.owner() follows it."""
+    import getpass
+
+    release = tmp_path / "hermes" / "releases" / "r1" / "venv"
+    release.mkdir(parents=True)
+    link = tmp_path / "venvs" / "hermes"
+    link.parent.mkdir()
+    link.symlink_to(release)
+    me = getpass.getuser()
+    rows = dc.check_hermes_ownership(
+        expected_user=me,
+        hermes_home=tmp_path / "home",
+        venv=link,
+        release_root=tmp_path / "hermes",
+        python_root=tmp_path / "python",
+        stray_home=tmp_path / "stray",
+        owner_of=lambda p: p.owner(),
+        exists=lambda p: p.exists(),
+    )
+    venv_row = next(r for r in rows if r["label"] == "hermes venv")
+    assert venv_row["status"] == "ok"

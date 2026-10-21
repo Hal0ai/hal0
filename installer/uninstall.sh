@@ -488,11 +488,17 @@ fi
 # distro upgrade, half-provisioned hermes) collides with the next install's
 # `hal0 agent install hermes` / hindsight bootstrap. --purge wipes all of
 # ${VAR_DIR} below anyway, so this is a no-op-then-redundant in that mode.
-#   /var/lib/hal0/venvs/<agent>   — hermes (+ any other agent) managed venvs
+#   /var/lib/hal0/venvs/<agent>   — hermes (+ any other agent) managed venvs;
+#       venvs/hermes is a symlink into the release tree after ADR-0032
+#   /var/lib/hal0/hermes          — the Hermes release tree (mirror.git, every
+#       release, current/previous); `rm -rf venvs` only drops the symlink
 #   /var/lib/hal0/memory/hindsight/.venv — Hindsight engine venv (pg0/hf-cache
 #       under that dir are engine STATE; keep them in conservative mode so the
 #       memory banks survive a re-install, drop them under --purge with VAR_DIR)
 rm_path "${VAR_DIR}/venvs"
+rm_path "${VAR_DIR}/hermes"
+# The pre-release-layout uv interpreter dir (root-owned on older installs).
+rm_path "${VAR_DIR}/python"
 rm_path "${VAR_DIR}/memory/hindsight/.venv"
 
 # ── PATH symlinks / CLI shims (system mode only) ──────────────────────────────

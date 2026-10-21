@@ -26,7 +26,7 @@ import structlog.testing
 from hal0.agents import hermes_provision as hp
 from hal0.slots.state import DISPATCHABLE_STATES, SlotState
 
-from ._hermes_fakes import fake_hermes_run
+from ._hermes_fakes import fake_ensure_release, fake_hermes_run
 
 
 @pytest.fixture
@@ -328,16 +328,13 @@ def test_install_phase_skips_venv_when_binary_exists_and_client_imports(
     hermes_home = tmp_path / "hermes_home"
     state = hp.BootstrapState(venv=str(venv), hermes_home=str(hermes_home))
 
-    called: list[Any] = []
-
-    def _no_install(*args: Any, **kwargs: Any) -> None:
-        called.append(args)
+    called: list[dict[str, Any]] = []
 
     out = hp._phase_install(
         hp._StepCtx(
             state=state,
             io=hp.InstallIO(
-                install_venv=_no_install,
+                ensure_release=fake_ensure_release(called),
                 probe_mcp_client=lambda *_a, **_kw: {
                     "ok": True,
                     "stage": "import",
@@ -348,8 +345,10 @@ def test_install_phase_skips_venv_when_binary_exists_and_client_imports(
         )
     )
     assert out.status == hp.PhaseStatus.OK
-    # Venv binary present and its MCP client imports → no rebuild.
-    assert called == []
+    # Venv binary present and its MCP client imports → the builder is asked
+    # without force, and it reports nothing to do.
+    assert [c["force"] for c in called] == [False]
+    assert out.details["release_status"] == "converged"
     assert "venv_reinstalled_reason" not in out.details
     # Canonical `hermes` wrapper is installed (the hal0-hermes back-compat
     # symlink is retired).
@@ -393,16 +392,13 @@ def test_install_phase_reinstalls_a_venv_whose_mcp_client_is_missing(
     )
     state = hp.BootstrapState(venv=str(venv), hermes_home=str(tmp_path / "hermes_home"))
 
-    install_calls: list[Path] = []
-
-    def _fake_install(v: Path, _req: Path, **_kwargs: Any) -> None:
-        install_calls.append(v)
+    install_calls: list[dict[str, Any]] = []
 
     out = hp._phase_install(
         hp._StepCtx(
             state=state,
             io=hp.InstallIO(
-                install_venv=_fake_install,
+                ensure_release=fake_ensure_release(install_calls),
                 probe_mcp_client=lambda *_a, **_kw: {
                     "ok": False,
                     "stage": "import",
@@ -414,7 +410,9 @@ def test_install_phase_reinstalls_a_venv_whose_mcp_client_is_missing(
     )
 
     assert out.status == hp.PhaseStatus.OK
-    assert install_calls == [venv]
+    assert [(c["venv"], c["force"], c["reason"]) for c in install_calls] == [
+        (venv, True, "mcp client import failed")
+    ]
     assert out.details["venv_reinstalled_reason"] == "mcp client import failed"
 
 
@@ -429,17 +427,50 @@ def test_install_phase_runs_venv_install_when_binary_missing(
     hermes_home = tmp_path / "hermes_home"
     state = hp.BootstrapState(venv=str(venv), hermes_home=str(hermes_home))
 
-    install_calls: list[Path] = []
+    install_calls: list[dict[str, Any]] = []
 
-    def _fake_install(v: Path, _req: Path, **_kwargs: Any) -> None:
-        install_calls.append(v)
-        (v / "bin").mkdir(parents=True, exist_ok=True)
-        (v / "bin" / "hermes").write_text("#!/bin/sh\nexit 0\n")
-        (v / "bin" / "hermes").chmod(0o755)
-
-    out = hp._phase_install(hp._StepCtx(state=state, io=hp.InstallIO(install_venv=_fake_install)))
+    out = hp._phase_install(
+        hp._StepCtx(state=state, io=hp.InstallIO(ensure_release=fake_ensure_release(install_calls)))
+    )
     assert out.status == hp.PhaseStatus.OK
-    assert install_calls == [venv]
+    assert [(c["venv"], c["force"], c["caller"], c["wait"]) for c in install_calls] == [
+        (venv, True, "provision", True)
+    ]
+    assert out.details["release_status"] == "activated"
+
+
+@pytest.mark.parametrize("status", ["build_failed", "activation_failed", "offline", "busy"])
+def test_install_phase_fails_with_the_builder_remedy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, status: str
+) -> None:
+    monkeypatch.setattr(
+        hp, "HERMES_CLI_INSTALL_PATH", tmp_path / "usr" / "local" / "bin" / "hermes"
+    )
+    state = hp.BootstrapState(venv=str(tmp_path / "venv"), hermes_home=str(tmp_path / "home"))
+    out = hp._phase_install(
+        hp._StepCtx(state=state, io=hp.InstallIO(ensure_release=fake_ensure_release(status=status)))
+    )
+    assert out.status == hp.PhaseStatus.FAIL
+    assert f"hermes release {status}" in (out.reason or "")
+    assert "fake remedy" in (out.reason or "")
+
+
+def test_install_phase_passes_offline_and_the_upgrade_ref(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#2838: HAL0_HERMES_OFFLINE (written by ``--offline``) reaches the builder."""
+    monkeypatch.setattr(
+        hp, "HERMES_CLI_INSTALL_PATH", tmp_path / "usr" / "local" / "bin" / "hermes"
+    )
+    monkeypatch.setenv("HAL0_HERMES_OFFLINE", "1")
+    ref = "3ef6bbd201263d354fd83ec55b3c306ded2eb72a"
+    state = hp.BootstrapState(venv=str(tmp_path / "venv"), hermes_home=str(tmp_path / "h"), ref=ref)
+    calls: list[dict[str, Any]] = []
+    hp._phase_install(
+        hp._StepCtx(state=state, io=hp.InstallIO(ensure_release=fake_ensure_release(calls)))
+    )
+    assert calls[0]["offline"] is True
+    assert calls[0]["ref"] == ref
 
 
 def test_persisted_hermes_python_is_atomic_and_idempotent(tmp_path: Path) -> None:
@@ -729,79 +760,60 @@ def test_preflight_passes_when_uv_can_provision_python(
     assert out.details["uv_python_fallback"] is True
 
 
-class TestUvAvailableFallsBackToFixedPipxPath:
-    """#2124: `installer/agents/hermes-prereqs.sh` installs uv via pipx to a
-    fixed bin dir (production: `/usr/local/bin`), specifically so this
-    process can find it. But `_uv_available`'s PATH probe
-    (`shutil.which("uv")`) reads *this process's* `PATH` — which can lack
-    that bin dir on a non-login exec context (`pct exec`, `lxc-attach`,
-    `docker exec`, cloud-init/`runcmd`) even though the install landed
-    there just fine, and even though the bash script's OWN post-install
-    check no longer makes that mistake (see hermes-prereqs.sh `ensure_uv`).
-    A caller whose PATH lacks the bin dir would still see `uv_python_fallback:
-    False` and fail preflight with an actionable-sounding but false error —
-    unless `_uv_available` also checks the fixed location directly.
+class TestUvDiscovery:
+    """ADR-0034 decision 2: uv ships in hal0's venv, next to ``sys.executable``.
+
+    The sibling is checked first, so a privilege drop that carries a deficient
+    PATH (#2124) cannot hide it; ``PATH`` is the fallback for a dev venv
+    without uv. The pipx lookup at ``/usr/local/bin/uv`` is gone with
+    ``hermes-prereqs.sh``'s ``ensure_uv``.
     """
 
-    def test_falls_back_when_path_probe_misses_but_fixed_location_is_executable(
+    @staticmethod
+    def _exe(path: Path) -> Path:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("#!/bin/sh\necho uv\n", encoding="utf-8")
+        path.chmod(0o755)
+        return path
+
+    def test_sibling_of_the_running_interpreter_wins_over_path(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        fake_bin_dir = tmp_path / "usr-local-bin"
-        fake_bin_dir.mkdir()
-        fake_uv = fake_bin_dir / "uv"
-        fake_uv.write_text("#!/usr/bin/env bash\necho uv\n", encoding="utf-8")
-        fake_uv.chmod(0o755)
-        monkeypatch.setattr(hp, "_UV_PIPX_FALLBACK_BIN", fake_uv)
+        uv = self._exe(tmp_path / "venv" / "bin" / "uv")
+        monkeypatch.setattr(hp.sys, "executable", str(tmp_path / "venv" / "bin" / "python"))
+        assert hp._uv_available(prober=lambda _name: "/opt/elsewhere/uv") == str(uv)
 
-        # Simulates a PATH that excludes the pipx bin dir — the exact shape
-        # from the issue's repro (`/sbin:/bin:/usr/sbin:/usr/bin`).
-        out = hp._uv_available(prober=lambda _name: None)
-        assert out == str(fake_uv)
-
-    def test_path_probe_still_wins_when_it_finds_something(self) -> None:
-        # The fast path (uv already on PATH) must not be shadowed by the
-        # fallback — no unnecessary reliance on the fixed location.
-        out = hp._uv_available(prober=lambda _name: "/opt/homebrew/bin/uv")
-        assert out == "/opt/homebrew/bin/uv"
-
-    def test_returns_none_when_neither_path_nor_fixed_location_has_uv(
+    def test_path_is_the_fallback_when_the_venv_has_no_uv(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        monkeypatch.setattr(hp, "_UV_PIPX_FALLBACK_BIN", tmp_path / "no-such-uv")
-        assert hp._uv_available(prober=lambda _name: None) is None
+        monkeypatch.setattr(hp.sys, "executable", str(tmp_path / "bare" / "bin" / "python"))
+        assert (
+            hp._uv_available(prober=lambda _name: "/opt/homebrew/bin/uv") == "/opt/homebrew/bin/uv"
+        )
 
-    def test_returns_none_when_fallback_location_is_a_directory_not_a_file(
-        self, tmp_path: Path
-    ) -> None:
-        # A directory can satisfy os.access(..., os.X_OK) (traversable) without
-        # being anything uv could execute — the fallback must require a
-        # regular file, not just "some access bit is set" (#2151 review nit).
+    def test_none_when_neither_has_uv(self, tmp_path: Path) -> None:
+        assert hp._uv_available(prober=lambda _name: None, fallback_bin=tmp_path / "nope") is None
+
+    def test_a_directory_named_uv_is_not_uv(self, tmp_path: Path) -> None:
         bogus = tmp_path / "uv"
         bogus.mkdir()
         assert hp._uv_available(prober=lambda _name: None, fallback_bin=bogus) is None
 
-    def test_fallback_bin_kwarg_overrides_the_module_default(self, tmp_path: Path) -> None:
-        fake_uv = tmp_path / "uv"
-        fake_uv.write_text("#!/usr/bin/env bash\necho uv\n", encoding="utf-8")
-        fake_uv.chmod(0o755)
-        out = hp._uv_available(prober=lambda _name: None, fallback_bin=fake_uv)
-        assert out == str(fake_uv)
+    def test_fallback_bin_overrides_the_sibling(self, tmp_path: Path) -> None:
+        uv = self._exe(tmp_path / "custom" / "uv")
+        assert hp._uv_available(prober=lambda _name: None, fallback_bin=uv) == str(uv)
 
-    def test_honors_hal0_uv_pipx_bin_dir_env_for_symmetry_with_the_installer(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        # hermes-prereqs.sh's UV_PIPX_BIN_DIR honors HAL0_UV_PIPX_BIN_DIR
-        # (#2151 finding 2); the Python-side default fallback should resolve
-        # the same override for symmetry, so an operator who redirects the
-        # bash installer's pipx target doesn't desync from this side too.
-        pipx_bin_dir = tmp_path / "custom-pipx-bin"
-        pipx_bin_dir.mkdir()
-        fake_uv = pipx_bin_dir / "uv"
-        fake_uv.write_text("#!/usr/bin/env bash\necho uv\n", encoding="utf-8")
-        fake_uv.chmod(0o755)
-        monkeypatch.setenv("HAL0_UV_PIPX_BIN_DIR", str(pipx_bin_dir))
-        out = hp._uv_available(prober=lambda _name: None)
-        assert out == str(fake_uv)
+    def test_release_builder_uses_the_same_order(self, tmp_path: Path) -> None:
+        from hal0.agents.hermes_release import find_uv
+
+        uv = self._exe(tmp_path / "venv" / "bin" / "uv")
+        exe = tmp_path / "venv" / "bin" / "python"
+        assert find_uv(executable=exe, which=lambda _n: "/usr/bin/uv") == str(uv)
+        assert (
+            find_uv(executable=tmp_path / "x" / "python", which=lambda _n: "/usr/bin/uv")
+            == "/usr/bin/uv"
+        )
+        assert find_uv(executable=tmp_path / "x" / "python", which=lambda _n: None) is None
 
 
 def test_ensure_python_prefers_system_interpreter_over_uv() -> None:
@@ -892,27 +904,17 @@ def test_provision_via_uv_sanitizes_leaked_root_home(
         assert e["UV_PYTHON_INSTALL_DIR"] == str(hp.UV_PYTHON_INSTALL_DIR)
 
 
-def test_install_venv_sanitizes_leaked_root_home(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """O15 (same leak class): venv + pip subprocesses also get a sane HOME."""
+def test_release_build_env_sanitizes_leaked_root_home(monkeypatch: pytest.MonkeyPatch) -> None:
+    """O15 (same leak class): git and uv in the release builder get a sane HOME."""
+    from hal0.agents.hermes_release import build_env
+
     monkeypatch.setenv("HOME", "/root")
-    envs: list[dict[str, str] | None] = []
-
-    class _Runner:
-        @staticmethod
-        def run(argv: list[str], *, env: dict[str, str] | None = None, **_kw: Any) -> None:
-            envs.append(env)
-
-    hp._install_venv(
-        tmp_path / "venv",
-        tmp_path / "requirements.txt",
-        runner=_Runner,
-        python_resolver=lambda: "/usr/bin/python3.12",
-    )
-    assert envs, "venv/pip must have been invoked"
-    assert all(e is not None and e["HOME"] == hp._hal0_service_home() for e in envs)
-    assert all(e is not None and e["HOME"] != "/root" for e in envs)
+    monkeypatch.setenv("VIRTUAL_ENV", "/somewhere/else")
+    env = build_env()
+    assert env["HOME"] == hp._hal0_service_home() != "/root"
+    assert env["UV_CACHE_DIR"] == str(hp.UV_CACHE_DIR)
+    assert env["UV_PYTHON_INSTALL_DIR"] == str(hp.UV_PYTHON_INSTALL_DIR)
+    assert "VIRTUAL_ENV" not in env
 
 
 def test_provision_via_uv_creates_install_dir_world_traversable(
@@ -922,7 +924,8 @@ def test_provision_via_uv_creates_install_dir_world_traversable(
     # service user cannot traverse to reach the symlinked base interpreter —
     # the exact "gateway venv python won't start" failure the /var/lib/hal0
     # move was meant to fix. The install dir must be created 0o755 *before*
-    # uv is invoked, so record its mode at the moment the runner is called.
+    # uv is invoked, so record its mode at the moment the runner is called. It is
+    # 2775, matching the perms table.
     install_dir = tmp_path / "python"
     monkeypatch.setattr(hp, "UV_PYTHON_INSTALL_DIR", install_dir)
 
@@ -934,7 +937,7 @@ def test_provision_via_uv_creates_install_dir_world_traversable(
     class _Runner:
         @staticmethod
         def run(argv: list[str], **_kw: Any) -> _Result:
-            modes_at_run.append(install_dir.stat().st_mode & 0o777)
+            modes_at_run.append(install_dir.stat().st_mode & 0o7777)
             return _Result()
 
     old_umask = os.umask(0o077)
@@ -950,9 +953,10 @@ def test_provision_via_uv_creates_install_dir_world_traversable(
     assert out == f"{install_dir}/cpython-3.12/bin/python3.12"
     # World-traversable despite the 077 umask (a plain mkdir would be 0700)...
     assert install_dir.is_dir()
-    assert install_dir.stat().st_mode & 0o777 == 0o755
+    # 2775, the mode hal0.install.perms declares for it (setgid hal0 group).
+    assert install_dir.stat().st_mode & 0o7777 == 0o2775
     # ...and already so by the time uv's first subcommand ran.
-    assert modes_at_run and modes_at_run[0] == 0o755
+    assert modes_at_run and modes_at_run[0] == 0o2775
 
 
 def test_ensure_python_returns_none_without_uv(tmp_path: Path) -> None:
@@ -982,70 +986,20 @@ def test_ensure_python_returns_none_when_uv_fetch_fails() -> None:
     assert out is None
 
 
-@pytest.mark.parametrize("minor", ["3.11", "3.13", "3.14"])
-def test_install_venv_rebuilds_venv_on_unsupported_interpreter(tmp_path: Path, minor: str) -> None:
-    # A non-3.12 venv can never converge by pip alone. The replacement is
-    # built beside the live tree and swapped transactionally.
-    venv = tmp_path / "venv"
-    (venv / "lib" / f"python{minor}" / "site-packages").mkdir(parents=True)
-    stale_marker = venv / "lib" / f"python{minor}" / "site-packages" / "hermes_cli"
-    stale_marker.mkdir()
-    calls: list[list[str]] = []
-
-    class _Runner:
-        @staticmethod
-        def run(argv: list[str], check: bool, env: dict[str, str] | None = None) -> None:
-            calls.append(argv)
-
-    hp._install_venv(
-        venv, tmp_path / "req.txt", runner=_Runner, python_resolver=lambda: "/usr/bin/python3.12"
-    )
-    assert not stale_marker.exists()  # successful swap removes the rollback tree
-    assert calls[0][:3] == ["/usr/bin/python3.12", "-m", "venv"]
+def test_install_venv_is_gone() -> None:
+    # ADR-0032 decision 6: nothing writes into a release once it exists, so the
+    # in-place build and its minor-version rebuild are deleted.
+    assert not hasattr(hp, "_install_venv")
+    assert not hasattr(hp, "_venv_python_minor")
 
 
-def test_install_venv_keeps_supported_venv(tmp_path: Path) -> None:
-    venv = tmp_path / "venv"
-    (venv / "lib" / "python3.12" / "site-packages").mkdir(parents=True)
-    calls: list[list[str]] = []
-
-    class _Runner:
-        @staticmethod
-        def run(argv: list[str], check: bool, env: dict[str, str] | None = None) -> None:
-            calls.append(argv)
-
-    hp._install_venv(
-        venv, tmp_path / "req.txt", runner=_Runner, python_resolver=lambda: "/usr/bin/python3.12"
-    )
-    # No `-m venv` call — straight to pip into the existing venv.
-    assert all(argv[2] != "venv" for argv in calls if len(argv) > 2)
-
-
-def test_requirements_floor_blocks_broken_hermes_agent() -> None:
-    # Regression guard for #1247: hermes-agent 0.15.2's wheel is broken
-    # (imports hermes_cli.dashboard_auth, ships without it). The shipped
-    # requirement must foreclose that broken build by ONE of two *reviewed*
-    # means — never an arbitrary/unreviewed pin:
-    #   * a version floor >= 0.16.0, so no resolver (incl. old-Python wheel
-    #     fallbacks) can select 0.15.2; OR
-    #   * a pin to a commit/tag in hp.VETTED_HERMES_REFS — the production
-    #     posture, where the ref was built from vetted upstream source.
+def test_requirement_pins_a_vetted_commit() -> None:
+    # The builder checks the pinned commit out of its mirror, so the shipped
+    # requirement must name a full commit in hp.VETTED_HERMES_REFS. A version
+    # floor no longer counts (ADR-0032 decision 3).
     text = hp.HERMES_REQUIREMENTS.read_text()
-    line = hp._hermes_requirement_line(text)
-    floor = hp.hermes_requirement_floor(line)
-    ref = hp.hermes_pinned_ref(line)
-    floored = floor is not None and floor >= hp.HERMES_MIN_VERSION
-    vetted_pin = ref is not None and ref in hp.VETTED_HERMES_REFS
-    assert floored or vetted_pin, (
-        f"hermes requirement neither floored >= {hp.HERMES_MIN_VERSION} nor pinned "
-        f"to a vetted ref — a broken/unreviewed build could be selected: {line!r}"
-    )
-    # Protection intent: a VCS pin that is NOT on the reviewed allowlist must
-    # never satisfy the guard (that is exactly how a broken 0.15.2 commit, or
-    # any unvetted ref, would sneak past a floor-only check).
-    if ref is not None and not floored:
-        assert ref in hp.VETTED_HERMES_REFS, f"unreviewed hermes ref pinned: {line!r}"
-    # Single source of truth for the allowlist + broken-build floor.
+    ref = hp.hermes_pinned_ref(hp._hermes_requirement_line(text))
+    assert ref is not None and ref in hp.VETTED_HERMES_REFS
     assert hp.hermes_requirement_is_vetted(text)
 
 
@@ -1067,8 +1021,13 @@ def test_shipped_requirement_is_the_vetted_commit_pin() -> None:
             "3ef6bbd201263d354fd83ec55b3c306ded2eb72a",
             True,
         ),
-        # Floored+capped spec — blocks 0.15.2 numerically.
-        ("hermes-agent[web]>=0.16.0,<1.0", True),
+        # Floored+capped spec — a floor names no commit to check out.
+        ("hermes-agent[web]>=0.16.0,<1.0", False),
+        # A tag pin — refused: only a full 40-hex commit is vetted.
+        (
+            "hermes-agent[web] @ git+https://github.com/NousResearch/hermes-agent.git@v2026.7.20",
+            False,
+        ),
         # Broken build hard-pinned by version — rejected (below floor, no ref).
         ("hermes-agent[web]==0.15.2", False),
         # Sub-floor floor — 0.15.x still selectable, rejected.
@@ -1082,9 +1041,9 @@ def test_shipped_requirement_is_the_vetted_commit_pin() -> None:
     ],
 )
 def test_requirement_vetted_classifier_enforces_protections(line: str, vetted: bool) -> None:
-    # The broken-build protection lives in one seam; exercise both accept paths
-    # (vetted ref / >=0.16.0 floor) and the reject paths (sub-floor, hard-pinned
-    # broken version, unreviewed commit) directly.
+    # The vetted-ref protection lives in one seam; exercise the accept path
+    # (vetted commit) and the reject paths (any floor, hard-pinned version, a
+    # tag, an unreviewed commit) directly.
     assert hp.hermes_requirement_is_vetted(line) is vetted
 
 
@@ -3862,7 +3821,7 @@ def test_install_phase_installs_canonical_wrapper(
 
     state = hp.BootstrapState(venv=str(venv), hermes_home=str(tmp_path / "hh"))
     out = hp._phase_install(
-        hp._StepCtx(state=state, io=hp.InstallIO(install_venv=lambda *a, **kw: None))
+        hp._StepCtx(state=state, io=hp.InstallIO(ensure_release=fake_ensure_release()))
     )
 
     assert out.status == hp.PhaseStatus.OK

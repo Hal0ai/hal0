@@ -246,18 +246,43 @@ def _is_ready(cfg: AgentConfig, *, timeout: float = 1.0) -> bool:
 # ----------------------------------------------------------------------------
 
 
-def _resolve_web_dist(cfg: AgentConfig) -> Path | None:
-    """Locate the pre-built Hermes dashboard assets inside the agent venv.
+def _checkout_web_dist(venv: Path) -> Path | None:
+    """The dashboard build in the release checkout behind a venv link (#2837).
 
-    The wheel ships the bundle at
-    ``<venv>/lib/pythonX.Y/site-packages/hermes_cli/web_dist``. We GLOB the
-    ``pythonX.Y`` segment rather than hardcode a minor version: the agent venv
-    is built with whatever ``python3`` the host provides (3.11-3.14+), so a
-    pinned ``python3.12`` path silently breaks on every other interpreter — the
-    cause of the install-time hermes crash-loop on a Python-3.14 box. Returns
-    the first existing match, or ``None`` when no built dist is present.
+    After the release-layout migration ``/var/lib/hal0/venvs/hermes`` is a
+    symlink to ``/var/lib/hal0/hermes/current/venv``. The release builder
+    builds the UI into the checkout next to that venv,
+    ``current/src/hermes_cli/web_dist`` (ADR-0034 decision 4). The path is
+    taken through the link's own target (``current/…``), not fully resolved,
+    so it names whatever release ``current`` points at.
+    """
+    if not venv.is_symlink():
+        return None
+    try:
+        target = Path(os.readlink(venv))
+    except OSError:
+        return None
+    if not target.is_absolute():
+        target = venv.parent / target
+    dist = target.parent / "src" / "hermes_cli" / "web_dist"
+    return dist if (dist / "index.html").is_file() else None
+
+
+def _resolve_web_dist(cfg: AgentConfig) -> Path | None:
+    """Locate the pre-built Hermes dashboard assets for the agent venv.
+
+    First the release checkout behind the venv link
+    (:func:`_checkout_web_dist`): an editable install never has a
+    ``site-packages`` copy. Then, for a pre-layout non-editable venv, the wheel's
+    ``<venv>/lib/pythonX.Y/site-packages/hermes_cli/web_dist``, with the
+    ``pythonX.Y`` segment GLOBBED rather than hardcoded so another interpreter
+    minor does not silently break it. Returns ``None`` when no built dist is
+    present.
     """
 
+    checkout = _checkout_web_dist(cfg.venv)
+    if checkout is not None:
+        return checkout
     matches = sorted(cfg.venv.glob("lib/python3.*/site-packages/hermes_cli/web_dist"))
     for path in matches:
         if path.is_dir():

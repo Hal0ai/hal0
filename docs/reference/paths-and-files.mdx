@@ -65,11 +65,50 @@ key layout.
 │   └── <name>/workspace/     # per-agent sandbox root (chroot/bind-mount target)
 ├── stacks/state.json         # active-stack pointer + content hash
 ├── mcp/hermes-managed.json   # MCP server ids hal0 itself joined into Hermes config
+├── venvs/hermes -> /var/lib/hal0/hermes/current/venv   # fixed symlink; a real directory only before the first migration
+├── hermes/                   # Hermes release tree (hal0:hal0), see below
+├── python/                   # legacy uv interpreters from before the release layout; root-owned on older installs, never written by builds
 ├── openwebui/                 # OpenWebUI state
 └── .config/flm/models/       # default FLM (NPU) model cache
 ```
 
 `profile-centric.json` is not consulted to decide what still needs converting: that is read from each file's content, so running `hal0 profile migrate` again writes nothing for entries already converted. An unchanged blocked slot is reported again and is not retried until its file changes. The file does have one reader: `hal0 update --rollback` takes the list of conversion backups from it when the target release predates the conversion. Do not delete it while you may still roll back; without it the rollback finds no backups to restore. To undo a conversion by hand for a downgrade, see `hal0 profile migrate --restore` in the [CLI reference](/docs/reference/cli-operator/).
+
+### Hermes release tree
+
+Hermes is installed as one release directory per build, behind a `current`
+symlink (ADR-0032, ADR-0034). Only `current` moves when a release is
+activated; the agent unit, the `hermes` wrapper and the gateway unit reach
+the venv through `/var/lib/hal0/venvs/hermes` or `/var/lib/hal0/hermes/current/`.
+
+```
+/var/lib/hal0/hermes/
+├── .lock                         # flock held by every build, activation and prune; holds the holder's pid, caller and start time
+├── mirror.git/                   # blobless bare mirror of NousResearch/hermes-agent, fetched by sha with tags
+├── releases/<sha12>-<UTC stamp>/
+│   ├── src/                      # git worktree of mirror.git, detached at the vetted sha
+│   ├── venv/                     # editable install against src/
+│   └── release.json              # ref, describe, interpreter, web_dist, hal0 version; written last
+├── releases/legacy-<sha12>/      # the pre-migration 3.12 venv, moved here on the first migration (no src/)
+├── python/                       # uv-managed interpreters for Hermes builds (UV_PYTHON_INSTALL_DIR)
+├── .cache/uv/                    # uv cache for Hermes builds (UV_CACHE_DIR)
+├── current -> releases/<id>      # the live release
+└── previous -> releases/<id>     # the automatic flip-back target
+```
+
+Builds run as the `hal0` user, so uv's interpreters and cache live inside
+this hal0-owned tree. The older `/var/lib/hal0/python` is root-owned on
+existing installs; builds never write it, and it is removed only by a root
+path (`installer/uninstall.sh`, or the root prelude of `hal0 agent
+reprovision` once nothing uses the interpreter in it).
+
+A release without `release.json` is incomplete and is deleted by the next
+build. Every successful activation keeps `current` and `previous` and deletes
+every other release, except one that `/etc/systemd/system/hermes-gateway.service`
+still names. Each activation also writes the `venv.pin` stamp under
+`/var/lib/hal0/state/agents/hermes/` from `release.json`. Steady state is two
+releases (a few hundred MB each), the mirror (a blobless partial clone,
+about 200 MB at the current pin) and the uv cache.
 
 ### Model store resolution
 

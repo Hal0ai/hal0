@@ -46,7 +46,6 @@ import sqlite3
 import stat
 import subprocess  # nosec B404 — needed to spawn python -m venv + pip
 import sys
-import tempfile
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -59,6 +58,12 @@ from hal0.agents.anchor_window import (
     AnchorWindow,
     read_hermes_minimum_context,
     resolve_anchor_window,
+)
+from hal0.agents.hermes_layout import (
+    HERMES_PYTHON_ROOT,
+    HERMES_UV_CACHE,
+    HERMES_VENV_PATH,
+    release_root_for,
 )
 from hal0.agents.role_slots import candidate_from_slot_mapping, resolve_role_slots
 from hal0.install.perms import SECRETS_DIR_MODE, ensure_shared_dir
@@ -140,6 +145,8 @@ class BootstrapState:
     hermes_home: str = "/var/lib/hal0/.hermes"
     venv: str = "/var/lib/hal0/venvs/hermes"
     agent_id: str = "hermes"
+    #: A vetted ref other than the pin (``hal0 agent upgrade hermes --to``).
+    ref: str | None = None
 
 
 def _utcnow() -> str:
@@ -333,8 +340,13 @@ def _phase_preflight(ctx: _StepCtx) -> PhaseResult:
     * venv tree + ``$HERMES_HOME`` write-probed — we create both in later
       phases; a real touch/unlink catches a root-owned ``$HERMES_HOME`` (or
       SELinux/ACL block) that an ``os.access`` check on ``/var/lib/hal0`` misses.
-    * ≥ 4 GiB free under ``/var/lib/hal0/`` — Hermes deps + a typical
-      memory cache run ~3 GiB; 4 GiB leaves headroom for venv rebuild.
+    * ≥ 4 GiB free under ``/var/lib/hal0/`` (:data:`MIN_FREE_GIB`). The
+      release layout keeps two releases (a 3.12 venv of ~143 MB plus a
+      ~182 MB checkout each, measured at v0.22.2), the blobless bare mirror
+      (~200 MB at 3ef6bbd2, more as later pins add blobs) and the uv cache
+      (~143 MB), and a build adds a third release before the prune: about
+      1.5 GB at peak with a managed interpreter. 4 GiB still leaves room for
+      the memory cache and HERMES_HOME.
     """
     state = ctx.state
     failures: list[str] = []
@@ -375,7 +387,9 @@ def _phase_preflight(ctx: _StepCtx) -> PhaseResult:
     # on Fedora: hermes provisioned as a non-root login user against root-owned
     # /var/lib/hal0). os.access() also lies under SELinux / ACLs / NFS.
     blocked = sorted(
-        str(p) for p in (Path(state.venv), Path(state.hermes_home)) if not path_is_writable(p)
+        str(p)
+        for p in (Path(state.venv), release_root_for(Path(state.venv)), Path(state.hermes_home))
+        if not path_is_writable(p)
     )
     details["write_blocked"] = blocked
     if blocked:
@@ -417,9 +431,9 @@ def _python_range_error() -> str:
     return (
         f"exact Python 3.12 was not found — Hermes requires a deterministic "
         f"3.12 venv (upstream metadata is `{lo} <= version < {cap}`). "
-        f"Install python3.12 with its venv module, or install uv "
-        f"(https://astral.sh/uv); hal0 will provision Python {UV_PYTHON_FALLBACK} "
-        f"under {UV_PYTHON_INSTALL_DIR}"
+        f"Install python3.12, or let the uv that ships in hal0's venv fetch "
+        f"Python {UV_PYTHON_FALLBACK} under {UV_PYTHON_INSTALL_DIR} (needs the "
+        f"network; reinstall hal0 if its venv has no uv)"
     )
 
 
@@ -432,14 +446,20 @@ UV_PYTHON_FALLBACK = "3.12"
 #: venv executes as the ``hal0`` user via a symlinked base interpreter, which
 #: would then be unreachable. A world-readable tree under /var/lib/hal0 keeps
 #: the interpreter usable by the service and survives root-homedir cleanups.
-UV_PYTHON_INSTALL_DIR = Path("/var/lib/hal0/python")
+#: It sits inside the hal0-owned release tree (/var/lib/hal0/hermes/python),
+#: not the older /var/lib/hal0/python, which is root-owned on existing hosts
+#: and which a build running as hal0 could not write (ADR-0034, decision 2
+#: amendment).
+UV_PYTHON_INSTALL_DIR = HERMES_PYTHON_ROOT
 
 #: The hal0 service state root — the fallback HOME for provisioning subprocesses
 #: (see :func:`_hal0_subprocess_env`). install.sh chowns ``.cache``/``.config``
 #: under here to hal0, so tools that write dot-dirs land in a hal0-owned tree.
 _HAL0_STATE_ROOT = Path("/var/lib/hal0")
-#: uv cache home, pinned under the hal0 state root (never ~/.cache → /root).
-UV_CACHE_DIR = _HAL0_STATE_ROOT / ".cache" / "uv"
+#: uv cache home, pinned inside the hal0-owned release tree (never ~/.cache →
+#: /root, and not /var/lib/hal0/.cache/uv, which an earlier root-run uv can
+#: have left root-owned).
+UV_CACHE_DIR = HERMES_UV_CACHE
 HERMES_PYTHON_ENV = Path("/etc/hal0/hermes-python.env")
 
 
@@ -647,58 +667,25 @@ def _hal0_subprocess_env(**overrides: str) -> dict[str, str]:
     return env
 
 
-# hermes-prereqs.sh installs uv to this fixed location via pipx (see
-# UV_PIPX_BIN_DIR there) specifically so a caller can find it even when its
-# own PATH lacks /usr/local/bin — a real gap on non-login exec contexts (pct
-# exec, lxc-attach, docker exec, cloud-init/runcmd) that bypass PAM's
-# /etc/environment (#2124). This process inherits whatever PATH the CLI
-# invocation started with, and the root→hal0 privilege drop
-# (cli/agent_commands._run_as_hal0, via runuser/setpriv/sudo) can carry that
-# same deficient PATH straight through — `sudo`'s secure_path can even
-# override it. `shutil.which("uv")` alone reproduces, one call site later,
-# the exact "verify an install via inherited PATH instead of the location
-# that was actually written" bug hermes-prereqs.sh had to fix in itself.
-# Falling back to the fixed path here closes the same gap for this
-# Python-side consumer, independent of what PATH actually made it through.
-_UV_PIPX_FALLBACK_BIN = Path("/usr/local/bin/uv")
-
-
-def _uv_pipx_fallback_bin() -> Path:
-    """Resolve the default uv-fallback path.
-
-    Honors ``HAL0_UV_PIPX_BIN_DIR`` for symmetry with
-    installer/agents/hermes-prereqs.sh's namespaced pipx-bin-dir override
-    (#2124/#2151 review) — an operator who redirects the bash installer's
-    pipx target gets the same redirection here instead of the two halves
-    silently desyncing. Falls back to the ``_UV_PIPX_FALLBACK_BIN`` module
-    attribute (read here, not captured as a default, so tests that
-    monkeypatch it keep working) when the env var is unset.
-    """
-    override = os.environ.get("HAL0_UV_PIPX_BIN_DIR")
-    return Path(override) / "uv" if override else _UV_PIPX_FALLBACK_BIN
-
-
 def _uv_available(
     prober: Callable[[str], str | None] = shutil.which,
     *,
     fallback_bin: Path | None = None,
 ) -> str | None:
-    """Probe PATH first, then the fixed pipx-install location (#2124).
+    """The uv shipped in hal0's own venv, then uv on PATH (ADR-0034 decision 2).
 
-    ``fallback_bin`` is injectable — defaulting to
-    :func:`_uv_pipx_fallback_bin` — so a caller simulating a uv-less host (an
-    absent ``prober``) can also pin the fixed-path fallback to a location
-    guaranteed not to exist, instead of it unconditionally consulting
-    whatever `/usr/local/bin/uv` happens to be on the actual machine running
-    the test (#2151 review).
+    uv is a pinned dependency of hal0 (``pyproject.toml``), so every hal0
+    install and every ``hal0 update`` puts it next to the running interpreter:
+    ``Path(sys.executable).parent / "uv"``. That location is checked first, so
+    a privilege drop that carries a deficient PATH (#2124) cannot hide it.
+    ``fallback_bin`` overrides that location (tests point it at a path that
+    does not exist to simulate a uv-less venv). ``prober`` is the PATH lookup
+    for a dev checkout running from a venv without uv.
     """
-    found = prober("uv")
-    if found:
-        return found
-    fallback = fallback_bin if fallback_bin is not None else _uv_pipx_fallback_bin()
-    if fallback.is_file() and os.access(fallback, os.X_OK):
-        return str(fallback)
-    return None
+    sibling = fallback_bin if fallback_bin is not None else Path(sys.executable).parent / "uv"
+    if sibling.is_file() and os.access(sibling, os.X_OK):
+        return str(sibling)
+    return prober("uv")
 
 
 def _provision_python_via_uv(
@@ -733,14 +720,16 @@ def _provision_python_via_uv(
     # tree lands 0700 and the hal0 service user can't traverse to the symlinked
     # base interpreter — silently reproducing the very "gateway venv python
     # won't start" failure this /var/lib/hal0 move was meant to fix. chmod the
-    # leaf to 0o755 to guarantee traversal; idempotent under --repair, and
+    # leaf to 0o2775 (setgid, world-traversable) to guarantee traversal; idempotent under --repair, and
     # mirrors the other hal0-reachable dirs (gateway drop-in .chmod(0o755)).
     # Best-effort: a perms hiccup (e.g. unprivileged
     # caller) must not abort an otherwise-working provision, so log and
     # continue rather than fall through to the None/range-error path.
     try:
         UV_PYTHON_INSTALL_DIR.mkdir(parents=True, exist_ok=True)
-        UV_PYTHON_INSTALL_DIR.chmod(0o755)
+        # setgid hal0 group, traversable by everyone: the same 2775 the perms
+        # table (hal0.install.perms) declares for this directory.
+        UV_PYTHON_INSTALL_DIR.chmod(0o2775)
     except OSError as exc:
         log.warning(
             "uv-install-dir-perms-failed",
@@ -822,74 +811,10 @@ def _venv_python(venv: Path) -> Path:
     return venv / "bin" / "python"
 
 
-def _venv_python_minor(venv: Path) -> tuple[int, int] | None:
-    """Minor version of an existing venv, read from its ``lib/pythonX.Y`` dir.
-
-    Filesystem-only on purpose — the venv may be too broken to execute
-    (that's exactly the case we're probing for). ``None`` when the layout
-    is unrecognizable; callers should treat that as \"leave it alone\".
-    """
-    for entry in sorted(venv.glob("lib/python3.*")):
-        try:
-            major, minor = entry.name.removeprefix("python").split(".", 1)
-            return (int(major), int(minor))
-        except ValueError:
-            continue
-    return None
-
-
-def _install_venv(
-    venv: Path,
-    requirements: Path,
-    *,
-    runner: Any = subprocess,
-    python_resolver: Callable[[], str | None] = _ensure_supported_python,
-) -> None:
-    """Create the venv at ``venv`` and install ``requirements`` into it.
-
-    Two-step: ``python3.12 -m venv`` then ``pip install -r``. The venv itself
-    is stdlib-built — uv enters only inside the resolver, as the last-resort
-    interpreter fetch on hosts with no packaged Python 3.12.
-    """
-    py = python_resolver()
-    if py is None:
-        raise RuntimeError(_python_range_error())
-    venv.parent.mkdir(parents=True, exist_ok=True)
-    existing_minor = _venv_python_minor(venv) if venv.exists() else None
-    needs_replacement = existing_minor is not None and existing_minor != (3, 12)
-    target = venv
-    rollback: Path | None = None
-    if needs_replacement:
-        # Build beside the live venv. The live tree remains runnable if pip,
-        # network, or the replacement interpreter fails.
-        target = Path(tempfile.mkdtemp(prefix=f".{venv.name}.build-", dir=venv.parent))
-    try:
-        env = _hal0_subprocess_env()
-        target_preexists = target.exists()
-        if needs_replacement or not target_preexists:
-            runner.run([py, "-m", "venv", str(target)], check=True, env=env)  # nosec B603
-        pip = _venv_python(target)
-        runner.run([str(pip), "-m", "pip", "install", "--upgrade", "pip"], check=True, env=env)  # nosec B603
-        runner.run([str(pip), "-m", "pip", "install", "-r", str(requirements)], check=True, env=env)  # nosec B603
-        if needs_replacement:
-            rollback = venv.with_name(f"{venv.name}.rollback-{os.getpid()}")
-            os.replace(venv, rollback)
-            try:
-                os.replace(target, venv)
-            except BaseException:
-                os.replace(rollback, venv)
-                raise
-            shutil.rmtree(rollback)
-    except BaseException:
-        if needs_replacement and target.exists():
-            shutil.rmtree(target, ignore_errors=True)
-        raise
-
-
-#: Default managed-venv + requirements + HERMES_HOME for the upgrade path.
-#: Mirrors the BootstrapState defaults so `hal0 agent upgrade hermes` can run
-#: standalone (it pip-upgrades + migrates before re-running the state machine).
-HERMES_VENV_DEFAULT = Path("/var/lib/hal0/venvs/hermes")
+#: Default managed-venv + requirements + HERMES_HOME. Mirrors the
+#: BootstrapState defaults. The venv path is a symlink through the release
+#: layout once a host has migrated (``hal0.agents.hermes_layout``).
+HERMES_VENV_DEFAULT = HERMES_VENV_PATH
 HERMES_HOME_DEFAULT = Path("/var/lib/hal0/.hermes")
 HERMES_REQUIREMENTS = (
     REPO_ROOT_FOR_INSTALLER / "installer" / "agents" / "hermes" / "requirements.txt"
@@ -911,11 +836,6 @@ HERMES_REQUIREMENTS = (
 # ``tests/agents/hermes/test_contract_compatibility.py``.
 VETTED_HERMES_REFS: frozenset[str] = frozenset({"3ef6bbd201263d354fd83ec55b3c306ded2eb72a"})
 
-# Broken-build floor (#1247): every hermes-agent below this is off-limits to any
-# resolver, including old-Python wheel fallbacks that would otherwise land on the
-# broken 0.15.2 build.
-HERMES_MIN_VERSION: tuple[int, int, int] = (0, 16, 0)
-
 _HERMES_FLOOR_RE = re.compile(r">=\s*(\d+)\.(\d+)\.(\d+)")
 _HERMES_GIT_REF_RE = re.compile(r"git\+https?://\S+?@([0-9A-Za-z._+-]+)")
 _HERMES_SHA_RE = re.compile(r"[0-9a-f]{40}")
@@ -933,8 +853,7 @@ def _hermes_requirement_line(text: str) -> str:
 def hermes_requirement_floor(line: str) -> tuple[int, int, int] | None:
     """The ``>=X.Y.Z`` version floor of a requirement line, or ``None``.
 
-    ``None`` when the line carries no floor — e.g. a bare git-commit pin, which
-    has no PEP 440 version to compare against :data:`HERMES_MIN_VERSION`.
+    Display only (:func:`_hermes_version_pin`). ``None`` for a git-commit pin.
     """
     m = _HERMES_FLOOR_RE.search(line)
     return (int(m.group(1)), int(m.group(2)), int(m.group(3))) if m else None
@@ -947,78 +866,19 @@ def hermes_pinned_ref(line: str) -> str | None:
 
 
 def hermes_requirement_is_vetted(text: str) -> bool:
-    """Whether the shipped requirement forecloses the broken 0.15.2 build.
+    """Whether the shipped requirement pins a commit in :data:`VETTED_HERMES_REFS`.
 
-    Acceptable via EITHER reviewed means (never an arbitrary/unreviewed pin):
-
-      * a version floor ``>= HERMES_MIN_VERSION`` — no resolver, including
-        old-Python wheel fallbacks, can select the broken build; OR
-      * a pin to a commit/tag in :data:`VETTED_HERMES_REFS` — the ref was built
-        from vetted upstream source that passed the contract compatibility test.
+    The builder checks the pinned commit out of a hal0-owned mirror (ADR-0032
+    decision 3), so only a full 40-hex commit that passed the contract
+    compatibility review is acceptable. A version floor cannot name a commit
+    to check out, and upstream reports its package version as ``0.0.0``, so
+    the old ``>= HERMES_MIN_VERSION`` floor path is gone.
     """
     line = _hermes_requirement_line(text)
-    floor = hermes_requirement_floor(line)
-    if floor is not None and floor >= HERMES_MIN_VERSION:
-        return True
     ref = hermes_pinned_ref(line)
-    return ref is not None and ref in VETTED_HERMES_REFS
-
-
-def upgrade_hermes_runtime(
-    *,
-    venv: Path = HERMES_VENV_DEFAULT,
-    requirements: Path = HERMES_REQUIREMENTS,
-    hermes_home: Path = HERMES_HOME_DEFAULT,
-    version: str | None = None,
-    runner: Any = subprocess,
-) -> tuple[bool, str]:
-    """Pull the latest matching ``hermes-agent`` into the venv + reconcile config.
-
-    This is the runtime half of ``hal0 agent upgrade hermes`` — the package move
-    that the old hard pin (issue #240) used to forbid:
-
-      1. ``pip install -U`` the requirements (floor/cap from requirements.txt),
-         or an exact ``--to=<version>`` when the operator pins one.
-      2. ``hermes config migrate`` so the on-disk config.yaml schema matches the
-         newly-installed hermes build — hermes owns + migrates its own config,
-         hal0 only layers its keys on top, so a minor bump no longer strands us.
-
-    Non-fatal on the migrate step: a migrate hiccup is surfaced but doesn't fail
-    the upgrade (the subsequent reprovision re-renders + re-chowns to hal0). The
-    caller runs ``bootstrap hermes --repair`` afterwards to converge the rest.
-
-    Returns ``(ok, message)``. ``ok`` is False only when the pip upgrade itself
-    fails (no venv, network/resolver error) — that's a real, actionable stop.
-    """
-    pip = _venv_python(venv)
-    if not pip.exists():
-        return False, f"hermes venv missing at {venv} — run `hal0 agent install hermes` first"
-
-    # ``[web,mcp]`` — an exact-version upgrade must request the same extras as
-    # requirements.txt: rebuilding the venv from ``[web]`` alone strips the MCP
-    # client out from under a working install (#2021).
-    spec = f"hermes-agent[web,mcp]=={version}" if version else None
-    pip_argv = [str(pip), "-m", "pip", "install", "--upgrade"]
-    pip_argv += [spec] if spec else ["-r", str(requirements)]
-    try:
-        runner.run(pip_argv, check=True)  # nosec B603 — argv from local config
-    except (subprocess.SubprocessError, OSError) as exc:
-        return False, f"pip upgrade failed: {exc}"
-
-    # Reconcile the config schema to the freshly-installed hermes. hermes owns
-    # the file; this adds/migrates ITS keys without touching hal0's overlay.
-    hermes_bin = pip.parent / "hermes"
-    migrated = False
-    try:
-        env = _hal0_subprocess_env(HERMES_HOME=str(hermes_home))  # HOME-sanitized (O15)
-        runner.run([str(hermes_bin), "config", "migrate"], check=True, env=env)  # nosec B603
-        migrated = True
-    except (subprocess.SubprocessError, OSError) as exc:
-        log.warning("hermes_provision.config_migrate_failed", error=str(exc))
-
-    target = version or "latest matching requirements"
-    suffix = " + config migrated" if migrated else " (config migrate skipped — see logs)"
-    return True, f"hermes-agent upgraded → {target}{suffix}"
+    return (
+        ref is not None and _HERMES_SHA_RE.fullmatch(ref) is not None and ref in VETTED_HERMES_REFS
+    )
 
 
 def _copy_wrapper(wrapper_src: Path, wrapper_dst: Path) -> None:
@@ -1078,6 +938,24 @@ def _dirs_identical(a: Path, b: Path) -> bool:
     return all(_dirs_identical(a / sub, b / sub) for sub in cmp.common_dirs)
 
 
+def _truthy_env(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on", "y"}
+
+
+def _print_builder_wait(holder: dict[str, Any]) -> None:
+    """CLI callers wait for the builder lock and say who holds it (decision 6)."""
+    from hal0.agents.hermes_release import describe_holder
+
+    print(f"waiting for the Hermes builder lock, held by {describe_holder(holder)} …", flush=True)
+
+
+def _ensure_release(**kwargs: Any) -> Any:
+    """Default :attr:`InstallIO.ensure_release`: the real release builder."""
+    from hal0.agents.hermes_release import ensure_release
+
+    return ensure_release(**kwargs)
+
+
 def _phase_install(ctx: _StepCtx) -> PhaseResult:
     """Provision the managed Hermes venv + ``/usr/local/bin/hermes`` + plugins.
 
@@ -1092,9 +970,11 @@ def _phase_install(ctx: _StepCtx) -> PhaseResult:
     ``$HERMES_HOME/plugins/model-providers/hal0/`` — the copy tolerates a missing
     source dir (skipped-step report line) until that lane lands.
 
-    Converges: skips the venv build when ``bin/hermes`` already exists (unless
-    ``--repair``), and each plugin tree copy hash-skips when already identical.
-    ``details["changed"]`` is the convergence signal.
+    Converges: the release builder (:mod:`hal0.agents.hermes_release`) builds
+    only when the binary is missing, under ``--repair``, when the MCP client
+    cannot import, or on one of its own triggers (pre-layout venv, live ref or
+    interpreter differs from the target). Each plugin tree copy hash-skips
+    when already identical. ``details["changed"]`` is the convergence signal.
     """
     state = ctx.state
     details: dict[str, Any] = {}
@@ -1155,17 +1035,49 @@ def _phase_install(ctx: _StepCtx) -> PhaseResult:
             reinstall_reason = "mcp client import failed"
             details["mcp_client_before_reinstall"] = probe
 
+    # Every build goes through the release builder (ADR-0032 decision 6): it
+    # takes the builder lock, applies the layout / ref / interpreter triggers on
+    # top of the reasons above, builds a fresh release, activates it with a
+    # flip-back on failure, writes the venv.pin stamp and prunes. A host that
+    # needs nothing returns ``converged`` without building.
+    offline = _truthy_env("HAL0_HERMES_OFFLINE")
+    try:
+        outcome = ctx.io.ensure_release(
+            caller="provision",
+            venv=venv,
+            requirements=requirements,
+            ref=state.ref,
+            force=reinstall_reason is not None,
+            reason=reinstall_reason,
+            wait=True,
+            on_wait=_print_builder_wait,
+            offline=offline,
+            hermes_home=hermes_home,
+        )
+    except Exception as exc:  # a builder bug must fail the step, not the pipeline
+        log.warning("hermes_provision.release_builder_crashed", error=str(exc))
+        return PhaseResult(
+            status=PhaseStatus.FAIL,
+            reason=f"hermes release builder crashed: {exc}",
+            details=details,
+        )
+    details["release_status"] = outcome.status
     if reinstall_reason is not None:
         details["venv_reinstalled_reason"] = reinstall_reason
-        try:
-            ctx.io.install_venv(venv, requirements)
-            changed = True
-        except (subprocess.SubprocessError, RuntimeError, OSError) as exc:
-            return PhaseResult(
-                status=PhaseStatus.FAIL,
-                reason=f"venv install failed: {exc}",
-                details=details,
-            )
+    if outcome.release_id:
+        details["release"] = outcome.release_id
+    if outcome.warnings:
+        details["release_warnings"] = list(outcome.warnings)
+    if not outcome.ok:
+        reason = outcome.error or outcome.status
+        if outcome.remedy:
+            reason = f"{reason} — {outcome.remedy}"
+        return PhaseResult(
+            status=PhaseStatus.FAIL,
+            reason=f"hermes release {outcome.status}: {reason}",
+            details=details,
+        )
+    changed = changed or outcome.changed
     details["venv"] = str(venv)
     details["hermes_bin"] = str(hermes_bin)
 
@@ -1206,8 +1118,8 @@ def _phase_install(ctx: _StepCtx) -> PhaseResult:
         details["plugins_skipped"] = plugins_skipped
     details["changed"] = changed
 
-    # No chown-back (§7.4 F.7): provisioning runs as hal0, so the venv under
-    # /var/lib/hal0/venvs is born hal0:hal0.
+    # No chown-back (§7.4 F.7): provisioning runs as hal0, so the release tree
+    # under /var/lib/hal0/hermes is born hal0:hal0.
     return PhaseResult(status=PhaseStatus.OK, details=details)
 
 
@@ -7200,7 +7112,7 @@ class InstallIO:
     probe_mcp_server: Callable[..., dict[str, Any]] = _probe_mcp_server
     probe_mcp_client: Callable[..., dict[str, Any]] = _probe_mcp_client
     mcp_memory_call: Callable[..., dict[str, Any]] = _mcp_memory_call
-    install_venv: Callable[..., None] = _install_venv
+    ensure_release: Callable[..., Any] = _ensure_release
     read_env_probe: Callable[[], dict[str, Any]] = _read_env_probe
     load_config: Callable[[], Any] = _load_hal0_config
     run: Callable[..., Any] = subprocess.run
@@ -7334,6 +7246,7 @@ def install_hermes(
     state_root: Path | None = None,
     write_report: bool = True,
     verbose: bool = False,
+    ref: str | None = None,
 ) -> InstallReport:
     """Provision Hermes in one linear, convergent pass.
 
@@ -7353,7 +7266,7 @@ def install_hermes(
     is the whole public contract; tests point them at a tmp tree.
     """
     io = io if io is not None else InstallIO()
-    state = BootstrapState(hermes_home=str(hermes_home), venv=str(venv), agent_id=agent_id)
+    state = BootstrapState(hermes_home=str(hermes_home), venv=str(venv), agent_id=agent_id, ref=ref)
 
     # RATIFIED 2026-07-18 (inc-1 deliverable 6): `--repair` reconciles ownership
     # drift BEFORE the converging writes, so a root-clobbered HERMES_HOME/venv is
@@ -7455,6 +7368,7 @@ def bootstrap_cli(
     repair: bool,
     verbose: bool = False,
     state_root: Path | None = None,
+    ref: str | None = None,
 ) -> int:
     """CLI entry point — thin delegator to :func:`install_hermes`.
 
@@ -7466,7 +7380,7 @@ def bootstrap_cli(
     mode, so "dry run" only ever meant "real install, no report" and phase
     skipping was silently dropped. The CLI now refuses both flags up front.
     """
-    report = install_hermes(repair=repair, state_root=state_root, verbose=verbose)
+    report = install_hermes(repair=repair, state_root=state_root, verbose=verbose, ref=ref)
     if verbose:
         target = (state_root or _DEFAULT_STATE_ROOT) / _STATE_FILE_NAME
         print(f"state: {target}")

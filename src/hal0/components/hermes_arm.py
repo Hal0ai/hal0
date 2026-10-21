@@ -1,11 +1,12 @@
-"""Converge the bundled Hermes venv onto the requirements.txt pin (spec §1).
+"""Converge the bundled Hermes release onto the requirements.txt pin (spec §1).
 
-Reuses the provisioner's own install + probe seams exactly as
-``updater.repair_hermes_mcp_client`` does (that pass heals import-broken
-venvs; this arm heals VERSION drift — both land on the state a fresh
-provision produces). The build identity is a stamp file, not a dist-probe:
-the pin may be a git ref, which no importlib.metadata probe can confirm.
-No snapshot machinery — hermes has no one-way DB; HERMES_HOME untouched.
+Goes through the same release builder (:mod:`hal0.agents.hermes_release`) as
+provisioning and ``updater.repair_hermes_mcp_client``, so every path lands on
+the state a fresh provision produces. The status identity is the
+``venv.pin`` stamp, written from ``release.json`` by every activation; the
+build decision reads ``release.json`` itself. No snapshot machinery — hermes
+has no one-way DB; HERMES_HOME is touched only by ``hermes config migrate``
+and the flip-back's config restore.
 """
 
 from __future__ import annotations
@@ -19,11 +20,9 @@ from typing import Any
 import structlog
 
 from hal0.config.paths import var_lib
-from hal0.system.seam import SEAM_BIN, is_hal0_service_user
+from hal0.system.seam import is_hal0_service_user
 
 log = structlog.get_logger(__name__)
-
-_CTL_TIMEOUT_S = 120.0
 
 Runner = Callable[..., subprocess.CompletedProcess]
 
@@ -105,6 +104,28 @@ def installed_hermes_pin(venv: Path | None = None) -> str | None:
     return _installed_pin_from_provision_checkpoint()
 
 
+def hermes_build_trigger(venv: Path | None = None) -> str | None:
+    """Why the live Hermes release needs a build, or ``None`` (read-only).
+
+    The component row uses it so a host still on the pre-layout venv (whose
+    stamp already equals the pin) reads ``pending``, not ``converged``.
+    Best-effort: any error reads as ``None``.
+    """
+    try:
+        from hal0.agents import hermes_release as rel
+
+        layout = rel.Layout.for_venv(venv or (var_lib() / "venvs" / "hermes"))
+        if (
+            not layout.venv_link.exists()
+            and rel.live_release(layout) is None
+            and not rel.complete_releases(layout)
+        ):
+            return None
+        return rel.build_trigger(layout, rel.require_vetted(rel.read_pin().ref), rel.target_minor())
+    except Exception:
+        return None
+
+
 def converge_hermes(
     *,
     job_id: str | None = None,
@@ -113,74 +134,100 @@ def converge_hermes(
     venv: Path | None = None,
     is_hal0_user: Callable[[], bool] | None = None,
 ) -> dict[str, Any]:
+    """Converge the live Hermes release onto the pin through the release builder.
+
+    ADR-0032 decision 6: builds on any trigger (pre-layout venv, live ref or
+    interpreter differs from the pin). Never waits for the builder lock: a
+    held lock returns ``busy`` and the next ``hal0 update`` retries. Every
+    activation stops and starts only the units that were running, so a
+    gateway the operator stopped is never started.
+    """
     from hal0.agents import hermes_provision as hermes
+    from hal0.agents import hermes_release as rel
 
     runner = runner if runner is not None else subprocess.run
     is_hal0_user = is_hal0_user if is_hal0_user is not None else is_hal0_service_user
     venv = venv or hermes.HERMES_VENV_DEFAULT
 
-    if not (venv / "bin" / "python").exists():
+    layout = rel.Layout.for_venv(venv)
+    # A live release with a missing venvs/hermes link (a builder that died
+    # mid-switch) is still provisioned: the builder relinks it.
+    # A live release with a missing venvs/hermes link, or a release tree a
+    # migration left without current (a builder that died mid-switch), is
+    # still provisioned: the builder relinks or adopts it. Only a tree with no
+    # complete release at all is "not provisioned".
+    if (
+        not (venv / "bin" / "python").exists()
+        and rel.live_release(layout) is None
+        and not rel.complete_releases(layout)
+    ):
         return {"status": "skipped", "reason": "hermes not provisioned"}
 
     pinned = hermes._hermes_version_pin()
     installed = installed_hermes_pin(venv)
     result: dict[str, Any] = {"installed": installed, "pinned": pinned}
-    if installed == pinned:
+    try:
+        target = rel.require_vetted(rel.read_pin().ref)
+    except rel.ReleaseError as exc:
+        return {**result, "status": "build_failed", "error": str(exc)}
+    trigger = rel.build_trigger(layout, target, rel.target_minor())
+    if trigger is None:
         return {**result, "status": "converged"}
+    result["trigger"] = trigger
     if not apply:
         log.warning(
             "components.hermes_stale",
             job_id=job_id,
             installed=installed,
             pinned=pinned,
+            trigger=trigger,
             remedy="run 'hal0 update'",
         )
         return {**result, "status": "stale"}
 
-    try:
-        hermes._install_venv(venv, hermes.HERMES_REQUIREMENTS)
-    except Exception as exc:
-        return {**result, "status": "build_failed", "error": f"venv install failed: {exc}"}
-
-    try:
-        probe = hermes._probe_mcp_client(venv / "bin" / "python", None, agent_id="hermes")
-    except Exception as exc:
-        return {**result, "status": "build_failed", "error": f"post-install probe failed: {exc}"}
-    if not probe.get("ok"):
+    outcome = rel.ensure_release(
+        caller="converge",
+        venv=venv,
+        wait=False,
+        units=rel.SystemdUnits(run=runner, use_seam=is_hal0_user()),
+    )
+    if outcome.status == "busy":
+        holder = outcome.holder or {}
+        log.warning(
+            "components.hermes_busy",
+            job_id=job_id,
+            holder_pid=holder.get("pid"),
+            holder_caller=holder.get("caller"),
+            holder_since=holder.get("started_at"),
+        )
+        return {**result, "status": "busy", "holder_pid": holder.get("pid"), "holder": holder}
+    if outcome.status in ("build_failed", "activation_failed", "offline"):
+        status = "activation_failed" if outcome.status == "activation_failed" else "build_failed"
         return {
             **result,
-            "status": "build_failed",
-            "error": f"rebuilt venv fails its own probe: {probe.get('error')}",
-            "remedy": "run 'sudo hal0 agent reprovision hermes --repair'",
+            "status": status,
+            "error": outcome.error,
+            "remedy": outcome.remedy or "run 'sudo hal0 agent reprovision hermes --repair'",
+            "detail": list(outcome.warnings),
         }
+    if outcome.status == "converged":
+        return {**result, "status": "converged"}
 
-    try:
-        stamp_path().parent.mkdir(parents=True, exist_ok=True)
-        stamp_path().write_text(pinned + "\n", encoding="utf-8")
-    except OSError as exc:
-        log.warning("components.hermes_stamp_failed", job_id=job_id, error=str(exc))
-
-    # Bounce the agent unit (and its gateway) so the running process picks
-    # up the rebuilt venv — same reason repair_hermes_mcp_client bounces
-    # hermes-gateway. Best-effort.
-    for argv in (
-        (
-            ["sudo", "-n", SEAM_BIN, "try-restart-agent", "hermes"]
-            if is_hal0_user()
-            else ["systemctl", "try-restart", "hal0-agent@hermes.service"]
-        ),
-        (
-            ["sudo", "-n", SEAM_BIN, "svc-restart", "hermes-gateway"]
-            if is_hal0_user()
-            else ["systemctl", "try-restart", "hermes-gateway.service"]
-        ),
-    ):
-        try:
-            runner(argv, capture_output=True, text=True, timeout=_CTL_TIMEOUT_S)
-        except (OSError, subprocess.SubprocessError) as exc:
-            log.warning(
-                "components.hermes_restart_failed", job_id=job_id, argv=argv[0], error=str(exc)
-            )
-
-    log.info("components.hermes_upgraded", job_id=job_id, installed=installed, pinned=pinned)
-    return {**result, "status": "upgraded", "from": installed, "to": pinned}
+    log.info(
+        "components.hermes_upgraded",
+        job_id=job_id,
+        installed=installed,
+        pinned=pinned,
+        release=outcome.release_id,
+        migrated_legacy=outcome.migrated_legacy,
+    )
+    out = {
+        **result,
+        "status": "upgraded",
+        "from": installed,
+        "to": pinned,
+        "release": outcome.release_id,
+    }
+    if outcome.warnings:
+        out["detail"] = list(outcome.warnings)
+    return out

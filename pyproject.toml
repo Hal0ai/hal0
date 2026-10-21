@@ -67,6 +67,17 @@ dependencies = [
   # silently fell back to the broken naive tuple compare — a box on
   # 1.0.0rc1 was never offered 1.0.0/1.0.1 GA. Declare it directly.
   "packaging>=24",
+  # ADR-0032 decision 9 / ADR-0034 decision 2: the Hermes release builder runs
+  # the uv that ships next to hal0's own interpreter (venv/bin/uv) to create the
+  # Hermes venv, install it from upstream's lock and fetch a managed Python.
+  # Every install and every `hal0 update` therefore delivers it. The wheels are
+  # py3-none manylinux/musllinux builds for x86_64 and aarch64. Capped like the
+  # other build-affecting pins: a new minor can change `uv export` or
+  # `uv pip sync` output, so raise it deliberately. The ceiling also keeps a
+  # quarantine like upstream Hermes's: only a uv release at least 7 days old
+  # at the time of the pin (0.13.1, 2026-10-14) is allowed, because the
+  # installer resolves this range rather than uv.lock.
+  "uv>=0.12.22,<0.13.2",
 ]
 
 [project.optional-dependencies]

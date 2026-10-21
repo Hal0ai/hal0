@@ -24,7 +24,13 @@ log = structlog.get_logger(__name__)
 #: what the dashboard Retry affordance reads). A boot-time diagnose-only
 #: pass must not clobber one of these with a generic "stale"/"pending"
 #: result that has no error/remedy of its own (M1, final-review).
-_FAILURE_STATUSES = ("build_failed", "snapshot_failed", "rolled_back")
+_FAILURE_STATUSES = ("build_failed", "snapshot_failed", "rolled_back", "activation_failed")
+
+#: Results that mean "the arm did not run" rather than a verdict. ``busy`` is
+#: the Hermes arm finding the builder lock held (ADR-0032 decision 6): it is
+#: not a failure, and it must not erase a recorded failure's breadcrumb, so it
+#: is treated like a diagnose-only pass when a failure is on record.
+_DID_NOT_RUN_STATUSES = ("busy",)
 
 
 def _resolve_converge(comp: ComponentDef) -> Callable[..., dict[str, Any]]:
@@ -98,8 +104,11 @@ def converge_component(
     # it here would silently erase the operator-facing detail on every
     # restart until someone happens to retry. An apply=True pass (retry,
     # `hal0 update`) always records — it may be curing or re-confirming the
-    # failure, and either way its result is the freshest truth.
-    if diagnose_only:
+    # failure, and either way its result is the freshest truth. The one
+    # exception is a result that says the arm did not run at all (``busy``):
+    # it confirms nothing, so a recorded ``activation_failed`` stays on the
+    # row until a later activation succeeds (ADR-0032 decision 7, step 8).
+    if diagnose_only or result.get("status") in _DID_NOT_RUN_STATUSES:
         existing = load_component_state().get(comp.id) or {}
         if existing.get("status") in _FAILURE_STATUSES:
             log.info(

@@ -1016,7 +1016,16 @@ def update(
 #: Component statuses that mean "not converged yet" — everything else
 #: (currently just "converged", plus the openwebui-only "override" and
 #: "not-installed") counts as settled for the purposes of the exit code.
-_COMPONENT_PENDING = ("pending", "stale", "ahead", "build_failed", "snapshot_failed", "rolled_back")
+_COMPONENT_PENDING = (
+    "pending",
+    "stale",
+    "ahead",
+    "build_failed",
+    "snapshot_failed",
+    "rolled_back",
+    "activation_failed",
+    "busy",
+)
 
 
 def _component_rows() -> list[dict]:

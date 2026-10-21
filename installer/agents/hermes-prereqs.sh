@@ -1,25 +1,23 @@
 #!/usr/bin/env bash
 # hal0 — Hermes provisioning prerequisites.
 #
-# `hal0 agent install hermes` provisions Hermes into a hal0-managed venv
-# at /var/lib/hal0/venvs/hermes. That needs an OS toolchain a clean box
-# may lack: a python3 that can `python3 -m venv` (Debian/Ubuntu split this
-# into the separate python3-venv package — the classic clean-Ubuntu trap),
-# python3-pip, pipx, and git. This script ensures all five are present,
-# using lib/distro.sh for cross-distro package naming.
+# `hal0 agent install hermes` builds Hermes as a release under
+# /var/lib/hal0/hermes (ADR-0032): a git mirror of the pinned commit plus a
+# venv that uv creates. uv ships in hal0's own venv (pyproject.toml), and it
+# fetches a managed Python when the box has no python3.12, so this script no
+# longer installs uv. It ensures the rest of the OS toolchain a clean box may
+# lack: python3 with its venv module (the classic clean-Ubuntu trap),
+# python3-pip, pipx, and git, using lib/distro.sh for cross-distro naming.
 #
-# git is required because the provisioner's `pip install
-# git+https://github.com/NousResearch/hermes-agent.git@<rev>` shells out to
-# `git clone`; a stock minimal distro image doesn't ship it (#1726, #1727
-# review). This script is the SHARED choke point for both provisioning
-# entry points — install.sh's inline `hal0 agent install hermes` call and
-# the standalone/deferred `hal0 agent install hermes` an operator runs
-# manually (e.g. after HAL0_SKIP_HERMES=1, or per the remediation hint on
-# a failed inline provision) — both go through
+# git is load-bearing: the builder fetches the pinned commit into its mirror
+# and checks it out with `git worktree add`; a stock minimal distro image
+# doesn't ship it (#1726, #1727 review). This script is the SHARED choke point
+# for both provisioning entry points — install.sh's inline
+# `hal0 agent install hermes` call and the standalone/deferred one an operator
+# runs manually (e.g. after HAL0_SKIP_HERMES=1) — both go through
 # hal0.cli.agent_commands._install_hermes, which shells out to this exact
-# script (see installer/install.sh's own preflight_git gate, which is
-# fast-path defense-in-depth only; this script is what actually covers
-# both call sites).
+# script (installer/install.sh's own preflight_git gate is fast-path
+# defense-in-depth only).
 #
 # Idempotent: probes first and installs nothing when the toolchain is
 # already complete. Cross-distro via the same package-manager detection
@@ -35,103 +33,20 @@ info() { printf '[hermes-prereqs] %s\n' "$*"; }
 warn() { printf '[hermes-prereqs] WARN: %s\n' "$*" >&2; }
 die() { printf '[hermes-prereqs] ERROR: %s\n' "$*" >&2; exit 1; }
 
-# Hermes is deliberately pinned to Python 3.12. The hal0 runtime has its
-# separate Python policy; do not use python3, python3.11, or python3.13 here.
 PY="$(command -v python3.12 || command -v python3 || true)"
 
 # ── Probe: is the toolchain already complete? ────────────────────────────────
 have_venv() { [ -n "${PY}" ] && "${PY}" -c 'import venv, ensurepip' >/dev/null 2>&1; }
 have_pip() { [ -n "${PY}" ] && "${PY}" -m pip --version >/dev/null 2>&1; }
 have_pipx() { command -v pipx >/dev/null 2>&1; }
-have_uv() { command -v uv >/dev/null 2>&1; }
 # `command -v git` only proves a `git` file resolves on PATH, not that it
 # runs (a non-executable file — permissions drift, a half-finished package
 # install — still resolves). `git --version` is the real functional probe
 # (#1727 review).
 have_git() { git --version >/dev/null 2>&1; }
 
-# hermes-agent wheels pin `requires-python >=3.11,<3.14`. On a box whose only
-# interpreter is 3.14+ (e.g. Ubuntu 26.04, whose apt has no python3.12), pip
-# filters out every hermes-agent wheel and the provision fails. The provisioner
-# (hermes_provision._provision_python_via_uv) recovers by downloading a managed
-# 3.12 with `uv python install` — but only if `uv` is on PATH. So on a
-# 3.14-only box, uv is a REQUIRED prerequisite; where a system 3.11-3.13 exists
-# it's unnecessary.
-have_system_hermes_py() {
-    command -v python3.12 >/dev/null 2>&1
-}
-
-# Where pipx drops the uv shim. Hardcoded to /usr/local/bin in production;
-# overridable via an already-exported HAL0_UV_PIPX_BIN_DIR so tests can
-# redirect it without writing into a real system directory. Deliberately
-# namespaced instead of reading the ambient PIPX_BIN_DIR: that name is
-# pipx's own general-purpose contract (an operator may already export it to
-# steer every pipx install on the box), and reading it here would let it
-# silently move this specific install target while the Python-side fallback
-# (hermes_provision._UV_PIPX_FALLBACK_BIN) stayed hardcoded to
-# /usr/local/bin — reproducing #2124 one phase later with the two halves
-# desynced (#2151 review). ${UV_PIPX_BIN_DIR} is still passed to pipx as its
-# own PIPX_BIN_DIR explicitly on the invocation below, so the install target
-# is controlled by exactly this variable regardless of what else is in the
-# ambient environment.
-UV_PIPX_BIN_DIR="${HAL0_UV_PIPX_BIN_DIR:-/usr/local/bin}"
-
-# Install uv to a fixed location (pipx → ${UV_PIPX_BIN_DIR}) so the
-# provisioner's managed-interpreter fallback
-# (hermes_provision._provision_python_via_uv) can find it. Idempotent;
-# requires pipx. Returns non-zero if uv still isn't usable afterwards.
-ensure_uv() {
-    have_uv && { info "uv already present ($(command -v uv))"; return 0; }
-    have_pipx || { warn "pipx unavailable — cannot install uv for the managed-Python fallback"; return 1; }
-    info "installing uv (managed-Python fallback for hermes-agent on 3.14+ boxes) via pipx → ${UV_PIPX_BIN_DIR}"
-    PIPX_HOME="${PIPX_HOME:-/opt/pipx}" PIPX_BIN_DIR="${UV_PIPX_BIN_DIR}" pipx install uv >/dev/null 2>&1 || true
-    # Verify the exact path pipx just wrote to — NOT via `command -v`/PATH
-    # (#2124). A non-login exec context (pct exec, lxc-attach, docker exec,
-    # cloud-init/runcmd, a service manager — anything that bypasses PAM's
-    # /etc/environment) can have a PATH that lacks ${UV_PIPX_BIN_DIR} even
-    # though the install landed there just fine, and `have_uv` (== `command -v
-    # uv`) would then falsely report failure on a successful install. `have_uv`
-    # above remains the correct fast path (a box that already has uv on PATH
-    # needs no reinstall) — it is only wrong as the POST-INSTALL check. On
-    # success, also fold ${UV_PIPX_BIN_DIR} onto PATH for the rest of this
-    # script's own run, so subsequent `command -v uv` calls here (e.g. the log
-    # line in ensure_interpreter_path) see it consistently.
-    if [ -f "${UV_PIPX_BIN_DIR}/uv" ] && [ -x "${UV_PIPX_BIN_DIR}/uv" ]; then
-        case ":${PATH}:" in
-            *":${UV_PIPX_BIN_DIR}:"*) ;;
-            *) PATH="${UV_PIPX_BIN_DIR}:${PATH}"; export PATH ;;
-        esac
-        return 0
-    fi
-    have_uv
-}
-
-# Ensure the hermes-agent interpreter path is satisfiable before declaring the
-# toolchain complete: hermes-agent wheels require Python <3.14, so a 3.14-only
-# box needs uv on PATH (the provisioner then fetches a managed 3.12/3.13).
-ensure_interpreter_path() {
-    if have_system_hermes_py; then
-        info "system Python 3.12 present — uv fallback not required"
-    elif ensure_uv; then
-        info "uv ready ($(command -v uv)) — provisioner will fetch a managed Python <3.14"
-    else
-        die "this box has only Python 3.14+ (hermes-agent wheels require <3.14) and
-uv could not be installed for the managed-interpreter fallback. Install uv
-(https://docs.astral.sh/uv/) or a python3.12, then re-run \`hal0 agent install hermes\`."
-    fi
-}
-
-# Toolchain is "complete" only when the interpreter fallback is also satisfiable:
-# venv+pip+pipx+git AND (a system Python in range OR uv reachable — either on
-# PATH or already installed at the fixed pipx location, since `have_uv` alone
-# is PATH-based and would false-negative on a non-login exec context where a
-# prior run already installed uv to ${UV_PIPX_BIN_DIR} but PATH doesn't carry
-# it — the same blind spot #2124 fixed for the post-install check in
-# ensure_uv, extended here so the "nothing to do" fast path doesn't redo that
-# work every invocation).
-if have_venv && have_pip && have_pipx && have_git \
-    && { have_system_hermes_py || have_uv || { [ -f "${UV_PIPX_BIN_DIR}/uv" ] && [ -x "${UV_PIPX_BIN_DIR}/uv" ]; }; }; then
-    info "toolchain already present (python venv + pip + pipx + git + interpreter path) — nothing to do"
+if have_venv && have_pip && have_pipx && have_git; then
+    info "toolchain already present (python venv + pip + pipx + git) — nothing to do"
     exit 0
 fi
 
@@ -184,18 +99,13 @@ PY="$(command -v python3.12 || command -v python3 || true)"
 have_venv || die "python venv module still missing after install — check ${PY:-python3} and \`$(python_venv_hint)\`"
 have_pip || warn "python pip still not importable — bootstrap will bootstrap it via ensurepip"
 have_pipx || warn "pipx not on PATH after install — Hermes still installs into the managed venv; pipx is optional tooling"
-# git is load-bearing, not optional — `pip install git+...` (the very next
-# phase of provisioning) hard-requires it, so a still-missing/unusable git
-# here must die loudly with a remediation line rather than warn and let the
-# pip clone fail with the original opaque error three steps later (#1726,
-# #1727 review).
+# git is load-bearing, not optional — the release builder's very first step
+# fetches the pinned commit into its git mirror, so a still-missing/unusable
+# git here must die loudly with a remediation line rather than warn and let
+# the build fail three steps later (#1726, #1727 review).
 have_git || die "git still missing or not runnable after install — install it manually
 (e.g. \`$(pkg_install_cmd git 2>/dev/null || echo 'install git via your distro package manager')\`),
 then re-run \`hal0 agent install hermes\`."
-
-# hermes-agent's Python-version floor: ensure a usable interpreter path (system
-# 3.11-3.13, or uv for the managed fallback on a 3.14-only box).
-ensure_interpreter_path
 
 info "toolchain ready"
 exit 0

@@ -33,7 +33,7 @@ def test_installio_defaults_bind_real_seams() -> None:
     assert io.fetch_model_contexts is hp._fetch_model_contexts
     assert io.probe_mcp_server is hp._probe_mcp_server
     assert io.mcp_memory_call is hp._mcp_memory_call
-    assert io.install_venv is hp._install_venv
+    assert io.ensure_release is hp._ensure_release
     assert io.read_env_probe is hp._read_env_probe
     assert io.load_config is hp._load_hal0_config
     assert io.run is hp.subprocess.run

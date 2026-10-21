@@ -109,6 +109,16 @@ exit 0
 """
 
 
+# Stands in for ``${VENV_DIR}/bin/python`` (hal0's own venv) running the
+# gateway unit normaliser, ``-m hal0.agents.hermes_gateway_unit``. Exits with
+# $NORMALISE_RC (default 0) so a test can simulate a unit that still names a
+# release path.
+HAL0_PYTHON = r"""#!/bin/bash
+echo "python $*" >> "$CALLS"
+exit "${NORMALISE_RC:-0}"
+"""
+
+
 class Box:
     """A throwaway host: unit dir, stub binaries, recorded systemctl state."""
 
@@ -125,6 +135,10 @@ class Box:
             p = self.bin / name
             p.write_text(body)
             p.chmod(0o755)
+        self.hal0_venv = tmp / "hal0-venv"
+        (self.hal0_venv / "bin").mkdir(parents=True)
+        (self.hal0_venv / "bin" / "python").write_text(HAL0_PYTHON)
+        (self.hal0_venv / "bin" / "python").chmod(0o755)
         self.agent_unit = self.unit_dir / "hal0-agent@.service"
         self.agent_unit.write_text("[Unit]\n")
         repo = tmp / "repo" / "installer" / "systemd"
@@ -159,8 +173,9 @@ class Box:
         return self.calls.read_text().splitlines() if self.calls.exists() else []
 
     def run(
-        self, body: str, *, venv: str = "/usr/lib/hal0/venv"
+        self, body: str, *, venv: str | None = None, normalise_rc: int = 0
     ) -> subprocess.CompletedProcess[str]:
+        venv = venv or (str(self.hal0_venv) if body is HERMES_BLOCK else "/usr/lib/hal0/venv")
         prelude = (
             'info() { echo "INFO: $*"; }\nwarn() { echo "WARN: $*"; }\n'
             'wait_active() { systemctl is-active --quiet "$1"; }\n'
@@ -179,6 +194,7 @@ class Box:
             "UNIT_DIR": str(self.unit_dir),
             "VENV": str(self.venv),
             "HERMES_STUB": str(self.bin / "hermes"),
+            "NORMALISE_RC": str(normalise_rc),
         }
         env.pop("HAL0_SKIP_HERMES", None)
         return subprocess.run(
@@ -330,3 +346,41 @@ def test_gateway_fresh_install_enables(tmp_path: Path) -> None:
     assert "hal0 agent install hermes" in box.log()
     assert box.state_of("hermes-gateway.service") == "enabled"
     assert box.active("hermes-gateway.service")
+
+
+# ── gateway unit normaliser (ADR-0032 decision 12) ─────────────────────────
+
+
+def test_generator_run_is_followed_by_the_normaliser_before_enable(tmp_path: Path) -> None:
+    box = Box(tmp_path)
+    box.provisioned()
+    res = box.run(HERMES_BLOCK)
+    assert res.returncode == 0, res.stderr
+    log = box.log()
+    gen = next(i for i, c in enumerate(log) if c.startswith("hermes gateway install"))
+    norm = next(i for i, c in enumerate(log) if c == "python -m hal0.agents.hermes_gateway_unit")
+    enable = next(i for i, c in enumerate(log) if c == "enable --now hermes-gateway.service")
+    assert gen < norm < enable
+    assert box.state_of("hermes-gateway.service") == "enabled"
+
+
+def test_a_unit_left_naming_a_release_path_stays_disabled(tmp_path: Path) -> None:
+    box = Box(tmp_path)
+    box.provisioned()
+    res = box.run(HERMES_BLOCK, normalise_rc=2)
+    assert res.returncode == 0, res.stderr
+    assert "still names a release path" in res.stdout
+    assert box.state_of("hermes-gateway.service") == "disabled"
+    assert not box.active("hermes-gateway.service")
+    assert "enable --now hermes-gateway.service" not in box.log()
+
+
+def test_a_disabled_but_running_gateway_survives_a_failed_normalise(tmp_path: Path) -> None:
+    box = Box(tmp_path)
+    box.provisioned()
+    box.set_state("hermes-gateway.service", "disabled", active=True)
+    (box.unit_dir / "hermes-gateway.service").write_text("[Unit]\n")
+    res = box.run(HERMES_BLOCK, normalise_rc=2)
+    assert res.returncode == 0, res.stderr
+    assert box.active("hermes-gateway.service")
+    assert "disable --now hermes-gateway.service" not in box.log()

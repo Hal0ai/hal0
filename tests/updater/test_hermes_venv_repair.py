@@ -13,19 +13,19 @@ Measured on ct150 during the rc.12 lane: header quoted by the #2090 pass, and
 (``hal0 agent reprovision hermes --repair``) but nothing named it.
 
 So the capability check belongs beside the header repair, in the sequence both
-upgrade paths already converge on.
+upgrade paths already converge on. The cure is a fresh release of the live
+ref through the one release builder (ADR-0032 decision 6), never an in-place
+install; the update never waits for the builder lock.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
 from hal0.agents import hermes_provision as hp
-from hal0.system.seam import SEAM_BIN
 from hal0.updater.updater import repair_hermes_mcp_client
 
 
@@ -53,56 +53,89 @@ BROKEN = {
 }
 
 
-def test_reinstalls_the_venv_when_its_mcp_client_cannot_import(
+from hal0.agents import hermes_release as rel  # noqa: E402
+
+
+class _Ensure:
+    """Stands in for ``hermes_release.ensure_release`` and records its kwargs."""
+
+    def __init__(self, outcome: rel.ReleaseOutcome | None = None, exc: Exception | None = None):
+        self.calls: list[dict[str, Any]] = []
+        self.outcome = outcome or rel.ReleaseOutcome(status="activated", release_id="r1")
+        self.exc = exc
+
+    def __call__(self, **kw: Any) -> rel.ReleaseOutcome:
+        self.calls.append(kw)
+        if self.exc is not None:
+            raise self.exc
+        return self.outcome
+
+
+def test_rebuilds_a_release_when_its_mcp_client_cannot_import(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     venv = _venv(tmp_path)
-    installs: list[tuple[Path, Path]] = []
     probes: list[Path] = []
-
-    def _install(target: Path, requirements: Path, **_kw: Any) -> None:
-        installs.append((target, requirements))
-
+    ensure = _Ensure()
     monkeypatch.setattr(hp, "_probe_mcp_client", _probe([BROKEN, OK], probes))
-    monkeypatch.setattr(hp, "_install_venv", _install)
+    monkeypatch.setattr(rel, "ensure_release", ensure)
 
-    repaired = repair_hermes_mcp_client(venv=venv, restart_gateway=False)
-
-    assert repaired is True
-    assert [target for target, _ in installs] == [venv]
-    assert installs[0][1] == hp.HERMES_REQUIREMENTS
+    assert repair_hermes_mcp_client(venv=venv, restart_gateway=False) is True
+    [kw] = ensure.calls
+    assert kw["venv"] == venv
+    assert kw["force"] is True, "a repair is a fresh release of the live ref"
+    assert kw["wait"] is False, "hal0 update never waits for the builder lock"
+    assert kw["caller"] == "repair"
+    assert isinstance(kw["units"], rel.NoUnits)
     # Probed before repairing, then again to prove the repair took.
     assert probes == [venv / "bin" / "python", venv / "bin" / "python"]
 
 
+def test_units_are_managed_by_activation_when_restart_gateway(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With restart_gateway the builder's default unit controller is used.
+
+    Activation records which units were active, stops only those, and starts
+    only those again, so a gateway the operator stopped or disabled is never
+    started (#2822/#2823); as hal0 it goes through the seam (#2828). Those
+    invariants are tested against ``activate_release`` in
+    tests/agents/test_hermes_release.py.
+    """
+    venv = _venv(tmp_path)
+    ensure = _Ensure()
+    monkeypatch.setattr(hp, "_probe_mcp_client", _probe([BROKEN, OK], []))
+    monkeypatch.setattr(rel, "ensure_release", ensure)
+    assert repair_hermes_mcp_client(venv=venv, restart_gateway=True) is True
+    assert ensure.calls[0]["units"] is None
+
+
 def test_a_working_client_is_left_alone(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     venv = _venv(tmp_path)
-    installs: list[Path] = []
-
+    ensure = _Ensure()
     monkeypatch.setattr(hp, "_probe_mcp_client", _probe([OK], []))
-    monkeypatch.setattr(hp, "_install_venv", lambda target, _req, **_kw: installs.append(target))
+    monkeypatch.setattr(rel, "ensure_release", ensure)
 
     assert repair_hermes_mcp_client(venv=venv, restart_gateway=False) is False
-    assert installs == []
+    assert ensure.calls == []
 
 
 def test_reports_without_installing_when_repair_is_disabled(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The boot-time safety net diagnoses; it must not pip-install at startup.
+    """The boot-time safety net diagnoses; it must not build at startup.
 
     ``check_outstanding_migrations`` runs on every ``hal0-api`` boot, including
-    crash-restarts. A network install there would put an unbounded, failing
-    pip run in the startup path of a box that is already unhealthy.
+    crash-restarts. A network build there would put an unbounded, failing
+    install in the startup path of a box that is already unhealthy.
     """
     venv = _venv(tmp_path)
-    installs: list[Path] = []
-
+    ensure = _Ensure()
     monkeypatch.setattr(hp, "_probe_mcp_client", _probe([BROKEN], []))
-    monkeypatch.setattr(hp, "_install_venv", lambda target, _req, **_kw: installs.append(target))
+    monkeypatch.setattr(rel, "ensure_release", ensure)
 
     assert repair_hermes_mcp_client(venv=venv, install=False, restart_gateway=False) is False
-    assert installs == []
+    assert ensure.calls == []
 
 
 def test_absent_venv_is_a_quiet_no_op(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -114,100 +147,56 @@ def test_absent_venv_is_a_quiet_no_op(tmp_path: Path, monkeypatch: pytest.Monkey
     assert probed == []
 
 
-def test_a_failed_reinstall_does_not_raise(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """pip can fail (no network, resolver conflict) — an update must survive it."""
-    venv = _venv(tmp_path)
-
-    def _boom(*_a: Any, **_kw: Any) -> None:
-        raise RuntimeError("pip exploded")
-
-    monkeypatch.setattr(hp, "_probe_mcp_client", _probe([BROKEN], []))
-    monkeypatch.setattr(hp, "_install_venv", _boom)
-
-    assert repair_hermes_mcp_client(venv=venv, restart_gateway=False) is False
-
-
-def test_a_reinstall_that_does_not_heal_reports_false(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("status", ["build_failed", "activation_failed", "offline"])
+def test_a_failed_rebuild_does_not_raise(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, status: str
 ) -> None:
-    """Only a re-probe proves the repair worked — pip exiting 0 does not."""
+    """A build can fail (no network, resolver conflict) — an update must survive it."""
     venv = _venv(tmp_path)
-
     monkeypatch.setattr(hp, "_probe_mcp_client", _probe([BROKEN], []))
-    monkeypatch.setattr(hp, "_install_venv", lambda *_a, **_kw: None)
-
-    assert repair_hermes_mcp_client(venv=venv, restart_gateway=False) is False
-
-
-def test_gateway_bounce_uses_try_restart_so_a_stopped_unit_stays_stopped(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """#2822: ``restart`` would start a gateway the operator disabled."""
-    venv = _venv(tmp_path)
-    calls: list[list[str]] = []
-
-    def _run(cmd: list[str], **_kw: Any) -> Any:
-        calls.append(list(cmd))
-        return SimpleNamespace(returncode=0, stdout="", stderr="")
-
-    monkeypatch.setattr(hp, "_probe_mcp_client", _probe([BROKEN, OK], []))
-    monkeypatch.setattr(hp, "_install_venv", lambda *a, **k: None)
-    monkeypatch.setattr("hal0.updater.updater.subprocess.run", _run)
-    monkeypatch.setattr("hal0.updater.updater.os.geteuid", lambda: 0)
-
-    assert repair_hermes_mcp_client(venv=venv, restart_gateway=True) is True
-    assert calls == [["systemctl", "try-restart", "hermes-gateway.service"]]
-
-
-def _bounce(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    *,
-    euid: int,
-    rc: int = 0,
-    stderr: str = "",
-) -> tuple[list[list[str]], list[tuple[str, dict[str, Any]]]]:
-    venv = _venv(tmp_path)
-    calls: list[list[str]] = []
-    warnings: list[tuple[str, dict[str, Any]]] = []
-
-    def _run(cmd: list[str], **_kw: Any) -> Any:
-        calls.append(list(cmd))
-        return SimpleNamespace(returncode=rc, stdout="", stderr=stderr)
-
-    monkeypatch.setattr(hp, "_probe_mcp_client", _probe([BROKEN, OK], []))
-    monkeypatch.setattr(hp, "_install_venv", lambda *a, **k: None)
-    monkeypatch.setattr("hal0.updater.updater.subprocess.run", _run)
-    monkeypatch.setattr("hal0.updater.updater.os.geteuid", lambda: euid)
     monkeypatch.setattr(
-        "hal0.updater.updater.log.warning",
-        lambda event, **kw: (
-            warnings.append((event, kw))
-            if event == "updater.hermes_gateway_bounce_failed"
-            else None
-        ),
+        rel, "ensure_release", _Ensure(rel.ReleaseOutcome(status=status, error="boom"))
     )
-    assert repair_hermes_mcp_client(venv=venv, restart_gateway=True) is True
-    return calls, warnings
+    assert repair_hermes_mcp_client(venv=venv, restart_gateway=False) is False
 
 
-def test_gateway_bounce_non_root_goes_through_the_seam(
+def test_a_held_builder_lock_is_busy_and_retried_next_update(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """#2828: the hal0 user cannot run bare systemctl; it must use sudo -n + seam."""
-    calls, warnings = _bounce(tmp_path, monkeypatch, euid=1000)
-    assert calls == [["sudo", "-n", SEAM_BIN, "svc-try-restart", "hermes-gateway"]]
-    assert warnings == []
+    venv = _venv(tmp_path)
+    warnings: list[tuple[str, dict[str, Any]]] = []
+    holder = {"pid": 77, "caller": "provision", "started_at": "2026-10-21T00:00:00Z"}
+    monkeypatch.setattr(hp, "_probe_mcp_client", _probe([BROKEN], []))
+    monkeypatch.setattr(
+        rel, "ensure_release", _Ensure(rel.ReleaseOutcome(status="busy", holder=holder))
+    )
+    monkeypatch.setattr(
+        "hal0.updater.updater.log.warning", lambda event, **kw: warnings.append((event, kw))
+    )
+    assert repair_hermes_mcp_client(venv=venv, restart_gateway=False) is False
+    assert (
+        "components.hermes_busy",
+        {
+            "job_id": None,
+            "holder_pid": 77,
+            "holder_caller": "provision",
+            "holder_since": "2026-10-21T00:00:00Z",
+        },
+    ) in warnings
 
 
-def test_gateway_bounce_nonzero_rc_warns_with_trimmed_stderr(
+def test_a_rebuild_that_does_not_heal_reports_false(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """#2828: a non-zero exit is logged, not silently dropped."""
-    _, warnings = _bounce(tmp_path, monkeypatch, euid=1000, rc=1, stderr="  boom\n" + "x" * 900)
-    assert len(warnings) == 1
-    event, kw = warnings[0]
-    assert event == "updater.hermes_gateway_bounce_failed"
-    assert kw["rc"] == 1
-    assert kw["stderr"].startswith("boom")
-    assert len(kw["stderr"]) == 500
+    """Only a re-probe proves the repair worked — the builder's verdict does not."""
+    venv = _venv(tmp_path)
+    monkeypatch.setattr(hp, "_probe_mcp_client", _probe([BROKEN], []))
+    monkeypatch.setattr(rel, "ensure_release", _Ensure())
+    assert repair_hermes_mcp_client(venv=venv, restart_gateway=False) is False
+
+
+def test_updater_venv_path_matches_the_layout_constant() -> None:
+    from hal0.agents.hermes_layout import HERMES_VENV_PATH
+    from hal0.updater import updater
+
+    assert updater.HERMES_VENV_PATH == HERMES_VENV_PATH

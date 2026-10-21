@@ -11,9 +11,15 @@ import structlog
 from hal0.components.registry import COMPONENTS
 from hal0.components.state import load_component_state
 
-_FAILURE_STATUSES = frozenset({"build_failed", "snapshot_failed", "rolled_back"})
+# Keep in step with hal0.components.runner._FAILURE_STATUSES. ``busy`` (the
+# Hermes builder lock was held) is deliberately absent: it is not a failure,
+# so a row whose last result is ``busy`` derives from installed vs pinned and
+# reads ``pending`` while the live ref still differs (ADR-0032 decision 6).
+_FAILURE_STATUSES = frozenset(
+    {"build_failed", "snapshot_failed", "rolled_back", "activation_failed"}
+)
 _PENDING_STATUSES = frozenset(
-    {"pending", "stale", "build_failed", "snapshot_failed", "rolled_back"}
+    {"pending", "stale", "build_failed", "snapshot_failed", "rolled_back", "activation_failed"}
 )
 
 log = structlog.get_logger(__name__)
@@ -39,6 +45,12 @@ def _resolve(fn: Callable[[], Any]) -> Callable[[], Any]:
     if module is not None and name is not None and hasattr(module, name):
         return getattr(module, name)
     return fn
+
+
+def _hermes_needs_build() -> bool:
+    from hal0.components.hermes_arm import hermes_build_trigger
+
+    return hermes_build_trigger() is not None
 
 
 def _pin_label(component_id: str) -> str | None:
@@ -69,6 +81,14 @@ def component_status_snapshot() -> dict[str, Any]:
             derived = last["status"]
         elif installed is None:
             derived = "not-installed"
+        elif last.get("status") == "busy":
+            # The last pass found the Hermes builder lock held and did not
+            # run: not a failure, but not confirmed converged either.
+            derived = "pending"
+        elif installed == pinned and comp.id == "hermes" and _hermes_needs_build():
+            # A pre-layout host's stamp already equals the pin, but the next
+            # update still has to migrate it (ADR-0032 decision 6).
+            derived = "pending"
         elif installed == pinned:
             derived = "converged"
         else:

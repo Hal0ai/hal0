@@ -778,13 +778,12 @@ preflight_container_runtime() {
 # Back-compat alias: older docs / `hal0 doctor` builds call preflight_docker.
 preflight_docker() { preflight_container_runtime "$@"; }
 
-# git — Hermes agent provisioning runs `pip install
-# git+https://github.com/NousResearch/hermes-agent.git@<rev>`, which pip
-# implements by shelling out to `git clone`. A stock minimal distro image
+# git — the Hermes release builder (ADR-0032) fetches the pinned
+# hermes-agent commit into a bare mirror under /var/lib/hal0/hermes and adds
+# a worktree per release, all with `git`. A stock minimal distro image
 # (fresh Ubuntu 24.04 LXC/cloud template, no git preinstalled) doesn't ship
-# it, so that pip install dies with "ERROR: Cannot find command 'git'" deep
-# inside the Hermes toolchain step (#1726) unless something checks for it
-# first. Two modes, mirroring preflight_container_runtime/preflight_venv:
+# it, so the build dies at its fetch step deep inside the Hermes toolchain
+# step (#1726) unless something checks for it first. Two modes, mirroring preflight_container_runtime/preflight_venv:
 #
 #   HAL0_GIT_REQUIRED=1 (install.sh sets this immediately before the Hermes
 #     provisioning step) — auto-install git via the detected package
@@ -793,7 +792,7 @@ preflight_docker() { preflight_container_runtime "$@"; }
 #     (install.sh treats it the same as any other Hermes provisioning
 #     failure — non-fatal to the overall install, per #1584's established
 #     graceful-degradation pattern — but the message is specific to git
-#     instead of being buried in pip's clone-failure noise).
+#     instead of being buried in the build's fetch-failure noise).
 #
 #   Unset (default, e.g. `hal0 doctor` / preflight_all) — soft: warn +
 #     return 1 so a read-only report finishes without mutating the system.
@@ -801,8 +800,8 @@ preflight_docker() { preflight_container_runtime "$@"; }
 # Codex review (#1727): `command -v git` only proves a `git` file resolves
 # on PATH, not that it runs — a non-executable file (permissions drift, a
 # half-finished package install) still resolves via `command -v` and would
-# have reported success right up until pip's own `git clone` failed with
-# the original error. `git --version` is the actual functional probe: it
+# have reported success right up until the builder's own `git fetch` failed
+# with the original error. `git --version` is the actual functional probe: it
 # both resolves the binary AND proves the OS will exec it.
 _git_usable() {
     git --version >/dev/null 2>&1
@@ -815,7 +814,7 @@ preflight_git() {
     fi
 
     if [[ "${HAL0_GIT_REQUIRED:-0}" != "1" ]]; then
-        warn "git not found or not runnable — Hermes agent provisioning (pip install git+...) will fail until it's installed"
+        warn "git not found or not runnable — Hermes agent provisioning (the release builder's git mirror) will fail until it's installed"
         return 1
     fi
 

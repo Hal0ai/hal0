@@ -45,6 +45,11 @@ describe('pendingCount', () => {
 
 describe('RETRYABLE_STATUSES', () => {
   it('retry only on failures, never on pending (spec §4)', () => {
-    expect(RETRYABLE_STATUSES).toEqual(['build_failed', 'snapshot_failed', 'rolled_back'])
+    expect(RETRYABLE_STATUSES).toEqual([
+      'build_failed',
+      'snapshot_failed',
+      'rolled_back',
+      'activation_failed',
+    ])
   })
 })

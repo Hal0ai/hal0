@@ -178,8 +178,9 @@ def _install_hermes(
     1. **Toolchain** — ``installer/agents/hermes-prereqs.sh`` ensures
        python3 (>=3.11), python3-venv (the clean-Ubuntu trap), python3-pip
        and pipx via the distro helper. Idempotent.
-    2. **Provision** — the bootstrap pipeline creates the venv,
-       pip-installs hermes-agent into it, installs the
+    2. **Provision** — the bootstrap pipeline builds a Hermes release
+       (a checkout of the vetted commit plus an editable venv under
+       ``/var/lib/hal0/hermes``, ADR-0032), installs the
        ``/usr/local/bin/hermes`` shim, and writes the manager seed
        (registers the agent).
     3. **Reset personas** — (``reset_personas=True``, opt-in) force-overwrite
@@ -232,7 +233,7 @@ def _install_hermes(
             f"[yellow]prereq script missing at {prereqs}; assuming toolchain present.[/yellow]"
         )
 
-    console.print("[bold]Provisioning Hermes[/bold] → /var/lib/hal0/venvs/hermes …")
+    console.print("[bold]Provisioning Hermes[/bold] → /var/lib/hal0/hermes (release layout) …")
     # §7.4: when invoked as root this drops to the hal0 user so every HERMES_HOME
     # write is born hal0:hal0 (root-only prelude + re-exec). Non-root runs the
     # pipeline in-process. See _provision_hermes.
@@ -275,7 +276,7 @@ def _install_hermes(
     console.print(
         Panel(
             "[bold green]Installed[/bold green] hermes  "
-            "[dim](managed venv: /var/lib/hal0/venvs/hermes)[/dim]",
+            "[dim](live release: /var/lib/hal0/hermes/current)[/dim]",
             border_style="green",
         )
     )
@@ -453,9 +454,15 @@ def _enforce_hermes_single_pick(*, switch: bool) -> None:
 # The agent unit runs as this user (User= in installer/systemd/hal0-agent@.service).
 _AGENT_RUNTIME_USER = "hal0"
 # Trees the bootstrap creates as the installing user that the agent must own to
-# run: the venv (exec), HERMES_HOME (read+write at runtime), bootstrap state.
+# run: the venv link (exec), the release tree it points into (which also holds
+# the uv-managed interpreters and uv's cache), HERMES_HOME (read+write at
+# runtime), bootstrap state. The venv path is a symlink after the first
+# migration; the write probe follows it into the live release, and the release
+# root is probed in its own right. The pre-layout /var/lib/hal0/python is not
+# listed: it is root-owned on existing hosts and builds never write it.
 _HERMES_AGENT_TREES = (
     "/var/lib/hal0/venvs/hermes",
+    "/var/lib/hal0/hermes",
     "/var/lib/hal0/.hermes",
     "/var/lib/hal0/state/agents/hermes",
 )
@@ -516,6 +523,129 @@ def _ensure_hermes_writable_or_die() -> None:
 # caller runs the pipeline in-process unchanged.
 
 
+#: hal0-owned setgid directories the root prelude creates before it resolves
+#: the interpreter (ADR-0032 decision 5): a uv fetch must land in a tree hal0
+#: already owns. uv's interpreters and cache live under /var/lib/hal0/hermes.
+_HERMES_PRELUDE_DIRS = (
+    "/var/lib/hal0",
+    "/var/lib/hal0/venvs",
+    "/var/lib/hal0/hermes",
+    "/var/lib/hal0/state",
+    "/var/lib/hal0/state/agents",
+)
+
+
+def _ensure_hermes_prelude_dirs() -> None:
+    """Create the hal0-owned setgid parents of every Hermes tree (root only)."""
+    import os as _os
+    import pwd as _pwd
+    from pathlib import Path as _Path
+
+    try:
+        ent = _pwd.getpwnam(_AGENT_RUNTIME_USER)
+    except KeyError:
+        # No hal0 user (dev/rootless layout) — nothing to pre-own.
+        return
+    # The hal0-owned parents; the provisioner creates its leaves (.hermes,
+    # the venvs/hermes link, the releases, state/agents/hermes) under these as
+    # hal0 → born hal0:hal0. /var/lib/hal0/hermes holds the release tree, the
+    # uv-managed interpreters and uv's cache (ADR-0032 decision 5, ADR-0034
+    # decision 2 amendment).
+    # A symlink here is left alone: chown/chmod would act on its target.
+    for d in _HERMES_PRELUDE_DIRS:
+        p = _Path(d)
+        if p.is_symlink():
+            console.print(f"[dim]hermes prelude: {d} is a symlink; left as is[/dim]")
+            continue
+        try:
+            p.mkdir(parents=True, exist_ok=True)
+            _os.chown(p, ent.pw_uid, ent.pw_gid)
+            p.chmod(0o2775)
+        except OSError as exc:
+            # Best-effort: `doctor perms --fix` (install.sh) is the authority for
+            # this skeleton, so a gap here usually surfaces downstream as a loud
+            # "venv install failed". Surface a hint for diagnosability rather than
+            # failing the whole install on a single dir.
+            console.print(f"[dim]hermes prelude: could not pre-own {d}: {exc}[/dim]")
+
+
+def _hand_uv_trees_to_hal0(roots: tuple[Any, ...] | None = None) -> None:
+    """``lchown`` the builder's uv interpreter and cache trees to hal0 (root only).
+
+    Walks without following symlinks, so nothing outside the trees changes.
+    """
+    import os as _os
+    import pwd as _pwd
+
+    from hal0.agents.hermes_layout import HERMES_PYTHON_ROOT, HERMES_UV_CACHE
+
+    try:
+        ent = _pwd.getpwnam(_AGENT_RUNTIME_USER)
+    except KeyError:
+        return
+    for root in roots if roots is not None else (HERMES_PYTHON_ROOT, HERMES_UV_CACHE):
+        if root.is_symlink() or not root.is_dir():
+            continue
+        try:
+            _os.lchown(root, ent.pw_uid, ent.pw_gid)
+            for dirpath, dirnames, filenames in _os.walk(root, followlinks=False):
+                for name in (*dirnames, *filenames):
+                    _os.lchown(_os.path.join(dirpath, name), ent.pw_uid, ent.pw_gid)
+        except OSError as exc:
+            console.print(f"[dim]hermes prelude: could not hand {root} to hal0: {exc}[/dim]")
+
+
+def _cleanup_pre_layout_python() -> bool:
+    """Remove the pre-layout /var/lib/hal0/python once nothing uses it (root only).
+
+    It is root-owned on existing hosts, so only a root path may remove it, and
+    only once no release, pre-layout venv, or ``HAL0_HERMES_PYTHON`` value (this
+    process' or the persisted one) names an interpreter in it.
+    """
+    import os as _os
+
+    from hal0.agents.hermes_layout import (
+        HERMES_VENV_PATH,
+        LEGACY_PYTHON_ROOT,
+        remove_legacy_python_if_unused,
+    )
+    from hal0.agents.hermes_provision import _read_hermes_python_env
+
+    try:
+        persisted = _read_hermes_python_env() or ""
+    except (ValueError, OSError, UnicodeDecodeError):
+        persisted = ""
+    prefix = f"{LEGACY_PYTHON_ROOT}/"
+    for value in (_os.environ.get("HAL0_HERMES_PYTHON", ""), persisted):
+        if value.startswith(prefix):
+            return False
+    if remove_legacy_python_if_unused(HERMES_VENV_PATH, legacy_root=LEGACY_PYTHON_ROOT):
+        console.print("[dim]removed the unused pre-layout /var/lib/hal0/python[/dim]")
+        return True
+    return False
+
+
+def _hand_pre_layout_venv_to_hal0() -> None:
+    """``lchown`` a real-directory (pre-layout) venvs/hermes to hal0 when it isn't."""
+    import pwd as _pwd
+
+    from hal0.agents.hermes_layout import HERMES_VENV_PATH
+
+    venv = HERMES_VENV_PATH
+    if venv.is_symlink() or not venv.is_dir():
+        return
+    try:
+        uid = _pwd.getpwnam(_AGENT_RUNTIME_USER).pw_uid
+    except KeyError:
+        return
+    try:
+        if venv.stat().st_uid == uid and venv.parent.stat().st_uid == uid:
+            return
+    except OSError:
+        return
+    _hand_uv_trees_to_hal0((venv,))
+
+
 def _hermes_root_prelude(terminal_env: dict[str, str] | None = None) -> None:
     """Root-only prep run before dropping provisioning to hal0 (§7.4).
 
@@ -525,8 +655,6 @@ def _hermes_root_prelude(terminal_env: dict[str, str] | None = None) -> None:
     land born-owned. Idempotent; the caller only invokes it when ``euid == 0``.
     """
     import os as _os
-    import pwd as _pwd
-    from pathlib import Path as _Path
 
     from hal0.agents.hermes_provision import (
         REPO_ROOT_FOR_INSTALLER,
@@ -540,6 +668,16 @@ def _hermes_root_prelude(terminal_env: dict[str, str] | None = None) -> None:
     # runs as hal0 after the re-exec, so it must happen here, before the drop.
     sweep_stale_agent_dropins_as_root()
 
+    # Before the interpreter is resolved: a uv fetch writes
+    # /var/lib/hal0/hermes/python and must find its parent hal0-owned
+    # (ADR-0032 decision 5).
+    _ensure_hermes_prelude_dirs()
+    # A pre-layout venv left root-owned by a provision from before §7.4 cannot
+    # be renamed into the release layout by the hal0 builder (a directory
+    # moving to a new parent needs write permission on itself). Hand it to
+    # hal0 here, as root, so the first migration can move it.
+    _hand_pre_layout_venv_to_hal0()
+
     try:
         hermes_python = resolve_hermes_python()
         _persist_hermes_python(hermes_python)
@@ -547,6 +685,13 @@ def _hermes_root_prelude(terminal_env: dict[str, str] | None = None) -> None:
     except (RuntimeError, ValueError) as exc:
         console.print(f"[yellow]hermes Python 3.12 resolver hint:[/yellow] {exc}")
         raise
+    finally:
+        # A uv fetch run here, as root, writes root-owned files into the
+        # builder's hal0-owned tree; hand them back so the hal0 builder can
+        # prune them later.
+        _hand_uv_trees_to_hal0()
+
+    _cleanup_pre_layout_python()
 
     wrapper_src = REPO_ROOT_FOR_INSTALLER / "installer" / "wrappers" / "hermes"
     if wrapper_src.is_file():
@@ -580,31 +725,6 @@ def _hermes_root_prelude(terminal_env: dict[str, str] | None = None) -> None:
             "[yellow]Hermes terminal tool ENABLED — the agent will be able to run "
             "commands as the hal0 user, which is root-equivalent on this box.[/yellow]"
         )
-
-    try:
-        ent = _pwd.getpwnam(_AGENT_RUNTIME_USER)
-    except KeyError:
-        # No hal0 user (dev/rootless layout) — nothing to pre-own.
-        return
-    # The hal0-owned parents; the provisioner creates its leaves (.hermes,
-    # venvs/hermes, state/agents/hermes) under these as hal0 → born hal0:hal0.
-    for d in (
-        "/var/lib/hal0",
-        "/var/lib/hal0/venvs",
-        "/var/lib/hal0/state",
-        "/var/lib/hal0/state/agents",
-    ):
-        p = _Path(d)
-        try:
-            p.mkdir(parents=True, exist_ok=True)
-            _os.chown(p, ent.pw_uid, ent.pw_gid)
-            p.chmod(0o2775)
-        except OSError as exc:
-            # Best-effort: `doctor perms --fix` (install.sh) is the authority for
-            # this skeleton, so a gap here usually surfaces downstream as a loud
-            # "venv install failed". Surface a hint for diagnosability rather than
-            # failing the whole install on a single dir.
-            console.print(f"[dim]hermes prelude: could not pre-own {d}: {exc}[/dim]")
 
 
 def _agent_home() -> str:
@@ -694,6 +814,7 @@ def _provision_hermes(
     offline: bool = False,
     verbose: bool = False,
     terminal_tool: bool | None = None,
+    ref: str | None = None,
 ) -> int:
     """Run the Hermes bootstrap pipeline, dropping to hal0 first when root (§7.4).
 
@@ -705,6 +826,11 @@ def _provision_hermes(
     opt-in (``None`` = not asked → the provisioner's default-off / preserve-
     existing rule). It travels as ``HAL0_HERMES_TERMINAL`` because the
     provisioning that consumes it runs in a re-exec'd, privilege-dropped child.
+
+    ``ref`` builds a vetted ref other than the pin (``hal0 agent upgrade
+    hermes --to``); it travels as the hidden ``--ref`` flag of the re-exec.
+    ``offline`` travels as ``--offline``, which sets ``HAL0_HERMES_OFFLINE`` in
+    the child, where the release builder reads it.
     """
     import os as _os
 
@@ -725,9 +851,14 @@ def _provision_hermes(
         # process' env would outlive the call and colour a later one.
         previous = _os.environ.get(HERMES_TERMINAL_ENV)
         _os.environ.update(provision_env)
+        previous_offline = _os.environ.get("HAL0_HERMES_OFFLINE")
+        if offline:
+            _os.environ["HAL0_HERMES_OFFLINE"] = "1"
         try:
-            rc = bootstrap_cli(repair=repair, verbose=verbose)
+            rc = bootstrap_cli(repair=repair, verbose=verbose, ref=ref)
         finally:
+            if offline and previous_offline is None:
+                _os.environ.pop("HAL0_HERMES_OFFLINE", None)
             if provision_env:
                 if previous is None:
                     _os.environ.pop(HERMES_TERMINAL_ENV, None)
@@ -742,6 +873,8 @@ def _provision_hermes(
             argv.append("--repair")
         if offline:
             argv.append("--offline")
+        if ref:
+            argv += ["--ref", ref]
         if verbose:
             argv.append("--verbose")
         rc = _run_as_hal0(argv, extra_env=provision_env)
@@ -865,6 +998,38 @@ def _gateway_left_off_note(unit: str, state: str) -> None:
     console.print(f"[yellow]{unit} is {state}; left as is (run '{turn_on}' to turn it on)[/yellow]")
 
 
+def _normalise_gateway_unit_or_warn(has_systemctl: bool, *, turn_off: bool = True) -> bool:
+    """Run the gateway unit normaliser; on failure warn and leave the unit off.
+
+    Returns ``True`` when the unit names only stable paths. A unit that still
+    names a release path is disabled and stopped, the same posture this command
+    takes when the generator itself fails, because that release can be pruned
+    from under it.
+    """
+    import subprocess as _subprocess
+    from pathlib import Path as _Path
+
+    from hal0.agents.hermes_gateway_unit import normalise_gateway_unit
+
+    result = normalise_gateway_unit(_Path(_HERMES_GATEWAY_UNIT), reload=has_systemctl)
+    if result.ok:
+        if result.changed:
+            console.print(
+                "[dim]hermes-gateway unit normalised to /var/lib/hal0/hermes/current/[/dim]"
+            )
+        return True
+    detail = result.error or "; ".join(result.remaining)
+    console.print(
+        f"[yellow]hermes-gateway unit could not be normalised ({detail}) — leaving the "
+        "gateway disabled. Re-run `sudo hal0 agent install hermes`.[/yellow]"
+    )
+    if has_systemctl and turn_off:
+        _subprocess.run(  # nosec B603 B607 — fixed argv
+            ["systemctl", "disable", "--now", "hermes-gateway.service"], check=False
+        )
+    return False
+
+
 def _install_hermes_gateway() -> None:
     """`hermes gateway install --system --run-as-user hal0` + enable the unit.
 
@@ -967,6 +1132,17 @@ def _install_hermes_gateway() -> None:
             "[yellow]hermes gateway install failed — Telegram/Discord bridge "
             "unavailable; continuing.[/yellow]"
         )
+
+    # ADR-0032 decision 12: the generator bakes the release path it ran from
+    # (/var/lib/hal0/hermes/releases/<id>/…) into the unit. Rewrite it to the
+    # stable current/ path straight after the generator and before any enable,
+    # or the next activation's prune would delete what the gateway runs from.
+    # A gateway the operator disabled is only warned about, never stopped here
+    # (#2815): the disabled branch below keeps its own posture.
+    # Run even when the generator failed: a unit left from an earlier run can
+    # still name a release path, and enabling it would pin the gateway there.
+    if not _normalise_gateway_unit_or_warn(has_systemctl, turn_off=not disabled):
+        return
 
     if disabled:
         # Operator turned it off: refresh done, enable skipped. A disabled but
@@ -1716,9 +1892,17 @@ def bootstrap_hermes(
     offline: bool = typer.Option(
         False,
         "--offline",
-        help="Assume hermes-agent wheel is pre-staged; preflight skips PyPI check.",
+        help=(
+            "Never build a Hermes release. When a build is needed the install step "
+            "fails and names the step that needs the network; a running host keeps "
+            "its live release."
+        ),
     ),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Verbose phase log."),
+    # Internal: `hal0 agent upgrade hermes --to=<sha>` re-execs this command as
+    # hal0 with the vetted ref it validated. Hidden, and validated again by the
+    # builder (VETTED_HERMES_REFS), so it is never a way around the freeze.
+    ref: str | None = typer.Option(None, "--ref", hidden=True),
 ) -> None:
     """Run the Hermes-Agent install — one linear convergent pass."""
     # Late import keeps the CLI startup snappy on hosts where the
@@ -1738,10 +1922,11 @@ def bootstrap_hermes(
         )
         raise typer.Exit(2)
     if offline:
+        # Read by the release builder (hermes_provision._phase_install, #2838).
         _os.environ["HAL0_HERMES_OFFLINE"] = "1"
     # §7.4: drops to hal0 first when invoked as root (re-execs this same command
     # as hal0), else runs the pipeline in-process. See _provision_hermes.
-    rc = _provision_hermes(repair=repair, offline=offline, verbose=verbose)
+    rc = _provision_hermes(repair=repair, offline=offline, verbose=verbose, ref=ref)
     raise typer.Exit(rc)
 
 
@@ -1892,38 +2077,44 @@ def agent_log(
 def agent_upgrade(
     name: str = typer.Argument("hermes", help="Bundled agent name."),
     to: str | None = typer.Option(
-        None, "--to", help="Pin to a specific version (power-user / compat-testing flag)."
+        None,
+        "--to",
+        help=(
+            "Build a vetted commit other than the pin: a full 40-hex sha listed in "
+            "VETTED_HERMES_REFS. Lasts until the next `hal0 update`, which converges "
+            "back to the pin."
+        ),
     ),
 ) -> None:
-    """Upgrade Hermes to the latest matching release, then reprovision.
+    """Build and activate a fresh Hermes release of the pin (or ``--to=<sha>``).
 
-    Pulls the newest ``hermes-agent`` within the requirements floor/cap (or the
-    exact ``--to=<version>``), runs ``hermes config migrate`` so the config
-    schema matches the new build, then re-runs bootstrap to re-render hal0's
-    config keys and reconcile ownership. No hard pin blocks the update — hermes
-    owns + migrates its own config; hal0 layers its keys on top.
+    Goes through the same release builder as install and ``hal0 update``
+    (ADR-0032 decision 6): a new release directory, ``hermes config migrate``
+    from the new release, a re-verify, and an automatic flip-back to the
+    previous release on failure. A version string or an ``==X.Y.Z`` spec is
+    refused. As root, provisioning drops to the hal0 user like every other
+    entry point.
     """
     if name != "hermes":
         die(f"upgrade currently only supports `hermes`; got {name!r}.")
         return
-    import subprocess as _subprocess  # nosec B404 — known argv
+    from hal0.agents.hermes_release import ReleaseError, require_vetted
 
-    from hal0.agents.hermes_provision import upgrade_hermes_runtime
-
-    ok, msg = upgrade_hermes_runtime(version=to)
-    if not ok:
-        console.print(f"[red]✗[/red]  {msg}")
-        raise typer.Exit(1)
-    console.print(f"[green]✓[/green]  {msg}")
-
-    # Reprovision: re-render hal0's config keys against the new build and
-    # re-chown the venv + HERMES_HOME back to the hal0 service user (pip ran as
-    # the invoking user). bootstrap --repair is idempotent.
-    console.print("[dim]reprovisioning (config render + ownership reconcile)…[/dim]")
-    rc = _subprocess.run(  # nosec B603 — known argv
-        ["hal0", "agent", "bootstrap", "hermes", "--repair"],
-        check=False,
-    ).returncode
+    if to is not None:
+        try:
+            require_vetted(to.strip())
+        except ReleaseError as exc:
+            die(
+                f"--to: {exc}. Pass a full commit sha from VETTED_HERMES_REFS; "
+                "version strings and `==X.Y.Z` specs are no longer accepted."
+            )
+            return
+        to = to.strip()
+    console.print(
+        f"[bold]Building a Hermes release[/bold] of {to[:12] if to else 'the pinned ref'} "
+        "(release layout, flip-back on failure)…"
+    )
+    rc = _provision_hermes(repair=True, ref=to)
     raise typer.Exit(rc)
 
 

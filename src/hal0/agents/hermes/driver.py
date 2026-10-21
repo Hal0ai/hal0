@@ -40,6 +40,7 @@ from typing import Any
 
 import structlog
 
+from hal0.agents.hermes_layout import HERMES_VENV_PATH
 from hal0.agents.manager import (
     AgentDriver,
     HermesUpstreamMissingError,
@@ -78,7 +79,7 @@ _WRAPPER_READY_FLAG = "--hal0-ready"
 # HERMES_CLI_INSTALL_PATH). Mirrored here as plain constants so the
 # probe stays cheap and doesn't import the heavy provisioning module
 # at driver-import time.
-_MANAGED_VENV = Path("/var/lib/hal0/venvs/hermes")
+_MANAGED_VENV = HERMES_VENV_PATH
 _MANAGED_VENV_HERMES = _MANAGED_VENV / "bin" / "hermes"
 _HERMES_CLI_SHIM = Path("/usr/local/bin/hermes")
 
@@ -283,9 +284,9 @@ class HermesDriver(AgentDriver):
         # seed + data + state triad and so will leak if we don't
         # clean them here:
         #
-        #   * the dedicated Python venv at ``/var/lib/hal0/venvs/<name>/``
-        #     (built by ``hermes_provision._install_venv``) — full
-        #     interpreter + site-packages, ~hundreds of MiB.
+        #   * the venv link at ``/var/lib/hal0/venvs/<name>/`` and the
+        #     release tree behind it (``/var/lib/hal0/hermes``, built by
+        #     ``hermes_release``) — two releases plus a mirror, ~1 GiB.
         #   * the operator-facing docs the ``context_link`` phase
         #     renders into ``/etc/hal0/`` (HERMES.md + AGENTS.md).
         #
@@ -523,36 +524,45 @@ class HermesDriver(AgentDriver):
                 continue
 
     def _remove_venv(self, provision: dict[str, Any]) -> None:
-        """Remove the per-agent Python venv recorded in provision.json (#348).
+        """Remove the Hermes venv recorded in provision.json and its releases (#348).
 
-        Reads top-level ``venv`` from the checkpoint — that field is
-        the canonical record of where ``hermes_provision._install_venv``
-        actually built the venv on this host, including any operator
-        override. Production default is
-        ``/var/lib/hal0/venvs/<name>/``.
+        Reads ``venv`` from the checkpoint (top level, or the install step's
+        details, where the linear installer's last-run report records it) —
+        the record of where the venv lives on this host, including any
+        operator override.
+        Production default is ``/var/lib/hal0/venvs/hermes``.
 
-        Idempotent: a missing venv directory is a no-op. We require
-        the recorded path to be a directory before recursing — a
-        symlink-to-elsewhere or a stale file at the recorded location
-        is left alone (the operator can investigate; we don't want
-        an aggressive rmtree following an unexpected target).
+        Symlink-aware (ADR-0032 decision 13): after the release-layout
+        migration that path is a symlink into ``/var/lib/hal0/hermes``. The
+        link is unlinked, never followed by ``rmtree``, and the whole release
+        tree it belongs to (mirror, every release, ``current``/``previous``) is
+        removed with it. A pre-layout real-directory venv is removed as before.
+        Idempotent and best-effort: a missing path is a no-op, and a
+        permissions failure never aborts the rest of the uninstall.
         """
+        from hal0.agents.hermes_layout import release_root_for, remove_hermes_install
+
         raw_venv = provision.get("venv")
+        if not isinstance(raw_venv, str) or not raw_venv:
+            # The linear installer's last-run report records the venv under
+            # the install step, not at the top level.
+            phases = provision.get("phases")
+            install = phases.get("install") if isinstance(phases, dict) else None
+            details = install.get("details") if isinstance(install, dict) else None
+            raw_venv = details.get("venv") if isinstance(details, dict) else None
         if not isinstance(raw_venv, str) or not raw_venv:
             return
         venv = Path(raw_venv)
-        # Resolve through symlinks via ``is_dir()`` which follows
-        # them; if the recorded path is a symlink-to-dir we still
-        # want to rmtree the target tree (it's our venv, just a
-        # weird mount layout). ``shutil.rmtree`` against a non-dir
-        # raises; the explicit guard turns that into the no-op
-        # contract the issue requires.
-        if not venv.is_dir():
+        root = release_root_for(venv)
+        if not root.is_dir():
+            remove_hermes_install(venv)
             return
+        # Hold the builder lock so an uninstall never deletes a tree a build
+        # or activation is writing. Waits for a running build to finish.
+        from hal0.agents.hermes_release import Layout, builder_lock
+
         try:
-            shutil.rmtree(venv)
+            with builder_lock(Layout.for_venv(venv), caller="uninstall", wait=True):
+                remove_hermes_install(venv)
         except OSError:
-            # Best-effort. A permissions failure or a concurrent
-            # writer won't abort the rest of the uninstall — the
-            # manager's seed + data + state cleanup still runs.
-            return
+            remove_hermes_install(venv)

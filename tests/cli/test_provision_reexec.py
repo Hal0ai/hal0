@@ -95,3 +95,127 @@ def test_provision_reexec_uses_the_running_binary(
     assert seen, "the root branch never re-exec'd"
     assert seen[0][0] == str(running)
     assert seen[0][1:4] == ["agent", "bootstrap", "hermes"]
+
+
+def test_offline_and_ref_ride_the_reexec(monkeypatch: pytest.MonkeyPatch) -> None:
+    """#2838 / ADR-0032 d6: --offline and the upgrade ref reach the hal0 child."""
+    monkeypatch.setattr(agent_commands.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(agent_commands, "_hermes_root_prelude", lambda _env: None)
+    monkeypatch.setattr(agent_commands, "_running_hal0_bin", lambda: "/x/hal0")
+    seen: list[list[str]] = []
+    monkeypatch.setattr(agent_commands, "_run_as_hal0", lambda argv, **_k: seen.append(argv) or 0)
+    ref = "3ef6bbd201263d354fd83ec55b3c306ded2eb72a"
+    agent_commands._provision_hermes(offline=True, ref=ref)
+    assert seen == [["/x/hal0", "agent", "bootstrap", "hermes", "--offline", "--ref", ref]]
+
+
+def test_in_process_offline_sets_the_variable_the_builder_reads(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import os
+
+    monkeypatch.setattr(agent_commands.os, "geteuid", lambda: 1000)
+    monkeypatch.delenv("HAL0_HERMES_OFFLINE", raising=False)
+    seen: dict[str, object] = {}
+
+    def _bootstrap(**kw: object) -> int:
+        seen.update(kw, offline=os.environ.get("HAL0_HERMES_OFFLINE"))
+        return 0
+
+    monkeypatch.setattr("hal0.agents.hermes_provision.bootstrap_cli", _bootstrap)
+    assert agent_commands._provision_hermes(offline=True, ref=None) == 0
+    assert seen["offline"] == "1"
+    assert "HAL0_HERMES_OFFLINE" not in os.environ  # restored afterwards
+
+
+def test_root_prelude_owns_the_release_and_python_dirs_before_resolving(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ADR-0032 decision 5: /var/lib/hal0/{hermes,python} exist before uv runs."""
+    events: list[str] = []
+    monkeypatch.setattr(
+        agent_commands, "_ensure_hermes_prelude_dirs", lambda: events.append("dirs")
+    )
+
+    def _resolve() -> str:
+        events.append("resolve")
+        raise RuntimeError("stop here")
+
+    monkeypatch.setattr(
+        "hal0.agents.hermes_provision.sweep_stale_agent_dropins_as_root", lambda: None
+    )
+    monkeypatch.setattr("hal0.agents.hermes_provision.resolve_hermes_python", _resolve)
+    monkeypatch.setattr(agent_commands, "_hand_uv_trees_to_hal0", lambda: events.append("hand"))
+    with pytest.raises(RuntimeError):
+        agent_commands._hermes_root_prelude({})
+    # The uv trees are handed back to hal0 even when resolution fails.
+    assert events == ["dirs", "resolve", "hand"]
+    assert "/var/lib/hal0/hermes" in agent_commands._HERMES_PRELUDE_DIRS
+    assert "/var/lib/hal0/python" not in agent_commands._HERMES_PRELUDE_DIRS
+    assert "/var/lib/hal0/python" not in agent_commands._HERMES_AGENT_TREES
+    assert {"/var/lib/hal0/hermes"} <= set(agent_commands._HERMES_AGENT_TREES)
+
+
+def test_prelude_dirs_leave_a_symlink_alone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import pwd
+
+    real = tmp_path / "real"
+    real.mkdir()
+    real.chmod(0o700)
+    link = tmp_path / "link"
+    link.symlink_to(real)
+    monkeypatch.setattr(agent_commands, "_HERMES_PRELUDE_DIRS", (str(link),))
+    me = pwd.getpwuid(__import__("os").getuid())
+    monkeypatch.setattr(pwd, "getpwnam", lambda _n: me)
+    agent_commands._ensure_hermes_prelude_dirs()
+    assert oct(real.stat().st_mode & 0o7777) == "0o700"  # chmod never followed the link
+
+
+def test_prelude_hands_a_root_owned_pre_layout_venv_to_hal0(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import pwd
+
+    from hal0.agents import hermes_layout
+
+    venv = tmp_path / "venvs" / "hermes"
+    (venv / "bin").mkdir(parents=True)
+    monkeypatch.setattr(hermes_layout, "HERMES_VENV_PATH", venv)
+    fake = pwd.struct_passwd(("hal0", "x", 4242, 4242, "", str(tmp_path), "/bin/false"))
+    monkeypatch.setattr(pwd, "getpwnam", lambda _n: fake)
+    handed: list[tuple] = []
+    monkeypatch.setattr(
+        agent_commands, "_hand_uv_trees_to_hal0", lambda roots=None: handed.append(roots)
+    )
+    agent_commands._hand_pre_layout_venv_to_hal0()
+    assert handed == [(venv,)]
+    # A migrated host (venvs/hermes is a link) is never touched.
+    handed.clear()
+    real = tmp_path / "r"
+    real.mkdir()
+    link = tmp_path / "venvs" / "link"
+    link.symlink_to(real)
+    monkeypatch.setattr(hermes_layout, "HERMES_VENV_PATH", link)
+    agent_commands._hand_pre_layout_venv_to_hal0()
+    assert handed == []
+
+
+def test_pre_layout_python_cleanup_honours_the_persisted_value(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from hal0.agents import hermes_layout
+
+    legacy = tmp_path / "python"
+    (legacy / "cpython-3.12.15").mkdir(parents=True)
+    monkeypatch.setattr(hermes_layout, "LEGACY_PYTHON_ROOT", legacy)
+    monkeypatch.setattr(hermes_layout, "HERMES_VENV_PATH", tmp_path / "venvs" / "hermes")
+    monkeypatch.delenv("HAL0_HERMES_PYTHON", raising=False)
+    persisted = f"{legacy}/cpython-3.12.15/bin/python3.12"
+    monkeypatch.setattr("hal0.agents.hermes_provision._read_hermes_python_env", lambda: persisted)
+    assert agent_commands._cleanup_pre_layout_python() is False
+    assert legacy.is_dir()
+    monkeypatch.setattr("hal0.agents.hermes_provision._read_hermes_python_env", lambda: None)
+    assert agent_commands._cleanup_pre_layout_python() is True
+    assert not legacy.exists()
