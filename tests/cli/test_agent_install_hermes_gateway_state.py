@@ -32,6 +32,7 @@ def _setup(
     generator_rc: int = 0,
     generator_rejects_flags: bool = False,
     which: str | None = "/usr/bin/systemctl",
+    unit_text: str = "[Unit]\n",
 ) -> list[list[str]]:
     gateway_unit = tmp_path / UNIT
     calls: list[list[str]] = []
@@ -49,7 +50,7 @@ def _setup(
             if generator_rejects_flags and "--no-start-now" in argv:
                 return _Done(2)
             if generator_rc == 0:
-                gateway_unit.write_text("[Unit]\n")
+                gateway_unit.write_text(unit_text)
             return _Done(generator_rc)
         return _Done(0)
 
@@ -197,3 +198,39 @@ def test_systemctl_oserror_is_treated_as_not_found(monkeypatch, tmp_path) -> Non
     monkeypatch.setattr(subprocess, "run", _boom)
     ac._install_hermes_gateway()
     assert ["systemctl", "enable", "--now", UNIT] in calls
+
+
+# ── ADR-0032 decision 12: the normaliser runs straight after the generator ──
+
+RELEASE = "/var/lib/hal0/hermes/releases/3ef6bbd20126-20261021T000000Z"
+
+
+def test_generated_unit_is_normalised_before_enable(monkeypatch, tmp_path) -> None:
+    unit_text = f"ExecStart={RELEASE}/venv/bin/python -m hermes_cli.main gateway run\n"
+    calls = _setup(monkeypatch, tmp_path, state="not-found", unit_text=unit_text)
+    ac._install_hermes_gateway()
+    assert (tmp_path / UNIT).read_text() == (
+        "ExecStart=/var/lib/hal0/hermes/current/venv/bin/python -m hermes_cli.main gateway run\n"
+    )
+    try_restart = calls.index(["systemctl", "try-restart", UNIT])
+    enable = calls.index(["systemctl", "enable", "--now", UNIT])
+    assert try_restart < enable
+
+
+def test_a_unit_still_naming_a_release_is_left_disabled(monkeypatch, tmp_path, capsys) -> None:
+    # No trailing slash after the id: the prefix rewrite cannot match it.
+    unit_text = f"ExecStart={RELEASE}\n"
+    calls = _setup(monkeypatch, tmp_path, state="not-found", unit_text=unit_text)
+    ac._install_hermes_gateway()
+    assert not _enables(calls)
+    assert ["systemctl", "disable", "--now", UNIT] in calls
+    assert "could not be normalised" in _out(capsys)
+
+
+def test_disabled_gateway_with_a_bad_unit_is_only_warned_about(
+    monkeypatch, tmp_path, capsys
+) -> None:
+    calls = _setup(monkeypatch, tmp_path, state="disabled", active=True, unit_text=f"X={RELEASE}\n")
+    ac._install_hermes_gateway()
+    assert ["systemctl", "disable", "--now", UNIT] not in calls
+    assert "could not be normalised" in _out(capsys)

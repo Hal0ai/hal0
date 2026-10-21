@@ -907,6 +907,38 @@ def _gateway_left_off_note(unit: str, state: str) -> None:
     console.print(f"[yellow]{unit} is {state}; left as is (run '{turn_on}' to turn it on)[/yellow]")
 
 
+def _normalise_gateway_unit_or_warn(has_systemctl: bool, *, turn_off: bool = True) -> bool:
+    """Run the gateway unit normaliser; on failure warn and leave the unit off.
+
+    Returns ``True`` when the unit names only stable paths. A unit that still
+    names a release path is disabled and stopped, the same posture this command
+    takes when the generator itself fails, because that release can be pruned
+    from under it.
+    """
+    import subprocess as _subprocess
+    from pathlib import Path as _Path
+
+    from hal0.agents.hermes_gateway_unit import normalise_gateway_unit
+
+    result = normalise_gateway_unit(_Path(_HERMES_GATEWAY_UNIT), reload=has_systemctl)
+    if result.ok:
+        if result.changed:
+            console.print(
+                "[dim]hermes-gateway unit normalised to /var/lib/hal0/hermes/current/[/dim]"
+            )
+        return True
+    detail = result.error or "; ".join(result.remaining)
+    console.print(
+        f"[yellow]hermes-gateway unit could not be normalised ({detail}) — leaving the "
+        "gateway disabled. Re-run `sudo hal0 agent install hermes`.[/yellow]"
+    )
+    if has_systemctl and turn_off:
+        _subprocess.run(  # nosec B603 B607 — fixed argv
+            ["systemctl", "disable", "--now", "hermes-gateway.service"], check=False
+        )
+    return False
+
+
 def _install_hermes_gateway() -> None:
     """`hermes gateway install --system --run-as-user hal0` + enable the unit.
 
@@ -1009,6 +1041,15 @@ def _install_hermes_gateway() -> None:
             "[yellow]hermes gateway install failed — Telegram/Discord bridge "
             "unavailable; continuing.[/yellow]"
         )
+
+    # ADR-0032 decision 12: the generator bakes the release path it ran from
+    # (/var/lib/hal0/hermes/releases/<id>/…) into the unit. Rewrite it to the
+    # stable current/ path straight after the generator and before any enable,
+    # or the next activation's prune would delete what the gateway runs from.
+    # A gateway the operator disabled is only warned about, never stopped here
+    # (#2815): the disabled branch below keeps its own posture.
+    if rc == 0 and not _normalise_gateway_unit_or_warn(has_systemctl, turn_off=not disabled):
+        return
 
     if disabled:
         # Operator turned it off: refresh done, enable skipped. A disabled but

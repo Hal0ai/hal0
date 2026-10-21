@@ -1,0 +1,32 @@
+[Unit]
+Description=Hermes Agent Gateway - Messaging Platform Integration
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=hal0
+Group=hal0
+ExecStart=/var/lib/hal0/hermes/releases/3ef6bbd20126-20261021T000000Z/venv/bin/python -m hermes_cli.main gateway run
+WorkingDirectory=/var/lib/hal0/.hermes
+Environment="HOME=/var/lib/hal0"
+Environment="USER=hal0"
+Environment="LOGNAME=hal0"
+Environment="PATH=/var/lib/hal0/hermes/releases/3ef6bbd20126-20261021T000000Z/venv/bin:/var/lib/hal0/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+Environment="VIRTUAL_ENV=/var/lib/hal0/hermes/releases/3ef6bbd20126-20261021T000000Z/venv"
+Environment="HERMES_HOME=/var/lib/hal0/.hermes"
+Restart=always
+RestartSec=5
+RestartForceExitStatus=75
+RestartPreventExitStatus=78
+KillMode=mixed
+KillSignal=SIGTERM
+ExecReload=/bin/kill -USR1 $MAINPID
+ExecStopPost=-/var/lib/hal0/hermes/releases/3ef6bbd20126-20261021T000000Z/venv/bin/python -m gateway.cgroup_cleanup
+TimeoutStopSec=60
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
