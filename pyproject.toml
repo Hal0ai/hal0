@@ -77,7 +77,7 @@ dependencies = [
   # quarantine like upstream Hermes's: only a uv release at least 7 days old
   # at the time of the pin (0.13.1, 2026-10-14) is allowed, because the
   # installer resolves this range rather than uv.lock.
-  "uv>=0.12.22,<0.13.2",
+  "uv>=0.12.22,<0.13.5",
 ]
 
 [project.optional-dependencies]
