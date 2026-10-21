@@ -1308,7 +1308,9 @@ def test_hal0_linger_row(tmp_path, gateway: bool, enabled, status: str) -> None:
     if gateway:
         unit.write_text("[Unit]\nAfter=user@999.service\nWants=user@999.service\n")
     check = da.check_hal0_linger(
-        probe=lambda: LingerState("hal0", enabled, "test", "why"), gateway_unit=unit
+        probe=lambda: LingerState("hal0", enabled, "test", "why"),
+        gateway_unit=unit,
+        gateway_in_use=lambda: True,
     )
     assert check.key == "hal0_linger"
     assert check.status == status
@@ -1325,10 +1327,31 @@ def test_hal0_linger_row_flags_a_gateway_unit_from_before_0_22(tmp_path) -> None
 
     unit = tmp_path / "hermes-gateway.service"
     unit.write_text("[Service]\nExecStart=/v/bin/python -m hermes_cli.main gateway run\n")
-    check = da.check_hal0_linger(probe=lambda: LingerState("hal0", True, "test"), gateway_unit=unit)
+    check = da.check_hal0_linger(
+        probe=lambda: LingerState("hal0", True, "test"),
+        gateway_unit=unit,
+        gateway_in_use=lambda: True,
+    )
     assert check.status == "warn"
     assert "predates Hermes 0.22" in check.detail
     assert "sudo hal0 agent install hermes" in check.detail
+
+
+@pytest.mark.parametrize("enabled", [True, False])
+def test_hal0_linger_row_is_info_for_a_disabled_gateway(tmp_path, enabled: bool) -> None:  # type: ignore[no-untyped-def]
+    # A gateway the operator disabled (the test boxes) never runs: an old
+    # unit shape or linger off must not warn.
+    from hal0.system.linger import LingerState
+
+    unit = tmp_path / "hermes-gateway.service"
+    unit.write_text("[Service]\nExecStart=/v/bin/python -m hermes_cli.main gateway run\n")
+    check = da.check_hal0_linger(
+        probe=lambda: LingerState("hal0", enabled, "test"),
+        gateway_unit=unit,
+        gateway_in_use=lambda: False,
+    )
+    assert check.status == "pass"
+    assert "disabled" in check.detail
 
 
 def test_hal0_linger_row_never_raises(tmp_path) -> None:  # type: ignore[no-untyped-def]

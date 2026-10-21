@@ -79,7 +79,7 @@ def test_gateway_unit_regen_reason(tmp_path: Path) -> None:
     unit = tmp_path / "hermes-gateway.service"
     lingers = tmp_path / "linger"
     lingers.mkdir()
-    kw = {"unit": str(unit), "linger_dir": str(lingers)}
+    kw = {"unit": str(unit), "linger_dir": str(lingers), "in_use": lambda: True}
     # No gateway installed: nothing to say.
     assert linger.gateway_unit_regen_reason(**kw) is None
     # The 0.19.0 generator's shape.
@@ -92,3 +92,38 @@ def test_gateway_unit_regen_reason(tmp_path: Path) -> None:
     # Both right.
     (lingers / "hal0").touch()
     assert linger.gateway_unit_regen_reason(**kw) is None
+
+
+def test_gateway_unit_regen_reason_silent_for_a_disabled_gateway(tmp_path: Path) -> None:
+    unit = tmp_path / "hermes-gateway.service"
+    unit.write_text("[Service]\nExecStart=/v/bin/python -m hermes_cli.main gateway run\n")
+    assert (
+        linger.gateway_unit_regen_reason(
+            unit=str(unit), linger_dir=str(tmp_path), in_use=lambda: False
+        )
+        is None
+    )
+
+
+def test_gateway_in_use_reads_the_wants_symlink_first(tmp_path: Path) -> None:
+    wants = tmp_path / "multi-user.target.wants"
+    wants.mkdir()
+    (wants / "hermes-gateway.service").symlink_to(tmp_path / "hermes-gateway.service")
+    assert linger.gateway_in_use(
+        unit_dir=str(tmp_path), run=lambda *a, **k: pytest.fail("no subprocess when enabled")
+    )
+
+
+@pytest.mark.parametrize(("rc", "expected"), [(0, True), (3, False)])
+def test_gateway_in_use_falls_back_to_is_active(tmp_path: Path, rc: int, expected: bool) -> None:
+    seen: list[list[str]] = []
+
+    def run(argv: list[str], **_kw: Any) -> subprocess.CompletedProcess[str]:
+        seen.append(argv)
+        return _proc(rc)
+
+    assert (
+        linger.gateway_in_use(unit_dir=str(tmp_path), run=run, which=lambda _n: "/bin/systemctl")
+        is expected
+    )
+    assert seen == [["systemctl", "is-active", "--quiet", "hermes-gateway.service"]]

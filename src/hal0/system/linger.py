@@ -111,21 +111,56 @@ HERMES_GATEWAY_UNIT = "/etc/systemd/system/hermes-gateway.service"
 GATEWAY_REGEN_COMMAND = "sudo hal0 agent install hermes"
 
 
+def gateway_in_use(
+    *,
+    unit_dir: str = "/etc/systemd/system",
+    run: Callable[..., Any] = subprocess.run,
+    which: Callable[[str], str | None] = shutil.which,
+) -> bool:
+    """Is ``hermes-gateway.service`` enabled or running?
+
+    Enablement is read from the ``*.wants/hermes-gateway.service`` symlinks
+    ``systemctl enable`` lays under ``unit_dir`` (no subprocess). Only when
+    there is none does it ask ``systemctl is-active``, which needs no
+    privilege, to catch a gateway the operator disabled but left running. A
+    disabled, stopped gateway (the test boxes) never runs, so its unit shape
+    and linger do not matter.
+    """
+    base = Path(unit_dir)
+    if any(base.glob("*.wants/hermes-gateway.service")):
+        return True
+    if not which("systemctl"):
+        return False
+    try:
+        proc = run(  # nosec B603 B607 — fixed argv, read-only query
+            ["systemctl", "is-active", "--quiet", "hermes-gateway.service"],
+            capture_output=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return proc.returncode == 0
+
+
 def gateway_unit_regen_reason(
     *,
     unit: str = HERMES_GATEWAY_UNIT,
     linger_dir: str = LINGER_DIR,
     user: str = HAL0_USER,
+    in_use: Callable[[], bool] | None = None,
 ) -> str | None:
     """Why the installed gateway unit needs ``sudo hal0 agent install hermes``, or ``None``.
 
-    Read-only and subprocess-free, so ``hal0 update`` can call it as any
-    user. ``hal0 update`` does not rerun the gateway generator, so a box that
+    Read-only and unprivileged, so ``hal0 update`` can call it as any user
+    (its only subprocess is :func:`gateway_in_use`'s ``systemctl is-active``,
+    and only when the gateway is not enabled). ``hal0 update`` does not rerun the gateway generator, so a box that
     ran Hermes before 1.6.0 keeps the unit Hermes 0.19.0 wrote: no
     ``user@<uid>.service`` ordering and no linger. Under v0.22.2 that unit
     starts, but kanban workers cannot get their restart-safe scope and never
     start, and cron jobs run unscoped (hermes ``tools/process_registry.py:415-462``
-    at ``d923a5eb``). ``None`` when there is no gateway unit.
+    at ``d923a5eb``). ``None`` when there is no gateway unit, or when the
+    gateway is neither enabled nor running (:func:`gateway_in_use`).
     """
     try:
         text = Path(unit).read_text(encoding="utf-8")
@@ -133,6 +168,8 @@ def gateway_unit_regen_reason(
         return None
     except OSError as exc:
         return f"the hermes-gateway unit could not be read ({exc})"
+    if not (in_use or gateway_in_use)():
+        return None
     if "user@" not in text:
         return "the hermes-gateway unit predates Hermes 0.22 (no user@<uid>.service ordering)"
     if os.path.isdir(linger_dir) and not os.path.exists(os.path.join(linger_dir, user)):
@@ -147,6 +184,7 @@ __all__ = [
     "LINGER_DIR",
     "LingerState",
     "disable_linger",
+    "gateway_in_use",
     "gateway_unit_regen_reason",
     "read_linger",
 ]

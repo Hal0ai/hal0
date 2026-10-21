@@ -1352,6 +1352,7 @@ def check_hal0_linger(
     *,
     probe: Callable[[], Any] | None = None,
     gateway_unit: Path | None = None,
+    gateway_in_use: Callable[[], bool] | None = None,
 ) -> Check:
     """Is systemd linger on for ``hal0``? (ADR-0034 decision 6)
 
@@ -1366,6 +1367,8 @@ def check_hal0_linger(
       ``user@<uid>.service`` ordering) — ``warn``: it was generated at the
       0.19.0 pin and still starts v0.22.2, but without the ordering the
       gateway can race the user manager at boot and lose its worker bus;
+    * gateway installed but disabled and stopped — ``pass`` (info): it never
+      runs, so neither its unit shape nor linger matters;
     * no gateway, linger on — ``warn``: left over from an uninstall that
       could not remove it;
     * no gateway, linger off — ``pass``;
@@ -1385,6 +1388,14 @@ def check_hal0_linger(
     )
     if state.enabled is None:
         return Check(name, label, _WARN, f"could not read linger state ({state.detail})")
+    if gateway and not (gateway_in_use or linger.gateway_in_use)():
+        return Check(
+            name,
+            label,
+            _PASS,
+            f"{'on' if state.enabled else 'off'}; the Hermes gateway is installed but disabled "
+            "and stopped, so linger is not needed until you enable it",
+        )
     if gateway and not state.enabled:
         return Check(
             name,
