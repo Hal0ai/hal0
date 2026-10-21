@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import gc
 import os
 import threading
 import time
@@ -278,6 +279,55 @@ def test_client_stream_ends_when_client_key_rotates(served: Served) -> None:
     _wait_for(lambda: live_sockets.open_count() == 0, "stream left registered")
 
 
+def test_revoked_stream_generator_is_closed_not_left_to_gc(served: Served) -> None:
+    """A revoked route generator is closed at once, never left for the collector.
+
+    Two paths used to leave it suspended at ``yield``, so its ``finally``
+    (event-bus unsubscribes, upstream relay closes) ran only when a garbage
+    collection happened to find it: the request-id middleware's
+    ``BaseHTTPMiddleware`` memory-stream hop, where the disconnect's
+    cancellation landed in the hop's ``send``, and the guard raising
+    ``_StreamRevoked`` at a chunk the route sent while it was already being
+    told of the disconnect. With the collector off an abandoned generator
+    never closes; a producer that ticks every millisecond hits both windows
+    within a few rounds.
+    """
+    rounds: list[threading.Event] = []
+
+    async def _fast_stream() -> StreamingResponse:
+        finished = threading.Event()
+        rounds.append(finished)
+
+        async def gen() -> Any:
+            try:
+                while True:
+                    yield "data: tick\n\n"
+                    await asyncio.sleep(0.001)
+            finally:
+                finished.set()
+
+        return StreamingResponse(gen(), media_type="text/event-stream")
+
+    served.app.add_api_route("/v1/_test-2816/fast", _fast_stream, methods=["GET"])
+    served.app.state.login_limiter = None  # thirty rotations from one address
+    gc_was_enabled = gc.isenabled()
+    gc.disable()
+    try:
+        for n in range(30):
+            headers = {"Authorization": f"Bearer {os.environ['HAL0_CLIENT_KEY']}"}
+            with _open_stream(served, "/v1/_test-2816/fast", headers) as lines:
+                assert next(lines) == "data: tick"
+
+                _rotate(served, tier="client")
+
+                _assert_ends_revoked(lines)
+            _wait_for(rounds[n].is_set, f"round {n}: stream generator was not closed")
+            _wait_for(lambda: live_sockets.open_count() == 0, "stream left registered")
+    finally:
+        if gc_was_enabled:
+            gc.enable()
+
+
 def test_client_stream_on_a_surviving_key_keeps_streaming(served: Served) -> None:
     """Rotating the admin key leaves a client-key stream alone."""
     headers = {"Authorization": f"Bearer {CLIENT_KEY}"}
@@ -413,6 +463,48 @@ def test_guard_stops_a_producer_and_swallows_its_error() -> None:
     sent, leftover = asyncio.run(_drive(producer, lambda: True, revoke_after=3))
     _assert_revoked_end(sent)
     assert sum(1 for m in sent if m.get("more_body")) == 3  # nothing after the revocation
+    assert not leftover
+    assert live_sockets.open_count() == 0
+
+
+def test_guard_stops_a_listening_producer_that_never_yields() -> None:
+    """A chunk sent while the app winds down is dropped, but only a bounded number.
+
+    The app listens for the disconnect in another task, so its first chunks
+    after the revocation are dropped quietly (see ``guard_http_stream``). A
+    producer that never yields to the loop would otherwise spin on dropped
+    chunks for ever: the drain timeout cannot fire without a yield.
+    """
+
+    async def listening_producer(scope: Any, receive: Any, send: Any) -> None:
+        await send(_SSE_START)
+        listener = asyncio.ensure_future(receive())
+        try:
+            await send({"type": "http.response.body", "body": b"data: 0\n\n", "more_body": True})
+            for _ in range(10):  # the revocation lands; the listener is told
+                await asyncio.sleep(0)
+            while True:  # never yields again
+                await send(
+                    {"type": "http.response.body", "body": b"data: x\n\n", "more_body": True}
+                )
+        finally:
+            listener.cancel()
+
+    # A regression spins the loop, so no timeout inside it could fire: run
+    # it on a daemon thread and fail on the join instead of hanging.
+    result: list[tuple[list[dict], set]] = []
+    thread = threading.Thread(
+        target=lambda: result.append(
+            asyncio.run(_drive(listening_producer, lambda: True, revoke_after=1))
+        ),
+        daemon=True,
+    )
+    thread.start()
+    thread.join(_DEADLINE_S)
+    assert result, "a revoked producer that never yields was not stopped"
+    sent, leftover = result[0]
+    _assert_revoked_end(sent)
+    assert sum(1 for m in sent if m.get("more_body")) == 1  # nothing after the revocation
     assert not leftover
     assert live_sockets.open_count() == 0
 
