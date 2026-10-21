@@ -215,6 +215,38 @@ board executor harvests are unchanged at NEW.
      (`loginctl disable-linger hal0`).
    - The `hal0-systemctl` allow-list and the agent unit's sandbox do not
      change.
+   - **Amendment (2026-10-21, #2615): `hal0 update` heals an old-shape
+     gateway unit.** A box that ran Hermes before 1.6.0 keeps the unit
+     Hermes 0.19.0 wrote, with no `user@<uid>.service` ordering and no
+     linger, and `hal0 update` never reran the generator. The fix is a new
+     no-argument `hal0-update hermes-gateway` verb. The sudoers grant does
+     not change: it already names the wrapper with no argument list. Hermes's
+     converge arm calls the verb through `UpdateSeam`, as `hal0`, once the
+     live release is v0.22-shape (its checkout has `hermes_bootstrap`). It
+     runs after both a release build and a converged no-op, so a box that
+     already updated is healed by its next update. The call happens only
+     when the unprivileged check behind the notice finds an enabled or
+     running gateway whose unit is old-shape or whose linger is off.
+   - As root the verb runs only hal0's own code from the root-owned
+     `/usr/lib/hal0` tree, imported with `-I`. It never runs Hermes code:
+     the Hermes venv and checkout are `hal0`-owned, so running `hermes
+     gateway install --system` from them as root would let a process
+     compromised as `hal0` edit that tree and then call the verb to run its
+     code as root. Instead `hal0.agents.hermes_gateway_regen` renders the
+     v0.22.2 unit from a template, with fixed `current/` paths and the `hal0`
+     uid from `pwd`. It validates the result (`User=hal0`, no root `Exec*`,
+     only allowed paths) and writes it `root:root 0644` atomically. It reads
+     only the existing unit file and the state reported by `systemctl` and
+     `loginctl`.
+   - The verb then runs `loginctl enable-linger hal0`, and runs `systemctl
+     restart hermes-gateway.service` only if the gateway was running. It
+     never enables, disables, starts or stops the unit. A disabled, stopped
+     or masked gateway is left alone, and a current unit with linger on is a
+     no-op.
+   - A failure, or a missing grant, does not fail the update. The `hal0
+     update` notice and the `hal0_linger` doctor row stay as the fallback.
+     `sudo hal0 agent install hermes` still runs upstream's generator,
+     because that root run is the operator's choice.
 7. **New: hal0 turns session pruning off.** The config overlay writes
    `sessions.auto_prune: false` at the pin bump, so an upgrade deletes no
    session history. Retention policy is a later decision with its own

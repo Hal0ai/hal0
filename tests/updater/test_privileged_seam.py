@@ -149,10 +149,11 @@ def test_seam_argv_is_the_whole_grant_surface() -> None:
     asyncio.run(seam.stage("stable"))
     asyncio.run(seam.activate("hal0-1.0.0"))
     seam.discard("hal0-1.0.0")
+    seam.hermes_gateway()
     seam.assert_privileges() if Path(SEAM_BIN).exists() else None
 
     verbs = {call[3] for call in run.calls}
-    assert verbs <= {"check", "stage", "activate", "discard"}
+    assert verbs <= {"check", "stage", "activate", "discard", "hermes-gateway"}
     assert all(call[:3] == ["sudo", "-n", SEAM_BIN] for call in run.calls)
 
 
@@ -388,6 +389,87 @@ def test_main_revalidates_arguments_as_root(capsys: Any) -> None:
     """The wrapper's regexes are a convenience; Python is the boundary."""
     assert main(["activate", "../../etc"]) == 1
     assert main(["stage", "evil-channel"]) == 1
+
+
+# ── hermes-gateway (ADR-0034 decision 6 amendment) ─────────────────────────────
+
+
+def test_hermes_gateway_routes_through_sudo_with_no_arguments() -> None:
+    run = FakeRun(stdout=_envelope({"action": "noop", "message": "current"}))
+    seam = UpdateSeam(run=run, is_hal0_user=lambda: True)
+    out = seam.hermes_gateway()
+    assert run.calls == [["sudo", "-n", SEAM_BIN, "hermes-gateway"]]
+    assert out["action"] == "noop"
+
+
+def test_hermes_gateway_failure_raises_update_error() -> None:
+    run = FakeRun(returncode=1, stderr="hal0-update: hermes gateway: loginctl failed")
+    seam = UpdateSeam(run=run, is_hal0_user=lambda: True)
+    with pytest.raises(UpdateError):
+        seam.hermes_gateway()
+
+
+def test_hermes_gateway_unrouted_non_root_is_skipped(monkeypatch: Any) -> None:
+    monkeypatch.setattr("hal0.updater.privileged.os.geteuid", lambda: 1000)
+    run = FakeRun()
+    out = UpdateSeam(run=run, is_hal0_user=lambda: False).hermes_gateway()
+    assert out["action"] == "skipped"
+    assert run.calls == []
+
+
+def test_hermes_gateway_unrouted_root_runs_in_process(monkeypatch: Any) -> None:
+    from hal0.agents import hermes_gateway_regen as regen
+
+    monkeypatch.setattr("hal0.updater.privileged.os.geteuid", lambda: 0)
+    monkeypatch.setattr(
+        regen, "regenerate_gateway_unit", lambda: regen.RegenResult("noop", "current")
+    )
+    run = FakeRun()
+    out = UpdateSeam(run=run, is_hal0_user=lambda: False).hermes_gateway()
+    assert out["action"] == "noop"
+    assert run.calls == []
+
+
+def test_main_hermes_gateway_emits_the_result_and_one_line(capsys: Any, monkeypatch: Any) -> None:
+    from hal0.agents import hermes_gateway_regen as regen
+
+    monkeypatch.setattr(
+        regen,
+        "regenerate_gateway_unit",
+        lambda: regen.RegenResult(
+            "regenerated",
+            "hermes-gateway.service: unit rewritten, linger on for hal0",
+            unit_rewritten=True,
+            linger_enabled=True,
+        ),
+    )
+    assert main(["hermes-gateway"]) == 0
+    out = capsys.readouterr()
+    payload = json.loads(out.out.strip().splitlines()[-1])["hal0_update_result"]
+    assert payload["action"] == "regenerated" and payload["unit_rewritten"] is True
+    assert out.err.strip() == (
+        "hal0-update: hermes-gateway.service: unit rewritten, linger on for hal0"
+    )
+
+
+def test_main_hermes_gateway_takes_no_arguments(monkeypatch: Any) -> None:
+    from hal0.agents import hermes_gateway_regen as regen
+
+    called: list[bool] = []
+    monkeypatch.setattr(regen, "regenerate_gateway_unit", lambda: called.append(True))
+    assert main(["hermes-gateway", "/etc/passwd"]) == 1
+    assert called == []
+
+
+def test_main_hermes_gateway_failure_exits_one(capsys: Any, monkeypatch: Any) -> None:
+    from hal0.agents import hermes_gateway_regen as regen
+
+    def boom() -> None:
+        raise regen.GatewayRegenError("loginctl enable-linger hal0 failed: nope")
+
+    monkeypatch.setattr(regen, "regenerate_gateway_unit", boom)
+    assert main(["hermes-gateway"]) == 1
+    assert "loginctl enable-linger hal0 failed" in capsys.readouterr().err
 
 
 # ── activate/discard against a real (HAL0_HOME) tree ───────────────────────────

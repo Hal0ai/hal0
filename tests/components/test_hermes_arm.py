@@ -334,3 +334,149 @@ def test_a_broken_config_never_fails_the_converge(tmp_path, old_config) -> None:
     res = hermes_arm.converge_hermes(venv=_live_release())
     assert res["status"] == "converged"
     assert any("not applied" in d for d in res["detail"])
+
+
+# ── gateway unit heal through `hal0-update hermes-gateway` (ADR-0034 d6) ─────
+
+
+def _v022_checkout(venv) -> None:
+    """Give the live release the module a v0.22-shape gateway unit imports."""
+    from hal0.agents import hermes_release as rel
+
+    src = rel.Layout.for_venv(venv).current / "src"
+    src.mkdir(parents=True, exist_ok=True)
+    (src / "hermes_bootstrap.py").write_text("", encoding="utf-8")
+
+
+class _Seam:
+    def __init__(self, outcome=None, exc=None):
+        self.calls = 0
+        self.outcome = outcome or {"action": "regenerated", "message": "unit rewritten"}
+        self.exc = exc
+
+    def hermes_gateway(self):
+        self.calls += 1
+        if self.exc is not None:
+            raise self.exc
+        return self.outcome
+
+
+def _heal(venv, seam, reason="the hermes-gateway unit predates Hermes 0.22"):
+    from hal0.agents import hermes_release as rel
+
+    result: dict = {}
+    hermes_arm._heal_gateway_unit(
+        result,
+        layout=rel.Layout.for_venv(venv),
+        job_id="j",
+        seam_factory=lambda: seam,
+        regen_reason=lambda: reason,
+    )
+    return result
+
+
+def test_heal_calls_the_seam_when_the_unit_is_old_shape(tmp_path) -> None:
+    venv = _live_release()
+    _v022_checkout(venv)
+    seam = _Seam()
+    result = _heal(venv, seam)
+    assert seam.calls == 1
+    assert result["detail"] == [hermes_arm.GATEWAY_HEALED_NOTE]
+
+
+def test_heal_skips_sudo_when_the_unit_is_current_or_off(tmp_path) -> None:
+    venv = _live_release()
+    _v022_checkout(venv)
+    seam = _Seam()
+    assert _heal(venv, seam, reason=None) == {}
+    assert seam.calls == 0
+
+
+def test_heal_waits_for_a_v0_22_release(tmp_path) -> None:
+    """A live release without hermes_bootstrap (0.19.0) would not run the new unit."""
+    venv = _live_release(ref=OLD_PIN, minor="3.12")
+    seam = _Seam()
+    assert _heal(venv, seam) == {}
+    assert seam.calls == 0
+
+
+def test_heal_noop_from_root_adds_nothing(tmp_path) -> None:
+    venv = _live_release()
+    _v022_checkout(venv)
+    result = _heal(venv, _Seam(outcome={"action": "noop", "message": "current"}))
+    assert result == {}
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [
+        RuntimeError("sudo: a password is required"),
+        __import__("hal0.updater.updater", fromlist=["UpdateError"]).UpdateError(
+            "privileged update seam failed: hermes-gateway (rc=1)"
+        ),
+    ],
+)
+def test_heal_failure_is_non_fatal_and_names_the_remedy(tmp_path, exc) -> None:
+    venv = _live_release()
+    _v022_checkout(venv)
+    result = _heal(venv, _Seam(exc=exc))
+    assert len(result["detail"]) == 1
+    assert "sudo hal0 agent install hermes" in result["detail"][0]
+
+
+def test_converge_heals_on_the_converged_path_but_never_on_diagnose(tmp_path, monkeypatch) -> None:
+    calls: list[str] = []
+    monkeypatch.setattr(
+        hermes_arm, "_heal_gateway_unit", lambda result, **kw: calls.append(kw["job_id"])
+    )
+    venv = _live_release()
+    with patch("hal0.agents.hermes_release.ensure_release") as ensure:
+        assert (
+            hermes_arm.converge_hermes(venv=venv, apply=False, job_id="d")["status"] == "converged"
+        )
+        assert calls == []
+        assert hermes_arm.converge_hermes(venv=venv, job_id="u")["status"] == "converged"
+    ensure.assert_not_called()
+    assert calls == ["u"]
+
+
+def test_converge_heals_after_an_upgrade_activates(tmp_path, monkeypatch) -> None:
+    calls: list[dict] = []
+    monkeypatch.setattr(hermes_arm, "_heal_gateway_unit", lambda result, **kw: calls.append(result))
+    venv = _venv(tmp_path)
+    with patch(
+        "hal0.agents.hermes_release.ensure_release",
+        return_value=_outcome(status="activated", release_id="r1", ref=PIN),
+    ):
+        res = hermes_arm.converge_hermes(venv=venv, is_hal0_user=lambda: True)
+    assert res["status"] == "upgraded"
+    assert len(calls) == 1 and calls[0] is res
+
+
+def test_heal_routes_through_update_seam_by_default(tmp_path, monkeypatch) -> None:
+    """Default wiring: UpdateSeam.hermes_gateway, i.e. sudo -n hal0-update hermes-gateway."""
+    from hal0.agents import hermes_release as rel
+    from hal0.updater import privileged
+
+    venv = _live_release()
+    _v022_checkout(venv)
+    seen: list[list[str]] = []
+
+    def fake_run(argv, **kw):
+        import subprocess
+
+        seen.append(list(argv))
+        return subprocess.CompletedProcess(argv, 1, "", "sudo: a password is required")
+
+    real_seam = privileged.UpdateSeam
+    monkeypatch.setattr(
+        privileged,
+        "UpdateSeam",
+        lambda job_id=None: real_seam(run=fake_run, is_hal0_user=lambda: True, job_id=job_id),
+    )
+    result: dict = {}
+    hermes_arm._heal_gateway_unit(
+        result, layout=rel.Layout.for_venv(venv), job_id="j", regen_reason=lambda: "old"
+    )
+    assert seen == [["sudo", "-n", privileged.SEAM_BIN, "hermes-gateway"]]
+    assert "sudo hal0 agent install hermes" in result["detail"][0]

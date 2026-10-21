@@ -111,13 +111,24 @@ def test_activate_and_discard_forward_the_dir_token(installed: Path) -> None:
     assert argv[-2:] == ["discard", "hal0-1.0.0-rc.1"]
 
 
+def test_hermes_gateway_forwards_no_arguments(installed: Path) -> None:
+    rc, argv, _ = _run(installed, "hermes-gateway")
+    assert rc == 0
+    assert argv == ["-I", "-m", "hal0.updater.privileged", "hermes-gateway"]
+
+
 def test_isolated_mode_is_always_used(installed: Path) -> None:
     """`-I` drops PYTHON* env vars, user site, and the CWD from sys.path.
 
     Without it a caller-controlled working directory containing a ``hal0/``
     package would be imported by a ROOT interpreter.
     """
-    for args in (("check",), ("stage", "stable"), ("activate", "hal0-1.0.0")):
+    for args in (
+        ("check",),
+        ("stage", "stable"),
+        ("activate", "hal0-1.0.0"),
+        ("hermes-gateway",),
+    ):
         _, argv, _ = _run(installed, *args)
         assert argv[0] == "-I"
 
@@ -130,7 +141,7 @@ def test_help_lists_exactly_the_granted_verbs(installed: Path) -> None:
         check=False,
     )
     assert proc.returncode == 0
-    for verb in ("check", "stage", "activate", "discard"):
+    for verb in ("check", "stage", "activate", "discard", "hermes-gateway"):
         assert verb in proc.stdout
 
 
@@ -310,6 +321,8 @@ def test_check_activate_discard_do_not_resolve_releases_url(
         ("discard",),
         ("discard", "hal0-1.0.0 ; reboot"),
         ("discard", "hal0-" + "a" * 200),
+        ("hermes-gateway", "/etc/passwd"),
+        ("hermes-gateway", "--unit", "x"),
     ],
 )
 def test_bad_input_is_refused_before_the_interpreter_runs(
