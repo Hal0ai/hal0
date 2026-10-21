@@ -458,7 +458,7 @@ _AGENT_RUNTIME_USER = "hal0"
 # the uv-managed interpreters and uv's cache), HERMES_HOME (read+write at
 # runtime), bootstrap state. The venv path is a symlink after the first
 # migration; the write probe follows it into the live release, and the release
-# root is probed in its own right. The legacy /var/lib/hal0/python is not
+# root is probed in its own right. The pre-layout /var/lib/hal0/python is not
 # listed: it is root-owned on existing hosts and builds never write it.
 _HERMES_AGENT_TREES = (
     "/var/lib/hal0/venvs/hermes",
@@ -636,12 +636,12 @@ def _hermes_root_prelude(terminal_env: dict[str, str] | None = None) -> None:
         _hand_uv_trees_to_hal0()
 
     # The pre-layout /var/lib/hal0/python is root-owned on existing hosts, so
-    # only a root path may remove it, and only once no release, legacy venv or
+    # only a root path may remove it, and only once no release, pre-layout venv or
     # HAL0_HERMES_PYTHON value names an interpreter in it.
     from hal0.agents.hermes_layout import remove_legacy_python_if_unused
 
     if remove_legacy_python_if_unused(configured=_os.environ.get("HAL0_HERMES_PYTHON", "")):
-        console.print("[dim]removed the unused legacy /var/lib/hal0/python[/dim]")
+        console.print("[dim]removed the unused pre-layout /var/lib/hal0/python[/dim]")
 
     wrapper_src = REPO_ROOT_FOR_INSTALLER / "installer" / "wrappers" / "hermes"
     if wrapper_src.is_file():

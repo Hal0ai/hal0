@@ -521,7 +521,7 @@ def check_hermes_ownership(
         # hal0 user built, so a migrated host keeps passing this row.
         (venv, "hermes venv"),
         (release_root, "hermes release tree"),
-        # The builder's interpreters, inside the release tree. The legacy
+        # The builder's interpreters, inside the release tree. The pre-layout
         # /var/lib/hal0/python is not audited: it is root-owned on existing
         # hosts by design and builds never write it.
         (python_root, "uv-managed Python"),

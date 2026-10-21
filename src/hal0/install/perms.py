@@ -467,7 +467,7 @@ def ownership_table(
         # (ADR-0032 decision 5, ADR-0034 decision 2 amendment). Builds run as
         # hal0, so both top-level dirs must be hal0-owned. Top level only: the
         # trees below hold executables and venvs whose modes are not hal0's to
-        # normalise. The legacy /var/lib/hal0/python is deliberately absent:
+        # normalise. The pre-layout /var/lib/hal0/python is deliberately absent:
         # it is root-owned on existing hosts, builds never write it, and a
         # root path removes it once nothing uses it.
         PermRow(

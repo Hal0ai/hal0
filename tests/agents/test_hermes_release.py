@@ -236,7 +236,7 @@ def test_triggers(tree) -> None:
     layout = rel.Layout.for_venv(tree["venv"])
     assert rel.build_trigger(layout, PIN, "3.12") == "no live release"
     _legacy_venv(tree)
-    assert "legacy layout" in rel.build_trigger(layout, PIN, "3.12")
+    assert "pre-layout venv" in rel.build_trigger(layout, PIN, "3.12")
 
 
 # ── build ────────────────────────────────────────────────────────────────────
@@ -484,7 +484,7 @@ def test_a_failed_first_migration_flips_back_to_legacy(tree) -> None:
     assert tree["stamp"].read_text() == PIN[:12] + "\n"
     assert units.state[rel.AGENT_UNIT] == "active"
     # A legacy release left live triggers a fresh migration attempt next time.
-    assert rel.build_trigger(layout, PIN, "3.12") == "the legacy release is live"
+    assert rel.build_trigger(layout, PIN, "3.12") == "the pre-layout release is live"
 
 
 def test_a_failed_switch_puts_the_legacy_venv_back(tree, monkeypatch) -> None:

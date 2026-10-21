@@ -15,7 +15,7 @@ carry its own copy of ``/var/lib/hal0/venvs/hermes`` imports it from here.
     /var/lib/hal0/venvs/hermes -> /var/lib/hal0/hermes/current/venv
 
 ``/var/lib/hal0/venvs/hermes`` is a symlink once a host has migrated, and a
-real directory (the legacy 3.12 venv built from the ``git+`` line) until then.
+real directory (the pre-layout 3.12 venv built from the ``git+`` line) until then.
 Code that deletes or audits it must handle both, which is what
 :func:`remove_hermes_install` is for.
 """
@@ -45,7 +45,7 @@ HERMES_PYTHON_ROOT = HERMES_RELEASE_ROOT / "python"
 HERMES_UV_CACHE = HERMES_RELEASE_ROOT / ".cache" / "uv"
 
 #: The pre-release-layout interpreter dir. Root-owned on existing hosts and
-#: still the home of the interpreter a legacy venv (and a persisted
+#: still the home of the interpreter a pre-layout venv (and a persisted
 #: ``HAL0_HERMES_PYTHON``) may use. Builds never write it; only root paths
 #: remove it (``installer/uninstall.sh``, and the root prelude once nothing
 #: names it).
@@ -75,7 +75,7 @@ def remove_hermes_install(venv: Path) -> list[str]:
 
     Symlink-aware (ADR-0032 decision 13). A venv link is unlinked, never
     followed by ``rmtree``, and the release tree it belongs to is removed
-    whole. A legacy real-directory venv is removed as a directory. A stray
+    whole. A pre-layout real-directory venv is removed as a directory. A stray
     file at the path is left for the operator. Every step is best-effort and
     idempotent: a missing path is a no-op.
     """
@@ -133,7 +133,7 @@ def legacy_python_users(
 ) -> list[str]:
     """What still uses an interpreter under ``legacy_root``; empty when nothing does.
 
-    Checked: the venv at ``venv`` when it is still a real (legacy) directory,
+    Checked: the venv at ``venv`` when it is still a real (pre-layout) directory,
     every release's ``release.json`` interpreter and its venv's
     ``pyvenv.cfg``, and the configured ``HAL0_HERMES_PYTHON`` value.
     """

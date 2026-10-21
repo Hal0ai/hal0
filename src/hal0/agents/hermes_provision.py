@@ -970,7 +970,7 @@ def _phase_install(ctx: _StepCtx) -> PhaseResult:
 
     Converges: the release builder (:mod:`hal0.agents.hermes_release`) builds
     only when the binary is missing, under ``--repair``, when the MCP client
-    cannot import, or on one of its own triggers (legacy layout, live ref or
+    cannot import, or on one of its own triggers (pre-layout venv, live ref or
     interpreter differs from the target). Each plugin tree copy hash-skips
     when already identical. ``details["changed"]`` is the convergence signal.
     """

@@ -536,7 +536,7 @@ class HermesDriver(AgentDriver):
         migration that path is a symlink into ``/var/lib/hal0/hermes``. The
         link is unlinked, never followed by ``rmtree``, and the whole release
         tree it belongs to (mirror, every release, ``current``/``previous``) is
-        removed with it. A legacy real-directory venv is removed as before.
+        removed with it. A pre-layout real-directory venv is removed as before.
         Idempotent and best-effort: a missing path is a no-op, and a
         permissions failure never aborts the rest of the uninstall.
         """

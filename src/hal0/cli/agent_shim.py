@@ -273,7 +273,7 @@ def _resolve_web_dist(cfg: AgentConfig) -> Path | None:
 
     First the release checkout behind the venv link
     (:func:`_checkout_web_dist`): an editable install never has a
-    ``site-packages`` copy. Then, for a legacy non-editable venv, the wheel's
+    ``site-packages`` copy. Then, for a pre-layout non-editable venv, the wheel's
     ``<venv>/lib/pythonX.Y/site-packages/hermes_cli/web_dist``, with the
     ``pythonX.Y`` segment GLOBBED rather than hardcoded so another interpreter
     minor does not silently break it. Returns ``None`` when no built dist is

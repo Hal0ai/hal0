@@ -72,7 +72,7 @@ def test_legacy_venv_dir_is_stale_on_diagnose(tmp_path) -> None:
     hermes_arm.stamp_path().write_text(PIN[:12] + "\n", encoding="utf-8")
     res = hermes_arm.converge_hermes(venv=venv, apply=False)
     assert res["status"] == "stale"
-    assert "legacy layout" in res["trigger"]
+    assert "pre-layout venv" in res["trigger"]
 
 
 def test_ref_drift_is_stale_on_diagnose(tmp_path) -> None:

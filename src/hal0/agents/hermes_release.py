@@ -50,6 +50,11 @@ from hal0.agents.hermes_layout import GATEWAY_UNIT_PATH, release_root_for
 log = structlog.get_logger(__name__)
 
 RELEASE_JSON = "release.json"
+#: ADR-0032 decision 11 fixes these names for the release the first migration
+#: makes from the pre-layout venv: ``releases/legacy-<sha12>/`` and
+#: ``"legacy": true`` in its ``release.json``.
+_LEGACY_KEY = "legacy"  # scar-ok: release.json key fixed by ADR-0032 decision 11
+_LEGACY_PREFIX = "legacy-"  # scar-ok: release directory prefix fixed by ADR-0032 decision 11
 AGENT_UNIT = "hal0-agent@hermes.service"
 GATEWAY_UNIT = "hermes-gateway.service"
 HERMES_UNITS: tuple[str, ...] = (AGENT_UNIT, GATEWAY_UNIT)
@@ -173,8 +178,8 @@ class Release:
         return str(self.data.get("ref") or "")
 
     @property
-    def legacy(self) -> bool:
-        return bool(self.data.get("legacy"))
+    def legacy(self) -> bool:  # scar-ok: ADR-0032 decision 11 names the "legacy release"
+        return bool(self.data.get(_LEGACY_KEY))
 
     @property
     def python_minor(self) -> str | None:
@@ -681,7 +686,7 @@ def build_release(
             "web_dist": web_dist,
             "hal0_version": hp._hal0_version_string(),
             "built_at": _utc_iso(),
-            "legacy": False,
+            _LEGACY_KEY: False,
         }
         _atomic_json(rdir / RELEASE_JSON, data)
     except BaseException:
@@ -811,7 +816,7 @@ def _read_stamp_ref(stamp_file: Path | None) -> str:
 
 
 def _prepare_legacy_release(layout: Layout, *, stamp_file: Path | None) -> Release:
-    """Create ``releases/legacy-<sha12>/`` with its ``release.json``; no venv yet.
+    """Create the pre-layout release dir with its ``release.json``; no venv yet.
 
     ``release.json`` is written before the venv moves in, so a builder that
     dies between the two leaves a complete release record rather than an
@@ -820,10 +825,10 @@ def _prepare_legacy_release(layout: Layout, *, stamp_file: Path | None) -> Relea
     ref = _read_stamp_ref(stamp_file)
     cfg = _pyvenv_cfg(layout.venv_link)
     layout.releases.mkdir(parents=True, exist_ok=True)
-    rid = f"legacy-{ref[:12]}"
+    rid = f"{_LEGACY_PREFIX}{ref[:12]}"
     n = 1
     while (layout.releases / rid).exists():
-        rid = f"legacy-{ref[:12]}-{n}"
+        rid = f"{_LEGACY_PREFIX}{ref[:12]}-{n}"
         n += 1
     rdir = layout.releases / rid
     rdir.mkdir()
@@ -833,7 +838,7 @@ def _prepare_legacy_release(layout: Layout, *, stamp_file: Path | None) -> Relea
     python = str(Path(home) / f"python{minor}") if home and minor else None
     data = {
         "id": rid,
-        "legacy": True,
+        _LEGACY_KEY: True,
         "ref": ref,
         "describe": None,
         "python": python,
@@ -930,21 +935,21 @@ def _undo_switch(
     layout: Layout,
     old_current: str | None,
     old_previous: str | None,
-    legacy: Release | None,
+    old_venv: Release | None,
 ) -> None:
-    """Put links (and a half-migrated legacy venv) back after a failed switch."""
+    """Put links (and a half-migrated pre-layout venv) back after a failed switch."""
     with contextlib.suppress(OSError):
         _restore_link(layout.current, old_current)
         _restore_link(layout.previous, old_previous)
-    if legacy is None:
+    if old_venv is None:
         return
     with contextlib.suppress(OSError):
-        if legacy.venv.is_dir() and not layout.venv_link.is_dir():
+        if old_venv.venv.is_dir() and not layout.venv_link.is_dir():
             if layout.venv_link.is_symlink():
                 layout.venv_link.unlink()
-            os.rename(legacy.venv, layout.venv_link)
-        if not legacy.venv.exists():
-            shutil.rmtree(legacy.path, ignore_errors=True)
+            os.rename(old_venv.venv, layout.venv_link)
+        if not old_venv.venv.exists():
+            shutil.rmtree(old_venv.path, ignore_errors=True)
 
 
 def activate_release(
@@ -962,7 +967,7 @@ def activate_release(
     """Stop, switch, migrate, start, re-verify; flip back on failure (decision 7).
 
     Handles the first migration too (decision 11): when ``venvs/hermes`` is
-    still a real directory, it moves into ``releases/legacy-<sha12>/venv``
+    still a real directory, it moves into the pre-layout release ``venv/``
     while both units are stopped, and becomes the flip-back target.
 
     Only units that were active before the switch are stopped and started, so
@@ -1177,12 +1182,12 @@ def sweep_incomplete(layout: Layout, *, run: Runner = _run) -> list[str]:
 def build_trigger(layout: Layout, ref: str, minor: str) -> str | None:
     """Why a build is needed, or ``None`` (ADR-0032 decision 6's three triggers)."""
     if layout.venv_link.exists() and not layout.venv_link.is_symlink():
-        return "legacy layout: venvs/hermes is a real directory"
+        return "pre-layout venv: venvs/hermes is a real directory"
     live = live_release(layout)
     if live is None:
         return "no live release"
-    if live.legacy:
-        return "the legacy release is live"
+    if live.legacy:  # scar-ok: ADR-0032 decision 11 names the "legacy release"
+        return "the pre-layout release is live"
     try:
         failed = (layout.root / FAILED_MARKER).read_text(encoding="utf-8").strip()
     except OSError:

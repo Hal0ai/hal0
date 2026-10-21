@@ -114,7 +114,7 @@ def converge_hermes(
 ) -> dict[str, Any]:
     """Converge the live Hermes release onto the pin through the release builder.
 
-    ADR-0032 decision 6: builds on any trigger (legacy layout, live ref or
+    ADR-0032 decision 6: builds on any trigger (pre-layout venv, live ref or
     interpreter differs from the pin). Never waits for the builder lock: a
     held lock returns ``busy`` and the next ``hal0 update`` retries. Every
     activation stops and starts only the units that were running, so a
