@@ -351,8 +351,8 @@ def _expected_integrity_for_asset(entry: dict[str, Any], file_path: str) -> str 
     (``{relative_path: 'sha384-...'}``). Upstream ships neither: the
     ``/api/dashboard/plugins`` listing carries ``name``, ``label``,
     ``description``, ``icon``, ``version``, ``tab``, ``slots``, ``entry``,
-    ``css``, ``has_api`` and ``source`` (``hermes_cli/web_server_dashboard.py:541-555``
-    at the pinned v0.22.2; the same keys at 0.19.0). So today this returns
+    ``css``, ``has_api`` and ``source`` (``hermes_cli/web_server_dashboard.py:548-562``
+    at the pinned v0.22.4; the same keys at v0.22.2 and 0.19.0). So today this returns
     ``None`` and assets are proxied without an SRI check; the shapes are kept
     so an upstream that adds SRI is verified without proxy changes.
     """

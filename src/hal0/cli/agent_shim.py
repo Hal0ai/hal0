@@ -313,17 +313,21 @@ def _build_hermes_argv(cfg: AgentConfig) -> list[str]:
     """Build the argv that boots Hermes with ``/api/events`` + ``/api/pty``.
 
     The chosen invocation is ``hermes --tui dashboard``. Re-verified against
-    the pinned Hermes v0.22.2 (``d923a5eb``):
+    the pinned Hermes v0.22.4 (``4d043038``):
 
-    * ``cmd_dashboard`` (``hermes_cli/main.py:2701``) is the subcommand that
-      starts ``hermes_cli.web_server.start_server`` (``web_server.py:1610``),
+    * ``cmd_dashboard`` (``hermes_cli/main.py:2660``) is the subcommand that
+      starts ``hermes_cli.web_server.start_server`` (``web_server.py:1361``),
       which serves the ``/api/pty``, ``/api/ws`` and ``/api/events``
-      WebSockets (``hermes_cli/web_routers/chat_ws.py:538``, ``:701``,
-      ``:752``).
+      WebSockets (``hermes_cli/web_routers/chat_ws.py:538``, ``:702``,
+      ``:767``).
     * The embedded chat (``/chat``, ``/api/pty``, ``/api/ws``) is always on:
-      ``_DASHBOARD_EMBEDDED_CHAT_ENABLED = True`` (``web_server.py:461-464``;
-      also true at 3ef6bbd2). ``--tui`` is a top-level chat flag ("launch the
-      modern TUI", ``hermes_cli/_parser.py:206``) that the ``dashboard``
+      ``_DASHBOARD_EMBEDDED_CHAT_ENABLED = True`` (``web_server.py:297``;
+      also true at 3ef6bbd2 and d923a5eb). From v0.22.3 the Ink TUI that
+      ``/api/pty`` runs is a client of the gateway daemon, which it finds
+      through ``$HERMES_HOME/gateway.sock`` (on hal0, the system
+      ``hermes-gateway.service``); ``/api/ws`` still runs its turns in the
+      dashboard process. ``--tui`` is a top-level chat flag ("launch the
+      modern TUI", ``hermes_cli/_parser.py:208``) that the ``dashboard``
       subcommand does not read; it is kept only so the argv stays the one
       the unit has always run. Nothing reads a ``HERMES_DASHBOARD_TUI``
       env var at either pin, so hal0 no longer sets one.

@@ -916,15 +916,23 @@ HERMES_REQUIREMENTS = (
 # adding it here AND refreshing the contract fixtures under
 # ``tests/fixtures/hermes/contracts/`` +
 # ``tests/agents/hermes/test_contract_compatibility.py``.
-# v0.22.2 (``d923a5eb``) since ADR-0034 decision 8. Only the current pin is
-# listed: a pre-release tag (``rc.*`` / ``+canary.*``) is never vetted.
-VETTED_HERMES_REFS: frozenset[str] = frozenset({"d923a5eb487a17c0a68801bba9ef0f56c81040a8"})
+# v0.22.4 (``4d043038``) is the pin; v0.22.2 (``d923a5eb``, ADR-0034 decision 8)
+# stays vetted so a flip-back to the previous release and a box still on it keep
+# building. A pre-release tag (``rc.*`` / ``+canary.*``) is never vetted.
+VETTED_HERMES_REFS: frozenset[str] = frozenset(
+    {
+        "4d04303818b61bf3aa09278af48356315515965b",
+        "d923a5eb487a17c0a68801bba9ef0f56c81040a8",
+    }
+)
 
 #: The ``requires-python`` each vetted ref declares in its pyproject.toml,
 #: recorded at review time so the target minor is known before a checkout
 #: exists (the build trigger, the root prelude). The build re-reads it from
 #: the checkout and fails on a mismatch.
 VETTED_HERMES_REQUIRES_PYTHON: dict[str, str] = {
+    # NousResearch/hermes-agent 4d043038 (v0.22.4), pyproject.toml:15.
+    "4d04303818b61bf3aa09278af48356315515965b": ">=3.11,<3.15",
     # NousResearch/hermes-agent d923a5eb (v0.22.2), pyproject.toml:15.
     "d923a5eb487a17c0a68801bba9ef0f56c81040a8": ">=3.11,<3.15",
 }
@@ -1380,10 +1388,10 @@ def _phase_home_init(ctx: _StepCtx) -> PhaseResult:
 
 KANBAN_DB_NAME = "kanban.db"
 
-# The table set hermes's own SCHEMA_SQL creates (hermes_cli/kanban_db.py:804-990
-# at the pinned ref d923a5eb / v0.22.2; the same seven tables since 0.18.2).
+# The table set hermes's own SCHEMA_SQL creates (hermes_cli/kanban_db.py:776-982
+# at the pinned ref 4d043038 / v0.22.4; the same seven tables since 0.18.2).
 # ``init_db`` itself moved to hermes_cli/kanban_db_connect.py:804 and is
-# re-exported from hermes_cli.kanban_db (kanban_db.py:4427-4429), so the import
+# re-exported from hermes_cli.kanban_db (kanban_db.py:4218-4222), so the import
 # below is unchanged.
 # Used ONLY as a cheap existence probe for the convergent skip — never as a
 # CREATE statement source, so a future upstream migration can add columns or
@@ -1777,7 +1785,7 @@ HAL0_CONFIG_LIST_KEYS: dict[str, Any] = {
 # 127.0.0.1:8080, which is precisely what the bundled host-management skills
 # need. So the choice is on/off, not local/sandboxed.
 #
-# HOW "off" IS EXPRESSED (re-verified against the pinned v0.22.2, d923a5eb):
+# HOW "off" IS EXPRESSED (re-verified against the pinned v0.22.4, 4d043038):
 # dropping ``terminal.backend`` does NOT disable anything — DEFAULT_CONFIG
 # still carries ``terminal.backend: local`` (hermes_cli/config_defaults.py:298)
 # and ``config set`` bridges terminal keys to TERMINAL_ENV. What removes the
@@ -1786,7 +1794,7 @@ HAL0_CONFIG_LIST_KEYS: dict[str, Any] = {
 # (model_tools.py:332-337), so a composite bundle (``toolsets: [hermes-cli]``,
 # the default hal0 runs with) cannot re-add a disabled toolset's tools, and
 # the API server's per-platform toolsets apply it as a global suppression
-# list too (hermes_cli/tools_config.py:626-632). ``terminal`` resolves to
+# list too (hermes_cli/tools_config.py:643-649). ``terminal`` resolves to
 # ``terminal`` + ``process_manage`` (toolsets.py:102); ``code_execution``
 # resolves to ``execute_code`` (toolsets.py:155), which runs arbitrary Python
 # as the same user — disabling one without the other would leave the shell
@@ -2847,13 +2855,13 @@ def _persona_prompt_layer(system_prompt: str) -> dict[str, Any]:
 
     ``agent.system_prompt`` is the overlay Hermes resolves into each
     session's ephemeral system prompt (hermes_cli/personality.py:118-123 at
-    the pinned d923a5eb), read by the CLI, the TUI gateway behind the
-    dashboard chat, and the messaging gateway. ``display.personality`` is
+    the pinned 4d043038, unchanged since d923a5eb), read by the CLI, the TUI
+    gateway behind the dashboard chat, and the messaging gateway. ``display.personality`` is
     left to the operator: a known personality named there overlays this
     prompt, which is Hermes's own ``/personality`` behaviour.
 
-    It goes through the YAML merge, not ``hermes config set``: v0.22.2's
-    ``config set`` refuses a value that "looks like a list/mapping", and the
+    It goes through the YAML merge, not ``hermes config set``: from v0.22.2
+    (still at v0.22.4) ``config set`` refuses a value that "looks like a list/mapping", and the
     persona addendum's ``- hal0-admin: …`` lines do, so the write failed
     (non-fatally) and the prompt never landed. ``{}`` when there is no
     prompt, so an existing value is left alone.

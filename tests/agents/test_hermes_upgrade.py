@@ -18,7 +18,8 @@ from typer.testing import CliRunner
 import hal0.cli.agent_commands as ac
 from hal0.agents import hermes_provision as hp
 
-PIN = "d923a5eb487a17c0a68801bba9ef0f56c81040a8"  # the shipped pin, v0.22.2
+PIN = "4d04303818b61bf3aa09278af48356315515965b"  # the shipped pin, v0.22.4
+PREV_PIN = "d923a5eb487a17c0a68801bba9ef0f56c81040a8"  # v0.22.2, still vetted
 
 
 @pytest.fixture
@@ -47,6 +48,14 @@ def test_upgrade_to_a_vetted_sha_passes_the_ref(provision_calls: list[dict[str, 
     result = _upgrade("--to", PIN)
     assert result.exit_code == 0, result.output
     assert provision_calls == [{"repair": True, "ref": PIN}]
+
+
+def test_upgrade_to_the_previous_pin_stays_allowed(provision_calls: list[dict[str, Any]]) -> None:
+    # v0.22.2 stays in VETTED_HERMES_REFS after the v0.22.4 bump, so an operator
+    # can still build it back with --to until the next `hal0 update`.
+    result = _upgrade("--to", PREV_PIN)
+    assert result.exit_code == 0, result.output
+    assert provision_calls == [{"repair": True, "ref": PREV_PIN}]
 
 
 @pytest.mark.parametrize(

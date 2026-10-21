@@ -25,7 +25,9 @@ The template matches what upstream's ``generate_systemd_unit(system=True,
 run_as_user="hal0")`` writes at ``d923a5eb`` (``hermes_cli/gateway.py:3256``),
 once :mod:`hal0.agents.hermes_gateway_unit` has normalised it to
 ``current/``. The test fixture ``tests/fixtures/hermes/gateway-unit-v0.22.2.service``
-is that output. Where upstream reads the target user's Hermes config, the
+is that output. v0.22.4 (``4d043038``, ``gateway.py:3196``) generates the same
+unit byte for byte: the generator and every helper it calls are unchanged, and
+both refs render an identical unit from the same inputs. Where upstream reads the target user's Hermes config, the
 template uses upstream's defaults instead, because root must not read
 ``hal0``'s config:
 

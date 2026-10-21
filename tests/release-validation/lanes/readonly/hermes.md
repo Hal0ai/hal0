@@ -101,8 +101,8 @@ chat messages — that is the `hermes-e2e` stateful lane.
 
 17. **A warn names its probe.** `provision.json` `smoke_tests` with `status: warn` must carry a `failures[]` list whose names match the false entries in `details.results`; a warn with no named probe is a finding (20261016003929: 2 failures, both named). Also confirm `/var/lib/hal0/.hermes/.env` absence is expected: `/api/status` advertises an `env_path` there that does not exist on a fresh install (treated as upstream behaviour, unverified).
 
-18. **Pin.** From v1.6.0 Hermes is v0.22.2, commit `d923a5eb`, on fresh and upgraded boxes
-   alike. Read the commit from the install, not from `hermes --version` (that makes a network
+18. **Pin.** Hermes is v0.22.4, commit `4d043038`, on fresh and upgraded boxes alike (v1.6.0
+   shipped v0.22.2, `d923a5eb`, which stays vetted as the flip-back target). Read the commit from the install, not from `hermes --version` (that makes a network
    update check and needs tags): the live release's recorded sha, or `git rev-parse HEAD` in its
    checkout. A box on any other sha is a finding.
 19. **Session history is kept.** `/var/lib/hal0/.hermes/config.yaml` must carry
@@ -122,13 +122,26 @@ chat messages — that is the `hermes-e2e` stateful lane.
    0.19.0-shape unit and a `warn` row naming that command; after it, `pass`. A kanban card that
    stays queued while the gateway journal logs `spawn of <task> deferred, host cannot place
    the worker` is this case.
-22. **MCP client on mcp 2.0.** The v0.22.2 venv carries mcp 2.0, which dropped
+22. **MCP client on mcp 2.x.** The v0.22.4 venv carries mcp 2.3 (v0.22.2 had 2.0), which dropped
    `streamablehttp_client`. `provision.json` `mcp_wire` must be `ok` with stage `connected` for
    both servers (not an `ImportError` at stage `import`), and check 2b still applies.
 23. **Board token harvest.** `curl -s http://127.0.0.1:9119/ | grep -c __HERMES_SESSION_TOKEN__`
    must be at least 1, and neither `systemctl show hal0-agent@hermes -p Environment` nor
    `config.yaml` may set `HERMES_DASHBOARD_PUBLIC_URL` / `dashboard.public_url`: either one
    turns the dashboard login on and the token disappears from the page.
+24. **Dashboard chat runs through the gateway (v0.22.3+).** The Ink TUI behind the dashboard's
+   Chat tab (`/api/pty`) is now a client of the gateway daemon: it finds it through
+   `/var/lib/hal0/.hermes/gateway.sock` and never runs turns itself. With
+   `hermes-gateway.service` active, a Chat-tab prompt must get an answer and
+   `ps -u hal0 -o pid,cgroup,args | grep "gateway run"` must show exactly one gateway, in
+   `hermes-gateway.service`. A second `gateway run` in the `hal0-agent@hermes` cgroup (an
+   unmanaged gateway the TUI spawned) is a `major` finding. With the gateway stopped, record
+   what the Chat tab shows; a hang with no error is a finding.
+25. **Upgrade from v0.22.2.** On the UPGRADE box, the first `hal0 update` must rebuild
+   (`release.json` `ref` = `4d043038…`, `previous` = the v0.22.2 release), restart
+   `hermes-gateway.service` onto the new release, and leave `config.yaml` at
+   `_config_version: 51` with `sessions.auto_prune: false` intact. The session count must match
+   the pre-update baseline (item 19).
 
 ## Carry-forward
 

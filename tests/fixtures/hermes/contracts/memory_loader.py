@@ -5,8 +5,8 @@
 Adapter lane: **hal0-memory** (installed seed layout + registration collector).
 
 Copied from the reviewed official pin
-``d923a5eb487a17c0a68801bba9ef0f56c81040a8`` (``plugins/memory/__init__.py``,
-Hermes v0.22.2).
+``4d04303818b61bf3aa09278af48356315515965b`` (``plugins/memory/__init__.py``,
+Hermes v0.22.4; the loader is unchanged since v0.22.2).
 
 Frozen facts:
 
@@ -21,7 +21,7 @@ Frozen facts:
   provider (``plugins/memory/__init__.py:397-485``). Since 0.22 the collector
   forwards any other ``register_*`` call to a real ``PluginContext``.
 * **The general PluginContext** — gained an INERT
-  ``register_memory_provider`` in 0.22 (``hermes_cli/plugins.py:723-732``): it
+  ``register_memory_provider`` in 0.22 (``hermes_cli/plugins.py:719-728``): it
   only records the provider. Activation still belongs to the memory loader,
   through ``memory.provider``.
 """

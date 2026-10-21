@@ -8,8 +8,8 @@
 # a full sha in VETTED_HERMES_REFS. `hal0 agent upgrade hermes --to=<sha>`
 # builds another vetted commit until the next `hal0 update`.
 #
-# Compatibility posture: pin the reviewed official v0.22.2 release commit
-# (d923a5eb, ADR-0034 decision 8) so provider, memory, and voice plugin
+# Compatibility posture: pin the reviewed official v0.22.4 release commit
+# (4d043038; v0.22.2 d923a5eb before it, ADR-0034 decision 8) so provider, memory, and voice plugin
 # contracts cannot drift underneath the bundled hal0 adapters. Lift this pin
 # only through the compatibility review: re-vendor
 # tests/fixtures/hermes/contracts/ and move VETTED_HERMES_REFS and
@@ -32,4 +32,4 @@
 # `hermes-venv-missing-mcp-extra`). The provisioning `mcp_wire` phase now
 # hard-fails when the venv client cannot import/connect — do not drop this
 # extra.
-hermes-agent[web,mcp] @ git+https://github.com/NousResearch/hermes-agent.git@d923a5eb487a17c0a68801bba9ef0f56c81040a8
+hermes-agent[web,mcp] @ git+https://github.com/NousResearch/hermes-agent.git@4d04303818b61bf3aa09278af48356315515965b

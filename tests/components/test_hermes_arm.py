@@ -33,7 +33,8 @@ def test_unprovisioned_skips(tmp_path) -> None:
     assert res["status"] == "skipped"
 
 
-PIN = "d923a5eb487a17c0a68801bba9ef0f56c81040a8"  # the shipped pin, v0.22.2
+PIN = "4d04303818b61bf3aa09278af48356315515965b"  # the shipped pin, v0.22.4
+PREV_PIN = "d923a5eb487a17c0a68801bba9ef0f56c81040a8"  # v0.22.2, the previous pin
 OLD_PIN = "3ef6bbd201263d354fd83ec55b3c306ded2eb72a"  # 0.19.0, before #2615 PR 4
 
 
@@ -88,7 +89,16 @@ def test_a_0_19_0_release_on_312_is_stale_after_the_pin_bump(tmp_path) -> None:
     venv = _live_release(ref=OLD_PIN, minor="3.12")
     res = hermes_arm.converge_hermes(venv=venv, apply=False)
     assert res["status"] == "stale"
-    assert "differs from target d923a5eb487a" in res["trigger"]
+    assert "differs from target 4d04303818b6" in res["trigger"]
+
+
+def test_a_v0_22_2_release_is_stale_after_the_v0_22_4_bump(tmp_path) -> None:
+    """A box on the v0.22.2 release rebuilds on its next `hal0 update`, same minor."""
+    venv = _live_release(ref=PREV_PIN, minor="3.14")
+    res = hermes_arm.converge_hermes(venv=venv, apply=False)
+    assert res["status"] == "stale"
+    assert "differs from target 4d04303818b6" in res["trigger"]
+    assert "interpreter" not in res["trigger"]
 
 
 def test_interpreter_minor_drift_triggers(tmp_path) -> None:
