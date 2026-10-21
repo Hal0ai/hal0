@@ -279,6 +279,15 @@ sudo systemctl restart hal0-agent@hermes
 curl -X POST http://localhost:8080/api/agents/hermes/restart
 ```
 
+Restart the Hermes gateway with `sudo systemctl restart hermes-gateway`, not
+with `hermes gateway restart` or `hermes gateway start`. Upstream's commands
+regenerate the unit when it differs from what they would write, which turns
+hal0's stable `/var/lib/hal0/hermes/current/` paths back into the paths of
+one release under `/var/lib/hal0/hermes/releases/<id>/`. The gateway then
+stays on that release when hal0 builds a newer one, and `hermes gateway status`
+reports the unit as outdated. `sudo hal0 agent install hermes` regenerates and
+normalises the unit again.
+
 </TabItem>
 <TabItem label="Uninstall">
 
