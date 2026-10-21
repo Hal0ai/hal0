@@ -42,6 +42,7 @@ applying. Add those subsections to a version's section to surface them; see
 
 ### Changed
 
+- **A stale or invalid `HAL0_HERMES_PYTHON` no longer stops a Hermes build.** Before, a value from the environment or from `/etc/hal0/hermes-python.env` that failed validation, or a file the parser rejected, made `hal0 agent install hermes`, `hal0 update` and the preflight fail until an operator fixed it by hand. The value is now discarded with a `hermes-python-discarded` warning that names it, why it failed and the interpreter chosen instead. hal0 then re-probes (`python3.12` on PATH, then uv) and writes the new interpreter back to the file. When the file is read-only to the `hal0` user, the re-probed interpreter serves that build and the file is left alone. If nothing is found the error is unchanged (ADR-0032 decision 9, #2615).
 - **The dashboard's optional browser Sentry no longer sends the browser's User-Agent or Referer.** This only matters for a dashboard built with `VITE_SENTRY_DSN`. The Sentry SDK moved to v11, which replaced `sendDefaultPii` with per-category `dataCollection` settings that collect everything unless switched off. hal0 switches every category off: no user info or IP inference, no cookies, no request or response headers, no bodies and no URL query strings. Before, the SDK attached the User-Agent and Referer headers to every event. Spans still travel inside their transaction event, so the existing secret scrubber still sees all of them. (#2834).
 
 ### Fixed
