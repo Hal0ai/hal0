@@ -73,8 +73,11 @@ dependencies = [
   # Every install and every `hal0 update` therefore delivers it. The wheels are
   # py3-none manylinux/musllinux builds for x86_64 and aarch64. Capped like the
   # other build-affecting pins: a new minor can change `uv export` or
-  # `uv pip sync` output, so raise it deliberately.
-  "uv>=0.12.22,<0.14",
+  # `uv pip sync` output, so raise it deliberately. The ceiling also keeps a
+  # quarantine like upstream Hermes's: only a uv release at least 7 days old
+  # at the time of the pin (0.13.1, 2026-10-14) is allowed, because the
+  # installer resolves this range rather than uv.lock.
+  "uv>=0.12.22,<0.13.2",
 ]
 
 [project.optional-dependencies]
