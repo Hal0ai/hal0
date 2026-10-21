@@ -117,6 +117,18 @@ def converge_component(
                 existing_status=existing.get("status"),
             )
             return result
+        # A note from the last applying converge (e.g. "Hermes config keys
+        # applied; restart hal0-agent@hermes ...") must survive the diagnose
+        # pass hal0-api runs at boot. `hal0 update` restarts hal0-api before
+        # it reads the component table, so without this the boot diagnose
+        # re-recorded the row and the note never reached the operator. It is
+        # replaced by the next applying converge's own result.
+        if (
+            existing.get("note")
+            and "note" not in result
+            and result.get("status") == existing.get("status")
+        ):
+            result = {**result, "note": existing["note"]}
 
     record_component_result(comp.id, result)
     return result
