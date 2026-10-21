@@ -115,7 +115,11 @@ def hermes_build_trigger(venv: Path | None = None) -> str | None:
         from hal0.agents import hermes_release as rel
 
         layout = rel.Layout.for_venv(venv or (var_lib() / "venvs" / "hermes"))
-        if not layout.venv_link.exists() and rel.live_release(layout) is None:
+        if (
+            not layout.venv_link.exists()
+            and rel.live_release(layout) is None
+            and not rel.complete_releases(layout)
+        ):
             return None
         return rel.build_trigger(layout, rel.require_vetted(rel.read_pin().ref), rel.target_minor())
     except Exception:
@@ -148,7 +152,15 @@ def converge_hermes(
     layout = rel.Layout.for_venv(venv)
     # A live release with a missing venvs/hermes link (a builder that died
     # mid-switch) is still provisioned: the builder relinks it.
-    if not (venv / "bin" / "python").exists() and rel.live_release(layout) is None:
+    # A live release with a missing venvs/hermes link, or a release tree a
+    # migration left without current (a builder that died mid-switch), is
+    # still provisioned: the builder relinks or adopts it. Only a tree with no
+    # complete release at all is "not provisioned".
+    if (
+        not (venv / "bin" / "python").exists()
+        and rel.live_release(layout) is None
+        and not rel.complete_releases(layout)
+    ):
         return {"status": "skipped", "reason": "hermes not provisioned"}
 
     pinned = hermes._hermes_version_pin()

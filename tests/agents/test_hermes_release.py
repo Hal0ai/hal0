@@ -963,3 +963,95 @@ def test_root_drop_forwards_the_wait_printer(tree, monkeypatch) -> None:
     )
     rel.main([json.dumps({"caller": "provision", "print_wait": True})])
     assert callable(calls[0]["on_wait"])
+
+
+# ── re-review follow-ups (a)-(c) ─────────────────────────────────────────────
+
+
+def _crashed_mid_migration(tree) -> rel.Layout:
+    """The state a builder leaves when it dies after the rename, before ``current``."""
+    layout = rel.Layout.for_venv(tree["venv"])
+    rdir = layout.releases / f"legacy-{PIN[:12]}"
+    (rdir / "venv" / "bin").mkdir(parents=True)
+    (rdir / "venv" / "bin" / "python").write_text("legacy")
+    (rdir / "release.json").write_text(
+        json.dumps({"id": rdir.name, "legacy": True, "ref": PIN[:12], "python_minor": "3.12"})
+    )
+    (layout.root / rel.STOPPED_UNITS).write_text(json.dumps({"units": [rel.AGENT_UNIT]}))
+    assert not tree["venv"].exists() and not layout.current.exists()
+    return layout
+
+
+def test_an_orphaned_pre_layout_release_is_adopted_and_the_migration_retried(tree) -> None:
+    layout = _crashed_mid_migration(tree)
+    units = FakeUnits()
+    out = _ensure(tree, FakeTools(), units)
+    assert out.status == "activated", out.error
+    assert out.previous_id == f"legacy-{PIN[:12]}"
+    assert os.readlink(layout.previous) == f"releases/legacy-{PIN[:12]}"
+    assert tree["venv"].is_symlink()
+    # The unit the dead builder stopped was started again.
+    assert ("start", rel.AGENT_UNIT) in units.log
+
+
+def test_adoption_alone_restores_the_pre_migration_host(tree) -> None:
+    layout = _crashed_mid_migration(tree)
+    assert rel.repair_venv_link(layout) is True
+    assert os.readlink(layout.current) == f"releases/legacy-{PIN[:12]}"
+    assert (tree["venv"] / "bin" / "python").read_text() == "legacy"
+    assert rel.build_trigger(layout, PIN, "3.12") == "the pre-layout release is live"
+
+
+def test_a_never_activated_release_is_not_adopted(tree) -> None:
+    layout = rel.Layout.for_venv(tree["venv"])
+    rdir = layout.releases / f"{PIN[:12]}-20261021T000000Z"
+    (rdir / "venv" / "bin").mkdir(parents=True)
+    (rdir / "venv" / "bin" / "python").write_text("")
+    (rdir / "release.json").write_text(json.dumps({"id": rdir.name, "ref": PIN}))
+    assert rel.repair_venv_link(layout) is False
+    assert not layout.current.exists()
+
+
+def test_the_link_is_repaired_before_stranded_units_start(tree) -> None:
+    assert _ensure(tree, FakeTools()).ok
+    layout = rel.Layout.for_venv(tree["venv"])
+    tree["venv"].unlink()
+    (layout.root / rel.STOPPED_UNITS).write_text(json.dumps({"units": [rel.AGENT_UNIT]}))
+    seen: list[bool] = []
+
+    class Spy(FakeUnits):
+        def start(self, unit: str) -> bool:
+            seen.append(tree["venv"].is_symlink())
+            return super().start(unit)
+
+    assert _ensure(tree, FakeTools(), Spy()).status == "converged"
+    assert seen == [True]
+
+
+@pytest.mark.parametrize("state", ["disabled", "masked", "masked-runtime"])
+def test_a_stranded_unit_the_operator_turned_off_stays_off(tree, state: str) -> None:
+    """#2823 holds for crash recovery too."""
+    assert _ensure(tree, FakeTools()).ok
+    layout = rel.Layout.for_venv(tree["venv"])
+    (layout.root / rel.STOPPED_UNITS).write_text(
+        json.dumps({"units": [rel.AGENT_UNIT, rel.GATEWAY_UNIT]})
+    )
+
+    class Off(FakeUnits):
+        def enabled_state(self, unit: str) -> str:
+            return state if unit == rel.GATEWAY_UNIT else "enabled"
+
+    units = Off()
+    _ensure(tree, FakeTools(), units)
+    assert units.log == [("start", rel.AGENT_UNIT)]
+
+
+def test_systemd_units_read_is_enabled_without_privilege() -> None:
+    calls: list[list[str]] = []
+
+    def _run(argv: list[str], **_kw: Any) -> Any:
+        calls.append(list(argv))
+        return subprocess.CompletedProcess(argv, 1, "disabled\n", "")
+
+    assert rel.SystemdUnits(run=_run, use_seam=True).enabled_state(rel.GATEWAY_UNIT) == "disabled"
+    assert calls == [["systemctl", "is-enabled", rel.GATEWAY_UNIT]]

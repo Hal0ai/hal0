@@ -743,6 +743,21 @@ class SystemdUnits:
     def active(self, unit: str) -> bool:
         return self._show(unit).get("ActiveState") == "active"
 
+    def enabled_state(self, unit: str) -> str:
+        """``systemctl is-enabled`` (no privilege needed); ``unknown`` on error."""
+        try:
+            proc = self._run(
+                ["systemctl", "is-enabled", unit],
+                capture_output=True,
+                text=True,
+                timeout=30,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return "unknown"
+        out = (getattr(proc, "stdout", "") or "").strip()
+        return out.splitlines()[0] if out else "unknown"
+
     def restarts(self, unit: str) -> int | None:
         try:
             return int(self._show(unit).get("NRestarts", ""))
@@ -880,6 +895,47 @@ def _clear_stopped_units(layout: Layout) -> None:
         (layout.root / STOPPED_UNITS).unlink()
 
 
+_OFF_STATES = frozenset({"disabled", "masked", "masked-runtime"})
+
+
+def complete_releases(layout: Layout) -> list[Release]:
+    """Every release with a ``release.json`` and a venv interpreter, oldest first."""
+    if not layout.releases.is_dir():
+        return []
+    out = []
+    for rdir in sorted(layout.releases.iterdir()):
+        release = read_release(rdir) if rdir.is_dir() else None
+        if release is not None and (release.venv / "bin" / "python").exists():
+            out.append(release)
+    return out
+
+
+def _adopt_orphaned_pre_layout_release(layout: Layout) -> bool:
+    """Make the pre-layout release ``current`` when a migration died mid-switch.
+
+    A crash after the venv moved into the pre-layout release ``venv/`` but
+    before the first ``current`` swap leaves no ``venvs/hermes``, no
+    ``current``, and the only working venv inside that release. Adopting it as
+    ``current`` (and relinking) restores the host as it was before the
+    migration; the pre-layout trigger then retries the migration normally.
+    Only a pre-layout release is adopted: any other complete release was
+    never activated and verified.
+    """
+    if layout.current.is_symlink() or layout.venv_link.exists():
+        return False
+    candidates = [r for r in complete_releases(layout) if r.data.get(_LEGACY_KEY)]
+    if not candidates:
+        return False
+    adopted = candidates[-1]
+    try:
+        _swap_link(layout.current, Path("releases") / adopted.id)
+    except OSError as exc:
+        log.warning("hermes_release.adopt_failed", release=adopted.id, error=str(exc))
+        return False
+    log.warning("hermes_release.adopted_orphaned_release", release=adopted.id)
+    return True
+
+
 def restart_stranded_units(layout: Layout, units: Any) -> list[str]:
     """Start units a dead builder stopped and never started again; return them."""
     try:
@@ -891,10 +947,19 @@ def restart_stranded_units(layout: Layout, units: Any) -> list[str]:
         if isinstance(data, dict)
         else []
     )
+    # #2823: never start a unit the operator has since disabled or masked,
+    # even one the dead builder had recorded as running.
+    enabled_state = getattr(units, "enabled_state", None)
+    started: list[str] = []
     for unit in names:
+        if callable(enabled_state) and enabled_state(unit) in _OFF_STATES:
+            log.info("hermes_release.stranded_unit_left_off", unit=unit)
+            continue
         if not units.active(unit):
             units.start(unit)
+        started.append(unit)
     _clear_stopped_units(layout)
+    names = started
     if names:
         log.warning("hermes_release.restarted_stranded_units", units=names)
     return names
@@ -911,7 +976,7 @@ def repair_venv_link(layout: Layout) -> bool:
     link = layout.venv_link
     if link.exists() and not link.is_symlink():
         return False
-    if live_release(layout) is None:
+    if live_release(layout) is None and not _adopt_orphaned_pre_layout_release(layout):
         return False
     try:
         if link.is_symlink() and Path(os.readlink(link)) == layout.venv_target:
@@ -1503,8 +1568,10 @@ def ensure_release(
     try:
         with builder_lock(layout, caller=caller, wait=wait, on_wait=on_wait):
             sweep_incomplete(layout, run=run)
-            stranded = restart_stranded_units(layout, units)
+            # Relink first, so units a dead builder stopped start on a
+            # resolvable venvs/hermes.
             relinked = repair_venv_link(layout)
+            stranded = restart_stranded_units(layout, units)
             trigger = build_trigger(layout, target, target_minor())
             if trigger is None and not force:
                 notes = []

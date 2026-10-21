@@ -227,3 +227,17 @@ def test_build_trigger_helper_is_none_when_converged_or_absent(tmp_path) -> None
     assert hermes_arm.hermes_build_trigger(tmp_path / "nope" / "venvs" / "hermes") is None
     venv = _live_release()
     assert hermes_arm.hermes_build_trigger(venv) is None
+
+
+def test_a_tree_a_migration_crash_left_without_current_is_still_provisioned(tmp_path) -> None:
+    from hal0.agents import hermes_release as rel
+
+    venv = var_lib() / "venvs" / "hermes"
+    layout = rel.Layout.for_venv(venv)
+    rdir = layout.releases / "legacy-3ef6bbd20126"
+    (rdir / "venv" / "bin").mkdir(parents=True)
+    (rdir / "venv" / "bin" / "python").write_text("")
+    (rdir / "release.json").write_text(json.dumps({"legacy": True, "ref": "3ef6bbd20126"}))
+    res = hermes_arm.converge_hermes(venv=venv, apply=False)
+    assert res["status"] == "stale"
+    assert hermes_arm.hermes_build_trigger(venv) == "no live release"
