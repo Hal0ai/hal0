@@ -37,6 +37,42 @@ def client_isolated(app_isolated: FastAPI) -> Iterator[TestClient]:
         yield c
 
 
+class _Calls(list):  # type: ignore[type-arg]
+    """The fake's call log; reading it waits briefly for the first call.
+
+    The pull route schedules the download with ``asyncio.create_task`` and
+    returns 202 first, so under ``TestClient`` the task runs on the app's
+    loop thread concurrently with the test. ``len()`` and indexing wait up to
+    3 s for a call to land; an equality check (``== []``) does not wait.
+    """
+
+    def _settle(self) -> None:
+        deadline = time.monotonic() + 3.0
+        while not list.__len__(self) and time.monotonic() < deadline:
+            time.sleep(0.01)
+
+    def __len__(self) -> int:
+        self._settle()
+        return list.__len__(self)
+
+    def __getitem__(self, index: Any) -> Any:
+        self._settle()
+        return list.__getitem__(self, index)
+
+
+def _wait_for_fake_pull(app: FastAPI, model_id: str) -> None:
+    """Wait for the fake pull the route scheduled to finish.
+
+    The route starts it with ``asyncio.create_task`` and returns 202 first,
+    so under ``TestClient`` it runs on the loop thread concurrently with the
+    test, and would overwrite a state the test sets in the meantime.
+    """
+    deadline = time.monotonic() + 3.0
+    while app.state.model_pull_jobs[model_id].state != "completed":
+        assert time.monotonic() < deadline, "the fake pull never completed"
+        time.sleep(0.01)
+
+
 @pytest.fixture
 def fake_run_pull(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
     """Patch run_pull to record calls + drive job state synchronously.
@@ -45,7 +81,7 @@ def fake_run_pull(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
     The fake transitions the job straight to ``completed`` so SSE / status
     routes see a terminal frame on their first poll.
     """
-    calls: list[dict[str, Any]] = []
+    calls: list[dict[str, Any]] = _Calls()
 
     async def fake(job: PullJob, *, hf_repo: str, hf_file: str, **kw: Any) -> None:
         calls.append({"job": job, "hf_repo": hf_repo, "hf_file": hf_file, **kw})
@@ -273,6 +309,7 @@ def test_pull_idempotent_when_already_running(
     # First call completes via the fake. Manually re-set state to
     # ``running`` so the second call hits the "already in flight" branch.
     client_isolated.post("/api/models/qwen3-4b/pull")
+    _wait_for_fake_pull(app_isolated, "qwen3-4b")
     jobs = app_isolated.state.model_pull_jobs
     jobs["qwen3-4b"].state = "running"
     r = client_isolated.post("/api/models/qwen3-4b/pull")
@@ -284,9 +321,15 @@ def test_pull_status_returns_job_dict(
     client_isolated: TestClient, fake_run_pull: list[dict[str, Any]]
 ) -> None:
     client_isolated.post("/api/models/qwen3-4b/pull")
-    r = client_isolated.get("/api/models/qwen3-4b/pull/status")
-    assert r.status_code == 200, r.text
-    body = r.json()
+    # The scheduled pull runs on the loop thread concurrently with the test.
+    deadline = time.monotonic() + 3.0
+    while True:
+        r = client_isolated.get("/api/models/qwen3-4b/pull/status")
+        assert r.status_code == 200, r.text
+        body = r.json()
+        if body["state"] == "completed" or time.monotonic() > deadline:
+            break
+        time.sleep(0.01)
     assert body["model_id"] == "qwen3-4b"
     assert body["state"] == "completed"
     assert body["bytes_downloaded"] == body["bytes_total"]
@@ -305,6 +348,7 @@ def test_pull_cancel_flips_flag(
 ) -> None:
     """Cancelling an in-flight job sets the cancel flag."""
     client_isolated.post("/api/models/qwen3-4b/pull")
+    _wait_for_fake_pull(app_isolated, "qwen3-4b")
     jobs = app_isolated.state.model_pull_jobs
     jobs["qwen3-4b"].state = "running"  # simulate live download
     r = client_isolated.post("/api/models/qwen3-4b/pull/cancel")
@@ -467,7 +511,14 @@ def test_pull_persists_job_to_disk(
     on_disk = json.loads(job_file.read_text(encoding="utf-8"))
     assert on_disk["model_id"] == "qwen3-4b"
     assert "state" in on_disk
-    # The terminal snapshot includes bytes_downloaded from the fake.
+
+    # The background task then persists its terminal snapshot, which includes
+    # bytes_downloaded from the fake. Wait for it: the route returns before
+    # the task runs.
+    deadline = time.monotonic() + 3.0
+    while on_disk.get("state") in ("queued", "running") and time.monotonic() < deadline:
+        time.sleep(0.05)
+        on_disk = json.loads(job_file.read_text(encoding="utf-8"))
     assert on_disk["bytes_downloaded"] == 1024
 
 

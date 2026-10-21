@@ -60,6 +60,13 @@ REVOKED_SSE_EVENT: Final[bytes] = b'event: revoked\ndata: {"reason": "credential
 #: subscriptions, run its ``finally`` blocks) before it is cancelled.
 STREAM_DRAIN_TIMEOUT_S: float = 5.0
 
+#: Body chunks a revoked stream may still send, and have dropped, while it
+#: winds down through the disconnect (see :func:`guard_http_stream`) before it
+#: is stopped with :class:`_StreamRevoked` instead. Starlette's
+#: ``StreamingResponse`` sends one or two; the cap stops an app that sends
+#: without ever yielding to the loop from spinning on dropped chunks.
+REVOKED_CHUNKS_DROPPED_MAX: Final[int] = 32
+
 #: How often the process-wide ticker re-checks every open socket and stream.
 #: Bounds how long one outlives the expiry of the session cookie it was
 #: opened with; a rotation does not wait for it.
@@ -349,10 +356,18 @@ async def guard_http_stream(
 
     On revocation:
 
-    - nothing more the app sends reaches the client; a later body chunk
-      raises :class:`_StreamRevoked` (an ``OSError``, the same thing a send
-      on a closed connection raises) to stop a generator that is still
-      producing;
+    - nothing more the app sends reaches the client. If the app listens for
+      the disconnect below (it is waiting in ``receive()``, or has been
+      handed ``http.disconnect``), a later body chunk is dropped quietly.
+      Raising there would throw out of Starlette's ``async for`` over the
+      route's generator and leave it suspended at ``yield``, so its
+      ``finally`` (unsubscribes, upstream closes) would wait for the garbage
+      collector; dropping it lets the generator run on to its next
+      ``await``, where the disconnect's cancellation closes it. An app that
+      is not listening, or that sends more than
+      :data:`REVOKED_CHUNKS_DROPPED_MAX` chunks, gets :class:`_StreamRevoked`
+      (an ``OSError``, the same thing a send on a closed connection raises)
+      to stop it producing;
     - the app's ``receive()`` returns ``http.disconnect``, a pending one
       included, which is how Starlette's ``StreamingResponse`` and routes
       polling ``request.is_disconnected()`` learn a client went away; their
@@ -371,6 +386,9 @@ async def guard_http_stream(
     stop = asyncio.Event()  # set once ``revoked`` is; exists before arming
     watcher: asyncio.Future[None] | None = None
     body_done = False
+    listening = 0  # receive() calls waiting for a disconnect right now
+    disconnect_delivered = False
+    dropped = 0
     event_stream = False
     started = False
     finished = False
@@ -379,8 +397,9 @@ async def guard_http_stream(
         return revoked is not None and revoked.is_set()
 
     async def guarded_receive() -> Message:
-        nonlocal body_done
+        nonlocal body_done, listening, disconnect_delivered
         if stopped():
+            disconnect_delivered = True
             return {"type": "http.disconnect"}
         if not body_done:
             # The request body is read before any response streams; only a
@@ -391,18 +410,22 @@ async def guard_http_stream(
             return message
         incoming = asyncio.ensure_future(receive())
         waiter = asyncio.ensure_future(stop.wait())
+        listening += 1
         try:
             await asyncio.wait({incoming, waiter}, return_when=asyncio.FIRST_COMPLETED)
         finally:
+            listening -= 1
             waiter.cancel()
             if not incoming.done():
                 incoming.cancel()
         if incoming.done() and not incoming.cancelled() and not stopped():
             return incoming.result()
+        if stopped():
+            disconnect_delivered = True
         return {"type": "http.disconnect"}
 
     async def guarded_send(message: Message) -> None:
-        nonlocal started, finished, event_stream
+        nonlocal started, finished, event_stream, dropped
         kind = message.get("type")
         if kind == "http.response.start":
             started = True
@@ -413,9 +436,12 @@ async def guard_http_stream(
                 arm()
         elif kind == "http.response.body":
             if stopped():
-                if message.get("more_body", False):
-                    raise _StreamRevoked("stream credential revoked")
-                return  # the app ending its response: ours ends it instead
+                if not message.get("more_body", False):
+                    return  # the app ending its response: ours ends it instead
+                if (listening or disconnect_delivered) and dropped < REVOKED_CHUNKS_DROPPED_MAX:
+                    dropped += 1
+                    return  # the app is winding down: see the docstring
+                raise _StreamRevoked("stream credential revoked")
             if not message.get("more_body", False):
                 finished = True
         await send(message)

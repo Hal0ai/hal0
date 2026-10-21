@@ -15,6 +15,7 @@ The HF tree fetch is monkeypatched at the route module boundary
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 from typing import Any
 
@@ -168,7 +169,12 @@ def test_update_pins_dest_to_existing_path(
     assert body["state"] == "queued"
     assert body["dest_path"] == str(fpath)
     assert body["update"] is True
-    # The background task must receive the pinned destination + coords.
+    # The background task must receive the pinned destination + coords. The
+    # route schedules it with asyncio.create_task and returns first, so under
+    # TestClient it runs on the loop thread concurrently with this test.
+    deadline = time.monotonic() + 3.0
+    while not captured and time.monotonic() < deadline:
+        time.sleep(0.01)
     assert captured["dest_override"] == str(fpath)
     assert captured["hf_repo"] == "org/stale"
     assert captured["hf_file"] == "stale.gguf"
