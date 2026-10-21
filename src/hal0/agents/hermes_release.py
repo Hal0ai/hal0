@@ -1630,7 +1630,12 @@ def sweep_incomplete(layout: Layout, *, run: Runner = _run) -> list[str]:
 
 
 def build_trigger(
-    layout: Layout, ref: str, minor: str, platform_extras: tuple[str, ...] | list[str] = ()
+    layout: Layout,
+    ref: str,
+    minor: str,
+    platform_extras: tuple[str, ...] | list[str] = (),
+    *,
+    hermes_home: Path | str | None = None,
 ) -> str | None:
     """Why a build is needed, or ``None`` (ADR-0032 decision 6's three triggers).
 
@@ -1639,6 +1644,12 @@ def build_trigger(
     installed by hand count as present. Only a lock-built release is judged,
     since only the lock path installs platform extras, and only extras its
     checkout declares, or the trigger would fire on every update.
+
+    A fifth: Hermes boots the live release into a dependency generation its
+    own lazy installer committed under ``HERMES_HOME/installs``
+    (:func:`hermes_platforms.committed_generation`), so what runs is not the
+    verified release venv. A rebuild gets a new checkout path, hence a new
+    install key with no generation, and carries the generation's platform SDKs.
     """
     if layout.venv_link.exists() and not layout.venv_link.is_symlink():
         return "pre-layout venv: venvs/hermes is a real directory"
@@ -1660,6 +1671,13 @@ def build_trigger(
         return f"live ref {live.ref[:12]} differs from target {ref[:12]}"
     if live.python_minor != minor:
         return f"live interpreter {live.python_minor} differs from target {minor}"
+    home = Path(hermes_home) if hermes_home is not None else hp.HERMES_HOME_DEFAULT
+    generation = hpl.committed_generation(home, live.src)
+    if generation is not None:
+        return (
+            f"Hermes runs the live release from its own lazily installed environment "
+            f"{generation}, not from the release venv"
+        )
     if platform_extras and live.data.get("lock") is True:
         defined = _checkout_extras(live.src)
         wanted = [e for e in platform_extras if defined is None or e in defined]
@@ -1889,7 +1907,7 @@ def ensure_release(
                 return ReleaseOutcome(
                     status="build_failed", ref=target, error=str(exc), remedy=REPAIR_REMEDY
                 )
-            trigger = build_trigger(layout, target, minor, platform_extras)
+            trigger = build_trigger(layout, target, minor, platform_extras, hermes_home=home)
             if trigger is None and not force:
                 notes = []
                 if relinked:
@@ -1946,9 +1964,13 @@ def ensure_release(
                 )
             # The live venv's platform SDKs (the pre-layout venv's too) carry
             # over, whether a lazy install or the operator put them there.
-            carried = (
-                hpl.installed_platform_extras(layout.venv_link) if layout.venv_link.exists() else ()
-            )
+            carried: set[str] = set()
+            if layout.venv_link.exists():
+                carried.update(hpl.installed_platform_extras(layout.venv_link))
+            live = live_release(layout)
+            generation = hpl.committed_generation(home, live.src) if live is not None else None
+            if generation is not None:
+                carried.update(hpl.installed_platform_extras(generation))
             build_extras = sorted({*platform_extras, *carried})
             log.info(
                 "hermes_release.build_start",

@@ -122,7 +122,14 @@ board executor harvests are unchanged at NEW.
      extras alone. `release.json` records them as `platform_extras`, and a
      configured platform whose extra is missing from a lock-built live
      release is a build trigger. `matrix` is never added: its `python-olm`
-     builds from source, and upstream's adapter degrades without it.
+     builds from source, and upstream's adapter degrades without it. hal0 does
+     not rely on upstream's lazy installs instead. In a release, a lazy
+     install succeeds at most once per process, and only takes effect after
+     a restart. It commits a pm "generation" under `HERMES_HOME/installs`
+     holding that one extra, without the pin's, and every later Hermes
+     process for the release boots from that generation instead of the
+     verified release venv. Such a generation for the live release is
+     therefore a build trigger too.
 2. **Amends ADR-0032 decision 9: a uv-managed 3.14 is preferred.**
    - The builder uses a uv-managed CPython 3.14 under
      `/var/lib/hal0/hermes/python` (see the amendment at the end of this
