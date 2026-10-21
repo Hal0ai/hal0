@@ -88,14 +88,19 @@ board executor harvests are unchanged at NEW.
 ## Decision
 
 1. **Amends ADR-0032 decision 1: dependencies come from upstream's lock.**
-   - When the vetted ref ships a `uv.lock`, the builder installs the release
-     in three steps:
+   - When the vetted ref ships a `uv.lock` whose `requires-python` admits the
+     venv's interpreter minor, the builder installs the release in three
+     steps:
      1. `uv export --frozen --extra web --extra mcp --no-emit-project` from
         the checkout;
      2. `uv pip sync --require-hashes` of that export into the release venv;
      3. `uv pip install --no-deps -e "<checkout>"`.
-   - A ref without a lock (`3ef6bbd2`) keeps ADR-0032's
-     `uv pip install -e "<checkout>[web,mcp]"`.
+   - A ref without a lock, or whose lock cannot serve that minor, keeps
+     ADR-0032's `uv pip install -e "<checkout>[web,mcp]"`, and `release.json`
+     records which path ran (`install: lock|editable`). Correction
+     (2026-10-21): this line first said `3ef6bbd2` has no lock. It does ship
+     a `uv.lock`, with `requires-python = ">=3.11, <3.14"`, so it takes the
+     lock path on 3.12 and the editable path on 3.14.
    - The extras stay `web` and `mcp`, read from the requirements line as
      ADR-0032 decision 3 says.
 2. **Amends ADR-0032 decision 9: a uv-managed 3.14 is preferred.**
