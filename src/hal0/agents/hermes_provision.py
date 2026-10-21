@@ -1711,6 +1711,9 @@ SESSION_START_HOOK: dict[str, Any] = {
     "command": "/usr/lib/hal0/hermes-hooks/inject-system-state.sh",
     "timeout": 2,
 }
+#: Hermes session pruning switch; hal0 writes it false (ADR-0034 decision 7).
+SESSIONS_AUTO_PRUNE_CONFIG_KEY = "sessions.auto_prune"
+
 #: Hermes config key that carries the active persona's prompt (#2839). See
 #: :func:`_build_config_overlay`; the contract suite pins it to the key
 #: ``hermes_cli/personality.py`` reads.
@@ -2250,6 +2253,11 @@ def _build_config_overlay(
         terminal_scratch = str(Path(hermes_home) / "scratch")
         pairs += [("terminal.backend", "local"), ("terminal.cwd", terminal_scratch)]
     pairs += [("agent.max_turns", 60), ("agent.reasoning_effort", "medium")]
+    # From v0.22 Hermes deletes ENDED sessions idle for 90 days at startup
+    # unless this is false (hermes_cli/config_defaults.py:2264-2278 at
+    # d923a5eb). hal0 keeps session history, as before the bump, until a
+    # retention setting exists (ADR-0034 decision 7).
+    pairs.append((SESSIONS_AUTO_PRUNE_CONFIG_KEY, False))
     # The active persona's prompt (#2839). ``agent.system_prompt`` is the
     # overlay Hermes resolves into each session's ephemeral system prompt
     # (hermes_cli/personality.py:118-123 at the pinned d923a5eb), read by the
@@ -2269,7 +2277,7 @@ def _build_config_overlay(
     ]
 
     # auxiliary.<task> side-job routing (feat/hermes-role-slots): utility-slot
-    # tasks render provider:"custom"+base_url; vision/web_extract stay "main".
+    # tasks render provider:"custom"+base_url; vision stays "main".
     for task, cfg in auxiliary_tasks.items():
         pairs += [
             (f"auxiliary.{task}.provider", cfg.get("provider", "main")),
@@ -2689,10 +2697,15 @@ def _merge_config_yaml_layers(
 
 #: Dotted config keys an older hal0 wrote that Hermes v0.22.2 never reads.
 #: ``agent.system_prompt_prelude`` had no reader at any pin (#2839; the persona
-#: prompt now goes to :data:`PERSONA_PROMPT_CONFIG_KEY`). Dropped from
-#: config.yaml at the next provision; an overrides.yaml that sets one still
-#: wins.
-RETIRED_HAL0_CONFIG_KEYS: tuple[str, ...] = ("agent.system_prompt_prelude",)
+#: prompt now goes to :data:`PERSONA_PROMPT_CONFIG_KEY`). The two auxiliary
+#: blocks lost their aux LLM in v0.22 and are ignored
+#: (hermes_cli/config_defaults.py:760, :776). Dropped from config.yaml at the
+#: next provision; an overrides.yaml that sets one still wins.
+RETIRED_HAL0_CONFIG_KEYS: tuple[str, ...] = (
+    "agent.system_prompt_prelude",
+    "auxiliary.web_extract",
+    "auxiliary.session_search",
+)
 
 
 def _retire_hal0_personality(data: dict[str, Any], persona_names: Iterable[str]) -> bool:
@@ -5370,15 +5383,18 @@ def _resolve_custom_providers(
 # roles use the platform role hint when supplied, allowing labels to change
 # without changing opaque slot identity or semantic assignment.
 #
-# Vision + web_extract have no dedicated slot — they stay provider:"main".
+# Vision has no dedicated slot — it stays provider:"main". Hermes v0.22
+# dropped the aux LLM for web_extract and session_search and ignores a
+# leftover ``auxiliary.<task>`` block for them
+# (hermes_cli/config_defaults.py:760, :776 at d923a5eb), so hal0 no longer
+# writes either; :data:`RETIRED_HAL0_CONFIG_KEYS` removes the old blocks.
 
 # The hal0-routed side-tasks (everything that should run on the cheap
-# `utility` slot). vision/web_extract are intentionally excluded — they
-# keep provider:"main" so they inherit the chat model (which may carry a
-# vision label) rather than the tiny utility model.
+# `utility` slot). vision is intentionally excluded — it keeps
+# provider:"main" so it inherits the chat model (which may carry a vision
+# label) rather than the tiny utility model.
 _UTILITY_AUX_TASKS: tuple[str, ...] = (
     "compression",
-    "session_search",
     "title_generation",
     "skills_hub",
     "mcp",
@@ -5387,7 +5403,7 @@ _UTILITY_AUX_TASKS: tuple[str, ...] = (
 # Tasks that always stay on the main chat provider regardless of slot
 # state. Rendered verbatim so the auxiliary: block is fully parameterized
 # (no hard-coded entries left in the template).
-_MAIN_AUX_TASKS: tuple[str, ...] = ("vision", "web_extract")
+_MAIN_AUX_TASKS: tuple[str, ...] = ("vision",)
 
 # Delegation retains its existing overlay adapter; auxiliary role policy lives
 # in role_slots.py and is shared with runtime consumers.
@@ -5457,9 +5473,7 @@ def _resolve_auxiliary_tasks(
     by_role = {entry.role: entry for entry in role_map.entries}
     task_roles = {
         "vision": "vision",
-        "web_extract": "vision",
         "compression": "compression",
-        "session_search": "session_search",
         "title_generation": "compression",
         "skills_hub": "skills_hub",
         "mcp": "mcp",

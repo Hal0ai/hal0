@@ -183,7 +183,7 @@ def test_config_yaml_contains_role_slot_blocks(target: tuple[Path, Path]) -> Non
     assert cfg["delegation"]["model"] == "qwen3-coder-test"
     assert cfg["delegation"]["provider"] == "custom"
     assert cfg["delegation"]["base_url"] == "http://127.0.0.1:8080/v1"
-    for task in ("compression", "session_search", "title_generation"):
+    for task in ("compression", "title_generation"):
         assert cfg["auxiliary"][task]["model"] == "qwen3-utility-test"
         assert cfg["auxiliary"][task]["provider"] == "custom"
     assert cfg["auxiliary"]["vision"]["provider"] == "main"

@@ -263,6 +263,31 @@ def test_retired_persona_key_is_dropped_from_existing_configs() -> None:
     assert "agent.system_prompt_prelude" in RETIRED_HAL0_CONFIG_KEYS
 
 
+# ── upstream defaults hal0 overrides or stops writing (ADR-0034) ───────────
+
+
+def test_hal0_turns_session_pruning_off() -> None:
+    # v0.22 prunes ended sessions after 90 idle days unless this is false
+    # (config_defaults.py:2264-2278). ADR-0034 decision 7: hal0 writes false.
+    from hal0.agents.hermes_provision import SESSIONS_AUTO_PRUNE_CONFIG_KEY
+
+    assert config_defaults.SESSIONS_AUTO_PRUNE_DEFAULT is True
+    assert config_defaults.SESSIONS_RETENTION_DAYS_DEFAULT == 90
+    assert SESSIONS_AUTO_PRUNE_CONFIG_KEY == config_defaults.SESSIONS_AUTO_PRUNE_KEY
+    assert _overlay()[config_defaults.SESSIONS_AUTO_PRUNE_KEY] is False
+
+
+def test_hal0_writes_no_retired_auxiliary_task() -> None:
+    # web_extract and session_search lost their aux LLM in v0.22
+    # (config_defaults.py:760, :776); a leftover block is ignored.
+    from hal0.agents import hermes_provision as hp
+
+    written = set(hp._MAIN_AUX_TASKS) | set(hp._UTILITY_AUX_TASKS)
+    assert not written & config_defaults.RETIRED_AUXILIARY_TASKS
+    for task in config_defaults.RETIRED_AUXILIARY_TASKS:
+        assert f"auxiliary.{task}" in hp.RETIRED_HAL0_CONFIG_KEYS
+
+
 # ── lane: hal0-voice ───────────────────────────────────────────────────────
 
 

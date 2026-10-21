@@ -1750,20 +1750,22 @@ def test_resolve_delegation_none_when_slot_not_ready() -> None:
 def test_resolve_auxiliary_tasks_routes_utility_group_to_utility_slot() -> None:
     aux = hp._resolve_auxiliary_tasks(_ROLE_SLOTS, hal0_base_url=_HAL0_V1)
     # Utility group → custom provider on the utility slot's model.
-    for task in ("compression", "session_search", "title_generation", "skills_hub", "mcp"):
+    for task in ("compression", "title_generation", "skills_hub", "mcp"):
         assert aux[task] == {
             "provider": "custom",
             "model": "qwen3-zero-coder-v2-0.8b-f16",
             "base_url": _HAL0_V1,
         }
-    # vision/web_extract always stay on the main chat provider.
-    for task in ("vision", "web_extract"):
-        assert aux[task] == {"provider": "main", "model": "", "base_url": ""}
+    # vision always stays on the main chat provider.
+    assert aux["vision"] == {"provider": "main", "model": "", "base_url": ""}
+    # web_extract/session_search have no aux LLM since Hermes v0.22.
+    assert "web_extract" not in aux
+    assert "session_search" not in aux
 
 
 def test_resolve_auxiliary_tasks_degrades_to_main_without_utility_slot() -> None:
     aux = hp._resolve_auxiliary_tasks(_ROLE_SLOTS[:1], hal0_base_url=_HAL0_V1)
-    for task in ("compression", "session_search", "title_generation"):
+    for task in ("compression", "title_generation"):
         assert aux[task]["provider"] == "main"
         assert aux[task]["model"] == ""
 
@@ -1784,14 +1786,13 @@ def test_resolve_auxiliary_tasks_routes_to_npu_virtual_when_utility_on_npu() -> 
         },
     ]
     aux = hp._resolve_auxiliary_tasks(slots, hal0_base_url=_HAL0_V1)
-    for task in ("compression", "session_search", "title_generation", "skills_hub", "mcp"):
+    for task in ("compression", "title_generation", "skills_hub", "mcp"):
         assert aux[task] == {
             "provider": "custom",
             "model": "hal0/npu",
             "base_url": _HAL0_V1,
         }
-    for task in ("vision", "web_extract"):
-        assert aux[task] == {"provider": "main", "model": "", "base_url": ""}
+    assert aux["vision"] == {"provider": "main", "model": "", "base_url": ""}
 
 
 def test_overlay_emits_delegation_and_auxiliary_keys() -> None:
@@ -1811,7 +1812,12 @@ def test_overlay_emits_delegation_and_auxiliary_keys() -> None:
     assert keys["auxiliary.compression.provider"] == "custom"
     assert keys["auxiliary.compression.model"] == "qwen3-zero-coder-v2-0.8b-f16"
     assert keys["auxiliary.compression.base_url"] == _HAL0_V1
-    assert keys["auxiliary.session_search.model"] == "qwen3-zero-coder-v2-0.8b-f16"
+    assert keys["auxiliary.title_generation.model"] == "qwen3-zero-coder-v2-0.8b-f16"
+    assert not any(
+        k.startswith(("auxiliary.session_search.", "auxiliary.web_extract.")) for k in keys
+    )
+    # Session pruning is off (ADR-0034 decision 7).
+    assert keys["sessions.auto_prune"] is False
     # vision stays on the main chat provider (no base_url key emitted).
     assert keys["auxiliary.vision.provider"] == "main"
     assert "auxiliary.vision.base_url" not in keys
