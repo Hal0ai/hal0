@@ -121,7 +121,8 @@ def hermes_build_trigger(venv: Path | None = None) -> str | None:
             and not rel.complete_releases(layout)
         ):
             return None
-        return rel.build_trigger(layout, rel.require_vetted(rel.read_pin().ref), rel.target_minor())
+        ref = rel.require_vetted(rel.read_pin().ref)
+        return rel.build_trigger(layout, ref, rel.target_minor(ref))
     except Exception:
         return None
 
@@ -170,7 +171,11 @@ def converge_hermes(
         target = rel.require_vetted(rel.read_pin().ref)
     except rel.ReleaseError as exc:
         return {**result, "status": "build_failed", "error": str(exc)}
-    trigger = rel.build_trigger(layout, target, rel.target_minor())
+    try:
+        minor = rel.target_minor(target)
+    except rel.ReleaseError as exc:
+        return {**result, "status": "build_failed", "error": str(exc)}
+    trigger = rel.build_trigger(layout, target, minor)
     if trigger is None:
         return {**result, "status": "converged"}
     result["trigger"] = trigger

@@ -39,7 +39,8 @@ class FakeTools:
         web: str | None = None,
         web_ok: bool = True,
         fail: Callable[[list[str]], bool] | None = None,
-        minor: str = "3.14",
+        minor: str = "3.12",
+        requires_python: str | None = None,
     ) -> None:
         self.head = head
         self.lock = lock
@@ -47,6 +48,7 @@ class FakeTools:
         self.web_ok = web_ok
         self.fail = fail
         self.minor = minor
+        self.requires_python = requires_python
         self.calls: list[list[str]] = []
         self.envs: list[dict[str, str]] = []
 
@@ -65,9 +67,13 @@ class FakeTools:
             elif "worktree" in argv and "add" in argv:
                 src = Path(argv[-2])
                 (src / "hermes_cli").mkdir(parents=True)
+                if self.requires_python:
+                    (src / "pyproject.toml").write_text(
+                        f'[project]\nname = "hermes-agent"\nrequires-python = "{self.requires_python}"\n'
+                    )
                 if self.lock:
                     (src / "uv.lock").write_text(
-                        'version = 1\nrevision = 3\nrequires-python = ">=3.14"\n'
+                        'version = 1\nrevision = 3\nrequires-python = ">=3.11"\n'
                     )
                 if self.web:
                     (src / "web").mkdir()
@@ -79,6 +85,8 @@ class FakeTools:
                 out = self.head + "\n"
             elif "describe" in argv:
                 out = "v2026.7.20\n"
+            elif "log" in argv and "--format=%cI" in argv:
+                out = "2026-07-20T12:00:00+00:00\n"
         elif argv[0] == UV and argv[1] == "venv":
             venv = Path(argv[-1])
             (venv / "bin").mkdir(parents=True)
@@ -171,7 +179,7 @@ def _ensure(
         "units": units if units is not None else FakeUnits(),
         "run": tools,
         "probe": OK_PROBE,
-        "python_resolver": lambda: "/usr/bin/python3.14",
+        "python_resolver": lambda m: f"/usr/bin/python{m}",
         "uv": UV,
         "stamp_file": tree["stamp"],
         "gateway_unit": tree["unit"],
@@ -236,9 +244,9 @@ def test_no_lock_falls_back_to_an_editable_install_with_extras(tmp_path: Path) -
 
 def test_triggers(tree) -> None:
     layout = rel.Layout.for_venv(tree["venv"])
-    assert rel.build_trigger(layout, PIN, "3.14") == "no live release"
+    assert rel.build_trigger(layout, PIN, "3.12") == "no live release"
     _legacy_venv(tree)
-    assert "pre-layout venv" in rel.build_trigger(layout, PIN, "3.14")
+    assert "pre-layout venv" in rel.build_trigger(layout, PIN, "3.12")
 
 
 # ── build ────────────────────────────────────────────────────────────────────
@@ -258,7 +266,7 @@ def test_fresh_install_builds_activates_stamps_and_links(tree) -> None:
     assert not layout.previous.exists()
     data = live.data
     assert data["describe"] == "v2026.7.20"
-    assert data["python_minor"] == "3.14" and data["python"] == "/usr/bin/python3.14"
+    assert data["python_minor"] == "3.12" and data["python"] == "/usr/bin/python3.12"
     assert data["lock"] is False and data["web_dist"] == "absent" and data["legacy"] is False
     # Every activation path writes the stamp from release.json.
     assert tree["stamp"].read_text() == PIN[:12] + "\n"
@@ -486,7 +494,7 @@ def test_a_failed_first_migration_flips_back_to_legacy(tree) -> None:
     assert tree["stamp"].read_text() == PIN[:12] + "\n"
     assert units.state[rel.AGENT_UNIT] == "active"
     # A legacy release left live triggers a fresh migration attempt next time.
-    assert rel.build_trigger(layout, PIN, "3.14") == "the pre-layout release is live"
+    assert rel.build_trigger(layout, PIN, "3.12") == "the pre-layout release is live"
 
 
 def test_a_failed_switch_puts_the_legacy_venv_back(tree, monkeypatch) -> None:
@@ -717,7 +725,7 @@ def test_unused_legacy_python_is_removed(tree) -> None:
     from hal0.agents import hermes_layout as hl
 
     legacy = _legacy_root(tree)
-    assert _ensure(tree, FakeTools()).ok  # a release on /usr/bin/python3.14
+    assert _ensure(tree, FakeTools()).ok  # a release on /usr/bin/python3.12
     assert hl.remove_legacy_python_if_unused(tree["venv"], legacy_root=legacy) is True
     assert not legacy.exists()
 
@@ -785,10 +793,10 @@ def test_a_first_install_that_fails_reverify_is_rebuilt_next_time(tree) -> None:
     out = _ensure(tree, FakeTools(), probe=_probe)
     assert out.status == "activation_failed" and not out.flipped_back
     layout = rel.Layout.for_venv(tree["venv"])
-    assert "failed its last re-verify" in rel.build_trigger(layout, PIN, "3.14")
+    assert "failed its last re-verify" in rel.build_trigger(layout, PIN, "3.12")
     again = _ensure(tree, FakeTools())
     assert again.status == "activated"
-    assert rel.build_trigger(layout, PIN, "3.14") is None
+    assert rel.build_trigger(layout, PIN, "3.12") is None
 
 
 def test_a_flip_back_whose_link_swap_fails_still_restarts_units(tree, monkeypatch) -> None:
@@ -876,7 +884,7 @@ def test_a_missing_venv_link_is_relinked_without_a_rebuild(tree) -> None:
     assert _ensure(tree, FakeTools()).ok
     layout = rel.Layout.for_venv(tree["venv"])
     tree["venv"].unlink()  # a builder that died between the rename and the swap
-    assert "does not point at current/venv" in rel.build_trigger(layout, PIN, "3.14")
+    assert "does not point at current/venv" in rel.build_trigger(layout, PIN, "3.12")
     tools = FakeTools()
     out = _ensure(tree, tools)
     assert out.status == "converged"
@@ -1059,24 +1067,67 @@ def test_systemd_units_read_is_enabled_without_privilege() -> None:
     assert calls == [["systemctl", "is-enabled", rel.GATEWAY_UNIT]]
 
 
-# ── PR 3: Python 3.14 (ADR-0032 decision 9, ADR-0034 decision 2) ─────────────
+# ── PR 3: Python 3.14, chosen per ref (ADR-0032 d9, ADR-0034 d1/d2 amendment) ─
 
 
-def test_target_minor_is_314() -> None:
-    assert rel.target_minor() == "3.14" == hp.UV_PYTHON_FALLBACK
-    assert hp.PYTHON_MIN == (3, 14) and hp.PYTHON_MAX_EXCLUSIVE == (3, 15)
+@pytest.fixture
+def ref_admits_314(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make PIN's vetted record admit 3.14, as a pin bump to v0.22.2 would."""
+    monkeypatch.setitem(hp.VETTED_HERMES_REQUIRES_PYTHON, PIN, ">=3.11,<3.15")
 
 
-def test_the_interpreter_minor_trigger_fires_on_312_vs_314(tree) -> None:
-    assert _ensure(tree, FakeTools(minor="3.12")).ok  # a PR 2 release on 3.12
+def test_the_target_minor_follows_the_ref(ref_admits_314) -> None:
+    assert rel.target_minor(PIN) == "3.14"
+    assert rel.target_minor(None) == "3.14" == hp.UV_PYTHON_FALLBACK
+    assert hp.hermes_target_minor(PIN, ">=3.11,<3.14") == "3.12"
+    assert hp.hermes_target_minor(PIN, ">=3.11,<3.13") == "3.12"
+    with pytest.raises(ValueError):
+        hp.hermes_target_minor(PIN, ">=3.15")
+
+
+def test_3ef6bbd2_targets_312_its_requires_python_admits() -> None:
+    assert hp.VETTED_HERMES_REQUIRES_PYTHON[PIN] == ">=3.11,<3.14"
+    assert rel.target_minor(PIN) == "3.12"
+
+
+def test_a_312_release_of_a_ref_capped_below_314_never_loops(tree) -> None:
+    """PR 3 alone changes nothing on a 3ef6bbd2 host: 3.12 under its lock."""
+    assert _ensure(tree, FakeTools(lock=True)).ok
     layout = rel.Layout.for_venv(tree["venv"])
-    assert "interpreter 3.12 differs from target 3.14" in rel.build_trigger(layout, PIN, "3.14")
+    assert rel.live_release(layout).python_minor == "3.12"
+    assert rel.build_trigger(layout, PIN, rel.target_minor(PIN)) is None
+    for _ in range(3):
+        tools = FakeTools(lock=True)
+        assert _ensure(tree, tools).status == "converged"
+        assert tools.calls == []
+
+
+def test_the_minor_trigger_fires_when_the_ref_admits_314(tree, monkeypatch) -> None:
+    assert _ensure(tree, FakeTools()).ok  # 3.12, under the 3ef6bbd2 record
+    layout = rel.Layout.for_venv(tree["venv"])
     old = rel.live_release(layout).id
-    out = _ensure(tree, FakeTools())  # no force: the trigger alone rebuilds
+    monkeypatch.setitem(hp.VETTED_HERMES_REQUIRES_PYTHON, PIN, ">=3.14")
+    assert "interpreter 3.12 differs from target 3.14" in rel.build_trigger(
+        layout, PIN, rel.target_minor(PIN)
+    )
+    seen: list[str] = []
+    out = _ensure(
+        tree,
+        FakeTools(minor="3.14", requires_python=">=3.14"),
+        python_resolver=lambda m: seen.append(m) or f"/usr/bin/python{m}",
+    )
     assert out.status == "activated" and out.previous_id == old
+    assert seen == ["3.14"]
     assert rel.live_release(layout).python_minor == "3.14"
-    assert os.readlink(layout.previous) == f"releases/{old}"  # 3.12 stays as previous
-    assert rel.build_trigger(layout, PIN, "3.14") is None
+    assert os.readlink(layout.previous) == f"releases/{old}"
+
+
+def test_a_checkout_that_disagrees_with_its_vetted_record_is_refused(tree) -> None:
+    tools = FakeTools(requires_python=">=3.14")  # record says <3.14
+    out = _ensure(tree, tools)
+    assert out.status == "build_failed"
+    assert "VETTED_HERMES_REQUIRES_PYTHON" in out.error
+    assert not tools.find(lambda c: c[:2] == [UV, "venv"]), "refused before the venv"
 
 
 class LockFor312(FakeTools):
@@ -1092,19 +1143,40 @@ class LockFor312(FakeTools):
         return out
 
 
-def test_a_lock_that_cannot_serve_314_falls_back_to_the_editable_install(tree) -> None:
+def test_3ef6bbd2s_lock_serves_its_312_venv(tree) -> None:
     tools = LockFor312()
     assert _ensure(tree, tools).ok
+    assert tools.find(lambda c: c[:2] == [UV, "export"])
+    data = rel.live_release(rel.Layout.for_venv(tree["venv"])).data
+    assert data["install"] == "lock" and data["python_minor"] == "3.12"
+
+
+def test_the_no_lock_fallback_is_pinned_to_the_commit_date(tree) -> None:
+    tools = FakeTools()  # no uv.lock in the checkout
+    assert _ensure(tree, tools).ok
+    [install] = tools.find(lambda c: c[:3] == [UV, "pip", "install"])
+    assert install[install.index("--exclude-newer") + 1] == "2026-07-20T12:00:00+00:00"
+    data = rel.live_release(rel.Layout.for_venv(tree["venv"])).data
+    assert data["install"] == "editable" and data["exclude_newer"] == "2026-07-20T12:00:00+00:00"
+
+
+def test_a_lock_that_cannot_serve_the_minor_falls_back_pinned(tree, ref_admits_314) -> None:
+    tools = LockFor312(minor="3.14")
+    assert _ensure(tree, tools).ok
     assert not tools.find(lambda c: c[:2] == [UV, "export"])
-    assert tools.find(lambda c: c[:3] == [UV, "pip", "install"] and c[-1].endswith("[web,mcp]"))
+    [install] = tools.find(lambda c: c[:3] == [UV, "pip", "install"])
+    assert "--exclude-newer" in install and install[-1].endswith("[web,mcp]")
     data = rel.live_release(rel.Layout.for_venv(tree["venv"])).data
     assert data["install"] == "editable" and data["lock"] is False and data["lock_present"] is True
 
 
-def test_a_lock_that_serves_314_records_the_lock_path(tree) -> None:
-    assert _ensure(tree, FakeTools(lock=True)).ok
+def test_a_lock_that_serves_314_records_the_lock_path(tree, ref_admits_314) -> None:
+    tools = FakeTools(lock=True, minor="3.14")
+    assert _ensure(tree, tools).ok
     data = rel.live_release(rel.Layout.for_venv(tree["venv"])).data
-    assert data["install"] == "lock" and data["lock"] is True
+    assert data["install"] == "lock" and data["lock"] is True and data["exclude_newer"] is None
+    [install] = tools.find(lambda c: c[:3] == [UV, "pip", "install"])
+    assert "--exclude-newer" not in install
 
 
 @pytest.mark.parametrize(
@@ -1124,7 +1196,7 @@ def test_lock_without_requires_python_does_not_serve(tmp_path: Path) -> None:
     assert rel.lock_serves(tmp_path / "absent.lock", None) is False
 
 
-def test_managed_312_is_uninstalled_only_once_no_kept_release_names_it(tree) -> None:
+def test_managed_312_is_uninstalled_only_once_no_kept_release_names_it(tree, monkeypatch) -> None:
     layout = rel.Layout.for_venv(tree["venv"])
     managed312 = layout.python_dir / "cpython-3.12.15-linux-x86_64-gnu"
     managed312.mkdir(parents=True)
@@ -1134,22 +1206,23 @@ def test_managed_312_is_uninstalled_only_once_no_kept_release_names_it(tree) -> 
     def uninstalls(tools: FakeTools) -> list[list[str]]:
         return tools.find(lambda c: c[:3] == [UV, "python", "uninstall"])
 
-    t = FakeTools(minor="3.12")
-    assert _ensure(tree, t, python_resolver=lambda: py312).ok
+    t = FakeTools()
+    assert _ensure(tree, t, python_resolver=lambda _m: py312).ok
     assert uninstalls(t) == []  # the live release uses it
-    t = FakeTools()
-    assert _ensure(tree, t, python_resolver=lambda: py314).ok
+    monkeypatch.setitem(hp.VETTED_HERMES_REQUIRES_PYTHON, PIN, ">=3.14")
+    t = FakeTools(minor="3.14", requires_python=">=3.14")
+    assert _ensure(tree, t, python_resolver=lambda _m: py314).ok
     assert uninstalls(t) == []  # still kept as previous
-    t = FakeTools()
-    assert _ensure(tree, t, python_resolver=lambda: py314, force=True).ok
+    t = FakeTools(minor="3.14", requires_python=">=3.14")
+    assert _ensure(tree, t, python_resolver=lambda _m: py314, force=True).ok
     assert uninstalls(t) == [[UV, "python", "uninstall", "3.12"]]
 
 
-def test_a_configured_314_does_not_pin_the_retired_312(tree, monkeypatch) -> None:
+def test_a_configured_314_does_not_pin_the_retired_312(tree, monkeypatch, ref_admits_314) -> None:
     layout = rel.Layout.for_venv(tree["venv"])
     (layout.python_dir / "cpython-3.12.15").mkdir(parents=True)
     monkeypatch.setenv("HAL0_HERMES_PYTHON", f"{layout.python_dir}/cpython-3.14.7/bin/python3.14")
-    assert _ensure(tree, FakeTools()).ok
+    assert _ensure(tree, FakeTools(minor="3.14")).ok
     tools = FakeTools()
     rel.prune_releases(layout, run=tools, uv=UV, gateway_unit=tree["unit"])
     assert tools.find(lambda c: c == [UV, "python", "uninstall", "3.12"])
