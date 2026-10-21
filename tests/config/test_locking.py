@@ -17,19 +17,23 @@ from typing import Any
 from hal0.config.locking import file_lock
 
 
-def _hold_then_release(target: str, barrier: Any, hold_s: float, events: Any) -> None:
+def _hold_then_release(target: str, held: Any, hold_s: float, events: Any) -> None:
     """Acquire the lock, record acquire/release timestamps around a hold."""
-    barrier.wait()
     with file_lock(target):
         events.put(("holder_acquire", time.monotonic()))
+        held.set()
         time.sleep(hold_s)
         events.put(("holder_release", time.monotonic()))
 
 
-def _contender(target: str, barrier: Any, head_start_s: float, events: Any) -> None:
-    """Wait for the holder to grab the lock first, then block on acquire."""
-    barrier.wait()
-    time.sleep(head_start_s)  # let the holder win the lock first
+def _contender(target: str, held: Any, events: Any) -> None:
+    """Wait until the holder has the lock, then block on acquire.
+
+    Waiting on an event rather than a fixed head start: under coverage on a
+    loaded runner the holder can take longer than any sleep to acquire, and
+    the contender then wins the lock legitimately.
+    """
+    assert held.wait(timeout=10), "holder never acquired the lock"
     with file_lock(target):
         events.put(("contender_acquire", time.monotonic()))
 
@@ -38,11 +42,11 @@ def test_second_process_blocks_until_first_releases(tmp_path: Path) -> None:
     target = tmp_path / "thing.toml"
 
     ctx = multiprocessing.get_context("fork")
-    barrier = ctx.Barrier(2)
+    held = ctx.Event()
     events: Any = ctx.Queue()
 
-    holder = ctx.Process(target=_hold_then_release, args=(str(target), barrier, 0.5, events))
-    contender = ctx.Process(target=_contender, args=(str(target), barrier, 0.1, events))
+    holder = ctx.Process(target=_hold_then_release, args=(str(target), held, 0.5, events))
+    contender = ctx.Process(target=_contender, args=(str(target), held, events))
     holder.start()
     contender.start()
     holder.join(timeout=15)
