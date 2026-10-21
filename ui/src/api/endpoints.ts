@@ -56,6 +56,8 @@ export const ENDPOINTS = {
     `/api/slots/${encodeURIComponent(name)}/pull`,
   slotPullStream: (name: string) =>
     `/api/slots/${encodeURIComponent(name)}/pull/stream`,
+  slotPullStatus: (name: string) =>
+    `/api/slots/${encodeURIComponent(name)}/pull/status`,
   slotResolved: (name: string) =>
     `/api/slots/${encodeURIComponent(name)}/resolved`,
 

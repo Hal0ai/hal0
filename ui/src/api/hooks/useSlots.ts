@@ -9,7 +9,7 @@
 
 import { useMutation, useQuery, useQueryClient, type UseQueryResult } from '@tanstack/react-query'
 import { useEffect, useRef, useState } from 'react'
-import { api, apiGet } from '../client'
+import { api, apiGet, isSignedOut, SIGNED_OUT_MESSAGE } from '../client'
 import { ENDPOINTS } from '../endpoints'
 
 // Mutating verbs go through `api(..., { raw: true })` so the dev-time
@@ -808,6 +808,9 @@ export function useSlotImagePull(): ImagePullSnapshot {
   const [totalLayers, setTotalLayers] = useState(0)
   const [error, setError] = useState<string | null>(null)
   const esRef = useRef<EventSource | null>(null)
+  // Bumped on reset / new start so a late reconcile GET for a superseded
+  // pull cannot overwrite the current one.
+  const genRef = useRef(0)
   const qc = useQueryClient()
 
   const closeStream = () => {
@@ -844,17 +847,37 @@ export function useSlotImagePull(): ImagePullSnapshot {
       return
     }
     const es = esRef.current
+    const gen = genRef.current
     es.onmessage = (evt: MessageEvent) => {
       try { applyPayload(JSON.parse(evt.data)) } catch { /* skip */ }
     }
-    es.onerror = () => {
-      setState('failed')
-      setError('stream error')
+    // Stream death is not an answer about the pull (#2824): a `revoked`
+    // frame (key rotation / session expiry) or a dropped connection leaves
+    // the server-side job running. Close, then ask the status route once;
+    // a 401 there means this browser is signed out.
+    const reconcile = () => {
       closeStream()
+      void (async () => {
+        try {
+          const status = await apiGet<any>(ENDPOINTS.slotPullStatus(name))
+          if (genRef.current !== gen) return
+          if (status && typeof status === 'object') applyPayload(status)
+        } catch (e) {
+          if (genRef.current !== gen) return
+          if (isSignedOut(e)) {
+            setError(SIGNED_OUT_MESSAGE)
+            qc.invalidateQueries({ queryKey: ['auth-status'] })
+          }
+          /* otherwise keep last known state */
+        }
+      })()
     }
+    es.addEventListener('revoked', reconcile)
+    es.onerror = reconcile
   }
 
   const start = async (name: string) => {
+    genRef.current += 1
     setSlotName(name)
     setState('pulling')
     setLayer(0)
@@ -872,6 +895,7 @@ export function useSlotImagePull(): ImagePullSnapshot {
   }
 
   const reset = () => {
+    genRef.current += 1
     closeStream()
     setSlotName(null)
     setImage(null)
