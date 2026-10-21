@@ -30,6 +30,28 @@ def test_read_linger_uses_loginctl_show_user(value: str, enabled: bool) -> None:
     assert seen == [["loginctl", "show-user", "hal0", "-p", "Linger", "--value"]]
 
 
+def test_linger_defaults_resolve_after_module_import(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Default system helpers must follow module patches made after import."""
+    seen: list[list[str]] = []
+
+    def run(argv: list[str], **_kw: Any) -> subprocess.CompletedProcess[str]:
+        seen.append(argv)
+        output = "yes\n" if argv[0] == "loginctl" and argv[1] == "show-user" else ""
+        return _proc(0, output)
+
+    monkeypatch.setattr(linger.subprocess, "run", run)
+    monkeypatch.setattr(linger.shutil, "which", lambda name: f"/usr/bin/{name}")
+
+    assert linger.read_linger().enabled is True
+    assert linger.disable_linger() == (True, "linger disabled for hal0")
+    assert linger.gateway_in_use(unit_dir="/missing") is True
+    assert seen == [
+        ["loginctl", "show-user", "hal0", "-p", "Linger", "--value"],
+        ["loginctl", "disable-linger", "hal0"],
+        ["systemctl", "is-active", "--quiet", "hermes-gateway.service"],
+    ]
+
+
 def test_read_linger_falls_back_to_the_linger_dir(tmp_path: Path) -> None:
     # show-user errors for a user that is neither logged in nor lingering.
     (tmp_path / "hal0").touch()
