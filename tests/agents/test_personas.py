@@ -1,7 +1,7 @@
 """Unit tests for :mod:`hal0.agents.personas` (PR-3, v0.3).
 
 Persona TOML is the hal0-side concept layered on top of Hermes's
-``system_prompt_prelude`` + tool gating + memory namespacing. These
+``agent.system_prompt`` overlay + tool gating + memory namespacing. These
 tests pin the round-trip + malformed-handling + seed contracts every
 downstream surface (config_write Phase 7, the activate API in PR-4,
 the dashboard chooser in PR-10) depends on.

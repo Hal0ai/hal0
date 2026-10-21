@@ -53,7 +53,6 @@ def _overlay(**over: Any) -> dict[str, Any]:
         mcp_servers=_MCP_SERVERS,
         agent_id="hermes-agent",
         system_prompt="",
-        personality_name="",
         live_resolve_enabled=True,
     )
     base.update(over)

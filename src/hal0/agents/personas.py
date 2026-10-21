@@ -1,18 +1,17 @@
 """Hermes persona store + activation helpers (PR-3, v0.3).
 
 Personas are hal0's user-facing concept layered on top of Hermes's
-``system_prompt_prelude`` + tool gating + memory namespacing. Each
+``agent.system_prompt`` overlay + tool gating + memory namespacing. Each
 persona is a TOML file at ``/var/lib/hal0/.hermes/personas/<id>.toml``
 plus a single-line pointer at ``personas/active.txt`` naming the active
 one. The provisioner reads the active persona during Phase 7 (system
 prompt injection) and Phase 8 (seed) so the rendered config.yaml
 carries the right prompt + MCP usage block.
 
-Activation hot-reload (PR-3 scope): write ``active.txt`` atomically;
-best-effort POST ``reload.env`` to a running hermes JSON-RPC endpoint
-when reachable. If hermes isn't running, the next service start picks
-up the new active persona via the provision render path. PR-4 wires
-the API endpoint that calls :func:`activate`.
+Activation: write ``active.txt`` atomically, then a best-effort
+``reload.env`` nudge (:func:`hermes_reload`). The nudge never reaches
+Hermes (#2850), and only a reprovision re-renders the persona prompt
+into ``config.yaml`` (``hermes_provision._phase_config_write``).
 
 See ``docs/agents/hermes/CONFIG.md`` for the full TOML schema + write
 ownership semantics.
@@ -301,12 +300,13 @@ def hermes_reload(
 ) -> tuple[bool, str | None]:
     """Best-effort hot-reload nudge to a running Hermes process.
 
-    Sends a JSON-RPC frame with ``method`` (defaults to ``reload.env``,
-    which upstream documents as re-reading ``$HERMES_HOME/.env`` + a
-    subset of config knobs without restarting the agent loop). PR-4
-    will swap this for the proper ``session.compress`` once the
-    upstream WS proxy lands; for now this is the only persona-swap
-    nudge available without restarting the service.
+    Sends a JSON-RPC frame with ``method`` (defaults to ``reload.env``)
+    as an HTTP POST. Re-verified against Hermes v0.22.2 (``d923a5eb``):
+    ``reload.env`` exists (``tui_gateway/methods_tools.py:267``) but only
+    re-reads ``$HERMES_HOME/.env``, ``/api/ws`` is a token-gated WebSocket
+    on the dashboard port (``hermes_cli/web_routers/chat_ws.py:701``), and
+    nothing listens on 8765. The nudge therefore always fails, which the
+    callers already treat as non-fatal. #2850 tracks replacing it.
 
     Returns ``(ok, error)`` so the API + CLI can decide how loud to be:
     a failed nudge is non-fatal — the persona file is on disk and the
@@ -578,7 +578,8 @@ def build_prompt_addendum(
 ) -> str:
     """Compose the hal0 MCP usage block appended to the persona's system prompt.
 
-    Hermes treats ``system_prompt_prelude`` as a single string, so this
+    The result is written to Hermes's ``agent.system_prompt`` (a single
+    string, hermes_cli/personality.py:118-123 at ``d923a5eb``), so this
     is the canonical place to surface "you have these MCP tools" + the
     persona's approval policy. The dashboard's HermesChat sidecar
     (PR-10) and the persona TOML stay the only places ANY of this

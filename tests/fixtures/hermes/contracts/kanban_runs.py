@@ -10,22 +10,24 @@ that external run through this surface, entirely separate from the
 ``api_surface.py`` (that family belongs to the executor's OpenAI-compatible
 run/session surface, not the kanban plugin's per-task worker ledger).
 
-Schema + route table + the dashboard session-token injection format are
+Schema + route table + the dashboard session-token injection formats are
 copied verbatim from the reviewed official pin
-``3ef6bbd201263d354fd83ec55b3c306ded2eb72a`` (Hermes v2026.7.20 / 0.19.0):
-``hermes_cli/kanban_db.py`` (schema) and
-``plugins/kanban/dashboard/plugin_api.py`` (routes, mounted at
-``/api/plugins/kanban`` by ``hermes_cli/web_server.py``'s generic
-``/api/plugins/{plugin['name']}`` plugin-router mount).
+``d923a5eb487a17c0a68801bba9ef0f56c81040a8`` (Hermes v0.22.2):
+``hermes_cli/kanban_db.py:804-990`` (schema),
+``plugins/kanban/dashboard/plugin_api.py:936-985`` (routes, mounted at
+``/api/plugins/kanban`` by the generic ``/api/plugins/{plugin['name']}``
+plugin-router mount, which moved to ``hermes_cli/web_server_dashboard.py:1040``
+in 0.22) and ``hermes_cli/web_server_dashboard.py:134, :165`` (token
+injection).
 
 KNOWN GAP (recorded, not silently accepted — see the R5 hermes-bump runbook
 and §7 "Two validation re-runs, now unblocked" / Phase 6 HP-executor first
 live contact, never exercised): the pinned upstream kanban plugin does NOT
 expose a bare ``POST /runs`` creation route, and its terminal-state route is
 named ``terminate`` — but ``HermesBoardExecutor.dispatch()``
-(``src/hal0/board/hermes_executor.py:308-312``) POSTs directly to
+(``src/hal0/board/hermes_executor.py:310-313``) POSTs directly to
 ``WORKER_BASE_PATH`` (i.e. ``POST /api/plugins/kanban/runs``) to create a run,
-and ``.cancel()`` (``:350-352``) POSTs to
+and ``.cancel()`` (``:352-354``) POSTs to
 ``{WORKER_BASE_PATH}/{run_id}/cancel``. Neither route exists in this frozen
 surface; the closest analogues are ``POST /dispatch`` (batch auto-dispatch,
 different request/response shape) and ``POST /runs/{run_id}/terminate``. This
@@ -67,17 +69,31 @@ KANBAN_RUNS_ROUTES = (
     ("post", "/runs/{run_id}/terminate"),
 )
 
-# hermes_cli/web_server.py's generic plugin-router mount:
+# hermes_cli/web_server_dashboard.py:1040, the generic plugin-router mount:
 #   app.include_router(router, prefix=f"/api/plugins/{plugin['name']}")
 # The kanban plugin registers as "kanban", giving the base hal0's
 # WORKER_BASE_PATH ("/api/plugins/kanban/runs") depends on.
 KANBAN_PLUGIN_MOUNT_PREFIX = "/api/plugins/kanban"
 
-# --- Dashboard session-token injection (hermes_cli/web_server.py) -----------
+# --- Dashboard session-token injection (hermes_cli/web_server_dashboard.py) --
 # Only emitted on the UNGATED (auth_required=False) bootstrap branch; the
 # gated branch instead ships window.__HERMES_AUTH_REQUIRED__=true and expects
 # cookie auth via /api/auth/me. hal0's harvest regex
 # (hal0.board.hermes_executor._TOKEN_RE / hal0.board._TOKEN_RE) assumes the
 # ungated shape — it deliberately matches only the loopback, no-prior-auth
-# deployment hal0 targets.
+# deployment hal0 targets. The gate turns on for a non-loopback bind OR a
+# non-loopback dashboard.public_url (see config_defaults.py in this package).
+#
+# Two forms exist at 0.22.2:
+# * the SPA index (web_server_dashboard.py:165), an f-string with literal quotes;
+# * the headless ``serve`` token page (web_server_dashboard.py:134), which
+#   renders the token with ``json.dumps`` — a JSON string, so also
+#   double-quoted for the url-safe tokens Hermes mints
+#   (``secrets.token_urlsafe(32)``, web_server.py:401-402).
 SESSION_TOKEN_INJECTION_TEMPLATE = 'window.__HERMES_SESSION_TOKEN__="{token}";'
+SESSION_TOKEN_HEADLESS_TEMPLATE = (
+    "<!doctype html><html><head><script>"
+    "window.__HERMES_SESSION_TOKEN__={token_json};"
+    "window.__HERMES_AUTH_REQUIRED__=false;"
+    "</script></head><body>{msg}</body></html>"
+)

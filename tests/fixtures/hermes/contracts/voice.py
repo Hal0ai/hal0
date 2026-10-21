@@ -5,7 +5,7 @@
 Adapter lane: **hal0-voice** (routes Hermes STT/TTS through active hal0 slots).
 
 Two seams from the reviewed official pin
-``3ef6bbd201263d354fd83ec55b3c306ded2eb72a`` (Hermes v2026.7.20 / 0.19.0):
+``d923a5eb487a17c0a68801bba9ef0f56c81040a8`` (Hermes v0.22.2):
 
 1. The **command-provider** config path (initial hal0-voice implementation):
    generated ``tts`` / ``stt`` config selecting stable hal0 wrapper commands.
@@ -15,8 +15,9 @@ Two seams from the reviewed official pin
    metadata cannot fit the command contract): ``PluginContext``'s
    ``register_tts_provider`` / ``register_transcription_provider`` (frozen in
    ``plugin_context.py``), which delegate to the module-level
-   ``register_provider(provider) -> None`` of ``agent/tts_registry.py`` and
-   ``agent/transcription_registry.py``.
+   ``register_provider(provider, *, scope=None) -> None`` that
+   ``agent/tts_registry.py`` and ``agent/transcription_registry.py`` export
+   from a shared ``agent.provider_registry.ProviderRegistry`` since 0.22.
 
 ``PluginContext`` is re-exported from ``plugin_context.py`` so the historical
 ``from tests.fixtures.hermes.contracts.voice import PluginContext`` import path

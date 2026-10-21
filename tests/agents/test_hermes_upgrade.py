@@ -18,7 +18,7 @@ from typer.testing import CliRunner
 import hal0.cli.agent_commands as ac
 from hal0.agents import hermes_provision as hp
 
-PIN = "3ef6bbd201263d354fd83ec55b3c306ded2eb72a"
+PIN = "d923a5eb487a17c0a68801bba9ef0f56c81040a8"  # the shipped pin, v0.22.2
 
 
 @pytest.fixture

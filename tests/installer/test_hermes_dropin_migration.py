@@ -15,6 +15,13 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[2]
 INSTALL_SH = REPO / "installer" / "install.sh"
 SHIPPED = REPO / "installer" / "systemd" / "hal0-agent@hermes.service.d" / "10-hal0.conf"
+# The last content hal0 shipped as override.conf (sha256 9ef07ea4…, the first
+# entry in install.sh's allow-list). 10-hal0.conf has moved on since (the
+# HERMES_DASHBOARD_TUI line went in #2615 PR 4), so the migration test needs
+# the frozen bytes, not today's drop-in.
+LAST_SHIPPED_OVERRIDE = (
+    Path(__file__).parent / "fixtures" / "hermes-override-conf-last-shipped.conf"
+)
 
 
 def _run(tmp_path: Path, legacy: str | None) -> tuple[Path, str]:
@@ -43,9 +50,8 @@ def test_fresh_install_writes_10_hal0_conf(tmp_path: Path) -> None:
 
 
 def test_hash_matched_override_conf_is_removed(tmp_path: Path) -> None:
-    # Current-HEAD content of the legacy file == the version hal0 last shipped
-    # as override.conf (commit 1cc5cb8f); that is byte-identical to 10-hal0.conf.
-    d, out = _run(tmp_path, SHIPPED.read_text())
+    # A legacy override.conf byte-identical to a version hal0 shipped.
+    d, out = _run(tmp_path, LAST_SHIPPED_OVERRIDE.read_text())
     assert not (d / "override.conf").exists()
     assert (d / "10-hal0.conf").exists()
     assert "WARN" not in out

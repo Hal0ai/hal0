@@ -4559,3 +4559,72 @@ regressions:
       in the store. Seeded slots (profiles) are unaffected, so the defect only shows on a slot you create
       without a profile.
     promote_ready: false
+
+  - id: hermes-persona-prelude-dead-key
+    issue: 2839
+    from: v1.6.0
+    severity: major
+    tier: mechanical
+    lane: hermes
+    summary: >-
+      The config overlay wrote the active persona's prompt to agent.system_prompt_prelude, which no
+      Hermes version reads (3ef6bbd2 or d923a5eb), so the persona and its MCP-tool and approval
+      posture never reached the model. Fixed in #2615 PR 4: the prompt goes to agent.system_prompt
+      (hermes_cli/personality.py:118-123 at d923a5eb) and provisioning drops the stale key.
+    repro: |
+      sudo python3 -c "import yaml;c=yaml.safe_load(open('/var/lib/hal0/.hermes/config.yaml'));a=c.get('agent',{});print(bool(a.get('system_prompt')), 'system_prompt_prelude' in a)"
+    expect: >-
+      Prints "True False": a non-empty agent.system_prompt and no agent.system_prompt_prelude.
+    promote_ready: false
+
+  - id: hermes-mcp-probe-mcp2-import
+    issue: 2615
+    from: v1.6.0
+    severity: ga-blocker
+    tier: mechanical
+    lane: hermes
+    summary: >-
+      Hermes v0.22.2 locks mcp 2.0.0, which removed streamablehttp_client. hal0's mcp_wire probe
+      imported that name and would hard-fail provisioning on every v0.22.2 venv. Fixed in #2615 PR 4:
+      the probe prefers streamable_http_client and falls back to the legacy call.
+    repro: |
+      sudo hal0 agent status hermes --json | jq '.phases.mcp_wire.status, .phases.mcp_wire.details'
+    expect: >-
+      mcp_wire status ok, both servers probed to stage "connected" with tools listed; no
+      "cannot import name 'streamablehttp_client'" anywhere in provision.json.
+    promote_ready: false
+
+  - id: hermes-sessions-auto-prune-off
+    issue: 2615
+    from: v1.6.0
+    severity: major
+    tier: mechanical
+    lane: hermes
+    summary: >-
+      Hermes 0.22 deletes ended sessions idle for 90 days at startup unless sessions.auto_prune is
+      false (hermes_cli/config_defaults.py:2264-2278). hal0 writes it false (ADR-0034 decision 7);
+      an upgrade must delete no session history.
+    repro: |
+      sudo grep -A1 '^sessions:' /var/lib/hal0/.hermes/config.yaml
+    expect: >-
+      sessions.auto_prune is false; on an upgraded box the session count matches the pre-upgrade
+      baseline.
+    promote_ready: false
+
+  - id: hermes-hal0-linger-visible
+    issue: 2615
+    from: v1.6.0
+    severity: minor
+    tier: mechanical
+    lane: hermes
+    summary: >-
+      The v0.22 gateway generator enables linger for hal0 (ADR-0034 decision 6). hal0 doctor all
+      reports it (hal0_linger) and hal0 agent uninstall hermes / installer/uninstall.sh remove it.
+    repro: |
+      loginctl show-user hal0 -p Linger
+      hal0 doctor all --json | jq '.[] | select(.key=="hal0_linger")'
+    expect: >-
+      Linger=yes and a pass row while hermes-gateway.service is installed; after an uninstall,
+      Linger=no (or no such user) and the row passes.
+    promote_ready: false
+

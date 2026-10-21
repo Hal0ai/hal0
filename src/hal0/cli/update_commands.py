@@ -963,6 +963,7 @@ def update(
             components_ok = True
         else:
             components_ok = _print_component_table(component_rows)
+        _print_hermes_gateway_notice()
         if converged and components_ok and not image_pending and not render_blocked:
             console.print(Panel("[green]update applied.[/green]", border_style="green"))
             return
@@ -1054,6 +1055,27 @@ def _component_rows_tolerant() -> list[dict] | None:
     return body.get("components") or []
 
 
+def _print_hermes_gateway_notice() -> None:
+    """Name `sudo hal0 agent install hermes` when the gateway unit is stale (#2615).
+
+    `hal0 update` does not regenerate the Hermes gateway unit. A unit written
+    before Hermes 0.22, or a box without linger for hal0, leaves Hermes's
+    kanban workers unable to start, and nothing else says so outside the
+    gateway journal. Read-only; never changes the exit code.
+    """
+    from hal0.system import linger
+
+    reason = linger.gateway_unit_regen_reason()
+    if reason is None:
+        return
+    console.print(
+        f"[yellow]![/yellow] hermes gateway: {escape(reason)} — Hermes kanban workers cannot "
+        "start and cron jobs run without their own scope. Fix: run "
+        f"`{linger.GATEWAY_REGEN_COMMAND}` once.",
+        soft_wrap=True,
+    )
+
+
 def _print_component_table(rows: list[dict]) -> bool:
     """Render the component table; True when everything is converged."""
     table = Table(title="Components", show_header=True, header_style="bold")
@@ -1098,7 +1120,9 @@ def update_status_cmd() -> None:
         die(str(exc))
         return
     _print_check(body)
-    if not _print_component_table(_component_rows()):
+    components_ok = _print_component_table(_component_rows())
+    _print_hermes_gateway_notice()
+    if not components_ok:
         console.print(
             "[dim](exit 2 = components not converged — run `hal0 update` "
             "or `hal0 update component <id>`)[/dim]"

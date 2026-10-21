@@ -271,6 +271,16 @@ repeats. Trim it to your own lines. A drop-in carrying `ConfigurationDirectory=`
 is renamed to `<name>.hal0-disabled`, because that directive crash-loops the
 unit (status 241); the file is kept, not deleted.
 
+#### Hermes gateway and linger
+
+The Hermes gateway runs as `hermes-gateway.service`, a system unit Hermes
+generates with `User=hal0`. From Hermes 0.22 the generator also turns on
+systemd linger for `hal0` and orders the gateway after `user@<uid>.service`,
+because Hermes's scheduled and kanban workers start through
+`systemd-run --user` under that user's manager. `hal0 doctor all` shows the
+linger state on its `hal0_linger` row. `hal0 agent uninstall hermes` and
+`installer/uninstall.sh` turn it off again.
+
 Hindsight's entry here isn't a second thing to learn: the Services page's
 buttons for it run through the identical `unit_action` → `hal0-systemctl`
 path already described in hindsight-api.service above.

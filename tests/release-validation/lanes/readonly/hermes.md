@@ -101,6 +101,35 @@ chat messages — that is the `hermes-e2e` stateful lane.
 
 17. **A warn names its probe.** `provision.json` `smoke_tests` with `status: warn` must carry a `failures[]` list whose names match the false entries in `details.results`; a warn with no named probe is a finding (20261016003929: 2 failures, both named). Also confirm `/var/lib/hal0/.hermes/.env` absence is expected: `/api/status` advertises an `env_path` there that does not exist on a fresh install (treated as upstream behaviour, unverified).
 
+18. **Pin.** From v1.6.0 Hermes is v0.22.2, commit `d923a5eb`, on fresh and upgraded boxes
+   alike. Read the commit from the install, not from `hermes --version` (that makes a network
+   update check and needs tags): the live release's recorded sha, or `git rev-parse HEAD` in its
+   checkout. A box on any other sha is a finding.
+19. **Session history is kept.** `/var/lib/hal0/.hermes/config.yaml` must carry
+   `sessions.auto_prune: false` (ADR-0034 decision 7). On an upgraded box, compare the session
+   count (`sudo -u hal0 hermes sessions list` or the `sessions` table in `state.db`) with the
+   pre-upgrade baseline; a drop with no operator action is a `major` finding. Also grep the
+   gateway journal for prune lines.
+20. **Persona prompt reaches Hermes (#2839).** `config.yaml` must carry a non-empty
+   `agent.system_prompt` that starts with the active persona's `[persona.prompt] system` text,
+   and must NOT carry `agent.system_prompt_prelude` (no Hermes version reads it). hal0 no longer
+   writes `display.personality`; a value there is an operator's `/personality` pick, and on the
+   first `hermes config migrate` to 0.22 upstream resets it once.
+21. **Linger.** With `hermes-gateway.service` installed, `loginctl show-user hal0 -p Linger`
+   must say `yes`, the unit must carry `After=user@<uid>.service`, and `hal0 doctor all --json`
+   must show `hal0_linger` as `pass`. On a box where Hermes was uninstalled the row must not
+   report linger on. On the UPGRADE box, before `sudo hal0 agent install hermes`, expect the
+   0.19.0-shape unit and a `warn` row naming that command; after it, `pass`. A kanban card that
+   stays queued while the gateway journal logs `spawn of <task> deferred, host cannot place
+   the worker` is this case.
+22. **MCP client on mcp 2.0.** The v0.22.2 venv carries mcp 2.0, which dropped
+   `streamablehttp_client`. `provision.json` `mcp_wire` must be `ok` with stage `connected` for
+   both servers (not an `ImportError` at stage `import`), and check 2b still applies.
+23. **Board token harvest.** `curl -s http://127.0.0.1:9119/ | grep -c __HERMES_SESSION_TOKEN__`
+   must be at least 1, and neither `systemctl show hal0-agent@hermes -p Environment` nor
+   `config.yaml` may set `HERMES_DASHBOARD_PUBLIC_URL` / `dashboard.public_url`: either one
+   turns the dashboard login on and the token disappears from the page.
+
 ## Carry-forward
 
 Hermes findings have historically been *reporting* defects rather than functional ones. Treat

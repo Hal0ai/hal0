@@ -2,6 +2,12 @@
 
 Everything runs against a tmp release tree with a fake ``git``/``uv`` runner
 and fake unit controller, so no network, no real venv, no systemd.
+
+``PIN`` is 0.19.0 (``3ef6bbd2``), the pin before #2615 PR 4. It stays the
+default here as the representative ref capped below 3.14 (3.12 venv, no
+lock that serves 3.14, no ``web.mjs``): the autouse fixture vets it again
+with its recorded ``requires-python``. ``NEW_PIN`` is the shipped pin,
+v0.22.2, and the "PR 4" section covers the move from one to the other.
 """
 
 from __future__ import annotations
@@ -20,6 +26,7 @@ from hal0.agents import hermes_provision as hp
 from hal0.agents import hermes_release as rel
 
 PIN = "3ef6bbd201263d354fd83ec55b3c306ded2eb72a"
+NEW_PIN = "d923a5eb487a17c0a68801bba9ef0f56c81040a8"
 URL = "https://github.com/NousResearch/hermes-agent.git"
 UV = "/fake/venv/bin/uv"
 OK_PROBE: Callable[[Path], dict[str, Any]] = lambda _py: {"ok": True}  # noqa: E731
@@ -144,6 +151,13 @@ class FakeUnits:
         for unit in self.crash_on_start:
             if self.state[unit] == "active":
                 self.restart_count[unit] += 1
+
+
+@pytest.fixture(autouse=True)
+def _vet_the_312_ref(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Vet 0.19.0 alongside the shipped pin, with its real requires-python."""
+    monkeypatch.setattr(hp, "VETTED_HERMES_REFS", hp.VETTED_HERMES_REFS | {PIN})
+    monkeypatch.setitem(hp.VETTED_HERMES_REQUIRES_PYTHON, PIN, ">=3.11,<3.14")
 
 
 @pytest.fixture
@@ -364,6 +378,36 @@ def test_web_build_failure_at_the_old_pin_records_absent(tree) -> None:
     out = _ensure(tree, FakeTools(web="old", web_ok=False))
     assert out.ok
     assert rel.live_release(rel.Layout.for_venv(tree["venv"])).data["web_dist"] == "absent"
+
+
+def test_web_build_runs_with_upstreams_tool_store_inside_the_release_tree(tree) -> None:
+    """Node goes to hermes/tools via HERMES_RUNTIME_DIR, shared by every release."""
+    tools = FakeTools(web="new")
+    assert _ensure(tree, tools).ok
+    layout = rel.Layout.for_venv(tree["venv"])
+    [i] = [
+        n
+        for n, c in enumerate(tools.calls)
+        if c[0].endswith("/bin/python") and "_build_web_ui" in " ".join(c)
+    ]
+    assert tools.envs[i]["HERMES_RUNTIME_DIR"] == str(layout.tools)
+    assert layout.tools == layout.root / "tools"
+
+
+@pytest.mark.parametrize("web", ["new", "old"])
+def test_lazy_installs_off_fails_the_v0222_web_build_with_the_fix(tree, web: str) -> None:
+    """security.allow_lazy_installs: false makes upstream's build pass
+    --no-install; a ref with web.mjs fails up front and names the fix, before
+    any npm work. A ref without web.mjs (0.19.0) is unaffected."""
+    (tree["home"] / "config.yaml").write_text("security:\n  allow_lazy_installs: false\n")
+    tools = FakeTools(web=web)
+    out = _ensure(tree, tools)
+    if web == "new":
+        assert out.status == "build_failed"
+        assert "allow_lazy_installs" in out.error and "reprovision hermes" in out.error
+        assert not tools.find(lambda c: "_build_web_ui" in " ".join(c))
+    else:
+        assert out.ok
 
 
 # ── offline (#2838) ──────────────────────────────────────────────────────────
@@ -1230,3 +1274,70 @@ def test_a_configured_314_does_not_pin_the_retired_312(tree, monkeypatch, ref_ad
     tools = FakeTools()
     rel.prune_releases(layout, run=tools, uv=UV, gateway_unit=tree["unit"])
     assert not tools.find(lambda c: c[:3] == [UV, "python", "uninstall"])
+
+
+# ── PR 4: the pin moves to v0.22.2, which moves hosts to 3.14 ────────────────
+
+
+class LockFor314(FakeTools):
+    """A v0.22.2 checkout: requires-python >=3.11,<3.15 and a uv.lock serving 3.14."""
+
+    def __init__(self, **kw: Any) -> None:
+        kw.setdefault("head", NEW_PIN)
+        kw.setdefault("minor", "3.14")
+        kw.setdefault("requires_python", ">=3.11,<3.15")
+        super().__init__(**kw)
+
+    def __call__(self, argv: list[Any], **kw: Any) -> subprocess.CompletedProcess:
+        out = super().__call__(argv, **kw)
+        argv = [str(a) for a in argv]
+        if argv[0] == "git" and "worktree" in argv and "add" in argv:
+            (Path(argv[-2]) / "uv.lock").write_text(
+                'version = 1\nrevision = 3\nrequires-python = ">=3.11, <3.15"\n'
+            )
+        return out
+
+
+def test_the_shipped_pin_is_vetted_and_targets_314() -> None:
+    assert NEW_PIN in hp.VETTED_HERMES_REFS
+    assert hp.VETTED_HERMES_REQUIRES_PYTHON[NEW_PIN] == ">=3.11,<3.15"
+    assert rel.target_minor(NEW_PIN) == "3.14"
+
+
+def test_the_pin_bump_rebuilds_a_312_release_on_the_managed_314_from_the_lock(tree) -> None:
+    """`hal0 update` on a 0.19.0 host: the requirements line moves to v0.22.2,
+    the build trigger fires, and the new release runs a uv-managed 3.14
+    installed from upstream's lock."""
+    layout = rel.Layout.for_venv(tree["venv"])
+    assert _ensure(tree, LockFor312()).ok  # the 0.19.0 release, on 3.12
+    old = rel.live_release(layout)
+    assert old.python_minor == "3.12"
+
+    tree["req"].write_text(f"hermes-agent[web,mcp] @ git+{URL}@{NEW_PIN}\n", encoding="utf-8")
+    trigger = rel.build_trigger(layout, NEW_PIN, rel.target_minor(NEW_PIN))
+    assert trigger is not None
+    managed = f"{layout.python_dir}/cpython-3.14.7-linux-x86_64-gnu/bin/python3.14"
+    seen: list[str] = []
+    tools = LockFor314()
+    out = _ensure(tree, tools, python_resolver=lambda m: seen.append(m) or managed)
+
+    assert out.status == "activated" and out.previous_id == old.id
+    assert seen == ["3.14"]
+    live = rel.live_release(layout)
+    assert live.ref == NEW_PIN and live.python_minor == "3.14"
+    data = live.data
+    assert data["python"].startswith(f"{layout.python_dir}/cpython-3.14")
+    assert data["install"] == "lock" and data["lock"] is True
+    assert tools.find(lambda c: c[:2] == [UV, "export"])
+    assert os.readlink(layout.previous) == f"releases/{old.id}"
+    # Converged afterwards: no second rebuild on the next update.
+    again = LockFor314()
+    assert _ensure(tree, again, python_resolver=lambda _m: managed).status == "converged"
+    assert again.calls == []
+
+
+def test_a_v0222_checkout_that_disagrees_with_its_record_is_refused(tree) -> None:
+    tree["req"].write_text(f"hermes-agent[web,mcp] @ git+{URL}@{NEW_PIN}\n", encoding="utf-8")
+    out = _ensure(tree, LockFor314(requires_python=">=3.11,<3.14"))
+    assert out.status == "build_failed"
+    assert "VETTED_HERMES_REQUIRES_PYTHON" in out.error

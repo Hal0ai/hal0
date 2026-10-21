@@ -222,7 +222,7 @@ def fake_ensure_release(calls: list[dict[str, Any]] | None = None, *, status: st
         venv = Path(kw["venv"])
         if not kw.get("force") and (venv / "bin" / "hermes").exists():
             return ReleaseOutcome(
-                status="converged", ref="3ef6bbd201263d354fd83ec55b3c306ded2eb72a"
+                status="converged", ref="d923a5eb487a17c0a68801bba9ef0f56c81040a8"
             )
         if status != "activated":
             return ReleaseOutcome(status=status, error=f"fake {status}", remedy="fake remedy")
@@ -230,7 +230,7 @@ def fake_ensure_release(calls: list[dict[str, Any]] | None = None, *, status: st
         for name in ("hermes", "python"):
             (venv / "bin" / name).write_text("#!/bin/sh\nexit 0\n")
             (venv / "bin" / name).chmod(0o755)
-        return ReleaseOutcome(status="activated", release_id="3ef6bbd20126-20261021T000000Z")
+        return ReleaseOutcome(status="activated", release_id="d923a5eb487a-20261021T000000Z")
 
     return _ensure
 

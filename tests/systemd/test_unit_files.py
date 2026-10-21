@@ -212,10 +212,10 @@ class TestHermesOverride:
         # must not survive anywhere in the override after the migration.
         assert "/var/lib/hal0/agents/hermes" not in override_text
 
-    def test_pins_dashboard_tui(self, override_text: str) -> None:
-        # Belt-and-braces with the shim's `--tui` flag — env wins if
-        # argv is ever stripped (e.g. operator drops a custom ExecStart).
-        assert re.search(r'^Environment="HERMES_DASHBOARD_TUI=1"', override_text, re.MULTILINE)
+    def test_sets_no_dead_dashboard_tui_env(self, override_text: str) -> None:
+        # No Hermes version reads HERMES_DASHBOARD_TUI; the dashboard's
+        # embedded chat is always on.
+        assert "HERMES_DASHBOARD_TUI" not in override_text
 
     def test_inference_base_default(self, override_text: str) -> None:
         # Hermes's hal0 model-provider plugin discovers the OpenAI-compatible

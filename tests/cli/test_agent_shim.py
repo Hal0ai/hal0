@@ -293,10 +293,13 @@ class TestHermesEnv:
         env = agent_shim._build_hermes_env(_cfg(home=Path("/custom/home")))
         assert env["HERMES_HOME"] == "/custom/home"
 
-    def test_dashboard_tui_set(self) -> None:
-        # Belt-and-braces with the --tui flag in argv.
-        env = agent_shim._build_hermes_env(_cfg())
-        assert env["HERMES_DASHBOARD_TUI"] == "1"
+    def test_no_dead_dashboard_tui_env(self) -> None:
+        # Hermes reads no HERMES_DASHBOARD_TUI at 3ef6bbd2 or d923a5eb; the
+        # embedded chat is always on (web_server.py:461-464 at d923a5eb).
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("HERMES_DASHBOARD_TUI", None)
+            env = agent_shim._build_hermes_env(_cfg())
+        assert "HERMES_DASHBOARD_TUI" not in env
 
     def test_notify_socket_stripped(self) -> None:
         # The shim owns sd_notify; child shouldn't be able to send

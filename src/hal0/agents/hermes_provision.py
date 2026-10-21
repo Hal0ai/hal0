@@ -348,8 +348,11 @@ def _phase_preflight(ctx: _StepCtx) -> PhaseResult:
       ~182 MB checkout each, measured at v0.22.2), the blobless bare mirror
       (~200 MB at 3ef6bbd2, more as later pins add blobs) and the uv cache
       (~143 MB), and a build adds a third release before the prune: about
-      1.5 GB at peak with a managed interpreter. 4 GiB still leaves room for
-      the memory cache and HERMES_HOME.
+      1.5 GB at peak with a managed interpreter. The v0.22.2 dashboard build
+      adds upstream's pinned Node v26.7.0 under ``hermes/tools`` (shared by
+      every release, roughly 200 MB unpacked; not measured here) and the
+      build's ``node_modules`` in each release checkout. 4 GiB still leaves
+      room for those, the memory cache and HERMES_HOME.
     """
     state = ctx.state
     failures: list[str] = []
@@ -912,14 +915,17 @@ HERMES_REQUIREMENTS = (
 # adding it here AND refreshing the contract fixtures under
 # ``tests/fixtures/hermes/contracts/`` +
 # ``tests/agents/hermes/test_contract_compatibility.py``.
-VETTED_HERMES_REFS: frozenset[str] = frozenset({"3ef6bbd201263d354fd83ec55b3c306ded2eb72a"})
+# v0.22.2 (``d923a5eb``) since ADR-0034 decision 8. Only the current pin is
+# listed: a pre-release tag (``rc.*`` / ``+canary.*``) is never vetted.
+VETTED_HERMES_REFS: frozenset[str] = frozenset({"d923a5eb487a17c0a68801bba9ef0f56c81040a8"})
 
 #: The ``requires-python`` each vetted ref declares in its pyproject.toml,
 #: recorded at review time so the target minor is known before a checkout
 #: exists (the build trigger, the root prelude). The build re-reads it from
 #: the checkout and fails on a mismatch.
 VETTED_HERMES_REQUIRES_PYTHON: dict[str, str] = {
-    "3ef6bbd201263d354fd83ec55b3c306ded2eb72a": ">=3.11,<3.14",
+    # NousResearch/hermes-agent d923a5eb (v0.22.2), pyproject.toml:15.
+    "d923a5eb487a17c0a68801bba9ef0f56c81040a8": ">=3.11,<3.15",
 }
 
 
@@ -1345,9 +1351,11 @@ def _phase_home_init(ctx: _StepCtx) -> PhaseResult:
 
 KANBAN_DB_NAME = "kanban.db"
 
-# The table set hermes's own SCHEMA_SQL creates (hermes_cli/kanban_db.py,
-# pinned ref 3ef6bbd201263d354fd83ec55b3c306ded2eb72a / v2026.7.20 / 0.19.0;
-# unchanged since 0.18.2).
+# The table set hermes's own SCHEMA_SQL creates (hermes_cli/kanban_db.py:804-990
+# at the pinned ref d923a5eb / v0.22.2; the same seven tables since 0.18.2).
+# ``init_db`` itself moved to hermes_cli/kanban_db_connect.py:804 and is
+# re-exported from hermes_cli.kanban_db (kanban_db.py:4427-4429), so the import
+# below is unchanged.
 # Used ONLY as a cheap existence probe for the convergent skip — never as a
 # CREATE statement source, so a future upstream migration can add columns or
 # tables without hal0 drifting out of sync.
@@ -1684,13 +1692,16 @@ def _live_resolve_enabled() -> bool:
 
 # ── HAL0 config overlay (config-set + targeted YAML merge) ───────────────────
 #
-# hermes 0.17 owns + migrates its own config.yaml; hal0 layers ONLY its
-# integration keys on top instead of rendering the whole file (the old
-# Jinja whole-file ownership that forced the ``hermes-agent==0.14.0`` pin —
+# Hermes owns + migrates its own config.yaml (``hermes config migrate``);
+# hal0 layers ONLY its integration keys on top instead of rendering the whole
+# file (the old Jinja whole-file ownership forced an exact Hermes pin —
 # issues #240 / #934). Two appliers, split by what hermes's CLI can express:
 #
-#   * scalars + nested-scalars → hermes's OWN ``config set`` (~0.13s each,
-#     idempotent, exercises hermes's schema validation). Even ``mcp_servers``
+#   * scalars + nested-scalars → hermes's OWN ``config set`` (idempotent,
+#     exercises hermes's own coercion and key checks). At v0.22.2 ``config
+#     set`` refuses only a known key given under the wrong prefix and writes
+#     any other unknown key with a warning (hermes_cli/config.py:3577-3633);
+#     every key in :func:`_build_config_overlay` applies. Even ``mcp_servers``
 #     goes here: ``hermes mcp add`` is interactive (prompts "Save anyway?"
 #     on a connect probe and hangs with no TTY), so the nested-scalar
 #     ``mcp_servers.<name>.{type,url,headers.*,timeout}`` form is the
@@ -1706,6 +1717,14 @@ SESSION_START_HOOK: dict[str, Any] = {
     "command": "/usr/lib/hal0/hermes-hooks/inject-system-state.sh",
     "timeout": 2,
 }
+#: Hermes session pruning switch; hal0 writes it false (ADR-0034 decision 7).
+SESSIONS_AUTO_PRUNE_CONFIG_KEY = "sessions.auto_prune"
+
+#: Hermes config key that carries the active persona's prompt (#2839). See
+#: :func:`_build_config_overlay`; the contract suite pins it to the key
+#: ``hermes_cli/personality.py`` reads.
+PERSONA_PROMPT_CONFIG_KEY = "agent.system_prompt"
+
 HAL0_CONFIG_LIST_KEYS: dict[str, Any] = {
     "skills": {"external_dirs": SKILLS_EXTERNAL_DIRS},
     "hooks": {"on_session_start": [SESSION_START_HOOK]},
@@ -1729,18 +1748,20 @@ HAL0_CONFIG_LIST_KEYS: dict[str, Any] = {
 # 127.0.0.1:8080, which is precisely what the bundled host-management skills
 # need. So the choice is on/off, not local/sandboxed.
 #
-# HOW "off" IS EXPRESSED (verified against the pinned hermes-agent 0.18.2
-# installed at /var/lib/hal0/venvs/hermes, READ-ONLY): dropping
-# ``terminal.backend`` does NOT disable anything — hermes_cli/config.py
-# _DEFAULTS still carries ``terminal.backend: local`` and bridges it to
-# TERMINAL_ENV. What removes the tool from the model-facing schema is
-# ``agent.disabled_toolsets``: model_tools._compute_tool_definitions applies
-# it as a strict subtraction AFTER toolset resolution, explicitly so that a
-# composite bundle (``toolsets: [hermes-cli]``, the default hal0 runs with)
-# cannot re-add a disabled toolset's tools. ``terminal`` resolves to
-# ``terminal`` + ``process``; ``code_execution`` resolves to ``execute_code``,
-# which runs arbitrary Python as the same user — disabling one without the
-# other would leave the shell reachable by another name.
+# HOW "off" IS EXPRESSED (re-verified against the pinned v0.22.2, d923a5eb):
+# dropping ``terminal.backend`` does NOT disable anything — DEFAULT_CONFIG
+# still carries ``terminal.backend: local`` (hermes_cli/config_defaults.py:298)
+# and ``config set`` bridges terminal keys to TERMINAL_ENV. What removes the
+# tool from the model-facing schema is ``agent.disabled_toolsets``:
+# model_tools._select_tool_names subtracts it LAST, after toolset resolution
+# (model_tools.py:332-337), so a composite bundle (``toolsets: [hermes-cli]``,
+# the default hal0 runs with) cannot re-add a disabled toolset's tools, and
+# the API server's per-platform toolsets apply it as a global suppression
+# list too (hermes_cli/tools_config.py:626-632). ``terminal`` resolves to
+# ``terminal`` + ``process_manage`` (toolsets.py:102); ``code_execution``
+# resolves to ``execute_code`` (toolsets.py:155), which runs arbitrary Python
+# as the same user — disabling one without the other would leave the shell
+# reachable by another name.
 HERMES_TERMINAL_ENV = "HAL0_HERMES_TERMINAL"
 # The two DIRECT execution toolsets, kept named because they are what the
 # ``terminal`` opt-in is about; :data:`TERMINAL_OFF_TOOLSETS` is what hal0
@@ -1750,14 +1771,15 @@ TERMINAL_TOOLSETS: list[str] = ["terminal", "code_execution"]
 # ``delegation`` (#1882 review, finding 3).
 #
 # ``delegate_task`` builds a child agent from the toolsets named in the CALL.
-# The pinned hermes-agent 0.18.2 constructs that child from ``enabled_toolsets``
-# alone and never forwards the parent's ``disabled_toolsets``, and its
-# ``DELEGATE_BLOCKED_TOOLS`` blocks ``execute_code`` but not ``terminal`` or
-# ``process``. So on a terminal-OFF box a prompt-injected agent could call
-# ``delegate_task(toolsets=["terminal"])`` and have the child run the very
-# commands the operator declined — the subtraction would be one hop deep
-# instead of closed. Same reasoning that already bundles ``code_execution``
-# with ``terminal``: a shell reachable under another name is still a shell.
+# hermes-agent 0.18.2 constructed that child from ``enabled_toolsets`` alone
+# and never forwarded the parent's ``disabled_toolsets``, so on a terminal-OFF
+# box a prompt-injected agent could call ``delegate_task(toolsets=["terminal"])``
+# and have the child run the very commands the operator declined. v0.22.2
+# closes that upstream: the child inherits the parent's ``disabled_toolsets``
+# and may only narrow the parent's toolsets
+# (tools/delegate_tool_toolsets.py:78-123). hal0 still subtracts
+# ``delegation`` so the posture does not rest on that one upstream guarantee:
+# a shell reachable under another name is still a shell.
 #
 # ``delegation`` is a plain toolset in hermes' registry (tools: ``delegate_task``,
 # no ``posture`` key, not a ``hermes-*`` bundle), so ``disabled_toolsets``
@@ -2059,7 +2081,9 @@ def _fmt_config_value(value: Any) -> str:
     """Render a value as the positional argv for ``hermes config set``.
 
     hermes coerces ``true``/``false`` → bool and bare integers → int on the
-    way in (verified on 0.17), so we only need the lowercased bool spelling;
+    way in (``_coerce_config_set_value``, hermes_cli/config.py:3377 at
+    v0.22.2; checked by applying the overlay there), so we only need the
+    lowercased bool spelling;
     everything else is its ``str()``. NB: lists are intentionally never
     passed here — config set would store them as the literal string.
     """
@@ -2077,7 +2101,6 @@ def _build_config_overlay(
     mcp_servers: list[dict[str, Any]],
     agent_id: str,
     system_prompt: str,
-    personality_name: str,
     live_resolve_enabled: bool,
     hermes_home: Path | str = HERMES_HOME_DEFAULT,
     terminal_enabled: bool = False,
@@ -2089,9 +2112,12 @@ def _build_config_overlay(
     Mirrors the (now-deleted) ``config.yaml.j2`` — but ONLY the scalar /
     nested-scalar keys. List-valued keys (``skills.external_dirs``,
     ``hooks.on_session_start``) are layered by :func:`_merge_config_yaml_layers`;
-    ``model.context_length`` is deliberately omitted (hermes treats it as a
-    GLOBAL override that bleeds onto cloud models — per-model context comes
-    from live ``/v1/models`` discovery instead).
+    ``model.context_length`` is deliberately omitted: per-model context comes
+    from live ``/v1/models`` discovery. (Hermes 0.14 applied it to every
+    model, cloud ones included; v0.22.2 scopes it to the configured default
+    model and route, hermes agent/agent_init.py:1700-1745, but under
+    live-resolve that default is the virtual ``hal0/agent``, so a single
+    number would still be wrong for most slots.)
 
     Under live-resolve (the hal0 default) ``model.default`` is the virtual
     ``hal0/agent`` against the gateway with ``discover_models`` on, so the
@@ -2241,8 +2267,21 @@ def _build_config_overlay(
         terminal_scratch = str(Path(hermes_home) / "scratch")
         pairs += [("terminal.backend", "local"), ("terminal.cwd", terminal_scratch)]
     pairs += [("agent.max_turns", 60), ("agent.reasoning_effort", "medium")]
+    # From v0.22 Hermes deletes ENDED sessions idle for 90 days at startup
+    # unless this is false (hermes_cli/config_defaults.py:2264-2278 at
+    # d923a5eb). hal0 keeps session history, as before the bump, until a
+    # retention setting exists (ADR-0034 decision 7).
+    pairs.append((SESSIONS_AUTO_PRUNE_CONFIG_KEY, False))
+    # The active persona's prompt (#2839). ``agent.system_prompt`` is the
+    # overlay Hermes resolves into each session's ephemeral system prompt
+    # (hermes_cli/personality.py:118-123 at the pinned d923a5eb), read by the
+    # CLI, the TUI gateway behind the dashboard chat, and the messaging
+    # gateway. hal0 used to write ``agent.system_prompt_prelude``, which no
+    # Hermes version reads. ``display.personality`` is left to the operator:
+    # a known personality named there overlays this prompt, which is
+    # Hermes's own ``/personality`` behaviour.
     if system_prompt:
-        pairs.append(("agent.system_prompt_prelude", system_prompt))
+        pairs.append((PERSONA_PROMPT_CONFIG_KEY, system_prompt))
 
     # Reasoning visibility: both flags are required together (#635).
     pairs += [
@@ -2250,11 +2289,9 @@ def _build_config_overlay(
         ("display.streaming", True),
         ("display.show_reasoning", True),
     ]
-    if personality_name:
-        pairs.append(("display.personality", personality_name))
 
     # auxiliary.<task> side-job routing (feat/hermes-role-slots): utility-slot
-    # tasks render provider:"custom"+base_url; vision/web_extract stay "main".
+    # tasks render provider:"custom"+base_url; vision stays "main".
     for task, cfg in auxiliary_tasks.items():
         pairs += [
             (f"auxiliary.{task}.provider", cfg.get("provider", "main")),
@@ -2619,6 +2656,7 @@ def _merge_config_yaml_layers(
     *,
     list_keys: dict[str, Any],
     overrides_path: Path,
+    persona_names: Iterable[str] = (),
 ) -> bool:
     """Deep-merge the irreducible list keys + operator overrides onto config.yaml.
 
@@ -2626,7 +2664,14 @@ def _merge_config_yaml_layers(
     list-valued hal0 keys (``skills.external_dirs``, ``hooks.on_session_start``)
     are layered here. The operator escape hatch (``overrides.yaml``) deep-merges
     on top LAST so a hand override still wins. Every hermes-owned key is
-    preserved (merge, never clobber). Returns True iff the file changed.
+    preserved (merge, never clobber). Keys hal0 itself used to write and no
+    longer does (:data:`RETIRED_HAL0_CONFIG_KEYS`) are removed first, so an
+    upgraded box does not keep dead config. A ``display.personality`` that
+    equals one of ``persona_names`` (a hal0 persona's display name, which
+    hal0 itself wrote there before #2839) is reset to ``""``: Hermes lets a
+    known personality override ``agent.system_prompt``, so a custom persona
+    named like a built-in personality ("Concise") would otherwise replace the
+    persona prompt. Returns True iff the file changed.
     """
     try:
         import yaml  # type: ignore[import-untyped]
@@ -2635,6 +2680,9 @@ def _merge_config_yaml_layers(
     base: dict[str, Any] = {}
     if config_path.exists():
         base = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+    for dotted in RETIRED_HAL0_CONFIG_KEYS:
+        _drop_dotted_key(base, dotted)
+    _retire_hal0_personality(base, persona_names)
     merged = _deep_merge(base, list_keys)
     if overrides_path.exists():
         overlay = yaml.safe_load(overrides_path.read_text(encoding="utf-8")) or {}
@@ -2658,6 +2706,51 @@ def _merge_config_yaml_layers(
     if config_path.exists() and config_path.read_text(encoding="utf-8") == out:
         return False
     _atomic_write(config_path, out)
+    return True
+
+
+#: Dotted config keys an older hal0 wrote that Hermes v0.22.2 never reads.
+#: ``agent.system_prompt_prelude`` had no reader at any pin (#2839; the persona
+#: prompt now goes to :data:`PERSONA_PROMPT_CONFIG_KEY`). The two auxiliary
+#: blocks lost their aux LLM in v0.22 and are ignored
+#: (hermes_cli/config_defaults.py:760, :776). Dropped from config.yaml at the
+#: next provision; an overrides.yaml that sets one still wins.
+RETIRED_HAL0_CONFIG_KEYS: tuple[str, ...] = (
+    "agent.system_prompt_prelude",
+    "auxiliary.web_extract",
+    "auxiliary.session_search",
+)
+
+
+def _retire_hal0_personality(data: dict[str, Any], persona_names: Iterable[str]) -> bool:
+    """Reset ``display.personality`` when it holds a hal0 persona's display name.
+
+    Before #2839 hal0 wrote the active persona's display name there. Hermes
+    normalises names with ``strip().lower()`` (hermes_cli/personality.py:80-83
+    at d923a5eb), so the comparison does too. True iff it was reset.
+    """
+    names = {str(n).strip().lower() for n in persona_names if str(n).strip()}
+    display = data.get("display")
+    if not names or not isinstance(display, dict):
+        return False
+    current = display.get("personality")
+    if not isinstance(current, str) or current.strip().lower() not in names:
+        return False
+    display["personality"] = ""
+    return True
+
+
+def _drop_dotted_key(data: dict[str, Any], dotted: str) -> bool:
+    """Remove ``a.b.c`` from a nested dict in place; True iff it was present."""
+    *parents, leaf = dotted.split(".")
+    node: Any = data
+    for part in parents:
+        node = node.get(part) if isinstance(node, dict) else None
+        if not isinstance(node, dict):
+            return False
+    if leaf not in node:
+        return False
+    del node[leaf]
     return True
 
 
@@ -2733,6 +2826,25 @@ def _personas_root_for(state: BootstrapState) -> Path:
     return Path(state.hermes_home) / "personas"
 
 
+#: Display names of the personas hal0 seeds (personas.py ``_seed_*``); a
+#: config.yaml written before #2839 can carry any of them as a personality.
+_SEED_PERSONA_DISPLAY_NAMES: tuple[str, ...] = ("Hermes", "Coder", "hal0 Brain")
+
+
+def _hal0_persona_display_names(state: BootstrapState) -> list[str]:
+    """Every hal0 persona display name: the seeds plus the persona store."""
+    from hal0.agents import personas as _personas
+
+    root = _personas_root_for(state)
+    if not root.exists() and _personas.PERSONAS_ROOT.exists():
+        root = _personas.PERSONAS_ROOT
+    try:
+        stored = [p.display_name for p in _personas.list_personas(root=root)]
+    except OSError:
+        stored = []
+    return [*_SEED_PERSONA_DISPLAY_NAMES, *stored]
+
+
 def _active_persona_render(
     state: BootstrapState,
     *,
@@ -2741,7 +2853,7 @@ def _active_persona_render(
 ) -> tuple[str, str]:
     """Look up the active persona + compose the system-prompt prelude.
 
-    Returns ``(system_prompt, personality_name)``. When no personas have
+    Returns ``(system_prompt, display_name)``. When no personas have
     been seeded yet (very first config_write before persona_seed runs),
     falls back to ``("", "")`` so the render still succeeds — the
     second pass after persona_seed lands the real prelude. The persona
@@ -2777,12 +2889,12 @@ def _phase_config_write(ctx: _StepCtx) -> PhaseResult:
     """Apply hal0's integration overlay onto the hermes-owned ``config.yaml``.
 
     Config-set redesign (replaces the old whole-file Jinja render that forced
-    the ``hermes-agent==0.14.0`` pin): hermes owns + migrates ``config.yaml``;
-    hal0 layers ONLY its keys on top.
+    an exact Hermes pin): hermes owns + migrates ``config.yaml``; hal0 layers
+    ONLY its keys on top.
 
       1. ``hermes config migrate`` — hermes creates/schema-migrates its file.
       2. Scalar/nested-scalar overlay (model wiring, providers.custom, memory,
-         model_aliases, delegation, mcp_servers, persona prelude, auxiliary,
+         model_aliases, delegation, mcp_servers, persona prompt, auxiliary,
          …) applied via ``hermes config set`` — idempotent, headless-safe.
       3. The two irreducible LIST keys (``skills.external_dirs``,
          ``hooks.on_session_start``) + operator ``overrides.yaml`` deep-merged
@@ -2908,7 +3020,7 @@ def _phase_config_write(ctx: _StepCtx) -> PhaseResult:
                 ),
             }
         )
-    system_prompt, personality_name = _active_persona_render(state, mcp_servers=mcp_servers)
+    system_prompt, persona_name = _active_persona_render(state, mcp_servers=mcp_servers)
     live_resolve_enabled = _live_resolve_enabled()
     # Operator's Hermes command-approvals setting, read from the root-owned
     # seed TOML (never from agent-writable state). Lenient: an unreadable or
@@ -2925,7 +3037,6 @@ def _phase_config_write(ctx: _StepCtx) -> PhaseResult:
         mcp_servers=mcp_servers,
         agent_id=state.agent_id,
         system_prompt=system_prompt,
-        personality_name=personality_name,
         live_resolve_enabled=live_resolve_enabled,
         hermes_home=hermes_home,
         terminal_enabled=terminal_enabled,
@@ -2946,6 +3057,7 @@ def _phase_config_write(ctx: _StepCtx) -> PhaseResult:
             mcp_servers=mcp_servers,
         ),
         overrides_path=OVERRIDES_PATH,
+        persona_names=_hal0_persona_display_names(state),
     )
 
     # Legacy honcho.json cleanup — see _disable_honcho_hermes_host.
@@ -2987,7 +3099,7 @@ def _phase_config_write(ctx: _StepCtx) -> PhaseResult:
             "config_migrated": migrated,
             "primary_model": primary["model_id"],
             "chat_slot_count": len(chat_slots),
-            "persona": personality_name or None,
+            "persona": persona_name or None,
             "mcp_server_count": len(mcp_servers),
             "delegation_model": (delegation or {}).get("model"),
             "auxiliary_utility_model": _utility_aux_model(auxiliary_tasks),
@@ -3190,6 +3302,16 @@ def _probe_mcp_server(
 #: stdlib + whatever hermes-agent's extras pulled in, nothing else). Emits
 #: exactly one JSON verdict line on stdout and always exits 0; the parent
 #: (:func:`_probe_mcp_client`) owns turning "no verdict" into a failure.
+#:
+#: Two client APIs. ``streamable_http_client(url, *, http_client=...)`` exists
+#: from mcp 1.24 and is the only one in mcp 2.0, which Hermes v0.22.2 locks
+#: (it dropped the older ``streamablehttp_client(url, headers=...)``).
+#: Headers ride on a client from the SDK's own ``create_mcp_http_client``, so
+#: the client is built on whichever httpx the SDK imports (``httpx2`` from
+#: 2.0). The yielded tuple is ``(read, write)`` on 2.0 and
+#: ``(read, write, get_session_id)`` on 1.x, so only the first two are used.
+#: The older call stays as the fallback for an mcp below 1.24; a 0.19.0
+#: release (mcp 1.26) has both and takes the new one.
 _MCP_CLIENT_PROBE_SCRIPT = """\
 import asyncio, json, os, sys
 
@@ -3200,7 +3322,13 @@ def _emit(payload):
 
 try:
     from mcp import ClientSession
-    from mcp.client.streamable_http import streamablehttp_client
+    from mcp.client import streamable_http as _transport
+    _new_client = getattr(_transport, "streamable_http_client", None)
+    _legacy_client = getattr(_transport, "streamablehttp_client", None)
+    if _new_client is not None:
+        from mcp.shared._httpx_utils import create_mcp_http_client
+    elif _legacy_client is None:
+        raise ImportError("mcp.client.streamable_http has no streamable-HTTP client")
 except BaseException as exc:  # ImportError, but also half-broken installs
     _emit({"ok": False, "stage": "import", "tools": [],
            "error": f"{type(exc).__name__}: {exc}"})
@@ -3214,12 +3342,20 @@ if not url:
 headers = json.loads(os.environ.get("HAL0_MCP_PROBE_HEADERS") or "{}")
 
 
+async def _list_tools(streams):
+    async with ClientSession(streams[0], streams[1]) as session:
+        await session.initialize()
+        listed = await session.list_tools()
+        return [t.name for t in listed.tools]
+
+
 async def _probe():
-    async with streamablehttp_client(url, headers=headers) as (read, write, _sid):
-        async with ClientSession(read, write) as session:
-            await session.initialize()
-            listed = await session.list_tools()
-            return [t.name for t in listed.tools]
+    if _new_client is not None:
+        async with create_mcp_http_client(headers=headers) as http_client:
+            async with _new_client(url, http_client=http_client) as streams:
+                return await _list_tools(streams)
+    async with _legacy_client(url, headers=headers) as streams:
+        return await _list_tools(streams)
 
 
 try:
@@ -4885,8 +5021,8 @@ def _slot_context_length(slot: dict[str, Any]) -> int | None:
 
     Reads ``ctx_effective`` (the slot view's resolved window), then
     ``context_length`` then ``ctx_size`` — the same precedence
-    :func:`_resolve_primary_slot` uses — so the per-model entry in
-    ``custom_providers`` matches what the gateway serves.
+    :func:`_resolve_primary_slot` uses — so the chat-slot entries match
+    what the gateway serves.
     """
     raw = slot.get("ctx_effective") or slot.get("context_length") or slot.get("ctx_size")
     if raw is None:
@@ -5207,43 +5343,6 @@ def _collect_chat_slots(
     return out
 
 
-def _resolve_custom_providers(
-    chat_slots: list[dict[str, Any]],
-    *,
-    hal0_base_url: str,
-) -> list[dict[str, Any]] | None:
-    """Build the ``custom_providers`` block from live chat slots.
-
-    hermes 0.14.0 `agent/model_metadata.py:get_model_context_length`
-    treats the top-level ``model.context_length`` as a GLOBAL override
-    applied to EVERY model — switching to a cloud model (deepseek/
-    openrouter) then wrongly inherits our local value. The supported
-    per-model mechanism is ``custom_providers[].models.<model_id>.
-    context_length``, matched by base_url + model in `hermes_cli/config.py:
-    get_custom_provider_context_length` (used by startup, /model switch and
-    /info) and merged into the picker via `get_compatible_custom_providers`.
-    It does NOT bleed across base_urls/providers.
-
-    Returns a single-element list ``[{name, base_url, models}]`` where the
-    ``models`` KEYS are model_ids (what hermes looks up at runtime), not
-    slot aliases. Degrade-safe: only slots that resolve a context_length
-    contribute an entry; returns ``None`` when none do so the template
-    omits the block entirely.
-    """
-    models: dict[str, dict[str, Any]] = {}
-    for slot in chat_slots:
-        model_id = slot.get("model_id")
-        ctx = slot.get("context_length")
-        if not model_id or not ctx:
-            continue
-        # First writer wins on a model_id collision (declaration order
-        # mirrors _collect_chat_slots / /api/slots ordering).
-        models.setdefault(model_id, {"context_length": int(ctx)})
-    if not models:
-        return None
-    return [{"name": "hal0", "base_url": hal0_base_url, "models": models}]
-
-
 # ── Role→slot resolution (delegation + auxiliary) ───────────────────────────
 #
 # hermes-agent supports per-ROLE models beyond the main chat block:
@@ -5261,15 +5360,18 @@ def _resolve_custom_providers(
 # roles use the platform role hint when supplied, allowing labels to change
 # without changing opaque slot identity or semantic assignment.
 #
-# Vision + web_extract have no dedicated slot — they stay provider:"main".
+# Vision has no dedicated slot — it stays provider:"main". Hermes v0.22
+# dropped the aux LLM for web_extract and session_search and ignores a
+# leftover ``auxiliary.<task>`` block for them
+# (hermes_cli/config_defaults.py:760, :776 at d923a5eb), so hal0 no longer
+# writes either; :data:`RETIRED_HAL0_CONFIG_KEYS` removes the old blocks.
 
 # The hal0-routed side-tasks (everything that should run on the cheap
-# `utility` slot). vision/web_extract are intentionally excluded — they
-# keep provider:"main" so they inherit the chat model (which may carry a
-# vision label) rather than the tiny utility model.
+# `utility` slot). vision is intentionally excluded — it keeps
+# provider:"main" so it inherits the chat model (which may carry a vision
+# label) rather than the tiny utility model.
 _UTILITY_AUX_TASKS: tuple[str, ...] = (
     "compression",
-    "session_search",
     "title_generation",
     "skills_hub",
     "mcp",
@@ -5278,7 +5380,7 @@ _UTILITY_AUX_TASKS: tuple[str, ...] = (
 # Tasks that always stay on the main chat provider regardless of slot
 # state. Rendered verbatim so the auxiliary: block is fully parameterized
 # (no hard-coded entries left in the template).
-_MAIN_AUX_TASKS: tuple[str, ...] = ("vision", "web_extract")
+_MAIN_AUX_TASKS: tuple[str, ...] = ("vision",)
 
 # Delegation retains its existing overlay adapter; auxiliary role policy lives
 # in role_slots.py and is shared with runtime consumers.
@@ -5348,9 +5450,7 @@ def _resolve_auxiliary_tasks(
     by_role = {entry.role: entry for entry in role_map.entries}
     task_roles = {
         "vision": "vision",
-        "web_extract": "vision",
         "compression": "compression",
-        "session_search": "session_search",
         "title_generation": "compression",
         "skills_hub": "skills_hub",
         "mcp": "mcp",

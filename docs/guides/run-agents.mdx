@@ -46,6 +46,29 @@ normal user it aborts cleanly up front with a `sudo` hint.
 Pass `--switch` to atomically uninstall whatever agent is currently
 installed before installing this one.
 
+### Hermes version, session history and linger
+
+hal0 installs one reviewed Hermes release: v0.22.2 (commit `d923a5eb`) from
+hal0 1.6.0. Moving from the previous pin (0.19.0) changes two things you may
+notice:
+
+- **Session history is kept.** From 0.22, Hermes deletes ended sessions that
+  have been idle for 90 days, at startup. hal0 writes `sessions.auto_prune:
+  false` into Hermes's config, so nothing is pruned. To prune anyway, set
+  `sessions.auto_prune: true` in `/etc/hal0/agents/hermes/overrides.yaml` and
+  run `hal0 agent reprovision hermes`.
+- **The `hal0` user lingers.** Installing the Hermes gateway turns on systemd
+  linger for `hal0`. Hermes's scheduled jobs and kanban workers run through
+  `hal0`'s own systemd manager, which only runs while the user lingers.
+  `hal0 doctor all` reports it on the `hal0_linger` row, and
+  `hal0 agent uninstall hermes` turns it off.
+
+`hal0 update` does not regenerate the gateway unit. On a box that ran Hermes
+before 1.6.0, run `sudo hal0 agent install hermes` once after the update: it
+rewrites the gateway unit and turns linger on. Until then Hermes's kanban
+workers do not start and cron jobs run outside their own scope, and
+`hal0 update`, `hal0 update status` and `hal0 doctor all` print the command.
+
 ## Hermes' terminal tool — off by default
 
 Hermes ships **without** a terminal tool. It can read your box through the
@@ -256,6 +279,15 @@ sudo systemctl restart hal0-agent@hermes
 curl -X POST http://localhost:8080/api/agents/hermes/restart
 ```
 
+Restart the Hermes gateway with `sudo systemctl restart hermes-gateway`, not
+with `hermes gateway restart` or `hermes gateway start`. Upstream's commands
+regenerate the unit when it differs from what they would write, which turns
+hal0's stable `/var/lib/hal0/hermes/current/` paths back into the paths of
+one release under `/var/lib/hal0/hermes/releases/<id>/`. The gateway then
+stays on that release when hal0 builds a newer one, and `hermes gateway status`
+reports the unit as outdated. `sudo hal0 agent install hermes` regenerates and
+normalises the unit again.
+
 </TabItem>
 <TabItem label="Uninstall">
 
@@ -266,6 +298,10 @@ hal0 agent uninstall hermes --keep-memory
 
 Default uninstall tears down the agent's private memory namespace too;
 `--keep-memory` preserves it so a re-install reuses the identity card.
+
+Uninstalling Hermes also runs `loginctl disable-linger hal0`, which undoes the
+linger the Hermes gateway turned on. Run the uninstall as root for that step;
+otherwise it prints the command to run.
 
 </TabItem>
 </Tabs>
@@ -293,12 +329,13 @@ A persona is a TOML file pairing a system prompt with tool gating:
 ```sh
 hal0 agent personas list                 # list + mark the active one
 hal0 agent personas show <id>            # print a persona's TOML (good template)
-hal0 agent personas activate <id>        # switch active + nudge a hot-reload
+hal0 agent personas activate <id>        # switch the active persona
 ```
 
-Activating writes the active pointer atomically and best-effort nudges a
-running Hermes to hot-reload; if Hermes isn't running, the next restart
-picks up the new active persona. To author your own, copy `personas show`
+Activating writes the active pointer atomically. The persona's prompt reaches
+Hermes as `agent.system_prompt` in its `config.yaml` the next time hal0
+provisions the agent, so run `hal0 agent reprovision hermes` after switching.
+A restart alone does not apply it. To author your own, copy `personas show`
 output, change the persona id, and save it under the persona store.
 
 ## Connect accounts for OAuth skills

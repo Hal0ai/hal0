@@ -6,8 +6,19 @@ Adapter lane: **hal0-provider** (dynamic model-provider plugin, chat_completions
 
 Fields and the ``fetch_models`` / ``register_provider`` / ``get_provider_profile``
 signatures are copied verbatim from the reviewed official pin
-``3ef6bbd201263d354fd83ec55b3c306ded2eb72a`` (``providers/base.py`` and
-``providers/__init__.py``, Hermes v2026.7.20 / 0.19.0).
+``d923a5eb487a17c0a68801bba9ef0f56c81040a8`` (``providers/base.py:41-160`` and
+``providers/__init__.py:122, :192``, Hermes v0.22.2). The hooks hal0-provider
+overrides (``get_hostname``, ``prepare_messages``, ``build_extra_body``,
+``build_api_kwargs_extras``, ``default_vision_model``, ``get_max_tokens``,
+``fetch_models``) keep their 0.19.0 signatures. 0.22 added fields with
+defaults that leave a hal0 profile's behaviour unchanged (``hidden``,
+``supports_model_listing``, the ``auth_handler`` / ``refresh_credential`` /
+``classify_api_error`` hooks, ``supports_prompt_cache_key``,
+``native_reasoning_details_type``, the ``process_*`` external-process
+fields, ``model_aliases``, ``unsupported_response_formats``,
+``model_capabilities``). Since 0.22 ``register_provider`` also lands a
+registration made while a ``$HERMES_HOME`` plugin imports in that home's
+layer; name-based override still holds.
 
 The provider lane consumes: ``api_mode`` defaulting to ``chat_completions``
 (OpenAI-compat transport), ``aliases`` (stable role aliases), ``base_url`` /
@@ -18,10 +29,13 @@ The provider lane consumes: ``api_mode`` defaulting to ``chat_completions``
 profile can register under ``plugins/model-providers/hal0/``).
 """
 
+# Upstream spells Callable from typing.
+# ruff: noqa: UP035
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Callable
 
 OMIT_TEMPERATURE = object()
 
@@ -40,19 +54,34 @@ class ProviderProfile:
     description: str = ""
     signup_url: str = ""
 
+    hidden: bool = False
+
     # Auth & endpoints
     env_vars: tuple = ()
     base_url: str = ""
     models_url: str = ""
     auth_type: str = "api_key"
     supports_health_check: bool = True
+    supports_model_listing: bool = True
+    auth_handler: Callable[[str, Any], Any] | None = None
+    refresh_credential: Callable[[Any], Any] | None = None
+    classify_api_error: Callable[..., Any] | None = None
 
     # Vision support
     supports_vision: bool = False
     supports_vision_tool_messages: bool = True
+    supports_prompt_cache_key: bool = False
+    native_reasoning_details_type: str | None = None
+
+    # External-process providers
+    process_command: str = ""
+    process_args: tuple = ()
+    process_command_env_vars: tuple = ()
+    process_args_env_var: str = ""
 
     # Model catalog
     fallback_models: tuple = ()
+    model_aliases: dict = field(default_factory=dict)
     hostname: str = ""
 
     # Client-level quirks
@@ -61,7 +90,9 @@ class ProviderProfile:
     # Request-level quirks
     fixed_temperature: Any = None
     default_max_tokens: int | None = None
+    unsupported_response_formats: tuple = ()
     default_aux_model: str = ""
+    model_capabilities: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     def get_hostname(self) -> str:
         return self.hostname

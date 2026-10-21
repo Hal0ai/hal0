@@ -838,13 +838,14 @@ known_issues:
     adjudicated: v1.0.0-rc.6
     related_issue: 1829
     summary: >-
-      A fresh install's hermes-agent (0.19.0 at the current pin, 0.18.2 before it; from the pinned VCS commit) ships neither
+      A fresh install's hermes-agent (0.19.0 until v1.6.0, 0.18.2 before it; from the pinned VCS commit) ships neither
       hermes_cli/web_dist nor the web frontend source, so GET :9119/ returns 404 "Frontend not
       built". The agent process is otherwise healthy and hal0's unit STATUS string says so
       truthfully ("hermes agent up; dashboard UI not built (no web_dist bundled)").
     why: >-
-      hal0 deliberately pins hermes-agent to an immutable, reviewed upstream commit (3ef6bbd2 /
-      0.19.0; 9de9c25f / 0.18.2 before) under a governed compatibility freeze (VETTED_HERMES_REFS + contract fixtures).
+      hal0 deliberately pins hermes-agent to an immutable, reviewed upstream commit (d923a5eb /
+      v0.22.2 from v1.6.0; 3ef6bbd2 / 0.19.0 and 9de9c25f / 0.18.2 before) under a governed
+      compatibility freeze (VETTED_HERMES_REFS + contract fixtures).
       The dashboard bundle is an upstream npm build artifact the pinned git tree does not carry
       pre-built, so a VCS install of the pin cannot contain it — and the tree ships no
       hermes_cli/web source either, so even a node-equipped box has nothing to build. hal0
@@ -861,6 +862,10 @@ known_issues:
       surface, not the wheel.
     review_at: v1.1.0
     review_due: true
+    v1_6_0_note: >-
+      Re-adjudicate in v1.6.0. ADR-0034 decision 4 has each Hermes release build its dashboard UI
+      (hermes_cli/web_dist) once, at build time, from the v0.22.2 checkout, which does carry the
+      web source. If that landed, :9119/ should serve the SPA and this entry should be retired.
 
   - id: cli-api-polish-rollup-1840-still-open
     status: by-design      # process adjudication, not a product ruling

@@ -261,8 +261,10 @@ prompt and 32 decode tokens, capped at 30 s) when the slot's metrics carry no re
 `dns`, `runners`, `capabilities`, `memory`, `openwebui`, `hermes`, `auth`, `models`,
 `migrations`, `ui-dist`, `ports`, `port_dnat`, `netns`, `hal0_target`, `secret-modes`,
 `hardware_freshness`, `seed_context_envelope`, `agent-uid`, `api-journal`, `stt-weights`, `seams`,
-`mcp_mounts`, `hermes_mcp_auth`, `hermes_anchor_window`, `hindsight_llm_auth`,
-`memory_engine_version`, `memory_extraction_throughput`. There is no standalone `hal0 doctor seams`
+`mcp_mounts`, `hermes_mcp_auth`, `hermes_command_approvals`, `hermes_anchor_window`,
+`hal0_linger`, `hindsight_llm_auth`, `memory_engine_version`, `memory_extraction_throughput`.
+`hal0_linger` reads whether systemd linger is on for the `hal0` user (`loginctl show-user hal0 -p
+Linger`) and warns when that does not match whether the Hermes gateway is installed. There is no standalone `hal0 doctor seams`
 command — `seams` is one of these roll-up rows, surfaced by `hal0 doctor all`.
 
 ## `hal0 upstream` — manage upstream LLM providers
@@ -328,6 +330,8 @@ config with `auth_style = "google_query"` still loads: it's coerced to `bearer` 
 | `agent personas activate <persona_id>` | `persona_id` | `--reload-url` |
 
 `agent upgrade hermes` builds and activates a fresh Hermes release of the pin, or of `--to <sha>`, through the same release builder as install and `hal0 update`, and switches back to the previous release by itself if the new one fails its re-check. A ref other than the pin lasts until the next `hal0 update`.
+
+`agent uninstall hermes` also runs `loginctl disable-linger hal0` (as root; otherwise it prints the command), undoing the linger the Hermes gateway turned on.
 
 `agent install hermes` respects an operator-disabled gateway. If `hermes-gateway.service` is `disabled`, the unit file is refreshed with `--no-start-now --no-start-on-login` and the unit is not enabled or started (a copy already running is left running). If it is `masked-runtime` it is treated the same way. If it is persistently `masked`, the generator does not run at all. Either way the command prints how to turn it back on (`systemctl enable --now hermes-gateway.service`, preceded by `systemctl unmask` or `unmask --runtime` for a mask). A fresh or enabled gateway is installed and enabled as before.
 

@@ -164,6 +164,18 @@ class Layout:
     def uv_cache(self) -> Path:
         return self.root / ".cache" / "uv"
 
+    @property
+    def tools(self) -> Path:
+        """Upstream's package-manager store (``HERMES_RUNTIME_DIR``).
+
+        The v0.22.2 web build fetches its pinned Node through ``pm`` (Node
+        v26.7.0 per upstream ``pm/lock.json``). Without the override ``pm``
+        puts it in ``$HERMES_HOME/tools`` (``pm/environments.py:211-239`` at
+        d923a5eb), outside the release tree. Shared by every release so a
+        build does not download Node again.
+        """
+        return self.root / "tools"
+
 
 @dataclass(frozen=True)
 class Release:
@@ -396,9 +408,33 @@ def build_env(*, hermes_home: Path | None = None, layout: Layout | None = None) 
         GIT_TERMINAL_PROMPT="0",
     )
     env.pop("VIRTUAL_ENV", None)
+    if layout is not None:
+        # Upstream's own build and CI scripts point pm at a store this way
+        # (scripts/ci/setup_toolchain.py, scripts/build/launchers.py).
+        env["HERMES_RUNTIME_DIR"] = str(layout.tools)
     if hermes_home is not None:
         env["HERMES_HOME"] = str(hermes_home)
     return env
+
+
+def _lazy_installs_disabled(hermes_home: str | None) -> bool:
+    """True when Hermes's ``security.allow_lazy_installs`` is false.
+
+    v0.22.2's web build asks ``pm`` for Node and its npm dependencies, and
+    with lazy installs off it passes ``--no-install`` and fails
+    (hermes_cli/source_build.py:70-80, pm/install.py:164-191 at d923a5eb).
+    Upstream's dashboard build takes no flag to override the setting, so
+    hal0 checks it first and names the fix instead of failing deep in npm.
+    """
+    if not hermes_home:
+        return False
+    path = Path(hermes_home) / "config.yaml"
+    try:
+        data = hp._parse_yaml_config(path.read_text(encoding="utf-8"))
+    except OSError:
+        return False
+    security = (data or {}).get("security")
+    return isinstance(security, dict) and security.get("allow_lazy_installs") is False
 
 
 # ── The lock ─────────────────────────────────────────────────────────────────
@@ -603,6 +639,15 @@ def build_web_ui(src: Path, venv: Path, *, run: Runner, env: Mapping[str, str]) 
     if not (web / "package.json").is_file():
         return "absent"
     ships_build_script = (src / "scripts" / "build" / "web.mjs").is_file()
+    if ships_build_script and _lazy_installs_disabled(env.get("HERMES_HOME")):
+        raise ReleaseError(
+            "web-build",
+            "security.allow_lazy_installs is false in "
+            f"{env.get('HERMES_HOME')}/config.yaml, so Hermes's dashboard build cannot "
+            "fetch its pinned Node and npm packages. Remove that setting (and any "
+            "`security.allow_lazy_installs: false` in /etc/hal0/agents/hermes/overrides.yaml), "
+            "then run `sudo hal0 agent reprovision hermes`",
+        )
     error = ""
     try:
         proc = run(

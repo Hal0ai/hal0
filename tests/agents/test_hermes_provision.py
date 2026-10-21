@@ -868,8 +868,54 @@ def test_the_resolver_targets_the_minor_it_is_given(tmp_path: Path) -> None:
     assert [a[3] for a in runner.ran if a[0] == "/usr/local/bin/uv"] == ["3.12", "3.12"]
 
 
-def test_the_pinned_ref_targets_312() -> None:
-    assert hp.pinned_target_minor() == "3.12"
+def test_the_pinned_ref_targets_314() -> None:
+    """v0.22.2 (d923a5eb) declares requires-python ">=3.11,<3.15" (its
+    pyproject.toml:15), so the shipped pin moves hosts to 3.14."""
+    assert hp.pinned_target_minor() == "3.14"
+    assert set(hp.VETTED_HERMES_REQUIRES_PYTHON) == set(hp.VETTED_HERMES_REFS)
+
+
+class _MinorRunner(_UvRunner):
+    """``_UvRunner`` that also answers the version probe from the path."""
+
+    def run(self, argv: list[str], **kw: Any) -> Any:
+        argv = [str(a) for a in argv]
+        if len(argv) > 2 and argv[1] == "-c" and "version_info" in argv[2]:
+            self.ran.append(argv)
+            out = "3.14" if "3.14" in argv[0] else "3.12"
+            return type("R", (), {"stdout": out + "\n"})()
+        return super().run(argv, **kw)
+
+
+@pytest.mark.parametrize("source", ["persisted", "environment"])
+def test_the_pin_bump_repersists_the_312_interpreter_as_the_managed_314(
+    tmp_path: Path, source: str
+) -> None:
+    """#2615 PR 4: a host whose hermes-python.env names the uv-managed 3.12 of
+    the 0.19.0 pin is re-pointed at a uv-managed 3.14 on the next resolve for
+    the v0.22.2 pin, and the file is rewritten. ``environment`` is hal0-api
+    during `hal0 update`: its unit loads the old value through
+    ``EnvironmentFile=-/etc/hal0/hermes-python.env``, and /etc/hal0 is
+    hal0:hal0 2775, so the rewrite succeeds as hal0."""
+    env_path = tmp_path / "hermes-python.env"
+    old = f"{hp.UV_PYTHON_INSTALL_DIR}/cpython-3.12.15-linux-x86_64-gnu/bin/python3.12"
+    new = f"{hp.UV_PYTHON_INSTALL_DIR}/cpython-3.14.7-linux-x86_64-gnu/bin/python3.14"
+    env_path.write_text(f"HAL0_HERMES_PYTHON={old}\n")
+    env = {"HAL0_HERMES_PYTHON": old} if source == "environment" else {}
+    with structlog.testing.capture_logs() as logs:
+        out = hp.resolve_hermes_python(
+            env=env,
+            env_path=env_path,
+            prober=_uv_prober(system=None),
+            runner=_MinorRunner(new),
+            fallback_bin=Path("/nonexistent/uv"),
+            minor=hp.pinned_target_minor(),
+        )
+    assert out == new
+    assert env_path.read_text() == f"HAL0_HERMES_PYTHON={new}\n"
+    warn = next(e for e in logs if e["event"] == "hermes-python-discarded")
+    assert warn["value"] == old and "exactly 3.14" in warn["reason"]
+    assert warn["source"] == source
 
 
 def test_an_override_with_an_old_sqlite_is_used_with_a_warning(tmp_path: Path) -> None:
@@ -1249,7 +1295,7 @@ def test_shipped_requirement_is_the_vetted_commit_pin() -> None:
         # Vetted commit pin — the production posture.
         (
             "hermes-agent[web] @ git+https://github.com/NousResearch/hermes-agent.git@"
-            "3ef6bbd201263d354fd83ec55b3c306ded2eb72a",
+            "d923a5eb487a17c0a68801bba9ef0f56c81040a8",
             True,
         ),
         # Floored+capped spec — a floor names no commit to check out.
@@ -1295,9 +1341,9 @@ def test_version_pin_reports_commit_ref_without_crashing(monkeypatch, tmp_path) 
         monkeypatch,
         tmp_path,
         "# comment\nhermes-agent[web] @ git+https://github.com/NousResearch/"
-        "hermes-agent.git@3ef6bbd201263d354fd83ec55b3c306ded2eb72a\n",
+        "hermes-agent.git@d923a5eb487a17c0a68801bba9ef0f56c81040a8\n",
     )
-    assert pin == "3ef6bbd20126"
+    assert pin == "d923a5eb487a"
 
 
 def test_version_pin_reports_exact_floored_and_unknown_forms(monkeypatch, tmp_path) -> None:
@@ -1495,11 +1541,72 @@ def _build_overlay_keys(**over):
         mcp_servers=[],
         agent_id="hermes-agent",
         system_prompt="",
-        personality_name="",
         live_resolve_enabled=True,
     )
     base.update(over)
     return dict(hp._build_config_overlay(**base))
+
+
+def test_merge_drops_config_keys_hal0_no_longer_writes(tmp_path: Path) -> None:
+    yaml = pytest.importorskip("yaml")
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(
+        "agent:\n  max_turns: 60\n  system_prompt_prelude: old\nmodel:\n  default: m\n",
+        encoding="utf-8",
+    )
+    changed = hp._merge_config_yaml_layers(
+        cfg, list_keys={}, overrides_path=tmp_path / "absent.yaml"
+    )
+    data = yaml.safe_load(cfg.read_text(encoding="utf-8"))
+    assert changed is True
+    assert data["agent"] == {"max_turns": 60}
+    assert data["model"] == {"default": "m"}
+
+
+@pytest.mark.parametrize(
+    ("current", "reset"),
+    [("Concise", True), (" hal0 brain ", True), ("pirate", False), ("", False)],
+)
+def test_merge_retires_a_personality_hal0_wrote(tmp_path: Path, current: str, reset: bool) -> None:
+    """#2839 follow-up: a display.personality equal to a hal0 persona display
+    name (what hal0 wrote before the fix) is reset, so a persona named like a
+    built-in personality cannot override agent.system_prompt. An operator's
+    own pick is left alone."""
+    yaml = pytest.importorskip("yaml")
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(
+        yaml.safe_dump({"display": {"personality": current, "streaming": True}}),
+        encoding="utf-8",
+    )
+    hp._merge_config_yaml_layers(
+        cfg,
+        list_keys={},
+        overrides_path=tmp_path / "absent.yaml",
+        persona_names=["Concise", "hal0 Brain"],
+    )
+    display = yaml.safe_load(cfg.read_text(encoding="utf-8"))["display"]
+    assert display["personality"] == ("" if reset else current)
+    assert display["streaming"] is True
+
+
+def test_persona_display_names_cover_seeds_and_the_store(tmp_path: Path) -> None:
+    from hal0.agents import personas
+
+    state = hp.BootstrapState(venv=str(tmp_path / "v"), hermes_home=str(tmp_path / "h"))
+    root = hp._personas_root_for(state)
+    seeded = personas._seed_coder("hermes")
+    seeded.display_name = "Concise"
+    personas.save_persona(seeded, root=root)
+    names = hp._hal0_persona_display_names(state)
+    assert {"Hermes", "Coder", "hal0 Brain", "Concise"} <= set(names)
+
+
+def test_drop_dotted_key_tolerates_missing_and_non_dict_parents() -> None:
+    data = {"agent": "scalar", "auxiliary": {"vision": {}}}
+    assert hp._drop_dotted_key(data, "agent.system_prompt_prelude") is False
+    assert hp._drop_dotted_key(data, "auxiliary.web_extract") is False
+    assert hp._drop_dotted_key(data, "auxiliary.vision") is True
+    assert data == {"agent": "scalar", "auxiliary": {}}
 
 
 def test_overlay_includes_provider_and_identity_keys() -> None:
@@ -1511,8 +1618,8 @@ def test_overlay_includes_provider_and_identity_keys() -> None:
     # memory.graph.* dropped entirely — dead config,
     # configures hal0's own Hindsight engine, not anything hermes reads.
     assert "memory.graph.enabled" not in keys
-    # model.context_length is NEVER set — hermes treats it as a global override
-    # that bleeds onto cloud models.
+    # model.context_length is NEVER set — per-model context comes from live
+    # /v1/models discovery (see _build_config_overlay).
     assert "model.context_length" not in keys
 
 
@@ -1643,20 +1750,22 @@ def test_resolve_delegation_none_when_slot_not_ready() -> None:
 def test_resolve_auxiliary_tasks_routes_utility_group_to_utility_slot() -> None:
     aux = hp._resolve_auxiliary_tasks(_ROLE_SLOTS, hal0_base_url=_HAL0_V1)
     # Utility group → custom provider on the utility slot's model.
-    for task in ("compression", "session_search", "title_generation", "skills_hub", "mcp"):
+    for task in ("compression", "title_generation", "skills_hub", "mcp"):
         assert aux[task] == {
             "provider": "custom",
             "model": "qwen3-zero-coder-v2-0.8b-f16",
             "base_url": _HAL0_V1,
         }
-    # vision/web_extract always stay on the main chat provider.
-    for task in ("vision", "web_extract"):
-        assert aux[task] == {"provider": "main", "model": "", "base_url": ""}
+    # vision always stays on the main chat provider.
+    assert aux["vision"] == {"provider": "main", "model": "", "base_url": ""}
+    # web_extract/session_search have no aux LLM since Hermes v0.22.
+    assert "web_extract" not in aux
+    assert "session_search" not in aux
 
 
 def test_resolve_auxiliary_tasks_degrades_to_main_without_utility_slot() -> None:
     aux = hp._resolve_auxiliary_tasks(_ROLE_SLOTS[:1], hal0_base_url=_HAL0_V1)
-    for task in ("compression", "session_search", "title_generation"):
+    for task in ("compression", "title_generation"):
         assert aux[task]["provider"] == "main"
         assert aux[task]["model"] == ""
 
@@ -1677,14 +1786,13 @@ def test_resolve_auxiliary_tasks_routes_to_npu_virtual_when_utility_on_npu() -> 
         },
     ]
     aux = hp._resolve_auxiliary_tasks(slots, hal0_base_url=_HAL0_V1)
-    for task in ("compression", "session_search", "title_generation", "skills_hub", "mcp"):
+    for task in ("compression", "title_generation", "skills_hub", "mcp"):
         assert aux[task] == {
             "provider": "custom",
             "model": "hal0/npu",
             "base_url": _HAL0_V1,
         }
-    for task in ("vision", "web_extract"):
-        assert aux[task] == {"provider": "main", "model": "", "base_url": ""}
+    assert aux["vision"] == {"provider": "main", "model": "", "base_url": ""}
 
 
 def test_overlay_emits_delegation_and_auxiliary_keys() -> None:
@@ -1704,7 +1812,12 @@ def test_overlay_emits_delegation_and_auxiliary_keys() -> None:
     assert keys["auxiliary.compression.provider"] == "custom"
     assert keys["auxiliary.compression.model"] == "qwen3-zero-coder-v2-0.8b-f16"
     assert keys["auxiliary.compression.base_url"] == _HAL0_V1
-    assert keys["auxiliary.session_search.model"] == "qwen3-zero-coder-v2-0.8b-f16"
+    assert keys["auxiliary.title_generation.model"] == "qwen3-zero-coder-v2-0.8b-f16"
+    assert not any(
+        k.startswith(("auxiliary.session_search.", "auxiliary.web_extract.")) for k in keys
+    )
+    # Session pruning is off (ADR-0034 decision 7).
+    assert keys["sessions.auto_prune"] is False
     # vision stays on the main chat provider (no base_url key emitted).
     assert keys["auxiliary.vision.provider"] == "main"
     assert "auxiliary.vision.base_url" not in keys
@@ -2324,6 +2437,54 @@ def test_probe_mcp_client_script_emits_verdict_on_real_interpreter(
     # resolves on THIS interpreter, the verdict must come from the script.
     assert res["stage"] == "import"
     assert set(res) >= {"ok", "stage", "tools", "error"}
+
+
+def _run_probe_script_against_fake_mcp(tmp_path: Path, *, new: bool, legacy: bool) -> dict:
+    """Run the embedded probe script import-only against a stub ``mcp`` package."""
+    import json as _json
+    import subprocess as _sp
+
+    pkg = tmp_path / "mcp"
+    (pkg / "client").mkdir(parents=True)
+    (pkg / "shared").mkdir()
+    (pkg / "__init__.py").write_text("class ClientSession:\n    pass\n")
+    (pkg / "client" / "__init__.py").write_text("")
+    (pkg / "shared" / "__init__.py").write_text("")
+    (pkg / "shared" / "_httpx_utils.py").write_text("def create_mcp_http_client(**kw):\n    pass\n")
+    body = ""
+    if new:
+        body += "def streamable_http_client(url, *, http_client=None):\n    pass\n"
+    if legacy:
+        body += "def streamablehttp_client(url, headers=None):\n    pass\n"
+    (pkg / "client" / "streamable_http.py").write_text(body)
+    out = _sp.run(
+        [sys.executable, "-c", hp._MCP_CLIENT_PROBE_SCRIPT],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+        env={"PYTHONPATH": str(tmp_path), "HAL0_MCP_PROBE_URL": ""},
+    )
+    return _json.loads(out.stdout.strip().splitlines()[-1])
+
+
+@pytest.mark.parametrize(
+    ("new", "legacy", "ok"),
+    [
+        (True, False, True),  # mcp 2.0 (Hermes v0.22.2 lock): legacy alias removed
+        (True, True, True),  # mcp 1.24-1.x: both present
+        (False, True, True),  # mcp < 1.24: legacy only
+        (False, False, False),  # neither: a broken client stack
+    ],
+)
+def test_probe_script_imports_whichever_streamable_http_client_the_sdk_has(
+    tmp_path: Path, new: bool, legacy: bool, ok: bool
+) -> None:
+    """mcp 2.0 dropped ``streamablehttp_client``; the probe must not fail the
+    ``mcp_wire`` phase on a venv that only has ``streamable_http_client``."""
+    res = _run_probe_script_against_fake_mcp(tmp_path, new=new, legacy=legacy)
+    assert res["stage"] == "import"
+    assert res["ok"] is ok, res
 
 
 def test_smoke_admin_tools_list_url_follows_server_inventory(
