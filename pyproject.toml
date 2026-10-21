@@ -75,9 +75,13 @@ dependencies = [
   # other build-affecting pins: a new minor can change `uv export` or
   # `uv pip sync` output, so raise it deliberately. The ceiling also keeps a
   # quarantine like upstream Hermes's: only a uv release at least 7 days old
-  # at the time of the pin (0.13.1, 2026-10-14) is allowed, because the
-  # installer resolves this range rather than uv.lock.
-  "uv>=0.12.22,<0.13.2",
+  # at the time of the pin is allowed, because the installer resolves this
+  # range rather than uv.lock. Exception (2026-10-21, operator decision): 0.13.4
+  # (released 2026-10-20) is admitted a day old because it removes a
+  # compromised emSign root from uv's bundled CA store (GHSA-hq85-5cpj-mr62),
+  # the case a quarantine cannot help with. The floor moves to it too, so no
+  # install keeps the vulnerable store.
+  "uv>=0.13.4,<0.13.5",
 ]
 
 [project.optional-dependencies]
