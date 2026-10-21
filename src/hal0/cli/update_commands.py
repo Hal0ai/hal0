@@ -279,6 +279,9 @@ _MIGRATION_PASS_LABELS: dict[str, str] = {
     "updater.components_converge_failed": "component convergence",
     "updater.retired_skills_prune_failed": "retired bundled-skill cleanup",
     "updater.kokoro_bundle_pull_failed": "kokoro-v1 bundle pull (run: hal0 model pull kokoro-v1)",
+    "components.hermes_gateway_regen_failed": (
+        "hermes gateway unit regeneration (run: sudo hal0 agent install hermes)"
+    ),
 }
 
 
@@ -1058,10 +1061,11 @@ def _component_rows_tolerant() -> list[dict] | None:
 def _print_hermes_gateway_notice() -> None:
     """Name `sudo hal0 agent install hermes` when the gateway unit is stale (#2615).
 
-    `hal0 update` does not regenerate the Hermes gateway unit. A unit written
-    before Hermes 0.22, or a box without linger for hal0, leaves Hermes's
-    kanban workers unable to start, and nothing else says so outside the
-    gateway journal. Read-only; never changes the exit code.
+    `hal0 update` regenerates an old-shape gateway unit through `hal0-update
+    hermes-gateway` (ADR-0034 decision 6); this is the fallback for when that
+    could not run. A unit written before Hermes 0.22, or a box without linger
+    for hal0, leaves Hermes's kanban workers unable to start, and nothing else
+    says so outside the gateway journal. Read-only; never changes the exit code.
     """
     from hal0.system import linger
 

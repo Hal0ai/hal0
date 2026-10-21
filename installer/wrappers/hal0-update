@@ -198,6 +198,11 @@ case "${cmd}" in
     exec "${PY}" -I -m hal0.updater.privileged activate "${dir_name}"
     ;;
 
+  hermes-gateway)             # no arguments: heal an old-shape Hermes gateway unit
+    [[ $# -eq 0 ]] || die "hermes-gateway takes no arguments"
+    exec "${PY}" -I -m hal0.updater.privileged hermes-gateway
+    ;;
+
   discard)                    # discard <hal0-VERSION>   (rm -rf semantics)
     dir_name="${1:-}"; validate_dir_name "${dir_name}"
     exec "${PY}" -I -m hal0.updater.privileged discard "${dir_name}"
@@ -211,6 +216,8 @@ usage: hal0-update <command> [args]
                                    channel: stable|preview|nightly
   activate <hal0-VERSION>          swap ${LIB_ROOT}/current + re-pip the venv
   discard <hal0-VERSION>           remove a staged ${LIB_ROOT}/<dir> tree
+  hermes-gateway                   rewrite an old-shape hermes-gateway unit, turn
+                                   linger on for hal0 (never starts a stopped unit)
 EOF
     ;;
 

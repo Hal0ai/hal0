@@ -154,8 +154,9 @@ def gateway_unit_regen_reason(
 
     Read-only and unprivileged, so ``hal0 update`` can call it as any user
     (its only subprocess is :func:`gateway_in_use`'s ``systemctl is-active``,
-    and only when the gateway is not enabled). ``hal0 update`` does not rerun the gateway generator, so a box that
-    ran Hermes before 1.6.0 keeps the unit Hermes 0.19.0 wrote: no
+    and only when the gateway is not enabled). A box that ran Hermes before
+    1.6.0 keeps the unit Hermes 0.19.0 wrote until ``hal0 update`` heals it
+    through ``hal0-update hermes-gateway`` (:mod:`hal0.agents.hermes_gateway_regen`): no
     ``user@<uid>.service`` ordering and no linger. Under v0.22.2 that unit
     starts, but kanban workers cannot get their restart-safe scope and never
     start, and cron jobs run unscoped (hermes ``tools/process_registry.py:415-462``

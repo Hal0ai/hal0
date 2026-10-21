@@ -96,6 +96,8 @@ _RESULT_KEY = "hal0_update_result"
 _STAGE_TIMEOUT = 1800.0
 _ACTIVATE_TIMEOUT = 1800.0
 _SHORT_TIMEOUT = 60.0
+#: A restart waits out the gateway's TimeoutStopSec (70 s) and its start.
+_GATEWAY_TIMEOUT = 300.0
 
 
 def _remediation(detail: str) -> UpdatePrivilegeError:
@@ -279,6 +281,26 @@ class UpdateSeam:
             return await asyncio.to_thread(activate_release, name, job_id=self._job_id)
         return await asyncio.to_thread(self._invoke, "activate", name, timeout=_ACTIVATE_TIMEOUT)
 
+    def hermes_gateway(self) -> dict[str, Any]:
+        """Heal an old-shape Hermes gateway unit and turn linger on, as root.
+
+        Routed (the ``hal0`` service account): ``sudo -n hal0-update
+        hermes-gateway``. Unrouted root (an operator's own root run) calls the
+        same primitive in-process. Anyone else has no way to write
+        ``/etc/systemd/system`` and gets ``action="skipped"``. Raises
+        :class:`UpdateError` when the root side fails or the grant is missing.
+        """
+        if self.routed:
+            return self._invoke("hermes-gateway", timeout=_GATEWAY_TIMEOUT)
+        if os.geteuid() != 0:
+            return {"action": "skipped", "message": "not root and not the hal0 service account"}
+        from hal0.agents.hermes_gateway_regen import GatewayRegenError, regenerate_gateway_unit
+
+        try:
+            return regenerate_gateway_unit().as_dict()
+        except GatewayRegenError as exc:
+            raise UpdateError(f"hermes gateway: {exc}", details={}) from exc
+
     def discard(self, dir_name: str) -> None:
         """Remove a staged ``<usr_lib>/<dir_name>`` tree (idempotent)."""
         name = _validate_dir_name(dir_name)
@@ -397,7 +419,7 @@ def main(argv: list[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
     if not args:
         print(
-            "usage: python -m hal0.updater.privileged <check|stage|activate|discard>",
+            "usage: python -m hal0.updater.privileged <check|stage|activate|discard|hermes-gateway>",
             file=sys.stderr,
         )
         return 64
@@ -426,6 +448,24 @@ def main(argv: list[str] | None = None) -> int:
             # could have written must never reach it.
             assert_trusted_release_dir(_usr_lib_root() / name)
             _emit(activate_release(name))
+            return 0
+        if verb == "hermes-gateway":
+            # No arguments cross this boundary. The verb runs only hal0's own
+            # code from this root-owned tree and never executes anything from
+            # the hal0-owned Hermes release (ADR-0034 decision 6 amendment).
+            if rest:
+                raise UpdateError("hermes-gateway takes no arguments", details={"argv": rest})
+            from hal0.agents.hermes_gateway_regen import (
+                GatewayRegenError,
+                regenerate_gateway_unit,
+            )
+
+            try:
+                regen = regenerate_gateway_unit()
+            except GatewayRegenError as exc:
+                raise UpdateError(f"hermes gateway: {exc}", details={}) from exc
+            print(f"hal0-update: {regen.message}", file=sys.stderr)
+            _emit(regen.as_dict())
             return 0
         if verb == "discard":
             if len(rest) != 1:

@@ -15,7 +15,7 @@ WorkingDirectory=/var/lib/hal0/.hermes
 Environment="HOME=/var/lib/hal0"
 Environment="USER=hal0"
 Environment="LOGNAME=hal0"
-Environment="PATH=/var/lib/hal0/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+Environment="PATH=/var/lib/hal0/hermes/releases/d923a5eb487a-20261021T000000Z/src/node_modules/.bin:/var/lib/hal0/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 Environment="HERMES_HOME=/var/lib/hal0/.hermes"
 Environment="HERMES_SUPERVISED_CHILD=1"

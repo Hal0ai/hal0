@@ -3571,6 +3571,7 @@ _NON_FATAL_MIGRATION_FAILURE_EVENTS: tuple[str, ...] = (
     "updater.memory_engine_upgrade_failed",
     "updater.components_converge_failed",
     "updater.kokoro_bundle_pull_failed",
+    "components.hermes_gateway_regen_failed",
 )
 
 
