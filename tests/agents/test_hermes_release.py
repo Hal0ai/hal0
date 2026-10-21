@@ -31,6 +31,14 @@ URL = "https://github.com/NousResearch/hermes-agent.git"
 UV = "/fake/venv/bin/uv"
 OK_PROBE: Callable[[Path], dict[str, Any]] = lambda _py: {"ok": True}  # noqa: E731
 
+#: What `uv pip sync` of an export puts in site-packages, per extra.
+_EXTRA_PACKAGES = {
+    "telegram": ("telegram",),
+    "discord": ("discord", "aiohttp"),
+    "slack": ("slack_bolt", "aiohttp"),
+    "sms": ("aiohttp",),
+}
+
 
 # ── fakes ────────────────────────────────────────────────────────────────────
 
@@ -58,6 +66,7 @@ class FakeTools:
         self.requires_python = requires_python
         self.calls: list[list[str]] = []
         self.envs: list[dict[str, str]] = []
+        self.exported: list[list[str]] = []
 
     def __call__(self, argv: list[Any], **kw: Any) -> subprocess.CompletedProcess:
         argv = [str(a) for a in argv]
@@ -94,6 +103,16 @@ class FakeTools:
                 out = "v2026.7.20\n"
             elif "log" in argv and "--format=%cI" in argv:
                 out = "2026-07-20T12:00:00+00:00\n"
+        elif argv[:2] == [UV, "export"]:
+            self.exported.append([argv[i + 1] for i, a in enumerate(argv) if a == "--extra"])
+        elif argv[:3] == [UV, "pip", "sync"]:
+            # Install what the export named, as packages in site-packages.
+            venv = Path(argv[argv.index("--python") + 1]).parent.parent
+            site = venv / "lib" / f"python{self.minor}" / "site-packages"
+            site.mkdir(parents=True, exist_ok=True)
+            for extra in self.exported[-1]:
+                for pkg in _EXTRA_PACKAGES.get(extra, ()):
+                    (site / pkg).mkdir(exist_ok=True)
         elif argv[0] == UV and argv[1] == "venv":
             venv = Path(argv[-1])
             (venv / "bin").mkdir(parents=True)
@@ -1507,25 +1526,10 @@ def test_an_unwritable_config_never_starts_the_new_release(update_box, monkeypat
 
 #: The extras v0.22.2 declares that matter here (pyproject.toml at d923a5eb).
 _V0222_EXTRAS = ("web", "mcp", "telegram", "discord", "slack", "sms", "messaging", "matrix")
-#: What `uv pip sync` of an export puts in site-packages, per extra.
-_EXTRA_PACKAGES = {
-    "telegram": ("telegram",),
-    "discord": ("discord", "aiohttp"),
-    "slack": ("slack_bolt", "aiohttp"),
-    "sms": ("aiohttp",),
-}
 
 
 class PlatformLock(LockFor314):
-    """A v0.22.2 checkout whose pyproject declares the platform extras.
-
-    ``uv pip sync`` of an export installs the packages of the extras that
-    export named, so a test can read what reached the venv.
-    """
-
-    def __init__(self, **kw: Any) -> None:
-        super().__init__(**kw)
-        self.exported: list[list[str]] = []
+    """A v0.22.2 checkout whose pyproject declares the platform extras."""
 
     def __call__(self, argv: list[Any], **kw: Any) -> subprocess.CompletedProcess:
         out = super().__call__(argv, **kw)
@@ -1536,15 +1540,6 @@ class PlatformLock(LockFor314):
                 '[project]\nname = "hermes-agent"\nrequires-python = ">=3.11,<3.15"\n'
                 f"[project.optional-dependencies]\n{extras}\n"
             )
-        elif argv[:2] == [UV, "export"]:
-            self.exported.append([argv[i + 1] for i, a in enumerate(argv) if a == "--extra"])
-        elif argv[:3] == [UV, "pip", "sync"]:
-            venv = Path(argv[argv.index("--python") + 1]).parent.parent
-            site = venv / "lib" / "python3.14" / "site-packages"
-            site.mkdir(parents=True, exist_ok=True)
-            for extra in self.exported[-1]:
-                for pkg in _EXTRA_PACKAGES.get(extra, ()):
-                    (site / pkg).mkdir(exist_ok=True)
         return out
 
 
@@ -1568,10 +1563,10 @@ def test_a_config_with_telegram_and_discord_installs_those_extras(tree) -> None:
     tools = PlatformLock()
     out = _ensure(tree, tools)
     assert out.status == "activated", out.error
-    assert tools.exported == [["web", "mcp", "discord", "telegram"]]
+    assert tools.exported == [["web", "mcp", "discord", "sms", "telegram"]]
     live = rel.live_release(layout)
-    assert live.data["extras"] == ["web", "mcp", "discord", "telegram"]
-    assert live.data["platform_extras"] == ["discord", "telegram"]
+    assert live.data["extras"] == ["web", "mcp", "discord", "sms", "telegram"]
+    assert live.data["platform_extras"] == ["discord", "sms", "telegram"]
     assert {p.name for p in _site(live).iterdir()} == {"telegram", "discord", "aiohttp"}
 
 
@@ -1588,25 +1583,75 @@ def test_a_config_yaml_platform_block_counts_and_enabled_false_beats_a_token(tre
     assert tools.exported == [["web", "mcp", "slack", "sms"]]
 
 
-def test_a_box_with_no_platforms_installs_only_web_and_mcp(tree) -> None:
+def test_a_config_with_no_platforms_needs_no_extras() -> None:
+    from hal0.agents import hermes_platforms as hpl
+
+    assert hpl.configured_platforms({"model": {"default": "x"}}, [{}]) == []
+    assert hpl.extras_for([]) == ()
+
+
+def test_a_box_with_no_messaging_platforms_adds_only_the_api_servers_aiohttp(tree) -> None:
+    """hal0 enables the gateway API server on every box, before the key exists
+    on a fresh install, so aiohttp (`sms`) is the only extra beyond web and mcp."""
     layout = _on_v0222(tree)
     (tree["home"] / "config.yaml").write_text("model:\n  default: x\n", encoding="utf-8")
     tools = PlatformLock()
     assert _ensure(tree, tools).ok
-    assert tools.exported == [["web", "mcp"]]
+    assert tools.exported == [["web", "mcp", "sms"]]
     live = rel.live_release(layout)
-    assert live.data["extras"] == ["web", "mcp"] and live.data["platform_extras"] == []
-    assert not _site(live).exists() or not any(_site(live).iterdir())
+    assert live.data["extras"] == ["web", "mcp", "sms"] and live.data["platform_extras"] == ["sms"]
+    assert {p.name for p in _site(live).iterdir()} == {"aiohttp"}
 
 
-def test_the_gateway_api_server_key_needs_aiohttp(tree) -> None:
-    """hal0 provisions API_SERVER_KEY on every box, and upstream's API server
-    adapter refuses to start without aiohttp (gateway/run.py:3320 at d923a5eb)."""
+def test_an_explicitly_disabled_api_server_adds_nothing(tree) -> None:
     _on_v0222(tree)
-    _vault(tree, API_SERVER_KEY="k" * 43)
+    (tree["home"] / "config.yaml").write_text(
+        "platforms:\n  api_server:\n    enabled: false\n", encoding="utf-8"
+    )
     tools = PlatformLock()
     assert _ensure(tree, tools).ok
-    assert tools.exported == [["web", "mcp", "sms"]]
+    assert tools.exported == [["web", "mcp"]]
+
+
+def test_upstream_any_of_gates_and_top_level_blocks() -> None:
+    """Weixin enables on either name (gateway/config_env.py:551 at d923a5eb), and a
+    top-level `<platform>:` block's `enabled` wins over the nested ones."""
+    from hal0.agents import hermes_platforms as hpl
+
+    assert hpl.configured_platforms(None, [{"WEIXIN_TOKEN": "t"}]) == ["weixin"]
+    assert hpl.configured_platforms(None, [{"TEAMS_CLIENT_ID": "a"}]) == []
+    config = {"telegram": {"enabled": True}, "platforms": {"discord": {"enabled": True}},
+              "discord": {"enabled": False}}  # fmt: skip
+    assert hpl.configured_platforms(config, [{"DISCORD_BOT_TOKEN": "x"}]) == ["telegram"]
+    teams = {"TEAMS_CLIENT_ID": "a", "TEAMS_CLIENT_SECRET": "b", "TEAMS_TENANT_ID": "c"}
+    assert hpl.extras_for(hpl.configured_platforms(None, [teams])) == ("teams",)
+    assert hpl.extras_for(["wecom_callback"]) == ("sms", "wecom")
+
+
+def test_a_hal0_caller_reads_the_vaults_key_names_through_the_seam(tmp_path) -> None:
+    """hal0-api cannot read the 0600 vault; the seam returns names, never values."""
+    from hal0.agents import hermes_platforms as hpl
+
+    vault = tmp_path / "hermes.env"
+    vault.write_text("TELEGRAM_BOT_TOKEN=secret\n")
+    vault.chmod(0)
+    calls: list[list[str]] = []
+
+    def _seam(argv: list[str], **_kw: Any) -> subprocess.CompletedProcess:
+        calls.append(argv)
+        return subprocess.CompletedProcess(argv, 0, "TELEGRAM_BOT_TOKEN\nAPI_SERVER_KEY\n", "")
+
+    try:
+        if os.access(vault, os.R_OK):
+            pytest.skip("root reads a 0000 file")
+        got = hpl.configured_platform_extras(tmp_path, vault, seam="/s/hal0-agentenv", run=_seam)
+    finally:
+        vault.chmod(0o600)
+    assert calls == [["sudo", "-n", "/s/hal0-agentenv", "secret-keys", "hermes"]]
+    assert got == ("sms", "telegram")
+    # An old seam without the verb, or no vault at all, reads as no keys.
+    fail = lambda argv, **_kw: subprocess.CompletedProcess(argv, 2, "", "bad cmd")  # noqa: E731
+    assert hpl.read_vault(vault.with_name("absent.env"), seam="/s", run=fail) == {}
 
 
 def test_a_configured_platform_missing_from_the_live_release_triggers_a_rebuild(tree) -> None:
@@ -1620,12 +1665,13 @@ def test_a_configured_platform_missing_from_the_live_release_triggers_a_rebuild(
     assert rel.build_trigger(layout, NEW_PIN, minor) is None
     trigger = rel.build_trigger(layout, NEW_PIN, minor, rel.configured_extras())
     assert trigger == "configured platform extras missing from the live release: telegram"
+    assert rel.configured_extras() == ("sms", "telegram")
 
     tools = PlatformLock()
     out = _ensure(tree, tools, python_resolver=lambda _m: managed)
     assert out.status == "activated" and out.reason == trigger
     assert out.previous_id == first.id
-    assert rel.live_release(layout).data["platform_extras"] == ["telegram"]
+    assert rel.live_release(layout).data["platform_extras"] == ["sms", "telegram"]
     again = PlatformLock()
     assert _ensure(tree, again).status == "converged" and again.calls == []
 
@@ -1637,7 +1683,7 @@ def test_extras_installed_by_hand_count_as_satisfied(tree) -> None:
     _vault(tree, TELEGRAM_BOT_TOKEN="123:abc", DISCORD_BOT_TOKEN="xyz", API_SERVER_KEY="k" * 43)
     site = _site(rel.live_release(layout))
     site.mkdir(parents=True, exist_ok=True)
-    for pkg in ("telegram", "discord", "aiohttp", "slack_bolt"):
+    for pkg in ("telegram", "discord", "slack_bolt"):
         (site / pkg).mkdir()
     extras = rel.configured_extras()
     assert extras == ("discord", "sms", "telegram")
@@ -1652,8 +1698,7 @@ def test_a_rebuild_carries_the_live_venvs_platform_sdks(tree) -> None:
     layout = _on_v0222(tree)
     assert _ensure(tree, PlatformLock()).ok
     site = _site(rel.live_release(layout))
-    site.mkdir(parents=True, exist_ok=True)
-    for pkg in ("telegram", "discord", "aiohttp"):
+    for pkg in ("telegram", "discord"):
         (site / pkg).mkdir()
     tools = PlatformLock()
     assert _ensure(tree, tools, force=True).ok
@@ -1681,7 +1726,7 @@ def test_platform_extras_take_the_lock_and_hash_path_only(tree) -> None:
     assert _ensure(tree, tools).ok
     [export] = tools.find(lambda c: c[:2] == [UV, "export"])
     assert "--frozen" in export and "--no-emit-project" in export
-    assert tools.exported == [["web", "mcp", "slack", "telegram"]]
+    assert tools.exported == [["web", "mcp", "slack", "sms", "telegram"]]
     [sync] = tools.find(lambda c: c[:3] == [UV, "pip", "sync"])
     assert "--require-hashes" in sync and sync[-1] == export[export.index("--output-file") + 1]
     # The only `pip install` is the project itself, without dependencies.
@@ -1742,4 +1787,4 @@ def test_a_root_caller_reads_the_vault_and_hands_the_extras_to_the_hal0_child(
     monkeypatch.setattr(rel.shutil, "which", lambda _n: None)
     monkeypatch.setattr(rel.subprocess, "run", _fake_run)
     rel.ensure_release(caller="converge", venv=tree["venv"], units=rel.NoUnits())
-    assert json.loads(seen[0][-1])["platform_extras"] == ["telegram"]
+    assert json.loads(seen[0][-1])["platform_extras"] == ["sms", "telegram"]

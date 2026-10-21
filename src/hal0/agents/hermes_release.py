@@ -358,13 +358,14 @@ def configured_extras(
 ) -> tuple[str, ...]:
     """The platform extras this box's Hermes configuration needs (hermes_platforms).
 
-    Defaults to the live ``HERMES_HOME`` and the gateway's secrets vault. Only
-    a root caller can read the vault; any other caller sees config.yaml and
-    ``.env`` alone, and the build's carry-over of installed extras covers the rest.
+    Defaults to the live ``HERMES_HOME`` and the gateway's secrets vault. Root
+    reads the vault; a ``hal0`` caller (hal0-api's converge pass) gets the
+    names of its set keys from the ``hal0-agentenv secret-keys`` seam.
     """
     home = Path(hermes_home) if hermes_home is not None else hp.HERMES_HOME_DEFAULT
     vault = Path(secrets_env) if secrets_env is not None else hp.HERMES_SECRETS_ENV
-    return hpl.configured_platform_extras(home, vault)
+    seam = hp._HAL0_AGENTENV if os.geteuid() != 0 else None
+    return hpl.configured_platform_extras(home, vault, seam=seam)
 
 
 def release_extras(

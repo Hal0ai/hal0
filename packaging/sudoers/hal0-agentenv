@@ -10,7 +10,8 @@
 # the entire privileged surface: the helper validates the agent name, builds the
 # target path itself, takes content on stdin, and only ever touches
 # <agent>.{env,toml} under those two fixed directories — no wildcards, no shell,
-# no arbitrary file writes.
+# no arbitrary file writes. Its one read verb, `secret-keys`, prints only the
+# names of the secrets-vault keys that are set, never a value.
 #
 # Install (as root):
 #   install -m 0440 packaging/sudoers/hal0-agentenv /etc/sudoers.d/hal0-agentenv

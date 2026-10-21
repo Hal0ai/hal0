@@ -103,7 +103,7 @@ See [Config schema](/docs/reference/config-schema/) for the `[metrics]` TOML tab
 | `HAL0_HERMES_LIVE_RESOLVE` | `"1"` | `0` opts out of live model-discovery (Hermes' picker polling hal0-api's `/v1/models`) back into single-backend pinning. |
 | `HAL0_HERMES_TERMINAL` | unset (→ terminal tool OFF) | Opt the agent into a terminal tool at provisioning time. `1` enables it, `0` disables it. With it on, Hermes can run shell commands as the `hal0` user, which is root-equivalent on this box. A non-interactive install never enables it; see [Run agents](/docs/guides/run-agents/). |
 | `HAL0_HERMES_OFFLINE` | unset | Set programmatically by `hal0 agent bootstrap --offline`. |
-| `HAL0_AGENTENV` | `/usr/lib/hal0/bin/hal0-agentenv` | Privileged-seam binary hal0-api (running unprivileged) delegates to for writing root:root agent secret/env files. Env-overridable for tests, not a normal operator knob. |
+| `HAL0_AGENTENV` | `/usr/lib/hal0/bin/hal0-agentenv` | Privileged-seam binary hal0-api (running unprivileged) delegates to for writing root:root agent secret/env files, and for listing which secrets-vault keys are set (names only, never values). Env-overridable for tests, not a normal operator knob. |
 | `HAL0_SYSTEMCTL` | `/usr/lib/hal0/bin/hal0-systemctl` | Privileged-seam binary hal0-api delegates to for the systemd writes/reloads it cannot do unprivileged. Env-overridable for tests, not a normal operator knob. |
 | `HAL0_INFERENCE_BASE` | `http://127.0.0.1:8080` | Base URL the Hermes provisioner records as hal0's inference endpoint. |
 | `HAL0_AGENT_SECRET_PATH` | `/var/lib/hal0/agents/secret.bin` | HMAC secret that signs dashboard session cookies (`hal0_session`). |

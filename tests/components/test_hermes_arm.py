@@ -256,16 +256,19 @@ def test_a_configured_platform_missing_from_the_live_release_is_stale(
     monkeypatch.setattr(hp, "HERMES_HOME_DEFAULT", tmp_path / "no-home")
     res = hermes_arm.converge_hermes(venv=venv, apply=False)
     assert res["status"] == "stale"
-    assert res["trigger"] == "configured platform extras missing from the live release: telegram"
+    assert res["trigger"] == (
+        "configured platform extras missing from the live release: sms, telegram"
+    )
     assert "telegram" in hermes_arm.hermes_build_trigger(venv)
 
     with patch("hal0.agents.hermes_release.ensure_release") as ensure:
         ensure.return_value = rel.ReleaseOutcome(status="converged")
         hermes_arm.converge_hermes(venv=venv)
-    assert ensure.call_args.kwargs["platform_extras"] == ("telegram",)
+    assert ensure.call_args.kwargs["platform_extras"] == ("sms", "telegram")
 
-    site = rdir / "venv" / "lib" / "python3.14" / "site-packages" / "telegram"
-    site.mkdir(parents=True)  # installed by hand
+    site = rdir / "venv" / "lib" / "python3.14" / "site-packages"
+    for pkg in ("telegram", "aiohttp"):  # installed by hand
+        (site / pkg).mkdir(parents=True)
     assert hermes_arm.converge_hermes(venv=venv, apply=False)["status"] == "converged"
 
 
