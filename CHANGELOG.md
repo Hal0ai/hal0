@@ -32,13 +32,7 @@ applying. Add those subsections to a version's section to surface them; see
 
 ### Breaking
 
-- `hal0 agent bootstrap hermes --repair` (and `HermesDriver.install`) no
-  longer fold the previous `hermes.env` back into `NO_PROXY` (#2534): an
-  exemption removed from `api.env` or the environment now actually
-  disappears from the agent's `NO_PROXY` on the next render. Renders that
-  cannot verify the required MCP host set (discovery failure with no
-  readable previous policy) fail closed — the `install_artifacts` step
-  reports a failure naming the fix instead of writing a reduced policy.
+- **Removing a `NO_PROXY` exemption from `api.env` now removes it from the Hermes agent's `NO_PROXY`.** A driver env rewrite run as root (`hal0 agent bootstrap hermes --repair`, `HermesDriver.install`, an MCP exposure change) read the previous `/etc/hal0/agents/hermes.env` back in as an operator source, so every entry it had ever written stayed there, including an operator `*`. A rewrite now takes operator entries only from `api.env` and its own process environment, so an entry exported only in an interactive shell is dropped again by the next rewrite from the service. When hal0 cannot read the MCP registry to find the exposed loopback hosts, a rewrite keeps the previous `NO_PROXY` lines; when there is no readable previous file, the `install_artifacts` step of `hal0 agent bootstrap hermes` fails and names the fix, and `HermesDriver.install` raises, instead of writing a list without those hosts (#2534).
 
 ### Removed
 

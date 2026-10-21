@@ -90,13 +90,15 @@ headers from their own MCP client, which hal0 cannot configure:
   `/etc/hal0/agents/hermes.env` to `localhost`, `127.0.0.1`, `::1` and every
   loopback host an exposed server uses. hal0 rewrites that file, so add your
   own exclusions to hal0-api's environment (`/etc/hal0/api.env`); hal0
-  copies them in. A changed `NO_PROXY` in `api.env` is copied in the next
-  time the set of exposed loopback hosts changes or Hermes is reprovisioned.
-  Removing an entry from `api.env` does not remove it from `hermes.env`,
-  because a rewrite run as root keeps the entries already in the file: to
-  clear one, delete it from `api.env`, run `sudo systemctl restart hal0-api`,
-  delete it from both the `NO_PROXY=` and `no_proxy=` lines of
-  `/etc/hal0/agents/hermes.env` (as root), then restart `hal0-agent@hermes`.
+  copies them in. Each rewrite recomputes `NO_PROXY` from `api.env`, the
+  environment of the process doing the rewrite, and the exposed loopback
+  hosts, so an entry added to or removed from `api.env` takes effect the
+  next time the set of exposed loopback hosts changes or Hermes is
+  reprovisioned (`hal0 agent bootstrap hermes --repair`). An entry exported
+  only in an interactive shell is dropped again by the next rewrite from the
+  service. If hal0 cannot read the MCP registry to find the exposed hosts, a
+  rewrite keeps the previous `NO_PROXY` lines, and a first install reports
+  the `install_artifacts` step as failed rather than write a reduced list.
   A newly exposed loopback host takes effect when the agent restarts:
   `sudo systemctl restart hal0-agent@hermes`. The exposed hosts are added for
   that `hal0-agent@hermes` service only: interactive `hermes` and the
