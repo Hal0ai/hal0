@@ -315,3 +315,53 @@ def installed_platform_extras(venv: Path) -> tuple[str, ...]:
 def missing_extras(venv: Path, extras: Iterable[str]) -> list[str]:
     """Those of ``extras`` the venv lacks, sorted."""
     return sorted({e for e in extras if not has_extra(venv, e)})
+
+
+# ── upstream's own lazy-install generations ──────────────────────────────────
+#
+# A lazy install that does succeed (the first one a process attempts, while it
+# still runs from the release venv) does not touch the release: pm builds a new
+# "dependency generation" under ``$HERMES_HOME/installs/<install key>/
+# environments/<id>/venv`` and records it in that install's ``facts.json``
+# (``pm/environments.py:20-38``, ``pm/lock.py:269-279``). Every later
+# ``hermes`` process for that checkout boots into the generation instead of the
+# release venv (``hermes_bootstrap.py:611-613`` ->
+# ``pm/environments.py:449-512``). The generation holds only the extras pm
+# selected, starting from none (``pm/install.py:749-762``), so it lacks the
+# pin's ``mcp``; hal0's release check probes the release venv and never sees it.
+
+
+def install_key(src: Path) -> str:
+    """Upstream's per-checkout key: the resolved checkout path, hashed
+    (``pm/environments.py:20-22``). A release's ``src`` resolves to its own
+    directory, so every release has its own key."""
+    import hashlib
+
+    return hashlib.sha256(str(Path(src).resolve()).encode("utf-8")).hexdigest()[:16]
+
+
+def committed_generation(hermes_home: Path, src: Path) -> Path | None:
+    """The pm generation Hermes boots into for ``src``, or ``None``.
+
+    Read from ``<hermes_home>/installs/<key>/facts.json`` the way upstream's
+    ``_recorded_venv`` reads it (``pm/environments.py:297-318``), never imported.
+    """
+    import json
+
+    state = Path(hermes_home) / "installs" / install_key(src)
+    try:
+        data = json.loads((state / "facts.json").read_text(encoding="utf-8-sig"))
+        value = data["packages"]["venv"]["environment"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    if not isinstance(value, str):
+        return None
+    environment = Path(value)
+    generations = state / "environments"
+    try:
+        inside = environment.resolve().is_relative_to(generations.resolve())
+    except OSError:
+        return None
+    if not inside or not (environment / "pyvenv.cfg").is_file():
+        return None
+    return environment
