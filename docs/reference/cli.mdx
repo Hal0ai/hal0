@@ -316,16 +316,18 @@ config with `auth_style = "google_query"` still loads: it's coerced to `bearer` 
 | `agent peers` | — | — |
 | `agent status [name]` | optional `name` (default `hermes`) | `--json` |
 | `agent log [name]` | optional `name` (default `hermes`) | `--phase` |
-| `agent upgrade [name]` | optional `name` (default `hermes`) | `--to` |
+| `agent upgrade [name]` | optional `name` (default `hermes`) | `--to <sha>` (a full 40-hex commit in `VETTED_HERMES_REFS`; versions and `==X.Y.Z` are refused) |
 | `agent reprovision [name]` | optional `name` (default `hermes`) | `--repair`, `--verbose`/`-v` |
 | `agent command-approvals [mode]` | optional `mode` (`smart` or `manual`); omit to show the setting | `--json` |
 | `agent approvals list` | — | — |
 | `agent approvals approve <approval_id>` | `approval_id` | — |
 | `agent approvals deny <approval_id>` | `approval_id` | — |
-| `agent bootstrap hermes` | — | `--repair`, `--offline`, `--verbose`/`-v` |
+| `agent bootstrap hermes` | — | `--repair`, `--offline` (never builds; a needed build fails and names the step that needs the network), `--verbose`/`-v` |
 | `agent personas list` | — | — |
 | `agent personas show <persona_id>` | `persona_id` | — |
 | `agent personas activate <persona_id>` | `persona_id` | `--reload-url` |
+
+`agent upgrade hermes` builds and activates a fresh Hermes release of the pin, or of `--to <sha>`, through the same release builder as install and `hal0 update`, and switches back to the previous release by itself if the new one fails its re-check. A ref other than the pin lasts until the next `hal0 update`.
 
 `agent install hermes` respects an operator-disabled gateway. If `hermes-gateway.service` is `disabled`, the unit file is refreshed with `--no-start-now --no-start-on-login` and the unit is not enabled or started (a copy already running is left running). If it is `masked-runtime` it is treated the same way. If it is persistently `masked`, the generator does not run at all. Either way the command prints how to turn it back on (`systemctl enable --now hermes-gateway.service`, preceded by `systemctl unmask` or `unmask --runtime` for a mask). A fresh or enabled gateway is installed and enabled as before.
 

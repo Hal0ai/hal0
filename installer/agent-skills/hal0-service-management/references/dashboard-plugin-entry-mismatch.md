@@ -48,10 +48,13 @@ restart the dashboard process (not just rescan via API) for changes to take effe
    ```
    `404` confirms the file doesn't exist.
 
-3. **Check whether the plugin has the component built into the main JS**:
+3. **Check whether the plugin has the component built into the main JS**.
+   The dashboard is built once per release into the release checkout
+   (`/var/lib/hal0/hermes/current/src/`); a host not yet migrated to the
+   release layout has it under the venv's `lib/python3.X/site-packages/`:
    ```bash
    grep -oP '.{0,80}<plugin_name>.{0,80}' \
-     /var/lib/hal0/venvs/hermes/lib/python3.12/site-packages/hermes_cli/web_dist/assets/index-*.js
+     /var/lib/hal0/hermes/current/src/hermes_cli/web_dist/assets/index-*.js
    ```
    If you see UI strings like `"Loading <Plugin> board…"`,
    `"Failed to load <Plugin> board"`, or `renderingError` in multiple
@@ -60,7 +63,7 @@ restart the dashboard process (not just rescan via API) for changes to take effe
 
 4. **Check what's actually in the plugin dashboard directory**:
    ```bash
-   ls -la <venv>/lib/python3.12/site-packages/plugins/<name>/dashboard/
+   ls -la /var/lib/hal0/hermes/current/src/plugins/<name>/dashboard/
    ```
    If you see `manifest.json` + `plugin_api.py` but no `dist/` and no
    JS files, the frontend was never packaged.
@@ -86,18 +89,20 @@ dashboard sidebar tab is removed.
 }
 ```
 
-### Option B: Upgrade hermes-agent
+### Option B: Move to a newer vetted hermes-agent commit
 
-If the missing JS bundle is a packaging gap in the installed version,
-check for a newer release that ships it:
+hal0 pins hermes-agent to a reviewed commit and never pip-upgrades it in
+place. If the missing JS bundle is fixed upstream, the fix reaches the box
+when hal0's pin moves to a commit that has it. An operator can build a
+different vetted commit (one already listed in hal0's `VETTED_HERMES_REFS`)
+with:
 
 ```bash
-/var/lib/hal0/venvs/hermes/bin/pip install --upgrade --dry-run hermes-agent
+sudo hal0 agent upgrade hermes --to <40-hex sha>
 ```
 
-If a newer version exists, upgrade, then restart the gateway and dashboard.
-The upgraded package will overwrite the plugin files with the correct
-manifest + JS bundle.
+That builds a fresh release with its own checkout, plugin files and
+dashboard, and switches to it; the next `hal0 update` returns to the pin.
 
 ### Why `"entry": ""` does NOT work
 

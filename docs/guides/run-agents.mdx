@@ -206,20 +206,34 @@ from a slot's runtime logs.
 
 ```sh
 hal0 agent reprovision hermes          # idempotent re-converge
-hal0 agent reprovision hermes --repair # force every phase, rebuilding the venv
-hal0 agent upgrade hermes              # bump the version pin + repair
-hal0 agent upgrade hermes --to 0.15.3  # pin a specific version
+hal0 agent reprovision hermes --repair # force every phase, building a fresh release
+hal0 agent upgrade hermes              # build and activate a fresh release of the pin
+hal0 agent upgrade hermes --to <sha>   # build a vetted commit other than the pin
 ```
 
 `reprovision` is a stable wrapper over the same state machine `install`
 runs. Plain `reprovision` re-converges the agent, including its managed
 virtualenv, so it is the command to reach for when the agent is running
 but its MCP tools are missing. `--repair` forces every phase instead of
-converging: it rebuilds the venv, re-writes the persona seeds and
-re-renders the config.
+converging: it builds a fresh Hermes release, re-writes the persona seeds
+and re-renders the config.
 
-To stage the agent wheel offline or watch each phase as it runs, drop to
-the underlying command directly. It is one linear pass: there is no
+Every build lands in its own release directory under `/var/lib/hal0/hermes`
+and is checked before anything switches. Activating it stops the agent and
+the gateway (only the ones that were running), moves the `current` link,
+runs `hermes config migrate` from the new release, starts the units again
+and re-checks them. If that re-check fails, hal0 switches back to the
+previous release and restores `config.yaml` by itself.
+
+`upgrade --to` takes only a full commit sha listed in hal0's vetted refs.
+A version string such as `0.15.3` or an `==X.Y.Z` spec is refused. A ref
+other than the pin lasts until the next `hal0 update`, which builds the pin
+again.
+
+To watch each phase as it runs, or to re-run provisioning without the
+network, drop to the underlying command directly. With `--offline` it never
+builds: if a build is needed, the install step fails and names the step
+that needs the network, and a running host keeps its live release. It is one linear pass: there is no
 preview mode and no way to skip a phase, and it refuses `--dry-run` and
 `--skip-phase` rather than run a real install.
 
@@ -433,14 +447,16 @@ fails to import with `mcp.client.streamable_http is not available` while
 the config header reads correctly.
 
 `hal0 update` now checks both on every upgrade and repairs what it finds.
-Verification is a re-probe of the import, not pip's exit code, so a repair
+A venv repair builds a fresh release of the live commit and activates it,
+switching back on its own if the result does not check out. Verification
+is a re-probe of the import, not the installer's exit code, so a repair
 that silently produces an unusable venv is reported as a failure rather
-than a success. If a repair cannot run — no venv on the box, an
-unresolvable pip — the update logs the fault and the remedy and carries on
-rather than failing.
+than a success. If a repair cannot run — no venv on the box, no network,
+another build holding the builder lock — the update logs the fault and the
+remedy and carries on rather than failing; the next update retries.
 
 `hal0-api` also probes this on every start, including crash-restarts, but
-that path only diagnoses: it will not run pip during the startup of a box
+that path only diagnoses: it will not build during the startup of a box
 that is already unhealthy. It logs the remedy, and the next real update
 performs the repair.
 
@@ -448,7 +464,7 @@ To fix a box by hand:
 
 ```sh
 hal0 agent reprovision hermes           # re-converges the venv; usually enough
-hal0 agent reprovision hermes --repair  # forces a full venv rebuild
+hal0 agent reprovision hermes --repair  # builds and activates a fresh release
 ```
 
 ## Related

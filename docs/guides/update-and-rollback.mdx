@@ -322,6 +322,18 @@ retry surface for a component that's stuck (e.g. `build_failed` after a
 transient pull failure). `--check` prints the status row without
 converging.
 
+Hermes converges through its release builder. The first `hal0 update` after
+upgrading to a release with the Hermes release layout migrates every host:
+it builds a new release under `/var/lib/hal0/hermes`, stops the agent and
+the gateway (only those that were running), moves the old venv aside as the
+`legacy` release, switches, runs `hermes config migrate`, and starts the
+units again. Expect a short Hermes outage during that step. If the new
+release fails its re-check, hal0 switches back to the old venv, restores
+`config.yaml`, and reports `activation_failed` with the
+`sudo hal0 agent reprovision hermes --repair` remedy. The component row
+also shows `busy` for a pass that found another Hermes build running; that
+is not a failure, and the next update retries.
+
 <Aside type="note">
 An apply that leaves a component unconverged, or a slot blocked by the
 profile-centric conversion, still reports the update as applied, but exits **2** —

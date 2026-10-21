@@ -6,14 +6,14 @@ The Hermes dashboard (`hermes dashboard --host 127.0.0.1 --port 9119`) runs as u
 
 ## Diagnostic signal
 
-`curl http://127.0.0.1:9119/api/status` returns 500. Enabling debug mode (`log_level='debug'` in uvicorn, or `app.debug = True`) reveals the traceback:
+`curl http://127.0.0.1:9119/api/status` returns 500. Enabling debug mode (`log_level='debug'` in uvicorn, or `app.debug = True`) reveals the traceback. Hermes is an editable install from a source checkout, so its files live under the live release's checkout, `/var/lib/hal0/hermes/current/src/` (a host not yet migrated to the release layout has them under `/var/lib/hal0/venvs/hermes/lib/python3.X/site-packages/` instead):
 
 ```
 PermissionError: [Errno 13] Permission denied: '/var/lib/hal0/agents/hermes/gateway.lock'
-  File "/var/lib/hal0/venvs/hermes/lib/python3.12/site-packages/gateway/status.py", line 466, in is_gateway_runtime_lock_active
+  File "/var/lib/hal0/hermes/current/src/gateway/status.py", line 466, in is_gateway_runtime_lock_active
     handle = open(resolved_lock_path, "a+", encoding="utf-8")
 
-  File "/var/lib/hal0/venvs/hermes/lib/python3.12/site-packages/hermes_cli/web_server.py", line 545, in get_status
+  File "/var/lib/hal0/hermes/current/src/hermes_cli/web_server.py", line 545, in get_status
     gateway_pid = get_running_pid()
 ```
 
