@@ -2,6 +2,13 @@
 
 ## Status
 
+**ACCEPTED (merged in #2788).** Amended by ADR-0034 (2026-10-21) for
+hermes-agent v0.22.2: decision 1 (dependencies are installed from upstream's
+`uv.lock`), decision 6 (offline-safe release check, a dashboard UI build per
+release, mirror fetches tags), decision 9 (a uv-managed 3.14 is preferred over
+a system one with an old SQLite) and decision 12 (the normaliser rewrites the
+whole unit file). The rest of this record stands.
+
 Proposed (2026-10-20). The operator chose option (a) on #2615 (2026-10-19): a
 pinned source checkout plus an editable install on Python 3.14. This record
 turns that choice into a design. On 2026-10-20 the operator cut two pieces
