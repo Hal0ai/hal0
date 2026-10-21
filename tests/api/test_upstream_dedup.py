@@ -22,7 +22,7 @@ ever registered in the routing table.
 
 from __future__ import annotations
 
-import asyncio
+import inspect
 from typing import Any
 
 import pytest
@@ -301,8 +301,8 @@ def test_public_symbol_exports() -> None:
     assert callable(_fetch_hal0_composite_models)
     assert callable(_hal0_model_cache_clear)
     assert callable(_prime_hal0_composite_cache)
-    assert asyncio.iscoroutinefunction(_fetch_hal0_composite_models)
-    assert asyncio.iscoroutinefunction(_prime_hal0_composite_cache)
+    assert inspect.iscoroutinefunction(_fetch_hal0_composite_models)
+    assert inspect.iscoroutinefunction(_prime_hal0_composite_cache)
 
 
 # ── #1837 follow-up: a degraded enumeration must not wipe the bucket ────────

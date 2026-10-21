@@ -40,16 +40,14 @@ jobs:
     # hang on #1915, see #1927) would otherwise run to GitHub's 6-hour
     # default. 45 covers the parallel suite plus slow-runner margin.
     timeout-minutes: 45
-    # 3.14 is experimental until every dep ships 3.14 wheels — surface it
-    # without reddening main. No-op on PRs, which run 3.12 only.
-    continue-on-error: ${{ matrix.python-version == '3.14' }}
     strategy:
       fail-fast: false
       matrix:
-        # PRs test the primary 3.12 only (fast feedback; matches the required
-        # "python (3.12)" status check). Pushes to main test the full supported
-        # range so Python-version drift still gates the protected branch.
-        python-version: ${{ (github.event_name == 'pull_request' && fromJSON('["3.12"]')) || fromJSON('["3.12","3.13","3.14"]') }}
+        # PRs test 3.12 (the floor) and 3.14 (what Ubuntu 26.04 installs run);
+        # both are blocking, matching the required "python (3.12)" and
+        # "python (3.14)" status checks. Pushes to main also run 3.13 so the
+        # full supported range still gates the protected branch.
+        python-version: ${{ (github.event_name == 'pull_request' && fromJSON('["3.12","3.14"]')) || fromJSON('["3.12","3.13","3.14"]') }}
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
