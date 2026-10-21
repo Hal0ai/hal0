@@ -98,11 +98,13 @@ WantedBy=multi-user.target
 
 ### Hermes interpreter policy
 
-The Hermes venv runs on exactly Python 3.14. When a build needs an interpreter, hal0 checks these in order:
+The Hermes venv runs on exactly one Python minor, which the pinned Hermes commit decides. hal0 uses the newest of 3.14 and 3.12 that the commit's `requires-python` admits. The current pin, `3ef6bbd2`, caps below 3.14, so it builds on 3.12 under its own lock. A newer pin that admits 3.14 builds on 3.14. When a build needs an interpreter for that minor, hal0 checks these in order:
 
-1. `HAL0_HERMES_PYTHON`, from the environment and then from `/etc/hal0/hermes-python.env`. A value that is not a Python 3.14 is discarded with a warning, and the interpreter is re-probed. A value whose interpreter links an SQLite older than 3.51.3 is still used, with a warning.
-2. A system `python3.14` that links SQLite 3.51.3 or newer.
-3. A uv-managed CPython 3.14 under `/var/lib/hal0/hermes/python`, fetched by the uv that ships in hal0's venv. On today's distributions this is the default: Ubuntu 26.04's `python3.14` links SQLite 3.46.1, and Hermes forces DELETE journal mode below 3.51.3.
+1. `HAL0_HERMES_PYTHON`, the operator's override, from the environment and then from `/etc/hal0/hermes-python.env`. A value that is not the target minor is discarded with a warning, and the interpreter is re-probed. A value whose interpreter links an SQLite older than 3.51.3 is still used, with a warning.
+2. A uv-managed CPython under `/var/lib/hal0/hermes/python`, fetched by the uv that ships in hal0's venv (`uv python install --managed-python`). It must link SQLite 3.51.3 or newer.
+3. A system `python3.14` (or `python3.12`) that links SQLite 3.51.3 or newer, used when uv cannot fetch one. Ubuntu 26.04's `python3.14` links SQLite 3.46.1, below the floor where Hermes forces DELETE journal mode, so it is never used.
+
+hal0's own venv interpreter is never used for Hermes.
 
 hal0 writes the interpreter it chose back to `/etc/hal0/hermes-python.env`. `hal0 doctor` reports the SQLite version of the live Hermes interpreter, and warns below 3.51.3.
 

@@ -370,6 +370,13 @@ Rollback swaps the code tree only. It does not restore `profiles.toml`,
 slot files or any other config: that is config state, deliberately decoupled
 from the code tree. The one exception is the profile-centric conversion below.
 
+Rolling back to 1.5.0 or earlier leaves Hermes on the newer release layout:
+`venvs/hermes` stays a link into `/var/lib/hal0/hermes`, and Hermes keeps
+running on that release. A 1.5.0 `hal0 agent reprovision hermes --repair`
+does not understand the layout. It can leave a stray
+`/var/lib/hal0/venvs/hermes.rollback-<pid>` symlink behind and report a
+failure. Delete that symlink; the release it pointed at is unaffected.
+
 ### Rolling back past the profile-centric conversion
 
 The release that moves to profile-centric config

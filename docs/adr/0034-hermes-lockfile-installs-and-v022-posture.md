@@ -138,6 +138,24 @@ board executor harvests are unchanged at NEW.
      `hermes/python` or `hermes/.cache/uv` back to `hal0`. `hal0 doctor
      perms` audits the release tree and does not treat the root-owned
      legacy directory as an error.
+   - **Amendment (2026-10-21, #2615 PR 3): the target minor follows the
+     ref, and the interpreter order is override, uv, system.** This amends
+     decisions 1 and 2 above. The builder never installs a ref on an
+     interpreter its metadata excludes. A release is built on the newest of
+     3.14 and 3.12 that the ref's `requires-python` admits. hal0 records that
+     spec per vetted ref (`VETTED_HERMES_REQUIRES_PYTHON`), so the build
+     trigger and the root prelude know the minor before a checkout exists,
+     and the build refuses a checkout that disagrees with the record.
+     `3ef6bbd2` (`>=3.11,<3.14`) therefore stays on 3.12 under its own lock,
+     and the move to 3.14 arrives with the pin bump to a ref that requires it,
+     under that ref's lock. A ref with no usable lock falls back to the
+     editable `[extras]` install with `--exclude-newer` set to the commit
+     date, so the resolve is reproducible. The interpreter for that minor is:
+     a valid `HAL0_HERMES_PYTHON` override first; then a uv-managed CPython
+     (`--managed-python` on `uv python install` and `uv python find`, and the
+     found interpreter must link SQLite >= 3.51.3); then a system
+     `python<minor>` with that SQLite. hal0's own venv interpreter is never
+     used.
 3. **Amends ADR-0032 decisions 4 and 6: the mirror fetches tags, and the
    release check is offline-safe.**
    - `mirror.git` fetches tags along with the sha.
