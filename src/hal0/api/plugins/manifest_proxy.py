@@ -346,12 +346,15 @@ def _manifest_entry_for(plugins: list[dict[str, Any]], name: str) -> dict[str, A
 def _expected_integrity_for_asset(entry: dict[str, Any], file_path: str) -> str | None:
     """Resolve the manifest's ``integrity`` value for ``file_path``.
 
-    The upstream manifest stores SRI either at the top level
-    (``integrity`` applies to the ``entry`` bundle) or per-asset via
-    optional ``integrity_map`` (``{relative_path: 'sha384-...'}``). The
-    upstream contract today only ships the top-level form for the
-    primary JS bundle; we accept both shapes so future per-asset SRI
-    drops in without proxy changes.
+    Two shapes are accepted: a top-level ``integrity`` that applies to the
+    ``entry`` bundle, and a per-asset ``integrity_map``
+    (``{relative_path: 'sha384-...'}``). Upstream ships neither: the
+    ``/api/dashboard/plugins`` listing carries ``name``, ``label``,
+    ``description``, ``icon``, ``version``, ``tab``, ``slots``, ``entry``,
+    ``css``, ``has_api`` and ``source`` (``hermes_cli/web_server_dashboard.py:541-555``
+    at the pinned v0.22.2; the same keys at 0.19.0). So today this returns
+    ``None`` and assets are proxied without an SRI check; the shapes are kept
+    so an upstream that adds SRI is verified without proxy changes.
     """
     integrity_map = entry.get("integrity_map")
     if isinstance(integrity_map, dict):

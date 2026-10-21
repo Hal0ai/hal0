@@ -293,19 +293,21 @@ def _resolve_web_dist(cfg: AgentConfig) -> Path | None:
 def _build_hermes_argv(cfg: AgentConfig) -> list[str]:
     """Build the argv that boots Hermes with ``/api/events`` + ``/api/pty``.
 
-    The chosen invocation is ``hermes --tui dashboard`` per ``hermes_cli/
-    main.py:14050-14102`` and ``hermes_cli/main.py:10930-10939``:
+    The chosen invocation is ``hermes --tui dashboard``. Re-verified against
+    the pinned Hermes v0.22.2 (``d923a5eb``):
 
-    * ``cmd_dashboard`` is the ONLY subcommand that imports + calls
-      ``hermes_cli.web_server.start_server``, which is where the
-      ``/api/pty``, ``/api/events``, and ``/api/ws`` routes are mounted
-      (``hermes_cli/web_server.py:3585`` ``/api/pty``,
-      ``hermes_cli/web_server.py:3763`` ``/api/events``,
-      ``hermes_cli/web_server.py:3704`` ``/api/ws``).
-    * ``--tui`` (alias env: ``HERMES_DASHBOARD_TUI=1``) flips on the
-      embedded chat PTY — without it the dashboard runs but the chat
-      tab is hidden and ``/api/pty`` refuses upgrades. hal0's chat
-      surface needs both.
+    * ``cmd_dashboard`` (``hermes_cli/main.py:2701``) is the subcommand that
+      starts ``hermes_cli.web_server.start_server`` (``web_server.py:1610``),
+      which serves the ``/api/pty``, ``/api/ws`` and ``/api/events``
+      WebSockets (``hermes_cli/web_routers/chat_ws.py:538``, ``:701``,
+      ``:752``).
+    * The embedded chat (``/chat``, ``/api/pty``, ``/api/ws``) is always on:
+      ``_DASHBOARD_EMBEDDED_CHAT_ENABLED = True`` (``web_server.py:461-464``;
+      also true at 3ef6bbd2). ``--tui`` is a top-level chat flag ("launch the
+      modern TUI", ``hermes_cli/_parser.py:206``) that the ``dashboard``
+      subcommand does not read; it is kept only so the argv stays the one
+      the unit has always run. Nothing reads a ``HERMES_DASHBOARD_TUI``
+      env var at either pin, so hal0 no longer sets one.
     * ``--skip-build`` keeps the unit start fast and works without npm
       on the production box — the wheel ships ``hermes_cli/web_dist/``
       pre-built. Added ONLY when a built dist is actually found (see
@@ -396,9 +398,6 @@ def _build_hermes_env(cfg: AgentConfig) -> dict[str, str]:
     env = dict(os.environ)
     env["HAL0_AGENT_ID"] = cfg.agent_id
     env["HERMES_HOME"] = str(cfg.home)
-    # Mirror ``--tui`` so any nested hermes-cli invocation (e.g. an
-    # in-process subprocess.run) sees the same flag without parsing argv.
-    env["HERMES_DASHBOARD_TUI"] = "1"
     # Point hermes at the version-correct pre-built dashboard assets. We honor
     # an existing HERMES_WEB_DIST ONLY when it resolves to a real directory (a
     # deliberate hand-built tree set in a `systemctl edit` drop-in); a stale

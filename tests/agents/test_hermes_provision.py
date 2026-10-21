@@ -1618,8 +1618,8 @@ def test_overlay_includes_provider_and_identity_keys() -> None:
     # memory.graph.* dropped entirely — dead config,
     # configures hal0's own Hindsight engine, not anything hermes reads.
     assert "memory.graph.enabled" not in keys
-    # model.context_length is NEVER set — hermes treats it as a global override
-    # that bleeds onto cloud models.
+    # model.context_length is NEVER set — per-model context comes from live
+    # /v1/models discovery (see _build_config_overlay).
     assert "model.context_length" not in keys
 
 

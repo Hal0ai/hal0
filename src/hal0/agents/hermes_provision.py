@@ -1689,13 +1689,16 @@ def _live_resolve_enabled() -> bool:
 
 # ── HAL0 config overlay (config-set + targeted YAML merge) ───────────────────
 #
-# hermes 0.17 owns + migrates its own config.yaml; hal0 layers ONLY its
-# integration keys on top instead of rendering the whole file (the old
-# Jinja whole-file ownership that forced the ``hermes-agent==0.14.0`` pin —
+# Hermes owns + migrates its own config.yaml (``hermes config migrate``);
+# hal0 layers ONLY its integration keys on top instead of rendering the whole
+# file (the old Jinja whole-file ownership forced an exact Hermes pin —
 # issues #240 / #934). Two appliers, split by what hermes's CLI can express:
 #
-#   * scalars + nested-scalars → hermes's OWN ``config set`` (~0.13s each,
-#     idempotent, exercises hermes's schema validation). Even ``mcp_servers``
+#   * scalars + nested-scalars → hermes's OWN ``config set`` (idempotent,
+#     exercises hermes's own coercion and key checks). At v0.22.2 ``config
+#     set`` refuses only a known key given under the wrong prefix and writes
+#     any other unknown key with a warning (hermes_cli/config.py:3577-3633);
+#     every key in :func:`_build_config_overlay` applies. Even ``mcp_servers``
 #     goes here: ``hermes mcp add`` is interactive (prompts "Save anyway?"
 #     on a connect probe and hangs with no TTY), so the nested-scalar
 #     ``mcp_servers.<name>.{type,url,headers.*,timeout}`` form is the
@@ -1742,18 +1745,20 @@ HAL0_CONFIG_LIST_KEYS: dict[str, Any] = {
 # 127.0.0.1:8080, which is precisely what the bundled host-management skills
 # need. So the choice is on/off, not local/sandboxed.
 #
-# HOW "off" IS EXPRESSED (verified against the pinned hermes-agent 0.18.2
-# installed at /var/lib/hal0/venvs/hermes, READ-ONLY): dropping
-# ``terminal.backend`` does NOT disable anything — hermes_cli/config.py
-# _DEFAULTS still carries ``terminal.backend: local`` and bridges it to
-# TERMINAL_ENV. What removes the tool from the model-facing schema is
-# ``agent.disabled_toolsets``: model_tools._compute_tool_definitions applies
-# it as a strict subtraction AFTER toolset resolution, explicitly so that a
-# composite bundle (``toolsets: [hermes-cli]``, the default hal0 runs with)
-# cannot re-add a disabled toolset's tools. ``terminal`` resolves to
-# ``terminal`` + ``process``; ``code_execution`` resolves to ``execute_code``,
-# which runs arbitrary Python as the same user — disabling one without the
-# other would leave the shell reachable by another name.
+# HOW "off" IS EXPRESSED (re-verified against the pinned v0.22.2, d923a5eb):
+# dropping ``terminal.backend`` does NOT disable anything — DEFAULT_CONFIG
+# still carries ``terminal.backend: local`` (hermes_cli/config_defaults.py:298)
+# and ``config set`` bridges terminal keys to TERMINAL_ENV. What removes the
+# tool from the model-facing schema is ``agent.disabled_toolsets``:
+# model_tools._select_tool_names subtracts it LAST, after toolset resolution
+# (model_tools.py:332-337), so a composite bundle (``toolsets: [hermes-cli]``,
+# the default hal0 runs with) cannot re-add a disabled toolset's tools, and
+# the API server's per-platform toolsets apply it as a global suppression
+# list too (hermes_cli/tools_config.py:626-632). ``terminal`` resolves to
+# ``terminal`` + ``process_manage`` (toolsets.py:102); ``code_execution``
+# resolves to ``execute_code`` (toolsets.py:155), which runs arbitrary Python
+# as the same user — disabling one without the other would leave the shell
+# reachable by another name.
 HERMES_TERMINAL_ENV = "HAL0_HERMES_TERMINAL"
 # The two DIRECT execution toolsets, kept named because they are what the
 # ``terminal`` opt-in is about; :data:`TERMINAL_OFF_TOOLSETS` is what hal0
@@ -1763,14 +1768,15 @@ TERMINAL_TOOLSETS: list[str] = ["terminal", "code_execution"]
 # ``delegation`` (#1882 review, finding 3).
 #
 # ``delegate_task`` builds a child agent from the toolsets named in the CALL.
-# The pinned hermes-agent 0.18.2 constructs that child from ``enabled_toolsets``
-# alone and never forwards the parent's ``disabled_toolsets``, and its
-# ``DELEGATE_BLOCKED_TOOLS`` blocks ``execute_code`` but not ``terminal`` or
-# ``process``. So on a terminal-OFF box a prompt-injected agent could call
-# ``delegate_task(toolsets=["terminal"])`` and have the child run the very
-# commands the operator declined — the subtraction would be one hop deep
-# instead of closed. Same reasoning that already bundles ``code_execution``
-# with ``terminal``: a shell reachable under another name is still a shell.
+# hermes-agent 0.18.2 constructed that child from ``enabled_toolsets`` alone
+# and never forwarded the parent's ``disabled_toolsets``, so on a terminal-OFF
+# box a prompt-injected agent could call ``delegate_task(toolsets=["terminal"])``
+# and have the child run the very commands the operator declined. v0.22.2
+# closes that upstream: the child inherits the parent's ``disabled_toolsets``
+# and may only narrow the parent's toolsets
+# (tools/delegate_tool_toolsets.py:78-123). hal0 still subtracts
+# ``delegation`` so the posture does not rest on that one upstream guarantee:
+# a shell reachable under another name is still a shell.
 #
 # ``delegation`` is a plain toolset in hermes' registry (tools: ``delegate_task``,
 # no ``posture`` key, not a ``hermes-*`` bundle), so ``disabled_toolsets``
@@ -2072,7 +2078,9 @@ def _fmt_config_value(value: Any) -> str:
     """Render a value as the positional argv for ``hermes config set``.
 
     hermes coerces ``true``/``false`` → bool and bare integers → int on the
-    way in (verified on 0.17), so we only need the lowercased bool spelling;
+    way in (``_coerce_config_set_value``, hermes_cli/config.py:3377 at
+    v0.22.2; checked by applying the overlay there), so we only need the
+    lowercased bool spelling;
     everything else is its ``str()``. NB: lists are intentionally never
     passed here — config set would store them as the literal string.
     """
@@ -2101,9 +2109,12 @@ def _build_config_overlay(
     Mirrors the (now-deleted) ``config.yaml.j2`` — but ONLY the scalar /
     nested-scalar keys. List-valued keys (``skills.external_dirs``,
     ``hooks.on_session_start``) are layered by :func:`_merge_config_yaml_layers`;
-    ``model.context_length`` is deliberately omitted (hermes treats it as a
-    GLOBAL override that bleeds onto cloud models — per-model context comes
-    from live ``/v1/models`` discovery instead).
+    ``model.context_length`` is deliberately omitted: per-model context comes
+    from live ``/v1/models`` discovery. (Hermes 0.14 applied it to every
+    model, cloud ones included; v0.22.2 scopes it to the configured default
+    model and route, hermes agent/agent_init.py:1700-1745, but under
+    live-resolve that default is the virtual ``hal0/agent``, so a single
+    number would still be wrong for most slots.)
 
     Under live-resolve (the hal0 default) ``model.default`` is the virtual
     ``hal0/agent`` against the gateway with ``discover_models`` on, so the
@@ -2875,8 +2886,8 @@ def _phase_config_write(ctx: _StepCtx) -> PhaseResult:
     """Apply hal0's integration overlay onto the hermes-owned ``config.yaml``.
 
     Config-set redesign (replaces the old whole-file Jinja render that forced
-    the ``hermes-agent==0.14.0`` pin): hermes owns + migrates ``config.yaml``;
-    hal0 layers ONLY its keys on top.
+    an exact Hermes pin): hermes owns + migrates ``config.yaml``; hal0 layers
+    ONLY its keys on top.
 
       1. ``hermes config migrate`` — hermes creates/schema-migrates its file.
       2. Scalar/nested-scalar overlay (model wiring, providers.custom, memory,
@@ -5007,8 +5018,8 @@ def _slot_context_length(slot: dict[str, Any]) -> int | None:
 
     Reads ``ctx_effective`` (the slot view's resolved window), then
     ``context_length`` then ``ctx_size`` — the same precedence
-    :func:`_resolve_primary_slot` uses — so the per-model entry in
-    ``custom_providers`` matches what the gateway serves.
+    :func:`_resolve_primary_slot` uses — so the chat-slot entries match
+    what the gateway serves.
     """
     raw = slot.get("ctx_effective") or slot.get("context_length") or slot.get("ctx_size")
     if raw is None:
@@ -5327,43 +5338,6 @@ def _collect_chat_slots(
             }
         )
     return out
-
-
-def _resolve_custom_providers(
-    chat_slots: list[dict[str, Any]],
-    *,
-    hal0_base_url: str,
-) -> list[dict[str, Any]] | None:
-    """Build the ``custom_providers`` block from live chat slots.
-
-    hermes 0.14.0 `agent/model_metadata.py:get_model_context_length`
-    treats the top-level ``model.context_length`` as a GLOBAL override
-    applied to EVERY model — switching to a cloud model (deepseek/
-    openrouter) then wrongly inherits our local value. The supported
-    per-model mechanism is ``custom_providers[].models.<model_id>.
-    context_length``, matched by base_url + model in `hermes_cli/config.py:
-    get_custom_provider_context_length` (used by startup, /model switch and
-    /info) and merged into the picker via `get_compatible_custom_providers`.
-    It does NOT bleed across base_urls/providers.
-
-    Returns a single-element list ``[{name, base_url, models}]`` where the
-    ``models`` KEYS are model_ids (what hermes looks up at runtime), not
-    slot aliases. Degrade-safe: only slots that resolve a context_length
-    contribute an entry; returns ``None`` when none do so the template
-    omits the block entirely.
-    """
-    models: dict[str, dict[str, Any]] = {}
-    for slot in chat_slots:
-        model_id = slot.get("model_id")
-        ctx = slot.get("context_length")
-        if not model_id or not ctx:
-            continue
-        # First writer wins on a model_id collision (declaration order
-        # mirrors _collect_chat_slots / /api/slots ordering).
-        models.setdefault(model_id, {"context_length": int(ctx)})
-    if not models:
-        return None
-    return [{"name": "hal0", "base_url": hal0_base_url, "models": models}]
 
 
 # ── Role→slot resolution (delegation + auxiliary) ───────────────────────────
