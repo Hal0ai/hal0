@@ -447,6 +447,37 @@ def test_uninstall_unlinks_a_venv_symlink_and_removes_the_release_tree(
     assert (outside / "keep").exists()
 
 
+def test_uninstall_holds_the_builder_lock_while_removing(
+    driver: HermesDriver,
+    tmp_hal0_home: str,
+    monkeypatch,
+) -> None:
+    from hal0.agents import hermes_release
+
+    var_lib = Path(tmp_hal0_home) / "var-lib" / "hal0"
+    root = var_lib / "hermes"
+    (root / "releases" / "r1" / "venv").mkdir(parents=True)
+    (root / "current").symlink_to("releases/r1")
+    venv = var_lib / "venvs" / "hermes"
+    venv.parent.mkdir(parents=True)
+    venv.symlink_to(root / "current" / "venv")
+    _stamp_provision(tmp_hal0_home, venv=venv)
+    held: list[str] = []
+    real_lock = hermes_release.builder_lock
+
+    def _spy(layout, *, caller, wait, on_wait=None):
+        held.append(caller)
+        assert wait is True
+        return real_lock(layout, caller=caller, wait=wait, on_wait=on_wait)
+
+    monkeypatch.setattr(hermes_release, "builder_lock", _spy)
+    driver._runner = _FakeRunner()  # type: ignore[assignment]
+    driver.install(bearer_token="tok")
+    driver.uninstall()
+    assert held == ["uninstall"]
+    assert not root.exists() and not venv.is_symlink()
+
+
 def test_uninstall_of_an_override_venv_leaves_the_release_tree(
     driver: HermesDriver,
     tmp_hal0_home: str,

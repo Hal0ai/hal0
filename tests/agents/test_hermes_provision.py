@@ -924,7 +924,8 @@ def test_provision_via_uv_creates_install_dir_world_traversable(
     # service user cannot traverse to reach the symlinked base interpreter —
     # the exact "gateway venv python won't start" failure the /var/lib/hal0
     # move was meant to fix. The install dir must be created 0o755 *before*
-    # uv is invoked, so record its mode at the moment the runner is called.
+    # uv is invoked, so record its mode at the moment the runner is called. It is
+    # 2775, matching the perms table.
     install_dir = tmp_path / "python"
     monkeypatch.setattr(hp, "UV_PYTHON_INSTALL_DIR", install_dir)
 
@@ -936,7 +937,7 @@ def test_provision_via_uv_creates_install_dir_world_traversable(
     class _Runner:
         @staticmethod
         def run(argv: list[str], **_kw: Any) -> _Result:
-            modes_at_run.append(install_dir.stat().st_mode & 0o777)
+            modes_at_run.append(install_dir.stat().st_mode & 0o7777)
             return _Result()
 
     old_umask = os.umask(0o077)
@@ -952,9 +953,10 @@ def test_provision_via_uv_creates_install_dir_world_traversable(
     assert out == f"{install_dir}/cpython-3.12/bin/python3.12"
     # World-traversable despite the 077 umask (a plain mkdir would be 0700)...
     assert install_dir.is_dir()
-    assert install_dir.stat().st_mode & 0o777 == 0o755
+    # 2775, the mode hal0.install.perms declares for it (setgid hal0 group).
+    assert install_dir.stat().st_mode & 0o7777 == 0o2775
     # ...and already so by the time uv's first subcommand ran.
-    assert modes_at_run and modes_at_run[0] == 0o755
+    assert modes_at_run and modes_at_run[0] == 0o2775
 
 
 def test_ensure_python_returns_none_without_uv(tmp_path: Path) -> None:

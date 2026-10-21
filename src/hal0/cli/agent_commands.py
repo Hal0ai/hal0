@@ -569,7 +569,7 @@ def _ensure_hermes_prelude_dirs() -> None:
             console.print(f"[dim]hermes prelude: could not pre-own {d}: {exc}[/dim]")
 
 
-def _hand_uv_trees_to_hal0() -> None:
+def _hand_uv_trees_to_hal0(roots: tuple[Any, ...] | None = None) -> None:
     """``lchown`` the builder's uv interpreter and cache trees to hal0 (root only).
 
     Walks without following symlinks, so nothing outside the trees changes.
@@ -583,7 +583,7 @@ def _hand_uv_trees_to_hal0() -> None:
         ent = _pwd.getpwnam(_AGENT_RUNTIME_USER)
     except KeyError:
         return
-    for root in (HERMES_PYTHON_ROOT, HERMES_UV_CACHE):
+    for root in roots if roots is not None else (HERMES_PYTHON_ROOT, HERMES_UV_CACHE):
         if root.is_symlink() or not root.is_dir():
             continue
         try:
@@ -593,6 +593,57 @@ def _hand_uv_trees_to_hal0() -> None:
                     _os.lchown(_os.path.join(dirpath, name), ent.pw_uid, ent.pw_gid)
         except OSError as exc:
             console.print(f"[dim]hermes prelude: could not hand {root} to hal0: {exc}[/dim]")
+
+
+def _cleanup_pre_layout_python() -> bool:
+    """Remove the pre-layout /var/lib/hal0/python once nothing uses it (root only).
+
+    It is root-owned on existing hosts, so only a root path may remove it, and
+    only once no release, pre-layout venv, or ``HAL0_HERMES_PYTHON`` value (this
+    process' or the persisted one) names an interpreter in it.
+    """
+    import os as _os
+
+    from hal0.agents.hermes_layout import (
+        HERMES_VENV_PATH,
+        LEGACY_PYTHON_ROOT,
+        remove_legacy_python_if_unused,
+    )
+    from hal0.agents.hermes_provision import _read_hermes_python_env
+
+    try:
+        persisted = _read_hermes_python_env() or ""
+    except (ValueError, OSError, UnicodeDecodeError):
+        persisted = ""
+    prefix = f"{LEGACY_PYTHON_ROOT}/"
+    for value in (_os.environ.get("HAL0_HERMES_PYTHON", ""), persisted):
+        if value.startswith(prefix):
+            return False
+    if remove_legacy_python_if_unused(HERMES_VENV_PATH, legacy_root=LEGACY_PYTHON_ROOT):
+        console.print("[dim]removed the unused pre-layout /var/lib/hal0/python[/dim]")
+        return True
+    return False
+
+
+def _hand_pre_layout_venv_to_hal0() -> None:
+    """``lchown`` a real-directory (pre-layout) venvs/hermes to hal0 when it isn't."""
+    import pwd as _pwd
+
+    from hal0.agents.hermes_layout import HERMES_VENV_PATH
+
+    venv = HERMES_VENV_PATH
+    if venv.is_symlink() or not venv.is_dir():
+        return
+    try:
+        uid = _pwd.getpwnam(_AGENT_RUNTIME_USER).pw_uid
+    except KeyError:
+        return
+    try:
+        if venv.stat().st_uid == uid and venv.parent.stat().st_uid == uid:
+            return
+    except OSError:
+        return
+    _hand_uv_trees_to_hal0((venv,))
 
 
 def _hermes_root_prelude(terminal_env: dict[str, str] | None = None) -> None:
@@ -621,6 +672,11 @@ def _hermes_root_prelude(terminal_env: dict[str, str] | None = None) -> None:
     # /var/lib/hal0/hermes/python and must find its parent hal0-owned
     # (ADR-0032 decision 5).
     _ensure_hermes_prelude_dirs()
+    # A pre-layout venv left root-owned by a provision from before §7.4 cannot
+    # be renamed into the release layout by the hal0 builder (a directory
+    # moving to a new parent needs write permission on itself). Hand it to
+    # hal0 here, as root, so the first migration can move it.
+    _hand_pre_layout_venv_to_hal0()
 
     try:
         hermes_python = resolve_hermes_python()
@@ -635,13 +691,7 @@ def _hermes_root_prelude(terminal_env: dict[str, str] | None = None) -> None:
         # prune them later.
         _hand_uv_trees_to_hal0()
 
-    # The pre-layout /var/lib/hal0/python is root-owned on existing hosts, so
-    # only a root path may remove it, and only once no release, pre-layout venv or
-    # HAL0_HERMES_PYTHON value names an interpreter in it.
-    from hal0.agents.hermes_layout import remove_legacy_python_if_unused
-
-    if remove_legacy_python_if_unused(configured=_os.environ.get("HAL0_HERMES_PYTHON", "")):
-        console.print("[dim]removed the unused pre-layout /var/lib/hal0/python[/dim]")
+    _cleanup_pre_layout_python()
 
     wrapper_src = REPO_ROOT_FOR_INSTALLER / "installer" / "wrappers" / "hermes"
     if wrapper_src.is_file():

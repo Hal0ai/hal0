@@ -105,3 +105,32 @@ def test_status_tuples_stay_in_step() -> None:
 
     assert set(runner._FAILURE_STATUSES) == set(status._FAILURE_STATUSES)
     assert "busy" not in status._FAILURE_STATUSES
+
+
+def test_pre_layout_hermes_host_is_pending_although_the_stamp_matches() -> None:
+    with (
+        patch("hal0.components.registry._hermes_installed", return_value="3ef6bbd20126"),
+        patch("hal0.components.registry._hermes_pinned", return_value="3ef6bbd20126"),
+        patch("hal0.components.status._hermes_needs_build", return_value=True),
+    ):
+        snap = status.component_status_snapshot()
+    row = next(r for r in snap["components"] if r["id"] == "hermes")
+    assert row["status"] == "pending"
+
+
+def test_busy_with_a_matching_stamp_is_not_green() -> None:
+    state.record_component_result("hermes", {"status": "busy", "holder_pid": 42})
+    with (
+        patch("hal0.components.registry._hermes_installed", return_value="3ef6bbd20126"),
+        patch("hal0.components.registry._hermes_pinned", return_value="3ef6bbd20126"),
+        patch("hal0.components.status._hermes_needs_build", return_value=False),
+    ):
+        snap = status.component_status_snapshot()
+    row = next(r for r in snap["components"] if r["id"] == "hermes")
+    assert row["status"] == "pending"
+
+
+def test_busy_counts_as_pending_in_the_update_cli() -> None:
+    from hal0.cli.update_commands import _COMPONENT_PENDING
+
+    assert "busy" in _COMPONENT_PENDING and "activation_failed" in _COMPONENT_PENDING

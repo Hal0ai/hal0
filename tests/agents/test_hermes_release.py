@@ -823,3 +823,143 @@ def test_prune_backstop_matches_a_bare_release_dir(tree) -> None:
     _ensure(tree, FakeTools(), force=True)
     _ensure(tree, FakeTools(), force=True)
     assert (layout.releases / first).is_dir()
+
+
+# ── review follow-ups on #2851 ───────────────────────────────────────────────
+
+
+class StopFails(FakeUnits):
+    def stop(self, unit: str) -> bool:
+        self.log.append(("stop", unit))
+        return False
+
+
+def test_failed_activations_never_leak_releases(tree) -> None:
+    """Each failed activation must drop its release, or every update adds one."""
+    first = _ensure(tree, FakeTools()).release_id
+    layout = rel.Layout.for_venv(tree["venv"])
+    for _ in range(3):
+        out = _ensure(tree, FakeTools(), StopFails(active={rel.AGENT_UNIT}), force=True)
+        assert out.status == "activation_failed" and "could not stop" in out.error
+    n = {"p": 0}
+
+    def _probe(_py: Path) -> dict[str, Any]:
+        n["p"] += 1
+        return {"ok": n["p"] % 2 == 1, "error": "broken"}  # build passes, re-verify fails
+
+    for _ in range(3):
+        out = _ensure(tree, FakeTools(), force=True, probe=_probe)
+        assert out.status == "activation_failed" and out.flipped_back
+    assert [p.name for p in layout.releases.iterdir()] == [first]
+    assert os.readlink(layout.current) == f"releases/{first}"
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root bypasses directory permissions")
+def test_an_unmovable_pre_layout_venv_refuses_before_building(tree) -> None:
+    venv = _legacy_venv(tree)
+    venv.chmod(0o555)
+    try:
+        tools = FakeTools()
+        out = _ensure(tree, tools)
+        assert out.status == "build_failed"
+        assert "not writable" in out.error
+        assert "doctor perms --fix" in out.remedy and "reprovision hermes" in out.remedy
+        assert not tools.find(lambda c: "fetch" in c), "refused before building"
+        assert venv.is_dir() and not venv.is_symlink()
+    finally:
+        venv.chmod(0o755)
+
+
+def test_a_missing_venv_link_is_relinked_without_a_rebuild(tree) -> None:
+    assert _ensure(tree, FakeTools()).ok
+    layout = rel.Layout.for_venv(tree["venv"])
+    tree["venv"].unlink()  # a builder that died between the rename and the swap
+    assert "does not point at current/venv" in rel.build_trigger(layout, PIN, "3.12")
+    tools = FakeTools()
+    out = _ensure(tree, tools)
+    assert out.status == "converged"
+    assert any("relinked" in w for w in out.warnings)
+    assert os.readlink(tree["venv"]) == str(layout.venv_target)
+    assert not tools.find(lambda c: "fetch" in c)
+
+
+def test_a_wrong_venv_link_is_relinked(tree, tmp_path) -> None:
+    assert _ensure(tree, FakeTools()).ok
+    tree["venv"].unlink()
+    tree["venv"].symlink_to(tmp_path)
+    assert _ensure(tree, FakeTools()).status == "converged"
+    assert os.readlink(tree["venv"]) == str(rel.Layout.for_venv(tree["venv"]).venv_target)
+
+
+def test_units_a_dead_builder_stopped_are_started_again(tree) -> None:
+    assert _ensure(tree, FakeTools()).ok
+    layout = rel.Layout.for_venv(tree["venv"])
+    (layout.root / rel.STOPPED_UNITS).write_text(
+        json.dumps({"units": [rel.AGENT_UNIT, "evil.service"]})
+    )
+    units = FakeUnits()
+    out = _ensure(tree, FakeTools(), units)
+    assert out.status == "converged"
+    assert units.log == [("start", rel.AGENT_UNIT)]  # never a unit outside HERMES_UNITS
+    assert not (layout.root / rel.STOPPED_UNITS).exists()
+
+
+def test_the_stopped_units_record_is_written_before_stopping_and_cleared_after(tree) -> None:
+    assert _ensure(tree, FakeTools()).ok
+    layout = rel.Layout.for_venv(tree["venv"])
+    seen: list[Any] = []
+
+    class Spy(FakeUnits):
+        def stop(self, unit: str) -> bool:
+            seen.append(json.loads((layout.root / rel.STOPPED_UNITS).read_text())["units"])
+            return super().stop(unit)
+
+    assert _ensure(tree, FakeTools(), Spy(active={rel.AGENT_UNIT}), force=True).ok
+    assert seen == [[rel.AGENT_UNIT]]
+    assert not (layout.root / rel.STOPPED_UNITS).exists()
+
+
+def test_a_half_initialised_mirror_gets_its_origin_back(tree) -> None:
+    layout = rel.Layout.for_venv(tree["venv"])
+    layout.mirror.mkdir(parents=True)
+    (layout.mirror / "HEAD").write_text("ref: refs/heads/main\n")  # init ran, remote add did not
+
+    class NoOrigin(FakeTools):
+        def __call__(self, argv: list[Any], **kw: Any) -> subprocess.CompletedProcess:
+            argv = [str(a) for a in argv]
+            if argv[-3:] == ["remote", "get-url", "origin"]:
+                self.calls.append(argv)
+                self.envs.append({})
+                return subprocess.CompletedProcess(argv, 2, "", "error: No such remote 'origin'")
+            return super().__call__(argv, **kw)
+
+    tools = NoOrigin()
+    assert _ensure(tree, tools).ok
+    assert tools.find(lambda c: c[-4:] == ["remote", "add", "origin", URL])
+    assert not tools.find(lambda c: "set-url" in c)
+    assert tools.find(lambda c: c[-2:] == ["remote.origin.promisor", "true"])
+
+
+def test_root_drop_forwards_the_wait_printer(tree, monkeypatch) -> None:
+    seen: list[list[str]] = []
+
+    def _fake_run(cmd: list[str], **_kw: Any) -> subprocess.CompletedProcess:
+        seen.append(list(cmd))
+        return subprocess.CompletedProcess(cmd, 0, json.dumps({"status": "converged"}), None)
+
+    monkeypatch.setattr(rel.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(rel, "_hal0_user_exists", lambda: True)
+    monkeypatch.setattr(rel.shutil, "which", lambda _n: None)
+    monkeypatch.setattr(rel.subprocess, "run", _fake_run)
+    rel.ensure_release(caller="provision", venv=tree["venv"], on_wait=lambda _h: None)
+    assert json.loads(seen[0][-1])["print_wait"] is True
+    assert seen[0][:5] == ["sudo", "-n", "-u", "hal0", "--"]
+
+    calls: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        rel,
+        "ensure_release",
+        lambda **kw: calls.append(kw) or rel.ReleaseOutcome(status="converged"),
+    )
+    rel.main([json.dumps({"caller": "provision", "print_wait": True})])
+    assert callable(calls[0]["on_wait"])

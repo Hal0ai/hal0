@@ -47,6 +47,12 @@ def _resolve(fn: Callable[[], Any]) -> Callable[[], Any]:
     return fn
 
 
+def _hermes_needs_build() -> bool:
+    from hal0.components.hermes_arm import hermes_build_trigger
+
+    return hermes_build_trigger() is not None
+
+
 def _pin_label(component_id: str) -> str | None:
     if component_id == "openwebui":
         from hal0.openwebui.image_pin import OPENWEBUI_PIN_LABEL
@@ -75,6 +81,14 @@ def component_status_snapshot() -> dict[str, Any]:
             derived = last["status"]
         elif installed is None:
             derived = "not-installed"
+        elif last.get("status") == "busy":
+            # The last pass found the Hermes builder lock held and did not
+            # run: not a failure, but not confirmed converged either.
+            derived = "pending"
+        elif installed == pinned and comp.id == "hermes" and _hermes_needs_build():
+            # A pre-layout host's stamp already equals the pin, but the next
+            # update still has to migrate it (ADR-0032 decision 6).
+            derived = "pending"
         elif installed == pinned:
             derived = "converged"
         else:

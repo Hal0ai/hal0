@@ -1024,6 +1024,7 @@ _COMPONENT_PENDING = (
     "snapshot_failed",
     "rolled_back",
     "activation_failed",
+    "busy",
 )
 
 

@@ -104,6 +104,24 @@ def installed_hermes_pin(venv: Path | None = None) -> str | None:
     return _installed_pin_from_provision_checkpoint()
 
 
+def hermes_build_trigger(venv: Path | None = None) -> str | None:
+    """Why the live Hermes release needs a build, or ``None`` (read-only).
+
+    The component row uses it so a host still on the pre-layout venv (whose
+    stamp already equals the pin) reads ``pending``, not ``converged``.
+    Best-effort: any error reads as ``None``.
+    """
+    try:
+        from hal0.agents import hermes_release as rel
+
+        layout = rel.Layout.for_venv(venv or (var_lib() / "venvs" / "hermes"))
+        if not layout.venv_link.exists() and rel.live_release(layout) is None:
+            return None
+        return rel.build_trigger(layout, rel.require_vetted(rel.read_pin().ref), rel.target_minor())
+    except Exception:
+        return None
+
+
 def converge_hermes(
     *,
     job_id: str | None = None,
@@ -127,13 +145,15 @@ def converge_hermes(
     is_hal0_user = is_hal0_user if is_hal0_user is not None else is_hal0_service_user
     venv = venv or hermes.HERMES_VENV_DEFAULT
 
-    if not (venv / "bin" / "python").exists():
+    layout = rel.Layout.for_venv(venv)
+    # A live release with a missing venvs/hermes link (a builder that died
+    # mid-switch) is still provisioned: the builder relinks it.
+    if not (venv / "bin" / "python").exists() and rel.live_release(layout) is None:
         return {"status": "skipped", "reason": "hermes not provisioned"}
 
     pinned = hermes._hermes_version_pin()
     installed = installed_hermes_pin(venv)
     result: dict[str, Any] = {"installed": installed, "pinned": pinned}
-    layout = rel.Layout.for_venv(venv)
     try:
         target = rel.require_vetted(rel.read_pin().ref)
     except rel.ReleaseError as exc:

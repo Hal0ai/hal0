@@ -171,3 +171,51 @@ def test_prelude_dirs_leave_a_symlink_alone(
     monkeypatch.setattr(pwd, "getpwnam", lambda _n: me)
     agent_commands._ensure_hermes_prelude_dirs()
     assert oct(real.stat().st_mode & 0o7777) == "0o700"  # chmod never followed the link
+
+
+def test_prelude_hands_a_root_owned_pre_layout_venv_to_hal0(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import pwd
+
+    from hal0.agents import hermes_layout
+
+    venv = tmp_path / "venvs" / "hermes"
+    (venv / "bin").mkdir(parents=True)
+    monkeypatch.setattr(hermes_layout, "HERMES_VENV_PATH", venv)
+    fake = pwd.struct_passwd(("hal0", "x", 4242, 4242, "", str(tmp_path), "/bin/false"))
+    monkeypatch.setattr(pwd, "getpwnam", lambda _n: fake)
+    handed: list[tuple] = []
+    monkeypatch.setattr(
+        agent_commands, "_hand_uv_trees_to_hal0", lambda roots=None: handed.append(roots)
+    )
+    agent_commands._hand_pre_layout_venv_to_hal0()
+    assert handed == [(venv,)]
+    # A migrated host (venvs/hermes is a link) is never touched.
+    handed.clear()
+    real = tmp_path / "r"
+    real.mkdir()
+    link = tmp_path / "venvs" / "link"
+    link.symlink_to(real)
+    monkeypatch.setattr(hermes_layout, "HERMES_VENV_PATH", link)
+    agent_commands._hand_pre_layout_venv_to_hal0()
+    assert handed == []
+
+
+def test_pre_layout_python_cleanup_honours_the_persisted_value(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from hal0.agents import hermes_layout
+
+    legacy = tmp_path / "python"
+    (legacy / "cpython-3.12.15").mkdir(parents=True)
+    monkeypatch.setattr(hermes_layout, "LEGACY_PYTHON_ROOT", legacy)
+    monkeypatch.setattr(hermes_layout, "HERMES_VENV_PATH", tmp_path / "venvs" / "hermes")
+    monkeypatch.delenv("HAL0_HERMES_PYTHON", raising=False)
+    persisted = f"{legacy}/cpython-3.12.15/bin/python3.12"
+    monkeypatch.setattr("hal0.agents.hermes_provision._read_hermes_python_env", lambda: persisted)
+    assert agent_commands._cleanup_pre_layout_python() is False
+    assert legacy.is_dir()
+    monkeypatch.setattr("hal0.agents.hermes_provision._read_hermes_python_env", lambda: None)
+    assert agent_commands._cleanup_pre_layout_python() is True
+    assert not legacy.exists()

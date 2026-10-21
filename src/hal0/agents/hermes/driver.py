@@ -540,7 +540,7 @@ class HermesDriver(AgentDriver):
         Idempotent and best-effort: a missing path is a no-op, and a
         permissions failure never aborts the rest of the uninstall.
         """
-        from hal0.agents.hermes_layout import remove_hermes_install
+        from hal0.agents.hermes_layout import release_root_for, remove_hermes_install
 
         raw_venv = provision.get("venv")
         if not isinstance(raw_venv, str) or not raw_venv:
@@ -552,4 +552,17 @@ class HermesDriver(AgentDriver):
             raw_venv = details.get("venv") if isinstance(details, dict) else None
         if not isinstance(raw_venv, str) or not raw_venv:
             return
-        remove_hermes_install(Path(raw_venv))
+        venv = Path(raw_venv)
+        root = release_root_for(venv)
+        if not root.is_dir():
+            remove_hermes_install(venv)
+            return
+        # Hold the builder lock so an uninstall never deletes a tree a build
+        # or activation is writing. Waits for a running build to finish.
+        from hal0.agents.hermes_release import Layout, builder_lock
+
+        try:
+            with builder_lock(Layout.for_venv(venv), caller="uninstall", wait=True):
+                remove_hermes_install(venv)
+        except OSError:
+            remove_hermes_install(venv)

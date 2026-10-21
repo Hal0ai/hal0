@@ -476,21 +476,30 @@ def _ensure_mirror(layout: Layout, url: str, *, run: Runner, env: Mapping[str, s
     only the blobs a release's ``git worktree add`` checks out: measured at
     about 200 MB for 3ef6bbd2 with every tag.
     """
-    if not (layout.mirror / "HEAD").is_file():
-        m = layout.mirror
+    m = layout.mirror
+    if not (m / "HEAD").is_file():
         _must(run, "mirror", ["git", "init", "--bare", "--quiet", m], env=env)
-        _must(run, "mirror", ["git", "-C", m, "remote", "add", "origin", url], env=env)
-        _must(run, "mirror", ["git", "-C", m, "config", "remote.origin.promisor", "true"], env=env)
-        _must(
-            run,
-            "mirror",
-            ["git", "-C", m, "config", "remote.origin.partialclonefilter", "blob:none"],
-            env=env,
+    # A mirror whose first setup died after `git init` has HEAD but no origin
+    # (every later fetch would fail with "No such remote 'origin'"), so the
+    # remote and its partial-clone config are (re)applied whenever origin is
+    # missing, not only on a fresh init.
+    try:
+        has_origin = (
+            run(["git", "-C", str(m), "remote", "get-url", "origin"], env=env).returncode == 0
         )
+    except (OSError, subprocess.SubprocessError):
+        has_origin = False
+    if has_origin:
+        _must(run, "mirror", ["git", "-C", m, "remote", "set-url", "origin", url], env=env)
     else:
-        _must(
-            run, "mirror", ["git", "-C", layout.mirror, "remote", "set-url", "origin", url], env=env
-        )
+        _must(run, "mirror", ["git", "-C", m, "remote", "add", "origin", url], env=env)
+    _must(run, "mirror", ["git", "-C", m, "config", "remote.origin.promisor", "true"], env=env)
+    _must(
+        run,
+        "mirror",
+        ["git", "-C", m, "config", "remote.origin.partialclonefilter", "blob:none"],
+        env=env,
+    )
 
 
 def install_command_lines(
@@ -855,6 +864,66 @@ def _prepare_legacy_release(layout: Layout, *, stamp_file: Path | None) -> Relea
 
 FAILED_MARKER = ".activation-failed"
 
+#: The units an activation stopped, written before the first stop and removed
+#: once they are started again. A builder that dies in between leaves it, and
+#: the next lock holder starts those units (:func:`restart_stranded_units`).
+STOPPED_UNITS = ".stopped-units"
+
+
+def _record_stopped_units(layout: Layout, units: list[str]) -> None:
+    with contextlib.suppress(OSError):
+        _atomic_json(layout.root / STOPPED_UNITS, {"units": units, "at": _utc_iso()})
+
+
+def _clear_stopped_units(layout: Layout) -> None:
+    with contextlib.suppress(FileNotFoundError):
+        (layout.root / STOPPED_UNITS).unlink()
+
+
+def restart_stranded_units(layout: Layout, units: Any) -> list[str]:
+    """Start units a dead builder stopped and never started again; return them."""
+    try:
+        data = json.loads((layout.root / STOPPED_UNITS).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    names = (
+        [u for u in (data.get("units") or []) if u in HERMES_UNITS]
+        if isinstance(data, dict)
+        else []
+    )
+    for unit in names:
+        if not units.active(unit):
+            units.start(unit)
+    _clear_stopped_units(layout)
+    if names:
+        log.warning("hermes_release.restarted_stranded_units", units=names)
+    return names
+
+
+def repair_venv_link(layout: Layout) -> bool:
+    """Point ``venvs/hermes`` back at ``current/venv`` when it is missing or wrong.
+
+    A builder that died between the pre-layout rename and the link swap
+    leaves the path missing. The live release is fine, so no rebuild is
+    needed. A real directory (a pre-layout venv) is never touched here.
+    Returns ``True`` when the link was rewritten.
+    """
+    link = layout.venv_link
+    if link.exists() and not link.is_symlink():
+        return False
+    if live_release(layout) is None:
+        return False
+    try:
+        if link.is_symlink() and Path(os.readlink(link)) == layout.venv_target:
+            return False
+        link.parent.mkdir(parents=True, exist_ok=True)
+        _swap_link(link, layout.venv_target)
+    except OSError as exc:
+        log.warning("hermes_release.venv_link_repair_failed", error=str(exc))
+        return False
+    log.warning("hermes_release.venv_link_repaired", link=str(link))
+    return True
+
 
 def _write_failed_marker(layout: Layout, release_id: str) -> None:
     """Record that ``release_id`` is live but failed its re-verify.
@@ -974,6 +1043,38 @@ def activate_release(
     a gateway the operator stopped or disabled is never started (#2823).
     """
     recorded = [u for u in HERMES_UNITS if units.active(u)]
+    if recorded:
+        _record_stopped_units(layout, recorded)
+    try:
+        return _activate(
+            new,
+            recorded=recorded,
+            layout=layout,
+            units=units,
+            hermes_home=hermes_home,
+            run=run,
+            probe=probe,
+            settle_s=settle_s,
+            stamp_file=stamp_file,
+            sleep=sleep,
+        )
+    finally:
+        _clear_stopped_units(layout)
+
+
+def _activate(
+    new: Release,
+    *,
+    recorded: list[str],
+    layout: Layout,
+    units: Any,
+    hermes_home: Path,
+    run: Runner,
+    probe: Callable[[Path], Mapping[str, Any]],
+    settle_s: float,
+    stamp_file: Path | None,
+    sleep: Callable[[float], None],
+) -> Activation:
     stopped: list[str] = []
     for unit in recorded:
         if not units.stop(unit):
@@ -1186,6 +1287,9 @@ def build_trigger(layout: Layout, ref: str, minor: str) -> str | None:
     live = live_release(layout)
     if live is None:
         return "no live release"
+    link = layout.venv_link
+    if not link.is_symlink() or Path(os.readlink(link)) != layout.venv_target:
+        return "venvs/hermes does not point at current/venv"
     if live.legacy:  # scar-ok: ADR-0032 decision 11 names the "legacy release"
         return "the pre-layout release is live"
     try:
@@ -1256,6 +1360,34 @@ def _default_stamp_file() -> Path:
     from hal0.components.hermes_arm import stamp_path
 
     return stamp_path()
+
+
+def _drop_unlive(layout: Layout, new: Release, *, run: Runner, gateway_unit: Path) -> None:
+    if _link_release_id(layout.current) == new.id or _link_release_id(layout.previous) == new.id:
+        return
+    if _names_release(_read_unit(gateway_unit), layout.releases / new.id):
+        return
+    _remove_release(layout, new.path, run=run, env=build_env(layout=layout))
+
+
+def _migration_blocked(layout: Layout) -> str | None:
+    """Why the first migration cannot move the pre-layout venv, or ``None``.
+
+    ``rename()`` of a directory to a new parent needs write permission on the
+    directory itself (its ``..`` entry changes) and on both parents. A venv
+    left root-owned by a provision from before §7.4 would therefore fail the
+    switch on every update, after a full build; refuse before building.
+    """
+    link = layout.venv_link
+    if not link.is_dir() or link.is_symlink():
+        return None
+    for path in (link, link.parent):
+        if not os.access(path, os.W_OK):
+            return (
+                f"the pre-layout venv cannot be moved into the release layout: {path} is "
+                "not writable by the builder (a root-owned venv from an earlier provision)"
+            )
+    return None
 
 
 def _hal0_user_exists() -> bool:
@@ -1356,6 +1488,7 @@ def ensure_release(
             offline=offline,
             hermes_home=hermes_home,
             no_units=isinstance(units, NoUnits),
+            print_wait=on_wait is not None,
         )
     layout = Layout.for_venv(venv if venv is not None else hp.HERMES_VENV_DEFAULT)
     home = Path(hermes_home) if hermes_home is not None else hp.HERMES_HOME_DEFAULT
@@ -1370,9 +1503,18 @@ def ensure_release(
     try:
         with builder_lock(layout, caller=caller, wait=wait, on_wait=on_wait):
             sweep_incomplete(layout, run=run)
+            stranded = restart_stranded_units(layout, units)
+            relinked = repair_venv_link(layout)
             trigger = build_trigger(layout, target, target_minor())
             if trigger is None and not force:
-                return ReleaseOutcome(status="converged", ref=target)
+                notes = []
+                if relinked:
+                    notes.append("venvs/hermes was missing or wrong; relinked to current/venv")
+                if stranded:
+                    notes.append(
+                        f"restarted units a dead builder left stopped: {', '.join(stranded)}"
+                    )
+                return ReleaseOutcome(status="converged", ref=target, warnings=notes)
             why = trigger or reason or "forced rebuild"
             if offline:
                 return ReleaseOutcome(
@@ -1380,6 +1522,15 @@ def ensure_release(
                     reason=why,
                     ref=target,
                     error=offline_refusal(why, target, pin.url),
+                )
+            blocked = _migration_blocked(layout)
+            if blocked:
+                return ReleaseOutcome(
+                    status="build_failed",
+                    reason=why,
+                    ref=target,
+                    error=blocked,
+                    remedy="sudo hal0 doctor perms --fix, or sudo hal0 agent reprovision hermes",
                 )
             resolver = (
                 python_resolver if python_resolver is not None else hp._ensure_supported_python
@@ -1443,6 +1594,7 @@ def ensure_release(
                 )
             except OSError as exc:
                 log.warning("hermes_release.activation_crashed", release=new.id, error=str(exc))
+                _drop_unlive(layout, new, run=run, gateway_unit=gateway_unit)
                 return ReleaseOutcome(
                     status="activation_failed",
                     reason=why,
@@ -1471,10 +1623,12 @@ def ensure_release(
                 out.warnings += prune_releases(
                     layout, run=run, uv=uv_bin, gateway_unit=gateway_unit
                 )
-            elif act.flipped_back:
-                # The failed release is no longer live; drop it unless the
-                # gateway unit names it.
-                prune_releases(layout, run=run, uv=None, gateway_unit=gateway_unit)
+            else:
+                # A failed release that is not live (flipped back, never
+                # switched, or a stop that failed) is dropped unless the
+                # gateway unit names it; otherwise every failed update would
+                # leave another release behind.
+                _drop_unlive(layout, new, run=run, gateway_unit=gateway_unit)
             log.info(
                 "hermes_release.activation",
                 caller=caller,
@@ -1494,7 +1648,22 @@ def main(argv: list[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
     kw = json.loads(args[0]) if args else {}
     no_units = bool(kw.pop("no_units", False))
-    out = ensure_release(units=NoUnits() if no_units else None, drop_root=False, **kw)
+    print_wait = bool(kw.pop("print_wait", False))
+
+    def _on_wait(holder: dict[str, Any]) -> None:
+        # stderr: the parent captures only stdout (the outcome line).
+        print(
+            f"waiting for the Hermes builder lock, held by {describe_holder(holder)} …",
+            file=sys.stderr,
+            flush=True,
+        )
+
+    out = ensure_release(
+        units=NoUnits() if no_units else None,
+        drop_root=False,
+        on_wait=_on_wait if print_wait else None,
+        **kw,
+    )
     print(json.dumps(dataclasses.asdict(out)), flush=True)
     return 0 if out.ok else 1
 

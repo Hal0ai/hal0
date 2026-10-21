@@ -720,14 +720,16 @@ def _provision_python_via_uv(
     # tree lands 0700 and the hal0 service user can't traverse to the symlinked
     # base interpreter — silently reproducing the very "gateway venv python
     # won't start" failure this /var/lib/hal0 move was meant to fix. chmod the
-    # leaf to 0o755 to guarantee traversal; idempotent under --repair, and
+    # leaf to 0o2775 (setgid, world-traversable) to guarantee traversal; idempotent under --repair, and
     # mirrors the other hal0-reachable dirs (gateway drop-in .chmod(0o755)).
     # Best-effort: a perms hiccup (e.g. unprivileged
     # caller) must not abort an otherwise-working provision, so log and
     # continue rather than fall through to the None/range-error path.
     try:
         UV_PYTHON_INSTALL_DIR.mkdir(parents=True, exist_ok=True)
-        UV_PYTHON_INSTALL_DIR.chmod(0o755)
+        # setgid hal0 group, traversable by everyone: the same 2775 the perms
+        # table (hal0.install.perms) declares for this directory.
+        UV_PYTHON_INSTALL_DIR.chmod(0o2775)
     except OSError as exc:
         log.warning(
             "uv-install-dir-perms-failed",

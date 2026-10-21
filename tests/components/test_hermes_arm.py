@@ -212,3 +212,18 @@ def test_checkpoint_venv_absent_still_reads_none_regardless_of_checkpoint(tmp_pa
     # consulting the stamp or the checkpoint (deprovisioned-box semantics).
     _write_checkpoint("v2026.7.7.2")
     assert hermes_arm.installed_hermes_pin(tmp_path / "nope") is None
+
+
+def test_a_missing_venv_link_is_still_provisioned_and_stale(tmp_path) -> None:
+    venv = _live_release()
+    venv.unlink()
+    res = hermes_arm.converge_hermes(venv=venv, apply=False)
+    assert res["status"] == "stale"
+    assert "does not point" in res["trigger"]
+    assert "does not point" in hermes_arm.hermes_build_trigger(venv)
+
+
+def test_build_trigger_helper_is_none_when_converged_or_absent(tmp_path) -> None:
+    assert hermes_arm.hermes_build_trigger(tmp_path / "nope" / "venvs" / "hermes") is None
+    venv = _live_release()
+    assert hermes_arm.hermes_build_trigger(venv) is None
