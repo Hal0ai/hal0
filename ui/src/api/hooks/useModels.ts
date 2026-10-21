@@ -457,6 +457,8 @@ export type PullState =
   | 'failed'
   | 'cancelled'
 
+/** Max consecutive stream reattaches without progress before giving up. */
+const PULL_REATTACH_MAX = 5
 const TERMINAL = new Set<PullState>(['completed', 'failed', 'cancelled'])
 
 // One file of a pull job (``PullFile.as_dict``): a split GGUF pulls one
@@ -525,6 +527,10 @@ export function usePullJob(): PullSnapshot {
   // stream-end reconcile GET is async; a late answer for a superseded job
   // must not clobber the new one (same idiom as useRunnerImagePullJob).
   const genRef = useRef(0)
+  // Consecutive stream-ends without a payload in between; caps reattaches so
+  // a looping revoke cannot spin (#2824).
+  const reattachRef = useRef(0)
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const qc = useQueryClient()
 
   const closeStream = () => {
@@ -534,10 +540,25 @@ export function usePullJob(): PullSnapshot {
     }
   }
 
-  useEffect(() => () => closeStream(), [])
+  const clearTimer = () => {
+    if (timerRef.current) {
+      clearTimeout(timerRef.current)
+      timerRef.current = null
+    }
+  }
+
+  useEffect(
+    () => () => {
+      genRef.current += 1
+      clearTimer()
+      closeStream()
+    },
+    [],
+  )
 
   const applyPayload = (payload: any) => {
     if (!payload || typeof payload !== 'object') return
+    reattachRef.current = 0
     if (typeof payload.state === 'string') setState(payload.state)
     const dl = payload.bytes_downloaded ?? payload.downloaded
     const tot = payload.bytes_total ?? payload.total
@@ -597,7 +618,24 @@ export function usePullJob(): PullSnapshot {
         try {
           const status = await apiGet<any>(ENDPOINTS.modelPullStatus(id))
           if (genRef.current !== gen) return
-          if (status && typeof status === 'object') applyPayload(status)
+          if (status && typeof status === 'object') {
+            // applyPayload resets the counter; keep it across this reconcile.
+            const n = reattachRef.current
+            applyPayload(status)
+            reattachRef.current = n
+            if (status.state === 'queued' || status.state === 'running') {
+              // Still running: the browser may hold a reissued cookie (the
+              // rotating tab), so reopen the stream with a capped backoff.
+              if (reattachRef.current >= PULL_REATTACH_MAX) return
+              const delay = Math.min(1000 * 2 ** reattachRef.current, 16_000)
+              reattachRef.current += 1
+              clearTimer()
+              timerRef.current = setTimeout(() => {
+                timerRef.current = null
+                if (genRef.current === gen) attachStream(id)
+              }, delay)
+            }
+          }
         } catch (e) {
           if (genRef.current !== gen) return
           if (isSignedOut(e)) {
@@ -628,6 +666,8 @@ export function usePullJob(): PullSnapshot {
 
   const reset = () => {
     genRef.current += 1
+    reattachRef.current = 0
+    clearTimer()
     closeStream()
     setModelId(null)
     setJobId(null)

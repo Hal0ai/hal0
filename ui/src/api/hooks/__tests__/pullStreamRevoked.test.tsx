@@ -190,3 +190,66 @@ describe('useSlotImagePull stream end (#2824)', () => {
     expect(invalidate).toHaveBeenCalledWith({ queryKey: ['auth-status'] })
   })
 })
+
+describe('reattach while the job is still running (#2824)', () => {
+  beforeEach(() => vi.useFakeTimers())
+  afterEach(() => vi.useRealTimers())
+
+  const tick = (ms: number) => act(async () => { await vi.advanceTimersByTimeAsync(ms) })
+
+  it('model: revoked -> status running -> stream reopened, later progress applied', async () => {
+    apiGetMock.mockResolvedValue({ state: 'running', bytes_downloaded: 1, bytes_total: 10 })
+    const { ref } = mount(usePullJob)
+    await act(async () => { await ref.current.start('m1') })
+    await act(async () => { FakeEventSource.instances[0].emit('revoked', {}) })
+    await tick(1000)
+    expect(FakeEventSource.instances).toHaveLength(2)
+    expect(FakeEventSource.instances[0].closed).toBe(true)
+    await act(async () => { FakeEventSource.instances[1].emit('progress', { state: 'running', bytes_downloaded: 7, bytes_total: 10 }) })
+    expect(ref.current.downloaded).toBe(7)
+  })
+
+  it('model: repeated errors stop reattaching at the cap', async () => {
+    apiGetMock.mockResolvedValue({ state: 'running' })
+    const { ref } = mount(usePullJob)
+    await act(async () => { await ref.current.start('m1') })
+    for (let i = 0; i < 12; i++) {
+      const es = FakeEventSource.instances[FakeEventSource.instances.length - 1]
+      await act(async () => { es.onerror?.() })
+      await tick(20_000)
+    }
+    expect(FakeEventSource.instances).toHaveLength(6) // initial + 5 reattaches
+  })
+
+  it('model: terminal status does not reattach', async () => {
+    apiGetMock.mockResolvedValue({ state: 'completed' })
+    const { ref } = mount(usePullJob)
+    await act(async () => { await ref.current.start('m1') })
+    await act(async () => { FakeEventSource.instances[0].onerror?.() })
+    await tick(20_000)
+    expect(FakeEventSource.instances).toHaveLength(1)
+  })
+
+  it('slot: revoked -> status pulling -> stream reopened, later progress applied', async () => {
+    apiGetMock.mockResolvedValue({ state: 'pulling', layer: 1, total_layers: 5 })
+    const { ref } = mount(useSlotImagePull)
+    await act(async () => { await ref.current.start('s1') })
+    await act(async () => { FakeEventSource.instances[0].emit('revoked', {}) })
+    await tick(1000)
+    expect(FakeEventSource.instances).toHaveLength(2)
+    await act(async () => { FakeEventSource.instances[1].onmessage?.({ data: JSON.stringify({ state: 'pulling', layer: 4, total_layers: 5 }) } as MessageEvent) })
+    expect(ref.current.layer).toBe(4)
+  })
+
+  it('slot: repeated errors stop reattaching at the cap', async () => {
+    apiGetMock.mockResolvedValue({ state: 'pulling' })
+    const { ref } = mount(useSlotImagePull)
+    await act(async () => { await ref.current.start('s1') })
+    for (let i = 0; i < 12; i++) {
+      const es = FakeEventSource.instances[FakeEventSource.instances.length - 1]
+      await act(async () => { es.onerror?.() })
+      await tick(20_000)
+    }
+    expect(FakeEventSource.instances).toHaveLength(6)
+  })
+})
