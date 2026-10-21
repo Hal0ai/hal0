@@ -1788,3 +1788,58 @@ def test_a_root_caller_reads_the_vault_and_hands_the_extras_to_the_hal0_child(
     monkeypatch.setattr(rel.subprocess, "run", _fake_run)
     rel.ensure_release(caller="converge", venv=tree["venv"], units=rel.NoUnits())
     assert json.loads(seen[0][-1])["platform_extras"] == ["sms", "telegram"]
+
+
+def _lazy_generation(tree: dict[str, Path], release: rel.Release, *pkgs: str) -> Path:
+    """What upstream's pm leaves after a lazy install: a committed generation
+    for the release's checkout under HERMES_HOME/installs (pm/lock.py:269-279)."""
+    from hal0.agents import hermes_platforms as hpl
+
+    state = tree["home"] / "installs" / hpl.install_key(release.src)
+    gen = state / "environments" / "g1" / "venv"
+    site = gen / "lib" / "python3.14" / "site-packages"
+    site.mkdir(parents=True)
+    (gen / "pyvenv.cfg").write_text("version_info = 3.14.0\n")
+    for pkg in pkgs:
+        (site / pkg).mkdir()
+    (state / "facts.json").write_text(
+        json.dumps(
+            {"packages": {"venv": {"stamp": "s", "extras": ["discord"], "environment": str(gen)}}}
+        )
+    )
+    return gen
+
+
+def test_a_lazily_installed_generation_triggers_a_rebuild_that_carries_its_sdks(tree) -> None:
+    """Hermes boots the release into its own generation (hermes_bootstrap.py:613),
+    which drops the pin's extras; the rebuild escapes it with a new install key."""
+    from hal0.agents import hermes_platforms as hpl
+
+    layout = _on_v0222(tree)
+    assert _ensure(tree, PlatformLock()).ok
+    first = rel.live_release(layout)
+    gen = _lazy_generation(tree, first, "discord", "aiohttp")
+    minor = rel.target_minor(NEW_PIN)
+    trigger = rel.build_trigger(layout, NEW_PIN, minor, hermes_home=tree["home"])
+    assert trigger and str(gen) in trigger
+
+    tools = PlatformLock()
+    out = _ensure(tree, tools)
+    assert out.status == "activated" and out.reason == trigger
+    assert tools.exported == [["web", "mcp", "discord", "sms"]]
+    new = rel.live_release(layout)
+    assert hpl.install_key(new.src) != hpl.install_key(first.src)
+    assert hpl.committed_generation(tree["home"], new.src) is None
+    assert rel.build_trigger(layout, NEW_PIN, minor, hermes_home=tree["home"]) is None
+
+
+def test_a_generation_record_outside_its_install_is_ignored(tree) -> None:
+    from hal0.agents import hermes_platforms as hpl
+
+    layout = _on_v0222(tree)
+    assert _ensure(tree, PlatformLock()).ok
+    live = rel.live_release(layout)
+    _lazy_generation(tree, live)
+    facts = tree["home"] / "installs" / hpl.install_key(live.src) / "facts.json"
+    facts.write_text(json.dumps({"packages": {"venv": {"environment": str(live.venv)}}}))
+    assert hpl.committed_generation(tree["home"], live.src) is None
