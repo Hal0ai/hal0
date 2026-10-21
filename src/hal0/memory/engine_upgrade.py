@@ -98,7 +98,7 @@ ENGINE_BASE_URL = "http://127.0.0.1:9177"
 #: ``HINDSIGHT_PY_MIN_MINOR``/``HINDSIGHT_PY_MAX_MINOR`` (kept as constants
 #: there too, "so bumping the supported band is a one-line change").
 PY_MIN_MINOR = 11
-PY_MAX_MINOR = 13
+PY_MAX_MINOR = 14
 
 #: Each pip invocation gets its own cap well under the post-swap migration
 #: subprocess envelope (2700s in updater.py) so the outer process always has
@@ -251,28 +251,32 @@ def _interpreter_in_band(runner: Runner, py: str) -> bool:
         return False
 
 
-def _resolve_interpreter(runner: Runner, venv: Path) -> tuple[str, bool]:
+def _resolve_interpreter(runner: Runner, venv: Path) -> str:
     """Pick the interpreter for the replacement venv.
 
-    Returns ``(python, fallback)`` where ``fallback=True`` means no in-band
-    3.11-3.13 interpreter was found and pip must bypass the requires-python
-    gate (litellm's metadata-only 3.14 cap — the same dance install.sh's
-    fresh-install branch does). Mirrors preflight.sh's
-    ``resolve_hindsight_python`` order, minus interpreter auto-install (a
-    root apt operation that stays preflight-only):
+    Returns the path of an in-band (3.11-3.14) interpreter, or raises
+    ``subprocess.SubprocessError`` naming ``HAL0_HINDSIGHT_PYTHON`` when none
+    exists. Mirrors preflight.sh's ``resolve_hindsight_python`` order, minus
+    interpreter auto-install (a root apt operation that stays
+    preflight-only):
 
-    1. ``HAL0_HINDSIGHT_PYTHON`` — operator override, honored verbatim.
+    1. ``HAL0_HINDSIGHT_PYTHON`` — operator override; must be in-band.
     2. The existing venv's own base interpreter (realpath through the
        ``bin/python`` symlink) — on the ``hal0 update`` path preflight never
        ran, and the interpreter that built the current venv already proved
        itself. Falls back to ``pyvenv.cfg``'s ``home`` when the symlink
        dangles.
-    3. ``python3.13`` / ``python3.12`` / ``python3.11`` on PATH.
-    4. This process's own base interpreter, flagged as out-of-band.
+    3. ``python3.14`` down to ``python3.11`` on PATH.
+    4. This process's own base interpreter, when in-band.
     """
+    band = f"3.{PY_MIN_MINOR}-3.{PY_MAX_MINOR}"
     override = os.environ.get("HAL0_HINDSIGHT_PYTHON")
     if override:
-        return override, not _interpreter_in_band(runner, override)
+        if _interpreter_in_band(runner, override):
+            return override
+        raise subprocess.SubprocessError(
+            f"HAL0_HINDSIGHT_PYTHON={override} is missing or outside Python {band}"
+        )
 
     base = Path(os.path.realpath(venv / "bin" / "python"))
     if not base.exists():
@@ -288,14 +292,20 @@ def _resolve_interpreter(runner: Runner, venv: Path) -> tuple[str, bool]:
         except OSError:
             pass
     if base.exists() and _interpreter_in_band(runner, str(base)):
-        return str(base), False
+        return str(base)
 
-    for name in ("python3.13", "python3.12", "python3.11"):
+    for name in ("python3.14", "python3.13", "python3.12", "python3.11"):
         found = shutil.which(name)
         if found and _interpreter_in_band(runner, found):
-            return found, False
+            return found
 
-    return os.path.realpath(sys.executable), True
+    own = os.path.realpath(sys.executable)
+    if _interpreter_in_band(runner, own):
+        return own
+    raise subprocess.SubprocessError(
+        f"no Python {band} interpreter found for the memory-engine venv; "
+        "install one or set HAL0_HINDSIGHT_PYTHON=/path/to/python3.X"
+    )
 
 
 def _du_bytes(path: Path) -> int:
@@ -456,9 +466,9 @@ def upgrade_memory_engine(
     }
 
     # ── Build aside (engine still serving; a failure here costs nothing) ──
-    py, fallback = _resolve_interpreter(runner, venv)
     shutil.rmtree(venv_new, ignore_errors=True)
     try:
+        py = _resolve_interpreter(runner, venv)
         proc = _run(runner, [py, "-m", "venv", str(venv_new)], timeout=_VENV_TIMEOUT_S)
         if proc.returncode != 0:
             raise subprocess.SubprocessError(proc.stderr or "venv creation failed")
@@ -466,18 +476,8 @@ def upgrade_memory_engine(
         _run(runner, [pip, "install", "--upgrade", "pip", "wheel", "-q"], timeout=_PIP_TIMEOUT_S)
         spec = f"hindsight-api=={HINDSIGHT_API_PIN}"
         proc = _run(runner, [pip, "install", spec, "-q"], timeout=_PIP_TIMEOUT_S)
-        if proc.returncode != 0 and not fallback:
-            # Same two-attempt dance as install.sh's fresh-install branch:
-            # litellm's requires-python gate is metadata-only.
-            fallback = True
         if proc.returncode != 0:
-            proc = _run(
-                runner,
-                [pip, "install", "--ignore-requires-python", spec, "-q"],
-                timeout=_PIP_TIMEOUT_S,
-            )
-            if proc.returncode != 0:
-                raise subprocess.SubprocessError(proc.stderr or "pip install failed")
+            raise subprocess.SubprocessError(proc.stderr or "pip install failed")
         built = _installed_version(runner, venv_new)
         if built != HINDSIGHT_API_PIN or not os.access(venv_new / "bin" / "hindsight-api", os.X_OK):
             # pip exit codes lie (#2021); only the venv's own probe is truth.

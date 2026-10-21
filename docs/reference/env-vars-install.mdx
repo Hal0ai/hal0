@@ -50,7 +50,7 @@ hermes` (see the comment on each).
 | `HAL0_SKIP_HERMES` | unset (`0`) | `1` skips Hermes provisioning at install time. Deferred install: `hal0 agent install hermes`. |
 | `HAL0_SKIP_OPENWEBUI` | unset (`0`) | `1` skips enabling the bundled OpenWebUI chat UI at install time. Deferred install: `hal0 app install openwebui`. |
 | `HAL0_SKIP_HINDSIGHT` | unset (`0`) | `1` skips standing up the Hindsight memory engine (interpreter resolution and the `hindsight-api` unit) entirely. |
-| `HAL0_HINDSIGHT_PYTHON` | unset (auto-resolved 3.11–3.13) | Pins the interpreter used for the Hindsight venv — needed when the default `python3` is 3.14+ (litellm's `requires-python` gate rejects it) and no compatible one can be auto-installed. |
+| `HAL0_HINDSIGHT_PYTHON` | unset (auto-resolved 3.11–3.14) | Pins the interpreter used for the Hindsight venv. Must be Python 3.11–3.14; needed only when the default `python3` is outside that range and no in-range interpreter can be found or auto-installed. The install fails with a clear error if none exists. |
 | `HAL0_SKIP_SETUP` | unset (`0`) | `1` skips first-run seeding (`hal0 setup --auto`) — no sentinel/wiring, no capability-slot scaffolding, no brain or agent model offer. |
 | `HAL0_NO_PROBE` | unset | Alias for `HAL0_SKIP_SETUP=1` at the hardware-probe step specifically; also re-exported across the sudo re-exec so a re-launched root install keeps the answer. |
 | `HAL0_SKIP_BRAIN_MODEL` | unset (`0`) | `1` skips the brain-model pull offer. |

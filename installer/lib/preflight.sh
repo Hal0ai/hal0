@@ -285,19 +285,15 @@ resolve_main_python() {
 
 # ── Hindsight interpreter selection ─────────────────────────────────────────
 # The Hindsight memory engine runs in its OWN venv (${VAR_DIR}/memory/hindsight)
-# and pulls litellm, which publishes `requires-python >=3.10,<3.14`. The main
-# hal0 venv is happy on 3.14, but litellm's *metadata* gate makes
-# `pip install hindsight-api` fail with a wall of "Could not find a version"
-# resolver noise on a 3.14 host before the install can fall back. We resolve a
-# compatible interpreter (3.11-3.13) up front — auto-installing one when asked —
-# so the Hindsight venv builds clean; only when none exists do we fall back to
-# the default interpreter + --ignore-requires-python (litellm actually runs fine
-# on 3.14 — the classifier was dropped over a since-resolved fastuuid wheel gap,
-# BerriAI/litellm#26343).
+# and pulls litellm, whose `requires-python` is >=3.10,<3.15 (litellm >=1.100).
+# hindsight-api installs and imports cleanly on 3.12, 3.13 and 3.14 with no
+# resolver bypass, so any interpreter in 3.11-3.14 is accepted as-is. We resolve
+# one up front — auto-installing one when asked — and fail with a clear error
+# naming HAL0_HINDSIGHT_PYTHON when none exists (#1537).
 #
 # Range kept as constants so bumping the supported band is a one-line change.
 HINDSIGHT_PY_MIN_MINOR=11
-HINDSIGHT_PY_MAX_MINOR=13
+HINDSIGHT_PY_MAX_MINOR=14
 
 # Echo the 3.x minor (e.g. "14") of an interpreter; nothing + non-zero on error.
 _py_minor() { "${1}" -c 'import sys; print(sys.version_info[1])' 2>/dev/null; }
@@ -309,27 +305,26 @@ _py_hindsight_ok() {
     (( m >= HINDSIGHT_PY_MIN_MINOR && m <= HINDSIGHT_PY_MAX_MINOR ))
 }
 
-# Best-effort: install a Hindsight-compatible Python (3.13→3.11) via the
+# Best-effort: install a Hindsight-compatible Python (3.14→3.11) via the
 # detected package manager and set HINDSIGHT_PY to it. Returns 0 on success,
 # 1 otherwise (nothing installed / not resolvable). Only fires when
 # HAL0_HINDSIGHT_AUTOINSTALL=1 (install.sh sets it) so `hal0 doctor` and
-# read-only preflight never mutate the system. Never fatal — the caller falls
-# back to --ignore-requires-python.
+# read-only preflight never mutate the system. Never fatal on its own — the
+# caller (resolve_hindsight_python) reports the failure.
 _hindsight_py_autoinstall() {
     [[ "${HAL0_HINDSIGHT_AUTOINSTALL:-0}" == "1" ]] || return 1
     pkg_mgr >/dev/null 2>&1 || return 1
     local fam v cand; fam="$(distro_family)"
     info "no Python 3.${HINDSIGHT_PY_MIN_MINOR}-3.${HINDSIGHT_PY_MAX_MINOR} found for the Hindsight venv — attempting to install one (${fam})"
-    for v in 13 12 11; do
+    for v in 14 13 12 11; do
         cand="python3.${v}"
         case "${fam}" in
             debian)
                 DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=120 update -qq >/dev/null 2>&1 || true
                 DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=120 install -y -q "${cand}" "${cand}-venv" >/dev/null 2>&1 || continue ;;
             fedora) "$(pkg_mgr)" install -y "${cand}" >/dev/null 2>&1 || continue ;;
-            # Arch/openSUSE/Alpine ship a single rolling python; a pinned older
-            # minor isn't reliably in the base repos. Skip — the metadata-gate
-            # bypass covers these.
+            # Arch/openSUSE/Alpine ship a single rolling python; a pinned
+            # minor isn't reliably in the base repos. Skip.
             *) return 1 ;;
         esac
         if command -v "${cand}" >/dev/null 2>&1 && _py_hindsight_ok "${cand}"; then
@@ -342,29 +337,26 @@ _hindsight_py_autoinstall() {
 }
 
 # Resolve the interpreter the Hindsight venv should be built with into the
-# globals HINDSIGHT_PY and HINDSIGHT_PY_FALLBACK (1 = the chosen interpreter is
-# OUTSIDE litellm's supported band, so the caller must pass
-# --ignore-requires-python). Selection order:
-#   1. HAL0_HINDSIGHT_PYTHON override (honoured verbatim)
+# global HINDSIGHT_PY. Selection order:
+#   1. HAL0_HINDSIGHT_PYTHON override (must be inside the band)
 #   2. the default ${PY} when it's already in-band (the common clean case)
-#   3. python3.13 → python3.11 already on PATH
+#   3. python3.14 → python3.11 already on PATH
 #   4. auto-install one (only when HAL0_HINDSIGHT_AUTOINSTALL=1)
-#   5. give up → default ${PY} with the metadata gate bypassed
-# Read-only unless step 4 fires; always returns 0 (it never blocks the install).
+#   5. give up: error naming HAL0_HINDSIGHT_PYTHON, return 1
+# Read-only unless step 4 fires.
 resolve_hindsight_python() {
     local def="${HAL0_PY:-${HAL0_PYTHON:-python3}}"
+    local band="3.${HINDSIGHT_PY_MIN_MINOR}-3.${HINDSIGHT_PY_MAX_MINOR}"
     HINDSIGHT_PY=""
-    HINDSIGHT_PY_FALLBACK=0
 
     if [[ -n "${HAL0_HINDSIGHT_PYTHON:-}" ]]; then
-        HINDSIGHT_PY="${HAL0_HINDSIGHT_PYTHON}"
-        if _py_hindsight_ok "${HINDSIGHT_PY}"; then
+        if _py_hindsight_ok "${HAL0_HINDSIGHT_PYTHON}"; then
+            HINDSIGHT_PY="${HAL0_HINDSIGHT_PYTHON}"
             info "hindsight python: ${HINDSIGHT_PY} (HAL0_HINDSIGHT_PYTHON)"
-        else
-            HINDSIGHT_PY_FALLBACK=1
-            warn "hindsight python: ${HINDSIGHT_PY} is outside 3.${HINDSIGHT_PY_MIN_MINOR}-3.${HINDSIGHT_PY_MAX_MINOR}; will bypass litellm's requires-python gate"
+            return 0
         fi
-        return 0
+        err "HAL0_HINDSIGHT_PYTHON=${HAL0_HINDSIGHT_PYTHON} is missing or outside Python ${band}; point it at a Python ${band} interpreter or unset it"
+        return 1
     fi
 
     if _py_hindsight_ok "${def}"; then
@@ -374,11 +366,11 @@ resolve_hindsight_python() {
     fi
 
     local v cand
-    for v in 13 12 11; do
+    for v in 14 13 12 11; do
         cand="python3.${v}"
         if command -v "${cand}" >/dev/null 2>&1 && _py_hindsight_ok "${cand}"; then
             HINDSIGHT_PY="${cand}"
-            info "hindsight python: ${cand} (default ${def} is out of litellm's 3.10-3.13 range)"
+            info "hindsight python: ${cand} (default ${def} is outside Python ${band})"
             return 0
         fi
     done
@@ -387,24 +379,22 @@ resolve_hindsight_python() {
         return 0
     fi
 
-    HINDSIGHT_PY="${def}"
-    HINDSIGHT_PY_FALLBACK=1
-    warn "hindsight python: no Python 3.${HINDSIGHT_PY_MIN_MINOR}-3.${HINDSIGHT_PY_MAX_MINOR} available — will build the memory-engine venv on ${def} and bypass litellm's requires-python gate"
-    warn "  for a clean install: $(pkg_install_cmd python3.12 python3.12-venv 2>/dev/null || echo 'install python3.12') and re-run, or set HAL0_HINDSIGHT_PYTHON=python3.12"
-    return 0
+    err "no Python ${band} available for the Hindsight memory-engine venv (default ${def} is outside that range)"
+    err "  install one and re-run, or set HAL0_HINDSIGHT_PYTHON=/path/to/python3.X (3.${HINDSIGHT_PY_MIN_MINOR}-3.${HINDSIGHT_PY_MAX_MINOR}); e.g. 'uv python install 3.13' then HAL0_HINDSIGHT_PYTHON=\$(uv python find 3.13)"
+    err "  or skip the memory engine with HAL0_SKIP_HINDSIGHT=1"
+    return 1
 }
 
 # Read-only wrapper for preflight_all / `hal0 doctor`: report the Hindsight
 # interpreter decision without mutating the system (auto-install suppressed).
-# Always returns 0 — the metadata-gate bypass means a 3.14 host is not a
-# failure, just a heads-up.
+# Returns 1 when no in-band interpreter exists (same condition that fails the
+# install).
 preflight_hindsight_python() {
     if [[ "${HAL0_SKIP_HINDSIGHT:-0}" == "1" ]]; then
         info "hindsight memory engine: skipped (HAL0_SKIP_HINDSIGHT=1)"
         return 0
     fi
     HAL0_HINDSIGHT_AUTOINSTALL=0 resolve_hindsight_python
-    return 0
 }
 
 # CPU architecture — hal0 ships x86_64-only binaries (FastFlowLM .deb,
