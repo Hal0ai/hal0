@@ -256,9 +256,18 @@ class HermesDriver(AgentDriver):
         # (the real /etc path, the only one the seam can reach): hand it over
         # so the write neither touches the host's file nor needs privilege.
         env_path = self._env_file_path()
-        hermes_provision.refresh_driver_env(
-            env_path=None if env_path == hermes_provision.DRIVER_ENV_PATH else env_path
-        )
+        try:
+            hermes_provision.refresh_driver_env(
+                env_path=None if env_path == hermes_provision.DRIVER_ENV_PATH else env_path
+            )
+        except hermes_provision.DriverEnvPolicyUnknown as exc:
+            # Keep the failure visible and retryable, but say what it means
+            # for this driver: the env file on disk still holds the previous
+            # policy and credentials (#2602 review).
+            raise RuntimeError(
+                f"driver env for {self.name!r} not refreshed: {exc} — the "
+                "existing file was left untouched"
+            ) from exc
 
     def uninstall(self) -> None:
         # Stop the running service BEFORE removing files so the agent

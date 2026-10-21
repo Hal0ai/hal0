@@ -6712,7 +6712,23 @@ def _no_proxy_in_env_file(body: str | None) -> list[str]:
     return out
 
 
-def _driver_env_no_proxy(existing_body: str | None, exposed: list[str] | None = None) -> str:
+def _no_proxy_env_lines(body: str | None) -> list[str]:
+    """The verbatim ``NO_PROXY``/``no_proxy`` lines of an env-file body.
+
+    Only this renderer writes the file, and it writes both spellings as plain
+    ``KEY=value`` lines, so a raw prefix match is enough — no shell spellings
+    to unfold here. Used to carry the previous policy forward verbatim when a
+    render cannot verify the required host set (#2534 review), never to
+    compute a new one.
+    """
+    return [
+        line
+        for line in (body or "").splitlines()
+        if line.split("=", 1)[0] in ("NO_PROXY", "no_proxy")
+    ]
+
+
+def _driver_env_no_proxy(exposed: list[str] | None = None) -> str | None:
     """The ``NO_PROXY`` value for the driver env (#2330).
 
     Hermes's MCP client is an ``httpx.AsyncClient`` with the default
@@ -6722,15 +6738,20 @@ def _driver_env_no_proxy(existing_body: str | None, exposed: list[str] | None = 
     unit, so its value replaces whatever the unit inherits; the result
     therefore keeps the operator's entries first and appends
     :data:`_NO_PROXY_BASE` plus every loopback host an exposed record uses.
-    Operator entries come from this process's environment, hal0-api's
+    Operator entries come from this process's environment and hal0-api's
     ``api.env`` (readable by the hal0 user, so a run from a shell without
-    them still keeps them) and the file being replaced, when readable. Both
-    spellings are merged because Python's proxy lookup prefers the lowercase
-    one.
+    them still keeps them). The file being replaced is *not* a source
+    (#2534): folding its previous value back in made every entry permanent
+    for root renders, so an entry the operator removed from api.env stayed
+    in the service's ``NO_PROXY`` forever.
 
     ``exposed`` is the loopback host list the caller already looked up (the
     MCP join passes the set it is about to record, so a second lookup can't
     fail and leave the recorded set unwritten); ``None`` looks it up here.
+    Returns ``None`` when that lookup failed and the caller supplied no list:
+    the required-host set is then unknown, and the caller decides whether a
+    reduced value is safe to commit (a rewrite here keeps the previous
+    policy verbatim instead).
     """
     from hal0.config import paths as _cfg_paths
 
@@ -6741,15 +6762,18 @@ def _driver_env_no_proxy(existing_body: str | None, exposed: list[str] | None = 
     with contextlib.suppress(OSError):
         api_env = _cfg_paths.api_env().read_text(encoding="utf-8")
     operator += _no_proxy_in_env_file(api_env)
-    operator += _no_proxy_in_env_file(existing_body)
     if exposed is None:
         try:
             from hal0.mcp.installed import exposed_loopback_hosts
 
             exposed = exposed_loopback_hosts()
-        except Exception as exc:  # never fail the env write over the MCP registry
+        except Exception as exc:
             log.warning("hermes_provision.driver_env_mcp_hosts_failed", error=str(exc))
-            exposed = []
+            # Signalled, not degraded to an empty list: a recomputed value here
+            # could drop the exclusions surviving local connections still need
+            # (#2534 review). The caller keeps the previous policy or fails
+            # closed — a reduced value is never committed sight-unseen.
+            return None
     # Only host, IP, CIDR, `*` and leading-dot entries reach the file: the
     # value lands unquoted in a systemd EnvironmentFile, where a stray quote
     # (say from a malformed api.env line) would swallow the lines after it.
@@ -6760,6 +6784,18 @@ def _driver_env_no_proxy(existing_body: str | None, exposed: list[str] | None = 
     if "*" in operator:
         return "*"
     return ",".join(dict.fromkeys([*operator, *_NO_PROXY_BASE, *exposed]))
+
+
+class DriverEnvPolicyUnknown(RuntimeError):
+    """Raised when a driver env render cannot determine the required
+    ``NO_PROXY`` host set and no previous policy is readable to keep.
+
+    Committing a policy without the exposed hosts could route a surviving
+    local MCP connection's traffic — including its ``[secrets]`` headers —
+    through an environment proxy (#2330), and treating the render as a no-op
+    would strand a credential refresh behind a false success (#2602 review).
+    Failing closed makes the refresh visible and retryable.
+    """
 
 
 def _write_driver_env(
@@ -6843,13 +6879,38 @@ def _write_driver_env(
     direct = sandboxed or os.geteuid() == 0
     existing: str | None = None
     if path.exists():
-        # Unreadable when unprivileged (0600 root:root): the operator's
-        # NO_PROXY then comes from this process's environment alone.
+        # Only for the no-op check below — not an operator NO_PROXY source
+        # (#2534): folding the file's own value back in made every entry
+        # permanent for root renders. Unreadable when unprivileged (0600
+        # root:root), which just forces a rewrite through the seam.
         with contextlib.suppress(OSError):
             existing = path.read_text(encoding="utf-8")
     # #2330: keep loopback MCP traffic, and its header values, off any proxy.
-    no_proxy = _driver_env_no_proxy(existing, no_proxy_hosts)
-    lines += [f"NO_PROXY={no_proxy}", f"no_proxy={no_proxy}"]
+    # When discovery failed and the caller gave no host list, a recomputed
+    # value could drop exclusions surviving local connections still need, so
+    # the previous policy is kept verbatim; the next render with healthy
+    # discovery prunes it normally (#2534). With no readable previous policy
+    # there is nothing safe to write: installed MCP records can predate the
+    # file, and skipping the render would strand an already-rendered token
+    # rotation behind a fake no-op — fail closed instead and let the caller
+    # retry once discovery heals (#2602 review).
+    no_proxy = _driver_env_no_proxy(no_proxy_hosts)
+    if no_proxy is None:
+        prev = _no_proxy_env_lines(existing)
+        if prev:
+            lines += prev
+        else:
+            log.warning(
+                "hermes_provision.driver_env_policy_unknown",
+                path=str(path),
+            )
+            raise DriverEnvPolicyUnknown(
+                "MCP host discovery failed and no previous NO_PROXY policy is "
+                "readable; the driver env is left unchanged — retry once host "
+                "discovery works"
+            )
+    else:
+        lines += [f"NO_PROXY={no_proxy}", f"no_proxy={no_proxy}"]
     body = "\n".join(lines) + "\n"
     if path.exists():
         unchanged = existing == body
@@ -6969,7 +7030,24 @@ def _phase_install_artifacts(ctx: _StepCtx) -> PhaseResult:
     # are euid-aware: root writes directly (re-pinning root:root), a hal0-run
     # provisioner delegates the write to `sudo -n hal0-agentenv`.
     seed_path, seed_wrote = _write_seed_toml(state, repair=repair)
-    env_path, env_wrote = _write_driver_env(state)
+    try:
+        env_path, env_wrote = _write_driver_env(state)
+    except DriverEnvPolicyUnknown as exc:
+        # Fail the step, not the pipeline with a raw traceback: the reason is
+        # actionable and a rerun converges once the registry is readable
+        # (#2602 review). The seed write above is unaffected.
+        log.warning("hermes_provision.install_artifacts_policy_unknown", error=str(exc))
+        return PhaseResult(
+            status=PhaseStatus.FAIL,
+            reason=(
+                f"driver env not written: {exc} — fix the MCP registry, then "
+                "rerun `hal0 agent bootstrap hermes --repair`"
+            ),
+            details={
+                "seed_path": str(seed_path),
+                "seed_wrote": seed_wrote,
+            },
+        )
 
     return PhaseResult(
         status=PhaseStatus.OK,

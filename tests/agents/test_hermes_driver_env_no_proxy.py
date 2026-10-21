@@ -114,13 +114,36 @@ def test_driver_env_keeps_the_operators_proxy_exclusions(
     assert upper == [".hal0.example.com", "10.0.0.0", "intranet", "localhost", "127.0.0.1", "::1"]
 
 
-def test_driver_env_keeps_a_value_already_in_the_file(driver_env: Path, tmp_hal0_home: str) -> None:
+def test_driver_env_drops_a_value_only_in_the_file(driver_env: Path, tmp_hal0_home: str) -> None:
+    """The file being replaced is not an operator source (#2534): an entry
+    that lives only in an old hermes.env must not survive a re-render, or a
+    root render keeps it forever after it left the operator's sources."""
     driver_env.parent.mkdir(parents=True)
     driver_env.write_text("HAL0_API_URL=http://127.0.0.1:8080\nNO_PROXY=192.0.2.10\n")
     hp._write_driver_env()
     upper, lower = _no_proxy_entries(driver_env)
     assert upper == lower
-    assert upper == ["192.0.2.10", "localhost", "127.0.0.1", "::1"]
+    assert upper == ["localhost", "127.0.0.1", "::1"]
+
+
+def test_driver_env_prunes_an_entry_removed_from_api_env(
+    driver_env: Path, tmp_hal0_home: str
+) -> None:
+    """Removing an entry from api.env removes it from the driver env on the
+    next render, for root and unprivileged renders alike (#2534)."""
+    from hal0.config import paths
+
+    api_env = paths.api_env()
+    api_env.parent.mkdir(parents=True, exist_ok=True)
+    api_env.write_text("HAL0_PORT=8080\nno_proxy=192.0.2.10\n")
+    hp._write_driver_env()
+    assert "192.0.2.10" in _no_proxy_entries(driver_env)[0]
+
+    api_env.write_text("HAL0_PORT=8080\n")
+    hp._write_driver_env()
+    upper, lower = _no_proxy_entries(driver_env)
+    assert upper == lower
+    assert "192.0.2.10" not in upper
 
 
 def test_driver_env_no_proxy_is_stable_across_rewrites(
@@ -134,7 +157,69 @@ def test_driver_env_no_proxy_is_stable_across_rewrites(
     _, wrote = hp._write_driver_env()
     assert wrote is True
     _, wrote = hp._write_driver_env()
-    assert wrote is False  # merging the file's own value back in is a no-op
+    assert wrote is False  # every source is re-read, so the value recomputes identically
+
+
+def test_driver_env_keeps_the_previous_policy_when_discovery_fails(
+    driver_env: Path, tmp_hal0_home: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A render that cannot verify the required host set keeps the previous
+    NO_PROXY verbatim instead of committing a reduced one (#2534 review):
+    surviving local connections keep their proxy bypass until a render with
+    healthy discovery recomputes and prunes normally."""
+    _install(
+        "local-a",
+        "http://127.0.0.2:9000/mcp",
+        exposure=installed.ExposureConfig(hermes=True),
+    )
+    hp._write_driver_env()
+    assert "127.0.0.2" in _no_proxy_entries(driver_env)[0]
+
+    def broken() -> list[str]:
+        raise RuntimeError("registry unavailable")
+
+    monkeypatch.setattr(installed, "exposed_loopback_hosts", broken)
+    _, wrote = hp._write_driver_env()
+    assert wrote is False  # the carried-forward policy makes the render a no-op
+    assert "127.0.0.2" in _no_proxy_entries(driver_env)[0]
+
+
+def test_driver_env_fails_closed_on_a_first_render_when_discovery_fails(
+    driver_env: Path, tmp_hal0_home: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With no previous policy to keep, a render cannot verify the required
+    host set: installed MCP records can predate the file, so a base-only
+    value could send a surviving connection's traffic to the proxy. Fail
+    closed and leave the file unwritten (#2534 review)."""
+
+    def broken() -> list[str]:
+        raise RuntimeError("registry unavailable")
+
+    monkeypatch.setattr(installed, "exposed_loopback_hosts", broken)
+    with pytest.raises(hp.DriverEnvPolicyUnknown):
+        hp._write_driver_env()
+    assert not driver_env.exists()
+
+
+def test_driver_env_surfaces_a_refresh_failure_instead_of_a_fake_no_op(
+    driver_env: Path, tmp_hal0_home: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The failure must be visible for retry, not reported as (path, False):
+    on the unprivileged path the same branch (unreadable root-owned file)
+    would strand an already-rendered token rotation in the old file (#2602
+    review)."""
+    hp._write_driver_env()
+
+    def broken() -> list[str]:
+        raise RuntimeError("registry unavailable")
+
+    monkeypatch.setattr(installed, "exposed_loopback_hosts", broken)
+    # The previous policy can no longer be read — the unprivileged 0600
+    # situation in production.
+    driver_env.unlink()
+    with pytest.raises(hp.DriverEnvPolicyUnknown):
+        hp._write_driver_env()
+    assert not driver_env.exists()
 
 
 def test_driver_env_keeps_the_exclusions_in_hal0_apis_env_file(
