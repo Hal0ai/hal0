@@ -20,12 +20,15 @@
 // report to, and grepping it for the ingest host proves it.
 //
 // Privacy posture (strict scrub), matching the backend:
-//   * `sendDefaultPii: false`, and the `user` block is dropped outright.
+//   * every `dataCollection` category off (no user info or IP inference, no
+//     cookies, headers, bodies or query strings), and the `user` block is
+//     dropped outright.
 //   * every URL is truncated at `?` before it is sent. hal0 accepts
 //     `?api_key=` on SSE/WS URLs (browsers cannot set headers on those), so a
 //     query string is assumed to be credential-bearing.
 //   * error AND transaction events are scrubbed (`beforeSend`,
-//     `beforeSendTransaction`): every text field through `redactSecrets`, a
+//     `beforeSendTransaction`, with `traceLifecycle: 'static'` so spans travel
+//     inside the transaction event): every text field through `redactSecrets`, a
 //     value under a secret-named key or a sensitive header masked whole, and a
 //     hook that throws drops the event.
 //   * no Session Replay, no `attachStacktrace` of DOM content — a replay of a
@@ -1161,14 +1164,40 @@ export async function initSentry(): Promise<boolean> {
       dsn,
       release: `hal0-ui@${__HAL0_UI_VERSION__}`,
       environment: String(import.meta.env.VITE_SENTRY_ENVIRONMENT ?? '').trim() || 'development',
-      sendDefaultPii: false,
+      // SDK v11 removed `sendDefaultPii` and replaced it with `dataCollection`,
+      // whose unset default collects EVERYTHING (user info and IP inference,
+      // cookies, request and response headers, bodies, query strings). Every
+      // category is switched off explicitly, including the ones no browser
+      // integration reads today, so a later integration or SDK bump starts
+      // from "collect nothing" rather than the SDK default. In the browser
+      // this means: Relay is told `infer_ip: 'never'` and sessions carry no
+      // IP (`userInfo`), and the HttpContext integration sends no request
+      // headers (User-Agent, Referer) and no query string on `request.url`.
+      dataCollection: {
+        userInfo: false,
+        cookies: false,
+        httpHeaders: { request: false, response: false },
+        httpBodies: [],
+        urlQueryParams: false,
+        graphQL: { document: false, variables: false },
+        genAI: { inputs: false, outputs: false },
+        databaseQueryData: false,
+        queues: false,
+        stackFrameVariables: false,
+        frameContextLines: 0,
+      },
       tracesSampleRate,
       // Only add the tracing integration when it will actually sample —
       // otherwise it instruments every fetch/XHR on the dashboard's polling
       // loops for events that are immediately discarded.
       integrations: tracesSampleRate > 0 ? [mod.browserTracingIntegration()] : [],
-      // Spans are sent inside their transaction event (no span streaming), so
-      // `beforeSendTransaction` sees every span the tracing integration made.
+      // v11 streams spans by default, and in stream mode the SDK never calls
+      // `beforeSendTransaction`: spans would leave unscrubbed. 'static' keeps
+      // spans inside their transaction event, so `beforeSendTransaction` sees
+      // every span the tracing integration made. (`beforeSendTransaction` is
+      // deprecated and goes away in v12; moving to `beforeSendSpan` is the
+      // v12 migration, and it must keep the fail-closed drop.)
+      traceLifecycle: 'static',
       beforeSend: (event) => scrubOrDrop(event),
       beforeSendTransaction: (event) => scrubOrDrop(event),
     })
