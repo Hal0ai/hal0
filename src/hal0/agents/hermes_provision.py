@@ -350,7 +350,7 @@ def _phase_preflight(ctx: _StepCtx) -> PhaseResult:
       (~143 MB), and a build adds a third release before the prune: about
       1.5 GB at peak with a managed interpreter. The v0.22.2 dashboard build
       adds upstream's pinned Node v26.7.0 under ``hermes/tools`` (shared by
-      every release, roughly 200 MB unpacked; not measured here) and the
+      every release; 364 MB measured on a test box) and the
       build's ``node_modules`` in each release checkout. 4 GiB still leaves
       room for those, the memory cache and HERMES_HOME.
     """
