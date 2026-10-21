@@ -32,6 +32,18 @@ dir, and a watchdog. Crucially, the agent's secret files stay root-owned and
 unreadable to the `hal0` user, so the agent can't read its own credential
 store even though it can write to hal0's data paths.
 
+hal0 pins Hermes to one reviewed upstream release, v0.22.2 (commit
+`d923a5eb`) from hal0 1.6.0, and runs it from its own Python 3.14
+virtualenv. Two Hermes behaviours are set on purpose:
+
+- **Session history is kept.** Hermes 0.22 deletes ended sessions after 90
+  idle days unless told not to. hal0 writes `sessions.auto_prune: false`, so
+  no history is pruned.
+- **The `hal0` user lingers.** The Hermes gateway turns on systemd linger for
+  `hal0`, because Hermes's scheduled and kanban workers run under that user's
+  systemd manager. `hal0 doctor all` shows the linger state, and uninstalling
+  Hermes turns it off.
+
 The agent process binds to **loopback only**. Chatting with Hermes happens in
 Hermes's own dashboard (its Chat tab), which the hal0 dashboard links to once
 `HAL0_HERMES_PUBLIC_URL` is set; hal0 does not proxy it. The agent reaches
@@ -85,9 +97,12 @@ page — this page stops at "what it is and how it relates to Hermes."
 
 A **persona** is the unit that shapes the bundled agent. It is a small TOML
 file that carries a **system prompt**, a **tool-gating policy**, a memory
-namespace, a preferred upstream/model, and a spending budget. Switching
-personas changes the agent's behaviour on its next turn — without restarting
-the process.
+namespace, a preferred upstream/model, and a spending budget. hal0 writes
+the active persona's prompt into Hermes's `agent.system_prompt`, which Hermes
+applies to every new session. A personality picked with Hermes's own
+`/personality` command replaces it for as long as that personality stays
+selected. Switching personas takes effect the next time hal0 provisions the
+agent (`hal0 agent reprovision hermes`).
 
 The tool-gating policy is what makes a persona a safety boundary. It's a
 three-tier `ToolPolicy` — `allow`, `gated`, `never` (block) — expressed as
