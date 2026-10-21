@@ -380,6 +380,36 @@ def test_web_build_failure_at_the_old_pin_records_absent(tree) -> None:
     assert rel.live_release(rel.Layout.for_venv(tree["venv"])).data["web_dist"] == "absent"
 
 
+def test_web_build_runs_with_upstreams_tool_store_inside_the_release_tree(tree) -> None:
+    """Node goes to hermes/tools via HERMES_RUNTIME_DIR, shared by every release."""
+    tools = FakeTools(web="new")
+    assert _ensure(tree, tools).ok
+    layout = rel.Layout.for_venv(tree["venv"])
+    [i] = [
+        n
+        for n, c in enumerate(tools.calls)
+        if c[0].endswith("/bin/python") and "_build_web_ui" in " ".join(c)
+    ]
+    assert tools.envs[i]["HERMES_RUNTIME_DIR"] == str(layout.tools)
+    assert layout.tools == layout.root / "tools"
+
+
+@pytest.mark.parametrize("web", ["new", "old"])
+def test_lazy_installs_off_fails_the_v0222_web_build_with_the_fix(tree, web: str) -> None:
+    """security.allow_lazy_installs: false makes upstream's build pass
+    --no-install; a ref with web.mjs fails up front and names the fix, before
+    any npm work. A ref without web.mjs (0.19.0) is unaffected."""
+    (tree["home"] / "config.yaml").write_text("security:\n  allow_lazy_installs: false\n")
+    tools = FakeTools(web=web)
+    out = _ensure(tree, tools)
+    if web == "new":
+        assert out.status == "build_failed"
+        assert "allow_lazy_installs" in out.error and "reprovision hermes" in out.error
+        assert not tools.find(lambda c: "_build_web_ui" in " ".join(c))
+    else:
+        assert out.ok
+
+
 # ── offline (#2838) ──────────────────────────────────────────────────────────
 
 

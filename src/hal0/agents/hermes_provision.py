@@ -348,8 +348,11 @@ def _phase_preflight(ctx: _StepCtx) -> PhaseResult:
       ~182 MB checkout each, measured at v0.22.2), the blobless bare mirror
       (~200 MB at 3ef6bbd2, more as later pins add blobs) and the uv cache
       (~143 MB), and a build adds a third release before the prune: about
-      1.5 GB at peak with a managed interpreter. 4 GiB still leaves room for
-      the memory cache and HERMES_HOME.
+      1.5 GB at peak with a managed interpreter. The v0.22.2 dashboard build
+      adds upstream's pinned Node v26.7.0 under ``hermes/tools`` (shared by
+      every release, roughly 200 MB unpacked; not measured here) and the
+      build's ``node_modules`` in each release checkout. 4 GiB still leaves
+      room for those, the memory cache and HERMES_HOME.
     """
     state = ctx.state
     failures: list[str] = []
