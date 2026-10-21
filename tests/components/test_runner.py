@@ -171,3 +171,40 @@ def test_busy_is_recorded_when_no_failure_is_on_record() -> None:
     ):
         runner.converge_component(comp, job_id=None, apply=True)
     assert state.load_component_state()["hermes"]["status"] == "busy"
+
+
+NOTE = "Hermes config keys applied; restart hal0-agent@hermes to load agent.system_prompt"
+
+
+def test_a_note_survives_the_boot_diagnose_and_reaches_the_status_row() -> None:
+    """`hal0 update` restarts hal0-api, whose boot pass re-records each
+    component diagnose-only before the CLI reads the table; the note from
+    the update's own converge must still be on the row then."""
+    from hal0.components.status import component_status_snapshot
+
+    results = iter([{"status": "converged", "note": NOTE}, {"status": "converged"}])
+    with patch("hal0.components.registry._hermes_converge", side_effect=lambda **_k: next(results)):
+        hermes = next(c for c in runner.COMPONENTS if c.id == "hermes")
+        runner.converge_component(hermes, apply=True)  # hal0 update
+        runner.converge_component(hermes, diagnose_only=True, apply=False)  # boot
+    assert state.load_component_state()["hermes"]["note"] == NOTE
+    row = next(r for r in component_status_snapshot()["components"] if r["id"] == "hermes")
+    assert row["note"] == NOTE
+
+
+def test_the_next_applying_converge_replaces_the_note() -> None:
+    results = iter([{"status": "converged", "note": NOTE}, {"status": "converged"}])
+    with patch("hal0.components.registry._hermes_converge", side_effect=lambda **_k: next(results)):
+        hermes = next(c for c in runner.COMPONENTS if c.id == "hermes")
+        runner.converge_component(hermes, apply=True)
+        runner.converge_component(hermes, apply=True)
+    assert "note" not in state.load_component_state()["hermes"]
+
+
+def test_a_diagnose_that_finds_a_new_state_drops_the_note() -> None:
+    results = iter([{"status": "converged", "note": NOTE}, {"status": "stale"}])
+    with patch("hal0.components.registry._hermes_converge", side_effect=lambda **_k: next(results)):
+        hermes = next(c for c in runner.COMPONENTS if c.id == "hermes")
+        runner.converge_component(hermes, apply=True)
+        runner.converge_component(hermes, diagnose_only=True, apply=False)
+    assert "note" not in state.load_component_state()["hermes"]

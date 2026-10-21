@@ -1707,3 +1707,33 @@ def test_component_table_prints_a_note_on_a_converged_row(capsys) -> None:
         m.console.print = orig  # type: ignore[method-assign]
     assert ok is True
     assert any("Hermes config keys applied" in line for line in printed)
+
+
+def test_update_status_prints_a_component_note_under_the_table(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The real CLI printer, fed the row hal0-api serves after `hal0 update`."""
+    from hal0.system import linger
+
+    note = "Hermes config keys applied; restart hal0-agent@hermes to load agent.system_prompt"
+    monkeypatch.setattr(uc, "_api_unreachable", lambda url: False)
+    monkeypatch.setattr(linger, "gateway_unit_regen_reason", lambda: None)
+
+    def fake_get(path: str, **kwargs: object) -> dict:
+        if path == "/api/updates/components":
+            row = _component_row(id="hermes", name="Hermes", status="converged", note=note)
+            return {"components": [row], "pending": 0}
+        return {
+            "current": "1.0.0",
+            "latest": "1.0.0",
+            "channel": "stable",
+            "update_available": False,
+            "manifest": {},
+        }
+
+    monkeypatch.setattr(uc, "api_get", fake_get)
+    result = runner.invoke(app, ["update", "status"])
+    assert result.exit_code == 0, result.output
+    flat = " ".join(result.output.split())
+    assert "hermes: Hermes config keys applied; restart hal0-agent@hermes" in flat
+    assert flat.index("Hermes config keys applied") > flat.index("Components")
