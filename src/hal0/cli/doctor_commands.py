@@ -53,6 +53,7 @@ from rich.console import Console
 from rich.table import Table
 
 import hal0
+from hal0.agents.hermes_layout import HERMES_PYTHON_ROOT, HERMES_RELEASE_ROOT, HERMES_VENV_PATH
 from hal0.cli.doctor_diagnosis import Diagnosis, Evidence, NextStep, render_json
 
 app = typer.Typer(
@@ -489,7 +490,9 @@ def toolbox_pull(
 # explicit `sudo hal0 agent bootstrap hermes --repair` path.
 
 _HERMES_HOME = Path("/var/lib/hal0/.hermes")
-_HERMES_VENV = Path("/var/lib/hal0/venvs/hermes")
+_HERMES_VENV = HERMES_VENV_PATH
+_HERMES_RELEASES = HERMES_RELEASE_ROOT
+_HERMES_PYTHON = HERMES_PYTHON_ROOT
 _STRAY_ROOT_HOME = Path("/root/.hermes")
 _EXPECTED_OWNER = "hal0"
 
@@ -499,6 +502,8 @@ def check_hermes_ownership(
     expected_user: str = _EXPECTED_OWNER,
     hermes_home: Path = _HERMES_HOME,
     venv: Path = _HERMES_VENV,
+    release_root: Path = _HERMES_RELEASES,
+    python_root: Path = _HERMES_PYTHON,
     stray_home: Path = _STRAY_ROOT_HOME,
     owner_of: Callable[[Path], str | None],
     exists: Callable[[Path], bool],
@@ -512,7 +517,11 @@ def check_hermes_ownership(
     checks = (
         (hermes_home, "HERMES_HOME tree"),
         (hermes_home / "config.yaml", "config.yaml"),
+        # Follows the venvs/hermes symlink into the live release, which the
+        # hal0 user built, so a migrated host keeps passing this row.
         (venv, "hermes venv"),
+        (release_root, "hermes release tree"),
+        (python_root, "uv-managed Python"),
     )
     for path, label in checks:
         if not exists(path):

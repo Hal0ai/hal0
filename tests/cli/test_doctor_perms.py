@@ -167,3 +167,44 @@ def test_repair_short_circuits_on_failure() -> None:
     assert ok is False
     assert "chgrp failed" in msg
     assert "operation not permitted" in msg
+
+
+def test_release_tree_and_managed_python_rows() -> None:
+    """ADR-0032 decision 13: the release tree and uv-managed Python are audited."""
+    root, python = Path("/var/lib/hal0/hermes"), Path("/var/lib/hal0/python")
+    owners = {
+        _HOME: "hal0",
+        _HOME / "config.yaml": "hal0",
+        _VENV: "hal0",
+        root: "hal0",
+        python: "root",
+    }
+    rows = _check(owners, present=set(owners))
+    labels = {r["label"]: r for r in rows}
+    assert labels["hermes release tree"]["status"] == "ok"
+    assert labels["uv-managed Python"]["status"] == "drift"
+    assert dc.has_ownership_drift(rows) is True
+
+
+def test_venv_row_follows_the_symlink_into_a_hal0_owned_release(tmp_path: Path) -> None:
+    """A migrated host's venvs/hermes is a symlink; Path.owner() follows it."""
+    import getpass
+
+    release = tmp_path / "hermes" / "releases" / "r1" / "venv"
+    release.mkdir(parents=True)
+    link = tmp_path / "venvs" / "hermes"
+    link.parent.mkdir()
+    link.symlink_to(release)
+    me = getpass.getuser()
+    rows = dc.check_hermes_ownership(
+        expected_user=me,
+        hermes_home=tmp_path / "home",
+        venv=link,
+        release_root=tmp_path / "hermes",
+        python_root=tmp_path / "python",
+        stray_home=tmp_path / "stray",
+        owner_of=lambda p: p.owner(),
+        exists=lambda p: p.exists(),
+    )
+    venv_row = next(r for r in rows if r["label"] == "hermes venv")
+    assert venv_row["status"] == "ok"

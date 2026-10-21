@@ -410,6 +410,43 @@ def test_uninstall_removes_venv_recorded_in_provision_json(
     assert not venv.exists(), "venv directory must be removed by uninstall (#348)"
 
 
+def test_uninstall_unlinks_a_venv_symlink_and_removes_the_release_tree(
+    driver: HermesDriver,
+    tmp_hal0_home: str,
+) -> None:
+    """ADR-0032 decision 13: a symlinked venv must not leave every release behind.
+
+    The old ``is_dir()`` guard followed the link, and ``rmtree`` refuses a
+    symlink, so uninstall reported success with the whole release tree left.
+    """
+    var_lib = Path(tmp_hal0_home) / "var-lib" / "hal0"
+    root = var_lib / "hermes"
+    release = root / "releases" / "3ef6bbd20126-20261021T000000Z"
+    (release / "venv" / "bin").mkdir(parents=True)
+    (release / "src").mkdir()
+    (root / "mirror.git").mkdir()
+    (root / "current").symlink_to("releases/3ef6bbd20126-20261021T000000Z")
+    venv = var_lib / "venvs" / "hermes"
+    venv.parent.mkdir(parents=True)
+    venv.symlink_to(root / "current" / "venv")
+    outside = Path(tmp_hal0_home) / "elsewhere"
+    outside.mkdir()
+    (outside / "keep").write_text("x")
+    # Recorded the way the linear installer's report records it.
+    state_dir = _state_dir(tmp_hal0_home)
+    state_dir.mkdir(parents=True, exist_ok=True)
+    (state_dir / "provision.json").write_text(
+        json.dumps({"phases": {"install": {"status": "ok", "details": {"venv": str(venv)}}}})
+    )
+
+    driver._runner = _FakeRunner()  # type: ignore[assignment]
+    driver.install(bearer_token="tok")
+    driver.uninstall()
+    assert not venv.is_symlink() and not venv.exists()
+    assert not root.exists(), "the release tree must go with the link"
+    assert (outside / "keep").exists()
+
+
 def test_uninstall_is_idempotent_when_venv_already_gone(
     driver: HermesDriver,
     tmp_hal0_home: str,

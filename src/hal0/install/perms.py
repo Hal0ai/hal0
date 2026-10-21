@@ -463,6 +463,25 @@ def ownership_table(
             0o700,
             role="HERMES_HOME",
         ),
+        # The Hermes release tree and the uv-managed interpreters (ADR-0032
+        # decision 5). Builds run as hal0, so both top-level dirs must be
+        # hal0-owned; a root-run uv fetch from before the release layout left
+        # /var/lib/hal0/python root-owned. Top level only: the trees below hold
+        # executables and venvs whose modes are not hal0's to normalise.
+        PermRow(
+            paths.var_lib() / "hermes",
+            state_owner,
+            service_group,
+            0o2775,
+            role="Hermes release tree",
+        ),
+        PermRow(
+            paths.var_lib() / "python",
+            state_owner,
+            service_group,
+            0o2775,
+            role="uv-managed Python (Hermes)",
+        ),
         # slots/ (runtime slot state) — the per-slot working dirs +
         # ``<slot>/state.json`` the User=hal0 daemon writes at load time.
         # install.sh `mkdir -p ${VAR_DIR}/slots` creates it root:root at
