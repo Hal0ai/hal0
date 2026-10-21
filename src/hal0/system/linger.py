@@ -1,0 +1,106 @@
+"""systemd linger for the ``hal0`` user (ADR-0034 decision 6).
+
+From Hermes v0.22, ``hermes gateway install --system --run-as-user hal0``
+enables linger for ``hal0`` (hermes ``hermes_cli/gateway.py:3476-3530`` at
+``d923a5eb``) and orders the gateway after ``user@<uid>.service``
+(``gateway.py:3292-3295``). Hermes's restart-safe cron and kanban workers run
+through ``systemd-run --user``, which needs that user manager; kanban always
+requires it (``hermes_cli/config_defaults.py:1872-1874``). hal0 accepts the
+linger, shows it in ``hal0 doctor all``, and removes it on uninstall.
+
+The read is non-mutating: ``loginctl show-user <user> -p Linger --value``,
+falling back to logind's own record under ``/var/lib/systemd/linger`` when
+``loginctl`` cannot answer (no logind, or a user that is neither logged in nor
+lingering, which ``show-user`` reports as an error).
+"""
+
+from __future__ import annotations
+
+import os
+import shutil
+import subprocess
+from collections.abc import Callable
+from dataclasses import dataclass
+from typing import Any
+
+#: The service user whose linger the Hermes gateway enables.
+HAL0_USER = "hal0"
+
+#: Where logind records lingering users (``loginctl enable-linger <user>``).
+LINGER_DIR = "/var/lib/systemd/linger"
+
+
+@dataclass(frozen=True)
+class LingerState:
+    """Whether ``user`` lingers, and how that was determined."""
+
+    user: str
+    enabled: bool | None
+    source: str
+    detail: str = ""
+
+
+def read_linger(
+    user: str = HAL0_USER,
+    *,
+    run: Callable[..., Any] = subprocess.run,
+    which: Callable[[str], str | None] = shutil.which,
+    linger_dir: str = LINGER_DIR,
+) -> LingerState:
+    """Return the linger state of ``user`` without changing anything.
+
+    ``enabled`` is ``None`` only when neither ``loginctl`` nor the linger
+    directory can say (no systemd at all).
+    """
+    detail = ""
+    if which("loginctl"):
+        try:
+            proc = run(  # nosec B603 B607 — fixed argv, read-only query
+                ["loginctl", "show-user", user, "-p", "Linger", "--value"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            detail = str(exc)
+        else:
+            value = (proc.stdout or "").strip().lower()
+            if proc.returncode == 0 and value in {"yes", "no"}:
+                return LingerState(user, value == "yes", "loginctl")
+            detail = (proc.stderr or proc.stdout or "").strip()
+    if os.path.isdir(linger_dir):
+        return LingerState(
+            user, os.path.exists(os.path.join(linger_dir, user)), "linger-dir", detail
+        )
+    return LingerState(user, None, "unavailable", detail or "no loginctl and no linger dir")
+
+
+def disable_linger(
+    user: str = HAL0_USER,
+    *,
+    run: Callable[..., Any] = subprocess.run,
+    which: Callable[[str], str | None] = shutil.which,
+) -> tuple[bool, str]:
+    """``loginctl disable-linger <user>``; returns ``(ok, message)``.
+
+    Needs root. Never raises: uninstall must keep going when it fails.
+    """
+    if not which("loginctl"):
+        return (False, "loginctl not found")
+    try:
+        proc = run(  # nosec B603 B607 — fixed argv
+            ["loginctl", "disable-linger", user],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return (False, str(exc))
+    if proc.returncode != 0:
+        return (False, (proc.stderr or proc.stdout or "").strip() or f"exit {proc.returncode}")
+    return (True, f"linger disabled for {user}")
+
+
+__all__ = ["HAL0_USER", "LINGER_DIR", "LingerState", "disable_linger", "read_linger"]

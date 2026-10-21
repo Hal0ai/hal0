@@ -249,6 +249,18 @@ if [[ "${DEV_MODE}" -eq 0 ]]; then
         fi
     done
 
+    # Hermes v0.22's `hermes gateway install --system --run-as-user hal0` turns
+    # systemd linger on for hal0 so its cron/kanban workers reach
+    # `systemd-run --user` (ADR-0034 decision 6). Turn it off with the gateway,
+    # which also stops hal0's user manager. Best-effort, like every step here.
+    if command -v loginctl &>/dev/null && [[ -e /var/lib/systemd/linger/hal0 ]]; then
+        if loginctl disable-linger hal0; then
+            info "Disabled systemd linger for hal0"
+        else
+            soft_fail "Could not disable systemd linger for hal0"
+        fi
+    fi
+
     # Stop + remove every hal0-created container. The unit stops above SHOULD
     # have taken the slot/openwebui containers down (ExecStopPost=podman rm -f),
     # but a half-installed box can have orphaned containers whose units never

@@ -1224,6 +1224,13 @@ def test_build_all_checks_composes_verify_plus_extras(monkeypatch: pytest.Monkey
         ),
     )
 
+    # Linger row (ADR-0034) shells out to loginctl otherwise.
+    monkeypatch.setattr(
+        da,
+        "check_hal0_linger",
+        lambda **_kw: Check("hal0_linger", "hal0 user linger", "pass", "stubbed"),
+    )
+
     # Stale-DNAT + netns rows (#1814) shell out to nft/podman otherwise;
     # neutralise both so this composition test asserts the row list.
     monkeypatch.setattr(
@@ -1251,8 +1258,8 @@ def test_build_all_checks_composes_verify_plus_extras(monkeypatch: pytest.Monkey
 
     checks = da.build_all_checks()
     keys = [c.key for c in checks]
-    # 7 verify rows + 22 extras.
-    assert keys[-22:] == [
+    # 7 verify rows + 23 extras.
+    assert keys[-23:] == [
         "auth",
         "models",
         "registry-toml",
@@ -1272,12 +1279,65 @@ def test_build_all_checks_composes_verify_plus_extras(monkeypatch: pytest.Monkey
         "hermes_mcp_auth",
         "hermes_command_approvals",
         "hermes_anchor_window",
+        "hal0_linger",
         "hindsight_llm_auth",
         "memory_engine_version",
         "memory_extraction_throughput",
     ]
     assert "api" in keys and "runners" in keys
     assert da.overall_verdict(checks) == "ok"
+
+
+# ── hal0 user linger (ADR-0034 decision 6) ───────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    ("gateway", "enabled", "status"),
+    [
+        (True, True, "pass"),
+        (True, False, "warn"),
+        (False, True, "warn"),
+        (False, False, "pass"),
+        (True, None, "warn"),
+    ],
+)
+def test_hal0_linger_row(tmp_path, gateway: bool, enabled, status: str) -> None:  # type: ignore[no-untyped-def]
+    from hal0.system.linger import LingerState
+
+    unit = tmp_path / "hermes-gateway.service"
+    if gateway:
+        unit.write_text("[Unit]\nAfter=user@999.service\nWants=user@999.service\n")
+    check = da.check_hal0_linger(
+        probe=lambda: LingerState("hal0", enabled, "test", "why"), gateway_unit=unit
+    )
+    assert check.key == "hal0_linger"
+    assert check.status == status
+    if status == "warn" and gateway and enabled is False:
+        assert "sudo hal0 agent install hermes" in check.detail
+    if status == "warn" and not gateway:
+        assert "disable-linger" in check.detail
+
+
+def test_hal0_linger_row_flags_a_gateway_unit_from_before_0_22(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    # The 0.19.0 generator wrote `python -m hermes_cli.main ... gateway run`
+    # with no user@ ordering; it still starts v0.22.2 but should be regenerated.
+    from hal0.system.linger import LingerState
+
+    unit = tmp_path / "hermes-gateway.service"
+    unit.write_text("[Service]\nExecStart=/v/bin/python -m hermes_cli.main gateway run\n")
+    check = da.check_hal0_linger(probe=lambda: LingerState("hal0", True, "test"), gateway_unit=unit)
+    assert check.status == "warn"
+    assert "predates Hermes 0.22" in check.detail
+    assert "sudo hal0 agent install hermes" in check.detail
+
+
+def test_hal0_linger_row_never_raises(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    def boom():  # type: ignore[no-untyped-def]
+        raise RuntimeError("no dbus")
+
+    check = da.check_hal0_linger(probe=boom, gateway_unit=tmp_path / "x")
+    assert check.status == "warn"
+    assert "no dbus" in check.detail
 
 
 # ── hindsight LLM auth (engine-side silent-401 guard) ────────────────────────

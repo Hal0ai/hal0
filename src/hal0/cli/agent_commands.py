@@ -1313,6 +1313,33 @@ def agent_uninstall(
         console.print(f"[bold]Uninstalled[/bold] {name}.")
         if keep_memory:
             console.print("[dim](memory preserved — re-install will reuse it)[/dim]")
+    if name == "hermes":
+        _disable_hal0_linger()
+
+
+def _disable_hal0_linger() -> None:
+    """Undo the linger ``hermes gateway install`` enabled (ADR-0034 decision 6).
+
+    The daemon runs as ``hal0`` and cannot change logind state, so the CLI
+    does it, as root. Off root it prints the command instead. Best-effort:
+    a failure is reported and never fails the uninstall.
+    """
+    from hal0.system import linger
+
+    state = linger.read_linger()
+    if state.enabled is False:
+        return
+    if os.geteuid() != 0:
+        console.print(
+            "[yellow]systemd linger may still be on for hal0[/yellow] — "
+            "run `sudo loginctl disable-linger hal0`."
+        )
+        return
+    ok, message = linger.disable_linger()
+    if ok:
+        console.print(f"[dim]{message}[/dim]")
+    else:
+        console.print(f"[yellow]Could not disable linger for hal0:[/yellow] {message}")
 
 
 # Outcomes of ``_uninstall_hermes_memory``. See #350 — the bare-swallowed

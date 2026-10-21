@@ -395,3 +395,46 @@ def test_cli_proceeds_without_force_when_confirmed(
     result = runner.invoke(agent_commands.app, ["uninstall", "hermes"], input="y\n")
     assert result.exit_code == 0, result.output
     assert "Uninstalled" in result.output
+
+
+# ── linger teardown (ADR-0034 decision 6) ────────────────────────────────────
+
+
+def _linger_state(enabled):  # type: ignore[no-untyped-def]
+    from hal0.system.linger import LingerState
+
+    return LingerState("hal0", enabled, "test")
+
+
+def test_disable_hal0_linger_as_root(monkeypatch: pytest.MonkeyPatch) -> None:
+    from hal0.system import linger
+
+    calls: list[str] = []
+    monkeypatch.setattr(linger, "read_linger", lambda: _linger_state(True))
+    monkeypatch.setattr(linger, "disable_linger", lambda: (calls.append("x"), (True, "ok"))[1])
+    monkeypatch.setattr(agent_commands.os, "geteuid", lambda: 0)
+    agent_commands._disable_hal0_linger()
+    assert calls == ["x"]
+
+
+def test_disable_hal0_linger_skips_when_already_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    from hal0.system import linger
+
+    monkeypatch.setattr(linger, "read_linger", lambda: _linger_state(False))
+    monkeypatch.setattr(
+        linger, "disable_linger", lambda: pytest.fail("must not touch logind when linger is off")
+    )
+    monkeypatch.setattr(agent_commands.os, "geteuid", lambda: 0)
+    agent_commands._disable_hal0_linger()
+
+
+def test_disable_hal0_linger_off_root_only_prints(monkeypatch: pytest.MonkeyPatch) -> None:
+    from hal0.system import linger
+
+    printed: list[str] = []
+    monkeypatch.setattr(linger, "read_linger", lambda: _linger_state(True))
+    monkeypatch.setattr(linger, "disable_linger", lambda: pytest.fail("needs root"))
+    monkeypatch.setattr(agent_commands.os, "geteuid", lambda: 1000)
+    monkeypatch.setattr(agent_commands.console, "print", lambda msg, *a, **k: printed.append(msg))
+    agent_commands._disable_hal0_linger()
+    assert any("disable-linger hal0" in m for m in printed)
