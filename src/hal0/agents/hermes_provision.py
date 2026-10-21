@@ -3195,6 +3195,16 @@ def _probe_mcp_server(
 #: stdlib + whatever hermes-agent's extras pulled in, nothing else). Emits
 #: exactly one JSON verdict line on stdout and always exits 0; the parent
 #: (:func:`_probe_mcp_client`) owns turning "no verdict" into a failure.
+#:
+#: Two client APIs. ``streamable_http_client(url, *, http_client=...)`` exists
+#: from mcp 1.24 and is the only one in mcp 2.0, which Hermes v0.22.2 locks
+#: (it dropped the older ``streamablehttp_client(url, headers=...)``).
+#: Headers ride on a client from the SDK's own ``create_mcp_http_client``, so
+#: the client is built on whichever httpx the SDK imports (``httpx2`` from
+#: 2.0). The yielded tuple is ``(read, write)`` on 2.0 and
+#: ``(read, write, get_session_id)`` on 1.x, so only the first two are used.
+#: The older call stays as the fallback for an mcp below 1.24; a 0.19.0
+#: release (mcp 1.26) has both and takes the new one.
 _MCP_CLIENT_PROBE_SCRIPT = """\
 import asyncio, json, os, sys
 
@@ -3205,7 +3215,13 @@ def _emit(payload):
 
 try:
     from mcp import ClientSession
-    from mcp.client.streamable_http import streamablehttp_client
+    from mcp.client import streamable_http as _transport
+    _new_client = getattr(_transport, "streamable_http_client", None)
+    _legacy_client = getattr(_transport, "streamablehttp_client", None)
+    if _new_client is not None:
+        from mcp.shared._httpx_utils import create_mcp_http_client
+    elif _legacy_client is None:
+        raise ImportError("mcp.client.streamable_http has no streamable-HTTP client")
 except BaseException as exc:  # ImportError, but also half-broken installs
     _emit({"ok": False, "stage": "import", "tools": [],
            "error": f"{type(exc).__name__}: {exc}"})
@@ -3219,12 +3235,20 @@ if not url:
 headers = json.loads(os.environ.get("HAL0_MCP_PROBE_HEADERS") or "{}")
 
 
+async def _list_tools(streams):
+    async with ClientSession(streams[0], streams[1]) as session:
+        await session.initialize()
+        listed = await session.list_tools()
+        return [t.name for t in listed.tools]
+
+
 async def _probe():
-    async with streamablehttp_client(url, headers=headers) as (read, write, _sid):
-        async with ClientSession(read, write) as session:
-            await session.initialize()
-            listed = await session.list_tools()
-            return [t.name for t in listed.tools]
+    if _new_client is not None:
+        async with create_mcp_http_client(headers=headers) as http_client:
+            async with _new_client(url, http_client=http_client) as streams:
+                return await _list_tools(streams)
+    async with _legacy_client(url, headers=headers) as streams:
+        return await _list_tools(streams)
 
 
 try:

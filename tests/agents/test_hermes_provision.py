@@ -2372,6 +2372,54 @@ def test_probe_mcp_client_script_emits_verdict_on_real_interpreter(
     assert set(res) >= {"ok", "stage", "tools", "error"}
 
 
+def _run_probe_script_against_fake_mcp(tmp_path: Path, *, new: bool, legacy: bool) -> dict:
+    """Run the embedded probe script import-only against a stub ``mcp`` package."""
+    import json as _json
+    import subprocess as _sp
+
+    pkg = tmp_path / "mcp"
+    (pkg / "client").mkdir(parents=True)
+    (pkg / "shared").mkdir()
+    (pkg / "__init__.py").write_text("class ClientSession:\n    pass\n")
+    (pkg / "client" / "__init__.py").write_text("")
+    (pkg / "shared" / "__init__.py").write_text("")
+    (pkg / "shared" / "_httpx_utils.py").write_text("def create_mcp_http_client(**kw):\n    pass\n")
+    body = ""
+    if new:
+        body += "def streamable_http_client(url, *, http_client=None):\n    pass\n"
+    if legacy:
+        body += "def streamablehttp_client(url, headers=None):\n    pass\n"
+    (pkg / "client" / "streamable_http.py").write_text(body)
+    out = _sp.run(
+        [sys.executable, "-c", hp._MCP_CLIENT_PROBE_SCRIPT],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+        env={"PYTHONPATH": str(tmp_path), "HAL0_MCP_PROBE_URL": ""},
+    )
+    return _json.loads(out.stdout.strip().splitlines()[-1])
+
+
+@pytest.mark.parametrize(
+    ("new", "legacy", "ok"),
+    [
+        (True, False, True),  # mcp 2.0 (Hermes v0.22.2 lock): legacy alias removed
+        (True, True, True),  # mcp 1.24-1.x: both present
+        (False, True, True),  # mcp < 1.24: legacy only
+        (False, False, False),  # neither: a broken client stack
+    ],
+)
+def test_probe_script_imports_whichever_streamable_http_client_the_sdk_has(
+    tmp_path: Path, new: bool, legacy: bool, ok: bool
+) -> None:
+    """mcp 2.0 dropped ``streamablehttp_client``; the probe must not fail the
+    ``mcp_wire`` phase on a venv that only has ``streamable_http_client``."""
+    res = _run_probe_script_against_fake_mcp(tmp_path, new=new, legacy=legacy)
+    assert res["stage"] == "import"
+    assert res["ok"] is ok, res
+
+
 def test_smoke_admin_tools_list_url_follows_server_inventory(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
