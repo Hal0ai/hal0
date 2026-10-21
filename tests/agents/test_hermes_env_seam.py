@@ -379,3 +379,39 @@ def test_seed_toml_root_writes_directly(tmp_path: Path, monkeypatch: pytest.Monk
     assert wrote is True
     assert path.exists()
     assert path.read_text()  # non-empty TOML
+
+
+# ── secret-keys: the one read verb ───────────────────────────────────────────
+
+
+def _secret_keys_snippet() -> str:
+    """The python3 -c body of the wrapper's ``secret-keys`` verb, unescaped by bash."""
+    text = (Path(__file__).parents[2] / "installer" / "wrappers" / "hal0-agentenv").read_text()
+    verb = text[text.index("  secret-keys)") :]
+    verb = verb[: verb.index("\n    ;;")]
+    return verb[verb.index("python3 -c '") + len("python3 -c '") : verb.rindex('\' "$secrets"')]
+
+
+def test_secret_keys_prints_set_names_and_never_a_value(tmp_path: Path) -> None:
+    """hal0-api learns which platforms have credentials without reading them."""
+    import sys
+
+    vault = tmp_path / "hermes.env"
+    vault.write_text(
+        "# operator note\n"
+        "TELEGRAM_BOT_TOKEN=123:supersecret\n"
+        "export DISCORD_BOT_TOKEN='discordsecret'\n"
+        "EMPTY=\n"
+        "WEBHOOK_ENABLED=false\n"
+        'API_SERVER_KEY="apikeysecret"\n'
+        "bad key=1\n",
+        encoding="utf-8",
+    )
+    proc = subprocess.run(
+        [sys.executable, "-I", "-c", _secret_keys_snippet(), str(vault)],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert proc.stdout.splitlines() == ["TELEGRAM_BOT_TOKEN", "DISCORD_BOT_TOKEN", "API_SERVER_KEY"]
+    assert "secret" not in proc.stdout.lower()

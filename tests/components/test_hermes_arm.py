@@ -238,6 +238,40 @@ def test_build_trigger_helper_is_none_when_converged_or_absent(tmp_path) -> None
     assert hermes_arm.hermes_build_trigger(venv) is None
 
 
+def test_a_configured_platform_missing_from_the_live_release_is_stale(
+    tmp_path, monkeypatch
+) -> None:
+    """The converge pre-check sees the vault's platform and hands it to the build."""
+    from hal0.agents import hermes_provision as hp
+    from hal0.agents import hermes_release as rel
+
+    venv = _live_release()
+    live = rel.live_release(rel.Layout.for_venv(venv))
+    rdir = live.path
+    (rdir / "release.json").write_text(json.dumps({**live.data, "lock": True}), encoding="utf-8")
+    vault = tmp_path / "secrets" / "hermes.env"
+    vault.parent.mkdir()
+    vault.write_text("TELEGRAM_BOT_TOKEN=123:abc\n", encoding="utf-8")
+    monkeypatch.setattr(hp, "HERMES_SECRETS_ENV", vault)
+    monkeypatch.setattr(hp, "HERMES_HOME_DEFAULT", tmp_path / "no-home")
+    res = hermes_arm.converge_hermes(venv=venv, apply=False)
+    assert res["status"] == "stale"
+    assert res["trigger"] == (
+        "configured platform extras missing from the live release: sms, telegram"
+    )
+    assert "telegram" in hermes_arm.hermes_build_trigger(venv)
+
+    with patch("hal0.agents.hermes_release.ensure_release") as ensure:
+        ensure.return_value = rel.ReleaseOutcome(status="converged")
+        hermes_arm.converge_hermes(venv=venv)
+    assert ensure.call_args.kwargs["platform_extras"] == ("sms", "telegram")
+
+    site = rdir / "venv" / "lib" / "python3.14" / "site-packages"
+    for pkg in ("telegram", "aiohttp"):  # installed by hand
+        (site / pkg).mkdir(parents=True)
+    assert hermes_arm.converge_hermes(venv=venv, apply=False)["status"] == "converged"
+
+
 def test_a_tree_a_migration_crash_left_without_current_is_still_provisioned(tmp_path) -> None:
     from hal0.agents import hermes_release as rel
 

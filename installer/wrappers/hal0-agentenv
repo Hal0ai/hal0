@@ -15,6 +15,9 @@
 # delegates exactly those two writes here, just like hal0-slotctl delegates the
 # slot-unit + systemctl ops.
 #
+# The one read, `secret-keys`, prints which vault keys are set (names only,
+# never values).
+#
 # This script is the entire privileged surface for agent env writes. The agent
 # regex below is a security requirement: it rejects path traversal (../), shell
 # metacharacters, and anything that is not a literal agent name, so the grant in
@@ -81,6 +84,31 @@ except BaseException:
     except OSError:
         pass
     raise
+' "$secrets"
+    ;;
+  secret-keys)
+    # The one read verb: prints the NAMES of the vault keys that are set, one
+    # per line, and never a value. The release builder uses it to see which
+    # gateway platforms have credentials (a configured Telegram or Discord bot
+    # needs its SDK in the Hermes release), from hal0-api running as hal0,
+    # which cannot read the 0600 vault. A key whose value is empty or a false
+    # flag (0, false, no, off) is not printed. No vault: no output, exit 0.
+    [[ -f "$secrets" ]] || exit 0
+    python3 -c '
+import sys
+names = []
+with open(sys.argv[1], encoding="utf-8", errors="replace") as f:
+    for line in f:
+        s = line.strip()
+        if s.startswith("export "):
+            s = s[7:].strip()
+        if not s or s.startswith("#") or "=" not in s:
+            continue
+        k, v = s.split("=", 1)
+        k, v = k.strip(), v.strip().strip("\"\x27")
+        if k.replace("_", "").isalnum() and v and v.lower() not in ("0", "false", "no", "off"):
+            names.append(k)
+sys.stdout.write("".join(n + "\n" for n in names))
 ' "$secrets"
     ;;
   write-driver-env)

@@ -122,7 +122,7 @@ def hermes_build_trigger(venv: Path | None = None) -> str | None:
         ):
             return None
         ref = rel.require_vetted(rel.read_pin().ref)
-        return rel.build_trigger(layout, ref, rel.target_minor(ref))
+        return rel.build_trigger(layout, ref, rel.target_minor(ref), rel.configured_extras())
     except Exception:
         return None
 
@@ -208,7 +208,9 @@ def converge_hermes(
         minor = rel.target_minor(target)
     except rel.ReleaseError as exc:
         return {**result, "status": "build_failed", "error": str(exc)}
-    trigger = rel.build_trigger(layout, target, minor)
+    # Read before any drop to hal0: only root sees the gateway's secrets vault.
+    platform_extras = rel.configured_extras()
+    trigger = rel.build_trigger(layout, target, minor, platform_extras)
     if trigger is None:
         if apply:
             _config_backstop(result, job_id=job_id)
@@ -229,6 +231,7 @@ def converge_hermes(
         caller="converge",
         venv=venv,
         wait=False,
+        platform_extras=platform_extras,
         units=rel.SystemdUnits(run=runner, use_seam=is_hal0_user()),
     )
     if outcome.status == "busy":

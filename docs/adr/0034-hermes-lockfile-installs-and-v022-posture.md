@@ -103,6 +103,26 @@ board executor harvests are unchanged at NEW.
      lock path on 3.12 and the editable path on 3.14.
    - The extras stay `web` and `mcp`, read from the requirements line as
      ADR-0032 decision 3 says.
+   - **Amendment (2026-10-21): the gateway's platform extras are added at
+     build time.** v0.22.2 installs a messaging platform's SDK lazily, at
+     first use (`pm.ensure_import`), and that lazy install refuses to run
+     from a process outside pm's own environment, which a hal0 release is
+     (`pm/client.py:208-223` at d923a5eb). The built-in adapters, the API
+     server among them, need aiohttp and have no lazy path at all. So the
+     builder adds upstream's extra for each platform the box configures
+     (the adapter's own lazy extra, such as `telegram`, `discord`, `slack` or
+     `teams`, and `sms`, which is aiohttp alone, for the aiohttp adapters),
+     read from the gateway's secrets vault, `HERMES_HOME/.env` and the
+     `config.yaml` platform blocks, plus the ones the live venv already has
+     installed. The API server always counts, because hal0 provisions its key
+     on every box, after a fresh install's first build. An unprivileged
+     caller learns which vault keys are set from the `hal0-agentenv`
+     `secret-keys` verb, which prints names and never values. They install only through the lock
+     path, with `--require-hashes`; the no-lock fallback keeps the pin's
+     extras alone. `release.json` records them as `platform_extras`, and a
+     configured platform whose extra is missing from a lock-built live
+     release is a build trigger. `matrix` is never added: its `python-olm`
+     builds from source, and upstream's adapter degrades without it.
 2. **Amends ADR-0032 decision 9: a uv-managed 3.14 is preferred.**
    - The builder uses a uv-managed CPython 3.14 under
      `/var/lib/hal0/hermes/python` (see the amendment at the end of this
