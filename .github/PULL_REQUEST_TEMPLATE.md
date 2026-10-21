@@ -1,5 +1,5 @@
 <!--
-If external PRs aren't being merged yet, see CONTRIBUTING.md. Keep this form
+See CONTRIBUTING.md for the sign-off and test requirements. Keep this form
 concise — it's a checklist for reviewers, not a design doc. Pre-fill the
 risk grade, touched surfaces, and test-tier runs before requesting review.
 -->

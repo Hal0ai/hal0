@@ -4,12 +4,11 @@ hal0 is licensed [Apache 2.0](./LICENSE). The current version is in
 [`CHANGELOG.md`](./CHANGELOG.md) — this file deliberately does not repeat it,
 because a version pinned here goes stale on every cut and has (it said
 `v1.0.0-rc.6` for six releases). The runtime model is one podman container per
-slot. The contribution model is still being decided.
-<!-- TODO(human): flip the next line to open the external-PR merge window
-     when ready (audit Q6.3 / #630). Timing is the maintainer's call. -->
-External PRs aren't being merged yet; please open issues for discussion.
+slot.
 
-When the model opens up, the shape will be:
+Pull requests from outside contributors are welcome. A maintainer reviews
+each one and may merge it. For a large change, open an issue first so the
+approach can be agreed before you write it. Every PR needs:
 
 - **Sign off every commit** — `git commit -s` (Developer Certificate of
   Origin; see [below](#developer-certificate-of-origin-dco))
