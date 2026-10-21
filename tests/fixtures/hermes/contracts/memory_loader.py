@@ -5,42 +5,49 @@
 Adapter lane: **hal0-memory** (installed seed layout + registration collector).
 
 Copied from the reviewed official pin
-``3ef6bbd201263d354fd83ec55b3c306ded2eb72a`` (``plugins/memory/__init__.py``,
-Hermes v2026.7.20 / 0.19.0).
+``d923a5eb487a17c0a68801bba9ef0f56c81040a8`` (``plugins/memory/__init__.py``,
+Hermes v0.22.2).
 
-Two frozen facts the design doc's LXC105 compatibility-defect correction
-(#3 in the research doc) depends on:
+Frozen facts:
 
-* **Directory layout** — an external memory provider is discovered from
-  ``plugins/memory/<name>/`` (the *specialized* subtree), NOT the general
-  top-level ``plugins/<name>/``. The hal0 provisioning must install the seed at
-  ``plugins/memory/hal0-memory/`` for the selected Hermes target.
+* **Directory layout** — bundled providers live in ``plugins/memory/<name>/``
+  inside the Hermes tree; a user-installed provider is discovered from
+  ``$HERMES_HOME/plugins/<name>/`` (``plugins/memory/__init__.py:1-7``,
+  ``plugins/plugin_loader.py:81-87``). hal0 provisioning installs the seed at
+  ``$HERMES_HOME/plugins/hal0-memory/``
+  (``hal0.agents.hermes_provision`` plugin targets).
 * **Registration collector** — the loader passes a collector context whose
   ``register_memory_provider(self, provider)`` captures the single external
-  provider. The general ``PluginContext`` deliberately has no such method
-  (memory providers are routed to this specialized loader instead).
+  provider (``plugins/memory/__init__.py:397-485``). Since 0.22 the collector
+  forwards any other ``register_*`` call to a real ``PluginContext``.
+* **The general PluginContext** — gained an INERT
+  ``register_memory_provider`` in 0.22 (``hermes_cli/plugins.py:723-732``): it
+  only records the provider. Activation still belongs to the memory loader,
+  through ``memory.provider``.
 """
 
 from __future__ import annotations
 
-# Specialized discovery root, relative to a plugin source (bundled,
-# $HERMES_HOME/plugins, or a project .hermes/plugins tree).
+# Bundled-provider discovery root inside the Hermes tree.
 MEMORY_PLUGIN_SUBDIR = "plugins/memory"
+# User-installed provider root, relative to $HERMES_HOME.
+USER_PLUGIN_SUBDIR = "plugins"
 
 
 class _ProviderCollector:
     """Loader context that captures ``register_memory_provider`` calls."""
 
-    def __init__(self):
+    def __init__(self, name: str, *, register_skills: bool = True):
+        self.name = name
         self.provider = None
+
+    def register_hook(self, hook_name, callback):
+        pass
 
     def register_memory_provider(self, provider):
         self.provider = provider
 
-    def register_tool(self, *args, **kwargs):
-        pass
-
-    def register_hook(self, *args, **kwargs):
+    def register_skill(self, *args, **kwargs):
         pass
 
     def register_cli_command(self, *args, **kwargs):

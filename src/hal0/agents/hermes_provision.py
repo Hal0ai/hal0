@@ -912,14 +912,17 @@ HERMES_REQUIREMENTS = (
 # adding it here AND refreshing the contract fixtures under
 # ``tests/fixtures/hermes/contracts/`` +
 # ``tests/agents/hermes/test_contract_compatibility.py``.
-VETTED_HERMES_REFS: frozenset[str] = frozenset({"3ef6bbd201263d354fd83ec55b3c306ded2eb72a"})
+# v0.22.2 (``d923a5eb``) since ADR-0034 decision 8. Only the current pin is
+# listed: a pre-release tag (``rc.*`` / ``+canary.*``) is never vetted.
+VETTED_HERMES_REFS: frozenset[str] = frozenset({"d923a5eb487a17c0a68801bba9ef0f56c81040a8"})
 
 #: The ``requires-python`` each vetted ref declares in its pyproject.toml,
 #: recorded at review time so the target minor is known before a checkout
 #: exists (the build trigger, the root prelude). The build re-reads it from
 #: the checkout and fails on a mismatch.
 VETTED_HERMES_REQUIRES_PYTHON: dict[str, str] = {
-    "3ef6bbd201263d354fd83ec55b3c306ded2eb72a": ">=3.11,<3.14",
+    # NousResearch/hermes-agent d923a5eb (v0.22.2), pyproject.toml:15.
+    "d923a5eb487a17c0a68801bba9ef0f56c81040a8": ">=3.11,<3.15",
 }
 
 
@@ -1345,9 +1348,11 @@ def _phase_home_init(ctx: _StepCtx) -> PhaseResult:
 
 KANBAN_DB_NAME = "kanban.db"
 
-# The table set hermes's own SCHEMA_SQL creates (hermes_cli/kanban_db.py,
-# pinned ref 3ef6bbd201263d354fd83ec55b3c306ded2eb72a / v2026.7.20 / 0.19.0;
-# unchanged since 0.18.2).
+# The table set hermes's own SCHEMA_SQL creates (hermes_cli/kanban_db.py:804-990
+# at the pinned ref d923a5eb / v0.22.2; the same seven tables since 0.18.2).
+# ``init_db`` itself moved to hermes_cli/kanban_db_connect.py:804 and is
+# re-exported from hermes_cli.kanban_db (kanban_db.py:4427-4429), so the import
+# below is unchanged.
 # Used ONLY as a cheap existence probe for the convergent skip — never as a
 # CREATE statement source, so a future upstream migration can add columns or
 # tables without hal0 drifting out of sync.

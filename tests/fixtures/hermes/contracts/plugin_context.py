@@ -9,21 +9,38 @@ dispatch_tool, inject_message), and the optional future **hal0-context**
 (register_context_engine).
 
 Signatures copied verbatim from the reviewed official pin
-``3ef6bbd201263d354fd83ec55b3c306ded2eb72a`` (``hermes_cli/plugins.py``,
-Hermes v2026.7.20 / 0.19.0). ``register(ctx)`` is called once at startup; a
-registration crash disables only that plugin (per the design's "every adapter
-degrades independently" requirement).
+``d923a5eb487a17c0a68801bba9ef0f56c81040a8`` (``hermes_cli/plugins.py``,
+Hermes v0.22.2; read with ``inspect.signature`` in a v0.22.2 venv).
+``register(ctx)`` is called once at startup; a registration crash disables
+only that plugin (per the design's "every adapter degrades independently"
+requirement).
 
-Note: memory providers are NOT registered through this general context —
-they use the specialized ``plugins/memory/<name>/`` loader whose collector
-context exposes ``register_memory_provider`` (see ``memory_loader.py``).
+What changed since 0.19.0: most ``register_*`` methods now return a
+``PluginRegistration`` handle (``hermes_cli/plugins_ledger.py:29``) so a forced
+reload can unwind them; ``inject_message`` gained keyword-only ``session_key``
+and ``origin``; ``register_auxiliary_task`` gained ``inherit_from``; the voice
+registrars are generated from ``_SCOPED_PROVIDER_REGISTRARS``
+(``plugins.py:1054-1064``); and the general context gained an inert
+``register_memory_provider`` (see ``memory_loader.py``).
 """
 
-# ruff: noqa: UP006, UP035, UP045
+# ruff: noqa: UP035, UP045
 
 from __future__ import annotations
 
-from typing import Any, Callable, Dict, Optional
+from collections.abc import Mapping
+from dataclasses import dataclass
+from typing import Any, Callable, Optional
+
+
+@dataclass
+class PluginRegistration:
+    """One host-owned registration plus its inverse (plugins_ledger.py:29-36)."""
+
+    kind: str
+    key: str
+    release: Callable[[], None]
+    plugin_key: str = ""
 
 
 class PluginContext:
@@ -41,23 +58,33 @@ class PluginContext:
         description: str = "",
         emoji: str = "",
         override: bool = False,
-    ) -> None:
-        pass
+    ) -> Optional[PluginRegistration]:
+        return None
 
-    def inject_message(self, content: str, role: str = "user") -> bool:
+    def inject_message(
+        self,
+        content: str,
+        role: str = "user",
+        *,
+        session_key: str | None = None,
+        origin: Mapping[str, Any] | None = None,
+    ) -> bool:
         return False
 
     def dispatch_tool(self, tool_name: str, args: dict, **kwargs) -> str:
         return ""
 
-    def register_context_engine(self, engine) -> None:
+    def register_context_engine(self, engine) -> Optional[PluginRegistration]:
+        return None
+
+    def register_memory_provider(self, provider) -> None:
         pass
 
-    def register_tts_provider(self, provider) -> None:
-        pass
+    def register_tts_provider(self, provider) -> Optional[PluginRegistration]:
+        return None
 
-    def register_transcription_provider(self, provider) -> None:
-        pass
+    def register_transcription_provider(self, provider) -> Optional[PluginRegistration]:
+        return None
 
     def register_platform(
         self,
@@ -69,8 +96,8 @@ class PluginContext:
         required_env: list | None = None,
         install_hint: str = "",
         **entry_kwargs: Any,
-    ) -> None:
-        pass
+    ) -> Optional[PluginRegistration]:
+        return None
 
     def register_auxiliary_task(
         self,
@@ -78,9 +105,10 @@ class PluginContext:
         *,
         display_name: str,
         description: str,
-        defaults: Optional[Dict[str, Any]] = None,
-    ) -> None:
-        pass
+        defaults: Optional[dict[str, Any]] = None,
+        inherit_from: Optional[str] = None,
+    ) -> PluginRegistration:
+        raise NotImplementedError
 
-    def register_hook(self, hook_name: str, callback: Callable) -> None:
-        pass
+    def register_hook(self, hook_name: str, callback: Callable) -> PluginRegistration:
+        raise NotImplementedError

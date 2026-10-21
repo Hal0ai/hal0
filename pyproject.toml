@@ -213,26 +213,23 @@ warn_unused_configs = true
 # `scripts/hermes-sdk-diff.sh --bump <sha>`, δ-harness + γ-suite, open
 # `chore(hermes): bump upstream pin to <short-sha>` PR).
 [tool.hal0.upstream-hermes]
-# Aligned to the reviewed official compatibility freeze (research doc §"Supported
-# compatibility freeze"): NousResearch/hermes-agent v2026.7.20 / 0.19.0, the same
-# immutable commit the installer requirements.txt and the frozen contract fixtures
-# (tests/fixtures/hermes/contracts/) pin. The drift-watch, the compat pin, and the
-# fixtures MUST stay in lockstep — tests/agents/hermes/test_contract_compatibility.py
-# enforces it. `date` is the upstream commit date of `commit`, not the bump date.
+# Aligned to the reviewed official release NousResearch/hermes-agent v0.22.2
+# (d923a5eb), the same immutable commit the installer requirements.txt, the
+# VETTED_HERMES_REFS allowlist, and the frozen contract fixtures
+# (tests/fixtures/hermes/contracts/) pin (ADR-0034 decision 8). The drift-watch, the
+# compat pin, and the fixtures MUST stay in lockstep —
+# tests/agents/hermes/test_contract_compatibility.py enforces it. `date` is the
+# upstream commit date of `commit`, not the bump date.
 #
-# 0.19.0 is the newest release hal0's install model can take. Upstream stopped
-# supporting pip/wheel installs in d84e11af (#68217, first released in v2026.7.30 /
-# 0.19.1): its setup.py now raises on bdist_wheel/sdist outside a Nix build, so the
-# `hermes-agent @ git+…` requirement cannot build. From v0.21.6 every core
-# dependency is also marked `python_version >= '3.14'`, while hal0 builds the
-# Hermes venv on 3.12. Bumping past this commit needs the install model reworked
-# first; the drift issue stays open until then.
+# v0.22.2 installs through the ADR-0032 / ADR-0034 model: an editable source
+# checkout in a uv-managed Python 3.14 venv, dependencies from upstream's uv.lock.
 #
-# History: 9de9c25f (v2026.7.7.2 / 0.18.2, 2026-07-07) before this; the original
+# History: 3ef6bbd2 (v2026.7.20 / 0.19.0, 2026-07-20) before this, then
+# 9de9c25f (v2026.7.7.2 / 0.18.2, 2026-07-07); the original
 # earendil-works@0554ef1 (2026-05-28) is historical provenance in git history only.
 repo   = "https://github.com/NousResearch/hermes-agent"
-commit = "3ef6bbd201263d354fd83ec55b3c306ded2eb72a"
-date   = "2026-07-20"
+commit = "d923a5eb487a17c0a68801bba9ef0f56c81040a8"
+date   = "2026-10-15"
 
 # Surfaces hal0 vendors, shims, or proxies. The diff job only opens an
 # issue when one of these paths changes between the pinned commit and
@@ -276,4 +273,19 @@ tracked_files = [
                                       # task_events/task_runs/task_attachments/kanban_notify_subs)
     "plugins/kanban/dashboard/plugin_api.py",  # /api/plugins/kanban/runs* surface
                                       # HermesBoardExecutor (board/hermes_executor.py) calls
+    # Added at the v0.22.2 bump (#2615). Run routes moved out of api_server.py,
+    # the dashboard's session-token injection moved out of web_server.py, and the
+    # gateway unit generator and the install metadata are now hal0 touchpoints.
+    "gateway/platforms/api_server_runs.py",  # /v1/runs* routes (split from api_server.py)
+    "hermes_cli/web_server_dashboard.py",  # __HERMES_SESSION_TOKEN__ injection the board harvests
+    "hermes_cli/gateway.py",         # gateway unit generator (ExecStart/ExecStop, linger)
+    "hermes_cli/_launchers.py",      # the `-c` launcher lines the unit normaliser rewrites
+    "hermes_cli/main.py",            # CLI entry: `dashboard` flags, `--version` network check
+    "agent/model_metadata.py",       # MINIMUM_CONTEXT_LENGTH (anchor-window floor)
+    "setup.py",                      # wheel/sdist refusal outside Nix (install model)
+    "pyproject.toml",                # requires-python, extras, uv.lock settings
+    "hermes_cli/config_defaults.py",  # DEFAULT_CONFIG moved out of config.py (sessions.auto_prune,
+                                      # approvals.mode, dashboard.public_url, auxiliary.*)
+    "hermes_cli/personality.py",     # agent.system_prompt / display.personality (persona, #2839)
+    "hermes_cli/kanban_db_connect.py",  # init_db (re-exported by kanban_db.py) kanban_db_init calls
 ]

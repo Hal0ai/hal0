@@ -868,8 +868,54 @@ def test_the_resolver_targets_the_minor_it_is_given(tmp_path: Path) -> None:
     assert [a[3] for a in runner.ran if a[0] == "/usr/local/bin/uv"] == ["3.12", "3.12"]
 
 
-def test_the_pinned_ref_targets_312() -> None:
-    assert hp.pinned_target_minor() == "3.12"
+def test_the_pinned_ref_targets_314() -> None:
+    """v0.22.2 (d923a5eb) declares requires-python ">=3.11,<3.15" (its
+    pyproject.toml:15), so the shipped pin moves hosts to 3.14."""
+    assert hp.pinned_target_minor() == "3.14"
+    assert set(hp.VETTED_HERMES_REQUIRES_PYTHON) == set(hp.VETTED_HERMES_REFS)
+
+
+class _MinorRunner(_UvRunner):
+    """``_UvRunner`` that also answers the version probe from the path."""
+
+    def run(self, argv: list[str], **kw: Any) -> Any:
+        argv = [str(a) for a in argv]
+        if len(argv) > 2 and argv[1] == "-c" and "version_info" in argv[2]:
+            self.ran.append(argv)
+            out = "3.14" if "3.14" in argv[0] else "3.12"
+            return type("R", (), {"stdout": out + "\n"})()
+        return super().run(argv, **kw)
+
+
+@pytest.mark.parametrize("source", ["persisted", "environment"])
+def test_the_pin_bump_repersists_the_312_interpreter_as_the_managed_314(
+    tmp_path: Path, source: str
+) -> None:
+    """#2615 PR 4: a host whose hermes-python.env names the uv-managed 3.12 of
+    the 0.19.0 pin is re-pointed at a uv-managed 3.14 on the next resolve for
+    the v0.22.2 pin, and the file is rewritten. ``environment`` is hal0-api
+    during `hal0 update`: its unit loads the old value through
+    ``EnvironmentFile=-/etc/hal0/hermes-python.env``, and /etc/hal0 is
+    hal0:hal0 2775, so the rewrite succeeds as hal0."""
+    env_path = tmp_path / "hermes-python.env"
+    old = f"{hp.UV_PYTHON_INSTALL_DIR}/cpython-3.12.15-linux-x86_64-gnu/bin/python3.12"
+    new = f"{hp.UV_PYTHON_INSTALL_DIR}/cpython-3.14.7-linux-x86_64-gnu/bin/python3.14"
+    env_path.write_text(f"HAL0_HERMES_PYTHON={old}\n")
+    env = {"HAL0_HERMES_PYTHON": old} if source == "environment" else {}
+    with structlog.testing.capture_logs() as logs:
+        out = hp.resolve_hermes_python(
+            env=env,
+            env_path=env_path,
+            prober=_uv_prober(system=None),
+            runner=_MinorRunner(new),
+            fallback_bin=Path("/nonexistent/uv"),
+            minor=hp.pinned_target_minor(),
+        )
+    assert out == new
+    assert env_path.read_text() == f"HAL0_HERMES_PYTHON={new}\n"
+    warn = next(e for e in logs if e["event"] == "hermes-python-discarded")
+    assert warn["value"] == old and "exactly 3.14" in warn["reason"]
+    assert warn["source"] == source
 
 
 def test_an_override_with_an_old_sqlite_is_used_with_a_warning(tmp_path: Path) -> None:
@@ -1249,7 +1295,7 @@ def test_shipped_requirement_is_the_vetted_commit_pin() -> None:
         # Vetted commit pin — the production posture.
         (
             "hermes-agent[web] @ git+https://github.com/NousResearch/hermes-agent.git@"
-            "3ef6bbd201263d354fd83ec55b3c306ded2eb72a",
+            "d923a5eb487a17c0a68801bba9ef0f56c81040a8",
             True,
         ),
         # Floored+capped spec — a floor names no commit to check out.
@@ -1295,9 +1341,9 @@ def test_version_pin_reports_commit_ref_without_crashing(monkeypatch, tmp_path) 
         monkeypatch,
         tmp_path,
         "# comment\nhermes-agent[web] @ git+https://github.com/NousResearch/"
-        "hermes-agent.git@3ef6bbd201263d354fd83ec55b3c306ded2eb72a\n",
+        "hermes-agent.git@d923a5eb487a17c0a68801bba9ef0f56c81040a8\n",
     )
-    assert pin == "3ef6bbd20126"
+    assert pin == "d923a5eb487a"
 
 
 def test_version_pin_reports_exact_floored_and_unknown_forms(monkeypatch, tmp_path) -> None:

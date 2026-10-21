@@ -2,9 +2,10 @@
 
 Every assertion here freezes one Hermes SDK / plugin / HTTP / config touchpoint
 that a planned hal0 adapter lane consumes, copied verbatim from the reviewed
-official pin ``3ef6bbd2`` (NousResearch/hermes-agent v2026.7.20 / 0.19.0). The
-frozen fixtures live under ``tests/fixtures/hermes/contracts/`` and each is
-labelled with its consuming adapter lane.
+official pin ``d923a5eb`` (NousResearch/hermes-agent v0.22.2, ADR-0034
+decision 8). The frozen fixtures live under ``tests/fixtures/hermes/contracts/``
+and each is labelled with its consuming adapter lane. ADR-0032 decision 15
+re-vendors them at every pin bump.
 
 Together with the installer pin and the ``hermes-sdk-diff`` drift-watch
 (``[tool.hal0.upstream-hermes]`` in pyproject.toml), this is the tripwire: a
@@ -16,7 +17,6 @@ Lanes: hal0-memory, hal0-provider, hal0-voice, hal0-hermes-executor,
 hal0-hermes-automation, plus the cross-cutting security checklist (item 4).
 """
 
-import re
 import tomllib
 from inspect import signature
 from pathlib import Path
@@ -26,17 +26,18 @@ import pytest
 from tests.fixtures.hermes.contracts import api_surface, config_defaults, kanban_runs
 from tests.fixtures.hermes.contracts.memory_loader import (
     MEMORY_PLUGIN_SUBDIR,
+    USER_PLUGIN_SUBDIR,
     _ProviderCollector,
 )
 from tests.fixtures.hermes.contracts.memory_provider import MemoryProvider
-from tests.fixtures.hermes.contracts.plugin_context import PluginContext
+from tests.fixtures.hermes.contracts.plugin_context import PluginContext, PluginRegistration
 from tests.fixtures.hermes.contracts.provider_profile import (
     ProviderProfile,
     get_provider_profile,
     register_provider,
 )
 
-HERMES_COMMIT = "3ef6bbd201263d354fd83ec55b3c306ded2eb72a"
+HERMES_COMMIT = "d923a5eb487a17c0a68801bba9ef0f56c81040a8"
 HERMES_REPO = "https://github.com/NousResearch/hermes-agent"
 _REPO_ROOT = Path(__file__).parents[3]
 
@@ -91,12 +92,16 @@ def test_provider_registration_name_override() -> None:
 
 # ── lane: hal0-memory ──────────────────────────────────────────────────────
 
-# Frozen roster: every MemoryProvider lifecycle seam the design doc references.
+# Frozen roster: every public MemoryProvider member at the pin.
 _MEMORY_ROSTER = frozenset(
     {
         "name",
         "is_available",
         "initialize",
+        "unavailable_reason",
+        "recall_status",
+        "identity_signature",
+        "pre_compress_checkpoint_api_version",
         "system_prompt_block",
         "prefetch",
         "queue_prefetch",
@@ -122,6 +127,28 @@ def test_memory_provider_roster_is_frozen() -> None:
     assert public == _MEMORY_ROSTER
 
 
+def test_memory_provider_required_methods_are_unchanged() -> None:
+    # hal0-memory implements exactly these; a new abstract method would make
+    # Hermes refuse to instantiate the provider.
+    assert frozenset({"name", "is_available", "initialize", "get_tool_schemas"}) == (
+        MemoryProvider.__abstractmethods__
+    )
+
+
+def test_memory_provider_optional_hooks_added_since_0_19_have_safe_defaults() -> None:
+    assert str(signature(MemoryProvider.unavailable_reason)) == "(self) -> 'str'"
+    assert str(signature(MemoryProvider.recall_status)) == "(self) -> 'Optional[RecallStatus]'"
+    assert str(signature(MemoryProvider.identity_signature)) == "(self) -> 'dict[str, Any]'"
+    assert MemoryProvider.pre_compress_checkpoint_api_version == 1
+    assert str(signature(MemoryProvider.on_turn_start)) == (
+        "(self, turn_number: 'int', message: 'str', **kwargs) -> 'None'"
+    )
+    assert str(signature(MemoryProvider.on_session_switch)) == (
+        "(self, new_session_id: 'str', *, parent_session_id: 'str' = '', "
+        "reset: 'bool' = False, rewound: 'bool' = False, **kwargs) -> 'None'"
+    )
+
+
 def test_memory_provider_preserves_turn_lifecycle_signatures() -> None:
     assert str(signature(MemoryProvider.system_prompt_block)) == "(self) -> 'str'"
     assert str(signature(MemoryProvider.prefetch)) == (
@@ -132,8 +159,8 @@ def test_memory_provider_preserves_turn_lifecycle_signatures() -> None:
     )
     assert str(signature(MemoryProvider.sync_turn)) == (
         "(self, user_content: 'str', assistant_content: 'str', *, "
-        "session_id: 'str' = '', messages: 'Optional[List[Dict[str, Any]]]' = None) "
-        "-> 'None'"
+        "session_id: 'str' = '', messages: 'Optional[list[dict[str, Any]]]' = None, "
+        "turn_author: 'Optional[dict[str, Any]]' = None) -> 'None'"
     )
 
 
@@ -146,14 +173,14 @@ def test_memory_provider_identity_and_availability_signatures() -> None:
 
 def test_memory_provider_capture_and_compression_hook_signatures() -> None:
     assert str(signature(MemoryProvider.on_pre_compress)) == (
-        "(self, messages: 'List[Dict[str, Any]]') -> 'str'"
+        "(self, messages: 'list[dict[str, Any]]') -> 'str'"
     )
     assert str(signature(MemoryProvider.on_session_end)) == (
-        "(self, messages: 'List[Dict[str, Any]]') -> 'None'"
+        "(self, messages: 'list[dict[str, Any]]') -> 'None'"
     )
     assert str(signature(MemoryProvider.on_memory_write)) == (
         "(self, action: 'str', target: 'str', content: 'str', "
-        "metadata: 'Optional[Dict[str, Any]]' = None) -> 'None'"
+        "metadata: 'Optional[dict[str, Any]]' = None) -> 'None'"
     )
     assert str(signature(MemoryProvider.on_delegation)) == (
         "(self, task: 'str', result: 'str', *, child_session_id: 'str' = '', **kwargs) -> 'None'"
@@ -161,20 +188,33 @@ def test_memory_provider_capture_and_compression_hook_signatures() -> None:
 
 
 def test_memory_provider_setup_schema_signatures() -> None:
-    assert str(signature(MemoryProvider.get_config_schema)) == "(self) -> 'List[Dict[str, Any]]'"
+    assert str(signature(MemoryProvider.get_config_schema)) == "(self) -> 'list[dict[str, Any]]'"
     assert str(signature(MemoryProvider.save_config)) == (
-        "(self, values: 'Dict[str, Any]', hermes_home: 'str') -> 'None'"
+        "(self, values: 'dict[str, Any]', hermes_home: 'str') -> 'None'"
     )
-    assert str(signature(MemoryProvider.backup_paths)) == "(self) -> 'List[str]'"
+    assert str(signature(MemoryProvider.backup_paths)) == "(self) -> 'list[str]'"
 
 
 def test_memory_loader_layout_and_registration_collector() -> None:
-    # Installed seed lives under the specialized subtree, NOT top-level plugins/.
+    # Bundled providers live under plugins/memory/<name>/; a user provider (the
+    # hal0-memory seed) under $HERMES_HOME/plugins/<name>/.
     assert MEMORY_PLUGIN_SUBDIR == "plugins/memory"
-    # The memory loader's collector exposes register_memory_provider; the general
-    # PluginContext deliberately does not.
+    assert USER_PLUGIN_SUBDIR == "plugins"
+    # The memory loader's collector captures register_memory_provider. Since
+    # 0.22 the general PluginContext also has one, but it is inert: it records
+    # the provider and returns None, and activation stays with memory.provider.
     assert hasattr(_ProviderCollector, "register_memory_provider")
-    assert not hasattr(PluginContext, "register_memory_provider")
+    assert str(signature(PluginContext.register_memory_provider)) == "(self, provider) -> 'None'"
+
+
+def test_hal0_memory_seed_installs_under_the_user_plugin_root() -> None:
+    # The provisioning target must match the loader's user root.
+    import inspect
+
+    from hal0.agents import hermes_provision as hp
+
+    src = inspect.getsource(hp)
+    assert '"hal0-memory": hermes_home / "plugins" / "hal0-memory"' in src
 
 
 def test_memory_provider_config_selection_key() -> None:
@@ -185,9 +225,11 @@ def test_memory_provider_config_selection_key() -> None:
 
 
 def test_voice_registration_callables_match_plugin_context() -> None:
-    assert str(signature(PluginContext.register_tts_provider)) == "(self, provider) -> 'None'"
+    assert str(signature(PluginContext.register_tts_provider)) == (
+        "(self, provider) -> 'Optional[PluginRegistration]'"
+    )
     assert str(signature(PluginContext.register_transcription_provider)) == (
-        "(self, provider) -> 'None'"
+        "(self, provider) -> 'Optional[PluginRegistration]'"
     )
 
 
@@ -200,33 +242,69 @@ def test_voice_command_provider_config_keys() -> None:
 
 
 def test_plugin_context_registration_signatures() -> None:
-    assert str(signature(PluginContext.register_context_engine)) == "(self, engine) -> 'None'"
+    assert str(signature(PluginContext.register_context_engine)) == (
+        "(self, engine) -> 'Optional[PluginRegistration]'"
+    )
     assert str(signature(PluginContext.register_hook)) == (
-        "(self, hook_name: 'str', callback: 'Callable') -> 'None'"
+        "(self, hook_name: 'str', callback: 'Callable') -> 'PluginRegistration'"
     )
     assert str(signature(PluginContext.dispatch_tool)) == (
         "(self, tool_name: 'str', args: 'dict', **kwargs) -> 'str'"
     )
     assert str(signature(PluginContext.inject_message)) == (
-        "(self, content: 'str', role: 'str' = 'user') -> 'bool'"
+        "(self, content: 'str', role: 'str' = 'user', *, session_key: 'str | None' = None, "
+        "origin: 'Mapping[str, Any] | None' = None) -> 'bool'"
     )
     assert str(signature(PluginContext.register_auxiliary_task)) == (
         "(self, key: 'str', *, display_name: 'str', description: 'str', "
-        "defaults: 'Optional[Dict[str, Any]]' = None) -> 'None'"
+        "defaults: 'Optional[dict[str, Any]]' = None, "
+        "inherit_from: 'Optional[str]' = None) -> 'PluginRegistration'"
     )
+    assert str(signature(PluginContext.register_tool)) == (
+        "(self, name: 'str', toolset: 'str', schema: 'dict', handler: 'Callable', "
+        "check_fn: 'Callable | None' = None, requires_env: 'list | None' = None, "
+        "is_async: 'bool' = False, description: 'str' = '', emoji: 'str' = '', "
+        "override: 'bool' = False) -> 'Optional[PluginRegistration]'"
+    )
+    assert [f for f in PluginRegistration.__dataclass_fields__] == [
+        "kind",
+        "key",
+        "release",
+        "plugin_key",
+    ]
 
 
 # ── lane: hal0-hermes-executor (run + session HTTP surface) ────────────────
 
 
 def test_executor_run_routes_are_frozen() -> None:
+    # Since 0.22 these come from gateway/platforms/api_server_runs.py:234-240;
+    # /steer is new since 0.19.0.
     assert api_surface.RUN_ROUTES == (
         ("post", "/v1/runs"),
         ("get", "/v1/runs/{run_id}"),
         ("get", "/v1/runs/{run_id}/events"),
         ("post", "/v1/runs/{run_id}/approval"),
+        ("post", "/v1/runs/{run_id}/steer"),
         ("post", "/v1/runs/{run_id}/stop"),
     )
+
+
+def test_api_server_route_table_is_complete() -> None:
+    # The fixture tables together are the whole _http_route_table() at the pin
+    # (46 rows); the 11 rows new since 0.19.0 are all accounted for.
+    tables = (
+        api_surface.RUN_ROUTES,
+        api_surface.SESSION_ROUTES,
+        api_surface.CHAT_ROUTES,
+        api_surface.JOB_ROUTES,
+        api_surface.PLATFORM_CALLBACK_ROUTES,
+        api_surface.OTHER_ROUTES,
+    )
+    rows = [row for table in tables for row in table]
+    assert len(rows) == len(set(rows)) == 46
+    assert len(api_surface.ADDED_SINCE_0_19_0) == 11
+    assert set(rows) >= api_surface.ADDED_SINCE_0_19_0
 
 
 def test_executor_session_routes_present() -> None:
@@ -302,14 +380,28 @@ def test_kanban_runs_creation_and_cancel_routes_are_a_known_gap() -> None:
     assert ("post", "/runs/{run_id}/terminate") in kanban_runs.KANBAN_RUNS_ROUTES
 
 
-def test_dashboard_session_token_injection_format_is_frozen() -> None:
-    # hal0.board._TOKEN_RE / hal0.board.hermes_executor._TOKEN_RE both harvest
-    # this exact shape from the dashboard's ungated bootstrap HTML.
-    token_re = re.compile(r'window\.__HERMES_SESSION_TOKEN__\s*=\s*"([^"]+)"')
-    rendered = kanban_runs.SESSION_TOKEN_INJECTION_TEMPLATE.format(token="tok-123")
-    match = token_re.search(rendered)
-    assert match is not None
-    assert match.group(1) == "tok-123"
+@pytest.mark.parametrize("module", ["hal0.board", "hal0.board.hermes_executor"])
+def test_board_token_harvest_matches_both_injection_forms(module: str) -> None:
+    # hal0.board._TOKEN_RE and hal0.board.hermes_executor._TOKEN_RE harvest the
+    # session token from the dashboard's ungated HTML. At 0.22.2 it is injected
+    # two ways (web_server_dashboard.py:165 SPA index, :134 headless page); the
+    # real regexes must read the token back from both.
+    import importlib
+    import json
+    import secrets
+
+    token_re = importlib.import_module(module)._TOKEN_RE
+    token = secrets.token_urlsafe(32)  # how Hermes mints it (web_server.py:401-402)
+    forms = (
+        kanban_runs.SESSION_TOKEN_INJECTION_TEMPLATE.format(token=token),
+        kanban_runs.SESSION_TOKEN_HEADLESS_TEMPLATE.format(
+            token_json=json.dumps(token), msg="headless"
+        ),
+    )
+    for rendered in forms:
+        match = token_re.search(rendered)
+        assert match is not None, rendered
+        assert match.group(1) == token
 
 
 # ── SECURITY CHECKLIST (board fold, lxc105 — item 4) ───────────────────────
@@ -323,6 +415,16 @@ def test_upstream_approvals_default_is_frozen_and_hal0_pins_its_own() -> None:
 
     assert config_defaults.APPROVALS_MODE_DEFAULT == "smart"
     assert HAL0_APPROVALS_MODE == "smart"
+
+
+def test_hal0_approval_modes_are_a_subset_of_upstream_modes() -> None:
+    # Upstream accepts manual | smart | off (approval_mode.py:16); hal0 offers
+    # only smart | manual and leaves "off" to overrides.yaml.
+    from hal0.config.schema import HERMES_COMMAND_APPROVALS_MODES
+
+    assert config_defaults.APPROVALS_MODES == ("manual", "smart", "off")
+    assert set(HERMES_COMMAND_APPROVALS_MODES) <= set(config_defaults.APPROVALS_MODES)
+    assert "off" not in HERMES_COMMAND_APPROVALS_MODES
 
 
 def test_platform_callback_route_is_frozen() -> None:
@@ -354,10 +456,10 @@ def test_api_server_refuses_placeholder_or_weak_key() -> None:
         "execution) whenever the terminal tool is enabled, which the lxc105 "
         "checklist flags as an unsandboxed-by-default local terminal. The pin "
         "is NOT what forces this: the pinned ref also ships sandboxed backends "
-        "(hermes_cli/config.py branches on docker | singularity | modal | "
-        "daytona | ssh, and tools/environments/{docker,singularity,modal,"
-        "daytona,ssh}.py all exist in the installed venv), so no pin bump is "
-        "needed to change it. None is viable here: a containerised shell cannot "
+        "(built-in names local, docker, singularity, modal, daytona, "
+        "vercel_sandbox, ssh at hermes_cli/plugins.py:1039-1046, and "
+        "tools/environments/{docker,singularity,modal,daytona,ssh}.py exist at "
+        "d923a5eb), so no pin bump is needed to change it. None is viable here: a containerised shell cannot "
         "reach the host filesystem or 127.0.0.1:8080, which would break the "
         "bundled host-management skills (hal0-service-management, hal0-bench, "
         "hal0-tune). The 'by default' half is now answered "
@@ -427,7 +529,19 @@ def test_sdk_diff_tracks_full_adapter_contract_surface() -> None:
         "hermes_cli/config.py",
         "hermes_cli/auth.py",
         "hermes_cli/kanban_db.py",
+        "hermes_cli/kanban_db_connect.py",
         "plugins/kanban/dashboard/plugin_api.py",
+        # Added at the v0.22.2 bump.
+        "gateway/platforms/api_server_runs.py",
+        "hermes_cli/web_server_dashboard.py",
+        "hermes_cli/config_defaults.py",
+        "hermes_cli/personality.py",
+        "hermes_cli/gateway.py",
+        "hermes_cli/_launchers.py",
+        "hermes_cli/main.py",
+        "agent/model_metadata.py",
+        "setup.py",
+        "pyproject.toml",
     }
     missing = required - tracked
     assert not missing, f"drift-watch missing contract surfaces: {sorted(missing)}"

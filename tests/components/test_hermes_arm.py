@@ -33,10 +33,11 @@ def test_unprovisioned_skips(tmp_path) -> None:
     assert res["status"] == "skipped"
 
 
-PIN = "3ef6bbd201263d354fd83ec55b3c306ded2eb72a"
+PIN = "d923a5eb487a17c0a68801bba9ef0f56c81040a8"  # the shipped pin, v0.22.2
+OLD_PIN = "3ef6bbd201263d354fd83ec55b3c306ded2eb72a"  # 0.19.0, before #2615 PR 4
 
 
-def _live_release(ref=PIN, minor="3.12"):
+def _live_release(ref=PIN, minor="3.14"):
     """A migrated layout: venvs/hermes -> hermes/current/venv -> releases/<id>/venv."""
     from hal0.agents import hermes_release as rel
 
@@ -80,6 +81,14 @@ def test_ref_drift_is_stale_on_diagnose(tmp_path) -> None:
     res = hermes_arm.converge_hermes(venv=venv, apply=False)
     assert res["status"] == "stale"
     assert "differs" in res["trigger"]
+
+
+def test_a_0_19_0_release_on_312_is_stale_after_the_pin_bump(tmp_path) -> None:
+    """`hal0 update` to 1.6.0: the live 0.19.0 release on 3.12 must rebuild."""
+    venv = _live_release(ref=OLD_PIN, minor="3.12")
+    res = hermes_arm.converge_hermes(venv=venv, apply=False)
+    assert res["status"] == "stale"
+    assert "differs from target d923a5eb487a" in res["trigger"]
 
 
 def test_interpreter_minor_drift_triggers(tmp_path) -> None:

@@ -5,24 +5,50 @@
 Adapter lane: **hal0-memory** (the one active external memory provider).
 
 Signatures are copied verbatim from the reviewed official pin
-``3ef6bbd201263d354fd83ec55b3c306ded2eb72a`` (``agent/memory_provider.py``,
-Hermes v2026.7.20 / 0.19.0). A Hermes bump that reshapes any of these
-lifecycle seams must re-vendor this file and update the frozen signatures in
+``d923a5eb487a17c0a68801bba9ef0f56c81040a8`` (``agent/memory_provider.py``,
+Hermes v0.22.2). A Hermes bump that reshapes any of these lifecycle seams must
+re-vendor this file and update the frozen signatures in
 ``tests/agents/hermes/test_contract_compatibility.py`` — that diff is the
 tripwire the ``hermes-sdk-diff`` drift-watch and the compat-pin exist to force.
+
+What changed since 0.19.0 (``3ef6bbd2``):
+
+* the four abstract methods (``name``, ``is_available``, ``initialize``,
+  ``get_tool_schemas``) are unchanged;
+* new optional hooks with safe defaults: ``unavailable_reason``,
+  ``recall_status``, ``identity_signature``, and the
+  ``pre_compress_checkpoint_api_version`` class attribute;
+* ``sync_turn`` gained a keyword-only ``turn_author``. The memory manager only
+  passes it to signatures that accept it (``agent/memory_manager.py:601-618``), so
+  hal0-memory's narrower override keeps working;
+* annotations moved from ``List``/``Dict`` to builtin ``list``/``dict``.
 """
 
 # Preserve the reviewed upstream ABC and typing spellings verbatim.
-# ruff: noqa: B027, UP006, UP035, UP045
+# ruff: noqa: B027, UP045
 
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Any, Dict, List, Optional
+from dataclasses import dataclass
+from typing import Any, Optional
+
+INDICATOR_GLYPH = "🧠"
+
+
+@dataclass(frozen=True)
+class RecallStatus:
+    """What the last prefetch injected, for the deterministic recall indicator."""
+
+    provider_label: str
+    count: int
+    glyph: str = INDICATOR_GLYPH
 
 
 class MemoryProvider(ABC):
     """Contract surface required by the hal0 memory provider."""
+
+    pre_compress_checkpoint_api_version = 1
 
     @property
     @abstractmethod
@@ -33,11 +59,14 @@ class MemoryProvider(ABC):
 
     @abstractmethod
     def is_available(self) -> bool:
-        """Config-only readiness check — no network (design: is_available())."""
+        """Config-only readiness check — no network."""
 
     @abstractmethod
     def initialize(self, session_id: str, **kwargs) -> None:
-        """Per-session init; kwargs carry server-derived identity/context."""
+        """Per-session init; kwargs carry hermes_home, platform, agent_context, ..."""
+
+    def unavailable_reason(self) -> str:
+        return ""
 
     def system_prompt_block(self) -> str:
         return ""
@@ -48,21 +77,25 @@ class MemoryProvider(ABC):
     def queue_prefetch(self, query: str, *, session_id: str = "") -> None:
         pass
 
+    def recall_status(self) -> Optional[RecallStatus]:
+        return None
+
     def sync_turn(
         self,
         user_content: str,
         assistant_content: str,
         *,
         session_id: str = "",
-        messages: Optional[List[Dict[str, Any]]] = None,
+        messages: Optional[list[dict[str, Any]]] = None,
+        turn_author: Optional[dict[str, Any]] = None,
     ) -> None:
         pass
 
     @abstractmethod
-    def get_tool_schemas(self) -> List[Dict[str, Any]]:
+    def get_tool_schemas(self) -> list[dict[str, Any]]:
         """Memory tool schemas (search/recall/add/...)."""
 
-    def handle_tool_call(self, tool_name: str, args: Dict[str, Any], **kwargs) -> str:
+    def handle_tool_call(self, tool_name: str, args: dict[str, Any], **kwargs) -> str:
         raise NotImplementedError
 
     def shutdown(self) -> None:
@@ -73,7 +106,10 @@ class MemoryProvider(ABC):
     def on_turn_start(self, turn_number: int, message: str, **kwargs) -> None:
         pass
 
-    def on_session_end(self, messages: List[Dict[str, Any]]) -> None:
+    def identity_signature(self) -> dict[str, Any]:
+        return {}
+
+    def on_session_end(self, messages: list[dict[str, Any]]) -> None:
         pass
 
     def on_session_switch(
@@ -87,7 +123,7 @@ class MemoryProvider(ABC):
     ) -> None:
         pass
 
-    def on_pre_compress(self, messages: List[Dict[str, Any]]) -> str:
+    def on_pre_compress(self, messages: list[dict[str, Any]]) -> str:
         return ""
 
     def on_delegation(
@@ -95,10 +131,10 @@ class MemoryProvider(ABC):
     ) -> None:
         pass
 
-    def get_config_schema(self) -> List[Dict[str, Any]]:
+    def get_config_schema(self) -> list[dict[str, Any]]:
         return []
 
-    def save_config(self, values: Dict[str, Any], hermes_home: str) -> None:
+    def save_config(self, values: dict[str, Any], hermes_home: str) -> None:
         pass
 
     def on_memory_write(
@@ -106,9 +142,9 @@ class MemoryProvider(ABC):
         action: str,
         target: str,
         content: str,
-        metadata: Optional[Dict[str, Any]] = None,
+        metadata: Optional[dict[str, Any]] = None,
     ) -> None:
         pass
 
-    def backup_paths(self) -> List[str]:
+    def backup_paths(self) -> list[str]:
         return []
