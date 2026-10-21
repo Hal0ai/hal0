@@ -1541,11 +1541,72 @@ def _build_overlay_keys(**over):
         mcp_servers=[],
         agent_id="hermes-agent",
         system_prompt="",
-        personality_name="",
         live_resolve_enabled=True,
     )
     base.update(over)
     return dict(hp._build_config_overlay(**base))
+
+
+def test_merge_drops_config_keys_hal0_no_longer_writes(tmp_path: Path) -> None:
+    yaml = pytest.importorskip("yaml")
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(
+        "agent:\n  max_turns: 60\n  system_prompt_prelude: old\nmodel:\n  default: m\n",
+        encoding="utf-8",
+    )
+    changed = hp._merge_config_yaml_layers(
+        cfg, list_keys={}, overrides_path=tmp_path / "absent.yaml"
+    )
+    data = yaml.safe_load(cfg.read_text(encoding="utf-8"))
+    assert changed is True
+    assert data["agent"] == {"max_turns": 60}
+    assert data["model"] == {"default": "m"}
+
+
+@pytest.mark.parametrize(
+    ("current", "reset"),
+    [("Concise", True), (" hal0 brain ", True), ("pirate", False), ("", False)],
+)
+def test_merge_retires_a_personality_hal0_wrote(tmp_path: Path, current: str, reset: bool) -> None:
+    """#2839 follow-up: a display.personality equal to a hal0 persona display
+    name (what hal0 wrote before the fix) is reset, so a persona named like a
+    built-in personality cannot override agent.system_prompt. An operator's
+    own pick is left alone."""
+    yaml = pytest.importorskip("yaml")
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(
+        yaml.safe_dump({"display": {"personality": current, "streaming": True}}),
+        encoding="utf-8",
+    )
+    hp._merge_config_yaml_layers(
+        cfg,
+        list_keys={},
+        overrides_path=tmp_path / "absent.yaml",
+        persona_names=["Concise", "hal0 Brain"],
+    )
+    display = yaml.safe_load(cfg.read_text(encoding="utf-8"))["display"]
+    assert display["personality"] == ("" if reset else current)
+    assert display["streaming"] is True
+
+
+def test_persona_display_names_cover_seeds_and_the_store(tmp_path: Path) -> None:
+    from hal0.agents import personas
+
+    state = hp.BootstrapState(venv=str(tmp_path / "v"), hermes_home=str(tmp_path / "h"))
+    root = hp._personas_root_for(state)
+    seeded = personas._seed_coder("hermes")
+    seeded.display_name = "Concise"
+    personas.save_persona(seeded, root=root)
+    names = hp._hal0_persona_display_names(state)
+    assert {"Hermes", "Coder", "hal0 Brain", "Concise"} <= set(names)
+
+
+def test_drop_dotted_key_tolerates_missing_and_non_dict_parents() -> None:
+    data = {"agent": "scalar", "auxiliary": {"vision": {}}}
+    assert hp._drop_dotted_key(data, "agent.system_prompt_prelude") is False
+    assert hp._drop_dotted_key(data, "auxiliary.web_extract") is False
+    assert hp._drop_dotted_key(data, "auxiliary.vision") is True
+    assert data == {"agent": "scalar", "auxiliary": {}}
 
 
 def test_overlay_includes_provider_and_identity_keys() -> None:

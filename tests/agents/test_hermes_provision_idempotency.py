@@ -139,12 +139,16 @@ def test_report_written_for_agent_status(target: tuple[Path, Path], tmp_path: Pa
 # ── config.yaml content contracts ────────────────────────────────────────────
 
 
-def test_config_yaml_contains_persona_prelude(target: tuple[Path, Path]) -> None:
-    """The render carries the active persona's system_prompt_prelude + label."""
+def test_config_yaml_contains_persona_prompt(target: tuple[Path, Path]) -> None:
+    """The render carries the active persona's prompt under the key Hermes reads
+    (``agent.system_prompt``, #2839), not the dead ``system_prompt_prelude``,
+    and leaves ``display.personality`` to the operator."""
+    yaml = pytest.importorskip("yaml")
     _install(target)
-    config = _config(target)
-    assert "system_prompt_prelude" in config
-    assert "personality:" in config
+    cfg = yaml.safe_load(_config(target))
+    assert cfg["agent"]["system_prompt"].strip()
+    assert "system_prompt_prelude" not in cfg["agent"]
+    assert "personality" not in (cfg.get("display") or {})
 
 
 def test_config_yaml_contains_chat_slot_aliases(target: tuple[Path, Path]) -> None:

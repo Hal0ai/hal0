@@ -28,7 +28,6 @@ def _overlay(hermes_home: Path | str) -> dict[str, object]:
             mcp_servers=[],
             agent_id="hermes",
             system_prompt="",
-            personality_name="",
             live_resolve_enabled=True,
             hermes_home=hermes_home,
             # D2 is about WHERE the shell lands once the operator has opted in;
@@ -81,7 +80,6 @@ def test_terminal_backend_is_local_only_when_opted_in() -> None:
             mcp_servers=[],
             agent_id="hermes",
             system_prompt="",
-            personality_name="",
             live_resolve_enabled=True,
             hermes_home="/var/lib/hal0/.hermes",
             terminal_enabled=False,

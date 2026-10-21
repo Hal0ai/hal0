@@ -221,6 +221,48 @@ def test_memory_provider_config_selection_key() -> None:
     assert config_defaults.MEMORY_PROVIDER_CONFIG_KEY == "memory.provider"
 
 
+# ── persona prompt (#2839) ─────────────────────────────────────────────────
+
+
+def _overlay(**over: object) -> dict:
+    from hal0.agents import hermes_provision as hp
+
+    base: dict = dict(
+        primary={"model_id": "m", "backend_url": "http://127.0.0.1:8080/v1"},
+        chat_slots=[],
+        delegation=None,
+        auxiliary_tasks={},
+        mcp_servers=[],
+        agent_id="hermes",
+        system_prompt="",
+        live_resolve_enabled=True,
+    )
+    base.update(over)
+    return dict(hp._build_config_overlay(**base))
+
+
+def test_persona_prompt_goes_to_the_key_hermes_reads() -> None:
+    # Hermes resolves the session's ephemeral system prompt from
+    # agent.system_prompt (personality.py:118-123). hal0 used to write
+    # agent.system_prompt_prelude, which no Hermes version reads; this keeps
+    # the persona key pinned to the reader so it cannot go dead again.
+    from hal0.agents.hermes_provision import PERSONA_PROMPT_CONFIG_KEY
+
+    assert PERSONA_PROMPT_CONFIG_KEY == config_defaults.PERSONA_PROMPT_CONFIG_KEY
+    keys = _overlay(system_prompt="You are hal0.")
+    assert keys[config_defaults.PERSONA_PROMPT_CONFIG_KEY] == "You are hal0."
+    assert "agent.system_prompt_prelude" not in keys
+    # display.personality would override the prompt when it names a known
+    # personality; hal0 leaves it to the operator.
+    assert config_defaults.PERSONALITY_NAME_CONFIG_KEY not in keys
+
+
+def test_retired_persona_key_is_dropped_from_existing_configs() -> None:
+    from hal0.agents.hermes_provision import RETIRED_HAL0_CONFIG_KEYS
+
+    assert "agent.system_prompt_prelude" in RETIRED_HAL0_CONFIG_KEYS
+
+
 # ── lane: hal0-voice ───────────────────────────────────────────────────────
 
 

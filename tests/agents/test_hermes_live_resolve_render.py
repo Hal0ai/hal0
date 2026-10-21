@@ -21,7 +21,6 @@ def _overlay(*, live_resolve_enabled, **over):
         mcp_servers=[],
         agent_id="hermes",
         system_prompt="x",
-        personality_name="default",
     )
     base.update(over)
     pairs = _build_config_overlay(live_resolve_enabled=live_resolve_enabled, **base)

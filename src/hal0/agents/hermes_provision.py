@@ -1711,6 +1711,11 @@ SESSION_START_HOOK: dict[str, Any] = {
     "command": "/usr/lib/hal0/hermes-hooks/inject-system-state.sh",
     "timeout": 2,
 }
+#: Hermes config key that carries the active persona's prompt (#2839). See
+#: :func:`_build_config_overlay`; the contract suite pins it to the key
+#: ``hermes_cli/personality.py`` reads.
+PERSONA_PROMPT_CONFIG_KEY = "agent.system_prompt"
+
 HAL0_CONFIG_LIST_KEYS: dict[str, Any] = {
     "skills": {"external_dirs": SKILLS_EXTERNAL_DIRS},
     "hooks": {"on_session_start": [SESSION_START_HOOK]},
@@ -2082,7 +2087,6 @@ def _build_config_overlay(
     mcp_servers: list[dict[str, Any]],
     agent_id: str,
     system_prompt: str,
-    personality_name: str,
     live_resolve_enabled: bool,
     hermes_home: Path | str = HERMES_HOME_DEFAULT,
     terminal_enabled: bool = False,
@@ -2246,8 +2250,16 @@ def _build_config_overlay(
         terminal_scratch = str(Path(hermes_home) / "scratch")
         pairs += [("terminal.backend", "local"), ("terminal.cwd", terminal_scratch)]
     pairs += [("agent.max_turns", 60), ("agent.reasoning_effort", "medium")]
+    # The active persona's prompt (#2839). ``agent.system_prompt`` is the
+    # overlay Hermes resolves into each session's ephemeral system prompt
+    # (hermes_cli/personality.py:118-123 at the pinned d923a5eb), read by the
+    # CLI, the TUI gateway behind the dashboard chat, and the messaging
+    # gateway. hal0 used to write ``agent.system_prompt_prelude``, which no
+    # Hermes version reads. ``display.personality`` is left to the operator:
+    # a known personality named there overlays this prompt, which is
+    # Hermes's own ``/personality`` behaviour.
     if system_prompt:
-        pairs.append(("agent.system_prompt_prelude", system_prompt))
+        pairs.append((PERSONA_PROMPT_CONFIG_KEY, system_prompt))
 
     # Reasoning visibility: both flags are required together (#635).
     pairs += [
@@ -2255,8 +2267,6 @@ def _build_config_overlay(
         ("display.streaming", True),
         ("display.show_reasoning", True),
     ]
-    if personality_name:
-        pairs.append(("display.personality", personality_name))
 
     # auxiliary.<task> side-job routing (feat/hermes-role-slots): utility-slot
     # tasks render provider:"custom"+base_url; vision/web_extract stay "main".
@@ -2624,6 +2634,7 @@ def _merge_config_yaml_layers(
     *,
     list_keys: dict[str, Any],
     overrides_path: Path,
+    persona_names: Iterable[str] = (),
 ) -> bool:
     """Deep-merge the irreducible list keys + operator overrides onto config.yaml.
 
@@ -2631,7 +2642,14 @@ def _merge_config_yaml_layers(
     list-valued hal0 keys (``skills.external_dirs``, ``hooks.on_session_start``)
     are layered here. The operator escape hatch (``overrides.yaml``) deep-merges
     on top LAST so a hand override still wins. Every hermes-owned key is
-    preserved (merge, never clobber). Returns True iff the file changed.
+    preserved (merge, never clobber). Keys hal0 itself used to write and no
+    longer does (:data:`RETIRED_HAL0_CONFIG_KEYS`) are removed first, so an
+    upgraded box does not keep dead config. A ``display.personality`` that
+    equals one of ``persona_names`` (a hal0 persona's display name, which
+    hal0 itself wrote there before #2839) is reset to ``""``: Hermes lets a
+    known personality override ``agent.system_prompt``, so a custom persona
+    named like a built-in personality ("Concise") would otherwise replace the
+    persona prompt. Returns True iff the file changed.
     """
     try:
         import yaml  # type: ignore[import-untyped]
@@ -2640,6 +2658,9 @@ def _merge_config_yaml_layers(
     base: dict[str, Any] = {}
     if config_path.exists():
         base = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+    for dotted in RETIRED_HAL0_CONFIG_KEYS:
+        _drop_dotted_key(base, dotted)
+    _retire_hal0_personality(base, persona_names)
     merged = _deep_merge(base, list_keys)
     if overrides_path.exists():
         overlay = yaml.safe_load(overrides_path.read_text(encoding="utf-8")) or {}
@@ -2663,6 +2684,46 @@ def _merge_config_yaml_layers(
     if config_path.exists() and config_path.read_text(encoding="utf-8") == out:
         return False
     _atomic_write(config_path, out)
+    return True
+
+
+#: Dotted config keys an older hal0 wrote that Hermes v0.22.2 never reads.
+#: ``agent.system_prompt_prelude`` had no reader at any pin (#2839; the persona
+#: prompt now goes to :data:`PERSONA_PROMPT_CONFIG_KEY`). Dropped from
+#: config.yaml at the next provision; an overrides.yaml that sets one still
+#: wins.
+RETIRED_HAL0_CONFIG_KEYS: tuple[str, ...] = ("agent.system_prompt_prelude",)
+
+
+def _retire_hal0_personality(data: dict[str, Any], persona_names: Iterable[str]) -> bool:
+    """Reset ``display.personality`` when it holds a hal0 persona's display name.
+
+    Before #2839 hal0 wrote the active persona's display name there. Hermes
+    normalises names with ``strip().lower()`` (hermes_cli/personality.py:80-83
+    at d923a5eb), so the comparison does too. True iff it was reset.
+    """
+    names = {str(n).strip().lower() for n in persona_names if str(n).strip()}
+    display = data.get("display")
+    if not names or not isinstance(display, dict):
+        return False
+    current = display.get("personality")
+    if not isinstance(current, str) or current.strip().lower() not in names:
+        return False
+    display["personality"] = ""
+    return True
+
+
+def _drop_dotted_key(data: dict[str, Any], dotted: str) -> bool:
+    """Remove ``a.b.c`` from a nested dict in place; True iff it was present."""
+    *parents, leaf = dotted.split(".")
+    node: Any = data
+    for part in parents:
+        node = node.get(part) if isinstance(node, dict) else None
+        if not isinstance(node, dict):
+            return False
+    if leaf not in node:
+        return False
+    del node[leaf]
     return True
 
 
@@ -2738,6 +2799,25 @@ def _personas_root_for(state: BootstrapState) -> Path:
     return Path(state.hermes_home) / "personas"
 
 
+#: Display names of the personas hal0 seeds (personas.py ``_seed_*``); a
+#: config.yaml written before #2839 can carry any of them as a personality.
+_SEED_PERSONA_DISPLAY_NAMES: tuple[str, ...] = ("Hermes", "Coder", "hal0 Brain")
+
+
+def _hal0_persona_display_names(state: BootstrapState) -> list[str]:
+    """Every hal0 persona display name: the seeds plus the persona store."""
+    from hal0.agents import personas as _personas
+
+    root = _personas_root_for(state)
+    if not root.exists() and _personas.PERSONAS_ROOT.exists():
+        root = _personas.PERSONAS_ROOT
+    try:
+        stored = [p.display_name for p in _personas.list_personas(root=root)]
+    except OSError:
+        stored = []
+    return [*_SEED_PERSONA_DISPLAY_NAMES, *stored]
+
+
 def _active_persona_render(
     state: BootstrapState,
     *,
@@ -2746,7 +2826,7 @@ def _active_persona_render(
 ) -> tuple[str, str]:
     """Look up the active persona + compose the system-prompt prelude.
 
-    Returns ``(system_prompt, personality_name)``. When no personas have
+    Returns ``(system_prompt, display_name)``. When no personas have
     been seeded yet (very first config_write before persona_seed runs),
     falls back to ``("", "")`` so the render still succeeds — the
     second pass after persona_seed lands the real prelude. The persona
@@ -2787,7 +2867,7 @@ def _phase_config_write(ctx: _StepCtx) -> PhaseResult:
 
       1. ``hermes config migrate`` — hermes creates/schema-migrates its file.
       2. Scalar/nested-scalar overlay (model wiring, providers.custom, memory,
-         model_aliases, delegation, mcp_servers, persona prelude, auxiliary,
+         model_aliases, delegation, mcp_servers, persona prompt, auxiliary,
          …) applied via ``hermes config set`` — idempotent, headless-safe.
       3. The two irreducible LIST keys (``skills.external_dirs``,
          ``hooks.on_session_start``) + operator ``overrides.yaml`` deep-merged
@@ -2913,7 +2993,7 @@ def _phase_config_write(ctx: _StepCtx) -> PhaseResult:
                 ),
             }
         )
-    system_prompt, personality_name = _active_persona_render(state, mcp_servers=mcp_servers)
+    system_prompt, persona_name = _active_persona_render(state, mcp_servers=mcp_servers)
     live_resolve_enabled = _live_resolve_enabled()
     # Operator's Hermes command-approvals setting, read from the root-owned
     # seed TOML (never from agent-writable state). Lenient: an unreadable or
@@ -2930,7 +3010,6 @@ def _phase_config_write(ctx: _StepCtx) -> PhaseResult:
         mcp_servers=mcp_servers,
         agent_id=state.agent_id,
         system_prompt=system_prompt,
-        personality_name=personality_name,
         live_resolve_enabled=live_resolve_enabled,
         hermes_home=hermes_home,
         terminal_enabled=terminal_enabled,
@@ -2951,6 +3030,7 @@ def _phase_config_write(ctx: _StepCtx) -> PhaseResult:
             mcp_servers=mcp_servers,
         ),
         overrides_path=OVERRIDES_PATH,
+        persona_names=_hal0_persona_display_names(state),
     )
 
     # Legacy honcho.json cleanup — see _disable_honcho_hermes_host.
@@ -2992,7 +3072,7 @@ def _phase_config_write(ctx: _StepCtx) -> PhaseResult:
             "config_migrated": migrated,
             "primary_model": primary["model_id"],
             "chat_slot_count": len(chat_slots),
-            "persona": personality_name or None,
+            "persona": persona_name or None,
             "mcp_server_count": len(mcp_servers),
             "delegation_model": (delegation or {}).get("model"),
             "auxiliary_utility_model": _utility_aux_model(auxiliary_tasks),
