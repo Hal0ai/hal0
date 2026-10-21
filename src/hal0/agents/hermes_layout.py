@@ -51,6 +51,12 @@ HERMES_UV_CACHE = HERMES_RELEASE_ROOT / ".cache" / "uv"
 #: names it).
 LEGACY_PYTHON_ROOT = Path("/var/lib/hal0/python")
 
+#: Hermes treats an SQLite older than this as having the WAL-reset bug and
+#: forces DELETE journal mode with a warning per database (ADR-0034 decision
+#: 2, upstream ``hermes_state_wal.py``). The one definition: the resolver and
+#: ``hal0 doctor`` both import it. Ubuntu 26.04's python3.14 links 3.46.1.
+SQLITE_MIN: tuple[int, int, int] = (3, 51, 3)
+
 #: The unit upstream's ``hermes gateway install --system`` writes.
 GATEWAY_UNIT_PATH = Path("/etc/systemd/system/hermes-gateway.service")
 

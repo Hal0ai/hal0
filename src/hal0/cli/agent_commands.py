@@ -660,6 +660,7 @@ def _hermes_root_prelude(terminal_env: dict[str, str] | None = None) -> None:
         REPO_ROOT_FOR_INSTALLER,
         _install_cli_wrapper,
         _persist_hermes_python,
+        pinned_target_minor,
         resolve_hermes_python,
         sweep_stale_agent_dropins_as_root,
     )
@@ -679,11 +680,14 @@ def _hermes_root_prelude(terminal_env: dict[str, str] | None = None) -> None:
     _hand_pre_layout_venv_to_hal0()
 
     try:
-        hermes_python = resolve_hermes_python()
-        _persist_hermes_python(hermes_python)
+        # The pinned ref decides the minor (3.12 for 3ef6bbd2, 3.14 for a
+        # ref that admits it), so a valid persisted value for it is kept.
+        minor = pinned_target_minor()
+        hermes_python = resolve_hermes_python(minor=minor)
+        _persist_hermes_python(hermes_python, minor=minor)
         _os.environ["HAL0_HERMES_PYTHON"] = hermes_python
     except (RuntimeError, ValueError) as exc:
-        console.print(f"[yellow]hermes Python 3.14 resolver hint:[/yellow] {exc}")
+        console.print(f"[yellow]hermes Python resolver hint:[/yellow] {exc}")
         raise
     finally:
         # A uv fetch run here, as root, writes root-owned files into the

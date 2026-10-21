@@ -53,7 +53,12 @@ from rich.console import Console
 from rich.table import Table
 
 import hal0
-from hal0.agents.hermes_layout import HERMES_PYTHON_ROOT, HERMES_RELEASE_ROOT, HERMES_VENV_PATH
+from hal0.agents.hermes_layout import (
+    HERMES_PYTHON_ROOT,
+    HERMES_RELEASE_ROOT,
+    HERMES_VENV_PATH,
+    SQLITE_MIN,
+)
 from hal0.cli.doctor_diagnosis import Diagnosis, Evidence, NextStep, render_json
 
 app = typer.Typer(
@@ -202,12 +207,6 @@ def doctor(
     raise typer.Exit(result.returncode)
 
 
-#: Hermes forces DELETE journal mode, with a warning per database, below this
-#: SQLite (ADR-0034 decision 2). Mirrors hermes_provision.SQLITE_MIN without
-#: importing the provisioning module into ``hal0 doctor``.
-_HERMES_SQLITE_MIN = (3, 51, 3)
-
-
 def check_hermes_sqlite(
     venv: Path | None = None, *, run: Callable[..., Any] = subprocess.run
 ) -> dict[str, str]:
@@ -243,14 +242,14 @@ def check_hermes_sqlite(
         version = tuple(int(x) for x in sqlite.split("."))
     except ValueError:
         return {"status": "warn", "detail": f"unparsable SQLite version {sqlite!r}"}
-    floor = ".".join(map(str, _HERMES_SQLITE_MIN))
-    if version < _HERMES_SQLITE_MIN:
+    floor = ".".join(map(str, SQLITE_MIN))
+    if version < SQLITE_MIN:
         return {
             "status": "warn",
             "detail": (
                 f"Python {py} links SQLite {sqlite} (< {floor}): Hermes forces DELETE journal "
                 "mode and warns per database. Clear HAL0_HERMES_PYTHON so hal0 uses a "
-                "uv-managed 3.14, then `sudo hal0 agent reprovision hermes --repair`."
+                "uv-managed interpreter, then `sudo hal0 agent reprovision hermes --repair`."
             ),
         }
     return {"status": "ok", "detail": f"Python {py}, SQLite {sqlite} (>= {floor})"}

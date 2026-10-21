@@ -63,6 +63,7 @@ from hal0.agents.hermes_layout import (
     HERMES_PYTHON_ROOT,
     HERMES_UV_CACHE,
     HERMES_VENV_PATH,
+    SQLITE_MIN,
     release_root_for,
 )
 from hal0.agents.role_slots import candidate_from_slot_mapping, resolve_role_slots
@@ -177,20 +178,20 @@ def content_hash(*pieces: str | bytes) -> str:
 # Pinned constants — keep these in sync with installer/agents/hermes/
 # requirements.txt and the wrapper script. The constants are exposed
 # at module scope so tests can monkey-patch them onto a tmp path.
-# The Hermes venv runs on exactly Python 3.14 (ADR-0032 decision 9). From
+# The Hermes venv runs on exactly one Python minor, chosen per vetted ref
+# (ADR-0032 decision 9, ADR-0034 amendment): the newest minor in
+# SUPPORTED_HERMES_MINORS that the ref's ``requires-python`` admits. From
 # v0.21.6 every core hermes-agent dependency carries a
-# `python_version >= '3.14'` marker, so on an older interpreter the package
-# installs without openai, httpx, fastapi or pydantic. PYTHON_MIN and
-# PYTHON_MAX_EXCLUSIVE bracket exactly one minor; they are the single source
-# of truth for the resolver, the preflight message and the build trigger.
+# `python_version >= '3.14'` marker, so those refs need 3.14; 3ef6bbd2 caps
+# ``requires-python`` below 3.14 and stays on 3.12, under its own lock.
+# PYTHON_MIN/PYTHON_MAX_EXCLUSIVE bracket the newest supported minor (the
+# default target for a ref hal0 has no record of).
 PYTHON_MIN = (3, 14)
 PYTHON_MAX_EXCLUSIVE = (3, 15)
 
-#: Hermes treats an SQLite older than this as having the WAL-reset bug and
-#: forces DELETE journal mode with a warning per database (ADR-0034 decision
-#: 2, upstream ``hermes_state_wal.py``). A system ``python3.14`` is accepted
-#: only when it links at least this version; Ubuntu 26.04's links 3.46.1.
-SQLITE_MIN = (3, 51, 3)
+#: Minors hal0 can build the Hermes venv on, newest first.
+SUPPORTED_HERMES_MINORS: tuple[str, ...] = ("3.14", "3.12")
+
 MIN_FREE_GIB = 4
 DAEMON_HEALTH_URL = "http://127.0.0.1:8080/api/health"
 WRAPPER_INSTALL_PATH = Path("/usr/local/bin/hal0-hermes")
@@ -359,17 +360,17 @@ def _phase_preflight(ctx: _StepCtx) -> PhaseResult:
     # What matters is the VENV interpreter, not the running one — resolve it
     # the same way the install phase will, so a host with no usable 3.14 and
     # no uv fails here with a real explanation instead of deep in the build.
-    venv_python = _resolve_supported_python()
+    minor = pinned_target_minor()
+    details["target_minor"] = minor
+    # uv-managed comes first (ADR-0034 decision 2): uv being available is
+    # enough, since preflight only checks availability and never downloads.
+    # Without uv, a qualifying system python<minor> must exist.
+    uv = _uv_available()
+    details["uv_python_fallback"] = uv is not None
+    venv_python = None if uv is not None else _resolve_supported_python(minor=minor)
     details["venv_python"] = venv_python
-    if venv_python is None:
-        # No system interpreter in range. uv can still provision one during
-        # the install phase (#1250) — we only check availability here, not
-        # download: preflight must stay fast and side-effect free. Fail only
-        # when that fallback is closed too.
-        uv = _uv_available()
-        details["uv_python_fallback"] = uv is not None
-        if uv is None:
-            failures.append(_python_range_error())
+    if uv is None and venv_python is None:
+        failures.append(_python_range_error(minor))
 
     rc = ctx.io.http_get(DAEMON_HEALTH_URL)
     details["daemon_http_status"] = rc
@@ -426,22 +427,21 @@ def _phase_preflight(ctx: _StepCtx) -> PhaseResult:
 # ── Phase B: install ────────────────────────────────────────────────────────
 
 
-def _python_range_error() -> str:
+def _python_range_error(minor: str | None = None) -> str:
     """Actionable failure text for hosts with no hermes-compatible Python."""
-    lo = ".".join(str(p) for p in PYTHON_MIN)
-    cap = ".".join(str(p) for p in PYTHON_MAX_EXCLUSIVE)
+    minor = minor or UV_PYTHON_FALLBACK
     sqlite = ".".join(str(p) for p in SQLITE_MIN)
     return (
-        f"no usable Python {UV_PYTHON_FALLBACK} was found — the Hermes venv is built "
-        f"on exactly {lo} (`{lo} <= version < {cap}`). Let the uv that ships in "
-        f"hal0's venv fetch Python {UV_PYTHON_FALLBACK} under {UV_PYTHON_INSTALL_DIR} "
-        f"(needs the network; reinstall hal0 if its venv has no uv), or install a "
-        f"python{UV_PYTHON_FALLBACK} that links SQLite >= {sqlite}"
+        f"no usable Python {minor} was found — the Hermes venv for this ref is built "
+        f"on exactly {minor}. Let the uv that ships in hal0's venv fetch a managed "
+        f"Python {minor} under {UV_PYTHON_INSTALL_DIR} (needs the network; reinstall "
+        f"hal0 if its venv has no uv), or install a python{minor} that links SQLite "
+        f">= {sqlite}"
     )
 
 
-#: Minor version uv provisions when no system interpreter qualifies (#1250),
-#: and the target minor of every release (the interpreter-minor trigger).
+#: The newest supported minor: the target for a ref hal0 has no
+#: ``requires-python`` record of, and the resolver's default.
 #: Keep inside [PYTHON_MIN, PYTHON_MAX_EXCLUSIVE).
 UV_PYTHON_FALLBACK = "3.14"
 
@@ -467,8 +467,11 @@ UV_CACHE_DIR = HERMES_UV_CACHE
 HERMES_PYTHON_ENV = Path("/etc/hal0/hermes-python.env")
 
 
-def _validate_hermes_python(path: str, *, runner: Any = subprocess) -> tuple[int, int]:
-    """Execute *path* and require the exact Hermes Python policy version."""
+def _validate_hermes_python(
+    path: str, *, runner: Any = subprocess, minor: str | None = None
+) -> tuple[int, int]:
+    """Execute *path* and require exactly the Hermes target minor (default 3.14)."""
+    want = minor or UV_PYTHON_FALLBACK
     if not path or not Path(path).is_absolute() or any(c in path for c in "\n\r\\\"';&|$"):
         raise ValueError(f"invalid HAL0_HERMES_PYTHON path: {path!r}")
     try:
@@ -480,13 +483,13 @@ def _validate_hermes_python(path: str, *, runner: Any = subprocess) -> tuple[int
         )
     except (subprocess.SubprocessError, OSError) as exc:
         raise ValueError(f"Hermes Python override is not executable: {path}") from exc
-    version = (result.stdout or "").strip()
-    if version != UV_PYTHON_FALLBACK:
+    version = (getattr(result, "stdout", "") or "").strip()
+    if version != want:
         raise ValueError(
-            f"Hermes Python must be exactly {UV_PYTHON_FALLBACK}: {path} reports "
-            f"{version or 'unknown'}"
+            f"Hermes Python must be exactly {want}: {path} reports {version or 'unknown'}"
         )
-    return PYTHON_MIN
+    major, _, mnr = want.partition(".")
+    return (int(major), int(mnr))
 
 
 def _interpreter_sqlite(path: str, *, runner: Any = subprocess) -> tuple[int, ...] | None:
@@ -526,10 +529,14 @@ def _read_hermes_python_env(path: Path = HERMES_PYTHON_ENV) -> str | None:
 
 
 def _persist_hermes_python(
-    path: str, env_path: Path = HERMES_PYTHON_ENV, *, runner: Any = subprocess
+    path: str,
+    env_path: Path = HERMES_PYTHON_ENV,
+    *,
+    runner: Any = subprocess,
+    minor: str | None = None,
 ) -> None:
     """Atomically persist a validated Hermes interpreter path."""
-    _validate_hermes_python(path, runner=runner)
+    _validate_hermes_python(path, runner=runner, minor=minor)
     env_path.parent.mkdir(parents=True, exist_ok=True)
     content = f"HAL0_HERMES_PYTHON={path}\n"
     if env_path.exists() and env_path.read_text(encoding="utf-8") == content:
@@ -550,6 +557,7 @@ def _check_configured_hermes_python(
     env_path: Path,
     *,
     runner: Any,
+    minor: str | None = None,
 ) -> tuple[str | None, str, tuple[str, str, str] | None]:
     """Look up an operator or persisted ``HAL0_HERMES_PYTHON`` and validate it.
 
@@ -574,7 +582,7 @@ def _check_configured_hermes_python(
     if candidate is None:
         return None, source, None
     try:
-        _validate_hermes_python(candidate, runner=runner)
+        _validate_hermes_python(candidate, runner=runner, minor=minor)
     except ValueError as exc:
         return None, source, (source, candidate, str(exc))
     if not _sqlite_ok(candidate, runner=runner):
@@ -597,6 +605,7 @@ def _adopt_reprobed_hermes_python(
     environ: Any,
     env_path: Path,
     runner: Any,
+    minor: str | None = None,
 ) -> None:
     """Warn about a discarded value and pin the re-probed interpreter.
 
@@ -616,7 +625,7 @@ def _adopt_reprobed_hermes_python(
     if chosen is None:
         return
     try:
-        _persist_hermes_python(chosen, env_path, runner=runner)
+        _persist_hermes_python(chosen, env_path, runner=runner, minor=minor)
     except OSError as exc:
         environ["HAL0_HERMES_PYTHON"] = chosen
         log.info(
@@ -633,6 +642,23 @@ def _adopt_reprobed_hermes_python(
     log.info("hermes-python-persisted", path=str(env_path), chosen=chosen)
 
 
+def _probe_hermes_python(
+    prober: Callable[[str], str | None],
+    runner: Any,
+    *,
+    fallback_bin: Path | None,
+    minor: str,
+) -> tuple[str | None, str]:
+    """ADR-0034 decision 2 order after an override: uv-managed, then a system
+    ``python<minor>`` that links SQLite >= 3.51.3. Returns ``(path, source)``.
+    """
+    found = _provision_python_via_uv(prober, runner, fallback_bin=fallback_bin, minor=minor)
+    if found is not None:
+        return found, "uv-managed"
+    found = _resolve_supported_python(prober, runner=runner, minor=minor)
+    return found, "system"
+
+
 def resolve_hermes_python(
     *,
     env: dict[str, str] | None = None,
@@ -640,40 +666,40 @@ def resolve_hermes_python(
     prober: Callable[[str], str | None] = shutil.which,
     runner: Any = subprocess,
     fallback_bin: Path | None = None,
+    minor: str | None = None,
 ) -> str:
-    """Resolve exact Python 3.14 using the documented precedence order.
+    """Resolve the Hermes interpreter for ``minor`` (default 3.14), or raise.
 
-    A valid ``HAL0_HERMES_PYTHON`` (environment, then the persisted file) wins,
-    with a warning when it links an old SQLite. Otherwise a system
-    ``python3.14`` that links SQLite >= 3.51.3, then a uv-managed 3.14 under
-    ``UV_PYTHON_INSTALL_DIR`` (ADR-0034 decision 2). A configured value that
-    fails validation is discarded with a warning and the interpreter is
-    re-probed; the new value is persisted when *env_path* is writable.
-    ``fallback_bin`` passes through to :func:`_provision_python_via_uv`.
+    Order (ADR-0034 decision 2): a valid ``HAL0_HERMES_PYTHON`` override
+    (environment, then the persisted file; one that links an old SQLite is
+    used with a warning); then a uv-managed CPython under
+    ``UV_PYTHON_INSTALL_DIR``; then a system ``python<minor>`` that links
+    SQLite >= 3.51.3. hal0's own venv interpreter is never used. A configured
+    value that fails validation is discarded with a warning and the
+    interpreter re-probed; the new value is persisted when *env_path* is
+    writable. ``fallback_bin`` passes through to :func:`_provision_python_via_uv`.
     """
+    minor = minor or UV_PYTHON_FALLBACK
     environ = os.environ if env is None else env
-    candidate, source, discard = _check_configured_hermes_python(environ, env_path, runner=runner)
+    candidate, source, discard = _check_configured_hermes_python(
+        environ, env_path, runner=runner, minor=minor
+    )
     if candidate is None:
-        candidate = prober(f"python{UV_PYTHON_FALLBACK}")
-        if candidate is not None and not _sqlite_ok(candidate, runner=runner):
-            log.info("hermes-python-system-old-sqlite", path=candidate)
-            candidate = None
-        source = "system"
-        if candidate is None:
-            candidate = _provision_python_via_uv(prober, runner, fallback_bin=fallback_bin)
-            source = "uv-managed"
+        candidate, source = _probe_hermes_python(
+            prober, runner, fallback_bin=fallback_bin, minor=minor
+        )
         if candidate is None:
             if discard is not None:
                 _adopt_reprobed_hermes_python(
-                    None, discard, environ=environ, env_path=env_path, runner=runner
+                    None, discard, environ=environ, env_path=env_path, runner=runner, minor=minor
                 )
-            raise RuntimeError(_python_range_error())
-        _validate_hermes_python(candidate, runner=runner)
+            raise RuntimeError(_python_range_error(minor))
+        _validate_hermes_python(candidate, runner=runner, minor=minor)
         if discard is not None:
             _adopt_reprobed_hermes_python(
-                candidate, discard, environ=environ, env_path=env_path, runner=runner
+                candidate, discard, environ=environ, env_path=env_path, runner=runner, minor=minor
             )
-    log.info("hermes-python-resolved", source=source, path=candidate, version=UV_PYTHON_FALLBACK)
+    log.info("hermes-python-resolved", source=source, path=candidate, version=minor)
     return candidate
 
 
@@ -735,6 +761,7 @@ def _provision_python_via_uv(
     runner: Any = subprocess,
     *,
     fallback_bin: Path | None = None,
+    minor: str | None = None,
 ) -> str | None:
     """Fetch a uv-managed Python as the last resort (#1250).
 
@@ -746,6 +773,7 @@ def _provision_python_via_uv(
     fall through to the actionable range error. ``fallback_bin`` passes
     through to :func:`_uv_available` (see there).
     """
+    minor = minor or UV_PYTHON_FALLBACK
     uv = _uv_available(prober, fallback_bin=fallback_bin)
     if uv is None:
         return None
@@ -783,12 +811,13 @@ def _provision_python_via_uv(
             # --no-bin: no python3.14 link in ~/.local/bin. hal0's HOME is
             # /var/lib/hal0, where that dir may not be writable, and nothing
             # needs the interpreter on PATH.
-            [uv, "python", "install", UV_PYTHON_FALLBACK, "--no-bin"],
+            # --managed-python: never "install" by finding a system Python.
+            [uv, "python", "install", minor, "--managed-python", "--no-bin"],
             check=True,
             env=env,
         )
         found = runner.run(  # nosec B603
-            [uv, "python", "find", UV_PYTHON_FALLBACK],
+            [uv, "python", "find", minor, "--managed-python"],
             check=True,
             env=env,
             capture_output=True,
@@ -796,38 +825,43 @@ def _provision_python_via_uv(
         )
     except (subprocess.SubprocessError, OSError):
         return None
-    path = (found.stdout or "").strip()
-    return path or None
+    path = (getattr(found, "stdout", "") or "").strip()
+    if not path:
+        return None
+    if not _sqlite_ok(path, runner=runner):
+        # A managed CPython links a current SQLite; one that does not is not
+        # what ADR-0034 decision 2 asked for, so the caller falls through.
+        log.warning("hermes-python-uv-old-sqlite", path=path)
+        return None
+    return path
 
 
 def _ensure_supported_python(
     prober: Callable[[str], str | None] = shutil.which,
     *,
     runner: Any = subprocess,
-    running: tuple[int, int] | None = None,
     fallback_bin: Path | None = None,
     env_path: Path | None = None,
+    minor: str | None = None,
 ) -> str | None:
-    """Resolve the exact Python 3.14 interpreter for the Hermes venv.
+    """Resolve the Hermes interpreter for ``minor`` (default 3.14), or ``None``.
 
-    A valid explicit or persisted override wins. One that fails validation is
-    discarded with a warning and the interpreter is re-probed: a system
-    ``python3.14`` that links SQLite >= 3.51.3 first, then a uv-managed 3.14.
-    The re-probed value is persisted when the file is writable.
-    ``fallback_bin`` passes through to :func:`_provision_python_via_uv`.
+    Same order as :func:`resolve_hermes_python`: a valid override, then a
+    uv-managed CPython, then a system ``python<minor>`` that links SQLite
+    >= 3.51.3. A value that fails validation is discarded with a warning and
+    the re-probed one persisted when the file is writable.
     """
+    minor = minor or UV_PYTHON_FALLBACK
     env_path = HERMES_PYTHON_ENV if env_path is None else env_path
     configured, _source, discard = _check_configured_hermes_python(
-        os.environ, env_path, runner=runner
+        os.environ, env_path, runner=runner, minor=minor
     )
     if configured is not None:
         return configured
-    found = _resolve_supported_python(prober, running=running, runner=runner)
-    if found is None:
-        found = _provision_python_via_uv(prober, runner, fallback_bin=fallback_bin)
+    found, _source = _probe_hermes_python(prober, runner, fallback_bin=fallback_bin, minor=minor)
     if discard is not None:
         _adopt_reprobed_hermes_python(
-            found, discard, environ=os.environ, env_path=env_path, runner=runner
+            found, discard, environ=os.environ, env_path=env_path, runner=runner, minor=minor
         )
     return found
 
@@ -835,23 +869,19 @@ def _ensure_supported_python(
 def _resolve_supported_python(
     prober: Callable[[str], str | None] = shutil.which,
     *,
-    running: tuple[int, int] | None = None,
     runner: Any = subprocess,
+    minor: str | None = None,
 ) -> str | None:
-    """Find a system Python 3.14 Hermes can use as is, or ``None``.
+    """A system ``python<minor>`` Hermes can use as is (SQLite >= 3.51.3), or ``None``.
 
-    Probes explicit ``python3.14`` on PATH, then the running interpreter when
-    it is itself 3.14. Either is accepted only when it links SQLite >= 3.51.3
-    (ADR-0034 decision 2); otherwise the caller falls through to a uv-managed
-    3.14, which links a current SQLite.
+    The last fallback after a uv-managed interpreter (ADR-0034 decision 2).
+    hal0's own running interpreter is never considered: that would couple the
+    Hermes venv to hal0's venv.
     """
-    for minor in range(PYTHON_MAX_EXCLUSIVE[1] - 1, PYTHON_MIN[1] - 1, -1):
-        explicit = prober(f"python3.{minor}")
-        if explicit and _sqlite_ok(explicit, runner=runner):
-            return explicit
-    current = running if running is not None else sys.version_info[:2]
-    if PYTHON_MIN <= current < PYTHON_MAX_EXCLUSIVE and _sqlite_ok(sys.executable, runner=runner):
-        return sys.executable
+    minor = minor or UV_PYTHON_FALLBACK
+    explicit = prober(f"python{minor}")
+    if explicit and _sqlite_ok(explicit, runner=runner):
+        return explicit
     return None
 
 
@@ -883,6 +913,51 @@ HERMES_REQUIREMENTS = (
 # ``tests/fixtures/hermes/contracts/`` +
 # ``tests/agents/hermes/test_contract_compatibility.py``.
 VETTED_HERMES_REFS: frozenset[str] = frozenset({"3ef6bbd201263d354fd83ec55b3c306ded2eb72a"})
+
+#: The ``requires-python`` each vetted ref declares in its pyproject.toml,
+#: recorded at review time so the target minor is known before a checkout
+#: exists (the build trigger, the root prelude). The build re-reads it from
+#: the checkout and fails on a mismatch.
+VETTED_HERMES_REQUIRES_PYTHON: dict[str, str] = {
+    "3ef6bbd201263d354fd83ec55b3c306ded2eb72a": ">=3.11,<3.14",
+}
+
+
+def hermes_target_minor(ref: str | None, requires_python: str | None = None) -> str:
+    """The newest supported minor ``ref``'s ``requires-python`` admits.
+
+    ``requires_python`` (read from a checkout) wins over the vetted record. A
+    ref with neither targets :data:`UV_PYTHON_FALLBACK`. Raises ``ValueError``
+    when the spec admits no supported minor.
+    """
+    from packaging.specifiers import InvalidSpecifier, SpecifierSet
+
+    spec = requires_python or (VETTED_HERMES_REQUIRES_PYTHON.get(ref) if ref else None)
+    if not spec:
+        return UV_PYTHON_FALLBACK
+    try:
+        specifier = SpecifierSet(spec)
+    except InvalidSpecifier as exc:
+        raise ValueError(f"unparsable requires-python {spec!r}") from exc
+    for minor in SUPPORTED_HERMES_MINORS:
+        if specifier.contains(f"{minor}.0", prereleases=True):
+            return minor
+    raise ValueError(
+        f"requires-python {spec!r} admits none of {', '.join(SUPPORTED_HERMES_MINORS)}"
+    )
+
+
+def pinned_target_minor() -> str:
+    """The target minor of the pinned ref in requirements.txt."""
+    try:
+        ref = hermes_pinned_ref(_hermes_requirement_line(HERMES_REQUIREMENTS.read_text()))
+    except (OSError, ValueError):
+        ref = None
+    try:
+        return hermes_target_minor(ref)
+    except ValueError:
+        return UV_PYTHON_FALLBACK
+
 
 _HERMES_FLOOR_RE = re.compile(r">=\s*(\d+)\.(\d+)\.(\d+)")
 _HERMES_GIT_REF_RE = re.compile(r"git\+https?://\S+?@([0-9A-Za-z._+-]+)")

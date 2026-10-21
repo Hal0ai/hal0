@@ -249,7 +249,8 @@ def test_hermes_sqlite_row_absent_without_a_venv(tmp_path: Path) -> None:
     assert dc.check_hermes_sqlite(tmp_path / "none")["status"] == "absent"
 
 
-def test_hermes_sqlite_floor_matches_the_provisioner() -> None:
+def test_hermes_sqlite_floor_is_defined_once() -> None:
+    from hal0.agents import hermes_layout
     from hal0.agents import hermes_provision as hp
 
-    assert dc._HERMES_SQLITE_MIN == hp.SQLITE_MIN
+    assert dc.SQLITE_MIN is hermes_layout.SQLITE_MIN is hp.SQLITE_MIN == (3, 51, 3)

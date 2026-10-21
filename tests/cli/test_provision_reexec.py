@@ -137,7 +137,7 @@ def test_root_prelude_owns_the_release_and_python_dirs_before_resolving(
         agent_commands, "_ensure_hermes_prelude_dirs", lambda: events.append("dirs")
     )
 
-    def _resolve() -> str:
+    def _resolve(**_kw: object) -> str:
         events.append("resolve")
         raise RuntimeError("stop here")
 
