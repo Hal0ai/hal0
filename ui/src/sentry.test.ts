@@ -529,3 +529,67 @@ describe('initSentry beforeSend', () => {
     expect(out.sdkProcessingMetadata).toBe(metadata)
   })
 })
+
+// SDK v11 replaced `sendDefaultPii` with `dataCollection`, and an unset
+// `dataCollection` collects everything. These pin the restrictive config so a
+// later bump cannot drop or loosen it without a red test.
+describe('initSentry data collection', () => {
+  type Options = Record<string, unknown> & { dataCollection: Record<string, unknown> }
+  let options: Options
+
+  beforeAll(async () => {
+    vi.stubEnv('VITE_SENTRY_DSN', 'https://public@example.invalid/1')
+    vi.stubGlobal('__HAL0_UI_VERSION__', 'test')
+    expect(await initSentry()).toBe(true)
+    options = sdk.init.mock.calls[0][0] as Options
+  })
+
+  it('switches every data-collection category off', () => {
+    expect(options.dataCollection).toEqual({
+      userInfo: false,
+      cookies: false,
+      httpHeaders: { request: false, response: false },
+      httpBodies: [],
+      urlQueryParams: false,
+      graphQL: { document: false, variables: false },
+      genAI: { inputs: false, outputs: false },
+      databaseQueryData: false,
+      queues: false,
+      stackFrameVariables: false,
+      frameContextLines: 0,
+    })
+    expect(options).not.toHaveProperty('sendDefaultPii')
+  })
+
+  it('keeps spans inside transaction events so beforeSendTransaction scrubs them', () => {
+    // In v11's default 'stream' lifecycle the SDK never calls
+    // beforeSendTransaction, and spans would leave unscrubbed.
+    expect(options.traceLifecycle).toBe('static')
+    expect(typeof options.beforeSendTransaction).toBe('function')
+    expect(typeof options.beforeSend).toBe('function')
+  })
+
+  it('resolves to "collect nothing" in the real SDK, for every category it knows', async () => {
+    // Drive the real client's resolver, so a category a future SDK adds (and
+    // defaults on) fails here until it is switched off above.
+    const real = await vi.importActual<typeof import('@sentry/react')>('@sentry/react')
+    const client = new real.BrowserClient({
+      dsn: 'https://public@example.invalid/1',
+      dataCollection: options.dataCollection,
+      integrations: [],
+      stackParser: real.defaultStackParser,
+      transport: real.makeFetchTransport,
+    } as ConstructorParameters<typeof real.BrowserClient>[0])
+    const resolved = client.getDataCollectionOptions() as unknown as Record<string, unknown>
+    const isOff = (value: unknown): boolean => {
+      if (value === false || value === 0) return true
+      if (Array.isArray(value)) return value.length === 0
+      if (value && typeof value === 'object') return Object.values(value).every(isOff)
+      return false
+    }
+    for (const [key, value] of Object.entries(resolved)) {
+      expect.soft(isOff(value), `dataCollection.${key} = ${JSON.stringify(value)}`).toBe(true)
+    }
+    void client.close()
+  })
+})
