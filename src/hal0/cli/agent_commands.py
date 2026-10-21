@@ -683,7 +683,7 @@ def _hermes_root_prelude(terminal_env: dict[str, str] | None = None) -> None:
         _persist_hermes_python(hermes_python)
         _os.environ["HAL0_HERMES_PYTHON"] = hermes_python
     except (RuntimeError, ValueError) as exc:
-        console.print(f"[yellow]hermes Python 3.12 resolver hint:[/yellow] {exc}")
+        console.print(f"[yellow]hermes Python 3.14 resolver hint:[/yellow] {exc}")
         raise
     finally:
         # A uv fetch run here, as root, writes root-owned files into the
