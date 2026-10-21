@@ -1559,7 +1559,8 @@ def test_merge_drops_config_keys_hal0_no_longer_writes(tmp_path: Path) -> None:
     )
     data = yaml.safe_load(cfg.read_text(encoding="utf-8"))
     assert changed is True
-    assert data["agent"] == {"max_turns": 60}
+    # The prelude's text moves to agent.system_prompt, which was unset.
+    assert data["agent"] == {"max_turns": 60, "system_prompt": "old"}
     assert data["model"] == {"default": "m"}
 
 
@@ -1599,6 +1600,43 @@ def test_persona_display_names_cover_seeds_and_the_store(tmp_path: Path) -> None
     personas.save_persona(seeded, root=root)
     names = hp._hal0_persona_display_names(state)
     assert {"Hermes", "Coder", "hal0 Brain", "Concise"} <= set(names)
+
+
+def test_release_config_invariants_on_a_pre_2839_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    yaml = pytest.importorskip("yaml")
+    monkeypatch.setattr(hp, "OVERRIDES_PATH", tmp_path / "absent.yaml")
+    (tmp_path / "config.yaml").write_text(
+        "agent:\n  system_prompt_prelude: P\nsessions:\n  retention_days: 30\n"
+        "auxiliary:\n  web_extract: {provider: main}\n"
+    )
+    assert hp.apply_release_config_invariants(tmp_path) is True
+    cfg = yaml.safe_load((tmp_path / "config.yaml").read_text())
+    assert cfg["sessions"] == {"retention_days": 30, "auto_prune": False}
+    assert cfg["agent"] == {"system_prompt": "P"}
+    assert cfg["auxiliary"] == {}
+    # Idempotent.
+    assert hp.apply_release_config_invariants(tmp_path) is False
+
+
+def test_release_config_invariants_keep_a_rendered_system_prompt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    yaml = pytest.importorskip("yaml")
+    monkeypatch.setattr(hp, "OVERRIDES_PATH", tmp_path / "absent.yaml")
+    (tmp_path / "config.yaml").write_text(
+        "agent:\n  system_prompt: NEW\n  system_prompt_prelude: OLD\n"
+    )
+    hp.apply_release_config_invariants(tmp_path)
+    assert yaml.safe_load((tmp_path / "config.yaml").read_text())["agent"] == {
+        "system_prompt": "NEW"
+    }
+
+
+def test_release_config_invariants_without_a_config_do_nothing(tmp_path: Path) -> None:
+    assert hp.apply_release_config_invariants(tmp_path) is False
+    assert not (tmp_path / "config.yaml").exists()
 
 
 def test_drop_dotted_key_tolerates_missing_and_non_dict_parents() -> None:

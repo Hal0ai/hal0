@@ -2680,6 +2680,7 @@ def _merge_config_yaml_layers(
     base: dict[str, Any] = {}
     if config_path.exists():
         base = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+    _carry_prelude_to_system_prompt(base)
     for dotted in RETIRED_HAL0_CONFIG_KEYS:
         _drop_dotted_key(base, dotted)
     _retire_hal0_personality(base, persona_names)
@@ -2720,6 +2721,72 @@ RETIRED_HAL0_CONFIG_KEYS: tuple[str, ...] = (
     "auxiliary.web_extract",
     "auxiliary.session_search",
 )
+
+
+def _carry_prelude_to_system_prompt(data: dict[str, Any]) -> bool:
+    """Move a pre-#2839 ``agent.system_prompt_prelude`` into ``agent.system_prompt``.
+
+    Only when ``agent.system_prompt`` is unset or blank, so a value the
+    overlay or the operator wrote wins. The prelude key itself is then
+    dropped with the other :data:`RETIRED_HAL0_CONFIG_KEYS`. This lets a path
+    that cannot render the persona (``hal0 update``'s release activation)
+    still hand Hermes the prompt hal0 last rendered. True iff it moved.
+    """
+    agent = data.get("agent")
+    if not isinstance(agent, dict):
+        return False
+    prelude = agent.get("system_prompt_prelude")
+    current = agent.get("system_prompt")
+    if not isinstance(prelude, str) or not prelude.strip():
+        return False
+    if isinstance(current, str) and current.strip():
+        return False
+    agent["system_prompt"] = prelude
+    return True
+
+
+#: Keys every Hermes release hal0 activates must find in config.yaml before
+#: its units start (ADR-0034 decision 7: session pruning off). Written by
+#: :func:`apply_release_config_invariants` during activation as well as by
+#: the full overlay on install and reprovision.
+RELEASE_CONFIG_INVARIANTS: dict[str, Any] = {"sessions": {"auto_prune": False}}
+
+
+def apply_release_config_invariants(
+    hermes_home: Path | str,
+    *,
+    overrides_path: Path | None = None,
+) -> bool:
+    """Bring an existing config.yaml up to what the pinned Hermes needs from hal0.
+
+    ``hal0 update`` converges Hermes by building and activating a release; it
+    does not run the provisioning pipeline, so the config overlay
+    (:func:`_phase_config_write`) never runs on that path. The release
+    activation calls this while the agent and gateway are stopped, after
+    ``hermes config migrate`` and before they start, so the new release's
+    first start already sees ``sessions.auto_prune: false`` and none of the
+    retired keys. It writes :data:`RELEASE_CONFIG_INVARIANTS`, moves the old
+    persona prelude into ``agent.system_prompt``, drops
+    :data:`RETIRED_HAL0_CONFIG_KEYS`, resets a ``display.personality`` hal0
+    wrote, and lays ``overrides.yaml`` on top, so an operator's own
+    ``sessions.auto_prune`` still wins. No-op without a config.yaml.
+    Returns True iff the file changed.
+    """
+    home = Path(hermes_home)
+    config = home / "config.yaml"
+    if not config.is_file():
+        return False
+    import yaml
+
+    loaded = yaml.safe_load(config.read_text(encoding="utf-8"))
+    if loaded is not None and not isinstance(loaded, dict):
+        raise ValueError(f"{config} is not a YAML mapping")
+    return _merge_config_yaml_layers(
+        config,
+        list_keys=RELEASE_CONFIG_INVARIANTS,
+        overrides_path=overrides_path if overrides_path is not None else OVERRIDES_PATH,
+        persona_names=_persona_display_names_for_home(home),
+    )
 
 
 def _retire_hal0_personality(data: dict[str, Any], persona_names: Iterable[str]) -> bool:
@@ -2833,9 +2900,13 @@ _SEED_PERSONA_DISPLAY_NAMES: tuple[str, ...] = ("Hermes", "Coder", "hal0 Brain")
 
 def _hal0_persona_display_names(state: BootstrapState) -> list[str]:
     """Every hal0 persona display name: the seeds plus the persona store."""
+    return _persona_display_names_for_home(Path(state.hermes_home))
+
+
+def _persona_display_names_for_home(hermes_home: Path) -> list[str]:
     from hal0.agents import personas as _personas
 
-    root = _personas_root_for(state)
+    root = hermes_home / "personas"
     if not root.exists() and _personas.PERSONAS_ROOT.exists():
         root = _personas.PERSONAS_ROOT
     try:

@@ -575,13 +575,13 @@ def test_only_units_that_were_active_are_stopped_and_started(tree) -> None:
 
 def test_flip_back_on_a_crash_looping_unit_restores_config(tree) -> None:
     first = _ensure(tree, FakeTools())
-    (tree["home"] / "config.yaml").write_text("good\n")
+    (tree["home"] / "config.yaml").write_text("good: 1\n")
     units = FakeUnits(active={rel.AGENT_UNIT, rel.GATEWAY_UNIT}, crash_on_start={rel.GATEWAY_UNIT})
     tools = FakeTools()
 
     def _run(argv: list[Any], **kw: Any) -> Any:
         if [str(a) for a in argv][-2:] == ["config", "migrate"]:
-            (tree["home"] / "config.yaml").write_text("migrated-by-new\n")
+            (tree["home"] / "config.yaml").write_text("migrated-by-new: 1\n")
         return tools(argv, **kw)
 
     out = _ensure(tree, tools, units, force=True, run=_run, sleep=units.settle)
@@ -589,7 +589,7 @@ def test_flip_back_on_a_crash_looping_unit_restores_config(tree) -> None:
     assert "restarted" in out.error
     layout = rel.Layout.for_venv(tree["venv"])
     assert os.readlink(layout.current) == f"releases/{first.release_id}"
-    assert (tree["home"] / "config.yaml").read_text() == "good\n"
+    assert (tree["home"] / "config.yaml").read_text() == "good: 1\n"
     assert tree["stamp"].read_text() == PIN[:12] + "\n"
 
 
@@ -1341,3 +1341,158 @@ def test_a_v0222_checkout_that_disagrees_with_its_record_is_refused(tree) -> Non
     out = _ensure(tree, LockFor314(requires_python=">=3.11,<3.14"))
     assert out.status == "build_failed"
     assert "VETTED_HERMES_REQUIRES_PYTHON" in out.error
+
+
+# ── hal0 update: config keys reach an existing box (#2615 PR 4 follow-up) ───
+
+_OLD_CONFIG = """\
+_config_version: 22
+agent:
+  max_turns: 60
+  system_prompt_prelude: You are hal0's agent.
+display:
+  personality: Hermes
+  streaming: true
+auxiliary:
+  vision: {provider: main}
+  web_extract: {provider: custom, model: u}
+  session_search: {provider: custom, model: u}
+"""
+
+
+class BootMaintenanceTools(LockFor314):
+    """Simulates upstream's boot maintenance: any `hermes` CLI start (here
+    `--help` and `config migrate`) rewrites $HERMES_HOME/config.yaml and drops
+    a `.bak-<stamp>` beside it, as post_update.step_migrate_config does."""
+
+    def __call__(self, argv: list[Any], **kw: Any) -> subprocess.CompletedProcess:
+        out = super().__call__(argv, **kw)
+        argv = [str(a) for a in argv]
+        if argv[0].endswith("/bin/hermes"):
+            home = Path((kw.get("env") or {})["HERMES_HOME"])
+            cfg = home / "config.yaml"
+            if cfg.is_file():
+                (home / "config.yaml.bak-20261021T174537Z").write_text(cfg.read_text())
+                cfg.write_text(cfg.read_text().replace("personality: Hermes", "personality: ''"))
+        return out
+
+
+class ConfigSnapshotUnits(FakeUnits):
+    """Records config.yaml as each unit starts."""
+
+    def __init__(self, home: Path, **kw: Any) -> None:
+        super().__init__(**kw)
+        self.home = home
+        self.seen: list[tuple[str, str]] = []
+
+    def start(self, unit: str) -> bool:
+        cfg = self.home / "config.yaml"
+        self.seen.append((unit, cfg.read_text() if cfg.is_file() else ""))
+        return super().start(unit)
+
+
+@pytest.fixture
+def update_box(tree, monkeypatch: pytest.MonkeyPatch) -> dict[str, Path]:
+    """A 0.19.0 box on 3.12 with a pre-#2839 config.yaml, about to `hal0 update`."""
+    monkeypatch.setattr(hp, "OVERRIDES_PATH", tree["home"].parent / "no-overrides.yaml")
+    assert _ensure(tree, LockFor312()).ok
+    (tree["home"] / "config.yaml").write_text(_OLD_CONFIG)
+    tree["req"].write_text(f"hermes-agent[web,mcp] @ git+{URL}@{NEW_PIN}\n", encoding="utf-8")
+    return tree
+
+
+def _cfg(home: Path) -> dict[str, Any]:
+    import yaml
+
+    return yaml.safe_load((home / "config.yaml").read_text())
+
+
+def test_the_build_never_touches_the_live_hermes_home(update_box) -> None:
+    """`hermes --help` in verify must not run boot maintenance on the live home."""
+    tree = update_box
+    tools = BootMaintenanceTools(web="new")
+    rel.build_release(
+        NEW_PIN,
+        layout=rel.Layout.for_venv(tree["venv"]),
+        pin=rel.Pin(url=URL, extras=("web", "mcp"), ref=NEW_PIN),
+        run=tools,
+        probe=OK_PROBE,
+        python="/usr/bin/python3.14",
+        uv=UV,
+        hermes_home=tree["home"],
+        minor="3.14",
+    )
+    assert (tree["home"] / "config.yaml").read_text() == _OLD_CONFIG
+    assert not list(tree["home"].glob("config.yaml.bak-*"))
+    [i] = [n for n, c in enumerate(tools.calls) if c[-1] == "--help"]
+    assert tools.envs[i]["HERMES_HOME"] != str(tree["home"])
+
+
+def test_update_converge_writes_the_v022_keys_before_the_units_start(update_box) -> None:
+    """Regression for the CT150 lane: an update-path converge from a 0.19-shaped
+    config ends with sessions.auto_prune false, the persona in
+    agent.system_prompt and the retired keys gone, and both units first start
+    on that file."""
+    tree = update_box
+    units = ConfigSnapshotUnits(tree["home"], active={rel.AGENT_UNIT, rel.GATEWAY_UNIT})
+    out = _ensure(tree, BootMaintenanceTools(web="new"), units=units)
+    assert out.status == "activated", out.error
+
+    cfg = _cfg(tree["home"])
+    assert cfg["sessions"]["auto_prune"] is False
+    assert cfg["agent"]["system_prompt"] == "You are hal0's agent."
+    assert "system_prompt_prelude" not in cfg["agent"]
+    assert set(cfg["auxiliary"]) == {"vision"}
+    assert cfg["display"]["personality"] == ""
+    assert cfg["agent"]["max_turns"] == 60 and cfg["display"]["streaming"] is True
+
+    # Ordering: the stop happened first, and every start saw the keys.
+    assert units.log[0][0] == "stop"
+    starts = [text for unit, text in units.seen]
+    assert starts, "the units were restarted"
+    for text in starts:
+        import yaml
+
+        started_on = yaml.safe_load(text)
+        assert started_on["sessions"]["auto_prune"] is False
+        assert "system_prompt_prelude" not in started_on["agent"]
+
+
+def test_the_flip_back_copy_is_the_config_from_before_the_update(update_box) -> None:
+    tree = update_box
+    out = _ensure(tree, BootMaintenanceTools(web="new"))
+    assert out.ok
+    layout = rel.Layout.for_venv(tree["venv"])
+    previous = rel.Layout.for_venv(tree["venv"]).previous.resolve()
+    [copy] = list(previous.glob("config.yaml.before-*"))
+    assert copy.read_text() == _OLD_CONFIG
+    assert layout.current.resolve() != previous
+
+
+def test_an_operator_override_of_auto_prune_still_wins(update_box, monkeypatch) -> None:
+    tree = update_box
+    overrides = tree["home"].parent / "overrides.yaml"
+    overrides.write_text("sessions:\n  auto_prune: true\n")
+    monkeypatch.setattr(hp, "OVERRIDES_PATH", overrides)
+    assert _ensure(tree, BootMaintenanceTools(web="new")).ok
+    assert _cfg(tree["home"])["sessions"]["auto_prune"] is True
+
+
+def test_an_unwritable_config_never_starts_the_new_release(update_box, monkeypatch) -> None:
+    """If hal0 cannot put sessions.auto_prune: false on disk, the v0.22 release
+    must not start: flip back to the 0.19.0 release and its config instead."""
+    tree = update_box
+    layout = rel.Layout.for_venv(tree["venv"])
+    old = rel.live_release(layout)
+
+    def boom(_home: Any, **_kw: Any) -> bool:
+        raise OSError("read-only file system")
+
+    monkeypatch.setattr(hp, "apply_release_config_invariants", boom)
+    units = ConfigSnapshotUnits(tree["home"], active={rel.AGENT_UNIT, rel.GATEWAY_UNIT})
+    out = _ensure(tree, BootMaintenanceTools(web="new"), units=units)
+    assert out.status == "activation_failed"
+    assert "read-only file system" in out.error and out.flipped_back
+    assert rel.live_release(layout).id == old.id
+    assert (tree["home"] / "config.yaml").read_text() == _OLD_CONFIG
+    assert units.seen, "the old release's units are started again"
