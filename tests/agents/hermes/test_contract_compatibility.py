@@ -471,6 +471,38 @@ def test_board_token_harvest_matches_both_injection_forms(module: str) -> None:
         assert match.group(1) == token
 
 
+def test_hal0_never_sets_the_dashboard_public_url() -> None:
+    # At 0.22.2 a non-loopback dashboard.public_url (or its env override
+    # HERMES_DASHBOARD_PUBLIC_URL) turns the dashboard auth gate on even for a
+    # loopback bind (web_server.py:551-561, :1177-1206;
+    # dashboard_auth/prefix.py:120-126). The gated SPA drops
+    # __HERMES_SESSION_TOKEN__, so the board's token harvest would fail. hal0
+    # must set neither: not in the config overlay, and nowhere in the code or
+    # the installer that writes Hermes's config, env files or units.
+    keys = _overlay(system_prompt="p", mcp_servers=[{"name": "hal0-admin", "url": "http://x"}])
+    assert not any(k.startswith(config_defaults.DASHBOARD_PUBLIC_URL_CONFIG_KEY) for k in keys)
+    assert config_defaults.DASHBOARD_PUBLIC_URL_ENV not in keys
+
+    from hal0.agents import hermes_provision as hp
+
+    assert not any(k == "dashboard" or k.startswith("dashboard.") for k in hp.HAL0_CONFIG_LIST_KEYS)
+    offenders = []
+    for root in ("src", "installer"):
+        for path in (_REPO_ROOT / root).rglob("*"):
+            if not path.is_file() or path.suffix in {".pyc", ".png", ".svg", ".woff2"}:
+                continue
+            try:
+                text = path.read_text(encoding="utf-8")
+            except (UnicodeDecodeError, OSError):
+                continue
+            if (
+                config_defaults.DASHBOARD_PUBLIC_URL_ENV in text
+                or config_defaults.DASHBOARD_PUBLIC_URL_CONFIG_KEY in text
+            ):
+                offenders.append(str(path.relative_to(_REPO_ROOT)))
+    assert offenders == [], offenders
+
+
 # ── SECURITY CHECKLIST (board fold, lxc105 — item 4) ───────────────────────
 
 
