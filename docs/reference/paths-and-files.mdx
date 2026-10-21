@@ -67,8 +67,7 @@ key layout.
 ├── mcp/hermes-managed.json   # MCP server ids hal0 itself joined into Hermes config
 ├── venvs/hermes -> /var/lib/hal0/hermes/current/venv   # fixed symlink; a real directory only before the first migration
 ├── hermes/                   # Hermes release tree (hal0:hal0), see below
-├── python/                   # uv-managed interpreters for the Hermes venv (UV_PYTHON_INSTALL_DIR)
-├── .cache/uv/                # uv cache for Hermes builds (UV_CACHE_DIR)
+├── python/                   # legacy uv interpreters from before the release layout; root-owned on older installs, never written by builds
 ├── openwebui/                 # OpenWebUI state
 └── .config/flm/models/       # default FLM (NPU) model cache
 ```
@@ -91,9 +90,17 @@ the venv through `/var/lib/hal0/venvs/hermes` or `/var/lib/hal0/hermes/current/`
 │   ├── venv/                     # editable install against src/
 │   └── release.json              # ref, describe, interpreter, web_dist, hal0 version; written last
 ├── releases/legacy-<sha12>/      # the pre-migration 3.12 venv, moved here on the first migration (no src/)
+├── python/                       # uv-managed interpreters for Hermes builds (UV_PYTHON_INSTALL_DIR)
+├── .cache/uv/                    # uv cache for Hermes builds (UV_CACHE_DIR)
 ├── current -> releases/<id>      # the live release
 └── previous -> releases/<id>     # the automatic flip-back target
 ```
+
+Builds run as the `hal0` user, so uv's interpreters and cache live inside
+this hal0-owned tree. The older `/var/lib/hal0/python` is root-owned on
+existing installs; builds never write it, and it is removed only by a root
+path (`installer/uninstall.sh`, or the root prelude of `hal0 agent
+reprovision` once nothing uses the interpreter in it).
 
 A release without `release.json` is incomplete and is deleted by the next
 build. Every successful activation keeps `current` and `previous` and deletes

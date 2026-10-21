@@ -99,7 +99,9 @@ board executor harvests are unchanged at NEW.
    - The extras stay `web` and `mcp`, read from the requirements line as
      ADR-0032 decision 3 says.
 2. **Amends ADR-0032 decision 9: a uv-managed 3.14 is preferred.**
-   - The builder uses a uv-managed CPython 3.14 under `/var/lib/hal0/python`.
+   - The builder uses a uv-managed CPython 3.14 under
+     `/var/lib/hal0/hermes/python` (see the amendment at the end of this
+     decision; this line originally said `/var/lib/hal0/python`).
    - It accepts a system `python3.14` only if that interpreter's
      `sqlite3.sqlite_version` is at least 3.51.3.
    - `HAL0_HERMES_PYTHON` remains the operator's override, and an override
@@ -110,6 +112,27 @@ board executor harvests are unchanged at NEW.
      own venv and the discard-and-re-probe of a stale value. One addition:
      the builder finds uv next to the running interpreter
      (`Path(sys.executable).parent / "uv"`), not on `PATH`.
+   - **Amendment (2026-10-21, #2615 PR 2): uv's interpreters and cache live
+     inside the release tree.** The builder sets `UV_PYTHON_INSTALL_DIR` to
+     `/var/lib/hal0/hermes/python` and `UV_CACHE_DIR` to
+     `/var/lib/hal0/hermes/.cache/uv`, not `/var/lib/hal0/python` and
+     `/var/lib/hal0/.cache/uv`. The reason: on existing installs
+     `/var/lib/hal0/python` is `root:hal0 755`, with `root:root`
+     interpreter directories under it, because an earlier root-run uv fetch
+     created it, and the uv cache can be root-owned the same way. Builds run
+     as `hal0` (§7.4), so `uv python install` there would fail on every
+     existing host and leave its `hal0 update` stuck on the legacy release.
+     `/var/lib/hal0/hermes` is the builder's own `hal0`-owned tree, created
+     before any build. `/var/lib/hal0/python` is left alone: a legacy
+     release, and a persisted `HAL0_HERMES_PYTHON`, may still use the 3.12
+     in it. Retention prunes only interpreters under `hermes/python`. Only
+     root paths remove the legacy directory: `installer/uninstall.sh`, and
+     the root prelude of `hal0 agent install`/`reprovision`/`upgrade` once
+     no release, legacy venv or `HAL0_HERMES_PYTHON` names an interpreter
+     in it. The root prelude hands any files its own uv fetch writes under
+     `hermes/python` or `hermes/.cache/uv` back to `hal0`. `hal0 doctor
+     perms` audits the release tree and does not treat the root-owned
+     legacy directory as an error.
 3. **Amends ADR-0032 decisions 4 and 6: the mirror fetches tags, and the
    release check is offline-safe.**
    - `mirror.git` fetches tags along with the sha.
