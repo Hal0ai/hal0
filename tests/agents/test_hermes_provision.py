@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+import structlog.testing
 
 from hal0.agents import hermes_provision as hp
 from hal0.slots.state import DISPATCHABLE_STATES, SlotState
@@ -456,21 +457,204 @@ def test_persisted_hermes_python_is_atomic_and_idempotent(tmp_path: Path) -> Non
     assert env_path.stat().st_mode & 0o777 == 0o644
 
 
-def test_invalid_persisted_hermes_python_does_not_fall_back(tmp_path: Path) -> None:
+class _VersionRunner:
+    """Reports 3.12 for paths containing ``3.12`` and 3.11 otherwise."""
+
+    @staticmethod
+    def run(argv: list[str], **_kwargs: Any) -> Any:
+        out = "3.12\n" if "3.12" in argv[0] else "3.11\n"
+        return type("Result", (), {"stdout": out})()
+
+
+def _unset_hermes_python_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    # delenv alone records nothing when the name is absent, so a later
+    # os.environ write by the code under test would leak into other tests.
+    monkeypatch.setenv("HAL0_HERMES_PYTHON", "placeholder")
+    monkeypatch.delenv("HAL0_HERMES_PYTHON")
+
+
+_GOOD = "/usr/bin/python3.12"
+_STALE = "/opt/python3.11"
+
+
+def _which_312(name: str) -> str | None:
+    return _GOOD if name == "python3.12" else None
+
+
+def test_resolve_discards_invalid_env_value_and_reprobes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     env_path = tmp_path / "hermes-python.env"
-    env_path.write_text("HAL0_HERMES_PYTHON=/opt/python3.11\n")
-
-    class _Runner:
-        @staticmethod
-        def run(_argv: list[str], **_kwargs: Any) -> Any:
-            return type("Result", (), {"stdout": "3.11\n"})()
-
-    with pytest.raises(ValueError, match=r"exactly 3\.12"):
-        hp.resolve_hermes_python(
-            env_path=env_path,
-            prober=lambda _name: "/usr/bin/python3.12",
-            runner=_Runner,
+    env = {"HAL0_HERMES_PYTHON": _STALE}
+    _unset_hermes_python_env(monkeypatch)
+    with structlog.testing.capture_logs() as logs:
+        out = hp.resolve_hermes_python(
+            env=env, env_path=env_path, prober=_which_312, runner=_VersionRunner
         )
+    assert out == _GOOD
+    assert env["HAL0_HERMES_PYTHON"] == _GOOD
+    assert env_path.read_text() == f"HAL0_HERMES_PYTHON={_GOOD}\n"
+    warn = next(e for e in logs if e["event"] == "hermes-python-discarded")
+    assert warn["log_level"] == "warning"
+    assert warn["value"] == _STALE
+    assert "exactly 3.12" in warn["reason"]
+    assert warn["chosen"] == _GOOD
+
+
+def test_resolve_discards_invalid_file_value_and_persists_new(tmp_path: Path) -> None:
+    env_path = tmp_path / "hermes-python.env"
+    env_path.write_text(f"HAL0_HERMES_PYTHON={_STALE}\n")
+    env: dict[str, str] = {}
+    with structlog.testing.capture_logs() as logs:
+        out = hp.resolve_hermes_python(
+            env=env, env_path=env_path, prober=_which_312, runner=_VersionRunner
+        )
+    assert out == _GOOD
+    assert env_path.read_text() == f"HAL0_HERMES_PYTHON={_GOOD}\n"
+    warn = next(e for e in logs if e["event"] == "hermes-python-discarded")
+    assert warn["source"] == "persisted"
+    assert warn["value"] == _STALE
+
+
+def test_resolve_discards_malformed_file_and_reprobes(tmp_path: Path) -> None:
+    env_path = tmp_path / "hermes-python.env"
+    env_path.write_text("HAL0_HERMES_PYTHON=/a\nHAL0_HERMES_PYTHON=/b\n")
+    with structlog.testing.capture_logs() as logs:
+        out = hp.resolve_hermes_python(
+            env={}, env_path=env_path, prober=_which_312, runner=_VersionRunner
+        )
+    assert out == _GOOD
+    assert env_path.read_text() == f"HAL0_HERMES_PYTHON={_GOOD}\n"
+    warn = next(e for e in logs if e["event"] == "hermes-python-discarded")
+    assert "invalid Hermes Python environment file" in warn["reason"]
+    assert "HAL0_HERMES_PYTHON=/a" in warn["value"]
+
+
+def test_resolve_leaves_unwritable_file_alone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    env_path = tmp_path / "hermes-python.env"
+    env_path.write_text(f"HAL0_HERMES_PYTHON={_STALE}\n")
+
+    def _denied(*_a: Any, **_k: Any) -> None:
+        raise PermissionError("read-only file system")
+
+    monkeypatch.setattr(hp, "_persist_hermes_python", _denied)
+    env: dict[str, str] = {}
+    with structlog.testing.capture_logs() as logs:
+        out = hp.resolve_hermes_python(
+            env=env, env_path=env_path, prober=_which_312, runner=_VersionRunner
+        )
+    assert out == _GOOD
+    assert env["HAL0_HERMES_PYTHON"] == _GOOD
+    assert env_path.read_text() == f"HAL0_HERMES_PYTHON={_STALE}\n"
+    assert any(e["event"] == "hermes-python-persist-skipped" for e in logs)
+
+
+def test_persist_unwritable_dir_raises_oserror_and_leaves_no_tmp(tmp_path: Path) -> None:
+    if os.geteuid() == 0:
+        pytest.skip("root ignores directory permissions")
+    d = tmp_path / "etc"
+    d.mkdir()
+    env_path = d / "hermes-python.env"
+    env_path.write_text(f"HAL0_HERMES_PYTHON={_STALE}\n")
+    d.chmod(0o555)
+    try:
+        with pytest.raises(OSError):
+            hp._persist_hermes_python(_GOOD, env_path, runner=_VersionRunner)
+    finally:
+        d.chmod(0o755)
+    assert env_path.read_text() == f"HAL0_HERMES_PYTHON={_STALE}\n"
+    assert [p.name for p in d.iterdir()] == ["hermes-python.env"]
+
+
+def test_resolve_valid_value_still_wins(tmp_path: Path) -> None:
+    env_path = tmp_path / "hermes-python.env"
+    env_path.write_text("HAL0_HERMES_PYTHON=/opt/py3.12-file\n")
+    with structlog.testing.capture_logs() as logs:
+        out = hp.resolve_hermes_python(
+            env={"HAL0_HERMES_PYTHON": "/opt/py3.12-env"},
+            env_path=env_path,
+            prober=_which_312,
+            runner=_VersionRunner,
+        )
+        assert out == "/opt/py3.12-env"
+        out = hp.resolve_hermes_python(
+            env={}, env_path=env_path, prober=_which_312, runner=_VersionRunner
+        )
+    assert out == "/opt/py3.12-file"
+    assert env_path.read_text() == "HAL0_HERMES_PYTHON=/opt/py3.12-file\n"
+    assert not any(e["event"] == "hermes-python-discarded" for e in logs)
+
+
+def test_resolve_still_raises_when_reprobe_finds_nothing(tmp_path: Path) -> None:
+    with pytest.raises(RuntimeError, match=r"Python 3\.12 is unavailable"):
+        hp.resolve_hermes_python(
+            env={"HAL0_HERMES_PYTHON": _STALE},
+            env_path=tmp_path / "hermes-python.env",
+            prober=lambda _name: None,
+            runner=_VersionRunner,
+            fallback_bin=tmp_path / "no-such-uv",
+        )
+
+
+def test_ensure_discards_invalid_env_value_and_persists(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    env_path = tmp_path / "hermes-python.env"
+    monkeypatch.setenv("HAL0_HERMES_PYTHON", _STALE)
+    out = hp._ensure_supported_python(prober=_which_312, runner=_VersionRunner, env_path=env_path)
+    assert out == _GOOD
+    assert os.environ["HAL0_HERMES_PYTHON"] == _GOOD
+    assert env_path.read_text() == f"HAL0_HERMES_PYTHON={_GOOD}\n"
+
+
+def test_ensure_discards_malformed_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    env_path = tmp_path / "hermes-python.env"
+    env_path.write_text("garbage\n")
+    _unset_hermes_python_env(monkeypatch)
+    out = hp._ensure_supported_python(prober=_which_312, runner=_VersionRunner, env_path=env_path)
+    assert out == _GOOD
+    assert env_path.read_text() == f"HAL0_HERMES_PYTHON={_GOOD}\n"
+
+
+def test_ensure_unwritable_file_uses_reprobed_for_this_build(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    env_path = tmp_path / "hermes-python.env"
+    env_path.write_text(f"HAL0_HERMES_PYTHON={_STALE}\n")
+    _unset_hermes_python_env(monkeypatch)
+
+    def _denied(*_a: Any, **_k: Any) -> None:
+        raise PermissionError("denied")
+
+    monkeypatch.setattr(hp, "_persist_hermes_python", _denied)
+    out = hp._ensure_supported_python(prober=_which_312, runner=_VersionRunner, env_path=env_path)
+    assert out == _GOOD
+    assert env_path.read_text() == f"HAL0_HERMES_PYTHON={_STALE}\n"
+
+
+def test_ensure_valid_persisted_value_wins(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    env_path = tmp_path / "hermes-python.env"
+    env_path.write_text("HAL0_HERMES_PYTHON=/opt/py3.12-file\n")
+    _unset_hermes_python_env(monkeypatch)
+    out = hp._ensure_supported_python(prober=_which_312, runner=_VersionRunner, env_path=env_path)
+    assert out == "/opt/py3.12-file"
+    assert env_path.read_text() == "HAL0_HERMES_PYTHON=/opt/py3.12-file\n"
+
+
+def test_ensure_returns_none_when_reprobe_finds_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("HAL0_HERMES_PYTHON", _STALE)
+    out = hp._ensure_supported_python(
+        prober=lambda _name: None,
+        runner=_VersionRunner,
+        running=(3, 14),
+        fallback_bin=tmp_path / "no-such-uv",
+        env_path=tmp_path / "hermes-python.env",
+    )
+    assert out is None
 
 
 def test_resolve_python_uses_only_exact_312() -> None:

@@ -489,9 +489,92 @@ def _persist_hermes_python(
     if env_path.exists() and env_path.read_text(encoding="utf-8") == content:
         return
     tmp = env_path.with_name(f".{env_path.name}.{os.getpid()}.tmp")
-    tmp.write_text(content, encoding="utf-8")
-    os.chmod(tmp, 0o644)
-    os.replace(tmp, env_path)
+    try:
+        tmp.write_text(content, encoding="utf-8")
+        os.chmod(tmp, 0o644)
+        os.replace(tmp, env_path)
+    except OSError:
+        with contextlib.suppress(OSError):
+            tmp.unlink()
+        raise
+
+
+def _check_configured_hermes_python(
+    environ: Mapping[str, str],
+    env_path: Path,
+    *,
+    runner: Any,
+) -> tuple[str | None, str, tuple[str, str, str] | None]:
+    """Look up an operator or persisted ``HAL0_HERMES_PYTHON`` and validate it.
+
+    Returns ``(value, source, discard)``. ``value`` is the validated path, or
+    ``None`` when nothing is configured or the configured value is unusable.
+    ``discard`` is ``(source, value, reason)`` for an unusable value, covering a
+    bad environment value, a bad persisted value, and a file the parser rejects
+    (ADR-0032 decision 9: discarded with a warning, never refused).
+    """
+    source = "environment"
+    candidate = environ.get("HAL0_HERMES_PYTHON")
+    if candidate is None:
+        source = "persisted"
+        try:
+            candidate = _read_hermes_python_env(env_path)
+        except (ValueError, OSError, UnicodeDecodeError) as exc:
+            try:
+                raw = env_path.read_text(encoding="utf-8", errors="replace")[:200]
+            except OSError:
+                raw = ""
+            return None, source, (source, repr(raw), str(exc))
+    if candidate is None:
+        return None, source, None
+    try:
+        _validate_hermes_python(candidate, runner=runner)
+    except ValueError as exc:
+        return None, source, (source, candidate, str(exc))
+    return candidate, source, None
+
+
+def _adopt_reprobed_hermes_python(
+    chosen: str | None,
+    discard: tuple[str, str, str],
+    *,
+    environ: Any,
+    env_path: Path,
+    runner: Any,
+) -> None:
+    """Warn about a discarded value and pin the re-probed interpreter.
+
+    Sets ``HAL0_HERMES_PYTHON`` in *environ* so later calls in the same process
+    agree, and persists it when the file is writable. An unwritable file (the
+    ``hal0`` user against a root-owned ``/etc/hal0``) is left alone: the
+    re-probed interpreter serves this build only.
+    """
+    source, value, reason = discard
+    log.warning(
+        "hermes-python-discarded",
+        source=source,
+        value=value,
+        reason=reason,
+        chosen=chosen,
+    )
+    if chosen is None:
+        return
+    try:
+        _persist_hermes_python(chosen, env_path, runner=runner)
+    except OSError as exc:
+        environ["HAL0_HERMES_PYTHON"] = chosen
+        log.info(
+            "hermes-python-persist-skipped",
+            path=str(env_path),
+            chosen=chosen,
+            error=str(exc),
+        )
+        return
+    except ValueError as exc:
+        log.info("hermes-python-persist-skipped", path=str(env_path), chosen=chosen, error=str(exc))
+        return
+    environ["HAL0_HERMES_PYTHON"] = chosen
+    log.info("hermes-python-persisted", path=str(env_path), chosen=chosen)
 
 
 def resolve_hermes_python(
@@ -504,23 +587,30 @@ def resolve_hermes_python(
 ) -> str:
     """Resolve exact Python 3.12 using the documented precedence order.
 
-    ``fallback_bin`` passes through to :func:`_provision_python_via_uv`.
+    A configured value that fails validation is discarded with a warning and
+    the interpreter is re-probed (``python3.12`` on PATH, then uv); the new
+    value is persisted when *env_path* is writable. ``fallback_bin`` passes
+    through to :func:`_provision_python_via_uv`.
     """
     environ = os.environ if env is None else env
-    source = "environment"
-    candidate = environ.get("HAL0_HERMES_PYTHON")
-    if candidate is None:
-        candidate = _read_hermes_python_env(env_path)
-        source = "persisted"
+    candidate, source, discard = _check_configured_hermes_python(environ, env_path, runner=runner)
     if candidate is None:
         candidate = prober("python3.12")
         source = "system"
-    if candidate is None:
-        candidate = _provision_python_via_uv(prober, runner, fallback_bin=fallback_bin)
-        source = "uv-managed"
-    if candidate is None:
-        raise RuntimeError("Python 3.12 is unavailable; install python3.12 or uv and retry")
-    _validate_hermes_python(candidate, runner=runner)
+        if candidate is None:
+            candidate = _provision_python_via_uv(prober, runner, fallback_bin=fallback_bin)
+            source = "uv-managed"
+        if candidate is None:
+            if discard is not None:
+                _adopt_reprobed_hermes_python(
+                    None, discard, environ=environ, env_path=env_path, runner=runner
+                )
+            raise RuntimeError("Python 3.12 is unavailable; install python3.12 or uv and retry")
+        _validate_hermes_python(candidate, runner=runner)
+        if discard is not None:
+            _adopt_reprobed_hermes_python(
+                candidate, discard, environ=environ, env_path=env_path, runner=runner
+            )
     log.info("hermes-python-resolved", source=source, path=candidate, version="3.12")
     return candidate
 
@@ -682,23 +772,30 @@ def _ensure_supported_python(
     runner: Any = subprocess,
     running: tuple[int, int] | None = None,
     fallback_bin: Path | None = None,
+    env_path: Path | None = None,
 ) -> str | None:
     """Resolve the exact Python 3.12 interpreter for the Hermes venv.
 
-    A qualifying system ``python3.12`` wins before uv downloads a managed 3.12;
-    explicit and persisted overrides are validated before either fallback.
-    ``fallback_bin`` passes through to :func:`_provision_python_via_uv`.
+    A valid explicit or persisted override wins. One that fails validation is
+    discarded with a warning and the interpreter is re-probed: a qualifying
+    system ``python3.12`` first, then a uv-managed 3.12. The re-probed value is
+    persisted when the file is writable. ``fallback_bin`` passes through to
+    :func:`_provision_python_via_uv`.
     """
-    configured = os.environ.get("HAL0_HERMES_PYTHON")
-    if configured is None:
-        configured = _read_hermes_python_env()
+    env_path = HERMES_PYTHON_ENV if env_path is None else env_path
+    configured, _source, discard = _check_configured_hermes_python(
+        os.environ, env_path, runner=runner
+    )
     if configured is not None:
-        _validate_hermes_python(configured, runner=runner)
         return configured
     found = _resolve_supported_python(prober, running=running)
-    if found is not None:
-        return found
-    return _provision_python_via_uv(prober, runner, fallback_bin=fallback_bin)
+    if found is None:
+        found = _provision_python_via_uv(prober, runner, fallback_bin=fallback_bin)
+    if discard is not None:
+        _adopt_reprobed_hermes_python(
+            found, discard, environ=os.environ, env_path=env_path, runner=runner
+        )
+    return found
 
 
 def _resolve_supported_python(
