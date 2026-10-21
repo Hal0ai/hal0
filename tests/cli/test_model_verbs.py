@@ -5,6 +5,7 @@ assessment): ``model default``, ``model update [--check]``, and
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -216,6 +217,117 @@ def test_model_rm_keep_files_sends_opt_out(deletes: list[tuple[str, dict[str, An
     ]
     assert "kept_by_request" in result.output
     assert "hidden from future scans" in result.output
+
+
+def test_model_rm_keep_files_keeps_add_hint_for_addable_extensions(
+    deletes: list[tuple[str, dict[str, Any]]],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A kept file whose extension add accepts keeps the `model add` hint."""
+    from hal0.config import paths as cfg_paths
+
+    monkeypatch.setattr(cfg_paths, "hal0_toml", lambda: tmp_path / "hal0.toml")
+    result = runner.invoke(model_commands.app, ["rm", "qwen3-4b", "--force", "--keep-files"])
+
+    assert result.exit_code == 0, result.output
+    # rich wraps at the console width; collapse whitespace before matching.
+    assert "`hal0 model add <path>` brings one back" in " ".join(result.output.split())
+
+
+def test_model_rm_keep_files_hints_pull_when_add_would_refuse(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """#2748: a kept file outside [models].file_extensions cannot come back
+    through `model add`, so the hint must name `model pull` instead."""
+    from hal0.config import paths as cfg_paths
+
+    monkeypatch.setattr(cfg_paths, "hal0_toml", lambda: tmp_path / "hal0.toml")
+    monkeypatch.setattr(model_commands, "_api_unreachable", lambda _url: False)
+    kept = "/srv/hal0/models/tts/kokoro-v1/kokoro-v1.0.onnx"
+    monkeypatch.setattr(
+        model_commands,
+        "api_delete",
+        lambda path, **kw: {
+            "id": "kokoro-v1",
+            "deleted": True,
+            "files_removed": [],
+            "files_kept": [{"path": kept, "reason": "kept_by_request"}],
+            "bytes_freed": 0,
+            "tombstoned": [kept],
+            "warnings": [],
+        },
+    )
+    result = runner.invoke(model_commands.app, ["rm", "kokoro-v1", "--force", "--keep-files"])
+
+    assert result.exit_code == 0, result.output
+    out = " ".join(result.output.split())
+    assert "`hal0 model pull kokoro-v1` is the way back" in out
+    assert "brings one back" not in out
+
+
+def test_model_rm_keep_files_hints_no_pull_for_uncurated_models(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """rm dropped the registry row that carried a non-curated model's HF
+    source, so a bare `model pull <id>` cannot resolve it (#2748 review).
+    The hint must not name a command that would raise."""
+    from hal0.config import paths as cfg_paths
+
+    monkeypatch.setattr(cfg_paths, "hal0_toml", lambda: tmp_path / "hal0.toml")
+    monkeypatch.setattr(model_commands, "_api_unreachable", lambda _url: False)
+    kept = "/srv/hal0/models/local-custom-7b/weights.onnx"
+    monkeypatch.setattr(
+        model_commands,
+        "api_delete",
+        lambda path, **kw: {
+            "id": "local-custom-7b",
+            "deleted": True,
+            "files_removed": [],
+            "files_kept": [{"path": kept, "reason": "kept_by_request"}],
+            "bytes_freed": 0,
+            "tombstoned": [kept],
+            "warnings": [],
+        },
+    )
+    result = runner.invoke(model_commands.app, ["rm", "local-custom-7b", "--force", "--keep-files"])
+
+    assert result.exit_code == 0, result.output
+    out = " ".join(result.output.split())
+    assert "`hal0 model add` refuses their extension(s)" in out
+    assert "model pull" not in out
+
+
+def test_add_would_accept_falls_back_to_schema_defaults(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unreadable config must not reinstate the false add hint (#2748
+    review): compare suffixes against the schema's default extensions."""
+    from hal0.config import loader
+
+    def unreadable() -> None:
+        raise RuntimeError("no config")
+
+    monkeypatch.setattr(loader, "load_hal0_config", unreadable)
+
+    assert model_commands._add_would_accept(["/models/weights.gguf"]) is True
+    assert model_commands._add_would_accept(["/models/voices.onnx"]) is False
+
+
+def test_is_curated_returns_false_when_the_lookup_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed catalogue lookup must not promise a pull it cannot resolve."""
+    from hal0.registry import curated
+
+    def unreadable(_model_id: str) -> None:
+        raise RuntimeError("catalogue unreadable")
+
+    monkeypatch.setattr(curated, "get_curated", unreadable)
+
+    assert model_commands._is_curated("orphan-7b") is False
 
 
 def test_model_rm_prompt_names_the_files(deletes: list[tuple[str, dict[str, Any]]]) -> None:
