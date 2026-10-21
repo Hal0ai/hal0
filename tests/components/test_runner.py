@@ -138,3 +138,36 @@ def test_converge_component_diagnose_only_flag_gates_recording_directly() -> Non
     assert result["status"] == "stale"
     stored = state.load_component_state()["openwebui"]
     assert stored["status"] == "snapshot_failed"  # untouched
+
+
+def test_busy_never_erases_a_recorded_activation_failure() -> None:
+    """ADR-0032 decision 7 step 8: activation_failed stays until an activation succeeds.
+
+    ``busy`` means the arm did not run (the builder lock was held), so even an
+    apply=True pass must not overwrite the failure breadcrumb with it.
+    """
+    from hal0.components.registry import COMPONENTS
+
+    comp = next(c for c in COMPONENTS if c.id == "hermes")
+    state.record_component_result(
+        "hermes", {"status": "activation_failed", "error": "re-verify", "remedy": "x"}
+    )
+    with patch(
+        "hal0.components.registry._hermes_converge",
+        side_effect=lambda **kw: {"status": "busy", "holder_pid": 9},
+    ):
+        result = runner.converge_component(comp, job_id=None, apply=True)
+    assert result["status"] == "busy"
+    assert state.load_component_state()["hermes"]["status"] == "activation_failed"
+
+
+def test_busy_is_recorded_when_no_failure_is_on_record() -> None:
+    from hal0.components.registry import COMPONENTS
+
+    comp = next(c for c in COMPONENTS if c.id == "hermes")
+    with patch(
+        "hal0.components.registry._hermes_converge",
+        side_effect=lambda **kw: {"status": "busy", "holder_pid": 9},
+    ):
+        runner.converge_component(comp, job_id=None, apply=True)
+    assert state.load_component_state()["hermes"]["status"] == "busy"

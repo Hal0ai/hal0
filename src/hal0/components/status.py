@@ -11,9 +11,15 @@ import structlog
 from hal0.components.registry import COMPONENTS
 from hal0.components.state import load_component_state
 
-_FAILURE_STATUSES = frozenset({"build_failed", "snapshot_failed", "rolled_back"})
+# Keep in step with hal0.components.runner._FAILURE_STATUSES. ``busy`` (the
+# Hermes builder lock was held) is deliberately absent: it is not a failure,
+# so a row whose last result is ``busy`` derives from installed vs pinned and
+# reads ``pending`` while the live ref still differs (ADR-0032 decision 6).
+_FAILURE_STATUSES = frozenset(
+    {"build_failed", "snapshot_failed", "rolled_back", "activation_failed"}
+)
 _PENDING_STATUSES = frozenset(
-    {"pending", "stale", "build_failed", "snapshot_failed", "rolled_back"}
+    {"pending", "stale", "build_failed", "snapshot_failed", "rolled_back", "activation_failed"}
 )
 
 log = structlog.get_logger(__name__)

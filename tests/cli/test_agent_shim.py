@@ -201,6 +201,41 @@ class TestHermesArgv:
         argv = agent_shim._build_hermes_argv(_cfg(venv=tmp_path))
         assert "--skip-build" in argv
 
+    @staticmethod
+    def _release_layout(tmp_path: Path, *, built: bool = True) -> Path:
+        """venvs/hermes -> <root>/current/venv, current -> releases/<id>."""
+        root = tmp_path / "hermes"
+        rel = root / "releases" / "3ef6bbd20126-20261021T000000Z"
+        (rel / "venv" / "bin").mkdir(parents=True)
+        if built:
+            dist = rel / "src" / "hermes_cli" / "web_dist"
+            dist.mkdir(parents=True)
+            (dist / "index.html").write_text("<html>")
+        (root / "current").symlink_to("releases/3ef6bbd20126-20261021T000000Z")
+        venv = tmp_path / "venvs" / "hermes"
+        venv.parent.mkdir()
+        venv.symlink_to(root / "current" / "venv")
+        return venv
+
+    def test_web_dist_found_in_the_release_checkout(self, tmp_path: Path) -> None:
+        """#2837: an editable release has no site-packages copy of web_dist."""
+        venv = self._release_layout(tmp_path)
+        dist = agent_shim._resolve_web_dist(_cfg(venv=venv))
+        # Through current/, not the resolved release path, so it follows a switch.
+        assert dist == tmp_path / "hermes" / "current" / "src" / "hermes_cli" / "web_dist"
+        assert "--skip-build" in agent_shim._build_hermes_argv(_cfg(venv=venv))
+
+    def test_unbuilt_checkout_drops_skip_build(self, tmp_path: Path) -> None:
+        venv = self._release_layout(tmp_path, built=False)
+        assert agent_shim._resolve_web_dist(_cfg(venv=venv)) is None
+        assert "--skip-build" not in agent_shim._build_hermes_argv(_cfg(venv=venv))
+
+    def test_legacy_release_falls_back_to_site_packages(self, tmp_path: Path) -> None:
+        venv = self._release_layout(tmp_path, built=False)
+        dist = self._mk_web_dist(venv.resolve(), "python3.12")
+        assert agent_shim._resolve_web_dist(_cfg(venv=venv)) is not None
+        assert dist.is_dir()
+
     def test_binds_loopback_only(self) -> None:
         # Default cfg → 127.0.0.1. Binding to 0.0.0.0 would let any LAN
         # host reach /api/pty without hal0-api's Origin/HMAC checks

@@ -1,4 +1,4 @@
-"""Hermes converge arm: stamp-tracked venv rebuild at the requirements pin."""
+"""Hermes converge arm: release-builder converge onto the requirements pin."""
 
 from __future__ import annotations
 
@@ -33,52 +33,112 @@ def test_unprovisioned_skips(tmp_path) -> None:
     assert res["status"] == "skipped"
 
 
-def test_stamped_at_pin_converges(tmp_path) -> None:
-    venv = _venv(tmp_path)
-    with patch("hal0.agents.hermes_provision._hermes_version_pin", return_value="v2026.7.7.2"):
-        hermes_arm.stamp_path().parent.mkdir(parents=True, exist_ok=True)
-        hermes_arm.stamp_path().write_text("v2026.7.7.2\n", encoding="utf-8")
+PIN = "3ef6bbd201263d354fd83ec55b3c306ded2eb72a"
+
+
+def _live_release(ref=PIN, minor="3.12"):
+    """A migrated layout: venvs/hermes -> hermes/current/venv -> releases/<id>/venv."""
+    from hal0.agents import hermes_release as rel
+
+    venv = var_lib() / "venvs" / "hermes"
+    layout = rel.Layout.for_venv(venv)
+    rid = f"{ref[:12]}-20261021T000000Z"
+    rdir = layout.releases / rid
+    (rdir / "venv" / "bin").mkdir(parents=True)
+    (rdir / "venv" / "bin" / "python").write_text("", encoding="utf-8")
+    (rdir / "release.json").write_text(
+        json.dumps({"id": rid, "ref": ref, "python_minor": minor, "legacy": False}),
+        encoding="utf-8",
+    )
+    layout.current.symlink_to(f"releases/{rid}")
+    venv.parent.mkdir(parents=True, exist_ok=True)
+    venv.symlink_to(layout.venv_target)
+    return venv
+
+
+def test_live_release_at_pin_converges(tmp_path) -> None:
+    venv = _live_release()
+    with patch("hal0.agents.hermes_release.ensure_release") as ensure:
         res = hermes_arm.converge_hermes(venv=venv)
     assert res["status"] == "converged"
+    ensure.assert_not_called()
 
 
-def test_drift_diagnose_only(tmp_path) -> None:
+def test_legacy_venv_dir_is_stale_on_diagnose(tmp_path) -> None:
+    # A real venvs/hermes directory is the legacy layout: the layout trigger
+    # fires even when the stamp matches the pin (ADR-0032 decision 6).
     venv = _venv(tmp_path)
-    with patch("hal0.agents.hermes_provision._hermes_version_pin", return_value="v2"):
-        res = hermes_arm.converge_hermes(venv=venv, apply=False)
+    hermes_arm.stamp_path().parent.mkdir(parents=True, exist_ok=True)
+    hermes_arm.stamp_path().write_text(PIN[:12] + "\n", encoding="utf-8")
+    res = hermes_arm.converge_hermes(venv=venv, apply=False)
     assert res["status"] == "stale"
+    assert "legacy layout" in res["trigger"]
 
 
-def test_drift_rebuilds_probes_and_stamps(tmp_path) -> None:
+def test_ref_drift_is_stale_on_diagnose(tmp_path) -> None:
+    venv = _live_release(ref="f" * 40)
+    res = hermes_arm.converge_hermes(venv=venv, apply=False)
+    assert res["status"] == "stale"
+    assert "differs" in res["trigger"]
+
+
+def test_interpreter_minor_drift_triggers(tmp_path) -> None:
+    venv = _live_release(minor="3.11")
+    res = hermes_arm.converge_hermes(venv=venv, apply=False)
+    assert res["status"] == "stale"
+    assert "interpreter" in res["trigger"]
+
+
+def _outcome(**kw):
+    from hal0.agents.hermes_release import ReleaseOutcome
+
+    return ReleaseOutcome(**kw)
+
+
+def test_drift_builds_through_the_release_builder_without_waiting(tmp_path) -> None:
     venv = _venv(tmp_path)
-    with (
-        patch("hal0.agents.hermes_provision._hermes_version_pin", return_value="v2"),
-        patch("hal0.agents.hermes_provision._install_venv") as install,
-        patch("hal0.agents.hermes_provision._probe_mcp_client", return_value={"ok": True}),
-    ):
-        res = hermes_arm.converge_hermes(
-            venv=venv,
-            runner=MagicMock(return_value=MagicMock(returncode=0)),
-            is_hal0_user=lambda: False,
-        )
+    runner = MagicMock(return_value=MagicMock(returncode=0, stdout=""))
+    with patch(
+        "hal0.agents.hermes_release.ensure_release",
+        return_value=_outcome(status="activated", release_id="r1", ref=PIN),
+    ) as ensure:
+        res = hermes_arm.converge_hermes(venv=venv, runner=runner, is_hal0_user=lambda: True)
     assert res["status"] == "upgraded"
-    install.assert_called_once()
-    assert hermes_arm.installed_hermes_pin() == "v2"
+    assert res["release"] == "r1"
+    kw = ensure.call_args.kwargs
+    assert kw["caller"] == "converge"
+    assert kw["wait"] is False, "hal0 update never waits for the builder lock"
+    assert kw["venv"] == venv
+    # As hal0, unit stops/starts go through the hal0-systemctl seam.
+    assert kw["units"]._use_seam is True
 
 
-def test_failed_probe_is_build_failed_and_unstamped(tmp_path) -> None:
+def test_busy_lock_is_a_busy_status_with_the_holder_pid(tmp_path) -> None:
     venv = _venv(tmp_path)
-    with (
-        patch("hal0.agents.hermes_provision._hermes_version_pin", return_value="v2"),
-        patch("hal0.agents.hermes_provision._install_venv"),
-        patch(
-            "hal0.agents.hermes_provision._probe_mcp_client",
-            return_value={"ok": False, "error": "no mcp"},
+    holder = {"pid": 4242, "caller": "provision", "started_at": "2026-10-21T00:00:00Z"}
+    with patch(
+        "hal0.agents.hermes_release.ensure_release",
+        return_value=_outcome(status="busy", holder=holder),
+    ):
+        res = hermes_arm.converge_hermes(venv=venv, is_hal0_user=lambda: False)
+    assert res["status"] == "busy"
+    assert res["holder_pid"] == 4242
+
+
+@pytest.mark.parametrize("status", ["build_failed", "activation_failed"])
+def test_failed_build_or_activation_names_a_real_remedy(tmp_path, status) -> None:
+    venv = _venv(tmp_path)
+    with patch(
+        "hal0.agents.hermes_release.ensure_release",
+        return_value=_outcome(
+            status=status,
+            error="verify-mcp: no mcp",
+            remedy="sudo hal0 agent reprovision hermes --repair",
         ),
     ):
         res = hermes_arm.converge_hermes(venv=venv, is_hal0_user=lambda: False)
-    assert res["status"] == "build_failed"
-    assert hermes_arm.installed_hermes_pin() is None
+    assert res["status"] == status
+    assert res["error"] == "verify-mcp: no mcp"
     # The remedy must name a real `hal0 agent` subcommand (it once named a
     # non-existent `provision`).
     from hal0.cli.agent_commands import app as agent_app

@@ -1,143 +1,106 @@
-"""Tests for hal0.agents.hermes_provision.upgrade_hermes_runtime.
+"""``hal0 agent upgrade hermes`` goes through the release builder (ADR-0032 decision 6).
 
-The runtime half of ``hal0 agent upgrade hermes``: pip-upgrade the unpinned
-``hermes-agent`` (floor/cap or an exact ``--to``) + ``hermes config migrate`` so
-the schema matches the new build. Verifies the argv, the version-pin branch, the
-non-fatal migrate, and the real-stop pip failure — all via an injected runner so
-no network or real venv is touched.
+``--to`` takes only a full 40-hex commit listed in ``VETTED_HERMES_REFS``; a
+version string, an ``==X.Y.Z`` spec, a tag or an unlisted commit is refused
+before anything runs. A valid call drops to hal0 through ``_provision_hermes``
+with ``repair=True`` and the ref, the same entry point every other
+provisioning command uses, and the re-exec uses the running tree's ``hal0``
+rather than whatever ``hal0`` is first on PATH (#2092).
 """
 
 from __future__ import annotations
 
-import subprocess
-from pathlib import Path
 from typing import Any
 
-from hal0.agents.hermes_provision import upgrade_hermes_runtime
+import pytest
+from typer.testing import CliRunner
+
+import hal0.cli.agent_commands as ac
+from hal0.agents import hermes_provision as hp
+
+PIN = "3ef6bbd201263d354fd83ec55b3c306ded2eb72a"
 
 
-class FakeRunner:
-    def __init__(self, fail_on: Any = None) -> None:
-        self.calls: list[list[str]] = []
-        self.fail_on = fail_on  # Callable[[list[str]], bool] | None
+@pytest.fixture
+def provision_calls(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
+    calls: list[dict[str, Any]] = []
 
-    def run(self, argv: list[str], **_kwargs: Any) -> Any:
-        self.calls.append(list(argv))
-        if self.fail_on is not None and self.fail_on(list(argv)):
-            raise subprocess.CalledProcessError(1, argv)
-        return None
+    def _fake(**kw: Any) -> int:
+        calls.append(kw)
+        return 0
 
-
-def _is_pip(argv: list[str]) -> bool:
-    return "install" in argv and "--upgrade" in argv
+    monkeypatch.setattr(ac, "_provision_hermes", _fake)
+    return calls
 
 
-def _is_migrate(argv: list[str]) -> bool:
-    return argv[-2:] == ["config", "migrate"]
+def _upgrade(*args: str) -> Any:
+    return CliRunner().invoke(ac.app, ["upgrade", "hermes", *args])
 
 
-def _fake_venv(tmp_path: Path) -> Path:
-    """A venv whose bin/python exists so the missing-venv guard passes."""
-    bindir = tmp_path / "bin"
-    bindir.mkdir()
-    py = bindir / "python"
-    py.write_text("#!/bin/sh\n")
-    py.chmod(0o755)
-    return tmp_path
+def test_upgrade_without_to_rebuilds_the_pin(provision_calls: list[dict[str, Any]]) -> None:
+    result = _upgrade()
+    assert result.exit_code == 0, result.output
+    assert provision_calls == [{"repair": True, "ref": None}]
 
 
-def _pip_call(calls: list[list[str]]) -> list[str] | None:
-    return next((c for c in calls if "pip" in c and "install" in c and "--upgrade" in c), None)
+def test_upgrade_to_a_vetted_sha_passes_the_ref(provision_calls: list[dict[str, Any]]) -> None:
+    result = _upgrade("--to", PIN)
+    assert result.exit_code == 0, result.output
+    assert provision_calls == [{"repair": True, "ref": PIN}]
 
 
-def _migrate_call(calls: list[list[str]]) -> list[str] | None:
-    return next((c for c in calls if c[-2:] == ["config", "migrate"]), None)
+@pytest.mark.parametrize(
+    "to",
+    [
+        "0.19.0",
+        "==0.19.0",
+        "hermes-agent==0.19.0",
+        "v2026.7.20",
+        PIN[:12],
+        "f" * 40,  # well-formed but not vetted
+        PIN.upper(),
+    ],
+)
+def test_upgrade_refuses_anything_but_a_vetted_sha(
+    to: str, provision_calls: list[dict[str, Any]]
+) -> None:
+    result = _upgrade("--to", to)
+    assert result.exit_code != 0
+    assert provision_calls == [], "a refused --to must not reach provisioning"
+    assert "VETTED_HERMES_REFS" in result.output
 
 
-def test_missing_venv_is_actionable_stop(tmp_path: Path) -> None:
-    ok, msg = upgrade_hermes_runtime(venv=tmp_path / "nope", runner=FakeRunner())
-    assert ok is False
-    assert "venv missing" in msg
+def test_upgrade_runtime_and_floor_are_gone() -> None:
+    assert not hasattr(hp, "upgrade_hermes_runtime")
+    assert not hasattr(hp, "HERMES_MIN_VERSION")
 
 
-def test_happy_path_upgrades_then_migrates(tmp_path: Path) -> None:
-    venv = _fake_venv(tmp_path)
-    r = FakeRunner()
-    ok, msg = upgrade_hermes_runtime(
-        venv=venv, requirements=Path("/req.txt"), hermes_home=tmp_path, runner=r
-    )
-    assert ok is True
-    pip = _pip_call(r.calls)
-    assert pip is not None
-    # no --to → installs from the requirements file (floor/cap)
-    assert pip[-2:] == ["-r", "/req.txt"]
-    assert _migrate_call(r.calls) is not None
-    assert "config migrated" in msg
+def test_root_upgrade_reexecs_the_running_hal0_with_the_ref(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """As root, ``--ref`` rides the privilege-dropped re-exec of the running tree."""
+    seen: list[list[str]] = []
+    monkeypatch.setattr(ac.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(ac, "_hermes_root_prelude", lambda _env=None: None)
+    monkeypatch.setattr(ac, "_running_hal0_bin", lambda: "/usr/lib/hal0/venv/bin/hal0")
+    monkeypatch.setattr(ac, "_run_as_hal0", lambda argv, **_kw: seen.append(list(argv)) or 0)
+    import os
 
-
-def test_version_pin_installs_exact_spec(tmp_path: Path) -> None:
-    venv = _fake_venv(tmp_path)
-    r = FakeRunner()
-    ok, _ = upgrade_hermes_runtime(venv=venv, version="0.15.2", runner=r)
-    assert ok is True
-    pip = _pip_call(r.calls)
-    assert pip is not None
-    # ``[web,mcp]``: an exact-version upgrade must keep the MCP client extra —
-    # rebuilding the venv from ``[web]`` alone strips hermes' MCP client (#2021).
-    assert pip[-1] == "hermes-agent[web,mcp]==0.15.2"
-    assert "-r" not in pip
-
-
-def test_migrate_failure_is_non_fatal(tmp_path: Path) -> None:
-    venv = _fake_venv(tmp_path)
-    r = FakeRunner(fail_on=_is_migrate)  # pip ok, migrate raises
-    ok, msg = upgrade_hermes_runtime(venv=venv, runner=r)
-    assert ok is True  # upgrade still succeeds
-    assert "migrate skipped" in msg
-
-
-def test_pip_failure_is_a_real_stop(tmp_path: Path) -> None:
-    venv = _fake_venv(tmp_path)
-    r = FakeRunner(fail_on=_is_pip)  # pip upgrade fails
-    ok, msg = upgrade_hermes_runtime(venv=venv, runner=r)
-    assert ok is False
-    assert "pip upgrade failed" in msg
-    assert _migrate_call(r.calls) is None  # never reached migrate
-
-
-def test_requirements_floor_not_hard_pinned() -> None:
-    """No accidental update-blocker: a commit-pin is allowed ONLY when it is the
-    reviewed production ref (hp.VETTED_HERMES_REFS).
-
-    A hard pin was a past update-blocker, so an *arbitrary* ``==`` pin or an
-    unreviewed VCS ref is still forbidden. The exemption is tied strictly to the
-    vetted allowlist: production intentionally pins a reviewed commit/tag, but
-    any other hard pin must be a floored+capped spec instead.
-    """
-    import re
-
-    from hal0.agents import hermes_provision as hp
-    from hal0.agents.hermes_provision import HERMES_REQUIREMENTS
-
-    text = HERMES_REQUIREMENTS.read_text(encoding="utf-8")
-    reqs = [
-        ln.strip() for ln in text.splitlines() if ln.strip() and not ln.lstrip().startswith("#")
+    monkeypatch.setattr(os, "geteuid", lambda: 0)
+    rc = ac._provision_hermes(repair=True, ref=PIN)
+    assert rc == 0
+    assert seen == [
+        ["/usr/lib/hal0/venv/bin/hal0", "agent", "bootstrap", "hermes", "--repair", "--ref", PIN]
     ]
+
+
+def test_requirement_is_a_vetted_commit_pin() -> None:
+    """The shipped requirement pins a reviewed commit, the only accepted form."""
+    text = hp.HERMES_REQUIREMENTS.read_text(encoding="utf-8")
+    reqs = [ln.strip() for ln in text.splitlines() if ln.strip() and not ln.startswith("#")]
     assert len(reqs) == 1, f"expected a single hermes requirement, got: {reqs!r}"
-    line = hp._hermes_requirement_line(text)
-    ref = hp.hermes_pinned_ref(line)
-    floor = hp.hermes_requirement_floor(line)
-
-    if ref is not None:
-        # A VCS pin is a hard pin — permitted solely because it is vetted.
-        assert ref in hp.VETTED_HERMES_REFS, (
-            f"hermes requirement hard-pins an unreviewed ref (update-blocker): {line!r}"
-        )
-    else:
-        # A version spec must be floored+capped, never a bare ``==`` hard pin.
-        assert "==" not in line, f"bare hard pin is an update-blocker: {line!r}"
-        assert floor is not None and floor >= hp.HERMES_MIN_VERSION
-        assert re.search(r"<\s*\d", line), f"requirement floor not capped: {line!r}"
-
-    # The pin still enforces the broken-build protection through the same seam.
+    ref = hp.hermes_pinned_ref(hp._hermes_requirement_line(text))
+    assert ref in hp.VETTED_HERMES_REFS
     assert hp.hermes_requirement_is_vetted(text)
+    # A floor no longer counts: it cannot name a commit to check out.
+    assert not hp.hermes_requirement_is_vetted("hermes-agent[web,mcp]>=0.16.0,<1")

@@ -66,3 +66,42 @@ def test_probe_crash_degrades_to_unknown() -> None:
         snap = status.component_status_snapshot()  # must not raise
     row = next(r for r in snap["components"] if r["id"] == "hindsight")
     assert row["installed"] is None
+
+
+def test_activation_failed_is_a_recorded_failure() -> None:
+    state.record_component_result(
+        "hermes",
+        {
+            "status": "activation_failed",
+            "error": "re-verify",
+            "remedy": "sudo hal0 agent reprovision hermes --repair",
+        },
+    )
+    with (
+        patch("hal0.components.registry._hermes_installed", return_value="3ef6bbd20126"),
+        patch("hal0.components.registry._hermes_pinned", return_value="3ef6bbd20126"),
+    ):
+        snap = status.component_status_snapshot()
+    row = next(r for r in snap["components"] if r["id"] == "hermes")
+    assert row["status"] == "activation_failed"
+    assert row["remedy"].startswith("sudo hal0 agent reprovision")
+    assert snap["pending"] >= 1
+
+
+def test_busy_is_not_a_failure_and_derives_pending() -> None:
+    """ADR-0032 decision 6: a held builder lock never reads as build_failed."""
+    state.record_component_result("hermes", {"status": "busy", "holder_pid": 42})
+    with (
+        patch("hal0.components.registry._hermes_installed", return_value="aaaaaaaaaaaa"),
+        patch("hal0.components.registry._hermes_pinned", return_value="3ef6bbd20126"),
+    ):
+        snap = status.component_status_snapshot()
+    row = next(r for r in snap["components"] if r["id"] == "hermes")
+    assert row["status"] == "pending"
+
+
+def test_status_tuples_stay_in_step() -> None:
+    from hal0.components import runner
+
+    assert set(runner._FAILURE_STATUSES) == set(status._FAILURE_STATUSES)
+    assert "busy" not in status._FAILURE_STATUSES

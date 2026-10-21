@@ -27,7 +27,12 @@ export type ComponentRow = {
 // Failure statuses a retry (POST .../converge) makes sense for. Never
 // includes 'pending' — the spec (§4) is explicit that pending rows get no
 // update-now button, only a passive arrow label; retry is failure recovery.
-export const RETRYABLE_STATUSES = ['build_failed', 'snapshot_failed', 'rolled_back'] as const
+export const RETRYABLE_STATUSES = [
+  'build_failed',
+  'snapshot_failed',
+  'rolled_back',
+  'activation_failed',
+] as const
 
 const PENDING = new Set(['pending', 'stale', ...RETRYABLE_STATUSES])
 

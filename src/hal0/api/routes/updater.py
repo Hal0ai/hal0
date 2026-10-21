@@ -983,7 +983,12 @@ async def _run_component_job(
         job["error"] = str(exc)
     else:
         job["component_result"] = result
-        failed = result.get("status") in ("build_failed", "snapshot_failed", "rolled_back")
+        failed = result.get("status") in (
+            "build_failed",
+            "snapshot_failed",
+            "rolled_back",
+            "activation_failed",
+        )
         job["state"] = "failed" if failed else "applied"
         if failed:
             job["error"] = result.get("error")

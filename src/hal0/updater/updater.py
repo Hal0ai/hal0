@@ -1643,18 +1643,18 @@ def _run_config_migrations_locked(
     return (source, new_version)
 
 
-#: Where the managed hermes venv lives. Mirrors ``HERMES_VENV_DEFAULT`` in
-#: :mod:`hal0.agents.hermes_provision`, duplicated so this pass stays
-#: importable from the post-swap subprocess without pulling the provisioning
-#: module in at import time. The one place that module IS needed — an actual
-#: repair — imports it lazily, inside the branch that has already proven the
-#: box is broken.
-HERMES_VENV_PATH = Path("/var/lib/hal0/venvs/hermes")
-
 #: What an operator runs by hand when the automatic repair could not (no
 #: network during the update, a resolver conflict). Logged with the failure so
 #: the remedy travels with the diagnosis — the omission #2102 is partly about.
 HERMES_VENV_REMEDY = "hal0 agent reprovision hermes --repair"
+
+#: Where the managed hermes venv (link) lives. The same value as
+#: ``hal0.agents.hermes_layout.HERMES_VENV_PATH``, spelled out here so core
+#: modules that import the updater pull in no hermes module (golden path #15);
+#: ``tests/updater/test_hermes_venv_repair.py`` pins the two together. Only a
+#: real repair imports the builder, lazily, inside the branch that has already
+#: proven the box is broken.
+HERMES_VENV_PATH = Path("/var/lib/hal0/venvs/hermes")
 
 
 def repair_hermes_mcp_client(
@@ -1664,7 +1664,7 @@ def repair_hermes_mcp_client(
     install: bool = True,
     restart_gateway: bool = True,
 ) -> bool:
-    """Reinstall a hermes venv whose MCP client cannot import (#2102).
+    """Rebuild a hermes release whose MCP client cannot import (#2102).
 
     Heals the venv half of "the agent has no memory tools": a venv that
     drifted off the vetted pin — no ``mcp`` package at all, the
@@ -1677,8 +1677,11 @@ def repair_hermes_mcp_client(
     The diagnosis is the provisioner's own import assertion
     (``_probe_mcp_client`` with no URL — no server round-trip, just "can this
     interpreter import the client stack"), and the cure is the provisioner's
-    own venv install. Both are reused rather than reimplemented, so a repaired
-    box lands on exactly the state a fresh install produces.
+    own release builder (a fresh release of the live ref, activated with a
+    flip-back on failure). Both are reused rather than reimplemented, so a
+    repaired box lands on exactly the state a fresh install produces.
+
+    ``restart_gateway=False`` (tests) activates without touching any unit.
 
     ``install=False`` diagnoses without touching the venv. The boot-time safety
     net passes it: :func:`check_outstanding_migrations` runs on every
@@ -1724,14 +1727,40 @@ def repair_hermes_mcp_client(
     if not install:
         return False
 
-    try:
-        hermes._install_venv(venv, hermes.HERMES_REQUIREMENTS)
-    except Exception as exc:
+    # The cure is a fresh release of the live ref through the one builder
+    # (ADR-0032 decision 6): never a write into the live release. The update
+    # never waits for the builder lock; a held lock is retried by the next
+    # `hal0 update`. Activation stops and starts only the units that were
+    # running before the switch, so a gateway the operator stopped or disabled
+    # is never started (#2822/#2823), and as the unprivileged hal0 user it goes
+    # through the hal0-systemctl seam rather than a bare systemctl (#2828).
+    from hal0.agents import hermes_release as rel
+
+    outcome = rel.ensure_release(
+        caller="repair",
+        venv=venv,
+        force=True,
+        reason="mcp client import failed",
+        wait=False,
+        units=None if restart_gateway else rel.NoUnits(),
+    )
+    if outcome.status == "busy":
+        holder = outcome.holder or {}
+        log.warning(
+            "components.hermes_busy",
+            job_id=job_id,
+            holder_pid=holder.get("pid"),
+            holder_caller=holder.get("caller"),
+            holder_since=holder.get("started_at"),
+        )
+        return False
+    if not outcome.ok:
         log.warning(
             "updater.hermes_venv_repair_failed",
             job_id=job_id,
-            error=str(exc),
-            remedy=HERMES_VENV_REMEDY,
+            status=outcome.status,
+            error=outcome.error,
+            remedy=outcome.remedy or HERMES_VENV_REMEDY,
         )
         return False
 
@@ -1750,41 +1779,13 @@ def repair_hermes_mcp_client(
         )
         return False
 
-    log.info("updater.hermes_venv_repaired", job_id=job_id, venv=str(venv))
-
-    if restart_gateway:
-        # Same reason as the header repair: hermes builds its MCP client at
-        # start, so a running gateway keeps the broken one until it bounces.
-        # try-restart, not restart: a gateway the operator disabled and
-        # stopped must stay stopped (#2822); only a running unit is bounced.
-        # The updater runs as the unprivileged hal0 user on a deployed box, where
-        # a bare systemctl escalates through polkit and fails (#2828): same
-        # root/non-root split as cli/agent_commands.py's posture refresh.
-        from hal0.system.seam import SEAM_BIN
-
-        argv = (
-            ["systemctl", "try-restart", "hermes-gateway.service"]
-            if os.geteuid() == 0
-            else ["sudo", "-n", SEAM_BIN, "svc-try-restart", "hermes-gateway"]
-        )
-        try:
-            proc = subprocess.run(  # nosec B603 — seam-validated argv
-                argv,
-                check=False,
-                capture_output=True,
-                text=True,
-                timeout=120,
-            )
-            if proc.returncode != 0:
-                log.warning(
-                    "updater.hermes_gateway_bounce_failed",
-                    job_id=job_id,
-                    rc=proc.returncode,
-                    stderr=(proc.stderr or "").strip()[:500],
-                )
-        except (OSError, subprocess.SubprocessError) as exc:
-            log.warning("updater.hermes_gateway_bounce_failed", job_id=job_id, error=str(exc))
-
+    log.info(
+        "updater.hermes_venv_repaired",
+        job_id=job_id,
+        venv=str(venv),
+        release=outcome.release_id,
+        warnings=outcome.warnings or None,
+    )
     return True
 
 
