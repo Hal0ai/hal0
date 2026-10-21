@@ -1017,6 +1017,36 @@ def test_update_status_exits_0_when_all_components_converged(
     assert "Hindsight" in result.output
 
 
+def test_update_status_names_the_gateway_regen_when_the_unit_is_stale(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # #2615: `hal0 update` keeps the 0.19.0 gateway unit; say how to fix it,
+    # without changing the exit code.
+    from hal0.system import linger
+
+    monkeypatch.setattr(uc, "_api_unreachable", lambda url: False)
+
+    def fake_get(path: str, **kwargs: object) -> dict:
+        if path == "/api/updates/components":
+            return {"components": [_component_row(status="converged")], "pending": 0}
+        return {
+            "current": "1.0.0",
+            "latest": "1.0.0",
+            "channel": "stable",
+            "update_available": False,
+            "manifest": {},
+        }
+
+    monkeypatch.setattr(uc, "api_get", fake_get)
+    monkeypatch.setattr(
+        linger, "gateway_unit_regen_reason", lambda: "systemd linger is off for hal0"
+    )
+    result = runner.invoke(app, ["update", "status"])
+    assert result.exit_code == 0, result.output
+    assert "linger is off" in result.output
+    assert "sudo hal0 agent install hermes" in result.output
+
+
 def test_update_component_converges_and_prints_result(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

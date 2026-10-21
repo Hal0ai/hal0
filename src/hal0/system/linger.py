@@ -21,6 +21,7 @@ import shutil
 import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 #: The service user whose linger the Hermes gateway enables.
@@ -103,4 +104,49 @@ def disable_linger(
     return (True, f"linger disabled for {user}")
 
 
-__all__ = ["HAL0_USER", "LINGER_DIR", "LingerState", "disable_linger", "read_linger"]
+#: The Hermes gateway's system unit, written by ``hermes gateway install``.
+HERMES_GATEWAY_UNIT = "/etc/systemd/system/hermes-gateway.service"
+
+#: What an operator runs to regenerate the gateway unit and turn linger on.
+GATEWAY_REGEN_COMMAND = "sudo hal0 agent install hermes"
+
+
+def gateway_unit_regen_reason(
+    *,
+    unit: str = HERMES_GATEWAY_UNIT,
+    linger_dir: str = LINGER_DIR,
+    user: str = HAL0_USER,
+) -> str | None:
+    """Why the installed gateway unit needs ``sudo hal0 agent install hermes``, or ``None``.
+
+    Read-only and subprocess-free, so ``hal0 update`` can call it as any
+    user. ``hal0 update`` does not rerun the gateway generator, so a box that
+    ran Hermes before 1.6.0 keeps the unit Hermes 0.19.0 wrote: no
+    ``user@<uid>.service`` ordering and no linger. Under v0.22.2 that unit
+    starts, but kanban workers cannot get their restart-safe scope and never
+    start, and cron jobs run unscoped (hermes ``tools/process_registry.py:415-462``
+    at ``d923a5eb``). ``None`` when there is no gateway unit.
+    """
+    try:
+        text = Path(unit).read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        return f"the hermes-gateway unit could not be read ({exc})"
+    if "user@" not in text:
+        return "the hermes-gateway unit predates Hermes 0.22 (no user@<uid>.service ordering)"
+    if os.path.isdir(linger_dir) and not os.path.exists(os.path.join(linger_dir, user)):
+        return f"systemd linger is off for {user}"
+    return None
+
+
+__all__ = [
+    "GATEWAY_REGEN_COMMAND",
+    "HAL0_USER",
+    "HERMES_GATEWAY_UNIT",
+    "LINGER_DIR",
+    "LingerState",
+    "disable_linger",
+    "gateway_unit_regen_reason",
+    "read_linger",
+]

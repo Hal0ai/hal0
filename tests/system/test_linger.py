@@ -73,3 +73,22 @@ def test_disable_linger_runs_disable_for_hal0() -> None:
 def test_uninstall_script_disables_hal0_linger() -> None:
     script = (Path(__file__).parents[2] / "installer" / "uninstall.sh").read_text()
     assert "loginctl disable-linger hal0" in script
+
+
+def test_gateway_unit_regen_reason(tmp_path: Path) -> None:
+    unit = tmp_path / "hermes-gateway.service"
+    lingers = tmp_path / "linger"
+    lingers.mkdir()
+    kw = {"unit": str(unit), "linger_dir": str(lingers)}
+    # No gateway installed: nothing to say.
+    assert linger.gateway_unit_regen_reason(**kw) is None
+    # The 0.19.0 generator's shape.
+    unit.write_text("[Service]\nExecStart=/v/bin/python -m hermes_cli.main gateway run\n")
+    reason = linger.gateway_unit_regen_reason(**kw)
+    assert reason is not None and "predates Hermes 0.22" in reason
+    # A 0.22 unit, but linger off.
+    unit.write_text("[Unit]\nAfter=user@999.service\nWants=user@999.service\n")
+    assert linger.gateway_unit_regen_reason(**kw) == "systemd linger is off for hal0"
+    # Both right.
+    (lingers / "hal0").touch()
+    assert linger.gateway_unit_regen_reason(**kw) is None

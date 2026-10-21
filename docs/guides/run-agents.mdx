@@ -67,7 +67,7 @@ notice:
 before 1.6.0, run `sudo hal0 agent install hermes` once after the update: it
 rewrites the gateway unit and turns linger on. Until then Hermes's kanban
 workers do not start and cron jobs run outside their own scope, and
-`hal0 doctor all` warns on the `hal0_linger` row.
+`hal0 update`, `hal0 update status` and `hal0 doctor all` print the command.
 
 ## Hermes' terminal tool — off by default
 
