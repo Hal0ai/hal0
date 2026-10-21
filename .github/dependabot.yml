@@ -15,6 +15,12 @@ updates:
       interval: weekly
     open-pull-requests-limit: 5
     groups:
+      # react and react-dom must stay on the exact same version (React throws
+      # "Incompatible React versions" otherwise), so they always move together,
+      # majors included. Listed first: a dependency joins the first group it
+      # matches.
+      react:
+        patterns: [react, react-dom, "@types/react", "@types/react-dom"]
       npm-minor-patch:
         update-types: [minor, patch]
 
