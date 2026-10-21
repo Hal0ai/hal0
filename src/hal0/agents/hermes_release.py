@@ -44,6 +44,7 @@ from typing import Any
 
 import structlog
 
+from hal0.agents import hermes_platforms as hpl
 from hal0.agents import hermes_provision as hp
 from hal0.agents.hermes_layout import GATEWAY_UNIT_PATH, release_root_for
 
@@ -337,6 +338,53 @@ def _checkout_requires_python(src: Path) -> str | None:
 
 
 # ── Tools ────────────────────────────────────────────────────────────────────
+
+
+def _checkout_extras(src: Path) -> set[str] | None:
+    """``[project.optional-dependencies]`` names of the checkout, or ``None``."""
+    import tomllib
+
+    try:
+        with (src / "pyproject.toml").open("rb") as fh:
+            data = tomllib.load(fh)
+    except (OSError, ValueError):
+        return None
+    extras = (data.get("project") or {}).get("optional-dependencies")
+    return set(extras) if isinstance(extras, dict) else None
+
+
+def configured_extras(
+    hermes_home: Path | str | None = None, secrets_env: Path | str | None = None
+) -> tuple[str, ...]:
+    """The platform extras this box's Hermes configuration needs (hermes_platforms).
+
+    Defaults to the live ``HERMES_HOME`` and the gateway's secrets vault. Only
+    a root caller can read the vault; any other caller sees config.yaml and
+    ``.env`` alone, and the build's carry-over of installed extras covers the rest.
+    """
+    home = Path(hermes_home) if hermes_home is not None else hp.HERMES_HOME_DEFAULT
+    vault = Path(secrets_env) if secrets_env is not None else hp.HERMES_SECRETS_ENV
+    return hpl.configured_platform_extras(home, vault)
+
+
+def release_extras(
+    pin_extras: tuple[str, ...], platform_extras: tuple[str, ...] | list[str], src: Path
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """The pin's extras plus the platform extras the checkout defines.
+
+    Returns ``(all extras, platform extras applied)``. A platform extra the
+    checkout's pyproject does not declare is dropped: ``uv export --extra``
+    would refuse it, and a ref that lacks it cannot satisfy it anyway.
+    """
+    defined = _checkout_extras(src)
+    applied = tuple(
+        sorted(
+            e
+            for e in set(platform_extras)
+            if e not in pin_extras and (defined is None or e in defined)
+        )
+    )
+    return (*pin_extras, *applied), applied
 
 
 def find_uv(
@@ -733,8 +781,14 @@ def build_release(
     hermes_home: Path | None = None,
     stamp: Callable[[], str] = _utc_stamp,
     minor: str | None = None,
+    platform_extras: tuple[str, ...] | list[str] = (),
 ) -> Release:
     """Build and verify a new release of ``ref``; ``release.json`` is written last.
+
+    ``platform_extras`` are the gateway platforms' upstream extras
+    (:mod:`hal0.agents.hermes_platforms`). They install only through the lock,
+    hash-checked, next to the pin's extras; the no-lock fallback, which
+    resolves unhashed from PyPI, installs the pin's extras alone.
 
     ``minor`` is the interpreter minor ``python`` was resolved for (from the
     vetted ``requires-python`` record). The checkout's own ``requires-python``
@@ -799,11 +853,14 @@ def build_release(
                 if proc.returncode == 0:
                     exclude_newer = proc.stdout.strip() or None
         export_file = rdir / "requirements.lock.txt"
+        extras, applied = (
+            release_extras(pin.extras, platform_extras, src) if locked else (pin.extras, ())
+        )
         for argv in install_command_lines(
             uv=uv,
             src=src,
             venv=venv,
-            extras=pin.extras,
+            extras=extras,
             export_file=export_file,
             minor=minor,
             exclude_newer=exclude_newer,
@@ -840,7 +897,9 @@ def build_release(
             "ref": ref,
             "describe": describe,
             "url": pin.url,
-            "extras": list(pin.extras),
+            "extras": list(extras),
+            # The gateway platforms' extras among them (hermes_platforms).
+            "platform_extras": list(applied),
             "lock": locked,
             # Which install path ran: "lock" (uv export --frozen + pip sync
             # --require-hashes + --no-deps -e) or "editable" (-e "<src>[extras]").
@@ -1569,8 +1628,17 @@ def sweep_incomplete(layout: Layout, *, run: Runner = _run) -> list[str]:
 # ── The one entry point ──────────────────────────────────────────────────────
 
 
-def build_trigger(layout: Layout, ref: str, minor: str) -> str | None:
-    """Why a build is needed, or ``None`` (ADR-0032 decision 6's three triggers)."""
+def build_trigger(
+    layout: Layout, ref: str, minor: str, platform_extras: tuple[str, ...] | list[str] = ()
+) -> str | None:
+    """Why a build is needed, or ``None`` (ADR-0032 decision 6's three triggers).
+
+    A fourth (ADR-0034 decision 1's amendment): a configured platform's extra
+    (``platform_extras``) is missing from the live venv. Packages an operator
+    installed by hand count as present. Only a lock-built release is judged,
+    since only the lock path installs platform extras, and only extras its
+    checkout declares, or the trigger would fire on every update.
+    """
     if layout.venv_link.exists() and not layout.venv_link.is_symlink():
         return "pre-layout venv: venvs/hermes is a real directory"
     live = live_release(layout)
@@ -1591,6 +1659,12 @@ def build_trigger(layout: Layout, ref: str, minor: str) -> str | None:
         return f"live ref {live.ref[:12]} differs from target {ref[:12]}"
     if live.python_minor != minor:
         return f"live interpreter {live.python_minor} differs from target {minor}"
+    if platform_extras and live.data.get("lock") is True:
+        defined = _checkout_extras(live.src)
+        wanted = [e for e in platform_extras if defined is None or e in defined]
+        missing = hpl.missing_extras(live.venv, wanted)
+        if missing:
+            return f"configured platform extras missing from the live release: {', '.join(missing)}"
     return None
 
 
@@ -1753,6 +1827,8 @@ def ensure_release(
     settle_s: float = DEFAULT_SETTLE_S,
     sleep: Callable[[float], None] = time.sleep,
     drop_root: bool = True,
+    platform_extras: list[str] | tuple[str, ...] | None = None,
+    secrets_env: Path | str | None = None,
 ) -> ReleaseOutcome:
     """Converge the live Hermes release onto ``ref`` (default: the pin).
 
@@ -1764,7 +1840,16 @@ def ensure_release(
     the converge or repair pass) re-runs this function as ``hal0`` in a child
     process instead of building root-owned releases the next hal0 build could
     neither update nor prune.
+
+    ``platform_extras`` defaults to :func:`configured_extras`, read here before
+    any drop to hal0, because only root can read the gateway's secrets vault.
+    A build installs them together with the extras the live venv already has
+    (:func:`hermes_platforms.installed_platform_extras`), so a rebuild never
+    drops a platform SDK the box was running with.
     """
+    if platform_extras is None:
+        platform_extras = configured_extras(hermes_home, secrets_env)
+    platform_extras = list(platform_extras)
     if drop_root and os.geteuid() == 0 and _hal0_user_exists():
         return _ensure_as_hal0(
             caller=caller,
@@ -1778,6 +1863,7 @@ def ensure_release(
             hermes_home=hermes_home,
             no_units=isinstance(units, NoUnits),
             print_wait=on_wait is not None,
+            platform_extras=platform_extras,
         )
     layout = Layout.for_venv(venv if venv is not None else hp.HERMES_VENV_DEFAULT)
     home = Path(hermes_home) if hermes_home is not None else hp.HERMES_HOME_DEFAULT
@@ -1802,7 +1888,7 @@ def ensure_release(
                 return ReleaseOutcome(
                     status="build_failed", ref=target, error=str(exc), remedy=REPAIR_REMEDY
                 )
-            trigger = build_trigger(layout, target, minor)
+            trigger = build_trigger(layout, target, minor, platform_extras)
             if trigger is None and not force:
                 notes = []
                 if relinked:
@@ -1857,7 +1943,19 @@ def ensure_release(
                     error="uv: not found next to the running interpreter or on PATH",
                     remedy="reinstall hal0 (uv ships in its venv), then " + REPAIR_REMEDY,
                 )
-            log.info("hermes_release.build_start", caller=caller, ref=target, reason=why)
+            # The live venv's platform SDKs (the pre-layout venv's too) carry
+            # over, whether a lazy install or the operator put them there.
+            carried = (
+                hpl.installed_platform_extras(layout.venv_link) if layout.venv_link.exists() else ()
+            )
+            build_extras = sorted({*platform_extras, *carried})
+            log.info(
+                "hermes_release.build_start",
+                caller=caller,
+                ref=target,
+                reason=why,
+                platform_extras=build_extras,
+            )
             try:
                 new = build_release(
                     target,
@@ -1869,6 +1967,7 @@ def ensure_release(
                     probe=probe,
                     hermes_home=home,
                     minor=minor,
+                    platform_extras=build_extras,
                 )
             except (ReleaseError, OSError) as exc:
                 step = getattr(exc, "step", "build")
@@ -1915,6 +2014,13 @@ def ensure_release(
                 flipped_back=act.flipped_back,
                 migrated_legacy=act.migrated_legacy,
             )
+            if act.flipped_back and act.outgoing is not None:
+                lacking = hpl.missing_extras(act.outgoing.venv, platform_extras)
+                if lacking:
+                    out.warnings.append(
+                        f"the flipped-back release {act.outgoing.id} lacks the configured "
+                        f"platform extras {', '.join(lacking)}; the next update rebuilds it"
+                    )
             if act.ok:
                 _clear_failed_marker(layout)
                 warning = write_stamp(new, stamp)

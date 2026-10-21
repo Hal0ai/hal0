@@ -172,6 +172,10 @@ def tree(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Path]:
     monkeypatch.setattr(hp, "UV_PYTHON_INSTALL_DIR", var_lib / "python")
     monkeypatch.setattr(hp, "HERMES_PYTHON_ENV", tmp_path / "etc" / "hermes-python.env")
     monkeypatch.delenv("HAL0_HERMES_PYTHON", raising=False)
+    # The gateway's secrets vault and the default HERMES_HOME, read for the
+    # configured platforms (hermes_platforms), stay inside tmp.
+    monkeypatch.setattr(hp, "HERMES_SECRETS_ENV", tmp_path / "secrets" / "hermes.env")
+    monkeypatch.setattr(hp, "HERMES_HOME_DEFAULT", home)
     return {
         "venv": venv,
         "home": home,
@@ -179,6 +183,7 @@ def tree(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Path]:
         "stamp": var_lib / "state" / "agents" / "hermes" / "venv.pin",
         "unit": tmp_path / "etc" / "systemd" / "system" / "hermes-gateway.service",
         "root": var_lib / "hermes",
+        "vault": tmp_path / "secrets" / "hermes.env",
     }
 
 
@@ -1496,3 +1501,245 @@ def test_an_unwritable_config_never_starts_the_new_release(update_box, monkeypat
     assert rel.live_release(layout).id == old.id
     assert (tree["home"] / "config.yaml").read_text() == _OLD_CONFIG
     assert units.seen, "the old release's units are started again"
+
+
+# ── platform extras: the gateway's messaging SDKs survive a rebuild ──────────
+
+#: The extras v0.22.2 declares that matter here (pyproject.toml at d923a5eb).
+_V0222_EXTRAS = ("web", "mcp", "telegram", "discord", "slack", "sms", "messaging", "matrix")
+#: What `uv pip sync` of an export puts in site-packages, per extra.
+_EXTRA_PACKAGES = {
+    "telegram": ("telegram",),
+    "discord": ("discord", "aiohttp"),
+    "slack": ("slack_bolt", "aiohttp"),
+    "sms": ("aiohttp",),
+}
+
+
+class PlatformLock(LockFor314):
+    """A v0.22.2 checkout whose pyproject declares the platform extras.
+
+    ``uv pip sync`` of an export installs the packages of the extras that
+    export named, so a test can read what reached the venv.
+    """
+
+    def __init__(self, **kw: Any) -> None:
+        super().__init__(**kw)
+        self.exported: list[list[str]] = []
+
+    def __call__(self, argv: list[Any], **kw: Any) -> subprocess.CompletedProcess:
+        out = super().__call__(argv, **kw)
+        argv = [str(a) for a in argv]
+        if argv[0] == "git" and "worktree" in argv and "add" in argv:
+            extras = "\n".join(f'{e} = ["x"]' for e in _V0222_EXTRAS)
+            (Path(argv[-2]) / "pyproject.toml").write_text(
+                '[project]\nname = "hermes-agent"\nrequires-python = ">=3.11,<3.15"\n'
+                f"[project.optional-dependencies]\n{extras}\n"
+            )
+        elif argv[:2] == [UV, "export"]:
+            self.exported.append([argv[i + 1] for i, a in enumerate(argv) if a == "--extra"])
+        elif argv[:3] == [UV, "pip", "sync"]:
+            venv = Path(argv[argv.index("--python") + 1]).parent.parent
+            site = venv / "lib" / "python3.14" / "site-packages"
+            site.mkdir(parents=True, exist_ok=True)
+            for extra in self.exported[-1]:
+                for pkg in _EXTRA_PACKAGES.get(extra, ()):
+                    (site / pkg).mkdir(exist_ok=True)
+        return out
+
+
+def _on_v0222(tree: dict[str, Path]) -> rel.Layout:
+    tree["req"].write_text(f"hermes-agent[web,mcp] @ git+{URL}@{NEW_PIN}\n", encoding="utf-8")
+    return rel.Layout.for_venv(tree["venv"])
+
+
+def _vault(tree: dict[str, Path], **env: str) -> None:
+    tree["vault"].parent.mkdir(parents=True, exist_ok=True)
+    tree["vault"].write_text("".join(f"{k}={v}\n" for k, v in env.items()), encoding="utf-8")
+
+
+def _site(release: rel.Release) -> Path:
+    return release.venv / "lib" / "python3.14" / "site-packages"
+
+
+def test_a_config_with_telegram_and_discord_installs_those_extras(tree) -> None:
+    layout = _on_v0222(tree)
+    _vault(tree, TELEGRAM_BOT_TOKEN="123:abc", DISCORD_BOT_TOKEN="xyz")
+    tools = PlatformLock()
+    out = _ensure(tree, tools)
+    assert out.status == "activated", out.error
+    assert tools.exported == [["web", "mcp", "discord", "telegram"]]
+    live = rel.live_release(layout)
+    assert live.data["extras"] == ["web", "mcp", "discord", "telegram"]
+    assert live.data["platform_extras"] == ["discord", "telegram"]
+    assert {p.name for p in _site(live).iterdir()} == {"telegram", "discord", "aiohttp"}
+
+
+def test_a_config_yaml_platform_block_counts_and_enabled_false_beats_a_token(tree) -> None:
+    _on_v0222(tree)
+    (tree["home"] / "config.yaml").write_text(
+        "platforms:\n  slack:\n    enabled: true\ngateway:\n  telegram:\n    enabled: false\n",
+        encoding="utf-8",
+    )
+    (tree["home"] / ".env").write_text("TELEGRAM_BOT_TOKEN='123:abc'\nWEBHOOK_ENABLED=true\n")
+    tools = PlatformLock()
+    assert _ensure(tree, tools).ok
+    # slack by its block, the webhook's aiohttp by the env flag, telegram disabled.
+    assert tools.exported == [["web", "mcp", "slack", "sms"]]
+
+
+def test_a_box_with_no_platforms_installs_only_web_and_mcp(tree) -> None:
+    layout = _on_v0222(tree)
+    (tree["home"] / "config.yaml").write_text("model:\n  default: x\n", encoding="utf-8")
+    tools = PlatformLock()
+    assert _ensure(tree, tools).ok
+    assert tools.exported == [["web", "mcp"]]
+    live = rel.live_release(layout)
+    assert live.data["extras"] == ["web", "mcp"] and live.data["platform_extras"] == []
+    assert not _site(live).exists() or not any(_site(live).iterdir())
+
+
+def test_the_gateway_api_server_key_needs_aiohttp(tree) -> None:
+    """hal0 provisions API_SERVER_KEY on every box, and upstream's API server
+    adapter refuses to start without aiohttp (gateway/run.py:3320 at d923a5eb)."""
+    _on_v0222(tree)
+    _vault(tree, API_SERVER_KEY="k" * 43)
+    tools = PlatformLock()
+    assert _ensure(tree, tools).ok
+    assert tools.exported == [["web", "mcp", "sms"]]
+
+
+def test_a_configured_platform_missing_from_the_live_release_triggers_a_rebuild(tree) -> None:
+    """A box already on v0.22.2 without the SDKs (the 1.6.0 update) is rebuilt."""
+    layout = _on_v0222(tree)
+    managed = "/usr/bin/python3.14"
+    assert _ensure(tree, PlatformLock(), python_resolver=lambda _m: managed).ok
+    first = rel.live_release(layout)
+    _vault(tree, TELEGRAM_BOT_TOKEN="123:abc")
+    minor = rel.target_minor(NEW_PIN)
+    assert rel.build_trigger(layout, NEW_PIN, minor) is None
+    trigger = rel.build_trigger(layout, NEW_PIN, minor, rel.configured_extras())
+    assert trigger == "configured platform extras missing from the live release: telegram"
+
+    tools = PlatformLock()
+    out = _ensure(tree, tools, python_resolver=lambda _m: managed)
+    assert out.status == "activated" and out.reason == trigger
+    assert out.previous_id == first.id
+    assert rel.live_release(layout).data["platform_extras"] == ["telegram"]
+    again = PlatformLock()
+    assert _ensure(tree, again).status == "converged" and again.calls == []
+
+
+def test_extras_installed_by_hand_count_as_satisfied(tree) -> None:
+    """The operator's manual `uv pip install` of the messaging export is enough."""
+    layout = _on_v0222(tree)
+    assert _ensure(tree, PlatformLock()).ok
+    _vault(tree, TELEGRAM_BOT_TOKEN="123:abc", DISCORD_BOT_TOKEN="xyz", API_SERVER_KEY="k" * 43)
+    site = _site(rel.live_release(layout))
+    site.mkdir(parents=True, exist_ok=True)
+    for pkg in ("telegram", "discord", "aiohttp", "slack_bolt"):
+        (site / pkg).mkdir()
+    extras = rel.configured_extras()
+    assert extras == ("discord", "sms", "telegram")
+    assert rel.build_trigger(layout, NEW_PIN, rel.target_minor(NEW_PIN), extras) is None
+    tools = PlatformLock()
+    assert _ensure(tree, tools).status == "converged" and tools.calls == []
+
+
+def test_a_rebuild_carries_the_live_venvs_platform_sdks(tree) -> None:
+    """A forced rebuild keeps the hand-installed SDKs even with no visible config
+    (a hal0 caller cannot read the root-only vault)."""
+    layout = _on_v0222(tree)
+    assert _ensure(tree, PlatformLock()).ok
+    site = _site(rel.live_release(layout))
+    site.mkdir(parents=True, exist_ok=True)
+    for pkg in ("telegram", "discord", "aiohttp"):
+        (site / pkg).mkdir()
+    tools = PlatformLock()
+    assert _ensure(tree, tools, force=True).ok
+    assert tools.exported == [["web", "mcp", "discord", "sms", "telegram"]]
+
+
+def test_the_first_migration_carries_the_pre_layout_venvs_sdks(tree) -> None:
+    """1.5 to 1.6: the 0.19 venv's python-telegram-bot, discord.py and aiohttp."""
+    _on_v0222(tree)
+    venv = _legacy_venv(tree)
+    site = venv / "lib" / "python3.12" / "site-packages"
+    site.mkdir(parents=True)
+    for pkg in ("telegram", "discord", "aiohttp"):
+        (site / pkg).mkdir()
+    (site / "slack_sdk").mkdir()  # slack-sdk alone is not slack_bolt: not carried
+    tools = PlatformLock()
+    assert _ensure(tree, tools).ok
+    assert tools.exported == [["web", "mcp", "discord", "sms", "telegram"]]
+
+
+def test_platform_extras_take_the_lock_and_hash_path_only(tree) -> None:
+    _on_v0222(tree)
+    _vault(tree, TELEGRAM_BOT_TOKEN="123:abc", SLACK_BOT_TOKEN="xoxb")
+    tools = PlatformLock()
+    assert _ensure(tree, tools).ok
+    [export] = tools.find(lambda c: c[:2] == [UV, "export"])
+    assert "--frozen" in export and "--no-emit-project" in export
+    assert tools.exported == [["web", "mcp", "slack", "telegram"]]
+    [sync] = tools.find(lambda c: c[:3] == [UV, "pip", "sync"])
+    assert "--require-hashes" in sync and sync[-1] == export[export.index("--output-file") + 1]
+    # The only `pip install` is the project itself, without dependencies.
+    [install] = tools.find(lambda c: c[:3] == [UV, "pip", "install"])
+    assert "--no-deps" in install and install[-2:] == ["-e", install[-1]]
+    assert "[" not in install[-1]
+    assert not tools.find(lambda c: any("telegram" in a and a != "telegram" for a in c))
+
+
+def test_the_no_lock_fallback_never_adds_platform_extras(tree) -> None:
+    """3ef6bbd2 on its editable path resolves from PyPI unhashed: pin extras only,
+    and the trigger does not judge such a release, or it would fire forever."""
+    _vault(tree, TELEGRAM_BOT_TOKEN="123:abc")
+    tools = FakeTools()
+    assert _ensure(tree, tools).ok
+    [install] = tools.find(lambda c: c[:3] == [UV, "pip", "install"])
+    assert install[-1].endswith("[web,mcp]")
+    layout = rel.Layout.for_venv(tree["venv"])
+    assert rel.live_release(layout).data["platform_extras"] == []
+    assert rel.build_trigger(layout, PIN, "3.12", ("telegram",)) is None
+
+
+def test_an_extra_the_checkout_does_not_declare_is_dropped(tmp_path: Path) -> None:
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "pyproject.toml").write_text(
+        '[project]\nname = "h"\n[project.optional-dependencies]\nweb = []\ntelegram = []\n'
+    )
+    extras, applied = rel.release_extras(("web", "mcp"), ["telegram", "discord", "web"], src)
+    assert extras == ("web", "mcp", "telegram") and applied == ("telegram",)
+
+
+def test_a_flip_back_to_a_release_without_the_extras_warns_and_still_triggers(tree) -> None:
+    layout = _on_v0222(tree)
+    first = _ensure(tree, PlatformLock())
+    _vault(tree, DISCORD_BOT_TOKEN="xyz")
+    units = FakeUnits(active={rel.GATEWAY_UNIT}, crash_on_start={rel.GATEWAY_UNIT})
+    out = _ensure(tree, PlatformLock(), units, sleep=units.settle)
+    assert out.status == "activation_failed" and out.flipped_back
+    assert rel.live_release(layout).id == first.release_id
+    assert any("lacks the configured platform extras discord" in w for w in out.warnings)
+    trigger = rel.build_trigger(layout, NEW_PIN, rel.target_minor(NEW_PIN), ("discord",))
+    assert trigger and "discord" in trigger
+
+
+def test_a_root_caller_reads_the_vault_and_hands_the_extras_to_the_hal0_child(
+    tree, monkeypatch
+) -> None:
+    seen: list[list[str]] = []
+
+    def _fake_run(cmd: list[str], **_kw: Any) -> subprocess.CompletedProcess:
+        seen.append(list(cmd))
+        return subprocess.CompletedProcess(cmd, 0, json.dumps({"status": "converged"}), None)
+
+    _vault(tree, TELEGRAM_BOT_TOKEN="123:abc")
+    monkeypatch.setattr(rel.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(rel, "_hal0_user_exists", lambda: True)
+    monkeypatch.setattr(rel.shutil, "which", lambda _n: None)
+    monkeypatch.setattr(rel.subprocess, "run", _fake_run)
+    rel.ensure_release(caller="converge", venv=tree["venv"], units=rel.NoUnits())
+    assert json.loads(seen[0][-1])["platform_extras"] == ["telegram"]
