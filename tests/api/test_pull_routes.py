@@ -60,6 +60,19 @@ class _Calls(list):  # type: ignore[type-arg]
         return list.__getitem__(self, index)
 
 
+def _wait_for_fake_pull(app: FastAPI, model_id: str) -> None:
+    """Wait for the fake pull the route scheduled to finish.
+
+    The route starts it with ``asyncio.create_task`` and returns 202 first,
+    so under ``TestClient`` it runs on the loop thread concurrently with the
+    test, and would overwrite a state the test sets in the meantime.
+    """
+    deadline = time.monotonic() + 3.0
+    while app.state.model_pull_jobs[model_id].state != "completed":
+        assert time.monotonic() < deadline, "the fake pull never completed"
+        time.sleep(0.01)
+
+
 @pytest.fixture
 def fake_run_pull(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
     """Patch run_pull to record calls + drive job state synchronously.
@@ -296,6 +309,7 @@ def test_pull_idempotent_when_already_running(
     # First call completes via the fake. Manually re-set state to
     # ``running`` so the second call hits the "already in flight" branch.
     client_isolated.post("/api/models/qwen3-4b/pull")
+    _wait_for_fake_pull(app_isolated, "qwen3-4b")
     jobs = app_isolated.state.model_pull_jobs
     jobs["qwen3-4b"].state = "running"
     r = client_isolated.post("/api/models/qwen3-4b/pull")
@@ -307,9 +321,15 @@ def test_pull_status_returns_job_dict(
     client_isolated: TestClient, fake_run_pull: list[dict[str, Any]]
 ) -> None:
     client_isolated.post("/api/models/qwen3-4b/pull")
-    r = client_isolated.get("/api/models/qwen3-4b/pull/status")
-    assert r.status_code == 200, r.text
-    body = r.json()
+    # The scheduled pull runs on the loop thread concurrently with the test.
+    deadline = time.monotonic() + 3.0
+    while True:
+        r = client_isolated.get("/api/models/qwen3-4b/pull/status")
+        assert r.status_code == 200, r.text
+        body = r.json()
+        if body["state"] == "completed" or time.monotonic() > deadline:
+            break
+        time.sleep(0.01)
     assert body["model_id"] == "qwen3-4b"
     assert body["state"] == "completed"
     assert body["bytes_downloaded"] == body["bytes_total"]
@@ -328,11 +348,8 @@ def test_pull_cancel_flips_flag(
 ) -> None:
     """Cancelling an in-flight job sets the cancel flag."""
     client_isolated.post("/api/models/qwen3-4b/pull")
+    _wait_for_fake_pull(app_isolated, "qwen3-4b")
     jobs = app_isolated.state.model_pull_jobs
-    # Let the fake pull finish first, or it overwrites the state set below.
-    deadline = time.monotonic() + 3.0
-    while jobs["qwen3-4b"].state != "completed" and time.monotonic() < deadline:
-        time.sleep(0.01)
     jobs["qwen3-4b"].state = "running"  # simulate live download
     r = client_isolated.post("/api/models/qwen3-4b/pull/cancel")
     assert r.status_code == 200, r.text
