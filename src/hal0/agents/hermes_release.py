@@ -899,7 +899,9 @@ def build_release(
             "describe": describe,
             "url": pin.url,
             "extras": list(extras),
-            # The gateway platforms' extras among them (hermes_platforms).
+            # The extras beyond the pin's: the gateway platforms' and those
+            # carried from a lazily installed generation (hermes_platforms).
+            # The next rebuild carries them again.
             "platform_extras": list(applied),
             "lock": locked,
             # Which install path ran: "lock" (uv export --frozen + pip sync
@@ -1962,16 +1964,26 @@ def ensure_release(
                     error="uv: not found next to the running interpreter or on PATH",
                     remedy="reinstall hal0 (uv ships in its venv), then " + REPAIR_REMEDY,
                 )
-            # The live venv's platform SDKs (the pre-layout venv's too) carry
-            # over, whether a lazy install or the operator put them there.
+            # Carried into the new release: the live venv's platform SDKs (the
+            # pre-layout venv's too), whether a lazy install or the operator put
+            # them there; the extras the live release itself carried; and every
+            # extra upstream recorded for a lazily installed generation (a TTS
+            # engine or search provider too). Without the last, a rebuild drops
+            # the feature, its next use installs it lazily again, and every
+            # update rebuilds once more (#2876).
             carried: set[str] = set()
             if layout.venv_link.exists():
                 carried.update(hpl.installed_platform_extras(layout.venv_link))
             live = live_release(layout)
-            generation = hpl.committed_generation(home, live.src) if live is not None else None
-            if generation is not None:
-                carried.update(hpl.installed_platform_extras(generation))
-            build_extras = sorted({*platform_extras, *carried})
+            if live is not None:
+                recorded = live.data.get("platform_extras")
+                if isinstance(recorded, list):
+                    carried.update(e for e in recorded if isinstance(e, str))
+                generation = hpl.committed_generation(home, live.src)
+                if generation is not None:
+                    carried.update(hpl.installed_platform_extras(generation))
+                    carried.update(hpl.generation_extras(home, live.src))
+            build_extras = sorted({*platform_extras, *carried} - hpl.NEVER_CARRY)
             log.info(
                 "hermes_release.build_start",
                 caller=caller,

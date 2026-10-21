@@ -129,7 +129,11 @@ board executor harvests are unchanged at NEW.
      holding that one extra, without the pin's, and every later Hermes
      process for the release boots from that generation instead of the
      verified release venv. Such a generation for the live release is
-     therefore a build trigger too.
+     therefore a build trigger too. The rebuild carries every extra upstream
+     recorded for the generation (`packages.venv.extras`), not only the
+     platform ones, and `release.json` keeps them for every later rebuild,
+     so a lazily installed feature costs one rebuild, never one per update
+     (#2876). `matrix` and the umbrella extras are never carried.
 2. **Amends ADR-0032 decision 9: a uv-managed 3.14 is preferred.**
    - The builder uses a uv-managed CPython 3.14 under
      `/var/lib/hal0/hermes/python` (see the amendment at the end of this

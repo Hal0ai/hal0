@@ -365,3 +365,33 @@ def committed_generation(hermes_home: Path, src: Path) -> Path | None:
     if not inside or not (environment / "pyvenv.cfg").is_file():
         return None
     return environment
+
+
+#: Extras a rebuild never carries from a generation or an earlier release:
+#: ``matrix`` builds python-olm from source, so a failed build would repeat on
+#: every update; the umbrella extras would install far more than the operator
+#: ever asked for (``[all]`` alone is most of upstream's optional set).
+NEVER_CARRY = frozenset({"matrix", "all", "termux", "termux-all"})
+
+
+def generation_extras(hermes_home: Path, src: Path) -> tuple[str, ...]:
+    """The extras upstream recorded for the committed generation of ``src``.
+
+    ``facts.json`` stores the selection as ``packages.venv.extras``
+    (``pm/lock.py:269-279``): every extra a lazy install asked for, platform
+    or not (a TTS engine, a search provider). :data:`NEVER_CARRY` is dropped.
+    ``()`` when no generation is committed.
+    """
+    import json
+
+    if committed_generation(hermes_home, src) is None:
+        return ()
+    state = Path(hermes_home) / "installs" / install_key(src)
+    try:
+        data = json.loads((state / "facts.json").read_text(encoding="utf-8-sig"))
+        extras = data["packages"]["venv"]["extras"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return ()
+    if not isinstance(extras, list):
+        return ()
+    return tuple(sorted({e for e in extras if isinstance(e, str) and e not in NEVER_CARRY}))
