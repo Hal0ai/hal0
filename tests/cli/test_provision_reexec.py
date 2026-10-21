@@ -145,14 +145,15 @@ def test_root_prelude_owns_the_release_and_python_dirs_before_resolving(
         "hal0.agents.hermes_provision.sweep_stale_agent_dropins_as_root", lambda: None
     )
     monkeypatch.setattr("hal0.agents.hermes_provision.resolve_hermes_python", _resolve)
+    monkeypatch.setattr(agent_commands, "_hand_uv_trees_to_hal0", lambda: events.append("hand"))
     with pytest.raises(RuntimeError):
         agent_commands._hermes_root_prelude({})
-    assert events == ["dirs", "resolve"]
+    # The uv trees are handed back to hal0 even when resolution fails.
+    assert events == ["dirs", "resolve", "hand"]
     assert "/var/lib/hal0/hermes" in agent_commands._HERMES_PRELUDE_DIRS
-    assert "/var/lib/hal0/python" in agent_commands._HERMES_PRELUDE_DIRS
-    assert {"/var/lib/hal0/hermes", "/var/lib/hal0/python"} <= set(
-        agent_commands._HERMES_AGENT_TREES
-    )
+    assert "/var/lib/hal0/python" not in agent_commands._HERMES_PRELUDE_DIRS
+    assert "/var/lib/hal0/python" not in agent_commands._HERMES_AGENT_TREES
+    assert {"/var/lib/hal0/hermes"} <= set(agent_commands._HERMES_AGENT_TREES)
 
 
 def test_prelude_dirs_leave_a_symlink_alone(

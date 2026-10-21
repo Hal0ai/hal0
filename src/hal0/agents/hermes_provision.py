@@ -59,7 +59,12 @@ from hal0.agents.anchor_window import (
     read_hermes_minimum_context,
     resolve_anchor_window,
 )
-from hal0.agents.hermes_layout import HERMES_VENV_PATH, release_root_for
+from hal0.agents.hermes_layout import (
+    HERMES_PYTHON_ROOT,
+    HERMES_UV_CACHE,
+    HERMES_VENV_PATH,
+    release_root_for,
+)
 from hal0.agents.role_slots import candidate_from_slot_mapping, resolve_role_slots
 from hal0.install.perms import SECRETS_DIR_MODE, ensure_shared_dir
 from hal0.slot_lifecycle_budget import STACK_APPLY_SLOT_ALLOWANCE, slot_lifecycle_timeout_s
@@ -441,14 +446,20 @@ UV_PYTHON_FALLBACK = "3.12"
 #: venv executes as the ``hal0`` user via a symlinked base interpreter, which
 #: would then be unreachable. A world-readable tree under /var/lib/hal0 keeps
 #: the interpreter usable by the service and survives root-homedir cleanups.
-UV_PYTHON_INSTALL_DIR = Path("/var/lib/hal0/python")
+#: It sits inside the hal0-owned release tree (/var/lib/hal0/hermes/python),
+#: not the older /var/lib/hal0/python, which is root-owned on existing hosts
+#: and which a build running as hal0 could not write (ADR-0034, decision 2
+#: amendment).
+UV_PYTHON_INSTALL_DIR = HERMES_PYTHON_ROOT
 
 #: The hal0 service state root — the fallback HOME for provisioning subprocesses
 #: (see :func:`_hal0_subprocess_env`). install.sh chowns ``.cache``/``.config``
 #: under here to hal0, so tools that write dot-dirs land in a hal0-owned tree.
 _HAL0_STATE_ROOT = Path("/var/lib/hal0")
-#: uv cache home, pinned under the hal0 state root (never ~/.cache → /root).
-UV_CACHE_DIR = _HAL0_STATE_ROOT / ".cache" / "uv"
+#: uv cache home, pinned inside the hal0-owned release tree (never ~/.cache →
+#: /root, and not /var/lib/hal0/.cache/uv, which an earlier root-run uv can
+#: have left root-owned).
+UV_CACHE_DIR = HERMES_UV_CACHE
 HERMES_PYTHON_ENV = Path("/etc/hal0/hermes-python.env")
 
 

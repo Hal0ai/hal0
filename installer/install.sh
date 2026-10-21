@@ -4006,24 +4006,24 @@ else
         else
             _gateway_gen_args=(--system --run-as-user hal0)
             unit_state_off "${_gateway_state}" && _gateway_gen_args+=(--no-start-now --no-start-on-login)
-            if env -u HERMES_HOME HOME=/var/lib/hal0 \
-                /var/lib/hal0/venvs/hermes/bin/hermes gateway install "${_gateway_gen_args[@]}" </dev/null; then
-                # ADR-0032 decision 12: the generator bakes the release it ran
-                # from (/var/lib/hal0/hermes/releases/<id>/…) into the unit, and
-                # the next activation prunes that release. Rewrite every such
-                # path to /var/lib/hal0/hermes/current/ before any enable; the
-                # helper also daemon-reloads and try-restarts the gateway. A
-                # unit that still names a release path is left disabled, the
-                # same posture as a failed generator run.
-                if ! "${VENV_DIR}/bin/python" -m hal0.agents.hermes_gateway_unit; then
-                    warn "hermes-gateway unit still names a release path — leaving the gateway disabled; re-run '${HAL0_BIN} agent install hermes'"
-                    if ! unit_state_off "${_gateway_state}"; then
-                        systemctl disable --now hermes-gateway.service >/dev/null 2>&1 || true
-                    fi
-                    _gateway_state="disabled"
+            env -u HERMES_HOME HOME=/var/lib/hal0 \
+                /var/lib/hal0/venvs/hermes/bin/hermes gateway install "${_gateway_gen_args[@]}" </dev/null \
+                || warn "hermes gateway install failed — Telegram/Discord bridge unavailable; continuing"
+            # ADR-0032 decision 12: the generator bakes the release it ran
+            # from (/var/lib/hal0/hermes/releases/<id>/…) into the unit, and
+            # the next activation prunes that release. Rewrite every such
+            # path to /var/lib/hal0/hermes/current/ before any enable; the
+            # helper also daemon-reloads and try-restarts the gateway. It runs
+            # even after a failed generator run, because a unit left from an
+            # earlier run can still name a release. A unit that still names a
+            # release path is left disabled, the same posture as a failed
+            # generator run; a gateway the operator disabled is left as is.
+            if ! "${VENV_DIR}/bin/python" -m hal0.agents.hermes_gateway_unit; then
+                warn "hermes-gateway unit still names a release path — leaving the gateway disabled; re-run '${HAL0_BIN} agent install hermes'"
+                if ! unit_state_off "${_gateway_state}"; then
+                    systemctl disable --now hermes-gateway.service >/dev/null 2>&1 || true
                 fi
-            else
-                warn "hermes gateway install failed — Telegram/Discord bridge unavailable; continuing"
+                _gateway_state="disabled"
             fi
         fi
         if unit_state_off "${_gateway_state}"; then

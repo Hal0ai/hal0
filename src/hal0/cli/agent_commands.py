@@ -454,14 +454,15 @@ def _enforce_hermes_single_pick(*, switch: bool) -> None:
 # The agent unit runs as this user (User= in installer/systemd/hal0-agent@.service).
 _AGENT_RUNTIME_USER = "hal0"
 # Trees the bootstrap creates as the installing user that the agent must own to
-# run: the venv link (exec), the release tree it points into, the uv-managed
-# interpreters, HERMES_HOME (read+write at runtime), bootstrap state. The venv
-# path is a symlink after the first migration; the write probe follows it into
-# the live release, and the release root is probed in its own right.
+# run: the venv link (exec), the release tree it points into (which also holds
+# the uv-managed interpreters and uv's cache), HERMES_HOME (read+write at
+# runtime), bootstrap state. The venv path is a symlink after the first
+# migration; the write probe follows it into the live release, and the release
+# root is probed in its own right. The legacy /var/lib/hal0/python is not
+# listed: it is root-owned on existing hosts and builds never write it.
 _HERMES_AGENT_TREES = (
     "/var/lib/hal0/venvs/hermes",
     "/var/lib/hal0/hermes",
-    "/var/lib/hal0/python",
     "/var/lib/hal0/.hermes",
     "/var/lib/hal0/state/agents/hermes",
 )
@@ -524,12 +525,11 @@ def _ensure_hermes_writable_or_die() -> None:
 
 #: hal0-owned setgid directories the root prelude creates before it resolves
 #: the interpreter (ADR-0032 decision 5): a uv fetch must land in a tree hal0
-#: already owns.
+#: already owns. uv's interpreters and cache live under /var/lib/hal0/hermes.
 _HERMES_PRELUDE_DIRS = (
     "/var/lib/hal0",
     "/var/lib/hal0/venvs",
     "/var/lib/hal0/hermes",
-    "/var/lib/hal0/python",
     "/var/lib/hal0/state",
     "/var/lib/hal0/state/agents",
 )
@@ -548,8 +548,9 @@ def _ensure_hermes_prelude_dirs() -> None:
         return
     # The hal0-owned parents; the provisioner creates its leaves (.hermes,
     # the venvs/hermes link, the releases, state/agents/hermes) under these as
-    # hal0 → born hal0:hal0. /var/lib/hal0/hermes holds the release tree and
-    # /var/lib/hal0/python the uv-managed interpreters (ADR-0032 decision 5).
+    # hal0 → born hal0:hal0. /var/lib/hal0/hermes holds the release tree, the
+    # uv-managed interpreters and uv's cache (ADR-0032 decision 5, ADR-0034
+    # decision 2 amendment).
     # A symlink here is left alone: chown/chmod would act on its target.
     for d in _HERMES_PRELUDE_DIRS:
         p = _Path(d)
@@ -566,6 +567,32 @@ def _ensure_hermes_prelude_dirs() -> None:
             # "venv install failed". Surface a hint for diagnosability rather than
             # failing the whole install on a single dir.
             console.print(f"[dim]hermes prelude: could not pre-own {d}: {exc}[/dim]")
+
+
+def _hand_uv_trees_to_hal0() -> None:
+    """``lchown`` the builder's uv interpreter and cache trees to hal0 (root only).
+
+    Walks without following symlinks, so nothing outside the trees changes.
+    """
+    import os as _os
+    import pwd as _pwd
+
+    from hal0.agents.hermes_layout import HERMES_PYTHON_ROOT, HERMES_UV_CACHE
+
+    try:
+        ent = _pwd.getpwnam(_AGENT_RUNTIME_USER)
+    except KeyError:
+        return
+    for root in (HERMES_PYTHON_ROOT, HERMES_UV_CACHE):
+        if root.is_symlink() or not root.is_dir():
+            continue
+        try:
+            _os.lchown(root, ent.pw_uid, ent.pw_gid)
+            for dirpath, dirnames, filenames in _os.walk(root, followlinks=False):
+                for name in (*dirnames, *filenames):
+                    _os.lchown(_os.path.join(dirpath, name), ent.pw_uid, ent.pw_gid)
+        except OSError as exc:
+            console.print(f"[dim]hermes prelude: could not hand {root} to hal0: {exc}[/dim]")
 
 
 def _hermes_root_prelude(terminal_env: dict[str, str] | None = None) -> None:
@@ -590,8 +617,9 @@ def _hermes_root_prelude(terminal_env: dict[str, str] | None = None) -> None:
     # runs as hal0 after the re-exec, so it must happen here, before the drop.
     sweep_stale_agent_dropins_as_root()
 
-    # Before the interpreter is resolved: a uv fetch writes /var/lib/hal0/python
-    # and must find it hal0-owned (ADR-0032 decision 5).
+    # Before the interpreter is resolved: a uv fetch writes
+    # /var/lib/hal0/hermes/python and must find its parent hal0-owned
+    # (ADR-0032 decision 5).
     _ensure_hermes_prelude_dirs()
 
     try:
@@ -601,6 +629,19 @@ def _hermes_root_prelude(terminal_env: dict[str, str] | None = None) -> None:
     except (RuntimeError, ValueError) as exc:
         console.print(f"[yellow]hermes Python 3.12 resolver hint:[/yellow] {exc}")
         raise
+    finally:
+        # A uv fetch run here, as root, writes root-owned files into the
+        # builder's hal0-owned tree; hand them back so the hal0 builder can
+        # prune them later.
+        _hand_uv_trees_to_hal0()
+
+    # The pre-layout /var/lib/hal0/python is root-owned on existing hosts, so
+    # only a root path may remove it, and only once no release, legacy venv or
+    # HAL0_HERMES_PYTHON value names an interpreter in it.
+    from hal0.agents.hermes_layout import remove_legacy_python_if_unused
+
+    if remove_legacy_python_if_unused(configured=_os.environ.get("HAL0_HERMES_PYTHON", "")):
+        console.print("[dim]removed the unused legacy /var/lib/hal0/python[/dim]")
 
     wrapper_src = REPO_ROOT_FOR_INSTALLER / "installer" / "wrappers" / "hermes"
     if wrapper_src.is_file():
@@ -1048,7 +1089,9 @@ def _install_hermes_gateway() -> None:
     # or the next activation's prune would delete what the gateway runs from.
     # A gateway the operator disabled is only warned about, never stopped here
     # (#2815): the disabled branch below keeps its own posture.
-    if rc == 0 and not _normalise_gateway_unit_or_warn(has_systemctl, turn_off=not disabled):
+    # Run even when the generator failed: a unit left from an earlier run can
+    # still name a release path, and enabling it would pin the gateway there.
+    if not _normalise_gateway_unit_or_warn(has_systemctl, turn_off=not disabled):
         return
 
     if disabled:

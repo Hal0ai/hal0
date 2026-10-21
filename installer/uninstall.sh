@@ -497,6 +497,8 @@ fi
 #       memory banks survive a re-install, drop them under --purge with VAR_DIR)
 rm_path "${VAR_DIR}/venvs"
 rm_path "${VAR_DIR}/hermes"
+# The pre-release-layout uv interpreter dir (root-owned on older installs).
+rm_path "${VAR_DIR}/python"
 rm_path "${VAR_DIR}/memory/hindsight/.venv"
 
 # ── PATH symlinks / CLI shims (system mode only) ──────────────────────────────

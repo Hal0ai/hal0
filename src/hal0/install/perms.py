@@ -463,11 +463,13 @@ def ownership_table(
             0o700,
             role="HERMES_HOME",
         ),
-        # The Hermes release tree and the uv-managed interpreters (ADR-0032
-        # decision 5). Builds run as hal0, so both top-level dirs must be
-        # hal0-owned; a root-run uv fetch from before the release layout left
-        # /var/lib/hal0/python root-owned. Top level only: the trees below hold
-        # executables and venvs whose modes are not hal0's to normalise.
+        # The Hermes release tree and the uv-managed interpreters inside it
+        # (ADR-0032 decision 5, ADR-0034 decision 2 amendment). Builds run as
+        # hal0, so both top-level dirs must be hal0-owned. Top level only: the
+        # trees below hold executables and venvs whose modes are not hal0's to
+        # normalise. The legacy /var/lib/hal0/python is deliberately absent:
+        # it is root-owned on existing hosts, builds never write it, and a
+        # root path removes it once nothing uses it.
         PermRow(
             paths.var_lib() / "hermes",
             state_owner,
@@ -476,7 +478,7 @@ def ownership_table(
             role="Hermes release tree",
         ),
         PermRow(
-            paths.var_lib() / "python",
+            paths.var_lib() / "hermes" / "python",
             state_owner,
             service_group,
             0o2775,

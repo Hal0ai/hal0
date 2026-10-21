@@ -48,10 +48,12 @@ class FakeTools:
         self.fail = fail
         self.minor = minor
         self.calls: list[list[str]] = []
+        self.envs: list[dict[str, str]] = []
 
     def __call__(self, argv: list[Any], **kw: Any) -> subprocess.CompletedProcess:
         argv = [str(a) for a in argv]
         self.calls.append(argv)
+        self.envs.append(dict(kw.get("env") or {}))
         out = ""
         if self.fail is not None and self.fail(argv):
             return subprocess.CompletedProcess(argv, 1, "", f"simulated failure: {argv[:3]}")
@@ -607,9 +609,217 @@ def test_prune_runs_uv_cache_prune_and_keeps_an_in_use_interpreter(tree) -> None
 def test_retired_interpreter_is_uninstalled_once_nothing_names_it(tree) -> None:
     layout = rel.Layout.for_venv(tree["venv"])
     assert _ensure(tree, FakeTools()).ok
-    (hp.UV_PYTHON_INSTALL_DIR / "cpython-3.11.9-linux-x86_64-gnu").mkdir(parents=True)
+    (layout.python_dir / "cpython-3.11.9-linux-x86_64-gnu").mkdir(parents=True)
     tools = FakeTools()
     rel.prune_releases(
         layout, run=tools, uv=UV, gateway_unit=tree["unit"], retired_minors=("3.11",)
     )
     assert tools.find(lambda c: c == [UV, "python", "uninstall", "3.11"])
+
+
+# ── ADR-0034 decision 2 amendment: uv's trees live inside the release tree ──
+
+
+def test_a_hal0_build_never_needs_the_root_owned_legacy_python_dir(tree) -> None:
+    """Existing hosts have /var/lib/hal0/python root:hal0 755; builds run as hal0.
+
+    The builder points uv's interpreters and cache into the hal0-owned
+    release tree, so an unwritable legacy dir cannot fail the build.
+    """
+    var_lib = tree["root"].parent
+    legacy = var_lib / "python"
+    (legacy / "cpython-3.12.15-linux-x86_64-gnu").mkdir(parents=True)
+    legacy.chmod(0o555)
+    stale_cache = var_lib / ".cache" / "uv"
+    stale_cache.mkdir(parents=True)
+    stale_cache.chmod(0o555)
+    try:
+        tools = FakeTools()
+        out = _ensure(tree, tools)
+        assert out.ok, out.error
+        layout = rel.Layout.for_venv(tree["venv"])
+        uv_envs = [e for c, e in zip(tools.calls, tools.envs, strict=True) if c[0] == UV]
+        assert uv_envs
+        for env in uv_envs:
+            assert env["UV_PYTHON_INSTALL_DIR"] == str(layout.python_dir)
+            assert env["UV_CACHE_DIR"] == str(layout.uv_cache)
+        assert layout.python_dir.parent == tree["root"]
+    finally:
+        legacy.chmod(0o755)
+        stale_cache.chmod(0o755)
+
+
+def test_production_uv_paths_sit_inside_the_release_tree() -> None:
+    from hal0.agents import hermes_layout as hl
+
+    assert hp.UV_PYTHON_INSTALL_DIR == hl.HERMES_PYTHON_ROOT == hl.HERMES_RELEASE_ROOT / "python"
+    assert hp.UV_CACHE_DIR == hl.HERMES_UV_CACHE == hl.HERMES_RELEASE_ROOT / ".cache" / "uv"
+    assert rel.Layout.for_venv(hl.HERMES_VENV_PATH).python_dir == hl.HERMES_PYTHON_ROOT
+
+
+def test_prune_never_touches_the_legacy_python_dir(tree) -> None:
+    var_lib = tree["root"].parent
+    legacy = var_lib / "python" / "cpython-3.12.15-linux-x86_64-gnu"
+    legacy.mkdir(parents=True)
+    tools = FakeTools()
+    assert _ensure(tree, tools).ok
+    assert legacy.is_dir()
+    assert not tools.find(lambda c: c[:3] == [UV, "python", "uninstall"])
+
+
+# ── legacy /var/lib/hal0/python removal (root paths only) ────────────────────
+
+
+def _legacy_root(tree) -> Path:
+    root = tree["root"].parent / "python"
+    (root / "cpython-3.12.15").mkdir(parents=True)
+    return root
+
+
+def test_legacy_python_is_kept_while_the_legacy_venv_uses_it(tree) -> None:
+    from hal0.agents import hermes_layout as hl
+
+    legacy = _legacy_root(tree)
+    venv = tree["venv"]
+    (venv / "bin").mkdir(parents=True)
+    (venv / "pyvenv.cfg").write_text(f"home = {legacy}/cpython-3.12.15/bin\nversion = 3.12.15\n")
+    assert hl.legacy_python_users(venv, legacy_root=legacy) == [str(venv)]
+    assert hl.remove_legacy_python_if_unused(venv, legacy_root=legacy) is False
+    assert legacy.is_dir()
+
+
+def test_legacy_python_is_kept_while_a_release_names_it(tree) -> None:
+    from hal0.agents import hermes_layout as hl
+
+    legacy = _legacy_root(tree)
+    rdir = tree["root"] / "releases" / "legacy-3ef6bbd20126"
+    rdir.mkdir(parents=True)
+    (rdir / "release.json").write_text(
+        json.dumps({"legacy": True, "python_home": f"{legacy}/cpython-3.12.15/bin"})
+    )
+    assert hl.remove_legacy_python_if_unused(tree["venv"], legacy_root=legacy) is False
+
+
+def test_legacy_python_is_kept_while_hal0_hermes_python_points_into_it(tree) -> None:
+    from hal0.agents import hermes_layout as hl
+
+    legacy = _legacy_root(tree)
+    configured = f"{legacy}/cpython-3.12.15/bin/python3.12"
+    assert (
+        hl.remove_legacy_python_if_unused(tree["venv"], legacy_root=legacy, configured=configured)
+        is False
+    )
+
+
+def test_unused_legacy_python_is_removed(tree) -> None:
+    from hal0.agents import hermes_layout as hl
+
+    legacy = _legacy_root(tree)
+    assert _ensure(tree, FakeTools()).ok  # a release on /usr/bin/python3.12
+    assert hl.remove_legacy_python_if_unused(tree["venv"], legacy_root=legacy) is True
+    assert not legacy.exists()
+
+
+def test_a_symlinked_legacy_python_is_never_followed(tree, tmp_path) -> None:
+    from hal0.agents import hermes_layout as hl
+
+    target = tmp_path / "elsewhere"
+    target.mkdir()
+    (target / "keep").write_text("x")
+    link = tree["root"].parent / "python"
+    link.parent.mkdir(parents=True, exist_ok=True)
+    link.symlink_to(target)
+    assert hl.remove_legacy_python_if_unused(tree["venv"], legacy_root=link) is False
+    assert (target / "keep").exists()
+
+
+# ── root callers drop to hal0 (§7.4) ─────────────────────────────────────────
+
+
+def test_a_root_caller_runs_the_builder_as_hal0(tree, monkeypatch) -> None:
+    seen: list[list[str]] = []
+
+    def _fake_run(cmd: list[str], **_kw: Any) -> subprocess.CompletedProcess:
+        seen.append(list(cmd))
+        payload = json.dumps({"status": "activated", "release_id": "r9", "unknown": 1})
+        return subprocess.CompletedProcess(cmd, 0, "log line\n" + payload + "\n", None)
+
+    monkeypatch.setattr(rel.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(rel, "_hal0_user_exists", lambda: True)
+    monkeypatch.setattr(
+        rel.shutil, "which", lambda name: "/usr/sbin/runuser" if name == "runuser" else None
+    )
+    monkeypatch.setattr(rel.subprocess, "run", _fake_run)
+    out = rel.ensure_release(caller="converge", venv=tree["venv"], wait=False, units=rel.NoUnits())
+    assert out.status == "activated" and out.release_id == "r9"
+    [cmd] = seen
+    assert cmd[:4] == ["runuser", "-u", "hal0", "--"]
+    assert cmd[-3:-1] == ["-m", "hal0.agents.hermes_release"]
+    kw = json.loads(cmd[-1])
+    assert kw["caller"] == "converge" and kw["wait"] is False and kw["no_units"] is True
+    assert kw["venv"] == str(tree["venv"])
+
+
+def test_the_child_entry_point_never_drops_again(tree, monkeypatch) -> None:
+    calls: list[dict[str, Any]] = []
+
+    def _fake_ensure(**kw: Any) -> rel.ReleaseOutcome:
+        calls.append(kw)
+        return rel.ReleaseOutcome(status="converged")
+
+    monkeypatch.setattr(rel, "ensure_release", _fake_ensure)
+    assert rel.main([json.dumps({"caller": "repair", "no_units": True})]) == 0
+    assert calls[0]["drop_root"] is False
+    assert isinstance(calls[0]["units"], rel.NoUnits)
+
+
+def test_a_first_install_that_fails_reverify_is_rebuilt_next_time(tree) -> None:
+    calls = {"n": 0}
+
+    def _probe(_py: Path) -> dict[str, Any]:
+        calls["n"] += 1
+        return {"ok": calls["n"] == 1, "error": "no mcp"}
+
+    out = _ensure(tree, FakeTools(), probe=_probe)
+    assert out.status == "activation_failed" and not out.flipped_back
+    layout = rel.Layout.for_venv(tree["venv"])
+    assert "failed its last re-verify" in rel.build_trigger(layout, PIN, "3.12")
+    again = _ensure(tree, FakeTools())
+    assert again.status == "activated"
+    assert rel.build_trigger(layout, PIN, "3.12") is None
+
+
+def test_a_flip_back_whose_link_swap_fails_still_restarts_units(tree, monkeypatch) -> None:
+    assert _ensure(tree, FakeTools()).ok
+    units = FakeUnits(active={rel.AGENT_UNIT})
+    real_swap = rel._swap_link
+    state = {"n": 0}
+
+    def _swap(link: Path, target: Any) -> None:
+        if link.name == "current":
+            state["n"] += 1
+            if state["n"] == 2:  # the flip-back's swap
+                raise OSError("ENOSPC")
+        real_swap(link, target)
+
+    monkeypatch.setattr(rel, "_swap_link", _swap)
+    n = {"p": 0}
+
+    def _probe(_py: Path) -> dict[str, Any]:
+        n["p"] += 1
+        return {"ok": n["p"] == 1, "error": "broken"}
+
+    out = _ensure(tree, FakeTools(), units, force=True, probe=_probe)
+    assert out.status == "activation_failed"
+    assert "flip-back failed" in out.error
+    assert units.state[rel.AGENT_UNIT] == "active"
+
+
+def test_prune_backstop_matches_a_bare_release_dir(tree) -> None:
+    first = _ensure(tree, FakeTools()).release_id
+    layout = rel.Layout.for_venv(tree["venv"])
+    tree["unit"].parent.mkdir(parents=True)
+    tree["unit"].write_text(f"WorkingDirectory={layout.releases / first}\n")
+    _ensure(tree, FakeTools(), force=True)
+    _ensure(tree, FakeTools(), force=True)
+    assert (layout.releases / first).is_dir()

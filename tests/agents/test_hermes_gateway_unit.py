@@ -113,8 +113,8 @@ def test_a_missing_unit_is_a_no_op(tmp_path: Path) -> None:
 
 def test_main_exits_two_when_a_release_path_remains(tmp_path: Path, monkeypatch) -> None:
     unit = tmp_path / "hermes-gateway.service"
-    # A release path without the trailing slash the prefix needs.
-    unit.write_text(f"ExecStart={ROOT}/releases/abc\n", encoding="utf-8")
+    # The releases/ directory itself, with no release id after it.
+    unit.write_text(f"ExecStart={ROOT}/releases/\n", encoding="utf-8")
     monkeypatch.setattr(gu.subprocess, "run", _Run())
     assert gu.main([str(unit)]) == 2
 
@@ -141,3 +141,12 @@ def test_module_form_is_runnable(tmp_path: Path) -> None:
         env={**__import__("os").environ, "PYTHONPATH": str(Path(gu.__file__).parents[2])},
     )
     assert proc.returncode == 0, proc.stderr
+
+
+def test_a_bare_release_directory_is_rewritten_too() -> None:
+    """A path that ends at the release id (no trailing slash) is also rewritten."""
+    text = (
+        f'WorkingDirectory={ROOT}/releases/abc\nX="{ROOT}/releases/abc" {ROOT}/releases/abc/src\n'
+    )
+    out = gu.normalise_text(text)
+    assert out == f'WorkingDirectory={ROOT}/current\nX="{ROOT}/current" {ROOT}/current/src\n'

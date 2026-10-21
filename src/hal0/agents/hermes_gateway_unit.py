@@ -39,13 +39,15 @@ GATEWAY_UNIT = "hermes-gateway.service"
 
 
 def _release_prefix_re(root: Path) -> re.Pattern[str]:
-    # A release id never contains a slash, quote or whitespace.
-    return re.compile(re.escape(f"{root}/releases/") + r"[^/\s'\"]+/")
+    # A release id never contains a slash, quote or whitespace. The id may be
+    # followed by a slash (a path inside the release), whitespace, a quote or
+    # the end of the line (the release directory itself).
+    return re.compile(re.escape(f"{root}/releases/") + r"[^/\s'\"]+(?=[/\s'\"]|$)", re.MULTILINE)
 
 
 def normalise_text(text: str, *, root: Path = HERMES_RELEASE_ROOT) -> str:
-    """Replace every ``<root>/releases/<id>/`` with ``<root>/current/``."""
-    return _release_prefix_re(root).sub(f"{root}/current/", text)
+    """Replace every ``<root>/releases/<id>`` path prefix with ``<root>/current``."""
+    return _release_prefix_re(root).sub(f"{root}/current", text)
 
 
 def remaining_release_paths(text: str, *, root: Path = HERMES_RELEASE_ROOT) -> list[str]:

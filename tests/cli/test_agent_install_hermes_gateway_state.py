@@ -218,8 +218,8 @@ def test_generated_unit_is_normalised_before_enable(monkeypatch, tmp_path) -> No
 
 
 def test_a_unit_still_naming_a_release_is_left_disabled(monkeypatch, tmp_path, capsys) -> None:
-    # No trailing slash after the id: the prefix rewrite cannot match it.
-    unit_text = f"ExecStart={RELEASE}\n"
+    # The releases/ directory with no id: the prefix rewrite cannot match it.
+    unit_text = "ExecStart=/var/lib/hal0/hermes/releases/\n"
     calls = _setup(monkeypatch, tmp_path, state="not-found", unit_text=unit_text)
     ac._install_hermes_gateway()
     assert not _enables(calls)
@@ -230,7 +230,13 @@ def test_a_unit_still_naming_a_release_is_left_disabled(monkeypatch, tmp_path, c
 def test_disabled_gateway_with_a_bad_unit_is_only_warned_about(
     monkeypatch, tmp_path, capsys
 ) -> None:
-    calls = _setup(monkeypatch, tmp_path, state="disabled", active=True, unit_text=f"X={RELEASE}\n")
+    calls = _setup(
+        monkeypatch,
+        tmp_path,
+        state="disabled",
+        active=True,
+        unit_text="X=/var/lib/hal0/hermes/releases/\n",
+    )
     ac._install_hermes_gateway()
     assert ["systemctl", "disable", "--now", UNIT] not in calls
     assert "could not be normalised" in _out(capsys)

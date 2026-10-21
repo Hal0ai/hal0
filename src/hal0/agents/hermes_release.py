@@ -20,7 +20,7 @@ needed (:func:`build_trigger`), builds a fresh release
 Builds run as the ``hal0`` user (§7.4). ``git`` and ``uv`` run with the
 HOME-sanitised environment the provisioner already uses, uv's cache under
 ``/var/lib/hal0/.cache/uv`` and managed interpreters under
-``/var/lib/hal0/python``. uv is the copy that ships in hal0's own venv
+``/var/lib/hal0/hermes/python``, both inside the hal0-owned release tree. uv is the copy that ships in hal0's own venv
 (:func:`find_uv`).
 """
 
@@ -149,6 +149,15 @@ class Layout:
     @property
     def venv_target(self) -> Path:
         return self.current / "venv"
+
+    @property
+    def python_dir(self) -> Path:
+        """uv-managed interpreters (``UV_PYTHON_INSTALL_DIR``)."""
+        return self.root / "python"
+
+    @property
+    def uv_cache(self) -> Path:
+        return self.root / ".cache" / "uv"
 
 
 @dataclass(frozen=True)
@@ -345,11 +354,18 @@ def _must(run: Runner, step: str, argv: list[Any], **kw: Any) -> subprocess.Comp
     return proc
 
 
-def build_env(*, hermes_home: Path | None = None) -> dict[str, str]:
-    """HOME-sanitised environment for git and uv (O15), with uv's paths pinned."""
+def build_env(*, hermes_home: Path | None = None, layout: Layout | None = None) -> dict[str, str]:
+    """HOME-sanitised environment for git and uv (O15), with uv's paths pinned.
+
+    uv's interpreters and cache live inside the release tree, which the hal0
+    user owns, never in ``/var/lib/hal0/python`` or ``/var/lib/hal0/.cache/uv``:
+    both can be root-owned from an earlier root-run uv, and builds run as hal0.
+    """
+    python_dir = layout.python_dir if layout is not None else hp.UV_PYTHON_INSTALL_DIR
+    cache_dir = layout.uv_cache if layout is not None else hp.UV_CACHE_DIR
     env = hp._hal0_subprocess_env(
-        UV_CACHE_DIR=str(hp.UV_CACHE_DIR),
-        UV_PYTHON_INSTALL_DIR=str(hp.UV_PYTHON_INSTALL_DIR),
+        UV_CACHE_DIR=str(cache_dir),
+        UV_PYTHON_INSTALL_DIR=str(python_dir),
         UV_NO_PROGRESS="1",
         GIT_TERMINAL_PROMPT="0",
     )
@@ -604,7 +620,7 @@ def build_release(
     A failure removes the half-built directory and raises
     :class:`ReleaseError`; the live release is untouched.
     """
-    env = build_env(hermes_home=hermes_home)
+    env = build_env(hermes_home=hermes_home, layout=layout)
     layout.releases.mkdir(parents=True, exist_ok=True)
     rid = _new_release_id(layout, ref[:12], stamp())
     rdir = layout.releases / rid
@@ -832,6 +848,25 @@ def _prepare_legacy_release(layout: Layout, *, stamp_file: Path | None) -> Relea
     return Release(id=rid, path=rdir, data=data)
 
 
+FAILED_MARKER = ".activation-failed"
+
+
+def _write_failed_marker(layout: Layout, release_id: str) -> None:
+    """Record that ``release_id`` is live but failed its re-verify.
+
+    A release is never written after its ``release.json`` exists, so the
+    marker lives at the tree root. :func:`build_trigger` rebuilds while it
+    names the live release; a successful activation removes it.
+    """
+    with contextlib.suppress(OSError):
+        (layout.root / FAILED_MARKER).write_text(release_id + "\n", encoding="utf-8")
+
+
+def _clear_failed_marker(layout: Layout) -> None:
+    with contextlib.suppress(FileNotFoundError):
+        (layout.root / FAILED_MARKER).unlink()
+
+
 def _config_copy_name(new_id: str) -> str:
     return f"config.yaml.before-{new_id}"
 
@@ -852,7 +887,7 @@ def _config_migrate(layout: Layout, *, run: Runner, hermes_home: Path) -> str | 
     """``hermes config migrate`` from the new release; a warning string on failure."""
     if not (hermes_home / "config.yaml").is_file():
         return None
-    env = build_env(hermes_home=hermes_home)
+    env = build_env(hermes_home=hermes_home, layout=layout)
     try:
         proc = run(
             [str(layout.venv_link / "bin" / "hermes"), "config", "migrate"], env=env, timeout=300
@@ -993,7 +1028,10 @@ def activate_release(
     error: str | None = None
     try:
         verify_release(
-            layout.venv_link, run=run, probe=probe, env=build_env(hermes_home=hermes_home)
+            layout.venv_link,
+            run=run,
+            probe=probe,
+            env=build_env(hermes_home=hermes_home, layout=layout),
         )
     except ReleaseError as exc:
         error = str(exc)
@@ -1007,20 +1045,30 @@ def activate_release(
     result.error = error
     if outgoing is None:
         # A first install has nothing to flip back to: the release stays live
-        # and the failure is reported.
+        # and the failure is reported. The marker makes the next update or
+        # provision rebuild it (build_trigger) instead of calling it converged.
+        _write_failed_marker(layout, new.id)
         return result
     for unit in recorded:
         units.stop(unit)
-    _swap_link(layout.current, Path("releases") / outgoing.id)
-    if old_previous:
-        _swap_link(layout.previous, Path("releases") / old_previous)
-    else:
-        with contextlib.suppress(FileNotFoundError):
-            layout.previous.unlink()
-    _restore_config(outgoing, new.id, hermes_home)
-    for unit in recorded:
-        units.start(unit)
-    result.flipped_back = True
+    try:
+        _swap_link(layout.current, Path("releases") / outgoing.id)
+        _restore_link(layout.previous, old_previous)
+        result.flipped_back = True
+    except OSError as exc:
+        result.error = f"{error}; flip-back failed: {exc}"
+        _write_failed_marker(layout, new.id)
+    finally:
+        copy = outgoing.path / _config_copy_name(new.id)
+        had_config = copy.exists() or (hermes_home / "config.yaml").exists()
+        restored = result.flipped_back and _restore_config(outgoing, new.id, hermes_home)
+        if result.flipped_back and not restored and had_config:
+            result.warnings.append(
+                f"config.yaml was not restored from {copy}; it may carry the failed "
+                "release's `hermes config migrate` changes"
+            )
+        for unit in recorded:
+            units.start(unit)
     return result
 
 
@@ -1045,6 +1093,11 @@ def _configured_python() -> str:
     return text.strip().removeprefix("HAL0_HERMES_PYTHON=")
 
 
+def _names_release(text: str, rdir: Path) -> bool:
+    """Whether ``text`` names ``rdir`` as a path (followed by ``/``, space, quote or EOL)."""
+    return re.search(re.escape(str(rdir)) + r"(?=[/\s'\"]|$)", text, re.MULTILINE) is not None
+
+
 def prune_releases(
     layout: Layout,
     *,
@@ -1058,7 +1111,7 @@ def prune_releases(
     A release the gateway unit still names is kept, with a warning naming the
     ``sudo hal0 agent install hermes`` remedy. Returns the warnings.
     """
-    env = build_env()
+    env = build_env(layout=layout)
     warnings: list[str] = []
     keep = {r for r in (_link_release_id(layout.current), _link_release_id(layout.previous)) if r}
     unit_text = _read_unit(gateway_unit)
@@ -1066,7 +1119,7 @@ def prune_releases(
         for rdir in sorted(layout.releases.iterdir()):
             if not rdir.is_dir() or rdir.name in keep:
                 continue
-            if f"{layout.releases / rdir.name}/" in unit_text:
+            if _names_release(unit_text, layout.releases / rdir.name):
                 warnings.append(
                     f"kept release {rdir.name}: {gateway_unit} still names it — run "
                     "`sudo hal0 agent install hermes` to regenerate and normalise the unit"
@@ -1077,7 +1130,7 @@ def prune_releases(
     if uv is not None:
         with contextlib.suppress(OSError, subprocess.SubprocessError):
             run([uv, "cache", "prune"], env=env, timeout=600)
-        managed = hp.UV_PYTHON_INSTALL_DIR
+        managed = layout.python_dir
         kept = [read_release(layout.releases / rid) for rid in keep]
         configured = _configured_python()
         for minor in retired_minors:
@@ -1110,7 +1163,7 @@ def sweep_incomplete(layout: Layout, *, run: Runner = _run) -> list[str]:
     if not layout.releases.is_dir():
         return removed
     keep = {r for r in (_link_release_id(layout.current), _link_release_id(layout.previous)) if r}
-    env = build_env()
+    env = build_env(layout=layout)
     for rdir in sorted(layout.releases.iterdir()):
         if rdir.is_dir() and rdir.name not in keep and not (rdir / RELEASE_JSON).exists():
             _remove_release(layout, rdir, run=run, env=env)
@@ -1130,6 +1183,12 @@ def build_trigger(layout: Layout, ref: str, minor: str) -> str | None:
         return "no live release"
     if live.legacy:
         return "the legacy release is live"
+    try:
+        failed = (layout.root / FAILED_MARKER).read_text(encoding="utf-8").strip()
+    except OSError:
+        failed = ""
+    if failed and failed == live.id:
+        return f"the live release {live.id} failed its last re-verify"
     if live.ref != ref:
         return f"live ref {live.ref[:12]} differs from target {ref[:12]}"
     if live.python_minor != minor:
@@ -1194,6 +1253,58 @@ def _default_stamp_file() -> Path:
     return stamp_path()
 
 
+def _hal0_user_exists() -> bool:
+    import pwd
+
+    try:
+        pwd.getpwnam("hal0")
+    except KeyError:
+        return False
+    return True
+
+
+def _ensure_as_hal0(**kw: Any) -> ReleaseOutcome:
+    """Run :func:`ensure_release` as the hal0 user and parse its outcome."""
+    payload = json.dumps({k: (str(v) if isinstance(v, Path) else v) for k, v in kw.items()})
+    inner = [
+        "env",
+        "-u",
+        "HERMES_HOME",
+        f"HOME={hp._hal0_service_home()}",
+        sys.executable,
+        "-m",
+        "hal0.agents.hermes_release",
+        payload,
+    ]
+    if shutil.which("runuser"):
+        cmd = ["runuser", "-u", "hal0", "--", *inner]
+    elif shutil.which("setpriv"):
+        cmd = ["setpriv", "--reuid", "hal0", "--regid", "hal0", "--init-groups", "--", *inner]
+    else:
+        cmd = ["sudo", "-n", "-u", "hal0", "--", *inner]
+    try:
+        proc = subprocess.run(  # nosec B603 — fixed argv, our own module
+            cmd, stdout=subprocess.PIPE, text=True, check=False, timeout=6 * _STEP_TIMEOUT_S
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return ReleaseOutcome(
+            status="build_failed", error=f"drop to hal0: {exc}", remedy=REPAIR_REMEDY
+        )
+    for line in reversed((proc.stdout or "").strip().splitlines()):
+        try:
+            data = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(data, dict) and "status" in data:
+            fields = {f for f in ReleaseOutcome.__dataclass_fields__}
+            return ReleaseOutcome(**{k: v for k, v in data.items() if k in fields})
+    return ReleaseOutcome(
+        status="build_failed",
+        error=f"the hal0 builder child exited {proc.returncode} without an outcome",
+        remedy=REPAIR_REMEDY,
+    )
+
+
 def ensure_release(
     *,
     caller: str,
@@ -1215,13 +1326,32 @@ def ensure_release(
     gateway_unit: Path = GATEWAY_UNIT_PATH,
     settle_s: float = DEFAULT_SETTLE_S,
     sleep: Callable[[float], None] = time.sleep,
+    drop_root: bool = True,
 ) -> ReleaseOutcome:
     """Converge the live Hermes release onto ``ref`` (default: the pin).
 
     ``force`` builds even when no trigger applies (``--repair``, a failed MCP
     client probe, ``hal0 agent upgrade``). ``wait=False`` returns ``busy``
     instead of waiting for the lock.
+
+    Builds run as ``hal0`` (§7.4). A root caller (``sudo hal0 update`` reaching
+    the converge or repair pass) re-runs this function as ``hal0`` in a child
+    process instead of building root-owned releases the next hal0 build could
+    neither update nor prune.
     """
+    if drop_root and os.geteuid() == 0 and _hal0_user_exists():
+        return _ensure_as_hal0(
+            caller=caller,
+            venv=venv,
+            requirements=requirements,
+            ref=ref,
+            force=force,
+            reason=reason,
+            wait=wait,
+            offline=offline,
+            hermes_home=hermes_home,
+            no_units=isinstance(units, NoUnits),
+        )
     layout = Layout.for_venv(venv if venv is not None else hp.HERMES_VENV_DEFAULT)
     home = Path(hermes_home) if hermes_home is not None else hp.HERMES_HOME_DEFAULT
     try:
@@ -1294,17 +1424,28 @@ def ensure_release(
                     error=str(exc),
                     remedy="sudo hal0 doctor perms --fix, then " + REPAIR_REMEDY,
                 )
-            act = activate_release(
-                new,
-                layout=layout,
-                units=units,
-                hermes_home=home,
-                run=run,
-                probe=probe,
-                settle_s=settle_s,
-                stamp_file=stamp,
-                sleep=sleep,
-            )
+            try:
+                act = activate_release(
+                    new,
+                    layout=layout,
+                    units=units,
+                    hermes_home=home,
+                    run=run,
+                    probe=probe,
+                    settle_s=settle_s,
+                    stamp_file=stamp,
+                    sleep=sleep,
+                )
+            except OSError as exc:
+                log.warning("hermes_release.activation_crashed", release=new.id, error=str(exc))
+                return ReleaseOutcome(
+                    status="activation_failed",
+                    reason=why,
+                    ref=target,
+                    release_id=new.id,
+                    error=f"activation: {exc}",
+                    remedy=REPAIR_REMEDY,
+                )
             out = ReleaseOutcome(
                 status="activated" if act.ok else "activation_failed",
                 reason=why,
@@ -1318,6 +1459,7 @@ def ensure_release(
                 migrated_legacy=act.migrated_legacy,
             )
             if act.ok:
+                _clear_failed_marker(layout)
                 warning = write_stamp(new, stamp)
                 if warning:
                     out.warnings.append(warning)
@@ -1338,3 +1480,19 @@ def ensure_release(
             return out
     except HermesBusy as exc:
         return ReleaseOutcome(status="busy", ref=target, holder=exc.holder, error=str(exc))
+
+
+def main(argv: list[str] | None = None) -> int:
+    """``python -m hal0.agents.hermes_release '<json kwargs>'`` (the hal0 child)."""
+    import dataclasses
+
+    args = list(sys.argv[1:] if argv is None else argv)
+    kw = json.loads(args[0]) if args else {}
+    no_units = bool(kw.pop("no_units", False))
+    out = ensure_release(units=NoUnits() if no_units else None, drop_root=False, **kw)
+    print(json.dumps(dataclasses.asdict(out)), flush=True)
+    return 0 if out.ok else 1
+
+
+if __name__ == "__main__":  # pragma: no cover — exercised through main()
+    raise SystemExit(main())

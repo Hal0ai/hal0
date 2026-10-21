@@ -447,6 +447,24 @@ def test_uninstall_unlinks_a_venv_symlink_and_removes_the_release_tree(
     assert (outside / "keep").exists()
 
 
+def test_uninstall_of_an_override_venv_leaves_the_release_tree(
+    driver: HermesDriver,
+    tmp_hal0_home: str,
+) -> None:
+    """A recorded override (venvs/hermes-canary) must not take /var/lib/hal0/hermes."""
+    var_lib = Path(tmp_hal0_home) / "var-lib" / "hal0"
+    root = var_lib / "hermes"
+    (root / "releases" / "r1" / "venv").mkdir(parents=True)
+    override = var_lib / "venvs" / "hermes-canary"
+    (override / "bin").mkdir(parents=True)
+    _stamp_provision(tmp_hal0_home, venv=override)
+    driver._runner = _FakeRunner()  # type: ignore[assignment]
+    driver.install(bearer_token="tok")
+    driver.uninstall()
+    assert not override.exists()
+    assert (root / "releases" / "r1" / "venv").is_dir()
+
+
 def test_uninstall_is_idempotent_when_venv_already_gone(
     driver: HermesDriver,
     tmp_hal0_home: str,
