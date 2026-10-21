@@ -62,6 +62,7 @@ class _SlowDirSize:
         return self.size
 
 
+@pytest.mark.timing
 async def test_dir_size_walks_run_off_the_event_loop(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
