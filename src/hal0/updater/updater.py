@@ -1401,11 +1401,7 @@ def _extract_tarball(
 
             # Python 3.12+ supports filter='data' which blocks unsafe members.
             # We already vetted paths above, but pass it through for defence-in-depth.
-            try:
-                tf.extractall(path=dest, filter="data")  # type: ignore[arg-type]
-            except TypeError:
-                # Older Python without the filter kwarg — already vetted.
-                tf.extractall(path=dest)
+            tf.extractall(path=dest, filter="data")
     except UpdateExtractError:
         raise
     except (tarfile.TarError, OSError) as exc:

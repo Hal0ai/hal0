@@ -123,7 +123,7 @@ async def _collect(request: Any, text: str = "go") -> list[dict[str, Any]]:
 
 
 def _run(coro):
-    return asyncio.get_event_loop_policy().new_event_loop().run_until_complete(coro)
+    return asyncio.run(coro)
 
 
 # A board whose task text is a prompt-injection payload.
