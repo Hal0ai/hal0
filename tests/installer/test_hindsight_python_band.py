@@ -182,3 +182,12 @@ def test_resolve_interpreter_out_of_band_override_errors(
     monkeypatch.setenv("HAL0_HINDSIGHT_PYTHON", "py310")
     with pytest.raises(subprocess.SubprocessError, match="HAL0_HINDSIGHT_PYTHON=py310"):
         engine_upgrade._resolve_interpreter(_Runner({"py310": "3.10"}), tmp_path)
+
+
+def test_hindsight_failures_are_non_fatal_in_install_sh() -> None:
+    text = _INSTALL_SH.read_text()
+    assert "no usable Python for the Hindsight memory engine" not in text
+    assert "HAL0_SKIP_HINDSIGHT=1\n    fi" in text  # resolver failure skips the block
+    block = text[text.index('"${hs_pip}" install "hindsight-api==${HINDSIGHT_PIN}"') :][:1400]
+    assert "die " not in block
+    assert block.count('rm -rf "${HS_DIR}/.venv"') == 2

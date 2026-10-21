@@ -834,8 +834,12 @@ info "Pull destination: ${MODELS_DIR}"
 # into the install. Sets HINDSIGHT_PY, consumed in the Hindsight block below.
 # Skipped in dev mode and when HAL0_SKIP_HINDSIGHT=1.
 if [[ "${DEV_MODE}" -eq 0 && "${HAL0_SKIP_HINDSIGHT:-0}" -ne 1 ]]; then
-    HAL0_HINDSIGHT_AUTOINSTALL=1 resolve_hindsight_python \
-        || die "no usable Python for the Hindsight memory engine (see above)"
+    if ! HAL0_HINDSIGHT_AUTOINSTALL=1 resolve_hindsight_python; then
+        # Not fatal: the rest of the install is useful without the memory
+        # engine. Treat this run as HAL0_SKIP_HINDSIGHT=1.
+        warn "Hindsight memory engine skipped for this run (no usable Python); fix the interpreter and re-run install.sh to add it"
+        HAL0_SKIP_HINDSIGHT=1
+    fi
 fi
 
 # Disk + port-collision checks only matter for the live install — dev
@@ -3634,12 +3638,18 @@ else
             # pip exit codes lie (#2021) and the /health poll below only fires
             # after the unit starts, so prove the install here: the package
             # must install AND import in the venv it was installed into.
+            # Failure is not fatal for the whole installer: warn, drop the
+            # half-built venv so the next run retries cleanly, and let the
+            # `-x hindsight-api` guard below skip the unit/health steps.
+            hs_pyver="$("${HS_DIR}/.venv/bin/python" -c 'import sys;print("%d.%d"%sys.version_info[:2])' 2>/dev/null || echo '?')"
             if ! "${hs_pip}" install "hindsight-api==${HINDSIGHT_PIN}" -q; then
-                hs_pyver="$("${HS_DIR}/.venv/bin/python" -c 'import sys;print("%d.%d"%sys.version_info[:2])' 2>/dev/null || echo '?')"
-                die "hindsight-api==${HINDSIGHT_PIN} failed to install on Python ${hs_pyver}; set HAL0_HINDSIGHT_PYTHON to a Python 3.11-3.14 interpreter and re-run, or set HAL0_SKIP_HINDSIGHT=1"
-            fi
-            if ! "${HS_DIR}/.venv/bin/python" -c 'import hindsight_api' 2>/dev/null; then
-                die "hindsight-api==${HINDSIGHT_PIN} installed but 'import hindsight_api' fails in ${HS_DIR}/.venv; remove that venv and re-run, or set HAL0_SKIP_HINDSIGHT=1"
+                warn "hindsight-api==${HINDSIGHT_PIN} failed to install on Python ${hs_pyver} — memory engine will be unavailable"
+                warn "  set HAL0_HINDSIGHT_PYTHON=/path/to/python3.X (3.11-3.14) and re-run, or set HAL0_SKIP_HINDSIGHT=1"
+                rm -rf "${HS_DIR}/.venv"
+            elif ! "${HS_DIR}/.venv/bin/python" -c 'import hindsight_api' 2>/dev/null; then
+                warn "hindsight-api==${HINDSIGHT_PIN} installed but 'import hindsight_api' fails on Python ${hs_pyver} — memory engine will be unavailable"
+                warn "  set HAL0_HINDSIGHT_PYTHON=/path/to/python3.X (3.11-3.14) and re-run, or set HAL0_SKIP_HINDSIGHT=1"
+                rm -rf "${HS_DIR}/.venv"
             fi
         else
             # Existing venv: upgrading it was the engine-upgrade migration
