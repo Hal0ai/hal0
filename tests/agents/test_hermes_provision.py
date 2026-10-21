@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -27,6 +28,30 @@ from hal0.agents import hermes_provision as hp
 from hal0.slots.state import DISPATCHABLE_STATES, SlotState
 
 from ._hermes_fakes import fake_ensure_release, fake_hermes_run
+
+_REAL_UV_AVAILABLE = hp._uv_available
+
+
+@pytest.fixture(autouse=True)
+def _hermetic_uv(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Never let the host's uv into a resolver test.
+
+    ``_uv_available`` looks next to ``sys.executable`` first. CI installs hal0
+    with ``uv sync``, so a real uv sits there and the uv-managed branch (first
+    in ADR-0034's order) ran against fake runners. Here only a uv the test's
+    own ``prober`` names, or its ``fallback_bin``, is ever found.
+    :class:`TestUvDiscovery`, which tests the discovery rule itself, opts out.
+    """
+    if request.cls is not None and request.cls.__name__ == "TestUvDiscovery":
+        return
+
+    def _uv_available(prober=shutil.which, *, fallback_bin: Path | None = None):  # type: ignore[no-untyped-def]
+        return _REAL_UV_AVAILABLE(
+            prober,
+            fallback_bin=fallback_bin if fallback_bin is not None else Path("/nonexistent/uv"),
+        )
+
+    monkeypatch.setattr(hp, "_uv_available", _uv_available)
 
 
 @pytest.fixture
@@ -994,10 +1019,26 @@ class TestUvDiscovery:
         assert find_uv(executable=tmp_path / "x" / "python", which=lambda _n: None) is None
 
 
-def test_ensure_python_prefers_a_qualifying_system_interpreter_over_uv(
-    monkeypatch: pytest.MonkeyPatch,
+def test_ensure_python_uses_uv_first_even_with_a_qualifying_system_interpreter(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    # A system Python 3.14 with a current SQLite wins without uv being invoked.
+    """ADR-0034 d2: uv-managed first; a good system python3.14 does not win."""
+    monkeypatch.delenv("HAL0_HERMES_PYTHON", raising=False)
+    managed = f"{hp.UV_PYTHON_INSTALL_DIR}/cpython-3.14-linux-x86_64-gnu/bin/python3.14"
+    runner = _UvRunner(managed)
+    out = hp._ensure_supported_python(
+        prober=_uv_prober("/usr/bin/python3.14"),
+        runner=runner,
+        env_path=tmp_path / "hermes-python.env",
+    )
+    assert out == managed
+    assert [a[1:3] for a in runner.ran if a[0] == "/usr/local/bin/uv"][0] == ["python", "install"]
+
+
+def test_ensure_python_falls_back_to_a_qualifying_system_interpreter_without_uv(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """No uv anywhere: the system python3.14 with a current SQLite is used."""
     monkeypatch.delenv("HAL0_HERMES_PYTHON", raising=False)
     ran: list[list[str]] = []
 
@@ -1010,7 +1051,7 @@ def test_ensure_python_prefers_a_qualifying_system_interpreter_over_uv(
     out = hp._ensure_supported_python(
         prober=lambda name: "/usr/bin/python3.14" if name == "python3.14" else None,
         runner=_Runner,
-        env_path=Path("/nonexistent/hermes-python.env"),
+        env_path=tmp_path / "hermes-python.env",
     )
     assert out == "/usr/bin/python3.14"
     assert all("uv" not in a[0] for a in ran)
