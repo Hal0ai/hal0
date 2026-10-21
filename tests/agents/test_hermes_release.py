@@ -1657,6 +1657,29 @@ def test_a_hal0_caller_reads_the_vaults_key_names_through_the_seam(tmp_path) -> 
     assert hpl.read_vault(vault.with_name("absent.env"), seam="/s", run=fail) == {}
 
 
+def test_a_vault_in_an_unreadable_directory_still_goes_through_the_seam(tmp_path) -> None:
+    """The real layout: the vault's directory is 0700 root, so hal0 cannot stat it.
+
+    On Python 3.12 ``Path.exists()`` raises PermissionError there; the hal0
+    side must not touch the path beyond ``os.access`` and ask the seam.
+    """
+    from hal0.agents import hermes_platforms as hpl
+
+    vault_dir = tmp_path / "agents"
+    vault_dir.mkdir()
+    vault = vault_dir / "hermes.env"
+    vault.write_text("TELEGRAM_BOT_TOKEN=secret\n")
+    vault_dir.chmod(0)
+    seam = lambda argv, **_kw: subprocess.CompletedProcess(argv, 0, "TELEGRAM_BOT_TOKEN\n", "")  # noqa: E731
+    try:
+        if os.access(vault, os.R_OK):
+            pytest.skip("root can read inside a 0000 directory")
+        got = hpl.read_vault(vault, seam="/s/hal0-agentenv", run=seam)
+    finally:
+        vault_dir.chmod(0o700)
+    assert got == {"TELEGRAM_BOT_TOKEN": "1"}
+
+
 def test_a_configured_platform_missing_from_the_live_release_triggers_a_rebuild(tree) -> None:
     """A box already on v0.22.2 without the SDKs (the 1.6.0 update) is rebuilt."""
     layout = _on_v0222(tree)
