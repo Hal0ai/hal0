@@ -4348,3 +4348,50 @@ def test_hal0_admin_mcp_timeout_covers_the_widest_bridge_tool():
         f"outer MCP client caps at {hp._HAL0_ADMIN_MCP_TIMEOUT_S}s while the "
         f"widest tool it fronts budgets {widest}s"
     )
+
+
+# ── _atomic_write keeps the owner on a root run (#2615) ─────────────────────
+
+
+def test_atomic_write_as_root_keeps_the_owner_of_the_replaced_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A root caller (install.sh's post-activation pass reaching the Hermes
+    config backstop) must not leave config.yaml root-owned."""
+    target = tmp_path / "config.yaml"
+    target.write_text("a: 1\n")
+    st = target.stat()
+    chowned: list[tuple[str, int, int]] = []
+    monkeypatch.setattr(hp.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(hp.os, "chown", lambda p, u, g: chowned.append((str(p), u, g)))
+    hp._atomic_write(target, "a: 2\n")
+    assert chowned == [(str(target) + ".tmp", st.st_uid, st.st_gid)]
+    assert target.read_text() == "a: 2\n"
+
+
+def test_atomic_write_as_root_never_replaces_with_a_wrong_owner(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "config.yaml"
+    target.write_text("a: 1\n")
+
+    def deny(*_a: object) -> None:
+        raise PermissionError("chown denied")
+
+    monkeypatch.setattr(hp.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(hp.os, "chown", deny)
+    with pytest.raises(PermissionError):
+        hp._atomic_write(target, "a: 2\n")
+    assert target.read_text() == "a: 1\n"
+    assert not (tmp_path / "config.yaml.tmp").exists()
+
+
+def test_atomic_write_unprivileged_never_chowns(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "config.yaml"
+    target.write_text("a: 1\n")
+    monkeypatch.setattr(hp.os, "geteuid", lambda: 1000)
+    monkeypatch.setattr(hp.os, "chown", lambda *_a: pytest.fail("no chown off root"))
+    hp._atomic_write(target, "a: 2\n")
+    assert target.read_text() == "a: 2\n"

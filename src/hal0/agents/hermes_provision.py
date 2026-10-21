@@ -3856,16 +3856,30 @@ def _atomic_write(path: Path, content: str, *, mode: int | None = None) -> str:
 
     The chmod happens on the TMP file, before the rename, so the target is
     never observable at the wrong mode.
+
+    A root caller also keeps the replaced file's owner and group. Without
+    that, a root run (``install.sh``'s post-activation pass reaching
+    ``hermes_arm._config_backstop``) would leave ``config.yaml`` root-owned
+    and the ``hal0`` agent unable to rewrite it.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
-    if mode is None:
-        with contextlib.suppress(OSError):
-            mode = stat.S_IMODE(path.stat().st_mode)
+    owner: tuple[int, int] | None = None
+    with contextlib.suppress(OSError):
+        st = path.stat()
+        owner = (st.st_uid, st.st_gid)
+        if mode is None:
+            mode = stat.S_IMODE(st.st_mode)
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(content, encoding="utf-8")
     if mode is not None:
         with contextlib.suppress(OSError):
             os.chmod(tmp, mode)
+    if owner is not None and os.geteuid() == 0:
+        try:
+            os.chown(tmp, *owner)
+        except OSError:
+            tmp.unlink(missing_ok=True)
+            raise
     os.replace(tmp, path)
     return content_hash(content)
 
