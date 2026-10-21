@@ -1525,7 +1525,10 @@ def test_an_unwritable_config_never_starts_the_new_release(update_box, monkeypat
 # ── platform extras: the gateway's messaging SDKs survive a rebuild ──────────
 
 #: The extras v0.22.2 declares that matter here (pyproject.toml at d923a5eb).
-_V0222_EXTRAS = ("web", "mcp", "telegram", "discord", "slack", "sms", "messaging", "matrix")
+_V0222_EXTRAS = (
+    "web", "mcp", "telegram", "discord", "slack", "sms", "messaging", "matrix", "all",
+    "edge-tts", "exa",
+)  # fmt: skip
 
 
 class PlatformLock(LockFor314):
@@ -1790,7 +1793,9 @@ def test_a_root_caller_reads_the_vault_and_hands_the_extras_to_the_hal0_child(
     assert json.loads(seen[0][-1])["platform_extras"] == ["sms", "telegram"]
 
 
-def _lazy_generation(tree: dict[str, Path], release: rel.Release, *pkgs: str) -> Path:
+def _lazy_generation(
+    tree: dict[str, Path], release: rel.Release, *pkgs: str, extras: tuple[str, ...] = ("discord",)
+) -> Path:
     """What upstream's pm leaves after a lazy install: a committed generation
     for the release's checkout under HERMES_HOME/installs (pm/lock.py:269-279)."""
     from hal0.agents import hermes_platforms as hpl
@@ -1804,7 +1809,7 @@ def _lazy_generation(tree: dict[str, Path], release: rel.Release, *pkgs: str) ->
         (site / pkg).mkdir()
     (state / "facts.json").write_text(
         json.dumps(
-            {"packages": {"venv": {"stamp": "s", "extras": ["discord"], "environment": str(gen)}}}
+            {"packages": {"venv": {"stamp": "s", "extras": list(extras), "environment": str(gen)}}}
         )
     )
     return gen
@@ -1843,3 +1848,42 @@ def test_a_generation_record_outside_its_install_is_ignored(tree) -> None:
     facts = tree["home"] / "installs" / hpl.install_key(live.src) / "facts.json"
     facts.write_text(json.dumps({"packages": {"venv": {"environment": str(live.venv)}}}))
     assert hpl.committed_generation(tree["home"], live.src) is None
+
+
+def test_a_lazily_installed_tts_extra_converges_after_one_rebuild(tree) -> None:
+    """#2876: a generation holding a non-platform extra (a TTS engine) is rebuilt
+    once, the rebuild carries the extra, and nothing triggers again, including
+    on a later rebuild of the release."""
+    layout = _on_v0222(tree)
+    managed = "/usr/bin/python3.14"
+    assert _ensure(tree, PlatformLock(), python_resolver=lambda _m: managed).ok
+    first = rel.live_release(layout)
+    _lazy_generation(tree, first, extras=("edge-tts",))
+    minor = rel.target_minor(NEW_PIN)
+    assert rel.build_trigger(layout, NEW_PIN, minor, hermes_home=tree["home"])
+
+    tools = PlatformLock()
+    assert _ensure(tree, tools, python_resolver=lambda _m: managed).status == "activated"
+    assert tools.exported == [["web", "mcp", "edge-tts", "sms"]]
+    assert rel.live_release(layout).data["platform_extras"] == ["edge-tts", "sms"]
+
+    # Converged: the release carries the engine, so no lazy install, no generation.
+    assert rel.build_trigger(layout, NEW_PIN, minor, ("sms",), hermes_home=tree["home"]) is None
+    again = PlatformLock()
+    assert _ensure(tree, again, python_resolver=lambda _m: managed).status == "converged"
+    assert again.calls == []
+    # A later rebuild (a repair, a pin bump) keeps it: release.json carries it on.
+    forced = PlatformLock()
+    assert _ensure(tree, forced, force=True, python_resolver=lambda _m: managed).ok
+    assert forced.exported == [["web", "mcp", "edge-tts", "sms"]]
+
+
+def test_matrix_umbrellas_and_undeclared_extras_are_never_carried(tree) -> None:
+    layout = _on_v0222(tree)
+    assert _ensure(tree, PlatformLock()).ok
+    _lazy_generation(
+        tree, rel.live_release(layout), extras=("matrix", "all", "exa", "not-declared")
+    )
+    tools = PlatformLock()
+    assert _ensure(tree, tools).ok
+    assert tools.exported == [["web", "mcp", "exa", "sms"]]
