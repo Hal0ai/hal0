@@ -4,7 +4,7 @@
 # `hal0 agent install hermes` builds Hermes as a release under
 # /var/lib/hal0/hermes (ADR-0032): a git mirror of the pinned commit plus a
 # venv that uv creates. uv ships in hal0's own venv (pyproject.toml), and it
-# fetches a managed Python when the box has no python3.12, so this script no
+# fetches the managed Python 3.14 the Hermes venv runs on, so this script no
 # longer installs uv. It ensures the rest of the OS toolchain a clean box may
 # lack: python3 with its venv module (the classic clean-Ubuntu trap),
 # python3-pip, pipx, and git, using lib/distro.sh for cross-distro naming.
@@ -33,7 +33,7 @@ info() { printf '[hermes-prereqs] %s\n' "$*"; }
 warn() { printf '[hermes-prereqs] WARN: %s\n' "$*" >&2; }
 die() { printf '[hermes-prereqs] ERROR: %s\n' "$*" >&2; exit 1; }
 
-PY="$(command -v python3.12 || command -v python3 || true)"
+PY="$(command -v python3 || true)"
 
 # ── Probe: is the toolchain already complete? ────────────────────────────────
 have_venv() { [ -n "${PY}" ] && "${PY}" -c 'import venv, ensurepip' >/dev/null 2>&1; }
@@ -95,7 +95,7 @@ if ! eval "${cmd}"; then
 fi
 
 # ── Verify ───────────────────────────────────────────────────────────────────
-PY="$(command -v python3.12 || command -v python3 || true)"
+PY="$(command -v python3 || true)"
 have_venv || die "python venv module still missing after install — check ${PY:-python3} and \`$(python_venv_hint)\`"
 have_pip || warn "python pip still not importable — bootstrap will bootstrap it via ensurepip"
 have_pipx || warn "pipx not on PATH after install — Hermes still installs into the managed venv; pipx is optional tooling"

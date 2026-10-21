@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -27,6 +28,30 @@ from hal0.agents import hermes_provision as hp
 from hal0.slots.state import DISPATCHABLE_STATES, SlotState
 
 from ._hermes_fakes import fake_ensure_release, fake_hermes_run
+
+_REAL_UV_AVAILABLE = hp._uv_available
+
+
+@pytest.fixture(autouse=True)
+def _hermetic_uv(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Never let the host's uv into a resolver test.
+
+    ``_uv_available`` looks next to ``sys.executable`` first. CI installs hal0
+    with ``uv sync``, so a real uv sits there and the uv-managed branch (first
+    in ADR-0034's order) ran against fake runners. Here only a uv the test's
+    own ``prober`` names, or its ``fallback_bin``, is ever found.
+    :class:`TestUvDiscovery`, which tests the discovery rule itself, opts out.
+    """
+    if request.cls is not None and request.cls.__name__ == "TestUvDiscovery":
+        return
+
+    def _uv_available(prober=shutil.which, *, fallback_bin: Path | None = None):  # type: ignore[no-untyped-def]
+        return _REAL_UV_AVAILABLE(
+            prober,
+            fallback_bin=fallback_bin if fallback_bin is not None else Path("/nonexistent/uv"),
+        )
+
+    monkeypatch.setattr(hp, "_uv_available", _uv_available)
 
 
 @pytest.fixture
@@ -479,21 +504,28 @@ def test_persisted_hermes_python_is_atomic_and_idempotent(tmp_path: Path) -> Non
     class _Runner:
         @staticmethod
         def run(_argv: list[str], **_kwargs: Any) -> Any:
-            return type("Result", (), {"stdout": "3.12\n"})()
+            return type("Result", (), {"stdout": "3.14\n"})()
 
-    hp._persist_hermes_python("/opt/python3.12", env_path, runner=_Runner)
+    hp._persist_hermes_python("/opt/python3.14", env_path, runner=_Runner)
     first = env_path.read_text()
-    hp._persist_hermes_python("/opt/python3.12", env_path, runner=_Runner)
-    assert env_path.read_text() == first == "HAL0_HERMES_PYTHON=/opt/python3.12\n"
+    hp._persist_hermes_python("/opt/python3.14", env_path, runner=_Runner)
+    assert env_path.read_text() == first == "HAL0_HERMES_PYTHON=/opt/python3.14\n"
     assert env_path.stat().st_mode & 0o777 == 0o644
 
 
 class _VersionRunner:
-    """Reports 3.12 for paths containing ``3.12`` and 3.11 otherwise."""
+    """Reports 3.14 for paths containing ``3.14`` and 3.11 otherwise.
+
+    The SQLite probe answers 3.46.1 (Ubuntu 26.04's) for a path containing
+    ``oldsqlite`` and 3.53.1 otherwise.
+    """
 
     @staticmethod
     def run(argv: list[str], **_kwargs: Any) -> Any:
-        out = "3.12\n" if "3.12" in argv[0] else "3.11\n"
+        if any("sqlite3" in str(a) for a in argv):
+            out = "3.46.1\n" if "oldsqlite" in argv[0] else "3.53.1\n"
+        else:
+            out = "3.14\n" if "3.14" in argv[0] else "3.11\n"
         return type("Result", (), {"stdout": out})()
 
 
@@ -504,12 +536,12 @@ def _unset_hermes_python_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("HAL0_HERMES_PYTHON")
 
 
-_GOOD = "/usr/bin/python3.12"
+_GOOD = "/usr/bin/python3.14"
 _STALE = "/opt/python3.11"
 
 
-def _which_312(name: str) -> str | None:
-    return _GOOD if name == "python3.12" else None
+def _which_314(name: str) -> str | None:
+    return _GOOD if name == "python3.14" else None
 
 
 def test_resolve_discards_invalid_env_value_and_reprobes(
@@ -520,7 +552,7 @@ def test_resolve_discards_invalid_env_value_and_reprobes(
     _unset_hermes_python_env(monkeypatch)
     with structlog.testing.capture_logs() as logs:
         out = hp.resolve_hermes_python(
-            env=env, env_path=env_path, prober=_which_312, runner=_VersionRunner
+            env=env, env_path=env_path, prober=_which_314, runner=_VersionRunner
         )
     assert out == _GOOD
     assert env["HAL0_HERMES_PYTHON"] == _GOOD
@@ -528,7 +560,7 @@ def test_resolve_discards_invalid_env_value_and_reprobes(
     warn = next(e for e in logs if e["event"] == "hermes-python-discarded")
     assert warn["log_level"] == "warning"
     assert warn["value"] == _STALE
-    assert "exactly 3.12" in warn["reason"]
+    assert "exactly 3.14" in warn["reason"]
     assert warn["chosen"] == _GOOD
 
 
@@ -538,7 +570,7 @@ def test_resolve_discards_invalid_file_value_and_persists_new(tmp_path: Path) ->
     env: dict[str, str] = {}
     with structlog.testing.capture_logs() as logs:
         out = hp.resolve_hermes_python(
-            env=env, env_path=env_path, prober=_which_312, runner=_VersionRunner
+            env=env, env_path=env_path, prober=_which_314, runner=_VersionRunner
         )
     assert out == _GOOD
     assert env_path.read_text() == f"HAL0_HERMES_PYTHON={_GOOD}\n"
@@ -552,7 +584,7 @@ def test_resolve_discards_malformed_file_and_reprobes(tmp_path: Path) -> None:
     env_path.write_text("HAL0_HERMES_PYTHON=/a\nHAL0_HERMES_PYTHON=/b\n")
     with structlog.testing.capture_logs() as logs:
         out = hp.resolve_hermes_python(
-            env={}, env_path=env_path, prober=_which_312, runner=_VersionRunner
+            env={}, env_path=env_path, prober=_which_314, runner=_VersionRunner
         )
     assert out == _GOOD
     assert env_path.read_text() == f"HAL0_HERMES_PYTHON={_GOOD}\n"
@@ -574,7 +606,7 @@ def test_resolve_leaves_unwritable_file_alone(
     env: dict[str, str] = {}
     with structlog.testing.capture_logs() as logs:
         out = hp.resolve_hermes_python(
-            env=env, env_path=env_path, prober=_which_312, runner=_VersionRunner
+            env=env, env_path=env_path, prober=_which_314, runner=_VersionRunner
         )
     assert out == _GOOD
     assert env["HAL0_HERMES_PYTHON"] == _GOOD
@@ -601,25 +633,25 @@ def test_persist_unwritable_dir_raises_oserror_and_leaves_no_tmp(tmp_path: Path)
 
 def test_resolve_valid_value_still_wins(tmp_path: Path) -> None:
     env_path = tmp_path / "hermes-python.env"
-    env_path.write_text("HAL0_HERMES_PYTHON=/opt/py3.12-file\n")
+    env_path.write_text("HAL0_HERMES_PYTHON=/opt/py3.14-file\n")
     with structlog.testing.capture_logs() as logs:
         out = hp.resolve_hermes_python(
-            env={"HAL0_HERMES_PYTHON": "/opt/py3.12-env"},
+            env={"HAL0_HERMES_PYTHON": "/opt/py3.14-env"},
             env_path=env_path,
-            prober=_which_312,
+            prober=_which_314,
             runner=_VersionRunner,
         )
-        assert out == "/opt/py3.12-env"
+        assert out == "/opt/py3.14-env"
         out = hp.resolve_hermes_python(
-            env={}, env_path=env_path, prober=_which_312, runner=_VersionRunner
+            env={}, env_path=env_path, prober=_which_314, runner=_VersionRunner
         )
-    assert out == "/opt/py3.12-file"
-    assert env_path.read_text() == "HAL0_HERMES_PYTHON=/opt/py3.12-file\n"
+    assert out == "/opt/py3.14-file"
+    assert env_path.read_text() == "HAL0_HERMES_PYTHON=/opt/py3.14-file\n"
     assert not any(e["event"] == "hermes-python-discarded" for e in logs)
 
 
 def test_resolve_still_raises_when_reprobe_finds_nothing(tmp_path: Path) -> None:
-    with pytest.raises(RuntimeError, match=r"Python 3\.12 is unavailable"):
+    with pytest.raises(RuntimeError, match=r"no usable Python 3\.14"):
         hp.resolve_hermes_python(
             env={"HAL0_HERMES_PYTHON": _STALE},
             env_path=tmp_path / "hermes-python.env",
@@ -634,7 +666,7 @@ def test_ensure_discards_invalid_env_value_and_persists(
 ) -> None:
     env_path = tmp_path / "hermes-python.env"
     monkeypatch.setenv("HAL0_HERMES_PYTHON", _STALE)
-    out = hp._ensure_supported_python(prober=_which_312, runner=_VersionRunner, env_path=env_path)
+    out = hp._ensure_supported_python(prober=_which_314, runner=_VersionRunner, env_path=env_path)
     assert out == _GOOD
     assert os.environ["HAL0_HERMES_PYTHON"] == _GOOD
     assert env_path.read_text() == f"HAL0_HERMES_PYTHON={_GOOD}\n"
@@ -644,7 +676,7 @@ def test_ensure_discards_malformed_file(tmp_path: Path, monkeypatch: pytest.Monk
     env_path = tmp_path / "hermes-python.env"
     env_path.write_text("garbage\n")
     _unset_hermes_python_env(monkeypatch)
-    out = hp._ensure_supported_python(prober=_which_312, runner=_VersionRunner, env_path=env_path)
+    out = hp._ensure_supported_python(prober=_which_314, runner=_VersionRunner, env_path=env_path)
     assert out == _GOOD
     assert env_path.read_text() == f"HAL0_HERMES_PYTHON={_GOOD}\n"
 
@@ -660,18 +692,18 @@ def test_ensure_unwritable_file_uses_reprobed_for_this_build(
         raise PermissionError("denied")
 
     monkeypatch.setattr(hp, "_persist_hermes_python", _denied)
-    out = hp._ensure_supported_python(prober=_which_312, runner=_VersionRunner, env_path=env_path)
+    out = hp._ensure_supported_python(prober=_which_314, runner=_VersionRunner, env_path=env_path)
     assert out == _GOOD
     assert env_path.read_text() == f"HAL0_HERMES_PYTHON={_STALE}\n"
 
 
 def test_ensure_valid_persisted_value_wins(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     env_path = tmp_path / "hermes-python.env"
-    env_path.write_text("HAL0_HERMES_PYTHON=/opt/py3.12-file\n")
+    env_path.write_text("HAL0_HERMES_PYTHON=/opt/py3.14-file\n")
     _unset_hermes_python_env(monkeypatch)
-    out = hp._ensure_supported_python(prober=_which_312, runner=_VersionRunner, env_path=env_path)
-    assert out == "/opt/py3.12-file"
-    assert env_path.read_text() == "HAL0_HERMES_PYTHON=/opt/py3.12-file\n"
+    out = hp._ensure_supported_python(prober=_which_314, runner=_VersionRunner, env_path=env_path)
+    assert out == "/opt/py3.14-file"
+    assert env_path.read_text() == "HAL0_HERMES_PYTHON=/opt/py3.14-file\n"
 
 
 def test_ensure_returns_none_when_reprobe_finds_nothing(
@@ -681,45 +713,215 @@ def test_ensure_returns_none_when_reprobe_finds_nothing(
     out = hp._ensure_supported_python(
         prober=lambda _name: None,
         runner=_VersionRunner,
-        running=(3, 14),
         fallback_bin=tmp_path / "no-such-uv",
         env_path=tmp_path / "hermes-python.env",
     )
     assert out is None
 
 
-def test_resolve_python_uses_only_exact_312() -> None:
+def test_resolve_python_probes_only_the_target_minor() -> None:
     probed: list[str] = []
 
     def _prober(name: str) -> str | None:
         probed.append(name)
-        return f"/opt/{name}" if name == "python3.12" else None
+        return f"/opt/{name}" if name == "python3.14" else None
 
-    assert hp._resolve_supported_python(prober=_prober) == "/opt/python3.12"
+    assert hp._resolve_supported_python(prober=_prober, runner=_VersionRunner) == "/opt/python3.14"
+    assert probed == ["python3.14"]
+    probed.clear()
+    assert hp._resolve_supported_python(prober=_prober, runner=_VersionRunner, minor="3.12") is None
     assert probed == ["python3.12"]
 
 
-def test_resolve_python_rejects_non_312_running_interpreters() -> None:
-    assert hp._resolve_supported_python(prober=lambda _name: None, running=(3, 11)) is None
-    assert hp._resolve_supported_python(prober=lambda _name: None, running=(3, 13)) is None
+def test_hal0s_own_interpreter_is_never_used(monkeypatch: pytest.MonkeyPatch) -> None:
+    """ADR-0034 d2: no running-interpreter branch, even when hal0 runs on 3.14."""
+    monkeypatch.setattr(hp.sys, "version_info", (3, 14, 0, "final", 0))
+    assert hp._resolve_supported_python(prober=lambda _n: None, runner=_VersionRunner) is None
 
 
-def test_resolve_python_finds_exact_python3_12() -> None:
+def test_system_314_with_a_new_sqlite_is_accepted() -> None:
     out = hp._resolve_supported_python(
-        prober=lambda name: "/usr/bin/python3.12" if name == "python3.12" else None
+        prober=lambda name: "/usr/bin/python3.14" if name == "python3.14" else None,
+        runner=_VersionRunner,
     )
-    assert out == "/usr/bin/python3.12"
+    assert out == "/usr/bin/python3.14"
 
 
-def test_resolve_python_falls_back_to_sys_executable_in_range() -> None:
-    out = hp._resolve_supported_python(prober=lambda _name: None, running=(3, 12))
-    assert out == sys.executable
+def test_system_314_with_an_old_sqlite_is_refused() -> None:
+    """ADR-0034 d2: Ubuntu 26.04's python3.14 links SQLite 3.46.1 (< 3.51.3)."""
+    out = hp._resolve_supported_python(
+        prober=lambda name: "/usr/bin/oldsqlite/python3.14" if name == "python3.14" else None,
+        runner=_VersionRunner,
+    )
+    assert out is None
 
 
-def test_resolve_python_rejects_unsupported_running_interpreter() -> None:
-    # Only Python 3.12 may be used for the managed Hermes venv.
-    assert hp._resolve_supported_python(prober=lambda _name: None, running=(3, 14)) is None
-    assert hp._resolve_supported_python(prober=lambda _name: None, running=(3, 10)) is None
+class _UvRunner:
+    """uv install/find succeed with a managed path; SQLite answers per path."""
+
+    def __init__(self, managed: str, *, managed_sqlite: str = "3.53.1") -> None:
+        self.managed = managed
+        self.managed_sqlite = managed_sqlite
+        self.ran: list[list[str]] = []
+
+    def run(self, argv: list[str], **_kw: Any) -> Any:
+        argv = [str(a) for a in argv]
+        self.ran.append(argv)
+        if any("sqlite3" in a for a in argv):
+            out = (
+                self.managed_sqlite
+                if argv[0] == self.managed
+                else ("3.46.1" if "oldsqlite" in argv[0] else "3.53.1")
+            )
+        elif argv[1:3] == ["python", "find"]:
+            out = self.managed
+        else:
+            out = ""
+        return type("R", (), {"stdout": out + "\n"})()
+
+
+def _uv_prober(system: str | None = "/usr/bin/python3.14"):
+    def prober(name: str) -> str | None:
+        return {"python3.14": system, "uv": "/usr/local/bin/uv"}.get(name)
+
+    return prober
+
+
+def test_uv_managed_comes_before_a_qualifying_system_python(tmp_path: Path) -> None:
+    """ADR-0034 d2 order: uv-managed first, even over a system 3.14 with a new SQLite."""
+    managed = f"{hp.UV_PYTHON_INSTALL_DIR}/cpython-3.14-linux-x86_64-gnu/bin/python3.14"
+    runner = _UvRunner(managed)
+    out = hp._ensure_supported_python(
+        prober=_uv_prober(),
+        runner=runner,
+        fallback_bin=Path("/nonexistent/uv"),
+        env_path=tmp_path / "e.env",
+    )
+    assert out == managed
+
+
+def test_uv_install_and_find_are_managed_only_and_sqlite_checked(tmp_path: Path) -> None:
+    managed = f"{hp.UV_PYTHON_INSTALL_DIR}/cpython-3.14-linux-x86_64-gnu/bin/python3.14"
+    runner = _UvRunner(managed)
+    hp._provision_python_via_uv(_uv_prober(), runner, fallback_bin=Path("/nonexistent/uv"))
+    install, find = (a for a in runner.ran if a[0] == "/usr/local/bin/uv")
+    assert install[1:] == ["python", "install", "3.14", "--managed-python", "--no-bin"]
+    assert find[1:] == ["python", "find", "3.14", "--managed-python"]
+    assert any(a[0] == managed and "sqlite3" in a[-1] for a in runner.ran)
+
+
+def test_a_managed_python_with_an_old_sqlite_falls_back_to_the_system(tmp_path: Path) -> None:
+    managed = f"{hp.UV_PYTHON_INSTALL_DIR}/cpython-3.14/bin/python3.14"
+    runner = _UvRunner(managed, managed_sqlite="3.40.0")
+    out = hp._ensure_supported_python(
+        prober=_uv_prober(),
+        runner=runner,
+        fallback_bin=Path("/nonexistent/uv"),
+        env_path=tmp_path / "e.env",
+    )
+    assert out == "/usr/bin/python3.14"
+
+
+def test_the_system_python_is_the_fallback_when_uv_cannot_fetch(tmp_path: Path) -> None:
+    class _NoFetch(_UvRunner):
+        def run(self, argv: list[str], **kw: Any) -> Any:
+            if str(argv[0]).endswith("/uv"):
+                raise subprocess.CalledProcessError(1, argv)
+            return super().run(argv, **kw)
+
+    out = hp._ensure_supported_python(
+        prober=_uv_prober(),
+        runner=_NoFetch("x"),
+        fallback_bin=Path("/nonexistent/uv"),
+        env_path=tmp_path / "e.env",
+    )
+    assert out == "/usr/bin/python3.14"
+
+
+def test_a_system_python_with_an_old_sqlite_is_never_the_fallback(tmp_path: Path) -> None:
+    class _NoFetch(_UvRunner):
+        def run(self, argv: list[str], **kw: Any) -> Any:
+            if str(argv[0]).endswith("/uv"):
+                raise subprocess.CalledProcessError(1, argv)
+            return super().run(argv, **kw)
+
+    out = hp._ensure_supported_python(
+        prober=_uv_prober("/usr/bin/oldsqlite/python3.14"),
+        runner=_NoFetch("x"),
+        fallback_bin=Path("/nonexistent/uv"),
+        env_path=tmp_path / "e.env",
+    )
+    assert out is None
+
+
+def test_the_resolver_targets_the_minor_it_is_given(tmp_path: Path) -> None:
+    managed = f"{hp.UV_PYTHON_INSTALL_DIR}/cpython-3.12-linux-x86_64-gnu/bin/python3.12"
+    runner = _UvRunner(managed)
+    out = hp._ensure_supported_python(
+        prober=lambda n: "/usr/local/bin/uv" if n == "uv" else None,
+        runner=runner,
+        fallback_bin=Path("/nonexistent/uv"),
+        env_path=tmp_path / "e.env",
+        minor="3.12",
+    )
+    assert out == managed
+    assert [a[3] for a in runner.ran if a[0] == "/usr/local/bin/uv"] == ["3.12", "3.12"]
+
+
+def test_the_pinned_ref_targets_312() -> None:
+    assert hp.pinned_target_minor() == "3.12"
+
+
+def test_an_override_with_an_old_sqlite_is_used_with_a_warning(tmp_path: Path) -> None:
+    override = "/opt/oldsqlite/python3.14"
+    with structlog.testing.capture_logs() as logs:
+        out = hp.resolve_hermes_python(
+            env={"HAL0_HERMES_PYTHON": override},
+            env_path=tmp_path / "hermes-python.env",
+            prober=_which_314,
+            runner=_VersionRunner,
+        )
+    assert out == override
+    warn = next(e for e in logs if e["event"] == "hermes-python-old-sqlite")
+    assert warn["log_level"] == "warning" and warn["sqlite"] == "3.46.1"
+
+
+def test_a_stale_312_value_is_discarded_and_reprobed_to_314(tmp_path: Path) -> None:
+    """A 3.12 value persisted for an old pin is re-probed when the target is 3.14."""
+    env_path = tmp_path / "hermes-python.env"
+    stale = "/var/lib/hal0/python/cpython-3.12.15-linux-x86_64-gnu/bin/python3.12"
+    env_path.write_text(f"HAL0_HERMES_PYTHON={stale}\n")
+    env: dict[str, str] = {}
+    with structlog.testing.capture_logs() as logs:
+        out = hp.resolve_hermes_python(
+            env=env,
+            env_path=env_path,
+            prober=_which_314,
+            runner=_VersionRunner,
+            fallback_bin=Path("/nonexistent/uv"),
+            minor="3.14",
+        )
+    assert out == _GOOD
+    assert env_path.read_text() == f"HAL0_HERMES_PYTHON={_GOOD}\n"
+    warn = next(e for e in logs if e["event"] == "hermes-python-discarded")
+    assert warn["value"] == stale and "exactly 3.14" in warn["reason"]
+
+
+def test_a_persisted_312_value_is_kept_while_the_pin_targets_312(tmp_path: Path) -> None:
+    """PR 3 alone changes nothing on a 3ef6bbd2 host."""
+    env_path = tmp_path / "hermes-python.env"
+    kept = "/opt/python3.12"
+    env_path.write_text(f"HAL0_HERMES_PYTHON={kept}\n")
+
+    class _R:
+        @staticmethod
+        def run(argv: list[str], **_kw: Any) -> Any:
+            out = "3.53.1" if any("sqlite3" in str(a) for a in argv) else "3.12"
+            return type("R", (), {"stdout": out + "\n"})()
+
+    out = hp.resolve_hermes_python(env={}, env_path=env_path, runner=_R, minor="3.12")
+    assert out == kept
+    assert env_path.read_text() == f"HAL0_HERMES_PYTHON={kept}\n"
 
 
 def test_preflight_fails_actionably_when_no_supported_python(
@@ -736,8 +938,9 @@ def test_preflight_fails_actionably_when_no_supported_python(
     io = hp.InstallIO(http_get=lambda *_a, **_kw: 200)
     out = hp._phase_preflight(hp._StepCtx(state=state, io=io))
     assert out.status == hp.PhaseStatus.FAIL
-    assert "3.12" in (out.reason or "")
-    assert "Python 3.12" in (out.reason or "")
+    minor = hp.pinned_target_minor()
+    assert f"Python {minor}" in (out.reason or "")
+    assert "3.51.3" in (out.reason or "")
     assert "uv" in (out.reason or "")
 
 
@@ -816,21 +1019,43 @@ class TestUvDiscovery:
         assert find_uv(executable=tmp_path / "x" / "python", which=lambda _n: None) is None
 
 
-def test_ensure_python_prefers_system_interpreter_over_uv() -> None:
-    # A qualifying system Python 3.12 must win without uv ever being invoked.
+def test_ensure_python_uses_uv_first_even_with_a_qualifying_system_interpreter(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """ADR-0034 d2: uv-managed first; a good system python3.14 does not win."""
+    monkeypatch.delenv("HAL0_HERMES_PYTHON", raising=False)
+    managed = f"{hp.UV_PYTHON_INSTALL_DIR}/cpython-3.14-linux-x86_64-gnu/bin/python3.14"
+    runner = _UvRunner(managed)
+    out = hp._ensure_supported_python(
+        prober=_uv_prober("/usr/bin/python3.14"),
+        runner=runner,
+        env_path=tmp_path / "hermes-python.env",
+    )
+    assert out == managed
+    first_uv = next(a for a in runner.ran if a[0] == "/usr/local/bin/uv")
+    assert first_uv[1:3] == ["python", "install"]
+
+
+def test_ensure_python_falls_back_to_a_qualifying_system_interpreter_without_uv(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """No uv anywhere: the system python3.14 with a current SQLite is used."""
+    monkeypatch.delenv("HAL0_HERMES_PYTHON", raising=False)
     ran: list[list[str]] = []
 
     class _Runner:
         @staticmethod
-        def run(argv: list[str], **_kw: Any) -> None:
-            ran.append(argv)
+        def run(argv: list[str], **_kw: Any) -> Any:
+            ran.append(list(argv))
+            return type("R", (), {"stdout": "3.53.1\n"})()
 
     out = hp._ensure_supported_python(
-        prober=lambda name: "/usr/bin/python3.12" if name == "python3.12" else None,
+        prober=lambda name: "/usr/bin/python3.14" if name == "python3.14" else None,
         runner=_Runner,
+        env_path=tmp_path / "hermes-python.env",
     )
-    assert out == "/usr/bin/python3.12"
-    assert ran == []
+    assert out == "/usr/bin/python3.14"
+    assert all("uv" not in a[0] for a in ran)
 
 
 def test_ensure_python_provisions_via_uv_when_no_system_interpreter() -> None:
@@ -838,29 +1063,35 @@ def test_ensure_python_provisions_via_uv_when_no_system_interpreter() -> None:
     envs: list[dict[str, str] | None] = []
 
     class _Result:
-        stdout = "/var/lib/hal0/python/cpython-3.12.5-linux-x86_64-gnu/bin/python3.12\n"
+        stdout = "/var/lib/hal0/python/cpython-3.14.7-linux-x86_64-gnu/bin/python3.14\n"
 
     class _Runner:
         @staticmethod
         def run(argv: list[str], *, env: dict[str, str] | None = None, **_kw: Any) -> _Result:
             ran.append(argv)
             envs.append(env)
+            if any("sqlite3" in str(x) for x in argv):
+                return type("R", (), {"stdout": "3.53.1\n"})()
             return _Result()
 
     out = hp._ensure_supported_python(
         prober=lambda name: "/usr/local/bin/uv" if name == "uv" else None,
         runner=_Runner,
-        running=(3, 14),
     )
-    assert out == "/var/lib/hal0/python/cpython-3.12.5-linux-x86_64-gnu/bin/python3.12"
-    # install runs before find, both pinned to UV_PYTHON_FALLBACK...
-    assert [a[1:3] for a in ran] == [["python", "install"], ["python", "find"]]
-    assert all(a[3] == hp.UV_PYTHON_FALLBACK for a in ran)
+    assert out == "/var/lib/hal0/python/cpython-3.14.7-linux-x86_64-gnu/bin/python3.14"
+    # install runs before find, both pinned to UV_PYTHON_FALLBACK, then the
+    # found interpreter's SQLite is checked...
+    uv_calls = [a for a in ran if a[0] == "/usr/local/bin/uv"]
+    assert [a[1:3] for a in uv_calls] == [["python", "install"], ["python", "find"]]
+    assert all(a[3] == hp.UV_PYTHON_FALLBACK for a in uv_calls)
+    assert uv_calls[0][4:] == ["--managed-python", "--no-bin"]  # no ~/.local/bin link
     # ...and both redirected to the world-readable install dir (the default
     # ~/.local/share/uv under root's 0700 home would be unreachable by the
     # hal0 user the venv runs as).
+    uv_envs = [e for a, e in zip(ran, envs, strict=True) if a[0] == "/usr/local/bin/uv"]
     assert all(
-        e is not None and e["UV_PYTHON_INSTALL_DIR"] == str(hp.UV_PYTHON_INSTALL_DIR) for e in envs
+        e is not None and e["UV_PYTHON_INSTALL_DIR"] == str(hp.UV_PYTHON_INSTALL_DIR)
+        for e in uv_envs
     )
 
 
@@ -880,22 +1111,23 @@ def test_provision_via_uv_sanitizes_leaked_root_home(
     envs: list[dict[str, str] | None] = []
 
     class _Result:
-        stdout = "/var/lib/hal0/python/cpython-3.12/bin/python3.12\n"
+        stdout = "/var/lib/hal0/python/cpython-3.14/bin/python3.14\n"
 
     class _Runner:
         @staticmethod
         def run(argv: list[str], *, env: dict[str, str] | None = None, **_kw: Any) -> _Result:
             envs.append(env)
+            if any("sqlite3" in str(x) for x in argv):
+                return type("R", (), {"stdout": "3.53.1\n"})()
             return _Result()
 
     out = hp._provision_python_via_uv(
         prober=lambda name: "/usr/local/bin/uv" if name == "uv" else None,
         runner=_Runner,
     )
-    assert out == "/var/lib/hal0/python/cpython-3.12/bin/python3.12"
+    assert out == "/var/lib/hal0/python/cpython-3.14/bin/python3.14"
     assert envs, "uv must have been invoked"
-    for e in envs:
-        assert e is not None
+    for e in (e for e in envs if e is not None):
         # HOME is forced off /root to the resolved hal0 home (or the state-root
         # fallback when the hal0 account is absent, as in CI).
         assert e["HOME"] != "/root"
@@ -932,12 +1164,14 @@ def test_provision_via_uv_creates_install_dir_world_traversable(
     modes_at_run: list[int] = []
 
     class _Result:
-        stdout = f"{install_dir}/cpython-3.12/bin/python3.12\n"
+        stdout = f"{install_dir}/cpython-3.14/bin/python3.14\n"
 
     class _Runner:
         @staticmethod
         def run(argv: list[str], **_kw: Any) -> _Result:
             modes_at_run.append(install_dir.stat().st_mode & 0o7777)
+            if any("sqlite3" in str(x) for x in argv):
+                return type("R", (), {"stdout": "3.53.1\n"})()
             return _Result()
 
     old_umask = os.umask(0o077)
@@ -945,12 +1179,11 @@ def test_provision_via_uv_creates_install_dir_world_traversable(
         out = hp._ensure_supported_python(
             prober=lambda name: "/usr/local/bin/uv" if name == "uv" else None,
             runner=_Runner,
-            running=(3, 14),
         )
     finally:
         os.umask(old_umask)
 
-    assert out == f"{install_dir}/cpython-3.12/bin/python3.12"
+    assert out == f"{install_dir}/cpython-3.14/bin/python3.14"
     # World-traversable despite the 077 umask (a plain mkdir would be 0700)...
     assert install_dir.is_dir()
     # 2775, the mode hal0.install.perms declares for it (setgid hal0 group).
@@ -966,7 +1199,6 @@ def test_ensure_python_returns_none_without_uv(tmp_path: Path) -> None:
     # assertion holds on a fleet box with a real uv install, not just in CI.
     out = hp._ensure_supported_python(
         prober=lambda _name: None,
-        running=(3, 14),
         fallback_bin=tmp_path / "no-such-uv",
     )
     assert out is None
@@ -981,7 +1213,6 @@ def test_ensure_python_returns_none_when_uv_fetch_fails() -> None:
     out = hp._ensure_supported_python(
         prober=lambda name: "/usr/local/bin/uv" if name == "uv" else None,
         runner=_Runner,
-        running=(3, 14),
     )
     assert out is None
 

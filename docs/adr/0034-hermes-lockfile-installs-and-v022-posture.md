@@ -88,14 +88,19 @@ board executor harvests are unchanged at NEW.
 ## Decision
 
 1. **Amends ADR-0032 decision 1: dependencies come from upstream's lock.**
-   - When the vetted ref ships a `uv.lock`, the builder installs the release
-     in three steps:
+   - When the vetted ref ships a `uv.lock` whose `requires-python` admits the
+     venv's interpreter minor, the builder installs the release in three
+     steps:
      1. `uv export --frozen --extra web --extra mcp --no-emit-project` from
         the checkout;
      2. `uv pip sync --require-hashes` of that export into the release venv;
      3. `uv pip install --no-deps -e "<checkout>"`.
-   - A ref without a lock (`3ef6bbd2`) keeps ADR-0032's
-     `uv pip install -e "<checkout>[web,mcp]"`.
+   - A ref without a lock, or whose lock cannot serve that minor, keeps
+     ADR-0032's `uv pip install -e "<checkout>[web,mcp]"`, and `release.json`
+     records which path ran (`install: lock|editable`). Correction
+     (2026-10-21): this line first said `3ef6bbd2` has no lock. It does ship
+     a `uv.lock`, with `requires-python = ">=3.11, <3.14"`, so it takes the
+     lock path on 3.12 and the editable path on 3.14.
    - The extras stay `web` and `mcp`, read from the requirements line as
      ADR-0032 decision 3 says.
 2. **Amends ADR-0032 decision 9: a uv-managed 3.14 is preferred.**
@@ -133,6 +138,24 @@ board executor harvests are unchanged at NEW.
      `hermes/python` or `hermes/.cache/uv` back to `hal0`. `hal0 doctor
      perms` audits the release tree and does not treat the root-owned
      legacy directory as an error.
+   - **Amendment (2026-10-21, #2615 PR 3): the target minor follows the
+     ref, and the interpreter order is override, uv, system.** This amends
+     decisions 1 and 2 above. The builder never installs a ref on an
+     interpreter its metadata excludes. A release is built on the newest of
+     3.14 and 3.12 that the ref's `requires-python` admits. hal0 records that
+     spec per vetted ref (`VETTED_HERMES_REQUIRES_PYTHON`), so the build
+     trigger and the root prelude know the minor before a checkout exists,
+     and the build refuses a checkout that disagrees with the record.
+     `3ef6bbd2` (`>=3.11,<3.14`) therefore stays on 3.12 under its own lock,
+     and the move to 3.14 arrives with the pin bump to a ref that requires it,
+     under that ref's lock. A ref with no usable lock falls back to the
+     editable `[extras]` install with `--exclude-newer` set to the commit
+     date, so the resolve is reproducible. The interpreter for that minor is:
+     a valid `HAL0_HERMES_PYTHON` override first; then a uv-managed CPython
+     (`--managed-python` on `uv python install` and `uv python find`, and the
+     found interpreter must link SQLite >= 3.51.3); then a system
+     `python<minor>` with that SQLite. hal0's own venv interpreter is never
+     used.
 3. **Amends ADR-0032 decisions 4 and 6: the mirror fetches tags, and the
    release check is offline-safe.**
    - `mirror.git` fetches tags along with the sha.

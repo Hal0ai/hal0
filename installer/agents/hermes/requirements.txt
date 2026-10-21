@@ -1,19 +1,22 @@
 # hal0 — Hermes-Agent runtime requirements.
 #
-# The hal0 bootstrap creates a managed venv at /var/lib/hal0/venvs/hermes/
-# and installs from this file. `hal0 agent upgrade hermes` installs only a
-# deliberately reviewed commit, runs `hermes config migrate` to reconcile the
-# config schema, and reprovisions.
+# The hal0 release builder (src/hal0/agents/hermes_release.py, ADR-0032) does
+# NOT hand this line to pip. It reads the URL, the extras and the commit from
+# it, checks the commit out of a hal0-owned git mirror, and installs it
+# editable into a uv-built Python 3.14 venv under /var/lib/hal0/hermes
+# (from the checkout's uv.lock when that lock serves 3.14). The commit must be
+# a full sha in VETTED_HERMES_REFS. `hal0 agent upgrade hermes --to=<sha>`
+# builds another vetted commit until the next `hal0 update`.
 #
 # Compatibility posture: pin the reviewed official v2026.7.20 (0.19.0) release
 # commit so provider, memory, and voice plugin contracts cannot drift underneath
 # the bundled hal0 adapters. Lift this pin only through the compatibility review.
 #
-# 0.19.0 is the ceiling for this install model. From v2026.7.30 (0.19.1) upstream
-# setup.py refuses to build a wheel or sdist outside its Nix build (d84e11af,
-# NousResearch/hermes-agent#68217), so a `git+` requirement no longer installs;
-# from v0.21.6 every core dependency is also gated to Python >= 3.14 while this
-# venv is built on 3.12. Moving past 0.19.0 needs a new install model first.
+# From v2026.7.30 (0.19.1) upstream setup.py refuses to build a wheel or sdist
+# outside its Nix build (d84e11af, NousResearch/hermes-agent#68217), so this
+# line is no longer pip-installable as written; the builder's editable install
+# from a checkout is the supported path. From v0.21.6 every core dependency is
+# gated to Python >= 3.14, which is why the venv is built on 3.14.
 #
 # The `web` extra pulls fastapi + uvicorn[standard], which the hal0 agent
 # unit needs: it runs `hermes serve` in web/dashboard mode (HERMES_WEB_DIST

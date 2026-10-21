@@ -53,7 +53,12 @@ from rich.console import Console
 from rich.table import Table
 
 import hal0
-from hal0.agents.hermes_layout import HERMES_PYTHON_ROOT, HERMES_RELEASE_ROOT, HERMES_VENV_PATH
+from hal0.agents.hermes_layout import (
+    HERMES_PYTHON_ROOT,
+    HERMES_RELEASE_ROOT,
+    HERMES_VENV_PATH,
+    SQLITE_MIN,
+)
 from hal0.cli.doctor_diagnosis import Diagnosis, Evidence, NextStep, render_json
 
 app = typer.Typer(
@@ -194,9 +199,67 @@ def doctor(
         console.print(f"[red]✗[/red]  failed to exec bash: {exc}")
         raise typer.Exit(2) from exc
 
+    # Advisory only: never changes the exit code.
+    _print_hermes_sqlite_row(check_hermes_sqlite())
+
     # Preserve the script's exit code verbatim so chained shells see a
     # non-zero on the first failed check.
     raise typer.Exit(result.returncode)
+
+
+def check_hermes_sqlite(
+    venv: Path | None = None, *, run: Callable[..., Any] = subprocess.run
+) -> dict[str, str]:
+    """The SQLite version the live Hermes interpreter links; ``{status, detail}``.
+
+    ``status`` is ``ok``, ``warn`` (older than 3.51.3, or the probe failed) or
+    ``absent`` (no Hermes venv).
+    """
+    venv = venv if venv is not None else HERMES_VENV_PATH
+    python = venv / "bin" / "python"
+    if not python.exists():
+        return {"status": "absent", "detail": "no Hermes venv"}
+    try:
+        proc = run(
+            [
+                str(python),
+                "-I",
+                "-c",
+                "import sqlite3, sys; print(sys.version.split()[0], sqlite3.sqlite_version)",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return {"status": "warn", "detail": f"could not run {python}: {exc}"}
+    parts = (getattr(proc, "stdout", "") or "").split()
+    if getattr(proc, "returncode", 1) != 0 or len(parts) != 2:
+        return {"status": "warn", "detail": f"could not read the SQLite version from {python}"}
+    py, sqlite = parts
+    try:
+        version = tuple(int(x) for x in sqlite.split("."))
+    except ValueError:
+        return {"status": "warn", "detail": f"unparsable SQLite version {sqlite!r}"}
+    floor = ".".join(map(str, SQLITE_MIN))
+    if version < SQLITE_MIN:
+        return {
+            "status": "warn",
+            "detail": (
+                f"Python {py} links SQLite {sqlite} (< {floor}): Hermes forces DELETE journal "
+                "mode and warns per database. Clear HAL0_HERMES_PYTHON so hal0 uses a "
+                "uv-managed interpreter, then `sudo hal0 agent reprovision hermes --repair`."
+            ),
+        }
+    return {"status": "ok", "detail": f"Python {py}, SQLite {sqlite} (>= {floor})"}
+
+
+def _print_hermes_sqlite_row(row: dict[str, str]) -> None:
+    if row["status"] == "absent":
+        return
+    mark = "[green]✓[/green]" if row["status"] == "ok" else "[yellow]⚠[/yellow]"
+    console.print(f"{mark}  hermes interpreter: {row['detail']}")
 
 
 # ── hal0 doctor verify ──────────────────────────────────────────────────────

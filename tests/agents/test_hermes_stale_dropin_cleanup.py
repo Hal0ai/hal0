@@ -117,7 +117,7 @@ def test_root_prelude_runs_sweep_before_privilege_drop(monkeypatch) -> None:
 
     calls: list[str] = []
 
-    def _stop() -> str:
+    def _stop(**_kw: object) -> str:
         raise RuntimeError("stop after sweep")
 
     monkeypatch.setattr(hp, "sweep_stale_agent_dropins_as_root", lambda: calls.append("sweep"))

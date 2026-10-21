@@ -20,7 +20,7 @@ once.
 
 These tests exercise the real script end-to-end via subprocess (same
 technique as ``tests/installer/test_bootstrap_prereq_parity.py``), with a
-minimal fake toolchain (python3.12 + pipx already "present") so only the
+minimal fake toolchain (python3 + pipx already "present") so only the
 git-specific behavior is under test, plus static-text assertions proving
 git is wired into every distro family's package list and the
 functional (not just presence) verification.
@@ -64,7 +64,7 @@ _FAKE_GIT_WORKING = "#!/usr/bin/env bash\necho 'git version 2.43.0'\nexit 0\n"
 
 @pytest.fixture
 def base_bin_dir(tmp_path: Path) -> Path:
-    """Real bash + a fake, always-satisfied python3.12/pipx toolchain — only
+    """Real bash + a fake, always-satisfied python3/pipx toolchain — only
     git varies per test."""
     d = tmp_path / "bin"
     d.mkdir()
@@ -72,7 +72,7 @@ def base_bin_dir(tmp_path: Path) -> Path:
         found = shutil.which(tool)
         if found:
             os.symlink(found, d / tool)
-    _write_exe(d / "python3.12", _FAKE_PYTHON312)
+    _write_exe(d / "python3", _FAKE_PYTHON312)
     _write_exe(d / "pipx", _FAKE_PIPX)
     # Tests run as a non-root user, so hermes-prereqs.sh's `id -u` check
     # keeps the `sudo ` prefix pkg_install_cmd emits — a passthrough fake

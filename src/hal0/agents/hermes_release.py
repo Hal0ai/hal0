@@ -298,9 +298,30 @@ def require_vetted(ref: str) -> str:
     return ref
 
 
-def target_minor() -> str:
-    """The interpreter minor every release is built on (decision 9)."""
-    return hp.UV_PYTHON_FALLBACK
+def target_minor(ref: str | None = None) -> str:
+    """The interpreter minor a release of ``ref`` is built on.
+
+    The newest supported minor the ref's ``requires-python`` admits
+    (``hermes_provision.hermes_target_minor``): 3.12 for 3ef6bbd2, which caps
+    below 3.14; 3.14 for a ref with no record. Raises :class:`ReleaseError`
+    when the ref admits no supported minor.
+    """
+    try:
+        return hp.hermes_target_minor(ref)
+    except ValueError as exc:
+        raise ReleaseError("python", f"{(ref or '?')[:12]}: {exc}") from exc
+
+
+def _checkout_requires_python(src: Path) -> str | None:
+    """``[project].requires-python`` of the checkout, or ``None``."""
+    import tomllib
+
+    try:
+        data = tomllib.loads((src / "pyproject.toml").read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, ValueError):
+        return None
+    value = (data.get("project") or {}).get("requires-python")
+    return value if isinstance(value, str) and value.strip() else None
 
 
 # ── Tools ────────────────────────────────────────────────────────────────────
@@ -502,18 +523,52 @@ def _ensure_mirror(layout: Layout, url: str, *, run: Runner, env: Mapping[str, s
     )
 
 
+def lock_serves(lock: Path, minor: str | None) -> bool:
+    """Whether ``lock`` exists and its ``requires-python`` admits ``minor``.
+
+    3ef6bbd2's lock says ``>=3.11, <3.14``, so it cannot serve the 3.14 venv;
+    v0.22.2's covers 3.14 only. ``minor=None`` accepts any lock. An unreadable
+    or unparsable ``requires-python`` is treated as not serving.
+    """
+    if not lock.is_file():
+        return False
+    if minor is None:
+        return True
+    try:
+        head = lock.read_text(encoding="utf-8")[:4096]
+    except (OSError, UnicodeDecodeError):
+        return False
+    m = re.search(r'^requires-python\s*=\s*"([^"]*)"', head, re.MULTILINE)
+    if m is None:
+        return False
+    from packaging.specifiers import InvalidSpecifier, SpecifierSet
+
+    try:
+        return SpecifierSet(m.group(1)).contains(f"{minor}.0", prereleases=True)
+    except InvalidSpecifier:
+        return False
+
+
 def install_command_lines(
-    *, uv: str, src: Path, venv: Path, extras: tuple[str, ...], export_file: Path
+    *,
+    uv: str,
+    src: Path,
+    venv: Path,
+    extras: tuple[str, ...],
+    export_file: Path,
+    minor: str | None = None,
+    exclude_newer: str | None = None,
 ) -> list[list[str]]:
     """The dependency-install commands for one release (ADR-0034 decision 1).
 
-    With ``uv.lock`` in the checkout: export the lock with hashes, sync it into
-    the venv with ``--require-hashes``, then install the project itself with
-    ``--no-deps``. Without one (3ef6bbd2): ADR-0032's
-    ``uv pip install -e "<src>[extras]"``.
+    With a ``uv.lock`` in the checkout whose ``requires-python`` admits the
+    venv's ``minor``: export the lock with hashes, sync it into the venv with
+    ``--require-hashes``, then install the project itself with ``--no-deps``.
+    Otherwise (no lock, or a lock that cannot serve this minor, such as
+    3ef6bbd2's on 3.14): ADR-0032's ``uv pip install -e "<src>[extras]"``.
     """
     python = str(venv / "bin" / "python")
-    if (src / "uv.lock").is_file():
+    if lock_serves(src / "uv.lock", minor):
         export = [uv, "export", "--frozen", "--project", str(src)]
         for extra in extras:
             export += ["--extra", extra]
@@ -524,7 +579,11 @@ def install_command_lines(
             [uv, "pip", "install", "--python", python, "--no-deps", "-e", str(src)],
         ]
     spec = f"{src}[{','.join(extras)}]" if extras else str(src)
-    return [[uv, "pip", "install", "--python", python, "-e", spec]]
+    argv = [uv, "pip", "install", "--python", python]
+    if exclude_newer:
+        # Reproducible resolve: nothing uploaded after the ref's commit date.
+        argv += ["--exclude-newer", exclude_newer]
+    return [[*argv, "-e", spec]]
 
 
 def build_web_ui(src: Path, venv: Path, *, run: Runner, env: Mapping[str, str]) -> str:
@@ -628,8 +687,14 @@ def build_release(
     probe: Callable[[Path], Mapping[str, Any]] = _default_probe,
     hermes_home: Path | None = None,
     stamp: Callable[[], str] = _utc_stamp,
+    minor: str | None = None,
 ) -> Release:
     """Build and verify a new release of ``ref``; ``release.json`` is written last.
+
+    ``minor`` is the interpreter minor ``python`` was resolved for (from the
+    vetted ``requires-python`` record). The checkout's own ``requires-python``
+    must lead to the same minor, or the build stops before installing: hal0
+    never installs a ref on an interpreter its metadata excludes.
 
     A failure removes the half-built directory and raises
     :class:`ReleaseError`; the live release is untouched.
@@ -665,11 +730,38 @@ def build_release(
             ["git", "-C", layout.mirror, "worktree", "add", "--detach", src, ref],
             env=env,
         )
+        requires_python = _checkout_requires_python(src)
+        try:
+            checkout_minor = hp.hermes_target_minor(ref, requires_python)
+        except ValueError as exc:
+            raise ReleaseError("python", f"{ref[:12]}: {exc}") from exc
+        if minor is not None and checkout_minor != minor:
+            raise ReleaseError(
+                "python",
+                f"{ref[:12]} declares requires-python {requires_python!r} (minor "
+                f"{checkout_minor}), but its vetted record says {minor}; fix "
+                "VETTED_HERMES_REQUIRES_PYTHON",
+            )
+        minor = checkout_minor
         _must(run, "venv", [uv, "venv", "--quiet", "--python", python, venv], env=env)
-        locked = (src / "uv.lock").is_file()
+        locked = lock_serves(src / "uv.lock", minor)
+        exclude_newer = None
+        if not locked:
+            # The no-lock fallback resolves from PyPI; pin the resolve to the
+            # ref's commit date so a rebuild of the same ref is reproducible.
+            with contextlib.suppress(OSError, subprocess.SubprocessError):
+                proc = run(["git", "-C", str(src), "log", "-1", "--format=%cI", ref], env=env)
+                if proc.returncode == 0:
+                    exclude_newer = proc.stdout.strip() or None
         export_file = rdir / "requirements.lock.txt"
         for argv in install_command_lines(
-            uv=uv, src=src, venv=venv, extras=pin.extras, export_file=export_file
+            uv=uv,
+            src=src,
+            venv=venv,
+            extras=pin.extras,
+            export_file=export_file,
+            minor=minor,
+            exclude_newer=exclude_newer,
         ):
             _must(run, "install", argv, env=env)
         web_dist = build_web_ui(src, venv, run=run, env=env)
@@ -690,6 +782,12 @@ def build_release(
             "url": pin.url,
             "extras": list(pin.extras),
             "lock": locked,
+            # Which install path ran: "lock" (uv export --frozen + pip sync
+            # --require-hashes + --no-deps -e) or "editable" (-e "<src>[extras]").
+            "install": "lock" if locked else "editable",
+            "lock_present": (src / "uv.lock").is_file(),
+            "requires_python": requires_python,
+            "exclude_newer": exclude_newer,
             "python": python,
             "python_minor": _minor_of(cfg.get("version_info") or cfg.get("version")),
             "web_dist": web_dist,
@@ -1304,8 +1402,10 @@ def prune_releases(
         managed = layout.python_dir
         kept = [read_release(layout.releases / rid) for rid in keep]
         configured = _configured_python()
+        live = live_release(layout)
+        live_minor = live.python_minor if live is not None else None
         for minor in retired_minors:
-            if minor == target_minor():
+            if minor == live_minor:
                 continue
             if not any(managed.glob(f"cpython-{minor}*")):
                 continue
@@ -1317,7 +1417,10 @@ def prune_releases(
                 )
                 for r in kept
             )
-            if in_use or configured.startswith(str(managed)):
+            # A configured HAL0_HERMES_PYTHON pointing at an interpreter of
+            # this minor in the managed tree keeps it; one on the target
+            # minor does not.
+            if in_use or configured.startswith(str(managed / f"cpython-{minor}")):
                 continue
             with contextlib.suppress(OSError, subprocess.SubprocessError):
                 run([uv, "python", "uninstall", minor], env=env, timeout=300)
@@ -1522,7 +1625,7 @@ def ensure_release(
     units: Any = None,
     run: Runner = _run,
     probe: Callable[[Path], Mapping[str, Any]] = _default_probe,
-    python_resolver: Callable[[], str | None] | None = None,
+    python_resolver: Callable[[str], str | None] | None = None,
     uv: str | None = None,
     stamp_file: Path | None = None,
     gateway_unit: Path = GATEWAY_UNIT_PATH,
@@ -1572,7 +1675,13 @@ def ensure_release(
             # resolvable venvs/hermes.
             relinked = repair_venv_link(layout)
             stranded = restart_stranded_units(layout, units)
-            trigger = build_trigger(layout, target, target_minor())
+            try:
+                minor = target_minor(target)
+            except ReleaseError as exc:
+                return ReleaseOutcome(
+                    status="build_failed", ref=target, error=str(exc), remedy=REPAIR_REMEDY
+                )
+            trigger = build_trigger(layout, target, minor)
             if trigger is None and not force:
                 notes = []
                 if relinked:
@@ -1600,14 +1709,16 @@ def ensure_release(
                     remedy="sudo hal0 doctor perms --fix, or sudo hal0 agent reprovision hermes",
                 )
             resolver = (
-                python_resolver if python_resolver is not None else hp._ensure_supported_python
+                python_resolver
+                if python_resolver is not None
+                else (lambda m: hp._ensure_supported_python(minor=m))
             )
             try:
-                python = resolver()
+                python = resolver(minor)
             except (RuntimeError, ValueError, OSError) as exc:
                 python, py_error = None, str(exc)
             else:
-                py_error = hp._python_range_error()
+                py_error = hp._python_range_error(minor)
             if not python:
                 return ReleaseOutcome(
                     status="build_failed",
@@ -1636,6 +1747,7 @@ def ensure_release(
                     run=run,
                     probe=probe,
                     hermes_home=home,
+                    minor=minor,
                 )
             except (ReleaseError, OSError) as exc:
                 step = getattr(exc, "step", "build")

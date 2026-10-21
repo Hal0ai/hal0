@@ -218,3 +218,39 @@ def test_venv_row_follows_the_symlink_into_a_hal0_owned_release(tmp_path: Path) 
     )
     venv_row = next(r for r in rows if r["label"] == "hermes venv")
     assert venv_row["status"] == "ok"
+
+
+def _venv_with_python(tmp_path: Path) -> Path:
+    venv = tmp_path / "venv"
+    (venv / "bin").mkdir(parents=True)
+    (venv / "bin" / "python").write_text("")
+    return venv
+
+
+def _proc(out: str, rc: int = 0):
+    return type("P", (), {"stdout": out, "returncode": rc})()
+
+
+def test_hermes_sqlite_row_ok_for_a_current_sqlite(tmp_path: Path) -> None:
+    row = dc.check_hermes_sqlite(
+        _venv_with_python(tmp_path), run=lambda *a, **k: _proc("3.14.7 3.53.1\n")
+    )
+    assert row["status"] == "ok" and "SQLite 3.53.1" in row["detail"]
+
+
+def test_hermes_sqlite_row_warns_below_3_51_3(tmp_path: Path) -> None:
+    row = dc.check_hermes_sqlite(
+        _venv_with_python(tmp_path), run=lambda *a, **k: _proc("3.14.4 3.46.1\n")
+    )
+    assert row["status"] == "warn" and "3.46.1" in row["detail"] and "3.51.3" in row["detail"]
+
+
+def test_hermes_sqlite_row_absent_without_a_venv(tmp_path: Path) -> None:
+    assert dc.check_hermes_sqlite(tmp_path / "none")["status"] == "absent"
+
+
+def test_hermes_sqlite_floor_is_defined_once() -> None:
+    from hal0.agents import hermes_layout
+    from hal0.agents import hermes_provision as hp
+
+    assert dc.SQLITE_MIN is hermes_layout.SQLITE_MIN is hp.SQLITE_MIN == (3, 51, 3)

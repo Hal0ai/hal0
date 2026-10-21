@@ -27,10 +27,17 @@ request.
 sudo hal0 agent install hermes
 ```
 
-Installing Hermes runs a three-step foreground pipeline: ensure the
-toolchain (Python ≥3.12, venv stdlib, pip/pipx), provision the managed
-venv and register the agent, then enable and start the systemd unit
-(`hal0-agent@hermes`).
+Installing Hermes runs a three-step foreground pipeline. First it ensures
+the OS toolchain: git, plus python3 with venv and pip, and pipx. Then it
+builds a Hermes release and registers the agent. Last, it enables and
+starts the systemd unit (`hal0-agent@hermes`).
+
+The Hermes venv runs on the Python minor the pinned commit admits: 3.12
+for today's pin, 3.14 once the pin moves to a commit that requires it. By
+default the uv that ships with hal0 fetches a managed interpreter, which
+needs the network; a system one is used only when uv cannot fetch one and
+it links SQLite 3.51.3 or newer. See the
+[interpreter policy](/docs/operate/services#hermes-interpreter-policy).
 
 Run it as root — provisioning writes under root-owned `/var/lib/hal0` and
 then chowns the provisioned trees to the shared agent runtime user. As a
