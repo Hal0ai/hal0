@@ -957,10 +957,10 @@ Apache 2.0. See [`LICENSE`](./LICENSE).
 
 ## Contributing
 
-The contribution model is still being decided. File issues for discussion;
-PRs aren't being accepted from outside contributors yet. See
-[`CONTRIBUTING.md`](./CONTRIBUTING.md) for the test tiers and the eventual
-flow. For questions and general chat, join the
+Pull requests from outside contributors are welcome, and a maintainer
+reviews each one. For a large change, open an issue first. See
+[`CONTRIBUTING.md`](./CONTRIBUTING.md) for the sign-off requirement, the test
+tiers and the review flow. For questions and general chat, join the
 [hal0 Discord](https://discord.gg/7M4y6dcUyq).
 
 This project adheres to the [Contributor Covenant](./CODE_OF_CONDUCT.md)
