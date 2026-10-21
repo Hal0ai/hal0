@@ -133,3 +133,12 @@ export const apiPut = <T = unknown>(path: string, body?: ApiOptions['body']) =>
 /** Convenience: typed DELETE. */
 export const apiDelete = <T = unknown>(path: string) =>
   api<T>(path, { method: 'DELETE' })
+
+/** Shown when a pull-progress reconcile GET comes back 401 (#2824). */
+export const SIGNED_OUT_MESSAGE =
+  'Signed out — sign in again to see progress. The pull keeps running on the server.'
+
+/** True when `e` is the 401 a lapsed or revoked session produces. */
+export function isSignedOut(e: unknown): boolean {
+  return e instanceof Hal0Error && e.status === 401
+}

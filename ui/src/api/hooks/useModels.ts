@@ -12,7 +12,7 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { apiDelete, apiGet, apiPost, apiPut, Hal0Error } from '../client'
+import { apiDelete, apiGet, apiPost, apiPut, Hal0Error, isSignedOut, SIGNED_OUT_MESSAGE } from '../client'
 import { ENDPOINTS } from '../endpoints'
 import { CAPABILITIES_QUERY_KEY } from './useCapabilities'
 import { normalizeApiModel } from '@/lib/normalizeApiModel'
@@ -457,6 +457,8 @@ export type PullState =
   | 'failed'
   | 'cancelled'
 
+/** Max consecutive stream reattaches without progress before giving up. */
+const PULL_REATTACH_MAX = 5
 const TERMINAL = new Set<PullState>(['completed', 'failed', 'cancelled'])
 
 // One file of a pull job (``PullFile.as_dict``): a split GGUF pulls one
@@ -521,6 +523,14 @@ export function usePullJob(): PullSnapshot {
   const [files, setFiles] = useState<PullFileSnapshot[]>([])
   const [error, setError] = useState<PullSnapshot['error']>(null)
   const esRef = useRef<EventSource | null>(null)
+  // Bumped when the current job changes identity (reset / new start). The
+  // stream-end reconcile GET is async; a late answer for a superseded job
+  // must not clobber the new one (same idiom as useRunnerImagePullJob).
+  const genRef = useRef(0)
+  // Consecutive stream-ends without a payload in between; caps reattaches so
+  // a looping revoke cannot spin (#2824).
+  const reattachRef = useRef(0)
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const qc = useQueryClient()
 
   const closeStream = () => {
@@ -530,10 +540,25 @@ export function usePullJob(): PullSnapshot {
     }
   }
 
-  useEffect(() => () => closeStream(), [])
+  const clearTimer = () => {
+    if (timerRef.current) {
+      clearTimeout(timerRef.current)
+      timerRef.current = null
+    }
+  }
+
+  useEffect(
+    () => () => {
+      genRef.current += 1
+      clearTimer()
+      closeStream()
+    },
+    [],
+  )
 
   const applyPayload = (payload: any) => {
     if (!payload || typeof payload !== 'object') return
+    reattachRef.current = 0
     if (typeof payload.state === 'string') setState(payload.state)
     const dl = payload.bytes_downloaded ?? payload.downloaded
     const tot = payload.bytes_total ?? payload.total
@@ -574,6 +599,7 @@ export function usePullJob(): PullSnapshot {
       return
     }
     const es = esRef.current
+    const gen = genRef.current
     const onMsg = (evt: MessageEvent) => {
       try {
         applyPayload(JSON.parse(evt.data))
@@ -581,6 +607,47 @@ export function usePullJob(): PullSnapshot {
         /* skip malformed */
       }
     }
+    // The stream only observes the pull: a `revoked` frame (key rotation /
+    // session expiry, #2816) or an `error` (dropped connection, or the
+    // browser's reconnect getting a 401) says nothing about the job itself.
+    // Close the stream and ask the status route once. A 401 there means this
+    // browser is signed out; the pull keeps running on the server (#2824).
+    const reconcile = () => {
+      closeStream()
+      void (async () => {
+        try {
+          const status = await apiGet<any>(ENDPOINTS.modelPullStatus(id))
+          if (genRef.current !== gen) return
+          if (status && typeof status === 'object') {
+            // applyPayload resets the counter; keep it across this reconcile.
+            const n = reattachRef.current
+            applyPayload(status)
+            reattachRef.current = n
+            if (status.state === 'queued' || status.state === 'running') {
+              // Still running: the browser may hold a reissued cookie (the
+              // rotating tab), so reopen the stream with a capped backoff.
+              if (reattachRef.current >= PULL_REATTACH_MAX) return
+              const delay = Math.min(1000 * 2 ** reattachRef.current, 16_000)
+              reattachRef.current += 1
+              clearTimer()
+              timerRef.current = setTimeout(() => {
+                timerRef.current = null
+                if (genRef.current === gen) attachStream(id)
+              }, delay)
+            }
+          }
+        } catch (e) {
+          if (genRef.current !== gen) return
+          if (isSignedOut(e)) {
+            setError({ code: 'auth.required', message: SIGNED_OUT_MESSAGE, details: {} })
+            qc.invalidateQueries({ queryKey: ['auth-status'] })
+          }
+          /* otherwise keep last known state */
+        }
+      })()
+    }
+    es.addEventListener('revoked', reconcile)
+    es.onerror = reconcile
     es.addEventListener('progress', onMsg)
     es.addEventListener('completed', (e) => {
       applyPayload({ state: 'completed' })
@@ -598,6 +665,9 @@ export function usePullJob(): PullSnapshot {
   }
 
   const reset = () => {
+    genRef.current += 1
+    reattachRef.current = 0
+    clearTimer()
     closeStream()
     setModelId(null)
     setJobId(null)

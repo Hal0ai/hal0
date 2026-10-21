@@ -9,7 +9,7 @@
 
 import { useMutation, useQuery, useQueryClient, type UseQueryResult } from '@tanstack/react-query'
 import { useEffect, useRef, useState } from 'react'
-import { api, apiGet } from '../client'
+import { api, apiGet, isSignedOut, SIGNED_OUT_MESSAGE } from '../client'
 import { ENDPOINTS } from '../endpoints'
 
 // Mutating verbs go through `api(..., { raw: true })` so the dev-time
@@ -784,6 +784,8 @@ export interface ImagePullSnapshot {
 // `unknown` is terminal (#1939): the backend has told us it cannot determine
 // presence, which is a final answer to this poll — leaving it out would hold
 // the EventSource open forever waiting for a pull that was never started.
+/** Max consecutive stream reattaches without progress before giving up. */
+const PULL_REATTACH_MAX = 5
 const IMAGE_PULL_TERMINAL = new Set<ImagePullState>([
   'completed',
   'failed',
@@ -808,6 +810,13 @@ export function useSlotImagePull(): ImagePullSnapshot {
   const [totalLayers, setTotalLayers] = useState(0)
   const [error, setError] = useState<string | null>(null)
   const esRef = useRef<EventSource | null>(null)
+  // Bumped on reset / new start so a late reconcile GET for a superseded
+  // pull cannot overwrite the current one.
+  const genRef = useRef(0)
+  // Consecutive stream-ends without a payload in between; caps reattaches so
+  // a looping revoke cannot spin (#2824).
+  const reattachRef = useRef(0)
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const qc = useQueryClient()
 
   const closeStream = () => {
@@ -817,10 +826,25 @@ export function useSlotImagePull(): ImagePullSnapshot {
     }
   }
 
-  useEffect(() => () => closeStream(), [])
+  const clearTimer = () => {
+    if (timerRef.current) {
+      clearTimeout(timerRef.current)
+      timerRef.current = null
+    }
+  }
+
+  useEffect(
+    () => () => {
+      genRef.current += 1
+      clearTimer()
+      closeStream()
+    },
+    [],
+  )
 
   const applyPayload = (payload: any) => {
     if (!payload || typeof payload !== 'object') return
+    reattachRef.current = 0
     if (typeof payload.slot_name === 'string') setSlotName(payload.slot_name)
     if (typeof payload.image === 'string') setImage(payload.image)
     if (typeof payload.state === 'string') setState(payload.state as ImagePullState)
@@ -844,17 +868,56 @@ export function useSlotImagePull(): ImagePullSnapshot {
       return
     }
     const es = esRef.current
+    const gen = genRef.current
     es.onmessage = (evt: MessageEvent) => {
       try { applyPayload(JSON.parse(evt.data)) } catch { /* skip */ }
     }
-    es.onerror = () => {
-      setState('failed')
-      setError('stream error')
+    // Stream death is not an answer about the pull (#2824): a `revoked`
+    // frame (key rotation / session expiry) or a dropped connection leaves
+    // the server-side job running. Close, then ask the status route once;
+    // a 401 there means this browser is signed out.
+    const reconcile = () => {
       closeStream()
+      void (async () => {
+        try {
+          const status = await apiGet<any>(ENDPOINTS.slotPullStatus(name))
+          if (genRef.current !== gen) return
+          if (status && typeof status === 'object') {
+            // applyPayload resets the counter; keep it across this reconcile.
+            const n = reattachRef.current
+            applyPayload(status)
+            reattachRef.current = n
+            if (status.state === 'pulling') {
+              // Still pulling: the browser may hold a reissued cookie (the
+              // rotating tab), so reopen the stream with a capped backoff.
+              if (reattachRef.current >= PULL_REATTACH_MAX) return
+              const delay = Math.min(1000 * 2 ** reattachRef.current, 16_000)
+              reattachRef.current += 1
+              clearTimer()
+              timerRef.current = setTimeout(() => {
+                timerRef.current = null
+                if (genRef.current === gen) attachStream(name)
+              }, delay)
+            }
+          }
+        } catch (e) {
+          if (genRef.current !== gen) return
+          if (isSignedOut(e)) {
+            setError(SIGNED_OUT_MESSAGE)
+            qc.invalidateQueries({ queryKey: ['auth-status'] })
+          }
+          /* otherwise keep last known state */
+        }
+      })()
     }
+    es.addEventListener('revoked', reconcile)
+    es.onerror = reconcile
   }
 
   const start = async (name: string) => {
+    genRef.current += 1
+    reattachRef.current = 0
+    clearTimer()
     setSlotName(name)
     setState('pulling')
     setLayer(0)
@@ -872,6 +935,9 @@ export function useSlotImagePull(): ImagePullSnapshot {
   }
 
   const reset = () => {
+    genRef.current += 1
+    reattachRef.current = 0
+    clearTimer()
     closeStream()
     setSlotName(null)
     setImage(null)
