@@ -129,14 +129,15 @@ chat messages — that is the `hermes-e2e` stateful lane.
    must be at least 1, and neither `systemctl show hal0-agent@hermes -p Environment` nor
    `config.yaml` may set `HERMES_DASHBOARD_PUBLIC_URL` / `dashboard.public_url`: either one
    turns the dashboard login on and the token disappears from the page.
-24. **Dashboard chat runs through the gateway (v0.22.3+).** The Ink TUI behind the dashboard's
-   Chat tab (`/api/pty`) is now a client of the gateway daemon: it finds it through
-   `/var/lib/hal0/.hermes/gateway.sock` and never runs turns itself. With
-   `hermes-gateway.service` active, a Chat-tab prompt must get an answer and
+24. **No unmanaged gateway (v0.22.3+).** The dashboard's default Chat tab runs its turns in the
+   dashboard process (its TUI attaches to the dashboard's own `/api/ws`). A profile-scoped chat
+   (the profile switcher, for example `hal0-brain`) and `hermes chat` are clients of the gateway
+   daemon. With `hermes-gateway.service` active, both must answer, and
    `ps -u hal0 -o pid,cgroup,args | grep "gateway run"` must show exactly one gateway, in
-   `hermes-gateway.service`. A second `gateway run` in the `hal0-agent@hermes` cgroup (an
-   unmanaged gateway the TUI spawned) is a `major` finding. With the gateway stopped, record
-   what the Chat tab shows; a hang with no error is a finding.
+   `hermes-gateway.service`. Then, on the box with the gateway disabled, open a profile-scoped
+   chat: it must fail with a clear message, and no `gateway run --idle-exit` may appear,
+   especially not in the `hal0-agent@hermes` cgroup. Any unmanaged gateway is a `major` finding,
+   because it runs cron and the kanban dispatcher where the operator turned the gateway off.
 25. **Upgrade from v0.22.2.** On the UPGRADE box, the first `hal0 update` must rebuild
    (`release.json` `ref` = `4d043038…`, `previous` = the v0.22.2 release), restart
    `hermes-gateway.service` onto the new release, and leave `config.yaml` at

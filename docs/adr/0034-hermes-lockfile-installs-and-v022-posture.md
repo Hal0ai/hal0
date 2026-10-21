@@ -8,6 +8,9 @@ and 12, and adds two decisions that the pin bump to v0.22.2 needs. All other
 parts of ADR-0032 stand, including the four-PR split in its decision 14. The
 work is tracked on #2615 and ships in v1.6.0.
 
+Amended for v1.6.1 (#2874): decision 8's pin moves to v0.22.4. See
+"Amendment: the pin moves to v0.22.4" below.
+
 ## Context
 
 ADR-0032 was written against hermes-agent v0.21.7 (`71d34bad`). This record
@@ -281,6 +284,34 @@ board executor harvests are unchanged at NEW.
    with its contract-fixture refresh (decision 15). A pre-release tag (`rc.*`
    or `+canary.*`) is never vetted.
 
+### Amendment (2026-10, #2874): the pin moves to v0.22.4
+
+Decision 8's pin moves to v0.22.4, `4d04303818b61bf3aa09278af48356315515965b`.
+The bump ships in v1.6.1, not v1.6.0. Everything else in this record stands.
+
+- **v0.22.2 stays vetted.** `d923a5eb` remains in `VETTED_HERMES_REFS`, so
+  the release flip-back and `hal0 agent upgrade hermes --to d923a5eb…` still
+  build it. A box on v0.22.2 rebuilds onto v0.22.4 at its next `hal0 update`.
+- **Nothing in this record changes with the version.** The lock still serves
+  Python 3.14 (decisions 1 and 2), the extras are unchanged, and the dashboard
+  build still works (decision 4). The gateway unit the generator writes is
+  byte-identical (decision 5), so the template hal0 regenerates the unit from
+  does not change. Decision 7 still holds: v0.22.3 made `sessions.auto_prune`
+  opt-in again, but hal0 keeps writing `false`. That keeps history on a
+  flip-back to v0.22.2 and keeps away the one-time low-disk prune question
+  Hermes now asks while the key is unset.
+- **New precondition.** From v0.22.3 the Hermes gateway owns chat turns and
+  the session store. The dashboard's default Chat tab still runs in the
+  dashboard process. A profile-scoped chat, and the classic `hermes chat`
+  CLI, are gateway clients: with no gateway unit installed they start an
+  unmanaged `gateway run --idle-exit`, which runs cron and the kanban
+  dispatcher (upstream `hermes_cli/gateway_runtime.py:390-482`,
+  `hermes_cli/gateway_runtime_start.py:35-81`). A gateway unit that is
+  installed but masked, failed or stopped blocks that start. Before this pin
+  merges, hal0 must make sure no client can start a gateway on a box where
+  the operator disabled it. #2874 lists the work, and #2878 tracks a related
+  gap: the preview-restart side agent ignores `agent.disabled_toolsets`.
+
 ## Consequences
 
 - Each Hermes release installs exactly what upstream locked, with hashes,
@@ -303,6 +334,10 @@ board executor harvests are unchanged at NEW.
 
 - ADR-0032 (amended here), ADR-0033 (unchanged), ADR-0004.
 - #2615 (implementation), #2805 (deferred manual rollback).
+- NousResearch/hermes-agent `4d043038` (v0.22.4, amendment):
+  `hermes_cli/gateway_runtime.py`, `hermes_cli/gateway_runtime_start.py`,
+  `hermes_cli/gateway_runtime_service.py`, `hermes_cli/web_server_chat.py`,
+  `gateway/run_idle_exit.py`, `hermes_cli/config_defaults.py`.
 - NousResearch/hermes-agent `d923a5eb` (v0.22.2): `pyproject.toml`,
   `uv.lock`, `hermes_state_wal.py`, `hermes_cli/version_info.py`,
   `hermes_cli/main.py`, `hermes_cli/gateway.py`, `hermes_cli/_launchers.py`,

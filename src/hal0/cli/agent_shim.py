@@ -322,11 +322,11 @@ def _build_hermes_argv(cfg: AgentConfig) -> list[str]:
       ``:767``).
     * The embedded chat (``/chat``, ``/api/pty``, ``/api/ws``) is always on:
       ``_DASHBOARD_EMBEDDED_CHAT_ENABLED = True`` (``web_server.py:297``;
-      also true at 3ef6bbd2 and d923a5eb). From v0.22.3 the Ink TUI that
-      ``/api/pty`` runs is a client of the gateway daemon, which it finds
-      through ``$HERMES_HOME/gateway.sock`` (on hal0, the system
-      ``hermes-gateway.service``); ``/api/ws`` still runs its turns in the
-      dashboard process. ``--tui`` is a top-level chat flag ("launch the
+      also true at 3ef6bbd2 and d923a5eb). The Ink TUI that ``/api/pty``
+      runs attaches to this process's own ``/api/ws`` and runs its turns
+      here (``web_server_chat.py:431-435``). A profile-scoped chat
+      (``?profile=``) skips that and becomes a client of the gateway daemon
+      from v0.22.3. ``--tui`` is a top-level chat flag ("launch the
       modern TUI", ``hermes_cli/_parser.py:208``) that the ``dashboard``
       subcommand does not read; it is kept only so the argv stays the one
       the unit has always run. Nothing reads a ``HERMES_DASHBOARD_TUI``
