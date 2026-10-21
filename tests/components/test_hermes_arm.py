@@ -36,7 +36,7 @@ def test_unprovisioned_skips(tmp_path) -> None:
 PIN = "3ef6bbd201263d354fd83ec55b3c306ded2eb72a"
 
 
-def _live_release(ref=PIN, minor="3.12"):
+def _live_release(ref=PIN, minor="3.14"):
     """A migrated layout: venvs/hermes -> hermes/current/venv -> releases/<id>/venv."""
     from hal0.agents import hermes_release as rel
 

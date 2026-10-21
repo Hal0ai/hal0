@@ -502,18 +502,51 @@ def _ensure_mirror(layout: Layout, url: str, *, run: Runner, env: Mapping[str, s
     )
 
 
+def lock_serves(lock: Path, minor: str | None) -> bool:
+    """Whether ``lock`` exists and its ``requires-python`` admits ``minor``.
+
+    3ef6bbd2's lock says ``>=3.11, <3.14``, so it cannot serve the 3.14 venv;
+    v0.22.2's covers 3.14 only. ``minor=None`` accepts any lock. An unreadable
+    or unparsable ``requires-python`` is treated as not serving.
+    """
+    if not lock.is_file():
+        return False
+    if minor is None:
+        return True
+    try:
+        head = lock.read_text(encoding="utf-8")[:4096]
+    except (OSError, UnicodeDecodeError):
+        return False
+    m = re.search(r'^requires-python\s*=\s*"([^"]*)"', head, re.MULTILINE)
+    if m is None:
+        return False
+    from packaging.specifiers import InvalidSpecifier, SpecifierSet
+
+    try:
+        return SpecifierSet(m.group(1)).contains(f"{minor}.0", prereleases=True)
+    except InvalidSpecifier:
+        return False
+
+
 def install_command_lines(
-    *, uv: str, src: Path, venv: Path, extras: tuple[str, ...], export_file: Path
+    *,
+    uv: str,
+    src: Path,
+    venv: Path,
+    extras: tuple[str, ...],
+    export_file: Path,
+    minor: str | None = None,
 ) -> list[list[str]]:
     """The dependency-install commands for one release (ADR-0034 decision 1).
 
-    With ``uv.lock`` in the checkout: export the lock with hashes, sync it into
-    the venv with ``--require-hashes``, then install the project itself with
-    ``--no-deps``. Without one (3ef6bbd2): ADR-0032's
-    ``uv pip install -e "<src>[extras]"``.
+    With a ``uv.lock`` in the checkout whose ``requires-python`` admits the
+    venv's ``minor``: export the lock with hashes, sync it into the venv with
+    ``--require-hashes``, then install the project itself with ``--no-deps``.
+    Otherwise (no lock, or a lock that cannot serve this minor, such as
+    3ef6bbd2's on 3.14): ADR-0032's ``uv pip install -e "<src>[extras]"``.
     """
     python = str(venv / "bin" / "python")
-    if (src / "uv.lock").is_file():
+    if lock_serves(src / "uv.lock", minor):
         export = [uv, "export", "--frozen", "--project", str(src)]
         for extra in extras:
             export += ["--extra", extra]
@@ -666,10 +699,11 @@ def build_release(
             env=env,
         )
         _must(run, "venv", [uv, "venv", "--quiet", "--python", python, venv], env=env)
-        locked = (src / "uv.lock").is_file()
+        minor = target_minor()
+        locked = lock_serves(src / "uv.lock", minor)
         export_file = rdir / "requirements.lock.txt"
         for argv in install_command_lines(
-            uv=uv, src=src, venv=venv, extras=pin.extras, export_file=export_file
+            uv=uv, src=src, venv=venv, extras=pin.extras, export_file=export_file, minor=minor
         ):
             _must(run, "install", argv, env=env)
         web_dist = build_web_ui(src, venv, run=run, env=env)
@@ -690,6 +724,10 @@ def build_release(
             "url": pin.url,
             "extras": list(pin.extras),
             "lock": locked,
+            # Which install path ran: "lock" (uv export --frozen + pip sync
+            # --require-hashes + --no-deps -e) or "editable" (-e "<src>[extras]").
+            "install": "lock" if locked else "editable",
+            "lock_present": (src / "uv.lock").is_file(),
             "python": python,
             "python_minor": _minor_of(cfg.get("version_info") or cfg.get("version")),
             "web_dist": web_dist,
@@ -1317,7 +1355,10 @@ def prune_releases(
                 )
                 for r in kept
             )
-            if in_use or configured.startswith(str(managed)):
+            # A configured HAL0_HERMES_PYTHON pointing at an interpreter of
+            # this minor in the managed tree keeps it; one on the target
+            # minor does not.
+            if in_use or configured.startswith(str(managed / f"cpython-{minor}")):
                 continue
             with contextlib.suppress(OSError, subprocess.SubprocessError):
                 run([uv, "python", "uninstall", minor], env=env, timeout=300)
