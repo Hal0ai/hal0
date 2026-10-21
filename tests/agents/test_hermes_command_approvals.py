@@ -427,7 +427,6 @@ def _overlay(**kw: Any) -> dict[str, Any]:
         auxiliary_tasks={},
         mcp_servers=[],
         agent_id="hermes",
-        system_prompt="",
         live_resolve_enabled=True,
         **kw,
     )

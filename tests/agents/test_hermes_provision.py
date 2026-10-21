@@ -1540,7 +1540,6 @@ def _build_overlay_keys(**over):
         auxiliary_tasks={},
         mcp_servers=[],
         agent_id="hermes-agent",
-        system_prompt="",
         live_resolve_enabled=True,
     )
     base.update(over)

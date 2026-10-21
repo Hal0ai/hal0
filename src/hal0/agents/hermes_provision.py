@@ -2100,7 +2100,6 @@ def _build_config_overlay(
     auxiliary_tasks: dict[str, dict[str, Any]],
     mcp_servers: list[dict[str, Any]],
     agent_id: str,
-    system_prompt: str,
     live_resolve_enabled: bool,
     hermes_home: Path | str = HERMES_HOME_DEFAULT,
     terminal_enabled: bool = False,
@@ -2272,16 +2271,8 @@ def _build_config_overlay(
     # d923a5eb). hal0 keeps session history, as before the bump, until a
     # retention setting exists (ADR-0034 decision 7).
     pairs.append((SESSIONS_AUTO_PRUNE_CONFIG_KEY, False))
-    # The active persona's prompt (#2839). ``agent.system_prompt`` is the
-    # overlay Hermes resolves into each session's ephemeral system prompt
-    # (hermes_cli/personality.py:118-123 at the pinned d923a5eb), read by the
-    # CLI, the TUI gateway behind the dashboard chat, and the messaging
-    # gateway. hal0 used to write ``agent.system_prompt_prelude``, which no
-    # Hermes version reads. ``display.personality`` is left to the operator:
-    # a known personality named there overlays this prompt, which is
-    # Hermes's own ``/personality`` behaviour.
-    if system_prompt:
-        pairs.append((PERSONA_PROMPT_CONFIG_KEY, system_prompt))
+    # The persona prompt (agent.system_prompt) is NOT a config-set pair: see
+    # :func:`_persona_prompt_layer`.
 
     # Reasoning visibility: both flags are required together (#635).
     pairs += [
@@ -2807,6 +2798,27 @@ def _retire_hal0_personality(data: dict[str, Any], persona_names: Iterable[str])
     return True
 
 
+def _persona_prompt_layer(system_prompt: str) -> dict[str, Any]:
+    """The active persona's prompt as a YAML layer for :func:`_merge_config_yaml_layers` (#2839).
+
+    ``agent.system_prompt`` is the overlay Hermes resolves into each
+    session's ephemeral system prompt (hermes_cli/personality.py:118-123 at
+    the pinned d923a5eb), read by the CLI, the TUI gateway behind the
+    dashboard chat, and the messaging gateway. ``display.personality`` is
+    left to the operator: a known personality named there overlays this
+    prompt, which is Hermes's own ``/personality`` behaviour.
+
+    It goes through the YAML merge, not ``hermes config set``: v0.22.2's
+    ``config set`` refuses a value that "looks like a list/mapping", and the
+    persona addendum's ``- hal0-admin: …`` lines do, so the write failed
+    (non-fatally) and the prompt never landed. ``{}`` when there is no
+    prompt, so an existing value is left alone.
+    """
+    if not system_prompt:
+        return {}
+    return {"agent": {"system_prompt": system_prompt}}
+
+
 def _drop_dotted_key(data: dict[str, Any], dotted: str) -> bool:
     """Remove ``a.b.c`` from a nested dict in place; True iff it was present."""
     *parents, leaf = dotted.split(".")
@@ -3107,7 +3119,6 @@ def _phase_config_write(ctx: _StepCtx) -> PhaseResult:
         auxiliary_tasks=auxiliary_tasks,
         mcp_servers=mcp_servers,
         agent_id=state.agent_id,
-        system_prompt=system_prompt,
         live_resolve_enabled=live_resolve_enabled,
         hermes_home=hermes_home,
         terminal_enabled=terminal_enabled,
@@ -3122,10 +3133,13 @@ def _phase_config_write(ctx: _StepCtx) -> PhaseResult:
     pre_merge = config_path.read_text(encoding="utf-8") if config_path.exists() else None
     list_merge_changed = _merge_config_yaml_layers(
         config_path,
-        list_keys=_config_list_keys(
-            terminal_enabled=terminal_enabled,
-            existing_disabled=_disabled_toolsets(_parse_yaml_config(pre_merge)),
-            mcp_servers=mcp_servers,
+        list_keys=_deep_merge(
+            _config_list_keys(
+                terminal_enabled=terminal_enabled,
+                existing_disabled=_disabled_toolsets(_parse_yaml_config(pre_merge)),
+                mcp_servers=mcp_servers,
+            ),
+            _persona_prompt_layer(system_prompt),
         ),
         overrides_path=OVERRIDES_PATH,
         persona_names=_hal0_persona_display_names(state),

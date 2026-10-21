@@ -49,7 +49,6 @@ def _overlay_keys(**over: Any) -> dict[str, Any]:
         auxiliary_tasks={},
         mcp_servers=[{"name": "hal0-admin", "url": "http://x/mcp", "type": "http"}],
         agent_id="hermes-agent",
-        system_prompt="",
         live_resolve_enabled=True,
     )
     base.update(over)
