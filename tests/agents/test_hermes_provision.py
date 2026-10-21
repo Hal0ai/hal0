@@ -1032,7 +1032,8 @@ def test_ensure_python_uses_uv_first_even_with_a_qualifying_system_interpreter(
         env_path=tmp_path / "hermes-python.env",
     )
     assert out == managed
-    assert [a[1:3] for a in runner.ran if a[0] == "/usr/local/bin/uv"][0] == ["python", "install"]
+    first_uv = next(a for a in runner.ran if a[0] == "/usr/local/bin/uv")
+    assert first_uv[1:3] == ["python", "install"]
 
 
 def test_ensure_python_falls_back_to_a_qualifying_system_interpreter_without_uv(
