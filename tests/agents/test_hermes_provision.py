@@ -1540,7 +1540,6 @@ def _build_overlay_keys(**over):
         auxiliary_tasks={},
         mcp_servers=[],
         agent_id="hermes-agent",
-        system_prompt="",
         live_resolve_enabled=True,
     )
     base.update(over)
@@ -1559,7 +1558,8 @@ def test_merge_drops_config_keys_hal0_no_longer_writes(tmp_path: Path) -> None:
     )
     data = yaml.safe_load(cfg.read_text(encoding="utf-8"))
     assert changed is True
-    assert data["agent"] == {"max_turns": 60}
+    # The prelude's text moves to agent.system_prompt, which was unset.
+    assert data["agent"] == {"max_turns": 60, "system_prompt": "old"}
     assert data["model"] == {"default": "m"}
 
 
@@ -1599,6 +1599,60 @@ def test_persona_display_names_cover_seeds_and_the_store(tmp_path: Path) -> None
     personas.save_persona(seeded, root=root)
     names = hp._hal0_persona_display_names(state)
     assert {"Hermes", "Coder", "hal0 Brain", "Concise"} <= set(names)
+
+
+def test_release_config_invariants_on_a_pre_2839_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    yaml = pytest.importorskip("yaml")
+    monkeypatch.setattr(hp, "OVERRIDES_PATH", tmp_path / "absent.yaml")
+    (tmp_path / "config.yaml").write_text(
+        "agent:\n  system_prompt_prelude: P\nsessions:\n  retention_days: 30\n"
+        "auxiliary:\n  web_extract: {provider: main}\n"
+    )
+    assert hp.apply_release_config_invariants(tmp_path) is True
+    cfg = yaml.safe_load((tmp_path / "config.yaml").read_text())
+    assert cfg["sessions"] == {"retention_days": 30, "auto_prune": False}
+    assert cfg["agent"] == {"system_prompt": "P"}
+    assert cfg["auxiliary"] == {}
+    # Idempotent.
+    assert hp.apply_release_config_invariants(tmp_path) is False
+
+
+def test_release_config_invariants_keep_a_rendered_system_prompt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    yaml = pytest.importorskip("yaml")
+    monkeypatch.setattr(hp, "OVERRIDES_PATH", tmp_path / "absent.yaml")
+    (tmp_path / "config.yaml").write_text(
+        "agent:\n  system_prompt: NEW\n  system_prompt_prelude: OLD\n"
+    )
+    hp.apply_release_config_invariants(tmp_path)
+    assert yaml.safe_load((tmp_path / "config.yaml").read_text())["agent"] == {
+        "system_prompt": "NEW"
+    }
+
+
+def test_release_config_invariants_render_the_persona_when_both_keys_are_gone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The #2853 install path left some boxes with neither agent.system_prompt
+    nor the prelude; the invariants render the active persona then."""
+    yaml = pytest.importorskip("yaml")
+    from hal0.agents import personas
+
+    monkeypatch.setattr(hp, "OVERRIDES_PATH", tmp_path / "absent.yaml")
+    monkeypatch.setattr(personas, "PERSONAS_ROOT", tmp_path / "no-host-personas")
+    personas.seed_default_personas(root=tmp_path / "personas")
+    (tmp_path / "config.yaml").write_text("agent:\n  max_turns: 60\n")
+    assert hp.apply_release_config_invariants(tmp_path) is True
+    prompt = yaml.safe_load((tmp_path / "config.yaml").read_text())["agent"]["system_prompt"]
+    assert prompt.startswith("You are Hermes") and "hal0-admin" in prompt
+
+
+def test_release_config_invariants_without_a_config_do_nothing(tmp_path: Path) -> None:
+    assert hp.apply_release_config_invariants(tmp_path) is False
+    assert not (tmp_path / "config.yaml").exists()
 
 
 def test_drop_dotted_key_tolerates_missing_and_non_dict_parents() -> None:
@@ -4294,3 +4348,50 @@ def test_hal0_admin_mcp_timeout_covers_the_widest_bridge_tool():
         f"outer MCP client caps at {hp._HAL0_ADMIN_MCP_TIMEOUT_S}s while the "
         f"widest tool it fronts budgets {widest}s"
     )
+
+
+# ── _atomic_write keeps the owner on a root run (#2615) ─────────────────────
+
+
+def test_atomic_write_as_root_keeps_the_owner_of_the_replaced_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A root caller (install.sh's post-activation pass reaching the Hermes
+    config backstop) must not leave config.yaml root-owned."""
+    target = tmp_path / "config.yaml"
+    target.write_text("a: 1\n")
+    st = target.stat()
+    chowned: list[tuple[str, int, int]] = []
+    monkeypatch.setattr(hp.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(hp.os, "chown", lambda p, u, g: chowned.append((str(p), u, g)))
+    hp._atomic_write(target, "a: 2\n")
+    assert chowned == [(str(target) + ".tmp", st.st_uid, st.st_gid)]
+    assert target.read_text() == "a: 2\n"
+
+
+def test_atomic_write_as_root_never_replaces_with_a_wrong_owner(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "config.yaml"
+    target.write_text("a: 1\n")
+
+    def deny(*_a: object) -> None:
+        raise PermissionError("chown denied")
+
+    monkeypatch.setattr(hp.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(hp.os, "chown", deny)
+    with pytest.raises(PermissionError):
+        hp._atomic_write(target, "a: 2\n")
+    assert target.read_text() == "a: 1\n"
+    assert not (tmp_path / "config.yaml.tmp").exists()
+
+
+def test_atomic_write_unprivileged_never_chowns(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "config.yaml"
+    target.write_text("a: 1\n")
+    monkeypatch.setattr(hp.os, "geteuid", lambda: 1000)
+    monkeypatch.setattr(hp.os, "chown", lambda *_a: pytest.fail("no chown off root"))
+    hp._atomic_write(target, "a: 2\n")
+    assert target.read_text() == "a: 2\n"

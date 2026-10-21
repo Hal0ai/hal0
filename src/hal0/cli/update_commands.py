@@ -1100,6 +1100,8 @@ def _print_component_table(rows: list[dict]) -> bool:
         )
     console.print(table)
     for row in rows:
+        if row.get("note"):
+            console.print(f"[yellow]![/yellow] {row['id']}: {escape(str(row['note']))}")
         if row.get("status") in _COMPONENT_PENDING and (row.get("error") or row.get("remedy")):
             remedy = row.get("remedy") or f"retry with: hal0 update component {row['id']}"
             console.print(

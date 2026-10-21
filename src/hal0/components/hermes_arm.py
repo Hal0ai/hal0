@@ -127,6 +127,39 @@ def hermes_build_trigger(venv: Path | None = None) -> str | None:
         return None
 
 
+#: What `hal0 update` reports when the backstop below changed config.yaml.
+CONFIG_BACKSTOP_NOTE = (
+    "Hermes config keys applied; restart hal0-agent@hermes to load agent.system_prompt"
+)
+
+
+def _config_backstop(result: dict[str, Any], *, job_id: str | None) -> None:
+    """Write hal0's must-have Hermes config keys on a converged box (#2615).
+
+    A release activation writes them (``hermes_release._activate``), but a box
+    already on the pinned release never activates again, so `hal0 update`
+    would otherwise leave a config written before that fix as it is.
+    Idempotent; a no-op when the file already has the keys. No restart is
+    needed for ``sessions.auto_prune``: Hermes reads it at each startup.
+    ``agent.system_prompt`` is read by each new session's agent, so the note
+    says how to make the running agent pick it up now. Never fails the
+    converge.
+    """
+    from hal0.agents import hermes_provision as hermes
+
+    home = var_lib() / ".hermes"
+    try:
+        changed = hermes.apply_release_config_invariants(home)
+    except Exception as exc:  # the converge verdict must not depend on it
+        log.warning("components.hermes_config_backstop_failed", job_id=job_id, error=str(exc))
+        result["detail"] = [*result.get("detail", []), f"Hermes config keys not applied: {exc}"]
+        return
+    if changed:
+        log.info("components.hermes_config_backstop_applied", job_id=job_id, home=str(home))
+        result["note"] = CONFIG_BACKSTOP_NOTE
+        result["detail"] = [*result.get("detail", []), CONFIG_BACKSTOP_NOTE]
+
+
 def converge_hermes(
     *,
     job_id: str | None = None,
@@ -177,6 +210,8 @@ def converge_hermes(
         return {**result, "status": "build_failed", "error": str(exc)}
     trigger = rel.build_trigger(layout, target, minor)
     if trigger is None:
+        if apply:
+            _config_backstop(result, job_id=job_id)
         return {**result, "status": "converged"}
     result["trigger"] = trigger
     if not apply:
@@ -216,6 +251,7 @@ def converge_hermes(
             "detail": list(outcome.warnings),
         }
     if outcome.status == "converged":
+        _config_backstop(result, job_id=job_id)
         return {**result, "status": "converged"}
 
     log.info(

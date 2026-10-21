@@ -52,7 +52,6 @@ def _overlay(**over: Any) -> dict[str, Any]:
         auxiliary_tasks={},
         mcp_servers=_MCP_SERVERS,
         agent_id="hermes-agent",
-        system_prompt="",
         live_resolve_enabled=True,
     )
     base.update(over)

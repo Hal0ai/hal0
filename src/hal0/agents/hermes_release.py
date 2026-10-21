@@ -810,7 +810,22 @@ def build_release(
         ):
             _must(run, "install", argv, env=env)
         web_dist = build_web_ui(src, venv, run=run, env=env)
-        verify_release(venv, run=run, probe=probe, env=env, src=src, ref=ref)
+        # Never against the live HERMES_HOME: `hermes --help` runs upstream's
+        # boot maintenance (hermes_cli/main.py:3545-3549 -> boot_bootstrap ->
+        # post_update.step_migrate_config at d923a5eb), which migrates and
+        # rewrites config.yaml. A build must leave the live home alone; the
+        # migration belongs to activation, after the flip-back copy.
+        verify_home = rdir / VERIFY_HOME_DIR
+        verify_home.mkdir()
+        verify_release(
+            venv,
+            run=run,
+            probe=probe,
+            env={**env, "HERMES_HOME": str(verify_home)},
+            src=src,
+            ref=ref,
+        )
+        shutil.rmtree(verify_home, ignore_errors=True)
         describe = None
         with contextlib.suppress(OSError, subprocess.SubprocessError):
             proc = run(
@@ -1149,6 +1164,11 @@ def _clear_failed_marker(layout: Layout) -> None:
         (layout.root / FAILED_MARKER).unlink()
 
 
+#: Throwaway HERMES_HOME inside a release being built, for the checks that
+#: start the Hermes CLI (see build_release). Removed once they pass.
+VERIFY_HOME_DIR = ".verify-home"
+
+
 def _config_copy_name(new_id: str) -> str:
     return f"config.yaml.before-{new_id}"
 
@@ -1333,6 +1353,33 @@ def _activate(
     warning = _config_migrate(layout, run=run, hermes_home=hermes_home)
     if warning:
         result.warnings.append(warning)
+    # The units are still stopped: hal0's must-have keys (sessions.auto_prune:
+    # false first of all) go on disk before the new release first starts.
+    # `hal0 update` reaches Hermes only through this activation, never
+    # through the provisioning overlay.
+    try:
+        hp.apply_release_config_invariants(hermes_home)
+    except Exception as exc:  # a broken config.yaml must not start the release
+        error = f"could not write hal0's keys to {hermes_home / 'config.yaml'}: {exc}"
+        log.warning("hermes_release.config_invariants_failed", release=new.id, error=error)
+        result.ok = False
+        result.error = error
+        if outgoing is None:
+            _write_failed_marker(layout, new.id)
+        else:
+            _flip_back(
+                result,
+                error,
+                layout=layout,
+                outgoing=outgoing,
+                old_previous=old_previous,
+                new_id=new.id,
+                hermes_home=hermes_home,
+                units=units,
+                recorded=recorded,
+                stop_first=False,
+            )
+        return result
 
     for unit in recorded:
         units.start(unit)
@@ -1363,19 +1410,49 @@ def _activate(
         # provision rebuild it (build_trigger) instead of calling it converged.
         _write_failed_marker(layout, new.id)
         return result
-    for unit in recorded:
-        units.stop(unit)
+    _flip_back(
+        result,
+        error,
+        layout=layout,
+        outgoing=outgoing,
+        old_previous=old_previous,
+        new_id=new.id,
+        hermes_home=hermes_home,
+        units=units,
+        recorded=recorded,
+        stop_first=True,
+    )
+    return result
+
+
+def _flip_back(
+    result: Activation,
+    error: str,
+    *,
+    layout: Layout,
+    outgoing: Release,
+    old_previous: str | None,
+    new_id: str,
+    hermes_home: Path,
+    units: Any,
+    recorded: list[str],
+    stop_first: bool,
+) -> None:
+    """Point ``current`` back at ``outgoing``, restore its config.yaml, restart its units."""
+    if stop_first:
+        for unit in recorded:
+            units.stop(unit)
     try:
         _swap_link(layout.current, Path("releases") / outgoing.id)
         _restore_link(layout.previous, old_previous)
         result.flipped_back = True
     except OSError as exc:
         result.error = f"{error}; flip-back failed: {exc}"
-        _write_failed_marker(layout, new.id)
+        _write_failed_marker(layout, new_id)
     finally:
-        copy = outgoing.path / _config_copy_name(new.id)
+        copy = outgoing.path / _config_copy_name(new_id)
         had_config = copy.exists() or (hermes_home / "config.yaml").exists()
-        restored = result.flipped_back and _restore_config(outgoing, new.id, hermes_home)
+        restored = result.flipped_back and _restore_config(outgoing, new_id, hermes_home)
         if result.flipped_back and not restored and had_config:
             result.warnings.append(
                 f"config.yaml was not restored from {copy}; it may carry the failed "
@@ -1383,7 +1460,6 @@ def _activate(
             )
         for unit in recorded:
             units.start(unit)
-    return result
 
 
 # ── Retention ────────────────────────────────────────────────────────────────

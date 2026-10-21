@@ -234,7 +234,6 @@ def _overlay(**over: object) -> dict:
         auxiliary_tasks={},
         mcp_servers=[],
         agent_id="hermes",
-        system_prompt="",
         live_resolve_enabled=True,
     )
     base.update(over)
@@ -246,11 +245,19 @@ def test_persona_prompt_goes_to_the_key_hermes_reads() -> None:
     # agent.system_prompt (personality.py:118-123). hal0 used to write
     # agent.system_prompt_prelude, which no Hermes version reads; this keeps
     # the persona key pinned to the reader so it cannot go dead again.
-    from hal0.agents.hermes_provision import PERSONA_PROMPT_CONFIG_KEY
+    from hal0.agents import hermes_provision as hp
+    from hal0.agents.personas import _seed_hermes, build_prompt_addendum
 
-    assert PERSONA_PROMPT_CONFIG_KEY == config_defaults.PERSONA_PROMPT_CONFIG_KEY
-    keys = _overlay(system_prompt="You are hal0.")
-    assert keys[config_defaults.PERSONA_PROMPT_CONFIG_KEY] == "You are hal0."
+    assert hp.PERSONA_PROMPT_CONFIG_KEY == config_defaults.PERSONA_PROMPT_CONFIG_KEY
+    prompt = build_prompt_addendum(_seed_hermes("hermes"), mcp_servers=hp._default_mcp_servers())
+    layer = hp._persona_prompt_layer(prompt)
+    section, key = config_defaults.PERSONA_PROMPT_CONFIG_KEY.split(".")
+    assert layer == {section: {key: prompt}}
+    # The prompt goes through the YAML layer, never `hermes config set`, which
+    # at v0.22.2 refuses a multi-line value whose lines look like a YAML list
+    # ("- hal0-admin: ...") and writes nothing.
+    keys = _overlay()
+    assert not any(k.startswith(f"{section}.{key}") for k in keys)
     assert "agent.system_prompt_prelude" not in keys
     # display.personality would override the prompt when it names a known
     # personality; hal0 leaves it to the operator.
@@ -479,7 +486,7 @@ def test_hal0_never_sets_the_dashboard_public_url() -> None:
     # __HERMES_SESSION_TOKEN__, so the board's token harvest would fail. hal0
     # must set neither: not in the config overlay, and nowhere in the code or
     # the installer that writes Hermes's config, env files or units.
-    keys = _overlay(system_prompt="p", mcp_servers=[{"name": "hal0-admin", "url": "http://x"}])
+    keys = _overlay(mcp_servers=[{"name": "hal0-admin", "url": "http://x"}])
     assert not any(k.startswith(config_defaults.DASHBOARD_PUBLIC_URL_CONFIG_KEY) for k in keys)
     assert config_defaults.DASHBOARD_PUBLIC_URL_ENV not in keys
 

@@ -43,6 +43,23 @@ def _coerce(value: str) -> Any:
         return value
 
 
+def _refused_by_config_set(value: str) -> bool:
+    """v0.22.2 refuses a value that looks like a YAML list/mapping but does not
+    parse (hermes_cli/config.py:3377-3412 at d923a5eb), e.g. the multi-line
+    persona addendum with its ``- hal0-admin: ...`` lines."""
+    import yaml
+
+    if "\n" not in value or not any(
+        line.lstrip().startswith(("- ", "[", "{")) for line in value.splitlines()
+    ):
+        return False
+    try:
+        yaml.safe_load(value)
+    except yaml.YAMLError:
+        return True
+    return False
+
+
 def _set_dotted(data: dict[str, Any], dotted: str, value: Any) -> None:
     cur = data
     parts = dotted.split(".")
@@ -72,6 +89,9 @@ def apply_hermes_config_cli(argv: list[str], env: dict[str, str] | None) -> bool
             cfg.write_text("{}\n")
         return True
     if verb == ["config", "set"] and cfg is not None:
+        if _refused_by_config_set(argv[4]):
+            # v0.22.2 exits 1 and writes nothing; the caller only collects it.
+            return True
         data = (yaml.safe_load(cfg.read_text()) if cfg.exists() else None) or {}
         _set_dotted(data, argv[3], _coerce(argv[4]))
         cfg.parent.mkdir(parents=True, exist_ok=True)

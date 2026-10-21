@@ -350,7 +350,7 @@ def _phase_preflight(ctx: _StepCtx) -> PhaseResult:
       (~143 MB), and a build adds a third release before the prune: about
       1.5 GB at peak with a managed interpreter. The v0.22.2 dashboard build
       adds upstream's pinned Node v26.7.0 under ``hermes/tools`` (shared by
-      every release, roughly 200 MB unpacked; not measured here) and the
+      every release; 364 MB measured on a test box) and the
       build's ``node_modules`` in each release checkout. 4 GiB still leaves
       room for those, the memory cache and HERMES_HOME.
     """
@@ -2100,7 +2100,6 @@ def _build_config_overlay(
     auxiliary_tasks: dict[str, dict[str, Any]],
     mcp_servers: list[dict[str, Any]],
     agent_id: str,
-    system_prompt: str,
     live_resolve_enabled: bool,
     hermes_home: Path | str = HERMES_HOME_DEFAULT,
     terminal_enabled: bool = False,
@@ -2272,16 +2271,8 @@ def _build_config_overlay(
     # d923a5eb). hal0 keeps session history, as before the bump, until a
     # retention setting exists (ADR-0034 decision 7).
     pairs.append((SESSIONS_AUTO_PRUNE_CONFIG_KEY, False))
-    # The active persona's prompt (#2839). ``agent.system_prompt`` is the
-    # overlay Hermes resolves into each session's ephemeral system prompt
-    # (hermes_cli/personality.py:118-123 at the pinned d923a5eb), read by the
-    # CLI, the TUI gateway behind the dashboard chat, and the messaging
-    # gateway. hal0 used to write ``agent.system_prompt_prelude``, which no
-    # Hermes version reads. ``display.personality`` is left to the operator:
-    # a known personality named there overlays this prompt, which is
-    # Hermes's own ``/personality`` behaviour.
-    if system_prompt:
-        pairs.append((PERSONA_PROMPT_CONFIG_KEY, system_prompt))
+    # The persona prompt (agent.system_prompt) is NOT a config-set pair: see
+    # :func:`_persona_prompt_layer`.
 
     # Reasoning visibility: both flags are required together (#635).
     pairs += [
@@ -2680,6 +2671,7 @@ def _merge_config_yaml_layers(
     base: dict[str, Any] = {}
     if config_path.exists():
         base = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+    _carry_prelude_to_system_prompt(base)
     for dotted in RETIRED_HAL0_CONFIG_KEYS:
         _drop_dotted_key(base, dotted)
     _retire_hal0_personality(base, persona_names)
@@ -2722,6 +2714,87 @@ RETIRED_HAL0_CONFIG_KEYS: tuple[str, ...] = (
 )
 
 
+def _carry_prelude_to_system_prompt(data: dict[str, Any]) -> bool:
+    """Move a pre-#2839 ``agent.system_prompt_prelude`` into ``agent.system_prompt``.
+
+    Only when ``agent.system_prompt`` is unset or blank, so a value the
+    overlay or the operator wrote wins. The prelude key itself is then
+    dropped with the other :data:`RETIRED_HAL0_CONFIG_KEYS`. This lets a path
+    that cannot render the persona (``hal0 update``'s release activation)
+    still hand Hermes the prompt hal0 last rendered. True iff it moved.
+    """
+    agent = data.get("agent")
+    if not isinstance(agent, dict):
+        return False
+    prelude = agent.get("system_prompt_prelude")
+    current = agent.get("system_prompt")
+    if not isinstance(prelude, str) or not prelude.strip():
+        return False
+    if isinstance(current, str) and current.strip():
+        return False
+    agent["system_prompt"] = prelude
+    return True
+
+
+#: Keys every Hermes release hal0 activates must find in config.yaml before
+#: its units start (ADR-0034 decision 7: session pruning off). Written by
+#: :func:`apply_release_config_invariants` during activation as well as by
+#: the full overlay on install and reprovision.
+RELEASE_CONFIG_INVARIANTS: dict[str, Any] = {"sessions": {"auto_prune": False}}
+
+
+def apply_release_config_invariants(
+    hermes_home: Path | str,
+    *,
+    overrides_path: Path | None = None,
+) -> bool:
+    """Bring an existing config.yaml up to what the pinned Hermes needs from hal0.
+
+    ``hal0 update`` converges Hermes by building and activating a release; it
+    does not run the provisioning pipeline, so the config overlay
+    (:func:`_phase_config_write`) never runs on that path. The release
+    activation calls this while the agent and gateway are stopped, after
+    ``hermes config migrate`` and before they start, so the new release's
+    first start already sees ``sessions.auto_prune: false`` and none of the
+    retired keys. It writes :data:`RELEASE_CONFIG_INVARIANTS`, moves the old
+    persona prelude into ``agent.system_prompt``, drops
+    :data:`RETIRED_HAL0_CONFIG_KEYS`, resets a ``display.personality`` hal0
+    wrote, and lays ``overrides.yaml`` on top, so an operator's own
+    ``sessions.auto_prune`` still wins. When the file has neither
+    ``agent.system_prompt`` nor the old prelude (a box the #2853 install path
+    left without either), the active persona's prompt is rendered from the
+    persona store and written; an existing ``agent.system_prompt`` is never
+    replaced. No-op without a config.yaml. Returns True iff the file changed.
+    """
+    home = Path(hermes_home)
+    config = home / "config.yaml"
+    if not config.is_file():
+        return False
+    import yaml
+
+    loaded = yaml.safe_load(config.read_text(encoding="utf-8"))
+    if loaded is not None and not isinstance(loaded, dict):
+        raise ValueError(f"{config} is not a YAML mapping")
+    layers: dict[str, Any] = dict(RELEASE_CONFIG_INVARIANTS)
+    agent = (loaded or {}).get("agent")
+    agent = agent if isinstance(agent, dict) else {}
+    has_prompt = any(
+        isinstance(agent.get(k), str) and agent[k].strip()
+        for k in ("system_prompt", "system_prompt_prelude")
+    )
+    if not has_prompt:
+        prompt, _name = _active_persona_render(
+            BootstrapState(hermes_home=str(home)), mcp_servers=_default_mcp_servers()
+        )
+        layers = _deep_merge(layers, _persona_prompt_layer(prompt))
+    return _merge_config_yaml_layers(
+        config,
+        list_keys=layers,
+        overrides_path=overrides_path if overrides_path is not None else OVERRIDES_PATH,
+        persona_names=_persona_display_names_for_home(home),
+    )
+
+
 def _retire_hal0_personality(data: dict[str, Any], persona_names: Iterable[str]) -> bool:
     """Reset ``display.personality`` when it holds a hal0 persona's display name.
 
@@ -2738,6 +2811,27 @@ def _retire_hal0_personality(data: dict[str, Any], persona_names: Iterable[str])
         return False
     display["personality"] = ""
     return True
+
+
+def _persona_prompt_layer(system_prompt: str) -> dict[str, Any]:
+    """The active persona's prompt as a YAML layer for :func:`_merge_config_yaml_layers` (#2839).
+
+    ``agent.system_prompt`` is the overlay Hermes resolves into each
+    session's ephemeral system prompt (hermes_cli/personality.py:118-123 at
+    the pinned d923a5eb), read by the CLI, the TUI gateway behind the
+    dashboard chat, and the messaging gateway. ``display.personality`` is
+    left to the operator: a known personality named there overlays this
+    prompt, which is Hermes's own ``/personality`` behaviour.
+
+    It goes through the YAML merge, not ``hermes config set``: v0.22.2's
+    ``config set`` refuses a value that "looks like a list/mapping", and the
+    persona addendum's ``- hal0-admin: …`` lines do, so the write failed
+    (non-fatally) and the prompt never landed. ``{}`` when there is no
+    prompt, so an existing value is left alone.
+    """
+    if not system_prompt:
+        return {}
+    return {"agent": {"system_prompt": system_prompt}}
 
 
 def _drop_dotted_key(data: dict[str, Any], dotted: str) -> bool:
@@ -2833,9 +2927,13 @@ _SEED_PERSONA_DISPLAY_NAMES: tuple[str, ...] = ("Hermes", "Coder", "hal0 Brain")
 
 def _hal0_persona_display_names(state: BootstrapState) -> list[str]:
     """Every hal0 persona display name: the seeds plus the persona store."""
+    return _persona_display_names_for_home(Path(state.hermes_home))
+
+
+def _persona_display_names_for_home(hermes_home: Path) -> list[str]:
     from hal0.agents import personas as _personas
 
-    root = _personas_root_for(state)
+    root = hermes_home / "personas"
     if not root.exists() and _personas.PERSONAS_ROOT.exists():
         root = _personas.PERSONAS_ROOT
     try:
@@ -3036,7 +3134,6 @@ def _phase_config_write(ctx: _StepCtx) -> PhaseResult:
         auxiliary_tasks=auxiliary_tasks,
         mcp_servers=mcp_servers,
         agent_id=state.agent_id,
-        system_prompt=system_prompt,
         live_resolve_enabled=live_resolve_enabled,
         hermes_home=hermes_home,
         terminal_enabled=terminal_enabled,
@@ -3051,10 +3148,13 @@ def _phase_config_write(ctx: _StepCtx) -> PhaseResult:
     pre_merge = config_path.read_text(encoding="utf-8") if config_path.exists() else None
     list_merge_changed = _merge_config_yaml_layers(
         config_path,
-        list_keys=_config_list_keys(
-            terminal_enabled=terminal_enabled,
-            existing_disabled=_disabled_toolsets(_parse_yaml_config(pre_merge)),
-            mcp_servers=mcp_servers,
+        list_keys=_deep_merge(
+            _config_list_keys(
+                terminal_enabled=terminal_enabled,
+                existing_disabled=_disabled_toolsets(_parse_yaml_config(pre_merge)),
+                mcp_servers=mcp_servers,
+            ),
+            _persona_prompt_layer(system_prompt),
         ),
         overrides_path=OVERRIDES_PATH,
         persona_names=_hal0_persona_display_names(state),
@@ -3756,16 +3856,30 @@ def _atomic_write(path: Path, content: str, *, mode: int | None = None) -> str:
 
     The chmod happens on the TMP file, before the rename, so the target is
     never observable at the wrong mode.
+
+    A root caller also keeps the replaced file's owner and group. Without
+    that, a root run (``install.sh``'s post-activation pass reaching
+    ``hermes_arm._config_backstop``) would leave ``config.yaml`` root-owned
+    and the ``hal0`` agent unable to rewrite it.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
-    if mode is None:
-        with contextlib.suppress(OSError):
-            mode = stat.S_IMODE(path.stat().st_mode)
+    owner: tuple[int, int] | None = None
+    with contextlib.suppress(OSError):
+        st = path.stat()
+        owner = (st.st_uid, st.st_gid)
+        if mode is None:
+            mode = stat.S_IMODE(st.st_mode)
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(content, encoding="utf-8")
     if mode is not None:
         with contextlib.suppress(OSError):
             os.chmod(tmp, mode)
+    if owner is not None and os.geteuid() == 0:
+        try:
+            os.chown(tmp, *owner)
+        except OSError:
+            tmp.unlink(missing_ok=True)
+            raise
     os.replace(tmp, path)
     return content_hash(content)
 

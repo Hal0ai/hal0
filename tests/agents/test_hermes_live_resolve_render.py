@@ -20,7 +20,6 @@ def _overlay(*, live_resolve_enabled, **over):
         auxiliary_tasks={},
         mcp_servers=[],
         agent_id="hermes",
-        system_prompt="x",
     )
     base.update(over)
     pairs = _build_config_overlay(live_resolve_enabled=live_resolve_enabled, **base)

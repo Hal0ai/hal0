@@ -111,6 +111,9 @@ def component_status_snapshot() -> dict[str, Any]:
                 "status": derived,
                 "error": last.get("error"),
                 "remedy": last.get("remedy"),
+                # An informational line from the last converge that is not a
+                # failure (e.g. Hermes config keys applied on a converged box).
+                "note": last.get("note"),
                 "ts": last.get("ts"),
                 "detail": last.get("detail") or [],
             }
