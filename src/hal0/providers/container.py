@@ -2819,6 +2819,7 @@ class ContainerProvider(Provider):
         )
 
         parser = PullLineParser()
+        clean_eof = False
 
         try:
             assert proc.stdout is not None
@@ -2827,12 +2828,25 @@ class ContainerProvider(Provider):
                 if not line:
                     continue
                 yield parser.feed(line)
+            clean_eof = True
         except Exception as exc:
             yield {"state": "failed", "error": str(exc)}
             return
         finally:
-            with contextlib.suppress(ProcessLookupError, OSError):
-                proc.kill()
+            # #2814: kill only on the abort paths (exception, cancel,
+            # ``.aclose()``), never after a clean EOF. On CPython 3.12,
+            # ``Process.kill()`` goes through ``Popen.send_signal()``, which
+            # calls ``Popen.poll()`` — a ``waitpid(pid, WNOHANG)``. When the
+            # runtime has already exited but asyncio's child watcher has not
+            # run yet, that poll reaps the child behind the watcher's back,
+            # and ``proc.wait()`` below then returns the watcher's synthetic
+            # 255 ("exit status already read"), turning a successful pull
+            # into ``failed``. Python 3.13 signals with ``os.kill`` and does
+            # not reap. Same rule as the rootful twin in
+            # ``podman_mutate.pull_image_stream_rootful``.
+            if not clean_eof and proc.returncode is None:
+                with contextlib.suppress(ProcessLookupError, OSError):
+                    proc.kill()
 
         exit_code = await proc.wait()
         if exit_code == 0:

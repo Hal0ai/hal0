@@ -136,3 +136,87 @@ async def test_pull_falls_back_to_rootless_when_seam_unavailable(
     states = [e["state"] for e in events]
     assert "pulling" in states
     assert states[-1] == "completed"
+
+
+class _Py312ReapingProcess:
+    """Stand-in for ``asyncio.subprocess.Process`` with CPython 3.12's
+    ``kill()`` semantics (#2814).
+
+    On 3.12, ``Process.kill()`` reaches ``Popen.send_signal()``, which calls
+    ``Popen.poll()`` (a ``waitpid(pid, WNOHANG)``) before signalling. If the
+    child has already exited but asyncio's child watcher has not run yet, that
+    poll reaps it, and the watcher then reports a synthetic returncode of 255
+    ("child process pid N exit status already read"). This fake models that
+    outcome deterministically: once the stream is drained the child counts as
+    exited, so a ``kill()`` after EOF reaps it and ``wait()`` returns 255.
+    """
+
+    def __init__(self, lines: list[bytes]) -> None:
+        self._lines = lines
+        self.returncode: int | None = None
+        self.killed = False
+        self._drained = False
+        self._reaped_behind_watcher = False
+        self.stdout = self._stream()
+
+    async def _stream(self) -> AsyncIterator[bytes]:
+        for line in self._lines:
+            yield line
+        self._drained = True
+
+    def kill(self) -> None:
+        self.killed = True
+        if self._drained:
+            self._reaped_behind_watcher = True
+
+    async def wait(self) -> int:
+        self.returncode = 255 if self._reaped_behind_watcher else 0
+        return self.returncode
+
+
+def _patch_rootless_spawn(monkeypatch: pytest.MonkeyPatch, proc: _Py312ReapingProcess) -> None:
+    import asyncio
+
+    monkeypatch.setattr(podman_mutate, "rw_seam_available", lambda: False)
+    monkeypatch.setattr(container_mod, "_container_runtime", lambda: "/fake/podman")
+
+    async def _spawn(*_args: Any, **_kwargs: Any) -> _Py312ReapingProcess:
+        return proc
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _spawn)
+
+
+@pytest.mark.asyncio
+async def test_rootless_pull_does_not_kill_after_clean_eof(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#2814: the rootless path used to ``proc.kill()`` in a ``finally`` right
+    after stdout hit EOF and before ``proc.wait()``. On Python 3.12 that kill
+    polls and can reap the already-exited runtime behind asyncio's watcher, so
+    a successful pull read back as exit 255 and the stream ended ``failed``.
+    The CI flake in ``test_pull_falls_back_to_rootless_when_seam_unavailable``
+    and ``test_pull_image_stream_completed_on_success`` was this race."""
+    proc = _Py312ReapingProcess([b"Pulling from library/alpine\n", b"abc123: Pull complete\n"])
+    _patch_rootless_spawn(monkeypatch, proc)
+
+    events = [e async for e in ContainerProvider().pull_image_stream("alpine:latest")]
+
+    assert proc.killed is False
+    assert events[-1]["state"] == "completed"
+
+
+@pytest.mark.asyncio
+async def test_rootless_pull_kills_runtime_when_consumer_aborts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The abort path (a dashboard cancel calls ``.aclose()``) still kills the
+    runtime, so dropping the post-EOF kill does not leak a running pull."""
+    proc = _Py312ReapingProcess([b"abc123: Pulling fs layer\n", b"abc123: Pull complete\n"])
+    _patch_rootless_spawn(monkeypatch, proc)
+
+    agen = ContainerProvider().pull_image_stream("alpine:latest")
+    first = await agen.__anext__()
+    await agen.aclose()
+
+    assert first["state"] == "pulling"
+    assert proc.killed is True
