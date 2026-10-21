@@ -827,16 +827,20 @@ if [[ "${MODELS_DIR}" != /* ]]; then
 fi
 info "Pull destination: ${MODELS_DIR}"
 
-# The Hindsight memory engine (installed much later) builds its own venv and
-# pulls litellm, which gates out Python 3.14 via requires-python metadata.
-# Resolve the interpreter for that venv NOW — auto-installing a compatible
-# 3.11-3.13 when the default python is 3.14+ and the package manager can supply
-# one — so the memory-engine step builds cleanly instead of dumping a wall of
-# pip resolver errors mid-install. Sets HINDSIGHT_PY / HINDSIGHT_PY_FALLBACK,
-# consumed in the Hindsight block below. Never fatal (the metadata-gate bypass
-# is the backstop). Skipped in dev mode and when HAL0_SKIP_HINDSIGHT=1.
+# The Hindsight memory engine (installed much later) builds its own venv.
+# Resolve the interpreter for that venv NOW — a Python 3.11-3.14, auto-installed
+# when the default python is out of range and the package manager can supply
+# one — so a host with none learns it here, with a clear remedy, instead of
+# minutes into the install; the memory engine is then skipped for this run.
+# Sets HINDSIGHT_PY, consumed in the Hindsight block below.
+# Skipped in dev mode and when HAL0_SKIP_HINDSIGHT=1.
 if [[ "${DEV_MODE}" -eq 0 && "${HAL0_SKIP_HINDSIGHT:-0}" -ne 1 ]]; then
-    HAL0_HINDSIGHT_AUTOINSTALL=1 resolve_hindsight_python
+    if ! HAL0_HINDSIGHT_AUTOINSTALL=1 resolve_hindsight_python; then
+        # Not fatal: the rest of the install is useful without the memory
+        # engine. Treat this run as HAL0_SKIP_HINDSIGHT=1.
+        warn "Hindsight memory engine skipped for this run (no usable Python); fix the interpreter and re-run install.sh to add it"
+        HAL0_SKIP_HINDSIGHT=1
+    fi
 fi
 
 # Disk + port-collision checks only matter for the live install — dev
@@ -3624,41 +3628,29 @@ else
         info "setting up Hindsight memory engine (venv + daemon) — this can take a few minutes…"
         mkdir -p "${HS_DIR}/hf-cache" "${HS_DIR}/.cache"
         if [[ ! -x "${HS_DIR}/.venv/bin/hindsight-api" ]]; then
-            # Interpreter + gate decision were made up front by
-            # resolve_hindsight_python (preflight). HINDSIGHT_PY is a 3.11-3.13
-            # when one was found/installed; otherwise the default ${PY} with
-            # HINDSIGHT_PY_FALLBACK=1 (litellm's requires-python gate must be
-            # bypassed). Default to ${PY} if the resolver didn't run.
+            # Interpreter decision was made up front by
+            # resolve_hindsight_python (preflight): HINDSIGHT_PY is a Python
+            # 3.11-3.14. Default to ${PY} if the resolver didn't run.
             hs_py="${HINDSIGHT_PY:-${PY}}"
-            hs_fallback="${HINDSIGHT_PY_FALLBACK:-0}"
             "${hs_py}" -m venv "${HS_DIR}/.venv"
             hs_pip="${HS_DIR}/.venv/bin/pip"
             "${hs_pip}" install --upgrade pip wheel -q 2>/dev/null || true
 
-            # On a Python litellm rejects by metadata (3.14+ with no compatible
-            # interpreter available) skip the doomed first attempt — it spews a
-            # wall of "Could not find a version" resolver output — and bypass the
-            # gate directly. litellm runs fine on 3.14 (classifier dropped over a
-            # since-resolved fastuuid wheel gap; BerriAI/litellm#26343); the
-            # /health poll below is the real gate on whether the engine came up.
-            hs_installed=0
-            if [[ "${hs_fallback}" -ne 1 ]]; then
-                if "${hs_pip}" install "hindsight-api==${HINDSIGHT_PIN}" -q; then
-                    hs_installed=1
-                else
-                    hs_pyver="$("${HS_DIR}/.venv/bin/python" -c 'import sys;print("%d.%d"%sys.version_info[:2])' 2>/dev/null || echo '?')"
-                    warn "hindsight-api install failed on Python ${hs_pyver}; retrying past the requires-python gate"
-                fi
-            fi
-            if [[ "${hs_installed}" -ne 1 ]]; then
-                [[ "${hs_fallback}" -eq 1 ]] && \
-                    info "installing hindsight-api with --ignore-requires-python (no Python 3.11-3.13 available; litellm's 3.14 gate is metadata-only)"
-                if "${hs_pip}" install --ignore-requires-python "hindsight-api==${HINDSIGHT_PIN}" -q; then
-                    hs_installed=1
-                else
-                    warn "hindsight-api install failed — memory engine will be unavailable"
-                    warn "  install a Python 3.11-3.13 and re-run, or set HAL0_HINDSIGHT_PYTHON=python3.12"
-                fi
+            # pip exit codes lie (#2021) and the /health poll below only fires
+            # after the unit starts, so prove the install here: the package
+            # must install AND import in the venv it was installed into.
+            # Failure is not fatal for the whole installer: warn, drop the
+            # half-built venv so the next run retries cleanly, and let the
+            # `-x hindsight-api` guard below skip the unit/health steps.
+            hs_pyver="$("${HS_DIR}/.venv/bin/python" -c 'import sys;print("%d.%d"%sys.version_info[:2])' 2>/dev/null || echo '?')"
+            if ! "${hs_pip}" install "hindsight-api==${HINDSIGHT_PIN}" -q; then
+                warn "hindsight-api==${HINDSIGHT_PIN} failed to install on Python ${hs_pyver} — memory engine will be unavailable"
+                warn "  set HAL0_HINDSIGHT_PYTHON=/path/to/python3.X (3.11-3.14) and re-run, or set HAL0_SKIP_HINDSIGHT=1"
+                rm -rf "${HS_DIR}/.venv"
+            elif ! "${HS_DIR}/.venv/bin/python" -c 'import hindsight_api' 2>/dev/null; then
+                warn "hindsight-api==${HINDSIGHT_PIN} installed but 'import hindsight_api' fails on Python ${hs_pyver} — memory engine will be unavailable"
+                warn "  set HAL0_HINDSIGHT_PYTHON=/path/to/python3.X (3.11-3.14) and re-run, or set HAL0_SKIP_HINDSIGHT=1"
+                rm -rf "${HS_DIR}/.venv"
             fi
         else
             # Existing venv: upgrading it was the engine-upgrade migration
