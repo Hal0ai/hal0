@@ -19,11 +19,13 @@ upgrade paths already converge on.
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
 from hal0.agents import hermes_provision as hp
+from hal0.system.seam import SEAM_BIN
 from hal0.updater.updater import repair_hermes_mcp_client
 
 
@@ -146,11 +148,66 @@ def test_gateway_bounce_uses_try_restart_so_a_stopped_unit_stays_stopped(
 
     def _run(cmd: list[str], **_kw: Any) -> Any:
         calls.append(list(cmd))
-        return None
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
 
     monkeypatch.setattr(hp, "_probe_mcp_client", _probe([BROKEN, OK], []))
     monkeypatch.setattr(hp, "_install_venv", lambda *a, **k: None)
     monkeypatch.setattr("hal0.updater.updater.subprocess.run", _run)
+    monkeypatch.setattr("hal0.updater.updater.os.geteuid", lambda: 0)
 
     assert repair_hermes_mcp_client(venv=venv, restart_gateway=True) is True
     assert calls == [["systemctl", "try-restart", "hermes-gateway.service"]]
+
+
+def _bounce(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    euid: int,
+    rc: int = 0,
+    stderr: str = "",
+) -> tuple[list[list[str]], list[tuple[str, dict[str, Any]]]]:
+    venv = _venv(tmp_path)
+    calls: list[list[str]] = []
+    warnings: list[tuple[str, dict[str, Any]]] = []
+
+    def _run(cmd: list[str], **_kw: Any) -> Any:
+        calls.append(list(cmd))
+        return SimpleNamespace(returncode=rc, stdout="", stderr=stderr)
+
+    monkeypatch.setattr(hp, "_probe_mcp_client", _probe([BROKEN, OK], []))
+    monkeypatch.setattr(hp, "_install_venv", lambda *a, **k: None)
+    monkeypatch.setattr("hal0.updater.updater.subprocess.run", _run)
+    monkeypatch.setattr("hal0.updater.updater.os.geteuid", lambda: euid)
+    monkeypatch.setattr(
+        "hal0.updater.updater.log.warning",
+        lambda event, **kw: (
+            warnings.append((event, kw))
+            if event == "updater.hermes_gateway_bounce_failed"
+            else None
+        ),
+    )
+    assert repair_hermes_mcp_client(venv=venv, restart_gateway=True) is True
+    return calls, warnings
+
+
+def test_gateway_bounce_non_root_goes_through_the_seam(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#2828: the hal0 user cannot run bare systemctl; it must use sudo -n + seam."""
+    calls, warnings = _bounce(tmp_path, monkeypatch, euid=1000)
+    assert calls == [["sudo", "-n", SEAM_BIN, "svc-try-restart", "hermes-gateway"]]
+    assert warnings == []
+
+
+def test_gateway_bounce_nonzero_rc_warns_with_trimmed_stderr(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#2828: a non-zero exit is logged, not silently dropped."""
+    _, warnings = _bounce(tmp_path, monkeypatch, euid=1000, rc=1, stderr="  boom\n" + "x" * 900)
+    assert len(warnings) == 1
+    event, kw = warnings[0]
+    assert event == "updater.hermes_gateway_bounce_failed"
+    assert kw["rc"] == 1
+    assert kw["stderr"].startswith("boom")
+    assert len(kw["stderr"]) == 500

@@ -1761,13 +1761,31 @@ def repair_hermes_mcp_client(
         # start, so a running gateway keeps the broken one until it bounces.
         # try-restart, not restart: a gateway the operator disabled and
         # stopped must stay stopped (#2822); only a running unit is bounced.
+        # The updater runs as the unprivileged hal0 user on a deployed box, where
+        # a bare systemctl escalates through polkit and fails (#2828): same
+        # root/non-root split as cli/agent_commands.py's posture refresh.
+        from hal0.system.seam import SEAM_BIN
+
+        argv = (
+            ["systemctl", "try-restart", "hermes-gateway.service"]
+            if os.geteuid() == 0
+            else ["sudo", "-n", SEAM_BIN, "svc-try-restart", "hermes-gateway"]
+        )
         try:
-            subprocess.run(
-                ["systemctl", "try-restart", "hermes-gateway.service"],
+            proc = subprocess.run(  # nosec B603 — seam-validated argv
+                argv,
                 check=False,
                 capture_output=True,
+                text=True,
                 timeout=120,
             )
+            if proc.returncode != 0:
+                log.warning(
+                    "updater.hermes_gateway_bounce_failed",
+                    job_id=job_id,
+                    rc=proc.returncode,
+                    stderr=(proc.stderr or "").strip()[:500],
+                )
         except (OSError, subprocess.SubprocessError) as exc:
             log.warning("updater.hermes_gateway_bounce_failed", job_id=job_id, error=str(exc))
 
