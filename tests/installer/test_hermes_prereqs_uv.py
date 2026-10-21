@@ -9,7 +9,7 @@ needed) is gone, along with the Python-side pipx lookup.
 
 These tests run the real script end-to-end (same technique as
 ``test_hermes_prereqs_git.py``) on the box shape that used to need uv: only a
-``python3`` (no ``python3.12``) and no uv anywhere. It must now complete
+``python3`` and no uv anywhere. It must now complete
 without trying to install uv.
 """
 
@@ -119,3 +119,9 @@ class TestStaticWiring:
 
         assert not hasattr(hp, "_UV_PIPX_FALLBACK_BIN")
         assert not hasattr(hp, "_uv_pipx_fallback_bin")
+
+
+def test_no_python312_probe_or_inverted_314_check_remains() -> None:
+    text = _PREREQS.read_text(encoding="utf-8")
+    assert "python3.12" not in text
+    assert "<3.14" not in text and "3.14+" not in text

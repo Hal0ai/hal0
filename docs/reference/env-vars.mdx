@@ -99,7 +99,7 @@ See [Config schema](/docs/reference/config-schema/) for the `[metrics]` TOML tab
 
 | Variable | Default | Controls |
 |---|---|---|
-| `HAL0_HERMES_PYTHON` | unset (auto-discovered interpreter) | Pins the interpreter used to run/re-provision the Hermes venv. |
+| `HAL0_HERMES_PYTHON` | unset (auto-discovered interpreter) | Pins the interpreter used to build the Hermes venv. It must be a Python 3.14; any other value is discarded with a warning and the interpreter is re-probed. One that links an SQLite older than 3.51.3 is used, with a warning. hal0 also persists its own choice here, in `/etc/hal0/hermes-python.env`. |
 | `HAL0_HERMES_LIVE_RESOLVE` | `"1"` | `0` opts out of live model-discovery (Hermes' picker polling hal0-api's `/v1/models`) back into single-backend pinning. |
 | `HAL0_HERMES_TERMINAL` | unset (→ terminal tool OFF) | Opt the agent into a terminal tool at provisioning time. `1` enables it, `0` disables it. With it on, Hermes can run shell commands as the `hal0` user, which is root-equivalent on this box. A non-interactive install never enables it; see [Run agents](/docs/guides/run-agents/). |
 | `HAL0_HERMES_OFFLINE` | unset | Set programmatically by `hal0 agent bootstrap --offline`. |
