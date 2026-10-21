@@ -830,8 +830,9 @@ info "Pull destination: ${MODELS_DIR}"
 # The Hindsight memory engine (installed much later) builds its own venv.
 # Resolve the interpreter for that venv NOW — a Python 3.11-3.14, auto-installed
 # when the default python is out of range and the package manager can supply
-# one — so a host with none fails here with a clear remedy instead of minutes
-# into the install. Sets HINDSIGHT_PY, consumed in the Hindsight block below.
+# one — so a host with none learns it here, with a clear remedy, instead of
+# minutes into the install; the memory engine is then skipped for this run.
+# Sets HINDSIGHT_PY, consumed in the Hindsight block below.
 # Skipped in dev mode and when HAL0_SKIP_HINDSIGHT=1.
 if [[ "${DEV_MODE}" -eq 0 && "${HAL0_SKIP_HINDSIGHT:-0}" -ne 1 ]]; then
     if ! HAL0_HINDSIGHT_AUTOINSTALL=1 resolve_hindsight_python; then
