@@ -2760,8 +2760,11 @@ def apply_release_config_invariants(
     persona prelude into ``agent.system_prompt``, drops
     :data:`RETIRED_HAL0_CONFIG_KEYS`, resets a ``display.personality`` hal0
     wrote, and lays ``overrides.yaml`` on top, so an operator's own
-    ``sessions.auto_prune`` still wins. No-op without a config.yaml.
-    Returns True iff the file changed.
+    ``sessions.auto_prune`` still wins. When the file has neither
+    ``agent.system_prompt`` nor the old prelude (a box the #2853 install path
+    left without either), the active persona's prompt is rendered from the
+    persona store and written; an existing ``agent.system_prompt`` is never
+    replaced. No-op without a config.yaml. Returns True iff the file changed.
     """
     home = Path(hermes_home)
     config = home / "config.yaml"
@@ -2772,9 +2775,21 @@ def apply_release_config_invariants(
     loaded = yaml.safe_load(config.read_text(encoding="utf-8"))
     if loaded is not None and not isinstance(loaded, dict):
         raise ValueError(f"{config} is not a YAML mapping")
+    layers: dict[str, Any] = dict(RELEASE_CONFIG_INVARIANTS)
+    agent = (loaded or {}).get("agent")
+    agent = agent if isinstance(agent, dict) else {}
+    has_prompt = any(
+        isinstance(agent.get(k), str) and agent[k].strip()
+        for k in ("system_prompt", "system_prompt_prelude")
+    )
+    if not has_prompt:
+        prompt, _name = _active_persona_render(
+            BootstrapState(hermes_home=str(home)), mcp_servers=_default_mcp_servers()
+        )
+        layers = _deep_merge(layers, _persona_prompt_layer(prompt))
     return _merge_config_yaml_layers(
         config,
-        list_keys=RELEASE_CONFIG_INVARIANTS,
+        list_keys=layers,
         overrides_path=overrides_path if overrides_path is not None else OVERRIDES_PATH,
         persona_names=_persona_display_names_for_home(home),
     )

@@ -1691,3 +1691,19 @@ def test_rollback_timeout_warns_server_may_still_be_rolling_back(
     assert "current/VERSION" in out
     assert "flip back" in out
     assert srv.hits == 1
+
+
+def test_component_table_prints_a_note_on_a_converged_row(capsys) -> None:
+    printed: list[str] = []
+    import hal0.cli.update_commands as m
+
+    orig = m.console.print
+    try:
+        m.console.print = lambda *a, **k: printed.append(str(a[0]) if a else "")  # type: ignore[method-assign]
+        ok = m._print_component_table(
+            [_component_row(id="hermes", status="converged", note="Hermes config keys applied")]
+        )
+    finally:
+        m.console.print = orig  # type: ignore[method-assign]
+    assert ok is True
+    assert any("Hermes config keys applied" in line for line in printed)

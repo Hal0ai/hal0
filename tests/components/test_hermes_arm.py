@@ -250,3 +250,53 @@ def test_a_tree_a_migration_crash_left_without_current_is_still_provisioned(tmp_
     res = hermes_arm.converge_hermes(venv=venv, apply=False)
     assert res["status"] == "stale"
     assert hermes_arm.hermes_build_trigger(venv) == "no live release"
+
+
+# ── config backstop on a converged box (#2615) ──────────────────────────────
+
+
+@pytest.fixture
+def old_config(monkeypatch):
+    from hal0.agents import hermes_provision as hp
+
+    monkeypatch.setattr(hp, "OVERRIDES_PATH", var_lib() / "no-overrides.yaml")
+    home = var_lib() / ".hermes"
+    home.mkdir(parents=True, exist_ok=True)
+    cfg = home / "config.yaml"
+    cfg.write_text("agent:\n  max_turns: 60\n  system_prompt_prelude: P\n")
+    return cfg
+
+
+def test_a_converged_box_gets_the_config_keys_on_update(tmp_path, old_config) -> None:
+    """A box already on the pinned release never re-activates; `hal0 update`
+    must still write sessions.auto_prune: false and the persona prompt."""
+    import yaml
+
+    venv = _live_release()
+    with patch("hal0.agents.hermes_release.ensure_release") as ensure:
+        res = hermes_arm.converge_hermes(venv=venv)
+    ensure.assert_not_called()
+    assert res["status"] == "converged"
+    assert res["note"] == hermes_arm.CONFIG_BACKSTOP_NOTE
+    cfg = yaml.safe_load(old_config.read_text())
+    assert cfg["sessions"]["auto_prune"] is False
+    assert cfg["agent"] == {"max_turns": 60, "system_prompt": "P"}
+
+    # Idempotent: nothing to do, nothing to say.
+    again = hermes_arm.converge_hermes(venv=venv)
+    assert again["status"] == "converged" and "note" not in again
+
+
+def test_the_backstop_never_writes_on_diagnose(tmp_path, old_config) -> None:
+    venv = _live_release()
+    before = old_config.read_text()
+    res = hermes_arm.converge_hermes(venv=venv, apply=False)
+    assert res["status"] == "converged" and "note" not in res
+    assert old_config.read_text() == before
+
+
+def test_a_broken_config_never_fails_the_converge(tmp_path, old_config) -> None:
+    old_config.write_text("- not\n- a mapping\n")
+    res = hermes_arm.converge_hermes(venv=_live_release())
+    assert res["status"] == "converged"
+    assert any("not applied" in d for d in res["detail"])

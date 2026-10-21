@@ -1633,6 +1633,23 @@ def test_release_config_invariants_keep_a_rendered_system_prompt(
     }
 
 
+def test_release_config_invariants_render_the_persona_when_both_keys_are_gone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The #2853 install path left some boxes with neither agent.system_prompt
+    nor the prelude; the invariants render the active persona then."""
+    yaml = pytest.importorskip("yaml")
+    from hal0.agents import personas
+
+    monkeypatch.setattr(hp, "OVERRIDES_PATH", tmp_path / "absent.yaml")
+    monkeypatch.setattr(personas, "PERSONAS_ROOT", tmp_path / "no-host-personas")
+    personas.seed_default_personas(root=tmp_path / "personas")
+    (tmp_path / "config.yaml").write_text("agent:\n  max_turns: 60\n")
+    assert hp.apply_release_config_invariants(tmp_path) is True
+    prompt = yaml.safe_load((tmp_path / "config.yaml").read_text())["agent"]["system_prompt"]
+    assert prompt.startswith("You are Hermes") and "hal0-admin" in prompt
+
+
 def test_release_config_invariants_without_a_config_do_nothing(tmp_path: Path) -> None:
     assert hp.apply_release_config_invariants(tmp_path) is False
     assert not (tmp_path / "config.yaml").exists()
