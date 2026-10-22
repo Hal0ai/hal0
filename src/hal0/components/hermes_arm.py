@@ -149,6 +149,15 @@ def _config_backstop(result: dict[str, Any], *, job_id: str | None) -> None:
     from hal0.agents import hermes_provision as hermes
 
     home = var_lib() / ".hermes"
+    config = home / "config.yaml"
+
+    def _backend() -> str | None:
+        try:
+            return hermes._terminal_backend_in_config(config.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError):
+            return None
+
+    backend_before = _backend()
     try:
         changed = hermes.apply_release_config_invariants(home)
     except Exception as exc:  # the converge verdict must not depend on it
@@ -159,6 +168,22 @@ def _config_backstop(result: dict[str, Any], *, job_id: str | None) -> None:
         log.info("components.hermes_config_backstop_applied", job_id=job_id, home=str(home))
         result["note"] = CONFIG_BACKSTOP_NOTE
         result["detail"] = [*result.get("detail", []), CONFIG_BACKSTOP_NOTE]
+        if _backend() != backend_before:
+            # Unlike a release activation, this runs with both Hermes consumers
+            # live; the terminal gate (#2878) only reaches a running gateway and
+            # its side agents once the process re-reads its config.
+            failed = hermes.try_restart_hermes_consumers()
+            note = (
+                "Hermes restarted to apply the terminal posture"
+                if not failed
+                else "Hermes terminal posture changed; restart " + ", ".join(failed)
+            )
+            log.info(
+                "components.hermes_terminal_gate_applied",
+                job_id=job_id,
+                restart_failed=failed,
+            )
+            result["detail"] = [*result.get("detail", []), note]
 
 
 #: What `hal0 update` reports when the gateway unit was healed.

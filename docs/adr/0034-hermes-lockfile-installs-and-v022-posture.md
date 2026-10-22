@@ -352,8 +352,11 @@ Everything else in this record stands.
   without a reprovision. A caller with no applied decision (hal0-api's profile
   sweep, an update) treats a root config carrying the sentinel as OFF whatever
   the marker says, so a non-root opt-out whose marker could not be replaced is
-  never undone; opting in is a provisioning act. A provision that changed the
-  backend restarts the agent and gateway so the running process re-reads it. Hermes logs the rejection
+  never undone; opting in is a provisioning act. A cloned profile also gets
+  hal0's execution toolsets subtracted (appended to the operator's own list),
+  so its normal agent loses `execute_code` and `delegate_task` as the root
+  one does. A provision or an update that changed the backend restarts the
+  agent and gateway so the running process re-reads it. Hermes logs the rejection
   at ERROR, `Unknown TERMINAL_ENV 'hal0-terminal-off' …`, TTL-cached 30 s: the
   price of a gate upstream gives no switch for, and the name says who set it.
   `approvals.mode` still gates dangerous commands on a terminal-on box.
