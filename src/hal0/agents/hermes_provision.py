@@ -1812,7 +1812,26 @@ HAL0_CONFIG_LIST_KEYS: dict[str, Any] = {
 # resolves to ``execute_code`` (toolsets.py:155), which runs arbitrary Python
 # as the same user — disabling one without the other would leave the shell
 # reachable by another name.
+#
+# WHY THE SUBTRACTION IS NOT ENOUGH (#2878, v0.22.3+): the gateway-owned
+# preview-restart side agent is built with ``enabled_toolsets=['terminal',
+# 'file'], disabled_toolsets=None`` (gateway/session_tui_side.py:282-283 at
+# 4d043038), so ``agent.disabled_toolsets`` never reaches it. What every agent
+# in the process shares is the terminal tool's ``check_fn``
+# (``check_terminal_requirements``, tools/terminal_tool.py:1553): an unknown
+# ``terminal.backend`` fails it (tools/terminal_tool_backends.py:385-393) and
+# ``terminal`` + ``process_manage`` are dropped from every model-facing schema,
+# side agents included. A served profile gets its own ``terminal:`` section
+# through ``install_and_reset_profile_terminal_scope`` (gateway/run.py:1829), so
+# the sentinel lands in every profile hal0 writes. Hermes logs the rejection at
+# ERROR ("Unknown TERMINAL_ENV 'hal0-terminal-off' …", TTL-cached 30 s), which
+# is the price of a gate upstream gives no switch for; the name says who set it.
 HERMES_TERMINAL_ENV = "HAL0_HERMES_TERMINAL"
+#: ``terminal.backend`` hal0 writes while the terminal is OFF. Not a Hermes
+#: backend and never a plugin name, so ``check_terminal_requirements`` rejects
+#: it for every agent in the process (see above). Opting in replaces it with
+#: ``local``; an operator's docker/ssh/… backend is never overwritten.
+TERMINAL_OFF_BACKEND = "hal0-terminal-off"
 # The two DIRECT execution toolsets, kept named because they are what the
 # ``terminal`` opt-in is about; :data:`TERMINAL_OFF_TOOLSETS` is what hal0
 # actually writes and reads back.
@@ -1945,7 +1964,9 @@ def _existing_terminal_choice(config_text: str | None, hermes_home: Path | str) 
 
     Two shapes count as an operator decision:
 
-    * any backend OTHER than ``local`` — hermes' own default is ``local``, so a
+    * hal0's own :data:`TERMINAL_OFF_BACKEND` sentinel — written by a terminal-OFF
+      provision, so it reads as OFF;
+    * any other backend than ``local`` — hermes' own default is ``local``, so a
       docker/ssh/modal value cannot have been materialised by a migration and
       is necessarily someone's choice, whatever ``cwd`` it carries;
     * ``local`` together with ANY ``terminal.cwd`` that is not hermes' own
@@ -1974,6 +1995,8 @@ def _existing_terminal_choice(config_text: str | None, hermes_home: Path | str) 
     backend = str(terminal.get("backend") or "").strip()
     if not backend:
         return None
+    if backend == TERMINAL_OFF_BACKEND:
+        return False
     if backend != "local":
         return True
     cwd = str(terminal.get("cwd") or "").strip()
@@ -2306,15 +2329,20 @@ def _build_config_overlay(
     # home_init) so shells land in a writable, secret-free sandbox.
     #
     # Written ONLY when the operator opted in (#1863 — see TERMINAL_TOOLSETS).
-    # With the tool off there is no backend to configure, so hal0 writes no
-    # ``terminal.*`` key at all and subtracts the toolsets in _config_list_keys.
+    # With the tool off hal0 subtracts the toolsets in _config_list_keys AND
+    # writes the sentinel backend, the one key that also reaches the gateway's
+    # side agents (#2878, TERMINAL_OFF_BACKEND).
     # Also skipped when the operator has moved the backend off `local` by hand
     # (docker/ssh/…): that is a narrower execution boundary than hal0's default,
     # and re-asserting `local` on top of it would silently widen it back to
     # root-equivalent host execution.
-    if terminal_enabled and terminal_backend in (None, "", "local"):
+    hal0_owned_backend = terminal_backend in (None, "", "local", TERMINAL_OFF_BACKEND)
+    if terminal_enabled and hal0_owned_backend:
         terminal_scratch = str(Path(hermes_home) / "scratch")
         pairs += [("terminal.backend", "local"), ("terminal.cwd", terminal_scratch)]
+    elif not terminal_enabled and hal0_owned_backend:
+        # The gate the side agent cannot bypass (#2878, see TERMINAL_OFF_BACKEND).
+        pairs.append(("terminal.backend", TERMINAL_OFF_BACKEND))
     pairs += [("agent.max_turns", 60), ("agent.reasoning_effort", "medium")]
     # From v0.22 Hermes deletes ENDED sessions idle for 90 days at startup
     # unless this is false (hermes_cli/config_defaults.py:2264-2278 at
@@ -4929,7 +4957,9 @@ def _open_profiles_root(home: Path) -> int:
         os.close(home_fd)
 
 
-def _merge_profile_config(path: Path, desired: dict[str, Any]) -> dict[str, Any]:
+def _merge_profile_config(
+    path: Path, desired: dict[str, Any] | Callable[[dict[str, Any]], dict[str, Any]]
+) -> dict[str, Any]:
     """Deep-merge hal0's keys into one profile ``config.yaml`` (path form).
 
     ``path`` is ``<home>/profiles/<name>/config.yaml``; the work happens on a
@@ -4971,7 +5001,7 @@ def _same_inode(root_fd: int, name: str, dir_fd: int) -> bool:
 def _merge_profile_config_at(
     dir_fd: int,
     path: Path,
-    desired: dict[str, Any],
+    desired: dict[str, Any] | Callable[[dict[str, Any]], dict[str, Any]],
     *,
     still_named: Callable[[], bool] | None = None,
 ) -> dict[str, Any]:
@@ -5040,7 +5070,10 @@ def _merge_profile_config_at(
                     }
                 if _profile_wire_opted_out(base):
                     return {"wired": False, "changed": False, "reason": "opted out"}
-                merged = _deep_merge(base, desired)
+                # ``desired`` may depend on the document (the terminal gate
+                # replaces only hal0's own sentinel, never an operator's backend).
+                wanted = desired(base) if callable(desired) else desired
+                merged = _deep_merge(base, wanted)
                 changed = merged != base
                 if not changed:
                     break
@@ -5137,6 +5170,42 @@ def _profile_wire_desired(agent_id: str) -> dict[str, Any]:
     }
 
 
+def _terminal_profile_keys(
+    base: dict[str, Any], *, terminal_enabled: bool | None
+) -> dict[str, Any]:
+    """The ``terminal.backend`` a profile gets from the box's terminal decision.
+
+    A profile's ``agent.disabled_toolsets`` is a list hal0 never merges (it
+    would clobber the operator's), so the backend sentinel is the only part of
+    the terminal-OFF posture that reaches a cloned profile, and it is also the
+    part the gateway's side agents cannot bypass (#2878). OFF writes
+    :data:`TERMINAL_OFF_BACKEND` over an unset, ``local`` or sentinel backend
+    and leaves an operator's docker/ssh/… alone; ON replaces only the sentinel
+    with ``local``. ``None`` (no recorded decision, e.g. a hal0-api reconcile on
+    a box whose marker is unreadable) changes nothing.
+    """
+    if terminal_enabled is None:
+        return {}
+    terminal = base.get("terminal")
+    backend = str(terminal.get("backend") or "").strip() if isinstance(terminal, dict) else ""
+    if terminal_enabled is False and backend in ("", "local", TERMINAL_OFF_BACKEND):
+        return {"terminal": {"backend": TERMINAL_OFF_BACKEND}}
+    if terminal_enabled is True and backend == TERMINAL_OFF_BACKEND:
+        return {"terminal": {"backend": "local"}}
+    return {}
+
+
+def _profile_wire_desired_for(agent_id: str) -> Callable[[dict[str, Any]], dict[str, Any]]:
+    """``desired`` for :func:`_merge_profile_config_at`, folding the terminal gate in."""
+    terminal_enabled = read_terminal_state()
+    fixed = _profile_wire_desired(agent_id)
+
+    def desired(base: dict[str, Any]) -> dict[str, Any]:
+        return _deep_merge(fixed, _terminal_profile_keys(base, terminal_enabled=terminal_enabled))
+
+    return desired
+
+
 def wire_named_profiles(home: Path) -> dict[str, Any]:
     """Give every named Hermes profile hal0's MCP servers and memory (#2891).
 
@@ -5196,7 +5265,7 @@ def wire_named_profiles(home: Path) -> dict[str, Any]:
                     result = _merge_profile_config_at(
                         dir_fd,
                         profiles / name / "config.yaml",
-                        _profile_wire_desired(profile_agent_id(name)),
+                        _profile_wire_desired_for(profile_agent_id(name)),
                         still_named=lambda n=name, d=dir_fd: _same_inode(root_fd, n, d),
                     )
                 finally:
@@ -5247,7 +5316,7 @@ def _phase_brain_profile_mcp_wire(ctx: _StepCtx) -> PhaseResult:
 
     path = _brain_profile_config_path(ctx.state)
     desired = _profile_wire_desired(BRAIN_PROFILE_AGENT_ID)
-    result = _merge_profile_config(path, desired)
+    result = _merge_profile_config(path, _profile_wire_desired_for(BRAIN_PROFILE_AGENT_ID))
     if result.get("error"):
         return PhaseResult(
             status=PhaseStatus.OK,

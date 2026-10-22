@@ -79,8 +79,9 @@ def test_fresh_install_defaults_terminal_off(
     assert out.details["terminal_tool"] == "off"
     assert out.details["terminal_tool_reason"] == "default-off"
     assert _terminal_is_off(doc), doc
-    # hal0 writes no terminal.* key at all on a fresh box.
-    assert "terminal" not in doc, doc.get("terminal")
+    # The only terminal.* key hal0 writes on a fresh box is the sentinel
+    # backend that drops the tool for every agent in the process (#2878).
+    assert doc["terminal"] == {"backend": hp.TERMINAL_OFF_BACKEND}, doc.get("terminal")
 
 
 def test_fresh_config_yaml_never_ships_a_local_terminal_backend(
@@ -737,3 +738,113 @@ def test_effective_off_requires_every_route_gone() -> None:
 def test_corrupt_config_does_not_enable_terminal() -> None:
     enabled, _why = hp.terminal_tool_enabled(config_text="terminal: [", env={})
     assert enabled is False
+
+
+# ── #2878: the backend gate the side agent cannot bypass ─────────────────────
+#
+# Hermes v0.22.3+'s gateway-owned preview-restart side agent is built with
+# ``enabled_toolsets=['terminal','file'], disabled_toolsets=None``
+# (gateway/session_tui_side.py:282-283 at 4d043038), so the subtraction above
+# never reaches it. What every agent in the process shares is the terminal
+# tool's ``check_fn``: an unknown ``terminal.backend`` fails it and the tool
+# is dropped from every model-facing schema. hal0 writes that sentinel when
+# the terminal is off, and takes it back out when the operator opts in.
+
+
+def test_off_writes_the_sentinel_backend(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv(hp.HERMES_TERMINAL_ENV, raising=False)
+    _out, doc = _run_config_write(tmp_path, monkeypatch)
+    assert doc["terminal"]["backend"] == hp.TERMINAL_OFF_BACKEND
+    assert _terminal_is_off(doc), doc
+
+
+def test_sentinel_backend_is_not_a_real_hermes_backend() -> None:
+    # Hermes rejects unknown TERMINAL_ENV values in check_terminal_requirements
+    # (tools/terminal_tool_backends.py:385-393); the sentinel must never collide
+    # with a real or plugin-looking name, and must say who set it.
+    assert hp.TERMINAL_OFF_BACKEND.startswith("hal0-")
+    assert hp.TERMINAL_OFF_BACKEND not in {
+        "local",
+        "docker",
+        "singularity",
+        "modal",
+        "daytona",
+        "vercel_sandbox",
+        "ssh",
+        "managed_modal",
+    }
+
+
+def test_opting_in_later_replaces_the_sentinel_with_local(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "hh"
+    monkeypatch.delenv(hp.HERMES_TERMINAL_ENV, raising=False)
+    _out, doc = _run_config_write(tmp_path, monkeypatch, home=home)
+    assert doc["terminal"]["backend"] == hp.TERMINAL_OFF_BACKEND
+    monkeypatch.setenv(hp.HERMES_TERMINAL_ENV, "1")
+    out, doc = _run_config_write(tmp_path, monkeypatch, home=home)
+    assert out.details["terminal_tool"] == "on"
+    assert doc["terminal"]["backend"] == "local"
+    assert doc["terminal"]["cwd"] == str(home / "scratch")
+
+
+def test_off_leaves_an_operator_moved_backend_alone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A docker/ssh backend is the operator's narrower boundary; hal0 keeps the
+    toolset subtraction and does not overwrite their backend with the sentinel."""
+    monkeypatch.setenv(hp.HERMES_TERMINAL_ENV, "0")
+    home = tmp_path / "hh"
+    home.mkdir()
+    (home / "config.yaml").write_text("terminal:\n  backend: ssh\n  ssh_host: h\n")
+    _out, doc = _run_config_write(tmp_path, monkeypatch, home=home)
+    assert doc["terminal"]["backend"] == "ssh"
+    assert _terminal_is_off(doc), doc
+
+
+def test_sentinel_backend_reads_as_off_not_as_an_operator_choice() -> None:
+    text = f"terminal:\n  backend: {hp.TERMINAL_OFF_BACKEND}\n  cwd: /x\n"
+    assert hp._existing_terminal_choice(text, "/h") is False
+
+
+def test_profile_terminal_keys_follow_the_recorded_decision() -> None:
+    off = hp._terminal_profile_keys({}, terminal_enabled=False)
+    assert off == {"terminal": {"backend": hp.TERMINAL_OFF_BACKEND}}
+    assert hp._terminal_profile_keys(
+        {"terminal": {"backend": "local"}}, terminal_enabled=False
+    ) == {"terminal": {"backend": hp.TERMINAL_OFF_BACKEND}}
+    # an operator's docker/ssh backend is never overwritten
+    assert hp._terminal_profile_keys({"terminal": {"backend": "ssh"}}, terminal_enabled=False) == {}
+    # opting in takes the sentinel back out, and only the sentinel
+    assert hp._terminal_profile_keys(
+        {"terminal": {"backend": hp.TERMINAL_OFF_BACKEND}}, terminal_enabled=True
+    ) == {"terminal": {"backend": "local"}}
+    assert (
+        hp._terminal_profile_keys({"terminal": {"backend": "docker"}}, terminal_enabled=True) == {}
+    )
+    # no recorded decision: a hal0-api reconcile must not flip a box either way
+    assert hp._terminal_profile_keys({}, terminal_enabled=None) == {}
+
+
+def test_wire_named_profiles_gates_clones_when_the_terminal_is_off(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import yaml
+
+    monkeypatch.setattr("hal0.service_identity.service_key", lambda prefer=None: "svc-key")
+    home = tmp_path / "hh"
+    for name in ("coder", "lab"):
+        (home / "profiles" / name).mkdir(parents=True)
+    (home / "profiles" / "coder" / "config.yaml").write_text("model:\n  default: a\n")
+    (home / "profiles" / "lab" / "config.yaml").write_text("terminal:\n  backend: docker\n")
+    monkeypatch.setattr(hp, "read_terminal_state", lambda: False)
+    hp.wire_named_profiles(home)
+    coder = yaml.safe_load((home / "profiles" / "coder" / "config.yaml").read_text())
+    lab = yaml.safe_load((home / "profiles" / "lab" / "config.yaml").read_text())
+    assert coder["terminal"]["backend"] == hp.TERMINAL_OFF_BACKEND
+    assert lab["terminal"]["backend"] == "docker"
+    monkeypatch.setattr(hp, "read_terminal_state", lambda: True)
+    hp.wire_named_profiles(home)
+    coder = yaml.safe_load((home / "profiles" / "coder" / "config.yaml").read_text())
+    assert coder["terminal"]["backend"] == "local"

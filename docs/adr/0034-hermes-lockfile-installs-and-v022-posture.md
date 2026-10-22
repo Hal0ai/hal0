@@ -330,16 +330,23 @@ Everything else in this record stands.
   `service_identity_unverified` for a stopped hal0 unit, because the secrets
   drop-in adds `EnvironmentFile=`; `service_masked`; `service_failed`. hal0
   documents those messages (CHANGELOG, Breaking) and does not rewrite them.
-- **Accepted gap, tracked in #2878.** The gateway-owned preview-restart side
-  agent (`gateway/session_tui_side.py:282-283`) starts with the `terminal`
-  and `file` toolsets and passes `disabled_toolsets=None`, so hal0's
-  terminal-off posture (`agent.disabled_toolsets`, #1863) does not reach it.
-  It is reachable only through an authenticated gateway client (the loopback
-  `gateway.sock` as the `hal0` user, or a ticketed WebSocket); only the
-  Desktop app's preview pane sends `preview.restart`, hal0's dashboard never
-  does, and `approvals.mode` still gates dangerous commands. The pin moves
-  with that gap open. #2878 stays open for a hal0-side mitigation or an
-  upstream fix, and the next pin bump re-evaluates it.
+- **The terminal-off posture also gates the tool itself (#2878).** The
+  gateway-owned preview-restart side agent (`gateway/session_tui_side.py:282-283`)
+  starts with the `terminal` and `file` toolsets and passes
+  `disabled_toolsets=None`, so `agent.disabled_toolsets` (#1863) never reaches
+  it. What every agent in the process shares is the terminal tool's
+  `check_fn` (`tools/terminal_tool.py:1553`): an unknown `terminal.backend`
+  fails it (`tools/terminal_tool_backends.py:385-393`) and `terminal` and
+  `process_manage` leave every model-facing schema, side agents included. A
+  terminal-off box therefore carries `terminal.backend: hal0-terminal-off`
+  (`hermes_provision.TERMINAL_OFF_BACKEND`) next to the subtraction, in the
+  root config and in every profile hal0 wires (a served profile gets its own
+  `terminal:` section through `install_and_reset_profile_terminal_scope`,
+  `gateway/run.py:1829`). Opting in replaces the sentinel with `local`; an
+  operator's docker/ssh backend is never overwritten. Hermes logs the rejection
+  at ERROR, `Unknown TERMINAL_ENV 'hal0-terminal-off' …`, TTL-cached 30 s: the
+  price of a gate upstream gives no switch for, and the name says who set it.
+  `approvals.mode` still gates dangerous commands on a terminal-on box.
 
 ## Consequences
 
