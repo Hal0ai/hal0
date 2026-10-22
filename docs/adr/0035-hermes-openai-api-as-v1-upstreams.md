@@ -28,7 +28,12 @@ line above disagree.
    - It binds `127.0.0.1:8642` by default (`gateway/platforms/api_server.py:216-217`).
    - Host and port resolve from config
      `gateway.platforms.api_server.{host,port}`, then `API_SERVER_HOST` and
-     `API_SERVER_PORT`, then the defaults (`api_server.py:230`).
+     `API_SERVER_PORT`, then the defaults (`api_server.py:230`). That "env"
+     is the gateway's own, which `hermes_cli/env_loader.py:506` fills from
+     `$HERMES_HOME/.env` with `override=True`; hal0 reads the overrides
+     (`API_SERVER_HOST`, `API_SERVER_PORT`, `API_SERVER_MODEL_NAME`) from
+     that file and never from hal0-api's own process environment. An IPv6
+     literal host is bracketed when hal0 builds a URL from it.
    - The advertised endpoints are `GET /health`, `GET /health/detailed`,
      `GET /v1/models` and `POST /v1/chat/completions` (`api_server.py:80-82`).
    - `GET /health` is unauthenticated (handler at `api_server.py:2425`);
@@ -135,12 +140,19 @@ line above disagree.
    - `ensure_default_key` **mirrors** the default key into `$HERMES_HOME/.env`
      when neither config `api_server.key` nor that file holds a usable one:
      at provisioning, with the value `ensure_gateway_api_server_key` has just
-     minted for the vault, and on a root `hal0 agent reprovision hermes
-     --repair`, from the vault. It never mints a key of its own, because a
-     fresh value would desynchronise hal0 from the running gateway until its
-     next restart (fact 5). A non-root pass that finds no readable default
-     key leaves `hermes` unregistered and says so: the `profile_api_keys`
-     phase warns, and the `hermes-api` doctor row names the root repair.
+     minted for the vault, and in the root prelude of `sudo hal0 agent
+     reprovision hermes --repair`, from the vault (the provisioner itself
+     re-executes as `hal0` and cannot read it). It never mints a key of its
+     own, because a fresh value would desynchronise hal0 from the running
+     gateway until its next restart (fact 5). A non-root pass that finds no
+     readable default key leaves `hermes` unregistered and says so: the
+     `profile_api_keys` phase warns, and the `hermes-api` doctor row names
+     the root repair.
+   - Each check-then-append runs under hal0's cross-process `file_lock` on
+     the target `.env`, so hal0-api's periodic sweep and a CLI provision
+     running at once cannot both mint a key for one profile. Values are
+     parsed with Hermes's own dotenv rules (`agent/secret_scope.py:257-290`):
+     a quoted value keeps a trailing `# comment` out and its escapes in.
 4. **Pinned upstreams own their ids, and an owned id fails fast.** Only an id in
    a pinned upstream's `owned_models` is owned
    (`resolution_path="pinned:<name>"`). Other ids Hermes advertises, such as
@@ -150,7 +162,10 @@ line above disagree.
    loops hal0's own inference back into Hermes. An owned id never falls
    through to the `agent` slot (fact 9), and ownership is decided before
    container-slot preemption, so a loaded container slot that advertises an
-   owned id does not take the request either:
+   owned id does not take the request either. `/v1/models` follows the same
+   rule: the catalog row for an owned id comes from its owner, never from a
+   same-named slot alias or composite entry, so what the picker describes is
+   what the id runs:
    - upstream offline: 502 `dispatch.upstream_unavailable`, "...which is offline";
    - upstream disabled: "...which is disabled";
    - upstream live but not advertising the id: "...which is up but does not
@@ -186,6 +201,13 @@ line above disagree.
    - On `POST /api/agents/hermes/reconcile-upstreams` (404
      `agent.not_installed` when Hermes is absent). `hal0 agent bootstrap
      hermes` and `reprovision` call it best-effort.
+   - Right after `DELETE /api/agents/hermes` and after an install of Hermes
+     or a `switch` install, so an uninstalled agent's pinned entries and
+     process-environment keys do not linger for up to 120 s, still
+     preempting local slots.
+   - Every pass carries hal0-api's per-upstream models cache: an entry whose
+     endpoint or owned id changed, and a removed entry, are evicted from it,
+     so an id Hermes no longer advertises cannot keep routing on a warm cache.
    - Provisioning: `gateway_secrets_wire` mirrors the default key it mints
      (decision 3), and the `profile_api_keys` phase right after it runs the
      sweep, so `hal0 agent reprovision hermes` writes keys too.
@@ -198,7 +220,9 @@ line above disagree.
 9. **Visibility.** The Services page's OWUI card shows an "Agents" wired chip
    (`wired.agents`, from the server-side classifier). `hal0 doctor` has a
    `hermes-api` row, "Hermes API upstreams". Green on that row means the API
-   path answers, not that Hermes has its tools (see Consequences).
+   path answers, not that Hermes has its tools (see Consequences). Its
+   authenticated probe, like every hal0 request to a loopback Hermes, ignores
+   the proxy environment, so a profile key never reaches an `HTTP_PROXY`.
 
 ### The ADR-0033 boundary
 
@@ -242,7 +266,7 @@ its own for Hermes.
   it cannot know which slot model is loaded. The OWUI guide tells the operator
   to set a slot model as the task model.
 - `/v1/responses` is not available through hal0, which mounts no such route.
-- **Existing boxes need one root step for `hermes-agent`.** A box provisioned
+- **Existing boxes need one root step for the default profile.** A box provisioned
   before this decision holds its default key only in the root-only vault, so
   hal0-api cannot read it and `hermes` stays unregistered until
   `sudo hal0 agent reprovision hermes --repair` mirrors it into
