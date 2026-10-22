@@ -1469,3 +1469,105 @@ def test_check_carries_components_pending(isolated_client: TestClient) -> None:
     resp = isolated_client.get("/api/updates/check")
     assert resp.status_code == 200
     assert isinstance(resp.json()["components_pending"], int)
+
+
+# ── hermes converge → upstream reconcile ─────────────────────────────────────
+
+
+async def _run_hermes_job(
+    monkeypatch: pytest.MonkeyPatch, status: str, **patches: Any
+) -> dict[str, Any]:
+    import hal0.api.routes.updater as upd
+    import hal0.components.registry as creg
+    import hal0.components.runner as crun
+
+    monkeypatch.setattr(creg, "component_by_id", lambda cid: object())
+    monkeypatch.setattr(crun, "converge_component", lambda comp, **kw: {"status": status})
+    monkeypatch.setattr(upd, "_persist_job", lambda job: None)
+    targets = {
+        "reconcile_hermes_upstreams": "hal0.agents.hermes_upstreams",
+        "ensure_profile_keys": "hal0.agents.hermes_api",
+        "hermes_home": "hal0.agents.hermes_api",
+    }
+    for name, value in patches.items():
+        monkeypatch.setattr(f"{targets[name]}.{name}", value)
+    jobs: dict[str, dict[str, Any]] = {"j": {"id": "j"}}
+    await upd._run_component_job(jobs, "j", "hermes", {}, upstreams="REG", model_cache="CACHE")
+    return jobs["j"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["converged", "stale", "upgraded"])
+async def test_hermes_converge_reconciles_upstreams(
+    monkeypatch: pytest.MonkeyPatch, status: str
+) -> None:
+    seen: list[Any] = []
+
+    async def fake(registry: Any, **kw: Any) -> dict[str, Any]:
+        seen.append((registry, kw.get("model_cache")))
+        return {"registered": ["hermes"], "removed": []}
+
+    job = await _run_hermes_job(
+        monkeypatch,
+        status,
+        reconcile_hermes_upstreams=fake,
+        ensure_profile_keys=lambda home: ["work"],
+        hermes_home=lambda: "HOME",
+    )
+    assert seen == [("REG", "CACHE")]
+    assert job["state"] == "applied"
+    assert job["component_result"]["hermes_upstreams"] == {
+        "registered": ["hermes"],
+        "removed": [],
+        "keys_written": ["work"],
+    }
+
+
+@pytest.mark.asyncio
+async def test_hermes_key_sweep_failure_still_reconciles(monkeypatch: pytest.MonkeyPatch) -> None:
+    def boom(home: Any) -> list[str]:
+        raise OSError("nope")
+
+    async def fake(registry: Any, **_: Any) -> dict[str, Any]:
+        return {"registered": ["hermes"], "removed": []}
+
+    job = await _run_hermes_job(
+        monkeypatch,
+        "converged",
+        ensure_profile_keys=boom,
+        reconcile_hermes_upstreams=fake,
+        hermes_home=lambda: "HOME",
+    )
+    assert job["state"] == "applied"
+    assert job["component_result"]["hermes_upstreams"] == {
+        "registered": ["hermes"],
+        "removed": [],
+        "keys_written": [],
+    }
+
+
+@pytest.mark.asyncio
+async def test_hermes_reconcile_failure_does_not_fail_converge(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def boom(registry: Any, **_: Any) -> dict[str, Any]:
+        raise RuntimeError("nope")
+
+    job = await _run_hermes_job(
+        monkeypatch,
+        "converged",
+        reconcile_hermes_upstreams=boom,
+        ensure_profile_keys=lambda home: [],
+        hermes_home=lambda: "HOME",
+    )
+    assert job["state"] == "applied"
+    assert "hermes_upstreams" not in job["component_result"]
+
+
+@pytest.mark.asyncio
+async def test_hermes_reconcile_skipped_for_other_status(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def fake(registry: Any, **_: Any) -> dict[str, Any]:
+        raise AssertionError("must not run")
+
+    job = await _run_hermes_job(monkeypatch, "noop", reconcile_hermes_upstreams=fake)
+    assert "hermes_upstreams" not in job["component_result"]

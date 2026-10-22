@@ -544,3 +544,89 @@ def test_delete_upstream_retains_credentials(client: TestClient) -> None:
         assert "sk-keepme" in api_env.read_text()
     finally:
         os.environ.pop("OPENROUTER_API_KEY", None)
+
+
+def _seed_managed(client: TestClient) -> None:
+    _seed_upstreams(client)
+    client.app.state.upstreams.add(
+        Upstream(
+            name="hermes-agent",
+            kind="remote",
+            url="http://127.0.0.1:8642/v1",
+            managed_by="agent:hermes",
+            pinned=True,
+            owned_models=("hermes-agent",),
+        )
+    )
+
+
+def test_managed_upstream_serializes_owner_and_pinned(client: TestClient) -> None:
+    _seed_managed(client)
+    body = client.get("/api/upstreams").json()
+    by_name = {u["name"]: u for u in body}
+    assert by_name["hermes-agent"]["managed_by"] == "agent:hermes"
+    assert by_name["hermes-agent"]["pinned"] is True
+    assert by_name["hermes-agent"]["owned_models"] == ["hermes-agent"]
+    assert by_name["openrouter"]["managed_by"] is None
+    assert by_name["openrouter"]["pinned"] is False
+    assert by_name["openrouter"]["owned_models"] == []
+    single = client.get("/api/upstreams/hermes-agent").json()
+    assert single["managed_by"] == "agent:hermes"
+
+
+def test_patch_managed_upstream_400_names_owner(client: TestClient) -> None:
+    _seed_managed(client)
+    response = client.patch("/api/upstreams/hermes-agent", json={"url": "http://x"})
+    assert response.status_code == 400, response.text
+    assert response.json()["error"]["code"] == "upstream.protected"
+    assert "agent:hermes" in response.text
+    # Non-structural fields are agent-owned too.
+    response = client.patch("/api/upstreams/hermes-agent", json={"enabled": False})
+    assert response.status_code == 400, response.text
+    # No-op PATCH still echoes.
+    assert client.patch("/api/upstreams/hermes-agent", json={}).status_code == 200
+
+
+def test_delete_managed_upstream_400(client: TestClient) -> None:
+    _seed_managed(client)
+    response = client.delete("/api/upstreams/hermes-agent")
+    assert response.status_code == 400, response.text
+    assert response.json()["error"]["code"] == "upstream.protected"
+    assert "agent:hermes" in response.text
+    assert client.app.state.upstreams.get("hermes-agent") is not None
+
+
+def test_credentials_on_managed_upstream_400_writes_nothing(client: TestClient) -> None:
+    """I3: a Hermes key never lands in api.env through the credentials route."""
+    import os
+
+    _seed_upstreams(client)
+    client.app.state.upstreams.add(
+        Upstream(
+            name="hermes.coder",
+            kind="remote",
+            url="http://127.0.0.1:8642/p/coder/v1",
+            auth_style="bearer",
+            auth_value_env="HAL0_HERMES_API_KEY__CODER",
+            managed_by="agent:hermes",
+            pinned=True,
+            owned_models=("coder",),
+        )
+    )
+    api_env = _upstreams_toml_path(client).parent / "api.env"
+    before = api_env.read_bytes() if api_env.exists() else None
+    os.environ.pop("HAL0_HERMES_API_KEY__CODER", None)
+    try:
+        response = client.post(
+            "/api/providers/hermes.coder/credentials",
+            json={"key": "HAL0_HERMES_API_KEY__CODER", "value": "pasted-key-0123456789abcdef"},
+        )
+        assert response.status_code == 400, response.text
+        assert response.json()["error"]["code"] == "upstream.protected"
+        assert "agent:hermes" in response.text
+        after = api_env.read_bytes() if api_env.exists() else None
+        assert after == before
+        assert b"HAL0_HERMES_API_KEY__CODER" not in (after or b"")
+        assert "HAL0_HERMES_API_KEY__CODER" not in os.environ
+    finally:
+        os.environ.pop("HAL0_HERMES_API_KEY__CODER", None)

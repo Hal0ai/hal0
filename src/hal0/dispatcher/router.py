@@ -7,6 +7,10 @@ dispatch error and leaves slot management to the caller.
 
 Resolution order (PLAN.md §3, ported from haloai ``lib/dispatcher.py``):
 
+  0. **pinned** — an id in a ``pinned`` upstream's ``owned_models`` (never
+     merely its models cache) goes to that upstream or fails with
+     :class:`UpstreamUnavailable`; it never falls through to another lane.
+     Runs after the container-slot preemption and before the registry.
   1. **registry** — exact :class:`ModelRegistry` binding for the requested
      model id (or path-default for ``/embeddings``, ``/rerank``, and ``/rerankings``).  If
      the bound upstream is online, forward there.
@@ -657,6 +661,21 @@ class Dispatcher:
             raise
         return call
 
+    def _pinned_owner(self, model_id: str) -> Upstream | None:
+        """First pinned upstream whose ``owned_models`` holds ``model_id``.
+
+        Only ``owned_models`` confers ownership. An id that is merely in the
+        upstream's models cache (a Hermes ``model_routes`` alias, say) resolves
+        by the normal ladder, so it can never shadow a slot binding or loop a
+        request back into the upstream that made it. A disabled pinned
+        upstream still owns its ids: disabling it must not let the id fall
+        through to another lane.
+        """
+        for upstream in self._upstreams.list():
+            if getattr(upstream, "pinned", False) and model_id in upstream.owned_models:
+                return upstream
+        return None
+
     async def _resolve(
         self,
         request: Request,
@@ -685,6 +704,10 @@ class Dispatcher:
         # id the request actually asked for.
         lane_slot = lane_slot_pin(request)
 
+        # Pinned ownership is decided first: an owned id never goes to a
+        # container slot that happens to advertise the same id (Step 0b).
+        owner = self._pinned_owner(model_id)
+
         # ── Step 0: container-slot preemption ────────────────────────────
         # A loaded container slot (kind="remote" + slot_name) is the
         # authoritative server for the models it advertises, and must win
@@ -692,7 +715,7 @@ class Dispatcher:
         # #662). Only fires on a warm cache hit for a container remote.
         # Health-ordered (#1418): with two container slots advertising one
         # model, the live one wins over an ERROR-parked sibling.
-        for upstream in self._upstreams_in_priority_order(lane_slot):
+        for upstream in self._upstreams_in_priority_order(lane_slot) if owner is None else ():
             if _container_slot_name_of(upstream) and model_id in self._cached_models(upstream.name):
                 call = UpstreamCall(
                     upstream_name=upstream.name,
@@ -709,6 +732,68 @@ class Dispatcher:
                 )
                 self._log_decision(call, t0, cache_state="warm")
                 return call
+
+        # ── Step 0b: pinned upstream ownership ───────────────────────────
+        # A pinned upstream owns its ``owned_models`` ids: route there or fail
+        # loudly, never fall through to the registry / capability ladder (which
+        # would land on the agent slot). The cache only decides live vs. not
+        # advertised below; it never confers ownership.
+        if owner is not None:
+            if getattr(owner, "enabled", True) is False:
+                raise UpstreamUnavailable(
+                    f"model {model_id!r} is owned by upstream {owner.name!r}, which is disabled",
+                    details={"model": model_id, "upstream": owner.name, "disabled": True},
+                )
+            cache_state = "warm"
+            if model_id not in self._cached_models(owner.name):
+                try:
+                    await self._single_flight.do(
+                        f"prefetch:{owner.name}", self._fetch_models, owner
+                    )
+                except Exception as exc:  # TIER1 — log, then fail below
+                    log.warning(
+                        "dispatch.pinned_fetch_failed",
+                        upstream=owner.name,
+                        model=model_id,
+                        error=str(exc),
+                    )
+                    cache_state = "fetch_failed"
+                    fetch_error = True
+                else:
+                    cache_state = "fetched"
+                    fetch_error = False
+                cached = self._cached_models(owner.name)
+                if model_id not in cached:
+                    if fetch_error:
+                        raise UpstreamUnavailable(
+                            f"model {model_id!r} is served only by upstream "
+                            f"{owner.name!r}, which is offline",
+                            details={"model": model_id, "upstream": owner.name},
+                        )
+                    raise UpstreamUnavailable(
+                        f"model {model_id!r} is owned by upstream {owner.name!r}, "
+                        "which is up but does not advertise it",
+                        details={
+                            "model": model_id,
+                            "upstream": owner.name,
+                            "advertised": list(cached),
+                        },
+                    )
+            call = UpstreamCall(
+                upstream_name=owner.name,
+                target_url=_resolve_target_url(owner, path),
+                headers=self._build_headers(request, owner),
+                body=_remap_model(body, model_id),
+                streaming=streaming,
+                method=method,
+                resolved_model=model_id,
+                requested_model=original_model,
+                resolution_path=f"pinned:{owner.name}",
+                slot_name=_slot_name_of(owner),
+                container_slot_name=_container_slot_name_of(owner),
+            )
+            self._log_decision(call, t0, cache_state=cache_state)
+            return call
 
         # ── Step 1: registry lookup ──────────────────────────────────────
         registry_entry = self._registry_route_for(model_id)
@@ -1428,7 +1513,8 @@ class Dispatcher:
         # transport backstop; _guarded_stream still converts its ReadTimeout
         # into a diagnostic frame rather than a torn stream.
         timeout: httpx.Timeout | httpx._client.UseClientDefault
-        guard_active = bool(self._stream_total_timeout_s or self._stream_idle_timeout_s)
+        total_s, idle_s = self._stream_bounds_for(call.upstream_name)
+        guard_active = bool(total_s or idle_s)
         if guard_active:
             timeout = httpx.Timeout(
                 connect=5.0, read=None, write=10.0, pool=_DISPATCHER_POOL_TIMEOUT_S
@@ -1544,12 +1630,13 @@ class Dispatcher:
         already received instead of waiting forever on a socket that will
         never close.
         """
+        total_s, idle_s = self._stream_bounds_for(call.upstream_name)
         started = time.monotonic()
         source = resp.aiter_raw().__aiter__()
         stall: str | None = None
         try:
             while True:
-                budget = self._next_chunk_budget(started)
+                budget = self._next_chunk_budget(started, total_s, idle_s)
                 if budget is not None and budget <= 0.0:
                     stall = "total"
                     break
@@ -1561,7 +1648,7 @@ class Dispatcher:
                 except StopAsyncIteration:
                     return
                 except TimeoutError:
-                    stall = self._stall_reason(started)
+                    stall = self._stall_reason(started, total_s)
                     break
                 except httpx.ReadTimeout:
                     # Transport-level per-read timeout.  Reached only when the
@@ -1585,8 +1672,8 @@ class Dispatcher:
             target=call.target_url,
             reason=stall,
             elapsed_s=elapsed,
-            total_timeout_s=self._stream_total_timeout_s,
-            idle_timeout_s=self._stream_idle_timeout_s,
+            total_timeout_s=total_s,
+            idle_timeout_s=idle_s,
         )
         content_type = (resp.headers.get("content-type") or "").lower()
         if content_type.startswith(_SSE_CONTENT_TYPE):
@@ -1594,26 +1681,44 @@ class Dispatcher:
                 reason=stall or "total",
                 elapsed_s=elapsed,
                 upstream=call.upstream_name,
-                total_timeout_s=self._stream_total_timeout_s,
-                idle_timeout_s=self._stream_idle_timeout_s,
+                total_timeout_s=total_s,
+                idle_timeout_s=idle_s,
                 endpoint=call.target_url,
             )
 
-    def _next_chunk_budget(self, started: float) -> float | None:
+    def _stream_bounds_for(self, upstream_name: str) -> tuple[float, float]:
+        """``(total, idle)`` stall bounds for ``upstream_name``.
+
+        An upstream's non-``None`` override wins over the dispatcher global;
+        an unknown upstream gets the globals.  ``0`` still disables a bound.
+        """
+        total = self._stream_total_timeout_s
+        idle = self._stream_idle_timeout_s
+        upstream = self._upstreams.get(upstream_name)
+        if upstream is not None:
+            if upstream.stream_total_timeout_s is not None:
+                total = max(0.0, upstream.stream_total_timeout_s)
+            if upstream.stream_idle_timeout_s is not None:
+                idle = max(0.0, upstream.stream_idle_timeout_s)
+        return total, idle
+
+    @staticmethod
+    def _next_chunk_budget(started: float, total_s: float, idle_s: float) -> float | None:
         """Seconds to wait for the next chunk, or ``None`` when unbounded."""
-        idle = self._stream_idle_timeout_s or None
-        if not self._stream_total_timeout_s:
+        idle = idle_s or None
+        if not total_s:
             return idle
-        remaining_total = self._stream_total_timeout_s - (time.monotonic() - started)
+        remaining_total = total_s - (time.monotonic() - started)
         if idle is None:
             return remaining_total
         return min(idle, remaining_total)
 
-    def _stall_reason(self, started: float) -> str:
+    @staticmethod
+    def _stall_reason(started: float, total_s: float) -> str:
         """Classify which bound a timed-out read hit."""
-        if not self._stream_total_timeout_s:
+        if not total_s:
             return "idle"
-        if (time.monotonic() - started) >= self._stream_total_timeout_s:
+        if (time.monotonic() - started) >= total_s:
             return "total"
         return "idle"
 

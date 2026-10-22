@@ -470,11 +470,33 @@ def _is_remote_model(request: Request, model_id: str) -> bool:
             # not genuine external providers, so the thinking policy must apply.
             if getattr(u, "slot_name", None):
                 continue
-            if getattr(u, "kind", "") == "remote" and model_id in set(cache.get(u.name, [])):
+            if getattr(u, "kind", "") != "remote":
+                continue
+            if model_id in set(cache.get(u.name, [])) or model_id in getattr(u, "owned_models", ()):
                 return True
     except Exception:  # pragma: no cover — defensive
         return False
     return False
+
+
+def _is_pinned_owned(request: Request, model_id: str) -> bool:
+    """True if a ``pinned`` upstream lists ``model_id`` in its ``owned_models``.
+
+    Mirrors ``Dispatcher._pinned_owner``: only ``owned_models`` confers
+    ownership, never a models cache, so a hal0 peer or cloud remote that
+    happens to advertise a slot alias (``agent``) cannot suppress the local
+    alias rewrite and backend load.
+    """
+    upstreams = getattr(request.app.state, "upstreams", None)
+    if upstreams is None:
+        return False
+    try:
+        return any(
+            getattr(u, "pinned", False) and model_id in getattr(u, "owned_models", ())
+            for u in upstreams.list()
+        )
+    except Exception:  # pragma: no cover — defensive
+        return False
 
 
 async def _slot_thinking_default(
@@ -809,12 +831,17 @@ async def _dispatch_and_forward(
         body = await _read_json_body(request)
     # Translate an llm-slot alias (agent/utility/any enabled llm slot) → model id
     # before routing so the dispatcher sees the real model name.
-    body = await _rewrite_chat_slot_alias(request, body)
-    # #430: backend-aware load BEFORE dispatch, so a slot-backed model is
-    # loaded under its declared backend whichever routing path dispatch
-    # then takes. A model no upstream serves surfaces as the dispatcher's
-    # NoRouteFound envelope (404) — there is no catch-all fall-through.
-    await _ensure_backend_for_model(request, body)
+    # A model owned by a pinned remote upstream is never aliased to, or
+    # loaded as, a same-named local slot.
+    requested = body.get("model")
+    owned_remotely = isinstance(requested, str) and _is_pinned_owned(request, requested.strip())
+    if not owned_remotely:
+        body = await _rewrite_chat_slot_alias(request, body)
+        # #430: backend-aware load BEFORE dispatch, so a slot-backed model is
+        # loaded under its declared backend whichever routing path dispatch
+        # then takes. A model no upstream serves surfaces as the dispatcher's
+        # NoRouteFound envelope (404) — there is no catch-all fall-through.
+        await _ensure_backend_for_model(request, body)
     # DR-1: capability twin of the backend-aware load — wake an idle-EVICTED
     # embed/rerank/tts/img slot (resolved from the request PATH) so its
     # upstream is re-registered before dispatch, instead of 404ing.
@@ -967,6 +994,17 @@ async def _aggregate_models(request: Request, *, show_all: bool) -> list[dict[st
     slot_manager = getattr(request.app.state, "slot_manager", None)
     model_registry = getattr(request.app.state, "model_registry", None)
 
+    # An id a pinned upstream owns dispatches there (Dispatcher._pinned_owner),
+    # so its catalog row must come from that upstream too: a slot alias or a
+    # composite row with the same id would describe a model the id never runs.
+    pinned_owned: set[str] = set()
+    try:
+        for u in upstreams.list():
+            if getattr(u, "pinned", False):
+                pinned_owned.update(getattr(u, "owned_models", ()))
+    except Exception:
+        pinned_owned = set()
+
     # Per-slot alias entries first so a slot alias (e.g. "chat") wins
     # the id over any same-named raw model id an upstream might advertise.
     if slot_manager is not None and model_registry is not None:
@@ -976,7 +1014,7 @@ async def _aggregate_models(request: Request, *, show_all: bool) -> list[dict[st
             alias_entries = []
         for entry in alias_entries:
             mid = entry.get("id")
-            if not isinstance(mid, str) or mid in seen:
+            if not isinstance(mid, str) or mid in seen or mid in pinned_owned:
                 continue
             seen.add(mid)
             data.append(entry)
@@ -1053,7 +1091,7 @@ async def _aggregate_models(request: Request, *, show_all: bool) -> list[dict[st
             model_cache["hal0"] = list(fresh)
     if upstreams.get("hal0") is None:
         for mid in composite_models:
-            if mid in seen or mid in chat_model_ids:
+            if mid in seen or mid in chat_model_ids or mid in pinned_owned:
                 continue
             row = _catalog_row(mid, "hal0")
             if row is None:

@@ -180,6 +180,26 @@ class Upstream:
     is.
     """
 
+    managed_by: str | None = None
+    """Owner tag for agent-managed entries (e.g. ``"agent:hermes"``); ``None`` = operator-authored.
+    Dataclass-only: dynamic entries never round-trip TOML."""
+
+    pinned: bool = False
+    """Model-id routing is pinned to this upstream's ``owned_models``.
+    Dataclass-only: dynamic entries never round-trip TOML."""
+
+    owned_models: tuple[str, ...] = ()
+    """Model ids this upstream owns when ``pinned``.
+    Dataclass-only: dynamic entries never round-trip TOML."""
+
+    stream_idle_timeout_s: float | None = None
+    """Max seconds between streamed chunks; ``None`` = global default.
+    Dataclass-only: dynamic entries never round-trip TOML."""
+
+    stream_total_timeout_s: float | None = None
+    """Max total seconds for one streamed response; ``None`` = global default.
+    Dataclass-only: dynamic entries never round-trip TOML."""
+
 
 # ── Config-layer ↔ runtime conversion ─────────────────────────────────────────
 

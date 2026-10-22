@@ -1130,6 +1130,8 @@ class BootState:
     stop_runner_catalogue_sync_task: Any = None
     memory_reprobe_task: asyncio.Task[None] | None = None
     stop_memory_reprobe_task: Any = None
+    hermes_reconcile_task: asyncio.Task[None] | None = None
+    stop_hermes_reconcile_task: Any = None
     omni_router_client: httpx.AsyncClient | None = None
     boot_report: BootReport = field(default_factory=BootReport)
 
@@ -1342,6 +1344,69 @@ async def _boot_slot_manager(app: FastAPI, ctx: BootState) -> None:
         preload_evict_enabled=ctx.hal0_config.slots.preload_evict_enabled,
         preload_evict_headroom_mb=ctx.hal0_config.slots.preload_evict_headroom_mb,
     )
+
+
+#: Seconds between background Hermes upstream reconciles. The boot reconcile
+#: can run while ``hermes-gateway.service`` is still starting; the periodic
+#: re-run picks up profiles added, removed or re-keyed since.
+HERMES_RECONCILE_INTERVAL_S: float = 120
+
+
+async def _boot_hermes_upstreams(app: FastAPI, ctx: BootState) -> None:
+    """Phase — mirror Hermes gateway profiles into the upstream registry (non-fatal).
+
+    The key sweep runs first (inside ``sync_hermes_upstreams``), so every
+    hal0-api start (and so every ``hal0 update``, which restarts hal0-api)
+    delivers the profiles' API-server keys.
+    """
+    from hal0.agents.hermes_upstreams import sync_hermes_upstreams
+
+    try:
+        report = await sync_hermes_upstreams(
+            ctx.upstreams, model_cache=getattr(ctx, "upstream_models", None)
+        )
+    except Exception as exc:
+        log.warning("api.boot.hermes_upstreams_failed", error=str(exc))
+        return
+    if report.get("keys_written"):
+        log.info("api.boot.hermes_profile_keys", written=report["keys_written"])
+    log.info(
+        "api.boot.hermes_upstreams",
+        registered=len(report.get("registered", [])),
+        removed=len(report.get("removed", [])),
+    )
+
+
+async def _hermes_reconcile_loop(registry: Any, model_cache: Any = None) -> None:
+    """Re-run the Hermes key sweep + reconcile every ``HERMES_RECONCILE_INTERVAL_S``.
+
+    A profile created while hal0-api runs gets its key and its upstream on the
+    next pass. Errors are logged and the loop keeps going; it ends only when
+    cancelled.
+    """
+    from hal0.agents import hermes_upstreams
+
+    while True:
+        await asyncio.sleep(HERMES_RECONCILE_INTERVAL_S)
+        try:
+            await hermes_upstreams.sync_hermes_upstreams(registry, model_cache=model_cache)
+        except Exception as exc:
+            log.warning("api.hermes_upstreams.periodic_reconcile_failed", error=str(exc))
+
+
+def _start_hermes_reconcile_task(ctx: BootState) -> None:
+    """Start the periodic Hermes reconcile; its stop callback goes on ``ctx``."""
+    ctx.hermes_reconcile_task = asyncio.create_task(
+        _hermes_reconcile_loop(ctx.upstreams, getattr(ctx, "upstream_models", None))
+    )
+
+    async def _stop_hermes_reconcile_task() -> None:
+        if ctx.hermes_reconcile_task is not None:
+            ctx.hermes_reconcile_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await ctx.hermes_reconcile_task
+
+    ctx.stop_hermes_reconcile_task = _stop_hermes_reconcile_task
 
 
 async def _boot_dispatcher(app: FastAPI, ctx: BootState) -> None:
@@ -2027,6 +2092,10 @@ async def _boot_background_tasks(app: FastAPI, ctx: BootState) -> None:
 
     ctx.stop_memory_reprobe_task = _stop_memory_reprobe_task
 
+    # Periodic Hermes upstream reconcile: the boot phase may have probed a
+    # gateway that was still starting.
+    _start_hermes_reconcile_task(ctx)
+
     # OmniRouter (PR-16). Client-side OpenAI
     # tool-calling loop. Wired here so the /v1/chat/completions route
     # can pick it up via ``request.app.state.omni_router`` when a
@@ -2509,6 +2578,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     await _run_boot_phase(report, "audit_store", lambda: _boot_audit_store(app, ctx))
     await _run_boot_phase(report, "slot_manager", lambda: _boot_slot_manager(app, ctx))
     await _run_boot_phase(report, "dispatcher", lambda: _boot_dispatcher(app, ctx))
+    await _run_boot_phase(report, "hermes_upstreams", lambda: _boot_hermes_upstreams(app, ctx))
     # ``slot_reconcile`` starts the READY model-cache refresher (#2442) before
     # the AsyncExitStack below exists; a later phase failing must not leave
     # it subscribed.
@@ -2546,6 +2616,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 ("image_drift_task", ctx.stop_image_drift_task),
                 ("runner_catalogue_sync_task", ctx.stop_runner_catalogue_sync_task),
                 ("memory_reprobe_task", ctx.stop_memory_reprobe_task),
+                ("hermes_reconcile_task", ctx.stop_hermes_reconcile_task),
             ):
                 stack.push_async_callback(_bounded_shutdown_step(name, stop))
             ctx.metrics_service.start()

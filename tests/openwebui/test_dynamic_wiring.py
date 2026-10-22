@@ -192,6 +192,48 @@ def test_wiring_status_matrix(
     assert status["web_search"] is False  # no provider seam wired up yet
 
 
+def test_wiring_status_agents_empty_without_registry(tmp_hal0_home: str) -> None:
+    from hal0.openwebui.wiring import openwebui_wiring_status
+
+    _write_capabilities_toml(tmp_hal0_home, _NO_SELECTIONS)
+    assert openwebui_wiring_status()["agents"] == []
+
+
+def test_wiring_status_agents_lists_managed_upstream_models(tmp_hal0_home: str) -> None:
+    from types import SimpleNamespace
+
+    from hal0.openwebui.wiring import openwebui_wiring_status
+
+    def _up(name: str, managed_by: str | None, owned: tuple[str, ...]) -> SimpleNamespace:
+        return SimpleNamespace(name=name, managed_by=managed_by, owned_models=owned)
+
+    class _Reg:
+        def list(self) -> list[SimpleNamespace]:
+            return [
+                _up("hermes-agent", "agent:hermes", ("hermes-agent",)),
+                _up("hermes-coder", "agent:hermes", ("stale-owned",)),
+                _up("openai", None, ("gpt-x",)),
+            ]
+
+    _write_capabilities_toml(tmp_hal0_home, _NO_SELECTIONS)
+    status = openwebui_wiring_status(
+        upstreams=_Reg(), model_cache={"hermes-coder": ["coder", "hermes-agent"]}
+    )
+    # cache wins over owned_models; operator upstream ignored; sorted + deduped
+    assert status["agents"] == ["coder", "hermes-agent"]
+
+
+def test_wiring_status_agents_survives_broken_registry(tmp_hal0_home: str) -> None:
+    from hal0.openwebui.wiring import openwebui_wiring_status
+
+    class _Boom:
+        def list(self) -> list[object]:
+            raise RuntimeError("boom")
+
+    _write_capabilities_toml(tmp_hal0_home, _NO_SELECTIONS)
+    assert openwebui_wiring_status(upstreams=_Boom())["agents"] == []
+
+
 def test_wiring_no_embed_slot_produces_no_rag_overrides(tmp_hal0_home: str) -> None:
     from hal0.openwebui.wiring import resolve_dynamic_env_overrides
 

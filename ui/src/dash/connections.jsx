@@ -31,6 +31,7 @@ import { useMcpServers } from '@/api/hooks/useMcp'
 import { useConfigUrls } from '@/api/hooks/useConfigUrls'
 import {
   isManagedRemote,
+  managedByLabel,
   useProviderCredentialSet,
   useProvidersCatalog,
   useUpstreamCreate,
@@ -1064,6 +1065,9 @@ function UpstreamRow({ up, defaultOpen }) {
   const remove = useUpstreamDelete()
   const test = useUpstreamTest()
   const setCredential = useProviderCredentialSet()
+  // Agent-managed rows are read-only: the API refuses PATCH, DELETE and
+  // credential writes for them, so none of those controls render.
+  const managed = managedByLabel(up)
 
   const draft = {
     models: csvList(modelsText),
@@ -1118,6 +1122,7 @@ function UpstreamRow({ up, defaultOpen }) {
       <div className="eprow-main up-main" onClick={() => setOpen((o) => !o)}>
         <span className={'ep-dot ' + (up.enabled ? 'serving' : 'offline')} />
         <span className="ep-name">{up.name}</span>
+        {managed && <span className="chip outlined up-managed">{managed}</span>}
         <span className="ep-model">{up.url}</span>
         <span className="up-auth">
           <UpstreamAuthChip up={up} />
@@ -1131,36 +1136,42 @@ function UpstreamRow({ up, defaultOpen }) {
       <div className="ep-drawer">
         <div className="ep-drawer-in">
           <div className="up-controls">
-            <label className="up-toggle">
-              <input
-                type="checkbox"
-                checked={up.enabled}
-                onChange={(e) =>
-                  update.mutate(
-                    { name: up.name, patch: { enabled: e.target.checked } },
-                    { onError: updateErr('enabled toggle') },
-                  )
-                }
-              />
-              <span>
-                enabled <span className="meta">— off removes it from routing entirely</span>
-              </span>
-            </label>
-            <label className="up-toggle">
-              <input
-                type="checkbox"
-                checked={up.advertise_models}
-                onChange={(e) =>
-                  update.mutate(
-                    { name: up.name, patch: { advertise_models: e.target.checked } },
-                    { onError: updateErr('advertise toggle') },
-                  )
-                }
-              />
-              <span>
-                advertise models <span className="meta">— list in /v1/models</span>
-              </span>
-            </label>
+            {managed ? (
+              <span className="meta">read-only, {managed}: change it through the agent</span>
+            ) : (
+              <>
+                <label className="up-toggle">
+                  <input
+                    type="checkbox"
+                    checked={up.enabled}
+                    onChange={(e) =>
+                      update.mutate(
+                        { name: up.name, patch: { enabled: e.target.checked } },
+                        { onError: updateErr('enabled toggle') },
+                      )
+                    }
+                  />
+                  <span>
+                    enabled <span className="meta">— off removes it from routing entirely</span>
+                  </span>
+                </label>
+                <label className="up-toggle">
+                  <input
+                    type="checkbox"
+                    checked={up.advertise_models}
+                    onChange={(e) =>
+                      update.mutate(
+                        { name: up.name, patch: { advertise_models: e.target.checked } },
+                        { onError: updateErr('advertise toggle') },
+                      )
+                    }
+                  />
+                  <span>
+                    advertise models <span className="meta">— list in /v1/models</span>
+                  </span>
+                </label>
+              </>
+            )}
             <span className="grow" />
             <button className="btn sm" onClick={runTest} disabled={test.isPending}>
               {test.isPending ? 'Testing…' : 'Test connection'}
@@ -1175,108 +1186,128 @@ function UpstreamRow({ up, defaultOpen }) {
             </div>
           )}
 
-          <div className="ep-block">
-            <div className="ep-block-h">
-              <span className="ic">
-                <CIcon name="gauge" size={12} />
-              </span>{' '}
-              model filters<span className="grow" />
-              <span className="chip outlined">
-                {previewCount == null
-                  ? 'no catalog cached'
-                  : `${previewCount}/${known.length} advertised`}
-              </span>
+          {managed ? (
+            <div className="ep-block">
+              <div className="ep-block-h">
+                <span className="ic">
+                  <CIcon name="gauge" size={12} />
+                </span>{' '}
+                owned model ids
+              </div>
+              <span className="meta mono">{(up.owned_models || []).join(', ') || '—'}</span>
             </div>
-            <div className="up-filter-grid">
-              <label>
-                <span className="k">pinned ids</span>
-                <input
-                  className="up-input mono"
-                  placeholder="anthropic/claude-sonnet-4, …"
-                  value={modelsText}
-                  onChange={(e) => setModelsText(e.target.value)}
-                />
-              </label>
-              <label>
-                <span className="k">include globs</span>
-                <input
-                  className="up-input mono"
-                  placeholder="anthropic/*, google/*"
-                  value={includeText}
-                  onChange={(e) => setIncludeText(e.target.value)}
-                />
-              </label>
-              <label>
-                <span className="k">exclude globs (win)</span>
-                <input
-                  className="up-input mono"
-                  placeholder="*:free, nvidia/*"
-                  value={excludeText}
-                  onChange={(e) => setExcludeText(e.target.value)}
-                />
-              </label>
+          ) : (
+            <div className="ep-block">
+              <div className="ep-block-h">
+                <span className="ic">
+                  <CIcon name="gauge" size={12} />
+                </span>{' '}
+                model filters<span className="grow" />
+                <span className="chip outlined">
+                  {previewCount == null
+                    ? 'no catalog cached'
+                    : `${previewCount}/${known.length} advertised`}
+                </span>
+              </div>
+              <div className="up-filter-grid">
+                <label>
+                  <span className="k">pinned ids</span>
+                  <input
+                    className="up-input mono"
+                    placeholder="anthropic/claude-sonnet-4, …"
+                    value={modelsText}
+                    onChange={(e) => setModelsText(e.target.value)}
+                  />
+                </label>
+                <label>
+                  <span className="k">include globs</span>
+                  <input
+                    className="up-input mono"
+                    placeholder="anthropic/*, google/*"
+                    value={includeText}
+                    onChange={(e) => setIncludeText(e.target.value)}
+                  />
+                </label>
+                <label>
+                  <span className="k">exclude globs (win)</span>
+                  <input
+                    className="up-input mono"
+                    placeholder="*:free, nvidia/*"
+                    value={excludeText}
+                    onChange={(e) => setExcludeText(e.target.value)}
+                  />
+                </label>
+              </div>
+              <div className="up-filter-actions">
+                <span className="meta">
+                  curates /v1/models only — filtered-out models stay dispatchable by name
+                </span>
+                <span className="grow" />
+                <button className="btn sm" onClick={clearFilters} disabled={update.isPending}>
+                  Clear
+                </button>
+                <button className="btn sm primary" onClick={applyFilters} disabled={update.isPending}>
+                  Apply filters
+                </button>
+              </div>
             </div>
-            <div className="up-filter-actions">
-              <span className="meta">
-                curates /v1/models only — filtered-out models stay dispatchable by name
-              </span>
-              <span className="grow" />
-              <button className="btn sm" onClick={clearFilters} disabled={update.isPending}>
-                Clear
-              </button>
-              <button className="btn sm primary" onClick={applyFilters} disabled={update.isPending}>
-                Apply filters
-              </button>
-            </div>
-          </div>
+          )}
 
           <div className="up-foot">
-            {up.auth_value_env ? (
-              <span className="up-key">
-                <span className="k mono">{up.auth_value_env}</span>
-                <input
-                  className="up-input mono"
-                  type="password"
-                  placeholder={up.auth_key_present ? '•••••• (set — paste to replace)' : 'paste API key'}
-                  value={keyValue}
-                  onChange={(e) => setKeyValue(e.target.value)}
-                  autoComplete="off"
-                />
-                <button
-                  className="btn sm"
-                  onClick={saveKey}
-                  disabled={!keyValue || setCredential.isPending}
-                >
-                  {setCredential.isPending ? 'Saving…' : 'Save key'}
-                </button>
+            {managed ? (
+              <span className="meta">
+                key lives in the agent&apos;s own files ({up.auth_value_env || 'none'})
               </span>
             ) : (
-              <span className="meta">no credential declared (auth: {up.auth_style})</span>
-            )}
-            <span className="grow" />
-            {confirmDelete ? (
               <>
-                <span className="meta">delete {up.name}? key in api.env is kept</span>
-                <button className="btn sm" onClick={() => setConfirmDelete(false)}>
-                  Cancel
-                </button>
-                <button
-                  className="btn sm danger"
-                  onClick={() =>
-                    remove.mutate(up.name, {
-                      onError: (e) =>
-                        toast(`${up.name} delete failed — ${e?.message || 'see logs'}`, 'err'),
-                    })
-                  }
-                  disabled={remove.isPending}
-                >
-                  Confirm delete
-                </button>
+                {up.auth_value_env ? (
+                  <span className="up-key">
+                    <span className="k mono">{up.auth_value_env}</span>
+                    <input
+                      className="up-input mono"
+                      type="password"
+                      placeholder={up.auth_key_present ? '•••••• (set — paste to replace)' : 'paste API key'}
+                      value={keyValue}
+                      onChange={(e) => setKeyValue(e.target.value)}
+                      autoComplete="off"
+                    />
+                    <button
+                      className="btn sm"
+                      onClick={saveKey}
+                      disabled={!keyValue || setCredential.isPending}
+                    >
+                      {setCredential.isPending ? 'Saving…' : 'Save key'}
+                    </button>
+                  </span>
+                ) : (
+                  <span className="meta">no credential declared (auth: {up.auth_style})</span>
+                )}
+                <span className="grow" />
+                {confirmDelete ? (
+                  <>
+                    <span className="meta">delete {up.name}? key in api.env is kept</span>
+                    <button className="btn sm" onClick={() => setConfirmDelete(false)}>
+                      Cancel
+                    </button>
+                    <button
+                      className="btn sm danger"
+                      onClick={() =>
+                        remove.mutate(up.name, {
+                          onError: (e) =>
+                            toast(`${up.name} delete failed — ${e?.message || 'see logs'}`, 'err'),
+                        })
+                      }
+                      disabled={remove.isPending}
+                    >
+                      Confirm delete
+                    </button>
+                  </>
+                ) : (
+                  <button className="btn sm danger" onClick={() => setConfirmDelete(true)}>
+                    Delete
+                  </button>
+                )}
               </>
-            ) : (
-              <button className="btn sm danger" onClick={() => setConfirmDelete(true)}>
-                Delete
-              </button>
             )}
           </div>
         </div>

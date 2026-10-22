@@ -1052,3 +1052,121 @@ def test_bootstrap_hermes_help_does_not_advertise_preview_flags() -> None:
     assert res.exit_code == 0
     assert "--dry-run" not in res.output
     assert "--skip-phase" not in res.output
+
+
+# ── Upstream reconcile after provisioning ───────────────────────────────────
+
+
+def test_bootstrap_calls_reconcile_best_effort(monkeypatch) -> None:
+    """A successful bootstrap asks hal0-api to reconcile Hermes upstreams; an
+    unreachable API only prints a dim hint and never fails the command."""
+    from typer.testing import CliRunner
+
+    monkeypatch.setattr(ac, "_provision_hermes", lambda **_k: 0)
+    calls: list[str] = []
+
+    def _boom(**_k):  # type: ignore[no-untyped-def]
+        calls.append("auth_client")
+        raise RuntimeError("connection refused")
+
+    monkeypatch.setattr(ac, "auth_client", _boom)
+
+    res = CliRunner().invoke(ac.app, ["bootstrap", "hermes"])
+
+    assert res.exit_code == 0, res.output
+    assert calls == ["auth_client"]
+    assert "hal0-api not reachable" in res.output
+
+
+def test_reprovision_calls_reconcile_and_posts_endpoint(monkeypatch) -> None:
+    from typer.testing import CliRunner
+
+    monkeypatch.setattr(ac, "_provision_hermes", lambda **_k: 0)
+    posted: list[str] = []
+
+    class _Resp:
+        def raise_for_status(self) -> None:
+            return None
+
+    class _Client:
+        def __enter__(self) -> _Client:
+            return self
+
+        def __exit__(self, *_a: object) -> None:
+            return None
+
+        def post(self, url: str) -> _Resp:
+            posted.append(url)
+            return _Resp()
+
+    monkeypatch.setattr(ac, "auth_client", lambda **_k: _Client())
+    monkeypatch.setattr(ac, "_api_base", lambda: "http://api.test")
+
+    res = CliRunner().invoke(ac.app, ["reprovision", "hermes"])
+
+    assert res.exit_code == 0, res.output
+    assert posted == ["http://api.test/api/agents/hermes/reconcile-upstreams"]
+    assert "not reachable" not in res.output
+
+
+def test_failed_provision_skips_reconcile(monkeypatch) -> None:
+    from typer.testing import CliRunner
+
+    monkeypatch.setattr(ac, "_provision_hermes", lambda **_k: 3)
+    monkeypatch.setattr(
+        ac,
+        "auth_client",
+        lambda **_k: pytest.fail("reconcile must not run after a failed provision"),
+    )
+
+    res = CliRunner().invoke(ac.app, ["bootstrap", "hermes"])
+
+    assert res.exit_code == 3, res.output
+
+
+# ── Codex P1: the root prelude mirrors the vault key before the drop ─────────
+
+
+def test_root_prelude_calls_the_default_key_mirror() -> None:
+    import inspect
+
+    assert "_mirror_default_key_as_root()" in inspect.getsource(ac._hermes_root_prelude)
+
+
+def test_mirror_default_key_as_root_writes_hermes_env(tmp_path, monkeypatch) -> None:
+    """A box provisioned before the mirror: the vault has the key, .env does not.
+    Only root can read the vault, and the provisioner runs as hal0 after the
+    re-exec, so the prelude is where the key reaches $HERMES_HOME/.env."""
+    from hal0.agents import hermes_provision as hp
+
+    home = tmp_path / "hermes"
+    home.mkdir()
+    vault = tmp_path / "vault" / "hermes.env"
+    vault.parent.mkdir()
+    vault.write_text("API_SERVER_KEY=" + "v" * 43 + "\n")
+    monkeypatch.setattr(hp, "HERMES_SECRETS_ENV", vault)
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    printed: list[str] = []
+    monkeypatch.setattr(ac.console, "print", lambda *a, **k: printed.append(str(a[0])))
+
+    ac._mirror_default_key_as_root()
+    assert (home / ".env").read_text() == "API_SERVER_KEY=" + "v" * 43 + "\n"
+    assert any("mirrored" in line for line in printed)
+
+    printed.clear()
+    ac._mirror_default_key_as_root()  # idempotent, silent
+    assert (home / ".env").read_text().count("API_SERVER_KEY=") == 1
+    assert printed == []
+
+
+def test_mirror_default_key_as_root_hint_on_oserror(tmp_path, monkeypatch) -> None:
+    from hal0.agents import hermes_api
+
+    def boom(_home):
+        raise OSError("vault unreadable")
+
+    monkeypatch.setattr(hermes_api, "ensure_default_key", boom)
+    printed: list[str] = []
+    monkeypatch.setattr(ac.console, "print", lambda *a, **k: printed.append(str(a[0])))
+    ac._mirror_default_key_as_root()
+    assert printed and "vault unreadable" in printed[0]

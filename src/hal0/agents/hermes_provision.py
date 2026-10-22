@@ -5888,8 +5888,15 @@ def _phase_gateway_secrets_wire(ctx: _StepCtx) -> PhaseResult:
     # secret. Idempotent — a rerun keeps an existing strong key. Log-safe: we
     # record only the outcome + key length, never the value.
     key_generated = False
+    minted: list[str] = []
+
+    def _generate() -> str:
+        key = _generate_api_server_key()
+        minted.append(key)
+        return key
+
     try:
-        key_result = ensure_gateway_api_server_key()
+        key_result = ensure_gateway_api_server_key(generate=_generate)
         key_generated = key_result.outcome == "generated"
         details["api_server_key"] = {
             "outcome": key_result.outcome,
@@ -5897,6 +5904,21 @@ def _phase_gateway_secrets_wire(ctx: _StepCtx) -> PhaseResult:
         }
     except (OSError, subprocess.SubprocessError) as exc:
         details["api_server_key"] = {"outcome": "failed", "error": str(exc)}
+
+    if key_generated and minted:
+        # Mirror the key into Hermes's own ``.env`` while the value is still in
+        # hand. The vault is root-only and this provisioner usually runs as
+        # hal0, so this is the one moment hal0 can make the default key
+        # readable to hal0-api (hermes_api.ensure_default_key: same value, so
+        # nothing changes for the gateway).
+        from hal0.agents import hermes_api  # lazy: hermes_api imports this module
+
+        try:
+            mirrored = hermes_api.ensure_default_key(Path(ctx.state.hermes_home), value=minted[0])
+        except OSError as exc:
+            details["api_server_key"]["mirrored"] = f"failed: {exc}"
+        else:
+            details["api_server_key"]["mirrored"] = mirrored
 
     if result.outcome == "skipped":
         return PhaseResult(status=PhaseStatus.SKIP, reason=result.reason, details=details)
@@ -5916,6 +5938,49 @@ def _phase_gateway_secrets_wire(ctx: _StepCtx) -> PhaseResult:
         reason=result.reason,
         details=details,
     )
+
+
+def _phase_profile_api_keys(ctx: _StepCtx) -> PhaseResult:
+    """Give every Hermes profile an ``API_SERVER_KEY`` hal0-api can read.
+
+    Named profiles get a fresh key in their own ``.env``; the default profile's
+    key is mirrored from the vault into ``$HERMES_HOME/.env`` (root only — a
+    non-root pass cannot read the vault, see ``hermes_api.ensure_default_key``).
+    Covers every profile directory, not only served ones: a parked profile that
+    later wakes already has its key. Idempotent — profiles with a usable key are
+    left alone and reported under ``present``. A default key hal0-api still
+    cannot read is a non-fatal ``warn`` naming the fix, as is a failure of the
+    sweep itself (``OSError``).
+    """
+    # Lazy: hermes_api imports this module at load time.
+    from hal0.agents import hermes_api
+
+    home = Path(ctx.state.hermes_home)
+    try:
+        wrote = hermes_api.ensure_profile_keys(home)
+        present = [p for p in hermes_api.profile_dirs(home) if p not in wrote]
+        default_readable = hermes_api.api_key_for(hermes_api.DEFAULT_PROFILE, home) is not None
+    except OSError as exc:
+        return PhaseResult(
+            status=PhaseStatus.WARN,
+            reason=f"profile API keys not ensured: {exc}",
+            details={"wrote": [], "present": [], "errors": [str(exc)]},
+        )
+    details = {
+        "wrote": wrote,
+        "present": present,
+        "default_key": "present" if default_readable else "unreadable",
+    }
+    if not default_readable:
+        return PhaseResult(
+            status=PhaseStatus.WARN,
+            reason=(
+                "the default profile's API key is not readable by hal0-api; "
+                "run sudo hal0 agent reprovision hermes --repair"
+            ),
+            details=details,
+        )
+    return PhaseResult(status=PhaseStatus.OK, details=details)
 
 
 # /api/slots uses "transcription" as the type for STT slots; accept both so
@@ -7650,6 +7715,7 @@ _INSTALL_STEPS: tuple[tuple[str, Callable[[_StepCtx], PhaseResult]], ...] = (
     ("context_link", _phase_context_link),
     ("voice_wire", _phase_voice_wire),
     ("gateway_secrets_wire", _phase_gateway_secrets_wire),
+    ("profile_api_keys", _phase_profile_api_keys),
     ("smoke_tests", _phase_smoke_tests),
 )
 

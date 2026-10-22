@@ -439,3 +439,108 @@ async def test_legacy_completions_stall_frame_is_text_shaped() -> None:
     assert "stall" in choice["text"].lower()
     assert choice["finish_reason"] == "length"
     assert payload["x_hal0_stall"]["reason"] == "idle"
+
+
+# ── per-upstream stall bounds ────────────────────────────────────────────────
+
+
+class _PausedTwoChunkStream(httpx.AsyncByteStream):
+    """Two SSE chunks with a pause between, then a clean finish."""
+
+    def __init__(self, pause: float) -> None:
+        self._pause = pause
+
+    async def __aiter__(self) -> AsyncIterator[bytes]:  # type: ignore[override]
+        yield _GARBAGE_CHUNK
+        await asyncio.sleep(self._pause)
+        yield b"data: [DONE]\n\n"
+
+    async def aclose(self) -> None:
+        return None
+
+
+def _registered_dispatcher(
+    stream: httpx.AsyncByteStream,
+    *,
+    total: float,
+    idle: float,
+    upstream_idle: float | None = None,
+    upstream_total: float | None = None,
+) -> Dispatcher:
+    from hal0.upstreams.registry import Upstream, UpstreamRegistry
+
+    registry = UpstreamRegistry()
+    registry.add(
+        Upstream(
+            name="test-upstream",
+            kind="remote",
+            url="http://upstream.test/v1",
+            stream_idle_timeout_s=upstream_idle,
+            stream_total_timeout_s=upstream_total,
+        )
+    )
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, stream=stream, headers={"content-type": "text/event-stream"})
+
+    return Dispatcher(
+        http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+        upstream_registry=registry,
+        stream_total_timeout_s=total,
+        stream_idle_timeout_s=idle,
+    )
+
+
+@pytest.mark.asyncio
+async def test_upstream_stream_idle_override_wins() -> None:
+    """A looser per-upstream idle bound outlasts a tight global one."""
+    dispatcher = _registered_dispatcher(
+        _PausedTwoChunkStream(0.2), total=60.0, idle=0.05, upstream_idle=1.0
+    )
+    try:
+        resp = await dispatcher.forward(_call())
+        body = await _drain(resp)
+    finally:
+        await dispatcher.aclose()
+
+    assert b"x_hal0_stall" not in body
+    assert body == _GARBAGE_CHUNK + b"data: [DONE]\n\n"
+
+
+@pytest.mark.asyncio
+async def test_upstream_stream_idle_override_trips() -> None:
+    """A tighter per-upstream idle bound cuts a stream the global would allow."""
+    dispatcher = _registered_dispatcher(
+        _EndlessStream(_GARBAGE_CHUNK, gap=30.0), total=60.0, idle=10.0, upstream_idle=0.05
+    )
+    try:
+        resp = await dispatcher.forward(_call())
+        body = await _drain(resp)
+    finally:
+        await dispatcher.aclose()
+
+    stall = _stall_payload(body)["x_hal0_stall"]
+    assert stall["reason"] == "idle"
+
+
+@pytest.mark.asyncio
+async def test_upstream_stream_total_override_trips() -> None:
+    """The per-upstream total bound overrides the global total."""
+    dispatcher = _registered_dispatcher(
+        _EndlessStream(_GARBAGE_CHUNK, gap=0.001), total=60.0, idle=10.0, upstream_total=0.15
+    )
+    try:
+        resp = await dispatcher.forward(_call())
+        body = await _drain(resp)
+    finally:
+        await dispatcher.aclose()
+
+    assert _stall_payload(body)["x_hal0_stall"]["reason"] == "total"
+
+
+def test_stream_bounds_for_falls_back_to_globals() -> None:
+    dispatcher = _registered_dispatcher(
+        httpx.ByteStream(b""), total=7.0, idle=3.0, upstream_idle=1.5
+    )
+    assert dispatcher._stream_bounds_for("test-upstream") == (7.0, 1.5)
+    assert dispatcher._stream_bounds_for("unknown") == (7.0, 3.0)

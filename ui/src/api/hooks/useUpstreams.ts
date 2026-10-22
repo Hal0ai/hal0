@@ -33,6 +33,12 @@ export interface UpstreamEntry {
   enabled: boolean
   model_filters: UpstreamModelFilters | null
   models: string[]
+  /** Owner of an agent-managed entry (e.g. `agent:hermes`); null when operator-authored. */
+  managed_by?: string | null
+  /** A pinned entry's ids never fall through to another lane. */
+  pinned?: boolean
+  /** Model ids a pinned entry owns. */
+  owned_models?: string[]
   hint?: string
 }
 
@@ -92,6 +98,12 @@ export interface UpstreamTestResult {
  * `hal0` aggregate) are owned by the slot lifecycle and live on Slots. */
 export function isManagedRemote(u: UpstreamEntry): boolean {
   return u.kind === 'remote' && !u.slot_name
+}
+
+/** "managed by <owner>" for an agent-managed entry, else null. Such a row is
+ * read-only here: the API refuses PATCH, DELETE and credential writes. */
+export function managedByLabel(u: UpstreamEntry): string | null {
+  return u.managed_by ? `managed by ${u.managed_by}` : null
 }
 
 export function useUpstreams() {

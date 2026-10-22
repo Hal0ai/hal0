@@ -157,6 +157,7 @@ def test_openwebui_wired_reflects_the_shared_classifier(svc_client: TestClient) 
         "web_search": False,
         "embed_model": "nomic-embed-text-v1.5",
         "image_model": None,
+        "agents": ["hermes-agent", "coder"],
     }
     with contextlib.ExitStack() as stack:
         for p in _stub_all_down():
@@ -169,6 +170,30 @@ def test_openwebui_wired_reflects_the_shared_classifier(svc_client: TestClient) 
     assert r.status_code == 200, r.text
     by_id = _services_by_id(r.json())
     assert by_id["openwebui"]["wired"] == status
+
+
+def test_openwebui_wired_passes_registry_to_classifier(svc_client: TestClient) -> None:
+    """The route hands the live upstream registry (and model cache) to the
+    classifier so the Agents chip reflects the real Hermes upstreams."""
+    registry = object()
+    cache = {"hermes-agent": ["hermes-agent"]}
+    svc_client.app.state.upstreams = registry  # type: ignore[attr-defined]
+    svc_client.app.state.upstream_models = cache  # type: ignore[attr-defined]
+    with contextlib.ExitStack() as stack:
+        for p in _stub_all_down():
+            stack.enter_context(p)
+        mocked = stack.enter_context(
+            patch(
+                "hal0.openwebui.wiring.openwebui_wiring_status",
+                return_value={"chat": True, "agents": []},
+            )
+        )
+        r = svc_client.get("/api/services")
+
+    assert r.status_code == 200, r.text
+    mocked.assert_called_once()
+    assert mocked.call_args.kwargs["upstreams"] is registry
+    assert mocked.call_args.kwargs["model_cache"] is cache
 
 
 def test_openwebui_wired_degrades_to_none_on_resolver_failure(svc_client: TestClient) -> None:

@@ -23,7 +23,8 @@ import contextlib
 import json
 import shutil
 
-from fastapi import APIRouter, Query
+import structlog
+from fastapi import APIRouter, Query, Request
 
 from hal0.agents import (
     AgentAlreadyInstalledError,
@@ -39,6 +40,25 @@ from hal0.errors import BadRequest, Conflict, Hal0Error, MultiStatus, NotFound
 from hal0.redaction import redact_audit_args
 
 router = APIRouter()
+log = structlog.get_logger(__name__)
+
+
+def _bundled_name(name: str) -> str:
+    """``name`` if it is a bundled agent, else 404 ``agent.unknown``.
+
+    The manager derives install, state and data paths from the name, so the
+    routes admit only the two bundled names before anything touches the file
+    system. The tuple is spelled out, not ``BUNDLED_AGENTS``, so the check is
+    a constant comparison a static analyser recognises as the barrier for
+    ``py/path-injection``; ``test_bundled_name_guard_matches_bundled_agents``
+    keeps the two in lockstep.
+    """
+    if name not in ("hermes", "pi"):
+        raise NotFound(
+            f"unknown bundled agent {name!r}. Known: {', '.join(BUNDLED_AGENTS)}",
+            code="agent.unknown",
+        )
+    return name
 
 
 def _manager() -> AgentManager:
@@ -131,7 +151,7 @@ async def list_skills() -> dict[str, object]:
 
 
 @router.post("/install")
-async def install_agent(body: dict[str, object]) -> dict[str, object]:
+async def install_agent(body: dict[str, object], request: Request) -> dict[str, object]:
     """Install a bundled agent. Body shape: ``{"name": str, "switch"?:
     bool}``.
 
@@ -145,6 +165,7 @@ async def install_agent(body: dict[str, object]) -> dict[str, object]:
     name = body.get("name") if isinstance(body, dict) else None
     if not isinstance(name, str) or not name.strip():
         raise BadRequest("'name' is required (non-empty string)", code="agent.name_required")
+    name = _bundled_name(name)
     switch = bool(body.get("switch", False)) if isinstance(body, dict) else False
 
     if agent_kind(name) == "cli":
@@ -186,7 +207,49 @@ async def install_agent(body: dict[str, object]) -> dict[str, object]:
             code="agent.install_failed",
         ) from exc
 
+    if name == "hermes" or switch:
+        # Hermes just arrived, or ``switch`` just removed it (or another agent).
+        await _sync_hermes_upstreams_best_effort(request)
     return rec.as_dict()
+
+
+# ── POST /api/agents/hermes/reconcile-upstreams ──────────────────────────────
+
+
+@router.post("/hermes/reconcile-upstreams")
+async def reconcile_hermes_upstreams_route(request: Request) -> dict[str, object]:
+    """Re-mirror the Hermes gateway's profiles into the upstream registry.
+
+    Runs the key sweep first, so a profile created since the last pass gets
+    its key and shows up without waiting for the periodic reconcile.
+    """
+    from hal0.agents.hermes_upstreams import sync_hermes_upstreams
+
+    if "hermes" not in _manager().installed_names():
+        raise NotFound("hermes agent is not installed", code="agent.not_installed")
+    report = await sync_hermes_upstreams(
+        request.app.state.upstreams,
+        model_cache=getattr(request.app.state, "upstream_models", None),
+    )
+    return {"ok": True, **report}
+
+
+async def _sync_hermes_upstreams_best_effort(request: Request) -> None:
+    """Re-mirror after an install or uninstall changed what Hermes serves.
+
+    An uninstall must not leave the pinned entries (and their keys in the
+    process environment) up for the next 120 s periodic pass: their owned ids
+    would keep preempting local slots and fail every request.
+    """
+    from hal0.agents.hermes_upstreams import sync_hermes_upstreams
+
+    try:
+        await sync_hermes_upstreams(
+            request.app.state.upstreams,
+            model_cache=getattr(request.app.state, "upstream_models", None),
+        )
+    except Exception as exc:
+        log.warning("agents.hermes_upstreams_sync_failed", error=str(exc))
 
 
 # ── GET /api/agents/{name}/activity ──────────────────────────────────────────
@@ -349,7 +412,7 @@ async def agent_activity(
 
 
 @router.delete("/{name}")
-async def uninstall_agent(name: str) -> dict[str, str]:
+async def uninstall_agent(name: str, request: Request) -> dict[str, str]:
     """Uninstall a bundled agent.
 
     Idempotent: removing an agent that isn't installed returns 200 OK
@@ -363,6 +426,7 @@ async def uninstall_agent(name: str) -> dict[str, str]:
     half-uninstalled agent whose seed was already gone reported
     ``not_installed`` even while ``rm -rf``'ing its data + state dirs.
     """
+    name = _bundled_name(name)
     if agent_kind(name) == "cli":
         # Mirror of the install-route guard: the profile lives in the
         # invoking user's home, which this daemon can neither remove nor
@@ -385,6 +449,8 @@ async def uninstall_agent(name: str) -> dict[str, str]:
         # an honest 207 partial-removal listing what remained + why — never a
         # bare 500. ``removed`` reflects the pre-teardown disk witnesses so the
         # operator sees the agent WAS present.
+        if name == "hermes":
+            await _sync_hermes_upstreams_best_effort(request)
         raise MultiStatus(
             str(exc),
             code="agent.uninstall_incomplete",
@@ -395,6 +461,8 @@ async def uninstall_agent(name: str) -> dict[str, str]:
                 "residual": exc.residual,
             },
         ) from exc
+    if name == "hermes" and removed:
+        await _sync_hermes_upstreams_best_effort(request)
     return {
         "name": name,
         "status": "uninstalled" if removed else "not_installed",

@@ -90,7 +90,7 @@ def _mdns_url(sdef: ServiceDef, hostname: str, advertised: list[str]) -> str | N
     return f"http://{hostname}:{sdef.port}"
 
 
-def _openwebui_wired() -> dict[str, Any] | None:
+def _openwebui_wired(request: Request) -> dict[str, Any] | None:
     """OpenWebUI's wired-chip truth, from the SAME classifier that renders
     its env file (:mod:`hal0.openwebui.wiring`) — never re-derived here.
     Fail-soft: a broken resolver must not turn the whole Services page into
@@ -99,7 +99,11 @@ def _openwebui_wired() -> dict[str, Any] | None:
     try:
         from hal0.openwebui.wiring import openwebui_wiring_status
 
-        return openwebui_wiring_status()
+        state = request.app.state
+        return openwebui_wiring_status(
+            upstreams=getattr(state, "upstreams", None),
+            model_cache=getattr(state, "upstream_models", None),
+        )
     except Exception as exc:  # pragma: no cover — defensive
         log.warning("services.owui_wiring_status_failed", exc=repr(exc))
         return None
@@ -194,7 +198,7 @@ async def list_services(request: Request) -> dict[str, Any]:
                 "actions": list(sdef.actions),
                 "mdns_capable": sdef.mdns,
                 "hints": list(sdef.hints),
-                "wired": _openwebui_wired() if sdef.id == "openwebui" else None,
+                "wired": _openwebui_wired(request) if sdef.id == "openwebui" else None,
             }
         )
     return {"services": services, "mdns": disco}
