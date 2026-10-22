@@ -262,6 +262,18 @@ pass, but a few things are worth doing or checking. The full list is in the
   `profiles.toml` migration, and the migrated file does not parse on 1.1.0.
   Back up `/etc/hal0/profiles.toml` first if you may downgrade.
 
+## Upgrading to 1.6.0
+
+The first `hal0 update` to 1.6.0 changes how Hermes is installed. Nothing needs a manual migration pass, but expect the following. The full list is in the Breaking section under Unreleased in `CHANGELOG.md`.
+
+- **Hermes moves from 0.19.0 to v0.22.2 (`d923a5eb`) and from Python 3.12 to a uv-managed Python 3.14.** The update builds a release next to the live one under `/var/lib/hal0/hermes/releases/`, checks it, then switches. `/var/lib/hal0/venvs/hermes` becomes a symlink to `current/venv`. The build needs the network; an offline host refuses it and stays on 0.19.0. `/etc/hal0/hermes-python.env` is rewritten to the 3.14 interpreter and the old value is discarded with a `hermes-python-discarded` warning.
+- **Expect a short Hermes outage** while the agent and gateway restart on the new release.
+- **The gateway unit is regenerated and linger is enabled for `hal0` automatically.** Run `sudo hal0 agent install hermes` only if the update says it could not.
+- **Session history is kept** (`sessions.auto_prune: false`) and the persona prompt is written to `agent.system_prompt` before the new Hermes first starts.
+- **Open WebUI gets the default Hermes profile after one repair.** If the default profile is missing from the picker on a box that had Hermes installed before 1.6.0, run `sudo hal0 agent reprovision hermes --repair` once; `hal0 doctor` flags this on the `hermes-api` row. See [Talking to Hermes](/docs/guides/open-webui#talking-to-hermes).
+- **The agent chat proxy is removed.** `/api/agents/{id}/events`, `/submit` and `/session/*` return 404.
+- **Key rotation now ends open sockets and streams** (WebSocket close code `4401`, SSE `event: revoked`).
+
 ## Upgrading from an older release
 
 Upgrades start at **1.3.0**. Every release manifest declares the window it
@@ -327,12 +339,12 @@ upgrading to a release with the Hermes release layout migrates every host:
 it builds a new release under `/var/lib/hal0/hermes`, stops the agent and
 the gateway (only those that were running), moves the old venv aside as the
 `legacy` release, switches, runs `hermes config migrate`, and starts the
-units again. Expect a short Hermes outage during that step. If the new
+units again. Expect a short Hermes outage during that step. On an offline host the build is refused, the update names the step that needs the network, and Hermes stays on its live release. If the new
 release fails its re-check, hal0 switches back to the old venv, restores
 `config.yaml`, and reports `activation_failed` with the
 `sudo hal0 agent reprovision hermes --repair` remedy. The component row
 also shows `busy` for a pass that found another Hermes build running; that
-is not a failure, and the next update retries.
+is not a failure, and the next update retries. The update also regenerates the gateway unit and enables linger for the `hal0` user; it shows a component note such as "Hermes config keys applied; restart hal0-agent@hermes to load agent.system_prompt" in `hal0 update` and `hal0 update status` when a restart is still pending.
 
 <Aside type="note">
 An apply that leaves a component unconverged, or a slot blocked by the
@@ -370,12 +382,7 @@ Rollback swaps the code tree only. It does not restore `profiles.toml`,
 slot files or any other config: that is config state, deliberately decoupled
 from the code tree. The one exception is the profile-centric conversion below.
 
-Rolling back to 1.5.0 or earlier leaves Hermes on the newer release layout:
-`venvs/hermes` stays a link into `/var/lib/hal0/hermes`, and Hermes keeps
-running on that release. A 1.5.0 `hal0 agent reprovision hermes --repair`
-does not understand the layout. It can leave a stray
-`/var/lib/hal0/venvs/hermes.rollback-<pid>` symlink behind and report a
-failure. Delete that symlink; the release it pointed at is unaffected.
+Rolling back from 1.6.0 to 1.5.x leaves Hermes running on the release 1.6.0 built, and leaves the Hermes build failing until you update again. 1.6.0 records a Python 3.14 interpreter in `/etc/hal0/hermes-python.env`, and 1.5.x accepts only 3.12, so its Hermes converge stops with `Hermes Python must be exactly 3.12: <path> reports 3.14`. The 1.5.x MCP probe also fails against the mcp 2.0 client in the new venv, so every `hal0 update` on 1.5.x reports the Hermes venv as broken and `hal0 agent bootstrap hermes` and `hal0 agent reprovision hermes` fail at `mcp_wire`. Do not edit `hermes-python.env` to point 1.5.x at a 3.12 interpreter: 1.5's builder then replaces the release symlink at `/var/lib/hal0/venvs/hermes` with a 0.19.0 venv and leaves a stray `/var/lib/hal0/venvs/hermes.rollback-<pid>` behind. Update back to 1.6.0 instead, which clears these errors.
 
 ### Rolling back past the profile-centric conversion
 

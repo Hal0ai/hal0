@@ -173,6 +173,12 @@ middleware treats as the `admin` tier: one signing secret
 verified. See [Authentication](/docs/operate/auth/). Caller identity still
 flows on `X-hal0-Agent` underneath.
 
+Credentials are re-checked while a connection is open, not only when it starts.
+Rotating a key closes the WebSockets that were using the old credential with
+code `4401` and ends open Server-Sent Events streams with a final
+`event: revoked` frame. A sweep every 30 seconds does the same for expired
+sessions (8 hours, or 30 days with Remember me). Details: [Revoked streams](/docs/operate/auth#revoked-streams).
+
 ## Agent identity and gated actions
 
 hal0's agent and memory surfaces resolve caller identity from the

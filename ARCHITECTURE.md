@@ -68,7 +68,13 @@ src/hal0/
 │   ├── mcp_mount.py # mounts hal0-admin + hal0-memory MCP servers
 │   └── middleware/  # error envelope, request id, log scrub
 ├── agents/          # bundled-agent provisioner + driver
-│   ├── hermes_provision.py    # 15-phase Hermes bootstrap
+│   ├── hermes_provision.py    # 14-step Hermes bootstrap (_INSTALL_STEPS)
+│   ├── hermes_release.py      # release builder: one immutable release per build, flip-back
+│   ├── hermes_layout.py       # fixed paths of the release layout
+│   ├── hermes_gateway_unit.py # normalise the upstream-generated gateway unit
+│   ├── hermes_gateway_regen.py# root-side gateway unit regeneration + linger
+│   ├── hermes_api.py          # API-server endpoint, profiles, per-profile keys
+│   ├── hermes_upstreams.py    # one pinned /v1 upstream per keyed Hermes profile
 │   ├── hermes/driver.py       # hal0-bundled Hermes driver (plugin sources
 │   │                          #   live under installer/agents/hermes/plugins/)
 │   ├── personas.py            # persona TOML store + hot-reload nudge
@@ -317,7 +323,7 @@ bundled agents are not a revival of it.)
 ### Install & lifecycle
 
 ```
-sudo hal0 agent install hermes           # one-shot 12-step converging install
+sudo hal0 agent install hermes           # one-shot 14-step converging install
 sudo systemctl status hal0-agent@hermes  # unit health
 hal0 agent personas list                 # list personas (TOML store)
 hal0 agent personas activate coder       # swap active persona
@@ -328,16 +334,22 @@ agent. It renders `config.yaml`, `hermes.env`, persona TOMLs, the MCP
 server entries (`hal0-admin`, `hal0-memory`), the system-prompt addendum,
 and the composite `hal0` upstream config — all idempotently.
 
+### Release layout
+
+Every path that builds the Hermes venv (install, `hal0 agent reprovision hermes --repair`, `hal0 agent upgrade hermes`, and the `hal0 update` converge) goes through `ensure_release` in `src/hal0/agents/hermes_release.py` (ADR-0032, ADR-0034). It builds an immutable release under `/var/lib/hal0/hermes/releases/<sha12>-<stamp>/` (a `src/` worktree of the pinned commit, a `venv/`, and `release.json`) from upstream's lockfile, on a uv-managed CPython 3.14 kept in `/var/lib/hal0/hermes/python/`. The release is checked (imports, `hermes --help`, MCP probe) before the `current` symlink flips to it; `previous` keeps the last good release. `/var/lib/hal0/venvs/hermes` is a symlink to `/var/lib/hal0/hermes/current/venv` once a host has migrated (`src/hal0/agents/hermes_layout.py`). Activation stops the agent and gateway, switches `current`, runs `hermes config migrate`, and restarts; a failed re-check flips back to `previous` and restores `config.yaml`. `hal0 agent upgrade hermes --to <40-hex sha>` accepts only a commit in `VETTED_HERMES_REFS`.
+
+The gateway unit (`/etc/systemd/system/hermes-gateway.service`) is rendered by upstream's `hermes gateway install --system`; `hermes_gateway_unit.py` rewrites every release-local path in it to `/var/lib/hal0/hermes/current/`. On `hal0 update` the root verb `hal0-update hermes-gateway` runs `hermes_gateway_regen.py`, which regenerates a stale unit without running Hermes code as root and enables systemd linger for the `hal0` user (kanban and cron workers need the user manager). A gateway the operator disabled or masked stays off.
+
 ### Surfaces
 
 * **Provision** — `hal0 agent install hermes` (root: installs the CLI
   wrapper + hal0-owned skeleton, then re-execs `hal0 agent bootstrap
-  hermes` as the `hal0` user) → the 12-step, deliberately
+  hermes` as the `hal0` user) → the 14-step, deliberately
   **uncheckpointed** pipeline in `src/hal0/agents/hermes_provision.py`
   (`_INSTALL_STEPS`): `preflight → install →
   env_probe → home_init → kanban_db_init → install_artifacts → mcp_wire →
   config_write → context_link → voice_wire → gateway_secrets_wire →
-  smoke_tests`. Every step converges its slice of host state (a
+  profile_api_keys → profile_mcp_wire → smoke_tests`. Every step converges its slice of host state (a
   re-run over an already-provisioned box mutates nothing —
   `report.converged`); there is no resumable `provision.json` checkpoint
   machinery — a last-run report is written to
@@ -360,6 +372,7 @@ and the composite `hal0` upstream config — all idempotently.
   surface; hal0 does not proxy it (ADR-0033). The dashboard's
   agent-chat slide-out talks to the hal0-brain steward at
   `/api/brain/chat`, not to Hermes.
+* **Open WebUI and other /v1 clients** — `src/hal0/agents/hermes_upstreams.py` registers one pinned `kind="remote"` upstream per Hermes profile that has an API key (`managed_by="agent:hermes"`, bearer auth, 600 s timeout, stream idle 600 s / total 1800 s): `hermes` for the default profile (`http://127.0.0.1:8642/v1`) and `hermes.<profile>` for named ones (`/p/<profile>/v1`). Each profile appears as a model in `/v1/models`, so Open WebUI and any OpenAI-compatible client reach Hermes through hal0's `/v1` surface (ADR-0035). A Hermes model id never falls back to a slot: when its upstream is unreachable the call fails with `dispatch.upstream_unavailable`. `hal0-api` re-runs the key sweep and the reconcile every 120 s (`HERMES_RECONCILE_INTERVAL_S`, `src/hal0/api/__init__.py`), and `POST /api/agents/hermes/reconcile-upstreams` runs one on demand. The provisioning step `profile_api_keys` writes a missing per-profile key into `profiles/<p>/.env` and mirrors the default profile's vaulted key into `$HERMES_HOME/.env`; `profile_mcp_wire` (and the same sweep) gives every named profile the `hal0-admin` and `hal0-memory` MCP servers.
 * **Plugin host** — `src/hal0/api/plugins/`. Proxies upstream Hermes
   plugin manifests + serves plugin static assets so the dashboard can
   mount them in shadow-DOM iframes.
@@ -401,7 +414,13 @@ and the composite `hal0` upstream config — all idempotently.
 | Module                                         | Owns                                         |
 |------------------------------------------------|----------------------------------------------|
 | `src/hal0/agents/manager.py`                   | single-pick install / uninstall              |
-| `src/hal0/agents/hermes_provision.py`          | 12-step Hermes install pipeline + brain-lane bootstrap phases |
+| `src/hal0/agents/hermes_provision.py`          | 14-step Hermes install pipeline (`_INSTALL_STEPS`); the brain-lane phase functions stay callable from the hal0-api lifespan |
+| `src/hal0/agents/hermes_release.py`            | release builder, builder lock, activation + flip-back (ADR-0032/0034) |
+| `src/hal0/agents/hermes_layout.py`             | fixed release-layout paths (`/var/lib/hal0/hermes/...`, venv link) |
+| `src/hal0/agents/hermes_gateway_unit.py`       | rewrites release paths in the upstream-generated gateway unit |
+| `src/hal0/agents/hermes_gateway_regen.py`      | root-side gateway unit regeneration + linger (`hal0-update hermes-gateway`) |
+| `src/hal0/agents/hermes_api.py`                | Hermes API-server endpoint, profile discovery, per-profile keys |
+| `src/hal0/agents/hermes_upstreams.py`          | one pinned `/v1` upstream per keyed Hermes profile (ADR-0035) |
 | `src/hal0/agents/personas.py`                  | persona TOML store + hot-reload helper       |
 | `src/hal0/agents/mcp_client.py`                | MCP server-axis + tool-axis classifier       |
 | `src/hal0/agents/hermes/plugins/memory_hindsight/` | hal0-memory `MemoryProvider` plugin (canonical source; mirrored byte-for-byte into `installer/agents/hermes/plugins/hal0-memory/` at install time, guarded by `tests/agents/hermes_plugins/test_seed_parity.py`) |
@@ -424,8 +443,8 @@ These decisions are settled. Some are recorded as ADRs in `docs/adr/`
   does not build its own runtime.
 * **MCP allow-list** — the MCP client is default-deny on two axes
   (server-axis + tool-axis); a persona's `tools_allowed` opens the gate.
-* **Upstream pin** — the bundled Hermes runtime is pinned with periodic
-  drift detection rather than tracking upstream `main`.
+* **Upstream pin** — the bundled Hermes runtime is pinned to NousResearch/hermes-agent v0.22.2 (commit `d923a5eb`) with periodic
+  drift detection rather than tracking upstream `main` (ADR-0034). It installs from upstream's lockfile into a release on a uv-managed Python 3.14 (ADR-0032).
 * **LLM roles** — the canonical chat roles are `agent` (default anchor)
   and `utility`; the older `chat` / `primary` roles are retired.
 * **Memory engine** — Hindsight only (Cognee removed).
@@ -437,14 +456,13 @@ These decisions are settled. Some are recorded as ADRs in `docs/adr/`
 
 ### Upstream pin
 
-The Hermes-Agent upstream commit hal0 v0.3 is vendored / shimmed
-against lives in `pyproject.toml [tool.hal0.upstream-hermes]`. The
+The Hermes-Agent upstream commit hal0 builds and tests against (v0.22.2, `d923a5eb`) is recorded in `pyproject.toml [tool.hal0.upstream-hermes]`. The
 weekly `hermes-sdk-diff` GitHub Action opens a drift issue when one of
 the tracked files changes between the pin and upstream HEAD. Bump
 process: review issue, edit shim adapters if needed, run
 `scripts/hermes-sdk-diff.sh --bump <sha>`, δ-harness + γ-suite, open
 `chore(hermes): bump upstream pin to <short-sha>` PR. The pin is bumped
-only through this human-gated path — never auto-merged.
+only through this human-gated path — never auto-merged. The same commit is named in `installer/agents/hermes/requirements.txt`, and `VETTED_HERMES_REFS`, and `tests/agents/hermes/test_contract_compatibility.py` keeps them in lockstep with the frozen contract fixtures (ADR-0034 decision 8).
 
 ## Glossary
 
@@ -547,7 +565,7 @@ place — different scope from hal0's memory surface.
 
 Bundled agent option (service shape). User-owned upstream — grows native
 hal0-awareness on the Hermes side rather than via a hal0-owned shim. Runs
-as `hal0-agent-hermes.service`. Sidebar link-out OWUI-style in dashboard.
+as `hal0-agent@hermes.service` (the `hal0-agent@.service` template; the gateway is the separate `hermes-gateway.service`). Sidebar link-out OWUI-style in dashboard.
 
 ### skills
 
@@ -695,7 +713,7 @@ flags: chat + transcription + embedding. Verified empirically 2026-05-22
 (gemma3:1b + Whisper-V3-Turbo + Embedding-Gemma-300M loaded in one FLM
 process, ~2 GB NPU memory total, chat at 40 tok/s).
 
-hal0 leverages this with the `flm` profile (`flm serve --asr 1 --embed 1`)
+hal0 uses this through the `flm` profile (`flm serve --asr 1 --embed 1`)
 running in the `npu` slot's container (`hal0-slot@npu`), which answers
 `/v1/chat/completions`, `/v1/audio/transcriptions`, and `/v1/embeddings`
 on one static port. Three slot records ride that one container:
@@ -959,10 +977,10 @@ to call. Talks to `hal0-memory` MCP at `/mcp/memory` over HTTP. v0.3.
 ### hermes_provision
 
 The hal0 module at `src/hal0/agents/hermes_provision.py` that runs the
-12-step Hermes install pipeline (`_INSTALL_STEPS`: preflight → install →
+14-step Hermes install pipeline (`_INSTALL_STEPS`: preflight → install →
 env_probe → home_init → kanban_db_init → install_artifacts → mcp_wire →
 config_write → context_link → voice_wire → gateway_secrets_wire →
-smoke_tests). Convergent, not checkpointed; the last-run report lands in
+profile_api_keys → profile_mcp_wire → smoke_tests). Convergent, not checkpointed; the last-run report lands in
 `/var/lib/hal0/state/agents/hermes/provision.json` for `hal0 agent
 status`/`log`. CLI verb is `hal0 agent bootstrap hermes` (run as the `hal0`
 user by `hal0 agent install hermes`). Renamed from `hermes_bootstrap.py`
@@ -976,7 +994,7 @@ Pinned to `/var/lib/hal0/.hermes/` (`HERMES_HOME_DEFAULT` in
 hal0-bundled installs (not `~/.hermes`). Agents without an entry there
 keep the per-name layout `/var/lib/hal0/agents/<name>/`. Wrapper `/usr/local/bin/hal0-hermes`
 sources `/var/lib/hal0/secrets/agents/hermes.env`, exports `HERMES_HOME`,
-and execs `/var/lib/hal0/venvs/hermes/bin/hermes`. Raw
+and execs `/var/lib/hal0/venvs/hermes/bin/hermes` (a symlink to `/var/lib/hal0/hermes/current/venv` after the release-layout migration). Raw
 `/usr/local/bin/hermes` stays unwrapped so human SSH sessions get normal
 behavior.
 
@@ -1174,21 +1192,6 @@ slot introspection" half of the original candidate was dropped — already
 solved by [model_meta](#model_meta)'s `labels_of`. Issue #701, grilled
 2026-06-12; lands after PR #649 (shared `slots/manager.py` surface).
 
-### PhaseContext (proposed)
-
-The argument every Hermes-bootstrap phase receives once issue #702 lands:
-read-only `BootstrapState`, an explicit `repair` flag (deleting the
-`_repair_flag` dict sentinel), an injectable `PhaseIO` bundle of the
-network/subprocess seams (the test suite's monkeypatch tax, typed), and
-`output_of(phase)` — which raises unless the phase declared that
-dependency in its `needs` tuple. Deliberately NOT an input→output chained
-pipeline: the bootstrap's 15 phases (code comments say 12 — stale) have
-exactly four cross-phase reads, so the deepening is declared-and-validated
-dependencies over the existing run-all runner, whose FAIL semantics
-(failures never halt or skip dependents; fallbacks fire and are now
-recorded in `details["fallbacks"]`) are preserved byte-identically. Issue
-#702, grilled 2026-06-12.
-
 ### GPUMemorySample (proposed)
 
 The typed record `hardware/gpu_view.py:sample()` emits — vendor, both
@@ -1313,7 +1316,7 @@ default runner — runner parts superseded by `0028`), `0026` (model delete remo
 files by default, behind guards, with tombstones for kept files), `0027` (a
 runner's tier is the one source of "default"; every runner named for what it
 is), `0028` (fresh runner system: one key per runner, one `manifest.json` pin
-table, fork-only quants refused, one conversion migration). `0007`, `0008`–`0011`, `0014`, `0016`–`0019`, `0021`, and
+table, fork-only quants refused, one conversion migration). `0029` (profile-centric config: the model holds file facts, the profile every tune, the slot placement), `0030` (kokoro launches from the pulled store bundle), `0031` (speculative-decoding drafters are a model file fact, switched on the profile), `0032` (Hermes installs from a pinned source checkout into a uv-built Python 3.14 venv), `0033` (agent chat is Hermes's own dashboard; hal0 does not proxy it), `0034` (Hermes releases install from upstream's lockfile on a uv-managed Python 3.14, v0.22 posture), `0035` (Hermes profiles are routed to as pinned `/v1` upstreams). `0007`, `0008`–`0011`, `0014`, `0016`–`0019`, `0021`, and
 `0022` are gaps in this tree, not missing numbers to fill — see the next
 paragraph.
 

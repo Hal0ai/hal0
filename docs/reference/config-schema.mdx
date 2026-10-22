@@ -30,7 +30,7 @@ below) — see [Environment variables](/docs/reference/env-vars/) for the full l
 | `/etc/hal0/upstreams.toml` | TOML | Remote/cloud LLM upstream entries (`[[upstream]]`). |
 | `/etc/hal0/profiles.toml` | TOML | Named backend-tuning profiles. Optional — seeds apply if absent. |
 | `/etc/hal0/stacks.toml` | TOML | Named stack bundles (slot + profile + model sets). Optional. |
-| `/etc/hal0/agents/<name>.toml` | TOML | Per-agent MCP allowlist/config. |
+| `/etc/hal0/agents/<name>.toml` | TOML | Per-agent MCP allowlist/config. `hermes.toml` also carries the `[hermes]` table (`command_approvals`, `delegation_slot`); see [Config schema: providers, profiles, stacks & agents](/docs/reference/config-schema-profiles/#hermes-hermestoml-only). |
 | `/etc/hal0/hardware.json` | JSON | Hardware probe snapshot, written by `hal0 config hardware --refresh`. |
 | `/etc/hal0/manifest.json` | JSON | Release manifest — the `runners` table of runner-image pins. |
 | `/etc/hal0/api.env`, `/etc/hal0/openwebui.env` | env-file (`KEY=value`) | systemd `EnvironmentFile=` — secrets/keys, not part of the Pydantic schema. |

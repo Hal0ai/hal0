@@ -47,6 +47,13 @@ curl -fsSL https://hal0.dev/install.sh | sudo bash
 > notice. Upgrades start at 1.3.0; on anything older, read
 > [Upgrading from an older release](#upgrading-from-an-older-release) first.
 
+> **On main, next release (1.6.0):** Hermes moves to v0.22.2 on a uv-managed
+> Python 3.14 release layout, every Hermes profile appears in Open WebUI
+> and any `/v1` client, and CI requires Python 3.14. 1.6.0 is not tagged
+> yet; it reaches boxes through the `nightly` channel today and `hal0 update`
+> once it ships. See [What's new](#whats-new) and
+> [Upgrading to 1.6.0](#upgrading-to-160-on-main-not-yet-tagged).
+
 > **⚡ The installer is the whole setup.** There is no separate first-run
 > wizard afterwards. `install.sh` asks where models should live, optionally
 > takes a HuggingFace token, seeds every capability slot, downloads the hal0
@@ -62,7 +69,7 @@ curl -fsSL https://hal0.dev/install.sh | sudo bash
 | **Hardware** | First-class on AMD Strix Halo (ROCm iGPU + XDNA NPU); Vulkan and CPU fallbacks everywhere else, plus experimental CUDA. See [Hardware matrix](docs/reference/hardware-matrix.mdx). |
 | **Platform** | Linux + systemd + podman, including Proxmox LXC. macOS and Windows are not supported today — see [Support matrix](docs/reference/support-matrix.mdx). |
 | **Auth** | Enforcement is off by default (trusted-LAN posture) — opt in with `hal0 auth require on`. Once an admin key is configured, a LAN-bound box also gates mutating routes for off-box callers, even with enforcement off (v1.3.0). No TLS termination; front it with a reverse proxy if it's reachable beyond your LAN. |
-| **Chat UI** | OpenWebUI, prewired, on `:3001` — zero config. |
+| **Chat UI** | OpenWebUI, prewired, on `:3001` — zero config. Hermes agent profiles appear in its model picker next to your slots (on main for 1.6.0). |
 | **Updates** | Cosign-signed tarball releases via `hal0 update`, with one-flag rollback. |
 
 ### If you know Ollama / llama.cpp / Open WebUI / LocalAI, hal0 adds…
@@ -144,7 +151,10 @@ curl -fsSL https://hal0.dev/install.sh | sudo HAL0_CHANNEL=preview bash
    needs and seeds custom nodes.
 7. **Service start** — enables and starts `hal0-api` + `hal0.target`, the
    Hindsight memory engine, OpenWebUI on `:3001`, and the bundled Hermes
-   agent.
+   agent. From 1.6.0, Hermes builds its own immutable release under
+   `/var/lib/hal0/hermes/releases/` on a uv-managed CPython 3.14, so that
+   step needs network access on a first install. hal0 itself needs Python
+   3.12-3.14; the Hindsight engine venv accepts 3.11-3.14.
 
 Full step list and the complete env-var table:
 [`installer/README.md`](./installer/README.md).
@@ -161,7 +171,7 @@ Full step list and the complete env-var table:
 | `HAL0_SKIP_BRAIN_MODEL=1` | Keep the seeding, skip the brain pull (`brain` stays model-less) |
 | `HAL0_BRAIN_MODEL=<id>` | Force a specific curated brain quant |
 | `HAL0_PULL_AGENT_MODEL=1` / `=0` | Opt in to the big agent pull unattended / force-skip it on a TTY |
-| `HAL0_PY_AUTOINSTALL=1` | Let the installer install a compatible `python3.12` |
+| `HAL0_PY_AUTOINSTALL=1` | Let the installer install `python3.12` when the box has no Python in 3.12-3.14 |
 | `HAL0_SKIP_HINDSIGHT=1`, `HAL0_SKIP_OPENWEBUI=1`, `HAL0_SKIP_HERMES=1`, `HAL0_SKIP_COMFYUI=1` | Skip individual companion services |
 | `--no-start` | Provision everything, leave services stopped |
 | `--summary-json=PATH` | Write a versioned, machine-readable install summary (see [`installer/README.md`](./installer/README.md#--summary-jsonpath)) |
@@ -212,86 +222,45 @@ curl http://<box>:8080/v1/chat/completions \
 pull, and an interrupted pull resumes via HTTP `Range` instead of restarting
 from zero.
 
-## What's new in 1.0
+## What's new
 
-### The whole platform is agent-reachable
+### On main for 1.6.0 (next release)
 
-The admin MCP catalog went from 92 to **180 tools**: services lifecycle,
-ComfyUI, updater/doctor/health, hardware and request telemetry, the slots and
-models long-tail, bench, activity, approvals, runner images and NPU
-load/unload. The memory surface went from 5 tools to **26**, at feature parity
-with Hindsight 0.8.4 — including `memory_reflect` (LLM-backed synthesis),
-`memory_curate`/`memory_history` (the non-destructive "this is wrong"
-correction path), mental models, directives and async-operation polling.
+- **Hermes v0.22.2 on Python 3.14.** The bundled agent moves from 0.19.0 to
+  v0.22.2 (`d923a5eb`). Every build (install, `reprovision --repair`,
+  `upgrade`, update) produces an immutable release under
+  `/var/lib/hal0/hermes/releases/`, health-checked before the `current`
+  symlink flips, with a flip-back to `previous` if the re-check fails.
+  See [Hermes, the bundled agent](#hermes-the-bundled-agent).
+- **Hermes profiles in Open WebUI.** hal0 registers one pinned upstream per
+  Hermes profile, so `hermes-agent` and one model per profile appear in the
+  Open WebUI picker and in `/v1/models` for any OpenAI-compatible client.
+- **Every profile gets hal0's tools and memory.** `hal0-admin` and
+  `hal0-memory` are written into each named profile, with a private memory
+  bank per profile.
+- **Auth revocation.** Rotating a key closes open WebSockets with code 4401
+  and ends SSE streams; an expired session ends its streams too.
+- **Python 3.14 in CI.** Pull requests run 3.12 and 3.14; the Hindsight
+  engine installs on 3.14 without `--ignore-requires-python`.
+- **Agent chat proxy removed.** `/api/agents/{id}/events`, `/submit` and
+  `/session/*` return 404; chat with Hermes happens in Hermes's own
+  dashboard or through `/v1`.
 
-### Slots start when you say so
+### Shipped in 1.5.0
 
-New `autoload` setting: binding a model no longer implies a boot start. New
-eviction `priority` (0–100) replaces the inert `lru = true` opt-in, so
-memory-pressure eviction actually works on a stock box — pressure and
-pre-load eviction unload the lowest-priority slot first, LRU as the tie-break
-within a tier, and `pinned` still exempts a slot entirely.
+- **Speculative decoding drafters.** A model can carry a drafter file
+  (DFlash, EAGLE-3, LiLiCorr) that proposes tokens the main model checks in
+  one pass. Add from Hugging Face lists companion drafters and fit-checks the
+  pair before anything downloads; from a shell, `hal0 model pull <id> --draft
+  <file>` does the same. The profile `speculation` field (`auto`, `off`,
+  `ngram`) replaces `mtp`. See [Speculative decoding: drafters](#speculative-decoding-drafters).
+- **Per-lane device pinning.** The slot passes `--device` to `llama-server`
+  (`ROCm0`, `Vulkan0`, `CUDA0` or none).
+- **Runner images on llama.cpp b11716** for `standard`, `cpu` and `cuda`.
+- **Add from Hugging Face lists quants, not files**, and the model pickers
+  are compact.
 
-### Voice is a device-keyed switch
-
-Moonshine is back as the CPU STT engine in its own runner image. `cpu` runs
-Moonshine, `npu` runs whisper-v3:turbo, and a GPU device resolves to *no* STT
-engine instead of silently picking up a llama chat profile.
-
-### Image Gen and Slots got their lifecycle right
-
-State-typed engine indicators, a Stop that drives the GPU arbiter back to
-inference mode, dropdown-driven runner image / binary selection (picking an
-image repopulates the binary dropdown with what that image actually ships),
-and a `GET /api/slots` that no longer multiplies `podman inspect` fan-out on
-wide boxes.
-
-### Documentation moved into this repo
-
-`docs/` is the source of truth and publishes to hal0.dev through a mirror
-workflow, with a restored, v1.0-reconciled `getting-started/` section.
-
-### Stability work that landed in the rc line
-
-- **Hermes bootstrap MCP wiring actually works.** The seed TOML never
-  declared the builtin `[mcp.servers.*]` blocks, so the allow-list silently
-  skipped wiring both servers, and the post-wire probe double-appended `/mcp`
-  and 404ed. Bootstrap now also injects `HAL0_MCP_TOKEN` (0600) and renders
-  `Authorization: Bearer` into the Hermes MCP client config when the box has
-  auth on, refreshing it on `--repair` after a key rotation.
-- **ComfyUI `img` slot reliability.** Bind-mount dirs are created before
-  spawn (a missing tree crash-looped podman with exit 125), readiness waits
-  on ComfyUI's real `GET /system_stats` probe instead of 404-polling a
-  llama-style `/health` for 180 s, and the fail-watcher no longer strikes a
-  READY img slot to ERROR seconds after it comes up.
-- **`GET /api/slots` latency cut sharply on wide boxes** — no `podman
-  inspect` for stopped slots, TTL-cached `podman image inspect`, and a
-  single-flight 2 s snapshot that any slot mutation invalidates immediately.
-- **The Slots page no longer stalls on activity backfill** — the SSE stream
-  takes a `limit` and the client coalesces frame bursts into one render per
-  50 ms.
-- **Brain tool calls no longer 500** with `Unknown (built-in) filter 'min'`.
-  A corrected `hal0-brain-sft.jinja` ships bundled and the curated catalogue
-  stamps it into the model's `chat_template` at pull time.
-- **A drifted hermes venv re-converges on upgrade** instead of staying broken.
-
-### Quality-of-life
-
-- `hal0 doctor all` — one read-only pass over every surface with a rolled-up
-  verdict and an exit code you can branch on.
-- `hal0 doctor bundle` — a redacted support bundle in one command.
-- `hal0 doctor ports --fix` — prune stale netavark DNAT rules that black-hole
-  a port; it is the drill-down the `Slot ports` row used to lack.
-- `POST /api/profiles/generate` (`profile_generate` over MCP) drafts a profile
-  from a registered model or a HuggingFace repo, with an optional `use_llm`
-  pass that degrades to heuristics when inference is down.
-- Slot drawer: Profile moved under the model select (it rides the model
-  choice); Runner Image is a catalog dropdown with a "Custom image ref…"
-  escape hatch.
-- The `/mcp/memory` mount is now CLIENT-tier (was ADMIN), so memory-only
-  agents no longer need the platform-admin key.
-
-Breaking changes, migrations and known issues for this release are in
+Breaking changes, migrations and known issues for every release are in
 [`CHANGELOG.md`](./CHANGELOG.md).
 
 ## Why hal0
@@ -334,6 +303,10 @@ Embedding-Gemma all coresident. hal0 exposes this as one seeded `flm` slot
 ASR and embed on the running `flm serve`. The host-side FLM `.deb` is
 installed for device-sanity probes only; inference runs in the container.
 See [docs/concepts/strix-halo.mdx](./docs/concepts/strix-halo.mdx).
+
+**Faster replies, same answers.** Pair a model with a drafter and hal0
+fit-checks it before download, reports a drafter the runner image is too old
+for instead of failing the launch, and shows the acceptance rate per slot.
 
 **An agent that lives on the box.** The hal0-brain steward drives the
 platform from the dashboard's top bar, and Hermes/Pi install as real
@@ -399,9 +372,9 @@ content-addressed, host-redacted archive you can attach anywhere, and
   with `hal0 slot create NAME --type TYPE --model MODEL`. A deliberate
   `hal0 slot delete` is tombstoned, so re-running the installer never
   resurrects it.
-- **Model owns its tune** — since v1.0 the *model*, not the slot, owns
-  `context_size`, `extra_args`, `chat_template`, `profile` and MTP. A slot's
-  `[model].context_size` is a ceiling; a model with no stamped tune inherits
+- **Model owns its tune** — the *model*, not the slot, owns
+  `context_size`, `extra_args`, `chat_template`, `profile` and speculation
+  settings. A slot's `[model].context_size` is a ceiling; a model with no stamped tune inherits
   its profile's template as a floor.
 - **Container runtime** — every slot runs as its own podman container under
   `hal0-slot@<name>.service`, bound to a loopback port (8081–8099 + fixed
@@ -441,7 +414,8 @@ content-addressed, host-redacted archive you can attach anywhere, and
   source of truth for OpenWebUI, Hermes, Hindsight, ComfyUI and n8n:
   audit-logged systemd lifecycle actions (start/stop/restart/enable/
   disable), mDNS `.local` advertisement, and a dedicated Services page.
-  OpenWebUI is prewired at `:3001` with zero config.
+  OpenWebUI is prewired at `:3001` with zero config; its Services card shows an Agents chip once Hermes profiles
+  are wired in (on main for 1.6.0).
 - **Image generation, day one** — `POST /v1/images/generations` via ComfyUI
   in the `img` slot container (ROCm). The installer seeds the `img` slot and
   its ComfyUI model share.
@@ -458,20 +432,19 @@ hal0 ships **two MCP servers** and **two bundled agents**. The MCP servers
 `/mcp/memory` for Hindsight-backed long-term memory) are reachable by any
 MCP-speaking client — Claude Code, RAG services, your own scripts.
 `/mcp/admin` is ADMIN-tier; `/mcp/memory` is CLIENT-tier as of 1.0, so a
-memory-only agent does not need the platform-admin key. Both bundled agents
-can be installed simultaneously: `pi-coder` (CLI shape, from the
-`Hal0ai/pi-mono` fork via `@earendil-works/pi-coding-agent` on npm) and
-`Hermes-Agent` (service shape, via the hal0-owned `hermes` wrapper —
+memory-only agent does not need the platform-admin key. The bundled agents
+are `Hermes-Agent` (service shape, via the hal0-owned `hermes` wrapper —
 `hal0-hermes` remains a back-compat symlink — connecting to `hal0-api` at
-`HAL0_INFERENCE_BASE=http://127.0.0.1:8080`). Install either with
-`hal0 agent install <name>`. Destructive MCP calls (`model_pull`,
-`slot_delete`, `config_write`, …) gate through a header bell + inbox modal
+`HAL0_INFERENCE_BASE=http://127.0.0.1:8080`) and `pi` (CLI shape, from
+`@earendil-works/pi-coding-agent` on npm), and both can be installed side by
+side. Install either with `hal0 agent install <name>`. Destructive MCP
+calls (`model_pull`, `slot_delete`, `config_write`, …) gate through a header bell + inbox modal
 in the dashboard, with CLI parity via
 `hal0 agent approvals {list,approve,deny}`.
 
 The **hal0-brain steward** is a third, built-in persona wired to the
 dashboard's top-bar agent chat — no install step. It drives the platform
-through the **180-tool `hal0-admin` catalog** (models, slots, stacks,
+through the **full `hal0-admin` catalog** (models, slots, stacks,
 profiles, settings, upstreams, benchmarks) under a **per-persona tool
 policy**: `tools_allowed` hides tools, `require_approval` tightens them, and
 a `POLICY_NO_LOOSEN` floor keeps destructive and secret-bearing tools
@@ -486,6 +459,49 @@ the optional upgrade path: `[brain_chat] tool_model` (default `hal0/agent`)
 runs tool rounds there while chat stays on the brain slot, so a runner that
 cannot emit parseable tool calls reroutes instead of failing the turn. Set it
 to `off`, `none` or `disabled` to route tool turns nowhere.
+
+### Hermes, the bundled agent
+
+Hermes is the service-shape agent: it runs as `hal0-agent@hermes.service`
+under the unprivileged `hal0` user, pinned to one reviewed upstream commit
+(v0.22.2, `d923a5eb`, on main for 1.6.0), and talks to `hal0-api` for
+inference, tools and memory. `hal0 agent install hermes` installs it.
+
+- **Immutable releases.** Each build (install, `reprovision --repair`,
+  `upgrade`, update) lands in `/var/lib/hal0/hermes/releases/<id>/`, runs on
+  a uv-managed CPython 3.14, and is checked (imports, `hermes --help`, an MCP
+  probe) before `current` flips. Activation stops the agent and gateway,
+  switches, migrates the Hermes config and restarts; a failed re-check flips
+  back to `previous` with `config.yaml` restored. Sessions are kept
+  (`sessions.auto_prune: false`).
+- **Upgrades are vetted commits.** `hal0 agent upgrade hermes --to <40-hex
+  sha>` accepts only a commit listed in `VETTED_HERMES_REFS`; version strings
+  are refused.
+- **Profiles show up in Open WebUI.** hal0 registers one pinned, read-only
+  upstream per profile that has an API key: `hermes` for the default profile
+  and `hermes.<profile>` for the rest. `/v1/models` lists `hermes-agent` plus
+  one model id per served profile, so Open WebUI, Cline or a curl call can
+  pick one. The request body is forwarded untouched, streaming or not, and a
+  Hermes model never falls back to a slot: if the upstream is down you get
+  `dispatch.upstream_unavailable` (502).
+- **hal0 tools and memory in every profile.** hal0 writes the `hal0-admin`
+  and `hal0-memory` MCP servers into each named profile, with its own private
+  memory bank. Opt a profile out with `hal0: {wire_mcp: false}`.
+- **Approvals in the dashboard.** Gated tool calls from any profile land in
+  the dashboard inbox, same as the other agents.
+- **Delegation.** `[hermes] delegation_slot` in
+  `/etc/hal0/agents/hermes.toml` picks the slot that `delegate_task`
+  children run on (default `agent`).
+- **Desktop pairing.** `hal0 agent dashboard-token hermes` prints the
+  dashboard session token, which is minted once per install, so a Hermes
+  Desktop remote pairing survives restarts.
+- **Doctor rows.** `hal0 doctor all` checks `hermes-api` (upstream
+  registration), `hermes_profiles_mcp`, `hermes_generation`,
+  `hermes_delegation_slot` and `hal0_linger`.
+
+Tip for Open WebUI: set its task model to a plain slot model so chat titles
+and tags do not spend agent turns. Setup details are in
+[docs/guides/open-webui.mdx](./docs/guides/open-webui.mdx).
 
 See [docs/concepts/agents.mdx](./docs/concepts/agents.mdx),
 [docs/reference/mcp-tools.mdx](./docs/reference/mcp-tools.mdx) and
@@ -540,6 +556,38 @@ The NPU path is opt-in: the installer places a FastFlowLM `.deb` on the host
 device-sanity probes (`flm validate`); inference runs inside the
 `hal0-runner-flm` container. With FLM present the installer seeds the `flm`
 slot, and the NPU trio activates once `flm validate` passes.
+
+### Speculative decoding: drafters
+
+A drafter is a small file that proposes the next few tokens so the main model
+can verify them in one pass: same output, faster replies. It pairs with one
+model, the way a vision projector does.
+
+- **Get one.** In the dashboard, Add from Hugging Face lists companion
+  drafters (`-LiLiCorr`, `-DFlash`, `-DFlash2`, `-DSpark`, `-EAGLE3`,
+  `-draft`) and checks the fit from the two file headers before anything
+  downloads. From a shell:
+
+  ```sh
+  hal0 model pull <id> --draft <file> [--draft-repo <repo>]
+  hal0 model add <path> --draft <path>
+  hal0 model set <id> --draft <path|none>   # none unpairs
+  ```
+
+- **Choose when it runs.** The profile's `speculation` is `auto` (a paired
+  drafter if the runner image can run it, else the model's own MTP heads, else
+  nothing), `off`, or `ngram` (llama.cpp n-gram lookup, no extra file).
+- **No crash on a mismatch.** A drafter the runner image is too old for
+  (LiLiCorr needs llama.cpp b11669 or newer) is reported on the slot instead
+  of failing the launch, and each slot reports its draft acceptance rate.
+- **What to expect.** On one Strix Halo box, a 74B-A9B MoE model paired
+  with its LiLiCorr drafter decoded about 1.6x faster with identical output.
+  Speedup depends on the model, the drafter and the prompt, and a drafter
+  that predicts poorly gains little. The slot's acceptance rate tells you
+  whether a pairing is paying off.
+
+Details: [Drafters](./docs/guides/pull-and-register-models.mdx#drafters) and
+[Speculation in profiles](./docs/concepts/capabilities-and-profiles.mdx).
 
 For the container-runtime operator reference — service layout, slot TOML
 fields, profiles, GPU arbiter and day-2 commands — see
@@ -700,8 +748,11 @@ The installer records this under `[models].pull_root` in
 `/etc/hal0/hal0.toml`, so subsequent `hal0 model pull` calls honor it too.
 
 **Python too old.** hal0 needs 3.12–3.14. Let the installer provision one:
-`HAL0_PY_AUTOINSTALL=1`, or point it at an interpreter you already have with
-`HAL0_PYTHON=/usr/bin/python3.12`.
+`HAL0_PY_AUTOINSTALL=1` (installs `python3.12`), or point it at an interpreter you already have with
+`HAL0_PYTHON=/usr/bin/python3.12`. The Hindsight engine venv takes 3.11–3.14;
+with none present the installer skips it for that run and names
+`HAL0_HINDSIGHT_PYTHON`. Hermes does not use hal0's interpreter: from 1.6.0
+it gets its own uv-managed 3.14 (override with `HAL0_HERMES_PYTHON`).
 
 **No container runtime.** `install.sh` sets `HAL0_CONTAINER_REQUIRED=1` and
 auto-installs podman via the detected package manager — if that is not
@@ -719,6 +770,11 @@ gracefully — re-run it afterwards:
 ```sh
 hal0 agent install hermes
 ```
+
+From 1.6.0 the Hermes build also needs network access (it fetches a managed
+Python and the pinned release); offline, it refuses and leaves the live
+release running. `hal0 doctor all` names the failing Hermes row (`hermes-api`,
+`hermes_profiles_mcp`, `hermes_generation`, `hal0_linger`).
 
 **`hal0 doctor: AMDXDNA NPU detected but FastFlowLM not installed`.** The
 host-side sanity probe wants the FLM `.deb`. If you installed on a non-NPU
@@ -823,6 +879,29 @@ Or reinstall from scratch with `sudo bash installer/uninstall.sh --purge`,
 which deletes `/etc/hal0` and `/var/lib/hal0`, models included, followed by
 the normal one-liner.
 
+### Upgrading to 1.6.0 (on main, not yet tagged)
+
+1.6.0 follows the same `hal0 update` path from any 1.x box at 1.3.0 or
+later. Three things to know before you take it:
+
+- **Hermes rebuilds once, with a short outage.** The first update builds a
+  Hermes v0.22.2 release on a uv-managed Python 3.14 next to the live 0.19.0
+  one, stops the agent and gateway, switches, and restarts. A box that
+  cannot reach the network refuses the build and stays on 0.19.0. `hal0
+  update` also regenerates the gateway unit and enables systemd linger for the
+  `hal0` user.
+- **Run one repair if `hermes-agent` is missing from Open WebUI.** On a box
+  where Hermes was installed before 1.6.0, run
+  `sudo hal0 agent reprovision hermes --repair` once so the default
+  profile's API key is mirrored and `hermes-agent` appears in the picker.
+  `hal0 doctor` reports this on the `hermes-api` row.
+- **Rolling back to 1.5.x leaves the Hermes build failing** (`Hermes Python
+  must be exactly 3.12`) until you update forward again. Do not edit
+  `/etc/hal0/hermes-python.env` to 3.12 on 1.5.x.
+
+The agent chat proxy is gone: `/api/agents/{id}/events`, `/submit` and
+`/session/*` return 404.
+
 ### Migrations left to you
 
 Two migrations are deliberately left to you, because both rewrite state in
@@ -889,16 +968,16 @@ No dates — items are direction. The closer to the left, the closer to
 running on your box. Full version at
 [hal0.dev/#roadmap](https://hal0.dev/#roadmap).
 
-### Shipped (v1.0)
+### Shipped
 
 - **Per-slot podman containers** — every inference workload in its own
   `hal0-slot@<name>.service`; `ContainerProvider` + the runner-image registry
   replaced the single-daemon model
-- **hal0-brain steward** — top-bar agent chat driving the 180-tool
+- **hal0-brain steward** — top-bar agent chat driving the
   `hal0-admin` catalog under a per-persona tool policy, pausing turns on
   gated tools for inline approve/deny
-- **Model-owned tuning** — the model, not the slot, owns context size, MTP
-  and launch flags; profiles supply a floor, never an override
+- **Model-owned tuning** — the model, not the slot, owns context size, speculation
+  settings and launch flags; profiles supply a floor, never an override
 - **Slot autoload + eviction priority** — binding a model no longer implies
   a boot start, and pressure eviction orders by `priority` instead of an
   opt-in nobody set
@@ -929,7 +1008,17 @@ running on your box. Full version at
   entry point: curated slot seeds, brain steward pull, service start
 - **One model catalog (the SQLite registry)**, slot-state Prometheus +
   EventBus journal, `hal0 mcp` CLI with two-way MCP, cosign-keyless
-  self-update with rollback, bundled agents (pi-coder / Hermes-Agent)
+  self-update with rollback, bundled agents (Hermes-Agent / pi)
+- **Speculative decoding drafters (1.5)** — a model carries a drafter file
+  (LiLiCorr, DFlash, EAGLE-3) and the profile's `speculation` field picks
+  `auto`, `off` or `ngram`
+- **Per-lane device pinning (1.5)** — the slot passes `--device` so each
+  lane lands on its own GPU backend
+- **Hermes profiles as `/v1` upstreams (on main for 1.6)** — Open WebUI and
+  any OpenAI-compatible client chat with each Hermes profile, with hal0's
+  tools and memory wired into every one
+- **Hermes release layout on Python 3.14 (on main for 1.6)** — immutable,
+  health-checked releases with automatic flip-back
 
 ### Soon
 

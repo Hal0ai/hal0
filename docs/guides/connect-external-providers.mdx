@@ -90,6 +90,8 @@ reachability report: `{ok, status, latency_ms, models_count, error?}`. If
 the declared env var is empty, the probe fails fast without making an
 HTTP call.
 
+hal0 also registers upstreams for you. When Hermes is installed, each Hermes profile with an API key appears on the Providers page and in `GET /api/upstreams` as `hermes` or `hermes.<profile>`, with `managed_by` set to `agent:hermes`. These entries are pinned and read-only: an update or delete request is refused with `400 upstream.protected`. Change them on the Hermes side; see [Talking to Hermes](/docs/guides/open-webui#talking-to-hermes).
+
 ## Curate which models are advertised
 
 `[upstream.model_filters]` narrows which of an upstream's models show up

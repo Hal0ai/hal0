@@ -99,10 +99,10 @@ See [Config schema](/docs/reference/config-schema/) for the `[metrics]` TOML tab
 
 | Variable | Default | Controls |
 |---|---|---|
-| `HAL0_HERMES_PYTHON` | unset (auto-discovered interpreter) | Pins the interpreter used to build the Hermes venv. It must be the Python minor the pinned Hermes commit targets (3.12 for today's pin, 3.14 for a commit that admits it); any other value is discarded with a warning and the interpreter is re-probed. One that links an SQLite older than 3.51.3 is used, with a warning. hal0 also persists its own choice here, in `/etc/hal0/hermes-python.env`. |
+| `HAL0_HERMES_PYTHON` | unset (uv-managed CPython 3.14) | Pins the interpreter used to build the Hermes venv. It must be the Python minor the pinned Hermes commit targets (3.14 for the current pin, which declares requires-python >=3.11,<3.15). A value that fails validation, from the environment or from `/etc/hal0/hermes-python.env`, is discarded with a `hermes-python-discarded` warning naming the value and the reason; hal0 then re-probes (a uv-managed CPython of the target minor under `/var/lib/hal0/hermes/python`, then a system `python3.14` that links SQLite 3.51.3 or newer) and writes the interpreter it chose back to the file when the file is writable. A valid interpreter that links an SQLite older than 3.51.3 is used, with a warning. hal0's own interpreter is never used. See [Services](/docs/operate/services/#hermes-interpreter-policy). |
 | `HAL0_HERMES_LIVE_RESOLVE` | `"1"` | `0` opts out of live model-discovery (Hermes' picker polling hal0-api's `/v1/models`) back into single-backend pinning. |
 | `HAL0_HERMES_TERMINAL` | unset (→ terminal tool OFF) | Opt the agent into a terminal tool at provisioning time. `1` enables it, `0` disables it. With it on, Hermes can run shell commands as the `hal0` user, which is root-equivalent on this box. A non-interactive install never enables it; see [Run agents](/docs/guides/run-agents/). |
-| `HAL0_HERMES_OFFLINE` | unset | Set programmatically by `hal0 agent bootstrap --offline`. |
+| `HAL0_HERMES_OFFLINE` | unset | Set by `hal0 agent bootstrap hermes --offline`. With it set, a Hermes build that is needed fails and names the step that needs the network; the live release keeps running. |
 | `HAL0_AGENTENV` | `/usr/lib/hal0/bin/hal0-agentenv` | Privileged-seam binary hal0-api (running unprivileged) delegates to for writing root:root agent secret/env files, and for listing which secrets-vault keys are set (names only, never values). Env-overridable for tests, not a normal operator knob. |
 | `HAL0_SYSTEMCTL` | `/usr/lib/hal0/bin/hal0-systemctl` | Privileged-seam binary hal0-api delegates to for the systemd writes/reloads it cannot do unprivileged. Env-overridable for tests, not a normal operator knob. |
 | `HAL0_INFERENCE_BASE` | `http://127.0.0.1:8080` | Base URL the Hermes provisioner records as hal0's inference endpoint. |
@@ -110,8 +110,11 @@ See [Config schema](/docs/reference/config-schema/) for the `[metrics]` TOML tab
 | `HAL0_AGENT_ID` | `"hermes"` everywhere (default constant + per-call-site fallback) | Identity a plugin/proxy presents as (`X-hal0-Agent` header to Hindsight, board/manifest-proxy routing target, the hal0-provider plugin's own id). Written into the shim's child env by `hal0-agent`; per-request overrides exist above it in some paths. |
 | `HERMES_HOME` | `~/.hermes` | — |
 | `HERMES_SESSION_TOKEN` | unset (harvested live from the dashboard HTML) | Pins a Hermes session bearer explicitly instead of the per-process token the client otherwise scrapes from the dashboard on each start. Mainly for tests or a non-standard deploy. |
+| `HERMES_DASHBOARD_SESSION_TOKEN` | unset; `hal0-agent@hermes` supplies it | Upstream Hermes variable for the dashboard session token. Without it Hermes mints a new token at every start. `hal0-agent@hermes` mints one per install at `/var/lib/hal0/state/agents/hermes/dashboard-session-token` (0600) and exports it at every start, so a Hermes Desktop remote pairing survives restarts; `hal0 agent dashboard-token hermes` prints it. A `systemctl edit hal0-agent@hermes` drop-in that sets this variable wins over the file. |
 | `HERMES_DASHBOARD_PUBLIC_URL` | unset; hal0 never sets it | Upstream Hermes variable (also `dashboard.public_url` in Hermes's config). A non-loopback value turns Hermes's dashboard login on even though the dashboard binds loopback, and the kanban board can then no longer read the session token it needs. Leave it unset. |
 | `HERMES_DASHBOARD_BASE_URL` | `http://127.0.0.1:9119` | Upstream base URL for the Kanban-board plugin proxy (`/api/plugins/kanban/*` + its `/events` WS) and the manifest proxy — both loopback-only by design. |
+
+`HAL0_HERMES_RUNTIME_JSON`, `HAL0_HERMES_HOST` and `HAL0_HERMES_PORT` were read only by the removed agent chat proxy and have no effect; hal0 no longer writes `runtime.json`.
 
 ## Hindsight memory
 

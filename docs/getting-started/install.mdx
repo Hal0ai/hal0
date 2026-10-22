@@ -42,10 +42,9 @@ Accepted values: `stable` (default), `preview`, `nightly`.
   `.deb` and the runner container images). ARM and macOS/Windows are not
   supported.
 - **systemd** — `systemctl` must be on `PATH` (outside `--dev` mode).
-- **Python ≥ 3.12** — `pip install` of the release tree hard-requires
-  3.12+. If the default `python3` is older, the installer resolves or
-  auto-installs a 3.12 interpreter; otherwise it fails with a remediation
-  hint.
+- **Python 3.12 to 3.14** — hal0 requires `>=3.12` and is tested on 3.12, 3.13 and 3.14. If the default `python3` is older, the installer uses `python3.14`, `python3.13` or `python3.12` when one is already on `PATH`, and otherwise tries to install `python3.12` through apt or dnf. If none can be found or installed it stops with a remediation hint (`HAL0_PYTHON=python3.12`).
+- **Python for the memory engine** — the Hindsight memory engine builds its own venv and accepts Python 3.11 to 3.14. The installer picks one (installing it when it can) before it does anything else, so a host with none finds out up front. If none is usable, the memory engine is skipped for that run and the rest of the install continues; point `HAL0_HINDSIGHT_PYTHON` at a 3.11-3.14 interpreter and re-run to add it.
+- **Network for the first Hermes build** — the bundled Hermes agent builds on its own Python 3.14, never on hal0's interpreter. It uses a uv-managed CPython kept under `/var/lib/hal0/hermes/python/`, or a suitable system interpreter. The first build downloads Hermes's dependencies (and the interpreter, when uv-managed), so the host needs internet access when Hermes is provisioned.
 - **A container runtime** — every inference slot runs in a container.
   The installer prefers **podman** (auto-installed if neither podman nor
   docker is found); **docker** is accepted if already present.
@@ -89,13 +88,15 @@ in order:
     catalog.
 15. **Bundled agent skills** — installs the shipped agent skill set.
 16. **Service start** — starts `hal0-api` and `hal0-openwebui` (unless
-    `--no-start`).
+    `--no-start`), waits up to 60 s for `/api/health` to answer before the post-install checks run, stands up the Hindsight memory engine, then provisions the bundled Hermes agent (skip with `HAL0_SKIP_HERMES=1`; install later with `hal0 agent install hermes`). Hermes provisioning builds a release and can take a few minutes.
 
 </Steps>
 
 The installer is **idempotent** — safe to re-run after a partial failure,
 or just to pick up new configuration defaults. Existing config files are
-never clobbered.
+never clobbered, and a unit you disabled or masked (for example
+`hermes-gateway.service`) is left off on re-run; the installer prints the
+`systemctl` command to turn it back on.
 
 ## Flags and environment variables
 
@@ -119,7 +120,9 @@ curl -fsSL https://hal0.dev/install.sh | sudo bash -s -- --no-start --models-dir
 | `HAL0_NONINTERACTIVE` | _(unset)_ | Set to `1` to force flag/env values everywhere instead of prompting on a terminal |
 | `HAL0_NO_PROBE` | _(unset)_ | Set to `1` to skip the hardware probe / first-run seeding |
 | `HAL0_SKIP_HINDSIGHT` | _(unset)_ | Set to `1` to skip installing the Hindsight memory service |
-| `HAL0_PY_AUTOINSTALL` | _(unset)_ | Set to `1` to let the installer auto-install a Python 3.12 interpreter when the default is too old |
+| `HAL0_PY_AUTOINSTALL` | _(unset)_ | The installer already sets this itself when the default Python is below 3.12, so you rarely need it; it allows installing `python3.12` via apt or dnf when no 3.12-3.14 is on `PATH`. Other distros need `HAL0_PYTHON` pointed at a newer interpreter |
+| `HAL0_HINDSIGHT_PYTHON` | _(auto)_ | Interpreter (Python 3.11-3.14) for the Hindsight memory engine venv; use it when the installer reports none usable |
+| `HAL0_SKIP_HERMES` | _(unset)_ | Set to `1` to skip provisioning the bundled Hermes agent; install it later with `hal0 agent install hermes` |
 
 ### Install log and failure reports
 
@@ -169,7 +172,8 @@ journalctl -fu hal0-api
 `hal0 status` reports system + slot + memory health; `hal0 slot list`
 shows configured slots; the `/api/health` curl is a lightweight liveness
 probe (200 the moment the API is serving); `journalctl -fu hal0-api`
-tails the control-plane log if something looks wrong. For the full
+tails the control-plane log if something looks wrong. The installer itself
+waits up to 60 s for `/api/health` after starting `hal0-api`. For the full
 six-step "did it work" checklist — health, model list, first chat,
 dashboard, logs, and `hal0 doctor verify` — see
 [Verify the install](/docs/getting-started/verify/).

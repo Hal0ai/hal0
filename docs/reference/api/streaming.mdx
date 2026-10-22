@@ -107,6 +107,19 @@ hardware that routinely runs long turns, raise the total bound (up to `86400`) o
 set it to `0` and rely on the idle bound, which only fires on true silence.
 </Aside>
 
+An upstream entry can carry its own `stream_idle_timeout_s` and `stream_total_timeout_s`, which replace the `[dispatcher]` values for requests routed to it. The Hermes profile upstreams set 600 s idle and 1800 s total, because an agent turn can be silent while a tool runs.
+
+## Revoked streams
+
+When auth is on and a key rotation or an expired session revokes the credential an open stream was authorised with, hal0 ends the stream. A `text/event-stream` response, including a streamed `/v1` completion, ends with one final frame:
+
+```text
+event: revoked
+data: {"reason": "credential revoked"}
+```
+
+A streamed relay whose upstream does not send `text/event-stream` just ends, with no final frame. Open streams are re-checked on a rotation and every 30 seconds. With auth off nothing is revoked. Details and the WebSocket counterpart (close code 4401) are in [Authentication](/docs/operate/auth/#revoked-streams). A stream also releases its upstream connection as soon as the client disconnects.
+
 ## Slot state during a stream
 
 A slot dispatching a streaming request is held in the `SERVING` state until the client
