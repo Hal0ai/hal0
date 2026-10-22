@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import shutil
 import subprocess
-import sys
 from pathlib import Path
 from typing import Any
 
@@ -128,18 +127,3 @@ def test_a_half_initialised_real_mirror_recovers(tmp_path: Path, upstream, monke
     rel._ensure_mirror(layout, url, run=rel._run, env=rel.build_env(layout=layout))
     assert _git("-C", layout.mirror, "remote", "get-url", "origin") == url
     _git("-C", layout.mirror, "fetch", "-q", "--filter=blob:none", "--tags", "origin", sha)
-
-
-def test_run_does_not_inherit_the_callers_cwd(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """#2883: uv reads ``./uv.toml``, so a builder run from ``sudo``'s ``/root`` cwd
-    died on ``/root/uv.toml`` even with HOME pinned. Unpinned commands must not
-    start in the caller's cwd."""
-    (tmp_path / "uv.toml").write_text("")
-    monkeypatch.chdir(tmp_path)
-    proc = rel._run([sys.executable, "-c", "import os; print(os.getcwd())"])
-    assert Path(proc.stdout.strip()).resolve() != tmp_path.resolve()
-    # An explicit cwd (the git worktree calls) is still honoured.
-    proc = rel._run([sys.executable, "-c", "import os; print(os.getcwd())"], cwd=tmp_path)
-    assert Path(proc.stdout.strip()).resolve() == tmp_path.resolve()

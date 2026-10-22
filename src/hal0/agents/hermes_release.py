@@ -1811,7 +1811,16 @@ def _ensure_as_hal0(**kw: Any) -> ReleaseOutcome:
         cmd = ["sudo", "-n", "-u", "hal0", "--", *inner]
     try:
         proc = subprocess.run(  # nosec B603 — fixed argv, our own module
-            cmd, stdout=subprocess.PIPE, text=True, check=False, timeout=6 * _STEP_TIMEOUT_S
+            cmd,
+            stdout=subprocess.PIPE,
+            text=True,
+            check=False,
+            timeout=6 * _STEP_TIMEOUT_S,
+            # #2883: sudo leaves root's cwd (/root, 0700) on the child, and uv
+            # opens ./uv.toml from its cwd upward, so every uv the child runs
+            # (venv, python find) died on "Permission denied". Also keeps the
+            # caller's cwd off the child's sys.path[0] (python -m).
+            cwd="/",
         )
     except (OSError, subprocess.SubprocessError) as exc:
         return ReleaseOutcome(

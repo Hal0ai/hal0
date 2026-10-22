@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 import threading
 from collections.abc import Callable
 from pathlib import Path
@@ -817,8 +818,11 @@ def test_a_symlinked_legacy_python_is_never_followed(tree, tmp_path) -> None:
 def test_a_root_caller_runs_the_builder_as_hal0(tree, monkeypatch) -> None:
     seen: list[list[str]] = []
 
+    cwds: list[Any] = []
+
     def _fake_run(cmd: list[str], **_kw: Any) -> subprocess.CompletedProcess:
         seen.append(list(cmd))
+        cwds.append(_kw.get("cwd"))
         payload = json.dumps({"status": "activated", "release_id": "r9", "unknown": 1})
         return subprocess.CompletedProcess(cmd, 0, "log line\n" + payload + "\n", None)
 
@@ -831,6 +835,8 @@ def test_a_root_caller_runs_the_builder_as_hal0(tree, monkeypatch) -> None:
     out = rel.ensure_release(caller="converge", venv=tree["venv"], wait=False, units=rel.NoUnits())
     assert out.status == "activated" and out.release_id == "r9"
     [cmd] = seen
+    # #2883: the child must not inherit root's /root cwd (uv reads ./uv.toml).
+    assert cwds == ["/"]
     assert cmd[:4] == ["runuser", "-u", "hal0", "--"]
     assert cmd[-3:-1] == ["-m", "hal0.agents.hermes_release"]
     kw = json.loads(cmd[-1])
@@ -1910,3 +1916,17 @@ def test_matrix_umbrellas_and_undeclared_extras_are_never_carried(tree) -> None:
     tools = PlatformLock()
     assert _ensure(tree, tools).ok
     assert tools.exported == [["web", "mcp", "exa", "sms"]]
+
+
+def test_run_does_not_inherit_the_callers_cwd(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#2883: uv reads ``./uv.toml``, so a builder run from ``sudo``'s ``/root`` cwd
+    died on ``/root/uv.toml`` even with HOME pinned. Unpinned commands must not
+    start in the caller's cwd."""
+    monkeypatch.chdir(tmp_path)
+    proc = rel._run([sys.executable, "-c", "import os; print(os.getcwd())"])
+    assert Path(proc.stdout.strip()).resolve() != tmp_path.resolve()
+    # An explicit cwd (the git worktree calls) is still honoured.
+    proc = rel._run([sys.executable, "-c", "import os; print(os.getcwd())"], cwd=tmp_path)
+    assert Path(proc.stdout.strip()).resolve() == tmp_path.resolve()

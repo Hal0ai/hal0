@@ -780,10 +780,10 @@ def _provision_python_via_uv(
     uv = _uv_available(prober, fallback_bin=fallback_bin)
     if uv is None:
         return None
-    # Sanitize HOME + pin uv's cache to hal0-owned paths (O15): as hal0 with a
-    # leaked HOME=/root, uv would try to open /root/uv.toml and /root/.cache/uv
-    # → "Permission denied" → bootstrap failed. Force HOME to the hal0 home and
-    # UV_CACHE_DIR under the state root so uv never reaches into /root.
+    # Pin HOME and uv's cache to hal0-owned paths (O15) so uv never reaches into
+    # /root. HOME is not what made uv open /root/uv.toml, though: uv discovers
+    # uv.toml from its *cwd* upward (#2883). The hal0 builder child is started
+    # with cwd="/" (hermes_release._ensure_as_hal0) so that discovery is safe.
     env = _hal0_subprocess_env(
         UV_PYTHON_INSTALL_DIR=str(UV_PYTHON_INSTALL_DIR),
         UV_CACHE_DIR=str(UV_CACHE_DIR),
