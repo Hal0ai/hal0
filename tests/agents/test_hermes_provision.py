@@ -508,6 +508,52 @@ def test_install_phase_mirrors_plugins_even_when_the_release_build_fails(
     assert (home / "plugins" / "hal0-memory").is_dir()
 
 
+def test_install_phase_failed_build_still_reports_the_plugin_mutation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A rewritten plugin tree is a recorded change even when the build fails."""
+    monkeypatch.setattr(
+        hp, "HERMES_CLI_INSTALL_PATH", tmp_path / "usr" / "local" / "bin" / "hermes"
+    )
+    home = tmp_path / "home"
+    state = hp.BootstrapState(venv=str(tmp_path / "venv"), hermes_home=str(home))
+    out = hp._phase_install(
+        hp._StepCtx(
+            state=state,
+            io=hp.InstallIO(ensure_release=fake_ensure_release(status="build_failed")),
+        )
+    )
+    assert out.status == hp.PhaseStatus.FAIL
+    assert (out.details or {}).get("changed") is True
+    assert hp._step_changed("install", out) is True
+
+
+def test_install_phase_plugin_copy_failure_does_not_skip_the_release_build(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Neither step starves the other: the build runs, failures are merged."""
+    monkeypatch.setattr(
+        hp, "HERMES_CLI_INSTALL_PATH", tmp_path / "usr" / "local" / "bin" / "hermes"
+    )
+
+    def _boom(_src: Path, _dst: Path) -> bool:
+        raise OSError("read-only plugins dir")
+
+    monkeypatch.setattr(hp, "_copy_plugin_tree", _boom)
+    calls: list[dict[str, Any]] = []
+    inner = fake_ensure_release()
+
+    def _ensure(**kw: Any) -> Any:
+        calls.append(kw)
+        return inner(**kw)
+
+    state = hp.BootstrapState(venv=str(tmp_path / "venv"), hermes_home=str(tmp_path / "home"))
+    out = hp._phase_install(hp._StepCtx(state=state, io=hp.InstallIO(ensure_release=_ensure)))
+    assert calls, "release build must still run"
+    assert out.status == hp.PhaseStatus.FAIL
+    assert "read-only plugins dir" in (out.reason or "")
+
+
 def test_install_phase_passes_offline_and_the_upgrade_ref(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

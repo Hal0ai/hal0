@@ -269,8 +269,9 @@ def check_hermes_plugins(
     """Compare the plugin trees mirrored into HERMES_HOME with the shipped ones.
 
     ``status`` is ``ok``, ``warn`` (a mirrored tree differs from, or is missing
-    next to, the shipped source) or ``absent`` (no HERMES_HOME or no shipped
-    source to compare against). A stale manifest makes Hermes downgrade the
+    next to, the shipped source, or the required hal0-memory source is itself
+    missing), ``unreadable`` (HERMES_HOME not readable by this user) or
+    ``absent`` (no HERMES_HOME or no shipped source to compare against). A stale manifest makes Hermes downgrade the
     plugin (#2884).
     """
     from hal0.agents.hermes_provision import (
@@ -284,19 +285,32 @@ def check_hermes_plugins(
         if src_root is not None
         else REPO_ROOT_FOR_INSTALLER / "installer" / "agents" / "hermes" / "plugins"
     )
-    if not home.is_dir() or not src.is_dir():
-        return {"status": "absent", "detail": "no HERMES_HOME or shipped plugins"}
-    pairs = {
-        "hal0-memory": home / "plugins" / "hal0-memory",
-        "hal0-provider": home / "plugins" / "model-providers" / "hal0",
-    }
-    drifted: list[str] = []
-    for name, dst in pairs.items():
-        shipped = src / name
-        if not shipped.is_dir():
-            continue
-        if not dst.is_dir() or not _dirs_identical(shipped, dst):
-            drifted.append(str(dst))
+    try:
+        if not home.is_dir() or not src.is_dir():
+            return {"status": "absent", "detail": "no HERMES_HOME or shipped plugins"}
+        pairs = {
+            "hal0-memory": (home / "plugins" / "hal0-memory", False),
+            "hal0-provider": (home / "plugins" / "model-providers" / "hal0", True),
+        }
+        drifted: list[str] = []
+        for name, (dst, optional) in pairs.items():
+            shipped = src / name
+            if not shipped.is_dir():
+                if optional:
+                    continue
+                # hal0-memory is required by the mirror; a release without it
+                # is broken, never "matching".
+                drifted.append(f"{shipped} (shipped source missing)")
+                continue
+            if not dst.is_dir() or not _dirs_identical(shipped, dst):
+                drifted.append(str(dst))
+    except OSError as exc:
+        # HERMES_HOME is hal0:hal0 0700; as a non-root user is_dir() raises
+        # EACCES on Python 3.12. Advisory only: never abort `hal0 doctor`.
+        return {
+            "status": "unreadable",
+            "detail": f"cannot read HERMES_HOME plugin trees ({exc.strerror or exc}); run with sudo",
+        }
     if drifted:
         return {
             "status": "warn",

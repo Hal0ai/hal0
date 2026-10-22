@@ -1657,6 +1657,54 @@ HERMES_VENV_REMEDY = "hal0 agent reprovision hermes --repair"
 HERMES_VENV_PATH = Path("/var/lib/hal0/venvs/hermes")
 
 
+#: Where the hermes home (and so ``plugins/``) lives; same spelled-out value as
+#: ``HermesProvisionState.hermes_home`` for the same import-weight reason as
+#: :data:`HERMES_VENV_PATH`.
+HERMES_HOME_PATH = Path("/var/lib/hal0/.hermes")
+
+
+def mirror_hermes_plugins(
+    *,
+    job_id: str | None = None,
+    hermes_home: Path | None = None,
+    plugin_src_root: Path | None = None,
+    install: bool = True,
+) -> bool:
+    """Converge the mirrored Hermes plugin trees after an update (#2884).
+
+    ``hal0 update`` never provisions, and the installer skips provisioning when
+    the hermes venv already exists, so an in-place upgrade never re-ran the
+    plugin mirror: a manifest changed by a release (``kind: provider`` ->
+    ``kind: model-provider``) survived every nightly. This runs the
+    provisioner's own ``_mirror_plugins`` (hash-skips identical trees) from the
+    shipped ``installer/agents/hermes/plugins`` of the freshly activated tree.
+
+    ``install=False`` (the boot-time safety net) does nothing. A box without a
+    hermes home is skipped. Every failure is a quiet ``False``: a plugin copy
+    that cannot land is never a reason to fail an update; ``hal0 doctor``
+    reports the drift. Returns ``True`` only when a tree was rewritten.
+    """
+    if not install:
+        return False
+    home = hermes_home or HERMES_HOME_PATH
+    if not home.is_dir():
+        log.debug("updater.hermes_home_absent", job_id=job_id, hermes_home=str(home))
+        return False
+
+    from hal0.agents import hermes_provision as hermes
+
+    src_root = plugin_src_root or (
+        hermes.REPO_ROOT_FOR_INSTALLER / "installer" / "agents" / "hermes" / "plugins"
+    )
+    changed, _details, failure = hermes._mirror_plugins(src_root, home)
+    if failure is not None:
+        log.warning("updater.hermes_plugin_mirror_failed", job_id=job_id, reason=failure.reason)
+        return False
+    if changed:
+        log.info("updater.hermes_plugins_mirrored", job_id=job_id, hermes_home=str(home))
+    return changed
+
+
 def repair_hermes_mcp_client(
     *,
     job_id: str | None = None,
@@ -2011,6 +2059,12 @@ def run_post_activation_migrations(
         log.warning("updater.hermes_venv_repair_pass_failed", job_id=job_id, error=str(exc))
         # Non-fatal, same posture as the header repair above: the box keeps
         # the venv it had and the logged remedy names the manual repair.
+
+    try:
+        mirror_hermes_plugins(job_id=job_id, install=repair_hermes_venv)
+    except Exception as exc:
+        log.warning("updater.hermes_plugin_mirror_pass_failed", job_id=job_id, error=str(exc))
+        # Non-fatal: the stale tree stays and `hal0 doctor` flags it.
 
     try:
         relabel_stale_vulkan_slots(job_id=job_id)
