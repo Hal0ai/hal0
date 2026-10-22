@@ -1085,6 +1085,60 @@ def _ensure_release(**kwargs: Any) -> Any:
     return ensure_release(**kwargs)
 
 
+def _mirror_plugins(
+    plugin_src_root: Path, hermes_home: Path
+) -> tuple[bool, dict[str, Any], PhaseResult | None]:
+    """Mirror the shipped plugin trees into ``$HERMES_HOME/plugins``.
+
+    Runs BEFORE the release build (#2884): a failed build returns ``FAIL`` early
+    and used to skip the mirror, so a host whose release build kept failing
+    never converged its plugin manifests. The order is deliberate: if the
+    build fails, the new plugin trees sit next to the old, still-active Hermes
+    release (they are small manifests the old release has always loaded; a
+    future plugin that needs a newer Hermes pin must gate itself). hal0-memory is the shipped
+    MemoryProvider tree; hal0-provider is the model-provider tree (an absent
+    source is a skipped-step report line, not a failure).
+
+    Returns ``(changed, details, failure)``; ``failure`` is a ``FAIL`` result.
+    """
+    plugin_targets = {
+        "hal0-memory": hermes_home / "plugins" / "hal0-memory",
+        "hal0-provider": hermes_home / "plugins" / "model-providers" / "hal0",
+    }
+    optional_plugins = {"hal0-provider"}
+    changed = False
+    plugins_written: list[str] = []
+    plugins_skipped: list[str] = []
+    for src_name, dst in plugin_targets.items():
+        src = plugin_src_root / src_name
+        if not src.exists():
+            if src_name not in optional_plugins:
+                return (
+                    changed,
+                    {},
+                    PhaseResult(status=PhaseStatus.FAIL, reason=f"plugin source missing at {src}"),
+                )
+            plugins_skipped.append(f"{src_name}: source dir {src} absent")
+            continue
+        try:
+            if _copy_plugin_tree(src, dst):
+                changed = True
+            plugins_written.append(str(dst))
+        except OSError as exc:
+            return (
+                changed,
+                {},
+                PhaseResult(
+                    status=PhaseStatus.FAIL,
+                    reason=f"plugin copy {src} -> {dst} failed: {exc}",
+                ),
+            )
+    out: dict[str, Any] = {"plugins": plugins_written}
+    if plugins_skipped:
+        out["plugins_skipped"] = plugins_skipped
+    return changed, out, None
+
+
 def _phase_install(ctx: _StepCtx) -> PhaseResult:
     """Provision the managed Hermes venv + ``/usr/local/bin/hermes`` + plugins.
 
@@ -1164,6 +1218,22 @@ def _phase_install(ctx: _StepCtx) -> PhaseResult:
             reinstall_reason = "mcp client import failed"
             details["mcp_client_before_reinstall"] = probe
 
+    # Mirror the plugin trees first (#2884): a release-build FAIL below must not
+    # skip them, or a stale manifest survives every update.
+    # A copy failure does not skip the build either (neither step may starve the
+    # other); the two failures are merged into one FAIL below.
+    plug_changed, plug_details, plug_failure = _mirror_plugins(plugin_src_root, hermes_home)
+    changed = changed or plug_changed
+    details.update(plug_details)
+    details["changed"] = changed
+
+    def _fail(reason: str) -> PhaseResult:
+        # Keep the mutation record on a failed step (``_step_changed`` reads it).
+        details["changed"] = changed
+        if plug_failure is not None:
+            reason = f"{reason}; {plug_failure.reason}"
+        return PhaseResult(status=PhaseStatus.FAIL, reason=reason, details=details)
+
     # Every build goes through the release builder (ADR-0032 decision 6): it
     # takes the builder lock, applies the layout / ref / interpreter triggers on
     # top of the reasons above, builds a fresh release, activates it with a
@@ -1185,11 +1255,7 @@ def _phase_install(ctx: _StepCtx) -> PhaseResult:
         )
     except Exception as exc:  # a builder bug must fail the step, not the pipeline
         log.warning("hermes_provision.release_builder_crashed", error=str(exc))
-        return PhaseResult(
-            status=PhaseStatus.FAIL,
-            reason=f"hermes release builder crashed: {exc}",
-            details=details,
-        )
+        return _fail(f"hermes release builder crashed: {exc}")
     details["release_status"] = outcome.status
     if reinstall_reason is not None:
         details["venv_reinstalled_reason"] = reinstall_reason
@@ -1201,51 +1267,13 @@ def _phase_install(ctx: _StepCtx) -> PhaseResult:
         reason = outcome.error or outcome.status
         if outcome.remedy:
             reason = f"{reason} — {outcome.remedy}"
-        return PhaseResult(
-            status=PhaseStatus.FAIL,
-            reason=f"hermes release {outcome.status}: {reason}",
-            details=details,
-        )
+        return _fail(f"hermes release {outcome.status}: {reason}")
     changed = changed or outcome.changed
     details["venv"] = str(venv)
     details["hermes_bin"] = str(hermes_bin)
-
-    # Plugin dir-drops into $HERMES_HOME/plugins. hal0-memory is the shipped
-    # MemoryProvider tree; hal0-provider is the model-provider tree a concurrent
-    # lane ships (its source may be absent in this worktree — a missing source
-    # is a skipped-step report line, not a failure).
-    plugin_targets = {
-        "hal0-memory": hermes_home / "plugins" / "hal0-memory",
-        "hal0-provider": hermes_home / "plugins" / "model-providers" / "hal0",
-    }
-    # The shipped hal0-memory tree is required; hal0-provider (concurrent lane)
-    # is optional and its absent source is a skipped-step report line.
-    optional_plugins = {"hal0-provider"}
-    plugins_written: list[str] = []
-    plugins_skipped: list[str] = []
-    for src_name, dst in plugin_targets.items():
-        src = plugin_src_root / src_name
-        if not src.exists():
-            if src_name not in optional_plugins:
-                return PhaseResult(
-                    status=PhaseStatus.FAIL,
-                    reason=f"plugin source missing at {src}",
-                )
-            plugins_skipped.append(f"{src_name}: source dir {src} absent")
-            continue
-        try:
-            if _copy_plugin_tree(src, dst):
-                changed = True
-            plugins_written.append(str(dst))
-        except OSError as exc:
-            return PhaseResult(
-                status=PhaseStatus.FAIL,
-                reason=f"plugin copy {src} -> {dst} failed: {exc}",
-            )
-    details["plugins"] = plugins_written
-    if plugins_skipped:
-        details["plugins_skipped"] = plugins_skipped
     details["changed"] = changed
+    if plug_failure is not None:
+        return _fail(plug_failure.reason or "plugin mirror failed")
 
     # No chown-back (§7.4 F.7): provisioning runs as hal0, so the release tree
     # under /var/lib/hal0/hermes is born hal0:hal0.
@@ -7588,9 +7616,11 @@ class InstallReport:
 # consult is retired along with them.
 def _step_changed(name: str, result: PhaseResult) -> bool:
     """Derive a step's convergence signal from its :class:`PhaseResult`."""
-    if result.status != PhaseStatus.OK:
-        return False
     d = result.details or {}
+    if result.status != PhaseStatus.OK:
+        # A failed install may still have rewritten plugin trees (#2884): the
+        # mirror runs before the release build, so keep that mutation visible.
+        return name == "install" and bool(d.get("changed"))
     if name == "install_artifacts":
         return bool(d.get("seed_wrote") or d.get("env_wrote"))
     return bool(d.get("changed"))

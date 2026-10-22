@@ -200,3 +200,49 @@ def test_updater_venv_path_matches_the_layout_constant() -> None:
     from hal0.updater import updater
 
     assert updater.HERMES_VENV_PATH == HERMES_VENV_PATH
+
+
+def _plugin_src(tmp_path: Path, manifest: str) -> Path:
+    src = tmp_path / "shipped"
+    (src / "hal0-memory").mkdir(parents=True)
+    (src / "hal0-memory" / "plugin.yaml").write_text("kind: memory\n")
+    (src / "hal0-provider").mkdir()
+    (src / "hal0-provider" / "plugin.yaml").write_text(manifest)
+    return src
+
+
+def test_update_converges_a_stale_plugin_mirror(tmp_path: Path) -> None:
+    """#2884: an in-place update (no provisioning) refreshes stale plugin trees."""
+    from hal0.updater.updater import mirror_hermes_plugins
+
+    src = _plugin_src(tmp_path, "kind: model-provider\n")
+    home = tmp_path / "home"
+    stale = home / "plugins" / "model-providers" / "hal0"
+    stale.mkdir(parents=True)
+    (stale / "plugin.yaml").write_text("kind: provider\n")
+
+    assert mirror_hermes_plugins(hermes_home=home, plugin_src_root=src) is True
+    assert (stale / "plugin.yaml").read_text() == "kind: model-provider\n"
+    assert (home / "plugins" / "hal0-memory" / "plugin.yaml").is_file()
+    # converged: a second pass changes nothing
+    assert mirror_hermes_plugins(hermes_home=home, plugin_src_root=src) is False
+
+
+def test_plugin_mirror_skips_when_disabled_or_no_home(tmp_path: Path) -> None:
+    from hal0.updater.updater import mirror_hermes_plugins
+
+    src = _plugin_src(tmp_path, "kind: model-provider\n")
+    home = tmp_path / "home"
+    home.mkdir()
+    assert mirror_hermes_plugins(hermes_home=home, plugin_src_root=src, install=False) is False
+    assert not (home / "plugins").exists()
+    assert mirror_hermes_plugins(hermes_home=tmp_path / "nope", plugin_src_root=src) is False
+
+
+def test_plugin_mirror_failure_is_quiet(tmp_path: Path) -> None:
+    from hal0.updater.updater import mirror_hermes_plugins
+
+    home = tmp_path / "home"
+    home.mkdir()
+    # shipped root lacks the required hal0-memory: FAIL result, update unharmed
+    assert mirror_hermes_plugins(hermes_home=home, plugin_src_root=tmp_path / "empty") is False
