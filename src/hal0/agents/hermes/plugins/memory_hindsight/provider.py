@@ -97,6 +97,32 @@ _RECALL_HEADER = (
 )
 
 
+def _profile_agent_id(profile: str) -> str:
+    """``hermes__<profile>``: the identity hal0 provisions for a named profile.
+
+    Byte-for-byte the rule in ``hal0.agents.hermes_provision.profile_agent_id``
+    (this plugin runs inside the Hermes venv and cannot import hal0): sanitised
+    to ``[A-Za-z0-9_-]``, at most 64 chars, with a hash suffix when rewritten.
+    """
+    import re
+
+    slug = re.sub(r"[^A-Za-z0-9_-]", "_", profile)
+    plain = "hermes__" + slug
+    if slug == profile and len(plain) <= 64:
+        return plain
+    suffix = "-" + hashlib.sha256(profile.encode("utf-8")).hexdigest()[:8]
+    return plain[: 64 - len(suffix)] + suffix
+
+
+def _profile_name(hermes_home: str | None) -> str | None:
+    """The profile a ``<root>/profiles/<name>`` home belongs to, else None."""
+    if not hermes_home:
+        return None
+    path = os.path.abspath(hermes_home)
+    parent, name = os.path.split(path)
+    return name if os.path.basename(parent) == "profiles" and name else None
+
+
 def _hindsight_config_path(hermes_home: str | None = None) -> str:
     """Resolve ``<hermes_home>/hindsight/config.json`` (upstream layout).
 
@@ -241,9 +267,20 @@ class Hal0MemoryProvider(MemoryProvider):  # type: ignore[misc]
         # → config.json (~/.hermes/hindsight) → client default (applied when
         # both env and config are absent, since None passes through to the
         # client's own DEFAULT_* fallback).
-        config = self._load_hindsight_config()
+        # Multiplexing contract (upstream agent/memory_provider.py:85-103): one
+        # gateway process serves several profiles, and every binding comes
+        # from initialize()'s ``hermes_home``. For a ``<root>/profiles/<name>``
+        # home the identity is that profile's (its own config.json, else the
+        # ``hermes__<name>`` hal0 provisions); the process-wide HAL0_AGENT_ID
+        # is the default profile's and must never claim a clone's private bank.
+        hermes_home = str(kwargs.get("hermes_home") or "") or None
+        config = self._load_hindsight_config(hermes_home)
         base_url = os.environ.get("HAL0_MEMORY_BASE") or config.get("base_url")
-        agent_id = os.environ.get("HAL0_AGENT_ID") or config.get("agent_id")
+        profile = _profile_name(hermes_home)
+        if profile is not None:
+            agent_id = config.get("agent_id") or _profile_agent_id(profile)
+        else:
+            agent_id = os.environ.get("HAL0_AGENT_ID") or config.get("agent_id")
         self._client = Hal0MemoryClient(base_url=base_url, agent_id=agent_id)
 
     def shutdown(self) -> None:
@@ -585,11 +622,12 @@ class Hal0MemoryProvider(MemoryProvider):  # type: ignore[misc]
         ]
 
     @staticmethod
-    def _load_hindsight_config() -> dict[str, Any]:
-        # Best-effort read of ~/.hermes/hindsight/config.json (the M1 file). A
-        # missing/corrupt file is simply ignored so resolution falls through to
-        # the client default. Never raises.
-        path = _hindsight_config_path()
+    def _load_hindsight_config(hermes_home: str | None = None) -> dict[str, Any]:
+        # Best-effort read of <hermes_home>/hindsight/config.json (the M1 file;
+        # the bound profile's home, else $HERMES_HOME). A missing/corrupt file
+        # is simply ignored so resolution falls through to the client default.
+        # Never raises.
+        path = _hindsight_config_path(hermes_home)
         try:
             with open(path, encoding="utf-8") as fh:
                 data = json.load(fh)

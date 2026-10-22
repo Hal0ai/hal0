@@ -1156,3 +1156,55 @@ def test_injection_search_results_returned_as_json_data_not_evaluated() -> None:
     assert json.loads(out) == injected  # pure data round-trip
     fake_client.add.assert_not_called()
     fake_client.delete.assert_not_called()
+
+
+# ── Multiplexing contract (#140058): bind from initialize()'s hermes_home ────
+
+
+def _profile_home(tmp_path, name: str, agent_id: str | None = None):
+    home = tmp_path / "profiles" / name
+    (home / "hindsight").mkdir(parents=True)
+    if agent_id is not None:
+        (home / "hindsight" / "config.json").write_text(json.dumps({"agent_id": agent_id}))
+    return home
+
+
+def test_initialize_binds_a_profile_home_to_its_own_identity(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The gateway's process-wide HAL0_AGENT_ID is the default profile's, never a clone's."""
+    monkeypatch.setenv("HAL0_AGENT_ID", "hermes")
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    p = Hal0MemoryProvider()
+    p.initialize(session_id="s", hermes_home=str(_profile_home(tmp_path, "coder")))
+    assert p._client is not None and p._client.agent_id == "hermes__coder"
+
+
+def test_initialize_prefers_the_profile_config_agent_id(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("HAL0_AGENT_ID", "hermes")
+    p = Hal0MemoryProvider()
+    p.initialize(
+        session_id="s", hermes_home=str(_profile_home(tmp_path, "hal0-brain", "hermes__hal0-brain"))
+    )
+    assert p._client is not None and p._client.agent_id == "hermes__hal0-brain"
+
+
+def test_initialize_root_home_keeps_env_precedence(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("HAL0_AGENT_ID", "hermes")
+    (tmp_path / "hindsight").mkdir()
+    (tmp_path / "hindsight" / "config.json").write_text(json.dumps({"agent_id": "from-config"}))
+    p = Hal0MemoryProvider()
+    p.initialize(session_id="s", hermes_home=str(tmp_path))
+    assert p._client is not None and p._client.agent_id == "hermes"
+
+
+def test_profile_agent_id_matches_hal0s_naming() -> None:
+    from hal0.agents.hermes.plugins.memory_hindsight.provider import _profile_agent_id
+    from hal0.agents.hermes_provision import profile_agent_id
+
+    for name in ("coder", "hal0-brain", "foo.bar", "x" * 70):
+        assert _profile_agent_id(name) == profile_agent_id(name)
