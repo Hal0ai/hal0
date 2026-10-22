@@ -194,7 +194,7 @@ def test_reconcile_upstreams_route_returns_report(
 
     res = client.post("/api/agents/hermes/reconcile-upstreams")
     assert res.status_code == 200
-    assert res.json() == {"ok": True, **report, "keys_written": ["later"]}
+    assert res.json() == {"ok": True, **report, "keys_written": ["later"], "profiles_wired": []}
     assert seen == [sentinel]
 
 

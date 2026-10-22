@@ -1209,6 +1209,16 @@ def test_build_all_checks_includes_hermes_api(monkeypatch: pytest.MonkeyPatch) -
     )
     monkeypatch.setattr(
         da,
+        "check_hermes_profiles_mcp",
+        lambda **_kw: Check("hermes_profiles_mcp", "Hermes profile MCP wiring", "pass", "stubbed"),
+    )
+    monkeypatch.setattr(
+        da,
+        "check_hermes_generation_extras",
+        lambda **_kw: Check("hermes_generation", "Hermes pm generation", "pass", "stubbed"),
+    )
+    monkeypatch.setattr(
+        da,
         "check_hermes_command_approvals",
         lambda **_kw: Check(
             "hermes_command_approvals", "Hermes command approvals", "pass", "stubbed"
@@ -1276,8 +1286,8 @@ def test_build_all_checks_includes_hermes_api(monkeypatch: pytest.MonkeyPatch) -
 
     checks = da.build_all_checks()
     keys = [c.key for c in checks]
-    # 7 verify rows + 25 extras.
-    assert keys[-25:] == [
+    # 7 verify rows + 27 extras.
+    assert keys[-27:] == [
         "auth",
         "models",
         "registry-toml",
@@ -1296,6 +1306,8 @@ def test_build_all_checks_includes_hermes_api(monkeypatch: pytest.MonkeyPatch) -
         "mcp_mounts",
         "hermes-api",
         "hermes_mcp_auth",
+        "hermes_profiles_mcp",
+        "hermes_generation",
         "hermes_command_approvals",
         "hermes_delegation_slot",
         "hermes_anchor_window",
@@ -1907,3 +1919,338 @@ def test_hermes_http_get_keeps_loopback_requests_off_the_proxy(monkeypatch, url,
     monkeypatch.setattr(httpx, "get", fake_get)
     assert da._hermes_http_get(url, {"Authorization": "Bearer k"}) == (200, {"data": []})
     assert seen["trust_env"] is trust_env
+
+
+# ── #2891: profile MCP wiring + pm generation drift ──────────────────────────
+
+
+def _profiles_home(tmp_path, **profiles):
+    """``profiles=<name>: yaml text | None`` (None = directory without config)."""
+    home = tmp_path / "hermes"
+    for name, text in profiles.items():
+        d = home / "profiles" / name
+        d.mkdir(parents=True)
+        if text is not None:
+            (d / "config.yaml").write_text(text)
+    return home
+
+
+def _wired_yaml() -> str:
+    from hal0.agents import hermes_provision as hp
+
+    admin_t = hp._HAL0_ADMIN_MCP_TIMEOUT_S
+    mem_t = hp._memory_mcp_timeout()
+    return (
+        "memory:\n  provider: hal0-memory\n"
+        "mcp_servers:\n"
+        "  hal0-admin:\n    type: http\n    url: http://127.0.0.1:8080/mcp/admin/mcp\n"
+        "    headers:\n      X-hal0-Agent: hermes__coder\n      Authorization: Bearer k\n"
+        f"    timeout: {admin_t}\n"
+        "  hal0-memory:\n    type: http\n    url: http://127.0.0.1:8080/mcp/memory/mcp\n"
+        "    headers:\n      X-hal0-Agent: hermes__coder\n      X-hal0-Private: '1'\n"
+        "      Authorization: Bearer k\n"
+        f"    timeout: {mem_t}\n"
+    )
+
+
+_WIRED = _wired_yaml()
+_WIRED_FULL = _WIRED
+_UNAUTHED = _WIRED.replace("      Authorization: Bearer k\n", "")
+
+
+def test_profiles_mcp_passes_with_no_named_profiles(tmp_path) -> None:
+    home = _profiles_home(tmp_path)
+    (home / "profiles" / "hal0-brain").mkdir(parents=True)
+    c = da.check_hermes_profiles_mcp(auth={"auth_required": True}, home=home)
+    assert (c.key, c.status, c.critical) == ("hermes_profiles_mcp", "pass", False)
+
+
+def test_profiles_mcp_warns_when_profiles_dir_unreadable(tmp_path, monkeypatch) -> None:
+    home = _profiles_home(tmp_path, coder=_WIRED)
+    real_access = da.os.access
+
+    def fake_access(path, mode, *a, **kw):
+        if Path(path) == home / "profiles":
+            return False
+        return real_access(path, mode, *a, **kw)
+
+    monkeypatch.setattr(da.os, "access", fake_access)
+    c = da.check_hermes_profiles_mcp(auth={"auth_required": True}, home=home)
+    assert c.status == "warn" and "run hal0 doctor as hal0 or root" in c.detail
+
+
+def test_profiles_mcp_warns_on_unwired_profile(tmp_path) -> None:
+    home = _profiles_home(tmp_path, coder=_WIRED, homelab="model:\n  default: x\n", bare=None)
+    c = da.check_hermes_profiles_mcp(auth={"auth_required": True}, home=home)
+    assert c.status == "warn"
+    assert "profile(s) homelab not wired" in c.detail and "reconcile-upstreams" in c.detail
+    # CodeRabbit: a profile without config.yaml is not wired by the sweep; say so instead.
+    assert "bare have no config.yaml" in c.detail and "once Hermes creates its config" in c.detail
+
+
+def test_profiles_mcp_no_config_alone_is_informational(tmp_path) -> None:
+    home = _profiles_home(tmp_path, coder=_WIRED, bare=None)
+    c = da.check_hermes_profiles_mcp(auth={"auth_required": True}, home=home)
+    assert (
+        c.status == "pass" and "wired: coder" in c.detail and "bare have no config.yaml" in c.detail
+    )
+
+
+def test_profiles_mcp_fails_on_a_malformed_or_stale_bearer(tmp_path, monkeypatch) -> None:
+    """Codex P2: a truthy but unusable Authorization, or one that is not the box's current key."""
+    bad_shape = _WIRED.replace("Authorization: Bearer k", "Authorization: invalid")
+    home = _profiles_home(tmp_path, coder=bad_shape)
+    assert da.check_hermes_profiles_mcp(auth={"auth_required": True}, home=home).status == "fail"
+    monkeypatch.setattr("hal0.service_identity.service_key", lambda prefer=None: "current-key")
+    home2 = _profiles_home(tmp_path / "b", coder=_WIRED)  # "Bearer k" is stale now
+    c = da.check_hermes_profiles_mcp(auth={"auth_required": True}, home=home2)
+    assert c.status == "fail" and "stale" in c.detail
+    home3 = _profiles_home(tmp_path / "c", coder=_WIRED.replace("Bearer k", "Bearer current-key"))
+    assert da.check_hermes_profiles_mcp(auth={"auth_required": True}, home=home3).status == "pass"
+
+
+def test_profiles_mcp_fails_without_bearer_when_auth_required(tmp_path) -> None:
+    home = _profiles_home(tmp_path, coder=_UNAUTHED)
+    c = da.check_hermes_profiles_mcp(auth={"auth_required": True}, home=home)
+    assert c.status == "fail"
+    assert "no usable or a stale Authorization" in c.detail and "coder" in c.detail
+    # Auth-open box: a tokenless entry is the expected shape.
+    assert da.check_hermes_profiles_mcp(auth={"auth_required": False}, home=home).status == "pass"
+
+
+def test_profiles_mcp_reports_opt_out(tmp_path) -> None:
+    home = _profiles_home(tmp_path, coder=_WIRED, lab="hal0:\n  wire_mcp: false\n")
+    c = da.check_hermes_profiles_mcp(auth={"auth_required": True}, home=home)
+    assert c.status == "pass"
+    assert "wired: coder" in c.detail and "opted out: lab" in c.detail
+    # Codex: an opt-out added after wiring leaves the entries; the row says so.
+    home2 = _profiles_home(tmp_path / "b", lab="hal0:\n  wire_mcp: false\n" + _WIRED)
+    c2 = da.check_hermes_profiles_mcp(auth={"auth_required": True}, home=home2)
+    assert "opted out: lab (still carries hal0-admin, hal0-memory)" in c2.detail
+
+
+def test_profiles_mcp_warns_when_enumeration_fails(tmp_path, monkeypatch) -> None:
+    home = _profiles_home(tmp_path, coder=_WIRED)
+    real = Path.iterdir
+
+    def boom(self):
+        if self == home / "profiles":
+            raise OSError("io error")
+        return real(self)
+
+    monkeypatch.setattr(Path, "iterdir", boom)
+    c = da.check_hermes_profiles_mcp(auth={"auth_required": True}, home=home)
+    assert c.status == "warn" and "cannot list" in c.detail
+
+
+def test_generation_extras_warns_on_unreadable_release_metadata(tmp_path, monkeypatch) -> None:
+    from hal0.agents import hermes_release as rel
+
+    home, venv, root = _release_layout(tmp_path, ["web", "mcp"])
+    (root / "releases" / "abc-1" / "release.json").write_text("{not json")
+    monkeypatch.setattr(rel, "release_root_for", lambda _v: root)
+    c = da.check_hermes_generation_extras(home=home, venv=venv)
+    assert c.status == "warn" and "release.json cannot be read" in c.detail
+
+
+def _release_layout(tmp_path, extras, *, generation_extras=None):
+    """A live release under ``tmp_path/hermes`` and, optionally, a committed pm generation."""
+    import json
+
+    from hal0.agents import hermes_platforms as hpl
+
+    root = tmp_path / "hermes"
+    rid = "abc-1"
+    rel = root / "releases" / rid
+    (rel / "src").mkdir(parents=True)
+    (rel / "venv").mkdir()
+    (rel / "release.json").write_text(json.dumps({"ref": "x", "extras": extras}))
+    (root / "current").symlink_to(rel, target_is_directory=True)
+    venv = tmp_path / "venvs" / "hermes"
+    venv.parent.mkdir()
+    venv.symlink_to(rel / "venv", target_is_directory=True)
+    home = tmp_path / "home"
+    home.mkdir()
+    if generation_extras is not None:
+        state = home / "installs" / hpl.install_key(rel / "src")
+        env = state / "environments" / "gen1"
+        env.mkdir(parents=True)
+        (env / "pyvenv.cfg").write_text("home = x\n")
+        (state / "facts.json").write_text(
+            json.dumps(
+                {"packages": {"venv": {"environment": str(env), "extras": generation_extras}}}
+            )
+        )
+    return home, venv, root
+
+
+def test_generation_extras_passes_without_a_release(tmp_path) -> None:
+    c = da.check_hermes_generation_extras(home=tmp_path, venv=tmp_path / "nope")
+    assert (c.key, c.status) == ("hermes_generation", "pass")
+
+
+def test_generation_extras_passes_when_no_generation_committed(tmp_path, monkeypatch) -> None:
+    from hal0.agents import hermes_release as rel
+
+    home, venv, root = _release_layout(tmp_path, ["web", "mcp"])
+    monkeypatch.setattr(rel, "release_root_for", lambda _v: root)
+    c = da.check_hermes_generation_extras(home=home, venv=venv)
+    assert c.status == "pass" and "release venv" in c.detail
+
+
+def test_generation_extras_warns_on_drift(tmp_path, monkeypatch) -> None:
+    from hal0.agents import hermes_release as rel
+
+    home, venv, root = _release_layout(
+        tmp_path, ["web", "mcp", "telegram", "matrix"], generation_extras=["telegram"]
+    )
+    monkeypatch.setattr(rel, "release_root_for", lambda _v: root)
+    c = da.check_hermes_generation_extras(home=home, venv=venv)
+    assert c.status == "warn"
+    assert "lacks extra(s) mcp, web" in c.detail  # matrix is never carried
+    assert "reprovision hermes --repair" in c.detail
+
+
+def test_generation_extras_passes_when_generation_matches(tmp_path, monkeypatch) -> None:
+    from hal0.agents import hermes_release as rel
+
+    home, venv, root = _release_layout(tmp_path, ["web", "mcp"], generation_extras=["mcp", "web"])
+    monkeypatch.setattr(rel, "release_root_for", lambda _v: root)
+    c = da.check_hermes_generation_extras(home=home, venv=venv)
+    assert c.status == "pass" and "gen1" in c.detail
+
+
+def test_profiles_mcp_treats_non_mapping_headers_as_missing_auth(tmp_path) -> None:
+    broken = _WIRED.replace(
+        "    headers:\n      X-hal0-Agent: hermes__coder\n      Authorization: Bearer k\n",
+        "    headers: invalid\n",
+        1,
+    )
+    home = _profiles_home(tmp_path, coder=broken)
+    c = da.check_hermes_profiles_mcp(auth={"auth_required": True}, home=home)
+    assert c.status == "fail" and "coder" in c.detail
+
+
+def test_profiles_mcp_warns_when_home_is_not_traversable(tmp_path, monkeypatch) -> None:
+    """A 0700 Hermes home seen by another user: ``is_dir()`` is False, not an error."""
+    home = _profiles_home(tmp_path, coder=_WIRED)
+    real_access = da.os.access
+
+    def fake_access(path, mode, *a, **kw):
+        if Path(path) == home:
+            return False
+        return real_access(path, mode, *a, **kw)
+
+    monkeypatch.setattr(da.os, "access", fake_access)
+    c = da.check_hermes_profiles_mcp(auth={"auth_required": True}, home=home)
+    assert c.status == "warn" and "run hal0 doctor as hal0 or root" in c.detail
+
+
+def test_profiles_mcp_warns_on_drifted_identity_or_provider(tmp_path) -> None:
+    """Codex P2: a copied X-hal0-Agent or a missing X-hal0-Private is not "wired"."""
+    copied = _WIRED.replace("hermes__coder", "hermes__hal0-brain")
+    no_private = _WIRED.replace("      X-hal0-Private: '1'\n", "")
+    home = _profiles_home(tmp_path, coder=copied, lab=no_private)
+    c = da.check_hermes_profiles_mcp(auth={"auth_required": True}, home=home)
+    assert c.status == "warn"
+    assert "coder, lab" in c.detail and "differ from hal0's wiring" in c.detail
+    # Only a different profile name than the fixture's identity drifts: ``coder`` as itself passes.
+    home2 = _profiles_home(tmp_path / "b", coder=_WIRED)
+    assert da.check_hermes_profiles_mcp(auth={"auth_required": True}, home=home2).status == "pass"
+
+
+def test_profiles_mcp_ignores_dirs_hermes_would_not_serve(tmp_path) -> None:
+    home = _profiles_home(tmp_path, **{"Not A Profile": "a: 1\n"})
+    c = da.check_hermes_profiles_mcp(auth={"auth_required": True}, home=home)
+    assert c.status == "pass" and "no named Hermes profiles" in c.detail
+
+
+def test_generation_extras_counts_platform_extras(tmp_path, monkeypatch) -> None:
+    """Codex P2: a generation without the gateway platforms' SDK is drift too."""
+    import json
+
+    from hal0.agents import hermes_release as rel
+
+    home, venv, root = _release_layout(tmp_path, ["web", "mcp"], generation_extras=["mcp", "web"])
+    rj = root / "releases" / "abc-1" / "release.json"
+    rj.write_text(
+        json.dumps({"ref": "x", "extras": ["web", "mcp"], "platform_extras": ["telegram"]})
+    )
+    monkeypatch.setattr(rel, "release_root_for", lambda _v: root)
+    c = da.check_hermes_generation_extras(home=home, venv=venv)
+    assert c.status == "warn" and "lacks extra(s) telegram" in c.detail
+
+
+def test_profiles_mcp_warns_on_a_stale_memory_timeout(tmp_path) -> None:
+    """Codex P2: the 30 s budget the brain phase used cancels memory_reflect."""
+    import re
+
+    stale = re.sub(r"    timeout: \d+\n$", "    timeout: 30\n", _WIRED_FULL)
+    assert stale != _WIRED_FULL
+    home = _profiles_home(tmp_path, coder=stale)
+    c = da.check_hermes_profiles_mcp(auth={"auth_required": True}, home=home)
+    assert c.status == "warn" and "coder" in c.detail
+
+
+def test_profiles_mcp_reports_a_falsy_document_as_unreadable(tmp_path) -> None:
+    home = _profiles_home(tmp_path, coder="[]\n", lab="")
+    c = da.check_hermes_profiles_mcp(auth={"auth_required": True}, home=home)
+    assert c.status == "warn"
+    assert "coder is unreadable or not a mapping" in c.detail and "fix it by hand" in c.detail
+    assert "lab not wired" in c.detail.replace("profile(s) ", "")
+
+
+def test_generation_extras_warns_when_the_home_is_unreadable(tmp_path, monkeypatch) -> None:
+    from hal0.agents import hermes_release as rel
+
+    home, venv, root = _release_layout(tmp_path, ["web", "mcp"], generation_extras=["telegram"])
+    monkeypatch.setattr(rel, "release_root_for", lambda _v: root)
+    real_access = da.os.access
+    monkeypatch.setattr(
+        da.os,
+        "access",
+        lambda p, m, *a, **k: False if Path(p) == home else real_access(p, m, *a, **k),
+    )
+    c = da.check_hermes_generation_extras(home=home, venv=venv)
+    assert c.status == "warn" and "run hal0 doctor as hal0 or root" in c.detail
+
+
+def test_profiles_mcp_rejects_a_fifo_config_without_reading_it(tmp_path) -> None:
+    """Codex P2: a FIFO config.yaml would block hal0 doctor forever."""
+    import os
+
+    home = _profiles_home(tmp_path, pipe=None, coder=_WIRED)
+    os.mkfifo(home / "profiles" / "pipe" / "config.yaml")
+    c = da.check_hermes_profiles_mcp(auth={"auth_required": True}, home=home)
+    assert c.status == "warn" and "pipe is unreadable or not a mapping" in c.detail
+
+
+def test_profiles_mcp_warns_on_a_symlinked_home(tmp_path) -> None:
+    real_home = _profiles_home(tmp_path / "real", coder=_WIRED)
+    link = tmp_path / ".hermes"
+    link.symlink_to(real_home, target_is_directory=True)
+    c = da.check_hermes_profiles_mcp(auth={"auth_required": True}, home=link)
+    assert c.status == "warn" and "is a symlink" in c.detail
+
+
+def test_profiles_mcp_reports_a_symlinked_profile_as_unmanaged(tmp_path) -> None:
+    """Codex P2: the writer never follows a linked profile, so doctor must not call it wired."""
+    home = _profiles_home(tmp_path, coder=_WIRED)
+    real = tmp_path / "elsewhere"
+    real.mkdir()
+    (real / "config.yaml").write_text(_WIRED.replace("hermes__coder", "hermes__linked"))
+    (home / "profiles" / "linked").symlink_to(real, target_is_directory=True)
+    c = da.check_hermes_profiles_mcp(auth={"auth_required": True}, home=home)
+    assert c.status == "warn" and "linked are symlinks" in c.detail and "wired" not in c.detail
+
+
+def test_profiles_mcp_reads_configs_through_one_descriptor(tmp_path, monkeypatch) -> None:
+    """Codex P2: no second pathname lookup between the type check and the read."""
+    home = _profiles_home(tmp_path, coder=_WIRED)
+
+    def no_path_read(self, *a, **k):
+        raise AssertionError("read_text must not be used for profile configs")
+
+    monkeypatch.setattr(Path, "read_text", no_path_read)
+    c = da.check_hermes_profiles_mcp(auth={"auth_required": True}, home=home)
+    assert c.status == "pass" and "wired: coder" in c.detail

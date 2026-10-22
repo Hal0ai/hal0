@@ -4668,3 +4668,473 @@ def test_phase_profile_api_keys_oserror_is_warn(
 def test_install_steps_order_has_profile_api_keys_after_gateway_secrets_wire() -> None:
     names = [n for n, _fn in hp._INSTALL_STEPS]
     assert names.index("profile_api_keys") == names.index("gateway_secrets_wire") + 1
+
+
+# ── #2891: hal0's MCP servers in every named profile ─────────────────────────
+
+
+def _profiles(tmp_path: Path, **profiles: str | None) -> Path:
+    home = tmp_path / ".hermes"
+    for name, text in profiles.items():
+        d = home / "profiles" / name
+        d.mkdir(parents=True)
+        if text is not None:
+            (d / "config.yaml").write_text(text, encoding="utf-8")
+    return home
+
+
+def test_profile_agent_id_is_sanitised_for_the_mcp_identity_charset() -> None:
+    import re
+
+    assert hp.profile_agent_id("coder") == "hermes__coder"
+    rewritten = hp.profile_agent_id("my profile.v2")
+    assert (
+        rewritten.startswith("hermes__my_profile_v2-")
+        and len(rewritten) == len("hermes__my_profile_v2-") + 8
+    )
+    assert len(hp.profile_agent_id("x" * 90)) == 64
+    for name in ("coder", "my profile.v2", "x" * 90, "foo.bar", "foo_bar"):
+        assert re.fullmatch(r"[A-Za-z0-9_-]{1,64}", hp.profile_agent_id(name))
+
+
+def test_profile_agent_id_never_collides_after_normalisation() -> None:
+    """Codex P1: ``foo.bar`` and ``foo_bar`` must not share one private memory bank."""
+    ids = {hp.profile_agent_id(n) for n in ("foo.bar", "foo_bar", "foo-bar", "x" * 90, "x" * 91)}
+    assert len(ids) == 5
+    assert hp.profile_agent_id("foo_bar") == "hermes__foo_bar"  # a clean name keeps its id
+
+
+def test_wire_named_profiles_wires_each_profile_as_its_own_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import yaml
+
+    monkeypatch.setattr("hal0.service_identity.service_key", lambda prefer=None: "svc-key")
+    home = _profiles(
+        tmp_path,
+        coder="model:\n  default: agent\nmcp_servers:\n  mine:\n    type: http\n    url: http://x\n",
+        research="model:\n  default: agent\n",
+    )
+    (home / "profiles" / "hal0-brain").mkdir()
+    (home / "profiles" / "hal0-brain" / "config.yaml").write_text("model:\n  default: a\n")
+
+    report = hp.wire_named_profiles(home)
+    assert report == {
+        "wired": ["coder", "research"],
+        "changed": ["coder", "research"],
+        "skipped": {},
+        "errors": {},
+    }
+    coder = yaml.safe_load((home / "profiles" / "coder" / "config.yaml").read_text())
+    assert coder["mcp_servers"]["hal0-admin"]["headers"] == {
+        "X-hal0-Agent": "hermes__coder",
+        "Authorization": "Bearer svc-key",
+    }
+    assert coder["mcp_servers"]["hal0-memory"]["headers"]["X-hal0-Private"] == "1"
+    assert coder["mcp_servers"]["hal0-memory"]["headers"]["X-hal0-Agent"] == "hermes__coder"
+    assert coder["memory"]["provider"] == "hal0-memory"
+    assert coder["mcp_servers"]["mine"] == {"type": "http", "url": "http://x"}  # kept
+    assert coder["model"] == {"default": "agent"}
+    research = yaml.safe_load((home / "profiles" / "research" / "config.yaml").read_text())
+    assert research["mcp_servers"]["hal0-admin"]["headers"]["X-hal0-Agent"] == "hermes__research"
+    # hal0-brain keeps its own phase and identity: untouched here.
+    assert (
+        home / "profiles" / "hal0-brain" / "config.yaml"
+    ).read_text() == "model:\n  default: a\n"
+
+    again = hp.wire_named_profiles(home)
+    assert again["wired"] == ["coder", "research"] and again["changed"] == []
+
+
+def test_wire_named_profiles_skips_absent_config_and_opt_out(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("hal0.service_identity.service_key", lambda prefer=None: None)
+    home = _profiles(tmp_path, bare=None, lab="hal0:\n  wire_mcp: false\nmodel:\n  default: x\n")
+    before = (home / "profiles" / "lab" / "config.yaml").read_bytes()
+    report = hp.wire_named_profiles(home)
+    assert report["wired"] == [] and report["errors"] == {}
+    assert report["skipped"] == {"bare": "profile config absent", "lab": "opted out"}
+    assert (home / "profiles" / "lab" / "config.yaml").read_bytes() == before
+    assert hp.wire_named_profiles(tmp_path / "nowhere") == {
+        "wired": [],
+        "changed": [],
+        "skipped": {},
+        "errors": {},
+    }
+
+
+def test_wire_named_profiles_reports_a_broken_config_without_raising(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("hal0.service_identity.service_key", lambda prefer=None: None)
+    home = _profiles(tmp_path, bad="model: [unclosed\n", listy="- not\n- a mapping\n", ok="a: 1\n")
+    report = hp.wire_named_profiles(home)
+    assert set(report["errors"]) == {"bad", "listy"}
+    assert report["wired"] == ["ok"]
+
+
+def test_phase_profile_mcp_wire_runs_after_profile_api_keys(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr("hal0.service_identity.service_key", lambda prefer=None: None)
+    names = [n for n, _fn in hp._INSTALL_STEPS]
+    assert names.index("profile_mcp_wire") == names.index("profile_api_keys") + 1
+    home = _profiles(tmp_path, coder="model:\n  default: agent\n")
+    state = hp.BootstrapState(venv=str(tmp_path / "venv"), hermes_home=str(home))
+    out = hp._phase_profile_mcp_wire(hp._StepCtx(state=state, io=hp.InstallIO()))
+    assert out.status == hp.PhaseStatus.OK
+    assert out.details["changed"] is True and out.details["changed_profiles"] == ["coder"]
+    assert hp._step_changed("profile_mcp_wire", out) is True
+
+
+def test_phase_profile_mcp_wire_keeps_the_change_signal_on_a_partial_error(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Codex P2: a rewritten profile next to a broken one still counts as a change."""
+    monkeypatch.setattr("hal0.service_identity.service_key", lambda prefer=None: None)
+    home = _profiles(tmp_path, bad="model: [unclosed\n", coder="model:\n  default: agent\n")
+    state = hp.BootstrapState(venv=str(tmp_path / "venv"), hermes_home=str(home))
+    out = hp._phase_profile_mcp_wire(hp._StepCtx(state=state, io=hp.InstallIO()))
+    assert out.status == hp.PhaseStatus.OK  # warn-as-OK
+    assert out.reason is not None and "bad" in out.reason
+    assert out.details["errors"] == {"bad": out.details["errors"]["bad"]}
+    assert hp._step_changed("profile_mcp_wire", out) is True
+
+
+def test_wire_named_profiles_skips_dirs_hermes_would_not_serve(tmp_path: Path, monkeypatch) -> None:
+    """A directory that breaks Hermes's profile id rule is never wired."""
+    monkeypatch.setattr("hal0.service_identity.service_key", lambda prefer=None: None)
+    home = _profiles(tmp_path, **{"My Work": "a: 1\n", "ok": "a: 1\n", "-lead": "a: 1\n"})
+    report = hp.wire_named_profiles(home)
+    assert report["wired"] == ["ok"]
+    assert report["skipped"] == {"My Work": "invalid profile name", "-lead": "invalid profile name"}
+    assert (home / "profiles" / "My Work" / "config.yaml").read_text() == "a: 1\n"
+
+
+def test_wire_named_profiles_keeps_comments_of_an_already_wired_profile(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """CodeRabbit: decide on parsed content, so Hermes's own formatting and comments survive."""
+    monkeypatch.setattr("hal0.service_identity.service_key", lambda prefer=None: None)
+    home = _profiles(tmp_path, coder="model:\n  default: agent\n")
+    assert hp.wire_named_profiles(home)["changed"] == ["coder"]
+    cfg = home / "profiles" / "coder" / "config.yaml"
+    commented = "# operator note\n" + cfg.read_text().replace("hal0-admin:", "hal0-admin:  # ours")
+    cfg.write_text(commented)
+    assert hp.wire_named_profiles(home)["changed"] == []
+    assert cfg.read_text() == commented
+
+
+def test_wire_named_profiles_refuses_a_falsy_non_mapping_document(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Codex P2: ``[]`` / ``false`` / ``0`` are errors, not an empty mapping to overwrite."""
+    monkeypatch.setattr("hal0.service_identity.service_key", lambda prefer=None: None)
+    home = _profiles(tmp_path, a="[]\n", b="false\n", c="0\n", empty="")
+    report = hp.wire_named_profiles(home)
+    assert set(report["errors"]) == {"a", "b", "c"}
+    assert report["wired"] == ["empty"]  # an empty file is an empty mapping
+    assert (home / "profiles" / "a" / "config.yaml").read_text() == "[]\n"
+
+
+def test_wire_named_profiles_locks_and_replaces_atomically(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Codex P2: one read-merge-write transaction under file_lock, replaced via
+    tmp + rename with the mode kept, so Hermes's reconcile never sees a torn file."""
+    import fcntl
+    import os
+    import stat
+
+    monkeypatch.setattr("hal0.service_identity.service_key", lambda prefer=None: None)
+    home = _profiles(tmp_path, coder="model:\n  default: agent\n")
+    cfg = home / "profiles" / "coder" / "config.yaml"
+    os.chmod(cfg, 0o640)
+    locked: list[str] = []
+    real_flock = fcntl.flock
+
+    def spy(fd, op):
+        if op == fcntl.LOCK_EX:
+            locked.append(os.readlink(f"/proc/self/fd/{fd}"))
+        return real_flock(fd, op)
+
+    monkeypatch.setattr(fcntl, "flock", spy)
+    replaced: list[tuple] = []
+    real_replace = os.replace
+
+    def spy_replace(src, dst, **kw):
+        replaced.append((src, dst, sorted(kw)))
+        return real_replace(src, dst, **kw)
+
+    monkeypatch.setattr(hp.os, "replace", spy_replace)
+    report = hp.wire_named_profiles(home)
+    assert report["changed"] == ["coder"]
+    assert locked == [str(cfg.parent / ".config.yaml.lock")]  # lock inside the verified dir
+    # Renamed through the directory descriptor, from a random dot-name.
+    assert len(replaced) == 1 and replaced[0][1] == "config.yaml"
+    assert replaced[0][0].startswith(".config.yaml.")
+    assert replaced[0][2] == ["dst_dir_fd", "src_dir_fd"]
+    assert stat.S_IMODE(cfg.stat().st_mode) == 0o640
+
+
+def test_wire_named_profiles_never_follows_a_planted_tmp_symlink(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Codex P1: a root repair must not truncate whatever ``config.yaml.tmp`` points at."""
+    monkeypatch.setattr("hal0.service_identity.service_key", lambda prefer=None: None)
+    home = _profiles(tmp_path, coder="model:\n  default: agent\n")
+    victim = tmp_path / "root-only-file"
+    victim.write_text("precious\n")
+    (home / "profiles" / "coder" / "config.yaml.tmp").symlink_to(victim)
+    assert hp.wire_named_profiles(home)["changed"] == ["coder"]
+    assert victim.read_text() == "precious\n"
+    assert (home / "profiles" / "coder" / "config.yaml.tmp").is_symlink()  # untouched
+    leftovers = [
+        p.name for p in (home / "profiles" / "coder").iterdir() if p.name.startswith(".config")
+    ]
+    assert leftovers == [".config.yaml.lock"]  # the lock file is the only hal0 artefact
+
+
+def test_wire_named_profiles_redacts_yaml_errors(tmp_path: Path, monkeypatch) -> None:
+    """Codex P2: a YAML error near an Authorization line must not quote the bearer."""
+    monkeypatch.setattr("hal0.service_identity.service_key", lambda prefer=None: None)
+    home = _profiles(
+        tmp_path,
+        bad="mcp_servers:\n  hal0-admin:\n    headers:\n      Authorization: Bearer SECRET-TOKEN-VALUE\n   broken: [\n",
+    )
+    report = hp.wire_named_profiles(home)
+    assert "bad" in report["errors"]
+    assert "SECRET-TOKEN-VALUE" not in report["errors"]["bad"]
+    assert "line" in report["errors"]["bad"]
+
+
+def test_wire_named_profiles_contains_invalid_utf8_to_that_profile(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("hal0.service_identity.service_key", lambda prefer=None: None)
+    home = _profiles(tmp_path, ok="a: 1\n", zed="a: 1\n")
+    (home / "profiles" / "bad").mkdir()
+    (home / "profiles" / "bad" / "config.yaml").write_bytes(b"model: \xff\xfe\n")
+    report = hp.wire_named_profiles(home)
+    assert "bad" in report["errors"] and report["wired"] == ["ok", "zed"]
+
+
+def test_wire_named_profiles_never_follows_symlinked_profiles_or_configs(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Codex P1: a root repair must not rewrite a YAML file outside HERMES_HOME."""
+    monkeypatch.setattr("hal0.service_identity.service_key", lambda prefer=None: None)
+    home = _profiles(tmp_path, ok="a: 1\n")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "config.yaml").write_text("root: owned\n")
+    (home / "profiles" / "planted").symlink_to(outside, target_is_directory=True)
+    (home / "profiles" / "linked").mkdir()
+    (home / "profiles" / "linked" / "config.yaml").symlink_to(outside / "config.yaml")
+    report = hp.wire_named_profiles(home)
+    assert report["wired"] == ["ok"]
+    assert report["skipped"]["planted"] == "symlink"
+    assert report["errors"]["linked"] == "config.yaml is a symlink"
+    assert (outside / "config.yaml").read_text() == "root: owned\n"
+
+
+def test_wire_named_profiles_reports_an_unreadable_profile_root(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Codex P2: an enumeration failure is an error, not a clean empty report."""
+    monkeypatch.setattr("hal0.service_identity.service_key", lambda prefer=None: None)
+    home = _profiles(tmp_path, ok="a: 1\n")
+
+    import os
+
+    real_open = os.open
+
+    def boom(path, flags, *a, **kw):
+        if path == "profiles" and "dir_fd" in kw:  # opened relative to the home fd
+            raise PermissionError("denied")
+        return real_open(path, flags, *a, **kw)
+
+    monkeypatch.setattr(hp.os, "open", boom)
+    report = hp.wire_named_profiles(home)
+    assert report["errors"] == {"profiles/": "denied"} and report["wired"] == []
+    assert hp.wire_named_profiles(tmp_path / "absent")["errors"] == {}
+
+
+def test_named_profile_memory_timeout_matches_the_default_profile(monkeypatch) -> None:
+    """Codex P1: memory_reflect runs minutes; a 30 s client budget cancelled it."""
+    monkeypatch.setattr("hal0.service_identity.service_key", lambda prefer=None: None)
+    canonical = next(s["timeout"] for s in hp._default_mcp_servers() if s["name"] == "hal0-memory")
+    assert canonical >= 900
+    assert hp._build_profile_mcp_servers("hermes__coder")["hal0-memory"]["timeout"] == canonical
+    assert hp._build_brain_profile_mcp_servers()["hal0-memory"]["timeout"] == canonical
+
+
+def test_wire_named_profiles_refuses_a_symlinked_profiles_root(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr("hal0.service_identity.service_key", lambda prefer=None: None)
+    outside = tmp_path / "outside" / "victim"
+    outside.mkdir(parents=True)
+    (outside / "config.yaml").write_text("root: owned\n")
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    (home / "profiles").symlink_to(tmp_path / "outside", target_is_directory=True)
+    report = hp.wire_named_profiles(home)
+    assert report == {
+        "wired": [],
+        "changed": [],
+        "skipped": {},
+        "errors": {"profiles/": "profiles/ is a symlink"},
+    }
+    assert (outside / "config.yaml").read_text() == "root: owned\n"
+
+
+def test_replace_profile_config_sets_metadata_on_the_descriptor(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Codex P1: chmod/chown on the open fd, never on the temp path."""
+    import os
+
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text("a: 1\n")
+    os.chmod(cfg, 0o640)
+    calls: list[str] = []
+    monkeypatch.setattr(hp.os, "chmod", lambda *a, **k: calls.append("chmod-path"))
+    monkeypatch.setattr(hp.os, "chown", lambda *a, **k: calls.append("chown-path"))
+    real_fchmod = os.fchmod
+    monkeypatch.setattr(
+        hp.os, "fchmod", lambda fd, mode: (calls.append("fchmod"), real_fchmod(fd, mode))
+    )
+    monkeypatch.setattr(hp.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(hp.os, "fchown", lambda fd, uid, gid: calls.append("fchown"))
+    dir_fd = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        hp._replace_profile_config_at(dir_fd, "a: 2\n", cfg.stat())
+    finally:
+        os.close(dir_fd)
+    assert cfg.read_text() == "a: 2\n"
+    assert calls == ["fchmod", "fchown"]
+    assert (cfg.stat().st_mode & 0o777) == 0o640
+    assert [p.name for p in tmp_path.iterdir()] == ["config.yaml"]  # no temp file left
+
+
+def test_wire_named_profiles_refuses_a_fifo_config(tmp_path: Path, monkeypatch) -> None:
+    """Codex P2: a FIFO config.yaml would block the sweep for good."""
+    import os
+
+    monkeypatch.setattr("hal0.service_identity.service_key", lambda prefer=None: None)
+    home = _profiles(tmp_path, ok="a: 1\n", pipe=None)
+    os.mkfifo(home / "profiles" / "pipe" / "config.yaml")
+    report = hp.wire_named_profiles(home)
+    assert report["errors"]["pipe"] == "config.yaml is not a regular file"
+    assert report["wired"] == ["ok"]
+
+
+def test_wire_named_profiles_contains_a_stat_failure_to_that_profile(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Codex P2: one untraversable entry must not end the sweep for the others."""
+    monkeypatch.setattr("hal0.service_identity.service_key", lambda prefer=None: None)
+    home = _profiles(tmp_path, bad="a: 1\n", ok="a: 1\n")
+    import os
+
+    real_open = os.open
+
+    def flaky(path, flags, *a, **kw):
+        if path == "bad" and "dir_fd" in kw:
+            raise PermissionError("denied")
+        return real_open(path, flags, *a, **kw)
+
+    monkeypatch.setattr(hp.os, "open", flaky)
+    report = hp.wire_named_profiles(home)
+    assert report["errors"] == {"bad": "denied"} and report["wired"] == ["ok"]
+
+
+def test_wire_named_profiles_refuses_a_symlinked_hermes_home(tmp_path: Path, monkeypatch) -> None:
+    """Codex P1: a home replaced by a link must not steer a root repair elsewhere."""
+    monkeypatch.setattr("hal0.service_identity.service_key", lambda prefer=None: None)
+    real_home = _profiles(tmp_path / "real", coder="a: 1\n")
+    link = tmp_path / ".hermes"
+    link.symlink_to(real_home, target_is_directory=True)
+    report = hp.wire_named_profiles(link)
+    assert report["errors"] == {"profiles/": "HERMES_HOME is a symlink"} and report["wired"] == []
+    assert (real_home / "profiles" / "coder" / "config.yaml").read_text() == "a: 1\n"
+
+
+def test_wire_named_profiles_rereads_a_config_edited_under_the_sweep(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Codex P2: an operator save between read and replace is merged, not overwritten."""
+    import yaml
+
+    monkeypatch.setattr("hal0.service_identity.service_key", lambda prefer=None: None)
+    home = _profiles(tmp_path, coder="model:\n  default: agent\n")
+    cfg = home / "profiles" / "coder" / "config.yaml"
+    real_open = hp._open_config_nofollow
+    opens: list[int] = []
+
+    def racing_open(dir_fd):
+        opens.append(dir_fd)
+        if len(opens) == 2:  # the pre-replace probe: an operator saved meanwhile
+            cfg.write_text("model:\n  default: agent\noperator: kept\n")
+        return real_open(dir_fd)
+
+    monkeypatch.setattr(hp, "_open_config_nofollow", racing_open)
+    report = hp.wire_named_profiles(home)
+    assert report["changed"] == ["coder"] and report["errors"] == {}
+    data = yaml.safe_load(cfg.read_text())
+    assert data["operator"] == "kept"
+    assert data["mcp_servers"]["hal0-admin"]["headers"]["X-hal0-Agent"] == "hermes__coder"
+
+
+def test_wire_named_profiles_gives_up_on_a_config_that_keeps_changing(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setattr("hal0.service_identity.service_key", lambda prefer=None: None)
+    home = _profiles(tmp_path, coder="model:\n  default: agent\n")
+    cfg = home / "profiles" / "coder" / "config.yaml"
+    real_open = hp._open_config_nofollow
+    n = [0]
+
+    def churn(dir_fd):
+        n[0] += 1
+        if n[0] % 2 == 0:
+            cfg.write_text(f"model:\n  default: agent\nrev: {n[0]}\n")
+        return real_open(dir_fd)
+
+    monkeypatch.setattr(hp, "_open_config_nofollow", churn)
+    report = hp.wire_named_profiles(home)
+    assert report["errors"] == {"coder": "config.yaml kept changing during the sweep"}
+
+
+def test_wire_named_profiles_refuses_to_stamp_a_renamed_profile(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Codex P2: a sweep that opened ``alpha`` must not write hermes__alpha into ``beta``."""
+    monkeypatch.setattr("hal0.service_identity.service_key", lambda prefer=None: None)
+    home = _profiles(tmp_path, alpha="model:\n  default: agent\n")
+    monkeypatch.setattr(hp, "_same_inode", lambda root_fd, name, dir_fd: False)
+    report = hp.wire_named_profiles(home)
+    assert report["errors"] == {"alpha": "profile renamed during the sweep"}
+    assert "mcp_servers" not in (home / "profiles" / "alpha" / "config.yaml").read_text()
+
+
+def test_profile_lock_created_by_root_is_owned_like_the_directory(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Codex P2: a root pass must not leave a lock the hal0-api sweeps cannot open."""
+    import os
+
+    d = tmp_path / "coder"
+    d.mkdir()
+    dir_fd = os.open(d, os.O_RDONLY | os.O_DIRECTORY)
+    real_fstat = os.fstat
+    fake_dir = os.stat_result((0o40700, 1, 1, 1, 4242, 4343, 0, 0, 0, 0))
+    chowned: list[tuple] = []
+    monkeypatch.setattr(hp.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(hp.os, "fstat", lambda fd: fake_dir if fd == dir_fd else real_fstat(fd))
+    monkeypatch.setattr(hp.os, "fchown", lambda fd, uid, gid: chowned.append((uid, gid)))
+    try:
+        with hp._profile_lock(dir_fd):
+            pass
+    finally:
+        os.close(dir_fd)
+    assert chowned == [(4242, 4343)]
+    assert (d / ".config.yaml.lock").exists()

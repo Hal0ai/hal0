@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import contextlib
 import datetime
+import errno
 import grp
 import hashlib
 import json
@@ -46,7 +47,7 @@ import sqlite3
 import stat
 import subprocess  # nosec B404 — needed to spawn python -m venv + pip
 import sys
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
@@ -4766,28 +4767,27 @@ def _brain_profile_config_path(state: BootstrapState) -> Path:
     return Path(state.hermes_home) / "profiles" / _BRAIN_PROFILE_NAME / "config.yaml"
 
 
-def _build_brain_profile_mcp_servers() -> dict[str, Any]:
-    """The hal0-owned MCP servers the hal0-brain profile is wired to.
+def _build_profile_mcp_servers(agent_id: str) -> dict[str, Any]:
+    """The hal0-owned MCP servers a Hermes profile is wired to, as ``agent_id``.
 
     Mirrors the top-level ``_default_mcp_servers`` admin + memory pair but scoped
-    to the brain identity (``X-hal0-Agent: hermes__hal0-brain``); memory is
-    private (its own 3-tier bank). Deliberately just these two — the steward
-    gets platform control + memory only, not any other MCP surface.
+    to the profile's identity (``X-hal0-Agent``); memory is private (its own
+    3-tier bank). Deliberately just these two — a profile gets platform control
+    + memory only, not any other MCP surface.
 
     The ``/mcp`` mount is ADMIN-classed (security/exposure.py), so — same as
     the top-level overlay — a bearer is attached from the box service identity
     (:func:`hal0.service_identity.service_key`) whenever one is discoverable.
-    Resolved fresh on every call: :func:`_phase_brain_profile_mcp_wire` re-runs
-    this (and re-diffs the merge) on every provision/``--repair`` pass, so a
-    rotated key is re-propagated the next time provisioning runs — the static
+    Resolved fresh on every call: the wiring phases re-run this (and re-diff
+    the merge) on every provision/``--repair`` pass and every hal0-api sweep,
+    so a rotated key is re-propagated the next time one runs — the static
     config.yaml itself does not update live on rotation.
     """
-    from hal0.agents.personas import BRAIN_PROFILE_AGENT_ID
     from hal0.service_identity import service_key
 
     bearer = service_key(prefer="admin")
-    admin_headers: dict[str, Any] = {"X-hal0-Agent": BRAIN_PROFILE_AGENT_ID}
-    memory_headers: dict[str, Any] = {"X-hal0-Agent": BRAIN_PROFILE_AGENT_ID, "X-hal0-Private": "1"}
+    admin_headers: dict[str, Any] = {"X-hal0-Agent": agent_id}
+    memory_headers: dict[str, Any] = {"X-hal0-Agent": agent_id, "X-hal0-Private": "1"}
     if bearer:
         admin_headers["Authorization"] = f"Bearer {bearer}"
         memory_headers["Authorization"] = f"Bearer {bearer}"
@@ -4803,68 +4803,452 @@ def _build_brain_profile_mcp_servers() -> dict[str, Any]:
             "type": "http",
             "url": "http://127.0.0.1:8080/mcp/memory/mcp",
             "headers": memory_headers,
-            "timeout": 30,
+            # Same budget as the default profile's entry: memory_reflect runs
+            # minutes on the engine side, and a short client timeout cancels
+            # the call while the engine finishes the job anyway.
+            "timeout": _memory_mcp_timeout(),
         },
     }
+
+
+def _memory_mcp_timeout() -> int:
+    """The canonical ``hal0-memory`` client timeout from :func:`_default_mcp_servers`."""
+    for srv in _default_mcp_servers():
+        if srv["name"] == "hal0-memory":
+            return int(srv["timeout"])
+    return 900
+
+
+def _build_brain_profile_mcp_servers() -> dict[str, Any]:
+    """:func:`_build_profile_mcp_servers` for the hal0-brain steward identity."""
+    from hal0.agents.personas import BRAIN_PROFILE_AGENT_ID
+
+    return _build_profile_mcp_servers(BRAIN_PROFILE_AGENT_ID)
+
+
+#: Top-level key in a profile's ``config.yaml`` that turns hal0's wiring off:
+#: ``hal0: {wire_mcp: false}``. The profile then keeps whatever ``mcp_servers``
+#: the operator wrote, and hal0 never touches the file again.
+PROFILE_MCP_OPT_OUT_KEY = "wire_mcp"
+
+#: Hermes's own profile id rule (``hermes_constants.py:323`` at d923a5eb). A
+#: directory under ``profiles/`` that breaks it is not a profile Hermes serves,
+#: so hal0 never wires it.
+HERMES_PROFILE_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
+
+
+def profile_agent_id(profile: str) -> str:
+    """The MCP identity a named profile calls hal0 as: ``hermes__<profile>``.
+
+    Sanitised to the identity charset the MCP mount accepts
+    (``api/mcp_mount.py:client_id_resolver``, ``[A-Za-z0-9_-]{1,64}``): a
+    character outside it would collapse the caller to ``anonymous`` and get
+    every private memory write refused. A name that had to be rewritten or
+    cut carries a hash suffix of the original, so ``foo.bar`` and ``foo_bar``
+    never share one private memory bank. ``hal0-brain`` keeps its own constant.
+    """
+    import hashlib
+
+    slug = re.sub(r"[^A-Za-z0-9_-]", "_", profile)
+    plain = "hermes__" + slug
+    if slug == profile and len(plain) <= 64:
+        return plain
+    suffix = "-" + hashlib.sha256(profile.encode("utf-8")).hexdigest()[:8]
+    return plain[: 64 - len(suffix)] + suffix
+
+
+def _profile_wire_opted_out(base: dict[str, Any]) -> bool:
+    block = base.get("hal0")
+    return isinstance(block, dict) and block.get(PROFILE_MCP_OPT_OUT_KEY) is False
+
+
+_DIR_NOFOLLOW = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+
+
+def _nofollow_error(exc: OSError, path: Path) -> str:
+    """Message for an ``O_DIRECTORY|O_NOFOLLOW`` open that failed on ``path``.
+
+    A symlink answers ``ELOOP`` (or ``ENOTDIR``, when it points at a
+    directory and ``O_DIRECTORY`` is set); name it, rather than the errno.
+    """
+    if exc.errno in (errno.ELOOP, errno.ENOTDIR):
+        if os.path.islink(path):
+            return "profiles/ is a symlink" if path.name == "profiles" else "symlink"
+        if path.name == "profiles" and os.path.islink(path.parent):
+            return "HERMES_HOME is a symlink"
+    return str(exc)
+
+
+def _open_profile_dir(home: Path, name: str) -> int:
+    """Descriptor of ``home/profiles/<name>`` with no symlink followed on the way.
+
+    Opens ``profiles/`` and then ``<name>`` relative to it, each with
+    ``O_DIRECTORY|O_NOFOLLOW``, so a link planted by the service account at
+    either level is refused (``ELOOP``) instead of followed by a root repair.
+    Raises ``OSError``; the caller turns it into a per-profile error.
+    """
+    root_fd = _open_profiles_root(home)
+    try:
+        return os.open(name, _DIR_NOFOLLOW, dir_fd=root_fd)
+    finally:
+        os.close(root_fd)
+
+
+def _open_profiles_root(home: Path) -> int:
+    """Descriptor of ``home/profiles`` with neither the home nor ``profiles`` a symlink.
+
+    The Hermes home is opened first with ``O_DIRECTORY|O_NOFOLLOW`` and
+    ``profiles`` relative to it, so a home the service account replaced with a
+    link cannot steer a root repair into a real-looking tree elsewhere.
+    """
+    home_fd = os.open(home, _DIR_NOFOLLOW)
+    try:
+        return os.open("profiles", _DIR_NOFOLLOW, dir_fd=home_fd)
+    finally:
+        os.close(home_fd)
+
+
+def _merge_profile_config(path: Path, desired: dict[str, Any]) -> dict[str, Any]:
+    """Deep-merge hal0's keys into one profile ``config.yaml`` (path form).
+
+    ``path`` is ``<home>/profiles/<name>/config.yaml``; the work happens on a
+    directory descriptor (:func:`_merge_profile_config_at`), so the path only
+    names the profile. Never raises.
+    """
+    try:
+        dir_fd = _open_profile_dir(path.parent.parent.parent, path.parent.name)
+    except FileNotFoundError:
+        return {"wired": False, "changed": False, "reason": "profile config absent"}
+    except OSError as exc:
+        return {"wired": False, "changed": False, "error": _yaml_error_summary(exc)}
+    try:
+        return _merge_profile_config_at(dir_fd, path, desired)
+    finally:
+        os.close(dir_fd)
+
+
+def _open_config_nofollow(dir_fd: int) -> int:
+    """``config.yaml`` in ``dir_fd``, opened without following links and without
+    blocking (a FIFO would otherwise wait for a writer forever)."""
+    return os.open("config.yaml", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=dir_fd)
+
+
+def _config_version(st: os.stat_result) -> tuple[int, int, int, int]:
+    return (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns)
+
+
+def _same_inode(root_fd: int, name: str, dir_fd: int) -> bool:
+    """``name`` under ``root_fd`` is still the directory ``dir_fd`` was opened on."""
+    try:
+        now = os.stat(name, dir_fd=root_fd, follow_symlinks=False)
+    except OSError:
+        return False
+    was = os.fstat(dir_fd)
+    return (now.st_dev, now.st_ino) == (was.st_dev, was.st_ino)
+
+
+def _merge_profile_config_at(
+    dir_fd: int,
+    path: Path,
+    desired: dict[str, Any],
+    *,
+    still_named: Callable[[], bool] | None = None,
+) -> dict[str, Any]:
+    """Deep-merge hal0's keys into the ``config.yaml`` inside directory ``dir_fd``.
+
+    Every file operation is relative to the verified directory descriptor and
+    refuses symlinks (``O_NOFOLLOW``), the file must be regular (a FIFO would
+    block the sweep for good), and the replacement is a random-named
+    ``O_EXCL`` temp file in that directory with its mode and owner set on the
+    descriptor, renamed over ``config.yaml`` through the same ``dir_fd``. So a
+    root repair never reads or writes outside the profile directory, whatever
+    the service account renames meanwhile. ``path`` is for messages and the
+    cross-process lock only.
+
+    Merge, never clobber: scalars and dicts only, no list keys (``_deep_merge``
+    replaces lists, which would clobber an operator's ``plugins.enabled``).
+    Rewritten only when the parsed content differs, so a correct profile keeps
+    its comments and Hermes's formatting. Returns ``{"wired", "changed"}`` plus
+    ``reason`` (config absent, opted out, PyYAML missing) or ``error`` (I/O or
+    YAML, redacted) — never raises, so no caller blocks on one profile.
+    """
+    try:
+        import yaml  # type: ignore[import-untyped]
+    except ImportError:
+        return {"wired": False, "changed": False, "reason": "PyYAML unavailable"}
+    try:
+        # One read-merge-write transaction under a cross-process lock taken on
+        # a lock file inside the verified directory (not on a pathname that a
+        # rename could point elsewhere): the periodic sweep, a provision and
+        # an operator edit may overlap.
+        with _profile_lock(dir_fd):
+            # An operator's editor does not take hal0's lock, so the file is
+            # re-stat'ed right before the replacement; a version that moved
+            # since the read is read and merged again (a few times, then given
+            # up on), never overwritten from the stale parse.
+            for _attempt in range(4):
+                try:
+                    fd = _open_config_nofollow(dir_fd)
+                except FileNotFoundError:
+                    return {"wired": False, "changed": False, "reason": "profile config absent"}
+                except OSError as exc:
+                    if exc.errno == errno.ELOOP:
+                        return {
+                            "wired": False,
+                            "changed": False,
+                            "error": "config.yaml is a symlink",
+                        }
+                    raise
+                with os.fdopen(fd, "rb") as fh:
+                    st = os.fstat(fh.fileno())
+                    if not stat.S_ISREG(st.st_mode):
+                        return {
+                            "wired": False,
+                            "changed": False,
+                            "error": "config.yaml is not a regular file",
+                        }
+                    current = fh.read().decode("utf-8")
+                base = yaml.safe_load(current)
+                if base is None:  # an empty file is an empty mapping; ``[]``/``false`` are not
+                    base = {}
+                if not isinstance(base, dict):
+                    return {
+                        "wired": False,
+                        "changed": False,
+                        "error": "config.yaml is not a mapping",
+                    }
+                if _profile_wire_opted_out(base):
+                    return {"wired": False, "changed": False, "reason": "opted out"}
+                merged = _deep_merge(base, desired)
+                changed = merged != base
+                if not changed:
+                    break
+                out = yaml.safe_dump(merged, sort_keys=False, default_flow_style=False)
+                # The identity in ``desired`` was derived from the profile's
+                # name: it must still be this directory's name, or an older
+                # sweep would stamp a renamed profile with the wrong one.
+                if still_named is not None and not still_named():
+                    return {
+                        "wired": False,
+                        "changed": False,
+                        "error": "profile renamed during the sweep",
+                    }
+                probe = _open_config_nofollow(dir_fd)
+                try:
+                    live = os.fstat(probe)
+                finally:
+                    os.close(probe)
+                if _config_version(live) != _config_version(st):
+                    continue  # edited under us: read and merge again
+                _replace_profile_config_at(dir_fd, out, st)
+                break
+            else:
+                return {
+                    "wired": False,
+                    "changed": False,
+                    "error": "config.yaml kept changing during the sweep",
+                }
+    except (OSError, UnicodeDecodeError, yaml.YAMLError) as exc:  # type: ignore[attr-defined]
+        # Never ``str(exc)``: a PyYAML message quotes the offending line, which
+        # in this file can be a resolved Authorization header.
+        return {"wired": False, "changed": False, "error": _yaml_error_summary(exc)}
+    return {"wired": True, "changed": changed}
+
+
+@contextlib.contextmanager
+def _profile_lock(dir_fd: int) -> Iterator[None]:
+    """Exclusive ``flock`` on ``.config.yaml.lock`` inside ``dir_fd``.
+
+    Anchored to the directory descriptor, so two sweeps that overlap a rename
+    of the profile still serialise on the same inode.
+    """
+    import fcntl
+
+    fd = os.open(".config.yaml.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600, dir_fd=dir_fd)
+    try:
+        if os.geteuid() == 0:
+            # A root pass must not leave a root-owned lock that the hal0-api
+            # sweeps (User=hal0) could never open again: own it like the dir.
+            owner = os.fstat(dir_fd)
+            mine = os.fstat(fd)
+            if (mine.st_uid, mine.st_gid) != (owner.st_uid, owner.st_gid):
+                os.fchown(fd, owner.st_uid, owner.st_gid)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)
+
+
+def _replace_profile_config_at(dir_fd: int, text: str, st: os.stat_result) -> None:
+    """Replace ``config.yaml`` in ``dir_fd`` atomically, keeping ``st``'s mode and owner.
+
+    Random temp name, ``O_CREAT|O_EXCL|O_NOFOLLOW`` through ``dir_fd``, metadata
+    via ``fchmod``/``fchown`` on the open descriptor, then ``rename`` through the
+    same ``dir_fd``: no step takes a pathname the service account could swap.
+    """
+    import secrets
+
+    tmp = f".config.yaml.{secrets.token_hex(8)}"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=dir_fd)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+            fh.flush()
+            os.fchmod(fh.fileno(), stat.S_IMODE(st.st_mode))
+            if os.geteuid() == 0:
+                os.fchown(fh.fileno(), st.st_uid, st.st_gid)
+        os.replace(tmp, "config.yaml", src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp, dir_fd=dir_fd)
+        raise
+
+
+def _profile_wire_desired(agent_id: str) -> dict[str, Any]:
+    # hal0-owned profile keys: the two MCP servers + the memory provider. Only
+    # scalar/dict keys are set — never a list (see _merge_profile_config_at).
+    return {
+        "mcp_servers": _build_profile_mcp_servers(agent_id),
+        "memory": {"provider": "hal0-memory"},
+    }
+
+
+def wire_named_profiles(home: Path) -> dict[str, Any]:
+    """Give every named Hermes profile hal0's MCP servers and memory (#2891).
+
+    A profile cloned by the operator starts with no ``mcp_servers`` at all, so
+    through Open WebUI (ADR-0035) it answered without hal0-admin and
+    hal0-memory. Every directory under ``profiles/`` except ``hal0-brain``
+    (its own phase, its own identity) gets the hal0-admin + hal0-memory pair
+    as ``hermes__<profile>`` (:func:`profile_agent_id`) and
+    ``memory.provider: hal0-memory``, merged the way the brain profile is.
+    A profile opts out with ``hal0: {wire_mcp: false}``. Hermes re-reads a
+    profile's ``mcp_servers`` on its own 60 s reconcile, so no restart follows.
+
+    The walk is descriptor-anchored: ``profiles/`` is opened with
+    ``O_DIRECTORY|O_NOFOLLOW`` and each profile relative to it the same way,
+    so a symlink planted at either level is refused, not followed
+    (:func:`_merge_profile_config_at` for the file itself).
+
+    Returns ``{"wired": [...], "changed": [...], "skipped": {name: reason},
+    "errors": {name: error}}``; never raises.
+    """
+    report: dict[str, Any] = {"wired": [], "changed": [], "skipped": {}, "errors": {}}
+    profiles = Path(home) / "profiles"
+    try:
+        root_fd = _open_profiles_root(Path(home))
+    except FileNotFoundError:
+        return report  # no profiles at all: nothing to wire
+    except OSError as exc:
+        # A symlinked or unreadable root: say so, never a clean empty report
+        # that the caller would take for "every profile wired".
+        report["errors"]["profiles/"] = _nofollow_error(exc, profiles)
+        return report
+    try:
+        with os.scandir(root_fd) as it:
+            entries = sorted(it, key=lambda e: e.name)
+            for entry in entries:
+                name = entry.name
+                try:
+                    if entry.is_symlink():
+                        report["skipped"][name] = "symlink"
+                        continue
+                    if not entry.is_dir(follow_symlinks=False):
+                        continue
+                except OSError as exc:
+                    report["errors"][name] = str(exc)
+                    continue
+                if name == _BRAIN_PROFILE_NAME:
+                    continue
+                if not HERMES_PROFILE_ID_RE.match(name):
+                    report["skipped"][name] = "invalid profile name"
+                    continue
+                try:
+                    dir_fd = os.open(name, _DIR_NOFOLLOW, dir_fd=root_fd)
+                except OSError as exc:
+                    report["errors"][name] = _nofollow_error(exc, profiles / name)
+                    continue
+                try:
+                    result = _merge_profile_config_at(
+                        dir_fd,
+                        profiles / name / "config.yaml",
+                        _profile_wire_desired(profile_agent_id(name)),
+                        still_named=lambda n=name, d=dir_fd: _same_inode(root_fd, n, d),
+                    )
+                finally:
+                    os.close(dir_fd)
+                if result.get("error"):
+                    report["errors"][name] = result["error"]
+                elif not result["wired"]:
+                    report["skipped"][name] = result.get("reason", "skipped")
+                else:
+                    report["wired"].append(name)
+                    if result["changed"]:
+                        report["changed"].append(name)
+    except OSError as exc:
+        report["errors"]["profiles/"] = str(exc)
+    finally:
+        os.close(root_fd)
+    return report
+
+
+def _phase_profile_mcp_wire(ctx: _StepCtx) -> PhaseResult:
+    """Wire hal0's MCP servers into every named profile (:func:`wire_named_profiles`).
+
+    Warn-as-OK on a per-profile error (the step stays ``OK`` with a ``reason``),
+    so a profile that was rewritten in the same pass still counts as a change
+    for the install's convergence signal (``_step_changed`` drops the signal of
+    a non-OK step). A correct box is left untouched.
+    """
+    report = wire_named_profiles(Path(ctx.state.hermes_home))
+    details = {**report, "changed": bool(report["changed"]), "changed_profiles": report["changed"]}
+    reason = None
+    if report["errors"]:
+        reason = "profile MCP wiring failed for: " + ", ".join(
+            f"{n} ({e})" for n, e in sorted(report["errors"].items())
+        )
+    return PhaseResult(status=PhaseStatus.OK, details=details, reason=reason)
 
 
 def _phase_brain_profile_mcp_wire(ctx: _StepCtx) -> PhaseResult:
     """Reproducibly write hal0's brain-profile keys: MCP servers + memory provider.
 
     Deep-merges the hal0-owned keys (hal0-admin + hal0-memory MCP servers, and
-    ``memory.provider = hal0-memory``) into the profile config.yaml (merge,
-    never clobber; scalars/dicts only — no list keys), only writing when
-    something actually changed so a correctly configured box (and its comments)
-    is left untouched. Skips when the profile config is absent — the upstream
-    hermes binary owns profile creation. Any I/O / PyYAML gap degrades
-    warn-as-OK; bootstrap never blocks on it.
+    ``memory.provider = hal0-memory``) into the profile config.yaml via
+    :func:`_merge_profile_config`. Skips when the profile config is absent —
+    the upstream hermes binary owns profile creation. Any I/O / PyYAML gap
+    degrades warn-as-OK; bootstrap never blocks on it.
     """
-    state = ctx.state
-    path = _brain_profile_config_path(state)
-    # hal0-owned profile keys: the two MCP servers + the memory provider. Only
-    # scalar/dict keys are set — never a list (``_deep_merge`` replaces lists,
-    # which would clobber an operator's ``plugins.enabled`` / other entries).
-    desired = {
-        "mcp_servers": _build_brain_profile_mcp_servers(),
-        "memory": {"provider": "hal0-memory"},
-    }
+    from hal0.agents.personas import BRAIN_PROFILE_AGENT_ID
 
-    if not path.exists():
+    path = _brain_profile_config_path(ctx.state)
+    desired = _profile_wire_desired(BRAIN_PROFILE_AGENT_ID)
+    result = _merge_profile_config(path, desired)
+    if result.get("error"):
         return PhaseResult(
             status=PhaseStatus.OK,
-            details={"wired": False, "reason": "profile config absent", "path": str(path)},
-            reason="hal0-brain profile not present (upstream owns creation); MCP wiring skipped",
+            details={"wired": False, "error": result["error"], "path": str(path)},
+            reason=f"brain profile MCP wire failed ({result['error']}); continuing",
         )
-
-    try:
-        import yaml  # type: ignore[import-untyped]
-    except ImportError:
+    if not result["wired"]:
+        reason = result.get("reason", "skipped")
         return PhaseResult(
             status=PhaseStatus.OK,
-            details={"wired": False, "reason": "PyYAML unavailable", "path": str(path)},
-            reason="PyYAML absent; brain profile MCP not wired (continuing)",
+            details={"wired": False, "reason": reason, "path": str(path)},
+            reason=(
+                "hal0-brain profile not present (upstream owns creation); MCP wiring skipped"
+                if reason == "profile config absent"
+                else f"brain profile MCP not wired ({reason}; continuing)"
+            ),
         )
-
-    try:
-        current = path.read_text(encoding="utf-8")
-        base = yaml.safe_load(current) or {}
-        merged = _deep_merge(base, desired)
-        out = yaml.safe_dump(merged, sort_keys=False, default_flow_style=False)
-        changed = out != current
-        if changed:
-            path.write_text(out, encoding="utf-8")
-    except (OSError, yaml.YAMLError) as exc:  # type: ignore[attr-defined]
-        return PhaseResult(
-            status=PhaseStatus.OK,
-            details={"wired": False, "error": str(exc), "path": str(path)},
-            reason=f"brain profile MCP wire failed ({exc}); continuing",
-        )
-
     return PhaseResult(
         status=PhaseStatus.OK,
         details={
             "wired": True,
-            "changed": changed,
+            "changed": result["changed"],
             "path": str(path),
             "servers": sorted(desired["mcp_servers"].keys()),
         },
@@ -7716,6 +8100,7 @@ _INSTALL_STEPS: tuple[tuple[str, Callable[[_StepCtx], PhaseResult]], ...] = (
     ("voice_wire", _phase_voice_wire),
     ("gateway_secrets_wire", _phase_gateway_secrets_wire),
     ("profile_api_keys", _phase_profile_api_keys),
+    ("profile_mcp_wire", _phase_profile_mcp_wire),
     ("smoke_tests", _phase_smoke_tests),
 )
 

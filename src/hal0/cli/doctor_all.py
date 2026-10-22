@@ -1277,6 +1277,268 @@ def check_hermes_mcp_config_auth(
     )
 
 
+def _header(server: dict[str, Any], name: str) -> Any:
+    """``server.headers[name]`` when ``headers`` is a mapping, else ``None``."""
+    headers = server.get("headers")
+    return headers.get(name) if isinstance(headers, dict) else None
+
+
+def check_hermes_profiles_mcp(
+    *,
+    auth: dict[str, Any] | None,
+    home: Path | None = None,
+) -> Check:
+    """Every named Hermes profile carries hal0's MCP servers, with a bearer when
+    the box requires auth (#2891, ADR-0035).
+
+    A profile cloned by the operator starts with no ``mcp_servers``; hal0-api
+    wires hal0-admin + hal0-memory into it on every reconcile sweep
+    (``hermes_upstreams.sync_hermes_upstreams``), so a profile still unwired is
+    a WARN naming the sweep. An entry without ``Authorization`` on an auth-on
+    box is a FAIL like the default profile's row: Hermes would hang on the
+    401 at every discovery pass. ``hal0: {wire_mcp: false}`` opts a profile
+    out and is reported as such. ADVISORY (never critical).
+    """
+    from hal0.agents import hermes_api as ha
+    from hal0.agents import hermes_provision as hp
+    from hal0.agents.hermes_provision import PROFILE_MCP_OPT_OUT_KEY
+
+    key, label = "hermes_profiles_mcp", "Hermes profile MCP wiring"
+    root = home if home is not None else ha.hermes_home()
+    profiles = root / "profiles"
+    # Hermes chmods its home 0700: a non-hal0 operator cannot see the profiles
+    # (``is_dir()`` is simply False then). Say so instead of a green "no
+    # profiles" (same posture as the hermes-api row).
+    unreadable_msg = f"cannot read {profiles}; run hal0 doctor as hal0 or root"
+    if os.path.islink(root) or os.path.islink(profiles):
+        return Check(
+            key,
+            label,
+            _WARN,
+            f"{root if os.path.islink(root) else profiles} is a symlink; hal0 wires profiles "
+            "only through a real Hermes home",
+        )
+    if os.path.lexists(root) and not os.access(root, os.R_OK | os.X_OK):
+        return Check(key, label, _WARN, unreadable_msg)
+    if os.path.lexists(profiles) and not os.access(profiles, os.R_OK | os.X_OK):
+        return Check(key, label, _WARN, unreadable_msg)
+    linked: list[str] = []
+    try:
+        entries = []
+        for p in sorted(profiles.iterdir(), key=lambda p: p.name):
+            if p.is_symlink():  # the writer never follows it: unmanaged, say so
+                if p.name != "hal0-brain" and hp.HERMES_PROFILE_ID_RE.match(p.name):
+                    linked.append(p.name)
+                continue
+            if p.is_dir():
+                entries.append(p.name)
+    except FileNotFoundError:
+        entries = []
+    except OSError as exc:  # enumeration itself failed: never a green "no profiles"
+        return Check(key, label, _WARN, f"cannot list {profiles}: {exc}")
+    names = [n for n in entries if n != "hal0-brain" and hp.HERMES_PROFILE_ID_RE.match(n)]
+    if not names and not linked:
+        return Check(key, label, _PASS, "no named Hermes profiles")
+    auth_required = bool((auth or {}).get("auth_required"))
+
+    import yaml
+
+    unwired: list[str] = []
+    no_config: list[str] = []
+    unauthed: list[str] = []
+    drifted: list[str] = []
+    opted_out: list[str] = []
+    unreadable: list[str] = []
+    wired: list[str] = []
+    for name in names:
+        cfg = root / "profiles" / name / "config.yaml"
+        # Opened once, without following links or blocking on a FIFO, checked
+        # with fstat and read from that same descriptor, as the writer does.
+        try:
+            fd = os.open(cfg, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        except FileNotFoundError:
+            no_config.append(name)  # the writer skips it too: Hermes owns creation
+            continue
+        except OSError:
+            unreadable.append(name)
+            continue
+        try:
+            with os.fdopen(fd, "rb") as fh:
+                if not stat.S_ISREG(os.fstat(fh.fileno()).st_mode):
+                    unreadable.append(name)
+                    continue
+                data = yaml.safe_load(fh.read().decode("utf-8"))
+        except (OSError, UnicodeDecodeError, yaml.YAMLError):
+            unreadable.append(name)
+            continue
+        if data is None:  # an empty file is an empty mapping
+            data = {}
+        if not isinstance(data, dict):  # ``[]`` / ``false``: the writer refuses these too
+            unreadable.append(name)
+            continue
+        servers = data.get("mcp_servers")
+        servers = servers if isinstance(servers, dict) else {}
+        block = data.get("hal0")
+        if isinstance(block, dict) and block.get(PROFILE_MCP_OPT_OUT_KEY) is False:
+            # Opt-out means hands off: hal0 neither adds nor removes. Say what
+            # the profile still carries, so a revoke is a deliberate hand edit.
+            kept = [n for n in ("hal0-admin", "hal0-memory") if isinstance(servers.get(n), dict)]
+            opted_out.append(f"{name} (still carries {', '.join(kept)})" if kept else name)
+            continue
+        missing = [n for n in ("hal0-admin", "hal0-memory") if not isinstance(servers.get(n), dict)]
+        if missing:
+            unwired.append(name)
+            continue
+        # The identity and target must be the ones hal0 wires: a copied
+        # X-hal0-Agent would read another profile's private memory, a missing
+        # X-hal0-Private would write to the shared bank. The bearer must be the
+        # box's current service key when one is discoverable (a rotated key
+        # leaves a stale one behind), else at least a ``Bearer …`` string.
+        desired = hp._profile_wire_desired(hp.profile_agent_id(name))
+        if auth_required and any(
+            not _bearer_ok(
+                _header(servers[n], "Authorization"), want["headers"].get("Authorization")
+            )
+            for n, want in desired["mcp_servers"].items()
+        ):
+            unauthed.append(name)
+            continue
+        memory = data.get("memory")
+        provider = memory.get("provider") if isinstance(memory, dict) else None
+        if provider != desired["memory"]["provider"] or any(
+            servers[n].get("type") != want["type"]
+            or servers[n].get("url") != want["url"]
+            or servers[n].get("timeout") != want["timeout"]
+            or any(
+                _header(servers[n], h) != v
+                for h, v in want["headers"].items()
+                if h != "Authorization"
+            )
+            for n, want in desired["mcp_servers"].items()
+        ):
+            drifted.append(name)
+            continue
+        wired.append(name)
+
+    parts: list[str] = []
+    if unauthed:
+        parts.append(
+            f"hal0 MCP entries in profile(s) {', '.join(unauthed)} carry no usable or a stale "
+            "Authorization bearer; Hermes fails the 401 at discovery; run "
+            "POST /api/agents/hermes/reconcile-upstreams or sudo hal0 agent reprovision hermes --repair"
+        )
+    if unwired:
+        parts.append(
+            f"profile(s) {', '.join(unwired)} not wired to hal0-admin/hal0-memory yet; "
+            "hal0-api wires them within 120 s, or POST /api/agents/hermes/reconcile-upstreams"
+        )
+    if drifted:
+        parts.append(
+            f"profile(s) {', '.join(drifted)} carry hal0 MCP entries that differ from hal0's "
+            "wiring (identity, target or memory provider); the next hal0-api sweep rewrites them"
+        )
+    if unreadable:
+        parts.append(
+            f"config.yaml of profile(s) {', '.join(unreadable)} is unreadable or not a mapping; "
+            "hal0 leaves it alone, fix it by hand"
+        )
+    if no_config:
+        parts.append(
+            f"profile(s) {', '.join(no_config)} have no config.yaml; hal0 wires a profile once "
+            "Hermes creates its config"
+        )
+    if linked:
+        parts.append(
+            f"profile(s) {', '.join(linked)} are symlinks; hal0 never wires or repairs a linked "
+            "profile, replace the link with a real directory"
+        )
+    if unauthed:
+        return Check(key, label, _FAIL, "; ".join(parts))
+    if unwired or drifted or unreadable or linked:
+        return Check(key, label, _WARN, "; ".join(parts))
+    detail = f"wired: {', '.join(wired)}" if wired else "no profile wired"
+    if opted_out:
+        detail += f"; opted out: {', '.join(opted_out)}"
+    if parts:  # only the informational no-config note is left
+        detail += "; " + "; ".join(parts)
+    return Check(key, label, _PASS, detail)
+
+
+def _bearer_ok(value: Any, wanted: Any) -> bool:
+    """``value`` is the bearer hal0 would write (``wanted``), or a ``Bearer …`` string when
+    no service key is discoverable from where doctor runs."""
+    if not isinstance(value, str) or not value.startswith("Bearer ") or len(value) <= 7:
+        return False
+    return value == wanted if isinstance(wanted, str) else True
+
+
+def check_hermes_generation_extras(*, home: Path | None = None, venv: Path | None = None) -> Check:
+    """A committed pm generation for the live release must carry its extras (#2891).
+
+    Hermes's package manager can stage its own environment for a checkout and
+    boot every later process into it instead of the release venv hal0 built
+    (``hermes_platforms.committed_generation``). That generation starts with
+    no extras, so a gateway booted from one runs without ``mcp`` and has no
+    hal0 tools, silently. No generation committed means the gateway runs from
+    the release venv, which is the converged state. ADVISORY.
+    """
+    from hal0.agents import hermes_api as ha
+    from hal0.agents import hermes_platforms as hpl
+    from hal0.agents import hermes_provision as hp
+    from hal0.agents import hermes_release as rel
+
+    key, label = "hermes_generation", "Hermes pm generation"
+    root = home if home is not None else ha.hermes_home()
+    layout = rel.Layout.for_venv(venv if venv is not None else hp.HERMES_VENV_DEFAULT)
+    try:
+        release = rel.live_release(layout)
+    except OSError:
+        release = None
+    if release is None:
+        if rel._link_release_id(layout.current):
+            return Check(
+                key,
+                label,
+                _WARN,
+                f"{layout.current} names a release whose release.json cannot be read; "
+                "run sudo hal0 agent reprovision hermes --repair",
+            )
+        return Check(key, label, _PASS, "no live Hermes release")
+    # ``committed_generation`` answers None for an unreadable install state too;
+    # across a 0700 home that is not proof that no generation is committed.
+    installs = root / "installs"
+    for probe in (root, installs):
+        if os.path.lexists(probe) and not os.access(probe, os.R_OK | os.X_OK):
+            return Check(key, label, _WARN, f"cannot read {probe}; run hal0 doctor as hal0 or root")
+    try:
+        generation = hpl.committed_generation(root, release.src)
+    except OSError:
+        generation = None
+    if generation is None:
+        return Check(
+            key, label, _PASS, "gateway runs from the release venv (no generation committed)"
+        )
+    # ``extras`` is everything the release installed; ``platform_extras`` the
+    # gateway platforms' share of it. Union both in case a writer records only one.
+    wanted: set[str] = set()
+    for field in ("extras", "platform_extras"):
+        value = release.data.get(field)
+        if isinstance(value, list):
+            wanted.update(e for e in value if isinstance(e, str))
+    have = set(hpl.generation_extras(root, release.src))
+    missing = sorted(wanted - have - hpl.NEVER_CARRY)
+    if missing:
+        return Check(
+            key,
+            label,
+            _WARN,
+            f"the committed generation {generation.name} lacks extra(s) {', '.join(missing)} the "
+            f"release has; a gateway booted from it has no {'/'.join(missing)} tools; run "
+            "sudo hal0 agent reprovision hermes --repair",
+        )
+    return Check(key, label, _PASS, f"generation {generation.name} carries the release extras")
+
+
 def check_hermes_command_approvals(
     *,
     status_fn: Callable[[], dict[str, Any]] | None = None,
@@ -1888,6 +2150,8 @@ def build_all_checks(base: str | None = None) -> list[Check]:
             upstreams_payload=_get_any("/api/upstreams", base), slots_payload=slots_payload
         ),
         check_hermes_mcp_config_auth(auth=auth_payload),
+        check_hermes_profiles_mcp(auth=auth_payload),
+        check_hermes_generation_extras(),
         check_hermes_command_approvals(),
         check_hermes_delegation_slot(slots_payload),
         check_hermes_anchor_window(base=base),

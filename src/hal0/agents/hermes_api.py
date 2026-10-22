@@ -343,6 +343,11 @@ def ensure_default_key(home: Path, *, value: str | None = None) -> bool:
         return False
 
 
+def ensure_profile_mcp(home: Path) -> dict[str, Any]:
+    """Wire hal0's MCP servers into every named profile (``hermes_provision``)."""
+    return hp.wire_named_profiles(home)
+
+
 def ensure_profile_keys(home: Path) -> list[str]:
     """Give every profile a key hal0-api can read; returns the profiles written.
 
