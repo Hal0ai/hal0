@@ -662,12 +662,13 @@ class Dispatcher:
         return call
 
     def _pinned_owner(self, model_id: str) -> Upstream | None:
-        """First enabled pinned upstream owning ``model_id`` (owned or cached)."""
+        """First pinned upstream owning ``model_id`` (owned or cached).
+
+        A disabled pinned upstream still owns its ids: disabling it must not
+        let the id fall through to another lane.
+        """
         for upstream in self._upstreams.list():
-            if (
-                not getattr(upstream, "pinned", False)
-                or getattr(upstream, "enabled", True) is False
-            ):
+            if not getattr(upstream, "pinned", False):
                 continue
             if model_id in upstream.owned_models or model_id in self._cached_models(upstream.name):
                 return upstream
@@ -732,10 +733,17 @@ class Dispatcher:
         # registry / capability ladder (which would land on the agent slot).
         owner = self._pinned_owner(model_id)
         if owner is not None:
+            if getattr(owner, "enabled", True) is False:
+                raise UpstreamUnavailable(
+                    f"model {model_id!r} is owned by upstream {owner.name!r}, which is disabled",
+                    details={"model": model_id, "upstream": owner.name, "disabled": True},
+                )
             cache_state = "warm"
             if model_id not in self._cached_models(owner.name):
                 try:
-                    await self._fetch_models(owner)
+                    await self._single_flight.do(
+                        f"prefetch:{owner.name}", self._fetch_models, owner
+                    )
                 except Exception as exc:  # TIER1 — log, then fail below
                     log.warning(
                         "dispatch.pinned_fetch_failed",
@@ -743,13 +751,28 @@ class Dispatcher:
                         model=model_id,
                         error=str(exc),
                     )
-                cache_state = "fetched"
-            if model_id not in self._cached_models(owner.name):
-                raise UpstreamUnavailable(
-                    f"model {model_id!r} is served only by upstream {owner.name!r}, "
-                    "which is offline",
-                    details={"model": model_id, "upstream": owner.name},
-                )
+                    cache_state = "fetch_failed"
+                    fetch_error = True
+                else:
+                    cache_state = "fetched"
+                    fetch_error = False
+                cached = self._cached_models(owner.name)
+                if model_id not in cached:
+                    if fetch_error:
+                        raise UpstreamUnavailable(
+                            f"model {model_id!r} is served only by upstream "
+                            f"{owner.name!r}, which is offline",
+                            details={"model": model_id, "upstream": owner.name},
+                        )
+                    raise UpstreamUnavailable(
+                        f"model {model_id!r} is owned by upstream {owner.name!r}, "
+                        "which is up but does not advertise it",
+                        details={
+                            "model": model_id,
+                            "upstream": owner.name,
+                            "advertised": list(cached),
+                        },
+                    )
             call = UpstreamCall(
                 upstream_name=owner.name,
                 target_url=_resolve_target_url(owner, path),

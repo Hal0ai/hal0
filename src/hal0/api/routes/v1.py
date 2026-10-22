@@ -811,12 +811,17 @@ async def _dispatch_and_forward(
         body = await _read_json_body(request)
     # Translate an llm-slot alias (agent/utility/any enabled llm slot) → model id
     # before routing so the dispatcher sees the real model name.
-    body = await _rewrite_chat_slot_alias(request, body)
-    # #430: backend-aware load BEFORE dispatch, so a slot-backed model is
-    # loaded under its declared backend whichever routing path dispatch
-    # then takes. A model no upstream serves surfaces as the dispatcher's
-    # NoRouteFound envelope (404) — there is no catch-all fall-through.
-    await _ensure_backend_for_model(request, body)
+    # A model owned by a pinned remote upstream is never aliased to, or
+    # loaded as, a same-named local slot.
+    requested = body.get("model")
+    owned_remotely = isinstance(requested, str) and _is_remote_model(request, requested.strip())
+    if not owned_remotely:
+        body = await _rewrite_chat_slot_alias(request, body)
+        # #430: backend-aware load BEFORE dispatch, so a slot-backed model is
+        # loaded under its declared backend whichever routing path dispatch
+        # then takes. A model no upstream serves surfaces as the dispatcher's
+        # NoRouteFound envelope (404) — there is no catch-all fall-through.
+        await _ensure_backend_for_model(request, body)
     # DR-1: capability twin of the backend-aware load — wake an idle-EVICTED
     # embed/rerank/tts/img slot (resolved from the request PATH) so its
     # upstream is re-registered before dispatch, instead of 404ing.

@@ -17,13 +17,16 @@ from tests.dispatcher.test_router import (
 )
 
 
-def make_pinned(name: str = "hermes.coder", owned: tuple[str, ...] = ("coder",)) -> Upstream:
+def make_pinned(
+    name: str = "hermes.coder", owned: tuple[str, ...] = ("coder",), enabled: bool = True
+) -> Upstream:
     return Upstream(
         name=name,
         kind="remote",
         url="http://hermes.invalid/p/coder/v1",
         pinned=True,
         owned_models=owned,
+        enabled=enabled,
     )
 
 
@@ -107,3 +110,48 @@ async def test_unowned_model_unaffected_by_pinned_upstreams() -> None:
     call = await d.dispatch(make_request(), body={"model": "qwen3-4b", "messages": []})
     assert call.resolution_path == "registry"
     assert call.upstream_name == "chat"
+
+
+@pytest.mark.asyncio
+async def test_pinned_owned_model_disabled_raises_not_fallthrough() -> None:
+    pinned = make_pinned(enabled=False)
+    d = _dispatcher([make_slot("agent"), pinned], {})
+    with pytest.raises(UpstreamUnavailable) as exc:
+        await d.dispatch(make_request(), body={"model": "coder", "messages": []})
+    assert exc.value.details == {"model": "coder", "upstream": "hermes.coder", "disabled": True}
+    assert "disabled" in str(exc.value)
+
+
+@pytest.mark.asyncio
+async def test_pinned_owned_model_up_but_not_advertised() -> None:
+    async def fetch(u: Upstream) -> list[str]:
+        return ["other"]
+
+    cache = {"hermes.coder": ["other"]}
+    d = _dispatcher([make_slot("agent"), make_pinned()], cache, fetch=fetch)
+    with pytest.raises(UpstreamUnavailable) as exc:
+        await d.dispatch(make_request(), body={"model": "coder", "messages": []})
+    assert "does not advertise" in str(exc.value)
+    assert exc.value.details["advertised"] == ["other"]
+
+
+@pytest.mark.asyncio
+async def test_pinned_concurrent_cold_fetches_coalesce() -> None:
+    import asyncio
+
+    calls = 0
+    cache: dict[str, list[str]] = {}
+
+    async def fetch(u: Upstream) -> list[str]:
+        nonlocal calls
+        calls += 1
+        await asyncio.sleep(0.05)
+        cache[u.name] = ["coder"]
+        return ["coder"]
+
+    d = _dispatcher([make_pinned()], cache, fetch=fetch)
+    results = await asyncio.gather(
+        *[d.dispatch(make_request(), body={"model": "coder", "messages": []}) for _ in range(5)]
+    )
+    assert all(r.resolution_path == "pinned:hermes.coder" for r in results)
+    assert calls == 1
