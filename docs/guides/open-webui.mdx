@@ -84,6 +84,13 @@ hal0-admin and hal0-memory tools. Picking a slot model works exactly as it
 did before. The same entries appear in `/v1/models` for any other OpenAI
 client of hal0.
 
+- **Tools and memory in every profile.** hal0 writes its hal0-admin and
+  hal0-memory servers into each profile's own `config.yaml`, as that profile's
+  identity with a private memory bank, and keeps whatever else the profile
+  configures. A profile you create later gets them within two minutes. To
+  keep hal0 out of a profile, put `hal0: {wire_mcp: false}` in its
+  `config.yaml`. `hal0 doctor` reports the wiring on its `hermes_profiles_mcp`
+  row.
 - **Approvals** for gated hal0-admin tools land in the hal0 dashboard inbox,
   as they do from any other Hermes channel. The turn does not wait on them.
 - **History** is resent by Open WebUI on every turn; hal0 holds no Hermes

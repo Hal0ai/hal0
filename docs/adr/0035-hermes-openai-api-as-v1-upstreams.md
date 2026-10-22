@@ -217,7 +217,22 @@ line above disagree.
    upstream receives them when a client sends them. They are protocol
    selectors, not credentials. OWUI sends neither, and resends history each
    turn.
-9. **Visibility.** The Services page's OWUI card shows an "Agents" wired chip
+9. **Every named profile gets hal0's tools and memory (#2891).** A profile the
+   operator clones starts with no `mcp_servers`, so through `/v1` it answered
+   without hal0-admin and hal0-memory. `wire_named_profiles` deep-merges the
+   two hal0-owned MCP servers, as `X-hal0-Agent: hermes__<profile>` with a
+   private memory bank and the box bearer, and `memory.provider: hal0-memory`
+   into every `profiles/<p>/config.yaml` except `hal0-brain`, which keeps its
+   own phase and identity. It merges and never clobbers: scalars and dicts
+   only, rewritten only when the content differs. It runs in the provisioning
+   pipeline (phase `profile_mcp_wire`) and in every hal0-api sweep (decision
+   7), and Hermes re-reads a profile's `mcp_servers` on its own 60 s
+   reconcile, so a new profile has its tools without a restart. A profile opts
+   out with `hal0: {wire_mcp: false}`. `hal0 doctor` has a
+   `hermes_profiles_mcp` row for it and a `hermes_generation` row that warns
+   when a committed pm generation lacks extras the release has, the drift
+   that first hid the tools.
+10. **Visibility.** The Services page's OWUI card shows an "Agents" wired chip
    (`wired.agents`, from the server-side classifier). `hal0 doctor` has a
    `hermes-api` row, "Hermes API upstreams". Green on that row means the API
    path answers, not that Hermes has its tools (see Consequences). Its
@@ -255,9 +270,11 @@ its own for Hermes.
 - OWUI's picker, and `/v1/models` for every client, lists `hermes-agent` and
   one model per served profile next to the slot models. Choosing a slot model
   behaves exactly as before.
-- **Dependency on #2891.** The API path works when the gateway runs without the
-  `mcp` and `web` extras, but the profiles then have no hal0 tools, and the
-  doctor row says only that the API answers.
+- **The gateway must carry the `mcp` extra.** The API path works when the
+  gateway runs without it, but the profiles then have no hal0 tools, and the
+  `hermes-api` doctor row says only that the API answers. #2897 keeps the
+  gateway on the release venv, and the `hermes_generation` row warns when a
+  committed pm generation would take that away again (#2891).
 - **Streams can run for 30 minutes.** A Hermes turn can hold a hal0-api
   connection for up to 1800 s, against 900 s for a slot. A few concurrent long
   turns share the dispatcher's connection pool with slot traffic.
