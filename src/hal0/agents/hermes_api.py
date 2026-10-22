@@ -7,7 +7,10 @@ Verified against Hermes 0.22.2 (commit ``d923a5eb``):
 * The API server binds ``127.0.0.1:8642`` by default; host/port resolve from
   config ``gateway.platforms.api_server.{host,port}``, then env
   ``API_SERVER_HOST`` / ``API_SERVER_PORT``, then the defaults
-  (``gateway/platforms/api_server.py:216-230``, ``:1196``).
+  (``gateway/platforms/api_server.py:216-230``, ``:1196``). "Env" is the
+  gateway's, which ``hermes_cli/env_loader.py:506`` fills from
+  ``$HERMES_HOME/.env`` with ``override=True``; hal0 reads that file, never
+  hal0-api's own process environment.
 * The gateway serves one ``/p/<profile>/`` prefix per profile returned by
   ``profiles_to_serve`` (``hermes_cli/profiles.py:1135``). Under it the
   advertised model id is the profile name; the default profile advertises
@@ -40,6 +43,7 @@ from typing import Any
 import structlog
 
 from hal0.agents import hermes_provision as hp
+from hal0.config.locking import file_lock
 
 log = structlog.get_logger(__name__)
 
@@ -83,13 +87,29 @@ def _as_port(value: Any) -> int | None:
     return port if 0 < port < 65536 else None
 
 
+def gateway_env(home: Path, name: str) -> str | None:
+    """``name`` as the gateway sees it: from ``home/.env`` (Hermes's own env file)."""
+    return _dotenv_get(home / ".env", name)
+
+
 def api_server_endpoint(home: Path | None = None) -> tuple[str, int]:
-    """``(host, port)``: config, then ``API_SERVER_HOST/PORT`` env, then defaults."""
-    block = _api_server_block(home if home is not None else hermes_home())
+    """``(host, port)``: config, then ``API_SERVER_HOST/PORT`` in ``.env``, then defaults."""
+    root = home if home is not None else hermes_home()
+    block = _api_server_block(root)
     host = str(block.get("host") or "").strip()
-    host = host or os.environ.get("API_SERVER_HOST", "").strip() or DEFAULT_HOST
-    port = _as_port(block.get("port")) or _as_port(os.environ.get("API_SERVER_PORT"))
+    host = host or (gateway_env(root, "API_SERVER_HOST") or "").strip() or DEFAULT_HOST
+    port = _as_port(block.get("port")) or _as_port(gateway_env(root, "API_SERVER_PORT"))
     return host, port or DEFAULT_PORT
+
+
+def authority(host: str, port: int) -> str:
+    """``host:port`` for a URL; an IPv6 literal (``::1``) is bracketed."""
+    return f"[{host}]:{port}" if ":" in host and not host.startswith("[") else f"{host}:{port}"
+
+
+def api_server_base(home: Path) -> str:
+    """``http://<authority>`` of the API server, IPv6-safe."""
+    return "http://" + authority(*api_server_endpoint(home))
 
 
 def profile_dirs(home: Path) -> list[str]:
@@ -121,15 +141,13 @@ def probe_status(url: str, *, timeout: float = 3.0) -> int:
 def gateway_alive(home: Path, *, probe: Callable[[str], int] | None = None) -> bool:
     """Whether the API server's default ``/health`` answers exactly 200."""
     check = probe if probe is not None else probe_status
-    host, port = api_server_endpoint(home)
-    return check(f"http://{host}:{port}/health") == 200
+    return check(f"{api_server_base(home)}/health") == 200
 
 
 def profile_health(home: Path, profile: str, *, probe: Callable[[str], int] | None = None) -> int:
     """Status of ``/p/<profile>/health`` (``0`` on a transport error)."""
     check = probe if probe is not None else probe_status
-    host, port = api_server_endpoint(home)
-    return check(f"http://{host}:{port}/p/{profile}/health")
+    return check(f"{api_server_base(home)}/p/{profile}/health")
 
 
 def served_profiles(home: Path, *, probe: Callable[[str], int] | None = None) -> list[str]:
@@ -153,13 +171,48 @@ def _usable(value: str | None) -> bool:
     return len(v) >= _MIN_KEY_LENGTH and v.lower() not in _UNUSABLE_KEYS
 
 
-def _unquote(raw: str) -> str:
+def _strip_inline_comment(value: str) -> str:
+    """Hermes's rule (``agent/secret_scope.py:257-278``): a quoted value scans
+    to its closing quote (backslash-aware for double quotes) and drops a
+    trailing ``# ...``; an unquoted one is cut at a ``#`` preceded by whitespace."""
+    value = value.strip()
+    if not value:
+        return value
+    quote = value[0]
+    if quote in ("'", '"'):
+        i = 1
+        while i < len(value):
+            ch = value[i]
+            if quote == '"' and ch == "\\":
+                i += 2
+                continue
+            if ch == quote:
+                return value[: i + 1] if value[i + 1 :].lstrip().startswith("#") else value
+            i += 1
+        return value
+    return re.split(r"\s+#", value, maxsplit=1)[0].strip()
+
+
+def _parse_env_value(raw: str) -> str:
+    """Hermes's rule (``agent/secret_scope.py:280-290``): bare, ``'single'`` or
+    ``"double"`` with ``\\"`` / ``\\\\`` escapes."""
     value = raw.strip()
-    if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+    if len(value) >= 2 and value[0] == value[-1] == '"':
+        quoted = value[1:-1]
+        parsed: list[str] = []
+        i = 0
+        while i < len(quoted):
+            escaped = quoted[i] == "\\" and quoted[i + 1 : i + 2] in ('"', "\\")
+            parsed.append(quoted[i + 1] if escaped else quoted[i])
+            i += 2 if escaped else 1
+        return "".join(parsed)
+    if len(value) >= 2 and value[0] == value[-1] == "'":
         return value[1:-1]
-    # Unquoted: an inline comment starts at whitespace + '#'.
-    match = re.search(r"\s#", value)
-    return value[: match.start()].strip() if match else value
+    return value
+
+
+def _unquote(raw: str) -> str:
+    return _parse_env_value(_strip_inline_comment(raw))
 
 
 def _dotenv_get(path: Path, name: str) -> str | None:
@@ -246,7 +299,17 @@ def ensure_profile_key(profile: str, home: Path) -> bool:
     """
     if profile == DEFAULT_PROFILE or api_key_for(profile, home) is not None:
         return False
-    return _append_env_key(home / "profiles" / profile / ".env", hp._generate_api_server_key())
+    target = home / "profiles" / profile / ".env"
+    try:
+        # Re-check under the cross-process lock: hal0-api's periodic sweep and
+        # a CLI provision may run at once, and both must not mint a key.
+        with file_lock(target):
+            if api_key_for(profile, home) is not None:
+                return False
+            return _append_env_key(target, hp._generate_api_server_key())
+    except OSError as exc:  # lock file not creatable (dir not writable): skip
+        log.warning("hermes_api.key_skipped", path=str(target), error=str(exc))
+        return False
 
 
 def ensure_default_key(home: Path, *, value: str | None = None) -> bool:
@@ -269,7 +332,15 @@ def ensure_default_key(home: Path, *, value: str | None = None) -> bool:
     key = value if value is not None else hp._read_secrets_env().get(_KEY_NAME)
     if not key or not hp._is_strong_api_server_key(key):
         return False
-    return _append_env_key(home / ".env", key.strip())
+    target = home / ".env"
+    try:
+        with file_lock(target):
+            if api_key_for(DEFAULT_PROFILE, home) is not None:
+                return False
+            return _append_env_key(target, key.strip())
+    except OSError as exc:
+        log.warning("hermes_api.key_skipped", path=str(target), error=str(exc))
+        return False
 
 
 def ensure_profile_keys(home: Path) -> list[str]:
@@ -298,14 +369,15 @@ def default_model_id(home: Path | None = None) -> str:
     ``API_SERVER_MODEL_NAME`` is truthy (``gateway/config_env.py:141-151``,
     ``:314``), gated on a usable ``API_SERVER_KEY`` (``:308-310``). So: env,
     then config ``gateway.platforms.api_server.model_name``, then
-    ``hermes-agent``. The env read is hal0-api's own process env; hal0
-    renders no ``API_SERVER_*`` gateway env, so on a managed box config.yaml
-    is the source.
+    ``hermes-agent``. "Env" is the gateway's, read here from
+    ``$HERMES_HOME/.env`` (:func:`gateway_env`); hal0 renders no
+    ``API_SERVER_*`` into the gateway's unit environment.
     """
-    env = os.environ.get("API_SERVER_MODEL_NAME", "").strip()
+    root = home if home is not None else hermes_home()
+    env = (gateway_env(root, "API_SERVER_MODEL_NAME") or "").strip()
     if env:
         return env
-    block = _api_server_block(home if home is not None else hermes_home())
+    block = _api_server_block(root)
     configured = block.get("model_name")
     name = configured.strip() if isinstance(configured, str) else ""
     return name or DEFAULT_MODEL_ID

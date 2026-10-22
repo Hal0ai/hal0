@@ -53,10 +53,37 @@ def test_api_server_endpoint_defaults(home: Path) -> None:
     assert hermes_api.api_server_endpoint(home) == ("127.0.0.1", 8642)
 
 
-def test_api_server_endpoint_from_env(home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("API_SERVER_HOST", "0.0.0.0")
-    monkeypatch.setenv("API_SERVER_PORT", "9100")
+def test_api_server_endpoint_from_hermes_env_file(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Codex P1: the overrides Hermes honours are the ones in $HERMES_HOME/.env,
+    not hal0-api's own process environment."""
+    monkeypatch.setenv("API_SERVER_HOST", "10.9.9.9")  # hal0-api's env: ignored
+    monkeypatch.setenv("API_SERVER_PORT", "1")
+    assert hermes_api.api_server_endpoint(home) == ("127.0.0.1", 8642)
+    (home / ".env").write_text("API_SERVER_HOST=0.0.0.0\nAPI_SERVER_PORT=9100\n")
     assert hermes_api.api_server_endpoint(home) == ("0.0.0.0", 9100)
+
+
+def test_authority_brackets_ipv6() -> None:
+    assert hermes_api.authority("127.0.0.1", 8642) == "127.0.0.1:8642"
+    assert hermes_api.authority("::1", 8642) == "[::1]:8642"
+    assert hermes_api.authority("[::1]", 8642) == "[::1]:8642"
+
+
+def test_probe_urls_bracket_an_ipv6_host(home: Path) -> None:
+    (home / "config.yaml").write_text(
+        "gateway:\n  platforms:\n    api_server:\n      host: '::1'\n      port: 8642\n"
+    )
+    seen: list[str] = []
+
+    def probe(url: str) -> int:
+        seen.append(url)
+        return 200
+
+    assert hermes_api.gateway_alive(home, probe=probe) is True
+    assert hermes_api.profile_health(home, "coder", probe=probe) == 200
+    assert seen == ["http://[::1]:8642/health", "http://[::1]:8642/p/coder/health"]
 
 
 def test_api_server_endpoint_from_config(home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -188,6 +215,40 @@ def test_dotenv_parsing_rules(home: Path) -> None:
     assert hermes_api.api_key_for("coder", home) == GOOD
     env.write_text(f"API_SERVER_KEY='{GOOD} # kept'\n")
     assert hermes_api.api_key_for("coder", home) == f"{GOOD} # kept"
+
+
+def test_dotenv_quoted_value_with_inline_comment(home: Path) -> None:
+    """Codex P2: ``"<key>" # rotated`` must yield the key, not ``"<key>"``."""
+    env = home / "profiles" / "coder" / ".env"
+    env.write_text(f'API_SERVER_KEY="{GOOD}" # rotated\n')
+    assert hermes_api.api_key_for("coder", home) == GOOD
+    env.write_text(f"API_SERVER_KEY='{GOOD}' #x\n")
+    assert hermes_api.api_key_for("coder", home) == GOOD
+    env.write_text('API_SERVER_KEY="ab\\"cd\\\\ef_abcdefghijklmnop"\n')
+    assert hermes_api.api_key_for("coder", home) == 'ab"cd\\ef_abcdefghijklmnop'
+    env.write_text(f"API_SERVER_KEY={GOOD}#notacomment\n")
+    assert hermes_api.api_key_for("coder", home) == f"{GOOD}#notacomment"
+
+
+def test_key_writes_serialise_under_a_file_lock(
+    home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A periodic hal0-api sweep and a CLI provision may overlap; both check
+    and append under the same cross-process lock on the target ``.env``."""
+    locked: list[str] = []
+    real = hermes_api.file_lock
+
+    def spy(target: Path):
+        locked.append(str(target))
+        return real(target)
+
+    monkeypatch.setattr(hermes_api, "file_lock", spy)
+    assert hermes_api.ensure_profile_key("nokey", home) is True
+    _write_vault(tmp_path, VAULT)
+    assert hermes_api.ensure_default_key(home) is True
+    assert locked == [str(home / "profiles" / "nokey" / ".env"), str(home / ".env")]
+    assert hermes_api.ensure_profile_key("coder", home) is False  # keyed: no lock taken
+    assert len(locked) == 2
 
 
 def test_ensure_profile_key_writes_when_absent(home: Path) -> None:
@@ -355,13 +416,15 @@ def test_ensure_profile_keys_skips_unwritable_profile_dir(home: Path) -> None:
 
 def test_default_model_id_override_precedence(home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     assert hermes_api.default_model_id(home) == "hermes-agent"
-    monkeypatch.setenv("API_SERVER_MODEL_NAME", "from-env")
+    monkeypatch.setenv("API_SERVER_MODEL_NAME", "hal0-api-env")  # not the gateway's env
+    assert hermes_api.model_id_for("default", home) == "hermes-agent"
+    (home / ".env").write_text("OTHER=1\nAPI_SERVER_MODEL_NAME=from-env\n")
     assert hermes_api.model_id_for("default", home) == "from-env"
     (home / "config.yaml").write_text(
         "gateway:\n  platforms:\n    api_server:\n      model_name: from-config\n"
     )
     assert hermes_api.model_id_for("default", home) == "from-env"  # env > config
-    monkeypatch.delenv("API_SERVER_MODEL_NAME")
+    (home / ".env").write_text("OTHER=1\n")
     assert hermes_api.model_id_for("default", home) == "from-config"
     # Named profiles keep their name: Hermes resolves them with an empty override.
     assert hermes_api.model_id_for("coder", home) == "coder"
