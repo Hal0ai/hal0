@@ -76,6 +76,7 @@ const _WIRED_CHIPS = [
   { key: 'documents', label: 'Documents' },
   { key: 'images', label: 'Images' },
   { key: 'web_search', label: 'Web search' },
+  { key: 'agents', label: 'Agents' },
 ]
 
 function _wiredHint(key, on, wired) {
@@ -94,6 +95,10 @@ function _wiredHint(key, on, wired) {
         : 'No ComfyUI slot is bound — the image button has nothing to generate against (Capabilities → img).'
     case 'web_search':
       return 'No search provider is installed — the web-search toggle in Open WebUI has nothing to query.'
+    case 'agents':
+      return on
+        ? 'Hermes answers as: ' + wired.agents.join(', ')
+        : 'No Hermes profile is reachable; see hal0 doctor.'
     default:
       return ''
   }
@@ -104,7 +109,7 @@ function WiredChips({ wired }) {
   return (
     <div className="svcp-wired" data-testid="svcp-wired-openwebui">
       {_WIRED_CHIPS.map(({ key, label }) => {
-        const on = !!wired[key]
+        const on = key === 'agents' ? Array.isArray(wired.agents) && wired.agents.length > 0 : !!wired[key]
         return (
           <span key={key} className={'svcp-wired-chip' + (on ? ' on' : ' off')} data-testid={`svcp-wired-${key}`}>
             <span className={'sdot ' + (on ? 'serving' : 'offline')} style={{ width: 6, height: 6 }} />

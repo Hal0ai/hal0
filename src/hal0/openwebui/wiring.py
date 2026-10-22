@@ -23,6 +23,7 @@ route) — never the installer's cold ``python -m hal0.openwebui.env_writer``
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from typing import Any
 
 from hal0.capabilities.config import CapabilityConfig, load_capabilities_config
@@ -57,7 +58,31 @@ def _selection(cfg: CapabilityConfig, slot: str, child: str) -> Any:
     return cfg.selections.get(slot, {}).get(child)
 
 
-def openwebui_wiring_status() -> dict[str, Any]:
+def _agent_model_ids(
+    upstreams: Any | None, model_cache: Mapping[str, list[str]] | None
+) -> list[str]:
+    """Model ids Hermes answers as: every ``agent:hermes`` upstream's live
+    ``/v1/models`` ids (``model_cache``) when known, else its ``owned_models``.
+    Fail-soft: a bad registry yields ``[]``, never an exception."""
+    if upstreams is None:
+        return []
+    try:
+        ids: set[str] = set()
+        for up in upstreams.list():
+            if getattr(up, "managed_by", None) != "agent:hermes":
+                continue
+            cached = model_cache.get(up.name) if model_cache is not None else None
+            ids.update(cached or up.owned_models)
+        return sorted(ids)
+    except Exception:
+        return []
+
+
+def openwebui_wiring_status(
+    *,
+    upstreams: Any | None = None,
+    model_cache: Mapping[str, list[str]] | None = None,
+) -> dict[str, Any]:
     """Live truth behind both the dashboard's wired chips and the dynamic
     env blocks.
 
@@ -66,6 +91,10 @@ def openwebui_wiring_status() -> dict[str, Any]:
     ``_DEFAULT_OPENWEBUI_ENV``). Documents/images/web-search are gated on a
     real bound backend: an *enabled* capability selection with a non-empty
     model, never merely a slot file existing on disk.
+
+    ``agents`` lists the model ids Hermes profiles answer as; it needs the
+    live upstream registry, so callers outside the API process (the env
+    writer) omit it and get ``[]``.
     """
     cfg = load_capabilities_config()
     embed_sel = _selection(cfg, "embed", "embed")
@@ -80,6 +109,7 @@ def openwebui_wiring_status() -> dict[str, Any]:
         "web_search": False,
         "embed_model": embed_model or None,
         "image_model": image_model or None,
+        "agents": _agent_model_ids(upstreams, model_cache),
     }
 
 
