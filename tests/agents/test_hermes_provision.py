@@ -4909,3 +4909,51 @@ def test_wire_named_profiles_contains_invalid_utf8_to_that_profile(
     (home / "profiles" / "bad" / "config.yaml").write_bytes(b"model: \xff\xfe\n")
     report = hp.wire_named_profiles(home)
     assert "bad" in report["errors"] and report["wired"] == ["ok", "zed"]
+
+
+def test_wire_named_profiles_never_follows_symlinked_profiles_or_configs(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Codex P1: a root repair must not rewrite a YAML file outside HERMES_HOME."""
+    monkeypatch.setattr("hal0.service_identity.service_key", lambda prefer=None: None)
+    home = _profiles(tmp_path, ok="a: 1\n")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "config.yaml").write_text("root: owned\n")
+    (home / "profiles" / "planted").symlink_to(outside, target_is_directory=True)
+    (home / "profiles" / "linked").mkdir()
+    (home / "profiles" / "linked" / "config.yaml").symlink_to(outside / "config.yaml")
+    report = hp.wire_named_profiles(home)
+    assert report["wired"] == ["ok"]
+    assert report["skipped"]["planted"] == "symlink"
+    assert report["errors"]["linked"] == "config.yaml is a symlink"
+    assert (outside / "config.yaml").read_text() == "root: owned\n"
+
+
+def test_wire_named_profiles_reports_an_unreadable_profile_root(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Codex P2: an enumeration failure is an error, not a clean empty report."""
+    monkeypatch.setattr("hal0.service_identity.service_key", lambda prefer=None: None)
+    home = _profiles(tmp_path, ok="a: 1\n")
+
+    real_iterdir = hp.Path.iterdir
+
+    def boom(self):
+        if self == home / "profiles":
+            raise PermissionError("denied")
+        return real_iterdir(self)
+
+    monkeypatch.setattr(hp.Path, "iterdir", boom)
+    report = hp.wire_named_profiles(home)
+    assert report["errors"] == {"profiles/": "denied"} and report["wired"] == []
+    assert hp.wire_named_profiles(tmp_path / "absent")["errors"] == {}
+
+
+def test_named_profile_memory_timeout_matches_the_default_profile(monkeypatch) -> None:
+    """Codex P1: memory_reflect runs minutes; a 30 s client budget cancelled it."""
+    monkeypatch.setattr("hal0.service_identity.service_key", lambda prefer=None: None)
+    canonical = next(s["timeout"] for s in hp._default_mcp_servers() if s["name"] == "hal0-memory")
+    assert canonical >= 900
+    assert hp._build_profile_mcp_servers("hermes__coder")["hal0-memory"]["timeout"] == canonical
+    assert hp._build_brain_profile_mcp_servers()["hal0-memory"]["timeout"] == canonical

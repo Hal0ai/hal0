@@ -4802,9 +4802,20 @@ def _build_profile_mcp_servers(agent_id: str) -> dict[str, Any]:
             "type": "http",
             "url": "http://127.0.0.1:8080/mcp/memory/mcp",
             "headers": memory_headers,
-            "timeout": 30,
+            # Same budget as the default profile's entry: memory_reflect runs
+            # minutes on the engine side, and a short client timeout cancels
+            # the call while the engine finishes the job anyway.
+            "timeout": _memory_mcp_timeout(),
         },
     }
+
+
+def _memory_mcp_timeout() -> int:
+    """The canonical ``hal0-memory`` client timeout from :func:`_default_mcp_servers`."""
+    for srv in _default_mcp_servers():
+        if srv["name"] == "hal0-memory":
+            return int(srv["timeout"])
+    return 900
 
 
 def _build_brain_profile_mcp_servers() -> dict[str, Any]:
@@ -4946,17 +4957,33 @@ def wire_named_profiles(home: Path) -> dict[str, Any]:
     "errors": {name: error}}``.
     """
     report: dict[str, Any] = {"wired": [], "changed": [], "skipped": {}, "errors": {}}
+    profiles = Path(home) / "profiles"
     try:
-        names = sorted(p.name for p in (Path(home) / "profiles").iterdir() if p.is_dir())
-    except OSError:
+        entries = sorted(profiles.iterdir(), key=lambda p: p.name)
+    except FileNotFoundError:
+        return report  # no profiles at all: nothing to wire
+    except OSError as exc:
+        # Unreadable profile root: say so, never a clean empty report that the
+        # caller would take for "every profile wired".
+        report["errors"]["profiles/"] = str(exc)
         return report
-    for name in names:
+    for entry in entries:
+        name = entry.name
+        # A symlink planted by the service account must not make a root repair
+        # read and replace a config.yaml outside HERMES_HOME.
+        if entry.is_symlink() or not entry.is_dir():
+            if entry.is_symlink():
+                report["skipped"][name] = "symlink"
+            continue
         if name == _BRAIN_PROFILE_NAME:
             continue
         if not HERMES_PROFILE_ID_RE.match(name):
             report["skipped"][name] = "invalid profile name"
             continue
-        path = Path(home) / "profiles" / name / "config.yaml"
+        path = entry / "config.yaml"
+        if path.is_symlink():
+            report["errors"][name] = "config.yaml is a symlink"
+            continue
         result = _merge_profile_config(path, _profile_wire_desired(profile_agent_id(name)))
         if result.get("error"):
             report["errors"][name] = result["error"]
