@@ -6308,6 +6308,16 @@ def _phase_gateway_secrets_wire(ctx: _StepCtx) -> PhaseResult:
         return PhaseResult(status=PhaseStatus.SKIP, reason=result.reason, details=details)
     if result.outcome == "failed":
         return PhaseResult(status=PhaseStatus.FAIL, reason=result.reason, details=details)
+    if details["api_server_key"].get("outcome") == "failed":
+        # The drop-in is fine but the gateway has no key: its API server will
+        # not start, and every /v1 consumer is dead. Surface it in the summary
+        # instead of an ok row with the failure buried in details (#2908).
+        return PhaseResult(
+            status=PhaseStatus.WARN,
+            reason="gateway API_SERVER_KEY not written: "
+            + str(details["api_server_key"].get("error")),
+            details=details,
+        )
 
     # "written" | "unchanged" → OK. Convergence signal: the drop-in was
     # (re)written or a fresh API key was generated. A converged box is "unchanged"
@@ -6699,6 +6709,18 @@ def _generate_api_server_key() -> str:
     return _secrets.token_urlsafe(32)
 
 
+def _vault_key_names() -> set[str]:
+    """Names of the keys set in the vault, for a caller that cannot read it.
+
+    Routes through ``hermes_platforms.read_vault``: root reads the file, a
+    ``hal0`` caller asks the ``hal0-agentenv`` seam's ``secret-keys`` verb,
+    which prints names only. An absent vault or seam reads as no names.
+    """
+    from hal0.agents import hermes_platforms as hpl  # lazy: hpl imports this module
+
+    return set(hpl.read_vault(HERMES_SECRETS_ENV, seam=_HAL0_AGENTENV))
+
+
 def _read_secrets_env(path: Path | None = None) -> dict[str, str]:
     """Parse ``KEY=VALUE`` lines from the secrets vault (best-effort read)."""
     target = path if path is not None else HERMES_SECRETS_ENV
@@ -6748,15 +6770,20 @@ def ensure_gateway_api_server_key(
     """
     if existing is not None:
         env = existing
-    else:
-        vault_exists = HERMES_SECRETS_ENV.exists()
+    elif os.geteuid() == 0 or os.access(HERMES_SECRETS_ENV, os.R_OK):
         env = _read_secrets_env()
-        # A vault that exists but reads empty for a non-root caller is the
-        # 0600-root-owned case: install-time root already provisioned the key.
-        # Don't clobber it (we couldn't verify it, but we also can't read it —
-        # regenerating every runtime rerun would rotate a working key).
-        if vault_exists and not env and os.geteuid() != 0:
+    else:
+        # The provisioner runs as ``hal0`` and the vault's directory is 0700
+        # root, so it cannot even stat the file: on Python 3.12+
+        # ``Path.exists()`` raises ``PermissionError`` there instead of
+        # returning False, which this phase recorded as a failed key while
+        # reporting itself ok, and a fresh box never got a key (#2908). Ask the
+        # seam which names are set instead. A set key is kept: it cannot be
+        # verified from here, and regenerating every rerun would rotate a
+        # working key.
+        if "API_SERVER_KEY" in _vault_key_names():
             return ApiServerKeyResult(outcome="unreadable")
+        env = {}
 
     current = env.get("API_SERVER_KEY")
     if _is_strong_api_server_key(current):

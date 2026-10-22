@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -206,3 +207,78 @@ def test_reconcile_fixes_hermes_home_and_venv(
     chowned_paths = {c[0] for c in chowned}
     assert str(venv) in chowned_paths
     assert str(venv / "bin" / "hermes") in chowned_paths
+
+
+# ── #2908: a hal0 caller cannot stat the 0700 root vault directory ──────────
+
+
+def _non_root_vault(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    vault = tmp_path / "secrets" / "agents" / "hermes.env"
+    monkeypatch.setattr(hp, "HERMES_SECRETS_ENV", vault)
+    monkeypatch.setattr(hp.os, "geteuid", lambda: 999)
+    monkeypatch.setattr(hp.os, "access", lambda _p, _m: False)
+    return vault
+
+
+def test_ensure_non_root_keeps_a_key_the_seam_reports(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _non_root_vault(tmp_path, monkeypatch)
+    monkeypatch.setattr(hp, "_vault_key_names", lambda: {"API_SERVER_KEY", "HF_TOKEN"})
+
+    def _fail_write(_updates: dict[str, str]) -> None:  # pragma: no cover
+        raise AssertionError("must not rotate a key the vault already holds")
+
+    result = hp.ensure_gateway_api_server_key(write=_fail_write)
+    assert result.outcome == "unreadable"
+
+
+def test_ensure_non_root_generates_when_the_seam_reports_no_key(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _non_root_vault(tmp_path, monkeypatch)
+    monkeypatch.setattr(hp, "_vault_key_names", lambda: {"HF_TOKEN"})
+    written: dict[str, str] = {}
+    result = hp.ensure_gateway_api_server_key(write=lambda u: written.update(u))
+    assert result.outcome == "generated"
+    assert hp._is_strong_api_server_key(written["API_SERVER_KEY"])
+
+
+def test_ensure_non_root_never_stats_a_0700_vault_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The fresh-box repro: ``secrets/agents`` exists, 0700 root, no file yet.
+
+    ``Path.exists()`` raises ``PermissionError`` there on Python 3.12+, which
+    the phase recorded as ``api_server_key: failed`` while reporting itself ok,
+    so the gateway never got a key (#2908).
+    """
+    # ``os.getuid``: the agents conftest fakes ``geteuid`` to 0 for every test.
+    if os.getuid() == 0:
+        pytest.skip("root can stat any directory")
+    vault = tmp_path / "secrets" / "agents" / "hermes.env"
+    vault.parent.mkdir(parents=True)
+    vault.parent.chmod(0)
+    monkeypatch.setattr(hp, "HERMES_SECRETS_ENV", vault)
+    monkeypatch.setattr(hp.os, "geteuid", lambda: 999)
+    monkeypatch.setattr(hp, "_vault_key_names", set)
+    written: dict[str, str] = {}
+    try:
+        result = hp.ensure_gateway_api_server_key(write=lambda u: written.update(u))
+    finally:
+        vault.parent.chmod(0o700)
+    assert result.outcome == "generated" and "API_SERVER_KEY" in written
+
+
+def test_vault_key_names_asks_the_seam(monkeypatch: pytest.MonkeyPatch) -> None:
+    from hal0.agents import hermes_platforms as hpl
+
+    seen: dict[str, object] = {}
+
+    def _fake_read_vault(path, *, seam=None, run=None):
+        seen["path"], seen["seam"] = path, seam
+        return {"API_SERVER_KEY": "1"}
+
+    monkeypatch.setattr(hpl, "read_vault", _fake_read_vault)
+    assert hp._vault_key_names() == {"API_SERVER_KEY"}
+    assert seen == {"path": hp.HERMES_SECRETS_ENV, "seam": hp._HAL0_AGENTENV}
