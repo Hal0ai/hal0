@@ -731,6 +731,27 @@ def _hermes_root_prelude(terminal_env: dict[str, str] | None = None) -> None:
             "commands as the hal0 user, which is root-equivalent on this box.[/yellow]"
         )
 
+    _mirror_default_key_as_root()
+
+
+def _mirror_default_key_as_root() -> None:
+    """Mirror the vault's default gateway API key into ``$HERMES_HOME/.env``.
+
+    Only root can read the vault, and the provisioner that follows the prelude
+    runs as hal0, so this is the one place a box provisioned before the mirror
+    existed gets a default key hal0-api can read (ADR-0035, fact 5). Idempotent:
+    a usable key already in config or ``.env`` is left alone. A fresh install,
+    where the vault does not exist yet, is covered later by the provisioner's
+    ``gateway_secrets_wire`` phase, which mirrors the key it mints.
+    """
+    from hal0.agents import hermes_api
+
+    try:
+        if hermes_api.ensure_default_key(hermes_api.hermes_home()):
+            console.print("[dim]mirrored the Hermes gateway API key into $HERMES_HOME/.env[/dim]")
+    except OSError as exc:
+        console.print(f"[yellow]hermes API key mirror hint:[/yellow] {exc}")
+
 
 def _agent_home() -> str:
     """The hal0 service user's home dir (``/var/lib/hal0`` fallback)."""

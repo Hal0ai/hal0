@@ -1122,3 +1122,51 @@ def test_failed_provision_skips_reconcile(monkeypatch) -> None:
     res = CliRunner().invoke(ac.app, ["bootstrap", "hermes"])
 
     assert res.exit_code == 3, res.output
+
+
+# ── Codex P1: the root prelude mirrors the vault key before the drop ─────────
+
+
+def test_root_prelude_calls_the_default_key_mirror() -> None:
+    import inspect
+
+    assert "_mirror_default_key_as_root()" in inspect.getsource(ac._hermes_root_prelude)
+
+
+def test_mirror_default_key_as_root_writes_hermes_env(tmp_path, monkeypatch) -> None:
+    """A box provisioned before the mirror: the vault has the key, .env does not.
+    Only root can read the vault, and the provisioner runs as hal0 after the
+    re-exec, so the prelude is where the key reaches $HERMES_HOME/.env."""
+    from hal0.agents import hermes_provision as hp
+
+    home = tmp_path / "hermes"
+    home.mkdir()
+    vault = tmp_path / "vault" / "hermes.env"
+    vault.parent.mkdir()
+    vault.write_text("API_SERVER_KEY=" + "v" * 43 + "\n")
+    monkeypatch.setattr(hp, "HERMES_SECRETS_ENV", vault)
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    printed: list[str] = []
+    monkeypatch.setattr(ac.console, "print", lambda *a, **k: printed.append(str(a[0])))
+
+    ac._mirror_default_key_as_root()
+    assert (home / ".env").read_text() == "API_SERVER_KEY=" + "v" * 43 + "\n"
+    assert any("mirrored" in line for line in printed)
+
+    printed.clear()
+    ac._mirror_default_key_as_root()  # idempotent, silent
+    assert (home / ".env").read_text().count("API_SERVER_KEY=") == 1
+    assert printed == []
+
+
+def test_mirror_default_key_as_root_hint_on_oserror(tmp_path, monkeypatch) -> None:
+    from hal0.agents import hermes_api
+
+    def boom(_home):
+        raise OSError("vault unreadable")
+
+    monkeypatch.setattr(hermes_api, "ensure_default_key", boom)
+    printed: list[str] = []
+    monkeypatch.setattr(ac.console, "print", lambda *a, **k: printed.append(str(a[0])))
+    ac._mirror_default_key_as_root()
+    assert printed and "vault unreadable" in printed[0]
