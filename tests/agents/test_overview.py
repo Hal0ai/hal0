@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -433,12 +434,14 @@ def test_pi_checks_in_display_order_and_without_binary():
         "adapter_gate",
     ]
     assert out[0]["ok"] is False and out[-1]["ok"] is False
-    assert out[1]["ok"] is None and out[1]["detail"] == "no profiled home recorded"
+    assert out[1]["ok"] is None and out[1]["detail"] == "home not readable from the daemon"
 
 
-def test_pi_checks_fall_back_to_the_marker_home(tmp_path):
+def test_pi_checks_do_not_read_the_marker_home_when_home_is_none(tmp_path):
     (tmp_path / ".pi" / "agent").mkdir(parents=True)
-    (tmp_path / ".pi" / "agent" / "mcp.json").write_text("not json")
+    (tmp_path / ".pi" / "agent" / "mcp.json").write_text(
+        json.dumps({"mcpServers": {"hal0-memory": {}}})
+    )
     out = {
         c["id"]: c["ok"]
         for c in pi_profile_checks(
@@ -449,4 +452,40 @@ def test_pi_checks_fall_back_to_the_marker_home(tmp_path):
             home=None,
         )
     }
-    assert out["provider_ext"] is False and out["mcp_entry"] is False
+    assert [out[k] for k in ("provider_ext", "hindsight_ext", "theme", "mcp_entry")] == [None] * 4
+    assert out["hindsight_config"] is None
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores directory permissions")
+def test_pi_checks_answer_none_for_untraversable_paths_under_a_readable_home(tmp_path):
+    (tmp_path / ".pi" / "agent").mkdir(parents=True)
+    (tmp_path / ".pi" / "agent" / "mcp.json").write_text(
+        json.dumps({"mcpServers": {"hal0-memory": {}}})
+    )
+    (tmp_path / ".hindsight").mkdir()
+    locked = [tmp_path / ".pi", tmp_path / ".hindsight"]
+    for path in locked:
+        path.chmod(0o000)
+    try:
+        checks = {
+            c["id"]: c
+            for c in pi_profile_checks(
+                marker={"home": str(tmp_path)},
+                versions={"pi": "1.2.0", "adapter": "5.3.0"},
+                pins={"pi": "1.2.0", "adapter": "5.3.0"},
+                home_readable=True,
+                home=tmp_path,
+            )
+        }
+    finally:
+        for path in locked:
+            path.chmod(0o755)
+    for check_id in ("provider_ext", "hindsight_ext", "theme", "mcp_entry", "hindsight_config"):
+        assert checks[check_id]["ok"] is None, check_id
+        assert checks[check_id]["detail"].endswith("not readable from the daemon"), check_id
+    assert checks["binary"]["ok"] is True and checks["adapter_gate"]["ok"] is True
+
+
+def test_missing_unit_keys_are_unknown_not_a_fault():
+    assert degraded_reasons(**{**BASE, "units": {}}) == []
+    assert degraded_reasons(**{**BASE, "units": {"agent": "active", "gateway": None}}) == []

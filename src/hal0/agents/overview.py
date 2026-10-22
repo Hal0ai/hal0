@@ -218,7 +218,7 @@ def degraded_reasons(
     ``repair``. ``in_sync`` of ``None`` (Hermes not provisioned) is not drift.
     """
     reasons: list[dict[str, Any]] = []
-    gateway = units.get("gateway")
+    gateway = units.get("gateway") or "unknown"
     if gateway == "absent":
         reasons.append(
             _reason(
@@ -407,15 +407,31 @@ def _adapter_gate(versions: dict[str, str | None] | None) -> dict[str, Any]:
     return _check("adapter_gate", ok, f"pi {pi}, pi-mcp-adapter {adapter} ({needs})")
 
 
-def _has_memory_mcp_entry(path: Path) -> bool:
+def _not_readable(check_id: str, label: str) -> dict[str, Any]:
+    """``ok: None``: a path under the profiled home is not reachable by the daemon."""
+    return _check(check_id, None, f"{label} not readable from the daemon")
+
+
+def _mcp_entry_check(path: Path) -> dict[str, Any]:
     """Whether ``mcp.json`` has the ``hal0-memory`` server entry."""
-    config = _package_json(path)
-    servers = config.get("mcpServers") if config else None
-    return isinstance(servers, dict) and "hal0-memory" in servers
+    label = "hal0-memory MCP entry"
+    try:
+        config = json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, NotADirectoryError, ValueError):
+        config = None
+    except OSError:
+        return _not_readable("mcp_entry", label)
+    servers = config.get("mcpServers") if isinstance(config, dict) else None
+    present = isinstance(servers, dict) and "hal0-memory" in servers
+    return _check("mcp_entry", present, f"{label} {'present' if present else 'missing'}")
 
 
 def _file_check(check_id: str, path: Path, label: str) -> dict[str, Any]:
-    present = path.is_file()
+    """Whether ``path`` is a file. ``is_file`` raises on an untraversable parent."""
+    try:
+        present = path.is_file()
+    except OSError:
+        return _not_readable(check_id, label)
     return _check(check_id, present, f"{label} {'present' if present else 'missing'}")
 
 
@@ -430,24 +446,20 @@ def pi_profile_checks(
     """The Pi card's profile checks, in display order.
 
     ``binary`` and ``adapter_gate`` come from the probed ``versions``. The
-    rest read the profiled ``home``; when the daemon cannot read it they
-    answer ``ok: None`` ("unknown") rather than a false negative. ``home``
-    falls back to the profile ``marker``'s when the caller has none.
+    rest read the profiled ``home``; when the daemon cannot read it (``home``
+    is ``None``, ``home_readable`` is false, or a path under it is not
+    traversable) they answer ``ok: None`` ("unknown") rather than a false
+    negative. The caller has already resolved ``home`` and ``home_readable``
+    from the profile ``marker``, so the marker itself is not read here.
     """
     if versions is None:
         binary = _check("binary", False, "pi is not on PATH as an npm install")
     else:
         binary = _check("binary", True, f"pi {versions['pi']} (pinned {pins['pi']})")
 
-    if home is None and marker and marker.get("home"):
-        home = Path(str(marker["home"]))
-
     if home is None or not home_readable:
-        unknown = (
-            "no profiled home recorded" if home is None else "home not readable from the daemon"
-        )
         profile = [
-            _check(check_id, None, unknown)
+            _check(check_id, None, "home not readable from the daemon")
             for check_id in (
                 "provider_ext",
                 "hindsight_ext",
@@ -458,7 +470,6 @@ def pi_profile_checks(
         ]
     else:
         agent = home / ".pi" / "agent"
-        has_entry = _has_memory_mcp_entry(agent / "mcp.json")
         profile = [
             _file_check(
                 "provider_ext",
@@ -471,11 +482,7 @@ def pi_profile_checks(
                 "hindsight extension",
             ),
             _file_check("theme", agent / "themes" / "hal0.json", "hal0 theme"),
-            _check(
-                "mcp_entry",
-                has_entry,
-                f"hal0-memory MCP entry {'present' if has_entry else 'missing'}",
-            ),
+            _mcp_entry_check(agent / "mcp.json"),
             _file_check(
                 "hindsight_config",
                 home / ".hindsight" / "coding-agent.json",
