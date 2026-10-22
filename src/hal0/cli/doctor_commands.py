@@ -201,6 +201,7 @@ def doctor(
 
     # Advisory only: never changes the exit code.
     _print_hermes_sqlite_row(check_hermes_sqlite())
+    _print_hermes_plugins_row(check_hermes_plugins())
 
     # Preserve the script's exit code verbatim so chained shells see a
     # non-zero on the first failed check.
@@ -260,6 +261,58 @@ def _print_hermes_sqlite_row(row: dict[str, str]) -> None:
         return
     mark = "[green]✓[/green]" if row["status"] == "ok" else "[yellow]⚠[/yellow]"
     console.print(f"{mark}  hermes interpreter: {row['detail']}")
+
+
+def check_hermes_plugins(
+    hermes_home: Path | None = None, src_root: Path | None = None
+) -> dict[str, str]:
+    """Compare the plugin trees mirrored into HERMES_HOME with the shipped ones.
+
+    ``status`` is ``ok``, ``warn`` (a mirrored tree differs from, or is missing
+    next to, the shipped source) or ``absent`` (no HERMES_HOME or no shipped
+    source to compare against). A stale manifest makes Hermes downgrade the
+    plugin (#2884).
+    """
+    from hal0.agents.hermes_provision import (
+        REPO_ROOT_FOR_INSTALLER,
+        _dirs_identical,
+    )
+
+    home = hermes_home if hermes_home is not None else _HERMES_HOME
+    src = (
+        src_root
+        if src_root is not None
+        else REPO_ROOT_FOR_INSTALLER / "installer" / "agents" / "hermes" / "plugins"
+    )
+    if not home.is_dir() or not src.is_dir():
+        return {"status": "absent", "detail": "no HERMES_HOME or shipped plugins"}
+    pairs = {
+        "hal0-memory": home / "plugins" / "hal0-memory",
+        "hal0-provider": home / "plugins" / "model-providers" / "hal0",
+    }
+    drifted: list[str] = []
+    for name, dst in pairs.items():
+        shipped = src / name
+        if not shipped.is_dir():
+            continue
+        if not dst.is_dir() or not _dirs_identical(shipped, dst):
+            drifted.append(str(dst))
+    if drifted:
+        return {
+            "status": "warn",
+            "detail": (
+                f"{', '.join(drifted)} differ from the shipped plugins; Hermes may reject "
+                "the stale manifest. Run `sudo hal0 agent reprovision hermes`."
+            ),
+        }
+    return {"status": "ok", "detail": "plugin trees match the shipped source"}
+
+
+def _print_hermes_plugins_row(row: dict[str, str]) -> None:
+    if row["status"] == "absent":
+        return
+    mark = "[green]✓[/green]" if row["status"] == "ok" else "[yellow]⚠[/yellow]"
+    console.print(f"{mark}  hermes plugins: {row['detail']}")
 
 
 # ── hal0 doctor verify ──────────────────────────────────────────────────────

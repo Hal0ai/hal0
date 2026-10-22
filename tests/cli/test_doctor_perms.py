@@ -254,3 +254,18 @@ def test_hermes_sqlite_floor_is_defined_once() -> None:
     from hal0.agents import hermes_provision as hp
 
     assert dc.SQLITE_MIN is hermes_layout.SQLITE_MIN is hp.SQLITE_MIN == (3, 51, 3)
+
+
+def test_check_hermes_plugins_flags_a_stale_mirror(tmp_path: Path) -> None:
+    """#2884: a mirrored plugin tree that differs from the shipped one warns."""
+    src = tmp_path / "src"
+    (src / "hal0-provider").mkdir(parents=True)
+    (src / "hal0-provider" / "plugin.yaml").write_text("kind: model-provider\n")
+    home = tmp_path / "home"
+    dst = home / "plugins" / "model-providers" / "hal0"
+    dst.mkdir(parents=True)
+    (dst / "plugin.yaml").write_text("kind: provider\n")
+    assert dc.check_hermes_plugins(home, src)["status"] == "warn"
+    (dst / "plugin.yaml").write_text("kind: model-provider\n")
+    assert dc.check_hermes_plugins(home, src)["status"] == "ok"
+    assert dc.check_hermes_plugins(tmp_path / "none", src)["status"] == "absent"
