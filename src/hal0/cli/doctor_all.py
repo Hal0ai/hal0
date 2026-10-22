@@ -1300,6 +1300,7 @@ def check_hermes_profiles_mcp(
     out and is reported as such. ADVISORY (never critical).
     """
     from hal0.agents import hermes_api as ha
+    from hal0.agents import hermes_provision as hp
     from hal0.agents.hermes_provision import PROFILE_MCP_OPT_OUT_KEY
 
     key, label = "hermes_profiles_mcp", "Hermes profile MCP wiring"
@@ -1313,7 +1314,9 @@ def check_hermes_profiles_mcp(
         return Check(key, label, _WARN, unreadable_msg)
     if os.path.lexists(profiles) and not os.access(profiles, os.R_OK | os.X_OK):
         return Check(key, label, _WARN, unreadable_msg)
-    names = [n for n in ha.profile_dirs(root) if n != "hal0-brain"]
+    names = [
+        n for n in ha.profile_dirs(root) if n != "hal0-brain" and hp.HERMES_PROFILE_ID_RE.match(n)
+    ]
     if not names:
         return Check(key, label, _PASS, "no named Hermes profiles")
     auth_required = bool((auth or {}).get("auth_required"))
@@ -1322,6 +1325,7 @@ def check_hermes_profiles_mcp(
 
     unwired: list[str] = []
     unauthed: list[str] = []
+    drifted: list[str] = []
     opted_out: list[str] = []
     unreadable: list[str] = []
     wired: list[str] = []
@@ -1353,6 +1357,24 @@ def check_hermes_profiles_mcp(
         ):
             unauthed.append(name)
             continue
+        # The identity and target must be the ones hal0 wires: a copied
+        # X-hal0-Agent would read another profile's private memory, a missing
+        # X-hal0-Private would write to the shared bank.
+        desired = hp._profile_wire_desired(hp.profile_agent_id(name))
+        memory = data.get("memory")
+        provider = memory.get("provider") if isinstance(memory, dict) else None
+        if provider != desired["memory"]["provider"] or any(
+            servers[n].get("type") != want["type"]
+            or servers[n].get("url") != want["url"]
+            or any(
+                _header(servers[n], h) != v
+                for h, v in want["headers"].items()
+                if h != "Authorization"
+            )
+            for n, want in desired["mcp_servers"].items()
+        ):
+            drifted.append(name)
+            continue
         wired.append(name)
 
     parts: list[str] = []
@@ -1367,11 +1389,16 @@ def check_hermes_profiles_mcp(
             f"profile(s) {', '.join(unwired)} not wired to hal0-admin/hal0-memory yet; "
             "hal0-api wires them within 120 s, or POST /api/agents/hermes/reconcile-upstreams"
         )
+    if drifted:
+        parts.append(
+            f"profile(s) {', '.join(drifted)} carry hal0 MCP entries that differ from hal0's "
+            "wiring (identity, target or memory provider); the next hal0-api sweep rewrites them"
+        )
     if unreadable:
         parts.append(f"could not read config.yaml of profile(s) {', '.join(unreadable)}")
     if unauthed:
         return Check(key, label, _FAIL, "; ".join(parts))
-    if unwired or unreadable:
+    if unwired or drifted or unreadable:
         return Check(key, label, _WARN, "; ".join(parts))
     detail = f"wired: {', '.join(wired)}" if wired else "no profile wired"
     if opted_out:
@@ -1411,8 +1438,13 @@ def check_hermes_generation_extras(*, home: Path | None = None, venv: Path | Non
         return Check(
             key, label, _PASS, "gateway runs from the release venv (no generation committed)"
         )
-    extras = release.data.get("extras")
-    wanted = {e for e in extras if isinstance(e, str)} if isinstance(extras, list) else set()
+    # ``extras`` is everything the release installed; ``platform_extras`` the
+    # gateway platforms' share of it. Union both in case a writer records only one.
+    wanted: set[str] = set()
+    for field in ("extras", "platform_extras"):
+        value = release.data.get(field)
+        if isinstance(value, list):
+            wanted.update(e for e in value if isinstance(e, str))
     have = set(hpl.generation_extras(root, release.src))
     missing = sorted(wanted - have - hpl.NEVER_CARRY)
     if missing:

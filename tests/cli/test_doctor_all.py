@@ -1936,11 +1936,13 @@ def _profiles_home(tmp_path, **profiles):
 
 
 _WIRED = (
+    "memory:\n  provider: hal0-memory\n"
     "mcp_servers:\n"
     "  hal0-admin:\n    type: http\n    url: http://127.0.0.1:8080/mcp/admin/mcp\n"
     "    headers:\n      X-hal0-Agent: hermes__coder\n      Authorization: Bearer k\n"
     "  hal0-memory:\n    type: http\n    url: http://127.0.0.1:8080/mcp/memory/mcp\n"
-    "    headers:\n      X-hal0-Agent: hermes__coder\n      Authorization: Bearer k\n"
+    "    headers:\n      X-hal0-Agent: hermes__coder\n      X-hal0-Private: '1'\n"
+    "      Authorization: Bearer k\n"
 )
 _UNAUTHED = _WIRED.replace("      Authorization: Bearer k\n", "")
 
@@ -2081,3 +2083,38 @@ def test_profiles_mcp_warns_when_home_is_not_traversable(tmp_path, monkeypatch) 
     monkeypatch.setattr(da.os, "access", fake_access)
     c = da.check_hermes_profiles_mcp(auth={"auth_required": True}, home=home)
     assert c.status == "warn" and "run hal0 doctor as hal0 or root" in c.detail
+
+
+def test_profiles_mcp_warns_on_drifted_identity_or_provider(tmp_path) -> None:
+    """Codex P2: a copied X-hal0-Agent or a missing X-hal0-Private is not "wired"."""
+    copied = _WIRED.replace("hermes__coder", "hermes__hal0-brain")
+    no_private = _WIRED.replace("      X-hal0-Private: '1'\n", "")
+    home = _profiles_home(tmp_path, coder=copied, lab=no_private)
+    c = da.check_hermes_profiles_mcp(auth={"auth_required": True}, home=home)
+    assert c.status == "warn"
+    assert "coder, lab" in c.detail and "differ from hal0's wiring" in c.detail
+    # Only a different profile name than the fixture's identity drifts: ``coder`` as itself passes.
+    home2 = _profiles_home(tmp_path / "b", coder=_WIRED)
+    assert da.check_hermes_profiles_mcp(auth={"auth_required": True}, home=home2).status == "pass"
+
+
+def test_profiles_mcp_ignores_dirs_hermes_would_not_serve(tmp_path) -> None:
+    home = _profiles_home(tmp_path, **{"Not A Profile": "a: 1\n"})
+    c = da.check_hermes_profiles_mcp(auth={"auth_required": True}, home=home)
+    assert c.status == "pass" and "no named Hermes profiles" in c.detail
+
+
+def test_generation_extras_counts_platform_extras(tmp_path, monkeypatch) -> None:
+    """Codex P2: a generation without the gateway platforms' SDK is drift too."""
+    import json
+
+    from hal0.agents import hermes_release as rel
+
+    home, venv, root = _release_layout(tmp_path, ["web", "mcp"], generation_extras=["mcp", "web"])
+    rj = root / "releases" / "abc-1" / "release.json"
+    rj.write_text(
+        json.dumps({"ref": "x", "extras": ["web", "mcp"], "platform_extras": ["telegram"]})
+    )
+    monkeypatch.setattr(rel, "release_root_for", lambda _v: root)
+    c = da.check_hermes_generation_extras(home=home, venv=venv)
+    assert c.status == "warn" and "lacks extra(s) telegram" in c.detail

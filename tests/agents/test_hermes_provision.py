@@ -4782,16 +4782,58 @@ def test_phase_profile_mcp_wire_runs_after_profile_api_keys(tmp_path: Path, monk
     state = hp.BootstrapState(venv=str(tmp_path / "venv"), hermes_home=str(home))
     out = hp._phase_profile_mcp_wire(hp._StepCtx(state=state, io=hp.InstallIO()))
     assert out.status == hp.PhaseStatus.OK
-    assert out.details["changed"] == ["coder"]
+    assert out.details["changed"] is True and out.details["changed_profiles"] == ["coder"]
+    assert hp._step_changed("profile_mcp_wire", out) is True
 
 
-def test_phase_profile_mcp_wire_warns_on_errors(tmp_path: Path, monkeypatch) -> None:
+def test_phase_profile_mcp_wire_keeps_the_change_signal_on_a_partial_error(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Codex P2: a rewritten profile next to a broken one still counts as a change."""
     monkeypatch.setattr("hal0.service_identity.service_key", lambda prefer=None: None)
-    home = _profiles(tmp_path, bad="model: [unclosed\n")
+    home = _profiles(tmp_path, bad="model: [unclosed\n", coder="model:\n  default: agent\n")
     state = hp.BootstrapState(venv=str(tmp_path / "venv"), hermes_home=str(home))
     out = hp._phase_profile_mcp_wire(hp._StepCtx(state=state, io=hp.InstallIO()))
-    assert out.status == hp.PhaseStatus.WARN
+    assert out.status == hp.PhaseStatus.OK  # warn-as-OK
     assert out.reason is not None and "bad" in out.reason
+    assert out.details["errors"] == {"bad": out.details["errors"]["bad"]}
+    assert hp._step_changed("profile_mcp_wire", out) is True
+
+
+def test_wire_named_profiles_skips_dirs_hermes_would_not_serve(tmp_path: Path, monkeypatch) -> None:
+    """A directory that breaks Hermes's profile id rule is never wired."""
+    monkeypatch.setattr("hal0.service_identity.service_key", lambda prefer=None: None)
+    home = _profiles(tmp_path, **{"My Work": "a: 1\n", "ok": "a: 1\n", "-lead": "a: 1\n"})
+    report = hp.wire_named_profiles(home)
+    assert report["wired"] == ["ok"]
+    assert report["skipped"] == {"My Work": "invalid profile name", "-lead": "invalid profile name"}
+    assert (home / "profiles" / "My Work" / "config.yaml").read_text() == "a: 1\n"
+
+
+def test_wire_named_profiles_keeps_comments_of_an_already_wired_profile(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """CodeRabbit: decide on parsed content, so Hermes's own formatting and comments survive."""
+    monkeypatch.setattr("hal0.service_identity.service_key", lambda prefer=None: None)
+    home = _profiles(tmp_path, coder="model:\n  default: agent\n")
+    assert hp.wire_named_profiles(home)["changed"] == ["coder"]
+    cfg = home / "profiles" / "coder" / "config.yaml"
+    commented = "# operator note\n" + cfg.read_text().replace("hal0-admin:", "hal0-admin:  # ours")
+    cfg.write_text(commented)
+    assert hp.wire_named_profiles(home)["changed"] == []
+    assert cfg.read_text() == commented
+
+
+def test_wire_named_profiles_refuses_a_falsy_non_mapping_document(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Codex P2: ``[]`` / ``false`` / ``0`` are errors, not an empty mapping to overwrite."""
+    monkeypatch.setattr("hal0.service_identity.service_key", lambda prefer=None: None)
+    home = _profiles(tmp_path, a="[]\n", b="false\n", c="0\n", empty="")
+    report = hp.wire_named_profiles(home)
+    assert set(report["errors"]) == {"a", "b", "c"}
+    assert report["wired"] == ["empty"]  # an empty file is an empty mapping
+    assert (home / "profiles" / "a" / "config.yaml").read_text() == "[]\n"
 
 
 def test_wire_named_profiles_locks_and_replaces_atomically(

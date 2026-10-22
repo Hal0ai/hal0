@@ -4819,6 +4819,11 @@ def _build_brain_profile_mcp_servers() -> dict[str, Any]:
 #: the operator wrote, and hal0 never touches the file again.
 PROFILE_MCP_OPT_OUT_KEY = "wire_mcp"
 
+#: Hermes's own profile id rule (``hermes_constants.py:323`` at d923a5eb). A
+#: directory under ``profiles/`` that breaks it is not a profile Hermes serves,
+#: so hal0 never wires it.
+HERMES_PROFILE_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
+
 
 def profile_agent_id(profile: str) -> str:
     """The MCP identity a named profile calls hal0 as: ``hermes__<profile>``.
@@ -4870,15 +4875,20 @@ def _merge_profile_config(path: Path, desired: dict[str, Any]) -> dict[str, Any]
         # own 60 s reconcile never reads a half-written file.
         with file_lock(path):
             current = path.read_text(encoding="utf-8")
-            base = yaml.safe_load(current) or {}
+            base = yaml.safe_load(current)
+            if base is None:  # an empty file is an empty mapping; ``[]``/``false`` are not
+                base = {}
             if not isinstance(base, dict):
                 return {"wired": False, "changed": False, "error": "config.yaml is not a mapping"}
             if _profile_wire_opted_out(base):
                 return {"wired": False, "changed": False, "reason": "opted out"}
             merged = _deep_merge(base, desired)
-            out = yaml.safe_dump(merged, sort_keys=False, default_flow_style=False)
-            changed = out != current
+            # Decide on parsed content, not on serialised text: a profile that
+            # already holds the keys keeps its comments and Hermes's own
+            # formatting instead of being rewritten on every sweep.
+            changed = merged != base
             if changed:
+                out = yaml.safe_dump(merged, sort_keys=False, default_flow_style=False)
                 _atomic_write(path, out)
     except (OSError, UnicodeDecodeError, yaml.YAMLError) as exc:  # type: ignore[attr-defined]
         return {"wired": False, "changed": False, "error": str(exc)}
@@ -4917,6 +4927,9 @@ def wire_named_profiles(home: Path) -> dict[str, Any]:
     for name in names:
         if name == _BRAIN_PROFILE_NAME:
             continue
+        if not HERMES_PROFILE_ID_RE.match(name):
+            report["skipped"][name] = "invalid profile name"
+            continue
         path = Path(home) / "profiles" / name / "config.yaml"
         result = _merge_profile_config(path, _profile_wire_desired(profile_agent_id(name)))
         if result.get("error"):
@@ -4933,17 +4946,19 @@ def wire_named_profiles(home: Path) -> dict[str, Any]:
 def _phase_profile_mcp_wire(ctx: _StepCtx) -> PhaseResult:
     """Wire hal0's MCP servers into every named profile (:func:`wire_named_profiles`).
 
-    Warn-as-OK on a per-profile error; a correct box is left untouched.
+    Warn-as-OK on a per-profile error (the step stays ``OK`` with a ``reason``),
+    so a profile that was rewritten in the same pass still counts as a change
+    for the install's convergence signal (``_step_changed`` drops the signal of
+    a non-OK step). A correct box is left untouched.
     """
     report = wire_named_profiles(Path(ctx.state.hermes_home))
+    details = {**report, "changed": bool(report["changed"]), "changed_profiles": report["changed"]}
+    reason = None
     if report["errors"]:
-        return PhaseResult(
-            status=PhaseStatus.WARN,
-            reason="profile MCP wiring failed for: "
-            + ", ".join(f"{n} ({e})" for n, e in sorted(report["errors"].items())),
-            details=report,
+        reason = "profile MCP wiring failed for: " + ", ".join(
+            f"{n} ({e})" for n, e in sorted(report["errors"].items())
         )
-    return PhaseResult(status=PhaseStatus.OK, details=report)
+    return PhaseResult(status=PhaseStatus.OK, details=details, reason=reason)
 
 
 def _phase_brain_profile_mcp_wire(ctx: _StepCtx) -> PhaseResult:
