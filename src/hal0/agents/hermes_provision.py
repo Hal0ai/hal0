@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import contextlib
 import datetime
+import errno
 import grp
 import hashlib
 import json
@@ -4861,18 +4862,73 @@ def _profile_wire_opted_out(base: dict[str, Any]) -> bool:
     return isinstance(block, dict) and block.get(PROFILE_MCP_OPT_OUT_KEY) is False
 
 
+_DIR_NOFOLLOW = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+
+
+def _nofollow_error(exc: OSError, path: Path) -> str:
+    """Message for an ``O_DIRECTORY|O_NOFOLLOW`` open that failed on ``path``.
+
+    A symlink answers ``ELOOP`` (or ``ENOTDIR``, when it points at a
+    directory and ``O_DIRECTORY`` is set); name it, rather than the errno.
+    """
+    if exc.errno in (errno.ELOOP, errno.ENOTDIR) and os.path.islink(path):
+        return f"{path.name}/ is a symlink" if path.name == "profiles" else "symlink"
+    return str(exc)
+
+
+def _open_profile_dir(home: Path, name: str) -> int:
+    """Descriptor of ``home/profiles/<name>`` with no symlink followed on the way.
+
+    Opens ``profiles/`` and then ``<name>`` relative to it, each with
+    ``O_DIRECTORY|O_NOFOLLOW``, so a link planted by the service account at
+    either level is refused (``ELOOP``) instead of followed by a root repair.
+    Raises ``OSError``; the caller turns it into a per-profile error.
+    """
+    root_fd = os.open(Path(home) / "profiles", _DIR_NOFOLLOW)
+    try:
+        return os.open(name, _DIR_NOFOLLOW, dir_fd=root_fd)
+    finally:
+        os.close(root_fd)
+
+
 def _merge_profile_config(path: Path, desired: dict[str, Any]) -> dict[str, Any]:
-    """Deep-merge hal0's keys into one profile ``config.yaml``.
+    """Deep-merge hal0's keys into one profile ``config.yaml`` (path form).
+
+    ``path`` is ``<home>/profiles/<name>/config.yaml``; the work happens on a
+    directory descriptor (:func:`_merge_profile_config_at`), so the path only
+    names the profile. Never raises.
+    """
+    try:
+        dir_fd = _open_profile_dir(path.parent.parent.parent, path.parent.name)
+    except FileNotFoundError:
+        return {"wired": False, "changed": False, "reason": "profile config absent"}
+    except OSError as exc:
+        return {"wired": False, "changed": False, "error": _yaml_error_summary(exc)}
+    try:
+        return _merge_profile_config_at(dir_fd, path, desired)
+    finally:
+        os.close(dir_fd)
+
+
+def _merge_profile_config_at(dir_fd: int, path: Path, desired: dict[str, Any]) -> dict[str, Any]:
+    """Deep-merge hal0's keys into the ``config.yaml`` inside directory ``dir_fd``.
+
+    Every file operation is relative to the verified directory descriptor and
+    refuses symlinks (``O_NOFOLLOW``), the file must be regular (a FIFO would
+    block the sweep for good), and the replacement is a random-named
+    ``O_EXCL`` temp file in that directory with its mode and owner set on the
+    descriptor, renamed over ``config.yaml`` through the same ``dir_fd``. So a
+    root repair never reads or writes outside the profile directory, whatever
+    the service account renames meanwhile. ``path`` is for messages and the
+    cross-process lock only.
 
     Merge, never clobber: scalars and dicts only, no list keys (``_deep_merge``
-    replaces lists, which would clobber an operator's ``plugins.enabled``). The
-    file is rewritten only when the merged content differs, so a correct
-    profile (and its comments) is left byte-untouched. Returns ``{"wired",
-    "changed"}`` plus ``reason`` (config absent, opted out, PyYAML missing) or
-    ``error`` (I/O or YAML) — never raises, so no caller blocks on one profile.
+    replaces lists, which would clobber an operator's ``plugins.enabled``).
+    Rewritten only when the parsed content differs, so a correct profile keeps
+    its comments and Hermes's formatting. Returns ``{"wired", "changed"}`` plus
+    ``reason`` (config absent, opted out, PyYAML missing) or ``error`` (I/O or
+    YAML, redacted) — never raises, so no caller blocks on one profile.
     """
-    if not path.exists():
-        return {"wired": False, "changed": False, "reason": "profile config absent"}
     try:
         import yaml  # type: ignore[import-untyped]
     except ImportError:
@@ -4881,11 +4937,29 @@ def _merge_profile_config(path: Path, desired: dict[str, Any]) -> dict[str, Any]
 
     try:
         # One read-merge-write transaction under the cross-process lock: the
-        # periodic sweep, a provision and an operator edit may overlap. The
-        # replacement is atomic (temp file + rename, mode kept) so Hermes's
-        # own 60 s reconcile never reads a half-written file.
+        # periodic sweep, a provision and an operator edit may overlap.
         with file_lock(path):
-            current = path.read_text(encoding="utf-8")
+            try:
+                # O_NONBLOCK: opening a FIFO for reading would otherwise wait
+                # for a writer forever; fstat below rejects it instead.
+                fd = os.open(
+                    "config.yaml", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=dir_fd
+                )
+            except FileNotFoundError:
+                return {"wired": False, "changed": False, "reason": "profile config absent"}
+            except OSError as exc:
+                if exc.errno == errno.ELOOP:
+                    return {"wired": False, "changed": False, "error": "config.yaml is a symlink"}
+                raise
+            with os.fdopen(fd, "rb") as fh:
+                st = os.fstat(fh.fileno())
+                if not stat.S_ISREG(st.st_mode):
+                    return {
+                        "wired": False,
+                        "changed": False,
+                        "error": "config.yaml is not a regular file",
+                    }
+                current = fh.read().decode("utf-8")
             base = yaml.safe_load(current)
             if base is None:  # an empty file is an empty mapping; ``[]``/``false`` are not
                 base = {}
@@ -4894,13 +4968,10 @@ def _merge_profile_config(path: Path, desired: dict[str, Any]) -> dict[str, Any]
             if _profile_wire_opted_out(base):
                 return {"wired": False, "changed": False, "reason": "opted out"}
             merged = _deep_merge(base, desired)
-            # Decide on parsed content, not on serialised text: a profile that
-            # already holds the keys keeps its comments and Hermes's own
-            # formatting instead of being rewritten on every sweep.
             changed = merged != base
             if changed:
                 out = yaml.safe_dump(merged, sort_keys=False, default_flow_style=False)
-                _replace_profile_config(path, out)
+                _replace_profile_config_at(dir_fd, out, st)
     except (OSError, UnicodeDecodeError, yaml.YAMLError) as exc:  # type: ignore[attr-defined]
         # Never ``str(exc)``: a PyYAML message quotes the offending line, which
         # in this file can be a resolved Authorization header.
@@ -4908,36 +4979,34 @@ def _merge_profile_config(path: Path, desired: dict[str, Any]) -> dict[str, Any]
     return {"wired": True, "changed": changed}
 
 
-def _replace_profile_config(path: Path, text: str) -> None:
-    """Replace ``path`` atomically, keeping its mode (and owner as root).
+def _replace_profile_config_at(dir_fd: int, text: str, st: os.stat_result) -> None:
+    """Replace ``config.yaml`` in ``dir_fd`` atomically, keeping ``st``'s mode and owner.
 
-    The temporary file comes from ``mkstemp`` (random name, ``O_EXCL``), not a
-    predictable ``<name>.tmp``: this runs as root on a repair inside a
-    directory the ``hal0`` account can write, where a planted symlink of a
-    known name would be followed and truncate its target.
+    Random temp name, ``O_CREAT|O_EXCL|O_NOFOLLOW`` through ``dir_fd``, metadata
+    via ``fchmod``/``fchown`` on the open descriptor, then ``rename`` through the
+    same ``dir_fd``: no step takes a pathname the service account could swap.
     """
-    import tempfile
+    import secrets
 
-    st = path.stat()
-    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.")
+    tmp = f".config.yaml.{secrets.token_hex(8)}"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=dir_fd)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             fh.write(text)
             fh.flush()
-            # Metadata on the open descriptor, never on the path: a swapped-in
-            # symlink at the temp name would otherwise be followed.
             os.fchmod(fh.fileno(), stat.S_IMODE(st.st_mode))
             if os.geteuid() == 0:
                 os.fchown(fh.fileno(), st.st_uid, st.st_gid)
-        os.replace(tmp, path)
+        os.replace(tmp, "config.yaml", src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
     except BaseException:
-        Path(tmp).unlink(missing_ok=True)
+        with contextlib.suppress(OSError):
+            os.unlink(tmp, dir_fd=dir_fd)
         raise
 
 
 def _profile_wire_desired(agent_id: str) -> dict[str, Any]:
     # hal0-owned profile keys: the two MCP servers + the memory provider. Only
-    # scalar/dict keys are set — never a list (see _merge_profile_config).
+    # scalar/dict keys are set — never a list (see _merge_profile_config_at).
     return {
         "mcp_servers": _build_profile_mcp_servers(agent_id),
         "memory": {"provider": "hal0-memory"},
@@ -4956,58 +5025,69 @@ def wire_named_profiles(home: Path) -> dict[str, Any]:
     A profile opts out with ``hal0: {wire_mcp: false}``. Hermes re-reads a
     profile's ``mcp_servers`` on its own 60 s reconcile, so no restart follows.
 
+    The walk is descriptor-anchored: ``profiles/`` is opened with
+    ``O_DIRECTORY|O_NOFOLLOW`` and each profile relative to it the same way,
+    so a symlink planted at either level is refused, not followed
+    (:func:`_merge_profile_config_at` for the file itself).
+
     Returns ``{"wired": [...], "changed": [...], "skipped": {name: reason},
-    "errors": {name: error}}``.
+    "errors": {name: error}}``; never raises.
     """
     report: dict[str, Any] = {"wired": [], "changed": [], "skipped": {}, "errors": {}}
     profiles = Path(home) / "profiles"
-    if profiles.is_symlink():
-        # The root itself must be a real directory: a link planted by the
-        # service account would make every child look like an ordinary one.
-        report["errors"]["profiles/"] = "profiles/ is a symlink"
-        return report
     try:
-        entries = sorted(profiles.iterdir(), key=lambda p: p.name)
+        root_fd = os.open(profiles, _DIR_NOFOLLOW)
     except FileNotFoundError:
         return report  # no profiles at all: nothing to wire
     except OSError as exc:
-        # Unreadable profile root: say so, never a clean empty report that the
-        # caller would take for "every profile wired".
-        report["errors"]["profiles/"] = str(exc)
+        # A symlinked or unreadable root: say so, never a clean empty report
+        # that the caller would take for "every profile wired".
+        report["errors"]["profiles/"] = _nofollow_error(exc, profiles)
         return report
-    for entry in entries:
-        name = entry.name
-        path = entry / "config.yaml"
-        # A symlink planted by the service account must not make a root repair
-        # read and replace a config.yaml outside HERMES_HOME. A stat failure on
-        # one entry is that entry's error, never the end of the sweep.
-        try:
-            if entry.is_symlink():
-                report["skipped"][name] = "symlink"
-                continue
-            if not entry.is_dir():
-                continue
-            config_is_link = path.is_symlink()
-        except OSError as exc:
-            report["errors"][name] = str(exc)
-            continue
-        if name == _BRAIN_PROFILE_NAME:
-            continue
-        if not HERMES_PROFILE_ID_RE.match(name):
-            report["skipped"][name] = "invalid profile name"
-            continue
-        if config_is_link:
-            report["errors"][name] = "config.yaml is a symlink"
-            continue
-        result = _merge_profile_config(path, _profile_wire_desired(profile_agent_id(name)))
-        if result.get("error"):
-            report["errors"][name] = result["error"]
-        elif not result["wired"]:
-            report["skipped"][name] = result.get("reason", "skipped")
-        else:
-            report["wired"].append(name)
-            if result["changed"]:
-                report["changed"].append(name)
+    try:
+        with os.scandir(root_fd) as it:
+            entries = sorted(it, key=lambda e: e.name)
+            for entry in entries:
+                name = entry.name
+                try:
+                    if entry.is_symlink():
+                        report["skipped"][name] = "symlink"
+                        continue
+                    if not entry.is_dir(follow_symlinks=False):
+                        continue
+                except OSError as exc:
+                    report["errors"][name] = str(exc)
+                    continue
+                if name == _BRAIN_PROFILE_NAME:
+                    continue
+                if not HERMES_PROFILE_ID_RE.match(name):
+                    report["skipped"][name] = "invalid profile name"
+                    continue
+                try:
+                    dir_fd = os.open(name, _DIR_NOFOLLOW, dir_fd=root_fd)
+                except OSError as exc:
+                    report["errors"][name] = _nofollow_error(exc, profiles / name)
+                    continue
+                try:
+                    result = _merge_profile_config_at(
+                        dir_fd,
+                        profiles / name / "config.yaml",
+                        _profile_wire_desired(profile_agent_id(name)),
+                    )
+                finally:
+                    os.close(dir_fd)
+                if result.get("error"):
+                    report["errors"][name] = result["error"]
+                elif not result["wired"]:
+                    report["skipped"][name] = result.get("reason", "skipped")
+                else:
+                    report["wired"].append(name)
+                    if result["changed"]:
+                        report["changed"].append(name)
+    except OSError as exc:
+        report["errors"]["profiles/"] = str(exc)
+    finally:
+        os.close(root_fd)
     return report
 
 

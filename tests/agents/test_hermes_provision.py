@@ -4858,17 +4858,21 @@ def test_wire_named_profiles_locks_and_replaces_atomically(
         return real(target)
 
     monkeypatch.setattr(locking, "file_lock", spy)
-    replaced: list[str] = []
+    replaced: list[tuple] = []
     real_replace = os.replace
 
-    def spy_replace(src, dst):
-        replaced.append(str(dst))
-        return real_replace(src, dst)
+    def spy_replace(src, dst, **kw):
+        replaced.append((src, dst, sorted(kw)))
+        return real_replace(src, dst, **kw)
 
     monkeypatch.setattr(hp.os, "replace", spy_replace)
     report = hp.wire_named_profiles(home)
     assert report["changed"] == ["coder"]
-    assert locked == [str(cfg)] and replaced == [str(cfg)]
+    assert locked == [str(cfg)]
+    # Renamed through the directory descriptor, from a random dot-name.
+    assert len(replaced) == 1 and replaced[0][1] == "config.yaml"
+    assert replaced[0][0].startswith(".config.yaml.")
+    assert replaced[0][2] == ["dst_dir_fd", "src_dir_fd"]
     assert stat.S_IMODE(cfg.stat().st_mode) == 0o640
 
 
@@ -4937,14 +4941,16 @@ def test_wire_named_profiles_reports_an_unreadable_profile_root(
     monkeypatch.setattr("hal0.service_identity.service_key", lambda prefer=None: None)
     home = _profiles(tmp_path, ok="a: 1\n")
 
-    real_iterdir = hp.Path.iterdir
+    import os
 
-    def boom(self):
-        if self == home / "profiles":
+    real_open = os.open
+
+    def boom(path, flags, *a, **kw):
+        if Path(str(path)) == home / "profiles":
             raise PermissionError("denied")
-        return real_iterdir(self)
+        return real_open(path, flags, *a, **kw)
 
-    monkeypatch.setattr(hp.Path, "iterdir", boom)
+    monkeypatch.setattr(hp.os, "open", boom)
     report = hp.wire_named_profiles(home)
     assert report["errors"] == {"profiles/": "denied"} and report["wired"] == []
     assert hp.wire_named_profiles(tmp_path / "absent")["errors"] == {}
@@ -4995,10 +5001,27 @@ def test_replace_profile_config_sets_metadata_on_the_descriptor(
     )
     monkeypatch.setattr(hp.os, "geteuid", lambda: 0)
     monkeypatch.setattr(hp.os, "fchown", lambda fd, uid, gid: calls.append("fchown"))
-    hp._replace_profile_config(cfg, "a: 2\n")
+    dir_fd = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        hp._replace_profile_config_at(dir_fd, "a: 2\n", cfg.stat())
+    finally:
+        os.close(dir_fd)
     assert cfg.read_text() == "a: 2\n"
     assert calls == ["fchmod", "fchown"]
     assert (cfg.stat().st_mode & 0o777) == 0o640
+    assert [p.name for p in tmp_path.iterdir()] == ["config.yaml"]  # no temp file left
+
+
+def test_wire_named_profiles_refuses_a_fifo_config(tmp_path: Path, monkeypatch) -> None:
+    """Codex P2: a FIFO config.yaml would block the sweep for good."""
+    import os
+
+    monkeypatch.setattr("hal0.service_identity.service_key", lambda prefer=None: None)
+    home = _profiles(tmp_path, ok="a: 1\n", pipe=None)
+    os.mkfifo(home / "profiles" / "pipe" / "config.yaml")
+    report = hp.wire_named_profiles(home)
+    assert report["errors"]["pipe"] == "config.yaml is not a regular file"
+    assert report["wired"] == ["ok"]
 
 
 def test_wire_named_profiles_contains_a_stat_failure_to_that_profile(
@@ -5007,13 +5030,15 @@ def test_wire_named_profiles_contains_a_stat_failure_to_that_profile(
     """Codex P2: one untraversable entry must not end the sweep for the others."""
     monkeypatch.setattr("hal0.service_identity.service_key", lambda prefer=None: None)
     home = _profiles(tmp_path, bad="a: 1\n", ok="a: 1\n")
-    real = hp.Path.is_symlink
+    import os
 
-    def flaky(self):
-        if self == home / "profiles" / "bad":
+    real_open = os.open
+
+    def flaky(path, flags, *a, **kw):
+        if path == "bad" and "dir_fd" in kw:
             raise PermissionError("denied")
-        return real(self)
+        return real_open(path, flags, *a, **kw)
 
-    monkeypatch.setattr(hp.Path, "is_symlink", flaky)
+    monkeypatch.setattr(hp.os, "open", flaky)
     report = hp.wire_named_profiles(home)
     assert report["errors"] == {"bad": "denied"} and report["wired"] == ["ok"]
