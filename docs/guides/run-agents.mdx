@@ -202,6 +202,26 @@ The setting is not a boundary against an agent that has the terminal tool on.
   agent with a shell.
 </Aside>
 
+### Delegation slot
+
+When Hermes hands work to `delegate_task` children, they run on the `agent`
+slot by default, the same slot as the parent. On a single-parallel
+llama-server the children then queue behind the parent. To run them on another
+slot, such as `utility`, set `delegation_slot` in the `[hermes]` table of
+`/etc/hal0/agents/hermes.toml`:
+
+```toml
+[hermes]
+delegation_slot = "utility"
+```
+
+There is no CLI or dashboard writer for this yet, so edit the root-owned file.
+The choice survives `hal0 agent reprovision hermes`, which renders it as
+`delegation.model = "hal0/utility"`. It is applied only while that slot is
+ready. If the slot is down at provision time, nothing is rendered and a value
+from an earlier run stays, so start the slot and re-provision.
+`hal0 doctor all` warns while the chosen slot is not ready.
+
 ## Manage the lifecycle
 
 <Tabs>

@@ -5571,15 +5571,22 @@ def _resolve_delegation(
 
     Returns ``{model, base_url, provider}`` when the slot is live, else
     ``None`` so the template omits the block and subagents inherit the
-    parent (chat) model. ``base_url`` is the hal0 /v1 endpoint already
+    parent (chat) model. ``model`` is the raw model id for the default
+    ``agent`` slot and ``hal0/<slot>`` otherwise. ``base_url`` is the hal0 /v1 endpoint already
     used for the main model — setting it makes upstream auto-resolve the
     provider to "custom".
     """
     slot = _find_named_ready_slot(slots, slot_name)
     if slot is None:
         return None
+    # A non-default slot is rendered slot-qualified (``hal0/<slot>``): the /v1
+    # route resolves it to the model AND pins the lane (v1.py _normalize_chat_body,
+    # resolver ``_chain_for``), so two slots sharing a model id cannot swap the
+    # children back onto the parent's slot. The default ``agent`` slot keeps its
+    # raw model id (unchanged behaviour).
+    model = _slot_model_id(slot) if slot_name == _DELEGATION_SLOT_NAME else f"hal0/{slot_name}"
     return {
-        "model": _slot_model_id(slot),
+        "model": model,
         "base_url": hal0_base_url,
         "provider": "custom",
     }

@@ -1697,6 +1697,7 @@ def test_delegation_slot_offline_warns() -> None:
     slots = [{"name": "utility", "type": "llm", "state": "warming", "model_id": "m"}]
     c = da.check_hermes_delegation_slot(slots, slot_name="utility")
     assert c.status == "warn" and "utility" in c.detail
+    assert "last-rendered" in c.detail and "reprovision" in c.detail
 
 
 def test_delegation_slot_ready_passes() -> None:

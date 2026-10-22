@@ -2278,14 +2278,15 @@ class HermesAgentSettings(BaseModel):
     )
     delegation_slot: str = Field(
         default=HERMES_DEFAULT_DELEGATION_SLOT,
-        pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$",
+        pattern=r"^[a-z0-9][a-z0-9_-]{0,31}$",
         description=(
             "Name of the hal0 slot whose model Hermes delegate_task children run "
             "on (renders delegation.model). Default 'agent' runs children on the "
             "parent's slot; naming another slot (e.g. 'utility') lets children "
             "run beside the parent instead of queueing behind it on a "
-            "single-parallel llama-server. If the named slot is not ready, the "
-            "delegation block is omitted and children inherit the parent model."
+            "single-parallel llama-server. If the named slot is not ready when "
+            "Hermes is provisioned, the delegation block is not rendered (an "
+            "earlier rendering is left in place) until the next repair."
         ),
     )
 

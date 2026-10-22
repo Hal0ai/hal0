@@ -1353,14 +1353,17 @@ def check_hermes_delegation_slot(
 
     ADVISORY. Only an explicit non-default ``[hermes].delegation_slot`` is
     checked: the default (``agent``) is the parent's own slot. When the named
-    slot is absent or not dispatchable, provisioning omits the delegation
-    block and children silently inherit the parent model.
+    slot is absent or not dispatchable, provisioning does not render the
+    delegation block; a block rendered earlier stays in Hermes' config.yaml
+    until a repair runs while the slot is ready. A chosen slot only takes
+    effect at the next repair.
     """
     from hal0.agents import hermes_provision as hp
+    from hal0.config.schema import HERMES_DEFAULT_DELEGATION_SLOT
 
     name, label = "hermes_delegation_slot", "Hermes delegation slot"
     chosen = slot_name if slot_name is not None else hp.read_delegation_slot()
-    if chosen == hp._DELEGATION_SLOT_NAME:
+    if chosen == HERMES_DEFAULT_DELEGATION_SLOT:
         return Check(name, label, _PASS, f"{chosen} (default)")
     if not isinstance(slots, list):
         return Check(name, label, _PASS, f"{chosen}; slot state unavailable")
@@ -1370,10 +1373,12 @@ def check_hermes_delegation_slot(
             label,
             _WARN,
             f"delegation_slot is {chosen!r} but that slot is not ready; delegate_task "
-            "children inherit the parent model until it is — start the slot or set "
-            "[hermes].delegation_slot back to 'agent' in /etc/hal0/agents/hermes.toml",
+            "children inherit the parent model, or still target the last-rendered "
+            "model if delegation was rendered earlier. Start the slot and run "
+            "`hal0 agent reprovision hermes`, or set [hermes].delegation_slot back to "
+            "'agent' in /etc/hal0/agents/hermes.toml",
         )
-    return Check(name, label, _PASS, f"{chosen} (ready)")
+    return Check(name, label, _PASS, f"{chosen} (ready; applied at the next repair)")
 
 
 #: The Hermes gateway's system unit, written by ``hermes gateway install``.
