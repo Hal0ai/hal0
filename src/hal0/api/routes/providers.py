@@ -151,6 +151,9 @@ def _serialize_upstream(u: Any, *, last_models: list[str] | None = None) -> dict
             }
         ),
         "models": last_models or [],
+        "managed_by": getattr(u, "managed_by", None),
+        "pinned": bool(getattr(u, "pinned", False)),
+        "owned_models": list(getattr(u, "owned_models", ())),
     }
     return redact_config(out)
 
@@ -365,6 +368,15 @@ async def patch_upstream(name: str, body: UpstreamPatchBody, request: Request) -
         k: getattr(body, k) for k in body.model_fields_set if k in body.model_fields
     }
 
+    # Agent-managed entries are owned wholesale by the agent: any edit
+    # (enabled and model_filters included) goes through the agent.
+    if fields and getattr(u, "managed_by", None):
+        raise UpstreamProtectedHTTP(
+            f"upstream {name!r} is managed by {u.managed_by}; "
+            "change it through the agent, not here",
+            details={"name": name, "managed_by": u.managed_by},
+        )
+
     # The reserved name, slot-kind, and container-backed remotes (slot_name
     # set) get their structure from the slot lifecycle.
     protected = name == RESERVED_UPSTREAM_NAME or u.kind == "slot" or bool(u.slot_name)
@@ -430,6 +442,13 @@ async def delete_upstream(name: str, request: Request) -> dict[str, Any]:
     destroy a secret (remove it via ``/api/secrets`` if truly unwanted).
     """
     upstreams = request.app.state.upstreams
+    existing = upstreams.get(name)
+    if existing is not None and getattr(existing, "managed_by", None):
+        raise UpstreamProtectedHTTP(
+            f"upstream {name!r} is managed by {existing.managed_by}; "
+            "change it through the agent, not here",
+            details={"name": name, "managed_by": existing.managed_by},
+        )
     try:
         removed_from_toml = upstreams.remove_persistent(name)
     except UpstreamNotFound as exc:
