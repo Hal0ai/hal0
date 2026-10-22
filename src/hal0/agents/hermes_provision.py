@@ -47,7 +47,7 @@ import sqlite3
 import stat
 import subprocess  # nosec B404 — needed to spawn python -m venv + pip
 import sys
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
@@ -4871,8 +4871,11 @@ def _nofollow_error(exc: OSError, path: Path) -> str:
     A symlink answers ``ELOOP`` (or ``ENOTDIR``, when it points at a
     directory and ``O_DIRECTORY`` is set); name it, rather than the errno.
     """
-    if exc.errno in (errno.ELOOP, errno.ENOTDIR) and os.path.islink(path):
-        return f"{path.name}/ is a symlink" if path.name == "profiles" else "symlink"
+    if exc.errno in (errno.ELOOP, errno.ENOTDIR):
+        if os.path.islink(path):
+            return "profiles/ is a symlink" if path.name == "profiles" else "symlink"
+        if path.name == "profiles" and os.path.islink(path.parent):
+            return "HERMES_HOME is a symlink"
     return str(exc)
 
 
@@ -4884,11 +4887,25 @@ def _open_profile_dir(home: Path, name: str) -> int:
     either level is refused (``ELOOP``) instead of followed by a root repair.
     Raises ``OSError``; the caller turns it into a per-profile error.
     """
-    root_fd = os.open(Path(home) / "profiles", _DIR_NOFOLLOW)
+    root_fd = _open_profiles_root(home)
     try:
         return os.open(name, _DIR_NOFOLLOW, dir_fd=root_fd)
     finally:
         os.close(root_fd)
+
+
+def _open_profiles_root(home: Path) -> int:
+    """Descriptor of ``home/profiles`` with neither the home nor ``profiles`` a symlink.
+
+    The Hermes home is opened first with ``O_DIRECTORY|O_NOFOLLOW`` and
+    ``profiles`` relative to it, so a home the service account replaced with a
+    link cannot steer a root repair into a real-looking tree elsewhere.
+    """
+    home_fd = os.open(home, _DIR_NOFOLLOW)
+    try:
+        return os.open("profiles", _DIR_NOFOLLOW, dir_fd=home_fd)
+    finally:
+        os.close(home_fd)
 
 
 def _merge_profile_config(path: Path, desired: dict[str, Any]) -> dict[str, Any]:
@@ -4933,12 +4950,12 @@ def _merge_profile_config_at(dir_fd: int, path: Path, desired: dict[str, Any]) -
         import yaml  # type: ignore[import-untyped]
     except ImportError:
         return {"wired": False, "changed": False, "reason": "PyYAML unavailable"}
-    from hal0.config.locking import file_lock
-
     try:
-        # One read-merge-write transaction under the cross-process lock: the
-        # periodic sweep, a provision and an operator edit may overlap.
-        with file_lock(path):
+        # One read-merge-write transaction under a cross-process lock taken on
+        # a lock file inside the verified directory (not on a pathname that a
+        # rename could point elsewhere): the periodic sweep, a provision and
+        # an operator edit may overlap.
+        with _profile_lock(dir_fd):
             try:
                 # O_NONBLOCK: opening a FIFO for reading would otherwise wait
                 # for a writer forever; fstat below rejects it instead.
@@ -4977,6 +4994,26 @@ def _merge_profile_config_at(dir_fd: int, path: Path, desired: dict[str, Any]) -
         # in this file can be a resolved Authorization header.
         return {"wired": False, "changed": False, "error": _yaml_error_summary(exc)}
     return {"wired": True, "changed": changed}
+
+
+@contextlib.contextmanager
+def _profile_lock(dir_fd: int) -> Iterator[None]:
+    """Exclusive ``flock`` on ``.config.yaml.lock`` inside ``dir_fd``.
+
+    Anchored to the directory descriptor, so two sweeps that overlap a rename
+    of the profile still serialise on the same inode.
+    """
+    import fcntl
+
+    fd = os.open(".config.yaml.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600, dir_fd=dir_fd)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)
 
 
 def _replace_profile_config_at(dir_fd: int, text: str, st: os.stat_result) -> None:
@@ -5036,7 +5073,7 @@ def wire_named_profiles(home: Path) -> dict[str, Any]:
     report: dict[str, Any] = {"wired": [], "changed": [], "skipped": {}, "errors": {}}
     profiles = Path(home) / "profiles"
     try:
-        root_fd = os.open(profiles, _DIR_NOFOLLOW)
+        root_fd = _open_profiles_root(Path(home))
     except FileNotFoundError:
         return report  # no profiles at all: nothing to wire
     except OSError as exc:

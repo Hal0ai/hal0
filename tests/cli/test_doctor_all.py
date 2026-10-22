@@ -2213,3 +2213,21 @@ def test_generation_extras_warns_when_the_home_is_unreadable(tmp_path, monkeypat
     )
     c = da.check_hermes_generation_extras(home=home, venv=venv)
     assert c.status == "warn" and "run hal0 doctor as hal0 or root" in c.detail
+
+
+def test_profiles_mcp_rejects_a_fifo_config_without_reading_it(tmp_path) -> None:
+    """Codex P2: a FIFO config.yaml would block hal0 doctor forever."""
+    import os
+
+    home = _profiles_home(tmp_path, pipe=None, coder=_WIRED)
+    os.mkfifo(home / "profiles" / "pipe" / "config.yaml")
+    c = da.check_hermes_profiles_mcp(auth={"auth_required": True}, home=home)
+    assert c.status == "warn" and "pipe is unreadable or not a mapping" in c.detail
+
+
+def test_profiles_mcp_warns_on_a_symlinked_home(tmp_path) -> None:
+    real_home = _profiles_home(tmp_path / "real", coder=_WIRED)
+    link = tmp_path / ".hermes"
+    link.symlink_to(real_home, target_is_directory=True)
+    c = da.check_hermes_profiles_mcp(auth={"auth_required": True}, home=link)
+    assert c.status == "warn" and "is a symlink" in c.detail

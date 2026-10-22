@@ -1310,6 +1310,14 @@ def check_hermes_profiles_mcp(
     # (``is_dir()`` is simply False then). Say so instead of a green "no
     # profiles" (same posture as the hermes-api row).
     unreadable_msg = f"cannot read {profiles}; run hal0 doctor as hal0 or root"
+    if os.path.islink(root) or os.path.islink(profiles):
+        return Check(
+            key,
+            label,
+            _WARN,
+            f"{root if os.path.islink(root) else profiles} is a symlink; hal0 wires profiles "
+            "only through a real Hermes home",
+        )
     if os.path.lexists(root) and not os.access(root, os.R_OK | os.X_OK):
         return Check(key, label, _WARN, unreadable_msg)
     if os.path.lexists(profiles) and not os.access(profiles, os.R_OK | os.X_OK):
@@ -1337,9 +1345,20 @@ def check_hermes_profiles_mcp(
     for name in names:
         cfg = root / "profiles" / name / "config.yaml"
         try:
-            data = yaml.safe_load(cfg.read_text(encoding="utf-8"))
+            st = os.lstat(cfg)
         except FileNotFoundError:
             no_config.append(name)  # the writer skips it too: Hermes owns creation
+            continue
+        except OSError:
+            unreadable.append(name)
+            continue
+        if not stat.S_ISREG(st.st_mode):  # a symlink or a FIFO: the writer refuses it too
+            unreadable.append(name)
+            continue
+        try:
+            data = yaml.safe_load(cfg.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            no_config.append(name)
             continue
         except (OSError, UnicodeDecodeError, yaml.YAMLError):
             unreadable.append(name)

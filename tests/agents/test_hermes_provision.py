@@ -4841,23 +4841,23 @@ def test_wire_named_profiles_locks_and_replaces_atomically(
 ) -> None:
     """Codex P2: one read-merge-write transaction under file_lock, replaced via
     tmp + rename with the mode kept, so Hermes's reconcile never sees a torn file."""
+    import fcntl
     import os
     import stat
-
-    from hal0.config import locking
 
     monkeypatch.setattr("hal0.service_identity.service_key", lambda prefer=None: None)
     home = _profiles(tmp_path, coder="model:\n  default: agent\n")
     cfg = home / "profiles" / "coder" / "config.yaml"
     os.chmod(cfg, 0o640)
     locked: list[str] = []
-    real = locking.file_lock
+    real_flock = fcntl.flock
 
-    def spy(target):
-        locked.append(str(target))
-        return real(target)
+    def spy(fd, op):
+        if op == fcntl.LOCK_EX:
+            locked.append(os.readlink(f"/proc/self/fd/{fd}"))
+        return real_flock(fd, op)
 
-    monkeypatch.setattr(locking, "file_lock", spy)
+    monkeypatch.setattr(fcntl, "flock", spy)
     replaced: list[tuple] = []
     real_replace = os.replace
 
@@ -4868,7 +4868,7 @@ def test_wire_named_profiles_locks_and_replaces_atomically(
     monkeypatch.setattr(hp.os, "replace", spy_replace)
     report = hp.wire_named_profiles(home)
     assert report["changed"] == ["coder"]
-    assert locked == [str(cfg)]
+    assert locked == [str(cfg.parent / ".config.yaml.lock")]  # lock inside the verified dir
     # Renamed through the directory descriptor, from a random dot-name.
     assert len(replaced) == 1 and replaced[0][1] == "config.yaml"
     assert replaced[0][0].startswith(".config.yaml.")
@@ -4888,7 +4888,10 @@ def test_wire_named_profiles_never_follows_a_planted_tmp_symlink(
     assert hp.wire_named_profiles(home)["changed"] == ["coder"]
     assert victim.read_text() == "precious\n"
     assert (home / "profiles" / "coder" / "config.yaml.tmp").is_symlink()  # untouched
-    assert not [p for p in (home / "profiles" / "coder").iterdir() if p.name.startswith(".config")]
+    leftovers = [
+        p.name for p in (home / "profiles" / "coder").iterdir() if p.name.startswith(".config")
+    ]
+    assert leftovers == [".config.yaml.lock"]  # the lock file is the only hal0 artefact
 
 
 def test_wire_named_profiles_redacts_yaml_errors(tmp_path: Path, monkeypatch) -> None:
@@ -4946,7 +4949,7 @@ def test_wire_named_profiles_reports_an_unreadable_profile_root(
     real_open = os.open
 
     def boom(path, flags, *a, **kw):
-        if Path(str(path)) == home / "profiles":
+        if path == "profiles" and "dir_fd" in kw:  # opened relative to the home fd
             raise PermissionError("denied")
         return real_open(path, flags, *a, **kw)
 
@@ -5042,3 +5045,14 @@ def test_wire_named_profiles_contains_a_stat_failure_to_that_profile(
     monkeypatch.setattr(hp.os, "open", flaky)
     report = hp.wire_named_profiles(home)
     assert report["errors"] == {"bad": "denied"} and report["wired"] == ["ok"]
+
+
+def test_wire_named_profiles_refuses_a_symlinked_hermes_home(tmp_path: Path, monkeypatch) -> None:
+    """Codex P1: a home replaced by a link must not steer a root repair elsewhere."""
+    monkeypatch.setattr("hal0.service_identity.service_key", lambda prefer=None: None)
+    real_home = _profiles(tmp_path / "real", coder="a: 1\n")
+    link = tmp_path / ".hermes"
+    link.symlink_to(real_home, target_is_directory=True)
+    report = hp.wire_named_profiles(link)
+    assert report["errors"] == {"profiles/": "HERMES_HOME is a symlink"} and report["wired"] == []
+    assert (real_home / "profiles" / "coder" / "config.yaml").read_text() == "a: 1\n"
