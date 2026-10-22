@@ -4826,9 +4826,18 @@ def profile_agent_id(profile: str) -> str:
     Sanitised to the identity charset the MCP mount accepts
     (``api/mcp_mount.py:client_id_resolver``, ``[A-Za-z0-9_-]{1,64}``): a
     character outside it would collapse the caller to ``anonymous`` and get
-    every private memory write refused. ``hal0-brain`` keeps its own constant.
+    every private memory write refused. A name that had to be rewritten or
+    cut carries a hash suffix of the original, so ``foo.bar`` and ``foo_bar``
+    never share one private memory bank. ``hal0-brain`` keeps its own constant.
     """
-    return ("hermes__" + re.sub(r"[^A-Za-z0-9_-]", "_", profile))[:64]
+    import hashlib
+
+    slug = re.sub(r"[^A-Za-z0-9_-]", "_", profile)
+    plain = "hermes__" + slug
+    if slug == profile and len(plain) <= 64:
+        return plain
+    suffix = "-" + hashlib.sha256(profile.encode("utf-8")).hexdigest()[:8]
+    return plain[: 64 - len(suffix)] + suffix
 
 
 def _profile_wire_opted_out(base: dict[str, Any]) -> bool:
@@ -4852,19 +4861,26 @@ def _merge_profile_config(path: Path, desired: dict[str, Any]) -> dict[str, Any]
         import yaml  # type: ignore[import-untyped]
     except ImportError:
         return {"wired": False, "changed": False, "reason": "PyYAML unavailable"}
+    from hal0.config.locking import file_lock
+
     try:
-        current = path.read_text(encoding="utf-8")
-        base = yaml.safe_load(current) or {}
-        if not isinstance(base, dict):
-            return {"wired": False, "changed": False, "error": "config.yaml is not a mapping"}
-        if _profile_wire_opted_out(base):
-            return {"wired": False, "changed": False, "reason": "opted out"}
-        merged = _deep_merge(base, desired)
-        out = yaml.safe_dump(merged, sort_keys=False, default_flow_style=False)
-        changed = out != current
-        if changed:
-            path.write_text(out, encoding="utf-8")
-    except (OSError, yaml.YAMLError) as exc:  # type: ignore[attr-defined]
+        # One read-merge-write transaction under the cross-process lock: the
+        # periodic sweep, a provision and an operator edit may overlap. The
+        # replacement is atomic (temp file + rename, mode kept) so Hermes's
+        # own 60 s reconcile never reads a half-written file.
+        with file_lock(path):
+            current = path.read_text(encoding="utf-8")
+            base = yaml.safe_load(current) or {}
+            if not isinstance(base, dict):
+                return {"wired": False, "changed": False, "error": "config.yaml is not a mapping"}
+            if _profile_wire_opted_out(base):
+                return {"wired": False, "changed": False, "reason": "opted out"}
+            merged = _deep_merge(base, desired)
+            out = yaml.safe_dump(merged, sort_keys=False, default_flow_style=False)
+            changed = out != current
+            if changed:
+                _atomic_write(path, out)
+    except (OSError, UnicodeDecodeError, yaml.YAMLError) as exc:  # type: ignore[attr-defined]
         return {"wired": False, "changed": False, "error": str(exc)}
     return {"wired": True, "changed": changed}
 

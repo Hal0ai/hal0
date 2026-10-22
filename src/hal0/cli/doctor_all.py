@@ -1277,6 +1277,12 @@ def check_hermes_mcp_config_auth(
     )
 
 
+def _header(server: dict[str, Any], name: str) -> Any:
+    """``server.headers[name]`` when ``headers`` is a mapping, else ``None``."""
+    headers = server.get("headers")
+    return headers.get(name) if isinstance(headers, dict) else None
+
+
 def check_hermes_profiles_mcp(
     *,
     auth: dict[str, Any] | None,
@@ -1299,14 +1305,14 @@ def check_hermes_profiles_mcp(
     key, label = "hermes_profiles_mcp", "Hermes profile MCP wiring"
     root = home if home is not None else ha.hermes_home()
     profiles = root / "profiles"
-    try:
-        has_profiles = profiles.is_dir()
-    except PermissionError:
-        has_profiles = True
-    # Hermes chmods its home 0700: a non-hal0 operator cannot see the profiles.
-    # Say so instead of a green "no profiles" (same posture as the hermes-api row).
-    if has_profiles and not os.access(profiles, os.R_OK | os.X_OK):
-        return Check(key, label, _WARN, f"cannot read {profiles}; run hal0 doctor as hal0 or root")
+    # Hermes chmods its home 0700: a non-hal0 operator cannot see the profiles
+    # (``is_dir()`` is simply False then). Say so instead of a green "no
+    # profiles" (same posture as the hermes-api row).
+    unreadable_msg = f"cannot read {profiles}; run hal0 doctor as hal0 or root"
+    if os.path.lexists(root) and not os.access(root, os.R_OK | os.X_OK):
+        return Check(key, label, _WARN, unreadable_msg)
+    if os.path.lexists(profiles) and not os.access(profiles, os.R_OK | os.X_OK):
+        return Check(key, label, _WARN, unreadable_msg)
     names = [n for n in ha.profile_dirs(root) if n != "hal0-brain"]
     if not names:
         return Check(key, label, _PASS, "no named Hermes profiles")
@@ -1343,8 +1349,7 @@ def check_hermes_profiles_mcp(
             unwired.append(name)
             continue
         if auth_required and any(
-            not ((servers[n].get("headers") or {}).get("Authorization"))
-            for n in ("hal0-admin", "hal0-memory")
+            not _header(servers[n], "Authorization") for n in ("hal0-admin", "hal0-memory")
         ):
             unauthed.append(name)
             continue

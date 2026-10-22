@@ -4684,9 +4684,24 @@ def _profiles(tmp_path: Path, **profiles: str | None) -> Path:
 
 
 def test_profile_agent_id_is_sanitised_for_the_mcp_identity_charset() -> None:
+    import re
+
     assert hp.profile_agent_id("coder") == "hermes__coder"
-    assert hp.profile_agent_id("my profile.v2") == "hermes__my_profile_v2"
+    rewritten = hp.profile_agent_id("my profile.v2")
+    assert (
+        rewritten.startswith("hermes__my_profile_v2-")
+        and len(rewritten) == len("hermes__my_profile_v2-") + 8
+    )
     assert len(hp.profile_agent_id("x" * 90)) == 64
+    for name in ("coder", "my profile.v2", "x" * 90, "foo.bar", "foo_bar"):
+        assert re.fullmatch(r"[A-Za-z0-9_-]{1,64}", hp.profile_agent_id(name))
+
+
+def test_profile_agent_id_never_collides_after_normalisation() -> None:
+    """Codex P1: ``foo.bar`` and ``foo_bar`` must not share one private memory bank."""
+    ids = {hp.profile_agent_id(n) for n in ("foo.bar", "foo_bar", "foo-bar", "x" * 90, "x" * 91)}
+    assert len(ids) == 5
+    assert hp.profile_agent_id("foo_bar") == "hermes__foo_bar"  # a clean name keeps its id
 
 
 def test_wire_named_profiles_wires_each_profile_as_its_own_identity(
@@ -4777,3 +4792,50 @@ def test_phase_profile_mcp_wire_warns_on_errors(tmp_path: Path, monkeypatch) -> 
     out = hp._phase_profile_mcp_wire(hp._StepCtx(state=state, io=hp.InstallIO()))
     assert out.status == hp.PhaseStatus.WARN
     assert out.reason is not None and "bad" in out.reason
+
+
+def test_wire_named_profiles_locks_and_replaces_atomically(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Codex P2: one read-merge-write transaction under file_lock, replaced via
+    tmp + rename with the mode kept, so Hermes's reconcile never sees a torn file."""
+    import os
+    import stat
+
+    from hal0.config import locking
+
+    monkeypatch.setattr("hal0.service_identity.service_key", lambda prefer=None: None)
+    home = _profiles(tmp_path, coder="model:\n  default: agent\n")
+    cfg = home / "profiles" / "coder" / "config.yaml"
+    os.chmod(cfg, 0o640)
+    locked: list[str] = []
+    real = locking.file_lock
+
+    def spy(target):
+        locked.append(str(target))
+        return real(target)
+
+    monkeypatch.setattr(locking, "file_lock", spy)
+    replaced: list[str] = []
+    real_replace = os.replace
+
+    def spy_replace(src, dst):
+        replaced.append(str(dst))
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(hp.os, "replace", spy_replace)
+    report = hp.wire_named_profiles(home)
+    assert report["changed"] == ["coder"]
+    assert locked == [str(cfg)] and replaced == [str(cfg)]
+    assert stat.S_IMODE(cfg.stat().st_mode) == 0o640
+
+
+def test_wire_named_profiles_contains_invalid_utf8_to_that_profile(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("hal0.service_identity.service_key", lambda prefer=None: None)
+    home = _profiles(tmp_path, ok="a: 1\n", zed="a: 1\n")
+    (home / "profiles" / "bad").mkdir()
+    (home / "profiles" / "bad" / "config.yaml").write_bytes(b"model: \xff\xfe\n")
+    report = hp.wire_named_profiles(home)
+    assert "bad" in report["errors"] and report["wired"] == ["ok", "zed"]

@@ -2055,3 +2055,29 @@ def test_generation_extras_passes_when_generation_matches(tmp_path, monkeypatch)
     monkeypatch.setattr(rel, "release_root_for", lambda _v: root)
     c = da.check_hermes_generation_extras(home=home, venv=venv)
     assert c.status == "pass" and "gen1" in c.detail
+
+
+def test_profiles_mcp_treats_non_mapping_headers_as_missing_auth(tmp_path) -> None:
+    broken = _WIRED.replace(
+        "    headers:\n      X-hal0-Agent: hermes__coder\n      Authorization: Bearer k\n",
+        "    headers: invalid\n",
+        1,
+    )
+    home = _profiles_home(tmp_path, coder=broken)
+    c = da.check_hermes_profiles_mcp(auth={"auth_required": True}, home=home)
+    assert c.status == "fail" and "coder" in c.detail
+
+
+def test_profiles_mcp_warns_when_home_is_not_traversable(tmp_path, monkeypatch) -> None:
+    """A 0700 Hermes home seen by another user: ``is_dir()`` is False, not an error."""
+    home = _profiles_home(tmp_path, coder=_WIRED)
+    real_access = da.os.access
+
+    def fake_access(path, mode, *a, **kw):
+        if Path(path) == home:
+            return False
+        return real_access(path, mode, *a, **kw)
+
+    monkeypatch.setattr(da.os, "access", fake_access)
+    c = da.check_hermes_profiles_mcp(auth={"auth_required": True}, home=home)
+    assert c.status == "warn" and "run hal0 doctor as hal0 or root" in c.detail
