@@ -28,6 +28,18 @@ What is on the list, and why:
     ``anthropic-version`` for ``auth_style = "anthropic"`` upstreams.
 ``openai-organization``, ``openai-project``, ``openai-beta``
     OpenAI protocol / billing selectors an SDK caller set on purpose.
+``x-hermes-session-id``, ``x-hermes-session-key``
+    Hermes protocol selectors, named in its capabilities table as
+    ``session_continuity_header`` and ``session_key_header`` (Hermes
+    ``gateway/platforms/api_server.py:76-77`` at ``d923a5eb``).
+    ``X-Hermes-Session-Id`` on ``POST /v1/chat/completions`` continues an
+    existing session, reading its history from ``state.db`` rather than the
+    body (``api_server_openai_routes.py:679-690``). ``X-Hermes-Session-Key``
+    scopes long-term memory per channel, independent of the session id (same
+    lines). Hermes validates the key's shape and accepts it only when API-key
+    auth is configured (``api_server.py:1825-1836``). Neither is a credential:
+    Hermes authenticates the request with the bearer the dispatcher adds
+    (``api_server.py:1559-1575``).
 
 Deliberately left off: ``cookie``, ``authorization``, ``x-api-key``,
 ``proxy-*``, ``x-hal0-*``, ``forwarded`` / ``x-forwarded-*`` / ``x-real-ip``
@@ -55,6 +67,8 @@ FORWARDABLE_REQUEST_HEADERS: frozenset[str] = frozenset(
         "openai-organization",
         "openai-project",
         "openai-beta",
+        "x-hermes-session-id",
+        "x-hermes-session-key",
     }
 )
 

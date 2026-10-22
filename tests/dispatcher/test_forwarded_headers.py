@@ -245,6 +245,14 @@ def test_allowlist_matches_names_case_insensitively_and_lowercases_keys() -> Non
     assert out == {"content-type": "application/json", "anthropic-beta": "b"}
 
 
+def test_hermes_session_headers_forwarded() -> None:
+    out = forwardable_request_headers(
+        {"X-Hermes-Session-Id": "abc", "X-Hermes-Session-Key": "k", "cookie": "x"}
+    )
+    assert out == {"x-hermes-session-id": "abc", "x-hermes-session-key": "k"}
+    assert "cookie" not in out
+
+
 def test_extra_widens_the_list_for_one_call_only() -> None:
     headers = {"If-None-Match": '"e"', "X-API-Key": "k"}
     assert forwardable_request_headers(headers) == {}
