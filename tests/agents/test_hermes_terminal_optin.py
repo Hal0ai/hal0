@@ -848,3 +848,57 @@ def test_wire_named_profiles_gates_clones_when_the_terminal_is_off(
     hp.wire_named_profiles(home)
     coder = yaml.safe_load((home / "profiles" / "coder" / "config.yaml").read_text())
     assert coder["terminal"]["backend"] == "local"
+
+
+def test_a_lost_sentinel_fails_the_config_write_phase(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A partial `config set` that dropped the security-critical key is a FAIL, not OK."""
+    from tests.agents._hermes_fakes import apply_hermes_config_cli
+
+    monkeypatch.delenv(hp.HERMES_TERMINAL_ENV, raising=False)
+
+    class _Done:
+        def __init__(self, rc: int) -> None:
+            self.returncode, self.stdout, self.stderr = rc, "", "boom" if rc else ""
+
+    def flaky_run(argv, *_a, env=None, **_kw):
+        argv = list(argv)
+        if "terminal.backend" in argv:
+            return _Done(1)
+        apply_hermes_config_cli(argv, env)
+        return _Done(0)
+
+    monkeypatch.setattr(hp, "TERMINAL_STATE_PATH", tmp_path / "state" / "hermes-terminal-tool")
+    monkeypatch.setattr(
+        hp,
+        "_resolve_primary_slot",
+        lambda **_kwargs: {"model": "p", "base_url": "u", "context_length": 8000},
+    )
+    monkeypatch.setattr(hp, "OVERRIDES_PATH", tmp_path / "no-such-overrides.yaml")
+    from hal0.agents import personas as _personas
+
+    monkeypatch.setattr(_personas, "PERSONAS_ROOT", tmp_path / "personas-empty")
+    io = hp.InstallIO(fetch_slots=lambda: [], fetch_model_contexts=lambda: {}, run=flaky_run)
+    state = hp.BootstrapState(hermes_home=str(tmp_path / "hh"))
+    out = hp._phase_config_write(hp._StepCtx(state=state, io=io))
+    assert out.status == hp.PhaseStatus.FAIL
+    assert out.reason is not None and "terminal.backend" in out.reason and "#2878" in out.reason
+
+
+def test_wire_named_profiles_gates_an_mcp_opted_out_profile_too(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`hal0: {wire_mcp: false}` opts out of MCP wiring, not of the box's terminal decision."""
+    import yaml
+
+    monkeypatch.setattr("hal0.service_identity.service_key", lambda prefer=None: "svc-key")
+    home = tmp_path / "hh"
+    (home / "profiles" / "quiet").mkdir(parents=True)
+    (home / "profiles" / "quiet" / "config.yaml").write_text("hal0:\n  wire_mcp: false\n")
+    monkeypatch.setattr(hp, "read_terminal_state", lambda: False)
+    report = hp.wire_named_profiles(home)
+    doc = yaml.safe_load((home / "profiles" / "quiet" / "config.yaml").read_text())
+    assert doc["terminal"]["backend"] == hp.TERMINAL_OFF_BACKEND
+    assert "mcp_servers" not in doc and "memory" not in doc
+    assert report["skipped"].get("quiet") == "opted out"

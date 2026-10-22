@@ -3253,6 +3253,25 @@ def _phase_config_write(ctx: _StepCtx) -> PhaseResult:
     # FAIL only when the overlay couldn't apply at all (hermes_bin broken) —
     # that's a real, actionable stop the operator must see.
     status = PhaseStatus.OK if (applied or not pairs) else PhaseStatus.FAIL
+    # The sentinel backend is the one key the gateway's side agents cannot
+    # bypass (#2878), so a partial `config set` that lost it is not "a usable
+    # config": verify it in the file hal0 just wrote, and fail the phase when
+    # it is not there. Only checked when hal0 owns the backend (an operator's
+    # docker/ssh is deliberately left alone, see _build_config_overlay).
+    gate_expected = (not terminal_enabled) and terminal_backend in (
+        None,
+        "",
+        "local",
+        TERMINAL_OFF_BACKEND,
+    )
+    if gate_expected and _terminal_backend_in_config(config_after) != TERMINAL_OFF_BACKEND:
+        errors.insert(
+            0,
+            f"terminal.backend is not {TERMINAL_OFF_BACKEND!r} in {config_path} although the "
+            "terminal is off: the gateway's side agents would still see the terminal tool "
+            "(#2878); re-run the provision",
+        )
+        status = PhaseStatus.FAIL
     # Both stale cases point the opposite way from each other, so the line the
     # operator reads has to name the direction rather than assume opt-out.
     stale_reason = (
@@ -5068,11 +5087,18 @@ def _merge_profile_config_at(
                         "changed": False,
                         "error": "config.yaml is not a mapping",
                     }
-                if _profile_wire_opted_out(base):
-                    return {"wired": False, "changed": False, "reason": "opted out"}
                 # ``desired`` may depend on the document (the terminal gate
                 # replaces only hal0's own sentinel, never an operator's backend).
                 wanted = desired(base) if callable(desired) else desired
+                opted_out = _profile_wire_opted_out(base)
+                if opted_out:
+                    # ``hal0: {wire_mcp: false}`` opts out of the MCP servers and
+                    # the memory provider, not of the box's terminal decision:
+                    # the backend gate is what keeps the terminal tool away from
+                    # the gateway's side agents in THIS profile too (#2878).
+                    wanted = {k: v for k, v in wanted.items() if k == "terminal"}
+                    if not wanted:
+                        return {"wired": False, "changed": False, "reason": "opted out"}
                 merged = _deep_merge(base, wanted)
                 changed = merged != base
                 if not changed:
@@ -5106,6 +5132,8 @@ def _merge_profile_config_at(
         # Never ``str(exc)``: a PyYAML message quotes the offending line, which
         # in this file can be a resolved Authorization header.
         return {"wired": False, "changed": False, "error": _yaml_error_summary(exc)}
+    if opted_out:
+        return {"wired": False, "changed": changed, "reason": "opted out"}
     return {"wired": True, "changed": changed}
 
 
