@@ -24,10 +24,16 @@ Interface contract:
         Follow (``journalctl -f``) generator yielding filtered log lines. The
         caller checks :func:`shutil.which` before opening it and formats each
         line as an SSE frame. Cleans up the subprocess on cancel/close.
-    tail_journal_keepalive(unit, ..., keepalive_s) -> AsyncIterator[str | None]
+        Raises :class:`JournalTailExited` when journalctl exits on its own —
+        a follow never finishes on a healthy host, so its exit (journal read
+        denied, bad unit, journald down) is a reportable condition, not a
+        clean end of stream.
+    tail_journal_keepalive(unit, ..., keepalive_s)
+            -> AsyncIterator[str | None | JournalDegraded]
         Same stream, but yields ``None`` every ``keepalive_s`` of silence so
         the SSE route can pulse a comment frame and keep proxies from reaping
-        an idle connection (#1472).
+        an idle connection (#1472), and a terminal :class:`JournalDegraded`
+        (then stops) when the underlying journalctl exited.
 
 The ``asyncio``/``shutil`` modules are referenced module-globally so tests can
 monkeypatch the subprocess spawn.
@@ -40,6 +46,7 @@ import contextlib
 import re
 import shutil
 from collections.abc import AsyncIterator
+from dataclasses import dataclass
 
 # Heartbeat lines llama-server prints every few seconds while idle. Left
 # unfiltered they flood the last-N tail window within minutes and push the
@@ -160,6 +167,71 @@ def _suppress_proc():
     return contextlib.suppress(ProcessLookupError, OSError)
 
 
+# ── journalctl exiting underneath a tail ─────────────────────────────────────
+#
+# ``journalctl -f`` never returns on its own on a healthy host. When it does —
+# observed on a box whose hal0-api.service predates the
+# ``SupplementaryGroups=systemd-journal`` grant (#2435): "No journal files were
+# opened due to insufficient permissions." on stderr, exit 0, nothing on
+# stdout — the old generator ended cleanly, the SSE response closed after zero
+# bytes, and the browser's EventSource read stream-end as an error: the slot
+# log drawer and the Logs page sat in "reconnecting…" forever with no reason
+# shown. The exit is the signal, so it is reported, with the stderr text
+# turned into something an operator can act on.
+
+
+class JournalTailExited(RuntimeError):
+    """``journalctl -f`` exited while a tail was following it.
+
+    ``reason`` is operator-facing (what happened and, where known, the fix);
+    ``lines`` is how many lines were yielded before the exit.
+    """
+
+    def __init__(self, reason: str, lines: int = 0) -> None:
+        super().__init__(reason)
+        self.reason = reason
+        self.lines = lines
+
+
+@dataclass(frozen=True)
+class JournalDegraded:
+    """Terminal item from :func:`tail_journal_keepalive`: the tail cannot
+    continue; ``reason`` explains why. The SSE route frames it as the named
+    ``degraded`` event the dashboard and CLI already understand."""
+
+    reason: str
+
+
+#: journalctl's own wording when the caller lacks journal read.
+_JOURNAL_PERMISSION_MARKERS: tuple[str, ...] = (
+    "insufficient permissions",
+    "permission denied",
+)
+
+
+def journalctl_failure_reason(stderr: str, returncode: int | None, unit: str) -> str:
+    """Operator-facing reason for a journalctl run that produced no usable output.
+
+    The permission shape gets the actionable sentence (the grant lives on
+    ``hal0-api.service``, written by the installer — #2435; ``hal0 doctor
+    all`` has a matching row). Anything else quotes journalctl's last stderr
+    line, or falls back to the exit status. Pure.
+    """
+    lines = [ln.strip() for ln in stderr.splitlines() if ln.strip()]
+    lowered = " ".join(lines).lower()
+    if any(marker in lowered for marker in _JOURNAL_PERMISSION_MARKERS):
+        detail = lines[-1] if lines else "insufficient permissions"
+        return (
+            f"hal0-api cannot read the journal (journalctl: {detail}) — "
+            "hal0-api.service is missing SupplementaryGroups=systemd-journal; "
+            "re-run the installer once (`hal0 update` does not rewrite the unit; "
+            "`hal0 doctor all` row 'API journal read' tracks it)"
+        )
+    if lines:
+        return f"journalctl exited with status {returncode}: {lines[-1]}"
+    return f"journalctl exited with status {returncode} while following {unit}"
+
+
 async def read_tail(unit: str, lines: int, quiet: bool = True) -> tuple[str, str | None]:
     """Return the last ``lines`` of ``unit``'s journal output (one-shot).
 
@@ -190,7 +262,7 @@ async def read_tail(unit: str, lines: int, quiet: bool = True) -> tuple[str, str
         stderr=asyncio.subprocess.PIPE,
     )
     try:
-        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=8.0)
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=8.0)
     except TimeoutError:
         with _suppress_proc():
             proc.kill()
@@ -200,6 +272,12 @@ async def read_tail(unit: str, lines: int, quiet: bool = True) -> tuple[str, str
         kept = [ln for ln in text.splitlines() if ln and not is_log_noise(ln)]
         text = "\n".join(kept[-want:])
     if not text.strip():
+        # journalctl said WHY it printed nothing (journal read denied, bad
+        # match, …): that beats the "never started" guess below, which was
+        # the misleading hint a permission problem used to hide behind.
+        err = stderr.decode("utf-8", errors="replace") if stderr else ""
+        if err.strip():
+            return "", journalctl_failure_reason(err, proc.returncode, unit)
         # #1472: journalctl ran fine and produced nothing — which is exactly
         # the "unit has never started" case this function's contract promises a
         # hint for, and the case the route only attaches ``hint`` for. Returning
@@ -223,6 +301,11 @@ async def tail_journal(unit: str, backfill_n: int = 0, quiet: bool = True) -> As
     checking ``shutil.which("journalctl")`` before iterating (so it can emit an
     SSE ``degraded`` frame); this generator assumes journalctl exists. The
     subprocess is killed when the consumer stops iterating (client disconnect).
+
+    Raises :class:`JournalTailExited` when journalctl exits on its own — after
+    yielding whatever lines arrived first. A follow never finishes by itself
+    on a healthy host, so the exit is a condition to report (journal read
+    denied — #2435 — bad unit, journald down), never a clean end of stream.
     """
     backfill_n = max(0, min(int(backfill_n or 0), 5000))
     cmd = [
@@ -238,8 +321,9 @@ async def tail_journal(unit: str, backfill_n: int = 0, quiet: bool = True) -> As
     proc = await asyncio.create_subprocess_exec(
         *cmd,
         stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.PIPE,
     )
+    emitted = 0
     try:
         assert proc.stdout is not None
         async for raw in proc.stdout:
@@ -248,7 +332,20 @@ async def tail_journal(unit: str, backfill_n: int = 0, quiet: bool = True) -> As
                 continue
             if quiet and is_log_noise(line):
                 continue
+            emitted += 1
             yield line
+        # stdout hit EOF: journalctl is gone. Collect its last words (bounded,
+        # best-effort — the process has exited, so the pipe holds whatever it
+        # wrote) and report the exit instead of ending the stream quietly.
+        returncode = await proc.wait()
+        stderr = b""
+        if proc.stderr is not None:
+            with contextlib.suppress(TimeoutError, OSError):
+                stderr = await asyncio.wait_for(proc.stderr.read(4096), timeout=2.0)
+        raise JournalTailExited(
+            journalctl_failure_reason(stderr.decode("utf-8", errors="replace"), returncode, unit),
+            emitted,
+        )
     except asyncio.CancelledError:
         raise
     finally:
@@ -283,12 +380,14 @@ async def tail_journal_keepalive(
     quiet: bool = True,
     *,
     keepalive_s: float = KEEPALIVE_S,
-) -> AsyncIterator[str | None]:
+) -> AsyncIterator[str | None | JournalDegraded]:
     """:func:`tail_journal`, plus a ``None`` yield every ``keepalive_s`` of silence.
 
     ``None`` means "nothing to report, emit a keepalive"; the SSE route turns
     it into a ``: keepalive`` comment frame. Real lines pass through verbatim,
-    so this wrapper is transparent to a chatty stream.
+    so this wrapper is transparent to a chatty stream. When journalctl exits
+    underneath the tail (:class:`JournalTailExited`) the wrapper yields one
+    terminal :class:`JournalDegraded` carrying the reason and then stops.
 
     **Why a queue rather than the obvious ``asyncio.wait_for``.** Wrapping the
     generator step directly — ``await asyncio.wait_for(agen.__anext__(), t)``
@@ -301,12 +400,14 @@ async def tail_journal_keepalive(
     cancellation onto ``Queue.get()``, which is designed for it, and leaves the
     journal generator advancing on its own task.
     """
-    queue: asyncio.Queue[str | object] = asyncio.Queue()
+    queue: asyncio.Queue[str | JournalDegraded | object] = asyncio.Queue()
 
     async def _pump() -> None:
         try:
             async for line in tail_journal(unit, backfill_n, quiet):
                 await queue.put(line)
+        except JournalTailExited as exc:
+            queue.put_nowait(JournalDegraded(exc.reason))
         finally:
             # Always signal termination — including on cancellation — so a
             # consumer blocked on get() is never stranded waiting for a
@@ -324,6 +425,8 @@ async def tail_journal_keepalive(
             if item is _PUMP_DONE:
                 return
             yield item  # type: ignore[misc]
+            if isinstance(item, JournalDegraded):
+                return  # terminal: the tail cannot continue
     finally:
         # Client disconnect / consumer aclose(): stop the pump, which closes
         # the journalctl subprocess through tail_journal's own finally block.

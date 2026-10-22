@@ -1470,6 +1470,30 @@ def _find_synthetic_entry(request: Request, name: str) -> dict[str, Any] | None:
     return None
 
 
+def _degraded_frame(message: str) -> str:
+    """The named ``degraded`` SSE frame — NOT the reserved ``error`` name (B13):
+    EventSource's onmessage/onerror never fire for a named ``error`` frame,
+    so the log drawer used to spin forever. The dashboard (``useLogs.ts``)
+    and ``hal0 slot logs --follow`` both listen for ``degraded``."""
+    return "event: degraded\ndata: " + json.dumps({"message": message}) + "\n\n"
+
+
+async def _hold_open_after_degraded() -> Any:
+    """Keep an SSE log stream open after its ``degraded`` frame.
+
+    The client's degraded listener only records the message, while its
+    onerror closes and RECONNECTS (ui/src/api/hooks/useLogs.ts) — so a stream
+    that ended after the frame would put the viewer in a silent retry loop
+    against this endpoint forever (#1905). Keepalive cadence follows
+    :data:`hal0.slots.logs.KEEPALIVE_S` (read per tick so tests can shorten
+    it) so one proxy idle-timeout value covers every hal0 SSE stream (#1472).
+    The CLI follower treats ``degraded`` as terminal and returns on its own.
+    """
+    while True:
+        await asyncio.sleep(_logs.KEEPALIVE_S)
+        yield ": keepalive\n\n"
+
+
 def _synthetic_logs_hint(entry: dict[str, Any]) -> str:
     """Explain why a synthetic entry has no journal, worded per entry.
 
@@ -1581,20 +1605,9 @@ async def slot_logs_stream(
             raise
 
         async def synthetic_source() -> Any:
-            yield (
-                "event: degraded\ndata: "
-                + json.dumps({"message": _synthetic_logs_hint(entry)})
-                + "\n\n"
-            )
-            # Hold the stream open after the degraded frame: the client's
-            # degraded listener only records the message, while its onerror
-            # closes and RECONNECTS (ui/src/api/hooks/useLogs.ts) — so a
-            # stream that ends here would put the viewer in a silent retry
-            # loop against this endpoint forever. Keepalive cadence matches
-            # the journal streams (#1472) so proxy idle timeouts are covered.
-            while True:
-                await asyncio.sleep(15)
-                yield ": keepalive\n\n"
+            yield _degraded_frame(_synthetic_logs_hint(entry))
+            async for frame in _hold_open_after_degraded():
+                yield frame
 
         return StreamingResponse(
             synthetic_source(),
@@ -1619,11 +1632,22 @@ async def slot_logs_stream(
         # 400-line backfill into a ring with content-dedup deliberately off.
         # ``None`` is the idle tick; matches the 15 s cadence of the journal
         # and activity streams so one proxy timeout value covers them all.
-        async for line in _logs.tail_journal_keepalive(unit, backfill, quiet):
-            if line is None:
+        async for item in _logs.tail_journal_keepalive(unit, backfill, quiet):
+            if item is None:
                 yield ": keepalive\n\n"
                 continue
-            yield f"data: {json.dumps(redact_log_line(line))}\n\n"
+            if isinstance(item, _logs.JournalDegraded):
+                # journalctl exited underneath the tail (journal read denied
+                # — #2435 — bad unit, journald down). Ending the response
+                # here is what the viewer saw as an endless "reconnecting…":
+                # EventSource treats stream-end as an error and retries, and
+                # every retry got the same zero-byte close. Say why, then
+                # hold the stream open exactly like the synthetic branch.
+                yield _degraded_frame(item.reason)
+                async for frame in _hold_open_after_degraded():
+                    yield frame
+                return
+            yield f"data: {json.dumps(redact_log_line(item))}\n\n"
 
     return StreamingResponse(
         event_source(),
