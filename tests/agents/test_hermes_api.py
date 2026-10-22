@@ -178,3 +178,22 @@ def test_upstream_name_roundtrip() -> None:
     assert hermes_api.profile_of_upstream("hermes.coder") == "coder"
     assert hermes_api.profile_of_upstream("openrouter") is None
     assert hermes_api.profile_of_upstream("hermes.") is None
+
+
+def test_ensure_profile_keys_skips_unreadable_env(home: Path) -> None:
+    # A directory named .env raises IsADirectoryError on read, whatever the euid.
+    (home / "profiles" / "nokey" / ".env").mkdir()
+    assert hermes_api.ensure_profile_key("nokey", home) is False
+    assert hermes_api.ensure_profile_keys(home) == ["parked"]
+
+
+def test_ensure_profile_keys_skips_permission_denied_env(home: Path) -> None:
+    if os.getuid() == 0:
+        pytest.skip("root reads any file")
+    env = home / "profiles" / "nokey" / ".env"
+    env.write_text("A=1\n")
+    env.chmod(0o000)
+    try:
+        assert hermes_api.ensure_profile_keys(home) == ["parked"]
+    finally:
+        env.chmod(0o600)

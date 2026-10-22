@@ -33,7 +33,11 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+import structlog
+
 from hal0.agents import hermes_provision as hp
+
+log = structlog.get_logger(__name__)
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8642
@@ -174,6 +178,9 @@ def ensure_profile_key(profile: str, home: Path) -> bool:
         st: os.stat_result | None = target.stat()
     except FileNotFoundError:
         existing, st = b"", None
+    except OSError as exc:  # unreadable / not a file: skip, never abort the sweep
+        log.warning("hermes_api.key_skipped", path=str(target), error=str(exc))
+        return False
     prefix = existing if not existing or existing.endswith(b"\n") else existing + b"\n"
     line = f"{_KEY_NAME}={hp._generate_api_server_key()}\n".encode()
     fd, tmp = tempfile.mkstemp(dir=target.parent, prefix=".env.")
