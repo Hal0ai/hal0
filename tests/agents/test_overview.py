@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
+
+import pytest
 
 from hal0.agents.hermes_release import Release
 from hal0.agents.overview import (
@@ -10,7 +13,11 @@ from hal0.agents.overview import (
     doctor_rows,
     hermes_phase,
     hermes_version,
+    pi_installed_versions,
     pi_phase,
+    pi_pins,
+    pi_profile_checks,
+    pi_update_available,
     provision_summary,
     unit_states,
 )
@@ -244,3 +251,159 @@ def test_pi_phase():
     assert pi_phase(installed=False, status="") == "not_installed"
     assert pi_phase(installed=True, status="broken") == "broken"
     assert pi_phase(installed=True, status="installed") == "installed"
+
+
+def _fake_npm_tree(tmp_path, pi_v="0.84.4", adapter_v="2.31.0"):
+    root = tmp_path / "lib" / "node_modules"
+    pkg = root / "@earendil-works" / "pi-coding-agent"
+    (pkg / "dist" / "bundle").mkdir(parents=True)
+    (pkg / "package.json").write_text(
+        json.dumps({"name": "@earendil-works/pi-coding-agent", "version": pi_v})
+    )
+    (pkg / "dist" / "bundle" / "cli.js").write_text("")
+    (root / "pi-mcp-adapter").mkdir()
+    (root / "pi-mcp-adapter" / "package.json").write_text(
+        json.dumps({"name": "pi-mcp-adapter", "version": adapter_v})
+    )
+    link = tmp_path / "bin" / "pi"
+    link.parent.mkdir()
+    link.symlink_to(pkg / "dist" / "bundle" / "cli.js")
+    return link
+
+
+def test_pi_installed_versions_walks_up_from_the_symlink(tmp_path):
+    assert pi_installed_versions(_fake_npm_tree(tmp_path)) == {"pi": "0.84.4", "adapter": "2.31.0"}
+
+
+def test_pi_installed_versions_none_without_binary():
+    assert pi_installed_versions(None) is None
+
+
+def test_pi_installed_versions_adapter_absent(tmp_path):
+    link = _fake_npm_tree(tmp_path)
+    (tmp_path / "lib" / "node_modules" / "pi-mcp-adapter" / "package.json").unlink()
+    assert pi_installed_versions(link) == {"pi": "0.84.4", "adapter": None}
+
+
+def test_pi_installed_versions_none_for_a_non_npm_binary(tmp_path):
+    binary = tmp_path / "pi"
+    binary.write_text("#!/bin/sh\n")
+    assert pi_installed_versions(binary) is None
+
+
+def test_pi_pins_from_installer_script(tmp_path):
+    s = tmp_path / "pi.sh"
+    s.write_text(
+        'PI_PKG="@earendil-works/pi-coding-agent@1.2.0"\nADAPTER_PKG="pi-mcp-adapter@5.3.0"\n'
+    )
+    assert pi_pins(s) == {"pi": "1.2.0", "adapter": "5.3.0"}
+
+
+def test_pi_pins_raises_when_a_pin_is_missing(tmp_path):
+    s = tmp_path / "pi.sh"
+    s.write_text('PI_PKG="@earendil-works/pi-coding-agent@1.2.0"\n')
+    with pytest.raises(ValueError, match="ADAPTER_PKG"):
+        pi_pins(s)
+
+
+def test_pi_update_available_compares_versions():
+    assert (
+        pi_update_available(
+            {"pi": "0.84.4", "adapter": "2.31.0"}, {"pi": "1.2.0", "adapter": "5.3.0"}
+        )
+        is True
+    )
+    assert (
+        pi_update_available(
+            {"pi": "1.2.0", "adapter": "5.3.0"}, {"pi": "1.2.0", "adapter": "5.3.0"}
+        )
+        is False
+    )
+    assert pi_update_available(None, {"pi": "1.2.0", "adapter": "5.3.0"}) is False
+
+
+def test_pi_update_available_when_only_the_adapter_lags_or_is_missing():
+    pins = {"pi": "1.2.0", "adapter": "5.3.0"}
+    assert pi_update_available({"pi": "1.2.0", "adapter": "5.2.9"}, pins) is True
+    assert pi_update_available({"pi": "1.2.0", "adapter": None}, pins) is True
+    assert pi_update_available({"pi": "1.3.0", "adapter": "5.4.0"}, pins) is False
+
+
+def test_pi_checks_null_when_home_unreadable():
+    out = pi_profile_checks(
+        marker={"home": "/root"},
+        versions={"pi": "0.84.4", "adapter": "2.31.0"},
+        pins={"pi": "1.2.0", "adapter": "5.3.0"},
+        home_readable=False,
+        home=Path("/root"),
+    )
+    by = {c["id"]: c for c in out}
+    assert by["binary"]["ok"] is True
+    assert by["provider_ext"]["ok"] is None
+    assert by["provider_ext"]["detail"] == "home not readable from the daemon"
+    assert by["adapter_gate"]["ok"] is False and "5.0" in by["adapter_gate"]["detail"]
+
+
+def test_pi_checks_read_home_when_readable(tmp_path):
+    agent = tmp_path / ".pi" / "agent"
+    (agent / "extensions" / "hal0-provider").mkdir(parents=True)
+    (agent / "extensions" / "hal0-provider" / "index.ts").write_text("")
+    (agent / "themes").mkdir()
+    (agent / "themes" / "hal0.json").write_text("{}")
+    (agent / "mcp.json").write_text(json.dumps({"mcpServers": {"hal0-memory": {"url": "u"}}}))
+    out = {
+        c["id"]: c["ok"]
+        for c in pi_profile_checks(
+            marker={"home": str(tmp_path)},
+            versions={"pi": "1.2.0", "adapter": "5.3.0"},
+            pins={"pi": "1.2.0", "adapter": "5.3.0"},
+            home_readable=True,
+            home=tmp_path,
+        )
+    }
+    assert out == {
+        "binary": True,
+        "provider_ext": True,
+        "hindsight_ext": False,
+        "theme": True,
+        "mcp_entry": True,
+        "hindsight_config": False,
+        "adapter_gate": True,
+    }
+
+
+def test_pi_checks_in_display_order_and_without_binary():
+    out = pi_profile_checks(
+        marker=None,
+        versions=None,
+        pins={"pi": "1.2.0", "adapter": "5.3.0"},
+        home_readable=False,
+        home=None,
+    )
+    assert [c["id"] for c in out] == [
+        "binary",
+        "provider_ext",
+        "hindsight_ext",
+        "theme",
+        "mcp_entry",
+        "hindsight_config",
+        "adapter_gate",
+    ]
+    assert out[0]["ok"] is False and out[-1]["ok"] is False
+    assert out[1]["ok"] is None and out[1]["detail"] == "no profiled home recorded"
+
+
+def test_pi_checks_fall_back_to_the_marker_home(tmp_path):
+    (tmp_path / ".pi" / "agent").mkdir(parents=True)
+    (tmp_path / ".pi" / "agent" / "mcp.json").write_text("not json")
+    out = {
+        c["id"]: c["ok"]
+        for c in pi_profile_checks(
+            marker={"home": str(tmp_path)},
+            versions={"pi": "1.2.0", "adapter": "5.3.0"},
+            pins={"pi": "1.2.0", "adapter": "5.3.0"},
+            home_readable=True,
+            home=None,
+        )
+    }
+    assert out["provider_ext"] is False and out["mcp_entry"] is False

@@ -2,13 +2,19 @@
 
 Every function takes already-fetched inputs and returns plain dicts, so the
 route owns all I/O and each rule here is testable on its own. The only reads
-are the Pi helpers, which open the ``package.json`` files and the installer
-script they are handed.
+are the Pi helpers, which open the npm ``package.json`` files, the installer
+script and the profiled home they are handed.
 """
 
 from __future__ import annotations
 
+import json
+import os
+import re
+from pathlib import Path
 from typing import Any
+
+from packaging.version import InvalidVersion, Version
 
 from hal0.agents.hermes_release import Release
 
@@ -282,3 +288,187 @@ def pi_phase(*, installed: bool, status: str) -> str:
     if not installed:
         return "not_installed"
     return "broken" if status == "broken" else "installed"
+
+
+# ── Pi ───────────────────────────────────────────────────────────────────────
+
+_PI_PACKAGE = "@earendil-works/pi-coding-agent"
+_ADAPTER_PACKAGE = "pi-mcp-adapter"
+
+#: The versions of Pi and ``pi-mcp-adapter`` that read ``~/.pi/agent/mcp.json``
+#: (see ``PiDriver._write_mcp_config``): the adapter from 5.0, on Pi from 0.99.
+_ADAPTER_MIN = Version("5.0")
+_PI_MIN_FOR_ADAPTER = Version("0.99")
+
+_PI_PIN_RE = re.compile(r'^PI_PKG="[^"]*@(?P<version>[^"@]+)"', re.MULTILINE)
+_ADAPTER_PIN_RE = re.compile(r'^ADAPTER_PKG="[^"]*@(?P<version>[^"@]+)"', re.MULTILINE)
+
+
+def _package_json(path: Path) -> dict[str, Any] | None:
+    """A parsed ``package.json``, or ``None`` when it is missing or not an object."""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def pi_installed_versions(pi_binary: Path | None) -> dict[str, str | None] | None:
+    """Installed Pi and ``pi-mcp-adapter`` versions, read from the npm tree.
+
+    ``pi_binary`` is the ``pi`` executable on ``PATH``, an npm symlink into
+    ``<root>/@earendil-works/pi-coding-agent/``. Resolve it, walk up to the
+    package's own ``package.json``, and read the adapter's next to it under
+    the same npm root. ``None`` when there is no binary or it is not an npm
+    install of Pi.
+    """
+    if pi_binary is None:
+        return None
+    for parent in Path(os.path.realpath(pi_binary)).parents:
+        pkg = _package_json(parent / "package.json")
+        if pkg is None or pkg.get("name") != _PI_PACKAGE:
+            continue
+        version = pkg.get("version")
+        if not isinstance(version, str):
+            return None
+        adapter = _package_json(parent.parent.parent / _ADAPTER_PACKAGE / "package.json")
+        adapter_version = adapter.get("version") if adapter else None
+        return {
+            "pi": version,
+            "adapter": adapter_version if isinstance(adapter_version, str) else None,
+        }
+    return None
+
+
+def pi_pins(script: Path) -> dict[str, str]:
+    """The Pi and adapter versions the installer script pins.
+
+    Raises ``ValueError`` when either pin is missing from ``script``.
+    """
+    text = script.read_text(encoding="utf-8")
+    pi = _PI_PIN_RE.search(text)
+    adapter = _ADAPTER_PIN_RE.search(text)
+    if pi is None or adapter is None:
+        missing = "PI_PKG" if pi is None else "ADAPTER_PKG"
+        raise ValueError(f"{script} does not pin {missing}")
+    return {"pi": pi.group("version"), "adapter": adapter.group("version")}
+
+
+def _older(installed: str | None, pinned: str) -> bool:
+    """Whether ``installed`` is behind ``pinned`` (absent counts as behind).
+
+    npm versions that PEP 440 cannot parse fall back to plain inequality.
+    """
+    if installed is None:
+        return True
+    try:
+        return Version(installed) < Version(pinned)
+    except InvalidVersion:
+        return installed != pinned
+
+
+def pi_update_available(versions: dict[str, str | None] | None, pins: dict[str, str]) -> bool:
+    """True when Pi or its adapter is installed but behind the installer's pin."""
+    if versions is None:
+        return False
+    return _older(versions.get("pi"), pins["pi"]) or _older(
+        versions.get("adapter"), pins["adapter"]
+    )
+
+
+def _check(check_id: str, ok: bool | None, detail: str) -> dict[str, Any]:
+    return {"id": check_id, "ok": ok, "detail": detail}
+
+
+def _adapter_gate(versions: dict[str, str | None] | None) -> dict[str, Any]:
+    """Whether the installed adapter and Pi are new enough to read ``mcp.json``."""
+    needs = f"needs pi-mcp-adapter >= {_ADAPTER_MIN} on pi >= {_PI_MIN_FOR_ADAPTER}"
+    pi = versions.get("pi") if versions else None
+    adapter = versions.get("adapter") if versions else None
+    if pi is None or adapter is None:
+        return _check(
+            "adapter_gate", False, f"pi and pi-mcp-adapter are not both installed ({needs})"
+        )
+    try:
+        ok = Version(adapter) >= _ADAPTER_MIN and Version(pi) >= _PI_MIN_FOR_ADAPTER
+    except InvalidVersion:
+        return _check("adapter_gate", False, f"cannot compare pi {pi} / pi-mcp-adapter {adapter}")
+    return _check("adapter_gate", ok, f"pi {pi}, pi-mcp-adapter {adapter} ({needs})")
+
+
+def _has_memory_mcp_entry(path: Path) -> bool:
+    """Whether ``mcp.json`` has the ``hal0-memory`` server entry."""
+    config = _package_json(path)
+    servers = config.get("mcpServers") if config else None
+    return isinstance(servers, dict) and "hal0-memory" in servers
+
+
+def _file_check(check_id: str, path: Path, label: str) -> dict[str, Any]:
+    present = path.is_file()
+    return _check(check_id, present, f"{label} {'present' if present else 'missing'}")
+
+
+def pi_profile_checks(
+    *,
+    marker: dict[str, Any] | None,
+    versions: dict[str, str | None] | None,
+    pins: dict[str, str],
+    home_readable: bool,
+    home: Path | None,
+) -> list[dict[str, Any]]:
+    """The Pi card's profile checks, in display order.
+
+    ``binary`` and ``adapter_gate`` come from the probed ``versions``. The
+    rest read the profiled ``home``; when the daemon cannot read it they
+    answer ``ok: None`` ("unknown") rather than a false negative. ``home``
+    falls back to the profile ``marker``'s when the caller has none.
+    """
+    if versions is None:
+        binary = _check("binary", False, "pi is not on PATH as an npm install")
+    else:
+        binary = _check("binary", True, f"pi {versions['pi']} (pinned {pins['pi']})")
+
+    if home is None and marker and marker.get("home"):
+        home = Path(str(marker["home"]))
+
+    if home is None or not home_readable:
+        unknown = (
+            "no profiled home recorded" if home is None else "home not readable from the daemon"
+        )
+        profile = [
+            _check(check_id, None, unknown)
+            for check_id in (
+                "provider_ext",
+                "hindsight_ext",
+                "theme",
+                "mcp_entry",
+                "hindsight_config",
+            )
+        ]
+    else:
+        agent = home / ".pi" / "agent"
+        has_entry = _has_memory_mcp_entry(agent / "mcp.json")
+        profile = [
+            _file_check(
+                "provider_ext",
+                agent / "extensions" / "hal0-provider" / "index.ts",
+                "hal0-provider extension",
+            ),
+            _file_check(
+                "hindsight_ext",
+                agent / "extensions" / "hindsight" / "index.ts",
+                "hindsight extension",
+            ),
+            _file_check("theme", agent / "themes" / "hal0.json", "hal0 theme"),
+            _check(
+                "mcp_entry",
+                has_entry,
+                f"hal0-memory MCP entry {'present' if has_entry else 'missing'}",
+            ),
+            _file_check(
+                "hindsight_config",
+                home / ".hindsight" / "coding-agent.json",
+                "Hindsight client config",
+            ),
+        ]
+    return [binary, *profile, _adapter_gate(versions)]
