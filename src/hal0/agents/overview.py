@@ -74,3 +74,86 @@ def unit_states(agent_active: bool | None, gateway: str | None) -> dict[str, str
     """
     agent = {True: "active", False: "inactive", None: "unknown"}[agent_active]
     return {"agent": agent, "gateway": gateway or "unknown"}
+
+
+#: ``config_write`` phase details the card lifts to the top of the summary.
+_CONFIG_WRITE_KEYS = (
+    "primary_model",
+    "delegation_model",
+    "chat_slot_count",
+    "mcp_server_count",
+    "memory_provider",
+    "persona",
+    "terminal_tool",
+    "approvals_mode",
+)
+
+
+def provision_summary(data: dict[str, Any] | None) -> dict[str, Any]:
+    """Summarise ``provision.json`` (the last provision run) for the card.
+
+    Phases keep file order. ``ok``/``warn``/``fail`` count phases by status;
+    ``skip`` counts nowhere. The ``config_write`` phase's details are lifted
+    so the card does not need the raw blob. ``data`` is ``None`` when no run
+    has been recorded.
+    """
+    data = data or {}
+    phases = [
+        {
+            "name": name,
+            "status": entry.get("status"),
+            "at": entry.get("at"),
+            "failure_count": entry.get("failure_count"),
+            "reason": entry.get("reason"),
+        }
+        for name, entry in (data.get("phases") or {}).items()
+    ]
+    config_write = ((data.get("phases") or {}).get("config_write") or {}).get("details") or {}
+    return {
+        "present": bool(data),
+        "hal0_version": data.get("hal0_version"),
+        "hermes_version": data.get("hermes_version"),
+        "completed_at": data.get("completed_at"),
+        "phases": phases,
+        "ok": sum(1 for p in phases if p["status"] == "ok"),
+        "warn": sum(1 for p in phases if p["status"] == "warn"),
+        "fail": sum(1 for p in phases if p["status"] == "fail"),
+        **{key: config_write.get(key) for key in _CONFIG_WRITE_KEYS},
+    }
+
+
+def _ownership_row(ownership: list[dict[str, Any]]) -> dict[str, str]:
+    """Collapse the per-path ownership audit into one doctor row."""
+    drifted = [f"{r['label']}: {r['detail']}" for r in ownership if r["status"] == "drift"]
+    if drifted:
+        return {"id": "ownership", "status": "fail", "detail": "; ".join(drifted)}
+    return {"id": "ownership", "status": "ok", "detail": "no ownership drift"}
+
+
+def doctor_rows(
+    sqlite: dict[str, str],
+    plugins: dict[str, str],
+    ownership: list[dict[str, Any]],
+    gateway_unit: dict[str, str] | None,
+) -> list[dict[str, str]]:
+    """Doctor rows for the card: interpreter, plugins, ownership, gateway unit.
+
+    ``sqlite`` and ``plugins`` are the ``{status, detail}`` results of
+    ``check_hermes_sqlite`` and ``check_hermes_plugins``; ``ownership`` is the
+    row list from ``check_hermes_ownership``; ``gateway_unit`` is ``None``
+    when that check is not available.
+    """
+    rows = [
+        {"id": "interpreter", "status": sqlite["status"], "detail": sqlite["detail"]},
+        {"id": "plugins", "status": plugins["status"], "detail": plugins["detail"]},
+        _ownership_row(ownership),
+    ]
+    if gateway_unit is not None:
+        rows.append(
+            {
+                "id": "gateway_unit",
+                "status": gateway_unit["status"],
+                "detail": gateway_unit["detail"],
+            }
+        )
+    return rows
