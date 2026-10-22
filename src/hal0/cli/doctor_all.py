@@ -1757,6 +1757,10 @@ def check_hermes_api_upstreams(
         for slot in slots_payload:
             if not isinstance(slot, dict):
                 continue
+            # /api/slots lists remote upstreams too (kind "remote"), the Hermes
+            # entries among them. Only a local slot can shadow an owned id.
+            if slot.get("kind") == "remote":
+                continue
             mid = next(
                 (
                     slot[k]

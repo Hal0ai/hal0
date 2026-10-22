@@ -1859,6 +1859,22 @@ def test_check_hermes_api_upstreams_warns_when_not_reconciled(tmp_path) -> None:
     assert "POST /api/agents/hermes/reconcile-upstreams" in c.detail
 
 
+def test_check_hermes_api_upstreams_ignores_remote_rows_in_the_slots_payload(tmp_path) -> None:
+    """/api/slots lists the Hermes upstreams themselves as kind "remote" rows; they
+    are not local slots and must not be reported as colliding with their own ids."""
+    slots = [
+        {
+            "name": "hermes",
+            "kind": "remote",
+            "provider": "remote-upstream",
+            "model": "hermes-agent",
+        },
+        {"name": "hermes.alpha", "kind": "remote", "model": "alpha"},
+    ]
+    c = _api(_hermes_home(tmp_path), slots=slots)
+    assert c.status == "pass" and "wins" not in c.detail
+
+
 def test_check_hermes_api_upstreams_warns_on_collision(tmp_path) -> None:
     c = _api(_hermes_home(tmp_path), slots=[{"name": "agent", "model_id": "alpha"}])
     assert c.status == "warn"
