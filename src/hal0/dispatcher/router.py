@@ -704,6 +704,10 @@ class Dispatcher:
         # id the request actually asked for.
         lane_slot = lane_slot_pin(request)
 
+        # Pinned ownership is decided first: an owned id never goes to a
+        # container slot that happens to advertise the same id (Step 0b).
+        owner = self._pinned_owner(model_id)
+
         # ── Step 0: container-slot preemption ────────────────────────────
         # A loaded container slot (kind="remote" + slot_name) is the
         # authoritative server for the models it advertises, and must win
@@ -711,7 +715,7 @@ class Dispatcher:
         # #662). Only fires on a warm cache hit for a container remote.
         # Health-ordered (#1418): with two container slots advertising one
         # model, the live one wins over an ERROR-parked sibling.
-        for upstream in self._upstreams_in_priority_order(lane_slot):
+        for upstream in self._upstreams_in_priority_order(lane_slot) if owner is None else ():
             if _container_slot_name_of(upstream) and model_id in self._cached_models(upstream.name):
                 call = UpstreamCall(
                     upstream_name=upstream.name,
@@ -734,7 +738,6 @@ class Dispatcher:
         # loudly, never fall through to the registry / capability ladder (which
         # would land on the agent slot). The cache only decides live vs. not
         # advertised below; it never confers ownership.
-        owner = self._pinned_owner(model_id)
         if owner is not None:
             if getattr(owner, "enabled", True) is False:
                 raise UpstreamUnavailable(

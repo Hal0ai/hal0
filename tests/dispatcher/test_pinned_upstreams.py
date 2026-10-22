@@ -180,3 +180,29 @@ async def test_cached_only_id_is_not_pinned() -> None:
     call = await d.dispatch(make_request(), body={"model": "alias-x", "messages": []})
     assert not call.resolution_path.startswith("pinned:")
     assert call.upstream_name == "hermes"
+
+
+@pytest.mark.asyncio
+async def test_pinned_owned_id_beats_container_slot_preemption() -> None:
+    """Codex P1: a ready container slot advertising an owned id must not win
+    Step 0; the pinned owner is decided before container-slot preemption."""
+    container = Upstream(
+        name="gpu-slot", kind="remote", url="http://127.0.0.1:8090/v1", slot_name="gpu-slot"
+    )
+    d = _dispatcher(
+        [container, make_pinned()],
+        {"gpu-slot": ["coder"], "hermes.coder": ["coder"]},
+    )
+    call = await d.dispatch(make_request(), body={"model": "coder", "messages": []})
+    assert call.resolution_path == "pinned:hermes.coder"
+    assert call.upstream_name == "hermes.coder"
+
+
+@pytest.mark.asyncio
+async def test_container_slot_preemption_still_wins_unowned_ids() -> None:
+    container = Upstream(
+        name="gpu-slot", kind="remote", url="http://127.0.0.1:8090/v1", slot_name="gpu-slot"
+    )
+    d = _dispatcher([container, make_pinned()], {"gpu-slot": ["qwen"], "hermes.coder": ["coder"]})
+    call = await d.dispatch(make_request(), body={"model": "qwen", "messages": []})
+    assert call.resolution_path == "container:gpu-slot"
