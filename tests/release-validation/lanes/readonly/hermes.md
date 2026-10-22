@@ -101,8 +101,9 @@ chat messages — that is the `hermes-e2e` stateful lane.
 
 17. **A warn names its probe.** `provision.json` `smoke_tests` with `status: warn` must carry a `failures[]` list whose names match the false entries in `details.results`; a warn with no named probe is a finding (20261016003929: 2 failures, both named). Also confirm `/var/lib/hal0/.hermes/.env` absence is expected: `/api/status` advertises an `env_path` there that does not exist on a fresh install (treated as upstream behaviour, unverified).
 
-18. **Pin.** Hermes is v0.22.4, commit `4d043038`, on fresh and upgraded boxes alike (v1.6.0
-   shipped v0.22.2, `d923a5eb`, which stays vetted as the flip-back target). Read the commit from the install, not from `hermes --version` (that makes a network
+18. **Pin.** Hermes is v0.22.4, commit `4d043038`, on fresh and upgraded boxes alike (v0.22.2,
+   `d923a5eb`, is the upgrade baseline: the pin before this bump, still vetted as the flip-back
+   target). Read the commit from the install, not from `hermes --version` (that makes a network
    update check and needs tags): the live release's recorded sha, or `git rev-parse HEAD` in its
    checkout. A box on any other sha is a finding.
 19. **Session history is kept.** `/var/lib/hal0/.hermes/config.yaml` must carry
@@ -129,15 +130,18 @@ chat messages — that is the `hermes-e2e` stateful lane.
    must be at least 1, and neither `systemctl show hal0-agent@hermes -p Environment` nor
    `config.yaml` may set `HERMES_DASHBOARD_PUBLIC_URL` / `dashboard.public_url`: either one
    turns the dashboard login on and the token disappears from the page.
-24. **No unmanaged gateway (v0.22.3+).** The dashboard's default Chat tab runs its turns in the
-   dashboard process (its TUI attaches to the dashboard's own `/api/ws`). A profile-scoped chat
-   (the profile switcher, for example `hal0-brain`) and `hermes chat` are clients of the gateway
-   daemon. With `hermes-gateway.service` active, both must answer, and
-   `ps -u hal0 -o pid,cgroup,args | grep "gateway run"` must show exactly one gateway, in
-   `hermes-gateway.service`. Then, on the box with the gateway disabled, open a profile-scoped
-   chat: it must fail with a clear message, and no `gateway run --idle-exit` may appear,
-   especially not in the `hal0-agent@hermes` cgroup. Any unmanaged gateway is a `major` finding,
-   because it runs cron and the kanban dispatcher where the operator turned the gateway off.
+24. **No unmanaged gateway (v0.22.3+), passive checks only.** The dashboard's default Chat tab
+   runs its turns in the dashboard process (its TUI attaches to the dashboard's own `/api/ws`). A
+   profile-scoped chat (the profile switcher, for example `hal0-brain`) and `hermes chat` are
+   clients of the gateway daemon, and with no unit file installed they start their own. Here,
+   without sending any chat: `hal0 doctor all` must show the `Hermes gateway unit` row green;
+   `/etc/systemd/system/hermes-gateway.service` must exist (a masked unit is a symlink to
+   `/dev/null` and counts); every profile whose `config.yaml` sets `gateway.standalone: true`
+   must have its own `hermes-gateway-<profile>.service`; and
+   `ps -u hal0 -o pid,cgroup,args | grep "gateway run"` must show at most one gateway, in
+   `hermes-gateway.service`, never a `--idle-exit` one. Any unmanaged gateway is a `major`
+   finding, because it runs cron and the kanban dispatcher where the operator turned the gateway
+   off. The chat that would provoke one is `hermes-e2e` item 22, in the stateful lane.
 25. **Upgrade from v0.22.2.** On the UPGRADE box, the first `hal0 update` must rebuild
    (`release.json` `ref` = `4d043038…`, `previous` = the v0.22.2 release), restart
    `hermes-gateway.service` onto the new release, and leave `config.yaml` at

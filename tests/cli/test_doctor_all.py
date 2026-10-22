@@ -2332,6 +2332,24 @@ def test_gateway_unit_masked_counts_as_installed(tmp_path) -> None:
     assert c.status == "pass" and "installed (masked)" in c.detail
 
 
+def test_gateway_unit_standalone_profile_without_its_unit_fails(tmp_path) -> None:
+    """A gateway.standalone profile owns hermes-gateway-<profile>.service; absent, it spawns."""
+    home = tmp_path / "hermes"
+    (home / "profiles" / "lab").mkdir(parents=True)
+    (home / "profiles" / "shared").mkdir(parents=True)
+    (home / "config.yaml").write_text("model: x\n")
+    (home / "profiles" / "lab" / "config.yaml").write_text("gateway:\n  standalone: true\n")
+    (home / "profiles" / "shared" / "config.yaml").write_text("gateway:\n  standalone: false\n")
+    unit = tmp_path / "hermes-gateway.service"
+    unit.write_text("[Unit]\n")
+    c = da.check_hermes_gateway_unit(home=home, unit_path=unit, proc=_proc(tmp_path, []))
+    assert c.status == "fail" and c.critical is False
+    assert "lab (hermes-gateway-lab.service)" in c.detail and "shared" not in c.detail
+    (tmp_path / "hermes-gateway-lab.service").write_text("[Unit]\n")
+    c = da.check_hermes_gateway_unit(home=home, unit_path=unit, proc=_proc(tmp_path, []))
+    assert c.status == "pass"
+
+
 def test_gateway_unit_missing_fails(tmp_path) -> None:
     home = tmp_path / "hermes"
     home.mkdir()

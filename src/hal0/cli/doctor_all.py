@@ -2037,6 +2037,38 @@ def _unmanaged_gateways(proc: Path) -> list[str]:
     return found
 
 
+def _unit_present(unit: Path) -> bool:
+    """Presence by lstat, the test Hermes applies (``_exists``,
+    ``hermes_cli/gateway_runtime_service.py:84-90``): a persistently masked
+    unit is a symlink to /dev/null, which ``is_file()`` would call missing,
+    yet a mask is exactly one of the states that blocks the spawn."""
+    try:
+        unit.lstat()
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True
+    return True
+
+
+def _standalone_profiles(home: Path) -> list[str]:
+    """Profiles whose ``config.yaml`` sets ``gateway.standalone: true``."""
+    from hal0.agents import hermes_api as ha
+    from hal0.agents import hermes_provision as hp
+
+    found: list[str] = []
+    for name in ha.profile_dirs(home):
+        try:
+            text = (home / "profiles" / name / "config.yaml").read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        cfg = hp._parse_yaml_config(text) or {}
+        gateway = cfg.get("gateway") if isinstance(cfg, dict) else None
+        if isinstance(gateway, dict) and gateway.get("standalone") is True:
+            found.append(name)
+    return found
+
+
 def check_hermes_gateway_unit(
     *,
     home: Path | None = None,
@@ -2080,19 +2112,7 @@ def check_hermes_gateway_unit(
             + "; it runs cron and the kanban dispatcher outside hermes-gateway.service. "
             "Stop it, then run sudo hal0 agent install hermes so the unit file is installed",
         )
-    # Presence by lstat, the same test Hermes applies (`_exists` in
-    # hermes_cli/gateway_runtime_service.py:84-90): a persistently masked unit
-    # is a symlink to /dev/null, which is_file() would call missing, yet a
-    # mask is exactly one of the states that blocks the spawn.
-    try:
-        unit.lstat()
-    except FileNotFoundError:
-        present = False
-    except OSError:
-        present = True
-    else:
-        present = True
-    if not present:
+    if not _unit_present(unit):
         return Check(
             key,
             label,
@@ -2100,6 +2120,27 @@ def check_hermes_gateway_unit(
             f"{unit} is missing; a profile-scoped Hermes chat or hermes chat would start an "
             "unmanaged gateway (Hermes v0.22.3+). Run sudo hal0 agent install hermes; to keep "
             "the gateway off afterwards, systemctl disable --now hermes-gateway",
+        )
+    # A profile with ``gateway.standalone: true`` is excluded from the
+    # multiplexed gateway and owns its own ``hermes-gateway-<profile>.service``
+    # (``hermes_cli/gateway_runtime_service.py:37-60``): with that suffixed
+    # unit absent, a chat scoped to it spawns its own gateway even though the
+    # default unit is installed.
+    missing = [
+        p
+        for p in _standalone_profiles(root)
+        if not _unit_present(unit.with_name(f"hermes-gateway-{p}.service"))
+    ]
+    if missing:
+        return Check(
+            key,
+            label,
+            _FAIL,
+            "standalone Hermes profile(s) without their own gateway unit: "
+            + ", ".join(f"{p} (hermes-gateway-{p}.service)" for p in missing)
+            + "; a chat scoped to one would start an unmanaged gateway (Hermes v0.22.3+). "
+            "Install the unit (hermes -p <profile> gateway install --system) or unset "
+            "gateway.standalone in that profile's config.yaml",
         )
     state = "installed (masked)" if unit.is_symlink() else "installed"
     return Check(key, label, _PASS, f"{unit.name} {state}; no unmanaged gateway")
