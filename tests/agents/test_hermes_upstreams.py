@@ -116,6 +116,52 @@ async def test_reconcile_sets_owned_models_from_live_models(
     assert reg.get("hermes").owned_models == ("hermes-agent",)  # type: ignore[union-attr]
 
 
+async def test_reconcile_empty_fetch_keeps_default_owned(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    reg = UpstreamRegistry()
+    _patch_models(monkeypatch, reg, {})
+    await reconcile_hermes_upstreams(reg, home=home, probe=_probe(), environ={})
+    assert reg.get("hermes.coder").owned_models == ("coder",)  # type: ignore[union-attr]
+    assert reg.get("hermes").owned_models == ("hermes-agent",)  # type: ignore[union-attr]
+
+
+async def test_reconcile_real_fetch_authenticates_from_os_environ(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import os
+
+    for k in [k for k in os.environ if k.startswith("HAL0_HERMES_API_KEY__")]:
+        monkeypatch.delenv(k)
+    seen: list[str] = []
+
+    class _Resp:
+        def __init__(self, status: int, body: dict) -> None:
+            self.status_code = status
+            self._body = body
+
+        def json(self) -> dict:
+            return self._body
+
+    class _Client:
+        async def get(self, url: str, headers: dict | None = None, **_: object) -> _Resp:
+            auth = (headers or {}).get("Authorization")
+            seen.append(f"{url} {auth}")
+            if "/p/coder/" in url and auth == f"Bearer {CODER_KEY}":
+                return _Resp(200, {"data": [{"id": "coder"}]})
+            return _Resp(401, {})
+
+    reg = UpstreamRegistry()
+    monkeypatch.setattr(reg, "_get_client", lambda: _Client())
+    try:
+        await reconcile_hermes_upstreams(reg, home=home, probe=_probe())
+        assert reg.get("hermes.coder").owned_models == ("coder",)  # type: ignore[union-attr]
+        assert os.environ[env_key_name("coder")] == CODER_KEY
+    finally:
+        for p in ("default", "coder"):
+            os.environ.pop(env_key_name(p), None)
+
+
 async def test_reconcile_owned_models_merges_live_ids(
     home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

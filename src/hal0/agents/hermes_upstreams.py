@@ -57,7 +57,12 @@ async def reconcile_hermes_upstreams(
     probe: Callable[[str], int] | None = None,
     environ: MutableMapping[str, str] = os.environ,
 ) -> dict[str, Any]:
-    """Make the registry's Hermes-managed entries match the served profiles."""
+    """Make the registry's Hermes-managed entries match the served profiles.
+
+    The registry authenticates from the process environment (``os.environ``),
+    so ``environ`` must be ``os.environ`` (the default) for live model ids to
+    populate; any other mapping is only for tests inspecting what was set.
+    """
     home = home if home is not None else hermes_api.hermes_home()
     host, port = hermes_api.api_server_endpoint(home)
     served = await asyncio.to_thread(hermes_api.served_profiles, home, probe=probe)
