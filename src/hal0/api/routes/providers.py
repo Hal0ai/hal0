@@ -588,6 +588,15 @@ async def write_provider_credential(
     if upstream is None:
         raise UpstreamNotFoundHTTP(f"upstream {name!r} not found", {"name": name})
 
+    # An agent-managed entry's key belongs to the agent (Hermes's own .env,
+    # ADR-0035 decision 3); refuse before anything is written to api.env.
+    if getattr(upstream, "managed_by", None):
+        raise UpstreamProtectedHTTP(
+            f"upstream {name!r} is managed by {upstream.managed_by}; "
+            "change it through the agent, not here",
+            details={"name": name, "managed_by": upstream.managed_by},
+        )
+
     key = body.key.strip()
     if not _ENV_KEY_RE.match(key):
         raise ProviderCredentialError(

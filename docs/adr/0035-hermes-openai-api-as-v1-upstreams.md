@@ -141,8 +141,11 @@ line above disagree.
    Hermes upstreams use 600 s idle and 1800 s total, because a long tool run can
    leave gaps between deltas.
 6. **Managed entries are read-only on the providers page.** They serialize
-   `managed_by`, `pinned` and `owned_models`, and a `PATCH` or `DELETE` is
-   refused with 400 `upstream.protected`. The new `Upstream` fields are
+   `managed_by`, `pinned` and `owned_models`. A `PATCH`, a `DELETE` and a
+   `POST /api/providers/{name}/credentials` are refused with 400
+   `upstream.protected`, the last before anything is written to `api.env`.
+   The page lists them with a "managed by agent:hermes" badge and their owned
+   ids, and shows no delete, toggle, filter or key controls for them. The new `Upstream` fields are
    dataclass-only and never round-trip through TOML.
 7. **When it reconciles, and who writes the keys.**
    - At hal0-api boot (phase `hermes_upstreams`, after the dispatcher). The
