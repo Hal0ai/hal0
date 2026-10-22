@@ -133,6 +133,7 @@ def test_lifespan_registers_every_stop_callback_through_the_bound() -> None:
         "stop_image_drift_task",
         "stop_runner_catalogue_sync_task",
         "stop_memory_reprobe_task",
+        "stop_hermes_reconcile_task",
         "metrics_service.stop",
     ):
         assert name in src

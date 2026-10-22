@@ -32,10 +32,13 @@ def home(tmp_path: Path) -> Path:
     return h
 
 
-def _probe(status: dict[str, int] | None = None):
+def _probe(status: dict[str, int] | None = None, *, gateway: int = 200):
+    """``gateway`` answers the default ``/health``; ``status`` the ``/p/<p>/health`` probes."""
     table = {"coder": 200, "nokey": 200, **(status or {})}
 
     def probe(url: str) -> int:
+        if "/p/" not in url:
+            return gateway
         return table.get(url.split("/p/")[1].split("/")[0], 404)
 
     return probe
@@ -106,7 +109,7 @@ async def test_reconcile_skips_toml_authored_name(
     assert "hermes" not in report["registered"]
 
 
-async def test_reconcile_sets_owned_models_from_live_models(
+async def test_reconcile_owned_models_are_the_derived_ids(
     home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     reg = UpstreamRegistry()
@@ -155,20 +158,108 @@ async def test_reconcile_real_fetch_authenticates_from_os_environ(
     monkeypatch.setattr(reg, "_get_client", lambda: _Client())
     try:
         await reconcile_hermes_upstreams(reg, home=home, probe=_probe())
-        assert reg.get("hermes.coder").owned_models == ("coder",)  # type: ignore[union-attr]
         assert os.environ[env_key_name("coder")] == CODER_KEY
+        # The registry authenticates from os.environ, so the entry reconcile
+        # wrote fetches its live ids with the profile's own key.
+        assert await reg.fetch_models("hermes.coder") == ["coder"]
+        assert f"Bearer {CODER_KEY}" in seen[-1]
     finally:
         for p in ("default", "coder"):
             os.environ.pop(env_key_name(p), None)
 
 
-async def test_reconcile_owned_models_merges_live_ids(
+async def test_reconcile_gateway_down_registers_every_keyed_profile(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Ruling 8: liveness never decides ownership; a down gateway keeps every keyed id owned."""
+    reg = UpstreamRegistry()
+    _patch_models(monkeypatch, reg, {})
+    env: dict[str, str] = {}
+    down = _probe({"coder": 0, "nokey": 0}, gateway=0)
+    report = await reconcile_hermes_upstreams(reg, home=home, probe=down, environ=env)
+    assert {u.name for u in reg.list()} == {"hermes", "hermes.coder"}
+    assert report["registered"] == ["hermes", "hermes.coder"]
+    assert report["removed"] == []
+    assert reg.get("hermes").owned_models == ("hermes-agent",)  # type: ignore[union-attr]
+    assert reg.get("hermes.coder").owned_models == ("coder",)  # type: ignore[union-attr]
+    assert all(u.pinned for u in reg.list())
+    assert env[env_key_name("coder")] == CODER_KEY
+
+
+async def test_reconcile_gateway_down_removes_nothing(
     home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     reg = UpstreamRegistry()
-    _patch_models(monkeypatch, reg, {"hermes": ["other", "hermes-agent"]})
-    await reconcile_hermes_upstreams(reg, home=home, probe=_probe(), environ={})
-    assert reg.get("hermes").owned_models == ("hermes-agent", "other")  # type: ignore[union-attr]
+    _patch_models(monkeypatch, reg, {})
+    env: dict[str, str] = {}
+    await reconcile_hermes_upstreams(reg, home=home, probe=_probe(), environ=env)
+    report = await reconcile_hermes_upstreams(
+        reg, home=home, probe=_probe({"coder": 404}, gateway=0), environ=env
+    )
+    assert report["removed"] == []
+    assert reg.get("hermes.coder") is not None
+    assert env[env_key_name("coder")] == CODER_KEY
+
+
+async def test_reconcile_keeps_profile_whose_health_is_5xx(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    reg = UpstreamRegistry()
+    _patch_models(monkeypatch, reg, {})
+    env: dict[str, str] = {}
+    await reconcile_hermes_upstreams(reg, home=home, probe=_probe(), environ=env)
+    report = await reconcile_hermes_upstreams(
+        reg, home=home, probe=_probe({"coder": 503}), environ=env
+    )
+    assert report["removed"] == []
+    assert "hermes.coder" in report["registered"]
+    assert reg.get("hermes.coder") is not None
+
+
+async def test_reconcile_refreshes_a_rotated_key(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    reg = UpstreamRegistry()
+    _patch_models(monkeypatch, reg, {})
+    env: dict[str, str] = {}
+    await reconcile_hermes_upstreams(reg, home=home, probe=_probe(), environ=env)
+    rotated = "rotatedkey_0123456789abcdefghij"
+    (home / "profiles" / "coder" / ".env").write_text(f"API_SERVER_KEY={rotated}\n")
+    report = await reconcile_hermes_upstreams(reg, home=home, probe=_probe(), environ=env)
+    assert env[env_key_name("coder")] == rotated
+    assert "hermes.coder" in report["registered"]
+    assert reg.get("hermes.coder").pinned is True  # type: ignore[union-attr]
+
+
+async def test_reconcile_removes_entry_when_key_vanishes(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    reg = UpstreamRegistry()
+    _patch_models(monkeypatch, reg, {})
+    env: dict[str, str] = {}
+    await reconcile_hermes_upstreams(reg, home=home, probe=_probe(), environ=env)
+    (home / "profiles" / "coder" / ".env").write_text("OTHER=1\n")
+    report = await reconcile_hermes_upstreams(reg, home=home, probe=_probe(), environ=env)
+    assert report["removed"] == ["hermes.coder"]
+    assert report["profiles_without_key"] == ["coder", "nokey"]
+    assert reg.get("hermes.coder") is None
+    assert env_key_name("coder") not in env
+
+
+async def test_reconcile_warns_once_per_taken_name(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from structlog.testing import capture_logs
+
+    reg = UpstreamRegistry()
+    _patch_models(monkeypatch, reg, {})
+    reg.add(Upstream(name="hermes", kind="remote", url="http://elsewhere/v1"))
+    with capture_logs() as logs:
+        for _ in range(3):
+            await reconcile_hermes_upstreams(reg, home=home, probe=_probe(), environ={})
+    taken = [e for e in logs if e["event"] == "hermes_upstreams.name_taken"]
+    assert len(taken) == 1
+    assert taken[0]["name"] == "hermes"
 
 
 def test_build_hermes_upstream_fields() -> None:

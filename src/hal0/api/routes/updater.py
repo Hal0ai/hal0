@@ -986,7 +986,7 @@ async def _run_component_job(
         job["state"] = "failed"
         job["error"] = str(exc)
     else:
-        if component_id == "hermes" and result.get("status") in {"converged", "stale"}:
+        if component_id == "hermes" and result.get("status") in {"converged", "stale", "upgraded"}:
             try:
                 from hal0.agents.hermes_api import ensure_profile_keys, hermes_home
                 from hal0.agents.hermes_upstreams import reconcile_hermes_upstreams

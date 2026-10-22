@@ -96,13 +96,43 @@ def profile_dirs(home: Path) -> list[str]:
         return []
 
 
+def probe_status(url: str, *, timeout: float = 3.0) -> int:
+    """HTTP status of ``GET url``, including 4xx/5xx; ``0`` only on a transport error.
+
+    Unlike ``hermes_provision._http_get`` (0 for any failure, 404 included),
+    this lets callers tell "the gateway is down" from "this profile is not
+    served". A loopback target ignores the proxy environment.
+    """
+    import httpx
+
+    from hal0.service_identity import is_loopback_url
+
+    try:
+        resp = httpx.get(url, timeout=timeout, trust_env=not is_loopback_url(url))
+    except (httpx.HTTPError, OSError):
+        return 0
+    return int(resp.status_code)
+
+
+def gateway_alive(home: Path, *, probe: Callable[[str], int] | None = None) -> bool:
+    """Whether the API server's default ``/health`` answers exactly 200."""
+    check = probe if probe is not None else probe_status
+    host, port = api_server_endpoint(home)
+    return check(f"http://{host}:{port}/health") == 200
+
+
+def profile_health(home: Path, profile: str, *, probe: Callable[[str], int] | None = None) -> int:
+    """Status of ``/p/<profile>/health`` (``0`` on a transport error)."""
+    check = probe if probe is not None else probe_status
+    host, port = api_server_endpoint(home)
+    return check(f"http://{host}:{port}/p/{profile}/health")
+
+
 def served_profiles(home: Path, *, probe: Callable[[str], int] | None = None) -> list[str]:
     """``["default"]`` plus each profile dir whose ``/p/<name>/health`` answers 200."""
-    check = probe if probe is not None else hp._http_get
-    host, port = api_server_endpoint(home)
     served = [DEFAULT_PROFILE]
     for name in profile_dirs(home):
-        if check(f"http://{host}:{port}/p/{name}/health") == 200:
+        if profile_health(home, name, probe=probe) == 200:
             served.append(name)
     return served
 

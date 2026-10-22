@@ -90,7 +90,7 @@ line above disagree.
 
 ## Decision
 
-1. **One pinned `remote` upstream per served profile.**
+1. **One pinned `remote` upstream per keyed profile.**
    - `hal0.agents.hermes_upstreams.reconcile_hermes_upstreams` registers
      `hermes` for the default profile and `hermes.<profile>` for each named
      one, with urls `http://<host>:<port>/v1` and `.../p/<profile>/v1`.
@@ -99,11 +99,17 @@ line above disagree.
      ids Hermes advertises as `owned_models`. hal0 hardcodes no model id.
    - Operator-authored names in `upstreams.toml` win: the reconciler skips and
      logs them.
-2. **Profiles are discovered by asking Hermes.** `hal0.agents.hermes_api`
-   probes `/p/<name>/health` for each directory under `profiles/`, so hal0 does
-   not re-implement tombstone, parked or standalone rules. Multiplexing off
-   makes every probe 404 and only `hermes` registers. The endpoint follows
-   Hermes's own precedence (fact 2).
+2. **Ownership follows hal0's knowledge; liveness only decides success.**
+   - The reconciler registers the default profile and every directory under
+     `profiles/` that has a usable key, whether or not the gateway answers. A
+     gateway that is down, restarting or answering 5xx keeps every entry, so
+     its ids fail fast (decision 4) instead of falling to the `agent` slot.
+   - A named profile is dropped only when the gateway's default `/health`
+     answers 200 and its `/p/<name>/health` answers exactly 404. hal0 so asks
+     Hermes which profiles it serves and does not re-implement tombstone,
+     parked or standalone rules. Multiplexing off makes every live probe 404,
+     and only `hermes` stays.
+   - The endpoint follows Hermes's own precedence (fact 2).
 3. **Keys are read from Hermes's `.env` files and never copied.**
    - A key reaches the registry through hal0-api's own process environment,
      as `HAL0_HERMES_API_KEY__<PROFILE>`, refreshed on every reconcile. It is
@@ -133,15 +139,22 @@ line above disagree.
    `managed_by`, `pinned` and `owned_models`, and a `PATCH` or `DELETE` is
    refused with 400 `upstream.protected`. The new `Upstream` fields are
    dataclass-only and never round-trip through TOML.
-7. **When it reconciles.** At hal0-api boot (phase `hermes_upstreams`, after the
-   dispatcher), after the `hermes` component converge job (which first writes
-   missing profile keys and attaches `hermes_upstreams` to the job result), and
-   on `POST /api/agents/hermes/reconcile-upstreams` (404 `agent.not_installed`
-   when Hermes is absent). `hal0 agent bootstrap hermes` and `reprovision` call
-   it best-effort. Provisioning gains a `profile_api_keys` phase after
-   `gateway_secrets_wire`. There is no timer: the dispatcher's own model-cache
-   refresh and the fail-fast errors cover a gateway that stops between
-   reconciles.
+7. **When it reconciles, and who writes the keys.**
+   - At hal0-api boot (phase `hermes_upstreams`, after the dispatcher). The
+     phase first writes missing named-profile keys, so every hal0-api start,
+     including the restart that ends `hal0 update`, delivers them.
+   - Every 120 s after boot (`HERMES_RECONCILE_INTERVAL_S`), so a gateway that
+     was still starting at boot, or a profile added later, is picked up.
+     Errors are logged and the loop keeps running.
+   - After the `hermes` component converge job ends `converged`, `stale` or
+     `upgraded`. The job first writes missing profile keys and attaches
+     `hermes_upstreams` to its result.
+   - On `POST /api/agents/hermes/reconcile-upstreams` (404
+     `agent.not_installed` when Hermes is absent). `hal0 agent bootstrap
+     hermes` and `reprovision` call it best-effort.
+   - Provisioning gains a `profile_api_keys` phase after
+     `gateway_secrets_wire`, so `hal0 agent reprovision hermes` writes keys
+     too.
 8. **Two Hermes headers pass through.** `X-Hermes-Session-Id` and
    `X-Hermes-Session-Key` join the forwardable request headers
    (`api_server_openai_routes.py:679-690`). The allowlist is global, so every
@@ -195,17 +208,18 @@ its own for Hermes.
   it cannot know which slot model is loaded. The OWUI guide tells the operator
   to set a slot model as the task model.
 - `/v1/responses` is not available through hal0, which mounts no such route.
-- **Existing boxes need no operator step.** The default profile works on the
-  first hal0-api start after the update. Named profiles receive keys on the next
-  `hal0 update` or `hal0 agent reprovision hermes`, and are absent from the
-  picker until then.
+- **Existing boxes need no operator step.** hal0-api writes the named
+  profiles' keys and registers every profile at its first start after the
+  update. `hal0 agent reprovision hermes` and the `hermes` converge job write
+  them too.
 - **Every `hal0-brain` turn is an agent turn.** It is the resident steward with
   the admin tools, so it is exposed like any other served profile. Managed
   entries are read-only (decision 6), so hal0 has no per-entry switch. The knob
   is Hermes-side: park the profile (`hermes -p <profile> gateway stop`) or set
   `gateway.standalone: true` in its config. Either drops it from
   `profiles_to_serve` (`hermes_cli/profiles.py:1158-1159`), and the next
-  reconcile removes its upstream. The default profile cannot be hidden this way:
+  reconcile that sees the gateway up and the profile's prefix answer 404
+  removes its upstream. The default profile cannot be hidden this way:
   it is always served first, `gateway.standalone` is ignored on it, and a
   `gateway.parked` marker on it is ignored with a warning
   (`hermes_cli/profiles.py:1064-1067`, `:1151-1156`), so `hermes-agent` stays.

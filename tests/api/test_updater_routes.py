@@ -1497,7 +1497,7 @@ async def _run_hermes_job(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("status", ["converged", "stale"])
+@pytest.mark.parametrize("status", ["converged", "stale", "upgraded"])
 async def test_hermes_converge_reconciles_upstreams(
     monkeypatch: pytest.MonkeyPatch, status: str
 ) -> None:

@@ -75,8 +75,8 @@ images](/docs/guides/generate-images) for the underlying capability).
 
 ## Talking to Hermes
 
-Open WebUI's model picker lists every Hermes profile the bundled gateway
-serves, next to your slot models: `hermes-agent` for the default profile, and
+Open WebUI's model picker lists every Hermes profile that has an API key,
+next to your slot models: `hermes-agent` for the default profile, and
 one entry named after each additional profile. Picking one sends the turn to
 that profile's own OpenAI-compatible API through hal0's `/v1`, so the profile
 answers with everything it already has: its skills and toolsets, and the
@@ -99,14 +99,20 @@ client of hal0.
   Hermes's own `.env` files and keeps them in its process only. It never
   writes a key into `api.env`, the Open WebUI container or the vault, and the
   only thing it writes is a missing key into a named profile's own `.env`.
-  Profiles that had no key receive one on the next `hal0 update` or
-  `hal0 agent reprovision hermes`, and appear in the picker after that.
+  It does so at every hal0-api start (so after every `hal0 update`), on
+  `hal0 agent reprovision hermes` and after the Hermes component converge
+  job, and the profile appears in the picker after that.
+- **When Hermes is down** or still starting, its entries stay in the picker
+  and a turn to one fails at once with `dispatch.upstream_unavailable`. It is
+  never answered by a slot model instead. hal0 re-checks the gateway every two
+  minutes.
 
 To hide a profile from the picker, change it on the Hermes side: run
 `hermes -p <profile> gateway stop` to park it, or set `gateway.standalone:
 true` in that profile's config. Hermes then stops serving it, and hal0 removes
-its entry on the next reconcile (the next `hal0 update`, a hal0-api restart,
-or `POST /api/agents/hermes/reconcile-upstreams`). hal0's entries for these
+its entry on the next reconcile that finds the gateway running: within two
+minutes, at a hal0-api restart, or on
+`POST /api/agents/hermes/reconcile-upstreams`. hal0's entries for these
 models are read-only on the providers page. `hermes-agent`, the default
 profile, cannot be hidden this way and always stays.
 
@@ -151,8 +157,10 @@ curl http://localhost:8080/api/services | jq '.services[] | select(.id == "openw
 }
 ```
 
-The Agents chip is lit when Hermes answers; `agents` lists the model ids it
-serves, one per profile, and is an empty list when none do.
+The Agents chip is lit while hal0 has Hermes profiles registered; `agents`
+lists their model ids, one per profile, and is an empty list when there are
+none. It stays lit while the gateway is down, because the entries stay
+registered then (see "When Hermes is down" above).
 
 ## When the env file re-renders
 

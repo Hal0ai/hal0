@@ -37,8 +37,8 @@ SSE_BODY = "".join(_CHUNK % c for c in "abc") + "data: [DONE]\n\n"
 class FakeHermes(ThreadingHTTPServer):
     daemon_threads = True
 
-    def __init__(self) -> None:
-        super().__init__(("127.0.0.1", 0), _Handler)
+    def __init__(self, port: int = 0) -> None:
+        super().__init__(("127.0.0.1", port), _Handler)
         self.received: list[dict[str, Any]] = []
 
 
@@ -100,30 +100,42 @@ class _Handler(BaseHTTPRequestHandler):
         self._send(200, SSE_BODY.encode(), "text/event-stream")
 
 
-@pytest.fixture
-def fake_hermes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[FakeHermes]:
-    server = FakeHermes()
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-
+def _write_home(tmp_path: Path, port: int, monkeypatch: pytest.MonkeyPatch) -> None:
     home = tmp_path / "hermes-home"
     (home / "profiles" / "coder").mkdir(parents=True)
     (home / "profiles" / "parked").mkdir()  # no /p/parked/health -> not served
-    host, port = server.server_address[:2]
     (home / "config.yaml").write_text(
-        f"gateway:\n  platforms:\n    api_server:\n      host: {host}\n      port: {port}\n"
+        f"gateway:\n  platforms:\n    api_server:\n      host: 127.0.0.1\n      port: {port}\n"
     )
     (home / ".env").write_text(f"API_SERVER_KEY={DEFAULT_KEY}\n")
     (home / "profiles" / "coder" / ".env").write_text(f"API_SERVER_KEY={CODER_KEY}\n")
     monkeypatch.setenv("HERMES_HOME", str(home))
+    for profile in ("default", "coder", "parked"):
+        # The boot key sweep writes parked's key; reconcile exports every key.
+        monkeypatch.delenv(hermes_api.env_key_name(profile), raising=False)
+
+
+def _serve(server: FakeHermes) -> threading.Thread:
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    return thread
+
+
+def _stop(server: FakeHermes, thread: threading.Thread) -> None:
+    server.shutdown()
+    server.server_close()
+    thread.join(timeout=5)
+
+
+@pytest.fixture
+def fake_hermes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[FakeHermes]:
+    server = FakeHermes()
+    thread = _serve(server)
+    _write_home(tmp_path, server.server_address[1], monkeypatch)
     try:
         yield server
     finally:
-        server.shutdown()
-        server.server_close()
-        thread.join(timeout=5)
-        for profile in ("default", "coder"):
-            monkeypatch.delenv(hermes_api.env_key_name(profile), raising=False)
+        _stop(server, thread)
 
 
 @pytest.fixture
@@ -187,3 +199,47 @@ def test_services_page_reports_wired_agents(hermes_client: TestClient) -> None:
     assert r.status_code == 200, r.text
     by_id = {s["id"]: s for s in r.json()["services"]}
     assert by_id["openwebui"]["wired"]["agents"] == ["coder", "hermes-agent"]
+
+
+def test_hermes_down_at_boot_fails_fast_then_routes_after_reconcile(
+    tmp_path: Path, tmp_hal0_home: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """C1: a gateway still starting at boot keeps ``coder`` owned (502), never the agent slot."""
+    import socket
+
+    from hal0.api.routes import agents as agents_routes
+
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+    _write_home(tmp_path, port, monkeypatch)
+
+    class _Mgr:
+        def installed_names(self) -> list[str]:
+            return ["hermes"]
+
+    monkeypatch.setattr(agents_routes, "_manager", lambda: _Mgr())
+    sent = {"model": "coder", "messages": [{"role": "user", "content": "hi"}], "stream": True}
+    app: FastAPI = create_app()
+    with TestClient(app) as c:
+        owner = app.state.upstreams.get("hermes.coder")
+        assert owner is not None and owner.pinned
+        down = c.post("/v1/chat/completions", json=sent)
+        assert down.status_code == 502, down.text
+        assert down.json()["error"]["code"] == "dispatch.upstream_unavailable"
+        assert "hermes.coder" in down.text
+
+        server = FakeHermes(port)
+        thread = _serve(server)
+        try:
+            r = c.post("/api/agents/hermes/reconcile-upstreams")
+            assert r.status_code == 200, r.text
+            assert "hermes.coder" in r.json()["registered"]
+            assert "hermes.parked" in r.json()["removed"]
+            with c.stream("POST", "/v1/chat/completions", json=sent) as resp:
+                assert resp.status_code == 200, resp.read()
+                body = "".join(resp.iter_text())
+            assert body == SSE_BODY
+            assert [m["model"] for m in server.received] == ["coder"]
+        finally:
+            _stop(server, thread)

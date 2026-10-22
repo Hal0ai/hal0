@@ -1,9 +1,16 @@
-"""Register one pinned ``kind="remote"`` upstream per Hermes profile the gateway serves.
+"""Register one pinned ``kind="remote"`` upstream per keyed Hermes profile.
 
 The Hermes API server exposes each profile under ``/p/<profile>/``; this
-module mirrors that set into hal0's :class:`UpstreamRegistry` so every
-profile shows up as a model in ``/v1/models``. Entries are tagged
-``managed_by="agent:hermes"``; operator-authored entries are never touched.
+module mirrors hal0's knowledge of the profiles (their directories and keys)
+into the :class:`UpstreamRegistry` so every profile shows up as a model in
+``/v1/models``. Entries are tagged ``managed_by="agent:hermes"``;
+operator-authored entries are never touched.
+
+Ownership follows hal0's knowledge, not Hermes liveness: a gateway that is
+down, restarting or answering 5xx keeps every keyed profile registered (its
+requests fail fast with a 502 instead of falling through to the ``agent``
+slot). A named profile is dropped only when the gateway is up and its
+``/p/<profile>/health`` answers exactly 404.
 """
 
 from __future__ import annotations
@@ -50,6 +57,22 @@ def build_hermes_upstream(
     )
 
 
+def _candidate_profiles(home: Path, probe: Callable[[str], int] | None) -> list[str]:
+    """``default`` plus every profile dir, minus those definitively not served.
+
+    A named profile is left out only when the gateway's default ``/health``
+    answers 200 and the profile's ``/p/<name>/health`` answers exactly 404.
+    A transport error, a 5xx or a down gateway keeps it (Ruling 8).
+    """
+    alive = hermes_api.gateway_alive(home, probe=probe)
+    out = [hermes_api.DEFAULT_PROFILE]
+    for name in hermes_api.profile_dirs(home):
+        if alive and hermes_api.profile_health(home, name, probe=probe) == 404:
+            continue
+        out.append(name)
+    return out
+
+
 async def reconcile_hermes_upstreams(
     registry: UpstreamRegistry,
     *,
@@ -57,7 +80,7 @@ async def reconcile_hermes_upstreams(
     probe: Callable[[str], int] | None = None,
     environ: MutableMapping[str, str] = os.environ,
 ) -> dict[str, Any]:
-    """Make the registry's Hermes-managed entries match the served profiles.
+    """Make the registry's Hermes-managed entries match the keyed profiles.
 
     The registry authenticates from the process environment (``os.environ``),
     so ``environ`` must be ``os.environ`` (the default) for live model ids to
@@ -65,14 +88,14 @@ async def reconcile_hermes_upstreams(
     """
     home = home if home is not None else hermes_api.hermes_home()
     host, port = hermes_api.api_server_endpoint(home)
-    served = await asyncio.to_thread(hermes_api.served_profiles, home, probe=probe)
+    candidates = await asyncio.to_thread(_candidate_profiles, home, probe)
 
     registered: list[str] = []
     skipped: list[str] = []
     without_key: list[str] = []
     desired: dict[str, str] = {}  # upstream name -> env var
 
-    for profile in served:
+    for profile in candidates:
         key = hermes_api.api_key_for(profile, home)
         if key is None:
             without_key.append(profile)
@@ -93,9 +116,9 @@ async def reconcile_hermes_upstreams(
         upstream = build_hermes_upstream(
             profile, host=host, port=port, owned=(hermes_api.model_id_for(profile),)
         )
-        if existing is not None:
-            registry.remove(name)
-        registry.add(upstream)
+        # Replace in place: a remove-then-add would open a window in which the
+        # id has no owner and falls through to the ``agent`` slot.
+        registry.upsert(upstream)
         registered.append(name)
 
     removed: list[str] = []

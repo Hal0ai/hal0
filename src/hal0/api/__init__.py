@@ -1130,6 +1130,8 @@ class BootState:
     stop_runner_catalogue_sync_task: Any = None
     memory_reprobe_task: asyncio.Task[None] | None = None
     stop_memory_reprobe_task: Any = None
+    hermes_reconcile_task: asyncio.Task[None] | None = None
+    stop_hermes_reconcile_task: Any = None
     omni_router_client: httpx.AsyncClient | None = None
     boot_report: BootReport = field(default_factory=BootReport)
 
@@ -1344,10 +1346,28 @@ async def _boot_slot_manager(app: FastAPI, ctx: BootState) -> None:
     )
 
 
+#: Seconds between background Hermes upstream reconciles. The boot reconcile
+#: can run while ``hermes-gateway.service`` is still starting; the periodic
+#: re-run picks up profiles added, removed or re-keyed since.
+HERMES_RECONCILE_INTERVAL_S: float = 120
+
+
 async def _boot_hermes_upstreams(app: FastAPI, ctx: BootState) -> None:
-    """Phase — mirror Hermes gateway profiles into the upstream registry (non-fatal)."""
+    """Phase — mirror Hermes gateway profiles into the upstream registry (non-fatal).
+
+    Writes the named profiles' API-server keys first, so every hal0-api start
+    (and so every ``hal0 update``, which restarts hal0-api) delivers them.
+    """
+    from hal0.agents import hermes_api
     from hal0.agents.hermes_upstreams import reconcile_hermes_upstreams
 
+    try:
+        written = await asyncio.to_thread(hermes_api.ensure_profile_keys, hermes_api.hermes_home())
+    except Exception as exc:
+        log.warning("api.boot.hermes_profile_keys_failed", error=str(exc))
+    else:
+        if written:
+            log.info("api.boot.hermes_profile_keys", written=written)
     try:
         report = await reconcile_hermes_upstreams(ctx.upstreams)
     except Exception as exc:
@@ -1358,6 +1378,34 @@ async def _boot_hermes_upstreams(app: FastAPI, ctx: BootState) -> None:
         registered=len(report.get("registered", [])),
         removed=len(report.get("removed", [])),
     )
+
+
+async def _hermes_reconcile_loop(registry: Any) -> None:
+    """Re-run the Hermes upstream reconcile every ``HERMES_RECONCILE_INTERVAL_S``.
+
+    Errors are logged and the loop keeps going; it ends only when cancelled.
+    """
+    from hal0.agents import hermes_upstreams
+
+    while True:
+        await asyncio.sleep(HERMES_RECONCILE_INTERVAL_S)
+        try:
+            await hermes_upstreams.reconcile_hermes_upstreams(registry)
+        except Exception as exc:
+            log.warning("api.hermes_upstreams.periodic_reconcile_failed", error=str(exc))
+
+
+def _start_hermes_reconcile_task(ctx: BootState) -> None:
+    """Start the periodic Hermes reconcile; its stop callback goes on ``ctx``."""
+    ctx.hermes_reconcile_task = asyncio.create_task(_hermes_reconcile_loop(ctx.upstreams))
+
+    async def _stop_hermes_reconcile_task() -> None:
+        if ctx.hermes_reconcile_task is not None:
+            ctx.hermes_reconcile_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await ctx.hermes_reconcile_task
+
+    ctx.stop_hermes_reconcile_task = _stop_hermes_reconcile_task
 
 
 async def _boot_dispatcher(app: FastAPI, ctx: BootState) -> None:
@@ -2043,6 +2091,10 @@ async def _boot_background_tasks(app: FastAPI, ctx: BootState) -> None:
 
     ctx.stop_memory_reprobe_task = _stop_memory_reprobe_task
 
+    # Periodic Hermes upstream reconcile: the boot phase may have probed a
+    # gateway that was still starting.
+    _start_hermes_reconcile_task(ctx)
+
     # OmniRouter (PR-16). Client-side OpenAI
     # tool-calling loop. Wired here so the /v1/chat/completions route
     # can pick it up via ``request.app.state.omni_router`` when a
@@ -2563,6 +2615,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 ("image_drift_task", ctx.stop_image_drift_task),
                 ("runner_catalogue_sync_task", ctx.stop_runner_catalogue_sync_task),
                 ("memory_reprobe_task", ctx.stop_memory_reprobe_task),
+                ("hermes_reconcile_task", ctx.stop_hermes_reconcile_task),
             ):
                 stack.push_async_callback(_bounded_shutdown_step(name, stop))
             ctx.metrics_service.start()

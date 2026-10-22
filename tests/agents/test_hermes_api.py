@@ -77,6 +77,65 @@ def test_served_profiles_default_only_when_every_probe_fails(home: Path) -> None
     assert hermes_api.served_profiles(home, probe=lambda _u: 0) == ["default"]
 
 
+class _StatusServer:
+    """A loopback HTTP server answering every GET with a fixed status."""
+
+    def __init__(self, status: int) -> None:
+        import threading
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+        code = status
+
+        class _H(BaseHTTPRequestHandler):
+            def log_message(self, format: str, *args: object) -> None:
+                pass
+
+            def do_GET(self) -> None:
+                self.send_response(code)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), _H)
+        self.port = self.server.server_address[1]
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+
+    def close(self) -> None:
+        self.server.shutdown()
+        self.server.server_close()
+
+
+@pytest.mark.parametrize("status", [200, 404, 503])
+def test_probe_status_returns_the_real_status(status: int) -> None:
+    srv = _StatusServer(status)
+    try:
+        assert hermes_api.probe_status(f"http://127.0.0.1:{srv.port}/p/x/health") == status
+    finally:
+        srv.close()
+
+
+def test_probe_status_is_zero_on_transport_error() -> None:
+    import socket
+
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+    assert hermes_api.probe_status(f"http://127.0.0.1:{port}/health") == 0
+
+
+def test_gateway_alive_probes_default_health(home: Path) -> None:
+    seen: list[str] = []
+
+    def probe(url: str) -> int:
+        seen.append(url)
+        return 200
+
+    assert hermes_api.gateway_alive(home, probe=probe) is True
+    assert seen == ["http://127.0.0.1:8642/health"]
+    assert hermes_api.gateway_alive(home, probe=lambda _u: 503) is False
+    assert hermes_api.gateway_alive(home, probe=lambda _u: 0) is False
+
+
 def test_api_key_for_default_reads_dotenv(home: Path) -> None:
     (home / ".env").write_text(f'API_SERVER_KEY="{GOOD}"\n')
     assert hermes_api.api_key_for("default", home) == GOOD
