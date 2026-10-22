@@ -405,6 +405,9 @@ def find_uv(
     return which("uv")
 
 
+_NEUTRAL_CWD = "/"
+
+
 def _run(
     argv: list[str],
     *,
@@ -412,9 +415,12 @@ def _run(
     env: Mapping[str, str] | None = None,
     timeout: float = _STEP_TIMEOUT_S,
 ) -> subprocess.CompletedProcess:
+    # uv discovers ``uv.toml`` from the cwd upward, independent of HOME. A
+    # ``sudo`` caller's cwd is ``/root``, so an unpinned run died on
+    # ``/root/uv.toml`` as hal0 (#2883). Start from ``/`` unless told otherwise.
     return subprocess.run(  # nosec B603 — argv built from fixed tool paths
         [str(a) for a in argv],
-        cwd=str(cwd) if cwd is not None else None,
+        cwd=str(cwd) if cwd is not None else _NEUTRAL_CWD,
         env=dict(env) if env is not None else None,
         timeout=timeout,
         check=False,
