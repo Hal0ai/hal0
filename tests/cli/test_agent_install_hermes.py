@@ -1052,3 +1052,73 @@ def test_bootstrap_hermes_help_does_not_advertise_preview_flags() -> None:
     assert res.exit_code == 0
     assert "--dry-run" not in res.output
     assert "--skip-phase" not in res.output
+
+
+# ── Upstream reconcile after provisioning ───────────────────────────────────
+
+
+def test_bootstrap_calls_reconcile_best_effort(monkeypatch) -> None:
+    """A successful bootstrap asks hal0-api to reconcile Hermes upstreams; an
+    unreachable API only prints a dim hint and never fails the command."""
+    from typer.testing import CliRunner
+
+    monkeypatch.setattr(ac, "_provision_hermes", lambda **_k: 0)
+    calls: list[str] = []
+
+    def _boom(**_k):  # type: ignore[no-untyped-def]
+        calls.append("auth_client")
+        raise RuntimeError("connection refused")
+
+    monkeypatch.setattr(ac, "auth_client", _boom)
+
+    res = CliRunner().invoke(ac.app, ["bootstrap", "hermes"])
+
+    assert res.exit_code == 0, res.output
+    assert calls == ["auth_client"]
+    assert "hal0-api not reachable" in res.output
+
+
+def test_reprovision_calls_reconcile_and_posts_endpoint(monkeypatch) -> None:
+    from typer.testing import CliRunner
+
+    monkeypatch.setattr(ac, "_provision_hermes", lambda **_k: 0)
+    posted: list[str] = []
+
+    class _Resp:
+        def raise_for_status(self) -> None:
+            return None
+
+    class _Client:
+        def __enter__(self) -> _Client:
+            return self
+
+        def __exit__(self, *_a: object) -> None:
+            return None
+
+        def post(self, url: str) -> _Resp:
+            posted.append(url)
+            return _Resp()
+
+    monkeypatch.setattr(ac, "auth_client", lambda **_k: _Client())
+    monkeypatch.setattr(ac, "_api_base", lambda: "http://api.test")
+
+    res = CliRunner().invoke(ac.app, ["reprovision", "hermes"])
+
+    assert res.exit_code == 0, res.output
+    assert posted == ["http://api.test/api/agents/hermes/reconcile-upstreams"]
+    assert "not reachable" not in res.output
+
+
+def test_failed_provision_skips_reconcile(monkeypatch) -> None:
+    from typer.testing import CliRunner
+
+    monkeypatch.setattr(ac, "_provision_hermes", lambda **_k: 3)
+    monkeypatch.setattr(
+        ac,
+        "auth_client",
+        lambda **_k: pytest.fail("reconcile must not run after a failed provision"),
+    )
+
+    res = CliRunner().invoke(ac.app, ["bootstrap", "hermes"])
+
+    assert res.exit_code == 3, res.output

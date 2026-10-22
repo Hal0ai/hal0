@@ -4551,3 +4551,58 @@ def test_atomic_write_unprivileged_never_chowns(
     monkeypatch.setattr(hp.os, "chown", lambda *_a: pytest.fail("no chown off root"))
     hp._atomic_write(target, "a: 2\n")
     assert target.read_text() == "a: 2\n"
+
+
+# ── profile_api_keys phase ──────────────────────────────────────────────────
+
+
+def _profile_env(home: Path, name: str, *, keyed: bool) -> None:
+    pdir = home / "profiles" / name
+    pdir.mkdir(parents=True)
+    (pdir / ".env").write_text("API_SERVER_KEY=" + "k" * 40 + "\n" if keyed else "OTHER=1\n")
+
+
+def test_phase_profile_api_keys_writes_missing_only(tmp_path: Path) -> None:
+    home = tmp_path / ".hermes"
+    _profile_env(home, "coder", keyed=True)
+    _profile_env(home, "nokey", keyed=False)
+    state = hp.BootstrapState(venv=str(tmp_path / "venv"), hermes_home=str(home))
+    ctx = hp._StepCtx(state=state, io=hp.InstallIO())
+
+    out = hp._phase_profile_api_keys(ctx)
+    assert out.status == hp.PhaseStatus.OK
+    assert out.details["wrote"] == ["nokey"]
+    assert out.details["present"] == ["coder"]
+    assert "API_SERVER_KEY=" in (home / "profiles" / "nokey" / ".env").read_text()
+
+    again = hp._phase_profile_api_keys(ctx)
+    assert again.status == hp.PhaseStatus.OK
+    assert again.details["wrote"] == []
+    assert again.details["present"] == ["coder", "nokey"]
+
+
+def test_phase_profile_api_keys_no_profiles_is_ok(tmp_path: Path) -> None:
+    state = hp.BootstrapState(venv=str(tmp_path / "venv"), hermes_home=str(tmp_path / ".hermes"))
+    out = hp._phase_profile_api_keys(hp._StepCtx(state=state, io=hp.InstallIO()))
+    assert out.status == hp.PhaseStatus.OK
+    assert out.details == {"wrote": [], "present": []}
+
+
+def test_phase_profile_api_keys_oserror_is_warn(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import hal0.agents.hermes_api as ha
+
+    def _boom(_home: Path) -> list[str]:
+        raise OSError("disk gone")
+
+    monkeypatch.setattr(ha, "ensure_profile_keys", _boom)
+    state = hp.BootstrapState(venv=str(tmp_path / "venv"), hermes_home=str(tmp_path / ".hermes"))
+    out = hp._phase_profile_api_keys(hp._StepCtx(state=state, io=hp.InstallIO()))
+    assert out.status == hp.PhaseStatus.WARN
+    assert out.details["errors"] == ["disk gone"]
+
+
+def test_install_steps_order_has_profile_api_keys_after_gateway_secrets_wire() -> None:
+    names = [n for n, _fn in hp._INSTALL_STEPS]
+    assert names.index("profile_api_keys") == names.index("gateway_secrets_wire") + 1

@@ -30,6 +30,7 @@ from hal0.cli._shared import (
     api_get,
     api_post,
     api_put,
+    auth_client,
     die,
 )
 from hal0.cli._shared import _console as _stderr_console
@@ -1907,6 +1908,21 @@ def agent_peers() -> None:
     console.print(table)
 
 
+def _reconcile_upstreams_best_effort() -> None:
+    """Ask hal0-api to re-register the per-profile Hermes upstreams.
+
+    Provisioning may have added keys or profiles; the API also reconciles at its
+    own boot, so an unreachable API is a hint, never a failure.
+    """
+    try:
+        with auth_client(timeout=15) as client:
+            client.post(f"{_api_base()}/api/agents/hermes/reconcile-upstreams").raise_for_status()
+    except Exception:
+        console.print(
+            "[dim]hal0-api not reachable; Hermes upstreams reconcile at the next hal0-api start[/dim]"
+        )
+
+
 @bootstrap_app.command("hermes")
 def bootstrap_hermes(
     repair: bool = typer.Option(
@@ -1958,6 +1974,8 @@ def bootstrap_hermes(
     # §7.4: drops to hal0 first when invoked as root (re-execs this same command
     # as hal0), else runs the pipeline in-process. See _provision_hermes.
     rc = _provision_hermes(repair=repair, offline=offline, verbose=verbose, ref=ref)
+    if rc == 0:
+        _reconcile_upstreams_best_effort()
     raise typer.Exit(rc)
 
 
@@ -2195,6 +2213,8 @@ def agent_reprovision(
     # §7.4: drops to hal0 when root (see _provision_hermes) so a re-converge run
     # re-renders config.yaml born hal0:hal0, matching first install.
     rc = _provision_hermes(repair=repair, verbose=verbose)
+    if rc == 0:
+        _reconcile_upstreams_best_effort()
     raise typer.Exit(rc)
 
 

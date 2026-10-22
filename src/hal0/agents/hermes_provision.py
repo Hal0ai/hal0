@@ -5918,6 +5918,33 @@ def _phase_gateway_secrets_wire(ctx: _StepCtx) -> PhaseResult:
     )
 
 
+def _phase_profile_api_keys(ctx: _StepCtx) -> PhaseResult:
+    """Give every Hermes profile an ``API_SERVER_KEY`` so hal0 can front it.
+
+    Covers every profile directory, not only served ones: a parked profile that
+    later wakes already has its key. Idempotent — profiles with a usable key are
+    left alone and reported under ``present``. Only a failure of the sweep itself
+    (``OSError``) is recorded, as a non-fatal ``warn``.
+    """
+    # Lazy: hermes_api imports this module at load time.
+    from hal0.agents import hermes_api
+
+    home = Path(ctx.state.hermes_home)
+    try:
+        wrote = hermes_api.ensure_profile_keys(home)
+        present = [p for p in hermes_api.profile_dirs(home) if p not in wrote]
+    except OSError as exc:
+        return PhaseResult(
+            status=PhaseStatus.WARN,
+            reason=f"profile API keys not ensured: {exc}",
+            details={"wrote": [], "present": [], "errors": [str(exc)]},
+        )
+    return PhaseResult(
+        status=PhaseStatus.OK,
+        details={"wrote": wrote, "present": present},
+    )
+
+
 # /api/slots uses "transcription" as the type for STT slots; accept both so
 # _find_slot(slots, "stt") matches regardless of which label the server uses.
 _STT_SLOT_TYPES: frozenset[str] = frozenset({"stt", "transcription"})
@@ -7650,6 +7677,7 @@ _INSTALL_STEPS: tuple[tuple[str, Callable[[_StepCtx], PhaseResult]], ...] = (
     ("context_link", _phase_context_link),
     ("voice_wire", _phase_voice_wire),
     ("gateway_secrets_wire", _phase_gateway_secrets_wire),
+    ("profile_api_keys", _phase_profile_api_keys),
     ("smoke_tests", _phase_smoke_tests),
 )
 
