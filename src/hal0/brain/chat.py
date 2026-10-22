@@ -2185,9 +2185,14 @@ def _context_exceeded_error(prompt_tokens: int, context_length: int, model: Any)
 
 def _frame_messages(payload: dict[str, Any], system_prompt: str) -> list[dict[str, Any]]:
     """Build the first-round messages list, guaranteed template-safe (O18)."""
-    messages: list[dict[str, Any]] = [
-        m for m in (payload.get("messages") or []) if isinstance(m, dict)
-    ]
+    raw_messages = payload.get("messages")
+    # A truthy scalar (123, 1.5, true) is not iterable. Iterating it raises
+    # TypeError inside the StreamingResponse generator, after the 200 head, so
+    # the client gets an empty stream and the journal a full traceback (#2737).
+    # Treat any non-list as no messages, matching the string/dict behaviour.
+    messages: list[dict[str, Any]] = (
+        [m for m in raw_messages if isinstance(m, dict)] if isinstance(raw_messages, list) else []
+    )
     # Accept the singular `message` field as a trailing user turn — the
     # dashboard sends `messages`, but curl/tests/other clients POST
     # {"message": "..."} and it must not be silently dropped.

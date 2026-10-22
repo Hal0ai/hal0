@@ -17,6 +17,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+import pytest
+
 from hal0.brain import chat as bc
 from hal0.config.schema import BrainChatConfig, Hal0Config
 from hal0.mcp.approval_queue import ApprovalQueue
@@ -120,6 +122,14 @@ def test_frame_messages_guarantees_a_user_turn() -> None:
     # Empty payload must not yield a system-only (user-less) turn.
     framed = bc._frame_messages({}, "SYS")
     assert "user" in _roles(framed)
+
+
+@pytest.mark.parametrize("value", [123, 1.5, True])
+def test_frame_messages_treats_a_scalar_messages_value_as_empty(value: Any) -> None:
+    # #2737: iterating a truthy scalar raised inside the SSE generator, after
+    # the 200 head, leaving the client with a zero-frame stream.
+    framed = bc._frame_messages({"messages": value}, "SYS")
+    assert _roles(framed) == ["system", "user"]
 
 
 # ── first-round wire shape through the loop ──────────────────────────────────
