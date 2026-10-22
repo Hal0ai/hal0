@@ -121,3 +121,53 @@ async def test_peer_advertising_slot_alias_does_not_suppress_rewrite() -> None:
     with pytest.raises(_Stop):
         await v1._dispatch_and_forward(request, _Dispatcher(), body={"model": "agent"})
     assert seen[0]["model"] == "qwen3-4b"
+
+
+async def test_models_catalog_row_for_an_owned_id_comes_from_its_owner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Codex P1: a Hermes profile named like a slot alias (``agent``) dispatches
+    to Hermes, so /v1/models must describe it as Hermes's, not the slot's."""
+    import hal0.api as hal0_api
+
+    owner = Upstream(
+        name="hermes.agent",
+        kind="remote",
+        url="http://h.invalid/p/agent/v1",
+        pinned=True,
+        owned_models=("agent",),
+    )
+
+    async def alias_models(*_a, **_k):
+        return [{"id": "agent", "object": "model", "owned_by": "hal0", "created": 1}]
+
+    async def chat_ids(*_a, **_k):
+        return set()
+
+    async def composite(*_a, **_k):
+        return (["agent"], False)
+
+    monkeypatch.setattr(hal0_api, "hal0_slot_alias_models", alias_models)
+    monkeypatch.setattr(hal0_api, "hal0_chat_slot_model_ids", chat_ids)
+    monkeypatch.setattr(hal0_api, "_fetch_hal0_composite_models_detailed", composite)
+
+    async def fetch_models(name: str) -> list[str]:
+        return ["agent"] if name == "hermes.agent" else []
+
+    reg = SimpleNamespace(list=lambda: [owner], get=lambda name: None, fetch_models=fetch_models)
+    registry = SimpleNamespace(has=lambda mid: False, get=lambda mid: None)
+    request = SimpleNamespace(
+        query_params={},
+        headers={},
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                upstreams=reg,
+                upstream_models={},
+                slot_manager=object(),
+                model_registry=registry,
+            )
+        ),
+    )
+    rows = await v1._aggregate_models(request, show_all=True)
+    agent_rows = [r for r in rows if r["id"] == "agent"]
+    assert [r["owned_by"] for r in agent_rows] == ["hermes.agent"]

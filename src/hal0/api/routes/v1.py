@@ -994,6 +994,17 @@ async def _aggregate_models(request: Request, *, show_all: bool) -> list[dict[st
     slot_manager = getattr(request.app.state, "slot_manager", None)
     model_registry = getattr(request.app.state, "model_registry", None)
 
+    # An id a pinned upstream owns dispatches there (Dispatcher._pinned_owner),
+    # so its catalog row must come from that upstream too: a slot alias or a
+    # composite row with the same id would describe a model the id never runs.
+    pinned_owned: set[str] = set()
+    try:
+        for u in upstreams.list():
+            if getattr(u, "pinned", False):
+                pinned_owned.update(getattr(u, "owned_models", ()))
+    except Exception:
+        pinned_owned = set()
+
     # Per-slot alias entries first so a slot alias (e.g. "chat") wins
     # the id over any same-named raw model id an upstream might advertise.
     if slot_manager is not None and model_registry is not None:
@@ -1003,7 +1014,7 @@ async def _aggregate_models(request: Request, *, show_all: bool) -> list[dict[st
             alias_entries = []
         for entry in alias_entries:
             mid = entry.get("id")
-            if not isinstance(mid, str) or mid in seen:
+            if not isinstance(mid, str) or mid in seen or mid in pinned_owned:
                 continue
             seen.add(mid)
             data.append(entry)
@@ -1080,7 +1091,7 @@ async def _aggregate_models(request: Request, *, show_all: bool) -> list[dict[st
             model_cache["hal0"] = list(fresh)
     if upstreams.get("hal0") is None:
         for mid in composite_models:
-            if mid in seen or mid in chat_model_ids:
+            if mid in seen or mid in chat_model_ids or mid in pinned_owned:
                 continue
             row = _catalog_row(mid, "hal0")
             if row is None:
