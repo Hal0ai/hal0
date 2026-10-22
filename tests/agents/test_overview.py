@@ -5,7 +5,15 @@ from __future__ import annotations
 from pathlib import Path
 
 from hal0.agents.hermes_release import Release
-from hal0.agents.overview import doctor_rows, hermes_version, provision_summary, unit_states
+from hal0.agents.overview import (
+    degraded_reasons,
+    doctor_rows,
+    hermes_phase,
+    hermes_version,
+    pi_phase,
+    provision_summary,
+    unit_states,
+)
 
 
 def test_hermes_version_marks_update_when_installed_differs_from_pinned():
@@ -107,3 +115,132 @@ def test_doctor_rows_map_statuses():
         {"id": "plugins", "status": "absent", "detail": "no home"},
         {"id": "ownership", "status": "fail", "detail": "HERMES_HOME tree: root:root"},
     ]
+
+
+BASE = dict(
+    units={"agent": "active", "gateway": "active"},
+    api_healthy=True,
+    provision={"present": True, "fail": 0, "warn": 0, "phases": []},
+    doctor=[],
+    approvals={"in_sync": True, "source": "setting", "mode": "smart"},
+)
+
+
+def test_no_reasons_when_healthy():
+    assert degraded_reasons(**BASE) == []
+
+
+def test_reasons_in_display_order_with_fixes():
+    out = degraded_reasons(
+        **{
+            **BASE,
+            "api_healthy": False,
+            "provision": {"present": True, "fail": 1, "warn": 1, "phases": []},
+            "doctor": [{"id": "ownership", "status": "fail", "detail": "d"}],
+            "approvals": {"in_sync": False, "source": "overrides", "mode": "smart"},
+        }
+    )
+    assert [r["reason"] for r in out] == [
+        "api_unhealthy",
+        "provision_failed",
+        "provision_warn",
+        "doctor_drift",
+        "approvals_drift",
+    ]
+    assert out[0]["fix"] == "restart_gateway"
+    assert (
+        out[3]["fix"] == "cli" and out[3]["command"] == "sudo hal0 agent bootstrap hermes --repair"
+    )
+    assert out[4]["fix"] == "none" and "overrides" in out[4]["detail"]
+
+
+def test_gateway_down_suppresses_api_unhealthy():
+    out = degraded_reasons(
+        **{**BASE, "units": {"agent": "active", "gateway": "inactive"}, "api_healthy": False}
+    )
+    assert [r["reason"] for r in out] == ["gateway_down"]
+    assert out[0]["fix"] == "restart_gateway"
+
+
+def test_gateway_down_is_listed_before_the_other_reasons():
+    out = degraded_reasons(
+        **{
+            **BASE,
+            "units": {"agent": "active", "gateway": "inactive"},
+            "provision": {"present": True, "fail": 1, "warn": 0, "phases": []},
+        }
+    )
+    assert [r["reason"] for r in out] == ["gateway_down", "provision_failed"]
+    assert out[1]["fix"] == "repair"
+
+
+def test_unknown_gateway_state_is_not_a_fault():
+    out = degraded_reasons(**{**BASE, "units": {"agent": "active", "gateway": "unknown"}})
+    assert out == []
+
+
+def test_non_ownership_doctor_failure_offers_repair():
+    out = degraded_reasons(
+        **{**BASE, "doctor": [{"id": "gateway_unit", "status": "fail", "detail": "stale"}]}
+    )
+    assert [(r["reason"], r["fix"], r["command"]) for r in out] == [
+        ("doctor_drift", "repair", None)
+    ]
+
+
+def test_approvals_drift_resync_when_setting_owned():
+    out = degraded_reasons(
+        **{**BASE, "approvals": {"in_sync": False, "source": "setting", "mode": "manual"}}
+    )
+    assert out == [
+        {
+            "reason": "approvals_drift",
+            "detail": "config.yaml does not match the setting (manual)",
+            "fix": "resync_approvals",
+            "command": None,
+        }
+    ]
+
+
+def test_hermes_phase_precedence():
+    d = [{"reason": "gateway_down"}]
+    assert (
+        hermes_phase(installed=False, status="", unit_active=None, degraded=[], job=None)
+        == "not_installed"
+    )
+    assert (
+        hermes_phase(
+            installed=True,
+            status="installed",
+            unit_active=True,
+            degraded=d,
+            job={"state": "running"},
+        )
+        == "working"
+    )
+    assert (
+        hermes_phase(installed=True, status="broken", unit_active=True, degraded=d, job=None)
+        == "broken"
+    )
+    assert (
+        hermes_phase(installed=True, status="installed", unit_active=False, degraded=d, job=None)
+        == "down"
+    )
+    assert (
+        hermes_phase(installed=True, status="installed", unit_active=True, degraded=d, job=None)
+        == "degraded"
+    )
+    assert (
+        hermes_phase(installed=True, status="installed", unit_active=True, degraded=[], job=None)
+        == "ready"
+    )
+    assert (
+        hermes_phase(installed=True, status="installed", unit_active=None, degraded=[], job=None)
+        == "unknown"
+    )
+
+
+def test_pi_phase():
+    assert pi_phase(installed=False, status="") == "not_installed"
+    assert pi_phase(installed=True, status="broken") == "broken"
+    assert pi_phase(installed=True, status="installed") == "installed"

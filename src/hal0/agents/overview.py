@@ -157,3 +157,128 @@ def doctor_rows(
             }
         )
     return rows
+
+
+#: The root-only command that repairs ownership drift (the daemon runs as
+#: ``hal0`` and cannot ``chown`` the Hermes tree itself).
+_OWNERSHIP_REPAIR_COMMAND = "sudo hal0 agent bootstrap hermes --repair"
+
+
+def _reason(reason: str, detail: str, fix: str, command: str | None = None) -> dict[str, Any]:
+    """One degraded reason: what is wrong, and the card control that fixes it."""
+    return {"reason": reason, "detail": detail, "fix": fix, "command": command}
+
+
+def _approvals_reason(approvals: dict[str, Any]) -> dict[str, Any]:
+    """The reason for ``config.yaml`` drifting from the effective approvals mode.
+
+    A re-sync rewrites ``config.yaml`` from the operator setting, so it only
+    helps when the setting (or the default) owns the mode. When
+    ``overrides.yaml`` owns it the re-sync is a no-op and the operator has to
+    edit that file.
+    """
+    if approvals.get("source") == "overrides":
+        path = approvals.get("overrides_path") or "overrides.yaml"
+        return _reason(
+            "approvals_drift",
+            f"config.yaml does not match approvals.mode in {path}",
+            "none",
+        )
+    return _reason(
+        "approvals_drift",
+        f"config.yaml does not match the setting ({approvals.get('mode')})",
+        "resync_approvals",
+    )
+
+
+def degraded_reasons(
+    *,
+    units: dict[str, str],
+    api_healthy: bool,
+    provision: dict[str, Any],
+    doctor: list[dict[str, Any]],
+    approvals: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Why a running Hermes is degraded, in display order, each with its fix.
+
+    ``gateway_down`` fires for any known gateway state other than ``active``;
+    ``unknown`` means the probe could not answer, which is not evidence of a
+    fault. ``api_unhealthy`` needs an active gateway (the API server runs
+    inside it, and an inactive gateway already produced ``gateway_down``).
+    ``in_sync`` of ``None`` (Hermes not provisioned) is not drift.
+    """
+    reasons: list[dict[str, Any]] = []
+    gateway = units.get("gateway")
+    if gateway not in ("active", "unknown"):
+        reasons.append(
+            _reason("gateway_down", f"hermes-gateway.service is {gateway}", "restart_gateway")
+        )
+    elif gateway == "active" and not api_healthy:
+        reasons.append(
+            _reason(
+                "api_unhealthy",
+                "the Hermes API server did not answer its health check",
+                "restart_gateway",
+            )
+        )
+
+    phases = provision.get("phases") or []
+    failed = provision.get("fail", 0)
+    if failed:
+        names = [p["name"] for p in phases if p.get("status") == "fail"]
+        detail = f"{failed} provision phase(s) failed"
+        reasons.append(
+            _reason(
+                "provision_failed", f"{detail}: {', '.join(names)}" if names else detail, "repair"
+            )
+        )
+    if provision.get("warn") or any(p.get("failure_count") for p in phases):
+        reasons.append(
+            _reason("provision_warn", "the last provision run recorded warnings", "none")
+        )
+
+    for row in doctor:
+        if row.get("status") != "fail":
+            continue
+        detail = f"{row['id']}: {row['detail']}"
+        if row["id"] == "ownership":
+            reasons.append(_reason("doctor_drift", detail, "cli", _OWNERSHIP_REPAIR_COMMAND))
+        else:
+            reasons.append(_reason("doctor_drift", detail, "repair"))
+
+    if approvals.get("in_sync") is False:
+        reasons.append(_approvals_reason(approvals))
+    return reasons
+
+
+def hermes_phase(
+    *,
+    installed: bool,
+    status: str,
+    unit_active: bool | None,
+    degraded: list[dict[str, Any]],
+    job: dict[str, Any] | None,
+) -> str:
+    """The card's phase. First match wins.
+
+    ``serving`` is not decided here: it needs the slot the UI holds, so the
+    server answers ``ready`` and the UI upgrades it.
+    """
+    if not installed:
+        return "not_installed"
+    if job is not None and job.get("state") in ("queued", "running"):
+        return "working"
+    if status == "broken":
+        return "broken"
+    if unit_active is None:
+        return "unknown"
+    if not unit_active:
+        return "down"
+    return "degraded" if degraded else "ready"
+
+
+def pi_phase(*, installed: bool, status: str) -> str:
+    """Pi has no service to be up or down: it is absent, broken, or installed."""
+    if not installed:
+        return "not_installed"
+    return "broken" if status == "broken" else "installed"
