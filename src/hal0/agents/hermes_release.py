@@ -2068,6 +2068,10 @@ def ensure_release(
     try:
         pin = read_pin(requirements)
         target = require_vetted(ref or pin.ref)
+        # Every builder (install, update, upgrade --to, bootstrap --ref) passes
+        # here, so this is where an older vetted ref over a newer release's
+        # state.db is refused (upstream #140060, manual rollback in #2805).
+        refuse_downgrade(target, live=live_ref(layout))
     except ReleaseError as exc:
         return ReleaseOutcome(status="build_failed", error=str(exc), remedy=REPAIR_REMEDY)
     stamp = stamp_file if stamp_file is not None else _default_stamp_file()

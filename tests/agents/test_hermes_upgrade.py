@@ -156,3 +156,27 @@ def test_requirement_is_a_vetted_commit_pin() -> None:
     assert hp.hermes_requirement_is_vetted(text)
     # A floor no longer counts: it cannot name a commit to check out.
     assert not hp.hermes_requirement_is_vetted("hermes-agent[web,mcp]>=0.16.0,<1")
+
+
+def test_ensure_release_refuses_a_downgrade_at_the_build_boundary(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``agent bootstrap hermes --ref`` and every other builder pass through ensure_release."""
+    from hal0.agents import hermes_release as hr
+
+    monkeypatch.setattr(hr, "live_ref", lambda layout=None: PIN)
+    monkeypatch.setattr(hr, "configured_extras", lambda *a, **k: ())
+    req = tmp_path / "requirements.txt"
+    req.write_text(f"hermes-agent @ git+https://github.com/NousResearch/hermes-agent.git@{PIN}\n")
+    out = hr.ensure_release(
+        caller="test",
+        venv=tmp_path / "venv",
+        requirements=req,
+        ref=PREV_PIN,
+        force=True,
+        hermes_home=tmp_path / "home",
+        units=hr.NoUnits(),
+        drop_root=False,
+    )
+    assert out.status == "build_failed"
+    assert out.error is not None and "downgrade" in out.error and "#2805" in out.error
