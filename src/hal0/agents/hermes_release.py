@@ -405,6 +405,9 @@ def find_uv(
     return which("uv")
 
 
+_NEUTRAL_CWD = "/"
+
+
 def _run(
     argv: list[str],
     *,
@@ -412,9 +415,12 @@ def _run(
     env: Mapping[str, str] | None = None,
     timeout: float = _STEP_TIMEOUT_S,
 ) -> subprocess.CompletedProcess:
+    # uv discovers ``uv.toml`` from the cwd upward, independent of HOME. A
+    # ``sudo`` caller's cwd is ``/root``, so an unpinned run died on
+    # ``/root/uv.toml`` as hal0 (#2883). Start from ``/`` unless told otherwise.
     return subprocess.run(  # nosec B603 — argv built from fixed tool paths
         [str(a) for a in argv],
-        cwd=str(cwd) if cwd is not None else None,
+        cwd=str(cwd) if cwd is not None else _NEUTRAL_CWD,
         env=dict(env) if env is not None else None,
         timeout=timeout,
         check=False,
@@ -1805,7 +1811,16 @@ def _ensure_as_hal0(**kw: Any) -> ReleaseOutcome:
         cmd = ["sudo", "-n", "-u", "hal0", "--", *inner]
     try:
         proc = subprocess.run(  # nosec B603 — fixed argv, our own module
-            cmd, stdout=subprocess.PIPE, text=True, check=False, timeout=6 * _STEP_TIMEOUT_S
+            cmd,
+            stdout=subprocess.PIPE,
+            text=True,
+            check=False,
+            timeout=6 * _STEP_TIMEOUT_S,
+            # #2883: sudo leaves root's cwd (/root, 0700) on the child, and uv
+            # opens ./uv.toml from its cwd upward, so every uv the child runs
+            # (venv, python find) died on "Permission denied". Also keeps the
+            # caller's cwd off the child's sys.path[0] (python -m).
+            cwd="/",
         )
     except (OSError, subprocess.SubprocessError) as exc:
         return ReleaseOutcome(
