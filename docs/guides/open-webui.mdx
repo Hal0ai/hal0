@@ -97,11 +97,19 @@ client of hal0.
   slot model is loaded.
 - **Keys.** Hermes gives each profile its own API key. hal0 reads them from
   Hermes's own `.env` files and keeps them in its process only. It never
-  writes a key into `api.env`, the Open WebUI container or the vault, and the
-  only thing it writes is a missing key into a named profile's own `.env`.
-  It does so at every hal0-api start (so after every `hal0 update`), on
-  `hal0 agent reprovision hermes` and after the Hermes component converge
-  job, and the profile appears in the picker after that.
+  writes a key into `api.env`, the Open WebUI container or the vault. It
+  writes a missing key into a named profile's own `.env`, and it mirrors the
+  default profile's key into `$HERMES_HOME/.env` when it provisions Hermes.
+  It does so at every hal0-api start (so after every `hal0 update`), every
+  two minutes after that, on `hal0 agent reprovision hermes`, on
+  `POST /api/agents/hermes/reconcile-upstreams` and after the Hermes
+  component converge job, and the profile appears in the picker after that.
+- **`hermes-agent` missing from the picker?** On a box where Hermes was
+  installed before this release, the default key sits only in hal0's root-only
+  vault, which hal0-api cannot read. Run
+  `sudo hal0 agent reprovision hermes --repair` once; it mirrors that key
+  into `$HERMES_HOME/.env` and the entry appears on the next reconcile.
+  `hal0 doctor` reports this on the `hermes-api` row.
 - **When Hermes is down** or still starting, its entries stay in the picker
   and a turn to one fails at once with `dispatch.upstream_unavailable`. It is
   never answered by a slot model instead. hal0 re-checks the gateway every two

@@ -58,10 +58,15 @@ line above disagree.
    (`agent/secret_scope.py:390-420`); dotenv parsing follows
    `agent/secret_scope.py:257-290`; a key must pass `has_usable_secret`
    (`hermes_cli/auth.py:307-314`).
-5. **hal0-api can read the keys Hermes honours.** The default key lives in
-   `$HERMES_HOME/.env`, and each named profile's key would live in
-   `profiles/<p>/.env`. hal0-api runs as the same user as the gateway and can
-   read them. hal0's own vault is not where the gateway reads its key from.
+5. **hal0-api can read the keys Hermes honours once they sit in Hermes's
+   `.env` files.** Provisioning keeps the default key in hal0's root-only
+   vault (`hermes_provision.HERMES_SECRETS_ENV`), which reaches the gateway
+   as process environment through a systemd drop-in; hal0-api runs as `hal0`
+   and cannot read it there. Hermes loads `$HERMES_HOME/.env` over the
+   process environment at gateway start (`hermes_cli/env_loader.py:506`,
+   `override=True`), so the same value in that file changes nothing for the
+   gateway and is readable by hal0-api, which runs as the gateway's user.
+   Each named profile's key lives in `profiles/<p>/.env`.
 6. **OWUI reaches the host only through the bridge address**
    (`packaging/systemd/hal0-openwebui.service:70`, `host.docker.internal`),
    so it cannot reach a loopback-only Hermes. Hermes stays loopback-only
@@ -113,15 +118,29 @@ line above disagree.
      parked or standalone rules. Multiplexing off makes every live probe 404,
      and only `hermes` stays.
    - The endpoint follows Hermes's own precedence (fact 2).
+   - One owner per model id. When two profiles derive the same id (the
+     default profile configured with `model_name: coder` next to
+     `profiles/coder`), the first keeps it, `default` always first, and the
+     other is left out and reported under `model_id_collisions`, instead of a
+     second pinned owner that is advertised but never reached.
 3. **Keys are read from Hermes's `.env` files and never copied.**
    - A key reaches the registry through hal0-api's own process environment,
      as `HAL0_HERMES_API_KEY__<PROFILE>`, refreshed on every reconcile. It is
      never written to disk, to `api.env`, to the OWUI container or to the vault.
    - `ensure_profile_key` writes `API_SERVER_KEY` into a **named** profile's
-     `.env` only when that file has no usable key, atomically, keeping its mode.
-     It never rotates a present value and never touches the default profile,
-     whose key stays with `ensure_gateway_api_server_key`. Fact 4 means no
+     `.env` only when that file has no usable key, atomically, keeping its mode
+     and, as root, its owner (a new file is owned like its directory, so the
+     gateway can read it). It never rotates a present value. Fact 4 means no
      gateway restart follows.
+   - `ensure_default_key` **mirrors** the default key into `$HERMES_HOME/.env`
+     when neither config `api_server.key` nor that file holds a usable one:
+     at provisioning, with the value `ensure_gateway_api_server_key` has just
+     minted for the vault, and on a root `hal0 agent reprovision hermes
+     --repair`, from the vault. It never mints a key of its own, because a
+     fresh value would desynchronise hal0 from the running gateway until its
+     next restart (fact 5). A non-root pass that finds no readable default
+     key leaves `hermes` unregistered and says so: the `profile_api_keys`
+     phase warns, and the `hermes-api` doctor row names the root repair.
 4. **Pinned upstreams own their ids, and an owned id fails fast.** Only an id in
    a pinned upstream's `owned_models` is owned
    (`resolution_path="pinned:<name>"`). Other ids Hermes advertises, such as
@@ -129,7 +148,9 @@ line above disagree.
    the models cache and resolve by the normal ladder, slot and registry first.
    So an alias equal to a slot model id never takes that slot over and never
    loops hal0's own inference back into Hermes. An owned id never falls
-   through to the `agent` slot (fact 9):
+   through to the `agent` slot (fact 9), and ownership is decided before
+   container-slot preemption, so a loaded container slot that advertises an
+   owned id does not take the request either:
    - upstream offline: 502 `dispatch.upstream_unavailable`, "...which is offline";
    - upstream disabled: "...which is disabled";
    - upstream live but not advertising the id: "...which is up but does not
@@ -149,22 +170,25 @@ line above disagree.
    The page lists them with a "managed by agent:hermes" badge and their owned
    ids, and shows no delete, toggle, filter or key controls for them. The new `Upstream` fields are
    dataclass-only and never round-trip through TOML.
-7. **When it reconciles, and who writes the keys.**
-   - At hal0-api boot (phase `hermes_upstreams`, after the dispatcher). The
-     phase first writes missing named-profile keys, so every hal0-api start,
-     including the restart that ends `hal0 update`, delivers them.
+7. **When it reconciles, and who writes the keys.** Every hal0-api entry
+   point goes through `sync_hermes_upstreams`: the key sweep
+   (`ensure_profile_keys`) first, then the reconcile, so a profile created
+   while hal0-api runs gets its key on the next pass instead of after a
+   restart. A failed sweep is logged and the reconcile still runs.
+   - At hal0-api boot (phase `hermes_upstreams`, after the dispatcher), so
+     every hal0-api start, including the restart that ends `hal0 update`,
+     delivers the keys.
    - Every 120 s after boot (`HERMES_RECONCILE_INTERVAL_S`), so a gateway that
      was still starting at boot, or a profile added later, is picked up.
      Errors are logged and the loop keeps running.
    - After the `hermes` component converge job ends `converged`, `stale` or
-     `upgraded`. The job first writes missing profile keys and attaches
-     `hermes_upstreams` to its result.
+     `upgraded`; the job attaches `hermes_upstreams` to its result.
    - On `POST /api/agents/hermes/reconcile-upstreams` (404
      `agent.not_installed` when Hermes is absent). `hal0 agent bootstrap
      hermes` and `reprovision` call it best-effort.
-   - Provisioning gains a `profile_api_keys` phase after
-     `gateway_secrets_wire`, so `hal0 agent reprovision hermes` writes keys
-     too.
+   - Provisioning: `gateway_secrets_wire` mirrors the default key it mints
+     (decision 3), and the `profile_api_keys` phase right after it runs the
+     sweep, so `hal0 agent reprovision hermes` writes keys too.
 8. **Two Hermes headers pass through.** `X-Hermes-Session-Id` and
    `X-Hermes-Session-Key` join the forwardable request headers
    (`api_server_openai_routes.py:679-690`). The allowlist is global, so every
@@ -218,10 +242,19 @@ its own for Hermes.
   it cannot know which slot model is loaded. The OWUI guide tells the operator
   to set a slot model as the task model.
 - `/v1/responses` is not available through hal0, which mounts no such route.
-- **Existing boxes need no operator step.** hal0-api writes the named
-  profiles' keys and registers every profile at its first start after the
-  update. `hal0 agent reprovision hermes` and the `hermes` converge job write
-  them too.
+- **Existing boxes need one root step for `hermes-agent`.** A box provisioned
+  before this decision holds its default key only in the root-only vault, so
+  hal0-api cannot read it and `hermes` stays unregistered until
+  `sudo hal0 agent reprovision hermes --repair` mirrors it into
+  `$HERMES_HOME/.env` (fact 5). `hal0 doctor` says so on the `hermes-api`
+  row. The named profiles need no step: hal0-api writes their keys and
+  registers them at its first start after the update, and the periodic pass,
+  the reconcile route, `hal0 agent reprovision hermes` and the `hermes`
+  converge job do the same. A box installed after this decision gets the
+  mirror at provisioning.
+- **The test suite pins `HERMES_HOME`.** App boot runs the key sweep, so the
+  shared isolation fixture points `HERMES_HOME` under `tmp_path`; a suite run
+  on a box with a live Hermes tree never writes to it.
 - **Every `hal0-brain` turn is an agent turn.** It is the resident steward with
   the admin tools, so it is exposed like any other served profile. Managed
   entries are read-only (decision 6), so hal0 has no per-entry switch. The knob
