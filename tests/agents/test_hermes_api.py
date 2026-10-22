@@ -9,14 +9,23 @@ from pathlib import Path
 import pytest
 
 from hal0.agents import hermes_api
+from hal0.agents import hermes_provision as hp
 
 GOOD = "abcdefghijklmnopqrstuvwxyz012345"
+VAULT = "vault_key_abcdefghijklmnopqrstuvwxyz0123456"
 
 
 @pytest.fixture(autouse=True)
-def _clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
+def _clean_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     for name in ("HERMES_HOME", "API_SERVER_HOST", "API_SERVER_PORT", "API_SERVER_MODEL_NAME"):
         monkeypatch.delenv(name, raising=False)
+    # The default-key mirror reads hal0's root-only vault: keep it off the host.
+    monkeypatch.setattr(hp, "HERMES_SECRETS_ENV", tmp_path / "vault" / "hermes.env")
+
+
+def _write_vault(tmp_path: Path, key: str) -> None:
+    (tmp_path / "vault").mkdir(exist_ok=True)
+    (tmp_path / "vault" / "hermes.env").write_text(f"API_SERVER_KEY={key}\n")
 
 
 @pytest.fixture
@@ -219,6 +228,78 @@ def test_ensure_profile_key_refuses_default(home: Path) -> None:
 def test_ensure_profile_keys_returns_written_names(home: Path) -> None:
     assert hermes_api.ensure_profile_keys(home) == ["nokey", "parked"]
     assert hermes_api.ensure_profile_keys(home) == []
+    assert not hermes_api.api_key_for("default", home)  # no vault: default never minted
+
+
+def test_ensure_profile_keys_mirrors_default_first(home: Path, tmp_path: Path) -> None:
+    _write_vault(tmp_path, VAULT)
+    assert hermes_api.ensure_profile_keys(home) == ["default", "nokey", "parked"]
+    assert hermes_api.api_key_for("default", home) == VAULT
+    assert hermes_api.ensure_profile_keys(home) == []
+
+
+def test_ensure_default_key_mirrors_given_value_appending(home: Path) -> None:
+    """The provisioner hands over the key it just minted; other lines stay put."""
+    env = home / ".env"
+    os.chmod(env, 0o640)
+    assert hermes_api.ensure_default_key(home, value=GOOD) is True
+    assert env.read_text() == f"# top\nOTHER=1\nAPI_SERVER_KEY={GOOD}\n"
+    assert stat.S_IMODE(env.stat().st_mode) == 0o640
+    assert hermes_api.api_key_for("default", home) == GOOD
+
+
+def test_ensure_default_key_reads_vault_when_no_value(home: Path, tmp_path: Path) -> None:
+    _write_vault(tmp_path, VAULT)
+    assert hermes_api.ensure_default_key(home) is True
+    assert hermes_api.api_key_for("default", home) == VAULT
+
+
+def test_ensure_default_key_never_mints(home: Path) -> None:
+    """No value and no readable vault: nothing is written, the file is untouched."""
+    before = (home / ".env").read_bytes()
+    assert hermes_api.ensure_default_key(home) is False
+    assert (home / ".env").read_bytes() == before
+
+
+def test_ensure_default_key_refuses_weak_vault_key(home: Path, tmp_path: Path) -> None:
+    _write_vault(tmp_path, "changeme")
+    assert hermes_api.ensure_default_key(home) is False
+    _write_vault(tmp_path, "short")
+    assert hermes_api.ensure_default_key(home, value="short") is False
+    assert "API_SERVER_KEY" not in (home / ".env").read_text()
+
+
+def test_ensure_default_key_never_overwrites(home: Path, tmp_path: Path) -> None:
+    (home / ".env").write_text(f"API_SERVER_KEY={GOOD}\n")
+    _write_vault(tmp_path, VAULT)
+    assert hermes_api.ensure_default_key(home) is False
+    assert hermes_api.ensure_default_key(home, value=VAULT) is False
+    assert hermes_api.api_key_for("default", home) == GOOD
+
+
+def test_ensure_default_key_prefers_config_key(home: Path, tmp_path: Path) -> None:
+    (home / "config.yaml").write_text(
+        f"gateway:\n  platforms:\n    api_server:\n      key: {GOOD}\n"
+    )
+    _write_vault(tmp_path, VAULT)
+    assert hermes_api.ensure_default_key(home) is False
+    assert "API_SERVER_KEY" not in (home / ".env").read_text()
+
+
+def test_new_env_file_written_as_root_is_owned_like_its_directory(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A root --repair must not leave a root:root 0600 .env the hal0 gateway cannot read."""
+    chowned: list[tuple[str, int, int]] = []
+    pdir = home / "profiles" / "parked"
+    monkeypatch.setattr(hermes_api.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(
+        hermes_api.os, "chown", lambda path, uid, gid: chowned.append((str(path), uid, gid))
+    )
+    assert hermes_api.ensure_profile_key("parked", home) is True
+    st = pdir.stat()
+    assert len(chowned) == 1 and chowned[0][1:] == (st.st_uid, st.st_gid)
+    assert chowned[0][0].startswith(str(pdir / ".env."))  # the temp file, before os.replace
 
 
 def test_env_key_name() -> None:

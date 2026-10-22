@@ -4182,7 +4182,7 @@ def _patch_dropin_to_tmp(
     monkeypatch.setattr(
         hp,
         "ensure_gateway_api_server_key",
-        lambda: hp.ApiServerKeyResult(outcome="present", key_len=43),
+        lambda **_: hp.ApiServerKeyResult(outcome="present", key_len=43),
     )
     # Pretend we're root so the phase doesn't SKIP on the non-root guard.
     monkeypatch.setattr(hp.os, "geteuid", lambda: 0)
@@ -4562,10 +4562,19 @@ def _profile_env(home: Path, name: str, *, keyed: bool) -> None:
     (pdir / ".env").write_text("API_SERVER_KEY=" + "k" * 40 + "\n" if keyed else "OTHER=1\n")
 
 
-def test_phase_profile_api_keys_writes_missing_only(tmp_path: Path) -> None:
+@pytest.fixture
+def _no_vault(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Point the root-only vault at a tmp path (absent unless a test writes it)."""
+    vault = tmp_path / "vault" / "hermes.env"
+    monkeypatch.setattr(hp, "HERMES_SECRETS_ENV", vault)
+    return vault
+
+
+def test_phase_profile_api_keys_writes_missing_only(tmp_path: Path, _no_vault: Path) -> None:
     home = tmp_path / ".hermes"
     _profile_env(home, "coder", keyed=True)
     _profile_env(home, "nokey", keyed=False)
+    (home / ".env").write_text("API_SERVER_KEY=" + "d" * 43 + "\n")
     state = hp.BootstrapState(venv=str(tmp_path / "venv"), hermes_home=str(home))
     ctx = hp._StepCtx(state=state, io=hp.InstallIO())
 
@@ -4573,6 +4582,7 @@ def test_phase_profile_api_keys_writes_missing_only(tmp_path: Path) -> None:
     assert out.status == hp.PhaseStatus.OK
     assert out.details["wrote"] == ["nokey"]
     assert out.details["present"] == ["coder"]
+    assert out.details["default_key"] == "present"
     assert "API_SERVER_KEY=" in (home / "profiles" / "nokey" / ".env").read_text()
 
     again = hp._phase_profile_api_keys(ctx)
@@ -4581,11 +4591,63 @@ def test_phase_profile_api_keys_writes_missing_only(tmp_path: Path) -> None:
     assert again.details["present"] == ["coder", "nokey"]
 
 
-def test_phase_profile_api_keys_no_profiles_is_ok(tmp_path: Path) -> None:
-    state = hp.BootstrapState(venv=str(tmp_path / "venv"), hermes_home=str(tmp_path / ".hermes"))
+def test_phase_profile_api_keys_mirrors_vault_key_into_default_env(
+    tmp_path: Path, _no_vault: Path
+) -> None:
+    """Codex P1: a readable vault key (root --repair) lands in $HERMES_HOME/.env."""
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    _no_vault.parent.mkdir(parents=True)
+    _no_vault.write_text("API_SERVER_KEY=" + "v" * 43 + "\n")
+    state = hp.BootstrapState(venv=str(tmp_path / "venv"), hermes_home=str(home))
     out = hp._phase_profile_api_keys(hp._StepCtx(state=state, io=hp.InstallIO()))
     assert out.status == hp.PhaseStatus.OK
-    assert out.details == {"wrote": [], "present": []}
+    assert out.details == {"wrote": ["default"], "present": [], "default_key": "present"}
+    assert (home / ".env").read_text() == "API_SERVER_KEY=" + "v" * 43 + "\n"
+
+
+def test_phase_profile_api_keys_warns_when_default_key_unreadable(
+    tmp_path: Path, _no_vault: Path
+) -> None:
+    """No readable default key (non-root pass, vault 0600 root): WARN naming the fix."""
+    state = hp.BootstrapState(venv=str(tmp_path / "venv"), hermes_home=str(tmp_path / ".hermes"))
+    out = hp._phase_profile_api_keys(hp._StepCtx(state=state, io=hp.InstallIO()))
+    assert out.status == hp.PhaseStatus.WARN
+    assert out.reason is not None and "sudo hal0 agent reprovision hermes --repair" in out.reason
+    assert out.details == {"wrote": [], "present": [], "default_key": "unreadable"}
+    assert not (tmp_path / ".hermes" / ".env").exists()  # never mints a default key
+
+
+def test_gateway_secrets_wire_mirrors_minted_key_into_hermes_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Codex P1: the key minted for the vault is mirrored into $HERMES_HOME/.env
+    while the provisioner (usually hal0, which cannot read the vault) still has it."""
+    real_ensure = hp.ensure_gateway_api_server_key  # the helper below stubs it
+    _dropin, _fake, io = _patch_dropin_to_tmp(tmp_path, monkeypatch)
+    vault = tmp_path / "vault" / "hermes.env"
+    vault.parent.mkdir()
+    monkeypatch.setattr(hp, "HERMES_SECRETS_ENV", vault)
+    monkeypatch.setattr(hp, "ensure_gateway_api_server_key", real_ensure)
+    monkeypatch.setattr(hp, "_generate_api_server_key", lambda: "m" * 43)
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    (home / ".env").write_text("OTHER=1\n")
+    state = hp.BootstrapState(hermes_home=str(home))
+
+    out = hp._phase_gateway_secrets_wire(hp._StepCtx(state=state, io=io))
+
+    assert out.status == hp.PhaseStatus.OK
+    assert out.details["api_server_key"]["outcome"] == "generated"
+    assert out.details["api_server_key"]["mirrored"] is True
+    assert "API_SERVER_KEY=" + "m" * 43 in vault.read_text()
+    assert (home / ".env").read_text() == "OTHER=1\nAPI_SERVER_KEY=" + "m" * 43 + "\n"
+
+    # Rerun: the vault key is present, nothing is minted, .env is untouched.
+    again = hp._phase_gateway_secrets_wire(hp._StepCtx(state=state, io=io))
+    assert again.details["api_server_key"]["outcome"] == "present"
+    assert "mirrored" not in again.details["api_server_key"]
+    assert (home / ".env").read_text().count("API_SERVER_KEY=") == 1
 
 
 def test_phase_profile_api_keys_oserror_is_warn(

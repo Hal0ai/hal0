@@ -1449,9 +1449,11 @@ def check_hermes_api_upstreams(
         model = ha.model_id_for(profile, root)
         api_key = ha.api_key_for(profile, root)
         if api_key is None:
-            nokey = (
-                f"profile {profile} has no usable API key; "
-                "run hal0 agent reprovision hermes --repair"
+            nokey = f"profile {profile} has no usable API key; " + (
+                "run sudo hal0 agent reprovision hermes --repair "
+                "(it mirrors the gateway's vault key into $HERMES_HOME/.env)"
+                if profile == ha.DEFAULT_PROFILE
+                else "run sudo hal0 agent reprovision hermes --repair"
             )
             env = (
                 root / ".env"

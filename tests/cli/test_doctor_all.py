@@ -1819,8 +1819,19 @@ def test_check_hermes_api_upstreams_pass_lists_ids(tmp_path) -> None:
 def test_check_hermes_api_upstreams_warns_without_key(tmp_path) -> None:
     c = _api(_hermes_home(tmp_path, alpha_key=False))
     assert c.status == "warn"
-    assert "alpha" in c.detail and "hal0 agent reprovision hermes --repair" in c.detail
+    assert "alpha" in c.detail and "sudo hal0 agent reprovision hermes --repair" in c.detail
+    assert "vault" not in c.detail
     assert c.detail.endswith(_API_TAIL)
+
+
+def test_check_hermes_api_upstreams_default_without_key_names_the_vault_mirror(tmp_path) -> None:
+    """Codex P1: on a box provisioned before the mirror, the default key sits in
+    the root-only vault; the fix is a root --repair, and the row says so."""
+    c = _api(_hermes_home(tmp_path, default_key=False))
+    assert c.status == "warn"
+    assert "profile default has no usable API key" in c.detail
+    assert "sudo hal0 agent reprovision hermes --repair" in c.detail
+    assert "mirrors the gateway's vault key into $HERMES_HOME/.env" in c.detail
 
 
 def test_check_hermes_api_upstreams_fails_on_401(tmp_path) -> None:

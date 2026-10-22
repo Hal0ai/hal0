@@ -20,6 +20,10 @@ Verified against Hermes 0.22.2 (commit ``d923a5eb``):
 * ``_load_profile_secret_scope`` re-reads ``.env`` for every request
   (``gateway/run.py:1772-1782``), so a key written here needs no gateway
   restart.
+* The default profile's key is process environment, loaded once at gateway
+  start: config ``api_server.key``, else ``$HERMES_HOME/.env`` (which
+  ``hermes_cli/env_loader.py:506`` loads with ``override=True``), else the
+  environment the unit inherits from hal0's root-only vault.
 * Dotenv semantics mirror ``agent/secret_scope.py:257-290``.
 """
 
@@ -192,17 +196,15 @@ def api_key_for(profile: str, home: Path) -> str | None:
     return value.strip() if _usable(value) and value is not None else None
 
 
-def ensure_profile_key(profile: str, home: Path) -> bool:
-    """Append a fresh ``API_SERVER_KEY`` to a named profile lacking a usable one.
+def _append_env_key(target: Path, value: str) -> bool:
+    """Append ``API_SERVER_KEY=value`` to ``target`` atomically.
 
-    Returns ``True`` when it wrote. Never touches ``default`` or an existing
-    usable key. The file is replaced atomically (temp file + ``os.replace``),
-    keeping its mode and, as root, its owner; other lines stay byte-identical.
-    A new file is created ``0600``.
+    Other lines stay byte-identical; the file keeps its mode and, as root, its
+    owner. A new file is created ``0600`` and, as root, owned like its
+    directory, so the gateway (which runs as that owner) can read it. An
+    unreadable or unwritable target is skipped with ``hermes_api.key_skipped``
+    rather than raised: one bad profile must never abort the sweep.
     """
-    if profile == DEFAULT_PROFILE or api_key_for(profile, home) is not None:
-        return False
-    target = home / "profiles" / profile / ".env"
     try:
         existing = target.read_bytes()
         st: os.stat_result | None = target.stat()
@@ -212,18 +214,19 @@ def ensure_profile_key(profile: str, home: Path) -> bool:
         log.warning("hermes_api.key_skipped", path=str(target), error=str(exc))
         return False
     prefix = existing if not existing or existing.endswith(b"\n") else existing + b"\n"
-    line = f"{_KEY_NAME}={hp._generate_api_server_key()}\n".encode()
+    line = f"{_KEY_NAME}={value}\n".encode()
     try:
         fd, tmp = tempfile.mkstemp(dir=target.parent, prefix=".env.")
-    except OSError as exc:  # profile dir not writable by this user: skip, never abort the sweep
+    except OSError as exc:  # dir not writable by this user: skip, never abort the sweep
         log.warning("hermes_api.key_skipped", path=str(target), error=str(exc))
         return False
     try:
         with os.fdopen(fd, "wb") as fh:
             fh.write(prefix + line)
         os.chmod(tmp, stat.S_IMODE(st.st_mode) if st is not None else 0o600)
-        if st is not None and os.geteuid() == 0:
-            os.chown(tmp, st.st_uid, st.st_gid)
+        if os.geteuid() == 0:
+            owner = st if st is not None else target.parent.stat()
+            os.chown(tmp, owner.st_uid, owner.st_gid)
         os.replace(tmp, target)
     except OSError as exc:
         Path(tmp).unlink(missing_ok=True)
@@ -235,13 +238,52 @@ def ensure_profile_key(profile: str, home: Path) -> bool:
     return True
 
 
-def ensure_profile_keys(home: Path) -> list[str]:
-    """:func:`ensure_profile_key` for every profile dir; the names written.
+def ensure_profile_key(profile: str, home: Path) -> bool:
+    """Append a fresh ``API_SERVER_KEY`` to a named profile lacking a usable one.
 
-    Every directory, not only served ones: a parked profile that later wakes
-    already has its key.
+    Returns ``True`` when it wrote. Never touches ``default`` (see
+    :func:`ensure_default_key`) or an existing usable key.
     """
-    return [name for name in profile_dirs(home) if ensure_profile_key(name, home)]
+    if profile == DEFAULT_PROFILE or api_key_for(profile, home) is not None:
+        return False
+    return _append_env_key(home / "profiles" / profile / ".env", hp._generate_api_server_key())
+
+
+def ensure_default_key(home: Path, *, value: str | None = None) -> bool:
+    """Mirror the gateway's default ``API_SERVER_KEY`` into ``home/.env``.
+
+    Provisioning keeps the default key in hal0's root-only vault
+    (``hermes_provision.HERMES_SECRETS_ENV``); the gateway gets it as process
+    environment, and hal0-api cannot read it there. Hermes loads ``home/.env``
+    over the process environment at gateway start
+    (``hermes_cli/env_loader.py:506``, ``override=True``), so the same value in
+    that file changes nothing for the gateway and makes the key readable to
+    hal0-api. Writes only when neither config ``api_server.key`` nor
+    ``home/.env`` holds a usable key. ``value`` is the key the caller just
+    minted; otherwise the vault's, which only root can read. Never mints a key
+    of its own: a fresh value would desynchronise hal0 from the running
+    gateway until its next restart. Returns ``True`` when it wrote.
+    """
+    if api_key_for(DEFAULT_PROFILE, home) is not None:
+        return False
+    key = value if value is not None else hp._read_secrets_env().get(_KEY_NAME)
+    if not key or not hp._is_strong_api_server_key(key):
+        return False
+    return _append_env_key(home / ".env", key.strip())
+
+
+def ensure_profile_keys(home: Path) -> list[str]:
+    """Give every profile a key hal0-api can read; returns the profiles written.
+
+    ``default`` (mirrored, see :func:`ensure_default_key`) comes first, then
+    each named profile dir that got a fresh key. Idempotent: a profile with a
+    usable key is left alone, and a profile whose ``.env`` cannot be read or
+    written is skipped (``hermes_api.key_skipped``) rather than aborting the
+    sweep.
+    """
+    written = [DEFAULT_PROFILE] if ensure_default_key(home) else []
+    written.extend(name for name in profile_dirs(home) if ensure_profile_key(name, home))
+    return written
 
 
 def default_model_id(home: Path | None = None) -> str:
