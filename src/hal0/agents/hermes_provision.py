@@ -4927,7 +4927,33 @@ def _merge_profile_config(path: Path, desired: dict[str, Any]) -> dict[str, Any]
         os.close(dir_fd)
 
 
-def _merge_profile_config_at(dir_fd: int, path: Path, desired: dict[str, Any]) -> dict[str, Any]:
+def _open_config_nofollow(dir_fd: int) -> int:
+    """``config.yaml`` in ``dir_fd``, opened without following links and without
+    blocking (a FIFO would otherwise wait for a writer forever)."""
+    return os.open("config.yaml", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=dir_fd)
+
+
+def _config_version(st: os.stat_result) -> tuple[int, int, int, int]:
+    return (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns)
+
+
+def _same_inode(root_fd: int, name: str, dir_fd: int) -> bool:
+    """``name`` under ``root_fd`` is still the directory ``dir_fd`` was opened on."""
+    try:
+        now = os.stat(name, dir_fd=root_fd, follow_symlinks=False)
+    except OSError:
+        return False
+    was = os.fstat(dir_fd)
+    return (now.st_dev, now.st_ino) == (was.st_dev, was.st_ino)
+
+
+def _merge_profile_config_at(
+    dir_fd: int,
+    path: Path,
+    desired: dict[str, Any],
+    *,
+    still_named: Callable[[], bool] | None = None,
+) -> dict[str, Any]:
     """Deep-merge hal0's keys into the ``config.yaml`` inside directory ``dir_fd``.
 
     Every file operation is relative to the verified directory descriptor and
@@ -4956,39 +4982,72 @@ def _merge_profile_config_at(dir_fd: int, path: Path, desired: dict[str, Any]) -
         # rename could point elsewhere): the periodic sweep, a provision and
         # an operator edit may overlap.
         with _profile_lock(dir_fd):
-            try:
-                # O_NONBLOCK: opening a FIFO for reading would otherwise wait
-                # for a writer forever; fstat below rejects it instead.
-                fd = os.open(
-                    "config.yaml", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=dir_fd
-                )
-            except FileNotFoundError:
-                return {"wired": False, "changed": False, "reason": "profile config absent"}
-            except OSError as exc:
-                if exc.errno == errno.ELOOP:
-                    return {"wired": False, "changed": False, "error": "config.yaml is a symlink"}
-                raise
-            with os.fdopen(fd, "rb") as fh:
-                st = os.fstat(fh.fileno())
-                if not stat.S_ISREG(st.st_mode):
+            # An operator's editor does not take hal0's lock, so the file is
+            # re-stat'ed right before the replacement; a version that moved
+            # since the read is read and merged again (a few times, then given
+            # up on), never overwritten from the stale parse.
+            for _attempt in range(4):
+                try:
+                    fd = _open_config_nofollow(dir_fd)
+                except FileNotFoundError:
+                    return {"wired": False, "changed": False, "reason": "profile config absent"}
+                except OSError as exc:
+                    if exc.errno == errno.ELOOP:
+                        return {
+                            "wired": False,
+                            "changed": False,
+                            "error": "config.yaml is a symlink",
+                        }
+                    raise
+                with os.fdopen(fd, "rb") as fh:
+                    st = os.fstat(fh.fileno())
+                    if not stat.S_ISREG(st.st_mode):
+                        return {
+                            "wired": False,
+                            "changed": False,
+                            "error": "config.yaml is not a regular file",
+                        }
+                    current = fh.read().decode("utf-8")
+                base = yaml.safe_load(current)
+                if base is None:  # an empty file is an empty mapping; ``[]``/``false`` are not
+                    base = {}
+                if not isinstance(base, dict):
                     return {
                         "wired": False,
                         "changed": False,
-                        "error": "config.yaml is not a regular file",
+                        "error": "config.yaml is not a mapping",
                     }
-                current = fh.read().decode("utf-8")
-            base = yaml.safe_load(current)
-            if base is None:  # an empty file is an empty mapping; ``[]``/``false`` are not
-                base = {}
-            if not isinstance(base, dict):
-                return {"wired": False, "changed": False, "error": "config.yaml is not a mapping"}
-            if _profile_wire_opted_out(base):
-                return {"wired": False, "changed": False, "reason": "opted out"}
-            merged = _deep_merge(base, desired)
-            changed = merged != base
-            if changed:
+                if _profile_wire_opted_out(base):
+                    return {"wired": False, "changed": False, "reason": "opted out"}
+                merged = _deep_merge(base, desired)
+                changed = merged != base
+                if not changed:
+                    break
                 out = yaml.safe_dump(merged, sort_keys=False, default_flow_style=False)
+                # The identity in ``desired`` was derived from the profile's
+                # name: it must still be this directory's name, or an older
+                # sweep would stamp a renamed profile with the wrong one.
+                if still_named is not None and not still_named():
+                    return {
+                        "wired": False,
+                        "changed": False,
+                        "error": "profile renamed during the sweep",
+                    }
+                probe = _open_config_nofollow(dir_fd)
+                try:
+                    live = os.fstat(probe)
+                finally:
+                    os.close(probe)
+                if _config_version(live) != _config_version(st):
+                    continue  # edited under us: read and merge again
                 _replace_profile_config_at(dir_fd, out, st)
+                break
+            else:
+                return {
+                    "wired": False,
+                    "changed": False,
+                    "error": "config.yaml kept changing during the sweep",
+                }
     except (OSError, UnicodeDecodeError, yaml.YAMLError) as exc:  # type: ignore[attr-defined]
         # Never ``str(exc)``: a PyYAML message quotes the offending line, which
         # in this file can be a resolved Authorization header.
@@ -5007,6 +5066,13 @@ def _profile_lock(dir_fd: int) -> Iterator[None]:
 
     fd = os.open(".config.yaml.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600, dir_fd=dir_fd)
     try:
+        if os.geteuid() == 0:
+            # A root pass must not leave a root-owned lock that the hal0-api
+            # sweeps (User=hal0) could never open again: own it like the dir.
+            owner = os.fstat(dir_fd)
+            mine = os.fstat(fd)
+            if (mine.st_uid, mine.st_gid) != (owner.st_uid, owner.st_gid):
+                os.fchown(fd, owner.st_uid, owner.st_gid)
         fcntl.flock(fd, fcntl.LOCK_EX)
         try:
             yield
@@ -5110,6 +5176,7 @@ def wire_named_profiles(home: Path) -> dict[str, Any]:
                         dir_fd,
                         profiles / name / "config.yaml",
                         _profile_wire_desired(profile_agent_id(name)),
+                        still_named=lambda n=name, d=dir_fd: _same_inode(root_fd, n, d),
                     )
                 finally:
                     os.close(dir_fd)

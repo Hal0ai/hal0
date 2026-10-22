@@ -5056,3 +5056,85 @@ def test_wire_named_profiles_refuses_a_symlinked_hermes_home(tmp_path: Path, mon
     report = hp.wire_named_profiles(link)
     assert report["errors"] == {"profiles/": "HERMES_HOME is a symlink"} and report["wired"] == []
     assert (real_home / "profiles" / "coder" / "config.yaml").read_text() == "a: 1\n"
+
+
+def test_wire_named_profiles_rereads_a_config_edited_under_the_sweep(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Codex P2: an operator save between read and replace is merged, not overwritten."""
+    import yaml
+
+    monkeypatch.setattr("hal0.service_identity.service_key", lambda prefer=None: None)
+    home = _profiles(tmp_path, coder="model:\n  default: agent\n")
+    cfg = home / "profiles" / "coder" / "config.yaml"
+    real_open = hp._open_config_nofollow
+    opens: list[int] = []
+
+    def racing_open(dir_fd):
+        opens.append(dir_fd)
+        if len(opens) == 2:  # the pre-replace probe: an operator saved meanwhile
+            cfg.write_text("model:\n  default: agent\noperator: kept\n")
+        return real_open(dir_fd)
+
+    monkeypatch.setattr(hp, "_open_config_nofollow", racing_open)
+    report = hp.wire_named_profiles(home)
+    assert report["changed"] == ["coder"] and report["errors"] == {}
+    data = yaml.safe_load(cfg.read_text())
+    assert data["operator"] == "kept"
+    assert data["mcp_servers"]["hal0-admin"]["headers"]["X-hal0-Agent"] == "hermes__coder"
+
+
+def test_wire_named_profiles_gives_up_on_a_config_that_keeps_changing(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setattr("hal0.service_identity.service_key", lambda prefer=None: None)
+    home = _profiles(tmp_path, coder="model:\n  default: agent\n")
+    cfg = home / "profiles" / "coder" / "config.yaml"
+    real_open = hp._open_config_nofollow
+    n = [0]
+
+    def churn(dir_fd):
+        n[0] += 1
+        if n[0] % 2 == 0:
+            cfg.write_text(f"model:\n  default: agent\nrev: {n[0]}\n")
+        return real_open(dir_fd)
+
+    monkeypatch.setattr(hp, "_open_config_nofollow", churn)
+    report = hp.wire_named_profiles(home)
+    assert report["errors"] == {"coder": "config.yaml kept changing during the sweep"}
+
+
+def test_wire_named_profiles_refuses_to_stamp_a_renamed_profile(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Codex P2: a sweep that opened ``alpha`` must not write hermes__alpha into ``beta``."""
+    monkeypatch.setattr("hal0.service_identity.service_key", lambda prefer=None: None)
+    home = _profiles(tmp_path, alpha="model:\n  default: agent\n")
+    monkeypatch.setattr(hp, "_same_inode", lambda root_fd, name, dir_fd: False)
+    report = hp.wire_named_profiles(home)
+    assert report["errors"] == {"alpha": "profile renamed during the sweep"}
+    assert "mcp_servers" not in (home / "profiles" / "alpha" / "config.yaml").read_text()
+
+
+def test_profile_lock_created_by_root_is_owned_like_the_directory(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Codex P2: a root pass must not leave a lock the hal0-api sweeps cannot open."""
+    import os
+
+    d = tmp_path / "coder"
+    d.mkdir()
+    dir_fd = os.open(d, os.O_RDONLY | os.O_DIRECTORY)
+    real_fstat = os.fstat
+    fake_dir = os.stat_result((0o40700, 1, 1, 1, 4242, 4343, 0, 0, 0, 0))
+    chowned: list[tuple] = []
+    monkeypatch.setattr(hp.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(hp.os, "fstat", lambda fd: fake_dir if fd == dir_fd else real_fstat(fd))
+    monkeypatch.setattr(hp.os, "fchown", lambda fd, uid, gid: chowned.append((uid, gid)))
+    try:
+        with hp._profile_lock(dir_fd):
+            pass
+    finally:
+        os.close(dir_fd)
+    assert chowned == [(4242, 4343)]
+    assert (d / ".config.yaml.lock").exists()

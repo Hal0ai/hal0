@@ -1352,22 +1352,22 @@ def check_hermes_profiles_mcp(
     wired: list[str] = []
     for name in names:
         cfg = root / "profiles" / name / "config.yaml"
+        # Opened once, without following links or blocking on a FIFO, checked
+        # with fstat and read from that same descriptor, as the writer does.
         try:
-            st = os.lstat(cfg)
+            fd = os.open(cfg, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
         except FileNotFoundError:
             no_config.append(name)  # the writer skips it too: Hermes owns creation
             continue
         except OSError:
             unreadable.append(name)
             continue
-        if not stat.S_ISREG(st.st_mode):  # a symlink or a FIFO: the writer refuses it too
-            unreadable.append(name)
-            continue
         try:
-            data = yaml.safe_load(cfg.read_text(encoding="utf-8"))
-        except FileNotFoundError:
-            no_config.append(name)
-            continue
+            with os.fdopen(fd, "rb") as fh:
+                if not stat.S_ISREG(os.fstat(fh.fileno()).st_mode):
+                    unreadable.append(name)
+                    continue
+                data = yaml.safe_load(fh.read().decode("utf-8"))
         except (OSError, UnicodeDecodeError, yaml.YAMLError):
             unreadable.append(name)
             continue

@@ -2242,3 +2242,15 @@ def test_profiles_mcp_reports_a_symlinked_profile_as_unmanaged(tmp_path) -> None
     (home / "profiles" / "linked").symlink_to(real, target_is_directory=True)
     c = da.check_hermes_profiles_mcp(auth={"auth_required": True}, home=home)
     assert c.status == "warn" and "linked are symlinks" in c.detail and "wired" not in c.detail
+
+
+def test_profiles_mcp_reads_configs_through_one_descriptor(tmp_path, monkeypatch) -> None:
+    """Codex P2: no second pathname lookup between the type check and the read."""
+    home = _profiles_home(tmp_path, coder=_WIRED)
+
+    def no_path_read(self, *a, **k):
+        raise AssertionError("read_text must not be used for profile configs")
+
+    monkeypatch.setattr(Path, "read_text", no_path_read)
+    c = da.check_hermes_profiles_mcp(auth={"auth_required": True}, home=home)
+    assert c.status == "pass" and "wired: coder" in c.detail
