@@ -209,3 +209,85 @@ def test_reconcile_upstreams_404_when_not_installed(
     res = client.post("/api/agents/hermes/reconcile-upstreams")
     assert res.status_code == 404
     assert res.json()["error"]["code"] == "agent.not_installed"
+
+
+# ── Codex P2: install/uninstall re-mirror the Hermes upstreams at once ────────
+
+
+def _spy_sync(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, object]]:
+    calls: list[dict[str, object]] = []
+
+    async def fake(registry: object, **kw: object) -> dict[str, object]:
+        calls.append({"registry": registry, **kw})
+        return {"registered": [], "removed": ["hermes"], "keys_written": []}
+
+    monkeypatch.setattr("hal0.agents.hermes_upstreams.sync_hermes_upstreams", fake)
+    return calls
+
+
+def test_uninstall_hermes_reconciles_upstreams_immediately(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class _FakeMgr:
+        def uninstall(self, name: str) -> bool:
+            return True
+
+    monkeypatch.setattr(agents_routes, "_manager", lambda: _FakeMgr())
+    calls = _spy_sync(monkeypatch)
+    client.app.state.upstreams = reg = object()  # type: ignore[attr-defined]
+    client.app.state.upstream_models = cache = {}  # type: ignore[attr-defined]
+    res = client.delete("/api/agents/hermes")
+    assert res.status_code == 200
+    assert calls == [{"registry": reg, "model_cache": cache}]
+
+
+def test_uninstall_hermes_reconciles_even_when_partial(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from hal0.agents.manager import AgentUninstallIncompleteError
+
+    class _FakeMgr:
+        def uninstall(self, name: str) -> bool:
+            raise AgentUninstallIncompleteError(
+                "hermes", had_artifacts=True, residual=[{"path": "y", "reason": "root-owned"}]
+            )
+
+    monkeypatch.setattr(agents_routes, "_manager", lambda: _FakeMgr())
+    calls = _spy_sync(monkeypatch)
+    client.app.state.upstreams = object()  # type: ignore[attr-defined]
+    res = client.delete("/api/agents/hermes")
+    assert res.status_code == 207
+    assert len(calls) == 1
+
+
+def test_uninstall_other_agent_does_not_reconcile(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class _FakeMgr:
+        def uninstall(self, name: str) -> bool:
+            return True
+
+    monkeypatch.setattr(agents_routes, "_manager", lambda: _FakeMgr())
+    calls = _spy_sync(monkeypatch)
+    assert client.delete("/api/agents/not-hermes").status_code in (200, 404)
+    assert calls == []
+
+
+def test_install_hermes_reconciles_upstreams_immediately(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class _Rec:
+        def as_dict(self) -> dict[str, object]:
+            return {"name": "hermes"}
+
+    class _FakeMgr:
+        def install(self, name: str, switch: bool = False) -> _Rec:
+            return _Rec()
+
+    monkeypatch.setattr(agents_routes, "_manager", lambda: _FakeMgr())
+    monkeypatch.setattr(agents_routes, "agent_kind", lambda name: "daemon")
+    calls = _spy_sync(monkeypatch)
+    client.app.state.upstreams = object()  # type: ignore[attr-defined]
+    res = client.post("/api/agents/install", json={"name": "hermes"})
+    assert res.status_code == 200, res.text
+    assert len(calls) == 1

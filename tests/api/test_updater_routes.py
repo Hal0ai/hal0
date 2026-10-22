@@ -1492,7 +1492,7 @@ async def _run_hermes_job(
     for name, value in patches.items():
         monkeypatch.setattr(f"{targets[name]}.{name}", value)
     jobs: dict[str, dict[str, Any]] = {"j": {"id": "j"}}
-    await upd._run_component_job(jobs, "j", "hermes", {}, upstreams="REG")
+    await upd._run_component_job(jobs, "j", "hermes", {}, upstreams="REG", model_cache="CACHE")
     return jobs["j"]
 
 
@@ -1503,8 +1503,8 @@ async def test_hermes_converge_reconciles_upstreams(
 ) -> None:
     seen: list[Any] = []
 
-    async def fake(registry: Any, **_: Any) -> dict[str, Any]:
-        seen.append(registry)
+    async def fake(registry: Any, **kw: Any) -> dict[str, Any]:
+        seen.append((registry, kw.get("model_cache")))
         return {"registered": ["hermes"], "removed": []}
 
     job = await _run_hermes_job(
@@ -1514,7 +1514,7 @@ async def test_hermes_converge_reconciles_upstreams(
         ensure_profile_keys=lambda home: ["work"],
         hermes_home=lambda: "HOME",
     )
-    assert seen == ["REG"]
+    assert seen == [("REG", "CACHE")]
     assert job["state"] == "applied"
     assert job["component_result"]["hermes_upstreams"] == {
         "registered": ["hermes"],

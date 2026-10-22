@@ -971,6 +971,7 @@ async def _run_component_job(
     component_id: str,
     arm_kwargs: dict[str, Any],
     upstreams: Any = None,
+    model_cache: Any = None,
 ) -> None:
     from hal0.components.registry import component_by_id
     from hal0.components.runner import converge_component
@@ -990,7 +991,9 @@ async def _run_component_job(
             try:
                 from hal0.agents.hermes_upstreams import sync_hermes_upstreams
 
-                result["hermes_upstreams"] = await sync_hermes_upstreams(upstreams)
+                result["hermes_upstreams"] = await sync_hermes_upstreams(
+                    upstreams, model_cache=model_cache
+                )
             except Exception as exc:
                 log.warning("updater.hermes_upstreams_failed", error=str(exc))
         job["component_result"] = result
@@ -1069,7 +1072,12 @@ async def converge_component_route(component_id: str, request: Request) -> dict[
     _spawn_update_task(
         request,
         _run_component_job(
-            jobs, job_id, component_id, arm_kwargs, upstreams=request.app.state.upstreams
+            jobs,
+            job_id,
+            component_id,
+            arm_kwargs,
+            upstreams=request.app.state.upstreams,
+            model_cache=getattr(request.app.state, "upstream_models", None),
         ),
     )
     return dict(jobs[job_id])

@@ -415,3 +415,50 @@ def _recording(expected: UpstreamRegistry):
         return {"registered": [], "seen_home": home}
 
     return fake
+
+
+def test_build_hermes_upstream_brackets_ipv6_host() -> None:
+    u = build_hermes_upstream("coder", host="::1", port=8642, owned=("coder",))
+    assert u.url == "http://[::1]:8642/p/coder/v1"
+
+
+async def test_reconcile_evicts_the_models_cache_when_an_owned_id_changes(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Codex P2: a renamed default model must not keep routing on a warm cache."""
+    reg = UpstreamRegistry()
+    _patch_models(monkeypatch, reg, {})
+    env: dict[str, str] = {}
+    cache: dict[str, list[str]] = {}
+    await reconcile_hermes_upstreams(reg, home=home, probe=_probe(), environ=env, model_cache=cache)
+    cache["hermes"] = ["hermes-agent"]
+    cache["hermes.coder"] = ["coder"]
+    # Same entries again: nothing changed, the caches stay warm.
+    await reconcile_hermes_upstreams(reg, home=home, probe=_probe(), environ=env, model_cache=cache)
+    assert cache == {"hermes": ["hermes-agent"], "hermes.coder": ["coder"]}
+    # The default profile's advertised id changes: its cache is evicted.
+    (home / ".env").write_text(f"API_SERVER_KEY={DEFAULT_KEY}\nAPI_SERVER_MODEL_NAME=brain\n")
+    await reconcile_hermes_upstreams(reg, home=home, probe=_probe(), environ=env, model_cache=cache)
+    assert reg.get("hermes").owned_models == ("brain",)  # type: ignore[union-attr]
+    assert cache == {"hermes.coder": ["coder"]}
+    # A removed entry is evicted too.
+    report = await reconcile_hermes_upstreams(
+        reg, home=home, probe=_probe({"coder": 404}), environ=env, model_cache=cache
+    )
+    assert report["removed"] == ["hermes.coder"]
+    assert cache == {}
+
+
+async def test_sync_passes_the_models_cache_through(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen: dict[str, object] = {}
+
+    async def fake(registry: UpstreamRegistry, **kw: object) -> dict[str, object]:
+        seen.update(kw)
+        return {"registered": []}
+
+    monkeypatch.setattr(hermes_upstreams, "reconcile_hermes_upstreams", fake)
+    cache: dict[str, list[str]] = {}
+    await sync_hermes_upstreams(UpstreamRegistry(), home=home, model_cache=cache)
+    assert seen["model_cache"] is cache

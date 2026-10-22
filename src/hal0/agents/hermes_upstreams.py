@@ -37,7 +37,7 @@ def build_hermes_upstream(
     profile: str, *, host: str, port: int, owned: tuple[str, ...]
 ) -> Upstream:
     """The pinned remote :class:`Upstream` for ``profile``."""
-    base = f"http://{host}:{port}"
+    base = "http://" + hermes_api.authority(host, port)
     url = f"{base}/v1" if profile == hermes_api.DEFAULT_PROFILE else f"{base}/p/{profile}/v1"
     return Upstream(
         name=hermes_api.upstream_name_for(profile),
@@ -79,13 +79,17 @@ async def reconcile_hermes_upstreams(
     home: Path | None = None,
     probe: Callable[[str], int] | None = None,
     environ: MutableMapping[str, str] = os.environ,
+    model_cache: MutableMapping[str, list[str]] | None = None,
 ) -> dict[str, Any]:
     """Make the registry's Hermes-managed entries match the keyed profiles.
 
     The registry authenticates from the process environment (``os.environ``),
     so ``environ`` must be ``os.environ`` (the default) for requests to the
     entries to authenticate; any other mapping is only for tests inspecting
-    what was set.
+    what was set. ``model_cache`` is hal0-api's per-upstream models cache
+    (``app.state.upstream_models``): an entry whose url or owned id changed,
+    and a removed entry, are evicted from it, so a model id Hermes no longer
+    advertises cannot keep routing on a warm cache.
     """
     home = home if home is not None else hermes_api.hermes_home()
     host, port = hermes_api.api_server_endpoint(home)
@@ -150,6 +154,12 @@ async def reconcile_hermes_upstreams(
         upstream = build_hermes_upstream(profile, host=host, port=port, owned=(model_id,))
         # Replace in place: a remove-then-add would open a window in which the
         # id has no owner and falls through to the ``agent`` slot.
+        if (
+            model_cache is not None
+            and existing is not None
+            and (existing.url != upstream.url or existing.owned_models != upstream.owned_models)
+        ):
+            model_cache.pop(name, None)
         registry.upsert(upstream)
         registered.append(name)
 
@@ -157,6 +167,8 @@ async def reconcile_hermes_upstreams(
     for u in registry.list():
         if u.managed_by == MANAGED_BY and u.name not in desired:
             registry.remove(u.name)
+            if model_cache is not None:
+                model_cache.pop(u.name, None)
             if u.auth_value_env not in desired.values():
                 environ.pop(u.auth_value_env, None)
             removed.append(u.name)
@@ -175,7 +187,10 @@ async def reconcile_hermes_upstreams(
 
 
 async def sync_hermes_upstreams(
-    registry: UpstreamRegistry, *, home: Path | None = None
+    registry: UpstreamRegistry,
+    *,
+    home: Path | None = None,
+    model_cache: MutableMapping[str, list[str]] | None = None,
 ) -> dict[str, Any]:
     """Key sweep, then reconcile: the entry point every caller shares.
 
@@ -191,5 +206,5 @@ async def sync_hermes_upstreams(
     except Exception as exc:
         log.warning("hermes_upstreams.key_sweep_failed", error=str(exc))
         written = []
-    report = await reconcile_hermes_upstreams(registry, home=home)
+    report = await reconcile_hermes_upstreams(registry, home=home, model_cache=model_cache)
     return {**report, "keys_written": written}

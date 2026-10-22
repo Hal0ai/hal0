@@ -1362,7 +1362,9 @@ async def _boot_hermes_upstreams(app: FastAPI, ctx: BootState) -> None:
     from hal0.agents.hermes_upstreams import sync_hermes_upstreams
 
     try:
-        report = await sync_hermes_upstreams(ctx.upstreams)
+        report = await sync_hermes_upstreams(
+            ctx.upstreams, model_cache=getattr(ctx, "upstream_models", None)
+        )
     except Exception as exc:
         log.warning("api.boot.hermes_upstreams_failed", error=str(exc))
         return
@@ -1375,7 +1377,7 @@ async def _boot_hermes_upstreams(app: FastAPI, ctx: BootState) -> None:
     )
 
 
-async def _hermes_reconcile_loop(registry: Any) -> None:
+async def _hermes_reconcile_loop(registry: Any, model_cache: Any = None) -> None:
     """Re-run the Hermes key sweep + reconcile every ``HERMES_RECONCILE_INTERVAL_S``.
 
     A profile created while hal0-api runs gets its key and its upstream on the
@@ -1387,14 +1389,16 @@ async def _hermes_reconcile_loop(registry: Any) -> None:
     while True:
         await asyncio.sleep(HERMES_RECONCILE_INTERVAL_S)
         try:
-            await hermes_upstreams.sync_hermes_upstreams(registry)
+            await hermes_upstreams.sync_hermes_upstreams(registry, model_cache=model_cache)
         except Exception as exc:
             log.warning("api.hermes_upstreams.periodic_reconcile_failed", error=str(exc))
 
 
 def _start_hermes_reconcile_task(ctx: BootState) -> None:
     """Start the periodic Hermes reconcile; its stop callback goes on ``ctx``."""
-    ctx.hermes_reconcile_task = asyncio.create_task(_hermes_reconcile_loop(ctx.upstreams))
+    ctx.hermes_reconcile_task = asyncio.create_task(
+        _hermes_reconcile_loop(ctx.upstreams, getattr(ctx, "upstream_models", None))
+    )
 
     async def _stop_hermes_reconcile_task() -> None:
         if ctx.hermes_reconcile_task is not None:
