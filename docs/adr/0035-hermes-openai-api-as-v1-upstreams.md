@@ -228,7 +228,9 @@ line above disagree.
    pipeline (phase `profile_mcp_wire`) and in every hal0-api sweep (decision
    7), and Hermes re-reads a profile's `mcp_servers` on its own 60 s
    reconcile, so a new profile has its tools without a restart. A profile opts
-   out with `hal0: {wire_mcp: false}`. `hal0 doctor` has a
+   out with `hal0: {wire_mcp: false}`, which means hands off: hal0 neither
+   adds nor removes entries there, and revoking tools already wired is the
+   operator's edit, which the doctor row prompts for. `hal0 doctor` has a
    `hermes_profiles_mcp` row for it and a `hermes_generation` row that warns
    when a committed pm generation lacks extras the release has, the drift
    that first hid the tools.

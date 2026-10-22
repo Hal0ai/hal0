@@ -89,8 +89,11 @@ client of hal0.
   identity with a private memory bank, and keeps whatever else the profile
   configures. A profile you create later gets them within two minutes. To
   keep hal0 out of a profile, put `hal0: {wire_mcp: false}` in its
-  `config.yaml`. `hal0 doctor` reports the wiring on its `hermes_profiles_mcp`
-  row.
+  `config.yaml`: hal0 then neither adds nor removes anything there, so to
+  revoke the tools from a profile that already has them, delete the
+  `hal0-admin` and `hal0-memory` entries yourself. `hal0 doctor` reports the
+  wiring on its `hermes_profiles_mcp` row, including what an opted-out
+  profile still carries.
 - **Approvals** for gated hal0-admin tools land in the hal0 dashboard inbox,
   as they do from any other Hermes channel. The turn does not wait on them.
 - **History** is resent by Open WebUI on every turn; hal0 holds no Hermes

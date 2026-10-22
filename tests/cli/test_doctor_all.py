@@ -2023,6 +2023,34 @@ def test_profiles_mcp_reports_opt_out(tmp_path) -> None:
     c = da.check_hermes_profiles_mcp(auth={"auth_required": True}, home=home)
     assert c.status == "pass"
     assert "wired: coder" in c.detail and "opted out: lab" in c.detail
+    # Codex: an opt-out added after wiring leaves the entries; the row says so.
+    home2 = _profiles_home(tmp_path / "b", lab="hal0:\n  wire_mcp: false\n" + _WIRED)
+    c2 = da.check_hermes_profiles_mcp(auth={"auth_required": True}, home=home2)
+    assert "opted out: lab (still carries hal0-admin, hal0-memory)" in c2.detail
+
+
+def test_profiles_mcp_warns_when_enumeration_fails(tmp_path, monkeypatch) -> None:
+    home = _profiles_home(tmp_path, coder=_WIRED)
+    real = Path.iterdir
+
+    def boom(self):
+        if self == home / "profiles":
+            raise OSError("io error")
+        return real(self)
+
+    monkeypatch.setattr(Path, "iterdir", boom)
+    c = da.check_hermes_profiles_mcp(auth={"auth_required": True}, home=home)
+    assert c.status == "warn" and "cannot list" in c.detail
+
+
+def test_generation_extras_warns_on_unreadable_release_metadata(tmp_path, monkeypatch) -> None:
+    from hal0.agents import hermes_release as rel
+
+    home, venv, root = _release_layout(tmp_path, ["web", "mcp"])
+    (root / "releases" / "abc-1" / "release.json").write_text("{not json")
+    monkeypatch.setattr(rel, "release_root_for", lambda _v: root)
+    c = da.check_hermes_generation_extras(home=home, venv=venv)
+    assert c.status == "warn" and "release.json cannot be read" in c.detail
 
 
 def _release_layout(tmp_path, extras, *, generation_extras=None):

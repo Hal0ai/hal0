@@ -1314,9 +1314,13 @@ def check_hermes_profiles_mcp(
         return Check(key, label, _WARN, unreadable_msg)
     if os.path.lexists(profiles) and not os.access(profiles, os.R_OK | os.X_OK):
         return Check(key, label, _WARN, unreadable_msg)
-    names = [
-        n for n in ha.profile_dirs(root) if n != "hal0-brain" and hp.HERMES_PROFILE_ID_RE.match(n)
-    ]
+    try:
+        entries = sorted(p.name for p in profiles.iterdir() if p.is_dir())
+    except FileNotFoundError:
+        entries = []
+    except OSError as exc:  # enumeration itself failed: never a green "no profiles"
+        return Check(key, label, _WARN, f"cannot list {profiles}: {exc}")
+    names = [n for n in entries if n != "hal0-brain" and hp.HERMES_PROFILE_ID_RE.match(n)]
     if not names:
         return Check(key, label, _PASS, "no named Hermes profiles")
     auth_required = bool((auth or {}).get("auth_required"))
@@ -1345,12 +1349,15 @@ def check_hermes_profiles_mcp(
         if not isinstance(data, dict):  # ``[]`` / ``false``: the writer refuses these too
             unreadable.append(name)
             continue
-        block = data.get("hal0")
-        if isinstance(block, dict) and block.get(PROFILE_MCP_OPT_OUT_KEY) is False:
-            opted_out.append(name)
-            continue
         servers = data.get("mcp_servers")
         servers = servers if isinstance(servers, dict) else {}
+        block = data.get("hal0")
+        if isinstance(block, dict) and block.get(PROFILE_MCP_OPT_OUT_KEY) is False:
+            # Opt-out means hands off: hal0 neither adds nor removes. Say what
+            # the profile still carries, so a revoke is a deliberate hand edit.
+            kept = [n for n in ("hal0-admin", "hal0-memory") if isinstance(servers.get(n), dict)]
+            opted_out.append(f"{name} (still carries {', '.join(kept)})" if kept else name)
+            continue
         missing = [n for n in ("hal0-admin", "hal0-memory") if not isinstance(servers.get(n), dict)]
         if missing:
             unwired.append(name)
@@ -1456,6 +1463,14 @@ def check_hermes_generation_extras(*, home: Path | None = None, venv: Path | Non
     except OSError:
         release = None
     if release is None:
+        if rel._link_release_id(layout.current):
+            return Check(
+                key,
+                label,
+                _WARN,
+                f"{layout.current} names a release whose release.json cannot be read; "
+                "run sudo hal0 agent reprovision hermes --repair",
+            )
         return Check(key, label, _PASS, "no live Hermes release")
     # ``committed_generation`` answers None for an unreadable install state too;
     # across a 0700 home that is not proof that no generation is committed.
