@@ -44,8 +44,6 @@ import structlog
 from fastapi import APIRouter, Request
 
 from hal0 import __version__
-from hal0.agents.hermes_api import ensure_profile_keys, hermes_home
-from hal0.agents.hermes_upstreams import reconcile_hermes_upstreams
 from hal0.api.middleware.error_codes import BadRequest, Hal0Error
 from hal0.config import paths
 from hal0.config.loader import hal0_config_txn, load_hal0_config
@@ -990,6 +988,9 @@ async def _run_component_job(
     else:
         if component_id == "hermes" and result.get("status") in {"converged", "stale"}:
             try:
+                from hal0.agents.hermes_api import ensure_profile_keys, hermes_home
+                from hal0.agents.hermes_upstreams import reconcile_hermes_upstreams
+
                 keys_written = await asyncio.to_thread(ensure_profile_keys, hermes_home())
                 report = await reconcile_hermes_upstreams(upstreams)
                 result["hermes_upstreams"] = {**report, "keys_written": keys_written}

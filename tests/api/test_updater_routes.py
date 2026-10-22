@@ -1484,8 +1484,13 @@ async def _run_hermes_job(
     monkeypatch.setattr(creg, "component_by_id", lambda cid: object())
     monkeypatch.setattr(crun, "converge_component", lambda comp, **kw: {"status": status})
     monkeypatch.setattr(upd, "_persist_job", lambda job: None)
+    targets = {
+        "reconcile_hermes_upstreams": "hal0.agents.hermes_upstreams",
+        "ensure_profile_keys": "hal0.agents.hermes_api",
+        "hermes_home": "hal0.agents.hermes_api",
+    }
     for name, value in patches.items():
-        monkeypatch.setattr(upd, name, value)
+        monkeypatch.setattr(f"{targets[name]}.{name}", value)
     jobs: dict[str, dict[str, Any]] = {"j": {"id": "j"}}
     await upd._run_component_job(jobs, "j", "hermes", {}, upstreams="REG")
     return jobs["j"]

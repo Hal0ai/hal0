@@ -22,7 +22,6 @@ from fastapi import FastAPI
 
 from hal0 import __version__
 from hal0.activity import AuditStore
-from hal0.agents.hermes_upstreams import reconcile_hermes_upstreams
 from hal0.api.agents import (
     command_approvals as agents_command_approvals_routes,
 )
@@ -1347,6 +1346,8 @@ async def _boot_slot_manager(app: FastAPI, ctx: BootState) -> None:
 
 async def _boot_hermes_upstreams(app: FastAPI, ctx: BootState) -> None:
     """Phase — mirror Hermes gateway profiles into the upstream registry (non-fatal)."""
+    from hal0.agents.hermes_upstreams import reconcile_hermes_upstreams
+
     try:
         report = await reconcile_hermes_upstreams(ctx.upstreams)
     except Exception as exc:

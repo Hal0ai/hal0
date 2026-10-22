@@ -32,7 +32,6 @@ from hal0.agents import (
     AgentUninstallIncompleteError,
     HermesNotHal0AwareError,
 )
-from hal0.agents.hermes_upstreams import reconcile_hermes_upstreams
 from hal0.agents.manager import BUNDLED_AGENTS, agent_kind
 from hal0.agents.persona import AGENT_SKILLS, PERSONA_TONES, PERSONA_TOOLS
 from hal0.api.agents import restart as agent_restart
@@ -196,6 +195,8 @@ async def install_agent(body: dict[str, object]) -> dict[str, object]:
 @router.post("/hermes/reconcile-upstreams")
 async def reconcile_hermes_upstreams_route(request: Request) -> dict[str, object]:
     """Re-mirror the Hermes gateway's profiles into the upstream registry."""
+    from hal0.agents.hermes_upstreams import reconcile_hermes_upstreams
+
     if "hermes" not in _manager().installed_names():
         raise NotFound("hermes agent is not installed", code="agent.not_installed")
     report = await reconcile_hermes_upstreams(request.app.state.upstreams)

@@ -187,7 +187,7 @@ def test_reconcile_upstreams_route_returns_report(
             return ["hermes"]
 
     monkeypatch.setattr(agents_routes, "_manager", lambda: _Mgr())
-    monkeypatch.setattr(agents_routes, "reconcile_hermes_upstreams", fake)
+    monkeypatch.setattr("hal0.agents.hermes_upstreams.reconcile_hermes_upstreams", fake)
     client.app.state.upstreams = sentinel = object()  # type: ignore[attr-defined]
 
     res = client.post("/api/agents/hermes/reconcile-upstreams")
