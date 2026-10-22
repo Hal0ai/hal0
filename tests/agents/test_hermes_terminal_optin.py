@@ -789,18 +789,27 @@ def test_opting_in_later_replaces_the_sentinel_with_local(
     assert doc["terminal"]["cwd"] == str(home / "scratch")
 
 
-def test_off_leaves_an_operator_moved_backend_alone(
+def test_off_gates_an_operator_moved_backend_and_remembers_it(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A docker/ssh backend is the operator's narrower boundary; hal0 keeps the
-    toolset subtraction and does not overwrite their backend with the sentinel."""
+    """Off means off for every backend (#2878 review): a docker/ssh backend is set
+    aside under hal0.terminal_backend_saved and the sentinel takes its place;
+    opting in puts the operator's backend back and clears the memory."""
     monkeypatch.setenv(hp.HERMES_TERMINAL_ENV, "0")
     home = tmp_path / "hh"
     home.mkdir()
     (home / "config.yaml").write_text("terminal:\n  backend: ssh\n  ssh_host: h\n")
     _out, doc = _run_config_write(tmp_path, monkeypatch, home=home)
-    assert doc["terminal"]["backend"] == "ssh"
+    assert doc["terminal"]["backend"] == hp.TERMINAL_OFF_BACKEND
+    assert doc["terminal"]["ssh_host"] == "h"
+    assert doc["hal0"][hp.TERMINAL_SAVED_BACKEND_KEY] == "ssh"
     assert _terminal_is_off(doc), doc
+    monkeypatch.setenv(hp.HERMES_TERMINAL_ENV, "1")
+    out, doc = _run_config_write(tmp_path, monkeypatch, home=home)
+    assert out.details["terminal_tool"] == "on"
+    assert doc["terminal"]["backend"] == "ssh"
+    assert "cwd" not in doc["terminal"]
+    assert doc["hal0"][hp.TERMINAL_SAVED_BACKEND_KEY] == ""
 
 
 def test_sentinel_backend_reads_as_off_not_as_an_operator_choice() -> None:
@@ -809,21 +818,28 @@ def test_sentinel_backend_reads_as_off_not_as_an_operator_choice() -> None:
 
 
 def test_profile_terminal_keys_follow_the_recorded_decision() -> None:
-    off = hp._terminal_profile_keys({}, terminal_enabled=False)
-    assert off == {"terminal": {"backend": hp.TERMINAL_OFF_BACKEND}}
+    S, K = hp.TERMINAL_OFF_BACKEND, hp.TERMINAL_SAVED_BACKEND_KEY
+    assert hp._terminal_profile_keys({}, terminal_enabled=False) == {"terminal": {"backend": S}}
     assert hp._terminal_profile_keys(
         {"terminal": {"backend": "local"}}, terminal_enabled=False
-    ) == {"terminal": {"backend": hp.TERMINAL_OFF_BACKEND}}
-    # an operator's docker/ssh backend is never overwritten
-    assert hp._terminal_profile_keys({"terminal": {"backend": "ssh"}}, terminal_enabled=False) == {}
-    # opting in takes the sentinel back out, and only the sentinel
+    ) == {"terminal": {"backend": S}}
+    # off means off for every backend; the operator's is remembered
+    assert hp._terminal_profile_keys({"terminal": {"backend": "ssh"}}, terminal_enabled=False) == {
+        "terminal": {"backend": S},
+        "hal0": {K: "ssh"},
+    }
+    assert hp._terminal_profile_keys({"terminal": {"backend": S}}, terminal_enabled=False) == {}
+    # opting in takes only the sentinel out, restoring what was remembered
+    assert hp._terminal_profile_keys({"terminal": {"backend": S}}, terminal_enabled=True) == {
+        "terminal": {"backend": "local"}
+    }
     assert hp._terminal_profile_keys(
-        {"terminal": {"backend": hp.TERMINAL_OFF_BACKEND}}, terminal_enabled=True
-    ) == {"terminal": {"backend": "local"}}
+        {"terminal": {"backend": S}, "hal0": {K: "docker"}}, terminal_enabled=True
+    ) == {"terminal": {"backend": "docker"}, "hal0": {K: ""}}
     assert (
         hp._terminal_profile_keys({"terminal": {"backend": "docker"}}, terminal_enabled=True) == {}
     )
-    # no recorded decision: a hal0-api reconcile must not flip a box either way
+    # no decision: a hal0-api reconcile must not flip a box either way
     assert hp._terminal_profile_keys({}, terminal_enabled=None) == {}
 
 
@@ -838,16 +854,83 @@ def test_wire_named_profiles_gates_clones_when_the_terminal_is_off(
         (home / "profiles" / name).mkdir(parents=True)
     (home / "profiles" / "coder" / "config.yaml").write_text("model:\n  default: a\n")
     (home / "profiles" / "lab" / "config.yaml").write_text("terminal:\n  backend: docker\n")
-    monkeypatch.setattr(hp, "read_terminal_state", lambda: False)
-    hp.wire_named_profiles(home)
+    hp.wire_named_profiles(home, terminal_enabled=False)
     coder = yaml.safe_load((home / "profiles" / "coder" / "config.yaml").read_text())
     lab = yaml.safe_load((home / "profiles" / "lab" / "config.yaml").read_text())
     assert coder["terminal"]["backend"] == hp.TERMINAL_OFF_BACKEND
-    assert lab["terminal"]["backend"] == "docker"
-    monkeypatch.setattr(hp, "read_terminal_state", lambda: True)
-    hp.wire_named_profiles(home)
+    assert lab["terminal"]["backend"] == hp.TERMINAL_OFF_BACKEND
+    assert lab["hal0"][hp.TERMINAL_SAVED_BACKEND_KEY] == "docker"
+    hp.wire_named_profiles(home, terminal_enabled=True)
     coder = yaml.safe_load((home / "profiles" / "coder" / "config.yaml").read_text())
+    lab = yaml.safe_load((home / "profiles" / "lab" / "config.yaml").read_text())
     assert coder["terminal"]["backend"] == "local"
+    assert lab["terminal"]["backend"] == "docker"
+
+
+def test_wire_named_profiles_reads_the_marker_only_without_an_applied_decision(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A provisioning run passes the decision it applied; a hal0-api reconcile
+    has none and falls back to the recorded marker (#2878 review)."""
+    import yaml
+
+    monkeypatch.setattr("hal0.service_identity.service_key", lambda prefer=None: "svc-key")
+    home = tmp_path / "hh"
+    (home / "profiles" / "coder").mkdir(parents=True)
+    (home / "profiles" / "coder" / "config.yaml").write_text("model:\n  default: a\n")
+    monkeypatch.setattr(hp, "read_terminal_state", lambda: True)  # a stale root-owned marker
+    hp.wire_named_profiles(home, terminal_enabled=False)  # what config_write applied
+    doc = yaml.safe_load((home / "profiles" / "coder" / "config.yaml").read_text())
+    assert doc["terminal"]["backend"] == hp.TERMINAL_OFF_BACKEND
+    hp.wire_named_profiles(home)  # reconcile: marker says on
+    doc = yaml.safe_load((home / "profiles" / "coder" / "config.yaml").read_text())
+    assert doc["terminal"]["backend"] == "local"
+
+
+def test_profile_wire_phase_fails_when_an_off_box_cannot_gate_a_profile(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        hp,
+        "wire_named_profiles",
+        lambda home, terminal_enabled=None: {
+            "wired": [],
+            "changed": [],
+            "skipped": {},
+            "errors": {"coder": "config.yaml is a symlink"},
+        },
+    )
+    state = hp.BootstrapState(hermes_home=str(tmp_path), terminal_enabled=False)
+    out = hp._phase_profile_mcp_wire(hp._StepCtx(state=state, io=hp.InstallIO()))
+    assert out.status == hp.PhaseStatus.FAIL
+    assert out.reason is not None and "terminal gate" in out.reason and "coder" in out.reason
+    state.terminal_enabled = True
+    out = hp._phase_profile_mcp_wire(hp._StepCtx(state=state, io=hp.InstallIO()))
+    assert out.status == hp.PhaseStatus.OK and out.reason is not None
+
+
+def test_update_path_carries_the_terminal_gate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``hal0 update`` never runs the overlay; the release invariants apply the gate."""
+    import yaml
+
+    home = tmp_path / "hh"
+    home.mkdir()
+    (home / "config.yaml").write_text(
+        "agent:\n  system_prompt: keep\nterminal:\n  backend: local\n  cwd: /x\n"
+    )
+    monkeypatch.setattr(hp, "read_terminal_state", lambda: False)
+    assert hp.apply_release_config_invariants(home, overrides_path=tmp_path / "none.yaml") is True
+    doc = yaml.safe_load((home / "config.yaml").read_text())
+    assert doc["terminal"]["backend"] == hp.TERMINAL_OFF_BACKEND
+    assert doc["terminal"]["cwd"] == "/x"
+    monkeypatch.setattr(hp, "read_terminal_state", lambda: None)
+    assert hp.apply_release_config_invariants(home, overrides_path=tmp_path / "none.yaml") is False
+    monkeypatch.setattr(hp, "read_terminal_state", lambda: True)
+    assert hp.apply_release_config_invariants(home, overrides_path=tmp_path / "none.yaml") is True
+    doc = yaml.safe_load((home / "config.yaml").read_text())
+    assert doc["terminal"]["backend"] == "local"
 
 
 def test_a_lost_sentinel_fails_the_config_write_phase(
@@ -902,3 +985,4 @@ def test_wire_named_profiles_gates_an_mcp_opted_out_profile_too(
     assert doc["terminal"]["backend"] == hp.TERMINAL_OFF_BACKEND
     assert "mcp_servers" not in doc and "memory" not in doc
     assert report["skipped"].get("quiet") == "opted out"
+    assert report["changed"] == ["quiet"]

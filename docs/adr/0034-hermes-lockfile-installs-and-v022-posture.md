@@ -342,8 +342,13 @@ Everything else in this record stands.
   (`hermes_provision.TERMINAL_OFF_BACKEND`) next to the subtraction, in the
   root config and in every profile hal0 wires (a served profile gets its own
   `terminal:` section through `install_and_reset_profile_terminal_scope`,
-  `gateway/run.py:1829`). Opting in replaces the sentinel with `local`; an
-  operator's docker/ssh backend is never overwritten. Hermes logs the rejection
+  `gateway/run.py:1829`). Off means off for every backend: an operator's
+  docker/ssh value is set aside under `hal0.terminal_backend_saved` and put
+  back when the operator opts in; with nothing saved, opting in restores
+  `local`. The provisioner reads the sentinel back from the file it wrote and
+  fails the phase when it is missing, fails the profile sweep when a profile
+  could not take it, and `hal0 update` applies it through the release config
+  invariants, so an existing box gets it without a reprovision. Hermes logs the rejection
   at ERROR, `Unknown TERMINAL_ENV 'hal0-terminal-off' …`, TTL-cached 30 s: the
   price of a gate upstream gives no switch for, and the name says who set it.
   `approvals.mode` still gates dangerous commands on a terminal-on box.
