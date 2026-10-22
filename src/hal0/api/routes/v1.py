@@ -470,7 +470,9 @@ def _is_remote_model(request: Request, model_id: str) -> bool:
             # not genuine external providers, so the thinking policy must apply.
             if getattr(u, "slot_name", None):
                 continue
-            if getattr(u, "kind", "") == "remote" and model_id in set(cache.get(u.name, [])):
+            if getattr(u, "kind", "") != "remote":
+                continue
+            if model_id in set(cache.get(u.name, [])) or model_id in getattr(u, "owned_models", ()):
                 return True
     except Exception:  # pragma: no cover — defensive
         return False

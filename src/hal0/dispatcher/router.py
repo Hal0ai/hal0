@@ -7,6 +7,10 @@ dispatch error and leaves slot management to the caller.
 
 Resolution order (PLAN.md §3, ported from haloai ``lib/dispatcher.py``):
 
+  0. **pinned** — an id owned by a ``pinned`` upstream (``owned_models`` or
+     its models cache) goes to that upstream or fails with
+     :class:`UpstreamUnavailable`; it never falls through to another lane.
+     Runs after the container-slot preemption and before the registry.
   1. **registry** — exact :class:`ModelRegistry` binding for the requested
      model id (or path-default for ``/embeddings``, ``/rerank``, and ``/rerankings``).  If
      the bound upstream is online, forward there.
@@ -657,6 +661,18 @@ class Dispatcher:
             raise
         return call
 
+    def _pinned_owner(self, model_id: str) -> Upstream | None:
+        """First enabled pinned upstream owning ``model_id`` (owned or cached)."""
+        for upstream in self._upstreams.list():
+            if (
+                not getattr(upstream, "pinned", False)
+                or getattr(upstream, "enabled", True) is False
+            ):
+                continue
+            if model_id in upstream.owned_models or model_id in self._cached_models(upstream.name):
+                return upstream
+        return None
+
     async def _resolve(
         self,
         request: Request,
@@ -709,6 +725,46 @@ class Dispatcher:
                 )
                 self._log_decision(call, t0, cache_state="warm")
                 return call
+
+        # ── Step 0b: pinned upstream ownership ───────────────────────────
+        # A pinned upstream owns its ``owned_models`` ids (plus whatever its
+        # cache holds): route there or fail loudly, never fall through to the
+        # registry / capability ladder (which would land on the agent slot).
+        owner = self._pinned_owner(model_id)
+        if owner is not None:
+            cache_state = "warm"
+            if model_id not in self._cached_models(owner.name):
+                try:
+                    await self._fetch_models(owner)
+                except Exception as exc:  # TIER1 — log, then fail below
+                    log.warning(
+                        "dispatch.pinned_fetch_failed",
+                        upstream=owner.name,
+                        model=model_id,
+                        error=str(exc),
+                    )
+                cache_state = "fetched"
+            if model_id not in self._cached_models(owner.name):
+                raise UpstreamUnavailable(
+                    f"model {model_id!r} is served only by upstream {owner.name!r}, "
+                    "which is offline",
+                    details={"model": model_id, "upstream": owner.name},
+                )
+            call = UpstreamCall(
+                upstream_name=owner.name,
+                target_url=_resolve_target_url(owner, path),
+                headers=self._build_headers(request, owner),
+                body=_remap_model(body, model_id),
+                streaming=streaming,
+                method=method,
+                resolved_model=model_id,
+                requested_model=original_model,
+                resolution_path=f"pinned:{owner.name}",
+                slot_name=_slot_name_of(owner),
+                container_slot_name=_container_slot_name_of(owner),
+            )
+            self._log_decision(call, t0, cache_state=cache_state)
+            return call
 
         # ── Step 1: registry lookup ──────────────────────────────────────
         registry_entry = self._registry_route_for(model_id)
