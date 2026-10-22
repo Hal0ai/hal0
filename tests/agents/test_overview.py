@@ -186,6 +186,34 @@ def test_unknown_gateway_state_is_not_a_fault():
     assert out == []
 
 
+def test_doctor_drift_fires_on_any_not_ok_row():
+    warn_only = degraded_reasons(
+        **{**BASE, "doctor": [{"id": "plugins", "status": "warn", "detail": "trees differ"}]}
+    )
+    assert warn_only == [
+        {
+            "reason": "doctor_drift",
+            "detail": "plugins: trees differ",
+            "fix": "repair",
+            "command": None,
+        }
+    ]
+
+    mixed = degraded_reasons(
+        **{
+            **BASE,
+            "doctor": [
+                {"id": "interpreter", "status": "absent", "detail": "no Hermes venv"},
+                {"id": "ownership", "status": "fail", "detail": "HERMES_HOME tree: root:root"},
+            ],
+        }
+    )
+    assert len(mixed) == 1 and mixed[0]["reason"] == "doctor_drift"
+    assert mixed[0]["fix"] == "cli"
+    assert mixed[0]["command"] == "sudo hal0 agent bootstrap hermes --repair"
+    assert mixed[0]["detail"] == "ownership: HERMES_HOME tree: root:root"
+
+
 def test_non_ownership_doctor_failure_offers_repair():
     out = degraded_reasons(
         **{**BASE, "doctor": [{"id": "gateway_unit", "status": "fail", "detail": "stale"}]}

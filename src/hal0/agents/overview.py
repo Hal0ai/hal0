@@ -211,7 +211,10 @@ def degraded_reasons(
     ``unknown`` means the probe could not answer, which is not evidence of a
     fault. ``api_unhealthy`` needs an active gateway (the API server runs
     inside it, and an inactive gateway already produced ``gateway_down``).
-    ``in_sync`` of ``None`` (Hermes not provisioned) is not drift.
+    ``doctor_drift`` is one reason covering every doctor row whose status is
+    not ``ok`` or ``absent``; its fix is the root CLI command when the
+    ``ownership`` row contributes (hal0 cannot ``chown`` its own tree), else
+    ``repair``. ``in_sync`` of ``None`` (Hermes not provisioned) is not drift.
     """
     reasons: list[dict[str, Any]] = []
     gateway = units.get("gateway")
@@ -243,11 +246,10 @@ def degraded_reasons(
             _reason("provision_warn", "the last provision run recorded warnings", "none")
         )
 
-    for row in doctor:
-        if row.get("status") != "fail":
-            continue
-        detail = f"{row['id']}: {row['detail']}"
-        if row["id"] == "ownership":
+    drifted = [row for row in doctor if row.get("status") not in ("ok", "absent")]
+    if drifted:
+        detail = "; ".join(f"{row['id']}: {row['detail']}" for row in drifted)
+        if any(row["id"] == "ownership" for row in drifted):
             reasons.append(_reason("doctor_drift", detail, "cli", _OWNERSHIP_REPAIR_COMMAND))
         else:
             reasons.append(_reason("doctor_drift", detail, "repair"))
