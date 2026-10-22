@@ -331,3 +331,24 @@ async def test_reconcile_skips_profile_whose_env_name_collides(
     assert env[env_key_name("my-profile")] == CODER_KEY
     assert report["env_name_collisions"] == ["my_profile"]
     assert "hermes.my_profile" not in report["registered"]
+
+
+async def test_reconcile_stale_entry_does_not_pop_a_shared_env_var(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    for name in ("my-profile", "my_profile"):
+        (home / "profiles" / name).mkdir()
+    (home / "profiles" / "my-profile" / ".env").write_text(f"API_SERVER_KEY={CODER_KEY}\n")
+    reg = UpstreamRegistry()
+    _patch_models(monkeypatch, reg, {})
+    # Stale entry from an earlier run, sharing the colliding env var.
+    reg.upsert(
+        build_hermes_upstream("my_profile", host="127.0.0.1", port=8642, owned=("my_profile",))
+    )
+    env: dict[str, str] = {}
+    report = await reconcile_hermes_upstreams(
+        reg, home=home, probe=_probe({"my-profile": 200, "my_profile": 404}), environ=env
+    )
+    assert "hermes.my_profile" in report["removed"]
+    assert reg.get("hermes.my-profile") is not None
+    assert env[env_key_name("my-profile")] == CODER_KEY

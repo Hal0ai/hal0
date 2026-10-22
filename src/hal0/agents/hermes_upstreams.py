@@ -141,7 +141,8 @@ async def reconcile_hermes_upstreams(
     for u in registry.list():
         if u.managed_by == MANAGED_BY and u.name not in desired:
             registry.remove(u.name)
-            environ.pop(u.auth_value_env, None)
+            if u.auth_value_env not in desired.values():
+                environ.pop(u.auth_value_env, None)
             removed.append(u.name)
 
     # ``owned_models`` stays the derived id (Ruling 9): the live ``/v1/models``
