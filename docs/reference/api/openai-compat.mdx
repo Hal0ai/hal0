@@ -46,6 +46,7 @@ path strings, not reachable over HTTP):
 - `/v1/audio/translations`
 - `/v1/moderations`
 - `/v1/assistants`, `/v1/threads`, `/v1/files`, `/v1/fine_tuning/*`, `/v1/batches`
+- `/v1/responses` — not available through hal0, including for Hermes models; use `/v1/chat/completions`.
 
 ## Request body deviations from standard OpenAI shape
 
@@ -144,6 +145,10 @@ shape.
 - **`/v1/models` default filtering** — hides non-text-modality models unless
   `?show_all=true` is passed; `GET /v1/models/{id}` bypasses the filter.
 
+## Hermes models
+
+When the Hermes agent is installed, `GET /v1/models` lists `hermes-agent` for the default profile and one model id per additional served profile, next to the slot models. Each profile is a pinned, read-only upstream (`hermes` and `hermes.<profile>`, bearer auth) that hal0 registers at `http://127.0.0.1:8642/v1` and `/p/<profile>/v1`. A request for one of those ids goes to that upstream, streaming or not, and never falls back to a slot: if the upstream is offline or disabled the request fails with `502 dispatch.upstream_unavailable`. An id a Hermes profile owns is listed as Hermes's even when a slot alias has the same name. `X-Hermes-Session-Id` and `X-Hermes-Session-Key` request headers are forwarded to the upstream. `/v1/responses` is not available. See [Open WebUI](/docs/guides/open-webui/#talking-to-hermes).
+
 ## Model → slot resolution
 
 `model` in a request body is **not** used as a raw slot address by default — several
@@ -155,6 +160,9 @@ request type goes through the dispatcher):
    `SlotManager.load()` call so the model loads under its declared backend/device
    before the request is forwarded.
 2. **Dispatcher resolution** (`Dispatcher.dispatch`, all request types), in order:
+
+   A model id in a pinned upstream's `owned_models` (the Hermes profile ids) goes to that upstream or fails with `dispatch.upstream_unavailable`; it never falls through to a slot. This runs after container-slot preemption and before the registry lookup.
+
    1. A loaded container-backed slot that already advertises the model id wins
       outright (health-ordered).
    2. Exact registry lookup (`ModelRegistry.route_for`) — includes a check that falls

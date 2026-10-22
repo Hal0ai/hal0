@@ -40,10 +40,12 @@ hal0-api provisions and talks to over HTTP or MCP, not in-process.
   </Card>
   <Card title="Bundled agent" icon="comment">
     Hermes, a third-party agent runtime hal0 provisions and runs as its own
-    sandboxed `hal0-agent@<id>.service` — the only bundled agent as of v1.0
-    (earlier speculative bundles, pi-coder and opencode, were removed) —
+    sandboxed `hal0-agent@<id>.service` — the only bundled daemon agent (the
+    optional `pi` terminal coding tool is a separate CLI-kind bundle; the
+    earlier speculative bundles pi-coder and opencode were removed) —
     plus **hal0-brain**, a first-class, Hermes-independent platform steward
-    that drives the admin tool surface directly. See
+    that drives the admin tool surface directly. Its profiles are also
+    reachable as models on hal0's `/v1`. See
     [Agents](/docs/concepts/agents).
   </Card>
   <Card title="Front ends" icon="laptop">
@@ -178,7 +180,10 @@ a request went where it did.
    as `agent` or `utility`.
 
 2. The route layer translates a slot alias to the slot's configured model id,
-   then asks the dispatcher to resolve the request to an `UpstreamCall`.
+   then asks the dispatcher to resolve the request to an `UpstreamCall`. The
+   target can also be an external upstream, including the read-only upstreams
+   hal0 registers for each Hermes profile (`hermes`, `hermes.<profile>`); those
+   never fall back to a slot when offline.
 
 3. If the target is a local slot whose model isn't loaded yet, the dispatcher
    kicks a load using the slot's own hardware grid — `device`, `binary`,

@@ -11,6 +11,8 @@ hal0 mounts two [FastMCP](https://github.com/jlowin/fastmcp) (Streamable-HTTP) s
 on the main FastAPI app: `hal0-admin` at `/mcp/admin` and `hal0-memory` at
 `/mcp/memory`.
 
+Every Hermes profile is wired to both servers. hal0 writes `hal0-admin` and `hal0-memory` into each named profile's `config.yaml` as `hermes__<profile>`, with a private memory bank and the box bearer, at provisioning and on every hal0-api reconcile sweep (120 s). A profile opts out with `hal0: {wire_mcp: false}`. `hal0 doctor` reports the state on the `hermes_profiles_mcp` row.
+
 ## `hal0-admin` (`/mcp/admin`)
 
 Every admin tool is registered through one generic factory, so every tool's call

@@ -33,8 +33,16 @@ unreadable to the `hal0` user, so the agent can't read its own credential
 store even though it can write to hal0's data paths.
 
 hal0 pins Hermes to one reviewed upstream release, v0.22.2 (commit
-`d923a5eb`) from hal0 1.6.0, and runs it from its own Python 3.14
-virtualenv. Two Hermes behaviours are set on purpose:
+`d923a5eb`) from hal0 1.6.0. Every build (install, repair, upgrade, and the
+converge pass of `hal0 update`) produces an immutable release under
+`/var/lib/hal0/hermes/releases/<id>/` on a uv-managed Python 3.14, installed
+from upstream's hash-locked `uv.lock` and checked (imports, `hermes --help`, an
+MCP probe) before the `current` link moves. `/var/lib/hal0/venvs/hermes` is a
+symlink to `current/venv`. Activating a release stops the agent and gateway,
+switches, runs `hermes config migrate` and restarts them; if the re-check
+fails, hal0 switches back to the previous release and restores `config.yaml`.
+A release also carries the SDKs for the messaging platforms the box configures
+(Telegram, Discord, Slack and others). Two Hermes behaviours are set on purpose:
 
 - **Session history is kept.** Hermes 0.22 deletes ended sessions after 90
   idle days unless told not to. hal0 writes `sessions.auto_prune: false`, so
@@ -46,7 +54,9 @@ virtualenv. Two Hermes behaviours are set on purpose:
 
 The agent process binds to **loopback only**. Chatting with Hermes happens in
 Hermes's own dashboard (its Chat tab), which the hal0 dashboard links to once
-`HAL0_HERMES_PUBLIC_URL` is set; hal0 does not proxy it. The agent reaches
+`HAL0_HERMES_PUBLIC_URL` is set; hal0 does not proxy it. The old agent chat
+proxy (`/api/agents/{id}/events`, `/submit`, `/session/*`) is gone and those
+paths return 404. The agent reaches
 hal0's own inference and admin surfaces through environment hal0 writes for
 it (the API URL and the admin/memory MCP URLs).
 
@@ -56,6 +66,26 @@ dashboard's session token, which Hermes would otherwise mint fresh at every
 start; hal0 mints one per install and hands it to the dashboard at every
 start, so the pairing survives restarts and `hal0 update`. Read it with
 `hal0 agent dashboard-token hermes`.
+
+### Profiles, Open WebUI and delegation
+
+Each Hermes profile with an API key is also a model on hal0's `/v1`. hal0
+registers one pinned, read-only upstream per profile (`hermes` for the default
+profile, `hermes.<profile>` for the others), so `GET /v1/models` and Open
+WebUI's picker list `hermes-agent` plus one id per profile next to your slot
+models, and any OpenAI-compatible client can chat with them. A Hermes model id
+never falls back to a slot: if its upstream is down, the request fails with
+`dispatch.upstream_unavailable`. See
+[Talking to Hermes](/docs/guides/open-webui#talking-to-hermes).
+
+Every named profile also gets hal0's `hal0-admin` and `hal0-memory` MCP servers
+written into its own `config.yaml`, under the identity `hermes__<profile>`, at provisioning and on every reconcile sweep. Put
+`hal0: {wire_mcp: false}` in a profile's `config.yaml` to opt it out.
+
+Hermes's `delegate_task` children run on the `agent` slot by default. The
+`delegation_slot` key in the `[hermes]` table of `/etc/hal0/agents/hermes.toml`
+moves them to another slot; see
+[Run agents](/docs/guides/run-agents#delegation-slot).
 
 <Aside type="note">
 "Bundle, don't build" is the explicit design stance. hal0 governs and wires

@@ -46,14 +46,14 @@ supported everywhere).
 
 ## What the installer does
 
-1. **Pre-flight checks** — confirms a Python 3.12+ interpreter (auto-installed via `HAL0_PY_AUTOINSTALL=1`), systemd (skipped in `--dev`), x86_64 arch, a container runtime (podman, auto-installed — every inference slot needs one), GPU/NPU device visibility (hard-stops on broken passthrough; a CPU-only box needs explicit opt-in), disk space, and free ports.
+1. **Pre-flight checks** — confirms a Python 3.12 or newer interpreter (tested 3.12-3.14; when the default `python3` is below the floor, the installer looks for `python3.14`, `python3.13` and `python3.12` on PATH and otherwise auto-installs `python3.12` through the package manager on apt/dnf hosts), systemd (skipped in `--dev`), x86_64 arch, a container runtime (podman, auto-installed — every inference slot needs one), GPU/NPU device visibility (hard-stops on broken passthrough; a CPU-only box needs explicit opt-in), disk space, and free ports.
 2. **System user** — creates the dedicated `hal0` system user/group (skipped in `--dev`) and adds it to the host's `render`/`video` groups for GPU device access. `hal0-api` itself runs as this unprivileged user (`User=hal0` in the unit); the few genuinely-root operations it still needs — systemd unit writes, `daemon-reload`, slot start/stop/restart, self-update — route through narrow sudo seams (`hal0-systemctl`, `hal0-update`) installed later in "Systemd units". The slot inference containers (podman) are the sandbox boundary for models.
 3. **Filesystem layout** — code under `/usr/lib/hal0/hal0-<version>` with a `current` symlink and a shared venv (`hal0 update` swaps the symlink atomically); config in `/etc/hal0/`; state in `/var/lib/hal0/{models,registry,slots,openwebui,cache}`. In `--dev` everything lands under `$PWD/.hal0ai/` instead.
 4. **Python environment** — creates the shared venv and `pip install`s the release tree into it (editable in `--dev`), then links `/usr/local/bin/hal0` + `/usr/local/bin/hal0-agent`.
 5. **Node.js toolchain** — auto-provisions a Node.js LTS (`HAL0_NODE_AUTOINSTALL=1`) when the tree ships the dashboard's npm project (`ui/package.json`). Skipped entirely on a signed release tree that ships a prebuilt `ui/dist` (nothing to rebuild) and in `--dev` (install Node manually to exercise the build there).
 6. **Dashboard UI** — runs `npm install && npm run build` in `ui/` when the built assets are missing or stale (tree-hash stamped), or reuses a release's prebuilt `ui/dist` as-is. Skipped (with a warning) when Node/npm is absent or too old — the API still serves; the dashboard just 404s until built.
 7. **Configuration** — writes `/etc/hal0/hal0.toml`, `api.env` (0600), `upstreams.toml`, and `openwebui.env`; validates and persists a supplied HuggingFace token to the root-only `/var/lib/hal0/secrets/hal0-api.env`. `capabilities.toml` ships empty by design — the first-run dashboard renders the bundle picker. Existing files are **never clobbered** on re-run.
-8. **Systemd units** — writes `hal0-api.service`, `hal0.target`, `hal0-openwebui.service`, the podman↔Docker forward-reconciliation unit, and the `hal0-agent@.service` template (+ hermes drop-in, session-state hook, and the `hal0-systemctl` / `hal0-agentenv` / `hal0-benchctl` sudo seams with their sudoers grants), then `systemctl daemon-reload`. Units are written here; `hal0-api` and `hal0-openwebui` aren't enabled/started until the "Service start" step below. Per-slot `hal0-slot@<name>.service` units are managed by hal0 itself when slots are loaded.
+8. **Systemd units** — writes `hal0-api.service`, `hal0.target`, `hal0-openwebui.service`, the podman↔Docker forward-reconciliation unit, and the `hal0-agent@.service` template (+ hermes drop-in, session-state hook, and the `hal0-systemctl` / `hal0-agentenv` / `hal0-benchctl` sudo seams with their sudoers grants), then `systemctl daemon-reload`. The `hal0-update hermes-gateway` verb is what `hal0 update` uses to regenerate the Hermes gateway unit as root. Units are written here; `hal0-api` and `hal0-openwebui` aren't enabled/started until the "Service start" step below. Per-slot `hal0-slot@<name>.service` units are managed by hal0 itself when slots are loaded.
 9. **Container slot seeds** — copies `installer/etc-hal0/slots/{flm,tts,rerank,utility,img,agent,brain,qwen3tts,coder,embed}.toml` into `/etc/hal0/slots/` (never overwriting operator edits, and honoring a `hal0 slot delete` tombstone). Each slot gates on its own runtime validation at load time.
 10. **Hardware probe** — runs `hal0 setup --auto --no-pull --no-extensions` (first-run seeding): scaffolds capability-slot structure with no model picks, writes `/etc/hal0/hardware.json`, and prints the detected backends. Skipped by `HAL0_SKIP_SETUP=1` or `HAL0_NO_PROBE=1`.
 11. **Steward + agent models** — unconditionally pulls the curated brain model and binds it to the `brain` slot, so the dashboard's steward chat works out of the box — the brain models are native tool-callers on the shipped runner, so tool calls work too. Since rc.10 the default is hardware-blind: `lfm2.5-2.6b` (LiquidAI LFM2.5-2.6B-Q8_0, ~2.87 GB, 131k context) is plain Q8_0 GGUF that every llama.cpp runner loads, and the install step discloses the download size first. `HAL0_SKIP_BRAIN_MODEL=1` skips the pull; `HAL0_BRAIN_MODEL=<id>` forces the other curated brain id, `hal0-brain-sft-f16` (plain F16 GGUF). Then, only on an interactive terminal, an **opt-in** offer for a larger agent model (`qwen3.8-27b`, about 18.5 GB to download and about 25 GB of memory to serve, exact size printed first, default **No**, skipped entirely on non-interactive installs) — it becomes the bigger tool-caller behind the `[brain_chat] tool_model` fallback (default `hal0/agent`); `HAL0_PULL_AGENT_MODEL=1` opts in unattended, `=0` force-skips even on a TTY, `HAL0_AGENT_MODEL=<id>` names the model explicitly (the only known id is `qwen3.8-27b`). Both pulls are fail-soft — a decline or failure never fails the install.
@@ -61,14 +61,14 @@ supported everywhere).
 13. **ComfyUI model share** — creates the `models`/`output`/`input`/`user`/`custom_nodes` share directories the `img` slot container bind-mounts, and seeds custom nodes + `extra_model_paths.yaml` (never overwriting an existing copy). Skip with `HAL0_SKIP_COMFYUI=1`; a squashed/read-only mount here warns rather than aborts.
 14. **Bundle picker manifests** — copies the five first-run bundle manifests (hal0-Lite / hal0-Default / hal0-Pro / hal0-Max + LMX-Omni-52B-Halo) into `/var/lib/hal0/models/collections/omni/`, so the dashboard's bundle picker works from a packaged install and not just a source checkout.
 15. **Bundled agent skills** — ships hal0's own agent skills to `/usr/share/hal0/skills` (read-only source) and creates a writable drop-in at `/var/lib/hal0/skills`; the Hermes provisioning step below mirrors both into `/etc/hal0/agent-skills` so a fresh agent starts with the bundled skills already loaded.
-16. **Service start** — applies the `doctor perms --fix` ownership backstop, then (unless `--dev` or `--no-start`) enables and starts `hal0-api` + `hal0.target`, stands up the Hindsight memory engine (`HAL0_SKIP_HINDSIGHT=1` to skip), starts OpenWebUI (`HAL0_SKIP_OPENWEBUI=1`) and the podman-forward unit when Docker is co-installed, and provisions the bundled Hermes agent (`HAL0_SKIP_HERMES=1`). `--no-start` sets up everything but leaves services stopped — start manually with `hal0 serve`.
+16. **Service start** — applies the `doctor perms --fix` ownership backstop, then (unless `--dev` or `--no-start`) enables and starts `hal0-api` + `hal0.target`, waits up to 60 s for `/api/health` before the post-install probes (a slow start warns, it never aborts), stands up the Hindsight memory engine (`HAL0_SKIP_HINDSIGHT=1` to skip) (Python 3.11-3.14; with no usable interpreter the engine is skipped for that run, set `HAL0_HINDSIGHT_PYTHON`), starts OpenWebUI (`HAL0_SKIP_OPENWEBUI=1`) and the podman-forward unit when Docker is co-installed, and provisions the bundled Hermes agent (`HAL0_SKIP_HERMES=1`): git checkout of the pinned v0.22.2 commit into a release under `/var/lib/hal0/hermes/releases/`, built with uv on a managed Python 3.14 (needs network and `git`). A `hermes-gateway` or `hal0-bench` unit you disabled or masked is left off on re-run, with the `systemctl enable --now` command printed. `--no-start` sets up everything but leaves services stopped — start manually with `hal0 serve`.
 
 The installer is **idempotent** — safe to re-run after a partial failure or to update configuration defaults.
 
 ### Container runtime
 
 Each enabled slot runs one podman container built from a **profile** —
-a named (image, flags, mtp) template in `/etc/hal0/profiles.toml`
+a named flags template (device-agnostic; speculation mode, vision, context size) in `/etc/hal0/profiles.toml`
 (seeded from `installer/etc-hal0/profiles.toml`; hal0-api falls back to
 the built-in seed profiles when the file is absent). The slot TOML
 picks a profile via `profile = "<name>"`; per-slot state lives at
@@ -102,8 +102,10 @@ These are the variables `installer/install.sh` actually reads:
 | `HAL0_NO_PROBE` | _(unset)_ | Set to `1` to skip the hardware probe at the end |
 | `HAL0_SKIP_FLM_SHA` | _(unset)_ | Set to `1` to accept an unpinned FastFlowLM `.deb` checksum (placeholder pin only — a real mismatch always refuses) |
 | `HAL0_NONINTERACTIVE` | _(unset)_ | Set to `1` to force flag/env defaults everywhere, skipping the interactive models-dir / HuggingFace-token prompts even on a TTY |
-| `HAL0_PY_AUTOINSTALL` | _(unset)_ | Set to `1` to let the installer auto-install a compatible `python3.12` when the default `python3` is below hal0's floor |
+| `HAL0_PY_AUTOINSTALL` | _(unset)_ | The installer sets this itself when the default `python3` is below hal0's floor (3.12; tested 3.12-3.14) and then installs `python3.12` via apt or dnf. Other distros ship one rolling Python, so install 3.12+ manually and set `HAL0_PYTHON` |
 | `HAL0_SKIP_HINDSIGHT` | _(unset)_ | Set to `1` to skip installing/starting the `hindsight-api` memory service |
+| `HAL0_HINDSIGHT_PYTHON` | _(unset)_ | Interpreter for the Hindsight memory engine's own venv; must be Python 3.11-3.14. When unset, the installer picks `python3.14` down to `python3.11` from PATH, then tries to install one. If none is usable, the install continues and the memory engine is skipped for that run (the error names this variable) |
+| `HAL0_HERMES_PYTHON` | _(unset)_ | Override for the interpreter the Hermes release venv is built on. The resolved value is persisted in `/etc/hal0/hermes-python.env`; an unusable value is discarded with a `hermes-python-discarded` warning |
 | `HF_TOKEN` | _(unset)_ | HuggingFace read token for gated/large model pulls (also accepted as `HUGGING_FACE_HUB_TOKEN`). Pre-fills the interactive prompt (Enter keeps it) and is used directly on a non-interactive run; validated with `hf auth whoami` and persisted 0600 to `/var/lib/hal0/secrets/hal0-api.env` |
 | `HAL0_SKIP_BRAIN_MODEL` | _(unset)_ | Set to `1` to skip the unconditional brain (steward) model pull — the `brain` slot stays model-less |
 | `HAL0_BRAIN_MODEL` | _(unset)_ | Force a specific curated brain quant instead of the hardware-derived pick |
@@ -291,11 +293,11 @@ Two ways to resolve this, depending on what you're trying to do:
 
 The installer prints the same warning block at the end of every `--dev` run as a reminder.
 
-## MTP
+## MTP and speculative decoding
 
 Models with a baked-in multi-token-prediction (MTP) head are served by the
 `standard` runner image, which declares `RunnerSupports(mtp=True)`; the `cuda`
-and `cpu` runners do not support MTP drafting.
+and `cpu` runners do not draft with MTP heads.
 
 Two things compose to launch a slot, and neither is the other:
 
@@ -309,14 +311,7 @@ Two things compose to launch a slot, and neither is the other:
   addon profiles instead (`docs/reference/profile-addons.mdx`) — an existing
   install keeps them as ordinary custom profiles.
 
-**Whether the file has MTP heads is a model fact; whether a slot drafts
-with them is a profile tune** (`providers.container._effective_mtp`). The
-model's `mtp` field wins in either direction when set; `null` falls back to the
-registry `mtp` tag. The profile's `mtp` is `auto` (draft when the model has
-heads and the runner supports drafting) or `off`. When drafting is on,
-`MTP_DRAFT_BUNDLE` (`--spec-type draft-mtp` and its `--spec-draft-*` defaults,
-`config/schema.py`) goes in the profile layer ahead of the profile's own
-`flags`, so a profile can override any of them.
+**Whether the file has MTP heads, or a paired drafter file, is a model fact; whether a slot speculates is a profile tune.** The profile's `speculation` field (it replaced `mtp` in 1.5.0) is `auto` (use a paired drafter the runner image can run, else the model's MTP heads, else nothing), `off`, or `ngram` (llama.cpp n-gram lookup, no extra file). The decision lives in `effective_speculation` (`src/hal0/providers/speculation.py`); the per-kind flag bundles are `DRAFT_BUNDLE` and `NGRAM_BUNDLE` in `config/schema.py`, placed in the profile layer ahead of the profile's own `flags`, so a profile can override any of them. The model layer owns `--spec-type`; a profile may not carry it. The slot layer passes `--device` (ROCm0, Vulkan0, CUDA0 or none) from the slot's device.
 
 The seed profile catalog is **virtual** — it lives in code (`SEED_PROFILES`,
 sourced from `hal0/config/data/seed_profiles.toml`) and is overlaid on every
@@ -337,6 +332,8 @@ sudo bash installer/uninstall.sh --keep-data
 # No confirmation prompt (CI / scripted teardown)
 HAL0_FORCE=1 sudo bash installer/uninstall.sh
 ```
+
+Uninstall also runs `loginctl disable-linger hal0`, undoing the systemd linger that Hermes v0.22's gateway needs, and removes the Hermes release tree at `/var/lib/hal0/hermes`.
 
 ## Troubleshooting
 
@@ -411,6 +408,10 @@ journalctl -fu hal0-openwebui
 journalctl -fu 'hal0-slot@*'
 systemctl status hal0-api hal0-openwebui
 ```
+
+### Hermes won't build
+
+The Hermes release builder needs `git` and network access for the first build, and runs as the `hal0` user. Check `sudo hal0 agent log hermes` and `hal0 doctor`. A box that had Hermes before 1.6.0 should run `sudo hal0 agent reprovision hermes --repair` once so the default profile gets an API key and appears in Open WebUI (`hal0 doctor` row `hermes-api`). Rolling back from 1.6 to 1.5.x fails the Hermes build with `Hermes Python must be exactly 3.12` until you update forward again; do not edit `/etc/hal0/hermes-python.env` to 3.12 on 1.5.x.
 
 ### OpenWebUI can't reach the API
 

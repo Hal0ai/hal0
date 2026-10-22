@@ -96,7 +96,7 @@ aggregate self-check), so a failure tells you roughly where to look.
 `hal0 doctor all --json` runs every read-only doctor check in one pass —
 the `doctor verify` rows plus auth posture, model-store integrity, pending
 migrations, bound slot ports, and the privileged sudo seams — if you want
-one command that rolls these up into a single report. It exits `1` on any
+one command that rolls these up into a single report. That includes the Hermes rows: `hermes-api` (Hermes API upstreams for Open WebUI and `/v1` clients), `hermes_profiles_mcp` (hal0 tools and memory wired into each named profile), `hermes_generation`, and `hal0_linger` (systemd linger for the `hal0` user, which Hermes workers need). It exits `1` on any
 non-critical failure and `2` on a critical one, which makes it a stricter
 post-install gate for scripting than `doctor verify`.
 </Aside>
@@ -108,4 +108,4 @@ post-install gate for scripting than `doctor verify`.
 - **First chat fails or times out** — check the slot: `hal0 slot status brain`, `hal0 slot logs brain`.
 - **Dashboard won't load** — same unit as health; a health failure explains a dashboard failure too.
 - **Logs show repeating tracebacks** — `hal0 doctor bundle` collects a redacted diagnostic archive to attach to a bug report.
-- **Doctor reports a failing row** — the report names the row (`api`, `dns`, `runners`, `capabilities`, `memory`, `openwebui`, `hermes`); `hal0 doctor all` adds `auth`, `models`, `ports` and more. `doctor perms --fix` and `doctor models --fix` repair ownership drift directly; `doctor profiles` is audit-only.
+- **Doctor reports a failing row** — the report names the row (`api`, `dns`, `runners`, `capabilities`, `memory`, `openwebui`, `hermes`); `hal0 doctor all` adds `auth`, `models`, `ports` and more. If `hermes-api` reports a profile upstream missing, restart `hal0-api` (it reconciles upstreams every 120 s); if a profile still has no upstream on a box where Hermes was installed before the Open WebUI wiring, run `sudo hal0 agent reprovision hermes --repair` once; if `hal0_linger` fails, run `sudo hal0 agent install hermes`. `doctor perms --fix` and `doctor models --fix` repair ownership drift directly; `doctor profiles` audits broken references and un-pulled images, and `doctor profiles --fix` rewrites `type = "llm"` to the profile's real type on rerank/embed/tts slots.

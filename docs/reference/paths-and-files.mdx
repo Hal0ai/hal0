@@ -36,6 +36,7 @@ With `HAL0_HOME=$X` set (dev installs, tests): `usr_lib = $X/usr-lib/hal0/curren
 ├── stacks.toml               # optional
 ├── slots/                   # one <name>.toml per slot
 ├── agents/<name>.toml       # per-agent MCP allowlist/config
+├── hermes-python.env        # HAL0_HERMES_PYTHON=<interpreter> hal0 chose for the Hermes venv; optional operator override
 ├── mcp-servers/<id>.toml    # 0600, one record per user-installed MCP server
 ├── oauth-providers.toml     # OAuth provider registry, seeded once from shipped defaults
 └── *.lock                   # advisory RMW lock siblings
@@ -88,7 +89,7 @@ the venv through `/var/lib/hal0/venvs/hermes` or `/var/lib/hal0/hermes/current/`
 ├── releases/<sha12>-<UTC stamp>/
 │   ├── src/                      # git worktree of mirror.git, detached at the vetted sha
 │   ├── venv/                     # editable install against src/
-│   └── release.json              # ref, describe, interpreter, web_dist, hal0 version; written last
+│   └── release.json              # ref, describe, python, lock, install mode, platform_extras, web_dist, hal0 version; written last
 ├── releases/legacy-<sha12>/      # the pre-migration 3.12 venv, moved here on the first migration (no src/)
 ├── python/                       # uv-managed interpreters for Hermes builds (UV_PYTHON_INSTALL_DIR)
 ├── .cache/uv/                    # uv cache for Hermes builds (UV_CACHE_DIR)

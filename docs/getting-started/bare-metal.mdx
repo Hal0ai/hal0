@@ -27,8 +27,8 @@ The installer's pre-flight verifies each of these and installs what it can:
 |---|---|
 | **x86_64 / amd64** | Hard requirement — the runner images and FastFlowLM `.deb` are amd64-only. |
 | **systemd** | `systemctl` must be on `PATH`. Pre-flight fails hard without it. |
-| **Ubuntu 24.04+ or Debian 13** | Stock **Debian 12** and **Ubuntu 22.04** ship Python 3.11, which fails the installer's Python ≥ 3.12 preflight. On those releases, either point at a newer interpreter with `HAL0_PYTHON=python3.12`, or set `HAL0_PY_AUTOINSTALL=1` to let the installer provision one. |
-| **Python ≥ 3.12** | `pip install` of the release tree hard-requires 3.12+. Missing Python is fatal. |
+| **Ubuntu 24.04+ or Debian 13** | Stock **Debian 12** and **Ubuntu 22.04** ship Python 3.11 or older, which is below the installer's 3.12 floor. On those releases the installer looks for `python3.14`, `python3.13` or `python3.12` on `PATH` and, failing that, installs `python3.12` itself (`HAL0_PY_AUTOINSTALL=1` is set for you in this case). You can also point at a newer interpreter yourself with `HAL0_PYTHON=python3.12`. |
+| **Python 3.12 to 3.14** | hal0 requires `>=3.12` and is tested on 3.12-3.14. Missing or too-old Python with no installable replacement is fatal. The memory engine (Hindsight) separately accepts 3.11-3.14 (override with `HAL0_HINDSIGHT_PYTHON`); if none is found it is skipped and the install continues. The bundled Hermes agent builds on its own Python 3.14 (a uv-managed CPython or a suitable system interpreter) and needs network access for its first build. |
 | **`python3-venv` + `pip`** | The Ubuntu base ships `python3` without `ensurepip`; the installer auto-installs these on apt. |
 | **A container runtime** | Auto-installs **podman** if none is found. |
 | **~20 GB free disk** | Under `/var/lib`, plus free ports `8080` (API) and `3001` (OpenWebUI). |

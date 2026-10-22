@@ -115,7 +115,7 @@ client of hal0.
   `POST /api/agents/hermes/reconcile-upstreams` and after the Hermes
   component converge job, and the profile appears in the picker after that.
 - **`hermes-agent` missing from the picker?** On a box where Hermes was
-  installed before this release, the default key sits only in hal0's root-only
+  installed before 1.6.0, the default key sits only in hal0's root-only
   vault, which hal0-api cannot read. Run
   `sudo hal0 agent reprovision hermes --repair` once; it mirrors that key
   into `$HERMES_HOME/.env` and the entry appears on the next reconcile.
@@ -123,7 +123,7 @@ client of hal0.
 - **When Hermes is down** or still starting, its entries stay in the picker
   and a turn to one fails at once with `dispatch.upstream_unavailable`. It is
   never answered by a slot model instead. hal0 re-checks the gateway every two
-  minutes.
+  minutes. A long agent turn is allowed up to 600 seconds of silence on the stream and 1800 seconds in total. A named profile is dropped only when the running gateway answers 404 for it. Hermes entries are registered and removed on `hal0 agent install` and `uninstall`, so an uninstall removes them.
 
 To hide a profile from the picker, change it on the Hermes side: run
 `hermes -p <profile> gateway stop` to park it, or set `gateway.standalone:
@@ -137,7 +137,7 @@ profile, cannot be hidden this way and always stays.
 The Agents chip on the Services page (below) lists these entries, and the
 `hermes-api` row in `hal0 doctor` checks each one. A green row means the API
 path answers; it does not prove the gateway has its tools installed. The design is
-recorded in `docs/adr/0035-hermes-openai-api-as-v1-upstreams.md` (repo-only).
+recorded in [ADR-0035](/docs/adr/0035-hermes-openai-api-as-v1-upstreams).
 
 ## Web search
 

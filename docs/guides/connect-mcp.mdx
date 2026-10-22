@@ -259,6 +259,11 @@ update each client's stored `Authorization` header by hand. hal0's own
 bundled Hermes is the one exception: it re-reads the current key on the
 next `hal0 agent bootstrap hermes --repair`.
 
+A rotation does end connections that were using the old key: open WebSockets
+close with code `4401` and open SSE streams end with an `event: revoked` frame,
+so a long-lived MCP or event client must reconnect with the new key. See
+[Revoked streams](/docs/operate/auth#revoked-streams).
+
 <Aside type="tip">
 `X-hal0-Agent` is caller **identity**, not a credential — it stamps the
 audit trail and routes the `private:<agent>` memory namespace, but carries
