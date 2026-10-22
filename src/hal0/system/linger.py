@@ -160,7 +160,11 @@ def gateway_unit_regen_reason(
     ``user@<uid>.service`` ordering and no linger. Under v0.22.2 that unit
     starts, but kanban workers cannot get their restart-safe scope and never
     start, and cron jobs run unscoped (hermes ``tools/process_registry.py:415-462``
-    at ``d923a5eb``). ``None`` when there is no gateway unit, or when the
+    at ``d923a5eb``). A unit upstream rendered itself (``hermes gateway
+    migrate``) runs its release-local ``src/.hermes/bin/hermes`` shim, which
+    fails on the next release (#2894); any unit whose ``Exec*`` lines are not
+    hal0's launcher is stale too (``hermes_gateway_regen.unit_stale_reason``).
+    ``None`` when there is no gateway unit, or when the
     gateway is neither enabled nor running (:func:`gateway_in_use`).
     """
     try:
@@ -171,8 +175,11 @@ def gateway_unit_regen_reason(
         return f"the hermes-gateway unit could not be read ({exc})"
     if not (in_use or gateway_in_use)():
         return None
-    if "user@" not in text:
-        return "the hermes-gateway unit predates Hermes 0.22 (no user@<uid>.service ordering)"
+    from hal0.agents.hermes_gateway_regen import unit_stale_reason
+
+    stale = unit_stale_reason(text)
+    if stale is not None:
+        return stale
     if os.path.isdir(linger_dir) and not os.path.exists(os.path.join(linger_dir, user)):
         return f"systemd linger is off for {user}"
     return None

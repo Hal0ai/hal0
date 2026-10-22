@@ -1930,3 +1930,143 @@ def test_run_does_not_inherit_the_callers_cwd(
     # An explicit cwd (the git worktree calls) is still honoured.
     proc = rel._run([sys.executable, "-c", "import os; print(os.getcwd())"], cwd=tmp_path)
     assert Path(proc.stdout.strip()).resolve() == tmp_path.resolve()
+
+
+# ── #2894: a gateway unit on upstream's release-local launcher shim ──────────
+
+_FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "hermes"
+_GATEWAY_UID = 998
+
+
+class BootstrapLock(PlatformLock):
+    """A v0.22.2 checkout that ships ``hermes_bootstrap``, which hal0's launcher imports."""
+
+    def __call__(self, argv: list[Any], **kw: Any) -> subprocess.CompletedProcess:
+        out = super().__call__(argv, **kw)
+        argv = [str(a) for a in argv]
+        if argv[0] == "git" and "worktree" in argv and "add" in argv:
+            (Path(argv[-2]) / "hermes_bootstrap.py").write_text("", encoding="utf-8")
+        return out
+
+
+class UnitFileUnits(FakeUnits):
+    """systemd running the gateway from the unit file on disk.
+
+    Upstream's shim hard-codes the release it was written in, so on a new
+    release it exits on every start ("no dependency environment is committed
+    for this install") and systemd keeps restarting it.
+    """
+
+    def __init__(self, unit: Path) -> None:
+        super().__init__(active={rel.AGENT_UNIT, rel.GATEWAY_UNIT})
+        self.unit = unit
+
+    def settle(self, _seconds: float) -> None:
+        if self.state[rel.GATEWAY_UNIT] == "active" and "/src/.hermes/bin/hermes" in (
+            self.unit.read_text()
+        ):
+            self.restart_count[rel.GATEWAY_UNIT] += 1
+
+
+class RootVerb:
+    """``sudo -n hal0-update hermes-gateway``: the real root primitive, on the tmp unit."""
+
+    def __init__(self, unit: Path, units: FakeUnits, linger_dir: Path) -> None:
+        self.unit = unit
+        self.units = units
+        self.linger_dir = linger_dir
+        self.calls = 0
+
+    def _systemctl(self, argv: list[str], **_: Any) -> subprocess.CompletedProcess:
+        if argv[:2] == ["systemctl", "is-enabled"]:
+            return subprocess.CompletedProcess(argv, 0, "enabled\n", "")
+        if argv[:2] == ["systemctl", "is-active"]:
+            rc = 0 if self.units.active(rel.GATEWAY_UNIT) else 3
+            return subprocess.CompletedProcess(argv, rc, "", "")
+        if argv[:2] == ["loginctl", "enable-linger"]:
+            (self.linger_dir / argv[2]).touch()
+        self.units.log.append(("root", " ".join(argv)))
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    def hermes_gateway(self) -> dict[str, Any]:
+        from hal0.agents import hermes_gateway_regen as regen
+
+        self.calls += 1
+        return regen.regenerate_gateway_unit(
+            unit_path=self.unit,
+            linger_dir=str(self.linger_dir),
+            run=self._systemctl,
+            uid_of=lambda _name: _GATEWAY_UID,
+            which=lambda name: f"/usr/bin/{name}",
+        ).as_dict()
+
+
+def test_activation_regenerates_an_upstream_shim_unit_before_the_gateway_starts(
+    tree, monkeypatch
+) -> None:
+    """#2894: the unit `hermes gateway migrate --multiplex` wrote runs upstream's
+    release-local shim. Activation must put hal0's launcher in place through the
+    root verb, with linger, before the new release's gateway starts, so the
+    re-verify passes and nothing flips back."""
+    from hal0.agents import hermes_gateway_regen as regen
+    from hal0.updater import privileged
+
+    monkeypatch.setattr(regen.os, "chown", lambda *_a: None)
+    layout = _on_v0222(tree)
+    assert _ensure(tree, BootstrapLock(), drop_root=False).ok
+    first = rel.live_release(layout)
+    # The lazy generation that keeps asking for a rebuild on that box.
+    _lazy_generation(tree, first)
+
+    unit = tree["unit"]
+    unit.parent.mkdir(parents=True, exist_ok=True)
+    unit.write_text((_FIXTURES / "gateway-unit-upstream-shim.service").read_text())
+    wants = unit.parent / "multi-user.target.wants"
+    wants.mkdir()
+    (wants / unit.name).symlink_to(unit)
+    linger_dir = tree["root"] / "linger"
+    linger_dir.mkdir()
+
+    units = UnitFileUnits(unit)
+    verb = RootVerb(unit, units, linger_dir)
+    monkeypatch.setattr(privileged, "UpdateSeam", lambda job_id=None: verb)
+
+    out = _ensure(tree, BootstrapLock(), units, sleep=units.settle, drop_root=False)
+
+    assert out.status == "activated", out.error
+    assert not out.flipped_back
+    assert rel.live_release(layout).id == out.release_id != first.id
+    assert verb.calls == 1
+    assert unit.read_text() == regen.render_unit(_GATEWAY_UID)
+    assert (linger_dir / "hal0").exists()
+    assert rel.GATEWAY_HEALED_NOTE in out.warnings
+    # Rewritten while stopped, before the first start on the new release.
+    log = units.log
+    rewrite = log.index(("root", "systemctl daemon-reload"))
+    assert log.index(("stop", rel.GATEWAY_UNIT)) < rewrite
+    assert rewrite < log.index(("start", rel.GATEWAY_UNIT))
+    assert ("root", "systemctl restart hermes-gateway.service") not in log
+
+
+def test_activation_leaves_a_hal0_unit_alone_without_sudo(tree, monkeypatch) -> None:
+    """A unit already on hal0's launcher, linger on: the probe answers, no sudo."""
+    from hal0.agents import hermes_gateway_regen as regen
+    from hal0.updater import privileged
+
+    layout = _on_v0222(tree)
+    assert _ensure(tree, BootstrapLock(), drop_root=False).ok
+    _lazy_generation(tree, rel.live_release(layout))
+    unit = tree["unit"]
+    unit.parent.mkdir(parents=True, exist_ok=True)
+    unit.write_text(regen.render_unit(_GATEWAY_UID))
+    units = UnitFileUnits(unit)
+    calls: list[str] = []
+    monkeypatch.setattr(privileged, "UpdateSeam", lambda job_id=None: calls.append("seam"))
+    monkeypatch.setattr(
+        "hal0.system.linger.gateway_unit_regen_reason",
+        lambda **kw: regen.unit_stale_reason(Path(kw["unit"]).read_text()),
+    )
+    out = _ensure(tree, BootstrapLock(), units, sleep=units.settle, drop_root=False)
+    assert out.status == "activated", out.error
+    assert calls == []
+    assert unit.read_text() == regen.render_unit(_GATEWAY_UID)

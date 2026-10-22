@@ -30,6 +30,7 @@ import contextlib
 import datetime
 import errno
 import fcntl
+import functools
 import json
 import os
 import re
@@ -1040,6 +1041,109 @@ class NoUnits:
         return True
 
 
+# ── Gateway unit heal ────────────────────────────────────────────────────────
+
+#: What a heal that rewrote the unit or turned linger on reports.
+GATEWAY_HEALED_NOTE = "Hermes gateway unit regenerated for v0.22 (linger on for hal0)"
+#: What an operator runs when the heal could not.
+GATEWAY_REGEN_REMEDY = "sudo hal0 agent install hermes"
+
+
+@dataclass
+class GatewayHeal:
+    """What :func:`heal_gateway_unit` found and did."""
+
+    reason: str | None = None
+    action: str | None = None
+    message: str | None = None
+    error: str | None = None
+
+    @property
+    def note(self) -> str | None:
+        """The line ``hal0 update`` shows for this heal, or ``None``."""
+        if self.error is not None:
+            return (
+                f"Hermes gateway unit not regenerated ({self.reason}): {self.error}. "
+                f"Run `{GATEWAY_REGEN_REMEDY}` once."
+            )
+        if self.action == "regenerated":
+            return GATEWAY_HEALED_NOTE
+        return None
+
+
+def heal_gateway_unit(
+    layout: Layout,
+    *,
+    gateway_unit: Path = GATEWAY_UNIT_PATH,
+    job_id: str | None = None,
+    seam_factory: Callable[[], Any] | None = None,
+    regen_reason: Callable[[], str | None] | None = None,
+) -> GatewayHeal:
+    """Regenerate a stale gateway unit through ``hal0-update hermes-gateway`` (#2615, #2894).
+
+    Only once ``current`` is v0.22-shape: its checkout has the
+    ``hermes_bootstrap`` module hal0's launcher imports. The cheap
+    unprivileged probe (:func:`hal0.system.linger.gateway_unit_regen_reason`)
+    runs first, so a box whose unit is current with linger on, or whose
+    gateway is off, never calls sudo. The root verb takes no arguments,
+    re-checks everything itself, renders the unit from fixed paths, validates
+    it and never runs or reads the Hermes release (ADR-0034 decision 6).
+    Never raises: a failure lands in :attr:`GatewayHeal.error`.
+    """
+    from hal0.system import linger
+
+    try:
+        if not (layout.current / "src" / "hermes_bootstrap.py").is_file():
+            return GatewayHeal()
+        if regen_reason is not None:
+            reason = regen_reason()
+        else:
+            reason = linger.gateway_unit_regen_reason(
+                unit=str(gateway_unit),
+                in_use=lambda: linger.gateway_in_use(unit_dir=str(gateway_unit.parent)),
+            )
+    except Exception as exc:  # the probe is read-only; never fail the caller
+        log.warning("components.hermes_gateway_probe_failed", job_id=job_id, error=str(exc))
+        return GatewayHeal()
+    if reason is None:
+        return GatewayHeal()
+    try:
+        if seam_factory is None:
+            from hal0.updater.privileged import UpdateSeam
+
+            seam = UpdateSeam(job_id=job_id)
+        else:
+            seam = seam_factory()
+        outcome = seam.hermes_gateway()
+    except Exception as exc:  # non-fatal by design: the note names the remedy
+        message = str(getattr(exc, "message", "") or exc)
+        log.warning(
+            "components.hermes_gateway_regen_failed",
+            job_id=job_id,
+            reason=reason,
+            error=message,
+            remedy=GATEWAY_REGEN_REMEDY,
+        )
+        return GatewayHeal(reason=reason, error=message)
+    outcome = outcome if isinstance(outcome, dict) else {}
+    heal = GatewayHeal(reason=reason, action=outcome.get("action"), message=outcome.get("message"))
+    log.info(
+        "components.hermes_gateway_regen",
+        job_id=job_id,
+        reason=reason,
+        action=heal.action,
+        message=heal.message,
+    )
+    return heal
+
+
+def _default_gateway_heal(gateway_unit: Path) -> Callable[[Layout], str | None]:
+    def heal(layout: Layout) -> str | None:
+        return heal_gateway_unit(layout, gateway_unit=gateway_unit).note
+
+    return heal
+
+
 # ── Activation ───────────────────────────────────────────────────────────────
 
 
@@ -1328,6 +1432,7 @@ def activate_release(
     settle_s: float = DEFAULT_SETTLE_S,
     stamp_file: Path | None = None,
     sleep: Callable[[float], None] = time.sleep,
+    heal_gateway: Callable[[], str | None] | None = None,
 ) -> Activation:
     """Stop, switch, migrate, start, re-verify; flip back on failure (decision 7).
 
@@ -1337,6 +1442,12 @@ def activate_release(
 
     Only units that were active before the switch are stopped and started, so
     a gateway the operator stopped or disabled is never started (#2823).
+
+    ``heal_gateway`` runs after the switch, while the units are still
+    stopped and before any is started or re-verified: a gateway unit that
+    does not run hal0's launcher (upstream's release-local shim, #2894)
+    would otherwise fail every start on the new release and force a
+    flip-back. It returns a note for the outcome's warnings, or ``None``.
     """
     recorded = [u for u in HERMES_UNITS if units.active(u)]
     if recorded:
@@ -1353,6 +1464,7 @@ def activate_release(
             settle_s=settle_s,
             stamp_file=stamp_file,
             sleep=sleep,
+            heal_gateway=heal_gateway,
         )
     finally:
         _clear_stopped_units(layout)
@@ -1370,6 +1482,7 @@ def _activate(
     settle_s: float,
     stamp_file: Path | None,
     sleep: Callable[[float], None],
+    heal_gateway: Callable[[], str | None] | None = None,
 ) -> Activation:
     stopped: list[str] = []
     for unit in recorded:
@@ -1448,6 +1561,18 @@ def _activate(
                 stop_first=False,
             )
         return result
+
+    # #2894: put hal0's launcher in the gateway unit before the new release's
+    # first start. Through the root verb (`hal0-update hermes-gateway`), which
+    # never starts a unit that is stopped, as both are here.
+    if heal_gateway is not None:
+        try:
+            note = heal_gateway()
+        except Exception as exc:  # the heal reports its own failures; belt and braces
+            log.warning("hermes_release.gateway_heal_crashed", release=new.id, error=str(exc))
+            note = None
+        if note:
+            result.warnings.append(note)
 
     for unit in recorded:
         units.start(unit)
@@ -1865,6 +1990,7 @@ def ensure_release(
     drop_root: bool = True,
     platform_extras: list[str] | tuple[str, ...] | None = None,
     secrets_env: Path | str | None = None,
+    heal_gateway: Callable[[Layout], str | None] | None = None,
 ) -> ReleaseOutcome:
     """Converge the live Hermes release onto ``ref`` (default: the pin).
 
@@ -1882,6 +2008,11 @@ def ensure_release(
     A build installs them together with the extras the live venv already has
     (:func:`hermes_platforms.installed_platform_extras`), so a rebuild never
     drops a platform SDK the box was running with.
+
+    ``heal_gateway`` runs inside activation, before the new release's units
+    start (#2894). It defaults to :func:`heal_gateway_unit` on
+    ``gateway_unit`` whenever real units are controlled; :class:`NoUnits`
+    (nothing is started) skips it.
     """
     if platform_extras is None:
         platform_extras = configured_extras(hermes_home, secrets_env)
@@ -1910,6 +2041,8 @@ def ensure_release(
         return ReleaseOutcome(status="build_failed", error=str(exc), remedy=REPAIR_REMEDY)
     stamp = stamp_file if stamp_file is not None else _default_stamp_file()
     units = units if units is not None else SystemdUnits()
+    if heal_gateway is None and not isinstance(units, NoUnits):
+        heal_gateway = _default_gateway_heal(gateway_unit)
 
     try:
         with builder_lock(layout, caller=caller, wait=wait, on_wait=on_wait):
@@ -2040,6 +2173,9 @@ def ensure_release(
                     settle_s=settle_s,
                     stamp_file=stamp,
                     sleep=sleep,
+                    heal_gateway=(
+                        functools.partial(heal_gateway, layout) if heal_gateway else None
+                    ),
                 )
             except OSError as exc:
                 log.warning("hermes_release.activation_crashed", release=new.id, error=str(exc))

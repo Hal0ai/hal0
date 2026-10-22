@@ -1,11 +1,15 @@
-"""Regenerate an old-shape Hermes gateway unit as root, without running Hermes (ADR-0034 d6).
+"""Regenerate a stale Hermes gateway unit as root, without running Hermes (ADR-0034 d6).
 
 A box that ran Hermes before hal0 1.6.0 keeps the
 ``/etc/systemd/system/hermes-gateway.service`` that Hermes 0.19.0 wrote: no
 ``After=``/``Wants=user@<uid>.service`` and no linger for ``hal0``. Under
-v0.22.2 its kanban workers cannot start and cron jobs run unscoped.
-``hal0 update`` heals it through the ``hal0-update hermes-gateway`` verb,
-which runs :func:`regenerate_gateway_unit` as root.
+v0.22.2 its kanban workers cannot start and cron jobs run unscoped. A box
+where upstream rendered the unit itself (``hermes gateway migrate
+--multiplex``, or ``hermes gateway install`` run outside hal0) runs
+upstream's release-local launcher shim, which fails on every start once
+``current`` moves to a new release (#2894). ``hal0 update`` heals both
+through the ``hal0-update hermes-gateway`` verb, which runs
+:func:`regenerate_gateway_unit` as root.
 
 **Root never runs Hermes code.** The Hermes release tree (venv and checkout)
 is owned by ``hal0``. Running ``hermes gateway install --system`` from it as
@@ -212,6 +216,52 @@ def unit_is_old_shape(text: str) -> bool:
     return "user@" not in text
 
 
+#: Where upstream writes its per-checkout launcher shim. The shim hard-codes
+#: one release's checkout, interpreter and lazily installed dependency
+#: environment, so the gateway fails on the next release (#2894).
+UPSTREAM_SHIM_DIR = "/.hermes/bin/"
+
+#: The launcher hal0 renders, per ``Exec*`` key: its interpreter, then the
+#: ``-I -c`` bootstrap that puts ``current/src`` on ``sys.path``.
+_LAUNCHER_PREFIX = {
+    "ExecStart": f'"{PYTHON}" "-I" "-c" ',
+    "ExecStop": f'-"{PYTHON}" "-I" "-c" ',
+    "ExecStopPost": f'-"{PYTHON}" "-I" "-c" ',
+}
+_LAUNCHER_PATH = f"sys.path.insert(0, '{SRC}')"
+
+
+def unit_stale_reason(text: str) -> str | None:
+    """Why ``text`` is not a gateway unit hal0 leaves in place, or ``None``.
+
+    Stale is the pre-0.22 shape (no ``user@`` ordering, #2853), or any
+    ``ExecStart``/``ExecStop``/``ExecStopPost`` that is not hal0's launcher:
+    ``current/venv/bin/python -I -c`` with ``current/src`` on ``sys.path``.
+    That covers upstream's release-local shim under ``src/.hermes/bin/``
+    (#2894), a unit still naming ``releases/<id>``, and any other launcher.
+    A pure text check: it reads no file and runs nothing.
+    """
+    if unit_is_old_shape(text):
+        return "the hermes-gateway unit predates Hermes 0.22 (no user@<uid>.service ordering)"
+    seen: dict[str, list[str]] = {key: [] for key in _LAUNCHER_PREFIX}
+    for raw in text.splitlines():
+        m = _EXEC_KEY_RE.match(raw.strip())
+        if m and m.group(1) in seen:
+            seen[m.group(1)].append(m.group(2))
+    for key, prefix in _LAUNCHER_PREFIX.items():
+        if not seen[key]:
+            return f"the hermes-gateway unit has no {key}= running hal0's launcher"
+        for value in seen[key]:
+            if UPSTREAM_SHIM_DIR in value:
+                return (
+                    f"the hermes-gateway unit's {key}= runs upstream's release-local "
+                    "launcher (src/.hermes/bin/hermes), not hal0's"
+                )
+            if not value.startswith(prefix) or _LAUNCHER_PATH not in value:
+                return f"the hermes-gateway unit's {key}= is not hal0's launcher"
+    return None
+
+
 @dataclass
 class RegenResult:
     """What :func:`regenerate_gateway_unit` did."""
@@ -299,12 +349,14 @@ def regenerate_gateway_unit(
     uid_of: Callable[[str], int] | None = None,
     which: Callable[[str], str | None] = shutil.which,
 ) -> RegenResult:
-    """Heal an in-use old-shape gateway unit and turn linger on, preserving its state.
+    """Heal an in-use stale gateway unit and turn linger on, preserving its state.
 
     Acts only when the unit exists, is a regular file (a masked unit is a
-    ``/dev/null`` symlink and is left alone), is enabled or running, and
-    #2853's check fails: no ``user@`` ordering, or no linger for ``hal0``.
-    Then it renders the v0.22.2 unit (when the shape is old), writes it
+    ``/dev/null`` symlink and is left alone), is enabled or running, and the
+    unit is stale (:func:`unit_stale_reason`: no ``user@`` ordering, or an
+    ``Exec*`` line that is not hal0's launcher, such as upstream's
+    ``src/.hermes/bin/hermes`` shim) or ``hal0`` has no linger.
+    Then it renders the v0.22.2 unit (when the unit is stale), writes it
     ``root:root 0644`` atomically, reloads systemd, runs ``loginctl
     enable-linger hal0`` (when linger is off) and, only if the gateway was
     running, ``systemctl restart hermes-gateway.service``. It never enables,
@@ -337,14 +389,14 @@ def regenerate_gateway_unit(
     if not (was_enabled or was_active):
         return RegenResult("noop", f"{GATEWAY_UNIT} is {state} and stopped; left alone", **base)
 
-    old_shape = unit_is_old_shape(text)
+    stale = unit_stale_reason(text) is not None
     linger_on = os.path.exists(os.path.join(linger_dir, GATEWAY_USER))
-    if not old_shape and linger_on:
+    if not stale and linger_on:
         return RegenResult("noop", f"{GATEWAY_UNIT} is current and linger is on", **base)
 
     result = RegenResult("regenerated", "", **base)
     done = result.steps
-    if old_shape:
+    if stale:
         try:
             uid = uid_of(GATEWAY_USER)
         except KeyError as exc:
@@ -388,5 +440,6 @@ __all__ = [
     "regenerate_gateway_unit",
     "render_unit",
     "unit_is_old_shape",
+    "unit_stale_reason",
     "validate_unit",
 ]

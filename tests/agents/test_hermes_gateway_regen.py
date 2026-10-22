@@ -75,6 +75,29 @@ def test_the_render_is_detected_as_current_shape() -> None:
     assert regen.unit_is_old_shape((FIXTURES / "gateway-unit-3ef6bbd2.service").read_text())
 
 
+def test_stale_reason_accepts_only_hal0s_launcher() -> None:
+    """#2894: anything but hal0's launcher on current/ is stale, upstream's shim first."""
+    v022 = (FIXTURES / "gateway-unit-v0.22.2.service").read_text()
+    assert regen.unit_stale_reason(regen.render_unit(UID)) is None
+    assert regen.unit_stale_reason(gu.normalise_text(v022)) is None
+    old = (FIXTURES / "gateway-unit-3ef6bbd2.service").read_text()
+    assert "predates Hermes 0.22" in (regen.unit_stale_reason(old) or "")
+    shim = (FIXTURES / "gateway-unit-upstream-shim.service").read_text()
+    assert not regen.unit_is_old_shape(shim)
+    assert "src/.hermes/bin/hermes" in (regen.unit_stale_reason(shim) or "")
+    # A unit still naming releases/<id> is not on hal0's launcher either.
+    assert "ExecStart=" in (regen.unit_stale_reason(v022) or "")
+    # One stale Exec line is enough.
+    one = regen.render_unit(UID).replace(
+        "ExecStopPost=-", 'ExecStopPost=-"/var/lib/hal0/hermes/current/src/.hermes/bin/hermes" #', 1
+    )
+    assert "ExecStopPost=" in (regen.unit_stale_reason(one) or "")
+    no_start = "\n".join(
+        ln for ln in regen.render_unit(UID).splitlines() if not ln.startswith("ExecStart=")
+    )
+    assert "no ExecStart=" in (regen.unit_stale_reason(no_start) or "")
+
+
 # ── validation ─────────────────────────────────────────────────────────────────
 
 
@@ -231,6 +254,28 @@ def test_old_shape_with_linger_already_on_rewrites_without_loginctl(
     assert systemctl.mutating == [["systemctl", "daemon-reload"]] + (
         [["systemctl", "restart", "hermes-gateway.service"]] if active else []
     )
+
+
+@pytest.mark.parametrize("linger_on", [True, False])
+def test_an_upstream_shim_unit_is_rewritten_to_hal0s_launcher(
+    tmp_path: Path, linger_on: bool
+) -> None:
+    """#2894: upstream's release-local shim has user@ ordering, so the old-shape
+    test passed it; the heal must still rewrite it, validated, and turn linger on."""
+    unit = tmp_path / "hermes-gateway.service"
+    unit.write_text((FIXTURES / "gateway-unit-upstream-shim.service").read_text())
+    systemctl = FakeSystemctl(enabled="enabled", active=False)
+    result = _regen(tmp_path, systemctl, linger=linger_on)
+    assert result.action == "regenerated" and result.unit_rewritten
+    assert unit.read_text() == regen.render_unit(UID)
+    assert regen.unit_stale_reason(unit.read_text()) is None
+    assert regen.validate_unit(unit.read_text(), UID) == []
+    expected = [["systemctl", "daemon-reload"]]
+    if not linger_on:
+        expected.append(["loginctl", "enable-linger", "hal0"])
+        assert result.linger_enabled
+    # Stopped (activation stopped it): rewritten, never started.
+    assert systemctl.mutating == expected
 
 
 def test_a_current_unit_with_linger_on_is_a_noop(tmp_path: Path) -> None:

@@ -1,0 +1,41 @@
+# The gateway unit upstream renders itself (`hermes gateway migrate --multiplex -y`,
+# or `hermes gateway install` run outside hal0), as seen on an upgraded box (#2894).
+# ExecStart is verbatim. ExecStop and ExecStopPost name the same release-local
+# launcher shim; their trailing arguments are not load-bearing here.
+[Unit]
+Description=Hermes Agent Gateway - Messaging Platform Integration
+After=network-online.target
+Wants=network-online.target
+After=user@998.service
+Wants=user@998.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=hal0
+Group=hal0
+ExecStart="/var/lib/hal0/hermes/current/src/.hermes/bin/hermes" "gateway" "run"
+WorkingDirectory=/var/lib/hal0/.hermes
+Environment="HOME=/var/lib/hal0"
+Environment="USER=hal0"
+Environment="LOGNAME=hal0"
+Environment="PATH=/var/lib/hal0/hermes/current/src/node_modules/.bin:/var/lib/hal0/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+Environment="HERMES_HOME=/var/lib/hal0/.hermes"
+Environment="HERMES_SUPERVISED_CHILD=1"
+Restart=always
+RestartSec=5
+RestartForceExitStatus=75
+SuccessExitStatus=75
+RestartPreventExitStatus=78
+KillMode=mixed
+KillSignal=SIGTERM
+ExecReload=/bin/kill -USR1 $MAINPID
+ExecStop=-"/var/lib/hal0/hermes/current/src/.hermes/bin/hermes" "gateway" "stop-mark"
+ExecStopPost=-"/var/lib/hal0/hermes/current/src/.hermes/bin/hermes" "gateway" "cgroup-cleanup"
+TimeoutStopSec=70
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

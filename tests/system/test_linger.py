@@ -86,12 +86,28 @@ def test_gateway_unit_regen_reason(tmp_path: Path) -> None:
     unit.write_text("[Service]\nExecStart=/v/bin/python -m hermes_cli.main gateway run\n")
     reason = linger.gateway_unit_regen_reason(**kw)
     assert reason is not None and "predates Hermes 0.22" in reason
-    # A 0.22 unit, but linger off.
-    unit.write_text("[Unit]\nAfter=user@999.service\nWants=user@999.service\n")
+    # hal0's 0.22 unit, but linger off.
+    from hal0.agents.hermes_gateway_regen import render_unit
+
+    unit.write_text(render_unit(999))
     assert linger.gateway_unit_regen_reason(**kw) == "systemd linger is off for hal0"
     # Both right.
     (lingers / "hal0").touch()
     assert linger.gateway_unit_regen_reason(**kw) is None
+
+
+def test_gateway_unit_regen_reason_flags_upstreams_launcher_shim(tmp_path: Path) -> None:
+    """#2894: a unit upstream rendered (user@ ordering, linger on) still needs healing."""
+    fixture = Path(__file__).resolve().parents[1] / "fixtures" / "hermes"
+    unit = tmp_path / "hermes-gateway.service"
+    unit.write_text((fixture / "gateway-unit-upstream-shim.service").read_text())
+    lingers = tmp_path / "linger"
+    lingers.mkdir()
+    (lingers / "hal0").touch()
+    reason = linger.gateway_unit_regen_reason(
+        unit=str(unit), linger_dir=str(lingers), in_use=lambda: True
+    )
+    assert reason is not None and "src/.hermes/bin/hermes" in reason
 
 
 def test_gateway_unit_regen_reason_silent_for_a_disabled_gateway(tmp_path: Path) -> None:

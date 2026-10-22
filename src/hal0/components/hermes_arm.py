@@ -19,6 +19,7 @@ from typing import Any
 
 import structlog
 
+from hal0.agents import hermes_release as _rel
 from hal0.config.paths import var_lib
 from hal0.system.seam import is_hal0_service_user
 
@@ -161,7 +162,7 @@ def _config_backstop(result: dict[str, Any], *, job_id: str | None) -> None:
 
 
 #: What `hal0 update` reports when the gateway unit was healed.
-GATEWAY_HEALED_NOTE = "Hermes gateway unit regenerated for v0.22 (linger on for hal0)"
+GATEWAY_HEALED_NOTE = _rel.GATEWAY_HEALED_NOTE
 
 
 def _heal_gateway_unit(
@@ -172,60 +173,25 @@ def _heal_gateway_unit(
     seam_factory: Callable[[], Any] | None = None,
     regen_reason: Callable[[], str | None] | None = None,
 ) -> None:
-    """Regenerate an old-shape gateway unit through ``hal0-update hermes-gateway`` (#2615).
+    """Regenerate a stale gateway unit through ``hal0-update hermes-gateway`` (#2615).
 
-    Runs once the live release is v0.22-shape: its checkout has the
-    ``hermes_bootstrap`` module the rendered unit imports. The cheap
-    unprivileged check (#2853's ``gateway_unit_regen_reason``) runs first, so
-    a box whose unit is current, or whose gateway is off, never calls sudo.
-    The root side re-checks everything itself. Never fails the converge: a
-    failure, or a missing grant, adds the existing remedy to ``detail`` and
-    the `hal0 update` notice and the doctor row stay as the fallback.
+    The converged and upgraded paths' heal, through the same
+    :func:`hermes_release.heal_gateway_unit` an activation runs before the
+    new release's units start (#2894). It acts once the live release is
+    v0.22-shape, and only when the unprivileged probe finds the unit stale
+    (pre-0.22, or not hal0's launcher) or linger off. Never fails the
+    converge: a failure, or a missing grant, adds the existing remedy to
+    ``detail`` and the `hal0 update` notice and the doctor row stay as the
+    fallback.
     """
-    from hal0.system import linger
+    from hal0.agents import hermes_release as rel
 
-    try:
-        if not (layout.current / "src" / "hermes_bootstrap.py").is_file():
-            return
-        reason = (regen_reason or linger.gateway_unit_regen_reason)()
-    except Exception as exc:  # the probe is read-only; never fail the converge
-        log.warning("components.hermes_gateway_probe_failed", job_id=job_id, error=str(exc))
-        return
-    if reason is None:
-        return
-    try:
-        if seam_factory is None:
-            from hal0.updater.privileged import UpdateSeam
-
-            seam = UpdateSeam(job_id=job_id)
-        else:
-            seam = seam_factory()
-        outcome = seam.hermes_gateway()
-    except Exception as exc:  # non-fatal by design: the notice names the remedy
-        message = str(getattr(exc, "message", "") or exc)
-        log.warning(
-            "components.hermes_gateway_regen_failed",
-            job_id=job_id,
-            reason=reason,
-            error=message,
-            remedy=linger.GATEWAY_REGEN_COMMAND,
-        )
-        result["detail"] = [
-            *result.get("detail", []),
-            f"Hermes gateway unit not regenerated ({reason}): {message}. "
-            f"Run `{linger.GATEWAY_REGEN_COMMAND}` once.",
-        ]
-        return
-    action = outcome.get("action") if isinstance(outcome, dict) else None
-    log.info(
-        "components.hermes_gateway_regen",
-        job_id=job_id,
-        reason=reason,
-        action=action,
-        message=outcome.get("message") if isinstance(outcome, dict) else None,
+    heal = rel.heal_gateway_unit(
+        layout, job_id=job_id, seam_factory=seam_factory, regen_reason=regen_reason
     )
-    if action == "regenerated":
-        result["detail"] = [*result.get("detail", []), GATEWAY_HEALED_NOTE]
+    note = heal.note
+    if note and note not in result.get("detail", []):
+        result["detail"] = [*result.get("detail", []), note]
 
 
 def converge_hermes(
