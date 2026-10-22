@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import io
 import json as jsonlib
+from pathlib import Path
 
 import pytest
 import typer
@@ -1761,6 +1762,42 @@ def test_check_hermes_api_upstreams_absent_passes(tmp_path) -> None:
         False,
     )
     assert "no Hermes agent installed" in c.detail
+
+
+def test_check_hermes_api_upstreams_unreadable_home_warns(tmp_path, monkeypatch) -> None:
+    """Ruling 2: a 0700 Hermes home seen by a non-hal0 user is a WARN, never PASS."""
+    home = _hermes_home(tmp_path)
+    real_access = da.os.access
+
+    def fake_access(path, mode, *a, **kw):
+        if Path(path) == home:
+            return False
+        return real_access(path, mode, *a, **kw)
+
+    monkeypatch.setattr(da.os, "access", fake_access)
+    c = da.check_hermes_api_upstreams(home=home, upstreams_payload=[])
+    assert c.status == "warn"
+    assert c.detail == f"cannot read {home}; run hal0 doctor as hal0 or root"
+
+
+def test_check_hermes_api_upstreams_config_permission_error_warns(tmp_path, monkeypatch) -> None:
+    home = _hermes_home(tmp_path)
+    real_stat = Path.stat
+
+    def fake_stat(self, *a, **kw):
+        if self.name == "config.yaml":
+            raise PermissionError(13, "Permission denied", str(self))
+        return real_stat(self, *a, **kw)
+
+    monkeypatch.setattr(Path, "stat", fake_stat)
+    c = da.check_hermes_api_upstreams(home=home, upstreams_payload=[])
+    assert c.status == "warn"
+    assert c.detail == f"cannot read {home}; run hal0 doctor as hal0 or root"
+
+
+def test_check_hermes_api_upstreams_missing_home_passes(tmp_path) -> None:
+    c = da.check_hermes_api_upstreams(home=tmp_path / "nowhere", upstreams_payload=[])
+    assert c.status == "pass" and "no Hermes agent installed" in c.detail
 
 
 def test_check_hermes_api_upstreams_pass_lists_ids(tmp_path) -> None:

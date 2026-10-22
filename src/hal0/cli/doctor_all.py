@@ -35,6 +35,7 @@ from __future__ import annotations
 import contextlib
 import grp
 import json as jsonlib
+import os
 import pwd
 import shutil
 import stat
@@ -1420,7 +1421,20 @@ def check_hermes_api_upstreams(
     key, label = "hermes-api", "Hermes API upstreams"
     tail = " (API path only; MCP tools are not checked, see #2891)"
     root = home if home is not None else ha.hermes_home()
-    if not (root / "config.yaml").exists():
+    # Hermes chmods its home 0700, so a non-hal0 operator cannot see into it.
+    # Report that honestly instead of a green "not installed" (Ruling 2).
+    unreadable = Check(key, label, _WARN, f"cannot read {root}; run hal0 doctor as hal0 or root")
+    try:
+        is_home = root.is_dir()
+    except PermissionError:
+        return unreadable
+    if is_home and not os.access(root, os.R_OK | os.X_OK):
+        return unreadable
+    try:
+        (root / "config.yaml").stat()
+    except PermissionError:
+        return unreadable
+    except OSError:
         return Check(key, label, _PASS, "no Hermes agent installed")
     get = http_get if http_get is not None else _hermes_http_get
     host, port = ha.api_server_endpoint(root)
