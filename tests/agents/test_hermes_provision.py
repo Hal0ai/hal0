@@ -4190,6 +4190,23 @@ def _patch_dropin_to_tmp(
     return dropin_file, fake, hp.InstallIO(run=fake.run)
 
 
+def test_gateway_secrets_wire_warns_when_the_key_write_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed API_SERVER_KEY write is a WARN with a reason, not an ok row (#2908)."""
+    _, _, io = _patch_dropin_to_tmp(tmp_path, monkeypatch)
+
+    def _boom(**_: object) -> hp.ApiServerKeyResult:
+        raise PermissionError(13, "Permission denied", "/var/lib/hal0/secrets/agents/hermes.env")
+
+    monkeypatch.setattr(hp, "ensure_gateway_api_server_key", _boom)
+    out = hp._phase_gateway_secrets_wire(hp._StepCtx(state=hp.BootstrapState(), io=io))
+    assert out.status == hp.PhaseStatus.WARN
+    assert out.reason is not None and "API_SERVER_KEY" in out.reason
+    assert "hermes.env" in out.reason
+    assert out.details["api_server_key"]["outcome"] == "failed"
+
+
 def test_gateway_secrets_wire_writes_dropin(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
