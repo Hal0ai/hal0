@@ -147,3 +147,14 @@ def test_lifespan_starts_and_stops_periodic_reconcile(
     time.sleep(0.05)
     assert len(calls) == seen
 
+
+def test_suite_isolation_pins_hermes_home_under_tmp(tmp_path: Any) -> None:
+    """Codex P1: app boot sweeps keys under HERMES_HOME; a suite run on a box
+    with a live Hermes tree must never append to its profile .env files."""
+    import os
+    from pathlib import Path
+
+    from hal0.agents import hermes_api
+
+    assert Path(os.environ["HERMES_HOME"]) == tmp_path / "hermes"
+    assert hermes_api.hermes_home() == tmp_path / "hermes"
