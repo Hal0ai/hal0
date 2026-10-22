@@ -186,7 +186,7 @@ def test_config_yaml_contains_role_slot_blocks(target: tuple[Path, Path]) -> Non
     for task in ("compression", "title_generation"):
         assert cfg["auxiliary"][task]["model"] == "qwen3-utility-test"
         assert cfg["auxiliary"][task]["provider"] == "custom"
-    assert cfg["auxiliary"]["vision"]["provider"] == "main"
+    assert cfg["auxiliary"]["vision"]["provider"] == "custom"
     # No global model.context_length override; no custom_providers block.
     assert "context_length" not in cfg["model"]
     assert "custom_providers" not in cfg

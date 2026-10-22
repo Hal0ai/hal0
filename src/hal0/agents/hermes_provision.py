@@ -2282,10 +2282,10 @@ def _build_config_overlay(
     ]
 
     # auxiliary.<task> side-job routing (feat/hermes-role-slots): utility-slot
-    # tasks render provider:"custom"+base_url; vision stays "main".
+    # tasks and vision all render provider:"custom"+base_url (#2882).
     for task, cfg in auxiliary_tasks.items():
         pairs += [
-            (f"auxiliary.{task}.provider", cfg.get("provider", "main")),
+            (f"auxiliary.{task}.provider", cfg.get("provider", "custom")),
             (f"auxiliary.{task}.model", cfg.get("model", "")),
         ]
         if cfg.get("base_url"):
@@ -3086,7 +3086,7 @@ def _phase_config_write(ctx: _StepCtx) -> PhaseResult:
     chat_slots = _collect_chat_slots(slots_all, contexts=ctx.io.fetch_model_contexts())
     # feat/hermes-role-slots: delegation ← `agent` slot; auxiliary ← `utility`
     # slot. Both hit hal0's /v1 endpoint, so a missing slot degrades safely
-    # (delegation omitted / aux → "main").
+    # (delegation omitted / aux → empty model).
     hal0_v1_base = primary["backend_url"]
     delegation = _resolve_delegation(slots_all, hal0_base_url=hal0_v1_base)
     auxiliary_tasks = _resolve_auxiliary_tasks(slots_all, hal0_base_url=hal0_v1_base)
@@ -3225,7 +3225,7 @@ def _utility_aux_model(auxiliary_tasks: dict[str, dict[str, Any]] | None) -> str
 
     Returns the ``compression`` task's model (representative of the whole
     utility group) for self_report visibility, or ``None`` when the group
-    degraded to provider:"main".
+    degraded to an empty model.
     """
     if not auxiliary_tasks:
         return None
@@ -5474,15 +5474,16 @@ def _collect_chat_slots(
 # roles use the platform role hint when supplied, allowing labels to change
 # without changing opaque slot identity or semantic assignment.
 #
-# Vision has no dedicated slot — it stays provider:"main". Hermes v0.22
+# Vision has no dedicated slot — it renders provider:"custom" with an empty
+# model, inheriting the chat model ("main" is rejected by `hermes doctor`). Hermes v0.22
 # dropped the aux LLM for web_extract and session_search and ignores a
 # leftover ``auxiliary.<task>`` block for them
 # (hermes_cli/config_defaults.py:760, :776 at d923a5eb), so hal0 no longer
 # writes either; :data:`RETIRED_HAL0_CONFIG_KEYS` removes the old blocks.
 
 # The hal0-routed side-tasks (everything that should run on the cheap
-# `utility` slot). vision is intentionally excluded — it keeps
-# provider:"main" so it inherits the chat model (which may carry a vision
+# `utility` slot). vision is intentionally excluded — it keeps an empty
+# model so it inherits the chat model (which may carry a vision
 # label) rather than the tiny utility model.
 _UTILITY_AUX_TASKS: tuple[str, ...] = (
     "compression",
@@ -5506,7 +5507,7 @@ def _find_named_ready_slot(slots: list[dict[str, Any]], name: str) -> dict[str, 
 
     Degrade-safe: returns ``None`` when the slot is absent OR present but
     not ready/loaded OR carries no model_id, so callers can fall back
-    gracefully (delegation omitted; aux tasks revert to provider:"main").
+    gracefully (delegation omitted; aux tasks keep an empty model).
     """
     for s in slots:
         if not isinstance(s, dict):
@@ -5574,9 +5575,13 @@ def _resolve_auxiliary_tasks(
         entry = by_role[task_roles[task]]
         custom = entry.basis in {"utility", "npu_virtual"}
         tasks[task] = {
-            "provider": "custom" if custom else "main",
+            # Always "custom": Hermes' doctor rejects provider "main" as an
+            # unknown provider (#2882). Without a dedicated slot the model
+            # stays empty so the task inherits the main chat model through
+            # the hal0 endpoint.
+            "provider": "custom",
             "model": entry.model if custom else "",
-            "base_url": hal0_base_url if custom else "",
+            "base_url": hal0_base_url,
         }
     return tasks
 
