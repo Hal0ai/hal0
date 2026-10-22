@@ -1765,6 +1765,24 @@ def _api(home, *, status=200, upstreams=None, slots=None, calls=None):
     )
 
 
+def test_check_hermes_api_upstreams_gateway_off_warns(tmp_path) -> None:
+    """A gateway the operator turned off is a WARN that names the gap, not a FAIL per profile."""
+    home = _hermes_home(tmp_path)
+    calls: list = []
+
+    def http_get(url, headers):
+        calls.append(url)
+        return 200, {}
+
+    c = da.check_hermes_api_upstreams(
+        home=home, probe=lambda url: 0, http_get=http_get, upstreams_payload=[]
+    )
+    assert c.status == "warn" and c.critical is False
+    assert "not answering" in c.detail and "/health" in c.detail
+    assert "enable --now hermes-gateway" in c.detail and c.detail.endswith(_API_TAIL)
+    assert calls == []
+
+
 def test_check_hermes_api_upstreams_absent_passes(tmp_path) -> None:
     c = da.check_hermes_api_upstreams(home=tmp_path, upstreams_payload=[])
     assert (c.key, c.label, c.status, c.critical) == (

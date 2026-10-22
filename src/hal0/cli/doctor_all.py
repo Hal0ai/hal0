@@ -1706,6 +1706,17 @@ def check_hermes_api_upstreams(
         return Check(key, label, _PASS, "no Hermes agent installed")
     get = http_get if http_get is not None else _hermes_http_get
     base = ha.api_server_base(root)
+    if not ha.gateway_alive(root, probe=probe):
+        # A gateway the operator turned off (systemctl disable --now, #2815)
+        # is a legitimate state, not a broken API path: say what is not
+        # checked and how to turn it on, instead of a FAIL per profile.
+        return Check(
+            key,
+            label,
+            _WARN,
+            f"Hermes gateway not answering {base}/health, so the API path is not checked; "
+            "if the gateway is meant to run: sudo systemctl enable --now hermes-gateway" + tail,
+        )
     served = ha.served_profiles(root, probe=probe)
     registered = _upstream_names(upstreams_payload)
     api_down = upstreams_payload is None
