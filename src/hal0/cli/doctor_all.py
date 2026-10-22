@@ -1381,6 +1381,120 @@ def check_hermes_delegation_slot(
     return Check(name, label, _PASS, f"{chosen} (ready; applied at the next repair)")
 
 
+def _hermes_http_get(url: str, headers: dict[str, str]) -> tuple[int, Any]:
+    """GET ``url`` with ``headers``; ``(status, json_or_None)``, ``(0, None)`` on error."""
+    import httpx
+
+    try:
+        resp = httpx.get(url, headers=headers, timeout=5.0)
+    except httpx.HTTPError:
+        return 0, None
+    try:
+        body = resp.json()
+    except ValueError:
+        body = None
+    return resp.status_code, body
+
+
+def _upstream_names(payload: Any) -> set[str]:
+    rows = payload.get("upstreams") if isinstance(payload, dict) else payload
+    if not isinstance(rows, list):
+        return set()
+    return {r["name"] for r in rows if isinstance(r, dict) and isinstance(r.get("name"), str)}
+
+
+def check_hermes_api_upstreams(
+    *,
+    home: Path | None = None,
+    probe: Callable[[str], int] | None = None,
+    http_get: Callable[[str, dict[str, str]], tuple[int, Any]] | None = None,
+    upstreams_payload: Any = None,
+    slots_payload: Any = None,
+) -> Check:
+    """Each served Hermes profile's API path: key, authenticated ``/v1/models``, upstream.
+
+    ADVISORY (never critical). Checks the API path only, not the MCP tools.
+    """
+    from hal0.agents import hermes_api as ha
+
+    key, label = "hermes-api", "Hermes API upstreams"
+    tail = " (API path only; MCP tools are not checked, see #2891)"
+    root = home if home is not None else ha.hermes_home()
+    if not (root / "config.yaml").exists():
+        return Check(key, label, _PASS, "no Hermes agent installed")
+    get = http_get if http_get is not None else _hermes_http_get
+    host, port = ha.api_server_endpoint(root)
+    base = f"http://{host}:{port}"
+    served = ha.served_profiles(root, probe=probe)
+    registered = _upstream_names(upstreams_payload)
+    api_down = upstreams_payload is None
+    fails: list[str] = []
+    warns: list[str] = []
+    ok: list[str] = []
+    for profile in served:
+        model = ha.model_id_for(profile)
+        api_key = ha.api_key_for(profile, root)
+        if api_key is None:
+            nokey = (
+                f"profile {profile} has no usable API key; "
+                "run hal0 agent reprovision hermes --repair"
+            )
+            env = (
+                root / ".env"
+                if profile == ha.DEFAULT_PROFILE
+                else root / "profiles" / profile / ".env"
+            )
+            try:
+                env.read_text(encoding="utf-8")
+            except PermissionError:
+                warns.append(f"cannot read {env}; run hal0 doctor as hal0 or root")
+            except (OSError, UnicodeDecodeError):
+                warns.append(nokey)
+            else:
+                warns.append(nokey)
+            continue
+        prefix = "" if profile == ha.DEFAULT_PROFILE else f"/p/{profile}"
+        status, _body = get(f"{base}{prefix}/v1/models", {"Authorization": f"Bearer {api_key}"})
+        if status != 200:
+            fails.append(
+                f"profile {profile}: GET {prefix}/v1/models answered {status}, expected 200"
+            )
+            continue
+        if api_down:
+            warns.append(f"profile {profile}: hal0-api unreachable, upstream not verified")
+        elif ha.upstream_name_for(profile) not in registered:
+            warns.append(
+                f"profile {profile}: upstream {ha.upstream_name_for(profile)} missing; hal0-api has "
+                "not reconciled; restart hal0-api or POST /api/agents/hermes/reconcile-upstreams"
+            )
+        else:
+            ok.append(f"{profile}→{model}")
+    owned = {ha.model_id_for(p): p for p in served}
+    if isinstance(slots_payload, list):
+        for slot in slots_payload:
+            if not isinstance(slot, dict):
+                continue
+            mid = next(
+                (
+                    slot[k]
+                    for k in ("model_id", "model", "default_model")
+                    if isinstance(slot.get(k), str)
+                ),
+                None,
+            )
+            if mid in owned:
+                name = slot.get("name") or slot.get("alias") or slot.get("slug") or "?"
+                warns.append(
+                    f"slot {name} advertises {mid}, which Hermes profile {owned[mid]} owns; "
+                    "the Hermes upstream wins"
+                )
+    if fails:
+        return Check(key, label, _FAIL, "; ".join(fails + warns) + tail)
+    if warns:
+        return Check(key, label, _WARN, "; ".join(warns) + tail)
+    return Check(key, label, _PASS, "; ".join(ok) + tail)
+
+
 #: The Hermes gateway's system unit, written by ``hermes gateway install``.
 HERMES_GATEWAY_UNIT = Path("/etc/systemd/system/hermes-gateway.service")
 
@@ -1749,6 +1863,9 @@ def build_all_checks(base: str | None = None) -> list[Check]:
         check_voice_stt_weights(),
         check_seams(),
         check_mcp_mounts(),
+        check_hermes_api_upstreams(
+            upstreams_payload=_get_any("/api/upstreams", base), slots_payload=slots_payload
+        ),
         check_hermes_mcp_config_auth(auth=auth_payload),
         check_hermes_command_approvals(),
         check_hermes_delegation_slot(slots_payload),

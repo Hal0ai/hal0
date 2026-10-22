@@ -1152,7 +1152,9 @@ def test_anchor_window_warns_when_the_fetch_explodes(tmp_path) -> None:  # type:
 # ── build_all_checks orchestration ────────────────────────────────────────────
 
 
-def test_build_all_checks_composes_verify_plus_extras(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_build_all_checks_includes_hermes_api(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Composition test: also pins the ``hermes-api`` row and its payload wiring."""
+    hermes_api_kwargs: dict = {}
     monkeypatch.setattr(
         da,
         "gather_payloads",
@@ -1213,6 +1215,14 @@ def test_build_all_checks_composes_verify_plus_extras(monkeypatch: pytest.Monkey
     )
     monkeypatch.setattr(
         da,
+        "check_hermes_api_upstreams",
+        lambda **kw: (
+            hermes_api_kwargs.update(kw)
+            or Check("hermes-api", "Hermes API upstreams", "pass", "stubbed")
+        ),
+    )
+    monkeypatch.setattr(
+        da,
         "check_hermes_delegation_slot",
         lambda *_a, **_kw: Check(
             "hermes_delegation_slot", "Hermes delegation slot", "pass", "stubbed"
@@ -1265,8 +1275,8 @@ def test_build_all_checks_composes_verify_plus_extras(monkeypatch: pytest.Monkey
 
     checks = da.build_all_checks()
     keys = [c.key for c in checks]
-    # 7 verify rows + 24 extras.
-    assert keys[-24:] == [
+    # 7 verify rows + 25 extras.
+    assert keys[-25:] == [
         "auth",
         "models",
         "registry-toml",
@@ -1283,6 +1293,7 @@ def test_build_all_checks_composes_verify_plus_extras(monkeypatch: pytest.Monkey
         "stt-weights",
         "seams",
         "mcp_mounts",
+        "hermes-api",
         "hermes_mcp_auth",
         "hermes_command_approvals",
         "hermes_delegation_slot",
@@ -1294,6 +1305,8 @@ def test_build_all_checks_composes_verify_plus_extras(monkeypatch: pytest.Monkey
     ]
     assert "api" in keys and "runners" in keys
     assert da.overall_verdict(checks) == "ok"
+    assert hermes_api_kwargs["slots_payload"] == [{"port": 8081}]
+    assert "upstreams_payload" in hermes_api_kwargs
 
 
 # ── hal0 user linger (ADR-0034 decision 6) ───────────────────────────────────
@@ -1703,3 +1716,120 @@ def test_delegation_slot_offline_warns() -> None:
 def test_delegation_slot_ready_passes() -> None:
     slots = [{"name": "utility", "type": "llm", "state": "ready", "model_id": "m"}]
     assert da.check_hermes_delegation_slot(slots, slot_name="utility").status == "pass"
+
+
+# ── Hermes API upstreams ──────────────────────────────────────────────────────
+
+_KEY = "k" * 32
+_API_TAIL = " (API path only; MCP tools are not checked, see #2891)"
+
+
+def _hermes_home(tmp_path, *, default_key=True, alpha_key=True):
+    (tmp_path / "config.yaml").write_text("model: x\n")
+    if default_key:
+        (tmp_path / ".env").write_text(f"API_SERVER_KEY={_KEY}\n")
+    prof = tmp_path / "profiles" / "alpha"
+    prof.mkdir(parents=True)
+    if alpha_key:
+        (prof / ".env").write_text(f"API_SERVER_KEY={_KEY}\n")
+    return tmp_path
+
+
+def _api(home, *, status=200, upstreams=None, slots=None, calls=None):
+    def http_get(url, headers):
+        if calls is not None:
+            calls.append((url, headers))
+        return status, {"data": [{"id": "x"}]}
+
+    if upstreams is None:
+        upstreams = [{"name": "hermes"}, {"name": "hermes.alpha"}]
+    return da.check_hermes_api_upstreams(
+        home=home,
+        probe=lambda url: 200,
+        http_get=http_get,
+        upstreams_payload=upstreams,
+        slots_payload=slots,
+    )
+
+
+def test_check_hermes_api_upstreams_absent_passes(tmp_path) -> None:
+    c = da.check_hermes_api_upstreams(home=tmp_path, upstreams_payload=[])
+    assert (c.key, c.label, c.status, c.critical) == (
+        "hermes-api",
+        "Hermes API upstreams",
+        "pass",
+        False,
+    )
+    assert "no Hermes agent installed" in c.detail
+
+
+def test_check_hermes_api_upstreams_pass_lists_ids(tmp_path) -> None:
+    calls: list = []
+    c = _api(
+        _hermes_home(tmp_path),
+        calls=calls,
+        upstreams={"upstreams": [{"name": "hermes"}, {"name": "hermes.alpha"}]},
+    )
+    assert c.status == "pass"
+    assert "default→hermes-agent" in c.detail and "alpha→alpha" in c.detail
+    assert c.detail.endswith(_API_TAIL)
+    urls = {u for u, _ in calls}
+    assert "http://127.0.0.1:8642/v1/models" in urls
+    assert "http://127.0.0.1:8642/p/alpha/v1/models" in urls
+    assert all(h == {"Authorization": f"Bearer {_KEY}"} for _, h in calls)
+
+
+def test_check_hermes_api_upstreams_warns_without_key(tmp_path) -> None:
+    c = _api(_hermes_home(tmp_path, alpha_key=False))
+    assert c.status == "warn"
+    assert "alpha" in c.detail and "hal0 agent reprovision hermes --repair" in c.detail
+    assert c.detail.endswith(_API_TAIL)
+
+
+def test_check_hermes_api_upstreams_fails_on_401(tmp_path) -> None:
+    c = _api(_hermes_home(tmp_path), status=401)
+    assert c.status == "fail" and c.critical is False
+    assert "401" in c.detail and c.detail.endswith(_API_TAIL)
+
+
+def test_check_hermes_api_upstreams_warns_when_not_reconciled(tmp_path) -> None:
+    c = _api(_hermes_home(tmp_path), upstreams=[{"name": "hermes"}])
+    assert c.status == "warn"
+    assert "hermes.alpha" in c.detail
+    assert "POST /api/agents/hermes/reconcile-upstreams" in c.detail
+
+
+def test_check_hermes_api_upstreams_warns_on_collision(tmp_path) -> None:
+    c = _api(_hermes_home(tmp_path), slots=[{"name": "agent", "model_id": "alpha"}])
+    assert c.status == "warn"
+    assert "slot agent advertises alpha, which Hermes profile alpha owns" in c.detail
+    assert "the Hermes upstream wins" in c.detail
+
+
+def test_check_hermes_api_upstreams_warns_on_unreadable_env(tmp_path) -> None:
+    home = _hermes_home(tmp_path)
+    env = home / "profiles" / "alpha" / ".env"
+    orig = da.Path.read_text
+
+    def _deny(self, *a, **k):
+        if self == env:
+            raise PermissionError("denied")
+        return orig(self, *a, **k)
+
+    import pytest as _pt
+
+    with _pt.MonkeyPatch.context() as mp:
+        mp.setattr(da.Path, "read_text", _deny)
+        c = _api(home)
+    assert c.status == "warn"
+    assert "cannot read" in c.detail and "run hal0 doctor as hal0 or root" in c.detail
+
+
+def test_check_hermes_api_upstreams_warns_when_api_unreachable(tmp_path) -> None:
+    c = da.check_hermes_api_upstreams(
+        home=_hermes_home(tmp_path),
+        probe=lambda url: 200,
+        http_get=lambda url, headers: (200, {}),
+        upstreams_payload=None,
+    )
+    assert c.status == "warn" and "hal0-api unreachable" in c.detail
