@@ -1672,6 +1672,13 @@ def _upstream_names(payload: Any) -> set[str]:
     return {r["name"] for r in rows if isinstance(r, dict) and isinstance(r.get("name"), str)}
 
 
+def _gateway_expected() -> bool:
+    """Whether ``hermes-gateway.service`` is enabled or running (``linger.gateway_in_use``)."""
+    from hal0.system.linger import gateway_in_use
+
+    return gateway_in_use()
+
+
 def check_hermes_api_upstreams(
     *,
     home: Path | None = None,
@@ -1679,6 +1686,7 @@ def check_hermes_api_upstreams(
     http_get: Callable[[str, dict[str, str]], tuple[int, Any]] | None = None,
     upstreams_payload: Any = None,
     slots_payload: Any = None,
+    gateway_expected: Callable[[], bool] | None = None,
 ) -> Check:
     """Each served Hermes profile's API path: key, authenticated ``/v1/models``, upstream.
 
@@ -1706,16 +1714,22 @@ def check_hermes_api_upstreams(
         return Check(key, label, _PASS, "no Hermes agent installed")
     get = http_get if http_get is not None else _hermes_http_get
     base = ha.api_server_base(root)
-    if not ha.gateway_alive(root, probe=probe):
-        # A gateway the operator turned off (systemctl disable --now, #2815)
-        # is a legitimate state, not a broken API path: say what is not
-        # checked and how to turn it on, instead of a FAIL per profile.
+    health = (probe if probe is not None else ha.probe_status)(f"{base}/health")
+    expected = gateway_expected if gateway_expected is not None else _gateway_expected
+    if health == 0 and not expected():
+        # Transport failure (0, never an HTTP status: a 503 is a running but
+        # unhealthy gateway and stays on the FAIL path below) AND the unit is
+        # neither enabled nor running: the operator turned the gateway off
+        # (systemctl disable --now, #2815). That is a legitimate state, not a
+        # broken API path, so say what is not checked and how to turn it on
+        # instead of a FAIL per profile. An enabled gateway that does not
+        # answer is an outage and keeps failing below.
         return Check(
             key,
             label,
             _WARN,
-            f"Hermes gateway not answering {base}/health, so the API path is not checked; "
-            "if the gateway is meant to run: sudo systemctl enable --now hermes-gateway" + tail,
+            f"Hermes gateway is disabled and not running ({base}/health unreachable), so the "
+            "API path is not checked; to run it: sudo systemctl enable --now hermes-gateway" + tail,
         )
     served = ha.served_profiles(root, probe=probe)
     registered = _upstream_names(upstreams_payload)
