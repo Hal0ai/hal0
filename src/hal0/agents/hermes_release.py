@@ -312,6 +312,37 @@ def require_vetted(ref: str) -> str:
     return ref
 
 
+def live_ref(layout: Layout | None = None) -> str | None:
+    """The ref of the live release, or None when there is none (or it is legacy)."""
+    lay = layout if layout is not None else Layout.for_venv(hp.HERMES_VENV_DEFAULT)
+    try:
+        live = live_release(lay)
+    except OSError:
+        return None
+    return live.ref or None if live is not None else None
+
+
+def refuse_downgrade(ref: str, *, live: str | None) -> None:
+    """Raise ``ReleaseError`` when building ``ref`` would run an older vetted release
+    over the ``state.db`` the newer live one has written (upstream #140060).
+
+    Only two vetted refs can be ordered; an unknown or absent live ref passes.
+    """
+    versions = hp.VETTED_HERMES_VERSIONS
+    if live is None or live == ref or live not in versions or ref not in versions:
+        return
+    if versions[ref] < versions[live]:
+        want = ".".join(map(str, versions[ref]))
+        have = ".".join(map(str, versions[live]))
+        raise ReleaseError(
+            "downgrade",
+            f"{ref[:12]} is v{want}, older than the live v{have} ({live[:12]}): a downgrade "
+            "over the state.db the newer release has written is refused (upstream refuses "
+            "it too, and hal0's release switch keeps only config.yaml). A manual rollback "
+            "path is tracked in #2805",
+        )
+
+
 def target_minor(ref: str | None = None) -> str:
     """The interpreter minor a release of ``ref`` is built on.
 

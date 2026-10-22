@@ -926,6 +926,19 @@ VETTED_HERMES_REFS: frozenset[str] = frozenset(
     }
 )
 
+#: The upstream release each vetted ref is, for ordering two vetted refs.
+#: ``hal0 agent upgrade hermes --to`` refuses to build an older one over a
+#: newer one's ``state.db``: upstream's own ``hermes update`` refuses that
+#: downgrade, and hal0's release switch snapshots only ``config.yaml``, so the
+#: persisted gateway runtime state (session guards, policy receipts) would run
+#: under a release that predates it (upstream #140060; manual rollback is
+#: deferred to #2805). The automatic flip-back after a failed activation is
+#: not a build and is unaffected.
+VETTED_HERMES_VERSIONS: dict[str, tuple[int, int, int]] = {
+    "4d04303818b61bf3aa09278af48356315515965b": (0, 22, 4),
+    "d923a5eb487a17c0a68801bba9ef0f56c81040a8": (0, 22, 2),
+}
+
 #: The ``requires-python`` each vetted ref declares in its pyproject.toml,
 #: recorded at review time so the target minor is known before a checkout
 #: exists (the build trigger, the root prelude). The build re-reads it from

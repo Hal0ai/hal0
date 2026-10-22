@@ -2202,18 +2202,23 @@ def agent_upgrade(
     if name != "hermes":
         die(f"upgrade currently only supports `hermes`; got {name!r}.")
         return
-    from hal0.agents.hermes_release import ReleaseError, require_vetted
+    from hal0.agents import hermes_release as hr
 
     if to is not None:
         try:
-            require_vetted(to.strip())
-        except ReleaseError as exc:
+            hr.require_vetted(to.strip())
+        except hr.ReleaseError as exc:
             die(
                 f"--to: {exc}. Pass a full commit sha from VETTED_HERMES_REFS; "
                 "version strings and `==X.Y.Z` specs are no longer accepted."
             )
             return
         to = to.strip()
+        try:
+            hr.refuse_downgrade(to, live=hr.live_ref())
+        except hr.ReleaseError as exc:
+            die(f"--to: {exc}.")
+            return
     console.print(
         f"[bold]Building a Hermes release[/bold] of {to[:12] if to else 'the pinned ref'} "
         "(release layout, flip-back on failure)…"
