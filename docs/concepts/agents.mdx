@@ -50,6 +50,13 @@ Hermes's own dashboard (its Chat tab), which the hal0 dashboard links to once
 hal0's own inference and admin surfaces through environment hal0 writes for
 it (the API URL and the admin/memory MCP URLs).
 
+Hermes Desktop can pair with that dashboard remotely (token mode, through
+whatever reverse proxy you put in front of it). The token it stores is the
+dashboard's session token, which Hermes would otherwise mint fresh at every
+start; hal0 mints one per install and hands it to the dashboard at every
+start, so the pairing survives restarts and `hal0 update`. Read it with
+`hal0 agent dashboard-token hermes`.
+
 <Aside type="note">
 "Bundle, don't build" is the explicit design stance. hal0 governs and wires
 the agent runtime; it doesn't reimplement one.

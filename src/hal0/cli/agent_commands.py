@@ -2143,6 +2143,40 @@ def agent_log(
         console.print(log_file.read_text())
 
 
+@app.command("dashboard-token")
+def agent_dashboard_token(
+    name: str = typer.Argument("hermes", help="Bundled agent name (default: hermes)."),
+) -> None:
+    """Print the agent's stable dashboard session token.
+
+    Hermes Desktop in remote mode (token auth) stores this token and puts it
+    on every ``/api/ws`` upgrade. ``hal0-agent@<name>`` mints it once, under
+    ``/var/lib/hal0/state/agents/<name>/``, and exports it to the dashboard as
+    ``HERMES_DASHBOARD_SESSION_TOKEN`` at every start, so a pairing survives
+    restarts and ``hal0 update`` (#2899). Run as root or as the ``hal0`` user.
+    """
+    from hal0.cli.agent_shim import dashboard_session_token_path
+
+    path = dashboard_session_token_path(name)
+    try:
+        token = path.read_text(encoding="utf-8").strip()
+    except FileNotFoundError:
+        token = ""
+    except PermissionError:
+        _stderr_console.print(
+            f"[red]{name}: cannot read {path} — run as root or as the hal0 user.[/red]"
+        )
+        raise typer.Exit(1) from None
+    if not token:
+        _stderr_console.print(
+            f"[red]{name}: no dashboard session token at {path} yet — it is minted the "
+            f"first time hal0-agent@{name}.service starts (systemctl start "
+            f"hal0-agent@{name}).[/red]"
+        )
+        raise typer.Exit(1)
+    typer.echo(token)
+
+
 @app.command("upgrade")
 def agent_upgrade(
     name: str = typer.Argument("hermes", help="Bundled agent name."),

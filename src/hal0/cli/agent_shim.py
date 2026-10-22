@@ -37,6 +37,7 @@ import argparse
 import contextlib
 import os
 import pwd
+import secrets
 import shutil
 import signal
 import socket
@@ -78,6 +79,24 @@ _BUILTIN_AGENT_TYPES: dict[str, str] = {
 
 # Per-type default loopback port. hermes → upstream's 9119.
 _DEFAULT_PORTS: dict[str, int] = {"hermes": 9119}
+
+# hal0-owned per-agent state (provision.json, venv.pin live here too). The
+# shim runs as the ``hal0`` user, which owns this tree, so it can mint files
+# here without a root seam — unlike ``/var/lib/hal0/secrets/agents`` (0700 root).
+_STATE_AGENTS_DIR = Path("/var/lib/hal0/state/agents")
+
+#: Basename of the per-install dashboard session token under
+#: ``_STATE_AGENTS_DIR/<agent_id>/`` (#2899).
+DASHBOARD_SESSION_TOKEN_FILE = "dashboard-session-token"
+
+
+def dashboard_session_token_path(agent_id: str) -> Path:
+    """Where the stable dashboard session token for ``agent_id`` lives.
+
+    Single owner of the path: ``hal0 agent dashboard-token`` reads it from
+    here, and :func:`_build_hermes_env` mints it here.
+    """
+    return _STATE_AGENTS_DIR / agent_id / DASHBOARD_SESSION_TOKEN_FILE
 
 
 @dataclass(frozen=True)
@@ -392,6 +411,69 @@ def _runas_popen_extras(
     return {"user": ent.pw_uid, "group": ent.pw_gid}
 
 
+def _dashboard_session_token(
+    cfg: AgentConfig,
+    *,
+    user: str = "hal0",
+    geteuid: Callable[[], int] = os.geteuid,
+    getpwnam: Callable[[str], Any] = pwd.getpwnam,
+) -> str | None:
+    """The per-install dashboard session token, minted on first use (#2899).
+
+    Hermes resolves its dashboard ``_SESSION_TOKEN`` as
+    ``os.environ.get("HERMES_DASHBOARD_SESSION_TOKEN") or secrets.token_urlsafe(32)``
+    (``hermes_cli/web_server.py``, v0.22.2), i.e. fresh at every start unless
+    the shell that spawns it sets the variable. In loopback mode ``/api/ws``
+    accepts only ``?token=<that value>``, so a Hermes Desktop remote pairing
+    (token mode) that stored the token died at the next restart or
+    ``hal0 update`` with a misleading "proxy or firewall" message and nothing
+    in the journal.
+
+    The token lives at :func:`dashboard_session_token_path` (0600, owned by
+    the agent user). A manual root ``hal0-agent hermes serve`` drops its child
+    to ``user`` (#843); a file root mints is handed to that user so the unit's
+    next start can read it. Any failure returns ``None`` and says why on
+    stderr: Hermes then keeps its per-process token, which is exactly the
+    pre-fix behaviour, so this can never block a start.
+    """
+    path = dashboard_session_token_path(cfg.agent_id)
+    try:
+        try:
+            existing = path.read_text(encoding="utf-8").strip()
+        except FileNotFoundError:
+            existing = ""
+        if existing:
+            return existing
+        token = secrets.token_urlsafe(32)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write(token + "\n")
+        except BaseException:
+            with contextlib.suppress(OSError):
+                tmp.unlink()
+            raise
+        os.replace(tmp, path)
+        if geteuid() == 0:
+            try:
+                ent = getpwnam(user)
+            except KeyError:
+                ent = None
+            if ent is not None:
+                os.chown(path, ent.pw_uid, ent.pw_gid)
+        return token
+    except OSError as exc:
+        print(
+            f"hal0-agent: dashboard session token unavailable ({path}: {exc}); "
+            "Hermes mints a new one at every start, so a Desktop remote pairing "
+            "will not survive a restart",
+            file=sys.stderr,
+        )
+        return None
+
+
 def _build_hermes_env(cfg: AgentConfig) -> dict[str, str]:
     """Build the child env for Hermes — inherits parent + adds hal0 keys."""
 
@@ -413,6 +495,16 @@ def _build_hermes_env(cfg: AgentConfig) -> dict[str, str]:
             env["HERMES_WEB_DIST"] = str(web_dist)
         else:
             env.pop("HERMES_WEB_DIST", None)
+    # Stable dashboard session token (#2899). A value already in the env — a
+    # `systemctl edit` drop-in — is the operator's explicit choice and wins;
+    # otherwise mint/read the per-install file. When neither is available the
+    # variable is absent and Hermes mints its own per-process token.
+    if not env.get("HERMES_DASHBOARD_SESSION_TOKEN"):
+        token = _dashboard_session_token(cfg)
+        if token:
+            env["HERMES_DASHBOARD_SESSION_TOKEN"] = token
+        else:
+            env.pop("HERMES_DASHBOARD_SESSION_TOKEN", None)
     # Drop NOTIFY_SOCKET from the child — the shim owns sd_notify,
     # and a misbehaving Hermes plugin shouldn't be able to send
     # READY=1 / STOPPING=1 to systemd on our behalf.

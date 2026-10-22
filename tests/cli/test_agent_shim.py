@@ -21,6 +21,19 @@ import pytest
 
 from hal0.cli import agent_shim
 
+
+@pytest.fixture(autouse=True)
+def _token_state_under_tmp(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Point the dashboard session-token file at tmp_path for every test.
+
+    ``_build_hermes_env`` mints the token under ``/var/lib/hal0/state/agents``
+    by default; this suite runs on live hal0 boxes too, so it must never
+    touch (or be fooled by) the real file there.
+    """
+    monkeypatch.setattr(agent_shim, "_STATE_AGENTS_DIR", tmp_path / "state" / "agents")
+    monkeypatch.delenv("HERMES_DASHBOARD_SESSION_TOKEN", raising=False)
+
+
 # ---------------------------------------------------------------------------
 # Argv parsing
 # ---------------------------------------------------------------------------
@@ -385,6 +398,89 @@ class TestHermesEnv:
         with patch.dict(os.environ, {"HERMES_WEB_DIST": stale}):
             env = agent_shim._build_hermes_env(_cfg(venv=tmp_path))
         assert "HERMES_WEB_DIST" not in env
+
+
+# ---------------------------------------------------------------------------
+# Dashboard session token (#2899)
+# ---------------------------------------------------------------------------
+
+
+class TestDashboardSessionToken:
+    """Hermes mints ``_SESSION_TOKEN`` fresh per process unless
+    ``HERMES_DASHBOARD_SESSION_TOKEN`` is set; a Desktop remote pairing that
+    stored the token therefore died at every restart. The shim now mints one
+    per install and exports it."""
+
+    def test_token_minted_once_and_exported(self, tmp_path: Path) -> None:
+        env = agent_shim._build_hermes_env(_cfg())
+        token = env["HERMES_DASHBOARD_SESSION_TOKEN"]
+        assert len(token) >= 32
+        path = agent_shim.dashboard_session_token_path("hermes")
+        assert path == tmp_path / "state" / "agents" / "hermes" / "dashboard-session-token"
+        assert path.read_text() == token + "\n"
+        assert path.stat().st_mode & 0o777 == 0o600
+
+    def test_token_stable_across_restarts(self) -> None:
+        first = agent_shim._build_hermes_env(_cfg())["HERMES_DASHBOARD_SESSION_TOKEN"]
+        second = agent_shim._build_hermes_env(_cfg())["HERMES_DASHBOARD_SESSION_TOKEN"]
+        assert first == second
+
+    def test_token_is_per_agent(self) -> None:
+        hermes = agent_shim._build_hermes_env(_cfg(agent_id="hermes"))
+        other = agent_shim._build_hermes_env(_cfg(agent_id="piccoder"))
+        assert hermes["HERMES_DASHBOARD_SESSION_TOKEN"] != other["HERMES_DASHBOARD_SESSION_TOKEN"]
+
+    def test_existing_file_is_read_not_replaced(self) -> None:
+        path = agent_shim.dashboard_session_token_path("hermes")
+        path.parent.mkdir(parents=True)
+        path.write_text("operator-chosen-token\n")
+        env = agent_shim._build_hermes_env(_cfg())
+        assert env["HERMES_DASHBOARD_SESSION_TOKEN"] == "operator-chosen-token"
+
+    def test_operator_env_wins_over_file(self) -> None:
+        # A `systemctl edit` drop-in that sets the variable is the operator's
+        # explicit choice; the shim neither overrides it nor mints a file.
+        with patch.dict(os.environ, {"HERMES_DASHBOARD_SESSION_TOKEN": "from-dropin"}):
+            env = agent_shim._build_hermes_env(_cfg())
+        assert env["HERMES_DASHBOARD_SESSION_TOKEN"] == "from-dropin"
+        assert not agent_shim.dashboard_session_token_path("hermes").exists()
+
+    def test_blank_file_is_replaced(self) -> None:
+        path = agent_shim.dashboard_session_token_path("hermes")
+        path.parent.mkdir(parents=True)
+        path.write_text("\n")
+        env = agent_shim._build_hermes_env(_cfg())
+        assert len(env["HERMES_DASHBOARD_SESSION_TOKEN"]) >= 32
+        assert path.read_text().strip() == env["HERMES_DASHBOARD_SESSION_TOKEN"]
+
+    def test_unwritable_state_dir_never_blocks_start(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # The variable is simply absent: Hermes falls back to its per-process
+        # token, exactly the pre-fix behaviour, and the shim says why.
+        with patch.object(agent_shim.Path, "mkdir", side_effect=PermissionError("ro")):
+            env = agent_shim._build_hermes_env(_cfg())
+        assert "HERMES_DASHBOARD_SESSION_TOKEN" not in env
+        assert "dashboard session token" in capsys.readouterr().err
+
+    def test_root_run_hands_the_file_to_the_agent_user(self) -> None:
+        # A manual root `hal0-agent hermes serve` drops the child to hal0
+        # (#843); the file it mints must be readable by the unit's next start.
+        chowned: list[tuple[Path, int, int]] = []
+        with patch.object(
+            agent_shim.os, "chown", side_effect=lambda p, u, g: chowned.append((Path(p), u, g))
+        ):
+            token = agent_shim._dashboard_session_token(
+                _cfg(), geteuid=lambda: 0, getpwnam=_fake_pw(996, 996, "/var/lib/hal0")
+            )
+        path = agent_shim.dashboard_session_token_path("hermes")
+        assert token and path.read_text().strip() == token
+        assert chowned == [(path, 996, 996)]
+
+    def test_non_root_run_does_not_chown(self) -> None:
+        with patch.object(agent_shim.os, "chown") as chown:
+            agent_shim._dashboard_session_token(_cfg(), geteuid=lambda: 1000)
+        chown.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
