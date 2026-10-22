@@ -479,6 +479,26 @@ def _is_remote_model(request: Request, model_id: str) -> bool:
     return False
 
 
+def _is_pinned_owned(request: Request, model_id: str) -> bool:
+    """True if a ``pinned`` upstream lists ``model_id`` in its ``owned_models``.
+
+    Mirrors ``Dispatcher._pinned_owner``: only ``owned_models`` confers
+    ownership, never a models cache, so a hal0 peer or cloud remote that
+    happens to advertise a slot alias (``agent``) cannot suppress the local
+    alias rewrite and backend load.
+    """
+    upstreams = getattr(request.app.state, "upstreams", None)
+    if upstreams is None:
+        return False
+    try:
+        return any(
+            getattr(u, "pinned", False) and model_id in getattr(u, "owned_models", ())
+            for u in upstreams.list()
+        )
+    except Exception:  # pragma: no cover — defensive
+        return False
+
+
 async def _slot_thinking_default(
     request: Request, model_id: str, slot_name: str | None = None
 ) -> bool | None:
@@ -814,7 +834,7 @@ async def _dispatch_and_forward(
     # A model owned by a pinned remote upstream is never aliased to, or
     # loaded as, a same-named local slot.
     requested = body.get("model")
-    owned_remotely = isinstance(requested, str) and _is_remote_model(request, requested.strip())
+    owned_remotely = isinstance(requested, str) and _is_pinned_owned(request, requested.strip())
     if not owned_remotely:
         body = await _rewrite_chat_slot_alias(request, body)
         # #430: backend-aware load BEFORE dispatch, so a slot-backed model is
