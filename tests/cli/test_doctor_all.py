@@ -2231,3 +2231,14 @@ def test_profiles_mcp_warns_on_a_symlinked_home(tmp_path) -> None:
     link.symlink_to(real_home, target_is_directory=True)
     c = da.check_hermes_profiles_mcp(auth={"auth_required": True}, home=link)
     assert c.status == "warn" and "is a symlink" in c.detail
+
+
+def test_profiles_mcp_reports_a_symlinked_profile_as_unmanaged(tmp_path) -> None:
+    """Codex P2: the writer never follows a linked profile, so doctor must not call it wired."""
+    home = _profiles_home(tmp_path, coder=_WIRED)
+    real = tmp_path / "elsewhere"
+    real.mkdir()
+    (real / "config.yaml").write_text(_WIRED.replace("hermes__coder", "hermes__linked"))
+    (home / "profiles" / "linked").symlink_to(real, target_is_directory=True)
+    c = da.check_hermes_profiles_mcp(auth={"auth_required": True}, home=home)
+    assert c.status == "warn" and "linked are symlinks" in c.detail and "wired" not in c.detail

@@ -1322,14 +1322,22 @@ def check_hermes_profiles_mcp(
         return Check(key, label, _WARN, unreadable_msg)
     if os.path.lexists(profiles) and not os.access(profiles, os.R_OK | os.X_OK):
         return Check(key, label, _WARN, unreadable_msg)
+    linked: list[str] = []
     try:
-        entries = sorted(p.name for p in profiles.iterdir() if p.is_dir())
+        entries = []
+        for p in sorted(profiles.iterdir(), key=lambda p: p.name):
+            if p.is_symlink():  # the writer never follows it: unmanaged, say so
+                if p.name != "hal0-brain" and hp.HERMES_PROFILE_ID_RE.match(p.name):
+                    linked.append(p.name)
+                continue
+            if p.is_dir():
+                entries.append(p.name)
     except FileNotFoundError:
         entries = []
     except OSError as exc:  # enumeration itself failed: never a green "no profiles"
         return Check(key, label, _WARN, f"cannot list {profiles}: {exc}")
     names = [n for n in entries if n != "hal0-brain" and hp.HERMES_PROFILE_ID_RE.match(n)]
-    if not names:
+    if not names and not linked:
         return Check(key, label, _PASS, "no named Hermes profiles")
     auth_required = bool((auth or {}).get("auth_required"))
 
@@ -1439,9 +1447,14 @@ def check_hermes_profiles_mcp(
             f"profile(s) {', '.join(no_config)} have no config.yaml; hal0 wires a profile once "
             "Hermes creates its config"
         )
+    if linked:
+        parts.append(
+            f"profile(s) {', '.join(linked)} are symlinks; hal0 never wires or repairs a linked "
+            "profile, replace the link with a real directory"
+        )
     if unauthed:
         return Check(key, label, _FAIL, "; ".join(parts))
-    if unwired or drifted or unreadable:
+    if unwired or drifted or unreadable or linked:
         return Check(key, label, _WARN, "; ".join(parts))
     detail = f"wired: {', '.join(wired)}" if wired else "no profile wired"
     if opted_out:
