@@ -279,6 +279,8 @@ def test_default_model_id_override_precedence(home: Path, monkeypatch: pytest.Mo
     (home / "config.yaml").write_text(
         "gateway:\n  platforms:\n    api_server:\n      model_name: from-config\n"
     )
+    assert hermes_api.model_id_for("default", home) == "from-env"  # env > config
+    monkeypatch.delenv("API_SERVER_MODEL_NAME")
     assert hermes_api.model_id_for("default", home) == "from-config"
     # Named profiles keep their name: Hermes resolves them with an empty override.
     assert hermes_api.model_id_for("coder", home) == "coder"

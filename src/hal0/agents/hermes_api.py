@@ -247,19 +247,26 @@ def ensure_profile_keys(home: Path) -> list[str]:
 def default_model_id(home: Path | None = None) -> str:
     """Model id the default profile advertises at ``/v1/models``.
 
-    Hermes feeds ``extra.model_name`` (config
-    ``gateway.platforms.api_server.model_name``, else env
-    ``API_SERVER_MODEL_NAME``) into ``_resolve_model_name`` as the explicit
-    override, which wins over ``hermes-agent``
+    Hermes feeds ``extra.model_name`` into ``_resolve_model_name`` as the
+    explicit override, which wins over ``hermes-agent``
     (``api_server.py:1198-1200``, ``:1458-1468``; precedence in
-    ``hermes_cli/model_switch.py:630-641``; env seeding in
-    ``gateway/config_env.py:314``). Same config-then-env order as
-    :func:`api_server_endpoint`; the env is hal0-api's, not the gateway's.
+    ``hermes_cli/model_switch.py:630-641``). Env beats config.yaml
+    (``gateway/config.py:840`` "Priority: env > config.yaml"):
+    ``_env_extras`` overwrites ``extra["model_name"]`` whenever
+    ``API_SERVER_MODEL_NAME`` is truthy (``gateway/config_env.py:141-151``,
+    ``:314``), gated on a usable ``API_SERVER_KEY`` (``:308-310``). So: env,
+    then config ``gateway.platforms.api_server.model_name``, then
+    ``hermes-agent``. The env read is hal0-api's own process env; hal0
+    renders no ``API_SERVER_*`` gateway env, so on a managed box config.yaml
+    is the source.
     """
+    env = os.environ.get("API_SERVER_MODEL_NAME", "").strip()
+    if env:
+        return env
     block = _api_server_block(home if home is not None else hermes_home())
     configured = block.get("model_name")
-    name = str(configured).strip() if isinstance(configured, str) else ""
-    return name or os.environ.get("API_SERVER_MODEL_NAME", "").strip() or DEFAULT_MODEL_ID
+    name = configured.strip() if isinstance(configured, str) else ""
+    return name or DEFAULT_MODEL_ID
 
 
 def model_id_for(profile: str, home: Path | None = None) -> str:
