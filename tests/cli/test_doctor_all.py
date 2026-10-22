@@ -1213,6 +1213,13 @@ def test_build_all_checks_composes_verify_plus_extras(monkeypatch: pytest.Monkey
     )
     monkeypatch.setattr(
         da,
+        "check_hermes_delegation_slot",
+        lambda *_a, **_kw: Check(
+            "hermes_delegation_slot", "Hermes delegation slot", "pass", "stubbed"
+        ),
+    )
+    monkeypatch.setattr(
+        da,
         "check_hindsight_llm_auth",
         lambda **_kw: Check("hindsight_llm_auth", "Memory engine LLM auth", "pass", "stubbed"),
     )
@@ -1258,8 +1265,8 @@ def test_build_all_checks_composes_verify_plus_extras(monkeypatch: pytest.Monkey
 
     checks = da.build_all_checks()
     keys = [c.key for c in checks]
-    # 7 verify rows + 23 extras.
-    assert keys[-23:] == [
+    # 7 verify rows + 24 extras.
+    assert keys[-24:] == [
         "auth",
         "models",
         "registry-toml",
@@ -1278,6 +1285,7 @@ def test_build_all_checks_composes_verify_plus_extras(monkeypatch: pytest.Monkey
         "mcp_mounts",
         "hermes_mcp_auth",
         "hermes_command_approvals",
+        "hermes_delegation_slot",
         "hermes_anchor_window",
         "hal0_linger",
         "hindsight_llm_auth",
@@ -1678,3 +1686,19 @@ def test_command_approvals_invalid_value_warns(tmp_path) -> None:
 def test_command_approvals_unreadable_config_is_not_a_finding(tmp_path) -> None:
     c = _approvals_check(tmp_path, rendered=None, in_sync=None)
     assert c.status == "pass" and "run as root" in c.detail
+
+
+def test_delegation_slot_default_passes() -> None:
+    c = da.check_hermes_delegation_slot([], slot_name="agent")
+    assert c.status == "pass"
+
+
+def test_delegation_slot_offline_warns() -> None:
+    slots = [{"name": "utility", "type": "llm", "state": "warming", "model_id": "m"}]
+    c = da.check_hermes_delegation_slot(slots, slot_name="utility")
+    assert c.status == "warn" and "utility" in c.detail
+
+
+def test_delegation_slot_ready_passes() -> None:
+    slots = [{"name": "utility", "type": "llm", "state": "ready", "model_id": "m"}]
+    assert da.check_hermes_delegation_slot(slots, slot_name="utility").status == "pass"

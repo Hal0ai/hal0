@@ -3088,7 +3088,9 @@ def _phase_config_write(ctx: _StepCtx) -> PhaseResult:
     # slot. Both hit hal0's /v1 endpoint, so a missing slot degrades safely
     # (delegation omitted / aux → "main").
     hal0_v1_base = primary["backend_url"]
-    delegation = _resolve_delegation(slots_all, hal0_base_url=hal0_v1_base)
+    delegation = _resolve_delegation(
+        slots_all, hal0_base_url=hal0_v1_base, slot_name=read_delegation_slot()
+    )
     auxiliary_tasks = _resolve_auxiliary_tasks(slots_all, hal0_base_url=hal0_v1_base)
     # Probe-driven mcp_servers: mcp_wire runs immediately BEFORE us in the linear
     # pipeline, so its live probe result is available via output_of. Fall back to
@@ -5501,6 +5503,42 @@ _MAIN_AUX_TASKS: tuple[str, ...] = ("vision",)
 _DELEGATION_SLOT_NAME = "agent"
 
 
+def read_delegation_slot(path: Path | None = None) -> str:
+    """The operator's ``[hermes].delegation_slot`` from the root-owned seed TOML.
+
+    Lenient like the command-approvals reader: an absent key, an unreadable
+    seed or an invalid value all yield :data:`_DELEGATION_SLOT_NAME`
+    (``agent``). Never raises; provisioning must not abort over this key.
+    """
+    import tomllib
+
+    from pydantic import ValidationError
+
+    from hal0.config.schema import HermesAgentSettings
+
+    seed = path or INSTALL_SEED_PATH
+    try:
+        data = tomllib.loads(seed.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return _DELEGATION_SLOT_NAME
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
+        log.warning("hermes_provision.delegation_slot_seed_unreadable", path=str(seed))
+        return _DELEGATION_SLOT_NAME
+    table = data.get("hermes")
+    if not isinstance(table, dict) or "delegation_slot" not in table:
+        return _DELEGATION_SLOT_NAME
+    raw = table["delegation_slot"]
+    try:
+        return HermesAgentSettings(delegation_slot=raw).delegation_slot
+    except ValidationError:
+        log.warning(
+            "hermes_provision.delegation_slot_invalid",
+            value=str(raw),
+            fallback=_DELEGATION_SLOT_NAME,
+        )
+        return _DELEGATION_SLOT_NAME
+
+
 def _find_named_ready_slot(slots: list[dict[str, Any]], name: str) -> dict[str, Any] | None:
     """Return the ready ``type=='llm'`` slot whose name matches ``name``.
 
@@ -5527,8 +5565,9 @@ def _resolve_delegation(
     slots: list[dict[str, Any]],
     *,
     hal0_base_url: str,
+    slot_name: str = _DELEGATION_SLOT_NAME,
 ) -> dict[str, Any] | None:
-    """Build the ``delegation`` template dict from the ``agent`` slot.
+    """Build the ``delegation`` template dict from ``slot_name`` (default ``agent``).
 
     Returns ``{model, base_url, provider}`` when the slot is live, else
     ``None`` so the template omits the block and subagents inherit the
@@ -5536,7 +5575,7 @@ def _resolve_delegation(
     used for the main model — setting it makes upstream auto-resolve the
     provider to "custom".
     """
-    slot = _find_named_ready_slot(slots, _DELEGATION_SLOT_NAME)
+    slot = _find_named_ready_slot(slots, slot_name)
     if slot is None:
         return None
     return {

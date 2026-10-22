@@ -1801,6 +1801,31 @@ def test_resolve_delegation_none_when_slot_not_ready() -> None:
     assert hp._resolve_delegation(slots, hal0_base_url=_HAL0_V1) is None
 
 
+def test_resolve_delegation_honours_configured_slot() -> None:
+    deleg = hp._resolve_delegation(_ROLE_SLOTS, hal0_base_url=_HAL0_V1, slot_name="utility")
+    assert deleg is not None
+    assert deleg["model"] == "qwen3-zero-coder-v2-0.8b-f16"
+
+
+def test_resolve_delegation_configured_slot_offline_is_none() -> None:
+    assert (
+        hp._resolve_delegation(_ROLE_SLOTS[:2], hal0_base_url=_HAL0_V1, slot_name="utility") is None
+    )
+
+
+def test_read_delegation_slot(tmp_path) -> None:
+    seed = tmp_path / "hermes.toml"
+    assert hp.read_delegation_slot(seed) == "agent"  # absent file
+    seed.write_text('[hermes]\ndelegation_slot = "utility"\n')
+    assert hp.read_delegation_slot(seed) == "utility"
+    seed.write_text('[hermes]\ndelegation_slot = "bad slot!"\n')
+    assert hp.read_delegation_slot(seed) == "agent"  # invalid -> default
+    seed.write_text("not = [toml")
+    assert hp.read_delegation_slot(seed) == "agent"  # unreadable -> default
+    seed.write_text('[hermes]\ncommand_approvals = "manual"\n')
+    assert hp.read_delegation_slot(seed) == "agent"  # key absent
+
+
 def test_resolve_auxiliary_tasks_routes_utility_group_to_utility_slot() -> None:
     aux = hp._resolve_auxiliary_tasks(_ROLE_SLOTS, hal0_base_url=_HAL0_V1)
     # Utility group → custom provider on the utility slot's model.

@@ -1344,6 +1344,38 @@ def check_hermes_command_approvals(
     return Check(name, label, _PASS, f"{effective} ({st.get('source')})")
 
 
+def check_hermes_delegation_slot(
+    slots: Any,
+    *,
+    slot_name: str | None = None,
+) -> Check:
+    """The operator-chosen Hermes delegation slot must be ready.
+
+    ADVISORY. Only an explicit non-default ``[hermes].delegation_slot`` is
+    checked: the default (``agent``) is the parent's own slot. When the named
+    slot is absent or not dispatchable, provisioning omits the delegation
+    block and children silently inherit the parent model.
+    """
+    from hal0.agents import hermes_provision as hp
+
+    name, label = "hermes_delegation_slot", "Hermes delegation slot"
+    chosen = slot_name if slot_name is not None else hp.read_delegation_slot()
+    if chosen == hp._DELEGATION_SLOT_NAME:
+        return Check(name, label, _PASS, f"{chosen} (default)")
+    if not isinstance(slots, list):
+        return Check(name, label, _PASS, f"{chosen}; slot state unavailable")
+    if hp._find_named_ready_slot(slots, chosen) is None:
+        return Check(
+            name,
+            label,
+            _WARN,
+            f"delegation_slot is {chosen!r} but that slot is not ready; delegate_task "
+            "children inherit the parent model until it is — start the slot or set "
+            "[hermes].delegation_slot back to 'agent' in /etc/hal0/agents/hermes.toml",
+        )
+    return Check(name, label, _PASS, f"{chosen} (ready)")
+
+
 #: The Hermes gateway's system unit, written by ``hermes gateway install``.
 HERMES_GATEWAY_UNIT = Path("/etc/systemd/system/hermes-gateway.service")
 
@@ -1714,6 +1746,7 @@ def build_all_checks(base: str | None = None) -> list[Check]:
         check_mcp_mounts(),
         check_hermes_mcp_config_auth(auth=auth_payload),
         check_hermes_command_approvals(),
+        check_hermes_delegation_slot(slots_payload),
         check_hermes_anchor_window(base=base),
         check_hal0_linger(),
         check_hindsight_llm_auth(auth=auth_payload),
