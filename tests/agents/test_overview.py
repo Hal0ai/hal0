@@ -169,6 +169,21 @@ def test_gateway_down_suppresses_api_unhealthy():
     assert out[0]["fix"] == "restart_gateway"
 
 
+def test_gateway_absent_has_no_restart_fix():
+    out = degraded_reasons(**{**BASE, "units": {"agent": "active", "gateway": "absent"}})
+    assert out == [
+        {
+            "reason": "gateway_down",
+            "detail": "hermes-gateway.service is not installed; run hal0 doctor",
+            "fix": "none",
+            "command": None,
+        }
+    ]
+    for state in ("inactive", "failed"):
+        (reason,) = degraded_reasons(**{**BASE, "units": {"agent": "active", "gateway": state}})
+        assert reason["reason"] == "gateway_down" and reason["fix"] == "restart_gateway"
+
+
 def test_gateway_down_is_listed_before_the_other_reasons():
     out = degraded_reasons(
         **{

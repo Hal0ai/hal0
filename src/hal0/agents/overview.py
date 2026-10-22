@@ -209,7 +209,8 @@ def degraded_reasons(
 
     ``gateway_down`` fires for any known gateway state other than ``active``;
     ``unknown`` means the probe could not answer, which is not evidence of a
-    fault. ``api_unhealthy`` needs an active gateway (the API server runs
+    fault. Restart is its fix except for ``absent`` (no unit to restart), which
+    points the operator at ``hal0 doctor`` instead. ``api_unhealthy`` needs an active gateway (the API server runs
     inside it, and an inactive gateway already produced ``gateway_down``).
     ``doctor_drift`` is one reason covering every doctor row whose status is
     not ``ok`` or ``absent``; its fix is the root CLI command when the
@@ -218,7 +219,15 @@ def degraded_reasons(
     """
     reasons: list[dict[str, Any]] = []
     gateway = units.get("gateway")
-    if gateway not in ("active", "unknown"):
+    if gateway == "absent":
+        reasons.append(
+            _reason(
+                "gateway_down",
+                "hermes-gateway.service is not installed; run hal0 doctor",
+                "none",
+            )
+        )
+    elif gateway not in ("active", "unknown"):
         reasons.append(
             _reason("gateway_down", f"hermes-gateway.service is {gateway}", "restart_gateway")
         )
