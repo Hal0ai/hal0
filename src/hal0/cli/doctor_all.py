@@ -2080,10 +2080,18 @@ def check_hermes_gateway_unit(
             + "; it runs cron and the kanban dispatcher outside hermes-gateway.service. "
             "Stop it, then run sudo hal0 agent install hermes so the unit file is installed",
         )
+    # Presence by lstat, the same test Hermes applies (`_exists` in
+    # hermes_cli/gateway_runtime_service.py:84-90): a persistently masked unit
+    # is a symlink to /dev/null, which is_file() would call missing, yet a
+    # mask is exactly one of the states that blocks the spawn.
     try:
-        present = unit.is_file()
-    except OSError:
+        unit.lstat()
+    except FileNotFoundError:
         present = False
+    except OSError:
+        present = True
+    else:
+        present = True
     if not present:
         return Check(
             key,
@@ -2093,7 +2101,8 @@ def check_hermes_gateway_unit(
             "unmanaged gateway (Hermes v0.22.3+). Run sudo hal0 agent install hermes; to keep "
             "the gateway off afterwards, systemctl disable --now hermes-gateway",
         )
-    return Check(key, label, _PASS, f"{unit.name} installed; no unmanaged gateway")
+    state = "installed (masked)" if unit.is_symlink() else "installed"
+    return Check(key, label, _PASS, f"{unit.name} {state}; no unmanaged gateway")
 
 
 def check_hermes_anchor_window(

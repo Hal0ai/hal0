@@ -2321,6 +2321,17 @@ def test_gateway_unit_installed_passes(tmp_path) -> None:
     assert c.status == "pass" and "hermes-gateway.service installed" in c.detail
 
 
+def test_gateway_unit_masked_counts_as_installed(tmp_path) -> None:
+    """``systemctl mask`` leaves a symlink to /dev/null; a mask blocks the spawn too."""
+    home = tmp_path / "hermes"
+    home.mkdir()
+    (home / "config.yaml").write_text("model: x\n")
+    unit = tmp_path / "hermes-gateway.service"
+    unit.symlink_to("/dev/null")
+    c = da.check_hermes_gateway_unit(home=home, unit_path=unit, proc=_proc(tmp_path, []))
+    assert c.status == "pass" and "installed (masked)" in c.detail
+
+
 def test_gateway_unit_missing_fails(tmp_path) -> None:
     home = tmp_path / "hermes"
     home.mkdir()
