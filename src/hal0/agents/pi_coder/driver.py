@@ -33,6 +33,11 @@ untouched — different scope from hal0's memory MCP/REST surface
 Idempotency: every write here is an atomic tmp+rename overwrite, safe
 to re-run.
 
+``upgrade()`` is the in-place path for a box that already has pi: it
+re-pins both packages, redeploys hal0's own extensions and theme, and
+adds the Hindsight bank alias to an existing client config — without
+touching anything the operator added.
+
 pi's own config tree (``~/.pi/agent/``) is resolved from ``Path.home()``
 per call, NOT cached at import time — tests rely on this to redirect
 writes under a temp ``HOME`` via ``monkeypatch.setenv``.
@@ -44,6 +49,7 @@ import contextlib
 import json
 import os
 import shutil
+import stat
 import subprocess  # nosec B404 — required for shim
 from datetime import UTC, datetime
 from pathlib import Path
@@ -76,6 +82,10 @@ _THEME_SRC = Path(__file__).resolve().parent / "themes" / "hal0.json"
 # lockstep with installer/agents/pi.sh and scripts/smoke-pi.sh.
 _ADAPTER_PIN = "npm:pi-mcp-adapter@5.3.0"
 
+# Every version of the adapter hal0 manages, so a re-pin replaces an older
+# entry rather than leaving two adapters in ``packages``.
+_ADAPTER_PREFIX = _ADAPTER_PIN.rpartition("@")[0] + "@"
+
 # Packages hal0 manages in pi's settings.json ``packages`` array.
 # Dedup'd against operator entries on every install; removed (only
 # these entries) on uninstall.
@@ -95,6 +105,15 @@ _LEGACY_PACKAGE_ENTRIES = ("extensions/hal0-provider", "extensions/hindsight")
 
 # Hindsight's self-hosted server, colocated on the box (spec D4).
 _HINDSIGHT_API_URL = "http://127.0.0.1:9177"
+
+# The hal0 repo's default Hindsight bank id (``coding-agent::{gitProject}``)
+# converges into the shared hal0-mono bank. Keyed by that resolved id, so it
+# follows the repo wherever it is checked out — unlike ``mapPathToBank``, which
+# is tied to one path. The pinned client (@vectorize-io/hindsight-coding-agents
+# 0.8.1, the same one the Pi binding rides) applies ``banks.<resolvedId>.bank``
+# as a rename of the destination bank (dist/index.js ``applyBankConfig``).
+_HINDSIGHT_ALIAS_ID = "coding-agent::hal0"
+_HINDSIGHT_SHARED_BANK = "coding-agent::hal0-mono"
 
 # Upstream's own built-in defaults, restored on uninstall iff hal0 was
 # the active default (mirrors the pre-hal0 factory settings).
@@ -148,44 +167,7 @@ class PiDriver(AgentDriver):
     # ── AgentDriver protocol ────────────────────────────────────────────
 
     def install(self, *, bearer_token: str | None = None) -> None:
-        script = installer_script_path(self.name)
-        if not script.is_file():
-            raise AgentError(
-                f"installer script missing at {script}. This hal0 install looks "
-                "packaged without the bundled-agent scripts — reinstall hal0 from "
-                "a release tarball or git clone."
-            )
-
-        # The shell script needs the data dir to exist. We export it +
-        # the API URL so the script is tomli-w-free POSIX shell.
-        env = os.environ.copy()
-        data_dir = self._data_dir()
-        data_dir.mkdir(parents=True, exist_ok=True)
-        env["HAL0_AGENT_DATA_DIR"] = str(data_dir)
-        env["HAL0_API_URL"] = _api_base()
-        if bearer_token:
-            # Passed through for any manual/operator invocation of the
-            # script that wants it; installer/agents/pi.sh itself no
-            # longer consults it — the driver owns all token wiring
-            # (see _write_mcp_config / _resolve_service_token below).
-            env["HAL0_BEARER_TOKEN"] = bearer_token
-
-        try:
-            self._runner.run(  # type: ignore[attr-defined]
-                ["bash", str(script)],
-                env=env,
-                check=True,
-            )
-        except Exception as exc:  # subprocess.CalledProcessError or others
-            raise AgentError(
-                f"pi install failed ({type(exc).__name__}: {exc}). "
-                "installer/agents/pi.sh pins exact upstream versions (see its "
-                "header for the pin policy) — this is not a track-latest "
-                "surface, so a failure here usually means the pinned "
-                "package itself is broken or unreachable, not a new "
-                "upstream release. Check npm registry status / connectivity "
-                "before bumping the pin."
-            ) from exc
+        self._run_installer_script("install", bearer_token=bearer_token)
 
         # Model provider (autodiscovers hal0 slots) + hindsight memory
         # extensions, and the hal0 theme.
@@ -208,6 +190,44 @@ class PiDriver(AgentDriver):
 
         # Last: stamp the daemon-readable marker (see _write_profile_marker).
         # Ordering matters — the marker asserts the profile above landed.
+        self._write_profile_marker()
+
+    def upgrade(self) -> None:
+        """Re-pin pi on a box that already has it, without an uninstall.
+
+        Runs the installer again (it installs the exact pins, so a box on an
+        older pi or adapter converges), redeploys hal0's own two extensions
+        and the theme, replaces the managed ``pi-mcp-adapter`` entry, and
+        refreshes the MCP entry, the Hindsight bank alias and the marker.
+        Extensions the operator added under ``~/.pi/agent/extensions`` are
+        never touched — only the two hal0 directories are replaced.
+
+        Refuses to run as a different user than the one the marker names:
+        the profile lives in that user's home, and redeploying into another
+        one would leave a second, half-wired profile behind."""
+        marker = self._profile_marker_path()
+        try:
+            marker_home = Path(json.loads(marker.read_text(encoding="utf-8"))["home"])
+        except (OSError, json.JSONDecodeError, KeyError, TypeError) as exc:
+            raise AgentError(
+                f"pi is not installed (no readable profile marker at {marker}). "
+                "Install it first; there is nothing to upgrade."
+            ) from exc
+        if marker_home != Path.home():
+            raise AgentError(
+                f"pi was installed for {marker_home}, but this process runs as "
+                f"{Path.home()}: run this as the user who installed pi."
+            )
+
+        self._run_installer_script("upgrade", bearer_token=None)
+        self._deploy_extension(_PROVIDER_EXT_SRC, self._provider_ext_dst())
+        self._deploy_extension(_HINDSIGHT_EXT_SRC, self._hindsight_ext_dst())
+        self._npm_install_hindsight_ext()
+        self._deploy_theme()
+        self._write_pi_settings()
+        self._write_mcp_config(bearer_token=None)
+        self._ensure_hindsight_alias()
+        # Last, as in install(): the marker asserts the profile above landed.
         self._write_profile_marker()
 
     def uninstall(self) -> None:
@@ -323,6 +343,49 @@ class PiDriver(AgentDriver):
     def _profile_marker_path(self) -> Path:
         return self._data_dir() / _PROFILE_MARKER
 
+    def _run_installer_script(self, action: str, *, bearer_token: str | None) -> None:
+        """Run ``installer/agents/pi.sh`` (npm global install of both pins).
+        ``install`` and ``upgrade`` share it so the script always sees the
+        same environment; ``action`` only words the failure message."""
+        script = installer_script_path(self.name)
+        if not script.is_file():
+            raise AgentError(
+                f"installer script missing at {script}. This hal0 install looks "
+                "packaged without the bundled-agent scripts — reinstall hal0 from "
+                "a release tarball or git clone."
+            )
+
+        # The shell script needs the data dir to exist. We export it +
+        # the API URL so the script is tomli-w-free POSIX shell.
+        env = os.environ.copy()
+        data_dir = self._data_dir()
+        data_dir.mkdir(parents=True, exist_ok=True)
+        env["HAL0_AGENT_DATA_DIR"] = str(data_dir)
+        env["HAL0_API_URL"] = _api_base()
+        if bearer_token:
+            # Passed through for any manual/operator invocation of the
+            # script that wants it; installer/agents/pi.sh itself no
+            # longer consults it — the driver owns all token wiring
+            # (see _write_mcp_config / _resolve_service_token below).
+            env["HAL0_BEARER_TOKEN"] = bearer_token
+
+        try:
+            self._runner.run(  # type: ignore[attr-defined]
+                ["bash", str(script)],
+                env=env,
+                check=True,
+            )
+        except Exception as exc:  # subprocess.CalledProcessError or others
+            raise AgentError(
+                f"pi {action} failed ({type(exc).__name__}: {exc}). "
+                "installer/agents/pi.sh pins exact upstream versions (see its "
+                "header for the pin policy) — this is not a track-latest "
+                "surface, so a failure here usually means the pinned "
+                "package itself is broken or unreachable, not a new "
+                "upstream release. Check npm registry status / connectivity "
+                "before bumping the pin."
+            ) from exc
+
     def _write_profile_marker(self) -> None:
         """Stamp the data dir with where the profile was written.
 
@@ -387,7 +450,10 @@ class PiDriver(AgentDriver):
         packages = [
             p
             for p in existing.get("packages", [])
-            if isinstance(p, str) and p not in _LEGACY_PACKAGE_ENTRIES
+            if isinstance(p, str)
+            and p not in _LEGACY_PACKAGE_ENTRIES
+            # An older adapter pin is replaced by the current one below.
+            and not p.startswith(_ADAPTER_PREFIX)
         ]
         for managed in _MANAGED_PACKAGES:
             if managed not in packages:
@@ -515,9 +581,10 @@ class PiDriver(AgentDriver):
         """Seed ~/.hindsight/coding-agent.json iff absent — an existing
         file is operator/agent-shared state (other harnesses read it
         too) and is never overwritten. Banks: coding-agent::{gitProject};
-        the hal0 checkout this driver runs from, when there is one, maps
-        into the shared hal0-mono bank (spec bank guardrail). A packaged
-        install has no checkout, so no mapping is seeded (#2315)."""
+        the hal0 repo, when this driver runs from a checkout of it, maps
+        into the shared hal0-mono bank (spec bank guardrail) through the
+        name-keyed ``banks`` alias, which follows the repo to any path. A
+        packaged install has no checkout, so no mapping is seeded (#2315)."""
         path = self._hindsight_client_config()
         if path.exists():
             return
@@ -525,12 +592,43 @@ class PiDriver(AgentDriver):
             "serverMode": "self-hosted",
             "apiUrl": _HINDSIGHT_API_URL,
         }
-        checkout = _hal0_source_checkout()
-        if checkout is not None:
-            payload["mapPathToBank"] = {str(checkout): "coding-agent::hal0-mono"}
+        if _hal0_source_checkout() is not None:
+            payload["banks"] = {_HINDSIGHT_ALIAS_ID: {"bank": _HINDSIGHT_SHARED_BANK}}
         payload["retainTags"] = ["project:{gitProject}"]
         payload["retainMetadata"] = {"repo": "{gitProject}"}
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_suffix(".tmp")
         tmp.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
         tmp.replace(path)
+
+    def _ensure_hindsight_alias(self) -> bool:
+        """Add the hal0 bank alias to an EXISTING coding-agent.json when its
+        ``banks`` section lacks that key; return True iff it was added.
+
+        The file is shared state, so this touches nothing else: every other
+        key and every other ``banks`` entry stays as it was, an alias the
+        operator already set (even to a different bank) is left alone, and a
+        missing, unreadable or non-object file is not seeded here — that is
+        :meth:`_write_hindsight_config`'s job at install time. The rewrite
+        keeps the file's mode: it may carry a token."""
+        path = self._hindsight_client_config()
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            mode = stat.S_IMODE(path.stat().st_mode)
+        except (OSError, json.JSONDecodeError):
+            return False
+        if not isinstance(data, dict):
+            return False
+        banks = data.setdefault("banks", {})
+        if not isinstance(banks, dict) or _HINDSIGHT_ALIAS_ID in banks:
+            return False
+        banks[_HINDSIGHT_ALIAS_ID] = {"bank": _HINDSIGHT_SHARED_BANK}
+        tmp = path.with_suffix(".tmp")
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            os.write(fd, (json.dumps(data, indent=2) + "\n").encode("utf-8"))
+            os.fchmod(fd, mode)
+        finally:
+            os.close(fd)
+        tmp.replace(path)
+        return True
