@@ -258,6 +258,21 @@ board executor harvests are unchanged at NEW.
      update` notice and the `hal0_linger` doctor row stay as the fallback.
      `sudo hal0 agent install hermes` still runs upstream's generator,
      because that root run is the operator's choice.
+   - **Amendment (2026-10-22, #2894): a unit that is not on hal0's launcher
+     is stale too, and activation heals it before the new release starts.**
+     Upstream can render the unit itself (`hermes gateway migrate
+     --multiplex`, or `hermes gateway install` run outside hal0). That unit
+     has the `user@<uid>.service` ordering but runs upstream's launcher shim
+     in one release's checkout (`current/src/.hermes/bin/hermes`), which
+     fails every start on the next release, so activation flipped back on
+     every update. A unit is now stale when it is old-shape, or when any
+     `ExecStart`, `ExecStop` or `ExecStopPost` is not hal0's launcher
+     (`current/venv/bin/python -I -c` with `current/src` on `sys.path`). The
+     release builder calls the same verb during activation, after the switch
+     and while the units are stopped, before any unit starts or the release
+     is re-verified. The converge arm's call after a build or a converged
+     no-op stays. The verb, its sudoers grant, its validation and its
+     never-run-Hermes posture do not change.
 7. **New: hal0 turns session pruning off.** The config overlay writes
    `sessions.auto_prune: false` at the pin bump, so an upgrade deletes no
    session history. Retention policy is a later decision with its own
