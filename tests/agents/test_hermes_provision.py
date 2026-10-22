@@ -4999,3 +4999,21 @@ def test_replace_profile_config_sets_metadata_on_the_descriptor(
     assert cfg.read_text() == "a: 2\n"
     assert calls == ["fchmod", "fchown"]
     assert (cfg.stat().st_mode & 0o777) == 0o640
+
+
+def test_wire_named_profiles_contains_a_stat_failure_to_that_profile(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Codex P2: one untraversable entry must not end the sweep for the others."""
+    monkeypatch.setattr("hal0.service_identity.service_key", lambda prefer=None: None)
+    home = _profiles(tmp_path, bad="a: 1\n", ok="a: 1\n")
+    real = hp.Path.is_symlink
+
+    def flaky(self):
+        if self == home / "profiles" / "bad":
+            raise PermissionError("denied")
+        return real(self)
+
+    monkeypatch.setattr(hp.Path, "is_symlink", flaky)
+    report = hp.wire_named_profiles(home)
+    assert report["errors"] == {"bad": "denied"} and report["wired"] == ["ok"]

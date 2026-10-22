@@ -4977,19 +4977,26 @@ def wire_named_profiles(home: Path) -> dict[str, Any]:
         return report
     for entry in entries:
         name = entry.name
+        path = entry / "config.yaml"
         # A symlink planted by the service account must not make a root repair
-        # read and replace a config.yaml outside HERMES_HOME.
-        if entry.is_symlink() or not entry.is_dir():
+        # read and replace a config.yaml outside HERMES_HOME. A stat failure on
+        # one entry is that entry's error, never the end of the sweep.
+        try:
             if entry.is_symlink():
                 report["skipped"][name] = "symlink"
+                continue
+            if not entry.is_dir():
+                continue
+            config_is_link = path.is_symlink()
+        except OSError as exc:
+            report["errors"][name] = str(exc)
             continue
         if name == _BRAIN_PROFILE_NAME:
             continue
         if not HERMES_PROFILE_ID_RE.match(name):
             report["skipped"][name] = "invalid profile name"
             continue
-        path = entry / "config.yaml"
-        if path.is_symlink():
+        if config_is_link:
             report["errors"][name] = "config.yaml is a symlink"
             continue
         result = _merge_profile_config(path, _profile_wire_desired(profile_agent_id(name)))

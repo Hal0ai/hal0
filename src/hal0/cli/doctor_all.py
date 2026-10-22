@@ -1324,6 +1324,7 @@ def check_hermes_profiles_mcp(
     import yaml
 
     unwired: list[str] = []
+    no_config: list[str] = []
     unauthed: list[str] = []
     drifted: list[str] = []
     opted_out: list[str] = []
@@ -1334,7 +1335,7 @@ def check_hermes_profiles_mcp(
         try:
             data = yaml.safe_load(cfg.read_text(encoding="utf-8"))
         except FileNotFoundError:
-            unwired.append(name)
+            no_config.append(name)  # the writer skips it too: Hermes owns creation
             continue
         except (OSError, UnicodeDecodeError, yaml.YAMLError):
             unreadable.append(name)
@@ -1354,15 +1355,20 @@ def check_hermes_profiles_mcp(
         if missing:
             unwired.append(name)
             continue
+        # The identity and target must be the ones hal0 wires: a copied
+        # X-hal0-Agent would read another profile's private memory, a missing
+        # X-hal0-Private would write to the shared bank. The bearer must be the
+        # box's current service key when one is discoverable (a rotated key
+        # leaves a stale one behind), else at least a ``Bearer …`` string.
+        desired = hp._profile_wire_desired(hp.profile_agent_id(name))
         if auth_required and any(
-            not _header(servers[n], "Authorization") for n in ("hal0-admin", "hal0-memory")
+            not _bearer_ok(
+                _header(servers[n], "Authorization"), want["headers"].get("Authorization")
+            )
+            for n, want in desired["mcp_servers"].items()
         ):
             unauthed.append(name)
             continue
-        # The identity and target must be the ones hal0 wires: a copied
-        # X-hal0-Agent would read another profile's private memory, a missing
-        # X-hal0-Private would write to the shared bank.
-        desired = hp._profile_wire_desired(hp.profile_agent_id(name))
         memory = data.get("memory")
         provider = memory.get("provider") if isinstance(memory, dict) else None
         if provider != desired["memory"]["provider"] or any(
@@ -1383,9 +1389,9 @@ def check_hermes_profiles_mcp(
     parts: list[str] = []
     if unauthed:
         parts.append(
-            f"no Authorization on hal0 MCP entries in profile(s) {', '.join(unauthed)}; "
-            "Hermes hangs on the 401 at discovery; run POST /api/agents/hermes/reconcile-upstreams "
-            "or sudo hal0 agent reprovision hermes --repair"
+            f"hal0 MCP entries in profile(s) {', '.join(unauthed)} carry no usable or a stale "
+            "Authorization bearer; Hermes fails the 401 at discovery; run "
+            "POST /api/agents/hermes/reconcile-upstreams or sudo hal0 agent reprovision hermes --repair"
         )
     if unwired:
         parts.append(
@@ -1402,6 +1408,11 @@ def check_hermes_profiles_mcp(
             f"config.yaml of profile(s) {', '.join(unreadable)} is unreadable or not a mapping; "
             "hal0 leaves it alone, fix it by hand"
         )
+    if no_config:
+        parts.append(
+            f"profile(s) {', '.join(no_config)} have no config.yaml; hal0 wires a profile once "
+            "Hermes creates its config"
+        )
     if unauthed:
         return Check(key, label, _FAIL, "; ".join(parts))
     if unwired or drifted or unreadable:
@@ -1409,7 +1420,17 @@ def check_hermes_profiles_mcp(
     detail = f"wired: {', '.join(wired)}" if wired else "no profile wired"
     if opted_out:
         detail += f"; opted out: {', '.join(opted_out)}"
+    if parts:  # only the informational no-config note is left
+        detail += "; " + "; ".join(parts)
     return Check(key, label, _PASS, detail)
+
+
+def _bearer_ok(value: Any, wanted: Any) -> bool:
+    """``value`` is the bearer hal0 would write (``wanted``), or a ``Bearer …`` string when
+    no service key is discoverable from where doctor runs."""
+    if not isinstance(value, str) or not value.startswith("Bearer ") or len(value) <= 7:
+        return False
+    return value == wanted if isinstance(wanted, str) else True
 
 
 def check_hermes_generation_extras(*, home: Path | None = None, venv: Path | None = None) -> Check:

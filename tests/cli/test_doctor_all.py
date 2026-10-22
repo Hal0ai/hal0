@@ -1983,15 +1983,37 @@ def test_profiles_mcp_warns_on_unwired_profile(tmp_path) -> None:
     home = _profiles_home(tmp_path, coder=_WIRED, homelab="model:\n  default: x\n", bare=None)
     c = da.check_hermes_profiles_mcp(auth={"auth_required": True}, home=home)
     assert c.status == "warn"
-    assert "bare, homelab" in c.detail and "reconcile-upstreams" in c.detail
-    assert "coder" not in c.detail.split("not wired")[0]
+    assert "profile(s) homelab not wired" in c.detail and "reconcile-upstreams" in c.detail
+    # CodeRabbit: a profile without config.yaml is not wired by the sweep; say so instead.
+    assert "bare have no config.yaml" in c.detail and "once Hermes creates its config" in c.detail
+
+
+def test_profiles_mcp_no_config_alone_is_informational(tmp_path) -> None:
+    home = _profiles_home(tmp_path, coder=_WIRED, bare=None)
+    c = da.check_hermes_profiles_mcp(auth={"auth_required": True}, home=home)
+    assert (
+        c.status == "pass" and "wired: coder" in c.detail and "bare have no config.yaml" in c.detail
+    )
+
+
+def test_profiles_mcp_fails_on_a_malformed_or_stale_bearer(tmp_path, monkeypatch) -> None:
+    """Codex P2: a truthy but unusable Authorization, or one that is not the box's current key."""
+    bad_shape = _WIRED.replace("Authorization: Bearer k", "Authorization: invalid")
+    home = _profiles_home(tmp_path, coder=bad_shape)
+    assert da.check_hermes_profiles_mcp(auth={"auth_required": True}, home=home).status == "fail"
+    monkeypatch.setattr("hal0.service_identity.service_key", lambda prefer=None: "current-key")
+    home2 = _profiles_home(tmp_path / "b", coder=_WIRED)  # "Bearer k" is stale now
+    c = da.check_hermes_profiles_mcp(auth={"auth_required": True}, home=home2)
+    assert c.status == "fail" and "stale" in c.detail
+    home3 = _profiles_home(tmp_path / "c", coder=_WIRED.replace("Bearer k", "Bearer current-key"))
+    assert da.check_hermes_profiles_mcp(auth={"auth_required": True}, home=home3).status == "pass"
 
 
 def test_profiles_mcp_fails_without_bearer_when_auth_required(tmp_path) -> None:
     home = _profiles_home(tmp_path, coder=_UNAUTHED)
     c = da.check_hermes_profiles_mcp(auth={"auth_required": True}, home=home)
     assert c.status == "fail"
-    assert "no Authorization" in c.detail and "coder" in c.detail
+    assert "no usable or a stale Authorization" in c.detail and "coder" in c.detail
     # Auth-open box: a tokenless entry is the expected shape.
     assert da.check_hermes_profiles_mcp(auth={"auth_required": False}, home=home).status == "pass"
 
