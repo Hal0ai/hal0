@@ -106,7 +106,10 @@ A release without `release.json` is incomplete and is deleted by the next
 build. Every successful activation keeps `current` and `previous` and deletes
 every other release, except one that `/etc/systemd/system/hermes-gateway.service`
 still names. Each activation also writes the `venv.pin` stamp under
-`/var/lib/hal0/state/agents/hermes/` from `release.json`. Steady state is two
+`/var/lib/hal0/state/agents/hermes/` from `release.json`. The same directory
+holds `dashboard-session-token` (0600, `hal0`), the stable dashboard session
+token `hal0-agent@hermes` mints on its first start and exports to the Hermes
+dashboard (`hal0 agent dashboard-token`). Steady state is two
 releases (a few hundred MB each), the mirror (a blobless partial clone,
 about 200 MB at the current pin) and the uv cache.
 
