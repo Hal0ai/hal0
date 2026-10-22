@@ -56,6 +56,21 @@ def _remote(name: str = "openrouter", **kw: Any) -> Upstream:
     return Upstream(**defaults)
 
 
+def test_upstream_dynamic_fields_default() -> None:
+    from hal0.config.schema import UpstreamEntry
+    from hal0.upstreams.registry import upstream_from_entry
+
+    for u in (
+        _remote(),
+        upstream_from_entry(UpstreamEntry(name="x", kind="remote", url="http://h/v1")),
+    ):
+        assert u.managed_by is None
+        assert u.pinned is False
+        assert u.owned_models == ()
+        assert u.stream_idle_timeout_s is None
+        assert u.stream_total_timeout_s is None
+
+
 # ── CRUD ──────────────────────────────────────────────────────────────────────
 
 
