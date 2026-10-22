@@ -2,32 +2,33 @@
 
 Pure read-side helpers (plus one idempotent key writer) over Hermes's own
 truth: its ``/p/<profile>/health`` probes, ``config.yaml`` and ``.env`` files.
-Verified against Hermes 0.22.2 (commit ``d923a5eb``):
+Verified against Hermes 0.22.4 (commit ``4d043038``; first written at 0.22.2,
+``d923a5eb``, and every cited construct re-read at 0.22.4):
 
 * The API server binds ``127.0.0.1:8642`` by default; host/port resolve from
   config ``gateway.platforms.api_server.{host,port}``, then env
   ``API_SERVER_HOST`` / ``API_SERVER_PORT``, then the defaults
-  (``gateway/platforms/api_server.py:216-230``, ``:1196``). "Env" is the
-  gateway's, which ``hermes_cli/env_loader.py:506`` fills from
+  (``gateway/platforms/api_server.py:219-233``, ``:1124``). "Env" is the
+  gateway's, which ``hermes_cli/env_loader.py:516`` fills from
   ``$HERMES_HOME/.env`` with ``override=True``; hal0 reads that file, never
   hal0-api's own process environment.
 * The gateway serves one ``/p/<profile>/`` prefix per profile returned by
-  ``profiles_to_serve`` (``hermes_cli/profiles.py:1135``). Under it the
+  ``profiles_to_serve`` (``hermes_cli/profiles.py:1136``). Under it the
   advertised model id is the profile name; the default profile advertises
-  ``hermes-agent`` (``_resolve_model_name``, ``api_server.py:1458-1468``,
-  ``:2475-2480``).
+  ``hermes-agent`` (``_resolve_model_name``, ``api_server.py:1386-1396``,
+  ``:2417-2422``).
 * Named profiles fail closed: each needs its own ``API_SERVER_KEY`` in
   ``profiles/<p>/.env``; placeholder or <16-char keys count as unusable
-  (``_expected_api_key``, ``api_server.py:1535-1549``;
+  (``_expected_api_key``, ``api_server.py:1463-1477``;
   ``hermes_cli/auth.py:307-314``).
 * ``_load_profile_secret_scope`` re-reads ``.env`` for every request
-  (``gateway/run.py:1772-1782``), so a key written here needs no gateway
+  (``gateway/run.py:1787-1797``), so a key written here needs no gateway
   restart.
 * The default profile's key is process environment, loaded once at gateway
   start: config ``api_server.key``, else ``$HERMES_HOME/.env`` (which
-  ``hermes_cli/env_loader.py:506`` loads with ``override=True``), else the
+  ``hermes_cli/env_loader.py:516`` loads with ``override=True``), else the
   environment the unit inherits from hal0's root-only vault.
-* Dotenv semantics mirror ``agent/secret_scope.py:257-290``.
+* Dotenv semantics mirror ``agent/secret_scope.py:271-304``.
 """
 
 from __future__ import annotations
@@ -172,7 +173,7 @@ def _usable(value: str | None) -> bool:
 
 
 def _strip_inline_comment(value: str) -> str:
-    """Hermes's rule (``agent/secret_scope.py:257-278``): a quoted value scans
+    """Hermes's rule (``agent/secret_scope.py:271-292``): a quoted value scans
     to its closing quote (backslash-aware for double quotes) and drops a
     trailing ``# ...``; an unquoted one is cut at a ``#`` preceded by whitespace."""
     value = value.strip()
@@ -194,7 +195,7 @@ def _strip_inline_comment(value: str) -> str:
 
 
 def _parse_env_value(raw: str) -> str:
-    """Hermes's rule (``agent/secret_scope.py:280-290``): bare, ``'single'`` or
+    """Hermes's rule (``agent/secret_scope.py:294-304``): bare, ``'single'`` or
     ``"double"`` with ``\\"`` / ``\\\\`` escapes."""
     value = raw.strip()
     if len(value) >= 2 and value[0] == value[-1] == '"':
@@ -319,7 +320,7 @@ def ensure_default_key(home: Path, *, value: str | None = None) -> bool:
     (``hermes_provision.HERMES_SECRETS_ENV``); the gateway gets it as process
     environment, and hal0-api cannot read it there. Hermes loads ``home/.env``
     over the process environment at gateway start
-    (``hermes_cli/env_loader.py:506``, ``override=True``), so the same value in
+    (``hermes_cli/env_loader.py:516``, ``override=True``), so the same value in
     that file changes nothing for the gateway and makes the key readable to
     hal0-api. Writes only when neither config ``api_server.key`` nor
     ``home/.env`` holds a usable key. ``value`` is the key the caller just
@@ -367,12 +368,13 @@ def default_model_id(home: Path | None = None) -> str:
 
     Hermes feeds ``extra.model_name`` into ``_resolve_model_name`` as the
     explicit override, which wins over ``hermes-agent``
-    (``api_server.py:1198-1200``, ``:1458-1468``; precedence in
-    ``hermes_cli/model_switch.py:630-641``). Env beats config.yaml
-    (``gateway/config.py:840`` "Priority: env > config.yaml"):
-    ``_env_extras`` overwrites ``extra["model_name"]`` whenever
-    ``API_SERVER_MODEL_NAME`` is truthy (``gateway/config_env.py:141-151``,
-    ``:314``), gated on a usable ``API_SERVER_KEY`` (``:308-310``). So: env,
+    (``api_server.py:1126-1128``, ``:1386-1396``; precedence in
+    ``hermes_cli/model_switch.py:638-649``). Env beats config.yaml
+    (``gateway/config.py:826`` "Priority: env > config.yaml"):
+    ``env_extras`` overwrites ``extra["model_name"]`` whenever
+    ``API_SERVER_MODEL_NAME`` is truthy (``gateway/platform_env.py:85-100``,
+    called from ``gateway/config_env.py:120``), gated on a usable
+    ``API_SERVER_KEY`` (``config_env.py:114-116``). So: env,
     then config ``gateway.platforms.api_server.model_name``, then
     ``hermes-agent``. "Env" is the gateway's, read here from
     ``$HERMES_HOME/.env`` (:func:`gateway_env`); hal0 renders no
@@ -392,7 +394,7 @@ def model_id_for(profile: str, home: Path | None = None) -> str:
     """Model id Hermes advertises for ``profile``.
 
     The override applies to the default profile only: under a ``/p/<profile>/``
-    prefix Hermes calls ``_resolve_model_name("")`` (``api_server.py:2480``),
+    prefix Hermes calls ``_resolve_model_name("")`` (``api_server.py:2422``),
     so the explicit tier is empty and the profile name wins.
     """
     return default_model_id(home) if profile == DEFAULT_PROFILE else profile
