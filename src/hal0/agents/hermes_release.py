@@ -313,7 +313,7 @@ def require_vetted(ref: str) -> str:
 
 
 def live_ref(layout: Layout | None = None) -> str | None:
-    """The ref of the live release, or None when there is none (or it is legacy)."""
+    """The ref of the live release, or None when there is none or it records no ref."""
     lay = layout if layout is not None else Layout.for_venv(hp.HERMES_VENV_DEFAULT)
     try:
         live = live_release(lay)
