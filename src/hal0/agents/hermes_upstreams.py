@@ -206,5 +206,15 @@ async def sync_hermes_upstreams(
     except Exception as exc:
         log.warning("hermes_upstreams.key_sweep_failed", error=str(exc))
         written = []
+    # #2891: a profile is only useful through /v1 with hal0's tools and memory.
+    try:
+        wiring = await asyncio.to_thread(hermes_api.ensure_profile_mcp, home)
+    except Exception as exc:
+        log.warning("hermes_upstreams.profile_mcp_wire_failed", error=str(exc))
+        wiring = {"changed": [], "errors": {}}
+    if wiring.get("changed"):
+        log.info("hermes_upstreams.profile_mcp_wired", profiles=wiring["changed"])
+    for name, error in sorted((wiring.get("errors") or {}).items()):
+        log.warning("hermes_upstreams.profile_mcp_wire_error", profile=name, error=error)
     report = await reconcile_hermes_upstreams(registry, home=home, model_cache=model_cache)
-    return {**report, "keys_written": written}
+    return {**report, "keys_written": written, "profiles_wired": list(wiring.get("changed", []))}

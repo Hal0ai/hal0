@@ -462,3 +462,34 @@ async def test_sync_passes_the_models_cache_through(
     cache: dict[str, list[str]] = {}
     await sync_hermes_upstreams(UpstreamRegistry(), home=home, model_cache=cache)
     assert seen["model_cache"] is cache
+
+
+async def test_sync_wires_named_profiles_after_the_key_sweep(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#2891: a profile reachable through /v1 gets hal0's tools and memory."""
+    import yaml
+
+    monkeypatch.setattr("hal0.service_identity.service_key", lambda prefer=None: "svc")
+    (home / "profiles" / "coder" / "config.yaml").write_text("model:\n  default: agent\n")
+    reg = UpstreamRegistry()
+    monkeypatch.setattr(hermes_upstreams, "reconcile_hermes_upstreams", _recording(reg))
+    report = await sync_hermes_upstreams(reg, home=home)
+    assert report["profiles_wired"] == ["coder"]
+    cfg = yaml.safe_load((home / "profiles" / "coder" / "config.yaml").read_text())
+    assert cfg["mcp_servers"]["hal0-memory"]["headers"]["X-hal0-Agent"] == "hermes__coder"
+    again = await sync_hermes_upstreams(reg, home=home)
+    assert again["profiles_wired"] == []
+
+
+async def test_sync_reconciles_even_when_profile_wiring_fails(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def boom(_home: Path) -> dict[str, object]:
+        raise OSError("read-only")
+
+    monkeypatch.setattr(hermes_api, "ensure_profile_mcp", boom)
+    reg = UpstreamRegistry()
+    monkeypatch.setattr(hermes_upstreams, "reconcile_hermes_upstreams", _recording(reg))
+    report = await sync_hermes_upstreams(reg, home=home)
+    assert report["profiles_wired"] == [] and report["seen_home"] == home

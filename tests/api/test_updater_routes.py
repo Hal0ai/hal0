@@ -1520,6 +1520,7 @@ async def test_hermes_converge_reconciles_upstreams(
         "registered": ["hermes"],
         "removed": [],
         "keys_written": ["work"],
+        "profiles_wired": [],
     }
 
 
@@ -1543,6 +1544,7 @@ async def test_hermes_key_sweep_failure_still_reconciles(monkeypatch: pytest.Mon
         "registered": ["hermes"],
         "removed": [],
         "keys_written": [],
+        "profiles_wired": [],
     }
 
 

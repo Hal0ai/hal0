@@ -4668,3 +4668,112 @@ def test_phase_profile_api_keys_oserror_is_warn(
 def test_install_steps_order_has_profile_api_keys_after_gateway_secrets_wire() -> None:
     names = [n for n, _fn in hp._INSTALL_STEPS]
     assert names.index("profile_api_keys") == names.index("gateway_secrets_wire") + 1
+
+
+# ── #2891: hal0's MCP servers in every named profile ─────────────────────────
+
+
+def _profiles(tmp_path: Path, **profiles: str | None) -> Path:
+    home = tmp_path / ".hermes"
+    for name, text in profiles.items():
+        d = home / "profiles" / name
+        d.mkdir(parents=True)
+        if text is not None:
+            (d / "config.yaml").write_text(text, encoding="utf-8")
+    return home
+
+
+def test_profile_agent_id_is_sanitised_for_the_mcp_identity_charset() -> None:
+    assert hp.profile_agent_id("coder") == "hermes__coder"
+    assert hp.profile_agent_id("my profile.v2") == "hermes__my_profile_v2"
+    assert len(hp.profile_agent_id("x" * 90)) == 64
+
+
+def test_wire_named_profiles_wires_each_profile_as_its_own_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import yaml
+
+    monkeypatch.setattr("hal0.service_identity.service_key", lambda prefer=None: "svc-key")
+    home = _profiles(
+        tmp_path,
+        coder="model:\n  default: agent\nmcp_servers:\n  mine:\n    type: http\n    url: http://x\n",
+        research="model:\n  default: agent\n",
+    )
+    (home / "profiles" / "hal0-brain").mkdir()
+    (home / "profiles" / "hal0-brain" / "config.yaml").write_text("model:\n  default: a\n")
+
+    report = hp.wire_named_profiles(home)
+    assert report == {
+        "wired": ["coder", "research"],
+        "changed": ["coder", "research"],
+        "skipped": {},
+        "errors": {},
+    }
+    coder = yaml.safe_load((home / "profiles" / "coder" / "config.yaml").read_text())
+    assert coder["mcp_servers"]["hal0-admin"]["headers"] == {
+        "X-hal0-Agent": "hermes__coder",
+        "Authorization": "Bearer svc-key",
+    }
+    assert coder["mcp_servers"]["hal0-memory"]["headers"]["X-hal0-Private"] == "1"
+    assert coder["mcp_servers"]["hal0-memory"]["headers"]["X-hal0-Agent"] == "hermes__coder"
+    assert coder["memory"]["provider"] == "hal0-memory"
+    assert coder["mcp_servers"]["mine"] == {"type": "http", "url": "http://x"}  # kept
+    assert coder["model"] == {"default": "agent"}
+    research = yaml.safe_load((home / "profiles" / "research" / "config.yaml").read_text())
+    assert research["mcp_servers"]["hal0-admin"]["headers"]["X-hal0-Agent"] == "hermes__research"
+    # hal0-brain keeps its own phase and identity: untouched here.
+    assert (
+        home / "profiles" / "hal0-brain" / "config.yaml"
+    ).read_text() == "model:\n  default: a\n"
+
+    again = hp.wire_named_profiles(home)
+    assert again["wired"] == ["coder", "research"] and again["changed"] == []
+
+
+def test_wire_named_profiles_skips_absent_config_and_opt_out(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("hal0.service_identity.service_key", lambda prefer=None: None)
+    home = _profiles(tmp_path, bare=None, lab="hal0:\n  wire_mcp: false\nmodel:\n  default: x\n")
+    before = (home / "profiles" / "lab" / "config.yaml").read_bytes()
+    report = hp.wire_named_profiles(home)
+    assert report["wired"] == [] and report["errors"] == {}
+    assert report["skipped"] == {"bare": "profile config absent", "lab": "opted out"}
+    assert (home / "profiles" / "lab" / "config.yaml").read_bytes() == before
+    assert hp.wire_named_profiles(tmp_path / "nowhere") == {
+        "wired": [],
+        "changed": [],
+        "skipped": {},
+        "errors": {},
+    }
+
+
+def test_wire_named_profiles_reports_a_broken_config_without_raising(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("hal0.service_identity.service_key", lambda prefer=None: None)
+    home = _profiles(tmp_path, bad="model: [unclosed\n", listy="- not\n- a mapping\n", ok="a: 1\n")
+    report = hp.wire_named_profiles(home)
+    assert set(report["errors"]) == {"bad", "listy"}
+    assert report["wired"] == ["ok"]
+
+
+def test_phase_profile_mcp_wire_runs_after_profile_api_keys(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr("hal0.service_identity.service_key", lambda prefer=None: None)
+    names = [n for n, _fn in hp._INSTALL_STEPS]
+    assert names.index("profile_mcp_wire") == names.index("profile_api_keys") + 1
+    home = _profiles(tmp_path, coder="model:\n  default: agent\n")
+    state = hp.BootstrapState(venv=str(tmp_path / "venv"), hermes_home=str(home))
+    out = hp._phase_profile_mcp_wire(hp._StepCtx(state=state, io=hp.InstallIO()))
+    assert out.status == hp.PhaseStatus.OK
+    assert out.details["changed"] == ["coder"]
+
+
+def test_phase_profile_mcp_wire_warns_on_errors(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr("hal0.service_identity.service_key", lambda prefer=None: None)
+    home = _profiles(tmp_path, bad="model: [unclosed\n")
+    state = hp.BootstrapState(venv=str(tmp_path / "venv"), hermes_home=str(home))
+    out = hp._phase_profile_mcp_wire(hp._StepCtx(state=state, io=hp.InstallIO()))
+    assert out.status == hp.PhaseStatus.WARN
+    assert out.reason is not None and "bad" in out.reason

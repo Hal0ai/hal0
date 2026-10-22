@@ -4766,28 +4766,27 @@ def _brain_profile_config_path(state: BootstrapState) -> Path:
     return Path(state.hermes_home) / "profiles" / _BRAIN_PROFILE_NAME / "config.yaml"
 
 
-def _build_brain_profile_mcp_servers() -> dict[str, Any]:
-    """The hal0-owned MCP servers the hal0-brain profile is wired to.
+def _build_profile_mcp_servers(agent_id: str) -> dict[str, Any]:
+    """The hal0-owned MCP servers a Hermes profile is wired to, as ``agent_id``.
 
     Mirrors the top-level ``_default_mcp_servers`` admin + memory pair but scoped
-    to the brain identity (``X-hal0-Agent: hermes__hal0-brain``); memory is
-    private (its own 3-tier bank). Deliberately just these two — the steward
-    gets platform control + memory only, not any other MCP surface.
+    to the profile's identity (``X-hal0-Agent``); memory is private (its own
+    3-tier bank). Deliberately just these two — a profile gets platform control
+    + memory only, not any other MCP surface.
 
     The ``/mcp`` mount is ADMIN-classed (security/exposure.py), so — same as
     the top-level overlay — a bearer is attached from the box service identity
     (:func:`hal0.service_identity.service_key`) whenever one is discoverable.
-    Resolved fresh on every call: :func:`_phase_brain_profile_mcp_wire` re-runs
-    this (and re-diffs the merge) on every provision/``--repair`` pass, so a
-    rotated key is re-propagated the next time provisioning runs — the static
+    Resolved fresh on every call: the wiring phases re-run this (and re-diff
+    the merge) on every provision/``--repair`` pass and every hal0-api sweep,
+    so a rotated key is re-propagated the next time one runs — the static
     config.yaml itself does not update live on rotation.
     """
-    from hal0.agents.personas import BRAIN_PROFILE_AGENT_ID
     from hal0.service_identity import service_key
 
     bearer = service_key(prefer="admin")
-    admin_headers: dict[str, Any] = {"X-hal0-Agent": BRAIN_PROFILE_AGENT_ID}
-    memory_headers: dict[str, Any] = {"X-hal0-Agent": BRAIN_PROFILE_AGENT_ID, "X-hal0-Private": "1"}
+    admin_headers: dict[str, Any] = {"X-hal0-Agent": agent_id}
+    memory_headers: dict[str, Any] = {"X-hal0-Agent": agent_id, "X-hal0-Private": "1"}
     if bearer:
         admin_headers["Authorization"] = f"Bearer {bearer}"
         memory_headers["Authorization"] = f"Bearer {bearer}"
@@ -4808,63 +4807,165 @@ def _build_brain_profile_mcp_servers() -> dict[str, Any]:
     }
 
 
-def _phase_brain_profile_mcp_wire(ctx: _StepCtx) -> PhaseResult:
-    """Reproducibly write hal0's brain-profile keys: MCP servers + memory provider.
+def _build_brain_profile_mcp_servers() -> dict[str, Any]:
+    """:func:`_build_profile_mcp_servers` for the hal0-brain steward identity."""
+    from hal0.agents.personas import BRAIN_PROFILE_AGENT_ID
 
-    Deep-merges the hal0-owned keys (hal0-admin + hal0-memory MCP servers, and
-    ``memory.provider = hal0-memory``) into the profile config.yaml (merge,
-    never clobber; scalars/dicts only — no list keys), only writing when
-    something actually changed so a correctly configured box (and its comments)
-    is left untouched. Skips when the profile config is absent — the upstream
-    hermes binary owns profile creation. Any I/O / PyYAML gap degrades
-    warn-as-OK; bootstrap never blocks on it.
+    return _build_profile_mcp_servers(BRAIN_PROFILE_AGENT_ID)
+
+
+#: Top-level key in a profile's ``config.yaml`` that turns hal0's wiring off:
+#: ``hal0: {wire_mcp: false}``. The profile then keeps whatever ``mcp_servers``
+#: the operator wrote, and hal0 never touches the file again.
+PROFILE_MCP_OPT_OUT_KEY = "wire_mcp"
+
+
+def profile_agent_id(profile: str) -> str:
+    """The MCP identity a named profile calls hal0 as: ``hermes__<profile>``.
+
+    Sanitised to the identity charset the MCP mount accepts
+    (``api/mcp_mount.py:client_id_resolver``, ``[A-Za-z0-9_-]{1,64}``): a
+    character outside it would collapse the caller to ``anonymous`` and get
+    every private memory write refused. ``hal0-brain`` keeps its own constant.
     """
-    state = ctx.state
-    path = _brain_profile_config_path(state)
-    # hal0-owned profile keys: the two MCP servers + the memory provider. Only
-    # scalar/dict keys are set — never a list (``_deep_merge`` replaces lists,
-    # which would clobber an operator's ``plugins.enabled`` / other entries).
-    desired = {
-        "mcp_servers": _build_brain_profile_mcp_servers(),
-        "memory": {"provider": "hal0-memory"},
-    }
+    return ("hermes__" + re.sub(r"[^A-Za-z0-9_-]", "_", profile))[:64]
 
+
+def _profile_wire_opted_out(base: dict[str, Any]) -> bool:
+    block = base.get("hal0")
+    return isinstance(block, dict) and block.get(PROFILE_MCP_OPT_OUT_KEY) is False
+
+
+def _merge_profile_config(path: Path, desired: dict[str, Any]) -> dict[str, Any]:
+    """Deep-merge hal0's keys into one profile ``config.yaml``.
+
+    Merge, never clobber: scalars and dicts only, no list keys (``_deep_merge``
+    replaces lists, which would clobber an operator's ``plugins.enabled``). The
+    file is rewritten only when the merged content differs, so a correct
+    profile (and its comments) is left byte-untouched. Returns ``{"wired",
+    "changed"}`` plus ``reason`` (config absent, opted out, PyYAML missing) or
+    ``error`` (I/O or YAML) — never raises, so no caller blocks on one profile.
+    """
     if not path.exists():
-        return PhaseResult(
-            status=PhaseStatus.OK,
-            details={"wired": False, "reason": "profile config absent", "path": str(path)},
-            reason="hal0-brain profile not present (upstream owns creation); MCP wiring skipped",
-        )
-
+        return {"wired": False, "changed": False, "reason": "profile config absent"}
     try:
         import yaml  # type: ignore[import-untyped]
     except ImportError:
-        return PhaseResult(
-            status=PhaseStatus.OK,
-            details={"wired": False, "reason": "PyYAML unavailable", "path": str(path)},
-            reason="PyYAML absent; brain profile MCP not wired (continuing)",
-        )
-
+        return {"wired": False, "changed": False, "reason": "PyYAML unavailable"}
     try:
         current = path.read_text(encoding="utf-8")
         base = yaml.safe_load(current) or {}
+        if not isinstance(base, dict):
+            return {"wired": False, "changed": False, "error": "config.yaml is not a mapping"}
+        if _profile_wire_opted_out(base):
+            return {"wired": False, "changed": False, "reason": "opted out"}
         merged = _deep_merge(base, desired)
         out = yaml.safe_dump(merged, sort_keys=False, default_flow_style=False)
         changed = out != current
         if changed:
             path.write_text(out, encoding="utf-8")
     except (OSError, yaml.YAMLError) as exc:  # type: ignore[attr-defined]
+        return {"wired": False, "changed": False, "error": str(exc)}
+    return {"wired": True, "changed": changed}
+
+
+def _profile_wire_desired(agent_id: str) -> dict[str, Any]:
+    # hal0-owned profile keys: the two MCP servers + the memory provider. Only
+    # scalar/dict keys are set — never a list (see _merge_profile_config).
+    return {
+        "mcp_servers": _build_profile_mcp_servers(agent_id),
+        "memory": {"provider": "hal0-memory"},
+    }
+
+
+def wire_named_profiles(home: Path) -> dict[str, Any]:
+    """Give every named Hermes profile hal0's MCP servers and memory (#2891).
+
+    A profile cloned by the operator starts with no ``mcp_servers`` at all, so
+    through Open WebUI (ADR-0035) it answered without hal0-admin and
+    hal0-memory. Every directory under ``profiles/`` except ``hal0-brain``
+    (its own phase, its own identity) gets the hal0-admin + hal0-memory pair
+    as ``hermes__<profile>`` (:func:`profile_agent_id`) and
+    ``memory.provider: hal0-memory``, merged the way the brain profile is.
+    A profile opts out with ``hal0: {wire_mcp: false}``. Hermes re-reads a
+    profile's ``mcp_servers`` on its own 60 s reconcile, so no restart follows.
+
+    Returns ``{"wired": [...], "changed": [...], "skipped": {name: reason},
+    "errors": {name: error}}``.
+    """
+    report: dict[str, Any] = {"wired": [], "changed": [], "skipped": {}, "errors": {}}
+    try:
+        names = sorted(p.name for p in (Path(home) / "profiles").iterdir() if p.is_dir())
+    except OSError:
+        return report
+    for name in names:
+        if name == _BRAIN_PROFILE_NAME:
+            continue
+        path = Path(home) / "profiles" / name / "config.yaml"
+        result = _merge_profile_config(path, _profile_wire_desired(profile_agent_id(name)))
+        if result.get("error"):
+            report["errors"][name] = result["error"]
+        elif not result["wired"]:
+            report["skipped"][name] = result.get("reason", "skipped")
+        else:
+            report["wired"].append(name)
+            if result["changed"]:
+                report["changed"].append(name)
+    return report
+
+
+def _phase_profile_mcp_wire(ctx: _StepCtx) -> PhaseResult:
+    """Wire hal0's MCP servers into every named profile (:func:`wire_named_profiles`).
+
+    Warn-as-OK on a per-profile error; a correct box is left untouched.
+    """
+    report = wire_named_profiles(Path(ctx.state.hermes_home))
+    if report["errors"]:
+        return PhaseResult(
+            status=PhaseStatus.WARN,
+            reason="profile MCP wiring failed for: "
+            + ", ".join(f"{n} ({e})" for n, e in sorted(report["errors"].items())),
+            details=report,
+        )
+    return PhaseResult(status=PhaseStatus.OK, details=report)
+
+
+def _phase_brain_profile_mcp_wire(ctx: _StepCtx) -> PhaseResult:
+    """Reproducibly write hal0's brain-profile keys: MCP servers + memory provider.
+
+    Deep-merges the hal0-owned keys (hal0-admin + hal0-memory MCP servers, and
+    ``memory.provider = hal0-memory``) into the profile config.yaml via
+    :func:`_merge_profile_config`. Skips when the profile config is absent —
+    the upstream hermes binary owns profile creation. Any I/O / PyYAML gap
+    degrades warn-as-OK; bootstrap never blocks on it.
+    """
+    from hal0.agents.personas import BRAIN_PROFILE_AGENT_ID
+
+    path = _brain_profile_config_path(ctx.state)
+    desired = _profile_wire_desired(BRAIN_PROFILE_AGENT_ID)
+    result = _merge_profile_config(path, desired)
+    if result.get("error"):
         return PhaseResult(
             status=PhaseStatus.OK,
-            details={"wired": False, "error": str(exc), "path": str(path)},
-            reason=f"brain profile MCP wire failed ({exc}); continuing",
+            details={"wired": False, "error": result["error"], "path": str(path)},
+            reason=f"brain profile MCP wire failed ({result['error']}); continuing",
         )
-
+    if not result["wired"]:
+        reason = result.get("reason", "skipped")
+        return PhaseResult(
+            status=PhaseStatus.OK,
+            details={"wired": False, "reason": reason, "path": str(path)},
+            reason=(
+                "hal0-brain profile not present (upstream owns creation); MCP wiring skipped"
+                if reason == "profile config absent"
+                else f"brain profile MCP not wired ({reason}; continuing)"
+            ),
+        )
     return PhaseResult(
         status=PhaseStatus.OK,
         details={
             "wired": True,
-            "changed": changed,
+            "changed": result["changed"],
             "path": str(path),
             "servers": sorted(desired["mcp_servers"].keys()),
         },
@@ -7716,6 +7817,7 @@ _INSTALL_STEPS: tuple[tuple[str, Callable[[_StepCtx], PhaseResult]], ...] = (
     ("voice_wire", _phase_voice_wire),
     ("gateway_secrets_wire", _phase_gateway_secrets_wire),
     ("profile_api_keys", _phase_profile_api_keys),
+    ("profile_mcp_wire", _phase_profile_mcp_wire),
     ("smoke_tests", _phase_smoke_tests),
 )
 
