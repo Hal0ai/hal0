@@ -548,6 +548,30 @@ def read_lock_holder(layout: Layout) -> dict[str, Any]:
         os.close(fd)
 
 
+def builder_lock_free(layout: Layout) -> tuple[bool, dict[str, Any]]:
+    """Whether the builder lock is free right now, and the holder record if not.
+
+    A probe: it takes the ``flock`` without blocking and drops it again, and it
+    never rewrites the holder record, so a stale record from a finished holder
+    is left as it was. When the lock is taken the record comes back for the
+    caller to show, but it is advisory and may name a dead holder, as with
+    :func:`read_lock_holder`.
+    """
+    layout.root.mkdir(parents=True, exist_ok=True)
+    fd = os.open(layout.lock, os.O_RDWR | os.O_CREAT, 0o664)
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            if exc.errno not in (errno.EAGAIN, errno.EACCES, errno.EWOULDBLOCK):
+                raise
+            return False, _read_holder(fd)
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        return True, {}
+    finally:
+        os.close(fd)
+
+
 @contextlib.contextmanager
 def builder_lock(
     layout: Layout,

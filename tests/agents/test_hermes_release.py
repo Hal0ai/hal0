@@ -499,6 +499,31 @@ def test_a_waiting_caller_reports_the_holder_then_proceeds(tree) -> None:
     assert seen and seen[0]["caller"] == "converge"
 
 
+def test_builder_lock_free_true_when_unheld(tmp_path: Path) -> None:
+    layout = rel.Layout.for_venv(tmp_path / "venvs" / "hermes")
+    free, holder = rel.builder_lock_free(layout)
+    assert free is True and holder == {}
+
+
+def test_builder_lock_free_false_while_held(tmp_path: Path) -> None:
+    layout = rel.Layout.for_venv(tmp_path / "venvs" / "hermes")
+    with rel.builder_lock(layout, caller="t", wait=False):
+        free, holder = rel.builder_lock_free(layout)
+    assert free is False and holder["caller"] == "t"
+
+
+def test_builder_lock_free_never_rewrites_the_holder_record(tmp_path: Path) -> None:
+    layout = rel.Layout.for_venv(tmp_path / "venvs" / "hermes")
+    with rel.builder_lock(layout, caller="t", wait=False):
+        before = layout.lock.read_bytes()
+        rel.builder_lock_free(layout)
+        assert layout.lock.read_bytes() == before
+    # Free again: the probe took and dropped the lock without touching the stale record.
+    free, holder = rel.builder_lock_free(layout)
+    assert free is True and holder == {}
+    assert layout.lock.read_bytes() == before
+
+
 def test_an_incomplete_release_is_swept_under_the_lock(tree) -> None:
     layout = rel.Layout.for_venv(tree["venv"])
     dead = layout.releases / f"{PIN[:12]}-20200101T000000Z"

@@ -265,14 +265,14 @@ def extras_for(platforms: Iterable[str]) -> tuple[str, ...]:
     return tuple(sorted({e for p in platforms for e in PLATFORM_EXTRAS.get(p, ())}))
 
 
-def configured_platform_extras(
+def configured_platform_names(
     hermes_home: Path,
     secrets_env: Path | None,
     *,
     seam: str | None = None,
     run: Runner = subprocess.run,
-) -> tuple[str, ...]:
-    """The extras for the platforms configured in ``hermes_home`` and the vault.
+) -> list[str]:
+    """The gateway platforms configured in ``hermes_home`` and the vault, sorted.
 
     Reads ``config.yaml`` and ``.env`` under ``hermes_home`` and the gateway's
     secrets vault ``secrets_env`` (the unit's ``EnvironmentFile=``), the latter
@@ -288,7 +288,18 @@ def configured_platform_extras(
     envs = [read_env_file(home / ".env")]
     if secrets_env is not None:
         envs.append(read_vault(Path(secrets_env), seam=seam, run=run))
-    return extras_for(configured_platforms(config, envs, always=HAL0_MANAGED_PLATFORMS))
+    return configured_platforms(config, envs, always=HAL0_MANAGED_PLATFORMS)
+
+
+def configured_platform_extras(
+    hermes_home: Path,
+    secrets_env: Path | None,
+    *,
+    seam: str | None = None,
+    run: Runner = subprocess.run,
+) -> tuple[str, ...]:
+    """The extras for the platforms :func:`configured_platform_names` lists."""
+    return extras_for(configured_platform_names(hermes_home, secrets_env, seam=seam, run=run))
 
 
 def _site_packages(venv: Path) -> list[Path]:
