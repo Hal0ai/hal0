@@ -213,7 +213,11 @@ def ensure_profile_key(profile: str, home: Path) -> bool:
         return False
     prefix = existing if not existing or existing.endswith(b"\n") else existing + b"\n"
     line = f"{_KEY_NAME}={hp._generate_api_server_key()}\n".encode()
-    fd, tmp = tempfile.mkstemp(dir=target.parent, prefix=".env.")
+    try:
+        fd, tmp = tempfile.mkstemp(dir=target.parent, prefix=".env.")
+    except OSError as exc:  # profile dir not writable by this user: skip, never abort the sweep
+        log.warning("hermes_api.key_skipped", path=str(target), error=str(exc))
+        return False
     try:
         with os.fdopen(fd, "wb") as fh:
             fh.write(prefix + line)
@@ -221,6 +225,10 @@ def ensure_profile_key(profile: str, home: Path) -> bool:
         if st is not None and os.geteuid() == 0:
             os.chown(tmp, st.st_uid, st.st_gid)
         os.replace(tmp, target)
+    except OSError as exc:
+        Path(tmp).unlink(missing_ok=True)
+        log.warning("hermes_api.key_skipped", path=str(target), error=str(exc))
+        return False
     except BaseException:
         Path(tmp).unlink(missing_ok=True)
         raise

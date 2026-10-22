@@ -256,3 +256,17 @@ def test_ensure_profile_keys_skips_permission_denied_env(home: Path) -> None:
         assert hermes_api.ensure_profile_keys(home) == ["parked"]
     finally:
         env.chmod(0o600)
+
+
+def test_ensure_profile_keys_skips_unwritable_profile_dir(home: Path) -> None:
+    if os.getuid() == 0:
+        pytest.skip("root writes anywhere")
+    # "nokey" sorts before "parked": a write failure there must not abort the sweep.
+    locked = home / "profiles" / "nokey"
+    locked.chmod(0o500)
+    try:
+        assert hermes_api.ensure_profile_key("nokey", home) is False
+        assert hermes_api.ensure_profile_keys(home) == ["parked"]
+    finally:
+        locked.chmod(0o700)
+    assert hermes_api.api_key_for("parked", home) is not None
