@@ -194,12 +194,16 @@ async def install_agent(body: dict[str, object]) -> dict[str, object]:
 
 @router.post("/hermes/reconcile-upstreams")
 async def reconcile_hermes_upstreams_route(request: Request) -> dict[str, object]:
-    """Re-mirror the Hermes gateway's profiles into the upstream registry."""
-    from hal0.agents.hermes_upstreams import reconcile_hermes_upstreams
+    """Re-mirror the Hermes gateway's profiles into the upstream registry.
+
+    Runs the key sweep first, so a profile created since the last pass gets
+    its key and shows up without waiting for the periodic reconcile.
+    """
+    from hal0.agents.hermes_upstreams import sync_hermes_upstreams
 
     if "hermes" not in _manager().installed_names():
         raise NotFound("hermes agent is not installed", code="agent.not_installed")
-    report = await reconcile_hermes_upstreams(request.app.state.upstreams)
+    report = await sync_hermes_upstreams(request.app.state.upstreams)
     return {"ok": True, **report}
 
 

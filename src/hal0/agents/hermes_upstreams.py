@@ -173,3 +173,23 @@ async def reconcile_hermes_upstreams(
         "model_id_collisions": sorted(id_collisions),
     }
 
+
+async def sync_hermes_upstreams(
+    registry: UpstreamRegistry, *, home: Path | None = None
+) -> dict[str, Any]:
+    """Key sweep, then reconcile: the entry point every caller shares.
+
+    hal0-api boot, the periodic loop, ``POST /api/agents/hermes/reconcile-upstreams``
+    and the Hermes converge job all go through here, so a profile created after
+    hal0-api started gets its key on the next pass instead of waiting for a
+    restart. A failed sweep is logged and the reconcile still runs. The report
+    is :func:`reconcile_hermes_upstreams`'s plus ``keys_written``.
+    """
+    home = home if home is not None else hermes_api.hermes_home()
+    try:
+        written = await asyncio.to_thread(hermes_api.ensure_profile_keys, home)
+    except Exception as exc:
+        log.warning("hermes_upstreams.key_sweep_failed", error=str(exc))
+        written = []
+    report = await reconcile_hermes_upstreams(registry, home=home)
+    return {**report, "keys_written": written}

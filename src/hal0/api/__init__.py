@@ -1355,24 +1355,19 @@ HERMES_RECONCILE_INTERVAL_S: float = 120
 async def _boot_hermes_upstreams(app: FastAPI, ctx: BootState) -> None:
     """Phase — mirror Hermes gateway profiles into the upstream registry (non-fatal).
 
-    Writes the named profiles' API-server keys first, so every hal0-api start
-    (and so every ``hal0 update``, which restarts hal0-api) delivers them.
+    The key sweep runs first (inside ``sync_hermes_upstreams``), so every
+    hal0-api start (and so every ``hal0 update``, which restarts hal0-api)
+    delivers the profiles' API-server keys.
     """
-    from hal0.agents import hermes_api
-    from hal0.agents.hermes_upstreams import reconcile_hermes_upstreams
+    from hal0.agents.hermes_upstreams import sync_hermes_upstreams
 
     try:
-        written = await asyncio.to_thread(hermes_api.ensure_profile_keys, hermes_api.hermes_home())
-    except Exception as exc:
-        log.warning("api.boot.hermes_profile_keys_failed", error=str(exc))
-    else:
-        if written:
-            log.info("api.boot.hermes_profile_keys", written=written)
-    try:
-        report = await reconcile_hermes_upstreams(ctx.upstreams)
+        report = await sync_hermes_upstreams(ctx.upstreams)
     except Exception as exc:
         log.warning("api.boot.hermes_upstreams_failed", error=str(exc))
         return
+    if report.get("keys_written"):
+        log.info("api.boot.hermes_profile_keys", written=report["keys_written"])
     log.info(
         "api.boot.hermes_upstreams",
         registered=len(report.get("registered", [])),
@@ -1381,16 +1376,18 @@ async def _boot_hermes_upstreams(app: FastAPI, ctx: BootState) -> None:
 
 
 async def _hermes_reconcile_loop(registry: Any) -> None:
-    """Re-run the Hermes upstream reconcile every ``HERMES_RECONCILE_INTERVAL_S``.
+    """Re-run the Hermes key sweep + reconcile every ``HERMES_RECONCILE_INTERVAL_S``.
 
-    Errors are logged and the loop keeps going; it ends only when cancelled.
+    A profile created while hal0-api runs gets its key and its upstream on the
+    next pass. Errors are logged and the loop keeps going; it ends only when
+    cancelled.
     """
     from hal0.agents import hermes_upstreams
 
     while True:
         await asyncio.sleep(HERMES_RECONCILE_INTERVAL_S)
         try:
-            await hermes_upstreams.reconcile_hermes_upstreams(registry)
+            await hermes_upstreams.sync_hermes_upstreams(registry)
         except Exception as exc:
             log.warning("api.hermes_upstreams.periodic_reconcile_failed", error=str(exc))
 

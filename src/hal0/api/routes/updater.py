@@ -988,12 +988,9 @@ async def _run_component_job(
     else:
         if component_id == "hermes" and result.get("status") in {"converged", "stale", "upgraded"}:
             try:
-                from hal0.agents.hermes_api import ensure_profile_keys, hermes_home
-                from hal0.agents.hermes_upstreams import reconcile_hermes_upstreams
+                from hal0.agents.hermes_upstreams import sync_hermes_upstreams
 
-                keys_written = await asyncio.to_thread(ensure_profile_keys, hermes_home())
-                report = await reconcile_hermes_upstreams(upstreams)
-                result["hermes_upstreams"] = {**report, "keys_written": keys_written}
+                result["hermes_upstreams"] = await sync_hermes_upstreams(upstreams)
             except Exception as exc:
                 log.warning("updater.hermes_upstreams_failed", error=str(exc))
         job["component_result"] = result

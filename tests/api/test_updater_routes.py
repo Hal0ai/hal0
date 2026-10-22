@@ -1524,14 +1524,41 @@ async def test_hermes_converge_reconciles_upstreams(
 
 
 @pytest.mark.asyncio
-async def test_hermes_reconcile_failure_does_not_fail_converge(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+async def test_hermes_key_sweep_failure_still_reconciles(monkeypatch: pytest.MonkeyPatch) -> None:
     def boom(home: Any) -> list[str]:
         raise OSError("nope")
 
+    async def fake(registry: Any, **_: Any) -> dict[str, Any]:
+        return {"registered": ["hermes"], "removed": []}
+
     job = await _run_hermes_job(
-        monkeypatch, "converged", ensure_profile_keys=boom, hermes_home=lambda: "HOME"
+        monkeypatch,
+        "converged",
+        ensure_profile_keys=boom,
+        reconcile_hermes_upstreams=fake,
+        hermes_home=lambda: "HOME",
+    )
+    assert job["state"] == "applied"
+    assert job["component_result"]["hermes_upstreams"] == {
+        "registered": ["hermes"],
+        "removed": [],
+        "keys_written": [],
+    }
+
+
+@pytest.mark.asyncio
+async def test_hermes_reconcile_failure_does_not_fail_converge(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def boom(registry: Any, **_: Any) -> dict[str, Any]:
+        raise RuntimeError("nope")
+
+    job = await _run_hermes_job(
+        monkeypatch,
+        "converged",
+        reconcile_hermes_upstreams=boom,
+        ensure_profile_keys=lambda home: [],
+        hermes_home=lambda: "HOME",
     )
     assert job["state"] == "applied"
     assert "hermes_upstreams" not in job["component_result"]

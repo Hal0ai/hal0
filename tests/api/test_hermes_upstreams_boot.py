@@ -88,6 +88,7 @@ async def test_periodic_reconcile_reruns_and_survives_errors(
     from hal0.upstreams.registry import UpstreamRegistry
 
     calls: list[Any] = []
+    sweeps: list[Any] = []
 
     async def flaky(registry: Any, **_: Any) -> dict[str, Any]:
         calls.append(registry)
@@ -96,6 +97,9 @@ async def test_periodic_reconcile_reruns_and_survives_errors(
         return {"registered": [], "removed": [], "skipped": [], "profiles_without_key": []}
 
     monkeypatch.setattr("hal0.agents.hermes_upstreams.reconcile_hermes_upstreams", flaky)
+    # Codex P2: each pass sweeps keys first, so a profile created after boot
+    # gets its key without an API restart.
+    monkeypatch.setattr("hal0.agents.hermes_api.ensure_profile_keys", lambda h: sweeps.append(h))
     monkeypatch.setattr(api_mod, "HERMES_RECONCILE_INTERVAL_S", 0.01)
     ctx = api_mod.BootState()
     ctx.upstreams = UpstreamRegistry()
@@ -106,6 +110,7 @@ async def test_periodic_reconcile_reruns_and_survives_errors(
                 break
             await asyncio.sleep(0.01)
         assert len(calls) >= 3
+        assert len(sweeps) >= len(calls)
         assert all(r is ctx.upstreams for r in calls)
         assert ctx.hermes_reconcile_task is not None
         assert not ctx.hermes_reconcile_task.done()
@@ -141,3 +146,4 @@ def test_lifespan_starts_and_stops_periodic_reconcile(
     seen = len(calls)
     time.sleep(0.05)
     assert len(calls) == seen
+

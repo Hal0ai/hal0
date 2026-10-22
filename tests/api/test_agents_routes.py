@@ -188,11 +188,13 @@ def test_reconcile_upstreams_route_returns_report(
 
     monkeypatch.setattr(agents_routes, "_manager", lambda: _Mgr())
     monkeypatch.setattr("hal0.agents.hermes_upstreams.reconcile_hermes_upstreams", fake)
+    # Codex P2: the route sweeps keys first, like boot and the periodic pass.
+    monkeypatch.setattr("hal0.agents.hermes_api.ensure_profile_keys", lambda home: ["later"])
     client.app.state.upstreams = sentinel = object()  # type: ignore[attr-defined]
 
     res = client.post("/api/agents/hermes/reconcile-upstreams")
     assert res.status_code == 200
-    assert res.json() == {"ok": True, **report}
+    assert res.json() == {"ok": True, **report, "keys_written": ["later"]}
     assert seen == [sentinel]
 
 

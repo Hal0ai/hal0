@@ -6,10 +6,14 @@ from pathlib import Path
 
 import pytest
 
-from hal0.agents import hermes_upstreams
+from hal0.agents import hermes_api, hermes_upstreams
 from hal0.agents import hermes_provision as hp
 from hal0.agents.hermes_api import env_key_name
-from hal0.agents.hermes_upstreams import build_hermes_upstream, reconcile_hermes_upstreams
+from hal0.agents.hermes_upstreams import (
+    build_hermes_upstream,
+    reconcile_hermes_upstreams,
+    sync_hermes_upstreams,
+)
 from hal0.upstreams.registry import Upstream, UpstreamRegistry
 
 DEFAULT_KEY = "defaultkey_abcdefghijklmnop0123"
@@ -374,3 +378,40 @@ async def test_reconcile_skips_named_profile_whose_model_id_is_the_default_name(
     assert report["registered"] == ["hermes"]
     assert env_key_name("coder") not in env
 
+
+async def test_sync_writes_keys_then_reconciles(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Codex P2: every entry point sweeps keys first, so a profile created after
+    hal0-api started is picked up by the next periodic pass."""
+    (home / "profiles" / "later").mkdir()
+    reg = UpstreamRegistry()
+    _patch_models(monkeypatch, reg, {})
+    monkeypatch.setattr(hermes_upstreams, "reconcile_hermes_upstreams", _recording(reg))
+    report = await sync_hermes_upstreams(reg, home=home)
+    assert report["keys_written"] == ["later", "nokey"]
+    assert hermes_api.api_key_for("later", home) is not None
+    assert report["seen_home"] == home
+
+
+async def test_sync_reconciles_even_when_key_sweep_fails(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    reg = UpstreamRegistry()
+
+    def boom(_home: Path) -> list[str]:
+        raise OSError("read-only")
+
+    monkeypatch.setattr(hermes_api, "ensure_profile_keys", boom)
+    monkeypatch.setattr(hermes_upstreams, "reconcile_hermes_upstreams", _recording(reg))
+    report = await sync_hermes_upstreams(reg, home=home)
+    assert report["keys_written"] == []
+    assert report["seen_home"] == home
+
+
+def _recording(expected: UpstreamRegistry):
+    async def fake(registry: UpstreamRegistry, *, home: Path, **_: object) -> dict[str, object]:
+        assert registry is expected
+        return {"registered": [], "seen_home": home}
+
+    return fake
