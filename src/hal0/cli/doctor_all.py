@@ -1332,14 +1332,16 @@ def check_hermes_profiles_mcp(
     for name in names:
         cfg = root / "profiles" / name / "config.yaml"
         try:
-            data = yaml.safe_load(cfg.read_text(encoding="utf-8")) or {}
+            data = yaml.safe_load(cfg.read_text(encoding="utf-8"))
         except FileNotFoundError:
             unwired.append(name)
             continue
         except (OSError, UnicodeDecodeError, yaml.YAMLError):
             unreadable.append(name)
             continue
-        if not isinstance(data, dict):
+        if data is None:  # an empty file is an empty mapping
+            data = {}
+        if not isinstance(data, dict):  # ``[]`` / ``false``: the writer refuses these too
             unreadable.append(name)
             continue
         block = data.get("hal0")
@@ -1366,6 +1368,7 @@ def check_hermes_profiles_mcp(
         if provider != desired["memory"]["provider"] or any(
             servers[n].get("type") != want["type"]
             or servers[n].get("url") != want["url"]
+            or servers[n].get("timeout") != want["timeout"]
             or any(
                 _header(servers[n], h) != v
                 for h, v in want["headers"].items()
@@ -1395,7 +1398,10 @@ def check_hermes_profiles_mcp(
             "wiring (identity, target or memory provider); the next hal0-api sweep rewrites them"
         )
     if unreadable:
-        parts.append(f"could not read config.yaml of profile(s) {', '.join(unreadable)}")
+        parts.append(
+            f"config.yaml of profile(s) {', '.join(unreadable)} is unreadable or not a mapping; "
+            "hal0 leaves it alone, fix it by hand"
+        )
     if unauthed:
         return Check(key, label, _FAIL, "; ".join(parts))
     if unwired or drifted or unreadable:
@@ -1430,6 +1436,12 @@ def check_hermes_generation_extras(*, home: Path | None = None, venv: Path | Non
         release = None
     if release is None:
         return Check(key, label, _PASS, "no live Hermes release")
+    # ``committed_generation`` answers None for an unreadable install state too;
+    # across a 0700 home that is not proof that no generation is committed.
+    installs = root / "installs"
+    for probe in (root, installs):
+        if os.path.lexists(probe) and not os.access(probe, os.R_OK | os.X_OK):
+            return Check(key, label, _WARN, f"cannot read {probe}; run hal0 doctor as hal0 or root")
     try:
         generation = hpl.committed_generation(root, release.src)
     except OSError:

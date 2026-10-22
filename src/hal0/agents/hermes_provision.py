@@ -4923,9 +4923,12 @@ def _replace_profile_config(path: Path, text: str) -> None:
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             fh.write(text)
-        os.chmod(tmp, stat.S_IMODE(st.st_mode))
-        if os.geteuid() == 0:
-            os.chown(tmp, st.st_uid, st.st_gid)
+            fh.flush()
+            # Metadata on the open descriptor, never on the path: a swapped-in
+            # symlink at the temp name would otherwise be followed.
+            os.fchmod(fh.fileno(), stat.S_IMODE(st.st_mode))
+            if os.geteuid() == 0:
+                os.fchown(fh.fileno(), st.st_uid, st.st_gid)
         os.replace(tmp, path)
     except BaseException:
         Path(tmp).unlink(missing_ok=True)
@@ -4958,6 +4961,11 @@ def wire_named_profiles(home: Path) -> dict[str, Any]:
     """
     report: dict[str, Any] = {"wired": [], "changed": [], "skipped": {}, "errors": {}}
     profiles = Path(home) / "profiles"
+    if profiles.is_symlink():
+        # The root itself must be a real directory: a link planted by the
+        # service account would make every child look like an ordinary one.
+        report["errors"]["profiles/"] = "profiles/ is a symlink"
+        return report
     try:
         entries = sorted(profiles.iterdir(), key=lambda p: p.name)
     except FileNotFoundError:

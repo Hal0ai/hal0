@@ -1935,15 +1935,26 @@ def _profiles_home(tmp_path, **profiles):
     return home
 
 
-_WIRED = (
-    "memory:\n  provider: hal0-memory\n"
-    "mcp_servers:\n"
-    "  hal0-admin:\n    type: http\n    url: http://127.0.0.1:8080/mcp/admin/mcp\n"
-    "    headers:\n      X-hal0-Agent: hermes__coder\n      Authorization: Bearer k\n"
-    "  hal0-memory:\n    type: http\n    url: http://127.0.0.1:8080/mcp/memory/mcp\n"
-    "    headers:\n      X-hal0-Agent: hermes__coder\n      X-hal0-Private: '1'\n"
-    "      Authorization: Bearer k\n"
-)
+def _wired_yaml() -> str:
+    from hal0.agents import hermes_provision as hp
+
+    admin_t = hp._HAL0_ADMIN_MCP_TIMEOUT_S
+    mem_t = hp._memory_mcp_timeout()
+    return (
+        "memory:\n  provider: hal0-memory\n"
+        "mcp_servers:\n"
+        "  hal0-admin:\n    type: http\n    url: http://127.0.0.1:8080/mcp/admin/mcp\n"
+        "    headers:\n      X-hal0-Agent: hermes__coder\n      Authorization: Bearer k\n"
+        f"    timeout: {admin_t}\n"
+        "  hal0-memory:\n    type: http\n    url: http://127.0.0.1:8080/mcp/memory/mcp\n"
+        "    headers:\n      X-hal0-Agent: hermes__coder\n      X-hal0-Private: '1'\n"
+        "      Authorization: Bearer k\n"
+        f"    timeout: {mem_t}\n"
+    )
+
+
+_WIRED = _wired_yaml()
+_WIRED_FULL = _WIRED
 _UNAUTHED = _WIRED.replace("      Authorization: Bearer k\n", "")
 
 
@@ -2118,3 +2129,37 @@ def test_generation_extras_counts_platform_extras(tmp_path, monkeypatch) -> None
     monkeypatch.setattr(rel, "release_root_for", lambda _v: root)
     c = da.check_hermes_generation_extras(home=home, venv=venv)
     assert c.status == "warn" and "lacks extra(s) telegram" in c.detail
+
+
+def test_profiles_mcp_warns_on_a_stale_memory_timeout(tmp_path) -> None:
+    """Codex P2: the 30 s budget the brain phase used cancels memory_reflect."""
+    import re
+
+    stale = re.sub(r"    timeout: \d+\n$", "    timeout: 30\n", _WIRED_FULL)
+    assert stale != _WIRED_FULL
+    home = _profiles_home(tmp_path, coder=stale)
+    c = da.check_hermes_profiles_mcp(auth={"auth_required": True}, home=home)
+    assert c.status == "warn" and "coder" in c.detail
+
+
+def test_profiles_mcp_reports_a_falsy_document_as_unreadable(tmp_path) -> None:
+    home = _profiles_home(tmp_path, coder="[]\n", lab="")
+    c = da.check_hermes_profiles_mcp(auth={"auth_required": True}, home=home)
+    assert c.status == "warn"
+    assert "coder is unreadable or not a mapping" in c.detail and "fix it by hand" in c.detail
+    assert "lab not wired" in c.detail.replace("profile(s) ", "")
+
+
+def test_generation_extras_warns_when_the_home_is_unreadable(tmp_path, monkeypatch) -> None:
+    from hal0.agents import hermes_release as rel
+
+    home, venv, root = _release_layout(tmp_path, ["web", "mcp"], generation_extras=["telegram"])
+    monkeypatch.setattr(rel, "release_root_for", lambda _v: root)
+    real_access = da.os.access
+    monkeypatch.setattr(
+        da.os,
+        "access",
+        lambda p, m, *a, **k: False if Path(p) == home else real_access(p, m, *a, **k),
+    )
+    c = da.check_hermes_generation_extras(home=home, venv=venv)
+    assert c.status == "warn" and "run hal0 doctor as hal0 or root" in c.detail

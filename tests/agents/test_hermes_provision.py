@@ -4957,3 +4957,45 @@ def test_named_profile_memory_timeout_matches_the_default_profile(monkeypatch) -
     assert canonical >= 900
     assert hp._build_profile_mcp_servers("hermes__coder")["hal0-memory"]["timeout"] == canonical
     assert hp._build_brain_profile_mcp_servers()["hal0-memory"]["timeout"] == canonical
+
+
+def test_wire_named_profiles_refuses_a_symlinked_profiles_root(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr("hal0.service_identity.service_key", lambda prefer=None: None)
+    outside = tmp_path / "outside" / "victim"
+    outside.mkdir(parents=True)
+    (outside / "config.yaml").write_text("root: owned\n")
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    (home / "profiles").symlink_to(tmp_path / "outside", target_is_directory=True)
+    report = hp.wire_named_profiles(home)
+    assert report == {
+        "wired": [],
+        "changed": [],
+        "skipped": {},
+        "errors": {"profiles/": "profiles/ is a symlink"},
+    }
+    assert (outside / "config.yaml").read_text() == "root: owned\n"
+
+
+def test_replace_profile_config_sets_metadata_on_the_descriptor(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Codex P1: chmod/chown on the open fd, never on the temp path."""
+    import os
+
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text("a: 1\n")
+    os.chmod(cfg, 0o640)
+    calls: list[str] = []
+    monkeypatch.setattr(hp.os, "chmod", lambda *a, **k: calls.append("chmod-path"))
+    monkeypatch.setattr(hp.os, "chown", lambda *a, **k: calls.append("chown-path"))
+    real_fchmod = os.fchmod
+    monkeypatch.setattr(
+        hp.os, "fchmod", lambda fd, mode: (calls.append("fchmod"), real_fchmod(fd, mode))
+    )
+    monkeypatch.setattr(hp.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(hp.os, "fchown", lambda fd, uid, gid: calls.append("fchown"))
+    hp._replace_profile_config(cfg, "a: 2\n")
+    assert cfg.read_text() == "a: 2\n"
+    assert calls == ["fchmod", "fchown"]
+    assert (cfg.stat().st_mode & 0o777) == 0o640
