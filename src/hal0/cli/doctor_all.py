@@ -2011,6 +2011,91 @@ def check_memory_extraction_throughput(
     return Check(name, title, _PASS if est.get("verdict") == "ok" else _WARN, detail)
 
 
+def _unmanaged_gateways(proc: Path) -> list[str]:
+    """``pid (cgroup)`` for every ``gateway run --idle-exit`` process under ``proc``."""
+    found: list[str] = []
+    try:
+        entries = sorted(proc.iterdir())
+    except OSError:
+        return found
+    for entry in entries:
+        if not entry.name.isdigit():
+            continue
+        try:
+            argv = (entry / "cmdline").read_bytes().split(b"\0")
+        except OSError:
+            continue
+        if b"--idle-exit" not in argv or b"gateway" not in argv or b"run" not in argv:
+            continue
+        cgroup = "unknown cgroup"
+        try:
+            last = (entry / "cgroup").read_text(encoding="utf-8").strip().splitlines()[-1]
+            cgroup = last.rsplit(":", 1)[-1] or cgroup
+        except (OSError, IndexError, UnicodeDecodeError):
+            pass
+        found.append(f"pid {entry.name} ({cgroup})")
+    return found
+
+
+def check_hermes_gateway_unit(
+    *,
+    home: Path | None = None,
+    unit_path: Path | None = None,
+    proc: Path = Path("/proc"),
+) -> Check:
+    """Hermes installed means the gateway unit file exists and no unmanaged gateway runs.
+
+    From Hermes v0.22.3 a profile-scoped dashboard chat and the ``hermes chat``
+    CLI are gateway clients. With NO gateway unit file installed they start
+    their own ``gateway run --idle-exit`` inside the caller's cgroup, and that
+    gateway runs cron and the kanban dispatcher (upstream
+    ``hermes_cli/gateway_runtime_service.py:92-108`` and
+    ``hermes_cli/gateway_runtime_start.py:35-81`` at ``4d043038``). A unit
+    that is installed but disabled, stopped, masked or failed blocks that
+    start. hal0 only ever ``systemctl disable --now``s the unit and never
+    removes the file, so this row guards the one state that would let a client
+    spawn a gateway where the operator turned it off (ADR-0034 amendment,
+    #2874). Never critical: the row names the fix, it does not block setup.
+    """
+    from hal0.agents import hermes_api as ha
+    from hal0.agents.hermes_layout import GATEWAY_UNIT_PATH
+
+    key, label = "hermes-gateway-unit", "Hermes gateway unit"
+    root = home if home is not None else ha.hermes_home()
+    unit = unit_path if unit_path is not None else GATEWAY_UNIT_PATH
+    try:
+        (root / "config.yaml").stat()
+    except PermissionError:
+        return Check(key, label, _WARN, f"cannot read {root}; run hal0 doctor as hal0 or root")
+    except OSError:
+        return Check(key, label, _PASS, "no Hermes agent installed")
+    rogue = _unmanaged_gateways(proc)
+    if rogue:
+        return Check(
+            key,
+            label,
+            _FAIL,
+            "unmanaged Hermes gateway running: "
+            + ", ".join(rogue)
+            + "; it runs cron and the kanban dispatcher outside hermes-gateway.service. "
+            "Stop it, then run sudo hal0 agent install hermes so the unit file is installed",
+        )
+    try:
+        present = unit.is_file()
+    except OSError:
+        present = False
+    if not present:
+        return Check(
+            key,
+            label,
+            _FAIL,
+            f"{unit} is missing; a profile-scoped Hermes chat or hermes chat would start an "
+            "unmanaged gateway (Hermes v0.22.3+). Run sudo hal0 agent install hermes; to keep "
+            "the gateway off afterwards, systemctl disable --now hermes-gateway",
+        )
+    return Check(key, label, _PASS, f"{unit.name} installed; no unmanaged gateway")
+
+
 def check_hermes_anchor_window(
     *,
     base: str | None = None,
@@ -2158,6 +2243,7 @@ def build_all_checks(base: str | None = None) -> list[Check]:
         check_hermes_generation_extras(),
         check_hermes_command_approvals(),
         check_hermes_delegation_slot(slots_payload),
+        check_hermes_gateway_unit(),
         check_hermes_anchor_window(base=base),
         check_hal0_linger(),
         check_hindsight_llm_auth(auth=auth_payload),

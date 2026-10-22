@@ -1234,6 +1234,11 @@ def test_build_all_checks_includes_hermes_api(monkeypatch: pytest.MonkeyPatch) -
     )
     monkeypatch.setattr(
         da,
+        "check_hermes_gateway_unit",
+        lambda **_kw: Check("hermes-gateway-unit", "Hermes gateway unit", "pass", "stubbed"),
+    )
+    monkeypatch.setattr(
+        da,
         "check_hermes_delegation_slot",
         lambda *_a, **_kw: Check(
             "hermes_delegation_slot", "Hermes delegation slot", "pass", "stubbed"
@@ -1287,7 +1292,7 @@ def test_build_all_checks_includes_hermes_api(monkeypatch: pytest.MonkeyPatch) -
     checks = da.build_all_checks()
     keys = [c.key for c in checks]
     # 7 verify rows + 27 extras.
-    assert keys[-27:] == [
+    assert keys[-28:] == [
         "auth",
         "models",
         "registry-toml",
@@ -1310,6 +1315,7 @@ def test_build_all_checks_includes_hermes_api(monkeypatch: pytest.MonkeyPatch) -
         "hermes_generation",
         "hermes_command_approvals",
         "hermes_delegation_slot",
+        "hermes-gateway-unit",
         "hermes_anchor_window",
         "hal0_linger",
         "hindsight_llm_auth",
@@ -2270,3 +2276,104 @@ def test_profiles_mcp_reads_configs_through_one_descriptor(tmp_path, monkeypatch
     monkeypatch.setattr(Path, "read_text", no_path_read)
     c = da.check_hermes_profiles_mcp(auth={"auth_required": True}, home=home)
     assert c.status == "pass" and "wired: coder" in c.detail
+
+
+# ── Hermes gateway unit (ADR-0034 amendment, #2874) ──────────────────────────
+
+
+def _proc(tmp_path, procs):
+    proc = tmp_path / "proc"
+    for pid, argv, cgroup in procs:
+        d = proc / str(pid)
+        d.mkdir(parents=True)
+        (d / "cmdline").write_bytes(b"\0".join(a.encode() for a in argv) + b"\0")
+        (d / "cgroup").write_text(f"0::{cgroup}\n")
+    (proc / "self").mkdir(parents=True, exist_ok=True)
+    return proc
+
+
+def test_gateway_unit_no_hermes_passes(tmp_path) -> None:
+    c = da.check_hermes_gateway_unit(
+        home=tmp_path / "none", unit_path=tmp_path / "u.service", proc=_proc(tmp_path, [])
+    )
+    assert c.status == "pass" and "no Hermes agent" in c.detail
+
+
+def test_gateway_unit_installed_passes(tmp_path) -> None:
+    home = tmp_path / "hermes"
+    home.mkdir()
+    (home / "config.yaml").write_text("model: x\n")
+    unit = tmp_path / "hermes-gateway.service"
+    unit.write_text("[Unit]\n")
+    managed = [
+        "/var/lib/hal0/hermes/current/.venv/bin/python",
+        "-m",
+        "hermes_cli.main",
+        "gateway",
+        "run",
+        "--quiet",
+    ]
+    c = da.check_hermes_gateway_unit(
+        home=home,
+        unit_path=unit,
+        proc=_proc(tmp_path, [(10, managed, "/system.slice/hermes-gateway.service")]),
+    )
+    assert c.status == "pass" and "hermes-gateway.service installed" in c.detail
+
+
+def test_gateway_unit_missing_fails(tmp_path) -> None:
+    home = tmp_path / "hermes"
+    home.mkdir()
+    (home / "config.yaml").write_text("model: x\n")
+    c = da.check_hermes_gateway_unit(
+        home=home, unit_path=tmp_path / "hermes-gateway.service", proc=_proc(tmp_path, [])
+    )
+    assert c.status == "fail" and c.critical is False
+    assert "is missing" in c.detail and "hal0 agent install hermes" in c.detail
+    assert "disable --now hermes-gateway" in c.detail
+
+
+def test_gateway_unit_unmanaged_gateway_fails(tmp_path) -> None:
+    home = tmp_path / "hermes"
+    home.mkdir()
+    (home / "config.yaml").write_text("model: x\n")
+    unit = tmp_path / "hermes-gateway.service"
+    unit.write_text("[Unit]\n")
+    rogue = [
+        "/var/lib/hal0/hermes/current/.venv/bin/python",
+        "-m",
+        "hermes_cli.main",
+        "--profile",
+        "default",
+        "gateway",
+        "run",
+        "--quiet",
+        "--idle-exit",
+    ]
+    unrelated = ["grep", "gateway", "run", "--idle-exit"]
+    procs = [
+        (77, rogue, "/system.slice/system-hal0\\x2dagent.slice/hal0-agent@hermes.service"),
+        (78, unrelated, "/user.slice/user-0.slice/session-1.scope"),
+    ]
+    c = da.check_hermes_gateway_unit(home=home, unit_path=unit, proc=_proc(tmp_path, procs))
+    assert c.status == "fail" and c.critical is False
+    assert "pid 77" in c.detail and "hal0-agent@hermes.service" in c.detail
+    assert "pid 78" in c.detail  # argv is the rule; a wrapper that carries it is reported too
+    assert "Stop it" in c.detail and "hal0 agent install hermes" in c.detail
+
+
+def test_gateway_unit_unreadable_home_warns(tmp_path, monkeypatch) -> None:
+    home = tmp_path / "hermes"
+    home.mkdir()
+    cfg = home / "config.yaml"
+    cfg.write_text("model: x\n")
+    real_stat = Path.stat
+
+    def deny(self, *a, **k):
+        if self == cfg:
+            raise PermissionError(13, "denied", str(self))
+        return real_stat(self, *a, **k)
+
+    monkeypatch.setattr(Path, "stat", deny)
+    c = da.check_hermes_gateway_unit(home=home, unit_path=tmp_path / "u", proc=_proc(tmp_path, []))
+    assert c.status == "warn" and "run hal0 doctor as hal0 or root" in c.detail
