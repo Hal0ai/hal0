@@ -1383,11 +1383,17 @@ def check_hermes_delegation_slot(
 
 
 def _hermes_http_get(url: str, headers: dict[str, str]) -> tuple[int, Any]:
-    """GET ``url`` with ``headers``; ``(status, json_or_None)``, ``(0, None)`` on error."""
+    """GET ``url`` with ``headers``; ``(status, json_or_None)``, ``(0, None)`` on error.
+
+    A loopback target ignores the proxy environment: the request carries a
+    profile's bearer key, which must never reach an ``HTTP_PROXY``.
+    """
     import httpx
 
+    from hal0.service_identity import is_loopback_url
+
     try:
-        resp = httpx.get(url, headers=headers, timeout=5.0)
+        resp = httpx.get(url, headers=headers, timeout=5.0, trust_env=not is_loopback_url(url))
     except httpx.HTTPError:
         return 0, None
     try:
@@ -1437,8 +1443,7 @@ def check_hermes_api_upstreams(
     except OSError:
         return Check(key, label, _PASS, "no Hermes agent installed")
     get = http_get if http_get is not None else _hermes_http_get
-    host, port = ha.api_server_endpoint(root)
-    base = f"http://{host}:{port}"
+    base = ha.api_server_base(root)
     served = ha.served_profiles(root, probe=probe)
     registered = _upstream_names(upstreams_payload)
     api_down = upstreams_payload is None

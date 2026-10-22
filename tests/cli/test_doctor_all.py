@@ -1881,3 +1881,29 @@ def test_check_hermes_api_upstreams_warns_when_api_unreachable(tmp_path) -> None
         upstreams_payload=None,
     )
     assert c.status == "warn" and "hal0-api unreachable" in c.detail
+
+
+@pytest.mark.parametrize(
+    ("url", "trust_env"),
+    [("http://127.0.0.1:8642/v1/models", False), ("http://hermes.example:8642/v1/models", True)],
+)
+def test_hermes_http_get_keeps_loopback_requests_off_the_proxy(monkeypatch, url, trust_env):
+    """Codex P1: the authenticated doctor probe carries a profile key; a
+    loopback request must never be routed through HTTP_PROXY."""
+    import httpx
+
+    seen: dict = {}
+
+    class _Resp:
+        status_code = 200
+
+        def json(self):
+            return {"data": []}
+
+    def fake_get(u, **kw):
+        seen.update(url=u, **kw)
+        return _Resp()
+
+    monkeypatch.setattr(httpx, "get", fake_get)
+    assert da._hermes_http_get(url, {"Authorization": "Bearer k"}) == (200, {"data": []})
+    assert seen["trust_env"] is trust_env
