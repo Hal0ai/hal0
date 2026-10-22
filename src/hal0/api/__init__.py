@@ -22,6 +22,7 @@ from fastapi import FastAPI
 
 from hal0 import __version__
 from hal0.activity import AuditStore
+from hal0.agents.hermes_upstreams import reconcile_hermes_upstreams
 from hal0.api.agents import (
     command_approvals as agents_command_approvals_routes,
 )
@@ -1344,6 +1345,20 @@ async def _boot_slot_manager(app: FastAPI, ctx: BootState) -> None:
     )
 
 
+async def _boot_hermes_upstreams(app: FastAPI, ctx: BootState) -> None:
+    """Phase — mirror Hermes gateway profiles into the upstream registry (non-fatal)."""
+    try:
+        report = await reconcile_hermes_upstreams(ctx.upstreams)
+    except Exception as exc:
+        log.warning("api.boot.hermes_upstreams_failed", error=str(exc))
+        return
+    log.info(
+        "api.boot.hermes_upstreams",
+        registered=len(report.get("registered", [])),
+        removed=len(report.get("removed", [])),
+    )
+
+
 async def _boot_dispatcher(app: FastAPI, ctx: BootState) -> None:
     """Phase — Dispatcher wired to the shared model cache + slot manager."""
     ctx.dispatcher = Dispatcher(
@@ -2509,6 +2524,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     await _run_boot_phase(report, "audit_store", lambda: _boot_audit_store(app, ctx))
     await _run_boot_phase(report, "slot_manager", lambda: _boot_slot_manager(app, ctx))
     await _run_boot_phase(report, "dispatcher", lambda: _boot_dispatcher(app, ctx))
+    await _run_boot_phase(report, "hermes_upstreams", lambda: _boot_hermes_upstreams(app, ctx))
     # ``slot_reconcile`` starts the READY model-cache refresher (#2442) before
     # the AsyncExitStack below exists; a later phase failing must not leave
     # it subscribed.

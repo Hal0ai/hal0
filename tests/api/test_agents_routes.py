@@ -167,3 +167,43 @@ def test_uninstall_refuses_cli_kind_agent(client: TestClient) -> None:
     body = res.json()
     assert body["error"]["code"] == "agent.cli_kind_local_only"
     assert "hal0 agent uninstall pi" in body["error"]["message"]
+
+
+# ── POST /api/agents/hermes/reconcile-upstreams ──────────────────────────────
+
+
+def test_reconcile_upstreams_route_returns_report(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen: list[object] = []
+    report = {"registered": ["hermes"], "removed": [], "skipped": [], "profiles_without_key": []}
+
+    async def fake(registry: object, **_: object) -> dict[str, object]:
+        seen.append(registry)
+        return report
+
+    class _Mgr:
+        def installed_names(self) -> list[str]:
+            return ["hermes"]
+
+    monkeypatch.setattr(agents_routes, "_manager", lambda: _Mgr())
+    monkeypatch.setattr(agents_routes, "reconcile_hermes_upstreams", fake)
+    client.app.state.upstreams = sentinel = object()  # type: ignore[attr-defined]
+
+    res = client.post("/api/agents/hermes/reconcile-upstreams")
+    assert res.status_code == 200
+    assert res.json() == {"ok": True, **report}
+    assert seen == [sentinel]
+
+
+def test_reconcile_upstreams_404_when_not_installed(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class _Mgr:
+        def installed_names(self) -> list[str]:
+            return []
+
+    monkeypatch.setattr(agents_routes, "_manager", lambda: _Mgr())
+    res = client.post("/api/agents/hermes/reconcile-upstreams")
+    assert res.status_code == 404
+    assert res.json()["error"]["code"] == "agent.not_installed"
