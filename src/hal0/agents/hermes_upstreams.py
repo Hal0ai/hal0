@@ -95,6 +95,8 @@ async def reconcile_hermes_upstreams(
     skipped: list[str] = []
     without_key: list[str] = []
     desired: dict[str, str] = {}  # upstream name -> env var
+    claimed: dict[str, str] = {}  # env var -> the profile that owns it this run
+    collisions: set[str] = set()
 
     for profile in candidates:
         key = hermes_api.api_key_for(profile, home)
@@ -110,6 +112,19 @@ async def reconcile_hermes_upstreams(
                 _WARNED.add(name)
                 log.warning(
                     "hermes_upstreams.name_taken", name=name, managed_by=existing.managed_by
+                )
+            continue
+        if claimed.setdefault(env_name, profile) != profile:
+            # ``my-profile`` and ``my_profile`` map to one env var; sharing it
+            # would let one key overwrite the other and cleanup pop both.
+            collisions.add(profile)
+            if env_name not in _WARNED:
+                _WARNED.add(env_name)
+                log.warning(
+                    "hermes_upstreams.env_name_collision",
+                    env_name=env_name,
+                    profile=profile,
+                    kept=claimed[env_name],
                 )
             continue
         environ[env_name] = key
@@ -137,4 +152,5 @@ async def reconcile_hermes_upstreams(
         "removed": sorted(removed),
         "skipped": sorted(skipped),
         "profiles_without_key": sorted(without_key),
+        "env_name_collisions": sorted(collisions),
     }

@@ -307,3 +307,27 @@ async def test_reconcile_default_owns_configured_model_name(
     await reconcile_hermes_upstreams(reg, home=home, probe=_probe(), environ={})
     assert reg.get("hermes").owned_models == ("my-agent",)  # type: ignore[union-attr]
     assert reg.get("hermes.coder").owned_models == ("coder",)  # type: ignore[union-attr]
+
+
+async def test_reconcile_skips_profile_whose_env_name_collides(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    for name, key in (
+        ("my-profile", CODER_KEY),
+        ("my_profile", "zyxwvutsrqponmlkjihgfedcba987654"),
+    ):
+        d = home / "profiles" / name
+        d.mkdir()
+        (d / ".env").write_text(f"API_SERVER_KEY={key}\n")
+    reg = UpstreamRegistry()
+    _patch_models(monkeypatch, reg, {})
+    env: dict[str, str] = {}
+    report = await reconcile_hermes_upstreams(
+        reg, home=home, probe=_probe({"my-profile": 200, "my_profile": 200}), environ=env
+    )
+    # Sorted order: "my-profile" claims the name first; "my_profile" is skipped.
+    assert reg.get("hermes.my-profile") is not None
+    assert reg.get("hermes.my_profile") is None
+    assert env[env_key_name("my-profile")] == CODER_KEY
+    assert report["env_name_collisions"] == ["my_profile"]
+    assert "hermes.my_profile" not in report["registered"]
