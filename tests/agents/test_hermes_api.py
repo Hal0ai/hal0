@@ -15,7 +15,7 @@ GOOD = "abcdefghijklmnopqrstuvwxyz012345"
 
 @pytest.fixture(autouse=True)
 def _clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    for name in ("HERMES_HOME", "API_SERVER_HOST", "API_SERVER_PORT"):
+    for name in ("HERMES_HOME", "API_SERVER_HOST", "API_SERVER_PORT", "API_SERVER_MODEL_NAME"):
         monkeypatch.delenv(name, raising=False)
 
 
@@ -270,3 +270,15 @@ def test_ensure_profile_keys_skips_unwritable_profile_dir(home: Path) -> None:
     finally:
         locked.chmod(0o700)
     assert hermes_api.api_key_for("parked", home) is not None
+
+
+def test_default_model_id_override_precedence(home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    assert hermes_api.default_model_id(home) == "hermes-agent"
+    monkeypatch.setenv("API_SERVER_MODEL_NAME", "from-env")
+    assert hermes_api.model_id_for("default", home) == "from-env"
+    (home / "config.yaml").write_text(
+        "gateway:\n  platforms:\n    api_server:\n      model_name: from-config\n"
+    )
+    assert hermes_api.model_id_for("default", home) == "from-config"
+    # Named profiles keep their name: Hermes resolves them with an empty override.
+    assert hermes_api.model_id_for("coder", home) == "coder"

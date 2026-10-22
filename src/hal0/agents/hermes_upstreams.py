@@ -115,7 +115,7 @@ async def reconcile_hermes_upstreams(
         environ[env_name] = key
         desired[name] = env_name
         upstream = build_hermes_upstream(
-            profile, host=host, port=port, owned=(hermes_api.model_id_for(profile),)
+            profile, host=host, port=port, owned=(hermes_api.model_id_for(profile, home),)
         )
         # Replace in place: a remove-then-add would open a window in which the
         # id has no owner and falls through to the ``agent`` slot.

@@ -45,8 +45,9 @@ line above disagree.
      answers 404 for an unserved prefix and enters the profile's runtime scope
      (`api_server.py:1693-1716`; ingress route at `:4492`).
    - Under a prefix `GET /v1/models` advertises the profile name as the model
-     id; the default profile advertises `hermes-agent`
-     (`api_server.py:1458-1468`).
+     id; the default profile advertises its configured
+     `model_name` / `API_SERVER_MODEL_NAME`, else `hermes-agent`
+     (`api_server.py:1198-1200`, `:1458-1468`, `:2480`).
 4. **Per-profile keys fail closed.** A named profile does not inherit the
    default key. It reads `API_SERVER_KEY` from its own secret scope and gets an
    empty key when none is usable (`api_server.py:1535-1549`), and the bearer
@@ -97,7 +98,8 @@ line above disagree.
    - Each entry is `kind="remote"` with `auth_style="bearer"`,
      `managed_by="agent:hermes"`, `pinned=True`, `timeout_seconds=600`, and as
      `owned_models` exactly the id Hermes derives for the profile
-     (`hermes-agent` for the default, else the profile name; fact 3).
+     (for the default, the configured `model_name` / `API_SERVER_MODEL_NAME` when
+     set, else `hermes-agent`; for a named profile, its name; fact 3).
    - Operator-authored names in `upstreams.toml` win: the reconciler skips and
      logs them.
 2. **Ownership follows hal0's knowledge; liveness only decides success.**

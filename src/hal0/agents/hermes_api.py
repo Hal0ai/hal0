@@ -244,9 +244,32 @@ def ensure_profile_keys(home: Path) -> list[str]:
     return [name for name in profile_dirs(home) if ensure_profile_key(name, home)]
 
 
-def model_id_for(profile: str) -> str:
-    """Model id Hermes advertises for ``profile``."""
-    return DEFAULT_MODEL_ID if profile == DEFAULT_PROFILE else profile
+def default_model_id(home: Path | None = None) -> str:
+    """Model id the default profile advertises at ``/v1/models``.
+
+    Hermes feeds ``extra.model_name`` (config
+    ``gateway.platforms.api_server.model_name``, else env
+    ``API_SERVER_MODEL_NAME``) into ``_resolve_model_name`` as the explicit
+    override, which wins over ``hermes-agent``
+    (``api_server.py:1198-1200``, ``:1458-1468``; precedence in
+    ``hermes_cli/model_switch.py:630-641``; env seeding in
+    ``gateway/config_env.py:314``). Same config-then-env order as
+    :func:`api_server_endpoint`; the env is hal0-api's, not the gateway's.
+    """
+    block = _api_server_block(home if home is not None else hermes_home())
+    configured = block.get("model_name")
+    name = str(configured).strip() if isinstance(configured, str) else ""
+    return name or os.environ.get("API_SERVER_MODEL_NAME", "").strip() or DEFAULT_MODEL_ID
+
+
+def model_id_for(profile: str, home: Path | None = None) -> str:
+    """Model id Hermes advertises for ``profile``.
+
+    The override applies to the default profile only: under a ``/p/<profile>/``
+    prefix Hermes calls ``_resolve_model_name("")`` (``api_server.py:2480``),
+    so the explicit tier is empty and the profile name wins.
+    """
+    return default_model_id(home) if profile == DEFAULT_PROFILE else profile
 
 
 def upstream_name_for(profile: str) -> str:

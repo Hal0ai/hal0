@@ -1446,7 +1446,7 @@ def check_hermes_api_upstreams(
     warns: list[str] = []
     ok: list[str] = []
     for profile in served:
-        model = ha.model_id_for(profile)
+        model = ha.model_id_for(profile, root)
         api_key = ha.api_key_for(profile, root)
         if api_key is None:
             nokey = (
@@ -1483,7 +1483,7 @@ def check_hermes_api_upstreams(
             )
         else:
             ok.append(f"{profile}→{model}")
-    owned = {ha.model_id_for(p): p for p in served}
+    owned = {ha.model_id_for(p, root): p for p in served}
     if isinstance(slots_payload, list):
         for slot in slots_payload:
             if not isinstance(slot, dict):

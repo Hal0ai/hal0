@@ -17,7 +17,7 @@ CODER_KEY = "abcdefghijklmnopqrstuvwxyz012345"
 
 @pytest.fixture(autouse=True)
 def _clean(monkeypatch: pytest.MonkeyPatch) -> None:
-    for name in ("HERMES_HOME", "API_SERVER_HOST", "API_SERVER_PORT"):
+    for name in ("HERMES_HOME", "API_SERVER_HOST", "API_SERVER_PORT", "API_SERVER_MODEL_NAME"):
         monkeypatch.delenv(name, raising=False)
     hermes_upstreams._WARNED.clear()
 
@@ -294,3 +294,16 @@ def test_build_hermes_upstream_fields() -> None:
     assert c.owned_models == ("coder",)
     assert c.stream_idle_timeout_s == 600
     assert c.stream_total_timeout_s == 1800
+
+
+async def test_reconcile_default_owns_configured_model_name(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (home / "config.yaml").write_text(
+        "gateway:\n  platforms:\n    api_server:\n      model_name: my-agent\n"
+    )
+    reg = UpstreamRegistry()
+    _patch_models(monkeypatch, reg, {})
+    await reconcile_hermes_upstreams(reg, home=home, probe=_probe(), environ={})
+    assert reg.get("hermes").owned_models == ("my-agent",)  # type: ignore[union-attr]
+    assert reg.get("hermes.coder").owned_models == ("coder",)  # type: ignore[union-attr]
