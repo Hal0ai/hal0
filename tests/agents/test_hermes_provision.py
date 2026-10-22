@@ -4872,6 +4872,34 @@ def test_wire_named_profiles_locks_and_replaces_atomically(
     assert stat.S_IMODE(cfg.stat().st_mode) == 0o640
 
 
+def test_wire_named_profiles_never_follows_a_planted_tmp_symlink(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Codex P1: a root repair must not truncate whatever ``config.yaml.tmp`` points at."""
+    monkeypatch.setattr("hal0.service_identity.service_key", lambda prefer=None: None)
+    home = _profiles(tmp_path, coder="model:\n  default: agent\n")
+    victim = tmp_path / "root-only-file"
+    victim.write_text("precious\n")
+    (home / "profiles" / "coder" / "config.yaml.tmp").symlink_to(victim)
+    assert hp.wire_named_profiles(home)["changed"] == ["coder"]
+    assert victim.read_text() == "precious\n"
+    assert (home / "profiles" / "coder" / "config.yaml.tmp").is_symlink()  # untouched
+    assert not [p for p in (home / "profiles" / "coder").iterdir() if p.name.startswith(".config")]
+
+
+def test_wire_named_profiles_redacts_yaml_errors(tmp_path: Path, monkeypatch) -> None:
+    """Codex P2: a YAML error near an Authorization line must not quote the bearer."""
+    monkeypatch.setattr("hal0.service_identity.service_key", lambda prefer=None: None)
+    home = _profiles(
+        tmp_path,
+        bad="mcp_servers:\n  hal0-admin:\n    headers:\n      Authorization: Bearer SECRET-TOKEN-VALUE\n   broken: [\n",
+    )
+    report = hp.wire_named_profiles(home)
+    assert "bad" in report["errors"]
+    assert "SECRET-TOKEN-VALUE" not in report["errors"]["bad"]
+    assert "line" in report["errors"]["bad"]
+
+
 def test_wire_named_profiles_contains_invalid_utf8_to_that_profile(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

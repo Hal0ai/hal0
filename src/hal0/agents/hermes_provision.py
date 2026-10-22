@@ -4889,10 +4889,36 @@ def _merge_profile_config(path: Path, desired: dict[str, Any]) -> dict[str, Any]
             changed = merged != base
             if changed:
                 out = yaml.safe_dump(merged, sort_keys=False, default_flow_style=False)
-                _atomic_write(path, out)
+                _replace_profile_config(path, out)
     except (OSError, UnicodeDecodeError, yaml.YAMLError) as exc:  # type: ignore[attr-defined]
-        return {"wired": False, "changed": False, "error": str(exc)}
+        # Never ``str(exc)``: a PyYAML message quotes the offending line, which
+        # in this file can be a resolved Authorization header.
+        return {"wired": False, "changed": False, "error": _yaml_error_summary(exc)}
     return {"wired": True, "changed": changed}
+
+
+def _replace_profile_config(path: Path, text: str) -> None:
+    """Replace ``path`` atomically, keeping its mode (and owner as root).
+
+    The temporary file comes from ``mkstemp`` (random name, ``O_EXCL``), not a
+    predictable ``<name>.tmp``: this runs as root on a repair inside a
+    directory the ``hal0`` account can write, where a planted symlink of a
+    known name would be followed and truncate its target.
+    """
+    import tempfile
+
+    st = path.stat()
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        os.chmod(tmp, stat.S_IMODE(st.st_mode))
+        if os.geteuid() == 0:
+            os.chown(tmp, st.st_uid, st.st_gid)
+        os.replace(tmp, path)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
 
 
 def _profile_wire_desired(agent_id: str) -> dict[str, Any]:
