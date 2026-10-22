@@ -1428,7 +1428,8 @@ class Dispatcher:
         # transport backstop; _guarded_stream still converts its ReadTimeout
         # into a diagnostic frame rather than a torn stream.
         timeout: httpx.Timeout | httpx._client.UseClientDefault
-        guard_active = bool(self._stream_total_timeout_s or self._stream_idle_timeout_s)
+        total_s, idle_s = self._stream_bounds_for(call.upstream_name)
+        guard_active = bool(total_s or idle_s)
         if guard_active:
             timeout = httpx.Timeout(
                 connect=5.0, read=None, write=10.0, pool=_DISPATCHER_POOL_TIMEOUT_S
@@ -1544,12 +1545,13 @@ class Dispatcher:
         already received instead of waiting forever on a socket that will
         never close.
         """
+        total_s, idle_s = self._stream_bounds_for(call.upstream_name)
         started = time.monotonic()
         source = resp.aiter_raw().__aiter__()
         stall: str | None = None
         try:
             while True:
-                budget = self._next_chunk_budget(started)
+                budget = self._next_chunk_budget(started, total_s, idle_s)
                 if budget is not None and budget <= 0.0:
                     stall = "total"
                     break
@@ -1561,7 +1563,7 @@ class Dispatcher:
                 except StopAsyncIteration:
                     return
                 except TimeoutError:
-                    stall = self._stall_reason(started)
+                    stall = self._stall_reason(started, total_s)
                     break
                 except httpx.ReadTimeout:
                     # Transport-level per-read timeout.  Reached only when the
@@ -1585,8 +1587,8 @@ class Dispatcher:
             target=call.target_url,
             reason=stall,
             elapsed_s=elapsed,
-            total_timeout_s=self._stream_total_timeout_s,
-            idle_timeout_s=self._stream_idle_timeout_s,
+            total_timeout_s=total_s,
+            idle_timeout_s=idle_s,
         )
         content_type = (resp.headers.get("content-type") or "").lower()
         if content_type.startswith(_SSE_CONTENT_TYPE):
@@ -1594,26 +1596,44 @@ class Dispatcher:
                 reason=stall or "total",
                 elapsed_s=elapsed,
                 upstream=call.upstream_name,
-                total_timeout_s=self._stream_total_timeout_s,
-                idle_timeout_s=self._stream_idle_timeout_s,
+                total_timeout_s=total_s,
+                idle_timeout_s=idle_s,
                 endpoint=call.target_url,
             )
 
-    def _next_chunk_budget(self, started: float) -> float | None:
+    def _stream_bounds_for(self, upstream_name: str) -> tuple[float, float]:
+        """``(total, idle)`` stall bounds for ``upstream_name``.
+
+        An upstream's non-``None`` override wins over the dispatcher global;
+        an unknown upstream gets the globals.  ``0`` still disables a bound.
+        """
+        total = self._stream_total_timeout_s
+        idle = self._stream_idle_timeout_s
+        upstream = self._upstreams.get(upstream_name)
+        if upstream is not None:
+            if upstream.stream_total_timeout_s is not None:
+                total = max(0.0, upstream.stream_total_timeout_s)
+            if upstream.stream_idle_timeout_s is not None:
+                idle = max(0.0, upstream.stream_idle_timeout_s)
+        return total, idle
+
+    @staticmethod
+    def _next_chunk_budget(started: float, total_s: float, idle_s: float) -> float | None:
         """Seconds to wait for the next chunk, or ``None`` when unbounded."""
-        idle = self._stream_idle_timeout_s or None
-        if not self._stream_total_timeout_s:
+        idle = idle_s or None
+        if not total_s:
             return idle
-        remaining_total = self._stream_total_timeout_s - (time.monotonic() - started)
+        remaining_total = total_s - (time.monotonic() - started)
         if idle is None:
             return remaining_total
         return min(idle, remaining_total)
 
-    def _stall_reason(self, started: float) -> str:
+    @staticmethod
+    def _stall_reason(started: float, total_s: float) -> str:
         """Classify which bound a timed-out read hit."""
-        if not self._stream_total_timeout_s:
+        if not total_s:
             return "idle"
-        if (time.monotonic() - started) >= self._stream_total_timeout_s:
+        if (time.monotonic() - started) >= total_s:
             return "total"
         return "idle"
 
