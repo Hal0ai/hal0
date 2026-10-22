@@ -32,6 +32,7 @@ applying. Add those subsections to a version's section to surface them; see
 
 ### Added
 
+- **`sudo hal0 agent upgrade pi` re-pins an installed pi without an uninstall.** It reruns the pinned installer, redeploys hal0's two extensions, and leaves the extensions you added, your default provider, model and theme alone. Run it as the user who installed pi; `--to` stays Hermes-only.
 - **`hal0 doctor` has a `Hermes gateway unit` row.** It fails when Hermes is installed but `/etc/systemd/system/hermes-gateway.service` is missing, or when a `gateway run --idle-exit` process is running, naming its pid and cgroup. Either state means a Hermes v0.22.3+ client could run, or is running, a gateway of its own where the operator turned the gateway off (ADR-0034 amendment, #2874).
 
 - **`[hermes] delegation_slot` in `/etc/hal0/agents/hermes.toml` picks the slot Hermes's `delegate_task` children run on.** Hermes's `delegation.model` was rendered from the agent slot and nothing else, so on a single-GPU box every child queued behind its parent on the same llama-server (`--parallel 1`), and a hand edit of `delegation.model` was undone by the next repair. The default stays `agent`. Any other slot name renders `delegation.model = "hal0/<slot>"`, which hal0's `/v1` route resolves to that slot and pins the lane even when two slots share a model id. The setting is applied at provision or repair while the slot is ready, and `hal0 doctor` has a row for it. There is no CLI or API writer yet (#2893) (#2885).
