@@ -168,6 +168,19 @@ async def test_reconcile_real_fetch_authenticates_from_os_environ(
             os.environ.pop(env_key_name(p), None)
 
 
+async def test_reconcile_live_ids_do_not_become_owned(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Ruling 9: a ``model_routes`` alias Hermes advertises never confers ownership."""
+    reg = UpstreamRegistry()
+    _patch_models(
+        monkeypatch, reg, {"hermes": ["other", "hermes-agent"], "hermes.coder": ["coder", "x"]}
+    )
+    await reconcile_hermes_upstreams(reg, home=home, probe=_probe(), environ={})
+    assert reg.get("hermes").owned_models == ("hermes-agent",)  # type: ignore[union-attr]
+    assert reg.get("hermes.coder").owned_models == ("coder",)  # type: ignore[union-attr]
+
+
 async def test_reconcile_gateway_down_registers_every_keyed_profile(
     home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

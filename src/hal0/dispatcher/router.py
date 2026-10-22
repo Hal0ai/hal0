@@ -7,8 +7,8 @@ dispatch error and leaves slot management to the caller.
 
 Resolution order (PLAN.md §3, ported from haloai ``lib/dispatcher.py``):
 
-  0. **pinned** — an id owned by a ``pinned`` upstream (``owned_models`` or
-     its models cache) goes to that upstream or fails with
+  0. **pinned** — an id in a ``pinned`` upstream's ``owned_models`` (never
+     merely its models cache) goes to that upstream or fails with
      :class:`UpstreamUnavailable`; it never falls through to another lane.
      Runs after the container-slot preemption and before the registry.
   1. **registry** — exact :class:`ModelRegistry` binding for the requested
@@ -662,15 +662,17 @@ class Dispatcher:
         return call
 
     def _pinned_owner(self, model_id: str) -> Upstream | None:
-        """First pinned upstream owning ``model_id`` (owned or cached).
+        """First pinned upstream whose ``owned_models`` holds ``model_id``.
 
-        A disabled pinned upstream still owns its ids: disabling it must not
-        let the id fall through to another lane.
+        Only ``owned_models`` confers ownership. An id that is merely in the
+        upstream's models cache (a Hermes ``model_routes`` alias, say) resolves
+        by the normal ladder, so it can never shadow a slot binding or loop a
+        request back into the upstream that made it. A disabled pinned
+        upstream still owns its ids: disabling it must not let the id fall
+        through to another lane.
         """
         for upstream in self._upstreams.list():
-            if not getattr(upstream, "pinned", False):
-                continue
-            if model_id in upstream.owned_models or model_id in self._cached_models(upstream.name):
+            if getattr(upstream, "pinned", False) and model_id in upstream.owned_models:
                 return upstream
         return None
 
@@ -728,9 +730,10 @@ class Dispatcher:
                 return call
 
         # ── Step 0b: pinned upstream ownership ───────────────────────────
-        # A pinned upstream owns its ``owned_models`` ids (plus whatever its
-        # cache holds): route there or fail loudly, never fall through to the
-        # registry / capability ladder (which would land on the agent slot).
+        # A pinned upstream owns its ``owned_models`` ids: route there or fail
+        # loudly, never fall through to the registry / capability ladder (which
+        # would land on the agent slot). The cache only decides live vs. not
+        # advertised below; it never confers ownership.
         owner = self._pinned_owner(model_id)
         if owner is not None:
             if getattr(owner, "enabled", True) is False:

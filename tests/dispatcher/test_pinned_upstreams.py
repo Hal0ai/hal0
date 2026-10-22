@@ -155,3 +155,28 @@ async def test_pinned_concurrent_cold_fetches_coalesce() -> None:
     )
     assert all(r.resolution_path == "pinned:hermes.coder" for r in results)
     assert calls == 1
+
+
+@pytest.mark.asyncio
+async def test_pinned_alias_in_cache_does_not_shadow_slot() -> None:
+    """Ruling 9: a Hermes ``model_routes`` alias equal to a slot model never owns it."""
+    chat = make_slot("chat")
+    hermes = make_pinned("hermes", owned=("hermes-agent",))
+    d = _dispatcher(
+        [chat, hermes],
+        {"chat": ["qwen3-4b"], "hermes": ["hermes-agent", "qwen3-4b"]},
+        routes={"qwen3-4b": "chat"},
+    )
+    call = await d.dispatch(make_request(), body={"model": "qwen3-4b", "messages": []})
+    assert call.resolution_path == "registry"
+    assert call.upstream_name == "chat"
+
+
+@pytest.mark.asyncio
+async def test_cached_only_id_is_not_pinned() -> None:
+    """An id only in a pinned upstream's cache resolves by the normal ladder."""
+    hermes = make_pinned("hermes", owned=("hermes-agent",))
+    d = _dispatcher([hermes], {"hermes": ["hermes-agent", "alias-x"]})
+    call = await d.dispatch(make_request(), body={"model": "alias-x", "messages": []})
+    assert not call.resolution_path.startswith("pinned:")
+    assert call.upstream_name == "hermes"

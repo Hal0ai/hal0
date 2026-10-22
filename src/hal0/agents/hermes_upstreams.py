@@ -83,8 +83,9 @@ async def reconcile_hermes_upstreams(
     """Make the registry's Hermes-managed entries match the keyed profiles.
 
     The registry authenticates from the process environment (``os.environ``),
-    so ``environ`` must be ``os.environ`` (the default) for live model ids to
-    populate; any other mapping is only for tests inspecting what was set.
+    so ``environ`` must be ``os.environ`` (the default) for requests to the
+    entries to authenticate; any other mapping is only for tests inspecting
+    what was set.
     """
     home = home if home is not None else hermes_api.hermes_home()
     host, port = hermes_api.api_server_endpoint(home)
@@ -128,13 +129,9 @@ async def reconcile_hermes_upstreams(
             environ.pop(u.auth_value_env, None)
             removed.append(u.name)
 
-    for name in registered:
-        ids = await registry.fetch_models(name)
-        if ids:
-            profile = hermes_api.profile_of_upstream(name) or hermes_api.DEFAULT_PROFILE
-            owned = tuple(dict.fromkeys([hermes_api.model_id_for(profile), *ids]))
-            registry.update(name, owned_models=owned)
-
+    # ``owned_models`` stays the derived id (Ruling 9): the live ``/v1/models``
+    # ids, which include Hermes's gateway-wide ``model_routes`` aliases, reach
+    # the dispatcher's models cache and resolve by the normal ladder.
     return {
         "registered": sorted(registered),
         "removed": sorted(removed),

@@ -95,8 +95,9 @@ line above disagree.
      `hermes` for the default profile and `hermes.<profile>` for each named
      one, with urls `http://<host>:<port>/v1` and `.../p/<profile>/v1`.
    - Each entry is `kind="remote"` with `auth_style="bearer"`,
-     `managed_by="agent:hermes"`, `pinned=True`, `timeout_seconds=600` and the
-     ids Hermes advertises as `owned_models`. hal0 hardcodes no model id.
+     `managed_by="agent:hermes"`, `pinned=True`, `timeout_seconds=600`, and as
+     `owned_models` exactly the id Hermes derives for the profile
+     (`hermes-agent` for the default, else the profile name; fact 3).
    - Operator-authored names in `upstreams.toml` win: the reconciler skips and
      logs them.
 2. **Ownership follows hal0's knowledge; liveness only decides success.**
@@ -119,10 +120,14 @@ line above disagree.
      It never rotates a present value and never touches the default profile,
      whose key stays with `ensure_gateway_api_server_key`. Fact 4 means no
      gateway restart follows.
-4. **Pinned upstreams own their ids, and an owned id fails fast.** For a pinned
-   upstream every id in its advertised set is owned
-   (`resolution_path="pinned:<name>"`). An owned id never falls through to the
-   `agent` slot (fact 9):
+4. **Pinned upstreams own their ids, and an owned id fails fast.** Only an id in
+   a pinned upstream's `owned_models` is owned
+   (`resolution_path="pinned:<name>"`). Other ids Hermes advertises, such as
+   its gateway-wide `model_routes` aliases (`api_server.py:2485-2488`), go into
+   the models cache and resolve by the normal ladder, slot and registry first.
+   So an alias equal to a slot model id never takes that slot over and never
+   loops hal0's own inference back into Hermes. An owned id never falls
+   through to the `agent` slot (fact 9):
    - upstream offline: 502 `dispatch.upstream_unavailable`, "...which is offline";
    - upstream disabled: "...which is disabled";
    - upstream live but not advertising the id: "...which is up but does not
