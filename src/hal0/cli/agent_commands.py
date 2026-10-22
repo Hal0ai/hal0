@@ -951,9 +951,28 @@ def _provision_hermes(
     # config. Done HERE rather than in _install_hermes so every provisioning
     # entry point is covered — `reprovision`, `bootstrap` and `upgrade` all
     # land in this function and all now honour an explicit answer.
-    if rc == 0 and provision_env:
+    if rc == 0 and (provision_env or _terminal_gate_changed_in_last_report()):
         _restart_hermes_after_posture_change()
     return rc
+
+
+def _terminal_gate_changed_in_last_report() -> bool:
+    """Did the run that just finished change ``terminal.backend``?
+
+    A box with a recorded OFF decision and a pre-#2878 ``local`` backend gets
+    the sentinel from a plain ``--repair`` with no terminal flag; the running
+    gateway keeps serving the loaded backend, and its side agents the shell,
+    until it re-reads its config. The config_write phase records the mutation
+    in the last-run report; read it back rather than trust the flag alone.
+    """
+    import json
+
+    try:
+        data = json.loads(_agent_provision_state_file("hermes").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    phase = (data.get("phases") or {}).get("config_write") or {}
+    return bool((phase.get("details") or {}).get("terminal_backend_changed"))
 
 
 def _enable_and_start_hermes_unit() -> None:

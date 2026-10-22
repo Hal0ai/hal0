@@ -347,8 +347,13 @@ Everything else in this record stands.
   back when the operator opts in; with nothing saved, opting in restores
   `local`. The provisioner reads the sentinel back from the file it wrote and
   fails the phase when it is missing, fails the profile sweep when a profile
-  could not take it, and `hal0 update` applies it through the release config
-  invariants, so an existing box gets it without a reprovision. Hermes logs the rejection
+  could not take it (a served symlinked profile included), and `hal0 update`
+  applies it through the release config invariants, so an existing box gets it
+  without a reprovision. A caller with no applied decision (hal0-api's profile
+  sweep, an update) treats a root config carrying the sentinel as OFF whatever
+  the marker says, so a non-root opt-out whose marker could not be replaced is
+  never undone; opting in is a provisioning act. A provision that changed the
+  backend restarts the agent and gateway so the running process re-reads it. Hermes logs the rejection
   at ERROR, `Unknown TERMINAL_ENV 'hal0-terminal-off' …`, TTL-cached 30 s: the
   price of a gate upstream gives no switch for, and the name says who set it.
   `approvals.mode` still gates dangerous commands on a terminal-on box.

@@ -1975,18 +1975,43 @@ def _saved_terminal_backend(config_text: str | None) -> str | None:
 
 
 def _terminal_saved_layer(
-    *, terminal_enabled: bool, terminal_backend: str | None, saved_backend: str | None
+    *,
+    terminal_enabled: bool,
+    before_backend: str | None,
+    after_backend: str | None,
+    saved_backend: str | None,
 ) -> dict[str, Any]:
     """The ``hal0.terminal_backend_saved`` YAML layer the posture change needs.
 
-    OFF over an operator's backend remembers it; ON from the sentinel clears
-    the memory once the backend is put back. Empty otherwise.
+    OFF over an operator's backend (``before_backend``) remembers it. ON clears
+    the memory only once ``after_backend`` (read back after the overlay's
+    ``config set`` ran) shows the remembered backend in place: a failed restore
+    must keep the memory, or the next run would fall back to ``local``.
     """
-    if not terminal_enabled and terminal_backend not in (None, "", "local", TERMINAL_OFF_BACKEND):
-        return {"hal0": {TERMINAL_SAVED_BACKEND_KEY: terminal_backend}}
-    if terminal_enabled and terminal_backend == TERMINAL_OFF_BACKEND and saved_backend:
+    if not terminal_enabled and before_backend not in (None, "", "local", TERMINAL_OFF_BACKEND):
+        return {"hal0": {TERMINAL_SAVED_BACKEND_KEY: before_backend}}
+    if terminal_enabled and saved_backend and after_backend == saved_backend:
         return {"hal0": {TERMINAL_SAVED_BACKEND_KEY: ""}}
     return {}
+
+
+def box_terminal_decision(hermes_home: Path | str) -> bool | None:
+    """The terminal decision for a caller that applied none (a reconcile, an update).
+
+    The recorded marker, except that a root ``config.yaml`` carrying
+    :data:`TERMINAL_OFF_BACKEND` is OFF whatever the marker says: hal0 wrote
+    that sentinel deliberately, and a non-root opt-out may have applied it
+    without being able to replace a root-owned marker (#2878 review). An
+    opt-in rewrites the root config first, so the sentinel's absence lets the
+    marker speak. ``None`` when neither says anything.
+    """
+    try:
+        text = (Path(hermes_home) / "config.yaml").read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        text = None
+    if text is not None and _terminal_backend_in_config(text) == TERMINAL_OFF_BACKEND:
+        return False
+    return read_terminal_state()
 
 
 def _existing_terminal_choice(config_text: str | None, hermes_home: Path | str) -> bool | None:
@@ -2909,15 +2934,33 @@ def apply_release_config_invariants(
     # ``hal0 update`` never runs the overlay, so a terminal-off box would keep
     # its ``local`` backend, and the gateway's side agents the shell, until
     # the next reprovision. The recorded decision is the authority here.
-    layers = _deep_merge(
-        layers, _terminal_profile_keys(loaded or {}, terminal_enabled=read_terminal_state())
-    )
-    return _merge_config_yaml_layers(
+    decision = box_terminal_decision(home)
+    layers = _deep_merge(layers, _terminal_profile_keys(loaded or {}, terminal_enabled=decision))
+    changed = _merge_config_yaml_layers(
         config,
         list_keys=layers,
         overrides_path=overrides_path if overrides_path is not None else OVERRIDES_PATH,
         persona_names=_persona_display_names_for_home(home),
     )
+    # overrides.yaml lays on top by design, so a ``terminal.backend`` there can
+    # displace the sentinel. Activation cannot fail on it (that would flip the
+    # release back for a config the operator wrote), so say so loudly: the
+    # gateway's side agents keep the terminal tool until the override goes.
+    if decision is False:
+        try:
+            final = config.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            final = None
+        if _terminal_backend_in_config(final) != TERMINAL_OFF_BACKEND:
+            log.error(
+                "hermes.terminal_gate_overridden",
+                config=str(config),
+                overrides=str(overrides_path if overrides_path is not None else OVERRIDES_PATH),
+                expected=TERMINAL_OFF_BACKEND,
+                found=_terminal_backend_in_config(final),
+                issue="#2878",
+            )
+    return changed
 
 
 def _retire_hal0_personality(data: dict[str, Any], persona_names: Iterable[str]) -> bool:
@@ -3287,7 +3330,8 @@ def _phase_config_write(ctx: _StepCtx) -> PhaseResult:
                 ),
                 _terminal_saved_layer(
                     terminal_enabled=terminal_enabled,
-                    terminal_backend=terminal_backend,
+                    before_backend=terminal_backend,
+                    after_backend=_terminal_backend_in_config(pre_merge),
                     saved_backend=saved_backend,
                 ),
             ),
@@ -3314,10 +3358,8 @@ def _phase_config_write(ctx: _StepCtx) -> PhaseResult:
     # bypass (#2878), so a partial `config set` that lost it is not "a usable
     # config": verify it in the file hal0 just wrote, and fail the phase when
     # it is not there. Off means off for every backend (#2878 review).
-    gate_missing = (
-        not terminal_enabled and _terminal_backend_in_config(config_after) != TERMINAL_OFF_BACKEND
-    )
-    if gate_missing:
+    backend_after = _terminal_backend_in_config(config_after)
+    if not terminal_enabled and backend_after != TERMINAL_OFF_BACKEND:
         errors.insert(
             0,
             f"terminal.backend is not {TERMINAL_OFF_BACKEND!r} in {config_path} although the "
@@ -3325,6 +3367,14 @@ def _phase_config_write(ctx: _StepCtx) -> PhaseResult:
             "(#2878); re-run the provision",
         )
         status = PhaseStatus.FAIL
+    elif terminal_enabled and backend_after == TERMINAL_OFF_BACKEND:
+        errors.insert(
+            0,
+            f"terminal.backend is still {TERMINAL_OFF_BACKEND!r} in {config_path} after the "
+            "opt-in: the terminal stays unavailable; re-run the provision",
+        )
+        status = PhaseStatus.FAIL
+    terminal_backend_changed = backend_after != terminal_backend
     # Both stale cases point the opposite way from each other, so the line the
     # operator reads has to name the direction rather than assume opt-out.
     stale_reason = (
@@ -3345,6 +3395,7 @@ def _phase_config_write(ctx: _StepCtx) -> PhaseResult:
         details={
             "config_path": str(config_path),
             "changed": changed,
+            "terminal_backend_changed": terminal_backend_changed,
             "keys_applied": applied,
             "keys_total": len(pairs),
             "list_merge_changed": list_merge_changed,
@@ -5337,6 +5388,8 @@ def wire_named_profiles(
     Returns ``{"wired": [...], "changed": [...], "skipped": {name: reason},
     "errors": {name: error}}``; never raises.
     """
+    if terminal_enabled is _UNSET:
+        terminal_enabled = box_terminal_decision(home)
     report: dict[str, Any] = {"wired": [], "changed": [], "skipped": {}, "errors": {}}
     profiles = Path(home) / "profiles"
     try:
@@ -5422,10 +5475,20 @@ def _phase_profile_mcp_wire(ctx: _StepCtx) -> PhaseResult:
         reason = "profile MCP wiring failed for: " + ", ".join(
             f"{n} ({e})" for n, e in sorted(report["errors"].items())
         )
-        if terminal_enabled is False:
-            # A profile that could not take the terminal gate still shows the
-            # terminal tool to the gateway's side agents (#2878): not warn-as-OK.
-            reason += "; the terminal is off and these profiles did not receive the terminal gate"
+    if terminal_enabled is False:
+        # A profile that could not take the terminal gate still shows the
+        # terminal tool to the gateway's side agents (#2878): not warn-as-OK.
+        # A symlinked profile directory is served by Hermes (profile_dirs
+        # follows links) but never rewritten here, so it counts the same.
+        ungated = sorted(
+            set(report["errors"]) | {n for n, why in report["skipped"].items() if why == "symlink"}
+        )
+        if ungated:
+            note = (
+                "the terminal is off and these profiles did not receive the terminal gate: "
+                + ", ".join(ungated)
+            )
+            reason = f"{reason}; {note}" if reason else note
             status = PhaseStatus.FAIL
     return PhaseResult(status=status, details=details, reason=reason)
 
