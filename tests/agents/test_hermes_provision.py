@@ -33,6 +33,14 @@ _REAL_UV_AVAILABLE = hp._uv_available
 
 
 @pytest.fixture(autouse=True)
+def _isolated_install_seed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Point ``INSTALL_SEED_PATH`` at an absent tmp file so host seed state
+    (``[hermes].delegation_slot`` / ``command_approvals``) cannot leak into
+    ``_phase_config_write`` assertions. Tests that need a seed re-patch it."""
+    monkeypatch.setattr(hp, "INSTALL_SEED_PATH", tmp_path / "isolated-seed" / "hermes.toml")
+
+
+@pytest.fixture(autouse=True)
 def _hermetic_uv(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> None:
     """Never let the host's uv into a resolver test.
 
@@ -1801,6 +1809,32 @@ def test_resolve_delegation_none_when_slot_not_ready() -> None:
     assert hp._resolve_delegation(slots, hal0_base_url=_HAL0_V1) is None
 
 
+def test_resolve_delegation_honours_configured_slot() -> None:
+    deleg = hp._resolve_delegation(_ROLE_SLOTS, hal0_base_url=_HAL0_V1, slot_name="utility")
+    assert deleg is not None
+    # Slot-qualified so the /v1 route pins the lane (two slots may share a model id).
+    assert deleg["model"] == "hal0/utility"
+
+
+def test_resolve_delegation_configured_slot_offline_is_none() -> None:
+    assert (
+        hp._resolve_delegation(_ROLE_SLOTS[:2], hal0_base_url=_HAL0_V1, slot_name="utility") is None
+    )
+
+
+def test_read_delegation_slot(tmp_path) -> None:
+    seed = tmp_path / "hermes.toml"
+    assert hp.read_delegation_slot(seed) == "agent"  # absent file
+    seed.write_text('[hermes]\ndelegation_slot = "utility"\n')
+    assert hp.read_delegation_slot(seed) == "utility"
+    seed.write_text('[hermes]\ndelegation_slot = "bad slot!"\n')
+    assert hp.read_delegation_slot(seed) == "agent"  # invalid -> default
+    seed.write_text("not = [toml")
+    assert hp.read_delegation_slot(seed) == "agent"  # unreadable -> default
+    seed.write_text('[hermes]\ncommand_approvals = "manual"\n')
+    assert hp.read_delegation_slot(seed) == "agent"  # key absent
+
+
 def test_resolve_auxiliary_tasks_routes_utility_group_to_utility_slot() -> None:
     aux = hp._resolve_auxiliary_tasks(_ROLE_SLOTS, hal0_base_url=_HAL0_V1)
     # Utility group → custom provider on the utility slot's model.
@@ -1925,6 +1959,52 @@ def test_config_write_renders_role_slots_from_live_state(
     # The two irreducible list keys land via the targeted YAML merge.
     assert cfg["skills"]["external_dirs"] == hp.SKILLS_EXTERNAL_DIRS
     assert cfg["hooks"]["on_session_start"] == [hp.SESSION_START_HOOK]
+
+
+def test_config_write_renders_the_configured_delegation_slot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``[hermes].delegation_slot`` in the seed reaches the rendered config.yaml (#2885)."""
+    yaml = pytest.importorskip("yaml")
+    seed = tmp_path / "hermes.toml"
+    seed.write_text('[hermes]\ndelegation_slot = "utility"\n')
+    monkeypatch.setattr(hp, "INSTALL_SEED_PATH", seed)
+    state = hp.BootstrapState(hermes_home=str(tmp_path / "hh"))
+    monkeypatch.setattr(
+        hp,
+        "_resolve_primary_slot",
+        lambda **_k: {"model": "m", "base_url": _HAL0_V1, "context_length": 32768},
+    )
+    monkeypatch.setattr(hp, "OVERRIDES_PATH", tmp_path / "no-overrides.yaml")
+    from hal0.agents import personas as _personas
+
+    monkeypatch.setattr(_personas, "PERSONAS_ROOT", tmp_path / "personas-empty")
+    io = hp.InstallIO(
+        fetch_slots=lambda: list(_ROLE_SLOTS),
+        fetch_model_contexts=lambda: {},
+        run=fake_hermes_run(),
+    )
+    out = hp._phase_config_write(hp._StepCtx(state=state, io=io))
+    assert out.status == hp.PhaseStatus.OK
+    cfg = yaml.safe_load(Path(out.details["config_path"]).read_text())
+    assert cfg["delegation"]["model"] == "hal0/utility"
+    assert out.details["delegation_model"] == "hal0/utility"
+    assert cfg["delegation"]["base_url"] == _HAL0_V1
+
+
+def test_delegation_slot_survives_a_repair_seed_rewrite(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``_write_seed_toml --repair`` refreshes [agent]/[mcp] and must keep ``delegation_slot``."""
+    import tomllib
+
+    seed = tmp_path / "hermes.toml"
+    seed.write_text('[agent]\nname = "hermes"\n\n[hermes]\ndelegation_slot = "utility"\n')
+    monkeypatch.setattr(hp, "INSTALL_SEED_PATH", seed)
+    written: list[str] = []
+    monkeypatch.setattr(hp, "write_seed_toml_body", written.append)
+    hp._write_seed_toml(hp.BootstrapState(hermes_home=str(tmp_path / "hh")), repair=True)
+    assert tomllib.loads(written[-1])["hermes"]["delegation_slot"] == "utility"
 
 
 # ── #661/#635: reasoning wiring — chat slot + display flags ──────────────────

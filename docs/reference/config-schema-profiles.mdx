@@ -250,10 +250,12 @@ carried by its `extra="allow"`, so a bad value here never breaks MCP allow-list
 loading. Writes through `hal0 agent command-approvals` and
 `PUT /api/agents/hermes/command-approvals` are validated; provisioning reads the
 value leniently and falls back to the default if it is invalid.
+`delegation_slot` has no CLI or API writer yet; edit the root-owned file.
 
 | Key | Type | Default | Constraints |
 |---|---|---|---|
 | `command_approvals` | `"smart"\|"manual"` | `"smart"` | Rendered to Hermes' `approvals.mode`; an `approvals.mode` in `agents/hermes/overrides.yaml` wins |
+| `delegation_slot` | str | `"agent"` | Slot name, `^[a-z0-9][a-z0-9_-]{0,31}$`. The slot whose model `delegate_task` children run on. Any non-default slot is rendered as `delegation.model = "hal0/<slot>"`, so the request keeps that slot's lane. Applied at provision or repair, only while the slot is ready |
 
 ## `hardware.json`
 
