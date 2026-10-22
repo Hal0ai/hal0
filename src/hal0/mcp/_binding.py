@@ -29,7 +29,18 @@ from typing import TYPE_CHECKING, Any
 
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.fastmcp.exceptions import ToolError
+from mcp.server.fastmcp.server import Settings as _FastMCPSettings
 from mcp.server.fastmcp.tools import Tool
+
+# FastMCP's ``Settings`` is a pydantic-settings model with ``env_file=".env"``,
+# so every ``FastMCP(...)`` opened ``.env`` in the process's CURRENT directory.
+# hal0 never configures FastMCP through a dotenv file (its settings are its
+# own config), and the directory is wherever the caller sits: ``create_app()``
+# under ``hal0 agent reprovision hermes --repair`` run from ``/root`` as the
+# ``hal0`` user raised ``PermissionError: '.env'`` and failed the whole MCP
+# mount (#2907). pydantic-settings reads ``model_config["env_file"]`` at
+# instantiation, so clearing it here covers every FastMCP hal0 builds.
+_FastMCPSettings.model_config["env_file"] = None
 
 # The annotation a shared tool gives its injected-context parameter. It must
 # stay the BARE class: FastMCP finds the context parameter with
