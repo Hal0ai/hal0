@@ -19,7 +19,7 @@ Edit **both** copies together; the parity test fails otherwise.
 
 ## Contract
 
-* Profile fields (frozen pin `d923a5eb`, `providers.base.ProviderProfile`):
+* Profile fields (frozen pin `4d043038`, `providers.base.ProviderProfile`):
   `name = "hal0"`, `api_mode = "chat_completions"`,
   `base_url = "http://127.0.0.1:8080/v1"` (`HAL0_PROVIDER_BASE`),
   `default_aux_model = "hal0/agent"`, `supports_vision = True`.

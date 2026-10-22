@@ -11,24 +11,24 @@ Adapter lanes:
   family and the managed-cron fire webhook ``/api/cron/fire``.
 
 Route table + security constants copied verbatim from the reviewed official pin
-``d923a5eb487a17c0a68801bba9ef0f56c81040a8`` (Hermes v0.22.2). The routes are
+``4d04303818b61bf3aa09278af48356315515965b`` (Hermes v0.22.4). The routes are
 the rows of ``APIServerAdapter._http_route_table()``
-(``gateway/platforms/api_server.py:1718-1766``), which since 0.22 also pulls
-in the run routes from ``gateway/platforms/api_server_runs.py:234-240`` and
+(``gateway/platforms/api_server.py:1646-1694``), which since 0.22 also pulls
+in the run routes from ``gateway/platforms/api_server_runs.py:241-249`` and
 the room-member routes from ``gateway/platforms/api_server_room_grants.py:73-78``.
 ``connect()`` registers every row twice, natively and under ``/p/{profile}``
-(``api_server.py:4487-4489``).
+(``api_server.py:4473-4475``).
 
 SECURITY (board fold, lxc105): ``DEFAULT_HOST`` is loopback, the server refuses
 to start without ``API_SERVER_KEY`` and rejects placeholder / <16-char keys via
-``hermes_cli.auth.has_usable_secret`` (``api_server.py:4421-4449``). These are
+``hermes_cli.auth.has_usable_secret`` (``api_server.py:4407-4435``). These are
 frozen so a Hermes bump that weakened them fails the contract suite before any
 adapter ships.
 """
 
 from __future__ import annotations
 
-# --- Security defaults (gateway/platforms/api_server.py:216-217) ------------
+# --- Security defaults (gateway/platforms/api_server.py:219-220) ------------
 # Loopback bind default. A bump to "0.0.0.0" must trip the contract suite.
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8642
@@ -64,13 +64,18 @@ PLACEHOLDER_SECRET_VALUES = frozenset(
 # (method, path) pairs, in registration order.
 
 # Executor-bridge dispatch / inspect / cancel / reconcile surface
-# (api_server_runs.py:234-240). ``/steer`` is new since 0.19.0.
+# (api_server_runs.py:241-249). ``/steer`` is new since 0.19.0; ``/clarify`` and
+# ``/resolve-unknown`` are new since 0.22.2. For a room-member grant ``/clarify``
+# needs the ``approve`` permission and ``/resolve-unknown`` the ``stop`` one
+# (api_server_runs.py:364-365).
 RUN_ROUTES = (
     ("post", "/v1/runs"),
     ("get", "/v1/runs/{run_id}"),
     ("get", "/v1/runs/{run_id}/events"),
     ("post", "/v1/runs/{run_id}/approval"),
+    ("post", "/v1/runs/{run_id}/clarify"),
     ("post", "/v1/runs/{run_id}/steer"),
+    ("post", "/v1/runs/{run_id}/resolve-unknown"),
     ("post", "/v1/runs/{run_id}/stop"),
 )
 
@@ -99,7 +104,7 @@ CHAT_ROUTES = (
 
 # Automation-lane authenticated Jobs API + managed-cron fire webhook. The
 # ``/api/cron/fire`` row is only registered when the cron module imports
-# (api_server.py:1763-1765).
+# (api_server.py:1691-1693).
 JOB_ROUTES = (
     ("get", "/api/jobs"),
     ("post", "/api/jobs"),
@@ -158,6 +163,15 @@ ADDED_SINCE_0_19_0 = frozenset(
         ("post", "/v1/room-members/grants/revoke"),
         ("post", "/v1/room-members/invitations"),
         ("post", "/v1/runs/{run_id}/steer"),
+    }
+)
+
+# The (method, path) pairs new at v0.22.4 relative to v0.22.2 (d923a5eb). No
+# row was removed.
+ADDED_SINCE_0_22_2 = frozenset(
+    {
+        ("post", "/v1/runs/{run_id}/clarify"),
+        ("post", "/v1/runs/{run_id}/resolve-unknown"),
     }
 )
 

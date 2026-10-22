@@ -14,10 +14,15 @@ Before this change every OWUI turn landed on a slot model, so nothing in OWUI
 could reach hal0's memory, the hal0-admin tools, owner approvals or Hermes's
 own toolsets. These facts decide the shape of the fix.
 
-Verified against hermes-agent d923a5eb487a17c0a68801bba9ef0f56c81040a8.
+Verified against hermes-agent d923a5eb487a17c0a68801bba9ef0f56c81040a8 (v0.22.2) and 4d04303818b61bf3aa09278af48356315515965b (v0.22.4).
 
-Hermes line numbers below are in that tree (hermes-agent 0.22.2), which is the
-only ref in `VETTED_HERMES_REFS` (`src/hal0/agents/hermes_provision.py:920`).
+Hermes line numbers below are in the 4d043038 tree (hermes-agent 0.22.4), the
+pin. d923a5eb (0.22.2) stays in `VETTED_HERMES_REFS`
+(`src/hal0/agents/hermes_provision.py:922`); every cited construct was re-read
+at 4d043038 and behaves the same. One moved: the per-request profile secret
+scope (`gateway/run.py:1787-1797`) now goes through
+`tui_gateway/launch_profile_policy.py:157-167` (`owner_secret_scope`), which
+for a profile home still returns `build_profile_secret_scope`.
 `tests/agents/test_hermes_pin_guard.py` fails when the vetted refs and the
 line above disagree.
 
@@ -25,50 +30,50 @@ line above disagree.
    `HAL0_MANAGED_PLATFORMS` is `("api_server",)`
    (`src/hal0/agents/hermes_platforms.py:121`).
 2. **Hermes publishes an OpenAI-compatible API for external UIs.**
-   - It binds `127.0.0.1:8642` by default (`gateway/platforms/api_server.py:216-217`).
+   - It binds `127.0.0.1:8642` by default (`gateway/platforms/api_server.py:219-220`).
    - Host and port resolve from config
      `gateway.platforms.api_server.{host,port}`, then `API_SERVER_HOST` and
-     `API_SERVER_PORT`, then the defaults (`api_server.py:230`). That "env"
-     is the gateway's own, which `hermes_cli/env_loader.py:506` fills from
+     `API_SERVER_PORT`, then the defaults (`api_server.py:233`). That "env"
+     is the gateway's own, which `hermes_cli/env_loader.py:516` fills from
      `$HERMES_HOME/.env` with `override=True`; hal0 reads the overrides
      (`API_SERVER_HOST`, `API_SERVER_PORT`, `API_SERVER_MODEL_NAME`) from
      that file and never from hal0-api's own process environment. An IPv6
      literal host is bracketed when hal0 builds a URL from it.
    - The advertised endpoints are `GET /health`, `GET /health/detailed`,
      `GET /v1/models` and `POST /v1/chat/completions` (`api_server.py:80-82`).
-   - `GET /health` is unauthenticated (handler at `api_server.py:2425`);
-     `GET /v1/models` is bearer-authenticated (`api_server.py:2474-2475`).
-   - Chat completions live in `gateway/platforms/api_server_openai_routes.py:636`
+   - `GET /health` is unauthenticated (handler at `api_server.py:2367`);
+     `GET /v1/models` is bearer-authenticated (`api_server.py:2416-2417`).
+   - Chat completions live in `gateway/platforms/api_server_openai_routes.py:813`
      and stream SSE when `stream` is truthy, with string booleans coerced
-     (`api_server_openai_routes.py:656`, `:745`).
+     (`api_server_openai_routes.py:832`, `:912`).
 3. **One gateway serves many profiles.**
-   - With `multiplex_profiles` on (`gateway/config.py:612`, precedence at
-     `:767-775`), the gateway serves the default profile plus every live named
+   - With `multiplex_profiles` on (`gateway/config.py:619`, precedence at
+     `:753-761`), the gateway serves the default profile plus every live named
      profile under `profiles/` that is not tombstoned, parked or standalone
-     (`hermes_cli/profiles.py:1135-1160`).
+     (`hermes_cli/profiles.py:1136-1161`).
    - Named profiles are reached at `/p/<profile>/<same path>`. The middleware
      answers 404 for an unserved prefix and enters the profile's runtime scope
-     (`api_server.py:1693-1716`; ingress route at `:4492`).
+     (`api_server.py:1621-1644`; ingress route at `:4478`).
    - Under a prefix `GET /v1/models` advertises the profile name as the model
      id; the default profile advertises its configured
      `model_name` / `API_SERVER_MODEL_NAME`, else `hermes-agent`
-     (`api_server.py:1198-1200`, `:1458-1468`, `:2480`).
+     (`api_server.py:1126-1128`, `:1386-1396`, `:2422`).
 4. **Per-profile keys fail closed.** A named profile does not inherit the
    default key. It reads `API_SERVER_KEY` from its own secret scope and gets an
-   empty key when none is usable (`api_server.py:1535-1549`), and the bearer
-   check then answers 401 (`api_server.py:1559-1575`). The scope is built from
+   empty key when none is usable (`api_server.py:1463-1477`), and the bearer
+   check then answers 401 (`api_server.py:1487-1503`). The scope is built from
    the profile home's `.env` each time a request enters the profile, so a key
    written to that file needs no gateway restart
-   (`gateway/run.py:1772-1782`, `:1788-1818`). A last duplicate key wins
-   (`agent/secret_scope.py:390-420`); dotenv parsing follows
-   `agent/secret_scope.py:257-290`; a key must pass `has_usable_secret`
+   (`gateway/run.py:1787-1797`, `:1803-1833`). A last duplicate key wins
+   (`agent/secret_scope.py:399-429`); dotenv parsing follows
+   `agent/secret_scope.py:271-304`; a key must pass `has_usable_secret`
    (`hermes_cli/auth.py:307-314`).
 5. **hal0-api can read the keys Hermes honours once they sit in Hermes's
    `.env` files.** Provisioning keeps the default key in hal0's root-only
    vault (`hermes_provision.HERMES_SECRETS_ENV`), which reaches the gateway
    as process environment through a systemd drop-in; hal0-api runs as `hal0`
    and cannot read it there. Hermes loads `$HERMES_HOME/.env` over the
-   process environment at gateway start (`hermes_cli/env_loader.py:506`,
+   process environment at gateway start (`hermes_cli/env_loader.py:516`,
    `override=True`), so the same value in that file changes nothing for the
    gateway and is readable by hal0-api, which runs as the gateway's user.
    Each named profile's key lives in `profiles/<p>/.env`.
@@ -151,12 +156,12 @@ line above disagree.
    - Each check-then-append runs under hal0's cross-process `file_lock` on
      the target `.env`, so hal0-api's periodic sweep and a CLI provision
      running at once cannot both mint a key for one profile. Values are
-     parsed with Hermes's own dotenv rules (`agent/secret_scope.py:257-290`):
+     parsed with Hermes's own dotenv rules (`agent/secret_scope.py:271-304`):
      a quoted value keeps a trailing `# comment` out and its escapes in.
 4. **Pinned upstreams own their ids, and an owned id fails fast.** Only an id in
    a pinned upstream's `owned_models` is owned
    (`resolution_path="pinned:<name>"`). Other ids Hermes advertises, such as
-   its gateway-wide `model_routes` aliases (`api_server.py:2485-2488`), go into
+   its gateway-wide `model_routes` aliases (`api_server.py:2427-2430`), go into
    the models cache and resolve by the normal ladder, slot and registry first.
    So an alias equal to a slot model id never takes that slot over and never
    loops hal0's own inference back into Hermes. An owned id never falls
@@ -213,7 +218,7 @@ line above disagree.
      sweep, so `hal0 agent reprovision hermes` writes keys too.
 8. **Two Hermes headers pass through.** `X-Hermes-Session-Id` and
    `X-Hermes-Session-Key` join the forwardable request headers
-   (`api_server_openai_routes.py:679-690`). The allowlist is global, so every
+   (`api_server_openai_routes.py:842-853`). The allowlist is global, so every
    upstream receives them when a client sends them. They are protocol
    selectors, not credentials. OWUI sends neither, and resends history each
    turn.
@@ -303,12 +308,12 @@ its own for Hermes.
   entries are read-only (decision 6), so hal0 has no per-entry switch. The knob
   is Hermes-side: park the profile (`hermes -p <profile> gateway stop`) or set
   `gateway.standalone: true` in its config. Either drops it from
-  `profiles_to_serve` (`hermes_cli/profiles.py:1158-1159`), and the next
+  `profiles_to_serve` (`hermes_cli/profiles.py:1159-1160`), and the next
   reconcile that sees the gateway up and the profile's prefix answer 404
   removes its upstream. The default profile cannot be hidden this way:
   it is always served first, `gateway.standalone` is ignored on it, and a
   `gateway.parked` marker on it is ignored with a warning
-  (`hermes_cli/profiles.py:1064-1067`, `:1151-1156`), so `hermes-agent` stays.
+  (`hermes_cli/profiles.py:1065-1068`, `:1152-1157`), so `hermes-agent` stays.
 - **A Hermes pin bump is guarded.** Changing `VETTED_HERMES_REFS` fails
   `test_adr_0035_verified_ref_matches_vetted_pin` until the citations above are
   re-verified and the "Verified against" line is updated.
@@ -317,7 +322,10 @@ its own for Hermes.
 
 - ADR-0033 (amended here), ADR-0034, ADR-0004, ADR-0015.
 - #2891 (gateway runs without the `mcp` and `web` extras).
-- NousResearch/hermes-agent `d923a5eb` (v0.22.2): `gateway/platforms/api_server.py`,
+- NousResearch/hermes-agent `4d043038` (v0.22.4; first verified at `d923a5eb`,
+  v0.22.2): `gateway/platforms/api_server.py`,
   `gateway/platforms/api_server_openai_routes.py`, `gateway/run.py`,
-  `gateway/config.py`, `agent/secret_scope.py`, `hermes_cli/profiles.py`,
-  `hermes_cli/auth.py`.
+  `gateway/config.py`, `gateway/config_env.py`, `gateway/platform_env.py`,
+  `agent/secret_scope.py`, `hermes_cli/profiles.py`, `hermes_cli/auth.py`,
+  `hermes_cli/env_loader.py`, `hermes_cli/model_switch.py`,
+  `tui_gateway/launch_profile_policy.py`.

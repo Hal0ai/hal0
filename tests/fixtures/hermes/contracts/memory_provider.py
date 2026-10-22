@@ -5,8 +5,8 @@
 Adapter lane: **hal0-memory** (the one active external memory provider).
 
 Signatures are copied verbatim from the reviewed official pin
-``d923a5eb487a17c0a68801bba9ef0f56c81040a8`` (``agent/memory_provider.py``,
-Hermes v0.22.2). A Hermes bump that reshapes any of these lifecycle seams must
+``4d04303818b61bf3aa09278af48356315515965b`` (``agent/memory_provider.py``,
+Hermes v0.22.4). A Hermes bump that reshapes any of these lifecycle seams must
 re-vendor this file and update the frozen signatures in
 ``tests/agents/hermes/test_contract_compatibility.py`` — that diff is the
 tripwire the ``hermes-sdk-diff`` drift-watch and the compat-pin exist to force.
@@ -19,9 +19,17 @@ What changed since 0.19.0 (``3ef6bbd2``):
   ``recall_status``, ``identity_signature``, and the
   ``pre_compress_checkpoint_api_version`` class attribute;
 * ``sync_turn`` gained a keyword-only ``turn_author``. The memory manager only
-  passes it to signatures that accept it (``agent/memory_manager.py:601-618``), so
+  passes it to signatures that accept it (``agent/memory_manager.py:441-460``), so
   hal0-memory's narrower override keeps working;
 * annotations moved from ``List``/``Dict`` to builtin ``list``/``dict``.
+
+What changed since v0.22.2 (``d923a5eb``): no signature. The ABC now documents
+a multiplexing contract (#140058, ``agent/memory_provider.py:85-103``): every
+load gets a new instance, bound from ``initialize()``'s ``hermes_home``, with no
+profile state at module or class level. The memory manager enforces the binding
+and refuses an instance another profile already claimed
+(``agent/memory_manager.py:921-927``). hal0-memory serves one profile and is
+constructed per load, so it already meets it.
 """
 
 # Preserve the reviewed upstream ABC and typing spellings verbatim.

@@ -125,6 +125,17 @@ live chat: it is install-time ground truth, and it distinguishes "broken out of 
 
 Run order inside this lane: the reprovision checks (10) restart the gateway under any concurrent probe, so do them last; check 12's note about `[Truncated:` is read from `state.db`.
 
+22. **A profile-scoped chat never starts a gateway (v0.22.3+).** With `hermes-gateway.service`
+   active, open a profile-scoped chat (the dashboard profile switcher, for example `hal0-brain`)
+   and run one short `hermes -p hal0-brain chat` turn: both must answer, and
+   `ps -u hal0 -o pid,cgroup,args | grep "gateway run"` must still show exactly one gateway, in
+   `hermes-gateway.service`. Then `sudo systemctl disable --now hermes-gateway` and repeat: both
+   must fail with a clear `gateway inaccessible: <reason>` message, and no `gateway run
+   --idle-exit` may appear, especially not in the `hal0-agent@hermes` cgroup. An unmanaged
+   gateway is a `major` finding; kill it (`pkill -f "gateway run --idle-exit"`) before going on.
+   Cleanup: `sudo systemctl enable --now hermes-gateway`, confirm the readonly lane's item 24 is
+   green again, and delete the two test sessions.
+
 ## Leave behind
 
 Hermes running with its SHIPPED config restored. Brain, utility, and embed slots healthy. State

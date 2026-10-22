@@ -18,7 +18,8 @@ from typer.testing import CliRunner
 import hal0.cli.agent_commands as ac
 from hal0.agents import hermes_provision as hp
 
-PIN = "d923a5eb487a17c0a68801bba9ef0f56c81040a8"  # the shipped pin, v0.22.2
+PIN = "4d04303818b61bf3aa09278af48356315515965b"  # the shipped pin, v0.22.4
+PREV_PIN = "d923a5eb487a17c0a68801bba9ef0f56c81040a8"  # v0.22.2, still vetted
 
 
 @pytest.fixture
@@ -47,6 +48,57 @@ def test_upgrade_to_a_vetted_sha_passes_the_ref(provision_calls: list[dict[str, 
     result = _upgrade("--to", PIN)
     assert result.exit_code == 0, result.output
     assert provision_calls == [{"repair": True, "ref": PIN}]
+
+
+def _live(monkeypatch: pytest.MonkeyPatch, ref: str | None) -> None:
+    """Pretend the live release is ``ref`` (None: no release yet)."""
+    from hal0.agents import hermes_release as hr
+
+    monkeypatch.setattr(hr, "live_ref", lambda layout=None: ref)
+
+
+def test_upgrade_to_the_previous_pin_is_refused_once_the_newer_pin_ran(
+    provision_calls: list[dict[str, Any]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """v0.22.2 stays vetted (the flip-back target), but a deliberate build of it over a
+    state.db that v0.22.4 has written is a downgrade upstream refuses, and hal0's
+    release switch does not snapshot the database (#2805)."""
+    _live(monkeypatch, PIN)
+    result = _upgrade("--to", PREV_PIN)
+    assert result.exit_code != 0
+    assert provision_calls == []
+    assert "downgrade" in result.output and "state.db" in result.output and "#2805" in result.output
+
+
+def test_upgrade_to_the_previous_pin_stays_allowed_with_no_newer_release(
+    provision_calls: list[dict[str, Any]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    for live in (None, PREV_PIN):
+        provision_calls.clear()
+        _live(monkeypatch, live)
+        result = _upgrade("--to", PREV_PIN)
+        assert result.exit_code == 0, result.output
+        assert provision_calls == [{"repair": True, "ref": PREV_PIN}]
+
+
+def test_upgrade_to_the_pin_is_never_a_downgrade(
+    provision_calls: list[dict[str, Any]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _live(monkeypatch, PREV_PIN)
+    result = _upgrade("--to", PIN)
+    assert result.exit_code == 0, result.output
+
+
+def test_refuse_downgrade_orders_vetted_refs_by_version() -> None:
+    from hal0.agents import hermes_release as hr
+
+    assert hp.VETTED_HERMES_VERSIONS.keys() == set(hp.VETTED_HERMES_REFS)
+    with pytest.raises(hr.ReleaseError, match="downgrade"):
+        hr.refuse_downgrade(PREV_PIN, live=PIN)
+    hr.refuse_downgrade(PIN, live=PREV_PIN)
+    hr.refuse_downgrade(PIN, live=PIN)
+    hr.refuse_downgrade(PREV_PIN, live=None)
+    hr.refuse_downgrade(PREV_PIN, live="f" * 40)  # an unvetted live ref cannot be ordered
 
 
 @pytest.mark.parametrize(
@@ -104,3 +156,27 @@ def test_requirement_is_a_vetted_commit_pin() -> None:
     assert hp.hermes_requirement_is_vetted(text)
     # A floor no longer counts: it cannot name a commit to check out.
     assert not hp.hermes_requirement_is_vetted("hermes-agent[web,mcp]>=0.16.0,<1")
+
+
+def test_ensure_release_refuses_a_downgrade_at_the_build_boundary(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``agent bootstrap hermes --ref`` and every other builder pass through ensure_release."""
+    from hal0.agents import hermes_release as hr
+
+    monkeypatch.setattr(hr, "live_ref", lambda layout=None: PIN)
+    monkeypatch.setattr(hr, "configured_extras", lambda *a, **k: ())
+    req = tmp_path / "requirements.txt"
+    req.write_text(f"hermes-agent @ git+https://github.com/NousResearch/hermes-agent.git@{PIN}\n")
+    out = hr.ensure_release(
+        caller="test",
+        venv=tmp_path / "venv",
+        requirements=req,
+        ref=PREV_PIN,
+        force=True,
+        hermes_home=tmp_path / "home",
+        units=hr.NoUnits(),
+        drop_root=False,
+    )
+    assert out.status == "build_failed"
+    assert out.error is not None and "downgrade" in out.error and "#2805" in out.error

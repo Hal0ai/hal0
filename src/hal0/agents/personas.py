@@ -301,10 +301,10 @@ def hermes_reload(
     """Best-effort hot-reload nudge to a running Hermes process.
 
     Sends a JSON-RPC frame with ``method`` (defaults to ``reload.env``)
-    as an HTTP POST. Re-verified against Hermes v0.22.2 (``d923a5eb``):
+    as an HTTP POST. Re-verified against Hermes v0.22.4 (``4d043038``):
     ``reload.env`` exists (``tui_gateway/methods_tools.py:267``) but only
     re-reads ``$HERMES_HOME/.env``, ``/api/ws`` is a token-gated WebSocket
-    on the dashboard port (``hermes_cli/web_routers/chat_ws.py:701``), and
+    on the dashboard port (``hermes_cli/web_routers/chat_ws.py:702``), and
     nothing listens on 8765. The nudge therefore always fails, which the
     callers already treat as non-fatal. #2850 tracks replacing it.
 

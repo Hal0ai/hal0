@@ -307,8 +307,8 @@ class TestHermesEnv:
         assert env["HERMES_HOME"] == "/custom/home"
 
     def test_no_dead_dashboard_tui_env(self) -> None:
-        # Hermes reads no HERMES_DASHBOARD_TUI at 3ef6bbd2 or d923a5eb; the
-        # embedded chat is always on (web_server.py:461-464 at d923a5eb).
+        # Hermes reads no HERMES_DASHBOARD_TUI at 3ef6bbd2, d923a5eb or 4d043038; the
+        # embedded chat is always on (web_server.py:297 at 4d043038).
         with patch.dict(os.environ, {}, clear=False):
             os.environ.pop("HERMES_DASHBOARD_TUI", None)
             env = agent_shim._build_hermes_env(_cfg())

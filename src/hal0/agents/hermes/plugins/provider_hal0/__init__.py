@@ -15,7 +15,7 @@ Hermes venv, where the real ``providers.base.ProviderProfile`` /
 ``providers.register_provider`` live; ``profile.py`` falls back to a vendored
 frozen copy so it stays importable in hal0's own venv for unit tests.
 
-Registration contract (Hermes pin ``d923a5eb``, v0.22.2): provider profiles register
+Registration contract (Hermes pin ``4d043038``, v0.22.4): provider profiles register
 through the **module-level** seam ``providers.register_provider(profile)`` —
 the general ``PluginContext`` has no ``register_provider_profile`` method (see
 ``tests/fixtures/hermes/contracts/{provider_profile,plugin_context}.py``). We

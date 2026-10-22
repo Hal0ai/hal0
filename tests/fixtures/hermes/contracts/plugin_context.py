@@ -9,8 +9,9 @@ dispatch_tool, inject_message), and the optional future **hal0-context**
 (register_context_engine).
 
 Signatures copied verbatim from the reviewed official pin
-``d923a5eb487a17c0a68801bba9ef0f56c81040a8`` (``hermes_cli/plugins.py``,
-Hermes v0.22.2; read with ``inspect.signature`` in a v0.22.2 venv).
+``4d04303818b61bf3aa09278af48356315515965b`` (``hermes_cli/plugins.py``,
+Hermes v0.22.4; read with ``inspect.signature`` in a v0.22.4 venv, identical
+to v0.22.2 for every seam frozen here).
 ``register(ctx)`` is called once at startup; a registration crash disables
 only that plugin (per the design's "every adapter degrades independently"
 requirement).
@@ -20,7 +21,7 @@ What changed since 0.19.0: most ``register_*`` methods now return a
 reload can unwind them; ``inject_message`` gained keyword-only ``session_key``
 and ``origin``; ``register_auxiliary_task`` gained ``inherit_from``; the voice
 registrars are generated from ``_SCOPED_PROVIDER_REGISTRARS``
-(``plugins.py:1054-1064``); and the general context gained an inert
+(``plugins.py:1050-1060``); and the general context gained an inert
 ``register_memory_provider`` (see ``memory_loader.py``).
 """
 

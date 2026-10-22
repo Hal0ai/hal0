@@ -1,6 +1,6 @@
 """Hermes command approvals: the operator setting behind Hermes's ``approvals.mode``.
 
-Hermes Agent (0.19.0+, re-verified at the pinned v0.22.2 ``d923a5eb``) gates
+Hermes Agent (0.19.0+, re-verified at the pinned v0.22.4 ``4d043038``) gates
 a dangerous terminal command or an ``execute_code`` script behind an
 approval. ``approvals.mode`` decides who answers first. Upstream accepts
 ``manual``, ``smart`` and ``off`` (``hermes_cli/approval_mode.py:16``); hal0

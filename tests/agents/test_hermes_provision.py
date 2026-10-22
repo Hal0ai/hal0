@@ -951,10 +951,17 @@ def test_the_resolver_targets_the_minor_it_is_given(tmp_path: Path) -> None:
 
 
 def test_the_pinned_ref_targets_314() -> None:
-    """v0.22.2 (d923a5eb) declares requires-python ">=3.11,<3.15" (its
-    pyproject.toml:15), so the shipped pin moves hosts to 3.14."""
+    """v0.22.4 (4d043038) declares requires-python ">=3.11,<3.15" (its
+    pyproject.toml:15), as v0.22.2 (d923a5eb) did, so the shipped pin keeps
+    hosts on 3.14 and the v0.22.2 flip-back target builds on the same minor."""
     assert hp.pinned_target_minor() == "3.14"
     assert set(hp.VETTED_HERMES_REQUIRES_PYTHON) == set(hp.VETTED_HERMES_REFS)
+    for ref in (
+        "4d04303818b61bf3aa09278af48356315515965b",
+        "d923a5eb487a17c0a68801bba9ef0f56c81040a8",
+    ):
+        assert ref in hp.VETTED_HERMES_REFS
+        assert hp.hermes_target_minor(ref) == "3.14"
 
 
 class _MinorRunner(_UvRunner):
@@ -1377,6 +1384,12 @@ def test_shipped_requirement_is_the_vetted_commit_pin() -> None:
         # Vetted commit pin — the production posture.
         (
             "hermes-agent[web] @ git+https://github.com/NousResearch/hermes-agent.git@"
+            "4d04303818b61bf3aa09278af48356315515965b",
+            True,
+        ),
+        # The previous pin stays vetted (flip-back, boxes not yet updated).
+        (
+            "hermes-agent[web] @ git+https://github.com/NousResearch/hermes-agent.git@"
             "d923a5eb487a17c0a68801bba9ef0f56c81040a8",
             True,
         ),
@@ -1423,9 +1436,9 @@ def test_version_pin_reports_commit_ref_without_crashing(monkeypatch, tmp_path) 
         monkeypatch,
         tmp_path,
         "# comment\nhermes-agent[web] @ git+https://github.com/NousResearch/"
-        "hermes-agent.git@d923a5eb487a17c0a68801bba9ef0f56c81040a8\n",
+        "hermes-agent.git@4d04303818b61bf3aa09278af48356315515965b\n",
     )
-    assert pin == "d923a5eb487a"
+    assert pin == "4d04303818b6"
 
 
 def test_version_pin_reports_exact_floored_and_unknown_forms(monkeypatch, tmp_path) -> None:

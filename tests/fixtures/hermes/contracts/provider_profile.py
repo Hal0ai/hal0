@@ -6,8 +6,10 @@ Adapter lane: **hal0-provider** (dynamic model-provider plugin, chat_completions
 
 Fields and the ``fetch_models`` / ``register_provider`` / ``get_provider_profile``
 signatures are copied verbatim from the reviewed official pin
-``d923a5eb487a17c0a68801bba9ef0f56c81040a8`` (``providers/base.py:41-160`` and
-``providers/__init__.py:122, :192``, Hermes v0.22.2). The hooks hal0-provider
+``4d04303818b61bf3aa09278af48356315515965b`` (``providers/base.py:41-160`` and
+``providers/__init__.py:122, :192``, Hermes v0.22.4; ``providers/base.py`` is
+unchanged since v0.22.2, and v0.22.3 only taught ``get_provider_profile`` /
+``list_providers`` to return nothing inside a safe-mode worker). The hooks hal0-provider
 overrides (``get_hostname``, ``prepare_messages``, ``build_extra_body``,
 ``build_api_kwargs_extras``, ``default_vision_model``, ``get_max_tokens``,
 ``fetch_models``) keep their 0.19.0 signatures. 0.22 added fields with
