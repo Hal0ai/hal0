@@ -200,7 +200,9 @@ class PiDriver(AgentDriver):
         and the theme, replaces the managed ``pi-mcp-adapter`` entry, and
         refreshes the MCP entry, the Hindsight bank alias and the marker.
         Extensions the operator added under ``~/.pi/agent/extensions`` are
-        never touched — only the two hal0 directories are replaced.
+        never touched — only the two hal0 directories are replaced — and the
+        default provider, model and theme in ``settings.json`` are left as
+        the operator has them.
 
         Refuses to run as a different user than the one the marker names:
         the profile lives in that user's home, and redeploying into another
@@ -224,7 +226,9 @@ class PiDriver(AgentDriver):
         self._deploy_extension(_HINDSIGHT_EXT_SRC, self._hindsight_ext_dst())
         self._npm_install_hindsight_ext()
         self._deploy_theme()
-        self._write_pi_settings()
+        # Packages only: the default provider/model/theme are the operator's
+        # to change after install, and an upgrade must not revert them.
+        self._write_pi_settings(defaults=False)
         self._write_mcp_config(bearer_token=None)
         self._ensure_hindsight_alias()
         # Last, as in install(): the marker asserts the profile above landed.
@@ -431,11 +435,15 @@ class PiDriver(AgentDriver):
         theme_dst.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(str(_THEME_SRC), str(theme_dst))
 
-    def _write_pi_settings(self) -> None:
+    def _write_pi_settings(self, *, defaults: bool = True) -> None:
         """Upsert hal0 into pi's settings.json as the default
         provider/model/theme, plus the managed packages. Preserves all
         other existing settings (operator packages, subagent overrides,
-        etc). Creates a minimal file if none exists yet."""
+        etc). Creates a minimal file if none exists yet.
+
+        ``defaults=False`` writes only the managed packages and leaves the
+        default provider/model/theme as they are — what an upgrade wants,
+        since the operator may have switched them after install."""
         settings_file = self._settings_file()
         existing: dict[str, Any] = {}
         if settings_file.exists():
@@ -444,9 +452,10 @@ class PiDriver(AgentDriver):
             except (OSError, json.JSONDecodeError):
                 existing = {}
 
-        existing["defaultProvider"] = "hal0"
-        existing["defaultModel"] = "agent"
-        existing["theme"] = "hal0"
+        if defaults:
+            existing["defaultProvider"] = "hal0"
+            existing["defaultModel"] = "agent"
+            existing["theme"] = "hal0"
         packages = [
             p
             for p in existing.get("packages", [])

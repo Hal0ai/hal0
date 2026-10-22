@@ -137,6 +137,34 @@ def test_upgrade_leaves_operator_extensions(
     assert (extra / "index.ts").read_text() == "x"
 
 
+def test_upgrade_keeps_operator_defaults(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_runner: _FakeRunner
+) -> None:
+    """install() points pi at hal0; upgrade() only re-pins the managed package.
+    A default provider, model or theme the operator switched to afterwards
+    must survive."""
+    d = _driver_with_marker(tmp_path, monkeypatch, fake_runner)
+    d._settings_file().parent.mkdir(parents=True, exist_ok=True)
+    d._settings_file().write_text(
+        json.dumps(
+            {
+                "defaultProvider": "openrouter",
+                "defaultModel": "x",
+                "theme": "y",
+                "packages": ["npm:pi-mcp-adapter@2.31.0"],
+            }
+        )
+    )
+
+    d.upgrade()
+
+    settings = json.loads(d._settings_file().read_text())
+    assert settings["defaultProvider"] == "openrouter"
+    assert settings["defaultModel"] == "x"
+    assert settings["theme"] == "y"
+    assert settings["packages"] == ["npm:pi-mcp-adapter@5.3.0"]
+
+
 def test_ensure_hindsight_alias_adds_only_missing_key(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_runner: _FakeRunner
 ) -> None:
