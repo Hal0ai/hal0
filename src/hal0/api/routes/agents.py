@@ -43,6 +43,24 @@ router = APIRouter()
 log = structlog.get_logger(__name__)
 
 
+def _bundled_name(name: str) -> str:
+    """``name`` if it is a bundled agent, else 404 ``agent.unknown``.
+
+    The manager derives install, state and data paths from the name, so the
+    routes admit only the two bundled names before anything touches the file
+    system. The tuple is spelled out, not ``BUNDLED_AGENTS``, so the check is
+    a constant comparison a static analyser recognises as the barrier for
+    ``py/path-injection``; ``test_bundled_name_guard_matches_bundled_agents``
+    keeps the two in lockstep.
+    """
+    if name not in ("hermes", "pi"):
+        raise NotFound(
+            f"unknown bundled agent {name!r}. Known: {', '.join(BUNDLED_AGENTS)}",
+            code="agent.unknown",
+        )
+    return name
+
+
 def _manager() -> AgentManager:
     # Stateless — no shared state to wire onto app.state. A per-request
     # instance keeps the file-system read fresh (matches manager
@@ -147,6 +165,7 @@ async def install_agent(body: dict[str, object], request: Request) -> dict[str, 
     name = body.get("name") if isinstance(body, dict) else None
     if not isinstance(name, str) or not name.strip():
         raise BadRequest("'name' is required (non-empty string)", code="agent.name_required")
+    name = _bundled_name(name)
     switch = bool(body.get("switch", False)) if isinstance(body, dict) else False
 
     if agent_kind(name) == "cli":
@@ -407,6 +426,7 @@ async def uninstall_agent(name: str, request: Request) -> dict[str, str]:
     half-uninstalled agent whose seed was already gone reported
     ``not_installed`` even while ``rm -rf``'ing its data + state dirs.
     """
+    name = _bundled_name(name)
     if agent_kind(name) == "cli":
         # Mirror of the install-route guard: the profile lives in the
         # invoking user's home, which this daemon can neither remove nor

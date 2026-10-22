@@ -269,8 +269,40 @@ def test_uninstall_other_agent_does_not_reconcile(
 
     monkeypatch.setattr(agents_routes, "_manager", lambda: _FakeMgr())
     calls = _spy_sync(monkeypatch)
-    assert client.delete("/api/agents/not-hermes").status_code in (200, 404)
+    assert client.delete("/api/agents/pi").status_code == 400  # cli-kind: refused
     assert calls == []
+
+
+def test_bundled_name_guard_matches_bundled_agents() -> None:
+    """The routes' literal allowlist (the path-injection barrier) is BUNDLED_AGENTS."""
+    import ast
+    import inspect
+    import re
+
+    from hal0.agents.manager import BUNDLED_AGENTS
+
+    src = inspect.getsource(agents_routes._bundled_name)
+    literal = re.search(r"if name not in (\(.*?\)):", src)
+    assert literal is not None
+    assert ast.literal_eval(literal.group(1)) == BUNDLED_AGENTS
+    for name in BUNDLED_AGENTS:
+        assert agents_routes._bundled_name(name) == name
+
+
+@pytest.mark.parametrize("path", ["/api/agents/../etc", "/api/agents/nope"])
+def test_unknown_agent_name_is_refused_before_any_file_access(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, path: str
+) -> None:
+    class _Boom:
+        def uninstall(self, name: str) -> bool:
+            raise AssertionError("manager must not be reached")
+
+    monkeypatch.setattr(agents_routes, "_manager", lambda: _Boom())
+    res = client.delete(path)
+    assert res.status_code == 404
+    res = client.post("/api/agents/install", json={"name": "nope"})
+    assert res.status_code == 404
+    assert res.json()["error"]["code"] == "agent.unknown"
 
 
 def test_install_hermes_reconciles_upstreams_immediately(
