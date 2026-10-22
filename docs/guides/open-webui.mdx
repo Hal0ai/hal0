@@ -158,8 +158,9 @@ curl http://localhost:8080/api/services | jq '.services[] | select(.id == "openw
 ```
 
 The Agents chip is lit while hal0 has Hermes profiles registered; `agents`
-lists their model ids, one per profile, and is an empty list when there are
-none. It stays lit while the gateway is down, because the entries stay
+lists the model ids each profile advertises, which may include Hermes
+`model_routes` aliases as well as the profile's own id, and is an empty list
+when there are none. It stays lit while the gateway is down, because the entries stay
 registered then (see "When Hermes is down" above).
 
 ## When the env file re-renders
