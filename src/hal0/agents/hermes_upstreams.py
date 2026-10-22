@@ -97,6 +97,8 @@ async def reconcile_hermes_upstreams(
     desired: dict[str, str] = {}  # upstream name -> env var
     claimed: dict[str, str] = {}  # env var -> the profile that owns it this run
     collisions: set[str] = set()
+    owners: dict[str, str] = {}  # model id -> the profile that owns it this run
+    id_collisions: set[str] = set()
 
     for profile in candidates:
         key = hermes_api.api_key_for(profile, home)
@@ -114,6 +116,22 @@ async def reconcile_hermes_upstreams(
                     "hermes_upstreams.name_taken", name=name, managed_by=existing.managed_by
                 )
             continue
+        model_id = hermes_api.model_id_for(profile, home)
+        if owners.setdefault(model_id, profile) != profile:
+            # Default ``model_name: coder`` next to ``profiles/coder``: two
+            # pinned upstreams owning one id would leave the second one
+            # advertised but unreachable (``_pinned_owner`` takes the first).
+            # The first claimant keeps the id; ``default`` always comes first.
+            id_collisions.add(profile)
+            if f"model:{model_id}" not in _WARNED:
+                _WARNED.add(f"model:{model_id}")
+                log.warning(
+                    "hermes_upstreams.model_id_collision",
+                    model=model_id,
+                    profile=profile,
+                    kept=owners[model_id],
+                )
+            continue
         if claimed.setdefault(env_name, profile) != profile:
             # ``my-profile`` and ``my_profile`` map to one env var; sharing it
             # would let one key overwrite the other and cleanup pop both.
@@ -129,9 +147,7 @@ async def reconcile_hermes_upstreams(
             continue
         environ[env_name] = key
         desired[name] = env_name
-        upstream = build_hermes_upstream(
-            profile, host=host, port=port, owned=(hermes_api.model_id_for(profile, home),)
-        )
+        upstream = build_hermes_upstream(profile, host=host, port=port, owned=(model_id,))
         # Replace in place: a remove-then-add would open a window in which the
         # id has no owner and falls through to the ``agent`` slot.
         registry.upsert(upstream)
@@ -154,4 +170,6 @@ async def reconcile_hermes_upstreams(
         "skipped": sorted(skipped),
         "profiles_without_key": sorted(without_key),
         "env_name_collisions": sorted(collisions),
+        "model_id_collisions": sorted(id_collisions),
     }
+

@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from hal0.agents import hermes_upstreams
+from hal0.agents import hermes_provision as hp
 from hal0.agents.hermes_api import env_key_name
 from hal0.agents.hermes_upstreams import build_hermes_upstream, reconcile_hermes_upstreams
 from hal0.upstreams.registry import Upstream, UpstreamRegistry
@@ -16,9 +17,10 @@ CODER_KEY = "abcdefghijklmnopqrstuvwxyz012345"
 
 
 @pytest.fixture(autouse=True)
-def _clean(monkeypatch: pytest.MonkeyPatch) -> None:
+def _clean(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     for name in ("HERMES_HOME", "API_SERVER_HOST", "API_SERVER_PORT", "API_SERVER_MODEL_NAME"):
         monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(hp, "HERMES_SECRETS_ENV", tmp_path / "vault" / "hermes.env")
     hermes_upstreams._WARNED.clear()
 
 
@@ -352,3 +354,23 @@ async def test_reconcile_stale_entry_does_not_pop_a_shared_env_var(
     assert "hermes.my_profile" in report["removed"]
     assert reg.get("hermes.my-profile") is not None
     assert env[env_key_name("my-profile")] == CODER_KEY
+
+
+async def test_reconcile_skips_named_profile_whose_model_id_is_the_default_name(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Codex P2: default ``model_name: coder`` next to ``profiles/coder`` would
+    register two pinned owners of ``coder`` and leave the profile unreachable."""
+    (home / "config.yaml").write_text(
+        "gateway:\n  platforms:\n    api_server:\n      model_name: coder\n"
+    )
+    reg = UpstreamRegistry()
+    _patch_models(monkeypatch, reg, {})
+    env: dict[str, str] = {}
+    report = await reconcile_hermes_upstreams(reg, home=home, probe=_probe(), environ=env)
+    assert {u.name for u in reg.list()} == {"hermes"}
+    assert reg.get("hermes").owned_models == ("coder",)  # type: ignore[union-attr]
+    assert report["model_id_collisions"] == ["coder"]
+    assert report["registered"] == ["hermes"]
+    assert env_key_name("coder") not in env
+
