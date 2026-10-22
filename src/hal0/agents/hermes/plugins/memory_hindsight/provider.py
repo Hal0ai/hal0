@@ -278,7 +278,12 @@ class Hal0MemoryProvider(MemoryProvider):  # type: ignore[misc]
         base_url = os.environ.get("HAL0_MEMORY_BASE") or config.get("base_url")
         profile = _profile_name(hermes_home)
         if profile is not None:
-            agent_id = config.get("agent_id") or _profile_agent_id(profile)
+            # save_config writes the default id when none was configured, so
+            # a stored "hermes" on a profile home is not that profile's own.
+            stored = str(config.get("agent_id") or "")
+            agent_id = (
+                stored if stored and stored != _DEFAULT_AGENT_ID else _profile_agent_id(profile)
+            )
         else:
             agent_id = os.environ.get("HAL0_AGENT_ID") or config.get("agent_id")
         self._client = Hal0MemoryClient(base_url=base_url, agent_id=agent_id)

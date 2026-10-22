@@ -1208,3 +1208,13 @@ def test_profile_agent_id_matches_hal0s_naming() -> None:
 
     for name in ("coder", "hal0-brain", "foo.bar", "x" * 70):
         assert _profile_agent_id(name) == profile_agent_id(name)
+
+
+def test_initialize_ignores_a_stored_default_id_on_a_profile_home(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """save_config stores "hermes" when nothing was configured; that is never a clone's id."""
+    monkeypatch.setenv("HAL0_AGENT_ID", "hermes")
+    p = Hal0MemoryProvider()
+    p.initialize(session_id="s", hermes_home=str(_profile_home(tmp_path, "coder", "hermes")))
+    assert p._client is not None and p._client.agent_id == "hermes__coder"
