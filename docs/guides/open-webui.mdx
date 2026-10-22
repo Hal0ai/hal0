@@ -102,6 +102,14 @@ client of hal0.
   Profiles that had no key receive one on the next `hal0 update` or
   `hal0 agent reprovision hermes`, and appear in the picker after that.
 
+To hide a profile from the picker, change it on the Hermes side: run
+`hermes -p <profile> gateway stop` to park it, or set `gateway.standalone:
+true` in that profile's config. Hermes then stops serving it, and hal0 removes
+its entry on the next reconcile (the next `hal0 update`, a hal0-api restart,
+or `POST /api/agents/hermes/reconcile-upstreams`). hal0's entries for these
+models are read-only on the providers page. `hermes-agent`, the default
+profile, cannot be hidden this way and always stays.
+
 The Agents chip on the Services page (below) lists these entries, and the
 `hermes-api` row in `hal0 doctor` checks each one. A green row means the API
 path answers; it does not prove the gateway has its tools installed. The design is

@@ -201,7 +201,14 @@ its own for Hermes.
   picker until then.
 - **Every `hal0-brain` turn is an agent turn.** It is the resident steward with
   the admin tools, so it is exposed like any other served profile. Managed
-  entries are read-only (decision 6), so there is no per-entry switch to hide it.
+  entries are read-only (decision 6), so hal0 has no per-entry switch. The knob
+  is Hermes-side: park the profile (`hermes -p <profile> gateway stop`) or set
+  `gateway.standalone: true` in its config. Either drops it from
+  `profiles_to_serve` (`hermes_cli/profiles.py:1158-1159`), and the next
+  reconcile removes its upstream. The default profile cannot be hidden this way:
+  it is always served first, `gateway.standalone` is ignored on it, and a
+  `gateway.parked` marker on it is ignored with a warning
+  (`hermes_cli/profiles.py:1064-1067`, `:1151-1156`), so `hermes-agent` stays.
 - **A Hermes pin bump is guarded.** Changing `VETTED_HERMES_REFS` fails
   `test_adr_0035_verified_ref_matches_vetted_pin` until the citations above are
   re-verified and the "Verified against" line is updated.
