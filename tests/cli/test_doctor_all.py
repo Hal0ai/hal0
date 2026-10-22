@@ -1762,7 +1762,58 @@ def _api(home, *, status=200, upstreams=None, slots=None, calls=None):
         http_get=http_get,
         upstreams_payload=upstreams,
         slots_payload=slots,
+        gateway_expected=lambda: True,
     )
+
+
+def test_check_hermes_api_upstreams_gateway_disabled_warns(tmp_path) -> None:
+    """Disabled AND stopped (transport failure, unit not expected): WARN, no per-profile request."""
+    home = _hermes_home(tmp_path)
+    calls: list = []
+
+    def http_get(url, headers):
+        calls.append(url)
+        return 200, {}
+
+    c = da.check_hermes_api_upstreams(
+        home=home,
+        probe=lambda url: 0,
+        http_get=http_get,
+        upstreams_payload=[],
+        gateway_expected=lambda: False,
+    )
+    assert c.status == "warn" and c.critical is False
+    assert "disabled and not running" in c.detail and "/health" in c.detail
+    assert "enable --now hermes-gateway" in c.detail and c.detail.endswith(_API_TAIL)
+    assert calls == []
+
+
+def test_check_hermes_api_upstreams_enabled_but_unreachable_fails(tmp_path) -> None:
+    """An enabled gateway that does not answer is an outage, not an off switch."""
+    home = _hermes_home(tmp_path)
+    c = da.check_hermes_api_upstreams(
+        home=home,
+        probe=lambda url: 0,
+        http_get=lambda url, headers: (0, None),
+        upstreams_payload=[],
+        gateway_expected=lambda: True,
+    )
+    assert c.status == "fail"
+    assert "profile default: GET /v1/models answered 0" in c.detail
+
+
+def test_check_hermes_api_upstreams_unhealthy_running_gateway_fails(tmp_path) -> None:
+    """A 503 on /health is a running, unhealthy gateway: never the WARN path."""
+    home = _hermes_home(tmp_path)
+    c = da.check_hermes_api_upstreams(
+        home=home,
+        probe=lambda url: 503,
+        http_get=lambda url, headers: (503, None),
+        upstreams_payload=[],
+        gateway_expected=lambda: False,
+    )
+    assert c.status == "fail"
+    assert "answered 503" in c.detail
 
 
 def test_check_hermes_api_upstreams_absent_passes(tmp_path) -> None:
