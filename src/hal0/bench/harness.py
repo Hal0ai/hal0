@@ -533,14 +533,26 @@ class ExclusiveSlots:
     restart is a WARNING, never an exception — leaving a slot down must not
     also crash the benchmark session that already ran).
 
-    The caller wraps ONE Tier-A group's sweep (not per-attempt): the group's
-    pp/tg siblings share one memoised sweep, so they must also share one
-    stop/restart, exactly like the shell harness's per-sweep ``--exclusive``.
+    The session runner holds ONE window across a whole run of consecutive
+    Tier-A sweeps (``runner._ExclusiveWindow``), not one per sweep (#2770).
+    Every slot unit carries ``StartLimitBurst=10`` per
+    ``StartLimitIntervalSec=1800`` (``providers/container.py``), so the shell
+    harness's per-sweep ``--exclusive`` tripped the start limit from a
+    session's eleventh sweep and left pinned slots ``failed`` until an
+    operator ran ``reset-failed``.
+
+    The restart runs ``hal0-systemctl reset-failed <id>`` before each
+    ``start`` (the slot manager's own guard before a restart), so a unit this
+    window cycled can always be started again, and every slot that still
+    fails to restart is kept in :attr:`restore_failures` for the caller to
+    surface in the session result rather than only on stderr.
     """
 
     def __init__(self, runner: Callable[[list[str]], tuple[int, str, str]] | None = None) -> None:
         self._run = runner or _default_shell_runner
         self._stopped: list[str] = []
+        #: One message per slot this window stopped and could not restart.
+        self.restore_failures: list[str] = []
 
     def __enter__(self) -> ExclusiveSlots:
         for slot_id in self._active_slot_ids():
@@ -562,12 +574,15 @@ class ExclusiveSlots:
 
     def _restore(self) -> None:
         for slot_id in self._stopped:
+            # Clear the unit's failed state and start-limit counter first.
+            # Best-effort: reset-failed on a healthy unit is a no-op, and its
+            # own failure must never skip the start it precedes.
+            self._run(["sudo", "-n", SYSTEMCTL_SEAM, "reset-failed", slot_id])
             rc, _out, err = self._run(["sudo", "-n", SYSTEMCTL_SEAM, "start", slot_id])
             if rc != 0:
-                print(
-                    f"[exclusive] WARN: failed to restart hal0-slot@{slot_id}: {err.strip() or rc}",
-                    file=sys.stderr,
-                )
+                message = f"failed to restart hal0-slot@{slot_id}: {err.strip() or rc}"
+                self.restore_failures.append(message)
+                print(f"[exclusive] WARN: {message}", file=sys.stderr)
         self._stopped = []
 
     def _active_slot_ids(self) -> list[str]:

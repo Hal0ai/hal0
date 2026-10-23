@@ -886,6 +886,68 @@ class TestExclusiveSlots:
 
         assert "WARN" in capsys.readouterr().err
 
+    def test_restore_resets_the_start_limit_before_each_start(self) -> None:
+        """#2770: every slot unit carries StartLimitBurst=10; a restart must
+        clear the unit's failed state and start-limit counter first, or a
+        session that cycled it ten times leaves it ``failed``."""
+        calls: list[list[str]] = []
+
+        def runner(argv):
+            calls.append(argv)
+            if argv[0] == "systemctl":
+                return 0, "hal0-slot@2.service\nhal0-slot@8.service", ""
+            return 0, "", ""
+
+        with ExclusiveSlots(runner=runner):
+            pass
+
+        restore = [c[-2:] for c in calls if c[0] == "sudo" and c[-2] != "stop"]
+        assert restore == [
+            ["reset-failed", "2"],
+            ["start", "2"],
+            ["reset-failed", "8"],
+            ["start", "8"],
+        ]
+        for call in calls:
+            if call[0] == "sudo":
+                assert call[:3] == ["sudo", "-n", SYSTEMCTL_SEAM]
+
+    def test_a_failed_reset_still_attempts_the_start(self) -> None:
+        starts: list[str] = []
+
+        def runner(argv):
+            if argv[0] == "systemctl":
+                return 0, "hal0-slot@2.service", ""
+            if argv[-2] == "reset-failed":
+                return 1, "", "denied"
+            if argv[-2] == "start":
+                starts.append(argv[-1])
+            return 0, "", ""
+
+        with ExclusiveSlots(runner=runner) as slots:
+            pass
+
+        assert starts == ["2"]
+        assert slots.restore_failures == []
+
+    def test_failed_restart_is_kept_for_the_caller(self) -> None:
+        """#2770: a slot left down must reach the session result, not only
+        stderr."""
+
+        def runner(argv):
+            if argv[0] == "systemctl":
+                return 0, "hal0-slot@2.service\nhal0-slot@8.service", ""
+            if argv[-2:] == ["start", "2"]:
+                return 1, "", "Job for hal0-slot@2.service failed."
+            return 0, "", ""
+
+        with ExclusiveSlots(runner=runner) as slots:
+            pass
+
+        assert len(slots.restore_failures) == 1
+        assert "hal0-slot@2" in slots.restore_failures[0]
+        assert "Job for hal0-slot@2.service failed." in slots.restore_failures[0]
+
     def test_list_units_failure_treated_as_nothing_active(self) -> None:
         """Ported from ``test_harness_impl.py`` (finding 9): an unprivileged
         ``systemctl list-units`` failure degrades to "nothing active" rather

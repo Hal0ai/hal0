@@ -12,12 +12,13 @@ corrects every place the stubs assumed a contract that differs from the real box
     stopped by the exclusive window's own slot stop/restart, so an exclusive
     session may proceed while a slot is loaded-but-idle.
   * Exclusivity (Phase 2, ``hal0.bench.harness.ExclusiveSlots``) stops every
-    active ``hal0-slot@*`` unit for the duration of ONE Tier-A group's sweep
-    and restarts them on exit — a direct port of the shell harness's per-sweep
-    ``--exclusive`` (DESIGN §0.5 — the session-level ``gpu-quiesce`` verb was
-    deferred and does not exist on-box). Tier-A sweeps are memoised per
-    (model,lane,depth,config) so one GPU load (one stop/restart) yields BOTH
-    the pp and tg records.
+    active ``hal0-slot@*`` unit for a run of consecutive Tier-A sweeps and
+    restarts them before the next serving-tier cell or at session end
+    (``_ExclusiveWindow``). The shell harness's per-sweep ``--exclusive`` it
+    was ported from tripped the slot units' start limit on any session with
+    more than ten sweeps (#2770). Tier-A sweeps are memoised per
+    (model,lane,depth,config) so one GPU load yields BOTH the pp and tg
+    records.
   * Tier A (pp/tg): Phase 2 absorbs the shell harness
     (``installer/bench/run_benchmarks.sh`` + ``config.sh``) into
     ``hal0.bench.harness`` — the runner COMPOSES the full ``podman run …
@@ -162,6 +163,51 @@ class SessionResult:
     duration_s: float = 0.0
     aborted: str | None = None
     run_ids: list[str] = field(default_factory=list)
+    #: Slots the exclusive window stopped and could not restart (#2770). A
+    #: non-empty list means the session left production slots down.
+    slot_errors: list[str] = field(default_factory=list)
+
+
+class _ExclusiveWindow:
+    """The session's exclusive window: one :class:`harness.ExclusiveSlots`
+    held across every consecutive Tier-A sweep instead of one per sweep.
+
+    A per-sweep stop/start spent one of each slot unit's ten starts per half
+    hour (``StartLimitBurst=10``), so a roster session with more than ten
+    sweeps left pinned slots ``failed`` (#2770). The window opens lazily on
+    the first sweep that needs it and is released before any serving-tier
+    cell (those measure THROUGH a live slot) and when the session ends.
+
+    A window that could not open stays failed for the rest of the session:
+    every later sweep records the same reason rather than cycling the slots
+    again, and never runs without exclusivity.
+    """
+
+    def __init__(self) -> None:
+        self._slots: harness.ExclusiveSlots | None = None
+        self._open_error: str | None = None
+        self.slot_errors: list[str] = []
+
+    def ensure_open(self) -> None:
+        if self._open_error is not None:
+            raise RuntimeError(self._open_error)
+        if self._slots is not None:
+            return
+        slots = harness.ExclusiveSlots()
+        try:
+            slots.__enter__()
+        except RuntimeError as exc:
+            self._open_error = str(exc)
+            self.slot_errors.extend(slots.restore_failures)
+            raise
+        self._slots = slots
+
+    def release(self) -> None:
+        if self._slots is None:
+            return
+        slots, self._slots = self._slots, None
+        slots.__exit__(None, None, None)
+        self.slot_errors.extend(slots.restore_failures)
 
 
 def _new_run_id() -> str:
@@ -653,6 +699,7 @@ def run_session(
     # (pp prompt, tg decode) sizes per (model,lane,depth,config) group.
     sizes = _group_sizes(cells)
     sweep_cache: dict[tuple, tuple[list[dict], dict, Outcome, Telemetry, str]] = {}
+    window = _ExclusiveWindow() if exclusive else None
 
     try:
         for cell in cells:
@@ -675,6 +722,11 @@ def run_session(
             run_id = _new_run_id()
             artifacts = store.artifacts_dir(run_id)
 
+            # A serving-tier cell measures THROUGH a live slot: give the slots
+            # back before it runs (the next sweep reopens the window).
+            if window is not None and cell.kind not in _TIER_A_KINDS:
+                window.release()
+
             if cell.kind in _TIER_A_KINDS:
                 # The per-attempt seam timeout (crosses the privilege boundary
                 # as --timeout-s); the OUTER 6-attempt bound is now an emergent
@@ -685,7 +737,7 @@ def run_session(
                     cell,
                     artifacts,
                     per_attempt,
-                    exclusive,
+                    window,
                     sizes,
                     sweep_cache,
                     host,
@@ -725,6 +777,9 @@ def run_session(
             else:
                 result.cells_failed += 1  # a bad cell never kills the session
     finally:
+        if window is not None:
+            window.release()
+            result.slot_errors = list(window.slot_errors)
         result.duration_s = round(time.monotonic() - started, 1)
 
     return result
@@ -801,7 +856,7 @@ def _tier_a_record(
     cell,
     artifacts,
     per_attempt,
-    exclusive,
+    window,
     sizes,
     cache,
     host,
@@ -812,10 +867,11 @@ def _tier_a_record(
 ) -> Record:
     """Run (or reuse) the Tier-A sweep for this cell's group and parse its kind.
 
-    Exclusivity (``harness.ExclusiveSlots``) wraps ONLY the actual seam
-    execution for a non-memoised group — a cache hit (the pp/tg sibling
-    reusing the group's already-swept output) touches no slots at all,
-    matching the shell harness's per-SWEEP (not per-cell) ``--exclusive``."""
+    ``window`` is the session's :class:`_ExclusiveWindow` (``None`` for a
+    non-exclusive session). A non-memoised sweep makes sure it is open; it
+    stays open for the next sweep, so a run of consecutive sweeps stops and
+    restarts each slot once (#2770). A cache hit (the pp/tg sibling reusing
+    the group's already-swept output) touches no slots at all."""
     key = _group_key(cell)
     if key in cache:
         rows, meta, outcome, telemetry, telemetry_text = cache[key]  # sibling already swept this
@@ -840,15 +896,13 @@ def _tier_a_record(
             # crash the whole session with a bare KeyError.
             spec = harness.lane_specs()[cell.lane]
             devices = resolve_bench_devices()
-            # Telemetry (Phase 4) wraps the WHOLE sweep, including the
-            # exclusive stop/restart window — the sampler runs for as long as
-            # this group owns the GPU, not just the container's lifetime.
+            if window is not None:
+                window.ensure_open()
+            # Telemetry (Phase 4) wraps the whole sweep — the sampler runs for
+            # as long as this group owns the GPU, not just the container's
+            # lifetime.
             with _telemetry_session(run_id, devices.tier):
-                if exclusive:
-                    with harness.ExclusiveSlots():
-                        result = harness.run_cell(spec, devices, **run_kwargs)
-                else:
-                    result = harness.run_cell(spec, devices, **run_kwargs)
+                result = harness.run_cell(spec, devices, **run_kwargs)
         except (BenchDeviceError, RuntimeError, KeyError) as exc:
             # Device resolution failed, ExclusiveSlots could not stop a slot,
             # or the cell's lane isn't in harness.lane_specs() — a bad cell
