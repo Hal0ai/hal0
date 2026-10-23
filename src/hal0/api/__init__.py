@@ -29,6 +29,9 @@ from hal0.api.agents import (
     memory_stats as agents_memory_stats_routes,
 )
 from hal0.api.agents import (
+    overview as agents_overview_routes,
+)
+from hal0.api.agents import (
     personas as agents_personas_routes,
 )
 from hal0.api.agents import (
@@ -2983,6 +2986,15 @@ def create_app() -> FastAPI:
         agents_memory_stats_routes.router,
         prefix="/api/agents",
         tags=["agents", "memory"],
+    )
+
+    # Agent overview. GET /api/agents/{name}/overview is the one payload the
+    # Hermes and Pi cards render: versions, units, API health, provision and
+    # doctor state, approvals, memory. Built from live probes, cached 30 s.
+    app.include_router(
+        agents_overview_routes.router,
+        prefix="/api/agents",
+        tags=["agents", "overview"],
     )
 
     # Approval inbox. The dashboard bell, the MCP admin
