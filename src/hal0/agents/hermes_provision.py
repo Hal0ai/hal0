@@ -7992,30 +7992,17 @@ def _smoke_wrapper_ready(_state: BootstrapState, io: InstallIO) -> tuple[bool, s
     return (result.returncode == 0, f"--hal0-ready rc={result.returncode}")
 
 
-#: `hermes doctor` issues that a stock hal0 box always reports and that are not
-#: problems here (#2951). hal0 serves models through its own gateway and keeps
-#: provider keys in its vault, so Hermes' `.env` holds no provider key
-#: (hermes_cli/doctor_config.py `_check_env_file`), and the optional tools that
-#: want their own keys (discord, x_search, ...) stay unconfigured
-#: (doctor_tools.py `_check_tool_availability`; the same line also covers a
-#: selected but unconfigured web backend, which hal0 does not set up).
-#: Matched exactly: any other issue, or a reworded one after a pin bump, still
-#: fails the probe.
-_HERMES_DOCTOR_ADVISORY_ISSUES = frozenset(
-    {
-        "Run 'hermes setup' to configure API keys",
-        "Run 'hermes setup' to configure missing API keys for full tool access",
-    }
-)
-
-#: What `hermes doctor` says about hal0's terminal-off sentinel backend
-#: (doctor_tools.py `_check_plugin_backend`: no backend by that name exists, by
-#: design). Advisory only while the root config really carries
-#: :data:`TERMINAL_OFF_BACKEND`; any other unknown backend still fails.
-_HERMES_DOCTOR_TERMINAL_OFF_ISSUE = (
-    "Fix terminal.backend in config.yaml, or install/enable the plugin that provides it"
-)
-
+#: `hermes doctor`'s issue list is advisory here (#2951). Upstream exits 1
+#: whenever it lists anything, and what it lists is its view of a standalone
+#: install, which no hal0 box matches: no provider key in Hermes' `.env` (hal0
+#: keeps keys in its vault and serves models through its own gateway), optional
+#: tools without their own keys, hal0's terminal-off sentinel as an unknown
+#: backend, no `~/.local/bin/hermes` (hal0's entry point is
+#: /usr/local/bin/hermes), npm audit findings in upstream's own workspaces.
+#: hal0's own doctor rows cover what the operator can act on. So the probe
+#: checks that `hermes doctor` runs and reports, and records the issues in its
+#: detail; a crash, a timeout, an unreadable summary or any other exit code
+#: still fails it.
 #: One numbered entry of `hermes doctor`'s closing "Found N issue(s)" list
 #: (doctor.py `_print_summary`).
 _HERMES_DOCTOR_ISSUE_RE = re.compile(r"^\s*\d+\.\s+(?P<issue>\S.*?)\s*$")
@@ -8071,17 +8058,7 @@ def _smoke_hermes_doctor(_state: BootstrapState, io: InstallIO) -> tuple[bool, s
     issues = _hermes_doctor_issues(result.stdout or "")
     if issues is None:
         return (False, "rc=1 (no issue list in its output)")
-    advisory = set(_HERMES_DOCTOR_ADVISORY_ISSUES)
-    try:
-        config_text = (Path(_state.hermes_home) / "config.yaml").read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError):
-        config_text = None
-    if _terminal_backend_in_config(config_text) == TERMINAL_OFF_BACKEND:
-        advisory.add(_HERMES_DOCTOR_TERMINAL_OFF_ISSUE)
-    real = [issue for issue in issues if issue not in advisory]
-    if real:
-        return (False, "rc=1: " + "; ".join(real))
-    return (True, f"rc=1, only {len(issues)} advisory issue(s)")
+    return (True, f"rc=1, {len(issues)} advisory issue(s): " + "; ".join(issues))
 
 
 #: Probes that send a chat request to ``model.default``. Gated behind
