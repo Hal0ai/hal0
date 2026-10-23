@@ -485,6 +485,47 @@ export function useDenyApproval() {
   })
 }
 
+// ── Persona detail + activate ────────────────────────────────────────────────
+// GET  /api/agents/{id}/personas/{pid}           — full persona detail
+// POST /api/agents/{id}/personas/{pid}/activate  — make it the active persona
+// (src/hal0/api/agents/personas.py). Unlike the sidebar rollups above, a 404
+// here means the persona is genuinely gone, so the detail query throws and the
+// caller renders the error rather than a fabricated empty persona.
+
+export interface PersonaDetail {
+  id: string
+  display_name: string
+  summary: string
+  system_prompt: string
+  tools_allowed: string[]
+  memory_namespace: string
+  preferred_upstream: string
+  preferred_model: string
+  active: boolean
+}
+
+export function useAgentPersona(
+  agentId: string,
+  pid: string | null,
+  opts?: { enabled?: boolean },
+): UseQueryResult<PersonaDetail> {
+  return useQuery<PersonaDetail>({
+    // Nested under ['agents','personas',agentId] so activating or editing a
+    // persona (both invalidate that prefix) also refreshes the open detail.
+    queryKey: ['agents', 'personas', agentId, pid],
+    queryFn: () => apiGet<PersonaDetail>(ENDPOINTS.agentPersona(agentId, pid as string)),
+    enabled: !!pid && (opts?.enabled ?? true),
+  })
+}
+
+export function usePersonaActivate(agentId: string) {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (pid: string) => apiPost<unknown>(ENDPOINTS.agentPersonaActivate(agentId, pid)),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['agents', 'personas', agentId] }),
+  })
+}
+
 // ── Persona update mutation ──────────────────────────────────────────────────
 // PUT /api/agents/{id}/personas/{pid} — built by backend-dev (#task7).
 // 404 degrades gracefully: hook throws so the modal can show an error toast.

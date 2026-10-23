@@ -184,6 +184,12 @@ export const ENDPOINTS = {
   // deployments, but that's a defensive floor, not the expected state.
   agentPersonas: (id: string) =>
     `/api/agents/${encodeURIComponent(id)}/personas`,
+  // One persona's full detail (GET) and its activation (POST).
+  // Backend: src/hal0/api/agents/personas.py.
+  agentPersona: (id: string, pid: string) =>
+    `/api/agents/${encodeURIComponent(id)}/personas/${encodeURIComponent(pid)}`,
+  agentPersonaActivate: (id: string, pid: string) =>
+    `/api/agents/${encodeURIComponent(id)}/personas/${encodeURIComponent(pid)}/activate`,
   // Restart the systemd unit backing an agent (POST → {status, detail}).
   // Backend: hal0.api.agents.restart — only "hermes" is a known id in v0.3.
   agentRestart: (id: string) =>
