@@ -233,28 +233,19 @@ def test_child_script_calls_the_stable_entry_point(monkeypatch: pytest.MonkeyPat
     assert "ceiling" not in script
 
 
-def test_a_1_3_child_script_still_imports_and_runs(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A 1.3.x updater's post-swap child imports PROFILE_CATALOG_SCHEMA_VERSION
-    from hal0.updater.updater and passes ``ceiling=``. Until no supported box
-    can run a 1.3.x updater, both must keep working against this tree."""
-    from hal0.updater.updater import PROFILE_CATALOG_SCHEMA_VERSION
+def test_the_1_3_child_script_shim_is_gone() -> None:
+    """The upgrade floor is >=1.4.0 from v1.6.0, so no supported box runs a 1.3.x
+    updater; the ``PROFILE_CATALOG_SCHEMA_VERSION`` re-export and the ``ceiling=``
+    parameter its post-swap child used are deleted (HAL0-SUNSET v1.6.0)."""
+    import inspect
 
-    seen: dict[str, Any] = {}
-
-    def _fake_config_migrations(min_data_version, *, job_id=None, ceiling=None):
-        seen["ceiling"] = ceiling
-        return (1, 1)
-
-    monkeypatch.setattr(updater_module, "_maybe_run_config_migrations", _fake_config_migrations)
-    monkeypatch.setattr(updater_module, "repair_hermes_mcp_client", lambda **_k: True)
-    monkeypatch.setattr(updater_module, "relabel_stale_vulkan_slots", lambda **_k: 0)
-    monkeypatch.setattr("hal0.components.runner.converge_components", lambda **_k: {}, raising=True)
-
-    result = updater_module.run_post_activation_migrations(
-        1, job_id="j", ceiling=PROFILE_CATALOG_SCHEMA_VERSION - 1
+    assert not hasattr(updater_module, "PROFILE_CATALOG_SCHEMA_VERSION")
+    assert (
+        "ceiling" not in inspect.signature(updater_module.run_post_activation_migrations).parameters
     )
-    assert result == (1, 1)
-    assert seen["ceiling"] == 1
+    assert (
+        "ceiling" not in inspect.signature(updater_module._maybe_run_config_migrations).parameters
+    )
 
 
 # ── B2: relay + pass_warnings ────────────────────────────────────────────────
@@ -404,7 +395,6 @@ def test_never_raises_on_internal_failure(monkeypatch: pytest.MonkeyPatch) -> No
     def _boom(
         *,
         job_id=None,
-        ceiling=None,
         skip_catalogue_sync=False,
         repair_hermes_venv=True,
         upgrade_memory_engine_venv=True,
@@ -423,7 +413,7 @@ def test_forwards_the_real_migration_result_on_success(monkeypatch: pytest.Monke
     monkeypatch.setattr(
         updater_module,
         "run_post_activation_migrations",
-        lambda *, job_id=None, ceiling=None, skip_catalogue_sync=False, repair_hermes_venv=True, upgrade_memory_engine_venv=True, converge_companions=True, honour_restore_marker=False, rerender_after_runner_conversion=False, fetch_model_bundles=True: (
+        lambda *, job_id=None, skip_catalogue_sync=False, repair_hermes_venv=True, upgrade_memory_engine_venv=True, converge_companions=True, honour_restore_marker=False, rerender_after_runner_conversion=False, fetch_model_bundles=True: (
             1,
             2,
         ),
@@ -441,7 +431,6 @@ def test_skips_the_catalogue_sync_pass(monkeypatch: pytest.MonkeyPatch) -> None:
     def _fake_migrations(
         *,
         job_id=None,
-        ceiling=None,
         skip_catalogue_sync=False,
         repair_hermes_venv=True,
         upgrade_memory_engine_venv=True,

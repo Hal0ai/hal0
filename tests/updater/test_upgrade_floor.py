@@ -56,9 +56,11 @@ def _shipped_floor() -> str:
 # ── the shipped floor ─────────────────────────────────────────────────────────
 
 
-def test_shipped_manifest_declares_the_1_3_floor() -> None:
-    """The floor is a deliberate operator decision: upgrades start at 1.3.0."""
-    assert _shipped_floor() == ">=1.3.0"
+def test_shipped_manifest_declares_the_1_4_floor() -> None:
+    """The floor is a deliberate operator decision: from v1.6.0 upgrades start at
+    1.4.0, so the 1.3.x updater's post-swap shim could be deleted. A 1.3.x box
+    hops through 1.5.0 (`hal0 update --target 1.5.0`) first."""
+    assert _shipped_floor() == ">=1.4.0"
 
 
 def test_release_workflow_copies_the_floor_into_every_channel_manifest() -> None:
@@ -70,7 +72,7 @@ def test_release_workflow_copies_the_floor_into_every_channel_manifest() -> None
 
 @pytest.mark.parametrize(
     "installed",
-    ["1.3.0", "1.3.1", "1.4.0", "1.4.0-rc.1", "1.4.0rc1", "1.4.0-nightly.20261011035008"],
+    ["1.4.0", "1.4.1", "1.5.0", "1.5.0-rc.1", "1.5.0rc1", "1.5.0-nightly.20261011035008"],
 )
 def test_releases_inside_the_window_are_admitted(installed: str) -> None:
     _enforce_upgrade_floor(_manifest(_shipped_floor()), current=installed)
@@ -83,19 +85,21 @@ def test_releases_inside_the_window_are_admitted(installed: str) -> None:
         "1.0.0",
         "1.1.0",
         "1.2.0",
-        "1.3.0-rc.1",
+        "1.3.0",
+        "1.3.1",
+        "1.4.0-rc.1",
         "1.0.0-nightly.20260801120000",
         "1.0.0-nightly.20260801",
     ],
 )
-def test_below_the_1_3_floor_is_refused(installed: str) -> None:
+def test_below_the_1_4_floor_is_refused(installed: str) -> None:
     with pytest.raises(UpdateUpgradePathUnsupported) as ei:
         _enforce_upgrade_floor(_manifest(_shipped_floor()), current=installed)
     assert ei.value.details["installed_version"] == installed
-    assert ei.value.details["upgrade_from"] == ">=1.3.0"
+    assert ei.value.details["upgrade_from"] == ">=1.4.0"
     assert ei.value.details["target_version"] == "1.4.0"
     assert installed in str(ei.value)
-    assert ">=1.3.0" in str(ei.value)
+    assert ">=1.4.0" in str(ei.value)
     assert "reinstall" in ei.value.details["hint"]
 
 
@@ -122,7 +126,7 @@ def test_prepare_refuses_a_1_2_box_before_downloading(
     with pytest.raises(UpdateUpgradePathUnsupported) as ei:
         asyncio.run(Updater(channel="stable").prepare())
     assert ei.value.details["installed_version"] == "1.2.0"
-    assert ei.value.details["upgrade_from"] == ">=1.3.0"
+    assert ei.value.details["upgrade_from"] == ">=1.4.0"
 
 
 def test_nightly_maps_onto_a_dev_release_of_its_base() -> None:
@@ -150,4 +154,4 @@ def test_malformed_specifier_fails_open() -> None:
 
 
 def test_non_pep440_installed_version_fails_open() -> None:
-    _enforce_upgrade_floor(_manifest(">=1.3.0"), current="not-a-version")
+    _enforce_upgrade_floor(_manifest(">=1.4.0"), current="not-a-version")
