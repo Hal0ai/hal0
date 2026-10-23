@@ -101,6 +101,14 @@ non-critical failure and `2` on a critical one, which makes it a stricter
 post-install gate for scripting than `doctor verify`.
 </Aside>
 
+The installer runs its own short verify at the end (health, a structured-output
+probe, `hal0 update --check` and the memory engine). On a fresh install no
+model is bound yet, so the structured-output probe reports
+`structured-output probe skipped — no model bound yet` rather than a failure. It also
+skips, naming the state, when the slot it would hit is not loaded: the installer
+never loads a model just to test it. Re-run the installer after you bind and load
+a model to repeat the probe.
+
 ## If a step fails
 
 - **Health fails** — `systemctl status hal0-api`, then `journalctl -u hal0-api` for the crash reason.
