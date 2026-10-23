@@ -46,7 +46,11 @@ function MemError({ query, what, testid }) {
   );
 }
 
-const MEM_BANK_RE = /^[a-z0-9][a-z0-9_-]{0,127}$/i;
+// Mirrors routes/memory_admin.py's _BANK_RE: colons and dots are legal inside
+// an id (foreign agents mint `claude::<project>`, repo names carry dots —
+// `coding-agent::ultrareview-1.4`); a `..` run is refused there too.
+const MEM_BANK_RE = /^[a-z0-9][a-z0-9._:-]{0,127}$/i;
+const memBankIdOk = (id) => MEM_BANK_RE.test(id) && !id.includes('..');
 
 // ── New bank form ─────────────────────────────────────────────────────────────
 
@@ -61,8 +65,8 @@ function MemNewBankForm({ onClose }) {
   async function submit(e) {
     e.preventDefault();
     const id = bankId.trim();
-    if (!MEM_BANK_RE.test(id)) {
-      setError('Lowercase letters, digits, hyphens, underscores');
+    if (!memBankIdOk(id)) {
+      setError('Letters, digits, dots, colons, hyphens, underscores — no ".."');
       return;
     }
     setBusy(true);

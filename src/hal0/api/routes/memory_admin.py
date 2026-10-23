@@ -52,8 +52,14 @@ log = logging.getLogger(__name__)
 #: hindsight plugin's ``dynamicBankId`` mints ``claude::<project>`` and other
 #: stacks use ``global:hal0`` / ``private:claude``. Colons are legal in a URL
 #: path segment and carry no traversal risk, so they are allowed (after the
-#: first char); dots stay blocked (path tricks).
-_BANK_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_:-]{0,127}$")
+#: first char). Dots are allowed inside the id for the same reason — the
+#: hindsight coding-agent plugin names a bank after the repo, and repo names
+#: carry dots (``coding-agent::ultrareview-1.4``); blocking them meant such a
+#: bank could be browsed through the engine but never managed (or deleted)
+#: through hal0. The path-syntax shapes stay out: a leading dot (the regex
+#: wants an alphanumeric first char), a dot-only segment and any ``..`` run
+#: (:func:`_validate_segments`).
+_BANK_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,127}$")
 
 #: Sub-resource ids (documents, operations, entities, …) — UUIDs and slugs;
 #: dots allowed but never as a whole traversal segment.
@@ -109,7 +115,10 @@ def _client(request: Request) -> Any:
 def _validate_segments(path_params: dict[str, str]) -> dict[str, str]:
     for name, value in path_params.items():
         pattern = _BANK_RE if name == "bank_id" else _SEG_RE
-        if not pattern.match(value) or value.strip(".") == "":
+        # ``value`` is interpolated verbatim into the upstream path, so a
+        # ``..`` run is refused outright rather than trusted to the HTTP
+        # client's dot-segment handling.
+        if not pattern.match(value) or value.strip(".") == "" or ".." in value:
             raise BadRequest(
                 f"invalid {name}: {value!r}",
                 code="memory.invalid_bank" if name == "bank_id" else "memory.invalid_path",
