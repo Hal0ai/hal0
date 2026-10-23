@@ -929,7 +929,7 @@ function LoreTab({ identity, model }) {
             </div>
             <div className="atk-desc">{ab.desc}</div>
             <div className={"atk-unlock" + (unlocked ? " on" : "")}>
-              {unlocked ? "unlocked" : "locked · " + ((l && l.note) || "no live signal")}
+              {unlocked ? "unlocked" : (l && l.unknown ? "unverified · " : "locked · ") + ((l && l.note) || "no live signal")}
             </div>
           </div>
         );
