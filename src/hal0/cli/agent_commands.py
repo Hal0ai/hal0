@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 import typer
 from rich.console import Console
+from rich.markup import escape as _escape_markup
 from rich.panel import Panel
 from rich.table import Table
 
@@ -2149,15 +2150,27 @@ def agent_status(
         failures_cell = " ".join(failure_bits) or "—"
         details_blob = entry.get("details") or {}
         phase_failures = details_blob.get("failures") if isinstance(details_blob, dict) else None
+        phase_skipped = details_blob.get("skipped") if isinstance(details_blob, dict) else None
         if entry.get("reason"):
             detail = entry["reason"]
         elif phase_failures:
             shown = "; ".join(phase_failures[:2])
             more = len(phase_failures) - 2
             detail = f"{shown} (+{more} more)" if more > 0 else shown
+        elif phase_skipped:
+            # A skip is not a pass: say which probe skipped and why (a probe
+            # held back so it would not cold-load a model slot reads so here).
+            shown = "; ".join(phase_skipped[:2])
+            more = len(phase_skipped) - 2
+            detail = f"{shown} (+{more} more)" if more > 0 else shown
         else:
             detail = _json.dumps(details_blob)[:60]
-        table.add_row(phase, status_cell, failures_cell, entry.get("at", "—"), detail)
+        # Reasons, failures and skips are plain text from the provisioner, not
+        # Rich markup: ``[memory]`` in "could not read [memory] from hal0.toml"
+        # would otherwise be swallowed as a style tag.
+        table.add_row(
+            phase, status_cell, failures_cell, entry.get("at", "—"), _escape_markup(str(detail))
+        )
         if status == "warn":
             warn_phases.append(phase)
     console.print(table)

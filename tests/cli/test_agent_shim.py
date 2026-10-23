@@ -590,6 +590,74 @@ class TestCmdStatus:
         assert rc == 1
 
 
+class TestServeHeartbeat:
+    """The watchdog heartbeat probes with a longer timeout than start-up."""
+
+    def test_heartbeat_probe_waits_five_seconds(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """A dashboard slowed by host load is alive: the heartbeat's health
+        probe waits ``_HEARTBEAT_PROBE_TIMEOUT_S`` (5 s), not the 1 s default,
+        so a loaded host no longer costs the agent its watchdog pings."""
+        venv = tmp_path / "venv"
+        (venv / "bin").mkdir(parents=True)
+        (venv / "bin" / "hermes").write_text("#!/bin/sh\n")
+        cfg = _cfg(venv=venv, home=tmp_path)
+
+        class _Child:
+            returncode = 0
+
+            def __init__(self) -> None:
+                self._polls = 0
+
+            def poll(self) -> int | None:
+                # Alive for two heartbeat rounds, then exits.
+                self._polls += 1
+                return None if self._polls <= 2 else 0
+
+            def wait(self) -> int:
+                return 0
+
+        probes: list[float] = []
+        notified: list[str] = []
+
+        def _is_ready(_cfg: agent_shim.AgentConfig, *, timeout: float = 1.0) -> bool:
+            probes.append(timeout)
+            return True
+
+        monkeypatch.setattr(agent_shim, "_build_hermes_argv", lambda _c: ["hermes"])
+        monkeypatch.setattr(agent_shim, "_build_hermes_env", lambda _c: {})
+        monkeypatch.setattr(agent_shim, "_dashboard_ready_status", lambda _c: "up")
+        monkeypatch.setattr(agent_shim, "_runas_popen_extras", lambda _env: {})
+        monkeypatch.setattr(agent_shim.subprocess, "Popen", lambda *_a, **_k: _Child())
+        monkeypatch.setattr(agent_shim.signal, "signal", lambda *_a: None)
+        monkeypatch.setattr(agent_shim, "_wait_for_ready", lambda *_a: True)
+        monkeypatch.setattr(agent_shim, "_is_ready", _is_ready)
+        monkeypatch.setattr(agent_shim, "_sd_notify", lambda msg: notified.append(msg) or True)
+        monkeypatch.setattr(agent_shim.time, "sleep", lambda _s: None)
+
+        assert agent_shim.cmd_serve(cfg) == 0
+        assert agent_shim._HEARTBEAT_PROBE_TIMEOUT_S == 5.0
+        assert probes == [5.0, 5.0]
+        assert notified.count("WATCHDOG=1\n") == 2
+
+    def test_startup_wait_keeps_the_one_second_probe(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Only the heartbeat waits longer; the start-up poll still uses 1 s."""
+        probes: list[float] = []
+
+        def _is_ready(_cfg: agent_shim.AgentConfig, *, timeout: float = 1.0) -> bool:
+            probes.append(timeout)
+            return True
+
+        class _Child:
+            def poll(self) -> None:
+                return None
+
+        monkeypatch.setattr(agent_shim, "_is_ready", _is_ready)
+        assert agent_shim._wait_for_ready(_Child(), _cfg(), 5.0) is True  # type: ignore[arg-type]
+        assert probes == [1.0]
+
+
 class TestCmdStop:
     def test_idempotent_when_no_match(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(agent_shim, "_find_child_pids", lambda *_a, **_k: [])

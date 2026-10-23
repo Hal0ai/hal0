@@ -528,6 +528,13 @@ _READY_TIMEOUT_S = 90.0
 # Watchdog ping interval — half of the unit's WatchdogSec (60s) so a
 # single miss doesn't trip the watchdog.
 _WATCHDOG_INTERVAL_S = 25.0
+# Health-probe timeout for each heartbeat. Longer than the start-up wait's 1 s
+# poll: a dashboard slowed by host load (a big model loading next door) is
+# alive, and a 1 s probe let it miss two pings and get SIGABRTed. A healthy
+# loop still pings at most every 30 s (25 s sleep + 5 s probe), well inside
+# WatchdogSec=60, and a truly hung dashboard stops getting pings and is killed
+# within about a minute of hanging.
+_HEARTBEAT_PROBE_TIMEOUT_S = 5.0
 # SIGTERM → SIGKILL escalation window.
 _STOP_GRACE_S = 10.0
 
@@ -593,7 +600,7 @@ def cmd_serve(cfg: AgentConfig) -> int:
     # reachable; on either failure we let the loop exit and systemd
     # observe via WatchdogSec.
     while child.poll() is None:
-        if _is_ready(cfg):
+        if _is_ready(cfg, timeout=_HEARTBEAT_PROBE_TIMEOUT_S):
             _sd_notify("WATCHDOG=1\n")
         time.sleep(_WATCHDOG_INTERVAL_S)
 
