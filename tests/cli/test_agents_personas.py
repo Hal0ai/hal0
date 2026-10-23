@@ -71,38 +71,95 @@ def test_personas_show_missing_persona_exits_nonzero(
     assert result.exit_code != 0
 
 
-def test_personas_activate_writes_pointer_and_emits_status(
+def _stub_refresh(monkeypatch: pytest.MonkeyPatch, **fields: object) -> list[object]:
+    from hal0.agents import persona_live
+
+    calls: list[object] = []
+    result = {
+        "status": "applied",
+        "message": "Persona prompt written to Hermes's config.yaml; restarted.",
+        "changed": True,
+        "restarted": True,
+        "failed_units": [],
+        **fields,
+    }
+    monkeypatch.setattr(
+        persona_live, "refresh_persona_prompt", lambda root, **_kw: calls.append(root) or result
+    )
+    return calls
+
+
+def test_personas_activate_writes_pointer_and_applies_to_hermes(
     cli_runner: CliRunner,
     isolated_personas: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     P.seed_default_personas(agent_id="hermes-agent", root=isolated_personas)
-    # Hot-reload nudge is best-effort. Stub to return success so the test
-    # asserts the success path explicitly; the failure path lives in
-    # test_personas.py's activate test.
-    monkeypatch.setattr(P, "hermes_reload", lambda **_kw: (True, None))
+    calls = _stub_refresh(monkeypatch)
     result = cli_runner.invoke(agent_app, ["personas", "activate", "hal0-brain"])
     assert result.exit_code == 0
-    # active.txt now points at hal0-brain.
     assert (isolated_personas / P.ACTIVE_POINTER).read_text().strip() == "hal0-brain"
     assert "Activated" in result.stdout
     assert "Brain" in result.stdout
+    assert "written to Hermes" in result.stdout
+    assert calls == [isolated_personas]
+    # The retired claims must not come back.
+    assert "next Hermes restart" not in result.stdout
+    assert "nudge" not in result.stdout.lower()
 
 
-def test_personas_activate_failed_reload_warns_but_succeeds(
+def test_personas_activate_failed_apply_says_so_but_succeeds(
     cli_runner: CliRunner,
     isolated_personas: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """If Hermes isn't running the nudge fails but the activation
-    succeeds — the file write is the durable part."""
     P.seed_default_personas(agent_id="hermes-agent", root=isolated_personas)
-    monkeypatch.setattr(P, "hermes_reload", lambda **_kw: (False, "Connection refused"))
+    _stub_refresh(
+        monkeypatch,
+        status="failed",
+        message="Saved, but could not write Hermes's config.yaml: denied. The new prompt is "
+        "not live; run `sudo hal0 agent reprovision hermes --repair` to apply it.",
+    )
     result = cli_runner.invoke(agent_app, ["personas", "activate", "hal0-brain"])
     assert result.exit_code == 0
-    assert "Hot-reload nudge skipped" in result.stdout
-    # Activation still went through.
+    assert "not live" in result.stdout
+    assert "next Hermes restart" not in result.stdout
     assert (isolated_personas / P.ACTIVE_POINTER).read_text().strip() == "hal0-brain"
+
+
+def test_personas_activate_no_apply_leaves_hermes_alone(
+    cli_runner: CliRunner,
+    isolated_personas: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    P.seed_default_personas(agent_id="hermes-agent", root=isolated_personas)
+    calls = _stub_refresh(monkeypatch)
+    result = cli_runner.invoke(agent_app, ["personas", "activate", "hal0-brain", "--no-apply"])
+    assert result.exit_code == 0
+    assert calls == []
+    assert "Not applied" in result.stdout
+
+
+def test_personas_show_hides_steward_only_fields_for_other_personas(
+    cli_runner: CliRunner, isolated_personas: Path
+) -> None:
+    P.seed_default_personas(agent_id="hermes-agent", root=isolated_personas)
+    result = cli_runner.invoke(agent_app, ["personas", "show", "hermes"])
+    assert result.exit_code == 0
+    assert "preferred_model =" not in result.stdout
+    assert "allowed =" not in result.stdout
+    assert "steward-only" in result.stdout
+
+
+def test_personas_show_keeps_steward_only_fields_for_the_steward(
+    cli_runner: CliRunner, isolated_personas: Path
+) -> None:
+    P.seed_default_personas(agent_id="hermes-agent", root=isolated_personas)
+    result = cli_runner.invoke(agent_app, ["personas", "show", "hal0-brain"])
+    assert result.exit_code == 0
+    assert "preferred_model =" in result.stdout
+    assert "allowed =" in result.stdout
+    assert "steward-only" not in result.stdout
 
 
 def test_personas_activate_missing_persona_exits_nonzero(

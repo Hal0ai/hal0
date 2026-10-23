@@ -43,8 +43,9 @@ operator deletes the file. Its own system prompt and `preferred_model =
 "hal0/brain"` are what the brain actually runs on; the built-in system
 prompt baked into `hal0.brain.chat` is only a fallback, used when the
 persona TOML is missing or fails to parse. A persona's `tools_allowed` /
-approval policy narrows the brain's tool surface exactly the way it narrows
-Hermes's.
+approval policy narrows the brain's tool surface. `tools_allowed` and
+`preferred_model` are steward-only: Hermes does not enforce them for its own
+personas.
 
 <Aside type="note">
 The `brain` **slot's** `profile = "brain"` (in `installer/etc-hal0/slots/brain.toml`)

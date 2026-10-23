@@ -1,7 +1,8 @@
 """Persona endpoints for the bundled agents surface (v0.3 PR-4).
 
 Thin FastAPI wrapper around :mod:`hal0.agents.personas`. The persona TOML
-store + hot-reload nudge live in that module; this file is the HTTP
+store lives in that module and :mod:`hal0.agents.persona_live` makes an edit
+reach the running Hermes; this file is the HTTP
 shape the dashboard's persona picker (PR-8) + the ``hal0 agent persona``
 CLI (future) consume.
 
@@ -115,6 +116,19 @@ def _persona_detail(
         },
         "raw_toml": raw_toml,
     }
+
+
+async def _refresh_live(root: Path) -> dict[str, Any]:
+    """Render the active persona into Hermes's config.yaml and apply it.
+
+    Lazy import: :mod:`hal0.api` must not load Hermes code (GP15). The work is
+    blocking file and systemctl I/O, so it runs off the event loop.
+    """
+    import asyncio
+
+    from hal0.agents import persona_live
+
+    return await asyncio.to_thread(persona_live.refresh_persona_prompt, root)
 
 
 def _safe_error_message(exc: Exception) -> str:
@@ -321,7 +335,18 @@ async def update_agent_persona(
 
     log.info("persona.updated", agent_id=agent_id, persona_id=persona_id)
     active = personas_mod.get_active(root=root)
-    return _persona_detail(updated, raw_toml=raw_toml, active_id=active)
+    detail = _persona_detail(updated, raw_toml=raw_toml, active_id=active)
+    # Only the active persona's prompt and display name reach Hermes
+    # (config.yaml's agent.system_prompt), so only a change to them there is
+    # worth a re-render and restart (#2921).
+    prompt_changed = (
+        updated.system_prompt != existing.system_prompt
+        or updated.display_name != existing.display_name
+    )
+    detail["refresh"] = (
+        await _refresh_live(root) if persona_id == active and prompt_changed else None
+    )
+    return detail
 
 
 # ── POST /{agent_id}/personas/{persona_id}/activate ─────────────────────────
@@ -336,16 +361,18 @@ async def activate_agent_persona(
     """Swap the active persona for ``agent_id`` to ``persona_id``.
 
     Body shape ``{"reload": bool}``; ``reload`` defaults to ``true`` so
-    the dashboard's persona picker just POSTs an empty body and gets the
-    hot-reload nudge for free. ``reload=false`` writes ``active.txt``
-    but skips the JSON-RPC call — useful for batch tooling that wants
-    to flip the pointer without bothering a running Hermes process.
+    the dashboard's persona picker just POSTs an empty body and the new
+    prompt is rendered into Hermes's config.yaml and applied (#2850).
+    ``reload=false`` writes ``active.txt`` only — useful for batch tooling
+    that wants to flip the pointer without touching a running Hermes.
 
     Response carries the *previous* active persona id so the dashboard
-    can render an undo affordance. ``reloaded`` reflects the hot-reload
-    helper's success — ``false`` doesn't mean activation failed; it
-    just means the next message will use the new persona instead of
-    the in-flight one.
+    can render an undo affordance, and ``refresh``: ``{status, message,
+    changed, restarted, failed_units}`` (see
+    :func:`hal0.agents.persona_live.refresh_persona_prompt`), or ``null``
+    for ``reload=false``. A ``refresh.status`` of ``failed`` or
+    ``restart-failed`` doesn't mean activation failed; the pointer moved
+    but the running agent still has the old prompt, and ``message`` says so.
     """
     root = _resolve_agent(agent_id)
     do_reload = True
@@ -384,16 +411,14 @@ async def activate_agent_persona(
                 code="persona.activate_failed",
             ) from exc
 
-        hot_reload = result.get("hot_reload") or {}
         return {
             "agent_id": agent_id,
             "active": result.get("persona_id", persona_id),
             "previous": previous,
-            "reloaded": bool(hot_reload.get("ok")),
-            "reload_error": hot_reload.get("error"),
+            "refresh": await _refresh_live(root),
         }
 
-    # reload=false branch: write active.txt but DON'T nudge hermes.
+    # reload=false branch: write active.txt but leave Hermes alone.
     try:
         personas_mod.set_active(persona_id, root=root)
     except FileNotFoundError as exc:
@@ -407,6 +432,5 @@ async def activate_agent_persona(
         "agent_id": agent_id,
         "active": persona_id,
         "previous": previous,
-        "reloaded": False,
-        "reload_error": None,
+        "refresh": None,
     }

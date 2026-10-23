@@ -407,11 +407,24 @@ hal0 agent personas show <id>            # print a persona's TOML (good template
 hal0 agent personas activate <id>        # switch the active persona
 ```
 
-Activating writes the active pointer atomically. The persona's prompt reaches
-Hermes as `agent.system_prompt` in its `config.yaml` the next time hal0
-provisions the agent, so run `hal0 agent reprovision hermes` after switching.
-A restart alone does not apply it. To author your own, copy `personas show`
-output, change the persona id, and save it under the persona store.
+Activating writes the active pointer atomically, renders the persona's prompt
+into Hermes's `config.yaml` as `agent.system_prompt`, and try-restarts the
+Hermes agent and gateway so new sessions use it. A unit you stopped stays
+stopped. The same happens when you edit the active persona's name or prompt in
+the dashboard (or `PUT /api/agents/hermes/personas/<id>`); editing a persona
+that is not active changes nothing in Hermes until you activate it. The command
+prints what was and was not applied. If the config could not be written (the
+command was not run with enough privilege to write the Hermes config), the
+pointer still moved but the prompt is not live; run
+`sudo hal0 agent reprovision hermes --repair` to apply it. `--no-apply` only
+moves the pointer. An `agent.system_prompt` in `overrides.yaml` wins over the
+persona prompt.
+
+`tools_allowed` and `preferred_model` are steward-only. Only the `hal0-brain`
+persona enforces them; Hermes ignores both, so the dashboard editor and
+`personas show` hide them for every other persona. To author your own, copy
+`personas show` output, change the persona id, and save it under the persona
+store.
 
 ## Connect accounts for OAuth skills
 

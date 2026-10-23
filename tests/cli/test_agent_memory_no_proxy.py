@@ -23,7 +23,7 @@ from typing import Any
 
 import pytest
 
-from hal0.agents import hermes_provision, personas
+from hal0.agents import hermes_provision
 from hal0.cli import agent_commands, agent_shim
 from hal0.mcp import admin
 from hal0.memory import engine_upgrade
@@ -128,14 +128,6 @@ def test_agent_shim_readiness_probe_bypasses_the_proxy(proxied: Any) -> None:
     )
 
     assert agent_shim._is_ready(cfg) is True
-    assert api.seen and proxy.seen == []
-
-
-def test_hermes_reload_nudge_bypasses_the_proxy(proxied: Any) -> None:
-    api, proxy = proxied
-    ok, err = personas.hermes_reload(url=f"{api.url}/rpc")
-
-    assert (ok, err) == (True, None)
     assert api.seen and proxy.seen == []
 
 
