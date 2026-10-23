@@ -1,19 +1,27 @@
-"""Restart endpoint for bundled agents (v0.3 PR-11).
+"""Restart endpoints for bundled agents (v0.3 PR-11).
 
-``POST /api/agents/{agent_id}/restart`` — wraps ``systemctl restart
-hal0-agent@{agent_id}.service``. Flagged as missing during PR-6/PR-8/PR-10
-integration: the sidecar agent block (SidebarAgentBlock) and the dashboard
-service-status chip both want a one-click "restart this agent" action that
-doesn't require dropping to a terminal.
+``POST /api/agents/{agent_id}/restart`` restarts ``hal0-agent@{agent_id}.service``
+and ``POST /api/agents/{agent_id}/gateway/restart`` restarts the Hermes
+messaging gateway, ``hermes-gateway.service``. The sidebar agent block
+(SidebarAgentBlock), the dashboard service-status chip and the agent cards all
+want a one-click "restart this" action that doesn't require dropping to a
+terminal.
 
 Why a dedicated module
 ----------------------
-The action is small (one subprocess.run) but the security posture is
-non-trivial — restart is a state-mutation on a systemd unit, so it carries
-the same audit obligations as the rest of the v0.3 agent surface. Keeping
-it in its own module lets the test seam (``hal0.api.agents.restart``)
-stay narrow and lets the audit-log invocation live alongside the
-subprocess call rather than getting tangled up with the lifecycle routes.
+Restart is a state-mutation on a systemd unit, so it carries the same audit
+obligations as the rest of the v0.3 agent surface. Keeping it in its own module
+lets the test seam (``hal0.api.agents.restart``) stay narrow and lets the
+audit-log invocation live alongside the unit call rather than getting tangled
+up with the lifecycle routes.
+
+Privilege
+---------
+hal0-api runs as the unprivileged ``hal0`` user, and a bare ``systemctl
+restart`` is denied by polkit on a provisioned box (#2913). The restart goes
+through :func:`hal0.services.systemd.unit_action`, which runs the verb through
+:class:`hal0.system.seam.SystemCtlSeam` — the same sudo-wrapped path the slot
+and companion-service restarts take.
 
 Resolution
 ----------
@@ -41,6 +49,7 @@ import structlog
 from fastapi import APIRouter, Request
 
 from hal0.errors import Hal0Error, NotFound
+from hal0.services.systemd import unit_action
 
 log = structlog.get_logger(__name__)
 audit_log = structlog.get_logger("hal0.agents.audit")
@@ -53,16 +62,19 @@ router = APIRouter()
 # emphasise the "membership check only" intent.
 _KNOWN_AGENT_IDS: Final[frozenset[str]] = frozenset({"hermes"})
 
-# Timeout for the systemctl call itself. systemctl has its own deadlines
-# (TimeoutStartSec/TimeoutStopSec in the unit file), but we add a wall
-# clock here so a wedged systemd-bus doesn't hang the API request
-# forever. 30s matches hal0-agent@.service's ``TimeoutStartSec=120``
-# floor plus a small margin — long enough for a normal restart, short
-# enough to fail fast on a broken host.
-SYSTEMCTL_TIMEOUT_SECONDS: Final[float] = 30.0
+#: The Hermes messaging gateway, restarted by its own route (the agent unit does
+#: not carry it). ``COMPANION_SERVICE_UNITS`` maps it to the wrapper's
+#: ``hermes-gateway`` service key.
+GATEWAY_UNIT: Final[str] = "hermes-gateway.service"
 
-# Timeout for the read-only ``is-active`` probe. Much tighter than the restart
-# budget above: this one runs on a POLLED route (``GET /api/agents``, 5s from
+#: ``unit_action`` reports a timeout as a failed result whose message says so
+#: (``<verb> <unit> failed: timed out after Ns``); the restart seam turns that
+#: back into ``agent.restart_timeout`` so callers can tell "outcome unknown"
+#: from a hard failure.
+_TIMED_OUT_MARKER: Final[str] = "timed out"
+
+# Timeout for the read-only ``is-active`` probe. Much tighter than a restart's
+# budget (``unit_action`` allows 90s): this one runs on a POLLED route (``GET /api/agents``, 5s from
 # the dashboard), so a wedged systemd bus must degrade to "unknown" fast rather
 # than hold a request open. ``is-active`` needs no polkit authorization and
 # does no unit work, so a healthy host answers in single-digit milliseconds.
@@ -73,8 +85,9 @@ def _systemctl_path() -> str | None:
     """Resolve ``systemctl`` on PATH.
 
     Returns ``None`` on hosts that don't have systemd (containers, CI
-    macOS runners, the hal0-dev VM when tested via Docker). The route
-    surfaces that as a 503 with a clear hint rather than a 500 trace.
+    macOS runners, the hal0-dev VM when tested via Docker). Used by the
+    read-only :func:`unit_is_active` probe; restarts go through
+    :func:`hal0.services.systemd.unit_action` instead.
     """
     return shutil.which("systemctl")
 
@@ -167,36 +180,47 @@ def _resolve_actor(request: Request) -> str:
 async def restart_agent(agent_id: str, request: Request) -> dict[str, str]:
     """Restart the systemd unit backing ``agent_id``.
 
-    Returns ``{status, detail}``:
+    Returns ``{agent_id, unit, status, detail}`` with ``status="restarted"``:
+    the restart verb returned success. The Hermes unit may still be coming up
+    (``Type=notify``); the dashboard polls the service-status chip after this to
+    converge.
 
-    * ``status="restarted"`` — systemctl returned 0; the unit was
-      stopped then restarted. Caller's next ``GET`` of the agent's
-      status surface will show the new uptime.
-    * ``status="restarting"`` — systemctl returned 0 BUT the unit is
-      ``Type=notify`` (per the template); the start handshake is
-      in-flight. The dashboard polls the service-status chip after this
-      to converge.
-    * ``status="error"`` — systemctl returned non-zero. ``detail``
-      carries the trimmed stderr line so the dashboard can render a
-      toast. The HTTP response stays 500 via :class:`Hal0Error` so the
-      envelope middleware renders consistently.
+    A failed restart raises :class:`Hal0Error` (HTTP 500 via the envelope
+    middleware, the message carrying the failure line for the dashboard toast):
+
+    * ``code="agent.restart_failed"`` — the verb failed (no systemctl on the
+      host, a spawn failure, a non-zero exit, a refused privilege grant).
+    * ``code="agent.restart_timeout"`` — the verb did not finish in time.
 
     Validation
     ----------
     * Unknown ``agent_id`` → 404 with ``code="agent.unknown"`` (mirrors
       :func:`hal0.api.agents.personas._resolve_agent`).
-    * Missing ``systemctl`` on host → 503 (Hal0Error) with
-      ``code="agent.systemctl_unavailable"``.
-    * Timeout → 504-equivalent Hal0Error with
-      ``code="agent.restart_timeout"``.
 
     Idempotency
     -----------
     ``systemctl restart`` is safe to call on a stopped unit (it starts
     it). The route doesn't pre-check ``is-active`` because the result
     is identical: the caller wanted the unit running and now it is (or
-    failed to start, surfaced as ``error``).
+    failed to start, surfaced as an error).
     """
+    _require_known_agent(agent_id)
+    return await restart_agent_unit(agent_id, actor=_resolve_actor(request))
+
+
+@router.post("/{agent_id}/gateway/restart")
+async def restart_gateway(agent_id: str, request: Request) -> dict[str, str]:
+    """Restart ``hermes-gateway.service``, the messaging gateway of ``agent_id``.
+
+    Same contract as :func:`restart_agent` (including the 404 for an unknown
+    agent and the ``agent.restart_failed`` / ``agent.restart_timeout`` errors),
+    with ``unit="hermes-gateway.service"``.
+    """
+    _require_known_agent(agent_id)
+    return await restart_gateway_unit(agent_id, actor=_resolve_actor(request))
+
+
+def _require_known_agent(agent_id: str) -> None:
     if agent_id not in _KNOWN_AGENT_IDS:
         raise NotFound(
             f"unknown agent {agent_id!r}",
@@ -204,28 +228,36 @@ async def restart_agent(agent_id: str, request: Request) -> dict[str, str]:
             details={"agent_id": agent_id},
         )
 
-    return await restart_agent_unit(agent_id, actor=_resolve_actor(request))
+
+async def _restart_unit(agent_id: str, unit: str) -> str:
+    """Restart ``unit`` through the systemctl seam; return the success detail.
+
+    Raises :class:`~hal0.errors.Hal0Error` when the restart did not succeed:
+    ``agent.restart_timeout`` for a timeout, ``agent.restart_failed`` for
+    everything else. ``unit_action`` reports runtime failures in its result
+    rather than raising, so this is the one place they become errors.
+    """
+    result = await unit_action(unit, "restart")
+    message = str(result.get("message", ""))
+    if result.get("ok"):
+        return message or f"restart {unit}: ok"
+
+    details = {"agent_id": agent_id, "unit": unit}
+    if _TIMED_OUT_MARKER in message:
+        raise Hal0Error(message, code="agent.restart_timeout", details=details)
+    raise Hal0Error(
+        message or f"restart {unit} failed", code="agent.restart_failed", details=details
+    )
 
 
 async def restart_agent_unit(agent_id: str, *, actor: str) -> dict[str, str]:
-    """Run ``systemctl restart hal0-agent@{agent_id}.service`` and audit it.
+    """Restart ``hal0-agent@{agent_id}.service`` through the seam and audit it.
 
     The body of :func:`restart_agent`, shared with routes that restart the
     agent after changing its config (``command_approvals``). Raises
-    :class:`~hal0.errors.Hal0Error` on every failure (no systemctl, spawn
-    failure, timeout, non-zero exit); returns ``{agent_id, unit, status,
-    detail}`` on success. The caller validates ``agent_id``.
+    :class:`~hal0.errors.Hal0Error` on every failure; returns ``{agent_id,
+    unit, status, detail}`` on success. The caller validates ``agent_id``.
     """
-    systemctl = _systemctl_path()
-    if systemctl is None:
-        # 503-equivalent. Surfaces as a clear "host doesn't have systemd"
-        # rather than a generic 500 trace.
-        raise Hal0Error(
-            "systemctl not available on this host; cannot restart agent",
-            code="agent.systemctl_unavailable",
-            details={"agent_id": agent_id},
-        )
-
     unit = _unit_name(agent_id)
 
     audit_log.info(
@@ -235,100 +267,76 @@ async def restart_agent_unit(agent_id: str, *, actor: str) -> dict[str, str]:
         actor=actor,
     )
 
-    cmd = [systemctl, "restart", unit]
     try:
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-    except (OSError, FileNotFoundError) as exc:
+        detail = await _restart_unit(agent_id, unit)
+    except Hal0Error as exc:
         audit_log.warning(
-            "agent.restart.spawn_failed",
+            "agent.restart.timeout"
+            if exc.code == "agent.restart_timeout"
+            else "agent.restart.failed",
             agent_id=agent_id,
             unit=unit,
             actor=actor,
             error=str(exc),
         )
-        raise Hal0Error(
-            f"failed to spawn systemctl: {exc}",
-            code="agent.restart_failed",
-            details={"agent_id": agent_id, "unit": unit},
-        ) from exc
-
-    try:
-        stdout_bytes, stderr_bytes = await asyncio.wait_for(
-            proc.communicate(),
-            timeout=SYSTEMCTL_TIMEOUT_SECONDS,
-        )
-    except TimeoutError as exc:
-        with contextlib.suppress(ProcessLookupError, OSError):
-            proc.kill()
-        audit_log.warning(
-            "agent.restart.timeout",
-            agent_id=agent_id,
-            unit=unit,
-            actor=actor,
-            timeout_s=SYSTEMCTL_TIMEOUT_SECONDS,
-        )
-        raise Hal0Error(
-            f"systemctl restart {unit} timed out after {SYSTEMCTL_TIMEOUT_SECONDS}s",
-            code="agent.restart_timeout",
-            details={"agent_id": agent_id, "unit": unit},
-        ) from exc
-
-    rc = proc.returncode or 0
-    stderr_text = (stderr_bytes or b"").decode("utf-8", errors="replace").strip()
-    stdout_text = (stdout_bytes or b"").decode("utf-8", errors="replace").strip()
-
-    if rc != 0:
-        audit_log.warning(
-            "agent.restart.failed",
-            agent_id=agent_id,
-            unit=unit,
-            actor=actor,
-            returncode=rc,
-            stderr=stderr_text,
-        )
-        # Use a Hal0Error rather than letting the caller see raw stderr —
-        # the envelope middleware renders this as a 500 with the stable
-        # ``code`` set. Trim stderr to the first 200 chars to keep the
-        # response bounded.
-        raise Hal0Error(
-            f"systemctl restart {unit} failed (rc={rc}): {stderr_text[:200] or '<no stderr>'}",
-            code="agent.restart_failed",
-            details={
-                "agent_id": agent_id,
-                "unit": unit,
-                "returncode": rc,
-                "stderr": stderr_text[:200],
-            },
-        )
-
-    # systemctl restart returns 0 immediately for Type=notify units once
-    # the ExecStart command has been spawned; the unit may still be in
-    # ``activating`` state. The dashboard polls the chip after this so
-    # we don't need to block waiting for ``active``. Report
-    # "restarting" when stdout/stderr suggest the activation is still
-    # in flight; otherwise "restarted".
-    status = "restarted"
-    detail = stdout_text or f"systemctl restart {unit} returned 0"
-    if "activating" in stderr_text.lower() or "queued" in stderr_text.lower():
-        status = "restarting"
-        detail = stderr_text
+        raise
 
     audit_log.info(
         "agent.restart.ok",
         agent_id=agent_id,
         unit=unit,
         actor=actor,
-        status=status,
+        status="restarted",
     )
 
     return {
         "agent_id": agent_id,
         "unit": unit,
-        "status": status,
+        "status": "restarted",
+        "detail": detail,
+    }
+
+
+async def restart_gateway_unit(agent_id: str, *, actor: str) -> dict[str, str]:
+    """Restart ``hermes-gateway.service`` through the seam and audit it.
+
+    Emits ``agent.gateway_restart.invoked`` then ``agent.gateway_restart.finished``
+    (``status`` = ``restarted`` or ``error``) on the audit logger. Raises
+    :class:`~hal0.errors.Hal0Error` on failure, after the ``finished`` event.
+    The caller validates ``agent_id``.
+    """
+    audit_log.info(
+        "agent.gateway_restart.invoked",
+        agent_id=agent_id,
+        unit=GATEWAY_UNIT,
+        actor=actor,
+    )
+
+    try:
+        detail = await _restart_unit(agent_id, GATEWAY_UNIT)
+    except Hal0Error as exc:
+        audit_log.warning(
+            "agent.gateway_restart.finished",
+            agent_id=agent_id,
+            unit=GATEWAY_UNIT,
+            actor=actor,
+            status="error",
+            error=str(exc),
+        )
+        raise
+
+    audit_log.info(
+        "agent.gateway_restart.finished",
+        agent_id=agent_id,
+        unit=GATEWAY_UNIT,
+        actor=actor,
+        status="restarted",
+    )
+
+    return {
+        "agent_id": agent_id,
+        "unit": GATEWAY_UNIT,
+        "status": "restarted",
         "detail": detail,
     }
 
@@ -337,4 +345,11 @@ async def restart_agent_unit(agent_id: str, *, actor: str) -> dict[str, str]:
 # at module-internals via the underscore name.
 KNOWN_AGENT_IDS = _KNOWN_AGENT_IDS
 
-__all__ = ["KNOWN_AGENT_IDS", "restart_agent_unit", "router", "unit_is_active"]
+__all__ = [
+    "GATEWAY_UNIT",
+    "KNOWN_AGENT_IDS",
+    "restart_agent_unit",
+    "restart_gateway_unit",
+    "router",
+    "unit_is_active",
+]

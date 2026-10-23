@@ -270,6 +270,7 @@ def test_systemctl_foreign_unit_passes_through_even_as_hal0_user() -> None:
         ("hal0-openwebui.service", "start", ["svc-start", "openwebui"]),
         ("hindsight-api.service", "stop", ["svc-stop", "hindsight"]),
         ("hindsight-api.service", "enable", ["svc-enable", "hindsight"]),
+        ("hermes-gateway.service", "restart", ["svc-restart", "hermes-gateway"]),
     ],
 )
 def test_systemctl_routes_agent_and_companion_units_through_seam(

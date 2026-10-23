@@ -96,6 +96,10 @@ AGENT_UNIT_VERBS: dict[str, str] = {
 COMPANION_SERVICE_UNITS: dict[str, str] = {
     "hal0-openwebui.service": "openwebui",
     "hindsight-api.service": "hindsight",
+    # The wrapper's svc-* map already carries this key (#1863); without the
+    # client-side spelling the unprivileged API's restart fell through to bare
+    # systemctl and polkit denied it (#2913).
+    "hermes-gateway.service": "hermes-gateway",
 }
 
 #: Fixed, literal drop-in the memory extraction slot / LLM timeout ride on
