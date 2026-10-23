@@ -90,6 +90,7 @@ def _reset_cache() -> None:
     overview_route._cache.clear()
     overview_route._inflight.clear()
     overview_route._invalidated.clear()
+    overview_route._forget_platforms()
 
 
 @pytest.fixture(autouse=True)
@@ -844,3 +845,327 @@ def test_overview_unreadable_gateway_unit_row_offers_no_fix(client_ready, monkey
         "status": "unreadable",
         "detail": "cannot read the Hermes home",
     } in body["doctor"]
+
+
+# ── a build that takes too long ──────────────────────────────────────────────
+
+
+def _hang_gather(monkeypatch: pytest.MonkeyPatch, calls: list[str]) -> None:
+    """The Hermes gather never finishes (a wedged ``sudo``, a hung ``systemctl``)."""
+
+    async def _hang(request: Any) -> dict[str, Any]:
+        calls.append("gather")
+        await asyncio.sleep(60)
+        raise AssertionError("the build timeout did not cancel the gather")
+
+    monkeypatch.setattr(overview_route, "_gather_hermes", _hang)
+    monkeypatch.setattr(overview_route, "_BUILD_TIMEOUT_S", 0.05)
+
+
+def test_overview_build_timeout_answers_a_neutral_partial_overview(client_ready, monkeypatch):
+    calls: list[str] = []
+    _hang_gather(monkeypatch, calls)
+
+    r = client_ready.get("/api/agents/hermes/overview")
+
+    assert r.status_code == 200
+    body = r.json()
+    assert body["partial"] is True
+    assert body["phase"] == "unknown"
+    assert body["installed"] is True and body["status"] == "installed"
+    assert body["name"] == "hermes" and body["kind"] == "daemon"
+    assert body["generated_at"].endswith("Z")
+    # The live half is still answered, from the unit probe and the queue.
+    assert body["unit_active"] is True
+    assert body["units"] == {"agent": "active", "gateway": "unknown", "gateway_enabled": None}
+    assert body["approvals"] == {"mode": None, "effective": None, "in_sync": None, "pending": 0}
+    assert body["job"] is None
+    # Nothing the slow half would have said is claimed.
+    assert body["api_server"] == {"endpoint": None, "healthy": None, "profiles": []}
+    assert body["platforms"] == [] and body["doctor"] == [] and body["degraded"] == []
+    assert body["version"]["live"] is None and body["version"]["update_available"] is False
+    assert body["provision"]["present"] is False
+    assert body["memory"] == {"available": False, "writes": None, "last_write": None}
+    assert calls == ["gather"]
+
+
+def test_overview_build_timeout_is_cached_for_the_normal_ttl(client_ready, monkeypatch):
+    clock = [1000.0]
+    monkeypatch.setattr(overview_route, "_now", lambda: clock[0])
+    calls: list[str] = []
+    _hang_gather(monkeypatch, calls)
+
+    first = client_ready.get("/api/agents/hermes/overview").json()
+    clock[0] += overview_route._CACHE_TTL_S - 0.1
+    second = client_ready.get("/api/agents/hermes/overview").json()
+
+    assert calls == ["gather"]  # the next poll did not stall again
+    assert second == first
+    clock[0] += 0.2
+    assert client_ready.get("/api/agents/hermes/overview").json()["partial"] is True
+    assert calls == ["gather", "gather"]
+
+
+def test_overview_refresh_after_a_timeout_builds_the_real_thing(
+    client_ready, monkeypatch, probe_calls
+):
+    real_gather = overview_route._gather_hermes
+    _hang_gather(monkeypatch, [])
+    assert client_ready.get("/api/agents/hermes/overview").json()["partial"] is True
+
+    monkeypatch.setattr(overview_route, "_gather_hermes", real_gather)
+    body = client_ready.get("/api/agents/hermes/overview?refresh=1").json()
+
+    assert "partial" not in body and body["phase"] == "ready"
+    assert body["platforms"] == ["api_server", "telegram"]
+
+
+def test_overview_a_normal_build_is_not_marked_partial(client_ready):
+    assert "partial" not in client_ready.get("/api/agents/hermes/overview").json()
+
+
+def test_overview_neutral_overview_has_the_shape_of_a_real_one(client_ready, monkeypatch):
+    real = client_ready.get("/api/agents/hermes/overview").json()
+    _reset_cache()
+    _hang_gather(monkeypatch, [])
+    neutral = client_ready.get("/api/agents/hermes/overview").json()
+
+    assert set(neutral) == set(real) | {"partial"}
+    for key in ("version", "provision", "api_server", "approvals", "memory", "links", "units"):
+        assert set(neutral[key]) == set(real[key]), key
+
+
+def test_overview_timed_out_build_still_shows_a_running_job(client_ready, monkeypatch):
+    jobs = {"j": {"id": "j", "state": "running", "phase": "repair:hermes", "created_at": 1.0}}
+    client_ready.app.state.update_jobs = jobs
+    _hang_gather(monkeypatch, [])
+
+    body = client_ready.get("/api/agents/hermes/overview").json()
+
+    assert body["partial"] is True and body["phase"] == "working"
+    assert body["job"] == {"id": "j", "kind": "repair", "state": "running"}
+
+
+def test_overview_timed_out_build_still_shows_a_stopped_unit(client_ready, monkeypatch):
+    async def _inactive(agent_id: str) -> bool:
+        return False
+
+    monkeypatch.setattr(overview_route, "unit_is_active", _inactive)
+    _hang_gather(monkeypatch, [])
+
+    body = client_ready.get("/api/agents/hermes/overview").json()
+
+    assert body["partial"] is True and body["phase"] == "down"
+
+
+def test_overview_waiters_share_the_timed_out_build(client_ready, monkeypatch):
+    manager = _CountingManager([_record("hermes")])
+    monkeypatch.setattr(agents_routes, "_manager", lambda: manager)
+    entered = threading.Event()
+    calls: list[str] = []
+
+    async def _hang(request: Any) -> dict[str, Any]:
+        calls.append("gather")
+        entered.set()
+        await asyncio.sleep(60)
+        raise AssertionError("the build timeout did not cancel the gather")
+
+    monkeypatch.setattr(overview_route, "_gather_hermes", _hang)
+    monkeypatch.setattr(overview_route, "_BUILD_TIMEOUT_S", 1.5)
+    with ThreadPoolExecutor(2) as pool:
+        first = pool.submit(client_ready.get, "/api/agents/hermes/overview")
+        assert entered.wait(10)
+        second = pool.submit(client_ready.get, "/api/agents/hermes/overview")
+        assert manager.second_call.wait(10)
+        bodies = [f.result(timeout=20).json() for f in (first, second)]
+
+    assert calls == ["gather"]
+    assert bodies[0] == bodies[1] and bodies[0]["partial"] is True
+
+
+def test_overview_pi_build_timeout_answers_a_neutral_partial_overview(client_pi, monkeypatch):
+    async def _hang() -> dict[str, Any]:
+        await asyncio.sleep(60)
+        raise AssertionError("the build timeout did not cancel the gather")
+
+    monkeypatch.setattr(overview_route, "_gather_pi", _hang)
+    monkeypatch.setattr(overview_route, "_BUILD_TIMEOUT_S", 0.05)
+
+    body = client_pi.get("/api/agents/pi/overview").json()
+
+    assert body["partial"] is True and body["installed"] is True
+    assert body["phase"] == "installed" and body["status"] == "installed"
+    assert body["version"] == {"installed": None, "pin": None, "update_available": False}
+    assert body["profile"]["checks"] == []
+    assert body["commands"]["upgrade"] == "sudo hal0 agent upgrade pi"
+    assert body["generated_at"].endswith("Z")
+
+
+# ── the platform-names probe ─────────────────────────────────────────────────
+
+
+@pytest.fixture
+def platform_probe(monkeypatch: pytest.MonkeyPatch) -> list[tuple[Any, ...]]:
+    """Count the vault reads; each build that reaches the probe appends its arguments."""
+    calls: list[tuple[Any, ...]] = []
+
+    def _names(home, secrets_env, *, seam=None):
+        calls.append((home, secrets_env, seam))
+        return ["api_server", "telegram"]
+
+    monkeypatch.setattr(overview_route, "configured_platform_names", _names)
+    return calls
+
+
+def _expire_overview_cache(clock: list[float]) -> None:
+    clock[0] += overview_route._CACHE_TTL_S + 1
+
+
+def test_overview_platform_names_are_probed_once_per_five_minutes(
+    client_ready, monkeypatch, platform_probe
+):
+    clock = [1000.0]
+    monkeypatch.setattr(overview_route, "_now", lambda: clock[0])
+    assert overview_route._PLATFORMS_TTL_S == 300.0
+
+    first = client_ready.get("/api/agents/hermes/overview").json()
+    _expire_overview_cache(clock)  # a second build, 31 s on
+    second = client_ready.get("/api/agents/hermes/overview").json()
+
+    assert len(platform_probe) == 1
+    assert first["platforms"] == second["platforms"] == ["api_server", "telegram"]
+    clock[0] = 1000.0 + 301
+    client_ready.get("/api/agents/hermes/overview")
+    assert len(platform_probe) == 2
+
+
+def test_overview_platform_names_are_reused_until_the_ttl_edge(
+    client_ready, monkeypatch, platform_probe
+):
+    clock = [1000.0]
+    monkeypatch.setattr(overview_route, "_now", lambda: clock[0])
+    client_ready.get("/api/agents/hermes/overview")
+    clock[0] = 1000.0 + 299.9
+    client_ready.get("/api/agents/hermes/overview")
+    assert len(platform_probe) == 1
+
+
+def test_overview_invalidate_forces_a_platform_probe(client_ready, monkeypatch, platform_probe):
+    client_ready.get("/api/agents/hermes/overview")
+    overview_route.invalidate("pi")  # another agent's invalidation leaves it alone
+    client_ready.get("/api/agents/hermes/overview")
+    assert len(platform_probe) == 1
+
+    overview_route.invalidate("hermes")
+    client_ready.get("/api/agents/hermes/overview")
+    assert len(platform_probe) == 2
+
+
+def test_overview_refresh_forces_a_platform_probe(client_ready, platform_probe):
+    client_ready.get("/api/agents/hermes/overview")
+    client_ready.get("/api/agents/hermes/overview?refresh=1")
+    assert len(platform_probe) == 2
+
+
+def test_overview_a_failed_platform_probe_is_not_cached(client_ready, monkeypatch):
+    clock = [1000.0]
+    monkeypatch.setattr(overview_route, "_now", lambda: clock[0])
+    calls: list[int] = []
+
+    def _flaky(home, secrets_env, *, seam=None):
+        calls.append(1)
+        if len(calls) == 1:
+            raise OSError("sudo: a password is required")
+        return ["telegram"]
+
+    monkeypatch.setattr(overview_route, "configured_platform_names", _flaky)
+
+    assert client_ready.get("/api/agents/hermes/overview").json()["platforms"] == []
+    _expire_overview_cache(clock)
+    assert client_ready.get("/api/agents/hermes/overview").json()["platforms"] == ["telegram"]
+    assert len(calls) == 2
+
+
+def test_overview_platform_cache_is_keyed_by_home_and_vault(monkeypatch, platform_probe):
+    async def _run() -> None:
+        await overview_route._platform_names(Path("/h1"), Path("/v"), None)
+        await overview_route._platform_names(Path("/h1"), Path("/v"), None)
+        await overview_route._platform_names(Path("/h2"), Path("/v"), None)
+        await overview_route._platform_names(Path("/h1"), None, None)
+
+    asyncio.run(_run())
+
+    assert [(home, vault) for home, vault, _seam in platform_probe] == [
+        (Path("/h1"), Path("/v")),
+        (Path("/h2"), Path("/v")),
+        (Path("/h1"), None),
+    ]
+
+
+def test_overview_platform_names_are_returned_as_a_copy(monkeypatch, platform_probe):
+    async def _run() -> None:
+        names = await overview_route._platform_names(Path("/h"), Path("/v"), None)
+        names.append("mutated")
+        assert await overview_route._platform_names(Path("/h"), Path("/v"), None) == [
+            "api_server",
+            "telegram",
+        ]
+
+    asyncio.run(_run())
+
+
+def _stalling_probe(calls: list[int], started: threading.Event, release: threading.Event):
+    """A vault read whose first call stalls and answers ``old``; later calls answer ``fresh``."""
+
+    def _names(home, secrets_env, *, seam=None):
+        calls.append(1)
+        if len(calls) == 1:
+            started.set()
+            assert release.wait(10)
+            return ["old"]
+        return ["fresh"]
+
+    return _names
+
+
+def test_overview_a_platform_probe_running_during_invalidate_stores_nothing(monkeypatch):
+    calls: list[int] = []
+    started, release = threading.Event(), threading.Event()
+    monkeypatch.setattr(
+        overview_route, "configured_platform_names", _stalling_probe(calls, started, release)
+    )
+
+    async def _run() -> list[list[str]]:
+        task = asyncio.create_task(overview_route._platform_names(Path("/h"), Path("/v"), None))
+        await asyncio.to_thread(started.wait, 10)
+        overview_route.invalidate("hermes")  # the operator changed a platform meanwhile
+        release.set()
+        own = await task  # its own build still gets what it read
+        later = await overview_route._platform_names(Path("/h"), Path("/v"), None)
+        return [own, later]
+
+    own, later = asyncio.run(_run())
+
+    assert own == ["old"]
+    assert later == ["fresh"] and len(calls) == 2  # nothing stale was stored
+    assert [names for _stamp, names in overview_route._platforms_cache.values()] == [["fresh"]]
+
+
+def test_overview_a_platform_probe_running_during_refresh_stores_nothing(client_ready, monkeypatch):
+    manager = _CountingManager([_record("hermes")])
+    monkeypatch.setattr(agents_routes, "_manager", lambda: manager)
+    calls: list[int] = []
+    started, release = threading.Event(), threading.Event()
+    monkeypatch.setattr(
+        overview_route, "configured_platform_names", _stalling_probe(calls, started, release)
+    )
+    with ThreadPoolExecutor(2) as pool:
+        slow = pool.submit(client_ready.get, "/api/agents/hermes/overview")
+        assert started.wait(10)
+        refreshed = pool.submit(client_ready.get, "/api/agents/hermes/overview?refresh=1")
+        assert refreshed.result(timeout=20).json()["platforms"] == ["fresh"]
+        release.set()
+        assert slow.result(timeout=20).json()["platforms"] == ["old"]
+
+    # The stalled probe finished last; the platform cache still holds the refresh's.
+    assert [names for _stamp, names in overview_route._platforms_cache.values()] == [["fresh"]]

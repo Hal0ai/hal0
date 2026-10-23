@@ -475,6 +475,25 @@ def test_repair_invalidates_the_overview_once_the_job_is_registered(
     _drain_background(client)
 
 
+def test_repair_does_not_invalidate_the_overview_when_it_is_refused(
+    app_client: tuple[FastAPI, TestClient], layout: Layout, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A 404 and a 409 change nothing the card shows."""
+    app, client = app_client
+    _spawn_ok(monkeypatch)
+    seen: list[str] = []
+    monkeypatch.setattr(overview_route, "invalidate", seen.append)
+
+    assert client.post("/api/agents/nope/repair").status_code == 404
+    app.state.update_jobs = {"j1": {"id": "j1", "state": "running", "phase": "converge:hermes"}}
+    assert client.post("/api/agents/hermes/repair").status_code == 409
+    app.state.update_jobs = {}
+    with builder_lock(layout, caller="cli", wait=False):
+        assert client.post("/api/agents/hermes/repair").status_code == 409
+
+    assert seen == []
+
+
 def test_repair_audits(
     agents_client: TestClient, log_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

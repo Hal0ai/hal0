@@ -208,7 +208,9 @@ async def restart_agent(agent_id: str, request: Request) -> dict[str, str]:
     failed to start, surfaced as an error).
     """
     _require_known_agent(agent_id, _KNOWN_AGENT_IDS)
-    return await restart_agent_unit(agent_id, actor=_resolve_actor(request))
+    result = await restart_agent_unit(agent_id, actor=_resolve_actor(request))
+    _forget_overview(agent_id)
+    return result
 
 
 @router.post("/{agent_id}/gateway/restart")
@@ -223,7 +225,9 @@ async def restart_gateway(agent_id: str, request: Request) -> dict[str, str]:
     """
     _require_known_agent(agent_id, _GATEWAY_AGENTS)
     require_installed(agent_id)
-    return await restart_gateway_unit(agent_id, actor=_resolve_actor(request))
+    result = await restart_gateway_unit(agent_id, actor=_resolve_actor(request))
+    _forget_overview(agent_id)
+    return result
 
 
 def _require_known_agent(agent_id: str, known: frozenset[str]) -> None:
@@ -250,6 +254,17 @@ def require_installed(agent_id: str) -> None:
             code="agent.not_installed",
             details={"agent_id": agent_id},
         )
+
+
+def _forget_overview(agent_id: str) -> None:
+    """Drop ``agent_id``'s cached overview after a restart that went through.
+
+    Imported here: the overview module imports this one (and no Hermes module may
+    load with ``hal0.api``, golden path GP15).
+    """
+    from hal0.api.agents.overview import invalidate
+
+    invalidate(agent_id)
 
 
 async def _restart_unit(agent_id: str, unit: str) -> str:

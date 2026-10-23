@@ -10,6 +10,8 @@ chip consume:
 * a timed-out restart -> 5xx envelope w/ ``code="agent.restart_timeout"``
 * unknown agent id -> 404 ``code="agent.unknown"``
 * the gateway route on a box without Hermes -> 404 ``code="agent.not_installed"``
+* a restart that went through drops the agent's cached overview; one that did
+  not, or was refused, leaves it alone
 
 The restart goes through :func:`hal0.services.systemd.unit_action`, which
 runs through the systemctl seam (#2913: hal0-api is unprivileged, and a bare
@@ -26,6 +28,7 @@ from unittest.mock import AsyncMock
 import pytest
 from fastapi.testclient import TestClient
 
+from hal0.api.agents import overview as overview_route
 from hal0.api.agents import restart as restart_route
 from hal0.api.routes import agents as agents_routes
 from hal0.errors import Hal0Error
@@ -338,6 +341,8 @@ def test_gateway_restart_404_when_hermes_is_not_installed(
     """No install record, no gateway: refused before the seam is touched."""
     _install(monkeypatch)
     ua = _patch_unit_action(monkeypatch)
+    seen: list[str] = []
+    monkeypatch.setattr(overview_route, "invalidate", seen.append)
 
     r = client.post("/api/agents/hermes/gateway/restart")
 
@@ -346,6 +351,7 @@ def test_gateway_restart_404_when_hermes_is_not_installed(
     assert error["code"] == "agent.not_installed"
     assert error["details"] == {"agent_id": "hermes"}
     ua.assert_not_awaited()
+    assert seen == []
 
 
 def test_restart_does_not_ask_whether_the_agent_is_installed(
@@ -357,3 +363,67 @@ def test_restart_does_not_ask_whether_the_agent_is_installed(
 
     assert client.post("/api/agents/hermes/restart").status_code == 200
     ua.assert_awaited_once_with(AGENT_UNIT, "restart")
+
+
+# ── the cached overview ──────────────────────────────────────────────────────
+
+
+def _spy_overview(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Record every ``overview.invalidate`` call, in order with the restart verb."""
+    events: list[str] = []
+
+    async def _unit_action(unit: str, verb: str) -> dict[str, Any]:
+        events.append(f"{verb} {unit}")
+        return {"ok": True, "timed_out": False, "message": "restarted"}
+
+    monkeypatch.setattr(restart_route, "unit_action", _unit_action)
+    monkeypatch.setattr(
+        overview_route, "invalidate", lambda name: events.append(f"invalidate {name}")
+    )
+    return events
+
+
+@pytest.mark.parametrize(
+    ("path", "unit"),
+    [
+        ("/api/agents/hermes/restart", AGENT_UNIT),
+        ("/api/agents/hermes/gateway/restart", GATEWAY_UNIT),
+    ],
+)
+def test_restart_invalidates_the_overview_once_the_seam_returned_ok(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, path: str, unit: str
+) -> None:
+    events = _spy_overview(monkeypatch)
+
+    assert client.post(path).status_code == 200
+
+    assert events == [f"restart {unit}", "invalidate hermes"]
+
+
+@pytest.mark.parametrize(
+    "path", ["/api/agents/hermes/restart", "/api/agents/hermes/gateway/restart"]
+)
+@pytest.mark.parametrize("timed_out", [False, True])
+def test_a_failed_restart_leaves_the_cached_overview_alone(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, path: str, timed_out: bool
+) -> None:
+    _patch_unit_action(monkeypatch, ok=False, message="denied", timed_out=timed_out)
+    seen: list[str] = []
+    monkeypatch.setattr(overview_route, "invalidate", seen.append)
+
+    assert client.post(path).status_code >= 500
+
+    assert seen == []
+
+
+@pytest.mark.parametrize("path", ["/api/agents/pi-coder/restart", "/api/agents/pi/gateway/restart"])
+def test_a_refused_restart_leaves_the_cached_overview_alone(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, path: str
+) -> None:
+    _patch_unit_action(monkeypatch)
+    seen: list[str] = []
+    monkeypatch.setattr(overview_route, "invalidate", seen.append)
+
+    assert client.post(path).status_code == 404
+
+    assert seen == []
