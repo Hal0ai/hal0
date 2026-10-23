@@ -6,6 +6,12 @@ counters and the Pi npm tree, then hands the results to the pure builders in
 :mod:`hal0.agents.overview`. Each external call is a module attribute here so
 tests replace it without touching systemd, the network or the real Hermes tree.
 
+No Hermes module is imported at module level. ``hal0.api`` builds the app, and so
+mounts this router, when it is imported, and the core import graph must stay
+Hermes-free (GP15, ``tests/golden_paths/test_gp15_no_hermes.py``). The seams that
+reach Hermes are thin functions below that import their module when called; they
+stay module attributes, which is what the tests replace.
+
 Nothing in this route may raise for a normal box state. Every gather and every
 builder call runs behind a guard that returns a neutral value ("unknown",
 empty, ``None``) and logs a warning, so a missing systemd, a stopped gateway,
@@ -36,44 +42,12 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Final
+from typing import TYPE_CHECKING, Any, Final
 
 import structlog
 from fastapi import APIRouter, Query, Request
 
 from hal0.agents import overview as builders
-from hal0.agents.hermes_api import (
-    DEFAULT_PROFILE,
-    api_server_endpoint,
-    authority,
-    gateway_alive,
-    hermes_home,
-    probe_status,
-    profile_dirs,
-    profile_health,
-)
-from hal0.agents.hermes_command_approvals import status as command_status
-from hal0.agents.hermes_doctor import (
-    check_hermes_gateway_unit,
-    check_hermes_ownership,
-    check_hermes_plugins,
-    check_hermes_sqlite,
-)
-from hal0.agents.hermes_platforms import configured_platform_names
-from hal0.agents.hermes_provision import (
-    _HAL0_AGENTENV,
-    _STATE_FILE_NAME,
-    HERMES_SECRETS_ENV,
-    HERMES_VENV_DEFAULT,
-)
-from hal0.agents.hermes_release import (
-    Layout,
-    Release,
-    _link_release_id,
-    live_release,
-    read_pin,
-    read_release,
-)
 from hal0.agents.manager import AgentManager, AgentRecord, agent_kind, installer_script_path
 from hal0.agents.pi_coder import PiDriver
 from hal0.agents.pi_coder.driver import _HINDSIGHT_API_URL
@@ -84,6 +58,9 @@ from hal0.api.routes.approvals import _queue
 from hal0.api.routes.updater import _update_jobs
 from hal0.components.status import component_status_snapshot
 from hal0.services.systemd import unit_state
+
+if TYPE_CHECKING:
+    from hal0.agents.hermes_release import Layout, Pin, Release
 
 log = structlog.get_logger(__name__)
 router = APIRouter()
@@ -201,6 +178,8 @@ def invalidate(name: str) -> None:
 
 def provision_path() -> Path:
     """Where the last Hermes provision run is recorded."""
+    from hal0.agents.hermes_provision import _STATE_FILE_NAME
+
     return AgentManager()._state_dir("hermes") / _STATE_FILE_NAME
 
 
@@ -222,8 +201,91 @@ def pi_marker_path() -> Path:
 
 def _previous_release(layout: Layout) -> Release | None:
     """The release ``previous`` names, when it is complete."""
+    from hal0.agents.hermes_release import _link_release_id, read_release
+
     rid = _link_release_id(layout.previous)
     return read_release(layout.releases / rid) if rid else None
+
+
+# ── Hermes seams ────────────────────────────────────────────────────────────
+#
+# Each imports its Hermes module on call (see the module docstring).
+
+
+def gateway_alive(home: Path, *, probe: Callable[[str], int] | None = None) -> bool:
+    from hal0.agents import hermes_api
+
+    return hermes_api.gateway_alive(home, probe=probe)
+
+
+def profile_dirs(home: Path) -> list[str]:
+    from hal0.agents import hermes_api
+
+    return hermes_api.profile_dirs(home)
+
+
+def profile_health(home: Path, profile: str, *, probe: Callable[[str], int] | None = None) -> int:
+    from hal0.agents import hermes_api
+
+    return hermes_api.profile_health(home, profile, probe=probe)
+
+
+def probe_status(url: str, *, timeout: float = 3.0) -> int:
+    from hal0.agents import hermes_api
+
+    return hermes_api.probe_status(url, timeout=timeout)
+
+
+def live_release(layout: Layout) -> Release | None:
+    from hal0.agents import hermes_release
+
+    return hermes_release.live_release(layout)
+
+
+def read_pin() -> Pin:
+    from hal0.agents import hermes_release
+
+    return hermes_release.read_pin()
+
+
+def command_status() -> dict[str, Any]:
+    from hal0.agents import hermes_command_approvals
+
+    return hermes_command_approvals.status()
+
+
+def check_hermes_sqlite() -> dict[str, str]:
+    from hal0.agents import hermes_doctor
+
+    return hermes_doctor.check_hermes_sqlite()
+
+
+def check_hermes_plugins() -> dict[str, str]:
+    from hal0.agents import hermes_doctor
+
+    return hermes_doctor.check_hermes_plugins()
+
+
+def check_hermes_ownership(
+    *, owner_of: Callable[[Path], str | None], exists: Callable[[Path], bool]
+) -> list[dict[str, str]]:
+    from hal0.agents import hermes_doctor
+
+    return hermes_doctor.check_hermes_ownership(owner_of=owner_of, exists=exists)
+
+
+def check_hermes_gateway_unit() -> dict[str, str]:
+    from hal0.agents import hermes_doctor
+
+    return hermes_doctor.check_hermes_gateway_unit()
+
+
+def configured_platform_names(
+    home: Path, secrets_env: Path | None, *, seam: str | None = None
+) -> list[str]:
+    from hal0.agents import hermes_platforms
+
+    return hermes_platforms.configured_platform_names(home, secrets_env, seam=seam)
 
 
 def _owner_of(path: Path) -> str | None:
@@ -336,6 +398,8 @@ def _read_provision() -> dict[str, Any] | None:
 
 def _endpoint(home: Path) -> str:
     """``host:port`` of the API server, from config. No network."""
+    from hal0.agents.hermes_api import api_server_endpoint, authority
+
     host, port = api_server_endpoint(home)
     return authority(host, port)
 
@@ -347,6 +411,8 @@ async def _api_health(home: Path) -> tuple[bool, list[str]]:
     probed at once, one thread per probe. Profiles are only reported while the
     gateway itself is healthy; ``default`` is always among them.
     """
+
+    from hal0.agents.hermes_api import DEFAULT_PROFILE
 
     def probe(url: str) -> int:
         return probe_status(url, timeout=_PROBE_TIMEOUT_S)
@@ -429,6 +495,14 @@ async def _gather_hermes(request: Request) -> dict[str, Any]:
     ``approvals.pending``, ``job``, ``phase``) are added per request by
     :func:`_overlay_hermes`.
     """
+    from hal0.agents.hermes_api import hermes_home
+    from hal0.agents.hermes_provision import (
+        _HAL0_AGENTENV,
+        HERMES_SECRETS_ENV,
+        HERMES_VENV_DEFAULT,
+    )
+    from hal0.agents.hermes_release import Layout
+
     home = hermes_home()
     layout = Layout.for_venv(HERMES_VENV_DEFAULT)
     seam = _HAL0_AGENTENV if os.geteuid() != 0 else None

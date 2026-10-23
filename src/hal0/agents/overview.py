@@ -13,12 +13,14 @@ import os
 import re
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from packaging.version import InvalidVersion, Version
 
-from hal0.agents.hermes_release import Release
 from hal0.components.status import _PENDING_STATUSES
+
+if TYPE_CHECKING:
+    from hal0.agents.hermes_release import Release
 
 
 def _live_dict(release: Release) -> dict[str, Any]:
