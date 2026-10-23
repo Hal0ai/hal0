@@ -557,13 +557,31 @@ def test_a_failed_write_leaves_the_suffixed_unit_running(tmp_path: Path, monkeyp
     assert not [c for c in sc.mutating if c[1] == "disable"]
 
 
-def test_a_failed_disable_removes_nothing(tmp_path: Path) -> None:
+def test_a_failed_disable_removes_nothing_and_a_retry_keeps_the_state(tmp_path: Path) -> None:
     hashed = _hashed_unit(tmp_path)
     sc = UnitSystemctl({HASHED: ("enabled", True)}, fail=["systemctl", "disable"])
     with pytest.raises(regen.GatewayRegenError, match="disable"):
         _migrate(tmp_path, sc)
     assert hashed.exists()
+    assert not (tmp_path / CANON).exists()  # rolled back, so a retry is a fresh migration
     assert not [c for c in sc.mutating if c[1] in ("enable", "start")]
+    sc.fail = None
+    _migrate(tmp_path, sc)
+    assert not hashed.exists() and sc.states[CANON] == ("enabled", True)
+
+
+def test_the_update_heal_with_no_loginctl_reports_but_succeeds(tmp_path: Path) -> None:
+    _hashed_unit(tmp_path)
+    sc = UnitSystemctl({HASHED: ("enabled", True)})
+    out = regen.regenerate_gateway_unit(
+        unit_path=tmp_path / CANON,
+        linger_dir=str(tmp_path),
+        run=sc,
+        uid_of=lambda name: UID,
+        which=lambda name: None if name == "loginctl" else f"/usr/bin/{name}",
+    )
+    assert out.action == "regenerated" and sc.states[CANON] == ("enabled", True)
+    assert "follow-up" in out.message
 
 
 def test_a_failed_unlink_still_hands_the_gateway_over(tmp_path: Path, monkeypatch: Any) -> None:

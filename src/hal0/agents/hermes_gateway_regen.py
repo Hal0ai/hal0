@@ -487,12 +487,23 @@ def migrate_hashed_units(
         _check(run, ["systemctl", "daemon-reload"], "systemctl daemon-reload", done)
     unlink_errors: list[str] = []
     for path in hashed:
-        _check(
-            run,
-            ["systemctl", "disable", "--now", path.name],
-            f"systemctl disable --now {path.name}",
-            done,
-        )
+        try:
+            _check(
+                run,
+                ["systemctl", "disable", "--now", path.name],
+                f"systemctl disable --now {path.name}",
+                done,
+            )
+        except GatewayRegenError:
+            # Roll back the canonical unit this run wrote: left on disk, a
+            # retry would read it as one that "already existed" and keep its
+            # (disabled) state instead of the suffixed unit's (#2946 review).
+            if not pre_existing:
+                with contextlib.suppress(OSError):
+                    unit_path.unlink()
+                with contextlib.suppress(OSError, subprocess.SubprocessError):
+                    _run(run, ["systemctl", "daemon-reload"])
+            raise
         try:
             path.unlink()
         except FileNotFoundError:
@@ -640,9 +651,14 @@ def regenerate_gateway_unit(
         unit_path=unit_path, linger_dir=linger_dir, run=run, uid_of=uid_of, which=which
     )
     if migrated.action == "migrated":
-        tail = regenerate_gateway_unit(
-            unit_path=unit_path, linger_dir=linger_dir, run=run, uid_of=uid_of, which=which
-        )
+        try:
+            tail = regenerate_gateway_unit(
+                unit_path=unit_path, linger_dir=linger_dir, run=run, uid_of=uid_of, which=which
+            )
+        except GatewayRegenError as exc:
+            # The migration itself succeeded (the gateway moved over); a
+            # follow-up such as linger with no loginctl is reported, not fatal.
+            tail = RegenResult("noop", "", steps=[f"follow-up: {exc}"])
         steps = [*migrated.steps, *tail.steps]
         return RegenResult(
             "regenerated",
