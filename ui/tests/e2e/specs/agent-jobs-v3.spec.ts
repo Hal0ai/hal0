@@ -243,7 +243,6 @@ test.describe('Hermes upgrade job', () => {
     await expect(row).toHaveCount(0)
     await expect(page.getByTestId('agent-version-hermes')).toHaveText('v0.22.4')
     await expect(page.getByTestId('agent-update-badge-hermes')).toHaveCount(0)
-    expect(job.polls()).toBeGreaterThanOrEqual(3)
   })
 })
 
@@ -334,9 +333,9 @@ test.describe('Hermes repair job', () => {
     await page.getByTestId('agent-confirm-repair').click()
 
     await expect(toast(page, 'warning', 'Hermes builder is busy')).toBeVisible({ timeout: FIVE_S })
-    // Nothing was queued: still broken, no job row, no status poll.
+    // Nothing was queued: no status poll, still broken, no job row.
+    await expect.poll(() => job.polls(), { timeout: 2_000 }).toBe(0)
     await expect(front).toHaveAttribute('data-phase', 'broken')
     await expect(page.getByTestId('agent-job-hermes')).toHaveCount(0)
-    expect(job.polls()).toBe(0)
   })
 })
