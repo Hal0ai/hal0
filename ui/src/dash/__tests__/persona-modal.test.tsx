@@ -60,12 +60,12 @@ const PersonaEditModal = (
 ).PersonaEditModal
 
 const PERSONA = {
-  id: 'coder',
+  id: 'hal0-brain',
   display_name: 'Coder',
   summary: '',
   system_prompt: 'Be terse',
   tools_allowed: ['read_file'],
-  memory_namespace: 'coder',
+  memory_namespace: 'hal0-brain',
   preferred_upstream: '',
   preferred_model: 'hal0/brain',
   active: false,
@@ -160,12 +160,12 @@ function saveButton(): HTMLButtonElement {
 
 beforeEach(() => {
   persona = { ...PERSONA }
-  list = { agent_id: 'hermes', active: 'coder', personas: [] }
+  list = { agent_id: 'hermes', active: 'hal0-brain', personas: [] }
   slotsBox.current = SLOTS
   apiGet.mockReset()
   apiPut.mockReset()
   apiGet.mockImplementation(async (path: string) => {
-    if (path === '/api/agents/hermes/personas/coder') return persona
+    if (path === '/api/agents/hermes/personas/hal0-brain') return persona
     if (path === '/api/agents/hermes/personas') return list
     throw new Error(`unexpected GET ${path}`)
   })
@@ -181,7 +181,7 @@ afterEach(() => {
 
 describe('PersonaEditModal', () => {
   it('loads the persona and saves only API fields', async () => {
-    mount(React.createElement(PersonaEditModal, { open: true, personaId: 'coder', onClose: () => {} }))
+    mount(React.createElement(PersonaEditModal, { open: true, personaId: 'hal0-brain', onClose: () => {} }))
     await settle()
 
     expect(byValue('Coder')).toBeTruthy()
@@ -203,10 +203,10 @@ describe('PersonaEditModal', () => {
     expect(patterns.value).toBe('read_file')
     expect(document.body.textContent).toContain(
       'One pattern per line, matched against MCP tool names; * allows every tool. ' +
-        'Enforced by the hal0-brain steward; Hermes applies changes on its next reprovision.',
+        'Steward-only: enforced for hal0-brain.',
     )
     expect(document.body.textContent).toContain(
-      'Saved to the persona file; Hermes applies prompt changes on its next reprovision.',
+      "Editing the active persona's name or prompt also updates Hermes's config and restarts it.",
     )
 
     typeIntoArea(patterns, 'read_file\nwrite_file')
@@ -214,7 +214,7 @@ describe('PersonaEditModal', () => {
     await settle()
 
     expect(apiPut).toHaveBeenCalledTimes(1)
-    expect(apiPut).toHaveBeenCalledWith('/api/agents/hermes/personas/coder', {
+    expect(apiPut).toHaveBeenCalledWith('/api/agents/hermes/personas/hal0-brain', {
       display_name: 'Coder',
       system_prompt: 'Be terse',
       tools_allowed: ['read_file', 'write_file'],
@@ -226,23 +226,23 @@ describe('PersonaEditModal', () => {
   })
 
   it('falls back to the active persona when no personaId is passed', async () => {
-    list = { agent_id: 'hermes', active: 'coder', personas: [] }
+    list = { agent_id: 'hermes', active: 'hal0-brain', personas: [] }
     mount(React.createElement(PersonaEditModal, { open: true, onClose: () => {} }))
     await settle()
 
     expect(apiGet).toHaveBeenCalledWith('/api/agents/hermes/personas')
-    expect(apiGet).toHaveBeenCalledWith('/api/agents/hermes/personas/coder')
+    expect(apiGet).toHaveBeenCalledWith('/api/agents/hermes/personas/hal0-brain')
     expect(byValue('Coder')).toBeTruthy()
     act(() => saveButton().click())
     await settle()
     expect(apiPut).toHaveBeenCalledWith(
-      '/api/agents/hermes/personas/coder',
+      '/api/agents/hermes/personas/hal0-brain',
       expect.objectContaining({ display_name: 'Coder' }),
     )
   })
 
   it('does not load anything while closed', async () => {
-    mount(React.createElement(PersonaEditModal, { open: false, personaId: 'coder', onClose: () => {} }))
+    mount(React.createElement(PersonaEditModal, { open: false, personaId: 'hal0-brain', onClose: () => {} }))
     await settle()
     expect(apiGet).not.toHaveBeenCalled()
     expect(document.querySelector('[role="dialog"]')).toBeNull()
@@ -256,18 +256,18 @@ describe('PersonaEditModal', () => {
 
   it('shows the load error and no form when the persona is gone', async () => {
     apiGet.mockImplementation(async (path: string) => {
-      if (path === '/api/agents/hermes/personas/coder') {
-        throw new Hal0Error("persona 'coder' not found", {
+      if (path === '/api/agents/hermes/personas/hal0-brain') {
+        throw new Hal0Error("persona 'hal0-brain' not found", {
           code: 'persona.not_found',
           status: 404,
         })
       }
       throw new Error(`unexpected GET ${path}`)
     })
-    mount(React.createElement(PersonaEditModal, { open: true, personaId: 'coder', onClose: () => {} }))
+    mount(React.createElement(PersonaEditModal, { open: true, personaId: 'hal0-brain', onClose: () => {} }))
     await settle()
 
-    expect(document.body.textContent).toContain("Couldn't load persona — persona 'coder' not found")
+    expect(document.body.textContent).toContain("Couldn't load persona — persona 'hal0-brain' not found")
     expect(document.querySelectorAll('input, textarea, select')).toHaveLength(0)
     expect(saveButton().disabled).toBe(true)
     act(() => saveButton().click())
@@ -277,34 +277,34 @@ describe('PersonaEditModal', () => {
 
   it('a wildcard persona shows * and posts ["*"] unchanged', async () => {
     persona = { ...PERSONA, tools_allowed: ['*'] }
-    mount(React.createElement(PersonaEditModal, { open: true, personaId: 'coder', onClose: () => {} }))
+    mount(React.createElement(PersonaEditModal, { open: true, personaId: 'hal0-brain', onClose: () => {} }))
     await settle()
 
     expect(areaFor('Allowed tool patterns').value).toBe('*')
     act(() => saveButton().click())
     await settle()
     expect(apiPut).toHaveBeenLastCalledWith(
-      '/api/agents/hermes/personas/coder',
+      '/api/agents/hermes/personas/hal0-brain',
       expect.objectContaining({ tools_allowed: ['*'] }),
     )
   })
 
   it('posts the non-empty trimmed lines as patterns', async () => {
     persona = { ...PERSONA, tools_allowed: ['*'] }
-    mount(React.createElement(PersonaEditModal, { open: true, personaId: 'coder', onClose: () => {} }))
+    mount(React.createElement(PersonaEditModal, { open: true, personaId: 'hal0-brain', onClose: () => {} }))
     await settle()
 
     typeIntoArea(areaFor('Allowed tool patterns'), '  slot_*  \n\nmodel_pull\n   \nmemory_?et\n')
     act(() => saveButton().click())
     await settle()
     expect(apiPut).toHaveBeenLastCalledWith(
-      '/api/agents/hermes/personas/coder',
+      '/api/agents/hermes/personas/hal0-brain',
       expect.objectContaining({ tools_allowed: ['slot_*', 'model_pull', 'memory_?et'] }),
     )
   })
 
   it('a cleared pattern box posts ["*"], never an empty list', async () => {
-    mount(React.createElement(PersonaEditModal, { open: true, personaId: 'coder', onClose: () => {} }))
+    mount(React.createElement(PersonaEditModal, { open: true, personaId: 'hal0-brain', onClose: () => {} }))
     await settle()
 
     for (const blank of ['', '  \n \n']) {
@@ -312,21 +312,21 @@ describe('PersonaEditModal', () => {
       act(() => saveButton().click())
       await settle()
       expect(apiPut).toHaveBeenLastCalledWith(
-        '/api/agents/hermes/personas/coder',
+        '/api/agents/hermes/personas/hal0-brain',
         expect.objectContaining({ tools_allowed: ['*'] }),
       )
     }
   })
 
   it('picking a slot posts its hal0/<slot> model id; not set posts an empty string', async () => {
-    mount(React.createElement(PersonaEditModal, { open: true, personaId: 'coder', onClose: () => {} }))
+    mount(React.createElement(PersonaEditModal, { open: true, personaId: 'hal0-brain', onClose: () => {} }))
     await settle()
 
     pickSlot('hal0/agent')
     act(() => saveButton().click())
     await settle()
     expect(apiPut).toHaveBeenLastCalledWith(
-      '/api/agents/hermes/personas/coder',
+      '/api/agents/hermes/personas/hal0-brain',
       expect.objectContaining({ preferred_model: 'hal0/agent' }),
     )
 
@@ -335,14 +335,14 @@ describe('PersonaEditModal', () => {
     act(() => saveButton().click())
     await settle()
     expect(apiPut).toHaveBeenLastCalledWith(
-      '/api/agents/hermes/personas/coder',
+      '/api/agents/hermes/personas/hal0-brain',
       expect.objectContaining({ preferred_model: '' }),
     )
   })
 
   it('a persona with no preferred_model shows "— not set —" and posts ""', async () => {
     persona = { ...PERSONA, preferred_model: '' }
-    mount(React.createElement(PersonaEditModal, { open: true, personaId: 'coder', onClose: () => {} }))
+    mount(React.createElement(PersonaEditModal, { open: true, personaId: 'hal0-brain', onClose: () => {} }))
     await settle()
 
     const slot = slotSelect()
@@ -353,7 +353,7 @@ describe('PersonaEditModal', () => {
     act(() => saveButton().click())
     await settle()
     expect(apiPut).toHaveBeenLastCalledWith(
-      '/api/agents/hermes/personas/coder',
+      '/api/agents/hermes/personas/hal0-brain',
       expect.objectContaining({ preferred_model: '' }),
     )
   })
@@ -361,7 +361,7 @@ describe('PersonaEditModal', () => {
   it('keeps a stored preferred_model that is not a hal0/<llm slot> selectable', async () => {
     // A bare slot name, as a hand-edited persona file may carry.
     persona = { ...PERSONA, preferred_model: 'agent' }
-    mount(React.createElement(PersonaEditModal, { open: true, personaId: 'coder', onClose: () => {} }))
+    mount(React.createElement(PersonaEditModal, { open: true, personaId: 'hal0-brain', onClose: () => {} }))
     await settle()
 
     const slot = slotSelect()
@@ -375,8 +375,61 @@ describe('PersonaEditModal', () => {
     act(() => saveButton().click())
     await settle()
     expect(apiPut).toHaveBeenLastCalledWith(
-      '/api/agents/hermes/personas/coder',
+      '/api/agents/hermes/personas/hal0-brain',
       expect.objectContaining({ preferred_model: 'agent' }),
     )
+  })
+
+  describe('a persona that is not the steward', () => {
+    beforeEach(() => {
+      persona = { ...PERSONA, id: 'hermes', display_name: 'Hermes' }
+      apiGet.mockImplementation(async (path: string) => {
+        if (path === '/api/agents/hermes/personas/hermes') return persona
+        throw new Error(`unexpected GET ${path}`)
+      })
+    })
+
+    it('hides the steward-only fields and says why', async () => {
+      mount(React.createElement(PersonaEditModal, { open: true, personaId: 'hermes', onClose: () => {} }))
+      await settle()
+
+      expect(byValue('Hermes')).toBeTruthy()
+      expect(byValue('Be terse')).toBeTruthy()
+      expect(slotSelect()).toBeUndefined()
+      expect(() => areaFor('Allowed tool patterns')).toThrow()
+      expect(document.body.textContent).not.toContain('Routes to slot')
+      expect(document.body.textContent).toContain('steward-only')
+    })
+
+    it('saves only the name and prompt', async () => {
+      mount(React.createElement(PersonaEditModal, { open: true, personaId: 'hermes', onClose: () => {} }))
+      await settle()
+
+      act(() => saveButton().click())
+      await settle()
+      expect(apiPut).toHaveBeenCalledWith('/api/agents/hermes/personas/hermes', {
+        display_name: 'Hermes',
+        system_prompt: 'Be terse',
+      })
+    })
+
+    it('shows the refresh outcome from the save in the toast', async () => {
+      const toast = vi.fn()
+      ;(window as unknown as { __hal0Toast: unknown }).__hal0Toast = toast
+      apiPut.mockImplementation(async () => ({
+        ...persona,
+        refresh: { status: 'restart-failed', message: 'could not restart hermes-gateway.service' },
+      }))
+      mount(React.createElement(PersonaEditModal, { open: true, personaId: 'hermes', onClose: () => {} }))
+      await settle()
+
+      act(() => saveButton().click())
+      await settle()
+      expect(toast).toHaveBeenCalledWith(
+        'Persona saved — could not restart hermes-gateway.service',
+        'err',
+      )
+      delete (window as unknown as { __hal0Toast?: unknown }).__hal0Toast
+    })
   })
 })
