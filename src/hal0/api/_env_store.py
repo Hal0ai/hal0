@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import contextlib
 import os
+import re
 import tempfile
 from pathlib import Path
 
@@ -54,12 +55,27 @@ PROCESS_CONTROL_ENV_NAMES = frozenset(
         "PERL5OPT",
         "RUBYOPT",
         "GCONV_PATH",
+        "PERL5LIB",
+        "NODE_PATH",
+        "NODE_EXTRA_CA_CERTS",
+        # bash runs ``PS4`` (command substitution included) on every xtrace
+        # line, and SHELLOPTS/BASHOPTS can switch xtrace on in a child shell.
+        "SHELLOPTS",
+        "BASHOPTS",
+        "PS4",
+        # Redirects where hal0's Hermes helpers read and write its .env.
+        "HERMES_HOME",
     }
 )
 #: Prefix families with the same effect: the dynamic loader (``LD_*``,
 #: ``DYLD_*``), the interpreters and installers hal0's children run
-#: (``PYTHON*``, ``UV_*``, ``PIP_*``) and git (``GIT_SSH_COMMAND``, \u2026).
-PROCESS_CONTROL_ENV_PREFIXES = ("LD_", "DYLD_", "PYTHON", "UV_", "PIP_", "GIT_")
+#: (``PYTHON*``, ``UV_*``, ``PIP_*``, ``NPM_CONFIG_*`` for the Hermes web
+#: build's npm) and git (``GIT_SSH_COMMAND`` and the rest).
+PROCESS_CONTROL_ENV_PREFIXES = ("LD_", "DYLD_", "PYTHON", "UV_", "PIP_", "NPM_CONFIG_", "GIT_")
+
+# A key ``upsert_env_value`` will write: an env-var name and nothing else, so a
+# caller can never smuggle a line break (and a second variable) in the key.
+_ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 def is_process_control_env(key: str) -> bool:
@@ -141,6 +157,8 @@ def upsert_env_value(api_env: Path, key: str, value: str) -> None:
     routes, so no writer of this file can plant one (#2936). Deleting such a
     line stays allowed, so an existing one can be removed.
     """
+    if not _ENV_KEY_RE.match(key):
+        raise ValueError("env key must be an env-var name (letters, digits, underscores)")
     if is_process_control_env(key):
         raise ValueError(f"{key!r} controls how processes run and cannot be stored in api.env")
     if _LINE_BREAK_CHARS.intersection(value):

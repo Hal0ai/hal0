@@ -210,6 +210,14 @@ _PROCESS_CONTROL_NAMES = [
     "UV_INDEX_URL",
     "PIP_INDEX_URL",
     "GIT_SSH_COMMAND",
+    "NPM_CONFIG_REGISTRY",
+    "NODE_PATH",
+    "NODE_EXTRA_CA_CERTS",
+    "PERL5LIB",
+    "SHELLOPTS",
+    "BASHOPTS",
+    "PS4",
+    "HERMES_HOME",
 ]
 
 
@@ -269,4 +277,15 @@ def test_writer_guard_rejects_process_control_keys(tmp_path: Path, name: str) ->
     target = tmp_path / "api.env"
     with pytest.raises(ValueError, match="controls how processes run"):
         upsert_env_value(target, name, "x")
+    assert not target.exists()
+
+
+@pytest.mark.parametrize("key", ["X\nLD_PRELOAD", "A B", "A=B", "", "1ABC"])
+def test_writer_guard_rejects_malformed_keys(tmp_path: Path, key: str) -> None:
+    """The writer refuses a key that is not a bare env-var name (no line smuggled in the key)."""
+    from hal0.api._env_store import upsert_env_value
+
+    target = tmp_path / "api.env"
+    with pytest.raises(ValueError, match="env-var name"):
+        upsert_env_value(target, key, "x")
     assert not target.exists()

@@ -5,6 +5,7 @@ from __future__ import annotations
 import tomllib
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 
 from hal0.upstreams.registry import Upstream
@@ -656,7 +657,64 @@ def test_credentials_refuse_a_process_control_key(client: TestClient) -> None:
     )
 
     assert response.status_code == 400, response.text
-    assert "controls how processes run" in response.text
+    # details.reason is set only by the route's own check, not the writer guard.
+    assert response.json()["error"]["details"]["reason"] == "process_control"
     after = api_env.read_bytes() if api_env.exists() else None
     assert after == before
     assert os.environ.get("LD_PRELOAD") == live_before
+
+
+def test_credentials_refuse_a_hal0_key_on_an_upstream_without_auth_value_env(
+    client: TestClient,
+) -> None:
+    """#2936 review: with no declared env name the key was free-form, HAL0_PORT included."""
+    import os
+
+    _seed_upstreams(client)
+    client.app.state.upstreams.add(
+        Upstream(name="bare", kind="remote", url="https://example.invalid/v1", auth_value_env="")
+    )
+    api_env = _upstreams_toml_path(client).parent / "api.env"
+    before = api_env.read_bytes() if api_env.exists() else None
+    live_before = os.environ.get("HAL0_PORT")
+
+    response = client.post(
+        "/api/providers/bare/credentials", json={"key": "HAL0_PORT", "value": "1"}
+    )
+
+    assert response.status_code == 400, response.text
+    assert response.json()["error"]["details"]["reason"] == "hal0_reserved"
+    after = api_env.read_bytes() if api_env.exists() else None
+    assert after == before
+    assert os.environ.get("HAL0_PORT") == live_before
+
+
+@pytest.mark.parametrize("env_name", ["LD_PRELOAD", "PYTHONPATH", "HAL0_ADMIN_KEY"])
+def test_create_upstream_refuses_a_reserved_auth_value_env(
+    client: TestClient, env_name: str
+) -> None:
+    _seed_upstreams(client)
+    response = client.post(
+        "/api/upstreams",
+        json={"name": "sneaky", "url": "https://example.invalid/v1", "auth_value_env": env_name},
+    )
+    assert response.status_code == 400, response.text
+    assert response.json()["error"]["code"] == "upstream.invalid"
+    assert client.app.state.upstreams.get("sneaky") is None
+
+
+def test_patch_upstream_refuses_a_reserved_auth_value_env(client: TestClient) -> None:
+    _seed_upstreams(client)
+    created = client.post(
+        "/api/upstreams",
+        json={
+            "name": "custom",
+            "url": "https://example.invalid/v1",
+            "auth_value_env": "CUSTOM_KEY",
+        },
+    )
+    assert created.status_code == 201, created.text
+    response = client.patch("/api/upstreams/custom", json={"auth_value_env": "LD_PRELOAD"})
+    assert response.status_code == 400, response.text
+    assert response.json()["error"]["code"] == "upstream.invalid"
+    assert client.app.state.upstreams.get("custom").auth_value_env == "CUSTOM_KEY"
