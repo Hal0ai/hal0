@@ -1016,11 +1016,19 @@ info "directories under ${PREFIX}, ${ETC_DIR}, ${VAR_DIR} (pulls → ${MODELS_DI
 # OwnershipStore row's FHS-default target — chowned explicitly (not
 # ${MODELS_DIR}, which may point off-tree via --models-dir/HAL0_MODELS_DIR;
 # an external store's ownership is out of scope here).
+# A symlink is skipped (#2975): ${VAR_DIR} is hal0-owned and not sticky, so
+# the hal0 account can swap any of these for a link, and chown/chmod by
+# pathname would re-own the link's target. `chown -h` never follows; chmod
+# has no such flag, so the -L check is what keeps it off a link. The
+# descriptor-based `doctor perms --fix` pass is the authority behind this.
 if [[ "${DEV_MODE}" -eq 0 ]] && getent passwd hal0 >/dev/null 2>&1; then
-    chown hal0:hal0 "${VAR_DIR}/slots" "${VAR_DIR}/registry" "${VAR_DIR}/models" \
-        "${VAR_DIR}/backups" 2>/dev/null || true
-    chmod 2775 "${VAR_DIR}/slots" "${VAR_DIR}/registry" "${VAR_DIR}/models" \
-        "${VAR_DIR}/backups" 2>/dev/null || true
+    for _state_dir in "${VAR_DIR}/slots" "${VAR_DIR}/registry" "${VAR_DIR}/models" \
+        "${VAR_DIR}/backups"; do
+        [[ -L "${_state_dir}" ]] && { warn "${_state_dir} is a symlink; ownership left as is"; continue; }
+        chown -h hal0:hal0 "${_state_dir}" 2>/dev/null || true
+        chmod 2775 "${_state_dir}" 2>/dev/null || true
+    done
+    unset _state_dir
 fi
 
 # mDNS addon advertisements (#2059): services/mdns.py (hal0-api, User=hal0)
@@ -1782,6 +1790,9 @@ if [[ -n "${HF_TOKEN_VAL}" ]]; then
     # "hal0 system user" follow-up below stays root:root because it sits in
     # the DEV_MODE=0 branch. Tolerant chown mirrors the HF_SECRETS_TMP idiom
     # a few lines down: best-effort in --dev, real in a root prod install.
+    # A symlinked secrets/ is refused (#2975): `install -d` would re-mode
+    # the link's target, and the token would land wherever it points.
+    [[ -L "${SECRETS_DIR}" ]] && die "${SECRETS_DIR} is a symlink; refusing to write the HF token through it"
     install -d -m 0700 "${SECRETS_DIR}"  # 0700: see #1896
     chown root:root "${SECRETS_DIR}" 2>/dev/null || true
     HF_SECRETS_TMP="$(mktemp "${HF_SECRETS_ENV}.XXXXXX")"
@@ -3333,10 +3344,16 @@ else
     mkdir -p "${ETC_DIR}/agents"
     # secrets/ + secrets/agents are born 0700 root:root, matching BOTH the
     # ownership table (hal0.install.perms) and the hal0-agentenv seam's
-    # `install -d -m 0700`. A plain `mkdir -p` here births them 0755 under the
+    # descriptor-based 0700. A plain `mkdir -p` here births them 0755 under the
     # installer's umask, which the `doctor perms --fix` backstop then had to
     # tighten on every run — cosmetic drift the audit reported as a defect
     # (#1896). Explicit mode = born correct, nothing to reconcile.
+    # Refused when either is a symlink (#2975): ${VAR_DIR} is hal0-owned, and
+    # `install -d -o root -m 0700` on a link re-owns and re-modes its target.
+    for _secrets_dir in "${VAR_DIR}/secrets" "${VAR_DIR}/secrets/agents"; do
+        [[ -L "${_secrets_dir}" ]] && die "${_secrets_dir} is a symlink; refusing to re-own its target"
+    done
+    unset _secrets_dir
     install -d -m 0700 -o root -g root "${VAR_DIR}/secrets" "${VAR_DIR}/secrets/agents"
 
 fi

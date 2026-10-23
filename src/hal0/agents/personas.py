@@ -29,6 +29,8 @@ from typing import Any
 
 import structlog
 
+from hal0.security import nofollow
+
 log = structlog.get_logger(__name__)
 
 # Canonical on-disk store. State-dir, not config-dir, so a fresh install
@@ -230,12 +232,10 @@ def save_persona(persona: Persona, *, root: Path | None = None) -> Path:
     import tomli_w
 
     target_root = _personas_root(root)
-    target_root.mkdir(parents=True, exist_ok=True)
     target = target_root / f"{persona.id}.toml"
-    body = tomli_w.dumps(persona.to_dict())
-    tmp = target.with_suffix(".toml.tmp")
-    tmp.write_text(body, encoding="utf-8")
-    os.replace(tmp, target)
+    # By descriptor, random temp name (#2975): ``--reset-personas`` runs this
+    # as root inside the hal0-owned Hermes home.
+    nofollow.write_file(target, tomli_w.dumps(persona.to_dict()))
     return target
 
 
@@ -283,14 +283,12 @@ def set_active(persona_id: str, *, root: Path | None = None) -> Path:
     provisioner from rendering an empty system prompt later.
     """
     target_root = _personas_root(root)
-    target_root.mkdir(parents=True, exist_ok=True)
+    os.close(nofollow.open_dir(target_root, create=True))
     persona_path = target_root / f"{persona_id}.toml"
     if not persona_path.exists():
         raise FileNotFoundError(f"can't activate {persona_id!r}: {persona_path} doesn't exist")
     pointer = target_root / ACTIVE_POINTER
-    tmp = pointer.with_suffix(".tmp")
-    tmp.write_text(persona_id + "\n", encoding="utf-8")
-    os.replace(tmp, pointer)
+    nofollow.write_file(pointer, persona_id + "\n")
     return pointer
 
 

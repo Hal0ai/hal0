@@ -1038,3 +1038,34 @@ def test_root_owned_2755_backups_dir_is_drift_and_heals(
     assert changed == [backups]
     assert chown_calls == [(str(backups), 4242, 4243)]
     assert chmod_calls == [(str(backups), 0o2775)]
+
+
+def test_commit_refuses_a_directory_swapped_for_a_link_after_plan(tmp_path: Path) -> None:
+    """#2975: the service account swaps ``slots/`` for a link between plan and commit.
+
+    The planned path ``<state>/slots/shadow`` then names ``<victim>/shadow``.
+    A pathname ``chown``/``chmod`` re-owned that file; the descriptor walk
+    refuses the link and commit rolls back.
+    """
+    owner, group = _me()
+    state = tmp_path / "state"
+    state.mkdir()
+    state.chmod(0o2775)  # service-owned, group-writable, not sticky
+    slots = state / "slots"
+    slots.mkdir()
+    (slots / "shadow").write_text("planted")
+    os.chmod(slots / "shadow", 0o600)
+    row = perms.PermRow(slots, owner, group, 0o2775, glob="*", child_mode=0o664, role="slots")
+    pl = perms.plan([row])
+    assert any(d.path == slots / "shadow" for d in pl.drifted)
+
+    victim = tmp_path / "etc"
+    victim.mkdir()
+    (victim / "shadow").write_text("root secret")
+    os.chmod(victim / "shadow", 0o600)
+    slots.rename(state / "slots.away")
+    slots.symlink_to(victim)
+
+    with pytest.raises(OSError):
+        perms.commit(pl)
+    assert oct((victim / "shadow").stat().st_mode & 0o7777) == oct(0o600)

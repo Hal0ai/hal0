@@ -592,16 +592,21 @@ def _ensure_hermes_prelude_dirs() -> None:
     # hal0 → born hal0:hal0. /var/lib/hal0/hermes holds the release tree, the
     # uv-managed interpreters and uv's cache (ADR-0032 decision 5, ADR-0034
     # decision 2 amendment).
-    # A symlink here is left alone: chown/chmod would act on its target.
+    # A symlink here is left alone: chown/chmod would act on its target. The
+    # mkdir, chown and chmod go by descriptor (#2975): these dirs sit inside
+    # hal0-owned /var/lib/hal0, so an is_symlink() check followed by a
+    # pathname chown let the hal0 account swap a dir for a link in between.
+    from hal0.security import nofollow
+
     for d in _HERMES_PRELUDE_DIRS:
         p = _Path(d)
         if p.is_symlink():
             console.print(f"[dim]hermes prelude: {d} is a symlink; left as is[/dim]")
             continue
         try:
-            p.mkdir(parents=True, exist_ok=True)
-            _os.chown(p, ent.pw_uid, ent.pw_gid)
-            p.chmod(0o2775)
+            _os.close(nofollow.open_dir(p, create=True))
+            nofollow.chown(p, ent.pw_uid, ent.pw_gid)
+            nofollow.chmod(p, 0o2775)
         except OSError as exc:
             # Best-effort: `doctor perms --fix` (install.sh) is the authority for
             # this skeleton, so a gap here usually surfaces downstream as a loud

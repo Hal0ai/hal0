@@ -29,68 +29,151 @@ cmd="${1:-}"; agent="${2:-}"
 [[ "$agent" =~ ^[a-z0-9][a-z0-9-]{0,31}$ ]] || { echo "hal0-agentenv: bad agent name" >&2; exit 2; }
 # Run from / and start every python with -I (isolated mode: no cwd or script
 # dir on sys.path, PYTHON* env vars and user site-packages ignored). sudo keeps
-# the caller's working directory, so without both a planted tempfile.py there
+# the caller's working directory, so without both a planted module there
 # would be imported by this root interpreter (#3007). Every path below is
 # absolute.
 cd /
 secrets="/var/lib/hal0/secrets/agents/${agent}.env"
-driver="/etc/hal0/agents/${agent}.env"
-seed="/etc/hal0/agents/${agent}.toml"
+
+# One writer for all three write verbs (#2975). /var/lib/hal0 and /etc/hal0
+# are hal0-owned, so the hal0 account can rename secrets/ or agents/ and put a
+# symlink, or a tree it owns, in its place. `install -d`, `mktemp` and `mv` by
+# pathname would then follow it as root. This walks every directory from /
+# by descriptor, opening each entry O_NOFOLLOW once inside a directory anyone
+# but root can write, creates the root-owned dirs with mkdirat, refuses an
+# existing one that root does not own, and writes a random O_EXCL temp file
+# that is renamed through the same descriptor.
+#   argv: verb  base  'dir dir…'  dir_mode  file_mode  name
+#   verb: merge (stdin = KEY=VALUE updates) or replace (stdin = full body)
+read -r -d '' _SAFE_WRITE <<'PY' || true
+import errno, os, secrets, stat, sys
+
+verb, base, managed, dir_mode, file_mode, name = sys.argv[1:7]
+dir_mode, file_mode = int(dir_mode, 8), int(file_mode, 8)
+D = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC
+TRUSTED = {0, os.geteuid()}
+
+
+def die(msg):
+    sys.stderr.write(f"hal0-agentenv: refusing {msg}\n")
+    sys.exit(3)
+
+
+def trusted(fd):
+    st = os.fstat(fd)
+    return st.st_uid in TRUSTED and not st.st_mode & 0o022
+
+
+def step(fd, comp, *, create):
+    flags = D if trusted(fd) else D | os.O_NOFOLLOW
+    try:
+        return os.open(comp, flags, dir_fd=fd), False
+    except FileNotFoundError:
+        if not create:
+            raise
+    try:
+        os.mkdir(comp, 0o700, dir_fd=fd)
+        made = True
+    except FileExistsError:
+        made = False
+    return os.open(comp, D | os.O_NOFOLLOW, dir_fd=fd), made
+
+
+fd = os.open("/", D)
+walked = ""
+try:
+    steps = [(c, False) for c in base.split("/") if c] + [(c, True) for c in managed.split()]
+    for comp, is_managed in steps:
+        walked += "/" + comp
+        try:
+            nfd, made = step(fd, comp, create=is_managed)
+        except OSError as exc:
+            if exc.errno in (errno.ELOOP, errno.ENOTDIR):
+                die(f"{walked}: a symlink or not a directory")
+            raise
+        os.close(fd)
+        fd = nfd
+        if is_managed:
+            st = os.fstat(fd)
+            if not made and st.st_uid not in TRUSTED:
+                die(f"{walked}: not owned by root")
+            if os.geteuid() == 0:
+                os.fchown(fd, 0, 0)
+            os.fchmod(fd, dir_mode)
+except SystemExit:
+    os.close(fd)
+    raise
+
+body = sys.stdin.read()
+if verb == "merge":
+    updates = {}
+    for line in body.splitlines():
+        s = line.strip()
+        if not s or s.startswith("#") or "=" not in s:
+            continue
+        k, v = s.split("=", 1)
+        updates[k.strip()] = v
+    existing = []
+    try:
+        rfd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=fd)
+    except FileNotFoundError:
+        rfd = None
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            die(f"{walked}/{name}: a symlink")
+        raise
+    if rfd is not None:
+        with os.fdopen(rfd, encoding="utf-8") as f:
+            if not stat.S_ISREG(os.fstat(f.fileno()).st_mode):
+                die(f"{walked}/{name}: not a regular file")
+            existing = f.read().splitlines()
+    seen, out = set(), []
+    for line in existing:
+        s = line.strip()
+        if not s or s.startswith("#"):
+            out.append(line)
+            continue
+        k = s.split("=", 1)[0].strip()
+        if k in updates:
+            out.append(f"{k}={updates[k]}")
+            seen.add(k)
+        else:
+            out.append(line)
+    for k, v in updates.items():
+        if k not in seen:
+            out.append(f"{k}={v}")
+    body = "\n".join(out) + "\n"
+
+tmp = f".{name}.{secrets.token_hex(8)}"
+wfd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600, dir_fd=fd)
+try:
+    with os.fdopen(wfd, "w", encoding="utf-8") as f:
+        if os.geteuid() == 0:
+            os.fchown(f.fileno(), 0, 0)
+        os.fchmod(f.fileno(), file_mode)
+        f.write(body)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, name, src_dir_fd=fd, dst_dir_fd=fd)
+except BaseException:
+    try:
+        os.unlink(tmp, dir_fd=fd)
+    except OSError:
+        pass
+    raise
+PY
+
 case "$cmd" in
   merge-secrets)
     # stdin = KEY=VALUE update lines. Read-merge-write AS ROOT: the unprivileged
     # caller cannot read the 0600 vault to merge it, so the merge happens here.
     # Operator-added lines/comments and unrelated keys are preserved; matching
-    # keys are replaced; new keys are appended. Atomic (tmp + os.replace),
-    # 0600 root:root.
-    install -d -m 0700 -o root -g root /var/lib/hal0/secrets /var/lib/hal0/secrets/agents
-    # NB: the script is passed via `-c` (an argv), NOT a `<<heredoc` — a heredoc
-    # would become python's stdin and shadow the caller's piped KEY=VALUE
-    # updates, silently no-op'ing the merge. With `-c`, stdin stays the caller's.
-    python3 -I -c '
-import os, sys, tempfile
-path = sys.argv[1]
-updates = {}
-for line in sys.stdin.read().splitlines():
-    s = line.strip()
-    if not s or s.startswith("#") or "=" not in s:
-        continue
-    k, v = s.split("=", 1)
-    updates[k.strip()] = v
-existing = []
-if os.path.exists(path):
-    with open(path, encoding="utf-8") as f:
-        existing = f.read().splitlines()
-seen, out = set(), []
-for line in existing:
-    s = line.strip()
-    if not s or s.startswith("#"):
-        out.append(line)
-        continue
-    k = s.split("=", 1)[0].strip()
-    if k in updates:
-        out.append(f"{k}={updates[k]}")
-        seen.add(k)
-    else:
-        out.append(line)
-for k, v in updates.items():
-    if k not in seen:
-        out.append(f"{k}={v}")
-d = os.path.dirname(path)
-fd, tmp = tempfile.mkstemp(dir=d)
-try:
-    with os.fdopen(fd, "w", encoding="utf-8") as f:
-        f.write("\n".join(out) + "\n")
-    os.chmod(tmp, 0o600)
-    os.chown(tmp, 0, 0)
-    os.replace(tmp, path)
-except BaseException:
-    try:
-        os.unlink(tmp)
-    except OSError:
-        pass
-    raise
-' "$secrets"
+    # keys are replaced; new keys are appended. Atomic, 0600 root:root, in
+    # secrets/ and secrets/agents/ held at 0700 root:root (the ownership
+    # table's mode for both, #1896).
+    # The program is passed via `-c` (an argv), NOT a `<<heredoc`: a heredoc
+    # would become python's stdin and shadow the caller's piped updates.
+    python3 -I -c "$_SAFE_WRITE" merge /var/lib/hal0 "secrets agents" 0700 0600 "${agent}.env"
     ;;
   secret-keys)
     # The one read verb: prints the NAMES of the vault keys that are set, one
@@ -125,15 +208,7 @@ sys.stdout.write("".join(n + "\n" for n in names))
     # its already-materialised env, never by re-reading the file — see
     # cli/agent_shim.py _build_hermes_env), so tightening off the old 0644
     # (back when this file carried only non-secret URLs) costs nothing.
-    install -d -m 0755 -o root -g root /etc/hal0/agents
-    umask 077
-    tmp="$(mktemp "${driver}.XXXXXX")"
-    trap 'rm -f "$tmp"' EXIT
-    cat > "$tmp"
-    chown root:root "$tmp"
-    chmod 0600 "$tmp"
-    mv -f "$tmp" "$driver"
-    trap - EXIT
+    python3 -I -c "$_SAFE_WRITE" replace /etc/hal0 agents 0755 0600 "${agent}.env"
     ;;
   write-seed-toml)
     # stdin = full seed TOML body (the manager seed / MCP allow-list). The caller
@@ -142,15 +217,7 @@ sys.stdout.write("".join(n + "\n" for n in names))
     # in root:root /etc/hal0/agents. Atomic, 0644 root:root — no secret VALUES
     # live here (auth.env names an env var, never the token itself), so this one
     # stays world-readable, unlike write-driver-env above.
-    install -d -m 0755 -o root -g root /etc/hal0/agents
-    umask 022
-    tmp="$(mktemp "${seed}.XXXXXX")"
-    trap 'rm -f "$tmp"' EXIT
-    cat > "$tmp"
-    chown root:root "$tmp"
-    chmod 0644 "$tmp"
-    mv -f "$tmp" "$seed"
-    trap - EXIT
+    python3 -I -c "$_SAFE_WRITE" replace /etc/hal0 agents 0755 0644 "${agent}.toml"
     ;;
   *)
     echo "hal0-agentenv: bad cmd: ${cmd}" >&2

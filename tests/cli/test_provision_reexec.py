@@ -173,6 +173,32 @@ def test_prelude_dirs_leave_a_symlink_alone(
     assert oct(real.stat().st_mode & 0o7777) == "0o700"  # chmod never followed the link
 
 
+def test_prelude_dirs_never_follow_a_symlinked_ancestor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#2975: ``state/`` swapped for a link makes ``state/agents`` name a root dir.
+
+    The ``is_symlink()`` check only looks at the last component; the chown and
+    chmod went by pathname and followed the swapped ancestor.
+    """
+    import pwd
+
+    state_root = tmp_path / "var-lib-hal0"
+    state_root.mkdir()
+    state_root.chmod(0o2775)
+    victim = tmp_path / "etc"
+    (victim / "agents").mkdir(parents=True)
+    (victim / "agents").chmod(0o700)
+    (state_root / "state").symlink_to(victim)
+    monkeypatch.setattr(
+        agent_commands, "_HERMES_PRELUDE_DIRS", (str(state_root / "state" / "agents"),)
+    )
+    me = pwd.getpwuid(__import__("os").getuid())
+    monkeypatch.setattr(pwd, "getpwnam", lambda _n: me)
+    agent_commands._ensure_hermes_prelude_dirs()
+    assert oct((victim / "agents").stat().st_mode & 0o7777) == "0o700"
+
+
 def test_prelude_hands_a_root_owned_pre_layout_venv_to_hal0(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

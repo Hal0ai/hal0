@@ -5569,6 +5569,112 @@ def test_write_run_report_never_follows_a_planted_tmp_symlink(tmp_path: Path) ->
     assert "phases" in json.loads((root / "provision.json").read_text())
 
 
+# ── root writers never follow a swapped parent directory (#2975) ───────────
+
+
+def _service_root(tmp_path: Path) -> Path:
+    """A stand-in for /var/lib/hal0: 2775, so the walk treats it as untrusted."""
+    root = tmp_path / "var-lib-hal0"
+    root.mkdir()
+    root.chmod(0o2775)
+    return root
+
+
+@pytest.mark.parametrize("depth", ["parent", "grandparent"])
+def test_atomic_write_refuses_a_symlinked_ancestor(tmp_path: Path, depth: str) -> None:
+    """The service account renames ``.hermes`` and plants a link to a root dir."""
+    from hal0.security.nofollow import UnsafePathError
+
+    root = _service_root(tmp_path)
+    victim = tmp_path / "etc"
+    (victim / "profiles").mkdir(parents=True)
+    (root / ".hermes").symlink_to(victim)
+    target = root / ".hermes" / "config.yaml"
+    if depth == "grandparent":
+        target = root / ".hermes" / "profiles" / "SOUL.md"
+    with pytest.raises(UnsafePathError):
+        hp._atomic_write(target, "pwn: 1\n")
+    assert sorted(p.name for p in victim.rglob("*")) == ["profiles"]
+
+
+def test_atomic_write_if_changed_never_reads_through_a_link(tmp_path: Path) -> None:
+    from hal0.security.nofollow import UnsafePathError
+
+    root = _service_root(tmp_path)
+    (tmp_path / "shadow").write_text("same\n")
+    (root / "SOUL.md").symlink_to(tmp_path / "shadow")
+    # A link is not "unchanged": it is replaced by a real file.
+    with pytest.raises(UnsafePathError):
+        hp.nofollow.read_text(root / "SOUL.md")
+    _h, wrote = hp._atomic_write_if_changed(root / "SOUL.md", "same\n")
+    assert wrote and not (root / "SOUL.md").is_symlink()
+    assert (tmp_path / "shadow").read_text() == "same\n"
+
+
+def test_merge_env_file_refuses_a_secrets_dir_the_service_account_owns(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``secrets/`` swapped for a real tree the (non-root) service account owns."""
+    from hal0.security import nofollow
+    from hal0.security.nofollow import UnsafePathError
+
+    root = _service_root(tmp_path)
+    fake = root / "secrets" / "agents"
+    fake.mkdir(parents=True)
+    fake.chmod(0o700)
+    (fake / "hermes.env").write_text("PLANTED=1\n")
+    monkeypatch.setattr(nofollow, "_trusted_uids", lambda: frozenset({0}))
+    with pytest.raises(UnsafePathError):
+        hp._merge_env_file(fake / "hermes.env", {"API_SERVER_KEY": "s3cret"})
+    assert (fake / "hermes.env").read_text() == "PLANTED=1\n"
+
+
+def test_merge_env_file_refuses_a_symlinked_secrets_dir(tmp_path: Path) -> None:
+    from hal0.security.nofollow import UnsafePathError
+
+    root = _service_root(tmp_path)
+    victim = tmp_path / "etc-cron"
+    (victim / "agents").mkdir(parents=True)
+    (root / "secrets").symlink_to(victim)
+    with pytest.raises(UnsafePathError):
+        hp._merge_env_file(root / "secrets" / "agents" / "hermes.env", {"K": "v"})
+    assert list((victim / "agents").iterdir()) == []
+
+
+def test_merge_env_file_happy_path_is_0600_and_merges(tmp_path: Path) -> None:
+    import stat
+
+    root = _service_root(tmp_path)
+    vault = root / "secrets" / "agents" / "hermes.env"
+    hp._merge_env_file(vault, {"A": "1"})
+    hp._merge_env_file(vault, {"B": "2", "A": "3"})
+    assert vault.read_text() == "A=3\nB=2\n"
+    assert stat.S_IMODE(vault.stat().st_mode) == 0o600
+    for d in (vault.parent, vault.parent.parent):
+        assert stat.S_IMODE(d.stat().st_mode) == 0o700
+    assert sorted(p.name for p in vault.parent.iterdir()) == ["hermes.env"]
+
+
+def test_persist_hermes_python_refuses_a_symlinked_config_dir(tmp_path: Path) -> None:
+    from hal0.security.nofollow import UnsafePathError
+
+    etc_hal0 = _service_root(tmp_path)
+    victim = tmp_path / "victim"
+    victim.mkdir()
+    (etc_hal0 / "sub").symlink_to(victim)
+
+    class _Runner:
+        @staticmethod
+        def run(_argv: list[str], **_kwargs: Any) -> Any:
+            return type("Result", (), {"stdout": "3.14\n"})()
+
+    with pytest.raises(UnsafePathError):
+        hp._persist_hermes_python(
+            "/opt/python3.14", etc_hal0 / "sub" / "hermes-python.env", runner=_Runner
+        )
+    assert list(victim.iterdir()) == []
+
+
 # ── profile_api_keys phase ──────────────────────────────────────────────────
 
 

@@ -69,6 +69,7 @@ from hal0.agents.hermes_layout import (
 )
 from hal0.agents.role_slots import candidate_from_slot_mapping, resolve_role_slots
 from hal0.install.perms import SECRETS_DIR_MODE, ensure_shared_dir
+from hal0.security import nofollow
 from hal0.slot_lifecycle_budget import STACK_APPLY_SLOT_ALLOWANCE, slot_lifecycle_timeout_s
 from hal0.slots.state import SlotState, is_dispatchable_state, provider_requires_model
 from hal0.system import seam as _seam
@@ -543,19 +544,13 @@ def _persist_hermes_python(
 ) -> None:
     """Atomically persist a validated Hermes interpreter path."""
     _validate_hermes_python(path, runner=runner, minor=minor)
-    env_path.parent.mkdir(parents=True, exist_ok=True)
     content = f"HAL0_HERMES_PYTHON={path}\n"
-    if env_path.exists() and env_path.read_text(encoding="utf-8") == content:
-        return
-    tmp = env_path.with_name(f".{env_path.name}.{os.getpid()}.tmp")
-    try:
-        tmp.write_text(content, encoding="utf-8")
-        os.chmod(tmp, 0o644)
-        os.replace(tmp, env_path)
-    except OSError:
-        with contextlib.suppress(OSError):
-            tmp.unlink()
-        raise
+    # The root prelude writes this into /etc/hal0, which the hal0 account owns
+    # (#2975): no pathname step, and no predictable temp name.
+    with contextlib.suppress(nofollow.UnsafePathError, UnicodeDecodeError):
+        if nofollow.read_text(env_path) == content:
+            return
+    nofollow.write_file(env_path, content, mode=0o644)
 
 
 def _check_configured_hermes_python(
@@ -1552,14 +1547,7 @@ def _phase_env_probe(ctx: _StepCtx) -> PhaseResult:
     hermes_home.mkdir(parents=True, exist_ok=True)
     snapshot_path = hermes_home / ENV_SNAPSHOT_NAME
     body = json.dumps(snapshot, indent=2, sort_keys=True)
-    changed = True
-    if snapshot_path.exists():
-        try:
-            changed = snapshot_path.read_text(encoding="utf-8") != body
-        except OSError:
-            changed = True
-    if changed:
-        snapshot_path.write_text(body, encoding="utf-8")
+    _h, changed = _atomic_write_if_changed(snapshot_path, body)
     return PhaseResult(
         status=PhaseStatus.OK,
         details={
@@ -4206,38 +4194,13 @@ def _atomic_write(path: Path, content: str, *, mode: int | None = None) -> str:
     ``hermes_arm._config_backstop``) would leave ``config.yaml`` root-owned
     and the ``hal0`` agent unable to rewrite it.
 
-    The temp file gets a random name created ``O_CREAT|O_EXCL|O_NOFOLLOW``,
-    and its mode and owner are set through the open descriptor (#2903). Most
-    targets live in directories the ``hal0`` service account can write, so a
-    predictable ``<name>.tmp`` let that account plant a symlink a root repair
-    would write through, truncating and re-owning whatever it pointed at.
+    The write goes through :func:`hal0.security.nofollow.write_file`: a random
+    ``O_CREAT|O_EXCL|O_NOFOLLOW`` temp name (#2903), and a directory walked
+    from ``/`` by descriptor, so a ``.hermes`` (or any other parent) the
+    ``hal0`` service account swapped for a symlink is refused instead of
+    followed by a root repair (#2975).
     """
-    import secrets
-
-    path.parent.mkdir(parents=True, exist_ok=True)
-    owner: tuple[int, int] | None = None
-    with contextlib.suppress(OSError):
-        st = path.stat()
-        owner = (st.st_uid, st.st_gid)
-        if mode is None:
-            mode = stat.S_IMODE(st.st_mode)
-    tmp = path.with_name(f".{path.name}.{secrets.token_hex(8)}")
-    # 0o666 so a brand-new file with no ``mode`` lands at the umask default.
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o666)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            fh.write(content)
-            fh.flush()
-            if mode is not None:
-                with contextlib.suppress(OSError):
-                    os.fchmod(fh.fileno(), mode)
-            if owner is not None and os.geteuid() == 0:
-                os.fchown(fh.fileno(), *owner)
-        os.replace(tmp, path)
-    except BaseException:
-        with contextlib.suppress(OSError):
-            tmp.unlink()
-        raise
+    nofollow.write_file(path, content, mode=mode)
     return content_hash(content)
 
 
@@ -4249,12 +4212,11 @@ def _atomic_write_if_changed(
     The convergence signal for the rendered context files: a re-render that
     produces the same bytes leaves the file (and its mtime) untouched.
     """
-    if path.exists():
-        try:
-            if path.read_text(encoding="utf-8") == content:
-                return content_hash(content), False
-        except OSError:
-            pass
+    try:
+        if nofollow.read_text(path) == content:
+            return content_hash(content), False
+    except (OSError, UnicodeDecodeError):
+        pass
     return _atomic_write(path, content, mode=mode), True
 
 
@@ -7204,15 +7166,26 @@ def _merge_env_file(path: Path, updates: dict[str, str]) -> None:
 
     Preserves existing lines (comments + other entries the operator
     added by hand) and replaces values when keys match. Atomic via
-    tmpfile + rename.
+    tmpfile + rename, ``0600 root:root`` from the first byte.
+
+    The sole caller is the root-only vault (``secrets/agents/hermes.env``),
+    whose grandparent ``/var/lib/hal0`` the ``hal0`` account can write: it
+    could rename ``secrets/`` and put a link, or a tree it owns, in its place
+    (#2975). The directory is therefore walked by descriptor and must be owned
+    by root alone (``require_trusted_dir``), for the read and for the write.
+    A missing ``secrets/`` or ``secrets/agents`` is born ``0700`` (#1896,
+    #1942) and a pre-existing one is never re-moded.
     """
     existing: list[str] = []
     seen: set[str] = set()
-    if path.exists():
-        try:
-            existing = path.read_text(encoding="utf-8").splitlines()
-        except OSError:
-            existing = []
+    # Born 0700 before the trust check runs, so a fresh box passes it.
+    os.close(nofollow.open_dir(path.parent, create=True, mkdir_mode=SECRETS_DIR_MODE))
+    try:
+        existing = (nofollow.read_text(path, require_trusted_dir=True) or "").splitlines()
+    except nofollow.UnsafePathError:
+        raise
+    except (OSError, UnicodeDecodeError):
+        existing = []
 
     out_lines: list[str] = []
     for line in existing:
@@ -7230,23 +7203,14 @@ def _merge_env_file(path: Path, updates: dict[str, str]) -> None:
         if key not in seen:
             out_lines.append(f"{key}={val}")
 
-    import contextlib
-
-    # #1942 review finding 3: a bare `path.parent.mkdir(parents=True,
-    # exist_ok=True)` births an absent parent at the process umask (0755
-    # under UMask=0022) — the sole caller is HERMES_SECRETS_ENV
-    # (secrets/agents/hermes.env), so an absent parent means a fresh box
-    # provisioning before install.sh (or a lost/never-created secrets/agents)
-    # would reintroduce the exact #1896 drift class this PR closed.
-    # `ensure_shared_dir` is umask-proof and only chmod's the components it
-    # creates, so a pre-existing parent (the common case — install.sh seeds
-    # it first) is left untouched.
-    ensure_shared_dir(path.parent, mode=SECRETS_DIR_MODE)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text("\n".join(out_lines) + "\n", encoding="utf-8")
-    os.replace(tmp, path)
-    with contextlib.suppress(OSError):
-        path.chmod(0o600)
+    owner = (0, 0) if os.geteuid() == 0 else None
+    nofollow.write_file(
+        path,
+        "\n".join(out_lines) + "\n",
+        mode=0o600,
+        owner=owner,
+        require_trusted_dir=True,
+    )
 
 
 #: Privileged seam for writing the root:root agent .env files when hal0-api runs
@@ -7448,9 +7412,8 @@ def _write_secrets_env(updates: dict[str, str]) -> None:
     0600 vault never has to be readable by the ``hal0`` user.
     """
     if os.geteuid() == 0:
+        # _merge_env_file pins root:root 0600 through the descriptor (#2975).
         _merge_env_file(HERMES_SECRETS_ENV, updates)
-        with contextlib.suppress(OSError):
-            os.chown(HERMES_SECRETS_ENV, 0, 0)
     else:
         body = "".join(f"{k}={v}\n" for k, v in updates.items())
         _privileged_env_write("merge-secrets", body)
@@ -7608,8 +7571,8 @@ def reconcile_ownership_on_repair(
     enabled: bool,
     venv: Path | str = HERMES_VENV_DEFAULT,
     observe_fn: Callable[..., Any] | None = None,
-    chown: Callable[[str, int, int], None] = os.chown,
-    chmod: Callable[[str, int], None] = os.chmod,
+    chown: Callable[[str, int, int], None] = nofollow.chown,
+    chmod: Callable[[str, int], None] = nofollow.chmod,
     walk: Callable[[str], Any] = os.walk,
 ) -> OwnershipReconcileResult:
     """Reconcile HERMES_HOME/agents + the venv to hal0:hal0 (repair path only).
@@ -7619,6 +7582,9 @@ def reconcile_ownership_on_repair(
     a reason. When enabled, it drives :mod:`hal0.install.perms` (the single
     declarative ownership truth) for the Hermes rows the audit checks, then
     recursively chowns the venv tree (which perms has no per-file row for).
+    The default ``chown``/``chmod`` never follow a link (#2975): a venv's
+    ``bin/python`` is a symlink to the interpreter, and a pathname ``chown``
+    re-owned the interpreter itself; a link is now skipped.
     Every seam (observe/chown/chmod/walk) is injectable so tests exercise the
     drift→fix path without a real filesystem.
     """
@@ -8627,12 +8593,8 @@ def write_seed_toml_body(body: str) -> None:
     """
     path = INSTALL_SEED_PATH
     if os.geteuid() == 0:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(".toml.tmp")
-        tmp.write_text(body, encoding="utf-8")
-        os.replace(tmp, path)
-        with contextlib.suppress(OSError):
-            os.chown(path, 0, 0)
+        # /etc/hal0 is hal0-owned, so agents/ must really be root's (#2975).
+        nofollow.write_file(path, body, mode=0o644, owner=(0, 0), require_trusted_dir=True)
     else:
         _privileged_env_write("write-seed-toml", body)
 
@@ -8900,7 +8862,7 @@ def _write_driver_env(
             # carry this defect.
             if direct:
                 with contextlib.suppress(OSError):
-                    path.chmod(0o600)
+                    nofollow.chmod(path, 0o600)
                 return path, False
             try:
                 mode = path.stat().st_mode & 0o777
@@ -8916,19 +8878,16 @@ def _write_driver_env(
             _privileged_env_write("write-driver-env", body)
             return path, False
     if direct:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(".env.tmp")
-        tmp.write_text(body, encoding="utf-8")
-        # The body can carry a live secret: pin 0600 before it replaces the
-        # old file so there is no window at the umask default.
-        with contextlib.suppress(OSError):
-            tmp.chmod(0o600)
-        os.replace(tmp, path)
-        if not sandboxed:
-            with contextlib.suppress(OSError):
-                os.chown(path, 0, 0)
-        with contextlib.suppress(OSError):
-            path.chmod(0o600)
+        # The body can carry a live secret: 0600 before the first byte. A root
+        # write lands only in a root-owned agents/ (#2975: /etc/hal0 is
+        # hal0-owned, so the hal0 account could swap agents/ for a link).
+        nofollow.write_file(
+            path,
+            body,
+            mode=0o600,
+            owner=None if sandboxed else (0, 0),
+            require_trusted_dir=not sandboxed,
+        )
     else:
         # Driver env lives in root:root /etc/hal0/agents — delegate the write
         # to the seam (it builds the path from the validated agent name and

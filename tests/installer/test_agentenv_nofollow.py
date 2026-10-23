@@ -1,0 +1,105 @@
+"""hal0-agentenv's descriptor-based writer never follows a swapped directory (#2975).
+
+The wrapper runs as root through sudo, on demand of the ``hal0`` account, and
+writes into ``secrets/agents`` and ``/etc/hal0/agents``, whose parents that
+account owns. These tests run the wrapper's embedded Python program against a
+``tmp_path`` stand-in for the base directory, for real; only the root-only
+``fchown`` is skipped, because the suite is not root.
+"""
+
+from __future__ import annotations
+
+import stat
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+
+WRAPPER = Path(__file__).resolve().parents[2] / "installer" / "wrappers" / "hal0-agentenv"
+
+
+def _program() -> str:
+    body = WRAPPER.read_text(encoding="utf-8")
+    start = body.index("\n", body.index("<<'PY'")) + 1
+    return body[start : body.index("\nPY\n", start)]
+
+
+def _run(base: Path, verb: str, managed: str, name: str, stdin: str, modes=("0700", "0600")):
+    return subprocess.run(
+        [sys.executable, "-I", "-c", _program(), verb, str(base), managed, *modes, name],
+        input=stdin,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+
+@pytest.fixture
+def base(tmp_path: Path) -> Path:
+    root = tmp_path / "var-lib-hal0"
+    root.mkdir()
+    root.chmod(0o2775)  # service-owned, group-writable, not sticky
+    return root
+
+
+def test_merge_creates_root_dirs_and_merges(base: Path) -> None:
+    assert _run(base, "merge", "secrets agents", "hermes.env", "A=1\n").returncode == 0
+    proc = _run(base, "merge", "secrets agents", "hermes.env", "B=2\nA=3\n")
+    assert proc.returncode == 0, proc.stderr
+    vault = base / "secrets" / "agents" / "hermes.env"
+    assert vault.read_text() == "A=3\nB=2\n"
+    assert stat.S_IMODE(vault.stat().st_mode) == 0o600
+    for d in (base / "secrets", base / "secrets" / "agents"):
+        assert stat.S_IMODE(d.stat().st_mode) == 0o700
+    assert [p.name for p in vault.parent.iterdir()] == ["hermes.env"]
+
+
+def test_symlinked_secrets_dir_is_refused(base: Path, tmp_path: Path) -> None:
+    victim = tmp_path / "etc-sudoers-d"
+    (victim / "agents").mkdir(parents=True)
+    victim.chmod(0o755)
+    (base / "secrets").symlink_to(victim)
+    proc = _run(base, "merge", "secrets agents", "hermes.env", "K=v\n")
+    assert proc.returncode == 3
+    assert "symlink" in proc.stderr
+    assert list((victim / "agents").iterdir()) == []
+    assert stat.S_IMODE(victim.stat().st_mode) == 0o755  # never re-moded
+
+
+def test_symlinked_leaf_dir_is_refused(base: Path, tmp_path: Path) -> None:
+    victim = tmp_path / "victim"
+    victim.mkdir()
+    (base / "agents").symlink_to(victim)
+    proc = _run(base, "replace", "agents", "hermes.env", "SECRET=1\n", modes=("0755", "0600"))
+    assert proc.returncode == 3
+    assert list(victim.iterdir()) == []
+
+
+def test_planted_vault_symlink_is_never_read(base: Path, tmp_path: Path) -> None:
+    (base / "secrets" / "agents").mkdir(parents=True)
+    shadow = tmp_path / "shadow"
+    shadow.write_text("root:$6$hash\n")
+    (base / "secrets" / "agents" / "hermes.env").symlink_to(shadow)
+    proc = _run(base, "merge", "secrets agents", "hermes.env", "K=v\n")
+    assert proc.returncode == 3
+    assert shadow.read_text() == "root:$6$hash\n"
+
+
+def test_replace_writes_the_full_body(base: Path) -> None:
+    proc = _run(base, "replace", "agents", "hermes.toml", "[agent]\n", modes=("0755", "0644"))
+    assert proc.returncode == 0, proc.stderr
+    seed = base / "agents" / "hermes.toml"
+    assert seed.read_text() == "[agent]\n"
+    assert stat.S_IMODE(seed.stat().st_mode) == 0o644
+
+
+def test_every_write_verb_goes_through_the_writer() -> None:
+    body = WRAPPER.read_text(encoding="utf-8")
+    for verb in ("merge-secrets", "write-driver-env", "write-seed-toml"):
+        arm = body[body.index(f"  {verb})") :]
+        arm = arm[: arm.index(";;")]
+        code = "\n".join(ln for ln in arm.splitlines() if not ln.strip().startswith("#"))
+        assert '"$_SAFE_WRITE"' in code, verb
+        for unsafe in ("install -d", "mktemp", "mv -f", "chown ", "chmod "):
+            assert unsafe not in code, (verb, unsafe)

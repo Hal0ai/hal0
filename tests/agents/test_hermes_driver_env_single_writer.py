@@ -112,13 +112,15 @@ def test_dashboard_install_keeps_mode_and_owner(
     driver_env.parent.mkdir(parents=True)
     driver_env.write_text("HAL0_API_URL=http://stale\n", encoding="utf-8")
     driver_env.chmod(0o644)
-    chowns: list[tuple[str, int, int]] = []
-    monkeypatch.setattr(hp.os, "chown", lambda p, u, g: chowns.append((str(p), u, g)))
+    fchowns: list[tuple[int, int]] = []
+    monkeypatch.setattr(hp.os, "chown", lambda *_a: pytest.fail("chown takes a swappable path"))
+    monkeypatch.setattr(hp.os, "fchown", lambda _fd, u, g: fchowns.append((u, g)))
 
     _driver().install(bearer_token=None)
 
     assert (driver_env.stat().st_mode & 0o777) == 0o600
-    assert (str(driver_env), 0, 0) in chowns
+    # Pinned through the temp file's descriptor before it replaces the old one (#2975).
+    assert (0, 0) in fchowns
 
 
 # ── $HAL0_HOME sandbox: the install path must not reach for the real /etc ───
