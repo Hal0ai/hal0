@@ -182,6 +182,19 @@ class MemoryGraphSlotInvalid(Hal0Error):
     status = 422
 
 
+class MemoryGraphModelInvalid(Hal0Error):
+    """Rejected: ``extraction_model`` is not a model any upstream advertises.
+
+    #2919 — the memory engine's upstream target must be an id hal0's own
+    ``/v1`` routes; an id no configured upstream lists would 404 every
+    engine call. Rejected with the pickable ids so the dashboard + CLI fail
+    fast and the config is left as it was.
+    """
+
+    code = "config.memory_graph_model_invalid"
+    status = 422
+
+
 class MemoryExtractionCtxTooSmall(Hal0Error):
     """The resolved extraction slot's effective window can't fit the extraction prompt (#1903).
 
@@ -675,6 +688,8 @@ async def update_graph_config(request: Request) -> dict[str, Any]:
             ) from exc
 
         slot_changed = new_cfg.extraction_slot != cfg.memory.graph.extraction_slot
+        model_changed = new_cfg.extraction_model != cfg.memory.graph.extraction_model
+        target_kind, _target_model = memory_engine_target(new_cfg)
         was_enabled = cfg.memory.graph.enabled
         timeout_changed = new_cfg.llm_timeout_s != cfg.memory.graph.llm_timeout_s
         new_limits = ExtractionLimits.from_config(new_cfg)
@@ -689,6 +704,19 @@ async def update_graph_config(request: Request) -> dict[str, Any]:
                 raise MemoryGraphSlotInvalid(
                     f"extraction_slot {new_cfg.extraction_slot!r} is not an enabled llm slot",
                     details={"available_slots": ", ".join(available)},
+                )
+
+        # #2919: an EXPLICIT upstream model must be one a configured upstream
+        # advertises (the dispatcher's models cache), else every engine call
+        # would 404. An empty cache (no upstreams wired) cannot refute the
+        # choice, so — as for a slot with no slot set known — it stands.
+        if model_changed and new_cfg.extraction_model:
+            pickable = [row["id"] for row in _available_upstream_models(request)]
+            if pickable and new_cfg.extraction_model not in pickable:
+                raise MemoryGraphModelInvalid(
+                    f"extraction_model {new_cfg.extraction_model!r} is not a model any "
+                    "configured upstream advertises",
+                    details={"available_models": pickable},
                 )
 
         # Whether this PUT needs to propagate to hindsight-api: an explicit
@@ -764,6 +792,9 @@ async def update_graph_config(request: Request) -> dict[str, Any]:
         # Echo the live status so the dashboard's optimistic-update path
         # gets the counters in the same round trip without a second fetch.
         out["status"] = wrapper.graph_status()
+        # #2919: what hal0/memory resolves to after this write — the engine
+        # picks it up on its next call, no restart.
+        out["target"] = {"kind": target_kind, "model": _target_model, "alias": MEMORY_ALIAS}
         if propagation is not None:
             out["propagation"] = propagation
 
@@ -774,8 +805,13 @@ async def update_graph_config(request: Request) -> dict[str, Any]:
     # gate or changing the slot measures; a timeout / limit change re-projects
     # the cached measurement without touching the slot. A slow slot is a
     # warning in the response, never a refusal.
+    # #2919: the probe measures the SLOT; with an upstream target there is no
+    # slot in play, so it is skipped rather than measured and reported for a
+    # lane the engine is not using.
     throughput: dict[str, Any] | None = None
-    if slot_changed or (new_cfg.enabled and not was_enabled):
+    if target_kind != "slot":
+        pass
+    elif slot_changed or (new_cfg.enabled and not was_enabled):
         throughput = (
             await _measure_throughput(request, new_cfg.extraction_slot, new_cfg)
         ).as_dict()

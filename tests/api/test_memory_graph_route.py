@@ -199,6 +199,154 @@ def test_graph_status_without_upstreams_has_an_empty_model_list(
     assert body["target"]["alias"] == "hal0/memory"
 
 
+# ── #2919: PUT switches the engine between a local slot and an upstream model ─
+
+
+def _app_with_minimax(stub_wrapper: StubWrapper) -> FastAPI:
+    from types import SimpleNamespace
+
+    app = _build_app(stub_wrapper, "agent", "utility")
+    app.state.upstreams = SimpleNamespace(
+        list=lambda: [SimpleNamespace(name="minimax", kind="remote", slot_name=None, pinned=False)]
+    )
+    app.state.upstream_models = {"minimax": ["MiniMax-M2.5", "MiniMax-M2.1"]}
+    return app
+
+
+_NO_ENGINE_LLM = {
+    "provider": None,
+    "base_url": None,
+    "model": None,
+    "overridden": False,
+    "override_file": None,
+    "override_keys": [],
+}
+
+
+def test_put_extraction_model_switches_to_an_upstream_without_restart(
+    stub_wrapper: StubWrapper, hal0_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Picking an upstream model is a config write: the drop-in already pins
+    hal0/memory, so nothing is rewritten and hindsight-api is not restarted;
+    the slot throughput preflight does not run either (no slot in play)."""
+    import hal0.memory.extraction_env as ee
+
+    drop_in = tmp_path / "extraction-model.conf"
+    drop_in.write_text(ee.render_drop_in(300), encoding="utf-8")
+    monkeypatch.setattr(ee, "DROP_IN_PATH", drop_in)
+    app = _app_with_minimax(stub_wrapper)
+    with (
+        TestClient(app) as client,
+        patch("hal0.memory.extraction_env.apply_extraction_slot") as apply_mock,
+        patch("hal0.memory.extraction_env.effective_engine_llm", return_value=_NO_ENGINE_LLM),
+    ):
+        r = client.put(
+            "/api/memory/graph", json={"enabled": True, "extraction_model": "MiniMax-M2.5"}
+        )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["extraction_model"] == "MiniMax-M2.5"
+    assert body["extraction_slot"] == "utility"  # kept for the way back
+    assert body["target"] == {"kind": "upstream", "model": "MiniMax-M2.5", "alias": "hal0/memory"}
+    assert "propagation" not in body
+    assert "throughput" not in body
+    apply_mock.assert_not_called()
+    assert stub_wrapper.set_calls == [(True, "utility")]
+
+
+def test_put_unknown_extraction_model_rejected(stub_wrapper: StubWrapper, hal0_home: Path) -> None:
+    app = _app_with_minimax(stub_wrapper)
+    with TestClient(app) as client:
+        r = client.put("/api/memory/graph", json={"extraction_model": "nope/unknown"})
+    assert r.status_code == 422, r.text
+    err = r.json()["error"]
+    assert err["code"] == "config.memory_graph_model_invalid"
+    assert "MiniMax-M2.5" in err["details"]["available_models"]
+    assert stub_wrapper.set_calls == []
+
+
+def test_put_extraction_model_accepted_when_no_catalog_is_known(
+    client: TestClient, stub_wrapper: StubWrapper, hal0_home: Path
+) -> None:
+    """No upstreams wired (bare app) means we cannot check the id — the
+    explicit operator choice stands, as it does for a slot with no slot set."""
+    with patch("hal0.memory.extraction_env.effective_engine_llm", return_value=_NO_ENGINE_LLM):
+        r = client.put("/api/memory/graph", json={"extraction_model": "openrouter/some-model"})
+    assert r.status_code == 200, r.text
+    assert r.json()["target"]["kind"] == "upstream"
+
+
+def test_put_extraction_model_null_returns_to_the_slot(
+    stub_wrapper: StubWrapper, hal0_home: Path
+) -> None:
+    app = _app_with_minimax(stub_wrapper)
+    with (
+        TestClient(app) as client,
+        patch("hal0.memory.extraction_env.effective_engine_llm", return_value=_NO_ENGINE_LLM),
+    ):
+        r1 = client.put("/api/memory/graph", json={"extraction_model": "MiniMax-M2.1"})
+        assert r1.json()["target"]["kind"] == "upstream"
+        r2 = client.put("/api/memory/graph", json={"extraction_model": None})
+    assert r2.status_code == 200, r2.text
+    body = r2.json()
+    assert body["extraction_model"] is None
+    assert body["target"] == {"kind": "slot", "model": "hal0/utility", "alias": "hal0/memory"}
+
+
+def test_put_reconciles_old_slot_drop_in_to_the_memory_alias(
+    client: TestClient,
+    stub_wrapper: StubWrapper,
+    hal0_home: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A box upgraded from the slot-carrying drop-in still has hal0/utility on
+    disk; the first enabled PUT rewrites it (once) so the engine starts
+    calling hal0/memory."""
+    import hal0.memory.extraction_env as ee
+
+    drop_in = tmp_path / "extraction-model.conf"
+    drop_in.write_text(
+        ee.render_drop_in(300).replace("hal0/memory", "hal0/utility"), encoding="utf-8"
+    )
+    monkeypatch.setattr(ee, "DROP_IN_PATH", drop_in)
+    with (
+        patch("hal0.memory.extraction_env.apply_extraction_slot") as apply_mock,
+        patch("hal0.memory.extraction_env.effective_engine_llm", return_value=_NO_ENGINE_LLM),
+    ):
+        apply_mock.return_value = {
+            "slot": "utility",
+            "model": "hal0/memory",
+            "written": True,
+            "error": None,
+        }
+        r = client.put("/api/memory/graph", json={"enabled": True})
+    assert r.status_code == 200, r.text
+    assert r.json()["propagation"]["written"] is True
+    apply_mock.assert_called_once_with("utility", timeout_s=300, limits=ExtractionLimits())
+
+
+def test_put_model_change_does_not_propagate_when_drop_in_is_current(
+    stub_wrapper: StubWrapper, hal0_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import hal0.memory.extraction_env as ee
+
+    drop_in = tmp_path / "extraction-model.conf"
+    drop_in.write_text(ee.render_drop_in(300), encoding="utf-8")
+    monkeypatch.setattr(ee, "DROP_IN_PATH", drop_in)
+    app = _app_with_minimax(stub_wrapper)
+    with (
+        TestClient(app) as client,
+        patch("hal0.memory.extraction_env.apply_extraction_slot") as apply_mock,
+        patch("hal0.memory.extraction_env.effective_engine_llm", return_value=_NO_ENGINE_LLM),
+    ):
+        client.put("/api/memory/graph", json={"enabled": True})
+        r = client.put("/api/memory/graph", json={"extraction_model": "MiniMax-M2.5"})
+        r3 = client.put("/api/memory/graph", json={"extraction_model": None})
+    assert r.status_code == 200 and r3.status_code == 200
+    apply_mock.assert_not_called()
+
+
 def test_put_enable_with_valid_slot(
     client: TestClient, stub_wrapper: StubWrapper, hal0_home: Path
 ) -> None:
