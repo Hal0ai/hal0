@@ -39,6 +39,12 @@ from hal0.agents.hermes_api import (
     served_profiles,
 )
 from hal0.agents.hermes_command_approvals import status as command_status
+from hal0.agents.hermes_doctor import (
+    check_hermes_gateway_unit,
+    check_hermes_ownership,
+    check_hermes_plugins,
+    check_hermes_sqlite,
+)
 from hal0.agents.hermes_platforms import configured_platform_names
 from hal0.agents.hermes_provision import _HAL0_AGENTENV, HERMES_SECRETS_ENV, HERMES_VENV_DEFAULT
 from hal0.agents.hermes_release import (
@@ -56,15 +62,8 @@ from hal0.api.agents.restart import unit_is_active
 from hal0.api.routes import agents as agents_routes
 from hal0.api.routes.approvals import _queue
 from hal0.api.routes.updater import _update_jobs
-from hal0.cli.doctor_all import check_hermes_gateway_unit
-from hal0.cli.doctor_commands import (
-    check_hermes_ownership,
-    check_hermes_plugins,
-    check_hermes_sqlite,
-)
 from hal0.components.status import component_status_snapshot
 from hal0.config import paths
-from hal0.health_report import Check
 from hal0.services.systemd import unit_state
 
 log = structlog.get_logger(__name__)
@@ -93,9 +92,6 @@ _HINDSIGHT_HEALTH_URL: Final[str] = "http://127.0.0.1:9177/health"
 #: not terminal.
 _HERMES_JOB_PHASES: Final[frozenset[str]] = frozenset({"converge:hermes", "repair:hermes"})
 _ACTIVE_JOB_STATES: Final[frozenset[str]] = frozenset({"queued", "running"})
-
-#: ``health_report.Check.status`` to the doctor-row vocabulary.
-_CHECK_STATUS: Final[dict[str, str]] = {"pass": "ok", "warn": "warn", "fail": "fail"}
 
 #: Pins reported to the profile checks when the installer script cannot be read.
 _UNKNOWN_PINS: Final[dict[str, str]] = {"pi": "unknown", "adapter": "unknown"}
@@ -293,12 +289,6 @@ def _absent(detail: str | None) -> dict[str, str]:
     return {"status": "absent", "detail": detail or "check unavailable"}
 
 
-def _gateway_unit_row(check: Check | None, error: str | None) -> dict[str, str]:
-    if check is None:
-        return _absent(error)
-    return {"status": _CHECK_STATUS.get(check.status, "warn"), "detail": check.detail}
-
-
 def _installed_record(name: str) -> AgentRecord | None:
     return next((rec for rec in agents_routes._manager().list() if rec.name == name), None)
 
@@ -362,7 +352,7 @@ async def _gather_hermes(request: Request) -> dict[str, Any]:
         sqlite or _absent(sqlite_err),
         plugins or _absent(plugins_err),
         ownership or [],
-        _gateway_unit_row(gateway_check, gateway_check_err),
+        gateway_check or _absent(gateway_check_err),
     )
     if ownership_err is not None:
         doctor = [

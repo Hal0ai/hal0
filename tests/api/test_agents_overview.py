@@ -11,6 +11,9 @@ or the real Hermes tree.
 from __future__ import annotations
 
 import json
+import os
+import subprocess
+import sys
 from collections.abc import Callable, Iterator
 from pathlib import Path
 from types import SimpleNamespace
@@ -160,9 +163,10 @@ def _patch_hermes_ready(
         "check_hermes_ownership": lambda **kw: [
             {"path": "/h", "label": "HERMES_HOME tree", "status": "ok", "detail": "owned by hal0"}
         ],
-        "check_hermes_gateway_unit": lambda: SimpleNamespace(
-            status="pass", detail="hermes-gateway.service installed"
-        ),
+        "check_hermes_gateway_unit": lambda: {
+            "status": "ok",
+            "detail": "hermes-gateway.service installed",
+        },
         "command_status": lambda: {
             "mode": "smart",
             "effective": "smart",
@@ -443,3 +447,24 @@ def test_overview_provision_report_not_older_than_the_build_still_degrades(
     assert body["provision"]["stale"] is False
     assert [r["reason"] for r in body["degraded"]] == ["provision_failed"]
     assert body["phase"] == "degraded"
+
+
+def test_overview_route_does_not_import_hal0_cli():
+    """The API layer never imports ``hal0.cli`` (see ``hal0.health_report``).
+
+    A fresh interpreter, because this process has imported the CLI for other tests.
+    """
+    code = (
+        "import sys, hal0.api.agents.overview; "
+        "print('\\n'.join(sorted(m for m in sys.modules if m.startswith('hal0.cli'))))"
+    )
+    proc = subprocess.run(
+        [sys.executable, "-c", code],
+        env={**os.environ, "PYTHONPATH": os.pathsep.join(sys.path)},
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=True,
+    )
+    loaded = [line for line in proc.stdout.splitlines() if line.startswith("hal0.cli")]
+    assert loaded == []

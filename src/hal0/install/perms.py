@@ -1206,7 +1206,7 @@ def audit_rows(plan_: OwnershipPlan) -> list[dict[str, str]]:
     """Render an :class:`OwnershipPlan` as ``doctor``-style audit rows.
 
     Uses the same ``ok`` / ``drift`` / ``absent`` status vocabulary as
-    :func:`hal0.cli.doctor_commands.check_hermes_ownership` so the renderer is
+    :func:`hal0.agents.hermes_doctor.check_hermes_ownership` so the renderer is
     shared.
     """
     rows: list[dict[str, str]] = []
