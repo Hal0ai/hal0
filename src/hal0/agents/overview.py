@@ -293,9 +293,10 @@ def degraded_reasons(
     could not read Hermes' home) is a read error, not a missing unit, and has
     no fix. ``in_sync`` of ``None`` (Hermes not provisioned) is not
     drift. A ``provision`` marked ``stale`` (its report predates the live
-    release, which ``hal0 update`` rebuilds without rewriting
-    ``provision.json``) raises neither ``provision_failed`` nor
-    ``provision_warn``.
+    release) raises neither ``provision_failed`` nor ``provision_warn``, and
+    neither does any single phase marked ``stale``: ``hal0 update`` rewrites
+    only the ``install`` phase after a build (#2914), so the others can
+    predate the live release while the report as a whole does not.
     """
     reasons: list[dict[str, Any]] = []
     gateway = units.get("gateway") or "unknown"
@@ -314,7 +315,17 @@ def degraded_reasons(
 
     stale = bool(provision.get("stale"))
     phases = provision.get("phases") or []
-    failed = 0 if stale else provision.get("fail", 0)
+    if any(p.get("stale") for p in phases):
+        # Some phases predate the live release (a converge refreshed only
+        # ``install``): count the current ones alone.
+        phases = [p for p in phases if not p.get("stale")]
+        failed = sum(1 for p in phases if p.get("status") == "fail")
+        warned = any(p.get("status") == "warn" for p in phases)
+    else:
+        failed = provision.get("fail", 0)
+        warned = bool(provision.get("warn"))
+    if stale:
+        failed, warned = 0, False
     if failed:
         names = [p["name"] for p in phases if p.get("status") == "fail"]
         detail = f"{failed} provision phase(s) failed"
@@ -323,7 +334,7 @@ def degraded_reasons(
                 "provision_failed", f"{detail}: {', '.join(names)}" if names else detail, "repair"
             )
         )
-    if not stale and (provision.get("warn") or any(p.get("failure_count") for p in phases)):
+    if not stale and (warned or any(p.get("failure_count") for p in phases)):
         reasons.append(
             _reason("provision_warn", "the last provision run recorded warnings", "none")
         )

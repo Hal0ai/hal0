@@ -466,6 +466,35 @@ def test_overview_provision_report_not_older_than_the_build_still_degrades(
     assert body["phase"] == "degraded"
 
 
+def test_overview_phases_older_than_the_build_stay_quiet_after_a_converge_refresh(
+    client_ready, monkeypatch, tmp_path
+):
+    """#2914: `hal0 update` rewrites only the install phase, after the build.
+
+    The report is then newer than the build as a whole, but the phases the
+    converge did not run still predate it; their old failure must not degrade
+    the card any more than it did before the refresh.
+    """
+    _provision_and_build(
+        monkeypatch, tmp_path, report_at="2026-10-21T23:49:54Z", built_at="2026-10-22T02:19:58Z"
+    )
+    path = tmp_path / "provision.json"
+    data = json.loads(path.read_text())
+    data["phases"] = {
+        "install": {"status": "ok", "at": "2026-10-22T02:20:30Z"},
+        "smoke_tests": {"status": "fail", "at": "2026-10-21T23:50:00Z"},
+    }
+    path.write_text(json.dumps(data))
+    body = client_ready.get("/api/agents/hermes/overview").json()
+    provision = body["provision"]
+    assert provision["stale"] is False
+    assert [(p["name"], p["stale"]) for p in provision["phases"]] == [
+        ("install", False),
+        ("smoke_tests", True),
+    ]
+    assert body["degraded"] == [] and body["phase"] == "ready"
+
+
 def test_overview_route_does_not_import_hal0_cli():
     """The API layer never imports ``hal0.cli`` (see ``hal0.health_report``).
 

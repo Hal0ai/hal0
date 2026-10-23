@@ -498,3 +498,120 @@ def test_heal_routes_through_update_seam_by_default(tmp_path, monkeypatch) -> No
     )
     assert seen == [["sudo", "-n", privileged.SEAM_BIN, "hermes-gateway"]]
     assert "sudo hal0 agent install hermes" in result["detail"][0]
+
+
+# ── #2914: a converge refreshes provision.json's install phase ───────────────
+#
+# `hal0 update` rebuilds Hermes through this converge, but the last-run report
+# was only ever written by the provisioning pipeline, so an `install: fail` from
+# an earlier bootstrap outlived the build that fixed it.
+
+
+def _failed_bootstrap_report(*, other_status: str = "ok"):
+    path = var_lib() / "state" / "agents" / "hermes" / "provision.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {
+                "hal0_version": "1.5.0",
+                "hermes_version": "old",
+                "completed_at": None,
+                "repair": False,
+                "phases": {
+                    "preflight": {"status": "ok", "at": "2026-10-21T23:49:00Z", "changed": False},
+                    "install": {
+                        "status": "fail",
+                        "at": "2026-10-21T23:49:54Z",
+                        "changed": False,
+                        "reason": "hermes release build_failed: pip exited 1",
+                    },
+                    "smoke_tests": {
+                        "status": other_status,
+                        "at": "2026-10-21T23:50:00Z",
+                        "changed": False,
+                    },
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    return path
+
+
+def test_an_upgrade_refreshes_a_failed_install_phase(tmp_path) -> None:
+    path = _failed_bootstrap_report()
+    venv = _venv(tmp_path)
+    with (
+        patch(
+            "hal0.agents.hermes_release.ensure_release",
+            return_value=_outcome(status="activated", release_id="r1", ref=PIN),
+        ),
+        patch.object(hermes_arm, "_heal_gateway_unit"),
+    ):
+        res = hermes_arm.converge_hermes(venv=venv, is_hal0_user=lambda: True)
+    assert res["status"] == "upgraded"
+    data = json.loads(path.read_text())
+    install = data["phases"]["install"]
+    assert install["status"] == "ok"
+    assert install["details"]["release"] == "r1"
+    assert "reason" not in install
+    assert data["completed_at"] is not None
+    assert data["hermes_version"] == hp._hermes_version_pin()
+    # The phases the converge did not run are left as the bootstrap wrote them.
+    assert data["phases"]["preflight"]["at"] == "2026-10-21T23:49:00Z"
+
+
+def test_a_converged_box_heals_a_failed_install_left_by_an_earlier_run(tmp_path) -> None:
+    """The box from the report: already rebuilt, so every later update is converged."""
+    path = _failed_bootstrap_report()
+    venv = _live_release()
+    with (
+        patch("hal0.agents.hermes_release.ensure_release") as ensure,
+        patch.object(hermes_arm, "_heal_gateway_unit"),
+        patch.object(hermes_arm, "_config_backstop"),
+    ):
+        assert hermes_arm.converge_hermes(venv=venv)["status"] == "converged"
+    ensure.assert_not_called()
+    install = json.loads(path.read_text())["phases"]["install"]
+    assert install["status"] == "ok"
+    assert install["details"]["release"] == f"{PIN[:12]}-20261021T000000Z"
+
+
+def test_a_refresh_keeps_completed_at_null_while_another_phase_failed(tmp_path) -> None:
+    path = _failed_bootstrap_report(other_status="fail")
+    venv = _live_release()
+    with (
+        patch.object(hermes_arm, "_heal_gateway_unit"),
+        patch.object(hermes_arm, "_config_backstop"),
+    ):
+        hermes_arm.converge_hermes(venv=venv)
+    data = json.loads(path.read_text())
+    assert data["phases"]["install"]["status"] == "ok"
+    assert data["phases"]["smoke_tests"]["status"] == "fail"
+    assert data["completed_at"] is None
+
+
+def test_diagnose_and_failed_builds_leave_the_report_alone(tmp_path) -> None:
+    path = _failed_bootstrap_report()
+    before = path.read_text()
+    venv = _live_release(ref="f" * 40)
+    assert hermes_arm.converge_hermes(venv=venv, apply=False)["status"] == "stale"
+    assert path.read_text() == before
+    with patch(
+        "hal0.agents.hermes_release.ensure_release",
+        return_value=_outcome(status="build_failed", error="pip exited 1"),
+    ):
+        res = hermes_arm.converge_hermes(venv=venv, is_hal0_user=lambda: True)
+    assert res["status"] == "build_failed"
+    assert path.read_text() == before
+
+
+def test_a_converge_without_a_report_writes_none(tmp_path) -> None:
+    """No bootstrap ran, so there is no report to refresh and none is invented."""
+    venv = _live_release()
+    with (
+        patch.object(hermes_arm, "_heal_gateway_unit"),
+        patch.object(hermes_arm, "_config_backstop"),
+    ):
+        hermes_arm.converge_hermes(venv=venv)
+    assert not (var_lib() / "state" / "agents" / "hermes" / "provision.json").exists()

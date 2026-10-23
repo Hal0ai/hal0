@@ -517,10 +517,11 @@ def _active_job(request: Request) -> dict[str, str] | None:
 def _provision_view(provision_raw: dict[str, Any] | None, live: Release | None) -> dict[str, Any]:
     """The provision summary, marked ``stale`` when the live release postdates the report.
 
-    ``provision.json`` is written by the bootstrap pipeline only; the converge
-    that ``hal0 update`` runs rebuilds Hermes and leaves it alone, so a failed
-    phase can outlive the build that failed. A time that does not parse never
-    marks the report stale.
+    ``provision.json`` is written by the bootstrap pipeline; the converge that
+    ``hal0 update`` runs rebuilds Hermes and rewrites only the ``install``
+    phase (#2914), so the other phases can predate the live release. Each
+    phase is marked ``stale`` when it does, and the report as a whole when its
+    newest phase does. A time that does not parse never marks anything stale.
     """
     provision = builders.provision_summary(provision_raw)
     built_at = live.data.get("built_at") if live is not None else None
@@ -528,6 +529,9 @@ def _provision_view(provision_raw: dict[str, Any] | None, live: Release | None) 
     reported = builders.parse_timestamp(provision["reported_at"])
     provision["live_built_at"] = built_at
     provision["stale"] = built is not None and reported is not None and built > reported
+    for phase in provision["phases"]:
+        at = builders.parse_timestamp(phase["at"])
+        phase["stale"] = built is not None and at is not None and built > at
     return provision
 
 

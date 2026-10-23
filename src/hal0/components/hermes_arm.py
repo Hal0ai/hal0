@@ -235,6 +235,38 @@ def _heal_gateway_unit(
         result["detail"] = [*result.get("detail", []), note]
 
 
+def _refresh_provision_report(
+    *, layout: Any, release_id: str | None, changed: bool, job_id: str | None
+) -> None:
+    """Record the live release in ``provision.json``'s ``install`` phase (#2914).
+
+    The converge is the build half of the provisioner's ``install`` step, but
+    only the provisioner wrote the report, so a failed ``install`` from an
+    earlier bootstrap outlived the build that fixed it and ``hal0 agent
+    status`` reported a failed install on a healthy box. Runs only once the
+    converge left a release live on the pin. Never fails the converge.
+    """
+    from hal0.agents import hermes_provision as hermes
+    from hal0.agents import hermes_release as rel
+
+    try:
+        if release_id is None:
+            live = rel.live_release(layout)
+            release_id = live.id if live is not None else None
+        if release_id is None:
+            return
+        if hermes.record_converged_release(
+            release_id, state_root=_provision_checkpoint_path().parent, changed=changed
+        ):
+            log.info(
+                "components.hermes_provision_report_refreshed", job_id=job_id, release=release_id
+            )
+    except Exception as exc:
+        log.warning(
+            "components.hermes_provision_report_refresh_failed", job_id=job_id, error=str(exc)
+        )
+
+
 def converge_hermes(
     *,
     job_id: str | None = None,
@@ -290,6 +322,7 @@ def converge_hermes(
         if apply:
             _config_backstop(result, job_id=job_id)
             _heal_gateway_unit(result, layout=layout, job_id=job_id)
+            _refresh_provision_report(layout=layout, release_id=None, changed=False, job_id=job_id)
         return {**result, "status": "converged"}
     result["trigger"] = trigger
     if not apply:
@@ -332,6 +365,9 @@ def converge_hermes(
     if outcome.status == "converged":
         _config_backstop(result, job_id=job_id)
         _heal_gateway_unit(result, layout=layout, job_id=job_id)
+        _refresh_provision_report(
+            layout=layout, release_id=outcome.release_id, changed=False, job_id=job_id
+        )
         return {**result, "status": "converged"}
 
     log.info(
@@ -352,4 +388,7 @@ def converge_hermes(
     if outcome.warnings:
         out["detail"] = list(outcome.warnings)
     _heal_gateway_unit(out, layout=layout, job_id=job_id)
+    _refresh_provision_report(
+        layout=layout, release_id=outcome.release_id, changed=True, job_id=job_id
+    )
     return out
