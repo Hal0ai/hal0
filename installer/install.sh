@@ -2829,9 +2829,9 @@ fi
 #      missing libxrt only degrades the host probe — the container image
 #      bundles its own runtime.
 #
-#   2. FLM transitive runtime libs (ffmpeg for the audio-transcribe path,
-#      libboost-program-options for CLI parsing, libfftw3 for signal
-#      processing). NOT hand-installed — the per-distro .deb (3.) declares the
+#   2. FLM transitive runtime libs (libboost-program-options for CLI
+#      parsing, libedit for the interactive prompt; FLM dropped ffmpeg and
+#      fftw in 1.0). NOT hand-installed — the per-distro .deb (3.) declares the
 #      exact versions for its release, and `apt-get install ./deb` pulls them
 #      from the host's repos. (Hardcoding the ffmpeg6 SONAMEs was the old bug:
 #      they don't exist on ffmpeg7/8 hosts like Ubuntu 25.10+/26.04.)
@@ -2843,26 +2843,28 @@ fi
 # Refs: ADR-0009 (FLM trio NPU packing).
 ui_step "NPU prerequisites (FastFlowLM)" "~10-60s (apt hosts only)"
 
-# Pinned FLM .deb — bump in lockstep with ADR-0009 and the toolbox image
-# tag in manifest.json (both 0.9.44 as of v0.9.6). NOTE (since 0.9.43):
+# Pinned FLM .deb — bump in lockstep with ADR-0009 and the flm runner
+# image tag in manifest.json (both 1.0.10 as of v1.6.1). NOTE (since 0.9.43):
 # FLM rejects a CLI flag passed twice, so FLMProvider.container_spec must
 # never repeat a mode flag (--asr/--embed) the model already implies.
-FLM_DEB_VERSION="0.9.44"
+FLM_DEB_VERSION="1.0.10"
 # Upstream ships a SEPARATE .deb per distro, each built against that release's
-# ffmpeg/boost ABI: ubuntu24.04 (ffmpeg6/boost1.83), ubuntu25.10 + ubuntu26.04
-# (ffmpeg7/8 / boost1.90), and debian13. Pick the artefact matching THIS host
-# so `apt-get install ./deb` resolves the .deb's ffmpeg/boost/fftw deps from the
+# boost/libedit ABI: ubuntu24.04 (boost1.83), ubuntu25.10 + ubuntu26.04
+# (boost1.90), and debian13. Pick the artefact matching THIS host so
+# `apt-get install ./deb` resolves the .deb's boost/libedit/libxrt deps from the
 # host's own repos — no hardcoded SONAME list, and newer Ubuntu is first-class.
+# Since 1.0 FLM no longer links ffmpeg or fftw, and the 1.0.10 .deb needs
+# libxrt2 >= 2.25.0 (the lemonade-team PPA below ships it).
 # (Older installers pinned ONLY the ubuntu24.04 build and then had to SKIP host
 # FastFlowLM on every ffmpeg>=7 distro — even though the matching build existed.)
-# SHA-256 pinned per artefact, verified on download 2026-06-15; if upstream
+# SHA-256 pinned per artefact, verified on download 2026-10-23; if upstream
 # rebuilds under the same tag these drift — bump in lockstep with FLM_DEB_VERSION.
 _flm_sha_for_suffix() {
     case "$1" in
-        ubuntu24.04) echo "ce51f73da998e7b3b3ec21851a4450087f05d9a446108cc2d18a5355872c2800" ;;
-        ubuntu25.10) echo "b58ca7875d5e462ff53d84145987f81a4855a577b72efedde389768fcd93ad15" ;;
-        ubuntu26.04) echo "5eeb7fffc62f44260d1d562749bde56e1e7ade7940c3764765cf8933bac67ac3" ;;
-        debian13)    echo "2a56c2d4447642968ce1698252d983e2ffc4f2169071307a295cf681b54cf9af" ;;
+        ubuntu24.04) echo "1f6cd57b92f3685fc83d23b87551152d073c66d5abf58de07cdc3b7de779b82d" ;;
+        ubuntu25.10) echo "45c3385cc41ade8436931ff8b2ea96ee2de6e80944c46ada180da6af57ea5e38" ;;
+        ubuntu26.04) echo "e63cd8109ebc8890b464d3cece9ebea969726cbf73901232eb5a9f9fac7fe617" ;;
+        debian13)    echo "1ecf6eb742126d0ed48bcd0143b48532b4e5694eacf207c4e3f57c0e5ea94693" ;;
     esac
 }
 # Resolve host distro -> .deb suffix. For Ubuntu, pick the HIGHEST shipped build
@@ -2884,14 +2886,14 @@ case "$(distro_id)" in
     debian) FLM_DEB_SUFFIX="debian13" ;;
 esac
 FLM_DEB_SHA256="$(_flm_sha_for_suffix "${FLM_DEB_SUFFIX}")"
-FLM_DEB_URL="https://github.com/FastFlowLM/FastFlowLM/releases/download/v${FLM_DEB_VERSION}/fastflowlm_${FLM_DEB_VERSION}_${FLM_DEB_SUFFIX}_amd64.deb"
+FLM_DEB_URL="https://github.com/ROCm/FastFlowLM/releases/download/v${FLM_DEB_VERSION}/fastflowlm_${FLM_DEB_VERSION}_${FLM_DEB_SUFFIX}_amd64.deb"
 
 if [[ "${DEV_MODE}" -eq 1 ]]; then
     # Dev installs don't touch the host's apt or third-party package
     # sources — devs install once manually (see installer/README.md).
     # We still log what *would* have happened so the dev knows the gap
     # exists for production installs.
-    info "dev mode — skipping NPU prereqs (libxrt-npu2 + per-distro FastFlowLM .deb v${FLM_DEB_VERSION} + its ffmpeg/boost/fftw deps)"
+    info "dev mode — skipping NPU prereqs (libxrt-npu2 + per-distro FastFlowLM .deb v${FLM_DEB_VERSION} + its boost/libedit deps)"
     info "          install manually if exercising NPU paths: see installer/README.md"
 elif ! command -v apt-get >/dev/null 2>&1; then
     # Non-Debian host (Fedora, Arch/CachyOS, openSUSE…). FastFlowLM upstream
@@ -2916,7 +2918,7 @@ else
 
     # FLM host-support gate. Upstream now ships a per-distro .deb (ubuntu24.04 /
     # ubuntu25.10 / ubuntu26.04 / debian13), each pinned against that release's
-    # ffmpeg/boost ABI — so the host probe works on ffmpeg6/7/8 alike. The
+    # boost/libedit ABI — so the host probe works on every listed distro. The
     # resolution above set FLM_DEB_SUFFIX iff a matching build exists; when it
     # didn't, skip host-FLM with ONE honest line. The npu CONTAINER slot bundles
     # its own runtime, so NPU inference is unaffected — only the host `flm
@@ -2962,11 +2964,10 @@ else
         warn "  the npu container slot bundles its own XRT runtime and is unaffected"
     fi
 
-    # NB: the FLM ffmpeg/boost/fftw runtime libs are NOT pre-installed by hand
-    # anymore — `apt-get install ./fastflowlm_*.deb` (below) pulls the exact
-    # versions THIS .deb declares from the host's repos. That's why the build
-    # must match the host distro: it's what makes the dep resolution clean on
-    # ffmpeg7/8 hosts instead of demanding the ffmpeg6 SONAMEs that don't exist.
+    # NB: the FLM runtime libs are NOT pre-installed by hand anymore —
+    # `apt-get install ./fastflowlm_*.deb` (below) pulls the exact versions
+    # THIS .deb declares from the host's repos. That's why the build must match
+    # the host distro: each distro's boost and libedit SONAMEs differ.
 
     # 3. FLM .deb. Fail-soft: if upstream is unreachable or the SHA-256
     #    doesn't match, warn + skip. NPU paths gate on `flm validate`
