@@ -56,6 +56,7 @@ from hal0.dispatcher._capability_resolve import (
     LegacyResolutionFailed,
     guard_capability_mismatch,
     resolve_by_capability,
+    select_slot_by_type,
 )
 from hal0.dispatcher.lane_pin import lane_slot_pin, rank_slot_name, upstream_only_model
 from hal0.dispatcher.single_flight import SingleFlightGroup
@@ -951,7 +952,12 @@ class Dispatcher:
 
         # ── Step 4: capability/path routing ──────────────────────────────
         try:  # TIER1 — narrow exception handling; log + re-raise typed errors
-            slot_upstream = resolve_by_capability(path, body, self._upstreams)
+            slot_upstream = resolve_by_capability(
+                path,
+                body,
+                self._upstreams,
+                tts_slot=await self._tts_slot_for(path, original_model),
+            )
         except LegacyResolutionFailed as exc:
             # Bubble the typed error up after logging the decision point.
             log.warning(
@@ -1737,6 +1743,28 @@ class Dispatcher:
         return "idle"
 
     # ── internals ────────────────────────────────────────────────────────
+
+    async def _tts_slot_for(self, path: str, model: str) -> str | None:
+        """Serving ``type = "tts"`` slot for a speech request, picked by type (#2784).
+
+        ``None`` off the speech path or when there is no slot manager / no
+        qualifying slot, which leaves rule 3 on the seeded ``tts`` name.
+        """
+        if "/audio/speech" not in path or self._slot_manager is None:
+            return None
+        try:
+            configs = await self._slot_manager.iter_configs()
+        except Exception:  # TIER2 — slot inventory is best-effort; keep the name pin
+            log.warning("dispatch.tts_slot_inventory_failed", path=path)
+            return None
+        return select_slot_by_type(
+            configs,
+            "tts",
+            model,
+            seeded_name=_TTS_DEFAULT,
+            is_serving=self._slot_manager.is_ready_for_dispatch,
+            advertised=lambda name: self._cached_models(name),
+        )
 
     def _default_for_path(self, path: str) -> str:
         if "/embeddings" in path:
