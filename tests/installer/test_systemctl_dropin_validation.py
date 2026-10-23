@@ -26,7 +26,7 @@ from pathlib import Path
 import pytest
 
 from hal0.agents.hermes_provision import _gateway_dropin_body
-from hal0.memory.extraction_env import render_drop_in
+from hal0.memory.extraction_env import ExtractionLimits, render_drop_in
 
 REPO = Path(__file__).resolve().parents[2]
 WRAPPER = REPO / "installer" / "wrappers" / "hal0-systemctl"
@@ -83,13 +83,30 @@ def test_both_write_arms_validate_before_writing() -> None:
 
 
 def test_live_hindsight_body_is_accepted_byte_for_byte() -> None:
-    _accepts("hindsight", render_drop_in("chat"))
+    # #2919: the body pins the fixed alias hal0/memory (no slot in the file);
+    # the wrapper's `^hal0/…$` allow-list is exactly what lets that work with
+    # no installer change — pin it here against the shipped bash.
+    _accepts("hindsight", render_drop_in())
 
 
-@pytest.mark.parametrize("slot", ["chat", "graph-extract", "slot_1", "Mixed-Case"])
+@pytest.mark.parametrize(
+    "limits",
+    [
+        ExtractionLimits(),
+        ExtractionLimits(
+            max_concurrent=8, max_tokens=32768, llm_retries=5, task_retries=10, retry_backoff_s=3600
+        ),
+        ExtractionLimits(
+            max_concurrent=2, max_tokens=3072, llm_retries=0, task_retries=0, retry_backoff_s=10
+        ),
+    ],
+    ids=["defaults", "ceilings", "floors"],
+)
 @pytest.mark.parametrize("timeout_s", [300, 60, 1800])
-def test_live_hindsight_body_variants_are_accepted(slot: str, timeout_s: int) -> None:
-    _accepts("hindsight", render_drop_in(slot, timeout_s))
+def test_live_hindsight_body_variants_are_accepted(
+    timeout_s: int, limits: ExtractionLimits
+) -> None:
+    _accepts("hindsight", render_drop_in(timeout_s, limits=limits))
 
 
 def test_live_gateway_body_is_accepted_byte_for_byte() -> None:
@@ -156,7 +173,7 @@ def test_gateway_body_is_not_accepted_as_a_hindsight_dropin() -> None:
 
 
 def test_hindsight_body_is_not_accepted_as_a_gateway_dropin() -> None:
-    _rejects("gateway", render_drop_in("chat"))
+    _rejects("gateway", render_drop_in())
 
 
 def test_unknown_kind_is_refused() -> None:
