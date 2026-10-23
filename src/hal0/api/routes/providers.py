@@ -29,7 +29,7 @@ import structlog
 from fastapi import APIRouter, Request
 from pydantic import BaseModel, Field, ValidationError
 
-from hal0.api._env_store import upsert_env_value
+from hal0.api._env_store import is_process_control_env, upsert_env_value
 from hal0.api._redact import redact_config
 from hal0.api.middleware.error_codes import Hal0Error
 from hal0.config import paths
@@ -74,6 +74,36 @@ class UpstreamConflictHTTP(Hal0Error):
 class UpstreamInvalidHTTP(Hal0Error):
     code = "upstream.invalid"
     status = 400
+
+
+def _reserved_env_name_reason(key: str) -> str | None:
+    """Why ``key`` may not hold an upstream credential, or None when it may (#2936).
+
+    ``api.env`` is hal0-api's own environment file: a loader or interpreter
+    variable there runs code in every process hal0-api starts, and a
+    ``HAL0_*`` name is hal0's own service configuration and auth keys
+    (#1450), which ``/api/secrets`` already refuses.
+    """
+    from hal0.api.routes.secrets import is_protected_secret
+
+    if is_process_control_env(key):
+        return "process_control"
+    if is_protected_secret(key):
+        return "hal0_reserved"
+    return None
+
+
+def _check_auth_value_env(value: str | None, *, name: str) -> None:
+    """Refuse an upstream ``auth_value_env`` the credentials route would refuse."""
+    if not value:
+        return
+    reason = _reserved_env_name_reason(value.strip())
+    if reason is not None:
+        raise UpstreamInvalidHTTP(
+            f"auth_value_env {value!r} is reserved ({reason}) and cannot name an "
+            "upstream credential",
+            details={"name": name, "auth_value_env": value, "reason": reason},
+        )
 
 
 class ProviderCredentialError(Hal0Error):
@@ -247,6 +277,7 @@ async def create_upstream(body: UpstreamCreateBody, request: Request) -> dict[st
         prefilled = prefill.get(field)
         return prefilled if prefilled is not None else default
 
+    _check_auth_value_env(pick("auth_value_env", ""), name=name)
     url = pick("url")
     if not url:
         raise UpstreamInvalidHTTP(
@@ -388,6 +419,9 @@ async def patch_upstream(name: str, body: UpstreamPatchBody, request: Request) -
             f"structural fields are managed by the slot lifecycle",
             details={"name": name, "fields": structural_requested},
         )
+
+    if "auth_value_env" in fields:
+        _check_auth_value_env(fields["auth_value_env"], name=name)
 
     if not fields:
         # Nothing to do — but echo the current state so a no-op PATCH
@@ -603,6 +637,15 @@ async def write_provider_credential(
             "key must be an ALL_CAPS env-var name "
             "(letters, digits, underscores; no leading digit, no shell metacharacters)",
             details={"key": key},
+        )
+    # #2936: same refusals as /api/secrets — no loader or interpreter
+    # variable and no HAL0_* service key lands in hal0-api's environment
+    # through a credential, whatever auth_value_env the upstream declares.
+    reason = _reserved_env_name_reason(key)
+    if reason is not None:
+        raise ProviderCredentialError(
+            f"key {key!r} is reserved ({reason}) and cannot hold a credential",
+            details={"key": key, "reason": reason},
         )
 
     # Bind the credential to the upstream's declared env-var. Catches

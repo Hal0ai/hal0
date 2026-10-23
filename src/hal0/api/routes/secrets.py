@@ -48,6 +48,7 @@ from pydantic import BaseModel, Field
 
 from hal0.api._env_store import (
     delete_env_value,
+    is_process_control_env,
     list_env_keys,
     upsert_env_value,
 )
@@ -248,6 +249,15 @@ def _validate_value(value: str, key: str) -> None:
 async def _set_secret(name: str, body: SecretBody, request: Request) -> Response:
     """Shared set/overwrite implementation for POST + PUT."""
     key = _validate_mutable(name)
+    # #2936: a loader or interpreter variable is not a secret. Set-only: DELETE
+    # still accepts these names so an entry planted before this check can be
+    # removed from the same panel.
+    if is_process_control_env(key):
+        raise SecretProtected(
+            f"{key!r} controls how hal0-api and every process it starts load code "
+            "or find programs, so it cannot be stored as a secret",
+            details={"name": key, "protected": True, "reason": "process_control"},
+        )
     _validate_value(body.value, key)
 
     api_env = _api_env()

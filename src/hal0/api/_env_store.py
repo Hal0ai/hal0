@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import contextlib
 import os
+import re
 import tempfile
 from pathlib import Path
 
@@ -33,6 +34,54 @@ from hal0.config import paths
 # a phantom ``KEY=value`` entry on round-trip — even the higher-codepoint
 # ones (NEL/LS/PS) that a ``< 0x20`` byte check misses. We refuse them all.
 _LINE_BREAK_CHARS = frozenset("\n\r\v\f\x1c\x1d\x1e\x85\u2028\u2029")
+
+#: Names that steer how a process loads code or resolves programs rather than
+#: carry a credential (#2936). ``api.env`` is hal0-api's own
+#: ``EnvironmentFile=`` and every write also lands in the live
+#: ``os.environ``, so each child hal0-api spawns (model pulls, the Hermes
+#: provisioner, update and converge helpers) inherits the value, and hal0-api
+#: itself starts with it after a restart: ``LD_PRELOAD`` runs arbitrary code
+#: as ``hal0``, a wrong ``PATH`` or ``PYTHONPATH`` wedges the daemon. The sudo
+#: seam resets the environment, so none of this reaches root.
+PROCESS_CONTROL_ENV_NAMES = frozenset(
+    {
+        "PATH",
+        "HOME",
+        "SHELL",
+        "IFS",
+        "ENV",
+        "BASH_ENV",
+        "NODE_OPTIONS",
+        "PERL5OPT",
+        "RUBYOPT",
+        "GCONV_PATH",
+        "PERL5LIB",
+        "NODE_PATH",
+        "NODE_EXTRA_CA_CERTS",
+        # bash runs ``PS4`` (command substitution included) on every xtrace
+        # line, and SHELLOPTS/BASHOPTS can switch xtrace on in a child shell.
+        "SHELLOPTS",
+        "BASHOPTS",
+        "PS4",
+        # Redirects where hal0's Hermes helpers read and write its .env.
+        "HERMES_HOME",
+    }
+)
+#: Prefix families with the same effect: the dynamic loader (``LD_*``,
+#: ``DYLD_*``), the interpreters and installers hal0's children run
+#: (``PYTHON*``, ``UV_*``, ``PIP_*``, ``NPM_CONFIG_*`` for the Hermes web
+#: build's npm) and git (``GIT_SSH_COMMAND`` and the rest).
+PROCESS_CONTROL_ENV_PREFIXES = ("LD_", "DYLD_", "PYTHON", "UV_", "PIP_", "NPM_CONFIG_", "GIT_")
+
+# A key ``upsert_env_value`` will write: an env-var name and nothing else, so a
+# caller can never smuggle a line break (and a second variable) in the key.
+_ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def is_process_control_env(key: str) -> bool:
+    """True when ``key`` changes how processes run, not what they authenticate with."""
+    name = key.strip().upper()
+    return name in PROCESS_CONTROL_ENV_NAMES or name.startswith(PROCESS_CONTROL_ENV_PREFIXES)
 
 
 def _escape(value: str) -> str:
@@ -102,7 +151,16 @@ def upsert_env_value(api_env: Path, key: str, value: str) -> None:
     re-read would split on). Route-level validation should reject these
     before reaching here; this guard ensures no future caller can
     reintroduce the hole.
+
+    The same goes for the key: a loader or interpreter variable
+    (:func:`is_process_control_env`) is refused here as well as at the
+    routes, so no writer of this file can plant one (#2936). Deleting such a
+    line stays allowed, so an existing one can be removed.
     """
+    if not _ENV_KEY_RE.match(key):
+        raise ValueError("env key must be an env-var name (letters, digits, underscores)")
+    if is_process_control_env(key):
+        raise ValueError(f"{key!r} controls how processes run and cannot be stored in api.env")
     if _LINE_BREAK_CHARS.intersection(value):
         raise ValueError("env value must not contain line-break characters")
 
@@ -173,7 +231,10 @@ def list_env_keys(api_env: Path) -> list[str]:
 
 
 __all__ = [
+    "PROCESS_CONTROL_ENV_NAMES",
+    "PROCESS_CONTROL_ENV_PREFIXES",
     "delete_env_value",
+    "is_process_control_env",
     "list_env_keys",
     "upsert_env_value",
 ]
