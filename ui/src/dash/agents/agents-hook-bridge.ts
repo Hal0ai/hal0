@@ -6,9 +6,29 @@
 // under `window.__hal0Use*`, plus the bundled card art URLs (Vite-hashed,
 // base-path-safe) under `window.__hal0AgentArt`, so the cards resolve them
 // at runtime. Mirrors memory-tab-hook-bridge.ts.
+//
+// The second block of names (overview, repair, gateway restart, uninstall,
+// approvals mode, log tail, personas, converge, job poll, config URLs,
+// capabilities, approvals count) serves the state-aware cards.
 
-import { useAgents, useAgentRestart } from '@/api/hooks/useAgents'
+import {
+  useAgentApprovalsCount,
+  useAgentGatewayRestart,
+  useAgentOverview,
+  useAgentPersonas,
+  useAgentRepair,
+  useAgentRestart,
+  useAgents,
+  useAgentUninstall,
+  useCommandApprovalsMode,
+  usePersonaActivate,
+  useUnitLogTail,
+} from '@/api/hooks/useAgents'
+import { useCapabilities } from '@/api/hooks/useCapabilities'
+import { useComponentConverge } from '@/api/hooks/useComponents'
+import { useConfigUrls } from '@/api/hooks/useConfigUrls'
 import { useSlots } from '@/api/hooks/useSlots'
+import { useUpdateJob } from '@/api/hooks/useUpdates'
 
 // Bundled card art. Imported (not referenced from /public) so Vite fingerprints
 // them and they survive any base-path mount.
@@ -24,6 +44,22 @@ import opencodeArt from './assets/opencode-logo.svg'
 ).__hal0UseAgentRestart = useAgentRestart
 ;(window as unknown as { __hal0UseSlots?: typeof useSlots }).__hal0UseSlots =
   useSlots
+
+Object.assign(window, {
+  __hal0UseAgentOverview: useAgentOverview,
+  __hal0UseAgentRepair: useAgentRepair,
+  __hal0UseAgentGatewayRestart: useAgentGatewayRestart,
+  __hal0UseAgentUninstall: useAgentUninstall,
+  __hal0UseCommandApprovalsMode: useCommandApprovalsMode,
+  __hal0UseUnitLogTail: useUnitLogTail,
+  __hal0UseAgentPersonas: useAgentPersonas,
+  __hal0UsePersonaActivate: usePersonaActivate,
+  __hal0UseComponentConverge: useComponentConverge,
+  __hal0UseUpdateJob: useUpdateJob,
+  __hal0UseConfigUrls: useConfigUrls,
+  __hal0UseCapabilities: useCapabilities,
+  __hal0UseAgentApprovalsCount: useAgentApprovalsCount,
+})
 
 ;(
   window as unknown as { __hal0AgentArt?: Record<string, string> }
