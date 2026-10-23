@@ -86,6 +86,8 @@ export interface LoreAbility {
   unlocked: boolean
   /** One line saying what is missing; `null` once unlocked. */
   note: string | null
+  /** The check could not run (`ok: null`); the card says "unverified", not "locked". */
+  unknown?: boolean
 }
 
 export interface LoreSkill {
@@ -93,6 +95,8 @@ export interface LoreSkill {
   lit: boolean
   /** A short reason while dim (`· no slot` for Hermes); `null` once lit. */
   note: string | null
+  /** The check could not run (`ok: null`); the note says so instead of "missing". */
+  unknown?: boolean
 }
 
 export interface CardModel {
@@ -282,6 +286,14 @@ function ability(name: string, unlocked: boolean, locked: string): LoreAbility {
   return { name, unlocked, note: unlocked ? null : locked }
 }
 
+function unknownAbility(name: string, note: string): LoreAbility {
+  return { name, unlocked: false, note, unknown: true }
+}
+
+function unknownSkill(label: string, note: string): LoreSkill {
+  return { label, lit: false, note, unknown: true }
+}
+
 function skill(label: string, lit: boolean, dim: string = NO_SLOT): LoreSkill {
   return { label, lit, note: lit ? null : dim }
 }
@@ -328,9 +340,25 @@ function hermesLore(
 function piLore(overview: AgentOverview | null, phase: CardPhase): CardModel['lore'] {
   const checks = overview?.profile?.checks ?? []
   const checkOk = (id: string) => checks.some((c) => c.id === id && c.ok === true)
+  // `ok: null` means the daemon could not read Pi's home: unknown, not absent.
+  const checkUnknown = (id: string) => checks.some((c) => c.id === id && c.ok === null)
+  const home = text(overview?.profile?.home)
+  const where = home ? `${home} ` : ''
+  // `ok: null` also comes from a path under a readable home, so name the cause
+  // the overview reports instead of always blaming the home.
+  const cantVerify =
+    overview?.profile?.home_readable === false
+      ? `can't verify: home ${where}isn't readable by hal0`
+      : `can't verify: a path under ${where}isn't readable by hal0`
   const memory = blob(overview?.memory)
   const installed = phase === 'installed'
   const dualMemory = memory.mcp_entry === true && memory.hindsight_config === true
+  // A definite `false` beats an unknown half: only "no false, some null" is unverified.
+  const memoryUnknown =
+    !dualMemory &&
+    memory.mcp_entry !== false &&
+    memory.hindsight_config !== false &&
+    (memory.mcp_entry === null || memory.hindsight_config === null)
   // What stops Delegate and the install-bound chips: the status word, and for
   // a broken install the first check that fails, so a broken Pi never reads
   // "not installed".
@@ -340,20 +368,28 @@ function piLore(overview: AgentOverview | null, phase: CardPhase): CardModel['lo
     phase === 'broken' && failing ? `pi is broken: the ${failing.id} check fails` : `pi is ${word}`
   return {
     abilities: [
-      ability('Slot Sync', checkOk('provider_ext'), 'the hal0 provider extension is not present'),
-      ability(
-        'Dual Memory',
-        dualMemory,
-        'the memory MCP entry and the Hindsight config are not both wired',
-      ),
+      checkUnknown('provider_ext') && !checkOk('provider_ext')
+        ? unknownAbility('Slot Sync', cantVerify)
+        : ability('Slot Sync', checkOk('provider_ext'), 'the hal0 provider extension is not present'),
+      memoryUnknown
+        ? unknownAbility('Dual Memory', cantVerify)
+        : ability(
+            'Dual Memory',
+            dualMemory,
+            'the memory MCP entry and the Hindsight config are not both wired',
+          ),
       ability('Delegate', installed, notReady),
     ],
     skills: [
       skill('repo-aware', installed, `· ${word}`),
-      skill('shared memory', dualMemory, '· not wired'),
+      memoryUnknown
+        ? unknownSkill('shared memory', '· unverified')
+        : skill('shared memory', dualMemory, '· not wired'),
       skill('delegation', installed, `· ${word}`),
       skill('cli-native', checkOk('binary'), '· not on PATH'),
-      skill('theme', checkOk('theme'), '· not deployed'),
+      checkUnknown('theme') && !checkOk('theme')
+        ? unknownSkill('theme', '· unverified')
+        : skill('theme', checkOk('theme'), '· not deployed'),
     ],
   }
 }

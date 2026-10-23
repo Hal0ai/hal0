@@ -395,6 +395,95 @@ describe('deriveCardModel: chips and reach', () => {
   })
 })
 
+describe('deriveCardModel: pi lore check states', () => {
+  const withChecks = (checks: Array<{ id: string; ok: boolean | null }>, memory = {}) => ({
+    ...PI,
+    overview: {
+      ...PI_OVERVIEW,
+      profile: { home: '/root', home_readable: false, checks },
+      memory,
+    },
+  })
+  const unreadable = ['provider_ext', 'theme', 'mcp_entry', 'hindsight_config'].map((id) => ({
+    id,
+    ok: null,
+  }))
+
+  it('ok:null reads as unverified, not missing', () => {
+    const m = deriveCardModel(withChecks(unreadable, { mcp_entry: null, hindsight_config: null }))
+    for (const name of ['Slot Sync', 'Dual Memory']) {
+      const a = m.lore.abilities.find((x) => x.name === name)
+      expect(a?.unlocked).toBe(false)
+      expect(a?.unknown).toBe(true)
+      expect(a?.note).toContain("can't verify")
+      expect(a?.note).toContain('/root')
+      expect(a?.note).not.toContain('not present')
+    }
+    const theme = m.lore.skills.find((s) => s.label === 'theme')
+    expect(theme?.unknown).toBe(true)
+    expect(theme?.note).toBe('· unverified')
+    const shared = m.lore.skills.find((s) => s.label === 'shared memory')
+    expect(shared?.unknown).toBe(true)
+    expect(shared?.note).toBe('· unverified')
+  })
+
+  it('names the path, not the home, when the home is readable', () => {
+    const base = withChecks(unreadable, { mcp_entry: null, hindsight_config: null })
+    const m = deriveCardModel({
+      ...base,
+      overview: { ...base.overview, profile: { ...base.overview.profile, home_readable: true } },
+    })
+    const note = m.lore.abilities.find((x) => x.name === 'Slot Sync')?.note
+    expect(note).toContain('a path under /root')
+    expect(note).not.toContain('home /root')
+  })
+
+  it('a definite false beats an unknown half of the memory wiring', () => {
+    const m = deriveCardModel(withChecks(unreadable, { mcp_entry: false, hindsight_config: null }))
+    const dual = m.lore.abilities.find((x) => x.name === 'Dual Memory')
+    expect(dual?.unknown).toBeUndefined()
+    expect(dual?.note).toBe('the memory MCP entry and the Hindsight config are not both wired')
+    const shared = m.lore.skills.find((s) => s.label === 'shared memory')
+    expect(shared?.unknown).toBeUndefined()
+    expect(shared?.note).toBe('· not wired')
+  })
+
+  it('ok:false keeps the not-present wording', () => {
+    const m = deriveCardModel(
+      withChecks(
+        [
+          { id: 'provider_ext', ok: false },
+          { id: 'theme', ok: false },
+          { id: 'mcp_entry', ok: false },
+          { id: 'hindsight_config', ok: false },
+        ],
+        { mcp_entry: false, hindsight_config: false },
+      ),
+    )
+    const slot = m.lore.abilities.find((x) => x.name === 'Slot Sync')
+    expect(slot?.unknown).toBeUndefined()
+    expect(slot?.note).toBe('the hal0 provider extension is not present')
+    expect(m.lore.abilities.find((x) => x.name === 'Dual Memory')?.unknown).toBeUndefined()
+    expect(m.lore.skills.find((s) => s.label === 'theme')?.note).toBe('· not deployed')
+    expect(m.lore.skills.find((s) => s.label === 'shared memory')?.note).toBe('· not wired')
+  })
+
+  it('ok:true unlocks', () => {
+    const m = deriveCardModel(
+      withChecks(
+        [
+          { id: 'provider_ext', ok: true },
+          { id: 'theme', ok: true },
+        ],
+        { mcp_entry: true, hindsight_config: true },
+      ),
+    )
+    expect(m.lore.abilities.find((x) => x.name === 'Slot Sync')?.unlocked).toBe(true)
+    expect(m.lore.abilities.find((x) => x.name === 'Dual Memory')?.unlocked).toBe(true)
+    expect(m.lore.skills.find((s) => s.label === 'theme')?.lit).toBe(true)
+  })
+})
+
 describe('deriveCardModel: lore', () => {
   it('lore unlocks from live wiring', () => {
     const m = deriveCardModel({ ...READY, overview: READY_OVERVIEW })
@@ -601,7 +690,7 @@ describe('deriveCardModel: Pi', () => {
     const p = deriveCardModel({ ...PI, overview: partial })
     expect(p.lore.skills.map((s) => [s.label, s.lit, s.note])).toEqual([
       ['repo-aware', true, null],
-      ['shared memory', false, '· not wired'],
+      ['shared memory', false, '· unverified'],
       ['delegation', true, null],
       ['cli-native', false, '· not on PATH'],
       ['theme', true, null],
