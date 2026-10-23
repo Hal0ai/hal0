@@ -10,6 +10,12 @@
 //   - throughput + ctx ← window.__hal0UseSlots()    (primary slot metrics) —
 //                        Hermes only; Pi is a CLI tool with no backing slot
 //   - upgrade / repair jobs ← window.__hal0UseUpdateJob(jobId) (1.5s poll)
+//   - the active persona ← window.__hal0UseAgentPersonas("hermes") (5s), for
+//                        the persona chip (provision.json goes stale on an
+//                        activation)
+// After every action the card awaits window.__hal0RefreshAgentOverview, which
+// reads the overview with ?refresh=1: a plain refetch would answer from the
+// route's 30 s cache with the state from before the action.
 // window.__hal0DeriveCardModel (agent-phase.ts) folds those into the model the
 // card paints; this module owns the data and the action handlers, the card
 // (agent-card.jsx) only renders them.
@@ -176,6 +182,7 @@ function AgentsOverview() {
   const useCommandApprovalsMode = window.__hal0UseCommandApprovalsMode;
   const usePersonaActivate = window.__hal0UsePersonaActivate;
   const useHermesReconcileUpstreams = window.__hal0UseHermesReconcileUpstreams;
+  const useAgentPersonas = window.__hal0UseAgentPersonas;
   const useConfigUrls = window.__hal0UseConfigUrls;
   const useCapabilities = window.__hal0UseCapabilities;
 
@@ -185,6 +192,8 @@ function AgentsOverview() {
   const piOvQ = useAgentOverview ? useAgentOverview("pi") : { data: null };
   const urlsQ = useConfigUrls ? useConfigUrls() : { data: null };
   const capsQ = useCapabilities ? useCapabilities() : { data: null };
+  // The Controls tab and the sidebar poll the same key, so this adds no request.
+  const personasQ = useAgentPersonas ? useAgentPersonas("hermes") : { data: null };
 
   const converge = useComponentConverge ? useComponentConverge() : null;
   const repair = useAgentRepair ? useAgentRepair("hermes") : null;
@@ -194,6 +203,14 @@ function AgentsOverview() {
   const approvalsMode = useCommandApprovalsMode ? useCommandApprovalsMode("hermes") : null;
   const personaActivate = usePersonaActivate ? usePersonaActivate("hermes") : null;
   const reconcile = useHermesReconcileUpstreams ? useHermesReconcileUpstreams() : null;
+
+  // Read `name`'s overview past the route's 30 s cache and cache it. Never
+  // rejects: on an error the card keeps what it has and the next poll retries.
+  const refreshOverview = (name) => {
+    const refresh = window.__hal0RefreshAgentOverview;
+    return refresh ? refresh(qc, name).catch(() => {}) : Promise.resolve();
+  };
+  const refreshHermes = () => refreshOverview("hermes");
 
   // ── the Hermes build job (upgrade = converge, repair) ──────────────
   // Seeded from the overview's in-flight job (a build started from the CLI or
@@ -220,14 +237,16 @@ function AgentsOverview() {
     qc.invalidateQueries({ queryKey: ["agents"] });
     const kind = _jobKind(polled, startedKind.current);
     const result = polled.component_result || {};
-    if (polled.state === "failed") {
-      const why = polled.error || polled.error_code || "see the unit logs";
-      _toast(`Hermes ${kind} failed: ${why}`, "error");
-    } else if (result.status === "busy") {
-      _toast("Hermes builder is busy", "warning");
-    } else {
-      _toast(kind === "repair" ? "Hermes repaired" : "Hermes upgraded", "success");
-    }
+    refreshOverview("hermes").then(() => {
+      if (polled.state === "failed") {
+        const why = polled.error || polled.error_code || "see the unit logs";
+        _toast(`Hermes ${kind} failed: ${why}`, "error");
+      } else if (result.status === "busy") {
+        _toast("Hermes builder is busy", "warning");
+      } else {
+        _toast(kind === "repair" ? "Hermes repaired" : "Hermes upgraded", "success");
+      }
+    });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [finished, polled && polled.id]);
 
@@ -249,6 +268,13 @@ function AgentsOverview() {
   const caps = capsQ.data || null;
   const urls = urlsQ.data || null;
   const piOv = piOvQ.data || null;
+  const personas = personasQ.data || null;
+  const activeId = (personas && personas.active) || null;
+  const activeRow =
+    activeId && personas && Array.isArray(personas.personas)
+      ? personas.personas.find((p) => p.id === activeId) || null
+      : null;
+  const livePersona = activeRow ? activeRow.display_name || activeRow.id : activeId;
 
   // `lastTool` stays null this release: the only source, GET
   // /api/agents/{name}/activity, shells out to journalctl on every call. The
@@ -264,6 +290,7 @@ function AgentsOverview() {
           caps,
           urls,
           lastTool: null,
+          persona: livePersona,
         }),
         overview: hermesOv,
         health: _health(primary),
@@ -278,18 +305,16 @@ function AgentsOverview() {
     : null;
 
   // ── actions ────────────────────────────────────────────────────────
-  // Each resolves (never rejects) once its toast is out, so a card button can
-  // hold a busy state for exactly as long as the request runs.
-  const refetchHermes = () => {
-    if (hermesOvQ.refetch) hermesOvQ.refetch();
-  };
-
+  // Each resolves (never rejects) once the card shows the box after it and
+  // its toast is out, so a card button holds its busy state until then.
   const startJob = (kind, run) => {
     startedKind.current = kind;
     return run()
       .then((res) => {
         if (res && res.id) setJobId(res.id);
-        refetchHermes();
+        // The job overlay is current on every read; no refresh needed to
+        // pick up the new job.
+        if (hermesOvQ.refetch) hermesOvQ.refetch();
       })
       .catch((err) => {
         if (_isBusy(err)) _toast("Hermes builder is busy", "warning");
@@ -316,22 +341,24 @@ function AgentsOverview() {
       ? () =>
           restart
             .mutateAsync()
-            .then((res) => {
-              if (res && res.status === "error") _toast(`Hermes restart failed: ${res.detail || "see the unit logs"}`, "error");
-              else _toast(res && res.status === "restarting" ? "Hermes is restarting" : "Hermes restarted", "success");
-              refetchHermes();
-            })
+            .then((res) =>
+              refreshHermes().then(() => {
+                if (res && res.status === "error") _toast(`Hermes restart failed: ${res.detail || "see the unit logs"}`, "error");
+                else _toast(res && res.status === "restarting" ? "Hermes is restarting" : "Hermes restarted", "success");
+              }),
+            )
             .catch((err) => _toast(`Hermes restart failed: ${_errText(err)}`, "error"))
       : null,
     restartGateway: gatewayRestart
       ? () =>
           gatewayRestart
             .mutateAsync()
-            .then((res) => {
-              if (res && res.status === "error") _toast(`Gateway restart failed: ${res.detail || "see the unit logs"}`, "error");
-              else _toast("Hermes gateway restarted", "success");
-              refetchHermes();
-            })
+            .then((res) =>
+              refreshHermes().then(() => {
+                if (res && res.status === "error") _toast(`Gateway restart failed: ${res.detail || "see the unit logs"}`, "error");
+                else _toast("Hermes gateway restarted", "success");
+              }),
+            )
             .catch((err) => _toast(`Gateway restart failed: ${_errText(err)}`, "error"))
       : null,
     repair: repair ? () => startJob("repair", () => repair.mutateAsync()) : null,
@@ -340,48 +367,52 @@ function AgentsOverview() {
       ? () =>
           uninstall
             .mutateAsync()
-            .then((res) => {
-              if (res && res.status === "partially_uninstalled") {
-                const n = (res.residual || []).length;
-                _toast(`Hermes partly uninstalled: ${n} path${n === 1 ? "" : "s"} left behind`, "warning");
-              } else if (res && res.status === "not_installed") {
-                _toast("Hermes was not installed", "info");
-              } else {
-                _toast("Hermes uninstalled", "success");
-              }
-              refetchHermes();
-            })
+            .then((res) =>
+              refreshHermes().then(() => {
+                if (res && res.status === "partially_uninstalled") {
+                  const n = (res.residual || []).length;
+                  _toast(`Hermes partly uninstalled: ${n} path${n === 1 ? "" : "s"} left behind`, "warning");
+                } else if (res && res.status === "not_installed") {
+                  _toast("Hermes was not installed", "info");
+                } else {
+                  _toast("Hermes uninstalled", "success");
+                }
+              }),
+            )
             .catch((err) => _toast(`Uninstall failed: ${_errText(err)}`, "error"))
       : null,
     setApprovalsMode: approvalsMode
       ? (mode) =>
           approvalsMode
             .mutateAsync(mode)
-            .then((res) => {
-              const unsure = res && (res.restart === "unknown" || res.restart === "timeout");
-              _toast((res && res.message) || `Approvals set to ${mode}`, unsure ? "warning" : "success");
-              refetchHermes();
-            })
+            .then((res) =>
+              refreshHermes().then(() => {
+                const unsure = res && (res.restart === "unknown" || res.restart === "timeout");
+                _toast((res && res.message) || `Approvals set to ${mode}`, unsure ? "warning" : "success");
+              }),
+            )
             .catch((err) => _toast(`Approvals change failed: ${_errText(err)}`, "error"))
       : null,
     activatePersona: personaActivate
       ? (pid) =>
           personaActivate
             .mutateAsync(pid)
-            .then(() => {
-              qc.invalidateQueries({ queryKey: ["agents"] });
-              _toast("Persona activated", "success");
-            })
+            // Waits for the refetch, so the chip and the select name the new
+            // persona before the busy state clears.
+            .then(() => qc.invalidateQueries({ queryKey: ["agents"] }))
+            .then(() => _toast("Persona activated", "success"))
             .catch((err) => _toast(`Persona activation failed: ${_errText(err)}`, "error"))
       : null,
     reconcile: reconcile
       ? () =>
           reconcile
             .mutateAsync()
-            .then((res) => {
-              const n = res && Array.isArray(res.profiles_wired) ? res.profiles_wired.length : null;
-              _toast(n ? `Re-mirrored ${n} profile${n === 1 ? "" : "s"} to Open WebUI` : "Profiles re-mirrored to Open WebUI", "success");
-            })
+            .then((res) =>
+              refreshHermes().then(() => {
+                const n = res && Array.isArray(res.profiles_wired) ? res.profiles_wired.length : null;
+                _toast(n ? `Re-mirrored ${n} profile${n === 1 ? "" : "s"} to Open WebUI` : "Profiles re-mirrored to Open WebUI", "success");
+              }),
+            )
             .catch((err) => _toast(`Re-mirror failed: ${_errText(err)}`, "error"))
       : null,
     // LogsView (extras.jsx) reads no hash parameters, so there is no unit
@@ -392,10 +423,7 @@ function AgentsOverview() {
     // The approval queue modal is owned by App (main.jsx) and opened by event.
     openApprovals: () => { window.dispatchEvent(new CustomEvent("hal0:open-approvals")); },
     copy,
-    refresh: () => {
-      refetchHermes();
-      if (agentsQ.refetch) agentsQ.refetch();
-    },
+    refresh: () => Promise.all([refreshHermes(), agentsQ.refetch ? agentsQ.refetch() : null]).then(() => {}),
   };
 
   // Pi is a CLI tool: no unit, no gateway, no build job. Its lifecycle verbs
@@ -413,10 +441,9 @@ function AgentsOverview() {
     openActivity: null,
     openApprovals: null,
     copy,
-    refresh: () => {
-      if (piOvQ.refetch) piOvQ.refetch();
-      if (agentsQ.refetch) agentsQ.refetch();
-    },
+    // Re-check: the card shows "Checking…" until the fresh read lands.
+    refresh: () =>
+      Promise.all([refreshOverview("pi"), agentsQ.refetch ? agentsQ.refetch() : null]).then(() => {}),
   };
 
   return (

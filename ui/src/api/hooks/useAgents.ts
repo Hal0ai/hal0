@@ -35,7 +35,13 @@
 // path are swallowed — we don't want to drown the console on every
 // 5s tick.
 
-import { useMutation, useQuery, useQueryClient, type UseQueryResult } from '@tanstack/react-query'
+import {
+  useMutation,
+  useQuery,
+  useQueryClient,
+  type QueryClient,
+  type UseQueryResult,
+} from '@tanstack/react-query'
 import { apiDelete, apiGet, apiPost, apiPut, Hal0Error } from '../client'
 import { ENDPOINTS } from '../endpoints'
 import type { CommandApprovalsMode, CommandApprovalsResult } from './useHermesCommandApprovals'
@@ -712,7 +718,14 @@ export interface AgentOverview {
     approvals_mode?: string | null
     [key: string]: unknown
   }
-  approvals?: { mode?: string; effective?: string; in_sync?: boolean; pending?: number; [key: string]: unknown }
+  approvals?: {
+    mode?: string | null
+    effective?: string | null
+    /** null when Hermes is not provisioned (nothing rendered to compare). */
+    in_sync?: boolean | null
+    pending?: number
+    [key: string]: unknown
+  }
   /** Hermes: {available, writes, last_write}. Pi: {mcp_entry, hindsight_config,
    *  hindsight_api_reachable}. */
   memory?: Record<string, unknown>
@@ -740,7 +753,7 @@ export function useAgentOverview(
   opts?: { enabled?: boolean },
 ): UseQueryResult<AgentOverview | null> {
   return useQuery<AgentOverview | null>({
-    queryKey: ['agents', 'overview', name],
+    queryKey: agentOverviewKey(name),
     queryFn: async () => {
       const path = ENDPOINTS.agentOverview(name)
       try {
@@ -760,6 +773,39 @@ export function useAgentOverview(
     refetchInterval: OVERVIEW_POLL_MS,
     refetchOnWindowFocus: true,
   })
+}
+
+/** The query key `useAgentOverview(name)` caches under. */
+export function agentOverviewKey(name: string) {
+  return ['agents', 'overview', name] as const
+}
+
+/**
+ * Read `name`'s overview with `?refresh=1` and put it in the cache. The route
+ * keeps its slow probes (gateway, API server, degraded reasons, approvals, Pi's
+ * version and checks) for 30 s, so a plain refetch right after an action can
+ * answer with the state from before it; a refresh rebuilds them. A plain poll
+ * still in flight would land after this with the older answer, so it is
+ * cancelled first. Resolves with what was cached: `null` on 404/501/0, as the
+ * hook does; any other error rejects and leaves the cache alone.
+ */
+export async function refreshAgentOverview(
+  qc: QueryClient,
+  name: string,
+): Promise<AgentOverview | null> {
+  const path = ENDPOINTS.agentOverview(name)
+  let data: AgentOverview | null
+  try {
+    const body = await apiGet<AgentOverview>(`${path}?refresh=1`)
+    data = body && typeof body === 'object' ? body : null
+  } catch (err) {
+    if (!_isMissing(err)) throw err
+    _warnMissing(path, err)
+    data = null
+  }
+  await qc.cancelQueries({ queryKey: agentOverviewKey(name), exact: true })
+  qc.setQueryData(agentOverviewKey(name), data)
+  return data
 }
 
 /** The queued job snapshot the repair route returns; feed `id` to useUpdateJob. */
@@ -860,14 +906,38 @@ export function useAgentUninstall(name: string) {
 
 /** PUT /api/agents/{name}/command-approvals — re-renders Hermes's config and
  *  restarts the unit when it was running; the result carries `restart` and
- *  `message` for the toast. */
+ *  `message` for the toast.
+ *
+ *  The result is the new approvals status, so it is written straight into the
+ *  Settings query (as useSetHermesCommandApprovals does) and into the cached
+ *  overview's `approvals`. The overview itself is left out of the invalidation:
+ *  a plain refetch would answer from the route's 30 s cache with the old mode;
+ *  the card follows up with refreshAgentOverview instead. */
 export function useCommandApprovalsMode(name: string) {
   const qc = useQueryClient()
   return useMutation<CommandApprovalsResult, Error, CommandApprovalsMode>({
     mutationFn: (mode) =>
       apiPut<CommandApprovalsResult>(ENDPOINTS.agentCommandApprovals(name), { mode }),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['agents'] })
+    onSuccess: (res) => {
+      qc.setQueryData(['agent-command-approvals', name], res)
+      qc.setQueryData<AgentOverview | null>(agentOverviewKey(name), (old) =>
+        old
+          ? {
+              ...old,
+              approvals: {
+                ...(old.approvals ?? {}),
+                mode: res.mode,
+                effective: res.effective,
+                in_sync: res.in_sync,
+              },
+            }
+          : old,
+      )
+      const overview = agentOverviewKey(name)
+      qc.invalidateQueries({
+        queryKey: ['agents'],
+        predicate: (q) => !overview.every((part, i) => q.queryKey[i] === part),
+      })
     },
   })
 }

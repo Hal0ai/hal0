@@ -36,6 +36,7 @@ const {
   useAgentUninstall,
   useCommandApprovalsMode,
   useUnitLogTail,
+  refreshAgentOverview,
 } = await import('@/api/hooks/useAgents')
 const { ENDPOINTS } = await import('@/api/endpoints')
 
@@ -157,6 +158,63 @@ describe('agent overview, control and log hooks', () => {
     expect(probe.get().isError).toBe(false)
 
     act(() => probe.root.unmount())
+  })
+
+  it('refreshAgentOverview reads ?refresh=1 and writes the overview cache', async () => {
+    const stale = { name: 'hermes', kind: 'daemon', installed: true, phase: 'degraded' }
+    const fresh = { name: 'hermes', kind: 'daemon', installed: true, phase: 'ready' }
+    const qc = newClient()
+    qc.setQueryData(['agents', 'overview', 'hermes'], stale)
+    vi.mocked(client.apiGet).mockResolvedValue(fresh)
+
+    let result: unknown
+    await act(async () => {
+      result = await refreshAgentOverview(qc, 'hermes')
+    })
+
+    expect(client.apiGet).toHaveBeenCalledWith('/api/agents/hermes/overview?refresh=1')
+    expect(result).toEqual(fresh)
+    expect(qc.getQueryData(['agents', 'overview', 'hermes'])).toEqual(fresh)
+  })
+
+  it('refreshAgentOverview cancels a plain poll still in flight so it cannot land after', async () => {
+    const qc = newClient()
+    // The mounted hook's first (plain) read never resolves: it is the stale
+    // poll that would otherwise overwrite the refreshed body.
+    vi.mocked(client.apiGet).mockImplementationOnce(() => new Promise(() => {}))
+    const probe = mountHook(() => useAgentOverview('hermes-race'), qc)
+    await flush()
+    const fresh = { name: 'hermes-race', kind: 'daemon', installed: true, phase: 'ready' }
+    vi.mocked(client.apiGet).mockResolvedValue(fresh)
+    const cancel = vi.spyOn(qc, 'cancelQueries')
+
+    await act(async () => {
+      await refreshAgentOverview(qc, 'hermes-race')
+    })
+    await flush()
+
+    expect(cancel).toHaveBeenCalledWith({ queryKey: ['agents', 'overview', 'hermes-race'], exact: true })
+    expect(probe.get().data).toEqual(fresh)
+
+    act(() => probe.root.unmount())
+  })
+
+  it('refreshAgentOverview caches null on a 404, and a 5xx rejects without touching the cache', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const qc = newClient()
+    vi.mocked(client.apiGet).mockRejectedValueOnce(new client.Hal0Error('nf', { status: 404, code: 'not_found' }))
+    await act(async () => {
+      expect(await refreshAgentOverview(qc, 'hermes-refresh-nf')).toBeNull()
+    })
+    expect(qc.getQueryData(['agents', 'overview', 'hermes-refresh-nf'])).toBeNull()
+
+    const kept = { name: 'hermes', kind: 'daemon', installed: true, phase: 'ready' }
+    qc.setQueryData(['agents', 'overview', 'hermes'], kept)
+    vi.mocked(client.apiGet).mockRejectedValueOnce(new client.Hal0Error('boom', { status: 500, code: 'internal' }))
+    await act(async () => {
+      await expect(refreshAgentOverview(qc, 'hermes')).rejects.toThrow('boom')
+    })
+    expect(qc.getQueryData(['agents', 'overview', 'hermes'])).toEqual(kept)
   })
 
   it('useAgentOverview surfaces a real server error instead of hiding it', async () => {
@@ -318,10 +376,23 @@ describe('agent overview, control and log hooks', () => {
     act(() => probe.root.unmount())
   })
 
-  it('useCommandApprovalsMode puts the mode and invalidates agents', async () => {
-    const applied = { mode: 'manual', changed: true, restart: 'restarted', message: 'applied' }
+  it('useCommandApprovalsMode puts the mode, writes the result into both caches, and refetches all but the overview', async () => {
+    const applied = {
+      mode: 'manual',
+      effective: 'manual',
+      in_sync: true,
+      changed: true,
+      restart: 'restarted',
+      message: 'applied',
+    }
     vi.mocked(client.apiPut).mockResolvedValue(applied)
     const qc = newClient()
+    qc.setQueryData(['agents', 'overview', 'hermes'], {
+      name: 'hermes',
+      kind: 'daemon',
+      installed: true,
+      approvals: { mode: 'smart', effective: 'smart', in_sync: false, pending: 2 },
+    })
     const inv = vi.spyOn(qc, 'invalidateQueries')
     const probe = mountHook(() => useCommandApprovalsMode('hermes'), qc)
 
@@ -336,7 +407,24 @@ describe('agent overview, control and log hooks', () => {
     expect(client.apiPut).toHaveBeenCalledWith('/api/agents/hermes/command-approvals', {
       mode: 'manual',
     })
-    expect(inv).toHaveBeenCalledWith({ queryKey: ['agents'] })
+    // The Settings query and the card's overview read the new mode at once.
+    expect(qc.getQueryData(['agent-command-approvals', 'hermes'])).toEqual(applied)
+    expect(
+      (qc.getQueryData(['agents', 'overview', 'hermes']) as { approvals: unknown }).approvals,
+    ).toEqual({ mode: 'manual', effective: 'manual', in_sync: true, pending: 2 })
+
+    // Every agents query refetches except this agent's overview, whose plain
+    // read would come from the route's cache with the old mode.
+    expect(inv).toHaveBeenCalledTimes(1)
+    const filter = inv.mock.calls[0]?.[0] as unknown as {
+      queryKey: unknown[]
+      predicate: (q: { queryKey: unknown[] }) => boolean
+    }
+    expect(filter.queryKey).toEqual(['agents'])
+    expect(filter.predicate({ queryKey: ['agents', 'overview', 'hermes'] })).toBe(false)
+    expect(filter.predicate({ queryKey: ['agents', 'overview', 'pi'] })).toBe(true)
+    expect(filter.predicate({ queryKey: ['agents', 'personas', 'hermes'] })).toBe(true)
+    expect(filter.predicate({ queryKey: ['agents', 'list'] })).toBe(true)
 
     act(() => probe.root.unmount())
   })
@@ -428,6 +516,8 @@ describe('agents hook bridge', () => {
       __hal0UseConfigUrls: useConfigUrls,
       __hal0UseCapabilities: useCapabilities,
       __hal0UseAgentApprovalsCount: agents.useAgentApprovalsCount,
+      // Not a hook: the cards call it with their query client after an action.
+      __hal0RefreshAgentOverview: agents.refreshAgentOverview,
     }
     for (const [name, hook] of Object.entries(expected)) {
       expect(typeof hook, `${name} source`).toBe('function')

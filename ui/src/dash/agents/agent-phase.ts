@@ -73,6 +73,12 @@ export interface CardModelInput {
   caps: CapabilitiesLike | null
   urls: ConfigUrls | null
   lastTool?: LastTool | null
+  /**
+   * The active persona as the personas route reports it now. Preferred over
+   * `provision.persona`, which provision.json records only at a provision or a
+   * repair and so goes stale once a persona is activated.
+   */
+  persona?: string | null
 }
 
 export interface LoreAbility {
@@ -389,7 +395,7 @@ export function deriveCardModel(input: CardModelInput): CardModel {
     reasons,
     reasonsTop: reasons.slice(0, TOP_REASONS),
     chips: {
-      persona: provision?.persona ?? null,
+      persona: input.persona || provision?.persona || null,
       approvals: overview?.approvals?.mode ?? null,
       terminal: provision?.terminal_tool ?? null,
     },

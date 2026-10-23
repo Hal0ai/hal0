@@ -314,6 +314,18 @@ describe('deriveCardModel: chips and reach', () => {
     expect(deriveCardModel(READY).chips).toEqual({ persona: null, approvals: null, terminal: null })
   })
 
+  it('the persona chip names the live active persona over the last provision report', () => {
+    // provision.json is written only by a provision or a repair, so after an
+    // activation it still names the old persona.
+    const live = deriveCardModel({ ...READY, overview: READY_OVERVIEW, persona: 'Coder' })
+    expect(live.chips.persona).toBe('Coder')
+    // No live read yet (or the personas route is missing): the report is the fallback.
+    expect(deriveCardModel({ ...READY, overview: READY_OVERVIEW, persona: null }).chips.persona).toBe(
+      'ghost',
+    )
+    expect(deriveCardModel({ ...READY, persona: 'Coder' }).chips.persona).toBe('Coder')
+  })
+
   it('lights platform chips with the gateway and leaves api_server to the api chip', () => {
     const up = deriveCardModel({ ...READY, overview: READY_OVERVIEW })
     expect(up.reach.platforms).toEqual([{ id: 'telegram', lit: true }])

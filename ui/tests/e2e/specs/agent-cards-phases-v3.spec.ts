@@ -353,6 +353,45 @@ test.describe('Hermes card phases', () => {
     await expect.poll(() => gatewayPosts).toBe(1)
   })
 
+  test('after a fix the card reads the box past the overview cache (?refresh=1)', async ({
+    page,
+  }) => {
+    const degraded = hermesOverview({
+      phase: 'degraded',
+      units: { agent: 'active', gateway: 'failed', gateway_enabled: true },
+      degraded: [
+        { reason: 'gateway_down', detail: 'the gateway unit is failed', fix: 'restart_gateway' },
+      ],
+    })
+    // The route keeps its slow probes for 30 s: a plain read answers from that
+    // cache, and only ?refresh=1 rebuilds it, here with the gateway back up.
+    let restarted = false
+    let cached = degraded
+    const refreshes: string[] = []
+    await page.route('**/api/agents/hermes/gateway/restart', (route) => {
+      restarted = true
+      return json(route, { status: 'restarted' })
+    })
+    await mockCards(page, { agents: [hermesRecord(true)], hermes: degraded })
+    await page.route('**/api/agents/hermes/overview*', (route) => {
+      if (new URL(route.request().url()).searchParams.get('refresh') === '1') {
+        refreshes.push(route.request().url())
+        cached = restarted ? hermesOverview() : degraded
+      }
+      return json(route, cached)
+    })
+    await openAgents(page)
+
+    const front = face(page, 'hermes')
+    await expect(front).toHaveAttribute('data-phase', 'degraded', { timeout: FIVE_S })
+    await card(page, 'hermes').getByTestId('agent-action-restart-gateway').click()
+
+    // Well inside one 10 s poll: the action itself asked for the fresh read.
+    await expect(front).toHaveAttribute('data-phase', 'ready', { timeout: 3_000 })
+    expect(refreshes.length).toBe(1)
+    await expect(page.locator('.hal0-toast', { hasText: 'Hermes gateway restarted' })).toBeVisible()
+  })
+
   test('ready: chips on the front, Restart on the console back', async ({ page }) => {
     await page.route('**/api/agents/hermes/personas', (route) =>
       json(route, {

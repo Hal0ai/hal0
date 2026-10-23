@@ -25,6 +25,7 @@ import {
   useHermesReconcileUpstreams,
   usePersonaActivate,
   useUnitLogTail,
+  refreshAgentOverview,
 } from '@/api/hooks/useAgents'
 import { useCapabilities } from '@/api/hooks/useCapabilities'
 import { useComponentConverge } from '@/api/hooks/useComponents'
@@ -65,6 +66,9 @@ Object.assign(window, {
   __hal0UseHermesReconcileUpstreams: useHermesReconcileUpstreams,
   // Pure (no hook): the cards call it each render with the hooks' data.
   __hal0DeriveCardModel: deriveCardModel,
+  // Not a hook: the overview calls it with its query client after an action,
+  // so the card reads the box past the overview route's 30 s cache.
+  __hal0RefreshAgentOverview: refreshAgentOverview,
 })
 
 ;(
