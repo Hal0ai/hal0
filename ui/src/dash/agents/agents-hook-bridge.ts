@@ -6,9 +6,33 @@
 // under `window.__hal0Use*`, plus the bundled card art URLs (Vite-hashed,
 // base-path-safe) under `window.__hal0AgentArt`, so the cards resolve them
 // at runtime. Mirrors memory-tab-hook-bridge.ts.
+//
+// The second block of names (overview, repair, gateway restart, uninstall,
+// approvals mode, log tail, personas, converge, job poll, config URLs,
+// capabilities, approvals count, Open WebUI re-mirror) serves the state-aware
+// cards.
 
-import { useAgents, useAgentRestart } from '@/api/hooks/useAgents'
+import {
+  useAgentApprovalsCount,
+  useAgentGatewayRestart,
+  useAgentOverview,
+  useAgentPersonas,
+  useAgentRepair,
+  useAgentRestart,
+  useAgents,
+  useAgentUninstall,
+  useCommandApprovalsMode,
+  useHermesReconcileUpstreams,
+  usePersonaActivate,
+  useUnitLogTail,
+  refreshAgentOverview,
+} from '@/api/hooks/useAgents'
+import { useCapabilities } from '@/api/hooks/useCapabilities'
+import { useComponentConverge } from '@/api/hooks/useComponents'
+import { useConfigUrls } from '@/api/hooks/useConfigUrls'
 import { useSlots } from '@/api/hooks/useSlots'
+import { useUpdateJob } from '@/api/hooks/useUpdates'
+import { deriveCardModel } from './agent-phase'
 
 // Bundled card art. Imported (not referenced from /public) so Vite fingerprints
 // them and they survive any base-path mount.
@@ -24,6 +48,28 @@ import opencodeArt from './assets/opencode-logo.svg'
 ).__hal0UseAgentRestart = useAgentRestart
 ;(window as unknown as { __hal0UseSlots?: typeof useSlots }).__hal0UseSlots =
   useSlots
+
+Object.assign(window, {
+  __hal0UseAgentOverview: useAgentOverview,
+  __hal0UseAgentRepair: useAgentRepair,
+  __hal0UseAgentGatewayRestart: useAgentGatewayRestart,
+  __hal0UseAgentUninstall: useAgentUninstall,
+  __hal0UseCommandApprovalsMode: useCommandApprovalsMode,
+  __hal0UseUnitLogTail: useUnitLogTail,
+  __hal0UseAgentPersonas: useAgentPersonas,
+  __hal0UsePersonaActivate: usePersonaActivate,
+  __hal0UseComponentConverge: useComponentConverge,
+  __hal0UseUpdateJob: useUpdateJob,
+  __hal0UseConfigUrls: useConfigUrls,
+  __hal0UseCapabilities: useCapabilities,
+  __hal0UseAgentApprovalsCount: useAgentApprovalsCount,
+  __hal0UseHermesReconcileUpstreams: useHermesReconcileUpstreams,
+  // Pure (no hook): the cards call it each render with the hooks' data.
+  __hal0DeriveCardModel: deriveCardModel,
+  // Not a hook: the overview calls it with its query client after an action,
+  // so the card reads the box past the overview route's 30 s cache.
+  __hal0RefreshAgentOverview: refreshAgentOverview,
+})
 
 ;(
   window as unknown as { __hal0AgentArt?: Record<string, string> }

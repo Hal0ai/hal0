@@ -21,6 +21,14 @@ locally in the foreground because the venv build can't fit in one HTTP
 request.
 </Aside>
 
+## The Agents view
+
+The dashboard's **Agents** page draws every agent as a card. Hermes and Pi are
+live cards that read the state of the box; flip one for its console, with the
+controls to restart, upgrade, repair or uninstall Hermes. The
+[Agents view guide](/docs/guides/agents-view) covers what each status shows,
+the console tabs and how to read a degraded card.
+
 ## Install Hermes
 
 ```sh
@@ -315,6 +323,10 @@ stays on that release when hal0 builds a newer one, and `hermes gateway status`
 reports the unit as outdated. `sudo hal0 agent install hermes` regenerates and
 normalises the unit again.
 
+The Hermes card in the dashboard has buttons for restart, upgrade and repair:
+**Restart agent** and **Restart gateway** on its Controls tab, and **Upgrade**
+or **Repair** on its Lifecycle tab. See [The Agents view](/docs/guides/agents-view).
+
 </TabItem>
 <TabItem label="Uninstall">
 
@@ -329,6 +341,10 @@ Default uninstall tears down the agent's private memory namespace too;
 Uninstalling Hermes also runs `loginctl disable-linger hal0`, which undoes the
 linger the Hermes gateway turned on. Run the uninstall as root for that step;
 otherwise it prints the command to run.
+
+The Hermes card also has an **Uninstall** button on its Lifecycle tab, behind a
+type-to-confirm dialog. It has no `--keep-memory` option; see
+[The Agents view](/docs/guides/agents-view#upgrade-repair-and-uninstall).
 
 </TabItem>
 </Tabs>

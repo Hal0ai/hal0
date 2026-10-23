@@ -21,6 +21,9 @@
 //   - GET /api/mcp/servers                         — bundled MCP-server state
 //                                                    pip (reuses #206 surface)
 //
+// The state-aware agent cards' overview / repair / gateway-restart / uninstall /
+// command-approvals / log-tail hooks sit at the foot of the file.
+//
 // Polling cadence: 5s refetch + revalidate-on-focus (master plan §2
 // state-mgmt policy). Each individual hook can be overridden if a more
 // or less frequent cadence makes sense for the specific surface.
@@ -32,9 +35,17 @@
 // path are swallowed — we don't want to drown the console on every
 // 5s tick.
 
-import { useMutation, useQuery, useQueryClient, type UseQueryResult } from '@tanstack/react-query'
-import { apiGet, apiPost, apiPut, Hal0Error } from '../client'
+import {
+  useMutation,
+  useQuery,
+  useQueryClient,
+  type QueryClient,
+  type UseQueryResult,
+} from '@tanstack/react-query'
+import { apiDelete, apiGet, apiPost, apiPut, Hal0Error } from '../client'
 import { ENDPOINTS } from '../endpoints'
+import type { CommandApprovalsMode, CommandApprovalsResult } from './useHermesCommandApprovals'
+import type { UnitLogs } from './useServices'
 
 // ── Types ──────────────────────────────────────────────────────────
 
@@ -586,5 +597,409 @@ export function useAgentPersonaEnums(options?: { enabled?: boolean }) {
     queryFn: () => apiGet<PersonaEnumsResponse>(ENDPOINTS.agentPersonaEnums),
     staleTime: 5 * 60_000,
     enabled: options?.enabled ?? true,
+  })
+}
+
+// ── State-aware agent cards (agent-cards controls, task 15) ──────────────────
+//
+//   GET    /api/agents/{id}/overview            — one read for a card's face
+//   POST   /api/agents/{id}/repair              — queue a repair job
+//   POST   /api/agents/{id}/gateway/restart     — bounce the Hermes gateway unit
+//   DELETE /api/agents/{id}                     — uninstall
+//   PUT    /api/agents/{id}/command-approvals   — Hermes approvals.mode
+//   GET    /api/logs?unit=&n=                   — journal tail for the down face
+//
+// Upgrade is not here: the card calls useComponentConverge and tracks the job
+// with useUpdateJob, both republished through agents-hook-bridge.ts.
+
+/** Overview and log-tail poll at 10 s; pass `enabled: false` while the Agents
+ *  tab is not shown. */
+const OVERVIEW_POLL_MS = 10_000
+
+export type AgentPhase =
+  | 'working'
+  | 'broken'
+  | 'down'
+  | 'degraded'
+  | 'serving'
+  | 'ready'
+  | 'installed'
+  | 'not_installed'
+  | 'unknown'
+
+/** The one-click fix, if any, a degraded row offers. */
+export type AgentFix =
+  | 'restart_gateway'
+  | 'repair'
+  | 'resync_approvals'
+  | 'cli'
+  | 'none'
+
+export interface AgentDegradedRow {
+  reason: string
+  detail?: string
+  fix: AgentFix
+  command?: string | null
+}
+
+export interface AgentDoctorRow {
+  id: string
+  /** `unreadable`: the check could not read its source (the gateway unit row
+   *  on a box where the unit file is not readable to the daemon). */
+  status: 'ok' | 'warn' | 'fail' | 'absent' | 'unreadable'
+  detail?: string
+}
+
+export interface AgentProvisionPhase {
+  name: string
+  status: string
+  at?: string | null
+  failure_count?: number
+  reason?: string | null
+}
+
+export interface AgentOverview {
+  name: string
+  /** "daemon" (Hermes) or "cli" (Pi). */
+  kind: string
+  installed: boolean
+  /** On-disk install state ("installed" / "broken"); liveness is `units`. */
+  status?: string
+  unit_active?: boolean | null
+  /** Body-level timestamp the server stamps on the read. */
+  generated_at?: string
+  /** The newest queued/running converge:hermes or repair:hermes job. */
+  job?: { id: string; kind?: string; state: string; [key: string]: unknown } | null
+  /** Server-computed face. The UI upgrades `ready` to `serving` when a slot is
+   *  actually bound, exactly as `_derive` does. */
+  phase?: AgentPhase
+  degraded?: AgentDegradedRow[]
+  doctor?: AgentDoctorRow[]
+  /** Hermes: live/previous/pin/component. Pi: installed/pin. Not installed:
+   *  only `pin` appears at the top level (below). */
+  version?: {
+    live?: Record<string, unknown> | null
+    previous?: Record<string, unknown> | null
+    installed?: Record<string, unknown> | null
+    pin?: Record<string, unknown> | null
+    component?: { installed?: unknown; pinned?: unknown; status?: string; [key: string]: unknown }
+    update_available?: boolean
+    [key: string]: unknown
+  }
+  /** Not-installed agents: the pin the install would get. */
+  pin?: Record<string, unknown>
+  units?: {
+    agent?: 'active' | 'inactive' | 'failed' | 'unknown' | string
+    gateway?: 'active' | 'inactive' | 'failed' | 'unknown' | 'absent' | string
+    /** Whether the gateway unit is enabled; null when it cannot be told. */
+    gateway_enabled?: boolean | null
+    [key: string]: unknown
+  }
+  api_server?: { endpoint?: string; healthy?: boolean; profiles?: string[]; [key: string]: unknown }
+  platforms?: string[]
+  provision?: {
+    present?: boolean
+    hal0_version?: string | null
+    hermes_version?: string | null
+    completed_at?: string | null
+    /** When provision.json was written, and whether it predates the live build. */
+    reported_at?: string | null
+    stale?: boolean
+    live_built_at?: string | null
+    phases?: AgentProvisionPhase[]
+    ok?: number
+    warn?: number
+    fail?: number
+    primary_model?: string | null
+    delegation_model?: string | null
+    chat_slot_count?: number | null
+    mcp_server_count?: number | null
+    memory_provider?: string | null
+    persona?: string | null
+    terminal_tool?: 'on' | 'off' | null
+    approvals_mode?: string | null
+    [key: string]: unknown
+  }
+  approvals?: {
+    mode?: string | null
+    effective?: string | null
+    /** null when Hermes is not provisioned (nothing rendered to compare). */
+    in_sync?: boolean | null
+    pending?: number
+    [key: string]: unknown
+  }
+  /** Hermes: {available, writes, last_write}. Pi: {mcp_entry, hindsight_config,
+   *  hindsight_api_reachable}. */
+  memory?: Record<string, unknown>
+  links?: { desktop?: string | null; [key: string]: unknown }
+  /** Pi only. */
+  profile?: {
+    home?: string
+    profiled_at?: string | null
+    home_readable?: boolean
+    checks?: { id: string; ok: boolean | null; detail?: string }[]
+    [key: string]: unknown
+  }
+  /** Pi only: the verbs to show as copyable commands. */
+  commands?: { install?: string; upgrade?: string; uninstall?: string; [key: string]: unknown }
+  [key: string]: unknown
+}
+
+/**
+ * GET /api/agents/{name}/overview. `null` (never a throw) on 404/501/0 so a
+ * daemon that predates the route renders the old card; one warning per path.
+ * Pass `{ enabled: false }` to hold the poll while the Agents tab is hidden.
+ */
+export function useAgentOverview(
+  name: string,
+  opts?: { enabled?: boolean },
+): UseQueryResult<AgentOverview | null> {
+  return useQuery<AgentOverview | null>({
+    queryKey: agentOverviewKey(name),
+    queryFn: async () => {
+      const path = ENDPOINTS.agentOverview(name)
+      try {
+        const body = await apiGet<AgentOverview>(path)
+        return body && typeof body === 'object' ? body : null
+      } catch (err) {
+        if (_isMissing(err)) {
+          _warnMissing(path, err)
+          return null
+        }
+        throw err
+      }
+    },
+    enabled: opts?.enabled !== false,
+    // A poll that fails is retried by the next tick, not by backoff on top.
+    retry: false,
+    refetchInterval: OVERVIEW_POLL_MS,
+    refetchOnWindowFocus: true,
+  })
+}
+
+/** The query key `useAgentOverview(name)` caches under. */
+export function agentOverviewKey(name: string) {
+  return ['agents', 'overview', name] as const
+}
+
+/**
+ * Read `name`'s overview with `?refresh=1` and put it in the cache. The route
+ * keeps its slow probes (gateway, API server, degraded reasons, approvals, Pi's
+ * version and checks) for 30 s, so a plain refetch right after an action can
+ * answer with the state from before it; a refresh rebuilds them. A plain poll
+ * still in flight would land after this with the older answer, so it is
+ * cancelled first. Resolves with what was cached: `null` on 404/501/0, as the
+ * hook does; any other error rejects and leaves the cache alone.
+ */
+export async function refreshAgentOverview(
+  qc: QueryClient,
+  name: string,
+): Promise<AgentOverview | null> {
+  const path = ENDPOINTS.agentOverview(name)
+  let data: AgentOverview | null
+  try {
+    const body = await apiGet<AgentOverview>(`${path}?refresh=1`)
+    data = body && typeof body === 'object' ? body : null
+  } catch (err) {
+    if (!_isMissing(err)) throw err
+    _warnMissing(path, err)
+    data = null
+  }
+  await qc.cancelQueries({ queryKey: agentOverviewKey(name), exact: true })
+  qc.setQueryData(agentOverviewKey(name), data)
+  return data
+}
+
+/** The queued job snapshot the repair route returns; feed `id` to useUpdateJob. */
+export interface AgentJobSnapshot {
+  id: string
+  state?: string
+  phase?: string
+  [key: string]: unknown
+}
+
+/** POST /api/agents/{name}/repair — returns the queued job. */
+export function useAgentRepair(name: string) {
+  const qc = useQueryClient()
+  return useMutation<AgentJobSnapshot, Error, void>({
+    mutationFn: () => apiPost<AgentJobSnapshot>(ENDPOINTS.agentRepair(name)),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['agents'] })
+      qc.invalidateQueries({ queryKey: ['updates'] })
+    },
+  })
+}
+
+/** POST /api/agents/{name}/gateway/restart — result typed like the agent restart's. */
+export function useAgentGatewayRestart(name: string) {
+  const qc = useQueryClient()
+  return useMutation<AgentRestartResult, Error, void>({
+    mutationFn: () => apiPost<AgentRestartResult>(ENDPOINTS.agentGatewayRestart(name)),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['agents'] })
+    },
+  })
+}
+
+export interface AgentUninstallResidual {
+  path: string
+  reason: string
+}
+
+/**
+ * Outcome of DELETE /api/agents/{name}. The route answers 200 `{name, status}`
+ * for `uninstalled` / `not_installed`, but a partial removal is a 207 whose
+ * body is the error envelope (`{error:{code, message, details}}`), and
+ * `client.ts` only throws on a non-2xx, so the hook lifts `details` out and
+ * returns one shape. `removed` is whether the call found anything to remove;
+ * `residual` lists what the daemon user could not delete.
+ */
+export type AgentUninstallResult =
+  | { name: string; status: 'uninstalled' | 'not_installed' }
+  | {
+      name: string
+      status: 'partially_uninstalled'
+      removed: boolean
+      residual: AgentUninstallResidual[]
+    }
+
+interface UninstallBody {
+  name?: string
+  status?: string
+  error?: {
+    details?: {
+      name?: string
+      status?: string
+      removed?: boolean
+      residual?: AgentUninstallResidual[]
+    }
+  }
+}
+
+function _normaliseUninstall(name: string, body: UninstallBody | null): AgentUninstallResult {
+  const details = body?.error?.details
+  if (details?.status === 'partially_uninstalled') {
+    return {
+      name: details.name ?? name,
+      status: 'partially_uninstalled',
+      removed: details.removed === true,
+      residual: Array.isArray(details.residual) ? details.residual : [],
+    }
+  }
+  if (body?.status === 'uninstalled' || body?.status === 'not_installed') {
+    return { name: body.name ?? name, status: body.status }
+  }
+  throw new Error(`unexpected response uninstalling ${name}`)
+}
+
+/** DELETE /api/agents/{name} — idempotent; a cli-kind agent answers 400
+ *  `agent.cli_kind_local_only` (its profile is removed from the CLI). A 207
+ *  partial removal resolves with `status: 'partially_uninstalled'`. The agents
+ *  queries refresh whatever the outcome: a call that rejects (an unreadable
+ *  body, a timeout) may still have removed the agent. */
+export function useAgentUninstall(name: string) {
+  const qc = useQueryClient()
+  return useMutation<AgentUninstallResult, Error, void>({
+    mutationFn: async () =>
+      _normaliseUninstall(name, await apiDelete<UninstallBody | null>(ENDPOINTS.agentUninstall(name))),
+    onSettled: () => {
+      qc.invalidateQueries({ queryKey: ['agents'] })
+    },
+  })
+}
+
+/** PUT /api/agents/{name}/command-approvals — re-renders Hermes's config and
+ *  restarts the unit when it was running; the result carries `restart` and
+ *  `message` for the toast.
+ *
+ *  The result is the new approvals status, so it is written straight into the
+ *  Settings query (as useSetHermesCommandApprovals does) and into the cached
+ *  overview's `approvals`. The overview itself is left out of the invalidation:
+ *  a plain refetch would answer from the route's 30 s cache with the old mode;
+ *  the card follows up with refreshAgentOverview instead. */
+export function useCommandApprovalsMode(name: string) {
+  const qc = useQueryClient()
+  return useMutation<CommandApprovalsResult, Error, CommandApprovalsMode>({
+    mutationFn: (mode) =>
+      apiPut<CommandApprovalsResult>(ENDPOINTS.agentCommandApprovals(name), { mode }),
+    onSuccess: (res) => {
+      qc.setQueryData(['agent-command-approvals', name], res)
+      qc.setQueryData<AgentOverview | null>(agentOverviewKey(name), (old) =>
+        old
+          ? {
+              ...old,
+              approvals: {
+                ...(old.approvals ?? {}),
+                mode: res.mode,
+                effective: res.effective,
+                in_sync: res.in_sync,
+              },
+            }
+          : old,
+      )
+      const overview = agentOverviewKey(name)
+      qc.invalidateQueries({
+        queryKey: ['agents'],
+        predicate: (q) => !overview.every((part, i) => q.queryKey[i] === part),
+      })
+    },
+  })
+}
+
+/** What POST /api/agents/hermes/reconcile-upstreams answers: `ok` plus the
+ *  sync report (src/hal0/agents/hermes_upstreams.py sync_hermes_upstreams). */
+export interface HermesReconcileResult {
+  ok: boolean
+  keys_written?: unknown
+  profiles_wired?: string[]
+  [key: string]: unknown
+}
+
+/** POST /api/agents/hermes/reconcile-upstreams — re-mirror the Hermes
+ *  gateway's profiles into the upstream registry (Open WebUI reads them). */
+export function useHermesReconcileUpstreams() {
+  const qc = useQueryClient()
+  return useMutation<HermesReconcileResult, Error, void>({
+    mutationFn: () => apiPost<HermesReconcileResult>(ENDPOINTS.agentHermesReconcileUpstreams),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['agents'] })
+    },
+  })
+}
+
+/** GET /api/logs (src/hal0/api/routes/logs.py list_logs): the same body the
+ *  Services drawer reads. `hint` is set when the journal was unreadable or
+ *  empty and says why. */
+export type UnitLogTail = UnitLogs
+
+/**
+ * Journal tail for the `down` face. `null` on 404/501/0 (older daemon, or no
+ * such unit route), same once-per-path warning as the other agent reads. Polls
+ * every 10 s while `enabled`; a blank unit never fetches.
+ */
+export function useUnitLogTail(
+  unit: string,
+  n = 120,
+  enabled = true,
+): UseQueryResult<UnitLogTail | null> {
+  return useQuery<UnitLogTail | null>({
+    queryKey: ['agents', 'logs', unit, n],
+    queryFn: async () => {
+      const path = ENDPOINTS.logsUnit(unit, n)
+      try {
+        const body = await apiGet<UnitLogTail>(path)
+        return body && Array.isArray(body.lines) ? body : null
+      } catch (err) {
+        if (_isMissing(err)) {
+          _warnMissing(path, err)
+          return null
+        }
+        throw err
+      }
+    },
+    enabled: enabled && !!unit,
+    // A poll that fails is retried by the next tick, not by backoff on top.
+    retry: false,
+    refetchInterval: OVERVIEW_POLL_MS,
   })
 }

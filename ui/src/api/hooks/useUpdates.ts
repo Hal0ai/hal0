@@ -164,46 +164,92 @@ export function useRestartDriftedSlots() {
   })
 }
 
-export function useUpdateJob(jobId: string | null): {
+export interface UseUpdateJobOptions {
+  /**
+   * A snapshot still `queued`/`running` whose `updated_at` is older than this
+   * many milliseconds ends the poll as lost. Unset (the default) never ends a
+   * poll on age: a long single step legitimately goes quiet, so only a caller
+   * that knows its job's longest silence should set it.
+   */
+  staleAfterMs?: number
+}
+
+interface JobPoll {
+  /** The job id this state belongs to. */
+  id: string | null
   job: UpdateJob | null
   terminal: boolean
+  lost: boolean
+}
+
+const IDLE_POLL: JobPoll = { id: null, job: null, terminal: false, lost: false }
+
+/**
+ * Poll `/api/updates/status/{jobId}` every 1.5 s until the job is `applied` or
+ * `failed`. The loop also ends, with `terminal: true, lost: true`, when the
+ * server no longer knows the job (a 404) or, with `staleAfterMs`, when the
+ * last snapshot is a `queued`/`running` one that has gone quiet for longer
+ * than that. Any other error keeps polling: hal0-api restarts during a
+ * self-update and the job resolves once it is back. `job` stays the last
+ * snapshot read, so a lost job still shows its last known state. What comes
+ * back always belongs to `jobId`: a new id starts from nothing.
+ */
+export function useUpdateJob(
+  jobId: string | null,
+  opts?: UseUpdateJobOptions,
+): {
+  job: UpdateJob | null
+  terminal: boolean
+  lost: boolean
 } {
-  const [job, setJob] = useState<UpdateJob | null>(null)
-  const [terminal, setTerminal] = useState(false)
+  const [state, setState] = useState<JobPoll>(IDLE_POLL)
+  const staleAfterMs = opts?.staleAfterMs
 
   useEffect(() => {
-    if (!jobId) {
-      setJob(null)
-      setTerminal(false)
-      return
-    }
+    setState(IDLE_POLL)
+    if (!jobId) return
     let cancelled = false
     let timer: ReturnType<typeof setTimeout> | null = null
+
+    const patch = (p: Partial<JobPoll>) =>
+      setState((prev) => ({ ...(prev.id === jobId ? prev : { ...IDLE_POLL, id: jobId }), ...p }))
 
     const tick = async () => {
       try {
         const snap = await apiGet<UpdateJob>(ENDPOINTS.updateStatus(jobId))
         if (cancelled) return
-        setJob(snap)
         if (snap.state === 'applied' || snap.state === 'failed') {
-          setTerminal(true)
+          patch({ job: snap, terminal: true })
           return
         }
-      } catch {
-        // Transient errors during a self-update are expected (hal0-api
-        // is restarting). Keep polling — once the API comes back the
-        // job entry will resolve to a terminal state. Worst case the
-        // server lost the in-memory job map; the timeout below caps the
-        // poll loop.
+        if (
+          staleAfterMs !== undefined &&
+          typeof snap.updated_at === 'number' &&
+          Date.now() - snap.updated_at * 1000 > staleAfterMs
+        ) {
+          patch({ job: snap, terminal: true, lost: true })
+          return
+        }
+        patch({ job: snap })
+      } catch (err) {
+        if (cancelled) return
+        // The server answered and has no such job: nothing will ever resolve it.
+        if ((err as { status?: number } | null)?.status === 404) {
+          patch({ terminal: true, lost: true })
+          return
+        }
+        // Anything else is transient (hal0-api restarting mid-update): keep
+        // polling until the job resolves or the server says it is gone.
       }
-      if (!cancelled) timer = setTimeout(tick, 1500)
+      timer = setTimeout(tick, 1500)
     }
     tick()
     return () => {
       cancelled = true
       if (timer) clearTimeout(timer)
     }
-  }, [jobId])
+  }, [jobId, staleAfterMs])
 
-  return { job, terminal }
+  const cur = state.id === jobId ? state : IDLE_POLL
+  return { job: cur.job, terminal: cur.terminal, lost: cur.lost }
 }

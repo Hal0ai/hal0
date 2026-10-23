@@ -201,6 +201,22 @@ export const ENDPOINTS = {
   // NOT the MCP approval queue (agentApprovals*).
   agentCommandApprovals: (id: string) =>
     `/api/agents/${encodeURIComponent(id)}/command-approvals`,
+  // State-aware agent cards: GET overview (phase, version, units, doctor,
+  // degraded list), POST repair (queues a job), POST gateway/restart, and
+  // DELETE on the agent itself (uninstall, routes/agents.py). componentConverge
+  // is the Services page's route, reused for the card's Upgrade.
+  agentOverview: (id: string) =>
+    `/api/agents/${encodeURIComponent(id)}/overview`,
+  agentRepair: (id: string) =>
+    `/api/agents/${encodeURIComponent(id)}/repair`,
+  agentGatewayRestart: (id: string) =>
+    `/api/agents/${encodeURIComponent(id)}/gateway/restart`,
+  agentUninstall: (id: string) =>
+    `/api/agents/${encodeURIComponent(id)}`,
+  // Re-mirror the Hermes gateway's profiles as hal0 upstreams (routes/agents.py).
+  agentHermesReconcileUpstreams: '/api/agents/hermes/reconcile-upstreams',
+  componentConverge: (id: string) =>
+    `/api/updates/components/${encodeURIComponent(id)}/converge`,
   agentApprovals: '/api/agent/approvals',
   // Approval CRUD — list is an alias of agentApprovals; approve/deny are
   // the action endpoints added by backend-dev task #7 (PR #741 TODOs).

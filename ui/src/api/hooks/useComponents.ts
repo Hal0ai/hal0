@@ -15,6 +15,7 @@
 
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { apiGet, apiPost } from '../client'
+import { ENDPOINTS } from '../endpoints'
 import type { ComponentRow } from '@/dash/components-pure'
 
 type ComponentsResponse = { components: ComponentRow[]; pending: number }
@@ -37,7 +38,7 @@ export function useComponentConverge() {
   const qc = useQueryClient()
   return useMutation({
     mutationFn: (id: string) =>
-      apiPost<{ id: string }>(`/api/updates/components/${id}/converge`),
+      apiPost<{ id: string }>(ENDPOINTS.componentConverge(id)),
     onSettled: () => qc.invalidateQueries({ queryKey: ['updates', 'components'] }),
   })
 }

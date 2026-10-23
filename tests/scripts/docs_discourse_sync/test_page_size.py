@@ -149,6 +149,14 @@ def test_split_cli_env_vars_and_runner_images_pages_have_distinct_topics() -> No
         assert docs[second].external_id == "hal0-docs--" + second.replace("/", "--")
 
 
+def test_split_run_agents_pages_have_distinct_topics() -> None:
+    # The Agents view section moved out of run-agents. run-agents keeps its
+    # topic, the new guide page gets a topic of its own.
+    docs = {d.rel_key: d for d in discovery.discover_docs(REPO_ROOT / "docs")}
+    assert docs["guides/run-agents"].external_id == "hal0-docs--guides--run-agents"
+    assert docs["guides/agents-view"].external_id == "hal0-docs--guides--agents-view"
+
+
 def _doc(rel_key: str, body_md: str) -> discovery.Doc:
     section, _, slug = rel_key.partition("/")
     return discovery.Doc(

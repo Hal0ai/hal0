@@ -32,7 +32,9 @@
 .ao-lz .d { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
 .ao-lz .d.serving { background: var(--ok); box-shadow: 0 0 9px rgba(111,207,151,0.6); }
 .ao-lz .d.soon { background: transparent; border: 1.5px solid var(--fg-4); }
-.ao-lz .k { color: var(--fg-4); }
+.agents-overview .ao-lz .d.ready { background: var(--hal0-accent); }
+.agents-overview .ao-lz .d.down { background: var(--err); }
+.ao-lz .k { color: var(--fg-3); }
 
 .ao-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(330px, 340px)); gap: 26px; justify-content: start; }
 
@@ -127,28 +129,12 @@
 .agents-overview .skill.key { color: var(--fg); border-color: color-mix(in oklab, var(--el) 32%, transparent); }
 .agents-overview .skill.key::before { background: var(--el); box-shadow: 0 0 6px var(--el-glow); }
 
-/* quick-actions zone — pinned to the very bottom of the back face.
- * A secondary row (Logs · Persona) sits above the primary full-width
- * Restart button so the restart always lands at the very bottom edge. */
-.agents-overview .fcb-actions { margin-top: auto; border-top: 1px solid var(--line-soft); padding: 11px 14px 13px; display: flex; flex-direction: column; gap: 9px; }
-.agents-overview .fcb-act-row { display: flex; gap: 8px; }
+/* card action button (front bands and the console back) */
 .agents-overview .fc-act { flex: 1; display: inline-flex; align-items: center; justify-content: center; gap: 7px;
   font-family: var(--jbm); font-size: 10.5px; font-weight: 500; letter-spacing: 0.04em; text-transform: uppercase;
   color: var(--fg-2); background: transparent; border: 1px solid var(--line-strong); border-radius: 8px; padding: 8px 10px; cursor: pointer;
   transition: color var(--dur) var(--ease), border-color var(--dur) var(--ease), background var(--dur) var(--ease); }
 .agents-overview .fc-act:hover { color: var(--fg); border-color: color-mix(in oklab, var(--el) 40%, var(--line-strong)); background: color-mix(in oklab, var(--el) 6%, transparent); }
-.agents-overview .fc-restart { display: flex; align-items: center; justify-content: center; gap: 8px; width: 100%;
-  font-family: var(--jbm); font-size: 12px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase;
-  color: #14110a; background: var(--el); border: none; border-radius: 9px; padding: 11px 14px; cursor: pointer;
-  box-shadow: 0 0 0 1px color-mix(in oklab, var(--el) 40%, transparent), 0 8px 22px -10px var(--el-glow);
-  transition: transform 0.12s var(--ease), filter 0.18s var(--ease); }
-.agents-overview .fc-restart:hover { filter: brightness(1.08); transform: translateY(-1px); }
-.agents-overview .fc-restart:active { transform: translateY(0); }
-.agents-overview .fc-restart:disabled { cursor: default; filter: none; transform: none; opacity: 0.92; }
-.agents-overview .fc-restart.busy { background: color-mix(in oklab, var(--el) 28%, var(--bg-3)); color: var(--fg-2); box-shadow: 0 0 0 1px var(--line-strong); }
-.agents-overview .fc-restart.ok { background: var(--ok); color: #08120c; box-shadow: 0 0 0 1px var(--ok-line); }
-.agents-overview .fc-restart.err { background: var(--err); color: #1a0707; box-shadow: 0 0 0 1px var(--err-line); }
-.agents-overview .fc-restart .spin { animation: aoSpin 0.9s linear infinite; transform-origin: center; }
 @keyframes aoSpin { to { transform: rotate(360deg); } }
 
 /* ─── locked / coming-soon card (front module tile) ───────────────── */
@@ -187,4 +173,209 @@
 
 @media (prefers-reduced-motion: reduce) {
   .agents-overview .fcard-tilt, .agents-overview .fc-face { transition: none; }
+}
+
+/* ─── state-aware live cards: phases, console back ────────────────────
+ * Additions for the overview-driven cards (agent-card.jsx). Small labels on
+ * the near-black bands use --fg-3 (#8a8a85, above 4.5:1 on #0b0b0b) or
+ * brighter; --fg-4 and --fg-5 are kept off text. */
+
+/* StatusDot cls="working" (an upgrade or repair is running) */
+.agents-overview .sdot.working { background: var(--accent); box-shadow: 0 0 8px var(--accent-glow); animation: pulse 1.4s ease-in-out infinite; }
+
+.agents-overview .fc-meta .flip-hint { color: var(--fg-3); }
+.agents-overview .fc-st.warn { color: var(--warn); }
+.agents-overview .fc-st.working { color: var(--accent); }
+
+/* top band: version pill, update badge, python/ref line, Pi home chip */
+.agents-overview .fc-version-row { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin-top: 2px; }
+.agents-overview .fc-version { font-family: var(--jbm); font-size: 10px; font-weight: 600; letter-spacing: 0.02em; color: var(--fg);
+  background: rgba(0,0,0,0.55); border: 1px solid color-mix(in oklab, var(--el) 40%, var(--line-strong)); border-radius: var(--rad-pill);
+  padding: 2px 8px; max-width: 170px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.agents-overview .fc-badge { font-family: var(--jbm); font-size: 9.5px; font-weight: 600; letter-spacing: 0.02em; color: #14110a;
+  background: var(--accent); border-radius: var(--rad-pill); padding: 2px 7px; white-space: nowrap; box-shadow: 0 0 10px -2px var(--accent-glow); }
+.agents-overview .fc-sub { font-family: var(--jbm); font-size: 9.5px; letter-spacing: 0.02em; color: var(--fg-2); text-shadow: 0 1px 8px rgba(0,0,0,0.9); }
+/* the live top band carries more rows than the kit's: a deeper scrim keeps
+   them legible over a bright portrait */
+.agents-overview .fcard:not(.locked) .foilb-top { padding-bottom: 40px;
+  background: linear-gradient(to bottom, rgba(6,6,6,0.94), rgba(6,6,6,0.74) 64%, transparent); }
+.agents-overview .fcard:not(.locked) .fc-model { text-shadow: 0 1px 8px rgba(0,0,0,0.9); }
+
+/* right block in place of the health block */
+.agents-overview .fc-pblock { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; flex-shrink: 0; text-align: right; }
+.agents-overview .fc-pb-l { font-family: var(--jbm); font-size: 9.5px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--fg-2); }
+.agents-overview .fc-pb-v { font-family: var(--jbm); font-size: 13px; font-weight: 600; color: var(--err); }
+.agents-overview .fc-pb-n { font-family: var(--jbm); font-size: 22px; font-weight: 600; line-height: 1; color: var(--warn); font-variant-numeric: tabular-nums; }
+.agents-overview .fc-pblock.err .fc-pb-l { color: var(--err); }
+.agents-overview .fc-pblock.warn .fc-pb-l { color: var(--warn); }
+.agents-overview .fc-pblock.work { flex-direction: row; align-items: center; gap: 7px; }
+.agents-overview .fc-pblock.work .fc-pb-l { color: var(--accent); }
+.agents-overview .fc-spin { width: 11px; height: 11px; flex-shrink: 0; border-radius: 50%; border: 1.5px solid color-mix(in oklab, var(--accent) 30%, transparent);
+  border-top-color: var(--accent); animation: aoSpin 0.9s linear infinite; }
+
+/* chips: persona · approvals · terminal (and the Pi home chip) */
+.agents-overview .fc-chips { display: flex; flex-wrap: wrap; gap: 5px; }
+.agents-overview .fc-chip { font-family: var(--jbm); font-size: 9.5px; color: var(--fg-3); background: rgba(0,0,0,0.74); border: 1px solid var(--line-strong);
+  border-radius: var(--rad-pill); padding: 3px 8px; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.agents-overview .fc-chip b { color: var(--fg-2); font-weight: 500; }
+.agents-overview .fc-chip.on { color: var(--accent); border-color: var(--accent-line); }
+.agents-overview .fc-chip.on b { color: var(--accent); }
+.agents-overview .fc-chip.home { align-self: flex-start; margin-top: 3px; }
+
+/* reach: platforms, api · N profiles, desktop link */
+.agents-overview .fc-reach { display: flex; flex-wrap: wrap; gap: 5px; }
+.agents-overview .fc-rchip { display: inline-flex; align-items: center; gap: 5px; font-family: var(--jbm); font-size: 9.5px; color: var(--fg-3);
+  border: 1px dashed var(--line-strong); border-radius: 6px; padding: 3px 7px; text-decoration: none; background: rgba(0,0,0,0.7); }
+.agents-overview .fc-rchip::before { content: ""; width: 5px; height: 5px; flex-shrink: 0; border-radius: 50%; background: var(--fg-5); }
+.agents-overview .fc-rchip.lit { color: var(--fg-2); border-style: solid; border-color: var(--ok-line); }
+.agents-overview .fc-rchip.lit::before { background: var(--ok); box-shadow: 0 0 6px rgba(111,207,151,0.6); }
+/* the gateway is disabled on purpose: a solid neutral chip with a bar, not
+   the dashed dot of a platform that is merely unlit */
+.agents-overview .fc-rchip.off { color: var(--fg-2); border-style: solid; border-color: var(--line-strong); background: rgba(20,20,20,0.82); }
+.agents-overview .fc-rchip.off::before { width: 8px; height: 2px; border-radius: 1px; background: var(--fg-3); }
+.agents-overview .fc-rchip.link { color: var(--accent); border-style: solid; border-color: var(--accent-line); cursor: pointer; }
+.agents-overview .fc-rchip.link::before { background: var(--accent); }
+.agents-overview .fc-note { font-family: var(--jbm); font-size: 10px; line-height: 1.5; color: var(--fg-3); text-wrap: pretty; }
+.agents-overview .fc-note b { color: var(--fg-2); font-weight: 600; }
+
+/* down face: journal tail + Start · Repair · Logs */
+.agents-overview .fc-journal { display: flex; flex-direction: column; gap: 2px; background: rgba(0,0,0,0.62); border: 1px solid var(--err-line);
+  border-radius: 8px; padding: 7px 9px; }
+.agents-overview .fc-journal-l { font-family: var(--jbm); font-size: 9.5px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--err); margin-bottom: 2px; }
+.agents-overview .fc-journal-ln { font-family: var(--jbm); font-size: 9.5px; line-height: 1.45; color: var(--fg-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.agents-overview .fc-journal-ln.dim { color: var(--fg-3); }
+.agents-overview .fc-acts { display: flex; gap: 6px; }
+
+/* action buttons (extends .fc-act) */
+.agents-overview .fc-act.primary { color: #14110a; background: var(--accent); border-color: var(--accent); font-weight: 600; }
+.agents-overview .fc-act.primary:hover { color: #14110a; background: var(--accent); filter: brightness(1.08); }
+.agents-overview .fc-act.danger { color: var(--err); border-color: var(--err-line); }
+.agents-overview .fc-act.danger:hover { color: var(--err); background: var(--err-soft); border-color: var(--err); }
+.agents-overview .fc-act.wide { flex: none; width: 100%; }
+.agents-overview .fc-act:disabled { cursor: default; opacity: 0.55; filter: none; }
+.agents-overview .fc-act.busy { opacity: 0.8; }
+.agents-overview a.fc-act { box-sizing: border-box; text-decoration: none; }
+
+/* degraded face: top reasons, one fix each */
+.agents-overview .fc-reasons { display: flex; flex-direction: column; gap: 5px; cursor: default; }
+.agents-overview .fc-reason { display: flex; align-items: center; gap: 8px; background: rgba(0,0,0,0.58); border: 1px solid var(--warn-line);
+  border-left: 2px solid var(--warn); border-radius: 7px; padding: 5px 6px 5px 9px; }
+.agents-overview .fc-reason-t { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.agents-overview .fc-reason-n { font-family: var(--jbm); font-size: 10.5px; font-weight: 600; color: var(--fg); }
+.agents-overview .fc-reason-d { font-family: var(--jbm); font-size: 9.5px; color: var(--fg-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.agents-overview .fc-reason .fc-act { flex: none; padding: 5px 8px; font-size: 9.5px; }
+.agents-overview .fc-reason .fc-cmd { flex: none; max-width: 150px; }
+.agents-overview .fc-more { font-family: var(--jbm); font-size: 9.5px; color: var(--fg-3); }
+
+/* copy-command card: selectable command + copy button */
+.agents-overview .fc-cmd { display: flex; flex-direction: column; gap: 4px; cursor: default; }
+.agents-overview .fc-cmd-l { font-family: var(--jbm); font-size: 9.5px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--fg-3); }
+.agents-overview .fc-cmd-row { display: flex; align-items: stretch; background: var(--bg-sunken); border: 1px solid var(--line-strong); border-radius: 7px; overflow: hidden; }
+.agents-overview .fc-cmd-t { flex: 1; min-width: 0; font-family: var(--jbm); font-size: 10.5px; color: var(--fg); padding: 7px 9px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; user-select: all; cursor: text; }
+.agents-overview .fc-cmd-b { display: inline-flex; align-items: center; gap: 5px; flex-shrink: 0; font-family: var(--jbm); font-size: 9.5px; letter-spacing: 0.08em;
+  text-transform: uppercase; color: var(--accent); background: transparent; border: none; border-left: 1px solid var(--line-strong); padding: 0 10px; cursor: pointer; }
+.agents-overview .fc-cmd-b:hover { background: var(--accent-soft); }
+.agents-overview .fc-cmd-b:disabled { color: var(--fg-3); cursor: default; background: transparent; }
+
+/* working face: running job, steps seen so far, elapsed */
+.agents-overview .fc-job { display: flex; flex-direction: column; gap: 6px; background: rgba(0,0,0,0.62); border: 1px solid var(--accent-line);
+  border-radius: 8px; padding: 8px 10px; cursor: default; }
+.agents-overview .fc-job-h { display: flex; align-items: center; gap: 7px; font-family: var(--jbm); font-size: 10.5px; color: var(--fg-2); }
+.agents-overview .fc-job-h b { color: var(--accent); font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; }
+.agents-overview .fc-job-s { color: var(--fg-3); }
+.agents-overview .fc-job-t { margin-left: auto; color: var(--fg); font-variant-numeric: tabular-nums; }
+.agents-overview .fc-steps { display: flex; flex-direction: column; gap: 3px; }
+.agents-overview .fc-step { display: flex; align-items: center; gap: 7px; font-family: var(--jbm); font-size: 9.5px; color: var(--fg-3); }
+.agents-overview .fc-step::before { content: ""; width: 6px; height: 6px; flex-shrink: 0; border-radius: 50%; background: var(--ok); }
+.agents-overview .fc-step.cur { color: var(--fg); }
+.agents-overview .fc-step.cur::before { background: var(--accent); box-shadow: 0 0 6px var(--accent-glow); animation: pulse 1.4s ease-in-out infinite; }
+
+/* Pi profile checks */
+.agents-overview .fc-checks { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 10px; }
+.agents-overview .fc-check { display: flex; align-items: center; gap: 6px; min-width: 0; font-family: var(--jbm); font-size: 9.5px; color: var(--fg-2);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.agents-overview .fc-check i { width: 10px; flex-shrink: 0; font-style: normal; font-weight: 700; text-align: center; }
+.agents-overview .fc-check.ok i { color: var(--ok); }
+.agents-overview .fc-check.bad { color: var(--fg); }
+.agents-overview .fc-check.bad i { color: var(--err); }
+.agents-overview .fc-check.na, .agents-overview .fc-check.na i { color: var(--fg-3); }
+
+/* phase modifiers: border and portrait treatment */
+.agents-overview .fcard.is-down .fc-front { border-color: color-mix(in oklab, var(--err) 45%, var(--line-strong)); }
+.agents-overview .fcard.is-down .foilb-img,
+.agents-overview .fcard.is-down .pi-mark { filter: grayscale(0.85) brightness(0.6) contrast(1.05); }
+.agents-overview .fcard.is-degraded .fc-front { border-color: color-mix(in oklab, var(--warn) 50%, var(--line-strong)); }
+.agents-overview .fcard.is-degraded .foilb-img { filter: saturate(0.75) brightness(0.85); }
+.agents-overview .fcard.is-working .fc-front { border-color: var(--accent-line);
+  box-shadow: 0 32px 74px -30px rgba(0,0,0,0.86), 0 0 0 1px var(--accent-line), 0 0 26px -6px var(--accent-glow); }
+.agents-overview .fcard.is-working .foilb-img { filter: brightness(0.8) sepia(0.25); }
+.agents-overview .fcard.is-not-installed .fc-front { border-style: dashed; }
+.agents-overview .fcard.is-not-installed .foilb-img,
+.agents-overview .fcard.is-not-installed .pi-mark { filter: grayscale(1) brightness(0.45); }
+
+/* back: console tabs and panes */
+.agents-overview .fcb-tabs { display: flex; gap: 2px; padding: 0 12px; border-bottom: 1px solid var(--line-soft); }
+.agents-overview .fcb-tab { flex: 1; font-family: var(--jbm); font-size: 10px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--fg-3);
+  background: transparent; border: none; border-bottom: 2px solid transparent; padding: 9px 2px 8px; cursor: pointer; }
+.agents-overview .fcb-tab:hover { color: var(--fg-2); }
+.agents-overview .fcb-tab.on { color: var(--fg); border-bottom-color: var(--el); }
+.agents-overview .fcb-pane { min-height: 0; padding: 10px 14px 12px; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; }
+.agents-overview .fcb-pane .fcb-sec-l { color: var(--fg-3); margin-bottom: 0; }
+.agents-overview .fcb-pane-in { display: flex; flex-direction: column; gap: 9px; }
+.agents-overview .fcb-rows { display: flex; flex-direction: column; }
+.agents-overview .fcb-r { display: flex; align-items: baseline; gap: 10px; padding: 4px 0; border-bottom: 1px solid var(--line-soft); font-family: var(--jbm); font-size: 10px; }
+.agents-overview .fcb-r:last-child { border-bottom: none; }
+.agents-overview .fcb-r .k { flex: 0 0 94px; color: var(--fg-3); }
+.agents-overview .fcb-r .v { flex: 1; min-width: 0; color: var(--fg-2); overflow-wrap: anywhere; }
+.agents-overview .fcb-foot { font-family: var(--jbm); font-size: 9.5px; color: var(--fg-3); text-align: right; padding-top: 2px; }
+.agents-overview .fcb-grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 7px; }
+.agents-overview .fcb-field { display: flex; flex-direction: column; gap: 6px; }
+.agents-overview .fcb-row { display: flex; align-items: stretch; gap: 7px; }
+.agents-overview .fcb-row .fc-act { flex: none; }
+.agents-overview .fc-select { flex: 1; min-width: 0; font-family: var(--jbm); font-size: 10.5px; color: var(--fg); background: var(--bg-sunken);
+  border: 1px solid var(--line-strong); border-radius: 8px; padding: 6px 8px; }
+.agents-overview .fc-seg { flex: 1; display: flex; border: 1px solid var(--line-strong); border-radius: 8px; overflow: hidden; }
+.agents-overview .fc-seg-b { flex: 1; font-family: var(--jbm); font-size: 10px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--fg-3);
+  background: transparent; border: none; padding: 6px 8px; cursor: pointer; }
+.agents-overview .fc-seg-b + .fc-seg-b { border-left: 1px solid var(--line-strong); }
+.agents-overview .fc-seg-b.on { color: #14110a; background: var(--accent); font-weight: 600; }
+.agents-overview .fc-seg-b:disabled { cursor: default; }
+.agents-overview .fc-slot-dim { font-family: var(--jbm); font-size: 10px; color: var(--fg-3); text-align: center;
+  border: 1px dashed var(--line-strong); border-radius: 8px; padding: 9px 10px; }
+.agents-overview .fc-slot-dim a { color: var(--accent); text-decoration: underline; text-underline-offset: 2px; }
+/* Controls tab: groups sit a little further apart than the info panes' rows */
+.agents-overview .fcb-ctl { gap: 12px; }
+.agents-overview .fcb-ctl .fcb-field + .fcb-field { padding-top: 2px; }
+.agents-overview .fcb-card { display: flex; flex-direction: column; gap: 4px; background: var(--bg-sunken); border: 1px solid var(--line); border-radius: 9px; padding: 8px 10px; }
+.agents-overview .fcb-pin { font-family: var(--jbm); font-size: 10px; color: var(--fg-3); }
+.agents-overview .fcb-pin b { color: var(--fg); }
+.agents-overview .fcb-danger { display: flex; flex-direction: column; gap: 6px; margin-top: 4px; padding-top: 9px; border-top: 1px dashed var(--err-line); }
+
+/* lore: unlock line per ability, lit or dim skills */
+.agents-overview .atk.locked .atk-name { color: var(--fg-2); }
+.agents-overview .atk.locked .atk-cost, .agents-overview .atk.locked .atk-pow { opacity: 0.5; }
+.agents-overview .atk-unlock { font-family: var(--jbm); font-size: 9.5px; color: var(--fg-3); margin-top: 5px; padding-left: 34px; }
+.agents-overview .atk-unlock.on { color: var(--ok); }
+.agents-overview .skill.dim { color: var(--fg-3); border-style: dashed; }
+.agents-overview .skill i { font-style: normal; color: var(--fg-3); }
+
+/* upgrade confirm body */
+.agents-overview .ao-confirm p { margin: 0 0 8px; }
+.agents-overview .ao-confirm-v { font-size: 11px; color: var(--accent); margin-bottom: 10px; }
+.agents-overview .ao-confirm-note { margin: 12px 0 0; padding-top: 10px; border-top: 1px solid var(--line); font-size: 12px; color: var(--fg-3); }
+
+/* the flip buttons: the front's "tap · console" hint and the console's "front" */
+.agents-overview button.flip-hint { background: transparent; border: 0; border-radius: 5px; padding: 2px 4px; margin: -2px -4px;
+  line-height: inherit; cursor: pointer; }
+.agents-overview button.flip-hint:hover { color: var(--fg-2); }
+.agents-overview .fcb-unflip { margin-left: auto; display: inline-flex; align-items: center; gap: 5px; font-family: var(--jbm); font-size: 9.5px;
+  letter-spacing: 0.08em; text-transform: uppercase; color: var(--fg-3); background: transparent; border: 1px solid var(--line-strong);
+  border-radius: 6px; padding: 3px 7px; cursor: pointer; }
+.agents-overview .fcb-unflip:hover { color: var(--fg); border-color: color-mix(in oklab, var(--el) 40%, var(--line-strong)); }
+.agents-overview button.flip-hint:focus-visible,
+.agents-overview .fcb-unflip:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+@media (prefers-reduced-motion: reduce) {
+  .agents-overview .fc-spin, .agents-overview .sdot.working, .agents-overview .fc-step.cur::before { animation: none; }
 }
