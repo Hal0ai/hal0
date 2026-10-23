@@ -221,6 +221,39 @@ def test_no_reasons_when_healthy():
     assert degraded_reasons(**BASE) == []
 
 
+def test_smoke_skips_alone_raise_no_provision_warn(tmp_path: Path):
+    """A repair on a box whose model slots are cold: the gated smoke probes
+    skip (so the smoke test does not cold-load a slot), the phase stays ``ok``,
+    and the report the provisioner writes carries no ``failure_count`` — so a
+    healthy box shows no "provision warnings"."""
+    from hal0.agents import hermes_provision as hp
+
+    skipped = [
+        "chat_completions: skipped: chat model not loaded (slot agent is offline; "
+        "skipped so the smoke test does not cold-load it)",
+        "memory_roundtrip: skipped: memory engine's model not loaded (hal0/utility: "
+        "slot utility is offline; skipped so the smoke test does not cold-load it)",
+    ]
+    report = hp.InstallReport(hermes_home="/h", venv="/v", agent_id="hermes")
+    report.steps.append(hp.InstallStep(name="config_write", status="ok"))
+    report.steps.append(
+        hp.InstallStep(
+            name="smoke_tests",
+            status=hp.PhaseStatus.OK.value,
+            details={"results": {}, "failures": [], "skipped": skipped},
+        )
+    )
+    hp._write_run_report(report, tmp_path)
+    data = json.loads((tmp_path / hp._STATE_FILE_NAME).read_text())
+
+    smoke = data["phases"]["smoke_tests"]
+    assert "failure_count" not in smoke and smoke["skipped_count"] == 2
+    summary = provision_summary(data)
+    assert (summary["warn"], summary["fail"]) == (0, 0)
+    assert [p["failure_count"] for p in summary["phases"]] == [None, None]
+    assert degraded_reasons(**{**BASE, "provision": summary}) == []
+
+
 def test_stale_provision_report_does_not_degrade():
     stale = {
         "present": True,

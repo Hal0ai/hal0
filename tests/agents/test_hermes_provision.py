@@ -3357,13 +3357,92 @@ def _write_ready_chat_config(
     )
 
 
+@pytest.fixture(autouse=True)
+def _memory_engine_llm_off_host(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The memory gate's default seam reads hindsight-api's live environment
+    (``systemctl show`` + ``/proc``). Keep every test in this module off the
+    host's engine: report the engine LLM as unknown unless a test injects one."""
+    monkeypatch.setattr("hal0.memory.extraction_env.effective_engine_llm", lambda **_kw: {})
+
+
+#: A slot's own llama-server (``HAL0_HERMES_LIVE_RESOLVE=0``), not hal0's gateway.
+_DIRECT_BACKEND = "http://127.0.0.1:8081/v1"
+
+#: hal0-api's slot list, as the smoke guard reads it.
+_SLOTS_URL = "http://127.0.0.1:8080/api/slots"
+
+
+def _slot_row(name: str, state: str, model: str = "", **extra: Any) -> dict[str, Any]:
+    """One ``GET /api/slots`` row in the shape the route serves (``slot_view``):
+    the FSM ``state``, plus the config-lifted ``type`` and ``model_default``."""
+    loaded = state in ("ready", "serving", "idle")
+    row: dict[str, Any] = {
+        "name": name,
+        "kind": "local",
+        "type": "llm",
+        "state": state,
+        "status": state,
+        "model_id": model if (model and loaded) else None,
+    }
+    if model:
+        row["model_default"] = model
+    row.update(extra)
+    return row
+
+
+#: A box whose agent (``m1``) and utility (``u1``) slots are both loaded, so
+#: every gated probe may run.
+_WARM_SLOTS = [_slot_row("agent", "ready", "m1"), _slot_row("utility", "ready", "u1")]
+
+
+def _memory_cfg(**graph: Any) -> Any:
+    """A ``load_config()`` stand-in carrying just the ``[memory]`` table."""
+    from types import SimpleNamespace
+
+    from hal0.config.schema import MemoryGraphConfig
+
+    engine = graph.pop("engine", "hindsight")
+    enabled = graph.pop("enabled", True)
+    return SimpleNamespace(
+        memory=SimpleNamespace(enabled=enabled, engine=engine, graph=MemoryGraphConfig(**graph))
+    )
+
+
+def _box_io(
+    rows: list[dict[str, Any]] | None = _WARM_SLOTS,
+    *,
+    status: int | None = 200,
+    engine_llm: dict[str, Any] | None = None,
+    memory: Any = None,
+    calls: list[str] | None = None,
+    **kw: Any,
+) -> hp.InstallIO:
+    """``InstallIO`` for a box whose hal0-api answers its slot list with
+    ``(status, rows)``, whose memory engine calls ``hal0/memory`` on the
+    gateway (unless ``engine_llm`` says otherwise), and whose ``[memory]`` is
+    the schema default (unless ``memory``). ``calls`` records each slot-list
+    read."""
+
+    def _fetch() -> hp.SlotListAnswer:
+        if calls is not None:
+            calls.append("slots")
+        return (status, rows)
+
+    seams: dict[str, Any] = {
+        "fetch_slot_list": _fetch,
+        "read_memory_engine_llm": lambda: dict(engine_llm or {}),
+        "load_config": lambda: memory if memory is not None else _memory_cfg(),
+    }
+    return hp.InstallIO(**{**seams, **kw})
+
+
 def test_smoke_tests_phase_runs_each_probe_collecting_results(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     hh = tmp_path / "hh"
     _write_ready_chat_config(hh)
     state = hp.BootstrapState(hermes_home=str(hh))
-    io = hp.InstallIO(fetch_model_route_ready=lambda model_id, base_url="": model_id == "m1")
+    io = _box_io()
     # All six probes return (True, "...") so we exercise the rollup
     # without depending on a real Hermes binary or HTTP listener.
     monkeypatch.setattr(hp, "_smoke_wrapper_ready", lambda s, io: (True, "ok"))
@@ -3396,7 +3475,7 @@ def test_smoke_tests_phase_records_failures_as_warn_without_blocking(
     hh = tmp_path / "hh"
     _write_ready_chat_config(hh)
     state = hp.BootstrapState(hermes_home=str(hh))
-    io = hp.InstallIO(fetch_model_route_ready=lambda model_id, base_url="": model_id == "m1")
+    io = _box_io()
     monkeypatch.setattr(hp, "_smoke_wrapper_ready", lambda s, io: (False, "wrapper missing"))
     monkeypatch.setattr(hp, "_smoke_hermes_doctor", lambda s, io: (True, "ok"))
     monkeypatch.setattr(hp, "_smoke_chat_completions", lambda s, io: (False, "503"))
@@ -3430,7 +3509,9 @@ def test_smoke_tests_phase_skips_model_dependent_probes_without_chat_model(
     monkeypatch.setattr(hp, "_smoke_memory_roundtrip", lambda s, io: (True, "1 item"))
     monkeypatch.setattr(hp, "_smoke_admin_tools_list", lambda s, io: (True, "8 tools"))
     monkeypatch.setattr(hp, "_smoke_hermes_md_contains_primary", lambda s, io: (True, "ok"))
-    out = hp._phase_smoke_tests(hp._StepCtx(state=state))
+    # The memory engine's model (utility, in _WARM_SLOTS) is loaded, so its gate
+    # is open and the only question is the chat one.
+    out = hp._phase_smoke_tests(hp._StepCtx(state=state, io=_box_io()))
     assert calls == []  # the chat-gated probe never ran
     assert out.status == hp.PhaseStatus.OK  # skips aren't failures
     assert out.details["failures"] == []
@@ -3441,7 +3522,7 @@ def test_smoke_tests_phase_skips_model_dependent_probes_without_chat_model(
         "anchor_context_window",
     }
     assert out.details["results"]["chat_completions"]["skipped"] is True
-    assert "no chat model loaded" in out.details["results"]["chat_completions"]["detail"]
+    assert "chat model not loaded" in out.details["results"]["chat_completions"]["detail"]
     assert out.details["results"]["memory_roundtrip"] == {"passed": True, "detail": "1 item"}
 
 
@@ -3463,18 +3544,22 @@ class TestChatModelReady:
         assert ready is False
         assert "model.default unset" in reason
 
+    # The route-probe rules below are the DIRECT-backend path (a slot's own
+    # llama-server never cold-loads on a request); hal0's gateway is gated by
+    # its slot list instead — see TestSmokeColdLoadGuard.
+
     def test_model_with_no_route_not_ready(self, tmp_path: Path) -> None:
         hh = tmp_path / "hh"
-        _write_ready_chat_config(hh, "m1")
+        _write_ready_chat_config(hh, "m1", base_url=_DIRECT_BACKEND)
         state = hp.BootstrapState(hermes_home=str(hh))
         io = hp.InstallIO(fetch_model_route_ready=lambda model_id, base_url="": False)
         ready, reason = hp._chat_model_ready(state, io)
         assert ready is False
-        assert "has no route at http://127.0.0.1:8080/v1" in reason
+        assert f"has no route at {_DIRECT_BACKEND}" in reason
 
     def test_routable_model_ready(self, tmp_path: Path) -> None:
         hh = tmp_path / "hh"
-        _write_ready_chat_config(hh, "m1")
+        _write_ready_chat_config(hh, "m1", base_url=_DIRECT_BACKEND)
         state = hp.BootstrapState(hermes_home=str(hh))
         io = hp.InstallIO(fetch_model_route_ready=lambda model_id, base_url="": model_id == "m1")
         ready, reason = hp._chat_model_ready(state, io)
@@ -3500,7 +3585,7 @@ class TestChatModelReady:
         """``None`` means the endpoint settled nothing — run the probe. A skip
         is a claim and must be earned (#1831)."""
         hh = tmp_path / "hh"
-        _write_ready_chat_config(hh, "m1")
+        _write_ready_chat_config(hh, "m1", base_url=_DIRECT_BACKEND)
         state = hp.BootstrapState(hermes_home=str(hh))
         io = hp.InstallIO(fetch_model_route_ready=lambda model_id, base_url="": None)
         ready, reason = hp._chat_model_ready(state, io)
@@ -3510,7 +3595,7 @@ class TestChatModelReady:
     def test_probe_exception_does_not_skip(self, tmp_path: Path) -> None:
         """A broken preflight must not silently suppress the probe it gates."""
         hh = tmp_path / "hh"
-        _write_ready_chat_config(hh, "m1")
+        _write_ready_chat_config(hh, "m1", base_url=_DIRECT_BACKEND)
         state = hp.BootstrapState(hermes_home=str(hh))
 
         def _boom(_model_id: str, _base_url: str = "") -> bool:
@@ -3521,35 +3606,23 @@ class TestChatModelReady:
         assert ready is True
         assert "route probe errored" in reason
 
-    def test_shipped_virtual_default_ready_via_by_id_route_not_list(self, tmp_path: Path) -> None:
-        """Regression (#1831): the shipped ``model.default: hal0/agent`` is
-        NEVER a member of ``GET /v1/models``' list payload — that route
-        deliberately never advertises hal0's canonical virtuals (#1153) — so
-        the preflight must resolve the anchor through the **by-id** route
-        (``GET /v1/models/{id}``, which the gateway resolves through the
-        LiveSlotResolver) instead of checking list membership. A regression
-        here reintroduces "chat_completions and memory_roundtrip are skipped
-        on every install"."""
+    def test_shipped_virtual_default_ready_when_its_slot_is_loaded(self, tmp_path: Path) -> None:
+        """The shipped ``model.default: hal0/agent`` on the gateway is ready
+        when the agent slot is loaded — read off hal0-api's slot list, never
+        off ``GET /v1/models`` (whose list never advertises the canonical
+        virtuals, #1153) and never off the by-id route, which answers 200 for
+        a COLD slot too and so cannot tell a warm anchor from a cold load."""
         hh = tmp_path / "hh"
         _write_ready_chat_config(hh, "hal0/agent")
         state = hp.BootstrapState(hermes_home=str(hh))
 
-        # A realistic /v1/models list payload: never contains "hal0/agent",
-        # by design — only the underlying slot alias is listed.
-        realistic_list_contexts = {"brain": 32768, "utility": 8192}
+        def fetch_model_route_ready(_model_id: str, _base_url: str = "") -> bool:
+            raise AssertionError("the gateway path must not use the route probe")
 
-        def fetch_model_route_ready(model_id: str, _base_url: str = "") -> bool:
-            # The by-id route resolves virtuals; list membership is
-            # irrelevant to it.
-            return model_id == "hal0/agent"
-
-        io = hp.InstallIO(
-            fetch_model_contexts=lambda: realistic_list_contexts,
-            fetch_model_route_ready=fetch_model_route_ready,
-        )
+        io = _box_io(fetch_model_route_ready=fetch_model_route_ready)
         ready, reason = hp._chat_model_ready(state, io)
         assert ready is True
-        assert reason == "ready"
+        assert reason == "ready (slot agent is ready)"
 
 
 # ── #1831 follow-up: the preflight must interrogate the endpoint the chat
@@ -3696,15 +3769,24 @@ def test_unverifiable_route_runs_the_probe_instead_of_skipping(
 def test_virtual_anchor_with_no_live_slot_still_skips(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The #1793 install-time skip must survive: the gateway DOES resolve
-    ``hal0/*`` virtuals by id, so a 404 there is affirmative evidence that no
-    chat slot is live — skip rather than burn the probe's timeout."""
+    """The #1793 install-time skip must survive: an agent slot that is not
+    loaded skips the chat probe rather than burning its timeout — and, since
+    the gateway would LOAD that slot to answer, rather than cold-loading it."""
     hh = tmp_path / "hh"
     hh.mkdir()
     (hh / "config.yaml").write_text(
         "model:\n  default: hal0/agent\n  base_url: http://127.0.0.1:8080/v1\n"
     )
-    _fake_http(monkeypatch, {"http://127.0.0.1:8080/v1/models": {"data": [{"id": "brain"}]}})
+    _fake_http(
+        monkeypatch,
+        {
+            "http://127.0.0.1:8080/v1/models": {"data": [{"id": "brain"}]},
+            _SLOTS_URL: [
+                _slot_row("agent", "offline", "big-27b"),
+                _slot_row("utility", "ready", "u1"),
+            ],
+        },
+    )
     _stub_non_chat_probes(monkeypatch)
     monkeypatch.setattr(
         hp, "_smoke_chat_completions", lambda s, io: pytest.fail("probe must not run")
@@ -3712,6 +3794,7 @@ def test_virtual_anchor_with_no_live_slot_still_skips(
     state = hp.BootstrapState(hermes_home=str(hh))
     out = hp._phase_smoke_tests(hp._StepCtx(state=state))
     assert out.details["results"]["chat_completions"]["skipped"] is True
+    assert "slot agent is offline" in out.details["results"]["chat_completions"]["detail"]
     assert {s.split(":")[0] for s in out.details["skipped"]} == {
         "chat_completions",
         "anchor_context_window",
@@ -3721,8 +3804,9 @@ def test_virtual_anchor_with_no_live_slot_still_skips(
 def test_live_resolve_virtual_anchor_runs_the_probe(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The shipped default: ``hal0/agent`` against the gateway resolves
-    through the by-id route even though the list route never advertises it."""
+    """The shipped default: ``hal0/agent`` against the gateway runs the probe
+    when hal0-api reports the agent slot loaded, even though the list route
+    never advertises the virtual."""
     hh = tmp_path / "hh"
     hh.mkdir()
     (hh / "config.yaml").write_text(
@@ -3733,6 +3817,10 @@ def test_live_resolve_virtual_anchor_runs_the_probe(
         {
             "http://127.0.0.1:8080/v1/models/hal0/agent": {"id": "hal0/agent"},
             "http://127.0.0.1:8080/v1/models": {"data": [{"id": "brain"}]},
+            _SLOTS_URL: [
+                _slot_row("agent", "ready", "big-27b"),
+                _slot_row("utility", "ready", "u1"),
+            ],
         },
     )
     _stub_non_chat_probes(monkeypatch)
@@ -3747,6 +3835,475 @@ def test_live_resolve_virtual_anchor_runs_the_probe(
     # skips here (this fake catalog advertises no context_length), and a
     # blanket "nothing skipped" would make that skip look like a chat bug.
     assert not any(s.startswith("chat_completions") for s in out.details["skipped"])
+
+
+# ── a Hermes install or repair never cold-loads a slot to smoke-test it ─────
+#
+# Through hal0's gateway a request for a cold model loads its slot first
+# (``api/routes/v1.py::_ensure_backend_for_model``). A dashboard repair whose
+# smoke chat cold-loaded a 27B agent model stalled the host for minutes and the
+# agent's systemd watchdog SIGABRTed it. The gated probes now run only when
+# hal0-api's slot list shows the serving slot already loaded.
+
+#: Every slot state that is not dispatchable (offline, pulling, starting,
+#: warming, unloading, error): a request would have to load the slot.
+_COLD_STATES = sorted(s.value for s in SlotState if s not in DISPATCHABLE_STATES)
+_LOADED_STATES = sorted(s.value for s in DISPATCHABLE_STATES)
+
+_CHAT_URL = "http://127.0.0.1:8080/v1/chat/completions"
+_READY_REPLY = {"choices": [{"message": {"content": "ready"}}]}
+
+
+def _gateway_chat_box(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, seen: list[str], model: str = "hal0/agent"
+) -> hp.BootstrapState:
+    """A live-resolve config and a fake network recording every URL. The REAL
+    chat probe runs, so any attempt at ``/chat/completions`` shows in ``seen``."""
+    hh = tmp_path / "hh"
+    _write_ready_chat_config(hh, model)
+    _fake_http(monkeypatch, {_CHAT_URL: _READY_REPLY}, seen)
+    _stub_non_chat_probes(monkeypatch)
+    monkeypatch.setattr(hp, "_smoke_anchor_context_window", lambda s, io: (True, "window ok"))
+    return hp.BootstrapState(hermes_home=str(hh))
+
+
+def _chat_attempted(seen: list[str]) -> bool:
+    return any("chat/completions" in url for url in seen)
+
+
+class TestSmokeColdLoadGuard:
+    """The chat probe's gate on hal0's gateway: loaded slot or no request."""
+
+    @pytest.mark.parametrize("slot_state", _LOADED_STATES)
+    def test_a_loaded_slot_runs_the_chat_probe(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, slot_state: str
+    ) -> None:
+        seen: list[str] = []
+        state = _gateway_chat_box(tmp_path, monkeypatch, seen)
+        rows = [_slot_row("agent", slot_state, "big-27b"), _slot_row("utility", "ready", "u1")]
+        out = hp._phase_smoke_tests(hp._StepCtx(state=state, io=_box_io(rows)))
+        assert out.details["results"]["chat_completions"] == {"passed": True, "detail": "ready"}
+        assert out.details["results"]["anchor_context_window"]["passed"] is True
+        assert _chat_attempted(seen)
+        assert out.status == hp.PhaseStatus.OK
+
+    @pytest.mark.parametrize("slot_state", _COLD_STATES)
+    def test_a_cold_slot_skips_and_never_posts_a_chat(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, slot_state: str
+    ) -> None:
+        seen: list[str] = []
+        state = _gateway_chat_box(tmp_path, monkeypatch, seen)
+        rows = [_slot_row("agent", slot_state, "big-27b"), _slot_row("utility", "ready", "u1")]
+        out = hp._phase_smoke_tests(hp._StepCtx(state=state, io=_box_io(rows)))
+        assert not _chat_attempted(seen), seen
+        chat = out.details["results"]["chat_completions"]
+        assert chat == {
+            "passed": None,
+            "skipped": True,
+            "detail": (
+                f"skipped: chat model not loaded (slot agent is {slot_state}; "
+                "skipped so the smoke test does not cold-load it)"
+            ),
+        }
+        assert out.details["results"]["anchor_context_window"]["skipped"] is True
+        # A cold slot is not a fault: the phase stays ok and nothing failed.
+        assert out.status == hp.PhaseStatus.OK
+        assert out.details["failures"] == []
+
+    def test_a_route_that_answers_for_a_cold_slot_is_not_readiness(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The incident: ``GET /v1/models/hal0/agent`` answers 200 for a COLD
+        agent slot (the resolver logs ``not_loaded_loading``), so the old route
+        preflight said "ready" and the chat probe cold-loaded the slot. The
+        slot list says offline and wins. Production wiring: real fetchers over
+        a fake network."""
+        hh = tmp_path / "hh"
+        _write_ready_chat_config(hh, "hal0/agent")
+        seen: list[str] = []
+        _fake_http(
+            monkeypatch,
+            {
+                "http://127.0.0.1:8080/v1/models/hal0/agent": {"id": "hal0/agent"},
+                _CHAT_URL: _READY_REPLY,
+                _SLOTS_URL: [
+                    _slot_row("agent", "offline", "big-27b"),
+                    _slot_row("utility", "ready", "u1"),
+                ],
+            },
+            seen,
+        )
+        _stub_non_chat_probes(monkeypatch)
+        out = hp._phase_smoke_tests(hp._StepCtx(state=hp.BootstrapState(hermes_home=str(hh))))
+        assert _SLOTS_URL in seen
+        assert not _chat_attempted(seen), seen
+        assert out.details["results"]["chat_completions"]["skipped"] is True
+        assert out.status == hp.PhaseStatus.OK
+
+    @pytest.mark.parametrize(
+        ("status", "rows", "expected"),
+        [
+            (None, None, "hal0-api did not answer the slot list"),
+            (401, None, "hal0-api answered the slot list with HTTP 401"),
+            (500, None, "hal0-api answered the slot list with HTTP 500"),
+            (200, None, "hal0-api's slot list was unreadable"),
+            (
+                200,
+                [_slot_row("utility", "ready", "u1"), _slot_row("brain", "ready", "b1")],
+                "cannot tell which slot serves 'hal0/agent'",
+            ),
+        ],
+        ids=["unreachable", "http-401", "http-500", "unparseable", "slot-not-listed"],
+    )
+    def test_a_slot_list_that_cannot_answer_skips_and_never_posts_a_chat(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        status: int | None,
+        rows: list[dict[str, Any]] | None,
+        expected: str,
+    ) -> None:
+        """Never fall back to probing: probing IS the cold load."""
+        seen: list[str] = []
+        state = _gateway_chat_box(tmp_path, monkeypatch, seen)
+        out = hp._phase_smoke_tests(hp._StepCtx(state=state, io=_box_io(rows, status=status)))
+        assert not _chat_attempted(seen), seen
+        detail = out.details["results"]["chat_completions"]["detail"]
+        assert detail.startswith("skipped: chat model not loaded (")
+        assert expected in detail
+        assert detail.endswith("skipped so the smoke test does not cold-load a slot)")
+        assert out.status == hp.PhaseStatus.OK
+
+    def test_the_gateway_path_ignores_the_route_probe(self, tmp_path: Path) -> None:
+        """A route probe saying "routable" settles nothing on the gateway."""
+        hh = tmp_path / "hh"
+        _write_ready_chat_config(hh, "hal0/agent")
+        io = _box_io(
+            [_slot_row("agent", "offline", "big-27b")],
+            fetch_model_route_ready=lambda _m, _b="": True,
+        )
+        ready, reason = hp._chat_model_ready(hp.BootstrapState(hermes_home=str(hh)), io)
+        assert ready is False
+        assert reason == "slot agent is offline; skipped so the smoke test does not cold-load it"
+
+    def test_a_direct_llama_server_keeps_the_route_probe(self, tmp_path: Path) -> None:
+        """``HAL0_HERMES_LIVE_RESOLVE=0``: a slot's own llama-server never loads
+        on request, so the route probe decides and the slot list is not read —
+        even when hal0-api would report every slot cold."""
+        hh = tmp_path / "hh"
+        _write_ready_chat_config(hh, "raw-model-id", base_url=_DIRECT_BACKEND)
+        calls: list[str] = []
+        io = _box_io(
+            [_slot_row("agent", "offline", "raw-model-id")],
+            calls=calls,
+            fetch_model_route_ready=lambda m, _b="": m == "raw-model-id",
+        )
+        ready, reason = hp._chat_model_ready(hp.BootstrapState(hermes_home=str(hh)), io)
+        assert (ready, reason) == (True, "ready")
+        assert calls == []
+
+    def test_only_skips_leave_the_phase_ok(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A healthy box whose model slots are simply cold: every gated probe
+        skips, nothing fails, and the phase is ``ok`` — so ``provision.json``
+        carries no ``failure_count`` and the overview raises no
+        ``provision_warn``."""
+        hh = tmp_path / "hh"
+        _write_ready_chat_config(hh, "hal0/agent")
+        for name in ("_smoke_chat_completions", "_smoke_memory_roundtrip"):
+            monkeypatch.setattr(hp, name, lambda s, io: pytest.fail("gated probe ran"))
+        monkeypatch.setattr(hp, "_smoke_wrapper_ready", lambda s, io: (True, "ok"))
+        monkeypatch.setattr(hp, "_smoke_hermes_doctor", lambda s, io: (True, "ok"))
+        monkeypatch.setattr(hp, "_smoke_admin_tools_list", lambda s, io: (True, "8 tools"))
+        monkeypatch.setattr(hp, "_smoke_hermes_md_contains_primary", lambda s, io: (True, "ok"))
+        rows = [_slot_row("agent", "offline", "big-27b"), _slot_row("utility", "offline", "u1")]
+        out = hp._phase_smoke_tests(
+            hp._StepCtx(state=hp.BootstrapState(hermes_home=str(hh)), io=_box_io(rows))
+        )
+        assert out.status == hp.PhaseStatus.OK
+        assert out.details["failures"] == []
+        assert {s.split(":")[0] for s in out.details["skipped"]} == {
+            "chat_completions",
+            "anchor_context_window",
+            "memory_roundtrip",
+        }
+
+    def test_the_slot_list_is_read_once_per_run(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        seen: list[str] = []
+        state = _gateway_chat_box(tmp_path, monkeypatch, seen)
+        calls: list[str] = []
+        hp._phase_smoke_tests(hp._StepCtx(state=state, io=_box_io(calls=calls)))
+        assert calls == ["slots"]  # shared by the chat and memory gates
+
+
+class TestFetchSlotList:
+    """``GET /api/slots`` keeps "said no", "said nothing" and "not a list" apart."""
+
+    @staticmethod
+    def _serve(monkeypatch: pytest.MonkeyPatch, outcome: Any) -> list[tuple[Any, Any]]:
+        sent: list[tuple[Any, Any]] = []
+
+        def _open(req: Any, timeout: float | None = None) -> Any:
+            sent.append((req, timeout))
+            if isinstance(outcome, BaseException):
+                raise outcome
+            return outcome
+
+        monkeypatch.setattr("hal0.service_identity.open_url", _open)
+        return sent
+
+    def test_it_sends_the_box_key_and_keeps_only_dict_rows(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``open_url`` sends no key of its own; the read attaches the box
+        identity so it survives auth enforcement."""
+        monkeypatch.setenv("HAL0_ADMIN_KEY", "box-key")
+        row = _slot_row("agent", "ready", "m1")
+        sent = self._serve(monkeypatch, _FakeHTTPResponse(200, [row, "junk"]))
+        assert hp._fetch_slot_list() == (200, [row])
+        req, timeout = sent[0]
+        assert req.full_url == _SLOTS_URL
+        assert req.get_header("Authorization") == "Bearer box-key"
+        assert timeout == hp._SLOT_LIST_TIMEOUT_S
+
+    def test_a_wrapped_list_is_accepted(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        row = _slot_row("agent", "ready", "m1")
+        self._serve(monkeypatch, _FakeHTTPResponse(200, {"slots": [row]}))
+        assert hp._fetch_slot_list() == (200, [row])
+
+    def test_a_body_that_is_not_a_list_is_unreadable(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._serve(monkeypatch, _FakeHTTPResponse(200, {"detail": "nope"}))
+        assert hp._fetch_slot_list() == (200, None)
+
+    def test_an_http_error_keeps_its_status(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from urllib.error import HTTPError
+
+        self._serve(monkeypatch, HTTPError(_SLOTS_URL, 401, "Unauthorized", None, None))  # type: ignore[arg-type]
+        assert hp._fetch_slot_list() == (401, None)
+
+    def test_unreachable_is_no_status(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from urllib.error import URLError
+
+        self._serve(monkeypatch, URLError("connection refused"))
+        assert hp._fetch_slot_list() == (None, None)
+
+
+class TestSlotServingModel:
+    """Which slot a gateway request for ``model.default`` would land on."""
+
+    def test_a_canonical_virtual_maps_to_its_bound_slot(self) -> None:
+        rows = [_slot_row("agent", "ready", "big"), _slot_row("utility", "offline", "small")]
+        row, _why = hp._slot_serving_model("hal0/utility", rows)
+        assert row is not None and row["name"] == "utility"
+
+    def test_an_unbound_chain_head_falls_to_the_next_entry(self) -> None:
+        """``hal0/utility`` with no model on utility lands on the agent anchor
+        (the 27B case the memory gate must not cold-load)."""
+        rows = [_slot_row("agent", "offline", "big"), _slot_row("utility", "offline")]
+        row, _why = hp._slot_serving_model("hal0/utility", rows)
+        assert row is not None and row["name"] == "agent"
+
+    def test_any_bound_llm_slot_is_addressable_as_a_virtual(self) -> None:
+        rows = [_slot_row("agent", "ready", "big"), _slot_row("coder", "idle", "c1")]
+        row, _why = hp._slot_serving_model("hal0/coder", rows)
+        assert row is not None and row["name"] == "coder"
+
+    def test_the_npu_virtual_matches_an_flm_slot_by_device(self) -> None:
+        rows = [
+            _slot_row("agent", "ready", "big"),
+            _slot_row("flm", "offline", "gemma-FLM", declared_backend="flm"),
+        ]
+        row, _why = hp._slot_serving_model("hal0/npu", rows)
+        assert row is not None and row["name"] == "flm"
+
+    def test_a_single_bound_slot_pins_the_primary_fallback(self) -> None:
+        rows = [_slot_row("agent", "offline"), _slot_row("brain", "ready", "b1")]
+        row, _why = hp._slot_serving_model("hal0/agent", rows)
+        assert row is not None and row["name"] == "brain"
+
+    def test_an_ambiguous_fallback_is_not_pinned(self) -> None:
+        rows = [
+            _slot_row("agent", "offline"),
+            _slot_row("brain", "ready", "b1"),
+            _slot_row("utility", "ready", "u1"),
+        ]
+        row, why = hp._slot_serving_model("hal0/agent", rows)
+        assert row is None and "2 slots could take the fallback" in why
+
+    def test_a_physical_id_or_alias_maps_to_its_owning_slot(self) -> None:
+        rows = [_slot_row("agent", "ready", "big"), _slot_row("utility", "ready", "small")]
+        for model_id in ("small", "utility"):
+            row, _why = hp._slot_serving_model(model_id, rows)
+            assert row is not None and row["name"] == "utility"
+
+    def test_an_id_two_slots_carry_is_not_pinned(self) -> None:
+        rows = [_slot_row("brain", "ready", "same"), _slot_row("nano", "offline", "same")]
+        row, why = hp._slot_serving_model("same", rows)
+        assert row is None and "2 slots serve 'same'" in why
+
+    def test_unknown_ids_are_not_pinned(self) -> None:
+        rows = [_slot_row("agent", "ready", "big")]
+        assert hp._slot_serving_model("hal0/nope", rows)[0] is None
+        assert hp._slot_serving_model("cloud-model", rows)[0] is None
+
+    def test_synthetic_and_non_llm_rows_never_serve_chat(self) -> None:
+        rows = [
+            _slot_row("agent", "ready", "big", _synthetic=True, kind="remote"),
+            _slot_row("embed", "ready", "e1", type="embedding"),
+        ]
+        row, _why = hp._slot_serving_model("hal0/agent", rows)
+        assert row is None
+
+
+@pytest.mark.parametrize(
+    ("url", "expected"),
+    [
+        ("", True),
+        ("http://127.0.0.1:8080/v1", True),
+        ("http://localhost:8080/v1/", True),
+        ("http://[::1]:8080/v1", True),
+        (_DIRECT_BACKEND, False),
+        ("http://127.0.0.1:8080", False),
+        ("https://api.example.invalid/v1", False),
+        ("http://evil@127.0.0.1:8080/v1", False),
+    ],
+)
+def test_is_gateway_base_url(url: str, expected: bool) -> None:
+    assert hp._is_gateway_base_url(url) is expected
+
+
+class TestMemoryEngineGate:
+    """memory_roundtrip's ``memory_add`` makes hindsight extract with its own
+    LLM call to ``hal0/memory`` on the gateway, which loads the extraction slot
+    (``utility`` by default, the agent anchor when utility has no model) if it
+    is cold. The REAL probe runs against a recording memory seam, so any
+    attempt shows in ``calls``."""
+
+    @staticmethod
+    def _box(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> hp.BootstrapState:
+        hh = tmp_path / "hh"
+        _write_ready_chat_config(hh, "hal0/agent")
+        for name in (
+            "_smoke_wrapper_ready",
+            "_smoke_hermes_doctor",
+            "_smoke_chat_completions",
+            "_smoke_admin_tools_list",
+            "_smoke_hermes_md_contains_primary",
+            "_smoke_anchor_context_window",
+        ):
+            monkeypatch.setattr(hp, name, lambda s, io: (True, "ok"))
+        return hp.BootstrapState(hermes_home=str(hh))
+
+    @staticmethod
+    def _memory_seam(calls: list[str]) -> Any:
+        def _call(_method: str, params: dict[str, Any], **_kw: Any) -> dict[str, Any]:
+            calls.append(params["name"])
+            if params["name"] == "memory_search":
+                return {"ok": True, "result": {"items": [{"id": "1"}]}}
+            return {"ok": True, "result": {"id": "1"}}
+
+        return _call
+
+    def _run(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, rows: Any, **io_kw: Any
+    ) -> tuple[dict[str, Any], list[str]]:
+        calls: list[str] = []
+        state = self._box(tmp_path, monkeypatch)
+        io = _box_io(rows, mcp_memory_call=self._memory_seam(calls), **io_kw)
+        out = hp._phase_smoke_tests(hp._StepCtx(state=state, io=io))
+        assert out.status == hp.PhaseStatus.OK
+        return out.details["results"]["memory_roundtrip"], calls
+
+    def test_a_cold_extraction_slot_skips_and_never_writes(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        rows = [_slot_row("agent", "ready", "big"), _slot_row("utility", "offline", "u1")]
+        result, calls = self._run(tmp_path, monkeypatch, rows)
+        assert calls == []
+        assert result == {
+            "passed": None,
+            "skipped": True,
+            "detail": (
+                "skipped: memory engine's model not loaded (hal0/utility: slot utility is "
+                "offline; skipped so the smoke test does not cold-load it)"
+            ),
+        }
+
+    def test_a_loaded_extraction_slot_runs_the_roundtrip(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        rows = [_slot_row("agent", "offline", "big"), _slot_row("utility", "idle", "u1")]
+        result, calls = self._run(tmp_path, monkeypatch, rows)
+        assert calls == ["memory_add", "memory_search"]
+        assert result == {"passed": True, "detail": "1 item(s) returned"}
+
+    def test_an_unbound_utility_guards_the_agent_anchor_it_falls_to(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        rows = [_slot_row("agent", "offline", "big-27b"), _slot_row("utility", "offline")]
+        result, calls = self._run(tmp_path, monkeypatch, rows)
+        assert calls == []
+        assert "hal0/utility: slot agent is offline" in result["detail"]
+
+    def test_an_upstream_extraction_model_runs_with_every_slot_cold(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        rows = [_slot_row("agent", "offline", "big"), _slot_row("utility", "offline", "u1")]
+        memory = _memory_cfg(extraction_model="MiniMax-M2.5")
+        _result, calls = self._run(tmp_path, monkeypatch, rows, memory=memory)
+        assert calls == ["memory_add", "memory_search"]
+
+    def test_an_engine_llm_pointed_off_hal0_runs_with_every_slot_cold(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A ``hindsight-llm.env`` override that points the engine straight at
+        a cloud provider: the retain never reaches hal0, so nothing loads."""
+        rows = [_slot_row("agent", "offline", "big"), _slot_row("utility", "offline", "u1")]
+        engine_llm = {"base_url": "https://api.example.invalid/v1", "model": "m"}
+        _result, calls = self._run(tmp_path, monkeypatch, rows, engine_llm=engine_llm)
+        assert calls == ["memory_add", "memory_search"]
+
+    def test_an_engine_pinned_to_another_virtual_guards_that_slot(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A pre-#2919 drop-in still naming ``hal0/agent`` on the gateway."""
+        rows = [_slot_row("agent", "offline", "big"), _slot_row("utility", "ready", "u1")]
+        engine_llm = {"base_url": "http://127.0.0.1:8080/v1", "model": "hal0/agent"}
+        result, calls = self._run(tmp_path, monkeypatch, rows, engine_llm=engine_llm)
+        assert calls == []
+        assert "hal0/agent: slot agent is offline" in result["detail"]
+
+    @pytest.mark.parametrize(
+        "memory",
+        [_memory_cfg(engine="pgvector"), _memory_cfg(enabled=False)],
+        ids=["pgvector", "disabled"],
+    )
+    def test_no_engine_model_call_means_no_gate(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, memory: Any
+    ) -> None:
+        rows = [_slot_row("agent", "offline", "big"), _slot_row("utility", "offline", "u1")]
+        _result, calls = self._run(tmp_path, monkeypatch, rows, memory=memory)
+        assert calls == ["memory_add", "memory_search"]
+
+    def test_an_unanswerable_slot_list_skips(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        result, calls = self._run(tmp_path, monkeypatch, None, status=None)
+        assert calls == []
+        assert "hal0-api did not answer the slot list" in result["detail"]
+
+    def test_an_unreadable_hal0_toml_skips(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def _boom() -> Any:
+            raise OSError("permission denied")
+
+        result, calls = self._run(tmp_path, monkeypatch, _WARM_SLOTS, load_config=_boom)
+        assert calls == []
+        assert "could not read [memory] from hal0.toml" in result["detail"]
 
 
 class TestAnchorContextWindowPreflight:
@@ -3810,6 +4367,12 @@ class TestAnchorContextWindowPreflight:
                         {"id": "brain", "owned_by": "hal0", "context_length": 96000},
                     ]
                 },
+                # The agent slot is loaded, so the cold-load guard lets the
+                # anchor probe run.
+                _SLOTS_URL: [
+                    _slot_row("agent", "ready", "hal0-brain-sft-q8-rocmfpx"),
+                    _slot_row("utility", "ready", "u1"),
+                ],
             },
         )
         _stub_non_chat_probes(monkeypatch)
@@ -3871,22 +4434,13 @@ class TestAnchorContextWindowPreflight:
         assert out.details["results"]["anchor_context_window"]["skipped"] is True
         assert out.status == hp.PhaseStatus.OK
 
-    def test_ct152_the_anchor_falls_back_to_another_slot_and_must_not_pass(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, tmp_hal0_home: str
-    ) -> None:
-        """THE false negative, off the live ct152 box (rc.5).
-
-        The agent slot is offline (``model_id: null``) so ``hal0/agent``
-        resolves through the routing fallback chain to the BRAIN slot's
-        32,768-token window — under Hermes' 64,000 floor, i.e. a box that
-        cannot chat. But ``/v1/models`` lists only ``brain`` and ``utility``:
-        there is no row spelled ``agent`` or ``hal0/agent`` anywhere in it, so
-        a probe that looks the anchor up by its spelled alias sees nothing,
-        calls the window unknown, and reports a PASS.
-
-        Payloads are verbatim captures from ct152 — the expectation comes
-        from the gateway itself, not from anything hal0's resolver computes.
-        """
+    @staticmethod
+    def _ct152_box(
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_hal0_home: str,
+        slot_rows: list[dict[str, Any]],
+    ) -> hp.BootstrapState:
         hh = tmp_path / "hh"
         hh.mkdir()
         (hh / "config.yaml").write_text(
@@ -3907,12 +4461,62 @@ class TestAnchorContextWindowPreflight:
             {
                 "http://127.0.0.1:8080/v1/models/hal0/agent": _CT152_BY_ID,
                 "http://127.0.0.1:8080/v1/models": {"data": _CT152_CATALOG},
+                _SLOTS_URL: slot_rows,
             },
         )
         _stub_non_chat_probes(monkeypatch)
         monkeypatch.setattr(hp, "_smoke_chat_completions", lambda s, io: (True, "ready"))
-        state = hp.BootstrapState(hermes_home=str(hh), venv=str(tmp_path / "no-venv"))
+        return hp.BootstrapState(hermes_home=str(hh), venv=str(tmp_path / "no-venv"))
 
+    def test_ct152_the_anchor_falls_back_to_another_slot_and_must_not_pass(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, tmp_hal0_home: str
+    ) -> None:
+        """THE false negative, off the live ct152 box (rc.5).
+
+        The agent slot is offline (``model_id: null``) so ``hal0/agent``
+        resolves through the routing fallback chain to the BRAIN slot's
+        32,768-token window — under Hermes' 64,000 floor, i.e. a box that
+        cannot chat. But ``/v1/models`` lists only ``brain`` and ``utility``:
+        there is no row spelled ``agent`` or ``hal0/agent`` anywhere in it, so
+        a probe that looks the anchor up by its spelled alias sees nothing,
+        calls the window unknown, and reports a PASS.
+
+        Payloads are verbatim captures from ct152 — the expectation comes
+        from the gateway itself, not from anything hal0's resolver computes.
+        With brain AND utility both bound, the gateway's fallback is "the first
+        bound slot in its order", which the slot list cannot pin, so the
+        cold-load guard skips both model probes. Skipped is still not a pass.
+        """
+        state = self._ct152_box(
+            tmp_path,
+            monkeypatch,
+            tmp_hal0_home,
+            [
+                _slot_row("agent", "offline"),
+                _slot_row("brain", "ready", "hal0-brain-sft-fpx8"),
+                _slot_row("utility", "ready", "u1"),
+            ],
+        )
+        out = hp._phase_smoke_tests(hp._StepCtx(state=state))
+        result = out.details["results"]["anchor_context_window"]
+        assert result["passed"] is not True, result  # the whole point of #1867
+        assert result["skipped"] is True
+        assert "2 slots could take the fallback" in result["detail"]
+        assert out.details["results"]["chat_completions"]["skipped"] is True
+
+    def test_ct152_shape_with_one_bound_slot_fails_loudly_on_the_fallback_slot(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, tmp_hal0_home: str
+    ) -> None:
+        """The ct152 fallback on a box where brain is the only bound llm slot:
+        the fallback can only land there, brain is loaded, so the anchor probe
+        runs and names brain's profile, not the alias the anchor is spelled
+        with."""
+        state = self._ct152_box(
+            tmp_path,
+            monkeypatch,
+            tmp_hal0_home,
+            [_slot_row("agent", "offline"), _slot_row("brain", "ready", "hal0-brain-sft-fpx8")],
+        )
         out = hp._phase_smoke_tests(hp._StepCtx(state=state))
         result = out.details["results"]["anchor_context_window"]
         assert result["passed"] is not True, result  # the whole point of #1867

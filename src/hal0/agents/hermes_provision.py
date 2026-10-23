@@ -5931,6 +5931,230 @@ def _http_status_json(url: str) -> tuple[int | None, dict[str, Any] | None]:
         return (None, None)
 
 
+# ── Smoke-test cold-load guard ──────────────────────────────────────────────
+#
+# A model request sent through hal0's gateway makes hal0 LOAD the slot behind
+# that model when it is cold: chat dispatch maps the id to its slot and calls
+# ``SlotManager.load`` before routing (``api/routes/v1.py``
+# ``_ensure_backend_for_model``). A repair whose smoke chat cold-loaded a large
+# agent model saturated the host for minutes, and the agent's systemd watchdog
+# killed it. The probes that can reach a model therefore ask hal0-api for the
+# live state of the slot that would serve it, and run only when that slot is
+# already loaded.
+
+#: Budget for ``GET /api/slots``. The route probes every slot's container, which
+#: takes seconds on a wide box; the guard reads it once per smoke run.
+_SLOT_LIST_TIMEOUT_S = 10.0
+
+#: Every guard skip ends with this, so the report says why nothing was tried.
+_COLD_LOAD_SKIP = "skipped so the smoke test does not cold-load it"
+_COLD_LOAD_SKIP_UNKNOWN = "skipped so the smoke test does not cold-load a slot"
+
+#: ``(HTTP status, slot rows)`` from :func:`_fetch_slot_list`.
+SlotListAnswer = tuple[int | None, list[dict[str, Any]] | None]
+
+
+def _fetch_slot_list() -> SlotListAnswer:
+    """``GET /api/slots`` with the box identity: ``(status, rows)``.
+
+    Unlike :func:`_fetch_slots`, which folds every failure into ``[]``, this
+    keeps "hal0-api said no" (a status), "hal0-api said nothing" (status
+    ``None``) and "the answer was not a slot list" (rows ``None``) apart: the
+    smoke guard must tell an empty box from a question it could not ask. The
+    key is attached with :func:`hal0.service_identity.attach_service_auth`,
+    because :func:`hal0.service_identity.open_url` sends none, so the read
+    keeps working once auth is enforced.
+    """
+    from urllib.error import HTTPError, URLError
+    from urllib.request import Request
+
+    from hal0.service_identity import attach_service_auth, open_url
+
+    req = Request(f"{HAL0_API_URL}/api/slots", headers={"Accept": "application/json"})
+    attach_service_auth(req, prefer="admin")
+    try:
+        with open_url(req, timeout=_SLOT_LIST_TIMEOUT_S) as resp:
+            status = resp.status
+            try:
+                body = json.loads(resp.read().decode("utf-8"))
+            except (json.JSONDecodeError, UnicodeDecodeError, OSError):
+                return (status, None)
+    except HTTPError as exc:
+        return (exc.code, None)
+    except (URLError, OSError, TimeoutError):
+        return (None, None)
+    if isinstance(body, dict):
+        body = body.get("slots")
+    if not isinstance(body, list):
+        return (status, None)
+    return (status, [row for row in body if isinstance(row, dict)])
+
+
+def _read_memory_engine_llm() -> dict[str, Any]:
+    """The LLM hindsight-api really calls: ``{provider, base_url, model, …}``.
+
+    :func:`hal0.memory.extraction_env.effective_engine_llm` — the running
+    engine's own environment, else its unit plus ``hindsight-llm.env`` — so a
+    file override that points the engine off-box is seen. Never raises there.
+    """
+    from hal0.memory.extraction_env import effective_engine_llm
+
+    return effective_engine_llm()
+
+
+def _is_gateway_base_url(base_url: str) -> bool:
+    """Is ``base_url`` hal0's own ``/v1`` gateway? Empty means the gateway.
+
+    Compared parsed rather than as a string, so ``localhost`` and a trailing
+    slash still count: a gateway URL misread as a direct backend would put the
+    smoke probe back on the path that cold-loads a slot.
+    """
+    url = base_url.strip()
+    if not url:
+        return True
+    from urllib.parse import urlsplit
+
+    from hal0.service_identity import is_loopback_url
+
+    try:
+        got, want = urlsplit(url), urlsplit(HAL0_API_URL)
+        got_port, want_port = got.port, want.port
+    except ValueError:
+        return False
+    return (
+        is_loopback_url(url)
+        and got.scheme == want.scheme
+        and got_port == want_port
+        and got.path.rstrip("/") == "/v1"
+    )
+
+
+def _slot_row_model(row: dict[str, Any]) -> str:
+    """The slot's configured model (``model.default``), as ``/api/slots`` lifts it."""
+    return str(row.get("model_default") or "").strip()
+
+
+def _slot_row_device(row: dict[str, Any]) -> str:
+    """The slot's device; an FLM ``declared_backend`` means the NPU."""
+    device = row.get("device")
+    if isinstance(device, str) and device:
+        return device
+    return "npu" if row.get("declared_backend") == "flm" else ""
+
+
+def _slot_serving_model(
+    model_id: str, rows: list[dict[str, Any]]
+) -> tuple[dict[str, Any] | None, str]:
+    """The ``/api/slots`` row a gateway request for ``model_id`` would land on.
+
+    Mirrors the gateway so the guard asks about the slot a request would
+    really load:
+
+    * A ``hal0/<name>`` virtual walks
+      :func:`hal0.normalize.resolver.resolve_chain` over the views the gateway
+      builds (``hal0.api.hal0_llm_slot_views``: real ``llm`` slots with a
+      configured ``model.default``, which each row carries as
+      ``model_default``). The first chain entry with a bound model wins,
+      loaded or not (#2741), and that is the slot the chat route loads.
+    * Any other id is a slot's name (its alias) or its configured model id,
+      which the chat route maps back to the slot that owns it.
+
+    Returns ``(row, "")``, or ``(None, why)`` when the id does not pin exactly
+    one slot: the primary fallback (no chain entry has a bound model) on a box
+    with more than one bound slot, an id no slot carries, or one several slots
+    carry.
+    """
+    # ``_slot_matches_name`` is the resolver's own name rule (including the
+    # ``npu`` device escape hatch); importing it keeps one definition.
+    from hal0.normalize.resolver import SlotView, _slot_matches_name, resolve_chain
+
+    llm = [
+        row
+        for row in rows
+        if not row.get("_synthetic")
+        and str(row.get("type") or "").lower() == "llm"
+        and str(row.get("name") or "")
+    ]
+    bound = [row for row in llm if _slot_row_model(row)]
+    views = [
+        SlotView(
+            name=str(row["name"]),
+            device=_slot_row_device(row),
+            model_id=_slot_row_model(row),
+            context_length=0,
+        )
+        for row in bound
+    ]
+    loaded = {
+        view.model_id
+        for row, view in zip(bound, views, strict=True)
+        if is_dispatchable_state(_slot_state(row))
+    }
+    res = resolve_chain(model_id, views, loaded)
+    if res is not None:
+        if res.fallback or not res.matched_name:
+            # No chain entry has a bound model, so the gateway substitutes its
+            # configured primary: the bound ``agent`` slot, else the first bound
+            # llm slot in ITS order, which this list need not share. Only a
+            # single bound slot pins that choice.
+            if len(bound) == 1:
+                return bound[0], ""
+            return None, (
+                f"no slot in the '{model_id}' chain has a model bound, and "
+                f"{len(bound)} slots could take the fallback"
+            )
+        matched = [
+            row
+            for row, view in zip(bound, views, strict=True)
+            if _slot_matches_name(view, res.matched_name)
+        ]
+        if len(matched) != 1:
+            return None, f"{len(matched)} slots answer to '{res.matched_name}'"
+        return matched[0], ""
+    if model_id.startswith("hal0/"):
+        return None, f"'{model_id}' names no hal0 slot"
+    owners = [row for row in llm if model_id in (str(row.get("name")), _slot_row_model(row))]
+    if not owners:
+        return None, f"no local slot serves '{model_id}'"
+    if len(owners) > 1:
+        return None, f"{len(owners)} slots serve '{model_id}'"
+    return owners[0], ""
+
+
+def _slot_cold_load_guard(model_id: str, answer: SlotListAnswer) -> tuple[bool, str]:
+    """May a gateway request for ``model_id`` go out without loading a slot?
+
+    ``(True, why)`` only on affirmative evidence: hal0-api listed its slots and
+    the one serving ``model_id`` is dispatchable (``ready``, ``serving`` or
+    ``idle``, :func:`hal0.slots.state.is_dispatchable_state`), the states
+    ``SlotManager.load`` returns from without starting anything. Everything
+    else is ``(False, why)``: a cold slot, and every case where the question
+    could not be answered, because asking by sending the request IS the cold
+    load.
+    """
+    status, rows = answer
+    if status is None:
+        return False, f"hal0-api did not answer the slot list; {_COLD_LOAD_SKIP_UNKNOWN}"
+    if not 200 <= status < 300:
+        return (
+            False,
+            f"hal0-api answered the slot list with HTTP {status}; {_COLD_LOAD_SKIP_UNKNOWN}",
+        )
+    if rows is None:
+        return False, f"hal0-api's slot list was unreadable; {_COLD_LOAD_SKIP_UNKNOWN}"
+    row, why = _slot_serving_model(model_id, rows)
+    if row is None:
+        return (
+            False,
+            f"cannot tell which slot serves '{model_id}' ({why}); {_COLD_LOAD_SKIP_UNKNOWN}",
+        )
+    name = str(row.get("name"))
+    state = _slot_state(row) or "unknown"
+    if is_dispatchable_state(state):
+        return True, f"slot {name} is {state}"
+    return False, f"slot {name} is {state}; {_COLD_LOAD_SKIP}"
+
+
 def _slot_kind(slot: dict[str, Any]) -> str:
     """Best-effort capability classifier — handles a few schema variants.
 
@@ -7431,11 +7655,18 @@ def _phase_voice_wire(ctx: _StepCtx) -> PhaseResult:
 # chat_completions needs a routable chat model to mean anything; at install
 # time — before any model has ever been loaded — that's structurally
 # impossible, so a preflight (`_chat_model_ready`) decides ONCE whether the
-# route is live and the probe reports `skipped: no chat model loaded`
+# route is live and the probe reports `skipped: chat model not loaded`
 # instead of burning its timeout on a doomed request that then gets
 # recorded as an opaque failure. memory_roundtrip has no chat dependency
-# whatsoever (it drives the MCP memory_add/memory_search tools directly) and
-# always runs (#1831).
+# (#1831), but its memory_add makes the memory engine call ITS model through
+# hal0, so its own preflight (`_memory_engine_ready`) asks about that model.
+#
+# Neither probe may make hal0 load a slot: through hal0's gateway a request
+# for a cold model loads its slot first, and a repair that loaded a large
+# agent model that way stalled the host until the agent's watchdog killed it.
+# Both preflights therefore run their probe only when the slot that would
+# serve it is already loaded (see the cold-load guard above
+# `_fetch_slot_list`).
 
 
 def _wrapper_bin() -> Path:
@@ -7715,34 +7946,59 @@ def _smoke_hermes_doctor(_state: BootstrapState, io: InstallIO) -> tuple[bool, s
 
 #: Probes that only mean something once a chat-capable model is actually
 #: routable. Gated behind :func:`_chat_model_ready` so an install-time smoke
-#: run (no model has ever been loaded yet) reports `skipped`, not a timeout.
+#: run (no model has ever been loaded yet) reports `skipped`, not a timeout,
+#: and so a repair never cold-loads the chat model's slot to test it.
 #: memory_roundtrip does NOT belong here — it exercises the MCP
 #: memory_add/memory_search tools directly and has no chat dependency
 #: whatsoever (#1831); gating it behind the chat anchor over-skipped it even
-#: when memory itself was fully working.
+#: when memory itself was fully working. It has its own gate on the memory
+#: engine's model (:data:`_MEMORY_MODEL_PROBES`).
 #: ``anchor_context_window`` joins it for the same reason (#1867): with no chat
 #: model routable there is no advertised window to compare against Hermes'
 #: floor, so the honest report is ``skipped``, not a manufactured verdict.
 _MODEL_DEPENDENT_PROBES = frozenset({"chat_completions", "anchor_context_window"})
 
-#: Why each model-dependent probe skipped — a skip is a claim (#1793), so it
-#: has to state the claim that probe is actually making, not a borrowed one.
+#: Probes whose request makes the memory engine call its own model through
+#: hal0, gated behind :func:`_memory_engine_ready`.
+_MEMORY_MODEL_PROBES = frozenset({"memory_roundtrip"})
+
+#: Why each gated probe skipped — a skip is a claim (#1793), so it has to
+#: state the claim that probe is actually making, not a borrowed one.
 _SKIP_REASONS = {
-    "chat_completions": "no chat model loaded",
+    "chat_completions": "chat model not loaded",
     "anchor_context_window": "no routable anchor to measure a window on",
+    "memory_roundtrip": "memory engine's model not loaded",
 }
 
 
-def _chat_model_ready(state: BootstrapState, io: InstallIO) -> tuple[bool, str]:
+def _chat_model_ready(
+    state: BootstrapState,
+    io: InstallIO,
+    slot_list: Callable[[], SlotListAnswer] | None = None,
+) -> tuple[bool, str]:
     """Cheap preflight: is a chat-capable model actually routable right now?
 
     Reads ``model.default`` AND ``model.base_url`` from config.yaml — the two
-    fields :func:`_smoke_chat_completions` dispatches with — and asks *that
-    endpoint* whether the id routes (``io.fetch_model_route_ready``), instead
-    of paying a full chat-completion round trip just to find out nothing is
-    loaded.
+    fields :func:`_smoke_chat_completions` dispatches with — and asks about
+    *that endpoint*, instead of paying a full chat-completion round trip just
+    to find out nothing is loaded.
 
-    Two rules keep this honest, both learned from #1831:
+    **Through hal0's gateway** (``model.base_url`` empty or hal0's own
+    ``/v1``, the shipped live-resolve wiring) the probe runs only when the slot
+    that serves ``model.default`` is already loaded, per hal0-api's slot list
+    (:func:`_slot_cold_load_guard`; ``slot_list`` is the phase's shared read,
+    else ``io.fetch_slot_list``). The gateway answers a model's routability
+    even when its slot is cold, and the chat request then LOADS that slot: a
+    repair that cold-loaded a large agent model this way saturated the host
+    for minutes and the agent's systemd watchdog killed it. So a cold slot
+    skips, and so does every case where the slot list cannot answer
+    (hal0-api unreachable, non-2xx, unreadable, the id not pinned to one
+    slot). This is a deliberate exception to the "skip only on affirmative
+    evidence" rule below: the only other way to find out is the cold load.
+
+    **Against a slot's own llama-server** (``HAL0_HERMES_LIVE_RESOLVE=0``)
+    nothing loads on request, so the route probe (``io.fetch_model_route_ready``)
+    decides, under the two rules learned from #1831:
 
     * **Ask the endpoint the probe will use.** Consulting the hal0 gateway's
       catalog is answering a routability question with a discovery answer.
@@ -7774,6 +8030,9 @@ def _chat_model_ready(state: BootstrapState, io: InstallIO) -> tuple[bool, str]:
     if not model_name:
         return False, "model.default unset in config.yaml"
     base_url = str(model_cfg.get("base_url", "") or "")
+    if _is_gateway_base_url(base_url):
+        ready, why = _slot_cold_load_guard(str(model_name), _read_slot_list(io, slot_list))
+        return ready, (f"ready ({why})" if ready else why)
     try:
         routable = io.fetch_model_route_ready(model_name, base_url)
     except Exception as exc:  # preflight must never raise
@@ -7787,6 +8046,67 @@ def _chat_model_ready(state: BootstrapState, io: InstallIO) -> tuple[bool, str]:
     return True, "ready"
 
 
+def _read_slot_list(
+    io: InstallIO, slot_list: Callable[[], SlotListAnswer] | None
+) -> SlotListAnswer:
+    """The slot list via ``slot_list`` (else ``io.fetch_slot_list``); a raise is no answer."""
+    try:
+        return (slot_list or io.fetch_slot_list)()
+    except Exception:  # a preflight must never raise
+        return (None, None)
+
+
+def _memory_engine_ready(
+    io: InstallIO, slot_list: Callable[[], SlotListAnswer] | None = None
+) -> tuple[bool, str]:
+    """May memory_roundtrip run without making hal0 load a slot?
+
+    Its ``memory_add`` is a Hindsight retain, and the engine extracts facts
+    from it with its own LLM call to hal0's gateway as ``hal0/memory``
+    (``installer/systemd/hindsight-api.service``). hal0 resolves that to the
+    upstream ``[memory.graph].extraction_model`` when set, else to
+    ``hal0/<extraction_slot>`` (``utility`` by default, falling back to the
+    ``agent`` anchor when that slot has no model), and loads the slot if it is
+    cold. So the probe runs when that call cannot reach a slot (memory off,
+    the ``pgvector`` engine, which calls no model, an engine LLM pointed away
+    from hal0, an upstream target) or when :func:`_slot_cold_load_guard` finds
+    the slot loaded. Anything it cannot tell skips, like the chat gate.
+
+    Never raises.
+    """
+    from hal0.memory.extraction_env import MEMORY_ALIAS, memory_engine_target
+
+    try:
+        memory = io.load_config().memory
+        enabled = bool(memory.enabled)
+        engine = str(memory.engine or "hindsight").lower()
+        graph = memory.graph
+    except Exception as exc:
+        return False, f"could not read [memory] from hal0.toml ({exc}); {_COLD_LOAD_SKIP_UNKNOWN}"
+    if not enabled:
+        return True, "memory is disabled; no engine to call a model"
+    if engine == "pgvector":
+        return True, "the pgvector engine calls no model"
+    try:
+        engine_llm = io.read_memory_engine_llm() or {}
+    except Exception:
+        engine_llm = {}
+    engine_base_url = str(engine_llm.get("base_url") or "")
+    if engine_base_url and not _is_gateway_base_url(engine_base_url):
+        return True, "the memory engine's LLM is not hal0's gateway"
+    model = str(engine_llm.get("model") or "") or MEMORY_ALIAS
+    if model == MEMORY_ALIAS:
+        try:
+            kind, target = memory_engine_target(graph)
+        except Exception as exc:
+            return False, f"could not resolve {MEMORY_ALIAS} ({exc}); {_COLD_LOAD_SKIP_UNKNOWN}"
+        if kind == "upstream":
+            return True, f"{MEMORY_ALIAS} routes to the upstream model {target}"
+        model = target
+    ready, why = _slot_cold_load_guard(model, _read_slot_list(io, slot_list))
+    return ready, f"{model}: {why}"
+
+
 def _phase_smoke_tests(ctx: _StepCtx) -> PhaseResult:
     """Run the diagnostic probes; collect results into the checkpoint.
 
@@ -7794,9 +8114,22 @@ def _phase_smoke_tests(ctx: _StepCtx) -> PhaseResult:
     phase that recorded failures must say so, not report a clean ``ok`` with
     the failures buried in ``details`` (#1793). It never becomes ``fail``:
     smoke_tests stays diagnostic, so the overall install still succeeds.
+    A skipped probe (a gate said no, or a probe could not reach a verdict) is
+    recorded under ``skipped`` and never counts as a failure, so a box whose
+    model slots are simply cold reports ``ok``.
+
+    hal0-api's slot list is read at most once and shared by both gates.
     """
     state = ctx.state
-    chat_ready, chat_reason = _chat_model_ready(state, ctx.io)
+    slot_answer: list[SlotListAnswer] = []
+
+    def _slot_list() -> SlotListAnswer:
+        if not slot_answer:
+            slot_answer.append(_read_slot_list(ctx.io, None))
+        return slot_answer[0]
+
+    chat_ready, chat_reason = _chat_model_ready(state, ctx.io, _slot_list)
+    memory_ready, memory_reason = _memory_engine_ready(ctx.io, _slot_list)
     probes: list[tuple[str, Callable[[BootstrapState, InstallIO], tuple[bool | None, str]]]] = [
         ("wrapper_ready", _smoke_wrapper_ready),
         ("hermes_doctor", _smoke_hermes_doctor),
@@ -7810,8 +8143,13 @@ def _phase_smoke_tests(ctx: _StepCtx) -> PhaseResult:
     failures: list[str] = []
     skipped: list[str] = []
     for name, fn in probes:
+        gate_reason = None
         if name in _MODEL_DEPENDENT_PROBES and not chat_ready:
-            detail = f"skipped: {_SKIP_REASONS[name]} ({chat_reason})"
+            gate_reason = chat_reason
+        elif name in _MEMORY_MODEL_PROBES and not memory_ready:
+            gate_reason = memory_reason
+        if gate_reason is not None:
+            detail = f"skipped: {_SKIP_REASONS[name]} ({gate_reason})"
             results[name] = {"passed": None, "skipped": True, "detail": detail}
             skipped.append(f"{name}: {detail}")
             continue
@@ -8463,6 +8801,8 @@ class InstallIO:
     fetch_slots: Callable[[], list[dict[str, Any]]] = _fetch_slots
     fetch_model_contexts: Callable[[], dict[str, int]] = _fetch_model_contexts
     fetch_model_route_ready: Callable[[str, str], bool | None] = _fetch_model_route_ready
+    fetch_slot_list: Callable[[], SlotListAnswer] = _fetch_slot_list
+    read_memory_engine_llm: Callable[[], dict[str, Any]] = _read_memory_engine_llm
     fetch_anchor_models: Callable[..., tuple[dict[str, Any] | None, list[dict[str, Any]]]] = (
         _fetch_anchor_models
     )

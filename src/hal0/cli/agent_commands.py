@@ -2149,11 +2149,18 @@ def agent_status(
         failures_cell = " ".join(failure_bits) or "—"
         details_blob = entry.get("details") or {}
         phase_failures = details_blob.get("failures") if isinstance(details_blob, dict) else None
+        phase_skipped = details_blob.get("skipped") if isinstance(details_blob, dict) else None
         if entry.get("reason"):
             detail = entry["reason"]
         elif phase_failures:
             shown = "; ".join(phase_failures[:2])
             more = len(phase_failures) - 2
+            detail = f"{shown} (+{more} more)" if more > 0 else shown
+        elif phase_skipped:
+            # A skip is not a pass: say which probe skipped and why (a probe
+            # held back so it would not cold-load a model slot reads so here).
+            shown = "; ".join(phase_skipped[:2])
+            more = len(phase_skipped) - 2
             detail = f"{shown} (+{more} more)" if more > 0 else shown
         else:
             detail = _json.dumps(details_blob)[:60]
