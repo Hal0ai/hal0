@@ -386,3 +386,60 @@ def test_overview_job_is_the_newest_active_hermes_job(client_ready):
     body = client_ready.get("/api/agents/hermes/overview").json()
     assert body["job"] == {"id": "new", "kind": "repair", "state": "queued"}
     assert body["phase"] == "working"
+
+
+def _provision_and_build(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, *, report_at: str, built_at: str | None
+) -> None:
+    """A provision report whose install phase failed at ``report_at``, and a live
+    release built at ``built_at`` (no ``built_at`` key when ``None``)."""
+    (tmp_path / "provision.json").write_text(
+        json.dumps(
+            {
+                "hal0_version": "1.6.0",
+                "hermes_version": PIN_REF,
+                "completed_at": None,
+                "phases": {"install": {"status": "fail", "at": report_at}},
+            }
+        )
+    )
+    data: dict[str, Any] = {"ref": PIN_REF, "describe": "v0.22.4", "python_minor": "3.14"}
+    if built_at is not None:
+        data["built_at"] = built_at
+    live = Release(id="20261022T021958Z-aaaaaaa", path=tmp_path / "releases" / "r", data=data)
+    monkeypatch.setattr(overview_route, "live_release", lambda layout: live)
+
+
+def test_overview_provision_report_older_than_the_live_release_is_stale(
+    client_ready, monkeypatch, tmp_path
+):
+    _provision_and_build(
+        monkeypatch,
+        tmp_path,
+        report_at="2026-10-21T23:49:54Z",
+        built_at="2026-10-22T02:19:58Z",
+    )
+    body = client_ready.get("/api/agents/hermes/overview").json()
+    assert body["phase"] == "ready" and body["degraded"] == []
+    provision = body["provision"]
+    assert provision["stale"] is True and provision["fail"] == 1
+    assert provision["reported_at"] == "2026-10-21T23:49:54Z"
+    assert provision["live_built_at"] == "2026-10-22T02:19:58Z"
+
+
+@pytest.mark.parametrize(
+    ("report_at", "built_at"),
+    [
+        ("2026-10-22T03:00:00Z", "2026-10-22T02:19:58Z"),  # the report is newer than the build
+        ("2026-10-21T23:49:54Z", "not-a-time"),  # an unparseable build time is not stale
+        ("2026-10-21T23:49:54Z", None),  # a release with no build time is not stale
+    ],
+)
+def test_overview_provision_report_not_older_than_the_build_still_degrades(
+    client_ready, monkeypatch, tmp_path, report_at, built_at
+):
+    _provision_and_build(monkeypatch, tmp_path, report_at=report_at, built_at=built_at)
+    body = client_ready.get("/api/agents/hermes/overview").json()
+    assert body["provision"]["stale"] is False
+    assert [r["reason"] for r in body["degraded"]] == ["provision_failed"]
+    assert body["phase"] == "degraded"

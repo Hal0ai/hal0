@@ -155,7 +155,7 @@ Hermes (`kind: "daemon"`):
 | `units` | `agent` and `gateway` states: `active`, `inactive`, `failed`, `unknown`, and for the gateway `absent` when the unit does not exist. |
 | `api_server` | `endpoint` (`host:port`), `healthy`, and the `profiles` the gateway serves. |
 | `platforms` | Names of the configured gateway platforms. |
-| `provision` | The last provision run: `present`, versions, `completed_at`, `phases`, `ok`/`warn`/`fail` counts, and the configured models, MCP servers, memory provider and approvals mode. |
+| `provision` | The last provision run: `present`, versions, `completed_at`, `reported_at` (the newest phase time), `phases`, `ok`/`warn`/`fail` counts, and the configured models, MCP servers, memory provider and approvals mode. `live_built_at` is when the live release was built, and `stale` is `true` when the report is older than that build: `hal0 update` rebuilds Hermes without rewriting `provision.json`, so a stale report no longer lists `provision_failed` or `provision_warn` in `degraded`. |
 | `doctor` | Rows `{id, status, detail}` for `interpreter`, `plugins`, `ownership` and `gateway_unit`; `status` is `ok`, `warn`, `fail`, `absent` or `unreadable`. |
 | `approvals` | `mode`, `effective`, `in_sync` and the `pending` approval count. |
 | `memory` | `available`, `writes` and `last_write` of the agent's private namespace. |

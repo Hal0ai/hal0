@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import os
 import re
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -95,13 +96,29 @@ _CONFIG_WRITE_KEYS = (
 )
 
 
+def parse_timestamp(value: object) -> datetime | None:
+    """An ISO-8601 timestamp as an aware datetime, or ``None`` when it is not one.
+
+    A trailing ``Z`` is read as UTC and a naive time is taken to be UTC, so
+    values written by different hal0 components compare.
+    """
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value[:-1] + "+00:00" if value.endswith("Z") else value)
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
+
+
 def provision_summary(data: dict[str, Any] | None) -> dict[str, Any]:
     """Summarise ``provision.json`` (the last provision run) for the card.
 
     Phases keep file order. ``ok``/``warn``/``fail`` count phases by status;
     ``skip`` counts nowhere. The ``config_write`` phase's details are lifted
-    so the card does not need the raw blob. ``data`` is ``None`` when no run
-    has been recorded.
+    so the card does not need the raw blob. ``reported_at`` is the newest
+    phase time (as written), ``None`` when no phase carries a parseable one.
+    ``data`` is ``None`` when no run has been recorded.
     """
     data = data or {}
     phases = [
@@ -115,11 +132,14 @@ def provision_summary(data: dict[str, Any] | None) -> dict[str, Any]:
         for name, entry in (data.get("phases") or {}).items()
     ]
     config_write = ((data.get("phases") or {}).get("config_write") or {}).get("details") or {}
+    stamped = [(t, p["at"]) for p in phases if (t := parse_timestamp(p["at"])) is not None]
+    newest = max(stamped, key=lambda pair: pair[0], default=None)
     return {
         "present": bool(data),
         "hal0_version": data.get("hal0_version"),
         "hermes_version": data.get("hermes_version"),
         "completed_at": data.get("completed_at"),
+        "reported_at": newest[1] if newest else None,
         "phases": phases,
         "ok": sum(1 for p in phases if p["status"] == "ok"),
         "warn": sum(1 for p in phases if p["status"] == "warn"),
@@ -216,6 +236,9 @@ def degraded_reasons(
     not ``ok`` or ``absent``; its fix is the root CLI command when the
     ``ownership`` row contributes (hal0 cannot ``chown`` its own tree), else
     ``repair``. ``in_sync`` of ``None`` (Hermes not provisioned) is not drift.
+    A ``provision`` marked ``stale`` (its report predates the live release,
+    which ``hal0 update`` rebuilds without rewriting ``provision.json``)
+    raises neither ``provision_failed`` nor ``provision_warn``.
     """
     reasons: list[dict[str, Any]] = []
     gateway = units.get("gateway") or "unknown"
@@ -240,8 +263,9 @@ def degraded_reasons(
             )
         )
 
+    stale = bool(provision.get("stale"))
     phases = provision.get("phases") or []
-    failed = provision.get("fail", 0)
+    failed = 0 if stale else provision.get("fail", 0)
     if failed:
         names = [p["name"] for p in phases if p.get("status") == "fail"]
         detail = f"{failed} provision phase(s) failed"
@@ -250,7 +274,7 @@ def degraded_reasons(
                 "provision_failed", f"{detail}: {', '.join(names)}" if names else detail, "repair"
             )
         )
-    if provision.get("warn") or any(p.get("failure_count") for p in phases):
+    if not stale and (provision.get("warn") or any(p.get("failure_count") for p in phases)):
         reasons.append(
             _reason("provision_warn", "the last provision run recorded warnings", "none")
         )

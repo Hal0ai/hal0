@@ -106,6 +106,23 @@ def test_provision_summary_counts_and_lifts_config_write_details():
     )
 
 
+def test_provision_summary_reports_newest_phase_time():
+    data = {
+        "phases": {
+            "install": {"status": "fail", "at": "2026-10-21T23:49:54Z"},
+            "smoke_tests": {"status": "ok", "at": "2026-10-22T01:00:00+00:00"},
+            "config_write": {"status": "ok", "at": "2026-10-21T12:00:00Z"},
+            "mcp_wire": {"status": "ok"},
+        }
+    }
+    assert provision_summary(data)["reported_at"] == "2026-10-22T01:00:00+00:00"
+    assert provision_summary(None)["reported_at"] is None
+    assert (
+        provision_summary({"phases": {"install": {"status": "ok", "at": "t1"}}})["reported_at"]
+        is None
+    )
+
+
 def test_provision_summary_absent():
     out = provision_summary(None)
     assert out["present"] is False and out["phases"] == [] and out["terminal_tool"] is None
@@ -136,6 +153,20 @@ BASE = dict(
 
 def test_no_reasons_when_healthy():
     assert degraded_reasons(**BASE) == []
+
+
+def test_stale_provision_report_does_not_degrade():
+    stale = {
+        "present": True,
+        "fail": 1,
+        "warn": 1,
+        "stale": True,
+        "phases": [{"name": "install", "status": "fail", "failure_count": 2}],
+    }
+    assert degraded_reasons(**{**BASE, "provision": stale}) == []
+    # Only the two provision reasons go quiet; every other reason still fires.
+    out = degraded_reasons(**{**BASE, "provision": stale, "api_healthy": False})
+    assert [r["reason"] for r in out] == ["api_unhealthy"]
 
 
 def test_reasons_in_display_order_with_fixes():

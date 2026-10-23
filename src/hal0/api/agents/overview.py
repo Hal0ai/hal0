@@ -272,6 +272,23 @@ def _active_job(request: Request) -> dict[str, str] | None:
     }
 
 
+def _provision_view(provision_raw: dict[str, Any] | None, live: Release | None) -> dict[str, Any]:
+    """The provision summary, marked ``stale`` when the live release postdates the report.
+
+    ``provision.json`` is written by the bootstrap pipeline only; the converge
+    that ``hal0 update`` runs rebuilds Hermes and leaves it alone, so a failed
+    phase can outlive the build that failed. A time that does not parse never
+    marks the report stale.
+    """
+    provision = builders.provision_summary(provision_raw)
+    built_at = live.data.get("built_at") if live is not None else None
+    built = builders.parse_timestamp(built_at)
+    reported = builders.parse_timestamp(provision["reported_at"])
+    provision["live_built_at"] = built_at
+    provision["stale"] = built is not None and reported is not None and built > reported
+    return provision
+
+
 def _absent(detail: str | None) -> dict[str, str]:
     return {"status": "absent", "detail": detail or "check unavailable"}
 
@@ -340,7 +357,7 @@ async def _gather_hermes(request: Request) -> dict[str, Any]:
     gateway_check, gateway_check_err = gateway_result
 
     units = builders.unit_states(agent_active, gateway)
-    provision = builders.provision_summary(provision_raw)
+    provision = _provision_view(provision_raw, live)
     doctor = builders.doctor_rows(
         sqlite or _absent(sqlite_err),
         plugins or _absent(plugins_err),
