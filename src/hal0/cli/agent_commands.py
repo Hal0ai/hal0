@@ -352,10 +352,14 @@ def _upgrade_pi(to: str | None) -> None:
         return
     console.print("[bold]Upgrading pi[/bold] → ~/.pi (extensions · pins · memory wiring) …")
     try:
-        upgrade()
+        # The driver reports what it changed outside pi's own tree; a stand-in
+        # driver that returns nothing changed nothing.
+        result = upgrade() or {}
     except AgentError as exc:
         die(f"pi upgrade failed: {exc}")
         return
+    if result.get("hindsight_alias_added"):
+        console.print("Hindsight bank alias added to coding-agent.json")
     console.print(Panel("[bold green]Upgraded[/bold green] pi", border_style="green"))
 
 
@@ -2238,8 +2242,10 @@ def agent_upgrade(
     entry point.
 
     ``pi`` instead re-pins pi, redeploys hal0's extensions into ``~/.pi`` and
-    re-stamps the install marker (:meth:`PiDriver.upgrade`); run it as root,
-    as the user who installed pi. ``--to`` is refused for pi.
+    re-stamps the install marker (:meth:`PiDriver.upgrade`); run it the same
+    way you installed pi (``sudo hal0 agent upgrade pi``). It refuses when pi's
+    profile is in a different home or pi is not installed. ``--to`` is refused
+    for pi.
     """
     if name == "pi":
         _upgrade_pi(to)

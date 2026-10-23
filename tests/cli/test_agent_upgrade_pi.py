@@ -60,3 +60,25 @@ def test_upgrade_pi_driver_without_upgrade(monkeypatch: pytest.MonkeyPatch) -> N
     monkeypatch.setattr("hal0.agents.manager._driver_for", lambda name: types.SimpleNamespace())
     r = CliRunner().invoke(ac.app, ["upgrade", "pi"])
     assert r.exit_code == 1 and "pi driver has no upgrade" in r.output
+
+
+def test_upgrade_pi_reports_the_added_hindsight_alias(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(ac.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(
+        "hal0.agents.manager._driver_for",
+        lambda name: types.SimpleNamespace(upgrade=lambda: {"hindsight_alias_added": True}),
+    )
+    r = CliRunner().invoke(ac.app, ["upgrade", "pi"])
+    assert r.exit_code == 0
+    assert "Hindsight bank alias added to coding-agent.json" in r.output
+
+
+def test_upgrade_pi_is_quiet_when_no_alias_was_added(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(ac.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(
+        "hal0.agents.manager._driver_for",
+        lambda name: types.SimpleNamespace(upgrade=lambda: {"hindsight_alias_added": False}),
+    )
+    r = CliRunner().invoke(ac.app, ["upgrade", "pi"])
+    assert r.exit_code == 0 and "Upgraded pi" in r.output
+    assert "Hindsight" not in r.output
