@@ -669,9 +669,7 @@ async def update_graph_config(request: Request) -> dict[str, Any]:
         if not needs_propagation and new_cfg.enabled:
             from hal0.memory.extraction_env import drop_in_matches
 
-            if not drop_in_matches(
-                new_cfg.extraction_slot, new_cfg.llm_timeout_s, limits=new_limits
-            ):
+            if not drop_in_matches(new_cfg.llm_timeout_s, limits=new_limits):
                 # Reconciliation is inferred work we chose to do ourselves,
                 # not an explicit operator action — only do it when we can
                 # POSITIVELY confirm the unchanged slot is still valid

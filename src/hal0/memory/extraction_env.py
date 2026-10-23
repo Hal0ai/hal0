@@ -1,4 +1,4 @@
-"""Propagate the memory graph extraction slot to hindsight-api (ADR-0023).
+"""Propagate the memory engine's LLM settings to hindsight-api (ADR-0023, #2919).
 
 Hindsight builds its graph natively via its own extraction LLM, configured by the
 ``HINDSIGHT_API_LLM_MODEL`` env in the ``hindsight-api.service`` unit. To make the
@@ -7,12 +7,19 @@ owns a systemd **drop-in**::
 
     /etc/systemd/system/hindsight-api.service.d/extraction-model.conf
         [Service]
-        Environment=HINDSIGHT_API_LLM_MODEL=hal0/<slot>
+        Environment=HINDSIGHT_API_LLM_MODEL=hal0/memory
+        Environment=HINDSIGHT_API_LLM_TIMEOUT=...   (+ the #1834 extraction limits)
 
 and runs ``systemctl daemon-reload`` + ``systemctl restart hindsight-api`` so the
-engine picks up the new target. The slot is addressed as the ``hal0/<slot>`` virtual
-(resolved by the dispatcher to that slot's model — ADR-0023 §2), so the value tracks
-the slot, never a hardcoded model id.
+engine picks up a changed timeout or limit. The model line is the one fixed
+virtual id :data:`MEMORY_ALIAS`: hal0's ``/v1`` resolves ``hal0/memory`` at request
+time from ``[memory.graph]`` — to ``hal0/<extraction_slot>`` (ADR-0023 §2, a local
+slot) or, when ``extraction_model`` is set, to that upstream model id
+(:func:`memory_engine_target`). So the engine never learns which model it runs
+on, switching between a local slot and an upstream model (OpenRouter, MiniMax, …)
+is a hal0.toml write that applies on the next engine call, and the drop-in only
+changes — and the engine only restarts — for the timeout and the limits. Before
+#2919 the drop-in carried ``hal0/<slot>`` and every slot change cost a restart.
 
 Privileged operation, routed through the seam (#1641): both the drop-in write and
 the restart are genuinely-root, and hal0-api runs as the unprivileged ``hal0``
@@ -70,6 +77,15 @@ _SYSTEMCTL_TIMEOUT_S = 60.0
 
 #: Default daemon LLM timeout (seconds) — mirrors MemoryGraphConfig.llm_timeout_s.
 DEFAULT_LLM_TIMEOUT_S = 300
+
+#: The one virtual model id hindsight-api is ever pointed at (#2919). Reserved
+#: like ``hal0/agent`` / ``hal0/utility``: hal0's ``/v1`` alias rewrite resolves it
+#: from ``[memory.graph]`` on every call (see :func:`memory_engine_target`), so a
+#: slot literally named ``memory`` is not reachable through it. Spelled so it
+#: passes the root-side drop-in allow-list (``^hal0/[A-Za-z0-9_.-]{1,64}$`` in
+#: installer/wrappers/hal0-systemctl), which is what lets an upstream target
+#: work without an installer change.
+MEMORY_ALIAS = "hal0/memory"
 
 #: Conservative floor for Hindsight's native extraction prompt (#1903).
 #:
@@ -138,13 +154,16 @@ class ExtractionLimits:
 
 
 _DROP_IN_TEMPLATE = (
-    "# Managed by hal0 (ADR-0023 — memory.graph.extraction_slot / llm_timeout_s /\n"
-    "# extraction limits, #1834). Overrides the hindsight-api LLM target, timeout\n"
-    "# and extraction limits set in the base hindsight-api.service unit. Do not\n"
-    "# edit by hand; set via `hal0 memory graph enable --slot <name>` or the\n"
-    "# dashboard, which rewrites this file and restarts the service.\n"
+    "# Managed by hal0 (ADR-0023 / #2919 — memory.graph llm_timeout_s and the\n"
+    "# #1834 extraction limits). Overrides the hindsight-api LLM target, timeout\n"
+    "# and extraction limits set in the base hindsight-api.service unit. The model\n"
+    "# is always the virtual id hal0/memory: hal0's /v1 resolves it to\n"
+    "# [memory.graph].extraction_slot or extraction_model on every call, so the\n"
+    "# engine target changes without touching this file. Do not edit by hand; set\n"
+    "# via `hal0 memory graph enable` or the dashboard, which rewrite this file\n"
+    "# and restart the service when a timeout or limit changes.\n"
     "[Service]\n"
-    "Environment=HINDSIGHT_API_LLM_MODEL=hal0/{slot}\n"
+    "Environment=HINDSIGHT_API_LLM_MODEL=" + MEMORY_ALIAS + "\n"
     "Environment=HINDSIGHT_API_LLM_TIMEOUT={timeout_s}\n"
     "Environment=HINDSIGHT_API_RETAIN_LLM_MAX_CONCURRENT={max_concurrent}\n"
     "Environment=HINDSIGHT_API_RETAIN_MAX_COMPLETION_TOKENS={max_tokens}\n"
@@ -193,17 +212,15 @@ def _stale_wrapper_hint(exc: BaseException) -> str:
 
 
 def render_drop_in(
-    slot: str,
     timeout_s: int = DEFAULT_LLM_TIMEOUT_S,
     *,
     limits: ExtractionLimits | None = None,
 ) -> str:
-    """Return the drop-in contents pinning extraction to ``hal0/<slot>``, the
-    LLM timeout and the extraction limits (``limits`` defaults to the schema
+    """Return the drop-in contents pinning the engine to :data:`MEMORY_ALIAS`,
+    the LLM timeout and the extraction limits (``limits`` defaults to the schema
     defaults, see :class:`ExtractionLimits`)."""
     lim = limits if limits is not None else ExtractionLimits()
     return _DROP_IN_TEMPLATE.format(
-        slot=slot,
         timeout_s=int(timeout_s),
         max_concurrent=int(lim.max_concurrent),
         max_tokens=int(lim.max_tokens),
@@ -214,12 +231,13 @@ def render_drop_in(
 
 
 def drop_in_matches(
-    slot: str,
     timeout_s: int = DEFAULT_LLM_TIMEOUT_S,
     *,
     limits: ExtractionLimits | None = None,
 ) -> bool:
-    """True when the on-disk drop-in already reflects ``(slot, timeout_s, limits)``.
+    """True when the on-disk drop-in already reflects ``(timeout_s, limits)``
+    and pins :data:`MEMORY_ALIAS` (a pre-#2919 drop-in naming ``hal0/<slot>``
+    reads as drift, so the next enabled PUT rewrites it once).
 
     #1682 review: comparing only against ``hal0.toml`` is not enough to
     decide propagation is unnecessary. A host hit by the pre-seam write bug
@@ -242,11 +260,24 @@ def drop_in_matches(
     repair it, instead of an otherwise-idempotent PUT 500ing.
     """
     try:
-        return DROP_IN_PATH.read_text(encoding="utf-8") == render_drop_in(
-            slot, timeout_s, limits=limits
-        )
+        return DROP_IN_PATH.read_text(encoding="utf-8") == render_drop_in(timeout_s, limits=limits)
     except (OSError, UnicodeDecodeError):
         return False
+
+
+def memory_engine_target(graph: MemoryGraphConfig) -> tuple[str, str]:
+    """What :data:`MEMORY_ALIAS` resolves to under ``graph`` (#2919).
+
+    ``("upstream", <model id>)`` when ``extraction_model`` is set — an id hal0's
+    ``/v1`` routes to a configured upstream — else ``("slot", "hal0/<slot>")``,
+    the ADR-0023 virtual for the local extraction slot. The ``/v1`` alias
+    rewrite, the graph status route and the CLI all ask here, so there is one
+    answer to "which model is the memory engine on".
+    """
+    model = getattr(graph, "extraction_model", None)
+    if model:
+        return ("upstream", model)
+    return ("slot", extraction_model_name(graph.extraction_slot))
 
 
 def apply_extraction_slot(
@@ -257,7 +288,12 @@ def apply_extraction_slot(
     restart: bool = True,
     seam: SystemCtlSeam | None = None,
 ) -> dict[str, Any]:
-    """Write the drop-in for ``slot`` and (best-effort) restart hindsight-api.
+    """Write the drop-in and (best-effort) restart hindsight-api.
+
+    ``slot`` is the configured extraction slot, reported back in the status for
+    the caller's log line; since #2919 the drop-in itself pins
+    :data:`MEMORY_ALIAS` and hal0's ``/v1`` resolves that to the slot (or to
+    ``extraction_model``) per call, so a slot change alone no longer needs this.
 
     Returns a status dict::
 
@@ -273,7 +309,7 @@ def apply_extraction_slot(
     (``asyncio.to_thread``) — the restart waits on a hindsight-api cold start.
     """
     seam = seam if seam is not None else SystemCtlSeam()
-    model = f"hal0/{slot}"
+    model = MEMORY_ALIAS
     lim = limits if limits is not None else ExtractionLimits()
     result: dict[str, Any] = {
         "slot": slot,
@@ -289,7 +325,7 @@ def apply_extraction_slot(
 
     try:
         seam.write_hindsight_dropin(
-            render_drop_in(slot, timeout_s, limits=lim),
+            render_drop_in(timeout_s, limits=lim),
             path=DROP_IN_PATH,
             timeout=_SYSTEMCTL_TIMEOUT_S,
         )
