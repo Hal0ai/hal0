@@ -2464,3 +2464,24 @@ def test_gateway_unit_unreadable_home_warns(tmp_path, monkeypatch) -> None:
         home=home, unit_path=tmp_path / "u", proc=_proc(tmp_path, [])
     )
     assert row["status"] == "unreadable"
+
+
+def test_gateway_unit_names_upstreams_hashed_unit(tmp_path) -> None:
+    """#2943: a fresh 1.6.0 nightly install got hermes-gateway-<hash>.service."""
+    home = tmp_path / "hermes"
+    home.mkdir()
+    (home / "config.yaml").write_text("model: x\n")
+    units = tmp_path / "units"
+    units.mkdir()
+    fixture = (
+        Path(__file__).resolve().parents[1]
+        / "fixtures"
+        / "hermes"
+        / "gateway-unit-hashed-v0.22.4.service"
+    )
+    (units / "hermes-gateway-1975ce4b.service").write_text(fixture.read_text())
+    c = da.check_hermes_gateway_unit(
+        home=home, unit_path=units / "hermes-gateway.service", proc=_proc(tmp_path, [])
+    )
+    assert c.status == "fail" and c.critical is False
+    assert "hermes-gateway-1975ce4b.service" in c.detail and "sudo hal0 update" in c.detail

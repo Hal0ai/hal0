@@ -8,8 +8,12 @@ install.sh and runs them under ``bash -euo pipefail`` against stateful stubs:
 * ``hal0`` stands in for ``hal0 agent install hermes``: it creates the venv
   and, unless given ``--no-gateway``, enables + starts the gateway exactly as
   ``_install_hermes_gateway`` does (src/hal0/cli/agent_commands.py);
-* ``hermes`` stands in for the upstream ``hermes gateway install`` generator:
-  it writes the unit file, then enables and starts it unless told not to.
+* ``python`` stands in for hal0's own venv: ``-m hal0.agents.hermes_gateway_regen
+  install`` writes the unit file from hal0's template and never enables or
+  starts it (#2943); ``-m hal0.agents.hermes_gateway_unit`` is the normaliser;
+* ``hermes`` is upstream's binary. Since #2943 the installer must never run
+  it as root to install the gateway; the stub records any call so a test can
+  prove that.
 
 The real ``install`` binary is used, so a /dev/null mask symlink in the unit
 directory is exercised for real.
@@ -88,7 +92,7 @@ echo "hal0 $*" >> "$CALLS"
 mkdir -p "$VENV/bin"
 cp "$HERMES_STUB" "$VENV/bin/hermes"
 for a in "$@"; do [[ "$a" == --no-gateway ]] && exit 0; done
-"$VENV/bin/hermes" gateway install --system --run-as-user hal0
+echo "[Unit]" > "$UNIT_DIR/hermes-gateway.service"
 systemctl enable --now hermes-gateway.service
 """
 
@@ -109,12 +113,17 @@ exit 0
 """
 
 
-# Stands in for ``${VENV_DIR}/bin/python`` (hal0's own venv) running the
-# gateway unit normaliser, ``-m hal0.agents.hermes_gateway_unit``. Exits with
+# Stands in for ``${VENV_DIR}/bin/python`` (hal0's own venv). The template
+# install writes the unit and never toggles it; the normaliser exits with
 # $NORMALISE_RC (default 0) so a test can simulate a unit that still names a
 # release path.
 HAL0_PYTHON = r"""#!/bin/bash
 echo "python $*" >> "$CALLS"
+if [[ "$*" == "-m hal0.agents.hermes_gateway_regen install" ]]; then
+    echo "[Unit]" > "$UNIT_DIR/hermes-gateway.service"
+    systemctl daemon-reload
+    exit 0
+fi
 exit "${NORMALISE_RC:-0}"
 """
 
@@ -299,15 +308,14 @@ def test_gateway_disabled_survives_the_repair_path(tmp_path: Path) -> None:
     assert not box.active("hermes-gateway.service")
 
 
-def test_gateway_disabled_generator_never_starts_it(tmp_path: Path) -> None:
+def test_gateway_disabled_template_install_never_starts_it(tmp_path: Path) -> None:
     box = Box(tmp_path)
     box.provisioned()
     box.set_state("hermes-gateway.service", "disabled")
     (box.unit_dir / "hermes-gateway.service").write_text("[Unit]\n")
     res = box.run(HERMES_BLOCK)
     assert res.returncode == 0, res.stderr
-    gen = [c for c in box.log() if c.startswith("hermes gateway install")]
-    assert gen and "--no-start-now" in gen[0] and "--no-start-on-login" in gen[0]
+    assert "python -m hal0.agents.hermes_gateway_regen install" in box.log()
     assert not [c for c in box.log() if c.startswith(("start", "enable hermes-gateway"))]
     assert box.state_of("hermes-gateway.service") == "disabled"
     assert "hermes-gateway.service is disabled; left as is" in res.stdout
@@ -351,13 +359,15 @@ def test_gateway_fresh_install_enables(tmp_path: Path) -> None:
 # ── gateway unit normaliser (ADR-0032 decision 12) ─────────────────────────
 
 
-def test_generator_run_is_followed_by_the_normaliser_before_enable(tmp_path: Path) -> None:
+def test_template_install_is_followed_by_the_normaliser_before_enable(tmp_path: Path) -> None:
     box = Box(tmp_path)
     box.provisioned()
     res = box.run(HERMES_BLOCK)
     assert res.returncode == 0, res.stderr
     log = box.log()
-    gen = next(i for i, c in enumerate(log) if c.startswith("hermes gateway install"))
+    gen = next(
+        i for i, c in enumerate(log) if c == "python -m hal0.agents.hermes_gateway_regen install"
+    )
     norm = next(i for i, c in enumerate(log) if c == "python -m hal0.agents.hermes_gateway_unit")
     enable = next(i for i, c in enumerate(log) if c == "enable --now hermes-gateway.service")
     assert gen < norm < enable
@@ -370,7 +380,8 @@ def test_a_unit_left_naming_a_release_path_stays_disabled(tmp_path: Path) -> Non
     res = box.run(HERMES_BLOCK, normalise_rc=2)
     assert res.returncode == 0, res.stderr
     assert "still names a release path" in res.stdout
-    assert box.state_of("hermes-gateway.service") == "disabled"
+    # The template never enables the unit, so it was never on to turn off.
+    assert box.state_of("hermes-gateway.service") in (None, "disabled")
     assert not box.active("hermes-gateway.service")
     assert "enable --now hermes-gateway.service" not in box.log()
 
@@ -384,3 +395,21 @@ def test_a_disabled_but_running_gateway_survives_a_failed_normalise(tmp_path: Pa
     assert res.returncode == 0, res.stderr
     assert box.active("hermes-gateway.service")
     assert "disable --now hermes-gateway.service" not in box.log()
+
+
+def test_the_installer_never_runs_hermes_to_install_the_gateway(tmp_path: Path) -> None:
+    """#2943: upstream's generator run as root wrote hermes-gateway-<hash>.service
+    with a baked release path and created /root/.hermes. Fresh and re-run alike,
+    no ``hermes`` call may appear."""
+    box = Box(tmp_path)
+    res = box.run(HERMES_BLOCK)
+    assert res.returncode == 0, res.stderr
+    (tmp_path / "rerun").mkdir()
+    box2 = Box(tmp_path / "rerun")
+    box2.provisioned()
+    res2 = box2.run(HERMES_BLOCK)
+    assert res2.returncode == 0, res2.stderr
+    for b in (box, box2):
+        assert not [c for c in b.log() if c.startswith("hermes ")]
+        assert (b.unit_dir / "hermes-gateway.service").exists()
+        assert b.state_of("hermes-gateway.service") == "enabled"

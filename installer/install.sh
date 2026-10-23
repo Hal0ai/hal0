@@ -3974,7 +3974,8 @@ else
     # `hal0 agent install hermes` runs its own gateway install, which ends in
     # `systemctl enable --now hermes-gateway.service`
     # (src/hal0/cli/agent_commands.py, _install_hermes_gateway), and the
-    # gateway block further down runs the upstream generator. Both consult
+    # gateway block further down lays the unit down from hal0's template
+    # (#2943). Both consult
     # this one capture. `_gateway_was_active` records a unit that is disabled
     # but running, so the installer doesn't stop it.
     _gateway_state="$(unit_enable_state hermes-gateway.service)"
@@ -4037,73 +4038,40 @@ else
             warn "hal0-agent@hermes not yet active; check 'journalctl -u hal0-agent@hermes -n 40'"
         fi
         # Gateway (Telegram/Discord) also runs as a SYSTEM service under
-        # the hal0 user — same posture as the dashboard above. The
-        # bootstrap provisioner has already written the secrets drop-in
-        # (/etc/systemd/system/hermes-gateway.service.d/10-hal0-secrets.conf);
-        # hermes_cli lays down the main unit here. daemon-reload picks up
-        # the drop-in BEFORE first start so platforms connect on boot.
-        # HERMES_HOME is unset so the generator bakes the hal0 default
-        # (~/.hermes), not a value inherited from the installer env.
+        # the hal0 user, same posture as the dashboard above. The bootstrap
+        # provisioner has already written the secrets drop-in
+        # (/etc/systemd/system/hermes-gateway.service.d/10-hal0-secrets.conf),
+        # so the first start already has the platform tokens.
         #
-        # `hermes gateway install` on the systemd path PROMPTS interactively
-        # ("Start the gateway now…?" / "…on boot?") with no flag to bypass.
-        # The installer's contract is non-interactive (see DEBIAN_FRONTEND
-        # above), so we feed it </dev/null: a TTY-less read hits EOF and
-        # hermes falls back to its built-in defaults (install + enable on
-        # boot + start now). Without this, two failure modes appear:
-        #   - on a real TTY the install BLOCKS on the prompt;
-        #   - under a launcher that *closes* fd 0 (some headless/CI runners),
-        #     hermes' input() raises `RuntimeError: lost sys.stdin` — which it
-        #     does NOT catch — so the install aborts AFTER printing the prompt
-        #     but BEFORE writing the unit file. That is what produced the
-        #     "Unit file hermes-gateway.service does not exist" error below.
-        # Redirecting from /dev/null turns that crash into a clean EOF.
+        # The unit comes from hal0's own template (#2943), rendered as root
+        # from fixed paths by hal0's venv: `python -m
+        # hal0.agents.hermes_gateway_regen install`. Root never runs Hermes.
+        # Under the v0.22.4 pin, upstream's `hermes gateway install --system`
+        # run as root resolves its default home from root's ACCOUNT home
+        # (/root/.hermes), so with HOME=/var/lib/hal0 it named the unit
+        # hermes-gateway-<hash>.service, baked the release it ran from into
+        # ExecStart (pruned at the next activation), skipped hal0's drop-ins
+        # and left a stray /root/.hermes. The template also moves a gateway
+        # off such a hashed unit, keeping its on/off state, and turns linger
+        # on for hal0. It never enables or starts the canonical unit; the
+        # off switch and the enable below decide that.
         GATEWAY_UNIT_DST="${UNIT_DIR}/hermes-gateway.service"
         info "installing system-scope hermes gateway (User=hal0)"
-        # m1 fix: this script runs as root, so a bare `env -u HERMES_HOME
-        # hermes ...` here resolves `~/.hermes` to /root/.hermes — the exact
-        # "split-brain" root-owned tree `hal0 doctor perms` flags as Hermes
-        # ownership drift (check_hermes_ownership's stray_home check; see
-        # installer/lib/run-as-hal0.sh's docstring, which names this same
-        # `hermes gateway install --system` checks os.geteuid() == 0
-        # internally and refuses when invoked by a non-root user. The
-        # `--run-as-user hal0` flag tells the hermes CLI which runtime
-        # user to write into the systemd unit — we do NOT drop to that
-        # user here. Run the install command AS ROOT directly (the
-        # #843 safeguard for /root/.hermes is satisfied by the
-        # $HOME=/var/lib/hal0 override and the fact that 'pip install'
-        # was already done as hal0 earlier in the provisioning block).
         #
         # Off switch (#2807, using the capture above the provisioning block):
         #   - masked: the unit file is a /dev/null symlink. Never write through
-        #     a mask, so the generator does not run at all.
-        #   - disabled (or runtime-masked): refresh the unit file but pass
-        #     --no-start-now --no-start-on-login (both in the pinned
-        #     hermes-agent's `gateway install`), so the generator neither
-        #     enables nor starts it. That closes the window in which a stopped
-        #     gateway would come up and connect with the platform tokens. A
-        #     `systemctl mask --runtime` bracket was the alternative; the flags
-        #     are preferred because the generator's `enable` runs with
-        #     check=True and would fail against a mask, reporting a failed
-        #     install, and an interrupted run would leave the runtime mask
-        #     behind until reboot.
+        #     a mask, so nothing is written at all.
+        #   - disabled (or runtime-masked): refresh the unit file and leave it
+        #     off (the disable below).
         if [[ "${_gateway_state}" == "masked" ]]; then
             unit_left_off_note hermes-gateway.service "${_gateway_state}"
         else
-            _gateway_gen_args=(--system --run-as-user hal0)
-            unit_state_off "${_gateway_state}" && _gateway_gen_args+=(--no-start-now --no-start-on-login)
-            env -u HERMES_HOME HOME=/var/lib/hal0 \
-                /var/lib/hal0/venvs/hermes/bin/hermes gateway install "${_gateway_gen_args[@]}" </dev/null \
-                || warn "hermes gateway install failed — Telegram/Discord bridge unavailable; continuing"
-            # ADR-0032 decision 12: the generator bakes the release it ran
-            # from (/var/lib/hal0/hermes/releases/<id>/…) into the unit, and
-            # the next activation prunes that release. Rewrite every such
-            # path to /var/lib/hal0/hermes/current/ before any enable; the
-            # helper also daemon-reloads and try-restarts the gateway. It runs
-            # even after a failed generator run, because a unit left from an
-            # earlier run can still name a release. A unit that still names a
-            # release path is left disabled, the same posture as a failed
-            # generator run; a gateway the operator disabled is left as is.
+            "${VENV_DIR}/bin/python" -m hal0.agents.hermes_gateway_regen install \
+                || warn "hermes-gateway unit not installed — Telegram/Discord bridge unavailable; continuing"
+            # ADR-0032 decision 12: the unit must name only stable paths under
+            # /var/lib/hal0/hermes/current/. The template already does; the
+            # normaliser stays as the backstop for a unit left from an earlier
+            # run. A unit that still names a release is left disabled.
             if ! "${VENV_DIR}/bin/python" -m hal0.agents.hermes_gateway_unit; then
                 warn "hermes-gateway unit still names a release path — leaving the gateway disabled; re-run '${HAL0_BIN} agent install hermes'"
                 if ! unit_state_off "${_gateway_state}"; then
@@ -4141,7 +4109,7 @@ else
             fi
         else
             warn "hermes-gateway unit not installed (${GATEWAY_UNIT_DST} missing) — Telegram/Discord bridge unavailable"
-            warn "  retry with 'HERMES_HOME= /var/lib/hal0/venvs/hermes/bin/hermes gateway install --system --run-as-user hal0 </dev/null'"
+            warn "  retry with 'sudo ${HAL0_BIN} agent install hermes'"
         fi
     elif [[ -f "${AGENT_UNIT_DST}" ]]; then
         # No venv after the provision block: it was skipped (HAL0_SKIP_HERMES=1)

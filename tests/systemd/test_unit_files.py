@@ -300,7 +300,12 @@ class TestInstallerGatewayWiring:
         return (_REPO_ROOT / "installer" / "install.sh").read_text(encoding="utf-8")
 
     def test_installs_system_gateway_unit(self) -> None:
-        assert "gateway install --system --run-as-user hal0" in self._install_sh()
+        # hal0's template, not upstream's generator run as root (#2943).
+        text = self._install_sh()
+        assert "-m hal0.agents.hermes_gateway_regen install" in text
+        assert "gateway install --system" not in text.replace(
+            "upstream's `hermes gateway install --system`", ""
+        )
 
     def test_enables_gateway_service(self) -> None:
         assert "enable --now hermes-gateway.service" in self._install_sh()

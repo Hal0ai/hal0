@@ -1134,11 +1134,12 @@ def _normalise_gateway_unit_or_warn(has_systemctl: bool, *, turn_off: bool = Tru
 
 
 def _install_hermes_gateway() -> None:
-    """`hermes gateway install --system --run-as-user hal0` + enable the unit.
+    """Install ``hermes-gateway.service`` from hal0's template + enable the unit.
 
     Ports installer/install.sh's post-provision gateway block
-    (``env -u HERMES_HOME ... hermes gateway install --system ...`` through
-    the ``systemctl enable --now hermes-gateway`` + wait_active check).
+    (``hal0.agents.hermes_gateway_regen install`` through the ``systemctl
+    enable --now hermes-gateway`` + wait_active check). Upstream's generator
+    is not run (#2943).
     Best-effort throughout: every failure mode here warns and returns rather
     than raising, matching install.sh's ``|| warn ... continuing`` posture —
     a broken gateway must never be reported as a failed Hermes install.
@@ -1206,44 +1207,31 @@ def _install_hermes_gateway() -> None:
     # hal0's home + HERMES_HOME unset — so `~/.hermes` resolves under
     # /var/lib/hal0, never /root. `--run-as-user hal0` only names the
     # runtime user baked into the unit; it is not a privilege drop.
-    gateway_argv = [_HERMES_BIN, "gateway", "install", "--system", "--run-as-user", "hal0"]
-    if disabled:
-        # Refresh the unit file only: neither enable on login nor start now.
-        gateway_argv += ["--no-start-now", "--no-start-on-login"]
-    # `hermes gateway install` prompts interactively with no bypass flag;
-    # stdin=DEVNULL gives a clean EOF so it falls back to its built-in
-    # defaults (install + enable on boot + start now) instead of blocking.
-    env = dict(_os.environ)
-    env.pop("HERMES_HOME", None)
-    if _os.geteuid() == 0:
-        env["HOME"] = _agent_home()
-    rc = _subprocess.run(  # nosec B603 — fixed argv, known path
-        gateway_argv,
-        stdin=_subprocess.DEVNULL,
-        env=env,
-        check=False,
-    ).returncode
-    if rc != 0 and disabled:
-        # Possibly a hermes that doesn't know the no-start flags. Never retry
-        # without them (that would enable and start it): keep the unit off.
+    # hal0 lays the unit down from its own template (#2943). Running upstream's
+    # `hermes gateway install --system` as root under v0.22.4 names the unit
+    # hermes-gateway-<hash>.service (root's account home is not hal0's), bakes
+    # the release path it ran from and creates a stray /root/.hermes. The
+    # template never enables or starts the unit; the off switch below and the
+    # enable logic further down decide that, as before.
+    from hal0.agents.hermes_gateway_regen import GatewayRegenError, install_gateway_unit
+
+    if _os.geteuid() != 0:
         console.print(
-            f"[yellow]hermes gateway install failed (exit {rc}); unit not refreshed, "
-            "stays disabled.[/yellow]"
+            "[yellow]hermes gateway unit not installed: it needs root "
+            "(sudo hal0 agent install hermes) — continuing.[/yellow]"
         )
-    elif rc != 0:
+        return
+    try:
+        installed = install_gateway_unit()
+    except GatewayRegenError as exc:
         console.print(
-            "[yellow]hermes gateway install failed — Telegram/Discord bridge "
+            f"[yellow]hermes gateway unit not installed ({exc}) — Telegram/Discord bridge "
             "unavailable; continuing.[/yellow]"
         )
-
-    # ADR-0032 decision 12: the generator bakes the release path it ran from
-    # (/var/lib/hal0/hermes/releases/<id>/…) into the unit. Rewrite it to the
-    # stable current/ path straight after the generator and before any enable,
-    # or the next activation's prune would delete what the gateway runs from.
-    # A gateway the operator disabled is only warned about, never stopped here
-    # (#2815): the disabled branch below keeps its own posture.
-    # Run even when the generator failed: a unit left from an earlier run can
-    # still name a release path, and enabling it would pin the gateway there.
+        if disabled:
+            return
+    else:
+        console.print(f"[dim]{installed.message}[/dim]")
     if not _normalise_gateway_unit_or_warn(has_systemctl, turn_off=not disabled):
         return
 
@@ -1265,8 +1253,7 @@ def _install_hermes_gateway() -> None:
         console.print(
             f"[yellow]hermes-gateway unit not installed ({_HERMES_GATEWAY_UNIT} missing) — "
             "Telegram/Discord bridge unavailable.[/yellow]\n"
-            f"[dim]retry with: sudo env -u HERMES_HOME HOME={_agent_home()} "
-            f"{_HERMES_BIN} gateway install --system --run-as-user hal0 </dev/null[/dim]"
+            "[dim]retry with: sudo hal0 agent install hermes[/dim]"
         )
         return
 

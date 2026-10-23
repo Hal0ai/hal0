@@ -366,3 +366,149 @@ def test_root_side_reads_nothing_from_the_release_tree(tmp_path: Path, monkeypat
     monkeypatch.setattr(Path, "read_text", spy)
     _regen(tmp_path, FakeSystemctl(enabled="enabled", active=True), linger=False)
     assert opened == [str(tmp_path / "hermes-gateway.service")]
+
+
+# ── #2943: upstream's hashed unit on a fresh v0.22.4 install ───────────────────
+
+HASHED = "hermes-gateway-1975ce4b.service"
+
+
+def _hashed_unit(tmp_path: Path, name: str = HASHED, user: str = "hal0") -> Path:
+    # What `hermes gateway install --system --run-as-user hal0` wrote as root on
+    # a fresh 1.6.0 nightly (CT163, 2026-10-23): suffixed name, baked release path.
+    text = (FIXTURES / "gateway-unit-hashed-v0.22.4.service").read_text(encoding="utf-8")
+    unit = tmp_path / name
+    unit.write_text(text.replace("User=hal0", f"User={user}"), encoding="utf-8")
+    return unit
+
+
+def _which(name: str) -> str:
+    return f"/usr/bin/{name}"
+
+
+def test_only_hal0s_hashed_units_are_found(tmp_path: Path) -> None:
+    mine = _hashed_unit(tmp_path)
+    _hashed_unit(tmp_path, "hermes-gateway-0123abcd.service", user="bob")
+    (tmp_path / "hermes-gateway-deadbeef.service").symlink_to("/dev/null")
+    (tmp_path / "hermes-gateway-coder.service").write_text(mine.read_text())
+    assert regen.hal0_hashed_units(tmp_path) == [mine]
+    assert regen.hal0_hashed_units(tmp_path / "absent") == []
+
+
+def test_a_fresh_box_moves_the_gateway_onto_the_canonical_unit(tmp_path: Path) -> None:
+    hashed = _hashed_unit(tmp_path)
+    canonical = tmp_path / "hermes-gateway.service"
+    sc = FakeSystemctl(enabled="enabled", active=True)
+    out = regen.migrate_hashed_units(
+        unit_path=canonical, run=sc, uid_of=lambda name: UID, which=_which
+    )
+    assert out.action == "migrated" and out.was_enabled and out.was_active and out.restarted
+    assert not hashed.exists()
+    assert canonical.read_text() == regen.render_unit(UID)
+    assert sc.mutating == [
+        ["systemctl", "disable", "--now", HASHED],
+        ["systemctl", "daemon-reload"],
+        ["systemctl", "enable", "hermes-gateway.service"],
+        ["systemctl", "start", "hermes-gateway.service"],
+    ]
+
+
+def test_a_canonical_unit_that_already_existed_keeps_its_own_state(tmp_path: Path) -> None:
+    """The operator's off switch (#2807) wins over the hashed unit's state."""
+    _hashed_unit(tmp_path)
+    canonical = _old_unit(tmp_path)
+    sc = FakeSystemctl(enabled="enabled", active=True)
+    regen.migrate_hashed_units(unit_path=canonical, run=sc, uid_of=lambda name: UID, which=_which)
+    assert ["systemctl", "enable", "hermes-gateway.service"] not in sc.mutating
+    assert ["systemctl", "start", "hermes-gateway.service"] not in sc.mutating
+    assert canonical.read_text() == regen.render_unit(UID)
+
+
+def test_a_masked_canonical_unit_stays_masked_and_the_hashed_one_goes(tmp_path: Path) -> None:
+    hashed = _hashed_unit(tmp_path)
+    canonical = tmp_path / "hermes-gateway.service"
+    canonical.symlink_to("/dev/null")
+    sc = FakeSystemctl(enabled="enabled", active=True)
+    out = regen.migrate_hashed_units(
+        unit_path=canonical, run=sc, uid_of=lambda name: UID, which=_which
+    )
+    assert not hashed.exists() and canonical.is_symlink()
+    assert "masked" in out.message
+    assert sc.mutating == [
+        ["systemctl", "disable", "--now", HASHED],
+        ["systemctl", "daemon-reload"],
+    ]
+
+
+def test_the_update_heal_migrates_a_hashed_box(tmp_path: Path) -> None:
+    """``hal0-update hermes-gateway`` runs regenerate_gateway_unit; it must not
+    stop at "not installed" when only the hashed unit exists."""
+    hashed = _hashed_unit(tmp_path)
+    sc = FakeSystemctl(enabled="enabled", active=True)
+    out = _regen(tmp_path, sc, linger=True)
+    assert out.action == "regenerated" and out.unit_rewritten
+    assert not hashed.exists()
+    assert (tmp_path / "hermes-gateway.service").read_text() == regen.render_unit(UID)
+    # once migrated, the canonical unit is current and linger is on: no second restart
+    assert sc.mutating.count(["systemctl", "start", "hermes-gateway.service"]) == 1
+    assert ["systemctl", "restart", "hermes-gateway.service"] not in sc.mutating
+
+
+def test_install_writes_the_canonical_unit_and_never_toggles_it(tmp_path: Path) -> None:
+    linger_dir = tmp_path / "linger"
+    linger_dir.mkdir()
+    sc = FakeSystemctl(enabled="not-found", active=False)
+    out = regen.install_gateway_unit(
+        unit_path=tmp_path / "hermes-gateway.service",
+        linger_dir=str(linger_dir),
+        run=sc,
+        uid_of=lambda name: UID,
+        which=_which,
+    )
+    assert out.action == "installed" and out.unit_rewritten and out.linger_enabled
+    assert (tmp_path / "hermes-gateway.service").read_text() == regen.render_unit(UID)
+    assert sc.mutating == [["systemctl", "daemon-reload"], ["loginctl", "enable-linger", "hal0"]]
+
+
+def test_install_leaves_a_mask_alone(tmp_path: Path) -> None:
+    canonical = tmp_path / "hermes-gateway.service"
+    canonical.symlink_to("/dev/null")
+    sc = FakeSystemctl(enabled="masked", active=False)
+    out = regen.install_gateway_unit(
+        unit_path=canonical, linger_dir=str(tmp_path), run=sc, uid_of=lambda n: UID, which=_which
+    )
+    assert out.action == "noop" and canonical.is_symlink() and sc.mutating == []
+
+
+def test_install_runs_nothing_from_the_release_tree(tmp_path: Path, monkeypatch: Any) -> None:
+    """Root never executes Hermes: every subprocess is systemctl or loginctl."""
+    _hashed_unit(tmp_path)
+    sc = FakeSystemctl(enabled="enabled", active=True)
+    regen.install_gateway_unit(
+        unit_path=tmp_path / "hermes-gateway.service",
+        linger_dir=str(tmp_path),
+        run=sc,
+        uid_of=lambda name: UID,
+        which=_which,
+    )
+    assert {c[0] for c in sc.calls} <= {"systemctl", "loginctl"}
+
+
+def test_main_needs_the_install_verb_and_root(monkeypatch: Any) -> None:
+    assert regen.main([]) == 2
+    monkeypatch.setattr(regen.os, "geteuid", lambda: 1000)
+    assert regen.main(["install"]) == 1
+
+
+def test_the_update_probe_sees_a_hashed_box(tmp_path: Path) -> None:
+    """The unprivileged probe gates the heal; a box with only the hashed unit
+    must ask for it rather than read as "no gateway unit"."""
+    from hal0.system import linger
+
+    _hashed_unit(tmp_path)
+    reason = linger.gateway_unit_regen_reason(
+        unit=str(tmp_path / "hermes-gateway.service"),
+        linger_dir=str(tmp_path),
+        in_use=lambda: False,
+    )
+    assert reason is not None and HASHED in reason

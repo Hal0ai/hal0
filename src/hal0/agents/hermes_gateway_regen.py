@@ -43,8 +43,15 @@ template uses upstream's defaults instead, because root must not read
   (``_build_service_path_dirs``), every built release does, and it is a fixed
   path under ``current/``. A missing ``PATH`` directory is harmless.
 
-``sudo hal0 agent install hermes`` still runs upstream's generator. That is
-a root run the operator chose, not one ``hal0`` can trigger.
+Nothing in hal0 runs upstream's generator any more (#2943). Under the
+v0.22.4 pin, ``hermes gateway install --system`` run as root resolves its
+default home from root's ACCOUNT home (``/root/.hermes``), so with
+``HERMES_HOME=/var/lib/hal0/.hermes`` it names the unit
+``hermes-gateway-<hash>.service`` and bakes the release path it ran from;
+running it also creates a stray ``/root/.hermes``. The installer and
+``hal0 agent install hermes`` therefore lay the unit down with
+:func:`install_gateway_unit`, and every path that heals a unit first moves a
+hal0 gateway off such a hashed unit (:func:`migrate_hashed_units`).
 """
 
 from __future__ import annotations
@@ -293,18 +300,18 @@ def _run(run: Runner, argv: list[str], timeout: float = 120) -> subprocess.Compl
     return run(argv, capture_output=True, text=True, timeout=timeout, check=False)  # nosec B603
 
 
-def _enabled_state(run: Runner) -> str:
+def _enabled_state(run: Runner, unit: str = GATEWAY_UNIT) -> str:
     try:
-        proc = _run(run, ["systemctl", "is-enabled", GATEWAY_UNIT], timeout=30)
+        proc = _run(run, ["systemctl", "is-enabled", unit], timeout=30)
     except (OSError, subprocess.SubprocessError):
         return "unknown"
     out = (getattr(proc, "stdout", "") or "").strip()
     return out.splitlines()[0] if out else "unknown"
 
 
-def _is_active(run: Runner) -> bool:
+def _is_active(run: Runner, unit: str = GATEWAY_UNIT) -> bool:
     try:
-        proc = _run(run, ["systemctl", "is-active", "--quiet", GATEWAY_UNIT], timeout=30)
+        proc = _run(run, ["systemctl", "is-active", "--quiet", unit], timeout=30)
     except (OSError, subprocess.SubprocessError):
         return False
     return proc.returncode == 0
@@ -343,6 +350,175 @@ def _write_unit(path: Path, text: str) -> None:
         raise
 
 
+#: Upstream's profile-suffixed unit name: ``hermes-gateway-<8 hex>.service``.
+HASHED_UNIT_RE = re.compile(r"^hermes-gateway-[0-9a-f]{8}\.service$")
+
+
+def _is_hal0_hashed_unit(text: str) -> bool:
+    """A hashed unit that runs hal0's Hermes: ``User=hal0`` and a path under the release root."""
+    user = re.search(r"^User=(\S+)\s*$", text, re.MULTILINE)
+    return bool(user and user.group(1) == GATEWAY_USER and f"{HERMES_RELEASE_ROOT}/" in text)
+
+
+def hal0_hashed_units(unit_dir: Path) -> list[Path]:
+    """``hermes-gateway-<hash>.service`` files in ``unit_dir`` that run hal0's Hermes.
+
+    Read-only and unprivileged (unit files are world-readable), so the
+    ``hal0 update`` probe can call it. Symlinks are skipped: a mask is not a
+    unit to migrate. A hashed unit that does not run ``hal0``'s release tree
+    belongs to someone else and is never touched.
+    """
+    try:
+        entries = sorted(unit_dir.iterdir())
+    except OSError:
+        return []
+    found: list[Path] = []
+    for path in entries:
+        if not HASHED_UNIT_RE.match(path.name) or path.is_symlink() or not path.is_file():
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        if _is_hal0_hashed_unit(text):
+            found.append(path)
+    return found
+
+
+def _write_rendered(unit_path: Path, uid_of: Callable[[str], int], done: list[str]) -> None:
+    try:
+        uid = uid_of(GATEWAY_USER)
+    except KeyError as exc:
+        raise GatewayRegenError(_failure("resolve the hal0 uid", str(exc), done)) from exc
+    rendered = render_unit(uid)
+    problems = validate_unit(rendered, uid)
+    if problems:
+        raise GatewayRegenError("refusing the rendered unit: " + "; ".join(problems))
+    try:
+        _write_unit(unit_path, rendered)
+    except OSError as exc:
+        raise GatewayRegenError(_failure(f"write {unit_path}", str(exc), done)) from exc
+
+
+def migrate_hashed_units(
+    *,
+    unit_path: Path = GATEWAY_UNIT_PATH,
+    run: Runner | None = None,
+    uid_of: Callable[[str], int] | None = None,
+    which: Callable[[str], str | None] = shutil.which,
+) -> RegenResult:
+    """Move a hal0 gateway off upstream's hashed unit onto ``hermes-gateway.service`` (#2943).
+
+    Every hal0 hashed unit (:func:`hal0_hashed_units`) is stopped, disabled
+    and removed; its baked release path would die at the next prune. The
+    canonical unit is written from the template unless it is masked. When
+    the canonical unit did not exist before, it inherits the hashed unit's
+    state: enabled if it was enabled, started if it was running. A canonical
+    unit that already existed keeps its own state, so the operator's off
+    switch (#2807) wins. Root only. Raises :class:`GatewayRegenError`, naming
+    the steps already done.
+    """
+    run = run if run is not None else subprocess.run
+    uid_of = uid_of if uid_of is not None else (lambda name: pwd.getpwnam(name).pw_uid)
+    hashed = hal0_hashed_units(unit_path.parent)
+    if not hashed:
+        return RegenResult("noop", "no hashed hermes-gateway unit")
+    if which("systemctl") is None:
+        return RegenResult("noop", "hashed hermes-gateway unit found but no systemctl; left alone")
+    masked = unit_path.is_symlink()
+    pre_existing = masked or unit_path.exists()
+    result = RegenResult("migrated", "")
+    done = result.steps
+    for path in hashed:
+        state = _enabled_state(run, path.name)
+        result.was_enabled = result.was_enabled or state in ("enabled", "enabled-runtime")
+        result.was_active = result.was_active or _is_active(run, path.name)
+        _check(
+            run,
+            ["systemctl", "disable", "--now", path.name],
+            f"systemctl disable --now {path.name}",
+            done,
+        )
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            raise GatewayRegenError(_failure(f"remove {path}", str(exc), done)) from exc
+        done.append(f"removed {path.name}")
+    if not masked:
+        _write_rendered(unit_path, uid_of, done)
+        result.unit_rewritten = True
+        done.append(f"wrote {GATEWAY_UNIT}")
+    _check(run, ["systemctl", "daemon-reload"], "systemctl daemon-reload", done)
+    if masked:
+        done.append(f"{GATEWAY_UNIT} is masked; left off")
+    elif not pre_existing:
+        if result.was_enabled:
+            _check(
+                run, ["systemctl", "enable", GATEWAY_UNIT], f"systemctl enable {GATEWAY_UNIT}", done
+            )
+            done.append("enabled")
+        if result.was_active:
+            _check(
+                run, ["systemctl", "start", GATEWAY_UNIT], f"systemctl start {GATEWAY_UNIT}", done
+            )
+            result.restarted = True
+            done.append("started")
+    result.message = f"{GATEWAY_UNIT}: " + ", ".join(done)
+    return result
+
+
+def install_gateway_unit(
+    *,
+    unit_path: Path = GATEWAY_UNIT_PATH,
+    linger_dir: str = LINGER_DIR,
+    run: Runner | None = None,
+    uid_of: Callable[[str], int] | None = None,
+    which: Callable[[str], str | None] = shutil.which,
+) -> RegenResult:
+    """Lay ``hermes-gateway.service`` down from the template, as the installer does (#2943).
+
+    Replaces running upstream's ``hermes gateway install --system`` as root.
+    A masked unit is left masked. Otherwise a hal0 hashed unit is migrated
+    first, the canonical unit is (re)written, systemd is reloaded and linger
+    is turned on for ``hal0`` (kanban workers and cron need its user
+    manager). It never enables, starts, disables or stops the canonical unit
+    itself, except through the migration's state carry-over: the caller
+    applies the operator's on/off decision. Root only; never runs Hermes.
+    """
+    run = run if run is not None else subprocess.run
+    uid_of = uid_of if uid_of is not None else (lambda name: pwd.getpwnam(name).pw_uid)
+    migrated = migrate_hashed_units(unit_path=unit_path, run=run, uid_of=uid_of, which=which)
+    result = RegenResult("installed", "", migrated.was_enabled, migrated.was_active)
+    done = result.steps
+    done.extend(migrated.steps)
+    if unit_path.is_symlink():
+        result.action = "noop"
+        result.message = f"{GATEWAY_UNIT} is masked; left alone" + (
+            f" ({', '.join(done)})" if done else ""
+        )
+        return result
+    if not migrated.unit_rewritten:
+        _write_rendered(unit_path, uid_of, done)
+        done.append(f"wrote {GATEWAY_UNIT}")
+        if which("systemctl") is not None:
+            _check(run, ["systemctl", "daemon-reload"], "systemctl daemon-reload", done)
+    result.unit_rewritten = True
+    if not os.path.exists(os.path.join(linger_dir, GATEWAY_USER)) and which("loginctl") is not None:
+        _check(
+            run,
+            ["loginctl", "enable-linger", GATEWAY_USER],
+            f"loginctl enable-linger {GATEWAY_USER}",
+            done,
+        )
+        result.linger_enabled = True
+        done.append(f"linger on for {GATEWAY_USER}")
+    result.restarted = migrated.restarted
+    result.message = f"{GATEWAY_UNIT}: " + ", ".join(done)
+    return result
+
+
 def regenerate_gateway_unit(
     *,
     unit_path: Path = GATEWAY_UNIT_PATH,
@@ -371,6 +547,25 @@ def regenerate_gateway_unit(
     run = run if run is not None else subprocess.run
     uid_of = uid_of if uid_of is not None else (lambda name: pwd.getpwnam(name).pw_uid)
 
+    # A fresh 1.6.0 nightly install ran upstream's generator as root and got
+    # a hashed unit instead of this one (#2943): move the gateway first, then
+    # heal the canonical unit like any other.
+    migrated = migrate_hashed_units(unit_path=unit_path, run=run, uid_of=uid_of, which=which)
+    if migrated.action == "migrated":
+        tail = regenerate_gateway_unit(
+            unit_path=unit_path, linger_dir=linger_dir, run=run, uid_of=uid_of, which=which
+        )
+        steps = [*migrated.steps, *tail.steps]
+        return RegenResult(
+            "regenerated",
+            f"{GATEWAY_UNIT}: " + ", ".join(steps),
+            was_enabled=migrated.was_enabled,
+            was_active=migrated.was_active,
+            unit_rewritten=True,
+            linger_enabled=tail.linger_enabled,
+            restarted=migrated.restarted or tail.restarted,
+            steps=steps,
+        )
     if unit_path.is_symlink() or not unit_path.exists():
         return RegenResult("noop", f"{GATEWAY_UNIT}: not installed or masked; nothing to do")
     if not unit_path.is_file():
@@ -437,11 +632,39 @@ def regenerate_gateway_unit(
 
 __all__ = [
     "GATEWAY_UNIT",
+    "HASHED_UNIT_RE",
     "GatewayRegenError",
     "RegenResult",
+    "hal0_hashed_units",
+    "install_gateway_unit",
+    "migrate_hashed_units",
     "regenerate_gateway_unit",
     "render_unit",
     "unit_is_old_shape",
     "unit_stale_reason",
     "validate_unit",
 ]
+
+
+def main(argv: list[str] | None = None) -> int:
+    """``python -m hal0.agents.hermes_gateway_regen install`` (the installer's entry, as root)."""
+    import sys
+
+    args = list(sys.argv[1:] if argv is None else argv)
+    if args != ["install"]:
+        print("usage: python -m hal0.agents.hermes_gateway_regen install", file=sys.stderr)
+        return 2
+    if os.geteuid() != 0:
+        print("hermes-gateway unit: install needs root", file=sys.stderr)
+        return 1
+    try:
+        result = install_gateway_unit()
+    except GatewayRegenError as exc:
+        print(f"hermes-gateway unit: {exc}", file=sys.stderr)
+        return 1
+    print(result.message)
+    return 0
+
+
+if __name__ == "__main__":  # pragma: no cover — exercised through main()
+    raise SystemExit(main())

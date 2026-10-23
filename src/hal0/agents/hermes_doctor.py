@@ -316,6 +316,21 @@ def check_hermes_gateway_unit(
             "Stop it, then run sudo hal0 agent install hermes so the unit file is installed",
         }
     if not _unit_present(unit):
+        from hal0.agents.hermes_gateway_regen import hal0_hashed_units
+
+        hashed = hal0_hashed_units(unit.parent)
+        if hashed:
+            # A 1.6.0 nightly install ran upstream's generator as root (#2943):
+            # the gateway runs from a suffixed unit with a baked release path,
+            # without hal0's drop-ins, and dies at the next release prune.
+            return {
+                "status": "fail",
+                "detail": f"{unit} is missing; the gateway runs from upstream's suffixed "
+                + ", ".join(p.name for p in hashed)
+                + " instead, which names a release that the next update prunes and skips "
+                "hal0's secrets drop-in. Run sudo hal0 update (or sudo hal0 agent install "
+                "hermes) to move it onto hermes-gateway.service",
+            }
         return {
             "status": "fail",
             "detail": f"{unit} is missing; a profile-scoped Hermes chat or hermes chat would "
