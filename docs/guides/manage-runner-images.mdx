@@ -251,8 +251,8 @@ would launch actually present":
 | `present` | The resolved image is on disk. |
 | `pulling` | A pull job for this image is in flight. |
 | `missing` | podman was asked and the image is confirmed absent. |
-| `not-configured` | The slot's image could not be resolved from its config, so there is nothing to check — not a fault. |
-| `unknown` | The probe could not be made at all. |
+| `not-configured` | Image resolution succeeded but produced no ref, so there is nothing to check — not a fault. |
+| `unknown` | The probe could not be made at all, or the slot's image could not be resolved (an unreadable `profiles.toml`); the log line carries `reason=resolve-error`. |
 
 `unknown` (added by #1968, with two remaining gaps closed by #1980) exists
 because `missing` used to be overloaded: before that work, *any* probe
@@ -270,7 +270,8 @@ If you see `image_status: "unknown"` on a slot:
    that's the cause.
 2. Check the hal0-api journal for a `slot_view.image_probe_failed` line —
    it always logs the specific reason (seam denial, subprocess failure,
-   timeout) behind an `unknown`, even though the API payload itself carries
+   timeout, or `resolve-error` when the slot's image could not be resolved,
+   e.g. an unreadable `profiles.toml`) behind an `unknown`, even though the API payload itself carries
    no reason field.
 3. Don't treat `unknown` as `missing`: retrying a pull on a slot that's
    actually fine, just unprobeable, wastes bandwidth and doesn't fix the

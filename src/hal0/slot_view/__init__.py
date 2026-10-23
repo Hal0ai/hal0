@@ -531,10 +531,11 @@ async def container_enrichment(
     ``image_mismatch`` against the declared profile image, and
     ``image_status`` (present | pulling | missing | unknown | not-configured —
     an in-flight job in ``pull_jobs`` wins without an inspect syscall;
-    ``not-configured`` marks a slot whose image resolution raised, so there
-    is no ref to check (#1226; a profile-less slot resolves one, #2750);
-    ``unknown`` marks a probe that could not be MADE, #1939, which is a
-    different claim from ``missing``).
+    ``not-configured`` marks a slot that resolved no image ref, so there is
+    nothing to check (#1226; a profile-less slot resolves one, #2750);
+    ``unknown`` marks a probe that could not be MADE, #1939 — including an
+    image resolution that raised, #2800, logged as ``reason=resolve-error`` —
+    which is a different claim from ``missing``).
 
     ``provider`` is injectable for unit tests; ``None`` resolves the real
     ContainerProvider lazily so route-level patches on the class keep
@@ -660,6 +661,7 @@ async def container_enrichment(
         profile_name = str(cfg.get("profile") or "")
         entry["profile"] = profile_name
         image: str | None = None
+        resolve_failed = False
         try:
             prof = None
             if profile_name:
@@ -677,16 +679,32 @@ async def container_enrichment(
 
             image = _resolve_image_ref(cfg, prof)
             entry["image"] = image
-            # resolved_command = llama-server argv starting from the image.
-            # Off the event loop: it re-reads config + resolves the runner
-            # image, which is filesystem work, not a pure function.
+        except Exception as exc:
+            # Every container launch resolves a runner image (#2750), so a
+            # resolve failure is a fault, not "nothing to check". Log the
+            # reason (#1939) and report image_status=unknown below.
+            resolve_failed = True
+            image = None
+            entry["image"] = None
+            log.warning(
+                "slot_view.image_probe_failed slot=%s profile=%s reason=resolve-error "
+                "error=%s — reporting image_status=unknown",
+                name,
+                profile_name,
+                exc,
+            )
+        # resolved_command = llama-server argv starting from the image. Its
+        # own try: a failure here is a preview problem, not an image-resolve
+        # one, so it must not flip image_status or log resolve-error.
+        # Off the event loop: it re-reads config + resolves the runner
+        # image, which is filesystem work, not a pure function.
+        try:
             from hal0.providers.container import resolved_command_for_slot
 
             entry["resolved_command"] = await loop.run_in_executor(
                 None, resolved_command_for_slot, cfg
             )
         except Exception:
-            entry["image"] = None
             entry["resolved_command"] = None
 
         # #663: deterministic backend-of-record - the running container's image
@@ -745,10 +763,13 @@ async def container_enrichment(
                     exc,
                 )
                 entry["image_status"] = "unknown"
+        elif resolve_failed:
+            # Image resolution raised above (e.g. unreadable profiles.toml):
+            # a fault whose reason was logged, not "nothing to check" (#2800).
+            entry["image_status"] = "unknown"
         else:
-            # Image resolution itself failed above (e.g. unreadable config),
-            # so there is no ref to probe. "Nothing to check" is not a
-            # missing-image fault (#1226); report it distinctly.
+            # Resolution succeeded but yielded no ref; nothing to check, which
+            # is not a missing-image fault (#1226).
             entry["image_status"] = "not-configured"
 
         return name, entry

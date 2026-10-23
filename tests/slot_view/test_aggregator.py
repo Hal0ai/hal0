@@ -699,25 +699,51 @@ class TestContainerEnrichment:
         assert out["gpu-chat"]["image"]
         assert out["gpu-chat"]["image_status"] == "present"
 
-    async def test_unresolvable_image_means_not_configured_status(
-        self, monkeypatch: pytest.MonkeyPatch
+    async def test_image_resolve_error_means_unknown_status_and_logs(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
     ) -> None:
-        # #1226: not-configured is now reachable only when image resolution
-        # itself raises (e.g. unreadable config) — "nothing to check", not a
-        # missing-image fault.
+        # #2800: a raising image resolution is a fault (every container slot
+        # resolves an image since #2750), so it reports unknown plus a log
+        # line, not the quiet not-configured.
         import hal0.providers.container as container_mod
 
         def _boom(cfg: Any, prof: Any) -> str:
             raise RuntimeError("config unreadable")
 
         monkeypatch.setattr(container_mod, "_resolve_image_ref", _boom)
-        out = await container_enrichment(
-            [_container_cfg()],
-            pull_jobs={},
-            provider=FakeContainerProvider(active=False),
-        )
+        with caplog.at_level("WARNING"):
+            out = await container_enrichment(
+                [_container_cfg()],
+                pull_jobs={},
+                provider=FakeContainerProvider(active=False),
+            )
         assert out["gpu-chat"]["image"] is None
-        assert out["gpu-chat"]["image_status"] == "not-configured"
+        assert out["gpu-chat"]["image_status"] == "unknown"
+        assert "reason=resolve-error" in caplog.text
+
+    async def test_argv_preview_error_does_not_contradict_image_status(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        # #2800 review: the argv preview raising is not an image-resolve
+        # failure. The image resolved, so the status is the probed one and no
+        # resolve-error line is logged; only resolved_command goes None.
+        import hal0.providers.container as container_mod
+
+        def _boom(cfg: Any) -> list[str]:
+            raise RuntimeError("argv unbuildable")
+
+        monkeypatch.setattr(container_mod, "resolved_command_for_slot", _boom)
+        sv_mod._image_present_cache.clear()
+        with caplog.at_level("WARNING"):
+            out = await container_enrichment(
+                [_container_cfg()],
+                pull_jobs={},
+                provider=FakeContainerProvider(active=False),
+            )
+        assert out["gpu-chat"]["image"]
+        assert out["gpu-chat"]["resolved_command"] is None
+        assert out["gpu-chat"]["image_status"] == "present"
+        assert "reason=resolve-error" not in caplog.text
 
     async def test_pin_only_slot_reports_pin_and_probed_status(self) -> None:
         # A profileless slot whose image_pin declares the image used to answer

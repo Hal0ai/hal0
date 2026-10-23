@@ -243,7 +243,9 @@ function _formatAgo(deltaMs) {
  * Four of those are claims the backend can stand behind; `unknown` is the
  * backend saying it could not read the image store at all — the rootful
  * hal0-podman-ro seam returned rc 66, the sudoers grant is absent, the
- * wrapper and its Python mirror drifted, or the whole probe timed out.
+ * wrapper and its Python mirror drifted, or the whole probe timed out — or
+ * could not resolve the slot's image in the first place (#2800, e.g. an
+ * unreadable profiles.toml; the API log says reason=resolve-error).
  *
  * Only `unknown` gets a chip, and deliberately so:
  *   • `present` / `not-configured` are the quiet, correct states;
@@ -269,9 +271,12 @@ export function imageStatusChip(slot) {
     cls: "chip image-unknown",
     label: "image ?",
     tooltip:
-      `hal0 could not read the container image store${img}, so it does not ` +
-      `know whether this image is on disk. This is NOT a report that the ` +
-      `image is absent. Check the read-only podman seam with \`hal0 doctor seams\`.`,
+      `hal0 could not read the container image store${img}, or could not ` +
+      `resolve which image this slot uses, so it does not know whether the ` +
+      `image is on disk. This is NOT a report that the image is absent. ` +
+      `Run \`hal0 doctor all\` (seams row) and check the hal0-api journal for ` +
+      `slot_view.image_probe_failed: its reason says whether it was the ` +
+      `podman seam or image resolution.`,
   };
 }
 

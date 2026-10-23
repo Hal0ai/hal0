@@ -198,8 +198,9 @@ export interface Slot {
    *                    that the image is absent; render it as indeterminate
    *                    (see imageStatusChip in dash/slot-status.js), never as
    *                    a fault and never as `missing`.
-   *    not-configured  image resolution failed, so there is no ref to
-   *                    check (#1226); a profile-less slot resolves one (#2750)
+   *    not-configured  resolution succeeded but yielded no ref, so there is
+   *                    nothing to check (#1226); a failed resolve is
+   *                    `unknown` instead (#2800)
    */
   image_status?: 'present' | 'pulling' | 'missing' | 'unknown' | 'not-configured' | null
   /** ACTUAL running container image ref, read from ``podman inspect`` by
