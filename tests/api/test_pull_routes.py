@@ -300,6 +300,92 @@ def test_pull_body_partial_hf_coords_falls_back_to_resolver(
     assert fake_run_pull == []
 
 
+# ── #2775: body-supplied HF coordinates are validated before seeding ────────
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        # hf_filename climbing out of the models tree, or rooted elsewhere.
+        {"hf_repo": "org/name", "hf_filename": "../../etc/passwd"},
+        {"hf_repo": "org/name", "hf_filename": "sub/../../x.gguf"},
+        {"hf_repo": "org/name", "hf_filename": "/etc/passwd"},
+        {"hf_repo": "org/name", "hf_filename": "sub\\..\\x.gguf"},
+        # hf_repo that is not an org/name coordinate.
+        {"hf_repo": "not-a-slug", "hf_filename": "m.gguf"},
+        {"hf_repo": "org/name/extra", "hf_filename": "m.gguf"},
+        {"hf_repo": "../name", "hf_filename": "m.gguf"},
+        {"hf_repo": "org/..", "hf_filename": "m.gguf"},
+        {"hf_repo": "org name/x", "hf_filename": "m.gguf"},
+        # The sidecar coordinates ride the same body and get the same check.
+        {"hf_repo": "org/name", "hf_filename": "m.gguf", "mmproj_filename": "../mm.gguf"},
+        {"hf_repo": "org/name", "hf_filename": "m.gguf", "draft_filename": "/abs/d.gguf"},
+        {
+            "hf_repo": "org/name",
+            "hf_filename": "m.gguf",
+            "draft_filename": "d.gguf",
+            "draft_repo": "bad",
+        },
+    ],
+)
+def test_pull_body_rejects_unsafe_hf_coordinates(
+    client_isolated: TestClient,
+    app_isolated: FastAPI,
+    fake_run_pull: list[dict[str, Any]],
+    extra: dict[str, str],
+) -> None:
+    """#2775: a malformed repo or a filename that is absolute or climbs
+    with ``..`` is a 422 ``model.invalid_source`` — no row seeded, no pull.
+    """
+    r = client_isolated.post("/api/models/user.bad-coords/pull", json=extra)
+    assert r.status_code == 422, r.text
+    assert r.json()["error"]["code"] == "model.invalid_source"
+    assert fake_run_pull == []
+    from hal0.registry.store import ModelNotFound
+
+    with pytest.raises(ModelNotFound):
+        app_isolated.state.model_registry.get("user.bad-coords")
+
+
+def test_pull_body_accepts_repo_subfolder_filename(
+    client_isolated: TestClient,
+    app_isolated: FastAPI,
+    fake_run_pull: list[dict[str, Any]],
+) -> None:
+    """A relative filename inside a repo subfolder is a legitimate HF
+    coordinate (split quants often live under ``Q4_K_M/``) and still pulls.
+    """
+    from hal0.config import paths
+
+    r = client_isolated.post(
+        "/api/models/user.sub/pull",
+        json={"hf_repo": "org/Some-Model_1.5-GGUF", "hf_filename": "Q4_K_M/m.gguf"},
+    )
+    assert r.status_code == 202, r.text
+    entry = app_isolated.state.model_registry.get("user.sub")
+    assert Path(entry.path).resolve().is_relative_to(paths.models_dir().resolve())
+
+
+def test_seed_registry_keeps_provisional_path_inside_models_dir(
+    client_isolated: TestClient,
+    app_isolated: FastAPI,
+) -> None:
+    """#2775: the seeded row's provisional path never leaves models_dir(),
+    even for a model id the router would pass through verbatim (``..``).
+    """
+    from types import SimpleNamespace
+
+    from hal0.config import paths
+    from hal0.registry.pull_jobs import seed_registry_from_body
+
+    request = SimpleNamespace(app=app_isolated)
+    seed_registry_from_body(request, "..", "org/name", "m.gguf", None)  # type: ignore[arg-type]
+    entry = app_isolated.state.model_registry.get("..")
+    root = paths.models_dir().resolve()
+    assert Path(entry.path).resolve().is_relative_to(root)
+    assert Path(entry.path).resolve() != root / "m.gguf"
+
+
 def test_pull_idempotent_when_already_running(
     client_isolated: TestClient,
     app_isolated: FastAPI,

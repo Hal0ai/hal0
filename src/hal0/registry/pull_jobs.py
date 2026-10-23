@@ -257,10 +257,15 @@ def seed_registry_from_body(
     """
     from hal0.config import paths
     from hal0.registry.model import Model
+    from hal0.registry.pull import _sanitise_id
     from hal0.registry.store import ModelAlreadyExists
 
+    # Direct callers bypass resolve_pull_source_with_body, so check here too.
+    check_body_hf_coordinates(hf_repo=hf_repo, hf_file=hf_file)
     registry = request.app.state.model_registry
-    provisional_path = str(paths.models_dir() / model_id / hf_file)
+    # The id is a directory name here, so sanitise it the way run_pull does
+    # for the real destination: a ``..`` id must not lift the row out (#2775).
+    provisional_path = str(paths.models_dir() / _sanitise_id(model_id) / hf_file)
     caps = [str(c).strip() for c in (labels or []) if str(c).strip()] or ["chat"]
     # A pinned chat template is a launcher default that only matters at load
     # time (long after the pull finishes), so seed it now while the row is
@@ -309,6 +314,42 @@ class PullSource(NamedTuple):
     draft_repo: str | None = None
 
 
+def check_body_hf_coordinates(
+    *,
+    hf_repo: str | None = None,
+    hf_file: str | None = None,
+    mmproj_file: str | None = None,
+    draft_file: str | None = None,
+    draft_repo: str | None = None,
+) -> None:
+    """Refuse request-supplied HF coordinates that are not safe to use (#2775).
+
+    Repos must be ``org/name``; filenames must be relative paths inside the
+    repo (no absolute path, no ``..`` segment). Raises ``PullInvalidSource``
+    (422 ``model.invalid_source``) naming the offending field. ``None`` means
+    the field was not supplied and is skipped.
+    """
+    from hal0.upstreams.huggingface import is_safe_repo_filename, is_valid_repo_slug
+
+    for field, repo in (("hf_repo", hf_repo), ("draft_repo", draft_repo)):
+        if repo is not None and not is_valid_repo_slug(repo):
+            raise PullInvalidSource(
+                f"{field} {repo!r} is not a valid org/name HF repo coordinate",
+                details={"field": field, "value": repo},
+            )
+    for field, name in (
+        ("hf_filename", hf_file),
+        ("mmproj_filename", mmproj_file),
+        ("draft_filename", draft_file),
+    ):
+        if name is not None and not is_safe_repo_filename(name):
+            raise PullInvalidSource(
+                f"{field} {name!r} must be a relative path inside the repo "
+                "(no leading '/', no '..' segment)",
+                details={"field": field, "value": name},
+            )
+
+
 def resolve_pull_source_with_body(
     request: Request,
     model_id: str,
@@ -345,12 +386,16 @@ def resolve_pull_source_with_body(
         mmproj = _text(body.get("mmproj_filename") or body.get("mmproj_file"))
         draft = _text(body.get("draft_filename"))
         draft_repo = _text(body.get("draft_repo"))
+        # #2775: every body-supplied coordinate is checked here, before the
+        # route seeds a row or schedules a download from it.
+        check_body_hf_coordinates(mmproj_file=mmproj, draft_file=draft, draft_repo=draft_repo)
         repo_raw = body.get("hf_repo")
         file_raw = body.get("hf_filename") or body.get("hf_file")
         if isinstance(repo_raw, str) and isinstance(file_raw, str):
             repo = repo_raw.strip()
             file = file_raw.strip()
             if repo and file:
+                check_body_hf_coordinates(hf_repo=repo, hf_file=file)
                 return PullSource(
                     repo, file, mmproj, True, draft, (draft_repo or repo) if draft else None
                 )
