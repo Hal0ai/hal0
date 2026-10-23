@@ -2095,3 +2095,59 @@ def test_activation_leaves_a_hal0_unit_alone_without_sudo(tree, monkeypatch) -> 
     assert out.status == "activated", out.error
     assert calls == []
     assert unit.read_text() == regen.render_unit(_GATEWAY_UID)
+
+
+def test_prune_keeps_the_release_a_suffixed_gateway_unit_names(tree) -> None:
+    """#2943: until the gateway is moved off upstream's suffixed unit, the release
+    baked into it must survive the prune, or the gateway cannot restart."""
+    from hal0.agents.hermes_gateway_regen import HASHED_UNIT
+
+    first = _ensure(tree, FakeTools()).release_id
+    layout = rel.Layout.for_venv(tree["venv"])
+    tree["unit"].parent.mkdir(parents=True)
+    (tree["unit"].parent / HASHED_UNIT).write_text(
+        "[Service]\nUser=hal0\n"
+        f"ExecStart={layout.releases / first}/venv/bin/python -m hermes_cli.main gateway run\n"
+        'Environment="HERMES_HOME=/var/lib/hal0/.hermes"\n'
+    )
+    _ensure(tree, FakeTools(), force=True)
+    _ensure(tree, FakeTools(), force=True)
+    assert (layout.releases / first).is_dir()
+
+
+def _flapping_gateway_heal(units: FakeUnits):  # type: ignore[no-untyped-def]
+    """A heal that changes nothing, while the gateway flaps to active meanwhile."""
+
+    def heal(_layout: Any) -> None:
+        units.state[rel.GATEWAY_UNIT] = "active"
+        return None
+
+    return heal
+
+
+def test_activation_never_adopts_a_crash_looping_gateway_on_an_upgraded_box(tree) -> None:
+    """#2946 review: no suffixed unit before the heal, so a gateway that reads active
+    after it (Restart=always flapping) is not taken into the settle window."""
+    _ensure(tree, FakeTools())
+    units = FakeUnits(active={rel.AGENT_UNIT})
+    out = _ensure(tree, FakeTools(), units, force=True, heal_gateway=_flapping_gateway_heal(units))
+    assert out.status != "activation_failed", out.error
+    assert ("start", rel.GATEWAY_UNIT) not in units.log
+
+
+def test_activation_adopts_a_gateway_the_heal_moved_off_the_suffixed_unit(tree) -> None:
+    from hal0.agents.hermes_gateway_regen import HASHED_UNIT
+
+    _ensure(tree, FakeTools())
+    tree["unit"].parent.mkdir(parents=True, exist_ok=True)
+    suffixed = tree["unit"].parent / HASHED_UNIT
+    suffixed.write_text('[Service]\nUser=hal0\nEnvironment="HERMES_HOME=/var/lib/hal0/.hermes"\n')
+    units = FakeUnits(active={rel.AGENT_UNIT})
+
+    def heal(_layout: Any) -> None:
+        suffixed.unlink()
+        units.state[rel.GATEWAY_UNIT] = "active"
+        return None
+
+    _ensure(tree, FakeTools(), units, force=True, heal_gateway=heal)
+    assert ("start", rel.GATEWAY_UNIT) in units.log

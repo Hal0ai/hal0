@@ -1498,6 +1498,7 @@ def activate_release(
     stamp_file: Path | None = None,
     sleep: Callable[[float], None] = time.sleep,
     heal_gateway: Callable[[], str | None] | None = None,
+    gateway_unit: Path = GATEWAY_UNIT_PATH,
 ) -> Activation:
     """Stop, switch, migrate, start, re-verify; flip back on failure (decision 7).
 
@@ -1530,6 +1531,7 @@ def activate_release(
             stamp_file=stamp_file,
             sleep=sleep,
             heal_gateway=heal_gateway,
+            gateway_unit=gateway_unit,
         )
     finally:
         _clear_stopped_units(layout)
@@ -1548,6 +1550,7 @@ def _activate(
     stamp_file: Path | None,
     sleep: Callable[[float], None],
     heal_gateway: Callable[[], str | None] | None = None,
+    gateway_unit: Path = GATEWAY_UNIT_PATH,
 ) -> Activation:
     stopped: list[str] = []
     for unit in recorded:
@@ -1631,6 +1634,14 @@ def _activate(
     # first start. Through the root verb (`hal0-update hermes-gateway`), which
     # never starts a unit that is stopped, as both are here.
     if heal_gateway is not None:
+        # Only a box that had hal0's suffixed unit before the heal can get a
+        # gateway the heal started; on any other box an unrecorded gateway
+        # that reads active here is one crash-looping on its own, and taking
+        # it into the settle window would flip a good release back (#2946
+        # review).
+        from hal0.agents.hermes_gateway_regen import hal0_hashed_units
+
+        had_suffixed = bool(hal0_hashed_units(gateway_unit.parent))
         try:
             note = heal_gateway()
         except Exception as exc:  # the heal reports its own failures; belt and braces
@@ -1638,6 +1649,13 @@ def _activate(
             note = None
         if note:
             result.warnings.append(note)
+        # A box a 1.6.0 nightly installed had only upstream's suffixed unit,
+        # which ``recorded`` (canonical names) never saw; the heal moved it
+        # onto hermes-gateway.service and started it on the new release.
+        # Bring it into this activation so re-verify and flip-back cover it
+        # (#2943, #2946 review).
+        if had_suffixed and GATEWAY_UNIT not in recorded and units.active(GATEWAY_UNIT):
+            recorded = [*recorded, GATEWAY_UNIT]
 
     for unit in recorded:
         units.start(unit)
@@ -1762,14 +1780,24 @@ def prune_releases(
     env = build_env(layout=layout)
     warnings: list[str] = []
     keep = {r for r in (_link_release_id(layout.current), _link_release_id(layout.previous)) if r}
-    unit_text = _read_unit(gateway_unit)
+    # Upstream's suffixed unit (a fresh 1.6.0 nightly install, #2943) bakes a
+    # release path too; until hal0 has moved the gateway off it, that release
+    # must survive or the gateway cannot restart.
+    from hal0.agents.hermes_gateway_regen import hal0_hashed_units
+
+    named_by = [(gateway_unit, _read_unit(gateway_unit))]
+    named_by += [(p, _read_unit(p)) for p in hal0_hashed_units(gateway_unit.parent)]
     if layout.releases.is_dir():
         for rdir in sorted(layout.releases.iterdir()):
             if not rdir.is_dir() or rdir.name in keep:
                 continue
-            if _names_release(unit_text, layout.releases / rdir.name):
+            holder = next(
+                (u for u, text in named_by if _names_release(text, layout.releases / rdir.name)),
+                None,
+            )
+            if holder is not None:
                 warnings.append(
-                    f"kept release {rdir.name}: {gateway_unit} still names it — run "
+                    f"kept release {rdir.name}: {holder} still names it — run "
                     "`sudo hal0 agent install hermes` to regenerate and normalise the unit"
                 )
                 keep.add(rdir.name)
@@ -2242,6 +2270,7 @@ def ensure_release(
                     settle_s=settle_s,
                     stamp_file=stamp,
                     sleep=sleep,
+                    gateway_unit=gateway_unit,
                     heal_gateway=(
                         functools.partial(heal_gateway, layout) if heal_gateway else None
                     ),

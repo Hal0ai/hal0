@@ -1,0 +1,37 @@
+[Unit]
+Description=Hermes Agent Gateway - Messaging Platform Integration
+After=network-online.target
+Wants=network-online.target
+After=user@999.service
+Wants=user@999.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=hal0
+Group=hal0
+ExecStart="/var/lib/hal0/hermes/releases/4d04303818b6-20261023T063421Z/venv/bin/python" "-I" "-c" "import os, sys, runpy; os.environ.pop('PYTHONHOME', None); os.environ.pop('PYTHONPATH', None); os.environ.pop('VIRTUAL_ENV', None); sys.path.insert(0, '/var/lib/hal0/hermes/releases/4d04303818b6-20261023T063421Z/src'); os.environ['HERMES_HOME'] = os.environ.get('HERMES_HOME') or '/var/lib/hal0/.hermes'; import hermes_bootstrap; runpy.run_module('hermes_cli.main', run_name='__main__', alter_sys=True)" "gateway" "run"
+WorkingDirectory=/var/lib/hal0/.hermes
+Environment="HOME=/var/lib/hal0"
+Environment="USER=hal0"
+Environment="LOGNAME=hal0"
+Environment="PATH=/var/lib/hal0/hermes/releases/4d04303818b6-20261023T063421Z/src/node_modules/.bin:/var/lib/hal0/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+Environment="HERMES_HOME=/var/lib/hal0/.hermes"
+Environment="HERMES_SUPERVISED_CHILD=1"
+Restart=always
+RestartSec=5
+RestartForceExitStatus=75
+SuccessExitStatus=75
+RestartPreventExitStatus=78
+KillMode=mixed
+KillSignal=SIGTERM
+ExecReload=/bin/kill -USR1 $MAINPID
+ExecStop=-"/var/lib/hal0/hermes/releases/4d04303818b6-20261023T063421Z/venv/bin/python" "-I" "-c" "import os, sys, runpy; os.environ.pop('PYTHONHOME', None); os.environ.pop('PYTHONPATH', None); os.environ.pop('VIRTUAL_ENV', None); sys.path.insert(0, '/var/lib/hal0/hermes/releases/4d04303818b6-20261023T063421Z/src'); os.environ['HERMES_HOME'] = os.environ.get('HERMES_HOME') or '/var/lib/hal0/.hermes'; import hermes_bootstrap; runpy.run_module('gateway.systemd_stop_mark', run_name='__main__', alter_sys=True)"
+ExecStopPost=-"/var/lib/hal0/hermes/releases/4d04303818b6-20261023T063421Z/venv/bin/python" "-I" "-c" "import os, sys, runpy; os.environ.pop('PYTHONHOME', None); os.environ.pop('PYTHONPATH', None); os.environ.pop('VIRTUAL_ENV', None); sys.path.insert(0, '/var/lib/hal0/hermes/releases/4d04303818b6-20261023T063421Z/src'); os.environ['HERMES_HOME'] = os.environ.get('HERMES_HOME') or '/var/lib/hal0/.hermes'; import hermes_bootstrap; runpy.run_module('gateway.cgroup_cleanup', run_name='__main__', alter_sys=True)"
+TimeoutStopSec=70
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

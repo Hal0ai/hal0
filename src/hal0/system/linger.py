@@ -173,6 +173,16 @@ def gateway_unit_regen_reason(
     ``None`` when there is no gateway unit, or when the
     gateway is neither enabled nor running (:func:`gateway_in_use`).
     """
+    from hal0.agents.hermes_gateway_regen import hal0_hashed_units
+
+    hashed = hal0_hashed_units(Path(unit).parent)
+    if hashed:
+        # Upstream's generator, run as root under v0.22.4, wrote a suffixed
+        # unit with a baked release path instead of this one (#2943). It is
+        # not covered by the in-use test below, which reads the canonical
+        # unit, so ask for the heal whatever its state.
+        names = ", ".join(p.name for p in hashed)
+        return f"{names} is upstream's suffixed unit, not hermes-gateway.service (#2943)"
     try:
         text = Path(unit).read_text(encoding="utf-8")
     except FileNotFoundError:

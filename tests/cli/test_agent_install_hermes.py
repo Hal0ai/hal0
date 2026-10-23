@@ -334,80 +334,67 @@ def test_install_hermes_gateway_noop_when_venv_missing(monkeypatch) -> None:
     assert called["ran"] is False
 
 
-def test_install_hermes_gateway_installs_and_enables_unit(monkeypatch, tmp_path) -> None:
-    """Happy path: gateway install runs, the unit file lands, systemctl
-    enables + confirms it active — mirrors installer/install.sh's block."""
-    gateway_unit = tmp_path / "hermes-gateway.service"
+def _template_install(monkeypatch, gateway_unit, events: list | None = None):  # type: ignore[no-untyped-def]
+    """Stub hal0's root-side unit template (#2943) and record the call."""
+    from hal0.agents import hermes_gateway_regen as regen
 
+    def _fake(**_k):  # type: ignore[no-untyped-def]
+        if events is not None:
+            events.append("gateway-install")
+        gateway_unit.write_text("[Unit]\n")
+        return regen.RegenResult("installed", "hermes-gateway.service: wrote it")
+
+    monkeypatch.setattr("os.geteuid", lambda: 0)
+    monkeypatch.setattr(regen, "install_gateway_unit", _fake)
+
+
+def test_install_hermes_gateway_installs_and_enables_unit(monkeypatch, tmp_path) -> None:
+    """Happy path: hal0's template lays the unit down, systemctl enables and
+    confirms it active, mirroring installer/install.sh's block."""
+    gateway_unit = tmp_path / "hermes-gateway.service"
     calls: list[list[str]] = []
 
     def _fake_run(argv, *_a, **_k):  # type: ignore[no-untyped-def]
         calls.append(list(argv))
-        # The real `hermes gateway install` writes the unit file as a side
-        # effect; simulate that here so the "unit landed" branch runs.
-        if argv[0] == ac._HERMES_BIN:
-            gateway_unit.write_text("[Unit]\n")
+        return type("_Done", (), {"returncode": 0})()
 
-        class _Done:
-            returncode = 0
-
-        return _Done()
-
+    _template_install(monkeypatch, gateway_unit)
     monkeypatch.setattr(ac, "_hermes_venv_ready", lambda: True)
     monkeypatch.setattr(ac, "_HERMES_GATEWAY_UNIT", str(gateway_unit))
     monkeypatch.setattr(subprocess, "run", _fake_run)
     monkeypatch.setattr("shutil.which", lambda _n: "/usr/bin/systemctl")
     monkeypatch.setattr(ac, "_wait_active_unit", lambda _unit, timeout=15.0: True)
-    # No foreign gateway on this box → the enable gate is a no-op. Stub it so
-    # the test is hermetic regardless of the host's real systemd/drop-in state.
     monkeypatch.setattr("hal0.agents.hermes_provision._detect_foreign_gateways", lambda **_k: [])
 
     ac._install_hermes_gateway()
 
-    assert [ac._HERMES_BIN, "gateway", "install", "--system", "--run-as-user", "hal0"] in calls
+    assert not any(c and c[0] == ac._HERMES_BIN for c in calls)
     assert ["systemctl", "daemon-reload"] in calls
     assert ["systemctl", "enable", "--now", "hermes-gateway.service"] in calls
 
 
-def test_install_hermes_gateway_runs_as_root_directly(monkeypatch, tmp_path) -> None:
-    """#2061: as root, `hermes gateway install --system` must run AS ROOT —
-    hermes checks ``os.geteuid() == 0`` internally and refuses a non-root
-    caller ("System gateway install requires root. Re-run with sudo."), so
-    routing the root path through ``_run_as_hal0`` skipped the bridge on
-    every root install. The #843 stray-/root/.hermes safeguard is preserved
-    by env alone: ``HOME`` pinned to hal0's home + ``HERMES_HOME`` unset,
-    exactly like installer/install.sh's inline gateway block (PR #1337).
-    """
+def test_install_hermes_gateway_never_runs_hermes_as_root(monkeypatch, tmp_path) -> None:
+    """#2943: under the v0.22.4 pin, upstream's `hermes gateway install
+    --system` run as root resolves root's account home, writes
+    hermes-gateway-<hash>.service with a baked release path and creates
+    /root/.hermes. hal0 writes the unit from its own template instead, as root,
+    without dropping to hal0 (#2061) and without executing anything from the
+    Hermes release tree."""
     gateway_unit = tmp_path / "hermes-gateway.service"
-    monkeypatch.setattr("os.geteuid", lambda: 0)
+    ran: list[list[str]] = []
+    _template_install(monkeypatch, gateway_unit)
     monkeypatch.setattr(ac, "_hermes_venv_ready", lambda: True)
     monkeypatch.setattr(ac, "_HERMES_GATEWAY_UNIT", str(gateway_unit))
     monkeypatch.setattr("shutil.which", lambda _n: "/usr/bin/systemctl")
     monkeypatch.setattr(ac, "_wait_active_unit", lambda _unit, timeout=15.0: True)
     monkeypatch.setattr("hal0.agents.hermes_provision._detect_foreign_gateways", lambda **_k: [])
-    # Deterministic hal0 home regardless of the host's passwd database.
-    monkeypatch.setattr(ac, "_agent_home", lambda: "/var/lib/hal0")
-    # A leaked HERMES_HOME must not survive into the hermes subprocess.
-    monkeypatch.setenv("HERMES_HOME", "/root/.hermes-leaked")
 
-    captured: dict[str, Any] = {}
+    def _record(argv, *_a, **_k):  # type: ignore[no-untyped-def]
+        ran.append(list(argv))
+        return type("_D", (), {"returncode": 0})()
 
-    def _fake_run(argv, *_a, **kwargs):  # type: ignore[no-untyped-def]
-        if argv and argv[0] == ac._HERMES_BIN:
-            captured["argv"] = list(argv)
-            captured["stdin"] = kwargs.get("stdin")
-            captured["env"] = kwargs.get("env")
-            gateway_unit.write_text("[Unit]\n")
+    monkeypatch.setattr(subprocess, "run", _record)
 
-        class _Done:
-            returncode = 0
-
-        return _Done()
-
-    monkeypatch.setattr(subprocess, "run", _fake_run)
-
-    # Dropping to hal0 would make hermes' internal root check refuse the
-    # --system install — the exact #2061 regression.
     def _boom(argv: list[str], *, stdin: Any = None, extra_env: Any = None) -> int:
         raise AssertionError("gateway install must not drop to hal0 when root (#2061)")
 
@@ -415,24 +402,14 @@ def test_install_hermes_gateway_runs_as_root_directly(monkeypatch, tmp_path) -> 
 
     ac._install_hermes_gateway()
 
-    assert captured["argv"] == [
-        ac._HERMES_BIN,
-        "gateway",
-        "install",
-        "--system",
-        "--run-as-user",
-        "hal0",
-    ]
-    assert captured["stdin"] == subprocess.DEVNULL
-    assert captured["env"] is not None
-    assert "HERMES_HOME" not in captured["env"]
-    assert captured["env"]["HOME"] == "/var/lib/hal0"
+    assert gateway_unit.exists()
+    assert not any(c and c[0] == ac._HERMES_BIN for c in ran)
 
 
 def test_install_hermes_gateway_writes_dropin_before_gateway_install(monkeypatch, tmp_path) -> None:
-    """The secrets drop-in must be laid down BEFORE `hermes gateway install`
-    starts the (start-now) vanilla unit — otherwise hal0 flags its own active,
-    drop-in-less unit as a foreign poller and never wires the bridge."""
+    """The secrets drop-in must be laid down BEFORE the unit file lands, so the
+    first start already has the platform tokens and hal0 never sees its own
+    drop-in-less unit as a foreign poller."""
     import hal0.agents.hermes_provision as hp
 
     gateway_unit = tmp_path / "hermes-gateway.service"
@@ -443,17 +420,14 @@ def test_install_hermes_gateway_writes_dropin_before_gateway_install(monkeypatch
         return hp.GatewayDropinResult(outcome="written", dropin_path=str(gateway_unit))
 
     def _fake_run(argv, *_a, **_k):  # type: ignore[no-untyped-def]
-        if argv[0] == ac._HERMES_BIN:
-            events.append("gateway-install")
-            gateway_unit.write_text("[Unit]\n")
-        else:
-            events.append(" ".join(argv))
+        events.append(" ".join(argv))
 
         class _Done:
             returncode = 0
 
         return _Done()
 
+    _template_install(monkeypatch, gateway_unit, events)
     monkeypatch.setattr(ac, "_hermes_venv_ready", lambda: True)
     monkeypatch.setattr(ac, "_HERMES_GATEWAY_UNIT", str(gateway_unit))
     monkeypatch.setattr(subprocess, "run", _fake_run)
@@ -477,14 +451,13 @@ def test_install_hermes_gateway_skips_enable_on_foreign_gateway(monkeypatch, tmp
 
     def _fake_run(argv, *_a, **_k):  # type: ignore[no-untyped-def]
         calls.append(list(argv))
-        if argv[0] == ac._HERMES_BIN:
-            gateway_unit.write_text("[Unit]\n")
 
         class _Done:
             returncode = 0
 
         return _Done()
 
+    _template_install(monkeypatch, gateway_unit)
     monkeypatch.setattr(ac, "_hermes_venv_ready", lambda: True)
     monkeypatch.setattr(ac, "_HERMES_GATEWAY_UNIT", str(gateway_unit))
     monkeypatch.setattr(subprocess, "run", _fake_run)
@@ -502,8 +475,8 @@ def test_install_hermes_gateway_skips_enable_on_foreign_gateway(monkeypatch, tmp
 
     ac._install_hermes_gateway()  # must not raise
 
-    # The unit install still ran, but hal0 did NOT enable/start a second poller.
-    assert [ac._HERMES_BIN, "gateway", "install", "--system", "--run-as-user", "hal0"] in calls
+    # The unit still landed, but hal0 did NOT enable/start a second poller.
+    assert gateway_unit.exists()
     assert ["systemctl", "enable", "--now", "hermes-gateway.service"] not in calls
 
 
