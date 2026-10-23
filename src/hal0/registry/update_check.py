@@ -136,20 +136,34 @@ def _evaluate_shards(
     filename: str,
     files: dict[str, str],
     shard_shas: dict[str, str],
-) -> tuple[bool, str | None, list[str]]:
-    """Compare every part of a split GGUF; returns ``(changed, reason, rels)``.
+) -> tuple[str | None, list[str]]:
+    """Compare every part of a split GGUF; returns ``(reason, rels)``.
 
-    ``rels`` lists the parts whose remote sha differs from the recorded one.
-    A part count that changed upstream (same stem, different ``-of-N``) is an
-    update too. Parts with no recorded local sha or no remote LFS entry are
-    skipped, so they never raise a phantom update.
+    ``reason`` is ``shard_changed`` (``rels`` = parts whose remote sha differs
+    from the recorded one), ``shard_count_changed`` (the installed layout is
+    gone upstream and the same stem now has a different ``-of-N``; ``rels`` =
+    the installed parts), or ``None``. A layout that is still present is never
+    a count change: two layouts side by side are a valid repo shape. Parts
+    with no recorded local sha or no remote LFS entry are skipped, so they
+    never raise a phantom update.
     """
     path = PurePosixPath(filename)
     m = SHARD_RE.match(path.name)
-    if m is None:
-        return False, None, []
+    if m is None or not shard_shas:
+        return None, []
     tot = int(m.group("tot"))
     stem, ext = m.group("stem"), m.group("ext")
+    changed: list[str] = []
+    for i in range(1, tot + 1):
+        rel = str(path.with_name(f"{stem}-{i:05d}-of-{tot:05d}.{ext}"))
+        local = shard_shas.get(rel)
+        remote = files.get(rel)
+        if local and remote and local != remote:
+            changed.append(rel)
+    if changed:
+        return "shard_changed", changed
+    if filename in files:
+        return None, []
     for rel in files:
         rp = PurePosixPath(rel)
         rm = SHARD_RE.match(rp.name)
@@ -160,15 +174,31 @@ def _evaluate_shards(
             and rm.group("ext").lower() == ext.lower()
             and int(rm.group("tot")) != tot
         ):
-            return True, "shard_count_changed", []
-    changed: list[str] = []
-    for i in range(1, tot + 1):
-        rel = str(path.with_name(f"{stem}-{i:05d}-of-{tot:05d}.{ext}"))
-        local = shard_shas.get(rel)
-        remote = files.get(rel)
-        if local and remote and local != remote:
-            changed.append(rel)
-    return bool(changed), ("shard_changed" if changed else None), changed
+            return "shard_count_changed", sorted(shard_shas)
+    return None, []
+
+
+def shard_update_pending(verdict: dict[str, Any], current: dict[str, str]) -> bool:
+    """Re-check a cached shard verdict against the CURRENT installed rows.
+
+    ``current`` is :func:`load_shard_shas` now. A ``shard_changed`` verdict
+    holds only while an installed part still differs from the remote sha the
+    check recorded; a ``shard_count_changed`` one only while the installed
+    part set is the one the check saw. Applying an update changes the rows, so
+    the badge clears itself without waiting for the check TTL.
+    """
+    reason = verdict.get("reason")
+    if reason == "shard_changed":
+        remote = verdict.get("remote_shard_shas")
+        if not isinstance(remote, dict):
+            return False
+        return any(
+            isinstance(sha, str) and (cur := current.get(rel)) is not None and cur != sha
+            for rel, sha in remote.items()
+        )
+    if reason == "shard_count_changed":
+        return bool(current) and sorted(current) == verdict.get("changed_parts")
+    return False
 
 
 def evaluate_model_update(
@@ -205,13 +235,16 @@ def evaluate_model_update(
     if files is None:
         verdict["reason"] = "repo_unreachable"
         return verdict
-    shard_changed, shard_reason, shard_rels = _evaluate_shards(filename, files, shard_shas or {})
-    if shard_changed:
+    shard_reason, shard_rels = _evaluate_shards(filename, files, shard_shas or {})
+    if shard_reason is not None:
         # A later part (or the part count) moved upstream even if part 1 did not.
         verdict["update_available"] = True
         verdict["reason"] = shard_reason
         verdict["changed_parts"] = shard_rels
         verdict["remote_sha256"] = files.get(filename)
+        # Remote sha per changed part, so list_all can re-check the cached
+        # verdict against the installed rows instead of replaying it.
+        verdict["remote_shard_shas"] = {r: files[r] for r in shard_rels if r in files}
         return verdict
     remote_sha = files.get(filename)
     if remote_sha is None:
