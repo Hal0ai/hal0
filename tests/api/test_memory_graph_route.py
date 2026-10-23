@@ -804,7 +804,7 @@ def test_put_reconciles_drift_with_the_gate_off_for_an_upstream_target(
 def test_put_reconciles_a_missing_drop_in_for_an_upstream_target(
     stub_wrapper: StubWrapper, hal0_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """No drop-in at all (the base unit's hal0/utility is in force) + gate on
+    """No drop-in at all (an older base unit's hal0/utility in force) + gate on
     + the configured slot not even enabled: still written once (C2)."""
     import hal0.memory.extraction_env as ee
 

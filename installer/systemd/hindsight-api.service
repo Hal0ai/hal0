@@ -50,7 +50,8 @@ Environment=HINDSIGHT_API_LLM_BASE_URL=http://127.0.0.1:8080/v1
 #  - gemma3 4B NPU (FLM): worked but ~160s/extract + reflect timeouts.
 # `hal0/memory` is the memory engine's one fixed virtual id (ADR-0023 amendment,
 # #2919/#2925): hal0-api resolves it on every call to [memory.graph].extraction_slot
-# (default `utility`, falling back to the agent anchor if unloaded) or, when set, to
+# (default `utility`, loaded on demand; the agent anchor only when it has no bound
+# model, #2741) or, when set, to
 # [memory.graph].extraction_model (an upstream model). Switching the engine's model
 # from `hal0 memory graph enable` or the Memory dashboard therefore needs no change
 # here and no restart. The drop-in at hindsight-api.service.d/extraction-model.conf
