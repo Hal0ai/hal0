@@ -37,15 +37,15 @@ and one band that depends on the status word:
 | `not installed` | The agent is not on this box. | The release an install would get, and `sudo hal0 agent install hermes` to copy. |
 | `broken` | hal0 reports the install as broken. | The last five journal lines of `hal0-agent@hermes.service`, and **Start**, **Repair** (highlighted) and **Logs**. |
 | `down` | The agent unit is not running. | The unit's state, the same journal lines, and **Start** (highlighted), **Repair** and **Logs**. |
-| `degraded` | One or more checks found a problem. | The issue count, and up to three reasons, each with a fix button. More than three say "+N more" and list the rest on the console. |
+| `degraded` | One or more checks found a problem. | The issue count, and up to three reasons, each with its fix where there is one. More than three say "+N more" and list the rest on the console. |
 | `working` | An upgrade or repair is running. | Which one, its state, the elapsed time and the latest steps. A build started from the CLI or the Services page shows here too. |
 | `ready` | The agent unit is running. | Chips for the persona, the approvals mode and the terminal tool, then the chat platforms, the API server's profile count and a link to the Hermes desktop. "gateway off" replaces the platforms when you turned the gateway unit off. |
 | `serving` | Ready, and the model slot behind the agent is serving or reporting tokens per second. | The same chips and reach, with live tokens per second. |
 | `unknown` | hal0 cannot read the agent unit's state on this box. | A note, with **Restart** and **Logs**. |
 
 The version under the name is the live release. When it is behind the pin, an
-`↑` badge beside it names the pin, and a small line below shows the Python
-version and commit. The top-right corner shows throughput and context use while
+`↑` badge beside it names the pin (it is hidden while the card is `working` or
+`not installed`), and a small line below shows the Python version and commit. The top-right corner shows throughput and context use while
 the agent is `ready` or `serving`, and a short note for the other statuses, such
 as the issue count on a `degraded` card. Click a card to flip it to its console;
 click again to flip back.
@@ -78,8 +78,10 @@ opens on **Controls**.
   `HAL0_HERMES_PUBLIC_URL` is set (see the
   [environment variables](/docs/reference/env-vars)); until then the tab says so.
 - **Restart agent** and **Restart gateway** restart `hal0-agent@hermes` or the
-  Hermes gateway unit. A toast reports "Hermes is restarting" or "Hermes
-  restarted", or the failure reason. Both are disabled while a build runs.
+  Hermes gateway unit. Restart agent toasts "Hermes is restarting" or "Hermes
+  restarted", and Restart gateway toasts "Hermes gateway restarted". A failure
+  toasts `Hermes restart failed: <reason>` or `Gateway restart failed: <reason>`.
+  Both buttons are disabled while a build runs.
 - **Unit logs** opens the Logs page, and **Tool activity** opens the activity
   log on the Slots page. Neither acts on the agent.
 - **Persona** switches the active persona (a toast says "Persona activated"),
@@ -106,8 +108,9 @@ Python, extras, platform extras), the previous release, which is kept for
 automatic flip-back, and the pin, marked either "update available" or "live
 matches the pin". Under it sits one build button, and the **danger zone**.
 
-- **Upgrade to the pin** replaces Repair only while the live release is behind
-  the pin, the same condition that shows the `↑` badge. It runs the component
+- **Upgrade to `<pin>`** (the label names the pin) replaces Repair only while
+  the live release is behind the pin, the same condition that shows the `↑`
+  badge. It runs the component
   converge job the Services page uses. Its dialog shows the live release and the
   pin and says what follows: the pinned release is built beside the live one
   while Hermes keeps answering; config is migrated, MCP and memory are re-wired
@@ -162,9 +165,9 @@ Pi is a command-line tool, not a service, so its card has no unit, slot or
 gateway. For an installed Pi the top-right corner reads "no unit · no slot", and
 Pi is never `ready` or `serving`; a healthy install reads `installed`. The card shows
 the installed pi version and adapter against the pins, a `home` chip with the
-profile's home, and a row of profile checks: binary on PATH, the hal0 provider
-and hindsight extensions, the hal0 theme, the memory MCP entry, the adapter
-version and the hindsight config. Each is marked ✓, ✗ or –. When Pi is behind
+profile's home, and a row of profile checks labelled "binary on PATH", "hal0 provider ext",
+"hindsight ext", "hal0 theme", "memory MCP wired", "adapter version" and
+"hindsight config". Each is marked ✓, ✗ or –. When Pi is behind
 the pin, the `↑` badge appears and the front offers
 `sudo hal0 agent upgrade pi` to copy; a `broken` card offers the reinstall
 command instead.
@@ -175,8 +178,8 @@ tab offers the upgrade, uninstall and reinstall commands to copy, and a
 **Re-check** button that reads the card again. Its Lifecycle tab says what the
 upgrade does: it reinstalls both pins with npm, redeploys the hal0 provider and
 hindsight extensions and the theme, rewrites the managed package entry and the
-`hal0-memory` MCP entry, and re-stamps the marker. Run it as the user who
-installed Pi; extensions you added yourself are left alone.
+`hal0-memory` MCP entry, and re-stamps the marker. Run it with sudo, the same
+way you installed Pi; extensions you added yourself are left alone.
 
 ## Install Hermes
 
@@ -472,9 +475,9 @@ stays on that release when hal0 builds a newer one, and `hermes gateway status`
 reports the unit as outdated. `sudo hal0 agent install hermes` regenerates and
 normalises the unit again.
 
-The Hermes card in the dashboard has buttons for these too: **Restart agent**
-and **Restart gateway** on its Controls tab, and **Upgrade** or **Repair** on
-its Lifecycle tab. See [The Agents view](#the-agents-view).
+The Hermes card in the dashboard has buttons for restart, upgrade and repair:
+**Restart agent** and **Restart gateway** on its Controls tab, and **Upgrade**
+or **Repair** on its Lifecycle tab. See [The Agents view](#the-agents-view).
 
 </TabItem>
 <TabItem label="Uninstall">
