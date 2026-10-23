@@ -756,3 +756,53 @@ def test_the_update_heal_still_fails_on_a_non_linger_follow_up(
             uid_of=lambda name: UID,
             which=_which,
         )
+
+
+def test_a_restart_failure_that_names_linger_in_its_steps_still_fails(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    _hashed_unit(tmp_path)
+    sc = UnitSystemctl({HASHED: ("enabled", True)})
+    real = regen.regenerate_gateway_unit
+    calls = {"n": 0}
+
+    def wrapped(**kw: Any) -> regen.RegenResult:
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise regen.GatewayRegenError(
+                "systemctl restart hermes-gateway.service failed: boom (already done: linger on for hal0)"
+            )
+        return real(**kw)
+
+    monkeypatch.setattr(regen, "regenerate_gateway_unit", wrapped)
+    with pytest.raises(regen.GatewayRegenError, match="restart"):
+        regen.regenerate_gateway_unit(
+            unit_path=tmp_path / CANON,
+            linger_dir=str(tmp_path),
+            run=sc,
+            uid_of=lambda name: UID,
+            which=_which,
+        )
+
+
+def test_the_rollback_restores_the_unit_even_if_its_reload_raises(tmp_path: Path) -> None:
+    hashed = _hashed_unit(tmp_path)
+    inner = UnitSystemctl({HASHED: ("enabled", True)}, fail=["systemctl", "disable"])
+    reloads = {"n": 0}
+
+    def run(argv: list[str], **kw: Any) -> subprocess.CompletedProcess[str]:
+        if argv[:2] == ["systemctl", "daemon-reload"]:
+            reloads["n"] += 1
+            if reloads["n"] > 1:  # the rollback's reload
+                raise OSError("bus gone")
+        return inner(argv, **kw)
+
+    with pytest.raises(regen.GatewayRegenError):
+        regen.migrate_hashed_units(
+            unit_path=tmp_path / CANON,
+            linger_dir=str(tmp_path),
+            run=run,
+            uid_of=lambda name: UID,
+            which=_which,
+        )
+    assert hashed.exists() and inner.states[HASHED] == ("enabled", True)

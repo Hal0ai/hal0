@@ -492,12 +492,14 @@ def migrate_hashed_units(
                 unit_path.unlink()
         with contextlib.suppress(OSError, subprocess.SubprocessError):
             _run(run, ["systemctl", "daemon-reload"])
-            for path in hashed:
-                if not path.exists():
-                    continue
-                if result.was_enabled:
+        for path in hashed:
+            if not path.exists():
+                continue
+            if result.was_enabled:
+                with contextlib.suppress(OSError, subprocess.SubprocessError):
                     _run(run, ["systemctl", "enable", path.name])
-                if result.was_active:
+            if result.was_active:
+                with contextlib.suppress(OSError, subprocess.SubprocessError):
                     _run(run, ["systemctl", "start", path.name])
 
     if not masked:
@@ -672,7 +674,7 @@ def regenerate_gateway_unit(
             # The migration itself succeeded (the gateway moved over). Only a
             # linger follow-up (no loginctl, or enable-linger failed) is
             # reported instead of raised; anything else still fails the verb.
-            if "linger" not in str(exc):
+            if not str(exc).startswith(f"loginctl enable-linger {GATEWAY_USER}"):
                 raise
             tail = RegenResult("noop", "", steps=[f"follow-up: {exc}"])
         steps = [*migrated.steps, *tail.steps]
