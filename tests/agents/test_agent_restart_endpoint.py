@@ -9,6 +9,7 @@ chip consume:
 * a failed restart -> 5xx envelope w/ ``code="agent.restart_failed"``
 * a timed-out restart -> 5xx envelope w/ ``code="agent.restart_timeout"``
 * unknown agent id -> 404 ``code="agent.unknown"``
+* the gateway route on a box without Hermes -> 404 ``code="agent.not_installed"``
 
 The restart goes through :func:`hal0.services.systemd.unit_action`, which
 runs through the systemctl seam (#2913: hal0-api is unprivileged, and a bare
@@ -18,6 +19,7 @@ patch ``unit_action`` itself, so they never invoke systemd.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock
 
@@ -25,6 +27,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from hal0.api.agents import restart as restart_route
+from hal0.api.routes import agents as agents_routes
 from hal0.errors import Hal0Error
 from hal0.services.systemd import valid_unit
 
@@ -54,6 +57,18 @@ def _capture_audit(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, dict[str,
     monkeypatch.setattr(restart_route.audit_log, "info", _capture)
     monkeypatch.setattr(restart_route.audit_log, "warning", _capture)
     return calls
+
+
+def _install(monkeypatch: pytest.MonkeyPatch, *names: str) -> None:
+    """The agent manager lists exactly these agents as installed."""
+    records = [SimpleNamespace(name=name) for name in names]
+    monkeypatch.setattr(agents_routes, "_manager", lambda: SimpleNamespace(list=lambda: records))
+
+
+@pytest.fixture(autouse=True)
+def hermes_installed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Hermes is installed unless a test says otherwise."""
+    _install(monkeypatch, "hermes")
 
 
 def test_both_units_are_valid_unit_names() -> None:
@@ -315,3 +330,30 @@ def test_gateway_restart_failure_still_emits_finished_event(
         "agent.gateway_restart.finished",
     ]
     assert audit[1][1]["status"] == "error"
+
+
+def test_gateway_restart_404_when_hermes_is_not_installed(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No install record, no gateway: refused before the seam is touched."""
+    _install(monkeypatch)
+    ua = _patch_unit_action(monkeypatch)
+
+    r = client.post("/api/agents/hermes/gateway/restart")
+
+    assert r.status_code == 404
+    error = r.json()["error"]
+    assert error["code"] == "agent.not_installed"
+    assert error["details"] == {"agent_id": "hermes"}
+    ua.assert_not_awaited()
+
+
+def test_restart_does_not_ask_whether_the_agent_is_installed(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only the gateway route does: the agent unit's restart starts a stopped unit."""
+    _install(monkeypatch)
+    ua = _patch_unit_action(monkeypatch)
+
+    assert client.post("/api/agents/hermes/restart").status_code == 200
+    ua.assert_awaited_once_with(AGENT_UNIT, "restart")

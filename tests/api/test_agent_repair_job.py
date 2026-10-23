@@ -11,6 +11,7 @@ one, and ``HAL0_HOME`` points the job store at ``tmp_path``.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 import signal
@@ -679,6 +680,10 @@ async def test_terminate_without_a_group_falls_back_to_the_child(group_signals: 
     assert [sig for _pgid, sig in group_signals] == [signal.SIGTERM, signal.SIGKILL]
 
 
+@pytest.mark.skipif(
+    not hasattr(os, "killpg") or not Path("/proc").is_dir(),
+    reason="needs process groups and /proc to see a grandchild die",
+)
 async def test_terminate_stops_descendants_of_the_child(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -691,22 +696,297 @@ async def test_terminate_stops_descendants_of_the_child(
         stdout=asyncio.subprocess.PIPE,
         start_new_session=True,
     )
-    assert proc.stdout is not None
-    grandchild = int((await asyncio.wait_for(proc.stdout.readline(), 10)).decode())
+    try:
+        assert proc.stdout is not None
+        grandchild = int((await asyncio.wait_for(proc.stdout.readline(), 10)).decode())
 
-    def _running(pid: int) -> bool:
-        try:
-            state = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0]
-        except OSError:
-            return False
-        return state != "Z"
+        def _running(pid: int) -> bool:
+            try:
+                state = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0]
+            except OSError:
+                return False
+            return state != "Z"
 
-    assert _running(grandchild)
-    await asyncio.wait_for(repair_route._terminate(proc), 15)
-    for _ in range(100):
-        if not _running(grandchild):
-            break
-        await asyncio.sleep(0.05)
+        assert _running(grandchild)
+        await asyncio.wait_for(repair_route._terminate(proc), 15)
+        for _ in range(100):
+            if not _running(grandchild):
+                break
+            await asyncio.sleep(0.05)
 
-    assert not _running(grandchild)
-    assert proc.returncode is not None
+        assert not _running(grandchild)
+        assert proc.returncode is not None
+    finally:
+        # A failed assertion above must not leave ``sh`` and ``sleep 300`` behind.
+        with contextlib.suppress(OSError):
+            os.killpg(proc.pid, signal.SIGKILL)
+        with contextlib.suppress(Exception):
+            await asyncio.wait_for(proc.wait(), 5)
+
+
+# ── a repair that hal0-api restarted under ───────────────────────────────────
+
+#: Above Linux's ``pid_max`` (2**22), so no process has it and ``os.kill(pid, 0)``
+#: answers "no such process".
+_DEAD_PID = 4_194_305
+
+_RESTARTED_ERROR = "hal0-api restarted during the repair; the live release is unchanged"
+
+
+def _stale_job(state: str = "running", job_id: str = "r1") -> dict[str, Any]:
+    """A repair job the hal0-api before this one left in flight."""
+    job: dict[str, Any] = {
+        "id": job_id,
+        "state": state,
+        "phase": "repair:hermes",
+        "kind": "repair",
+        "agent": "hermes",
+        "api_pid": _DEAD_PID,
+        "steps": ["preflight"],
+        "created_at": 1.0,
+        "updated_at": 1.0,
+        "error": None,
+        "log_path": None,
+    }
+    if state == "running":
+        job["pid"] = _DEAD_PID
+    return job
+
+
+def _persisted(job_id: str) -> dict[str, Any]:
+    return json.loads((updater_routes._jobs_dir() / f"{job_id}.json").read_text())
+
+
+@pytest.mark.parametrize("state", ["running", "queued"])
+def test_stale_repair_job_marked_api_restarted_on_a_status_read(
+    app_client: tuple[FastAPI, TestClient], state: str
+) -> None:
+    app, client = app_client
+    updater_routes._persist_job(_stale_job(state))
+    app.state.update_jobs = {}  # a fresh process: nothing in memory
+
+    with structlog.testing.capture_logs() as logs:
+        final = client.get("/api/updates/status/r1").json()
+
+    assert final["state"] == "failed"
+    assert final["error_code"] == "api_restarted"
+    assert final["error"] == _RESTARTED_ERROR
+    assert final["steps"] == ["preflight"]
+    # Written down, and the in-memory copy the status poll re-seeded says the same.
+    assert _persisted("r1")["error_code"] == "api_restarted"
+    assert app.state.update_jobs["r1"]["state"] == "failed"
+    finished = [e for e in logs if e["event"] == "agent.repair.finished"]
+    assert [(e["job_id"], e["state"], e["exit_code"], e["error_code"]) for e in finished] == [
+        ("r1", "failed", None, "api_restarted")
+    ]
+    # A second poll does not reconcile it again.
+    with structlog.testing.capture_logs() as again:
+        assert client.get("/api/updates/status/r1").json()["state"] == "failed"
+    assert not [e for e in again if e["event"] == "agent.repair.finished"]
+
+
+def test_stale_repair_job_in_memory_is_marked_on_a_status_read(
+    app_client: tuple[FastAPI, TestClient],
+) -> None:
+    app, client = app_client
+    app.state.update_jobs = {"r1": _stale_job()}
+
+    final = client.get("/api/updates/status/r1").json()
+
+    assert (final["state"], final["error_code"]) == ("failed", "api_restarted")
+
+
+def test_status_read_leaves_other_jobs_alone(app_client: tuple[FastAPI, TestClient]) -> None:
+    app, client = app_client
+    converge = {
+        "id": "c1",
+        "state": "running",
+        "phase": "converge:hermes",
+        "api_pid": _DEAD_PID,
+        "pid": _DEAD_PID,
+    }
+    app.state.update_jobs = {"c1": dict(converge)}
+
+    assert client.get("/api/updates/status/c1").json()["state"] == "running"
+
+
+def test_a_reseeded_stale_repair_job_does_not_block_the_next_repair(
+    app_client: tuple[FastAPI, TestClient], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The poll that re-seeds the registry is the one that must not leave ``running`` behind."""
+    app, client = app_client
+    _spawn_ok(monkeypatch)
+    updater_routes._persist_job(_stale_job())
+    app.state.update_jobs = {}
+    assert client.get("/api/updates/status/r1").json()["state"] == "failed"
+
+    r = client.post("/api/agents/hermes/repair")
+
+    assert r.status_code == 202
+    _drain_background(client)
+
+
+def test_repair_post_over_a_persisted_running_job_with_a_dead_api_pid(
+    app_client: tuple[FastAPI, TestClient], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    app, client = app_client
+    _spawn_ok(monkeypatch)
+    updater_routes._persist_job(_stale_job())
+    app.state.update_jobs = {}
+
+    r = client.post("/api/agents/hermes/repair")
+
+    assert r.status_code == 202
+    _drain_background(client)
+    old = client.get("/api/updates/status/r1").json()
+    assert (old["state"], old["error_code"]) == ("failed", "api_restarted")
+    assert client.get(f"/api/updates/status/{r.json()['id']}").json()["state"] == "applied"
+
+
+@pytest.mark.parametrize("state", ["running", "queued"])
+def test_repair_post_reconciles_a_stale_job_before_the_busy_check(
+    app_client: tuple[FastAPI, TestClient], monkeypatch: pytest.MonkeyPatch, state: str
+) -> None:
+    """In the registry already (no status poll in between), a stale repair is not "in flight"."""
+    app, client = app_client
+    spawn = _spawn_ok(monkeypatch)
+    app.state.update_jobs = {"r1": _stale_job(state)}
+
+    r = client.post("/api/agents/hermes/repair")
+
+    assert r.status_code == 202
+    _drain_background(client)
+    spawn.assert_awaited_once()
+    assert app.state.update_jobs["r1"]["state"] == "failed"
+    assert app.state.update_jobs["r1"]["error_code"] == "api_restarted"
+    assert _persisted("r1")["error_code"] == "api_restarted"
+
+
+def test_repair_post_still_refuses_a_job_this_process_is_running(
+    app_client: tuple[FastAPI, TestClient], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    app, client = app_client
+    spawn = _spawn_ok(monkeypatch)
+    live = _stale_job("queued", "r2")
+    live["api_pid"] = os.getpid()
+    app.state.update_jobs = {"r2": live}
+
+    r = client.post("/api/agents/hermes/repair")
+
+    assert r.status_code == 409
+    assert r.json()["error"]["details"] == {"job_id": "r2"}
+    assert app.state.update_jobs["r2"]["state"] == "queued"
+    spawn.assert_not_awaited()
+
+
+def test_reconcile_leaves_live_job_alone() -> None:
+    job = {"state": "running", "phase": "repair:hermes", "api_pid": os.getpid(), "pid": 1}
+
+    out = repair_route.reconcile_stale_repair_job(job, pid_alive=lambda p: True)
+
+    assert out is job
+    assert job["state"] == "running"
+    assert "error_code" not in job
+
+
+def test_reconcile_marks_a_job_of_another_api_process_failed(
+    no_persist: list[str],
+) -> None:
+    job = {"id": "r1", "state": "running", "phase": "repair:hermes", "api_pid": 7, "pid": 1}
+
+    out = repair_route.reconcile_stale_repair_job(
+        job,
+        current_pid=8,
+        pid_alive=lambda p: True,  # the child lives; its owner is gone
+    )
+
+    assert out is job
+    assert (job["state"], job["error_code"], job["error"]) == (
+        "failed",
+        "api_restarted",
+        _RESTARTED_ERROR,
+    )
+    assert no_persist == ["failed"]
+
+
+def test_reconcile_marks_a_job_whose_child_is_gone_failed(no_persist: list[str]) -> None:
+    """The new hal0-api got the old one's pid: ``api_pid`` matches, the child does not exist."""
+    job = {"id": "r1", "state": "running", "phase": "repair:hermes", "api_pid": 8, "pid": 1}
+
+    repair_route.reconcile_stale_repair_job(job, current_pid=8, pid_alive=lambda p: False)
+
+    assert (job["state"], job["error_code"]) == ("failed", "api_restarted")
+
+
+def test_reconcile_leaves_a_job_of_this_process_whose_runner_is_alive_alone(
+    no_persist: list[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The child exited and was reaped; the runner has not yet read its last line."""
+    job = {"id": "r1", "state": "running", "phase": "repair:hermes", "api_pid": 8, "pid": 1}
+    monkeypatch.setattr(repair_route, "_live_runners", {"r1"})
+
+    repair_route.reconcile_stale_repair_job(job, current_pid=8, pid_alive=lambda p: False)
+
+    assert job["state"] == "running"
+    assert no_persist == []
+
+
+def test_reconcile_leaves_a_queued_job_of_this_process_alone(no_persist: list[str]) -> None:
+    job = {"id": "r1", "state": "queued", "phase": "repair:hermes", "api_pid": 8}
+
+    repair_route.reconcile_stale_repair_job(job, current_pid=8, pid_alive=lambda p: False)
+
+    assert job["state"] == "queued"
+
+
+@pytest.mark.parametrize(
+    "job",
+    [
+        {"state": "applied", "phase": "repair:hermes", "api_pid": 7, "pid": 1},
+        {"state": "failed", "phase": "repair:hermes", "api_pid": 7, "pid": 1},
+        {"state": "running", "phase": "converge:hermes", "api_pid": 7, "pid": 1},
+        {"state": "running", "phase": "apply"},
+    ],
+)
+def test_reconcile_leaves_terminal_and_other_jobs_alone(
+    job: dict[str, Any], no_persist: list[str]
+) -> None:
+    before = dict(job)
+
+    out = repair_route.reconcile_stale_repair_job(job, current_pid=8, pid_alive=lambda p: False)
+
+    assert out is job and job == before
+    assert no_persist == []
+
+
+@pytest.mark.parametrize("pid", [None, 0, -1, True, "12"])
+def test_pid_alive_is_false_for_what_is_not_a_pid(pid: object) -> None:
+    assert repair_route._pid_alive(pid) is False
+
+
+def test_pid_alive_sees_this_process_and_not_a_dead_one() -> None:
+    assert repair_route._pid_alive(os.getpid()) is True
+    assert repair_route._pid_alive(_DEAD_PID) is False
+
+
+async def test_runner_is_a_live_runner_only_while_it_runs(
+    no_persist: list[str], tmp_path: Path
+) -> None:
+    jobs = _job()
+    seen: list[bool] = []
+
+    class _Watching(_Lines):
+        async def readline(self) -> bytes:
+            seen.append("j1" in repair_route._live_runners)
+            return await super().readline()
+
+    proc = _FakeProc([], 0)
+    proc.stdout = _Watching([b"[run ] preflight\n"])  # type: ignore[assignment]
+    spawn = AsyncMock(return_value=proc)
+
+    await repair_route.run_repair_job(
+        jobs, "j1", argv=["hal0"], env={}, log_path=tmp_path / "job.log", spawn=spawn
+    )
+
+    assert seen and all(seen)
+    assert "j1" not in repair_route._live_runners

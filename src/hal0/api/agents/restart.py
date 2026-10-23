@@ -217,9 +217,12 @@ async def restart_gateway(agent_id: str, request: Request) -> dict[str, str]:
 
     Same contract as :func:`restart_agent` (including the 404 for an unknown
     agent and the ``agent.restart_failed`` / ``agent.restart_timeout`` errors),
-    with ``unit="hermes-gateway.service"``.
+    with ``unit="hermes-gateway.service"``. Unlike the agent restart it is also a
+    404 (``agent.not_installed``) when the agent has no install record: there is
+    no gateway to restart.
     """
     _require_known_agent(agent_id, _GATEWAY_AGENTS)
+    require_installed(agent_id)
     return await restart_gateway_unit(agent_id, actor=_resolve_actor(request))
 
 
@@ -228,6 +231,23 @@ def _require_known_agent(agent_id: str, known: frozenset[str]) -> None:
         raise NotFound(
             f"unknown agent {agent_id!r}",
             code="agent.unknown",
+            details={"agent_id": agent_id},
+        )
+
+
+def require_installed(agent_id: str) -> None:
+    """404 ``agent.not_installed`` unless the agent manager lists a record named ``agent_id``.
+
+    The check the card itself uses (``overview._installed_record``), shared by the
+    repair and gateway-restart routes. The routes module is imported here, not at
+    the top: it imports this one.
+    """
+    from hal0.api.routes import agents as agents_routes
+
+    if not any(rec.name == agent_id for rec in agents_routes._manager().list()):
+        raise NotFound(
+            f"{agent_id} is not installed",
+            code="agent.not_installed",
             details={"agent_id": agent_id},
         )
 
@@ -356,6 +376,7 @@ KNOWN_AGENT_IDS = _KNOWN_AGENT_IDS
 __all__ = [
     "GATEWAY_UNIT",
     "KNOWN_AGENT_IDS",
+    "require_installed",
     "restart_agent_unit",
     "restart_gateway_unit",
     "router",

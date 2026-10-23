@@ -804,21 +804,29 @@ async def update_status(job_id: str, request: Request) -> dict[str, Any]:
     Reads the in-memory registry first, then falls back to the on-disk
     store (``/var/lib/hal0/update-jobs/<id>.json``) so a status poll still
     resolves after an ``hal0-api`` restart wiped the process-local dict.
+
+    A repair job (``phase: "repair:hermes"``) that an earlier ``hal0-api`` left
+    ``queued`` or ``running`` is recorded ``failed`` (``error_code:
+    "api_restarted"``) before the snapshot is returned, whichever of the two
+    stores it came from: a job re-seeded from disk would otherwise read
+    ``running`` for good and refuse every converge and repair.
     """
     jobs = _update_jobs(request)
     job = jobs.get(job_id)
-    # Task 12: a "running" repair job whose api_pid is gone is failed here
-    # (error_code "api_restarted") before the snapshot is returned.
     if job is None:
-        persisted = _load_persisted_job(job_id)
-        if persisted is not None:
-            # Re-seed the in-memory registry so subsequent polls are fast.
-            jobs[job_id] = persisted
-            return dict(persisted)
-        raise UpdateJobNotFound(
-            f"no update job with id {job_id!r}",
-            details={"job_id": job_id},
-        )
+        job = _load_persisted_job(job_id)
+        if job is None:
+            raise UpdateJobNotFound(
+                f"no update job with id {job_id!r}",
+                details={"job_id": job_id},
+            )
+        # Re-seed the in-memory registry so subsequent polls are fast.
+        jobs[job_id] = job
+    if job.get("phase") == "repair:hermes":
+        # Imported here: the repair module imports this one.
+        from hal0.api.agents.repair import reconcile_stale_repair_job
+
+        reconcile_stale_repair_job(job)
     return dict(job)
 
 

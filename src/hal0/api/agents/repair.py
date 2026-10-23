@@ -41,10 +41,12 @@ Known limit
 -----------
 The child lives in hal0-api's cgroup, so a restart of hal0-api during a repair
 kills the build. The release builder is atomic (the ``current`` link swaps only
-at the very end), so the live release is untouched. The job is left ``running``
-on disk; the status route is to record it ``failed`` (``error_code:
-api_restarted``) once it sees the recorded ``api_pid`` is gone (the marker in
-``update_status``). Until that lands, such a job stays ``running``.
+at the very end), so the live release is untouched. The job is left ``queued`` or
+``running`` on disk. :func:`reconcile_stale_repair_job` then records it ``failed``
+(``error_code: api_restarted``) when the process that registered it is gone: the
+status route calls it for every job it serves, whether found in memory or
+re-seeded from disk, and the repair route calls it before deciding that a job is
+in flight, so a killed repair never blocks the next one.
 
 Layering
 --------
@@ -69,8 +71,7 @@ from typing import TYPE_CHECKING, Any, Final
 import structlog
 from fastapi import APIRouter, Request
 
-from hal0.api.agents.restart import _resolve_actor
-from hal0.api.routes import agents as agents_routes
+from hal0.api.agents.restart import _resolve_actor, require_installed
 from hal0.api.routes.updater import _persist_job, _spawn_update_task, _update_jobs
 from hal0.config import paths
 from hal0.errors import Conflict, NotFound
@@ -116,6 +117,16 @@ _LOG_DIR_MODE: Final[int] = 0o750
 
 _JOB_STATES_IN_FLIGHT: Final[tuple[str, str]] = ("queued", "running")
 
+#: What a repair job reads after hal0-api restarted under it.
+_API_RESTARTED_CODE: Final[str] = "api_restarted"
+_API_RESTARTED_ERROR: Final[str] = (
+    "hal0-api restarted during the repair; the live release is unchanged"
+)
+
+#: Ids of the jobs whose runner is executing in this process, so a job this
+#: process is still running is never mistaken for one an earlier process left.
+_live_runners: set[str] = set()
+
 # Test seams, module attributes on purpose: the tests replace them and nothing
 # else here touches a subprocess, the real release tree or /var/lib.
 _spawn: Callable[..., Any] = asyncio.create_subprocess_exec
@@ -156,12 +167,7 @@ def _require_installed(agent_id: str) -> None:
             code="agent.unknown",
             details={"agent_id": agent_id},
         )
-    if not any(rec.name == agent_id for rec in agents_routes._manager().list()):
-        raise NotFound(
-            f"{agent_id} is not installed",
-            code="agent.not_installed",
-            details={"agent_id": agent_id},
-        )
+    require_installed(agent_id)
 
 
 @router.post("/{agent_id}/repair", status_code=202)
@@ -187,9 +193,10 @@ async def repair_agent(agent_id: str, request: Request) -> dict[str, Any]:
     Known limit: the build runs as a child of hal0-api and shares its cgroup, so
     restarting hal0-api during a repair kills it. The release builder is atomic
     (``current`` swaps only at the end), so the live release is never half
-    written; the job is left ``running`` on disk. The status route is to record
-    it ``failed`` (``api_restarted``) once it finds the job's ``api_pid`` gone
-    (marker in ``update_status``); until that lands it stays ``running``.
+    written; the job is left ``running`` on disk and reads ``failed`` with
+    ``error_code: api_restarted`` the next time anything looks at it (the status
+    route, or this route's own busy check:
+    :func:`reconcile_stale_repair_job`).
     """
     _require_installed(agent_id)
 
@@ -199,6 +206,8 @@ async def repair_agent(agent_id: str, request: Request) -> dict[str, Any]:
     # local file, short enough to run on the loop.
     jobs = _update_jobs(request)
     for other in jobs.values():
+        # A repair an earlier hal0-api left ``running`` is not in flight.
+        reconcile_stale_repair_job(other)
         if other.get("state") in _JOB_STATES_IN_FLIGHT:
             raise Conflict(
                 "an update, converge or repair job is already in flight",
@@ -267,6 +276,73 @@ async def repair_agent(agent_id: str, request: Request) -> dict[str, Any]:
 def _touch(job: dict[str, Any]) -> None:
     job["updated_at"] = time.time()
     _persist_job(job)
+
+
+def _pid_alive(pid: object) -> bool:
+    """Whether a process with this pid exists (``os.kill(pid, 0)``); not a valid pid is not alive."""
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return True  # EPERM: it exists, under another user
+    return True
+
+
+def reconcile_stale_repair_job(
+    job: dict[str, Any],
+    *,
+    current_pid: int | None = None,
+    pid_alive: Callable[[object], bool] = _pid_alive,
+) -> dict[str, Any]:
+    """Record a repair job that hal0-api restarted under as ``failed``; return ``job``.
+
+    A repair job that is ``queued`` or ``running`` belongs to the hal0-api process
+    that registered it (``api_pid``). It is stale when that is not this process
+    (the runner and the child died with the old one: the child shares hal0-api's
+    cgroup), or when it is ``running`` here with no runner of ours behind it and
+    its child's ``pid`` is gone (the process id was reused by the new hal0-api).
+    The job is then set ``failed`` with ``error_code: "api_restarted"``, persisted,
+    and ``agent.repair.finished`` is emitted for it, since the runner that would
+    have is gone. The release builder swaps ``current`` only at its very end, so
+    the live release is unchanged either way.
+
+    Anything else (another phase, a terminal state, a job this process is still
+    running, a ``queued`` job of this process whose runner has not started) comes
+    back untouched. ``job`` is changed in place, so the caller's registry entry
+    reads ``failed`` afterwards.
+    """
+    if job.get("phase") != _PHASE or job.get("state") not in _JOB_STATES_IN_FLIGHT:
+        return job
+    me = os.getpid() if current_pid is None else current_pid
+    stale = job.get("api_pid") != me
+    if (
+        not stale
+        and job.get("state") == "running"
+        and job.get("id") not in _live_runners
+        and not pid_alive(job.get("pid"))
+    ):
+        stale = True
+    if not stale:
+        return job
+
+    job["state"] = "failed"
+    job["error"] = _API_RESTARTED_ERROR
+    job["error_code"] = _API_RESTARTED_CODE
+    _touch(job)
+    log.warning("agent.repair.api_restarted", job_id=job.get("id"), api_pid=job.get("api_pid"))
+    audit_log.warning(
+        "agent.repair.finished",
+        agent_id=str(job.get("agent", "hermes")),
+        job_id=job.get("id"),
+        actor=None,
+        exit_code=None,
+        state="failed",
+        error_code=_API_RESTARTED_CODE,
+    )
+    return job
 
 
 def _open_log(log_path: Path, job: dict[str, Any]) -> Any:
@@ -348,14 +424,16 @@ async def run_repair_job(
 
     If the task is cancelled (hal0-api shutting down) the child's process group is
     terminated and ``agent.repair.finished`` is emitted with ``state="cancelled"``.
-    A job that was already ``running`` is left so, on disk, for the status route to
-    reconcile; one cancelled before it started is persisted ``failed``
+    A job that was already ``running`` is left so, on disk, for
+    :func:`reconcile_stale_repair_job` to record as ``api_restarted`` once the
+    process is gone; one cancelled before it started is persisted ``failed``
     (``error = "repair cancelled"``).
     """
     job = jobs[job_id]
     agent_id = str(job.get("agent", "hermes"))
     exit_code: int | None = None
     cancelled = False
+    _live_runners.add(job_id)
     log_file = _open_log(log_path, job)
     proc: Any = None
     try:
@@ -430,10 +508,11 @@ async def run_repair_job(
         job["state"] = "failed"
         job["error"] = f"repair runner failed: {exc}"
     finally:
+        _live_runners.discard(job_id)
         if log_file is not None:
             log_file.close()
-        # A job cancelled while running stays ``running`` for the status route to
-        # reconcile; every other ending is written down.
+        # A job cancelled while running stays ``running`` for
+        # ``reconcile_stale_repair_job``; every other ending is written down.
         if job["state"] in ("applied", "failed"):
             _touch(job)
         outcome = "cancelled" if cancelled else job["state"]
@@ -448,4 +527,4 @@ async def run_repair_job(
         )
 
 
-__all__ = ["repair_agent", "router", "run_repair_job"]
+__all__ = ["reconcile_stale_repair_job", "repair_agent", "router", "run_repair_job"]
