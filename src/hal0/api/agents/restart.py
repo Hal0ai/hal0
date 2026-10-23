@@ -67,11 +67,14 @@ _KNOWN_AGENT_IDS: Final[frozenset[str]] = frozenset({"hermes"})
 #: ``hermes-gateway`` service key.
 GATEWAY_UNIT: Final[str] = "hermes-gateway.service"
 
-#: ``unit_action`` reports a timeout as a failed result whose message says so
-#: (``<verb> <unit> failed: timed out after Ns``); the restart seam turns that
-#: back into ``agent.restart_timeout`` so callers can tell "outcome unknown"
-#: from a hard failure.
-_TIMED_OUT_MARKER: Final[str] = "timed out"
+#: Longest failure message that reaches the HTTP envelope (the old spawn path
+#: trimmed stderr to the same bound); keeps a chatty systemctl error bounded.
+_MAX_DETAIL_CHARS: Final[int] = 200
+
+#: Agents that have a gateway to restart. Separate from ``_KNOWN_AGENT_IDS`` so
+#: a future bundled agent without a messaging gateway (pi) stays 404 on
+#: ``/{agent_id}/gateway/restart`` even once it joins the restart registry.
+_GATEWAY_AGENTS: Final[frozenset[str]] = frozenset({"hermes"})
 
 # Timeout for the read-only ``is-active`` probe. Much tighter than a restart's
 # budget (``unit_action`` allows 90s): this one runs on a POLLED route (``GET /api/agents``, 5s from
@@ -204,7 +207,7 @@ async def restart_agent(agent_id: str, request: Request) -> dict[str, str]:
     is identical: the caller wanted the unit running and now it is (or
     failed to start, surfaced as an error).
     """
-    _require_known_agent(agent_id)
+    _require_known_agent(agent_id, _KNOWN_AGENT_IDS)
     return await restart_agent_unit(agent_id, actor=_resolve_actor(request))
 
 
@@ -216,12 +219,12 @@ async def restart_gateway(agent_id: str, request: Request) -> dict[str, str]:
     agent and the ``agent.restart_failed`` / ``agent.restart_timeout`` errors),
     with ``unit="hermes-gateway.service"``.
     """
-    _require_known_agent(agent_id)
+    _require_known_agent(agent_id, _GATEWAY_AGENTS)
     return await restart_gateway_unit(agent_id, actor=_resolve_actor(request))
 
 
-def _require_known_agent(agent_id: str) -> None:
-    if agent_id not in _KNOWN_AGENT_IDS:
+def _require_known_agent(agent_id: str, known: frozenset[str]) -> None:
+    if agent_id not in known:
         raise NotFound(
             f"unknown agent {agent_id!r}",
             code="agent.unknown",
@@ -233,9 +236,11 @@ async def _restart_unit(agent_id: str, unit: str) -> str:
     """Restart ``unit`` through the systemctl seam; return the success detail.
 
     Raises :class:`~hal0.errors.Hal0Error` when the restart did not succeed:
-    ``agent.restart_timeout`` for a timeout, ``agent.restart_failed`` for
-    everything else. ``unit_action`` reports runtime failures in its result
-    rather than raising, so this is the one place they become errors.
+    ``agent.restart_timeout`` when ``unit_action`` flags ``timed_out`` (the
+    outcome is unknown), ``agent.restart_failed`` for everything else.
+    ``unit_action`` reports runtime failures in its result rather than
+    raising, so this is the one place they become errors. The message is
+    trimmed to :data:`_MAX_DETAIL_CHARS` before it reaches the envelope.
     """
     result = await unit_action(unit, "restart")
     message = str(result.get("message", ""))
@@ -243,11 +248,10 @@ async def _restart_unit(agent_id: str, unit: str) -> str:
         return message or f"restart {unit}: ok"
 
     details = {"agent_id": agent_id, "unit": unit}
-    if _TIMED_OUT_MARKER in message:
-        raise Hal0Error(message, code="agent.restart_timeout", details=details)
-    raise Hal0Error(
-        message or f"restart {unit} failed", code="agent.restart_failed", details=details
-    )
+    detail = (message or f"restart {unit} failed")[:_MAX_DETAIL_CHARS]
+    if result.get("timed_out"):
+        raise Hal0Error(detail, code="agent.restart_timeout", details=details)
+    raise Hal0Error(detail, code="agent.restart_failed", details=details)
 
 
 async def restart_agent_unit(agent_id: str, *, actor: str) -> dict[str, str]:
@@ -257,6 +261,10 @@ async def restart_agent_unit(agent_id: str, *, actor: str) -> dict[str, str]:
     agent after changing its config (``command_approvals``). Raises
     :class:`~hal0.errors.Hal0Error` on every failure; returns ``{agent_id,
     unit, status, detail}`` on success. The caller validates ``agent_id``.
+
+    The restart budget (90s) belongs to :func:`hal0.services.systemd.unit_action`
+    (its ``restart`` verb timeout), not to this module; a verb that outlives it
+    surfaces as ``agent.restart_timeout``.
     """
     unit = _unit_name(agent_id)
 

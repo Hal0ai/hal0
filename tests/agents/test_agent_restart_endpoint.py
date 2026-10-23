@@ -33,9 +33,13 @@ GATEWAY_UNIT = "hermes-gateway.service"
 
 
 def _patch_unit_action(
-    monkeypatch: pytest.MonkeyPatch, *, ok: bool = True, message: str = "restarted"
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    ok: bool = True,
+    message: str = "restarted",
+    timed_out: bool = False,
 ) -> AsyncMock:
-    ua = AsyncMock(return_value={"ok": ok, "message": message})
+    ua = AsyncMock(return_value={"ok": ok, "timed_out": timed_out, "message": message})
     monkeypatch.setattr(restart_route, "unit_action", ua)
     return ua
 
@@ -68,26 +72,45 @@ async def test_restart_routes_through_unit_action(monkeypatch: pytest.MonkeyPatc
 
 
 async def test_restart_failure_raises_hal0_error(monkeypatch: pytest.MonkeyPatch) -> None:
-    _patch_unit_action(monkeypatch, ok=False, message="denied")
+    ua = _patch_unit_action(monkeypatch, ok=False, message="denied")
     with pytest.raises(Hal0Error) as e:
         await restart_route.restart_agent_unit("hermes", actor="t")
+    ua.assert_awaited_once_with(AGENT_UNIT, "restart")
     assert e.value.code == "agent.restart_failed"
     assert "denied" in str(e.value)
 
 
 async def test_restart_timeout_keeps_its_own_code(monkeypatch: pytest.MonkeyPatch) -> None:
-    """``unit_action`` reports a timeout as a failed result with a ``timed out``
-    message. The command-approvals PUT tells a timeout (outcome unknown) from a
-    hard failure by code, so the restart seam must keep ``agent.restart_timeout``.
-    """
-    _patch_unit_action(
-        monkeypatch,
-        ok=False,
-        message=f"restart {AGENT_UNIT} failed: timed out after 90s",
+    """``unit_action`` flags a timed-out verb with ``timed_out``. The
+    command-approvals PUT tells a timeout (outcome unknown) from a hard failure
+    by code, so the restart seam must raise ``agent.restart_timeout``."""
+    ua = AsyncMock(
+        return_value={"ok": False, "timed_out": True, "message": "did not return within 90s"}
     )
+    monkeypatch.setattr(restart_route, "unit_action", ua)
     with pytest.raises(Hal0Error) as e:
         await restart_route.restart_agent_unit("hermes", actor="t")
+    ua.assert_awaited_once_with(AGENT_UNIT, "restart")
     assert e.value.code == "agent.restart_timeout"
+
+
+async def test_restart_timeout_is_decided_by_the_flag_not_the_wording(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failure whose stderr merely says ``timed out`` (a D-Bus connection
+    error, say) is a hard failure: only the structural ``timed_out`` flag makes
+    a timeout."""
+    _patch_unit_action(monkeypatch, ok=False, message="Connection timed out", timed_out=False)
+    with pytest.raises(Hal0Error) as e:
+        await restart_route.restart_agent_unit("hermes", actor="t")
+    assert e.value.code == "agent.restart_failed"
+
+
+async def test_restart_failure_message_is_trimmed(monkeypatch: pytest.MonkeyPatch) -> None:
+    _patch_unit_action(monkeypatch, ok=False, message="x" * 500)
+    with pytest.raises(Hal0Error) as e:
+        await restart_route.restart_agent_unit("hermes", actor="t")
+    assert str(e.value) == "x" * 200
 
 
 def test_restart_ok_returns_restarted_status(
@@ -117,8 +140,9 @@ def test_restart_unknown_agent_returns_404(
 def test_restart_failure_surfaces_envelope(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _patch_unit_action(monkeypatch, ok=False, message="restart failed: Unit not found.")
+    ua = _patch_unit_action(monkeypatch, ok=False, message="restart failed: Unit not found.")
     r = client.post("/api/agents/hermes/restart")
+    ua.assert_awaited_once_with(AGENT_UNIT, "restart")
     assert r.status_code >= 500
     body = r.json()
     assert body["error"]["code"] == "agent.restart_failed"
@@ -154,14 +178,32 @@ def test_restart_emits_audit_log_event(client: TestClient, monkeypatch: pytest.M
 def test_restart_failure_emits_audit_log_event(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _patch_unit_action(monkeypatch, ok=False, message="denied")
+    ua = _patch_unit_action(monkeypatch, ok=False, message="denied")
     audit = _capture_audit(monkeypatch)
 
     r = client.post("/api/agents/hermes/restart")
     assert r.status_code >= 500
+    ua.assert_awaited_once_with(AGENT_UNIT, "restart")
 
     event_names = [name for name, _ in audit]
     assert event_names == ["agent.restart.invoked", "agent.restart.failed"]
+
+
+def test_restart_timeout_emits_timeout_audit_event(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ua = _patch_unit_action(
+        monkeypatch, ok=False, message="did not return within 90s", timed_out=True
+    )
+    audit = _capture_audit(monkeypatch)
+
+    r = client.post("/api/agents/hermes/restart")
+    assert r.status_code >= 500
+    assert r.json()["error"]["code"] == "agent.restart_timeout"
+    ua.assert_awaited_once_with(AGENT_UNIT, "restart")
+
+    event_names = [name for name, _ in audit]
+    assert event_names == ["agent.restart.invoked", "agent.restart.timeout"]
 
 
 def test_restart_actor_defaults_to_dashboard(
@@ -199,13 +241,40 @@ def test_gateway_restart_unknown_agent_404(
     ua.assert_not_awaited()
 
 
+def test_gateway_restart_is_gated_on_gateway_agents_not_restartable_agents(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An agent that joins the restart registry without a messaging gateway
+    still 404s on the gateway route."""
+    ua = _patch_unit_action(monkeypatch)
+    monkeypatch.setattr(restart_route, "_KNOWN_AGENT_IDS", frozenset({"hermes", "pi"}))
+    assert client.post("/api/agents/pi/restart").status_code == 200
+    r = client.post("/api/agents/pi/gateway/restart")
+    assert r.status_code == 404
+    assert r.json()["error"]["code"] == "agent.unknown"
+    ua.assert_awaited_once_with("hal0-agent@pi.service", "restart")
+
+
 def test_gateway_restart_failure_surfaces_envelope(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _patch_unit_action(monkeypatch, ok=False, message="denied")
+    ua = _patch_unit_action(monkeypatch, ok=False, message="denied")
     r = client.post("/api/agents/hermes/gateway/restart")
     assert r.status_code >= 500
     assert r.json()["error"]["code"] == "agent.restart_failed"
+    ua.assert_awaited_once_with(GATEWAY_UNIT, "restart")
+
+
+def test_gateway_restart_timeout_surfaces_timeout_code(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ua = _patch_unit_action(
+        monkeypatch, ok=False, message="did not return within 90s", timed_out=True
+    )
+    r = client.post("/api/agents/hermes/gateway/restart")
+    assert r.status_code >= 500
+    assert r.json()["error"]["code"] == "agent.restart_timeout"
+    ua.assert_awaited_once_with(GATEWAY_UNIT, "restart")
 
 
 def test_gateway_restart_emits_audit_log_events(
@@ -234,11 +303,12 @@ def test_gateway_restart_emits_audit_log_events(
 def test_gateway_restart_failure_still_emits_finished_event(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _patch_unit_action(monkeypatch, ok=False, message="denied")
+    ua = _patch_unit_action(monkeypatch, ok=False, message="denied")
     audit = _capture_audit(monkeypatch)
 
     r = client.post("/api/agents/hermes/gateway/restart")
     assert r.status_code >= 500
+    ua.assert_awaited_once_with(GATEWAY_UNIT, "restart")
 
     assert [name for name, _ in audit] == [
         "agent.gateway_restart.invoked",

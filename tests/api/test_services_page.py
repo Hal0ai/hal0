@@ -17,6 +17,7 @@ Covers the registry-driven routes in ``hal0.api.routes.services`` plus the
 from __future__ import annotations
 
 import contextlib
+import subprocess
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -28,6 +29,7 @@ from hal0.api.routes.services import router as services_router
 from hal0.services import mdns
 from hal0.services import systemd as svc_systemd
 from hal0.services.registry import SERVICES, service_by_id
+from hal0.system.seam import SeamTimeout, SystemCtlSeam
 
 _ROUTE = "hal0.api.routes.services"
 _EXPECTED_IDS = {"openwebui", "comfyui", "hermes", "hindsight"}
@@ -400,6 +402,84 @@ async def test_unit_action_rejects_unknown_verb() -> None:
 async def test_unit_action_rejects_bad_unit_name() -> None:
     with pytest.raises(ValueError):
         await svc_systemd.unit_action("evil; rm -rf /", "restart")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "exc",
+    [
+        subprocess.TimeoutExpired(["systemctl", "restart", "hal0-openwebui.service"], 90.0),
+        SeamTimeout(["systemctl", "restart", "hal0-openwebui.service"], 90.0, None),
+    ],
+    ids=["subprocess-timeout", "seam-timeout"],
+)
+async def test_unit_action_flags_a_timed_out_verb(
+    exc: Exception, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A verb that outlives its budget is reported as ``timed_out`` (outcome
+    unknown), never raised. Through the real seam the timeout is a
+    ``SeamTimeout``, not a bare ``TimeoutExpired``."""
+
+    def _raise(*_a: object, **_kw: object) -> None:
+        raise exc
+
+    monkeypatch.setattr(svc_systemd.shutil, "which", lambda _name: "/usr/bin/systemctl")
+    monkeypatch.setattr(svc_systemd._SEAM, "systemctl", _raise)
+
+    result = await svc_systemd.unit_action("hal0-openwebui.service", "restart")
+
+    assert result["ok"] is False
+    assert result["timed_out"] is True
+    assert "restart hal0-openwebui.service failed" in str(result["message"])
+
+
+@pytest.mark.asyncio
+async def test_unit_action_real_seam_timeout_is_flagged(monkeypatch: pytest.MonkeyPatch) -> None:
+    """End to end through ``SystemCtlSeam`` + ``bounded_call``: the child
+    raising ``TimeoutExpired`` surfaces from the seam as ``SeamTimeout`` and
+    ``unit_action`` still reports ``timed_out``."""
+
+    def _run(argv: list[str], **_kw: object) -> subprocess.CompletedProcess[str]:
+        raise subprocess.TimeoutExpired(argv, 90.0)
+
+    monkeypatch.setattr(svc_systemd.shutil, "which", lambda _name: "/usr/bin/systemctl")
+    monkeypatch.setattr(svc_systemd, "_SEAM", SystemCtlSeam(run=_run, is_hal0_user=lambda: True))
+
+    result = await svc_systemd.unit_action("hal0-openwebui.service", "restart")
+
+    assert result["ok"] is False
+    assert result["timed_out"] is True
+
+
+@pytest.mark.asyncio
+async def test_unit_action_hard_failure_is_not_a_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    def _run(argv: list[str], **_kw: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(argv, 1, stdout="", stderr="Connection timed out")
+
+    monkeypatch.setattr(svc_systemd.shutil, "which", lambda _name: "/usr/bin/systemctl")
+    monkeypatch.setattr(svc_systemd, "_SEAM", SystemCtlSeam(run=_run, is_hal0_user=lambda: True))
+
+    result = await svc_systemd.unit_action("hal0-openwebui.service", "restart")
+
+    assert result["ok"] is False
+    assert result["timed_out"] is False
+
+
+@pytest.mark.asyncio
+async def test_unit_action_success_is_not_a_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    def _run(argv: list[str], **_kw: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(svc_systemd.shutil, "which", lambda _name: "/usr/bin/systemctl")
+    monkeypatch.setattr(svc_systemd, "_SEAM", SystemCtlSeam(run=_run, is_hal0_user=lambda: True))
+
+    result = await svc_systemd.unit_action("hal0-openwebui.service", "restart")
+
+    assert result == {
+        "ok": True,
+        "timed_out": False,
+        "message": "restart hal0-openwebui.service: ok",
+    }
 
 
 @pytest.mark.asyncio
