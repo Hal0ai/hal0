@@ -97,6 +97,35 @@ def normalise_repo_slug(value: str) -> str:
     return repo
 
 
+# An HF repo id is exactly ``org/name``: each half starts with an
+# alphanumeric and carries only ``[A-Za-z0-9._-]`` (the Hub's own rule), so a
+# ``..`` half, a space, or a third segment never names a repo.
+_REPO_SLUG_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*$")
+
+
+def is_valid_repo_slug(repo: str) -> bool:
+    """True when ``repo`` is a canonical ``org/name`` HF repo coordinate.
+
+    Checks the already-normalised slug, not a URL: callers that accept a
+    pasted ``https://huggingface.co/...`` link run :func:`normalise_repo_slug`
+    first.
+    """
+    return bool(_REPO_SLUG_RE.match(repo)) and ".." not in repo
+
+
+def is_safe_repo_filename(filename: str) -> bool:
+    """True when ``filename`` is a relative path inside an HF repo.
+
+    A repo file may sit in a subfolder (``Q4_K_M/model-00001-of-00002.gguf``),
+    but it is never absolute, never climbs with a ``..`` segment, and never
+    uses a backslash or NUL. hal0 joins this name under the models tree, so
+    anything else could point a registry row outside it (#2775).
+    """
+    if not filename or filename.startswith("/") or "\\" in filename or "\x00" in filename:
+        return False
+    return all(part not in ("", ".", "..") for part in filename.split("/"))
+
+
 # ── Search ───────────────────────────────────────────────────────────────
 
 
