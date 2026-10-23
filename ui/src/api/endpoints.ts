@@ -229,6 +229,10 @@ export const ENDPOINTS = {
     `/api/memory/banks/${encodeURIComponent(bank)}/stats/timeseries`,
   memoryBankProfile: (bank: string) =>
     `/api/memory/banks/${encodeURIComponent(bank)}/profile`,
+  // Bank config overrides (reflect_mission, disposition_*, …) — PATCH body
+  // is `{updates: {...}}`, partial; see routes/memory_admin.py's _FORWARDS.
+  memoryBankConfig: (bank: string) =>
+    `/api/memory/banks/${encodeURIComponent(bank)}/config`,
   memoryBankGraph: (bank: string) =>
     `/api/memory/banks/${encodeURIComponent(bank)}/graph`,
   // FU2: server-side ego / top-K subgraph slice for large banks.
