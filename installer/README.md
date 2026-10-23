@@ -326,8 +326,8 @@ customize.
 # Prompts before deleting config + model data
 sudo bash installer/uninstall.sh
 
-# Keep /etc/hal0 and /var/lib/hal0 (models, registry, OpenWebUI state)
-sudo bash installer/uninstall.sh --keep-data
+# Also wipe /etc/hal0, /var/lib/hal0, the hal0 user and podman images (asks for DELETE)
+sudo bash installer/uninstall.sh --purge
 
 # No confirmation prompt (CI / scripted teardown)
 HAL0_FORCE=1 sudo bash installer/uninstall.sh

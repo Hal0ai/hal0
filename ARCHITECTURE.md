@@ -234,7 +234,7 @@ Three categories of state, three filesystem locations:
 
 Code is replaceable (every update writes a new versioned dir + flips a
 symlink). Config is preserved across updates. Runtime is preserved
-across updates and survives uninstall when `--keep-data` is passed.
+across updates and survives the default (conservative) uninstall; `--purge` removes it.
 
 Operator-authored configuration stays in TOML; machine-owned runtime
 state and model metadata move to SQLite. These are distinct concepts and

@@ -8,7 +8,6 @@
 #   sudo bash uninstall.sh --purge     # clean slate: ALSO delete /etc/hal0,
 #                                      #   /var/lib/hal0, the hal0 user+group,
 #                                      #   podman images and the fastflowlm .deb
-#   sudo bash uninstall.sh --keep-data # legacy alias for the conservative default
 #   sudo bash uninstall.sh --force     # skip the --purge DELETE confirmation
 #        bash uninstall.sh --dev       # remove dev-mode tree under $PWD/.hal0ai
 #   HAL0_FORCE=1 sudo -E bash uninstall.sh # equivalent to --force
@@ -26,7 +25,7 @@
 # /etc/hal0 (config) and /var/lib/hal0 (models, registry, OpenWebUI state)
 # so a re-install reuses them.
 #
-# --purge (== --clean-slate) ALSO removes: /etc/hal0, /var/lib/hal0,
+# --purge ALSO removes: /etc/hal0, /var/lib/hal0,
 # the hal0 system user AND group, all hal0/toolbox podman IMAGES, and the
 # fastflowlm .deb — a true clean slate for fresh test installs.
 #
@@ -112,33 +111,32 @@ rm_path() {
 
 # ── Parse flags ───────────────────────────────────────────────────────────────
 # Default is now CONSERVATIVE: keep /etc/hal0 + /var/lib/hal0 (models) so a
-# re-install reuses them. --purge (== --clean-slate) flips PURGE=1 to wipe
-# config, data, the system user/group, and podman images for a true reset.
-# --keep-data is retained as an explicit alias of the conservative default
-# (back-compat for old runbooks / the `hal0 uninstall --keep-data` wrapper).
+# re-install reuses them. --purge flips PURGE=1 to wipe config, data, the
+# system user/group, and podman images for a true reset. There are no aliases:
+# --keep-data and --clean-slate are gone (#2866), and an unknown flag is an
+# error (exit 2) rather than a warning, so a removed spelling can never fall
+# through to a run the operator did not ask for.
 PURGE=0
 DEV_MODE=0
 HAL0_FORCE="${HAL0_FORCE:-0}"
 
 for arg in "$@"; do
     case "$arg" in
-        --purge|--clean-slate) PURGE=1 ;;
-        --keep-data) PURGE=0 ;;   # explicit conservative (now the default)
+        --purge)     PURGE=1 ;;
         --force)     HAL0_FORCE=1 ;;
         --dev)       DEV_MODE=1 ;;
         --help|-h)
             cat <<'EOF'
-Usage: uninstall.sh [--purge|--clean-slate] [--keep-data] [--force] [--dev]
+Usage: uninstall.sh [--purge] [--force] [--dev]
 
   (default)      Conservative teardown: stop services, remove code/units/
                  venvs/binaries and every hal0 podman container, but KEEP
                  /etc/hal0 (config) and /var/lib/hal0 (models, registry,
                  OpenWebUI state) so a re-install reuses them.
   --purge        Clean slate: everything the default removes, PLUS /etc/hal0,
-  --clean-slate    /var/lib/hal0, the hal0 system user+group, all hal0/toolbox
+                 /var/lib/hal0, the hal0 system user+group, all hal0/toolbox
                  podman images, and the fastflowlm .deb. Prompts for DELETE
                  confirmation unless --force / HAL0_FORCE=1.
-  --keep-data    Explicit conservative mode (alias of the default).
   --force        Skip the --purge DELETE confirmation prompt.
   --dev          Remove the dev-mode tree under $PWD/.hal0ai (or $HAL0_PREFIX);
                  no systemd / system-user / PATH-symlink operations performed.
@@ -155,7 +153,7 @@ something could not be removed.
 EOF
             exit 0
             ;;
-        *) warn "Unknown flag: $arg (ignored)" ;;
+        *) error "Unknown flag: $arg (see --help)"; exit 2 ;;
     esac
 done
 
@@ -580,7 +578,7 @@ else
 fi
 
 # ── First-run claim lockfile ──────────────────────────────────────────────────
-# Always cleaned up — even in the conservative (keep-data) default — because
+# Always cleaned up — even in the conservative (default) mode — because
 # the lockfile only has meaning during the first-run claim window, and a
 # leftover OTP after an uninstall is a credential lying around with no
 # semantics. Belt-and-braces even though the file lives under ${VAR_DIR}
@@ -609,7 +607,7 @@ if [[ "${DEV_MODE}" -eq 1 && -d "${PREFIX}" ]]; then
     fi
 fi
 
-# ── podman/docker images (clean-slate only) ───────────────────────────────────
+# ── podman/docker images (--purge only) ───────────────────────────────────
 # install.sh + the providers pull a stack of toolbox/serving images
 # (open-webui, hal0-toolbox-{vulkan,rocm,flm,kokoro}, comfyui). These are
 # large (multi-GB) and survive a code uninstall. The conservative default
@@ -640,7 +638,7 @@ if [[ "${DEV_MODE}" -eq 0 && "${PURGE}" -eq 1 ]]; then
     done
 fi
 
-# ── System user + group (clean-slate only) ────────────────────────────────────
+# ── System user + group (--purge only) ────────────────────────────────────
 # The hal0 system user owns ${VAR_DIR} content. The conservative default keeps
 # ${VAR_DIR}, so it MUST keep the user too (else the kept data is left orphaned
 # with a numeric uid that a later user could reuse). --purge removes both.
@@ -673,7 +671,7 @@ if [[ "${DEV_MODE}" -eq 0 && "${PURGE}" -eq 1 ]]; then
     fi
 fi
 
-# ── FLM .deb (clean-slate, apt hosts only) ────────────────────────────────────
+# ── FLM .deb (--purge, apt hosts only) ────────────────────────────────────
 # install.sh installs the `fastflowlm` .deb on Debian/Ubuntu hosts (NPU
 # host probe + device sanity). Reverse it under --purge only — it's a hal0-
 # specific package, but on a shared box a user may have grown to depend on it,

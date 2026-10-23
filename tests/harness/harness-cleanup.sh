@@ -8,7 +8,7 @@
 # Rows:
 #   stop-api               kill the hal0 serve PID from the handoff
 #   dev-manual-cleanup     rm -rf the dev prefix (the dev-mode equivalent of uninstall.sh)
-#   prod-uninstall         sudo installer/uninstall.sh --keep-data   (opt-in via HAL0_HARNESS_PROD=1)
+#   prod-uninstall         sudo installer/uninstall.sh              (opt-in via HAL0_HARNESS_PROD=1)
 #   no-residue             assert nothing left under /tmp/hal0-h-* or PREFIX
 
 set -euo pipefail
@@ -97,9 +97,9 @@ elif ! sudo -n true 2>/dev/null; then
     add_row "prod-uninstall" "skip" "$(since_ms "${start}")" "sudo -n not available"
 else
     LOG_U="${SCRIPT_DIR}/reports/prod-uninstall.log"
-    if HAL0_FORCE=1 sudo -E bash "${REPO_ROOT}/installer/uninstall.sh" --keep-data >"${LOG_U}" 2>&1; then
+    if HAL0_FORCE=1 sudo -E bash "${REPO_ROOT}/installer/uninstall.sh" >"${LOG_U}" 2>&1; then
         if [[ ! -f /etc/systemd/system/hal0-api.service ]] && [[ -d /etc/hal0 ]]; then
-            add_row "prod-uninstall" "pass" "$(since_ms "${start}")" "--keep-data: units removed, /etc/hal0 preserved"
+            add_row "prod-uninstall" "pass" "$(since_ms "${start}")" "conservative default: units removed, /etc/hal0 preserved"
         else
             add_row "prod-uninstall" "fail" "$(since_ms "${start}")" \
                 "post-uninstall state wrong: api unit present=$( [[ -f /etc/systemd/system/hal0-api.service ]] && echo yes || echo no ); /etc/hal0 present=$( [[ -d /etc/hal0 ]] && echo yes || echo no )"

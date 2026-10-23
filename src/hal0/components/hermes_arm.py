@@ -104,7 +104,7 @@ def installed_hermes_pin(venv: Path | None = None) -> str | None:
 
     Gated on the venv actually existing: a deprovisioned box (venv
     removed, stamp file surviving under ``var_lib()`` — state is preserved
-    across uninstall unless ``--keep-data`` is dropped) must read as
+    across a conservative uninstall; only ``--purge`` removes it) must read as
     ``None``, not as a stale "converged"/"pending" verdict, or the
     component-status derivation (spec §1 / Task 8) misreports an
     uninstalled component as still on some version.

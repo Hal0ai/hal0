@@ -169,8 +169,8 @@ def test_failed_build_or_activation_names_a_real_remedy(tmp_path, status) -> Non
 
 
 def test_deprovisioned_with_stale_stamp_reads_none(tmp_path) -> None:
-    # State (var_lib()) is preserved across an uninstall unless --keep-data
-    # is dropped, so a stamp file can outlive the venv it describes. That
+    # State (var_lib()) is preserved across a conservative uninstall (only
+    # --purge removes it), so a stamp file can outlive the venv it describes. That
     # must read as "not installed", not as a stale converged/pending
     # verdict (Task 8's status derivation depends on this).
     hermes_arm.stamp_path().parent.mkdir(parents=True, exist_ok=True)

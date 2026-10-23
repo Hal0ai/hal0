@@ -118,7 +118,7 @@ def api_env() -> Path:
 def var_lib() -> Path:
     """Return the hal0 runtime state root (/var/lib/hal0 or $HAL0_HOME/var-lib/hal0).
 
-    Preserved across updates.  Survives uninstall when --keep-data is passed.
+    Preserved across updates.  Survives the default (conservative) uninstall.
     """
     home = _hal0_home()
     if home is not None:
@@ -209,7 +209,7 @@ def db_path() -> Path:
     ``hal0.db.connection``): the model registry (ML-1), and later
     PortAuthority/metrics/runtime-state tables, all live in this one file.
     Same Runtime tier as :func:`activity_db` — preserved across updates and
-    survives uninstall with ``--keep-data``. Under HAL0_HOME it lands in the
+    survives the default (conservative) uninstall. Under HAL0_HOME it lands in the
     tmp tree, so tests are auto-isolated.
     """
     return var_lib() / "hal0.db"

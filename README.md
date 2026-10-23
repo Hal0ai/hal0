@@ -195,7 +195,7 @@ passthrough still needs the privileged-LXC recipe. See
 
 ```sh
 hal0 uninstall                 # prompts before deleting config + model data
-hal0 uninstall --keep-data     # keep /etc/hal0 and /var/lib/hal0
+hal0 uninstall --purge         # also wipe /etc/hal0, /var/lib/hal0, the hal0 user and images
 ```
 
 ## First ten minutes
