@@ -293,3 +293,10 @@ def test_a_profile_unit_with_the_same_name_is_not_read_as_the_default_gateway(
     ac._install_hermes_gateway()
     probed = [c for c in calls if c[:2] == ["systemctl", "is-enabled"]]
     assert probed and probed[0][-1] == UNIT
+
+
+def test_runtime_only_enablement_is_kept_on_reinstall(monkeypatch, tmp_path) -> None:
+    calls = _setup(monkeypatch, tmp_path, state="enabled-runtime")
+    ac._install_hermes_gateway()
+    assert ["systemctl", "enable", "--runtime", "--now", UNIT] in calls
+    assert ["systemctl", "enable", "--now", UNIT] not in calls

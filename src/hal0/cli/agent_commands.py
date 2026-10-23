@@ -1305,9 +1305,11 @@ def _install_hermes_gateway() -> None:
     # `write-gateway-dropin` — because that one is reached by the provisioner
     # running as the unprivileged hal0 user. Different caller, different rule.)
     _subprocess.run(["systemctl", "daemon-reload"], check=False)  # nosec B603 B607
-    rc = _subprocess.run(  # nosec B603 B607
-        ["systemctl", "enable", "--now", "hermes-gateway.service"], check=False
-    ).returncode
+    # enabled-runtime lasts until the next boot; keep it that way (#2946 review).
+    enable_argv = ["systemctl", "enable", "--now", "hermes-gateway.service"]
+    if state == "enabled-runtime":
+        enable_argv.insert(2, "--runtime")
+    rc = _subprocess.run(enable_argv, check=False).returncode  # nosec B603 B607
     if rc != 0:
         console.print(
             "[yellow]hermes-gateway enable returned non-zero — continuing "

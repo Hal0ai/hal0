@@ -2485,3 +2485,24 @@ def test_gateway_unit_names_upstreams_hashed_unit(tmp_path) -> None:
     )
     assert c.status == "fail" and c.critical is False
     assert "hermes-gateway-1975ce4b.service" in c.detail and "sudo hal0 update" in c.detail
+
+
+def test_gateway_unit_flags_both_units_installed(tmp_path) -> None:
+    """An interrupted move leaves both files; the live gateway may be the suffixed one."""
+    home = tmp_path / "hermes"
+    home.mkdir()
+    (home / "config.yaml").write_text("model: x\n")
+    units = tmp_path / "units"
+    units.mkdir()
+    fixture = (
+        Path(__file__).resolve().parents[1]
+        / "fixtures"
+        / "hermes"
+        / "gateway-unit-hashed-v0.22.4.service"
+    )
+    (units / "hermes-gateway-1975ce4b.service").write_text(fixture.read_text())
+    (units / "hermes-gateway.service").write_text("[Unit]\n")
+    c = da.check_hermes_gateway_unit(
+        home=home, unit_path=units / "hermes-gateway.service", proc=_proc(tmp_path, [])
+    )
+    assert c.status == "fail" and "both hermes-gateway.service" in c.detail

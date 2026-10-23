@@ -4110,7 +4110,10 @@ else
             # would otherwise emit a scary "Unit file … does not exist" error
             # and trip the ERR trap. Skip honestly with a warning instead.
             systemctl daemon-reload
-            systemctl enable --now hermes-gateway.service \
+            # enabled-runtime lasts until the next boot; keep it that way.
+            _gw_runtime=()
+            [[ "${_gateway_state}" == "enabled-runtime" ]] && _gw_runtime=(--runtime)
+            systemctl enable ${_gw_runtime[@]+"${_gw_runtime[@]}"} --now hermes-gateway.service \
                 || warn "hermes-gateway enable returned non-zero — continuing (check 'journalctl -u hermes-gateway -n 40')"
             if wait_active hermes-gateway.service 20; then
                 info "hermes-gateway is running (Telegram/Discord)"

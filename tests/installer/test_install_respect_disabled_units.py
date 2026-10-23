@@ -432,3 +432,12 @@ def test_a_disabled_suffixed_unit_keeps_a_rerun_from_turning_the_gateway_on(
     assert "python -m hal0.agents.hermes_gateway_regen state" in box.log()
     assert "enable --now hermes-gateway.service" not in box.log()
     assert "hermes-gateway.service is disabled; left as is" in res.stdout
+
+
+def test_runtime_only_enablement_stays_runtime_only(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("EFFECTIVE_GATEWAY_STATE", "enabled-runtime 1")
+    box = Box(tmp_path)
+    box.provisioned()
+    res = box.run(HERMES_BLOCK)
+    assert res.returncode == 0, res.stderr
+    assert "enable --runtime --now hermes-gateway.service" in box.log()
