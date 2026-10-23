@@ -200,8 +200,17 @@ Two concepts sit alongside plain facts:
     answer is kept refreshed from memory rather than re-derived on every
     ask. Created with a `name` and `source_query`; the first answer builds
     as an async operation, and later refreshes are triggered manually with
-    `memory_mental_model_refresh`; a mental model can be marked `is_stale`, surfaced in the
-    dashboard as a warning badge.
+    `memory_mental_model_refresh`. Each row in the dashboard shows when the
+    model last refreshed. Hindsight's `is_stale` only means the bank was
+    written since then, which on a busy bank is nearly always true, so it is
+    a quiet dot ("new memories since"), not a warning; the warning and a
+    "refresh failed" chip are kept for a refresh that failed after the last
+    success. Each bank has a refresh floor
+    (`mental_model_min_refresh_interval_seconds`: after every consolidation,
+    or at most hourly, every 4 h, every 12 h or daily) set from the bank bar
+    or with `hal0 memory bank profile set <bank> --min-refresh-interval
+    <seconds>`; a model with its own `trigger.min_refresh_interval_seconds`
+    keeps that instead.
   </Card>
 </CardGrid>
 

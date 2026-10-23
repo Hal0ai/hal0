@@ -169,6 +169,18 @@ by anyone who can reach the API):
   box). Deleting `HAL0_ADMIN_KEY` would disarm every future login and deleting
   `HAL0_PORT`/`HAL0_UI_DIST` would break the service on next restart — this is the
   control introduced after #1450.
+- **Process-control names** (1.6.0, #2936): a name that changes how processes load
+  code or find programs is refused on POST/PUT with `403 secret.protected`
+  (`details.reason: "process_control"`), because `api.env` is hal0-api's own
+  environment and every process it starts inherits it. Refused: `PATH`, `HOME`,
+  `SHELL`, `IFS`, `ENV`, `BASH_ENV`, `NODE_OPTIONS`, `NODE_PATH`,
+  `NODE_EXTRA_CA_CERTS`, `PERL5OPT`, `PERL5LIB`, `RUBYOPT`, `GCONV_PATH`,
+  `SHELLOPTS`, `BASHOPTS`, `PS4`, `HERMES_HOME`, and any name starting with `LD_`,
+  `DYLD_`, `PYTHON`, `UV_`, `PIP_`, `NPM_CONFIG_` or `GIT_`. DELETE still accepts
+  them, so an entry written before 1.6.0 can be removed. The provider credentials
+  route (`POST /api/providers/{name}/credentials`) refuses the same names and any
+  `HAL0_*` name with a 400, and so does an upstream's `auth_value_env` on create or
+  patch.
 - **Value grammar**: non-empty and printable (`str.isprintable()`). Control
   characters — including the higher-codepoint line separators `U+0085`/`U+2028`/
   `U+2029`, not just the ASCII C0 set — are rejected as `400 secret.value_invalid`,
