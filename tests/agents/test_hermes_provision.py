@@ -6118,3 +6118,24 @@ def test_smoke_hermes_doctor_fails_on_other_exit_codes(tmp_path: Path) -> None:
     ok, detail = _doctor_probe(tmp_path, 2, out)
     assert not ok
     assert detail == "rc=2"
+
+
+def test_smoke_hermes_doctor_fails_when_the_list_is_shorter_than_its_count(tmp_path: Path) -> None:
+    """An empty or multi-line issue would end the parse early and hide what
+    follows it; a count mismatch fails instead."""
+    out = _doctor_output(
+        "Run 'hermes setup' to configure API keys",
+        "",
+        "Run 'hermes setup' to migrate config",
+    )
+    ok, detail = _doctor_probe(tmp_path, 1, out)
+    assert not ok
+    assert "no issue list" in detail
+
+
+def test_smoke_hermes_doctor_reads_the_last_summary(tmp_path: Path) -> None:
+    echoed = _doctor_output("Run 'hermes setup' to configure API keys")
+    real = _doctor_output("Run 'hermes setup' to migrate config")
+    ok, detail = _doctor_probe(tmp_path, 1, echoed + real)
+    assert not ok
+    assert detail == "rc=1: Run 'hermes setup' to migrate config"

@@ -7997,8 +7997,10 @@ def _smoke_wrapper_ready(_state: BootstrapState, io: InstallIO) -> tuple[bool, s
 #: provider keys in its vault, so Hermes' `.env` holds no provider key
 #: (hermes_cli/doctor_config.py `_check_env_file`), and the optional tools that
 #: want their own keys (discord, x_search, ...) stay unconfigured
-#: (doctor_tools.py `_check_tool_availability`). Matched exactly: any other
-#: issue, or a reworded one after a pin bump, still fails the probe.
+#: (doctor_tools.py `_check_tool_availability`; the same line also covers a
+#: selected but unconfigured web backend, which hal0 does not set up).
+#: Matched exactly: any other issue, or a reworded one after a pin bump, still
+#: fails the probe.
 _HERMES_DOCTOR_ADVISORY_ISSUES = frozenset(
     {
         "Run 'hermes setup' to configure API keys",
@@ -8015,21 +8017,25 @@ def _hermes_doctor_issues(stdout: str) -> list[str] | None:
     """The issues `hermes doctor` listed in its summary, or None when it printed none.
 
     At the v0.22.4 pin `hermes doctor` exits 1 exactly when that list is
-    non-empty (doctor.py `run_doctor`). None means the summary is missing or
-    unrecognised, which the caller treats as a failure.
+    non-empty (doctor.py `run_doctor`). None means the summary is missing,
+    unrecognised, or holds a different number of entries than its own count,
+    which the caller treats as a failure.
     """
     # Hermes colours its output only on a TTY; strip SGR codes in case that changes.
     lines = re.sub(r"\x1b\[[0-9;]*m", "", stdout).splitlines()
-    for i, line in enumerate(lines):
-        if re.search(r"Found \d+ issue\(s\) to address:", line):
-            issues = []
-            for entry in lines[i + 1 :]:
-                match = _HERMES_DOCTOR_ISSUE_RE.match(entry)
-                if match:
-                    issues.append(match.group("issue"))
-                elif issues and entry.strip():
-                    break
-            return issues or None
+    # The summary prints last; a check's own output could echo its header.
+    for i in range(len(lines) - 1, -1, -1):
+        header = re.search(r"Found (\d+) issue\(s\) to address:", lines[i])
+        if header is None:
+            continue
+        issues = []
+        for entry in lines[i + 1 :]:
+            match = _HERMES_DOCTOR_ISSUE_RE.match(entry)
+            if match:
+                issues.append(match.group("issue"))
+            elif issues and entry.strip():
+                break
+        return issues if issues and len(issues) == int(header.group(1)) else None
     return None
 
 
