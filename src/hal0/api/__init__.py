@@ -35,6 +35,9 @@ from hal0.api.agents import (
     personas as agents_personas_routes,
 )
 from hal0.api.agents import (
+    repair as agents_repair_routes,
+)
+from hal0.api.agents import (
     restart as agents_restart_routes,
 )
 from hal0.api.auth import AuthEnforcementMiddleware
@@ -2970,6 +2973,17 @@ def create_app() -> FastAPI:
         agents_restart_routes.router,
         prefix="/api/agents",
         tags=["agents", "restart"],
+    )
+
+    # Hermes repair job. POST /api/agents/hermes/repair registers a tracked job
+    # in the updater's registry (phase ``repair:hermes``) and runs the
+    # provisioner with --repair in a child process; progress is read through
+    # GET /api/updates/status/{id}. Same ``/api/agents`` prefix, so the exposure
+    # rule classifies it ADMIN like the restart routes. Audit: agent.repair.*.
+    app.include_router(
+        agents_repair_routes.router,
+        prefix="/api/agents",
+        tags=["agents", "repair"],
     )
 
     # Hermes command approvals (Hermes's approvals.mode: smart | manual).

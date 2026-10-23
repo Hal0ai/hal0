@@ -807,6 +807,8 @@ async def update_status(job_id: str, request: Request) -> dict[str, Any]:
     """
     jobs = _update_jobs(request)
     job = jobs.get(job_id)
+    # Task 12: a "running" repair job whose api_pid is gone is failed here
+    # (error_code "api_restarted") before the snapshot is returned.
     if job is None:
         persisted = _load_persisted_job(job_id)
         if persisted is not None:
