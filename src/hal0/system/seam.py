@@ -35,7 +35,9 @@ from __future__ import annotations
 import os
 import pwd
 import re
+import shutil
 import subprocess
+import sys
 from collections.abc import Callable, Sequence
 from pathlib import Path
 
@@ -96,6 +98,10 @@ AGENT_UNIT_VERBS: dict[str, str] = {
 COMPANION_SERVICE_UNITS: dict[str, str] = {
     "hal0-openwebui.service": "openwebui",
     "hindsight-api.service": "hindsight",
+    # The wrapper's svc-* map already carries this key (#1863); without the
+    # client-side spelling the unprivileged API's restart fell through to bare
+    # systemctl and polkit denied it (#2913).
+    "hermes-gateway.service": "hermes-gateway",
 }
 
 #: Fixed, literal drop-in the memory extraction slot / LLM timeout ride on
@@ -191,6 +197,38 @@ def is_hal0_service_user() -> bool:
     except KeyError:
         return False
     return os.geteuid() == hal0_uid
+
+
+def hal0_service_home() -> str:
+    """The hal0 service user's home dir (``/var/lib/hal0`` fallback)."""
+    try:
+        return pwd.getpwnam("hal0").pw_dir or "/var/lib/hal0"
+    except KeyError:
+        return "/var/lib/hal0"
+
+
+def running_hal0_bin() -> str:
+    """The ``hal0`` console script belonging to the code that is running.
+
+    #2092: the privilege-drop re-exec used to resolve its target with
+    ``shutil.which("hal0")`` — whatever is first on PATH, which is not
+    necessarily the tree doing the re-exec. On a box carrying a stale wrapper
+    at ``/usr/local/bin/hal0`` (#1844 documents exactly that condition), an
+    operator running the CURRENT ``/usr/lib/hal0/venv/bin/hal0 agent
+    reprovision hermes`` as root had it silently re-exec an rc.3 build, which
+    then resolved its installer root relative to its own package location and
+    failed with a path that exists in no release
+    (``/usr/local/lib/python3.12/installer/...``).
+
+    A venv install puts the console script next to the interpreter, so
+    ``sys.executable``'s sibling names the running tree exactly. Fall back to
+    PATH (dev checkouts invoked as ``python -m`` have no sibling script), then
+    to the bare name so the caller still produces a runnable argv.
+    """
+    sibling = Path(sys.executable).with_name("hal0")
+    if sibling.is_file() and os.access(sibling, os.X_OK):
+        return str(sibling)
+    return shutil.which("hal0") or "hal0"
 
 
 def agent_unit_name(agent_id: str) -> str:

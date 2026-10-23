@@ -23,6 +23,7 @@ from hal0.agents import hermes_command_approvals as cmd
 from hal0.agents import hermes_provision as hp
 from hal0.api import auth as auth_mod
 from hal0.api.agents import command_approvals as routes
+from hal0.api.agents import overview as overview_route
 from hal0.api.agents import restart as restart_seam
 from hal0.api.middleware import error_codes
 from hal0.errors import Hal0Error
@@ -261,3 +262,93 @@ def test_restart_timeout_code_matches_the_seam() -> None:
     import inspect
 
     assert f'code="{cmd.RESTART_TIMEOUT_CODE}"' in inspect.getsource(restart_seam)
+
+
+# ── the cached overview ──────────────────────────────────────────────────────
+
+
+@pytest.fixture
+def invalidated(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Every ``overview.invalidate`` call the routes make."""
+    seen: list[str] = []
+    monkeypatch.setattr(overview_route, "invalidate", seen.append)
+    return seen
+
+
+def test_put_drops_the_cached_overview_once_the_mode_is_written(
+    box: dict[str, Any], client: TestClient, invalidated: list[str]
+) -> None:
+    assert client.put(PATH, json={"mode": "manual"}).status_code == 200
+
+    assert invalidated == ["hermes"]
+
+
+def test_put_that_changes_nothing_leaves_the_cached_overview_alone(
+    box: dict[str, Any], client: TestClient, invalidated: list[str]
+) -> None:
+    assert client.put(PATH, json={"mode": "manual"}).status_code == 200
+    body = client.put(PATH, json={"mode": "manual"}).json()
+
+    assert body["changed"] is False
+    assert invalidated == ["hermes"]
+
+
+def test_put_that_saved_the_mode_under_an_override_still_drops_it(
+    box: dict[str, Any], client: TestClient, tmp_path: Path, invalidated: list[str]
+) -> None:
+    (tmp_path / "overrides.yaml").write_text("approvals:\n  mode: smart\n")
+
+    assert client.put(PATH, json={"mode": "manual"}).json()["restart"] == "skipped-overridden"
+
+    assert invalidated == ["hermes"]
+
+
+def test_put_that_times_out_restarting_still_drops_it(
+    box: dict[str, Any],
+    client: TestClient,
+    invalidated: list[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The new mode is kept on disk when the restart outcome is unknown."""
+
+    async def _timeout(agent_id: str, *, actor: str) -> dict[str, str]:
+        raise Hal0Error("did not return", code=cmd.RESTART_TIMEOUT_CODE)
+
+    monkeypatch.setattr(restart_seam, "restart_agent_unit", _timeout)
+    res = client.put(PATH, json={"mode": "manual"})
+
+    assert res.json()["restart"] == "timeout"
+    assert invalidated == ["hermes"]
+
+
+@pytest.mark.parametrize("payload", [{"mode": "off"}, {}, ["manual"]])
+def test_put_rejected_leaves_the_cached_overview_alone(
+    box: dict[str, Any], client: TestClient, invalidated: list[str], payload: Any
+) -> None:
+    assert client.put(PATH, json=payload).status_code == 400
+
+    assert invalidated == []
+
+
+def test_put_that_failed_and_rolled_back_leaves_the_cached_overview_alone(
+    box: dict[str, Any], client: TestClient, invalidated: list[str]
+) -> None:
+    box["calls"]["fail"] = True
+
+    assert client.put(PATH, json={"mode": "manual"}).status_code == 500
+
+    assert invalidated == []
+
+
+def test_put_refused_for_who_asked_or_what_agent_leaves_the_cached_overview_alone(
+    box: dict[str, Any], client: TestClient, invalidated: list[str]
+) -> None:
+    assert (
+        client.put(PATH, json={"mode": "manual"}, headers={"X-hal0-Agent": "hermes"}).status_code
+        == 403
+    )
+    assert (
+        client.put("/api/agents/pi/command-approvals", json={"mode": "manual"}).status_code == 404
+    )
+
+    assert invalidated == []

@@ -95,9 +95,16 @@ async def put_command_approvals(agent_id: str, request: Request) -> dict[str, An
     async def _restart() -> dict[str, Any]:
         return await restart_seam.restart_agent_unit(agent_id, actor=actor)
 
-    return await cmd_approvals.apply_mode(
+    result = await cmd_approvals.apply_mode(
         body["mode"], actor=actor, unit_active=_unit_active, restart=_restart
     )
+    if result.get("changed"):
+        # The card shows the mode and whether it is in sync: drop the cached build.
+        # Imported here, like the Hermes module above (GP15).
+        from hal0.api.agents.overview import invalidate
+
+        invalidate(agent_id)
+    return result
 
 
 __all__ = ["OPERATOR_ACTORS", "router"]

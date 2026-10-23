@@ -342,7 +342,7 @@ def test_stays_green_after_update_job_image_cache_and_chat_template_writes(
     old_umask = os.umask(0o022)  # the shipped hal0-api unit's umask
     try:
         # 1. update job persist -> update-jobs/<id>.json (dir born by the writer)
-        _persist_job({"id": "job-1", "state": "queued"})
+        _persist_job({"id": "0123456789ab", "state": "queued"})
         assert _mode_drift(table) == [], "drift after an update-job persist"
 
         # 2. image-gen write -> images/cache/<uuid>.png (dir born by the writer)

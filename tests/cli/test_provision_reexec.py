@@ -19,6 +19,7 @@ executing — and that is what must be preferred.
 
 from __future__ import annotations
 
+import shutil
 import sys
 from pathlib import Path
 
@@ -41,7 +42,7 @@ def test_prefers_the_console_script_next_to_the_running_interpreter(
     stale.parent.mkdir(parents=True)
     stale.write_text("#!/usr/bin/python3\n", encoding="utf-8")
     stale.chmod(0o755)
-    monkeypatch.setattr(agent_commands.shutil, "which", lambda _n: str(stale))
+    monkeypatch.setattr(shutil, "which", lambda _n: str(stale))
 
     assert agent_commands._running_hal0_bin() == str(running)
 
@@ -52,7 +53,7 @@ def test_falls_back_to_path_when_no_sibling_script_exists(
     """A dev checkout run via ``python -m`` has no sibling console script; the
     old behaviour is still the best available answer there."""
     monkeypatch.setattr(sys, "executable", str(tmp_path / "nowhere" / "python"))
-    monkeypatch.setattr(agent_commands.shutil, "which", lambda _n: "/usr/bin/hal0")
+    monkeypatch.setattr(shutil, "which", lambda _n: "/usr/bin/hal0")
 
     assert agent_commands._running_hal0_bin() == "/usr/bin/hal0"
 
@@ -61,7 +62,7 @@ def test_falls_back_to_the_bare_name_when_nothing_resolves(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(sys, "executable", str(tmp_path / "nowhere" / "python"))
-    monkeypatch.setattr(agent_commands.shutil, "which", lambda _n: None)
+    monkeypatch.setattr(shutil, "which", lambda _n: None)
 
     assert agent_commands._running_hal0_bin() == "hal0"
 
@@ -77,7 +78,7 @@ def test_provision_reexec_uses_the_running_binary(
     running.write_text("#!/bin/sh\n", encoding="utf-8")
     running.chmod(0o755)
     monkeypatch.setattr(sys, "executable", str(venv_bin / "python"))
-    monkeypatch.setattr(agent_commands.shutil, "which", lambda _n: "/usr/local/bin/hal0")
+    monkeypatch.setattr(shutil, "which", lambda _n: "/usr/local/bin/hal0")
 
     monkeypatch.setattr(agent_commands.os, "geteuid", lambda: 0)
     monkeypatch.setattr(agent_commands, "_hermes_root_prelude", lambda _env: None)

@@ -28,6 +28,13 @@ miss, so the state a converge or repair leaves behind is never served from
 before it. Other routes call :func:`invalidate` after they change what the
 overview reports. The cheap live fields (unit state, pending approvals, the
 running job, ``status`` and ``phase``) are recomputed on every request.
+
+A build is capped at :data:`_BUILD_TIMEOUT_S`. One that runs past it is replaced
+by a neutral build (every probe "unknown", ``partial: true``), cached like any
+other, so a stalled probe costs one slow request per cache window rather than
+one per poll, and the waiters of that build all get the same answer. The
+configured-platform names, whose vault read goes through ``sudo``, are cached
+apart for :data:`_PLATFORMS_TTL_S`.
 """
 
 from __future__ import annotations
@@ -70,6 +77,17 @@ router = APIRouter()
 #: is not free.
 _CACHE_TTL_S: Final[float] = 30.0
 
+#: The longest a build may take. The probes carry their own timeouts (1-2 s); this
+#: bounds the sum of what they cannot (a wedged ``sudo``, a hung ``systemctl``,
+#: the doctor's interpreter check), so the route answers inside the dashboard's
+#: poll interval rather than hanging a request on each of them in turn.
+_BUILD_TIMEOUT_S: Final[float] = 8.0
+
+#: How long the configured-platform names are reused. They come from a ``sudo``
+#: vault read, and only an operator action (which calls :func:`invalidate`)
+#: changes them.
+_PLATFORMS_TTL_S: Final[float] = 300.0
+
 
 @dataclass(frozen=True)
 class _Entry:
@@ -108,6 +126,14 @@ _inflight: dict[str, _Flight] = {}
 #: ``name -> time of its last invalidation``. A build that started earlier does
 #: not store its result.
 _invalidated: dict[str, float] = {}
+
+#: ``(hermes home, secrets vault) -> (when the probe finished, names)``.
+_platforms_cache: dict[tuple[str, str], tuple[float, list[str]]] = {}
+
+#: Bumped whenever :data:`_platforms_cache` is dropped. A probe that started under an
+#: earlier value read from before the change that dropped the cache, so it does not
+#: store its answer.
+_platforms_generation = 0
 
 _GATEWAY_UNIT: Final[str] = "hermes-gateway.service"
 
@@ -182,6 +208,15 @@ def invalidate(name: str) -> None:
     _cache.pop(name, None)
     _inflight.pop(name, None)
     _invalidated[name] = _now()
+    if name == "hermes":
+        _forget_platforms()
+
+
+def _forget_platforms() -> None:
+    """Drop the cached platform names, and make a probe already running not store its answer."""
+    global _platforms_generation
+    _platforms_cache.clear()
+    _platforms_generation += 1
 
 
 def provision_path() -> Path:
@@ -500,6 +535,29 @@ def _installed_record(name: str) -> AgentRecord | None:
     return next((rec for rec in agents_routes._manager().list() if rec.name == name), None)
 
 
+async def _platform_names(home: Path, secrets_env: Path | None, seam: str | None) -> list[str]:
+    """The configured platforms, from the cache while it is younger than the TTL.
+
+    A probe that raises is not cached (and answers empty), so the next build
+    tries again. A probe running when the cache is dropped (:func:`invalidate`, or a
+    refresh) still answers its own build but does not store what it read, which
+    may predate the change.
+    """
+    key = (str(home), str(secrets_env))
+    held = _platforms_cache.get(key)
+    if held is not None and _now() - held[0] < _PLATFORMS_TTL_S:
+        return list(held[1])
+    generation = _platforms_generation
+    try:
+        names = await asyncio.to_thread(configured_platform_names, home, secrets_env, seam=seam)
+    except Exception as exc:
+        log.warning("agents.overview.gather_failed", gather="platforms", error=str(exc))
+        return []
+    if generation == _platforms_generation:
+        _platforms_cache[key] = (_now(), names)
+    return list(names)
+
+
 async def _gather_hermes(request: Request) -> dict[str, Any]:
     """The slow half of an installed Hermes' overview. Never raises.
 
@@ -521,7 +579,6 @@ async def _gather_hermes(request: Request) -> dict[str, Any]:
     seam = _HAL0_AGENTENV if os.geteuid() != 0 else None
 
     no_releases: tuple[Release | None, Release | None] = (None, None)
-    no_platforms: list[str] = []
     no_health: tuple[bool, list[str]] = (False, [])
     no_gateway = _Gateway(None, None, False)
 
@@ -536,14 +593,7 @@ async def _gather_hermes(request: Request) -> dict[str, Any]:
                 asyncio.wait_for(get_agent_memory_stats("hermes", request), _MEMORY_TIMEOUT_S),
                 None,
             ),
-            _in_thread(
-                "platforms",
-                no_platforms,
-                configured_platform_names,
-                home,
-                HERMES_SECRETS_ENV,
-                seam=seam,
-            ),
+            _platform_names(home, HERMES_SECRETS_ENV, seam),
         ),
         asyncio.gather(
             _in_thread("releases", no_releases, _read_releases, layout),
@@ -654,17 +704,30 @@ async def _overlay_hermes(
         ),
         "approvals": {**base["approvals"], "pending": _pending_approvals(request)},
         "job": job,
-        "phase": _safe(
-            "phase",
-            "unknown",
-            builders.hermes_phase,
-            installed=True,
-            status=record.status,
-            unit_active=agent_active,
-            degraded=base["degraded"],
-            job=job,
-        ),
+        "phase": _hermes_phase(base, record, agent_active, job),
     }
+
+
+def _hermes_phase(
+    base: dict[str, Any], record: AgentRecord, agent_active: bool | None, job: dict[str, str] | None
+) -> str:
+    """The card's phase from the live fields and the (possibly neutral) slow half.
+
+    ``ready`` and ``degraded`` both depend on the probes a timed-out build never
+    ran, so a ``partial`` build reads ``unknown`` instead; a running job, a broken
+    install and a stopped unit do not depend on them and still show.
+    """
+    phase = _safe(
+        "phase",
+        "unknown",
+        builders.hermes_phase,
+        installed=True,
+        status=record.status,
+        unit_active=agent_active,
+        degraded=base["degraded"],
+        job=job,
+    )
+    return "unknown" if base.get("partial") and phase in ("ready", "degraded") else phase
 
 
 # ── Pi gathers ──────────────────────────────────────────────────────────────
@@ -792,20 +855,77 @@ async def _not_installed(name: str) -> dict[str, Any]:
     return body
 
 
+# ── a build that timed out ──────────────────────────────────────────────────
+
+
+def _neutral_hermes() -> dict[str, Any]:
+    """The slow half of a Hermes overview with nothing probed: every answer "unknown".
+
+    Same keys as :func:`_gather_hermes`, so the per-request overlay and the UI read
+    it like any other build; ``partial`` marks it.
+    """
+    return {
+        "name": "hermes",
+        "kind": agent_kind("hermes"),
+        "version": {
+            "live": None,
+            "previous": None,
+            "pin": {"ref": "unknown", "describe": None},
+            "component": None,
+            "update_available": False,
+        },
+        "units": {"gateway": "unknown", "gateway_enabled": None},
+        "api_server": {"endpoint": None, "healthy": None, "profiles": []},
+        "platforms": [],
+        "provision": {**builders.provision_summary(None), "live_built_at": None, "stale": False},
+        "doctor": [],
+        "approvals": dict(_NO_APPROVALS),
+        "memory": dict(_NO_MEMORY),
+        "links": {"desktop": None},
+        "degraded": [],
+        "partial": True,
+    }
+
+
+def _neutral_pi() -> dict[str, Any]:
+    """The slow half of a Pi overview with nothing probed (see :func:`_neutral_hermes`)."""
+    return {
+        "name": "pi",
+        "kind": agent_kind("pi"),
+        "version": {"installed": None, "pin": None, "update_available": False},
+        "profile": {"home": None, "profiled_at": None, "home_readable": False, "checks": []},
+        "memory": {"mcp_entry": None, "hindsight_config": None, "hindsight_api_reachable": False},
+        "commands": {
+            "install": "sudo hal0 agent install pi",
+            "upgrade": "sudo hal0 agent upgrade pi",
+            "uninstall": "sudo hal0 agent uninstall pi",
+        },
+        "partial": True,
+    }
+
+
 # ── cache ───────────────────────────────────────────────────────────────────
 
 
 async def _build(name: str, request: Request, started: float, job: str | None) -> dict[str, Any]:
     """Build ``name``'s slow half and store it.
 
+    The gather is given :data:`_BUILD_TIMEOUT_S`; past it the build is the neutral
+    one (``partial: true``). It is stored like any other, so the next poll inside
+    the TTL does not stall again, and it is this single build's result, so every
+    waiter shares it.
+
     Nothing is stored when ``name`` was invalidated after this build started, or
     when a later-started build already stored its result.
     """
     generated_at = _utc_iso()
-    body = {
-        **await (_gather_hermes(request) if name == "hermes" else _gather_pi()),
-        "generated_at": generated_at,
-    }
+    gather = _gather_hermes(request) if name == "hermes" else _gather_pi()
+    try:
+        gathered = await asyncio.wait_for(gather, _BUILD_TIMEOUT_S)
+    except TimeoutError:
+        log.warning("agents.overview.build_timeout", agent=name, timeout_s=_BUILD_TIMEOUT_S)
+        gathered = _neutral_hermes() if name == "hermes" else _neutral_pi()
+    body = {**gathered, "generated_at": generated_at}
     held = _cache.get(name)
     if started >= _invalidated.get(name, float("-inf")) and (
         held is None or held.started <= started
@@ -849,6 +969,8 @@ async def _slow_half(name: str, request: Request, refresh: bool, job: str | None
     ):
         flight = None  # finished, or left behind by a loop that has closed
     if flight is None or flight.job != job or (refresh and not flight.refresh):
+        if refresh and name == "hermes":
+            _forget_platforms()  # a refresh re-reads the vault too
         task = asyncio.create_task(_build(name, request, started, job))
         task.add_done_callback(lambda t: _forget(name, t))
         flight = _Flight(task, refresh, job)

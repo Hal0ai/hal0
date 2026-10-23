@@ -152,7 +152,16 @@ def _jobs_dir() -> Path:
     return paths.var_lib() / "update-jobs"
 
 
+#: What every job id looks like: the routes mint them as ``uuid.uuid4().hex[:12]``. A
+#: job id is a file name under ``update-jobs/``, so anything else is refused rather
+#: than joined into a path (a persisted record carries its own ``id``).
+_JOB_ID_RE = re.compile(r"[0-9a-f]{12}")
+
+
 def _job_file(job_id: str) -> Path:
+    """The file a job is kept in; ``ValueError`` for an id the routes could not have minted."""
+    if not _JOB_ID_RE.fullmatch(job_id):
+        raise ValueError(f"not an update job id: {job_id!r}")
     return _jobs_dir() / f"{job_id}.json"
 
 
@@ -165,7 +174,11 @@ def _persist_job(job: dict[str, Any]) -> None:
     job_id = job.get("id")
     if not job_id:
         return
-    path = _job_file(str(job_id))
+    try:
+        path = _job_file(str(job_id))
+    except ValueError as exc:
+        log.warning("updater.job_persist_refused", job_id=str(job_id), error=str(exc))
+        return
     try:
         # update-jobs/ is declared 2775; a bare mkdir under the daemon's
         # UMask=0022 births 2755 and re-drifts `doctor perms` after every
@@ -189,8 +202,17 @@ def _persist_job(job: dict[str, Any]) -> None:
 
 
 def _load_persisted_job(job_id: str) -> dict[str, Any] | None:
-    """Read a persisted job snapshot from disk, or None if absent/unreadable."""
-    path = _job_file(job_id)
+    """Read a persisted job snapshot from disk, or None if absent, unreadable or not this job's.
+
+    ``None`` for an id the routes could not have minted, and for a file whose own
+    ``id`` is not the one asked for: the id inside a file is untrusted (it is what
+    :func:`_persist_job` writes the job back under), so a record that names another
+    job is not served and not written back.
+    """
+    try:
+        path = _job_file(job_id)
+    except ValueError:
+        return None
     try:
         raw = path.read_text(encoding="utf-8")
     except OSError:
@@ -199,7 +221,47 @@ def _load_persisted_job(job_id: str) -> dict[str, Any] | None:
         loaded = json.loads(raw)
     except ValueError:
         return None
-    return loaded if isinstance(loaded, dict) else None
+    if not isinstance(loaded, dict) or loaded.get("id") != job_id:
+        return None
+    return loaded
+
+
+#: Job states that are not terminal. The terminal ones are ``applied``,
+#: ``failed`` and (``/prepare`` only) ``prepared``.
+_UNFINISHED_STATES = ("queued", "running")
+
+#: ``error_code`` of a job that hal0-api stopped running because it restarted.
+INTERRUPTED_CODE = "api_restarted"
+
+
+def _interrupted_error(phase: object) -> str:
+    """What an interrupted job says, by what it was doing."""
+    phase = str(phase or "")
+    # Only the Hermes release builder is atomic (``current`` swaps at the very end),
+    # so only a Hermes build or repair can say the live release is unchanged. The
+    # other components converge in place.
+    if phase == "repair:hermes":
+        return "hal0-api restarted during the repair; the live release is unchanged"
+    if phase == "converge:hermes":
+        return "hal0-api restarted during the build; the live release is unchanged"
+    return "hal0-api restarted before this job finished; check `hal0 update status` before retrying"
+
+
+def _fail_interrupted_job(job: dict[str, Any]) -> dict[str, Any]:
+    """Record ``job`` as ``failed`` because the hal0-api process running it is gone.
+
+    Job tasks run inside hal0-api, so a job found ``queued`` or ``running`` that
+    no live task is behind was killed with its process. Sets ``error_code`` to
+    :data:`INTERRUPTED_CODE`, ``error`` by phase, ``updated_at``, and persists.
+    Returns ``job``, changed in place.
+    """
+    job["state"] = "failed"
+    job["error"] = _interrupted_error(job.get("phase"))
+    job["error_code"] = INTERRUPTED_CODE
+    job["updated_at"] = time.time()
+    _persist_job(job)
+    log.warning("updater.job_interrupted", job_id=job.get("id"), phase=job.get("phase"))
+    return job
 
 
 def _try_restart_hal0_api() -> tuple[bool | None, str | None]:
@@ -804,19 +866,42 @@ async def update_status(job_id: str, request: Request) -> dict[str, Any]:
     Reads the in-memory registry first, then falls back to the on-disk
     store (``/var/lib/hal0/update-jobs/<id>.json``) so a status poll still
     resolves after an ``hal0-api`` restart wiped the process-local dict.
+
+    A job that comes back from disk and is still ``queued`` or ``running`` was
+    started by a previous ``hal0-api`` process, which is gone: job tasks run
+    inside it. It is recorded ``failed`` with ``error_code: "api_restarted"``
+    before it is re-seeded into the registry or returned (for every phase), so a
+    poll across a restart does not leave a dead ``running`` job behind to refuse
+    every later component converge and repair with 409 (``/apply``, ``/prepare``
+    and ``/commit`` have no busy check). A job whose terminal state
+    reached disk (``applied``, ``failed``, ``prepared``) reloads unchanged: the
+    apply and commit jobs persist ``applied`` before the restart they start
+    (#1540), so a restart that is part of a job never leaves it unfinished.
+
+    A repair job still in the in-memory registry is checked too, against the
+    ``api_pid`` and child ``pid`` it recorded (the registry can only hold one
+    from this process, so this is the belt to the reload's braces).
     """
     jobs = _update_jobs(request)
     job = jobs.get(job_id)
+    reloaded = job is None
     if job is None:
-        persisted = _load_persisted_job(job_id)
-        if persisted is not None:
-            # Re-seed the in-memory registry so subsequent polls are fast.
-            jobs[job_id] = persisted
-            return dict(persisted)
-        raise UpdateJobNotFound(
-            f"no update job with id {job_id!r}",
-            details={"job_id": job_id},
-        )
+        job = _load_persisted_job(job_id)
+        if job is None:
+            raise UpdateJobNotFound(
+                f"no update job with id {job_id!r}",
+                details={"job_id": job_id},
+            )
+    if job.get("phase") == "repair:hermes":
+        # Imported here: the repair module imports this one.
+        from hal0.api.agents.repair import reconcile_stale_repair_job
+
+        reconcile_stale_repair_job(job, reloaded=reloaded)
+    elif reloaded and job.get("state") in _UNFINISHED_STATES:
+        _fail_interrupted_job(job)
+    if reloaded:
+        # Re-seed the in-memory registry so subsequent polls are fast.
+        jobs[job_id] = job
     return dict(job)
 
 

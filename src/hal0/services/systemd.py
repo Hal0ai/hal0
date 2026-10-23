@@ -37,7 +37,7 @@ import subprocess
 
 import structlog
 
-from hal0.system.seam import SystemCtlSeam
+from hal0.system.seam import SeamTimeout, SystemCtlSeam
 
 log = structlog.get_logger(__name__)
 
@@ -202,17 +202,28 @@ async def unit_is_active(unit: str) -> bool:
 async def unit_action(unit: str, verb: str) -> dict[str, object]:
     """Run one allow-listed lifecycle verb against ``unit``.
 
-    Returns ``{"ok": bool, "message": str}`` — never raises for runtime
-    failures (missing systemd, unit errors); raises ``ValueError`` only for
-    programming errors (verb outside :data:`ALLOWED_VERBS`, bad unit name),
-    which the route layer maps to a 400.
+    Returns ``{"ok": bool, "message": str, "timed_out": bool}`` — never raises
+    for runtime failures (missing systemd, unit errors, a wedged verb);
+    raises ``ValueError`` only for programming errors (verb outside
+    :data:`ALLOWED_VERBS`, bad unit name), which the route layer maps to a 400.
+
+    ``timed_out`` is the structural "the verb did not return within its
+    budget" signal: the outcome is unknown (the unit may still be coming up),
+    unlike a hard failure. It covers both the bare
+    :class:`subprocess.TimeoutExpired` and the :class:`SeamTimeout`
+    (``slot.seam_timeout``) the seam raises in its place when the call goes
+    through it.
     """
     if verb not in ALLOWED_VERBS:
         raise ValueError(f"verb {verb!r} is not an allowed systemctl verb")
     if not valid_unit(unit):
         raise ValueError(f"invalid unit name {unit!r}")
     if shutil.which("systemctl") is None:
-        return {"ok": False, "message": f"{verb} {unit} failed: systemctl not available"}
+        return {
+            "ok": False,
+            "timed_out": False,
+            "message": f"{verb} {unit} failed: systemctl not available",
+        }
     # Through the seam (#1590): as the hal0 service user this becomes
     # `sudo -n hal0-systemctl …` for hal0-managed units; everywhere else it is
     # the plain systemctl call this module always made. Sync subprocess —
@@ -229,15 +240,20 @@ async def unit_action(unit: str, verb: str) -> dict[str, object]:
     except subprocess.TimeoutExpired:
         return {
             "ok": False,
+            "timed_out": True,
             "message": f"{verb} {unit} failed: timed out after {_VERB_TIMEOUT[verb]:.0f}s",
         }
+    except SeamTimeout as exc:
+        # The seam's bounded_call turns TimeoutExpired into SeamTimeout before
+        # it reaches here, so this is the branch a real timeout takes.
+        return {"ok": False, "timed_out": True, "message": f"{verb} {unit} failed: {exc}"}
     except OSError as exc:  # pragma: no cover — spawn failure
-        return {"ok": False, "message": f"{verb} {unit} failed: {exc}"}
+        return {"ok": False, "timed_out": False, "message": f"{verb} {unit} failed: {exc}"}
     if proc.returncode == 0:
-        return {"ok": True, "message": f"{verb} {unit}: ok"}
+        return {"ok": True, "timed_out": False, "message": f"{verb} {unit}: ok"}
     detail = (proc.stderr or "").strip() or f"exit code {proc.returncode}"
     log.warning("services.unit_action_failed", unit=unit, verb=verb, detail=detail)
-    return {"ok": False, "message": f"{verb} {unit} failed: {detail}"}
+    return {"ok": False, "timed_out": False, "message": f"{verb} {unit} failed: {detail}"}
 
 
 __all__ = [
