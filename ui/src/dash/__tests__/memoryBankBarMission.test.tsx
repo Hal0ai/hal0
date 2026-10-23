@@ -165,6 +165,63 @@ describe('BankBar per-bank description (reflect mission) edit', () => {
     act(() => { root.unmount() })
   })
 
+  // Codex review on #2916: the draft must stay bound to the bank that opened
+  // the editor, a bank the list does not know must not be editable (a config
+  // PATCH to an unknown id would create that bank), and Escape must not leak
+  // to the workspace's window-level handler (which closes the fact inspector).
+
+  it('switching banks while editing closes the editor instead of saving onto the new bank', async () => {
+    const { host, root } = mountBar('primary')
+    act(() => {
+      ;(host.querySelector('[data-testid="mv-bank-mission"]') as HTMLButtonElement).click()
+    })
+    act(() => {
+      setNativeValue(
+        host.querySelector('[data-testid="mv-bank-mission-input"]') as HTMLTextAreaElement,
+        'text meant for primary',
+      )
+    })
+    // The bank selector changes underneath the open editor.
+    act(() => {
+      root.render(React.createElement(BankBar, { bank: 'scratch', setBank: () => {} }))
+    })
+    expect(host.querySelector('[data-testid="mv-bank-mission-input"]')).toBeNull()
+    expect((host.querySelector('[data-testid="mv-bank-mission"]') as HTMLButtonElement).textContent).toContain(
+      'no description set',
+    )
+    expect(configCalls).toEqual([])
+    act(() => { root.unmount() })
+  })
+
+  it('a bank id the list does not know cannot be edited (no PATCH that would mint it)', () => {
+    const { host, root } = mountBar('ghost-from-stale-localstorage')
+    const btn = host.querySelector('[data-testid="mv-bank-mission"]') as HTMLButtonElement
+    expect(btn).toBeTruthy()
+    expect(btn.disabled).toBe(true)
+    act(() => { btn.click() })
+    expect(host.querySelector('[data-testid="mv-bank-mission-input"]')).toBeNull()
+    expect(configCalls).toEqual([])
+    act(() => { root.unmount() })
+  })
+
+  it('Escape cancels the editor without reaching window-level keydown handlers', () => {
+    const seen: string[] = []
+    const spy = (e: KeyboardEvent) => { seen.push(e.key) }
+    window.addEventListener('keydown', spy)
+    const { host, root } = mountBar()
+    act(() => {
+      ;(host.querySelector('[data-testid="mv-bank-mission"]') as HTMLButtonElement).click()
+    })
+    act(() => {
+      const input = host.querySelector('[data-testid="mv-bank-mission-input"]') as HTMLTextAreaElement
+      input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+    })
+    window.removeEventListener('keydown', spy)
+    expect(host.querySelector('[data-testid="mv-bank-mission-input"]')).toBeNull()
+    expect(seen).toEqual([])
+    act(() => { root.unmount() })
+  })
+
   it('a failed save keeps the editor open and surfaces the error', async () => {
     failNextSave = new Error('memory engine returned an error')
     const { host, root } = mountBar()
