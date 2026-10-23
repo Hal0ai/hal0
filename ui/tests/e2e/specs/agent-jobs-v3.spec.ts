@@ -305,6 +305,98 @@ test.describe('Hermes repair job', () => {
     await expect(row).toHaveCount(0)
   })
 
+  test('a build started elsewhere while the repair confirm is open disables it and says why', async ({
+    page,
+  }) => {
+    await mockShell(page)
+    let building = false
+    await page.route('**/api/agents', (route) => json(route, { agents: [HERMES_RECORD], count: 1 }))
+    // The CLI (or another tab) starts a repair: the overview now reports it.
+    await page.route('**/api/agents/hermes/overview*', (route) =>
+      json(
+        route,
+        building
+          ? {
+              ...hermesOverview(),
+              phase: 'working',
+              job: { id: 'job-ext-1', kind: 'repair', state: 'running', phase: 'repair:hermes' },
+            }
+          : hermesOverview(),
+      ),
+    )
+    let posts = 0
+    await page.route('**/api/agents/hermes/repair', (route) => {
+      posts += 1
+      return json(route, { id: 'job-ext-1', state: 'queued', phase: 'repair:hermes' })
+    })
+    const job = await stageJobStatus(page, {
+      id: 'job-ext-1',
+      phase: 'repair:hermes',
+      steps: ['preflight'],
+      terminal: 'applied',
+    })
+    job.run()
+
+    await openHermes(page)
+    const front = page.getByTestId('agent-phase-hermes')
+    await expect(front).toHaveAttribute('data-phase', 'ready', { timeout: FIVE_S })
+
+    await openLifecycle(page)
+    await page.getByTestId('agent-card-hermes').getByTestId('agent-action-repair').click()
+    await expect(page.getByRole('dialog')).toBeVisible()
+    await expect(confirmButton(page, 'repair')).toBeEnabled()
+    await expect(page.getByTestId('agent-confirm-building')).toHaveCount(0)
+
+    // The overview polls every 10 s; a focus event makes the next read sooner.
+    building = true
+    await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')))
+    await expect(front).toHaveAttribute('data-phase', 'working', { timeout: 15_000 })
+
+    await expect(confirmButton(page, 'repair')).toBeDisabled()
+    await expect(page.getByTestId('agent-confirm-building')).toHaveText(
+      'A Hermes build is running; wait for it to finish.',
+    )
+    // A force-click on the disabled button starts nothing.
+    await confirmButton(page, 'repair').click({ force: true })
+    expect(posts).toBe(0)
+
+    await page.getByRole('button', { name: 'Cancel' }).click()
+    await expect(page.getByRole('dialog')).toHaveCount(0)
+  })
+
+  test('a repair job the server lost leaves working with a warning toast', async ({ page }) => {
+    await mockShell(page)
+    await page.route('**/api/agents', (route) => json(route, { agents: [HERMES_RECORD], count: 1 }))
+    await page.route('**/api/agents/hermes/overview*', (route) => json(route, hermesOverview()))
+    await page.route('**/api/agents/hermes/repair', (route) =>
+      json(route, { id: 'job-rp-lost', state: 'queued', phase: 'repair:hermes' }),
+    )
+    // The job record is gone (hal0-api restarted and dropped it).
+    await page.route('**/api/updates/status/job-rp-lost', (route) =>
+      json(
+        route,
+        { error: { code: 'system.update_job_not_found', message: 'update job not found' } },
+        404,
+      ),
+    )
+
+    await openHermes(page)
+    const front = page.getByTestId('agent-phase-hermes')
+    await expect(front).toHaveAttribute('data-phase', 'ready', { timeout: FIVE_S })
+
+    await openLifecycle(page)
+    await page.getByTestId('agent-card-hermes').getByTestId('agent-action-repair').click()
+    await expect(confirmButton(page, 'repair')).toBeEnabled()
+    await page.getByTestId('agent-confirm-repair').click()
+
+    await expect(
+      toast(page, 'warn', 'Lost track of the Hermes repair job; check the unit logs'),
+    ).toBeVisible({ timeout: FIVE_S })
+    await expect(front).toHaveAttribute('data-phase', 'ready', { timeout: FIVE_S })
+    await flip(page)
+    await expect(page.getByTestId('agent-job-hermes')).toHaveCount(0)
+  })
+
   test('a 409 from repair says the builder is busy and starts no job', async ({ page }) => {
     await mockShell(page)
     await page.route('**/api/agents', (route) =>

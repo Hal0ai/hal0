@@ -176,6 +176,12 @@ function _withoutFinishedJob(overview, doneIds) {
   return { ...overview, job: null, phase: overview.phase === "working" ? undefined : overview.phase };
 }
 
+// How long a queued or running build may go without an update before the card
+// stops waiting for it. The server bounds a repair child at 45 minutes and its
+// `install` step legitimately sits 15 to 20 without writing one, so this sits
+// above that bound.
+const JOB_STALE_MS = 50 * 60 * 1000;
+
 function AgentsOverview() {
   const LiveAgentCard = window.LiveAgentCard;
   const LockedAgentCard = window.LockedAgentCard;
@@ -233,7 +239,9 @@ function AgentsOverview() {
   const startedKind = useRef(null);
   // The pin as the card shows it, for the upgrade toast (set each render).
   const pinLabel = useRef("the pin");
-  const jobPoll = useUpdateJob ? useUpdateJob(jobId) : { job: null, terminal: false };
+  const jobPoll = useUpdateJob
+    ? useUpdateJob(jobId, { staleAfterMs: JOB_STALE_MS })
+    : { job: null, terminal: false, lost: false };
 
   const hermesOv = hermesOvQ.data || null;
   const ovJobId = hermesOv && hermesOv.job ? hermesOv.job.id : null;
@@ -266,15 +274,37 @@ function AgentsOverview() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [finished, polled && polled.id]);
 
+  // The server lost the job (its record is gone) or it stopped updating, so no
+  // finish is coming. Treat it as over: the card leaves `working`, the overview
+  // is read fresh, and the operator is told to look at the unit logs. Marking
+  // it done also keeps a stale overview from adopting it again. The card's
+  // busy lock is not held for a build (an action's busy state ends when the
+  // request returns), so there is nothing else to release.
+  const lost = !!jobPoll.lost && !!jobId;
+  useEffect(() => {
+    if (!lost || doneIds.includes(jobId)) return;
+    const kind = _jobKind(polled || (hermesOv && hermesOv.job), startedKind.current);
+    setDoneIds((ids) => [...ids, jobId]);
+    refreshOverview("hermes").then(() => {
+      _toast(`Lost track of the Hermes ${kind} job; check the unit logs`, "warn");
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [lost, jobId]);
+
   // Until the first status read lands, show the job as the overview reported
   // it, or as queued when we just started it, so the card turns to `working`
   // the moment the mutation returns.
   const seeded = hermesOv && hermesOv.job && hermesOv.job.id === jobId ? hermesOv.job : null;
-  const jobForModel =
-    polled ||
-    (jobId && !doneIds.includes(jobId)
-      ? seeded || { id: jobId, state: "queued", phase: (startedKind.current === "repair" ? "repair" : "converge") + ":hermes" }
-      : null);
+  // A lost job's last snapshot still reads queued or running, so it is left out
+  // here and in the overview filter below, in the same render that learns of
+  // the loss rather than the one after the effect marks it done.
+  const jobForModel = lost
+    ? null
+    : polled ||
+      (jobId && !doneIds.includes(jobId)
+        ? seeded || { id: jobId, state: "queued", phase: (startedKind.current === "repair" ? "repair" : "converge") + ":hermes" }
+        : null);
+  const settledIds = lost ? [...doneIds, jobId] : doneIds;
 
   // ── models ─────────────────────────────────────────────────────────
   const agents = (agentsQ.data && agentsQ.data.agents) || [];
@@ -300,7 +330,7 @@ function AgentsOverview() {
         ...derive({
           agent: "hermes",
           record: hermesRec,
-          overview: _withoutFinishedJob(hermesOv, doneIds),
+          overview: _withoutFinishedJob(hermesOv, settledIds),
           slot: primary,
           job: jobForModel,
           caps,

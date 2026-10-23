@@ -1051,16 +1051,24 @@ function LifecycleConfirms({ identity, model, confirm, busy, onCancel, onConfirm
   const ConfirmDialog = window.ConfirmDialog;
   if (!ConfirmDialog) return null;
   const tag = (k, label) => <span data-testid={"agent-confirm-" + k}>{label}</span>;
+  // A converge or repair started elsewhere (the CLI, the Services page, another
+  // tab) flips the card to `working` while a confirm is open. The card's own
+  // `busy` does not see that, so a build in flight blocks the confirm too.
+  const building = model.phase === "working";
+  const blocked = !!busy || building;
+  const buildNote = building ? (
+    <span data-testid="agent-confirm-building">A Hermes build is running; wait for it to finish.</span>
+  ) : null;
   return (
     <>
       <ConfirmDialog
         open={confirm === "upgrade"}
-        confirmDisabled={!!busy}
+        confirmDisabled={blocked}
         onCancel={onCancel}
         onConfirm={onConfirm}
         title="Upgrade Hermes to the pinned release?"
         confirmLabel={tag("upgrade", "Upgrade")}
-        footerNote=""
+        footerNote={buildNote || ""}
         message={
           <div className="ao-confirm">
             <div className="mono ao-confirm-v">{model.version.label} → {model.version.pinLabel}</div>
@@ -1071,12 +1079,12 @@ function LifecycleConfirms({ identity, model, confirm, busy, onCancel, onConfirm
       />
       <ConfirmDialog
         open={confirm === "repair"}
-        confirmDisabled={!!busy}
+        confirmDisabled={blocked}
         onCancel={onCancel}
         onConfirm={onConfirm}
         title="Rebuild the Hermes release at the pinned version?"
         confirmLabel={tag("repair", "Repair")}
-        footerNote=""
+        footerNote={buildNote || ""}
         message={
           <div className="ao-confirm">
             <p>Re-runs every provisioning phase and rebuilds the venv. Use it when MCP tools vanish or doctor reports drift.</p>
@@ -1086,13 +1094,14 @@ function LifecycleConfirms({ identity, model, confirm, busy, onCancel, onConfirm
       />
       <ConfirmDialog
         open={confirm === "uninstall"}
-        confirmDisabled={!!busy}
+        confirmDisabled={blocked}
         onCancel={onCancel}
         onConfirm={onConfirm}
         title={"Uninstall " + identity.name + "?"}
         confirmLabel={tag("uninstall", "Uninstall")}
         destructive
         typeToConfirm={identity.id}
+        footerNote={buildNote}
         message={
           "Removes " + identity.name + "'s seed, data and state from this box and drops its Open WebUI upstreams. " +
           "Install it again with " + model.commands.install + "."
