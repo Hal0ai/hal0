@@ -9315,6 +9315,66 @@ def _write_run_report(report: InstallReport, state_root: Path | None) -> None:
     _atomic_write(root / _STATE_FILE_NAME, json.dumps(data, indent=2, sort_keys=True) + "\n")
 
 
+#: ``details["source"]`` of an ``install`` phase a converge rewrote.
+CONVERGE_REPORT_SOURCE = "hal0 update"
+
+
+def record_converged_release(
+    release_id: str, *, state_root: Path | None = None, changed: bool = False
+) -> bool:
+    """Mark the last-run report's ``install`` phase ``ok`` for a live release (#2914).
+
+    ``hal0 update`` converges Hermes through the release builder, which is the
+    build half of the ``install`` step, but only :func:`install_hermes` wrote
+    ``provision.json``, so an ``install: fail`` from an earlier bootstrap
+    outlived the build that fixed it. A converge that leaves ``release_id``
+    live and on the pin calls this to rewrite that one phase: ``ok``, stamped
+    now, with the release overlaid onto the details the bootstrap recorded (the
+    ``venv`` that uninstall needs survives). Every other phase stays as the last
+    provision run wrote it; the converge did not run them. ``completed_at`` is
+    set when no phase is left failed (a phase the failed bootstrap skipped
+    counts as passed, as it does for the provisioner itself), and ``hermes_version`` becomes the pin.
+
+    Does nothing (returns ``False``) when there is no report (nothing ever
+    provisioned, so there is nothing to correct), the report is unreadable,
+    or ``install`` is already ``ok`` on this release. Write errors propagate.
+    """
+    root = state_root if state_root is not None else _DEFAULT_STATE_ROOT
+    target = root / _STATE_FILE_NAME
+    try:
+        data = json.loads(target.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    if not isinstance(data, dict):
+        return False
+    phases = data.get("phases")
+    if not isinstance(phases, dict):
+        return False
+    prior = phases.get("install")
+    prior = prior if isinstance(prior, dict) else {}
+    details = prior.get("details") if isinstance(prior.get("details"), dict) else {}
+    if prior.get("status") == PhaseStatus.OK.value and details.get("release") == release_id:
+        return False
+    now = _utcnow()
+    phases["install"] = {
+        "status": PhaseStatus.OK.value,
+        "at": now,
+        "changed": changed,
+        # Overlay, never replace: the bootstrap recorded `venv` and
+        # `hermes_bin` here and uninstall locates the venv through them.
+        "details": {**details, "release": release_id, "source": CONVERGE_REPORT_SOURCE},
+    }
+    data["hermes_version"] = _hermes_version_pin()
+    failed = any(
+        isinstance(entry, dict) and entry.get("status") == PhaseStatus.FAIL.value
+        for entry in phases.values()
+    )
+    if not failed and not data.get("completed_at"):
+        data["completed_at"] = now
+    _atomic_write(target, json.dumps(data, indent=2, sort_keys=True) + "\n")
+    return True
+
+
 # ── CLI surface ──────────────────────────────────────────────────────────────
 
 

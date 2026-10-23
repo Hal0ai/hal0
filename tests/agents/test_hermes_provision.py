@@ -4977,6 +4977,70 @@ def test_write_run_report_surfaces_failure_and_skipped_counts(tmp_path: Path) ->
     assert "skipped_count" not in env_probe
 
 
+def test_record_converged_release_is_a_no_op_without_a_report_or_change(tmp_path: Path) -> None:
+    """#2914: the converge refresh never invents a report and never rewrites an
+    ``install`` phase already ``ok`` on the same release."""
+    state_root = tmp_path / "state"
+    assert hp.record_converged_release("r1", state_root=state_root) is False
+    assert not (state_root / hp._STATE_FILE_NAME).exists()
+
+    state_root.mkdir()
+    target = state_root / hp._STATE_FILE_NAME
+    target.write_text("{not json", encoding="utf-8")
+    assert hp.record_converged_release("r1", state_root=state_root) is False
+    assert target.read_text(encoding="utf-8") == "{not json"
+
+    report = hp.InstallReport(hermes_home="/h", venv="/v", agent_id="hermes")
+    report.steps.append(
+        hp.InstallStep(name="install", status="ok", details={"release": "r1", "changed": True})
+    )
+    hp._write_run_report(report, state_root)
+    before = target.read_text(encoding="utf-8")
+    assert hp.record_converged_release("r1", state_root=state_root) is False
+    assert target.read_text(encoding="utf-8") == before
+    # A different live release is recorded.
+    assert hp.record_converged_release("r2", state_root=state_root, changed=True) is True
+    install = json.loads(target.read_text(encoding="utf-8"))["phases"]["install"]
+    assert install["details"] == {
+        "release": "r2",
+        "source": hp.CONVERGE_REPORT_SOURCE,
+        "changed": True,
+    }
+    assert install["changed"] is True
+
+
+def test_record_converged_release_keeps_the_venv_uninstall_needs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#2914 review: the refresh overlays the install details; it must not drop
+    the ``venv`` the bootstrap recorded, or uninstall silently skips cleanup."""
+    from hal0.agents import hermes_layout
+    from hal0.agents.hermes.driver import HermesDriver
+
+    state_root = tmp_path / "state"
+    venv = tmp_path / "venvs" / "hermes"
+    report = hp.InstallReport(hermes_home="/h", venv=str(venv), agent_id="hermes")
+    report.steps.append(
+        hp.InstallStep(
+            name="install",
+            status="fail",
+            details={"venv": str(venv), "hermes_bin": "/usr/local/bin/hermes", "release": "r1"},
+        )
+    )
+    hp._write_run_report(report, state_root)
+    assert hp.record_converged_release("r2", state_root=state_root) is True
+    data = json.loads((state_root / hp._STATE_FILE_NAME).read_text(encoding="utf-8"))
+    details = data["phases"]["install"]["details"]
+    assert details["venv"] == str(venv)
+    assert details["hermes_bin"] == "/usr/local/bin/hermes"
+    assert details["release"] == "r2"
+
+    removed: list[Path] = []
+    monkeypatch.setattr(hermes_layout, "remove_hermes_install", removed.append)
+    HermesDriver()._remove_venv(data)
+    assert removed == [venv]
+
+
 def test_self_report_writes_summary_memory_and_handles_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

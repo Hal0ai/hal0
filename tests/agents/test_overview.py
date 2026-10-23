@@ -268,6 +268,27 @@ def test_stale_provision_report_does_not_degrade():
     assert [r["reason"] for r in out] == ["api_unhealthy"]
 
 
+def test_phases_older_than_the_live_release_do_not_degrade():
+    """#2914: a converge refreshes only ``install``; older phases stay quiet, newer ones count."""
+    provision = {
+        "present": True,
+        "fail": 2,
+        "warn": 1,
+        "stale": False,
+        "phases": [
+            {"name": "install", "status": "ok", "stale": False},
+            {"name": "mcp_wire", "status": "fail", "stale": True},
+            {"name": "smoke_tests", "status": "warn", "failure_count": 1, "stale": True},
+        ],
+    }
+    assert degraded_reasons(**{**BASE, "provision": provision}) == []
+    provision["phases"].append({"name": "config_write", "status": "fail", "stale": False})
+    out = degraded_reasons(**{**BASE, "provision": provision})
+    assert [(r["reason"], r["detail"]) for r in out] == [
+        ("provision_failed", "1 provision phase(s) failed: config_write")
+    ]
+
+
 def test_reasons_in_display_order_with_fixes():
     out = degraded_reasons(
         **{
