@@ -17,9 +17,11 @@ a lift-and-shift, not a logic change.
 
 from __future__ import annotations
 
+from collections.abc import Callable, Iterable
 from typing import Any
 
 from hal0.errors import CapabilityMismatch, Hal0Error
+from hal0.slots.activation import slot_model_id
 from hal0.slots.manager import SLOT_ALIASES
 from hal0.upstreams.registry import Upstream, UpstreamRegistry
 
@@ -119,6 +121,8 @@ def resolve_by_capability(  # TIER1
     path: str,
     body: dict[str, Any] | None,
     upstreams: UpstreamRegistry,
+    *,
+    tts_slot: str | None = None,
 ) -> Upstream:
     """Resolve a request to a slot Upstream using path+name heuristics.
 
@@ -134,7 +138,9 @@ def resolve_by_capability(  # TIER1
          outgoing path is rewritten to ``/v1/rerank`` by the dispatcher —
          llama-server's native reranking endpoint is ``POST /rerank``, not
          ``/rerankings``).
-      3. ``/audio/speech`` in path → ``tts`` slot (kokoro; model-id unreliable).
+      3. ``/audio/speech`` in path → the ``tts_slot`` the dispatcher picked by
+         slot type (:func:`select_slot_by_type`, #2784), else the seeded ``tts``
+         slot (kokoro; model-id unreliable).
       4. ``/images/...`` in path → ``img`` slot (ComfyUI).
 
     Path-pinned candidates (rules 1-4, plus the rule-6 model-prefix pin)
@@ -159,6 +165,8 @@ def resolve_by_capability(  # TIER1
         path:       The original request path (e.g. "/v1/chat/completions").
         body:       Parsed JSON body dict (may be None for GETs).
         upstreams:  Registry to resolve slot names against.
+        tts_slot:   Name of a serving ``type = "tts"`` slot already chosen for
+                    this request; replaces the seeded ``tts`` name on rule 3.
 
     Returns:
         An :class:`Upstream` representing the slot to forward to.
@@ -190,9 +198,11 @@ def resolve_by_capability(  # TIER1
         path_pinned = True
     # Rule 3 — TTS path pin (/audio/speech → tts slot).
     # Model-id matching is unreliable for kokoro (server advertises "kokoro",
-    # clients send "kokoro-v1"/"tts"/etc.) so we route purely by path.
+    # clients send "kokoro-v1"/"tts"/etc.) so the path decides the capability;
+    # the dispatcher picks WHICH tts slot by type (#2784) and hands it in as
+    # ``tts_slot``, defaulting to the seeded name.
     elif any(frag in path for frag in _TTS_PATHS):
-        candidate = "tts"
+        candidate = tts_slot or "tts"
         path_pinned = True
     # Rule 4 — image-generation path pins to the img slot.  img is a
     # container slot post-Phase-D (ComfyUI via podman, registers as a
@@ -269,6 +279,41 @@ def resolve_by_capability(  # TIER1
     return upstream
 
 
+def select_slot_by_type(
+    configs: Iterable[dict[str, Any]],
+    slot_type: str,
+    model: str,
+    *,
+    seeded_name: str,
+    is_serving: Callable[[str], bool],
+    advertised: Callable[[str], Iterable[str]] = lambda _name: (),
+) -> str | None:
+    """Pick the serving slot of ``slot_type`` that should answer ``model`` (#2784).
+
+    Candidates are the model-bound slots of that type that are serving now.
+    With a ``model``, only slots bound to that registry id (or whose upstream
+    advertises it — the kokoro container says ``kokoro`` while the registry id
+    is ``kokoro-v1``) qualify. The ``seeded_name`` slot wins any tie, and is
+    the pick when no model was named; otherwise declaration order decides.
+    ``None`` when nothing qualifies, so the caller keeps its name-pinned
+    default (and the existing clean 404 when that is absent too).
+    """
+    candidates: list[str] = []
+    for cfg in configs:
+        name = str(cfg.get("name") or "")
+        if not name or str(cfg.get("type") or "").lower() != slot_type:
+            continue
+        bound = slot_model_id(cfg)
+        if not bound or not is_serving(name):
+            continue
+        if model and model != bound and model not in advertised(name):
+            continue
+        candidates.append(name)
+    if not candidates:
+        return None
+    return seeded_name if seeded_name in candidates else candidates[0]
+
+
 def guard_capability_mismatch(
     slot: str,
     path: str,
@@ -334,4 +379,5 @@ __all__ = [
     "LegacyResolutionFailed",
     "guard_capability_mismatch",
     "resolve_by_capability",
+    "select_slot_by_type",
 ]
