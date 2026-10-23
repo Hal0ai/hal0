@@ -31,7 +31,7 @@ process to babysit.
 curl -fsSL https://hal0.dev/install.sh | sudo bash
 ```
 
-> **v1.5.0 is the current stable release.** A minor release: new
+> **v1.6.0 is the current stable release.** A minor release: new
 > functionality, no config-schema migration, and an ordinary `hal0 update`
 > from any 1.x box. Three changes can break a script or a setup: `hal0 update`
 > now restarts slots whose runner image changed and exits 2 while any still

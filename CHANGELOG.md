@@ -30,6 +30,38 @@ applying. Add those subsections to a version's section to surface them; see
 
 ## [Unreleased]
 
+## [1.6.0] — 2026-10-23
+
+### Highlights
+
+- **Hermes v0.22.4 on Python 3.14, installed as a release.** The bundled
+  Hermes moves from 0.19.0 to v0.22.4 (`4d043038`) with its venv on a
+  uv-managed Python 3.14, built from upstream's lockfile into a release
+  layout that `hal0 update` activates with an automatic flip-back on a failed
+  start. `hal0 agent upgrade hermes --to` takes only a vetted commit, and
+  building an older vetted release over a newer one's `state.db` is refused.
+  (#2851, #2853, #2856, #2874, ADR-0032, ADR-0034)
+- **Every Hermes profile is reachable from Open WebUI, with hal0's tools and
+  memory.** hal0 registers one pinned, read-only `/v1` upstream per served
+  Hermes profile, so the Open WebUI picker lists `hermes-agent`, `coder`,
+  `hal0-brain` and the rest, and every named profile gets hal0-admin and
+  hal0-memory under its own identity with its own private memory bank.
+  (#2898, #2902, ADR-0035)
+- **A terminal-off box stays off for Hermes's hidden side agents too.** From
+  v0.22.3 the gateway's preview-restart side agent ignores
+  `agent.disabled_toolsets`; hal0 now also writes a `terminal.backend` Hermes
+  rejects in the tool's own availability check, in the root config and every
+  profile, so `terminal` and `process_manage` leave every schema. Opting in
+  puts the operator's backend back. (#2878, #2912)
+- **`hal0 doctor` watches the Hermes gateway and its API path.** New rows fail
+  when the gateway unit file is missing or an unmanaged `gateway run
+  --idle-exit` is running, check each served profile's authenticated
+  `/v1/models` and upstream, and warn rather than fail when the operator
+  turned the gateway off. (#2874, #2898, #2905)
+- **Rotating a key ends every live connection that used it.** Open WebSockets
+  and Server-Sent Events streams holding the old credential close at
+  rotation, and an expired session ends its streams. (see Removed)
+
 ### Added
 
 - **The memory engine can run on an upstream model, switched from the dashboard or CLI without a restart.** `[memory.graph].extraction_model` names an upstream model id hal0's `/v1` already routes (an OpenRouter or MiniMax id, say); unset, the engine stays on the local `extraction_slot`. hindsight-api now always calls one virtual id, `hal0/memory`, which hal0 resolves to your choice on every call, so picking a model is a config write that applies at once, uses hal0's own upstream credentials, and never restarts the engine — only a timeout or extraction-limit change still does, plus one repair of a stale or missing drop-in on the first save after upgrading. Pick it under **Engine model** on Settings → Data → Memory or the agents Memory tab (Local slots / Upstream models), or with `hal0 memory graph enable --model <id>` and `--local`. `GET /api/memory/graph/status` gains `target`, `available_models` and `engine_llm`, and the new **Engine running** row names the provider and model hindsight-api actually loads — including, in red, an override from `/etc/hal0/hindsight-llm.env`, which systemd applies after every hal0 setting and which used to leave hal0 reporting a slot the engine was not using (#2918, #2919, ADR-0023 amendment).
@@ -68,8 +100,6 @@ applying. Add those subsections to a version's section to surface them; see
 ### Fixed
 
 - **A bank whose id carries a dot can be managed and deleted from the dashboard again.** The admin routes under `/api/memory/banks/{bank_id}` rejected every dot as a path trick, so a bank the hindsight coding-agent plugin named after a repo (`coding-agent::ultrareview-1.4`) browsed fine through the engine but answered `invalid bank_id` to stats, profile and delete through hal0. Dots are now legal inside an id, as colons already were; a leading dot, a dot-only segment and any `..` run stay refused. The dashboard's new-bank form accepts the same grammar.
-- **A terminal-off box now keeps the shell away from Hermes's hidden side agents too.** From Hermes v0.22.3 the gateway's preview-restart side agent is built with the `terminal` toolset on and ignores `agent.disabled_toolsets`, the list hal0 used to switch the terminal off, so a `preview.restart` from an authenticated gateway client could run shell commands as the `hal0` user. hal0 now also writes `terminal.backend: hal0-terminal-off` while the terminal is off, in the root config and in every profile it wires; Hermes rejects the unknown backend in the tool's own availability check, which every agent in the gateway process shares, so `terminal` and `process_manage` disappear from every schema. Opting in replaces it with `local`; a backend the operator moved to docker or ssh is left alone. Hermes logs the rejection as `Unknown TERMINAL_ENV 'hal0-terminal-off'` at ERROR every 30 s while tools are listed; that line is expected on a terminal-off box (#2878).
-- **A terminal-off box now keeps the shell away from Hermes's hidden side agents too.** From Hermes v0.22.3 the gateway's preview-restart side agent is built with the `terminal` toolset on and ignores `agent.disabled_toolsets`, the list hal0 used to switch the terminal off, so a `preview.restart` from an authenticated gateway client could run shell commands as the `hal0` user. hal0 now also writes `terminal.backend: hal0-terminal-off` while the terminal is off, in the root config and in every profile it wires; Hermes rejects the unknown backend in the tool's own availability check, which every agent in the gateway process shares, so `terminal` and `process_manage` disappear from every schema. Off means off for every backend: a docker or ssh backend the operator chose is remembered under `hal0.terminal_backend_saved` and restored when the terminal is turned back on. `hal0 update` applies the gate on existing boxes; a provision that could not write it fails instead of reporting ok. Hermes logs the rejection as `Unknown TERMINAL_ENV 'hal0-terminal-off'` at ERROR every 30 s while tools are listed; that line is expected on a terminal-off box (#2878).
 - **A terminal-off box now keeps the shell away from Hermes's hidden side agents too.** From Hermes v0.22.3 the gateway's preview-restart side agent is built with the `terminal` toolset on and ignores `agent.disabled_toolsets`, the list hal0 used to switch the terminal off, so a `preview.restart` from an authenticated gateway client could run shell commands as the `hal0` user. hal0 now also writes `terminal.backend: hal0-terminal-off` while the terminal is off, in the root config and in every profile it wires; Hermes rejects the unknown backend in the tool's own availability check, which every agent in the gateway process shares, so `terminal` and `process_manage` disappear from every schema. Off means off for every backend: a docker or ssh backend the operator chose is remembered under `hal0.terminal_backend_saved` and restored when the terminal is turned back on. `hal0 update` applies the gate on existing boxes and restarts Hermes when it changed; a provision that could not write it fails instead of reporting ok; cloned profiles also lose `execute_code` and `delegate_task` while the terminal is off. Hermes logs the rejection as `Unknown TERMINAL_ENV 'hal0-terminal-off'` at ERROR every 30 s while tools are listed; that line is expected on a terminal-off box (#2878).
 
 - **A Hermes Desktop remote pairing now survives restarts and `hal0 update`.** Hermes mints its dashboard session token fresh at every start unless `HERMES_DASHBOARD_SESSION_TOKEN` is set, and hal0 never set it, so a Desktop paired in token mode failed its next connection with "Reached the gateway over HTTP, but the live WebSocket (/api/ws) connection failed" and nothing in the journal: the HTTP leg hits the public `/api/status`, the WebSocket leg sends the stored token and is closed with 4401. `hal0-agent@hermes` now mints one token per install at `/var/lib/hal0/state/agents/hermes/dashboard-session-token` (0600, `hal0`) and exports it to the dashboard at every start. `hal0 agent dashboard-token hermes` prints it for pairing. A `systemctl edit` drop-in that sets the variable still wins. If the file cannot be written the agent starts as before and the shim says so on stderr. Existing pairings need the new token once (#2899).
