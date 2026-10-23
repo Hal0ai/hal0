@@ -3475,6 +3475,15 @@ smoke_structured_output() {
     # hal0/utility is the canonical virtual alias (normalize/resolver.py):
     # it routes to the cheap helper slot and falls back to the anchor, so
     # the probe works on any box with at least one loaded model.
+    #
+    # Returns 0 pass, 1 fail, 2 skipped. SMOKE_STRUCTURED_NOTE carries the
+    # reason for a skip, or for a failure decided without sending the
+    # request: first-run seeding binds no model by design, so a fresh box has
+    # nothing to answer with; a bound but cold slot would be loaded by the
+    # request itself (the resolver returns needs_load and the route loads
+    # it), which the verify step must not do to a large model; and a slot in
+    # error is a failure, but sending the request would only retry its load.
+    SMOKE_STRUCTURED_NOTE=""
     local body resp
     body='{"model":"hal0/utility","messages":[{"role":"user","content":"Reply with only a JSON object of the form {\"ok\": true}."}],"response_format":{"type":"json_object"}}'
     # KB-1 auth: same key discovery as the hindsight EnvironmentFile above —
@@ -3485,9 +3494,74 @@ smoke_structured_output() {
         key="$(grep -oP '(?<=^HAL0_CLIENT_KEY=).*' /etc/hal0/api.env 2>/dev/null | head -1 || true)"
         [[ -n "${key}" ]] && auth=(-H "Authorization: Bearer ${key}")
     fi
+    # Which slot hal0/utility would land on, read from /api/slots without
+    # touching it. Mirrors resolve_chain: the first of utility, agent with a
+    # bound model, else the first model-bound llm slot. Bound means the
+    # configured model (model_default), which is what the resolver reads; a
+    # row's model_id is the runtime snapshot and outlives a cleared binding.
+    #
+    # Fails closed: the probe runs only when the target is in the
+    # dispatchable set (slots/state.py DISPATCHABLE_STATES: ready, serving,
+    # idle), where SlotManager.load is a no-op. Any other state, including
+    # one this list does not know, skips as cold; an unreadable slot list
+    # skips too. API reachability is the earlier verify steps' job.
+    local slots_json target _ _slot _state
     # `${auth[@]+"${auth[@]}"}` expands the (possibly empty) array under
     # `set -u` on bash < 4.4; shellcheck reads the quoted element as a string
     # whose quotes would be lost (SC2090), which does not apply to arrays.
+    # shellcheck disable=SC2090
+    if ! slots_json="$(curl -fsS -m 30 "http://127.0.0.1:${HAL0_PORT}/api/slots" \
+        ${auth[@]+"${auth[@]}"} 2>/dev/null)"; then
+        SMOKE_STRUCTURED_NOTE="could not read the slot list (GET /api/slots failed)"
+        return 2
+    fi
+    target="$(printf '%s' "${slots_json}" | "${PY}" -c 'import json, sys
+try:
+    slots = json.load(sys.stdin)
+    bound = [
+        s for s in slots
+        if s.get("kind") == "local"
+        and str(s.get("type") or "").lower() == "llm"
+        and s.get("model_default")
+    ]
+except Exception:
+    print("unreadable")
+    sys.exit(0)
+if not bound:
+    print("unbound")
+    sys.exit(0)
+by_name = {str(s.get("name") or "").lower(): s for s in bound}
+slot = by_name.get("utility") or by_name.get("agent") or bound[0]
+state = str(slot.get("status") or slot.get("state") or "unknown").split()[0]
+if state == "error":
+    verdict = "error"
+elif state in ("ready", "serving", "idle"):
+    verdict = "loaded"
+else:
+    verdict = "cold"
+print(verdict + " " + str(slot.get("name")).split()[0] + " " + state)' 2>/dev/null || true)"
+    case "${target}" in
+        loaded\ *)
+            ;;
+        unbound)
+            SMOKE_STRUCTURED_NOTE="no model bound yet"
+            return 2
+            ;;
+        cold\ *)
+            read -r _ _slot _state <<<"${target}"
+            SMOKE_STRUCTURED_NOTE="slot '${_slot}' is not loaded (${_state}); the probe would load it"
+            return 2
+            ;;
+        error\ *)
+            read -r _ _slot _state <<<"${target}"
+            SMOKE_STRUCTURED_NOTE="slot '${_slot}' is in error — check 'hal0 slot status ${_slot}' and 'journalctl -u hal0-slot@${_slot} -n 40'"
+            return 1
+            ;;
+        *)
+            SMOKE_STRUCTURED_NOTE="could not read the slot list (GET /api/slots did not return a slot list)"
+            return 2
+            ;;
+    esac
     # shellcheck disable=SC2090
     resp="$(curl -fsS -m 120 -X POST "http://127.0.0.1:${HAL0_PORT}/v1/chat/completions" \
         -H 'Content-Type: application/json' ${auth[@]+"${auth[@]}"} \
@@ -3531,11 +3605,23 @@ except Exception:
 }
 
 run_post_install_smoke() {
-    if smoke_structured_output; then
+    local _so_rc=0
+    smoke_structured_output || _so_rc=$?
+    if [[ "${_so_rc}" -eq 0 ]]; then
         info "structured-output probe ok (gateway /v1, json_object)"
+    elif [[ "${_so_rc}" -eq 2 && "${SMOKE_STRUCTURED_NOTE}" == "no model bound yet" ]]; then
+        info "structured-output probe skipped — no model bound yet (bind one from the dashboard, then re-run the installer to repeat this probe)"
+    elif [[ "${_so_rc}" -eq 2 && "${SMOKE_STRUCTURED_NOTE}" == "could not read the slot list"* ]]; then
+        info "structured-output probe skipped — ${SMOKE_STRUCTURED_NOTE}"
+    elif [[ "${_so_rc}" -eq 2 ]]; then
+        info "structured-output probe skipped — ${SMOKE_STRUCTURED_NOTE}, which the installer will not do (load it, then re-run the installer to repeat this probe)"
     else
         SMOKE_FAILED+=("structured-output")
-        warn "structured-output probe FAILED — a json_object request via the gateway (:${HAL0_PORT}/v1) did not return parseable JSON"
+        if [[ -n "${SMOKE_STRUCTURED_NOTE}" ]]; then
+            warn "structured-output probe FAILED — ${SMOKE_STRUCTURED_NOTE}"
+        else
+            warn "structured-output probe FAILED — a json_object request via the gateway (:${HAL0_PORT}/v1) did not return parseable JSON"
+        fi
         warn "  extraction/structured-output consumers are likely broken even if plain chat works — check 'hal0 status' for a loaded model, then 'journalctl -u hal0-api -n 40'"
         # #2131: on an upgraded box the commonest cause is a brain slot the
         # seeding pass downloaded a model for but never bound — the gateway
