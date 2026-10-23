@@ -48,13 +48,14 @@ Environment=HINDSIGHT_API_LLM_BASE_URL=http://127.0.0.1:8080/v1
 #    eviction risk vs the 35B primary (obsolete under container runtime).
 #  - gemma4-it:e2b/e4b (NPU): BLOCKED — amdxdna HWCTX alloc fails (err=-22).
 #  - gemma3 4B NPU (FLM): worked but ~160s/extract + reflect timeouts.
-# `hal0/utility` is hal0-api's virtual model name for the utility slot (a seeded
-# slot per ADR-0023, so always present; falls back to the agent anchor if unloaded).
-# This is the DEFAULT only — `hal0 memory graph enable --slot <name>` (or the Memory
-# dashboard) writes a drop-in at hindsight-api.service.d/extraction-model.conf that
-# overrides this value, so the operator can repoint extraction without editing this
-# installer-owned unit.
-Environment=HINDSIGHT_API_LLM_MODEL=hal0/utility
+# `hal0/memory` is the memory engine's one fixed virtual id (ADR-0023 amendment,
+# #2919/#2925): hal0-api resolves it on every call to [memory.graph].extraction_slot
+# (default `utility`, falling back to the agent anchor if unloaded) or, when set, to
+# [memory.graph].extraction_model (an upstream model). Switching the engine's model
+# from `hal0 memory graph enable` or the Memory dashboard therefore needs no change
+# here and no restart. The drop-in at hindsight-api.service.d/extraction-model.conf
+# carries the same value plus the LLM timeout and extraction limits.
+Environment=HINDSIGHT_API_LLM_MODEL=hal0/memory
 # Placeholder credential for the auth-off posture only. Once KB-1 auth is on,
 # /v1 requires a CLIENT-tier bearer and this placeholder 401s every
 # extraction/reflect call (silent retain failure). The real key lives in
@@ -78,7 +79,7 @@ Environment=HINDSIGHT_API_RETAIN_LLM_MAX_RETRIES=1
 Environment=HINDSIGHT_API_WORKER_MAX_RETRIES=2
 Environment=HINDSIGHT_API_WORKER_TASK_RETRY_BACKOFF_SECONDS=120
 # Skip the blocking startup LLM verification. On a fresh box no model is loaded
-# yet, so verifying hal0/utility would hang application startup (the daemon never
+# yet, so verifying hal0/memory would hang application startup (the daemon never
 # binds :9177) until the timeout. The LLM is only needed for extraction/reflection,
 # which runs lazily after a model is loaded — so the engine can serve, create, and
 # seed banks immediately without one. (When a utility model IS loaded, extraction

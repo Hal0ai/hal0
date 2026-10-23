@@ -923,3 +923,19 @@ def test_restart_hindsight_background_uses_seam_restart_verb() -> None:
 
     # Never raises -- a failed restart must not fail the caller.
     assert ee.restart_hindsight_background(seam=_Failing()) is False  # type: ignore[arg-type]
+
+
+# ── #2925: the shipped unit already calls the alias ──────────────────────────
+
+
+def test_shipped_hindsight_unit_defaults_to_the_memory_alias():
+    """A fresh box has no drop-in until the first graph PUT; the installer-owned
+    unit must already point the engine at hal0/memory, so the engine model
+    picker takes effect on the next call without that one-time repair."""
+    import re
+
+    unit = Path(__file__).resolve().parents[2] / "installer" / "systemd" / "hindsight-api.service"
+    models = re.findall(r"^Environment=HINDSIGHT_API_LLM_MODEL=(\S+)$", unit.read_text(), re.M)
+    assert models == [MEMORY_ALIAS]
+    # …and it is the same line the drop-in writes, so the two never disagree.
+    assert f"Environment=HINDSIGHT_API_LLM_MODEL={MEMORY_ALIAS}" in render_drop_in()
