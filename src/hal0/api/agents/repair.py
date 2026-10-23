@@ -13,8 +13,14 @@ Why a subprocess
 ----------------
 The provisioner takes minutes, prints to its console and mutates ``os.environ``.
 Run in-process it would hold all of that inside hal0-api. As a child it runs the
-same code path as ``hal0 agent reprovision hermes --repair``, and the API only
-reads its stdout line by line: every line goes to
+provisioning pipeline that ``sudo hal0 agent reprovision hermes --repair`` drops
+to the ``hal0`` user, but not that command's root-only prelude
+(``hal0.cli.agent_commands._hermes_root_prelude``: the stale ``hal0-agent@``
+drop-in sweep, handing a root-owned venv or uv Python tree back to ``hal0``, the
+``/usr/local/bin/hermes`` wrapper, recording the terminal-tool decision,
+mirroring the vaulted default key) nor the ownership reconcile. A box that needs
+any of those still needs the root command; the docs and the card say so. The API
+only reads the child's stdout line by line: every line goes to
 ``<state>/agents/hermes/provision-logs/job-<id>.log`` (mode 0640, directory 0750;
 the transcripts are not pruned) and every ``[run ] <step>`` line is appended to
 ``job["steps"]``, so the status route serves a coarse checklist while

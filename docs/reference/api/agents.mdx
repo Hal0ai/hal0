@@ -108,14 +108,22 @@ A restart that went through drops the agent's cached overview.
 
 ### Repair job
 
-`POST /api/agents/hermes/repair` runs `hal0 agent bootstrap hermes --repair --verbose` (the
-code path of `hal0 agent reprovision hermes --repair`) as a child of hal0-api and returns the
+`POST /api/agents/hermes/repair` runs `hal0 agent bootstrap hermes --repair --verbose` as the
+`hal0` user, as a child of hal0-api, and returns the
 queued job: `id`, `state: "queued"`, `phase: "repair:hermes"`, `kind: "repair"`, `agent`,
 `created_at`, `updated_at`, `error: null`, `steps: []`, `log_path`, `api_pid` (the hal0-api
 process that owns it) and `actor` (the `X-hal0-Agent` header, `hal0-dashboard` when absent).
 The job is in the updater's registry, so `GET /api/updates/status/{id}` serves it, and a repair
 and a converge refuse each other.
 
+- **What it does not cover.** This is the provisioning pipeline that
+  `sudo hal0 agent reprovision hermes --repair` hands to the `hal0` user, without the root-only
+  steps that command runs first: the stale `hal0-agent@` drop-in sweep, handing a root-owned
+  venv or uv Python tree back to `hal0`, the `/usr/local/bin/hermes` wrapper, recording the
+  terminal-tool decision, mirroring the vaulted default API key, and the ownership reconcile.
+  A repair can end `applied` on a box that needs one of those. For ownership, vault-key or
+  wrapper problems, and for the one-time root repair an older box asks for, run
+  `sudo hal0 agent reprovision hermes --repair` on the box.
 - `state` goes `queued`, `running`, then `applied` (exit 0) or `failed`. A running job has `pid`
   (the child) and `steps`, one entry per `[run ] <step>` line the provisioner prints. A job
   whose child was reaped has `exit_code`, including one that timed out or whose runner failed.
@@ -135,12 +143,17 @@ and a converge refuse each other.
   (`details.job_id`) or another process holds the Hermes builder lock (`details.holder`,
   advisory: it can name a dead holder); `500 agent.builder_lock_unreadable` when the lock
   file cannot be created or opened (`details.error`), a fault of the box that waiting will
-  not clear, so not a 409.
+  not clear, so not a 409. The lock check is a snapshot taken when the request arrives: a
+  root `hal0 agent upgrade hermes --to <sha>` that is still fetching its Python has not
+  taken the lock yet and reads as idle. A repair started then waits for that build and
+  rebuilds at the pin afterwards, so the `--to` release does not stay live.
 - **`api_restarted`.** The child shares hal0-api's cgroup, so restarting hal0-api mid-repair (a
   `hal0 update`, `systemctl restart hal0-api`) kills the build. The live release is unchanged,
   because the builder swaps `current` only at the very end. The next status read of the job
   records it `failed` with `error_code: "api_restarted"` and `error: "hal0-api restarted
-  during the repair; the live release is unchanged"`; run the repair again. Any update,
+  during the repair; the live release is unchanged"`; run the repair again. `hal0 update`
+  does not check for a running repair, so an update started from the CLI or the Updates
+  page during one ends it this way. Any update,
   converge or repair job still `queued` or `running` when it is read back after a hal0-api
   restart reads `failed` / `api_restarted` too, with the text `/api/updates` gives in the
   [REST API index](/docs/reference/api/rest-api/).
