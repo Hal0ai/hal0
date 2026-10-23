@@ -3432,6 +3432,9 @@ def _box_io(
         "fetch_slot_list": _fetch,
         "read_memory_engine_llm": lambda: dict(engine_llm or {}),
         "load_config": lambda: memory if memory is not None else _memory_cfg(),
+        # The anchor probe's route preflight: routable unless a test says not,
+        # so it never reaches a real gateway.
+        "fetch_model_route_ready": lambda _model_id, _base_url="": True,
     }
     return hp.InstallIO(**{**seams, **kw})
 
@@ -3905,7 +3908,12 @@ class TestSmokeColdLoadGuard:
                 "skipped so the smoke test does not cold-load it)"
             ),
         }
-        assert out.details["results"]["anchor_context_window"]["skipped"] is True
+        # The anchor-window probe only reads (GETs never load a slot), so it
+        # keeps its route preflight and still runs on the cold slot.
+        assert out.details["results"]["anchor_context_window"] == {
+            "passed": True,
+            "detail": "window ok",
+        }
         # A cold slot is not a fault: the phase stays ok and nothing failed.
         assert out.status == hp.PhaseStatus.OK
         assert out.details["failures"] == []
@@ -4002,6 +4010,29 @@ class TestSmokeColdLoadGuard:
         assert (ready, reason) == (True, "ready")
         assert calls == []
 
+    def test_the_anchor_preflight_keeps_the_route_probe_on_the_gateway(
+        self, tmp_path: Path
+    ) -> None:
+        """anchor_context_window only GETs the catalog, which never loads a
+        slot, so its preflight is the #1831 route probe on the gateway too —
+        never the slot list — and a cold agent slot does not hold it back."""
+        hh = tmp_path / "hh"
+        _write_ready_chat_config(hh, "hal0/agent")
+        calls: list[str] = []
+        asked: list[tuple[str, str]] = []
+
+        def _route(model_id: str, base_url: str = "") -> bool:
+            asked.append((model_id, base_url))
+            return True
+
+        io = _box_io(
+            [_slot_row("agent", "offline", "big-27b")], calls=calls, fetch_model_route_ready=_route
+        )
+        state = hp.BootstrapState(hermes_home=str(hh))
+        assert hp._anchor_route_ready(state, io) == (True, "ready")
+        assert asked == [("hal0/agent", "http://127.0.0.1:8080/v1")]
+        assert calls == []
+
     def test_only_skips_leave_the_phase_ok(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -4017,6 +4048,10 @@ class TestSmokeColdLoadGuard:
         monkeypatch.setattr(hp, "_smoke_hermes_doctor", lambda s, io: (True, "ok"))
         monkeypatch.setattr(hp, "_smoke_admin_tools_list", lambda s, io: (True, "8 tools"))
         monkeypatch.setattr(hp, "_smoke_hermes_md_contains_primary", lambda s, io: (True, "ok"))
+        # The anchor probe runs on a cold slot and finds no window to judge.
+        monkeypatch.setattr(
+            hp, "_smoke_anchor_context_window", lambda s, io: (None, "no advertised window")
+        )
         rows = [_slot_row("agent", "offline", "big-27b"), _slot_row("utility", "offline", "u1")]
         out = hp._phase_smoke_tests(
             hp._StepCtx(state=hp.BootstrapState(hermes_home=str(hh)), io=_box_io(rows))
@@ -4434,12 +4469,21 @@ class TestAnchorContextWindowPreflight:
         assert out.details["results"]["anchor_context_window"]["skipped"] is True
         assert out.status == hp.PhaseStatus.OK
 
-    @staticmethod
+    #: ct152 as captured: the agent slot is offline with no model bound, while
+    #: brain and utility are loaded.
+    _CT152_SLOTS = (
+        _slot_row("agent", "offline"),
+        _slot_row("brain", "ready", "hal0-brain-sft-fpx8"),
+        _slot_row("utility", "ready", "u1"),
+    )
+
+    @classmethod
     def _ct152_box(
+        cls,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
         tmp_hal0_home: str,
-        slot_rows: list[dict[str, Any]],
+        seen: list[str] | None = None,
     ) -> hp.BootstrapState:
         hh = tmp_path / "hh"
         hh.mkdir()
@@ -4461,11 +4505,13 @@ class TestAnchorContextWindowPreflight:
             {
                 "http://127.0.0.1:8080/v1/models/hal0/agent": _CT152_BY_ID,
                 "http://127.0.0.1:8080/v1/models": {"data": _CT152_CATALOG},
-                _SLOTS_URL: slot_rows,
+                _CHAT_URL: _READY_REPLY,
+                _SLOTS_URL: list(cls._CT152_SLOTS),
             },
+            seen,
         )
+        # The REAL chat probe stays in: any attempt at it shows in ``seen``.
         _stub_non_chat_probes(monkeypatch)
-        monkeypatch.setattr(hp, "_smoke_chat_completions", lambda s, io: (True, "ready"))
         return hp.BootstrapState(hermes_home=str(hh), venv=str(tmp_path / "no-venv"))
 
     def test_ct152_the_anchor_falls_back_to_another_slot_and_must_not_pass(
@@ -4483,40 +4529,10 @@ class TestAnchorContextWindowPreflight:
 
         Payloads are verbatim captures from ct152 — the expectation comes
         from the gateway itself, not from anything hal0's resolver computes.
-        With brain AND utility both bound, the gateway's fallback is "the first
-        bound slot in its order", which the slot list cannot pin, so the
-        cold-load guard skips both model probes. Skipped is still not a pass.
+        The agent slot is cold, but the anchor probe only reads the catalog, so
+        it keeps its route preflight and still runs here.
         """
-        state = self._ct152_box(
-            tmp_path,
-            monkeypatch,
-            tmp_hal0_home,
-            [
-                _slot_row("agent", "offline"),
-                _slot_row("brain", "ready", "hal0-brain-sft-fpx8"),
-                _slot_row("utility", "ready", "u1"),
-            ],
-        )
-        out = hp._phase_smoke_tests(hp._StepCtx(state=state))
-        result = out.details["results"]["anchor_context_window"]
-        assert result["passed"] is not True, result  # the whole point of #1867
-        assert result["skipped"] is True
-        assert "2 slots could take the fallback" in result["detail"]
-        assert out.details["results"]["chat_completions"]["skipped"] is True
-
-    def test_ct152_shape_with_one_bound_slot_fails_loudly_on_the_fallback_slot(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, tmp_hal0_home: str
-    ) -> None:
-        """The ct152 fallback on a box where brain is the only bound llm slot:
-        the fallback can only land there, brain is loaded, so the anchor probe
-        runs and names brain's profile, not the alias the anchor is spelled
-        with."""
-        state = self._ct152_box(
-            tmp_path,
-            monkeypatch,
-            tmp_hal0_home,
-            [_slot_row("agent", "offline"), _slot_row("brain", "ready", "hal0-brain-sft-fpx8")],
-        )
+        state = self._ct152_box(tmp_path, monkeypatch, tmp_hal0_home)
         out = hp._phase_smoke_tests(hp._StepCtx(state=state))
         result = out.details["results"]["anchor_context_window"]
         assert result["passed"] is not True, result  # the whole point of #1867
@@ -4529,6 +4545,25 @@ class TestAnchorContextWindowPreflight:
         assert "raise ctx_size to 65536 on profile 'brain-window'" in detail
         assert "hal0 slot restart brain" in detail
         assert "agent.toml" not in detail
+        assert out.status == hp.PhaseStatus.WARN
+
+    def test_ct152_the_chat_probe_skips_on_the_same_cold_box_and_never_posts(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, tmp_hal0_home: str
+    ) -> None:
+        """Same box: the chat probe WOULD make the gateway load a slot, and the
+        slot list cannot pin which one (agent has no model, so the gateway falls
+        back to the first of two bound slots in its own order). It skips, and
+        no request reaches ``/chat/completions``."""
+        seen: list[str] = []
+        state = self._ct152_box(tmp_path, monkeypatch, tmp_hal0_home, seen)
+        out = hp._phase_smoke_tests(hp._StepCtx(state=state))
+        assert _SLOTS_URL in seen
+        assert not _chat_attempted(seen), seen
+        chat = out.details["results"]["chat_completions"]
+        assert chat["skipped"] is True and chat["passed"] is None
+        assert chat["detail"].startswith("skipped: chat model not loaded (")
+        assert "2 slots could take the fallback" in chat["detail"]
+        assert not any(f.startswith("chat_completions") for f in out.details["failures"])
 
     def test_an_unreadable_window_skips_rather_than_passing(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

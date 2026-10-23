@@ -7666,7 +7666,11 @@ def _phase_voice_wire(ctx: _StepCtx) -> PhaseResult:
 # agent model that way stalled the host until the agent's watchdog killed it.
 # Both preflights therefore run their probe only when the slot that would
 # serve it is already loaded (see the cold-load guard above
-# `_fetch_slot_list`).
+# `_fetch_slot_list`). anchor_context_window only READS the anchor's window
+# (GETs that never load a slot), so it keeps the #1831 route preflight
+# (`_anchor_route_ready`) and still runs on a cold slot. hermes_doctor,
+# admin_tools_list, wrapper_ready and hermes_md_contains_primary send no model
+# request at all and are not gated.
 
 
 def _wrapper_bin() -> Path:
@@ -7931,6 +7935,9 @@ def _smoke_hermes_doctor(_state: BootstrapState, io: InstallIO) -> tuple[bool, s
     venv_hermes = _venv_python(Path(_state.venv)).parent / "hermes"
     if not venv_hermes.exists():
         return (False, f"hermes binary missing at {venv_hermes}")
+    # Never cold-loads a slot: at the v0.22.4 pin plain `hermes doctor` only GETs
+    # .../models; real model calls need `--live` (hermes_cli/doctor_live.py
+    # maybe_run_live_checks, doctor.py ~:189-192), which this never passes.
     try:
         result = io.run(  # nosec B603 — known-safe argv
             [str(venv_hermes), "doctor"],
@@ -7944,19 +7951,26 @@ def _smoke_hermes_doctor(_state: BootstrapState, io: InstallIO) -> tuple[bool, s
     return (result.returncode == 0, f"rc={result.returncode}")
 
 
-#: Probes that only mean something once a chat-capable model is actually
-#: routable. Gated behind :func:`_chat_model_ready` so an install-time smoke
-#: run (no model has ever been loaded yet) reports `skipped`, not a timeout,
-#: and so a repair never cold-loads the chat model's slot to test it.
+#: Probes that send a chat request to ``model.default``. Gated behind
+#: :func:`_chat_model_ready` so an install-time smoke run (no model has ever
+#: been loaded yet) reports `skipped`, not a timeout, and so a repair never
+#: cold-loads the chat model's slot to test it.
 #: memory_roundtrip does NOT belong here — it exercises the MCP
 #: memory_add/memory_search tools directly and has no chat dependency
 #: whatsoever (#1831); gating it behind the chat anchor over-skipped it even
 #: when memory itself was fully working. It has its own gate on the memory
 #: engine's model (:data:`_MEMORY_MODEL_PROBES`).
-#: ``anchor_context_window`` joins it for the same reason (#1867): with no chat
-#: model routable there is no advertised window to compare against Hermes'
-#: floor, so the honest report is ``skipped``, not a manufactured verdict.
-_MODEL_DEPENDENT_PROBES = frozenset({"chat_completions", "anchor_context_window"})
+_MODEL_DEPENDENT_PROBES = frozenset({"chat_completions"})
+
+#: Probes that only READ the anchor's advertised window, gated behind the
+#: route preflight :func:`_anchor_route_ready` (#1867): with no routable anchor
+#: there is no window to compare against Hermes' floor, so the honest report is
+#: ``skipped``, not a manufactured verdict. Their requests are GETs on
+#: ``/v1/models`` and ``/v1/models/{id}``, which never load a slot
+#: (``api/routes/v1.py`` ``get_model`` / ``_aggregate_models``), so they keep
+#: running on a cold slot and still catch an anchor whose window is under the
+#: floor there.
+_ANCHOR_ROUTE_PROBES = frozenset({"anchor_context_window"})
 
 #: Probes whose request makes the memory engine call its own model through
 #: hal0, gated behind :func:`_memory_engine_ready`.
@@ -8016,23 +8030,57 @@ def _chat_model_ready(
     Never raises: any config/parse/probe problem resolves to a decision plus
     the reason behind it.
     """
+    wiring = _read_model_wiring(state)
+    if isinstance(wiring, str):
+        return False, wiring
+    model_name, base_url = wiring
+    if _is_gateway_base_url(base_url):
+        ready, why = _slot_cold_load_guard(model_name, _read_slot_list(io, slot_list))
+        return ready, (f"ready ({why})" if ready else why)
+    return _route_preflight(model_name, base_url, io)
+
+
+def _anchor_route_ready(state: BootstrapState, io: InstallIO) -> tuple[bool, str]:
+    """Route preflight for the anchor-window probe (#1867): is ``model.default`` routable?
+
+    The anchor probe only GETs ``/v1/models`` and ``/v1/models/{id}``, which
+    never load a slot, so it does NOT take the chat probe's cold-load guard: it
+    keeps the #1831 route preflight on every endpoint, gateway included, and
+    still runs when the serving slot is cold. That keeps a box whose anchor
+    resolves under Hermes' floor failing loudly (the ct152 shape) instead of
+    skipping. Never raises.
+    """
+    wiring = _read_model_wiring(state)
+    if isinstance(wiring, str):
+        return False, wiring
+    model_name, base_url = wiring
+    return _route_preflight(model_name, base_url, io)
+
+
+def _read_model_wiring(state: BootstrapState) -> tuple[str, str] | str:
+    """``(model.default, model.base_url)`` from config.yaml, or why it cannot be read."""
     import yaml  # type: ignore[import-untyped]
 
     config_path = Path(state.hermes_home) / "config.yaml"
     if not config_path.exists():
-        return False, "config.yaml missing"
+        return "config.yaml missing"
     try:
         cfg = yaml.safe_load(config_path.read_text()) or {}
     except (OSError, yaml.YAMLError) as exc:
-        return False, f"config parse: {exc}"
+        return f"config parse: {exc}"
     model_cfg = cfg.get("model") or {}
     model_name = model_cfg.get("default", "")
     if not model_name:
-        return False, "model.default unset in config.yaml"
-    base_url = str(model_cfg.get("base_url", "") or "")
-    if _is_gateway_base_url(base_url):
-        ready, why = _slot_cold_load_guard(str(model_name), _read_slot_list(io, slot_list))
-        return ready, (f"ready ({why})" if ready else why)
+        return "model.default unset in config.yaml"
+    return str(model_name), str(model_cfg.get("base_url", "") or "")
+
+
+def _route_preflight(model_name: str, base_url: str, io: InstallIO) -> tuple[bool, str]:
+    """The #1831 route preflight: ask ``base_url`` whether ``model_name`` routes.
+
+    Skips only on an authoritative "no route"; an inconclusive or failed probe
+    lets the probe run and report what really happens.
+    """
     try:
         routable = io.fetch_model_route_ready(model_name, base_url)
     except Exception as exc:  # preflight must never raise
@@ -8118,7 +8166,10 @@ def _phase_smoke_tests(ctx: _StepCtx) -> PhaseResult:
     recorded under ``skipped`` and never counts as a failure, so a box whose
     model slots are simply cold reports ``ok``.
 
-    hal0-api's slot list is read at most once and shared by both gates.
+    Three gates: the chat probe and the memory round trip can make hal0 load a
+    slot, so they need it already loaded (cold-load guard); the anchor-window
+    probe only reads, so it keeps its route preflight. hal0-api's slot list is
+    read at most once and shared by the two cold-load gates.
     """
     state = ctx.state
     slot_answer: list[SlotListAnswer] = []
@@ -8129,6 +8180,7 @@ def _phase_smoke_tests(ctx: _StepCtx) -> PhaseResult:
         return slot_answer[0]
 
     chat_ready, chat_reason = _chat_model_ready(state, ctx.io, _slot_list)
+    anchor_ready, anchor_reason = _anchor_route_ready(state, ctx.io)
     memory_ready, memory_reason = _memory_engine_ready(ctx.io, _slot_list)
     probes: list[tuple[str, Callable[[BootstrapState, InstallIO], tuple[bool | None, str]]]] = [
         ("wrapper_ready", _smoke_wrapper_ready),
@@ -8146,6 +8198,8 @@ def _phase_smoke_tests(ctx: _StepCtx) -> PhaseResult:
         gate_reason = None
         if name in _MODEL_DEPENDENT_PROBES and not chat_ready:
             gate_reason = chat_reason
+        elif name in _ANCHOR_ROUTE_PROBES and not anchor_ready:
+            gate_reason = anchor_reason
         elif name in _MEMORY_MODEL_PROBES and not memory_ready:
             gate_reason = memory_reason
         if gate_reason is not None:
