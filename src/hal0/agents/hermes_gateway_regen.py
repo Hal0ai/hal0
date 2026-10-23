@@ -353,7 +353,6 @@ def _write_unit(path: Path, text: str) -> None:
 
 #: Hal0's Hermes home. Upstream names a non-default home's unit after the
 #: first 8 hex of sha256(home): ``hermes_cli/gateway_runtime_service.py:37-60``.
-HERMES_HOME = f"{AGENT_HOME}/.hermes"
 HASHED_UNIT = (
     "hermes-gateway-" + hashlib.sha256(HERMES_HOME.encode("utf-8")).hexdigest()[:8] + ".service"
 )

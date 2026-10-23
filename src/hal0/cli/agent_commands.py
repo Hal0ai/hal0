@@ -1235,14 +1235,24 @@ def _install_hermes_gateway() -> None:
     try:
         installed = install_gateway_unit()
     except GatewayRegenError as exc:
+        what = (
+            "hermes gateway unit written, but its install did not finish"
+            if _Path(_HERMES_GATEWAY_UNIT).is_file()
+            else "hermes gateway unit not installed"
+        )
         console.print(
-            f"[yellow]hermes gateway unit not installed ({exc}) — Telegram/Discord bridge "
-            "unavailable; continuing.[/yellow]"
+            f"[yellow]{what} ({exc}) — Telegram/Discord bridge may be unavailable; "
+            "continuing.[/yellow]"
         )
         if disabled:
             return
     else:
         console.print(f"[dim]{installed.message}[/dim]")
+        if "enable-linger" in installed.message and "failed" in installed.message:
+            console.print(
+                "[yellow]linger for hal0 is off: Hermes cron and kanban workers need it; "
+                "run 'sudo loginctl enable-linger hal0'.[/yellow]"
+            )
     if not _normalise_gateway_unit_or_warn(has_systemctl, turn_off=not disabled):
         return
 
