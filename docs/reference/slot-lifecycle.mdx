@@ -177,11 +177,15 @@ pending" during the half-open window.
 `unknown`, or `not-configured` (`hal0.slot_view.image_status_for`). Only
 `unknown` renders a dashboard chip: it means hal0 could not read the container
 image store at all — the rootful `hal0-podman-ro` seam returned an error, the
-sudoers grant is absent, or the read probe timed out — which is a different
+sudoers grant is absent, or the read probe timed out — or could not resolve the
+slot's image in the first place (an unreadable `profiles.toml`; the log carries
+`reason=resolve-error`) — which is a different
 claim from `missing` (podman was asked and said the image isn't there).
 `present` and `not-configured` are the quiet, correct states, and `pulling`
 already has its own progress bar. Seeing the "image ?" chip is the cue to run
-`hal0 doctor all` and check the `seams` row — there is no standalone
+`hal0 doctor all` and check the `seams` row, then the hal0-api journal for
+`slot_view.image_probe_failed` (a `reason=resolve-error` there means the image
+could not be resolved, not that the seam is broken). There is no standalone
 `hal0 doctor seams` command.
 
 A slot or its container that was stopped cleanly no longer paints as `crashed`
