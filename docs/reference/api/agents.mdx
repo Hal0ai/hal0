@@ -117,9 +117,10 @@ The job is in the updater's registry, so `GET /api/updates/status/{id}` serves i
 and a converge refuse each other.
 
 - `state` goes `queued`, `running`, then `applied` (exit 0) or `failed`. A running job has `pid`
-  (the child) and `steps`, one entry per `[run ] <step>` line the provisioner prints. A job that
-  ran to the end has `exit_code`. `audit_finished` appears once the job's
-  `agent.repair.finished` event has been logged.
+  (the child) and `steps`, one entry per `[run ] <step>` line the provisioner prints. A job
+  whose child was reaped has `exit_code`, including one that timed out or whose runner failed.
+  `audit_finished` appears once the runner has logged the job's `agent.repair.finished` event;
+  a job failed later as `api_restarted` logs that event without it.
 - A `failed` job's `error` is one of: `bootstrap exited <code>`; `bootstrap timed out after
   2700s` (a repair is bounded to 45 minutes); `could not start bootstrap: <os error>` (no `pid`,
   no `exit_code`); `repair runner failed: <error>` (the runner itself broke, for instance
