@@ -141,6 +141,7 @@ override: `HAL0_FLM_MODELS_DIR`.
 |---|---|---|---|
 | `enabled` | bool | `false` | informational only |
 | `extraction_slot` | str | `"utility"` | regex `^[a-z0-9][a-z0-9_-]{0,31}$` |
+| `extraction_model` | str \| null | `null` | an upstream model id hal0's `/v1` routes (regex `^[A-Za-z0-9][A-Za-z0-9_./:-]{0,127}$`, never `hal0/…`); set → the engine runs on it instead of `extraction_slot`, validated against the live upstream catalogs at set-time |
 | `llm_timeout_s` | int | `300` | `30-3600` |
 | `extraction_max_concurrent` | int | `1` | `1-8` |
 | `extraction_max_tokens` | int | `4096` | `3072-32768` |

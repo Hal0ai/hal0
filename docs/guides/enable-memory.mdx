@@ -90,10 +90,16 @@ Storing recall items is one thing; running an LLM over them to extract a
 knowledge graph is heavier and separately gated — **off by default** even
 on a fresh install.
 
-Hindsight builds its graph natively from whatever local `llm` slot you
-point it at. That slot is `[memory.graph].extraction_slot` in
-`hal0.toml` (default `"utility"`); changing it repoints Hindsight's
-extraction LLM and restarts `hindsight-api` to apply it. `[memory.graph].llm_timeout_s`
+Hindsight builds its graph natively from whatever model you point it
+at. By default that is a local `llm` slot, `[memory.graph].extraction_slot`
+in `hal0.toml` (default `"utility"`). You can instead run the engine on an
+upstream model — anything your configured upstreams advertise, such as an
+OpenRouter or MiniMax id — with `[memory.graph].extraction_model`; the
+local slot stays configured as the way back. Either way hindsight-api
+calls the one virtual id `hal0/memory`, which hal0's `/v1` resolves to your
+choice on every call, so switching applies at once with no engine
+restart, and an upstream target uses hal0's own upstream credentials (the
+engine never holds a cloud key). `[memory.graph].llm_timeout_s`
 (default `300`, 30–3600) sets how long Hindsight will wait on its own
 extraction/consolidation/reflect calls — raise it if a cold slot start
 regularly times out. The **Extraction limits** on the same panel (Settings →
@@ -115,21 +121,33 @@ hal0 memory graph status --json
 ```
 
 Shows whether extraction is on, the configured extraction slot (and
-whether it currently resolves to a live enabled `llm` slot), the
-available slots you could pick instead, and build/error counters.
+whether it currently resolves to a live enabled `llm` slot), the engine
+target `hal0/memory` resolves to, the available slots and upstream models
+you could pick instead, build/error counters, and **Engine running**: the
+provider, base URL and model `hindsight-api` actually loads. If
+`/etc/hal0/hindsight-llm.env` carries `HINDSIGHT_API_LLM_PROVIDER`,
+`_BASE_URL` or `_MODEL` lines, that row says so in red — systemd applies
+that file after every other setting, so hal0's picker has no effect until
+those lines are removed and `hindsight-api` is restarted.
 
 </TabItem>
 <TabItem label="Enable">
 
 ```sh
-hal0 memory graph enable                  # keep the current extraction slot
-hal0 memory graph enable --slot utility   # repoint it
+hal0 memory graph enable                        # keep the current target
+hal0 memory graph enable --slot utility         # run on a local slot
 hal0 memory graph enable --slot agent
+hal0 memory graph enable --model MiniMax-M2.5   # run on an upstream model
+hal0 memory graph enable --local                # back to the local slot
 ```
 
 `--slot` names a local `type=llm` slot; it must already be enabled — the
 server validates the choice against the live enabled-slot set and rejects
-an unknown or non-llm slot before it ever reaches `hal0.toml`.
+an unknown or non-llm slot before it ever reaches `hal0.toml`. `--model`
+names an upstream model id as `hal0 memory graph status` lists it under
+"Upstream models"; the server rejects an id no configured upstream
+advertises. The dashboard's **Engine model** picker (Settings → Data →
+Memory, and the agents Memory tab) offers the same two groups.
 
 Enabling also measures whether the extraction slot can finish one
 extraction inside `[memory.graph].llm_timeout_s`. hal0 reads the slot's
