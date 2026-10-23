@@ -45,6 +45,19 @@ CLIENT_STREAM_PATH = "/v1/_test-2816/stream"
 _DEADLINE_S = 10.0
 
 
+def _add_test_route(app: FastAPI, path: str, endpoint: Any) -> None:
+    """Register a test-only route ahead of every route ``create_app`` mounted.
+
+    With a built ``ui/dist`` the SPA catch-all is already in the table, and
+    ``add_api_route`` appends after it, so the catch-all would answer first.
+    """
+    before = len(app.router.routes)
+    app.add_api_route(path, endpoint, methods=["GET"])
+    added = app.router.routes[before:]
+    del app.router.routes[before:]
+    app.router.routes[0:0] = added
+
+
 @dataclass
 class Served:
     url: str
@@ -95,7 +108,7 @@ def _serve(
 
         return StreamingResponse(gen(), media_type="text/event-stream")
 
-    app.add_api_route(CLIENT_STREAM_PATH, _client_stream, methods=["GET"])
+    _add_test_route(app, CLIENT_STREAM_PATH, _client_stream)
 
     server = uvicorn.Server(
         uvicorn.Config(app, host="127.0.0.1", port=0, log_level="warning", lifespan="on")
@@ -308,7 +321,7 @@ def test_revoked_stream_generator_is_closed_not_left_to_gc(served: Served) -> No
 
         return StreamingResponse(gen(), media_type="text/event-stream")
 
-    served.app.add_api_route("/v1/_test-2816/fast", _fast_stream, methods=["GET"])
+    _add_test_route(served.app, "/v1/_test-2816/fast", _fast_stream)
     served.app.state.login_limiter = None  # thirty rotations from one address
     gc_was_enabled = gc.isenabled()
     gc.disable()
