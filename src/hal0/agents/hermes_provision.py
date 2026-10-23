@@ -8008,6 +8008,14 @@ _HERMES_DOCTOR_ADVISORY_ISSUES = frozenset(
     }
 )
 
+#: What `hermes doctor` says about hal0's terminal-off sentinel backend
+#: (doctor_tools.py `_check_plugin_backend`: no backend by that name exists, by
+#: design). Advisory only while the root config really carries
+#: :data:`TERMINAL_OFF_BACKEND`; any other unknown backend still fails.
+_HERMES_DOCTOR_TERMINAL_OFF_ISSUE = (
+    "Fix terminal.backend in config.yaml, or install/enable the plugin that provides it"
+)
+
 #: One numbered entry of `hermes doctor`'s closing "Found N issue(s)" list
 #: (doctor.py `_print_summary`).
 _HERMES_DOCTOR_ISSUE_RE = re.compile(r"^\s*\d+\.\s+(?P<issue>\S.*?)\s*$")
@@ -8063,10 +8071,17 @@ def _smoke_hermes_doctor(_state: BootstrapState, io: InstallIO) -> tuple[bool, s
     issues = _hermes_doctor_issues(result.stdout or "")
     if issues is None:
         return (False, "rc=1 (no issue list in its output)")
-    real = [issue for issue in issues if issue not in _HERMES_DOCTOR_ADVISORY_ISSUES]
+    advisory = set(_HERMES_DOCTOR_ADVISORY_ISSUES)
+    try:
+        config_text = (Path(_state.hermes_home) / "config.yaml").read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        config_text = None
+    if _terminal_backend_in_config(config_text) == TERMINAL_OFF_BACKEND:
+        advisory.add(_HERMES_DOCTOR_TERMINAL_OFF_ISSUE)
+    real = [issue for issue in issues if issue not in advisory]
     if real:
         return (False, "rc=1: " + "; ".join(real))
-    return (True, f"rc=1, only {len(issues)} provider-key advisory issue(s)")
+    return (True, f"rc=1, only {len(issues)} advisory issue(s)")
 
 
 #: Probes that send a chat request to ``model.default``. Gated behind

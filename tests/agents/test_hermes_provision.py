@@ -6057,11 +6057,17 @@ def _doctor_output(*issues: str) -> str:
     return _DOCTOR_TAIL.format(n=len(issues), issues=numbered)
 
 
-def _doctor_probe(tmp_path: Path, returncode: int, stdout: str) -> tuple[bool, str]:
+def _doctor_probe(
+    tmp_path: Path, returncode: int, stdout: str, *, backend: str | None = None
+) -> tuple[bool, str]:
     venv = tmp_path / "venv"
     (venv / "bin").mkdir(parents=True)
     (venv / "bin" / "hermes").write_text("")
-    state = hp.BootstrapState(hermes_home=str(tmp_path / "hh"), venv=str(venv))
+    hh = tmp_path / "hh"
+    if backend is not None:
+        hh.mkdir()
+        (hh / "config.yaml").write_text(f"terminal:\n  backend: {backend}\n")
+    state = hp.BootstrapState(hermes_home=str(hh), venv=str(venv))
 
     def _run(argv: list[str], **_kw: Any) -> subprocess.CompletedProcess[str]:
         assert argv[1:] == ["doctor"]  # never --live: that would load a model
@@ -6085,7 +6091,7 @@ def test_smoke_hermes_doctor_ignores_the_stock_provider_key_advisories(tmp_path:
     )
     ok, detail = _doctor_probe(tmp_path, 1, out)
     assert ok
-    assert "2 provider-key advisory" in detail
+    assert "2 advisory" in detail
 
 
 def test_smoke_hermes_doctor_strips_colour_codes(tmp_path: Path) -> None:
@@ -6139,3 +6145,26 @@ def test_smoke_hermes_doctor_reads_the_last_summary(tmp_path: Path) -> None:
     ok, detail = _doctor_probe(tmp_path, 1, echoed + real)
     assert not ok
     assert detail == "rc=1: Run 'hermes setup' to migrate config"
+
+
+_TERMINAL_ISSUE = (
+    "Fix terminal.backend in config.yaml, or install/enable the plugin that provides it"
+)
+
+
+def test_smoke_hermes_doctor_ignores_the_terminal_off_sentinel(tmp_path: Path) -> None:
+    """hal0's terminal-off sentinel is an unknown backend to upstream by design;
+    with the sentinel configured that issue is advisory."""
+    out = _doctor_output("Run 'hermes setup' to configure API keys", _TERMINAL_ISSUE)
+    ok, detail = _doctor_probe(tmp_path, 1, out, backend=hp.TERMINAL_OFF_BACKEND)
+    assert ok, detail
+
+
+@pytest.mark.parametrize("backend", [None, "local", "typo-backend"])
+def test_smoke_hermes_doctor_fails_an_unknown_backend_that_is_not_the_sentinel(
+    tmp_path: Path, backend: str | None
+) -> None:
+    out = _doctor_output(_TERMINAL_ISSUE)
+    ok, detail = _doctor_probe(tmp_path, 1, out, backend=backend)
+    assert not ok
+    assert detail == f"rc=1: {_TERMINAL_ISSUE}"
