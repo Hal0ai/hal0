@@ -19,7 +19,7 @@
  *                       and the card falls back to `unit_active` on the
  *                       /api/agents record alone
  */
-import { test, expect, json, type Page } from '../fixtures/apiMock'
+import { test, expect, json, seedSlots, type Page } from '../fixtures/apiMock'
 import type { AgentOverview } from '../../../src/api/hooks/useAgents'
 
 const FIVE_S = 5_500
@@ -80,19 +80,7 @@ async function mockAgents(page: Page, unitActive: boolean | null, source: Source
   )
   // /api/slots is served from window.HAL0_DATA by the in-bundle mock layer,
   // so it has to be seeded there rather than via page.route.
-  await page.addInitScript((slots) => {
-    let real: any
-    Object.defineProperty(window, 'HAL0_DATA', {
-      configurable: true,
-      get() {
-        return real
-      },
-      set(v) {
-        real = v
-        if (v && typeof v === 'object') v.slots = slots
-      },
-    })
-  }, [IDLE_PRIMARY])
+  await seedSlots(page, [IDLE_PRIMARY])
   // The Memory tab's live endpoints — keep the shell hermetic.
   await page.route('**/api/memory/graph/status', (route) =>
     json(route, { enabled: false, route: 'upstream' }),
@@ -110,7 +98,7 @@ for (const source of ['overview', 'agents record'] as const) {
 
       const card = hermesCard(page)
       await expect(card).toBeVisible({ timeout: FIVE_S })
-      await expect(card.locator('.fc-st')).toContainText('down', { timeout: FIVE_S })
+      await expect(card.locator('.fc-st')).toHaveText(/^down$/, { timeout: FIVE_S })
       await expect(card.locator('.fc-st')).not.toContainText('ready')
       // The error dot, so the colour matches the words.
       await expect(card.locator('.fc-st .sdot.error')).toBeVisible()
@@ -124,7 +112,7 @@ for (const source of ['overview', 'agents record'] as const) {
 
       const card = hermesCard(page)
       await expect(card).toBeVisible({ timeout: FIVE_S })
-      await expect(card.locator('.fc-st')).toContainText('ready', { timeout: FIVE_S })
+      await expect(card.locator('.fc-st')).toHaveText(/^ready$/, { timeout: FIVE_S })
       await expect(card.locator('.fc-st')).not.toContainText('down')
     })
 
@@ -134,7 +122,7 @@ for (const source of ['overview', 'agents record'] as const) {
 
       const card = hermesCard(page)
       await expect(card).toBeVisible({ timeout: FIVE_S })
-      await expect(card.locator('.fc-st')).toContainText('unknown', { timeout: FIVE_S })
+      await expect(card.locator('.fc-st')).toHaveText(/^unknown$/, { timeout: FIVE_S })
       await expect(card.locator('.fc-st')).not.toContainText('ready')
       await expect(card.locator('.fc-st .sdot.serving')).toHaveCount(0)
     })

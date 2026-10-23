@@ -19,7 +19,7 @@
  * slot through `window.HAL0_DATA` — `/api/slots` is answered by the in-bundle
  * mock layer and is not reachable through `page.route`.
  */
-import { test, expect, json, type Page } from '../fixtures/apiMock'
+import { test, expect, json, seedSlots, type Page } from '../fixtures/apiMock'
 import type { AgentOverview } from '../../../src/api/hooks/useAgents'
 
 const FIVE_S = 5_500
@@ -142,22 +142,6 @@ function chatSlot(state: 'ready' | 'serving') {
   }
 }
 
-async function seedSlots(page: Page, slots: unknown[]) {
-  await page.addInitScript((seed) => {
-    let real: any
-    Object.defineProperty(window, 'HAL0_DATA', {
-      configurable: true,
-      get() {
-        return real
-      },
-      set(v) {
-        real = v
-        if (v && typeof v === 'object') v.slots = seed
-      },
-    })
-  }, slots)
-}
-
 /** Mock the agents list, the two overviews and the slot, hermetically. */
 async function mockCards(
   page: Page,
@@ -218,7 +202,7 @@ test.describe('Hermes card phases', () => {
 
     const front = face(page, 'hermes')
     await expect(front).toHaveAttribute('data-phase', 'not_installed', { timeout: FIVE_S })
-    await expect(front.locator('.fc-st')).toContainText('not installed')
+    await expect(front.locator('.fc-st')).toHaveText(/^not installed$/)
     await expect(page.getByTestId('agent-version-hermes')).toHaveText('pin v0.22.4')
 
     const copy = card(page, 'hermes').getByTestId('agent-action-copy-install')
@@ -247,7 +231,7 @@ test.describe('Hermes card phases', () => {
 
     const front = face(page, 'hermes')
     await expect(front).toHaveAttribute('data-phase', 'broken', { timeout: FIVE_S })
-    await expect(front.locator('.fc-st')).toContainText('broken')
+    await expect(front.locator('.fc-st')).toHaveText(/^broken$/)
     await expect(front.locator('.fc-st .sdot.error')).toBeVisible()
     await expect(front.locator('.fc-journal-ln').last()).toContainText('exited with status 1')
 
@@ -282,7 +266,7 @@ test.describe('Hermes card phases', () => {
 
     const front = face(page, 'hermes')
     await expect(front).toHaveAttribute('data-phase', 'down', { timeout: FIVE_S })
-    await expect(front.locator('.fc-st')).toContainText('down')
+    await expect(front.locator('.fc-st')).toHaveText(/^down$/)
     await expect(front.locator('.fc-st')).not.toContainText('ready')
     await expect(front.locator('.fc-st .sdot.error')).toBeVisible()
     await expect(front.locator('.fc-journal-ln').last()).toContainText('stopped by systemctl')
@@ -327,7 +311,7 @@ test.describe('Hermes card phases', () => {
 
     const front = face(page, 'hermes')
     await expect(front).toHaveAttribute('data-phase', 'degraded', { timeout: FIVE_S })
-    await expect(front.locator('.fc-st')).toContainText('degraded')
+    await expect(front.locator('.fc-st')).toHaveText(/^degraded$/)
     // The block beside the version counts the reasons.
     await expect(front.locator('.fc-pblock.warn')).toContainText('3')
 
@@ -412,7 +396,7 @@ test.describe('Hermes card phases', () => {
 
     const front = face(page, 'hermes')
     await expect(front).toHaveAttribute('data-phase', 'ready', { timeout: FIVE_S })
-    await expect(front.locator('.fc-st')).toContainText('ready')
+    await expect(front.locator('.fc-st')).toHaveText(/^ready$/)
     await expect(front.locator('.fc-st')).not.toContainText('serving')
     await expect(front.locator('.fc-chips')).toContainText('approvals')
     await expect(front.locator('.fc-chips')).toContainText('smart')
@@ -431,6 +415,58 @@ test.describe('Hermes card phases', () => {
     await expect(card(page, 'hermes').getByTestId('agent-action-approvals-inbox')).toContainText(
       'inbox · 1',
     )
+  })
+
+  test('persona: the select only picks, Activate applies it, the chip follows', async ({ page }) => {
+    let active = 'default'
+    const activations: string[] = []
+    await page.route('**/api/agents/hermes/personas', (route) =>
+      json(route, {
+        agent_id: 'hermes',
+        active,
+        personas: [
+          { id: 'default', display_name: 'Default', active: active === 'default' },
+          { id: 'coder', display_name: 'Coder', active: active === 'coder' },
+        ],
+      }),
+    )
+    await page.route('**/api/agents/hermes/personas/*/activate', (route) => {
+      activations.push(new URL(route.request().url()).pathname)
+      active = 'coder'
+      return json(route, { ok: true })
+    })
+    await mockCards(page, {
+      agents: [hermesRecord(true)],
+      hermes: hermesOverview(),
+      slot: chatSlot('ready'),
+    })
+    await openAgents(page)
+
+    const front = face(page, 'hermes')
+    await expect(front).toHaveAttribute('data-phase', 'ready', { timeout: FIVE_S })
+    // The chip names the live active persona, not provision.json's.
+    await expect(front.locator('.fc-chips')).toContainText('persona · Default')
+
+    await flip(page, 'hermes')
+    const select = card(page, 'hermes').getByTestId('agent-action-persona')
+    const activate = card(page, 'hermes').getByTestId('agent-action-persona-activate')
+    await expect(select).toHaveValue('default')
+    await expect(activate).toBeDisabled()
+
+    // Picking a persona changes nothing on the box.
+    await select.selectOption('coder')
+    await expect(activate).toBeEnabled()
+    await page.waitForTimeout(500)
+    expect(activations).toEqual([])
+
+    await activate.click()
+    await expect.poll(() => activations).toEqual(['/api/agents/hermes/personas/coder/activate'])
+    await expect(page.locator('.hal0-toast.ok', { hasText: 'Persona activated' })).toBeVisible()
+    await expect(select).toHaveValue('coder')
+    await expect(activate).toBeDisabled()
+
+    await flip(page, 'hermes')
+    await expect(front.locator('.fc-chips')).toContainText('persona · Coder')
   })
 
   test('keyboard: Enter flips to the console, Tab reaches an action, Escape flips back', async ({
@@ -489,7 +525,7 @@ test.describe('Hermes card phases', () => {
 
     const front = face(page, 'hermes')
     await expect(front).toHaveAttribute('data-phase', 'serving', { timeout: FIVE_S })
-    await expect(front.locator('.fc-st')).toContainText('serving')
+    await expect(front.locator('.fc-st')).toHaveText(/^serving$/)
     await expect(front.locator('.hv-tput')).toContainText('41 tok/s')
 
     await flip(page, 'hermes')
@@ -509,7 +545,7 @@ test.describe('Hermes card phases', () => {
 
     const front = face(page, 'hermes')
     await expect(front).toHaveAttribute('data-phase', 'unknown', { timeout: FIVE_S })
-    await expect(front.locator('.fc-st')).toContainText('unknown')
+    await expect(front.locator('.fc-st')).toHaveText(/^unknown$/)
     await expect(front.locator('.fc-st')).not.toContainText('ready')
     await expect(front.locator('.fc-st .sdot.serving')).toHaveCount(0)
 
@@ -539,7 +575,7 @@ test.describe('Pi card phases', () => {
 
     const front = face(page, 'pi')
     await expect(front).toHaveAttribute('data-phase', 'installed', { timeout: FIVE_S })
-    await expect(front.locator('.fc-st')).toContainText('installed')
+    await expect(front.locator('.fc-st')).toHaveText(/^installed$/)
     await expect(page.getByTestId('agent-version-pi')).toHaveText('v0.9.2')
     await expect(page.getByTestId('agent-update-badge-pi')).toContainText('v0.10.0')
 
@@ -565,7 +601,7 @@ test.describe('Pi card phases', () => {
 
     const front = face(page, 'pi')
     await expect(front).toHaveAttribute('data-phase', 'not_installed', { timeout: FIVE_S })
-    await expect(front.locator('.fc-st')).toContainText('not installed')
+    await expect(front.locator('.fc-st')).toHaveText(/^not installed$/)
 
     const copy = card(page, 'pi').getByTestId('agent-action-copy-install')
     await expect(copy).toBeVisible()

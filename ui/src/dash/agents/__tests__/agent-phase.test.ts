@@ -177,6 +177,32 @@ describe('deriveCardModel: phase', () => {
     expect(m.phase).toBe('working')
   })
 
+  it('a running job wins even over an overview that says not installed', () => {
+    // Repair 404s and converge skips when Hermes is not installed, so a job
+    // here was started before an uninstall raced it; the card follows the job.
+    const m = deriveCardModel({
+      ...READY,
+      record: null,
+      overview: { name: 'hermes', kind: 'daemon', installed: false },
+      job: { id: 'j', state: 'running', phase: 'repair:hermes' },
+    })
+    expect(m.phase).toBe('working')
+  })
+
+  it('an error-like record status reads down for Hermes and broken for Pi', () => {
+    for (const status of ['error', 'failed', 'crashed', 'down']) {
+      const hermes = deriveCardModel({ ...READY, record: { name: 'hermes', status, unit_active: true } })
+      expect([status, hermes.phase]).toEqual([status, 'down'])
+      const pi = deriveCardModel({ ...PI, overview: null, record: { name: 'pi', status, unit_active: null } })
+      expect([status, pi.phase]).toEqual([status, 'broken'])
+    }
+    // A word the rule does not know is never healthy.
+    expect(
+      deriveCardModel({ ...READY, record: { name: 'hermes', status: 'installing', unit_active: true } })
+        .phase,
+    ).toBe('ready')
+  })
+
   it('a finished job does not force working', () => {
     const m = deriveCardModel({ ...READY, job: { id: 'j', state: 'failed', error: 'boom' } })
     expect(m.phase).toBe('ready')
@@ -480,6 +506,17 @@ describe('deriveCardModel: Pi', () => {
     expect(m.lifecycle.primary).toBe('upgrade')
   })
 
+  it('pi installed reads like Hermes ready, at its pin and behind it', () => {
+    const ready = deriveCardModel(READY)
+    const atPin = deriveCardModel({
+      ...PI,
+      overview: { ...PI_OVERVIEW, version: { ...PI_OVERVIEW.version, update_available: false } },
+    })
+    const behind = deriveCardModel(PI)
+    expect([atPin.statusCls, atPin.statusLabel]).toEqual([ready.statusCls, 'installed'])
+    expect([behind.statusCls, behind.statusLabel, behind.updateAvailable]).toEqual(['stale', 'installed', true])
+  })
+
   it('pi never reads ready or serving', () => {
     const live = { ...PI, record: { name: 'pi', status: 'installed', unit_active: true }, slot: { state: 'serving' } }
     expect(deriveCardModel(live).phase).toBe('installed')
@@ -570,10 +607,32 @@ describe('deriveCardModel: Pi', () => {
       ['theme', true, null],
     ])
 
-    const broken = deriveCardModel({ ...PI, overview: { ...PI_OVERVIEW, phase: 'broken' } })
+    const notInstalled = deriveCardModel({
+      ...PI,
+      record: null,
+      overview: { name: 'pi', kind: 'cli', installed: false },
+    })
+    expect(notInstalled.lore.skills.find((s) => s.label === 'delegation')?.note).toBe('· not installed')
+  })
+
+  it('a broken pi says broken, naming the failing check, never "not installed"', () => {
+    const failing = {
+      ...PI_OVERVIEW,
+      phase: 'broken' as const,
+      profile: { checks: [{ id: 'binary', ok: false }, { id: 'provider_ext', ok: true }] },
+    }
+    const broken = deriveCardModel({ ...PI, overview: failing })
     expect(broken.lore.skills.filter((s) => ['repo-aware', 'delegation'].includes(s.label))).toEqual([
-      { label: 'repo-aware', lit: false, note: '· not installed' },
-      { label: 'delegation', lit: false, note: '· not installed' },
+      { label: 'repo-aware', lit: false, note: '· broken' },
+      { label: 'delegation', lit: false, note: '· broken' },
     ])
+    expect(broken.lore.abilities.find((a) => a.name === 'Delegate')).toEqual({
+      name: 'Delegate',
+      unlocked: false,
+      note: 'pi is broken: the binary check fails',
+    })
+    // Broken with no failing check to name (the record said so).
+    const bare = deriveCardModel({ ...PI, overview: null, record: { name: 'pi', status: 'broken' } })
+    expect(bare.lore.abilities.find((a) => a.name === 'Delegate')?.note).toBe('pi is broken')
   })
 })

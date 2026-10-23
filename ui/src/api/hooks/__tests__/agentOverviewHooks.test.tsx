@@ -361,7 +361,7 @@ describe('agent overview, control and log hooks', () => {
     act(() => probe.root.unmount())
   })
 
-  it('useAgentUninstall rejects a body it cannot read instead of reporting success', async () => {
+  it('useAgentUninstall rejects a body it cannot read, and still refreshes the agents', async () => {
     vi.mocked(client.apiDelete).mockResolvedValue(null)
     const qc = newClient()
     const inv = vi.spyOn(qc, 'invalidateQueries')
@@ -371,7 +371,8 @@ describe('agent overview, control and log hooks', () => {
       await expect(probe.get().mutateAsync()).rejects.toThrow('unexpected response uninstalling hermes')
     })
 
-    expect(inv).not.toHaveBeenCalled()
+    // The DELETE ran; whatever it removed, the card must not stay stale.
+    expect(inv).toHaveBeenCalledWith({ queryKey: ['agents'] })
 
     act(() => probe.root.unmount())
   })

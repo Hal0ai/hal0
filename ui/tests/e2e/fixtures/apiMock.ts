@@ -59,6 +59,30 @@ export function json(route: Route, body: any, status = 200) {
   })
 }
 
+/* ── helper: seed the in-bundle slots ────────────────────────────── */
+
+/**
+ * `/api/slots` is answered by the in-bundle mock layer from
+ * `window.HAL0_DATA.slots`, not through `page.route`, so a spec that needs
+ * particular slots replaces them before the bundle assigns `HAL0_DATA`. Call it
+ * before `page.goto`.
+ */
+export async function seedSlots(page: Page, slots: unknown[]) {
+  await page.addInitScript((seed) => {
+    let real: any
+    Object.defineProperty(window, 'HAL0_DATA', {
+      configurable: true,
+      get() {
+        return real
+      },
+      set(v) {
+        real = v
+        if (v && typeof v === 'object') v.slots = seed
+      },
+    })
+  }, slots)
+}
+
 /* ── Install default mocks on a page ─────────────────────────────── */
 
 export async function installDefaultMocks(page: Page, state: MockState) {

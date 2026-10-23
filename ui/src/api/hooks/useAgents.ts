@@ -644,7 +644,9 @@ export interface AgentDegradedRow {
 
 export interface AgentDoctorRow {
   id: string
-  status: 'ok' | 'warn' | 'fail' | 'absent'
+  /** `unreadable`: the check could not read its source (the gateway unit row
+   *  on a box where the unit file is not readable to the daemon). */
+  status: 'ok' | 'warn' | 'fail' | 'absent' | 'unreadable'
   detail?: string
 }
 
@@ -892,13 +894,15 @@ function _normaliseUninstall(name: string, body: UninstallBody | null): AgentUni
 
 /** DELETE /api/agents/{name} — idempotent; a cli-kind agent answers 400
  *  `agent.cli_kind_local_only` (its profile is removed from the CLI). A 207
- *  partial removal resolves with `status: 'partially_uninstalled'`. */
+ *  partial removal resolves with `status: 'partially_uninstalled'`. The agents
+ *  queries refresh whatever the outcome: a call that rejects (an unreadable
+ *  body, a timeout) may still have removed the agent. */
 export function useAgentUninstall(name: string) {
   const qc = useQueryClient()
   return useMutation<AgentUninstallResult, Error, void>({
     mutationFn: async () =>
       _normaliseUninstall(name, await apiDelete<UninstallBody | null>(ENDPOINTS.agentUninstall(name))),
-    onSuccess: () => {
+    onSettled: () => {
       qc.invalidateQueries({ queryKey: ['agents'] })
     },
   })

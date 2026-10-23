@@ -147,6 +147,9 @@ const NO_COMMANDS: CardModel['commands'] = { install: '', upgrade: null, uninsta
 const STATUS: Record<CardPhase, { cls: StatusCls; label: string }> = {
   serving: { cls: 'serving', label: 'serving' },
   ready: { cls: 'stale', label: 'ready' },
+  // Ruling (PR 5 review, M5): a healthy Pi reads like Hermes `ready`, the same
+  // amber class and dot, whether or not it is behind its pin; the `↑` badge
+  // carries "behind". Its word stays `installed`.
   installed: { cls: 'stale', label: 'installed' },
   degraded: { cls: 'stale', label: 'degraded' },
   down: { cls: 'error', label: 'down' },
@@ -328,6 +331,13 @@ function piLore(overview: AgentOverview | null, phase: CardPhase): CardModel['lo
   const memory = blob(overview?.memory)
   const installed = phase === 'installed'
   const dualMemory = memory.mcp_entry === true && memory.hindsight_config === true
+  // What stops Delegate and the install-bound chips: the status word, and for
+  // a broken install the first check that fails, so a broken Pi never reads
+  // "not installed".
+  const word = STATUS[phase].label
+  const failing = checks.find((c) => c.ok === false)
+  const notReady =
+    phase === 'broken' && failing ? `pi is broken: the ${failing.id} check fails` : `pi is ${word}`
   return {
     abilities: [
       ability('Slot Sync', checkOk('provider_ext'), 'the hal0 provider extension is not present'),
@@ -336,12 +346,12 @@ function piLore(overview: AgentOverview | null, phase: CardPhase): CardModel['lo
         dualMemory,
         'the memory MCP entry and the Hindsight config are not both wired',
       ),
-      ability('Delegate', installed, 'pi is not installed'),
+      ability('Delegate', installed, notReady),
     ],
     skills: [
-      skill('repo-aware', installed, '· not installed'),
+      skill('repo-aware', installed, `· ${word}`),
       skill('shared memory', dualMemory, '· not wired'),
-      skill('delegation', installed, '· not installed'),
+      skill('delegation', installed, `· ${word}`),
       skill('cli-native', checkOk('binary'), '· not on PATH'),
       skill('theme', checkOk('theme'), '· not deployed'),
     ],

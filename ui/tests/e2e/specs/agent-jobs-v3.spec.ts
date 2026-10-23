@@ -12,7 +12,7 @@
  * The status route is staged by the test (queued → running → terminal) rather
  * than counted by call, so no assertion races the 1.5 s poll.
  */
-import { test, expect, json, type Page } from '../fixtures/apiMock'
+import { test, expect, json, seedSlots, type Page } from '../fixtures/apiMock'
 import type { AgentOverview } from '../../../src/api/hooks/useAgents'
 
 const FIVE_S = 5_500
@@ -62,23 +62,10 @@ function hermesOverview(opts: { behind?: boolean; phase?: AgentOverview['phase']
   }
 }
 
-/** A resident-but-idle chat slot. `/api/slots` is served from `window.HAL0_DATA`
- *  by the in-bundle mock layer (not reachable through `page.route`), and the
- *  default fixture's hot slot would turn a `ready` card into `serving`. */
+/** A resident-but-idle chat slot: the default fixture's hot slot would turn a
+ *  `ready` card into `serving`. */
 async function seedIdleSlot(page: Page) {
-  await page.addInitScript((slots) => {
-    let real: any
-    Object.defineProperty(window, 'HAL0_DATA', {
-      configurable: true,
-      get() {
-        return real
-      },
-      set(v) {
-        real = v
-        if (v && typeof v === 'object') v.slots = slots
-      },
-    })
-  }, [
+  await seedSlots(page, [
     {
       name: 'primary',
       type: 'llm',
@@ -103,6 +90,8 @@ interface JobScript {
   steps: string[]
   terminal: 'applied' | 'failed'
   error?: string
+  /** The converge arm's result on the terminal snapshot (`upgraded`, …). */
+  result?: Record<string, unknown>
 }
 
 /** `GET /api/updates/status/{id}`, advanced by the test: queued, then running
@@ -129,6 +118,7 @@ async function stageJobStatus(page: Page, job: JobScript) {
       state: job.terminal,
       steps: job.steps,
       error: job.terminal === 'failed' ? (job.error ?? 'failed') : null,
+      ...(job.result ? { component_result: job.result } : {}),
     })
   })
   return {
@@ -172,7 +162,8 @@ async function openLifecycle(page: Page) {
 const confirmButton = (page: Page, kind: 'upgrade' | 'repair') =>
   page.getByRole('button').filter({ has: page.getByTestId(`agent-confirm-${kind}`) })
 
-const toast = (page: Page, kind: 'success' | 'error' | 'warning', text: string) =>
+/** dashboard.css styles the toast kinds info, ok, warn and err. */
+const toast = (page: Page, kind: 'ok' | 'err' | 'warn', text: string) =>
   page.locator(`.hal0-toast.${kind}`, { hasText: text })
 
 // ── tests ───────────────────────────────────────────────────────────────
@@ -190,11 +181,14 @@ test.describe('Hermes upgrade job', () => {
     await page.route('**/api/updates/components/hermes/converge', (route) =>
       json(route, { id: 'job-up-1', state: 'queued', phase: 'converge:hermes' }),
     )
+    // A converge job never reports steps (only a repair does); its arm's
+    // result says what happened.
     const job = await stageJobStatus(page, {
       id: 'job-up-1',
       phase: 'converge:hermes',
-      steps: ['preflight'],
+      steps: [],
       terminal: 'applied',
+      result: { status: 'upgraded', installed: OLD_REF, pinned: PIN_REF },
     })
 
     await openHermes(page)
@@ -223,22 +217,32 @@ test.describe('Hermes upgrade job', () => {
 
     // The mutation's id is enough to turn the card to `working`.
     await expect(front).toHaveAttribute('data-phase', 'working', { timeout: FIVE_S })
+
+    // While the build runs, the console's acting controls are off.
+    const console_ = page.getByTestId('agent-card-hermes')
+    await console_.getByTestId('agent-tab-controls').click()
+    await expect(console_.getByTestId('agent-action-restart')).toBeDisabled()
+    await expect(console_.getByTestId('agent-approvals-manual')).toBeDisabled()
+    await expect(console_.getByTestId('agent-action-reconcile')).toBeDisabled()
+    await expect(console_.getByTestId('agent-action-persona-activate')).toBeDisabled()
+
     await flip(page) // back to the front for the job row
     const row = page.getByTestId('agent-job-hermes')
     await expect(row).toBeVisible()
     await expect(row).toHaveAttribute('data-state', 'queued')
     await expect(row.locator('.fc-job-h b')).toHaveText('upgrading')
-    await expect(front.locator('.fc-st')).toContainText('working')
+    await expect(front.locator('.fc-st')).toHaveText(/^working$/)
 
-    // running, with the steps the status route reports.
+    // running: no steps, so the face says it is building at the pin.
     job.run()
     await expect(row).toHaveAttribute('data-state', 'running', { timeout: FIVE_S })
-    await expect(row.locator('.fc-step.cur')).toHaveText('preflight')
+    await expect(row.locator('.fc-step')).toHaveCount(1)
+    await expect(row.locator('.fc-step.cur')).toHaveText('building at the pin')
 
     // applied: the overview now has the new release, the toast says so.
     upgraded = true
     job.finish()
-    await expect(toast(page, 'success', 'Hermes upgraded')).toBeVisible({ timeout: FIVE_S })
+    await expect(toast(page, 'ok', 'Hermes upgraded to v0.22.4')).toBeVisible({ timeout: FIVE_S })
     await expect(front).toHaveAttribute('data-phase', 'ready', { timeout: FIVE_S })
     await expect(row).toHaveCount(0)
     await expect(page.getByTestId('agent-version-hermes')).toHaveText('v0.22.4')
@@ -294,7 +298,7 @@ test.describe('Hermes repair job', () => {
     await expect(row.locator('.fc-step.cur')).toHaveText('rebuild venv')
 
     job.finish()
-    await expect(toast(page, 'error', 'Hermes repair failed: venv rebuild failed')).toBeVisible({
+    await expect(toast(page, 'err', 'Hermes repair failed: venv rebuild failed')).toBeVisible({
       timeout: FIVE_S,
     })
     await expect(front).toHaveAttribute('data-phase', 'ready', { timeout: FIVE_S })
@@ -332,9 +336,11 @@ test.describe('Hermes repair job', () => {
     await expect(confirmButton(page, 'repair')).toBeEnabled()
     await page.getByTestId('agent-confirm-repair').click()
 
-    await expect(toast(page, 'warning', 'Hermes builder is busy')).toBeVisible({ timeout: FIVE_S })
-    // Nothing was queued: no status poll, still broken, no job row.
-    await expect.poll(() => job.polls(), { timeout: 2_000 }).toBe(0)
+    await expect(toast(page, 'warn', 'Hermes builder is busy')).toBeVisible({ timeout: FIVE_S })
+    // Nothing was queued: wait past one 1.5 s status poll, then no poll has
+    // happened, the card is still broken and there is no job row.
+    await page.waitForTimeout(1_600)
+    expect(job.polls()).toBe(0)
     await expect(front).toHaveAttribute('data-phase', 'broken')
     await expect(page.getByTestId('agent-job-hermes')).toHaveCount(0)
   })

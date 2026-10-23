@@ -122,7 +122,7 @@ test.describe('Agents shell v0.5 (#agent — Overview default)', () => {
     await restartBtn.click()
 
     await expect.poll(() => restartCalled).toBe(true)
-    await expect(page.locator('.hal0-toast.success', { hasText: 'Hermes restarted' })).toBeVisible()
+    await expect(page.locator('.hal0-toast.ok', { hasText: 'Hermes restarted' })).toBeVisible()
   })
 
   test('Pi card flips to copyable commands with no Restart/Persona actions (CLI tool, no unit)', async ({

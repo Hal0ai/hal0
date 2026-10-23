@@ -130,6 +130,7 @@ function _health(slot) {
   };
 }
 
+// Toast kinds are the ones dashboard.css styles: info, ok, warn, err.
 function _toast(msg, kind) {
   if (window.__hal0Toast) window.__hal0Toast(msg, kind || "info");
 }
@@ -142,6 +143,18 @@ function _errText(err) {
 // is already in flight.
 function _isBusy(err) {
   return !!err && err.status === 409;
+}
+
+// What a finished converge job did, from the Hermes arm's result
+// (src/hal0/components/hermes_arm.py: upgraded, converged, skipped, busy; the
+// failed kinds end the job as `failed`). Returns [message, toast kind].
+function _upgradeOutcome(result, pinLabel) {
+  const status = result && result.status;
+  if (status === "upgraded") return ["Hermes upgraded to " + pinLabel, "ok"];
+  if (status === "converged") return ["Hermes already matches the pin", "ok"];
+  if (status === "skipped") return ["Hermes upgrade skipped: " + (result.reason || "no reason given"), "warn"];
+  if (status === "busy") return ["Hermes builder is busy", "warn"];
+  return ["Hermes upgrade finished", "ok"];
 }
 
 // "converge:hermes" → upgrade, "repair:hermes" → repair.
@@ -218,6 +231,8 @@ function AgentsOverview() {
   const [jobId, setJobId] = useState(null);
   const [doneIds, setDoneIds] = useState([]);
   const startedKind = useRef(null);
+  // The pin as the card shows it, for the upgrade toast (set each render).
+  const pinLabel = useRef("the pin");
   const jobPoll = useUpdateJob ? useUpdateJob(jobId) : { job: null, terminal: false };
 
   const hermesOv = hermesOvQ.data || null;
@@ -240,11 +255,12 @@ function AgentsOverview() {
     refreshOverview("hermes").then(() => {
       if (polled.state === "failed") {
         const why = polled.error || polled.error_code || "see the unit logs";
-        _toast(`Hermes ${kind} failed: ${why}`, "error");
-      } else if (result.status === "busy") {
-        _toast("Hermes builder is busy", "warning");
+        _toast(`Hermes ${kind} failed: ${why}`, "err");
+      } else if (kind === "repair") {
+        _toast("Hermes repaired", "ok");
       } else {
-        _toast(kind === "repair" ? "Hermes repaired" : "Hermes upgraded", "success");
+        const [msg, tone] = _upgradeOutcome(result, pinLabel.current);
+        _toast(msg, tone);
       }
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -293,13 +309,17 @@ function AgentsOverview() {
           persona: livePersona,
         }),
         overview: hermesOv,
+        // A 404 (an older daemon) is `null` data; anything else is an error.
+        overviewError: hermesOvQ.isError ? _errText(hermesOvQ.error) : null,
         health: _health(primary),
       }
     : null;
+  if (hermesModel) pinLabel.current = hermesModel.version.pinLabel;
   const piModel = derive
     ? {
         ...derive({ agent: "pi", record: piRec, overview: piOv, slot: null, job: null, caps, urls, lastTool: null }),
         overview: piOv,
+        overviewError: piOvQ.isError ? _errText(piOvQ.error) : null,
         health: _health(null),
       }
     : null;
@@ -317,8 +337,8 @@ function AgentsOverview() {
         if (hermesOvQ.refetch) hermesOvQ.refetch();
       })
       .catch((err) => {
-        if (_isBusy(err)) _toast("Hermes builder is busy", "warning");
-        else _toast(`Hermes ${kind} failed to start: ${_errText(err)}`, "error");
+        if (_isBusy(err)) _toast("Hermes builder is busy", "warn");
+        else _toast(`Hermes ${kind} failed to start: ${_errText(err)}`, "err");
       });
   };
 
@@ -329,7 +349,7 @@ function AgentsOverview() {
         fail();
         return Promise.resolve();
       }
-      return navigator.clipboard.writeText(text).then(() => _toast("Copied", "success"), fail);
+      return navigator.clipboard.writeText(text).then(() => _toast("Copied", "ok"), fail);
     } catch (e) {
       fail();
       return Promise.resolve();
@@ -343,11 +363,11 @@ function AgentsOverview() {
             .mutateAsync()
             .then((res) =>
               refreshHermes().then(() => {
-                if (res && res.status === "error") _toast(`Hermes restart failed: ${res.detail || "see the unit logs"}`, "error");
-                else _toast(res && res.status === "restarting" ? "Hermes is restarting" : "Hermes restarted", "success");
+                if (res && res.status === "err") _toast(`Hermes restart failed: ${res.detail || "see the unit logs"}`, "err");
+                else _toast(res && res.status === "restarting" ? "Hermes is restarting" : "Hermes restarted", "ok");
               }),
             )
-            .catch((err) => _toast(`Hermes restart failed: ${_errText(err)}`, "error"))
+            .catch((err) => _toast(`Hermes restart failed: ${_errText(err)}`, "err"))
       : null,
     restartGateway: gatewayRestart
       ? () =>
@@ -355,11 +375,11 @@ function AgentsOverview() {
             .mutateAsync()
             .then((res) =>
               refreshHermes().then(() => {
-                if (res && res.status === "error") _toast(`Gateway restart failed: ${res.detail || "see the unit logs"}`, "error");
-                else _toast("Hermes gateway restarted", "success");
+                if (res && res.status === "err") _toast(`Gateway restart failed: ${res.detail || "see the unit logs"}`, "err");
+                else _toast("Hermes gateway restarted", "ok");
               }),
             )
-            .catch((err) => _toast(`Gateway restart failed: ${_errText(err)}`, "error"))
+            .catch((err) => _toast(`Gateway restart failed: ${_errText(err)}`, "err"))
       : null,
     repair: repair ? () => startJob("repair", () => repair.mutateAsync()) : null,
     upgrade: converge ? () => startJob("upgrade", () => converge.mutateAsync("hermes")) : null,
@@ -371,15 +391,15 @@ function AgentsOverview() {
               refreshHermes().then(() => {
                 if (res && res.status === "partially_uninstalled") {
                   const n = (res.residual || []).length;
-                  _toast(`Hermes partly uninstalled: ${n} path${n === 1 ? "" : "s"} left behind`, "warning");
+                  _toast(`Hermes partly uninstalled: ${n} path${n === 1 ? "" : "s"} left behind`, "warn");
                 } else if (res && res.status === "not_installed") {
                   _toast("Hermes was not installed", "info");
                 } else {
-                  _toast("Hermes uninstalled", "success");
+                  _toast("Hermes uninstalled", "ok");
                 }
               }),
             )
-            .catch((err) => _toast(`Uninstall failed: ${_errText(err)}`, "error"))
+            .catch((err) => _toast(`Uninstall failed: ${_errText(err)}`, "err"))
       : null,
     setApprovalsMode: approvalsMode
       ? (mode) =>
@@ -388,10 +408,10 @@ function AgentsOverview() {
             .then((res) =>
               refreshHermes().then(() => {
                 const unsure = res && (res.restart === "unknown" || res.restart === "timeout");
-                _toast((res && res.message) || `Approvals set to ${mode}`, unsure ? "warning" : "success");
+                _toast((res && res.message) || `Approvals set to ${mode}`, unsure ? "warn" : "ok");
               }),
             )
-            .catch((err) => _toast(`Approvals change failed: ${_errText(err)}`, "error"))
+            .catch((err) => _toast(`Approvals change failed: ${_errText(err)}`, "err"))
       : null,
     activatePersona: personaActivate
       ? (pid) =>
@@ -400,8 +420,8 @@ function AgentsOverview() {
             // Waits for the refetch, so the chip and the select name the new
             // persona before the busy state clears.
             .then(() => qc.invalidateQueries({ queryKey: ["agents"] }))
-            .then(() => _toast("Persona activated", "success"))
-            .catch((err) => _toast(`Persona activation failed: ${_errText(err)}`, "error"))
+            .then(() => _toast("Persona activated", "ok"))
+            .catch((err) => _toast(`Persona activation failed: ${_errText(err)}`, "err"))
       : null,
     reconcile: reconcile
       ? () =>
@@ -410,10 +430,10 @@ function AgentsOverview() {
             .then((res) =>
               refreshHermes().then(() => {
                 const n = res && Array.isArray(res.profiles_wired) ? res.profiles_wired.length : null;
-                _toast(n ? `Re-mirrored ${n} profile${n === 1 ? "" : "s"} to Open WebUI` : "Profiles re-mirrored to Open WebUI", "success");
+                _toast(n ? `Re-mirrored ${n} profile${n === 1 ? "" : "s"} to Open WebUI` : "Profiles re-mirrored to Open WebUI", "ok");
               }),
             )
-            .catch((err) => _toast(`Re-mirror failed: ${_errText(err)}`, "error"))
+            .catch((err) => _toast(`Re-mirror failed: ${_errText(err)}`, "err"))
       : null,
     // LogsView (extras.jsx) reads no hash parameters, so there is no unit
     // filter to pass; the journal pane there tails hal0's own stream.

@@ -45,12 +45,13 @@ and one band that depends on the status word:
 
 The version under the name is the live release. When it is behind the pin, an
 `↑` badge beside it names the pin (it is hidden while the card is `working` or
-`not installed`), and a small line below shows the Python version and commit. The top-right corner shows throughput and context use while
-the agent is `ready` or `serving`, and a short note for the other statuses, such
-as the issue count on a `degraded` card. Click a card to flip it to its console;
-click again to flip back. From the keyboard, Tab to the card and press Enter or
-Space: the console opens with its selected tab focused, and Escape (or Enter on
-the card) flips it back.
+`not installed`), and a small line below shows the Python version and commit.
+The top-right corner shows throughput and context use while the agent is
+`ready` or `serving`, and a short note for the other statuses, such as the issue
+count on a `degraded` card. Click a card to flip it to its console; click again
+to flip back. From the keyboard, Tab to the card and press Enter or Space: the
+console opens with its selected tab focused, and Escape (or Enter on the card)
+flips it back.
 
 ### The console
 
@@ -62,9 +63,10 @@ opens on **Controls**.
   health, the primary and delegation models, the chat slot and MCP server
   counts, the terminal tool, memory, the approvals mode with how many are
   pending, the last provision report, the doctor rows, and every degraded
-  reason. When the provision report is older than the live
-  release it says so instead of showing counts that may be out of date. A
-  footer shows how long ago the card was refreshed.
+  reason. When the provision report is older than the live release it says so
+  instead of showing counts that may be out of date. A footer shows how long
+  ago the card was refreshed. If the overview cannot be read, the tab says so
+  with the reason; a hal0 too old to serve the overview gets a note instead.
 - **Controls** holds the buttons described next.
 - **Lore** shows what the agent can do right now. Ghost Relay unlocks when the
   gateway is running and at least one chat platform is configured, Engram when
@@ -72,7 +74,8 @@ opens on **Controls**.
   mode is smart. A locked ability says what is missing. The skill chips light
   from the voice wiring, the image and embeddings capabilities and the memory
   provider.
-- **Lifecycle** holds Upgrade, Repair and Uninstall.
+- **Lifecycle** holds **Upgrade to `<pin>`** or **Repair · rebuild at the
+  pin**, and **Uninstall Hermes**.
 
 ### Controls
 
@@ -80,28 +83,33 @@ opens on **Controls**.
   `HAL0_HERMES_PUBLIC_URL` is set (see the
   [environment variables](/docs/reference/env-vars)); until then the tab says so.
 - **Restart agent** and **Restart gateway** restart `hal0-agent@hermes` or the
-  Hermes gateway unit. Restart agent toasts "Hermes is restarting" or "Hermes
-  restarted", and Restart gateway toasts "Hermes gateway restarted". A failure
-  toasts `Hermes restart failed: <reason>` or `Gateway restart failed: <reason>`.
-  Both buttons are disabled while a build runs.
+  Hermes gateway unit. **Restart agent** toasts "Hermes is restarting" or
+  "Hermes restarted", and `Hermes restart failed: <reason>` when it fails.
+  **Restart gateway** toasts "Hermes gateway restarted", and
+  `Gateway restart failed: <reason>` when it fails.
 - **Unit logs** opens the Logs page, and **Tool activity** opens the activity
   log on the Slots page. Neither acts on the agent.
-- **Persona** switches the active persona (a toast says "Persona activated"),
-  and **Edit** opens the editor for the active one. See [Personas](#personas).
+- **Persona** lists the personas, with the active one marked. Picking one in
+  the list changes nothing; **Activate** makes it the active persona (a toast
+  says "Persona activated") and is enabled only when the pick differs from the
+  active one. **Edit** opens the editor for the active one. The `persona` chip
+  on the front names the active persona. See [Personas](#personas).
 - **Command approvals** switches between smart and manual, the same setting as
   [Command approvals](#command-approvals-smart-or-manual). The toast carries
   the result and warns when hal0 could not confirm the restart that applies it.
   The **inbox** button shows how many calls are waiting and opens
   [the approvals queue](#the-approvals-queue).
 - **Re-mirror profiles to Open WebUI** registers the Hermes profiles as `/v1`
-  upstreams again; see [Talking to Hermes](/docs/guides/open-webui#talking-to-hermes).
+  upstreams again; see
+  [Talking to Hermes](/docs/guides/open-webui#talking-to-hermes).
 
 One action runs at a time per card. While it runs, every other button that acts
 on the agent is disabled and the running one shows its busy label, such as
-"Restarting…". Buttons that only navigate or open a dialog (**Unit logs**,
-**Tool activity**, **Edit**, the inbox and **Logs**) stay usable. If a click
-still arrives while an action runs, the card says "Another action is still
-running" and does nothing.
+"Restarting…", until the card has read the box again: the card then shows the
+state after the action, not the one from before it. Buttons that only navigate
+or open a dialog (**Unit logs**, **Tool activity**, **Edit**, the inbox and
+**Logs**) stay usable. If a click still arrives while an action runs, the card
+says "Another action is still running" and does nothing.
 
 ### Upgrade, repair and uninstall
 
@@ -112,13 +120,12 @@ matches the pin". Under it sits one build button, and the **danger zone**.
 
 - **Upgrade to `<pin>`** (the label names the pin) replaces Repair only while
   the live release is behind the pin, the same condition that shows the `↑`
-  badge. It runs the component
-  converge job the Services page uses. Its dialog shows the live release and the
-  pin and says what follows: the pinned release is built beside the live one
-  while Hermes keeps answering; config is migrated, MCP and memory are re-wired
-  and the result is verified; then `current` flips and the agent and the gateway
-  restart, so Telegram and the desktop drop for a few seconds. If any step
-  fails, the old release is flipped back automatically.
+  badge. It runs the component converge job the Services page uses. Its dialog
+  shows the live release and the pin and says what follows: the pinned release
+  is built beside the live one while Hermes keeps answering; config is migrated,
+  MCP and memory are re-wired and the result is verified; then `current` flips
+  and the agent and the gateway restart, so Telegram and the desktop drop for a
+  few seconds. If any step fails, the old release is flipped back automatically.
 - **Repair · rebuild at the pin** takes the place of Upgrade when the live
   release matches the pin. It also appears on a `broken` or `down` card and as
   the fix for some degraded reasons. Its dialog says it re-runs every
@@ -131,13 +138,22 @@ matches the pin". Under it sits one build button, and the **danger zone**.
   no `--keep-memory` option, so use the CLI form below to keep the agent's
   memory namespace.
 
-While a build runs, the card shows `working` and Upgrade, Repair and Uninstall
-are disabled. A repair lists the steps the job reports, the latest four with a
-count of earlier ones, next to the elapsed time. An upgrade shows its state and
-"building at the pin", or "queued · waiting for the builder". When the job ends a
-toast says "Hermes repaired" or "Hermes upgraded", or "Hermes repair failed" (or
-"upgrade failed") with the reason. If another build holds the builder, the
-toast says "Hermes builder is busy" and nothing starts.
+While a build runs, the card shows `working`, and everything that would change
+the agent under the builder is disabled: Upgrade, Repair, Uninstall, **Restart
+agent**, **Restart gateway**, the persona's **Activate**, the approvals mode
+and **Re-mirror profiles to Open WebUI**. **Unit logs**, **Tool activity**,
+**Edit** and the inbox stay usable. A repair lists the steps the job reports,
+the latest four with a count of earlier ones, next to the elapsed time. An
+upgrade shows its state and "building at the pin", or "queued · waiting for the
+builder".
+
+When the job ends, a toast says how it went. A repair says "Hermes repaired".
+An upgrade says "Hermes upgraded to `<pin>`" when it built the pin, "Hermes
+already matches the pin" when there was nothing to build, and warns "Hermes
+upgrade skipped: `<reason>`" when Hermes was not provisioned. A failure says
+"Hermes repair failed" (or "Hermes upgrade failed") with the reason. If another
+build holds the builder, the toast says "Hermes builder is busy" and nothing
+starts.
 
 <Aside type="caution" title="Known limit">
 Restarting `hal0-api` while a repair runs stops the build. The live release is
@@ -152,7 +168,7 @@ A `degraded` card names each reason: "gateway down", "API server unhealthy",
 "provision failed", "provision warnings", "doctor drift" or "approvals out of
 sync", with its detail when there is one. A reason can offer one fix:
 
-- **Restart gateway** or **Restart agent** restarts the unit.
+- **Restart gateway** restarts the gateway unit.
 - **Repair** opens the repair dialog above.
 - **Re-sync** applies the current approvals mode again.
 - A command to copy and run on the box.
@@ -165,23 +181,23 @@ lists all of them.
 
 Pi is a command-line tool, not a service, so its card has no unit, slot or
 gateway. For an installed Pi the top-right corner reads "no unit · no slot", and
-Pi is never `ready` or `serving`; a healthy install reads `installed`. The card shows
-the installed pi version and adapter against the pins, a `home` chip with the
-profile's home, and a row of profile checks labelled "binary on PATH", "hal0 provider ext",
-"hindsight ext", "hal0 theme", "memory MCP wired", "adapter version" and
-"hindsight config". Each is marked ✓, ✗ or –. When Pi is behind
-the pin, the `↑` badge appears and the front offers
-`sudo hal0 agent upgrade pi` to copy; a `broken` card offers the reinstall
-command instead.
+Pi is never `ready` or `serving`; a healthy install reads `installed`. The card
+shows the installed pi version and adapter against the pins, a `home` chip with
+the profile's home, and a row of profile checks labelled "binary on PATH", "hal0
+provider ext", "hindsight ext", "hal0 theme", "memory MCP wired", "adapter
+version" and "hindsight config". Each is marked ✓, ✗ or –. When Pi is behind the
+pin, the `↑` badge appears and the front offers `sudo hal0 agent upgrade pi` to
+copy; a `broken` card offers the reinstall command instead.
 
 The dashboard never runs a Pi command, because Pi lives in the home of the user
 who installed it and the daemon can neither read nor change that. Its Controls
 tab offers the upgrade, uninstall and reinstall commands to copy, and a
-**Re-check** button that reads the card again. Its Lifecycle tab says what the
-upgrade does: it reinstalls both pins with npm, redeploys the hal0 provider and
-hindsight extensions and the theme, rewrites the managed package entry and the
-`hal0-memory` MCP entry, and re-stamps the marker. Run it with sudo, the same
-way you installed Pi; extensions you added yourself are left alone.
+**Re-check** button that reads the box again, past the overview's 30-second
+cache, and shows "Checking…" until the answer lands. Its Lifecycle tab says what
+the upgrade does: it reinstalls both pins with npm, redeploys the hal0 provider
+and hindsight extensions and the theme, rewrites the managed package entry and
+the `hal0-memory` MCP entry, and re-stamps the marker. Run it with sudo, the
+same way you installed Pi; extensions you added yourself are left alone.
 
 ## Install Hermes
 

@@ -213,7 +213,7 @@ function useRunner() {
   const run = (key, fn) => {
     if (typeof fn !== "function") return;
     if (busy) {
-      if (window.__hal0Toast) window.__hal0Toast("Another action is still running", "warning");
+      if (window.__hal0Toast) window.__hal0Toast("Another action is still running", "warn");
       return;
     }
     setBusy(key);
@@ -452,11 +452,6 @@ function FixControl({ live, reason, model, actions, busy, run, ask }) {
         <ActBtn live={live} testid="agent-action-restart-gateway" icon="refresh" label="Restart gateway"
           busy={busy === "restartGateway"} onClick={actions.restartGateway && (() => run("restartGateway", actions.restartGateway))} />
       );
-    case "restart_agent":
-      return (
-        <ActBtn live={live} testid="agent-action-restart" icon="refresh" label="Restart agent"
-          busy={busy === "restart"} onClick={actions.restart && (() => run("restart", actions.restart))} />
-      );
     case "repair":
       return (
         <ActBtn live={live} testid="agent-action-repair" label="Repair"
@@ -662,14 +657,26 @@ function StatusTab({ identity, model }) {
   if (!ov) {
     return (
       <div className="fcb-pane-in">
-        <div className="fc-note">
-          No overview from this daemon (GET /api/agents/{identity.id}/overview); the card shows liveness from the
-          agents list only.
-        </div>
+        {model.overviewError ? (
+          <div className="fc-note">
+            Overview unavailable: {model.overviewError}. The card shows liveness from the agents list until a read
+            works.
+          </div>
+        ) : (
+          <div className="fc-note">
+            No overview from this daemon (GET /api/agents/{identity.id}/overview); the card shows liveness from the
+            agents list only.
+          </div>
+        )}
       </div>
     );
   }
-  const foot = <div className="fcb-foot">refreshed <Ago ts={model.generatedAt} /></div>;
+  const foot = (
+    <div className="fcb-foot">
+      {model.overviewError ? "last read failed (" + model.overviewError + ") · showing the read from " : "refreshed "}
+      <Ago ts={model.generatedAt} />
+    </div>
+  );
 
   if (isPi) {
     const v = ov.version || {};
@@ -797,6 +804,10 @@ function HermesControls({ live, model, actions, busy, run, editPersona }) {
   const mode = model.chips.approvals;
   const working = model.phase === "working";
   const running = useContext(CardBusy);
+  // The select only picks; Activate applies. Null means "follow the active one".
+  const [picked, setPicked] = useState(null);
+  const choice = picked && list.some((p) => p.id === picked) ? picked : active;
+  const canActivate = !!choice && choice !== active;
 
   return (
     <div className="fcb-pane-in fcb-ctl">
@@ -829,19 +840,23 @@ function HermesControls({ live, model, actions, busy, run, editPersona }) {
         <div className="fcb-row">
           <select
             className="fc-select"
-            aria-label="Active persona"
+            aria-label="Persona to activate"
             data-testid={live ? "agent-action-persona" : undefined}
-            value={active}
-            disabled={!actions.activatePersona || !list.length || !!running}
+            value={choice}
+            disabled={!actions.activatePersona || !list.length || !!running || working}
             onClick={stop}
-            onChange={(e) => {
-              const pid = e.target.value;
-              if (pid && pid !== active) run("persona", () => actions.activatePersona(pid));
-            }}
+            onChange={(e) => setPicked(e.target.value || null)}
           >
             {!list.length && <option value="">—</option>}
-            {list.map((p) => <option key={p.id} value={p.id}>{p.display_name || p.id}</option>)}
+            {list.map((p) => (
+              <option key={p.id} value={p.id}>{(p.display_name || p.id) + (p.id === active ? " · active" : "")}</option>
+            ))}
           </select>
+          <ActBtn live={live} testid="agent-action-persona-activate" label="Activate" busyLabel="Activating…"
+            busy={busy === "persona"} disabled={!canActivate || working}
+            title={canActivate ? "Make this the active persona" : "Pick a persona other than the active one"}
+            onClick={actions.activatePersona && (() => run("persona", () =>
+              Promise.resolve(actions.activatePersona(choice)).then(() => setPicked(null))))} />
           <ActBtn live={live} testid="agent-action-persona-edit" label="Edit" free
             onClick={active ? () => editPersona(active) : null} title="Edit the active persona" />
         </div>
@@ -859,7 +874,7 @@ function HermesControls({ live, model, actions, busy, run, editPersona }) {
                 aria-checked={mode === m}
                 className={"fc-seg-b" + (mode === m ? " on" : "")}
                 data-testid={live ? "agent-approvals-" + m : undefined}
-                disabled={!actions.setApprovalsMode || !mode || !!running}
+                disabled={!actions.setApprovalsMode || !mode || !!running || working}
                 onClick={(e) => {
                   stop(e);
                   if (m !== mode) run("approvals", () => actions.setApprovalsMode(m));
@@ -873,7 +888,7 @@ function HermesControls({ live, model, actions, busy, run, editPersona }) {
       </div>
 
       <ActBtn live={live} testid="agent-action-reconcile" icon="refresh" label="Re-mirror profiles to Open WebUI"
-        busyLabel="Re-mirroring…" wide busy={busy === "reconcile"}
+        busyLabel="Re-mirroring…" wide busy={busy === "reconcile"} disabled={working}
         onClick={actions.reconcile && (() => run("reconcile", actions.reconcile))} />
     </div>
   );
