@@ -29,7 +29,7 @@ from fastapi.testclient import TestClient
 from hal0.api import create_app
 from hal0.api.routes import updater as u_mod
 
-_PREPARE_ERROR = (
+_GENERIC_ERROR = (
     "hal0-api restarted before this job finished; check `hal0 update status` before retrying"
 )
 _BUILD_ERROR = "hal0-api restarted during the build; the live release is unchanged"
@@ -73,20 +73,22 @@ def _on_disk(job_id: str) -> dict[str, Any]:
     ("phase", "message"),
     [
         ("converge:hermes", _BUILD_ERROR),
-        ("converge:openwebui", _BUILD_ERROR),
-        (None, _PREPARE_ERROR),  # the apply route sets no phase
-        ("prepare", _PREPARE_ERROR),
-        ("commit", _PREPARE_ERROR),
-        ("something-new", _PREPARE_ERROR),
+        # Only the Hermes release builder is atomic; the others converge in place.
+        ("converge:openwebui", _GENERIC_ERROR),
+        ("converge:hindsight", _GENERIC_ERROR),
+        (None, _GENERIC_ERROR),  # the apply route sets no phase
+        ("prepare", _GENERIC_ERROR),
+        ("commit", _GENERIC_ERROR),
+        ("something-new", _GENERIC_ERROR),
     ],
 )
 def test_an_unfinished_job_from_disk_reads_failed_api_restarted(
     app_client: tuple[FastAPI, TestClient], state: str, phase: str | None, message: str
 ) -> None:
     app, client = app_client
-    _persist_only(app, _job("j1", state, phase, channel="stable"))
+    _persist_only(app, _job("1000000000aa", state, phase, channel="stable"))
 
-    final = client.get("/api/updates/status/j1").json()
+    final = client.get("/api/updates/status/1000000000aa").json()
 
     assert final["state"] == "failed"
     assert final["error_code"] == "api_restarted"
@@ -94,21 +96,23 @@ def test_an_unfinished_job_from_disk_reads_failed_api_restarted(
     assert final["updated_at"] > 1.0
     assert final["channel"] == "stable"  # the rest of the record is as it was
     # Written down, and the registry the poll re-seeded says the same.
-    assert _on_disk("j1")["error_code"] == "api_restarted"
-    assert app.state.update_jobs["j1"]["state"] == "failed"
+    assert _on_disk("1000000000aa")["error_code"] == "api_restarted"
+    assert app.state.update_jobs["1000000000aa"]["state"] == "failed"
     # Reading it again does not touch it.
-    assert client.get("/api/updates/status/j1").json() == final
+    assert client.get("/api/updates/status/1000000000aa").json() == final
 
 
 @pytest.mark.parametrize(
     "job",
     [
-        _job("j1", "applied", None, restarted=None, restart_error=None),
-        _job("j1", "applied", "converge:hermes", component_result={"status": "converged"}),
-        _job("j1", "failed", "commit", error="boom", error_code="UpdateError"),
-        _job("j1", "failed", "converge:hermes", error="build failed"),
+        _job("1000000000aa", "applied", None, restarted=None, restart_error=None),
         _job(
-            "j1",
+            "1000000000aa", "applied", "converge:hermes", component_result={"status": "converged"}
+        ),
+        _job("1000000000aa", "failed", "commit", error="boom", error_code="UpdateError"),
+        _job("1000000000aa", "failed", "converge:hermes", error="build failed"),
+        _job(
+            "1000000000aa",
             "prepared",
             "prepare",
             resolved_version="9.9.9",
@@ -124,31 +128,35 @@ def test_a_finished_job_reloads_unchanged(
     app, client = app_client
     _persist_only(app, dict(job))
 
-    final = client.get("/api/updates/status/j1").json()
+    final = client.get("/api/updates/status/1000000000aa").json()
 
     assert final == job
-    assert _on_disk("j1") == job
+    assert _on_disk("1000000000aa") == job
 
 
 @pytest.mark.parametrize("state", ["running", "queued"])
 @pytest.mark.parametrize(
-    ("component", "result"),
+    ("component", "result", "message"),
     [
-        ("hermes", {"status": "build_failed", "error": "stub"}),
-        ("openwebui", {"status": "upgraded", "from": "a", "to": "b"}),
+        ("hermes", {"status": "build_failed", "error": "stub"}, _BUILD_ERROR),
+        ("openwebui", {"status": "upgraded", "from": "a", "to": "b"}, _GENERIC_ERROR),
     ],
 )
 def test_a_converge_is_accepted_after_a_dead_one_was_polled(
-    app_client: tuple[FastAPI, TestClient], state: str, component: str, result: dict[str, Any]
+    app_client: tuple[FastAPI, TestClient],
+    state: str,
+    component: str,
+    result: dict[str, Any],
+    message: str,
 ) -> None:
     """The poll that re-seeds the registry must not leave a ``running`` job in it."""
     app, client = app_client
-    _persist_only(app, _job("j1", state, f"converge:{component}"))
-    dead = client.get("/api/updates/status/j1").json()
+    _persist_only(app, _job("1000000000aa", state, f"converge:{component}"))
+    dead = client.get("/api/updates/status/1000000000aa").json()
     assert (dead["state"], dead["error_code"], dead["error"]) == (
         "failed",
         "api_restarted",
-        _BUILD_ERROR,
+        message,
     )
 
     with patch("hal0.components.runner.converge_component", return_value=result):
@@ -168,11 +176,11 @@ def test_a_running_job_of_this_process_is_not_touched(
     app_client: tuple[FastAPI, TestClient],
 ) -> None:
     app, client = app_client
-    live = _job("j1", "running", "converge:hermes")
-    app.state.update_jobs = {"j1": live}
+    live = _job("1000000000aa", "running", "converge:hermes")
+    app.state.update_jobs = {"1000000000aa": live}
     u_mod._persist_job(live)
 
-    final = client.get("/api/updates/status/j1").json()
+    final = client.get("/api/updates/status/1000000000aa").json()
 
     assert final["state"] == "running" and "error_code" not in final
     # And it still refuses the next one.
@@ -216,17 +224,17 @@ def test_apply_job_killed_by_its_own_restart_reloads_applied(
 
     monkeypatch.setattr(u_mod.Updater, "apply", fake_apply)
     seen: list[dict[str, Any]] = []
-    _kill_at_restart(monkeypatch, "a1", seen)
-    jobs = {"a1": _job("a1", "queued", None, channel="stable", version=None)}
-    u_mod._persist_job(jobs["a1"])
+    _kill_at_restart(monkeypatch, "2000000000aa", seen)
+    jobs = {"2000000000aa": _job("2000000000aa", "queued", None, channel="stable", version=None)}
+    u_mod._persist_job(jobs["2000000000aa"])
 
     with pytest.raises(asyncio.CancelledError):
-        asyncio.run(u_mod._run_apply_job(jobs, "a1", "stable", None))
+        asyncio.run(u_mod._run_apply_job(jobs, "2000000000aa", "stable", None))
     app.state.update_jobs = {}  # the new process
 
     # At the moment the restart killed us, "applied" was already on disk.
     assert [(row["state"], row.get("error_code")) for row in seen] == [("applied", None)]
-    final = client.get("/api/updates/status/a1").json()
+    final = client.get("/api/updates/status/2000000000aa").json()
     assert final["state"] == "applied"
     assert "error_code" not in final and final["error"] is None
 
@@ -242,16 +250,18 @@ def test_commit_job_killed_by_its_own_restart_reloads_applied(
 
     monkeypatch.setattr(u_mod.Updater, "commit", fake_commit)
     seen: list[dict[str, Any]] = []
-    _kill_at_restart(monkeypatch, "c1", seen)
-    jobs = {"c1": _job("c1", "queued", "commit", channel="stable", version="9.9.9")}
-    u_mod._persist_job(jobs["c1"])
+    _kill_at_restart(monkeypatch, "3000000000aa", seen)
+    jobs = {
+        "3000000000aa": _job("3000000000aa", "queued", "commit", channel="stable", version="9.9.9")
+    }
+    u_mod._persist_job(jobs["3000000000aa"])
 
     with pytest.raises(asyncio.CancelledError):
-        asyncio.run(u_mod._run_commit_job(jobs, "c1", "stable", "9.9.9"))
+        asyncio.run(u_mod._run_commit_job(jobs, "3000000000aa", "stable", "9.9.9"))
     app.state.update_jobs = {}
 
     assert [(row["state"], row.get("convergence")) for row in seen] == [("applied", convergence)]
-    final = client.get("/api/updates/status/c1").json()
+    final = client.get("/api/updates/status/3000000000aa").json()
     assert final["state"] == "applied" and "error_code" not in final
     assert final["convergence"] == convergence
 
@@ -265,13 +275,15 @@ def test_prepare_job_reloads_prepared(
         return {"version": "9.9.9", "notes": "what changed"}
 
     monkeypatch.setattr(u_mod.Updater, "prepare", fake_prepare)
-    jobs = {"p1": _job("p1", "queued", "prepare", channel="stable", version=None)}
-    u_mod._persist_job(jobs["p1"])
+    jobs = {
+        "4000000000aa": _job("4000000000aa", "queued", "prepare", channel="stable", version=None)
+    }
+    u_mod._persist_job(jobs["4000000000aa"])
 
-    asyncio.run(u_mod._run_prepare_job(jobs, "p1", "stable", None))
+    asyncio.run(u_mod._run_prepare_job(jobs, "4000000000aa", "stable", None))
     app.state.update_jobs = {}
 
-    final = client.get("/api/updates/status/p1").json()
+    final = client.get("/api/updates/status/4000000000aa").json()
     assert (final["state"], final["resolved_version"], final["notes"]) == (
         "prepared",
         "9.9.9",
@@ -290,13 +302,13 @@ def test_component_job_reloads_applied(
 
     monkeypatch.setattr(creg, "component_by_id", lambda cid: object())
     monkeypatch.setattr(crun, "converge_component", lambda comp, **kw: {"status": "converged"})
-    jobs = {"k1": _job("k1", "queued", "converge:openwebui")}
-    u_mod._persist_job(jobs["k1"])
+    jobs = {"5000000000aa": _job("5000000000aa", "queued", "converge:openwebui")}
+    u_mod._persist_job(jobs["5000000000aa"])
 
-    asyncio.run(u_mod._run_component_job(jobs, "k1", "openwebui", {}))
+    asyncio.run(u_mod._run_component_job(jobs, "5000000000aa", "openwebui", {}))
     app.state.update_jobs = {}
 
-    final = client.get("/api/updates/status/k1").json()
+    final = client.get("/api/updates/status/5000000000aa").json()
     assert final["state"] == "applied" and "error_code" not in final
 
 
@@ -327,3 +339,65 @@ def test_only_the_apply_and_commit_jobs_restart_hal0_api() -> None:
         applied = body.index('job["state"] = "applied"')
         persist = body.index("_persist_job(job)", applied)
         assert persist < body.index("asyncio.to_thread(_try_restart_hal0_api)")
+
+
+# ── the id in a job file is untrusted ────────────────────────────────────────
+
+
+def test_a_job_file_naming_another_id_is_not_served_or_written_back(
+    app_client: tuple[FastAPI, TestClient],
+) -> None:
+    """``update-jobs/x.json`` is read back and written under the ``id`` inside it."""
+    app, client = app_client
+    jobs_dir = u_mod._jobs_dir()
+    jobs_dir.mkdir(parents=True, exist_ok=True)
+    state_dir = jobs_dir.parent / "state"
+    state_dir.mkdir(parents=True, exist_ok=True)
+    crafted = {"id": "../state/escaped", "state": "running", "phase": "converge:hermes"}
+    (jobs_dir / "1000000000aa.json").write_text(json.dumps(crafted))
+
+    resp = client.get("/api/updates/status/1000000000aa")
+
+    assert resp.status_code == 404
+    assert not (state_dir / "escaped.json").exists()
+    assert not list(jobs_dir.parent.parent.rglob("escaped*"))
+    assert json.loads((jobs_dir / "1000000000aa.json").read_text()) == crafted
+    assert "1000000000aa" not in app.state.update_jobs
+
+
+@pytest.mark.parametrize(
+    "bad_id",
+    ["j1", "AAAAAAAAAAAA", "1000000000a", "1000000000aaa", "1000000000a-", "..", "x.json"],
+)
+def test_a_status_request_for_an_id_no_route_minted_is_404(
+    app_client: tuple[FastAPI, TestClient], bad_id: str
+) -> None:
+    _app, client = app_client
+    jobs_dir = u_mod._jobs_dir()
+    jobs_dir.mkdir(parents=True, exist_ok=True)
+    # Even a file that is named exactly that, with a matching id inside, is not read.
+    (jobs_dir / f"{bad_id}.json").write_text(json.dumps({"id": bad_id, "state": "applied"}))
+
+    assert client.get(f"/api/updates/status/{bad_id}").status_code == 404
+
+
+def test_a_job_with_a_path_in_its_id_is_not_persisted(
+    app_client: tuple[FastAPI, TestClient],
+) -> None:
+    jobs_dir = u_mod._jobs_dir()
+    escaped = jobs_dir.parent / "escaped.json"
+
+    u_mod._persist_job({"id": "../escaped", "state": "queued"})
+    u_mod._persist_job({"id": "../../escaped", "state": "queued"})
+
+    assert not escaped.exists()
+    assert not list(jobs_dir.parent.parent.rglob("escaped*"))
+    with pytest.raises(ValueError):
+        u_mod._job_file("../escaped")
+
+
+def test_the_ids_the_routes_mint_are_valid_job_ids() -> None:
+    import uuid
+
+    for _ in range(50):
+        assert u_mod._job_file(uuid.uuid4().hex[:12]).suffix == ".json"

@@ -50,6 +50,25 @@ class _Lines:
         return self._lines.pop(0) if self._lines else b""
 
 
+class _OverlongOnce:
+    """A child's stdout whose ``readline`` raises the given exceptions in sequence, then ends.
+
+    ``items`` before the first exception are lines; an exception item is raised
+    once; ``after`` are the lines that follow.
+    """
+
+    def __init__(self, items: list[bytes | BaseException], after: list[bytes]) -> None:
+        self._items = [*items, *after]
+
+    async def readline(self) -> bytes:
+        if not self._items:
+            return b""
+        item = self._items.pop(0)
+        if isinstance(item, BaseException):
+            raise item
+        return item
+
+
 class _FakeProc:
     def __init__(self, lines: list[bytes], rc: int) -> None:
         self.stdout = _Lines(lines)
@@ -186,6 +205,7 @@ def test_repair_queues_job_and_records_steps(
     assert final["steps"] == ["preflight", "install"]
     assert final["exit_code"] == 0
     assert final["pid"] == 4242
+    assert final["audit_finished"] is True  # its `finished` event was logged
     assert (log_dir / f"job-{job['id']}.log").read_text().splitlines() == [
         "[run ] preflight",
         "other",
@@ -217,10 +237,12 @@ def test_repair_returns_the_queued_job_snapshot(
         "steps",
         "log_path",
         "api_pid",
+        "actor",
     }
     assert job["kind"] == "repair" and job["agent"] == "hermes"
     assert job["error"] is None and job["steps"] == []
     assert job["api_pid"] == os.getpid()
+    assert job["actor"] == "hal0-dashboard"  # no X-hal0-Agent header
     assert job["log_path"] == str(log_dir / f"job-{job['id']}.log")
     _drain_background(agents_client)
 
@@ -413,10 +435,14 @@ def test_repair_in_flight_job_is_reported_before_the_lock(
     assert r.json()["error"]["details"] == {"job_id": "j1"}
 
 
-def test_repair_409_when_builder_lock_cannot_be_opened(
+def test_repair_500_when_builder_lock_cannot_be_opened(
     agents_client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The lock file cannot be created: not "free", and not a 500."""
+    """The lock file cannot be created: a server-side fault, not a 409.
+
+    The cards UI reads every 409 from this route as "a build is running"; a
+    permissions problem must not look like a busy builder for good.
+    """
     blocker = tmp_path / "not-a-directory"
     blocker.write_text("x")
     unusable = Layout.for_venv(blocker / "venvs" / "hermes")
@@ -425,7 +451,7 @@ def test_repair_409_when_builder_lock_cannot_be_opened(
 
     r = agents_client.post("/api/agents/hermes/repair")
 
-    assert r.status_code == 409
+    assert r.status_code == 500
     body = r.json()["error"]
     assert body["code"] == "agent.builder_lock_unreadable"
     assert body["details"]["error"]
@@ -584,7 +610,7 @@ async def test_runner_marks_failed_when_reading_the_output_breaks(
     proc = _FakeProc([], 7)
 
     async def _boom() -> bytes:
-        raise ValueError("Separator is not found, and chunk exceed the limit")
+        raise RuntimeError("the pipe broke")
 
     proc.stdout.readline = _boom  # type: ignore[method-assign]
     jobs = _job()
@@ -603,6 +629,88 @@ async def test_runner_marks_failed_when_reading_the_output_breaks(
     assert proc.killed
     # The code of the child it reaped, not a guess.
     assert jobs["j1"]["exit_code"] == proc.returncode == 7
+
+
+async def test_runner_skips_an_overlong_output_line_and_keeps_the_build_going(
+    tmp_path: Path, no_persist: list[str]
+) -> None:
+    """``StreamReader.readline`` raises ``ValueError`` for a line over the limit: not fatal."""
+
+    proc = _FakeProc([], 0)
+    proc.stdout = _OverlongOnce(  # type: ignore[assignment]
+        [b"[run ] before\n", ValueError("Separator is not found, and chunk exceed the limit")],
+        [b"[run ] after\n"],
+    )
+    jobs = _job()
+    log = tmp_path / "x.log"
+
+    with structlog.testing.capture_logs() as logs:
+        await repair_route.run_repair_job(
+            jobs,
+            "j1",
+            argv=["hal0"],
+            env={},
+            log_path=log,
+            spawn=AsyncMock(return_value=proc),
+        )
+
+    assert jobs["j1"]["state"] == "applied"
+    assert jobs["j1"]["steps"] == ["before", "after"]
+    assert log.read_text().splitlines() == [
+        "[run ] before",
+        f"[hal0] a line over {repair_route._STREAM_LIMIT} bytes was skipped",
+        "[run ] after",
+    ]
+    assert [e["event"] for e in logs if e["event"] == "agent.repair.line_skipped"] == [
+        "agent.repair.line_skipped"
+    ]
+
+
+async def test_runner_survives_a_real_stream_reader_overrun(
+    tmp_path: Path, no_persist: list[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The same with asyncio's own reader: the long line is dropped, the next line is read."""
+    reader = asyncio.StreamReader(limit=64)
+    reader.feed_data(b"[run ] first\n" + b"x" * 500 + b"\n[run ] second\n")
+    reader.feed_eof()
+    proc = _FakeProc([], 0)
+    proc.stdout = reader  # type: ignore[assignment]
+    jobs = _job()
+
+    await repair_route.run_repair_job(
+        jobs,
+        "j1",
+        argv=["hal0"],
+        env={},
+        log_path=tmp_path / "x.log",
+        spawn=AsyncMock(return_value=proc),
+    )
+
+    assert jobs["j1"]["state"] == "applied"
+    assert jobs["j1"]["steps"] == ["first", "second"]
+    assert (tmp_path / "x.log").read_text().count("was skipped") == 1
+
+
+async def test_runner_skips_a_limit_overrun_error_too(
+    tmp_path: Path, no_persist: list[str]
+) -> None:
+    proc = _FakeProc([], 0)
+    proc.stdout = _OverlongOnce(  # type: ignore[assignment]
+        [asyncio.LimitOverrunError("Separator is found, but chunk is longer than limit", 99)],
+        [b"[run ] next\n"],
+    )
+    jobs = _job()
+
+    await repair_route.run_repair_job(
+        jobs,
+        "j1",
+        argv=["hal0"],
+        env={},
+        log_path=tmp_path / "x.log",
+        spawn=AsyncMock(return_value=proc),
+    )
+
+    assert jobs["j1"]["state"] == "applied" and jobs["j1"]["steps"] == ["next"]
 
 
 async def _run_hanging(
@@ -646,7 +754,8 @@ async def test_runner_cancellation_kills_the_child_and_leaves_the_job_running(
 
     assert proc.killed  # no process group in this test: the child itself
     assert jobs["j1"]["state"] == "running"
-    assert no_persist == ["running"]
+    assert no_persist[-1] == "running"  # still running on disk, for the reconcile
+    assert jobs["j1"]["audit_finished"] is True  # but its `finished` event was logged
     finished = [e for e in logs if e["event"] == "agent.repair.finished"]
     assert len(finished) == 1
     assert finished[0]["state"] == "cancelled" and finished[0]["exit_code"] is None
@@ -757,7 +866,7 @@ _DEAD_PID = 4_194_305
 _RESTARTED_ERROR = "hal0-api restarted during the repair; the live release is unchanged"
 
 
-def _stale_job(state: str = "running", job_id: str = "r1") -> dict[str, Any]:
+def _stale_job(state: str = "running", job_id: str = "6000000000aa") -> dict[str, Any]:
     """A repair job the hal0-api before this one left in flight."""
     job: dict[str, Any] = {
         "id": job_id,
@@ -790,22 +899,22 @@ def test_stale_repair_job_marked_api_restarted_on_a_status_read(
     app.state.update_jobs = {}  # a fresh process: nothing in memory
 
     with structlog.testing.capture_logs() as logs:
-        final = client.get("/api/updates/status/r1").json()
+        final = client.get("/api/updates/status/6000000000aa").json()
 
     assert final["state"] == "failed"
     assert final["error_code"] == "api_restarted"
     assert final["error"] == _RESTARTED_ERROR
     assert final["steps"] == ["preflight"]
     # Written down, and the in-memory copy the status poll re-seeded says the same.
-    assert _persisted("r1")["error_code"] == "api_restarted"
-    assert app.state.update_jobs["r1"]["state"] == "failed"
+    assert _persisted("6000000000aa")["error_code"] == "api_restarted"
+    assert app.state.update_jobs["6000000000aa"]["state"] == "failed"
     finished = [e for e in logs if e["event"] == "agent.repair.finished"]
     assert [(e["job_id"], e["state"], e["exit_code"], e["error_code"]) for e in finished] == [
-        ("r1", "failed", None, "api_restarted")
+        ("6000000000aa", "failed", None, "api_restarted")
     ]
     # A second poll does not reconcile it again.
     with structlog.testing.capture_logs() as again:
-        assert client.get("/api/updates/status/r1").json()["state"] == "failed"
+        assert client.get("/api/updates/status/6000000000aa").json()["state"] == "failed"
     assert not [e for e in again if e["event"] == "agent.repair.finished"]
 
 
@@ -813,9 +922,9 @@ def test_stale_repair_job_in_memory_is_marked_on_a_status_read(
     app_client: tuple[FastAPI, TestClient],
 ) -> None:
     app, client = app_client
-    app.state.update_jobs = {"r1": _stale_job()}
+    app.state.update_jobs = {"6000000000aa": _stale_job()}
 
-    final = client.get("/api/updates/status/r1").json()
+    final = client.get("/api/updates/status/6000000000aa").json()
 
     assert (final["state"], final["error_code"]) == ("failed", "api_restarted")
 
@@ -842,7 +951,7 @@ def test_a_reseeded_stale_repair_job_does_not_block_the_next_repair(
     _spawn_ok(monkeypatch)
     updater_routes._persist_job(_stale_job())
     app.state.update_jobs = {}
-    assert client.get("/api/updates/status/r1").json()["state"] == "failed"
+    assert client.get("/api/updates/status/6000000000aa").json()["state"] == "failed"
 
     r = client.post("/api/agents/hermes/repair")
 
@@ -862,7 +971,7 @@ def test_a_repair_job_reloaded_from_disk_is_failed_whatever_its_pids_say(
     updater_routes._persist_job(job)
     app.state.update_jobs = {}
 
-    final = client.get("/api/updates/status/r1").json()
+    final = client.get("/api/updates/status/6000000000aa").json()
 
     assert (final["state"], final["error_code"]) == ("failed", "api_restarted")
     assert final["error"] == _RESTARTED_ERROR
@@ -882,7 +991,7 @@ def test_repair_post_over_a_persisted_running_job_with_a_dead_api_pid(
 
     assert r.status_code == 202
     _drain_background(client)
-    old = client.get("/api/updates/status/r1").json()
+    old = client.get("/api/updates/status/6000000000aa").json()
     assert (old["state"], old["error_code"]) == ("failed", "api_restarted")
     assert client.get(f"/api/updates/status/{r.json()['id']}").json()["state"] == "applied"
 
@@ -894,16 +1003,16 @@ def test_repair_post_reconciles_a_stale_job_before_the_busy_check(
     """In the registry already (no status poll in between), a stale repair is not "in flight"."""
     app, client = app_client
     spawn = _spawn_ok(monkeypatch)
-    app.state.update_jobs = {"r1": _stale_job(state)}
+    app.state.update_jobs = {"6000000000aa": _stale_job(state)}
 
     r = client.post("/api/agents/hermes/repair")
 
     assert r.status_code == 202
     _drain_background(client)
     spawn.assert_awaited_once()
-    assert app.state.update_jobs["r1"]["state"] == "failed"
-    assert app.state.update_jobs["r1"]["error_code"] == "api_restarted"
-    assert _persisted("r1")["error_code"] == "api_restarted"
+    assert app.state.update_jobs["6000000000aa"]["state"] == "failed"
+    assert app.state.update_jobs["6000000000aa"]["error_code"] == "api_restarted"
+    assert _persisted("6000000000aa")["error_code"] == "api_restarted"
 
 
 def test_repair_post_still_refuses_a_job_this_process_is_running(
@@ -911,15 +1020,15 @@ def test_repair_post_still_refuses_a_job_this_process_is_running(
 ) -> None:
     app, client = app_client
     spawn = _spawn_ok(monkeypatch)
-    live = _stale_job("queued", "r2")
+    live = _stale_job("queued", "7000000000aa")
     live["api_pid"] = os.getpid()
-    app.state.update_jobs = {"r2": live}
+    app.state.update_jobs = {"7000000000aa": live}
 
     r = client.post("/api/agents/hermes/repair")
 
     assert r.status_code == 409
-    assert r.json()["error"]["details"] == {"job_id": "r2"}
-    assert app.state.update_jobs["r2"]["state"] == "queued"
+    assert r.json()["error"]["details"] == {"job_id": "7000000000aa"}
+    assert app.state.update_jobs["7000000000aa"]["state"] == "queued"
     spawn.assert_not_awaited()
 
 
@@ -936,7 +1045,13 @@ def test_reconcile_leaves_live_job_alone() -> None:
 def test_reconcile_marks_a_job_of_another_api_process_failed(
     no_persist: list[str],
 ) -> None:
-    job = {"id": "r1", "state": "running", "phase": "repair:hermes", "api_pid": 7, "pid": 1}
+    job = {
+        "id": "6000000000aa",
+        "state": "running",
+        "phase": "repair:hermes",
+        "api_pid": 7,
+        "pid": 1,
+    }
 
     out = repair_route.reconcile_stale_repair_job(
         job,
@@ -955,7 +1070,13 @@ def test_reconcile_marks_a_job_of_another_api_process_failed(
 
 def test_reconcile_marks_a_job_whose_child_is_gone_failed(no_persist: list[str]) -> None:
     """The new hal0-api got the old one's pid: ``api_pid`` matches, the child does not exist."""
-    job = {"id": "r1", "state": "running", "phase": "repair:hermes", "api_pid": 8, "pid": 1}
+    job = {
+        "id": "6000000000aa",
+        "state": "running",
+        "phase": "repair:hermes",
+        "api_pid": 8,
+        "pid": 1,
+    }
 
     repair_route.reconcile_stale_repair_job(job, current_pid=8, pid_alive=lambda p: False)
 
@@ -966,8 +1087,14 @@ def test_reconcile_leaves_a_job_of_this_process_whose_runner_is_alive_alone(
     no_persist: list[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The child exited and was reaped; the runner has not yet read its last line."""
-    job = {"id": "r1", "state": "running", "phase": "repair:hermes", "api_pid": 8, "pid": 1}
-    monkeypatch.setattr(repair_route, "_live_runners", {"r1"})
+    job = {
+        "id": "6000000000aa",
+        "state": "running",
+        "phase": "repair:hermes",
+        "api_pid": 8,
+        "pid": 1,
+    }
+    monkeypatch.setattr(repair_route, "_live_runners", {"6000000000aa"})
 
     repair_route.reconcile_stale_repair_job(job, current_pid=8, pid_alive=lambda p: False)
 
@@ -976,7 +1103,7 @@ def test_reconcile_leaves_a_job_of_this_process_whose_runner_is_alive_alone(
 
 
 def test_reconcile_leaves_a_queued_job_of_this_process_alone(no_persist: list[str]) -> None:
-    job = {"id": "r1", "state": "queued", "phase": "repair:hermes", "api_pid": 8}
+    job = {"id": "6000000000aa", "state": "queued", "phase": "repair:hermes", "api_pid": 8}
 
     repair_route.reconcile_stale_repair_job(job, current_pid=8, pid_alive=lambda p: False)
 
@@ -1017,13 +1144,13 @@ def test_a_corrupt_child_pid_fails_the_job_instead_of_the_status_route(
     job = _stale_job()
     job["api_pid"] = os.getpid()
     job["pid"] = 2**31
-    app.state.update_jobs = {"r1": job}
+    app.state.update_jobs = {"6000000000aa": job}
 
-    final = client.get("/api/updates/status/r1").json()
+    final = client.get("/api/updates/status/6000000000aa").json()
 
     assert (final["state"], final["error_code"]) == ("failed", "api_restarted")
     app.state.update_jobs = {
-        "r2": {**_stale_job(job_id="r2"), "api_pid": os.getpid(), "pid": 2**31}
+        "7000000000aa": {**_stale_job(job_id="7000000000aa"), "api_pid": os.getpid(), "pid": 2**31}
     }
     assert client.post("/api/agents/hermes/repair").status_code == 202
     _drain_background(client)
@@ -1075,3 +1202,134 @@ async def test_runner_is_a_live_runner_only_while_it_runs(
 
     assert seen and all(seen)
     assert "j1" not in repair_route._live_runners
+
+
+# ── the actor and the single `finished` event ────────────────────────────────
+
+
+def test_repair_job_records_who_asked_for_it(
+    app_client: tuple[FastAPI, TestClient], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _app, client = app_client
+    _spawn_ok(monkeypatch)
+
+    job = client.post("/api/agents/hermes/repair", headers={"x-hal0-agent": "ops-bot"}).json()
+
+    assert job["actor"] == "ops-bot"
+    assert _persisted(job["id"])["actor"] == "ops-bot"
+    _drain_background(client)
+
+
+def test_a_reconciled_repair_job_logs_finished_with_the_actor_it_recorded(
+    app_client: tuple[FastAPI, TestClient],
+) -> None:
+    app, client = app_client
+    job = _stale_job()
+    job["actor"] = "ops-bot"
+    updater_routes._persist_job(job)
+    app.state.update_jobs = {}
+
+    with structlog.testing.capture_logs() as logs:
+        assert client.get("/api/updates/status/6000000000aa").json()["state"] == "failed"
+
+    (finished,) = [e for e in logs if e["event"] == "agent.repair.finished"]
+    assert finished["actor"] == "ops-bot"
+    assert (finished["state"], finished["exit_code"], finished["error_code"]) == (
+        "failed",
+        None,
+        "api_restarted",
+    )
+
+
+def test_reconcile_does_not_log_finished_twice(no_persist: list[str]) -> None:
+    """The runner that was cancelled by the shutdown already logged its ending."""
+    job = {
+        "id": "6000000000aa",
+        "state": "running",
+        "phase": "repair:hermes",
+        "api_pid": 7,
+        "actor": "ops-bot",
+        "audit_finished": True,
+    }
+
+    with structlog.testing.capture_logs() as logs:
+        repair_route.reconcile_stale_repair_job(job, current_pid=8)
+
+    assert job["state"] == "failed" and job["error_code"] == "api_restarted"
+    assert [e for e in logs if e["event"] == "agent.repair.finished"] == []
+
+
+async def test_a_runner_cancelled_by_shutdown_and_the_reconcile_log_one_finished_between_them(
+    tmp_path: Path, no_persist: list[str]
+) -> None:
+    proc = _FakeProc([], 0)
+    jobs = _job()
+    jobs["j1"]["actor"] = "ops-bot"
+    task = await _run_hanging(tmp_path, jobs, proc)
+    with structlog.testing.capture_logs() as logs:
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        # hal0-api restarts; the new process reads the job back from disk.
+        persisted = dict(jobs["j1"])
+        repair_route.reconcile_stale_repair_job(persisted, reloaded=True)
+
+    assert persisted["state"] == "failed" and persisted["error_code"] == "api_restarted"
+    finished = [e for e in logs if e["event"] == "agent.repair.finished"]
+    assert [(e["state"], e["actor"]) for e in finished] == [("cancelled", "tester")]
+
+
+# ── what the child and the transcript can do to the runner ──────────────────
+
+
+def test_a_transcript_path_that_is_a_symlink_is_not_followed(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "elsewhere"
+    target.write_text("untouched")
+    link = tmp_path / "job-x.log"
+    link.symlink_to(target)
+    job: dict[str, Any] = {"log_path": str(link)}
+
+    assert repair_route._open_log(link, job) is None
+
+    assert job["log_path"] is None
+    assert target.read_text() == "untouched"
+
+
+@pytest.mark.parametrize("pgid", [1, 0, -1, -4242])
+def test_signal_group_never_signals_init_or_our_own_group(
+    pgid: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def _must_not_be_called(*args: Any) -> None:
+        raise AssertionError("os.killpg was called")
+
+    monkeypatch.setattr(os, "killpg", _must_not_be_called)
+
+    assert _REAL_SIGNAL_GROUP(pgid, signal.SIGKILL) is False
+
+
+def test_signal_group_still_signals_a_real_group(monkeypatch: pytest.MonkeyPatch) -> None:
+    sent: list[tuple[int, int]] = []
+    monkeypatch.setattr(os, "killpg", lambda pgid, sig: sent.append((pgid, sig)))
+
+    assert _REAL_SIGNAL_GROUP(4242, signal.SIGTERM) is True
+    assert sent == [(4242, signal.SIGTERM)]
+
+
+# ── what a running repair does to the other routes ──────────────────────────
+
+
+def test_a_converge_is_refused_while_a_repair_is_running(
+    app_client: tuple[FastAPI, TestClient],
+) -> None:
+    """The registry is the shared busy signal: the converge route sees a repair job."""
+    app, client = app_client
+    live = _stale_job()
+    live["api_pid"] = os.getpid()
+    app.state.update_jobs = {live["id"]: live}
+
+    resp = client.post("/api/updates/components/hermes/converge")
+
+    assert resp.status_code == 409
+    assert app.state.update_jobs[live["id"]]["state"] == "running"  # and it was not "reconciled"

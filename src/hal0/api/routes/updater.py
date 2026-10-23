@@ -152,7 +152,16 @@ def _jobs_dir() -> Path:
     return paths.var_lib() / "update-jobs"
 
 
+#: What every job id looks like: the routes mint them as ``uuid.uuid4().hex[:12]``. A
+#: job id is a file name under ``update-jobs/``, so anything else is refused rather
+#: than joined into a path (a persisted record carries its own ``id``).
+_JOB_ID_RE = re.compile(r"[0-9a-f]{12}")
+
+
 def _job_file(job_id: str) -> Path:
+    """The file a job is kept in; ``ValueError`` for an id the routes could not have minted."""
+    if not _JOB_ID_RE.fullmatch(job_id):
+        raise ValueError(f"not an update job id: {job_id!r}")
     return _jobs_dir() / f"{job_id}.json"
 
 
@@ -165,7 +174,11 @@ def _persist_job(job: dict[str, Any]) -> None:
     job_id = job.get("id")
     if not job_id:
         return
-    path = _job_file(str(job_id))
+    try:
+        path = _job_file(str(job_id))
+    except ValueError as exc:
+        log.warning("updater.job_persist_refused", job_id=str(job_id), error=str(exc))
+        return
     try:
         # update-jobs/ is declared 2775; a bare mkdir under the daemon's
         # UMask=0022 births 2755 and re-drifts `doctor perms` after every
@@ -189,8 +202,17 @@ def _persist_job(job: dict[str, Any]) -> None:
 
 
 def _load_persisted_job(job_id: str) -> dict[str, Any] | None:
-    """Read a persisted job snapshot from disk, or None if absent/unreadable."""
-    path = _job_file(job_id)
+    """Read a persisted job snapshot from disk, or None if absent, unreadable or not this job's.
+
+    ``None`` for an id the routes could not have minted, and for a file whose own
+    ``id`` is not the one asked for: the id inside a file is untrusted (it is what
+    :func:`_persist_job` writes the job back under), so a record that names another
+    job is not served and not written back.
+    """
+    try:
+        path = _job_file(job_id)
+    except ValueError:
+        return None
     try:
         raw = path.read_text(encoding="utf-8")
     except OSError:
@@ -199,7 +221,9 @@ def _load_persisted_job(job_id: str) -> dict[str, Any] | None:
         loaded = json.loads(raw)
     except ValueError:
         return None
-    return loaded if isinstance(loaded, dict) else None
+    if not isinstance(loaded, dict) or loaded.get("id") != job_id:
+        return None
+    return loaded
 
 
 #: Job states that are not terminal. The terminal ones are ``applied``,
@@ -213,9 +237,12 @@ INTERRUPTED_CODE = "api_restarted"
 def _interrupted_error(phase: object) -> str:
     """What an interrupted job says, by what it was doing."""
     phase = str(phase or "")
+    # Only the Hermes release builder is atomic (``current`` swaps at the very end),
+    # so only a Hermes build or repair can say the live release is unchanged. The
+    # other components converge in place.
     if phase == "repair:hermes":
         return "hal0-api restarted during the repair; the live release is unchanged"
-    if phase.startswith("converge:"):
+    if phase == "converge:hermes":
         return "hal0-api restarted during the build; the live release is unchanged"
     return "hal0-api restarted before this job finished; check `hal0 update status` before retrying"
 
@@ -845,7 +872,8 @@ async def update_status(job_id: str, request: Request) -> dict[str, Any]:
     inside it. It is recorded ``failed`` with ``error_code: "api_restarted"``
     before it is re-seeded into the registry or returned (for every phase), so a
     poll across a restart does not leave a dead ``running`` job behind to refuse
-    every later update, converge and repair with 409. A job whose terminal state
+    every later component converge and repair with 409 (``/apply``, ``/prepare``
+    and ``/commit`` have no busy check). A job whose terminal state
     reached disk (``applied``, ``failed``, ``prepared``) reloads unchanged: the
     apply and commit jobs persist ``applied`` before the restart they start
     (#1540), so a restart that is part of a job never leaves it unfinished.

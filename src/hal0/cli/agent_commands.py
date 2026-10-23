@@ -12,7 +12,7 @@ import json as jsonlib
 import os
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 import typer
 from rich.console import Console
@@ -33,6 +33,9 @@ from hal0.cli._shared import (
 from hal0.cli._shared import _console as _stderr_console
 from hal0.mcp.approval_queue import _PRIMARY_TARGET_ARG
 from hal0.system.seam import hal0_service_home, running_hal0_bin
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 app = typer.Typer(help="Manage bundled agents (Phase 8 — Hermes-Agent).")
 console = Console()
@@ -2210,10 +2213,21 @@ def agent_log(
     if not log_dir.exists():
         console.print(f"[dim]{name}: no logs dir at {log_dir}[/dim]")
         raise typer.Exit(0)
-    pattern = f"{phase}.log" if phase else "*.log"
-    for log_file in sorted(log_dir.glob(pattern)):
+    for log_file in _provision_log_files(log_dir, phase):
         console.print(f"[bold]== {log_file.name} ==[/bold]")
         console.print(log_file.read_text())
+
+
+def _provision_log_files(log_dir: Path, phase: str | None) -> list[Path]:
+    """The logs ``hal0 agent log`` prints: ``<phase>.log``, or every bootstrap log.
+
+    The default listing leaves out ``job-<id>.log``: the transcripts of API-started
+    repairs (``POST /api/agents/hermes/repair``) are never pruned, so printing them
+    all would bury the bootstrap logs. ``--phase job-<id>`` still names one.
+    """
+    if phase:
+        return sorted(log_dir.glob(f"{phase}.log"))
+    return sorted(path for path in log_dir.glob("*.log") if not path.name.startswith("job-"))
 
 
 @app.command("dashboard-token")

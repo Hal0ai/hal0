@@ -80,7 +80,7 @@ from hal0.api.routes.updater import (
     _update_jobs,
 )
 from hal0.config import paths
-from hal0.errors import Conflict, NotFound
+from hal0.errors import Conflict, Hal0Error, NotFound
 from hal0.system.seam import hal0_service_home, running_hal0_bin
 
 if TYPE_CHECKING:
@@ -105,7 +105,8 @@ _BOOTSTRAP_ARGS: Final[tuple[str, ...]] = ("agent", "bootstrap", "hermes", "--re
 _STEP_PREFIX: Final[str] = "[run ] "
 
 #: Longest child output line the reader accepts (asyncio's default is 64 KiB; a
-#: pip or git transcript line can run past it).
+#: pip or git transcript line can run past it). A longer one is skipped with a
+#: marker in the transcript, never fatal to the build.
 _STREAM_LIMIT: Final[int] = 1 << 20
 
 #: How long a repair may run, reading and waiting together. A cold release build
@@ -186,9 +187,10 @@ async def repair_agent(agent_id: str, request: Request) -> dict[str, Any]:
       (``details.holder``: the lock's holder record, advisory, since it may name
       a holder that has since died; the decision is the ``flock``, never the
       record).
-    * 409 ``agent.builder_lock_unreadable`` when the lock file cannot be created
+    * 500 ``agent.builder_lock_unreadable`` when the lock file cannot be created
       or opened, so no answer about the lock can be given; ``details.error``
-      carries the OS error.
+      carries the OS error. A server-side fault, not a 409: a client treats every
+      409 here as "a build is running", and this one will not clear by waiting.
 
     Known limit: the build runs as a child of hal0-api and shares its cgroup, so
     restarting hal0-api during a repair kills it. The release builder is atomic
@@ -220,7 +222,7 @@ async def repair_agent(agent_id: str, request: Request) -> dict[str, Any]:
     try:
         free, holder = builder_lock_free(_layout())
     except OSError as exc:
-        raise Conflict(
+        raise Hal0Error(
             f"the Hermes builder lock cannot be opened: {exc}",
             code="agent.builder_lock_unreadable",
             details={"error": str(exc)},
@@ -248,6 +250,7 @@ async def repair_agent(agent_id: str, request: Request) -> dict[str, Any]:
         "steps": [],
         "log_path": str(log_path),
         "api_pid": os.getpid(),
+        "actor": actor,
     }
     _persist_job(jobs[job_id])
     audit_log.info("agent.repair.invoked", agent_id=agent_id, job_id=job_id, actor=actor)
@@ -311,8 +314,9 @@ def reconcile_stale_repair_job(
     start it (every unfinished job read that way is stale, whatever its pids say).
     The job is then set ``failed`` with ``error_code: "api_restarted"`` (the
     updater's :func:`_fail_interrupted_job`), persisted, and
-    ``agent.repair.finished`` is emitted for it, since the runner that would have
-    is gone. The release builder swaps ``current`` only at its very end, so the
+    ``agent.repair.finished`` is emitted for it (with the ``actor`` the job
+    recorded), since the runner that would have is gone, unless the runner already
+    emitted it (``audit_finished``). The release builder swaps ``current`` only at its very end, so the
     live release is unchanged either way.
 
     Anything else (another phase, a terminal state, a job this process is still
@@ -335,15 +339,18 @@ def reconcile_stale_repair_job(
         return job
 
     _fail_interrupted_job(job)
-    audit_log.warning(
-        "agent.repair.finished",
-        agent_id=str(job.get("agent", "hermes")),
-        job_id=job.get("id"),
-        actor=None,
-        exit_code=None,
-        state="failed",
-        error_code=INTERRUPTED_CODE,
-    )
+    # A runner that already logged its ending (it was cancelled by the shutdown that
+    # is now being reconciled) set ``audit_finished``: one ``finished`` per job.
+    if not job.get("audit_finished"):
+        audit_log.warning(
+            "agent.repair.finished",
+            agent_id=str(job.get("agent", "hermes")),
+            job_id=job.get("id"),
+            actor=job.get("actor"),
+            exit_code=None,
+            state="failed",
+            error_code=INTERRUPTED_CODE,
+        )
     return job
 
 
@@ -351,7 +358,8 @@ def _open_log(log_path: Path, job: dict[str, Any]) -> Any:
     """Open the transcript for append; ``None`` (and ``job["log_path"] = None``) when it cannot be."""
     try:
         log_path.parent.mkdir(mode=_LOG_DIR_MODE, parents=True, exist_ok=True)
-        fd = os.open(log_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, _LOG_FILE_MODE)
+        flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW
+        fd = os.open(log_path, flags, _LOG_FILE_MODE)
         return os.fdopen(fd, "a", encoding="utf-8")
     except OSError as exc:
         log.warning("agent.repair.log_unavailable", path=str(log_path), error=str(exc))
@@ -364,8 +372,12 @@ def _signal_group(pgid: int, sig: signal.Signals) -> bool:
 
     The child is spawned with ``start_new_session=True``, so its pid is the id of a
     group that holds it and everything it started. The group outlives a reaped
-    leader while any member lives, and its id cannot be reused until then.
+    leader while any member lives, and its id cannot be reused until then. A group
+    id of 1 or less is never signalled (``killpg(0)`` is this process' own group and
+    1 is init's), whatever a corrupt job record says.
     """
+    if pgid <= 1:
+        return False
     try:
         os.killpg(pgid, sig)
     except OSError:
@@ -422,7 +434,9 @@ async def run_repair_job(
     in the last two the child's process group is terminated and ``exit_code`` is
     the reaped child's return code. Whatever the outcome the job is persisted
     where it changed and ``agent.repair.finished`` is emitted with the
-    ``exit_code`` (``None`` when there was none).
+    ``exit_code`` (``None`` when there was none) and the job's ``actor``, after
+    which ``job["audit_finished"]`` is set. A child output line over
+    :data:`_STREAM_LIMIT` is skipped with a marker in the transcript.
 
     If the task is cancelled (hal0-api shutting down) the child's process group is
     terminated and ``agent.repair.finished`` is emitted with ``state="cancelled"``.
@@ -433,6 +447,7 @@ async def run_repair_job(
     """
     job = jobs[job_id]
     agent_id = str(job.get("agent", "hermes"))
+    actor = actor if actor is not None else job.get("actor")
     exit_code: int | None = None
     cancelled = False
     log_file = _open_log(log_path, job)
@@ -464,7 +479,19 @@ async def run_repair_job(
         try:
             async with deadline:
                 while True:
-                    raw = await proc.stdout.readline()
+                    try:
+                        raw = await proc.stdout.readline()
+                    except (ValueError, asyncio.LimitOverrunError) as exc:
+                        # A line over ``_STREAM_LIMIT``. ``StreamReader.readline``
+                        # drops the oversized chunk before it raises, so there is
+                        # nothing left to copy: leave a marker, keep reading.
+                        if log_file is not None:
+                            log_file.write(
+                                f"[hal0] a line over {_STREAM_LIMIT} bytes was skipped\n"
+                            )
+                            log_file.flush()
+                        log.warning("agent.repair.line_skipped", job_id=job_id, error=str(exc))
+                        continue
                     if not raw:
                         break
                     line = raw.decode("utf-8", errors="replace").rstrip("\r\n")
@@ -515,10 +542,6 @@ async def run_repair_job(
         _live_runners.discard(job_id)
         if log_file is not None:
             log_file.close()
-        # A job cancelled while running stays ``running`` for
-        # ``reconcile_stale_repair_job``; every other ending is written down.
-        if job["state"] in ("applied", "failed"):
-            _touch(job)
         outcome = "cancelled" if cancelled else job["state"]
         emit = audit_log.info if outcome == "applied" else audit_log.warning
         emit(
@@ -529,6 +552,11 @@ async def run_repair_job(
             exit_code=exit_code,
             state=outcome,
         )
+        # Written down for every ending. A job cancelled while running keeps its
+        # ``running`` state for ``reconcile_stale_repair_job``, but the flag tells it
+        # this ``finished`` was already emitted.
+        job["audit_finished"] = True
+        _touch(job)
 
 
 __all__ = ["reconcile_stale_repair_job", "repair_agent", "router", "run_repair_job"]

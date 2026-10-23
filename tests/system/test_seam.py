@@ -137,6 +137,20 @@ def test_hindsight_dropin_verb_exists_in_the_wrapper() -> None:
     assert seam_mod.HINDSIGHT_DROPIN_PATH.name in text
 
 
+def test_every_companion_service_key_is_accepted_by_the_wrapper() -> None:
+    """``COMPANION_SERVICE_UNITS`` is the client-side spelling of the wrapper's closed
+    ``svc-*`` map. A unit the Python side maps but the wrapper does not fails at runtime
+    with ``bad service key``: pin each (key, unit) pair to the wrapper's case arm."""
+    import re
+
+    wrapper = Path(__file__).resolve().parents[2] / "installer" / "wrappers" / "hal0-systemctl"
+    text = wrapper.read_text()
+    assert seam_mod.COMPANION_SERVICE_UNITS
+    for unit, key in seam_mod.COMPANION_SERVICE_UNITS.items():
+        arm = rf'^\s*{re.escape(key)}\)\s+unit="{re.escape(unit)}"'
+        assert re.search(arm, text, re.MULTILINE), f"{key} -> {unit} is not a svc-* arm"
+
+
 def test_write_quadlet_rejects_non_slot_name(tmp_path: Path) -> None:
     _, run = _recorder()
     seam = SystemCtlSeam(run=run, is_hal0_user=lambda: True)
