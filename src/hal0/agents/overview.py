@@ -252,6 +252,14 @@ def _approvals_reason(approvals: dict[str, Any]) -> dict[str, Any]:
     )
 
 
+def _doctor_fix(row: dict[str, Any]) -> tuple[str, str | None]:
+    """The fix for one drifted doctor row: ``(fix, command)``."""
+    if row["id"] == "gateway_unit" and row["status"] == "unreadable":
+        return "none", None  # a read error is not a missing unit
+    command = _DOCTOR_CLI_FIXES.get(row["id"])
+    return ("cli", command) if command else ("repair", None)
+
+
 def degraded_reasons(
     *,
     units: dict[str, Any],
@@ -260,6 +268,7 @@ def degraded_reasons(
     doctor: list[dict[str, Any]],
     approvals: dict[str, Any],
     gateway_settling: bool = False,
+    gateway_note: str | None = None,
 ) -> list[dict[str, Any]]:
     """Why a running Hermes is degraded, in display order, each with its fix.
 
@@ -273,11 +282,15 @@ def degraded_reasons(
     (the API server runs inside it, and an inactive gateway already produced
     ``gateway_down``) and is not raised while ``gateway_settling`` (the gateway
     is starting, reloading or in maintenance, so its API may not answer yet).
+    ``gateway_note``, when given, replaces the state in the ``gateway_down``
+    detail (``crash-looping (auto-restart)``).
     ``doctor_drift`` covers every doctor row whose status is not ``ok`` or
     ``absent``, one reason per distinct fix: the ``ownership`` row needs a root
     CLI command (hal0 cannot ``chown`` its own tree), the ``gateway_unit`` row
     another (hal0 cannot write ``/etc/systemd/system``), and the rest are fixed
-    by a Repair job. ``in_sync`` of ``None`` (Hermes not provisioned) is not
+    by a Repair job. A ``gateway_unit`` row that is ``unreadable`` (the check
+    could not read Hermes' home) is a read error, not a missing unit, and has
+    no fix. ``in_sync`` of ``None`` (Hermes not provisioned) is not
     drift. A ``provision`` marked ``stale`` (its report predates the live
     release, which ``hal0 update`` rebuilds without rewriting
     ``provision.json``) raises neither ``provision_failed`` nor
@@ -287,9 +300,8 @@ def degraded_reasons(
     gateway = units.get("gateway") or "unknown"
     if gateway not in ("active", "unknown", "absent"):
         if units.get("gateway_enabled") is not False:
-            reasons.append(
-                _reason("gateway_down", f"hermes-gateway.service is {gateway}", "restart_gateway")
-            )
+            detail = f"hermes-gateway.service is {gateway_note or gateway}"
+            reasons.append(_reason("gateway_down", detail, "restart_gateway"))
     elif gateway == "active" and not api_healthy and not gateway_settling:
         reasons.append(
             _reason(
@@ -316,13 +328,13 @@ def degraded_reasons(
         )
 
     # Group the drifted rows by fix, in row order, so each reason names one command.
-    fixes: dict[str | None, list[dict[str, Any]]] = {}
+    fixes: dict[tuple[str, str | None], list[dict[str, Any]]] = {}
     for row in doctor:
         if row.get("status") not in ("ok", "absent"):
-            fixes.setdefault(_DOCTOR_CLI_FIXES.get(row["id"]), []).append(row)
-    for command, rows in fixes.items():
+            fixes.setdefault(_doctor_fix(row), []).append(row)
+    for (fix, command), rows in fixes.items():
         detail = "; ".join(f"{row['id']}: {row['detail']}" for row in rows)
-        reasons.append(_reason("doctor_drift", detail, "cli" if command else "repair", command))
+        reasons.append(_reason("doctor_drift", detail, fix, command))
 
     if approvals.get("in_sync") is False:
         reasons.append(_approvals_reason(approvals))

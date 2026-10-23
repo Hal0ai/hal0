@@ -663,11 +663,11 @@ def test_overview_live_fields_are_current_on_a_cache_hit(client_ready, monkeypat
     assert probe_calls["gateway_alive"] == 1  # a cache hit
 
 
-def _gateway_unit_state(monkeypatch, active_state, unit_file_state):
+def _gateway_unit_state(monkeypatch, active_state, unit_file_state, sub_state="dead"):
     async def _state(unit: str) -> dict[str, str | None]:
         return {
             "active_state": active_state,
-            "sub_state": "dead",
+            "sub_state": sub_state,
             "unit_file_state": unit_file_state,
             "since": None,
         }
@@ -693,11 +693,20 @@ def test_overview_gateway_that_should_run_but_is_stopped_is_degraded(client_read
     assert [r["reason"] for r in body["degraded"]] == ["gateway_down"]
 
 
-@pytest.mark.parametrize("active_state", ["activating", "reloading", "refreshing", "maintenance"])
+@pytest.mark.parametrize(
+    ("active_state", "sub_state"),
+    [
+        ("activating", "start"),
+        ("activating", "start-post"),
+        ("reloading", "reload"),
+        ("refreshing", "running"),
+        ("maintenance", "dead"),
+    ],
+)
 def test_overview_api_not_answering_while_the_gateway_settles_is_not_degraded(
-    client_ready, monkeypatch, active_state
+    client_ready, monkeypatch, active_state, sub_state
 ):
-    _gateway_unit_state(monkeypatch, active_state, "enabled")
+    _gateway_unit_state(monkeypatch, active_state, "enabled", sub_state)
     monkeypatch.setattr(overview_route, "gateway_alive", lambda home, *, probe=None: False)
     body = client_ready.get("/api/agents/hermes/overview").json()
     assert body["units"]["gateway"] == "active" and body["degraded"] == []
@@ -803,3 +812,35 @@ def test_overview_generated_at_is_the_build_start_wall_clock(client_ready):
     assert client_ready.get("/api/agents/hermes/overview").json()["generated_at"] == first
     time.sleep(0.01)
     assert client_ready.get("/api/agents/hermes/overview?refresh=1").json()["generated_at"] != first
+
+
+@pytest.mark.parametrize("sub_state", ["auto-restart", "auto-restart-queued"])
+def test_overview_crash_looping_gateway_reads_down_not_settling(
+    client_ready, monkeypatch, sub_state
+):
+    """Restart=always with no start limit never reaches `failed`: it sits in activating/auto-restart."""
+    _gateway_unit_state(monkeypatch, "activating", "enabled", sub_state)
+    monkeypatch.setattr(overview_route, "gateway_alive", lambda home, *, probe=None: False)
+    body = client_ready.get("/api/agents/hermes/overview").json()
+    assert body["units"]["gateway"] == "failed"
+    assert body["phase"] == "degraded"
+    (reason,) = body["degraded"]
+    assert reason["reason"] == "gateway_down" and reason["fix"] == "restart_gateway"
+    assert "crash-looping (auto-restart)" in reason["detail"]
+
+
+def test_overview_unreadable_gateway_unit_row_offers_no_fix(client_ready, monkeypatch):
+    monkeypatch.setattr(
+        overview_route,
+        "check_hermes_gateway_unit",
+        lambda: {"status": "unreadable", "detail": "cannot read the Hermes home"},
+    )
+    body = client_ready.get("/api/agents/hermes/overview").json()
+    (reason,) = body["degraded"]
+    assert reason["reason"] == "doctor_drift" and reason["fix"] == "none"
+    assert reason["command"] is None
+    assert {
+        "id": "gateway_unit",
+        "status": "unreadable",
+        "detail": "cannot read the Hermes home",
+    } in body["doctor"]

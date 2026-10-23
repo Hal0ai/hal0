@@ -277,7 +277,8 @@ def check_hermes_gateway_unit(
 ) -> dict[str, str]:
     """Hermes installed means the gateway unit file exists and no unmanaged gateway runs.
 
-    ``{status, detail}`` with ``status`` ``ok``, ``warn`` or ``fail``.
+    ``{status, detail}`` with ``status`` ``ok``, ``warn``, ``fail`` or
+    ``unreadable`` (Hermes' home is not readable by this user).
 
     From Hermes v0.22.3 a profile-scoped dashboard chat and the ``hermes chat``
     CLI are gateway clients. With NO gateway unit file installed they start
@@ -300,7 +301,7 @@ def check_hermes_gateway_unit(
         (root / "config.yaml").stat()
     except PermissionError:
         return {
-            "status": "warn",
+            "status": "unreadable",
             "detail": f"cannot read {root}; run hal0 doctor as hal0 or root",
         }
     except OSError:

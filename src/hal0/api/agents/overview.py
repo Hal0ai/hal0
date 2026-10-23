@@ -95,6 +95,7 @@ class _Gateway:
     state: str | None  # active state, transition states folded in
     enabled: bool | None  # whether the unit file says it is meant to run
     settling: bool  # starting, reloading or in maintenance: its API may not answer yet
+    note: str | None = None  # what to say in place of the state when it is down
 
 
 #: Only installed agents are cached: install state is re-read on every request,
@@ -125,6 +126,13 @@ _GATEWAY_STATE_ALIASES: Final[dict[str, str]] = {
 #: yet, which is not a fault.
 _GATEWAY_SETTLING_STATES: Final[frozenset[str]] = frozenset(
     {"activating", "reloading", "refreshing", "maintenance"}
+)
+
+#: ``activating`` with one of these sub-states is not a start in progress: the
+#: unit is ``Restart=always`` with no start limit, so a gateway that keeps
+#: dying never reaches ``failed``; systemd waits to restart it here instead.
+_GATEWAY_CRASH_LOOP_SUBSTATES: Final[frozenset[str]] = frozenset(
+    {"auto-restart", "auto-restart-queued"}
 )
 
 #: ``get_agent_memory_stats`` can page the Hindsight bank with long read
@@ -354,15 +362,20 @@ async def _gateway_state() -> _Gateway:
     their neighbours: ``activating``, ``reloading``, ``refreshing`` and
     ``maintenance`` read as ``active`` (and mark the gateway as settling) and
     ``deactivating`` as ``inactive``, so a gateway restart is not reported as down.
+    The exception is ``activating`` in ``auto-restart``: that is a crash loop (the
+    unit restarts forever and never reaches ``failed``), so it reads ``failed``.
     """
     state = await unit_state(_GATEWAY_UNIT)
     active = state.get("active_state")
     file_state = state.get("unit_file_state")
+    enabled = builders.unit_file_enabled(file_state)
     if active == "inactive" and file_state in (None, "unknown"):
         return _Gateway("absent", None, False)
+    if active == "activating" and state.get("sub_state") in _GATEWAY_CRASH_LOOP_SUBSTATES:
+        return _Gateway("failed", enabled, False, "crash-looping (auto-restart)")
     return _Gateway(
         _GATEWAY_STATE_ALIASES.get(active, active) if active else None,
-        builders.unit_file_enabled(file_state),
+        enabled,
         active in _GATEWAY_SETTLING_STATES,
     )
 
@@ -592,6 +605,7 @@ async def _gather_hermes(request: Request) -> dict[str, Any]:
         builders.degraded_reasons,
         units=gateway_units,
         gateway_settling=gateway.settling,
+        gateway_note=gateway.note,
         api_healthy=healthy,
         provision=provision,
         doctor=doctor,

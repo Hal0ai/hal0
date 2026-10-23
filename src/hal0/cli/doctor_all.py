@@ -2051,7 +2051,7 @@ def check_hermes_gateway_unit(
     from hal0.agents import hermes_doctor
 
     row = hermes_doctor.check_hermes_gateway_unit(home=home, unit_path=unit_path, proc=proc)
-    status = {"ok": _PASS, "warn": _WARN, "fail": _FAIL}[row["status"]]
+    status = {"ok": _PASS, "warn": _WARN, "unreadable": _WARN, "fail": _FAIL}[row["status"]]
     return Check("hermes-gateway-unit", "Hermes gateway unit", status, row["detail"])
 
 

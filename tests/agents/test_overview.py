@@ -373,6 +373,33 @@ def test_gateway_unit_drift_needs_the_root_install_command():
     ]
 
 
+def test_unreadable_gateway_unit_row_has_no_fix():
+    """A read error is not a missing unit: the install command would not help."""
+    out = degraded_reasons(
+        **{
+            **BASE,
+            "doctor": [{"id": "gateway_unit", "status": "unreadable", "detail": "cannot read"}],
+        }
+    )
+    assert out == [
+        {
+            "reason": "doctor_drift",
+            "detail": "gateway_unit: cannot read",
+            "fix": "none",
+            "command": None,
+        }
+    ]
+
+
+def test_gateway_down_detail_can_name_a_crash_loop():
+    (reason,) = degraded_reasons(
+        **{**BASE, "units": {"agent": "active", "gateway": "failed"}},
+        gateway_note="crash-looping (auto-restart)",
+    )
+    assert reason["detail"] == "hermes-gateway.service is crash-looping (auto-restart)"
+    assert reason["fix"] == "restart_gateway"
+
+
 def test_doctor_drift_is_one_reason_per_distinct_fix():
     out = degraded_reasons(
         **{
