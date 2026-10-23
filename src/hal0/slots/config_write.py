@@ -305,6 +305,91 @@ def check_default_uniqueness(
         )
 
 
+# ── model ↔ engine fit ──────────────────────────────────────────────────────
+
+
+def slot_is_flm(cfg: Any) -> bool:
+    """True when the slot drives the NPU / FastFlowLM engine.
+
+    Read off the slot's own scalars (``device`` normalised through
+    ``BACKEND_TO_DEVICE`` so a legacy ``backend``-era token still counts, or an
+    explicit ``provider = "flm"``) rather than a profile lookup: this runs on
+    the write path, which must not resolve (and possibly persist) a profile.
+    """
+    from hal0.model_meta import BACKEND_TO_DEVICE
+    from hal0.slot_config import slot_scalar_table
+
+    scalars = slot_scalar_table(_cfg_to_dict(cfg))
+    device = str(scalars.get("device") or "").strip().lower()
+    if BACKEND_TO_DEVICE.get(device, device) == "npu":
+        return True
+    return str(scalars.get("provider") or "").strip().lower() == "flm"
+
+
+def model_is_flm(model_id: str, registry: Any) -> bool | None:
+    """Whether ``model_id`` is an FLM (NPU) model; ``None`` when unknown.
+
+    Registry rows answer through the same ``provider`` -> backend-tag
+    derivation ``/api/models`` serves as ``provider_effective``. FLM-owned
+    ``<tag>-FLM`` ids that are installed host-side (never registry rows) are
+    FLM too. An id neither source knows is *unknown*, not "not FLM": the guard
+    only refuses a positively identified mismatch.
+    """
+    from hal0.model_meta import derive_model_provider
+
+    if registry is not None:
+        try:
+            model = registry.get(model_id)
+        except Exception:
+            model = None
+        if model is not None:
+            provider = getattr(model, "provider", None) or derive_model_provider(
+                getattr(model, "backends", None)
+            )
+            return provider == "flm"
+    from hal0.providers.flm import is_installed_flm_id
+
+    return True if is_installed_flm_id(model_id) else None
+
+
+def check_model_fits_slot(slot_name: str, cfg: Any, model_id: str | None, registry: Any) -> None:
+    """Refuse binding an FLM model to a non-FLM slot, or a non-FLM one to an FLM slot.
+
+    FLM models run only on the NPU (``flm`` runner, format ``flm``); the GPU/CPU
+    llama.cpp runners (format ``gguf``) cannot load them, and an FLM slot cannot
+    serve a GGUF. Without this the bind is accepted and the slot crash-loops at
+    load. ``cfg`` is the slot's config AFTER the write (merged), so a write that
+    changes ``device`` and ``model`` together is judged on the final pair.
+    Unknown models pass (see :func:`model_is_flm`).
+
+    Raises:
+        SlotConfigError: a positively identified engine mismatch (HTTP 400,
+            code ``slot.model_engine_mismatch``).
+    """
+    if not model_id:
+        return
+    flm_model = model_is_flm(str(model_id), registry)
+    if flm_model is None:
+        return
+    flm_slot = slot_is_flm(cfg)
+    if flm_model == flm_slot:
+        return
+    if flm_model:
+        msg = (
+            f"model {model_id!r} is an FLM (NPU) model and cannot run on slot "
+            f"{slot_name!r}, which is not an NPU slot"
+        )
+        hint = "pick a GGUF model for this slot, or bind the FLM model to an NPU slot"
+    else:
+        msg = f"model {model_id!r} is not an FLM model and cannot run on NPU slot {slot_name!r}"
+        hint = "pick an FLM model for this NPU slot"
+    raise SlotConfigError(
+        msg,
+        details={"slot": slot_name, "model_id": str(model_id), "hint": hint},
+        code="slot.model_engine_mismatch",
+    )
+
+
 def guard_slot_write_payload(updates: dict[str, Any]) -> None:
     """Run the slot-write PARTITION boundary over an in-process write payload.
 
@@ -414,8 +499,11 @@ __all__ = [
     "_read_slot_toml_dict",
     "_reconcile_device_profile",
     "check_default_uniqueness",
+    "check_model_fits_slot",
     "check_npu_exclusivity",
     "guard_slot_write_payload",
+    "model_is_flm",
     "reconcile_and_guard_slot_config",
     "reconcile_slot_updates",
+    "slot_is_flm",
 ]
