@@ -8,6 +8,10 @@
 // fields the operator can actually change, and posts exactly those four. There
 // is no tone: the Hermes Persona dataclass has no such field.
 //
+// `tools_allowed` is a list of fnmatch patterns matched against the admin MCP
+// tool names (ToolPolicy.allows in hal0/mcp/admin.py), so it is edited as text,
+// one pattern per line, not ticked off a static catalogue.
+//
 // flow-modals.jsx is a window-globals dash module (bare `Modal` /
 // `FieldInfoIcon` / `Icons` identifiers resolve off `window`), so the globals
 // are installed before the dynamic import — same pattern as
@@ -66,17 +70,6 @@ const PERSONA = {
   active: false,
 }
 
-// The enums route still ships `tones` (the backend catalogue predates this
-// modal's rewrite); the modal must ignore them.
-const ENUMS = {
-  tones: [{ id: 'operator', label: 'operator', desc: 'terse + technical' }],
-  tools: [
-    { id: 'read_file', label: 'read_file', cap: 'fs-read' },
-    { id: 'write_file', label: 'write_file', cap: 'fs-write' },
-    { id: 'shell_exec', label: 'shell_exec', cap: 'shell-exec' },
-  ],
-}
-
 const SLOTS = [
   { name: 'agent', type: 'llm', model: 'qwen', device: 'gpu' },
   { name: 'brain', type: 'llm', model: 'gemma', device: 'npu' },
@@ -86,15 +79,18 @@ const SLOTS = [
 let persona: Record<string, unknown>
 let list: { agent_id: string; active: string | null; personas: unknown[] }
 
+// Every root is unmounted in afterEach, so a failed assertion cannot leak a
+// mounted modal (and its QueryClient) into the next test.
+const roots: ReactDOMClient.Root[] = []
 function mount(el: React.ReactElement) {
   const host = document.createElement('div')
   document.body.appendChild(host)
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   const root = createRoot(host)
+  roots.push(root)
   act(() => {
     root.render(React.createElement(QueryClientProvider, { client: qc }, el))
   })
-  return { host, root }
 }
 
 // Let react-query resolve the faked fetches and React commit the result.
@@ -116,14 +112,28 @@ function field(match: (el: HTMLInputElement | HTMLTextAreaElement | HTMLSelectEl
 
 const byValue = (v: string) => field((el) => el.value === v)
 
-// The checkbox inside the <label> whose text is exactly `name`.
-function toolBox(name: string): HTMLInputElement {
-  const label = Array.from(document.querySelectorAll('label')).find(
-    (l) => l.textContent?.trim() === name,
+// The textarea in the form row whose label starts with `label`.
+function areaFor(label: string): HTMLTextAreaElement {
+  const row = Array.from(document.querySelectorAll('.form-row')).find((r) =>
+    r.querySelector('.form-lbl')?.textContent?.startsWith(label),
   )
-  const box = label?.querySelector<HTMLInputElement>('input[type="checkbox"]')
-  if (!box) throw new Error(`no checkbox labelled ${name}`)
-  return box
+  const area = row?.querySelector('textarea')
+  if (!area) throw new Error(`no textarea labelled ${label}`)
+  return area
+}
+
+// React tracks a controlled field's value, so a plain `.value =` assignment
+// is invisible to onChange; going through the prototype setter is what
+// actually exercises it (same workaround as model-drawer.test.tsx).
+const areaValueSetter = Object.getOwnPropertyDescriptor(
+  window.HTMLTextAreaElement.prototype,
+  'value',
+)!.set!
+function typeIntoArea(area: HTMLTextAreaElement, value: string) {
+  act(() => {
+    areaValueSetter.call(area, value)
+    area.dispatchEvent(new Event('input', { bubbles: true }))
+  })
 }
 
 function saveButton(): HTMLButtonElement {
@@ -141,21 +151,21 @@ beforeEach(() => {
   apiGet.mockImplementation(async (path: string) => {
     if (path === '/api/agents/hermes/personas/coder') return persona
     if (path === '/api/agents/hermes/personas') return list
-    if (path === '/api/agents/persona-enums') return ENUMS
     throw new Error(`unexpected GET ${path}`)
   })
   apiPut.mockImplementation(async () => persona)
 })
 
 afterEach(() => {
+  act(() => {
+    for (const root of roots.splice(0)) root.unmount()
+  })
   document.body.innerHTML = ''
 })
 
 describe('PersonaEditModal', () => {
   it('loads the persona and saves only API fields', async () => {
-    const { root } = mount(
-      React.createElement(PersonaEditModal, { open: true, personaId: 'coder', onClose: () => {} }),
-    )
+    mount(React.createElement(PersonaEditModal, { open: true, personaId: 'coder', onClose: () => {} }))
     await settle()
 
     expect(byValue('Coder')).toBeTruthy()
@@ -168,10 +178,15 @@ describe('PersonaEditModal', () => {
     // No tone anywhere: not a label, not a control, not in the copy.
     expect(document.body.textContent).not.toMatch(/tone/i)
     expect(document.querySelector('[aria-label*="tone" i]')).toBeNull()
-    expect(toolBox('read_file').checked).toBe(true)
-    expect(toolBox('write_file').checked).toBe(false)
 
-    act(() => toolBox('write_file').click())
+    // tools_allowed is seeded into the pattern textarea, one per line.
+    const patterns = areaFor('Allowed tool patterns')
+    expect(patterns.value).toBe('read_file')
+    expect(document.body.textContent).toContain(
+      'One pattern per line, matched against MCP tool names; * allows every tool.',
+    )
+
+    typeIntoArea(patterns, 'read_file\nwrite_file')
     act(() => saveButton().click())
     await settle()
 
@@ -182,12 +197,14 @@ describe('PersonaEditModal', () => {
       tools_allowed: ['read_file', 'write_file'],
       preferred_model: 'agent',
     })
-    act(() => root.unmount())
+    // The static tool catalogue is no longer read: its ids are not the MCP
+    // tool names tools_allowed is matched against.
+    expect(apiGet).not.toHaveBeenCalledWith('/api/agents/persona-enums')
   })
 
   it('falls back to the active persona when no personaId is passed', async () => {
     list = { agent_id: 'hermes', active: 'coder', personas: [] }
-    const { root } = mount(React.createElement(PersonaEditModal, { open: true, onClose: () => {} }))
+    mount(React.createElement(PersonaEditModal, { open: true, onClose: () => {} }))
     await settle()
 
     expect(apiGet).toHaveBeenCalledWith('/api/agents/hermes/personas')
@@ -199,62 +216,61 @@ describe('PersonaEditModal', () => {
       '/api/agents/hermes/personas/coder',
       expect.objectContaining({ display_name: 'Coder' }),
     )
-    act(() => root.unmount())
   })
 
   it('does not load anything while closed', async () => {
-    const { root } = mount(
-      React.createElement(PersonaEditModal, { open: false, personaId: 'coder', onClose: () => {} }),
-    )
+    mount(React.createElement(PersonaEditModal, { open: false, personaId: 'coder', onClose: () => {} }))
     await settle()
     expect(apiGet).not.toHaveBeenCalled()
     expect(document.querySelector('[role="dialog"]')).toBeNull()
-    act(() => root.unmount())
   })
 
-  it('a wildcard persona shows every tool ticked and posts ["*"] unchanged', async () => {
+  it('a wildcard persona shows * and posts ["*"] unchanged', async () => {
     persona = { ...PERSONA, tools_allowed: ['*'] }
-    const { root } = mount(
-      React.createElement(PersonaEditModal, { open: true, personaId: 'coder', onClose: () => {} }),
-    )
+    mount(React.createElement(PersonaEditModal, { open: true, personaId: 'coder', onClose: () => {} }))
     await settle()
 
-    for (const id of ['read_file', 'write_file', 'shell_exec']) {
-      expect(toolBox(id).checked).toBe(true)
-    }
+    expect(areaFor('Allowed tool patterns').value).toBe('*')
     act(() => saveButton().click())
     await settle()
     expect(apiPut).toHaveBeenLastCalledWith(
       '/api/agents/hermes/personas/coder',
       expect.objectContaining({ tools_allowed: ['*'] }),
     )
-    act(() => root.unmount())
   })
 
-  it('unticking a tool on a wildcard persona posts the explicit remainder', async () => {
+  it('posts the non-empty trimmed lines as patterns', async () => {
     persona = { ...PERSONA, tools_allowed: ['*'] }
-    const { root } = mount(
-      React.createElement(PersonaEditModal, { open: true, personaId: 'coder', onClose: () => {} }),
-    )
+    mount(React.createElement(PersonaEditModal, { open: true, personaId: 'coder', onClose: () => {} }))
     await settle()
 
-    act(() => toolBox('shell_exec').click())
-    expect(toolBox('shell_exec').checked).toBe(false)
-    expect(toolBox('read_file').checked).toBe(true)
+    typeIntoArea(areaFor('Allowed tool patterns'), '  slot_*  \n\nmodel_pull\n   \nmemory_?et\n')
     act(() => saveButton().click())
     await settle()
     expect(apiPut).toHaveBeenLastCalledWith(
       '/api/agents/hermes/personas/coder',
-      expect.objectContaining({ tools_allowed: ['read_file', 'write_file'] }),
+      expect.objectContaining({ tools_allowed: ['slot_*', 'model_pull', 'memory_?et'] }),
     )
-    act(() => root.unmount())
+  })
+
+  it('a cleared pattern box posts ["*"], never an empty list', async () => {
+    mount(React.createElement(PersonaEditModal, { open: true, personaId: 'coder', onClose: () => {} }))
+    await settle()
+
+    for (const blank of ['', '  \n \n']) {
+      typeIntoArea(areaFor('Allowed tool patterns'), blank)
+      act(() => saveButton().click())
+      await settle()
+      expect(apiPut).toHaveBeenLastCalledWith(
+        '/api/agents/hermes/personas/coder',
+        expect.objectContaining({ tools_allowed: ['*'] }),
+      )
+    }
   })
 
   it('keeps a preferred_model that is not an llm slot selectable', async () => {
     persona = { ...PERSONA, preferred_model: 'retired-slot' }
-    const { root } = mount(
-      React.createElement(PersonaEditModal, { open: true, personaId: 'coder', onClose: () => {} }),
-    )
+    mount(React.createElement(PersonaEditModal, { open: true, personaId: 'coder', onClose: () => {} }))
     await settle()
 
     const slot = field((el) => el.tagName === 'SELECT') as HTMLSelectElement
@@ -266,6 +282,5 @@ describe('PersonaEditModal', () => {
       '/api/agents/hermes/personas/coder',
       expect.objectContaining({ preferred_model: 'retired-slot' }),
     )
-    act(() => root.unmount())
   })
 })

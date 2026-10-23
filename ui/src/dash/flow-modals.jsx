@@ -1,12 +1,7 @@
 // hal0 dashboard — FirstRun + Backends + Agent flow modals
 // Skip confirm, post-install hero, backend install/uninstall, FLM .deb guide, persona edit, namespace reset
 
-import {
-  useAgentPersona,
-  useAgentPersonaEnums,
-  useAgentPersonas,
-  usePersonaUpdate,
-} from '@/api/hooks/useAgents'
+import { useAgentPersona, useAgentPersonas, usePersonaUpdate } from '@/api/hooks/useAgents'
 import { useNpuLoad, useNpuUnload } from '@/api/hooks/useBackends'
 import { useSlots } from '@/api/hooks/useSlots'
 
@@ -127,36 +122,26 @@ function PersonaEditModal({ open, onClose, personaId }) {
   // acts on; every other field of the body is ignored server-side.
   const [displayName, setDisplayName] = useStateFM("");
   const [systemPrompt, setSystemPrompt] = useStateFM("");
-  const [toolsAllowed, setToolsAllowed] = useStateFM([]);
+  const [toolPatterns, setToolPatterns] = useStateFM("");
   const [slot, setSlot] = useStateFM("");
-
-  // #226: the tool catalogue comes from /api/agents/persona-enums so the
-  // picker tracks the server-side enum without UI patches. Gate the fetch on
-  // `open` so closed modals don't pre-warm the catalogue on every parent
-  // render (review: PR #364 medium).
-  const enums = useAgentPersonaEnums({ enabled: open });
-  const tools = enums.data?.tools ?? [];
 
   useEffectFM(() => {
     if (open && persona) {
       setDisplayName(persona.display_name || "");
       setSystemPrompt(persona.system_prompt || "");
-      setToolsAllowed(persona.tools_allowed || []);
+      setToolPatterns((persona.tools_allowed || []).join("\n"));
       setSlot(persona.preferred_model || "");
     }
   }, [open, persona]);
 
-  // `["*"]` means every tool: show each box ticked, and keep posting `["*"]`
-  // until the operator unticks one — then it becomes the explicit list.
-  const allTools = toolsAllowed.includes("*");
-  const toggleTool = (id) => {
-    if (allTools) {
-      setToolsAllowed(tools.map(t => t.id).filter(x => x !== id));
-    } else if (toolsAllowed.includes(id)) {
-      setToolsAllowed(toolsAllowed.filter(x => x !== id));
-    } else {
-      setToolsAllowed([...toolsAllowed, id]);
-    }
+  // tools_allowed is a list of fnmatch patterns matched against the admin MCP
+  // tool names (ToolPolicy.allows, hal0/mcp/admin.py) — not a pick-list, so it
+  // is edited as text. Blank lines drop out, and an empty result posts ["*"]
+  // so the stored list says what it means rather than relying on ToolPolicy
+  // reading an empty list as "*".
+  const toolsAllowed = () => {
+    const patterns = toolPatterns.split("\n").map(l => l.trim()).filter(Boolean);
+    return patterns.length ? patterns : ["*"];
   };
 
   // Routes to the *live* configured slots (GET /api/slots), not the static
@@ -194,7 +179,7 @@ function PersonaEditModal({ open, onClose, personaId }) {
                     body: {
                       display_name: displayName.trim(),
                       system_prompt: systemPrompt,
-                      tools_allowed: toolsAllowed,
+                      tools_allowed: toolsAllowed(),
                       preferred_model: slot,
                     },
                   });
@@ -263,26 +248,20 @@ function PersonaEditModal({ open, onClose, personaId }) {
           <div className="form-section">Tool set</div>
           <div className="form-row">
             <div className="form-lbl">
-              <span>Allowed tools</span>
-              <FieldInfoIcon description="subset of OmniRouter tools this persona can call" />
+              <span>Allowed tool patterns</span>
+              <FieldInfoIcon description="fnmatch patterns over MCP tool names · a tool outside every pattern is hidden from this persona" />
             </div>
-            <div className="form-ctl" style={{display: "flex", flexWrap: "wrap", gap: 8}}>
-              {enums.isLoading && (
-                <span className="mono" style={{fontSize: 11, color: "var(--fg-4)"}}>Loading tools…</span>
-              )}
-              {enums.isError && (
-                <span className="mono" style={{fontSize: 11, color: "var(--err, #c66)"}}>Tools unavailable</span>
-              )}
-              {tools.map(t => (
-                <label key={t.id} className="checkbox-row">
-                  <input
-                    type="checkbox"
-                    checked={allTools || toolsAllowed.includes(t.id)}
-                    onChange={() => toggleTool(t.id)}
-                  />
-                  <span className="mono">{t.label}</span>
-                </label>
-              ))}
+            <div className="form-ctl">
+              <textarea
+                className="input mono"
+                value={toolPatterns}
+                onChange={e => setToolPatterns(e.target.value)}
+                rows={4}
+                spellCheck={false}
+                placeholder="*"
+                style={{resize: "vertical", minHeight: 72}}
+              />
+              <div className="hint">One pattern per line, matched against MCP tool names; <span className="mono">*</span> allows every tool.</div>
             </div>
           </div>
         </>
