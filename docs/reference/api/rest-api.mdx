@@ -169,7 +169,7 @@ by anyone who can reach the API):
   box). Deleting `HAL0_ADMIN_KEY` would disarm every future login and deleting
   `HAL0_PORT`/`HAL0_UI_DIST` would break the service on next restart — this is the
   control introduced after #1450.
-- **Process-control names** (1.6.0, #2936): a name that changes how processes load
+- **Process-control names** (1.6.0, #2936 / #2940): a name that changes how processes load
   code or find programs is refused on POST/PUT with `403 secret.protected`
   (`details.reason: "process_control"`), because `api.env` is hal0-api's own
   environment and every process it starts inherits it. Refused: `PATH`, `HOME`,
