@@ -503,6 +503,11 @@ def migrate_hashed_units(
                 _run(run, ["systemctl", "disable", "--now", GATEWAY_UNIT])
             with contextlib.suppress(OSError):
                 unit_path.unlink()
+        elif not masked and old_text is not None:
+            # Put a pre-existing canonical unit back as it was, so a retry
+            # still sees it stale and restarts it after the rewrite.
+            with contextlib.suppress(OSError):
+                _write_unit(unit_path, old_text)
         with contextlib.suppress(OSError, subprocess.SubprocessError):
             _run(run, ["systemctl", "daemon-reload"])
         for path in hashed:

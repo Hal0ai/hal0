@@ -838,3 +838,15 @@ def test_install_reports_a_missing_loginctl(tmp_path: Path) -> None:
     )
     assert out.unit_rewritten and not out.linger_enabled
     assert "no loginctl" in out.message
+
+
+def test_a_rollback_restores_a_pre_existing_canonical_unit(tmp_path: Path) -> None:
+    _hashed_unit(tmp_path)
+    canonical = _old_unit(tmp_path)
+    before = canonical.read_text()
+    sc = UnitSystemctl(
+        {HASHED: ("disabled", False), CANON: ("enabled", True)}, fail=["systemctl", "stop"]
+    )
+    with pytest.raises(regen.GatewayRegenError):
+        _migrate(tmp_path, sc)
+    assert canonical.read_text() == before
