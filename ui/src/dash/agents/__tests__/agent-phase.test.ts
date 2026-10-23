@@ -214,6 +214,15 @@ describe('deriveCardModel: phase', () => {
     expect(m.commands).toEqual({ install: 'sudo hal0 agent install hermes', upgrade: null, uninstall: null })
   })
 
+  it('the overview wins over a stale agents-list record that still says installed', () => {
+    const m = deriveCardModel({
+      ...READY,
+      overview: { name: 'hermes', kind: 'daemon', installed: false, pin: { ref: PIN_REF } },
+    })
+    expect(m.phase).toBe('not_installed')
+    expect(m.statusLabel).toBe('not installed')
+  })
+
   it('an agent outside the bundled set is a roadmap card', () => {
     const m = deriveCardModel({ ...READY, record: null, agent: 'qwen' })
     expect(m.phase).toBe('roadmap')
@@ -221,7 +230,7 @@ describe('deriveCardModel: phase', () => {
     expect(m.statusLabel).toBe('on the roadmap')
   })
 
-  it('gateway off on purpose is not degraded', () => {
+  it('a gateway disabled on purpose sets gatewayOff and adds no reasons', () => {
     const m = deriveCardModel({
       ...READY,
       overview: {
@@ -270,6 +279,15 @@ describe('deriveCardModel: version', () => {
     expect(m.version).toEqual({ label: 'v0.22.2', sub: 'py 3.14 · 0123456', pinLabel: 'fedcba9' })
     expect(m.updateAvailable).toBe(false)
     expect(m.lifecycle).toEqual({ primary: 'repair', previous: 'v0.22.1' })
+  })
+
+  it('prefers the pin describe, else its short ref', () => {
+    const described = {
+      ...READY_OVERVIEW,
+      version: { ...READY_OVERVIEW.version, pin: { ref: PIN_REF, describe: 'v0.22.3' } },
+    }
+    expect(deriveCardModel({ ...READY, overview: described }).version.pinLabel).toBe('v0.22.3')
+    expect(deriveCardModel({ ...READY, overview: READY_OVERVIEW }).version.pinLabel).toBe('fedcba9')
   })
 
   it('falls back to the short ref when describe is absent', () => {
@@ -324,6 +342,14 @@ describe('deriveCardModel: chips and reach', () => {
     expect(deriveCardModel(READY).reach.desktop).toBeNull()
   })
 
+  it('only the Hermes card has a desktop link', () => {
+    const on = urls({ hermes: 'https://hermes.example', hermes_enabled: true })
+    const piWithLink = { ...PI_OVERVIEW, links: { desktop: 'https://hermes.example/desktop' } }
+    expect(deriveCardModel({ ...PI, overview: piWithLink, urls: on }).reach.desktop).toBeNull()
+    expect(deriveCardModel({ ...READY, record: null, agent: 'qwen', urls: on }).reach.desktop).toBeNull()
+    expect(deriveCardModel({ ...READY, urls: on }).reach.desktop).toBe('https://hermes.example')
+  })
+
   it('carries the last tool when the caller has one', () => {
     expect(deriveCardModel(READY).lastTool).toBeNull()
     const m = deriveCardModel({ ...READY, lastTool: { name: 'terminal', at: 1_700_000_000 } })
@@ -375,7 +401,6 @@ describe('deriveCardModel: lore', () => {
       'speech · stt',
       'image-gen',
       'memory',
-      'vision',
       'embeddings',
     ])
     expect(m.lore.skills.every((s) => !s.lit && s.note === '· no slot')).toBe(true)
@@ -385,8 +410,7 @@ describe('deriveCardModel: lore', () => {
     const caps = {
       selections: {
         img: { img: { enabled: true } },
-        embed: { embed: { enabled: false }, rerank: { enabled: true } },
-        vision: { vision: { enabled: false } },
+        embed: { embed: { enabled: true }, rerank: { enabled: false } },
       },
     }
     const m = deriveCardModel({ ...READY, overview: READY_OVERVIEW, caps })
@@ -395,11 +419,29 @@ describe('deriveCardModel: lore', () => {
       ['speech · stt', true],
       ['image-gen', true],
       ['memory', true],
-      ['vision', false],
       ['embeddings', true],
     ])
-    expect(m.lore.skills.find((s) => s.label === 'vision')?.note).toBe('· no slot')
     expect(m.lore.skills.find((s) => s.label === 'image-gen')?.note).toBeNull()
+  })
+
+  it('embeddings needs the embed child, a reranker alone does not light it', () => {
+    const rerankOnly = { selections: { embed: { embed: { enabled: false }, rerank: { enabled: true } } } }
+    const m = deriveCardModel({ ...READY, overview: READY_OVERVIEW, caps: rerankOnly })
+    const embeddings = m.lore.skills.find((s) => s.label === 'embeddings')
+    expect(embeddings?.lit).toBe(false)
+    expect(embeddings?.note).toBe('· no slot')
+    const noChild = { selections: { embed: { rerank: { enabled: true } } } }
+    expect(
+      deriveCardModel({ ...READY, overview: READY_OVERVIEW, caps: noChild }).lore.skills.find(
+        (s) => s.label === 'embeddings',
+      )?.lit,
+    ).toBe(false)
+  })
+
+  it('image-gen needs the img child of the img slot', () => {
+    const wrongSlot = { selections: { voice: { img: { enabled: true } } } }
+    const m = deriveCardModel({ ...READY, overview: READY_OVERVIEW, caps: wrongSlot })
+    expect(m.lore.skills.find((s) => s.label === 'image-gen')?.lit).toBe(false)
   })
 
   it('voice skills need voice_wire ok, memory needs a provider', () => {

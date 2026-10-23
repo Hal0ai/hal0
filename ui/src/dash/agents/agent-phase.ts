@@ -209,6 +209,9 @@ function derivePhase(
   const { record, overview, slot } = input
   if (!BUNDLED.has(agent)) return 'roadmap'
   if (jobActive(input.job) || jobActive(overview?.job)) return 'working'
+  // The overview is the fresher word: an uninstall can leave the agents-list
+  // record behind for one poll.
+  if (overview?.installed === false) return 'not_installed'
 
   let phase: CardPhase = overview?.phase ?? phaseFromRecord(record, isPi)
   // Pi never becomes ready or serving, whatever a stray signal says.
@@ -247,7 +250,7 @@ function deriveVersion(overview: AgentOverview | null, isPi: boolean): CardModel
   return {
     label: text(live.describe) ?? ref ?? NO_VALUE,
     sub: sub || NO_VALUE,
-    pinLabel: shortRef(pin.ref) ?? NO_VALUE,
+    pinLabel: text(pin.describe) ?? shortRef(pin.ref) ?? NO_VALUE,
   }
 }
 
@@ -258,9 +261,12 @@ function previousRelease(overview: AgentOverview | null): string | null {
 
 // ── Lore ───────────────────────────────────────────────────────────────
 
-function capabilityEnabled(caps: CapabilitiesLike | null, slot: string): boolean {
-  const children = caps?.selections?.[slot]
-  return !!children && Object.values(children).some((c) => c?.enabled === true)
+/**
+ * Whether `selections.<slot>.<child>` is enabled. Only the named child counts:
+ * the `embed` slot also holds `rerank`, and a reranker alone is not embeddings.
+ */
+function capabilityEnabled(caps: CapabilitiesLike | null, slot: string, child: string): boolean {
+  return caps?.selections?.[slot]?.[child]?.enabled === true
 }
 
 function ability(name: string, unlocked: boolean, locked: string): LoreAbility {
@@ -303,10 +309,9 @@ function hermesLore(
     skills: [
       skill('voice · tts', voiceWired),
       skill('speech · stt', voiceWired),
-      skill('image-gen', capabilityEnabled(caps, 'img')),
+      skill('image-gen', capabilityEnabled(caps, 'img', 'img')),
       skill('memory', !!text(provision?.memory_provider)),
-      skill('vision', capabilityEnabled(caps, 'vision')),
-      skill('embeddings', capabilityEnabled(caps, 'embed')),
+      skill('embeddings', capabilityEnabled(caps, 'embed', 'embed')),
     ],
   }
 }
@@ -341,7 +346,13 @@ function deriveCommands(agent: string, overview: AgentOverview | null): CardMode
   }
 }
 
-function deriveDesktop(overview: AgentOverview | null, urls: ConfigUrls | null): string | null {
+/** The Hermes desktop link; only the Hermes card has one. */
+function deriveDesktop(
+  agent: string,
+  overview: AgentOverview | null,
+  urls: ConfigUrls | null,
+): string | null {
+  if (agent !== 'hermes') return null
   return (
     text(overview?.links?.desktop) ?? (urls?.hermes_enabled ? text(urls.hermes) : undefined) ?? null
   )
@@ -382,7 +393,7 @@ export function deriveCardModel(input: CardModelInput): CardModel {
         lit: overview?.api_server?.healthy === true,
         profiles: strings(overview?.api_server?.profiles),
       },
-      desktop: deriveDesktop(overview, urls),
+      desktop: deriveDesktop(agent, overview, urls),
     },
     lastTool: input.lastTool ?? null,
     lore:
