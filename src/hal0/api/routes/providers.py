@@ -20,6 +20,7 @@ working alongside the reactive editor.
 
 from __future__ import annotations
 
+import asyncio
 import os
 import re
 from pathlib import Path
@@ -29,7 +30,7 @@ import structlog
 from fastapi import APIRouter, Request
 from pydantic import BaseModel, Field, ValidationError
 
-from hal0.api._env_store import is_process_control_env, upsert_env_value
+from hal0.api._env_store import TlsTrustError, is_process_control_env, upsert_env_value
 from hal0.api._redact import redact_config
 from hal0.api.middleware.error_codes import Hal0Error
 from hal0.config import paths
@@ -579,6 +580,12 @@ def _write_credential_to_api_env(api_env: Path, key: str, value: str) -> None:
     """
     try:
         upsert_env_value(api_env, key, value)
+    except TlsTrustError as exc:
+        raise ProviderCredentialError(
+            f"key {key!r} selects the CA bundle outbound TLS clients trust, so it is only "
+            f"accepted as a root-owned path hal0 cannot write: {exc.reason}",
+            details={"key": key, "reason": "tls_trust"},
+        ) from exc
     except ValueError as exc:
         # Writer-level guard tripped (e.g. newline in value) — surface as
         # a 400 rather than a 500.
@@ -674,7 +681,7 @@ async def write_provider_credential(
 
     api_env = paths.etc() / "api.env"
     try:
-        _write_credential_to_api_env(api_env, key, body.value)
+        await asyncio.to_thread(_write_credential_to_api_env, api_env, key, body.value)
     except ProviderCredentialError:
         raise
     except OSError as exc:

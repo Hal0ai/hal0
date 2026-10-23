@@ -278,42 +278,49 @@ def rotate_api_env_key(tier: str) -> dict[str, object]:
 
     new_key = generate_service_key()
 
-    try:
-        existing = target.read_text(encoding="utf-8")
-    except OSError:
-        existing = ""
+    # Same lock the /api/secrets and credentials writers hold, so a rotation
+    # cannot interleave with a save and drop one of the two (#2941).
+    from hal0.api._env_store import api_env_lock
 
-    content = _upsert_env_line(existing, env_name, new_key)
-
-    # Preserve the existing owner/group (never silently change who owns the
-    # config file); force 0640 because it now carries a live secret.
-    prev_uid = prev_gid = -1
-    with contextlib.suppress(OSError):
-        st = target.stat()
-        prev_uid, prev_gid = st.st_uid, st.st_gid
-
-    tmp_path: str | None = None
-    try:
-        fd, tmp_path = tempfile.mkstemp(prefix=".api.env.", suffix=".tmp", dir=str(target.parent))
+    with api_env_lock(target):
         try:
-            with os.fdopen(fd, "w", encoding="utf-8") as fh:
-                fh.write(content)
-                fh.flush()
-                os.fsync(fh.fileno())
-        except BaseException:
-            with contextlib.suppress(OSError):
-                os.close(fd)
-            raise
-        os.chmod(tmp_path, _API_ENV_MODE)
-        if prev_uid != -1:
-            with contextlib.suppress(OSError):
-                os.chown(tmp_path, prev_uid, prev_gid)
-        os.replace(tmp_path, str(target))
-        tmp_path = None  # rename succeeded; don't clean up in finally
-    finally:
-        if tmp_path is not None:
-            with contextlib.suppress(OSError):
-                os.unlink(tmp_path)
+            existing = target.read_text(encoding="utf-8")
+        except OSError:
+            existing = ""
+
+        content = _upsert_env_line(existing, env_name, new_key)
+
+        # Preserve the existing owner/group (never silently change who owns the
+        # config file); force 0640 because it now carries a live secret.
+        prev_uid = prev_gid = -1
+        with contextlib.suppress(OSError):
+            st = target.stat()
+            prev_uid, prev_gid = st.st_uid, st.st_gid
+
+        tmp_path: str | None = None
+        try:
+            fd, tmp_path = tempfile.mkstemp(
+                prefix=".api.env.", suffix=".tmp", dir=str(target.parent)
+            )
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                    fh.write(content)
+                    fh.flush()
+                    os.fsync(fh.fileno())
+            except BaseException:
+                with contextlib.suppress(OSError):
+                    os.close(fd)
+                raise
+            os.chmod(tmp_path, _API_ENV_MODE)
+            if prev_uid != -1:
+                with contextlib.suppress(OSError):
+                    os.chown(tmp_path, prev_uid, prev_gid)
+            os.replace(tmp_path, str(target))
+            tmp_path = None  # rename succeeded; don't clean up in finally
+        finally:
+            if tmp_path is not None:
+                with contextlib.suppress(OSError):
+                    os.unlink(tmp_path)
 
     # Live effect: the auth hot path reads os.environ per request, so the new
     # key is honoured on the very next request without a restart.

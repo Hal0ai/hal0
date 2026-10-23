@@ -21,9 +21,13 @@ systemd's ``EnvironmentFile=`` parser sees the literal secret verbatim.
 from __future__ import annotations
 
 import contextlib
+import fcntl
 import os
 import re
+import stat
 import tempfile
+import threading
+from collections.abc import Iterator
 from pathlib import Path
 
 from hal0.config import paths
@@ -57,7 +61,6 @@ PROCESS_CONTROL_ENV_NAMES = frozenset(
         "GCONV_PATH",
         "PERL5LIB",
         "NODE_PATH",
-        "NODE_EXTRA_CA_CERTS",
         # bash runs ``PS4`` (command substitution included) on every xtrace
         # line, and SHELLOPTS/BASHOPTS can switch xtrace on in a child shell.
         "SHELLOPTS",
@@ -73,6 +76,28 @@ PROCESS_CONTROL_ENV_NAMES = frozenset(
 #: build's npm) and git (``GIT_SSH_COMMAND`` and the rest).
 PROCESS_CONTROL_ENV_PREFIXES = ("LD_", "DYLD_", "PYTHON", "UV_", "PIP_", "NPM_CONFIG_", "GIT_")
 
+#: Names that choose which CA bundle outbound TLS clients trust (#2941). A
+#: bundle the ``hal0`` user can write lets a man-in-the-middle read every
+#: token hal0 sends upstream (HF, provider keys), so these are stored only as
+#: a path hal0 cannot modify (:func:`tls_trust_violation`) -- not denied
+#: outright, because a corporate-proxy box needs a custom CA.
+TLS_TRUST_ENV_NAMES = frozenset(
+    {
+        "SSL_CERT_FILE",
+        "SSL_CERT_DIR",
+        "REQUESTS_CA_BUNDLE",
+        "CURL_CA_BUNDLE",
+        "NODE_EXTRA_CA_CERTS",
+    }
+)
+
+#: The uid that must own a trusted path. Module state only so tests can stand
+#: in for root; production code never changes it.
+_TRUSTED_UID = 0
+#: Directory at and above which a path is taken as trusted without inspection.
+#: ``None`` checks every component from ``/``. Tests point it at ``tmp_path``.
+_TRUST_ANCHOR: Path | None = None
+
 # A key ``upsert_env_value`` will write: an env-var name and nothing else, so a
 # caller can never smuggle a line break (and a second variable) in the key.
 _ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -82,6 +107,166 @@ def is_process_control_env(key: str) -> bool:
     """True when ``key`` changes how processes run, not what they authenticate with."""
     name = key.strip().upper()
     return name in PROCESS_CONTROL_ENV_NAMES or name.startswith(PROCESS_CONTROL_ENV_PREFIXES)
+
+
+def is_tls_trust_env(key: str) -> bool:
+    """True when ``key`` selects the CA bundle or directory TLS clients trust."""
+    return key.strip().upper() in TLS_TRUST_ENV_NAMES
+
+
+#: Bounds on what one TLS trust value may make the check do: it runs in a
+#: worker thread, but a hostile value must not buy unbounded work.
+_TLS_MAX_VALUE_CHARS = 4096
+_TLS_MAX_LIST_ENTRIES = 16
+_TLS_MAX_SYMLINK_HOPS = 40
+_TLS_MAX_DIR_ENTRIES = 2000
+
+
+class TlsTrustError(ValueError):
+    """A TLS trust variable's value is not a path hal0 cannot rewrite (#2941)."""
+
+    def __init__(self, key: str, reason: str) -> None:
+        super().__init__(f"{key!r} is a TLS trust setting and cannot be stored: {reason}")
+        self.key = key
+        self.reason = reason
+
+
+# CodeQL note: `os.lstat`, `os.readlink` and `os.scandir` below report
+# py/path-injection (the rule this repo already carries standing alerts for).
+# The operator-supplied path is the whole point: the check inspects metadata
+# (owner, mode, type) to decide whether to store it, and never opens, reads,
+# creates or modifies it, so a hostile value can at worst make the check say no.
+def _node_violation(node: Path, st: os.stat_result) -> str | None:
+    if st.st_uid != _TRUSTED_UID:
+        return "the path, a symlink hop or a parent directory is not root-owned"
+    if not stat.S_ISLNK(st.st_mode) and st.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+        return "the path or a parent directory is group- or world-writable"
+    return None
+
+
+def _walk_trusted(value: str) -> tuple[Path | None, str | None]:
+    """Resolve absolute ``value`` by hand, vetting every component and symlink hop.
+
+    Each component, ``/`` included, is ``lstat``-ed: it must be owned by the
+    trusted uid and, unless it is a symlink (whose own mode is meaningless),
+    not writable by group or others. A symlink is read and its target spliced
+    into the remaining path (absolute targets restart from ``/``), so every
+    intermediate hop is vetted, not only the first link and the final target:
+    whoever can rewrite any hop can repoint the whole path. Returns the
+    resolved path or the refusal reason.
+    """
+    anchor = _TRUST_ANCHOR
+    skipped = {anchor, *anchor.parents} if anchor is not None else set()
+
+    def vet(node: Path) -> tuple[os.stat_result | None, str | None]:
+        try:
+            st = os.lstat(node)
+        except (OSError, ValueError):
+            return None, "the path does not exist or cannot be inspected"
+        if node in skipped:
+            return st, None
+        return st, _node_violation(node, st)
+
+    cur = Path("/")
+    _, reason = vet(cur)
+    if reason is not None:
+        return None, reason
+    parts = list(Path(value).parts[1:])
+    hops = 0
+    while parts:
+        name = parts.pop(0)
+        if name in ("", "."):
+            continue
+        if name == "..":
+            cur = cur.parent
+            continue
+        nxt = cur / name
+        st, reason = vet(nxt)
+        if reason is not None:
+            return None, reason
+        assert st is not None
+        if stat.S_ISLNK(st.st_mode):
+            hops += 1
+            if hops > _TLS_MAX_SYMLINK_HOPS:
+                return None, "too many symlink hops"
+            try:
+                target = Path(os.readlink(nxt))
+            except OSError:
+                return None, "the path cannot be inspected"
+            if target.is_absolute():
+                cur = Path("/")
+                parts = [*target.parts[1:], *parts]
+            else:
+                parts = [*target.parts, *parts]
+            continue
+        cur = nxt
+    return cur, None
+
+
+def _tls_path_violation(value: str, *, want_dir: bool, any_type: bool = False) -> str | None:
+    if not value or value != value.strip() or "\x00" in value:
+        return "the value must be an absolute path"
+    path = Path(value)
+    if not path.is_absolute() or ".." in path.parts:
+        return "the value must be an absolute path with no '..' component"
+    resolved, reason = _walk_trusted(value)
+    if reason is not None or resolved is None:
+        return reason or "the path does not exist"
+    try:
+        st = os.lstat(resolved)
+    except OSError:
+        return "the path does not exist or cannot be inspected"
+    if any_type:
+        return None
+    if not (stat.S_ISDIR(st.st_mode) if want_dir else stat.S_ISREG(st.st_mode)):
+        return "the path must be a directory" if want_dir else "the path must be a regular file"
+    if not want_dir:
+        return None
+    # A directory is only as trustworthy as what is in it: vet every entry
+    # (hash-named symlinks included) the same way.
+    try:
+        with os.scandir(resolved) as it:
+            for count, entry in enumerate(it, 1):
+                if count > _TLS_MAX_DIR_ENTRIES:
+                    return "the directory holds too many entries to vet"
+                reason = _tls_path_violation(
+                    str(resolved / entry.name), want_dir=False, any_type=True
+                )
+                if reason is not None:
+                    return f"a directory entry fails the check: {reason}"
+    except OSError:
+        return "the directory cannot be listed"
+    return None
+
+
+def tls_trust_violation(key: str, value: str) -> str | None:
+    """Why ``value`` may not be stored under TLS trust variable ``key``, or None (#2941).
+
+    Accepted: an absolute path to an existing root-owned file (a directory for
+    ``SSL_CERT_DIR``, where a ``:`` list is accepted if every entry qualifies),
+    not group- or world-writable, under parents that are root-owned and not
+    group- or world-writable. Symlinks are followed hop by hop and every hop,
+    its directory and the final target must pass; for ``SSL_CERT_DIR`` so must
+    each entry of the directory. Any other key returns None. The reason never
+    repeats the value. Mode and ownership only: ACLs, mount options and file
+    attributes are not inspected. Blocking filesystem work: call it from a
+    thread inside the event loop.
+    """
+    name = key.strip().upper()
+    if name not in TLS_TRUST_ENV_NAMES:
+        return None
+    if len(value) > _TLS_MAX_VALUE_CHARS:
+        return "the value is too long"
+    if name == "SSL_CERT_DIR":
+        entries = value.split(":")
+        if len(entries) > _TLS_MAX_LIST_ENTRIES:
+            return "the list has too many entries"
+        for entry in entries:
+            reason = _tls_path_violation(entry, want_dir=True)
+            if reason is not None:
+                return reason
+        return None
+    return _tls_path_violation(value, want_dir=False)
 
 
 def _escape(value: str) -> str:
@@ -102,6 +287,51 @@ def _line_targets_key(line: str, key: str) -> bool:
         or stripped.startswith(f"# {key}=")
         or stripped.startswith(f"#{key}=")
     )
+
+
+_API_ENV_THREAD_LOCK = threading.RLock()
+
+
+@contextlib.contextmanager
+def api_env_lock(api_env: Path) -> Iterator[None]:
+    """Serialise read-modify-write cycles on ``api_env``.
+
+    The routes call the writers from worker threads, so a module lock keeps two
+    saves in this process from both reading the old file and the second rename
+    dropping the first's key. An ``flock`` on a sidecar file in the same
+    directory extends that to other holders of the file (``oauth/store.py``,
+    ``service_identity.rotate_api_env_key``, a second hal0 process). The
+    sidecar is the lock, not ``api.env`` itself, because every write replaces
+    ``api.env``'s inode. If the sidecar cannot be opened the thread lock still
+    holds.
+    """
+    with _API_ENV_THREAD_LOCK:
+        fd: int | None = None
+        try:
+            api_env.parent.mkdir(parents=True, exist_ok=True)
+            fd = os.open(
+                api_env.parent / f".{api_env.name}.lock",
+                os.O_RDWR | os.O_CREAT | getattr(os, "O_CLOEXEC", 0),
+                0o600,
+            )
+            if os.geteuid() == 0:
+                # A root-created sidecar must stay openable by the service user,
+                # or locking silently degrades to the thread lock for hal0-api.
+                with contextlib.suppress(OSError):
+                    st = api_env.stat()
+                    os.fchown(fd, st.st_uid, st.st_gid)
+            fcntl.flock(fd, fcntl.LOCK_EX)
+        except OSError:
+            if fd is not None:
+                os.close(fd)
+            fd = None
+        try:
+            yield
+        finally:
+            if fd is not None:
+                with contextlib.suppress(OSError):
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+                os.close(fd)
 
 
 def _atomic_write(api_env: Path, text: str) -> None:
@@ -155,7 +385,9 @@ def upsert_env_value(api_env: Path, key: str, value: str) -> None:
     The same goes for the key: a loader or interpreter variable
     (:func:`is_process_control_env`) is refused here as well as at the
     routes, so no writer of this file can plant one (#2936). Deleting such a
-    line stays allowed, so an existing one can be removed.
+    line stays allowed, so an existing one can be removed. A TLS trust
+    variable (:func:`tls_trust_violation`) is refused unless its value is a
+    root-owned path hal0 cannot write (#2941).
     """
     if not _ENV_KEY_RE.match(key):
         raise ValueError("env key must be an env-var name (letters, digits, underscores)")
@@ -163,28 +395,32 @@ def upsert_env_value(api_env: Path, key: str, value: str) -> None:
         raise ValueError(f"{key!r} controls how processes run and cannot be stored in api.env")
     if _LINE_BREAK_CHARS.intersection(value):
         raise ValueError("env value must not contain line-break characters")
+    tls_reason = tls_trust_violation(key, value)
+    if tls_reason is not None:
+        raise TlsTrustError(key, tls_reason)
 
-    existing = ""
-    with contextlib.suppress(FileNotFoundError):
-        existing = api_env.read_text(encoding="utf-8")
+    with api_env_lock(api_env):
+        existing = ""
+        with contextlib.suppress(FileNotFoundError):
+            existing = api_env.read_text(encoding="utf-8")
 
-    new_line = f'{key}="{_escape(value)}"\n'
-    lines = existing.splitlines(keepends=True) if existing else []
-    rewritten: list[str] = []
-    replaced = False
-    for line in lines:
-        if _line_targets_key(line, key):
-            if not replaced:
-                rewritten.append(new_line)
-                replaced = True
-            continue
-        rewritten.append(line)
-    if not replaced:
-        if rewritten and not rewritten[-1].endswith("\n"):
-            rewritten.append("\n")
-        rewritten.append(new_line)
+        new_line = f'{key}="{_escape(value)}"\n'
+        lines = existing.splitlines(keepends=True) if existing else []
+        rewritten: list[str] = []
+        replaced = False
+        for line in lines:
+            if _line_targets_key(line, key):
+                if not replaced:
+                    rewritten.append(new_line)
+                    replaced = True
+                continue
+            rewritten.append(line)
+        if not replaced:
+            if rewritten and not rewritten[-1].endswith("\n"):
+                rewritten.append("\n")
+            rewritten.append(new_line)
 
-    _atomic_write(api_env, "".join(rewritten))
+        _atomic_write(api_env, "".join(rewritten))
 
 
 def delete_env_value(api_env: Path, key: str) -> bool:
@@ -195,17 +431,18 @@ def delete_env_value(api_env: Path, key: str) -> bool:
     Missing file → ``False`` (nothing to delete). Raises :class:`OSError`
     only on a genuine write failure.
     """
-    try:
-        existing = api_env.read_text(encoding="utf-8")
-    except FileNotFoundError:
-        return False
+    with api_env_lock(api_env):
+        try:
+            existing = api_env.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return False
 
-    lines = existing.splitlines(keepends=True)
-    kept = [line for line in lines if not _line_targets_key(line, key)]
-    if len(kept) == len(lines):
-        return False
-    _atomic_write(api_env, "".join(kept))
-    return True
+        lines = existing.splitlines(keepends=True)
+        kept = [line for line in lines if not _line_targets_key(line, key)]
+        if len(kept) == len(lines):
+            return False
+        _atomic_write(api_env, "".join(kept))
+        return True
 
 
 def list_env_keys(api_env: Path) -> list[str]:
@@ -233,8 +470,13 @@ def list_env_keys(api_env: Path) -> list[str]:
 __all__ = [
     "PROCESS_CONTROL_ENV_NAMES",
     "PROCESS_CONTROL_ENV_PREFIXES",
+    "TLS_TRUST_ENV_NAMES",
+    "TlsTrustError",
+    "api_env_lock",
     "delete_env_value",
     "is_process_control_env",
+    "is_tls_trust_env",
     "list_env_keys",
+    "tls_trust_violation",
     "upsert_env_value",
 ]
