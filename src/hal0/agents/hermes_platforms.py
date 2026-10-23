@@ -276,7 +276,10 @@ def configured_platform_names(
 
     Reads ``config.yaml`` and ``.env`` under ``hermes_home`` and the gateway's
     secrets vault ``secrets_env`` (the unit's ``EnvironmentFile=``), the latter
-    through :func:`read_vault`. :data:`HAL0_MANAGED_PLATFORMS` always count.
+    through :func:`read_vault`. :data:`HAL0_MANAGED_PLATFORMS` always count, so
+    ``api_server`` is included because hal0 manages it, unless ``config.yaml``
+    explicitly sets ``enabled: false`` for it (:func:`configured_platforms`'s
+    rule).
     """
     from hal0.agents import hermes_provision as hp
 

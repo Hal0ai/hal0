@@ -556,6 +556,16 @@ def builder_lock_free(layout: Layout) -> tuple[bool, dict[str, Any]]:
     is left as it was. When the lock is taken the record comes back for the
     caller to show, but it is advisory and may name a dead holder, as with
     :func:`read_lock_holder`.
+
+    The answer is a snapshot, not a reservation. For the instant the probe
+    holds ``LOCK_EX``, a concurrent ``builder_lock(wait=False)`` raises
+    :class:`HermesBusy` with a stale or empty holder record, and the lock can
+    be taken by someone else the moment the probe returns ``(True, {})``.
+
+    Raises:
+        OSError: when the release root or the lock file cannot be created or
+            opened read-write (for instance ``PermissionError`` when the caller
+            cannot write there, or the file was created by root).
     """
     layout.root.mkdir(parents=True, exist_ok=True)
     fd = os.open(layout.lock, os.O_RDWR | os.O_CREAT, 0o664)
