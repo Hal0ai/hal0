@@ -392,6 +392,81 @@ def test_repair_child_env_is_sanitised(
     assert os.environ["HERMES_HOME"] == "/somewhere/else"
 
 
+#: Daemon secrets and operator settings that must never reach the provisioner.
+_PLANTED_SECRETS = {
+    "HF_TOKEN": "hf_planted",
+    "HUGGING_FACE_HUB_TOKEN": "hf_planted2",
+    "OPENAI_API_KEY": "sk-planted",
+    "HAL0_ADMIN_KEY": "admin-planted",
+    "HAL0_CLIENT_KEY": "client-planted",
+    "HAL0_HERMES_API_KEY__CODER": "hermes-planted",
+    "HAL0_SENTRY_DSN": "https://planted@sentry.invalid/1",
+    "HAL0_HERMES_TERMINAL": "local",
+    "HERMES_HOME": "/somewhere/else",
+    "SSL_CERT_FILE": "/etc/planted.pem",
+    "PIP_INDEX_URL": "https://user:pw@index.invalid/simple",
+}
+
+
+def _child_env_for(monkeypatch: pytest.MonkeyPatch, **extra: str) -> dict[str, str]:
+    for key in list(os.environ):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setattr(repair_route, "hal0_service_home", lambda: "/srv/hal0")
+    for key, value in {**_PLANTED_SECRETS, **extra}.items():
+        monkeypatch.setenv(key, value)
+    return repair_route._child_env()
+
+
+def test_repair_child_env_drops_secrets(monkeypatch: pytest.MonkeyPatch) -> None:
+    env = _child_env_for(monkeypatch, HAL0_FUTURE_SECRET="s3cret", ANOTHER_UPSTREAM_KEY="k")
+    for name in (*_PLANTED_SECRETS, "HAL0_FUTURE_SECRET", "ANOTHER_UPSTREAM_KEY"):
+        assert name not in env, name
+    assert "s3cret" not in env.values()
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "PATH",
+        "LANG",
+        "LC_ALL",
+        "LC_CTYPE",
+        "TZ",
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "NO_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "no_proxy",
+        "ALL_PROXY",
+        "HAL0_HOME",
+        "HAL0_API_URL",
+        "HAL0_DASHBOARD_URL",
+        "HAL0_BIND_HOST",
+        "HAL0_PORT",
+        "HAL0_HOSTNAME",
+        "HAL0_HERMES_PYTHON",
+        "HAL0_HERMES_LIVE_RESOLVE",
+        "HAL0_INFERENCE_BASE",
+        "HAL0_LOG_LEVEL",
+    ],
+)
+def test_repair_child_env_passes_allow_listed(monkeypatch: pytest.MonkeyPatch, name: str) -> None:
+    assert _child_env_for(monkeypatch, **{name: "kept"})[name] == "kept"
+
+
+def test_repair_child_env_keeps_what_the_repair_needs(monkeypatch: pytest.MonkeyPatch) -> None:
+    env = _child_env_for(
+        monkeypatch, PATH="/usr/bin:/bin", HAL0_API_URL="http://127.0.0.1:8080", HOME="/root"
+    )
+    assert env["PATH"] == "/usr/bin:/bin"
+    assert env["HAL0_API_URL"] == "http://127.0.0.1:8080"
+    assert env["HOME"] == "/srv/hal0"
+    assert env["PYTHONUNBUFFERED"] == "1"
+    # The daemon's own environment is untouched.
+    assert os.environ["HERMES_HOME"] == "/somewhere/else"
+
+
 def test_repair_409_when_update_job_in_flight(
     app_client: tuple[FastAPI, TestClient], monkeypatch: pytest.MonkeyPatch
 ) -> None:
