@@ -72,9 +72,10 @@ from hal0.config.migrations import latest_version, run_migrations
 # A 1.3.x updater's post-swap child script imports this name from here and
 # passes `ceiling=` to run_post_activation_migrations; both stay until no
 # supported box can run a 1.3.x updater. manifest.json still says
-# `upgrade_from = ">=1.3.0"` at v1.5.0, so a 1.3.x box can update straight
-# to this release and its updater needs the name. Delete both once the
-# floor passes 1.3.x. HAL0-SUNSET: v1.6.0
+# `upgrade_from = ">=1.3.0"` at v1.6.0 (the floor decision, >=1.4.0 or not,
+# is the operator's and has not been taken), so a 1.3.x box can update
+# straight to this release and its updater needs the name. Delete both once
+# the floor passes 1.3.x. HAL0-SUNSET: v1.7.0
 from hal0.config.migrations.v2 import PROFILE_CATALOG_SCHEMA_VERSION  # noqa: F401
 from hal0.errors import Hal0Error
 from hal0.release.policy import ReleaseKind, ReleasePolicy, ReleaseTagError
