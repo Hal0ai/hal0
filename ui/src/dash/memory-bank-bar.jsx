@@ -514,8 +514,13 @@ function BankBar({ bank, setBank }) {
   // on every consolidation round.
   const useBankConfig = window.__hal0UseBankConfig
   const bankConfigQuery = useBankConfig ? useBankConfig(bank) : { data: null }
+  // Until the bank's config has loaded (or when it failed) the selector shows
+  // no value and is disabled, rather than claiming the engine default.
+  const floorKnown = !!bankConfigQuery.data?.config
   const floorRaw = bankConfigQuery.data?.config?.mental_model_min_refresh_interval_seconds
-  const floorValue = String(Number.isFinite(Number(floorRaw)) && floorRaw != null ? Number(floorRaw) : 0)
+  const floorValue = !floorKnown
+    ? ''
+    : String(Number.isFinite(Number(floorRaw)) && floorRaw != null ? Number(floorRaw) : 0)
   const floorOptions = [
     ['0', 'after every consolidation'],
     ['3600', 'at most hourly'],
@@ -523,7 +528,8 @@ function BankBar({ bank, setBank }) {
     ['43200', 'at most every 12 h'],
     ['86400', 'at most daily'],
   ]
-  if (!floorOptions.some(([v]) => v === floorValue)) floorOptions.push([floorValue, `at most every ${floorValue} s`])
+  if (!floorKnown) floorOptions.splice(0, floorOptions.length, ['', bankConfigQuery.isError ? 'unavailable' : '…'])
+  else if (!floorOptions.some(([v]) => v === floorValue)) floorOptions.push([floorValue, `at most every ${floorValue} s`])
   const useFloorUpdate = window.__hal0UseBankConfigUpdate
   const floorUpdate = useFloorUpdate ? useFloorUpdate() : { mutateAsync: async () => {}, isPending: false }
   const setFloor = async (value) => {
@@ -893,9 +899,9 @@ function BankBar({ bank, setBank }) {
                 className="mono"
                 data-testid="mv-mm-floor"
                 value={floorValue}
-                disabled={floorUpdate.isPending}
+                disabled={floorUpdate.isPending || !floorKnown}
                 onChange={(e) => setFloor(e.target.value)}
-                title="mental_model_min_refresh_interval_seconds — the bank's floor between automatic refreshes"
+                title="mental_model_min_refresh_interval_seconds — the bank's floor between automatic refreshes (a model with its own trigger.min_refresh_interval_seconds keeps that instead)"
                 style={{ fontSize: 10.5, background: 'var(--bg-2)', color: 'var(--fg-2)', border: '1px solid var(--line)' }}
               >
                 {floorOptions.map(([v, label]) => (
@@ -905,7 +911,8 @@ function BankBar({ bank, setBank }) {
             </div>
             <p className="mhelp" style={{ marginTop: 6 }}>
               standing questions, refreshed from memory on consolidation (no more often than the floor
-              above) — hover to read the current answer; • means new memories since the last refresh
+              above, unless a model sets its own) — hover to read the current answer; • means new
+              memories since the last refresh
             </p>
           </div>
         </div>

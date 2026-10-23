@@ -39,7 +39,7 @@ const MODELS = [
 ]
 
 const configCalls: unknown[] = []
-let bankConfig: Record<string, unknown> = { mental_model_min_refresh_interval_seconds: 14400 }
+let bankConfig: Record<string, unknown> | null = { mental_model_min_refresh_interval_seconds: 14400 }
 
 Object.assign(globalThis as unknown as Record<string, unknown>, {
   __hal0Toast: () => {},
@@ -56,7 +56,7 @@ Object.assign(globalThis as unknown as Record<string, unknown>, {
   __hal0UseMentalModelRefresh: () => ({ mutate: () => {} }),
   __hal0UseConsolidate: () => ({ mutate: () => {}, isPending: false }),
   __hal0UseBankDelete: () => ({ isPending: false, mutateAsync: async () => ({}) }),
-  __hal0UseBankConfig: () => ({ data: { bank_id: 'primary', config: bankConfig } }),
+  __hal0UseBankConfig: () => ({ data: bankConfig ? { bank_id: 'primary', config: bankConfig } : undefined }),
   __hal0UseBankConfigUpdate: () => ({
     isPending: false,
     mutateAsync: async (vars: unknown) => {
@@ -135,6 +135,16 @@ describe('BankBar mental-model rows (#2920)', () => {
     const { host, root } = mountRules()
     const sel = host.querySelector('[data-testid="mv-mm-floor"]') as HTMLSelectElement
     expect(sel.value).toBe('0')
+    act(() => { root.unmount() })
+  })
+
+  it('while the config is loading or failed the selector does not claim a value', () => {
+    bankConfig = null
+    const { host, root } = mountRules()
+    const sel = host.querySelector('[data-testid="mv-mm-floor"]') as HTMLSelectElement
+    expect(sel.disabled).toBe(true)
+    expect(sel.value).toBe('')
+    expect(sel.textContent).not.toContain('after every consolidation')
     act(() => { root.unmount() })
   })
 

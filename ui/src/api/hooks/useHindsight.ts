@@ -168,14 +168,6 @@ export function useBankUpsert() {
   })
 }
 
-/**
- * Per-bank config overrides — the bank's description ("mission", the reflect
- * persona Hindsight shows for it) lives here as `reflect_mission`, next to
- * the disposition traits. Same wire shape as `hal0 memory bank profile set`:
- * one `PATCH .../config` with `{updates}`, partial — only the keys passed
- * change. The bank list carries the effective mission, so only that query
- * is refetched.
- */
 /** A bank's effective config overrides (`GET .../config` → `{bank_id, config}`). */
 export function useBankConfig(bank: string | null) {
   return useQuery<{ bank_id: string; config: Record<string, unknown> }>({
@@ -189,6 +181,14 @@ export function useBankConfig(bank: string | null) {
   })
 }
 
+/**
+ * Per-bank config overrides — the bank's description ("mission", the reflect
+ * persona Hindsight shows for it) lives here as `reflect_mission`, next to
+ * the disposition traits. Same wire shape as `hal0 memory bank profile set`:
+ * one `PATCH .../config` with `{updates}`, partial — only the keys passed
+ * change. The bank list carries the effective mission, so only that query
+ * is refetched.
+ */
 export function useBankConfigUpdate() {
   const qc = useQueryClient()
   return useMutation({
