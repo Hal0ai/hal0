@@ -159,10 +159,11 @@ export const ENDPOINTS = {
   agentApprovalsStream: '/api/agent/approvals/events',
 
   // ── Agents — list + dashboard catalogues ─────────────────────────
-  // ``agents`` is the installed-bundled list (#207). ``agentSkills`` +
-  // ``agentPersonaEnums`` back the Skills tab (#227) + the
-  // PersonaEditModal selects (#226). Static catalogues sourced from
-  // ``hal0.agents.persona`` server-side.
+  // ``agents`` is the installed-bundled list (#207). ``agentSkills`` backs the
+  // Skills tab (#227). ``agentPersonaEnums`` was the PersonaEditModal's tone
+  // and tool pick-lists (#226); the modal now edits ``tools_allowed`` as
+  // fnmatch patterns and has no tone, so nothing in the dashboard reads it.
+  // Static catalogues sourced from ``hal0.agents.persona`` server-side.
   agents: '/api/agents',
   agentSkills: '/api/agents/skills',
   agentPersonaEnums: '/api/agents/persona-enums',
@@ -184,6 +185,12 @@ export const ENDPOINTS = {
   // deployments, but that's a defensive floor, not the expected state.
   agentPersonas: (id: string) =>
     `/api/agents/${encodeURIComponent(id)}/personas`,
+  // One persona's full detail (GET) and its activation (POST).
+  // Backend: src/hal0/api/agents/personas.py.
+  agentPersona: (id: string, pid: string) =>
+    `/api/agents/${encodeURIComponent(id)}/personas/${encodeURIComponent(pid)}`,
+  agentPersonaActivate: (id: string, pid: string) =>
+    `/api/agents/${encodeURIComponent(id)}/personas/${encodeURIComponent(pid)}/activate`,
   // Restart the systemd unit backing an agent (POST → {status, detail}).
   // Backend: hal0.api.agents.restart — only "hermes" is a known id in v0.3.
   agentRestart: (id: string) =>

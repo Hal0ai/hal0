@@ -1,7 +1,7 @@
 // hal0 dashboard — FirstRun + Backends + Agent flow modals
 // Skip confirm, post-install hero, backend install/uninstall, FLM .deb guide, persona edit, namespace reset
 
-import { useAgentPersonaEnums, usePersonaUpdate } from '@/api/hooks/useAgents'
+import { useAgentPersona, useAgentPersonas, usePersonaUpdate } from '@/api/hooks/useAgents'
 import { useNpuLoad, useNpuUnload } from '@/api/hooks/useBackends'
 import { useSlots } from '@/api/hooks/useSlots'
 
@@ -107,60 +107,86 @@ hal0 slot restart npu`;
 // ────────────────────────────────────────────────────────────────
 // AGENT — Persona Edit · No-bundled-agent state · Reset namespace
 // ────────────────────────────────────────────────────────────────
-function PersonaEditModal({ open, onClose, persona }) {
+function PersonaEditModal({ open, onClose, personaId }) {
   // "hermes" is the only agent with a persona surface in v0.3 (single-tenant).
   const AGENT_ID = "hermes";
   const personaUpdate = usePersonaUpdate(AGENT_ID);
 
-  const [name, setName] = useStateFM(persona?.name || "");
-  const [systemPrompt, setSystemPrompt] = useStateFM(
-    "You are hal0, an operator-direct AI assistant running locally on the user's hardware. Be terse, technical, and surface the slots/tools you use as you work."
-  );
-  const [tone, setTone] = useStateFM(persona?.tone || "operator");
-  const [slot, setSlot] = useStateFM(persona?.slot || "agent");
+  // Edits the persona named by `personaId`; without one, the active persona.
+  // The list is only needed (and polled) for that fallback, while open.
+  const personas = useAgentPersonas(open && !personaId ? AGENT_ID : null);
+  const pid = personaId || personas.data?.active || null;
+  const personaQ = useAgentPersona(AGENT_ID, pid, { enabled: open && !!pid });
+  const persona = personaQ.data;
 
-  // #226: tone + tool catalogues come from /api/agents/persona-enums
-  // so the picker tracks the server-side enum without UI patches.
-  // Gate the fetch on `open` so closed modals don't pre-warm the
-  // catalogue on every parent render (review: PR #364 medium).
-  const enums = useAgentPersonaEnums({ enabled: open });
-  const tones = enums.data?.tones ?? [];
-  const tools = enums.data?.tools ?? [];
+  // The form edits exactly the fields PUT /api/agents/{id}/personas/{pid}
+  // acts on; every other field of the body is ignored server-side.
+  const [displayName, setDisplayName] = useStateFM("");
+  const [systemPrompt, setSystemPrompt] = useStateFM("");
+  const [toolPatterns, setToolPatterns] = useStateFM("");
+  const [slot, setSlot] = useStateFM("");
 
   useEffectFM(() => {
     if (open && persona) {
-      setName(persona.name || "");
-      setSlot(persona.slot || "agent");
-      setTone(persona.tone || "operator");
+      setDisplayName(persona.display_name || "");
+      setSystemPrompt(persona.system_prompt || "");
+      setToolPatterns((persona.tools_allowed || []).join("\n"));
+      setSlot(persona.preferred_model || "");
     }
   }, [open, persona]);
 
+  // tools_allowed is a list of fnmatch patterns matched against the admin MCP
+  // tool names (ToolPolicy.allows, hal0/mcp/admin.py) — not a pick-list, so it
+  // is edited as text. Blank lines drop out, and an empty result posts ["*"]
+  // so the stored list says what it means rather than relying on ToolPolicy
+  // reading an empty list as "*".
+  const toolsAllowed = () => {
+    const patterns = toolPatterns.split("\n").map(l => l.trim()).filter(Boolean);
+    return patterns.length ? patterns : ["*"];
+  };
+
+  // preferred_model is a /v1 model id, not a slot name: hal0/<slot> resolves
+  // to that slot (normalize/resolver.py), which is how the hal0-brain steward
+  // reads it (brain/chat.py). Empty falls back to its default.
+  //
   // Routes to the *live* configured slots (GET /api/slots), not the static
   // HAL0_DATA mock — the mock carried leftover dev-test slots (coder,
   // warming-demo) that leaked into this picker on the real dashboard.
   const slotsQ = useSlots();
   const llmSlots = (slotsQ.data || []).filter(s => s.type === "llm");
 
+  // Why the form isn't showing yet. A missing persona (404) is surfaced, not
+  // papered over with an empty form that would save over it.
+  const unavailable = persona ? null
+    : personaQ.isError ? `Couldn't load persona — ${personaQ.error?.message || "request failed"}`
+    : (personaQ.isLoading || personas.isLoading) ? "Loading persona…"
+    : "No persona to edit.";
+
   return (
     <Modal
       open={open}
       onClose={onClose}
       eyebrow="Agent · persona"
-      title={persona?.isAdd ? "New persona" : `Edit ${persona?.name || "persona"}`}
+      title={`Edit ${persona?.display_name || pid || "persona"}`}
       width={680}
       foot={
         <>
-          <span>Personas route to a chat slot and carry their own system prompt + tone.</span>
+          <span>Saved to the persona file; Hermes applies prompt changes on its next reprovision.</span>
           <span style={{display: "inline-flex", gap: 8}}>
             <button className="btn ghost sm" onClick={onClose} disabled={personaUpdate.isPending}>Cancel</button>
             <button
               className="btn sm"
-              disabled={personaUpdate.isPending || !name.trim()}
+              disabled={personaUpdate.isPending || !persona || !displayName.trim()}
               onClick={async () => {
                 try {
                   await personaUpdate.mutateAsync({
-                    pid: persona?.id || name.trim(),
-                    body: { name: name.trim(), slot, tone, system_prompt: systemPrompt },
+                    pid,
+                    body: {
+                      display_name: displayName.trim(),
+                      system_prompt: systemPrompt,
+                      tools_allowed: toolsAllowed(),
+                      preferred_model: slot,
+                    },
                   });
                   window.__hal0Toast && window.__hal0Toast(`Persona saved`, "ok");
                   onClose();
@@ -176,87 +202,80 @@ function PersonaEditModal({ open, onClose, persona }) {
         </>
       }
     >
-      <div className="form-row">
-        <div className="form-lbl">
-          <span>Name</span>
-          <FieldInfoIcon description="unique within personas" />
-        </div>
-        <div className="form-ctl">
-          <input className="input mono" value={name} onChange={e => setName(e.target.value)} placeholder="hermes-coder" />
-        </div>
-      </div>
+      {unavailable ? (
+        <div className="mono" style={{fontSize: 12, color: personaQ.isError ? "var(--err, #c66)" : "var(--fg-4)"}}>{unavailable}</div>
+      ) : (
+        <>
+          <div className="form-row">
+            <div className="form-lbl">
+              <span>Display name</span>
+              <FieldInfoIcon description="shown in the persona list · the id never changes" />
+            </div>
+            <div className="form-ctl">
+              <input className="input mono" value={displayName} onChange={e => setDisplayName(e.target.value)} placeholder="Hermes coder" />
+            </div>
+          </div>
 
-      <div className="form-row">
-        <div className="form-lbl">
-          <span>Routes to slot</span>
-          <FieldInfoIcon description="only llm-type slots are eligible" />
-        </div>
-        <div className="form-ctl">
-          <select className="input mono" value={slot} onChange={e => setSlot(e.target.value)}>
-            {llmSlots.map(s => (
-              <option key={s.name} value={s.name}>{s.name} · {s.model} · {s.device}</option>
-            ))}
-          </select>
-        </div>
-      </div>
+          <div className="form-row">
+            <div className="form-lbl">
+              <span>Routes to slot</span>
+              <FieldInfoIcon description="only llm-type slots are eligible" />
+            </div>
+            <div className="form-ctl">
+              <select className="input mono" value={slot} onChange={e => setSlot(e.target.value)}>
+                <option value="">— not set —</option>
+                {llmSlots.map(s => (
+                  <option key={s.name} value={`hal0/${s.name}`}>{s.name} · {s.model} · {s.device}</option>
+                ))}
+                {/* A stored value that isn't a hal0/<llm slot> (a bare slot
+                    name from a hand-edited persona file, a retired slot)
+                    stays selectable rather than silently reading as the
+                    first option. */}
+                {slot && !llmSlots.some(s => `hal0/${s.name}` === slot) && (
+                  <option value={slot}>{slot}</option>
+                )}
+              </select>
+            </div>
+          </div>
 
-      <div className="form-row">
-        <div className="form-lbl">
-          <span>Tone</span>
-          <FieldInfoIcon description="descriptive label · doesn't affect routing" />
-        </div>
-        <div className="form-ctl">
-          <select className="input mono" value={tone} onChange={e => setTone(e.target.value)} disabled={enums.isLoading}>
-            {enums.isLoading && <option value={tone}>loading…</option>}
-            {enums.isError && <option value={tone}>{tone} (enums unavailable)</option>}
-            {!enums.isLoading && !enums.isError && tones.length === 0 && (
-              <option value={tone}>{tone}</option>
-            )}
-            {tones.map(t => (
-              <option key={t.id} value={t.id}>{t.label}{t.desc ? ` — ${t.desc}` : ""}</option>
-            ))}
-          </select>
-        </div>
-      </div>
+          <div className="form-row">
+            <div className="form-lbl">
+              <span>System prompt</span>
+              <FieldInfoIcon description="prepended on every request to this persona" />
+            </div>
+            <div className="form-ctl">
+              <textarea
+                className="input mono"
+                value={systemPrompt}
+                onChange={e => setSystemPrompt(e.target.value)}
+                rows={6}
+                style={{resize: "vertical", minHeight: 100}}
+              />
+              <div className="hint">{systemPrompt.length} chars · ~{Math.round(systemPrompt.length / 4)} tokens</div>
+            </div>
+          </div>
 
-      <div className="form-row">
-        <div className="form-lbl">
-          <span>System prompt</span>
-          <FieldInfoIcon description="prepended on every request to this persona" />
-        </div>
-        <div className="form-ctl">
-          <textarea
-            className="input mono"
-            value={systemPrompt}
-            onChange={e => setSystemPrompt(e.target.value)}
-            rows={6}
-            style={{resize: "vertical", minHeight: 100}}
-          />
-          <div className="hint">{systemPrompt.length} chars · ~{Math.round(systemPrompt.length / 4)} tokens</div>
-        </div>
-      </div>
-
-      <div className="form-section">Tool set</div>
-      <div className="form-row">
-        <div className="form-lbl">
-          <span>Allowed tools</span>
-          <FieldInfoIcon description="subset of OmniRouter tools this persona can call" />
-        </div>
-        <div className="form-ctl" style={{display: "flex", flexWrap: "wrap", gap: 8}}>
-          {enums.isLoading && (
-            <span className="mono" style={{fontSize: 11, color: "var(--fg-4)"}}>Loading tools…</span>
-          )}
-          {enums.isError && (
-            <span className="mono" style={{fontSize: 11, color: "var(--err, #c66)"}}>Tools unavailable</span>
-          )}
-          {tools.map(t => (
-            <label key={t.id} className="checkbox-row">
-              <input type="checkbox" defaultChecked={["read_file", "edit_file", "embed_text"].includes(t.id)} />
-              <span className="mono">{t.label}</span>
-            </label>
-          ))}
-        </div>
-      </div>
+          <div className="form-section">Tool set</div>
+          <div className="form-row">
+            <div className="form-lbl">
+              <span>Allowed tool patterns</span>
+              <FieldInfoIcon description="fnmatch patterns over MCP tool names · a tool outside every pattern is hidden from this persona" />
+            </div>
+            <div className="form-ctl">
+              <textarea
+                className="input mono"
+                value={toolPatterns}
+                onChange={e => setToolPatterns(e.target.value)}
+                rows={4}
+                spellCheck={false}
+                placeholder="*"
+                style={{resize: "vertical", minHeight: 72}}
+              />
+              <div className="hint">One pattern per line, matched against MCP tool names; <span className="mono">*</span> allows every tool. Enforced by the hal0-brain steward; Hermes applies changes on its next reprovision.</div>
+            </div>
+          </div>
+        </>
+      )}
     </Modal>
   );
 }
