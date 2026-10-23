@@ -105,13 +105,7 @@ _REPAIR_AGENTS: Final[frozenset[str]] = frozenset({"hermes"})
 _PHASE: Final[str] = "repair:hermes"
 
 #: What the child is asked to do, after the binary.
-_BOOTSTRAP_ARGS: Final[tuple[str, ...]] = (
-    "agent",
-    "reprovision",
-    "hermes",
-    "--repair",
-    "--verbose",
-)
+_BOOTSTRAP_ARGS: Final[tuple[str, ...]] = ("agent", "reprovision", "hermes", "--repair", "--verbose")  # fmt: skip
 
 #: A ``--verbose`` provisioner prints this before each install step.
 _STEP_PREFIX: Final[str] = "[run ] "
