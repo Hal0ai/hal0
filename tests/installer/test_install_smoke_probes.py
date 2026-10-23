@@ -261,6 +261,7 @@ def _gateway(
     content: str = '{"ok": true}',
     *,
     post_fails: bool = False,
+    post_rc: int = 7,
 ) -> Path:
     """Fake curl: ``/api/slots`` answers ``slots`` (a raw string is sent as
     is); every other request is logged, so a test can assert the chat POST
@@ -274,7 +275,8 @@ def _gateway(
         'for a in "$@"; do\n'
         f'  case "$a" in */api/slots) cat "{tmp_path}/slots.json"; exit 0 ;; esac\n'
         "done\n"
-        f'echo post >> "{posts}"\n' + ("exit 7" if post_fails else f'cat "{tmp_path}/reply.json"'),
+        f'echo post >> "{posts}"\n'
+        + (f"exit {post_rc}" if post_fails else f'cat "{tmp_path}/reply.json"'),
     )
     return posts
 
@@ -391,3 +393,47 @@ def test_a_non_json_slot_list_skips_without_a_chat_post(tmp_path: Path) -> None:
     assert "structured-output probe skipped — could not read the slot list" in res.stdout
     assert "FAILED:structured-output" not in res.stdout
     assert not posts.exists()
+
+
+# ── #2952: a curl timeout is advisory, not a Verify FAILED ─────────────────
+
+
+def test_probe_timeout_returns_3(tmp_path: Path) -> None:
+    _gateway(tmp_path, _LOADED, post_fails=True, post_rc=28)
+    res = _drive(tmp_path, "smoke_structured_output")
+    assert res.returncode == 3
+
+
+def test_probe_timeout_warns_without_recording_a_failure(tmp_path: Path) -> None:
+    _gateway(tmp_path, _LOADED, post_fails=True, post_rc=28)
+    _write_exec(tmp_path / "hal0", "exit 0")
+    res = _drive(tmp_path, _SHOW)
+    assert "structured-output probe timed out" in res.stderr
+    assert "FAILED" not in res.stderr
+    assert "FAILED:structured-output" not in res.stdout
+    assert "FAILED:" not in res.stdout.replace("FAILED:\n", "")
+
+
+def test_probe_http_error_still_fails(tmp_path: Path) -> None:
+    _gateway(tmp_path, _LOADED, post_fails=True, post_rc=22)
+    _write_exec(tmp_path / "hal0", "exit 0")
+    res = _drive(tmp_path, _SHOW)
+    assert "structured-output probe FAILED" in res.stderr
+    assert "FAILED:structured-output" in res.stdout
+
+
+def test_probe_bad_json_still_fails_in_the_run(tmp_path: Path) -> None:
+    _gateway(tmp_path, _LOADED, content="Paris")
+    _write_exec(tmp_path / "hal0", "exit 0")
+    res = _drive(tmp_path, _SHOW)
+    assert "structured-output probe FAILED" in res.stderr
+    assert "FAILED:structured-output" in res.stdout
+
+
+def test_probe_success_in_the_run_is_clean(tmp_path: Path) -> None:
+    _gateway(tmp_path, _LOADED)
+    _write_exec(tmp_path / "hal0", "exit 0")
+    res = _drive(tmp_path, _SHOW)
+    assert "structured-output probe ok" in res.stdout
+    assert "FAILED:structured-output" not in res.stdout
+    assert "structured-output" not in res.stderr
