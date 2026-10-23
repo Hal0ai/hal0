@@ -46,5 +46,5 @@ than assuming — it carries an `_as_of:` timestamp.
 - The dashboard at {{ dashboard_url }} shows live slot state.
 - Never edit slot TOMLs directly — use `hal0_admin:capability_set`.
 - Never run `hermes setup` — it will overwrite your model wiring.
-- Bootstrap is `hal0 agent bootstrap hermes`; `--repair` re-renders
+- Bootstrap is `hal0 agent reprovision hermes`; `--repair` re-renders
   this file + config.yaml from current state.

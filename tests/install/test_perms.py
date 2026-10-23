@@ -259,7 +259,7 @@ def test_agent_skills_mirror_is_service_writable(tmp_hal0_home: str) -> None:
     """#1828: /etc/hal0/agent-skills must be writable by the service account.
 
     install.sh births it root:root 0755 and the §7.4 privilege drop then runs
-    `hal0 agent bootstrap hermes` as hal0, so context_link's five
+    `hal0 agent reprovision hermes` as hal0, so context_link's five
     ``os.symlink`` calls all hit EACCES and the agent comes up with an empty
     skill manifest. The row is dir-only (its contents are symlinks, which the
     store never writes) and mirrors the /etc/hal0 config-root row: setgid 2775

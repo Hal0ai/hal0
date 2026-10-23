@@ -405,7 +405,7 @@ def ownership_table(
         # to it, this dir is WRITTEN by the provisioner: context_link's
         # ``_mirror_bundled_skills`` symlinks each /usr/share/hal0/skills entry
         # into it, and since the §7.4 privilege drop (5faef6d6) that writer is
-        # `hal0 agent bootstrap hermes` re-exec'd as the hal0 user. install.sh
+        # `hal0 agent reprovision hermes` re-exec'd as the hal0 user. install.sh
         # creates the dir as root (root:root 0755) and the /etc/hal0 root row
         # above is non-recursive, so nothing ever handed it to hal0 — all five
         # symlinks got EACCES on 100% of fresh installs and Hermes came up with

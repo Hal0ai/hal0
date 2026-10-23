@@ -135,7 +135,7 @@ def check_hermes_plugins(
 # writes a split-brain /root/.hermes tree and/or leaves root:root files the
 # User=hal0 unit can't read (so Hermes silently falls back to the default
 # provider). This surfaces that loudly. It NEVER repairs — reconciliation is the
-# explicit `sudo hal0 agent bootstrap hermes --repair` path.
+# explicit `sudo hal0 agent reprovision hermes --repair` path.
 
 _HERMES_HOME = Path("/var/lib/hal0/.hermes")
 _HERMES_VENV = HERMES_VENV_PATH

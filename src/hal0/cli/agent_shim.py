@@ -552,7 +552,7 @@ def cmd_serve(cfg: AgentConfig) -> int:
         if not cfg.hermes_bin.exists():
             _die(
                 f"hermes binary not found at {cfg.hermes_bin} — run "
-                "'hal0 agent bootstrap hermes' first"
+                "'hal0 agent reprovision hermes' first"
             )
         argv = _build_hermes_argv(cfg)
         env = _build_hermes_env(cfg)
@@ -719,13 +719,13 @@ def cmd_status(cfg: AgentConfig) -> int:
 def cmd_reprovision(cfg: AgentConfig) -> int:
     """Re-run the hal0 bootstrap pipeline for this agent.
 
-    Today this delegates to ``hal0 agent bootstrap <type> --repair``
+    Today this delegates to ``hal0 agent reprovision <type> --repair``
     (the only re-entry point in the current CLI). When PR-3 lands an
     explicit ``reprovision`` subcommand, swap the argv to point at it.
     """
 
     hal0_bin = shutil.which("hal0") or "/usr/local/bin/hal0"
-    argv = [hal0_bin, "agent", "bootstrap", cfg.agent_type, "--repair"]
+    argv = [hal0_bin, "agent", "reprovision", cfg.agent_type, "--repair"]
     return subprocess.call(argv)
 
 

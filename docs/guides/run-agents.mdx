@@ -320,15 +320,15 @@ that commit as vetted, `hal0 update` refuses to keep or rebuild it and names
 `--clear-override`. The command also refuses a vetted commit older than the live release: once v0.22.4 is live, `--target d923a5eb487a17c0a68801bba9ef0f56c81040a8` (v0.22.2) fails as a downgrade, because v0.22.3 and later write gateway runtime state into Hermes's `state.db` that v0.22.2 cannot run over. The automatic flip-back after a failed activation is not affected.
 
 To watch each phase as it runs, or to re-run provisioning without the
-network, drop to the underlying command directly. With `--offline` it never
+network, use the flags below. With `--offline` it never
 builds: if a build is needed, the install step fails and names the step
 that needs the network, and a running host keeps its live release. It is one linear pass: there is no
-preview mode and no way to skip a phase, and it refuses `--dry-run` and
-`--skip-phase` rather than run a real install.
+preview mode and no way to skip a phase, so it has no `--dry-run` or
+`--skip-phase`.
 
 ```sh
-hal0 agent bootstrap hermes --offline
-hal0 agent bootstrap hermes --repair --verbose
+hal0 agent reprovision hermes --offline
+hal0 agent reprovision hermes --repair --verbose
 ```
 
 To restart the running Hermes process without re-provisioning anything:

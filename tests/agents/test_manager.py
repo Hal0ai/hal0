@@ -454,7 +454,7 @@ def test_read_record_consults_driver_when_seed_missing(
     """#432: a running agent with on-disk artifacts but NO /etc seed must
     report ``installed``, not ``broken``.
 
-    The ``hal0 agent bootstrap hermes`` path used to leave the data +
+    The ``hal0 agent reprovision hermes`` path used to leave the data +
     state dirs on disk without writing the seed TOML, so ``_read_record``
     short-circuited to ``broken`` before ever consulting driver health —
     even though the agent was up and reachable. Now the missing-seed

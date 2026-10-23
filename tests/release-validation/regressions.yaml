@@ -532,7 +532,7 @@ regressions:
     summary: >-
       All five bundled hal0 agent skills fail to link on a fresh install — install.sh creates
       /etc/hal0/agent-skills as root:root 0755 with no PermRow, and the privilege-dropped
-      `hal0 agent bootstrap hermes` (running as hal0) gets EACCES on every symlink. Hermes comes
+      `hal0 agent reprovision hermes` (running as hal0) gets EACCES on every symlink. Hermes comes
       up with an empty skill manifest while `_phase_context_link` still returns PhaseStatus.OK.
     rc6_note: >-
       Fixed: agent-skills is hal0:hal0 2775 with all five symlinks, context_link details list

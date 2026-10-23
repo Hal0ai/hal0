@@ -46,11 +46,6 @@ console = Console()
 approvals_app = typer.Typer(help="Manage agent approval requests (gated destructives).")
 app.add_typer(approvals_app, name="approvals")
 
-# Bootstrap sub-sub-app — ``hal0 agent bootstrap hermes`` runs the
-# Hermes provisioning (linear convergent install_hermes since inc-2).
-bootstrap_app = typer.Typer(help="Run bundled-agent bootstrap pipelines (Phase 10).")
-app.add_typer(bootstrap_app, name="bootstrap")
-
 # Personas sub-sub-app (PR-3, v0.3) — manages the persona TOML store at
 # /var/lib/hal0/.hermes/personas/. Activate writes active.txt and
 # triggers a best-effort hot-reload nudge; the API endpoint added in PR-4
@@ -557,9 +552,9 @@ def _ensure_hermes_writable_or_die() -> None:
 # of root-then-chown), the provisioning step drops to the hal0 user whenever it
 # is invoked as root: run the root-only prelude (install the /usr/local/bin
 # wrapper + ensure the setgid hal0-owned parent dirs), then re-exec `hal0 agent
-# bootstrap hermes` as hal0. This single choke point covers every caller
+# reprovision hermes` as hal0. This single choke point covers every caller
 # (install.sh's `agent install hermes`, a standalone `sudo hal0 agent install
-# hermes`, `bootstrap`/`reprovision`/`upgrade`) so F.7 can delete the chown-back
+# hermes`, `reprovision`) so F.7 can delete the chown-back
 # without stranding any path on root:root files. A non-root (dev / already-hal0)
 # caller runs the pipeline in-process unchanged.
 
@@ -864,7 +859,7 @@ def _provision_hermes(
     """Run the Hermes bootstrap pipeline, dropping to hal0 first when root (§7.4).
 
     Non-root (dev / already-hal0): call ``bootstrap_cli`` in-process. Root: run
-    the root-only prelude, then re-exec ``hal0 agent bootstrap hermes`` as hal0
+    the root-only prelude, then re-exec ``hal0 agent reprovision hermes`` as hal0
     so every provisioning write is born ``hal0:hal0``.
 
     ``terminal_tool`` is the operator's explicit answer to the terminal-tool
@@ -913,7 +908,7 @@ def _provision_hermes(
         _hermes_root_prelude(provision_env)
         # #2092: the running tree, not PATH's — see _running_hal0_bin.
         hal0_bin = _running_hal0_bin()
-        argv = [hal0_bin, "agent", "bootstrap", "hermes"]
+        argv = [hal0_bin, "agent", "reprovision", "hermes"]
         if repair:
             argv.append("--repair")
         if offline:
@@ -928,7 +923,7 @@ def _provision_hermes(
         return rc
     # A posture change only reaches the model once the process re-reads its
     # config. Done HERE rather than in _install_hermes so every provisioning
-    # entry point is covered — `reprovision` and `bootstrap` both
+    # entry point is covered — `install` and `reprovision` both
     # land in this function and all now honour an explicit answer.
     # A gate THIS run wrote restarts the consumers even when a later phase
     # (smoke tests) failed the run: the mutation is on disk, and a live gateway
@@ -2038,58 +2033,6 @@ def _reconcile_upstreams_best_effort() -> None:
         )
 
 
-@bootstrap_app.command("hermes")
-def bootstrap_hermes(
-    repair: bool = typer.Option(
-        False,
-        "--repair",
-        help="Force every step to re-run its writes (root: also reconciles ownership).",
-    ),
-    # #2445: both flags predate the linear installer, which has no plan-only
-    # mode and no phase selection. They stay parseable (hidden) only so an old
-    # script gets a clear "not supported" error instead of a generic
-    # unknown-option one, and never the real install it asked to preview.
-    dry_run: bool = typer.Option(False, "--dry-run", hidden=True),
-    skip_phase: list[str] = typer.Option([], "--skip-phase", hidden=True),
-    offline: bool = typer.Option(
-        False,
-        "--offline",
-        help=(
-            "Never build a Hermes release. When a build is needed the install step "
-            "fails and names the step that needs the network; a running host keeps "
-            "its live release."
-        ),
-    ),
-    verbose: bool = typer.Option(False, "--verbose", "-v", help="Verbose phase log."),
-) -> None:
-    """Run the Hermes-Agent install — one linear convergent pass."""
-    # Late import keeps the CLI startup snappy on hosts where the
-    # hermes_provision module's downstream slices grow heavier deps.
-    import os as _os
-
-    unsupported = [
-        flag for flag, given in (("--dry-run", dry_run), ("--skip-phase", skip_phase)) if given
-    ]
-    if unsupported:
-        # Refuse before the root prelude or the re-exec: both of those write.
-        _stderr_console.print(
-            f"[red]error[/red]: {', '.join(unsupported)} not supported. The Hermes "
-            "installer is one linear convergent pass with no preview mode and no "
-            "phase selection. Inspect the last run with "
-            "[bold]hal0 agent status hermes[/bold]."
-        )
-        raise typer.Exit(2)
-    if offline:
-        # Read by the release builder (hermes_provision._phase_install, #2838).
-        _os.environ["HAL0_HERMES_OFFLINE"] = "1"
-    # §7.4: drops to hal0 first when invoked as root (re-execs this same command
-    # as hal0), else runs the pipeline in-process. See _provision_hermes.
-    rc = _provision_hermes(repair=repair, offline=offline, verbose=verbose)
-    if rc == 0:
-        _reconcile_upstreams_best_effort()
-    raise typer.Exit(rc)
-
-
 # ── Bootstrap status / log / upgrade / uninstall (Phase 10, #246) ───────────
 
 
@@ -2128,7 +2071,9 @@ def agent_status(
             # (the exact symptom from live install-validation m4).
             typer.echo(_json.dumps({"name": name, "provisioned": False, "phases": {}}, indent=2))
             raise typer.Exit(0)
-        console.print(f"[dim]{name}: no provision.json yet (run bootstrap first).[/dim]")
+        console.print(
+            f"[dim]{name}: no provision.json yet (run `hal0 agent install {name}` first).[/dim]"
+        )
         raise typer.Exit(0)
     data = _json.loads(state_file.read_text())
     if json_out:
@@ -2345,22 +2290,34 @@ def agent_reprovision(
             "box whose agent has no MCP tools."
         ),
     ),
-    verbose: bool = typer.Option(False, "--verbose", "-v"),
+    offline: bool = typer.Option(
+        False,
+        "--offline",
+        help=(
+            "Never build a Hermes release. When a build is needed the install step "
+            "fails and names the step that needs the network; a running host keeps "
+            "its live release."
+        ),
+    ),
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="Verbose phase log."),
 ) -> None:
     """Re-run the convergent install idempotently.
 
-    Wrapper over ``hal0 agent bootstrap hermes`` that's name-stable
-    across v0.4 agents (only flag the difference: this is the
-    "re-converge" verb, not the "first install" verb). Steps whose
-    on-disk artefacts already match are skipped; steps whose inputs
-    drifted re-run.
+    The one Hermes converge verb: steps whose on-disk artefacts already match
+    are skipped, steps whose inputs drifted re-run. As root it re-execs itself
+    as the hal0 user (see :func:`_provision_hermes`).
     """
+    import os as _os
+
     if name != "hermes":
         die(f"reprovision currently only supports `hermes`; got {name!r}.")
         return
+    if offline:
+        # Read by the release builder (hermes_provision._phase_install, #2838).
+        _os.environ["HAL0_HERMES_OFFLINE"] = "1"
     # §7.4: drops to hal0 when root (see _provision_hermes) so a re-converge run
     # re-renders config.yaml born hal0:hal0, matching first install.
-    rc = _provision_hermes(repair=repair, verbose=verbose)
+    rc = _provision_hermes(repair=repair, offline=offline, verbose=verbose)
     if rc == 0:
         _reconcile_upstreams_best_effort()
     raise typer.Exit(rc)

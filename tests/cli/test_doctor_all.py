@@ -907,7 +907,7 @@ def test_mcp_mounts_401_names_the_repair_command() -> None:
     )
     assert c.status == "fail"
     assert "hal0-admin" in c.detail
-    assert "hal0 agent bootstrap hermes --repair" in c.detail
+    assert "hal0 agent reprovision hermes --repair" in c.detail
 
 
 def test_mcp_mounts_generic_transport_failure_surfaces_raw_error() -> None:
@@ -982,7 +982,7 @@ def test_hermes_mcp_auth_fails_when_bearer_missing(tmp_path) -> None:  # type: i
     c = da.check_hermes_mcp_config_auth(auth={"auth_required": True}, config_path=cfg)
     assert c.status == "fail"
     assert "hal0-admin" in c.detail and "hal0-memory" in c.detail
-    assert "hal0 agent bootstrap hermes --repair" in c.detail
+    assert "hal0 agent reprovision hermes --repair" in c.detail
 
 
 def test_hermes_mcp_auth_passes_when_bearer_present(tmp_path) -> None:  # type: ignore[no-untyped-def]

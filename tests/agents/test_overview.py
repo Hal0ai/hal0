@@ -318,7 +318,8 @@ def test_reasons_in_display_order_with_fixes():
     ]
     assert out[0]["fix"] == "restart_gateway"
     assert (
-        out[3]["fix"] == "cli" and out[3]["command"] == "sudo hal0 agent bootstrap hermes --repair"
+        out[3]["fix"] == "cli"
+        and out[3]["command"] == "sudo hal0 agent reprovision hermes --repair"
     )
     assert out[4]["fix"] == "none" and "overrides" in out[4]["detail"]
 
@@ -409,7 +410,7 @@ def test_doctor_drift_fires_on_any_not_ok_row():
     )
     assert len(mixed) == 1 and mixed[0]["reason"] == "doctor_drift"
     assert mixed[0]["fix"] == "cli"
-    assert mixed[0]["command"] == "sudo hal0 agent bootstrap hermes --repair"
+    assert mixed[0]["command"] == "sudo hal0 agent reprovision hermes --repair"
     assert mixed[0]["detail"] == "ownership: HERMES_HOME tree: root:root"
 
 
@@ -478,7 +479,7 @@ def test_doctor_drift_is_one_reason_per_distinct_fix():
     )
     assert [(r["fix"], r["command"], r["detail"]) for r in out] == [
         ("repair", None, "interpreter: old sqlite; plugins: trees differ"),
-        ("cli", "sudo hal0 agent bootstrap hermes --repair", "ownership: root:root"),
+        ("cli", "sudo hal0 agent reprovision hermes --repair", "ownership: root:root"),
         ("cli", "sudo hal0 agent install hermes", "gateway_unit: unit missing"),
     ]
     assert {r["reason"] for r in out} == {"doctor_drift"}

@@ -36,6 +36,8 @@ applying. Add those subsections to a version's section to surface them; see
 
 - **`hal0 update owui` is gone: use `hal0 update component openwebui`.** There is no alias. `--target <digest>`, `--clear-override`, `--check` and `--yes` work on `hal0 update component <id>` exactly as they did on `hal0 update owui`; the OpenWebUI override marker and the `/api/updates/components/openwebui/converge` body are unchanged. Every other command's remedy text that named `hal0 update owui` now names the new spelling. `hal0 update owui` exits with the CLI's unknown-command error. (#2868)
 
+- **`hal0 agent bootstrap hermes` is gone: use `hal0 agent reprovision hermes`.** The two were the same command, and there is no alias. `reprovision` takes `--repair`, `--verbose` and now `--offline` (a build that is needed fails and names the step that needs the network; a running host keeps its live release). The `--dry-run` and `--skip-phase` flags that only printed "not supported" are removed with the command: `reprovision` rejects them as unknown options. `hal0 agent bootstrap` exits with the CLI's unknown-command error. The dashboard's Hermes repair (`POST /api/agents/hermes/repair`) now runs `hal0 agent reprovision hermes --repair --verbose`, and every doctor row, remedy string, installer wrapper message and agent-facing template that named the old verb names the new one. (#2863)
+
 ### Changed
 
 - **The installer installs FastFlowLM 1.0.10 on NPU hosts, up from 0.9.44.** The pinned host `.deb` now comes from `ROCm/FastFlowLM`, where the project moved, with new SHA-256 pins for each distro build. FastFlowLM 1.0 drops ffmpeg and fftw and needs `libxrt2` 2.25 or newer. The matching `flm` runner image ships separately as a runner pin.

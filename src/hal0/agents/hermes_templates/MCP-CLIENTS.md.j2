@@ -41,7 +41,7 @@ Both keys live in `/etc/hal0/api.env` on this host (owner-only, `0600`) — read
 hal0 auth rotate admin    # or: hal0 auth rotate client
 ```
 
-A rotation is **not** live-propagated into an already-rendered client config. hal0's own bundled Hermes picks up the new key on the next `hal0 agent bootstrap hermes --repair`; any other client (this file's examples included) needs its saved `Authorization` header updated by hand.
+A rotation is **not** live-propagated into an already-rendered client config. hal0's own bundled Hermes picks up the new key on the next `hal0 agent reprovision hermes --repair`; any other client (this file's examples included) needs its saved `Authorization` header updated by hand.
 
 ## Quick Start
 
@@ -131,7 +131,7 @@ the `Authorization` header — see [Authentication](#authentication).
 
 | Symptom | Likely Cause | Fix |
 |---------|-------------|-----|
-| HTTP 401 Unauthorized | Auth is armed on this box and the request carried no (or a stale) `Authorization` bearer | Add `Authorization: Bearer <key>` — see [Authentication](#authentication); if this is hal0's own Hermes, run `hal0 agent bootstrap hermes --repair` |
+| HTTP 401 Unauthorized | Auth is armed on this box and the request carried no (or a stale) `Authorization` bearer | Add `Authorization: Bearer <key>` — see [Authentication](#authentication); if this is hal0's own Hermes, run `hal0 agent reprovision hermes --repair` |
 | HTTP 405 Method Not Allowed | URL missing `/mcp` suffix (e.g. `/mcp/admin`) | Use full path: `/mcp/admin/mcp` |
 | HTTP 406 Not Acceptable | Using `streamable-http` transport (sends GET + POST) | Use `http` transport (POST-only) |
 | Connection refused | hal0 API not running | `systemctl status hal0-api` |

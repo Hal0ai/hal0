@@ -7,7 +7,7 @@ Two copies exist by design (mirroring hal0-memory):
   ``$HERMES_HOME/plugins/model-providers/hal0/``):
   ``installer/agents/hermes/plugins/hal0-provider/``
 
-This lock keeps them unified so ``hal0 agent bootstrap hermes --repair`` can
+This lock keeps them unified so ``hal0 agent reprovision hermes --repair`` can
 never clobber behaviour that isn't in the repo. Edit both dirs together.
 """
 

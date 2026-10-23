@@ -345,7 +345,7 @@ The gateway unit (`/etc/systemd/system/hermes-gateway.service`) is rendered by u
 ### Surfaces
 
 * **Provision** — `hal0 agent install hermes` (root: installs the CLI
-  wrapper + hal0-owned skeleton, then re-execs `hal0 agent bootstrap
+  wrapper + hal0-owned skeleton, then re-execs `hal0 agent reprovision
   hermes` as the `hal0` user) → the 14-step, deliberately
   **uncheckpointed** pipeline in `src/hal0/agents/hermes_provision.py`
   (`_INSTALL_STEPS`): `preflight → install →
@@ -984,7 +984,7 @@ env_probe → home_init → kanban_db_init → install_artifacts → mcp_wire �
 config_write → context_link → voice_wire → gateway_secrets_wire →
 profile_api_keys → profile_mcp_wire → smoke_tests). Convergent, not checkpointed; the last-run report lands in
 `/var/lib/hal0/state/agents/hermes/provision.json` for `hal0 agent
-status`/`log`. CLI verb is `hal0 agent bootstrap hermes` (run as the `hal0`
+status`/`log`. CLI verb is `hal0 agent reprovision hermes` (run as the `hal0`
 user by `hal0 agent install hermes`). Renamed from `hermes_bootstrap.py`
 to avoid a soft collision with upstream's Windows-UTF8 module of the same
 filename.

@@ -139,7 +139,7 @@ fi
 
 if [ ! -x "$HAL0_HERMES_BIN" ]; then
     printf 'hermes: venv binary missing at %s\n' "$HAL0_HERMES_BIN" >&2
-    printf '  Run `hal0 agent bootstrap hermes` to provision.\n' >&2
+    printf '  Run `hal0 agent reprovision hermes` to provision.\n' >&2
     exit 127
 fi
 

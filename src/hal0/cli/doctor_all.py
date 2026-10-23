@@ -1180,7 +1180,7 @@ def check_mcp_mounts(results: dict[str, dict[str, Any]] | None = None) -> Check:
             if any(marker in err for marker in ("401", "403", "Unauthorized", "Forbidden")):
                 failures.append(
                     f"{name}: {err} — agent token missing/stale: "
-                    "run `hal0 agent bootstrap hermes --repair`"
+                    "run `hal0 agent reprovision hermes --repair`"
                 )
             else:
                 failures.append(f"{name}: {err}")
@@ -1209,7 +1209,7 @@ def check_hermes_mcp_config_auth(
     Static counterpart to :func:`check_mcp_mounts`: that row proves the LIVE
     handshake works right now (as the box's own service key, from wherever
     `hal0 doctor` runs); this one proves the specific artifact
-    ``hal0 agent bootstrap hermes`` renders is what actually carries the
+    ``hal0 agent reprovision hermes`` renders is what actually carries the
     bearer forward into every Hermes-issued call — the drift class where
     ``HAL0_ADMIN_KEY`` was set or rotated *after* the last provision/repair
     pass, so the live config.yaml is stale even though the box's current key
@@ -1267,7 +1267,7 @@ def check_hermes_mcp_config_auth(
             "Hermes MCP config auth",
             _FAIL,
             f"auth is required but {', '.join(missing)} carries no Authorization header in "
-            f"{path} — run `hal0 agent bootstrap hermes --repair`",
+            f"{path} — run `hal0 agent reprovision hermes --repair`",
         )
     return Check(
         "hermes_mcp_auth",

@@ -1314,7 +1314,7 @@ if [[ "${DEV_MODE}" -eq 0 ]]; then
     # Also link `hal0-agent` — the `hal0-agent@.service` unit ExecStart's
     # `/usr/local/bin/hal0-agent`, so without this symlink the agent units
     # fail with status=203/EXEC the moment an operator runs
-    # `hal0 agent bootstrap hermes`. Derive the link dir from HAL0_PATH_LINK
+    # `hal0 agent reprovision hermes`. Derive the link dir from HAL0_PATH_LINK
     # so a relocated `hal0` keeps `hal0-agent` beside it.
     HAL0_AGENT_LINK="$(dirname "${HAL0_PATH_LINK}")/hal0-agent"
     if [[ -x "${HAL0_AGENT_BIN}" ]]; then
@@ -3950,7 +3950,7 @@ else
     # §7.4 privilege drop: `agent install hermes` runs here as root, but the CLI
     # itself drops the BOOTSTRAP step to the hal0 user (cli/_provision_hermes) —
     # a root-only prelude installs the /usr/local/bin wrapper + ensures the
-    # setgid hal0-owned skeleton, then it re-execs `agent bootstrap hermes` as
+    # setgid hal0-owned skeleton, then it re-execs `agent reprovision hermes` as
     # hal0 so config.yaml / personas / provision.json are all born
     # hal0:hal0. Root:root artifacts (seed TOML, driver env, gateway drop-in) go
     # through the hal0-agentenv / hal0-systemctl sudo seams. The remaining root
