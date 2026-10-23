@@ -223,6 +223,97 @@ def test_graph_status_reports_target_and_available_models(
     assert body["engine_llm"] == engine_llm
 
 
+def test_graph_status_warms_cold_remote_catalogs(
+    stub_wrapper: StubWrapper, hal0_home: Path
+) -> None:
+    """The model cache is filled only by the dispatcher's cold prefetch on a
+    dispatch miss, so right after a hal0-api restart every remote bucket is
+    empty and the picker's Upstream models group was empty (CT105, #2926).
+    The status route warms cold eligible remotes through the shared
+    fetch-and-merge path, and the operator's model_filters still apply."""
+    from types import SimpleNamespace
+
+    from hal0.api.routes import memory as memory_routes
+    from hal0.upstreams.filters import ModelFilters
+
+    memory_routes._WARM_ATTEMPTS.clear()
+    app = _build_app(stub_wrapper, "agent", "utility")
+    app.state.upstreams = SimpleNamespace(
+        list=lambda: [
+            SimpleNamespace(name="minimax", kind="remote", slot_name=None, pinned=False),
+            SimpleNamespace(
+                name="openrouter",
+                kind="remote",
+                slot_name=None,
+                pinned=False,
+                model_filters=ModelFilters(models=("minimax/minimax-m3",)),
+            ),
+            SimpleNamespace(name="hermes", kind="remote", slot_name=None, pinned=True),
+        ]
+    )
+    cache: dict[str, list[str]] = {}
+    app.state.upstream_models = cache
+    fetched: list[str] = []
+
+    async def fetch_and_cache(u: Any) -> list[str]:
+        fetched.append(u.name)
+        cache[u.name] = {"minimax": ["MiniMax-M2.5"], "openrouter": ["minimax/minimax-m3", "x/y"]}[
+            u.name
+        ]
+        return cache[u.name]
+
+    app.state.fetch_and_cache = fetch_and_cache
+    with (
+        TestClient(app) as client,
+        patch("hal0.memory.extraction_env.effective_engine_llm", return_value=_NO_ENGINE_LLM),
+    ):
+        body = client.get("/api/memory/graph/status").json()
+    assert sorted(fetched) == ["minimax", "openrouter"]  # never the pinned agent
+    assert body["available_models"] == [
+        {"id": "MiniMax-M2.5", "owned_by": "minimax"},
+        {"id": "minimax/minimax-m3", "owned_by": "openrouter"},
+    ]
+
+
+def test_graph_status_does_not_refetch_an_offline_remote_every_poll(
+    stub_wrapper: StubWrapper, hal0_home: Path
+) -> None:
+    from types import SimpleNamespace
+
+    from hal0.api.routes import memory as memory_routes
+
+    memory_routes._WARM_ATTEMPTS.clear()
+    app = _build_app(stub_wrapper, "agent")
+    app.state.upstreams = SimpleNamespace(
+        list=lambda: [SimpleNamespace(name="minimax", kind="remote", slot_name=None, pinned=False)]
+    )
+    app.state.upstream_models = {}
+    calls: list[str] = []
+
+    async def offline(u: Any) -> list[str]:
+        calls.append(u.name)
+        return []
+
+    app.state.fetch_and_cache = offline
+    with (
+        TestClient(app) as client,
+        patch("hal0.memory.extraction_env.effective_engine_llm", return_value=_NO_ENGINE_LLM),
+    ):
+        client.get("/api/memory/graph/status")
+        client.get("/api/memory/graph/status")
+        body = client.get("/api/memory/graph/status").json()
+    assert calls == ["minimax"]  # once per 60 s, not once per poll
+    assert body["available_models"] == []
+
+
+def test_graph_status_route_requires_admin() -> None:
+    """Warming makes outbound provider calls; the route that triggers it must
+    sit behind the ADMIN tier, never OPEN or CLIENT."""
+    from hal0.security.exposure import AuthClass, classify
+
+    assert classify("GET", "/api/memory/graph/status") == AuthClass.ADMIN
+
+
 def test_graph_status_without_upstreams_has_an_empty_model_list(
     client: TestClient, stub_wrapper: StubWrapper
 ) -> None:
@@ -264,6 +355,7 @@ _NO_ENGINE_LLM = {
     "overridden": False,
     "override_file": None,
     "override_keys": [],
+    "source": "process",
 }
 
 

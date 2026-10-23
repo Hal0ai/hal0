@@ -22,6 +22,7 @@ import asyncio
 import contextlib
 import logging
 import re
+import time
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -243,6 +244,53 @@ async def _enabled_llm_slots(request: Request) -> list[str]:
     return sorted(alias_map.keys())
 
 
+#: Last warm attempt per upstream name (monotonic seconds): an offline
+#: provider is re-fetched at most once per :data:`_WARM_RETRY_S`, not on
+#: every status poll.
+_WARM_ATTEMPTS: dict[str, float] = {}
+_WARM_RETRY_S = 60.0
+
+
+async def _warm_cold_catalogs(
+    request: Request, upstreams: list[Any], cache: dict[str, list[str]]
+) -> None:
+    """Fill empty model-cache buckets for eligible remotes (#2926 follow-up).
+
+    The shared cache is written only by the dispatcher's cold prefetch on a
+    dispatch miss, so after a hal0-api restart every remote bucket is empty
+    and the engine picker had nothing to offer. Uses the same fetch-and-merge
+    helper as the dispatcher (``app.state.fetch_and_cache``), concurrently,
+    each fetch bounded by the registry's own timeouts. The route is ADMIN
+    (``security/exposure.py``), so this never runs for an unauthenticated
+    caller on an auth-on box.
+    """
+    fetch = getattr(request.app.state, "fetch_and_cache", None)
+    registry = getattr(request.app.state, "upstreams", None)
+    now = time.monotonic()
+    cold = [
+        u
+        for u in upstreams
+        if not cache.get(u.name) and now - _WARM_ATTEMPTS.get(u.name, -1e9) >= _WARM_RETRY_S
+    ]
+    if not cold:
+        return
+    for u in cold:
+        _WARM_ATTEMPTS[u.name] = now
+
+    async def _one(u: Any) -> None:
+        try:
+            if fetch is not None:
+                await fetch(u)
+            elif registry is not None and hasattr(registry, "fetch_models"):
+                models = await registry.fetch_models(u.name)
+                if models:
+                    cache[u.name] = list(models)
+        except Exception:  # best-effort, status must not fail
+            log.debug("memory.graph_status.warm_failed upstream=%s", u.name)
+
+    await asyncio.gather(*(_one(u) for u in cold))
+
+
 async def _available_upstream_models(request: Request) -> list[dict[str, str]]:
     """Upstream model ids the operator may run the memory engine on (#2919).
 
@@ -259,21 +307,27 @@ async def _available_upstream_models(request: Request) -> list[dict[str, str]]:
     from hal0.upstreams.filters import apply_filters
 
     upstreams = getattr(request.app.state, "upstreams", None)
-    cache = getattr(request.app.state, "upstream_models", {}) or {}
+    # Not ``or {}``: an empty dict is the live shared cache on a fresh process,
+    # and swapping it for a private copy would discard what warming writes.
+    cache = getattr(request.app.state, "upstream_models", None)
+    if cache is None:
+        cache = {}
     if upstreams is None:
         return []
     local_names = set(await _enabled_llm_slots(request))
     rows: list[dict[str, str]] = []
     try:
-        for up in upstreams.list():
-            if getattr(up, "kind", "") != "remote" or getattr(up, "slot_name", None):
-                continue
-            if getattr(up, "pinned", False):
-                continue
-            if getattr(up, "enabled", True) is False:
-                continue
-            if getattr(up, "advertise_models", True) is False:
-                continue
+        eligible = [
+            up
+            for up in upstreams.list()
+            if getattr(up, "kind", "") == "remote"
+            and not getattr(up, "slot_name", None)
+            and not getattr(up, "pinned", False)
+            and getattr(up, "enabled", True) is not False
+            and getattr(up, "advertise_models", True) is not False
+        ]
+        await _warm_cold_catalogs(request, eligible, cache)
+        for up in eligible:
             ids = [m for m in (cache.get(up.name, []) or []) if isinstance(m, str) and m]
             for model_id in apply_filters(ids, getattr(up, "model_filters", None)):
                 if model_id.startswith("hal0/") or model_id in local_names:
