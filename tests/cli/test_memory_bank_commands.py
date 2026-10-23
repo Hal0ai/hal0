@@ -148,6 +148,21 @@ def test_profile_set_disposition_goes_through_config_patch(stub_api) -> None:
     assert payload == {"updates": {"disposition_skepticism": 5}}
 
 
+def test_profile_set_min_refresh_interval_goes_through_config_patch(stub_api) -> None:
+    """#2920: the per-bank mental-model refresh floor is one more config key."""
+    result = runner.invoke(bc.app, ["profile", "set", "shared", "--min-refresh-interval", "14400"])
+    assert result.exit_code == 0, result.output
+    path, payload = stub_api["patch"][-1]
+    assert path == "/api/memory/banks/shared/config"
+    assert payload == {"updates": {"mental_model_min_refresh_interval_seconds": 14400}}
+
+
+def test_profile_set_min_refresh_interval_rejects_negative(stub_api) -> None:
+    result = runner.invoke(bc.app, ["profile", "set", "shared", "--min-refresh-interval", "-1"])
+    assert result.exit_code != 0
+    assert stub_api["patch"] == []
+
+
 def test_profile_set_mission_fields_go_through_config_patch(stub_api) -> None:
     result = runner.invoke(
         bc.app,

@@ -502,7 +502,41 @@ function BankBar({ bank, setBank }) {
   const mentalModelsQuery = useMentalModels ? useMentalModels(bank) : { data: null }
   const mentalModels = mentalModelsQuery.data?.items || []
   const mentalModelRefresh = useMentalModelRefresh ? useMentalModelRefresh() : { mutate: () => {} }
-  const staleCount = mentalModels.filter((m) => m.is_stale).length
+  // #2920: Hindsight's `is_stale` only says the bank was written since the
+  // model's last refresh — on a busy bank that is nearly always true, so it is
+  // a quiet hint. The fault is a refresh that failed after the last success.
+  const refreshFailed = (m) =>
+    !!m.last_refresh_failed_at &&
+    (!m.last_refreshed_at || m.last_refresh_failed_at > m.last_refreshed_at)
+  const failedCount = mentalModels.filter(refreshFailed).length
+  // The bank's floor between automatic refreshes (0/unset = after every
+  // consolidation) — what keeps a busy bank from re-reflecting every model
+  // on every consolidation round.
+  const useBankConfig = window.__hal0UseBankConfig
+  const bankConfigQuery = useBankConfig ? useBankConfig(bank) : { data: null }
+  const floorRaw = bankConfigQuery.data?.config?.mental_model_min_refresh_interval_seconds
+  const floorValue = String(Number.isFinite(Number(floorRaw)) && floorRaw != null ? Number(floorRaw) : 0)
+  const floorOptions = [
+    ['0', 'after every consolidation'],
+    ['3600', 'at most hourly'],
+    ['14400', 'at most every 4 h'],
+    ['43200', 'at most every 12 h'],
+    ['86400', 'at most daily'],
+  ]
+  if (!floorOptions.some(([v]) => v === floorValue)) floorOptions.push([floorValue, `at most every ${floorValue} s`])
+  const useFloorUpdate = window.__hal0UseBankConfigUpdate
+  const floorUpdate = useFloorUpdate ? useFloorUpdate() : { mutateAsync: async () => {}, isPending: false }
+  const setFloor = async (value) => {
+    try {
+      await floorUpdate.mutateAsync({
+        bank,
+        updates: { mental_model_min_refresh_interval_seconds: Number(value) },
+      })
+      memToast('Refresh floor saved', 'ok')
+    } catch (err) {
+      memToast(`Save failed: ${err?.message || 'see logs'}`, 'err')
+    }
+  }
 
   if (!b) return null
 
@@ -802,8 +836,8 @@ function BankBar({ bank, setBank }) {
           </div>
           <div className="pad" style={{ padding: '12px 14px 16px' }}>
             <div style={{ display: 'flex', alignItems: 'center', marginBottom: 4 }}>
-              <span className="mv-cell-k" style={{ margin: 0 }}>
-                mental models · {staleCount} stale
+              <span className="mv-cell-k" style={{ margin: 0 }} data-testid="mv-mm-head">
+                mental models{failedCount > 0 ? ` · ${failedCount} failed` : ''}
               </span>
               <span style={{ flex: 1 }} />
               <button
@@ -822,15 +856,28 @@ function BankBar({ bank, setBank }) {
                 title={`${m.source_query} — ${m.content || ''}`}
               >
                 <span
-                  style={{ flex: 1, color: m.is_stale ? 'var(--warn)' : undefined, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+                  style={{ flex: 1, color: refreshFailed(m) ? 'var(--warn)' : undefined, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
                 >
                   {m.name}
                 </span>
-                {m.is_stale ? (
-                  <span className="mv-chip warn">stale</span>
-                ) : (
-                  <span className="mini num">{(m.last_refreshed_at || '').slice(0, 10)}</span>
+                {refreshFailed(m) && (
+                  <span className="mv-chip warn" title={`last refresh failed ${m.last_refresh_failed_at}`}>
+                    refresh failed
+                  </span>
                 )}
+                {!refreshFailed(m) && m.is_stale && (
+                  <span
+                    className="mini"
+                    data-testid="mv-mm-new-since"
+                    title="new memories since the last refresh — the next refresh picks them up"
+                    style={{ color: 'var(--fg-4)' }}
+                  >
+                    •
+                  </span>
+                )}
+                <span className="mini num" title={m.last_refreshed_at ? `last refreshed ${m.last_refreshed_at}` : 'never refreshed'}>
+                  {(m.last_refreshed_at || 'never').slice(0, 10)}
+                </span>
                 <button
                   className="mv-btn"
                   style={{ padding: '0 7px', fontSize: 10 }}
@@ -840,9 +887,25 @@ function BankBar({ bank, setBank }) {
                 </button>
               </div>
             ))}
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 8 }}>
+              <span className="mini" style={{ color: 'var(--fg-4)' }}>refresh</span>
+              <select
+                className="mono"
+                data-testid="mv-mm-floor"
+                value={floorValue}
+                disabled={floorUpdate.isPending}
+                onChange={(e) => setFloor(e.target.value)}
+                title="mental_model_min_refresh_interval_seconds — the bank's floor between automatic refreshes"
+                style={{ fontSize: 10.5, background: 'var(--bg-2)', color: 'var(--fg-2)', border: '1px solid var(--line)' }}
+              >
+                {floorOptions.map(([v, label]) => (
+                  <option key={v} value={v}>{label}</option>
+                ))}
+              </select>
+            </div>
             <p className="mhelp" style={{ marginTop: 6 }}>
-              standing questions, refreshed from memory on consolidation — hover to read the current
-              answer
+              standing questions, refreshed from memory on consolidation (no more often than the floor
+              above) — hover to read the current answer; • means new memories since the last refresh
             </p>
           </div>
         </div>

@@ -176,13 +176,27 @@ export function useBankUpsert() {
  * change. The bank list carries the effective mission, so only that query
  * is refetched.
  */
+/** A bank's effective config overrides (`GET .../config` → `{bank_id, config}`). */
+export function useBankConfig(bank: string | null) {
+  return useQuery<{ bank_id: string; config: Record<string, unknown> }>({
+    queryKey: ['memory', 'banks', bank, 'config'],
+    queryFn: () =>
+      apiGet<{ bank_id: string; config: Record<string, unknown> }>(
+        ENDPOINTS.memoryBankConfig(bank as string),
+      ),
+    enabled: !!bank,
+    staleTime: 30_000,
+  })
+}
+
 export function useBankConfigUpdate() {
   const qc = useQueryClient()
   return useMutation({
     mutationFn: ({ bank, updates }: { bank: string; updates: Record<string, unknown> }) =>
       apiPatch(ENDPOINTS.memoryBankConfig(bank), { updates }),
-    onSuccess: () => {
+    onSuccess: (_d, vars) => {
       void qc.invalidateQueries({ queryKey: ['memory', 'banks'], exact: true })
+      void qc.invalidateQueries({ queryKey: ['memory', 'banks', vars.bank, 'config'] })
     },
   })
 }
@@ -485,8 +499,12 @@ export interface MentalModel {
   source_query: string
   content?: string | null
   tags?: string[]
+  // "the bank was written since this model last refreshed" — on a busy bank
+  // this is true almost always; it is a hint, not a fault (#2920).
   is_stale?: boolean
   last_refreshed_at?: string | null
+  // set when a refresh failed; a fault only when later than last_refreshed_at
+  last_refresh_failed_at?: string | null
 }
 
 export function useMentalModels(bank: string | null) {

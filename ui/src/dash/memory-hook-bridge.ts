@@ -17,6 +17,7 @@ import {
 
 import {
   useAggregateBankStats,
+  useBankConfig,
   useBankConfigUpdate,
   useBankDelete,
   useBankDocuments,
@@ -85,6 +86,7 @@ Object.assign(window as unknown as Record<string, unknown>, {
   __hal0UseAggregateBankStats: useAggregateBankStats,
   __hal0UseBankTimeseries: useBankTimeseries,
   __hal0UseBankUpsert: useBankUpsert,
+  __hal0UseBankConfig: useBankConfig,
   __hal0UseBankConfigUpdate: useBankConfigUpdate,
   __hal0UseBankDelete: useBankDelete,
   __hal0UseBankOperations: useBankOperations,
