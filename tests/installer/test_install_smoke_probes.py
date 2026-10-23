@@ -329,3 +329,24 @@ def test_remote_upstreams_do_not_count_as_a_bound_slot(tmp_path: Path) -> None:
     res = _drive(tmp_path, "smoke_structured_output")
     assert res.returncode == 2
     assert not posts.exists()
+
+
+def test_a_target_slot_in_error_fails_without_sending_the_request(tmp_path: Path) -> None:
+    """A crash-looping slot is exactly what the probe exists to catch, so it
+    is a failure, not a skip; sending the request would only retry the load."""
+    posts = _gateway(tmp_path, [_slot("utility", "small-model", "error")])
+    _write_exec(tmp_path / "hal0", "exit 0")
+    res = _drive(tmp_path, _SHOW)
+    assert "FAILED:structured-output" in res.stdout
+    assert "slot 'utility' is in error" in res.stderr
+    assert not posts.exists()
+
+
+def test_a_stale_runtime_model_id_does_not_count_as_bound(tmp_path: Path) -> None:
+    """A row's model_id outlives a cleared binding; the resolver reads only the
+    configured model, so hal0/utility goes to the warm agent and is probed."""
+    stale = {**_slot("utility", None, "offline"), "model_id": "old-model"}
+    posts = _gateway(tmp_path, [stale, _slot("agent", "big-model", "ready")])
+    res = _drive(tmp_path, "smoke_structured_output")
+    assert res.returncode == 0, res.stderr
+    assert posts.read_text(encoding="utf-8").count("post") == 1
