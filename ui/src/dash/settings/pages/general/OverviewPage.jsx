@@ -35,6 +35,13 @@ export function _pct(v) {
   return v == null ? '—' : `${Math.round(v * 100)}%`
 }
 
+// A forced performance level (gpu-compute.service) pins the AMD busy counter
+// at 100; caption it like the telemetry header instead of showing a bare 100%.
+export function _gpuUtil(H) {
+  const v = _pct(H?.gpu_util)
+  return v !== '—' && H?.util_is_forced_high ? `${v} · pinned (forced performance level)` : v
+}
+
 function _ms(v) {
   return v == null ? '—' : `${Math.round(v)} ms`
 }
@@ -122,7 +129,7 @@ function HardwarePanel() {
           <SRow k="CPU utilization" sub="Host CPU load" mono v={_pct(H.cpu_util)} />
           {hasGpu ? (
             <>
-              <SRow k="GPU utilization" sub="Compute load on the primary accelerator" mono v={_pct(H.gpu_util)} />
+              <SRow k="GPU utilization" sub="Compute load on the primary accelerator" mono v={_gpuUtil(H)} />
               <SRow k="GPU VRAM" sub="Dedicated/GTT memory in use" mono v={<span style={{ color: 'var(--fg-3)' }}>{_mb(H.gpu_vram_used_mb ?? H.gtt_used_mb)} / {_mb(H.gpu_vram_total_mb)}</span>} />
             </>
           ) : (
