@@ -300,3 +300,33 @@ def test_runtime_only_enablement_is_kept_on_reinstall(monkeypatch, tmp_path) -> 
     ac._install_hermes_gateway()
     assert ["systemctl", "enable", "--runtime", "--now", UNIT] in calls
     assert ["systemctl", "enable", "--now", UNIT] not in calls
+
+
+def test_a_failed_move_never_enables_a_second_gateway(monkeypatch, tmp_path, capsys) -> None:
+    """The rollback may have put the suffixed gateway back; enabling the canonical
+    unit after that would start a second poller (#2946 review)."""
+    from hal0.agents.hermes_gateway_regen import HASHED_UNIT
+
+    calls = _setup(monkeypatch, tmp_path, state="not-found", install_fails=True)
+    (tmp_path / UNIT).write_text("[Unit]\n")  # a canonical file is on disk
+    (tmp_path / HASHED_UNIT).write_text(
+        '[Service]\nUser=hal0\nEnvironment="HERMES_HOME=/var/lib/hal0/.hermes"\n'
+    )
+    ac._install_hermes_gateway()
+    assert _enables(calls) == []
+    out = _out(capsys)
+    assert "suffixed gateway unit is still in place" in out
+    assert "continuing" not in out
+
+
+def test_a_failure_without_a_suffixed_unit_still_enables_the_gateway(
+    monkeypatch, tmp_path, capsys
+) -> None:
+    """A transient failure on a box with no suffixed unit (a plain daemon-reload,
+    a stale-unit restart) keeps the old behaviour: the operator's on decision
+    still enables the canonical unit."""
+    calls = _setup(monkeypatch, tmp_path, state="not-found", install_fails=True)
+    (tmp_path / UNIT).write_text("[Unit]\n")
+    ac._install_hermes_gateway()
+    assert ["systemctl", "enable", "--now", UNIT] in _enables(calls)
+    assert "continuing" in _out(capsys)

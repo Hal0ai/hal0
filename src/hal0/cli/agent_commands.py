@@ -1224,7 +1224,11 @@ def _install_hermes_gateway() -> None:
     # the release path it ran from and creates a stray /root/.hermes. The
     # template never enables or starts the unit; the off switch below and the
     # enable logic further down decide that, as before.
-    from hal0.agents.hermes_gateway_regen import GatewayRegenError, install_gateway_unit
+    from hal0.agents.hermes_gateway_regen import (
+        GatewayRegenError,
+        hal0_hashed_units,
+        install_gateway_unit,
+    )
 
     if _os.geteuid() != 0:
         console.print(
@@ -1240,6 +1244,18 @@ def _install_hermes_gateway() -> None:
             if _Path(_HERMES_GATEWAY_UNIT).is_file()
             else "hermes gateway unit not installed"
         )
+        # Never enable the canonical unit while a suffixed unit is still there:
+        # a failed move's rollback may have put that gateway back, and enabling
+        # would start a second poller on the same tokens (#2946 review). Any
+        # other failure (a plain daemon-reload, a stale-unit restart) keeps the
+        # old behaviour and goes on to apply the operator's on/off decision.
+        if hal0_hashed_units(_Path(_HERMES_GATEWAY_UNIT).parent):
+            console.print(
+                f"[yellow]{what} ({exc}) — the suffixed gateway unit is still in place, "
+                "so hermes-gateway.service is not enabled; re-run "
+                "'sudo hal0 agent install hermes' to retry the move.[/yellow]"
+            )
+            return
         console.print(
             f"[yellow]{what} ({exc}) — Telegram/Discord bridge may be unavailable; "
             "continuing.[/yellow]"

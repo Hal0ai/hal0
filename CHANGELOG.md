@@ -30,6 +30,10 @@ applying. Add those subsections to a version's section to surface them; see
 
 ## [Unreleased]
 
+### Fixed
+
+- **A Hermes gateway migration that fails partway can no longer leave two gateways running or lose track of one.** Three gaps remained in the move off a 1.6.0-nightly suffixed `hermes-gateway-<hash>.service` (#2946). If an update was killed after taking over the gateway, its crash-recovery journal did not list the gateway, so recovery restarted every unit except it. The restart that loads a rewritten, stale canonical unit ran after the rollback window, so a failed restart left the operator's gateway stopped. And after a failed move, `hal0 agent install hermes` went on to enable the canonical unit even when the rollback had restored the suffixed gateway, starting a second poller on the same Telegram/Discord tokens. The journal is now rewritten as soon as the gateway is taken over. The restart runs inside the rollback, which brings the original gateway back if it fails. The install command stops after a failed move. ([#2950](https://github.com/Hal0ai/hal0/issues/2950))
+
 ## [1.6.0] — 2026-10-23
 
 ### Highlights

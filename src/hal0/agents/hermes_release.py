@@ -1656,6 +1656,9 @@ def _activate(
         # (#2943, #2946 review).
         if had_suffixed and GATEWAY_UNIT not in recorded and units.active(GATEWAY_UNIT):
             recorded = [*recorded, GATEWAY_UNIT]
+            # Keep the crash-recovery journal in step, or a killed update
+            # would restart only the units recorded before the heal.
+            _record_stopped_units(layout, recorded)
 
     for unit in recorded:
         units.start(unit)

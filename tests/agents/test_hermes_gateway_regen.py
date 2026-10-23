@@ -381,11 +381,18 @@ def test_the_suffix_is_upstreams_hash_of_hal0s_home() -> None:
 class UnitSystemctl:
     """Per-unit systemctl state: is-enabled/is-active answer per unit; enable,
     disable, start, stop and restart change it. ``fail`` names an argv prefix
-    that fails."""
+    that fails, ``also_fail`` more of them; a failed start or restart leaves
+    the unit inactive."""
 
-    def __init__(self, states: dict[str, tuple[str, bool]], fail: list[str] | None = None) -> None:
+    def __init__(
+        self,
+        states: dict[str, tuple[str, bool]],
+        fail: list[str] | None = None,
+        also_fail: list[list[str]] | None = None,
+    ) -> None:
         self.states = dict(states)
         self.fail = fail
+        self.also_fail = also_fail or []
         self.calls: list[list[str]] = []
 
     @property
@@ -395,7 +402,10 @@ class UnitSystemctl:
     def __call__(self, argv: list[str], **_: Any) -> subprocess.CompletedProcess[str]:
         argv = list(argv)
         self.calls.append(argv)
-        if self.fail and argv[: len(self.fail)] == self.fail:
+        if any(argv[: len(f)] == f for f in [*([self.fail] if self.fail else []), *self.also_fail]):
+            if argv[1] in ("start", "restart"):
+                state, _active = self.states.get(argv[-1], ("not-found", False))
+                self.states[argv[-1]] = (state, False)
             return subprocess.CompletedProcess(argv, 1, "", "boom")
         unit = argv[-1]
         state, active = self.states.get(unit, ("not-found", False))
@@ -871,3 +881,49 @@ def test_a_rollback_restores_a_pre_existing_canonical_unit(tmp_path: Path) -> No
     with pytest.raises(regen.GatewayRegenError):
         _migrate(tmp_path, sc)
     assert canonical.read_text() == before
+
+
+def test_a_failed_restart_of_a_stale_canonical_unit_keeps_the_suffixed_one(tmp_path: Path) -> None:
+    hashed = _hashed_unit(tmp_path)
+    canonical = _old_unit(tmp_path)
+    before = canonical.read_text()
+    sc = UnitSystemctl(
+        {HASHED: ("disabled", False), CANON: ("enabled", True)},
+        fail=["systemctl", "restart", CANON],
+    )
+    text_at_start: list[str] = []
+    inner = sc.__call__
+
+    def spy(argv: list[str], **kw: Any) -> subprocess.CompletedProcess[str]:
+        if list(argv) == ["systemctl", "start", CANON]:
+            text_at_start.append(canonical.read_text())
+        return inner(argv, **kw)
+
+    with pytest.raises(regen.GatewayRegenError, match="restart") as err:
+        _migrate(tmp_path, spy)  # type: ignore[arg-type]
+    assert "left stopped" not in str(err.value)
+    assert hashed.exists() and canonical.read_text() == before
+    # The failed restart left the unit down; the rollback starts it again,
+    # on the old text, after the rollback's daemon-reload.
+    calls = sc.mutating
+    start = calls.index(["systemctl", "start", CANON])
+    restart = calls.index(["systemctl", "restart", CANON])
+    reloads = [i for i, c in enumerate(calls) if c == ["systemctl", "daemon-reload"]]
+    assert restart < max(i for i in reloads if i < start) < start
+    assert text_at_start == [before]
+    assert sc.states[CANON] == ("enabled", True)
+
+
+def test_a_rollback_that_cannot_start_the_canonical_unit_says_it_is_left_stopped(
+    tmp_path: Path,
+) -> None:
+    _hashed_unit(tmp_path)
+    _old_unit(tmp_path)
+    sc = UnitSystemctl(
+        {HASHED: ("disabled", False), CANON: ("enabled", True)},
+        fail=["systemctl", "restart", CANON],
+        also_fail=[["systemctl", "start", CANON]],
+    )
+    with pytest.raises(regen.GatewayRegenError, match=f"{CANON} left stopped"):
+        _migrate(tmp_path, sc)
+    assert sc.states[CANON] == ("enabled", False)
