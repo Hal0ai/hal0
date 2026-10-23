@@ -72,7 +72,13 @@ import structlog
 from fastapi import APIRouter, Request
 
 from hal0.api.agents.restart import _resolve_actor, require_installed
-from hal0.api.routes.updater import _persist_job, _spawn_update_task, _update_jobs
+from hal0.api.routes.updater import (
+    INTERRUPTED_CODE,
+    _fail_interrupted_job,
+    _persist_job,
+    _spawn_update_task,
+    _update_jobs,
+)
 from hal0.config import paths
 from hal0.errors import Conflict, NotFound
 from hal0.system.seam import hal0_service_home, running_hal0_bin
@@ -116,12 +122,6 @@ _LOG_FILE_MODE: Final[int] = 0o640
 _LOG_DIR_MODE: Final[int] = 0o750
 
 _JOB_STATES_IN_FLIGHT: Final[tuple[str, str]] = ("queued", "running")
-
-#: What a repair job reads after hal0-api restarted under it.
-_API_RESTARTED_CODE: Final[str] = "api_restarted"
-_API_RESTARTED_ERROR: Final[str] = (
-    "hal0-api restarted during the repair; the live release is unchanged"
-)
 
 #: Ids of the jobs whose runner is executing in this process, so a job this
 #: process is still running is never mistaken for one an earlier process left.
@@ -286,6 +286,8 @@ def _pid_alive(pid: object) -> bool:
         os.kill(pid, 0)
     except ProcessLookupError:
         return False
+    except OverflowError:
+        return False  # too large to be a pid (a corrupt job file), so nothing has it
     except OSError:
         return True  # EPERM: it exists, under another user
     return True
@@ -296,6 +298,7 @@ def reconcile_stale_repair_job(
     *,
     current_pid: int | None = None,
     pid_alive: Callable[[object], bool] = _pid_alive,
+    reloaded: bool = False,
 ) -> dict[str, Any]:
     """Record a repair job that hal0-api restarted under as ``failed``; return ``job``.
 
@@ -303,11 +306,14 @@ def reconcile_stale_repair_job(
     that registered it (``api_pid``). It is stale when that is not this process
     (the runner and the child died with the old one: the child shares hal0-api's
     cgroup), or when it is ``running`` here with no runner of ours behind it and
-    its child's ``pid`` is gone (the process id was reused by the new hal0-api).
-    The job is then set ``failed`` with ``error_code: "api_restarted"``, persisted,
-    and ``agent.repair.finished`` is emitted for it, since the runner that would
-    have is gone. The release builder swaps ``current`` only at its very end, so
-    the live release is unchanged either way.
+    its child's ``pid`` is gone (the process id was reused by the new hal0-api),
+    or when ``reloaded`` says it was read back from disk by a process that did not
+    start it (every unfinished job read that way is stale, whatever its pids say).
+    The job is then set ``failed`` with ``error_code: "api_restarted"`` (the
+    updater's :func:`_fail_interrupted_job`), persisted, and
+    ``agent.repair.finished`` is emitted for it, since the runner that would have
+    is gone. The release builder swaps ``current`` only at its very end, so the
+    live release is unchanged either way.
 
     Anything else (another phase, a terminal state, a job this process is still
     running, a ``queued`` job of this process whose runner has not started) comes
@@ -317,7 +323,7 @@ def reconcile_stale_repair_job(
     if job.get("phase") != _PHASE or job.get("state") not in _JOB_STATES_IN_FLIGHT:
         return job
     me = os.getpid() if current_pid is None else current_pid
-    stale = job.get("api_pid") != me
+    stale = reloaded or job.get("api_pid") != me
     if (
         not stale
         and job.get("state") == "running"
@@ -328,11 +334,7 @@ def reconcile_stale_repair_job(
     if not stale:
         return job
 
-    job["state"] = "failed"
-    job["error"] = _API_RESTARTED_ERROR
-    job["error_code"] = _API_RESTARTED_CODE
-    _touch(job)
-    log.warning("agent.repair.api_restarted", job_id=job.get("id"), api_pid=job.get("api_pid"))
+    _fail_interrupted_job(job)
     audit_log.warning(
         "agent.repair.finished",
         agent_id=str(job.get("agent", "hermes")),
@@ -340,7 +342,7 @@ def reconcile_stale_repair_job(
         actor=None,
         exit_code=None,
         state="failed",
-        error_code=_API_RESTARTED_CODE,
+        error_code=INTERRUPTED_CODE,
     )
     return job
 
@@ -433,10 +435,12 @@ async def run_repair_job(
     agent_id = str(job.get("agent", "hermes"))
     exit_code: int | None = None
     cancelled = False
-    _live_runners.add(job_id)
     log_file = _open_log(log_path, job)
     proc: Any = None
     try:
+        # First thing inside the ``try``, so the ``finally`` that discards it always
+        # runs once it is in the set.
+        _live_runners.add(job_id)
         try:
             proc = await spawn(
                 *argv,

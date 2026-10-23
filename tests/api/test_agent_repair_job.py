@@ -516,7 +516,12 @@ def _job(job_id: str = "j1") -> dict[str, dict[str, Any]]:
 def no_persist(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     """Replace the job store write; the list collects the state at each write."""
     states: list[str] = []
-    monkeypatch.setattr(repair_route, "_persist_job", lambda job: states.append(job["state"]))
+
+    def _record(job: dict[str, Any]) -> None:
+        states.append(job["state"])
+
+    monkeypatch.setattr(repair_route, "_persist_job", _record)
+    monkeypatch.setattr(updater_routes, "_persist_job", _record)  # the reconcile's own write
     return states
 
 
@@ -826,6 +831,26 @@ def test_a_reseeded_stale_repair_job_does_not_block_the_next_repair(
     _drain_background(client)
 
 
+def test_a_repair_job_reloaded_from_disk_is_failed_whatever_its_pids_say(
+    app_client: tuple[FastAPI, TestClient], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Nothing in memory means no runner of ours: even a matching ``api_pid`` and a live ``pid``."""
+    app, client = app_client
+    _spawn_ok(monkeypatch)
+    job = _stale_job()
+    job["api_pid"] = os.getpid()
+    job["pid"] = os.getpid()
+    updater_routes._persist_job(job)
+    app.state.update_jobs = {}
+
+    final = client.get("/api/updates/status/r1").json()
+
+    assert (final["state"], final["error_code"]) == ("failed", "api_restarted")
+    assert final["error"] == _RESTARTED_ERROR
+    assert client.post("/api/agents/hermes/repair").status_code == 202
+    _drain_background(client)
+
+
 def test_repair_post_over_a_persisted_running_job_with_a_dead_api_pid(
     app_client: tuple[FastAPI, TestClient], monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -959,14 +984,55 @@ def test_reconcile_leaves_terminal_and_other_jobs_alone(
     assert no_persist == []
 
 
-@pytest.mark.parametrize("pid", [None, 0, -1, True, "12"])
+@pytest.mark.parametrize("pid", [None, 0, -1, True, "12", 2**31, 2**70])
 def test_pid_alive_is_false_for_what_is_not_a_pid(pid: object) -> None:
     assert repair_route._pid_alive(pid) is False
+
+
+def test_a_corrupt_child_pid_fails_the_job_instead_of_the_status_route(
+    app_client: tuple[FastAPI, TestClient], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``os.kill(2**31, 0)`` raises ``OverflowError``: not a 500 on the status route or the POST."""
+    app, client = app_client
+    _spawn_ok(monkeypatch)
+    job = _stale_job()
+    job["api_pid"] = os.getpid()
+    job["pid"] = 2**31
+    app.state.update_jobs = {"r1": job}
+
+    final = client.get("/api/updates/status/r1").json()
+
+    assert (final["state"], final["error_code"]) == ("failed", "api_restarted")
+    app.state.update_jobs = {
+        "r2": {**_stale_job(job_id="r2"), "api_pid": os.getpid(), "pid": 2**31}
+    }
+    assert client.post("/api/agents/hermes/repair").status_code == 202
+    _drain_background(client)
 
 
 def test_pid_alive_sees_this_process_and_not_a_dead_one() -> None:
     assert repair_route._pid_alive(os.getpid()) is True
     assert repair_route._pid_alive(_DEAD_PID) is False
+
+
+async def test_runner_that_cannot_open_its_log_does_not_stay_a_live_runner(
+    no_persist: list[str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An unexpected error before the job runs must not pin its id in ``_live_runners``."""
+
+    def _boom(log_path: Path, job: dict[str, Any]) -> Any:
+        raise RuntimeError("not an OSError")
+
+    monkeypatch.setattr(repair_route, "_open_log", _boom)
+    spawn = AsyncMock()
+
+    with pytest.raises(RuntimeError):
+        await repair_route.run_repair_job(
+            _job(), "j1", argv=["hal0"], env={}, log_path=tmp_path / "job.log", spawn=spawn
+        )
+
+    assert "j1" not in repair_route._live_runners
+    spawn.assert_not_awaited()
 
 
 async def test_runner_is_a_live_runner_only_while_it_runs(
