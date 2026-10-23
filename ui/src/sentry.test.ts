@@ -540,7 +540,13 @@ describe('initSentry data collection', () => {
   beforeAll(async () => {
     vi.stubEnv('VITE_SENTRY_DSN', 'https://public@example.invalid/1')
     vi.stubGlobal('__HAL0_UI_VERSION__', 'test')
-    expect(await initSentry()).toBe(true)
+    // `initSentry` is idempotent per module instance and vitest 5 clears mock
+    // call history between suites, so initialise a fresh instance of the module
+    // rather than relying on calls recorded by an earlier describe block.
+    vi.resetModules()
+    sdk.init.mockClear()
+    const fresh = await import('./sentry')
+    expect(await fresh.initSentry()).toBe(true)
     options = sdk.init.mock.calls[0][0] as Options
   })
 
