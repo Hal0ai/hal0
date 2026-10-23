@@ -112,6 +112,14 @@ marker in the agent's data dir plus a `pi`-on-PATH probe — the daemon
 cannot read the operator's `0700` home, so it never inspects `~/.pi`
 directly.
 
+The dashboard's Agents view shows Pi as a live card: the installed pi and
+adapter versions against the pins (with an update badge when it is behind),
+and the profile checks for the binary, the hal0 provider and hindsight
+extensions, the theme and the memory wiring. The daemon still never installs,
+upgrades or uninstalls Pi, so the card does not run anything: it copies
+`sudo hal0 agent upgrade pi` (and the uninstall and reinstall commands) for you
+to run on the box. See [The Agents view](/docs/guides/run-agents#pi).
+
 ## hal0-brain: the steward that drives hal0 itself
 
 Separately from the bundled agent runtime, hal0 runs its own **brain

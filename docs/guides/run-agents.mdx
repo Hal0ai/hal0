@@ -21,6 +21,163 @@ locally in the foreground because the venv build can't fit in one HTTP
 request.
 </Aside>
 
+## The Agents view
+
+The dashboard's **Agents** page draws every agent as a card. Hermes and Pi are
+live cards that read the state of the box and refresh about every ten seconds.
+Qwen and opencode sit behind a grey "Coming soon" mask and do nothing yet.
+
+### The front of the card
+
+The front shows the agent's name with a status dot, the version it is running,
+and one band that depends on the status word:
+
+| Status | What it means | What the card shows |
+|---|---|---|
+| `not installed` | The agent is not on this box. | The release an install would get, and `sudo hal0 agent install hermes` to copy. |
+| `broken` | hal0 reports the install as broken. | The last five journal lines of `hal0-agent@hermes.service`, and **Start**, **Repair** (highlighted) and **Logs**. |
+| `down` | The agent unit is not running. | The unit's state, the same journal lines, and **Start** (highlighted), **Repair** and **Logs**. |
+| `degraded` | One or more checks found a problem. | The issue count, and up to three reasons, each with a fix button. More than three say "+N more" and list the rest on the console. |
+| `working` | An upgrade or repair is running. | Which one, its state, the elapsed time and the latest steps. A build started from the CLI or the Services page shows here too. |
+| `ready` | The agent unit is running. | Chips for the persona, the approvals mode and the terminal tool, then the chat platforms, the API server's profile count and a link to the Hermes desktop. "gateway off" replaces the platforms when you turned the gateway unit off. |
+| `serving` | Ready, and the model slot behind the agent is serving or reporting tokens per second. | The same chips and reach, with live tokens per second. |
+| `unknown` | hal0 cannot read the agent unit's state on this box. | A note, with **Restart** and **Logs**. |
+
+The version under the name is the live release. When it is behind the pin, an
+`↑` badge beside it names the pin, and a small line below shows the Python
+version and commit. The top-right corner shows throughput and context use while
+the agent is `ready` or `serving`, and a short note for the other statuses, such
+as the issue count on a `degraded` card. Click a card to flip it to its console;
+click again to flip back.
+
+### The console
+
+The back of the card has four tabs, and the arrow keys move between them. It
+opens on **Controls**.
+
+- **Status** is read-only: the agent unit and gateway state (a gateway you
+  turned off is marked "disabled"), the platforms, the API server's endpoint and
+  health, the primary and delegation models, the chat slot and MCP server
+  counts, the terminal tool, memory, the approvals mode with how many are
+  pending, the last provision report, the doctor rows, and every degraded
+  reason. When the provision report is older than the live
+  release it says so instead of showing counts that may be out of date. A
+  footer shows how long ago the card was refreshed.
+- **Controls** holds the buttons described next.
+- **Lore** shows what the agent can do right now. Ghost Relay unlocks when the
+  gateway is running and at least one chat platform is configured, Engram when
+  memory is available, and Deep Run when the terminal tool is on and approvals
+  mode is smart. A locked ability says what is missing. The skill chips light
+  from the voice wiring, the image and embeddings capabilities and the memory
+  provider.
+- **Lifecycle** holds Upgrade, Repair and Uninstall.
+
+### Controls
+
+- **Open Hermes desktop** links to the Hermes desktop once
+  `HAL0_HERMES_PUBLIC_URL` is set (see the
+  [environment variables](/docs/reference/env-vars)); until then the tab says so.
+- **Restart agent** and **Restart gateway** restart `hal0-agent@hermes` or the
+  Hermes gateway unit. A toast reports "Hermes is restarting" or "Hermes
+  restarted", or the failure reason. Both are disabled while a build runs.
+- **Unit logs** opens the Logs page, and **Tool activity** opens the activity
+  log on the Slots page. Neither acts on the agent.
+- **Persona** switches the active persona (a toast says "Persona activated"),
+  and **Edit** opens the editor for the active one. See [Personas](#personas).
+- **Command approvals** switches between smart and manual, the same setting as
+  [Command approvals](#command-approvals-smart-or-manual). The toast carries
+  the result and warns when hal0 could not confirm the restart that applies it.
+  The **inbox** button shows how many calls are waiting and opens
+  [the approvals queue](#the-approvals-queue).
+- **Re-mirror profiles to Open WebUI** registers the Hermes profiles as `/v1`
+  upstreams again; see [Talking to Hermes](/docs/guides/open-webui#talking-to-hermes).
+
+One action runs at a time per card. While it runs, every other button that acts
+on the agent is disabled and the running one shows its busy label, such as
+"Restarting…". Buttons that only navigate or open a dialog (**Unit logs**,
+**Tool activity**, **Edit**, the inbox and **Logs**) stay usable. If a click
+still arrives while an action runs, the card says "Another action is still
+running" and does nothing.
+
+### Upgrade, repair and uninstall
+
+The **Lifecycle** tab shows the live release (version, commit, build time,
+Python, extras, platform extras), the previous release, which is kept for
+automatic flip-back, and the pin, marked either "update available" or "live
+matches the pin". Under it sits one build button, and the **danger zone**.
+
+- **Upgrade to the pin** replaces Repair only while the live release is behind
+  the pin, the same condition that shows the `↑` badge. It runs the component
+  converge job the Services page uses. Its dialog shows the live release and the
+  pin and says what follows: the pinned release is built beside the live one
+  while Hermes keeps answering; config is migrated, MCP and memory are re-wired
+  and the result is verified; then `current` flips and the agent and the gateway
+  restart, so Telegram and the desktop drop for a few seconds. If any step
+  fails, the old release is flipped back automatically.
+- **Repair · rebuild at the pin** takes the place of Upgrade when the live
+  release matches the pin. It also appears on a `broken` or `down` card and as
+  the fix for some degraded reasons. Its dialog says it re-runs every
+  provisioning phase and rebuilds the venv, and to use it when MCP tools vanish
+  or doctor reports drift.
+- **Uninstall Hermes** asks you to type `hermes` before it proceeds. It removes
+  Hermes's seed, data and state from this box and drops its Open WebUI
+  upstreams; put it back with `sudo hal0 agent install hermes`. If some paths
+  could not be removed, a toast says how many were left behind. The button has
+  no `--keep-memory` option, so use the CLI form below to keep the agent's
+  memory namespace.
+
+While a build runs, the card shows `working` and Upgrade, Repair and Uninstall
+are disabled. A repair lists the steps the job reports, the latest four with a
+count of earlier ones, next to the elapsed time. An upgrade shows its state and
+"building at the pin", or "queued · waiting for the builder". When the job ends a
+toast says "Hermes repaired" or "Hermes upgraded", or "Hermes repair failed" (or
+"upgrade failed") with the reason. If another build holds the builder, the
+toast says "Hermes builder is busy" and nothing starts.
+
+<Aside type="caution" title="Known limit">
+Restarting `hal0-api` while a repair runs stops the build. The live release is
+kept, because each build lands in its own release directory and nothing
+switches until it has been checked. Start the repair again once `hal0-api` is
+back.
+</Aside>
+
+### Degraded reasons and their fixes
+
+A `degraded` card names each reason: "gateway down", "API server unhealthy",
+"provision failed", "provision warnings", "doctor drift" or "approvals out of
+sync", with its detail when there is one. A reason can offer one fix:
+
+- **Restart gateway** or **Restart agent** restarts the unit.
+- **Repair** opens the repair dialog above.
+- **Re-sync** applies the current approvals mode again.
+- A command to copy and run on the box.
+
+A reason with no fix is text only. When two reasons offer the same fix, its
+button appears once. The front shows the first three reasons; the Status tab
+lists all of them.
+
+### Pi
+
+Pi is a command-line tool, not a service, so its card has no unit, slot or
+gateway. For an installed Pi the top-right corner reads "no unit · no slot", and
+Pi is never `ready` or `serving`; a healthy install reads `installed`. The card shows
+the installed pi version and adapter against the pins, a `home` chip with the
+profile's home, and a row of profile checks: binary on PATH, the hal0 provider
+and hindsight extensions, the hal0 theme, the memory MCP entry, the adapter
+version and the hindsight config. Each is marked ✓, ✗ or –. When Pi is behind
+the pin, the `↑` badge appears and the front offers
+`sudo hal0 agent upgrade pi` to copy; a `broken` card offers the reinstall
+command instead.
+
+The dashboard never runs a Pi command, because Pi lives in the home of the user
+who installed it and the daemon can neither read nor change that. Its Controls
+tab offers the upgrade, uninstall and reinstall commands to copy, and a
+**Re-check** button that reads the card again. Its Lifecycle tab says what the
+upgrade does: it reinstalls both pins with npm, redeploys the hal0 provider and
+hindsight extensions and the theme, rewrites the managed package entry and the
+`hal0-memory` MCP entry, and re-stamps the marker. Run it as the user who
+installed Pi; extensions you added yourself are left alone.
+
 ## Install Hermes
 
 ```sh
@@ -315,6 +472,10 @@ stays on that release when hal0 builds a newer one, and `hermes gateway status`
 reports the unit as outdated. `sudo hal0 agent install hermes` regenerates and
 normalises the unit again.
 
+The Hermes card in the dashboard has buttons for these too: **Restart agent**
+and **Restart gateway** on its Controls tab, and **Upgrade** or **Repair** on
+its Lifecycle tab. See [The Agents view](#the-agents-view).
+
 </TabItem>
 <TabItem label="Uninstall">
 
@@ -329,6 +490,10 @@ Default uninstall tears down the agent's private memory namespace too;
 Uninstalling Hermes also runs `loginctl disable-linger hal0`, which undoes the
 linger the Hermes gateway turned on. Run the uninstall as root for that step;
 otherwise it prints the command to run.
+
+The Hermes card also has an **Uninstall** button on its Lifecycle tab, behind a
+type-to-confirm dialog. It has no `--keep-memory` option; see
+[The Agents view](#upgrade-repair-and-uninstall).
 
 </TabItem>
 </Tabs>
