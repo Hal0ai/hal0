@@ -674,7 +674,7 @@ def regenerate_gateway_unit(
             # The migration itself succeeded (the gateway moved over). Only a
             # linger follow-up (no loginctl, or enable-linger failed) is
             # reported instead of raised; anything else still fails the verb.
-            if not str(exc).startswith(f"loginctl enable-linger {GATEWAY_USER}"):
+            if not str(exc).startswith("loginctl enable-linger"):
                 raise
             tail = RegenResult("noop", "", steps=[f"follow-up: {exc}"])
         steps = [*migrated.steps, *tail.steps]
