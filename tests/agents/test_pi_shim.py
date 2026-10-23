@@ -143,17 +143,19 @@ def test_install_writes_hindsight_config_only_if_absent(home: Path) -> None:
     assert json.loads(cfg_path.read_text())["apiUrl"] == "http://other:9177"
 
 
-def test_hindsight_config_maps_resolved_checkout_into_shared_bank(
+def test_hindsight_config_maps_hal0_repo_into_shared_bank(
     home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """#2315: the hal0-mono bank mapping keys off the checkout hal0 actually
-    runs from, not a path baked into the source."""
+    """#2315: the hal0-mono mapping is seeded when hal0 runs from a checkout,
+    keyed by the repo's bank id (not a path), so it follows the repo to any
+    clone or worktree."""
     checkout = tmp_path / "somewhere" / "hal0"
     monkeypatch.setattr(driver_mod, "_hal0_source_checkout", lambda: checkout)
     drv, _ = _driver()
     drv.install()
     cfg = json.loads((home / ".hindsight" / "coding-agent.json").read_text())
-    assert cfg["mapPathToBank"] == {str(checkout): "coding-agent::hal0-mono"}
+    assert cfg["banks"] == {"coding-agent::hal0": {"bank": "coding-agent::hal0-mono"}}
+    assert "mapPathToBank" not in cfg
 
 
 def test_hindsight_config_omits_bank_mapping_without_checkout(
@@ -165,6 +167,7 @@ def test_hindsight_config_omits_bank_mapping_without_checkout(
     drv, _ = _driver()
     drv.install()
     cfg = json.loads((home / ".hindsight" / "coding-agent.json").read_text())
+    assert "banks" not in cfg
     assert "mapPathToBank" not in cfg
 
 

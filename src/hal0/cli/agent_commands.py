@@ -321,6 +321,48 @@ def _install_pi() -> None:
     )
 
 
+def _upgrade_pi(to: str | None) -> None:
+    """Foreground, CLI-local pi upgrade — the sibling of :func:`_install_pi`.
+
+    Runs :meth:`PiDriver.upgrade` in-process for the same reason install does:
+    it re-pins the global npm prefix and redeploys into the invoking user's
+    ``~/.pi``, neither of which the ``hal0`` system user can write. The driver
+    refuses to run as a different user than the one that installed pi and
+    raises :class:`AgentError` when pi is not installed; both surface here as
+    a plain error line. ``--to`` is Hermes-only (a vetted commit sha); pi has
+    one pinned release, so the option is refused rather than ignored.
+    """
+    if to is not None:
+        die("--to applies to hermes only; pi upgrades to the version hal0 pins.")
+        return
+    if os.geteuid() != 0:
+        die(
+            "run as root (sudo hal0 agent upgrade pi) — pi upgrades the "
+            "invoking user's home and the global npm prefix."
+        )
+        return
+
+    # Call-time imports: the manager pulls in every driver lazily, and a test
+    # (or a dev box missing one driver's dependencies) swaps `_driver_for`.
+    from hal0.agents.manager import AgentError, _driver_for
+
+    upgrade = getattr(_driver_for("pi"), "upgrade", None)
+    if upgrade is None:
+        die("pi driver has no upgrade.")
+        return
+    console.print("[bold]Upgrading pi[/bold] → ~/.pi (extensions · pins · memory wiring) …")
+    try:
+        # The driver reports what it changed outside pi's own tree; a stand-in
+        # driver that returns nothing changed nothing.
+        result = upgrade() or {}
+    except AgentError as exc:
+        die(f"pi upgrade failed: {exc}")
+        return
+    if result.get("hindsight_alias_added"):
+        console.print("Hindsight bank alias added to coding-agent.json")
+    console.print(Panel("[bold green]Upgraded[/bold green] pi", border_style="green"))
+
+
 def _restart_hermes_after_posture_change() -> None:
     """Restart the Hermes consumers so a tool-posture change takes hold.
 
@@ -2184,9 +2226,9 @@ def agent_upgrade(
         None,
         "--to",
         help=(
-            "Build a vetted commit other than the pin: a full 40-hex sha listed in "
-            "VETTED_HERMES_REFS. Lasts until the next `hal0 update`, which converges "
-            "back to the pin."
+            "Hermes only. Build a vetted commit other than the pin: a full 40-hex sha "
+            "listed in VETTED_HERMES_REFS. Lasts until the next `hal0 update`, which "
+            "converges back to the pin."
         ),
     ),
 ) -> None:
@@ -2198,9 +2240,18 @@ def agent_upgrade(
     previous release on failure. A version string or an ``==X.Y.Z`` spec is
     refused. As root, provisioning drops to the hal0 user like every other
     entry point.
+
+    ``pi`` instead re-pins pi, redeploys hal0's extensions into ``~/.pi`` and
+    re-stamps the install marker (:meth:`PiDriver.upgrade`); run it the same
+    way you installed pi (``sudo hal0 agent upgrade pi``). It refuses when pi's
+    profile is in a different home or pi is not installed. ``--to`` is refused
+    for pi.
     """
+    if name == "pi":
+        _upgrade_pi(to)
+        return
     if name != "hermes":
-        die(f"upgrade currently only supports `hermes`; got {name!r}.")
+        die(f"upgrade currently only supports `hermes` and `pi`; got {name!r}.")
         return
     from hal0.agents import hermes_release as hr
 
