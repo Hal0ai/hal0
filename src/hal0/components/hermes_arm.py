@@ -171,6 +171,10 @@ def _config_backstop(result: dict[str, Any], *, job_id: str | None) -> None:
         # Not cosmetic: a served profile's side agents still see the terminal.
         log.error("components.hermes_terminal_gate_failed", job_id=job_id, error=str(exc))
         result["detail"] = [*result.get("detail", []), f"Hermes terminal gate not applied: {exc}"]
+        if _backend() != backend_before:
+            # The root (and any profile written before the failure) already
+            # changed on disk; the live consumers must still re-read it.
+            hermes.try_restart_hermes_consumers()
         return
     except Exception as exc:  # the converge verdict must not depend on it
         log.warning("components.hermes_config_backstop_failed", job_id=job_id, error=str(exc))

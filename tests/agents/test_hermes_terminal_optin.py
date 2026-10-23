@@ -1391,9 +1391,13 @@ def test_update_path_fails_closed_when_a_profile_cannot_take_the_gate(
 
     monkeypatch.setattr(hermes_arm, "var_lib", lambda: tmp_path)
     (tmp_path / ".hermes").symlink_to(home)
+    bounced: list[int] = []
+    monkeypatch.setattr(hp, "try_restart_hermes_consumers", lambda: bounced.append(1) or [])
     result: dict = {}
     hermes_arm._config_backstop(result, job_id="j")
     assert any("terminal gate not applied" in d for d in result["detail"])
+    # the root gate was written before the profile failure: the live consumers re-read it
+    assert bounced == [1]
 
 
 def test_profile_phase_records_a_terminal_backend_change_for_the_restart(
