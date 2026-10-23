@@ -115,10 +115,12 @@ matches the pin". Under it sits one build button, and the **danger zone**.
   release matches the pin. It also appears on a `broken` or `down` card and as
   the fix for some degraded reasons. It re-runs the provisioning phases as the
   `hal0` user and rebuilds the venv; use it when MCP tools vanish or doctor
-  reports drift. Its closing checks never load a model to test it: when the
-  slot behind the agent's model (or the memory engine's model) is not loaded,
-  the checks that need it are reported as skipped, and a skip does not count as
-  a provision warning. It skips the root-only steps of
+  reports drift. Its closing checks never load a slot that is not already
+  loaded, and never restart one with a pending config change: when the slot
+  behind the agent's model (or the memory engine's model) is not loaded, or is
+  waiting for a restart to pick up a config change, the checks that need it are
+  reported as skipped with the reason, and a skip does not count as a provision
+  warning. It skips the root-only steps of
   `sudo hal0 agent reprovision hermes --repair` (the stale drop-in sweep, file
   ownership, the vaulted default key, the `hermes` wrapper, the terminal-tool
   record), so it can end successfully on a box that still needs them. For those

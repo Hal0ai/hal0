@@ -198,3 +198,36 @@ def test_status_table_shows_why_a_skip_only_phase_skipped(
     assert "failed" not in result.output
     assert chat_skip in result.output
     assert "recorded failures" not in result.output
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        {"status": "ok", "skipped_count": 1, "details": {"failures": [], "skipped": ["{line}"]}},
+        {"status": "warn", "failure_count": 1, "details": {"failures": ["{line}"]}},
+        {"status": "fail", "reason": "{line}"},
+    ],
+    ids=["skip", "failure", "reason"],
+)
+def test_status_table_prints_square_brackets_verbatim(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, entry: dict[str, object]
+) -> None:
+    """Detail text is the provisioner's plain text, not Rich markup: the
+    memory gate's "could not read [memory] from hal0.toml" must not lose
+    ``[memory]`` to Rich's tag parser."""
+    line = (
+        "memory_roundtrip: skipped: memory engine's model not loaded (could not read "
+        "[memory] from hal0.toml (permission denied); skipped so the smoke test does "
+        "not cold-load a slot)"
+    )
+    phase = json.loads(json.dumps(entry).replace("{line}", line))
+    state_dir = tmp_path / "hermes"
+    state_dir.mkdir(parents=True)
+    (state_dir / "provision.json").write_text(json.dumps({"phases": {"smoke_tests": phase}}))
+    monkeypatch.setattr(
+        agent_commands, "_agent_provision_state_file", lambda name: state_dir / "provision.json"
+    )
+    monkeypatch.setattr(agent_commands, "console", Console(width=400))
+    result = runner.invoke(agent_commands.app, ["status", "hermes"])
+    assert result.exit_code == 0, result.output
+    assert "could not read [memory] from hal0.toml" in result.output

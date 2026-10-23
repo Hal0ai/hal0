@@ -5942,16 +5942,49 @@ def _http_status_json(url: str) -> tuple[int | None, dict[str, Any] | None]:
 # live state of the slot that would serve it, and run only when that slot is
 # already loaded.
 
-#: Budget for ``GET /api/slots``. The route probes every slot's container, which
-#: takes seconds on a wide box; the guard reads it once per smoke run.
+#: Budget for ``GET /api/slots`` and ``GET /api/slots/{name}``. The routes probe
+#: slot containers, which takes seconds on a wide box; the guard reads the list
+#: once per smoke run and each candidate slot's detail at most once.
 _SLOT_LIST_TIMEOUT_S = 10.0
 
 #: Every guard skip ends with this, so the report says why nothing was tried.
 _COLD_LOAD_SKIP = "skipped so the smoke test does not cold-load it"
 _COLD_LOAD_SKIP_UNKNOWN = "skipped so the smoke test does not cold-load a slot"
+_RESTART_SKIP = "skipped so the smoke test does not restart it"
 
 #: ``(HTTP status, slot rows)`` from :func:`_fetch_slot_list`.
 SlotListAnswer = tuple[int | None, list[dict[str, Any]] | None]
+#: ``(HTTP status, slot detail)`` from :func:`_fetch_slot_detail`.
+SlotDetailAnswer = tuple[int | None, dict[str, Any] | None]
+
+
+def _get_api_json(path: str) -> tuple[int | None, Any]:
+    """``GET {HAL0_API_URL}{path}`` with the box identity: ``(status, body)``.
+
+    ``(None, None)`` when hal0-api did not answer; body ``None`` when the
+    answer was not JSON. The key is attached with
+    :func:`hal0.service_identity.attach_service_auth`, because
+    :func:`hal0.service_identity.open_url` sends none, so the read keeps
+    working once auth is enforced.
+    """
+    from urllib.error import HTTPError, URLError
+    from urllib.request import Request
+
+    from hal0.service_identity import attach_service_auth, open_url
+
+    req = Request(f"{HAL0_API_URL}{path}", headers={"Accept": "application/json"})
+    attach_service_auth(req, prefer="admin")
+    try:
+        with open_url(req, timeout=_SLOT_LIST_TIMEOUT_S) as resp:
+            status = resp.status
+            try:
+                return (status, json.loads(resp.read().decode("utf-8")))
+            except (json.JSONDecodeError, UnicodeDecodeError, OSError):
+                return (status, None)
+    except HTTPError as exc:
+        return (exc.code, None)
+    except (URLError, OSError, TimeoutError):
+        return (None, None)
 
 
 def _fetch_slot_list() -> SlotListAnswer:
@@ -5960,34 +5993,27 @@ def _fetch_slot_list() -> SlotListAnswer:
     Unlike :func:`_fetch_slots`, which folds every failure into ``[]``, this
     keeps "hal0-api said no" (a status), "hal0-api said nothing" (status
     ``None``) and "the answer was not a slot list" (rows ``None``) apart: the
-    smoke guard must tell an empty box from a question it could not ask. The
-    key is attached with :func:`hal0.service_identity.attach_service_auth`,
-    because :func:`hal0.service_identity.open_url` sends none, so the read
-    keeps working once auth is enforced.
+    smoke guard must tell an empty box from a question it could not ask.
     """
-    from urllib.error import HTTPError, URLError
-    from urllib.request import Request
-
-    from hal0.service_identity import attach_service_auth, open_url
-
-    req = Request(f"{HAL0_API_URL}/api/slots", headers={"Accept": "application/json"})
-    attach_service_auth(req, prefer="admin")
-    try:
-        with open_url(req, timeout=_SLOT_LIST_TIMEOUT_S) as resp:
-            status = resp.status
-            try:
-                body = json.loads(resp.read().decode("utf-8"))
-            except (json.JSONDecodeError, UnicodeDecodeError, OSError):
-                return (status, None)
-    except HTTPError as exc:
-        return (exc.code, None)
-    except (URLError, OSError, TimeoutError):
-        return (None, None)
+    status, body = _get_api_json("/api/slots")
     if isinstance(body, dict):
         body = body.get("slots")
     if not isinstance(body, list):
         return (status, None)
     return (status, [row for row in body if isinstance(row, dict)])
+
+
+def _fetch_slot_detail(name: str) -> SlotDetailAnswer:
+    """``GET /api/slots/{name}`` with the box identity: ``(status, slot)``.
+
+    The by-name route computes the slot's ``config_drift``
+    (``api/routes/slots.py`` ``get_slot``); the list route does not. Same
+    status/body split as :func:`_fetch_slot_list`.
+    """
+    from urllib.parse import quote
+
+    status, body = _get_api_json(f"/api/slots/{quote(name, safe='')}")
+    return (status, body if isinstance(body, dict) else None)
 
 
 def _read_memory_engine_llm() -> dict[str, Any]:
@@ -6005,28 +6031,25 @@ def _read_memory_engine_llm() -> dict[str, Any]:
 def _is_gateway_base_url(base_url: str) -> bool:
     """Is ``base_url`` hal0's own ``/v1`` gateway? Empty means the gateway.
 
-    Compared parsed rather than as a string, so ``localhost`` and a trailing
-    slash still count: a gateway URL misread as a direct backend would put the
-    smoke probe back on the path that cold-loads a slot.
+    Any host whose port is hal0-api's (:data:`HAL0_API_URL`) and whose path is
+    ``/v1`` counts, so an ``overrides.yaml`` that names the gateway by host
+    name or LAN address is still guarded. Compared parsed rather than as a
+    string, so a trailing slash counts too. Erring this way is safe: a gateway
+    URL misread as a direct backend would put the smoke probe back on the path
+    that cold-loads a slot, while a non-hal0 server on that port is only
+    skipped ("no local slot serves ...").
     """
     url = base_url.strip()
     if not url:
         return True
     from urllib.parse import urlsplit
 
-    from hal0.service_identity import is_loopback_url
-
     try:
         got, want = urlsplit(url), urlsplit(HAL0_API_URL)
         got_port, want_port = got.port, want.port
     except ValueError:
         return False
-    return (
-        is_loopback_url(url)
-        and got.scheme == want.scheme
-        and got_port == want_port
-        and got.path.rstrip("/") == "/v1"
-    )
+    return got_port == want_port and got.path.rstrip("/") == "/v1"
 
 
 def _slot_row_model(row: dict[str, Any]) -> str:
@@ -6042,10 +6065,10 @@ def _slot_row_device(row: dict[str, Any]) -> str:
     return "npu" if row.get("declared_backend") == "flm" else ""
 
 
-def _slot_serving_model(
+def _slots_serving_model(
     model_id: str, rows: list[dict[str, Any]]
-) -> tuple[dict[str, Any] | None, str]:
-    """The ``/api/slots`` row a gateway request for ``model_id`` would land on.
+) -> tuple[list[dict[str, Any]], str]:
+    """The ``/api/slots`` rows a gateway request for ``model_id`` could land on.
 
     Mirrors the gateway so the guard asks about the slot a request would
     really load:
@@ -6059,10 +6082,12 @@ def _slot_serving_model(
     * Any other id is a slot's name (its alias) or its configured model id,
       which the chat route maps back to the slot that owns it.
 
-    Returns ``(row, "")``, or ``(None, why)`` when the id does not pin exactly
-    one slot: the primary fallback (no chain entry has a bound model) on a box
-    with more than one bound slot, an id no slot carries, or one several slots
-    carry.
+    Returns ``([row], "")`` when one slot is pinned. When no chain entry has a
+    bound model the gateway substitutes its configured primary, the first
+    bound llm slot in ITS order, which this list need not share: then every
+    bound row is returned and the request lands on one of them. ``([], why)``
+    when nothing can be pinned: no bound slot at all, an id no slot carries,
+    or one several slots carry.
     """
     # ``_slot_matches_name`` is the resolver's own name rule (including the
     # ``npu`` device escape hatch); importing it keeps one definition.
@@ -6093,44 +6118,66 @@ def _slot_serving_model(
     res = resolve_chain(model_id, views, loaded)
     if res is not None:
         if res.fallback or not res.matched_name:
-            # No chain entry has a bound model, so the gateway substitutes its
-            # configured primary: the bound ``agent`` slot, else the first bound
-            # llm slot in ITS order, which this list need not share. Only a
-            # single bound slot pins that choice.
-            if len(bound) == 1:
-                return bound[0], ""
-            return None, (
-                f"no slot in the '{model_id}' chain has a model bound, and "
-                f"{len(bound)} slots could take the fallback"
-            )
+            if not bound:
+                return [], f"no slot in the '{model_id}' chain has a model bound"
+            return bound, ""
         matched = [
             row
             for row, view in zip(bound, views, strict=True)
             if _slot_matches_name(view, res.matched_name)
         ]
         if len(matched) != 1:
-            return None, f"{len(matched)} slots answer to '{res.matched_name}'"
-        return matched[0], ""
+            return [], f"{len(matched)} slots answer to '{res.matched_name}'"
+        return matched, ""
     if model_id.startswith("hal0/"):
-        return None, f"'{model_id}' names no hal0 slot"
+        return [], f"'{model_id}' names no hal0 slot"
     owners = [row for row in llm if model_id in (str(row.get("name")), _slot_row_model(row))]
     if not owners:
-        return None, f"no local slot serves '{model_id}'"
+        return [], f"no local slot serves '{model_id}'"
     if len(owners) > 1:
-        return None, f"{len(owners)} slots serve '{model_id}'"
-    return owners[0], ""
+        return [], f"{len(owners)} slots serve '{model_id}'"
+    return owners, ""
 
 
-def _slot_cold_load_guard(model_id: str, answer: SlotListAnswer) -> tuple[bool, str]:
+def _slot_drift_blocks(name: str, answer: SlotDetailAnswer) -> str | None:
+    """Why a request must not reach loaded slot ``name``, or ``None`` if it may.
+
+    ``SlotManager.load`` restarts a loaded slot whose running config lags its
+    TOML (``_should_converge``: ``config_drift.drifted`` without a
+    ``render_error``), which after ``hal0 update`` re-renders units without
+    bouncing them is a full model reload. This mirrors that rule on the slot's
+    detail (:func:`_fetch_slot_detail`); a detail read that cannot answer
+    blocks too.
+    """
+    status, body = answer
+    if status is None:
+        return f"hal0-api did not answer for slot {name}'s config; {_RESTART_SKIP}"
+    if not 200 <= status < 300:
+        return f"hal0-api answered slot {name}'s config with HTTP {status}; {_RESTART_SKIP}"
+    if body is None:
+        return f"hal0-api's config for slot {name} was unreadable; {_RESTART_SKIP}"
+    drift = body.get("config_drift")
+    if isinstance(drift, dict) and drift.get("drifted") and not drift.get("render_error"):
+        return f"slot {name} has a pending config change; a load would restart it"
+    return None
+
+
+def _slot_cold_load_guard(
+    model_id: str,
+    answer: SlotListAnswer,
+    slot_detail: Callable[[str], SlotDetailAnswer],
+) -> tuple[bool, str]:
     """May a gateway request for ``model_id`` go out without loading a slot?
 
-    ``(True, why)`` only on affirmative evidence: hal0-api listed its slots and
-    the one serving ``model_id`` is dispatchable (``ready``, ``serving`` or
-    ``idle``, :func:`hal0.slots.state.is_dispatchable_state`), the states
-    ``SlotManager.load`` returns from without starting anything. Everything
-    else is ``(False, why)``: a cold slot, and every case where the question
-    could not be answered, because asking by sending the request IS the cold
-    load.
+    ``(True, why)`` only on affirmative evidence: hal0-api listed its slots,
+    every slot the request could land on is dispatchable (``ready``,
+    ``serving`` or ``idle``, :func:`hal0.slots.state.is_dispatchable_state`,
+    the states ``SlotManager.load`` returns from without starting anything),
+    and none of them has a pending config change that load would restart it
+    for (:func:`_slot_drift_blocks`, read through ``slot_detail``). Everything
+    else is ``(False, why)``: a cold or drifted slot, and every case where the
+    question could not be answered, because asking by sending the request IS
+    the load.
     """
     status, rows = answer
     if status is None:
@@ -6142,17 +6189,31 @@ def _slot_cold_load_guard(model_id: str, answer: SlotListAnswer) -> tuple[bool, 
         )
     if rows is None:
         return False, f"hal0-api's slot list was unreadable; {_COLD_LOAD_SKIP_UNKNOWN}"
-    row, why = _slot_serving_model(model_id, rows)
-    if row is None:
+    candidates, why = _slots_serving_model(model_id, rows)
+    if not candidates:
         return (
             False,
             f"cannot tell which slot serves '{model_id}' ({why}); {_COLD_LOAD_SKIP_UNKNOWN}",
         )
-    name = str(row.get("name"))
-    state = _slot_state(row) or "unknown"
-    if is_dispatchable_state(state):
-        return True, f"slot {name} is {state}"
-    return False, f"slot {name} is {state}; {_COLD_LOAD_SKIP}"
+    for row in candidates:
+        name = str(row.get("name"))
+        state = _slot_state(row) or "unknown"
+        if is_dispatchable_state(state):
+            continue
+        if len(candidates) == 1:
+            return False, f"slot {name} is {state}; {_COLD_LOAD_SKIP}"
+        return False, (
+            f"'{model_id}' falls back to one of {len(candidates)} slots and slot {name} "
+            f"is {state}; {_COLD_LOAD_SKIP_UNKNOWN}"
+        )
+    for row in candidates:
+        blocked = _slot_drift_blocks(str(row.get("name")), slot_detail(str(row.get("name"))))
+        if blocked is not None:
+            return False, blocked
+    if len(candidates) == 1:
+        row = candidates[0]
+        return True, f"slot {row.get('name')} is {_slot_state(row)}"
+    return True, f"'{model_id}' falls back to one of {len(candidates)} slots, all loaded"
 
 
 def _slot_kind(slot: dict[str, Any]) -> str:
@@ -7665,8 +7726,8 @@ def _phase_voice_wire(ctx: _StepCtx) -> PhaseResult:
 # for a cold model loads its slot first, and a repair that loaded a large
 # agent model that way stalled the host until the agent's watchdog killed it.
 # Both preflights therefore run their probe only when the slot that would
-# serve it is already loaded (see the cold-load guard above
-# `_fetch_slot_list`). anchor_context_window only READS the anchor's window
+# serve it is already loaded and has no pending config change, for which a
+# load restarts it (see the cold-load guard above `_fetch_slot_list`). anchor_context_window only READS the anchor's window
 # (GETs that never load a slot), so it keeps the #1831 route preflight
 # (`_anchor_route_ready`) and still runs on a cold slot. hermes_doctor,
 # admin_tools_list, wrapper_ready and hermes_md_contains_primary send no model
@@ -7989,6 +8050,7 @@ def _chat_model_ready(
     state: BootstrapState,
     io: InstallIO,
     slot_list: Callable[[], SlotListAnswer] | None = None,
+    slot_detail: Callable[[str], SlotDetailAnswer] | None = None,
 ) -> tuple[bool, str]:
     """Cheap preflight: is a chat-capable model actually routable right now?
 
@@ -7999,9 +8061,11 @@ def _chat_model_ready(
 
     **Through hal0's gateway** (``model.base_url`` empty or hal0's own
     ``/v1``, the shipped live-resolve wiring) the probe runs only when the slot
-    that serves ``model.default`` is already loaded, per hal0-api's slot list
-    (:func:`_slot_cold_load_guard`; ``slot_list`` is the phase's shared read,
-    else ``io.fetch_slot_list``). The gateway answers a model's routability
+    that serves ``model.default`` is already loaded and has no pending config
+    change a load would restart it for, per hal0-api's slot list and that
+    slot's detail (:func:`_slot_cold_load_guard`; ``slot_list`` and
+    ``slot_detail`` are the phase's shared reads, else ``io.fetch_slot_list``
+    and ``io.fetch_slot_detail``). The gateway answers a model's routability
     even when its slot is cold, and the chat request then LOADS that slot: a
     repair that cold-loaded a large agent model this way saturated the host
     for minutes and the agent's systemd watchdog killed it. So a cold slot
@@ -8035,7 +8099,9 @@ def _chat_model_ready(
         return False, wiring
     model_name, base_url = wiring
     if _is_gateway_base_url(base_url):
-        ready, why = _slot_cold_load_guard(model_name, _read_slot_list(io, slot_list))
+        ready, why = _slot_cold_load_guard(
+            model_name, _read_slot_list(io, slot_list), _slot_detail_reader(io, slot_detail)
+        )
         return ready, (f"ready ({why})" if ready else why)
     return _route_preflight(model_name, base_url, io)
 
@@ -8104,8 +8170,25 @@ def _read_slot_list(
         return (None, None)
 
 
+def _slot_detail_reader(
+    io: InstallIO, slot_detail: Callable[[str], SlotDetailAnswer] | None
+) -> Callable[[str], SlotDetailAnswer]:
+    """One slot's detail via ``slot_detail`` (else ``io.fetch_slot_detail``); a raise is no answer."""
+    fetch = slot_detail or io.fetch_slot_detail
+
+    def _read(name: str) -> SlotDetailAnswer:
+        try:
+            return fetch(name)
+        except Exception:  # a preflight must never raise
+            return (None, None)
+
+    return _read
+
+
 def _memory_engine_ready(
-    io: InstallIO, slot_list: Callable[[], SlotListAnswer] | None = None
+    io: InstallIO,
+    slot_list: Callable[[], SlotListAnswer] | None = None,
+    slot_detail: Callable[[str], SlotDetailAnswer] | None = None,
 ) -> tuple[bool, str]:
     """May memory_roundtrip run without making hal0 load a slot?
 
@@ -8118,7 +8201,8 @@ def _memory_engine_ready(
     cold. So the probe runs when that call cannot reach a slot (memory off,
     the ``pgvector`` engine, which calls no model, an engine LLM pointed away
     from hal0, an upstream target) or when :func:`_slot_cold_load_guard` finds
-    the slot loaded. Anything it cannot tell skips, like the chat gate.
+    the slot loaded with no pending config change. Anything it cannot tell
+    skips, like the chat gate.
 
     Never raises.
     """
@@ -8151,7 +8235,9 @@ def _memory_engine_ready(
         if kind == "upstream":
             return True, f"{MEMORY_ALIAS} routes to the upstream model {target}"
         model = target
-    ready, why = _slot_cold_load_guard(model, _read_slot_list(io, slot_list))
+    ready, why = _slot_cold_load_guard(
+        model, _read_slot_list(io, slot_list), _slot_detail_reader(io, slot_detail)
+    )
     return ready, f"{model}: {why}"
 
 
@@ -8168,20 +8254,28 @@ def _phase_smoke_tests(ctx: _StepCtx) -> PhaseResult:
 
     Three gates: the chat probe and the memory round trip can make hal0 load a
     slot, so they need it already loaded (cold-load guard); the anchor-window
-    probe only reads, so it keeps its route preflight. hal0-api's slot list is
-    read at most once and shared by the two cold-load gates.
+    probe only reads, so it keeps its route preflight. hal0-api's slot list,
+    and each slot's detail, are read at most once and shared by the two
+    cold-load gates.
     """
     state = ctx.state
     slot_answer: list[SlotListAnswer] = []
+    detail_answers: dict[str, SlotDetailAnswer] = {}
+    read_detail = _slot_detail_reader(ctx.io, None)
 
     def _slot_list() -> SlotListAnswer:
         if not slot_answer:
             slot_answer.append(_read_slot_list(ctx.io, None))
         return slot_answer[0]
 
-    chat_ready, chat_reason = _chat_model_ready(state, ctx.io, _slot_list)
+    def _slot_detail(name: str) -> SlotDetailAnswer:
+        if name not in detail_answers:
+            detail_answers[name] = read_detail(name)
+        return detail_answers[name]
+
+    chat_ready, chat_reason = _chat_model_ready(state, ctx.io, _slot_list, _slot_detail)
     anchor_ready, anchor_reason = _anchor_route_ready(state, ctx.io)
-    memory_ready, memory_reason = _memory_engine_ready(ctx.io, _slot_list)
+    memory_ready, memory_reason = _memory_engine_ready(ctx.io, _slot_list, _slot_detail)
     probes: list[tuple[str, Callable[[BootstrapState, InstallIO], tuple[bool | None, str]]]] = [
         ("wrapper_ready", _smoke_wrapper_ready),
         ("hermes_doctor", _smoke_hermes_doctor),
@@ -8856,6 +8950,7 @@ class InstallIO:
     fetch_model_contexts: Callable[[], dict[str, int]] = _fetch_model_contexts
     fetch_model_route_ready: Callable[[str, str], bool | None] = _fetch_model_route_ready
     fetch_slot_list: Callable[[], SlotListAnswer] = _fetch_slot_list
+    fetch_slot_detail: Callable[[str], SlotDetailAnswer] = _fetch_slot_detail
     read_memory_engine_llm: Callable[[], dict[str, Any]] = _read_memory_engine_llm
     fetch_anchor_models: Callable[..., tuple[dict[str, Any] | None, list[dict[str, Any]]]] = (
         _fetch_anchor_models
