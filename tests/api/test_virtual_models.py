@@ -158,6 +158,23 @@ def test_get_model_resolves_virtual_name(client, monkeypatch):
     assert row["owned_by"] == "hal0"
 
 
+def test_get_model_resolves_the_memory_alias_to_the_slot(client, monkeypatch):
+    """#2919: hindsight-api probes ``hal0/memory``; with the default config
+    (extraction_slot=utility, no upstream model) it resolves through the
+    utility→agent chain like ``hal0/utility`` does, id round-tripped."""
+    sm = _FakeSlotManager()
+    mr = _FakeModelRegistry()
+    client.app.state.slot_manager = sm
+    client.app.state.model_registry = mr
+    monkeypatch.setattr("hal0.api.hal0_chat_slot_model_ids", lambda sm: {"big"})
+
+    response = client.get("/v1/models/hal0/memory")
+    assert response.status_code == 200, response.text
+    row = response.json()
+    assert row["id"] == "hal0/memory"
+    assert row["owned_by"] == "hal0"
+
+
 def test_get_model_unresolvable_virtual_name_still_404s(client, monkeypatch):
     """A virtual name with no matching slot still 404s (no false positives)."""
     sm = _FakeSlotManager()

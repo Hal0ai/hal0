@@ -38,6 +38,7 @@ from fastapi.responses import Response, StreamingResponse
 from hal0.api import image_cache, live_sockets
 from hal0.api.deps import DispatcherDep
 from hal0.dispatcher.lane_pin import lane_slot_pin, preferred_slot, set_lane_pin
+from hal0.memory.extraction_env import MEMORY_ALIAS
 from hal0.upstreams.filters import apply_filters
 
 log = structlog.get_logger("hal0-v1")
@@ -334,6 +335,24 @@ async def _read_json_body(request: Request) -> dict[str, Any]:
     return parsed if isinstance(parsed, dict) else {}
 
 
+def _memory_alias_target(request: Request) -> tuple[str, str]:
+    """What ``hal0/memory`` resolves to right now (#2919).
+
+    Reads ``[memory.graph]`` off ``app.state.hal0_config`` — the cache every
+    ``hal0_config_txn.save`` refreshes — so a PUT on the graph route applies on
+    the engine's very next call, no restart. A bare app without the lifespan
+    (router-only tests) behaves like the schema default.
+    """
+    from hal0.config.schema import MemoryGraphConfig
+    from hal0.memory.extraction_env import memory_engine_target
+
+    cfg = getattr(request.app.state, "hal0_config", None)
+    graph = getattr(getattr(cfg, "memory", None), "graph", None)
+    if graph is None:
+        graph = MemoryGraphConfig()
+    return memory_engine_target(graph)
+
+
 async def _rewrite_chat_slot_alias(request: Request, body: dict[str, Any]) -> dict[str, Any]:
     """Translate a chat-slot ALIAS in ``body["model"]`` to its model id.
 
@@ -610,6 +629,18 @@ async def _normalize_chat_body(request: Request, body: dict[str, Any]) -> dict[s
     )
     raw_model = body.get("model")
     pinned: str | None = None
+    if raw_model == MEMORY_ALIAS:
+        # #2919: the memory engine's one fixed id. A slot target continues
+        # below exactly as ``hal0/<extraction_slot>`` would; an upstream
+        # target becomes that id as-is — no slot lookup, no lane pin — and
+        # the dispatcher routes it to its upstream or answers
+        # dispatch.no_route, never the agent anchor.
+        kind, target = _memory_alias_target(request)
+        if kind == "upstream":
+            body = {**body, "model": target}
+            raw_model = None
+        else:
+            raw_model = target
     if isinstance(raw_model, str) and raw_model:
         res = await resolver.resolve(raw_model)
         if res is not None and res.model_id:
@@ -1207,6 +1238,18 @@ async def _resolve_virtual_model_entry(
     """
     if not model_id.startswith("hal0/"):
         return None
+    requested = model_id
+    if model_id == MEMORY_ALIAS:
+        # #2919: answer with the engine target's row. An upstream target is a
+        # catalog id already — pick its row; a slot target resolves below as
+        # ``hal0/<extraction_slot>``. Either way the alias round-trips as the id.
+        kind, target = _memory_alias_target(request)
+        if kind == "upstream":
+            for entry in data:
+                if isinstance(entry, dict) and entry.get("id") == target:
+                    return {**entry, "id": requested}
+            return None
+        model_id = target
     from hal0.normalize.resolver import LiveSlotResolver
 
     views = await _normalize_slot_views(request)
@@ -1236,7 +1279,7 @@ async def _resolve_virtual_model_entry(
     candidate_ids.append(res.model_id)
     for entry in data:
         if isinstance(entry, dict) and entry.get("id") in candidate_ids:
-            return {**entry, "id": model_id}
+            return {**entry, "id": requested}
     return None
 
 
