@@ -22,9 +22,12 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+from pathlib import PurePosixPath
 from typing import Any
 
 import httpx
+
+from hal0.registry.fileset import SHARD_RE
 
 log = logging.getLogger(__name__)
 
@@ -103,9 +106,75 @@ async def fetch_remote_lfs_shas(
     return results
 
 
+def load_shard_shas(registry: Any, model_id: str) -> dict[str, str]:
+    """``{rel: sha256}`` of a model's installed split-GGUF parts (#2761).
+
+    Read from the ``model_file`` rows the pull writes (one per part,
+    ``role = shard``). Empty for a single-file model, a non-SQLite registry,
+    or any read failure: the check then falls back to the first part alone.
+    """
+    db = getattr(registry, "db_path", None)
+    if db is None:
+        return {}
+    try:
+        from hal0.db import repository
+        from hal0.db.connection import connect
+
+        with connect(db) as conn:
+            rows = repository.list_model_files(conn, model_id)
+    except Exception:
+        log.debug("update_check.shard_rows_failed", extra={"model_id": model_id}, exc_info=True)
+        return {}
+    return {
+        r["rel"]: str(r["sha256"]).lower()
+        for r in rows
+        if r.get("role") == "shard" and r.get("rel") and r.get("sha256")
+    }
+
+
+def _evaluate_shards(
+    filename: str,
+    files: dict[str, str],
+    shard_shas: dict[str, str],
+) -> tuple[bool, str | None, list[str]]:
+    """Compare every part of a split GGUF; returns ``(changed, reason, rels)``.
+
+    ``rels`` lists the parts whose remote sha differs from the recorded one.
+    A part count that changed upstream (same stem, different ``-of-N``) is an
+    update too. Parts with no recorded local sha or no remote LFS entry are
+    skipped, so they never raise a phantom update.
+    """
+    path = PurePosixPath(filename)
+    m = SHARD_RE.match(path.name)
+    if m is None:
+        return False, None, []
+    tot = int(m.group("tot"))
+    stem, ext = m.group("stem"), m.group("ext")
+    for rel in files:
+        rp = PurePosixPath(rel)
+        rm = SHARD_RE.match(rp.name)
+        if (
+            rm is not None
+            and rp.parent == path.parent
+            and rm.group("stem") == stem
+            and rm.group("ext").lower() == ext.lower()
+            and int(rm.group("tot")) != tot
+        ):
+            return True, "shard_count_changed", []
+    changed: list[str] = []
+    for i in range(1, tot + 1):
+        rel = str(path.with_name(f"{stem}-{i:05d}-of-{tot:05d}.{ext}"))
+        local = shard_shas.get(rel)
+        remote = files.get(rel)
+        if local and remote and local != remote:
+            changed.append(rel)
+    return bool(changed), ("shard_changed" if changed else None), changed
+
+
 def evaluate_model_update(
     model: Any,
     repo_files: dict[str, dict[str, str] | None],
+    shard_shas: dict[str, str] | None = None,
 ) -> dict[str, Any] | None:
     """Pure per-model update verdict against pre-fetched repo trees.
 
@@ -135,6 +204,14 @@ def evaluate_model_update(
     files = repo_files.get(repo)
     if files is None:
         verdict["reason"] = "repo_unreachable"
+        return verdict
+    shard_changed, shard_reason, shard_rels = _evaluate_shards(filename, files, shard_shas or {})
+    if shard_changed:
+        # A later part (or the part count) moved upstream even if part 1 did not.
+        verdict["update_available"] = True
+        verdict["reason"] = shard_reason
+        verdict["changed_parts"] = shard_rels
+        verdict["remote_sha256"] = files.get(filename)
         return verdict
     remote_sha = files.get(filename)
     if remote_sha is None:

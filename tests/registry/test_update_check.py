@@ -233,3 +233,65 @@ async def test_run_pull_dest_override_replaces_in_place(tmp_hal0_home: str, tmp_
     assert row.path == str(dest)
     assert row.metadata["sha256"] == hashlib.sha256(new_body).hexdigest()
     assert isinstance(row.metadata.get("pulled_at"), int)
+
+
+# ── split GGUF (#2761) ───────────────────────────────────────────────────────
+
+_P1 = "m/m-00001-of-00003.gguf"
+_P2 = "m/m-00002-of-00003.gguf"
+_P3 = "m/m-00003-of-00003.gguf"
+_LOCAL_PARTS = {_P1: SHA_A, _P2: "c" * 64, _P3: "d" * 64}
+
+
+def _split_model() -> Model:
+    return _model(hf_filename=_P1, metadata={"sha256": SHA_A})
+
+
+def test_evaluate_split_flags_replaced_later_part() -> None:
+    remote = {_P1: SHA_A, _P2: "e" * 64, _P3: "d" * 64}
+    v = evaluate_model_update(_split_model(), {"Qwen/Qwen3-4B-GGUF": remote}, _LOCAL_PARTS)
+    assert v is not None
+    assert v["update_available"] is True
+    assert v["changed_parts"] == [_P2]
+
+
+def test_evaluate_split_current_when_all_parts_match() -> None:
+    v = evaluate_model_update(
+        _split_model(), {"Qwen/Qwen3-4B-GGUF": dict(_LOCAL_PARTS)}, _LOCAL_PARTS
+    )
+    assert v is not None
+    assert v["update_available"] is False
+
+
+def test_evaluate_split_flags_part_count_change() -> None:
+    remote = {_P1: SHA_A, "m/m-00001-of-00004.gguf": "f" * 64}
+    v = evaluate_model_update(_split_model(), {"Qwen/Qwen3-4B-GGUF": remote}, _LOCAL_PARTS)
+    assert v is not None
+    assert v["update_available"] is True
+    assert v["reason"] == "shard_count_changed"
+
+
+def test_load_shard_shas_reads_shard_rows(tmp_hal0_home: str) -> None:
+    from hal0.db import repository
+    from hal0.db.connection import connect, tx
+    from hal0.registry.update_check import load_shard_shas
+
+    registry = ModelRegistry()
+    registry.add(_split_model())
+    db = registry.db_path
+    assert db is not None
+    with connect(db) as conn, tx(conn):
+        for i, (rel, sha) in enumerate(_LOCAL_PARTS.items(), start=1):
+            repository.upsert_model_file(
+                conn,
+                model_id="qwen3-4b",
+                rel=rel,
+                sha256=sha,
+                lfs=True,
+                role="shard",
+                shard_index=i,
+            )
+        repository.upsert_model_file(
+            conn, model_id="qwen3-4b", rel="mmproj.gguf", sha256=SHA_B, role="mmproj"
+        )
+    assert load_shard_shas(registry, "qwen3-4b") == _LOCAL_PARTS
