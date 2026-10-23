@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import stat
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -500,9 +501,17 @@ def _mcp_entry_check(path: Path) -> dict[str, Any]:
 
 
 def _file_check(check_id: str, path: Path, label: str) -> dict[str, Any]:
-    """Whether ``path`` is a file. ``is_file`` raises on an untraversable parent."""
+    """Whether ``path`` is a file; ``ok: None`` when a parent is untraversable.
+
+    ``stat`` is called directly rather than ``Path.is_file``: from Python 3.14
+    ``is_file`` answers ``False`` on any ``OSError``, so an untraversable parent
+    would read as "missing". ``stat`` raises ``PermissionError`` there on every
+    interpreter, which is the "unknown" answer this check must give.
+    """
     try:
-        present = path.is_file()
+        present = stat.S_ISREG(os.stat(path).st_mode)
+    except (FileNotFoundError, NotADirectoryError):
+        present = False
     except OSError:
         return _not_readable(check_id, label)
     return _check(check_id, present, f"{label} {'present' if present else 'missing'}")
