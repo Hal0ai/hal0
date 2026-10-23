@@ -225,8 +225,25 @@ async def get_agent_memory_stats(agent_id: str, request: Request) -> dict[str, A
     }
 
 
+async def memory_reachable(agent_id: str, request: Request) -> bool:
+    """Whether the memory engine answers, without walking any bank.
+
+    ``bank_stats`` is one constant-time engine call, so unlike
+    :func:`get_agent_memory_stats` its cost does not grow with bank size. The
+    overview uses it to keep memory "available" when the count misses its
+    budget on a large bank (#2957). A provider without ``bank_stats`` reads as
+    not reachable.
+    """
+    wrapper = getattr(request.app.state, "memory_provider", None)
+    bank_stats = getattr(wrapper, "bank_stats", None)
+    if bank_stats is None:
+        return False
+    await bank_stats(dataset=_namespace_for(agent_id), client_id=agent_id)
+    return True
+
+
 # Re-exported for tests so they can monkeypatch the registry without
 # poking at the underscore-prefixed name.
 KNOWN_AGENT_IDS = _KNOWN_AGENT_IDS
 
-__all__ = ["KNOWN_AGENT_IDS", "router"]
+__all__ = ["KNOWN_AGENT_IDS", "get_agent_memory_stats", "memory_reachable", "router"]

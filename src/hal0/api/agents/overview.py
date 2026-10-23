@@ -58,7 +58,7 @@ from hal0.agents import overview as builders
 from hal0.agents.manager import AgentManager, AgentRecord, agent_kind, installer_script_path
 from hal0.agents.pi_coder import PiDriver
 from hal0.agents.pi_coder.driver import _HINDSIGHT_API_URL
-from hal0.api.agents.memory_stats import get_agent_memory_stats
+from hal0.api.agents.memory_stats import get_agent_memory_stats, memory_reachable
 from hal0.api.agents.restart import unit_is_active
 from hal0.api.routes import agents as agents_routes
 from hal0.api.routes.approvals import _queue
@@ -161,10 +161,14 @@ _GATEWAY_CRASH_LOOP_SUBSTATES: Final[frozenset[str]] = frozenset(
     {"auto-restart", "auto-restart-queued"}
 )
 
-#: ``get_agent_memory_stats`` can page the Hindsight bank with long read
-#: timeouts; the overview waits this long for it, then reports memory as
-#: unavailable.
+#: ``get_agent_memory_stats`` pages the Hindsight bank (up to 500 items), which
+#: on a large unified bank can take as long as this budget. Missing it does not
+#: make memory unavailable: availability falls back to :data:`_MEMORY_REACH_TIMEOUT_S`.
 _MEMORY_TIMEOUT_S: Final[float] = 2.0
+
+#: Budget for the constant-time engine reachability check that decides
+#: ``available`` when the count missed its budget (#2957).
+_MEMORY_REACH_TIMEOUT_S: Final[float] = 2.0
 
 #: One probe's budget. The probes run concurrently, so a dead gateway costs one
 #: second in total, not one per profile.
@@ -558,6 +562,43 @@ async def _platform_names(home: Path, secrets_env: Path | None, seam: str | None
     return list(names)
 
 
+async def _memory_count(request: Request) -> dict[str, Any] | None:
+    """The full memory stats, or ``None`` when it misses its budget or fails.
+
+    A timeout is expected on a large bank, so it logs at debug; other failures
+    keep the gather warning.
+    """
+    try:
+        return await asyncio.wait_for(get_agent_memory_stats("hermes", request), _MEMORY_TIMEOUT_S)
+    except TimeoutError:
+        log.debug("agents.overview.memory_count_timeout")
+    except Exception as exc:
+        log.warning("agents.overview.gather_failed", gather="memory", error=str(exc))
+    return None
+
+
+async def _memory_summary(request: Request) -> dict[str, Any]:
+    """``{available, writes, last_write}`` for the memory row. Never raises.
+
+    The item count can be slow on a large bank, so availability does not wait on
+    it: when the count misses its budget, a constant-time reachability check
+    decides ``available`` and ``writes``/``last_write`` are ``None`` (unknown).
+    """
+    count, reachable = await asyncio.gather(
+        _memory_count(request),
+        _guarded(
+            "memory_reach",
+            asyncio.wait_for(memory_reachable("hermes", request), _MEMORY_REACH_TIMEOUT_S),
+            False,
+        ),
+    )
+    if isinstance(count, dict):
+        return {key: count.get(key) for key in ("available", "writes", "last_write")}
+    if reachable:
+        return {"available": True, "writes": None, "last_write": None}
+    return dict(_NO_MEMORY)
+
+
 async def _gather_hermes(request: Request) -> dict[str, Any]:
     """The slow half of an installed Hermes' overview. Never raises.
 
@@ -588,11 +629,7 @@ async def _gather_hermes(request: Request) -> dict[str, Any]:
             _guarded("unit_gateway", _gateway_state(), no_gateway),
             _in_thread("endpoint", None, _endpoint, home),
             _guarded("api_health", _api_health(home), no_health),
-            _guarded(
-                "memory",
-                asyncio.wait_for(get_agent_memory_stats("hermes", request), _MEMORY_TIMEOUT_S),
-                None,
-            ),
+            _memory_summary(request),
             _platform_names(home, HERMES_SECRETS_ENV, seam),
         ),
         asyncio.gather(
@@ -661,11 +698,7 @@ async def _gather_hermes(request: Request) -> dict[str, Any]:
         doctor=doctor,
         approvals=approvals_full,
     )
-    memory = (
-        {key: memory_raw.get(key) for key in ("available", "writes", "last_write")}
-        if isinstance(memory_raw, dict)
-        else dict(_NO_MEMORY)
-    )
+    memory = memory_raw
 
     return {
         "name": "hermes",
