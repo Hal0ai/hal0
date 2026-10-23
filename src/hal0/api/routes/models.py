@@ -27,7 +27,11 @@ from hal0.model_meta import derive_model_provider
 from hal0.registry import pull_jobs as _pull_jobs
 from hal0.registry.curated import CURATED_MODELS
 from hal0.registry.pull import PullInvalidSource
-from hal0.registry.update_check import evaluate_model_update, fetch_remote_lfs_shas
+from hal0.registry.update_check import (
+    evaluate_model_update,
+    fetch_remote_lfs_shas,
+    load_shard_shas,
+)
 from hal0.runners import RUNNER_IMAGES as _runner_images_registry
 from hal0.services import models_service as _svc
 from hal0.slots.capacity import estimate_file_size_kv_mb, gtt_feasibility_verdict
@@ -547,7 +551,8 @@ async def check_model_updates(request: Request, refresh: bool = False) -> dict[s
         )
         checks: dict[str, dict[str, Any]] = {}
         for m in entries:
-            verdict = evaluate_model_update(m, repo_files)
+            shard_shas = await asyncio.to_thread(load_shard_shas, registry, m.id)
+            verdict = evaluate_model_update(m, repo_files, shard_shas)
             if verdict is not None:
                 checks[m.id] = verdict
         payload: dict[str, Any] = {

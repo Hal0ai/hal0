@@ -18,6 +18,7 @@ that land first.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import errno
 import logging
@@ -1611,7 +1612,16 @@ async def list_all(
         dumped = model_to_dict(entry)
         dumped["installed"] = True
         chk = update_checks.get(entry.id)
-        if isinstance(chk, dict):
+        if isinstance(chk, dict) and str(chk.get("reason") or "").startswith("shard_"):
+            # A later part of a split GGUF moved (#2761): the first part's sha
+            # still matches, so the per-row recompute below would hide it.
+            # Re-check against the installed part rows so an applied update
+            # clears the badge instead of replaying the cached verdict.
+            from hal0.registry.update_check import load_shard_shas, shard_update_pending
+
+            current = await asyncio.to_thread(load_shard_shas, registry, entry.id)
+            dumped["update_available"] = shard_update_pending(chk, current)
+        elif isinstance(chk, dict):
             remote_sha = chk.get("remote_sha256")
             local_sha = (entry.metadata or {}).get("sha256")
             dumped["update_available"] = bool(

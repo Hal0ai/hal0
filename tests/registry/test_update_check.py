@@ -8,6 +8,7 @@ directly against pre-baked repo trees.
 from __future__ import annotations
 
 import hashlib
+import types
 from pathlib import Path
 from typing import Any
 
@@ -17,7 +18,11 @@ import pytest
 from hal0.registry.model import Model
 from hal0.registry.pull import make_job, run_pull
 from hal0.registry.store import ModelRegistry
-from hal0.registry.update_check import evaluate_model_update, fetch_remote_lfs_shas
+from hal0.registry.update_check import (
+    evaluate_model_update,
+    fetch_remote_lfs_shas,
+    shard_update_pending,
+)
 
 # ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -233,3 +238,140 @@ async def test_run_pull_dest_override_replaces_in_place(tmp_hal0_home: str, tmp_
     assert row.path == str(dest)
     assert row.metadata["sha256"] == hashlib.sha256(new_body).hexdigest()
     assert isinstance(row.metadata.get("pulled_at"), int)
+
+
+# ── split GGUF (#2761) ───────────────────────────────────────────────────────
+
+_P1 = "m/m-00001-of-00003.gguf"
+_P2 = "m/m-00002-of-00003.gguf"
+_P3 = "m/m-00003-of-00003.gguf"
+_LOCAL_PARTS = {_P1: SHA_A, _P2: "c" * 64, _P3: "d" * 64}
+
+
+def _split_model() -> Model:
+    return _model(hf_filename=_P1, metadata={"sha256": SHA_A})
+
+
+def test_evaluate_split_flags_replaced_later_part() -> None:
+    remote = {_P1: SHA_A, _P2: "e" * 64, _P3: "d" * 64}
+    v = evaluate_model_update(_split_model(), {"Qwen/Qwen3-4B-GGUF": remote}, _LOCAL_PARTS)
+    assert v is not None
+    assert v["update_available"] is True
+    assert v["changed_parts"] == [_P2]
+
+
+def test_evaluate_split_current_when_all_parts_match() -> None:
+    v = evaluate_model_update(
+        _split_model(), {"Qwen/Qwen3-4B-GGUF": dict(_LOCAL_PARTS)}, _LOCAL_PARTS
+    )
+    assert v is not None
+    assert v["update_available"] is False
+
+
+def test_evaluate_split_flags_part_count_change() -> None:
+    # Installed 3-part layout is gone upstream; a 4-part one replaced it.
+    remote = {"m/m-00001-of-00004.gguf": "f" * 64}
+    v = evaluate_model_update(_split_model(), {"Qwen/Qwen3-4B-GGUF": remote}, _LOCAL_PARTS)
+    assert v is not None
+    assert v["update_available"] is True
+    assert v["reason"] == "shard_count_changed"
+
+
+def test_evaluate_split_ignores_side_by_side_layout() -> None:
+    # Installed layout still present and unchanged next to a 4-part one: no update.
+    remote = {**_LOCAL_PARTS, "m/m-00001-of-00004.gguf": "f" * 64}
+    v = evaluate_model_update(_split_model(), {"Qwen/Qwen3-4B-GGUF": remote}, _LOCAL_PARTS)
+    assert v is not None
+    assert v["update_available"] is False
+
+
+def test_evaluate_split_count_change_needs_shard_rows() -> None:
+    remote = {"m/m-00001-of-00004.gguf": "f" * 64}
+    v = evaluate_model_update(_split_model(), {"Qwen/Qwen3-4B-GGUF": remote}, {})
+    assert v is not None
+    assert v["update_available"] is False
+
+
+def test_shard_update_pending_clears_after_apply() -> None:
+    remote = {_P1: SHA_A, _P2: "e" * 64, _P3: "d" * 64}
+    v = evaluate_model_update(_split_model(), {"Qwen/Qwen3-4B-GGUF": remote}, _LOCAL_PARTS)
+    assert v is not None
+    assert shard_update_pending(v, _LOCAL_PARTS) is True
+    assert shard_update_pending(v, {**_LOCAL_PARTS, _P2: "e" * 64}) is False
+
+
+def test_shard_update_pending_count_change_clears_when_parts_replaced() -> None:
+    remote = {"m/m-00001-of-00004.gguf": "f" * 64}
+    v = evaluate_model_update(_split_model(), {"Qwen/Qwen3-4B-GGUF": remote}, _LOCAL_PARTS)
+    assert v is not None
+    assert shard_update_pending(v, _LOCAL_PARTS) is True
+    assert shard_update_pending(v, {"m/m-00001-of-00004.gguf": "f" * 64}) is False
+
+
+def test_load_shard_shas_reads_shard_rows(tmp_hal0_home: str) -> None:
+    from hal0.db import repository
+    from hal0.db.connection import connect, tx
+    from hal0.registry.update_check import load_shard_shas
+
+    registry = ModelRegistry()
+    registry.add(_split_model())
+    db = registry.db_path
+    assert db is not None
+    with connect(db) as conn, tx(conn):
+        for i, (rel, sha) in enumerate(_LOCAL_PARTS.items(), start=1):
+            repository.upsert_model_file(
+                conn,
+                model_id="qwen3-4b",
+                rel=rel,
+                sha256=sha,
+                lfs=True,
+                role="shard",
+                shard_index=i,
+            )
+        repository.upsert_model_file(
+            conn, model_id="qwen3-4b", rel="mmproj.gguf", sha256=SHA_B, role="mmproj"
+        )
+    assert load_shard_shas(registry, "qwen3-4b") == _LOCAL_PARTS
+
+
+async def test_list_all_clears_shard_badge_after_apply(tmp_hal0_home: str) -> None:
+    from hal0.db import repository
+    from hal0.db.connection import connect, tx
+    from hal0.services import models_service
+
+    registry = ModelRegistry()
+    registry.add(_split_model())
+    db = registry.db_path
+    assert db is not None
+
+    def _rows(shas: dict[str, str]) -> None:
+        with connect(db) as conn, tx(conn):
+            for i, (rel, sha) in enumerate(shas.items(), start=1):
+                repository.upsert_model_file(
+                    conn,
+                    model_id="qwen3-4b",
+                    rel=rel,
+                    sha256=sha,
+                    lfs=True,
+                    role="shard",
+                    shard_index=i,
+                )
+
+    _rows(_LOCAL_PARTS)
+    remote = {_P1: SHA_A, _P2: "e" * 64, _P3: "d" * 64}
+    verdict = evaluate_model_update(_split_model(), {"Qwen/Qwen3-4B-GGUF": remote}, _LOCAL_PARTS)
+    assert verdict is not None
+    state = {"models": {"qwen3-4b": verdict}}
+
+    async def _flag() -> Any:
+        out = await models_service.list_all(
+            registry=registry,
+            upstreams=types.SimpleNamespace(list=lambda: []),
+            cache={},
+            update_state=state,
+        )
+        return next(m for m in out["models"] if m["id"] == "qwen3-4b")["update_available"]
+
+    assert await _flag() is True
+    _rows({_P2: "e" * 64})  # update applied: part 2 now matches remote
+    assert await _flag() is False
