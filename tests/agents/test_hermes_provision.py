@@ -6034,3 +6034,108 @@ def test_profile_lock_created_by_root_is_owned_like_the_directory(
         os.close(dir_fd)
     assert chowned == [(4242, 4343)]
     assert (d / ".config.yaml.lock").exists()
+
+
+# ---------------------------------------------------------------------------
+# hermes_doctor smoke probe: provider-key advisories are not failures (#2951)
+# ---------------------------------------------------------------------------
+
+_DOCTOR_TAIL = """
+◆ Memory Provider
+
+────────────────────────────────────────────────────────────
+  Found {n} issue(s) to address:
+
+{issues}
+  Tip: run 'hermes doctor --fix' to auto-fix what's possible.
+
+"""
+
+
+def _doctor_output(*issues: str) -> str:
+    numbered = "".join(f"  {i}. {issue}\n" for i, issue in enumerate(issues, 1))
+    return _DOCTOR_TAIL.format(n=len(issues), issues=numbered)
+
+
+def _doctor_probe(tmp_path: Path, returncode: int, stdout: str) -> tuple[bool, str]:
+    venv = tmp_path / "venv"
+    (venv / "bin").mkdir(parents=True)
+    (venv / "bin" / "hermes").write_text("")
+    state = hp.BootstrapState(hermes_home=str(tmp_path / "hh"), venv=str(venv))
+
+    def _run(argv: list[str], **_kw: Any) -> subprocess.CompletedProcess[str]:
+        assert argv[1:] == ["doctor"]  # never --live: that would load a model
+        return subprocess.CompletedProcess(argv, returncode, stdout=stdout, stderr="")
+
+    return hp._smoke_hermes_doctor(state, hp.InstallIO(run=_run))
+
+
+def test_smoke_hermes_doctor_passes_on_rc0(tmp_path: Path) -> None:
+    ok, detail = _doctor_probe(tmp_path, 0, "  All checks passed! 🎉\n")
+    assert ok
+    assert detail == "rc=0"
+
+
+def test_smoke_hermes_doctor_ignores_the_stock_provider_key_advisories(tmp_path: Path) -> None:
+    """A stock hal0 box keeps no provider key in Hermes' .env, so upstream always
+    lists these two and exits 1; the probe must not turn that into a warn."""
+    out = _doctor_output(
+        "Run 'hermes setup' to configure API keys",
+        "Run 'hermes setup' to configure missing API keys for full tool access",
+    )
+    ok, detail = _doctor_probe(tmp_path, 1, out)
+    assert ok
+    assert "2 provider-key advisory" in detail
+
+
+def test_smoke_hermes_doctor_strips_colour_codes(tmp_path: Path) -> None:
+    out = _doctor_output("\x1b[33mRun 'hermes setup' to configure API keys\x1b[0m")
+    ok, _detail = _doctor_probe(tmp_path, 1, out)
+    assert ok
+
+
+def test_smoke_hermes_doctor_fails_on_any_other_issue(tmp_path: Path) -> None:
+    out = _doctor_output(
+        "Run 'hermes setup' to configure API keys",
+        "Run 'hermes setup' to migrate config",
+    )
+    ok, detail = _doctor_probe(tmp_path, 1, out)
+    assert not ok
+    assert detail == "rc=1: Run 'hermes setup' to migrate config"
+
+
+@pytest.mark.parametrize("stdout", ["", "Traceback (most recent call last):\n  boom\n"])
+def test_smoke_hermes_doctor_fails_closed_without_an_issue_list(
+    tmp_path: Path, stdout: str
+) -> None:
+    ok, detail = _doctor_probe(tmp_path, 1, stdout)
+    assert not ok
+    assert "no issue list" in detail
+
+
+def test_smoke_hermes_doctor_fails_on_other_exit_codes(tmp_path: Path) -> None:
+    out = _doctor_output("Run 'hermes setup' to configure API keys")
+    ok, detail = _doctor_probe(tmp_path, 2, out)
+    assert not ok
+    assert detail == "rc=2"
+
+
+def test_smoke_hermes_doctor_fails_when_the_list_is_shorter_than_its_count(tmp_path: Path) -> None:
+    """An empty or multi-line issue would end the parse early and hide what
+    follows it; a count mismatch fails instead."""
+    out = _doctor_output(
+        "Run 'hermes setup' to configure API keys",
+        "",
+        "Run 'hermes setup' to migrate config",
+    )
+    ok, detail = _doctor_probe(tmp_path, 1, out)
+    assert not ok
+    assert "no issue list" in detail
+
+
+def test_smoke_hermes_doctor_reads_the_last_summary(tmp_path: Path) -> None:
+    echoed = _doctor_output("Run 'hermes setup' to configure API keys")
+    real = _doctor_output("Run 'hermes setup' to migrate config")
+    ok, detail = _doctor_probe(tmp_path, 1, echoed + real)
+    assert not ok
+    assert detail == "rc=1: Run 'hermes setup' to migrate config"
