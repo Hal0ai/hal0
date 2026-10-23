@@ -1520,16 +1520,24 @@ async def _maybe_run_omni_loop(request: Request, body: dict[str, Any]) -> Respon
     requested_model = body.get("model")
     if not isinstance(requested_model, str) or not requested_model:
         return None
+    from hal0.api import _slot_model_id
+    from hal0.providers.flm import flm_id_to_tag_async
+
     configs = await slot_manager.iter_configs()
     candidates: list[str] = []
     for cfg in configs:
         if cfg.get("type") != "llm":
             continue
-        model_section = cfg.get("model") or {}
-        if isinstance(model_section, dict):
-            default = model_section.get("default", "")
-            if isinstance(default, str) and default == requested_model:
-                candidates.append(str(cfg.get("name", "")))
+        default = _slot_model_id(cfg)
+        if not default:
+            continue
+        # An FLM slot's configured id is the ``-FLM`` catalog id, but the body
+        # carries the native colon tag by now (alias rewrite + normalize);
+        # compare through the same translation the slot views publish (#2779).
+        if default == requested_model or (
+            default.endswith("-FLM") and await flm_id_to_tag_async(default) == requested_model
+        ):
+            candidates.append(str(cfg.get("name", "")))
     caller_slot_name = preferred_slot(slot_manager, candidates, lane_slot=lane_slot_pin(request))
     if caller_slot_name is None:
         return None
