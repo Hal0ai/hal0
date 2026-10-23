@@ -546,6 +546,174 @@ class TestSessionIntegration:
         assert [c[4] for c in stops] == ["agent"]
         assert [c[4] for c in starts] == ["agent"]
 
+    @staticmethod
+    def _fake_slots(monkeypatch, active="hal0-slot@2.service\nhal0-slot@8.service", fail=None):
+        """Route ExclusiveSlots' systemctl calls through a recorder; ``fail``
+        maps ``(verb, id)`` to the ``(rc, stdout, stderr)`` that call returns."""
+        calls: list[list[str]] = []
+        fail = fail or {}
+
+        def fake(argv):
+            calls.append(argv)
+            if argv[:2] == ["systemctl", "list-units"]:
+                return 0, active, ""
+            return fail.get(tuple(argv[-2:]), (0, "", ""))
+
+        monkeypatch.setattr(harness, "_default_shell_runner", fake)
+        monkeypatch.setattr(harness.time, "sleep", lambda _s: None)
+        return calls
+
+    @staticmethod
+    def _verbs(calls, verb):
+        return [c[-1] for c in calls if c[0] == "sudo" and c[-2] == verb]
+
+    def test_a_dozen_exclusive_sweeps_cycle_each_slot_once(self, sandbox, monkeypatch, tmp_path):
+        """#2770: twelve Tier-A groups in one session must stop and start each
+        slot ONCE, not once per sweep — the slot units' StartLimitBurst=10
+        tripped on the eleventh per-sweep cycle and left pinned slots failed."""
+        calls_file = sandbox / "calls"
+        _install_fake_seam(sandbox, monkeypatch, calls_file)
+        calls = self._fake_slots(monkeypatch)
+
+        store = Store(tmp_path / "state")
+        cells = plan(_suite(["pp", "tg"], depths=range(1, 13)), _registry(), store)
+        assert len(cells) == 24
+
+        result = runner.run_session(
+            cells,
+            store,
+            Host(hal0_version="1.0.0", exclusive=True),
+            suite_id="t",
+            api="http://x",
+            exclusive=True,
+        )
+
+        assert result.cells_ok == 24
+        assert calls_file.read_text().count("run") == 12  # twelve real sweeps
+        assert self._verbs(calls, "stop") == ["2", "8"]
+        assert self._verbs(calls, "start") == ["2", "8"]
+        assert self._verbs(calls, "reset-failed") == ["2", "8"]
+        assert result.slot_errors == []
+
+    def test_a_slot_left_down_is_a_session_error(self, sandbox, monkeypatch, tmp_path):
+        """#2770: a failed restart reaches SessionResult (and so the
+        bench.session.completed event), not only a stderr warning."""
+        _install_fake_seam(sandbox, monkeypatch, sandbox / "calls")
+        self._fake_slots(monkeypatch, fail={("start", "2"): (1, "", "start-limit-hit")})
+
+        store = Store(tmp_path / "state")
+        cells = _cells(["pp", "tg"], store)
+        result = runner.run_session(
+            cells,
+            store,
+            Host(hal0_version="1.0.0", exclusive=True),
+            suite_id="t",
+            api="http://x",
+            exclusive=True,
+        )
+
+        assert result.cells_ok == 2
+        assert len(result.slot_errors) == 1
+        assert "hal0-slot@2" in result.slot_errors[0]
+        assert "start-limit-hit" in result.slot_errors[0]
+
+    def test_slots_are_restored_before_a_serving_cell(self, sandbox, monkeypatch, tmp_path):
+        """A serving-tier cell measures THROUGH a live slot, so the exclusive
+        window closes before it runs and reopens for the next sweep."""
+        _install_fake_seam(sandbox, monkeypatch, sandbox / "calls")
+        calls = self._fake_slots(monkeypatch, active="hal0-slot@2.service")
+        fake_ab = sandbox / "fake_server_ab"
+        fake_ab.write_text("#!/bin/bash\nexit 2\n")
+        fake_ab.chmod(fake_ab.stat().st_mode | stat.S_IEXEC)
+        monkeypatch.setattr(runner, "SERVER_AB", str(fake_ab))
+        monkeypatch.setattr(runner, "_slot_for_model", lambda api, mid: "slot1")
+        starts_when_serving: list[int] = []
+        real_bc = runner._tier_bc_record
+
+        def spy_bc(*a, **k):
+            starts_when_serving.append(len(self._verbs(calls, "start")))
+            return real_bc(*a, **k)
+
+        monkeypatch.setattr(runner, "_tier_bc_record", spy_bc)
+
+        store = Store(tmp_path / "state")
+        first = plan(_suite(["pp", "embed"]), _registry(), store)
+        assert [c.kind for c in first] == ["pp", "embed"]
+        second = plan(_suite(["pp"], depths=(4096,)), _registry(), store)
+        result = runner.run_session(
+            first + second,
+            store,
+            Host(hal0_version="1.0.0", exclusive=True),
+            suite_id="t",
+            api="http://x",
+            exclusive=True,
+        )
+
+        assert result.cells_ok == 2
+        assert starts_when_serving == [1]  # the slot was back up for the embed cell
+        assert self._verbs(calls, "stop") == ["2", "2"]
+        assert self._verbs(calls, "start") == ["2", "2"]
+
+    def test_a_slot_that_returns_mid_session_is_stopped_again(self, sandbox, monkeypatch, tmp_path):
+        """A slot the dispatcher lazy-loads (or an operator loads) after the
+        window opened must be stopped before the next sweep and restored at
+        the end, not measured next to."""
+        calls_file = sandbox / "calls"
+        _install_fake_seam(sandbox, monkeypatch, calls_file)
+        calls = self._fake_slots(monkeypatch, active="hal0-slot@2.service")
+        listings = iter(["hal0-slot@2.service", "hal0-slot@2.service\nhal0-slot@9.service"])
+        base = harness._default_shell_runner
+
+        def fake(argv):
+            if argv[:2] == ["systemctl", "list-units"]:
+                calls.append(argv)
+                return 0, next(listings, "hal0-slot@9.service"), ""
+            return base(argv)
+
+        monkeypatch.setattr(harness, "_default_shell_runner", fake)
+
+        store = Store(tmp_path / "state")
+        cells = plan(_suite(["pp"], depths=range(1, 4)), _registry(), store)
+        result = runner.run_session(
+            cells,
+            store,
+            Host(hal0_version="1.0.0", exclusive=True),
+            suite_id="t",
+            api="http://x",
+            exclusive=True,
+        )
+
+        assert result.cells_ok == 3
+        assert self._verbs(calls, "stop") == ["2", "9"]
+        assert self._verbs(calls, "start") == ["2", "9"]
+        assert result.slot_errors == []
+
+    def test_a_failed_stop_is_not_retried_every_sweep(self, sandbox, monkeypatch, tmp_path):
+        """When the window cannot open, every later sweep records FAILED with
+        the same reason instead of cycling the slots again."""
+        calls_file = sandbox / "calls"
+        _install_fake_seam(sandbox, monkeypatch, calls_file)
+        calls = self._fake_slots(monkeypatch, fail={("stop", "8"): (1, "", "permission denied")})
+
+        store = Store(tmp_path / "state")
+        cells = plan(_suite(["pp"], depths=range(1, 13)), _registry(), store)
+        result = runner.run_session(
+            cells,
+            store,
+            Host(hal0_version="1.0.0", exclusive=True),
+            suite_id="t",
+            api="http://x",
+            exclusive=True,
+        )
+
+        assert result.cells_failed == 12
+        assert not calls_file.exists()  # no sweep ran without exclusivity
+        assert self._verbs(calls, "stop") == ["2", "8"]
+        assert self._verbs(calls, "start") == ["2"]
+        notes = [r["note"] for r in store.iter_records()]
+        assert len(notes) == 12
+        assert all("could not stop hal0-slot@8" in n for n in notes)
+
     def test_tier_bc_run_appends_a_failed_record_not_a_crash(self, sandbox, monkeypatch, tmp_path):
         """A server_ab that exits non-zero yields outcome=failed and the
         session continues — never an exception, never a dropped cell."""

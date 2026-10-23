@@ -246,7 +246,7 @@ def test_worker_drains_a_queued_model_on_an_auth_required_box(
 
     def fake_run_session(cells, store, host, **kw):
         seen["host"] = host
-        return types.SimpleNamespace(aborted=None, cells_ok=0, cells_failed=0)
+        return types.SimpleNamespace(aborted=None, cells_ok=0, cells_failed=0, slot_errors=[])
 
     monkeypatch.setattr(cli, "plan", fake_plan)
     monkeypatch.setattr(cli, "run_session", fake_run_session)

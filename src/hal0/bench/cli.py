@@ -248,9 +248,12 @@ def cmd_run(args: argparse.Namespace) -> int:
         "cells_failed": result.cells_failed,
         "duration_s": result.duration_s,
         "aborted": result.aborted,
+        # #2770: slots the exclusive window could not restart — the session
+        # left them down, so the run fails loudly instead of only warning.
+        "slot_errors": result.slot_errors,
     }
     print(json.dumps(event, indent=2))
-    return 0 if result.aborted is None else 1
+    return 0 if result.aborted is None and not result.slot_errors else 1
 
 
 def _lookup_model_id(model: str, registry: list[dict]) -> tuple[str | None, int]:
@@ -528,6 +531,10 @@ def cmd_worker(args: argparse.Namespace) -> int:
                 should_continue=control.worker_should_run,
                 trigger="queue",
             )
+            # #2770: a slot the exclusive window left down is an error on
+            # every exit path, including a Stop or a contended retry.
+            for err in result.slot_errors:
+                print(f"[worker] ERROR: exclusive window {err}")
             if result.aborted == "stopped":
                 print(
                     f"[worker] {suite.id} stopped after {result.cells_ok} cell(s) — item stays queued"
