@@ -90,6 +90,22 @@ def stub_wrapper() -> StubWrapper:
     return StubWrapper()
 
 
+@pytest.fixture(autouse=True)
+def current_drop_in(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Every test starts with an on-disk drop-in that already pins hal0/memory
+    at the default timeout and limits — no drift — so a PUT propagates only
+    for the reason the test sets up (a stale drop-in it writes itself, or a
+    timeout/limit change). Without this the dev box's missing real drop-in
+    would read as drift in every test."""
+    import hal0.memory.extraction_env as ee
+
+    path = tmp_path / "current" / "extraction-model.conf"
+    path.parent.mkdir(parents=True)
+    path.write_text(ee.render_drop_in(300), encoding="utf-8")
+    monkeypatch.setattr(ee, "DROP_IN_PATH", path)
+    return path
+
+
 def _build_app(stub: StubWrapper, *slot_names: str) -> FastAPI:
     app = FastAPI()
     error_codes.install(app)
@@ -139,20 +155,47 @@ def test_graph_status_reports_target_and_available_models(
     runs (#2918)."""
     from types import SimpleNamespace
 
+    from hal0.upstreams.filters import ModelFilters
+
     app = _build_app(stub_wrapper, "agent", "utility")
     app.state.upstreams = SimpleNamespace(
         list=lambda: [
             SimpleNamespace(name="minimax", kind="remote", slot_name=None, pinned=False),
-            SimpleNamespace(name="openrouter", kind="remote", slot_name=None, pinned=False),
+            # Operator-curated catalog: only the m3 id is advertised on /v1/models,
+            # so only it is pickable (reviewer finding I5).
+            SimpleNamespace(
+                name="openrouter",
+                kind="remote",
+                slot_name=None,
+                pinned=False,
+                model_filters=ModelFilters(models=("minimax/minimax-m3",)),
+            ),
             SimpleNamespace(name="hermes", kind="remote", slot_name=None, pinned=True),
             SimpleNamespace(name="utility", kind="slot", slot_name="utility", pinned=False),
+            SimpleNamespace(
+                name="offline-provider", kind="remote", slot_name=None, pinned=False, enabled=False
+            ),
+            SimpleNamespace(
+                name="quiet-provider",
+                kind="remote",
+                slot_name=None,
+                pinned=False,
+                advertise_models=False,
+            ),
+            # A LAN hal0 peer advertises its own virtuals and slot aliases —
+            # neither is an engine target here (schema refuses hal0/…; a bare
+            # slot name would be rewritten back to the LOCAL slot).
+            SimpleNamespace(name="peer", kind="remote", slot_name=None, pinned=False),
         ]
     )
     app.state.upstream_models = {
         "minimax": ["MiniMax-M2.5", "MiniMax-M2.1"],
-        "openrouter": ["minimax/minimax-m3"],
+        "openrouter": ["minimax/minimax-m3", "deepseek/deepseek-v4-pro"],
         "hermes": ["hermes-agent"],
         "utility": ["tiel-coder"],
+        "offline-provider": ["gpt-x"],
+        "quiet-provider": ["gpt-y"],
+        "peer": ["hal0/agent", "agent", "utility", "peer-only-model"],
     }
     engine_llm = {
         "provider": "openai",
@@ -175,6 +218,7 @@ def test_graph_status_reports_target_and_available_models(
         {"id": "MiniMax-M2.1", "owned_by": "minimax"},
         {"id": "MiniMax-M2.5", "owned_by": "minimax"},
         {"id": "minimax/minimax-m3", "owned_by": "openrouter"},
+        {"id": "peer-only-model", "owned_by": "peer"},
     ]
     assert body["engine_llm"] == engine_llm
 
@@ -362,8 +406,12 @@ def test_put_enable_with_valid_slot(
     assert body["extraction_slot"] == "agent"
     # The wrapper was flipped on with the new slot.
     assert stub_wrapper.set_calls == [(True, "agent")]
-    # Slot changed → propagation echoed.
-    assert body["propagation"]["slot"] == "agent"
+    # #2919: the drop-in pins hal0/memory whatever the slot, and hal0's /v1
+    # resolves the alias per call — a slot change alone never restarts the
+    # engine. (Reviewer finding I3: the restart cost ~60 s and did nothing.)
+    assert "propagation" not in body
+    apply_mock.assert_not_called()
+    assert body["target"] == {"kind": "slot", "model": "hal0/agent", "alias": "hal0/memory"}
 
 
 def test_put_persists_hal0_toml_before_propagating(
@@ -376,12 +424,16 @@ def test_put_persists_hal0_toml_before_propagating(
     from hal0.config import paths as config_paths
 
     def _record(*_a: object, **_k: object) -> dict[str, object]:
-        # Called from the thread hop: hal0.toml must ALREADY name the new slot.
-        assert 'extraction_slot = "agent"' in config_paths.hal0_toml().read_text()
+        # Called from the thread hop: hal0.toml must ALREADY carry the new
+        # value. (#2919: a slot change no longer propagates; the timeout does.)
+        assert "llm_timeout_s = 600" in config_paths.hal0_toml().read_text()
         return {"slot": "agent", "written": True, "error": None}
 
     with patch("hal0.memory.extraction_env.apply_extraction_slot", side_effect=_record):
-        r = client.put("/api/memory/graph", json={"enabled": True, "extraction_slot": "agent"})
+        r = client.put(
+            "/api/memory/graph",
+            json={"enabled": True, "extraction_slot": "agent", "llm_timeout_s": 600},
+        )
 
     assert r.status_code == 200, r.text
     assert r.json()["propagation"]["written"] is True
@@ -570,53 +622,125 @@ def test_put_reconciles_when_toml_matches_but_drop_in_does_not(
     apply_mock.assert_called_once_with("utility", timeout_s=300, limits=ExtractionLimits())
 
 
-def test_put_reconciliation_skipped_when_unchanged_slot_is_unavailable(
+def test_put_reconciles_drift_even_when_the_slot_is_unavailable(
     stub_wrapper: StubWrapper, hal0_home: Path
 ) -> None:
-    """#1717 review: an unrelated PUT (e.g. just {"enabled": true}) with
-    slot_changed=False must not silently restart hindsight-api onto a slot
-    that's since been deleted/disabled just because the on-disk drop-in also
-    happened to be stale. Unlike an explicit slot change, reconciliation is
-    inferred work — when we can't positively confirm the (unchanged) slot is
-    still valid, skip the reconciliation attempt rather than erroring this
-    otherwise-unrelated request."""
-    # "utility" (the config default / stub_wrapper's default extraction_slot)
-    # is deliberately NOT in the enabled llm slot set here.
-    app = _build_app(stub_wrapper, "agent")
+    """#1717 used to skip reconciliation when the (unchanged) slot could not
+    be verified, because the drop-in named that slot and a restart could pin
+    the engine to a broken lane. Since #2919 the drop-in pins hal0/memory and
+    the slot is resolved per call, so a stale drop-in is repaired whatever the
+    slot set looks like — otherwise a box with a disabled utility slot (the
+    fresh-install shape) could never move its engine to an upstream model
+    (reviewer finding C2)."""
+    app = _build_app(stub_wrapper, "agent")  # "utility" not available
     with (
         TestClient(app) as client,
         patch("hal0.memory.extraction_env.drop_in_matches", return_value=False),
         patch("hal0.memory.extraction_env.apply_extraction_slot") as apply_mock,
     ):
+        apply_mock.return_value = {
+            "slot": "utility",
+            "model": "hal0/memory",
+            "written": True,
+            "error": None,
+        }
         r = client.put("/api/memory/graph", json={"enabled": True})
 
     assert r.status_code == 200, r.text
-    assert "propagation" not in r.json()
-    apply_mock.assert_not_called()
-    # The gate itself still flips — reconciliation just declined to touch
-    # hindsight-api, it didn't block the (unrelated) enable request.
+    assert r.json()["propagation"]["written"] is True
+    apply_mock.assert_called_once_with("utility", timeout_s=300, limits=ExtractionLimits())
     assert stub_wrapper.set_calls == [(True, "utility")]
 
 
-def test_put_reconciliation_skipped_when_no_slots_are_known(
+def test_put_reconciles_drift_when_no_slots_are_known(
     stub_wrapper: StubWrapper, hal0_home: Path
 ) -> None:
-    """#1717 review: an empty/unknown available set (slot_manager unwired,
-    or enumeration failed) must not be treated as "anything goes" for
-    reconciliation the way it is for an explicit operator-driven slot
-    change — we can't verify the slot, so we must not force a restart onto
-    it just because the drop-in happens to be stale too."""
     app = _build_app(stub_wrapper)  # no slot_manager at all
     with (
         TestClient(app) as client,
         patch("hal0.memory.extraction_env.drop_in_matches", return_value=False),
         patch("hal0.memory.extraction_env.apply_extraction_slot") as apply_mock,
     ):
+        apply_mock.return_value = {
+            "slot": "utility",
+            "model": "hal0/memory",
+            "written": True,
+            "error": None,
+        }
         r = client.put("/api/memory/graph", json={"enabled": True})
 
     assert r.status_code == 200, r.text
-    assert "propagation" not in r.json()
-    apply_mock.assert_not_called()
+    apply_mock.assert_called_once()
+
+
+def test_put_reconciles_drift_with_the_gate_off_for_an_upstream_target(
+    stub_wrapper: StubWrapper, hal0_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The gate is informational — the engine extracts either way — so picking
+    an upstream model on Settings → Data → Memory with the gate off must still
+    repoint an engine whose drop-in (or base unit) pins hal0/utility, else the
+    status says "upstream" while the engine keeps calling the slot (C2)."""
+    import hal0.memory.extraction_env as ee
+
+    drop_in = tmp_path / "extraction-model.conf"
+    drop_in.write_text(
+        ee.render_drop_in(300).replace("hal0/memory", "hal0/utility"), encoding="utf-8"
+    )
+    monkeypatch.setattr(ee, "DROP_IN_PATH", drop_in)
+    app = _app_with_minimax(stub_wrapper)
+    with (
+        TestClient(app) as client,
+        patch("hal0.memory.extraction_env.apply_extraction_slot") as apply_mock,
+        patch("hal0.memory.extraction_env.effective_engine_llm", return_value=_NO_ENGINE_LLM),
+    ):
+        apply_mock.return_value = {
+            "slot": "utility",
+            "model": "hal0/memory",
+            "written": True,
+            "error": None,
+        }
+        r = client.put("/api/memory/graph", json={"extraction_model": "MiniMax-M2.5"})
+
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["enabled"] is False
+    assert body["target"]["kind"] == "upstream"
+    assert body["propagation"]["written"] is True
+    apply_mock.assert_called_once()
+
+
+def test_put_reconciles_a_missing_drop_in_for_an_upstream_target(
+    stub_wrapper: StubWrapper, hal0_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No drop-in at all (the base unit's hal0/utility is in force) + gate on
+    + the configured slot not even enabled: still written once (C2)."""
+    import hal0.memory.extraction_env as ee
+
+    monkeypatch.setattr(ee, "DROP_IN_PATH", tmp_path / "never-written.conf")
+    from types import SimpleNamespace
+
+    app = _build_app(stub_wrapper, "agent")  # utility not enabled
+    app.state.upstreams = SimpleNamespace(
+        list=lambda: [SimpleNamespace(name="minimax", kind="remote", slot_name=None, pinned=False)]
+    )
+    app.state.upstream_models = {"minimax": ["MiniMax-M2.5"]}
+    with (
+        TestClient(app) as client,
+        patch("hal0.memory.extraction_env.apply_extraction_slot") as apply_mock,
+        patch("hal0.memory.extraction_env.effective_engine_llm", return_value=_NO_ENGINE_LLM),
+    ):
+        apply_mock.return_value = {
+            "slot": "utility",
+            "model": "hal0/memory",
+            "written": True,
+            "error": None,
+        }
+        r = client.put(
+            "/api/memory/graph", json={"enabled": True, "extraction_model": "MiniMax-M2.5"}
+        )
+
+    assert r.status_code == 200, r.text
+    apply_mock.assert_called_once()
 
 
 def test_put_disable_succeeds_despite_a_stale_unavailable_configured_slot(
@@ -626,20 +750,25 @@ def test_put_disable_succeeds_despite_a_stale_unavailable_configured_slot(
     {"enabled": false}. Disabling must always succeed — including when the
     configured extraction slot has since been deleted/disabled and the
     drop-in is also stale — because disabling doesn't need the (unchanged,
-    now-irrelevant) slot to be valid. Reconciliation must not even be
-    attempted while enabled=False."""
+    now-irrelevant) slot to be valid. Since #2919 a stale drop-in is repaired
+    on any PUT (it no longer names the slot), so the repair is attempted here
+    too, but it is best-effort: its failure never blocks the disable."""
     app = _build_app(stub_wrapper, "agent")  # "utility" not available
     with (
         TestClient(app) as client,
-        patch("hal0.memory.extraction_env.drop_in_matches") as matches_mock,
+        patch("hal0.memory.extraction_env.drop_in_matches", return_value=False),
         patch("hal0.memory.extraction_env.apply_extraction_slot") as apply_mock,
     ):
+        apply_mock.return_value = {
+            "slot": "utility",
+            "model": "hal0/memory",
+            "written": False,
+            "error": "seam: EPERM",
+        }
         r = client.put("/api/memory/graph", json={"enabled": False})
 
     assert r.status_code == 200, r.text
-    assert "propagation" not in r.json()
-    matches_mock.assert_not_called()
-    apply_mock.assert_not_called()
+    assert r.json()["propagation"]["error"] == "seam: EPERM"
     assert stub_wrapper.set_calls == [(False, "utility")]
 
 

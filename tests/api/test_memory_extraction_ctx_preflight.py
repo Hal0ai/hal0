@@ -145,25 +145,17 @@ def test_preflight_skipped_when_the_engine_target_is_an_upstream_model(
     upstream model, not a slot, so the slot's context window is irrelevant —
     the REAL ``_extraction_window`` must answer ``None`` before any catalog
     lookup, and ``/add`` proceeds even when the slot would be below floor."""
-    import tomli_w
-
-    # Under HAL0_HOME the loader reads $HAL0_HOME/etc/hal0/hal0.toml.
-    home = tmp_path / "hal0-home"
-    (home / "etc" / "hal0").mkdir(parents=True)
-    (home / "var-lib").mkdir(parents=True)
-    (home / "etc" / "hal0" / "hal0.toml").write_text(
-        tomli_w.dumps(
-            {
-                "meta": {"schema_version": 1},
-                "memory": {
-                    "graph": {"extraction_slot": "utility", "extraction_model": "MiniMax-M2.5"}
-                },
-            }
-        )
-    )
-    monkeypatch.setenv("HAL0_HOME", str(home))
+    from hal0.config.schema import Hal0Config, MemoryConfig, MemoryGraphConfig
 
     app = _build_app(stub_wrapper)
+    # The hot path reads the lifespan's cached config, never the disk (a
+    # corrupt hal0.toml must not turn every memory write into a 500).
+    app.state.hal0_config = Hal0Config(
+        memory=MemoryConfig(
+            graph=MemoryGraphConfig(extraction_slot="utility", extraction_model="MiniMax-M2.5")
+        )
+    )
+    monkeypatch.setenv("HAL0_HOME", str(tmp_path / "unused-home"))
 
     catalog_calls: list[tuple[Any, ...]] = []
 

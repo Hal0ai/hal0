@@ -74,20 +74,30 @@ export function engineTargetPutBody(value) {
 
 const UNKNOWN = 'engine LLM unknown (hal0-api could not read the hindsight-api unit)'
 
+const ALIAS = 'hal0/memory'
+
 /**
- * `{text, warn}` describing the LLM hindsight-api really runs on. `warn` is
- * set when /etc/hal0/hindsight-llm.env overrides provider/base_url/model:
- * then hal0's picker is not in effect until those lines are removed.
+ * `{text, warn, reason}` describing the LLM hindsight-api really runs on.
+ * `warn` is set with `reason: 'override'` when /etc/hal0/hindsight-llm.env
+ * overrides provider/base_url/model (the picker is not in effect until those
+ * lines are removed), and with `reason: 'pinned'` when the unit still pins a
+ * slot id instead of hal0/memory (no drop-in written yet — one Save repoints
+ * it). `reason` is null otherwise.
  */
 export function engineRunningLine(status) {
   const e = status && status.engine_llm
-  if (!e || !e.model) return { text: UNKNOWN, warn: false }
+  if (!e || !e.model) return { text: UNKNOWN, warn: false, reason: null }
   let text = `${e.model} via ${e.provider || '?'}`
   if (e.base_url) text += ` @ ${e.base_url}`
   if (e.overridden) {
     const keys = Array.isArray(e.override_keys) && e.override_keys.length ? ` (${e.override_keys.join(', ')})` : ''
     text += ` — overridden by ${e.override_file || 'hindsight-llm.env'}${keys}; the picker has no effect until those lines are removed and hindsight-api is restarted`
-    return { text, warn: true }
+    return { text, warn: true, reason: 'override' }
   }
-  return { text, warn: false }
+  const alias = (status.target && status.target.alias) || ALIAS
+  if (e.model !== alias) {
+    text += ` — engine still pinned to ${e.model}; Save graph settings once to repoint it to ${alias} (writes the drop-in and restarts hindsight-api)`
+    return { text, warn: true, reason: 'pinned' }
+  }
+  return { text, warn: false, reason: null }
 }

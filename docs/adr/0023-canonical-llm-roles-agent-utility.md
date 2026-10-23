@@ -92,10 +92,16 @@ the extraction limits. hal0's `/v1` resolves the alias from
   did — the §2 generalised chain `(<slot>, agent)`, same lane pin, same
   on-demand load;
 - with `extraction_model` set to an upstream model id (one `/v1/models`
-  lists for a remote, non-pinned upstream — OpenRouter, MiniMax, …) the
-  request carries that id as-is, with no slot lookup and no lane pin, and
-  the dispatcher routes it to its upstream or answers `dispatch.no_route`;
-  it never falls through to the `agent` anchor.
+  lists for a remote, non-pinned, enabled upstream after its
+  `model_filters` — OpenRouter, MiniMax, …) the request carries that id
+  as-is, with no slot lookup, no lane pin and no slot thinking policy, and
+  is marked *upstream-only* (`set_upstream_only` in
+  `src/hal0/dispatcher/lane_pin.py`). The dispatcher routes it to its
+  upstream or, when no remote advertises the id (cold cache, provider
+  offline), answers `dispatch.upstream_unavailable` before its step-4
+  heuristics — so it never falls through to the `agent` anchor or the
+  `flm` slot, which would have run memory extraction on the chat lane
+  while status said "upstream".
 
 Before this amendment the drop-in named `hal0/<extraction_slot>`, so every
 slot change rewrote it and restarted the engine, and an upstream target
@@ -105,8 +111,13 @@ Now switching the engine between a local slot and an upstream model is a
 `hal0.toml` write that the hot path reads from `app.state.hal0_config`,
 applied on the engine's next call; the drop-in changes, and the engine
 restarts, only for a timeout or limit change. A pre-amendment drop-in
-still naming `hal0/<slot>` reads as drift and is rewritten once on the
-next enabled graph PUT.
+still naming `hal0/<slot>` — or no drop-in at all, which leaves the base
+unit's `hal0/utility` in force — reads as drift and is rewritten once on
+the next graph PUT, gate on or off and whatever the slot set looks like
+(the #1717 reason to skip, a restart pinning the engine to an unverifiable
+slot, is void now that the file no longer names a slot). Until that write
+the status reports `engine_llm.model` as the slot id and the dashboard and
+CLI say the engine is still pinned.
 
 The engine still runs through hal0's `/v1` with hal0's upstream auth, so
 an upstream target adds no credential to the engine, and hal0's upstream

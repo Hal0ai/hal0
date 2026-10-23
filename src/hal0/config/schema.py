@@ -1939,9 +1939,11 @@ class MemoryGraphConfig(BaseModel):
     """[memory.graph] section of hal0.toml (ADR-0023).
 
     Controls graph extraction on the Hindsight engine. Hindsight builds its graph
-    natively via its own extraction LLM; hal0 points that LLM at the
-    ``extraction_slot`` (propagated to hindsight-api as
-    ``HINDSIGHT_API_LLM_MODEL=hal0/<slot>`` through a systemd drop-in).
+    natively via its own extraction LLM; hal0 points that LLM at the fixed
+    virtual id ``hal0/memory`` (through a systemd drop-in) and resolves it on
+    every call to ``hal0/<extraction_slot>`` or, when set, to
+    ``extraction_model`` (#2919), so the engine's model changes without a
+    restart.
 
     ADR-0023 replaced the inert, cognee-era ``route``/``upstream`` enum with a
     single ``extraction_slot`` knob. ``model_config.extra = "ignore"`` means a
@@ -1963,9 +1965,10 @@ class MemoryGraphConfig(BaseModel):
         default="utility",
         description=(
             "The local llm slot Hindsight uses for graph extraction / "
-            "consolidation / reflect. Propagated to hindsight-api as "
-            "HINDSIGHT_API_LLM_MODEL=hal0/<slot> via a systemd drop-in. Validated "
-            "against the live enabled-llm-slot set by the API at set-time."
+            "consolidation / reflect while extraction_model is unset. hindsight-api "
+            "calls the fixed id hal0/memory; hal0's /v1 resolves it to this slot "
+            "per call, so a change needs no engine restart. Validated against the "
+            "live enabled-llm-slot set by the API at set-time."
         ),
     )
     extraction_model: str | None = Field(

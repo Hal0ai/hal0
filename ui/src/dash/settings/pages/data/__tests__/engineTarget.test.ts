@@ -101,7 +101,19 @@ describe('engineRunningLine', () => {
     expect(engineRunningLine(STATUS)).toEqual({
       text: 'hal0/memory via openai @ http://127.0.0.1:8080/v1',
       warn: false,
+      reason: null,
     })
+  })
+  it('warns when the engine is still pinned to a slot id instead of hal0/memory', () => {
+    const line = engineRunningLine({
+      ...STATUS,
+      extraction_model: 'MiniMax-M2.5',
+      engine_llm: { ...STATUS.engine_llm, model: 'hal0/utility' },
+    })
+    expect(line.warn).toBe(true)
+    expect(line.reason).toBe('pinned')
+    expect(line.text).toContain('still pinned to hal0/utility')
+    expect(line.text).toContain('Save')
   })
   it('warns when hindsight-llm.env overrides the target', () => {
     const line = engineRunningLine({
@@ -116,6 +128,7 @@ describe('engineRunningLine', () => {
       },
     })
     expect(line.warn).toBe(true)
+    expect(line.reason).toBe('override')
     expect(line.text).toContain('MiniMax-M2.5 via minimax')
     expect(line.text).toContain('overridden by /etc/hal0/hindsight-llm.env')
     expect(line.text).toContain('HINDSIGHT_API_LLM_MODEL')
@@ -124,10 +137,12 @@ describe('engineRunningLine', () => {
     expect(engineRunningLine({ ...STATUS, engine_llm: undefined })).toEqual({
       text: 'engine LLM unknown (hal0-api could not read the hindsight-api unit)',
       warn: false,
+      reason: null,
     })
     expect(engineRunningLine(null)).toEqual({
       text: 'engine LLM unknown (hal0-api could not read the hindsight-api unit)',
       warn: false,
+      reason: null,
     })
   })
 })

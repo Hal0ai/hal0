@@ -91,13 +91,17 @@ def test_enable_without_slot_keeps_current(stub_api) -> None:
 
 
 def test_enable_with_slot_sends_extraction_slot(stub_api) -> None:
-    result = runner.invoke(
-        memory_commands.app,
-        ["graph", "enable", "--slot", "agent"],
-    )
+    result = runner.invoke(memory_commands.graph_app, ["enable", "--slot", "agent"])
     assert result.exit_code == 0, result.output
-    _, payload = stub_api["put"][-1]
-    assert payload == {"enabled": True, "extraction_slot": "agent"}
+    # #2919: picking a slot also clears any upstream model, matching the
+    # dashboard picker — otherwise `--slot` would leave the engine on the
+    # upstream while saying "run on a local slot" (reviewer finding I4).
+    assert stub_api["put"] == [
+        (
+            "/api/memory/graph",
+            {"enabled": True, "extraction_slot": "agent", "extraction_model": None},
+        )
+    ]
 
 
 # ── #2919: the engine's model can be an upstream model ───────────────────────
@@ -188,8 +192,47 @@ def test_status_shows_target_and_what_the_engine_really_runs(
     assert "HINDSIGHT_API_LLM_PROVIDER" in out
 
 
+def test_status_warns_when_the_engine_is_still_pinned_to_a_slot(
+    stub_api, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A box whose unit still says hal0/utility (no drop-in written yet) is
+    not on the picker's target even though nothing overrides it (C2)."""
+
+    def fake_get(path: str, **_kw: Any) -> dict[str, Any]:
+        return {
+            "enabled": False,
+            "extraction_slot": "utility",
+            "slot_resolves": False,
+            "available_slots": ["agent"],
+            "extraction_model": "MiniMax-M2.5",
+            "target": {"kind": "upstream", "model": "MiniMax-M2.5", "alias": "hal0/memory"},
+            "available_models": [{"id": "MiniMax-M2.5", "owned_by": "minimax"}],
+            "engine_llm": {
+                "provider": "openai",
+                "base_url": "http://127.0.0.1:8080/v1",
+                "model": "hal0/utility",
+                "overridden": False,
+                "override_file": None,
+                "override_keys": [],
+            },
+            "in_flight": 0,
+            "builds_ok": 0,
+            "errors": 0,
+            "last_built_at": None,
+            "last_error": None,
+        }
+
+    monkeypatch.setattr(memory_commands, "api_get", fake_get)
+    result = runner.invoke(memory_commands.graph_app, ["status"])
+    assert result.exit_code == 0, result.output
+    # rich wraps the panel at 80 columns, so assert on tokens it cannot split.
+    assert "still pinned to hal0/utility" in result.output
+    assert "repoint" in result.output
+
+
 def test_route_option_no_longer_exists(stub_api) -> None:
-    """ADR-0023: --route/--provider/--model were removed in favour of --slot."""
+    """ADR-0023: --route/--provider were removed in favour of --slot (#2919 later
+    added --model, which names an upstream model id rather than a provider)."""
     result = runner.invoke(
         memory_commands.app,
         ["graph", "enable", "--route", "upstream"],

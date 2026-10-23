@@ -329,6 +329,14 @@ def graph_status_cmd(
                 "hal0's engine target is not in effect until those lines are removed "
                 "and hindsight-api is restarted[/red]"
             )
+        elif engine["model"] != (target.get("alias") or "hal0/memory"):
+            # No drop-in written yet (or a pre-#2919 one): the unit still
+            # pins a slot id, so the picker's target is not what runs.
+            running += (
+                f"\n[red]engine still pinned to {engine['model']} — run "
+                "`hal0 memory graph enable` once to repoint it to hal0/memory "
+                "(writes the drop-in and restarts hindsight-api)[/red]"
+            )
         t.add_row("Engine running", running)
     t.add_row("Builds OK", str(s.get("builds_ok", 0)))
     t.add_row("Errors", str(s.get("errors", 0)))
@@ -381,7 +389,10 @@ def graph_enable_cmd(
         return
     payload: dict[str, Any] = {"enabled": True}
     if slot is not None:
+        # A slot choice also clears any upstream model, as the dashboard
+        # picker does — otherwise the engine would stay on the upstream.
         payload["extraction_slot"] = slot
+        payload["extraction_model"] = None
     if model is not None:
         payload["extraction_model"] = model
     if local:

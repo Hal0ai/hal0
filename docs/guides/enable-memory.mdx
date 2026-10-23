@@ -147,7 +147,10 @@ an unknown or non-llm slot before it ever reaches `hal0.toml`. `--model`
 names an upstream model id as `hal0 memory graph status` lists it under
 "Upstream models"; the server rejects an id no configured upstream
 advertises. The dashboard's **Engine model** picker (Settings → Data →
-Memory, and the agents Memory tab) offers the same two groups.
+Memory, and the agents Memory tab) offers the same two groups. On a box
+upgraded from an earlier release the first save repoints `hindsight-api`
+at `hal0/memory` once (one drop-in write and restart); until then the
+**Engine running** row says the engine is still pinned to the old slot id.
 
 Enabling also measures whether the extraction slot can finish one
 extraction inside `[memory.graph].llm_timeout_s`. hal0 reads the slot's

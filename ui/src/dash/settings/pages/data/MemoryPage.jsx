@@ -318,7 +318,7 @@ function MemoryGraphPanel() {
         sub={st && !targetIsUpstream && !st.slot_resolves
           ? "⚠ configured slot doesn't match an enabled LLM slot — extraction is stalled until this points at a live slot or an upstream model"
           : targetIsUpstream
-            ? "Upstream model the engine calls through hal0's /v1 — applies at once, no engine restart; the local slot stays as the way back"
+            ? "Upstream model the engine calls through hal0's /v1 — memory text leaves the box to that provider; applies at once, no engine restart; the local slot stays as the way back"
             : "Local LLM slot that runs extraction, consolidation, reflect and mental-model refresh"}
         v={
           targetOptions.local.length + targetOptions.upstream.length > 0 ? (
@@ -345,9 +345,11 @@ function MemoryGraphPanel() {
       />
       <SRow
         k="Engine running"
-        sub={running.warn
+        sub={running.reason === "override"
           ? "⚠ /etc/hal0/hindsight-llm.env sets the engine's provider/model and beats every hal0 setting — remove those lines and restart hindsight-api for the picker above to take effect"
-          : "The LLM hindsight-api actually loads: hal0/memory resolves to the picker above on every call"}
+          : running.reason === "pinned"
+            ? "⚠ the engine is not calling hal0/memory yet — Save once (any change) to write the drop-in and restart it onto the picker above"
+            : "The LLM hindsight-api actually loads: hal0/memory resolves to the picker above on every call"}
         mono
         v={<span data-testid="mem-graph-engine-running" style={{color: running.warn ? "var(--warn)" : "var(--fg-3)"}}>{running.text}</span>}
       />
