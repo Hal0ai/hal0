@@ -44,8 +44,8 @@ class LingerState:
 def read_linger(
     user: str = HAL0_USER,
     *,
-    run: Callable[..., Any] = subprocess.run,
-    which: Callable[[str], str | None] = shutil.which,
+    run: Callable[..., Any] | None = None,
+    which: Callable[[str], str | None] | None = None,
     linger_dir: str = LINGER_DIR,
 ) -> LingerState:
     """Return the linger state of ``user`` without changing anything.
@@ -53,6 +53,8 @@ def read_linger(
     ``enabled`` is ``None`` only when neither ``loginctl`` nor the linger
     directory can say (no systemd at all).
     """
+    run = subprocess.run if run is None else run
+    which = shutil.which if which is None else which
     detail = ""
     if which("loginctl"):
         try:
@@ -80,13 +82,15 @@ def read_linger(
 def disable_linger(
     user: str = HAL0_USER,
     *,
-    run: Callable[..., Any] = subprocess.run,
-    which: Callable[[str], str | None] = shutil.which,
+    run: Callable[..., Any] | None = None,
+    which: Callable[[str], str | None] | None = None,
 ) -> tuple[bool, str]:
     """``loginctl disable-linger <user>``; returns ``(ok, message)``.
 
     Needs root. Never raises: uninstall must keep going when it fails.
     """
+    run = subprocess.run if run is None else run
+    which = shutil.which if which is None else which
     if not which("loginctl"):
         return (False, "loginctl not found")
     try:
@@ -114,8 +118,8 @@ GATEWAY_REGEN_COMMAND = "sudo hal0 agent install hermes"
 def gateway_in_use(
     *,
     unit_dir: str = "/etc/systemd/system",
-    run: Callable[..., Any] = subprocess.run,
-    which: Callable[[str], str | None] = shutil.which,
+    run: Callable[..., Any] | None = None,
+    which: Callable[[str], str | None] | None = None,
 ) -> bool:
     """Is ``hermes-gateway.service`` enabled or running?
 
@@ -126,6 +130,8 @@ def gateway_in_use(
     disabled, stopped gateway (the test boxes) never runs, so its unit shape
     and linger do not matter.
     """
+    run = subprocess.run if run is None else run
+    which = shutil.which if which is None else which
     base = Path(unit_dir)
     if any(base.glob("*.wants/hermes-gateway.service")):
         return True
