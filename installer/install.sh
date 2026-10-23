@@ -3499,16 +3499,23 @@ smoke_structured_output() {
     # bound model, else the first model-bound llm slot. Bound means the
     # configured model (model_default), which is what the resolver reads; a
     # row's model_id is the runtime snapshot and outlives a cleared binding.
-    # Loaded means the dispatchable set (slots/state.py DISPATCHABLE_STATES),
-    # where SlotManager.load is a no-op. An unreadable slot list prints
-    # nothing and the probe runs as before.
-    local target _ _slot _state
+    #
+    # Fails closed: the probe runs only when the target is in the
+    # dispatchable set (slots/state.py DISPATCHABLE_STATES: ready, serving,
+    # idle), where SlotManager.load is a no-op. Any other state, including
+    # one this list does not know, skips as cold; an unreadable slot list
+    # skips too. API reachability is the earlier verify steps' job.
+    local slots_json target _ _slot _state
     # `${auth[@]+"${auth[@]}"}` expands the (possibly empty) array under
     # `set -u` on bash < 4.4; shellcheck reads the quoted element as a string
     # whose quotes would be lost (SC2090), which does not apply to arrays.
     # shellcheck disable=SC2090
-    target="$(curl -fsS -m 30 "http://127.0.0.1:${HAL0_PORT}/api/slots" \
-        ${auth[@]+"${auth[@]}"} 2>/dev/null | "${PY}" -c 'import json, sys
+    if ! slots_json="$(curl -fsS -m 30 "http://127.0.0.1:${HAL0_PORT}/api/slots" \
+        ${auth[@]+"${auth[@]}"} 2>/dev/null)"; then
+        SMOKE_STRUCTURED_NOTE="could not read the slot list (GET /api/slots failed)"
+        return 2
+    fi
+    target="$(printf '%s' "${slots_json}" | "${PY}" -c 'import json, sys
 try:
     slots = json.load(sys.stdin)
     bound = [
@@ -3518,21 +3525,24 @@ try:
         and s.get("model_default")
     ]
 except Exception:
+    print("unreadable")
     sys.exit(0)
 if not bound:
     print("unbound")
     sys.exit(0)
 by_name = {str(s.get("name") or "").lower(): s for s in bound}
 slot = by_name.get("utility") or by_name.get("agent") or bound[0]
-state = str(slot.get("status") or slot.get("state") or "unknown")
+state = str(slot.get("status") or slot.get("state") or "unknown").split()[0]
 if state == "error":
     verdict = "error"
-elif state in ("offline", "pulling", "starting", "warming", "unloading"):
-    verdict = "cold"
-else:
+elif state in ("ready", "serving", "idle"):
     verdict = "loaded"
-print(verdict + " " + str(slot.get("name")) + " " + state)' 2>/dev/null || true)"
+else:
+    verdict = "cold"
+print(verdict + " " + str(slot.get("name")).split()[0] + " " + state)' 2>/dev/null || true)"
     case "${target}" in
+        loaded\ *)
+            ;;
         unbound)
             SMOKE_STRUCTURED_NOTE="no model bound yet"
             return 2
@@ -3546,6 +3556,10 @@ print(verdict + " " + str(slot.get("name")) + " " + state)' 2>/dev/null || true)
             read -r _ _slot _state <<<"${target}"
             SMOKE_STRUCTURED_NOTE="slot '${_slot}' is in error — check 'hal0 slot status ${_slot}' and 'journalctl -u hal0-slot@${_slot} -n 40'"
             return 1
+            ;;
+        *)
+            SMOKE_STRUCTURED_NOTE="could not read the slot list (GET /api/slots did not return a slot list)"
+            return 2
             ;;
     esac
     # shellcheck disable=SC2090
@@ -3597,6 +3611,8 @@ run_post_install_smoke() {
         info "structured-output probe ok (gateway /v1, json_object)"
     elif [[ "${_so_rc}" -eq 2 && "${SMOKE_STRUCTURED_NOTE}" == "no model bound yet" ]]; then
         info "structured-output probe skipped — no model bound yet (bind one from the dashboard, then re-run the installer to repeat this probe)"
+    elif [[ "${_so_rc}" -eq 2 && "${SMOKE_STRUCTURED_NOTE}" == "could not read the slot list"* ]]; then
+        info "structured-output probe skipped — ${SMOKE_STRUCTURED_NOTE}"
     elif [[ "${_so_rc}" -eq 2 ]]; then
         info "structured-output probe skipped — ${SMOKE_STRUCTURED_NOTE}, which the installer will not do (load it, then re-run the installer to repeat this probe)"
     else

@@ -110,8 +110,7 @@ def _drive(tmp_path: Path, script_body: str) -> subprocess.CompletedProcess[str]
 
 
 def test_probe_passes_when_gateway_returns_parseable_json(tmp_path: Path) -> None:
-    reply = _chat_completion('{"ok": true}')
-    _write_exec(tmp_path / "curl", f"echo '{reply}'")
+    _gateway(tmp_path, _LOADED)
     res = _drive(tmp_path, "smoke_structured_output")
     assert res.returncode == 0, res.stderr
 
@@ -119,16 +118,15 @@ def test_probe_passes_when_gateway_returns_parseable_json(tmp_path: Path) -> Non
 def test_probe_fails_on_non_json_content(tmp_path: Path) -> None:
     """The regression this probe exists for: a coherent chat reply ('Paris')
     is NOT structured output — the probe must fail on it."""
-    reply = _chat_completion("Paris")
-    _write_exec(tmp_path / "curl", f"echo '{reply}'")
+    _gateway(tmp_path, _LOADED, content="Paris")
     res = _drive(tmp_path, "smoke_structured_output")
-    assert res.returncode != 0
+    assert res.returncode == 1
 
 
-def test_probe_fails_when_gateway_is_down(tmp_path: Path) -> None:
-    _write_exec(tmp_path / "curl", "exit 7")
+def test_probe_fails_when_the_chat_request_fails(tmp_path: Path) -> None:
+    _gateway(tmp_path, _LOADED, post_fails=True)
     res = _drive(tmp_path, "smoke_structured_output")
-    assert res.returncode != 0
+    assert res.returncode == 1
 
 
 def test_update_check_invokes_hal0_update_check(tmp_path: Path) -> None:
@@ -142,7 +140,7 @@ def test_update_check_invokes_hal0_update_check(tmp_path: Path) -> None:
 def test_smoke_is_fail_soft_and_records_failures(tmp_path: Path) -> None:
     """Both probes failing must not abort the driver (exit 0) — install
     completes; failures land in SMOKE_FAILED for the summary box."""
-    _write_exec(tmp_path / "curl", "exit 7")
+    _gateway(tmp_path, _LOADED, post_fails=True)
     _write_exec(tmp_path / "hal0", "exit 1")
     res = _drive(
         tmp_path,
@@ -207,7 +205,7 @@ def test_probe_failure_prints_the_brain_remediation_when_one_is_offered(
     tmp_path: Path,
 ) -> None:
     venv = _fake_venv(tmp_path, "echo 'bind it: hal0 slot edit brain --model lfm2.5-2.6b'")
-    _write_exec(tmp_path / "curl", "exit 7")
+    _gateway(tmp_path, _LOADED, post_fails=True)
     _write_exec(tmp_path / "hal0", "exit 0")
     res = _drive(tmp_path, f'VENV_DIR="{venv}"\nrun_post_install_smoke\nexit 0')
     assert res.returncode == 0, res.stderr
@@ -218,7 +216,7 @@ def test_probe_failure_says_nothing_extra_when_the_slot_is_bound(tmp_path: Path)
     """`--check-binding` prints nothing when the binding is fine, so a
     fresh-install probe failure reads exactly as it did before."""
     venv = _fake_venv(tmp_path, "exit 0")
-    _write_exec(tmp_path / "curl", "exit 7")
+    _gateway(tmp_path, _LOADED, post_fails=True)
     _write_exec(tmp_path / "hal0", "exit 0")
     res = _drive(tmp_path, f'VENV_DIR="{venv}"\nrun_post_install_smoke\nexit 0')
     assert res.returncode == 0, res.stderr
@@ -229,7 +227,7 @@ def test_probe_failure_survives_a_missing_venv(tmp_path: Path) -> None:
     """The hint runs under `set -euo pipefail` while the installer is ALREADY
     reporting a failure — an absent venv (or an unset VENV_DIR) must not turn
     a warning into an aborted install."""
-    _write_exec(tmp_path / "curl", "exit 7")
+    _gateway(tmp_path, _LOADED, post_fails=True)
     _write_exec(tmp_path / "hal0", "exit 0")
     res = _drive(
         tmp_path,
@@ -254,19 +252,29 @@ def _slot(name: str, model: str | None, status: str, kind: str = "local") -> dic
     return {"name": name, "kind": kind, "type": "llm", "model_default": model, "status": status}
 
 
-def _gateway(tmp_path: Path, slots: list[dict[str, object]], content: str = '{"ok": true}') -> Path:
-    """Fake curl: ``/api/slots`` answers ``slots``; the chat POST answers
-    ``content`` and is logged, so a test can assert it never happened."""
+_LOADED = [_slot("utility", "small-model", "ready")]
+
+
+def _gateway(
+    tmp_path: Path,
+    slots: list[dict[str, object]] | str,
+    content: str = '{"ok": true}',
+    *,
+    post_fails: bool = False,
+) -> Path:
+    """Fake curl: ``/api/slots`` answers ``slots`` (a raw string is sent as
+    is); every other request is logged, so a test can assert the chat POST
+    never happened, and answers ``content`` or fails like a dead gateway."""
     posts = tmp_path / "posts.log"
-    (tmp_path / "slots.json").write_text(json.dumps(slots), encoding="utf-8")
+    raw = slots if isinstance(slots, str) else json.dumps(slots)
+    (tmp_path / "slots.json").write_text(raw, encoding="utf-8")
     (tmp_path / "reply.json").write_text(_chat_completion(content), encoding="utf-8")
     _write_exec(
         tmp_path / "curl",
         'for a in "$@"; do\n'
         f'  case "$a" in */api/slots) cat "{tmp_path}/slots.json"; exit 0 ;; esac\n'
         "done\n"
-        f'echo post >> "{posts}"\n'
-        f'cat "{tmp_path}/reply.json"',
+        f'echo post >> "{posts}"\n' + ("exit 7" if post_fails else f'cat "{tmp_path}/reply.json"'),
     )
     return posts
 
@@ -350,3 +358,36 @@ def test_a_stale_runtime_model_id_does_not_count_as_bound(tmp_path: Path) -> Non
     res = _drive(tmp_path, "smoke_structured_output")
     assert res.returncode == 0, res.stderr
     assert posts.read_text(encoding="utf-8").count("post") == 1
+
+
+def test_an_unknown_state_skips_as_cold(tmp_path: Path) -> None:
+    """Fail closed: only DISPATCHABLE_STATES (ready, serving, idle) are probed.
+    A state this list does not know might mean the request would load it."""
+    posts = _gateway(tmp_path, [_slot("utility", "small-model", "rebooting")])
+    _write_exec(tmp_path / "hal0", "exit 0")
+    res = _drive(tmp_path, _SHOW)
+    assert "slot 'utility' is not loaded (rebooting)" in res.stdout
+    assert "FAILED:structured-output" not in res.stdout
+    assert not posts.exists()
+
+
+def test_an_unreachable_slot_list_skips_without_a_chat_post(tmp_path: Path) -> None:
+    """Fail closed: when the slot list cannot be read the probe cannot tell
+    whether it would load a slot, so it skips. API reachability is covered by
+    the earlier verify steps, so this is not a failure."""
+    calls = tmp_path / "curl.calls"
+    _write_exec(tmp_path / "curl", f'echo "$@" >> "{calls}"\nexit 22')
+    _write_exec(tmp_path / "hal0", "exit 0")
+    res = _drive(tmp_path, _SHOW)
+    assert "structured-output probe skipped — could not read the slot list" in res.stdout
+    assert "FAILED:structured-output" not in res.stdout
+    assert "/v1/chat/completions" not in calls.read_text(encoding="utf-8")
+
+
+def test_a_non_json_slot_list_skips_without_a_chat_post(tmp_path: Path) -> None:
+    posts = _gateway(tmp_path, "<html>401 Unauthorized</html>")
+    _write_exec(tmp_path / "hal0", "exit 0")
+    res = _drive(tmp_path, _SHOW)
+    assert "structured-output probe skipped — could not read the slot list" in res.stdout
+    assert "FAILED:structured-output" not in res.stdout
+    assert not posts.exists()
