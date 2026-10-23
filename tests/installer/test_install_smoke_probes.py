@@ -245,3 +245,87 @@ def test_smoke_failures_surface_in_the_summary_box() -> None:
     assert "SMOKE_FAILED" in _TEXT.split("SUMMARY_LINES=(", 1)[1], (
         "SMOKE_FAILED is never referenced after the summary box starts building"
     )
+
+
+# ── Skip gate: no bound model, or a cold slot the probe would load ─────────
+
+
+def _slot(name: str, model: str | None, status: str, kind: str = "local") -> dict[str, object]:
+    return {"name": name, "kind": kind, "type": "llm", "model_default": model, "status": status}
+
+
+def _gateway(tmp_path: Path, slots: list[dict[str, object]], content: str = '{"ok": true}') -> Path:
+    """Fake curl: ``/api/slots`` answers ``slots``; the chat POST answers
+    ``content`` and is logged, so a test can assert it never happened."""
+    posts = tmp_path / "posts.log"
+    (tmp_path / "slots.json").write_text(json.dumps(slots), encoding="utf-8")
+    (tmp_path / "reply.json").write_text(_chat_completion(content), encoding="utf-8")
+    _write_exec(
+        tmp_path / "curl",
+        'for a in "$@"; do\n'
+        f'  case "$a" in */api/slots) cat "{tmp_path}/slots.json"; exit 0 ;; esac\n'
+        "done\n"
+        f'echo post >> "{posts}"\n'
+        f'cat "{tmp_path}/reply.json"',
+    )
+    return posts
+
+
+_SHOW = 'info() { echo "INFO: $*"; }\nrun_post_install_smoke\nprintf "FAILED:%s\\n" "${SMOKE_FAILED[@]}"\nexit 0'
+
+
+def test_fresh_install_with_no_bound_model_skips_without_failing(tmp_path: Path) -> None:
+    """First-run seeding binds no model by design, so the probe cannot pass
+    on a fresh box; it must not count as a verify failure."""
+    posts = _gateway(tmp_path, [_slot("agent", None, "offline"), _slot("utility", "", "offline")])
+    _write_exec(tmp_path / "hal0", "exit 0")
+    res = _drive(tmp_path, _SHOW)
+    assert "structured-output probe skipped — no model bound yet" in res.stdout
+    assert "FAILED:structured-output" not in res.stdout
+    assert not posts.exists(), "the chat probe must not be sent when nothing is bound"
+
+
+def test_a_cold_target_slot_is_skipped_not_loaded(tmp_path: Path) -> None:
+    """hal0/utility resolves to a bound utility slot even when it is cold and
+    the request would load it; a warm agent does not change the target."""
+    posts = _gateway(
+        tmp_path,
+        [_slot("agent", "big-model", "ready"), _slot("utility", "small-model", "offline")],
+    )
+    _write_exec(tmp_path / "hal0", "exit 0")
+    res = _drive(tmp_path, _SHOW)
+    assert "structured-output probe skipped — slot 'utility' is not loaded (offline)" in res.stdout
+    assert "FAILED:structured-output" not in res.stdout
+    assert not posts.exists(), "the probe must not cold-load a slot"
+
+
+def test_a_loaded_anchor_is_probed_when_utility_has_no_model(tmp_path: Path) -> None:
+    posts = _gateway(
+        tmp_path, [_slot("utility", None, "offline"), _slot("agent", "big-model", "serving")]
+    )
+    res = _drive(tmp_path, "smoke_structured_output")
+    assert res.returncode == 0, res.stderr
+    assert posts.read_text(encoding="utf-8").count("post") == 1
+
+
+def test_a_loaded_target_that_returns_prose_still_fails(tmp_path: Path) -> None:
+    _gateway(tmp_path, [_slot("utility", "small-model", "ready")], content="Paris")
+    _write_exec(tmp_path / "hal0", "exit 0")
+    res = _drive(tmp_path, _SHOW)
+    assert "FAILED:structured-output" in res.stdout
+
+
+def test_remote_upstreams_do_not_count_as_a_bound_slot(tmp_path: Path) -> None:
+    """/api/slots also lists synthetic remote upstreams; hal0/utility never
+    resolves to one, so a box with only remotes has no model bound."""
+    remote = {
+        "name": "openrouter",
+        "kind": "remote",
+        "type": None,
+        "model": "x",
+        "status": "serving",
+    }
+    posts = _gateway(tmp_path, [remote, _slot("agent", None, "offline")])
+    res = _drive(tmp_path, "smoke_structured_output")
+    assert res.returncode == 2
+    assert not posts.exists()
