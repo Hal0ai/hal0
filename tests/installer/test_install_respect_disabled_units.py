@@ -119,6 +119,10 @@ exit 0
 # release path.
 HAL0_PYTHON = r"""#!/bin/bash
 echo "python $*" >> "$CALLS"
+if [[ "$*" == "-m hal0.agents.hermes_gateway_regen state" ]]; then
+    echo "${EFFECTIVE_GATEWAY_STATE:-not-found 0}"
+    exit 0
+fi
 if [[ "$*" == "-m hal0.agents.hermes_gateway_regen install" ]]; then
     echo "[Unit]" > "$UNIT_DIR/hermes-gateway.service"
     systemctl daemon-reload
@@ -413,3 +417,18 @@ def test_the_installer_never_runs_hermes_to_install_the_gateway(tmp_path: Path) 
         assert not [c for c in b.log() if c.startswith("hermes ")]
         assert (b.unit_dir / "hermes-gateway.service").exists()
         assert b.state_of("hermes-gateway.service") == "enabled"
+
+
+def test_a_disabled_suffixed_unit_keeps_a_rerun_from_turning_the_gateway_on(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """#2943 review: only upstream's suffixed unit exists, disabled. The
+    installer must read that as the operator's off switch."""
+    monkeypatch.setenv("EFFECTIVE_GATEWAY_STATE", "disabled 0")
+    box = Box(tmp_path)
+    box.provisioned()
+    res = box.run(HERMES_BLOCK)
+    assert res.returncode == 0, res.stderr
+    assert "python -m hal0.agents.hermes_gateway_regen state" in box.log()
+    assert "enable --now hermes-gateway.service" not in box.log()
+    assert "hermes-gateway.service is disabled; left as is" in res.stdout

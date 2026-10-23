@@ -254,3 +254,19 @@ def test_disabled_gateway_with_a_bad_unit_is_only_warned_about(
     ac._install_hermes_gateway()
     assert ["systemctl", "disable", "--now", UNIT] not in calls
     assert "could not be normalised" in _out(capsys)
+
+
+def test_a_disabled_suffixed_unit_is_read_as_the_operators_off_switch(
+    monkeypatch, tmp_path, capsys
+) -> None:
+    """#2943 review: on a box a 1.6.0 nightly installed there is no
+    hermes-gateway.service, only upstream's suffixed unit. Its disabled state
+    is the operator's choice; the reinstall must not turn the gateway on."""
+    from hal0.agents.hermes_gateway_regen import HASHED_UNIT
+
+    calls = _setup(monkeypatch, tmp_path, state="disabled")
+    (tmp_path / HASHED_UNIT).write_text("[Unit]\n")
+    ac._install_hermes_gateway()
+    probed = [c for c in calls if c[:2] == ["systemctl", "is-enabled"]]
+    assert probed and probed[0][-1] == HASHED_UNIT
+    assert _enables(calls) == []

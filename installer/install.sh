@@ -3981,6 +3981,16 @@ else
     _gateway_state="$(unit_enable_state hermes-gateway.service)"
     _gateway_was_active=0
     systemctl is-active --quiet hermes-gateway.service 2>/dev/null && _gateway_was_active=1
+    # A box a 1.6.0 nightly installed has no hermes-gateway.service, only
+    # upstream's suffixed unit (#2943). Its on/off state is the operator's
+    # choice, which the template install carries over, so read that instead.
+    if [[ "${_gateway_state}" == "not-found" && -x "${VENV_DIR}/bin/python" ]]; then
+        _eff="$("${VENV_DIR}/bin/python" -m hal0.agents.hermes_gateway_regen state 2>/dev/null || true)"
+        if [[ -n "${_eff}" && "${_eff%% *}" != "not-found" ]]; then
+            _gateway_state="${_eff%% *}"
+            [[ "${_eff##* }" == "1" ]] && _gateway_was_active=1
+        fi
+    fi
     _hermes_install_args=()
     unit_state_off "${_gateway_state}" && _hermes_install_args+=(--no-gateway)
 

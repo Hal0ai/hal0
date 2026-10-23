@@ -368,17 +368,66 @@ def test_root_side_reads_nothing_from_the_release_tree(tmp_path: Path, monkeypat
     assert opened == [str(tmp_path / "hermes-gateway.service")]
 
 
-# ── #2943: upstream's hashed unit on a fresh v0.22.4 install ───────────────────
+# ── #2943: upstream's suffixed unit on a fresh v0.22.4 install ─────────────────
 
-HASHED = "hermes-gateway-1975ce4b.service"
+HASHED = regen.HASHED_UNIT
+CANON = "hermes-gateway.service"
 
 
-def _hashed_unit(tmp_path: Path, name: str = HASHED, user: str = "hal0") -> Path:
+def test_the_suffix_is_upstreams_hash_of_hal0s_home() -> None:
+    assert HASHED == "hermes-gateway-1975ce4b.service"
+
+
+class UnitSystemctl:
+    """Per-unit systemctl state: is-enabled/is-active answer per unit; enable,
+    disable, start, stop and restart change it. ``fail`` names an argv prefix
+    that fails."""
+
+    def __init__(self, states: dict[str, tuple[str, bool]], fail: list[str] | None = None) -> None:
+        self.states = dict(states)
+        self.fail = fail
+        self.calls: list[list[str]] = []
+
+    @property
+    def mutating(self) -> list[list[str]]:
+        return [c for c in self.calls if c[1] not in ("is-enabled", "is-active")]
+
+    def __call__(self, argv: list[str], **_: Any) -> subprocess.CompletedProcess[str]:
+        argv = list(argv)
+        self.calls.append(argv)
+        if self.fail and argv[: len(self.fail)] == self.fail:
+            return subprocess.CompletedProcess(argv, 1, "", "boom")
+        unit = argv[-1]
+        state, active = self.states.get(unit, ("not-found", False))
+        if argv[:2] == ["systemctl", "is-enabled"]:
+            return subprocess.CompletedProcess(
+                argv, 0 if state == "enabled" else 1, state + "\n", ""
+            )
+        if argv[:2] == ["systemctl", "is-active"]:
+            return subprocess.CompletedProcess(argv, 0 if active else 3, "", "")
+        verb = argv[1]
+        if verb == "enable":
+            self.states[unit] = ("enabled", active)
+        elif verb == "disable":
+            self.states[unit] = ("disabled", False if "--now" in argv else active)
+        elif verb in ("start", "restart"):
+            self.states[unit] = (state, True)
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+
+def _hashed_unit(
+    tmp_path: Path, name: str = HASHED, user: str = "hal0", home: str | None = None
+) -> Path:
     # What `hermes gateway install --system --run-as-user hal0` wrote as root on
     # a fresh 1.6.0 nightly (CT163, 2026-10-23): suffixed name, baked release path.
     text = (FIXTURES / "gateway-unit-hashed-v0.22.4.service").read_text(encoding="utf-8")
+    text = text.replace("User=hal0", f"User={user}")
+    if home is not None:
+        text = text.replace(
+            'Environment="HERMES_HOME=/var/lib/hal0/.hermes"', f'Environment="HERMES_HOME={home}"'
+        )
     unit = tmp_path / name
-    unit.write_text(text.replace("User=hal0", f"User={user}"), encoding="utf-8")
+    unit.write_text(text, encoding="utf-8")
     return unit
 
 
@@ -386,52 +435,176 @@ def _which(name: str) -> str:
     return f"/usr/bin/{name}"
 
 
-def test_only_hal0s_hashed_units_are_found(tmp_path: Path) -> None:
+def _migrate(tmp_path: Path, sc: UnitSystemctl, *, linger: bool = True) -> regen.RegenResult:
+    linger_dir = tmp_path / "linger"
+    linger_dir.mkdir(exist_ok=True)
+    if linger:
+        (linger_dir / "hal0").touch()
+    return regen.migrate_hashed_units(
+        unit_path=tmp_path / CANON,
+        linger_dir=str(linger_dir),
+        run=sc,
+        uid_of=lambda name: UID,
+        which=_which,
+    )
+
+
+def test_only_hal0s_suffixed_unit_is_found(tmp_path: Path) -> None:
     mine = _hashed_unit(tmp_path)
-    _hashed_unit(tmp_path, "hermes-gateway-0123abcd.service", user="bob")
-    (tmp_path / "hermes-gateway-deadbeef.service").symlink_to("/dev/null")
-    (tmp_path / "hermes-gateway-coder.service").write_text(mine.read_text())
     assert regen.hal0_hashed_units(tmp_path) == [mine]
+    # a standalone profile's unit, even with an 8-hex name, is not it
+    other = tmp_path / "other"
+    other.mkdir()
+    _hashed_unit(other, "hermes-gateway-cafebabe.service")
+    assert regen.hal0_hashed_units(other) == []
+    # same name, someone else's user or home: not hal0's
+    for n, kw in enumerate(({"user": "bob"}, {"home": "/var/lib/hal0/.hermes/profiles/coder"})):
+        d = tmp_path / f"case{n}"
+        d.mkdir()
+        _hashed_unit(d, **kw)
+        assert regen.hal0_hashed_units(d) == []
+    masked = tmp_path / "masked"
+    masked.mkdir()
+    (masked / HASHED).symlink_to("/dev/null")
+    assert regen.hal0_hashed_units(masked) == []
     assert regen.hal0_hashed_units(tmp_path / "absent") == []
 
 
-def test_a_fresh_box_moves_the_gateway_onto_the_canonical_unit(tmp_path: Path) -> None:
+def test_an_enabled_running_suffixed_unit_moves_over_canonical_first(tmp_path: Path) -> None:
     hashed = _hashed_unit(tmp_path)
-    canonical = tmp_path / "hermes-gateway.service"
-    sc = FakeSystemctl(enabled="enabled", active=True)
-    out = regen.migrate_hashed_units(
-        unit_path=canonical, run=sc, uid_of=lambda name: UID, which=_which
-    )
+    sc = UnitSystemctl({HASHED: ("enabled", True)})
+    out = _migrate(tmp_path, sc)
     assert out.action == "migrated" and out.was_enabled and out.was_active and out.restarted
     assert not hashed.exists()
-    assert canonical.read_text() == regen.render_unit(UID)
+    assert (tmp_path / CANON).read_text() == regen.render_unit(UID)
     assert sc.mutating == [
+        ["systemctl", "daemon-reload"],
         ["systemctl", "disable", "--now", HASHED],
         ["systemctl", "daemon-reload"],
-        ["systemctl", "enable", "hermes-gateway.service"],
-        ["systemctl", "start", "hermes-gateway.service"],
+        ["systemctl", "enable", CANON],
+        ["systemctl", "start", CANON],
     ]
+    assert sc.states[CANON] == ("enabled", True)
+
+
+def test_an_enabled_but_crash_looping_suffixed_unit_still_ends_running(tmp_path: Path) -> None:
+    """Its baked release was pruned, so is-active says no; enabled is the intent."""
+    _hashed_unit(tmp_path)
+    sc = UnitSystemctl({HASHED: ("enabled", False)})
+    _migrate(tmp_path, sc)
+    assert sc.states[CANON] == ("enabled", True)
+
+
+def test_a_disabled_stopped_suffixed_unit_stays_off(tmp_path: Path) -> None:
+    _hashed_unit(tmp_path)
+    sc = UnitSystemctl({HASHED: ("disabled", False)})
+    _migrate(tmp_path, sc)
+    assert CANON not in sc.states
+    assert not [c for c in sc.mutating if c[1] in ("enable", "start")]
+
+
+def test_a_disabled_but_running_suffixed_unit_keeps_running_disabled(tmp_path: Path) -> None:
+    _hashed_unit(tmp_path)
+    sc = UnitSystemctl({HASHED: ("disabled", True)})
+    _migrate(tmp_path, sc)
+    assert ["systemctl", "start", CANON] in sc.mutating
+    assert ["systemctl", "enable", CANON] not in sc.mutating
+
+
+def test_linger_is_turned_on_before_the_start(tmp_path: Path) -> None:
+    _hashed_unit(tmp_path)
+    sc = UnitSystemctl({HASHED: ("enabled", True)})
+    _migrate(tmp_path, sc, linger=False)
+    m = sc.mutating
+    assert m.index(["loginctl", "enable-linger", "hal0"]) < m.index(["systemctl", "start", CANON])
+
+
+def test_the_update_heal_with_linger_off_starts_once(tmp_path: Path) -> None:
+    _hashed_unit(tmp_path)
+    sc = UnitSystemctl({HASHED: ("enabled", True)})
+    linger_dir = tmp_path / "linger"
+    linger_dir.mkdir()
+
+    def run(argv: list[str], **kw: Any) -> subprocess.CompletedProcess[str]:
+        out = sc(argv, **kw)
+        if argv[:2] == ["loginctl", "enable-linger"]:
+            (linger_dir / "hal0").touch()
+        return out
+
+    out = regen.regenerate_gateway_unit(
+        unit_path=tmp_path / CANON,
+        linger_dir=str(linger_dir),
+        run=run,
+        uid_of=lambda name: UID,
+        which=_which,
+    )
+    assert out.action == "regenerated"
+    starts = [c for c in sc.mutating if c[1] in ("start", "restart") and c[-1] == CANON]
+    assert starts == [["systemctl", "start", CANON]]
+
+
+def test_a_failed_write_leaves_the_suffixed_unit_running(tmp_path: Path, monkeypatch: Any) -> None:
+    hashed = _hashed_unit(tmp_path)
+    sc = UnitSystemctl({HASHED: ("enabled", True)})
+
+    def boom(path: Path, text: str) -> None:
+        raise OSError("read-only")
+
+    monkeypatch.setattr(regen, "_write_unit", boom)
+    with pytest.raises(regen.GatewayRegenError, match="read-only"):
+        _migrate(tmp_path, sc)
+    assert hashed.exists() and sc.states[HASHED] == ("enabled", True)
+    assert not [c for c in sc.mutating if c[1] == "disable"]
+
+
+def test_a_failed_disable_removes_nothing(tmp_path: Path) -> None:
+    hashed = _hashed_unit(tmp_path)
+    sc = UnitSystemctl({HASHED: ("enabled", True)}, fail=["systemctl", "disable"])
+    with pytest.raises(regen.GatewayRegenError, match="disable"):
+        _migrate(tmp_path, sc)
+    assert hashed.exists()
+    assert not [c for c in sc.mutating if c[1] in ("enable", "start")]
+
+
+def test_a_failed_unlink_still_hands_the_gateway_over(tmp_path: Path, monkeypatch: Any) -> None:
+    hashed = _hashed_unit(tmp_path)
+    sc = UnitSystemctl({HASHED: ("enabled", True)})
+    real_unlink = Path.unlink
+
+    def unlink(self: Path, *a: Any, **k: Any) -> None:
+        if self == hashed:
+            raise OSError("busy")
+        real_unlink(self, *a, **k)
+
+    monkeypatch.setattr(Path, "unlink", unlink)
+    with pytest.raises(regen.GatewayRegenError, match="busy"):
+        _migrate(tmp_path, sc)
+    assert sc.states[CANON] == ("enabled", True)
 
 
 def test_a_canonical_unit_that_already_existed_keeps_its_own_state(tmp_path: Path) -> None:
-    """The operator's off switch (#2807) wins over the hashed unit's state."""
+    """The operator's off switch (#2807) wins over the suffixed unit's state."""
     _hashed_unit(tmp_path)
-    canonical = _old_unit(tmp_path)
-    sc = FakeSystemctl(enabled="enabled", active=True)
-    regen.migrate_hashed_units(unit_path=canonical, run=sc, uid_of=lambda name: UID, which=_which)
-    assert ["systemctl", "enable", "hermes-gateway.service"] not in sc.mutating
-    assert ["systemctl", "start", "hermes-gateway.service"] not in sc.mutating
-    assert canonical.read_text() == regen.render_unit(UID)
+    _new_unit(tmp_path)
+    sc = UnitSystemctl({HASHED: ("enabled", True), CANON: ("disabled", False)})
+    _migrate(tmp_path, sc)
+    assert not [c for c in sc.mutating if c[-1] == CANON and c[1] in ("enable", "start", "restart")]
 
 
-def test_a_masked_canonical_unit_stays_masked_and_the_hashed_one_goes(tmp_path: Path) -> None:
+def test_a_stale_running_canonical_unit_is_restarted_after_the_rewrite(tmp_path: Path) -> None:
+    _hashed_unit(tmp_path)
+    _old_unit(tmp_path)
+    sc = UnitSystemctl({HASHED: ("disabled", False), CANON: ("enabled", True)})
+    _migrate(tmp_path, sc)
+    assert ["systemctl", "restart", CANON] in sc.mutating
+
+
+def test_a_masked_canonical_unit_stays_masked_and_the_suffixed_one_goes(tmp_path: Path) -> None:
     hashed = _hashed_unit(tmp_path)
-    canonical = tmp_path / "hermes-gateway.service"
+    canonical = tmp_path / CANON
     canonical.symlink_to("/dev/null")
-    sc = FakeSystemctl(enabled="enabled", active=True)
-    out = regen.migrate_hashed_units(
-        unit_path=canonical, run=sc, uid_of=lambda name: UID, which=_which
-    )
+    sc = UnitSystemctl({HASHED: ("enabled", True), CANON: ("masked", False)})
+    out = _migrate(tmp_path, sc)
     assert not hashed.exists() and canonical.is_symlink()
     assert "masked" in out.message
     assert sc.mutating == [
@@ -440,52 +613,61 @@ def test_a_masked_canonical_unit_stays_masked_and_the_hashed_one_goes(tmp_path: 
     ]
 
 
-def test_the_update_heal_migrates_a_hashed_box(tmp_path: Path) -> None:
-    """``hal0-update hermes-gateway`` runs regenerate_gateway_unit; it must not
-    stop at "not installed" when only the hashed unit exists."""
-    hashed = _hashed_unit(tmp_path)
-    sc = FakeSystemctl(enabled="enabled", active=True)
-    out = _regen(tmp_path, sc, linger=True)
-    assert out.action == "regenerated" and out.unit_rewritten
-    assert not hashed.exists()
-    assert (tmp_path / "hermes-gateway.service").read_text() == regen.render_unit(UID)
-    # once migrated, the canonical unit is current and linger is on: no second restart
-    assert sc.mutating.count(["systemctl", "start", "hermes-gateway.service"]) == 1
-    assert ["systemctl", "restart", "hermes-gateway.service"] not in sc.mutating
+def test_effective_state_reads_the_suffixed_unit_when_there_is_no_canonical(tmp_path: Path) -> None:
+    sc = UnitSystemctl({HASHED: ("disabled", True), CANON: ("enabled", False)})
+    assert regen.effective_gateway_state(unit_path=tmp_path / CANON, run=sc) == ("not-found", False)
+    _hashed_unit(tmp_path)
+    assert regen.effective_gateway_state(unit_path=tmp_path / CANON, run=sc) == ("disabled", True)
+    _new_unit(tmp_path)
+    assert regen.effective_gateway_state(unit_path=tmp_path / CANON, run=sc) == ("enabled", False)
 
 
 def test_install_writes_the_canonical_unit_and_never_toggles_it(tmp_path: Path) -> None:
     linger_dir = tmp_path / "linger"
     linger_dir.mkdir()
-    sc = FakeSystemctl(enabled="not-found", active=False)
+    sc = UnitSystemctl({})
     out = regen.install_gateway_unit(
-        unit_path=tmp_path / "hermes-gateway.service",
+        unit_path=tmp_path / CANON,
         linger_dir=str(linger_dir),
         run=sc,
         uid_of=lambda name: UID,
         which=_which,
     )
     assert out.action == "installed" and out.unit_rewritten and out.linger_enabled
-    assert (tmp_path / "hermes-gateway.service").read_text() == regen.render_unit(UID)
+    assert (tmp_path / CANON).read_text() == regen.render_unit(UID)
     assert sc.mutating == [["systemctl", "daemon-reload"], ["loginctl", "enable-linger", "hal0"]]
 
 
+def test_install_reports_a_linger_failure_without_raising(tmp_path: Path) -> None:
+    sc = UnitSystemctl({}, fail=["loginctl", "enable-linger"])
+    out = regen.install_gateway_unit(
+        unit_path=tmp_path / CANON,
+        linger_dir=str(tmp_path),
+        run=sc,
+        uid_of=lambda name: UID,
+        which=_which,
+    )
+    assert out.unit_rewritten and not out.linger_enabled
+    assert "enable-linger hal0 failed" in out.message
+    assert (tmp_path / CANON).exists()
+
+
 def test_install_leaves_a_mask_alone(tmp_path: Path) -> None:
-    canonical = tmp_path / "hermes-gateway.service"
+    canonical = tmp_path / CANON
     canonical.symlink_to("/dev/null")
-    sc = FakeSystemctl(enabled="masked", active=False)
+    sc = UnitSystemctl({CANON: ("masked", False)})
     out = regen.install_gateway_unit(
         unit_path=canonical, linger_dir=str(tmp_path), run=sc, uid_of=lambda n: UID, which=_which
     )
     assert out.action == "noop" and canonical.is_symlink() and sc.mutating == []
 
 
-def test_install_runs_nothing_from_the_release_tree(tmp_path: Path, monkeypatch: Any) -> None:
+def test_install_runs_nothing_from_the_release_tree(tmp_path: Path) -> None:
     """Root never executes Hermes: every subprocess is systemctl or loginctl."""
     _hashed_unit(tmp_path)
-    sc = FakeSystemctl(enabled="enabled", active=True)
+    sc = UnitSystemctl({HASHED: ("enabled", True)})
     regen.install_gateway_unit(
-        unit_path=tmp_path / "hermes-gateway.service",
+        unit_path=tmp_path / CANON,
         linger_dir=str(tmp_path),
         run=sc,
         uid_of=lambda name: UID,
@@ -494,21 +676,19 @@ def test_install_runs_nothing_from_the_release_tree(tmp_path: Path, monkeypatch:
     assert {c[0] for c in sc.calls} <= {"systemctl", "loginctl"}
 
 
-def test_main_needs_the_install_verb_and_root(monkeypatch: Any) -> None:
+def test_main_needs_a_verb_and_root(monkeypatch: Any) -> None:
     assert regen.main([]) == 2
     monkeypatch.setattr(regen.os, "geteuid", lambda: 1000)
     assert regen.main(["install"]) == 1
 
 
-def test_the_update_probe_sees_a_hashed_box(tmp_path: Path) -> None:
-    """The unprivileged probe gates the heal; a box with only the hashed unit
+def test_the_update_probe_sees_a_suffixed_box(tmp_path: Path) -> None:
+    """The unprivileged probe gates the heal; a box with only the suffixed unit
     must ask for it rather than read as "no gateway unit"."""
     from hal0.system import linger
 
     _hashed_unit(tmp_path)
     reason = linger.gateway_unit_regen_reason(
-        unit=str(tmp_path / "hermes-gateway.service"),
-        linger_dir=str(tmp_path),
-        in_use=lambda: False,
+        unit=str(tmp_path / CANON), linger_dir=str(tmp_path), in_use=lambda: False
     )
     assert reason is not None and HASHED in reason

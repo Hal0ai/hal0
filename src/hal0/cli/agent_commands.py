@@ -1159,9 +1159,20 @@ def _install_hermes_gateway() -> None:
     # venv) must not reconnect a gateway that was turned off.
     unit = "hermes-gateway.service"
     has_systemctl = _shutil.which("systemctl") is not None
-    state = _gateway_enable_state(unit) if has_systemctl else "not-found"
+    # The gateway the operator actually has: on a box a 1.6.0 nightly
+    # installed that is upstream's suffixed unit, whose on/off state the
+    # template install carries over (#2943).
+    from hal0.agents.hermes_gateway_regen import HASHED_UNIT
+
+    hashed_only = (
+        not _Path(_HERMES_GATEWAY_UNIT).exists()
+        and not _Path(_HERMES_GATEWAY_UNIT).is_symlink()
+        and (_Path(_HERMES_GATEWAY_UNIT).parent / HASHED_UNIT).is_file()
+    )
+    probe_unit = HASHED_UNIT if hashed_only else unit
+    state = _gateway_enable_state(probe_unit) if has_systemctl else "not-found"
     disabled = state in ("disabled", "masked-runtime")
-    was_active = has_systemctl and disabled and _gateway_unit_active(unit)
+    was_active = has_systemctl and disabled and _gateway_unit_active(probe_unit)
     if state == "masked":
         # Never run the generator over a persistent mask: the unit path is a
         # /dev/null symlink, and writing through it would unmask the unit.
