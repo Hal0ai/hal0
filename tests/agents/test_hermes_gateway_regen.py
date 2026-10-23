@@ -481,9 +481,9 @@ def test_an_enabled_running_suffixed_unit_moves_over_canonical_first(tmp_path: P
         ["systemctl", "daemon-reload"],
         ["systemctl", "stop", HASHED],
         ["systemctl", "disable", HASHED],
-        ["systemctl", "daemon-reload"],
         ["systemctl", "enable", CANON],
         ["systemctl", "start", CANON],
+        ["systemctl", "daemon-reload"],
     ]
     assert sc.states[CANON] == ("enabled", True)
 
@@ -555,7 +555,7 @@ def test_a_failed_write_leaves_the_suffixed_unit_running(tmp_path: Path, monkeyp
     with pytest.raises(regen.GatewayRegenError, match="read-only"):
         _migrate(tmp_path, sc)
     assert hashed.exists() and sc.states[HASHED] == ("enabled", True)
-    assert not [c for c in sc.mutating if c[1] == "disable"]
+    assert not [c for c in sc.mutating if c[1] in ("stop", "disable") and c[-1] == HASHED]
 
 
 def test_a_failed_disable_removes_nothing_and_a_retry_keeps_the_state(tmp_path: Path) -> None:
@@ -806,3 +806,35 @@ def test_the_rollback_restores_the_unit_even_if_its_reload_raises(tmp_path: Path
             which=_which,
         )
     assert hashed.exists() and inner.states[HASHED] == ("enabled", True)
+
+
+def test_a_failed_start_of_the_canonical_unit_hands_back_to_the_suffixed_one(
+    tmp_path: Path,
+) -> None:
+    hashed = _hashed_unit(tmp_path)
+    sc = UnitSystemctl({HASHED: ("enabled", True)}, fail=["systemctl", "start", CANON])
+    with pytest.raises(regen.GatewayRegenError, match="start"):
+        _migrate(tmp_path, sc)
+    assert hashed.exists() and not (tmp_path / CANON).exists()
+    assert sc.states[HASHED] == ("enabled", True)
+
+
+def test_runtime_only_enablement_stays_runtime_only(tmp_path: Path) -> None:
+    _hashed_unit(tmp_path)
+    sc = UnitSystemctl({HASHED: ("enabled-runtime", True)})
+    _migrate(tmp_path, sc)
+    assert ["systemctl", "enable", "--runtime", CANON] in sc.mutating
+    assert ["systemctl", "enable", CANON] not in sc.mutating
+
+
+def test_install_reports_a_missing_loginctl(tmp_path: Path) -> None:
+    sc = UnitSystemctl({})
+    out = regen.install_gateway_unit(
+        unit_path=tmp_path / CANON,
+        linger_dir=str(tmp_path),
+        run=sc,
+        uid_of=lambda name: UID,
+        which=lambda name: None if name == "loginctl" else f"/usr/bin/{name}",
+    )
+    assert out.unit_rewritten and not out.linger_enabled
+    assert "no loginctl" in out.message

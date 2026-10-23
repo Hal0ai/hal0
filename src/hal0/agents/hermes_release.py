@@ -1638,6 +1638,13 @@ def _activate(
             note = None
         if note:
             result.warnings.append(note)
+        # A box a 1.6.0 nightly installed had only upstream's suffixed unit,
+        # which ``recorded`` (canonical names) never saw; the heal moved it
+        # onto hermes-gateway.service and started it on the new release.
+        # Bring it into this activation so re-verify and flip-back cover it
+        # (#2943, #2946 review).
+        if GATEWAY_UNIT not in recorded and units.active(GATEWAY_UNIT):
+            recorded = [*recorded, GATEWAY_UNIT]
 
     for unit in recorded:
         units.start(unit)

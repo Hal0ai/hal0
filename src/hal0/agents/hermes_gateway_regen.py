@@ -425,8 +425,10 @@ def _ensure_linger(
     run: Runner, linger_dir: str, which: Callable[[str], str | None], done: list[str]
 ) -> str | None:
     """Turn linger on for ``hal0``. Returns an error string instead of raising."""
-    if os.path.exists(os.path.join(linger_dir, GATEWAY_USER)) or which("loginctl") is None:
+    if os.path.exists(os.path.join(linger_dir, GATEWAY_USER)):
         return None
+    if which("loginctl") is None:
+        return f"loginctl enable-linger {GATEWAY_USER} failed: no loginctl"
     try:
         proc = _run(run, ["loginctl", "enable-linger", GATEWAY_USER])
     except (OSError, subprocess.SubprocessError) as exc:
@@ -450,9 +452,9 @@ def migrate_hashed_units(
 
     Order, so no failure loses the gateway: the canonical unit is rendered,
     validated, written and loaded FIRST (a failure there leaves the suffixed
-    unit untouched); then the suffixed unit is stopped and disabled (a
-    failure there removes nothing); then it is removed; then the canonical
-    unit takes over its state. An enabled suffixed unit means the operator
+    unit untouched); then the suffixed unit is stopped and disabled; then the
+    canonical unit takes over its state; only then is the suffixed unit
+    removed. A failure anywhere before the removal rolls back to the start. An enabled suffixed unit means the operator
     wants the gateway on, so the canonical unit is enabled AND started even
     if the old one was crash-looping on a pruned release; a disabled one that
     was running is started but left disabled. A canonical unit that already
@@ -476,18 +478,29 @@ def migrate_hashed_units(
             old_text = unit_path.read_text(encoding="utf-8")
     result = RegenResult("migrated", "")
     done = result.steps
+    runtime_only = False
     for path in hashed:
         state = _enabled_state(run, path.name)
-        result.was_enabled = result.was_enabled or state in ("enabled", "enabled-runtime")
+        if state == "enabled":
+            result.was_enabled = True
+        elif state == "enabled-runtime":
+            result.was_enabled = True
+            runtime_only = True
         result.was_active = result.was_active or _is_active(run, path.name)
+    runtime_only = runtime_only and not any(
+        _enabled_state(run, p.name) == "enabled" for p in hashed
+    )
 
     def rollback() -> None:
         # Undo this run's half-done move so a retry starts from the same box:
         # a canonical unit left on disk would read as one that "already
         # existed" and keep its (disabled) state (#2946 review), and a
         # suffixed unit left stopped or disabled would lose the operator's
-        # on/off state.
+        # on/off state. The suffixed file is only removed once the handoff
+        # has succeeded, so it is always there to restore.
         if not pre_existing:
+            with contextlib.suppress(OSError, subprocess.SubprocessError):
+                _run(run, ["systemctl", "disable", "--now", GATEWAY_UNIT])
             with contextlib.suppress(OSError):
                 unit_path.unlink()
         with contextlib.suppress(OSError, subprocess.SubprocessError):
@@ -496,29 +509,55 @@ def migrate_hashed_units(
             if not path.exists():
                 continue
             if result.was_enabled:
+                argv = ["systemctl", "enable", *(["--runtime"] if runtime_only else []), path.name]
                 with contextlib.suppress(OSError, subprocess.SubprocessError):
-                    _run(run, ["systemctl", "enable", path.name])
+                    _run(run, argv)
             if result.was_active:
                 with contextlib.suppress(OSError, subprocess.SubprocessError):
                     _run(run, ["systemctl", "start", path.name])
 
-    if not masked:
-        _write_rendered(unit_path, uid_of, done)
-        result.unit_rewritten = True
-        done.append(f"wrote {GATEWAY_UNIT}")
-        try:
+    try:
+        if not masked:
+            _write_rendered(unit_path, uid_of, done)
+            result.unit_rewritten = True
+            done.append(f"wrote {GATEWAY_UNIT}")
             _check(run, ["systemctl", "daemon-reload"], "systemctl daemon-reload", done)
-        except GatewayRegenError:
-            rollback()
-            raise
-    unlink_errors: list[str] = []
-    for path in hashed:
-        try:
+        for path in hashed:
             _check(run, ["systemctl", "stop", path.name], f"systemctl stop {path.name}", done)
             _check(run, ["systemctl", "disable", path.name], f"systemctl disable {path.name}", done)
-        except GatewayRegenError:
-            rollback()
-            raise
+        if masked:
+            done.append(f"{GATEWAY_UNIT} is masked; left off")
+        elif not pre_existing:
+            start = result.was_enabled or result.was_active
+            if start:
+                linger_error = _ensure_linger(run, linger_dir, which, done)
+                if linger_error:
+                    done.append(linger_error)
+            if result.was_enabled:
+                # enabled-runtime stays runtime-only: it lasts until the next boot.
+                argv = [
+                    "systemctl",
+                    "enable",
+                    *(["--runtime"] if runtime_only else []),
+                    GATEWAY_UNIT,
+                ]
+                _check(run, argv, " ".join(argv), done)
+                done.append("enabled (runtime)" if runtime_only else "enabled")
+            if start:
+                _check(
+                    run,
+                    ["systemctl", "start", GATEWAY_UNIT],
+                    f"systemctl start {GATEWAY_UNIT}",
+                    done,
+                )
+                result.restarted = True
+                done.append("started")
+    except GatewayRegenError:
+        rollback()
+        raise
+    # The handoff succeeded: only now does the suffixed unit go.
+    unlink_errors: list[str] = []
+    for path in hashed:
         try:
             path.unlink()
         except FileNotFoundError:
@@ -528,27 +567,10 @@ def migrate_hashed_units(
             continue
         done.append(f"removed {path.name}")
     _check(run, ["systemctl", "daemon-reload"], "systemctl daemon-reload", done)
-    if masked:
-        done.append(f"{GATEWAY_UNIT} is masked; left off")
-    elif not pre_existing:
-        start = result.was_enabled or result.was_active
-        if start:
-            linger_error = _ensure_linger(run, linger_dir, which, done)
-            if linger_error:
-                done.append(linger_error)
-        if result.was_enabled:
-            _check(
-                run, ["systemctl", "enable", GATEWAY_UNIT], f"systemctl enable {GATEWAY_UNIT}", done
-            )
-            done.append("enabled")
-        if start:
-            _check(
-                run, ["systemctl", "start", GATEWAY_UNIT], f"systemctl start {GATEWAY_UNIT}", done
-            )
-            result.restarted = True
-            done.append("started")
-    elif (
-        old_text is not None
+    if (
+        pre_existing
+        and not masked
+        and old_text is not None
         and unit_stale_reason(old_text) is not None
         and _is_active(run, GATEWAY_UNIT)
     ):

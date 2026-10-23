@@ -1162,12 +1162,12 @@ def _install_hermes_gateway() -> None:
     # The gateway the operator actually has: on a box a 1.6.0 nightly
     # installed that is upstream's suffixed unit, whose on/off state the
     # template install carries over (#2943).
-    from hal0.agents.hermes_gateway_regen import HASHED_UNIT
+    from hal0.agents.hermes_gateway_regen import HASHED_UNIT, hal0_hashed_units
 
     hashed_only = (
         not _Path(_HERMES_GATEWAY_UNIT).exists()
         and not _Path(_HERMES_GATEWAY_UNIT).is_symlink()
-        and (_Path(_HERMES_GATEWAY_UNIT).parent / HASHED_UNIT).is_file()
+        and bool(hal0_hashed_units(_Path(_HERMES_GATEWAY_UNIT).parent))
     )
     probe_unit = HASHED_UNIT if hashed_only else unit
     state = _gateway_enable_state(probe_unit) if has_systemctl else "not-found"

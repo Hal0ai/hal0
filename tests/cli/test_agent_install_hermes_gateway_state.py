@@ -262,11 +262,34 @@ def test_a_disabled_suffixed_unit_is_read_as_the_operators_off_switch(
     """#2943 review: on a box a 1.6.0 nightly installed there is no
     hermes-gateway.service, only upstream's suffixed unit. Its disabled state
     is the operator's choice; the reinstall must not turn the gateway on."""
+    from pathlib import Path as _P
+
     from hal0.agents.hermes_gateway_regen import HASHED_UNIT
 
     calls = _setup(monkeypatch, tmp_path, state="disabled")
-    (tmp_path / HASHED_UNIT).write_text("[Unit]\n")
+    fixture = (
+        _P(__file__).resolve().parents[1]
+        / "fixtures"
+        / "hermes"
+        / "gateway-unit-hashed-v0.22.4.service"
+    )
+    (tmp_path / HASHED_UNIT).write_text(fixture.read_text())
     ac._install_hermes_gateway()
     probed = [c for c in calls if c[:2] == ["systemctl", "is-enabled"]]
     assert probed and probed[0][-1] == HASHED_UNIT
     assert _enables(calls) == []
+
+
+def test_a_profile_unit_with_the_same_name_is_not_read_as_the_default_gateway(
+    monkeypatch, tmp_path
+) -> None:
+    """A standalone profile whose id happens to be the hash (#2946 review)."""
+    from hal0.agents.hermes_gateway_regen import HASHED_UNIT
+
+    calls = _setup(monkeypatch, tmp_path, state="disabled")
+    (tmp_path / HASHED_UNIT).write_text(
+        '[Service]\nUser=hal0\nEnvironment="HERMES_HOME=/var/lib/hal0/.hermes/profiles/1975ce4b"\n'
+    )
+    ac._install_hermes_gateway()
+    probed = [c for c in calls if c[:2] == ["systemctl", "is-enabled"]]
+    assert probed and probed[0][-1] == UNIT
