@@ -58,6 +58,12 @@ applying. Add those subsections to a version's section to surface them; see
   --idle-exit` is running, check each served profile's authenticated
   `/v1/models` and upstream, and warn rather than fail when the operator
   turned the gateway off. (#2874, #2898, #2905)
+- **The memory engine runs on a local slot or an upstream model, switched
+  without a restart.** Pick it under **Engine model** on Settings → Data →
+  Memory or with `hal0 memory graph enable --model <id>`; hindsight-api calls
+  one virtual id, `hal0/memory`, that hal0 resolves per call, and a new
+  **Engine running** row shows the model the engine really loads, including
+  an override from `/etc/hal0/hindsight-llm.env`. (#2918, #2926)
 - **Rotating a key ends every live connection that used it.** Open WebSockets
   and Server-Sent Events streams holding the old credential close at
   rotation, and an expired session ends its streams. (see Removed)
