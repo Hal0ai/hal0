@@ -23,7 +23,9 @@ class _Upstreams:
         return self._ups
 
 
-def _make_request(*, cfgs=None, loaded=None, upstreams=None, upstream_models=None, registry=None):
+def _make_request(
+    *, cfgs=None, loaded=None, upstreams=None, upstream_models=None, registry=None, graph=None
+):
     """Build a minimal request stand-in.
 
     ``loaded`` materialises as a container-backed remote upstream
@@ -42,7 +44,13 @@ def _make_request(*, cfgs=None, loaded=None, upstreams=None, upstream_models=Non
         upstream_models=models,
         model_registry=registry,
     )
-    return SimpleNamespace(app=SimpleNamespace(state=state), _body=b"")
+    if graph is not None:
+        # ``graph`` is a MemoryGraphConfig: the lifespan's app.state.hal0_config
+        # is what the hal0/memory alias reads (#2919).
+        from hal0.config.schema import Hal0Config, MemoryConfig
+
+        state.hal0_config = Hal0Config(memory=MemoryConfig(graph=graph))
+    return SimpleNamespace(app=SimpleNamespace(state=state), state=SimpleNamespace(), _body=b"")
 
 
 _PRIMARY = [
@@ -63,6 +71,119 @@ async def test_virtual_name_resolved_and_thinking_injected():
     out = await v1._normalize_chat_body(req, {"model": "hal0/agent", "messages": []})
     assert out["model"] == "big"
     assert out["chat_template_kwargs"]["enable_thinking"] is False
+
+
+# ── hal0/memory: the memory engine's one fixed id (#2919) ────────────────────
+#
+# hindsight-api is always pointed at ``hal0/memory``; this path resolves it from
+# [memory.graph] on every call — to the local extraction slot, or to the
+# configured upstream model — so the engine switches targets without a restart
+# and never needs to know which model it runs on.
+
+_UTILITY_AND_AGENT = [
+    *_PRIMARY,
+    {
+        "name": "utility",
+        "type": "llm",
+        "device": "gpu-vulkan",
+        "role": None,
+        "model": {"default": "small"},
+    },
+]
+
+
+@pytest.mark.asyncio
+async def test_memory_alias_resolves_to_the_extraction_slot():
+    from hal0.config.schema import MemoryGraphConfig
+
+    req = _make_request(
+        cfgs=_UTILITY_AND_AGENT,
+        loaded={"big", "small"},
+        graph=MemoryGraphConfig(extraction_slot="utility"),
+    )
+    out = await v1._normalize_chat_body(req, {"model": "hal0/memory", "messages": []})
+    assert out["model"] == "small"
+
+
+@pytest.mark.asyncio
+async def test_memory_alias_follows_a_changed_extraction_slot():
+    from hal0.config.schema import MemoryGraphConfig
+
+    req = _make_request(
+        cfgs=_UTILITY_AND_AGENT,
+        loaded={"big", "small"},
+        graph=MemoryGraphConfig(extraction_slot="agent"),
+    )
+    out = await v1._normalize_chat_body(req, {"model": "hal0/memory", "messages": []})
+    assert out["model"] == "big"
+
+
+@pytest.mark.asyncio
+async def test_memory_alias_upstream_target_bypasses_slot_resolution():
+    """With ``extraction_model`` set the alias becomes that upstream id as-is:
+    no slot lookup, no lane pin, no thinking injection (it is a remote) — the
+    dispatcher routes the id to its upstream or answers dispatch.no_route,
+    never the agent anchor."""
+    import json
+
+    from hal0.config.schema import MemoryGraphConfig
+
+    req = _make_request(
+        cfgs=_UTILITY_AND_AGENT,
+        loaded={"big", "small"},
+        upstreams=[SimpleNamespace(name="minimax", kind="remote", slot_name=None, owned_models=())],
+        upstream_models={"minimax": ["MiniMax-M2.5"]},
+        graph=MemoryGraphConfig(extraction_slot="utility", extraction_model="MiniMax-M2.5"),
+    )
+    out = await v1._normalize_chat_body(req, {"model": "hal0/memory", "messages": []})
+    assert out["model"] == "MiniMax-M2.5"
+    assert "chat_template_kwargs" not in out
+    assert json.loads(req._body)["model"] == "MiniMax-M2.5"
+
+
+@pytest.mark.asyncio
+async def test_memory_alias_upstream_target_marks_the_request_upstream_only_even_on_a_cold_cache():
+    """No remote has advertised the id yet (fresh hal0-api, provider offline):
+    the body must still go out unmodified — no slot thinking policy injected
+    into a cloud request — and the request carries the upstream-only marker
+    the dispatcher refuses to fall through on."""
+    from hal0.config.schema import MemoryGraphConfig
+    from hal0.dispatcher.lane_pin import UPSTREAM_ONLY_ATTR
+
+    req = _make_request(
+        cfgs=_UTILITY_AND_AGENT,
+        loaded={"big", "small"},
+        upstreams=[SimpleNamespace(name="minimax", kind="remote", slot_name=None, owned_models=())],
+        upstream_models={"minimax": []},
+        graph=MemoryGraphConfig(extraction_slot="utility", extraction_model="MiniMax-M2.5"),
+    )
+    out = await v1._normalize_chat_body(req, {"model": "hal0/memory", "messages": []})
+    assert out["model"] == "MiniMax-M2.5"
+    assert "chat_template_kwargs" not in out
+    assert getattr(req.state, UPSTREAM_ONLY_ATTR) == "MiniMax-M2.5"
+
+
+@pytest.mark.asyncio
+async def test_memory_alias_slot_target_does_not_mark_the_request_upstream_only():
+    from hal0.config.schema import MemoryGraphConfig
+    from hal0.dispatcher.lane_pin import UPSTREAM_ONLY_ATTR
+
+    req = _make_request(
+        cfgs=_UTILITY_AND_AGENT,
+        loaded={"big", "small"},
+        graph=MemoryGraphConfig(extraction_slot="utility"),
+    )
+    await v1._normalize_chat_body(req, {"model": "hal0/memory", "messages": []})
+    assert getattr(req.state, UPSTREAM_ONLY_ATTR, "") == ""
+
+
+@pytest.mark.asyncio
+async def test_memory_alias_without_config_falls_back_to_the_default_slot():
+    """A bare app (no hal0_config on state) behaves like the schema default
+    (extraction_slot=utility)."""
+    req = _make_request(cfgs=_UTILITY_AND_AGENT, loaded={"big", "small"})
+    out = await v1._normalize_chat_body(req, {"model": "hal0/memory", "messages": []})
+    assert out["model"] == "small"
 
 
 @pytest.mark.asyncio

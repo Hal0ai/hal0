@@ -149,17 +149,27 @@ function MemoryGraphPanel() {
   const extractionSlot = (data && data.extraction_slot) || "utility";
   const slotResolves = !!(data && data.slot_resolves);
   const availableSlots = (data && data.available_slots) || [];
+  // #2919: the engine's model may be an upstream model instead; the picker's
+  // pure helpers come from the hook bridge (this module has no ES imports).
+  const et = window.__hal0MemEngineTarget;
+  const targetValue = et ? et.value(data) : `slot:${extractionSlot}`;
+  const targetOptions = et ? et.options(data) : { local: availableSlots.map(s => ({ value: `slot:${s}`, label: s })), upstream: [] };
+  const targetIsUpstream = !!(data && data.extraction_model);
+  const engineLabel = targetIsUpstream ? data.extraction_model : extractionSlot;
+  const running = et ? et.runningLine(data) : null;
 
   const [showSlotPicker, setShowSlotPicker] = useStateMT(false);
-  const [draftSlot, setDraftSlot] = useStateMT(extractionSlot);
+  const [draftTarget, setDraftTarget] = useStateMT(targetValue);
+  const draftSlot = draftTarget.replace(/^slot:/, "");
 
   const openPanel = () => {
-    setDraftSlot(extractionSlot);
+    setDraftTarget(targetValue);
     setShowSlotPicker(true);
   };
 
   const submit = () => {
-    const payload = { enabled: true, extraction_slot: draftSlot };
+    const body = et ? et.putBody(draftTarget) : { extraction_slot: draftSlot };
+    const payload = { enabled: true, ...body };
     update.mutate(payload, {
       onSuccess: (resp) => {
         setShowSlotPicker(false);
@@ -211,7 +221,7 @@ function MemoryGraphPanel() {
       <div className="mo-card-h">
         <span className="mo-eyebrow">Graph extraction</span>
         <span className="grow" />
-        {enabled ? <span className="chip ok">ON · {extractionSlot}</span> : <span className="chip">OFF</span>}
+        {enabled ? <span className="chip ok">ON · {engineLabel}</span> : <span className="chip">OFF</span>}
       </div>
 
       {!enabled && !showSlotPicker && (
@@ -227,17 +237,22 @@ function MemoryGraphPanel() {
 
       {enabled && !showSlotPicker && (
         <>
-          <div style={{display: "flex", alignItems: "center", gap: 8, marginBottom: 12}}>
-            <span className="mono" style={{fontSize: 11, color: "var(--fg-3)"}}>extraction slot</span>
-            <span className="mono" style={{fontSize: 12, color: "var(--fg)", fontWeight: 500}}>{extractionSlot}</span>
+          <div style={{display: "flex", alignItems: "center", gap: 8, marginBottom: 12, flexWrap: "wrap"}}>
+            <span className="mono" style={{fontSize: 11, color: "var(--fg-3)"}}>{targetIsUpstream ? "engine model" : "extraction slot"}</span>
+            <span className="mono" style={{fontSize: 12, color: "var(--fg)", fontWeight: 500}}>{engineLabel}</span>
             <span
               className="mono"
               data-testid="graph-slot-resolves"
-              style={{fontSize: 10.5, padding: "1px 6px", borderRadius: "var(--rad)", border: "1px solid var(--line)", color: slotResolves ? "var(--ok, #6a6)" : "var(--err, #c66)"}}
+              style={{fontSize: 10.5, padding: "1px 6px", borderRadius: "var(--rad)", border: "1px solid var(--line)", color: targetIsUpstream || slotResolves ? "var(--ok, #6a6)" : "var(--err, #c66)"}}
             >
-              {slotResolves ? "resolves" : "no matching enabled llm slot"}
+              {targetIsUpstream ? "upstream · via hal0 /v1" : slotResolves ? "resolves" : "no matching enabled llm slot"}
             </span>
           </div>
+          {running && (
+            <div className="mono" data-testid="graph-engine-running" style={{fontSize: 11, color: running.warn ? "var(--warn, #c96)" : "var(--fg-4)", marginBottom: 10}}>
+              engine running: {running.text}
+            </div>
+          )}
           <div style={{display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 0, border: "1px solid var(--line)", borderRadius: "var(--rad)", overflow: "hidden", marginBottom: 12}}>
             {[
               { l: "Built", v: String(builds),  sub: "lifetime" },
@@ -263,7 +278,7 @@ function MemoryGraphPanel() {
             </div>
           )}
           <div style={{display: "flex", gap: 8}}>
-            <button className="btn ghost sm" onClick={openPanel}>{Icons.edit} Change slot</button>
+            <button className="btn ghost sm" onClick={openPanel}>{Icons.edit} Change model</button>
             <button className="btn danger sm" onClick={disable}>Disable</button>
           </div>
         </>
@@ -272,24 +287,33 @@ function MemoryGraphPanel() {
       {showSlotPicker && (
         <div style={{display: "flex", flexDirection: "column", gap: 14}}>
           <div>
-            <div className="mono" style={{fontSize: 10, color: "var(--fg-4)", textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 6}}>Extraction slot</div>
-            {availableSlots.length > 0 ? (
+            <div className="mono" style={{fontSize: 10, color: "var(--fg-4)", textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 6}}>Engine model</div>
+            {targetOptions.local.length + targetOptions.upstream.length > 0 ? (
               <select
                 data-testid="graph-slot-select"
-                value={draftSlot}
-                onChange={e => setDraftSlot(e.target.value)}
+                value={draftTarget}
+                onChange={e => setDraftTarget(e.target.value)}
                 style={{width: "100%", padding: "6px 8px", background: "var(--bg-2)", border: "1px solid var(--line)", color: "var(--fg)", fontFamily: "var(--jbm)", fontSize: 12}}
               >
-                {availableSlots.map(s => (
-                  <option key={s} value={s}>{s}</option>
-                ))}
+                <optgroup label="Local slots">
+                  {targetOptions.local.map(o => (
+                    <option key={o.value} value={o.value}>{o.label}</option>
+                  ))}
+                </optgroup>
+                {targetOptions.upstream.length > 0 && (
+                  <optgroup label="Upstream models">
+                    {targetOptions.upstream.map(o => (
+                      <option key={o.value} value={o.value}>{o.label}</option>
+                    ))}
+                  </optgroup>
+                )}
               </select>
             ) : (
               <input
                 type="text"
                 data-testid="graph-slot-input"
                 value={draftSlot}
-                onChange={e => setDraftSlot(e.target.value)}
+                onChange={e => setDraftTarget(e.target.value ? `slot:${e.target.value}` : "")}
                 placeholder="utility"
                 style={{width: "100%", padding: "6px 8px", background: "var(--bg-2)", border: "1px solid var(--line)", color: "var(--fg)", fontFamily: "var(--jbm)", fontSize: 12}}
               />
@@ -299,13 +323,23 @@ function MemoryGraphPanel() {
           {/* ADR-0023 §3 — extraction routes to a local enabled-llm slot. */}
           <div style={{padding: 12, border: "1px solid var(--line)", borderRadius: "var(--rad)", background: "var(--bg-2)"}}>
             <div className="mono" style={{fontSize: 10, color: "var(--fg-4)", textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 4}}>Routing</div>
-            <p style={{fontSize: 12, color: "var(--fg-2)", margin: 0, lineHeight: 1.5}}>
-              Graph extraction sends ingested memory text to the&nbsp;
-              <span className="mono" style={{color: "var(--fg)"}}>{draftSlot}</span> slot
-              {" "}for entity + relation extraction. Everything stays on-box — pick a
-              cheap local slot (e.g. <span className="mono" style={{color: "var(--fg)"}}>utility</span>)
-              to keep extraction light. Quality may vary on small models.
-            </p>
+            {draftTarget.startsWith("model:") ? (
+              <p style={{fontSize: 12, color: "var(--fg-2)", margin: 0, lineHeight: 1.5}}>
+                The engine calls the&nbsp;
+                <span className="mono" style={{color: "var(--fg)"}}>{draftTarget.slice("model:".length)}</span>
+                {" "}upstream model through hal0's /v1 for extraction, consolidation, reflect and
+                mental-model refresh. Memory text leaves the box to that provider; it applies at once,
+                without an engine restart, and the local slot stays as the way back.
+              </p>
+            ) : (
+              <p style={{fontSize: 12, color: "var(--fg-2)", margin: 0, lineHeight: 1.5}}>
+                Graph extraction sends ingested memory text to the&nbsp;
+                <span className="mono" style={{color: "var(--fg)"}}>{draftSlot}</span> slot
+                {" "}for entity + relation extraction. Everything stays on-box — pick a
+                cheap local slot (e.g. <span className="mono" style={{color: "var(--fg)"}}>utility</span>)
+                to keep extraction light. Quality may vary on small models.
+              </p>
+            )}
           </div>
 
           {/* ADR-0023 §4 quality caveat copy. */}

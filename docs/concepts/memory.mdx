@@ -242,6 +242,11 @@ even on a fresh install, under `[memory.graph]`:
   it.
 - `extraction_slot` (default `"utility"`) — the local `type=llm` slot
   Hindsight's extraction/consolidation/reflect calls are routed to.
+- `extraction_model` (default unset) — an upstream model id hal0's `/v1`
+  routes (an OpenRouter or MiniMax id, for example). When set, the engine
+  runs on it instead of the slot. Hindsight always calls the one virtual id
+  `hal0/memory`; hal0 resolves it to the slot or the model on every call,
+  so the switch applies without an engine restart.
 - `llm_timeout_s` (default `300`, range 30–3600) — timeout for the Hindsight
   daemon's LLM calls, covering cold slot starts and long reflects.
 - the extraction limits — `extraction_max_concurrent` (default `1`),

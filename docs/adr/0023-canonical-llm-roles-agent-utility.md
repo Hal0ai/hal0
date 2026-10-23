@@ -78,6 +78,63 @@ already loaded. A cold `utility` (or `brain`, `npu`, or any operator-named
 largest model on the box for every Hindsight extraction call meant for
 the cheap helper.
 
+### Amendment (2026-10, #2919): the memory engine calls `hal0/memory`
+
+`hal0/memory` is a fourth reserved virtual name. hindsight-api is pointed
+at it and nothing else: the drop-in hal0 writes
+(`src/hal0/memory/extraction_env.py`) pins
+`HINDSIGHT_API_LLM_MODEL=hal0/memory` and carries only the LLM timeout and
+the extraction limits. hal0's `/v1` resolves the alias from
+`[memory.graph]` on every call (`_normalize_chat_body` in
+`src/hal0/api/routes/v1.py`, `memory_engine_target` in `extraction_env.py`):
+
+- with `extraction_model` unset it behaves exactly as `hal0/<extraction_slot>`
+  did — the §2 generalised chain `(<slot>, agent)`, same lane pin, same
+  on-demand load;
+- with `extraction_model` set to an upstream model id (one `/v1/models`
+  lists for a remote, non-pinned, enabled upstream after its
+  `model_filters` — OpenRouter, MiniMax, …) the request carries that id
+  as-is, with no slot lookup, no lane pin and no slot thinking policy, and
+  is marked *upstream-only* (`set_upstream_only` in
+  `src/hal0/dispatcher/lane_pin.py`). The dispatcher routes it to its
+  upstream or, when no remote advertises the id (cold cache, provider
+  offline), answers `dispatch.upstream_unavailable` before its step-4
+  heuristics — so it never falls through to the `agent` anchor or the
+  `flm` slot, which would have run memory extraction on the chat lane
+  while status said "upstream".
+
+Before this amendment the drop-in named `hal0/<extraction_slot>`, so every
+slot change rewrote it and restarted the engine, and an upstream target
+was impossible without changing the root-side allow-list in
+`installer/wrappers/hal0-systemctl` (which only admits `hal0/…` values).
+Now switching the engine between a local slot and an upstream model is a
+`hal0.toml` write that the hot path reads from `app.state.hal0_config`,
+applied on the engine's next call; the drop-in changes, and the engine
+restarts, only for a timeout or limit change. A pre-amendment drop-in
+still naming `hal0/<slot>` — or no drop-in at all, which leaves the base
+unit's `hal0/utility` in force — reads as drift and is rewritten once on
+the next graph PUT, gate on or off and whatever the slot set looks like
+(the #1717 reason to skip, a restart pinning the engine to an unverifiable
+slot, is void now that the file no longer names a slot). Until that write
+the status reports `engine_llm.model` as the slot id and the dashboard and
+CLI say the engine is still pinned.
+
+The engine still runs through hal0's `/v1` with hal0's upstream auth, so
+an upstream target adds no credential to the engine, and hal0's upstream
+filters and audit apply to its calls. Per-operation targets (retain vs
+reflect vs mental-model refresh, which hindsight-api supports through
+`HINDSIGHT_API_<OP>_LLM_*`) are deliberately not configured here; #2919
+tracks them.
+
+`GET /api/memory/graph/status` reports `target` (what the alias resolves
+to), `available_models` (the pickable upstream ids) and `engine_llm`: the
+provider, base URL and model the unit really loads, overlaying
+`/etc/hal0/hindsight-llm.env` on the unit's merged `Environment=` the way
+systemd does. That file is read after every `Environment=` line, drop-ins
+included, so PROVIDER/BASE_URL/MODEL lines an operator adds there beat
+hal0's target silently; the status names the file and the keys instead of
+hiding it (#2918).
+
 ## Consequences
 
 - One naming vocabulary (`agent`/`utility`, plus any operator-named slot)

@@ -32,7 +32,8 @@ from hal0.api._audit import record_action
 from hal0.api.middleware.error_codes import BadRequest, Hal0Error
 from hal0.config.loader import hal0_config_txn, load_hal0_config
 from hal0.config.schema import MemoryGraphConfig
-from hal0.memory.extraction_env import ExtractionLimits
+from hal0.memory import extraction_env as _ee
+from hal0.memory.extraction_env import MEMORY_ALIAS, ExtractionLimits, memory_engine_target
 from hal0.memory.hindsight_provider import bank_to_namespace
 from hal0.memory.namespace import (
     DEFAULT_DATASET,
@@ -181,6 +182,19 @@ class MemoryGraphSlotInvalid(Hal0Error):
     status = 422
 
 
+class MemoryGraphModelInvalid(Hal0Error):
+    """Rejected: ``extraction_model`` is not a model any upstream advertises.
+
+    #2919 — the memory engine's upstream target must be an id hal0's own
+    ``/v1`` routes; an id no configured upstream lists would 404 every
+    engine call. Rejected with the pickable ids so the dashboard + CLI fail
+    fast and the config is left as it was.
+    """
+
+    code = "config.memory_graph_model_invalid"
+    status = 422
+
+
 class MemoryExtractionCtxTooSmall(Hal0Error):
     """The resolved extraction slot's effective window can't fit the extraction prompt (#1903).
 
@@ -227,6 +241,48 @@ async def _enabled_llm_slots(request: Request) -> list[str]:
     except Exception:
         return []
     return sorted(alias_map.keys())
+
+
+async def _available_upstream_models(request: Request) -> list[dict[str, str]]:
+    """Upstream model ids the operator may run the memory engine on (#2919).
+
+    Exactly the ids ``/v1/models`` would list for a remote, non-pinned,
+    enabled upstream that advertises models, after its ``model_filters`` —
+    drawn from the dispatcher's models cache, so no upstream round trip. A
+    slot-backed upstream is already a slot (pick it as one); a pinned
+    upstream is an agent (Hermes) whose ids are not engine LLMs. Two id
+    shapes are dropped even when advertised: ``hal0/…`` virtuals (a LAN
+    hal0 peer's), which the schema refuses, and ids equal to a local slot
+    name, which the route layer would rewrite back to the LOCAL slot while
+    status said "upstream". Sorted by owner then id so the picker is stable.
+    """
+    from hal0.upstreams.filters import apply_filters
+
+    upstreams = getattr(request.app.state, "upstreams", None)
+    cache = getattr(request.app.state, "upstream_models", {}) or {}
+    if upstreams is None:
+        return []
+    local_names = set(await _enabled_llm_slots(request))
+    rows: list[dict[str, str]] = []
+    try:
+        for up in upstreams.list():
+            if getattr(up, "kind", "") != "remote" or getattr(up, "slot_name", None):
+                continue
+            if getattr(up, "pinned", False):
+                continue
+            if getattr(up, "enabled", True) is False:
+                continue
+            if getattr(up, "advertise_models", True) is False:
+                continue
+            ids = [m for m in (cache.get(up.name, []) or []) if isinstance(m, str) and m]
+            for model_id in apply_filters(ids, getattr(up, "model_filters", None)):
+                if model_id.startswith("hal0/") or model_id in local_names:
+                    continue
+                rows.append({"id": model_id, "owned_by": up.name})
+    except Exception:  # pragma: no cover — defensive, status must not 500
+        return []
+    rows.sort(key=lambda row: (row["owned_by"], row["id"]))
+    return rows
 
 
 def _wrapper(request: Request) -> Any:
@@ -279,6 +335,14 @@ async def graph_status(request: Request) -> dict[str, Any]:
     status["llm_timeout_s"] = graph_cfg.llm_timeout_s
     status["extraction_limits"] = ExtractionLimits.from_config(graph_cfg).as_dict()
     status["throughput"] = _cached_throughput(request, status.get("extraction_slot"), graph_cfg)
+    # #2919: what hal0/memory resolves to, and what else it could — the picker.
+    status["extraction_model"] = graph_cfg.extraction_model
+    kind, target_model = memory_engine_target(graph_cfg)
+    status["target"] = {"kind": kind, "model": target_model, "alias": MEMORY_ALIAS}
+    status["available_models"] = await _available_upstream_models(request)
+    # #2918: the LLM the engine really loads — a hindsight-llm.env override of
+    # provider/base_url/model beats every drop-in and must not stay hidden.
+    status["engine_llm"] = await asyncio.to_thread(_ee.effective_engine_llm)
     await _augment_build_counters(request, status)
     return status
 
@@ -601,13 +665,14 @@ async def update_graph_config(request: Request) -> dict[str, Any]:
     (PATCH-style "flip enabled but keep the slot") because dashboards
     typically send the delta, not the whole block.
 
-    When ``extraction_slot`` changes, it is validated against the live
-    enabled-llm-slot set and propagated to the hindsight-api service (via a
-    systemd drop-in + restart) so the engine's native extraction LLM follows
-    the operator's choice. A timeout or extraction-limit change (#1834)
-    propagates the same way: the limits are env knobs of the daemon, so
-    they only take effect through the drop-in and a restart. On success persists ``hal0.toml`` atomically and
-    flips the live wrapper's reported state.
+    ``extraction_slot`` is validated against the live enabled-llm-slot set and
+    ``extraction_model`` against the upstream catalogs; neither change
+    restarts the engine (#2919): hindsight-api calls the fixed alias
+    hal0/memory and hal0's /v1 resolves it per call. A timeout or
+    extraction-limit change (#1834) propagates through the systemd drop-in +
+    restart, and a stale or missing drop-in is repaired on any PUT. On
+    success persists ``hal0.toml`` atomically and flips the live wrapper's
+    reported state.
     """
     try:
         body = await request.json()
@@ -638,6 +703,8 @@ async def update_graph_config(request: Request) -> dict[str, Any]:
             ) from exc
 
         slot_changed = new_cfg.extraction_slot != cfg.memory.graph.extraction_slot
+        model_changed = new_cfg.extraction_model != cfg.memory.graph.extraction_model
+        target_kind, _target_model = memory_engine_target(new_cfg)
         was_enabled = cfg.memory.graph.enabled
         timeout_changed = new_cfg.llm_timeout_s != cfg.memory.graph.llm_timeout_s
         new_limits = ExtractionLimits.from_config(new_cfg)
@@ -654,35 +721,41 @@ async def update_graph_config(request: Request) -> dict[str, Any]:
                     details={"available_slots": ", ".join(available)},
                 )
 
-        # Whether this PUT needs to propagate to hindsight-api: an explicit
-        # slot/timeout change, or (#1682 review) the on-disk drop-in has
-        # drifted from what hal0.toml already claims to be running — a host
-        # stuck in the pre-seam-bug broken state (toml already says slot A,
-        # drop-in never written) must still reconcile on the next PUT of its
-        # unchanged slot, not no-op on config equality.
+        # #2919: an EXPLICIT upstream model must be one a configured upstream
+        # advertises (the dispatcher's models cache), else every engine call
+        # would 404. An empty cache (no upstreams wired) cannot refute the
+        # choice, so — as for a slot with no slot set known — it stands.
+        if model_changed and new_cfg.extraction_model:
+            pickable = [row["id"] for row in await _available_upstream_models(request)]
+            if pickable and new_cfg.extraction_model not in pickable:
+                raise MemoryGraphModelInvalid(
+                    f"extraction_model {new_cfg.extraction_model!r} is not a model any "
+                    "configured upstream advertises",
+                    details={"available_models": pickable},
+                )
+
+        # Whether this PUT needs to propagate to hindsight-api (drop-in
+        # rewrite + restart). Since #2919 the drop-in carries only the LLM
+        # timeout and the extraction limits — its model line is the fixed
+        # alias hal0/memory, which hal0's /v1 resolves per call — so:
         #
-        # Reconciliation only runs while the gate is meant to be enabled
-        # (#1717 review): a bare {"enabled": false} must always be able to
-        # disable, even with a stale/deleted configured slot — disabling
-        # doesn't need the (unchanged) slot to be valid.
-        needs_propagation = slot_changed or timeout_changed or limits_changed
-        if not needs_propagation and new_cfg.enabled:
+        # * a slot or model change alone never propagates (the engine picks
+        #   the new target up on its next call, no 60 s cold start);
+        # * a timeout or limit change always does;
+        # * drift (#1682 review) is repaired on ANY PUT, gate on or off and
+        #   whatever the slot set looks like: a missing or pre-#2919 drop-in
+        #   leaves the engine calling the base unit's hal0/utility, so an
+        #   upstream pick would otherwise be recorded but never take effect
+        #   (the fresh-install shape, where utility seeds disabled). The
+        #   #1717 reason to skip — a restart could pin the engine to an
+        #   unverifiable slot — is gone with the slot gone from the file; the
+        #   write is still best-effort and a failure is surfaced, never
+        #   raised, so a bare {"enabled": false} always succeeds.
+        needs_propagation = timeout_changed or limits_changed
+        if not needs_propagation:
             from hal0.memory.extraction_env import drop_in_matches
 
-            if not drop_in_matches(
-                new_cfg.extraction_slot, new_cfg.llm_timeout_s, limits=new_limits
-            ):
-                # Reconciliation is inferred work we chose to do ourselves,
-                # not an explicit operator action — only do it when we can
-                # POSITIVELY confirm the unchanged slot is still valid
-                # (#1717 review). An empty/unknown available set (no slots
-                # enabled, or enumeration failed) means we can't tell, and
-                # forcing a restart onto an unverifiable slot could replace
-                # a possibly-still-working drop-in with a broken one; skip
-                # reconciliation instead of erroring this — often
-                # unrelated — request.
-                available = await _enabled_llm_slots(request)
-                needs_propagation = new_cfg.extraction_slot in available
+            needs_propagation = not drop_in_matches(new_cfg.llm_timeout_s, limits=new_limits)
 
         # Flip the live wrapper's reported state BEFORE persisting.
         try:
@@ -729,6 +802,9 @@ async def update_graph_config(request: Request) -> dict[str, Any]:
         # Echo the live status so the dashboard's optimistic-update path
         # gets the counters in the same round trip without a second fetch.
         out["status"] = wrapper.graph_status()
+        # #2919: what hal0/memory resolves to after this write — the engine
+        # picks it up on its next call, no restart.
+        out["target"] = {"kind": target_kind, "model": _target_model, "alias": MEMORY_ALIAS}
         if propagation is not None:
             out["propagation"] = propagation
 
@@ -739,8 +815,13 @@ async def update_graph_config(request: Request) -> dict[str, Any]:
     # gate or changing the slot measures; a timeout / limit change re-projects
     # the cached measurement without touching the slot. A slow slot is a
     # warning in the response, never a refusal.
+    # #2919: the probe measures the SLOT; with an upstream target there is no
+    # slot in play, so it is skipped rather than measured and reported for a
+    # lane the engine is not using.
     throughput: dict[str, Any] | None = None
-    if slot_changed or (new_cfg.enabled and not was_enabled):
+    if target_kind != "slot":
+        pass
+    elif slot_changed or (new_cfg.enabled and not was_enabled):
         throughput = (
             await _measure_throughput(request, new_cfg.extraction_slot, new_cfg)
         ).as_dict()
@@ -798,6 +879,16 @@ async def _extraction_window(request: Request, wrapper: Any) -> Any | None:
     """
     slot = getattr(wrapper, "extraction_slot", None)
     if not slot or getattr(wrapper, "hindsight_client", None) is None:
+        return None
+    # #2919: with an upstream model set, hal0/memory does not resolve to the
+    # slot at all — its context window is not what the engine's extraction
+    # call will see, so there is nothing to preflight here. Read the
+    # lifespan's cached config: this is the memory-write hot path, and a
+    # disk read + parse per write (or a 500 on a corrupt hal0.toml) has no
+    # place in it.
+    cfg = getattr(request.app.state, "hal0_config", None)
+    graph = getattr(getattr(cfg, "memory", None), "graph", None)
+    if graph is not None and getattr(graph, "extraction_model", None):
         return None
 
     from hal0.api import hal0_slot_alias_models

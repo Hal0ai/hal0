@@ -219,6 +219,9 @@ _HAL0_REGISTRY: dict[str, ApplyPlanEntry] = {
     # Listed here so the schema-driven field registry still classifies them.
     "memory.graph.enabled": {"apply_class": "immediate", "services": []},
     "memory.graph.extraction_slot": {"apply_class": "immediate", "services": []},
+    # #2919: the upstream model the hal0/memory alias resolves to — read by
+    # the /v1 hot path from app.state.hal0_config, so a PUT applies at once.
+    "memory.graph.extraction_model": {"apply_class": "immediate", "services": []},
     "memory.graph.llm_timeout_s": {"apply_class": "immediate", "services": []},
     # #1834 extraction limits: same drop-in + restart, same sole writer.
     "memory.graph.extraction_max_concurrent": {"apply_class": "immediate", "services": []},

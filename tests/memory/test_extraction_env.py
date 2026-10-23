@@ -16,10 +16,12 @@ from hal0.memory.extraction_env import (
     DROP_IN_PATH,
     EXTRACTION_FLOOR_ENV,
     EXTRACTION_MIN_CONTEXT_TOKENS,
+    MEMORY_ALIAS,
     apply_extraction_slot,
     drop_in_matches,
     extraction_floor,
     extraction_model_name,
+    memory_engine_target,
     render_drop_in,
     resolve_extraction_window,
 )
@@ -44,15 +46,34 @@ def _forbidden(*_a, **_k):  # pragma: no cover — a call here is the bug
     raise AssertionError("privileged work must route through the seam, not bare subprocess")
 
 
-def test_render_drop_in_pins_hal0_virtual():
-    out = render_drop_in("utility")
-    assert "HINDSIGHT_API_LLM_MODEL=hal0/utility" in out
+def test_render_drop_in_pins_the_memory_alias():
+    """#2919: the drop-in no longer carries the slot. hindsight-api always
+    calls the one virtual id ``hal0/memory``; hal0's /v1 resolves it from
+    [memory.graph] at request time, so switching the engine between a local
+    slot and an upstream model never rewrites this file or restarts the
+    engine."""
+    out = render_drop_in()
+    assert MEMORY_ALIAS == "hal0/memory"
+    assert "HINDSIGHT_API_LLM_MODEL=hal0/memory" in out
+    assert "hal0/utility" not in out
     assert "[Service]" in out
 
 
-def test_render_drop_in_tracks_the_slot_name():
-    assert "HINDSIGHT_API_LLM_MODEL=hal0/agent" in render_drop_in("agent")
-    assert "HINDSIGHT_API_LLM_MODEL=hal0/coder-mini" in render_drop_in("coder-mini")
+def test_memory_engine_target_slot_and_upstream():
+    from hal0.config.schema import MemoryGraphConfig
+
+    assert memory_engine_target(MemoryGraphConfig(extraction_slot="utility")) == (
+        "slot",
+        "hal0/utility",
+    )
+    assert memory_engine_target(MemoryGraphConfig(extraction_slot="agent")) == (
+        "slot",
+        "hal0/agent",
+    )
+    # An upstream model wins over the slot while it is set.
+    assert memory_engine_target(
+        MemoryGraphConfig(extraction_slot="utility", extraction_model="MiniMax-M2.5")
+    ) == ("upstream", "MiniMax-M2.5")
 
 
 def test_drop_in_path_is_a_systemd_override():
@@ -81,8 +102,8 @@ def test_apply_writes_drop_in_and_reports_status(monkeypatch, tmp_path: Path):
     assert result["written"] is True
     assert result["daemon_reloaded"] is True
     assert result["restarted"] is True
-    assert result["model"] == "hal0/utility"
-    assert drop_in.read_text().count("HINDSIGHT_API_LLM_MODEL=hal0/utility") == 1
+    assert result["model"] == "hal0/memory"
+    assert drop_in.read_text().count("HINDSIGHT_API_LLM_MODEL=hal0/memory") == 1
     # daemon-reload then restart, in order. Off the hal0 service account the
     # seam is a passthrough, so these are the bare argv.
     assert ran[0][:2] == ["systemctl", "daemon-reload"]
@@ -108,8 +129,8 @@ def test_apply_no_restart_skips_systemctl(monkeypatch, tmp_path: Path):
 def test_render_drop_in_includes_llm_timeout():
     # Default mirrors MemoryGraphConfig.llm_timeout_s (300s); explicit values
     # ride the same drop-in so one file owns both hindsight LLM env overrides.
-    assert "HINDSIGHT_API_LLM_TIMEOUT=300" in render_drop_in("utility")
-    assert "HINDSIGHT_API_LLM_TIMEOUT=600" in render_drop_in("utility", timeout_s=600)
+    assert "HINDSIGHT_API_LLM_TIMEOUT=300" in render_drop_in()
+    assert "HINDSIGHT_API_LLM_TIMEOUT=600" in render_drop_in(timeout_s=600)
 
 
 # ── #1834: extraction limits ride the same drop-in ───────────────────────────
@@ -134,7 +155,7 @@ def test_extraction_limits_defaults_are_conservative():
 def test_render_drop_in_carries_the_extraction_limits():
     from hal0.memory.extraction_env import ExtractionLimits
 
-    out = render_drop_in("utility")
+    out = render_drop_in()
     assert "HINDSIGHT_API_RETAIN_LLM_MAX_CONCURRENT=1" in out
     assert "HINDSIGHT_API_RETAIN_MAX_COMPLETION_TOKENS=4096" in out
     assert "HINDSIGHT_API_RETAIN_LLM_MAX_RETRIES=1" in out
@@ -144,7 +165,7 @@ def test_render_drop_in_carries_the_extraction_limits():
     tuned = ExtractionLimits(
         max_concurrent=2, max_tokens=8192, llm_retries=0, task_retries=5, retry_backoff_s=30
     )
-    out = render_drop_in("utility", limits=tuned)
+    out = render_drop_in(limits=tuned)
     assert "HINDSIGHT_API_RETAIN_LLM_MAX_CONCURRENT=2" in out
     assert "HINDSIGHT_API_RETAIN_MAX_COMPLETION_TOKENS=8192" in out
     assert "HINDSIGHT_API_RETAIN_LLM_MAX_RETRIES=0" in out
@@ -175,9 +196,9 @@ def test_drop_in_matches_sees_a_limits_change(monkeypatch, tmp_path: Path):
 
     path = tmp_path / "extraction-model.conf"
     monkeypatch.setattr(ee, "DROP_IN_PATH", path)
-    path.write_text(render_drop_in("agent", 300), encoding="utf-8")
-    assert drop_in_matches("agent", 300) is True
-    assert drop_in_matches("agent", 300, limits=ExtractionLimits(max_concurrent=2)) is False
+    path.write_text(render_drop_in(300), encoding="utf-8")
+    assert drop_in_matches(300) is True
+    assert drop_in_matches(300, limits=ExtractionLimits(max_concurrent=2)) is False
 
 
 def test_apply_threads_limits_into_drop_in_and_status(monkeypatch, tmp_path: Path):
@@ -212,7 +233,7 @@ def test_apply_threads_timeout_into_drop_in_and_status(monkeypatch, tmp_path: Pa
     result = apply_extraction_slot("agent", timeout_s=900, restart=False)
     assert result["timeout_s"] == 900
     text = drop_in.read_text()
-    assert "HINDSIGHT_API_LLM_MODEL=hal0/agent" in text
+    assert "HINDSIGHT_API_LLM_MODEL=hal0/memory" in text
     assert "HINDSIGHT_API_LLM_TIMEOUT=900" in text
 
 
@@ -251,7 +272,7 @@ def test_apply_routes_every_step_through_the_seam_as_the_hal0_user(monkeypatch, 
         ["sudo", "-n", SEAM_BIN, "svc-restart", "hindsight"],
     ]
     body = calls[0][1]
-    assert "HINDSIGHT_API_LLM_MODEL=hal0/utility" in body
+    assert "HINDSIGHT_API_LLM_MODEL=hal0/memory" in body
     assert "HINDSIGHT_API_LLM_TIMEOUT=420" in body
 
 
@@ -324,22 +345,23 @@ def test_drop_in_matches_true_when_content_is_identical(monkeypatch, tmp_path: P
     import hal0.memory.extraction_env as ee
 
     path = tmp_path / "extraction-model.conf"
-    path.write_text(render_drop_in("agent", 300))
+    path.write_text(render_drop_in(300))
     monkeypatch.setattr(ee, "DROP_IN_PATH", path)
 
-    assert drop_in_matches("agent", 300) is True
+    assert drop_in_matches(300) is True
 
 
-def test_drop_in_matches_false_on_stale_content(monkeypatch, tmp_path: Path):
-    """The recorded slot changed but the drop-in still names the old one —
-    exactly the divergence a broken host can be stuck in."""
+def test_drop_in_matches_false_on_a_pre_alias_slot_drop_in(monkeypatch, tmp_path: Path):
+    """A box upgraded from the slot-carrying drop-in (``hal0/utility``) still
+    has that file on disk — it must read as drift so the next enabled PUT
+    rewrites it to the alias and restarts the engine once."""
     import hal0.memory.extraction_env as ee
 
     path = tmp_path / "extraction-model.conf"
-    path.write_text(render_drop_in("utility", 300))
+    path.write_text(render_drop_in(300).replace("hal0/memory", "hal0/utility"), encoding="utf-8")
     monkeypatch.setattr(ee, "DROP_IN_PATH", path)
 
-    assert drop_in_matches("agent", 300) is False
+    assert drop_in_matches(300) is False
 
 
 def test_drop_in_matches_false_when_missing(monkeypatch, tmp_path: Path):
@@ -351,7 +373,7 @@ def test_drop_in_matches_false_when_missing(monkeypatch, tmp_path: Path):
 
     monkeypatch.setattr(ee, "DROP_IN_PATH", tmp_path / "never-written.conf")
 
-    assert drop_in_matches("agent", 300) is False
+    assert drop_in_matches(300) is False
 
 
 def test_drop_in_matches_false_on_undecodable_bytes(monkeypatch, tmp_path: Path):
@@ -365,7 +387,7 @@ def test_drop_in_matches_false_on_undecodable_bytes(monkeypatch, tmp_path: Path)
     path.write_bytes(b"\xff\xfe not valid utf-8 \x80\x81")
     monkeypatch.setattr(ee, "DROP_IN_PATH", path)
 
-    assert drop_in_matches("agent", 300) is False
+    assert drop_in_matches(300) is False
 
 
 def test_drop_in_matches_reads_utf8_regardless_of_locale(monkeypatch, tmp_path: Path):
@@ -379,7 +401,7 @@ def test_drop_in_matches_reads_utf8_regardless_of_locale(monkeypatch, tmp_path: 
 
     path = tmp_path / "extraction-model.conf"
     # The rendered template contains a real em dash (U+2014) in its header.
-    content = render_drop_in("agent", 300)
+    content = render_drop_in(300)
     assert "—" in content
     path.write_text(content, encoding="utf-8")
     monkeypatch.setattr(ee, "DROP_IN_PATH", path)
@@ -395,7 +417,7 @@ def test_drop_in_matches_reads_utf8_regardless_of_locale(monkeypatch, tmp_path: 
 
     monkeypatch.setattr(Path, "read_text", _locale_sensitive_read_text)
 
-    assert drop_in_matches("agent", 300) is True
+    assert drop_in_matches(300) is True
 
 
 def test_apply_writes_directly_when_not_the_hal0_user(monkeypatch, tmp_path: Path):
@@ -412,11 +434,107 @@ def test_apply_writes_directly_when_not_the_hal0_user(monkeypatch, tmp_path: Pat
     result = apply_extraction_slot("agent", seam=seam)
 
     assert result["error"] is None
-    assert drop_in.read_text().count("HINDSIGHT_API_LLM_MODEL=hal0/agent") == 1
+    assert drop_in.read_text().count("HINDSIGHT_API_LLM_MODEL=hal0/memory") == 1
     assert [c[0] for c in calls] == [
         ["systemctl", "daemon-reload"],
         ["systemctl", "restart", "hindsight-api.service"],
     ]
+
+
+# ── #2918: the LLM the engine really runs ────────────────────────────────────
+#
+# systemd applies EnvironmentFile= after every Environment= line, drop-ins
+# included, so PROVIDER/BASE_URL/MODEL lines an operator adds to
+# /etc/hal0/hindsight-llm.env silently beat hal0's target. hal0 must report
+# what the engine loads, not what it configured.
+
+_UNIT_ENV = {
+    "HINDSIGHT_API_LLM_PROVIDER": "openai",
+    "HINDSIGHT_API_LLM_BASE_URL": "http://127.0.0.1:8080/v1",
+    "HINDSIGHT_API_LLM_MODEL": "hal0/memory",
+    "HINDSIGHT_API_LLM_API_KEY": "unit-placeholder",
+}
+
+
+def test_effective_engine_llm_key_only_file_is_not_an_override(tmp_path: Path):
+    from hal0.memory.extraction_env import effective_engine_llm
+
+    env_file = tmp_path / "hindsight-llm.env"
+    env_file.write_text("HINDSIGHT_API_LLM_API_KEY=supersecret-box-key\n")
+    out = effective_engine_llm(env_file=env_file, unit_env=_UNIT_ENV)
+    assert out == {
+        "provider": "openai",
+        "base_url": "http://127.0.0.1:8080/v1",
+        "model": "hal0/memory",
+        "overridden": False,
+        "override_file": None,
+        "override_keys": [],
+    }
+    assert "supersecret" not in repr(out)
+
+
+def test_effective_engine_llm_reports_a_provider_override(tmp_path: Path):
+    from hal0.memory.extraction_env import effective_engine_llm
+
+    env_file = tmp_path / "hindsight-llm.env"
+    env_file.write_text(
+        "HINDSIGHT_API_LLM_PROVIDER=minimax\n"
+        "HINDSIGHT_API_LLM_BASE_URL=https://api.minimax.io/v1\n"
+        "HINDSIGHT_API_LLM_MODEL=MiniMax-M2.5\n"
+        "HINDSIGHT_API_LLM_API_KEY=supersecret-cloud-key\n"
+    )
+    out = effective_engine_llm(env_file=env_file, unit_env=_UNIT_ENV)
+    assert out["provider"] == "minimax"
+    assert out["base_url"] == "https://api.minimax.io/v1"
+    assert out["model"] == "MiniMax-M2.5"
+    assert out["overridden"] is True
+    assert out["override_file"] == str(env_file)
+    assert out["override_keys"] == [
+        "HINDSIGHT_API_LLM_BASE_URL",
+        "HINDSIGHT_API_LLM_MODEL",
+        "HINDSIGHT_API_LLM_PROVIDER",
+    ]
+    assert "supersecret" not in repr(out)
+
+
+def test_effective_engine_llm_without_file_uses_unit_env(tmp_path: Path):
+    from hal0.memory.extraction_env import effective_engine_llm
+
+    out = effective_engine_llm(env_file=tmp_path / "missing.env", unit_env=_UNIT_ENV)
+    assert out["model"] == "hal0/memory"
+    assert out["overridden"] is False
+    assert out["override_file"] is None
+
+
+def test_effective_engine_llm_tolerates_an_unreadable_unit(tmp_path: Path):
+    """``systemctl show`` failing (no systemd, a dev shell) degrades to Nones,
+    never an exception on the status route."""
+    from hal0.memory.extraction_env import effective_engine_llm
+
+    out = effective_engine_llm(env_file=tmp_path / "missing.env", show_unit_env=lambda: {})
+    assert out == {
+        "provider": None,
+        "base_url": None,
+        "model": None,
+        "overridden": False,
+        "override_file": None,
+        "override_keys": [],
+    }
+
+
+def test_parse_systemctl_environment_value():
+    """``systemctl show -p Environment --value`` prints one space-separated
+    line of KEY=VALUE pairs (values may be quoted when they carry spaces)."""
+    from hal0.memory.extraction_env import _parse_systemctl_environment
+
+    raw = (
+        "HOME=/var/lib/hal0/memory/hindsight HINDSIGHT_API_LLM_MODEL=hal0/memory "
+        '"HINDSIGHT_API_LLM_EXTRA_BODY={\\"a\\": 1}" HINDSIGHT_API_LLM_TIMEOUT=300\n'
+    )
+    env = _parse_systemctl_environment(raw)
+    assert env["HINDSIGHT_API_LLM_MODEL"] == "hal0/memory"
+    assert env["HINDSIGHT_API_LLM_TIMEOUT"] == "300"
+    assert env["HOME"] == "/var/lib/hal0/memory/hindsight"
 
 
 # ── #1903: extraction-slot context-window preflight ─────────────────────────

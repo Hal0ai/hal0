@@ -7,6 +7,12 @@ import { useState, useEffect } from 'react'
 import { useSettingsClient } from '../../data/settingsClient.js'
 import { useCapabilities } from '@/api/hooks/useCapabilities'
 import { useMemoryGraphStatus, useRetryFailedExtractions, useUpdateMemoryGraph } from '@/api/hooks/useMemory'
+import {
+  engineRunningLine,
+  engineTargetOptions,
+  engineTargetPutBody,
+  engineTargetValue,
+} from './engineTarget.js'
 import { ApplyBadge } from '../../shared/ApplyBadge.jsx'
 import { SRow } from '../../shared/SRow.jsx'
 import { AdvRow, _schemaField, _getIn, _deepMergePatch, _advCoerce, _advInputStyle } from '../../shared/SchemaRow.jsx'
@@ -227,7 +233,10 @@ function MemoryGraphPanel() {
   };
 
   const [enabled, setEnabled] = useState(false);
-  const [slot, setSlot] = useState("");
+  // #2919: one picker for the engine's model — "slot:<name>" (a local llm
+  // slot) or "model:<id>" (an upstream model); engineTarget.js owns the
+  // encoding and the PUT body each choice turns into.
+  const [target, setTarget] = useState("");
   const [timeoutS, setTimeoutS] = useState("300");
   // #1834 extraction limits — one editable string per knob, seeded from the
   // status echo; the pure helpers in extractionLimits.js own bounds + diffing.
@@ -236,10 +245,10 @@ function MemoryGraphPanel() {
   useEffect(() => {
     if (!st) return;
     setEnabled(!!st.enabled);
-    setSlot(st.extraction_slot || "");
+    setTarget(engineTargetValue(st));
     if (st.llm_timeout_s != null) setTimeoutS(String(st.llm_timeout_s));
     setLimits(limitsFormFromStatus(st));
-  }, [st?.enabled, st?.extraction_slot, st?.llm_timeout_s, limitsKey]);
+  }, [st?.enabled, st?.extraction_slot, st?.extraction_model, st?.llm_timeout_s, limitsKey]);
 
   const timeoutNum = parseInt(timeoutS, 10);
   const timeoutValid = /^\d+$/.test(timeoutS.trim()) && timeoutNum >= 30 && timeoutNum <= 3600;
@@ -250,19 +259,18 @@ function MemoryGraphPanel() {
   const limitsOk = limitsSupported(st);
   const dirty = !!st && (
     enabled !== !!st.enabled
-    || slot !== (st.extraction_slot || "")
+    || target !== engineTargetValue(st)
     || (st.llm_timeout_s != null && timeoutS !== String(st.llm_timeout_s))
     || limitsFormDirty(limits, st)
   );
-  const slots = st?.available_slots || [];
-  // Keep the currently-configured slot pickable even when it no longer
-  // resolves, so the operator can see (and move off) a stale value.
-  const slotOptions = slot && !slots.includes(slot) ? [slot, ...slots] : slots;
+  const targetOptions = engineTargetOptions(st);
+  const running = engineRunningLine(st);
+  const targetIsUpstream = target.startsWith("model:");
 
   const doSave = async () => {
     try {
       const body = { enabled };
-      if (slot) body.extraction_slot = slot;
+      Object.assign(body, engineTargetPutBody(target));
       if (timeoutValid) body.llm_timeout_s = timeoutNum;
       Object.assign(body, limitsPutBody(limits, st));
       const resp = await updateGraph.mutateAsync(body);
@@ -306,22 +314,44 @@ function MemoryGraphPanel() {
         <input type="checkbox" checked={enabled} disabled={!st} onChange={e => setEnabled(e.target.checked)} style={{accentColor: "var(--accent)"}} />
       } />
       <SRow
-        k="Extraction slot"
-        sub={st && !st.slot_resolves
-          ? "⚠ configured slot doesn't match an enabled LLM slot — extraction is stalled until this points at a live slot"
-          : "Local LLM slot that runs the extraction prompts"}
+        k="Engine model"
+        sub={st && !targetIsUpstream && !st.slot_resolves
+          ? "⚠ configured slot doesn't match an enabled LLM slot — extraction is stalled until this points at a live slot or an upstream model"
+          : targetIsUpstream
+            ? "Upstream model the engine calls through hal0's /v1 — memory text leaves the box to that provider; applies at once, no engine restart; the local slot stays as the way back"
+            : "Local LLM slot that runs extraction, consolidation, reflect and mental-model refresh"}
         v={
-          slotOptions.length > 0 ? (
-            <select value={slot} disabled={!st} onChange={e => setSlot(e.target.value)} style={_advInputStyle}>
-              {slotOptions.map(s => (
-                <option key={s} value={s}>{s}{slots.includes(s) ? "" : " (not running)"}</option>
-              ))}
+          targetOptions.local.length + targetOptions.upstream.length > 0 ? (
+            <select value={target} disabled={!st} onChange={e => setTarget(e.target.value)} style={_advInputStyle} data-testid="mem-graph-target">
+              <optgroup label="Local slots">
+                {targetOptions.local.map(o => (
+                  <option key={o.value} value={o.value}>{o.label}</option>
+                ))}
+              </optgroup>
+              {targetOptions.upstream.length > 0 && (
+                <optgroup label="Upstream models">
+                  {targetOptions.upstream.map(o => (
+                    <option key={o.value} value={o.value}>{o.label}</option>
+                  ))}
+                </optgroup>
+              )}
             </select>
           ) : (
-            <input value={slot} disabled={!st} onChange={e => setSlot(e.target.value)} placeholder="slot name (e.g. utility)"
+            <input value={target.replace(/^slot:/, "")} disabled={!st}
+              onChange={e => setTarget(e.target.value ? `slot:${e.target.value}` : "")} placeholder="slot name (e.g. utility)"
               className="mono" style={{..._advInputStyle, width: 200}} />
           )
         }
+      />
+      <SRow
+        k="Engine running"
+        sub={running.reason === "override"
+          ? "⚠ /etc/hal0/hindsight-llm.env sets the engine's provider/model and beats every hal0 setting — remove those lines and restart hindsight-api for the picker above to take effect"
+          : running.reason === "pinned"
+            ? "⚠ the engine is not calling hal0/memory yet — Save once (any change) to write the drop-in and restart it onto the picker above"
+            : "The LLM hindsight-api actually loads: hal0/memory resolves to the picker above on every call"}
+        mono
+        v={<span data-testid="mem-graph-engine-running" style={{color: running.warn ? "var(--warn)" : "var(--fg-3)"}}>{running.text}</span>}
       />
       <SRow
         k="LLM timeout"
@@ -393,7 +423,7 @@ function MemoryGraphPanel() {
         {dirty && (
           <button className="btn ghost sm" onClick={() => {
             setEnabled(!!st?.enabled);
-            setSlot(st?.extraction_slot || "");
+            setTarget(engineTargetValue(st));
             setTimeoutS(st?.llm_timeout_s != null ? String(st.llm_timeout_s) : "300");
             setLimits(limitsFormFromStatus(st));
           }}>Reset</button>

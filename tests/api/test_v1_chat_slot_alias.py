@@ -152,6 +152,54 @@ async def test_rewrite_is_noop_for_bare_model_id() -> None:
     assert req._body == b""  # not rewritten
 
 
+# ── hal0/memory: the memory engine's one fixed id (#2919) ────────────────────
+#
+# hindsight-api is always pointed at ``hal0/memory``. The chat path resolves it
+# in ``_normalize_chat_body`` (covered in test_chat_normalization.py — the
+# bare-alias rewrite here is a no-op for every ``hal0/`` virtual); this file
+# pins the ``GET /v1/models/hal0/memory`` lookup for an upstream target.
+
+
+class _FakeAppWithConfig:
+    def __init__(self, slot_manager: Any, graph: Any) -> None:
+        from hal0.config.schema import Hal0Config, MemoryConfig
+
+        cfg = Hal0Config(memory=MemoryConfig(graph=graph))
+        self.state = type("S", (), {"slot_manager": slot_manager, "hal0_config": cfg})()
+
+
+class _FakeRequestWithConfig(_FakeRequest):
+    def __init__(self, slot_manager: Any, graph: Any) -> None:
+        self.app = _FakeAppWithConfig(slot_manager, graph)
+        self._body = b""
+
+
+@pytest.mark.asyncio
+async def test_memory_alias_virtual_entry_points_at_the_upstream_row() -> None:
+    """``GET /v1/models/hal0/memory`` answers with the target's catalog row,
+    id rewritten back to the alias, for an upstream target too."""
+    from hal0.api.routes.v1 import _resolve_virtual_model_entry
+    from hal0.config.schema import MemoryGraphConfig
+
+    req = _FakeRequestWithConfig(
+        _FakeSlotManager(_three_chat_slots()),
+        MemoryGraphConfig(extraction_model="MiniMax-M2.5"),
+    )
+    catalog = [
+        {"id": "utility", "owned_by": "hal0"},
+        {"id": "MiniMax-M2.5", "owned_by": "minimax"},
+    ]
+    row = await _resolve_virtual_model_entry(req, "hal0/memory", catalog)
+    assert row == {"id": "hal0/memory", "owned_by": "minimax"}
+    # An upstream id the catalog does not carry resolves to nothing — the
+    # caller 404s rather than inventing a row.
+    req2 = _FakeRequestWithConfig(
+        _FakeSlotManager(_three_chat_slots()),
+        MemoryGraphConfig(extraction_model="not/advertised"),
+    )
+    assert await _resolve_virtual_model_entry(req2, "hal0/memory", catalog) is None
+
+
 @pytest.mark.asyncio
 async def test_rewrite_is_noop_without_slot_manager() -> None:
     from hal0.api.routes.v1 import _rewrite_chat_slot_alias

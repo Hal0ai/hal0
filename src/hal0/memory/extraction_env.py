@@ -1,4 +1,4 @@
-"""Propagate the memory graph extraction slot to hindsight-api (ADR-0023).
+"""Propagate the memory engine's LLM settings to hindsight-api (ADR-0023, #2919).
 
 Hindsight builds its graph natively via its own extraction LLM, configured by the
 ``HINDSIGHT_API_LLM_MODEL`` env in the ``hindsight-api.service`` unit. To make the
@@ -7,12 +7,19 @@ owns a systemd **drop-in**::
 
     /etc/systemd/system/hindsight-api.service.d/extraction-model.conf
         [Service]
-        Environment=HINDSIGHT_API_LLM_MODEL=hal0/<slot>
+        Environment=HINDSIGHT_API_LLM_MODEL=hal0/memory
+        Environment=HINDSIGHT_API_LLM_TIMEOUT=...   (+ the #1834 extraction limits)
 
 and runs ``systemctl daemon-reload`` + ``systemctl restart hindsight-api`` so the
-engine picks up the new target. The slot is addressed as the ``hal0/<slot>`` virtual
-(resolved by the dispatcher to that slot's model — ADR-0023 §2), so the value tracks
-the slot, never a hardcoded model id.
+engine picks up a changed timeout or limit. The model line is the one fixed
+virtual id :data:`MEMORY_ALIAS`: hal0's ``/v1`` resolves ``hal0/memory`` at request
+time from ``[memory.graph]`` — to ``hal0/<extraction_slot>`` (ADR-0023 §2, a local
+slot) or, when ``extraction_model`` is set, to that upstream model id
+(:func:`memory_engine_target`). So the engine never learns which model it runs
+on, switching between a local slot and an upstream model (OpenRouter, MiniMax, …)
+is a hal0.toml write that applies on the next engine call, and the drop-in only
+changes — and the engine only restarts — for the timeout and the limits. Before
+#2919 the drop-in carried ``hal0/<slot>`` and every slot change cost a restart.
 
 Privileged operation, routed through the seam (#1641): both the drop-in write and
 the restart are genuinely-root, and hal0-api runs as the unprivileged ``hal0``
@@ -40,6 +47,7 @@ raising, so the API can surface a partial result instead of 500ing.
 from __future__ import annotations
 
 import os
+import shlex
 import subprocess
 import time
 from collections.abc import Callable, Mapping, Sequence
@@ -70,6 +78,15 @@ _SYSTEMCTL_TIMEOUT_S = 60.0
 
 #: Default daemon LLM timeout (seconds) — mirrors MemoryGraphConfig.llm_timeout_s.
 DEFAULT_LLM_TIMEOUT_S = 300
+
+#: The one virtual model id hindsight-api is ever pointed at (#2919). Reserved
+#: like ``hal0/agent`` / ``hal0/utility``: hal0's ``/v1`` alias rewrite resolves it
+#: from ``[memory.graph]`` on every call (see :func:`memory_engine_target`), so a
+#: slot literally named ``memory`` is not reachable through it. Spelled so it
+#: passes the root-side drop-in allow-list (``^hal0/[A-Za-z0-9_.-]{1,64}$`` in
+#: installer/wrappers/hal0-systemctl), which is what lets an upstream target
+#: work without an installer change.
+MEMORY_ALIAS = "hal0/memory"
 
 #: Conservative floor for Hindsight's native extraction prompt (#1903).
 #:
@@ -138,13 +155,16 @@ class ExtractionLimits:
 
 
 _DROP_IN_TEMPLATE = (
-    "# Managed by hal0 (ADR-0023 — memory.graph.extraction_slot / llm_timeout_s /\n"
-    "# extraction limits, #1834). Overrides the hindsight-api LLM target, timeout\n"
-    "# and extraction limits set in the base hindsight-api.service unit. Do not\n"
-    "# edit by hand; set via `hal0 memory graph enable --slot <name>` or the\n"
-    "# dashboard, which rewrites this file and restarts the service.\n"
+    "# Managed by hal0 (ADR-0023 / #2919 — memory.graph llm_timeout_s and the\n"
+    "# #1834 extraction limits). Overrides the hindsight-api LLM target, timeout\n"
+    "# and extraction limits set in the base hindsight-api.service unit. The model\n"
+    "# is always the virtual id hal0/memory: hal0's /v1 resolves it to\n"
+    "# [memory.graph].extraction_slot or extraction_model on every call, so the\n"
+    "# engine target changes without touching this file. Do not edit by hand; set\n"
+    "# via `hal0 memory graph enable` or the dashboard, which rewrite this file\n"
+    "# and restart the service when a timeout or limit changes.\n"
     "[Service]\n"
-    "Environment=HINDSIGHT_API_LLM_MODEL=hal0/{slot}\n"
+    "Environment=HINDSIGHT_API_LLM_MODEL=" + MEMORY_ALIAS + "\n"
     "Environment=HINDSIGHT_API_LLM_TIMEOUT={timeout_s}\n"
     "Environment=HINDSIGHT_API_RETAIN_LLM_MAX_CONCURRENT={max_concurrent}\n"
     "Environment=HINDSIGHT_API_RETAIN_MAX_COMPLETION_TOKENS={max_tokens}\n"
@@ -193,17 +213,15 @@ def _stale_wrapper_hint(exc: BaseException) -> str:
 
 
 def render_drop_in(
-    slot: str,
     timeout_s: int = DEFAULT_LLM_TIMEOUT_S,
     *,
     limits: ExtractionLimits | None = None,
 ) -> str:
-    """Return the drop-in contents pinning extraction to ``hal0/<slot>``, the
-    LLM timeout and the extraction limits (``limits`` defaults to the schema
+    """Return the drop-in contents pinning the engine to :data:`MEMORY_ALIAS`,
+    the LLM timeout and the extraction limits (``limits`` defaults to the schema
     defaults, see :class:`ExtractionLimits`)."""
     lim = limits if limits is not None else ExtractionLimits()
     return _DROP_IN_TEMPLATE.format(
-        slot=slot,
         timeout_s=int(timeout_s),
         max_concurrent=int(lim.max_concurrent),
         max_tokens=int(lim.max_tokens),
@@ -214,12 +232,13 @@ def render_drop_in(
 
 
 def drop_in_matches(
-    slot: str,
     timeout_s: int = DEFAULT_LLM_TIMEOUT_S,
     *,
     limits: ExtractionLimits | None = None,
 ) -> bool:
-    """True when the on-disk drop-in already reflects ``(slot, timeout_s, limits)``.
+    """True when the on-disk drop-in already reflects ``(timeout_s, limits)``
+    and pins :data:`MEMORY_ALIAS` (a pre-#2919 drop-in naming ``hal0/<slot>``
+    reads as drift, so the next enabled PUT rewrites it once).
 
     #1682 review: comparing only against ``hal0.toml`` is not enough to
     decide propagation is unnecessary. A host hit by the pre-seam write bug
@@ -242,11 +261,142 @@ def drop_in_matches(
     repair it, instead of an otherwise-idempotent PUT 500ing.
     """
     try:
-        return DROP_IN_PATH.read_text(encoding="utf-8") == render_drop_in(
-            slot, timeout_s, limits=limits
-        )
+        return DROP_IN_PATH.read_text(encoding="utf-8") == render_drop_in(timeout_s, limits=limits)
     except (OSError, UnicodeDecodeError):
         return False
+
+
+#: The env file the hindsight-api unit reads (``EnvironmentFile=-``) for its
+#: /v1 credential. systemd applies ``EnvironmentFile=`` after every
+#: ``Environment=`` line, drop-ins included, so PROVIDER/BASE_URL/MODEL lines an
+#: operator adds here silently beat hal0's target (#2918). hal0-api can read it
+#: (0640 root:hal0) and reports what the engine actually loads.
+HINDSIGHT_LLM_ENV_PATH = Path("/etc/hal0/hindsight-llm.env")
+
+#: The keys that decide which LLM the engine talks to. The credential key is
+#: deliberately not among them: it is never read into a status payload.
+_LLM_TARGET_KEYS: tuple[str, ...] = (
+    "HINDSIGHT_API_LLM_PROVIDER",
+    "HINDSIGHT_API_LLM_BASE_URL",
+    "HINDSIGHT_API_LLM_MODEL",
+)
+
+#: ``systemctl show`` is a subprocess; the dashboard polls status every few
+#: seconds, so the unit environment is remembered this long.
+_UNIT_ENV_TTL_S = 30.0
+_unit_env_cache: tuple[float, dict[str, str]] | None = None
+
+
+def _parse_systemctl_environment(raw: str) -> dict[str, str]:
+    """``systemctl show -p Environment --value`` → ``{KEY: VALUE}``.
+
+    One line of space-separated ``KEY=VALUE`` tokens; a token whose value
+    carries spaces is printed quoted as a whole, which ``shlex`` undoes.
+    """
+    out: dict[str, str] = {}
+    try:
+        tokens = shlex.split(raw)
+    except ValueError:
+        tokens = raw.split()
+    for tok in tokens:
+        if "=" not in tok:
+            continue
+        key, value = tok.split("=", 1)
+        if key:
+            out[key] = value
+    return out
+
+
+def _systemctl_show_environment() -> dict[str, str]:
+    """The merged ``Environment=`` of the hindsight-api unit (base + drop-ins),
+    as systemd would hand it to the process — before any ``EnvironmentFile=``.
+    Unprivileged read; ``{}`` when systemd is not there or the unit is unknown."""
+    global _unit_env_cache
+    now = time.monotonic()
+    if _unit_env_cache is not None and now - _unit_env_cache[0] < _UNIT_ENV_TTL_S:
+        return dict(_unit_env_cache[1])
+    try:
+        proc = subprocess.run(
+            ["systemctl", "show", SERVICE, "-p", "Environment", "--value"],
+            capture_output=True,
+            text=True,
+            timeout=5.0,
+            check=False,
+        )
+        env = _parse_systemctl_environment(proc.stdout) if proc.returncode == 0 else {}
+    except (OSError, subprocess.SubprocessError):
+        env = {}
+    _unit_env_cache = (now, env)
+    return dict(env)
+
+
+def _read_env_file(path: Path) -> dict[str, str]:
+    """``KEY=VALUE`` lines of a systemd environment file; ``{}`` if unreadable."""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return {}
+    out: dict[str, str] = {}
+    for line in text.splitlines():
+        item = line.strip()
+        if item.startswith("export "):
+            item = item[len("export ") :].strip()
+        if not item or item.startswith("#") or "=" not in item:
+            continue
+        key, value = item.split("=", 1)
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+        out[key.strip()] = value
+    return out
+
+
+def effective_engine_llm(
+    *,
+    env_file: Path = HINDSIGHT_LLM_ENV_PATH,
+    unit_env: Mapping[str, str] | None = None,
+    show_unit_env: Callable[[], Mapping[str, str]] = _systemctl_show_environment,
+) -> dict[str, Any]:
+    """The LLM hindsight-api really runs on, and whether a file override set it (#2918).
+
+    Overlays the three target keys from ``env_file`` on the unit's merged
+    ``Environment=`` (``unit_env`` when given, else ``show_unit_env()``), which
+    is exactly what systemd does at unit start. Returns::
+
+        {"provider", "base_url", "model",            # as the engine sees them
+         "overridden": bool,                         # any target key came from the file
+         "override_file": str | None, "override_keys": [sorted key names]}
+
+    The credential is never read into the result. Everything degrades to
+    ``None``/``False`` rather than raising — this feeds a status route.
+    """
+    unit = dict(unit_env) if unit_env is not None else dict(show_unit_env() or {})
+    file_env = _read_env_file(Path(env_file))
+    override_keys = sorted(k for k in _LLM_TARGET_KEYS if file_env.get(k))
+    merged = {**unit, **{k: file_env[k] for k in override_keys}}
+    return {
+        "provider": merged.get("HINDSIGHT_API_LLM_PROVIDER") or None,
+        "base_url": merged.get("HINDSIGHT_API_LLM_BASE_URL") or None,
+        "model": merged.get("HINDSIGHT_API_LLM_MODEL") or None,
+        "overridden": bool(override_keys),
+        "override_file": str(env_file) if override_keys else None,
+        "override_keys": override_keys,
+    }
+
+
+def memory_engine_target(graph: MemoryGraphConfig) -> tuple[str, str]:
+    """What :data:`MEMORY_ALIAS` resolves to under ``graph`` (#2919).
+
+    ``("upstream", <model id>)`` when ``extraction_model`` is set — an id hal0's
+    ``/v1`` routes to a configured upstream — else ``("slot", "hal0/<slot>")``,
+    the ADR-0023 virtual for the local extraction slot. The ``/v1`` alias
+    rewrite, the graph status route and the CLI all ask here, so there is one
+    answer to "which model is the memory engine on".
+    """
+    model = getattr(graph, "extraction_model", None)
+    if model:
+        return ("upstream", model)
+    return ("slot", extraction_model_name(graph.extraction_slot))
 
 
 def apply_extraction_slot(
@@ -257,7 +407,12 @@ def apply_extraction_slot(
     restart: bool = True,
     seam: SystemCtlSeam | None = None,
 ) -> dict[str, Any]:
-    """Write the drop-in for ``slot`` and (best-effort) restart hindsight-api.
+    """Write the drop-in and (best-effort) restart hindsight-api.
+
+    ``slot`` is the configured extraction slot, reported back in the status for
+    the caller's log line; since #2919 the drop-in itself pins
+    :data:`MEMORY_ALIAS` and hal0's ``/v1`` resolves that to the slot (or to
+    ``extraction_model``) per call, so a slot change alone no longer needs this.
 
     Returns a status dict::
 
@@ -273,7 +428,7 @@ def apply_extraction_slot(
     (``asyncio.to_thread``) — the restart waits on a hindsight-api cold start.
     """
     seam = seam if seam is not None else SystemCtlSeam()
-    model = f"hal0/{slot}"
+    model = MEMORY_ALIAS
     lim = limits if limits is not None else ExtractionLimits()
     result: dict[str, Any] = {
         "slot": slot,
@@ -289,7 +444,7 @@ def apply_extraction_slot(
 
     try:
         seam.write_hindsight_dropin(
-            render_drop_in(slot, timeout_s, limits=lim),
+            render_drop_in(timeout_s, limits=lim),
             path=DROP_IN_PATH,
             timeout=_SYSTEMCTL_TIMEOUT_S,
         )
