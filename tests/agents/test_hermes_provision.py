@@ -5413,11 +5413,12 @@ def test_atomic_write_as_root_keeps_the_owner_of_the_replaced_file(
     target = tmp_path / "config.yaml"
     target.write_text("a: 1\n")
     st = target.stat()
-    chowned: list[tuple[str, int, int]] = []
+    chowned: list[tuple[int, int]] = []
     monkeypatch.setattr(hp.os, "geteuid", lambda: 0)
-    monkeypatch.setattr(hp.os, "chown", lambda p, u, g: chowned.append((str(p), u, g)))
+    monkeypatch.setattr(hp.os, "chown", lambda *_a: pytest.fail("chown takes a swappable path"))
+    monkeypatch.setattr(hp.os, "fchown", lambda _fd, u, g: chowned.append((u, g)))
     hp._atomic_write(target, "a: 2\n")
-    assert chowned == [(str(target) + ".tmp", st.st_uid, st.st_gid)]
+    assert chowned == [(st.st_uid, st.st_gid)]
     assert target.read_text() == "a: 2\n"
 
 
@@ -5431,11 +5432,11 @@ def test_atomic_write_as_root_never_replaces_with_a_wrong_owner(
         raise PermissionError("chown denied")
 
     monkeypatch.setattr(hp.os, "geteuid", lambda: 0)
-    monkeypatch.setattr(hp.os, "chown", deny)
+    monkeypatch.setattr(hp.os, "fchown", deny)
     with pytest.raises(PermissionError):
         hp._atomic_write(target, "a: 2\n")
     assert target.read_text() == "a: 1\n"
-    assert not (tmp_path / "config.yaml.tmp").exists()
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["config.yaml"]  # no temp left
 
 
 def test_atomic_write_unprivileged_never_chowns(
@@ -5445,8 +5446,64 @@ def test_atomic_write_unprivileged_never_chowns(
     target.write_text("a: 1\n")
     monkeypatch.setattr(hp.os, "geteuid", lambda: 1000)
     monkeypatch.setattr(hp.os, "chown", lambda *_a: pytest.fail("no chown off root"))
+    monkeypatch.setattr(hp.os, "fchown", lambda *_a: pytest.fail("no chown off root"))
     hp._atomic_write(target, "a: 2\n")
     assert target.read_text() == "a: 2\n"
+
+
+@pytest.mark.parametrize("euid", [0, 1000])
+def test_atomic_write_never_follows_a_planted_tmp_symlink(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, euid: int
+) -> None:
+    """#2903: the service account can plant ``<name>.tmp`` in ``$HERMES_HOME``;
+    a root repair writing through it would truncate and re-own the link target."""
+    import stat
+
+    victim = tmp_path / "root-only-file"
+    victim.write_text("precious\n")
+    home = tmp_path / "home"
+    home.mkdir()
+    target = home / "config.yaml"
+    target.write_text("a: 1\n")
+    (home / "config.yaml.tmp").symlink_to(victim)
+    monkeypatch.setattr(hp.os, "geteuid", lambda: euid)
+    monkeypatch.setattr(hp.os, "chown", lambda *_a: pytest.fail("chown takes a swappable path"))
+    monkeypatch.setattr(hp.os, "fchown", lambda *_a: None)
+    hp._atomic_write(target, "a: 2\n", mode=0o640)
+    assert victim.read_text() == "precious\n"
+    assert target.read_text() == "a: 2\n"
+    assert not target.is_symlink()
+    assert stat.S_IMODE(target.stat().st_mode) == 0o640
+    assert (home / "config.yaml.tmp").is_symlink()  # untouched
+    assert sorted(p.name for p in home.iterdir()) == ["config.yaml", "config.yaml.tmp"]
+
+
+def test_atomic_write_new_file_gets_the_umask_default(tmp_path: Path) -> None:
+    """No mode and no file to inherit from: the process umask still decides."""
+    import stat
+
+    old = os.umask(0o027)
+    try:
+        hp._atomic_write(tmp_path / "fresh.md", "x\n")
+    finally:
+        os.umask(old)
+    assert stat.S_IMODE((tmp_path / "fresh.md").stat().st_mode) == 0o640
+
+
+def test_write_run_report_never_follows_a_planted_tmp_symlink(tmp_path: Path) -> None:
+    """#2903: the state root is service-writable; the run report must not write
+    through a planted ``provision.json.tmp``."""
+    victim = tmp_path / "root-only-file"
+    victim.write_text("precious\n")
+    root = tmp_path / "state"
+    root.mkdir()
+    (root / "provision.json.tmp").symlink_to(victim)
+    report = hp.InstallReport(
+        hermes_home=str(tmp_path / "hh"), venv=str(tmp_path / "venv"), agent_id="hermes-agent"
+    )
+    hp._write_run_report(report, root)
+    assert victim.read_text() == "precious\n"
+    assert "phases" in json.loads((root / "provision.json").read_text())
 
 
 # ── profile_api_keys phase ──────────────────────────────────────────────────
