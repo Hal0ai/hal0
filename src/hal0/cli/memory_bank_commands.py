@@ -202,6 +202,13 @@ def profile_set_cmd(
     empathy: int | None = typer.Option(
         None, "--empathy", min=1, max=5, help="1=detached .. 5=empathetic (disposition trait)."
     ),
+    min_refresh_interval: int | None = typer.Option(
+        None,
+        "--min-refresh-interval",
+        min=0,
+        help="Seconds a mental model must wait between automatic refreshes "
+        "(mental_model_min_refresh_interval_seconds; 0 = after every consolidation).",
+    ),
     json_out: bool = typer.Option(False, "--json", help="Emit raw JSON instead of a panel."),
 ) -> None:
     """Update a bank's profile.
@@ -221,6 +228,7 @@ def profile_set_cmd(
             ("disposition_skepticism", skepticism),
             ("disposition_literalism", literalism),
             ("disposition_empathy", empathy),
+            ("mental_model_min_refresh_interval_seconds", min_refresh_interval),
         )
         if value is not None
     }
@@ -228,7 +236,7 @@ def profile_set_cmd(
     if not updates:
         die(
             "pass at least one of --retain-mission/--observations-mission/--reflect-mission "
-            "/--skepticism/--literalism/--empathy"
+            "/--skepticism/--literalism/--empathy/--min-refresh-interval"
         )
         return
 
