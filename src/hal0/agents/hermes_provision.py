@@ -1725,6 +1725,16 @@ def _default_mcp_servers() -> list[dict[str, Any]]:
     ]
 
 
+def _model_default_id(model_id: str, live_resolve: bool) -> str:
+    """The ``model.default`` id: ``hal0/agent`` under live-resolve, else ``model_id``.
+
+    One rule shared by the config.yaml overlay and the HERMES.md render, so the
+    ``hermes_md_contains_primary`` smoke probe compares two outputs of the same
+    computation and only drift in the files themselves can fail it.
+    """
+    return "hal0/agent" if live_resolve else model_id
+
+
 def _live_resolve_enabled() -> bool:
     """Single source of truth for live-resolve mode.
 
@@ -2408,7 +2418,7 @@ def _build_config_overlay(
     # hermes's built-in bucket for Ollama/vLLM/llama.cpp endpoints; hal0 is
     # that endpoint. max_tokens guards the thinking-model silent-TUI (#635).
     # ADR-0023: the canonical default virtual is hal0/agent (was hal0/chat).
-    pairs.append(("model.default", "hal0/agent" if live_resolve_enabled else primary["model_id"]))
+    pairs.append(("model.default", _model_default_id(primary["model_id"], live_resolve_enabled)))
     pairs += [
         ("model.provider", "custom"),
         ("model.base_url", base_url),
@@ -6559,6 +6569,11 @@ def render_live_context(
             hal0_version=_hal0_version_string(),
             hermes_version=_hermes_version_pin(),
             primary=primary_for_template,
+            model_default=(
+                ""
+                if primary_for_template is None
+                else _model_default_id(primary_for_template["model_id"], _live_resolve_enabled())
+            ),
             chat_slots=chat_slots,
             peer_agents=[],
             dashboard_url=os.environ.get(
@@ -7966,27 +7981,56 @@ def _smoke_admin_tools_list(state: BootstrapState, io: InstallIO) -> tuple[bool,
     return (n >= 5, f"{n} tools via hermes mcp client")
 
 
-def _smoke_hermes_md_contains_primary(state: BootstrapState, _io: InstallIO) -> tuple[bool, str]:
+#: The line ``HERMES.md.j2`` renders for the primary model. The probe matches
+#: this line, not a bare substring: ``hal0/agent`` also appears in unrelated
+#: prose, so a substring test passed whatever the file said about the model.
+#: The template renders ``_none wired yet_`` when no LLM slot is dispatchable.
+_HERMES_MD_PRIMARY_LINE = re.compile(
+    r"^- Primary model: (?:`([^`\n]+)`|(_none wired yet_))[ \t]*$", re.MULTILINE
+)
+
+
+def _smoke_hermes_md_contains_primary(
+    state: BootstrapState, _io: InstallIO
+) -> tuple[bool | None, str]:
+    """Check HERMES.md names the primary model config.yaml points at.
+
+    Under live-resolve (the default) both sides are the constant ``hal0/agent``,
+    so this proves the line exists and a primary resolved at render time; an id
+    mismatch is only observable with ``HAL0_HERMES_LIVE_RESOLVE=0``. A
+    ``model.default`` set in overrides.yaml wins in config.yaml but is not
+    reflected in HERMES.md, so it reports a mismatch.
+
+    Returns ``None`` (skipped, advisory) when no primary is wired yet: that is
+    legitimately unknown state on a fresh install or with stopped slots, not a
+    failure (#1793).
+    """
     hermes_md = ETC_HAL0_DIR / "HERMES.md"
     if not hermes_md.exists():
         return (False, f"{hermes_md} not present")
     config = Path(state.hermes_home) / "config.yaml"
     if not config.exists():
-        return (False, "config.yaml missing")
-    import yaml  # type: ignore[import-untyped]
-
+        return (False, f"{config} not present")
     try:
+        import yaml
+
         cfg = yaml.safe_load(config.read_text()) or {}
     except (OSError, yaml.YAMLError) as exc:
         return (False, f"config parse: {exc}")
-    primary = (cfg.get("model") or {}).get("default", "")
+    primary = str((cfg.get("model") or {}).get("default") or "").strip()
     if not primary:
-        return (True, "no primary configured; skipping content check")
+        # No verdict is reachable; report skipped, never a pass (#1793).
+        return (None, "no primary configured; nothing to compare HERMES.md against")
     body = hermes_md.read_text(encoding="utf-8")
-    return (
-        primary in body,
-        f"primary='{primary}' {'in' if primary in body else 'missing from'} HERMES.md",
-    )
+    match = _HERMES_MD_PRIMARY_LINE.search(body)
+    if match is None:
+        return (False, f"HERMES.md has no 'Primary model' line (config primary='{primary}')")
+    rendered = match.group(1)
+    if rendered is None:
+        return (None, "HERMES.md renders no primary model yet (no dispatchable LLM slot)")
+    if rendered != primary:
+        return (False, f"HERMES.md names primary '{rendered}' but config.yaml has '{primary}'")
+    return (True, f"primary='{primary}' named in HERMES.md")
 
 
 def _smoke_wrapper_ready(_state: BootstrapState, io: InstallIO) -> tuple[bool, str]:

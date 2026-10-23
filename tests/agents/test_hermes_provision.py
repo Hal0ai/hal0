@@ -6183,3 +6183,92 @@ def test_smoke_hermes_doctor_reads_the_last_summary(tmp_path: Path) -> None:
     ok, detail = _doctor_probe(tmp_path, 1, echoed + real)
     assert ok
     assert detail == "rc=1, 2 advisory issue(s): real one; real two"
+
+
+# -- hermes_md_contains_primary: evidence, not a substring (#2947) -----------
+
+
+def _render_hermes_md(model_default: str, primary: dict[str, Any] | None) -> str:
+    return hp._render_template(
+        "HERMES.md.j2",
+        env={},
+        hal0_version="1.0",
+        hermes_version="0.1",
+        primary=primary,
+        model_default=model_default,
+        chat_slots=[],
+        peer_agents=[],
+        dashboard_url="http://hal0.local:8080",
+    )
+
+
+def _md_probe_setup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, body: str, default: str | None
+) -> hp.BootstrapState:
+    import yaml
+
+    etc = tmp_path / "etc"
+    etc.mkdir()
+    (etc / "HERMES.md").write_text(body, encoding="utf-8")
+    monkeypatch.setattr(hp, "ETC_HAL0_DIR", etc)
+    hh = tmp_path / "hh"
+    hh.mkdir()
+    model = {"default": default} if default else {}
+    (hh / "config.yaml").write_text(yaml.safe_dump({"model": model}), encoding="utf-8")
+    return hp.BootstrapState(hermes_home=str(hh))
+
+
+def test_hermes_md_primary_probe_rejects_body_with_only_the_skills_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``hal0/agent`` is a substring of ``/etc/hal0/agent-skills/``; that prose is
+    not evidence the file names the primary model."""
+    body = "# Where you are\n\nSkills live in /etc/hal0/agent-skills/\n"
+    assert "hal0/agent" in body  # the old substring test would have passed
+    state = _md_probe_setup(tmp_path, monkeypatch, body, "hal0/agent")
+    passed, detail = hp._smoke_hermes_md_contains_primary(state, _box_io())
+    assert passed is False
+    assert "Primary model" in detail
+
+
+def test_hermes_md_primary_probe_skips_on_none_wired_yet_render(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No dispatchable LLM slot: config.yaml still says ``hal0/agent`` but the
+    real render says ``_none wired yet_``. Unknown state skips, never fails."""
+    body = _render_hermes_md("", None)
+    assert "- Primary model: _none wired yet_" in body
+    state = _md_probe_setup(tmp_path, monkeypatch, body, "hal0/agent")
+    passed, detail = hp._smoke_hermes_md_contains_primary(state, _box_io())
+    assert passed is None
+    assert "no primary" in detail
+
+
+def test_hermes_md_primary_probe_passes_on_rendered_primary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    primary = {"alias": "agent", "model_id": "m", "backend_url": "http://x"}
+    body = _render_hermes_md("hal0/agent", primary)
+    state = _md_probe_setup(tmp_path, monkeypatch, body, "hal0/agent")
+    passed, _ = hp._smoke_hermes_md_contains_primary(state, _box_io())
+    assert passed is True
+
+
+def test_hermes_md_primary_probe_fails_on_stale_primary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    primary = {"alias": "agent", "model_id": "old", "backend_url": "http://x"}
+    body = _render_hermes_md("old-model", primary)
+    state = _md_probe_setup(tmp_path, monkeypatch, body, "new-model")
+    passed, detail = hp._smoke_hermes_md_contains_primary(state, _box_io())
+    assert passed is False
+    assert "old-model" in detail
+
+
+def test_hermes_md_primary_probe_skips_without_primary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    state = _md_probe_setup(tmp_path, monkeypatch, _render_hermes_md("", None), None)
+    passed, detail = hp._smoke_hermes_md_contains_primary(state, _box_io())
+    assert passed is None
+    assert "no primary" in detail

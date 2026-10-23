@@ -2,13 +2,15 @@
    Hermes auto-injects this on every session because terminal.cwd =
    /etc/hal0 (set by config_write phase per plan §8).
 
-   Parameters: env, primary (dict|None), chat_slots (list), peer_agents (list),
-   hal0_version, hermes_version.
+   Parameters: env, primary (dict|None), model_default (str, the config.yaml
+   model.default id; empty when no primary), chat_slots (list),
+   peer_agents (list), hal0_version, hermes_version.
 #}# Where you are
 
 - Host: {{ env.get('container', {}).get('product_name', 'unknown') }}{% if env.get('container', {}).get('kind') %} ({{ env.get('container', {}).get('kind') }}){% endif %}
 - Platform: {{ env.get('cpu', {}).get('model', 'unknown') }}
 - hal0 version: {{ hal0_version }} / hermes-agent: {{ hermes_version }}
+- Primary model: {% if model_default %}`{{ model_default }}`{% else %}_none wired yet_{% endif %}
 - Memory MCP: `hal0_memory` (auto-loaded; full read/write on `private:hermes`,
   plus advanced memory tools incl. reflection, mental models, and directives)
 - Admin MCP: `hal0_admin` (auto-loaded; full platform management — slots,
