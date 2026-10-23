@@ -3476,7 +3476,9 @@ smoke_structured_output() {
     # it routes to the cheap helper slot and falls back to the anchor, so
     # the probe works on any box with at least one loaded model.
     #
-    # Returns 0 pass, 1 fail, 2 skipped. SMOKE_STRUCTURED_NOTE carries the
+    # Returns 0 pass, 1 fail, 2 skipped, 3 timed out (curl exit 28: the model
+    # is slow or busy, e.g. CPU-only, so the probe proved nothing either way;
+    # advisory, never a Verify FAILED — #2952). SMOKE_STRUCTURED_NOTE carries the
     # reason for a skip, or for a failure decided without sending the
     # request: first-run seeding binds no model by design, so a fresh box has
     # nothing to answer with; a bound but cold slot would be loaded by the
@@ -3562,10 +3564,16 @@ print(verdict + " " + str(slot.get("name")).split()[0] + " " + state)' 2>/dev/nu
             return 2
             ;;
     esac
+    local _curl_rc=0
     # shellcheck disable=SC2090
     resp="$(curl -fsS -m 120 -X POST "http://127.0.0.1:${HAL0_PORT}/v1/chat/completions" \
         -H 'Content-Type: application/json' ${auth[@]+"${auth[@]}"} \
-        -d "${body}" 2>/dev/null)" || return 1
+        -d "${body}" 2>/dev/null)" || _curl_rc=$?
+    if [[ "${_curl_rc}" -eq 28 ]]; then
+        return 3
+    elif [[ "${_curl_rc}" -ne 0 ]]; then
+        return 1
+    fi
     # The assertion: the CONTENT of the reply parses as JSON — an HTTP 200
     # carrying prose ("Paris") is exactly the failure this probe exists for.
     printf '%s' "${resp}" | "${PY}" -c 'import json, sys
@@ -3613,6 +3621,10 @@ run_post_install_smoke() {
         info "structured-output probe skipped — no model bound yet (bind one from the dashboard, then re-run the installer to repeat this probe)"
     elif [[ "${_so_rc}" -eq 2 && "${SMOKE_STRUCTURED_NOTE}" == "could not read the slot list"* ]]; then
         info "structured-output probe skipped — ${SMOKE_STRUCTURED_NOTE}"
+    elif [[ "${_so_rc}" -eq 3 ]]; then
+        # #2952: advisory only — not added to SMOKE_FAILED, so the summary box
+        # shows no "Verify FAILED" for a slow (CPU-only) or busy model.
+        warn "structured-output probe timed out after 120s (model slow or busy) — not a verified failure; re-run the installer once the model is loaded to repeat this probe, or check 'hal0 status' and 'journalctl -u hal0-api -n 40'"
     elif [[ "${_so_rc}" -eq 2 ]]; then
         info "structured-output probe skipped — ${SMOKE_STRUCTURED_NOTE}, which the installer will not do (load it, then re-run the installer to repeat this probe)"
     else
