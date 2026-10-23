@@ -945,8 +945,12 @@ def _provision_hermes(
             argv += ["--ref", ref]
         if verbose:
             argv.append("--verbose")
-        rc = _run_as_hal0(argv, extra_env=provision_env)
+        # The parent owns the restart: the child reads the same report and
+        # would bounce both consumers a second time for one change.
+        rc = _run_as_hal0(argv, extra_env={**provision_env, _RESTART_OWNER_ENV: "parent"})
 
+    if _os.environ.get(_RESTART_OWNER_ENV) == "parent":
+        return rc
     # A posture change only reaches the model once the process re-reads its
     # config. Done HERE rather than in _install_hermes so every provisioning
     # entry point is covered — `reprovision`, `bootstrap` and `upgrade` all
@@ -954,6 +958,10 @@ def _provision_hermes(
     if rc == 0 and (provision_env or _terminal_gate_changed_in_last_report()):
         _restart_hermes_after_posture_change()
     return rc
+
+
+#: Set for the privilege-dropped re-exec so only the root parent restarts Hermes.
+_RESTART_OWNER_ENV = "HAL0_HERMES_RESTART_OWNER"
 
 
 def _terminal_gate_changed_in_last_report() -> bool:

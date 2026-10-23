@@ -2040,6 +2040,36 @@ def try_restart_hermes_consumers(
     return failed
 
 
+def apply_terminal_gate_to_profiles(hermes_home: Path | str, *, terminal_enabled: bool) -> bool:
+    """Merge the terminal gate alone (no MCP keys) into every profile's config.yaml.
+
+    Descriptor-anchored like the MCP sweep (symlinked profiles are refused, not
+    followed). Returns True when any profile changed. On an OFF box a profile
+    that could not take the gate is logged at ERROR: its side agents keep the
+    terminal tool.
+    """
+    from hal0.agents import hermes_api as ha
+
+    home = Path(hermes_home)
+    changed = False
+    for name in ha.profile_dirs(home):
+        if not HERMES_PROFILE_ID_RE.match(name):
+            continue
+        result = _merge_profile_config(
+            home / "profiles" / name / "config.yaml",
+            lambda base: _terminal_profile_keys(base, terminal_enabled=terminal_enabled),
+        )
+        if result.get("error") and terminal_enabled is False:
+            log.error(
+                "hermes.terminal_gate_profile_failed",
+                profile=name,
+                error=result["error"],
+                issue="#2878",
+            )
+        changed = changed or bool(result.get("changed"))
+    return changed
+
+
 def box_terminal_decision(hermes_home: Path | str) -> bool | None:
     """The terminal decision for a caller that applied none (a reconcile, an update).
 
@@ -2987,6 +3017,12 @@ def apply_release_config_invariants(
         overrides_path=overrides_path if overrides_path is not None else OVERRIDES_PATH,
         persona_names=_persona_display_names_for_home(home),
     )
+    # Every profile too, hal0-brain included: the profile phases run only on a
+    # provision or a hal0-api start, and a release activation restarts the
+    # gateway, not hal0-api, so a brain or clone profile would keep its live
+    # backend indefinitely after an upgrade (#2878 review).
+    if decision is not None:
+        changed = apply_terminal_gate_to_profiles(home, terminal_enabled=decision) or changed
     # overrides.yaml lays on top by design, so a ``terminal.backend`` there can
     # displace the sentinel. Activation cannot fail on it (that would flip the
     # release back for a config the operator wrote), so say so loudly: the
@@ -5245,7 +5281,7 @@ def _merge_profile_config_at(
                     # the memory provider, not of the box's terminal decision:
                     # the backend gate is what keeps the terminal tool away from
                     # the gateway's side agents in THIS profile too (#2878).
-                    wanted = {k: v for k, v in wanted.items() if k in ("terminal", "hal0")}
+                    wanted = {k: v for k, v in wanted.items() if k in ("terminal", "hal0", "agent")}
                     if not wanted:
                         return {"wired": False, "changed": False, "reason": "opted out"}
                 merged = _deep_merge(base, wanted)
@@ -5389,14 +5425,17 @@ def _terminal_profile_keys(
                 # opt-in puts it back (#2878 review).
                 keys["hal0"] = {TERMINAL_SAVED_BACKEND_KEY: backend}
         return keys
+    if backend != TERMINAL_OFF_BACKEND:
+        # No sentinel: hal0 never gated this profile, so a ``terminal`` entry
+        # the operator disabled by hand on a terminal-on box stays theirs.
+        return {}
     if any(t in existing for t in TERMINAL_OFF_TOOLSETS):
         keys["agent"] = {
             "disabled_toolsets": [t for t in existing if t not in TERMINAL_OFF_TOOLSETS]
         }
-    if backend == TERMINAL_OFF_BACKEND:
-        keys["terminal"] = {"backend": saved or "local"}
-        if saved:
-            keys["hal0"] = {TERMINAL_SAVED_BACKEND_KEY: ""}
+    keys["terminal"] = {"backend": saved or "local"}
+    if saved:
+        keys["hal0"] = {TERMINAL_SAVED_BACKEND_KEY: ""}
     return keys
 
 

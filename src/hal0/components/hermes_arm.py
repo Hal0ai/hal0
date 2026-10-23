@@ -151,11 +151,18 @@ def _config_backstop(result: dict[str, Any], *, job_id: str | None) -> None:
     home = var_lib() / ".hermes"
     config = home / "config.yaml"
 
-    def _backend() -> str | None:
-        try:
-            return hermes._terminal_backend_in_config(config.read_text(encoding="utf-8"))
-        except (OSError, UnicodeDecodeError):
-            return None
+    def _backend() -> dict[str, str | None]:
+        """``terminal.backend`` of the root config and every profile's."""
+        paths = [config, *sorted((home / "profiles").glob("*/config.yaml"))]
+        out: dict[str, str | None] = {}
+        for path in paths:
+            try:
+                out[str(path)] = hermes._terminal_backend_in_config(
+                    path.read_text(encoding="utf-8")
+                )
+            except (OSError, UnicodeDecodeError):
+                out[str(path)] = None
+        return out
 
     backend_before = _backend()
     try:

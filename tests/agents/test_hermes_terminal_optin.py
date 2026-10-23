@@ -853,6 +853,15 @@ def test_profile_terminal_keys_follow_the_recorded_decision() -> None:
     assert (
         hp._terminal_profile_keys({"terminal": {"backend": "docker"}}, terminal_enabled=True) == {}
     )
+    # no sentinel means hal0 never gated this profile: an operator's own
+    # `terminal` entry on a terminal-on box is not hal0's to remove
+    assert (
+        hp._terminal_profile_keys(
+            {"terminal": {"backend": "local"}, "agent": {"disabled_toolsets": ["terminal"]}},
+            terminal_enabled=True,
+        )
+        == {}
+    )
     # no decision: a hal0-api reconcile must not flip a box either way
     assert hp._terminal_profile_keys({}, terminal_enabled=None) == {}
 
@@ -1161,6 +1170,12 @@ def test_wire_named_profiles_gates_an_mcp_opted_out_profile_too(
     assert "mcp_servers" not in doc and "memory" not in doc
     assert report["skipped"].get("quiet") == "opted out"
     assert report["changed"] == ["quiet"]
+    assert set(hp.TERMINAL_OFF_TOOLSETS) <= set(doc["agent"]["disabled_toolsets"])
+    monkeypatch.setattr(hp, "read_terminal_state", lambda: True)
+    hp.wire_named_profiles(home)
+    doc = yaml.safe_load((home / "profiles" / "quiet" / "config.yaml").read_text())
+    assert doc["terminal"]["backend"] == "ssh"
+    assert not set(hp.TERMINAL_OFF_TOOLSETS) & set(doc["agent"]["disabled_toolsets"])
 
 
 def test_brain_phase_fails_closed_when_an_off_box_cannot_gate_it(
@@ -1246,3 +1261,65 @@ def test_update_backstop_bounces_hermes_when_the_gate_changed(
     result = {}
     hermes_arm._config_backstop(result, job_id="j")
     assert bounced == [1] and "note" not in result
+
+
+def test_update_path_gates_the_brain_and_every_profile(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A release activation restarts the gateway, not hal0-api, so the invariants
+    gate hal0-brain and the clones themselves (#2878 review)."""
+    import yaml
+
+    home = tmp_path / "hh"
+    for name in ("hal0-brain", "coder"):
+        (home / "profiles" / name).mkdir(parents=True)
+        (home / "profiles" / name / "config.yaml").write_text("terminal:\n  backend: local\n")
+    (home / "config.yaml").write_text("agent:\n  system_prompt: keep\n")
+    monkeypatch.setattr(hp, "read_terminal_state", lambda: False)
+    assert hp.apply_release_config_invariants(home, overrides_path=tmp_path / "none.yaml") is True
+    for name in ("hal0-brain", "coder"):
+        doc = yaml.safe_load((home / "profiles" / name / "config.yaml").read_text())
+        assert doc["terminal"]["backend"] == hp.TERMINAL_OFF_BACKEND, name
+        assert set(hp.TERMINAL_OFF_TOOLSETS) <= set(doc["agent"]["disabled_toolsets"]), name
+    assert hp.apply_release_config_invariants(home, overrides_path=tmp_path / "none.yaml") is False
+
+
+def test_update_backstop_bounces_when_only_a_profile_backend_changed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from hal0.components import hermes_arm
+
+    home = tmp_path / ".hermes"
+    (home / "profiles" / "hal0-brain").mkdir(parents=True)
+    (home / "config.yaml").write_text(
+        f"agent:\n  system_prompt: keep\nterminal:\n  backend: {hp.TERMINAL_OFF_BACKEND}\n"
+    )
+    (home / "profiles" / "hal0-brain" / "config.yaml").write_text("terminal:\n  backend: local\n")
+    monkeypatch.setattr(hermes_arm, "var_lib", lambda: tmp_path)
+    monkeypatch.setattr(hp, "read_terminal_state", lambda: False)
+    monkeypatch.setattr(hp, "OVERRIDES_PATH", tmp_path / "none.yaml")
+    bounced: list[int] = []
+    monkeypatch.setattr(hp, "try_restart_hermes_consumers", lambda: bounced.append(1) or [])
+    result: dict = {}
+    hermes_arm._config_backstop(result, job_id="j")
+    assert bounced == [1]
+
+
+def test_root_reexec_child_leaves_the_restart_to_the_parent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import os
+
+    import hal0.cli.agent_commands as ac
+
+    monkeypatch.setattr(hp, "bootstrap_cli", lambda **_kw: 0)
+    monkeypatch.setattr(ac, "_terminal_gate_changed_in_last_report", lambda: True)
+    restarted: list[int] = []
+    monkeypatch.setattr(ac, "_restart_hermes_after_posture_change", lambda: restarted.append(1))
+    monkeypatch.setattr(os, "geteuid", lambda: 999)
+    monkeypatch.setenv(ac._RESTART_OWNER_ENV, "parent")
+    assert ac._provision_hermes(repair=True) == 0
+    assert restarted == []
+    monkeypatch.delenv(ac._RESTART_OWNER_ENV, raising=False)
+    assert ac._provision_hermes(repair=True) == 0
+    assert restarted == [1]
