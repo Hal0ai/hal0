@@ -113,9 +113,14 @@ matches the pin". Under it sits one build button, and the **danger zone**.
   few seconds. If any step fails, the old release is flipped back automatically.
 - **Repair · rebuild at the pin** takes the place of Upgrade when the live
   release matches the pin. It also appears on a `broken` or `down` card and as
-  the fix for some degraded reasons. Its dialog says it re-runs every
-  provisioning phase and rebuilds the venv, and to use it when MCP tools vanish
-  or doctor reports drift.
+  the fix for some degraded reasons. It re-runs the provisioning phases as the
+  `hal0` user and rebuilds the venv; use it when MCP tools vanish or doctor
+  reports drift. It skips the root-only steps of
+  `sudo hal0 agent reprovision hermes --repair` (the stale drop-in sweep, file
+  ownership, the vaulted default key, the `hermes` wrapper, the terminal-tool
+  record), so it can end successfully on a box that still needs them. For those
+  problems, and for the one-time root repair an older box asks for, run that
+  command on the box; the dialog says so.
 - **Uninstall Hermes** asks you to type `hermes` before it proceeds. It removes
   Hermes's seed, data and state from this box and drops its Open WebUI
   upstreams; put it back with `sudo hal0 agent install hermes`. If some paths

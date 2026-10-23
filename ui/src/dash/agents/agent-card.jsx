@@ -1087,7 +1087,8 @@ function LifecycleConfirms({ identity, model, confirm, busy, onCancel, onConfirm
         footerNote={buildNote || ""}
         message={
           <div className="ao-confirm">
-            <p>Re-runs every provisioning phase and rebuilds the venv. Use it when MCP tools vanish or doctor reports drift.</p>
+            <p>Re-runs the provisioning phases as the hal0 user and rebuilds the venv. Use it when MCP tools vanish or doctor reports drift.</p>
+            <p className="ao-confirm-note">File ownership, vault-key and wrapper problems are out of its reach: run <code>sudo hal0 agent reprovision hermes --repair</code> on the box for those.</p>
             <p className="ao-confirm-note">Restarting hal0-api while it runs stops the build; the live release is kept.</p>
           </div>
         }
