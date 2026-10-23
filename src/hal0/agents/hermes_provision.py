@@ -1841,6 +1841,10 @@ TERMINAL_OFF_BACKEND = "hal0-terminal-off"
 #: ``hal0.<key>`` in config.yaml: the backend the sentinel replaced, so an
 #: opt-in restores the operator's choice. Cleared (``""``) on restore.
 TERMINAL_SAVED_BACKEND_KEY = "terminal_backend_saved"
+#: ``hal0.<key>`` in a PROFILE config.yaml: the ``agent.disabled_toolsets``
+#: entries hal0 itself appended while gating, so an opt-in removes exactly
+#: those and never an entry the profile's operator disabled by hand.
+TERMINAL_ADDED_TOOLSETS_KEY = "terminal_disabled_added"
 # The two DIRECT execution toolsets, kept named because they are what the
 # ``terminal`` opt-in is about; :data:`TERMINAL_OFF_TOOLSETS` is what hal0
 # actually writes and reads back.
@@ -5449,34 +5453,45 @@ def _terminal_profile_keys(
         else ""
     )
     existing = _disabled_toolsets(base)
+    added_raw = (
+        hal0_block.get(TERMINAL_ADDED_TOOLSETS_KEY) if isinstance(hal0_block, dict) else None
+    )
+    added = [str(t) for t in added_raw] if isinstance(added_raw, list) else []
     keys: dict[str, Any] = {}
     if terminal_enabled is False:
         # The sentinel removes terminal + process_manage for every agent; the
         # profile's own agent would still reach execute_code and delegate_task
         # without the subtraction, so the clone gets hal0's entries too. The
         # list is computed from the document (hal0's entries appended to the
-        # operator's), so the replace-on-merge of a list clobbers nothing.
+        # operator's), so the replace-on-merge of a list clobbers nothing, and
+        # the entries hal0 added are recorded so an opt-in removes only those.
         missing = [t for t in TERMINAL_OFF_TOOLSETS if t not in existing]
         if missing:
             keys["agent"] = {"disabled_toolsets": [*existing, *missing]}
+            keys["hal0"] = {TERMINAL_ADDED_TOOLSETS_KEY: sorted({*added, *missing})}
         if backend != TERMINAL_OFF_BACKEND:
             keys["terminal"] = {"backend": TERMINAL_OFF_BACKEND}
             if backend not in ("", "local"):
                 # Off means off for every backend; remember the operator's so an
                 # opt-in puts it back (#2878 review).
-                keys["hal0"] = {TERMINAL_SAVED_BACKEND_KEY: backend}
+                keys.setdefault("hal0", {})[TERMINAL_SAVED_BACKEND_KEY] = backend
         return keys
     if backend != TERMINAL_OFF_BACKEND:
         # No sentinel: hal0 never gated this profile, so a ``terminal`` entry
         # the operator disabled by hand on a terminal-on box stays theirs.
         return {}
-    if any(t in existing for t in TERMINAL_OFF_TOOLSETS):
-        keys["agent"] = {
-            "disabled_toolsets": [t for t in existing if t not in TERMINAL_OFF_TOOLSETS]
-        }
+    if added and any(t in existing for t in added):
+        # Only what hal0 appended goes; an entry the profile's operator had
+        # disabled before the gate (or added since) is theirs to keep.
+        keys["agent"] = {"disabled_toolsets": [t for t in existing if t not in added]}
+    hal0_keys: dict[str, Any] = {}
+    if added:
+        hal0_keys[TERMINAL_ADDED_TOOLSETS_KEY] = []
     keys["terminal"] = {"backend": saved or "local"}
     if saved:
-        keys["hal0"] = {TERMINAL_SAVED_BACKEND_KEY: ""}
+        hal0_keys[TERMINAL_SAVED_BACKEND_KEY] = ""
+    if hal0_keys:
+        keys["hal0"] = hal0_keys
     return keys
 
 
@@ -5619,19 +5634,24 @@ def _phase_profile_mcp_wire(ctx: _StepCtx) -> PhaseResult:
         reason = "profile MCP wiring failed for: " + ", ".join(
             f"{n} ({e})" for n, e in sorted(report["errors"].items())
         )
-    if terminal_enabled is False:
-        # A profile that could not take the terminal gate still shows the
-        # terminal tool to the gateway's side agents (#2878): not warn-as-OK.
-        # A symlinked profile directory is served by Hermes (profile_dirs
-        # follows links) but never rewritten here, so it counts the same.
-        ungated = sorted(
-            set(report["errors"]) | {n for n, why in report["skipped"].items() if why == "symlink"}
-        )
-        if ungated:
-            note = (
-                "the terminal is off and these profiles did not receive the terminal gate: "
-                + ", ".join(ungated)
-            )
+    # A profile that could not be rewritten (an error, or a symlinked profile
+    # directory Hermes serves but this sweep never follows) is a FAIL when it
+    # leaves the gate wrong: off and ungated, its side agents still see the
+    # terminal tool (#2878); on and still on the sentinel, the box-wide opt-in
+    # it just reported did not reach it.
+    untouched = set(report["errors"]) | {
+        n for n, why in report["skipped"].items() if why == "symlink"
+    }
+    if untouched and terminal_enabled is not None:
+        backends = profile_backends(ctx.state.hermes_home)
+        if terminal_enabled is False:
+            wrong = sorted(untouched)
+            note = "the terminal is off and these profiles did not receive the terminal gate: "
+        else:
+            wrong = sorted(n for n in untouched if backends.get(n) == TERMINAL_OFF_BACKEND)
+            note = "the terminal is on and these profiles are still gated: "
+        if wrong:
+            note += ", ".join(wrong)
             reason = f"{reason}; {note}" if reason else note
             status = PhaseStatus.FAIL
     return PhaseResult(status=status, details=details, reason=reason)

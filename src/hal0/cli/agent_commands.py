@@ -904,6 +904,8 @@ def _provision_hermes(
 
     from hal0.agents.hermes_provision import HERMES_TERMINAL_ENV, bootstrap_cli
 
+    report_before = _last_report_completed_at()
+
     # The flag wins; otherwise forward an inherited answer (install.sh exports
     # it after prompting) explicitly, since the sudo drop path resets the env.
     if terminal_tool is not None:
@@ -955,7 +957,10 @@ def _provision_hermes(
     # config. Done HERE rather than in _install_hermes so every provisioning
     # entry point is covered — `reprovision`, `bootstrap` and `upgrade` all
     # land in this function and all now honour an explicit answer.
-    if rc == 0 and (provision_env or _terminal_gate_changed_in_last_report()):
+    # A gate THIS run wrote restarts the consumers even when a later phase
+    # (smoke tests) failed the run: the mutation is on disk, and a live gateway
+    # would keep the backend it loaded (#2878).
+    if (rc == 0 and provision_env) or _terminal_gate_changed_in_last_report(since=report_before):
         _restart_hermes_after_posture_change()
     return rc
 
@@ -964,20 +969,38 @@ def _provision_hermes(
 _RESTART_OWNER_ENV = "HAL0_HERMES_RESTART_OWNER"
 
 
-def _terminal_gate_changed_in_last_report() -> bool:
-    """Did the run that just finished change ``terminal.backend``?
-
-    A box with a recorded OFF decision and a pre-#2878 ``local`` backend gets
-    the sentinel from a plain ``--repair`` with no terminal flag; the running
-    gateway keeps serving the loaded backend, and its side agents the shell,
-    until it re-reads its config. The config_write phase records the mutation
-    in the last-run report; read it back rather than trust the flag alone.
-    """
+def _load_last_report() -> dict[str, Any] | None:
     import json
 
     try:
         data = json.loads(_agent_provision_state_file("hermes").read_text(encoding="utf-8"))
     except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _last_report_completed_at() -> str | None:
+    data = _load_last_report()
+    if not data:
+        return None
+    return str(data.get("completed_at") or "") or None
+
+
+def _terminal_gate_changed_in_last_report(*, since: str | None = None) -> bool:
+    """Did the run that just finished change ``terminal.backend``?
+
+    A box with a recorded OFF decision and a pre-#2878 ``local`` backend gets
+    the sentinel from a plain ``--repair`` with no terminal flag; the running
+    gateway keeps serving the loaded backend, and its side agents the shell,
+    until it re-reads its config. The phases record the mutation in the
+    last-run report; read it back rather than trust the flag alone. ``since``
+    is the previous report's ``completed_at``: a report not newer than it is
+    the previous run's, not this one's, and counts as no change.
+    """
+    data = _load_last_report()
+    if data is None:
+        return False
+    if since is not None and str(data.get("completed_at") or "") <= since:
         return False
     phases = data.get("phases") or {}
     return any(
