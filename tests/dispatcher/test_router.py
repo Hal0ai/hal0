@@ -311,6 +311,89 @@ async def test_prefetch_respects_parallel_cap() -> None:
     assert max_in_flight <= 2, f"cap of 2 exceeded: saw {max_in_flight} concurrent legs"
 
 
+# ── #2919: an upstream-only request never falls through to a slot ───────────
+#
+# The memory engine's `hal0/memory` alias rewrites to a bare upstream model id
+# at the route layer and marks the request upstream-only. When no remote
+# advertises that id (cold cache, provider offline, id typo) the request must
+# fail loudly — never land on the agent anchor or the flm slot via step 4,
+# which would silently run memory extraction on the operator's chat lane.
+
+
+@pytest.mark.asyncio
+async def test_upstream_only_request_fails_instead_of_falling_through_to_a_slot() -> None:
+    from hal0.dispatcher.lane_pin import set_upstream_only
+    from hal0.dispatcher.router import UpstreamUnavailable
+
+    anchor = make_slot("agent")
+    remote = make_remote("minimax", "https://api.minimax.io/v1")
+    upstreams = FakeUpstreamRegistry([anchor, remote])
+    models = FakeModelRegistry(routes={})
+
+    async def fetch(_u: Upstream) -> list[str]:
+        raise RuntimeError("offline")
+
+    dispatcher = Dispatcher(
+        upstream_registry=upstreams,
+        model_registry=models,
+        cached_models=lambda name: [],
+        fetch_models=fetch,
+    )
+    request = make_request()
+    set_upstream_only(request, "MiniMax-M2.5")
+    with pytest.raises(UpstreamUnavailable) as ei:
+        await dispatcher.dispatch(request, body={"model": "MiniMax-M2.5"})
+    assert ei.value.details["model"] == "MiniMax-M2.5"
+    assert ei.value.details["upstream_only"] is True
+
+
+@pytest.mark.asyncio
+async def test_upstream_only_request_still_routes_to_its_remote_when_advertised() -> None:
+    from hal0.dispatcher.lane_pin import set_upstream_only
+
+    anchor = make_slot("agent")
+    remote = make_remote("minimax", "https://api.minimax.io/v1")
+    upstreams = FakeUpstreamRegistry([anchor, remote])
+    models = FakeModelRegistry(routes={})
+    cache = {"minimax": ["MiniMax-M2.5"]}
+    dispatcher = Dispatcher(
+        upstream_registry=upstreams,
+        model_registry=models,
+        cached_models=lambda name: cache.get(name, []),
+    )
+    request = make_request()
+    set_upstream_only(request, "MiniMax-M2.5")
+    call = await dispatcher.dispatch(request, body={"model": "MiniMax-M2.5"})
+    assert call.upstream_name == "minimax"
+    assert call.resolution_path == "passthrough:minimax"
+
+
+@pytest.mark.asyncio
+async def test_upstream_only_colon_id_never_lands_on_the_npu_slot() -> None:
+    """Rule 5 sends any ``a:b`` id to the flm slot; an upstream-only
+    ``vendor/model:free`` must not take that exit either."""
+    from hal0.dispatcher.lane_pin import set_upstream_only
+    from hal0.dispatcher.router import UpstreamUnavailable
+
+    flm = make_slot("flm", "http://127.0.0.1:8088/v1")
+    anchor = make_slot("agent")
+    remote = make_remote("openrouter", "https://openrouter.ai/api/v1")
+    dispatcher = Dispatcher(
+        upstream_registry=FakeUpstreamRegistry([flm, anchor, remote]),
+        model_registry=FakeModelRegistry(routes={}),
+        cached_models=lambda name: [],
+        fetch_models=lambda _u: _async_empty(),
+    )
+    request = make_request()
+    set_upstream_only(request, "minimax/minimax-m3:free")
+    with pytest.raises(UpstreamUnavailable):
+        await dispatcher.dispatch(request, body={"model": "minimax/minimax-m3:free"})
+
+
+async def _async_empty() -> list[str]:
+    return []
+
+
 # ── 4. legacy fallback path ──────────────────────────────────────────────────
 
 

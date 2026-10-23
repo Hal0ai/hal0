@@ -50,7 +50,7 @@ def _make_request(
         from hal0.config.schema import Hal0Config, MemoryConfig
 
         state.hal0_config = Hal0Config(memory=MemoryConfig(graph=graph))
-    return SimpleNamespace(app=SimpleNamespace(state=state), _body=b"")
+    return SimpleNamespace(app=SimpleNamespace(state=state), state=SimpleNamespace(), _body=b"")
 
 
 _PRIMARY = [
@@ -139,6 +139,42 @@ async def test_memory_alias_upstream_target_bypasses_slot_resolution():
     assert out["model"] == "MiniMax-M2.5"
     assert "chat_template_kwargs" not in out
     assert json.loads(req._body)["model"] == "MiniMax-M2.5"
+
+
+@pytest.mark.asyncio
+async def test_memory_alias_upstream_target_marks_the_request_upstream_only_even_on_a_cold_cache():
+    """No remote has advertised the id yet (fresh hal0-api, provider offline):
+    the body must still go out unmodified — no slot thinking policy injected
+    into a cloud request — and the request carries the upstream-only marker
+    the dispatcher refuses to fall through on."""
+    from hal0.config.schema import MemoryGraphConfig
+    from hal0.dispatcher.lane_pin import UPSTREAM_ONLY_ATTR
+
+    req = _make_request(
+        cfgs=_UTILITY_AND_AGENT,
+        loaded={"big", "small"},
+        upstreams=[SimpleNamespace(name="minimax", kind="remote", slot_name=None, owned_models=())],
+        upstream_models={"minimax": []},
+        graph=MemoryGraphConfig(extraction_slot="utility", extraction_model="MiniMax-M2.5"),
+    )
+    out = await v1._normalize_chat_body(req, {"model": "hal0/memory", "messages": []})
+    assert out["model"] == "MiniMax-M2.5"
+    assert "chat_template_kwargs" not in out
+    assert getattr(req.state, UPSTREAM_ONLY_ATTR) == "MiniMax-M2.5"
+
+
+@pytest.mark.asyncio
+async def test_memory_alias_slot_target_does_not_mark_the_request_upstream_only():
+    from hal0.config.schema import MemoryGraphConfig
+    from hal0.dispatcher.lane_pin import UPSTREAM_ONLY_ATTR
+
+    req = _make_request(
+        cfgs=_UTILITY_AND_AGENT,
+        loaded={"big", "small"},
+        graph=MemoryGraphConfig(extraction_slot="utility"),
+    )
+    await v1._normalize_chat_body(req, {"model": "hal0/memory", "messages": []})
+    assert getattr(req.state, UPSTREAM_ONLY_ATTR, "") == ""
 
 
 @pytest.mark.asyncio

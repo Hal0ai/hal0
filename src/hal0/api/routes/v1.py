@@ -37,7 +37,7 @@ from fastapi.responses import Response, StreamingResponse
 
 from hal0.api import image_cache, live_sockets
 from hal0.api.deps import DispatcherDep
-from hal0.dispatcher.lane_pin import lane_slot_pin, preferred_slot, set_lane_pin
+from hal0.dispatcher.lane_pin import lane_slot_pin, preferred_slot, set_lane_pin, set_upstream_only
 from hal0.memory.extraction_env import MEMORY_ALIAS
 from hal0.upstreams.filters import apply_filters
 
@@ -629,15 +629,20 @@ async def _normalize_chat_body(request: Request, body: dict[str, Any]) -> dict[s
     )
     raw_model = body.get("model")
     pinned: str | None = None
+    upstream_only = False
     if raw_model == MEMORY_ALIAS:
         # #2919: the memory engine's one fixed id. A slot target continues
         # below exactly as ``hal0/<extraction_slot>`` would; an upstream
-        # target becomes that id as-is — no slot lookup, no lane pin — and
-        # the dispatcher routes it to its upstream or answers
-        # dispatch.no_route, never the agent anchor.
+        # target becomes that id as-is — no slot lookup, no lane pin, no slot
+        # thinking policy (this body goes to a cloud provider) — and the
+        # request is marked upstream-only so the dispatcher routes it to its
+        # upstream or fails with dispatch.upstream_unavailable, never the
+        # agent anchor (not even on a cold or offline catalog).
         kind, target = _memory_alias_target(request)
         if kind == "upstream":
             body = {**body, "model": target}
+            set_upstream_only(request, target)
+            upstream_only = True
             raw_model = None
         else:
             raw_model = target
@@ -662,7 +667,7 @@ async def _normalize_chat_body(request: Request, body: dict[str, Any]) -> dict[s
                 pinned = res.matched_name
 
     model_id = body.get("model")
-    if isinstance(model_id, str) and not _is_remote_model(request, model_id):
+    if isinstance(model_id, str) and not upstream_only and not _is_remote_model(request, model_id):
         default_thinking = await _slot_thinking_default(request, model_id, pinned)
         body = apply_thinking_policy(
             body,

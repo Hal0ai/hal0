@@ -31,6 +31,15 @@ from hal0.slots.state import SlotState, slot_selection_rank
 #: dispatcher) can never drift onto different keys.
 LANE_PIN_ATTR = "hal0_lane_slot"
 
+#: Attribute marking a request that may ONLY be served by a remote upstream
+#: (#2919). The memory engine's ``hal0/memory`` alias rewrites to a bare
+#: upstream model id at the route layer; without this marker a cold or
+#: offline catalog would let the dispatcher's step-4 heuristics land the
+#: request on the agent anchor (or the flm slot for an ``a:b`` id) — memory
+#: extraction silently running on the operator's chat lane while status says
+#: "upstream". The dispatcher refuses to fall through when it is set.
+UPSTREAM_ONLY_ATTR = "hal0_upstream_only"
+
 #: The cheap-helper slot (ADR-0023). Keyed on the slot NAME, as the reaper's
 #: pinned set is (:data:`hal0.slots.reaper._PINNED_BY_DEFAULT`): ADR-0023 fixes
 #: the name, and a role/label lookup would need a config read on the dispatch
@@ -39,10 +48,13 @@ UTILITY_SLOT_NAME = "utility"
 
 __all__ = [
     "LANE_PIN_ATTR",
+    "UPSTREAM_ONLY_ATTR",
     "lane_slot_pin",
     "preferred_slot",
     "rank_slot_name",
     "set_lane_pin",
+    "set_upstream_only",
+    "upstream_only_model",
 ]
 
 
@@ -64,6 +76,24 @@ def lane_slot_pin(request: Any) -> str:
     """
     try:
         value = getattr(request.state, LANE_PIN_ATTR, "")
+    except Exception:
+        return ""
+    return value if isinstance(value, str) else ""
+
+
+def set_upstream_only(request: Any, model_id: str) -> None:
+    """Mark this request as servable only by a remote upstream (see
+    :data:`UPSTREAM_ONLY_ATTR`). Never raises on a request stand-in."""
+    if not model_id:
+        return
+    with contextlib.suppress(Exception):
+        setattr(request.state, UPSTREAM_ONLY_ATTR, str(model_id))
+
+
+def upstream_only_model(request: Any) -> str:
+    """The upstream model id this request was marked upstream-only for, or ``""``."""
+    try:
+        value = getattr(request.state, UPSTREAM_ONLY_ATTR, "")
     except Exception:
         return ""
     return value if isinstance(value, str) else ""

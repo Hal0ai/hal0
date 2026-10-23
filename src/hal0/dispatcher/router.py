@@ -57,7 +57,7 @@ from hal0.dispatcher._capability_resolve import (
     guard_capability_mismatch,
     resolve_by_capability,
 )
-from hal0.dispatcher.lane_pin import lane_slot_pin, rank_slot_name
+from hal0.dispatcher.lane_pin import lane_slot_pin, rank_slot_name, upstream_only_model
 from hal0.dispatcher.single_flight import SingleFlightGroup
 from hal0.errors import Hal0Error
 from hal0.forwarded_headers import forwardable_request_headers
@@ -934,6 +934,20 @@ class Dispatcher:
                     )
                     self._log_decision(call, t0, cache_state="prefetched")
                     return call
+
+        # ── #2919: an upstream-only request stops here ───────────────────
+        # The memory engine's ``hal0/memory`` alias was rewritten to a bare
+        # upstream model id and marked upstream-only at the route layer. No
+        # remote advertises it right now (cold cache, provider offline, id
+        # typo), and the step-4 heuristics below would land it on the agent
+        # anchor or — for an ``a:b`` id — the flm slot: memory extraction
+        # silently running on the operator's chat lane. Fail loudly instead.
+        if upstream_only_model(request):
+            raise UpstreamUnavailable(
+                f"model {model_id!r} is the memory engine's upstream target and no "
+                "configured upstream advertises it right now",
+                details={"model": model_id, "upstream_only": True},
+            )
 
         # ── Step 4: capability/path routing ──────────────────────────────
         try:  # TIER1 — narrow exception handling; log + re-raise typed errors
