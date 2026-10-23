@@ -38,6 +38,8 @@
 import { useMutation, useQuery, useQueryClient, type UseQueryResult } from '@tanstack/react-query'
 import { apiDelete, apiGet, apiPost, apiPut, Hal0Error } from '../client'
 import { ENDPOINTS } from '../endpoints'
+import type { CommandApprovalsMode, CommandApprovalsResult } from './useHermesCommandApprovals'
+import type { UnitLogs } from './useServices'
 
 // ── Types ──────────────────────────────────────────────────────────
 
@@ -616,12 +618,12 @@ export type AgentPhase =
   | 'serving'
   | 'ready'
   | 'installed'
+  | 'not_installed'
   | 'unknown'
 
 /** The one-click fix, if any, a degraded row offers. */
 export type AgentFix =
   | 'restart_gateway'
-  | 'restart_agent'
   | 'repair'
   | 'resync_approvals'
   | 'cli'
@@ -657,7 +659,7 @@ export interface AgentOverview {
   status?: string
   unit_active?: boolean | null
   /** Body-level timestamp the server stamps on the read. */
-  generated_at?: string | number | null
+  generated_at?: string
   /** The newest queued/running converge:hermes or repair:hermes job. */
   job?: { id: string; kind?: string; state: string; [key: string]: unknown } | null
   /** Server-computed face. The UI upgrades `ready` to `serving` when a slot is
@@ -753,6 +755,8 @@ export function useAgentOverview(
       }
     },
     enabled: opts?.enabled !== false,
+    // A poll that fails is retried by the next tick, not by backoff on top.
+    retry: false,
     refetchInterval: OVERVIEW_POLL_MS,
     refetchOnWindowFocus: true,
   })
@@ -789,36 +793,77 @@ export function useAgentGatewayRestart(name: string) {
   })
 }
 
-export interface AgentUninstallResult {
-  name: string
-  status: 'uninstalled' | 'not_installed' | string
-  [key: string]: unknown
+export interface AgentUninstallResidual {
+  path: string
+  reason: string
+}
+
+/**
+ * Outcome of DELETE /api/agents/{name}. The route answers 200 `{name, status}`
+ * for `uninstalled` / `not_installed`, but a partial removal is a 207 whose
+ * body is the error envelope (`{error:{code, message, details}}`), and
+ * `client.ts` only throws on a non-2xx, so the hook lifts `details` out and
+ * returns one shape. `removed` is whether the call found anything to remove;
+ * `residual` lists what the daemon user could not delete.
+ */
+export type AgentUninstallResult =
+  | { name: string; status: 'uninstalled' | 'not_installed' }
+  | {
+      name: string
+      status: 'partially_uninstalled'
+      removed: boolean
+      residual: AgentUninstallResidual[]
+    }
+
+interface UninstallBody {
+  name?: string
+  status?: string
+  error?: {
+    details?: {
+      name?: string
+      status?: string
+      removed?: boolean
+      residual?: AgentUninstallResidual[]
+    }
+  }
+}
+
+function _normaliseUninstall(name: string, body: UninstallBody | null): AgentUninstallResult {
+  const details = body?.error?.details
+  if (details?.status === 'partially_uninstalled') {
+    return {
+      name: details.name ?? name,
+      status: 'partially_uninstalled',
+      removed: details.removed === true,
+      residual: Array.isArray(details.residual) ? details.residual : [],
+    }
+  }
+  if (body?.status === 'uninstalled' || body?.status === 'not_installed') {
+    return { name: body.name ?? name, status: body.status }
+  }
+  throw new Error(`unexpected response uninstalling ${name}`)
 }
 
 /** DELETE /api/agents/{name} — idempotent; a cli-kind agent answers 400
- *  `agent.cli_kind_local_only` (its profile is removed from the CLI). */
+ *  `agent.cli_kind_local_only` (its profile is removed from the CLI). A 207
+ *  partial removal resolves with `status: 'partially_uninstalled'`. */
 export function useAgentUninstall(name: string) {
   const qc = useQueryClient()
   return useMutation<AgentUninstallResult, Error, void>({
-    mutationFn: () => apiDelete<AgentUninstallResult>(ENDPOINTS.agentUninstall(name)),
+    mutationFn: async () =>
+      _normaliseUninstall(name, await apiDelete<UninstallBody | null>(ENDPOINTS.agentUninstall(name))),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['agents'] })
     },
   })
 }
 
-export type CommandApprovalsModeValue = 'smart' | 'manual'
-
-export interface CommandApprovalsResult {
-  mode: CommandApprovalsModeValue | string
-  [key: string]: unknown
-}
-
 /** PUT /api/agents/{name}/command-approvals — re-renders Hermes's config and
- *  restarts the unit when it was running. */
+ *  restarts the unit when it was running; the result carries `restart` and
+ *  `message` for the toast. */
 export function useCommandApprovalsMode(name: string) {
   const qc = useQueryClient()
-  return useMutation<CommandApprovalsResult, Error, CommandApprovalsModeValue>({
+  return useMutation<CommandApprovalsResult, Error, CommandApprovalsMode>({
     mutationFn: (mode) =>
       apiPut<CommandApprovalsResult>(ENDPOINTS.agentCommandApprovals(name), { mode }),
     onSuccess: () => {
@@ -827,14 +872,10 @@ export function useCommandApprovalsMode(name: string) {
   })
 }
 
-/** GET /api/logs (src/hal0/api/routes/logs.py list_logs). `hint` is set when the
- *  journal was unreadable or empty and says why. */
-export interface UnitLogTail {
-  unit: string
-  lines: string[]
-  count: number
-  hint?: string
-}
+/** GET /api/logs (src/hal0/api/routes/logs.py list_logs): the same body the
+ *  Services drawer reads. `hint` is set when the journal was unreadable or
+ *  empty and says why. */
+export type UnitLogTail = UnitLogs
 
 /**
  * Journal tail for the `down` face. `null` on 404/501/0 (older daemon, or no
@@ -862,6 +903,8 @@ export function useUnitLogTail(
       }
     },
     enabled: enabled && !!unit,
+    // A poll that fails is retried by the next tick, not by backoff on top.
+    retry: false,
     refetchInterval: OVERVIEW_POLL_MS,
   })
 }

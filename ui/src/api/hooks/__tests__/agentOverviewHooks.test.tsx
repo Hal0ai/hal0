@@ -141,6 +141,7 @@ describe('agent overview, control and log hooks', () => {
     })
     await flush()
     expect(probe.get().data).toBeNull()
+    expect(client.apiGet).toHaveBeenCalledTimes(2)
     expect(warn).toHaveBeenCalledTimes(1)
 
     act(() => probe.root.unmount())
@@ -244,25 +245,93 @@ describe('agent overview, control and log hooks', () => {
     const inv = vi.spyOn(qc, 'invalidateQueries')
     const probe = mountHook(() => useAgentUninstall('hermes'), qc)
 
+    let result: unknown
     await act(async () => {
-      await probe.get().mutateAsync()
+      result = await probe.get().mutateAsync()
     })
 
     expect(client.apiDelete).toHaveBeenCalledWith('/api/agents/hermes')
+    expect(result).toEqual({ name: 'hermes', status: 'uninstalled' })
     expect(inv).toHaveBeenCalledWith({ queryKey: ['agents'] })
 
     act(() => probe.root.unmount())
   })
 
+  it('useAgentUninstall passes not_installed through', async () => {
+    vi.mocked(client.apiDelete).mockResolvedValue({ name: 'hermes', status: 'not_installed' })
+    const probe = mountHook(() => useAgentUninstall('hermes'), newClient())
+
+    let result: unknown
+    await act(async () => {
+      result = await probe.get().mutateAsync()
+    })
+
+    expect(result).toEqual({ name: 'hermes', status: 'not_installed' })
+
+    act(() => probe.root.unmount())
+  })
+
+  it('useAgentUninstall lifts a 207 partial removal out of the error envelope', async () => {
+    // client.ts throws only on !res.ok, so a 207 resolves with the envelope as
+    // its body: {error: {code, message, details: {name, status, removed, residual}}}.
+    const residual = [{ path: '/var/lib/hal0/agents/hermes/venv', reason: 'Permission denied' }]
+    vi.mocked(client.apiDelete).mockResolvedValue({
+      error: {
+        code: 'agent.uninstall_incomplete',
+        message: 'could not remove 1 entry',
+        details: { name: 'hermes', status: 'partially_uninstalled', removed: true, residual },
+      },
+    })
+    const qc = newClient()
+    const inv = vi.spyOn(qc, 'invalidateQueries')
+    const probe = mountHook(() => useAgentUninstall('hermes'), qc)
+
+    let result: unknown
+    await act(async () => {
+      result = await probe.get().mutateAsync()
+    })
+
+    expect(result).toEqual({
+      name: 'hermes',
+      status: 'partially_uninstalled',
+      removed: true,
+      residual,
+    })
+    // The agent is partly gone, so the lists still refresh.
+    expect(inv).toHaveBeenCalledWith({ queryKey: ['agents'] })
+
+    act(() => probe.root.unmount())
+  })
+
+  it('useAgentUninstall rejects a body it cannot read instead of reporting success', async () => {
+    vi.mocked(client.apiDelete).mockResolvedValue(null)
+    const qc = newClient()
+    const inv = vi.spyOn(qc, 'invalidateQueries')
+    const probe = mountHook(() => useAgentUninstall('hermes'), qc)
+
+    await act(async () => {
+      await expect(probe.get().mutateAsync()).rejects.toThrow('unexpected response uninstalling hermes')
+    })
+
+    expect(inv).not.toHaveBeenCalled()
+
+    act(() => probe.root.unmount())
+  })
+
   it('useCommandApprovalsMode puts the mode and invalidates agents', async () => {
-    vi.mocked(client.apiPut).mockResolvedValue({ mode: 'manual' })
+    const applied = { mode: 'manual', changed: true, restart: 'restarted', message: 'applied' }
+    vi.mocked(client.apiPut).mockResolvedValue(applied)
     const qc = newClient()
     const inv = vi.spyOn(qc, 'invalidateQueries')
     const probe = mountHook(() => useCommandApprovalsMode('hermes'), qc)
 
+    let result: unknown
     await act(async () => {
-      await probe.get().mutateAsync('manual')
+      result = await probe.get().mutateAsync('manual')
     })
+
+    // The full apply result, so the card can toast `restart` and `message`.
+    expect(result).toEqual(applied)
 
     expect(client.apiPut).toHaveBeenCalledWith('/api/agents/hermes/command-approvals', {
       mode: 'manual',
@@ -331,34 +400,39 @@ describe('agent overview, control and log hooks', () => {
 })
 
 describe('agents hook bridge', () => {
-  it('publishes every hook the state-aware cards read on window', async () => {
+  it('publishes every hook the state-aware cards read on window, by identity', async () => {
     await import('@/dash/agents/agents-hook-bridge')
+    const agents = await import('@/api/hooks/useAgents')
+    const { useSlots } = await import('@/api/hooks/useSlots')
+    const { useCapabilities } = await import('@/api/hooks/useCapabilities')
+    const { useComponentConverge } = await import('@/api/hooks/useComponents')
+    const { useConfigUrls } = await import('@/api/hooks/useConfigUrls')
+    const { useUpdateJob } = await import('@/api/hooks/useUpdates')
     const w = window as unknown as Record<string, unknown>
-    const names = [
-      // Already published before this task — must survive the extension.
-      '__hal0UseAgents',
-      '__hal0UseAgentRestart',
-      '__hal0UseSlots',
+    const expected: Record<string, unknown> = {
+      // Already published before this task: must survive the extension.
+      __hal0UseAgents: agents.useAgents,
+      __hal0UseAgentRestart: agents.useAgentRestart,
+      __hal0UseSlots: useSlots,
       // New.
-      '__hal0UseAgentOverview',
-      '__hal0UseAgentRepair',
-      '__hal0UseAgentGatewayRestart',
-      '__hal0UseAgentUninstall',
-      '__hal0UseCommandApprovalsMode',
-      '__hal0UseUnitLogTail',
-      '__hal0UseAgentPersonas',
-      '__hal0UsePersonaActivate',
-      '__hal0UseComponentConverge',
-      '__hal0UseUpdateJob',
-      '__hal0UseConfigUrls',
-      '__hal0UseCapabilities',
-      '__hal0UseAgentApprovalsCount',
-    ]
-    for (const name of names) {
-      expect(typeof w[name], name).toBe('function')
+      __hal0UseAgentOverview: agents.useAgentOverview,
+      __hal0UseAgentRepair: agents.useAgentRepair,
+      __hal0UseAgentGatewayRestart: agents.useAgentGatewayRestart,
+      __hal0UseAgentUninstall: agents.useAgentUninstall,
+      __hal0UseCommandApprovalsMode: agents.useCommandApprovalsMode,
+      __hal0UseUnitLogTail: agents.useUnitLogTail,
+      __hal0UseAgentPersonas: agents.useAgentPersonas,
+      __hal0UsePersonaActivate: agents.usePersonaActivate,
+      __hal0UseComponentConverge: useComponentConverge,
+      __hal0UseUpdateJob: useUpdateJob,
+      __hal0UseConfigUrls: useConfigUrls,
+      __hal0UseCapabilities: useCapabilities,
+      __hal0UseAgentApprovalsCount: agents.useAgentApprovalsCount,
     }
-    expect(w.__hal0UseAgentOverview).toBe(useAgentOverview)
-    expect(w.__hal0UseUnitLogTail).toBe(useUnitLogTail)
+    for (const [name, hook] of Object.entries(expected)) {
+      expect(typeof hook, `${name} source`).toBe('function')
+      expect(w[name], name).toBe(hook)
+    }
     expect(w.__hal0AgentArt).toMatchObject({ hermes: expect.any(String), pi: expect.any(String) })
   })
 })
