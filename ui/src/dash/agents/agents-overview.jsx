@@ -363,7 +363,7 @@ function AgentsOverview() {
             .mutateAsync()
             .then((res) =>
               refreshHermes().then(() => {
-                if (res && res.status === "err") _toast(`Hermes restart failed: ${res.detail || "see the unit logs"}`, "err");
+                if (res && res.status === "error") _toast(`Hermes restart failed: ${res.detail || "see the unit logs"}`, "err");
                 else _toast(res && res.status === "restarting" ? "Hermes is restarting" : "Hermes restarted", "ok");
               }),
             )
@@ -375,7 +375,7 @@ function AgentsOverview() {
             .mutateAsync()
             .then((res) =>
               refreshHermes().then(() => {
-                if (res && res.status === "err") _toast(`Gateway restart failed: ${res.detail || "see the unit logs"}`, "err");
+                if (res && res.status === "error") _toast(`Gateway restart failed: ${res.detail || "see the unit logs"}`, "err");
                 else _toast("Hermes gateway restarted", "ok");
               }),
             )

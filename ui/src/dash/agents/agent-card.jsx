@@ -9,9 +9,13 @@
 //                     on the right, and a bottom band per phase (chips and
 //                     reach when healthy; journal tail, reasons and fixes,
 //                     the install command or the running job otherwise).
-//                     A click, or Enter / Space on the focused card, flips
-//                     it to a tabbed console: Status, Controls, Lore,
-//                     Lifecycle. Escape inside the console flips it back.
+//                     A click on the card, or its "tap · console" button,
+//                     flips it to a tabbed console: Status, Controls, Lore,
+//                     Lifecycle. The console's "front" button or Escape
+//                     flips it back. The two buttons are the keyboard and
+//                     screen-reader way in and out; the card shell itself
+//                     carries no role, so the console's own controls are
+//                     never flattened into one button.
 //   LockedAgentCard — a roadmap entry behind a grey "coming soon" mask. The
 //                     dummy module tile + identity show through; the card is
 //                     non-interactive (no flip) until the integration ships.
@@ -367,7 +371,7 @@ function PhaseBlock({ model, isPi }) {
 }
 
 // ── front: bottom band pieces ───────────────────────────────────────
-function StatusRow({ identity, model }) {
+function StatusRow({ identity, model, flipped, onFlip }) {
   const Icon = window.Icon;
   const StatusDot = window.StatusDot;
   const cls = model.statusCls;
@@ -381,7 +385,18 @@ function StatusRow({ identity, model }) {
       <span className={"fc-st" + tone}>
         <StatusDot cls={cls} />{model.statusLabel}
       </span>
-      <span className="flip-hint"><Icon name="refresh" size={11} sw={1.5} />tap · console</span>
+      <button
+        type="button"
+        id={"agent-" + identity.id + "-flip"}
+        className="flip-hint"
+        data-testid={"agent-flip-" + identity.id}
+        aria-label={"Open " + identity.name + " console"}
+        aria-expanded={!!flipped}
+        aria-controls={"agent-" + identity.id + "-console"}
+        onClick={(e) => { stop(e); if (onFlip) onFlip(); }}
+      >
+        <Icon name="refresh" size={11} sw={1.5} />tap · console
+      </button>
       <span className="fc-rarity" title="holo rare">
         {[0, 1, 2, 3, 4].map((i) => <span key={i} className={"fc-star" + (i < identity.rarity ? "" : " off")} />)}
       </span>
@@ -552,9 +567,9 @@ function PiChecks({ model }) {
 
 // ── front: bottom band by phase ─────────────────────────────────────
 function PhaseBand(props) {
-  const { live, identity, model, actions, busy, run, ask } = props;
+  const { live, identity, model, actions, busy, run, ask, flipped, onFlip } = props;
   const isPi = identity.id === "pi";
-  const status = <StatusRow identity={identity} model={model} />;
+  const status = <StatusRow identity={identity} model={model} flipped={flipped} onFlip={onFlip} />;
 
   if (model.phase === "not_installed") {
     return (
@@ -1100,45 +1115,43 @@ function LiveAgentCard({ identity, model, actions }) {
   const [confirm, setConfirm] = useState(null);
   const [personaEdit, setPersonaEdit] = useState(null);
   const [busy, run] = useRunner();
-  const cardRef = useRef(null);
-  // Set when the keyboard asked for the flip, so focus follows it; a mouse
-  // flip leaves focus where it is.
-  const keyFlip = useRef(false);
+  // Set by the flip buttons and Escape, so focus follows the flip: the face
+  // being left turns inert, and a focused control on it would otherwise drop
+  // focus to the page. A click on the card body flips without moving focus.
+  const moveFocus = useRef(false);
+  const flipTo = (to) => {
+    moveFocus.current = true;
+    setFlipped(to);
+  };
 
   // The back is a control surface: no tilt there, or a target near the edge
-  // moves out from under the pointer between hover and click. After a
-  // keyboard flip, focus lands on the selected tab (to the console) or on the
-  // card itself (back to the front); the face it leaves is inert by then.
+  // moves out from under the pointer between hover and click. After a button
+  // or Escape flip, focus lands on the selected tab (to the console) or on the
+  // front's flip button (back to the front); the face it leaves is inert by then.
   useEffect(() => {
     if (flipped) onLeave();
-    if (keyFlip.current) {
-      keyFlip.current = false;
-      const el = flipped ? document.getElementById("agent-" + a.id + "-tab-" + tab) : cardRef.current;
+    if (moveFocus.current) {
+      moveFocus.current = false;
+      const el = document.getElementById(
+        flipped ? "agent-" + a.id + "-tab-" + tab : "agent-" + a.id + "-flip",
+      );
       if (el) el.focus();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [flipped]);
 
-  // The card shell is a toggle button. Enter or Space flips it only when the
-  // shell itself has focus, so keys aimed at an inner control never flip it;
   // Escape anywhere in the console flips back.
   const onKeyDown = (e) => {
     if (e.key === "Escape" && flipped) {
       e.preventDefault();
-      keyFlip.current = true;
-      setFlipped(false);
-      return;
-    }
-    if (e.target !== e.currentTarget) return;
-    if (e.key === "Enter" || e.key === " ") {
-      e.preventDefault();
-      keyFlip.current = true;
-      setFlipped((f) => !f);
+      flipTo(false);
     }
   };
 
   const healthy = !isPi && (model.phase === "ready" || model.phase === "serving");
-  const front = { live: !flipped, identity: a, model, actions, busy, run, ask: setConfirm };
+  const front = {
+    live: !flipped, identity: a, model, actions, busy, run, ask: setConfirm, flipped, onFlip: () => flipTo(true),
+  };
   const back = { live: flipped, identity: a, model, actions, busy, run, ask: setConfirm, editPersona: setPersonaEdit };
   const homeChip = isPi && model.overview && model.overview.profile ? model.overview.profile.home : null;
   const versionText =
@@ -1160,13 +1173,8 @@ function LiveAgentCard({ identity, model, actions }) {
   return (
     <CardBusy.Provider value={busy}>
       <div
-        ref={cardRef}
         className={"fcard" + (PHASE_MOD[model.phase] || "")}
         data-testid={"agent-card-" + a.id}
-        role="button"
-        tabIndex={0}
-        aria-pressed={flipped}
-        aria-label={flipped ? a.name + " card, show front (Escape also flips back)" : a.name + " card, show console"}
         style={a.el ? { "--el": a.el, "--el-glow": a.elGlow } : undefined}
         onMouseMove={flipped ? undefined : onMove}
         onMouseLeave={onLeave}
@@ -1243,11 +1251,25 @@ function LiveAgentCard({ identity, model, actions }) {
             </div>
 
             {/* ── BACK ── */}
-            <div className="fc-face fc-back" inert={!flipped} style={{ opacity: flipped ? 1 : 0 }}>
+            <div
+              className="fc-face fc-back"
+              id={"agent-" + a.id + "-console"}
+              inert={!flipped}
+              style={{ opacity: flipped ? 1 : 0 }}
+            >
               <div className="fcb-h">
                 <Icon name="agent" size={15} sw={1.4} />
                 <span className="l"><b>{a.name}</b> · console</span>
-                <span style={{ marginLeft: "auto" }}><StatusDot cls={model.statusCls} /></span>
+                <button
+                  type="button"
+                  className="fcb-unflip"
+                  data-testid={"agent-unflip-" + a.id}
+                  aria-label="Back to front"
+                  onClick={(e) => { stop(e); flipTo(false); }}
+                >
+                  <Icon name="refresh" size={11} sw={1.5} />front
+                </button>
+                <StatusDot cls={model.statusCls} />
               </div>
               <ConsoleTabs id={a.id} tab={tab} setTab={setTab} live={flipped} />
               <div

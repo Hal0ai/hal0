@@ -365,9 +365,16 @@
 .agents-overview .ao-confirm-v { font-size: 11px; color: var(--accent); margin-bottom: 10px; }
 .agents-overview .ao-confirm-note { margin: 12px 0 0; padding-top: 10px; border-top: 1px solid var(--line); font-size: 12px; color: var(--fg-3); }
 
-/* the card shell is a toggle: a ring for keyboard focus, none for a click */
-.agents-overview .fcard:not(.locked):focus-visible { outline: 2px solid var(--accent); outline-offset: 4px; border-radius: 18px; }
-.agents-overview .fcard:not(.locked):focus:not(:focus-visible) { outline: none; }
+/* the flip buttons: the front's "tap · console" hint and the console's "front" */
+.agents-overview button.flip-hint { background: transparent; border: 0; border-radius: 5px; padding: 2px 4px; margin: -2px -4px;
+  line-height: inherit; cursor: pointer; }
+.agents-overview button.flip-hint:hover { color: var(--fg-2); }
+.agents-overview .fcb-unflip { margin-left: auto; display: inline-flex; align-items: center; gap: 5px; font-family: var(--jbm); font-size: 9.5px;
+  letter-spacing: 0.08em; text-transform: uppercase; color: var(--fg-3); background: transparent; border: 1px solid var(--line-strong);
+  border-radius: 6px; padding: 3px 7px; cursor: pointer; }
+.agents-overview .fcb-unflip:hover { color: var(--fg); border-color: color-mix(in oklab, var(--el) 40%, var(--line-strong)); }
+.agents-overview button.flip-hint:focus-visible,
+.agents-overview .fcb-unflip:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 
 @media (prefers-reduced-motion: reduce) {
   .agents-overview .fc-spin, .agents-overview .sdot.working, .agents-overview .fc-step.cur::before { animation: none; }

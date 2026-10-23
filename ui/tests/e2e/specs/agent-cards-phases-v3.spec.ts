@@ -469,7 +469,7 @@ test.describe('Hermes card phases', () => {
     await expect(front.locator('.fc-chips')).toContainText('persona · Coder')
   })
 
-  test('keyboard: Enter flips to the console, Tab reaches an action, Escape flips back', async ({
+  test('keyboard: the flip button opens the console, Tab reaches an action, Escape flips back', async ({
     page,
   }) => {
     await mockCards(page, {
@@ -480,16 +480,28 @@ test.describe('Hermes card phases', () => {
     await openAgents(page)
 
     const c = card(page, 'hermes')
+    const flipBtn = c.getByTestId('agent-flip-hermes')
     await expect(face(page, 'hermes')).toHaveAttribute('data-phase', 'ready', { timeout: FIVE_S })
-    await expect(c).toHaveAttribute('role', 'button')
-    await expect(c).toHaveAttribute('aria-pressed', 'false')
-    await expect(c).toHaveAttribute('aria-label', 'Hermes card, show console')
+    // The shell is not a button (its button role would flatten the console's
+    // controls); the flip is a real button on each face.
+    await expect(c).not.toHaveAttribute('role', /.*/)
+    await expect(c).not.toHaveAttribute('tabindex', /.*/)
+    await expect(flipBtn).toHaveAccessibleName('Open Hermes console')
+    await expect(flipBtn).toHaveAttribute('aria-expanded', 'false')
 
-    // Enter on the focused card opens the console with the selected tab focused.
-    await c.focus()
+    // Tab from the Agents view's tab strip to the flip button.
+    await page.getByTestId('agent-tab-overview').focus()
+    let at = ''
+    for (let i = 0; i < 12 && at !== 'agent-flip-hermes'; i++) {
+      await page.keyboard.press('Tab')
+      at = await page.evaluate(() => document.activeElement?.getAttribute('data-testid') ?? '')
+    }
+    expect(at).toBe('agent-flip-hermes')
+
+    // Enter opens the console with the selected tab focused.
     await page.keyboard.press('Enter')
-    await expect(c).toHaveAttribute('aria-pressed', 'true')
     await expect(c.getByTestId('agent-tab-controls')).toBeFocused()
+    await expect(flipBtn).toHaveAttribute('aria-expanded', 'true')
 
     // Tab from the tab strip into the panel reaches an action control.
     let reached = ''
@@ -500,16 +512,48 @@ test.describe('Hermes card phases', () => {
       )
     }
     expect(reached).toMatch(/^agent-action-/)
-    // A key aimed at an inner control does not flip the card.
-    await expect(c).toHaveAttribute('aria-pressed', 'true')
 
-    // Escape flips back and returns focus to the card; Space flips it again.
+    // Escape flips back and returns focus to the flip button.
     await page.keyboard.press('Escape')
-    await expect(c).toHaveAttribute('aria-pressed', 'false')
-    await expect(c).toBeFocused()
+    await expect(flipBtn).toBeFocused()
+    await expect(flipBtn).toHaveAttribute('aria-expanded', 'false')
+
+    // Space opens it again; the console's own "front" button closes it.
     await page.keyboard.press(' ')
-    await expect(c).toHaveAttribute('aria-pressed', 'true')
     await expect(c.getByTestId('agent-tab-controls')).toBeFocused()
+    await c.getByTestId('agent-unflip-hermes').focus()
+    await expect(c.getByTestId('agent-unflip-hermes')).toHaveAccessibleName('Back to front')
+    await page.keyboard.press('Enter')
+    await expect(flipBtn).toBeFocused()
+  })
+
+  test('a restart that answers status "error" toasts the failure, not success', async ({
+    page,
+  }) => {
+    await page.route('**/api/agents/hermes/restart', (route) =>
+      json(route, { status: 'error', detail: 'unit refused to start' }),
+    )
+    await page.route('**/api/agents/hermes/gateway/restart', (route) =>
+      json(route, { status: 'error', detail: 'gateway unit not found' }),
+    )
+    await mockCards(page, {
+      agents: [hermesRecord(true)],
+      hermes: hermesOverview(),
+      slot: chatSlot('ready'),
+    })
+    await openAgents(page)
+    await expect(face(page, 'hermes')).toHaveAttribute('data-phase', 'ready', { timeout: FIVE_S })
+
+    await flip(page, 'hermes')
+    await card(page, 'hermes').getByTestId('agent-action-restart').click()
+    await expect(
+      page.locator('.hal0-toast.err', { hasText: 'Hermes restart failed: unit refused to start' }),
+    ).toBeVisible()
+    await card(page, 'hermes').getByTestId('agent-action-restart-gateway').click()
+    await expect(
+      page.locator('.hal0-toast.err', { hasText: 'Gateway restart failed: gateway unit not found' }),
+    ).toBeVisible()
+    await expect(page.locator('.hal0-toast', { hasText: 'Hermes restarted' })).toHaveCount(0)
   })
 
   test('serving: a ready overview with a hot slot reads serving, with throughput', async ({
