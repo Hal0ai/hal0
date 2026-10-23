@@ -134,6 +134,19 @@ async def get_agent_memory_stats(agent_id: str, request: Request) -> dict[str, A
 
     Unknown ``agent_id`` → 404 (matches the personas + restart routes).
     """
+    return await memory_stats_snapshot(agent_id, request)
+
+
+async def memory_stats_snapshot(
+    agent_id: str, request: Request, *, limit: int = _LIST_PAGE_LIMIT
+) -> dict[str, Any]:
+    """The stats body, paging at most ``limit`` items.
+
+    ``limit=1`` is the cheap availability probe (``available`` and
+    ``last_write`` are exact; ``writes`` is then at most 1 and is not a count).
+    On a large unified bank the full page costs about as much as the overview's
+    budget, so the overview probes with 1 and counts separately (#2957).
+    """
     if agent_id not in _KNOWN_AGENT_IDS:
         raise NotFound(
             f"unknown agent {agent_id!r}",
@@ -169,7 +182,7 @@ async def get_agent_memory_stats(agent_id: str, request: Request) -> dict[str, A
         page = await wrapper.list_items(
             dataset=namespace,
             cursor=None,
-            limit=_LIST_PAGE_LIMIT,
+            limit=limit,
             client_id=agent_id,
         )
     except Exception as exc:
