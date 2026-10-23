@@ -80,7 +80,7 @@ hal0 bench results --model qwen3.8-27b --json       # then compare configs
 
 Allowed tuning flags (seam whitelist, enforced on the argv `hal0.bench.harness` composes
 before the `hal0-benchctl` `exec` seam re-validates it): `-b -ub -ngl -fa -ctk -ctv -p -n
--d -r -t -mmp -pg`. Tuning needs a quiet GPU, so `exclusive = true` is normally required
+-d -r -t -lm -pg`. Tuning needs a quiet GPU, so `exclusive = true` is normally required
 — only when nothing is serving; the runner stops/restarts the slots around the suite (see
 hal0-bench's GPU rule).
 

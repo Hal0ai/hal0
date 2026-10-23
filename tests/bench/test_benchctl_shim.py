@@ -662,6 +662,17 @@ class TestTelemetryEndToEnd:
         assert started[0] == 124, started
 
 
+def test_wrapper_tuning_whitelist_matches_the_planner() -> None:
+    """The seam's value-checked flag arm is the planner's tune set plus the
+    measurement flags (-p/-n/-d/-r); a llama-bench flag rename must land in
+    both places (#2769)."""
+    from hal0.bench.planner import _TUNE_FLAGS
+
+    arm = re.search(r"^\s*(-b\|[^)\n]+)\)\s*$", BENCHCTL.read_text(), re.M)
+    assert arm is not None, "tuning-flag case arm not found in hal0-benchctl"
+    assert set(arm.group(1).split("|")) == set(_TUNE_FLAGS) | {"-p", "-n", "-d", "-r"}
+
+
 def test_the_shim_is_syntactically_valid() -> None:
     proc = subprocess.run(["bash", "-n", str(BENCHCTL)], capture_output=True, text=True, timeout=60)
     assert proc.returncode == 0, proc.stderr
