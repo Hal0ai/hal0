@@ -303,6 +303,33 @@ def graph_status_cmd(
     t.add_row("Extraction slot", slot_line)
     if available:
         t.add_row("Available slots", ", ".join(available))
+    # #2919: what hal0/memory resolves to, and (#2918) what the engine really runs.
+    target = s.get("target") or {}
+    if target.get("model"):
+        kind = "upstream model" if target.get("kind") == "upstream" else "local slot"
+        t.add_row(
+            "Engine target",
+            f"[bold]{target['model']}[/bold] [dim]({kind} via {target.get('alias', 'hal0/memory')})[/dim]",
+        )
+    models = s.get("available_models") or []
+    if models:
+        ids = [str(m.get("id")) for m in models if isinstance(m, dict)]
+        shown = ", ".join(ids[:12]) + (" …" if len(ids) > 12 else "")
+        t.add_row("Upstream models", shown)
+    engine = s.get("engine_llm") or {}
+    if engine.get("model"):
+        running = f"[bold]{engine['model']}[/bold] [dim]via {engine.get('provider') or '?'}"
+        if engine.get("base_url"):
+            running += f" @ {engine['base_url']}"
+        running += "[/dim]"
+        if engine.get("overridden"):
+            keys = ", ".join(engine.get("override_keys") or [])
+            running += (
+                f"\n[red]overridden by {engine.get('override_file')} ({keys}) — "
+                "hal0's engine target is not in effect until those lines are removed "
+                "and hindsight-api is restarted[/red]"
+            )
+        t.add_row("Engine running", running)
     t.add_row("Builds OK", str(s.get("builds_ok", 0)))
     t.add_row("Errors", str(s.get("errors", 0)))
     t.add_row("In-flight", str(s.get("in_flight", 0)))
@@ -324,19 +351,41 @@ def graph_enable_cmd(
     slot: str | None = typer.Option(
         None,
         "--slot",
-        help="Local llm slot used for graph extraction (e.g. 'utility'). "
+        help="Local llm slot the memory engine runs on (e.g. 'utility'). "
         "Must be an enabled type=llm slot; the server validates against the live "
-        "slot set and restarts hindsight-api to point its extraction LLM there. "
-        "Omit to keep the current slot.",
+        "slot set. Omit to keep the current slot.",
+    ),
+    model: str | None = typer.Option(
+        None,
+        "--model",
+        help="Run the memory engine on an upstream model instead of a local slot — "
+        "an id hal0's /v1 already routes (see `hal0 memory graph status` → "
+        "'Upstream models', e.g. 'MiniMax-M2.5' or 'minimax/minimax-m3'). "
+        "Applies at once, no engine restart; the slot is kept as the way back.",
+    ),
+    local: bool = typer.Option(
+        False,
+        "--local",
+        help="Run the memory engine on the local extraction slot again (clears --model).",
     ),
     json_out: bool = typer.Option(
         False, "--json", help="Emit the raw JSON response instead of a panel."
     ),
 ) -> None:
-    """Turn graph extraction ON (optionally repointing the extraction slot)."""
+    """Turn graph extraction ON (optionally repointing the engine's model)."""
+    if model is not None and local:
+        die("--model and --local are exclusive")
+        return
+    if model is not None and slot is not None:
+        die("--slot and --model are exclusive: --model keeps the configured slot as the way back")
+        return
     payload: dict[str, Any] = {"enabled": True}
     if slot is not None:
         payload["extraction_slot"] = slot
+    if model is not None:
+        payload["extraction_model"] = model
+    if local:
+        payload["extraction_model"] = None
 
     url = _api_base()
     if _api_unreachable(url):
@@ -361,11 +410,16 @@ def graph_enable_cmd(
     speed = _throughput_row(result.get("throughput"))
     speed_line = f"\n{speed}" if speed else ""
     too_slow = bool(result.get("warnings"))
+    target = result.get("target") or {}
+    target_line = ""
+    if target.get("model"):
+        kind = "upstream model" if target.get("kind") == "upstream" else "local slot"
+        target_line = f"\nengine target = [bold]{target['model']}[/bold] [dim]({kind})[/dim]"
     console.print(
         Panel(
             f"[bold green]Graph extraction enabled[/bold green]\n"
             f"extraction slot = [bold]{result.get('extraction_slot')}[/bold]"
-            f"{prop_line}{speed_line}",
+            f"{target_line}{prop_line}{speed_line}",
             border_style="yellow" if too_slow else "green",
         )
     )

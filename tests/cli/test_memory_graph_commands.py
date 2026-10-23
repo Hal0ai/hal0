@@ -100,6 +100,94 @@ def test_enable_with_slot_sends_extraction_slot(stub_api) -> None:
     assert payload == {"enabled": True, "extraction_slot": "agent"}
 
 
+# ── #2919: the engine's model can be an upstream model ───────────────────────
+
+
+def test_enable_with_model_sends_extraction_model(stub_api) -> None:
+    result = runner.invoke(memory_commands.graph_app, ["enable", "--model", "MiniMax-M2.5"])
+    assert result.exit_code == 0, result.output
+    assert stub_api["put"] == [
+        ("/api/memory/graph", {"enabled": True, "extraction_model": "MiniMax-M2.5"})
+    ]
+
+
+def test_enable_local_clears_the_model(stub_api) -> None:
+    result = runner.invoke(memory_commands.graph_app, ["enable", "--local"])
+    assert result.exit_code == 0, result.output
+    assert stub_api["put"] == [("/api/memory/graph", {"enabled": True, "extraction_model": None})]
+
+
+@pytest.mark.parametrize(
+    "argv", [["enable", "--model", "x", "--local"], ["enable", "--model", "x", "--slot", "agent"]]
+)
+def test_enable_model_is_exclusive_with_local_and_slot(stub_api, argv: list[str]) -> None:
+    result = runner.invoke(memory_commands.graph_app, argv)
+    assert result.exit_code != 0
+    assert "exclusive" in result.output
+    assert stub_api["put"] == []
+
+
+def test_enable_panel_names_the_engine_target(stub_api, monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_put(path: str, **kw: Any) -> dict[str, Any]:
+        return {
+            "enabled": True,
+            "extraction_slot": "utility",
+            "extraction_model": "MiniMax-M2.5",
+            "target": {"kind": "upstream", "model": "MiniMax-M2.5", "alias": "hal0/memory"},
+            "status": {"enabled": True},
+        }
+
+    monkeypatch.setattr(memory_commands, "api_put", fake_put)
+    result = runner.invoke(memory_commands.graph_app, ["enable", "--model", "MiniMax-M2.5"])
+    assert result.exit_code == 0, result.output
+    assert "MiniMax-M2.5" in result.output
+    assert "upstream model" in result.output
+
+
+def test_status_shows_target_and_what_the_engine_really_runs(
+    stub_api, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#2918: an operator override in hindsight-llm.env is named, in red, with
+    the keys that came from it — not hidden behind the configured slot."""
+
+    def fake_get(path: str, **_kw: Any) -> dict[str, Any]:
+        return {
+            "enabled": True,
+            "extraction_slot": "utility",
+            "slot_resolves": True,
+            "available_slots": ["agent", "utility"],
+            "extraction_model": None,
+            "target": {"kind": "slot", "model": "hal0/utility", "alias": "hal0/memory"},
+            "available_models": [
+                {"id": "MiniMax-M2.5", "owned_by": "minimax"},
+                {"id": "minimax/minimax-m3", "owned_by": "openrouter"},
+            ],
+            "engine_llm": {
+                "provider": "minimax",
+                "base_url": "https://api.minimax.io/v1",
+                "model": "MiniMax-M2.5",
+                "overridden": True,
+                "override_file": "/etc/hal0/hindsight-llm.env",
+                "override_keys": ["HINDSIGHT_API_LLM_MODEL", "HINDSIGHT_API_LLM_PROVIDER"],
+            },
+            "in_flight": 0,
+            "builds_ok": 1,
+            "errors": 0,
+            "last_built_at": None,
+            "last_error": None,
+        }
+
+    monkeypatch.setattr(memory_commands, "api_get", fake_get)
+    result = runner.invoke(memory_commands.graph_app, ["status"])
+    assert result.exit_code == 0, result.output
+    out = result.output
+    assert "Engine target" in out and "hal0/utility" in out and "local slot" in out
+    assert "Upstream models" in out and "minimax/minimax-m3" in out
+    assert "Engine running" in out and "via minimax" in out
+    assert "overridden by /etc/hal0/hindsight-llm.env" in out
+    assert "HINDSIGHT_API_LLM_PROVIDER" in out
+
+
 def test_route_option_no_longer_exists(stub_api) -> None:
     """ADR-0023: --route/--provider/--model were removed in favour of --slot."""
     result = runner.invoke(
