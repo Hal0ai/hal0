@@ -480,29 +480,42 @@ def migrate_hashed_units(
         state = _enabled_state(run, path.name)
         result.was_enabled = result.was_enabled or state in ("enabled", "enabled-runtime")
         result.was_active = result.was_active or _is_active(run, path.name)
+
+    def rollback() -> None:
+        # Undo this run's half-done move so a retry starts from the same box:
+        # a canonical unit left on disk would read as one that "already
+        # existed" and keep its (disabled) state (#2946 review), and a
+        # suffixed unit left stopped or disabled would lose the operator's
+        # on/off state.
+        if not pre_existing:
+            with contextlib.suppress(OSError):
+                unit_path.unlink()
+        with contextlib.suppress(OSError, subprocess.SubprocessError):
+            _run(run, ["systemctl", "daemon-reload"])
+            for path in hashed:
+                if not path.exists():
+                    continue
+                if result.was_enabled:
+                    _run(run, ["systemctl", "enable", path.name])
+                if result.was_active:
+                    _run(run, ["systemctl", "start", path.name])
+
     if not masked:
         _write_rendered(unit_path, uid_of, done)
         result.unit_rewritten = True
         done.append(f"wrote {GATEWAY_UNIT}")
-        _check(run, ["systemctl", "daemon-reload"], "systemctl daemon-reload", done)
+        try:
+            _check(run, ["systemctl", "daemon-reload"], "systemctl daemon-reload", done)
+        except GatewayRegenError:
+            rollback()
+            raise
     unlink_errors: list[str] = []
     for path in hashed:
         try:
-            _check(
-                run,
-                ["systemctl", "disable", "--now", path.name],
-                f"systemctl disable --now {path.name}",
-                done,
-            )
+            _check(run, ["systemctl", "stop", path.name], f"systemctl stop {path.name}", done)
+            _check(run, ["systemctl", "disable", path.name], f"systemctl disable {path.name}", done)
         except GatewayRegenError:
-            # Roll back the canonical unit this run wrote: left on disk, a
-            # retry would read it as one that "already existed" and keep its
-            # (disabled) state instead of the suffixed unit's (#2946 review).
-            if not pre_existing:
-                with contextlib.suppress(OSError):
-                    unit_path.unlink()
-                with contextlib.suppress(OSError, subprocess.SubprocessError):
-                    _run(run, ["systemctl", "daemon-reload"])
+            rollback()
             raise
         try:
             path.unlink()
@@ -656,8 +669,11 @@ def regenerate_gateway_unit(
                 unit_path=unit_path, linger_dir=linger_dir, run=run, uid_of=uid_of, which=which
             )
         except GatewayRegenError as exc:
-            # The migration itself succeeded (the gateway moved over); a
-            # follow-up such as linger with no loginctl is reported, not fatal.
+            # The migration itself succeeded (the gateway moved over). Only a
+            # linger follow-up (no loginctl, or enable-linger failed) is
+            # reported instead of raised; anything else still fails the verb.
+            if "linger" not in str(exc):
+                raise
             tail = RegenResult("noop", "", steps=[f"follow-up: {exc}"])
         steps = [*migrated.steps, *tail.steps]
         return RegenResult(

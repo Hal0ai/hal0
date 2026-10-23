@@ -479,7 +479,8 @@ def test_an_enabled_running_suffixed_unit_moves_over_canonical_first(tmp_path: P
     assert (tmp_path / CANON).read_text() == regen.render_unit(UID)
     assert sc.mutating == [
         ["systemctl", "daemon-reload"],
-        ["systemctl", "disable", "--now", HASHED],
+        ["systemctl", "stop", HASHED],
+        ["systemctl", "disable", HASHED],
         ["systemctl", "daemon-reload"],
         ["systemctl", "enable", CANON],
         ["systemctl", "start", CANON],
@@ -564,7 +565,8 @@ def test_a_failed_disable_removes_nothing_and_a_retry_keeps_the_state(tmp_path: 
         _migrate(tmp_path, sc)
     assert hashed.exists()
     assert not (tmp_path / CANON).exists()  # rolled back, so a retry is a fresh migration
-    assert not [c for c in sc.mutating if c[1] in ("enable", "start")]
+    assert not [c for c in sc.mutating if c[1] in ("enable", "start") and c[-1] == CANON]
+    assert sc.states[HASHED] == ("enabled", True)
     sc.fail = None
     _migrate(tmp_path, sc)
     assert not hashed.exists() and sc.states[CANON] == ("enabled", True)
@@ -626,7 +628,8 @@ def test_a_masked_canonical_unit_stays_masked_and_the_suffixed_one_goes(tmp_path
     assert not hashed.exists() and canonical.is_symlink()
     assert "masked" in out.message
     assert sc.mutating == [
-        ["systemctl", "disable", "--now", HASHED],
+        ["systemctl", "stop", HASHED],
+        ["systemctl", "disable", HASHED],
         ["systemctl", "daemon-reload"],
     ]
 
@@ -710,3 +713,46 @@ def test_the_update_probe_sees_a_suffixed_box(tmp_path: Path) -> None:
         unit=str(tmp_path / CANON), linger_dir=str(tmp_path), in_use=lambda: False
     )
     assert reason is not None and HASHED in reason
+
+
+def test_a_failed_reload_after_the_write_rolls_back(tmp_path: Path) -> None:
+    hashed = _hashed_unit(tmp_path)
+    sc = UnitSystemctl({HASHED: ("enabled", True)}, fail=["systemctl", "daemon-reload"])
+    with pytest.raises(regen.GatewayRegenError, match="daemon-reload"):
+        _migrate(tmp_path, sc)
+    assert hashed.exists() and not (tmp_path / CANON).exists()
+    assert sc.states[HASHED] == ("enabled", True)
+
+
+def test_a_failed_disable_after_the_stop_restores_the_suffixed_unit(tmp_path: Path) -> None:
+    hashed = _hashed_unit(tmp_path)
+    sc = UnitSystemctl({HASHED: ("enabled", True)}, fail=["systemctl", "disable"])
+    with pytest.raises(regen.GatewayRegenError):
+        _migrate(tmp_path, sc)
+    assert hashed.exists() and not (tmp_path / CANON).exists()
+    assert sc.states[HASHED] == ("enabled", True)  # stopped by this run, started again
+
+
+def test_the_update_heal_still_fails_on_a_non_linger_follow_up(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    _hashed_unit(tmp_path)
+    sc = UnitSystemctl({HASHED: ("enabled", True)})
+    real = regen.regenerate_gateway_unit
+    calls = {"n": 0}
+
+    def wrapped(**kw: Any) -> regen.RegenResult:
+        calls["n"] += 1
+        if calls["n"] == 2:  # the follow-up tail
+            raise regen.GatewayRegenError("systemctl restart failed: boom")
+        return real(**kw)
+
+    monkeypatch.setattr(regen, "regenerate_gateway_unit", wrapped)
+    with pytest.raises(regen.GatewayRegenError, match="restart"):
+        regen.regenerate_gateway_unit(
+            unit_path=tmp_path / CANON,
+            linger_dir=str(tmp_path),
+            run=sc,
+            uid_of=lambda name: UID,
+            which=_which,
+        )
