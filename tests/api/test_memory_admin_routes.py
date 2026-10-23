@@ -135,6 +135,39 @@ def test_leading_colon_bank_id_still_400(client: TestClient) -> None:
     assert r.json()["error"]["code"] == "memory.invalid_bank"
 
 
+def test_dotted_bank_id_forwards(client: TestClient, recorder: _Recorder) -> None:
+    """The hindsight coding-agent plugin names a bank after the repo, and repo
+    names carry dots (``coding-agent::ultrareview-1.4``). The grammar used to
+    block every dot as a "path trick", so such a bank browsed fine through the
+    engine but 400ed on every hal0 route — including its own delete."""
+    bank = "coding-agent::ultrareview-1.4"
+    recorder.respond(
+        "GET", f"/v1/default/banks/{bank}/stats", 200, {"bank_id": bank, "total_nodes": 1}
+    )
+    r = client.get(f"/api/memory/banks/{bank}/stats")
+    assert r.status_code == 200, r.json()
+    assert recorder.requests[-1]["path"] == f"/v1/default/banks/{bank}/stats"
+
+
+def test_dotted_bank_id_delete_forwards(client: TestClient, recorder: _Recorder) -> None:
+    bank = "coding-agent::ultrareview-1.4"
+    r = client.delete(f"/api/memory/banks/{bank}?confirm={bank}")
+    assert r.status_code == 200, r.json()
+    assert recorder.requests[-1]["method"] == "DELETE"
+    assert recorder.requests[-1]["path"] == f"/v1/default/banks/{bank}"
+
+
+@pytest.mark.parametrize("bank", ["...", ".hidden", "a..b", "bad..id"])
+def test_dot_segment_bank_ids_still_400(client: TestClient, bank: str) -> None:
+    """Dots are allowed inside an id; a dot-only segment, a leading dot and a
+    ``..`` run are not — those are the shapes that read as path syntax. (A
+    bare ``.``/``..`` segment never reaches the handler: the HTTP client
+    normalises it away before the request leaves.)"""
+    r = client.get(f"/api/memory/banks/{bank}/stats")
+    assert r.status_code == 400, (bank, r.status_code)
+    assert r.json()["error"]["code"] == "memory.invalid_bank"
+
+
 # ── #1796: unknown-bank stats must 404, not 200 with zeroed counters ───────────
 
 
