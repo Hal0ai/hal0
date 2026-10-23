@@ -184,8 +184,10 @@ one line and a link here rather than a repeat.
   actually controls what a slot runs on.
 - **Storage** — where hal0 reads and writes model files on disk. Covered
   in detail below.
-- **Memory** — the memory engine, graph extraction, and reranker. See
-  [Enable memory](/docs/guides/enable-memory).
+- **Memory** — the memory engine, graph extraction, and reranker. The
+  graph panel's **Engine model** picker chooses a local slot or an upstream
+  model for the engine and applies without a restart; the agents Memory tab
+  carries the same picker. See [Enable memory](/docs/guides/enable-memory).
 - **Updates** — signed self-update plus version/license identity. See
   [Update and roll back](/docs/guides/update-and-rollback).
 - **Advanced** — low-level dispatcher and activity-log tuning rendered

@@ -64,7 +64,11 @@ WantedBy=multi-user.target
   not an isolation boundary. The installer omits the line on a host that has
   no `systemd-journal` group. `hal0 update` does not rewrite this unit:
   re-run the installer once after updating to 1.4.0. `hal0 doctor all` warns
-  (`API journal read`) until it has been.
+  (`API journal read`) until it has been. Until then the Logs page's slot
+  channel and the slot log drawer show a notice naming the cause and the fix (a
+  `degraded` frame, held open with keepalives) instead of reconnecting in a
+  loop, the one-shot slot log tail carries the same hint, and
+  `hal0 slot logs --follow` prints the reason and returns.
 - **User/group** — `hal0:hal0`. Root-only operations (writing per-slot
   units, `daemon-reload`, restarting itself during an update) go through a
   narrow `sudo -n` wrapper (`hal0-systemctl`) rather than running the daemon
@@ -98,7 +102,7 @@ WantedBy=multi-user.target
 
 ### Hermes interpreter policy
 
-The Hermes venv runs on exactly one Python minor, which the pinned Hermes commit decides: the newest of 3.14 and 3.12 that its `requires-python` admits. The current pin, v0.22.2 (`d923a5eb`), declares `>=3.11,<3.15`, so Hermes runs on a uv-managed CPython 3.14 under `/var/lib/hal0/hermes/python/cpython-3.14*`, with its dependencies installed from upstream's hash-locked `uv.lock`. Before 1.6.0 the pin capped below 3.14 and Hermes ran on 3.12; the first `hal0 update` that carries the new pin builds the 3.14 release next to the old one, switches, and rewrites `/etc/hal0/hermes-python.env` (the old 3.12 value is discarded with a `hermes-python-discarded` warning). When a build needs an interpreter for that minor, hal0 checks these in order:
+The Hermes venv runs on exactly one Python minor, which the pinned Hermes commit decides: the newest of 3.14 and 3.12 that its `requires-python` admits. The current pin, v0.22.4 (`4d043038`), declares `>=3.11,<3.15`, so Hermes runs on a uv-managed CPython 3.14 under `/var/lib/hal0/hermes/python/cpython-3.14*`, with its dependencies installed from upstream's hash-locked `uv.lock`. Before 1.6.0 the pin capped below 3.14 and Hermes ran on 3.12; the first `hal0 update` that carries the new pin builds the 3.14 release next to the old one, switches, and rewrites `/etc/hal0/hermes-python.env` (the old 3.12 value is discarded with a `hermes-python-discarded` warning). When a build needs an interpreter for that minor, hal0 checks these in order:
 
 1. `HAL0_HERMES_PYTHON`, the operator's override, from the environment and then from `/etc/hal0/hermes-python.env`. A value that is not the target minor is discarded with a warning, and the interpreter is re-probed. A value whose interpreter links an SQLite older than 3.51.3 is still used, with a warning.
 2. A uv-managed CPython under `/var/lib/hal0/hermes/python`, fetched by the uv that ships in hal0's venv (`uv python install --managed-python`). It must link SQLite 3.51.3 or newer.
@@ -177,23 +181,49 @@ WantedBy=multi-user.target
   `HINDSIGHT_API_LLM_API_KEY=hal0-local-noauth` placeholder with the real
   client key. `installer/install.sh` writes that file at install time from
   `HAL0_CLIENT_KEY`/`HAL0_ADMIN_KEY` in `/etc/hal0/api.env`, and `hal0 auth
-  rotate` keeps it fresh afterward. An optional operator drop-in,
-  `hindsight-api.service.d/extraction-model.conf`, overrides
-  `HINDSIGHT_API_LLM_MODEL` and `HINDSIGHT_API_LLM_TIMEOUT` without editing the
-  installer-owned unit (written by `hal0 memory graph enable --slot <name>` or
-  the Memory dashboard page). That drop-in lives under `/etc/systemd/system`
+  rotate` keeps it fresh afterward. A hal0-owned drop-in,
+  `hindsight-api.service.d/extraction-model.conf`, overrides the shipped unit
+  without editing it. Its model line is always `HINDSIGHT_API_LLM_MODEL=hal0/memory`,
+  the virtual id hal0's `/v1` resolves on every call to the local
+  `[memory.graph].extraction_slot` or to the upstream model in
+  `extraction_model`. Choosing a slot or an upstream model (**Engine model** on
+  Settings → Data → Memory, or `hal0 memory graph enable --slot|--model|--local`)
+  is therefore a config write that applies at once and never restarts the
+  engine. The drop-in also carries `HINDSIGHT_API_LLM_TIMEOUT` and the extraction
+  limits (`HINDSIGHT_API_RETAIN_LLM_MAX_CONCURRENT`,
+  `HINDSIGHT_API_RETAIN_MAX_COMPLETION_TOKENS`,
+  `HINDSIGHT_API_RETAIN_LLM_MAX_RETRIES`, `HINDSIGHT_API_WORKER_MAX_RETRIES`,
+  `HINDSIGHT_API_WORKER_TASK_RETRY_BACKOFF_SECONDS`). Changing one of those
+  rewrites the file and restarts hindsight-api, and the first save after
+  upgrading from a release that pinned a slot id there repairs the drop-in the
+  same way. That drop-in lives under `/etc/systemd/system`
   and hal0-api runs unprivileged, so the write and the follow-up restart both
   route through the `hal0-systemctl` wrapper
   (`write-hindsight-dropin` + `svc-restart hindsight`). If the wrapper or its
   sudoers grant is missing, the API's response carries a non-null
-  `propagation.error` and the engine keeps its previous extraction target —
+  `propagation.error` and the engine keeps the drop-in it had —
   check `hal0 doctor` for the seam rows. The wrapper allow-lists the drop-in
-  body on the root side: only `#` comments, a single `[Service]` header and the
-  two `Environment=HINDSIGHT_API_LLM_*` assignments are accepted, so a
+  body on the root side: only `#` comments, a single `[Service]` header and
+  `Environment=` assignments of the seven keys above are accepted
+  (`HINDSIGHT_API_LLM_MODEL` must be a `hal0/<name>` value), so a
   hand-crafted fragment (`ExecStart=`, `User=`, any other directive) is
   rejected rather than written. Run
   `hal0-systemctl check-dropin hindsight < body` to see why a body was refused;
   it validates and echoes without writing anything.
+- **Overrides in `hindsight-llm.env` win.** systemd applies `EnvironmentFile=`
+  after every `Environment=` line in the unit and its drop-ins. A
+  `HINDSIGHT_API_LLM_PROVIDER`, `HINDSIGHT_API_LLM_BASE_URL` or
+  `HINDSIGHT_API_LLM_MODEL` line in `/etc/hal0/hindsight-llm.env` therefore beats
+  `hal0/memory` and whatever you picked under **Engine model**: hal0 reports the
+  slot or model you chose while the engine runs the override. The **Engine
+  running** row on Settings → Data → Memory (highlighted when an override applies),
+  `hal0 memory graph status` and `engine_llm` in `GET /api/memory/graph/status`
+  name the provider and model hindsight-api actually loads, read from the
+  running engine process; when hal0-api can read neither the process nor the
+  file, they say `cannot verify` instead of claiming no override. Remove the lines and
+  restart hindsight-api to hand the choice back to hal0. The installer (on a box
+  that has a key) and `hal0 auth rotate` rewrite the file with the API key line
+  only, which drops any override you added.
 - **Data root** — embedded Postgres at `/var/lib/hal0/memory/hindsight/.pg0`,
   pinned via the unit's `HOME=` env (Hindsight has no dedicated data-dir
   variable of its own).
@@ -202,8 +232,8 @@ WantedBy=multi-user.target
 
 | File | Purpose |
 |---|---|
-| `/etc/hal0/hindsight-llm.env` | Optional `EnvironmentFile`, `-` prefixed (ignored if absent) — supplies the real `HINDSIGHT_API_LLM_API_KEY`, written by `installer/install.sh` and kept fresh by `hal0 auth rotate`. |
-| `hindsight-api.service.d/extraction-model.conf` | Optional systemd drop-in under `/etc/systemd/system` — overrides `HINDSIGHT_API_LLM_MODEL`/`HINDSIGHT_API_LLM_TIMEOUT`, written via `hal0 memory graph enable --slot <name>` or the Memory dashboard page. |
+| `/etc/hal0/hindsight-llm.env` | Optional `EnvironmentFile`, `-` prefixed (ignored if absent) — supplies the real `HINDSIGHT_API_LLM_API_KEY`, written by `installer/install.sh` and kept fresh by `hal0 auth rotate`. A `HINDSIGHT_API_LLM_PROVIDER`, `_BASE_URL` or `_MODEL` line here overrides hal0's engine target. |
+| `hindsight-api.service.d/extraction-model.conf` | hal0-owned systemd drop-in under `/etc/systemd/system` — sets `HINDSIGHT_API_LLM_MODEL=hal0/memory`, `HINDSIGHT_API_LLM_TIMEOUT` and the extraction limits; written when the timeout or a limit changes (`hal0 memory graph enable`, the Memory settings page) or the file is stale. |
 
 ### Health endpoint
 
@@ -294,6 +324,8 @@ shows the linger state on its `hal0_linger` row, and if the verb fails
 hermes` and `installer/uninstall.sh` run `loginctl disable-linger hal0`. A
 gateway the operator disabled or masked is left off by the installer,
 `hal0 agent install hermes` and `hal0 update`.
+
+From Hermes v0.22.3 the gateway daemon owns chat turns and the session store. The dashboard's default Chat tab still runs its turns in the dashboard process and needs no gateway. A chat opened for another profile (such as `hal0-brain`) and the classic `hermes chat` CLI are gateway clients that attach to `hermes-gateway.service`. hal0 keeps the unit file installed even when you turn the gateway off (it only ever runs `systemctl disable --now`, never removes the file), because an installed unit in any state is what stops a client from starting a gateway of its own. `hal0 doctor` has a `Hermes gateway unit` row (`hermes-gateway-unit`) that fails when the file is missing or a `gateway run --idle-exit` process is running, and the `hermes-api` row warns rather than fails while the gateway is off. To chat in another profile, run the gateway with `sudo systemctl enable --now hermes-gateway`. During `hal0 update`, a gateway unit whose `ExecStart`, `ExecStop` or `ExecStopPost` is not hal0's launcher (for example one written by `hermes gateway install` outside hal0) is rewritten to hal0's launcher while the gateway is stopped, before the new release starts.
 
 Hindsight's entry here isn't a second thing to learn: the Services page's
 buttons for it run through the identical `unit_action` → `hal0-systemctl`

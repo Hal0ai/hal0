@@ -334,9 +334,11 @@ agent. It renders `config.yaml`, `hermes.env`, persona TOMLs, the MCP
 server entries (`hal0-admin`, `hal0-memory`), the system-prompt addendum,
 and the composite `hal0` upstream config — all idempotently.
 
+The terminal gate is part of that overlay. With the terminal off, hal0 writes `terminal.backend: hal0-terminal-off` (`TERMINAL_OFF_BACKEND`) into the Hermes root config and every wired profile. Hermes rejects the backend in its tool availability check, so `terminal` and `process_manage` drop out of every model-facing schema, including side agents that ignore `agent.disabled_toolsets`. A docker or ssh backend the operator chose is saved under `hal0.terminal_backend_saved` and restored when the terminal is switched back on; `hal0 update` applies the gate and restarts Hermes when it changed. Hermes logs `Unknown TERMINAL_ENV` at ERROR every 30 s while the gate is on; that line is expected.
+
 ### Release layout
 
-Every path that builds the Hermes venv (install, `hal0 agent reprovision hermes --repair`, `hal0 agent upgrade hermes`, and the `hal0 update` converge) goes through `ensure_release` in `src/hal0/agents/hermes_release.py` (ADR-0032, ADR-0034). It builds an immutable release under `/var/lib/hal0/hermes/releases/<sha12>-<stamp>/` (a `src/` worktree of the pinned commit, a `venv/`, and `release.json`) from upstream's lockfile, on a uv-managed CPython 3.14 kept in `/var/lib/hal0/hermes/python/`. The release is checked (imports, `hermes --help`, MCP probe) before the `current` symlink flips to it; `previous` keeps the last good release. `/var/lib/hal0/venvs/hermes` is a symlink to `/var/lib/hal0/hermes/current/venv` once a host has migrated (`src/hal0/agents/hermes_layout.py`). Activation stops the agent and gateway, switches `current`, runs `hermes config migrate`, and restarts; a failed re-check flips back to `previous` and restores `config.yaml`. `hal0 agent upgrade hermes --to <40-hex sha>` accepts only a commit in `VETTED_HERMES_REFS`.
+Every path that builds the Hermes venv (install, `hal0 agent reprovision hermes --repair`, `hal0 agent upgrade hermes`, and the `hal0 update` converge) goes through `ensure_release` in `src/hal0/agents/hermes_release.py` (ADR-0032, ADR-0034). It builds an immutable release under `/var/lib/hal0/hermes/releases/<sha12>-<stamp>/` (a `src/` worktree of the pinned commit, a `venv/`, and `release.json`) from upstream's lockfile, on a uv-managed CPython 3.14 kept in `/var/lib/hal0/hermes/python/`. The release is checked (imports, `hermes --help`, MCP probe) before the `current` symlink flips to it; `previous` keeps the last good release. `/var/lib/hal0/venvs/hermes` is a symlink to `/var/lib/hal0/hermes/current/venv` once a host has migrated (`src/hal0/agents/hermes_layout.py`). Activation stops the agent and gateway, switches `current`, runs `hermes config migrate`, and restarts; a failed re-check flips back to `previous` and restores `config.yaml`. `hal0 agent upgrade hermes --to <40-hex sha>` accepts only a commit in `VETTED_HERMES_REFS`, and refuses one that is an older release than the installed one (a downgrade).
 
 The gateway unit (`/etc/systemd/system/hermes-gateway.service`) is rendered by upstream's `hermes gateway install --system`; `hermes_gateway_unit.py` rewrites every release-local path in it to `/var/lib/hal0/hermes/current/`. On `hal0 update` the root verb `hal0-update hermes-gateway` runs `hermes_gateway_regen.py`, which regenerates a stale unit without running Hermes code as root and enables systemd linger for the `hal0` user (kanban and cron workers need the user manager). A gateway the operator disabled or masked stays off.
 
@@ -388,7 +390,7 @@ The gateway unit (`/etc/systemd/system/hermes-gateway.service`) is rendered by u
   `MemoryProvider` (`src/hal0/memory/provider.py`), whose default engine
   is Hindsight (`src/hal0/memory/hindsight_provider.py`); the cognee
   wrapper was removed (Hindsight is the only memory engine). Per-agent
-  private namespace = `private:<agent_id>`.
+  private namespace = `private:<client_id>`. The engine's own extraction LLM always calls one virtual model id, `hal0/memory`, which the `/v1` dispatcher (`src/hal0/api/routes/v1.py`, `MEMORY_ALIAS` in `src/hal0/memory/extraction_env.py`) resolves on every call: to the upstream model named by `[memory.graph].extraction_model` when set, otherwise to the local `[memory.graph].extraction_slot`. Switching target is therefore a config write that applies at once with no engine restart. An upstream target is upstream-only and never falls back to a slot.
 * **Approvals & audit** — every gated tool invocation (`model_pull`,
   `slot_delete`, `config_write`, `memory_delete` >1) goes through the
   approval inbox at `/api/agent/approvals`; the SidebarAgentBlock's
@@ -443,7 +445,7 @@ These decisions are settled. Some are recorded as ADRs in `docs/adr/`
   does not build its own runtime.
 * **MCP allow-list** — the MCP client is default-deny on two axes
   (server-axis + tool-axis); a persona's `tools_allowed` opens the gate.
-* **Upstream pin** — the bundled Hermes runtime is pinned to NousResearch/hermes-agent v0.22.2 (commit `d923a5eb`) with periodic
+* **Upstream pin** — the bundled Hermes runtime is pinned to NousResearch/hermes-agent v0.22.4 (commit `4d043038`) with periodic
   drift detection rather than tracking upstream `main` (ADR-0034). It installs from upstream's lockfile into a release on a uv-managed Python 3.14 (ADR-0032).
 * **LLM roles** — the canonical chat roles are `agent` (default anchor)
   and `utility`; the older `chat` / `primary` roles are retired.
@@ -456,13 +458,13 @@ These decisions are settled. Some are recorded as ADRs in `docs/adr/`
 
 ### Upstream pin
 
-The Hermes-Agent upstream commit hal0 builds and tests against (v0.22.2, `d923a5eb`) is recorded in `pyproject.toml [tool.hal0.upstream-hermes]`. The
+The Hermes-Agent upstream commit hal0 builds and tests against (v0.22.4, `4d043038`) is recorded in `pyproject.toml [tool.hal0.upstream-hermes]`. The
 weekly `hermes-sdk-diff` GitHub Action opens a drift issue when one of
 the tracked files changes between the pin and upstream HEAD. Bump
 process: review issue, edit shim adapters if needed, run
 `scripts/hermes-sdk-diff.sh --bump <sha>`, δ-harness + γ-suite, open
 `chore(hermes): bump upstream pin to <short-sha>` PR. The pin is bumped
-only through this human-gated path — never auto-merged. The same commit is named in `installer/agents/hermes/requirements.txt`, and `VETTED_HERMES_REFS`, and `tests/agents/hermes/test_contract_compatibility.py` keeps them in lockstep with the frozen contract fixtures (ADR-0034 decision 8).
+only through this human-gated path — never auto-merged. The same commit is named in `installer/agents/hermes/requirements.txt`, and `VETTED_HERMES_REFS`, and `tests/agents/hermes/test_contract_compatibility.py` keeps them in lockstep with the frozen contract fixtures (ADR-0034 decision 8). v0.22.2 (`d923a5eb`) stays in `VETTED_HERMES_REFS` only so the automatic flip-back after a failed activation and a box still on it keep working; `hal0 agent upgrade hermes --to` refuses to build the older vetted release over a newer one (`VETTED_HERMES_VERSIONS`), because the newer release's `state.db` holds persisted gateway runtime state that the older release predates.
 
 ## Glossary
 

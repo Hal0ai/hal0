@@ -124,11 +124,15 @@ Shows whether extraction is on, the configured extraction slot (and
 whether it currently resolves to a live enabled `llm` slot), the engine
 target `hal0/memory` resolves to, the available slots and upstream models
 you could pick instead, build/error counters, and **Engine running**: the
-provider, base URL and model `hindsight-api` actually loads. If
-`/etc/hal0/hindsight-llm.env` carries `HINDSIGHT_API_LLM_PROVIDER`,
-`_BASE_URL` or `_MODEL` lines, that row says so in red — systemd applies
-that file after every other setting, so hal0's picker has no effect until
-those lines are removed and `hindsight-api` is restarted.
+provider, base URL and model `hindsight-api` actually loads, read from the
+running engine process itself. If `/etc/hal0/hindsight-llm.env` carries
+`HINDSIGHT_API_LLM_PROVIDER`, `_BASE_URL` or `_MODEL` lines, that row says
+so in red — systemd applies that file after every other setting, so hal0's
+picker has no effect until those lines are removed and `hindsight-api` is
+restarted. With the engine down, the row shows what the unit and that file
+would give it at the next start. When hal0-api can read neither the engine
+process nor the file, the row says `cannot verify` in yellow rather than
+claiming there is no override.
 
 </TabItem>
 <TabItem label="Enable">
@@ -146,7 +150,9 @@ server validates the choice against the live enabled-slot set and rejects
 an unknown or non-llm slot before it ever reaches `hal0.toml`. `--model`
 names an upstream model id as `hal0 memory graph status` lists it under
 "Upstream models"; the server rejects an id no configured upstream
-advertises. The dashboard's **Engine model** picker (Settings → Data →
+advertises. That list is filled right after a `hal0-api` restart: the
+status call fetches each provider's catalog when its cache is empty, and
+retries a provider that is offline at most once a minute. The dashboard's **Engine model** picker (Settings → Data →
 Memory, and the agents Memory tab) offers the same two groups. On a box
 upgraded from an earlier release the first save repoints `hindsight-api`
 at `hal0/memory` once (one drop-in write and restart); until then the
@@ -246,6 +252,8 @@ Deleting a whole bank requires `--confirm <bank>` to exactly match the
 target bank id — the CLI refuses before the request even reaches the
 server if it doesn't, and the server enforces the same check independently.
 
+A bank id starts with a letter or digit and continues with letters, digits, `.`, `_`, `:` or `-`, up to 128 characters in all. Dots are legal inside an id, so a bank the hindsight coding-agent plugin named after a repository (`coding-agent::ultrareview-1.4`) can be managed and deleted through hal0: its stats, profile, config and delete routes under `/api/memory/banks/{bank_id}` accept it. A leading dot, a dot-only segment and any `..` run are refused. The dashboard's new-bank form accepts the same grammar.
+
 `bank profile set` writes every flag as a bank-config override in one
 config PATCH: `--skepticism`/`--literalism`/`--empathy` (1–5 disposition
 traits) and `--retain-mission`/`--observations-mission`/`--reflect-mission`.
@@ -254,6 +262,8 @@ get` shows the bank's name, mission and effective disposition. The memory
 engine's own `/profile` endpoint answers `410 Gone` from Hindsight 0.10.0 on;
 hal0's `/api/memory/banks/<bank>/profile` keeps working by composing the same
 answer from the bank list and the bank config.
+
+`--reflect-mission` is the text the Memory workspace shows under the bank picker as the bank's description. You can also edit it there in place; see [The bank bar](/docs/guides/memory-workspace#the-bank-bar).
 
 ## Async operations and mental models
 

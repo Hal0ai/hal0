@@ -32,8 +32,8 @@ dir, and a watchdog. Crucially, the agent's secret files stay root-owned and
 unreadable to the `hal0` user, so the agent can't read its own credential
 store even though it can write to hal0's data paths.
 
-hal0 pins Hermes to one reviewed upstream release, v0.22.2 (commit
-`d923a5eb`) from hal0 1.6.0. Every build (install, repair, upgrade, and the
+hal0 pins Hermes to one reviewed upstream release, v0.22.4 (commit
+`4d043038`), the pin since hal0 1.6.0. Every build (install, repair, upgrade, and the
 converge pass of `hal0 update`) produces an immutable release under
 `/var/lib/hal0/hermes/releases/<id>/` on a uv-managed Python 3.14, installed
 from upstream's hash-locked `uv.lock` and checked (imports, `hermes --help`, an
@@ -52,6 +52,14 @@ A release also carries the SDKs for the messaging platforms the box configures
   systemd manager. `hal0 doctor all` shows the linger state, and uninstalling
   Hermes turns it off.
 
+The pin only moves forward. `hal0 agent upgrade hermes --to` takes only a
+vetted commit and refuses to build an older vetted release over a newer one's
+`state.db`, because the gateway's persisted runtime state would then run under
+a release that predates it. Once v0.22.4 is live, a request for the older
+vetted v0.22.2 build is refused as a downgrade. That older commit stays
+vetted so the automatic flip-back to the previous release when a new one fails
+its start check, and a box still on it, keep working.
+
 The agent process binds to **loopback only**. Chatting with Hermes happens in
 Hermes's own dashboard (its Chat tab), which the hal0 dashboard links to once
 `HAL0_HERMES_PUBLIC_URL` is set; hal0 does not proxy it. The old agent chat
@@ -66,6 +74,19 @@ dashboard's session token, which Hermes would otherwise mint fresh at every
 start; hal0 mints one per install and hands it to the dashboard at every
 start, so the pairing survives restarts and `hal0 update`. Read it with
 `hal0 agent dashboard-token hermes`.
+
+From Hermes v0.22.3, a chat scoped to a profile and the `hermes chat` CLI
+need the managed `hermes-gateway.service`; without it they would start an
+unmanaged gateway of their own. hal0 keeps the unit file installed even when
+you turn the gateway off, so a client never has to. To chat in another profile,
+run the gateway with `sudo systemctl enable --now hermes-gateway`.
+`hal0 doctor all` has a `Hermes gateway unit` row that fails when the unit
+file is missing, when a standalone profile lacks its own unit, or when a stray
+`gateway run --idle-exit` process is running. The `Hermes API upstreams` row
+warns, rather than fails, when you turned the gateway off. The dashboard's
+Hermes and Pi cards read all of this from one admin route,
+`GET /api/agents/{name}/overview` (cached 30 s, `?refresh=1` rebuilds it); see
+the [REST API reference](/docs/reference/api/rest-api#agent-overview-apiagentsnameoverview).
 
 ### Profiles, Open WebUI and delegation
 
@@ -86,6 +107,18 @@ Hermes's `delegate_task` children run on the `agent` slot by default. The
 `delegation_slot` key in the `[hermes]` table of `/etc/hal0/agents/hermes.toml`
 moves them to another slot; see
 [Run agents](/docs/guides/run-agents#delegation-slot).
+
+Hermes's terminal tool is off unless you opt in (see
+[Run agents](/docs/guides/run-agents)). While it is off, hal0 writes
+`terminal.backend: hal0-terminal-off` into the Hermes root config and every
+wired profile. Hermes rejects that backend in the terminal tool's own
+availability check, so `terminal` and `process_manage` drop out of every tool
+schema, including the gateway's preview-restart side agent, which ignores
+`agent.disabled_toolsets` from v0.22.3. A docker or ssh backend you chose
+earlier is saved under `hal0.terminal_backend_saved` and restored when you opt
+back in. `hal0 update` applies the gate to an existing box.
+Hermes logs `Unknown TERMINAL_ENV 'hal0-terminal-off'` at ERROR about every 30
+seconds while tools are listed; on a terminal-off box that line is expected.
 
 <Aside type="note">
 "Bundle, don't build" is the explicit design stance. hal0 governs and wires
@@ -111,6 +144,15 @@ recall/retain, per-repo banks). Status in `hal0 agent list` derives from a
 marker in the agent's data dir plus a `pi`-on-PATH probe — the daemon
 cannot read the operator's `0700` home, so it never inspects `~/.pi`
 directly.
+
+Re-pin an installed pi with `sudo hal0 agent upgrade pi`, run the same way you
+installed it. It reruns the pinned installer and redeploys hal0's two
+extensions, and leaves extensions you added, your default provider, model and
+theme alone. It refuses when pi's profile is in a different home or pi is not
+installed, and `--to` stays Hermes-only. A fresh `hal0 agent install pi` from a
+git checkout seeds a name-keyed `banks` alias (`coding-agent::hal0` to
+`coding-agent::hal0-mono`) in `~/.hindsight/coding-agent.json`; `upgrade pi`
+adds the alias to an existing file.
 
 The dashboard's Agents view shows Pi as a live card: the installed pi and
 adapter versions against the pins (with an update badge when it is behind),

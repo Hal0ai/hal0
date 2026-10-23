@@ -34,10 +34,13 @@ Accepted values: `stable` (default), `preview`, `nightly`.
 
 ## Requirements
 
-- **curl** and **ca-certificates** — the bootstrap one-liner needs them to
-  fetch and verify the release manifest. Minimal cloud/LXC images often
-  ship without either: `apt-get install -y curl ca-certificates` (or the
-  equivalent for your distro).
+- **curl** and **ca-certificates** — the one-liner needs them to fetch the
+  bootstrap at all. Minimal cloud/LXC images, including a stock Ubuntu 24.04
+  Proxmox container, ship without curl:
+  `apt-get update && apt-get install -y curl ca-certificates` (or the
+  equivalent for your distro). The bootstrap then checks for `tar`,
+  `sha256sum`, `jq` and `python3`, installs any that are missing with the
+  system package manager, and fetches its own pinned `cosign`.
 - **Linux, x86_64** — hal0 ships amd64-only binaries (the FastFlowLM
   `.deb` and the runner container images). ARM and macOS/Windows are not
   supported.

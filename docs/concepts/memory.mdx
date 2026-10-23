@@ -200,8 +200,17 @@ Two concepts sit alongside plain facts:
     answer is kept refreshed from memory rather than re-derived on every
     ask. Created with a `name` and `source_query`; the first answer builds
     as an async operation, and later refreshes are triggered manually with
-    `memory_mental_model_refresh`; a mental model can be marked `is_stale`, surfaced in the
-    dashboard as a warning badge.
+    `memory_mental_model_refresh`. Each row in the dashboard shows when the
+    model last refreshed. Hindsight's `is_stale` only means the bank was
+    written since then, which on a busy bank is nearly always true, so it is
+    a quiet dot ("new memories since"), not a warning; the warning and a
+    "refresh failed" chip are kept for a refresh that failed after the last
+    success. Each bank has a refresh floor
+    (`mental_model_min_refresh_interval_seconds`: after every consolidation,
+    or at most hourly, every 4 h, every 12 h or daily) set from the bank bar
+    or with `hal0 memory bank profile set <bank> --min-refresh-interval
+    <seconds>`; a model with its own `trigger.min_refresh_interval_seconds`
+    keeps that instead.
   </Card>
 </CardGrid>
 
@@ -221,7 +230,7 @@ that union so the most relevant facts surface first. Configured under
   `8.0`) — HTTP budgets. A timeout or an unreachable reranker never blocks
   recall: it fails soft back to the fused vector ordering.
 
-The dashboard's Settings → Memory page has a picker for `rerank_model`: the
+The dashboard's Settings → Data → Memory page has a picker for `rerank_model`: the
 schema default is offered as "builtin", plus every model in the
 capabilities catalog tagged for reranking (labelled with its serving
 backend), plus whatever is currently saved if it's outside both lists. Free
@@ -266,13 +275,30 @@ even on a fresh install, under `[memory.graph]`:
   queued memory operation (consolidation and mental-model refresh too)
   shares them, since the engine has no retain-only task retry.
 
-All of them are propagated to the `hindsight-api` service as
-`HINDSIGHT_API_LLM_MODEL=hal0/<slot>`, `HINDSIGHT_API_LLM_TIMEOUT=<n>` and
-the matching `HINDSIGHT_API_RETAIN_*` / `HINDSIGHT_API_WORKER_*` limits via
-a systemd drop-in at `/etc/systemd/system/hindsight-api.service.d/extraction-model.conf`,
-followed by `daemon-reload` + a service restart — all routed through hal0's
-privileged-operation seam rather than hal0-api (which runs unprivileged)
-touching `/etc/systemd` directly.
+The timeout and the extraction limits are propagated to the `hindsight-api`
+service as `HINDSIGHT_API_LLM_TIMEOUT=<n>` and the matching
+`HINDSIGHT_API_RETAIN_*` / `HINDSIGHT_API_WORKER_*` limits through a systemd
+drop-in at
+`/etc/systemd/system/hindsight-api.service.d/extraction-model.conf`, followed
+by `daemon-reload` and a service restart. The same drop-in always carries
+`HINDSIGHT_API_LLM_MODEL=hal0/memory`, so changing the slot or
+`extraction_model` rewrites nothing and restarts nothing; only a timeout or
+limit change restarts the engine, and a stale or missing drop-in is repaired
+on any save. The write and restart go through hal0's privileged-operation seam
+rather than hal0-api (which runs unprivileged) touching `/etc/systemd`
+directly.
+
+Pick the engine model under **Engine model** on Settings → Data → Memory or on the
+agents Memory tab (Local slots / Upstream models), or from the CLI with
+`hal0 memory graph enable --model <id>`; `--local` returns to the local
+`extraction_slot`, and `--model` cannot be combined with `--slot` or
+`--local`. `GET /api/memory/graph/status` reports `target`, `available_models`
+and `engine_llm`. The **Engine running** row names the provider and model
+hindsight-api really loads, read from the running engine process. If
+`/etc/hal0/hindsight-llm.env` overrides the model, the row flags it: systemd
+applies that file after every hal0 setting, so the override wins over your
+choice until you remove it. When hal0-api can read neither the process nor
+that file, the row says it cannot verify rather than reporting no override.
 
 <Aside type="note">
 A memory write is refused (fast, with a clear error) rather than silently
