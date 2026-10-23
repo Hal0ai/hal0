@@ -149,6 +149,16 @@ def _hal0_source_checkout() -> Path | None:
     return None
 
 
+def _is_hal0_managed_package(entry: object) -> bool:
+    """True for a ``packages`` entry hal0 rewrites: an old double-loading
+    extension entry or any ``pi-mcp-adapter`` pin. Matches the string form and
+    the object form's ``source``; anything else is the operator's."""
+    source = entry.get("source") if isinstance(entry, dict) else entry
+    return isinstance(source, str) and (
+        source in _LEGACY_PACKAGE_ENTRIES or source.startswith(_ADAPTER_PREFIX)
+    )
+
+
 def _pi_binary_on_path() -> bool:
     """Module-level seam so tests can monkeypatch the PATH probe."""
     return shutil.which("pi") is not None
@@ -192,7 +202,7 @@ class PiDriver(AgentDriver):
         # Ordering matters — the marker asserts the profile above landed.
         self._write_profile_marker()
 
-    def upgrade(self) -> None:
+    def upgrade(self) -> dict[str, bool]:
         """Re-pin pi on a box that already has it, without an uninstall.
 
         Runs the installer again (it installs the exact pins, so a box on an
@@ -206,7 +216,13 @@ class PiDriver(AgentDriver):
 
         Refuses to run as a different user than the one the marker names:
         the profile lives in that user's home, and redeploying into another
-        one would leave a second, half-wired profile behind."""
+        one would leave a second, half-wired profile behind. A
+        ``settings.json`` or ``mcp.json`` that is not a JSON object is refused
+        too, before anything runs, rather than replaced the way ``install``
+        would.
+
+        Returns ``{"hindsight_alias_added": bool}`` so the caller can tell the
+        operator that the shared Hindsight config was changed."""
         marker = self._profile_marker_path()
         try:
             marker_home = Path(json.loads(marker.read_text(encoding="utf-8"))["home"])
@@ -218,21 +234,35 @@ class PiDriver(AgentDriver):
         if marker_home != Path.home():
             raise AgentError(
                 f"pi was installed for {marker_home}, but this process runs as "
-                f"{Path.home()}: run this as the user who installed pi."
+                f"{Path.home()}: run this as the user who installed pi — re-run as "
+                "the user whose home holds the profile, e.g. "
+                f"`sudo HOME={marker_home} hal0 agent upgrade pi`, or uninstall "
+                "and reinstall pi."
             )
+        # install() starts over from an unusable settings.json / mcp.json; an
+        # upgrade would discard what the operator had in it, so refuse first.
+        self._require_json_object_or_absent(self._settings_file())
+        self._require_json_object_or_absent(self._mcp_config_path())
 
         self._run_installer_script("upgrade", bearer_token=None)
         self._deploy_extension(_PROVIDER_EXT_SRC, self._provider_ext_dst())
         self._deploy_extension(_HINDSIGHT_EXT_SRC, self._hindsight_ext_dst())
-        self._npm_install_hindsight_ext()
+        try:
+            self._npm_install_hindsight_ext()
+        except (subprocess.CalledProcessError, OSError) as exc:
+            raise AgentError(
+                f"npm install for the hindsight extension failed ({exc}); re-run "
+                "`sudo hal0 agent upgrade pi` once the registry is reachable"
+            ) from exc
         self._deploy_theme()
         # Packages only: the default provider/model/theme are the operator's
         # to change after install, and an upgrade must not revert them.
         self._write_pi_settings(defaults=False)
         self._write_mcp_config(bearer_token=None)
-        self._ensure_hindsight_alias()
+        alias_added = self._ensure_hindsight_alias()
         # Last, as in install(): the marker asserts the profile above landed.
         self._write_profile_marker()
+        return {"hindsight_alias_added": alias_added}
 
     def uninstall(self) -> None:
         # Best-effort: run the uninstall companion installer/agents/pi.sh
@@ -347,6 +377,25 @@ class PiDriver(AgentDriver):
     def _profile_marker_path(self) -> Path:
         return self._data_dir() / _PROFILE_MARKER
 
+    @staticmethod
+    def _require_json_object_or_absent(path: Path) -> None:
+        """Raise :class:`AgentError` unless ``path`` is absent or holds a JSON
+        object — the one case where rewriting it cannot lose operator data."""
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return
+        except OSError as exc:
+            raise AgentError(
+                f"{path} cannot be read ({exc}); fix it, then re-run the upgrade"
+            ) from exc
+        except json.JSONDecodeError:
+            data = None
+        if not isinstance(data, dict):
+            raise AgentError(
+                f"{path} is not a JSON object; fix or remove it, then re-run the upgrade"
+            )
+
     def _run_installer_script(self, action: str, *, bearer_token: str | None) -> None:
         """Run ``installer/agents/pi.sh`` (npm global install of both pins).
         ``install`` and ``upgrade`` share it so the script always sees the
@@ -456,14 +505,11 @@ class PiDriver(AgentDriver):
             existing["defaultProvider"] = "hal0"
             existing["defaultModel"] = "agent"
             existing["theme"] = "hal0"
-        packages = [
-            p
-            for p in existing.get("packages", [])
-            if isinstance(p, str)
-            and p not in _LEGACY_PACKAGE_ENTRIES
-            # An older adapter pin is replaced by the current one below.
-            and not p.startswith(_ADAPTER_PREFIX)
-        ]
+        # Entries are a string or, in pi's object form, ``{"source": ...}``
+        # carrying per-package options: the operator's, kept whole. Only a
+        # double-loading extension entry or an older adapter pin (replaced below)
+        # is dropped.
+        packages = [p for p in existing.get("packages", []) if not _is_hal0_managed_package(p)]
         for managed in _MANAGED_PACKAGES:
             if managed not in packages:
                 packages.append(managed)
@@ -619,11 +665,12 @@ class PiDriver(AgentDriver):
         operator already set (even to a different bank) is left alone, and a
         missing, unreadable or non-object file is not seeded here — that is
         :meth:`_write_hindsight_config`'s job at install time. The rewrite
-        keeps the file's mode: it may carry a token."""
+        keeps the file's mode and owner and writes through a symlink: it may
+        carry a token and may be managed elsewhere."""
         path = self._hindsight_client_config()
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
-            mode = stat.S_IMODE(path.stat().st_mode)
+            st = path.stat()
         except (OSError, json.JSONDecodeError):
             return False
         if not isinstance(data, dict):
@@ -632,12 +679,19 @@ class PiDriver(AgentDriver):
         if not isinstance(banks, dict) or _HINDSIGHT_ALIAS_ID in banks:
             return False
         banks[_HINDSIGHT_ALIAS_ID] = {"bank": _HINDSIGHT_SHARED_BANK}
-        tmp = path.with_suffix(".tmp")
+        # Write through a symlink (a dotfiles-managed file) instead of
+        # replacing the link with a regular file.
+        target = path.resolve()
+        tmp = target.with_suffix(".tmp")
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         try:
             os.write(fd, (json.dumps(data, indent=2) + "\n").encode("utf-8"))
-            os.fchmod(fd, mode)
+            os.fchmod(fd, stat.S_IMODE(st.st_mode))
+            # Run as root over another user's file, hand it back to its owner.
+            # Without the privilege the file ends up owned by whoever runs this.
+            with contextlib.suppress(PermissionError):
+                os.fchown(fd, st.st_uid, st.st_gid)
         finally:
             os.close(fd)
-        tmp.replace(path)
+        tmp.replace(target)
         return True

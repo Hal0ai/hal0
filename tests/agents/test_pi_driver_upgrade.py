@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import os
 import stat
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -84,7 +85,10 @@ def test_upgrade_reruns_installer_and_redeploys(
         json.dumps({"packages": ["npm:pi-mcp-adapter@2.31.0", "npm:other@1"]})
     )
 
-    d.upgrade()
+    result = d.upgrade()
+
+    # No coding-agent.json on this box: nothing to add the alias to.
+    assert result == {"hindsight_alias_added": False}
 
     assert fake_runner.calls[0][0][:2] == ["bash", str(driver_mod.installer_script_path("pi"))]
     # Same env contract as install(): the data dir and API URL reach the script.
@@ -108,8 +112,11 @@ def test_upgrade_refuses_wrong_user(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_runner: _FakeRunner
 ) -> None:
     d = _driver_with_marker(tmp_path, monkeypatch, fake_runner, marker_home="/somewhere/else")
-    with pytest.raises(AgentError, match="run this as the user who installed pi"):
+    with pytest.raises(AgentError, match="run this as the user who installed pi") as err:
         d.upgrade()
+    # The error names the way out: the home the marker holds, or a reinstall.
+    assert "sudo HOME=/somewhere/else hal0 agent upgrade pi" in str(err.value)
+    assert "uninstall and reinstall pi" in str(err.value)
     assert fake_runner.calls == []
     assert not d._settings_file().exists()
 
@@ -245,8 +252,120 @@ def test_upgrade_seeds_alias_into_existing_hindsight_config(
     cfg.parent.mkdir(parents=True)
     cfg.write_text(json.dumps({"apiUrl": "http://other:9177"}))
 
-    d.upgrade()
+    result = d.upgrade()
 
+    assert result == {"hindsight_alias_added": True}
     data = json.loads(cfg.read_text())
     assert data["apiUrl"] == "http://other:9177"
     assert data["banks"] == {"coding-agent::hal0": {"bank": "coding-agent::hal0-mono"}}
+
+
+def test_write_pi_settings_keeps_object_form_packages(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_runner: _FakeRunner
+) -> None:
+    """pi accepts ``{"source": ..., "skills": []}`` package entries. They are the
+    operator's: kept as they are, unless the source is one hal0 manages."""
+    d = _driver_with_marker(tmp_path, monkeypatch, fake_runner)
+    d._settings_file().parent.mkdir(parents=True, exist_ok=True)
+    d._settings_file().write_text(
+        json.dumps(
+            {
+                "packages": [
+                    "npm:other@1",
+                    {"source": "npm:my-package", "skills": []},
+                    {"source": "npm:pi-mcp-adapter@2.31.0"},
+                    {"source": "extensions/hindsight"},
+                ]
+            }
+        )
+    )
+
+    d._write_pi_settings(defaults=False)
+
+    assert json.loads(d._settings_file().read_text())["packages"] == [
+        "npm:other@1",
+        {"source": "npm:my-package", "skills": []},
+        "npm:pi-mcp-adapter@5.3.0",
+    ]
+
+
+class _NpmFailsRunner(_FakeRunner):
+    def run(self, argv, **kwargs):
+        if argv[0] == "npm":
+            raise subprocess.CalledProcessError(1, argv)
+        return super().run(argv, **kwargs)
+
+
+def test_upgrade_wraps_a_failing_hindsight_npm_install(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    d = _driver_with_marker(tmp_path, monkeypatch, _NpmFailsRunner())
+    with pytest.raises(AgentError, match="npm install for the hindsight extension failed") as err:
+        d.upgrade()
+    assert "sudo hal0 agent upgrade pi" in str(err.value)
+    assert isinstance(err.value.__cause__, subprocess.CalledProcessError)
+
+
+@pytest.mark.parametrize(
+    ("filename", "content"),
+    [("settings.json", "[]"), ("mcp.json", "{not json")],
+)
+def test_upgrade_refuses_to_replace_an_unusable_config(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fake_runner: _FakeRunner,
+    filename: str,
+    content: str,
+) -> None:
+    """install() starts over from an unusable settings.json / mcp.json; an
+    upgrade must not silently discard what the operator had in it."""
+    d = _driver_with_marker(tmp_path, monkeypatch, fake_runner)
+    path = d._pi_agent_dir() / filename
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content)
+
+    with pytest.raises(AgentError, match="is not a JSON object; fix or remove it") as err:
+        d.upgrade()
+
+    assert str(path) in str(err.value)
+    assert path.read_text() == content
+    assert fake_runner.calls == []  # refused before the installer ran
+
+
+def test_ensure_hindsight_alias_writes_through_a_symlink(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_runner: _FakeRunner
+) -> None:
+    """A dotfiles-managed coding-agent.json is a symlink: the alias lands in
+    its target and the link stays a link."""
+    d = _driver_with_marker(tmp_path, monkeypatch, fake_runner)
+    real = tmp_path / "dotfiles" / "coding-agent.json"
+    real.parent.mkdir()
+    real.write_text(json.dumps({"apiUrl": "http://127.0.0.1:9177"}))
+    cfg = d._hindsight_client_config()
+    cfg.parent.mkdir(parents=True)
+    cfg.symlink_to(real)
+
+    assert d._ensure_hindsight_alias() is True
+
+    assert cfg.is_symlink() and cfg.resolve() == real
+    assert json.loads(real.read_text())["banks"] == {
+        "coding-agent::hal0": {"bank": "coding-agent::hal0-mono"}
+    }
+
+
+def test_ensure_hindsight_alias_keeps_the_file_owner(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_runner: _FakeRunner
+) -> None:
+    """Run as root over another user's file, the rewrite must hand it back to
+    that owner. A non-root test cannot chown for real, so assert the call."""
+    d = _driver_with_marker(tmp_path, monkeypatch, fake_runner)
+    cfg = d._hindsight_client_config()
+    cfg.parent.mkdir(parents=True)
+    cfg.write_text(json.dumps({"apiUrl": "http://127.0.0.1:9177"}))
+    st = os.stat(cfg)
+    chowned: list[tuple[int, int]] = []
+    monkeypatch.setattr(os, "fchown", lambda fd, uid, gid: chowned.append((uid, gid)))
+
+    assert d._ensure_hindsight_alias() is True
+
+    assert chowned == [(st.st_uid, st.st_gid)]
