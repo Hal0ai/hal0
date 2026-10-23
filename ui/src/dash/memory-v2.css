@@ -241,6 +241,11 @@
 .pick{font:600 13px var(--jbm);background:var(--bg-2);color:var(--fg);border:1px solid var(--line);border-radius:6px;padding:7px 10px;cursor:pointer;flex:none}
 .pick:hover{border-color:var(--line-strong,#3A3A3A)}
 .mv-bankbar .pers{font:400 11.5px var(--geist,sans-serif);color:var(--fg-4);flex:1;min-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;line-height:1.4}
+.mv-bankbar button.pers{appearance:none;background:none;border:0;padding:0;margin:0;text-align:left;cursor:text;font:inherit;color:inherit;border-radius:4px}
+.mv-bankbar button.pers:hover,.mv-bankbar button.pers:focus-visible{color:var(--fg-2);outline:1px dashed var(--line-soft,#1C1C1C);outline-offset:3px}
+.mv-bankbar form.pers.editing{white-space:normal;overflow:visible;display:flex;flex-direction:column;gap:6px;flex-basis:100%;order:9}
+.mv-bankbar .pers.editing textarea{resize:vertical;min-height:56px;font:400 12px var(--geist,sans-serif)}
+.mv-bankbar .pers-acts{display:flex;align-items:center;gap:8px}
 .mv-bankbar .dist{width:210px;flex:none}
 .mv-bankbar .cell{flex:none;min-width:0}
 .mv-bankbar .ops{display:flex;flex-direction:column;gap:4px;align-items:flex-start;flex:none}

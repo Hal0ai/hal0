@@ -17,7 +17,7 @@
 // world/experience (the prototype's picker also offered "observation";
 // that option is dropped here).
 
-const { useState: useStateBankBar } = React
+const { useState: useStateBankBar, useEffect: useEffectBankBar } = React
 
 function memToast(msg, kind = 'info') {
   if (typeof window !== 'undefined' && window.__hal0Toast) window.__hal0Toast(msg, kind)
@@ -421,6 +421,59 @@ function BankBar({ bank, setBank }) {
   // admin route, unlike bulk memory-id deletes on the MCP mounts).
   const useBankDelete = window.__hal0UseBankDelete
   const del = useBankDelete ? useBankDelete() : { mutateAsync: async () => {}, isPending: false }
+
+  // Per-bank description. Every bank used to show whatever mission it was
+  // created with (the coding-agent plugin stamps one text on all of its
+  // banks) and the only way to change it was `hal0 memory bank profile set
+  // --reflect-mission`. The text IS Hindsight's `reflect_mission` config
+  // override — the persona reflect answers with — so the editor writes
+  // exactly that key, through the same PATCH .../config the CLI uses.
+  const useBankConfigUpdate = window.__hal0UseBankConfigUpdate
+  const cfgUpdate = useBankConfigUpdate
+    ? useBankConfigUpdate()
+    : { mutateAsync: async () => {}, isPending: false }
+  // The selected id may be stale (a deleted bank remembered in localStorage
+  // or the hash): `b` then falls back to banks[0] for display, but a config
+  // PATCH to an id the engine does not know would CREATE that bank, so the
+  // editor is off until the selection names a listed bank.
+  const bankKnown = banks.some((x) => x.bank_id === bank)
+  const [editingMission, setEditingMission] = useStateBankBar(false)
+  // The bank the editor was opened for — the save targets THIS id, never the
+  // live `bank` prop, and the editor closes if the selector moves away.
+  const [editingBank, setEditingBank] = useStateBankBar(null)
+  const [missionDraft, setMissionDraft] = useStateBankBar('')
+  const startMissionEdit = () => {
+    if (!bankKnown) return
+    setEditingBank(bank)
+    setMissionDraft(b?.mission || '')
+    setEditingMission(true)
+  }
+  const cancelMissionEdit = () => setEditingMission(false)
+  useEffectBankBar(() => {
+    if (editingMission && editingBank !== bank) setEditingMission(false)
+  }, [bank, editingMission, editingBank])
+  const saveMission = async (e) => {
+    e?.preventDefault?.()
+    const target = editingBank
+    if (!target || !banks.some((x) => x.bank_id === target)) {
+      memToast('Save failed: bank is no longer listed', 'err')
+      setEditingMission(false)
+      return
+    }
+    const current = banks.find((x) => x.bank_id === target)?.mission || ''
+    const next = missionDraft.trim()
+    if (next === current) {
+      setEditingMission(false)
+      return
+    }
+    try {
+      await cfgUpdate.mutateAsync({ bank: target, updates: { reflect_mission: next } })
+      memToast(next ? 'Description saved' : 'Description cleared', 'ok')
+      setEditingMission(false)
+    } catch (err) {
+      memToast(`Save failed: ${err?.message || 'see logs'}`, 'err')
+    }
+  }
   const [confirmingDelete, setConfirmingDelete] = useStateBankBar(false)
   const runDelete = async () => {
     try {
@@ -468,9 +521,60 @@ function BankBar({ bank, setBank }) {
             </option>
           ))}
         </select>
-        <div className="pers" title={b.mission || 'no description set'}>
-          {b.mission || <span style={{ color: 'var(--fg-5)' }}>no description set</span>}
-        </div>
+        {editingMission ? (
+          <form className="pers editing" onSubmit={saveMission} data-testid="mv-bank-mission-form">
+            <textarea
+              className="mv-input"
+              data-testid="mv-bank-mission-input"
+              autoFocus
+              rows={3}
+              placeholder="What this bank is for — the persona reflect answers with (reflect mission)"
+              value={missionDraft}
+              onChange={(e) => setMissionDraft(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Escape') {
+                  // Handled here: the workspace's window-level Escape closes
+                  // the fact inspector, which this cancel must not also do.
+                  e.stopPropagation()
+                  cancelMissionEdit()
+                }
+                if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) saveMission(e)
+              }}
+            />
+            <div className="pers-acts">
+              <span className="mini">reflect mission · per bank</span>
+              <span style={{ flex: 1 }} />
+              <button type="button" className="mv-btn" onClick={cancelMissionEdit}>
+                Cancel
+              </button>
+              <button
+                type="submit"
+                className="mv-btn primary"
+                data-testid="mv-bank-mission-save"
+                disabled={cfgUpdate.isPending}
+              >
+                {cfgUpdate.isPending ? 'Saving…' : 'Save'}
+              </button>
+            </div>
+          </form>
+        ) : (
+          <button
+            type="button"
+            className="pers"
+            data-testid="mv-bank-mission"
+            disabled={!bankKnown}
+            title={
+              bankKnown
+                ? (b.mission || 'no description set') + ' — click to edit'
+                : `bank "${bank}" is not in the list — pick a listed bank to edit its description`
+            }
+            onClick={startMissionEdit}
+          >
+            {b.mission || (
+              <span style={{ color: 'var(--fg-5)' }}>no description set — click to add</span>
+            )}
+          </button>
+        )}
         <div className="cell dist">
           <span className="mv-cell-k">composition</span>
           {window.TypeBar && <window.TypeBar b={{ world, experience, observation }} />}

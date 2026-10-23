@@ -168,6 +168,25 @@ export function useBankUpsert() {
   })
 }
 
+/**
+ * Per-bank config overrides — the bank's description ("mission", the reflect
+ * persona Hindsight shows for it) lives here as `reflect_mission`, next to
+ * the disposition traits. Same wire shape as `hal0 memory bank profile set`:
+ * one `PATCH .../config` with `{updates}`, partial — only the keys passed
+ * change. The bank list carries the effective mission, so only that query
+ * is refetched.
+ */
+export function useBankConfigUpdate() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: ({ bank, updates }: { bank: string; updates: Record<string, unknown> }) =>
+      apiPatch(ENDPOINTS.memoryBankConfig(bank), { updates }),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ['memory', 'banks'], exact: true })
+    },
+  })
+}
+
 export function useBankDelete() {
   const qc = useQueryClient()
   return useMutation({
