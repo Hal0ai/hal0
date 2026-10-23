@@ -2135,7 +2135,9 @@ def test_activation_never_adopts_a_crash_looping_gateway_on_an_upgraded_box(tree
     assert ("start", rel.GATEWAY_UNIT) not in units.log
 
 
-def test_activation_adopts_a_gateway_the_heal_moved_off_the_suffixed_unit(tree) -> None:
+def test_activation_adopts_a_gateway_the_heal_moved_off_the_suffixed_unit(
+    tree, monkeypatch: pytest.MonkeyPatch
+) -> None:
     from hal0.agents.hermes_gateway_regen import HASHED_UNIT
 
     _ensure(tree, FakeTools())
@@ -2151,15 +2153,13 @@ def test_activation_adopts_a_gateway_the_heal_moved_off_the_suffixed_unit(tree) 
 
     journal: list[list[str]] = []
     real_record = rel._record_stopped_units
-    monkeypatch_record = lambda layout, units_: (
-        journal.append(list(units_)),
-        real_record(layout, units_),
-    )  # noqa: E731
-    rel._record_stopped_units, saved = monkeypatch_record, rel._record_stopped_units
-    try:
-        _ensure(tree, FakeTools(), units, force=True, heal_gateway=heal)
-    finally:
-        rel._record_stopped_units = saved
+
+    def spy(layout: Any, units_: list[str]) -> None:
+        journal.append(list(units_))
+        real_record(layout, units_)
+
+    monkeypatch.setattr(rel, "_record_stopped_units", spy)
+    _ensure(tree, FakeTools(), units, force=True, heal_gateway=heal)
     assert ("start", rel.GATEWAY_UNIT) in units.log
     # the crash-recovery journal is rewritten with the adopted gateway
     assert journal and rel.GATEWAY_UNIT in journal[-1]
