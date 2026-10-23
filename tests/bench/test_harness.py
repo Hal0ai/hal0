@@ -72,7 +72,7 @@ from hal0.runners import RUNNER_IMAGES, resolve_runner_image
 STANDARD_IMAGE = resolve_runner_image(RUNNER_IMAGES["standard"])
 CPU_IMAGE = resolve_runner_image(RUNNER_IMAGES["cpu"])
 BENCH_BIN = "/opt/hal0/bin/llama-bench"
-COMMON_ARGS = [("-fa", "1"), ("-mmp", "0")]
+COMMON_ARGS = [("-fa", "1"), ("-lm", "none")]
 
 #: One llama-bench ``-o json`` row, the same shape
 #: ``tests/bench/fixtures/llama_bench_0.8b_rocm.json`` carries.
@@ -284,16 +284,16 @@ class TestDedupeFlags:
         assert result == [("-ngl", "99")]
 
     def test_first_seen_order_is_preserved_for_distinct_flags(self) -> None:
-        result = dedupe_flags([("-fa", "1"), ("-mmp", "0"), ("-ngl", "99")])
+        result = dedupe_flags([("-fa", "1"), ("-lm", "none"), ("-ngl", "99")])
 
-        assert [k for k, _ in result] == ["-fa", "-mmp", "-ngl"]
+        assert [k for k, _ in result] == ["-fa", "-lm", "-ngl"]
 
     def test_a_flag_repeated_keeps_its_first_seen_position(self) -> None:
         """The regression the shell version's associative-array + order-list
         combo guards: replacing a flag's value must not move it to the end."""
-        result = dedupe_flags([("-fa", "1"), ("-mmp", "0"), ("-fa", "0")])
+        result = dedupe_flags([("-fa", "1"), ("-lm", "none"), ("-fa", "0")])
 
-        assert [k for k, _ in result] == ["-fa", "-mmp"]
+        assert [k for k, _ in result] == ["-fa", "-lm"]
         assert dict(result)["-fa"] == "0"
 
     def test_comma_sweep_values_pass_through_untouched(self) -> None:
@@ -421,7 +421,7 @@ class TestComposePodmanArgv:
         assert argv[argv.index("-m") + 1] == "/models/some/tiny.gguf"
 
     def test_common_args_are_present_and_ngl_is_not_duplicated_by_them(self) -> None:
-        """``COMMON`` (``-fa 1``, ``-mmp 0``) never carries ``-ngl`` — that is
+        """``COMMON`` (``-fa 1``, ``-lm none``) never carries ``-ngl`` — that is
         the whole reason ``-ngl`` lives in each lane's ``dev_args`` instead
         (Phase 1 regression: a common ``-ngl 99`` plus the CPU lane's
         ``-ngl 0`` would run BOTH and double every CPU cell)."""
@@ -430,7 +430,8 @@ class TestComposePodmanArgv:
 
         assert "-fa" in argv
         assert argv[argv.index("-fa") + 1] == "1"
-        assert "-mmp" in argv
+        assert "-lm" in argv
+        assert "-mmp" not in argv
         assert argv.count("-ngl") == 1
         assert argv[argv.index("-ngl") + 1] == "0"
 
@@ -467,8 +468,8 @@ class TestComposePodmanArgv:
             "/models/tiny.gguf",
             "-fa",
             "1",
-            "-mmp",
-            "0",
+            "-lm",
+            "none",
             "-ngl",
             "0",
             "-o",

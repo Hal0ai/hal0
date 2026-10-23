@@ -57,7 +57,7 @@ REGISTRY_PATH = "/api/models"
 # (-p/-n/-d/-r). A
 # variant flag outside this set is rejected at plan time (fail fast, before the
 # seam does).
-_TUNE_FLAGS = frozenset({"-b", "-ub", "-ngl", "-fa", "-ctk", "-ctv", "-t", "-mmp", "-pg"})
+_TUNE_FLAGS = frozenset({"-b", "-ub", "-ngl", "-fa", "-ctk", "-ctv", "-t", "-lm", "-pg"})
 
 # Prompt length for the pp measurement at every depth (the community-standard
 # pp512). The depth axis is the KV fill (llama-bench -d): a pp cell measures

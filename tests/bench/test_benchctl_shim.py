@@ -195,8 +195,8 @@ def _rocm_argv(model_root: Path, model_abs: Path, kfd: str, dri_render: str) -> 
         str(model_abs),
         "-fa",
         "1",
-        "-mmp",
-        "0",
+        "-lm",
+        "none",
         "-ngl",
         "99",
         "-dev",
@@ -223,8 +223,8 @@ def _cpu_argv(model_root: Path, model_abs: Path) -> list[str]:
         str(model_abs),
         "-fa",
         "1",
-        "-mmp",
-        "0",
+        "-lm",
+        "none",
         "-ngl",
         "0",
         "-o",
@@ -345,6 +345,19 @@ class TestExecRejects:
 
         assert proc.returncode != 0
         assert "podman flag not allowed: --privileged" in proc.stderr
+
+    def test_rejects_the_dropped_mmp_flag(self, tmp_path) -> None:
+        """llama-bench b11716 replaced ``-mmp`` with ``-lm``; the seam no
+        longer whitelists the dead spelling (#2769)."""
+        model_root, model_abs, env = self._base(tmp_path)
+        argv = _cpu_argv(model_root, model_abs)
+        i = argv.index("-lm")
+        argv[i : i + 2] = ["-mmp", "0"]
+
+        proc = _run(["exec", "--", *argv], env)
+
+        assert proc.returncode != 0
+        assert "flag not allowed in bench argv: -mmp" in proc.stderr
 
     def test_rejects_bad_security_opt(self, tmp_path) -> None:
         model_root, model_abs, env = self._base(tmp_path)
