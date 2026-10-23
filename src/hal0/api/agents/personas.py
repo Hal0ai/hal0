@@ -119,10 +119,10 @@ def _persona_detail(
 
 
 async def _refresh_live(root: Path) -> dict[str, Any]:
-    """Render the active persona into Hermes's config.yaml and apply it.
+    """Render the active persona into Hermes's config.yaml.
 
     Lazy import: :mod:`hal0.api` must not load Hermes code (GP15). The work is
-    blocking file and systemctl I/O, so it runs off the event loop.
+    blocking file I/O, so it runs off the event loop.
     """
     import asyncio
 
@@ -336,16 +336,10 @@ async def update_agent_persona(
     log.info("persona.updated", agent_id=agent_id, persona_id=persona_id)
     active = personas_mod.get_active(root=root)
     detail = _persona_detail(updated, raw_toml=raw_toml, active_id=active)
-    # Only the active persona's prompt and display name reach Hermes
-    # (config.yaml's agent.system_prompt), so only a change to them there is
-    # worth a re-render and restart (#2921).
-    prompt_changed = (
-        updated.system_prompt != existing.system_prompt
-        or updated.display_name != existing.display_name
-    )
-    detail["refresh"] = (
-        await _refresh_live(root) if persona_id == active and prompt_changed else None
-    )
+    # The active persona's rendered prompt also carries its approval policy and
+    # memory namespace, so every PUT to it re-renders; an identical render
+    # comes back `unchanged` and writes nothing (#2921).
+    detail["refresh"] = await _refresh_live(root) if persona_id == active else None
     return detail
 
 
@@ -362,16 +356,15 @@ async def activate_agent_persona(
 
     Body shape ``{"reload": bool}``; ``reload`` defaults to ``true`` so
     the dashboard's persona picker just POSTs an empty body and the new
-    prompt is rendered into Hermes's config.yaml and applied (#2850).
+    prompt is rendered into Hermes's config.yaml (#2850).
     ``reload=false`` writes ``active.txt`` only — useful for batch tooling
     that wants to flip the pointer without touching a running Hermes.
 
     Response carries the *previous* active persona id so the dashboard
     can render an undo affordance, and ``refresh``: ``{status, message,
-    changed, restarted, failed_units}`` (see
+    changed}`` (see
     :func:`hal0.agents.persona_live.refresh_persona_prompt`), or ``null``
-    for ``reload=false``. A ``refresh.status`` of ``failed`` or
-    ``restart-failed`` doesn't mean activation failed; the pointer moved
+    for ``reload=false``. A ``refresh.status`` of ``failed`` doesn't mean activation failed; the pointer moved
     but the running agent still has the old prompt, and ``message`` says so.
     """
     root = _resolve_agent(agent_id)

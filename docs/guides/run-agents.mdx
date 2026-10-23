@@ -408,11 +408,13 @@ hal0 agent personas activate <id>        # switch the active persona
 ```
 
 Activating writes the active pointer atomically, renders the persona's prompt
-into Hermes's `config.yaml` as `agent.system_prompt`, and try-restarts the
-Hermes agent and gateway so new sessions use it. A unit you stopped stays
-stopped. The same happens when you edit the active persona's name or prompt in
-the dashboard (or `PUT /api/agents/hermes/personas/<id>`); editing a persona
-that is not active changes nothing in Hermes until you activate it. The command
+into Hermes's `config.yaml` as `agent.system_prompt`. Hermes re-reads that file
+without a restart: new sessions and the next gateway turn use the new prompt,
+while a dashboard chat that is already open keeps the old one until you start a
+new chat. The same happens when you edit the active persona in the dashboard
+(or `PUT /api/agents/hermes/personas/<id>`); editing a persona that is not
+active changes nothing in Hermes until you activate it. Switching persona does
+not touch named Hermes profiles (`coder`, `homelab`, `research`). The command
 prints what was and was not applied. If the config could not be written (the
 command was not run with enough privilege to write the Hermes config), the
 pointer still moved but the prompt is not live; run

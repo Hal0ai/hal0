@@ -2500,8 +2500,8 @@ def personas_activate(
     """Switch the active persona and apply its prompt to Hermes.
 
     Writes ``active.txt`` atomically, renders the persona prompt into
-    Hermes's ``config.yaml`` (``agent.system_prompt``) and try-restarts the
-    Hermes agent and gateway so new sessions use it. The result line says
+    Hermes's ``config.yaml`` (``agent.system_prompt``); Hermes re-reads it for new
+    sessions and gateway turns, no restart. The result line says
     what was and was not applied; an unprivileged caller that cannot write
     the config is told to run the repair command. Mirrors
     ``POST /api/agents/{id}/personas/{pid}/activate``.

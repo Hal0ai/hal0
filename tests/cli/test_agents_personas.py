@@ -77,10 +77,8 @@ def _stub_refresh(monkeypatch: pytest.MonkeyPatch, **fields: object) -> list[obj
     calls: list[object] = []
     result = {
         "status": "applied",
-        "message": "Persona prompt written to Hermes's config.yaml; restarted.",
+        "message": "Persona prompt written to Hermes's config.yaml; new sessions use it.",
         "changed": True,
-        "restarted": True,
-        "failed_units": [],
         **fields,
     }
     monkeypatch.setattr(

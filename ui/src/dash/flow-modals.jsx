@@ -175,7 +175,7 @@ function PersonaEditModal({ open, onClose, personaId }) {
       width={680}
       foot={
         <>
-          <span>Saved to the persona file. Editing the active persona's name or prompt also updates Hermes's config and restarts it.</span>
+          <span>Saved to the persona file. Editing the active persona also updates Hermes's config; new chats use it.</span>
           <span style={{display: "inline-flex", gap: 8}}>
             <button className="btn ghost sm" onClick={onClose} disabled={personaUpdate.isPending}>Cancel</button>
             <button

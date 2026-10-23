@@ -21,18 +21,30 @@ def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     home = tmp_path / "hermes"
     home.mkdir()
     (home / "config.yaml").write_text(
-        yaml.safe_dump({"model": {"default": "x"}, "agent": {"max_turns": 5}}), encoding="utf-8"
+        yaml.safe_dump(
+            {
+                "model": {"default": "x"},
+                "agent": {"max_turns": 5},
+                "terminal": {"backend": hp.TERMINAL_OFF_BACKEND},
+                "toolsets": {"disabled": list(hp.TERMINAL_OFF_TOOLSETS)},
+                "mcp_servers": {
+                    "hal0-admin": {"url": "http://127.0.0.1:8080/mcp/admin/mcp"},
+                    "github": {"url": "https://example.invalid/mcp"},
+                },
+            }
+        ),
+        encoding="utf-8",
     )
     monkeypatch.setattr(hp, "OVERRIDES_PATH", tmp_path / "overrides.yaml")
     restarts: list[int] = []
-    failed: list[str] = []
 
     def _restart() -> list[str]:
         restarts.append(1)
-        return list(failed)
+        return []
 
+    # The refresh must never restart anything: Hermes re-reads config.yaml.
     monkeypatch.setattr(hp, "try_restart_hermes_consumers", _restart)
-    return {"root": root, "home": home, "restarts": restarts, "failed": failed, "tmp": tmp_path}
+    return {"root": root, "home": home, "restarts": restarts, "tmp": tmp_path}
 
 
 def _agent(home: Path) -> dict[str, Any]:
@@ -43,11 +55,16 @@ def test_activate_renders_new_prompt_and_restarts(env: dict[str, Any]) -> None:
     P.activate("hal0-brain", root=env["root"])
     out = persona_live.refresh_persona_prompt(env["root"], hermes_home=env["home"])
     assert out["status"] == persona_live.APPLIED
-    assert out["changed"] is True and out["restarted"] is True
+    assert out["changed"] is True
+    assert "new sessions" in out["message"] and "old prompt" in out["message"]
     agent = _agent(env["home"])
     assert "hal0 Brain" in agent["system_prompt"] or "steward" in agent["system_prompt"].lower()
     assert agent["max_turns"] == 5  # hermes-owned keys survive
-    assert len(env["restarts"]) == 1
+    cfg = yaml.safe_load((env["home"] / "config.yaml").read_text(encoding="utf-8"))
+    assert cfg["terminal"]["backend"] == hp.TERMINAL_OFF_BACKEND
+    assert cfg["toolsets"]["disabled"] == list(hp.TERMINAL_OFF_TOOLSETS)
+    assert set(cfg["mcp_servers"]) == {"hal0-admin", "github"}
+    assert env["restarts"] == []
 
 
 def test_edit_of_active_prompt_is_rendered(env: dict[str, Any]) -> None:
@@ -60,23 +77,11 @@ def test_edit_of_active_prompt_is_rendered(env: dict[str, Any]) -> None:
     assert "UNIQUE-PROMPT-MARKER" in _agent(env["home"])["system_prompt"]
 
 
-def test_second_refresh_is_unchanged_and_does_not_restart(env: dict[str, Any]) -> None:
+def test_second_refresh_is_unchanged(env: dict[str, Any]) -> None:
     persona_live.refresh_persona_prompt(env["root"], hermes_home=env["home"])
-    env["restarts"].clear()
     out = persona_live.refresh_persona_prompt(env["root"], hermes_home=env["home"])
     assert out["status"] == persona_live.UNCHANGED
     assert env["restarts"] == []
-
-
-def test_restart_failure_is_reported_not_hidden(env: dict[str, Any]) -> None:
-    env["failed"].append("hermes-gateway.service")
-    out = persona_live.refresh_persona_prompt(env["root"], hermes_home=env["home"])
-    assert out["status"] == persona_live.RESTART_FAILED
-    assert out["failed_units"] == ["hermes-gateway.service"]
-    assert out["restarted"] is False
-    assert "hermes-gateway.service" in out["message"]
-    assert "old prompt" in out["message"]
-    assert "system_prompt" in _agent(env["home"])  # the write itself landed
 
 
 def test_unwritable_config_reports_failure_and_repair_hint(
@@ -108,11 +113,3 @@ def test_no_config_yaml_means_not_installed(env: dict[str, Any]) -> None:
     out = persona_live.refresh_persona_prompt(env["root"], hermes_home=env["home"])
     assert out["status"] == persona_live.NOT_INSTALLED
     assert env["restarts"] == []
-
-
-def test_restart_false_writes_but_does_not_restart(env: dict[str, Any]) -> None:
-    out = persona_live.refresh_persona_prompt(env["root"], hermes_home=env["home"], restart=False)
-    assert out["status"] == persona_live.APPLIED
-    assert out["restarted"] is False
-    assert env["restarts"] == []
-    assert "Restart Hermes" in out["message"]

@@ -206,7 +206,7 @@ describe('PersonaEditModal', () => {
         'Steward-only: enforced for hal0-brain.',
     )
     expect(document.body.textContent).toContain(
-      "Editing the active persona's name or prompt also updates Hermes's config and restarts it.",
+      "Editing the active persona also updates Hermes's config; new chats use it.",
     )
 
     typeIntoArea(patterns, 'read_file\nwrite_file')
@@ -418,7 +418,7 @@ describe('PersonaEditModal', () => {
       ;(window as unknown as { __hal0Toast: unknown }).__hal0Toast = toast
       apiPut.mockImplementation(async () => ({
         ...persona,
-        refresh: { status: 'restart-failed', message: 'could not restart hermes-gateway.service' },
+        refresh: { status: 'failed', message: 'could not write config.yaml' },
       }))
       mount(React.createElement(PersonaEditModal, { open: true, personaId: 'hermes', onClose: () => {} }))
       await settle()
@@ -426,7 +426,7 @@ describe('PersonaEditModal', () => {
       act(() => saveButton().click())
       await settle()
       expect(toast).toHaveBeenCalledWith(
-        'Persona saved — could not restart hermes-gateway.service',
+        'Persona saved — could not write config.yaml',
         'err',
       )
       delete (window as unknown as { __hal0Toast?: unknown }).__hal0Toast

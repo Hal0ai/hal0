@@ -28,7 +28,7 @@ def personas_root(
 ) -> Iterator[Path]:
     """Redirect the personas store to a tmp dir for the whole test.
 
-    Both the module-level :data:`PERSONAS_ROOT`  and the route module's agent registry are
+    Both the module-level :data:`PERSONAS_ROOT` and the route module's agent registry are
     rewired so the API handlers resolve agent_id="hermes" against the
     tmp dir.
     """
@@ -184,8 +184,6 @@ def refreshes(monkeypatch: pytest.MonkeyPatch) -> list[Path]:
             "status": "applied",
             "message": "ok",
             "changed": True,
-            "restarted": True,
-            "failed_units": [],
         }
 
     monkeypatch.setattr(persona_live, "refresh_persona_prompt", _fake)
@@ -232,8 +230,6 @@ def test_activate_reports_failed_refresh_honestly(
             "status": "failed",
             "message": "Saved, but could not write Hermes's config.yaml: denied.",
             "changed": False,
-            "restarted": False,
-            "failed_units": [],
         },
     )
     r = client.post("/api/agents/hermes/personas/hal0-brain/activate", json={})
@@ -324,14 +320,22 @@ def test_put_inactive_persona_does_not_refresh(
     assert refreshes == []
 
 
-def test_put_active_persona_without_prompt_change_does_not_refresh(
+def test_put_active_persona_approval_change_refreshes_hermes(
     client: TestClient, seeded_personas: Path, refreshes: list[Path]
 ) -> None:
-    """tools_allowed and preferred_model never reach Hermes, so no restart."""
+    """The rendered prompt carries the approval policy, so it must re-render."""
     r = client.put(
         "/api/agents/hermes/personas/hermes",
-        json={"summary": "New blurb", "tools_allowed": ["memory_*"], "preferred_model": "hal0/x"},
+        json={"approval": {"default_policy": "never", "require_approval": ["shell.*"]}},
     )
     assert r.status_code == 200, r.text
-    assert r.json()["refresh"] is None
-    assert refreshes == []
+    assert r.json()["refresh"]["status"] == "applied"
+    assert refreshes == [seeded_personas]
+
+
+def test_put_active_persona_memory_namespace_change_refreshes_hermes(
+    client: TestClient, seeded_personas: Path, refreshes: list[Path]
+) -> None:
+    r = client.put("/api/agents/hermes/personas/hermes", json={"memory_namespace": "private:x"})
+    assert r.status_code == 200, r.text
+    assert refreshes == [seeded_personas]

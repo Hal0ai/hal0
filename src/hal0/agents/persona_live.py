@@ -2,17 +2,16 @@
 
 The persona prompt lives in Hermes's ``config.yaml`` as
 ``agent.system_prompt`` (:func:`hermes_provision._persona_prompt_layer`), and
-Hermes reads that file at process start. Editing a persona TOML or moving
-``active.txt`` therefore changes nothing for a running agent until the active
-persona is rendered into ``config.yaml`` again and the consumers restart.
+Editing a persona TOML or moving ``active.txt`` changes nothing for Hermes
+until the active persona is rendered into ``config.yaml`` again.
 
-:func:`refresh_persona_prompt` does both through the mechanisms the Hermes
-command-approvals setting already uses: the YAML layer merge the provisioner
-applies (:func:`hermes_provision._merge_config_yaml_layers`, with the
-operator's ``overrides.yaml`` still winning), then
-:func:`hermes_provision.try_restart_hermes_consumers` (the ``hal0-systemctl``
-seam, ``sudo -n`` for a non-root caller). Hermes code is imported lazily so
-importing :mod:`hal0.api` never loads it (golden path GP15).
+:func:`refresh_persona_prompt` does that with the YAML layer merge the
+provisioner applies (:func:`hermes_provision._merge_config_yaml_layers`, with
+the operator's ``overrides.yaml`` still winning). No restart is needed: Hermes
+v0.22.4 re-reads ``config.yaml`` keyed on the file signature, so the atomic
+rewrite is picked up by the gateway's next turn and by every new TUI session.
+Open dashboard chats keep the prompt they started with. Hermes code is
+imported lazily so importing :mod:`hal0.api` never loads it (golden path GP15).
 """
 
 from __future__ import annotations
@@ -30,7 +29,6 @@ UNCHANGED = "unchanged"
 OVERRIDDEN = "overridden"
 NOT_INSTALLED = "not-installed"
 FAILED = "failed"
-RESTART_FAILED = "restart-failed"
 
 _REPAIR_HINT = "sudo hal0 agent reprovision hermes --repair"
 
@@ -54,27 +52,25 @@ def refresh_persona_prompt(
     root: Path,
     *,
     hermes_home: Path | str | None = None,
-    restart: bool = True,
 ) -> dict[str, Any]:
-    """Render the active persona's prompt into Hermes's config.yaml and apply it.
+    """Render the active persona's prompt into Hermes's config.yaml.
 
     ``root`` is the personas store the caller edited, so the render reads the
     same files the edit wrote. Never raises: every failure comes back as a
     ``status`` plus a ``message`` that says what did and did not happen.
 
-    Returns ``{"status", "message", "changed", "restarted", "failed_units"}``
-    where ``status`` is one of ``applied`` (written, consumers restarted),
-    ``unchanged`` (config already had this prompt), ``overridden``
-    (overrides.yaml wins, nothing written), ``not-installed`` (no config.yaml
-    yet), ``restart-failed`` (written, a restart failed) or ``failed``
-    (config.yaml could not be written).
+    Returns ``{"status", "message", "changed"}``
+    where ``status`` is one of ``applied`` (written), ``unchanged`` (config
+    already had this prompt), ``overridden`` (overrides.yaml wins, nothing
+    written), ``not-installed`` (no config.yaml yet) or ``failed`` (config.yaml
+    could not be written).
     """
     from hal0.agents import hermes_provision as hp
     from hal0.agents import personas as personas_mod
 
     home = Path(hermes_home) if hermes_home is not None else hp.HERMES_HOME_DEFAULT
     config = home / "config.yaml"
-    base: dict[str, Any] = {"changed": False, "restarted": False, "failed_units": []}
+    base: dict[str, Any] = {"changed": False}
     if not config.is_file():
         return _result(
             NOT_INSTALLED,
@@ -114,28 +110,13 @@ def refresh_persona_prompt(
     if not changed:
         return _result(
             UNCHANGED,
-            "Saved. Hermes's config.yaml already carries this prompt; nothing to restart.",
+            "Saved. Hermes's config.yaml already carries this prompt.",
             **base,
-        )
-    base["changed"] = True
-    if not restart:
-        return _result(
-            APPLIED,
-            "Persona prompt written to Hermes's config.yaml. Restart Hermes to apply it.",
-            **base,
-        )
-    failed = hp.try_restart_hermes_consumers()
-    if failed:
-        return _result(
-            RESTART_FAILED,
-            "Persona prompt written to Hermes's config.yaml, but "
-            f"{', '.join(failed)} could not be restarted, so the running agent still "
-            "uses the old prompt until it is restarted.",
-            **{**base, "failed_units": failed},
         )
     return _result(
         APPLIED,
-        "Persona prompt written to Hermes's config.yaml; the Hermes agent and gateway "
-        "were restarted (a stopped unit stays stopped) and new sessions use it.",
-        **{**base, "restarted": True},
+        "Persona prompt written to Hermes's config.yaml; new sessions and the next "
+        "gateway turn use it. Open dashboard chats keep the old prompt until you "
+        "start a new chat.",
+        changed=True,
     )
