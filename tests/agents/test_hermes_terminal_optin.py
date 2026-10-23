@@ -990,8 +990,16 @@ def test_box_terminal_decision_trusts_the_root_sentinel_over_a_stale_marker(
     assert hp.box_terminal_decision(home) is False
     (home / "config.yaml").write_text("terminal:\n  backend: local\n")
     assert hp.box_terminal_decision(home) is True
+    # no marker: the provisioner's own rule decides from the config
     monkeypatch.setattr(hp, "read_terminal_state", lambda: None)
-    assert hp.box_terminal_decision(home) is None
+    (home / "config.yaml").write_text(
+        "agent:\n  disabled_toolsets: [terminal, code_execution, delegation]\n"
+    )
+    assert hp.box_terminal_decision(home) is False
+    (home / "config.yaml").write_text("terminal:\n  backend: local\n  cwd: /srv/mine\n")
+    assert hp.box_terminal_decision(home) is True  # a legacy working shell
+    (home / "config.yaml").write_text("model:\n  default: x\n")
+    assert hp.box_terminal_decision(home) is False  # default off
     assert hp.box_terminal_decision(tmp_path / "absent") is None
 
 
@@ -1323,3 +1331,86 @@ def test_root_reexec_child_leaves_the_restart_to_the_parent(
     monkeypatch.delenv(ac._RESTART_OWNER_ENV, raising=False)
     assert ac._provision_hermes(repair=True) == 0
     assert restarted == [1]
+
+
+def test_update_path_fails_closed_when_a_profile_cannot_take_the_gate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "hh"
+    (home / "profiles" / "coder").mkdir(parents=True)
+    (home / "profiles" / "coder" / "config.yaml").write_text("terminal:\n  backend: local\n")
+    (home / "config.yaml").write_text("agent:\n  system_prompt: keep\n")
+    monkeypatch.setattr(hp, "read_terminal_state", lambda: False)
+    monkeypatch.setattr(
+        hp,
+        "_merge_profile_config",
+        lambda path, desired: {"wired": False, "changed": False, "error": "ro"},
+    )
+    with pytest.raises(hp.TerminalGateError, match="coder"):
+        hp.apply_release_config_invariants(home, overrides_path=tmp_path / "none.yaml")
+    from hal0.components import hermes_arm
+
+    monkeypatch.setattr(hermes_arm, "var_lib", lambda: tmp_path)
+    (tmp_path / ".hermes").symlink_to(home)
+    result: dict = {}
+    hermes_arm._config_backstop(result, job_id="j")
+    assert any("terminal gate not applied" in d for d in result["detail"])
+
+
+def test_profile_phase_records_a_terminal_backend_change_for_the_restart(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import json
+
+    import hal0.cli.agent_commands as ac
+
+    monkeypatch.setattr("hal0.service_identity.service_key", lambda prefer=None: "svc-key")
+    home = tmp_path / "hh"
+    (home / "profiles" / "coder").mkdir(parents=True)
+    (home / "profiles" / "coder" / "config.yaml").write_text("terminal:\n  backend: local\n")
+    (home / "config.yaml").write_text(f"terminal:\n  backend: {hp.TERMINAL_OFF_BACKEND}\n")
+    state = hp.BootstrapState(hermes_home=str(home), terminal_enabled=False)
+    out = hp._phase_profile_mcp_wire(hp._StepCtx(state=state, io=hp.InstallIO()))
+    assert out.details["terminal_backend_changed"] is True
+    out = hp._phase_profile_mcp_wire(hp._StepCtx(state=state, io=hp.InstallIO()))
+    assert out.details["terminal_backend_changed"] is False
+    report = tmp_path / "provision.json"
+    monkeypatch.setattr(ac, "_agent_provision_state_file", lambda name: report)
+    report.write_text(
+        json.dumps(
+            {
+                "phases": {
+                    "config_write": {"details": {"terminal_backend_changed": False}},
+                    "profile_mcp_wire": {"details": {"terminal_backend_changed": True}},
+                }
+            }
+        )
+    )
+    assert ac._terminal_gate_changed_in_last_report() is True
+
+
+def test_a_displaced_sentinel_is_reported_as_terminal_on(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """overrides.yaml wins by design; the status line must not call that box off."""
+    overrides = tmp_path / "overrides.yaml"
+    overrides.write_text("terminal:\n  backend: local\n")
+    monkeypatch.delenv(hp.HERMES_TERMINAL_ENV, raising=False)
+    monkeypatch.setattr(hp, "TERMINAL_STATE_PATH", tmp_path / "state" / "hermes-terminal-tool")
+    monkeypatch.setattr(
+        hp,
+        "_resolve_primary_slot",
+        lambda **_kwargs: {"model": "p", "base_url": "u", "context_length": 8000},
+    )
+    monkeypatch.setattr(hp, "OVERRIDES_PATH", overrides)
+    from hal0.agents import personas as _personas
+
+    monkeypatch.setattr(_personas, "PERSONAS_ROOT", tmp_path / "personas-empty")
+    io = hp.InstallIO(
+        fetch_slots=lambda: [], fetch_model_contexts=lambda: {}, run=fake_hermes_run()
+    )
+    state = hp.BootstrapState(hermes_home=str(tmp_path / "hh"))
+    out = hp._phase_config_write(hp._StepCtx(state=state, io=io))
+    assert out.status == hp.PhaseStatus.FAIL
+    assert out.details["terminal_tool"] == "on"
+    assert out.details["terminal_tool_decision"] == "off"

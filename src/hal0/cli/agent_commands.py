@@ -979,8 +979,11 @@ def _terminal_gate_changed_in_last_report() -> bool:
         data = json.loads(_agent_provision_state_file("hermes").read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return False
-    phase = (data.get("phases") or {}).get("config_write") or {}
-    return bool((phase.get("details") or {}).get("terminal_backend_changed"))
+    phases = data.get("phases") or {}
+    return any(
+        bool(((phases.get(name) or {}).get("details") or {}).get("terminal_backend_changed"))
+        for name in ("config_write", "profile_mcp_wire", "brain_profile_mcp_wire")
+    )
 
 
 def _enable_and_start_hermes_unit() -> None:

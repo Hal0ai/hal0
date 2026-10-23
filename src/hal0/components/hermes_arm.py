@@ -167,6 +167,11 @@ def _config_backstop(result: dict[str, Any], *, job_id: str | None) -> None:
     backend_before = _backend()
     try:
         changed = hermes.apply_release_config_invariants(home)
+    except hermes.TerminalGateError as exc:
+        # Not cosmetic: a served profile's side agents still see the terminal.
+        log.error("components.hermes_terminal_gate_failed", job_id=job_id, error=str(exc))
+        result["detail"] = [*result.get("detail", []), f"Hermes terminal gate not applied: {exc}"]
+        return
     except Exception as exc:  # the converge verdict must not depend on it
         log.warning("components.hermes_config_backstop_failed", job_id=job_id, error=str(exc))
         result["detail"] = [*result.get("detail", []), f"Hermes config keys not applied: {exc}"]

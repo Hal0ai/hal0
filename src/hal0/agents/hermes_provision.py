@@ -2040,18 +2040,34 @@ def try_restart_hermes_consumers(
     return failed
 
 
+class TerminalGateError(RuntimeError):
+    """A terminal-off box has profiles that could not take the terminal gate (#2878)."""
+
+
+def profile_backends(hermes_home: Path | str) -> dict[str, str | None]:
+    """``terminal.backend`` per ``profiles/<name>/config.yaml`` (None when unreadable)."""
+    out: dict[str, str | None] = {}
+    for path in sorted((Path(hermes_home) / "profiles").glob("*/config.yaml")):
+        try:
+            out[path.parent.name] = _terminal_backend_in_config(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError):
+            out[path.parent.name] = None
+    return out
+
+
 def apply_terminal_gate_to_profiles(hermes_home: Path | str, *, terminal_enabled: bool) -> bool:
     """Merge the terminal gate alone (no MCP keys) into every profile's config.yaml.
 
     Descriptor-anchored like the MCP sweep (symlinked profiles are refused, not
     followed). Returns True when any profile changed. On an OFF box a profile
-    that could not take the gate is logged at ERROR: its side agents keep the
-    terminal tool.
+    that could not take the gate raises :class:`TerminalGateError`: its side
+    agents would keep the terminal tool.
     """
     from hal0.agents import hermes_api as ha
 
     home = Path(hermes_home)
     changed = False
+    failed: dict[str, str] = {}
     for name in ha.profile_dirs(home):
         if not HERMES_PROFILE_ID_RE.match(name):
             continue
@@ -2059,15 +2075,25 @@ def apply_terminal_gate_to_profiles(hermes_home: Path | str, *, terminal_enabled
             home / "profiles" / name / "config.yaml",
             lambda base: _terminal_profile_keys(base, terminal_enabled=terminal_enabled),
         )
-        if result.get("error") and terminal_enabled is False:
-            log.error(
-                "hermes.terminal_gate_profile_failed",
-                profile=name,
-                error=result["error"],
-                issue="#2878",
-            )
+        if result.get("error"):
+            failed[name] = str(result["error"])
         changed = changed or bool(result.get("changed"))
+    if failed and terminal_enabled is False:
+        # Fail closed: a release activation rolls back when an invariant
+        # raises, which beats restarting the gateway with a served profile
+        # whose side agents still see the terminal tool.
+        raise TerminalGateError(
+            "the terminal is off and these Hermes profiles did not receive the terminal gate: "
+            + ", ".join(f"{n} ({e})" for n, e in sorted(failed.items()))
+        )
     return changed
+
+
+def _read_text_or_none(path: Path) -> str | None:
+    try:
+        return path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
 
 
 def box_terminal_decision(hermes_home: Path | str) -> bool | None:
@@ -2078,7 +2104,8 @@ def box_terminal_decision(hermes_home: Path | str) -> bool | None:
     that sentinel deliberately, and a non-root opt-out may have applied it
     without being able to replace a root-owned marker (#2878 review). An
     opt-in rewrites the root config first, so the sentinel's absence lets the
-    marker speak. ``None`` when neither says anything.
+    marker speak. With no usable marker, :func:`terminal_tool_enabled`'s
+    existing-config / default-off rule applies. ``None`` only with no config.
     """
     try:
         text = (Path(hermes_home) / "config.yaml").read_text(encoding="utf-8")
@@ -2086,7 +2113,16 @@ def box_terminal_decision(hermes_home: Path | str) -> bool | None:
         text = None
     if text is not None and _terminal_backend_in_config(text) == TERMINAL_OFF_BACKEND:
         return False
-    return read_terminal_state()
+    recorded = read_terminal_state()
+    if recorded is not None or text is None:
+        return recorded
+    # No marker (absent, unreadable, corrupt) but a config: the provisioner's
+    # own rule decides, so a pre-sentinel box whose disabled_toolsets record
+    # the off posture, or a fresh box (default off), is gated by an update
+    # instead of left as it was.
+    return terminal_tool_enabled(config_text=text, recorded=None, hermes_home=hermes_home, env={})[
+        0
+    ]
 
 
 def _existing_terminal_choice(config_text: str | None, hermes_home: Path | str) -> bool | None:
@@ -3492,7 +3528,12 @@ def _phase_config_write(ctx: _StepCtx) -> PhaseResult:
             # operator's overrides.yaml wins over hal0's disabled_toolsets, so
             # reporting the decision alone could claim "off" on a box where the
             # tool is in fact loaded. The decision is reported alongside it.
-            "terminal_tool": "on" if terminal_enabled_in_config(config_after) else "off",
+            "terminal_tool": (
+                "on"
+                if terminal_enabled_in_config(config_after)
+                or (not terminal_enabled and backend_after != TERMINAL_OFF_BACKEND)
+                else "off"
+            ),
             "terminal_tool_decision": "on" if terminal_enabled else "off",
             "terminal_tool_reason": terminal_reason,
             "approvals_mode": approvals_mode,
@@ -5562,8 +5603,16 @@ def _phase_profile_mcp_wire(ctx: _StepCtx) -> PhaseResult:
         if ctx.state.terminal_enabled is not None
         else box_terminal_decision(ctx.state.hermes_home)
     )
+    backends_before = profile_backends(ctx.state.hermes_home)
     report = wire_named_profiles(Path(ctx.state.hermes_home), terminal_enabled=terminal_enabled)
-    details = {**report, "changed": bool(report["changed"]), "changed_profiles": report["changed"]}
+    details = {
+        **report,
+        "changed": bool(report["changed"]),
+        "changed_profiles": report["changed"],
+        # The CLI restarts the consumers on this (#2878): a profile gated here
+        # reaches a running gateway only once it re-reads its config.
+        "terminal_backend_changed": profile_backends(ctx.state.hermes_home) != backends_before,
+    }
     reason = None
     status = PhaseStatus.OK
     if report["errors"]:
@@ -5606,9 +5655,11 @@ def _phase_brain_profile_mcp_wire(ctx: _StepCtx) -> PhaseResult:
         if ctx.state.terminal_enabled is not None
         else box_terminal_decision(ctx.state.hermes_home)
     )
+    backend_before = _terminal_backend_in_config(_read_text_or_none(path))
     result = _merge_profile_config(
         path, _profile_wire_desired_for(BRAIN_PROFILE_AGENT_ID, terminal_enabled=terminal_enabled)
     )
+    backend_changed = _terminal_backend_in_config(_read_text_or_none(path)) != backend_before
     if result.get("error"):
         if terminal_enabled is False:
             # Fail closed: a brain profile that could not take the terminal
@@ -5642,6 +5693,7 @@ def _phase_brain_profile_mcp_wire(ctx: _StepCtx) -> PhaseResult:
         details={
             "wired": True,
             "changed": result["changed"],
+            "terminal_backend_changed": backend_changed,
             "path": str(path),
             "servers": sorted(desired["mcp_servers"].keys()),
         },
