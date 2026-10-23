@@ -58,7 +58,7 @@ from hal0.agents import overview as builders
 from hal0.agents.manager import AgentManager, AgentRecord, agent_kind, installer_script_path
 from hal0.agents.pi_coder import PiDriver
 from hal0.agents.pi_coder.driver import _HINDSIGHT_API_URL
-from hal0.api.agents.memory_stats import memory_stats_snapshot
+from hal0.api.agents.memory_stats import get_agent_memory_stats, memory_reachable
 from hal0.api.agents.restart import unit_is_active
 from hal0.api.routes import agents as agents_routes
 from hal0.api.routes.approvals import _queue
@@ -161,14 +161,14 @@ _GATEWAY_CRASH_LOOP_SUBSTATES: Final[frozenset[str]] = frozenset(
     {"auto-restart", "auto-restart-queued"}
 )
 
-#: Budget for the cheap one-item memory probe that decides ``available`` and
-#: ``last_write``. Missing it reports memory as unavailable.
+#: ``get_agent_memory_stats`` pages the Hindsight bank (up to 500 items), which
+#: on a large unified bank can take as long as this budget. Missing it does not
+#: make memory unavailable: availability falls back to :data:`_MEMORY_REACH_TIMEOUT_S`.
 _MEMORY_TIMEOUT_S: Final[float] = 2.0
 
-#: Budget for the best-effort ``writes`` count (up to 500 items). On a large
-#: bank it can take as long as the probe's whole budget; missing it reports
-#: ``writes: null`` and leaves memory available (#2957).
-_MEMORY_COUNT_TIMEOUT_S: Final[float] = 2.0
+#: Budget for the constant-time engine reachability check that decides
+#: ``available`` when the count missed its budget (#2957).
+_MEMORY_REACH_TIMEOUT_S: Final[float] = 2.0
 
 #: One probe's budget. The probes run concurrently, so a dead gateway costs one
 #: second in total, not one per profile.
@@ -562,29 +562,41 @@ async def _platform_names(home: Path, secrets_env: Path | None, seam: str | None
     return list(names)
 
 
+async def _memory_count(request: Request) -> dict[str, Any] | None:
+    """The full memory stats, or ``None`` when it misses its budget or fails.
+
+    A timeout is expected on a large bank, so it logs at debug; other failures
+    keep the gather warning.
+    """
+    try:
+        return await asyncio.wait_for(get_agent_memory_stats("hermes", request), _MEMORY_TIMEOUT_S)
+    except TimeoutError:
+        log.debug("agents.overview.memory_count_timeout")
+    except Exception as exc:
+        log.warning("agents.overview.gather_failed", gather="memory", error=str(exc))
+    return None
+
+
 async def _memory_summary(request: Request) -> dict[str, Any]:
     """``{available, writes, last_write}`` for the memory row. Never raises.
 
-    Availability comes from a one-item read, which stays cheap on a large bank.
-    The item count is best-effort: if it misses its own budget, ``writes`` is
-    ``None`` and memory is still available.
+    The item count can be slow on a large bank, so availability does not wait on
+    it: when the count misses its budget, a constant-time reachability check
+    decides ``available`` and ``writes``/``last_write`` are ``None`` (unknown).
     """
-    probe, count = await asyncio.gather(
+    count, reachable = await asyncio.gather(
+        _memory_count(request),
         _guarded(
-            "memory",
-            asyncio.wait_for(memory_stats_snapshot("hermes", request, limit=1), _MEMORY_TIMEOUT_S),
-            None,
-        ),
-        _guarded(
-            "memory_count",
-            asyncio.wait_for(memory_stats_snapshot("hermes", request), _MEMORY_COUNT_TIMEOUT_S),
-            None,
+            "memory_reach",
+            asyncio.wait_for(memory_reachable("hermes", request), _MEMORY_REACH_TIMEOUT_S),
+            False,
         ),
     )
-    if not isinstance(probe, dict) or not probe.get("available"):
-        return dict(_NO_MEMORY)
-    writes = count.get("writes") if isinstance(count, dict) and count.get("available") else None
-    return {"available": True, "writes": writes, "last_write": probe.get("last_write")}
+    if isinstance(count, dict):
+        return {key: count.get(key) for key in ("available", "writes", "last_write")}
+    if reachable:
+        return {"available": True, "writes": None, "last_write": None}
+    return dict(_NO_MEMORY)
 
 
 async def _gather_hermes(request: Request) -> dict[str, Any]:

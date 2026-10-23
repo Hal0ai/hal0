@@ -130,7 +130,10 @@ def _patch_hermes_ready(
         probe_calls["gateway_alive"] += 1
         return True
 
-    async def _memory(agent_id: str, request: Any, *, limit: int = 500) -> dict[str, Any]:
+    async def _reachable(agent_id: str, request: Any) -> bool:
+        return True
+
+    async def _memory(agent_id: str, request: Any) -> dict[str, Any]:
         return {
             "agent_id": agent_id,
             "available": True,
@@ -187,7 +190,8 @@ def _patch_hermes_ready(
             "in_sync": True,
         },
         "_queue": lambda request: SimpleNamespace(list_pending=lambda: []),
-        "memory_stats_snapshot": _memory,
+        "get_agent_memory_stats": _memory,
+        "memory_reachable": _reachable,
         "configured_platform_names": lambda *a, **kw: ["api_server", "telegram"],
         "provision_path": lambda: provision,
     }
@@ -720,35 +724,48 @@ def test_overview_api_not_answering_from_an_active_gateway_is_degraded(client_re
     assert [r["reason"] for r in body["degraded"]] == ["api_unhealthy"]
 
 
-def test_overview_stalled_memory_probe_degrades_to_unavailable(client_ready, monkeypatch):
-    async def _never(agent_id: str, request: Any, *, limit: int = 500) -> dict[str, Any]:
+def test_overview_stalled_memory_and_unreachable_engine_is_unavailable(client_ready, monkeypatch):
+    async def _never(agent_id: str, request: Any) -> dict[str, Any]:
         await asyncio.sleep(30)  # far past the budget: only a timeout can end the wait
         return {"available": True, "writes": 99, "last_write": "late"}
 
-    monkeypatch.setattr(overview_route, "memory_stats_snapshot", _never)
+    async def _down(agent_id: str, request: Any) -> bool:
+        raise ConnectionError("engine down")
+
+    monkeypatch.setattr(overview_route, "get_agent_memory_stats", _never)
+    monkeypatch.setattr(overview_route, "memory_reachable", _down)
     monkeypatch.setattr(overview_route, "_MEMORY_TIMEOUT_S", 0.05)
-    monkeypatch.setattr(overview_route, "_MEMORY_COUNT_TIMEOUT_S", 0.05)
     resp = client_ready.get("/api/agents/hermes/overview")
     assert resp.status_code == 200
     assert resp.json()["memory"] == {"available": False, "writes": None, "last_write": None}
 
 
 def test_overview_slow_memory_count_keeps_memory_available(client_ready, monkeypatch):
-    """#2957: a large bank's 500-item count missing its budget is not an outage."""
+    """#2957: a large bank's slow count is not an outage; the reach check decides."""
 
-    async def _slow_count(agent_id: str, request: Any, *, limit: int = 500) -> dict[str, Any]:
-        if limit > 1:
-            await asyncio.sleep(30)
-        return {"available": True, "writes": 1, "last_write": "2026-10-23T10:00:00Z"}
+    async def _slow_count(agent_id: str, request: Any) -> dict[str, Any]:
+        await asyncio.sleep(30)
+        return {"available": True, "writes": 500, "last_write": "late"}
 
-    monkeypatch.setattr(overview_route, "memory_stats_snapshot", _slow_count)
-    monkeypatch.setattr(overview_route, "_MEMORY_COUNT_TIMEOUT_S", 0.05)
+    monkeypatch.setattr(overview_route, "get_agent_memory_stats", _slow_count)
+    monkeypatch.setattr(overview_route, "_MEMORY_TIMEOUT_S", 0.05)
     resp = client_ready.get("/api/agents/hermes/overview")
-    assert resp.json()["memory"] == {
-        "available": True,
-        "writes": None,
-        "last_write": "2026-10-23T10:00:00Z",
-    }
+    assert resp.json()["memory"] == {"available": True, "writes": None, "last_write": None}
+
+
+def test_overview_memory_availability_ignores_a_slow_filtered_walk(client_ready, monkeypatch):
+    """The reach check, not any bank walk, decides: only the count is slow."""
+    walked: list[str] = []
+
+    async def _walk(agent_id: str, request: Any) -> dict[str, Any]:
+        walked.append(agent_id)
+        await asyncio.sleep(30)
+        return {"available": True, "writes": 1, "last_write": None}
+
+    monkeypatch.setattr(overview_route, "get_agent_memory_stats", _walk)
+    monkeypatch.setattr(overview_route, "_MEMORY_TIMEOUT_S", 0.05)
+    assert client_ready.get("/api/agents/hermes/overview").json()["memory"]["available"] is True
+    assert walked == ["hermes"]
 
 
 def test_overview_a_job_starting_or_ending_is_a_cache_miss(client_ready, probe_calls):
