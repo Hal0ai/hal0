@@ -9,7 +9,8 @@
 //
 // The second block of names (overview, repair, gateway restart, uninstall,
 // approvals mode, log tail, personas, converge, job poll, config URLs,
-// capabilities, approvals count) serves the state-aware cards.
+// capabilities, approvals count, Open WebUI re-mirror) serves the state-aware
+// cards.
 
 import {
   useAgentApprovalsCount,
@@ -21,6 +22,7 @@ import {
   useAgents,
   useAgentUninstall,
   useCommandApprovalsMode,
+  useHermesReconcileUpstreams,
   usePersonaActivate,
   useUnitLogTail,
 } from '@/api/hooks/useAgents'
@@ -60,6 +62,7 @@ Object.assign(window, {
   __hal0UseConfigUrls: useConfigUrls,
   __hal0UseCapabilities: useCapabilities,
   __hal0UseAgentApprovalsCount: useAgentApprovalsCount,
+  __hal0UseHermesReconcileUpstreams: useHermesReconcileUpstreams,
   // Pure (no hook): the cards call it each render with the hooks' data.
   __hal0DeriveCardModel: deriveCardModel,
 })

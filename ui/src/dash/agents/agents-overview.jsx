@@ -1,31 +1,32 @@
 // hal0 dashboard — Agents Overview (the #agent landing tab).
 //
 // The library of agents as collectible cards. Hermes and Pi are the live
-// bundled-agent foils (ADR-0004 §2 single-pick — exactly one of the two is
-// actually installed on a given box, but both light up here so an operator
-// can see the card either way, with status reflecting reality):
-//   - agent liveness   ← window.__hal0UseAgents()  (GET /api/agents, 5s)
-//   - throughput + ctx ← window.__hal0UseSlots()    (primary slot metrics,
-//                          2.5s) — Hermes only; Pi is a CLI tool invoked
-//                          against whichever hal0 slot the operator picks,
-//                          not one dedicated backing slot, so its health
-//                          block shows install status without throughput.
-//   - Restart          → window.__hal0UseAgentRestart("hermes")
-//                          (POST /api/agents/hermes/restart → systemctl).
-//                          Pi has no systemd unit and no persona store, so
-//                          its card has no Restart/Persona actions.
-// The rest of the library (Qwen · OpenCode) are roadmap entries shown
-// behind a grey "coming soon" mask with curated dummy content.
+// bundled agents; each card is drawn from one render-ready model:
+//   - install, version, units, provision, doctor, degraded reasons
+//                      ← window.__hal0UseAgentOverview(name)
+//                        (GET /api/agents/{name}/overview, 10s)
+//   - agent liveness   ← window.__hal0UseAgents()  (GET /api/agents, 5s), the
+//                        fallback when a daemon predates the overview route
+//   - throughput + ctx ← window.__hal0UseSlots()    (primary slot metrics) —
+//                        Hermes only; Pi is a CLI tool with no backing slot
+//   - upgrade / repair jobs ← window.__hal0UseUpdateJob(jobId) (1.5s poll)
+// window.__hal0DeriveCardModel (agent-phase.ts) folds those into the model the
+// card paints; this module owns the data and the action handlers, the card
+// (agent-card.jsx) only renders them.
+// The rest of the library (Qwen · OpenCode) are roadmap entries shown behind
+// a grey "coming soon" mask with curated dummy content.
 //
 // Window-globals shim — register on window, read React + hooks + cards from
 // the same. No ES imports across dash/* (main.tsx load order is the contract).
 
-const { useState, useRef, useEffect } = React;
+import { useQueryClient } from "@tanstack/react-query";
 
-// ── static (curated) identity for the live Hermes card ──────────────
-// Health + status + the backing model are live; the rest is the kit's
-// authored content. `liveModel` is the model the orchestrated agent slot
-// is actually serving (falls back to a dash when no slot is resolved).
+const { useState, useEffect, useRef } = React;
+
+// ── curated identity for the live Hermes card ───────────────────────
+// Names, art and descriptions only: whether an ability is unlocked or a skill
+// lit comes from the card model. `liveModel` is the model the orchestrated
+// agent slot is actually serving (a dash when no slot is resolved).
 function _hermesIdentity(liveModel) {
   return {
     id: "hermes",
@@ -39,25 +40,18 @@ function _hermesIdentity(liveModel) {
       { name: "Engram", cost: 2, desc: "Folds every run back into memory — never relearns.", pow: "60" },
       { name: "Deep Run", cost: 3, desc: "Chains tools for hours, fully AFK.", pow: "90" },
     ],
-    skills: [
-      { l: "voice · tts", key: true },
-      { l: "speech · stt", key: true },
-      { l: "image-gen", key: true },
-      { l: "vision", key: true },
-      { l: "embeddings" },
-    ],
+    skills: [],
   };
 }
 
-// ── static (curated) identity for the live Pi card ───────────────────
-// Pi is a CLI tool, not a backing slot — `model` is the default model
-// hal0's pi-coder driver wires it to (hal0-provider extension), not a
-// live slot reading.
-function _piCoderIdentity() {
+// ── curated identity for the live Pi card ────────────────────────────
+// Pi is a CLI tool, not a backing slot — `model` is the provider hal0's pi
+// driver wires it to (hal0-provider extension), not a live slot reading.
+function _piIdentity() {
   return {
-    id: "pi-coder",
+    id: "pi",
     name: "Pi",
-    model: "hal0/agent",
+    model: "hal0/agent · cli tool",
     role: "autonomous coding · repo-aware engineering",
     rarity: 2,
     el: "#6f7785",
@@ -123,33 +117,6 @@ function _primarySlot(slots) {
   );
 }
 
-// Map agent liveness + slot activity → StatusDot cls + a short label.
-// Mirrors useSidebarAgentRollup. #1459: an `installed` AgentRecord is an
-// ON-DISK fact, not a running one — the bundle can sit there with
-// `hal0-agent@<name>.service` inactive. Liveness comes from the record's
-// `unit_active` probe:
-//   true  → ready (amber), upgraded to `serving` (green) when the backing slot
-//           is actively generating — never a fake "serving" while idle
-//   false → down (red), and the card's Restart action is the way out
-//   null / absent → unknown (grey). Unobservable is NOT healthy: an older
-//           backend, a host without systemd, or an agent with no template unit
-//           (Pi is a CLI tool) all land here.
-function _derive(agentRec, slot) {
-  if (!agentRec) return { cls: "offline", label: "not installed" };
-  const status = String(agentRec.status || "").toLowerCase();
-  if (status === "broken" || /error|fail|crash|down/.test(status)) {
-    return { cls: "error", label: "down" };
-  }
-  const unitActive = agentRec.unit_active;
-  if (unitActive === false) return { cls: "error", label: "down" };
-  if (unitActive !== true) return { cls: "offline", label: "unknown" };
-  const servingNow =
-    !!slot && (slot.state === "serving" || (slot.metrics && slot.metrics.toks > 0));
-  return servingNow
-    ? { cls: "serving", label: "serving" }
-    : { cls: "stale", label: "ready" };
-}
-
 function _health(slot) {
   const m = (slot && slot.metrics) || {};
   const toks = m.toks;
@@ -164,117 +131,328 @@ function _health(slot) {
   };
 }
 
+function _toast(msg, kind) {
+  if (window.__hal0Toast) window.__hal0Toast(msg, kind || "info");
+}
+
+function _errText(err) {
+  return (err && err.message) || "request failed";
+}
+
+// A 409 from the converge or repair route: another job (or the builder lock)
+// is already in flight.
+function _isBusy(err) {
+  return !!err && err.status === 409;
+}
+
+// "converge:hermes" → upgrade, "repair:hermes" → repair.
+function _jobKind(job, fallback) {
+  const phase = String((job && (job.phase || job.kind)) || "");
+  if (phase.startsWith("repair")) return "repair";
+  if (phase.startsWith("converge")) return "upgrade";
+  return fallback || "upgrade";
+}
+
+// The overview route caches for 30 s, so for a while after a job finishes it
+// can still report that job as running (and its phase as `working`). Once our
+// poller has seen the job's terminal state, drop the stale job from the
+// overview the model reads; the phase then falls back to the record rule
+// until the next fresh read.
+function _withoutFinishedJob(overview, doneIds) {
+  if (!overview || !overview.job || !doneIds.includes(overview.job.id)) return overview;
+  return { ...overview, job: null, phase: overview.phase === "working" ? undefined : overview.phase };
+}
+
 function AgentsOverview() {
   const LiveAgentCard = window.LiveAgentCard;
   const LockedAgentCard = window.LockedAgentCard;
-  const PersonaEditModal = window.PersonaEditModal;
+  const derive = window.__hal0DeriveCardModel;
+
+  const qc = useQueryClient();
 
   const useAgents = window.__hal0UseAgents;
   const useSlots = window.__hal0UseSlots;
+  const useAgentOverview = window.__hal0UseAgentOverview;
+  const useUpdateJob = window.__hal0UseUpdateJob;
+  const useComponentConverge = window.__hal0UseComponentConverge;
+  const useAgentRepair = window.__hal0UseAgentRepair;
   const useAgentRestart = window.__hal0UseAgentRestart;
+  const useAgentGatewayRestart = window.__hal0UseAgentGatewayRestart;
+  const useAgentUninstall = window.__hal0UseAgentUninstall;
+  const useCommandApprovalsMode = window.__hal0UseCommandApprovalsMode;
+  const usePersonaActivate = window.__hal0UsePersonaActivate;
+  const useHermesReconcileUpstreams = window.__hal0UseHermesReconcileUpstreams;
+  const useConfigUrls = window.__hal0UseConfigUrls;
+  const useCapabilities = window.__hal0UseCapabilities;
 
   const agentsQ = useAgents ? useAgents() : { data: null };
   const slotsQ = useSlots ? useSlots() : { data: null };
+  const hermesOvQ = useAgentOverview ? useAgentOverview("hermes") : { data: null };
+  const piOvQ = useAgentOverview ? useAgentOverview("pi") : { data: null };
+  const urlsQ = useConfigUrls ? useConfigUrls() : { data: null };
+  const capsQ = useCapabilities ? useCapabilities() : { data: null };
+
+  const converge = useComponentConverge ? useComponentConverge() : null;
+  const repair = useAgentRepair ? useAgentRepair("hermes") : null;
   const restart = useAgentRestart ? useAgentRestart("hermes") : null;
+  const gatewayRestart = useAgentGatewayRestart ? useAgentGatewayRestart("hermes") : null;
+  const uninstall = useAgentUninstall ? useAgentUninstall("hermes") : null;
+  const approvalsMode = useCommandApprovalsMode ? useCommandApprovalsMode("hermes") : null;
+  const personaActivate = usePersonaActivate ? usePersonaActivate("hermes") : null;
+  const reconcile = useHermesReconcileUpstreams ? useHermesReconcileUpstreams() : null;
 
-  const [restartState, setRestartState] = useState("idle"); // idle | busy | ok | err
-  const [personaOpen, setPersonaOpen] = useState(false);
-  const resetTimer = useRef(null);
+  // ── the Hermes build job (upgrade = converge, repair) ──────────────
+  // Seeded from the overview's in-flight job (a build started from the CLI or
+  // the Services page) and from our own mutation results.
+  const [jobId, setJobId] = useState(null);
+  const [doneIds, setDoneIds] = useState([]);
+  const startedKind = useRef(null);
+  const jobPoll = useUpdateJob ? useUpdateJob(jobId) : { job: null, terminal: false };
 
-  useEffect(() => () => { if (resetTimer.current) clearTimeout(resetTimer.current); }, []);
+  const hermesOv = hermesOvQ.data || null;
+  const ovJobId = hermesOv && hermesOv.job ? hermesOv.job.id : null;
+  useEffect(() => {
+    if (ovJobId && ovJobId !== jobId && !doneIds.includes(ovJobId)) setJobId(ovJobId);
+  }, [ovJobId, jobId, doneIds]);
 
+  // Read terminal off the snapshot itself: useUpdateJob's `terminal` flag is
+  // only reset when the id goes to null, so it can still be true from the
+  // previous job while a new one is being polled.
+  const polled = jobPoll.job && jobPoll.job.id === jobId ? jobPoll.job : null;
+  const finished = !!polled && (polled.state === "applied" || polled.state === "failed");
+  useEffect(() => {
+    if (!finished || doneIds.includes(polled.id)) return;
+    setDoneIds((ids) => [...ids, polled.id]);
+    qc.invalidateQueries({ queryKey: ["agents"] });
+    const kind = _jobKind(polled, startedKind.current);
+    const result = polled.component_result || {};
+    if (polled.state === "failed") {
+      const why = polled.error || polled.error_code || "see the unit logs";
+      _toast(`Hermes ${kind} failed: ${why}`, "error");
+    } else if (result.status === "busy") {
+      _toast("Hermes builder is busy", "warning");
+    } else {
+      _toast(kind === "repair" ? "Hermes repaired" : "Hermes upgraded", "success");
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [finished, polled && polled.id]);
+
+  // Until the first status read lands, show the job as the overview reported
+  // it, or as queued when we just started it, so the card turns to `working`
+  // the moment the mutation returns.
+  const seeded = hermesOv && hermesOv.job && hermesOv.job.id === jobId ? hermesOv.job : null;
+  const jobForModel =
+    polled ||
+    (jobId && !doneIds.includes(jobId)
+      ? seeded || { id: jobId, state: "queued", phase: (startedKind.current === "repair" ? "repair" : "converge") + ":hermes" }
+      : null);
+
+  // ── models ─────────────────────────────────────────────────────────
   const agents = (agentsQ.data && agentsQ.data.agents) || [];
   const hermesRec = agents.find((a) => a.name === "hermes" || a.id === "hermes") || null;
+  const piRec = agents.find((a) => a.name === "pi" || a.id === "pi") || null;
   const primary = _primarySlot(slotsQ.data);
-  const { cls: statusCls, label: statusLabel } = _derive(hermesRec, primary);
-  const health = _health(primary);
+  const caps = capsQ.data || null;
+  const urls = urlsQ.data || null;
+  const piOv = piOvQ.data || null;
 
-  // Pi is a CLI tool, not a backing service — no slot of its own to read
-  // throughput/ctx from (_derive/_health both tolerate a null slot: status
-  // falls back to "ready"/"not installed"/"down" off the AgentRecord alone,
-  // health renders "—" placeholders).
-  // #1472: Pi used to look itself up in GET /api/agents and run the result
-  // through _derive. That lookup can never hit: BUNDLED_AGENTS is ("hermes",)
-  // (src/hal0/agents/manager.py) and POST /api/agents/install 404s any other
-  // name, so no AgentRecord for pi-coder is constructible. _derive(null, null)
-  // answers "not installed", which reads as "installable, just not installed
-  // yet" — the one thing that is not true. Pi is a roadmap entry; label it the
-  // way the legend already labels roadmap cards, and drop the dead lookup
-  // rather than leave wiring that implies a signal exists. Restore the probe
-  // when it is genuinely installable (pi-coder driver config).
-  const ROADMAP_STATUS = { cls: "soon", label: "on the roadmap" };
-  const { cls: piStatusCls, label: piStatusLabel } = ROADMAP_STATUS;
-  const piHealth = _health(null);
+  // `lastTool`: no hook reads GET /api/agents/{name}/activity yet (it shells
+  // out to journalctl on every call), so the card shows no last-tool line.
+  const hermesModel = derive
+    ? {
+        ...derive({
+          agent: "hermes",
+          record: hermesRec,
+          overview: _withoutFinishedJob(hermesOv, doneIds),
+          slot: primary,
+          job: jobForModel,
+          caps,
+          urls,
+          lastTool: null,
+        }),
+        overview: hermesOv,
+        health: _health(primary),
+      }
+    : null;
+  const piModel = derive
+    ? {
+        ...derive({ agent: "pi", record: piRec, overview: piOv, slot: null, job: null, caps, urls, lastTool: null }),
+        overview: piOv,
+        health: _health(null),
+      }
+    : null;
 
-  const onRestart = () => {
-    if (!restart || restartState === "busy") return;
-    setRestartState("busy");
-    if (resetTimer.current) clearTimeout(resetTimer.current);
-    restart
-      .mutateAsync()
+  // ── actions ────────────────────────────────────────────────────────
+  // Each resolves (never rejects) once its toast is out, so a card button can
+  // hold a busy state for exactly as long as the request runs.
+  const refetchHermes = () => {
+    if (hermesOvQ.refetch) hermesOvQ.refetch();
+  };
+
+  const startJob = (kind, run) => {
+    startedKind.current = kind;
+    return run()
       .then((res) => {
-        // "restarting" (Type=notify handshake in flight) still resolves the
-        // call — show success; the live polls converge the dot afterwards.
-        setRestartState(res && res.status === "error" ? "err" : "ok");
+        if (res && res.id) setJobId(res.id);
+        refetchHermes();
       })
-      .catch(() => setRestartState("err"))
-      .finally(() => {
-        resetTimer.current = setTimeout(() => setRestartState("idle"), 2600);
+      .catch((err) => {
+        if (_isBusy(err)) _toast("Hermes builder is busy", "warning");
+        else _toast(`Hermes ${kind} failed to start: ${_errText(err)}`, "error");
       });
   };
 
-  const onLogs = () => { window.location.hash = "#logs"; };
-  const onPersona = () => setPersonaOpen(true);
+  const copy = (text) => {
+    const fail = () => _toast(text, "info");
+    try {
+      if (!navigator.clipboard || !navigator.clipboard.writeText) {
+        fail();
+        return Promise.resolve();
+      }
+      return navigator.clipboard.writeText(text).then(() => _toast("Copied", "success"), fail);
+    } catch (e) {
+      fail();
+      return Promise.resolve();
+    }
+  };
+
+  const hermesActions = {
+    restart: restart
+      ? () =>
+          restart
+            .mutateAsync()
+            .then((res) => {
+              if (res && res.status === "error") _toast(`Hermes restart failed: ${res.detail || "see the unit logs"}`, "error");
+              else _toast(res && res.status === "restarting" ? "Hermes is restarting" : "Hermes restarted", "success");
+              refetchHermes();
+            })
+            .catch((err) => _toast(`Hermes restart failed: ${_errText(err)}`, "error"))
+      : null,
+    restartGateway: gatewayRestart
+      ? () =>
+          gatewayRestart
+            .mutateAsync()
+            .then((res) => {
+              if (res && res.status === "error") _toast(`Gateway restart failed: ${res.detail || "see the unit logs"}`, "error");
+              else _toast("Hermes gateway restarted", "success");
+              refetchHermes();
+            })
+            .catch((err) => _toast(`Gateway restart failed: ${_errText(err)}`, "error"))
+      : null,
+    repair: repair ? () => startJob("repair", () => repair.mutateAsync()) : null,
+    upgrade: converge ? () => startJob("upgrade", () => converge.mutateAsync("hermes")) : null,
+    uninstall: uninstall
+      ? () =>
+          uninstall
+            .mutateAsync()
+            .then((res) => {
+              if (res && res.status === "partially_uninstalled") {
+                const n = (res.residual || []).length;
+                _toast(`Hermes partly uninstalled: ${n} path${n === 1 ? "" : "s"} left behind`, "warning");
+              } else if (res && res.status === "not_installed") {
+                _toast("Hermes was not installed", "info");
+              } else {
+                _toast("Hermes uninstalled", "success");
+              }
+              refetchHermes();
+            })
+            .catch((err) => _toast(`Uninstall failed: ${_errText(err)}`, "error"))
+      : null,
+    setApprovalsMode: approvalsMode
+      ? (mode) =>
+          approvalsMode
+            .mutateAsync(mode)
+            .then((res) => {
+              const unsure = res && (res.restart === "unknown" || res.restart === "timeout");
+              _toast((res && res.message) || `Approvals set to ${mode}`, unsure ? "warning" : "success");
+              refetchHermes();
+            })
+            .catch((err) => _toast(`Approvals change failed: ${_errText(err)}`, "error"))
+      : null,
+    activatePersona: personaActivate
+      ? (pid) =>
+          personaActivate
+            .mutateAsync(pid)
+            .then(() => {
+              qc.invalidateQueries({ queryKey: ["agents"] });
+              _toast("Persona activated", "success");
+            })
+            .catch((err) => _toast(`Persona activation failed: ${_errText(err)}`, "error"))
+      : null,
+    reconcile: reconcile
+      ? () =>
+          reconcile
+            .mutateAsync()
+            .then((res) => {
+              const n = res && Array.isArray(res.profiles_wired) ? res.profiles_wired.length : null;
+              _toast(n ? `Re-mirrored ${n} profile${n === 1 ? "" : "s"} to Open WebUI` : "Profiles re-mirrored to Open WebUI", "success");
+            })
+            .catch((err) => _toast(`Re-mirror failed: ${_errText(err)}`, "error"))
+      : null,
+    // LogsView (extras.jsx) reads no hash parameters, so there is no unit
+    // filter to pass; the journal pane there tails hal0's own stream.
+    openLogs: () => { window.location.hash = "#logs"; },
+    // The Activity surface is the ActivityLog pane on the Slots page.
+    openActivity: () => { window.location.hash = "#slots"; },
+    // The approval queue modal is owned by App (main.jsx) and opened by event.
+    openApprovals: () => { window.dispatchEvent(new CustomEvent("hal0:open-approvals")); },
+    copy,
+    refresh: () => {
+      refetchHermes();
+      if (agentsQ.refetch) agentsQ.refetch();
+    },
+  };
+
+  // Pi is a CLI tool: no unit, no gateway, no build job. Its lifecycle verbs
+  // run as the user who installed it, so the card only hands out commands.
+  const piActions = {
+    restart: null,
+    restartGateway: null,
+    repair: null,
+    upgrade: null,
+    uninstall: null,
+    setApprovalsMode: null,
+    activatePersona: null,
+    reconcile: null,
+    openLogs: null,
+    openActivity: null,
+    openApprovals: null,
+    copy,
+    refresh: () => {
+      if (piOvQ.refetch) piOvQ.refetch();
+      if (agentsQ.refetch) agentsQ.refetch();
+    },
+  };
 
   return (
     <div className="agents-overview" data-testid="agents-overview">
       <div className="ao-head">
         <div className="ao-eye">hal0 · agent library</div>
-        {/* #1472: this claimed Hermes and Pi were both "live — their cards
-            stream real install/endpoint status". Only Hermes can be:
-            BUNDLED_AGENTS is ("hermes",) and POST /api/agents/install 404s
-            any other name, so no AgentRecord for pi-coder can exist and the
-            card was permanently "not installed" — which reads as
-            "installable, just not installed yet". It is on the roadmap like
-            the rest; say that instead of contradicting the page's own
-            legend. */}
         <p className="ao-sub">
-          Every agent in the runtime as a collectible card. <b>Hermes</b> is live — its card
-          streams real install/endpoint status and flips to abilities, skills, and quick
-          actions. <b>Pi</b> is on the roadmap alongside the rest.
+          Every agent in the runtime as a card. Hermes and Pi stream real install, version and
+          health state; flip a card for its console.
         </p>
         <div className="ao-legend">
           <span className="ao-lz"><span className="d serving" />Serving <span className="k">· live, wired</span></span>
+          <span className="ao-lz"><span className="d ready" />Ready</span>
+          <span className="ao-lz"><span className="d down" />Down</span>
           <span className="ao-lz"><span className="d soon" />Coming soon <span className="k">· on the roadmap</span></span>
         </div>
       </div>
 
       <div className="ao-grid">
-        {LiveAgentCard && (
+        {LiveAgentCard && hermesModel && (
           <LiveAgentCard
-            agent={_hermesIdentity(primary && primary.model)}
-            health={health}
-            statusCls={statusCls}
-            statusLabel={statusLabel}
-            restart={{ state: restartState, onClick: onRestart }}
-            onLogs={onLogs}
-            onPersona={onPersona}
+            identity={_hermesIdentity(primary && primary.model)}
+            model={hermesModel}
+            actions={hermesActions}
           />
         )}
-        {LiveAgentCard && (
-          <LiveAgentCard
-            agent={_piCoderIdentity()}
-            health={piHealth}
-            statusCls={piStatusCls}
-            statusLabel={piStatusLabel}
-          />
+        {LiveAgentCard && piModel && (
+          <LiveAgentCard identity={_piIdentity()} model={piModel} actions={piActions} />
         )}
         {LockedAgentCard && _lockedRoster().map((a) => <LockedAgentCard key={a.id} agent={a} />)}
       </div>
-
-      {PersonaEditModal && (
-        <PersonaEditModal open={personaOpen} onClose={() => setPersonaOpen(false)} />
-      )}
     </div>
   );
 }

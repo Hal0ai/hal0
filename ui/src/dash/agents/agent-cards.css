@@ -32,6 +32,8 @@
 .ao-lz .d { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
 .ao-lz .d.serving { background: var(--ok); box-shadow: 0 0 9px rgba(111,207,151,0.6); }
 .ao-lz .d.soon { background: transparent; border: 1.5px solid var(--fg-4); }
+.ao-lz .d.ready { background: var(--hal0-accent); }
+.ao-lz .d.down { background: var(--err); }
 .ao-lz .k { color: var(--fg-4); }
 
 .ao-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(330px, 340px)); gap: 26px; justify-content: start; }

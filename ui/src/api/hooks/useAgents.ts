@@ -872,6 +872,27 @@ export function useCommandApprovalsMode(name: string) {
   })
 }
 
+/** What POST /api/agents/hermes/reconcile-upstreams answers: `ok` plus the
+ *  sync report (src/hal0/agents/hermes_upstreams.py sync_hermes_upstreams). */
+export interface HermesReconcileResult {
+  ok: boolean
+  keys_written?: unknown
+  profiles_wired?: string[]
+  [key: string]: unknown
+}
+
+/** POST /api/agents/hermes/reconcile-upstreams — re-mirror the Hermes
+ *  gateway's profiles into the upstream registry (Open WebUI reads them). */
+export function useHermesReconcileUpstreams() {
+  const qc = useQueryClient()
+  return useMutation<HermesReconcileResult, Error, void>({
+    mutationFn: () => apiPost<HermesReconcileResult>(ENDPOINTS.agentHermesReconcileUpstreams),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['agents'] })
+    },
+  })
+}
+
 /** GET /api/logs (src/hal0/api/routes/logs.py list_logs): the same body the
  *  Services drawer reads. `hint` is set when the journal was unreadable or
  *  empty and says why. */

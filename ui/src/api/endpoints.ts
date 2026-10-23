@@ -213,6 +213,8 @@ export const ENDPOINTS = {
     `/api/agents/${encodeURIComponent(id)}/gateway/restart`,
   agentUninstall: (id: string) =>
     `/api/agents/${encodeURIComponent(id)}`,
+  // Re-mirror the Hermes gateway's profiles as hal0 upstreams (routes/agents.py).
+  agentHermesReconcileUpstreams: '/api/agents/hermes/reconcile-upstreams',
   componentConverge: (id: string) =>
     `/api/updates/components/${encodeURIComponent(id)}/converge`,
   agentApprovals: '/api/agent/approvals',
