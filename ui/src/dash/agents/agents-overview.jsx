@@ -40,13 +40,13 @@ function _hermesIdentity(liveModel) {
       { name: "Engram", cost: 2, desc: "Folds every run back into memory — never relearns.", pow: "60" },
       { name: "Deep Run", cost: 3, desc: "Chains tools for hours, fully AFK.", pow: "90" },
     ],
-    skills: [],
   };
 }
 
 // ── curated identity for the live Pi card ────────────────────────────
 // Pi is a CLI tool, not a backing slot — `model` is the provider hal0's pi
 // driver wires it to (hal0-provider extension), not a live slot reading.
+// As for Hermes, skill chips and their lit state come from the card model.
 function _piIdentity() {
   return {
     id: "pi",
@@ -62,13 +62,6 @@ function _piIdentity() {
       { name: "Slot Sync", cost: 1, desc: "Auto-discovers every hal0 slot as a model provider — no config, no restart.", pow: "70" },
       { name: "Dual Memory", cost: 2, desc: "Reads and writes hal0's shared memory bank alongside every other agent.", pow: "65" },
       { name: "Delegate", cost: 2, desc: "Spins up scout, planner, worker, and reviewer subagents for parallel work.", pow: "75" },
-    ],
-    skills: [
-      { l: "repo-aware", key: true },
-      { l: "shared memory", key: true },
-      { l: "delegation", key: true },
-      { l: "cli-native" },
-      { l: "theme" },
     ],
   };
 }
@@ -153,11 +146,12 @@ function _jobKind(job, fallback) {
   return fallback || "upgrade";
 }
 
-// The overview route caches for 30 s, so for a while after a job finishes it
-// can still report that job as running (and its phase as `working`). Once our
-// poller has seen the job's terminal state, drop the stale job from the
-// overview the model reads; the phase then falls back to the record rule
-// until the next fresh read.
+// The overview route keys its cache by job and recomputes `job` and `phase` on
+// every request, so a live overview stops reporting a job once it ends. This
+// only guards a read that still names a job our poller has already seen
+// finish (a static mock, or a response that was in flight as the job ended):
+// that job and its `working` phase are dropped, and the phase falls back to
+// the record rule until the next read.
 function _withoutFinishedJob(overview, doneIds) {
   if (!overview || !overview.job || !doneIds.includes(overview.job.id)) return overview;
   return { ...overview, job: null, phase: overview.phase === "working" ? undefined : overview.phase };
@@ -256,8 +250,9 @@ function AgentsOverview() {
   const urls = urlsQ.data || null;
   const piOv = piOvQ.data || null;
 
-  // `lastTool`: no hook reads GET /api/agents/{name}/activity yet (it shells
-  // out to journalctl on every call), so the card shows no last-tool line.
+  // `lastTool` stays null this release: the only source, GET
+  // /api/agents/{name}/activity, shells out to journalctl on every call. The
+  // model keeps the input so a later change can wire a cheap source.
   const hermesModel = derive
     ? {
         ...derive({

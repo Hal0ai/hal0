@@ -17,19 +17,24 @@
 //
 // agents-overview.jsx owns the data and the actions; this file paints
 // `{identity, model, actions}` (model = window.__hal0DeriveCardModel's output
-// plus `overview` and `health`). The only reads made here are the ones a
-// single face needs while it is on screen: the journal tail on the `down`
-// face, and the persona list and approvals count on the Controls tab.
+// plus `overview` and `health`). The reads made here belong to one face: the
+// journal tail on the `down` face, and the persona list and approvals count
+// on the Controls tab.
 //
-// Both faces stay mounted (the flip is an opacity cross-fade), so action
-// test ids are only set on the face that is showing (`live`): one id, one
-// element, whichever side is up.
+// Both faces stay mounted (the flip is an opacity cross-fade). The hidden one
+// is `inert`, so it takes no focus or clicks, and action test ids are only set
+// on the face that is showing (`live`): one id, one element, whichever side is
+// up. While one action runs, every other action control is disabled.
 //
 // Window-globals shim: register on `window`, read React / Icon / StatusDot /
 // ConfirmDialog / PersonaEditModal from the same. No ES imports across
 // dash/* (main.tsx load order is the contract).
 
-const { useState, useRef, useLayoutEffect, useEffect } = React;
+const { useState, useRef, useLayoutEffect, useEffect, useContext, createContext } = React;
+
+// The key of the action this card is running, or null. Action controls read
+// it to disable themselves, so a click can never be swallowed by `run`.
+const CardBusy = createContext(null);
 
 // Drive the 3D flip with the Web Animations API. A CSS transition on a
 // rotateY 0→180 hits a matrix-interpolation singularity in some engines and
@@ -199,19 +204,23 @@ function useNow(ms) {
 }
 
 // One action at a time per card; `busy` names it until its promise settles.
-// The overview's actions never reject (they toast their own errors).
+// The overview's actions never reject (they toast their own errors). Action
+// controls are disabled while one runs; should a call still arrive, it is
+// refused out loud, never dropped silently.
 function useRunner() {
   const [busy, setBusy] = useState(null);
-  const alive = useRef(true);
-  useEffect(() => () => { alive.current = false; }, []);
   const run = (key, fn) => {
-    if (typeof fn !== "function" || busy) return;
+    if (typeof fn !== "function") return;
+    if (busy) {
+      if (window.__hal0Toast) window.__hal0Toast("Another action is still running", "warning");
+      return;
+    }
     setBusy(key);
     let p;
     try { p = fn(); } catch (e) { p = null; }
     Promise.resolve(p)
       .catch(() => {})
-      .then(() => { if (alive.current) setBusy(null); });
+      .then(() => setBusy(null));
   };
   return [busy, run];
 }
@@ -224,8 +233,12 @@ function Ago({ ts }) {
 }
 
 // ── primitives local to the card ────────────────────────────────────
-function ActBtn({ live, testid, icon, label, busyLabel, busy, onClick, primary, danger, disabled, title, wide }) {
+// `busy`: this button's own action is the one running (it shows busyLabel).
+// `free`: the button only navigates or opens a dialog that does not act, so
+// it stays usable while another action runs.
+function ActBtn({ live, testid, icon, label, busyLabel, busy, onClick, primary, danger, disabled, title, wide, free }) {
   const Icon = window.Icon;
+  const running = useContext(CardBusy);
   const cls =
     "fc-act" + (primary ? " primary" : "") + (danger ? " danger" : "") + (wide ? " wide" : "") + (busy ? " busy" : "");
   return (
@@ -233,7 +246,7 @@ function ActBtn({ live, testid, icon, label, busyLabel, busy, onClick, primary, 
       type="button"
       className={cls}
       data-testid={live ? testid : undefined}
-      disabled={!!disabled || !!busy || !onClick}
+      disabled={!!disabled || !!busy || !onClick || (!free && !!running)}
       title={title}
       onClick={(e) => { stop(e); if (onClick) onClick(); }}
     >
@@ -251,10 +264,11 @@ function CopyCommand({ live, command, testid, actions, label }) {
   if (!command) return null;
   const canCopy = !!(actions && actions.copy);
   return (
-    <div className="fc-cmd" onClick={stop}>
+    <div className="fc-cmd">
       {label && <span className="fc-cmd-l">{label}</span>}
       <div className="fc-cmd-row">
-        <code className="fc-cmd-t" title={command}>{command}</code>
+        {/* selecting the command is an interaction: it must not flip the card */}
+        <code className="fc-cmd-t" title={command} onClick={stop}>{command}</code>
         <button
           type="button"
           className="fc-cmd-b"
@@ -325,13 +339,16 @@ function PhaseBlock({ model, isPi }) {
           <span className="fc-pb-l">{model.degradedCount === 1 ? "issue" : "issues"}</span>
         </div>
       );
-    case "down":
+    case "down": {
+      // The unit's state word as reported; "unknown" (or no report) is a dash.
+      const unit = ov.units && ov.units.agent;
       return (
         <div className="fc-pblock err">
           <span className="fc-pb-l">agent unit</span>
-          <span className="fc-pb-v">{_dash(ov.units && ov.units.agent !== "unknown" ? ov.units.agent : "inactive")}</span>
+          <span className="fc-pb-v">{_dash(unit && unit !== "unknown" ? unit : null)}</span>
         </div>
       );
+    }
     case "broken":
       return <div className="fc-pblock err"><span className="fc-pb-l">install broken</span></div>;
     case "working":
@@ -407,16 +424,6 @@ function Reach({ model }) {
   );
 }
 
-function LastTool({ model }) {
-  const t = model.lastTool;
-  if (!t || !t.name) return null;
-  return (
-    <div className="fc-last">
-      last tool · <b>{t.name}</b>{t.at != null && <> · <Ago ts={t.at} /></>}
-    </div>
-  );
-}
-
 // The last journal lines of the agent unit; mounted only on the down face.
 function JournalTail() {
   const useUnitLogTail = window.__hal0UseUnitLogTail;
@@ -473,7 +480,7 @@ function Reasons({ live, identity, model, actions, busy, run, ask }) {
   const seen = new Set();
   const more = model.reasons.length - model.reasonsTop.length;
   return (
-    <div className="fc-reasons" data-testid={"agent-reasons-" + identity.id} onClick={stop}>
+    <div className="fc-reasons" data-testid={"agent-reasons-" + identity.id}>
       {model.reasonsTop.map((r, i) => {
         const key = r.fix === "cli" ? "cli:" + (r.command || "") : r.fix;
         const repeat = seen.has(key);
@@ -505,7 +512,7 @@ function JobFace({ id, job }) {
   const shown = steps.slice(-4);
   const earlier = steps.length - shown.length;
   return (
-    <div className="fc-job" data-testid={"agent-job-" + id} data-state={job.state} onClick={stop}>
+    <div className="fc-job" data-testid={"agent-job-" + id} data-state={job.state}>
       <div className="fc-job-h">
         <span className="fc-spin" aria-hidden="true" />
         <b>{_jobWord(job)}</b>
@@ -587,12 +594,12 @@ function PhaseBand(props) {
       return (
         <>
           <JournalTail />
-          <div className="fc-acts" onClick={stop}>
+          <div className="fc-acts">
             <ActBtn live={live} testid="agent-action-restart" icon="refresh" label="Start" busyLabel="Starting…"
               primary={!broken} busy={busy === "restart"} onClick={actions.restart && (() => run("restart", actions.restart))} />
             <ActBtn live={live} testid="agent-action-repair" label="Repair" primary={broken}
               busy={busy === "repair"} onClick={actions.repair && (() => ask("repair"))} />
-            <ActBtn live={live} testid="agent-action-logs" icon="logs" label="Logs" onClick={actions.openLogs} />
+            <ActBtn live={live} testid="agent-action-logs" icon="logs" label="Logs" free onClick={actions.openLogs} />
           </div>
           {status}
         </>
@@ -618,7 +625,6 @@ function PhaseBand(props) {
         <>
           <Chips model={model} />
           <Reach model={model} />
-          <LastTool model={model} />
           {status}
         </>
       );
@@ -626,10 +632,10 @@ function PhaseBand(props) {
       return (
         <>
           <div className="fc-note">hal0 cannot read the agent unit's state on this box.</div>
-          <div className="fc-acts" onClick={stop}>
+          <div className="fc-acts">
             <ActBtn live={live} testid="agent-action-restart" icon="refresh" label="Restart" busyLabel="Restarting…"
               busy={busy === "restart"} onClick={actions.restart && (() => run("restart", actions.restart))} />
-            <ActBtn live={live} testid="agent-action-logs" icon="logs" label="Logs" onClick={actions.openLogs} />
+            <ActBtn live={live} testid="agent-action-logs" icon="logs" label="Logs" free onClick={actions.openLogs} />
           </div>
           {status}
         </>
@@ -640,7 +646,7 @@ function PhaseBand(props) {
 // ── back: tabs ──────────────────────────────────────────────────────
 function NotInstalledPane({ live, model, actions }) {
   return (
-    <div className="fcb-pane-in" onClick={stop}>
+    <div className="fcb-pane-in">
       <div className="fc-note">
         Not installed on this box{model.version.pinLabel !== "—" && <> · installs <b>{model.version.pinLabel}</b></>}.
       </div>
@@ -759,7 +765,7 @@ function ControlsTab({ live, identity, model, actions, busy, run, editPersona })
   if (isPi) {
     const c = model.commands;
     return (
-      <div className="fcb-pane-in" onClick={stop}>
+      <div className="fcb-pane-in">
         <div className="fc-note">Pi runs as the user who installed it, so these run on the box, not from here.</div>
         <CopyCommand live={live} label="upgrade" command={c.upgrade} testid="agent-action-copy-upgrade" actions={actions} />
         <CopyCommand live={live} label="uninstall" command={c.uninstall} testid="agent-action-copy-uninstall" actions={actions} />
@@ -772,8 +778,9 @@ function ControlsTab({ live, identity, model, actions, busy, run, editPersona })
   return <HermesControls live={live} model={model} actions={actions} busy={busy} run={run} editPersona={editPersona} />;
 }
 
-// Mounted only while the Controls tab is open, so the persona list and the
-// approvals count are polled only then.
+// Controls is the default tab and the back stays mounted, so the persona list
+// and the approvals count poll from page load. Both share the sidebar block's
+// query keys, so react-query serves the card and the sidebar from one poll.
 function HermesControls({ live, model, actions, busy, run, editPersona }) {
   const Icon = window.Icon;
   const usePersonas = window.__hal0UseAgentPersonas;
@@ -788,16 +795,22 @@ function HermesControls({ live, model, actions, busy, run, editPersona }) {
     typeof countQ.data === "number" ? countQ.data : ov.approvals && ov.approvals.pending != null ? ov.approvals.pending : null;
   const mode = model.chips.approvals;
   const working = model.phase === "working";
+  const running = useContext(CardBusy);
 
   return (
-    <div className="fcb-pane-in fcb-ctl" onClick={stop}>
+    <div className="fcb-pane-in fcb-ctl">
       {model.reach.desktop ? (
         <a className="fc-act primary wide" href={model.reach.desktop} target="_blank" rel="noopener noreferrer"
           data-testid={live ? "agent-action-desktop" : undefined} onClick={stop}>
           <Icon name="ext" size={12} sw={1.5} />Open Hermes desktop
         </a>
       ) : (
-        <div className="fc-slot-dim">Set HAL0_HERMES_PUBLIC_URL to link the desktop</div>
+        <div className="fc-slot-dim">
+          Set HAL0_HERMES_PUBLIC_URL to link the desktop ·{" "}
+          <a href="https://hal0.dev/docs/reference/env-vars/" target="_blank" rel="noopener noreferrer" onClick={stop}>
+            docs
+          </a>
+        </div>
       )}
 
       <div className="fcb-grid2">
@@ -806,8 +819,8 @@ function HermesControls({ live, model, actions, busy, run, editPersona }) {
         <ActBtn live={live} testid="agent-action-restart-gateway" icon="refresh" label="Restart gateway" busyLabel="Restarting…"
           busy={busy === "restartGateway"} disabled={working}
           onClick={actions.restartGateway && (() => run("restartGateway", actions.restartGateway))} />
-        <ActBtn live={live} testid="agent-action-logs" icon="logs" label="Unit logs" onClick={actions.openLogs} />
-        <ActBtn live={live} testid="agent-action-activity" icon="tools" label="Tool activity" onClick={actions.openActivity} />
+        <ActBtn live={live} testid="agent-action-logs" icon="logs" label="Unit logs" free onClick={actions.openLogs} />
+        <ActBtn live={live} testid="agent-action-activity" icon="tools" label="Tool activity" free onClick={actions.openActivity} />
       </div>
 
       <div className="fcb-field">
@@ -815,9 +828,10 @@ function HermesControls({ live, model, actions, busy, run, editPersona }) {
         <div className="fcb-row">
           <select
             className="fc-select"
+            aria-label="Active persona"
             data-testid={live ? "agent-action-persona" : undefined}
             value={active}
-            disabled={!actions.activatePersona || !list.length || busy === "persona"}
+            disabled={!actions.activatePersona || !list.length || !!running}
             onClick={stop}
             onChange={(e) => {
               const pid = e.target.value;
@@ -827,7 +841,7 @@ function HermesControls({ live, model, actions, busy, run, editPersona }) {
             {!list.length && <option value="">—</option>}
             {list.map((p) => <option key={p.id} value={p.id}>{p.display_name || p.id}</option>)}
           </select>
-          <ActBtn live={live} testid="agent-action-persona-edit" label="Edit"
+          <ActBtn live={live} testid="agent-action-persona-edit" label="Edit" free
             onClick={active ? () => editPersona(active) : null} title="Edit the active persona" />
         </div>
       </div>
@@ -844,7 +858,7 @@ function HermesControls({ live, model, actions, busy, run, editPersona }) {
                 aria-checked={mode === m}
                 className={"fc-seg-b" + (mode === m ? " on" : "")}
                 data-testid={live ? "agent-approvals-" + m : undefined}
-                disabled={!actions.setApprovalsMode || !mode || busy === "approvals"}
+                disabled={!actions.setApprovalsMode || !mode || !!running}
                 onClick={(e) => {
                   stop(e);
                   if (m !== mode) run("approvals", () => actions.setApprovalsMode(m));
@@ -852,7 +866,7 @@ function HermesControls({ live, model, actions, busy, run, editPersona }) {
               >{m}</button>
             ))}
           </div>
-          <ActBtn live={live} testid="agent-action-approvals-inbox" label={"inbox · " + _dash(pending)}
+          <ActBtn live={live} testid="agent-action-approvals-inbox" label={"inbox · " + _dash(pending)} free
             onClick={actions.openApprovals} title="Pending approval queue" />
         </div>
       </div>
@@ -892,15 +906,15 @@ function LoreTab({ identity, model }) {
       <div className="fcb-skills">
         <div className="fcb-sec-l">Skills</div>
         <div className="skill-row">
-          {lore.skills.length
-            ? lore.skills.map((s, i) => (
-                <span className={"skill" + (s.lit ? " key" : " dim")} key={i}>
-                  {s.label}{!s.lit && s.note ? <i>{" " + s.note}</i> : null}
-                </span>
-              ))
-            : identity.skills.map((s, i) => (
-                <span className={"skill" + (s.key ? " key" : "")} key={i}>{s.l}</span>
-              ))}
+          {lore.skills.length ? (
+            lore.skills.map((s, i) => (
+              <span className={"skill" + (s.lit ? " key" : " dim")} key={i}>
+                {s.label}{!s.lit && s.note ? <i>{" " + s.note}</i> : null}
+              </span>
+            ))
+          ) : (
+            <span className="skill dim">—</span>
+          )}
         </div>
       </div>
     </div>
@@ -915,7 +929,7 @@ function LifecycleTab({ live, identity, model, actions, busy, ask }) {
 
   if (isPi) {
     return (
-      <div className="fcb-pane-in" onClick={stop}>
+      <div className="fcb-pane-in">
         <Rows rows={[
           ["installed", model.version.label + (model.version.sub !== "—" ? " · " + model.version.sub : "")],
           ["pinned", model.version.pinLabel],
@@ -935,7 +949,7 @@ function LifecycleTab({ live, identity, model, actions, busy, ask }) {
   const working = model.phase === "working";
   const upgrade = model.lifecycle.primary === "upgrade";
   return (
-    <div className="fcb-pane-in" onClick={stop}>
+    <div className="fcb-pane-in">
       <div className="fcb-card">
         <div className="fcb-sec-l">live release</div>
         <Rows rows={[
@@ -969,19 +983,31 @@ function LifecycleTab({ live, identity, model, actions, busy, ask }) {
   );
 }
 
-function ConsoleTabs({ tab, setTab, live }) {
+function ConsoleTabs({ id, tab, setTab, live }) {
   return (
-    <div className="fcb-tabs" role="tablist" onClick={stop}>
+    <div className="fcb-tabs" role="tablist" aria-label="console">
       {TABS.map(([k, label]) => (
         <button
           key={k}
+          id={"agent-" + id + "-tab-" + k}
           type="button"
           role="tab"
           aria-selected={tab === k}
+          aria-controls={"agent-" + id + "-panel"}
           className={"fcb-tab" + (tab === k ? " on" : "")}
           data-testid={"agent-tab-" + k}
-          tabIndex={live ? 0 : -1}
+          tabIndex={live && tab === k ? 0 : -1}
           onClick={(e) => { stop(e); setTab(k); }}
+          onKeyDown={(e) => {
+            // Arrow keys move between tabs (WAI-ARIA tabs pattern).
+            if (e.key !== "ArrowRight" && e.key !== "ArrowLeft") return;
+            e.preventDefault();
+            const i = TABS.findIndex(([t]) => t === k);
+            const next = TABS[(i + (e.key === "ArrowRight" ? 1 : TABS.length - 1)) % TABS.length][0];
+            setTab(next);
+            const el = document.getElementById("agent-" + id + "-tab-" + next);
+            if (el) el.focus();
+          }}
         >{label}</button>
       ))}
     </div>
@@ -990,7 +1016,7 @@ function ConsoleTabs({ tab, setTab, live }) {
 
 // Upgrade, repair and uninstall confirms. Rendered beside the card, not in
 // it: the card's perspective/transform would trap a fixed-position modal.
-function LifecycleConfirms({ identity, model, confirm, onCancel, onConfirm }) {
+function LifecycleConfirms({ identity, model, confirm, busy, onCancel, onConfirm }) {
   const ConfirmDialog = window.ConfirmDialog;
   if (!ConfirmDialog) return null;
   const tag = (k, label) => <span data-testid={"agent-confirm-" + k}>{label}</span>;
@@ -998,6 +1024,7 @@ function LifecycleConfirms({ identity, model, confirm, onCancel, onConfirm }) {
     <>
       <ConfirmDialog
         open={confirm === "upgrade"}
+        confirmDisabled={!!busy}
         onCancel={onCancel}
         onConfirm={onConfirm}
         title="Upgrade Hermes to the pinned release?"
@@ -1013,6 +1040,7 @@ function LifecycleConfirms({ identity, model, confirm, onCancel, onConfirm }) {
       />
       <ConfirmDialog
         open={confirm === "repair"}
+        confirmDisabled={!!busy}
         onCancel={onCancel}
         onConfirm={onConfirm}
         title="Rebuild the Hermes release at the pinned version?"
@@ -1027,6 +1055,7 @@ function LifecycleConfirms({ identity, model, confirm, onCancel, onConfirm }) {
       />
       <ConfirmDialog
         open={confirm === "uninstall"}
+        confirmDisabled={!!busy}
         onCancel={onCancel}
         onConfirm={onConfirm}
         title={"Uninstall " + identity.name + "?"}
@@ -1084,7 +1113,7 @@ function LiveAgentCard({ identity, model, actions }) {
   else pane = <ControlsTab {...back} />;
 
   return (
-    <>
+    <CardBusy.Provider value={busy}>
       <div
         className={"fcard" + (PHASE_MOD[model.phase] || "")}
         data-testid={"agent-card-" + a.id}
@@ -1099,6 +1128,7 @@ function LiveAgentCard({ identity, model, actions }) {
             {/* ── FRONT ── */}
             <div
               className="fc-face fc-front"
+              inert={flipped}
               style={{ opacity: flipped ? 0 : 1 }}
               data-testid={"agent-phase-" + a.id}
               data-phase={model.phase}
@@ -1162,14 +1192,19 @@ function LiveAgentCard({ identity, model, actions }) {
             </div>
 
             {/* ── BACK ── */}
-            <div className="fc-face fc-back" style={{ opacity: flipped ? 1 : 0 }}>
+            <div className="fc-face fc-back" inert={!flipped} style={{ opacity: flipped ? 1 : 0 }}>
               <div className="fcb-h">
                 <Icon name="agent" size={15} sw={1.4} />
                 <span className="l"><b>{a.name}</b> · console</span>
                 <span style={{ marginLeft: "auto" }}><StatusDot cls={model.statusCls} /></span>
               </div>
-              <ConsoleTabs tab={tab} setTab={setTab} live={flipped} />
-              <div className="fcb-body fcb-pane">{pane}</div>
+              <ConsoleTabs id={a.id} tab={tab} setTab={setTab} live={flipped} />
+              <div
+                className="fcb-body fcb-pane"
+                role="tabpanel"
+                id={"agent-" + a.id + "-panel"}
+                aria-labelledby={"agent-" + a.id + "-tab-" + tab}
+              >{pane}</div>
             </div>
 
           </div>
@@ -1181,6 +1216,7 @@ function LiveAgentCard({ identity, model, actions }) {
           identity={a}
           model={model}
           confirm={confirm}
+          busy={busy}
           onCancel={() => setConfirm(null)}
           onConfirm={onConfirm}
         />
@@ -1188,7 +1224,7 @@ function LiveAgentCard({ identity, model, actions }) {
       {!isPi && PersonaEditModal && (
         <PersonaEditModal open={!!personaEdit} personaId={personaEdit} onClose={() => setPersonaEdit(null)} />
       )}
-    </>
+    </CardBusy.Provider>
   );
 }
 

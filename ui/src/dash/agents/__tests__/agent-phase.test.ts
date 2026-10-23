@@ -522,7 +522,6 @@ describe('deriveCardModel: Pi', () => {
       ['Dual Memory', true],
       ['Delegate', true],
     ])
-    expect(m.lore.skills).toEqual([])
     const partial = {
       ...PI_OVERVIEW,
       profile: { checks: [{ id: 'provider_ext', ok: false }] },
@@ -530,5 +529,39 @@ describe('deriveCardModel: Pi', () => {
     }
     const p = deriveCardModel({ ...PI, overview: partial })
     expect(p.lore.abilities.map((a) => a.unlocked)).toEqual([false, false, true])
+  })
+
+  it('pi skills light from the install, the memory wiring and the profile checks', () => {
+    const m = deriveCardModel(PI)
+    expect(m.lore.skills.map((s) => [s.label, s.lit])).toEqual([
+      ['repo-aware', true],
+      ['shared memory', true],
+      ['delegation', true],
+      ['cli-native', true],
+      // the fixture's profile has no theme check
+      ['theme', false],
+    ])
+    expect(m.lore.skills.find((s) => s.label === 'theme')?.note).toBe('· not deployed')
+    expect(m.lore.skills.filter((s) => s.lit).every((s) => s.note === null)).toBe(true)
+
+    const partial = {
+      ...PI_OVERVIEW,
+      profile: { checks: [{ id: 'binary', ok: false }, { id: 'theme', ok: true }] },
+      memory: { mcp_entry: true, hindsight_config: null, hindsight_api_reachable: false },
+    }
+    const p = deriveCardModel({ ...PI, overview: partial })
+    expect(p.lore.skills.map((s) => [s.label, s.lit, s.note])).toEqual([
+      ['repo-aware', true, null],
+      ['shared memory', false, '· not wired'],
+      ['delegation', true, null],
+      ['cli-native', false, '· not on PATH'],
+      ['theme', true, null],
+    ])
+
+    const broken = deriveCardModel({ ...PI, overview: { ...PI_OVERVIEW, phase: 'broken' } })
+    expect(broken.lore.skills.filter((s) => ['repo-aware', 'delegation'].includes(s.label))).toEqual([
+      { label: 'repo-aware', lit: false, note: '· not installed' },
+      { label: 'delegation', lit: false, note: '· not installed' },
+    ])
   })
 })

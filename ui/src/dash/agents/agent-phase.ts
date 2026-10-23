@@ -85,7 +85,7 @@ export interface LoreAbility {
 export interface LoreSkill {
   label: string
   lit: boolean
-  /** `· no slot` while dim; `null` once lit. */
+  /** A short reason while dim (`· no slot` for Hermes); `null` once lit. */
   note: string | null
 }
 
@@ -273,8 +273,8 @@ function ability(name: string, unlocked: boolean, locked: string): LoreAbility {
   return { name, unlocked, note: unlocked ? null : locked }
 }
 
-function skill(label: string, lit: boolean): LoreSkill {
-  return { label, lit, note: lit ? null : NO_SLOT }
+function skill(label: string, lit: boolean, dim: string = NO_SLOT): LoreSkill {
+  return { label, lit, note: lit ? null : dim }
 }
 
 function hermesLore(
@@ -318,19 +318,27 @@ function hermesLore(
 
 function piLore(overview: AgentOverview | null, phase: CardPhase): CardModel['lore'] {
   const checks = overview?.profile?.checks ?? []
-  const providerExt = checks.some((c) => c.id === 'provider_ext' && c.ok === true)
+  const checkOk = (id: string) => checks.some((c) => c.id === id && c.ok === true)
   const memory = blob(overview?.memory)
+  const installed = phase === 'installed'
+  const dualMemory = memory.mcp_entry === true && memory.hindsight_config === true
   return {
     abilities: [
-      ability('Slot Sync', providerExt, 'the hal0 provider extension is not present'),
+      ability('Slot Sync', checkOk('provider_ext'), 'the hal0 provider extension is not present'),
       ability(
         'Dual Memory',
-        memory.mcp_entry === true && memory.hindsight_config === true,
+        dualMemory,
         'the memory MCP entry and the Hindsight config are not both wired',
       ),
-      ability('Delegate', phase === 'installed', 'pi is not installed'),
+      ability('Delegate', installed, 'pi is not installed'),
     ],
-    skills: [],
+    skills: [
+      skill('repo-aware', installed, '· not installed'),
+      skill('shared memory', dualMemory, '· not wired'),
+      skill('delegation', installed, '· not installed'),
+      skill('cli-native', checkOk('binary'), '· not on PATH'),
+      skill('theme', checkOk('theme'), '· not deployed'),
+    ],
   }
 }
 
