@@ -6057,17 +6057,11 @@ def _doctor_output(*issues: str) -> str:
     return _DOCTOR_TAIL.format(n=len(issues), issues=numbered)
 
 
-def _doctor_probe(
-    tmp_path: Path, returncode: int, stdout: str, *, backend: str | None = None
-) -> tuple[bool, str]:
+def _doctor_probe(tmp_path: Path, returncode: int, stdout: str) -> tuple[bool, str]:
     venv = tmp_path / "venv"
     (venv / "bin").mkdir(parents=True)
     (venv / "bin" / "hermes").write_text("")
-    hh = tmp_path / "hh"
-    if backend is not None:
-        hh.mkdir()
-        (hh / "config.yaml").write_text(f"terminal:\n  backend: {backend}\n")
-    state = hp.BootstrapState(hermes_home=str(hh), venv=str(venv))
+    state = hp.BootstrapState(hermes_home=str(tmp_path / "hh"), venv=str(venv))
 
     def _run(argv: list[str], **_kw: Any) -> subprocess.CompletedProcess[str]:
         assert argv[1:] == ["doctor"]  # never --live: that would load a model
@@ -6082,38 +6076,31 @@ def test_smoke_hermes_doctor_passes_on_rc0(tmp_path: Path) -> None:
     assert detail == "rc=0"
 
 
-def test_smoke_hermes_doctor_ignores_the_stock_provider_key_advisories(tmp_path: Path) -> None:
-    """A stock hal0 box keeps no provider key in Hermes' .env, so upstream always
-    lists these two and exits 1; the probe must not turn that into a warn."""
-    out = _doctor_output(
+def test_smoke_hermes_doctor_records_upstream_issues_as_advisory(tmp_path: Path) -> None:
+    """Upstream exits 1 whenever it lists an issue, and on hal0 boxes it always
+    lists some that describe a standalone install (#2951): a readable list is
+    recorded in the detail, never a failure."""
+    issues = (
         "Run 'hermes setup' to configure API keys",
-        "Run 'hermes setup' to configure missing API keys for full tool access",
+        "Missing ~/.local/bin/hermes symlink — run 'hermes doctor --fix'",
+        "Fix terminal.backend in config.yaml, or install/enable the plugin that provides it",
+        "web workspace has 4 npm vulnerabilities; wait for an upstream lockfile fix",
     )
-    ok, detail = _doctor_probe(tmp_path, 1, out)
+    ok, detail = _doctor_probe(tmp_path, 1, _doctor_output(*issues))
     assert ok
-    assert "2 advisory" in detail
+    assert detail == "rc=1, 4 advisory issue(s): " + "; ".join(issues)
 
 
 def test_smoke_hermes_doctor_strips_colour_codes(tmp_path: Path) -> None:
     out = _doctor_output("\x1b[33mRun 'hermes setup' to configure API keys\x1b[0m")
-    ok, _detail = _doctor_probe(tmp_path, 1, out)
-    assert ok
-
-
-def test_smoke_hermes_doctor_fails_on_any_other_issue(tmp_path: Path) -> None:
-    out = _doctor_output(
-        "Run 'hermes setup' to configure API keys",
-        "Run 'hermes setup' to migrate config",
-    )
     ok, detail = _doctor_probe(tmp_path, 1, out)
-    assert not ok
-    assert detail == "rc=1: Run 'hermes setup' to migrate config"
+    assert ok
+    assert detail == "rc=1, 1 advisory issue(s): Run 'hermes setup' to configure API keys"
 
 
 @pytest.mark.parametrize("stdout", ["", "Traceback (most recent call last):\n  boom\n"])
-def test_smoke_hermes_doctor_fails_closed_without_an_issue_list(
-    tmp_path: Path, stdout: str
-) -> None:
+def test_smoke_hermes_doctor_fails_without_an_issue_list(tmp_path: Path, stdout: str) -> None:
+    """rc 1 is also what a crash returns; without the summary it is a failure."""
     ok, detail = _doctor_probe(tmp_path, 1, stdout)
     assert not ok
     assert "no issue list" in detail
@@ -6127,44 +6114,15 @@ def test_smoke_hermes_doctor_fails_on_other_exit_codes(tmp_path: Path) -> None:
 
 
 def test_smoke_hermes_doctor_fails_when_the_list_is_shorter_than_its_count(tmp_path: Path) -> None:
-    """An empty or multi-line issue would end the parse early and hide what
-    follows it; a count mismatch fails instead."""
-    out = _doctor_output(
-        "Run 'hermes setup' to configure API keys",
-        "",
-        "Run 'hermes setup' to migrate config",
-    )
+    out = _doctor_output("Run 'hermes setup' to configure API keys", "", "another issue")
     ok, detail = _doctor_probe(tmp_path, 1, out)
     assert not ok
     assert "no issue list" in detail
 
 
 def test_smoke_hermes_doctor_reads_the_last_summary(tmp_path: Path) -> None:
-    echoed = _doctor_output("Run 'hermes setup' to configure API keys")
-    real = _doctor_output("Run 'hermes setup' to migrate config")
+    echoed = _doctor_output("echoed issue")
+    real = _doctor_output("real one", "real two")
     ok, detail = _doctor_probe(tmp_path, 1, echoed + real)
-    assert not ok
-    assert detail == "rc=1: Run 'hermes setup' to migrate config"
-
-
-_TERMINAL_ISSUE = (
-    "Fix terminal.backend in config.yaml, or install/enable the plugin that provides it"
-)
-
-
-def test_smoke_hermes_doctor_ignores_the_terminal_off_sentinel(tmp_path: Path) -> None:
-    """hal0's terminal-off sentinel is an unknown backend to upstream by design;
-    with the sentinel configured that issue is advisory."""
-    out = _doctor_output("Run 'hermes setup' to configure API keys", _TERMINAL_ISSUE)
-    ok, detail = _doctor_probe(tmp_path, 1, out, backend=hp.TERMINAL_OFF_BACKEND)
-    assert ok, detail
-
-
-@pytest.mark.parametrize("backend", [None, "local", "typo-backend"])
-def test_smoke_hermes_doctor_fails_an_unknown_backend_that_is_not_the_sentinel(
-    tmp_path: Path, backend: str | None
-) -> None:
-    out = _doctor_output(_TERMINAL_ISSUE)
-    ok, detail = _doctor_probe(tmp_path, 1, out, backend=backend)
-    assert not ok
-    assert detail == f"rc=1: {_TERMINAL_ISSUE}"
+    assert ok
+    assert detail == "rc=1, 2 advisory issue(s): real one; real two"
