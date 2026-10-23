@@ -1708,7 +1708,9 @@ def test_release_config_invariants_on_a_pre_2839_config(
     assert hp.apply_release_config_invariants(tmp_path) is True
     cfg = yaml.safe_load((tmp_path / "config.yaml").read_text())
     assert cfg["sessions"] == {"retention_days": 30, "auto_prune": False}
-    assert cfg["agent"] == {"system_prompt": "P"}
+    # the terminal gate rides along for a marker-less default-off box (#2878)
+    assert cfg["agent"]["system_prompt"] == "P"
+    assert set(hp.TERMINAL_OFF_TOOLSETS) <= set(cfg["agent"]["disabled_toolsets"])
     assert cfg["auxiliary"] == {}
     # Idempotent.
     assert hp.apply_release_config_invariants(tmp_path) is False
@@ -1723,9 +1725,10 @@ def test_release_config_invariants_keep_a_rendered_system_prompt(
         "agent:\n  system_prompt: NEW\n  system_prompt_prelude: OLD\n"
     )
     hp.apply_release_config_invariants(tmp_path)
-    assert yaml.safe_load((tmp_path / "config.yaml").read_text())["agent"] == {
-        "system_prompt": "NEW"
-    }
+    agent = yaml.safe_load((tmp_path / "config.yaml").read_text())["agent"]
+    assert agent["system_prompt"] == "NEW"
+    assert set(hp.TERMINAL_OFF_TOOLSETS) <= set(agent["disabled_toolsets"])
+    assert set(agent) == {"system_prompt", "disabled_toolsets"}
 
 
 def test_release_config_invariants_render_the_persona_when_both_keys_are_gone(

@@ -79,8 +79,9 @@ def test_fresh_install_defaults_terminal_off(
     assert out.details["terminal_tool"] == "off"
     assert out.details["terminal_tool_reason"] == "default-off"
     assert _terminal_is_off(doc), doc
-    # hal0 writes no terminal.* key at all on a fresh box.
-    assert "terminal" not in doc, doc.get("terminal")
+    # The only terminal.* key hal0 writes on a fresh box is the sentinel
+    # backend that drops the tool for every agent in the process (#2878).
+    assert doc["terminal"] == {"backend": hp.TERMINAL_OFF_BACKEND}, doc.get("terminal")
 
 
 def test_fresh_config_yaml_never_ships_a_local_terminal_backend(
@@ -737,3 +738,783 @@ def test_effective_off_requires_every_route_gone() -> None:
 def test_corrupt_config_does_not_enable_terminal() -> None:
     enabled, _why = hp.terminal_tool_enabled(config_text="terminal: [", env={})
     assert enabled is False
+
+
+# ── #2878: the backend gate the side agent cannot bypass ─────────────────────
+#
+# Hermes v0.22.3+'s gateway-owned preview-restart side agent is built with
+# ``enabled_toolsets=['terminal','file'], disabled_toolsets=None``
+# (gateway/session_tui_side.py:282-283 at 4d043038), so the subtraction above
+# never reaches it. What every agent in the process shares is the terminal
+# tool's ``check_fn``: an unknown ``terminal.backend`` fails it and the tool
+# is dropped from every model-facing schema. hal0 writes that sentinel when
+# the terminal is off, and takes it back out when the operator opts in.
+
+
+def test_off_writes_the_sentinel_backend(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv(hp.HERMES_TERMINAL_ENV, raising=False)
+    _out, doc = _run_config_write(tmp_path, monkeypatch)
+    assert doc["terminal"]["backend"] == hp.TERMINAL_OFF_BACKEND
+    assert _terminal_is_off(doc), doc
+
+
+def test_sentinel_backend_is_not_a_real_hermes_backend() -> None:
+    # Hermes rejects unknown TERMINAL_ENV values in check_terminal_requirements
+    # (tools/terminal_tool_backends.py:385-393); the sentinel must never collide
+    # with a real or plugin-looking name, and must say who set it.
+    assert hp.TERMINAL_OFF_BACKEND.startswith("hal0-")
+    assert hp.TERMINAL_OFF_BACKEND not in {
+        "local",
+        "docker",
+        "singularity",
+        "modal",
+        "daytona",
+        "vercel_sandbox",
+        "ssh",
+        "managed_modal",
+    }
+
+
+def test_opting_in_later_replaces_the_sentinel_with_local(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "hh"
+    monkeypatch.delenv(hp.HERMES_TERMINAL_ENV, raising=False)
+    _out, doc = _run_config_write(tmp_path, monkeypatch, home=home)
+    assert doc["terminal"]["backend"] == hp.TERMINAL_OFF_BACKEND
+    monkeypatch.setenv(hp.HERMES_TERMINAL_ENV, "1")
+    out, doc = _run_config_write(tmp_path, monkeypatch, home=home)
+    assert out.details["terminal_tool"] == "on"
+    assert doc["terminal"]["backend"] == "local"
+    assert doc["terminal"]["cwd"] == str(home / "scratch")
+
+
+def test_off_gates_an_operator_moved_backend_and_remembers_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Off means off for every backend (#2878 review): a docker/ssh backend is set
+    aside under hal0.terminal_backend_saved and the sentinel takes its place;
+    opting in puts the operator's backend back and clears the memory."""
+    monkeypatch.setenv(hp.HERMES_TERMINAL_ENV, "0")
+    home = tmp_path / "hh"
+    home.mkdir()
+    (home / "config.yaml").write_text("terminal:\n  backend: ssh\n  ssh_host: h\n")
+    _out, doc = _run_config_write(tmp_path, monkeypatch, home=home)
+    assert doc["terminal"]["backend"] == hp.TERMINAL_OFF_BACKEND
+    assert doc["terminal"]["ssh_host"] == "h"
+    assert doc["hal0"][hp.TERMINAL_SAVED_BACKEND_KEY] == "ssh"
+    assert _terminal_is_off(doc), doc
+    monkeypatch.setenv(hp.HERMES_TERMINAL_ENV, "1")
+    out, doc = _run_config_write(tmp_path, monkeypatch, home=home)
+    assert out.details["terminal_tool"] == "on"
+    assert doc["terminal"]["backend"] == "ssh"
+    assert "cwd" not in doc["terminal"]
+    assert doc["hal0"][hp.TERMINAL_SAVED_BACKEND_KEY] == ""
+
+
+def test_sentinel_backend_reads_as_off_not_as_an_operator_choice() -> None:
+    text = f"terminal:\n  backend: {hp.TERMINAL_OFF_BACKEND}\n  cwd: /x\n"
+    assert hp._existing_terminal_choice(text, "/h") is False
+
+
+def test_profile_terminal_keys_follow_the_recorded_decision() -> None:
+    S, K, OFF = hp.TERMINAL_OFF_BACKEND, hp.TERMINAL_SAVED_BACKEND_KEY, hp.TERMINAL_OFF_TOOLSETS
+    A = hp.TERMINAL_ADDED_TOOLSETS_KEY
+    gate = {
+        "terminal": {"backend": S},
+        "agent": {"disabled_toolsets": OFF},
+        "hal0": {A: sorted(OFF)},
+    }
+    assert hp._terminal_profile_keys({}, terminal_enabled=False) == gate
+    assert (
+        hp._terminal_profile_keys({"terminal": {"backend": "local"}}, terminal_enabled=False)
+        == gate
+    )
+    # off means off for every backend; the operator's is remembered
+    assert hp._terminal_profile_keys({"terminal": {"backend": "ssh"}}, terminal_enabled=False) == {
+        **gate,
+        "hal0": {A: sorted(OFF), K: "ssh"},
+    }
+    # the operator's own disabled entries stay, hal0's are appended once
+    assert (
+        hp._terminal_profile_keys(
+            {"terminal": {"backend": S}, "agent": {"disabled_toolsets": ["browser", *OFF]}},
+            terminal_enabled=False,
+        )
+        == {}
+    )
+    assert hp._terminal_profile_keys(
+        {"terminal": {"backend": S}, "agent": {"disabled_toolsets": ["browser"]}},
+        terminal_enabled=False,
+    ) == {"agent": {"disabled_toolsets": ["browser", *OFF]}, "hal0": {A: sorted(OFF)}}
+    # an operator's pre-existing `terminal` is not recorded as hal0's
+    assert hp._terminal_profile_keys(
+        {"agent": {"disabled_toolsets": ["terminal"]}}, terminal_enabled=False
+    ) == {
+        "terminal": {"backend": S},
+        "agent": {"disabled_toolsets": ["terminal", "code_execution", "delegation"]},
+        "hal0": {A: ["code_execution", "delegation"]},
+    }
+    # opting in takes the sentinel out and only the entries hal0 recorded
+    assert hp._terminal_profile_keys(
+        {
+            "terminal": {"backend": S},
+            "agent": {"disabled_toolsets": ["browser", *OFF]},
+            "hal0": {A: sorted(OFF)},
+        },
+        terminal_enabled=True,
+    ) == {
+        "terminal": {"backend": "local"},
+        "agent": {"disabled_toolsets": ["browser"]},
+        "hal0": {A: []},
+    }
+    assert hp._terminal_profile_keys(
+        {
+            "terminal": {"backend": S},
+            "agent": {"disabled_toolsets": ["terminal", "code_execution", "delegation"]},
+            "hal0": {A: ["code_execution", "delegation"]},
+        },
+        terminal_enabled=True,
+    ) == {
+        "terminal": {"backend": "local"},
+        "agent": {"disabled_toolsets": ["terminal"]},
+        "hal0": {A: []},
+    }
+    # no record of what hal0 added: nothing is removed from the list
+    assert hp._terminal_profile_keys(
+        {"terminal": {"backend": S}, "agent": {"disabled_toolsets": OFF}}, terminal_enabled=True
+    ) == {"terminal": {"backend": "local"}}
+    assert hp._terminal_profile_keys(
+        {"terminal": {"backend": S}, "hal0": {K: "docker"}}, terminal_enabled=True
+    ) == {"terminal": {"backend": "docker"}, "hal0": {K: ""}}
+    assert (
+        hp._terminal_profile_keys({"terminal": {"backend": "docker"}}, terminal_enabled=True) == {}
+    )
+    # no sentinel means hal0 never gated this profile: an operator's own
+    # `terminal` entry on a terminal-on box is not hal0's to remove
+    assert (
+        hp._terminal_profile_keys(
+            {"terminal": {"backend": "local"}, "agent": {"disabled_toolsets": ["terminal"]}},
+            terminal_enabled=True,
+        )
+        == {}
+    )
+    # no decision: a hal0-api reconcile must not flip a box either way
+    assert hp._terminal_profile_keys({}, terminal_enabled=None) == {}
+
+
+def test_wire_named_profiles_gates_clones_when_the_terminal_is_off(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import yaml
+
+    monkeypatch.setattr("hal0.service_identity.service_key", lambda prefer=None: "svc-key")
+    home = tmp_path / "hh"
+    for name in ("coder", "lab"):
+        (home / "profiles" / name).mkdir(parents=True)
+    (home / "profiles" / "coder" / "config.yaml").write_text("model:\n  default: a\n")
+    (home / "profiles" / "lab" / "config.yaml").write_text("terminal:\n  backend: docker\n")
+    hp.wire_named_profiles(home, terminal_enabled=False)
+    coder = yaml.safe_load((home / "profiles" / "coder" / "config.yaml").read_text())
+    lab = yaml.safe_load((home / "profiles" / "lab" / "config.yaml").read_text())
+    assert coder["terminal"]["backend"] == hp.TERMINAL_OFF_BACKEND
+    assert lab["terminal"]["backend"] == hp.TERMINAL_OFF_BACKEND
+    assert lab["hal0"][hp.TERMINAL_SAVED_BACKEND_KEY] == "docker"
+    assert set(hp.TERMINAL_OFF_TOOLSETS) <= set(coder["agent"]["disabled_toolsets"])
+    hp.wire_named_profiles(home, terminal_enabled=True)
+    coder = yaml.safe_load((home / "profiles" / "coder" / "config.yaml").read_text())
+    lab = yaml.safe_load((home / "profiles" / "lab" / "config.yaml").read_text())
+    assert coder["terminal"]["backend"] == "local"
+    assert lab["terminal"]["backend"] == "docker"
+
+
+def test_wire_named_profiles_reads_the_marker_only_without_an_applied_decision(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A provisioning run passes the decision it applied; a hal0-api reconcile
+    has none and falls back to the recorded marker (#2878 review)."""
+    import yaml
+
+    monkeypatch.setattr("hal0.service_identity.service_key", lambda prefer=None: "svc-key")
+    home = tmp_path / "hh"
+    (home / "profiles" / "coder").mkdir(parents=True)
+    (home / "profiles" / "coder" / "config.yaml").write_text("model:\n  default: a\n")
+    monkeypatch.setattr(hp, "read_terminal_state", lambda: True)  # a stale root-owned marker
+    hp.wire_named_profiles(home, terminal_enabled=False)  # what config_write applied
+    doc = yaml.safe_load((home / "profiles" / "coder" / "config.yaml").read_text())
+    assert doc["terminal"]["backend"] == hp.TERMINAL_OFF_BACKEND
+    hp.wire_named_profiles(home)  # reconcile: marker says on
+    doc = yaml.safe_load((home / "profiles" / "coder" / "config.yaml").read_text())
+    assert doc["terminal"]["backend"] == "local"
+
+
+def test_profile_wire_phase_fails_when_an_off_box_cannot_gate_a_profile(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        hp,
+        "wire_named_profiles",
+        lambda home, terminal_enabled=None: {
+            "wired": [],
+            "changed": [],
+            "skipped": {},
+            "errors": {"coder": "config.yaml is a symlink"},
+        },
+    )
+    state = hp.BootstrapState(hermes_home=str(tmp_path), terminal_enabled=False)
+    out = hp._phase_profile_mcp_wire(hp._StepCtx(state=state, io=hp.InstallIO()))
+    assert out.status == hp.PhaseStatus.FAIL
+    assert out.reason is not None and "terminal gate" in out.reason and "coder" in out.reason
+    state.terminal_enabled = True
+    out = hp._phase_profile_mcp_wire(hp._StepCtx(state=state, io=hp.InstallIO()))
+    assert out.status == hp.PhaseStatus.OK and out.reason is not None
+
+
+def test_update_path_carries_the_terminal_gate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``hal0 update`` never runs the overlay; the release invariants apply the gate."""
+    import yaml
+
+    home = tmp_path / "hh"
+    home.mkdir()
+    (home / "config.yaml").write_text(
+        "agent:\n  system_prompt: keep\nterminal:\n  backend: local\n  cwd: /x\n"
+    )
+    monkeypatch.setattr(hp, "read_terminal_state", lambda: False)
+    assert hp.apply_release_config_invariants(home, overrides_path=tmp_path / "none.yaml") is True
+    doc = yaml.safe_load((home / "config.yaml").read_text())
+    assert doc["terminal"]["backend"] == hp.TERMINAL_OFF_BACKEND
+    assert doc["terminal"]["cwd"] == "/x"
+    monkeypatch.setattr(hp, "read_terminal_state", lambda: None)
+    assert hp.apply_release_config_invariants(home, overrides_path=tmp_path / "none.yaml") is False
+    # Opting in is a provisioning act (the overlay rewrites the root config first);
+    # an update never lifts a sentinel on the marker's word alone, which is also
+    # what protects a non-root opt-out whose marker could not be replaced.
+    monkeypatch.setattr(hp, "read_terminal_state", lambda: True)
+    assert hp.apply_release_config_invariants(home, overrides_path=tmp_path / "none.yaml") is False
+    doc = yaml.safe_load((home / "config.yaml").read_text())
+    assert doc["terminal"]["backend"] == hp.TERMINAL_OFF_BACKEND
+
+
+def test_update_path_shouts_when_an_override_displaces_the_gate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import yaml
+
+    home = tmp_path / "hh"
+    home.mkdir()
+    (home / "config.yaml").write_text("agent:\n  system_prompt: keep\n")
+    overrides = tmp_path / "overrides.yaml"
+    overrides.write_text("terminal:\n  backend: local\n")
+    monkeypatch.setattr(hp, "read_terminal_state", lambda: False)
+    events: list = []
+    monkeypatch.setattr(hp.log, "error", lambda event, **kw: events.append((event, kw)))
+    hp.apply_release_config_invariants(home, overrides_path=overrides)
+    doc = yaml.safe_load((home / "config.yaml").read_text())
+    assert doc["terminal"]["backend"] == "local"  # the override wins by design
+    assert events and events[0][0] == "hermes.terminal_gate_overridden"
+    assert events[0][1]["found"] == "local" and events[0][1]["expected"] == hp.TERMINAL_OFF_BACKEND
+
+
+def test_box_terminal_decision_trusts_the_root_sentinel_over_a_stale_marker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "hh"
+    home.mkdir()
+    monkeypatch.setattr(hp, "read_terminal_state", lambda: True)
+    (home / "config.yaml").write_text(f"terminal:\n  backend: {hp.TERMINAL_OFF_BACKEND}\n")
+    assert hp.box_terminal_decision(home) is False
+    (home / "config.yaml").write_text("terminal:\n  backend: local\n")
+    assert hp.box_terminal_decision(home) is True
+    # no marker: the provisioner's own rule decides from the config
+    monkeypatch.setattr(hp, "read_terminal_state", lambda: None)
+    (home / "config.yaml").write_text(
+        "agent:\n  disabled_toolsets: [terminal, code_execution, delegation]\n"
+    )
+    assert hp.box_terminal_decision(home) is False
+    (home / "config.yaml").write_text("terminal:\n  backend: local\n  cwd: /srv/mine\n")
+    assert hp.box_terminal_decision(home) is True  # a legacy working shell
+    (home / "config.yaml").write_text("model:\n  default: x\n")
+    assert hp.box_terminal_decision(home) is False  # default off
+    assert hp.box_terminal_decision(tmp_path / "absent") is None
+
+
+def test_reconcile_does_not_undo_an_unrecorded_opt_out(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """hal0-api's sweep has no applied decision; a root sentinel plus a stale
+    marker saying on must not restore the clones' terminal (#2878 review)."""
+    import yaml
+
+    monkeypatch.setattr("hal0.service_identity.service_key", lambda prefer=None: "svc-key")
+    home = tmp_path / "hh"
+    (home / "profiles" / "coder").mkdir(parents=True)
+    (home / "config.yaml").write_text(f"terminal:\n  backend: {hp.TERMINAL_OFF_BACKEND}\n")
+    (home / "profiles" / "coder" / "config.yaml").write_text(
+        f"terminal:\n  backend: {hp.TERMINAL_OFF_BACKEND}\n"
+    )
+    monkeypatch.setattr(hp, "read_terminal_state", lambda: True)
+    hp.wire_named_profiles(home)
+    doc = yaml.safe_load((home / "profiles" / "coder" / "config.yaml").read_text())
+    assert doc["terminal"]["backend"] == hp.TERMINAL_OFF_BACKEND
+
+
+def test_saved_backend_is_cleared_only_after_a_verified_restore() -> None:
+    S, K = hp.TERMINAL_OFF_BACKEND, hp.TERMINAL_SAVED_BACKEND_KEY
+    # off over ssh remembers it
+    assert hp._terminal_saved_layer(
+        terminal_enabled=False, before_backend="ssh", after_backend=S, saved_backend=None
+    ) == {"hal0": {K: "ssh"}}
+    # opt-in whose config set landed: cleared
+    assert hp._terminal_saved_layer(
+        terminal_enabled=True, before_backend=S, after_backend="ssh", saved_backend="ssh"
+    ) == {"hal0": {K: ""}}
+    # opt-in whose config set failed (sentinel still there): memory kept
+    assert (
+        hp._terminal_saved_layer(
+            terminal_enabled=True, before_backend=S, after_backend=S, saved_backend="ssh"
+        )
+        == {}
+    )
+
+
+def test_opt_in_that_leaves_the_sentinel_fails_the_phase(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from tests.agents._hermes_fakes import apply_hermes_config_cli
+
+    class _Done:
+        def __init__(self, rc: int) -> None:
+            self.returncode, self.stdout, self.stderr = rc, "", "boom" if rc else ""
+
+    def flaky_run(argv, *_a, env=None, **_kw):
+        argv = list(argv)
+        if "terminal.backend" in argv:
+            return _Done(1)
+        apply_hermes_config_cli(argv, env)
+        return _Done(0)
+
+    home = tmp_path / "hh"
+    home.mkdir()
+    (home / "config.yaml").write_text(
+        f"terminal:\n  backend: {hp.TERMINAL_OFF_BACKEND}\nhal0:\n  {hp.TERMINAL_SAVED_BACKEND_KEY}: ssh\n"
+    )
+    monkeypatch.setenv(hp.HERMES_TERMINAL_ENV, "1")
+    monkeypatch.setattr(hp, "TERMINAL_STATE_PATH", tmp_path / "state" / "hermes-terminal-tool")
+    monkeypatch.setattr(
+        hp,
+        "_resolve_primary_slot",
+        lambda **_kwargs: {"model": "p", "base_url": "u", "context_length": 8000},
+    )
+    monkeypatch.setattr(hp, "OVERRIDES_PATH", tmp_path / "no-such-overrides.yaml")
+    from hal0.agents import personas as _personas
+
+    monkeypatch.setattr(_personas, "PERSONAS_ROOT", tmp_path / "personas-empty")
+    io = hp.InstallIO(fetch_slots=lambda: [], fetch_model_contexts=lambda: {}, run=flaky_run)
+    out = hp._phase_config_write(hp._StepCtx(state=hp.BootstrapState(hermes_home=str(home)), io=io))
+    assert out.status == hp.PhaseStatus.FAIL
+    assert out.reason is not None and "still" in out.reason
+    doc = yaml.safe_load((home / "config.yaml").read_text())
+    assert doc["hal0"][hp.TERMINAL_SAVED_BACKEND_KEY] == "ssh"  # memory kept for the retry
+
+
+def test_profile_wire_phase_fails_on_a_served_symlink_profile_when_off(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        hp,
+        "wire_named_profiles",
+        lambda home, terminal_enabled=None: {
+            "wired": ["coder"],
+            "changed": [],
+            "skipped": {"linked": "symlink", "quiet": "opted out"},
+            "errors": {},
+        },
+    )
+    state = hp.BootstrapState(hermes_home=str(tmp_path), terminal_enabled=False)
+    out = hp._phase_profile_mcp_wire(hp._StepCtx(state=state, io=hp.InstallIO()))
+    assert out.status == hp.PhaseStatus.FAIL
+    assert out.reason is not None and "linked" in out.reason and "quiet" not in out.reason
+
+
+def test_cli_restarts_hermes_when_the_report_says_the_gate_changed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import json
+
+    import hal0.cli.agent_commands as ac
+
+    report = tmp_path / "provision.json"
+    monkeypatch.setattr(ac, "_agent_provision_state_file", lambda name: report)
+    report.write_text(
+        json.dumps({"phases": {"config_write": {"details": {"terminal_backend_changed": True}}}})
+    )
+    assert ac._terminal_gate_changed_in_last_report() is True
+    report.write_text(
+        json.dumps({"phases": {"config_write": {"details": {"terminal_backend_changed": False}}}})
+    )
+    assert ac._terminal_gate_changed_in_last_report() is False
+    report.unlink()
+    assert ac._terminal_gate_changed_in_last_report() is False
+
+
+def test_a_lost_sentinel_fails_the_config_write_phase(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A partial `config set` that dropped the security-critical key is a FAIL, not OK."""
+    from tests.agents._hermes_fakes import apply_hermes_config_cli
+
+    monkeypatch.delenv(hp.HERMES_TERMINAL_ENV, raising=False)
+
+    class _Done:
+        def __init__(self, rc: int) -> None:
+            self.returncode, self.stdout, self.stderr = rc, "", "boom" if rc else ""
+
+    def flaky_run(argv, *_a, env=None, **_kw):
+        argv = list(argv)
+        if "terminal.backend" in argv:
+            return _Done(1)
+        apply_hermes_config_cli(argv, env)
+        return _Done(0)
+
+    monkeypatch.setattr(hp, "TERMINAL_STATE_PATH", tmp_path / "state" / "hermes-terminal-tool")
+    monkeypatch.setattr(
+        hp,
+        "_resolve_primary_slot",
+        lambda **_kwargs: {"model": "p", "base_url": "u", "context_length": 8000},
+    )
+    monkeypatch.setattr(hp, "OVERRIDES_PATH", tmp_path / "no-such-overrides.yaml")
+    from hal0.agents import personas as _personas
+
+    monkeypatch.setattr(_personas, "PERSONAS_ROOT", tmp_path / "personas-empty")
+    io = hp.InstallIO(fetch_slots=lambda: [], fetch_model_contexts=lambda: {}, run=flaky_run)
+    state = hp.BootstrapState(hermes_home=str(tmp_path / "hh"))
+    out = hp._phase_config_write(hp._StepCtx(state=state, io=io))
+    assert out.status == hp.PhaseStatus.FAIL
+    assert out.reason is not None and "terminal.backend" in out.reason and "#2878" in out.reason
+
+
+def test_wire_named_profiles_gates_an_mcp_opted_out_profile_too(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`hal0: {wire_mcp: false}` opts out of MCP wiring, not of the box's terminal decision."""
+    import yaml
+
+    monkeypatch.setattr("hal0.service_identity.service_key", lambda prefer=None: "svc-key")
+    home = tmp_path / "hh"
+    (home / "profiles" / "quiet").mkdir(parents=True)
+    (home / "profiles" / "quiet" / "config.yaml").write_text(
+        "hal0:\n  wire_mcp: false\nterminal:\n  backend: ssh\n"
+    )
+    monkeypatch.setattr(hp, "read_terminal_state", lambda: False)
+    report = hp.wire_named_profiles(home)
+    doc = yaml.safe_load((home / "profiles" / "quiet" / "config.yaml").read_text())
+    assert doc["terminal"]["backend"] == hp.TERMINAL_OFF_BACKEND
+    assert doc["hal0"]["wire_mcp"] is False
+    assert doc["hal0"][hp.TERMINAL_SAVED_BACKEND_KEY] == "ssh"
+    assert doc["hal0"][hp.TERMINAL_ADDED_TOOLSETS_KEY] == sorted(hp.TERMINAL_OFF_TOOLSETS)
+    assert "mcp_servers" not in doc and "memory" not in doc
+    assert report["skipped"].get("quiet") == "opted out"
+    assert report["changed"] == ["quiet"]
+    assert set(hp.TERMINAL_OFF_TOOLSETS) <= set(doc["agent"]["disabled_toolsets"])
+    monkeypatch.setattr(hp, "read_terminal_state", lambda: True)
+    hp.wire_named_profiles(home)
+    doc = yaml.safe_load((home / "profiles" / "quiet" / "config.yaml").read_text())
+    assert doc["terminal"]["backend"] == "ssh"
+    assert not set(hp.TERMINAL_OFF_TOOLSETS) & set(doc["agent"]["disabled_toolsets"])
+
+
+def test_brain_phase_fails_closed_when_an_off_box_cannot_gate_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("hal0.service_identity.service_key", lambda prefer=None: "svc-key")
+    monkeypatch.setattr(
+        hp,
+        "_merge_profile_config",
+        lambda path, desired: {"wired": False, "changed": False, "error": "read-only"},
+    )
+    state = hp.BootstrapState(hermes_home=str(tmp_path), terminal_enabled=False)
+    out = hp._phase_brain_profile_mcp_wire(hp._StepCtx(state=state, io=hp.InstallIO()))
+    assert out.status == hp.PhaseStatus.FAIL and out.reason is not None and "#2878" in out.reason
+    state.terminal_enabled = True
+    out = hp._phase_brain_profile_mcp_wire(hp._StepCtx(state=state, io=hp.InstallIO()))
+    assert out.status == hp.PhaseStatus.OK
+
+
+def test_brain_phase_without_an_applied_decision_trusts_the_root_sentinel(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """hal0-api's startup seed builds a fresh BootstrapState; a root sentinel plus a
+    stale marker saying on must not restore the brain profile's terminal."""
+    import yaml
+
+    monkeypatch.setattr("hal0.service_identity.service_key", lambda prefer=None: "svc-key")
+    home = tmp_path / "hh"
+    (home / "profiles" / "hal0-brain").mkdir(parents=True)
+    (home / "config.yaml").write_text(f"terminal:\n  backend: {hp.TERMINAL_OFF_BACKEND}\n")
+    (home / "profiles" / "hal0-brain" / "config.yaml").write_text(
+        f"terminal:\n  backend: {hp.TERMINAL_OFF_BACKEND}\n"
+    )
+    monkeypatch.setattr(hp, "read_terminal_state", lambda: True)
+    out = hp._phase_brain_profile_mcp_wire(
+        hp._StepCtx(state=hp.BootstrapState(hermes_home=str(home)), io=hp.InstallIO())
+    )
+    assert out.status == hp.PhaseStatus.OK
+    doc = yaml.safe_load((home / "profiles" / "hal0-brain" / "config.yaml").read_text())
+    assert doc["terminal"]["backend"] == hp.TERMINAL_OFF_BACKEND
+
+
+def test_try_restart_hermes_consumers_bounces_both_and_reports_failures(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[list[str]] = []
+
+    class _Done:
+        def __init__(self, rc: int) -> None:
+            self.returncode, self.stderr = rc, "boom" if rc else ""
+
+    def run(argv, **_kw):
+        calls.append(list(argv))
+        return _Done(1 if "hermes-gateway" in " ".join(argv) else 0)
+
+    monkeypatch.setattr(hp.os, "geteuid", lambda: 999)
+    failed = hp.try_restart_hermes_consumers(run=run, which=lambda name: "/bin/systemctl")
+    assert failed == ["hermes-gateway.service"]
+    assert any("try-restart" in " ".join(c) for c in calls) and len(calls) == 2
+    assert hp.try_restart_hermes_consumers(run=run, which=lambda name: None) == []
+
+
+def test_update_backstop_bounces_hermes_when_the_gate_changed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from hal0.components import hermes_arm
+
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    (home / "config.yaml").write_text(
+        "agent:\n  system_prompt: keep\nterminal:\n  backend: local\n"
+    )
+    monkeypatch.setattr(hermes_arm, "var_lib", lambda: tmp_path)
+    monkeypatch.setattr(hp, "read_terminal_state", lambda: False)
+    monkeypatch.setattr(hp, "OVERRIDES_PATH", tmp_path / "none.yaml")
+    bounced: list[int] = []
+    monkeypatch.setattr(hp, "try_restart_hermes_consumers", lambda: bounced.append(1) or [])
+    result: dict = {}
+    hermes_arm._config_backstop(result, job_id="j")
+    assert bounced == [1]
+    assert any("restarted to apply the terminal posture" in d for d in result["detail"])
+    # a second pass changes nothing and bounces nothing
+    result = {}
+    hermes_arm._config_backstop(result, job_id="j")
+    assert bounced == [1] and "note" not in result
+
+
+def test_update_path_gates_the_brain_and_every_profile(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A release activation restarts the gateway, not hal0-api, so the invariants
+    gate hal0-brain and the clones themselves (#2878 review)."""
+    import yaml
+
+    home = tmp_path / "hh"
+    for name in ("hal0-brain", "coder"):
+        (home / "profiles" / name).mkdir(parents=True)
+        (home / "profiles" / name / "config.yaml").write_text("terminal:\n  backend: local\n")
+    (home / "config.yaml").write_text("agent:\n  system_prompt: keep\n")
+    monkeypatch.setattr(hp, "read_terminal_state", lambda: False)
+    assert hp.apply_release_config_invariants(home, overrides_path=tmp_path / "none.yaml") is True
+    for name in ("hal0-brain", "coder"):
+        doc = yaml.safe_load((home / "profiles" / name / "config.yaml").read_text())
+        assert doc["terminal"]["backend"] == hp.TERMINAL_OFF_BACKEND, name
+        assert set(hp.TERMINAL_OFF_TOOLSETS) <= set(doc["agent"]["disabled_toolsets"]), name
+    assert hp.apply_release_config_invariants(home, overrides_path=tmp_path / "none.yaml") is False
+
+
+def test_update_backstop_bounces_when_only_a_profile_backend_changed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from hal0.components import hermes_arm
+
+    home = tmp_path / ".hermes"
+    (home / "profiles" / "hal0-brain").mkdir(parents=True)
+    (home / "config.yaml").write_text(
+        f"agent:\n  system_prompt: keep\nterminal:\n  backend: {hp.TERMINAL_OFF_BACKEND}\n"
+    )
+    (home / "profiles" / "hal0-brain" / "config.yaml").write_text("terminal:\n  backend: local\n")
+    monkeypatch.setattr(hermes_arm, "var_lib", lambda: tmp_path)
+    monkeypatch.setattr(hp, "read_terminal_state", lambda: False)
+    monkeypatch.setattr(hp, "OVERRIDES_PATH", tmp_path / "none.yaml")
+    bounced: list[int] = []
+    monkeypatch.setattr(hp, "try_restart_hermes_consumers", lambda: bounced.append(1) or [])
+    result: dict = {}
+    hermes_arm._config_backstop(result, job_id="j")
+    assert bounced == [1]
+
+
+def test_root_reexec_child_leaves_the_restart_to_the_parent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import os
+
+    import hal0.cli.agent_commands as ac
+
+    monkeypatch.setattr(hp, "bootstrap_cli", lambda **_kw: 0)
+    monkeypatch.setattr(ac, "_terminal_gate_changed_in_last_report", lambda since=None: True)
+    restarted: list[int] = []
+    monkeypatch.setattr(ac, "_restart_hermes_after_posture_change", lambda: restarted.append(1))
+    monkeypatch.setattr(os, "geteuid", lambda: 999)
+    monkeypatch.setenv(ac._RESTART_OWNER_ENV, "parent")
+    assert ac._provision_hermes(repair=True) == 0
+    assert restarted == []
+    monkeypatch.delenv(ac._RESTART_OWNER_ENV, raising=False)
+    assert ac._provision_hermes(repair=True) == 0
+    assert restarted == [1]
+
+
+def test_update_path_fails_closed_when_a_profile_cannot_take_the_gate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "hh"
+    (home / "profiles" / "coder").mkdir(parents=True)
+    (home / "profiles" / "coder" / "config.yaml").write_text("terminal:\n  backend: local\n")
+    (home / "config.yaml").write_text("agent:\n  system_prompt: keep\n")
+    monkeypatch.setattr(hp, "read_terminal_state", lambda: False)
+    monkeypatch.setattr(
+        hp,
+        "_merge_profile_config",
+        lambda path, desired: {"wired": False, "changed": False, "error": "ro"},
+    )
+    with pytest.raises(hp.TerminalGateError, match="coder"):
+        hp.apply_release_config_invariants(home, overrides_path=tmp_path / "none.yaml")
+    from hal0.components import hermes_arm
+
+    monkeypatch.setattr(hermes_arm, "var_lib", lambda: tmp_path)
+    (tmp_path / ".hermes").symlink_to(home)
+    # the call above already wrote the root gate before raising; put the root
+    # back so the backstop's own run is the one that changes it
+    (home / "config.yaml").write_text("agent:\n  system_prompt: keep\n")
+    bounced: list[int] = []
+    monkeypatch.setattr(hp, "try_restart_hermes_consumers", lambda: bounced.append(1) or [])
+    result: dict = {}
+    hermes_arm._config_backstop(result, job_id="j")
+    assert any("terminal gate not applied" in d for d in result["detail"])
+    # the root gate was written before the profile failure: the live consumers re-read it
+    assert bounced == [1]
+
+
+def test_profile_phase_records_a_terminal_backend_change_for_the_restart(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import json
+
+    import hal0.cli.agent_commands as ac
+
+    monkeypatch.setattr("hal0.service_identity.service_key", lambda prefer=None: "svc-key")
+    home = tmp_path / "hh"
+    (home / "profiles" / "coder").mkdir(parents=True)
+    (home / "profiles" / "coder" / "config.yaml").write_text("terminal:\n  backend: local\n")
+    (home / "config.yaml").write_text(f"terminal:\n  backend: {hp.TERMINAL_OFF_BACKEND}\n")
+    state = hp.BootstrapState(hermes_home=str(home), terminal_enabled=False)
+    out = hp._phase_profile_mcp_wire(hp._StepCtx(state=state, io=hp.InstallIO()))
+    assert out.details["terminal_backend_changed"] is True
+    out = hp._phase_profile_mcp_wire(hp._StepCtx(state=state, io=hp.InstallIO()))
+    assert out.details["terminal_backend_changed"] is False
+    report = tmp_path / "provision.json"
+    monkeypatch.setattr(ac, "_agent_provision_state_file", lambda name: report)
+    report.write_text(
+        json.dumps(
+            {
+                "phases": {
+                    "config_write": {"details": {"terminal_backend_changed": False}},
+                    "profile_mcp_wire": {"details": {"terminal_backend_changed": True}},
+                }
+            }
+        )
+    )
+    assert ac._terminal_gate_changed_in_last_report() is True
+
+
+def test_a_displaced_sentinel_is_reported_as_terminal_on(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """overrides.yaml wins by design; the status line must not call that box off."""
+    overrides = tmp_path / "overrides.yaml"
+    overrides.write_text("terminal:\n  backend: local\n")
+    monkeypatch.delenv(hp.HERMES_TERMINAL_ENV, raising=False)
+    monkeypatch.setattr(hp, "TERMINAL_STATE_PATH", tmp_path / "state" / "hermes-terminal-tool")
+    monkeypatch.setattr(
+        hp,
+        "_resolve_primary_slot",
+        lambda **_kwargs: {"model": "p", "base_url": "u", "context_length": 8000},
+    )
+    monkeypatch.setattr(hp, "OVERRIDES_PATH", overrides)
+    from hal0.agents import personas as _personas
+
+    monkeypatch.setattr(_personas, "PERSONAS_ROOT", tmp_path / "personas-empty")
+    io = hp.InstallIO(
+        fetch_slots=lambda: [], fetch_model_contexts=lambda: {}, run=fake_hermes_run()
+    )
+    state = hp.BootstrapState(hermes_home=str(tmp_path / "hh"))
+    out = hp._phase_config_write(hp._StepCtx(state=state, io=io))
+    assert out.status == hp.PhaseStatus.FAIL
+    assert out.details["terminal_tool"] == "on"
+    assert out.details["terminal_tool_decision"] == "off"
+
+
+def test_profile_wire_phase_fails_when_an_opt_in_leaves_a_profile_gated(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "hh"
+    (home / "profiles" / "stuck").mkdir(parents=True)
+    (home / "profiles" / "stuck" / "config.yaml").write_text(
+        f"terminal:\n  backend: {hp.TERMINAL_OFF_BACKEND}\n"
+    )
+    (home / "profiles" / "fine").mkdir(parents=True)
+    (home / "profiles" / "fine" / "config.yaml").write_text("terminal:\n  backend: local\n")
+    monkeypatch.setattr(
+        hp,
+        "wire_named_profiles",
+        lambda h, terminal_enabled=None: {
+            "wired": [],
+            "changed": [],
+            "skipped": {},
+            "errors": {"stuck": "read-only", "fine": "read-only"},
+        },
+    )
+    state = hp.BootstrapState(hermes_home=str(home), terminal_enabled=True)
+    out = hp._phase_profile_mcp_wire(hp._StepCtx(state=state, io=hp.InstallIO()))
+    assert out.status == hp.PhaseStatus.FAIL
+    assert out.reason is not None and out.reason.endswith("still gated: stuck")
+
+
+def test_cli_restarts_when_the_gate_changed_even_if_a_later_phase_failed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import json
+    import os
+
+    import hal0.cli.agent_commands as ac
+
+    report = tmp_path / "provision.json"
+    monkeypatch.setattr(ac, "_agent_provision_state_file", lambda name: report)
+    changed = {"phases": {"config_write": {"details": {"terminal_backend_changed": True}}}}
+    report.write_text(json.dumps({"completed_at": "2026-10-23T00:00:00Z", **changed}))
+
+    def failing_bootstrap(**_kw):
+        # the run writes the gate, then a later phase fails the run
+        report.write_text(json.dumps({"completed_at": "2026-10-23T00:05:00Z", **changed}))
+        return 1
+
+    monkeypatch.setattr(hp, "bootstrap_cli", failing_bootstrap)
+    restarted: list[int] = []
+    monkeypatch.setattr(ac, "_restart_hermes_after_posture_change", lambda: restarted.append(1))
+    monkeypatch.setattr(os, "geteuid", lambda: 999)
+    monkeypatch.delenv(ac._RESTART_OWNER_ENV, raising=False)
+    assert ac._provision_hermes(repair=True) == 1
+    assert restarted == [1]
+    # a run that never wrote a new report (the previous one still says changed) does not restart
+    restarted.clear()
+    monkeypatch.setattr(hp, "bootstrap_cli", lambda **_kw: 1)
+    assert ac._provision_hermes(repair=True) == 1
+    assert restarted == []

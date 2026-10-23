@@ -69,7 +69,9 @@ def test_terminal_cwd_never_etc_hal0() -> None:
 def test_terminal_backend_is_local_only_when_opted_in() -> None:
     # `local` is still the only viable backend on this box (podman, no docker;
     # a container could not reach the host or 127.0.0.1:8080), so opting in
-    # reproduces the historical config exactly. Opting out writes no backend.
+    # reproduces the historical config exactly. Opting out writes the sentinel
+    # backend that fails Hermes's terminal check_fn for every agent in the
+    # process (#2878), and no cwd.
     assert _overlay("/var/lib/hal0/.hermes")["terminal.backend"] == "local"
     off = dict(
         hp._build_config_overlay(
@@ -84,7 +86,7 @@ def test_terminal_backend_is_local_only_when_opted_in() -> None:
             terminal_enabled=False,
         )
     )
-    assert "terminal.backend" not in off
+    assert off["terminal.backend"] == hp.TERMINAL_OFF_BACKEND
     assert "terminal.cwd" not in off
 
 

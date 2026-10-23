@@ -149,6 +149,10 @@ class BootstrapState:
     agent_id: str = "hermes"
     #: A vetted ref other than the pin (``hal0 agent upgrade hermes --to``).
     ref: str | None = None
+    #: The terminal decision config_write APPLIED this run (env, marker, config,
+    #: default), so later phases gate profiles on it rather than on a marker a
+    #: non-root run may have failed to replace (#2878).
+    terminal_enabled: bool | None = None
 
 
 def _utcnow() -> str:
@@ -1812,7 +1816,35 @@ HAL0_CONFIG_LIST_KEYS: dict[str, Any] = {
 # resolves to ``execute_code`` (toolsets.py:155), which runs arbitrary Python
 # as the same user — disabling one without the other would leave the shell
 # reachable by another name.
+#
+# WHY THE SUBTRACTION IS NOT ENOUGH (#2878, v0.22.3+): the gateway-owned
+# preview-restart side agent is built with ``enabled_toolsets=['terminal',
+# 'file'], disabled_toolsets=None`` (gateway/session_tui_side.py:282-283 at
+# 4d043038), so ``agent.disabled_toolsets`` never reaches it. What every agent
+# in the process shares is the terminal tool's ``check_fn``
+# (``check_terminal_requirements``, tools/terminal_tool.py:1553): an unknown
+# ``terminal.backend`` fails it (tools/terminal_tool_backends.py:385-393) and
+# ``terminal`` + ``process_manage`` are dropped from every model-facing schema,
+# side agents included. A served profile gets its own ``terminal:`` section
+# through ``install_and_reset_profile_terminal_scope`` (gateway/run.py:1829), so
+# the sentinel lands in every profile hal0 writes. Hermes logs the rejection at
+# ERROR ("Unknown TERMINAL_ENV 'hal0-terminal-off' …", TTL-cached 30 s), which
+# is the price of a gate upstream gives no switch for; the name says who set it.
 HERMES_TERMINAL_ENV = "HAL0_HERMES_TERMINAL"
+#: ``terminal.backend`` hal0 writes while the terminal is OFF. Not a Hermes
+#: backend and never a plugin name, so ``check_terminal_requirements`` rejects
+#: it for every agent in the process (see above). OFF means off for every
+#: backend: an operator's docker/ssh/… value is set aside under
+#: :data:`TERMINAL_SAVED_BACKEND_KEY` and put back when the operator opts in;
+#: with nothing saved, opting in restores ``local``.
+TERMINAL_OFF_BACKEND = "hal0-terminal-off"
+#: ``hal0.<key>`` in config.yaml: the backend the sentinel replaced, so an
+#: opt-in restores the operator's choice. Cleared (``""``) on restore.
+TERMINAL_SAVED_BACKEND_KEY = "terminal_backend_saved"
+#: ``hal0.<key>`` in a PROFILE config.yaml: the ``agent.disabled_toolsets``
+#: entries hal0 itself appended while gating, so an opt-in removes exactly
+#: those and never an entry the profile's operator disabled by hand.
+TERMINAL_ADDED_TOOLSETS_KEY = "terminal_disabled_added"
 # The two DIRECT execution toolsets, kept named because they are what the
 # ``terminal`` opt-in is about; :data:`TERMINAL_OFF_TOOLSETS` is what hal0
 # actually writes and reads back.
@@ -1937,6 +1969,166 @@ def _terminal_backend_in_config(config_text: str | None) -> str | None:
     return backend or None
 
 
+def _saved_terminal_backend(config_text: str | None) -> str | None:
+    """The backend the sentinel replaced (``hal0.terminal_backend_saved``), or None."""
+    block = (_parse_yaml_config(config_text) or {}).get("hal0")
+    if not isinstance(block, dict):
+        return None
+    saved = str(block.get(TERMINAL_SAVED_BACKEND_KEY) or "").strip()
+    return saved or None
+
+
+def _terminal_saved_layer(
+    *,
+    terminal_enabled: bool,
+    before_backend: str | None,
+    after_backend: str | None,
+    saved_backend: str | None,
+) -> dict[str, Any]:
+    """The ``hal0.terminal_backend_saved`` YAML layer the posture change needs.
+
+    OFF over an operator's backend (``before_backend``) remembers it. ON clears
+    the memory only once ``after_backend`` (read back after the overlay's
+    ``config set`` ran) shows the remembered backend in place: a failed restore
+    must keep the memory, or the next run would fall back to ``local``.
+    """
+    if not terminal_enabled and before_backend not in (None, "", "local", TERMINAL_OFF_BACKEND):
+        return {"hal0": {TERMINAL_SAVED_BACKEND_KEY: before_backend}}
+    if terminal_enabled and saved_backend and after_backend == saved_backend:
+        return {"hal0": {TERMINAL_SAVED_BACKEND_KEY: ""}}
+    return {}
+
+
+def try_restart_hermes_consumers(
+    *, run: Callable[..., Any] | None = None, which: Callable[[str], str | None] = shutil.which
+) -> list[str]:
+    """``try-restart`` the agent unit and the gateway so a config change takes hold.
+
+    Both consumers load ``config.yaml`` in their own process; ``try-restart`` is
+    a no-op on an inactive unit, so a gateway the operator stopped stays
+    stopped. Root uses ``systemctl``; anyone else goes through the
+    ``hal0-systemctl`` seam with ``sudo -n`` (never a prompt). Best effort:
+    returns the units that failed to bounce, and never raises.
+    """
+    from hal0.system.seam import SEAM_BIN, agent_unit_argv
+
+    if which("systemctl") is None:
+        return []
+    runner = run if run is not None else subprocess.run
+    root = os.geteuid() == 0
+    plans: list[tuple[str, list[str]]] = [
+        ("hal0-agent@hermes.service", agent_unit_argv("try-restart", "hermes")),
+        (
+            "hermes-gateway.service",
+            ["systemctl", "try-restart", "hermes-gateway.service"]
+            if root
+            else ["sudo", "-n", SEAM_BIN, "svc-try-restart", "hermes-gateway"],
+        ),
+    ]
+    failed: list[str] = []
+    for unit, argv in plans:
+        try:
+            proc = runner(argv, check=False, capture_output=True, text=True, timeout=120)  # nosec B603
+        except (OSError, subprocess.SubprocessError) as exc:
+            log.warning("hermes.consumer_restart_failed", unit=unit, error=str(exc))
+            failed.append(unit)
+            continue
+        if getattr(proc, "returncode", 1) != 0:
+            log.warning(
+                "hermes.consumer_restart_failed",
+                unit=unit,
+                rc=proc.returncode,
+                stderr=(getattr(proc, "stderr", "") or "")[-200:],
+            )
+            failed.append(unit)
+    return failed
+
+
+class TerminalGateError(RuntimeError):
+    """A terminal-off box has profiles that could not take the terminal gate (#2878)."""
+
+
+def profile_backends(hermes_home: Path | str) -> dict[str, str | None]:
+    """``terminal.backend`` per ``profiles/<name>/config.yaml`` (None when unreadable)."""
+    out: dict[str, str | None] = {}
+    for path in sorted((Path(hermes_home) / "profiles").glob("*/config.yaml")):
+        try:
+            out[path.parent.name] = _terminal_backend_in_config(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError):
+            out[path.parent.name] = None
+    return out
+
+
+def apply_terminal_gate_to_profiles(hermes_home: Path | str, *, terminal_enabled: bool) -> bool:
+    """Merge the terminal gate alone (no MCP keys) into every profile's config.yaml.
+
+    Descriptor-anchored like the MCP sweep (symlinked profiles are refused, not
+    followed). Returns True when any profile changed. On an OFF box a profile
+    that could not take the gate raises :class:`TerminalGateError`: its side
+    agents would keep the terminal tool.
+    """
+    from hal0.agents import hermes_api as ha
+
+    home = Path(hermes_home)
+    changed = False
+    failed: dict[str, str] = {}
+    for name in ha.profile_dirs(home):
+        if not HERMES_PROFILE_ID_RE.match(name):
+            continue
+        result = _merge_profile_config(
+            home / "profiles" / name / "config.yaml",
+            lambda base: _terminal_profile_keys(base, terminal_enabled=terminal_enabled),
+        )
+        if result.get("error"):
+            failed[name] = str(result["error"])
+        changed = changed or bool(result.get("changed"))
+    if failed and terminal_enabled is False:
+        # Fail closed: a release activation rolls back when an invariant
+        # raises, which beats restarting the gateway with a served profile
+        # whose side agents still see the terminal tool.
+        raise TerminalGateError(
+            "the terminal is off and these Hermes profiles did not receive the terminal gate: "
+            + ", ".join(f"{n} ({e})" for n, e in sorted(failed.items()))
+        )
+    return changed
+
+
+def _read_text_or_none(path: Path) -> str | None:
+    try:
+        return path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
+
+
+def box_terminal_decision(hermes_home: Path | str) -> bool | None:
+    """The terminal decision for a caller that applied none (a reconcile, an update).
+
+    The recorded marker, except that a root ``config.yaml`` carrying
+    :data:`TERMINAL_OFF_BACKEND` is OFF whatever the marker says: hal0 wrote
+    that sentinel deliberately, and a non-root opt-out may have applied it
+    without being able to replace a root-owned marker (#2878 review). An
+    opt-in rewrites the root config first, so the sentinel's absence lets the
+    marker speak. With no usable marker, :func:`terminal_tool_enabled`'s
+    existing-config / default-off rule applies. ``None`` only with no config.
+    """
+    try:
+        text = (Path(hermes_home) / "config.yaml").read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        text = None
+    if text is not None and _terminal_backend_in_config(text) == TERMINAL_OFF_BACKEND:
+        return False
+    recorded = read_terminal_state()
+    if recorded is not None or text is None:
+        return recorded
+    # No marker (absent, unreadable, corrupt) but a config: the provisioner's
+    # own rule decides, so a pre-sentinel box whose disabled_toolsets record
+    # the off posture, or a fresh box (default off), is gated by an update
+    # instead of left as it was.
+    return terminal_tool_enabled(config_text=text, recorded=None, hermes_home=hermes_home, env={})[
+        0
+    ]
+
+
 def _existing_terminal_choice(config_text: str | None, hermes_home: Path | str) -> bool | None:
     """Read an EXISTING ``config.yaml``'s terminal posture, or ``None``.
 
@@ -1945,7 +2137,9 @@ def _existing_terminal_choice(config_text: str | None, hermes_home: Path | str) 
 
     Two shapes count as an operator decision:
 
-    * any backend OTHER than ``local`` — hermes' own default is ``local``, so a
+    * hal0's own :data:`TERMINAL_OFF_BACKEND` sentinel — written by a terminal-OFF
+      provision, so it reads as OFF;
+    * any other backend than ``local`` — hermes' own default is ``local``, so a
       docker/ssh/modal value cannot have been materialised by a migration and
       is necessarily someone's choice, whatever ``cwd`` it carries;
     * ``local`` together with ANY ``terminal.cwd`` that is not hermes' own
@@ -1974,6 +2168,8 @@ def _existing_terminal_choice(config_text: str | None, hermes_home: Path | str) 
     backend = str(terminal.get("backend") or "").strip()
     if not backend:
         return None
+    if backend == TERMINAL_OFF_BACKEND:
+        return False
     if backend != "local":
         return True
     cwd = str(terminal.get("cwd") or "").strip()
@@ -2154,6 +2350,7 @@ def _build_config_overlay(
     hermes_home: Path | str = HERMES_HOME_DEFAULT,
     terminal_enabled: bool = False,
     terminal_backend: str | None = None,
+    saved_backend: str | None = None,
     approvals_mode: str = HAL0_APPROVALS_MODE,
 ) -> list[tuple[str, Any]]:
     """Ordered ``(dotted_key, value)`` overlay applied via ``hermes config set``.
@@ -2306,15 +2503,26 @@ def _build_config_overlay(
     # home_init) so shells land in a writable, secret-free sandbox.
     #
     # Written ONLY when the operator opted in (#1863 — see TERMINAL_TOOLSETS).
-    # With the tool off there is no backend to configure, so hal0 writes no
-    # ``terminal.*`` key at all and subtracts the toolsets in _config_list_keys.
-    # Also skipped when the operator has moved the backend off `local` by hand
-    # (docker/ssh/…): that is a narrower execution boundary than hal0's default,
-    # and re-asserting `local` on top of it would silently widen it back to
+    # With the tool off hal0 subtracts the toolsets in _config_list_keys AND
+    # writes the sentinel backend, the one key that also reaches the gateway's
+    # side agents (#2878, TERMINAL_OFF_BACKEND).
+    # ``local`` is only re-asserted over a backend hal0 owns: an operator's
+    # docker/ssh/… is a narrower execution boundary than hal0's default, and
+    # re-asserting `local` on top of it would silently widen it back to
     # root-equivalent host execution.
-    if terminal_enabled and terminal_backend in (None, "", "local"):
-        terminal_scratch = str(Path(hermes_home) / "scratch")
-        pairs += [("terminal.backend", "local"), ("terminal.cwd", terminal_scratch)]
+    hal0_owned_backend = terminal_backend in (None, "", "local", TERMINAL_OFF_BACKEND)
+    if terminal_enabled:
+        if terminal_backend == TERMINAL_OFF_BACKEND and saved_backend and saved_backend != "local":
+            # Opting back in puts the operator's own backend back (#2878).
+            pairs.append(("terminal.backend", saved_backend))
+        elif hal0_owned_backend:
+            terminal_scratch = str(Path(hermes_home) / "scratch")
+            pairs += [("terminal.backend", "local"), ("terminal.cwd", terminal_scratch)]
+    elif terminal_backend != TERMINAL_OFF_BACKEND:
+        # The gate the side agent cannot bypass (#2878, see TERMINAL_OFF_BACKEND).
+        # Off means off for every backend; an operator's docker/ssh value is
+        # remembered in the YAML layer (_terminal_saved_layer) and restored.
+        pairs.append(("terminal.backend", TERMINAL_OFF_BACKEND))
     pairs += [("agent.max_turns", 60), ("agent.reasoning_effort", "medium")]
     # From v0.22 Hermes deletes ENDED sessions idle for 90 days at startup
     # unless this is false (hermes_cli/config_defaults.py:2264-2278 at
@@ -2837,12 +3045,43 @@ def apply_release_config_invariants(
             BootstrapState(hermes_home=str(home)), mcp_servers=_default_mcp_servers()
         )
         layers = _deep_merge(layers, _persona_prompt_layer(prompt))
-    return _merge_config_yaml_layers(
+    # The terminal gate reaches an existing box through this path (#2878):
+    # ``hal0 update`` never runs the overlay, so a terminal-off box would keep
+    # its ``local`` backend, and the gateway's side agents the shell, until
+    # the next reprovision. The recorded decision is the authority here.
+    decision = box_terminal_decision(home)
+    layers = _deep_merge(layers, _terminal_profile_keys(loaded or {}, terminal_enabled=decision))
+    changed = _merge_config_yaml_layers(
         config,
         list_keys=layers,
         overrides_path=overrides_path if overrides_path is not None else OVERRIDES_PATH,
         persona_names=_persona_display_names_for_home(home),
     )
+    # Every profile too, hal0-brain included: the profile phases run only on a
+    # provision or a hal0-api start, and a release activation restarts the
+    # gateway, not hal0-api, so a brain or clone profile would keep its live
+    # backend indefinitely after an upgrade (#2878 review).
+    if decision is not None:
+        changed = apply_terminal_gate_to_profiles(home, terminal_enabled=decision) or changed
+    # overrides.yaml lays on top by design, so a ``terminal.backend`` there can
+    # displace the sentinel. Activation cannot fail on it (that would flip the
+    # release back for a config the operator wrote), so say so loudly: the
+    # gateway's side agents keep the terminal tool until the override goes.
+    if decision is False:
+        try:
+            final = config.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            final = None
+        if _terminal_backend_in_config(final) != TERMINAL_OFF_BACKEND:
+            log.error(
+                "hermes.terminal_gate_overridden",
+                config=str(config),
+                overrides=str(overrides_path if overrides_path is not None else OVERRIDES_PATH),
+                expected=TERMINAL_OFF_BACKEND,
+                found=_terminal_backend_in_config(final),
+                issue="#2878",
+            )
+    return changed
 
 
 def _retire_hal0_personality(data: dict[str, Any], persona_names: Iterable[str]) -> bool:
@@ -3122,6 +3361,7 @@ def _phase_config_write(ctx: _StepCtx) -> PhaseResult:
             )
     # An operator who moved the backend off `local` by hand keeps that backend.
     terminal_backend = _terminal_backend_in_config(config_before)
+    saved_backend = _saved_terminal_backend(config_before)
     migrated = _ensure_hermes_config(hermes_bin, hermes_home, run)
 
     primary_raw = _resolve_primary_slot(slots_fetcher=ctx.io.fetch_slots)
@@ -3190,8 +3430,10 @@ def _phase_config_write(ctx: _StepCtx) -> PhaseResult:
         hermes_home=hermes_home,
         terminal_enabled=terminal_enabled,
         terminal_backend=terminal_backend,
+        saved_backend=saved_backend,
         approvals_mode=approvals_mode,
     )
+    ctx.state.terminal_enabled = terminal_enabled
     applied, errors = _apply_config_set(
         pairs, hermes_bin=hermes_bin, hermes_home=hermes_home, run=run
     )
@@ -3201,10 +3443,18 @@ def _phase_config_write(ctx: _StepCtx) -> PhaseResult:
     list_merge_changed = _merge_config_yaml_layers(
         config_path,
         list_keys=_deep_merge(
-            _config_list_keys(
-                terminal_enabled=terminal_enabled,
-                existing_disabled=_disabled_toolsets(_parse_yaml_config(pre_merge)),
-                mcp_servers=mcp_servers,
+            _deep_merge(
+                _config_list_keys(
+                    terminal_enabled=terminal_enabled,
+                    existing_disabled=_disabled_toolsets(_parse_yaml_config(pre_merge)),
+                    mcp_servers=mcp_servers,
+                ),
+                _terminal_saved_layer(
+                    terminal_enabled=terminal_enabled,
+                    before_backend=terminal_backend,
+                    after_backend=_terminal_backend_in_config(pre_merge),
+                    saved_backend=saved_backend,
+                ),
             ),
             _persona_prompt_layer(system_prompt),
         ),
@@ -3225,6 +3475,27 @@ def _phase_config_write(ctx: _StepCtx) -> PhaseResult:
     # FAIL only when the overlay couldn't apply at all (hermes_bin broken) —
     # that's a real, actionable stop the operator must see.
     status = PhaseStatus.OK if (applied or not pairs) else PhaseStatus.FAIL
+    # The sentinel backend is the one key the gateway's side agents cannot
+    # bypass (#2878), so a partial `config set` that lost it is not "a usable
+    # config": verify it in the file hal0 just wrote, and fail the phase when
+    # it is not there. Off means off for every backend (#2878 review).
+    backend_after = _terminal_backend_in_config(config_after)
+    if not terminal_enabled and backend_after != TERMINAL_OFF_BACKEND:
+        errors.insert(
+            0,
+            f"terminal.backend is not {TERMINAL_OFF_BACKEND!r} in {config_path} although the "
+            "terminal is off: the gateway's side agents would still see the terminal tool "
+            "(#2878); re-run the provision",
+        )
+        status = PhaseStatus.FAIL
+    elif terminal_enabled and backend_after == TERMINAL_OFF_BACKEND:
+        errors.insert(
+            0,
+            f"terminal.backend is still {TERMINAL_OFF_BACKEND!r} in {config_path} after the "
+            "opt-in: the terminal stays unavailable; re-run the provision",
+        )
+        status = PhaseStatus.FAIL
+    terminal_backend_changed = backend_after != terminal_backend
     # Both stale cases point the opposite way from each other, so the line the
     # operator reads has to name the direction rather than assume opt-out.
     stale_reason = (
@@ -3245,6 +3516,7 @@ def _phase_config_write(ctx: _StepCtx) -> PhaseResult:
         details={
             "config_path": str(config_path),
             "changed": changed,
+            "terminal_backend_changed": terminal_backend_changed,
             "keys_applied": applied,
             "keys_total": len(pairs),
             "list_merge_changed": list_merge_changed,
@@ -3260,7 +3532,12 @@ def _phase_config_write(ctx: _StepCtx) -> PhaseResult:
             # operator's overrides.yaml wins over hal0's disabled_toolsets, so
             # reporting the decision alone could claim "off" on a box where the
             # tool is in fact loaded. The decision is reported alongside it.
-            "terminal_tool": "on" if terminal_enabled_in_config(config_after) else "off",
+            "terminal_tool": (
+                "on"
+                if terminal_enabled_in_config(config_after)
+                or (not terminal_enabled and backend_after != TERMINAL_OFF_BACKEND)
+                else "off"
+            ),
             "terminal_tool_decision": "on" if terminal_enabled else "off",
             "terminal_tool_reason": terminal_reason,
             "approvals_mode": approvals_mode,
@@ -4929,7 +5206,9 @@ def _open_profiles_root(home: Path) -> int:
         os.close(home_fd)
 
 
-def _merge_profile_config(path: Path, desired: dict[str, Any]) -> dict[str, Any]:
+def _merge_profile_config(
+    path: Path, desired: dict[str, Any] | Callable[[dict[str, Any]], dict[str, Any]]
+) -> dict[str, Any]:
     """Deep-merge hal0's keys into one profile ``config.yaml`` (path form).
 
     ``path`` is ``<home>/profiles/<name>/config.yaml``; the work happens on a
@@ -4971,7 +5250,7 @@ def _same_inode(root_fd: int, name: str, dir_fd: int) -> bool:
 def _merge_profile_config_at(
     dir_fd: int,
     path: Path,
-    desired: dict[str, Any],
+    desired: dict[str, Any] | Callable[[dict[str, Any]], dict[str, Any]],
     *,
     still_named: Callable[[], bool] | None = None,
 ) -> dict[str, Any]:
@@ -5038,9 +5317,19 @@ def _merge_profile_config_at(
                         "changed": False,
                         "error": "config.yaml is not a mapping",
                     }
-                if _profile_wire_opted_out(base):
-                    return {"wired": False, "changed": False, "reason": "opted out"}
-                merged = _deep_merge(base, desired)
+                # ``desired`` may depend on the document (the terminal gate
+                # replaces only hal0's own sentinel, never an operator's backend).
+                wanted = desired(base) if callable(desired) else desired
+                opted_out = _profile_wire_opted_out(base)
+                if opted_out:
+                    # ``hal0: {wire_mcp: false}`` opts out of the MCP servers and
+                    # the memory provider, not of the box's terminal decision:
+                    # the backend gate is what keeps the terminal tool away from
+                    # the gateway's side agents in THIS profile too (#2878).
+                    wanted = {k: v for k, v in wanted.items() if k in ("terminal", "hal0", "agent")}
+                    if not wanted:
+                        return {"wired": False, "changed": False, "reason": "opted out"}
+                merged = _deep_merge(base, wanted)
                 changed = merged != base
                 if not changed:
                     break
@@ -5073,6 +5362,8 @@ def _merge_profile_config_at(
         # Never ``str(exc)``: a PyYAML message quotes the offending line, which
         # in this file can be a resolved Authorization header.
         return {"wired": False, "changed": False, "error": _yaml_error_summary(exc)}
+    if opted_out:
+        return {"wired": False, "changed": changed, "reason": "opted out"}
     return {"wired": True, "changed": changed}
 
 
@@ -5137,7 +5428,98 @@ def _profile_wire_desired(agent_id: str) -> dict[str, Any]:
     }
 
 
-def wire_named_profiles(home: Path) -> dict[str, Any]:
+def _terminal_profile_keys(
+    base: dict[str, Any], *, terminal_enabled: bool | None
+) -> dict[str, Any]:
+    """The ``terminal.backend`` a profile gets from the box's terminal decision.
+
+    OFF subtracts hal0's execution toolsets (:data:`TERMINAL_OFF_TOOLSETS`,
+    appended to whatever the operator disabled) and writes the backend
+    sentinel, the part the gateway's side agents cannot bypass (#2878). OFF writes
+    :data:`TERMINAL_OFF_BACKEND` over any backend, remembering an operator's
+    docker/ssh/… under ``hal0.terminal_backend_saved``; ON replaces only the
+    sentinel, with the remembered backend or ``local``. ``None`` (no decision,
+    e.g. a hal0-api reconcile on a box whose marker is unreadable) changes
+    nothing.
+    """
+    if terminal_enabled is None:
+        return {}
+    terminal = base.get("terminal")
+    backend = str(terminal.get("backend") or "").strip() if isinstance(terminal, dict) else ""
+    hal0_block = base.get("hal0")
+    saved = (
+        str(hal0_block.get(TERMINAL_SAVED_BACKEND_KEY) or "").strip()
+        if isinstance(hal0_block, dict)
+        else ""
+    )
+    existing = _disabled_toolsets(base)
+    added_raw = (
+        hal0_block.get(TERMINAL_ADDED_TOOLSETS_KEY) if isinstance(hal0_block, dict) else None
+    )
+    added = [str(t) for t in added_raw] if isinstance(added_raw, list) else []
+    keys: dict[str, Any] = {}
+    if terminal_enabled is False:
+        # The sentinel removes terminal + process_manage for every agent; the
+        # profile's own agent would still reach execute_code and delegate_task
+        # without the subtraction, so the clone gets hal0's entries too. The
+        # list is computed from the document (hal0's entries appended to the
+        # operator's), so the replace-on-merge of a list clobbers nothing, and
+        # the entries hal0 added are recorded so an opt-in removes only those.
+        missing = [t for t in TERMINAL_OFF_TOOLSETS if t not in existing]
+        if missing:
+            keys["agent"] = {"disabled_toolsets": [*existing, *missing]}
+            keys["hal0"] = {TERMINAL_ADDED_TOOLSETS_KEY: sorted({*added, *missing})}
+        if backend != TERMINAL_OFF_BACKEND:
+            keys["terminal"] = {"backend": TERMINAL_OFF_BACKEND}
+            if backend not in ("", "local"):
+                # Off means off for every backend; remember the operator's so an
+                # opt-in puts it back (#2878 review).
+                keys.setdefault("hal0", {})[TERMINAL_SAVED_BACKEND_KEY] = backend
+        return keys
+    if backend != TERMINAL_OFF_BACKEND:
+        # No sentinel: hal0 never gated this profile, so a ``terminal`` entry
+        # the operator disabled by hand on a terminal-on box stays theirs.
+        return {}
+    if added and any(t in existing for t in added):
+        # Only what hal0 appended goes; an entry the profile's operator had
+        # disabled before the gate (or added since) is theirs to keep.
+        keys["agent"] = {"disabled_toolsets": [t for t in existing if t not in added]}
+    hal0_keys: dict[str, Any] = {}
+    if added:
+        hal0_keys[TERMINAL_ADDED_TOOLSETS_KEY] = []
+    keys["terminal"] = {"backend": saved or "local"}
+    if saved:
+        hal0_keys[TERMINAL_SAVED_BACKEND_KEY] = ""
+    if hal0_keys:
+        keys["hal0"] = hal0_keys
+    return keys
+
+
+_UNSET: Any = object()
+
+
+def _profile_wire_desired_for(
+    agent_id: str, *, terminal_enabled: bool | None | Any = _UNSET
+) -> Callable[[dict[str, Any]], dict[str, Any]]:
+    """``desired`` for :func:`_merge_profile_config_at`, folding the terminal gate in.
+
+    ``terminal_enabled`` is the decision config_write applied this run when a
+    provisioning phase calls; a hal0-api reconcile has none and reads the
+    recorded marker.
+    """
+    if terminal_enabled is _UNSET:
+        terminal_enabled = read_terminal_state()
+    fixed = _profile_wire_desired(agent_id)
+
+    def desired(base: dict[str, Any]) -> dict[str, Any]:
+        return _deep_merge(fixed, _terminal_profile_keys(base, terminal_enabled=terminal_enabled))
+
+    return desired
+
+
+def wire_named_profiles(
+    home: Path, *, terminal_enabled: bool | None | Any = _UNSET
+) -> dict[str, Any]:
     """Give every named Hermes profile hal0's MCP servers and memory (#2891).
 
     A profile cloned by the operator starts with no ``mcp_servers`` at all, so
@@ -5157,6 +5539,8 @@ def wire_named_profiles(home: Path) -> dict[str, Any]:
     Returns ``{"wired": [...], "changed": [...], "skipped": {name: reason},
     "errors": {name: error}}``; never raises.
     """
+    if terminal_enabled is _UNSET:
+        terminal_enabled = box_terminal_decision(home)
     report: dict[str, Any] = {"wired": [], "changed": [], "skipped": {}, "errors": {}}
     profiles = Path(home) / "profiles"
     try:
@@ -5196,7 +5580,9 @@ def wire_named_profiles(home: Path) -> dict[str, Any]:
                     result = _merge_profile_config_at(
                         dir_fd,
                         profiles / name / "config.yaml",
-                        _profile_wire_desired(profile_agent_id(name)),
+                        _profile_wire_desired_for(
+                            profile_agent_id(name), terminal_enabled=terminal_enabled
+                        ),
                         still_named=lambda n=name, d=dir_fd: _same_inode(root_fd, n, d),
                     )
                 finally:
@@ -5205,6 +5591,9 @@ def wire_named_profiles(home: Path) -> dict[str, Any]:
                     report["errors"][name] = result["error"]
                 elif not result["wired"]:
                     report["skipped"][name] = result.get("reason", "skipped")
+                    if result.get("changed"):
+                        # an opted-out profile still took the terminal gate
+                        report["changed"].append(name)
                 else:
                     report["wired"].append(name)
                     if result["changed"]:
@@ -5224,14 +5613,48 @@ def _phase_profile_mcp_wire(ctx: _StepCtx) -> PhaseResult:
     for the install's convergence signal (``_step_changed`` drops the signal of
     a non-OK step). A correct box is left untouched.
     """
-    report = wire_named_profiles(Path(ctx.state.hermes_home))
-    details = {**report, "changed": bool(report["changed"]), "changed_profiles": report["changed"]}
+    terminal_enabled = (
+        ctx.state.terminal_enabled
+        if ctx.state.terminal_enabled is not None
+        else box_terminal_decision(ctx.state.hermes_home)
+    )
+    backends_before = profile_backends(ctx.state.hermes_home)
+    report = wire_named_profiles(Path(ctx.state.hermes_home), terminal_enabled=terminal_enabled)
+    details = {
+        **report,
+        "changed": bool(report["changed"]),
+        "changed_profiles": report["changed"],
+        # The CLI restarts the consumers on this (#2878): a profile gated here
+        # reaches a running gateway only once it re-reads its config.
+        "terminal_backend_changed": profile_backends(ctx.state.hermes_home) != backends_before,
+    }
     reason = None
+    status = PhaseStatus.OK
     if report["errors"]:
         reason = "profile MCP wiring failed for: " + ", ".join(
             f"{n} ({e})" for n, e in sorted(report["errors"].items())
         )
-    return PhaseResult(status=PhaseStatus.OK, details=details, reason=reason)
+    # A profile that could not be rewritten (an error, or a symlinked profile
+    # directory Hermes serves but this sweep never follows) is a FAIL when it
+    # leaves the gate wrong: off and ungated, its side agents still see the
+    # terminal tool (#2878); on and still on the sentinel, the box-wide opt-in
+    # it just reported did not reach it.
+    untouched = set(report["errors"]) | {
+        n for n, why in report["skipped"].items() if why == "symlink"
+    }
+    if untouched and terminal_enabled is not None:
+        backends = profile_backends(ctx.state.hermes_home)
+        if terminal_enabled is False:
+            wrong = sorted(untouched)
+            note = "the terminal is off and these profiles did not receive the terminal gate: "
+        else:
+            wrong = sorted(n for n in untouched if backends.get(n) == TERMINAL_OFF_BACKEND)
+            note = "the terminal is on and these profiles are still gated: "
+        if wrong:
+            note += ", ".join(wrong)
+            reason = f"{reason}; {note}" if reason else note
+            status = PhaseStatus.FAIL
+    return PhaseResult(status=status, details=details, reason=reason)
 
 
 def _phase_brain_profile_mcp_wire(ctx: _StepCtx) -> PhaseResult:
@@ -5247,8 +5670,28 @@ def _phase_brain_profile_mcp_wire(ctx: _StepCtx) -> PhaseResult:
 
     path = _brain_profile_config_path(ctx.state)
     desired = _profile_wire_desired(BRAIN_PROFILE_AGENT_ID)
-    result = _merge_profile_config(path, desired)
+    terminal_enabled = (
+        ctx.state.terminal_enabled
+        if ctx.state.terminal_enabled is not None
+        else box_terminal_decision(ctx.state.hermes_home)
+    )
+    backend_before = _terminal_backend_in_config(_read_text_or_none(path))
+    result = _merge_profile_config(
+        path, _profile_wire_desired_for(BRAIN_PROFILE_AGENT_ID, terminal_enabled=terminal_enabled)
+    )
+    backend_changed = _terminal_backend_in_config(_read_text_or_none(path)) != backend_before
     if result.get("error"):
+        if terminal_enabled is False:
+            # Fail closed: a brain profile that could not take the terminal
+            # gate still shows the terminal tool to the gateway's side agents.
+            return PhaseResult(
+                status=PhaseStatus.FAIL,
+                details={"wired": False, "error": result["error"], "path": str(path)},
+                reason=(
+                    f"brain profile MCP wire failed ({result['error']}); the terminal is off "
+                    "and the profile did not receive the terminal gate (#2878)"
+                ),
+            )
         return PhaseResult(
             status=PhaseStatus.OK,
             details={"wired": False, "error": result["error"], "path": str(path)},
@@ -5270,6 +5713,7 @@ def _phase_brain_profile_mcp_wire(ctx: _StepCtx) -> PhaseResult:
         details={
             "wired": True,
             "changed": result["changed"],
+            "terminal_backend_changed": backend_changed,
             "path": str(path),
             "servers": sorted(desired["mcp_servers"].keys()),
         },

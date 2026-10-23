@@ -1807,6 +1807,15 @@ async def _boot_seeds(app: FastAPI, ctx: BootState) -> None:
         )
         if wire_result.details.get("wired") and wire_result.details.get("changed"):
             log.info("brain_profile.mcp_wire_startup_seed", path=wire_result.details.get("path"))
+        elif str(wire_result.status) == "fail":
+            # The terminal is off and the brain profile did not take the gate
+            # (#2878): the gateway's side agents in that profile still see the
+            # terminal tool. Not cosmetic, so not a warning.
+            log.error(
+                "brain_profile.mcp_wire_startup_failed",
+                path=wire_result.details.get("path"),
+                reason=wire_result.reason,
+            )
     except Exception as exc:  # seeding must never block startup
         log.warning("brain_profile.mcp_wire_startup_seed_failed", error=str(exc))
 

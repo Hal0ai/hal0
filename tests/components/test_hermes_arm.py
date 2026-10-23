@@ -7,6 +7,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from hal0.agents import hermes_provision as hp
 from hal0.components import hermes_arm
 from hal0.config.paths import var_lib
 
@@ -304,6 +305,10 @@ def old_config(monkeypatch):
     from hal0.agents import hermes_provision as hp
 
     monkeypatch.setattr(hp, "OVERRIDES_PATH", var_lib() / "no-overrides.yaml")
+    # No marker and a config without a decision reads as default-off, so the
+    # backstop also applies the terminal gate (#2878) and bounces the consumers;
+    # record the bounce instead of reaching the systemctl seam.
+    monkeypatch.setattr(hp, "try_restart_hermes_consumers", lambda: [])
     home = var_lib() / ".hermes"
     home.mkdir(parents=True, exist_ok=True)
     cfg = home / "config.yaml"
@@ -324,7 +329,10 @@ def test_a_converged_box_gets_the_config_keys_on_update(tmp_path, old_config) ->
     assert res["note"] == hermes_arm.CONFIG_BACKSTOP_NOTE
     cfg = yaml.safe_load(old_config.read_text())
     assert cfg["sessions"]["auto_prune"] is False
-    assert cfg["agent"] == {"max_turns": 60, "system_prompt": "P"}
+    assert cfg["agent"]["max_turns"] == 60 and cfg["agent"]["system_prompt"] == "P"
+    # the terminal gate rides along for a default-off box (#2878)
+    assert cfg["terminal"]["backend"] == hp.TERMINAL_OFF_BACKEND
+    assert set(hp.TERMINAL_OFF_TOOLSETS) <= set(cfg["agent"]["disabled_toolsets"])
 
     # Idempotent: nothing to do, nothing to say.
     again = hermes_arm.converge_hermes(venv=venv)

@@ -149,8 +149,33 @@ def _config_backstop(result: dict[str, Any], *, job_id: str | None) -> None:
     from hal0.agents import hermes_provision as hermes
 
     home = var_lib() / ".hermes"
+    config = home / "config.yaml"
+
+    def _backend() -> dict[str, str | None]:
+        """``terminal.backend`` of the root config and every profile's."""
+        paths = [config, *sorted((home / "profiles").glob("*/config.yaml"))]
+        out: dict[str, str | None] = {}
+        for path in paths:
+            try:
+                out[str(path)] = hermes._terminal_backend_in_config(
+                    path.read_text(encoding="utf-8")
+                )
+            except (OSError, UnicodeDecodeError):
+                out[str(path)] = None
+        return out
+
+    backend_before = _backend()
     try:
         changed = hermes.apply_release_config_invariants(home)
+    except hermes.TerminalGateError as exc:
+        # Not cosmetic: a served profile's side agents still see the terminal.
+        log.error("components.hermes_terminal_gate_failed", job_id=job_id, error=str(exc))
+        result["detail"] = [*result.get("detail", []), f"Hermes terminal gate not applied: {exc}"]
+        if _backend() != backend_before:
+            # The root (and any profile written before the failure) already
+            # changed on disk; the live consumers must still re-read it.
+            hermes.try_restart_hermes_consumers()
+        return
     except Exception as exc:  # the converge verdict must not depend on it
         log.warning("components.hermes_config_backstop_failed", job_id=job_id, error=str(exc))
         result["detail"] = [*result.get("detail", []), f"Hermes config keys not applied: {exc}"]
@@ -159,6 +184,22 @@ def _config_backstop(result: dict[str, Any], *, job_id: str | None) -> None:
         log.info("components.hermes_config_backstop_applied", job_id=job_id, home=str(home))
         result["note"] = CONFIG_BACKSTOP_NOTE
         result["detail"] = [*result.get("detail", []), CONFIG_BACKSTOP_NOTE]
+        if _backend() != backend_before:
+            # Unlike a release activation, this runs with both Hermes consumers
+            # live; the terminal gate (#2878) only reaches a running gateway and
+            # its side agents once the process re-reads its config.
+            failed = hermes.try_restart_hermes_consumers()
+            note = (
+                "Hermes restarted to apply the terminal posture"
+                if not failed
+                else "Hermes terminal posture changed; restart " + ", ".join(failed)
+            )
+            log.info(
+                "components.hermes_terminal_gate_applied",
+                job_id=job_id,
+                restart_failed=failed,
+            )
+            result["detail"] = [*result.get("detail", []), note]
 
 
 #: What `hal0 update` reports when the gateway unit was healed.

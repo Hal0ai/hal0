@@ -670,20 +670,20 @@ def test_provision_hermes_forwards_terminal_answer_across_the_privilege_drop(
     monkeypatch.setattr(ac, "_run_as_hal0", _fake_run_as_hal0)
 
     assert ac._provision_hermes(terminal_tool=True) == 0
-    assert captured["extra_env"] == {HERMES_TERMINAL_ENV: "1"}
+    assert captured["extra_env"] == {HERMES_TERMINAL_ENV: "1", ac._RESTART_OWNER_ENV: "parent"}
 
     assert ac._provision_hermes(terminal_tool=False) == 0
-    assert captured["extra_env"] == {HERMES_TERMINAL_ENV: "0"}
+    assert captured["extra_env"] == {HERMES_TERMINAL_ENV: "0", ac._RESTART_OWNER_ENV: "parent"}
 
     # No flag and nothing in the environment → nothing forced.
     monkeypatch.delenv(HERMES_TERMINAL_ENV, raising=False)
     assert ac._provision_hermes() == 0
-    assert captured["extra_env"] == {}
+    assert captured["extra_env"] == {ac._RESTART_OWNER_ENV: "parent"}
 
     # No flag but the installer exported an answer → forwarded verbatim.
     monkeypatch.setenv(HERMES_TERMINAL_ENV, "1")
     assert ac._provision_hermes() == 0
-    assert captured["extra_env"] == {HERMES_TERMINAL_ENV: "1"}
+    assert captured["extra_env"] == {HERMES_TERMINAL_ENV: "1", ac._RESTART_OWNER_ENV: "parent"}
 
 
 def test_posture_change_restarts_the_running_hermes_as_root(monkeypatch) -> None:
