@@ -553,6 +553,20 @@ def cmd_worker(args: argparse.Namespace) -> int:
                 for f in flags:
                     print(f"  {f.model_id} {f.cell_key[:16]} {f.delta_pct}% vs {f.trailing_median}")
                 regress_journal(flags, suite.id)
+            if result.slot_errors:
+                # #2979: the cells ran, but a slot is still down. Park the item in
+                # failed.json with the cause so the queue view shows a warning
+                # rather than a clean success.
+                note = "slot not restored after the exclusive window: " + "; ".join(
+                    result.slot_errors
+                )
+                control.fail(item.get("id"), _failure_note(note), _now_stamp())
+                print(
+                    f"[worker] {suite.id} done with slot errors: "
+                    f"ok={result.cells_ok} failed={result.cells_failed}"
+                )
+                control.write_status(None, _now_stamp())
+                continue
             control.dequeue(item.get("id"))
             print(f"[worker] {suite.id} done: ok={result.cells_ok} failed={result.cells_failed}")
             control.write_status(None, _now_stamp())
