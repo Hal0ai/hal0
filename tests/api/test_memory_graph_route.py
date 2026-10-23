@@ -129,6 +129,76 @@ def test_graph_status_reports_available_slots_and_resolution(
     assert body["slot_resolves"] is True
 
 
+def test_graph_status_reports_target_and_available_models(
+    stub_wrapper: StubWrapper, hal0_home: Path
+) -> None:
+    """#2919: the status carries what ``hal0/memory`` resolves to, the
+    upstream models the operator may pick instead of a slot (remote,
+    non-pinned upstreams only — a pinned Hermes agent is not an engine LLM,
+    a slot-backed upstream is already a slot), and the LLM the engine really
+    runs (#2918)."""
+    from types import SimpleNamespace
+
+    app = _build_app(stub_wrapper, "agent", "utility")
+    app.state.upstreams = SimpleNamespace(
+        list=lambda: [
+            SimpleNamespace(name="minimax", kind="remote", slot_name=None, pinned=False),
+            SimpleNamespace(name="openrouter", kind="remote", slot_name=None, pinned=False),
+            SimpleNamespace(name="hermes", kind="remote", slot_name=None, pinned=True),
+            SimpleNamespace(name="utility", kind="slot", slot_name="utility", pinned=False),
+        ]
+    )
+    app.state.upstream_models = {
+        "minimax": ["MiniMax-M2.5", "MiniMax-M2.1"],
+        "openrouter": ["minimax/minimax-m3"],
+        "hermes": ["hermes-agent"],
+        "utility": ["tiel-coder"],
+    }
+    engine_llm = {
+        "provider": "openai",
+        "base_url": "http://127.0.0.1:8080/v1",
+        "model": "hal0/memory",
+        "overridden": False,
+        "override_file": None,
+        "override_keys": [],
+    }
+    with (
+        TestClient(app) as client,
+        patch("hal0.memory.extraction_env.effective_engine_llm", return_value=engine_llm),
+    ):
+        r = client.get("/api/memory/graph/status")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["extraction_model"] is None
+    assert body["target"] == {"kind": "slot", "model": "hal0/utility", "alias": "hal0/memory"}
+    assert body["available_models"] == [
+        {"id": "MiniMax-M2.1", "owned_by": "minimax"},
+        {"id": "MiniMax-M2.5", "owned_by": "minimax"},
+        {"id": "minimax/minimax-m3", "owned_by": "openrouter"},
+    ]
+    assert body["engine_llm"] == engine_llm
+
+
+def test_graph_status_without_upstreams_has_an_empty_model_list(
+    client: TestClient, stub_wrapper: StubWrapper
+) -> None:
+    with patch(
+        "hal0.memory.extraction_env.effective_engine_llm",
+        return_value={
+            "provider": None,
+            "base_url": None,
+            "model": None,
+            "overridden": False,
+            "override_file": None,
+            "override_keys": [],
+        },
+    ):
+        r = client.get("/api/memory/graph/status")
+    body = r.json()
+    assert body["available_models"] == []
+    assert body["target"]["alias"] == "hal0/memory"
+
+
 def test_put_enable_with_valid_slot(
     client: TestClient, stub_wrapper: StubWrapper, hal0_home: Path
 ) -> None:

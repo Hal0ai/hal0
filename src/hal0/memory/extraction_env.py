@@ -47,6 +47,7 @@ raising, so the API can surface a partial result instead of 500ing.
 from __future__ import annotations
 
 import os
+import shlex
 import subprocess
 import time
 from collections.abc import Callable, Mapping, Sequence
@@ -263,6 +264,124 @@ def drop_in_matches(
         return DROP_IN_PATH.read_text(encoding="utf-8") == render_drop_in(timeout_s, limits=limits)
     except (OSError, UnicodeDecodeError):
         return False
+
+
+#: The env file the hindsight-api unit reads (``EnvironmentFile=-``) for its
+#: /v1 credential. systemd applies ``EnvironmentFile=`` after every
+#: ``Environment=`` line, drop-ins included, so PROVIDER/BASE_URL/MODEL lines an
+#: operator adds here silently beat hal0's target (#2918). hal0-api can read it
+#: (0640 root:hal0) and reports what the engine actually loads.
+HINDSIGHT_LLM_ENV_PATH = Path("/etc/hal0/hindsight-llm.env")
+
+#: The keys that decide which LLM the engine talks to. The credential key is
+#: deliberately not among them: it is never read into a status payload.
+_LLM_TARGET_KEYS: tuple[str, ...] = (
+    "HINDSIGHT_API_LLM_PROVIDER",
+    "HINDSIGHT_API_LLM_BASE_URL",
+    "HINDSIGHT_API_LLM_MODEL",
+)
+
+#: ``systemctl show`` is a subprocess; the dashboard polls status every few
+#: seconds, so the unit environment is remembered this long.
+_UNIT_ENV_TTL_S = 30.0
+_unit_env_cache: tuple[float, dict[str, str]] | None = None
+
+
+def _parse_systemctl_environment(raw: str) -> dict[str, str]:
+    """``systemctl show -p Environment --value`` → ``{KEY: VALUE}``.
+
+    One line of space-separated ``KEY=VALUE`` tokens; a token whose value
+    carries spaces is printed quoted as a whole, which ``shlex`` undoes.
+    """
+    out: dict[str, str] = {}
+    try:
+        tokens = shlex.split(raw)
+    except ValueError:
+        tokens = raw.split()
+    for tok in tokens:
+        if "=" not in tok:
+            continue
+        key, value = tok.split("=", 1)
+        if key:
+            out[key] = value
+    return out
+
+
+def _systemctl_show_environment() -> dict[str, str]:
+    """The merged ``Environment=`` of the hindsight-api unit (base + drop-ins),
+    as systemd would hand it to the process — before any ``EnvironmentFile=``.
+    Unprivileged read; ``{}`` when systemd is not there or the unit is unknown."""
+    global _unit_env_cache
+    now = time.monotonic()
+    if _unit_env_cache is not None and now - _unit_env_cache[0] < _UNIT_ENV_TTL_S:
+        return dict(_unit_env_cache[1])
+    try:
+        proc = subprocess.run(
+            ["systemctl", "show", SERVICE, "-p", "Environment", "--value"],
+            capture_output=True,
+            text=True,
+            timeout=5.0,
+            check=False,
+        )
+        env = _parse_systemctl_environment(proc.stdout) if proc.returncode == 0 else {}
+    except (OSError, subprocess.SubprocessError):
+        env = {}
+    _unit_env_cache = (now, env)
+    return dict(env)
+
+
+def _read_env_file(path: Path) -> dict[str, str]:
+    """``KEY=VALUE`` lines of a systemd environment file; ``{}`` if unreadable."""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return {}
+    out: dict[str, str] = {}
+    for line in text.splitlines():
+        item = line.strip()
+        if item.startswith("export "):
+            item = item[len("export ") :].strip()
+        if not item or item.startswith("#") or "=" not in item:
+            continue
+        key, value = item.split("=", 1)
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+        out[key.strip()] = value
+    return out
+
+
+def effective_engine_llm(
+    *,
+    env_file: Path = HINDSIGHT_LLM_ENV_PATH,
+    unit_env: Mapping[str, str] | None = None,
+    show_unit_env: Callable[[], Mapping[str, str]] = _systemctl_show_environment,
+) -> dict[str, Any]:
+    """The LLM hindsight-api really runs on, and whether a file override set it (#2918).
+
+    Overlays the three target keys from ``env_file`` on the unit's merged
+    ``Environment=`` (``unit_env`` when given, else ``show_unit_env()``), which
+    is exactly what systemd does at unit start. Returns::
+
+        {"provider", "base_url", "model",            # as the engine sees them
+         "overridden": bool,                         # any target key came from the file
+         "override_file": str | None, "override_keys": [sorted key names]}
+
+    The credential is never read into the result. Everything degrades to
+    ``None``/``False`` rather than raising — this feeds a status route.
+    """
+    unit = dict(unit_env) if unit_env is not None else dict(show_unit_env() or {})
+    file_env = _read_env_file(Path(env_file))
+    override_keys = sorted(k for k in _LLM_TARGET_KEYS if file_env.get(k))
+    merged = {**unit, **{k: file_env[k] for k in override_keys}}
+    return {
+        "provider": merged.get("HINDSIGHT_API_LLM_PROVIDER") or None,
+        "base_url": merged.get("HINDSIGHT_API_LLM_BASE_URL") or None,
+        "model": merged.get("HINDSIGHT_API_LLM_MODEL") or None,
+        "overridden": bool(override_keys),
+        "override_file": str(env_file) if override_keys else None,
+        "override_keys": override_keys,
+    }
 
 
 def memory_engine_target(graph: MemoryGraphConfig) -> tuple[str, str]:

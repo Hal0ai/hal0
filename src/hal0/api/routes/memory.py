@@ -32,7 +32,8 @@ from hal0.api._audit import record_action
 from hal0.api.middleware.error_codes import BadRequest, Hal0Error
 from hal0.config.loader import hal0_config_txn, load_hal0_config
 from hal0.config.schema import MemoryGraphConfig
-from hal0.memory.extraction_env import ExtractionLimits
+from hal0.memory import extraction_env as _ee
+from hal0.memory.extraction_env import MEMORY_ALIAS, ExtractionLimits, memory_engine_target
 from hal0.memory.hindsight_provider import bank_to_namespace
 from hal0.memory.namespace import (
     DEFAULT_DATASET,
@@ -229,6 +230,34 @@ async def _enabled_llm_slots(request: Request) -> list[str]:
     return sorted(alias_map.keys())
 
 
+def _available_upstream_models(request: Request) -> list[dict[str, str]]:
+    """Upstream model ids the operator may run the memory engine on (#2919).
+
+    Drawn from the dispatcher's models cache, so no upstream round trip:
+    remote, non-pinned upstreams only. A slot-backed upstream is already a
+    slot (pick it as one); a pinned upstream is an agent (Hermes) whose ids
+    are not engine LLMs. Sorted by owner then id so the picker is stable.
+    """
+    upstreams = getattr(request.app.state, "upstreams", None)
+    cache = getattr(request.app.state, "upstream_models", {}) or {}
+    if upstreams is None:
+        return []
+    rows: list[dict[str, str]] = []
+    try:
+        for up in upstreams.list():
+            if getattr(up, "kind", "") != "remote" or getattr(up, "slot_name", None):
+                continue
+            if getattr(up, "pinned", False):
+                continue
+            for model_id in cache.get(up.name, []) or []:
+                if isinstance(model_id, str) and model_id:
+                    rows.append({"id": model_id, "owned_by": up.name})
+    except Exception:  # pragma: no cover — defensive, status must not 500
+        return []
+    rows.sort(key=lambda row: (row["owned_by"], row["id"]))
+    return rows
+
+
 def _wrapper(request: Request) -> Any:
     """Return the live memory provider or raise 503."""
     wrapper = getattr(request.app.state, "memory_provider", None)
@@ -279,6 +308,14 @@ async def graph_status(request: Request) -> dict[str, Any]:
     status["llm_timeout_s"] = graph_cfg.llm_timeout_s
     status["extraction_limits"] = ExtractionLimits.from_config(graph_cfg).as_dict()
     status["throughput"] = _cached_throughput(request, status.get("extraction_slot"), graph_cfg)
+    # #2919: what hal0/memory resolves to, and what else it could — the picker.
+    status["extraction_model"] = graph_cfg.extraction_model
+    kind, target_model = memory_engine_target(graph_cfg)
+    status["target"] = {"kind": kind, "model": target_model, "alias": MEMORY_ALIAS}
+    status["available_models"] = _available_upstream_models(request)
+    # #2918: the LLM the engine really loads — a hindsight-llm.env override of
+    # provider/base_url/model beats every drop-in and must not stay hidden.
+    status["engine_llm"] = await asyncio.to_thread(_ee.effective_engine_llm)
     await _augment_build_counters(request, status)
     return status
 

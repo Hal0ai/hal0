@@ -441,6 +441,102 @@ def test_apply_writes_directly_when_not_the_hal0_user(monkeypatch, tmp_path: Pat
     ]
 
 
+# ── #2918: the LLM the engine really runs ────────────────────────────────────
+#
+# systemd applies EnvironmentFile= after every Environment= line, drop-ins
+# included, so PROVIDER/BASE_URL/MODEL lines an operator adds to
+# /etc/hal0/hindsight-llm.env silently beat hal0's target. hal0 must report
+# what the engine loads, not what it configured.
+
+_UNIT_ENV = {
+    "HINDSIGHT_API_LLM_PROVIDER": "openai",
+    "HINDSIGHT_API_LLM_BASE_URL": "http://127.0.0.1:8080/v1",
+    "HINDSIGHT_API_LLM_MODEL": "hal0/memory",
+    "HINDSIGHT_API_LLM_API_KEY": "unit-placeholder",
+}
+
+
+def test_effective_engine_llm_key_only_file_is_not_an_override(tmp_path: Path):
+    from hal0.memory.extraction_env import effective_engine_llm
+
+    env_file = tmp_path / "hindsight-llm.env"
+    env_file.write_text("HINDSIGHT_API_LLM_API_KEY=supersecret-box-key\n")
+    out = effective_engine_llm(env_file=env_file, unit_env=_UNIT_ENV)
+    assert out == {
+        "provider": "openai",
+        "base_url": "http://127.0.0.1:8080/v1",
+        "model": "hal0/memory",
+        "overridden": False,
+        "override_file": None,
+        "override_keys": [],
+    }
+    assert "supersecret" not in repr(out)
+
+
+def test_effective_engine_llm_reports_a_provider_override(tmp_path: Path):
+    from hal0.memory.extraction_env import effective_engine_llm
+
+    env_file = tmp_path / "hindsight-llm.env"
+    env_file.write_text(
+        "HINDSIGHT_API_LLM_PROVIDER=minimax\n"
+        "HINDSIGHT_API_LLM_BASE_URL=https://api.minimax.io/v1\n"
+        "HINDSIGHT_API_LLM_MODEL=MiniMax-M2.5\n"
+        "HINDSIGHT_API_LLM_API_KEY=supersecret-cloud-key\n"
+    )
+    out = effective_engine_llm(env_file=env_file, unit_env=_UNIT_ENV)
+    assert out["provider"] == "minimax"
+    assert out["base_url"] == "https://api.minimax.io/v1"
+    assert out["model"] == "MiniMax-M2.5"
+    assert out["overridden"] is True
+    assert out["override_file"] == str(env_file)
+    assert out["override_keys"] == [
+        "HINDSIGHT_API_LLM_BASE_URL",
+        "HINDSIGHT_API_LLM_MODEL",
+        "HINDSIGHT_API_LLM_PROVIDER",
+    ]
+    assert "supersecret" not in repr(out)
+
+
+def test_effective_engine_llm_without_file_uses_unit_env(tmp_path: Path):
+    from hal0.memory.extraction_env import effective_engine_llm
+
+    out = effective_engine_llm(env_file=tmp_path / "missing.env", unit_env=_UNIT_ENV)
+    assert out["model"] == "hal0/memory"
+    assert out["overridden"] is False
+    assert out["override_file"] is None
+
+
+def test_effective_engine_llm_tolerates_an_unreadable_unit(tmp_path: Path):
+    """``systemctl show`` failing (no systemd, a dev shell) degrades to Nones,
+    never an exception on the status route."""
+    from hal0.memory.extraction_env import effective_engine_llm
+
+    out = effective_engine_llm(env_file=tmp_path / "missing.env", show_unit_env=lambda: {})
+    assert out == {
+        "provider": None,
+        "base_url": None,
+        "model": None,
+        "overridden": False,
+        "override_file": None,
+        "override_keys": [],
+    }
+
+
+def test_parse_systemctl_environment_value():
+    """``systemctl show -p Environment --value`` prints one space-separated
+    line of KEY=VALUE pairs (values may be quoted when they carry spaces)."""
+    from hal0.memory.extraction_env import _parse_systemctl_environment
+
+    raw = (
+        "HOME=/var/lib/hal0/memory/hindsight HINDSIGHT_API_LLM_MODEL=hal0/memory "
+        '"HINDSIGHT_API_LLM_EXTRA_BODY={\\"a\\": 1}" HINDSIGHT_API_LLM_TIMEOUT=300\n'
+    )
+    env = _parse_systemctl_environment(raw)
+    assert env["HINDSIGHT_API_LLM_MODEL"] == "hal0/memory"
+    assert env["HINDSIGHT_API_LLM_TIMEOUT"] == "300"
+    assert env["HOME"] == "/var/lib/hal0/memory/hindsight"
+
+
 # ── #1903: extraction-slot context-window preflight ─────────────────────────
 #
 # Hindsight's native extraction call is dispatched to ``hal0/<extraction_slot>``
