@@ -24,12 +24,6 @@ def test_watermark_matches_the_registered_version() -> None:
     assert PROFILE_CATALOG_SCHEMA_VERSION in MIGRATIONS
 
 
-def test_updater_gate_imports_the_same_constant() -> None:
-    from hal0.updater import updater as U
-
-    assert U.PROFILE_CATALOG_SCHEMA_VERSION is PROFILE_CATALOG_SCHEMA_VERSION
-
-
 def test_v1_to_v2_is_lossless_and_stamps() -> None:
     data = {
         "meta": {"schema_version": 1},

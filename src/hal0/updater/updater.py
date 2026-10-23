@@ -68,15 +68,6 @@ from hal0.config.loader import (
     write_toml_atomic,
 )
 from hal0.config.migrations import latest_version, run_migrations
-
-# A 1.3.x updater's post-swap child script imports this name from here and
-# passes `ceiling=` to run_post_activation_migrations; both stay until no
-# supported box can run a 1.3.x updater. manifest.json still says
-# `upgrade_from = ">=1.3.0"` at v1.6.0 (the floor decision, >=1.4.0 or not,
-# is the operator's and has not been taken), so a 1.3.x box can update
-# straight to this release and its updater needs the name. Delete both once
-# the floor passes 1.3.x. HAL0-SUNSET: v1.7.0
-from hal0.config.migrations.v2 import PROFILE_CATALOG_SCHEMA_VERSION  # noqa: F401
 from hal0.errors import Hal0Error
 from hal0.release.policy import ReleaseKind, ReleasePolicy, ReleaseTagError
 
@@ -1561,7 +1552,6 @@ def _maybe_run_config_migrations(
     min_data_version: int,
     *,
     job_id: str | None = None,
-    ceiling: int | None = None,
 ) -> tuple[int, int]:
     """Run forward config migrations if the release demands a newer schema.
 
@@ -1573,19 +1563,11 @@ def _maybe_run_config_migrations(
     Args:
         min_data_version: the release manifest's floor.
         job_id: optional breadcrumb for structured-log tracing.
-        ceiling: hard cap on the target version for THIS run; only a 1.3.x
-            updater's post-swap child passes one (see
-            :func:`run_post_activation_migrations`). Never clamps below the
-            on-disk version — that would be a downgrade, which
-            ``run_migrations`` rejects outright.
 
     Returns ``(source_version, target_version)`` for breadcrumb logging.
     Skips entirely when the running schema is already ≥ target.
     """
     target = max(min_data_version or 1, latest_version())
-    if ceiling is not None and ceiling < target:
-        log.info("updater.migrations_capped", job_id=job_id, uncapped=target, ceiling=ceiling)
-        target = ceiling
     toml_path = paths.hal0_toml()
 
     if not toml_path.exists():
@@ -1905,7 +1887,6 @@ def run_post_activation_migrations(
     min_data_version: int = 1,
     *,
     job_id: str | None = None,
-    ceiling: int | None = None,
     skip_catalogue_sync: bool = False,
     repair_hermes_venv: bool = True,
     upgrade_memory_engine_venv: bool = True,
@@ -1949,10 +1930,6 @@ def run_post_activation_migrations(
     (:func:`hal0.registry.toml_retirement.retire_registry_toml`), are each
     independently best-effort: one pass's exception is logged and never
     blocks the others or the caller's activation.
-
-    ``ceiling`` caps the schema-migration target. Only a 1.3.x updater passes
-    it: its post-swap child script still calls this with a ceiling derived
-    from the retired profile-catalog reset. ``None`` applies no cap.
 
     ``upgrade_memory_engine_venv`` gates the hindsight engine-venv
     convergence pass (:func:`hal0.memory.engine_upgrade.upgrade_memory_engine`).
@@ -2036,7 +2013,7 @@ def run_post_activation_migrations(
         except Exception as exc:
             log.warning("updater.runner_conversion_rerender_failed", job_id=job_id, error=str(exc))
 
-    migration_info = _maybe_run_config_migrations(min_data_version, job_id=job_id, ceiling=ceiling)
+    migration_info = _maybe_run_config_migrations(min_data_version, job_id=job_id)
 
     # Retire a leftover registry.toml: back it up, rename it, never import
     # it (every box at the 1.3.0 floor already did its first-boot import).

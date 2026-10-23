@@ -4,7 +4,7 @@
   "version": "1.6.0",
   "channel": "stable",
   "_upgrade_from_notes": "PEP 440 specifier for the versions this release upgrades from. release.yml copies it into every channel manifest, where the updater enforces it (updater._enforce_upgrade_floor); installer/install.sh enforces it on a re-run over an existing install. A box below it must step through a release inside the window or reinstall.",
-  "upgrade_from": ">=1.3.0",
+  "upgrade_from": ">=1.4.0",
   "runners": {
     "standard": {
       "image": "ghcr.io/hal0ai/hal0-runner-standard",

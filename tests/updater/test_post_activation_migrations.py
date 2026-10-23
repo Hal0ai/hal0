@@ -40,7 +40,7 @@ def _stub_every_pass(monkeypatch: pytest.MonkeyPatch) -> dict[str, list[Any]]:
         calls.setdefault("profile_restore_marker", []).append(honour_restore_marker)
         return ConversionReport(dry_run=dry_run)
 
-    def _config_migrations(min_data_version, *, job_id=None, ceiling=None):
+    def _config_migrations(min_data_version, *, job_id=None):
         calls["config_migrations"].append((min_data_version, job_id))
         return (1, 2)
 
