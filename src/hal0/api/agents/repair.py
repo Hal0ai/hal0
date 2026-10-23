@@ -15,15 +15,27 @@ The provisioner takes minutes, prints to its console and mutates ``os.environ``.
 Run in-process it would hold all of that inside hal0-api. As a child it runs the
 same code path as ``hal0 agent reprovision hermes --repair``, and the API only
 reads its stdout line by line: every line goes to
-``<state>/agents/hermes/provision-logs/job-<id>.log`` and every ``[run ] <step>``
-line is appended to ``job["steps"]``, so the status route serves a coarse
-checklist while ``provision.json`` still holds the previous report.
+``<state>/agents/hermes/provision-logs/job-<id>.log`` (mode 0640, directory 0750;
+the transcripts are not pruned) and every ``[run ] <step>`` line is appended to
+``job["steps"]``, so the status route serves a coarse checklist while
+``provision.json`` still holds the previous report.
 
 The child is the running tree's own ``hal0`` binary
 (:func:`hal0.system.seam.running_hal0_bin`), with ``HERMES_HOME`` unset and
 ``HOME`` set to the hal0 service home, the way ``_run_as_hal0`` builds its
 ``env`` prefix. It runs as the daemon's own user; there is no privilege change.
 ``HAL0_HERMES_TERMINAL`` is never set, so the existing posture is kept.
+
+Bounded
+-------
+The run is limited to :data:`_BOOTSTRAP_TIMEOUT_S` (reading the output and waiting
+for the exit together). A stalled ``pip`` or ``git``, or a grandchild that keeps
+the stdout pipe open after the child exits, would otherwise leave the job
+``running`` for good, and a ``running`` job refuses every converge and repair
+until hal0-api restarts. On timeout the child's whole process group is
+terminated and the job ends ``failed``. The child starts in its own session so
+its ``uv``/``pip``/``git`` descendants can be signalled with it, on a timeout or
+a cancellation.
 
 Known limit
 -----------
@@ -47,6 +59,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import os
+import signal
 import time
 import uuid
 from collections.abc import Callable
@@ -87,6 +100,19 @@ _STEP_PREFIX: Final[str] = "[run ] "
 #: Longest child output line the reader accepts (asyncio's default is 64 KiB; a
 #: pip or git transcript line can run past it).
 _STREAM_LIMIT: Final[int] = 1 << 20
+
+#: How long a repair may run, reading and waiting together. A cold release build
+#: that downloads a uv-managed Python takes 15-20 minutes on a slow box; this is
+#: more than twice that.
+_BOOTSTRAP_TIMEOUT_S: Final[float] = 45 * 60
+
+#: After SIGTERM to the child's process group, how long it has to exit before the
+#: group is sent SIGKILL.
+_TERM_GRACE_S: Final[float] = 5.0
+
+#: Transcript modes: the log may carry paths and pip output, not for other users.
+_LOG_FILE_MODE: Final[int] = 0o640
+_LOG_DIR_MODE: Final[int] = 0o750
 
 _JOB_STATES_IN_FLIGHT: Final[tuple[str, str]] = ("queued", "running")
 
@@ -246,22 +272,54 @@ def _touch(job: dict[str, Any]) -> None:
 def _open_log(log_path: Path, job: dict[str, Any]) -> Any:
     """Open the transcript for append; ``None`` (and ``job["log_path"] = None``) when it cannot be."""
     try:
-        log_path.parent.mkdir(parents=True, exist_ok=True)
-        return log_path.open("a", encoding="utf-8")
+        log_path.parent.mkdir(mode=_LOG_DIR_MODE, parents=True, exist_ok=True)
+        fd = os.open(log_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, _LOG_FILE_MODE)
+        return os.fdopen(fd, "a", encoding="utf-8")
     except OSError as exc:
         log.warning("agent.repair.log_unavailable", path=str(log_path), error=str(exc))
         job["log_path"] = None
         return None
 
 
+def _signal_group(pgid: int, sig: signal.Signals) -> bool:
+    """Send ``sig`` to process group ``pgid``; ``False`` when there is no such group.
+
+    The child is spawned with ``start_new_session=True``, so its pid is the id of a
+    group that holds it and everything it started. The group outlives a reaped
+    leader while any member lives, and its id cannot be reused until then.
+    """
+    try:
+        os.killpg(pgid, sig)
+    except OSError:
+        return False
+    return True
+
+
 async def _terminate(proc: Any) -> None:
-    """Kill the child if it is still running and reap it. Never raises."""
-    if getattr(proc, "returncode", None) is not None:
-        return
-    with contextlib.suppress(ProcessLookupError, OSError):
-        proc.kill()
+    """Stop the child and its descendants, and reap the child. Never raises.
+
+    SIGTERM to the process group (the child alone if there is no such group), up to
+    :data:`_TERM_GRACE_S` for the child to exit, then SIGKILL to the group for a
+    child that ignored the first signal and for descendants that outlived it.
+    Safe to call on a child that already exited: its group may still have members.
+    """
+    pid = getattr(proc, "pid", None)
+    try:
+        if pid is None or not _signal_group(pid, signal.SIGTERM):
+            with contextlib.suppress(Exception):
+                if proc.returncode is None:
+                    proc.kill()
+        if proc.returncode is None:
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(proc.wait(), _TERM_GRACE_S)
+    finally:
+        if pid is not None:
+            _signal_group(pid, signal.SIGKILL)
+        with contextlib.suppress(Exception):
+            if proc.returncode is None:
+                proc.kill()
     with contextlib.suppress(Exception):
-        await proc.wait()
+        await asyncio.wait_for(proc.wait(), _TERM_GRACE_S)
 
 
 async def run_repair_job(
@@ -280,17 +338,24 @@ async def run_repair_job(
     line by line to ``log_path`` and appends the step name of every ``[run ] ``
     line to ``job["steps"]`` (persisting each time). The job ends ``applied`` on
     exit code 0 and ``failed`` otherwise (``error = "bootstrap exited <rc>"``),
-    with ``exit_code`` set; a child that cannot be started, or a failure while
-    reading its output, also ends ``failed``. Whatever the outcome the job is
-    persisted and ``agent.repair.finished`` is emitted with the ``exit_code``
-    (``None`` when there was none).
+    with ``exit_code`` set. It also ends ``failed`` when the child cannot be
+    started, when reading its output breaks, and when it has not finished within
+    :data:`_BOOTSTRAP_TIMEOUT_S` (``error = "bootstrap timed out after <n>s"``);
+    in the last two the child's process group is terminated and ``exit_code`` is
+    the reaped child's return code. Whatever the outcome the job is persisted
+    where it changed and ``agent.repair.finished`` is emitted with the
+    ``exit_code`` (``None`` when there was none).
 
-    If the task is cancelled (hal0-api shutting down) the child is killed and the
-    job is left as it was: ``running`` on disk, for the status route to reconcile.
+    If the task is cancelled (hal0-api shutting down) the child's process group is
+    terminated and ``agent.repair.finished`` is emitted with ``state="cancelled"``.
+    A job that was already ``running`` is left so, on disk, for the status route to
+    reconcile; one cancelled before it started is persisted ``failed``
+    (``error = "repair cancelled"``).
     """
     job = jobs[job_id]
     agent_id = str(job.get("agent", "hermes"))
     exit_code: int | None = None
+    cancelled = False
     log_file = _open_log(log_path, job)
     proc: Any = None
     try:
@@ -302,6 +367,7 @@ async def run_repair_job(
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
                 limit=_STREAM_LIMIT,
+                start_new_session=True,
             )
         except OSError as exc:
             job["state"] = "failed"
@@ -312,19 +378,34 @@ async def run_repair_job(
         job["pid"] = proc.pid
         _touch(job)
 
-        while True:
-            raw = await proc.stdout.readline()
-            if not raw:
-                break
-            line = raw.decode("utf-8", errors="replace").rstrip("\r\n")
-            if log_file is not None:
-                log_file.write(line + "\n")
-                log_file.flush()
-            if line.startswith(_STEP_PREFIX):
-                job["steps"].append(line[len(_STEP_PREFIX) :].strip())
-                _touch(job)
+        deadline = asyncio.timeout(_BOOTSTRAP_TIMEOUT_S)
+        try:
+            async with deadline:
+                while True:
+                    raw = await proc.stdout.readline()
+                    if not raw:
+                        break
+                    line = raw.decode("utf-8", errors="replace").rstrip("\r\n")
+                    if log_file is not None:
+                        log_file.write(line + "\n")
+                        log_file.flush()
+                    if line.startswith(_STEP_PREFIX):
+                        step = line[len(_STEP_PREFIX) :].strip()
+                        if step:
+                            job["steps"].append(step)
+                            _touch(job)
+                exit_code = await proc.wait()
+        except TimeoutError:
+            if not deadline.expired():
+                raise
+            await _terminate(proc)
+            exit_code = proc.returncode
+            job["state"] = "failed"
+            job["error"] = f"bootstrap timed out after {int(_BOOTSTRAP_TIMEOUT_S)}s"
+            if exit_code is not None:
+                job["exit_code"] = exit_code
+            return
 
-        exit_code = await proc.wait()
         job["exit_code"] = exit_code
         if exit_code == 0:
             job["state"] = "applied"
@@ -332,31 +413,39 @@ async def run_repair_job(
             job["state"] = "failed"
             job["error"] = f"bootstrap exited {exit_code}"
     except asyncio.CancelledError:
+        cancelled = True
         if proc is not None:
             await _terminate(proc)
+        if job["state"] == "queued":
+            job["state"] = "failed"
+            job["error"] = "repair cancelled"
         raise
     except Exception as exc:
         log.warning("agent.repair.runner_failed", job_id=job_id, error=str(exc))
         if proc is not None:
             await _terminate(proc)
+            exit_code = proc.returncode
+            if exit_code is not None:
+                job["exit_code"] = exit_code
         job["state"] = "failed"
         job["error"] = f"repair runner failed: {exc}"
     finally:
         if log_file is not None:
             log_file.close()
-        # A cancelled run is neither applied nor failed: leave it for the status
-        # route to reconcile.
+        # A job cancelled while running stays ``running`` for the status route to
+        # reconcile; every other ending is written down.
         if job["state"] in ("applied", "failed"):
             _touch(job)
-            emit = audit_log.info if job["state"] == "applied" else audit_log.warning
-            emit(
-                "agent.repair.finished",
-                agent_id=agent_id,
-                job_id=job_id,
-                actor=actor,
-                exit_code=exit_code,
-                state=job["state"],
-            )
+        outcome = "cancelled" if cancelled else job["state"]
+        emit = audit_log.info if outcome == "applied" else audit_log.warning
+        emit(
+            "agent.repair.finished",
+            agent_id=agent_id,
+            job_id=job_id,
+            actor=actor,
+            exit_code=exit_code,
+            state=outcome,
+        )
 
 
 __all__ = ["repair_agent", "router", "run_repair_job"]

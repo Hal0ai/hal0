@@ -13,6 +13,8 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import signal
+import stat
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -32,6 +34,10 @@ from hal0.api.routes import agents as agents_routes
 from hal0.api.routes import updater as updater_routes
 from hal0.security.exposure import AuthClass, classify
 
+#: The real group-signalling function, kept so the one test that spawns real
+#: processes can put it back after the autouse fixture below replaces it.
+_REAL_SIGNAL_GROUP = repair_route._signal_group
+
 
 class _Lines:
     """The child's stdout: ``readline()`` yields the given lines, then ``b""``."""
@@ -49,10 +55,14 @@ class _FakeProc:
         self.returncode: int | None = None
         self._rc = rc
         self.pid = 4242
+        self.killed = False
 
     async def wait(self) -> int:
         self.returncode = self._rc
         return self._rc
+
+    def kill(self) -> None:
+        self.killed = True
 
 
 class _FakeManager:
@@ -81,6 +91,28 @@ def _drain_background(client: TestClient) -> None:
             await asyncio.gather(*tasks, return_exceptions=True)
 
     client.portal.call(_wait)  # type: ignore[union-attr]
+
+
+@pytest.fixture(autouse=True)
+def group_signals(monkeypatch: pytest.MonkeyPatch) -> list[tuple[int, signal.Signals]]:
+    """No test signals a real process group (the fake child's pid is arbitrary).
+
+    Records each ``(pgid, signal)`` and answers "no such group", so the runner
+    falls back to killing the child itself. A test that wants the group path sets
+    ``group_signals.found = True``.
+    """
+
+    class _Recorder(list):  # type: ignore[type-arg]
+        found = False
+
+    calls = _Recorder()
+
+    def _fake(pgid: int, sig: signal.Signals) -> bool:
+        calls.append((pgid, sig))
+        return calls.found
+
+    monkeypatch.setattr(repair_route, "_signal_group", _fake)
+    return calls
 
 
 @pytest.fixture
@@ -161,6 +193,8 @@ def test_repair_queues_job_and_records_steps(
     argv = spawn.await_args.args
     assert argv[1:] == ("agent", "bootstrap", "hermes", "--repair", "--verbose")
     assert "HERMES_HOME" not in spawn.await_args.kwargs["env"]
+    # Its own session, so the whole process group can be signalled with it.
+    assert spawn.await_args.kwargs["start_new_session"] is True
 
 
 def test_repair_returns_the_queued_job_snapshot(
@@ -224,13 +258,92 @@ def test_repair_spawn_failure_marks_failed(
         repair_route, "_spawn", AsyncMock(side_effect=FileNotFoundError("no such hal0"))
     )
 
-    job = agents_client.post("/api/agents/hermes/repair").json()
-    _drain_background(agents_client)
+    with structlog.testing.capture_logs() as logs:
+        job = agents_client.post("/api/agents/hermes/repair").json()
+        _drain_background(agents_client)
 
     final = agents_client.get(f"/api/updates/status/{job['id']}").json()
     assert final["state"] == "failed"
     assert final["error"].startswith("could not start bootstrap")
     assert "exit_code" not in final
+    on_disk = json.loads((updater_routes._jobs_dir() / f"{job['id']}.json").read_text())
+    assert on_disk["state"] == "failed" and on_disk["error"] == final["error"]
+    events = [e for e in logs if e["event"].startswith("agent.repair")]
+    assert [e["event"] for e in events] == ["agent.repair.invoked", "agent.repair.finished"]
+    assert events[1]["state"] == "failed" and events[1]["exit_code"] is None
+
+
+def test_repair_step_without_a_trailing_newline_at_eof_is_recorded(
+    agents_client: TestClient, log_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _spawn_ok(monkeypatch, [b"[run ] one\n", b"[run ] final"])
+
+    job = agents_client.post("/api/agents/hermes/repair").json()
+    _drain_background(agents_client)
+
+    final = agents_client.get(f"/api/updates/status/{job['id']}").json()
+    assert final["steps"] == ["one", "final"]
+    assert (log_dir / f"job-{job['id']}.log").read_text().splitlines()[-1] == "[run ] final"
+
+
+def test_repair_blank_step_names_are_skipped(
+    agents_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _spawn_ok(monkeypatch, [b"[run ]   \n", b"[run ] one\n", b"[run ] \r\n"])
+
+    job = agents_client.post("/api/agents/hermes/repair").json()
+    _drain_background(agents_client)
+
+    assert agents_client.get(f"/api/updates/status/{job['id']}").json()["steps"] == ["one"]
+
+
+def test_repair_transcript_is_not_readable_by_other_users(
+    agents_client: TestClient, log_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _spawn_ok(monkeypatch, [b"[run ] one\n"])
+
+    job = agents_client.post("/api/agents/hermes/repair").json()
+    _drain_background(agents_client)
+
+    log_file = log_dir / f"job-{job['id']}.log"
+    # 0640 and 0750 before the umask: nothing for others, no group write.
+    assert stat.S_IMODE(log_file.stat().st_mode) & 0o137 == 0
+    assert stat.S_IMODE(log_dir.stat().st_mode) & 0o027 == 0
+
+
+def test_repair_times_out_a_child_that_never_finishes(
+    agents_client: TestClient,
+    group_signals: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A stalled build must not leave the job running: it 409s every later job."""
+    proc = _FakeProc([], 0)
+
+    async def _stalled() -> bytes:
+        await asyncio.sleep(3600)
+        return b""
+
+    proc.stdout.readline = _stalled  # type: ignore[method-assign]
+    monkeypatch.setattr(repair_route, "_spawn", AsyncMock(return_value=proc))
+    monkeypatch.setattr(repair_route, "_BOOTSTRAP_TIMEOUT_S", 0.05)
+    group_signals.found = True
+
+    with structlog.testing.capture_logs() as logs:
+        job = agents_client.post("/api/agents/hermes/repair").json()
+        _drain_background(agents_client)
+
+    final = agents_client.get(f"/api/updates/status/{job['id']}").json()
+    assert final["state"] == "failed"
+    assert final["error"] == f"bootstrap timed out after {int(repair_route._BOOTSTRAP_TIMEOUT_S)}s"
+    assert final["exit_code"] == proc.returncode
+    assert group_signals == [(4242, signal.SIGTERM), (4242, signal.SIGKILL)]
+    events = [e for e in logs if e["event"].startswith("agent.repair")]
+    assert [e["event"] for e in events] == ["agent.repair.invoked", "agent.repair.finished"]
+    assert events[1]["state"] == "failed" and events[1]["exit_code"] == proc.returncode
+    # And the registry is free again.
+    _spawn_ok(monkeypatch)
+    assert agents_client.post("/api/agents/hermes/repair").status_code == 202
+    _drain_background(agents_client)
 
 
 def test_repair_child_env_is_sanitised(
@@ -443,19 +556,12 @@ async def test_runner_without_a_usable_log_file_still_runs(
 async def test_runner_marks_failed_when_reading_the_output_breaks(
     tmp_path: Path, no_persist: list[str]
 ) -> None:
-    class _Broken(_FakeProc):
-        def __init__(self) -> None:
-            super().__init__([], 0)
-            self.killed = False
+    proc = _FakeProc([], 7)
 
-        async def _boom(self) -> bytes:
-            raise ValueError("Separator is not found, and chunk exceed the limit")
+    async def _boom() -> bytes:
+        raise ValueError("Separator is not found, and chunk exceed the limit")
 
-        def kill(self) -> None:
-            self.killed = True
-
-    proc = _Broken()
-    proc.stdout.readline = proc._boom  # type: ignore[method-assign]
+    proc.stdout.readline = _boom  # type: ignore[method-assign]
     jobs = _job()
 
     await repair_route.run_repair_job(
@@ -470,25 +576,21 @@ async def test_runner_marks_failed_when_reading_the_output_breaks(
     assert jobs["j1"]["state"] == "failed"
     assert jobs["j1"]["error"].startswith("repair runner failed")
     assert proc.killed
+    # The code of the child it reaped, not a guess.
+    assert jobs["j1"]["exit_code"] == proc.returncode == 7
 
 
-async def test_runner_cancellation_kills_the_child_and_leaves_the_job_running(
-    tmp_path: Path, no_persist: list[str]
-) -> None:
-    class _Hangs(_FakeProc):
-        killed = False
+async def _run_hanging(
+    tmp_path: Path, jobs: dict[str, dict[str, Any]], proc: _FakeProc | None, spawn: Any = None
+) -> asyncio.Task[None]:
+    """Start the runner on a child whose output never ends, and let it get going."""
+    if proc is not None:
 
-        def kill(self) -> None:
-            self.killed = True
+        async def _never() -> bytes:
+            await asyncio.sleep(3600)
+            return b""
 
-    proc = _Hangs([], 0)
-
-    async def _never() -> bytes:
-        await asyncio.sleep(3600)
-        return b""
-
-    proc.stdout.readline = _never  # type: ignore[method-assign]
-    jobs = _job()
+        proc.stdout.readline = _never  # type: ignore[method-assign]
     task = asyncio.create_task(
         repair_route.run_repair_job(
             jobs,
@@ -496,15 +598,115 @@ async def test_runner_cancellation_kills_the_child_and_leaves_the_job_running(
             argv=["hal0"],
             env={},
             log_path=tmp_path / "x.log",
-            spawn=AsyncMock(return_value=proc),
+            spawn=spawn if spawn is not None else AsyncMock(return_value=proc),
+            actor="tester",
         )
     )
     for _ in range(10):
         await asyncio.sleep(0)
-    task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await task
+    return task
 
-    assert proc.killed
+
+async def test_runner_cancellation_kills_the_child_and_leaves_the_job_running(
+    tmp_path: Path, no_persist: list[str], group_signals: Any
+) -> None:
+    proc = _FakeProc([], 0)
+    jobs = _job()
+    task = await _run_hanging(tmp_path, jobs, proc)
+
+    with structlog.testing.capture_logs() as logs:
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    assert proc.killed  # no process group in this test: the child itself
     assert jobs["j1"]["state"] == "running"
     assert no_persist == ["running"]
+    finished = [e for e in logs if e["event"] == "agent.repair.finished"]
+    assert len(finished) == 1
+    assert finished[0]["state"] == "cancelled" and finished[0]["exit_code"] is None
+    assert finished[0]["actor"] == "tester"
+
+
+async def test_runner_cancelled_before_it_started_is_persisted_failed(
+    tmp_path: Path, no_persist: list[str]
+) -> None:
+    async def _slow_spawn(*args: Any, **kwargs: Any) -> _FakeProc:
+        await asyncio.sleep(3600)
+        raise AssertionError("not reached")
+
+    jobs = _job()
+    task = await _run_hanging(tmp_path, jobs, None, spawn=_slow_spawn)
+
+    with structlog.testing.capture_logs() as logs:
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    assert jobs["j1"]["state"] == "failed"
+    assert jobs["j1"]["error"] == "repair cancelled"
+    assert no_persist == ["failed"]
+    finished = [e for e in logs if e["event"] == "agent.repair.finished"]
+    assert [e["state"] for e in finished] == ["cancelled"]
+
+
+async def test_terminate_signals_the_group_then_kills_it_and_never_hangs(
+    monkeypatch: pytest.MonkeyPatch, group_signals: Any
+) -> None:
+    """A child that ignores SIGTERM and never exits is still given up on."""
+    monkeypatch.setattr(repair_route, "_TERM_GRACE_S", 0.05)
+    group_signals.found = True
+    proc = _FakeProc([], 0)
+
+    async def _never_exits() -> int:
+        await asyncio.sleep(3600)
+        return 0
+
+    proc.wait = _never_exits  # type: ignore[method-assign]
+
+    await asyncio.wait_for(repair_route._terminate(proc), 5)
+
+    assert group_signals == [(4242, signal.SIGTERM), (4242, signal.SIGKILL)]
+    assert proc.killed  # the direct kill of the child, as the last resort
+
+
+async def test_terminate_without_a_group_falls_back_to_the_child(group_signals: Any) -> None:
+    proc = _FakeProc([], 0)
+
+    await repair_route._terminate(proc)
+
+    assert proc.killed
+    assert [sig for _pgid, sig in group_signals] == [signal.SIGTERM, signal.SIGKILL]
+
+
+async def test_terminate_stops_descendants_of_the_child(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With the real signals: a grandchild that holds the pipe dies with the group."""
+    monkeypatch.setattr(repair_route, "_signal_group", _REAL_SIGNAL_GROUP)
+    proc = await asyncio.create_subprocess_exec(
+        "sh",
+        "-c",
+        "sleep 300 & echo $!; wait",
+        stdout=asyncio.subprocess.PIPE,
+        start_new_session=True,
+    )
+    assert proc.stdout is not None
+    grandchild = int((await asyncio.wait_for(proc.stdout.readline(), 10)).decode())
+
+    def _running(pid: int) -> bool:
+        try:
+            state = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0]
+        except OSError:
+            return False
+        return state != "Z"
+
+    assert _running(grandchild)
+    await asyncio.wait_for(repair_route._terminate(proc), 15)
+    for _ in range(100):
+        if not _running(grandchild):
+            break
+        await asyncio.sleep(0.05)
+
+    assert not _running(grandchild)
+    assert proc.returncode is not None
