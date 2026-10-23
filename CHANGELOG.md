@@ -34,6 +34,8 @@ applying. Add those subsections to a version's section to surface them; see
 
 - **`hal0 agent upgrade hermes --to <sha>` is gone: use `hal0 update component hermes --target <sha>`.** There is no alias. `hal0 agent upgrade hermes` now exits with a message naming the new command, and `hal0 agent upgrade` takes only `pi`. The `--target` check is the one `--to` had: a full 40-hex commit listed in `VETTED_HERMES_REFS`, and a commit older than the live release is refused as a downgrade. The hidden `--ref` flag of `hal0 agent bootstrap hermes`, which only the old command used to hand a ref to the privilege-dropped child, is removed with it. (#2865)
 
+- **`hal0 update owui` is gone: use `hal0 update component openwebui`.** There is no alias. `--target <digest>`, `--clear-override`, `--check` and `--yes` work on `hal0 update component <id>` exactly as they did on `hal0 update owui`; the OpenWebUI override marker and the `/api/updates/components/openwebui/converge` body are unchanged. Every other command's remedy text that named `hal0 update owui` now names the new spelling. `hal0 update owui` exits with the CLI's unknown-command error. (#2868)
+
 ### Changed
 
 - **The installer installs FastFlowLM 1.0.10 on NPU hosts, up from 0.9.44.** The pinned host `.deb` now comes from `ROCm/FastFlowLM`, where the project moved, with new SHA-256 pins for each distro build. FastFlowLM 1.0 drops ffmpeg and fftw and needs `libxrt2` 2.25 or newer. The matching `flm` runner image ships separately as a runner pin.

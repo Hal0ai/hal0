@@ -3,7 +3,7 @@ task 3).
 
 ``installer/wrappers/hal0-systemctl`` is the entire privileged surface a
 service-user ``hal0-api`` can reach for slot/systemd ops (see the module
-docstring at the top of the wrapper). ``hal0 update owui`` needs one more
+docstring at the top of the wrapper). ``hal0 update component openwebui`` needs one more
 root-only action to repin the *installed* OpenWebUI companion unit: rewrite
 every ``open-webui@sha256:…`` occurrence in
 ``/etc/systemd/system/hal0-openwebui.service`` to a new digest, then

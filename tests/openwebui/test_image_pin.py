@@ -1,7 +1,7 @@
 """Unit tests for the pure OpenWebUI image-pin helpers.
 
 These never touch the network, a subprocess, or a privileged path — they only
-exercise the text seam that ``hal0 update owui`` and the pin-consistency check
+exercise the text seam that ``hal0 update component openwebui`` and the pin-consistency check
 build on.
 """
 

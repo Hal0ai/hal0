@@ -1205,10 +1205,12 @@ def test_update_status_shows_a_hermes_override_with_both_shas(
     assert "--clear-override" in result.output
 
 
-# ── `hal0 update owui` (thin client rework; --tag GONE) ─────────────────────────
+# ── `hal0 update component openwebui --target` (thin client; `update owui` GONE) ─
 
 
-def test_update_owui_target_posts_normalized_digest(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_update_component_openwebui_target_posts_normalized_digest(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setattr(uc, "_api_unreachable", lambda url: False)
     monkeypatch.setattr(uc, "_interactive", lambda: False)
     posted: dict = {}
@@ -1230,15 +1232,38 @@ def test_update_owui_target_posts_normalized_digest(monkeypatch: pytest.MonkeyPa
     monkeypatch.setattr(uc, "api_get", fake_get)
     monkeypatch.setattr(uc, "api_post", fake_post)
     monkeypatch.setattr(uc, "_poll_job", fake_poll)
-    result = runner.invoke(app, ["update", "owui", "--target", digest_hex])
+    result = runner.invoke(app, ["update", "component", "openwebui", "--target", digest_hex])
     assert result.exit_code == 0, result.output
     assert posted["path"] == "/api/updates/components/openwebui/converge"
     assert posted["json"] == {"target": f"sha256:{digest_hex}"}
 
 
-def test_update_owui_tag_flag_no_longer_parses() -> None:
-    result = runner.invoke(app, ["update", "owui", "--tag", "x"])
-    assert result.exit_code == 2, result.output
+def test_update_component_openwebui_clear_override_posts_the_flag(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    posted = _wire_component_cli(monkeypatch, [_component_row(id="openwebui", status="override")])
+    result = runner.invoke(app, ["update", "component", "openwebui", "--clear-override", "--yes"])
+    assert result.exit_code == 0, result.output
+    assert posted["path"] == "/api/updates/components/openwebui/converge"
+    assert posted["json"] == {"clear_override": True}
+
+
+@pytest.mark.parametrize("bad", ["latest", "sha256:abc", "a" * 40])
+def test_update_component_openwebui_target_refuses_a_non_digest(
+    monkeypatch: pytest.MonkeyPatch, bad: str
+) -> None:
+    posted = _wire_component_cli(monkeypatch, [_component_row(id="openwebui")])
+    result = runner.invoke(app, ["update", "component", "openwebui", "--target", bad])
+    assert result.exit_code == 1 and "not a sha256 digest" in " ".join(result.output.split())
+    assert posted == {}
+
+
+def test_update_owui_is_gone() -> None:
+    """No alias: the old verb is an unknown command, and so is its `--tag`."""
+    for args in (["update", "owui"], ["update", "owui", "--target", "a" * 64]):
+        result = runner.invoke(app, args)
+        assert result.exit_code == 2, result.output
+        assert "owui" in result.output
 
 
 # ── post-apply restart policy for image drift (#2096) ─────────────────────────

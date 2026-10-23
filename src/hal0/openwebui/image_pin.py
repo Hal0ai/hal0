@@ -10,7 +10,7 @@ This module is the single place that knows how to read and rewrite that pin.
 It is deliberately pure — no network, no subprocess, no privileged writes — so
 it is trivially testable and can be reused by:
 
-* ``hal0 update owui`` (repin the *installed* unit on a running box), and
+* ``hal0 update component openwebui`` (repin the *installed* unit on a running box), and
 * ``scripts/check-owui-digest.sh`` / the pin-consistency test (assert the
   repo-source pin sites agree).
 
@@ -33,7 +33,7 @@ OPENWEBUI_GHCR_REPO = "open-webui/open-webui"
 #: Tag we resolve against when checking for a newer image. OWUI publishes the
 #: multi-arch container under ``:main`` (the tag its own docs recommend for the
 #: self-hosted container). No longer operator-overridable — the pin now rides
-#: hal0 releases; use ``hal0 update owui --target`` for an explicit digest
+#: hal0 releases; use ``hal0 update component openwebui --target`` for an explicit digest
 #: override instead.
 OPENWEBUI_DEFAULT_TAG = "main"
 

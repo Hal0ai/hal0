@@ -81,8 +81,7 @@ hal0 setup [--auto] [--storage-dir DIR] [--no-pull] [--no-extensions] [--no-slot
 hal0 update [--channel stable|preview|nightly] [--check] [--rollback]
             [--target VERSION] [--yes|-y] [--restart-slots|--no-restart-slots]
 hal0 update status
-hal0 update component <id> [--check] [--target SHA] [--clear-override] [--yes|-y]
-hal0 update owui [--check] [--target DIGEST] [--clear-override] [--yes|-y]
+hal0 update component <id> [--check] [--target REF] [--clear-override] [--yes|-y]
 ```
 
 | Flag | Meaning |
@@ -117,15 +116,13 @@ converging it. `<id>` is one of `openwebui`, `runner-images`, `hermes`,
 
 For `hermes`, `--target SHA` builds a vetted commit other than the pin (a full 40-hex commit in `VETTED_HERMES_REFS`; nothing older than the live release). It persists across `hal0 update` until `--clear-override`, and `hal0 update status` shows the row as `override`. The pin's own commit counts as `--clear-override`. Clearing is refused, keeping the override, when the pin is older than the live release; it cannot check an override this release no longer vets, so that case needs a newer pin. Repair rebuilds the override, not the pin; an unvetted override is never built.
 
-`hal0 update owui` converges the bundled OpenWebUI companion container to
-its release-carried pin — a thin alias for `hal0 update component
-openwebui`. There is no more independent `--tag` float-to-upstream flag:
-the pin now rides hal0 releases like every other component. `--target
-DIGEST` (`sha256:…` or bare 64-hex) pins an explicit digest override
-instead, which persists across future converges until cleared;
-`--clear-override` drops it and converges back to the release pin.
-`--check` prints the status row only; `--yes`/`-y` skips the confirmation
-prompt.
+For `openwebui`, `--target DIGEST` (`sha256:…` or bare 64-hex) pins an explicit
+digest instead of the release-carried one; it persists across future converges
+until `--clear-override` drops it and converges back to the release pin. There is
+no `--tag` float-to-upstream flag: the pin rides hal0 releases like every other
+component. `--yes`/`-y` skips the confirmation prompt that `--target` and
+`--clear-override` show on a terminal. `hal0 update owui` no longer exists; use
+`hal0 update component openwebui`.
 
 ## `hal0 slot` — manage inference slots
 

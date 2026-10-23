@@ -449,18 +449,18 @@ profiles.field_renamed`, `hal0 profile ... --mtp` exits 2); there is no alias.
 ## Repin the OpenWebUI companion container
 
 ```sh
-hal0 update owui --check
-hal0 update owui --yes
-hal0 update owui --target <digest> --yes
-hal0 update owui --clear-override --yes
+hal0 update component openwebui --check
+hal0 update component openwebui --yes
+hal0 update component openwebui --target <digest> --yes
+hal0 update component openwebui --clear-override --yes
 ```
 
-`hal0 update owui` is a thin alias for `hal0 update component openwebui`
-(see [Component updates](#component-updates) above) — it converges the
-bundled OpenWebUI container to whatever pin hal0 carries for it, the same
-as a plain `hal0 update` would. There is no independent `--tag`
-float-to-upstream flag any more; the pin rides hal0 releases like every
-other component.
+This is the same `hal0 update component <id>` every release-pinned component
+uses (see [Component updates](#component-updates) above). Plain, it converges
+the bundled OpenWebUI container to whatever pin hal0 carries for it, as a
+plain `hal0 update` would. There is no `--tag` float-to-upstream flag; the pin
+rides hal0 releases like every other component. `hal0 update owui` no longer
+exists.
 
 `--target <digest>` (`sha256:…` or bare 64-hex) pins an explicit digest
 override instead, for holding OWUI outside the release cadence. The
