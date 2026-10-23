@@ -551,10 +551,9 @@ export function usePersonaUpdate(agentId: string) {
   const qc = useQueryClient()
   return useMutation({
     // Contract: PUT /api/agents/{id}/personas/{pid} → 200 full persona detail
-    // TODO endpoints.ts (ui-sweep-b owns) — inline path for now
     mutationFn: ({ pid, body }: { pid: string; body: PersonaUpdateBody }) =>
       apiPut<unknown>(
-        `/api/agents/${encodeURIComponent(agentId)}/personas/${encodeURIComponent(pid)}`,
+        ENDPOINTS.agentPersona(agentId, pid),
         body as unknown as Record<string, unknown>,
       ),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['agents', 'personas', agentId] }),

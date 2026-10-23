@@ -113,7 +113,8 @@ function PersonaEditModal({ open, onClose, personaId }) {
   const personaUpdate = usePersonaUpdate(AGENT_ID);
 
   // Edits the persona named by `personaId`; without one, the active persona.
-  const personas = useAgentPersonas(personaId ? null : AGENT_ID);
+  // The list is only needed (and polled) for that fallback, while open.
+  const personas = useAgentPersonas(open && !personaId ? AGENT_ID : null);
   const pid = personaId || personas.data?.active || null;
   const personaQ = useAgentPersona(AGENT_ID, pid, { enabled: open && !!pid });
   const persona = personaQ.data;
@@ -144,6 +145,10 @@ function PersonaEditModal({ open, onClose, personaId }) {
     return patterns.length ? patterns : ["*"];
   };
 
+  // preferred_model is a /v1 model id, not a slot name: hal0/<slot> resolves
+  // to that slot (normalize/resolver.py), which is how the hal0-brain steward
+  // reads it (brain/chat.py). Empty falls back to its default.
+  //
   // Routes to the *live* configured slots (GET /api/slots), not the static
   // HAL0_DATA mock — the mock carried leftover dev-test slots (coder,
   // warming-demo) that leaked into this picker on the real dashboard.
@@ -166,7 +171,7 @@ function PersonaEditModal({ open, onClose, personaId }) {
       width={680}
       foot={
         <>
-          <span>Personas route to a chat slot and carry their own system prompt + tool set.</span>
+          <span>Saved to the persona file; Hermes applies prompt changes on its next reprovision.</span>
           <span style={{display: "inline-flex", gap: 8}}>
             <button className="btn ghost sm" onClick={onClose} disabled={personaUpdate.isPending}>Cancel</button>
             <button
@@ -218,11 +223,16 @@ function PersonaEditModal({ open, onClose, personaId }) {
             </div>
             <div className="form-ctl">
               <select className="input mono" value={slot} onChange={e => setSlot(e.target.value)}>
+                <option value="">— not set —</option>
                 {llmSlots.map(s => (
-                  <option key={s.name} value={s.name}>{s.name} · {s.model} · {s.device}</option>
+                  <option key={s.name} value={`hal0/${s.name}`}>{s.name} · {s.model} · {s.device}</option>
                 ))}
-                {!llmSlots.some(s => s.name === slot) && (
-                  <option value={slot}>{slot || "— not set —"}</option>
+                {/* A stored value that isn't a hal0/<llm slot> (a bare slot
+                    name from a hand-edited persona file, a retired slot)
+                    stays selectable rather than silently reading as the
+                    first option. */}
+                {slot && !llmSlots.some(s => `hal0/${s.name}` === slot) && (
+                  <option value={slot}>{slot}</option>
                 )}
               </select>
             </div>
@@ -261,7 +271,7 @@ function PersonaEditModal({ open, onClose, personaId }) {
                 placeholder="*"
                 style={{resize: "vertical", minHeight: 72}}
               />
-              <div className="hint">One pattern per line, matched against MCP tool names; <span className="mono">*</span> allows every tool.</div>
+              <div className="hint">One pattern per line, matched against MCP tool names; <span className="mono">*</span> allows every tool. Enforced by the hal0-brain steward; Hermes applies changes on its next reprovision.</div>
             </div>
           </div>
         </>
