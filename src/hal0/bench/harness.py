@@ -42,9 +42,10 @@ What ported, and where it changed shape:
   failure and never retries.
 * **``--exclusive`` GPU stop/restart** (``run_benchmarks.sh`` — stop every
   active ``hal0-slot@*`` unit except the NPU slot, sleep 3, restart on exit)
-  → :class:`ExclusiveSlots`, a context manager the caller wraps around ONE
-  Tier-A group's sweep (not per-attempt — one stop/restart serves every
-  retry AND the pp/tg sibling that reuses the same memoised sweep).
+  → :class:`ExclusiveSlots`, a context manager the session runner holds
+  across a run of consecutive Tier-A sweeps (not per sweep, not per attempt —
+  one stop/restart serves every retry, every pp/tg sibling and, per #2770,
+  every following sweep until a serving-tier cell or the session end).
 * **Result provenance** (the ``.meta.json`` sidecar ``cat`` heredoc) →
   built inside :func:`run_cell` with the exact v1 keys (``parsers.py``
   reads ``meta["image"]``). Three keys — ``context``, ``tag``, ``extra`` —
@@ -555,7 +556,19 @@ class ExclusiveSlots:
         self.restore_failures: list[str] = []
 
     def __enter__(self) -> ExclusiveSlots:
+        self.refresh()
+        return self
+
+    def refresh(self) -> None:
+        """Stop every slot that is active now and not already stopped by this
+        instance. ``__enter__`` calls it once; a caller holding the window
+        open across many sweeps calls it again, because a stopped slot can
+        come back mid-window (the dispatcher lazy-loads it on a request, or an
+        operator loads it) and would otherwise sit next to the benchmark."""
+        newly_stopped = False
         for slot_id in self._active_slot_ids():
+            if slot_id in self._stopped:
+                continue
             rc, _out, err = self._run(["sudo", "-n", SYSTEMCTL_SEAM, "stop", slot_id])
             if rc != 0:
                 # Best-effort restart of whatever we DID manage to stop before
@@ -565,9 +578,9 @@ class ExclusiveSlots:
                     f"[exclusive] could not stop hal0-slot@{slot_id}: {err.strip() or rc}"
                 )
             self._stopped.append(slot_id)
-        if self._stopped:
+            newly_stopped = True
+        if newly_stopped:
             time.sleep(3)
-        return self
 
     def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
         self._restore()

@@ -654,6 +654,40 @@ class TestSessionIntegration:
         assert self._verbs(calls, "stop") == ["2", "2"]
         assert self._verbs(calls, "start") == ["2", "2"]
 
+    def test_a_slot_that_returns_mid_session_is_stopped_again(self, sandbox, monkeypatch, tmp_path):
+        """A slot the dispatcher lazy-loads (or an operator loads) after the
+        window opened must be stopped before the next sweep and restored at
+        the end, not measured next to."""
+        calls_file = sandbox / "calls"
+        _install_fake_seam(sandbox, monkeypatch, calls_file)
+        calls = self._fake_slots(monkeypatch, active="hal0-slot@2.service")
+        listings = iter(["hal0-slot@2.service", "hal0-slot@2.service\nhal0-slot@9.service"])
+        base = harness._default_shell_runner
+
+        def fake(argv):
+            if argv[:2] == ["systemctl", "list-units"]:
+                calls.append(argv)
+                return 0, next(listings, "hal0-slot@9.service"), ""
+            return base(argv)
+
+        monkeypatch.setattr(harness, "_default_shell_runner", fake)
+
+        store = Store(tmp_path / "state")
+        cells = plan(_suite(["pp"], depths=range(1, 4)), _registry(), store)
+        result = runner.run_session(
+            cells,
+            store,
+            Host(hal0_version="1.0.0", exclusive=True),
+            suite_id="t",
+            api="http://x",
+            exclusive=True,
+        )
+
+        assert result.cells_ok == 3
+        assert self._verbs(calls, "stop") == ["2", "9"]
+        assert self._verbs(calls, "start") == ["2", "9"]
+        assert result.slot_errors == []
+
     def test_a_failed_stop_is_not_retried_every_sweep(self, sandbox, monkeypatch, tmp_path):
         """When the window cannot open, every later sweep records FAILED with
         the same reason instead of cycling the slots again."""

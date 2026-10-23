@@ -178,9 +178,14 @@ class _ExclusiveWindow:
     the first sweep that needs it and is released before any serving-tier
     cell (those measure THROUGH a live slot) and when the session ends.
 
-    A window that could not open stays failed for the rest of the session:
-    every later sweep records the same reason rather than cycling the slots
-    again, and never runs without exclusivity.
+    Each sweep re-checks the active slots: one that came back mid-window (a
+    lazy dispatcher load, an operator load) is stopped again and restored at
+    release, so no later sweep measures next to a live model.
+
+    A window that could not open stays failed until it is released (before a
+    serving-tier cell or at session end): every later sweep records the same
+    reason rather than cycling the slots again, and never runs without
+    exclusivity.
     """
 
     def __init__(self) -> None:
@@ -192,6 +197,11 @@ class _ExclusiveWindow:
         if self._open_error is not None:
             raise RuntimeError(self._open_error)
         if self._slots is not None:
+            try:
+                self._slots.refresh()
+            except RuntimeError as exc:
+                self._fail(exc)
+                raise
             return
         slots = harness.ExclusiveSlots()
         try:
@@ -202,7 +212,18 @@ class _ExclusiveWindow:
             raise
         self._slots = slots
 
+    def _fail(self, exc: RuntimeError) -> None:
+        """A refresh could not stop a newcomer; ``refresh`` already restored
+        everything it had stopped, so the window is closed and failed."""
+        assert self._slots is not None
+        self._open_error = str(exc)
+        self.slot_errors.extend(self._slots.restore_failures)
+        self._slots = None
+
     def release(self) -> None:
+        # A transient stop failure must not poison every later Tier-A cell:
+        # the next window (after a serving cell) gets a fresh attempt.
+        self._open_error = None
         if self._slots is None:
             return
         slots, self._slots = self._slots, None
@@ -543,8 +564,9 @@ def _tier_a_cmd(cell, pp_prompt: int, tg_gen: int, devices: BenchDeviceSpec) -> 
     """The exact ``sudo -n hal0-benchctl exec -- podman run …`` argv for a
     Tier-A group (Phase 2: composed here, not by a privileged sweep verb — see
     ``hal0.bench.harness``). Exclusivity no longer rides the argv at all: it is
-    a Python-side context manager (``harness.ExclusiveSlots``) the caller wraps
-    around the actual execution, so this function is pure command COMPOSITION
+    a Python-side context manager (``harness.ExclusiveSlots``, held by the session's
+    ``_ExclusiveWindow``) the caller opens
+    before the actual execution, so this function is pure command COMPOSITION
     (safe to call from ``describe_worklist`` with no slots touched).
 
     Raises ``KeyError`` for an unknown ``cell.lane`` — planner.plan() rejects

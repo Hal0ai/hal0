@@ -30,9 +30,10 @@ manually). Procedure encoded in SKILL.md:
 
 ## Commands
 
-Exclusivity is per-sweep: `hal0 bench run` on an `exclusive = true` suite stops
-and restarts the active GPU slots around each Tier-A sweep itself — there is no
-session-level quiesce verb.
+Exclusivity is per-window: `hal0 bench run` on an `exclusive = true` suite stops
+the active GPU slots once for a run of consecutive Tier-A sweeps and restarts
+them before a serving-tier cell and at session end — there is no session-level
+quiesce verb.
 
 ```bash
 # Run the autopilot pass
