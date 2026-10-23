@@ -198,6 +198,15 @@ def _env_reconcile_fields(
     return fields
 
 
+def _write_override(digest: str) -> None:
+    """Write the override marker atomically (tmp + rename)."""
+    path = override_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(digest + "\n", encoding="utf-8")
+    os.replace(tmp, path)
+
+
 def read_pin_override() -> str | None:
     try:
         value = override_path().read_text(encoding="utf-8").strip()
@@ -265,8 +274,7 @@ def converge_openwebui(
             # holds the box here instead of drifting back to the release
             # pin (spec §2: --target always writes the override marker).
             try:
-                override_path().parent.mkdir(parents=True, exist_ok=True)
-                override_path().write_text(target_digest + "\n", encoding="utf-8")
+                _write_override(target_digest)
             except OSError as exc:
                 log.warning(
                     "components.owui_override_persist_failed", job_id=job_id, error=str(exc)
@@ -344,8 +352,7 @@ def converge_openwebui(
     # ── Persist / render env / restart ──
     if target_digest is not None:
         try:
-            override_path().parent.mkdir(parents=True, exist_ok=True)
-            override_path().write_text(target_digest + "\n", encoding="utf-8")
+            _write_override(target_digest)
         except OSError as exc:
             log.warning("components.owui_override_persist_failed", job_id=job_id, error=str(exc))
 

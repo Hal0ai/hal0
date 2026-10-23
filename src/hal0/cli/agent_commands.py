@@ -323,7 +323,7 @@ def _install_pi() -> None:
     )
 
 
-def _upgrade_pi(to: str | None) -> None:
+def _upgrade_pi() -> None:
     """Foreground, CLI-local pi upgrade — the sibling of :func:`_install_pi`.
 
     Runs :meth:`PiDriver.upgrade` in-process for the same reason install does:
@@ -331,12 +331,8 @@ def _upgrade_pi(to: str | None) -> None:
     ``~/.pi``, neither of which the ``hal0`` system user can write. The driver
     refuses to run as a different user than the one that installed pi and
     raises :class:`AgentError` when pi is not installed; both surface here as
-    a plain error line. ``--to`` is Hermes-only (a vetted commit sha); pi has
-    one pinned release, so the option is refused rather than ignored.
+    a plain error line.
     """
-    if to is not None:
-        die("--to applies to hermes only; pi upgrades to the version hal0 pins.")
-        return
     if os.geteuid() != 0:
         die(
             "run as root (sudo hal0 agent upgrade pi) — pi upgrades the "
@@ -864,7 +860,6 @@ def _provision_hermes(
     offline: bool = False,
     verbose: bool = False,
     terminal_tool: bool | None = None,
-    ref: str | None = None,
 ) -> int:
     """Run the Hermes bootstrap pipeline, dropping to hal0 first when root (§7.4).
 
@@ -877,8 +872,6 @@ def _provision_hermes(
     existing rule). It travels as ``HAL0_HERMES_TERMINAL`` because the
     provisioning that consumes it runs in a re-exec'd, privilege-dropped child.
 
-    ``ref`` builds a vetted ref other than the pin (``hal0 agent upgrade
-    hermes --to``); it travels as the hidden ``--ref`` flag of the re-exec.
     ``offline`` travels as ``--offline``, which sets ``HAL0_HERMES_OFFLINE`` in
     the child, where the release builder reads it.
     """
@@ -907,7 +900,7 @@ def _provision_hermes(
         if offline:
             _os.environ["HAL0_HERMES_OFFLINE"] = "1"
         try:
-            rc = bootstrap_cli(repair=repair, verbose=verbose, ref=ref)
+            rc = bootstrap_cli(repair=repair, verbose=verbose)
         finally:
             if offline and previous_offline is None:
                 _os.environ.pop("HAL0_HERMES_OFFLINE", None)
@@ -925,8 +918,6 @@ def _provision_hermes(
             argv.append("--repair")
         if offline:
             argv.append("--offline")
-        if ref:
-            argv += ["--ref", ref]
         if verbose:
             argv.append("--verbose")
         # The parent owns the restart: the child reads the same report and
@@ -937,7 +928,7 @@ def _provision_hermes(
         return rc
     # A posture change only reaches the model once the process re-reads its
     # config. Done HERE rather than in _install_hermes so every provisioning
-    # entry point is covered — `reprovision`, `bootstrap` and `upgrade` all
+    # entry point is covered — `reprovision` and `bootstrap` both
     # land in this function and all now honour an explicit answer.
     # A gate THIS run wrote restarts the consumers even when a later phase
     # (smoke tests) failed the run: the mutation is on disk, and a live gateway
@@ -2070,10 +2061,6 @@ def bootstrap_hermes(
         ),
     ),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Verbose phase log."),
-    # Internal: `hal0 agent upgrade hermes --to=<sha>` re-execs this command as
-    # hal0 with the vetted ref it validated. Hidden, and validated again by the
-    # builder (VETTED_HERMES_REFS), so it is never a way around the freeze.
-    ref: str | None = typer.Option(None, "--ref", hidden=True),
 ) -> None:
     """Run the Hermes-Agent install — one linear convergent pass."""
     # Late import keeps the CLI startup snappy on hosts where the
@@ -2097,7 +2084,7 @@ def bootstrap_hermes(
         _os.environ["HAL0_HERMES_OFFLINE"] = "1"
     # §7.4: drops to hal0 first when invoked as root (re-execs this same command
     # as hal0), else runs the pipeline in-process. See _provision_hermes.
-    rc = _provision_hermes(repair=repair, offline=offline, verbose=verbose, ref=ref)
+    rc = _provision_hermes(repair=repair, offline=offline, verbose=verbose)
     if rc == 0:
         _reconcile_upstreams_best_effort()
     raise typer.Exit(rc)
@@ -2305,61 +2292,27 @@ def agent_dashboard_token(
 
 @app.command("upgrade")
 def agent_upgrade(
-    name: str = typer.Argument("hermes", help="Bundled agent name."),
-    to: str | None = typer.Option(
-        None,
-        "--to",
-        help=(
-            "Hermes only. Build a vetted commit other than the pin: a full 40-hex sha "
-            "listed in VETTED_HERMES_REFS. Lasts until the next `hal0 update`, which "
-            "converges back to the pin."
-        ),
-    ),
+    name: str = typer.Argument(..., help="Bundled agent name (pi)."),
 ) -> None:
-    """Build and activate a fresh Hermes release of the pin (or ``--to=<sha>``).
+    """Re-pin an installed pi: rerun its pinned installer and redeploy hal0's extensions.
 
-    Goes through the same release builder as install and ``hal0 update``
-    (ADR-0032 decision 6): a new release directory, ``hermes config migrate``
-    from the new release, a re-verify, and an automatic flip-back to the
-    previous release on failure. A version string or an ``==X.Y.Z`` spec is
-    refused. As root, provisioning drops to the hal0 user like every other
-    entry point.
-
-    ``pi`` instead re-pins pi, redeploys hal0's extensions into ``~/.pi`` and
-    re-stamps the install marker (:meth:`PiDriver.upgrade`); run it the same
-    way you installed pi (``sudo hal0 agent upgrade pi``). It refuses when pi's
-    profile is in a different home or pi is not installed. ``--to`` is refused
-    for pi.
+    Re-pins pi, redeploys hal0's extensions into ``~/.pi`` and re-stamps the
+    install marker (:meth:`PiDriver.upgrade`); run it the same way you
+    installed pi (``sudo hal0 agent upgrade pi``). It refuses when pi's
+    profile is in a different home or pi is not installed. Hermes updates with
+    ``hal0 update component hermes``.
     """
-    if name == "pi":
-        _upgrade_pi(to)
+    if name == "hermes":
+        die(
+            "Hermes updates with `hal0 update component hermes` "
+            "(`--target <sha>` for a vetted commit other than the pin); "
+            "`hal0 agent upgrade` re-pins pi only."
+        )
         return
-    if name != "hermes":
-        die(f"upgrade currently only supports `hermes` and `pi`; got {name!r}.")
+    if name != "pi":
+        die(f"upgrade currently only supports `pi`; got {name!r}.")
         return
-    from hal0.agents import hermes_release as hr
-
-    if to is not None:
-        try:
-            hr.require_vetted(to.strip())
-        except hr.ReleaseError as exc:
-            die(
-                f"--to: {exc}. Pass a full commit sha from VETTED_HERMES_REFS; "
-                "version strings and `==X.Y.Z` specs are no longer accepted."
-            )
-            return
-        to = to.strip()
-        try:
-            hr.refuse_downgrade(to, live=hr.live_ref())
-        except hr.ReleaseError as exc:
-            die(f"--to: {exc}.")
-            return
-    console.print(
-        f"[bold]Building a Hermes release[/bold] of {to[:12] if to else 'the pinned ref'} "
-        "(release layout, flip-back on failure)…"
-    )
-    rc = _provision_hermes(repair=True, ref=to)
-    raise typer.Exit(rc)
+    _upgrade_pi()
 
 
 # Note: there is no per-agent `rotate-token` subcommand here — agent

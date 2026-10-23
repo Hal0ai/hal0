@@ -5,8 +5,8 @@
 # it, checks the commit out of a hal0-owned git mirror, and installs it
 # editable into a uv-built Python 3.14 venv under /var/lib/hal0/hermes
 # (from the checkout's uv.lock when that lock serves 3.14). The commit must be
-# a full sha in VETTED_HERMES_REFS. `hal0 agent upgrade hermes --to=<sha>`
-# builds another vetted commit until the next `hal0 update`.
+# a full sha in VETTED_HERMES_REFS. `hal0 update component hermes --target <sha>`
+# builds another vetted commit and keeps it until `--clear-override`.
 #
 # Compatibility posture: pin the reviewed official v0.22.4 release commit
 # (4d043038; v0.22.2 d923a5eb before it, ADR-0034 decision 8) so provider, memory, and voice plugin

@@ -287,13 +287,14 @@ state directory, not a systemd journal. See
 from a slot's runtime logs.
 
 </TabItem>
-<TabItem label="Re-run / upgrade">
+<TabItem label="Re-run / update">
 
 ```sh
 hal0 agent reprovision hermes          # idempotent re-converge
 hal0 agent reprovision hermes --repair # force every phase, building a fresh release
-hal0 agent upgrade hermes              # build and activate a fresh release of the pin
-hal0 agent upgrade hermes --to <sha>   # build a vetted commit other than the pin
+hal0 update component hermes                       # build and activate a fresh release of the pin
+hal0 update component hermes --target <sha>        # build a vetted commit other than the pin; stays until cleared
+hal0 update component hermes --clear-override      # return to the pin
 ```
 
 `reprovision` is a stable wrapper over the same state machine `install`
@@ -310,10 +311,13 @@ runs `hermes config migrate` from the new release, starts the units again
 and re-checks them. If that re-check fails, hal0 switches back to the
 previous release and restores `config.yaml` by itself. A failed flip-back is reported as `activation_failed`. The plugin trees hal0 mirrors into `$HERMES_HOME/plugins/` are re-synced on `hal0 update` and on a repair whose build fails, so a stale plugin manifest does not survive an update.
 
-`upgrade --to` takes only a full commit sha listed in hal0's vetted refs.
-A version string such as `0.15.3` or an `==X.Y.Z` spec is refused. A ref
-other than the pin lasts until the next `hal0 update`, which builds the pin
-again. It also refuses a vetted commit older than the live release: once v0.22.4 is live, `--to d923a5eb487a17c0a68801bba9ef0f56c81040a8` (v0.22.2) fails as a downgrade, because v0.22.3 and later write gateway runtime state into Hermes's `state.db` that v0.22.2 cannot run over. The automatic flip-back after a failed activation is not affected.
+`hal0 update component hermes --target` takes only a full commit sha listed in
+hal0's vetted refs. A version string such as `0.15.3` or an `==X.Y.Z` spec is
+refused. The override persists across `hal0 update` until you run
+`hal0 update component hermes --clear-override`, and `hal0 update status` shows
+the row as overridden while it is set. If a later hal0 release no longer lists
+that commit as vetted, `hal0 update` refuses to keep or rebuild it and names
+`--clear-override`. The command also refuses a vetted commit older than the live release: once v0.22.4 is live, `--target d923a5eb487a17c0a68801bba9ef0f56c81040a8` (v0.22.2) fails as a downgrade, because v0.22.3 and later write gateway runtime state into Hermes's `state.db` that v0.22.2 cannot run over. The automatic flip-back after a failed activation is not affected.
 
 To watch each phase as it runs, or to re-run provisioning without the
 network, drop to the underlying command directly. With `--offline` it never
@@ -377,7 +381,7 @@ If you installed the pi coding agent with `sudo hal0 agent install pi`, re-pin i
 sudo hal0 agent upgrade pi
 ```
 
-Run it as root, the same way you installed pi. It reruns the pinned installer, redeploys hal0's two extensions and refreshes the hal0-memory MCP entry, and leaves the extensions you added under `~/.pi/agent/extensions` and your default provider, model and theme in `settings.json` alone. It refuses, and changes nothing, when pi is not installed, when pi's profile is in a different home than the one it runs in (run it as the user who installed pi), when `settings.json` or `mcp.json` is not a JSON object, or when `--to` is passed (`--to` is Hermes-only).
+Run it as root, the same way you installed pi. It reruns the pinned installer, redeploys hal0's two extensions and refreshes the hal0-memory MCP entry, and leaves the extensions you added under `~/.pi/agent/extensions` and your default provider, model and theme in `settings.json` alone. It refuses, and changes nothing, when pi is not installed, when pi's profile is in a different home than the one it runs in (run it as the user who installed pi), when `settings.json` or `mcp.json` is not a JSON object, and `--to` is not an option.
 
 A fresh `hal0 agent install pi` from a hal0 git checkout seeds a name-keyed `banks` alias in `~/.hindsight/coding-agent.json` (`coding-agent::hal0` to `coding-agent::hal0-mono`); `upgrade pi` adds that alias to an existing file that lacks it and leaves every other key alone. Other Hindsight-backed tools on the box read that file.
 

@@ -274,6 +274,15 @@ def test_uninstall_removes_env_file(driver: HermesDriver, tmp_hal0_home: str) ->
     assert not env_file.exists()
 
 
+def test_uninstall_clears_the_update_target_override(driver: HermesDriver) -> None:
+    from hal0.components.hermes_arm import override_path
+
+    override_path().parent.mkdir(parents=True, exist_ok=True)
+    override_path().write_text("d923a5eb487a17c0a68801bba9ef0f56c81040a8\n", encoding="utf-8")
+    driver.uninstall()
+    assert not override_path().exists()
+
+
 def test_uninstall_is_idempotent(driver: HermesDriver) -> None:
     """Calling uninstall when nothing's installed must not raise."""
     driver.uninstall()  # no env file yet — should be a no-op

@@ -144,9 +144,9 @@ and a converge refuse each other.
   advisory: it can name a dead holder); `500 agent.builder_lock_unreadable` when the lock
   file cannot be created or opened (`details.error`), a fault of the box that waiting will
   not clear, so not a 409. The lock check is a snapshot taken when the request arrives: a
-  root `hal0 agent upgrade hermes --to <sha>` that is still fetching its Python has not
+  `hal0 update component hermes --target <sha>` that is still fetching its Python has not
   taken the lock yet and reads as idle. A repair started then waits for that build and
-  rebuilds at the pin afterwards, so the `--to` release does not stay live.
+  rebuilds at the pin afterwards, so the `--target` release does not stay live.
 - **`api_restarted`.** The child shares hal0-api's cgroup, so restarting hal0-api mid-repair (a
   `hal0 update`, `systemctl restart hal0-api`) kills the build. The live release is unchanged,
   because the builder swaps `current` only at the very end. The next status read of the job

@@ -12,6 +12,7 @@ and the flip-back's config restore.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from collections.abc import Callable
 from pathlib import Path
@@ -30,6 +31,36 @@ Runner = Callable[..., subprocess.CompletedProcess]
 
 def stamp_path() -> Path:
     return var_lib() / "state" / "agents" / "hermes" / "venv.pin"
+
+
+def override_path() -> Path:
+    """Where ``--target`` persists a vetted commit (next to OpenWebUI's marker)."""
+    return var_lib() / "state" / "hermes.pin-override"
+
+
+def read_pin_override() -> str | None:
+    """The persisted override commit, or ``None`` (absent, unreadable or not a sha).
+
+    Not checked against ``VETTED_HERMES_REFS`` here: a later hal0 release can
+    drop a sha it once vetted, and the converge must see that to refuse it.
+    """
+    from hal0.agents import hermes_provision as hp
+
+    try:
+        value = override_path().read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    return value if hp._HERMES_SHA_RE.fullmatch(value) else None
+
+
+def unvetted_override_error(override: str) -> str:
+    return (
+        f"the Hermes override {override[:12]} is no longer in this hal0 release's "
+        "VETTED_HERMES_REFS, so hal0 will not keep or rebuild it"
+    )
+
+
+UNVETTED_OVERRIDE_REMEDY = "run 'hal0 update component hermes --clear-override'"
 
 
 def _provision_checkpoint_path() -> Path:
@@ -122,7 +153,7 @@ def hermes_build_trigger(venv: Path | None = None) -> str | None:
             and not rel.complete_releases(layout)
         ):
             return None
-        ref = rel.require_vetted(rel.read_pin().ref)
+        ref = rel.require_vetted(read_pin_override() or rel.read_pin().ref)
         return rel.build_trigger(layout, ref, rel.target_minor(ref), rel.configured_extras())
     except Exception:
         return None
@@ -267,6 +298,50 @@ def _refresh_provision_report(
         )
 
 
+def _settle_override(
+    result: dict[str, Any], target_ref: str | None, clear_override: bool, *, job_id: str | None
+) -> None:
+    """Record ``--target`` (atomically) or drop the marker, once the release is live.
+
+    Runs only after a converge that succeeded, so a failed build never leaves an
+    override behind and a refused ``--clear-override`` never loses one. A write or
+    unlink failure is reported in ``detail``: the operator must know the marker
+    is not what they asked for.
+    """
+    path = override_path()
+    try:
+        if target_ref is not None:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_name(path.name + ".tmp")
+            tmp.write_text(target_ref + "\n", encoding="utf-8")
+            os.replace(tmp, path)
+        elif clear_override:
+            path.unlink(missing_ok=True)
+    except OSError as exc:
+        log.warning("components.hermes_override_settle_failed", job_id=job_id, error=str(exc))
+        result["detail"] = [
+            *result.get("detail", []),
+            f"Hermes override marker {path} not updated: {exc}",
+        ]
+
+
+def override_build_ref() -> tuple[str | None, str | None]:
+    """``(ref, error)`` for builders that rebuild without choosing a ref.
+
+    ``ref`` is the vetted override to build instead of the pin, or ``None`` when
+    there is none. ``error`` is set when the marker names a commit this release
+    no longer vets: the caller must refuse, not build the pin over it.
+    """
+    override = read_pin_override()
+    if override is None:
+        return None, None
+    from hal0.agents.hermes_provision import VETTED_HERMES_REFS
+
+    if override not in VETTED_HERMES_REFS:
+        return None, f"{unvetted_override_error(override)}; {UNVETTED_OVERRIDE_REMEDY}"
+    return override, None
+
+
 def converge_hermes(
     *,
     job_id: str | None = None,
@@ -274,8 +349,16 @@ def converge_hermes(
     runner: Runner | None = None,
     venv: Path | None = None,
     is_hal0_user: Callable[[], bool] | None = None,
+    target_ref: str | None = None,
+    clear_override: bool = False,
 ) -> dict[str, Any]:
     """Converge the live Hermes release onto the pin through the release builder.
+
+    ``target_ref`` (``hal0 update component hermes --target``) builds a vetted
+    commit other than the pin and persists it to :func:`override_path` once it
+    is live; every later converge holds the box there (status ``override``)
+    until ``clear_override`` removes the marker. A marker whose commit a later
+    release no longer vets is refused, never built.
 
     ADR-0032 decision 6: builds on any trigger (pre-layout venv, live ref or
     interpreter differs from the pin). Never waits for the builder lock: a
@@ -307,10 +390,49 @@ def converge_hermes(
     pinned = hermes._hermes_version_pin()
     installed = installed_hermes_pin(venv)
     result: dict[str, Any] = {"installed": installed, "pinned": pinned}
+    marker = read_pin_override()
+    override = None if clear_override else marker
+    overridden = False
     try:
-        target = rel.require_vetted(rel.read_pin().ref)
+        pin_ref = rel.require_vetted(rel.read_pin().ref)
+        if target_ref is not None and target_ref.strip() == pin_ref:
+            # Pinning the release pin's own commit is the same as clearing: it
+            # must not hold the box off a later pin bump.
+            target_ref, clear_override, override = None, True, None
+        if clear_override and marker is not None:
+            try:
+                rel.refuse_downgrade(pin_ref, live=rel.live_ref(layout))
+            except rel.ReleaseError as exc:
+                raise rel.ReleaseError(
+                    "downgrade",
+                    f"--clear-override would return to the pin {pin_ref[:12]}, which is older "
+                    f"than the live release, so it is refused and the override is kept: {exc}. "
+                    "Wait for a hal0 release whose pin is at least the live release",
+                ) from exc
+        if target_ref is not None:
+            target = rel.require_vetted(target_ref)
+            rel.refuse_downgrade(target, live=rel.live_ref(layout))
+            overridden = True
+        elif override is not None:
+            if override not in hermes.VETTED_HERMES_REFS:
+                log.warning(
+                    "components.hermes_override_unvetted", job_id=job_id, override=override[:12]
+                )
+                return {
+                    **result,
+                    "override": override,
+                    "status": "build_failed",
+                    "error": unvetted_override_error(override),
+                    "remedy": UNVETTED_OVERRIDE_REMEDY,
+                }
+            target, overridden = override, True
+        else:
+            target = pin_ref
     except rel.ReleaseError as exc:
         return {**result, "status": "build_failed", "error": str(exc)}
+    if overridden:
+        result["override"] = target
+    settled = "override" if overridden else "converged"
     try:
         minor = rel.target_minor(target)
     except rel.ReleaseError as exc:
@@ -323,7 +445,8 @@ def converge_hermes(
             _config_backstop(result, job_id=job_id)
             _heal_gateway_unit(result, layout=layout, job_id=job_id)
             _refresh_provision_report(layout=layout, release_id=None, changed=False, job_id=job_id)
-        return {**result, "status": "converged"}
+            _settle_override(result, target_ref, clear_override, job_id=job_id)
+        return {**result, "status": settled}
     result["trigger"] = trigger
     if not apply:
         log.warning(
@@ -342,6 +465,7 @@ def converge_hermes(
         wait=False,
         platform_extras=platform_extras,
         units=rel.SystemdUnits(run=runner, use_seam=is_hal0_user()),
+        ref=target,
     )
     if outcome.status == "busy":
         holder = outcome.holder or {}
@@ -368,7 +492,8 @@ def converge_hermes(
         _refresh_provision_report(
             layout=layout, release_id=outcome.release_id, changed=False, job_id=job_id
         )
-        return {**result, "status": "converged"}
+        _settle_override(result, target_ref, clear_override, job_id=job_id)
+        return {**result, "status": settled}
 
     log.info(
         "components.hermes_upgraded",
@@ -382,11 +507,12 @@ def converge_hermes(
         **result,
         "status": "upgraded",
         "from": installed,
-        "to": pinned,
+        "to": target[:12] if overridden else pinned,
         "release": outcome.release_id,
     }
     if outcome.warnings:
         out["detail"] = list(outcome.warnings)
+    _settle_override(out, target_ref, clear_override, job_id=job_id)
     _heal_gateway_unit(out, layout=layout, job_id=job_id)
     _refresh_provision_report(
         layout=layout, release_id=outcome.release_id, changed=True, job_id=job_id

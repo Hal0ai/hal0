@@ -81,7 +81,7 @@ hal0 setup [--auto] [--storage-dir DIR] [--no-pull] [--no-extensions] [--no-slot
 hal0 update [--channel stable|preview|nightly] [--check] [--rollback]
             [--target VERSION] [--yes|-y] [--restart-slots|--no-restart-slots]
 hal0 update status
-hal0 update component <id> [--check]
+hal0 update component <id> [--check] [--target SHA] [--clear-override] [--yes|-y]
 hal0 update owui [--check] [--target DIGEST] [--clear-override] [--yes|-y]
 ```
 
@@ -114,6 +114,8 @@ per-component alternative to a full `hal0 update` for retrying just the
 piece that's stuck. `--check` prints that component's status row without
 converging it. `<id>` is one of `openwebui`, `runner-images`, `hermes`,
 `hindsight` (see `hal0 update status` for the live list).
+
+For `hermes`, `--target SHA` builds a vetted commit other than the release pin: a full 40-hex commit listed in `VETTED_HERMES_REFS` (versions, tags and unlisted commits are refused, and so is a commit older than the live release). The override persists across every later `hal0 update` until `--clear-override` drops it and converges back to the pin; `hal0 update status` shows the row as `override` with the override commit beside the pin, and the converge counts a live release that matches the override as converged. `--target` with the release pin's own commit is the same as `--clear-override`, so it does not hold the box off a later pin bump. `--clear-override` is refused (the override is kept) when the pin is older than the live release, since returning to it would be a downgrade; the override is removed only after the converge back to the pin succeeds. `reprovision --repair` and the MCP-client auto-repair rebuild the override commit, not the pin. If a later hal0 release no longer vets the override commit, `hal0 update` warns, refuses to keep or rebuild it, and names `--clear-override`.
 
 `hal0 update owui` converges the bundled OpenWebUI companion container to
 its release-carried pin — a thin alias for `hal0 update component
@@ -329,7 +331,7 @@ config with `auth_style = "google_query"` still loads: it's coerced to `bearer` 
 | `agent status [name]` | optional `name` (default `hermes`) | `--json` |
 | `agent log [name]` | optional `name` (default `hermes`) | `--phase` |
 | `agent dashboard-token [name]` | optional `name` (default `hermes`) | — |
-| `agent upgrade [name]` | optional `name` (`hermes` or `pi`; default `hermes`) | `--to <sha>` (Hermes only; a full 40-hex commit in `VETTED_HERMES_REFS`; versions and `==X.Y.Z` are refused) |
+| `agent upgrade <name>` | `name` (`pi`; Hermes updates with `hal0 update component hermes`) | — |
 | `agent reprovision [name]` | optional `name` (default `hermes`) | `--repair`, `--verbose`/`-v` |
 | `agent command-approvals [mode]` | optional `mode` (`smart` or `manual`); omit to show the setting | `--json` |
 | `agent approvals list` | — | — |
@@ -340,13 +342,13 @@ config with `auth_style = "google_query"` still loads: it's coerced to `bearer` 
 | `agent personas show <persona_id>` | `persona_id` | — |
 | `agent personas activate <persona_id>` | `persona_id` | `--reload-url` |
 
-`agent upgrade hermes` builds and activates a fresh Hermes release of the pin, or of `--to <sha>`, through the same release builder as install and `hal0 update`, and switches back to the previous release by itself if the new one fails its re-check. A ref other than the pin lasts until the next `hal0 update`.
+`hal0 update component hermes` builds and activates a fresh Hermes release of the pin, or of `--target <sha>`, through the same release builder as install and `hal0 update`, and switches back to the previous release by itself if the new one fails its re-check. A `--target` commit persists across `hal0 update` until `--clear-override`.
 
-hal0 pins Hermes v0.22.4 (`4d04303818b61bf3aa09278af48356315515965b`). `--to` is refused when the ref is older than the live release: once v0.22.4 is live, `--to d923a5eb487a17c0a68801bba9ef0f56c81040a8` (v0.22.2) fails with a `downgrade` error, because v0.22.3 and later write gateway runtime state into `state.db` that v0.22.2 cannot run over. The automatic flip-back after a failed activation is not a build and is unaffected.
+hal0 pins Hermes v0.22.4 (`4d04303818b61bf3aa09278af48356315515965b`). `--target` is refused when the ref is older than the live release: once v0.22.4 is live, `--target d923a5eb487a17c0a68801bba9ef0f56c81040a8` (v0.22.2) fails with a `downgrade` error, because v0.22.3 and later write gateway runtime state into `state.db` that v0.22.2 cannot run over. The automatic flip-back after a failed activation is not a build and is unaffected.
 
 `agent upgrade pi` re-pins an installed pi and redeploys hal0's extensions into `~/.pi` without touching the extensions you added or your default provider, model and theme. Run it the same way you installed pi (`sudo hal0 agent upgrade pi`); it refuses when pi's profile is in a different home or pi is not installed. It also adds a name-keyed Hindsight bank alias (`coding-agent::hal0` to `coding-agent::hal0-mono`) to an existing `~/.hindsight/coding-agent.json` that lacks it, and prints a line when it does. That file is shared: other Hindsight-backed tools on the box read it too. A fresh `agent install pi` from a git checkout seeds the same alias instead of a path mapping.
 
-`agent reprovision hermes --repair` forces every provisioning phase, builds a fresh Hermes release through the same builder as `upgrade`, rewrites the persona seeds and `config.yaml`, then re-registers the Hermes profiles as `/v1` upstreams. Run `sudo hal0 agent reprovision hermes --repair` once on a box where Hermes was installed before 1.6.0 so the default profile gets its API key and appears in `/v1/models` and Open WebUI. The same run wires hal0-admin and hal0-memory into every named profile (phase `profile_mcp_wire`) and writes any missing profile API key (phase `profile_api_keys`).
+`agent reprovision hermes --repair` forces every provisioning phase, builds a fresh Hermes release through the same builder as `hal0 update component hermes`, rewrites the persona seeds and `config.yaml`, then re-registers the Hermes profiles as `/v1` upstreams. Run `sudo hal0 agent reprovision hermes --repair` once on a box where Hermes was installed before 1.6.0 so the default profile gets its API key and appears in `/v1/models` and Open WebUI. The same run wires hal0-admin and hal0-memory into every named profile (phase `profile_mcp_wire`) and writes any missing profile API key (phase `profile_api_keys`).
 
 `agent dashboard-token hermes` prints the token Hermes Desktop needs for a remote pairing in token mode. `hal0-agent@hermes` mints it once under `/var/lib/hal0/state/agents/hermes/` and exports it to the dashboard as `HERMES_DASHBOARD_SESSION_TOKEN` at every start, so the pairing survives restarts and `hal0 update`. Run it as root or as the `hal0` user. A `systemctl edit hal0-agent@hermes` drop-in that sets `HERMES_DASHBOARD_SESSION_TOKEN` wins over the file.
 

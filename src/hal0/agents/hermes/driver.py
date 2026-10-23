@@ -305,6 +305,12 @@ class HermesDriver(AgentDriver):
         if env_file.exists():
             env_file.unlink()
 
+        # A `hal0 update component hermes --target` override belongs to this
+        # install: a fresh install must not rebuild an old one (#2865).
+        from hal0.components.hermes_arm import override_path
+
+        override_path().unlink(missing_ok=True)
+
     def status(self) -> str:
         """Return ``"installed"`` when Hermes is running/reachable, ``"broken"`` otherwise.
 

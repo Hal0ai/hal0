@@ -229,7 +229,7 @@ from zero.
 
 - **Hermes v0.22.4 on Python 3.14.** The bundled agent moves from 0.19.0 to
   v0.22.4 (`4d043038`). Every build (install, `reprovision --repair`,
-  `upgrade`, update) produces an immutable release under
+  update) produces an immutable release under
   `/var/lib/hal0/hermes/releases/`, health-checked before the `current`
   symlink flips, with a flip-back to `previous` if the re-check fails.
   See [Hermes, the bundled agent](#hermes-the-bundled-agent).
@@ -504,9 +504,9 @@ inference, tools and memory. `hal0 agent install hermes` installs it.
   switches, migrates the Hermes config and restarts; a failed re-check flips
   back to `previous` with `config.yaml` restored. Sessions are kept
   (`sessions.auto_prune: false`).
-- **Upgrades are vetted commits.** `hal0 agent upgrade hermes --to <40-hex
-  sha>` accepts only a commit listed in `VETTED_HERMES_REFS`; version strings
-  are refused.
+- **Updates are vetted commits.** `hal0 update component hermes --target
+  <40-hex sha>` accepts only a commit listed in `VETTED_HERMES_REFS`; version
+  strings are refused. The override stays until `--clear-override`.
 - **Profiles show up in Open WebUI.** hal0 registers one pinned, read-only
   upstream per profile that has an API key: `hermes` for the default profile
   and `hermes.<profile>` for the rest. `/v1/models` lists `hermes-agent` plus
@@ -931,7 +931,7 @@ later. Four things to know before you take it:
 - **Rolling back to 1.5.x leaves the Hermes build failing** (`Hermes Python
   must be exactly 3.12`) until you update forward again. Do not edit
   `/etc/hal0/hermes-python.env` to 3.12 on 1.5.x.
-- **Profile chat needs the gateway.** With Hermes v0.22.4 a chat opened for a non-default profile (such as `hal0-brain`) in Hermes's dashboard, and the `hermes chat` CLI, attach to `hermes-gateway.service` and report `gateway inaccessible` while it is stopped. Run `sudo systemctl enable --now hermes-gateway`. Once v0.22.4 is live, `hal0 agent upgrade hermes --to d923a5eb...` is refused as a downgrade.
+- **Profile chat needs the gateway.** With Hermes v0.22.4 a chat opened for a non-default profile (such as `hal0-brain`) in Hermes's dashboard, and the `hermes chat` CLI, attach to `hermes-gateway.service` and report `gateway inaccessible` while it is stopped. Run `sudo systemctl enable --now hermes-gateway`. Once v0.22.4 is live, `hal0 update component hermes --target d923a5eb...` is refused as a downgrade.
 
 The agent chat proxy is gone: `/api/agents/{id}/events`, `/submit` and
 `/session/*` return 404.

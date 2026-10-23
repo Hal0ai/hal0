@@ -1072,7 +1072,12 @@ async def _run_component_job(
         job["state"] = "failed"
         job["error"] = str(exc)
     else:
-        if component_id == "hermes" and result.get("status") in {"converged", "stale", "upgraded"}:
+        if component_id == "hermes" and result.get("status") in {
+            "converged",
+            "stale",
+            "upgraded",
+            "override",
+        }:
             try:
                 from hal0.agents.hermes_upstreams import sync_hermes_upstreams
 
@@ -1141,6 +1146,20 @@ async def converge_component_route(component_id: str, request: Request) -> dict[
             if normalized is None:
                 raise BadRequest("target must be a sha256 digest", details={"target": target})
             arm_kwargs["target_digest"] = normalized
+        if body.get("clear_override") is True:
+            arm_kwargs["clear_override"] = True
+    elif component_id == "hermes" and isinstance(body, dict):
+        target = body.get("target")
+        if isinstance(target, str):
+            from hal0.agents import hermes_release as rel
+
+            try:
+                arm_kwargs["target_ref"] = rel.require_vetted(target.strip())
+            except rel.ReleaseError as exc:
+                raise BadRequest(
+                    f"target: {exc}. Pass a full commit sha from VETTED_HERMES_REFS",
+                    details={"target": target},
+                ) from exc
         if body.get("clear_override") is True:
             arm_kwargs["clear_override"] = True
 
