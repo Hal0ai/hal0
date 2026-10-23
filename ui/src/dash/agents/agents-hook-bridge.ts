@@ -29,6 +29,7 @@ import { useComponentConverge } from '@/api/hooks/useComponents'
 import { useConfigUrls } from '@/api/hooks/useConfigUrls'
 import { useSlots } from '@/api/hooks/useSlots'
 import { useUpdateJob } from '@/api/hooks/useUpdates'
+import { deriveCardModel } from './agent-phase'
 
 // Bundled card art. Imported (not referenced from /public) so Vite fingerprints
 // them and they survive any base-path mount.
@@ -59,6 +60,8 @@ Object.assign(window, {
   __hal0UseConfigUrls: useConfigUrls,
   __hal0UseCapabilities: useCapabilities,
   __hal0UseAgentApprovalsCount: useAgentApprovalsCount,
+  // Pure (no hook): the cards call it each render with the hooks' data.
+  __hal0DeriveCardModel: deriveCardModel,
 })
 
 ;(
