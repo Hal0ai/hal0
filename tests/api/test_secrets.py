@@ -188,3 +188,85 @@ def test_hf_token_secret_roundtrip(client: TestClient) -> None:
     r = client.delete("/api/secrets/HF_TOKEN")
     assert r.status_code == 204
     assert os.environ.get("HF_TOKEN") is None
+
+
+_PROCESS_CONTROL_NAMES = [
+    "LD_PRELOAD",
+    "LD_LIBRARY_PATH",
+    "DYLD_INSERT_LIBRARIES",
+    "PYTHONPATH",
+    "PYTHONSTARTUP",
+    "PYTHONHOME",
+    "PATH",
+    "HOME",
+    "SHELL",
+    "IFS",
+    "ENV",
+    "BASH_ENV",
+    "NODE_OPTIONS",
+    "PERL5OPT",
+    "RUBYOPT",
+    "GCONV_PATH",
+    "UV_INDEX_URL",
+    "PIP_INDEX_URL",
+    "GIT_SSH_COMMAND",
+]
+
+
+@pytest.mark.parametrize("name", _PROCESS_CONTROL_NAMES)
+@pytest.mark.parametrize("method", ["post", "put"])
+def test_set_refuses_process_control_names(
+    client: TestClient, tmp_hal0_home: str, name: str, method: str
+) -> None:
+    """#2936: a loader/interpreter variable is refused before api.env or os.environ changes."""
+    api_env = _api_env_path(tmp_hal0_home)
+    before = api_env.read_bytes() if api_env.exists() else None
+    live_before = os.environ.get(name)
+
+    r = getattr(client, method)(f"/api/secrets/{name}", json={"value": "/tmp/evil.so"})
+
+    assert r.status_code == 403, r.text
+    err = r.json()["error"]
+    assert err["code"] == "secret.protected"
+    assert err["details"]["reason"] == "process_control"
+    assert "/tmp/evil.so" not in r.text
+    after = api_env.read_bytes() if api_env.exists() else None
+    assert after == before
+    assert os.environ.get(name) == live_before
+
+
+def test_delete_still_removes_a_planted_process_control_name(
+    client: TestClient, tmp_hal0_home: str
+) -> None:
+    """An LD_PRELOAD written before #2936 can still be removed from the panel."""
+    api_env = _api_env_path(tmp_hal0_home)
+    api_env.parent.mkdir(parents=True, exist_ok=True)
+    api_env.write_text('LD_PRELOAD="/tmp/evil.so"\nHF_TOKEN="hf_x"\n', encoding="utf-8")
+
+    r = client.delete("/api/secrets/LD_PRELOAD")
+
+    assert r.status_code == 204, r.text
+    content = api_env.read_text(encoding="utf-8")
+    assert "LD_PRELOAD" not in content
+    assert 'HF_TOKEN="hf_x"' in content
+
+
+@pytest.mark.parametrize(
+    "name", ["OPENROUTER_API_KEY", "GITHUB_TOKEN", "PATHFINDER_KEY", "HOMEASSISTANT_TOKEN"]
+)
+def test_ordinary_credentials_still_accepted(client: TestClient, name: str) -> None:
+    """The deny-list is exact names and prefixes, not substrings."""
+    r = client.put(f"/api/secrets/{name}", json={"value": "tok"})
+    assert r.status_code == 204, r.text
+    assert os.environ.get(name) == "tok"
+
+
+@pytest.mark.parametrize("name", ["LD_PRELOAD", "PYTHONPATH", "PATH", "ld_preload"])
+def test_writer_guard_rejects_process_control_keys(tmp_path: Path, name: str) -> None:
+    """Defense in depth: the shared api.env writer refuses them for every caller."""
+    from hal0.api._env_store import upsert_env_value
+
+    target = tmp_path / "api.env"
+    with pytest.raises(ValueError, match="controls how processes run"):
+        upsert_env_value(target, name, "x")
+    assert not target.exists()

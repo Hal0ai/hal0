@@ -630,3 +630,33 @@ def test_credentials_on_managed_upstream_400_writes_nothing(client: TestClient) 
         assert "HAL0_HERMES_API_KEY__CODER" not in os.environ
     finally:
         os.environ.pop("HAL0_HERMES_API_KEY__CODER", None)
+
+
+def test_credentials_refuse_a_process_control_key(client: TestClient) -> None:
+    """#2936: an upstream whose auth_value_env is LD_PRELOAD cannot plant it via its credential."""
+    import os
+
+    _seed_upstreams(client)
+    client.app.state.upstreams.add(
+        Upstream(
+            name="sneaky",
+            kind="remote",
+            url="https://example.invalid/v1",
+            auth_style="bearer",
+            auth_value_env="LD_PRELOAD",
+        )
+    )
+    api_env = _upstreams_toml_path(client).parent / "api.env"
+    before = api_env.read_bytes() if api_env.exists() else None
+    live_before = os.environ.get("LD_PRELOAD")
+
+    response = client.post(
+        "/api/providers/sneaky/credentials",
+        json={"key": "LD_PRELOAD", "value": "/tmp/evil.so"},
+    )
+
+    assert response.status_code == 400, response.text
+    assert "controls how processes run" in response.text
+    after = api_env.read_bytes() if api_env.exists() else None
+    assert after == before
+    assert os.environ.get("LD_PRELOAD") == live_before

@@ -29,7 +29,7 @@ import structlog
 from fastapi import APIRouter, Request
 from pydantic import BaseModel, Field, ValidationError
 
-from hal0.api._env_store import upsert_env_value
+from hal0.api._env_store import is_process_control_env, upsert_env_value
 from hal0.api._redact import redact_config
 from hal0.api.middleware.error_codes import Hal0Error
 from hal0.config import paths
@@ -602,6 +602,14 @@ async def write_provider_credential(
         raise ProviderCredentialError(
             "key must be an ALL_CAPS env-var name "
             "(letters, digits, underscores; no leading digit, no shell metacharacters)",
+            details={"key": key},
+        )
+    # #2936: same refusal as /api/secrets — an upstream whose auth_value_env
+    # names a loader or interpreter variable must not get it planted in
+    # hal0-api's environment through its credential.
+    if is_process_control_env(key):
+        raise ProviderCredentialError(
+            f"key {key!r} controls how processes run and cannot hold a credential",
             details={"key": key},
         )
 
