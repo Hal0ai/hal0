@@ -110,12 +110,12 @@ silently paper over.
 | `/api/memory` | ADMIN | Two routers share this prefix: the `[memory.graph]` gate/status, and the Hindsight engine admin surface (banks, graph, recall/reflect, mental models, directives, async operations). Every `DELETE` under this prefix is pinned ADMIN by an explicit rule independent of the generic one (issues #1024/#1302 — a prior unauthenticated bank-delete cascade-dropped ~632 live records); bank-scoped deletes additionally require a `?confirm=` echo + dry-run preview. |
 | `/api/board` | ADMIN | Operator Board — task/board CRUD, links, dispatch, and `WS /api/board/events`. Frozen FE↔BE contract (`ui/CONTRACTS.md` §4). |
 | `/api/brain` | ADMIN | `POST /api/brain/chat` (SSE) — the primary hal0-brain platform-steward chat surface. Drives the full admin tool surface (slot mutations, model pulls, board writes), hence ADMIN. |
-| `/api/updates` | ADMIN | Self-update: release-manifest check, prepare/commit/apply/rollback, channel get/set, post-update slot-drift report + restart. A commit job's `convergence.post_activation_migrations` carries `conversion_blockers` (target, reason) for anything the profile-centric conversion left unconverted; rollback to a release before the conversion restores the conversion backups first and reports them as `profile_conversion_restored`. |
+| `/api/updates` | ADMIN | Self-update: release-manifest check, prepare/commit/apply/rollback, channel get/set, post-update slot-drift report + restart. A commit job's `convergence.post_activation_migrations` carries `conversion_blockers` (target, reason) for anything the profile-centric conversion left unconverted; rollback to a release before the conversion restores the conversion backups first and reports them as `profile_conversion_restored`. Job state is also kept under `/var/lib/hal0/update-jobs/`: a job read back from there after a hal0-api restart that is still `queued` or `running` was killed with the old process and reads `failed` with `error_code: "api_restarted"`; a finished job reads as it was. |
 | `/api/events` | ADMIN | Dashboard footer event feed — backfill + `GET /api/events/stream` (SSE). See the auth-tier note above. |
 | `/api/activity` | ADMIN | Durable audit surface (SQLite-backed) — the slots-page ActivityLog's source of truth, with `/export` (csv/json) and `/stream` (SSE). See the auth-tier note above. |
 | `/api/journal` | ADMIN | Unified journal panel — flattens `/api/events` into one envelope for the dashboard journal view. See the auth-tier note above. |
 | `/api/images` | ADMIN | Cache for PNGs written by `POST /v1/images/generations`. ADMIN because a cached-image URL could otherwise leak a prompt via filename. |
-| `/api/agents` | ADMIN | Bundled-agent lifecycle (install/uninstall/list/status), personas, service restart, memory stats, and Hermes command approvals (`GET`/`PUT /api/agents/hermes/command-approvals`). The command-approvals `PUT` also refuses a request whose `X-hal0-Agent` header names an agent. `POST /api/agents/hermes/reconcile-upstreams` re-registers the Hermes profiles as upstreams on demand (it runs the profile API-key sweep first) and returns `{ok: true, ...report}`; 404 `agent.not_installed` when Hermes is not installed. hal0-api also reconciles every 120 s and after an agent install or uninstall. The agent chat proxy is gone: `/api/agents/{id}/events`, `/submit` and `/session/handshake\|create\|resume\|history` return 404. `GET /api/agents/{name}/overview` is the state behind the Hermes and Pi cards (see Agent overview below). |
+| `/api/agents` | ADMIN | Bundled-agent lifecycle (install/uninstall/list/status), personas, service restart, Hermes gateway restart and Hermes repair (see Agent restart and repair below), memory stats, and Hermes command approvals (`GET`/`PUT /api/agents/hermes/command-approvals`). The command-approvals `PUT` also refuses a request whose `X-hal0-Agent` header names an agent. `POST /api/agents/hermes/reconcile-upstreams` re-registers the Hermes profiles as upstreams on demand (it runs the profile API-key sweep first) and returns `{ok: true, ...report}`; 404 `agent.not_installed` when Hermes is not installed. hal0-api also reconciles every 120 s and after an agent install or uninstall. The agent chat proxy is gone: `/api/agents/{id}/events`, `/submit` and `/session/handshake\|create\|resume\|history` return 404. `GET /api/agents/{name}/overview` is the state behind the Hermes and Pi cards (see Agent overview below). |
 | `/api/agent/approvals` | ADMIN | Gated-tool approval inbox — every method (GET list, POST approve/deny, GET `/events` SSE) is ADMIN; `exposure.py`'s rule on this prefix carries no method filter, and the route module itself (`approvals.py`) declares no `Depends` — enforcement is entirely middleware-side. |
 | `/api/user` | ADMIN | Dashboard layout persistence (single-operator LAN device — one layout file per install). |
 | `/api/config` | Mixed | `GET /api/config/urls` (dashboard bootstrap hostnames) is OPEN; the rest of this prefix is ADMIN (may hold config-derived secrets). |
@@ -182,6 +182,45 @@ Pi (`kind: "cli"`):
 | `memory` | `mcp_entry` and `hindsight_config` (from `profile.checks`), and `hindsight_api_reachable`. |
 | `commands` | `install`, `upgrade` and `uninstall` commands to run as root. |
 | `phase` | `installed` or `broken`. |
+
+## Agent restart and repair
+
+ADMIN-gated with the rest of `/api/agents`, no request body, `hermes` only (any other agent
+is `404 agent.unknown`). Each action logs to `hal0.agents.audit` with `actor` (the
+`X-hal0-Agent` header, `hal0-dashboard` when absent).
+
+| Method | Path | Status | Notes |
+|---|---|---|---|
+| POST | `/api/agents/hermes/restart` | 200 | Restarts `hal0-agent@hermes.service` through the `hal0-systemctl` sudo wrapper, as the Services page does: hal0-api runs as the unprivileged `hal0` user, and a bare `systemctl restart` is denied by polkit. The command-approvals `PUT` restart takes the same path. Returns `{agent_id, unit, status: "restarted", detail}` once the verb exits 0. A failed verb is `500 agent.restart_failed` (the failure line, cut to 200 characters, in `message`); one still running after 90 s is `500 agent.restart_timeout`, outcome unknown. Events: `agent.restart.invoked`, then `.ok`, `.failed` or `.timeout`. |
+| POST | `/api/agents/hermes/gateway/restart` | 200 | The same for `hermes-gateway.service`, with the same body (`unit` is the gateway's), errors and budget; `404 agent.not_installed` when Hermes has no install record. Events: `agent.gateway_restart.invoked`, then `.finished` (`status` is `restarted` or `error`). |
+| POST | `/api/agents/hermes/repair` | 202 | Queues a repair job (below). |
+
+A restart that went through drops the agent's cached overview.
+
+### Repair job
+
+`POST /api/agents/hermes/repair` runs `hal0 agent bootstrap hermes --repair --verbose` (the
+code path of `hal0 agent reprovision hermes --repair`) as a child of hal0-api and returns the
+queued job: `id`, `state: "queued"`, `phase: "repair:hermes"`, `kind`, `agent`, `steps: []`,
+`log_path`, `created_at`, `updated_at`. The job is in the updater's registry, so
+`GET /api/updates/status/{id}` serves it, and a repair and a converge refuse each other.
+
+- `state` goes `queued`, `running`, then `applied` (exit 0) or `failed`. A running job has
+  `pid` and `steps`, one entry per `[run ] <step>` line the provisioner prints. A finished one
+  has `exit_code`; a failed one has `error`: `bootstrap exited <code>`, `could not start
+  bootstrap: <os error>` or, after 45 minutes, `bootstrap timed out after 2700s`.
+- The output goes to `log_path`,
+  `/var/lib/hal0/state/agents/hermes/provision-logs/job-<id>.log` (`null` if it could not be
+  opened; never pruned). Events: `agent.repair.invoked`, `agent.repair.finished`.
+- Refused, with no job: `404 agent.not_installed` without a Hermes install record;
+  `409 agent.busy` when an update, converge or repair job is `queued` or `running`
+  (`details.job_id`) or another process holds the Hermes builder lock (`details.holder`,
+  advisory: it can name a dead holder); `409 agent.builder_lock_unreadable` when the lock file
+  cannot be opened (`details.error`).
+- **`api_restarted`.** The child shares hal0-api's cgroup, so restarting hal0-api mid-repair (a
+  `hal0 update`, `systemctl restart hal0-api`) kills the build. The live release is unchanged,
+  because the builder swaps `current` only at the very end. The next status read of the job
+  records it `failed` with `error_code: "api_restarted"`; run the repair again.
 
 ## Secrets (`/api/secrets`)
 
