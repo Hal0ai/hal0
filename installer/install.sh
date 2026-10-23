@@ -3606,7 +3606,7 @@ else
     # [memory].enabled=true (hal0.toml default) pointing at a dead engine. The daemon
     # runs in its own venv at ${VAR_DIR}/memory/hindsight/.venv (pinned to the
     # version CT105 runs) with an embedded postgres + local BGE/MiniLM models;
-    # its extraction/reflection LLM is hal0/utility on :8080 (used lazily — the
+    # its extraction/reflection LLM is hal0/memory on :8080 (used lazily — the
     # unit sets HINDSIGHT_API_SKIP_LLM_VERIFICATION so it binds without a loaded
     # model). Escape hatch: HAL0_SKIP_HINDSIGHT=1.
     #

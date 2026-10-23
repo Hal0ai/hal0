@@ -798,7 +798,7 @@ async def update_graph_config(request: Request) -> dict[str, Any]:
         # * a timeout or limit change always does;
         # * drift (#1682 review) is repaired on ANY PUT, gate on or off and
         #   whatever the slot set looks like: a missing or pre-#2919 drop-in
-        #   leaves the engine calling the base unit's hal0/utility, so an
+        #   leaves the engine on whatever an older base unit pins (hal0/utility before #2925), so an
         #   upstream pick would otherwise be recorded but never take effect
         #   (the fresh-install shape, where utility seeds disabled). The
         #   #1717 reason to skip — a restart could pin the engine to an

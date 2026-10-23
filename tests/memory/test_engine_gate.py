@@ -114,7 +114,7 @@ def _engine_env(hs_dir: Path) -> dict[str, str]:
         "HF_HOME": str(hs_dir / "hf-cache"),
         "HINDSIGHT_API_LLM_PROVIDER": "openai",
         "HINDSIGHT_API_LLM_BASE_URL": "http://127.0.0.1:8080/v1",
-        "HINDSIGHT_API_LLM_MODEL": "hal0/utility",
+        "HINDSIGHT_API_LLM_MODEL": "hal0/memory",
         "HINDSIGHT_API_LLM_API_KEY": DEFAULT_API_KEY,
         "HINDSIGHT_API_SKIP_LLM_VERIFICATION": "true",
         "HINDSIGHT_API_EMBEDDINGS_LOCAL_FORCE_CPU": "true",

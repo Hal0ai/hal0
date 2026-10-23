@@ -121,7 +121,8 @@ GATEWAY_DROPIN_FILE="${GATEWAY_DROPIN_DIR}/10-hal0-secrets.conf"
 # ADR-0023): HINDSIGHT_API_LLM_MODEL + HINDSIGHT_API_LLM_TIMEOUT plus the #1834
 # extraction limits (RETAIN_LLM_MAX_CONCURRENT, RETAIN_MAX_COMPLETION_TOKENS,
 # RETAIN_LLM_MAX_RETRIES, WORKER_MAX_RETRIES, WORKER_TASK_RETRY_BACKOFF_SECONDS), repointed by
-# `hal0 memory graph enable --slot <name>` and the Memory dashboard. Same posture
+# `hal0 memory graph enable` and the Memory dashboard (the model line is the
+# fixed alias hal0/memory; a timeout or limit change is what rewrites the file). Same posture
 # and same reason as the gateway drop-in above: hal0-api runs as the
 # unprivileged hal0 user and cannot write /etc/systemd/system itself. LITERAL —
 # the caller supplies only the body on stdin, never the path.
@@ -195,8 +196,9 @@ validate_dropin_directive() {  # args: kind, "Key=Value" line
       evalue="${value#*=}"
       case "$ename" in
         HINDSIGHT_API_LLM_MODEL)
-          # Always the `hal0/<slot>` virtual (never a raw model id), and a slot
-          # id is the same bounded identifier the slot verbs accept.
+          # A `hal0/…` virtual, never a raw model id — since #2919 always
+          # `hal0/memory`, which hal0-api resolves to the configured slot or
+          # upstream model per call. Bounded like the slot verbs' identifiers.
           [[ "$evalue" =~ ^hal0/[A-Za-z0-9_.-]{1,64}$ ]] \
             || die "drop-in rejected: bad HINDSIGHT_API_LLM_MODEL value: $evalue"
           ;;
