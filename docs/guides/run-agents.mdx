@@ -78,7 +78,7 @@ sudo systemctl enable --now hermes-gateway
 
 With no messaging platform configured, the gateway serves only the API server and cron.
 
-hal0 keeps the gateway unit file installed even when you turn the gateway off, because an installed unit in any state stops a client from starting a gateway of its own. `hal0 doctor all` has a `Hermes gateway unit` row that fails when Hermes is installed but `/etc/systemd/system/hermes-gateway.service` is missing, or when a `gateway run --idle-exit` process is running (the row names its pid and cgroup). It also fails for a profile with `gateway.standalone: true` that has no `hermes-gateway-<profile>.service` of its own. To clear it, stop the stray process and run `sudo hal0 agent install hermes` so the unit file is installed; to keep the gateway off afterwards, run `sudo systemctl disable --now hermes-gateway`. While the gateway is disabled and stopped, the `hermes-api` row (Hermes API upstreams) warns instead of failing and prints the enable command above.
+hal0 keeps the gateway unit file installed even when you turn the gateway off, because an installed unit in any state stops a client from starting a gateway of its own. The `Hermes gateway unit` row of `hal0 doctor all` fails when that file is missing, when a `gateway run --idle-exit` process is running (it names the pid and cgroup), or when a `gateway.standalone: true` profile has no unit of its own. To clear it, stop the stray process and run `sudo hal0 agent install hermes`; to keep the gateway off afterwards, `sudo systemctl disable --now hermes-gateway`. While the gateway is off, the `hermes-api` row warns instead of failing.
 
 ### Dashboard token for Hermes Desktop
 
@@ -377,16 +377,9 @@ If you installed the pi coding agent with `sudo hal0 agent install pi`, re-pin i
 sudo hal0 agent upgrade pi
 ```
 
-Run it as root, the same way you installed pi. It reruns the pinned installer, redeploys hal0's two extensions and the theme, and refreshes the hal0-memory MCP entry. It leaves the extensions you added under `~/.pi/agent/extensions`, and your default provider, model and theme in pi's `settings.json`, as they are.
+Run it as root, the same way you installed pi. It reruns the pinned installer, redeploys hal0's two extensions and refreshes the hal0-memory MCP entry, and leaves the extensions you added under `~/.pi/agent/extensions` and your default provider, model and theme in `settings.json` alone. It refuses, and changes nothing, when pi is not installed, when pi's profile is in a different home than the one it runs in (run it as the user who installed pi), when `settings.json` or `mcp.json` is not a JSON object, or when `--to` is passed (`--to` is Hermes-only).
 
-The command refuses, and changes nothing, when:
-
-- pi is not installed (there is no readable profile marker);
-- pi's profile is in a different home than the one the command runs in. Run it as the user who installed pi, for example `sudo HOME=<that home> hal0 agent upgrade pi`;
-- pi's `settings.json` or `mcp.json` exists but is not a JSON object;
-- `--to` is passed. It applies to Hermes only; pi upgrades to the version hal0 pins.
-
-A fresh `hal0 agent install pi` run from a hal0 git checkout seeds a name-keyed `banks` alias in `~/.hindsight/coding-agent.json` that maps `coding-agent::hal0` to `coding-agent::hal0-mono`. A packaged install has no checkout and seeds no alias. `hal0 agent upgrade pi` adds the same alias to an existing file that lacks it, prints `Hindsight bank alias added to coding-agent.json`, and leaves every other key and any alias you already set alone. Other Hindsight-backed tools on the box read that file.
+A fresh `hal0 agent install pi` from a hal0 git checkout seeds a name-keyed `banks` alias in `~/.hindsight/coding-agent.json` (`coding-agent::hal0` to `coding-agent::hal0-mono`); `upgrade pi` adds that alias to an existing file that lacks it and leaves every other key alone. Other Hindsight-backed tools on the box read that file.
 
 ## Running `hermes` as root
 

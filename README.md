@@ -248,7 +248,7 @@ from zero.
   dashboard or through `/v1`.
 
 - **Memory engine on a local slot or an upstream model.** Pick it under
-  **Engine model** on Settings -> Memory (also on the agents Memory
+  **Engine model** on Settings -> Data -> Memory (also on the agents Memory
   tab) or run `hal0 memory graph enable --model <id>`; `--local` returns to
   the local extraction slot. hindsight-api always calls the virtual id
   `hal0/memory`, which hal0 resolves per call, so switching needs no engine

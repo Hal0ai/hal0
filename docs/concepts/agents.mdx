@@ -83,7 +83,10 @@ run the gateway with `sudo systemctl enable --now hermes-gateway`.
 `hal0 doctor all` has a `Hermes gateway unit` row that fails when the unit
 file is missing, when a standalone profile lacks its own unit, or when a stray
 `gateway run --idle-exit` process is running. The `Hermes API upstreams` row
-warns, rather than fails, when you turned the gateway off.
+warns, rather than fails, when you turned the gateway off. The dashboard's
+Hermes and Pi cards read all of this from one admin route,
+`GET /api/agents/{name}/overview` (cached 30 s, `?refresh=1` rebuilds it); see
+the [REST API reference](/docs/reference/api/rest-api#agent-overview-apiagentsnameoverview).
 
 ### Profiles, Open WebUI and delegation
 

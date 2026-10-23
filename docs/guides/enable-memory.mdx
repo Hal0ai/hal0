@@ -124,11 +124,15 @@ Shows whether extraction is on, the configured extraction slot (and
 whether it currently resolves to a live enabled `llm` slot), the engine
 target `hal0/memory` resolves to, the available slots and upstream models
 you could pick instead, build/error counters, and **Engine running**: the
-provider, base URL and model `hindsight-api` actually loads. If
-`/etc/hal0/hindsight-llm.env` carries `HINDSIGHT_API_LLM_PROVIDER`,
-`_BASE_URL` or `_MODEL` lines, that row says so in red — systemd applies
-that file after every other setting, so hal0's picker has no effect until
-those lines are removed and `hindsight-api` is restarted.
+provider, base URL and model `hindsight-api` actually loads, read from the
+running engine process itself. If `/etc/hal0/hindsight-llm.env` carries
+`HINDSIGHT_API_LLM_PROVIDER`, `_BASE_URL` or `_MODEL` lines, that row says
+so in red — systemd applies that file after every other setting, so hal0's
+picker has no effect until those lines are removed and `hindsight-api` is
+restarted. With the engine down, the row shows what the unit and that file
+would give it at the next start. When hal0-api can read neither the engine
+process nor the file, the row says `cannot verify` in yellow rather than
+claiming there is no override.
 
 </TabItem>
 <TabItem label="Enable">
@@ -146,7 +150,9 @@ server validates the choice against the live enabled-slot set and rejects
 an unknown or non-llm slot before it ever reaches `hal0.toml`. `--model`
 names an upstream model id as `hal0 memory graph status` lists it under
 "Upstream models"; the server rejects an id no configured upstream
-advertises. The dashboard's **Engine model** picker (Settings → Data →
+advertises. That list is filled right after a `hal0-api` restart: the
+status call fetches each provider's catalog when its cache is empty, and
+retries a provider that is offline at most once a minute. The dashboard's **Engine model** picker (Settings → Data →
 Memory, and the agents Memory tab) offers the same two groups. On a box
 upgraded from an earlier release the first save repoints `hindsight-api`
 at `hal0/memory` once (one drop-in write and restart); until then the

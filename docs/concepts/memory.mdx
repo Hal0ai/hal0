@@ -221,7 +221,7 @@ that union so the most relevant facts surface first. Configured under
   `8.0`) — HTTP budgets. A timeout or an unreachable reranker never blocks
   recall: it fails soft back to the fused vector ordering.
 
-The dashboard's Settings → Memory page has a picker for `rerank_model`: the
+The dashboard's Settings → Data → Memory page has a picker for `rerank_model`: the
 schema default is offered as "builtin", plus every model in the
 capabilities catalog tagged for reranking (labelled with its serving
 backend), plus whatever is currently saved if it's outside both lists. Free
@@ -279,15 +279,17 @@ on any save. The write and restart go through hal0's privileged-operation seam
 rather than hal0-api (which runs unprivileged) touching `/etc/systemd`
 directly.
 
-Pick the engine model under **Engine model** on Settings → Memory or on the
+Pick the engine model under **Engine model** on Settings → Data → Memory or on the
 agents Memory tab (Local slots / Upstream models), or from the CLI with
 `hal0 memory graph enable --model <id>`; `--local` returns to the local
 `extraction_slot`, and `--model` cannot be combined with `--slot` or
 `--local`. `GET /api/memory/graph/status` reports `target`, `available_models`
 and `engine_llm`. The **Engine running** row names the provider and model
-hindsight-api really loads. If `/etc/hal0/hindsight-llm.env` overrides the
-model, the row shows it in amber: systemd applies that file after every hal0
-setting, so the override wins over your choice until you remove it.
+hindsight-api really loads, read from the running engine process. If
+`/etc/hal0/hindsight-llm.env` overrides the model, the row flags it: systemd
+applies that file after every hal0 setting, so the override wins over your
+choice until you remove it. When hal0-api can read neither the process nor
+that file, the row says it cannot verify rather than reporting no override.
 
 <Aside type="note">
 A memory write is refused (fast, with a clear error) rather than silently

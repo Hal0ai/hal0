@@ -82,7 +82,7 @@ behaviors:
 - **`hal0/*` virtual model names** are resolved against live slot state before
   dispatch, and a "lane pin" records which specific slot the caller meant when
   multiple slots share one model id.
-- **`hal0/memory`** is the one fixed model id the memory engine (hindsight-api) calls; it is internal, not a model for clients to list or select. hal0 resolves it on every request from `[memory.graph]`: to `hal0/<extraction_slot>` while `extraction_model` is unset, otherwise to that upstream model id. An upstream target is routed only to its upstream, never to a slot; when no configured upstream advertises it the request fails with `502 dispatch.upstream_unavailable`. `GET /v1/models` does not list it. Change the target with `hal0 memory graph enable --model <id>` or `--local`, or under **Engine model** on Settings → Memory.
+- **`hal0/memory`** is the one fixed model id the memory engine (hindsight-api) calls; it is internal, not a model for clients to list or select. hal0 resolves it on every request from `[memory.graph]`: to `hal0/<extraction_slot>` while `extraction_model` is unset, otherwise to that upstream model id. An upstream target is routed only to its upstream, never to a slot; when no configured upstream advertises it the request fails with `502 dispatch.upstream_unavailable`. `GET /v1/models` does not list it. Change the target with `hal0 memory graph enable --model <id>` or `--local`, or under **Engine model** on Settings → Data → Memory.
 - **`enable_thinking` / `chat_template_kwargs`** — a thinking-policy override; if
   omitted, defaulted server-side from `enable_thinking` on the profile of the slot that serves the request.
 - Multiple `role: system` messages are collapsed into one and hoisted to position 0
