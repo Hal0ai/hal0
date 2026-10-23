@@ -329,6 +329,11 @@ def graph_status_cmd(
                 "hal0's engine target is not in effect until those lines are removed "
                 "and hindsight-api is restarted[/red]"
             )
+        elif engine.get("overridden") is None:
+            running += (
+                f"\n[yellow]cannot verify: the engine process and {engine.get('override_file')} "
+                "are not readable by hal0-api, so an override there would not show here[/yellow]"
+            )
         elif engine["model"] != (target.get("alias") or "hal0/memory"):
             # No drop-in written yet (or a pre-#2919 one): the unit still
             # pins a slot id, so the picker's target is not what runs.

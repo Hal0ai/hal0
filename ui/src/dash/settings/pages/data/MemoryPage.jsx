@@ -349,7 +349,9 @@ function MemoryGraphPanel() {
           ? "⚠ /etc/hal0/hindsight-llm.env sets the engine's provider/model and beats every hal0 setting — remove those lines and restart hindsight-api for the picker above to take effect"
           : running.reason === "pinned"
             ? "⚠ the engine is not calling hal0/memory yet — Save once (any change) to write the drop-in and restart it onto the picker above"
-            : "The LLM hindsight-api actually loads: hal0/memory resolves to the picker above on every call"}
+            : running.reason === "unverified"
+              ? "⚠ hal0-api cannot read the engine process or /etc/hal0/hindsight-llm.env — an override there would not show here"
+              : "The LLM hindsight-api actually loads: hal0/memory resolves to the picker above on every call"}
         mono
         v={<span data-testid="mem-graph-engine-running" style={{color: running.warn ? "var(--warn)" : "var(--fg-3)"}}>{running.text}</span>}
       />

@@ -133,6 +133,16 @@ describe('engineRunningLine', () => {
     expect(line.text).toContain('overridden by /etc/hal0/hindsight-llm.env')
     expect(line.text).toContain('HINDSIGHT_API_LLM_MODEL')
   })
+  it('warns that it cannot verify when the override state is unknown', () => {
+    const line = engineRunningLine({
+      ...STATUS,
+      engine_llm: { ...STATUS.engine_llm, overridden: null, override_file: '/etc/hal0/hindsight-llm.env', source: 'unit' },
+    })
+    expect(line.warn).toBe(true)
+    expect(line.reason).toBe('unverified')
+    expect(line.text).toContain('cannot verify')
+    expect(line.text).toContain('/etc/hal0/hindsight-llm.env')
+  })
   it('says so when the engine LLM is unknown', () => {
     expect(engineRunningLine({ ...STATUS, engine_llm: undefined })).toEqual({
       text: 'engine LLM unknown (hal0-api could not read the hindsight-api unit)',

@@ -351,37 +351,129 @@ def _read_env_file(path: Path) -> dict[str, str]:
     return out
 
 
+def _engine_main_pid() -> int | None:
+    """hindsight-api's MainPID, or None when it is not running / systemd absent."""
+    try:
+        proc = subprocess.run(
+            ["systemctl", "show", SERVICE, "-p", "MainPID", "--value"],
+            capture_output=True,
+            text=True,
+            timeout=5.0,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    try:
+        pid = int((proc.stdout or "").strip() or "0")
+    except ValueError:
+        return None
+    return pid if proc.returncode == 0 and pid > 0 else None
+
+
+def _proc_environ_path(pid: int) -> Path:
+    return Path(f"/proc/{pid}/environ")
+
+
+def _read_engine_process_env() -> dict[str, str] | None:
+    """The three LLM target keys from the RUNNING engine's environment.
+
+    hindsight-api runs as the same ``hal0`` uid as hal0-api, so its
+    ``/proc/<pid>/environ`` is readable without opening
+    /etc/hal0/hindsight-llm.env (0600 root:hal0 on some boxes). This is what
+    the engine actually loaded, after every ``Environment=`` and
+    ``EnvironmentFile=``.
+
+    The raw buffer is parsed in memory and only :data:`_LLM_TARGET_KEYS` are
+    kept: the credential and every other variable are dropped before
+    anything leaves this function, and no failure carries the buffer or the
+    OS error text (which can echo it) into a log, an exception or the
+    result. Returns ``None`` when the engine is not running or its environ
+    cannot be read, ``{}`` when it is readable but sets none of the keys.
+    """
+    pid = _engine_main_pid()
+    if pid is None:
+        return None
+    try:
+        raw = _proc_environ_path(pid).read_bytes()
+    except Exception:  # never surface the error text
+        log.debug("hal0.memory.engine_environ_unreadable", pid=pid)
+        return None
+    wanted = set(_LLM_TARGET_KEYS)
+    out: dict[str, str] = {}
+    for entry in raw.split(b"\0"):
+        key, sep, value = entry.partition(b"=")
+        if not sep:
+            continue
+        name = key.decode("utf-8", "replace")
+        if name in wanted:
+            out[name] = value.decode("utf-8", "replace")
+    return out
+
+
 def effective_engine_llm(
     *,
     env_file: Path = HINDSIGHT_LLM_ENV_PATH,
     unit_env: Mapping[str, str] | None = None,
     show_unit_env: Callable[[], Mapping[str, str]] = _systemctl_show_environment,
+    read_process_env: Callable[[], Mapping[str, str] | None] = _read_engine_process_env,
 ) -> dict[str, Any]:
     """The LLM hindsight-api really runs on, and whether a file override set it (#2918).
 
-    Overlays the three target keys from ``env_file`` on the unit's merged
-    ``Environment=`` (``unit_env`` when given, else ``show_unit_env()``), which
-    is exactly what systemd does at unit start. Returns::
+    First source of truth is the running engine's own environment
+    (``read_process_env``, ``source: "process"``): its three target keys are
+    compared with the unit's merged ``Environment=`` (``unit_env`` when given,
+    else ``show_unit_env()``); any key that differs came from
+    ``EnvironmentFile=`` — the only other source systemd applies — so it is
+    reported as an override of ``env_file`` without ever opening that file.
+
+    When the process cannot be read (engine down), the three keys from
+    ``env_file`` are overlaid on the unit env, which is what systemd does at
+    start (``source: "unit+file"``); if that file exists but cannot be read
+    either, ``overridden`` is ``None`` — "cannot verify", never "not
+    overridden" — and the values are the unit's (``source: "unit"``).
+    Returns::
 
         {"provider", "base_url", "model",            # as the engine sees them
-         "overridden": bool,                         # any target key came from the file
-         "override_file": str | None, "override_keys": [sorted key names]}
+         "overridden": bool | None,                  # None = cannot verify
+         "override_file": str | None, "override_keys": [sorted key names],
+         "source": "process" | "unit+file" | "unit"}
 
-    The credential is never read into the result. Everything degrades to
-    ``None``/``False`` rather than raising — this feeds a status route.
+    The credential is never read into the result. Everything degrades rather
+    than raising — this feeds a status route.
     """
     unit = dict(unit_env) if unit_env is not None else dict(show_unit_env() or {})
-    file_env = _read_env_file(Path(env_file))
-    override_keys = sorted(k for k in _LLM_TARGET_KEYS if file_env.get(k))
-    merged = {**unit, **{k: file_env[k] for k in override_keys}}
-    return {
-        "provider": merged.get("HINDSIGHT_API_LLM_PROVIDER") or None,
-        "base_url": merged.get("HINDSIGHT_API_LLM_BASE_URL") or None,
-        "model": merged.get("HINDSIGHT_API_LLM_MODEL") or None,
-        "overridden": bool(override_keys),
-        "override_file": str(env_file) if override_keys else None,
-        "override_keys": override_keys,
-    }
+
+    def _shape(
+        values: Mapping[str, str],
+        overridden: bool | None,
+        keys: list[str],
+        file_named: bool,
+        source: str,
+    ) -> dict[str, Any]:
+        return {
+            "provider": values.get("HINDSIGHT_API_LLM_PROVIDER") or None,
+            "base_url": values.get("HINDSIGHT_API_LLM_BASE_URL") or None,
+            "model": values.get("HINDSIGHT_API_LLM_MODEL") or None,
+            "overridden": overridden,
+            "override_file": str(env_file) if file_named else None,
+            "override_keys": keys,
+            "source": source,
+        }
+
+    process = read_process_env()
+    if process is not None:
+        keys = sorted(
+            k for k in _LLM_TARGET_KEYS if (process.get(k) or None) != (unit.get(k) or None)
+        )
+        return _shape(process, bool(keys), keys, bool(keys), "process")
+
+    path = Path(env_file)
+    if path.exists() and not os.access(path, os.R_OK):
+        return _shape(unit, None, [], True, "unit")
+    file_env = _read_env_file(path)
+    keys = sorted(k for k in _LLM_TARGET_KEYS if file_env.get(k))
+    merged = {**unit, **{k: file_env[k] for k in keys}}
+    return _shape(merged, bool(keys), keys, bool(keys), "unit+file" if path.exists() else "unit")
 
 
 def memory_engine_target(graph: MemoryGraphConfig) -> tuple[str, str]:

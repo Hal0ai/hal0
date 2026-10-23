@@ -230,6 +230,40 @@ def test_status_warns_when_the_engine_is_still_pinned_to_a_slot(
     assert "repoint" in result.output
 
 
+def test_status_says_when_the_engine_llm_cannot_be_verified(
+    stub_api, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def fake_get(path: str, **_kw: Any) -> dict[str, Any]:
+        return {
+            "enabled": True,
+            "extraction_slot": "utility",
+            "slot_resolves": True,
+            "available_slots": ["utility"],
+            "extraction_model": None,
+            "target": {"kind": "slot", "model": "hal0/utility", "alias": "hal0/memory"},
+            "available_models": [],
+            "engine_llm": {
+                "provider": "openai",
+                "base_url": "http://127.0.0.1:8080/v1",
+                "model": "hal0/memory",
+                "overridden": None,
+                "override_file": "/etc/hal0/hindsight-llm.env",
+                "override_keys": [],
+                "source": "unit",
+            },
+            "in_flight": 0,
+            "builds_ok": 0,
+            "errors": 0,
+            "last_built_at": None,
+            "last_error": None,
+        }
+
+    monkeypatch.setattr(memory_commands, "api_get", fake_get)
+    result = runner.invoke(memory_commands.graph_app, ["status"])
+    assert result.exit_code == 0, result.output
+    assert "cannot verify" in result.output
+
+
 def test_route_option_no_longer_exists(stub_api) -> None:
     """ADR-0023: --route/--provider were removed in favour of --slot (#2919 later
     added --model, which names an upstream model id rather than a provider)."""

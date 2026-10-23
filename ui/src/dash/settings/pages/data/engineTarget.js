@@ -82,7 +82,8 @@ const ALIAS = 'hal0/memory'
  * overrides provider/base_url/model (the picker is not in effect until those
  * lines are removed), and with `reason: 'pinned'` when the unit still pins a
  * slot id instead of hal0/memory (no drop-in written yet — one Save repoints
- * it). `reason` is null otherwise.
+ * it), and with `reason: 'unverified'` when hal0-api can read neither the
+ * engine process nor the env file. `reason` is null otherwise.
  */
 export function engineRunningLine(status) {
   const e = status && status.engine_llm
@@ -93,6 +94,10 @@ export function engineRunningLine(status) {
     const keys = Array.isArray(e.override_keys) && e.override_keys.length ? ` (${e.override_keys.join(', ')})` : ''
     text += ` — overridden by ${e.override_file || 'hindsight-llm.env'}${keys}; the picker has no effect until those lines are removed and hindsight-api is restarted`
     return { text, warn: true, reason: 'override' }
+  }
+  if (e.overridden === null) {
+    text += ` — cannot verify: neither the engine process nor ${e.override_file || 'hindsight-llm.env'} is readable by hal0-api, so an override there would not show here`
+    return { text, warn: true, reason: 'unverified' }
   }
   const alias = (status.target && status.target.alias) || ALIAS
   if (e.model !== alias) {
