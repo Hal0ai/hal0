@@ -7992,6 +7992,47 @@ def _smoke_wrapper_ready(_state: BootstrapState, io: InstallIO) -> tuple[bool, s
     return (result.returncode == 0, f"--hal0-ready rc={result.returncode}")
 
 
+#: `hermes doctor` issues that a stock hal0 box always reports and that are not
+#: problems here (#2951). hal0 serves models through its own gateway and keeps
+#: provider keys in its vault, so Hermes' `.env` holds no provider key
+#: (hermes_cli/doctor_config.py `_check_env_file`), and the optional tools that
+#: want their own keys (discord, x_search, ...) stay unconfigured
+#: (doctor_tools.py `_check_tool_availability`). Matched exactly: any other
+#: issue, or a reworded one after a pin bump, still fails the probe.
+_HERMES_DOCTOR_ADVISORY_ISSUES = frozenset(
+    {
+        "Run 'hermes setup' to configure API keys",
+        "Run 'hermes setup' to configure missing API keys for full tool access",
+    }
+)
+
+#: One numbered entry of `hermes doctor`'s closing "Found N issue(s)" list
+#: (doctor.py `_print_summary`).
+_HERMES_DOCTOR_ISSUE_RE = re.compile(r"^\s*\d+\.\s+(?P<issue>\S.*?)\s*$")
+
+
+def _hermes_doctor_issues(stdout: str) -> list[str] | None:
+    """The issues `hermes doctor` listed in its summary, or None when it printed none.
+
+    At the v0.22.4 pin `hermes doctor` exits 1 exactly when that list is
+    non-empty (doctor.py `run_doctor`). None means the summary is missing or
+    unrecognised, which the caller treats as a failure.
+    """
+    # Hermes colours its output only on a TTY; strip SGR codes in case that changes.
+    lines = re.sub(r"\x1b\[[0-9;]*m", "", stdout).splitlines()
+    for i, line in enumerate(lines):
+        if re.search(r"Found \d+ issue\(s\) to address:", line):
+            issues = []
+            for entry in lines[i + 1 :]:
+                match = _HERMES_DOCTOR_ISSUE_RE.match(entry)
+                if match:
+                    issues.append(match.group("issue"))
+                elif issues and entry.strip():
+                    break
+            return issues or None
+    return None
+
+
 def _smoke_hermes_doctor(_state: BootstrapState, io: InstallIO) -> tuple[bool, str]:
     venv_hermes = _venv_python(Path(_state.venv)).parent / "hermes"
     if not venv_hermes.exists():
@@ -8009,7 +8050,17 @@ def _smoke_hermes_doctor(_state: BootstrapState, io: InstallIO) -> tuple[bool, s
         )
     except (OSError, subprocess.SubprocessError) as exc:
         return (False, f"hermes doctor: {exc}")
-    return (result.returncode == 0, f"rc={result.returncode}")
+    if result.returncode == 0:
+        return (True, "rc=0")
+    if result.returncode != 1:
+        return (False, f"rc={result.returncode}")
+    issues = _hermes_doctor_issues(result.stdout or "")
+    if issues is None:
+        return (False, "rc=1 (no issue list in its output)")
+    real = [issue for issue in issues if issue not in _HERMES_DOCTOR_ADVISORY_ISSUES]
+    if real:
+        return (False, "rc=1: " + "; ".join(real))
+    return (True, f"rc=1, only {len(issues)} provider-key advisory issue(s)")
 
 
 #: Probes that send a chat request to ``model.default``. Gated behind
