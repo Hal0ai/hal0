@@ -9,8 +9,9 @@
 //                     on the right, and a bottom band per phase (chips and
 //                     reach when healthy; journal tail, reasons and fixes,
 //                     the install command or the running job otherwise).
-//                     A click flips it to a tabbed console: Status,
-//                     Controls, Lore, Lifecycle.
+//                     A click, or Enter / Space on the focused card, flips
+//                     it to a tabbed console: Status, Controls, Lore,
+//                     Lifecycle. Escape inside the console flips it back.
 //   LockedAgentCard — a roadmap entry behind a grey "coming soon" mask. The
 //                     dummy module tile + identity show through; the card is
 //                     non-interactive (no flip) until the integration ships.
@@ -1084,13 +1085,42 @@ function LiveAgentCard({ identity, model, actions }) {
   const [confirm, setConfirm] = useState(null);
   const [personaEdit, setPersonaEdit] = useState(null);
   const [busy, run] = useRunner();
+  const cardRef = useRef(null);
+  // Set when the keyboard asked for the flip, so focus follows it; a mouse
+  // flip leaves focus where it is.
+  const keyFlip = useRef(false);
 
   // The back is a control surface: no tilt there, or a target near the edge
-  // moves out from under the pointer between hover and click.
+  // moves out from under the pointer between hover and click. After a
+  // keyboard flip, focus lands on the selected tab (to the console) or on the
+  // card itself (back to the front); the face it leaves is inert by then.
   useEffect(() => {
     if (flipped) onLeave();
+    if (keyFlip.current) {
+      keyFlip.current = false;
+      const el = flipped ? document.getElementById("agent-" + a.id + "-tab-" + tab) : cardRef.current;
+      if (el) el.focus();
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [flipped]);
+
+  // The card shell is a toggle button. Enter or Space flips it only when the
+  // shell itself has focus, so keys aimed at an inner control never flip it;
+  // Escape anywhere in the console flips back.
+  const onKeyDown = (e) => {
+    if (e.key === "Escape" && flipped) {
+      e.preventDefault();
+      keyFlip.current = true;
+      setFlipped(false);
+      return;
+    }
+    if (e.target !== e.currentTarget) return;
+    if (e.key === "Enter" || e.key === " ") {
+      e.preventDefault();
+      keyFlip.current = true;
+      setFlipped((f) => !f);
+    }
+  };
 
   const healthy = !isPi && (model.phase === "ready" || model.phase === "serving");
   const front = { live: !flipped, identity: a, model, actions, busy, run, ask: setConfirm };
@@ -1115,12 +1145,18 @@ function LiveAgentCard({ identity, model, actions }) {
   return (
     <CardBusy.Provider value={busy}>
       <div
+        ref={cardRef}
         className={"fcard" + (PHASE_MOD[model.phase] || "")}
         data-testid={"agent-card-" + a.id}
+        role="button"
+        tabIndex={0}
+        aria-pressed={flipped}
+        aria-label={flipped ? a.name + " card, show front (Escape also flips back)" : a.name + " card, show console"}
         style={a.el ? { "--el": a.el, "--el-glow": a.elGlow } : undefined}
         onMouseMove={flipped ? undefined : onMove}
         onMouseLeave={onLeave}
         onClick={() => setFlipped((f) => !f)}
+        onKeyDown={onKeyDown}
       >
         <div className="fcard-tilt" ref={tiltRef}>
           <div className="fcard-inner" ref={innerRef} style={{ transform: "rotateY(" + (flipped ? 180 : 0) + "deg)" }}>

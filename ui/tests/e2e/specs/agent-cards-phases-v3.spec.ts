@@ -394,6 +394,49 @@ test.describe('Hermes card phases', () => {
     )
   })
 
+  test('keyboard: Enter flips to the console, Tab reaches an action, Escape flips back', async ({
+    page,
+  }) => {
+    await mockCards(page, {
+      agents: [hermesRecord(true)],
+      hermes: hermesOverview(),
+      slot: chatSlot('ready'),
+    })
+    await openAgents(page)
+
+    const c = card(page, 'hermes')
+    await expect(face(page, 'hermes')).toHaveAttribute('data-phase', 'ready', { timeout: FIVE_S })
+    await expect(c).toHaveAttribute('role', 'button')
+    await expect(c).toHaveAttribute('aria-pressed', 'false')
+    await expect(c).toHaveAttribute('aria-label', 'Hermes card, show console')
+
+    // Enter on the focused card opens the console with the selected tab focused.
+    await c.focus()
+    await page.keyboard.press('Enter')
+    await expect(c).toHaveAttribute('aria-pressed', 'true')
+    await expect(c.getByTestId('agent-tab-controls')).toBeFocused()
+
+    // Tab from the tab strip into the panel reaches an action control.
+    let reached = ''
+    for (let i = 0; i < 6 && !reached.startsWith('agent-action-'); i++) {
+      await page.keyboard.press('Tab')
+      reached = await page.evaluate(
+        () => document.activeElement?.getAttribute('data-testid') ?? '',
+      )
+    }
+    expect(reached).toMatch(/^agent-action-/)
+    // A key aimed at an inner control does not flip the card.
+    await expect(c).toHaveAttribute('aria-pressed', 'true')
+
+    // Escape flips back and returns focus to the card; Space flips it again.
+    await page.keyboard.press('Escape')
+    await expect(c).toHaveAttribute('aria-pressed', 'false')
+    await expect(c).toBeFocused()
+    await page.keyboard.press(' ')
+    await expect(c).toHaveAttribute('aria-pressed', 'true')
+    await expect(c.getByTestId('agent-tab-controls')).toBeFocused()
+  })
+
   test('serving: a ready overview with a hot slot reads serving, with throughput', async ({
     page,
   }) => {

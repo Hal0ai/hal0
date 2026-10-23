@@ -365,6 +365,10 @@
 .agents-overview .ao-confirm-v { font-size: 11px; color: var(--accent); margin-bottom: 10px; }
 .agents-overview .ao-confirm-note { margin: 12px 0 0; padding-top: 10px; border-top: 1px solid var(--line); font-size: 12px; color: var(--fg-3); }
 
+/* the card shell is a toggle: a ring for keyboard focus, none for a click */
+.agents-overview .fcard:not(.locked):focus-visible { outline: 2px solid var(--accent); outline-offset: 4px; border-radius: 18px; }
+.agents-overview .fcard:not(.locked):focus:not(:focus-visible) { outline: none; }
+
 @media (prefers-reduced-motion: reduce) {
   .agents-overview .fc-spin, .agents-overview .sdot.working, .agents-overview .fc-step.cur::before { animation: none; }
 }
