@@ -1,0 +1,135 @@
+---
+title: Agents API reference
+description: "The /api/agents routes behind the Hermes and Pi cards: the overview payload, the agent and gateway restarts, and the Hermes repair job — verified against src/hal0/api/agents/ and src/hal0/api/routes/updater.py."
+sidebar:
+  order: 50
+---
+
+The `/api/agents` routes that back the dashboard's Hermes and Pi cards: the overview
+payload, the agent and gateway restarts, and the Hermes repair job. The rest of the
+management surface, and the auth tiers, are in the
+[REST API index](/docs/reference/api/rest-api/).
+
+## Agent overview (`/api/agents/{name}/overview`)
+
+`GET /api/agents/{name}/overview[?refresh=1]` is the one payload the dashboard's Hermes
+and Pi cards render. ADMIN-gated with the rest of `/api/agents`. `name` is `hermes` or
+`pi`; any other name is `404 agent.unknown`. The route builds the answer from live
+probes and never fails for a normal box state: a missing systemd, a stopped gateway or
+an unreadable file shows as `unknown`, empty or `null` in the matching key.
+
+The probes are cached for 30 s per agent, counted from when the build finished, and
+built once per miss: requests that miss while a build is running wait for it.
+`?refresh=1` starts a new build and refills the cache. A Hermes build or repair starting
+or ending is a miss too, so the state it leaves behind is never served from before it.
+`generated_at` (an ISO-8601 UTC time, the start of the build behind the answer) tells a
+client how old the probes are. `status`, `unit_active`, `units.agent`, `approvals.pending`,
+`job` and `phase` are recomputed on every request.
+
+The cache is also dropped right after an action that changes what the card shows, so the
+next request is built after it: `POST /api/agents/hermes/restart` and
+`POST /api/agents/hermes/gateway/restart` once the restart went through,
+`PUT /api/agents/hermes/command-approvals` once the mode is written (a request that
+changed nothing leaves it alone), and `POST /api/agents/hermes/repair` when it registers
+its job. A refused or failed action does not drop it.
+
+A build is capped at 8 s. One that runs past it (a wedged `sudo` or `systemctl`, say) is
+replaced by a neutral build, answered with `200` and `"partial": true` and cached like
+any build, so the next poll inside the 30 s window does not stall again; the requests
+waiting on that build get the same body, and `?refresh=1` builds again. For Hermes the
+probed keys then read: `version.live`, `version.previous` and `version.component`
+`null`, `version.pin.ref` `"unknown"`, `update_available` `false`; `units.gateway`
+`"unknown"` and `gateway_enabled` `null`; `api_server` `endpoint` and `healthy` `null`
+and `profiles` `[]`; `platforms`, `doctor` and `degraded` `[]`; `provision.present`
+`false`; `approvals` `mode`, `effective` and `in_sync` `null`; `memory.available`
+`false`; `links.desktop` `null`. The live keys above are still current, and `phase` is
+`unknown` unless it is `working` (a running job), `broken` or `down`, because `ready` and
+`degraded` need the probes that did not run. For Pi, `version` is `{installed: null,
+pin: null, update_available: false}`, `profile.checks` is `[]` and the `memory` flags are
+`null` or `false`; `commands` and `phase` are as usual. A normal build has no `partial`
+key.
+
+`platforms` comes from a vault read through `sudo`, so it is cached on its own for 300 s
+per Hermes home and vault: a platform added or removed can take up to five minutes to
+show, unless the cache is dropped by one of the actions above or by `?refresh=1`, both of
+which also clear it. A read that failed answers `[]` and is not cached.
+
+A bundled agent that is not installed answers with only `name`, `kind`,
+`installed: false`, `phase: "not_installed"`, `commands.install`, and the version it
+would get: `pin` (`{ref, describe}`) for Hermes, `version` (`{installed: null, pin,
+update_available: false}`) for Pi.
+
+Hermes (`kind: "daemon"`):
+
+| Key | Value |
+|---|---|
+| `name`, `kind`, `installed`, `status` | Identity and install state (`status` is `installed` or `broken`). |
+| `unit_active` | `true`, `false`, or `null` when systemd cannot answer. |
+| `version` | `live` and `previous` release (`id`, `ref`, `describe`, and for `live` also `built_at`, `python_minor`, `extras`, `platform_extras`, `hal0_version`), the `pin` (`{ref, describe}`), the `component` row (`installed`, `pinned`, `status`), and `update_available`. |
+| `units` | `agent` is `active`, `inactive` or `unknown` (systemd could not answer). `gateway` is `active`, `inactive`, `failed`, `unknown`, or `absent` when the unit does not exist; its `activating`, `reloading`, `refreshing` and `maintenance` states read as `active` and `deactivating` as `inactive`, so a restart is not reported as down. The unit restarts forever (`Restart=always`) and never reaches `failed`, so `activating` with the `auto-restart` or `auto-restart-queued` sub-state is a crash loop and reads `failed`. `gateway_enabled` is `false` when the unit file is `disabled`, `masked` or `masked-runtime`, `true` for `enabled`, `enabled-runtime`, `static`, `linked`, `generated` and `transient`, and `null` otherwise. |
+| `api_server` | `endpoint` (`host:port`, from config), `healthy`, and the `profiles` the gateway serves. The gateway and every profile are probed at once, with a 1 s timeout each. |
+| `platforms` | Names of the configured gateway platforms. |
+| `provision` | The last provision run: `present`, versions, `completed_at`, `reported_at` (the newest phase time), `phases`, `ok`/`warn`/`fail` counts, and the configured models, MCP servers, memory provider and approvals mode. `live_built_at` is when the live release was built, and `stale` is `true` when the report is older than that build: `hal0 update` rebuilds Hermes without rewriting `provision.json`, so a stale report no longer lists `provision_failed` or `provision_warn` in `degraded`. |
+| `doctor` | Rows `{id, status, detail}` for `interpreter`, `plugins`, `ownership` and `gateway_unit`; `status` is `ok`, `warn`, `fail`, `absent` or `unreadable`. |
+| `approvals` | `mode`, `effective`, `in_sync` and the `pending` approval count. |
+| `memory` | `available`, `writes` and `last_write` of the agent's private namespace. |
+| `links` | `desktop`: the `HAL0_HERMES_PUBLIC_URL` value without a trailing slash, or `null`. |
+| `job` | The newest queued or running Hermes build, `{id, kind, state}` with `kind` `converge` or `repair`, or `null`. |
+| `degraded` | Why a running Hermes is degraded: `{reason, detail, fix, command}`, where `fix` is one of `restart_gateway`, `repair`, `resync_approvals`, `cli` (a root command, in `command`) or `none`. A gateway the operator turned off (`gateway_enabled: false`) and a missing gateway unit raise no `gateway_down` (the `gateway_unit` doctor row names the install command), the API not answering is not raised while the gateway is starting, reloading or in maintenance, and `doctor_drift` is one reason per distinct fix (a `gateway_unit` row that is `unreadable`, because the check could not read Hermes' home, has fix `none`). |
+| `phase` | `working`, `broken`, `unknown`, `down`, `degraded` or `ready`. The dashboard shows `ready` as `serving` when the agent slot is up. |
+| `generated_at` | When the build behind the cached probes started. |
+| `partial` | `true` only on a build that hit the 8 s cap; absent otherwise. |
+
+Pi (`kind: "cli"`):
+
+| Key | Value |
+|---|---|
+| `name`, `kind`, `installed`, `status` | Identity and install state. |
+| `version` | `installed` and `pin` as `{pi, adapter}` versions, and `update_available` (`true` when either is behind the installer's pin). |
+| `profile` | The marker's `home` and `profiled_at`, `home_readable`, and `checks`: `{id, ok, detail}` rows where `ok` is `null` when the daemon cannot read the profiled home. |
+| `memory` | `mcp_entry` and `hindsight_config` (from `profile.checks`), and `hindsight_api_reachable`. |
+| `commands` | `install`, `upgrade` and `uninstall` commands to run as root. |
+| `phase` | `installed` or `broken`. |
+| `generated_at`, `partial` | As for Hermes. |
+
+## Agent restart and repair
+
+ADMIN-gated with the rest of `/api/agents`, no request body, `hermes` only (any other agent
+is `404 agent.unknown`). Each action logs to `hal0.agents.audit` with `actor` (the
+`X-hal0-Agent` header, `hal0-dashboard` when absent).
+
+| Method | Path | Status | Notes |
+|---|---|---|---|
+| POST | `/api/agents/hermes/restart` | 200 | Restarts `hal0-agent@hermes.service` through the `hal0-systemctl` sudo wrapper, as the Services page does: hal0-api runs as the unprivileged `hal0` user, and a bare `systemctl restart` is denied by polkit. The command-approvals `PUT` restart takes the same path. Returns `{agent_id, unit, status: "restarted", detail}` once the verb exits 0. A failed verb is `500 agent.restart_failed` (the failure line, cut to 200 characters, in `message`); one still running after 90 s is `500 agent.restart_timeout`, outcome unknown. Events: `agent.restart.invoked`, then `.ok`, `.failed` or `.timeout`. |
+| POST | `/api/agents/hermes/gateway/restart` | 200 | The same for `hermes-gateway.service`, with the same body (`unit` is the gateway's), errors and budget; `404 agent.not_installed` when Hermes has no install record. Events: `agent.gateway_restart.invoked`, then `.finished` (`status` is `restarted` or `error`). |
+| POST | `/api/agents/hermes/repair` | 202 | Queues a repair job (below). |
+
+A restart that went through drops the agent's cached overview.
+
+### Repair job
+
+`POST /api/agents/hermes/repair` runs `hal0 agent bootstrap hermes --repair --verbose` (the
+code path of `hal0 agent reprovision hermes --repair`) as a child of hal0-api and returns the
+queued job: `id`, `state: "queued"`, `phase: "repair:hermes"`, `kind`, `agent`, `steps: []`,
+`log_path`, `created_at`, `updated_at`. The job is in the updater's registry, so
+`GET /api/updates/status/{id}` serves it, and a repair and a converge refuse each other.
+
+- `state` goes `queued`, `running`, then `applied` (exit 0) or `failed`. A running job has
+  `pid` and `steps`, one entry per `[run ] <step>` line the provisioner prints. A finished one
+  has `exit_code`; a failed one has `error`: `bootstrap exited <code>`, `could not start
+  bootstrap: <os error>` or, after 45 minutes, `bootstrap timed out after 2700s`.
+- The output goes to `log_path`,
+  `/var/lib/hal0/state/agents/hermes/provision-logs/job-<id>.log` (`null` if it could not be
+  opened; never pruned). Events: `agent.repair.invoked`, `agent.repair.finished`.
+- Refused, with no job: `404 agent.not_installed` without a Hermes install record;
+  `409 agent.busy` when an update, converge or repair job is `queued` or `running`
+  (`details.job_id`) or another process holds the Hermes builder lock (`details.holder`,
+  advisory: it can name a dead holder); `409 agent.builder_lock_unreadable` when the lock file
+  cannot be opened (`details.error`).
+- **`api_restarted`.** The child shares hal0-api's cgroup, so restarting hal0-api mid-repair (a
+  `hal0 update`, `systemctl restart hal0-api`) kills the build. The live release is unchanged,
+  because the builder swaps `current` only at the very end. The next status read of the job
+  records it `failed` with `error_code: "api_restarted"`; run the repair again. Any
+  update, converge or repair job still `queued` or `running` when it is read back after a
+  hal0-api restart reads the same (see `/api/updates` in the
+  [REST API index](/docs/reference/api/rest-api/)).
