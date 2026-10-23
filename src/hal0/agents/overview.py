@@ -18,12 +18,7 @@ from typing import Any
 from packaging.version import InvalidVersion, Version
 
 from hal0.agents.hermes_release import Release
-
-#: Component statuses that mean the pinned Hermes is not the running one yet
-#: (the Services page uses the same set; ``components.status._PENDING_STATUSES``).
-_PENDING_STATUSES = frozenset(
-    {"pending", "stale", "build_failed", "snapshot_failed", "rolled_back", "activation_failed"}
-)
+from hal0.components.status import _PENDING_STATUSES
 
 
 def _live_dict(release: Release) -> dict[str, Any]:
@@ -73,14 +68,41 @@ def hermes_version(
     }
 
 
-def unit_states(agent_active: bool | None, gateway: str | None) -> dict[str, str]:
+#: ``UnitFileState`` values that mean the operator turned the gateway off
+#: (``systemctl disable`` / ``mask``; ADR-0034 keeps both supported), and the
+#: ones that mean it is meant to run.
+_GATEWAY_OFF_FILE_STATES = frozenset({"disabled", "masked", "masked-runtime"})
+_GATEWAY_ON_FILE_STATES = frozenset(
+    {"enabled", "enabled-runtime", "static", "linked", "generated", "transient"}
+)
+
+
+def unit_file_enabled(unit_file_state: str | None) -> bool | None:
+    """Whether a unit's ``UnitFileState`` says it is meant to run.
+
+    ``False`` for ``disabled``, ``masked`` and ``masked-runtime``; ``True`` for
+    ``enabled``, ``enabled-runtime``, ``static``, ``linked``, ``generated`` and
+    ``transient``; ``None`` for anything else (including ``unknown``).
+    """
+    if unit_file_state in _GATEWAY_OFF_FILE_STATES:
+        return False
+    if unit_file_state in _GATEWAY_ON_FILE_STATES:
+        return True
+    return None
+
+
+def unit_states(
+    agent_active: bool | None, gateway: str | None, *, gateway_enabled: bool | None = None
+) -> dict[str, Any]:
     """Systemd state of the agent unit and the gateway unit.
 
     ``agent_active`` is the boolean liveness probe (``None`` when systemd could
     not answer); ``gateway`` is the unit's active state string or ``None``.
+    ``gateway_enabled`` says whether the gateway is meant to run (see
+    :func:`unit_file_enabled`); ``None`` when that is not known.
     """
     agent = {True: "active", False: "inactive", None: "unknown"}[agent_active]
-    return {"agent": agent, "gateway": gateway or "unknown"}
+    return {"agent": agent, "gateway": gateway or "unknown", "gateway_enabled": gateway_enabled}
 
 
 #: ``config_write`` phase details the card lifts to the top of the summary.
@@ -189,6 +211,17 @@ def doctor_rows(
 #: ``hal0`` and cannot ``chown`` the Hermes tree itself).
 _OWNERSHIP_REPAIR_COMMAND = "sudo hal0 agent bootstrap hermes --repair"
 
+#: The root-only command that installs the gateway unit. The daemon cannot: the
+#: unit lives under ``/etc/systemd/system``.
+_GATEWAY_INSTALL_COMMAND = "sudo hal0 agent install hermes"
+
+#: Doctor rows whose fix is a root CLI command, with that command. Every other
+#: row is fixed by a Repair job.
+_DOCTOR_CLI_FIXES = {
+    "ownership": _OWNERSHIP_REPAIR_COMMAND,
+    "gateway_unit": _GATEWAY_INSTALL_COMMAND,
+}
+
 
 def _reason(reason: str, detail: str, fix: str, command: str | None = None) -> dict[str, Any]:
     """One degraded reason: what is wrong, and the card control that fixes it."""
@@ -219,42 +252,43 @@ def _approvals_reason(approvals: dict[str, Any]) -> dict[str, Any]:
 
 def degraded_reasons(
     *,
-    units: dict[str, str],
+    units: dict[str, Any],
     api_healthy: bool,
     provision: dict[str, Any],
     doctor: list[dict[str, Any]],
     approvals: dict[str, Any],
+    gateway_settling: bool = False,
 ) -> list[dict[str, Any]]:
     """Why a running Hermes is degraded, in display order, each with its fix.
 
-    ``gateway_down`` fires for any known gateway state other than ``active``;
-    ``unknown`` means the probe could not answer, which is not evidence of a
-    fault. Restart is its fix except for ``absent`` (no unit to restart), which
-    points the operator at ``hal0 doctor`` instead. ``api_unhealthy`` needs an active gateway (the API server runs
-    inside it, and an inactive gateway already produced ``gateway_down``).
-    ``doctor_drift`` is one reason covering every doctor row whose status is
-    not ``ok`` or ``absent``; its fix is the root CLI command when the
-    ``ownership`` row contributes (hal0 cannot ``chown`` its own tree), else
-    ``repair``. ``in_sync`` of ``None`` (Hermes not provisioned) is not drift.
-    A ``provision`` marked ``stale`` (its report predates the live release,
-    which ``hal0 update`` rebuilds without rewriting ``provision.json``)
-    raises neither ``provision_failed`` nor ``provision_warn``.
+    ``gateway_down`` fires when the gateway is in a state other than ``active``,
+    ``unknown`` or ``absent``, unless ``units["gateway_enabled"]`` is ``False``:
+    an operator who disabled or masked the gateway (ADR-0034 keeps both) wants
+    it off, and the card shows that from ``units``. ``unknown`` means the probe
+    could not answer, which is not evidence of a fault. ``absent`` (no unit file)
+    raises nothing here: the ``gateway_unit`` doctor row covers it, with the
+    command that installs the unit. ``api_unhealthy`` needs an active gateway
+    (the API server runs inside it, and an inactive gateway already produced
+    ``gateway_down``) and is not raised while ``gateway_settling`` (the gateway
+    is starting, reloading or in maintenance, so its API may not answer yet).
+    ``doctor_drift`` covers every doctor row whose status is not ``ok`` or
+    ``absent``, one reason per distinct fix: the ``ownership`` row needs a root
+    CLI command (hal0 cannot ``chown`` its own tree), the ``gateway_unit`` row
+    another (hal0 cannot write ``/etc/systemd/system``), and the rest are fixed
+    by a Repair job. ``in_sync`` of ``None`` (Hermes not provisioned) is not
+    drift. A ``provision`` marked ``stale`` (its report predates the live
+    release, which ``hal0 update`` rebuilds without rewriting
+    ``provision.json``) raises neither ``provision_failed`` nor
+    ``provision_warn``.
     """
     reasons: list[dict[str, Any]] = []
     gateway = units.get("gateway") or "unknown"
-    if gateway == "absent":
-        reasons.append(
-            _reason(
-                "gateway_down",
-                "hermes-gateway.service is not installed; run hal0 doctor",
-                "none",
+    if gateway not in ("active", "unknown", "absent"):
+        if units.get("gateway_enabled") is not False:
+            reasons.append(
+                _reason("gateway_down", f"hermes-gateway.service is {gateway}", "restart_gateway")
             )
-        )
-    elif gateway not in ("active", "unknown"):
-        reasons.append(
-            _reason("gateway_down", f"hermes-gateway.service is {gateway}", "restart_gateway")
-        )
-    elif gateway == "active" and not api_healthy:
+    elif gateway == "active" and not api_healthy and not gateway_settling:
         reasons.append(
             _reason(
                 "api_unhealthy",
@@ -279,13 +313,14 @@ def degraded_reasons(
             _reason("provision_warn", "the last provision run recorded warnings", "none")
         )
 
-    drifted = [row for row in doctor if row.get("status") not in ("ok", "absent")]
-    if drifted:
-        detail = "; ".join(f"{row['id']}: {row['detail']}" for row in drifted)
-        if any(row["id"] == "ownership" for row in drifted):
-            reasons.append(_reason("doctor_drift", detail, "cli", _OWNERSHIP_REPAIR_COMMAND))
-        else:
-            reasons.append(_reason("doctor_drift", detail, "repair"))
+    # Group the drifted rows by fix, in row order, so each reason names one command.
+    fixes: dict[str | None, list[dict[str, Any]]] = {}
+    for row in doctor:
+        if row.get("status") not in ("ok", "absent"):
+            fixes.setdefault(_DOCTOR_CLI_FIXES.get(row["id"]), []).append(row)
+    for command, rows in fixes.items():
+        detail = "; ".join(f"{row['id']}: {row['detail']}" for row in rows)
+        reasons.append(_reason("doctor_drift", detail, "cli" if command else "repair", command))
 
     if approvals.get("in_sync") is False:
         reasons.append(_approvals_reason(approvals))

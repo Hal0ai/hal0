@@ -20,6 +20,7 @@ from hal0.agents.overview import (
     pi_profile_checks,
     pi_update_available,
     provision_summary,
+    unit_file_enabled,
     unit_states,
 )
 
@@ -38,13 +39,36 @@ def test_hermes_version_marks_update_when_installed_differs_from_pinned():
             "hal0_version": "1.5.0",
         },
     )
+    previous = Release(
+        id="3ef6bbd2c1a0-20261001T000000Z",
+        path=Path("/y"),
+        data={
+            "ref": "3ef6bbd2" + "0" * 32,
+            "describe": "v0.19.0",
+            "built_at": "2026-10-01T00:00:00Z",
+        },
+    )
     out = hermes_version(
         live,
-        None,
+        previous,
         pin_ref="4d043038" + "0" * 32,
         component={"installed": "d923a5eb", "pinned": "4d043038", "status": "pending"},
     )
-    assert out["live"]["describe"] == "v0.22.2"
+    assert out["live"] == {
+        "id": "d923a5eb487a-20261022T021933Z",
+        "ref": "d923a5eb" + "0" * 32,
+        "describe": "v0.22.2",
+        "built_at": "2026-10-22T02:19:58Z",
+        "python_minor": "3.14",
+        "extras": ["web", "mcp"],
+        "platform_extras": ["telegram"],
+        "hal0_version": "1.5.0",
+    }
+    assert out["previous"] == {
+        "id": "3ef6bbd2c1a0-20261001T000000Z",
+        "ref": "3ef6bbd2" + "0" * 32,
+        "describe": "v0.19.0",
+    }
     assert out["pin"] == {"ref": "4d043038" + "0" * 32, "describe": None}
     assert out["component"] == {"installed": "d923a5eb", "pinned": "4d043038", "status": "pending"}
     assert out["update_available"] is True
@@ -60,10 +84,52 @@ def test_hermes_version_converged_is_not_update():
     assert out["update_available"] is False and out["live"] is None
 
 
+def test_pending_statuses_have_one_owner():
+    from hal0.agents import overview
+    from hal0.components import status
+
+    assert overview._PENDING_STATUSES is status._PENDING_STATUSES
+
+
 def test_unit_states_maps_probe_results():
-    assert unit_states(True, "active") == {"agent": "active", "gateway": "active"}
-    assert unit_states(False, "failed") == {"agent": "inactive", "gateway": "failed"}
-    assert unit_states(None, None) == {"agent": "unknown", "gateway": "unknown"}
+    assert unit_states(True, "active") == {
+        "agent": "active",
+        "gateway": "active",
+        "gateway_enabled": None,
+    }
+    assert unit_states(False, "failed", gateway_enabled=False) == {
+        "agent": "inactive",
+        "gateway": "failed",
+        "gateway_enabled": False,
+    }
+    assert unit_states(None, None) == {
+        "agent": "unknown",
+        "gateway": "unknown",
+        "gateway_enabled": None,
+    }
+
+
+@pytest.mark.parametrize(
+    ("unit_file_state", "expected"),
+    [
+        ("disabled", False),
+        ("masked", False),
+        ("masked-runtime", False),
+        ("enabled", True),
+        ("enabled-runtime", True),
+        ("static", True),
+        ("linked", True),
+        ("generated", True),
+        ("transient", True),
+        ("linked-runtime", None),
+        ("alias", None),
+        ("unknown", None),
+        ("", None),
+        (None, None),
+    ],
+)
+def test_unit_file_enabled(unit_file_state, expected):
+    assert unit_file_enabled(unit_file_state) is expected
 
 
 def test_provision_summary_counts_and_lifts_config_write_details():
@@ -201,19 +267,41 @@ def test_gateway_down_suppresses_api_unhealthy():
     assert out[0]["fix"] == "restart_gateway"
 
 
-def test_gateway_absent_has_no_restart_fix():
-    out = degraded_reasons(**{**BASE, "units": {"agent": "active", "gateway": "absent"}})
-    assert out == [
-        {
-            "reason": "gateway_down",
-            "detail": "hermes-gateway.service is not installed; run hal0 doctor",
-            "fix": "none",
-            "command": None,
+def test_gateway_absent_raises_no_gateway_down_the_doctor_row_covers_it():
+    assert degraded_reasons(**{**BASE, "units": {"agent": "active", "gateway": "absent"}}) == []
+    out = degraded_reasons(
+        **{
+            **BASE,
+            "units": {"agent": "active", "gateway": "absent"},
+            "doctor": [{"id": "gateway_unit", "status": "fail", "detail": "unit missing"}],
         }
+    )
+    assert [(r["reason"], r["fix"], r["command"]) for r in out] == [
+        ("doctor_drift", "cli", "sudo hal0 agent install hermes")
     ]
+
+
+def test_gateway_down_offers_a_restart_for_inactive_and_failed():
     for state in ("inactive", "failed"):
         (reason,) = degraded_reasons(**{**BASE, "units": {"agent": "active", "gateway": state}})
         assert reason["reason"] == "gateway_down" and reason["fix"] == "restart_gateway"
+
+
+def test_gateway_the_operator_turned_off_is_not_degraded():
+    for state in ("inactive", "failed"):
+        units = {"agent": "active", "gateway": state, "gateway_enabled": False}
+        assert degraded_reasons(**{**BASE, "units": units}) == []
+    for enabled in (True, None):
+        units = {"agent": "active", "gateway": "inactive", "gateway_enabled": enabled}
+        out = degraded_reasons(**{**BASE, "units": units})
+        assert [r["reason"] for r in out] == ["gateway_down"]
+
+
+def test_api_unhealthy_waits_while_the_gateway_settles():
+    unhealthy = {**BASE, "api_healthy": False}
+    assert degraded_reasons(**unhealthy, gateway_settling=True) == []
+    out = degraded_reasons(**unhealthy, gateway_settling=False)
+    assert [r["reason"] for r in out] == ["api_unhealthy"]
 
 
 def test_gateway_down_is_listed_before_the_other_reasons():
@@ -261,13 +349,48 @@ def test_doctor_drift_fires_on_any_not_ok_row():
     assert mixed[0]["detail"] == "ownership: HERMES_HOME tree: root:root"
 
 
-def test_non_ownership_doctor_failure_offers_repair():
+def test_interpreter_and_plugin_drift_offer_repair():
+    for row_id in ("interpreter", "plugins"):
+        out = degraded_reasons(
+            **{**BASE, "doctor": [{"id": row_id, "status": "warn", "detail": "stale"}]}
+        )
+        assert [(r["reason"], r["fix"], r["command"]) for r in out] == [
+            ("doctor_drift", "repair", None)
+        ]
+
+
+def test_gateway_unit_drift_needs_the_root_install_command():
     out = degraded_reasons(
-        **{**BASE, "doctor": [{"id": "gateway_unit", "status": "fail", "detail": "stale"}]}
+        **{**BASE, "doctor": [{"id": "gateway_unit", "status": "fail", "detail": "unit missing"}]}
     )
-    assert [(r["reason"], r["fix"], r["command"]) for r in out] == [
-        ("doctor_drift", "repair", None)
+    assert out == [
+        {
+            "reason": "doctor_drift",
+            "detail": "gateway_unit: unit missing",
+            "fix": "cli",
+            "command": "sudo hal0 agent install hermes",
+        }
     ]
+
+
+def test_doctor_drift_is_one_reason_per_distinct_fix():
+    out = degraded_reasons(
+        **{
+            **BASE,
+            "doctor": [
+                {"id": "interpreter", "status": "warn", "detail": "old sqlite"},
+                {"id": "plugins", "status": "warn", "detail": "trees differ"},
+                {"id": "ownership", "status": "fail", "detail": "root:root"},
+                {"id": "gateway_unit", "status": "fail", "detail": "unit missing"},
+            ],
+        }
+    )
+    assert [(r["fix"], r["command"], r["detail"]) for r in out] == [
+        ("repair", None, "interpreter: old sqlite; plugins: trees differ"),
+        ("cli", "sudo hal0 agent bootstrap hermes --repair", "ownership: root:root"),
+        ("cli", "sudo hal0 agent install hermes", "gateway_unit: unit missing"),
+    ]
+    assert {r["reason"] for r in out} == {"doctor_drift"}
 
 
 def test_approvals_drift_resync_when_setting_owned():

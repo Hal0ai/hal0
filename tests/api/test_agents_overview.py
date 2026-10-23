@@ -10,6 +10,7 @@ or the real Hermes tree.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import subprocess
@@ -18,6 +19,7 @@ import threading
 import time
 from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -84,14 +86,20 @@ def _build_client(
         yield client
 
 
+def _reset_cache() -> None:
+    overview_route._cache.clear()
+    overview_route._inflight.clear()
+    overview_route._invalidated.clear()
+
+
 @pytest.fixture(autouse=True)
 def _clean_state(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[None]:
     """A hermetic Hermes home, no desktop URL, and an empty route cache."""
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes-home"))
     monkeypatch.delenv("HAL0_HERMES_PUBLIC_URL", raising=False)
-    overview_route._cache.clear()
+    _reset_cache()
     yield
-    overview_route._cache.clear()
+    _reset_cache()
 
 
 @pytest.fixture
@@ -263,7 +271,7 @@ def test_overview_hermes_ready_shape(client_ready):
     body = client_ready.get("/api/agents/hermes/overview").json()
     assert body["phase"] == "ready" and body["degraded"] == []
     assert body["version"]["update_available"] is False
-    assert body["units"] == {"agent": "active", "gateway": "active"}
+    assert body["units"] == {"agent": "active", "gateway": "active", "gateway_enabled": True}
     assert body["api_server"] == {
         "endpoint": "127.0.0.1:8642",
         "healthy": True,
@@ -294,9 +302,8 @@ def test_overview_hermes_not_installed_returns_pin_only(client_empty):
 
 def test_overview_degrades_without_systemd(client_nosystemd):
     body = client_nosystemd.get("/api/agents/hermes/overview").json()
-    assert (
-        body["units"] == {"agent": "unknown", "gateway": "unknown"} and body["phase"] == "unknown"
-    )
+    assert body["units"] == {"agent": "unknown", "gateway": "unknown", "gateway_enabled": None}
+    assert body["phase"] == "unknown"
 
 
 def test_overview_unknown_agent_404(client_ready):
@@ -376,7 +383,8 @@ def test_overview_missing_gateway_unit_is_absent(client_ready, monkeypatch):
 
     monkeypatch.setattr(overview_route, "unit_state", _not_loaded)
     body = client_ready.get("/api/agents/hermes/overview").json()
-    assert body["units"]["gateway"] == "absent"
+    assert body["units"]["gateway"] == "absent" and body["units"]["gateway_enabled"] is None
+    assert body["degraded"] == []  # the gateway_unit doctor row covers a missing unit
 
 
 def test_overview_job_is_the_newest_active_hermes_job(client_ready):
@@ -500,6 +508,8 @@ def test_overview_probes_the_gateway_and_every_profile_at_once(client_ready, mon
         ("active", "active"),
         ("activating", "active"),
         ("reloading", "active"),
+        ("refreshing", "active"),
+        ("maintenance", "active"),
         ("deactivating", "inactive"),
         ("failed", "failed"),
     ],
@@ -531,7 +541,7 @@ def test_overview_rejected_builder_input_degrades_one_block(client_ready, monkey
     assert body["version"]["live"] is None and body["version"]["update_available"] is False
     assert body["version"]["pin"] == {"ref": PIN_REF, "describe": None}
     assert body["provision"]["present"] is False and body["provision"]["stale"] is False
-    assert body["units"] == {"agent": "active", "gateway": "active"}
+    assert body["units"] == {"agent": "active", "gateway": "active", "gateway_enabled": True}
 
 
 class _CountingManager(_FakeManager):
@@ -629,30 +639,167 @@ def test_overview_uninstall_drops_the_cache_entry(client_ready, monkeypatch):
 
 
 def test_overview_live_fields_are_current_on_a_cache_hit(client_ready, monkeypatch, probe_calls):
-    """A build, an approval or a unit change inside the cache window shows without a refresh."""
+    """An approval or a unit change inside the cache window shows without a refresh.
+
+    (A Hermes job starting or ending is a cache miss; see the job test below.)
+    """
     first = client_ready.get("/api/agents/hermes/overview").json()
     assert first["job"] is None and first["phase"] == "ready"
     assert first["approvals"]["pending"] == 0
 
-    client_ready.app.state.update_jobs = {
-        "j": {"id": "j", "state": "running", "phase": "repair:hermes", "created_at": 1.0}
-    }
     pending = [{"id": "a"}, {"id": "b"}]
     monkeypatch.setattr(
         overview_route, "_queue", lambda request: SimpleNamespace(list_pending=lambda: pending)
     )
-    during = client_ready.get("/api/agents/hermes/overview").json()
-    assert during["job"] == {"id": "j", "kind": "repair", "state": "running"}
-    assert during["phase"] == "working" and during["approvals"]["pending"] == 2
-
-    client_ready.app.state.update_jobs["j"]["state"] = "applied"
 
     async def _inactive(agent_id: str) -> bool:
         return False
 
     monkeypatch.setattr(overview_route, "unit_is_active", _inactive)
     after = client_ready.get("/api/agents/hermes/overview").json()
-    assert after["job"] is None and after["phase"] == "down"
-    assert after["unit_active"] is False
-    assert after["units"] == {"agent": "inactive", "gateway": "active"}
-    assert probe_calls["gateway_alive"] == 1  # every one of these was a cache hit
+    assert after["approvals"]["pending"] == 2
+    assert after["phase"] == "down" and after["unit_active"] is False
+    assert after["units"] == {"agent": "inactive", "gateway": "active", "gateway_enabled": True}
+    assert probe_calls["gateway_alive"] == 1  # a cache hit
+
+
+def _gateway_unit_state(monkeypatch, active_state, unit_file_state):
+    async def _state(unit: str) -> dict[str, str | None]:
+        return {
+            "active_state": active_state,
+            "sub_state": "dead",
+            "unit_file_state": unit_file_state,
+            "since": None,
+        }
+
+    monkeypatch.setattr(overview_route, "unit_state", _state)
+
+
+@pytest.mark.parametrize("unit_file_state", ["disabled", "masked", "masked-runtime"])
+def test_overview_gateway_the_operator_turned_off_is_not_degraded(
+    client_ready, monkeypatch, unit_file_state
+):
+    _gateway_unit_state(monkeypatch, "inactive", unit_file_state)
+    monkeypatch.setattr(overview_route, "gateway_alive", lambda home, *, probe=None: False)
+    body = client_ready.get("/api/agents/hermes/overview").json()
+    assert body["units"]["gateway"] == "inactive" and body["units"]["gateway_enabled"] is False
+    assert body["degraded"] == [] and body["phase"] == "ready"
+
+
+def test_overview_gateway_that_should_run_but_is_stopped_is_degraded(client_ready, monkeypatch):
+    _gateway_unit_state(monkeypatch, "failed", "enabled")
+    body = client_ready.get("/api/agents/hermes/overview").json()
+    assert body["units"]["gateway_enabled"] is True
+    assert [r["reason"] for r in body["degraded"]] == ["gateway_down"]
+
+
+@pytest.mark.parametrize("active_state", ["activating", "reloading", "refreshing", "maintenance"])
+def test_overview_api_not_answering_while_the_gateway_settles_is_not_degraded(
+    client_ready, monkeypatch, active_state
+):
+    _gateway_unit_state(monkeypatch, active_state, "enabled")
+    monkeypatch.setattr(overview_route, "gateway_alive", lambda home, *, probe=None: False)
+    body = client_ready.get("/api/agents/hermes/overview").json()
+    assert body["units"]["gateway"] == "active" and body["degraded"] == []
+
+
+def test_overview_api_not_answering_from_an_active_gateway_is_degraded(client_ready, monkeypatch):
+    _gateway_unit_state(monkeypatch, "active", "enabled")
+    monkeypatch.setattr(overview_route, "gateway_alive", lambda home, *, probe=None: False)
+    body = client_ready.get("/api/agents/hermes/overview").json()
+    assert [r["reason"] for r in body["degraded"]] == ["api_unhealthy"]
+
+
+def test_overview_stalled_memory_stats_degrade_to_unavailable(client_ready, monkeypatch):
+    async def _never(agent_id: str, request: Any) -> dict[str, Any]:
+        await asyncio.sleep(30)  # far past the budget: only a timeout can end the wait
+        return {"available": True, "writes": 99, "last_write": "late"}
+
+    monkeypatch.setattr(overview_route, "get_agent_memory_stats", _never)
+    monkeypatch.setattr(overview_route, "_MEMORY_TIMEOUT_S", 0.05)
+    resp = client_ready.get("/api/agents/hermes/overview")
+    assert resp.status_code == 200
+    assert resp.json()["memory"] == {"available": False, "writes": None, "last_write": None}
+
+
+def test_overview_a_job_starting_or_ending_is_a_cache_miss(client_ready, probe_calls):
+    client_ready.get("/api/agents/hermes/overview")
+    client_ready.get("/api/agents/hermes/overview")
+    assert probe_calls["gateway_alive"] == 1
+
+    jobs = {"j": {"id": "j", "state": "running", "phase": "converge:hermes", "created_at": 1.0}}
+    client_ready.app.state.update_jobs = jobs
+    assert client_ready.get("/api/agents/hermes/overview").json()["phase"] == "working"
+    assert probe_calls["gateway_alive"] == 2
+    client_ready.get("/api/agents/hermes/overview")  # same job: cached
+    assert probe_calls["gateway_alive"] == 2
+
+    jobs["j"]["state"] = "applied"
+    assert client_ready.get("/api/agents/hermes/overview").json()["phase"] == "ready"
+    assert probe_calls["gateway_alive"] == 3
+    client_ready.get("/api/agents/hermes/overview")
+    assert probe_calls["gateway_alive"] == 3
+
+
+def test_overview_invalidate_drops_the_cache_entry(client_ready, probe_calls):
+    client_ready.get("/api/agents/hermes/overview")
+    overview_route.invalidate("hermes")
+    assert "hermes" not in overview_route._cache
+    client_ready.get("/api/agents/hermes/overview")
+    assert probe_calls["gateway_alive"] == 2
+
+
+def test_overview_a_build_running_during_invalidate_stores_nothing(
+    client_ready, monkeypatch, probe_calls
+):
+    entered, release = threading.Event(), threading.Event()
+
+    def alive(home, *, probe=None):
+        probe_calls["gateway_alive"] += 1
+        if probe_calls["gateway_alive"] == 1:
+            entered.set()
+            assert release.wait(10)
+        return True
+
+    monkeypatch.setattr(overview_route, "gateway_alive", alive)
+    with ThreadPoolExecutor(1) as pool:
+        stalled = pool.submit(client_ready.get, "/api/agents/hermes/overview")
+        assert entered.wait(10)
+        overview_route.invalidate("hermes")
+        release.set()
+        assert stalled.result(timeout=20).status_code == 200
+    assert "hermes" not in overview_route._cache
+    client_ready.get("/api/agents/hermes/overview")
+    assert probe_calls["gateway_alive"] == 2
+
+
+def test_overview_cache_age_counts_from_when_the_build_finished(
+    client_ready, monkeypatch, probe_calls
+):
+    clock = [1000.0]
+    monkeypatch.setattr(overview_route, "_now", lambda: clock[0])
+
+    def slow_alive(home, *, probe=None):
+        probe_calls["gateway_alive"] += 1
+        clock[0] += 20.0  # the build takes 20 s
+        return True
+
+    monkeypatch.setattr(overview_route, "gateway_alive", slow_alive)
+    client_ready.get("/api/agents/hermes/overview")
+    clock[0] += 25.0  # 45 s after the build began, 25 s after it finished
+    client_ready.get("/api/agents/hermes/overview")
+    assert probe_calls["gateway_alive"] == 1
+    clock[0] += 6.0  # 31 s after it finished
+    client_ready.get("/api/agents/hermes/overview")
+    assert probe_calls["gateway_alive"] == 2
+
+
+def test_overview_generated_at_is_the_build_start_wall_clock(client_ready):
+    before = datetime.now(UTC)
+    first = client_ready.get("/api/agents/hermes/overview").json()["generated_at"]
+    after = datetime.now(UTC)
+    assert first.endswith("Z")
+    assert before.replace(microsecond=0) <= datetime.fromisoformat(first) <= after
+    assert client_ready.get("/api/agents/hermes/overview").json()["generated_at"] == first
+    time.sleep(0.01)
+    assert client_ready.get("/api/agents/hermes/overview?refresh=1").json()["generated_at"] != first

@@ -137,8 +137,15 @@ roughly 43). `WS /v1/realtime` is documented separately — see
 and Pi cards render. ADMIN-gated with the rest of `/api/agents`. `name` is `hermes` or
 `pi`; any other name is `404 agent.unknown`. The route builds the answer from live
 probes and never fails for a normal box state: a missing systemd, a stopped gateway or
-an unreadable file shows as `unknown`, empty or `null` in the matching key. The result
-The probes are cached for 30 s per agent and built once per miss: requests that miss while a build is running wait for it. `?refresh=1` starts a new build and refills the cache. `status`, `unit_active`, `units.agent`, `approvals.pending`, `job` and `phase` are recomputed on every request, so a build that starts or finishes inside the window shows at once.
+an unreadable file shows as `unknown`, empty or `null` in the matching key.
+
+The probes are cached for 30 s per agent, counted from when the build finished, and
+built once per miss: requests that miss while a build is running wait for it.
+`?refresh=1` starts a new build and refills the cache. A Hermes build or repair starting
+or ending is a miss too, so the state it leaves behind is never served from before it.
+`generated_at` (an ISO-8601 UTC time, the start of the build behind the answer) tells a
+client how old the probes are. `status`, `unit_active`, `units.agent`, `approvals.pending`,
+`job` and `phase` are recomputed on every request.
 
 A bundled agent that is not installed answers with only `name`, `kind`,
 `installed: false`, `phase: "not_installed"`, `commands.install`, and the version it
@@ -152,7 +159,7 @@ Hermes (`kind: "daemon"`):
 | `name`, `kind`, `installed`, `status` | Identity and install state (`status` is `installed` or `broken`). |
 | `unit_active` | `true`, `false`, or `null` when systemd cannot answer. |
 | `version` | `live` and `previous` release (`id`, `ref`, `describe`, and for `live` also `built_at`, `python_minor`, `extras`, `platform_extras`, `hal0_version`), the `pin` (`{ref, describe}`), the `component` row (`installed`, `pinned`, `status`), and `update_available`. |
-| `units` | `agent` and `gateway` states: `active`, `inactive`, `failed`, `unknown`, and for the gateway `absent` when the unit does not exist. The gateway's `activating` and `reloading` read as `active` and `deactivating` as `inactive`, so a restart is not reported as down. |
+| `units` | `agent` is `active`, `inactive` or `unknown` (systemd could not answer). `gateway` is `active`, `inactive`, `failed`, `unknown`, or `absent` when the unit does not exist; its `activating`, `reloading`, `refreshing` and `maintenance` states read as `active` and `deactivating` as `inactive`, so a restart is not reported as down. `gateway_enabled` is `false` when the unit file is `disabled`, `masked` or `masked-runtime`, `true` for `enabled`, `enabled-runtime`, `static`, `linked`, `generated` and `transient`, and `null` otherwise. |
 | `api_server` | `endpoint` (`host:port`, from config), `healthy`, and the `profiles` the gateway serves. The gateway and every profile are probed at once, with a 1 s timeout each. |
 | `platforms` | Names of the configured gateway platforms. |
 | `provision` | The last provision run: `present`, versions, `completed_at`, `reported_at` (the newest phase time), `phases`, `ok`/`warn`/`fail` counts, and the configured models, MCP servers, memory provider and approvals mode. `live_built_at` is when the live release was built, and `stale` is `true` when the report is older than that build: `hal0 update` rebuilds Hermes without rewriting `provision.json`, so a stale report no longer lists `provision_failed` or `provision_warn` in `degraded`. |
@@ -161,8 +168,9 @@ Hermes (`kind: "daemon"`):
 | `memory` | `available`, `writes` and `last_write` of the agent's private namespace. |
 | `links` | `desktop`: the `HAL0_HERMES_PUBLIC_URL` value without a trailing slash, or `null`. |
 | `job` | The newest queued or running Hermes build, `{id, kind, state}` with `kind` `converge` or `repair`, or `null`. |
-| `degraded` | Why a running Hermes is degraded: `{reason, detail, fix, command}`. |
+| `degraded` | Why a running Hermes is degraded: `{reason, detail, fix, command}`, where `fix` is one of `restart_gateway`, `repair`, `resync_approvals`, `cli` (a root command, in `command`) or `none`. A gateway the operator turned off (`gateway_enabled: false`) and a missing gateway unit raise no `gateway_down` (the `gateway_unit` doctor row names the install command), the API not answering is not raised while the gateway is starting, reloading or in maintenance, and `doctor_drift` is one reason per distinct fix. |
 | `phase` | `working`, `broken`, `unknown`, `down`, `degraded` or `ready`. The dashboard shows `ready` as `serving` when the agent slot is up. |
+| `generated_at` | When the build behind the cached probes started. |
 
 Pi (`kind: "cli"`):
 

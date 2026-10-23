@@ -13,12 +13,15 @@ an unreadable file or a release record of an unexpected shape shows up as a
 degraded card instead of a 500.
 
 The slow part (probes, doctor checks, file reads) is built once per agent per
-:data:`_CACHE_TTL_S`. Requests that miss the cache while a build is running wait
-for that build instead of starting another; ``?refresh=1`` always starts a new
-one, and a build never overwrites a cache entry that a later-started build
-stored. The cheap live fields (unit state, pending approvals, the running job,
-``status`` and ``phase``) are recomputed on every request, so a build that
-starts or finishes inside the window shows at once.
+:data:`_CACHE_TTL_S`, counted from when the build finished. Requests that miss
+the cache while a build is running wait for that build instead of starting
+another; ``?refresh=1`` always starts a new one, and a build never overwrites a
+cache entry that a later-started build stored. The Hermes job that was running
+when a build started is part of its cache key: a job starting or ending is a
+miss, so the state a converge or repair leaves behind is never served from
+before it. Other routes call :func:`invalidate` after they change what the
+overview reports. The cheap live fields (unit state, pending approvals, the
+running job, ``status`` and ``phase``) are recomputed on every request.
 """
 
 from __future__ import annotations
@@ -30,6 +33,8 @@ import pwd
 import shutil
 import time
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Final
 
@@ -88,14 +93,43 @@ router = APIRouter()
 #: is not free.
 _CACHE_TTL_S: Final[float] = 30.0
 
-#: ``name -> (monotonic time the build started, body)``. Only installed agents
-#: are cached: install state is re-read on every request, so an install or an
-#: uninstall shows at once.
-_cache: dict[str, tuple[float, dict[str, Any]]] = {}
 
-#: ``name -> (the running build, whether a refresh started it)``. Created and
-#: awaited only inside the running event loop.
-_inflight: dict[str, tuple[asyncio.Task[dict[str, Any]], bool]] = {}
+@dataclass(frozen=True)
+class _Entry:
+    """One cached build."""
+
+    started: float  # when the build started; orders builds, so a late one cannot win
+    completed: float  # when it finished; the TTL runs from here
+    job: str | None  # id of the Hermes job running when it started
+    body: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class _Flight:
+    """A build in progress."""
+
+    task: asyncio.Task[dict[str, Any]]
+    refresh: bool  # a refresh started it
+    job: str | None
+
+
+@dataclass(frozen=True)
+class _Gateway:
+    state: str | None  # active state, transition states folded in
+    enabled: bool | None  # whether the unit file says it is meant to run
+    settling: bool  # starting, reloading or in maintenance: its API may not answer yet
+
+
+#: Only installed agents are cached: install state is re-read on every request,
+#: so an install or an uninstall shows at once.
+_cache: dict[str, _Entry] = {}
+
+#: Builds in progress. Created and awaited only inside the running event loop.
+_inflight: dict[str, _Flight] = {}
+
+#: ``name -> time of its last invalidation``. A build that started earlier does
+#: not store its result.
+_invalidated: dict[str, float] = {}
 
 _GATEWAY_UNIT: Final[str] = "hermes-gateway.service"
 
@@ -105,8 +139,21 @@ _GATEWAY_UNIT: Final[str] = "hermes-gateway.service"
 _GATEWAY_STATE_ALIASES: Final[dict[str, str]] = {
     "activating": "active",
     "reloading": "active",
+    "refreshing": "active",
+    "maintenance": "active",
     "deactivating": "inactive",
 }
+
+#: The aliased states that are on the way up. The gateway's API may not answer
+#: yet, which is not a fault.
+_GATEWAY_SETTLING_STATES: Final[frozenset[str]] = frozenset(
+    {"activating", "reloading", "refreshing", "maintenance"}
+)
+
+#: ``get_agent_memory_stats`` can page the Hindsight bank with long read
+#: timeouts; the overview waits this long for it, then reports memory as
+#: unavailable.
+_MEMORY_TIMEOUT_S: Final[float] = 2.0
 
 #: One probe's budget. The probes run concurrently, so a dead gateway costs one
 #: second in total, not one per profile.
@@ -133,6 +180,23 @@ _NO_MEMORY: Final[dict[str, Any]] = {"available": False, "writes": None, "last_w
 def _now() -> float:
     """The cache clock; a module function so tests move time without touching the loop's."""
     return time.monotonic()
+
+
+def _utc_iso() -> str:
+    return datetime.now(UTC).isoformat().replace("+00:00", "Z")
+
+
+def invalidate(name: str) -> None:
+    """Drop ``name``'s cached overview so the next request rebuilds it.
+
+    For routes that change what the overview reports (a restart, a repair, an
+    approvals change). Call it from the event loop, as an async route does. A
+    build already running when this is called finishes for its own waiters but
+    stores nothing, and new requests start a fresh one.
+    """
+    _cache.pop(name, None)
+    _inflight.pop(name, None)
+    _invalidated[name] = _now()
 
 
 def provision_path() -> Path:
@@ -217,21 +281,28 @@ async def _check[T](label: str, fn: Callable[[], T]) -> tuple[T | None, str | No
 # ── Hermes gathers ──────────────────────────────────────────────────────────
 
 
-async def _gateway_state() -> str | None:
-    """The gateway unit's active state; ``"absent"`` when systemd has no such unit.
+async def _gateway_state() -> _Gateway:
+    """The gateway unit's state, whether it is meant to run, and whether it is settling.
 
-    ``systemctl show`` exits 0 for an unknown unit and reports ``inactive`` with
-    an empty ``UnitFileState``, which :func:`unit_state` turns into ``unknown``.
-    A real unit that is merely stopped has a unit-file state. The transition
-    states fold into their neighbours: ``activating`` and ``reloading`` read as
-    ``active`` and ``deactivating`` as ``inactive``, so a gateway restart is not
-    reported as down.
+    ``"absent"`` when systemd has no such unit: ``systemctl show`` exits 0 for an
+    unknown unit and reports ``inactive`` with an empty ``UnitFileState``, which
+    :func:`unit_state` turns into ``unknown``. A real unit that is merely stopped
+    has a unit-file state, and that state also says whether the operator turned
+    the gateway off (``disabled``, ``masked``). The transition states fold into
+    their neighbours: ``activating``, ``reloading``, ``refreshing`` and
+    ``maintenance`` read as ``active`` (and mark the gateway as settling) and
+    ``deactivating`` as ``inactive``, so a gateway restart is not reported as down.
     """
     state = await unit_state(_GATEWAY_UNIT)
     active = state.get("active_state")
-    if active == "inactive" and state.get("unit_file_state") in (None, "unknown"):
-        return "absent"
-    return _GATEWAY_STATE_ALIASES.get(active, active) if active else None
+    file_state = state.get("unit_file_state")
+    if active == "inactive" and file_state in (None, "unknown"):
+        return _Gateway("absent", None, False)
+    return _Gateway(
+        _GATEWAY_STATE_ALIASES.get(active, active) if active else None,
+        builders.unit_file_enabled(file_state),
+        active in _GATEWAY_SETTLING_STATES,
+    )
 
 
 def _read_releases(layout: Layout) -> tuple[Release | None, Release | None]:
@@ -365,14 +436,19 @@ async def _gather_hermes(request: Request) -> dict[str, Any]:
     no_releases: tuple[Release | None, Release | None] = (None, None)
     no_platforms: list[str] = []
     no_health: tuple[bool, list[str]] = (False, [])
+    no_gateway = _Gateway(None, None, False)
 
     # Three groups, themselves run concurrently: live state, files, doctor checks.
     state, files, checks = await asyncio.gather(
         asyncio.gather(
-            _guarded("unit_gateway", _gateway_state(), None),
+            _guarded("unit_gateway", _gateway_state(), no_gateway),
             _in_thread("endpoint", None, _endpoint, home),
             _guarded("api_health", _api_health(home), no_health),
-            _guarded("memory", get_agent_memory_stats("hermes", request), None),
+            _guarded(
+                "memory",
+                asyncio.wait_for(get_agent_memory_stats("hermes", request), _MEMORY_TIMEOUT_S),
+                None,
+            ),
             _in_thread(
                 "platforms",
                 no_platforms,
@@ -400,6 +476,7 @@ async def _gather_hermes(request: Request) -> dict[str, Any]:
         ),
     )
     gateway, endpoint, (healthy, profiles), memory_raw, platforms = state
+    gateway_units = {"gateway": gateway.state or "unknown", "gateway_enabled": gateway.enabled}
     (live, previous), pin_ref, component, provision_raw, approvals_state = files
     sqlite_result, plugins_result, ownership_result, gateway_result = checks
     sqlite, sqlite_err = sqlite_result
@@ -439,7 +516,8 @@ async def _gather_hermes(request: Request) -> dict[str, Any]:
         "degraded",
         no_reasons,
         builders.degraded_reasons,
-        units={"gateway": gateway or "unknown"},
+        units=gateway_units,
+        gateway_settling=gateway.settling,
         api_healthy=healthy,
         provision=provision,
         doctor=doctor,
@@ -457,7 +535,7 @@ async def _gather_hermes(request: Request) -> dict[str, Any]:
         "version": _safe(
             "version", unknown_version, builders.hermes_version, live, previous, pin_ref, component
         ),
-        "units": {"gateway": gateway or "unknown"},
+        "units": gateway_units,
         "api_server": {"endpoint": endpoint, "healthy": healthy, "profiles": profiles},
         "platforms": platforms,
         "provision": provision,
@@ -472,17 +550,20 @@ async def _gather_hermes(request: Request) -> dict[str, Any]:
 
 
 async def _overlay_hermes(
-    base: dict[str, Any], record: AgentRecord, request: Request
+    base: dict[str, Any], record: AgentRecord, request: Request, job: dict[str, str] | None
 ) -> dict[str, Any]:
     """``base`` (possibly cached) plus the fields that must be current on every request."""
     agent_active = await _guarded("unit_agent", unit_is_active("hermes"), None)
-    job = _active_job(request)
     return {
         **base,
         "installed": True,
         "status": record.status,
         "unit_active": agent_active,
-        "units": builders.unit_states(agent_active, base["units"]["gateway"]),
+        "units": builders.unit_states(
+            agent_active,
+            base["units"]["gateway"],
+            gateway_enabled=base["units"]["gateway_enabled"],
+        ),
         "approvals": {**base["approvals"], "pending": _pending_approvals(request)},
         "job": job,
         "phase": _safe(
@@ -626,47 +707,65 @@ async def _not_installed(name: str) -> dict[str, Any]:
 # ── cache ───────────────────────────────────────────────────────────────────
 
 
-async def _build(name: str, request: Request, started: float) -> dict[str, Any]:
-    """Build ``name``'s slow half and store it, unless a later-started build already did."""
-    body = await (_gather_hermes(request) if name == "hermes" else _gather_pi())
+async def _build(name: str, request: Request, started: float, job: str | None) -> dict[str, Any]:
+    """Build ``name``'s slow half and store it.
+
+    Nothing is stored when ``name`` was invalidated after this build started, or
+    when a later-started build already stored its result.
+    """
+    generated_at = _utc_iso()
+    body = {
+        **await (_gather_hermes(request) if name == "hermes" else _gather_pi()),
+        "generated_at": generated_at,
+    }
     held = _cache.get(name)
-    if held is None or held[0] <= started:
-        _cache[name] = (started, body)
+    if started >= _invalidated.get(name, float("-inf")) and (
+        held is None or held.started <= started
+    ):
+        _cache[name] = _Entry(started, _now(), job, body)
     return body
 
 
 def _forget(name: str, task: asyncio.Task[dict[str, Any]]) -> None:
     """Drop ``name``'s in-flight entry once its task finished, unless a newer one replaced it."""
-    entry = _inflight.get(name)
-    if entry is not None and entry[0] is task:
+    flight = _inflight.get(name)
+    if flight is not None and flight.task is task:
         del _inflight[name]
 
 
-async def _slow_half(name: str, request: Request, refresh: bool) -> dict[str, Any]:
+async def _slow_half(name: str, request: Request, refresh: bool, job: str | None) -> dict[str, Any]:
     """The cached slow half of ``name``'s overview, built at most once per miss.
 
-    A request that misses the cache joins the build already running for
-    ``name``, if any. A refresh joins one only when a refresh started it: any
-    other build began before the refresh was asked for and may predate the
-    change the caller wants to see. Waiters are shielded, so one client
-    disconnecting does not cancel the build the others are waiting on.
+    A cached build answers while it is younger than the TTL (counted from when it
+    finished) and was started under the same Hermes ``job``. A request that
+    misses joins the build already running for ``name`` when that build was
+    started under the same job and, for a refresh, by a refresh: any other
+    running build began before the refresh was asked for, or before the job
+    changed, and may predate the change the caller wants to see. Waiters are
+    shielded, so one client disconnecting does not cancel the build the others
+    are waiting on.
     """
     started = _now()
-    cached = _cache.get(name)
-    if not refresh and cached is not None and started - cached[0] < _CACHE_TTL_S:
-        return cached[1]
-
-    entry = _inflight.get(name)
-    if entry is not None and (
-        entry[0].done() or entry[0].get_loop() is not asyncio.get_running_loop()
+    entry = _cache.get(name)
+    if (
+        not refresh
+        and entry is not None
+        and entry.job == job
+        and started - entry.completed < _CACHE_TTL_S
     ):
-        entry = None  # finished, or left behind by a loop that has closed
-    if entry is None or (refresh and not entry[1]):
-        task = asyncio.create_task(_build(name, request, started))
+        return entry.body
+
+    flight = _inflight.get(name)
+    if flight is not None and (
+        flight.task.done() or flight.task.get_loop() is not asyncio.get_running_loop()
+    ):
+        flight = None  # finished, or left behind by a loop that has closed
+    if flight is None or flight.job != job or (refresh and not flight.refresh):
+        task = asyncio.create_task(_build(name, request, started, job))
         task.add_done_callback(lambda t: _forget(name, t))
-        entry = (task, refresh)
-        _inflight[name] = entry
-    return await asyncio.shield(entry[0])
+        flight = _Flight(task, refresh, job)
+        _inflight[name] = flight
+    return await asyncio.shield(flight.task)
 
 
 # ── route ───────────────────────────────────────────────────────────────────
@@ -680,16 +779,18 @@ async def agent_overview(name: str, request: Request, refresh: int = Query(0)) -
     agent that is not installed answers with just its pin and the install
     command. For an installed agent the probes are cached for 30 s per agent
     and built once per miss; ``?refresh=1`` rebuilds them and refills the
-    cache. Unit state, pending approvals, the running job, ``status`` and
-    ``phase`` are current on every request.
+    cache, and a Hermes build or repair starting or ending is a miss too. Unit
+    state, pending approvals, the running job, ``status`` and ``phase`` are
+    current on every request.
     """
     name = agents_routes._bundled_name(name)
     record = _installed_record(name)
     if record is None:
-        _cache.pop(name, None)
+        invalidate(name)
         return await _not_installed(name)
 
-    base = await _slow_half(name, request, bool(refresh))
+    job = _active_job(request) if name == "hermes" else None
+    base = await _slow_half(name, request, bool(refresh), job["id"] if job else None)
     if name == "hermes":
-        return await _overlay_hermes(base, record, request)
+        return await _overlay_hermes(base, record, request, job)
     return _overlay_pi(base, record)
