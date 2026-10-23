@@ -422,6 +422,30 @@ describe('deriveCardModel: pi lore check states', () => {
     const theme = m.lore.skills.find((s) => s.label === 'theme')
     expect(theme?.unknown).toBe(true)
     expect(theme?.note).toBe('· unverified')
+    const shared = m.lore.skills.find((s) => s.label === 'shared memory')
+    expect(shared?.unknown).toBe(true)
+    expect(shared?.note).toBe('· unverified')
+  })
+
+  it('names the path, not the home, when the home is readable', () => {
+    const base = withChecks(unreadable, { mcp_entry: null, hindsight_config: null })
+    const m = deriveCardModel({
+      ...base,
+      overview: { ...base.overview, profile: { ...base.overview.profile, home_readable: true } },
+    })
+    const note = m.lore.abilities.find((x) => x.name === 'Slot Sync')?.note
+    expect(note).toContain('a path under /root')
+    expect(note).not.toContain('home /root')
+  })
+
+  it('a definite false beats an unknown half of the memory wiring', () => {
+    const m = deriveCardModel(withChecks(unreadable, { mcp_entry: false, hindsight_config: null }))
+    const dual = m.lore.abilities.find((x) => x.name === 'Dual Memory')
+    expect(dual?.unknown).toBeUndefined()
+    expect(dual?.note).toBe('the memory MCP entry and the Hindsight config are not both wired')
+    const shared = m.lore.skills.find((s) => s.label === 'shared memory')
+    expect(shared?.unknown).toBeUndefined()
+    expect(shared?.note).toBe('· not wired')
   })
 
   it('ok:false keeps the not-present wording', () => {
@@ -441,6 +465,7 @@ describe('deriveCardModel: pi lore check states', () => {
     expect(slot?.note).toBe('the hal0 provider extension is not present')
     expect(m.lore.abilities.find((x) => x.name === 'Dual Memory')?.unknown).toBeUndefined()
     expect(m.lore.skills.find((s) => s.label === 'theme')?.note).toBe('· not deployed')
+    expect(m.lore.skills.find((s) => s.label === 'shared memory')?.note).toBe('· not wired')
   })
 
   it('ok:true unlocks', () => {
@@ -665,7 +690,7 @@ describe('deriveCardModel: Pi', () => {
     const p = deriveCardModel({ ...PI, overview: partial })
     expect(p.lore.skills.map((s) => [s.label, s.lit, s.note])).toEqual([
       ['repo-aware', true, null],
-      ['shared memory', false, '· not wired'],
+      ['shared memory', false, '· unverified'],
       ['delegation', true, null],
       ['cli-native', false, '· not on PATH'],
       ['theme', true, null],
