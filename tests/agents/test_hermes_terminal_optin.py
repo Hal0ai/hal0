@@ -1391,6 +1391,9 @@ def test_update_path_fails_closed_when_a_profile_cannot_take_the_gate(
 
     monkeypatch.setattr(hermes_arm, "var_lib", lambda: tmp_path)
     (tmp_path / ".hermes").symlink_to(home)
+    # the call above already wrote the root gate before raising; put the root
+    # back so the backstop's own run is the one that changes it
+    (home / "config.yaml").write_text("agent:\n  system_prompt: keep\n")
     bounced: list[int] = []
     monkeypatch.setattr(hp, "try_restart_hermes_consumers", lambda: bounced.append(1) or [])
     result: dict = {}
