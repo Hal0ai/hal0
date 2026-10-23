@@ -462,9 +462,15 @@ def effective_engine_llm(
 
     process = read_process_env()
     if process is not None:
+        # A difference is blamed on the env file only when that file exists:
+        # without it the engine simply has not restarted onto the unit's
+        # current values (a drop-in written but the restart failed, or a
+        # daemon-reload alone) — the "still pinned" case, not an override.
         keys = sorted(
             k for k in _LLM_TARGET_KEYS if (process.get(k) or None) != (unit.get(k) or None)
         )
+        if not Path(env_file).exists():
+            keys = []
         return _shape(process, bool(keys), keys, bool(keys), "process")
 
     path = Path(env_file)
