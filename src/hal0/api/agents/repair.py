@@ -27,9 +27,9 @@ the transcripts are not pruned) and every ``[run ] <step>`` line is appended to
 ``provision.json`` still holds the previous report.
 
 The child is the running tree's own ``hal0`` binary
-(:func:`hal0.system.seam.running_hal0_bin`), with ``HERMES_HOME`` unset and
-``HOME`` set to the hal0 service home, the way ``_run_as_hal0`` builds its
-``env`` prefix. It runs as the daemon's own user; there is no privilege change.
+(:func:`hal0.system.seam.running_hal0_bin`), with ``HOME`` set to the hal0 service
+home and an allow-listed environment (:func:`_child_env`), so none of the
+daemon's keys are inherited. It runs as the daemon's own user; there is no privilege change.
 ``HAL0_HERMES_TERMINAL`` is never set, so the existing posture is kept.
 
 Bounded
@@ -152,15 +152,64 @@ def _layout() -> Layout:
     return Layout.for_venv(HERMES_VENV_DEFAULT)
 
 
-def _child_env() -> dict[str, str]:
-    """The environment of the provisioner child.
+#: The provisioner child's environment is built from this list, never copied from
+#: hal0-api's: the daemon holds the box keys, upstream API keys, HF tokens and
+#: per-profile Hermes keys, and the provisioner needs none of them. The box
+#: service key it self-calls with is read from ``api.env`` when the environment
+#: has none (``hal0.service_identity.service_key``), the same source
+#: ``sudo hal0 agent reprovision hermes --repair`` relies on. A new variable the
+#: repair needs is added here, with its reason.
+_CHILD_ENV_ALLOW: Final[tuple[tuple[str, str], ...]] = (
+    ("PATH", "finds uv, git, systemctl and the hal0 console script"),
+    ("LANG", "locale for git, uv and pip output"),
+    ("TZ", "timestamps in the transcript"),
+    ("HTTP_PROXY", "git/uv/pip and the hal0 HTTP client reach the network through it"),
+    ("HTTPS_PROXY", "as HTTP_PROXY"),
+    ("ALL_PROXY", "as HTTP_PROXY"),
+    ("NO_PROXY", "also seeds the Hermes service NO_PROXY (hermes_provision)"),
+    ("http_proxy", "lower-case spelling, read by curl and git"),
+    ("https_proxy", "as http_proxy"),
+    ("all_proxy", "as http_proxy"),
+    ("no_proxy", "as NO_PROXY"),
+    ("HAL0_HOME", "dev/test sandbox root for every hal0 path (config.paths)"),
+    ("HAL0_API_URL", "base URL of the self-calls to hal0-api (cli._shared, provisioner)"),
+    ("HAL0_DASHBOARD_URL", "dashboard URL rendered into the Hermes context"),
+    ("HAL0_BIND_HOST", "bind host the provisioner derives the API address from"),
+    ("HAL0_PORT", "API port, as HAL0_BIND_HOST"),
+    ("HAL0_HOSTNAME", "operator-facing hostname rendered into the Hermes context"),
+    (
+        "HAL0_HERMES_LIVE_RESOLVE",
+        "operator opt-out (=0) of live model resolution (hermes_provision)",
+    ),
+    ("HAL0_INFERENCE_BASE", "custom inference base rendered into the Hermes context"),
+    ("HAL0_LOG_LEVEL", "log verbosity of the child's transcript (cli.main)"),
+    ("HAL0_HERMES_PYTHON", "operator-pinned interpreter for the Hermes release build"),
+)
 
-    A copy of this process' environment without ``HERMES_HOME`` and with ``HOME``
-    at the hal0 service home. ``PYTHONUNBUFFERED`` keeps the child's ``[run ]``
-    lines from sitting in a pipe buffer until the run ends, which would leave the
-    step list empty for the whole install.
+#: Allowed by prefix: ``LC_ALL``, ``LC_CTYPE`` and the other locale categories.
+_CHILD_ENV_PREFIXES: Final[tuple[str, ...]] = ("LC_",)
+
+_CHILD_ENV_NAMES: Final[frozenset[str]] = frozenset(name for name, _ in _CHILD_ENV_ALLOW)
+
+
+def _child_env() -> dict[str, str]:
+    """The environment of the provisioner child, built from an allow-list.
+
+    Only :data:`_CHILD_ENV_ALLOW` (and ``LC_*``) is copied from this process, so a
+    dashboard repair does not hand the provisioner the daemon's secrets (#2938).
+    ``HOME`` is the hal0 service home and ``HERMES_HOME`` is never carried.
+    ``PYTHONUNBUFFERED`` keeps the child's ``[run ]`` lines from sitting in a pipe
+    buffer until the run ends, which would leave the step list empty for the whole
+    install.
+
+    TLS trust variables (``SSL_CERT_FILE`` and friends) are deliberately absent:
+    they belong here only once they are validated (#2941).
     """
-    env = {key: value for key, value in os.environ.items() if key != "HERMES_HOME"}
+    env = {
+        key: value
+        for key, value in os.environ.items()
+        if key in _CHILD_ENV_NAMES or key.startswith(_CHILD_ENV_PREFIXES)
+    }
     env["HOME"] = hal0_service_home()
     env["PYTHONUNBUFFERED"] = "1"
     return env
