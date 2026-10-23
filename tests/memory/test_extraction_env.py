@@ -547,7 +547,9 @@ _SECRET = "sk-should-never-leave-the-process"
 def test_effective_engine_llm_reads_the_running_process_first(tmp_path: Path):
     from hal0.memory.extraction_env import effective_engine_llm
 
-    unreadable = tmp_path / "hindsight-llm.env"  # never opened on this path
+    unreadable = tmp_path / "hindsight-llm.env"  # exists, never opened on this path
+    unreadable.write_text("HINDSIGHT_API_LLM_API_KEY=x\n")
+    unreadable.chmod(0)
     process = {
         "HINDSIGHT_API_LLM_PROVIDER": "minimax",
         "HINDSIGHT_API_LLM_BASE_URL": "https://api.minimax.io/v1",
@@ -566,6 +568,29 @@ def test_effective_engine_llm_reads_the_running_process_first(tmp_path: Path):
         "HINDSIGHT_API_LLM_PROVIDER",
     ]
     assert out["override_file"] == str(unreadable)
+
+
+def test_effective_engine_llm_process_drift_without_an_env_file_is_not_blamed_on_it(tmp_path: Path):
+    """The engine still has hal0/utility while the unit already says
+    hal0/memory (a drop-in written but the restart failed, or a daemon-reload
+    without a restart). No env file exists, so the difference must not be
+    reported as an override of it — the "still pinned, save once" advice
+    applies instead."""
+    from hal0.memory.extraction_env import effective_engine_llm
+
+    process = {
+        "HINDSIGHT_API_LLM_PROVIDER": "openai",
+        "HINDSIGHT_API_LLM_BASE_URL": "http://127.0.0.1:8080/v1",
+        "HINDSIGHT_API_LLM_MODEL": "hal0/utility",
+    }
+    out = effective_engine_llm(
+        env_file=tmp_path / "absent.env", unit_env=_UNIT_ENV, read_process_env=lambda: process
+    )
+    assert out["source"] == "process"
+    assert out["model"] == "hal0/utility"
+    assert out["overridden"] is False
+    assert out["override_file"] is None
+    assert out["override_keys"] == []
 
 
 def test_effective_engine_llm_process_matching_the_unit_is_not_an_override(tmp_path: Path):
