@@ -300,3 +300,13 @@ def test_runtime_only_enablement_is_kept_on_reinstall(monkeypatch, tmp_path) -> 
     ac._install_hermes_gateway()
     assert ["systemctl", "enable", "--runtime", "--now", UNIT] in calls
     assert ["systemctl", "enable", "--now", UNIT] not in calls
+
+
+def test_a_failed_move_never_enables_a_second_gateway(monkeypatch, tmp_path, capsys) -> None:
+    """The rollback may have put the suffixed gateway back; enabling the canonical
+    unit after that would start a second poller (#2946 review)."""
+    calls = _setup(monkeypatch, tmp_path, state="not-found", install_fails=True)
+    (tmp_path / UNIT).write_text("[Unit]\n")  # a canonical file is on disk
+    ac._install_hermes_gateway()
+    assert _enables(calls) == []
+    assert "did not finish" in _out(capsys)

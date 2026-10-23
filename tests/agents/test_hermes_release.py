@@ -2149,5 +2149,17 @@ def test_activation_adopts_a_gateway_the_heal_moved_off_the_suffixed_unit(tree) 
         units.state[rel.GATEWAY_UNIT] = "active"
         return None
 
-    _ensure(tree, FakeTools(), units, force=True, heal_gateway=heal)
+    journal: list[list[str]] = []
+    real_record = rel._record_stopped_units
+    monkeypatch_record = lambda layout, units_: (
+        journal.append(list(units_)),
+        real_record(layout, units_),
+    )  # noqa: E731
+    rel._record_stopped_units, saved = monkeypatch_record, rel._record_stopped_units
+    try:
+        _ensure(tree, FakeTools(), units, force=True, heal_gateway=heal)
+    finally:
+        rel._record_stopped_units = saved
     assert ("start", rel.GATEWAY_UNIT) in units.log
+    # the crash-recovery journal is rewritten with the adopted gateway
+    assert journal and rel.GATEWAY_UNIT in journal[-1]

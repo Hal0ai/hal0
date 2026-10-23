@@ -1244,8 +1244,10 @@ def _install_hermes_gateway() -> None:
             f"[yellow]{what} ({exc}) — Telegram/Discord bridge may be unavailable; "
             "continuing.[/yellow]"
         )
-        if disabled:
-            return
+        # Never go on to enable the canonical unit after a failed move: the
+        # rollback may have put the suffixed gateway back, and enabling would
+        # start a second poller on the same tokens (#2946 review).
+        return
     else:
         console.print(f"[dim]{installed.message}[/dim]")
         if "enable-linger" in installed.message and "failed" in installed.message:

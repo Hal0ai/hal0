@@ -483,15 +483,15 @@ def migrate_hashed_units(
     # have a suffixed unit, so this never overrides an operator's own off
     # switch there.
     canonical_owns_state = masked
+    canon_was_active = False
     if pre_existing and not masked:
         canon_state = _enabled_state(run, GATEWAY_UNIT)
         if canon_state == "unknown":
             raise GatewayRegenError(
                 f"cannot read the enablement of {GATEWAY_UNIT}; nothing changed"
             )
-        canonical_owns_state = canon_state in ("enabled", "enabled-runtime") or _is_active(
-            run, GATEWAY_UNIT
-        )
+        canon_was_active = _is_active(run, GATEWAY_UNIT)
+        canonical_owns_state = canon_state in ("enabled", "enabled-runtime") or canon_was_active
     result = RegenResult("migrated", "")
     done = result.steps
     runtime_only = False
@@ -530,6 +530,11 @@ def migrate_hashed_units(
                 _write_unit(unit_path, old_text)
         with contextlib.suppress(OSError, subprocess.SubprocessError):
             _run(run, ["systemctl", "daemon-reload"])
+        if pre_existing and not masked and canon_was_active:
+            # A failed restart of the operator's canonical unit: bring it back
+            # on its old text.
+            with contextlib.suppress(OSError, subprocess.SubprocessError):
+                _run(run, ["systemctl", "start", GATEWAY_UNIT])
         for path in hashed:
             if not path.exists():
                 continue
@@ -577,6 +582,23 @@ def migrate_hashed_units(
                 )
                 result.restarted = True
                 done.append("started")
+        if (
+            canonical_owns_state
+            and not masked
+            and old_text is not None
+            and unit_stale_reason(old_text) is not None
+            and _is_active(run, GATEWAY_UNIT)
+        ):
+            # The pre-existing canonical unit was stale and running: the rewrite
+            # only takes hold on a restart.
+            _check(
+                run,
+                ["systemctl", "restart", GATEWAY_UNIT],
+                f"systemctl restart {GATEWAY_UNIT}",
+                done,
+            )
+            result.restarted = True
+            done.append("restarted")
     except GatewayRegenError:
         rollback()
         raise
@@ -592,20 +614,6 @@ def migrate_hashed_units(
             continue
         done.append(f"removed {path.name}")
     _check(run, ["systemctl", "daemon-reload"], "systemctl daemon-reload", done)
-    if (
-        canonical_owns_state
-        and not masked
-        and old_text is not None
-        and unit_stale_reason(old_text) is not None
-        and _is_active(run, GATEWAY_UNIT)
-    ):
-        # The pre-existing canonical unit was stale and running: the rewrite
-        # only takes hold on a restart.
-        _check(
-            run, ["systemctl", "restart", GATEWAY_UNIT], f"systemctl restart {GATEWAY_UNIT}", done
-        )
-        result.restarted = True
-        done.append("restarted")
     if unlink_errors:
         raise GatewayRegenError(_failure("; ".join(unlink_errors), "left behind", done))
     result.message = f"{GATEWAY_UNIT}: " + ", ".join(done)

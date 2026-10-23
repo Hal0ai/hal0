@@ -871,3 +871,17 @@ def test_a_rollback_restores_a_pre_existing_canonical_unit(tmp_path: Path) -> No
     with pytest.raises(regen.GatewayRegenError):
         _migrate(tmp_path, sc)
     assert canonical.read_text() == before
+
+
+def test_a_failed_restart_of_a_stale_canonical_unit_keeps_the_suffixed_one(tmp_path: Path) -> None:
+    hashed = _hashed_unit(tmp_path)
+    canonical = _old_unit(tmp_path)
+    before = canonical.read_text()
+    sc = UnitSystemctl(
+        {HASHED: ("disabled", False), CANON: ("enabled", True)},
+        fail=["systemctl", "restart", CANON],
+    )
+    with pytest.raises(regen.GatewayRegenError, match="restart"):
+        _migrate(tmp_path, sc)
+    assert hashed.exists() and canonical.read_text() == before
+    assert ["systemctl", "start", CANON] in sc.mutating
