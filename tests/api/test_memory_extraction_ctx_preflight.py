@@ -138,6 +138,54 @@ def test_add_proceeds_when_the_window_cannot_be_proven(
     assert len(stub_wrapper.add_calls) == 1
 
 
+def test_preflight_skipped_when_the_engine_target_is_an_upstream_model(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, stub_wrapper: StubHindsightWrapper
+) -> None:
+    """#2919: with ``[memory.graph].extraction_model`` set the engine calls an
+    upstream model, not a slot, so the slot's context window is irrelevant —
+    the REAL ``_extraction_window`` must answer ``None`` before any catalog
+    lookup, and ``/add`` proceeds even when the slot would be below floor."""
+    import tomli_w
+
+    # Under HAL0_HOME the loader reads $HAL0_HOME/etc/hal0/hal0.toml.
+    home = tmp_path / "hal0-home"
+    (home / "etc" / "hal0").mkdir(parents=True)
+    (home / "var-lib").mkdir(parents=True)
+    (home / "etc" / "hal0" / "hal0.toml").write_text(
+        tomli_w.dumps(
+            {
+                "meta": {"schema_version": 1},
+                "memory": {
+                    "graph": {"extraction_slot": "utility", "extraction_model": "MiniMax-M2.5"}
+                },
+            }
+        )
+    )
+    monkeypatch.setenv("HAL0_HOME", str(home))
+
+    app = _build_app(stub_wrapper)
+
+    catalog_calls: list[tuple[Any, ...]] = []
+
+    async def _record(*args: Any, **_k: Any) -> list[dict[str, Any]]:
+        catalog_calls.append(args)
+        return []
+
+    # A slot manager + registry are present (the slot path WOULD run); the
+    # catalog lookup records whether it was consulted. (It cannot raise to
+    # prove the point — the route swallows lookup failures by design.)
+    app.state.slot_manager = object()
+    app.state.model_registry = object()
+    monkeypatch.setattr("hal0.api.hal0_slot_alias_models", _record)
+
+    with TestClient(app) as c:
+        r = c.post("/api/memory/add", json={"text": "hello"})
+
+    assert r.status_code == 200, r.text
+    assert len(stub_wrapper.add_calls) == 1
+    assert catalog_calls == []
+
+
 def test_add_skips_the_preflight_for_providers_without_slot_dispatched_extraction() -> None:
     """A provider with no ``hindsight_client`` (e.g. the in-memory
     ``PgVectorProvider`` fallback) never dispatches extraction to a slot at

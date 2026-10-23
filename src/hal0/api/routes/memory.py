@@ -870,6 +870,11 @@ async def _extraction_window(request: Request, wrapper: Any) -> Any | None:
     slot = getattr(wrapper, "extraction_slot", None)
     if not slot or getattr(wrapper, "hindsight_client", None) is None:
         return None
+    # #2919: with an upstream model set, hal0/memory does not resolve to the
+    # slot at all — its context window is not what the engine's extraction
+    # call will see, so there is nothing to preflight here.
+    if load_hal0_config().memory.graph.extraction_model:
+        return None
 
     from hal0.api import hal0_slot_alias_models
     from hal0.api.routes.v1 import _resolve_virtual_model_entry
