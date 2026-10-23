@@ -259,7 +259,7 @@ case "$cmd" in
           output_json=1 ;;
         -dev)
           [[ "$val" =~ ^[A-Za-z0-9]+$ ]] || die "bad -dev value: $val" ;;
-        -b|-ub|-ngl|-fa|-ctk|-ctv|-p|-n|-d|-r|-t|-mmp|-pg)
+        -b|-ub|-ngl|-fa|-ctk|-ctv|-p|-n|-d|-r|-t|-lm|-pg)
           [[ "$val" =~ ^[A-Za-z0-9_,.:+-]+$ ]] || die "bad flag value: $val" ;;
         *) die "flag not allowed in bench argv: $flag" ;;
       esac

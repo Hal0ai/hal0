@@ -44,7 +44,7 @@ root-owned harness directory to protect any more — the harness is the ordinary
     under the model-store root (`hal0.config.paths.model_store_root()`, not a hardcoded
     path);
   - llama-bench flags after `-m <model>`: only `-o json` (required) plus the whitelisted
-    tuning flags `-dev -b -ub -ngl -fa -ctk -ctv -p -n -d -r -t -mmp -pg`, with
+    tuning flags `-dev -b -ub -ngl -fa -ctk -ctv -p -n -d -r -t -lm -pg`, with
     numeric/comma/quant-shaped values;
   - `--rm` is required so the container reaps itself.
   The optional `--timeout-s N` wraps the exec in `timeout --kill-after=30 N` — enforced

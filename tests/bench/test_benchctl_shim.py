@@ -195,8 +195,8 @@ def _rocm_argv(model_root: Path, model_abs: Path, kfd: str, dri_render: str) -> 
         str(model_abs),
         "-fa",
         "1",
-        "-mmp",
-        "0",
+        "-lm",
+        "none",
         "-ngl",
         "99",
         "-dev",
@@ -223,8 +223,8 @@ def _cpu_argv(model_root: Path, model_abs: Path) -> list[str]:
         str(model_abs),
         "-fa",
         "1",
-        "-mmp",
-        "0",
+        "-lm",
+        "none",
         "-ngl",
         "0",
         "-o",
@@ -345,6 +345,19 @@ class TestExecRejects:
 
         assert proc.returncode != 0
         assert "podman flag not allowed: --privileged" in proc.stderr
+
+    def test_rejects_the_dropped_mmp_flag(self, tmp_path) -> None:
+        """llama-bench b11716 replaced ``-mmp`` with ``-lm``; the seam no
+        longer whitelists the dead spelling (#2769)."""
+        model_root, model_abs, env = self._base(tmp_path)
+        argv = _cpu_argv(model_root, model_abs)
+        i = argv.index("-lm")
+        argv[i : i + 2] = ["-mmp", "0"]
+
+        proc = _run(["exec", "--", *argv], env)
+
+        assert proc.returncode != 0
+        assert "flag not allowed in bench argv: -mmp" in proc.stderr
 
     def test_rejects_bad_security_opt(self, tmp_path) -> None:
         model_root, model_abs, env = self._base(tmp_path)
@@ -647,6 +660,17 @@ class TestTelemetryEndToEnd:
         old = text.replace(") </dev/null >/dev/null 2>&1 &", ") &", 1)
         started, _ended, _stopped = self._drive(tmp_path, monkeypatch, old)
         assert started[0] == 124, started
+
+
+def test_wrapper_tuning_whitelist_matches_the_planner() -> None:
+    """The seam's value-checked flag arm is the planner's tune set plus the
+    measurement flags (-p/-n/-d/-r); a llama-bench flag rename must land in
+    both places (#2769)."""
+    from hal0.bench.planner import _TUNE_FLAGS
+
+    arm = re.search(r"^\s*(-b\|[^)\n]+)\)\s*$", BENCHCTL.read_text(), re.M)
+    assert arm is not None, "tuning-flag case arm not found in hal0-benchctl"
+    assert set(arm.group(1).split("|")) == set(_TUNE_FLAGS) | {"-p", "-n", "-d", "-r"}
 
 
 def test_the_shim_is_syntactically_valid() -> None:

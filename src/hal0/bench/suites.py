@@ -85,7 +85,7 @@ class Matrix:
 
     ``configs`` is the flag-tuning axis: a list of ``{label, flags}`` variants,
     each a set of whitelisted llama-bench tuning flags (``-b -ub -ngl -fa -ctk
-    -ctv -t -mmp -pg``) the seam accepts. Every variant becomes its OWN cell
+    -ctv -t -lm -pg``) the seam accepts. Every variant becomes its OWN cell
     (its flags land in the resolved argv, which feeds cell_key), so a suite can
     A/B batch size, flash-attn, KV quant, etc. and compare them side by side.
     Default = one ``"default"`` variant with no extra flags (llama-bench

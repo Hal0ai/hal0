@@ -112,10 +112,11 @@ MAX_ATTEMPTS = 6
 #: shell harness's own override.
 _DEFAULT_HOST_LABEL = "hal0"
 
-# COMMON_BENCH_ARGS (config.sh): flash attention on, no mmap — applied to
+# COMMON_BENCH_ARGS (config.sh): flash attention on, no mmap/mlock
+# (``-lm none``; llama-bench b11716 dropped ``-mmp``) — applied to
 # EVERY cell, ahead of the lane's dev_args and the cell's own flags so later
-# sources (a variant's explicit -fa/-mmp) still win via dedupe_flags.
-_COMMON_BENCH_FLAGS: tuple[tuple[str, str], ...] = (("-fa", "1"), ("-mmp", "0"))
+# sources (a variant's explicit -fa/-lm) still win via dedupe_flags.
+_COMMON_BENCH_FLAGS: tuple[tuple[str, str], ...] = (("-fa", "1"), ("-lm", "none"))
 
 
 @dataclass(frozen=True)

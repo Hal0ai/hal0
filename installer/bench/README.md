@@ -125,7 +125,7 @@ GPU-free and ignored by exclusivity either way.
 - **What gets measured, at what depth/config** — a suite TOML under
   `/etc/hal0/bench/suites/` (seeds in `suites/` here). `[matrix].configs` is the
   flag-tuning axis: a list of `{label, flags}` variants, each a whitelisted llama-bench
-  tuning-flag set (`-b -ub -ngl -fa -ctk -ctv -t -mmp -pg`); every variant becomes its
+  tuning-flag set (`-b -ub -ngl -fa -ctk -ctv -t -lm -pg`); every variant becomes its
   own measured cell. `lane-matrix.toml` is the suite feeding `hal0-tune`'s sweeps.
 - **When it's polite to run on a schedule** — `window.toml` (seed here, operator-owned
   at `/etc/hal0/bench/window.toml`), consulted only by `hal0 bench run --scheduled`.
