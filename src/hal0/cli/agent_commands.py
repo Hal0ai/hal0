@@ -10,11 +10,8 @@ from __future__ import annotations
 
 import json as jsonlib
 import os
-import shutil
-import sys
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from pathlib import Path
 from typing import Any, Literal
 
 import typer
@@ -35,6 +32,7 @@ from hal0.cli._shared import (
 )
 from hal0.cli._shared import _console as _stderr_console
 from hal0.mcp.approval_queue import _PRIMARY_TARGET_ARG
+from hal0.system.seam import hal0_service_home, running_hal0_bin
 
 app = typer.Typer(help="Manage bundled agents (Phase 8 — Hermes-Agent).")
 console = Console()
@@ -797,36 +795,16 @@ def _mirror_default_key_as_root() -> None:
 
 def _agent_home() -> str:
     """The hal0 service user's home dir (``/var/lib/hal0`` fallback)."""
-    import pwd as _pwd
-
-    try:
-        return _pwd.getpwnam(_AGENT_RUNTIME_USER).pw_dir or "/var/lib/hal0"
-    except KeyError:
-        return "/var/lib/hal0"
+    return hal0_service_home()
 
 
 def _running_hal0_bin() -> str:
-    """The ``hal0`` console script belonging to the code that is running.
+    """The ``hal0`` console script belonging to the code that is running (#2092).
 
-    #2092: the privilege-drop re-exec used to resolve its target with
-    ``shutil.which("hal0")`` — whatever is first on PATH, which is not
-    necessarily the tree doing the re-exec. On a box carrying a stale wrapper
-    at ``/usr/local/bin/hal0`` (#1844 documents exactly that condition), an
-    operator running the CURRENT ``/usr/lib/hal0/venv/bin/hal0 agent
-    reprovision hermes`` as root had it silently re-exec an rc.3 build, which
-    then resolved its installer root relative to its own package location and
-    failed with a path that exists in no release
-    (``/usr/local/lib/python3.12/installer/...``).
-
-    A venv install puts the console script next to the interpreter, so
-    ``sys.executable``'s sibling names the running tree exactly. Fall back to
-    PATH (dev checkouts invoked as ``python -m`` have no sibling script), then
-    to the bare name so the caller still produces a runnable argv.
+    The body lives in :func:`hal0.system.seam.running_hal0_bin` so ``hal0.api``
+    can spawn the same binary without importing this CLI module.
     """
-    sibling = Path(sys.executable).with_name("hal0")
-    if sibling.is_file() and os.access(sibling, os.X_OK):
-        return str(sibling)
-    return shutil.which("hal0") or "hal0"
+    return running_hal0_bin()
 
 
 def _run_as_hal0(

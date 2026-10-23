@@ -446,3 +446,53 @@ def test_write_quadlet_wedged_seam_call_raises_seam_timeout(tmp_path: Path) -> N
 
     with pytest.raises(SeamTimeout):
         seam.write_quadlet(quadlet, "[Container]\n", timeout=15.0)
+
+
+# ── hal0_service_home() / running_hal0_bin() — hoisted from the CLI ─────────
+
+
+def test_hal0_service_home_is_the_hal0_users_home(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _Ent:
+        pw_dir = "/srv/hal0-home"
+
+    monkeypatch.setattr(seam_mod.pwd, "getpwnam", lambda _name: _Ent())
+    assert seam_mod.hal0_service_home() == "/srv/hal0-home"
+
+
+def test_hal0_service_home_falls_back_when_user_absent_or_home_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _no_such_user(_name: str) -> None:
+        raise KeyError("hal0")
+
+    monkeypatch.setattr(seam_mod.pwd, "getpwnam", _no_such_user)
+    assert seam_mod.hal0_service_home() == "/var/lib/hal0"
+
+    class _Empty:
+        pw_dir = ""
+
+    monkeypatch.setattr(seam_mod.pwd, "getpwnam", lambda _name: _Empty())
+    assert seam_mod.hal0_service_home() == "/var/lib/hal0"
+
+
+def test_running_hal0_bin_prefers_the_script_next_to_the_interpreter(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bin_dir = tmp_path / "venv" / "bin"
+    bin_dir.mkdir(parents=True)
+    script = bin_dir / "hal0"
+    script.write_text("#!/bin/sh\n", encoding="utf-8")
+    script.chmod(0o755)
+    monkeypatch.setattr(seam_mod.sys, "executable", str(bin_dir / "python"))
+    monkeypatch.setattr(seam_mod.shutil, "which", lambda _n: "/usr/local/bin/hal0")
+    assert seam_mod.running_hal0_bin() == str(script)
+
+
+def test_running_hal0_bin_falls_back_to_path_then_the_bare_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(seam_mod.sys, "executable", str(tmp_path / "nowhere" / "python"))
+    monkeypatch.setattr(seam_mod.shutil, "which", lambda _n: "/usr/bin/hal0")
+    assert seam_mod.running_hal0_bin() == "/usr/bin/hal0"
+    monkeypatch.setattr(seam_mod.shutil, "which", lambda _n: None)
+    assert seam_mod.running_hal0_bin() == "hal0"
