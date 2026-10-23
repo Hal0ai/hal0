@@ -4190,7 +4190,15 @@ def _atomic_write(path: Path, content: str, *, mode: int | None = None) -> str:
     that, a root run (``install.sh``'s post-activation pass reaching
     ``hermes_arm._config_backstop``) would leave ``config.yaml`` root-owned
     and the ``hal0`` agent unable to rewrite it.
+
+    The temp file gets a random name created ``O_CREAT|O_EXCL|O_NOFOLLOW``,
+    and its mode and owner are set through the open descriptor (#2903). Most
+    targets live in directories the ``hal0`` service account can write, so a
+    predictable ``<name>.tmp`` let that account plant a symlink a root repair
+    would write through, truncating and re-owning whatever it pointed at.
     """
+    import secrets
+
     path.parent.mkdir(parents=True, exist_ok=True)
     owner: tuple[int, int] | None = None
     with contextlib.suppress(OSError):
@@ -4198,18 +4206,23 @@ def _atomic_write(path: Path, content: str, *, mode: int | None = None) -> str:
         owner = (st.st_uid, st.st_gid)
         if mode is None:
             mode = stat.S_IMODE(st.st_mode)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(content, encoding="utf-8")
-    if mode is not None:
+    tmp = path.with_name(f".{path.name}.{secrets.token_hex(8)}")
+    # 0o666 so a brand-new file with no ``mode`` lands at the umask default.
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o666)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(content)
+            fh.flush()
+            if mode is not None:
+                with contextlib.suppress(OSError):
+                    os.fchmod(fh.fileno(), mode)
+            if owner is not None and os.geteuid() == 0:
+                os.fchown(fh.fileno(), *owner)
+        os.replace(tmp, path)
+    except BaseException:
         with contextlib.suppress(OSError):
-            os.chmod(tmp, mode)
-    if owner is not None and os.geteuid() == 0:
-        try:
-            os.chown(tmp, *owner)
-        except OSError:
-            tmp.unlink(missing_ok=True)
-            raise
-    os.replace(tmp, path)
+            tmp.unlink()
+        raise
     return content_hash(content)
 
 
@@ -9253,10 +9266,9 @@ def _write_run_report(report: InstallReport, state_root: Path | None) -> None:
         "repair": report.repair,
         "phases": {s.name: _phase_entry(s) for s in report.steps},
     }
-    target = root / _STATE_FILE_NAME
-    tmp = target.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    os.replace(tmp, target)
+    # _atomic_write, not a fixed ``provision.json.tmp``: the state root is
+    # service-writable and a root repair writes this report (#2903).
+    _atomic_write(root / _STATE_FILE_NAME, json.dumps(data, indent=2, sort_keys=True) + "\n")
 
 
 # ── CLI surface ──────────────────────────────────────────────────────────────
