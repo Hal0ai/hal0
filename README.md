@@ -31,28 +31,29 @@ process to babysit.
 curl -fsSL https://hal0.dev/install.sh | sudo bash
 ```
 
-> **v1.6.0 is the current stable release.** A minor release: new
+> **v1.6.0 is the current stable release.** A minor release (2026-10-23): new
 > functionality, no config-schema migration, and an ordinary `hal0 update`
-> from any 1.x box. Three changes can break a script or a setup: `hal0 update`
+> from any 1.4.x or later box; a 1.3.x box hops through 1.5.0 first. With
+> Hermes v0.22.4, a chat opened for a non-default profile and `hermes chat`
+> need the Hermes gateway running. Since 1.4.0, three changes can break a
+> script or a setup: `hal0 update`
 > now restarts slots whose runner image changed and exits 2 while any still
 > run the old one; exposing a user-installed MCP server to Hermes or the
 > brain profile is refused until hal0 enforces its tool policy; and an
 > installed MCP server that would send its secrets over plain `http://` to
 > another host no longer loads. After
 > updating, re-run the installer once to pick up the new Hindsight limits,
-> the Open WebUI client key and the Hermes wrappers. Read the v1.4.0
+> the Open WebUI client key and the Hermes wrappers. Read the 1.6.0
 > **Breaking** and **Migrations** notes in [CHANGELOG.md](CHANGELOG.md)
 > first. The project has followed semver since v1.0.0; a minor release's
 > **Breaking** notes flag behaviour changes an operator or a script may
-> notice. Upgrades start at 1.3.0; on anything older, read
+> notice. Upgrades start at 1.4.0; on anything older, read
 > [Upgrading from an older release](#upgrading-from-an-older-release) first.
 
-> **On main, next release (1.6.0):** Hermes moves to v0.22.2 on a uv-managed
-> Python 3.14 release layout, every Hermes profile appears in Open WebUI
-> and any `/v1` client, and CI requires Python 3.14. 1.6.0 is not tagged
-> yet; it reaches boxes through the `nightly` channel today and `hal0 update`
-> once it ships. See [What's new](#whats-new) and
-> [Upgrading to 1.6.0](#upgrading-to-160-on-main-not-yet-tagged).
+> **What 1.6.0 brings:** Hermes v0.22.4 (`4d043038`) on a uv-managed Python 3.14
+> release layout, every Hermes profile in Open WebUI and any `/v1` client, and a
+> memory engine you can point at a local slot or an upstream model. See
+> [What's new](#whats-new) and [Upgrading to 1.6.0](#upgrading-to-160).
 
 > **⚡ The installer is the whole setup.** There is no separate first-run
 > wizard afterwards. `install.sh` asks where models should live, optionally
@@ -69,7 +70,7 @@ curl -fsSL https://hal0.dev/install.sh | sudo bash
 | **Hardware** | First-class on AMD Strix Halo (ROCm iGPU + XDNA NPU); Vulkan and CPU fallbacks everywhere else, plus experimental CUDA. See [Hardware matrix](docs/reference/hardware-matrix.mdx). |
 | **Platform** | Linux + systemd + podman, including Proxmox LXC. macOS and Windows are not supported today — see [Support matrix](docs/reference/support-matrix.mdx). |
 | **Auth** | Enforcement is off by default (trusted-LAN posture) — opt in with `hal0 auth require on`. Once an admin key is configured, a LAN-bound box also gates mutating routes for off-box callers, even with enforcement off (v1.3.0). No TLS termination; front it with a reverse proxy if it's reachable beyond your LAN. |
-| **Chat UI** | OpenWebUI, prewired, on `:3001` — zero config. Hermes agent profiles appear in its model picker next to your slots (on main for 1.6.0). |
+| **Chat UI** | OpenWebUI, prewired, on `:3001` — zero config. Hermes agent profiles appear in its model picker next to your slots. |
 | **Updates** | Cosign-signed tarball releases via `hal0 update`, with one-flag rollback. |
 
 ### If you know Ollama / llama.cpp / Open WebUI / LocalAI, hal0 adds…
@@ -224,10 +225,10 @@ from zero.
 
 ## What's new
 
-### On main for 1.6.0 (next release)
+### Shipped in 1.6.0
 
-- **Hermes v0.22.2 on Python 3.14.** The bundled agent moves from 0.19.0 to
-  v0.22.2 (`d923a5eb`). Every build (install, `reprovision --repair`,
+- **Hermes v0.22.4 on Python 3.14.** The bundled agent moves from 0.19.0 to
+  v0.22.4 (`4d043038`). Every build (install, `reprovision --repair`,
   `upgrade`, update) produces an immutable release under
   `/var/lib/hal0/hermes/releases/`, health-checked before the `current`
   symlink flips, with a flip-back to `previous` if the re-check fails.
@@ -245,6 +246,35 @@ from zero.
 - **Agent chat proxy removed.** `/api/agents/{id}/events`, `/submit` and
   `/session/*` return 404; chat with Hermes happens in Hermes's own
   dashboard or through `/v1`.
+
+- **Memory engine on a local slot or an upstream model.** Pick it under
+  **Engine model** on Settings -> Memory (also on the agents Memory
+  tab) or run `hal0 memory graph enable --model <id>`; `--local` returns to
+  the local extraction slot. hindsight-api always calls the virtual id
+  `hal0/memory`, which hal0 resolves per call, so switching needs no engine
+  restart. An **Engine running** row names the provider and model the engine
+  really loads and flags an override from `/etc/hal0/hindsight-llm.env`.
+  The bank description under the picker in the Memory workspace is editable
+  in place, and bank ids may contain dots (`coding-agent::ultrareview-1.4`).
+- **Terminal off stays off for Hermes side agents.** With the terminal
+  disabled hal0 also writes `terminal.backend: hal0-terminal-off` into the
+  Hermes config and every wired profile, so `terminal` and `process_manage`
+  leave every schema, including the gateway's preview-restart agent. A
+  docker or ssh backend you chose is restored when you turn the terminal back
+  on. Hermes logs `Unknown TERMINAL_ENV 'hal0-terminal-off'` every 30 s on such
+  a box; that line is expected.
+- **Hermes gateway awareness.** From Hermes v0.22.3 the gateway owns chat for
+  non-default profiles and `hermes chat`; with the unit stopped they report
+  `gateway inaccessible`. Run `sudo systemctl enable --now hermes-gateway`.
+  New `hal0 doctor all` rows: `Hermes gateway unit` (fails when the unit file
+  is missing or an unmanaged `gateway run --idle-exit` runs) and `API journal
+  read`; the `hermes-api` row warns instead of failing when you turned the
+  gateway off.
+- **`sudo hal0 agent upgrade pi`** reruns the pinned pi installer and
+  redeploys hal0's two extensions, leaving your own extensions, provider,
+  model and theme alone.
+- **Upgrade floor is 1.4.0.** A 1.3.x box runs `hal0 update --target 1.5.0`
+  first, then updates again. See [Upgrading from an older release](#upgrading-from-an-older-release).
 
 ### Shipped in 1.5.0
 
@@ -415,7 +445,7 @@ content-addressed, host-redacted archive you can attach anywhere, and
   audit-logged systemd lifecycle actions (start/stop/restart/enable/
   disable), mDNS `.local` advertisement, and a dedicated Services page.
   OpenWebUI is prewired at `:3001` with zero config; its Services card shows an Agents chip once Hermes profiles
-  are wired in (on main for 1.6.0).
+  are wired in.
 - **Image generation, day one** — `POST /v1/images/generations` via ComfyUI
   in the `img` slot container (ROCm). The installer seeds the `img` slot and
   its ComfyUI model share.
@@ -464,7 +494,7 @@ to `off`, `none` or `disabled` to route tool turns nowhere.
 
 Hermes is the service-shape agent: it runs as `hal0-agent@hermes.service`
 under the unprivileged `hal0` user, pinned to one reviewed upstream commit
-(v0.22.2, `d923a5eb`, on main for 1.6.0), and talks to `hal0-api` for
+(v0.22.4, `4d043038`), and talks to `hal0-api` for
 inference, tools and memory. `hal0 agent install hermes` installs it.
 
 - **Immutable releases.** Each build (install, `reprovision --repair`,
@@ -774,7 +804,7 @@ hal0 agent install hermes
 From 1.6.0 the Hermes build also needs network access (it fetches a managed
 Python and the pinned release); offline, it refuses and leaves the live
 release running. `hal0 doctor all` names the failing Hermes row (`hermes-api`,
-`hermes_profiles_mcp`, `hermes_generation`, `hal0_linger`).
+`hermes_profiles_mcp`, `hermes_generation`, `hal0_linger`, `hermes-gateway-unit`).
 
 **`hal0 doctor: AMDXDNA NPU detected but FastFlowLM not installed`.** The
 host-side sanity probe wants the FLM `.deb`. If you installed on a non-NPU
@@ -822,7 +852,7 @@ daemon, so the same code path runs whether you update from the shell or the
 dashboard. After a successful apply the daemon try-restarts `hal0-api`
 itself.
 
-**`hal0 <version> supports upgrades from >=1.3.0; this box is on <older>`**
+**`hal0 <version> supports upgrades from >=1.4.0; this box is on <older>`**
 (`system.update_upgrade_path_unsupported`) — the box is below the upgrade
 floor. See [Upgrading from an older release](#upgrading-from-an-older-release).
 
@@ -864,14 +894,17 @@ One made with `sudo` is owned by root, so archive it with `sudo tar czf`, or
 
 ## Upgrading from an older release
 
-Upgrades start at **1.3.0**. `hal0 update` on an older box stops before it
+Upgrades start at **1.4.0**. `hal0 update` on an older box stops before it
 downloads anything, and re-running the installer over an older install stops
-before it changes anything. Step through 1.3.0 first by running its
-installer in place, which keeps `/etc/hal0` and `/var/lib/hal0`:
+before it changes anything. A box on 1.3.x takes one hop: `hal0 update
+--target 1.5.0`, then `hal0 update` again. A box older than 1.3.0 first steps
+through 1.3.0 by running its installer in place, which keeps `/etc/hal0` and
+`/var/lib/hal0`, then takes the same hop:
 
 ```sh
 curl -fsSL https://hal0.dev/install.sh \
   | sudo env HAL0_RELEASES_URL=https://github.com/hal0ai/hal0/releases/download/v1.3.0/stable.json bash
+hal0 update --target 1.5.0 -y
 hal0 update -y
 ```
 
@@ -879,13 +912,13 @@ Or reinstall from scratch with `sudo bash installer/uninstall.sh --purge`,
 which deletes `/etc/hal0` and `/var/lib/hal0`, models included, followed by
 the normal one-liner.
 
-### Upgrading to 1.6.0 (on main, not yet tagged)
+### Upgrading to 1.6.0
 
-1.6.0 follows the same `hal0 update` path from any 1.x box at 1.3.0 or
-later. Three things to know before you take it:
+1.6.0 follows the same `hal0 update` path from any 1.x box at 1.4.0 or
+later. Four things to know before you take it:
 
 - **Hermes rebuilds once, with a short outage.** The first update builds a
-  Hermes v0.22.2 release on a uv-managed Python 3.14 next to the live 0.19.0
+  Hermes v0.22.4 release on a uv-managed Python 3.14 next to the live 0.19.0
   one, stops the agent and gateway, switches, and restarts. A box that
   cannot reach the network refuses the build and stays on 0.19.0. `hal0
   update` also regenerates the gateway unit and enables systemd linger for the
@@ -898,6 +931,7 @@ later. Three things to know before you take it:
 - **Rolling back to 1.5.x leaves the Hermes build failing** (`Hermes Python
   must be exactly 3.12`) until you update forward again. Do not edit
   `/etc/hal0/hermes-python.env` to 3.12 on 1.5.x.
+- **Profile chat needs the gateway.** With Hermes v0.22.4 a chat opened for a non-default profile (such as `hal0-brain`) in Hermes's dashboard, and the `hermes chat` CLI, attach to `hermes-gateway.service` and report `gateway inaccessible` while it is stopped. Run `sudo systemctl enable --now hermes-gateway`. Once v0.22.4 is live, `hal0 agent upgrade hermes --to d923a5eb...` is refused as a downgrade.
 
 The agent chat proxy is gone: `/api/agents/{id}/events`, `/submit` and
 `/session/*` return 404.
@@ -1014,11 +1048,12 @@ running on your box. Full version at
   `auto`, `off` or `ngram`
 - **Per-lane device pinning (1.5)** — the slot passes `--device` so each
   lane lands on its own GPU backend
-- **Hermes profiles as `/v1` upstreams (on main for 1.6)** — Open WebUI and
+- **Hermes profiles as `/v1` upstreams (1.6)** — Open WebUI and
   any OpenAI-compatible client chat with each Hermes profile, with hal0's
   tools and memory wired into every one
-- **Hermes release layout on Python 3.14 (on main for 1.6)** — immutable,
+- **Hermes release layout on Python 3.14 (1.6)** — immutable,
   health-checked releases with automatic flip-back
+- **Memory engine on any model (1.6)** — the Hindsight engine runs on a local slot or an upstream model through the `hal0/memory` virtual id, switched without a restart
 
 ### Soon
 

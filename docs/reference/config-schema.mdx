@@ -140,7 +140,7 @@ override: `HAL0_FLM_MODELS_DIR`.
 | Key | Type | Default | Constraints |
 |---|---|---|---|
 | `enabled` | bool | `false` | informational only |
-| `extraction_slot` | str | `"utility"` | regex `^[a-z0-9][a-z0-9_-]{0,31}$` |
+| `extraction_slot` | str | `"utility"` | regex `^[a-z0-9][a-z0-9_-]{0,31}$`; the local slot the engine runs on while `extraction_model` is unset |
 | `extraction_model` | str \| null | `null` | an upstream model id hal0's `/v1` routes (regex `^[A-Za-z0-9][A-Za-z0-9_./:-]{0,127}$`, never `hal0/…`); set → the engine runs on it instead of `extraction_slot`, validated against the live upstream catalogs at set-time |
 | `llm_timeout_s` | int | `300` | `30-3600` |
 | `extraction_max_concurrent` | int | `1` | `1-8` |
@@ -148,6 +148,8 @@ override: `HAL0_FLM_MODELS_DIR`.
 | `extraction_llm_retries` | int | `1` | `0-5` |
 | `extraction_task_retries` | int | `2` | `0-10` |
 | `extraction_retry_backoff_s` | int | `120` | `10-3600` |
+
+`hindsight-api` always calls one virtual model id, `hal0/memory`, which the `extraction-model.conf` systemd drop-in sets. hal0's `/v1` resolves it on every call to `hal0/<extraction_slot>`, or to `extraction_model` when that is set. Changing `extraction_slot` or `extraction_model` therefore applies at once and does not restart the engine. Changing `llm_timeout_s` or one of the `extraction_*` limits rewrites the drop-in and restarts hindsight-api, as does the first save after an upgrade when the drop-in is missing or stale. An `extraction_model` that no configured upstream advertises is rejected (422 `config.memory_graph_model_invalid`, listing the pickable ids) and the config is left as it was. A `HINDSIGHT_API_LLM_PROVIDER`, `HINDSIGHT_API_LLM_BASE_URL` or `HINDSIGHT_API_LLM_MODEL` line in `/etc/hal0/hindsight-llm.env` overrides both settings; see [Services](/docs/operate/services/#hindsight-apiservice).
 
 #### `[memory.embedding]`
 

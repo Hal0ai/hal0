@@ -246,6 +246,8 @@ Deleting a whole bank requires `--confirm <bank>` to exactly match the
 target bank id — the CLI refuses before the request even reaches the
 server if it doesn't, and the server enforces the same check independently.
 
+A bank id starts with a letter or digit and continues with letters, digits, `.`, `_`, `:` or `-`, up to 128 characters in all. Dots are legal inside an id, so a bank the hindsight coding-agent plugin named after a repository (`coding-agent::ultrareview-1.4`) can be managed and deleted through hal0: its stats, profile, config and delete routes under `/api/memory/banks/{bank_id}` accept it. A leading dot, a dot-only segment and any `..` run are refused. The dashboard's new-bank form accepts the same grammar.
+
 `bank profile set` writes every flag as a bank-config override in one
 config PATCH: `--skepticism`/`--literalism`/`--empathy` (1–5 disposition
 traits) and `--retain-mission`/`--observations-mission`/`--reflect-mission`.
@@ -254,6 +256,8 @@ get` shows the bank's name, mission and effective disposition. The memory
 engine's own `/profile` endpoint answers `410 Gone` from Hindsight 0.10.0 on;
 hal0's `/api/memory/banks/<bank>/profile` keeps working by composing the same
 answer from the bank list and the bank config.
+
+`--reflect-mission` is the text the Memory workspace shows under the bank picker as the bank's description. You can also edit it there in place; see [The bank bar](/docs/guides/memory-workspace#the-bank-bar).
 
 ## Async operations and mental models
 

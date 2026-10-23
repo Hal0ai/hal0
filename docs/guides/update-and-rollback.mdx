@@ -264,11 +264,12 @@ pass, but a few things are worth doing or checking. The full list is in the
 
 ## Upgrading to 1.6.0
 
-The first `hal0 update` to 1.6.0 changes how Hermes is installed. Nothing needs a manual migration pass, but expect the following. The full list is in the Breaking section under Unreleased in `CHANGELOG.md`.
+The first `hal0 update` to 1.6.0 changes how Hermes is installed. One step is needed on a box that had Hermes before 1.6.0 (the Open WebUI repair below); expect the following. The full list is in the Breaking section of the `## [1.6.0]` entry in `CHANGELOG.md`.
 
-- **Hermes moves from 0.19.0 to v0.22.2 (`d923a5eb`) and from Python 3.12 to a uv-managed Python 3.14.** The update builds a release next to the live one under `/var/lib/hal0/hermes/releases/`, checks it, then switches. `/var/lib/hal0/venvs/hermes` becomes a symlink to `current/venv`. The build needs the network; an offline host refuses it and stays on 0.19.0. `/etc/hal0/hermes-python.env` is rewritten to the 3.14 interpreter and the old value is discarded with a `hermes-python-discarded` warning.
+- **Hermes moves from 0.19.0 to v0.22.4 (`4d043038`) and from Python 3.12 to a uv-managed Python 3.14.** The update builds a release next to the live one under `/var/lib/hal0/hermes/releases/`, checks it, then switches. `/var/lib/hal0/venvs/hermes` becomes a symlink to `current/venv`. The build needs the network; an offline host refuses it and stays on 0.19.0. `/etc/hal0/hermes-python.env` is rewritten to the 3.14 interpreter and the old value is discarded with a `hermes-python-discarded` warning. A box already on v0.22.2 rebuilds onto v0.22.4 at its next `hal0 update`.
 - **Expect a short Hermes outage** while the agent and gateway restart on the new release.
 - **The gateway unit is regenerated and linger is enabled for `hal0` automatically.** Run `sudo hal0 agent install hermes` only if the update says it could not.
+- **Hermes cannot be moved back to v0.22.2 once v0.22.4 is live.** v0.22.3 and later write gateway runtime state into Hermes's `state.db` that v0.22.2 cannot run over, so `hal0 agent upgrade hermes --to d923a5eb487a17c0a68801bba9ef0f56c81040a8` is refused as a downgrade. v0.22.2 stays in hal0's vetted refs for the automatic flip-back after a failed activation.
 - **Session history is kept** (`sessions.auto_prune: false`) and the persona prompt is written to `agent.system_prompt` before the new Hermes first starts.
 - **Open WebUI gets the default Hermes profile after one repair.** If the default profile is missing from the picker on a box that had Hermes installed before 1.6.0, run `sudo hal0 agent reprovision hermes --repair` once; `hal0 doctor` flags this on the `hermes-api` row. See [Talking to Hermes](/docs/guides/open-webui#talking-to-hermes).
 - **The agent chat proxy is removed.** `/api/agents/{id}/events`, `/submit` and `/session/*` return 404.

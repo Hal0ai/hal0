@@ -266,13 +266,28 @@ even on a fresh install, under `[memory.graph]`:
   queued memory operation (consolidation and mental-model refresh too)
   shares them, since the engine has no retain-only task retry.
 
-All of them are propagated to the `hindsight-api` service as
-`HINDSIGHT_API_LLM_MODEL=hal0/<slot>`, `HINDSIGHT_API_LLM_TIMEOUT=<n>` and
-the matching `HINDSIGHT_API_RETAIN_*` / `HINDSIGHT_API_WORKER_*` limits via
-a systemd drop-in at `/etc/systemd/system/hindsight-api.service.d/extraction-model.conf`,
-followed by `daemon-reload` + a service restart — all routed through hal0's
-privileged-operation seam rather than hal0-api (which runs unprivileged)
-touching `/etc/systemd` directly.
+The timeout and the extraction limits are propagated to the `hindsight-api`
+service as `HINDSIGHT_API_LLM_TIMEOUT=<n>` and the matching
+`HINDSIGHT_API_RETAIN_*` / `HINDSIGHT_API_WORKER_*` limits through a systemd
+drop-in at
+`/etc/systemd/system/hindsight-api.service.d/extraction-model.conf`, followed
+by `daemon-reload` and a service restart. The same drop-in always carries
+`HINDSIGHT_API_LLM_MODEL=hal0/memory`, so changing the slot or
+`extraction_model` rewrites nothing and restarts nothing; only a timeout or
+limit change restarts the engine, and a stale or missing drop-in is repaired
+on any save. The write and restart go through hal0's privileged-operation seam
+rather than hal0-api (which runs unprivileged) touching `/etc/systemd`
+directly.
+
+Pick the engine model under **Engine model** on Settings → Memory or on the
+agents Memory tab (Local slots / Upstream models), or from the CLI with
+`hal0 memory graph enable --model <id>`; `--local` returns to the local
+`extraction_slot`, and `--model` cannot be combined with `--slot` or
+`--local`. `GET /api/memory/graph/status` reports `target`, `available_models`
+and `engine_llm`. The **Engine running** row names the provider and model
+hindsight-api really loads. If `/etc/hal0/hindsight-llm.env` overrides the
+model, the row shows it in amber: systemd applies that file after every hal0
+setting, so the override wins over your choice until you remove it.
 
 <Aside type="note">
 A memory write is refused (fast, with a clear error) rather than silently

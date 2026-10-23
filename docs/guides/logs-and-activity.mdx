@@ -30,6 +30,8 @@ raw `journalctl`, if you have shell access on the host:
 journalctl -u hal0-slot@agent.service -f
 ```
 
+If `hal0-api` cannot read the journal, the log views say so instead of showing nothing. The live stream sends a `degraded` event that names the cause and the fix, then stays open with keepalives, so the dashboard's slot log drawer and the Logs page `slot` channel show the notice instead of cycling through "reconnecting…". `hal0 slot logs --follow` prints the reason and returns, and the one-shot tail (`hal0 slot logs`, `GET /api/slots/{name}/logs`) carries the same hint. The usual cause is a `hal0-api.service` unit written before it was granted `SupplementaryGroups=systemd-journal`; `hal0 update` does not rewrite that unit, so re-run the installer once (`curl -fsSL https://hal0.dev/install.sh | sudo bash`). `hal0 doctor all` tracks this on the `API journal read` row.
+
 ## Agent provisioning logs
 
 ```sh

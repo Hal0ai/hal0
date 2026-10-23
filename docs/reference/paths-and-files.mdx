@@ -37,6 +37,7 @@ With `HAL0_HOME=$X` set (dev installs, tests): `usr_lib = $X/usr-lib/hal0/curren
 ├── slots/                   # one <name>.toml per slot
 ├── agents/<name>.toml       # per-agent MCP allowlist/config
 ├── hermes-python.env        # HAL0_HERMES_PYTHON=<interpreter> hal0 chose for the Hermes venv; optional operator override
+├── hindsight-llm.env       # root:hal0 (0640 from the installer, 0600 after hal0 auth rotate), optional EnvironmentFile of hindsight-api: HINDSIGHT_API_LLM_API_KEY, kept fresh by hal0 auth rotate; a PROVIDER, BASE_URL or MODEL line here overrides the Engine model choice
 ├── mcp-servers/<id>.toml    # 0600, one record per user-installed MCP server
 ├── oauth-providers.toml     # OAuth provider registry, seeded once from shipped defaults
 └── *.lock                   # advisory RMW lock siblings

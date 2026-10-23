@@ -39,7 +39,7 @@ operation completed. Below it:
   an activity chip (`⟳ N working`, `N pending`, or `idle`). Click a row (or
   its arrow button) to open that bank in the Bank workspace.
 
-A **+ New bank** button/form sits below the table.
+A **+ New bank** button/form sits below the table. The form accepts a bank id that starts with a letter or digit and continues with letters, digits, `.`, `_`, `:` or `-`, up to 128 characters in all.
 
 ## Bank tab
 
@@ -58,6 +58,8 @@ modal (below); the small refresh icon next to it triggers **consolidate
 now** for this bank, and the trash icon deletes the bank. Delete opens a
 destructive confirm that asks you to type the bank id before calling
 `DELETE /api/memory/banks/{bank_id}`; there is no undo.
+
+The description next to the picker is the bank's Hindsight `reflect_mission`, the persona that reflect answers with. Click it to edit in place (a bank with none shows `no description set — click to add`), then **Save**; **Cancel** or Escape discards the edit, and Ctrl or Cmd plus Enter saves. Save writes the same per-bank config override as `hal0 memory bank profile set <bank> --reflect-mission "..."` and changes nothing else. Saving an empty text clears the description. Bank ids may contain dots (for example `coding-agent::ultrareview-1.4`), so a repo-named bank opens and deletes here like any other.
 
 Below that, two sub-tabs:
 
