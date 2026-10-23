@@ -77,7 +77,7 @@ def _run(
         + f"VENV_DIR={root / 'venv'!s}\n"
         + f"REPO_ROOT={repo_root!s}\n"
         + f"PY={sys.executable}\n"
-        + "VERSION=1.4.0\n"
+        + "VERSION=1.6.0\n"
         + _function_source()
         + "check_upgrade_floor\n"
         + "echo FLOOR_PASSED\n"
@@ -85,18 +85,28 @@ def _run(
     return subprocess.run(["bash", "-c", script], capture_output=True, text=True)
 
 
-@pytest.mark.parametrize("installed", ["1.2.0", "1.0.0", "0.9.8", "1.0.0-nightly.20260801120000"])
+@pytest.mark.parametrize(
+    "installed",
+    [
+        "1.3.1",
+        "1.3.0",
+        "1.2.0",
+        "0.9.8",
+        "1.0.0-nightly.20260801120000",
+        "1.4.0-nightly.20261011035008",
+    ],
+)
 def test_rerun_below_the_shipped_floor_is_refused(tmp_path: Path, installed: str) -> None:
     proc = _run(tmp_path, installed)
     assert proc.returncode == 1, proc.stdout + proc.stderr
     assert "FLOOR_PASSED" not in proc.stdout
     assert f"hal0 {installed} is installed" in proc.stderr
-    assert "upgrades only from >=1.3.0" in proc.stderr
-    assert "Upgrade to 1.3.0 first or reinstall" in proc.stderr
-    assert "releases/download/v1.3.0/stable.json" in proc.stderr
+    assert "upgrades only from >=1.4.0" in proc.stderr
+    assert "Upgrade to 1.4.0 first or reinstall" in proc.stderr
+    assert "releases/download/v1.4.0/stable.json" in proc.stderr
 
 
-@pytest.mark.parametrize("installed", ["1.3.0", "1.3.1", "1.4.0", "1.4.0-nightly.20261011035008"])
+@pytest.mark.parametrize("installed", ["1.4.0", "1.4.1", "1.5.0", "1.5.0-nightly.20261019194027"])
 def test_rerun_inside_the_window_proceeds(tmp_path: Path, installed: str) -> None:
     proc = _run(tmp_path, installed)
     assert proc.returncode == 0, proc.stdout + proc.stderr

@@ -276,29 +276,36 @@ The first `hal0 update` to 1.6.0 changes how Hermes is installed. Nothing needs 
 
 ## Upgrading from an older release
 
-Upgrades start at **1.3.0**. Every release manifest declares the window it
-upgrades from (`upgrade_from: ">=1.3.0"`), and both upgrade paths enforce it:
+Upgrades start at **1.4.0** (from 1.6.0; 1.3.0 before that). Every release
+manifest declares the window it upgrades from (`upgrade_from: ">=1.4.0"`),
+and both upgrade paths enforce it:
 
 - `hal0 update` on an older box stops before it downloads anything, with
   `system.update_upgrade_path_unsupported` and both versions named.
 - Re-running the installer over an older install stops before it changes
   anything.
 
-A nightly counts as a prerelease of its base version, so a `1.3.0` nightly is
-below the floor and a `1.4.0` nightly is inside it.
+A nightly counts as a prerelease of its base version, so a `1.4.0` nightly is
+below the floor and a `1.5.0` nightly is inside it.
 
-From an older box, step through 1.3.0 first. Its installer upgrades in place
-and keeps `/etc/hal0` and `/var/lib/hal0`:
+From a 1.3.x box, step through 1.5.0 first:
+
+```sh
+hal0 update --target 1.5.0 -y
+hal0 update -y
+```
+
+From 1.2.x or older, step through 1.3.0 with its installer, which upgrades in
+place and keeps `/etc/hal0` and `/var/lib/hal0`, then follow the 1.3.x path:
 
 ```sh
 curl -fsSL https://hal0.dev/install.sh \
   | sudo env HAL0_RELEASES_URL=https://github.com/hal0ai/hal0/releases/download/v1.3.0/stable.json bash
+hal0 update --target 1.5.0 -y
 hal0 update -y
 ```
 
-The first command installs 1.3.0 and runs its migrations. The second takes
-the box from 1.3.0 to the current release. Read "Upgrading to 1.3.0" above
-before you start.
+Read "Upgrading to 1.3.0" above before you start from 1.2.x.
 
 Or reinstall from scratch: `sudo bash installer/uninstall.sh --purge` deletes
 `/etc/hal0` and `/var/lib/hal0`, models included, and the normal one-liner
