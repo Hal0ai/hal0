@@ -138,7 +138,7 @@ and Pi cards render. ADMIN-gated with the rest of `/api/agents`. `name` is `herm
 `pi`; any other name is `404 agent.unknown`. The route builds the answer from live
 probes and never fails for a normal box state: a missing systemd, a stopped gateway or
 an unreadable file shows as `unknown`, empty or `null` in the matching key. The result
-is cached for 30 s per agent; `?refresh=1` rebuilds it and refills the cache.
+The probes are cached for 30 s per agent and built once per miss: requests that miss while a build is running wait for it. `?refresh=1` starts a new build and refills the cache. `status`, `unit_active`, `units.agent`, `approvals.pending`, `job` and `phase` are recomputed on every request, so a build that starts or finishes inside the window shows at once.
 
 A bundled agent that is not installed answers with only `name`, `kind`,
 `installed: false`, `phase: "not_installed"`, `commands.install`, and the version it
@@ -152,8 +152,8 @@ Hermes (`kind: "daemon"`):
 | `name`, `kind`, `installed`, `status` | Identity and install state (`status` is `installed` or `broken`). |
 | `unit_active` | `true`, `false`, or `null` when systemd cannot answer. |
 | `version` | `live` and `previous` release (`id`, `ref`, `describe`, and for `live` also `built_at`, `python_minor`, `extras`, `platform_extras`, `hal0_version`), the `pin` (`{ref, describe}`), the `component` row (`installed`, `pinned`, `status`), and `update_available`. |
-| `units` | `agent` and `gateway` states: `active`, `inactive`, `failed`, `unknown`, and for the gateway `absent` when the unit does not exist. |
-| `api_server` | `endpoint` (`host:port`), `healthy`, and the `profiles` the gateway serves. |
+| `units` | `agent` and `gateway` states: `active`, `inactive`, `failed`, `unknown`, and for the gateway `absent` when the unit does not exist. The gateway's `activating` and `reloading` read as `active` and `deactivating` as `inactive`, so a restart is not reported as down. |
+| `api_server` | `endpoint` (`host:port`, from config), `healthy`, and the `profiles` the gateway serves. The gateway and every profile are probed at once, with a 1 s timeout each. |
 | `platforms` | Names of the configured gateway platforms. |
 | `provision` | The last provision run: `present`, versions, `completed_at`, `reported_at` (the newest phase time), `phases`, `ok`/`warn`/`fail` counts, and the configured models, MCP servers, memory provider and approvals mode. `live_built_at` is when the live release was built, and `stale` is `true` when the report is older than that build: `hal0 update` rebuilds Hermes without rewriting `provision.json`, so a stale report no longer lists `provision_failed` or `provision_warn` in `degraded`. |
 | `doctor` | Rows `{id, status, detail}` for `interpreter`, `plugins`, `ownership` and `gateway_unit`; `status` is `ok`, `warn`, `fail`, `absent` or `unreadable`. |

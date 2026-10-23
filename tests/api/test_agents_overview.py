@@ -14,7 +14,10 @@ import json
 import os
 import subprocess
 import sys
+import threading
+import time
 from collections.abc import Callable, Iterator
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -147,7 +150,8 @@ def _patch_hermes_ready(
         "unit_is_active": _active,
         "unit_state": _unit_state,
         "gateway_alive": _gateway_alive,
-        "served_profiles": lambda home, *, probe=None: ["default", "coder"],
+        "profile_dirs": lambda home: ["coder"],
+        "profile_health": lambda home, name, *, probe=None: 200,
         "component_status_snapshot": lambda: {
             "components": [
                 {"id": "openwebui", "installed": "1", "pinned": "2", "status": "pending"},
@@ -356,7 +360,7 @@ def test_overview_survives_a_failing_probe(client_ready, monkeypatch):
     resp = client_ready.get("/api/agents/hermes/overview")
     assert resp.status_code == 200
     body = resp.json()
-    assert body["api_server"] == {"endpoint": None, "healthy": False, "profiles": []}
+    assert body["api_server"] == {"endpoint": "127.0.0.1:8642", "healthy": False, "profiles": []}
     assert body["phase"] == "degraded"
     assert [r["reason"] for r in body["degraded"]] == ["api_unhealthy"]
 
@@ -468,3 +472,187 @@ def test_overview_route_does_not_import_hal0_cli():
     )
     loaded = [line for line in proc.stdout.splitlines() if line.startswith("hal0.cli")]
     assert loaded == []
+
+
+def test_overview_probes_the_gateway_and_every_profile_at_once(client_ready, monkeypatch):
+    """Three probes must be in flight together to pass the barrier; sequential ones time out."""
+    barrier = threading.Barrier(3, timeout=5)
+
+    def alive(home, *, probe=None):
+        barrier.wait()
+        return True
+
+    def health(home, name, *, probe=None):
+        barrier.wait()
+        return 200 if name == "coder" else 404
+
+    monkeypatch.setattr(overview_route, "profile_dirs", lambda home: ["coder", "ghost"])
+    monkeypatch.setattr(overview_route, "gateway_alive", alive)
+    monkeypatch.setattr(overview_route, "profile_health", health)
+    body = client_ready.get("/api/agents/hermes/overview").json()
+    assert body["api_server"]["healthy"] is True
+    assert body["api_server"]["profiles"] == ["default", "coder"]
+
+
+@pytest.mark.parametrize(
+    ("active_state", "expected"),
+    [
+        ("active", "active"),
+        ("activating", "active"),
+        ("reloading", "active"),
+        ("deactivating", "inactive"),
+        ("failed", "failed"),
+    ],
+)
+def test_overview_gateway_transition_states_are_not_down(
+    client_ready, monkeypatch, active_state, expected
+):
+    async def _state(unit: str) -> dict[str, str | None]:
+        return {
+            "active_state": active_state,
+            "sub_state": "start",
+            "unit_file_state": "enabled",
+            "since": None,
+        }
+
+    monkeypatch.setattr(overview_route, "unit_state", _state)
+    body = client_ready.get("/api/agents/hermes/overview").json()
+    assert body["units"]["gateway"] == expected
+
+
+def test_overview_rejected_builder_input_degrades_one_block(client_ready, monkeypatch, tmp_path):
+    """A release.json or provision.json of an unexpected shape must not 500."""
+    bad = Release(id="r", path=tmp_path / "r", data={"ref": PIN_REF, "extras": 5})
+    monkeypatch.setattr(overview_route, "live_release", lambda layout: bad)
+    (tmp_path / "provision.json").write_text(json.dumps({"phases": 5}))
+    resp = client_ready.get("/api/agents/hermes/overview")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["version"]["live"] is None and body["version"]["update_available"] is False
+    assert body["version"]["pin"] == {"ref": PIN_REF, "describe": None}
+    assert body["provision"]["present"] is False and body["provision"]["stale"] is False
+    assert body["units"] == {"agent": "active", "gateway": "active"}
+
+
+class _CountingManager(_FakeManager):
+    """Signals each ``list()`` call, which a request makes just before it joins a build."""
+
+    def __init__(self, records: list[AgentRecord]) -> None:
+        super().__init__(records)
+        self.calls = 0
+        self.second_call = threading.Event()
+
+    def list(self) -> list[AgentRecord]:
+        self.calls += 1
+        if self.calls >= 2:
+            self.second_call.set()
+        return super().list()
+
+
+def test_overview_concurrent_misses_share_one_build(client_ready, monkeypatch, probe_calls):
+    manager = _CountingManager([_record("hermes")])
+    monkeypatch.setattr(agents_routes, "_manager", lambda: manager)
+    entered, release = threading.Event(), threading.Event()
+
+    def slow_alive(home, *, probe=None):
+        probe_calls["gateway_alive"] += 1
+        entered.set()
+        assert release.wait(10)
+        return True
+
+    monkeypatch.setattr(overview_route, "gateway_alive", slow_alive)
+    with ThreadPoolExecutor(2) as pool:
+        first = pool.submit(client_ready.get, "/api/agents/hermes/overview")
+        assert entered.wait(10)
+        second = pool.submit(client_ready.get, "/api/agents/hermes/overview")
+        assert manager.second_call.wait(10)
+        time.sleep(0.2)  # the second request has joined the running build by now
+        release.set()
+        bodies = [f.result(timeout=20).json() for f in (first, second)]
+    assert probe_calls["gateway_alive"] == 1
+    assert bodies[0] == bodies[1]
+
+
+def test_overview_late_build_does_not_overwrite_a_refresh(client_ready, monkeypatch, probe_calls):
+    manager = _CountingManager([_record("hermes")])
+    monkeypatch.setattr(agents_routes, "_manager", lambda: manager)
+    entered, release = threading.Event(), threading.Event()
+
+    def alive(home, *, probe=None):
+        probe_calls["gateway_alive"] += 1
+        if probe_calls["gateway_alive"] == 1:  # the first build stalls
+            entered.set()
+            assert release.wait(10)
+        return True
+
+    platform_calls = []
+
+    def platforms(*args, **kwargs):
+        platform_calls.append(1)
+        return ["old"] if len(platform_calls) == 1 else ["fresh"]
+
+    monkeypatch.setattr(overview_route, "gateway_alive", alive)
+    monkeypatch.setattr(overview_route, "configured_platform_names", platforms)
+    with ThreadPoolExecutor(2) as pool:
+        slow = pool.submit(client_ready.get, "/api/agents/hermes/overview")
+        assert entered.wait(10)
+        refreshed = pool.submit(client_ready.get, "/api/agents/hermes/overview?refresh=1")
+        assert refreshed.result(timeout=20).json()["platforms"] == ["fresh"]
+        release.set()
+        assert slow.result(timeout=20).json()["platforms"] == ["old"]
+    # The stalled build finished last; the cache still holds the refresh.
+    assert client_ready.get("/api/agents/hermes/overview").json()["platforms"] == ["fresh"]
+    assert probe_calls["gateway_alive"] == 2
+
+
+def test_overview_cache_expires_after_the_ttl(client_ready, monkeypatch, probe_calls):
+    clock = [1000.0]
+    monkeypatch.setattr(overview_route, "_now", lambda: clock[0])
+    client_ready.get("/api/agents/hermes/overview")
+    clock[0] += overview_route._CACHE_TTL_S - 0.1
+    client_ready.get("/api/agents/hermes/overview")
+    assert probe_calls["gateway_alive"] == 1
+    clock[0] += 0.2
+    client_ready.get("/api/agents/hermes/overview")
+    assert probe_calls["gateway_alive"] == 2
+
+
+def test_overview_uninstall_drops_the_cache_entry(client_ready, monkeypatch):
+    records = [_record("hermes")]
+    monkeypatch.setattr(agents_routes, "_manager", lambda: _FakeManager(records))
+    assert client_ready.get("/api/agents/hermes/overview").json()["installed"] is True
+    assert "hermes" in overview_route._cache
+    records.clear()
+    body = client_ready.get("/api/agents/hermes/overview").json()
+    assert body["installed"] is False and body["phase"] == "not_installed"
+    assert "hermes" not in overview_route._cache
+
+
+def test_overview_live_fields_are_current_on_a_cache_hit(client_ready, monkeypatch, probe_calls):
+    """A build, an approval or a unit change inside the cache window shows without a refresh."""
+    first = client_ready.get("/api/agents/hermes/overview").json()
+    assert first["job"] is None and first["phase"] == "ready"
+    assert first["approvals"]["pending"] == 0
+
+    client_ready.app.state.update_jobs = {
+        "j": {"id": "j", "state": "running", "phase": "repair:hermes", "created_at": 1.0}
+    }
+    pending = [{"id": "a"}, {"id": "b"}]
+    monkeypatch.setattr(
+        overview_route, "_queue", lambda request: SimpleNamespace(list_pending=lambda: pending)
+    )
+    during = client_ready.get("/api/agents/hermes/overview").json()
+    assert during["job"] == {"id": "j", "kind": "repair", "state": "running"}
+    assert during["phase"] == "working" and during["approvals"]["pending"] == 2
+
+    client_ready.app.state.update_jobs["j"]["state"] = "applied"
+
+    async def _inactive(agent_id: str) -> bool:
+        return False
+
+    monkeypatch.setattr(overview_route, "unit_is_active", _inactive)
+    after = client_ready.get("/api/agents/hermes/overview").json()
+    assert after["job"] is None and after["phase"] == "down"
+    assert after["unit_active"] is False
+    assert after["units"] == {"agent": "inactive", "gateway": "active"}
+    assert probe_calls["gateway_alive"] == 1  # every one of these was a cache hit

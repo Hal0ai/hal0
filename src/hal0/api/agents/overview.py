@@ -6,12 +6,19 @@ counters and the Pi npm tree, then hands the results to the pure builders in
 :mod:`hal0.agents.overview`. Each external call is a module attribute here so
 tests replace it without touching systemd, the network or the real Hermes tree.
 
-Nothing in this route may raise for a normal box state. Every gather runs
-behind a guard that returns a neutral value ("unknown", empty, ``None``) and
-logs a warning, so a missing systemd, a stopped gateway or an unreadable file
-shows up as a degraded card instead of a 500. The synchronous probes run
-concurrently in threads, and the result is cached per agent for
-:data:`_CACHE_TTL_S` (``?refresh=1`` bypasses and refills the cache).
+Nothing in this route may raise for a normal box state. Every gather and every
+builder call runs behind a guard that returns a neutral value ("unknown",
+empty, ``None``) and logs a warning, so a missing systemd, a stopped gateway,
+an unreadable file or a release record of an unexpected shape shows up as a
+degraded card instead of a 500.
+
+The slow part (probes, doctor checks, file reads) is built once per agent per
+:data:`_CACHE_TTL_S`. Requests that miss the cache while a build is running wait
+for that build instead of starting another; ``?refresh=1`` always starts a new
+one, and a build never overwrites a cache entry that a later-started build
+stored. The cheap live fields (unit state, pending approvals, the running job,
+``status`` and ``phase``) are recomputed on every request, so a build that
+starts or finishes inside the window shows at once.
 """
 
 from __future__ import annotations
@@ -31,12 +38,14 @@ from fastapi import APIRouter, Query, Request
 
 from hal0.agents import overview as builders
 from hal0.agents.hermes_api import (
+    DEFAULT_PROFILE,
     api_server_endpoint,
     authority,
     gateway_alive,
     hermes_home,
     probe_status,
-    served_profiles,
+    profile_dirs,
+    profile_health,
 )
 from hal0.agents.hermes_command_approvals import status as command_status
 from hal0.agents.hermes_doctor import (
@@ -46,7 +55,12 @@ from hal0.agents.hermes_doctor import (
     check_hermes_sqlite,
 )
 from hal0.agents.hermes_platforms import configured_platform_names
-from hal0.agents.hermes_provision import _HAL0_AGENTENV, HERMES_SECRETS_ENV, HERMES_VENV_DEFAULT
+from hal0.agents.hermes_provision import (
+    _HAL0_AGENTENV,
+    _STATE_FILE_NAME,
+    HERMES_SECRETS_ENV,
+    HERMES_VENV_DEFAULT,
+)
 from hal0.agents.hermes_release import (
     Layout,
     Release,
@@ -55,15 +69,15 @@ from hal0.agents.hermes_release import (
     read_pin,
     read_release,
 )
-from hal0.agents.manager import AgentRecord, agent_kind, installer_script_path
+from hal0.agents.manager import AgentManager, AgentRecord, agent_kind, installer_script_path
 from hal0.agents.pi_coder import PiDriver
+from hal0.agents.pi_coder.driver import _HINDSIGHT_API_URL
 from hal0.api.agents.memory_stats import get_agent_memory_stats
 from hal0.api.agents.restart import unit_is_active
 from hal0.api.routes import agents as agents_routes
 from hal0.api.routes.approvals import _queue
 from hal0.api.routes.updater import _update_jobs
 from hal0.components.status import component_status_snapshot
-from hal0.config import paths
 from hal0.services.systemd import unit_state
 
 log = structlog.get_logger(__name__)
@@ -74,19 +88,32 @@ router = APIRouter()
 #: is not free.
 _CACHE_TTL_S: Final[float] = 30.0
 
-#: ``name -> (monotonic time it was built, body)``. Only installed agents are
-#: cached: install state is re-read on every request so an install or an
+#: ``name -> (monotonic time the build started, body)``. Only installed agents
+#: are cached: install state is re-read on every request, so an install or an
 #: uninstall shows at once.
 _cache: dict[str, tuple[float, dict[str, Any]]] = {}
 
+#: ``name -> (the running build, whether a refresh started it)``. Created and
+#: awaited only inside the running event loop.
+_inflight: dict[str, tuple[asyncio.Task[dict[str, Any]], bool]] = {}
+
 _GATEWAY_UNIT: Final[str] = "hermes-gateway.service"
 
-#: One probe's budget. The route runs these concurrently, so a dead gateway
-#: costs one second, not one per profile.
+#: systemd transition states, folded into the state they are heading for or
+#: coming from, so a normal gateway restart is not reported as the gateway
+#: being down for the length of a cache window.
+_GATEWAY_STATE_ALIASES: Final[dict[str, str]] = {
+    "activating": "active",
+    "reloading": "active",
+    "deactivating": "inactive",
+}
+
+#: One probe's budget. The probes run concurrently, so a dead gateway costs one
+#: second in total, not one per profile.
 _PROBE_TIMEOUT_S: Final[float] = 1.0
 
 #: The hal0 memory server (Hindsight) a Pi profile points at.
-_HINDSIGHT_HEALTH_URL: Final[str] = "http://127.0.0.1:9177/health"
+_HINDSIGHT_HEALTH_URL: Final[str] = f"{_HINDSIGHT_API_URL}/health"
 
 #: ``updater`` registry phases that are a Hermes build, and the states that are
 #: not terminal.
@@ -96,21 +123,21 @@ _ACTIVE_JOB_STATES: Final[frozenset[str]] = frozenset({"queued", "running"})
 #: Pins reported to the profile checks when the installer script cannot be read.
 _UNKNOWN_PINS: Final[dict[str, str]] = {"pi": "unknown", "adapter": "unknown"}
 
-_NO_APPROVALS: Final[dict[str, Any]] = {
-    "mode": None,
-    "effective": None,
-    "in_sync": None,
-    "pending": 0,
-}
+_NO_APPROVALS: Final[dict[str, Any]] = {"mode": None, "effective": None, "in_sync": None}
 _NO_MEMORY: Final[dict[str, Any]] = {"available": False, "writes": None, "last_write": None}
 
 
 # ── seams ───────────────────────────────────────────────────────────────────
 
 
+def _now() -> float:
+    """The cache clock; a module function so tests move time without touching the loop's."""
+    return time.monotonic()
+
+
 def provision_path() -> Path:
     """Where the last Hermes provision run is recorded."""
-    return paths.var_lib() / "state" / "agents" / "hermes" / "provision.json"
+    return AgentManager()._state_dir("hermes") / _STATE_FILE_NAME
 
 
 def pi_binary() -> Path | None:
@@ -169,6 +196,15 @@ def _in_thread[T](
     return _guarded(label, asyncio.to_thread(fn, *args, **kwargs), default)
 
 
+def _safe[T](label: str, default: T, fn: Callable[..., T], *args: Any, **kwargs: Any) -> T:
+    """``fn(*args, **kwargs)``, or ``default`` (and a warning) when a builder rejects its input."""
+    try:
+        return fn(*args, **kwargs)
+    except Exception as exc:
+        log.warning("agents.overview.build_failed", build=label, error=str(exc))
+        return default
+
+
 async def _check[T](label: str, fn: Callable[[], T]) -> tuple[T | None, str | None]:
     """A doctor check in a thread: ``(result, None)``, or ``(None, error text)``."""
     try:
@@ -186,13 +222,16 @@ async def _gateway_state() -> str | None:
 
     ``systemctl show`` exits 0 for an unknown unit and reports ``inactive`` with
     an empty ``UnitFileState``, which :func:`unit_state` turns into ``unknown``.
-    A real unit that is merely stopped has a unit-file state.
+    A real unit that is merely stopped has a unit-file state. The transition
+    states fold into their neighbours: ``activating`` and ``reloading`` read as
+    ``active`` and ``deactivating`` as ``inactive``, so a gateway restart is not
+    reported as down.
     """
     state = await unit_state(_GATEWAY_UNIT)
     active = state.get("active_state")
     if active == "inactive" and state.get("unit_file_state") in (None, "unknown"):
         return "absent"
-    return active
+    return _GATEWAY_STATE_ALIASES.get(active, active) if active else None
 
 
 def _read_releases(layout: Layout) -> tuple[Release | None, Release | None]:
@@ -224,19 +263,37 @@ def _read_provision() -> dict[str, Any] | None:
     return data if isinstance(data, dict) else None
 
 
-def _api_server(home: Path) -> dict[str, Any]:
-    """Endpoint, health and served profiles of the Hermes API server."""
+def _endpoint(home: Path) -> str:
+    """``host:port`` of the API server, from config. No network."""
     host, port = api_server_endpoint(home)
+    return authority(host, port)
+
+
+async def _api_health(home: Path) -> tuple[bool, list[str]]:
+    """Whether the gateway answers, and the profiles it serves.
+
+    The gateway's ``/health`` and each profile's ``/p/<name>/health`` are
+    probed at once, one thread per probe. Profiles are only reported while the
+    gateway itself is healthy; ``default`` is always among them.
+    """
 
     def probe(url: str) -> int:
         return probe_status(url, timeout=_PROBE_TIMEOUT_S)
 
-    healthy = gateway_alive(home, probe=probe)
-    return {
-        "endpoint": authority(host, port),
-        "healthy": healthy,
-        "profiles": served_profiles(home, probe=probe) if healthy else [],
-    }
+    no_names: list[str] = []
+    names = await _in_thread("profile_dirs", no_names, profile_dirs, home)
+    healthy, codes = await asyncio.gather(
+        _in_thread("gateway_probe", False, gateway_alive, home, probe=probe),
+        asyncio.gather(
+            *(_in_thread("profile_probe", 0, profile_health, home, n, probe=probe) for n in names)
+        ),
+    )
+    if not healthy:
+        return False, []
+    return True, [
+        DEFAULT_PROFILE,
+        *(n for n, code in zip(names, codes, strict=True) if code == 200),
+    ]
 
 
 def _pending_approvals(request: Request) -> int:
@@ -294,23 +351,27 @@ def _installed_record(name: str) -> AgentRecord | None:
 
 
 async def _gather_hermes(request: Request) -> dict[str, Any]:
-    """The overview of an installed Hermes. Never raises."""
-    record = _installed_record("hermes")
-    status = record.status if record is not None else "installed"
+    """The slow half of an installed Hermes' overview. Never raises.
+
+    Everything that needs a probe, a subprocess or a file read. The live fields
+    that change between builds (``status``, ``unit_active``, ``units.agent``,
+    ``approvals.pending``, ``job``, ``phase``) are added per request by
+    :func:`_overlay_hermes`.
+    """
     home = hermes_home()
     layout = Layout.for_venv(HERMES_VENV_DEFAULT)
     seam = _HAL0_AGENTENV if os.geteuid() != 0 else None
 
     no_releases: tuple[Release | None, Release | None] = (None, None)
     no_platforms: list[str] = []
-    no_api: dict[str, Any] = {"endpoint": None, "healthy": False, "profiles": []}
+    no_health: tuple[bool, list[str]] = (False, [])
 
     # Three groups, themselves run concurrently: live state, files, doctor checks.
     state, files, checks = await asyncio.gather(
         asyncio.gather(
-            _guarded("unit_agent", unit_is_active("hermes"), None),
             _guarded("unit_gateway", _gateway_state(), None),
-            _in_thread("api_server", no_api, _api_server, home),
+            _in_thread("endpoint", None, _endpoint, home),
+            _guarded("api_health", _api_health(home), no_health),
             _guarded("memory", get_agent_memory_stats("hermes", request), None),
             _in_thread(
                 "platforms",
@@ -338,7 +399,7 @@ async def _gather_hermes(request: Request) -> dict[str, Any]:
             _check("gateway_unit", check_hermes_gateway_unit),
         ),
     )
-    agent_active, gateway, api, memory_raw, platforms = state
+    gateway, endpoint, (healthy, profiles), memory_raw, platforms = state
     (live, previous), pin_ref, component, provision_raw, approvals_state = files
     sqlite_result, plugins_result, ownership_result, gateway_result = checks
     sqlite, sqlite_err = sqlite_result
@@ -346,9 +407,20 @@ async def _gather_hermes(request: Request) -> dict[str, Any]:
     ownership, ownership_err = ownership_result
     gateway_check, gateway_check_err = gateway_result
 
-    units = builders.unit_states(agent_active, gateway)
-    provision = _provision_view(provision_raw, live)
-    doctor = builders.doctor_rows(
+    unknown_provision = {**builders.provision_summary(None), "live_built_at": None, "stale": False}
+    unknown_version = {
+        "live": None,
+        "previous": None,
+        "pin": {"ref": pin_ref, "describe": None},
+        "component": component,
+        "update_available": False,
+    }
+    provision = _safe("provision", unknown_provision, _provision_view, provision_raw, live)
+    no_rows: list[dict[str, str]] = []
+    doctor = _safe(
+        "doctor",
+        no_rows,
+        builders.doctor_rows,
         sqlite or _absent(sqlite_err),
         plugins or _absent(plugins_err),
         ownership or [],
@@ -359,23 +431,20 @@ async def _gather_hermes(request: Request) -> dict[str, Any]:
             {"id": "ownership", **_absent(ownership_err)} if row["id"] == "ownership" else row
             for row in doctor
         ]
-
-    pending = _pending_approvals(request)
     # ``degraded_reasons`` also reads ``source`` and ``overrides_path`` from the
-    # full status; the response carries only the four summary keys.
-    approvals_full = {**(approvals_state or _NO_APPROVALS), "pending": pending}
-    approvals = {
-        key: approvals_full.get(key) for key in ("mode", "effective", "in_sync", "pending")
-    }
-
-    degraded = builders.degraded_reasons(
-        units=units,
-        api_healthy=bool(api["healthy"]),
+    # full status; the response carries only the summary keys.
+    approvals_full = approvals_state or _NO_APPROVALS
+    no_reasons: list[dict[str, Any]] = []
+    degraded = _safe(
+        "degraded",
+        no_reasons,
+        builders.degraded_reasons,
+        units={"gateway": gateway or "unknown"},
+        api_healthy=healthy,
         provision=provision,
         doctor=doctor,
         approvals=approvals_full,
     )
-    job = _active_job(request)
     memory = (
         {key: memory_raw.get(key) for key in ("available", "writes", "last_write")}
         if isinstance(memory_raw, dict)
@@ -385,27 +454,45 @@ async def _gather_hermes(request: Request) -> dict[str, Any]:
     return {
         "name": "hermes",
         "kind": agent_kind("hermes"),
-        "installed": True,
-        "status": status,
-        "unit_active": agent_active,
-        "version": builders.hermes_version(live, previous, pin_ref, component),
-        "units": units,
-        "api_server": api,
+        "version": _safe(
+            "version", unknown_version, builders.hermes_version, live, previous, pin_ref, component
+        ),
+        "units": {"gateway": gateway or "unknown"},
+        "api_server": {"endpoint": endpoint, "healthy": healthy, "profiles": profiles},
         "platforms": platforms,
         "provision": provision,
         "doctor": doctor,
-        "approvals": approvals,
+        "approvals": {key: approvals_full.get(key) for key in ("mode", "effective", "in_sync")},
         "memory": memory,
         "links": {
             "desktop": os.environ.get("HAL0_HERMES_PUBLIC_URL", "").strip().rstrip("/") or None
         },
-        "job": job,
         "degraded": degraded,
-        "phase": builders.hermes_phase(
+    }
+
+
+async def _overlay_hermes(
+    base: dict[str, Any], record: AgentRecord, request: Request
+) -> dict[str, Any]:
+    """``base`` (possibly cached) plus the fields that must be current on every request."""
+    agent_active = await _guarded("unit_agent", unit_is_active("hermes"), None)
+    job = _active_job(request)
+    return {
+        **base,
+        "installed": True,
+        "status": record.status,
+        "unit_active": agent_active,
+        "units": builders.unit_states(agent_active, base["units"]["gateway"]),
+        "approvals": {**base["approvals"], "pending": _pending_approvals(request)},
+        "job": job,
+        "phase": _safe(
+            "phase",
+            "unknown",
+            builders.hermes_phase,
             installed=True,
-            status=status,
+            status=record.status,
             unit_active=agent_active,
-            degraded=degraded,
+            degraded=base["degraded"],
             job=job,
         ),
     }
@@ -459,9 +546,11 @@ def _pi_installed_state() -> tuple[dict[str, str | None] | None, dict[str, str] 
 
 
 async def _gather_pi() -> dict[str, Any]:
-    """The overview of an installed Pi. Never raises."""
-    record = _installed_record("pi")
-    status = record.status if record is not None else "installed"
+    """The slow half of an installed Pi's overview. Never raises.
+
+    ``installed``, ``status`` and ``phase`` come per request from
+    :func:`_overlay_pi`.
+    """
     no_state: tuple[dict[str, str | None] | None, dict[str, str] | None] = (None, None)
     (versions, pins), marker, hindsight_status = await asyncio.gather(
         _in_thread("pi_versions", no_state, _pi_installed_state),
@@ -481,12 +570,11 @@ async def _gather_pi() -> dict[str, Any]:
     return {
         "name": "pi",
         "kind": agent_kind("pi"),
-        "installed": True,
-        "status": status,
         "version": {
             "installed": versions,
             "pin": pins,
-            "update_available": pins is not None and builders.pi_update_available(versions, pins),
+            "update_available": pins is not None
+            and _safe("pi_update", False, builders.pi_update_available, versions, pins),
         },
         "profile": profile,
         "memory": {
@@ -499,7 +587,15 @@ async def _gather_pi() -> dict[str, Any]:
             "upgrade": "sudo hal0 agent upgrade pi",
             "uninstall": "sudo hal0 agent uninstall pi",
         },
-        "phase": builders.pi_phase(installed=True, status=status),
+    }
+
+
+def _overlay_pi(base: dict[str, Any], record: AgentRecord) -> dict[str, Any]:
+    return {
+        **base,
+        "installed": True,
+        "status": record.status,
+        "phase": _safe("phase", "unknown", builders.pi_phase, installed=True, status=record.status),
     }
 
 
@@ -527,6 +623,52 @@ async def _not_installed(name: str) -> dict[str, Any]:
     return body
 
 
+# ── cache ───────────────────────────────────────────────────────────────────
+
+
+async def _build(name: str, request: Request, started: float) -> dict[str, Any]:
+    """Build ``name``'s slow half and store it, unless a later-started build already did."""
+    body = await (_gather_hermes(request) if name == "hermes" else _gather_pi())
+    held = _cache.get(name)
+    if held is None or held[0] <= started:
+        _cache[name] = (started, body)
+    return body
+
+
+def _forget(name: str, task: asyncio.Task[dict[str, Any]]) -> None:
+    """Drop ``name``'s in-flight entry once its task finished, unless a newer one replaced it."""
+    entry = _inflight.get(name)
+    if entry is not None and entry[0] is task:
+        del _inflight[name]
+
+
+async def _slow_half(name: str, request: Request, refresh: bool) -> dict[str, Any]:
+    """The cached slow half of ``name``'s overview, built at most once per miss.
+
+    A request that misses the cache joins the build already running for
+    ``name``, if any. A refresh joins one only when a refresh started it: any
+    other build began before the refresh was asked for and may predate the
+    change the caller wants to see. Waiters are shielded, so one client
+    disconnecting does not cancel the build the others are waiting on.
+    """
+    started = _now()
+    cached = _cache.get(name)
+    if not refresh and cached is not None and started - cached[0] < _CACHE_TTL_S:
+        return cached[1]
+
+    entry = _inflight.get(name)
+    if entry is not None and (
+        entry[0].done() or entry[0].get_loop() is not asyncio.get_running_loop()
+    ):
+        entry = None  # finished, or left behind by a loop that has closed
+    if entry is None or (refresh and not entry[1]):
+        task = asyncio.create_task(_build(name, request, started))
+        task.add_done_callback(lambda t: _forget(name, t))
+        entry = (task, refresh)
+        _inflight[name] = entry
+    return await asyncio.shield(entry[0])
+
+
 # ── route ───────────────────────────────────────────────────────────────────
 
 
@@ -536,18 +678,18 @@ async def agent_overview(name: str, request: Request, refresh: int = Query(0)) -
 
     404 ``agent.unknown`` for a name that is not a bundled agent. A bundled
     agent that is not installed answers with just its pin and the install
-    command. An installed agent's overview is cached for 30 s per agent;
-    ``?refresh=1`` rebuilds it and refills the cache.
+    command. For an installed agent the probes are cached for 30 s per agent
+    and built once per miss; ``?refresh=1`` rebuilds them and refills the
+    cache. Unit state, pending approvals, the running job, ``status`` and
+    ``phase`` are current on every request.
     """
     name = agents_routes._bundled_name(name)
-    if _installed_record(name) is None:
+    record = _installed_record(name)
+    if record is None:
         _cache.pop(name, None)
         return await _not_installed(name)
 
-    cached = _cache.get(name)
-    if not refresh and cached is not None and time.monotonic() - cached[0] < _CACHE_TTL_S:
-        return cached[1]
-
-    body = await (_gather_hermes(request) if name == "hermes" else _gather_pi())
-    _cache[name] = (time.monotonic(), body)
-    return body
+    base = await _slow_half(name, request, bool(refresh))
+    if name == "hermes":
+        return await _overlay_hermes(base, record, request)
+    return _overlay_pi(base, record)
