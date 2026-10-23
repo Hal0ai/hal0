@@ -31,8 +31,8 @@ function _mb(mb) {
   return `${(n / 1024).toFixed(1)} GB`
 }
 
-function _pct(v) {
-  return v == null ? '—' : `${Math.round(v)}%`
+export function _pct(v) {
+  return v == null ? '—' : `${Math.round(v * 100)}%`
 }
 
 function _ms(v) {
