@@ -47,11 +47,17 @@ function mountHook<T>(useHook: () => T, qc: QueryClient) {
   return { root, get: () => latest }
 }
 
-/** Let in-flight query promises settle and React flush the resulting state. */
+/**
+ * Let in-flight query promises settle and React flush the resulting state.
+ * One macrotask is not enough under a loaded full-suite run (react-query hops
+ * through several promise ticks before it notifies), so wait a few.
+ */
 async function flush() {
-  await act(async () => {
-    await new Promise((resolve) => setTimeout(resolve, 0))
-  })
+  for (let i = 0; i < 5; i++) {
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0))
+    })
+  }
 }
 
 function newClient() {
