@@ -286,9 +286,12 @@ export interface MemoryEngineLlm {
   provider: string | null
   base_url: string | null
   model: string | null
-  overridden: boolean
+  // null = cannot verify (engine process and env file both unreadable)
+  overridden: boolean | null
   override_file: string | null
   override_keys: string[]
+  // where the values came from: the running engine, or the unit (+ file)
+  source?: 'process' | 'unit+file' | 'unit'
 }
 
 export interface MemoryExtractionLimits {

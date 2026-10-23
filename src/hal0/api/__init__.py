@@ -1691,6 +1691,9 @@ async def _boot_publish_runtime(app: FastAPI, ctx: BootState) -> None:
     app.state.dispatcher = ctx.dispatcher
     app.state.slot_manager = ctx.slot_manager
     app.state.model_cache = ctx.model_cache
+    # The memory engine picker warms cold remote buckets through the same
+    # fetch-and-merge path the dispatcher's prefetch uses (#2926 follow-up).
+    app.state.fetch_and_cache = ctx.fetch_and_cache
 
 
 async def _boot_seeds(app: FastAPI, ctx: BootState) -> None:

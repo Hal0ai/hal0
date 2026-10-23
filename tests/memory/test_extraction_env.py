@@ -448,6 +448,12 @@ def test_apply_writes_directly_when_not_the_hal0_user(monkeypatch, tmp_path: Pat
 # /etc/hal0/hindsight-llm.env silently beat hal0's target. hal0 must report
 # what the engine loads, not what it configured.
 
+
+def _no_process() -> None:
+    """The engine's /proc environ is not readable (engine down, other uid)."""
+    return None
+
+
 _UNIT_ENV = {
     "HINDSIGHT_API_LLM_PROVIDER": "openai",
     "HINDSIGHT_API_LLM_BASE_URL": "http://127.0.0.1:8080/v1",
@@ -461,7 +467,7 @@ def test_effective_engine_llm_key_only_file_is_not_an_override(tmp_path: Path):
 
     env_file = tmp_path / "hindsight-llm.env"
     env_file.write_text("HINDSIGHT_API_LLM_API_KEY=supersecret-box-key\n")
-    out = effective_engine_llm(env_file=env_file, unit_env=_UNIT_ENV)
+    out = effective_engine_llm(env_file=env_file, unit_env=_UNIT_ENV, read_process_env=_no_process)
     assert out == {
         "provider": "openai",
         "base_url": "http://127.0.0.1:8080/v1",
@@ -469,6 +475,7 @@ def test_effective_engine_llm_key_only_file_is_not_an_override(tmp_path: Path):
         "overridden": False,
         "override_file": None,
         "override_keys": [],
+        "source": "unit+file",
     }
     assert "supersecret" not in repr(out)
 
@@ -483,7 +490,7 @@ def test_effective_engine_llm_reports_a_provider_override(tmp_path: Path):
         "HINDSIGHT_API_LLM_MODEL=MiniMax-M2.5\n"
         "HINDSIGHT_API_LLM_API_KEY=supersecret-cloud-key\n"
     )
-    out = effective_engine_llm(env_file=env_file, unit_env=_UNIT_ENV)
+    out = effective_engine_llm(env_file=env_file, unit_env=_UNIT_ENV, read_process_env=_no_process)
     assert out["provider"] == "minimax"
     assert out["base_url"] == "https://api.minimax.io/v1"
     assert out["model"] == "MiniMax-M2.5"
@@ -500,7 +507,9 @@ def test_effective_engine_llm_reports_a_provider_override(tmp_path: Path):
 def test_effective_engine_llm_without_file_uses_unit_env(tmp_path: Path):
     from hal0.memory.extraction_env import effective_engine_llm
 
-    out = effective_engine_llm(env_file=tmp_path / "missing.env", unit_env=_UNIT_ENV)
+    out = effective_engine_llm(
+        env_file=tmp_path / "missing.env", unit_env=_UNIT_ENV, read_process_env=_no_process
+    )
     assert out["model"] == "hal0/memory"
     assert out["overridden"] is False
     assert out["override_file"] is None
@@ -511,7 +520,9 @@ def test_effective_engine_llm_tolerates_an_unreadable_unit(tmp_path: Path):
     never an exception on the status route."""
     from hal0.memory.extraction_env import effective_engine_llm
 
-    out = effective_engine_llm(env_file=tmp_path / "missing.env", show_unit_env=lambda: {})
+    out = effective_engine_llm(
+        env_file=tmp_path / "missing.env", show_unit_env=lambda: {}, read_process_env=_no_process
+    )
     assert out == {
         "provider": None,
         "base_url": None,
@@ -519,7 +530,156 @@ def test_effective_engine_llm_tolerates_an_unreadable_unit(tmp_path: Path):
         "overridden": False,
         "override_file": None,
         "override_keys": [],
+        "source": "unit",
     }
+
+
+# ── the running engine's environ is the first source of truth (#2926 follow-up) ─
+#
+# On CT105 /etc/hal0/hindsight-llm.env is 0600 root:hal0 — hal0-api cannot read
+# it — and the status said "not overridden" while the engine ran MiniMax. The
+# engine runs as the same uid as hal0-api, so its /proc/<pid>/environ IS
+# readable: that is what it really loaded, with no need to open the key file.
+
+_SECRET = "sk-should-never-leave-the-process"
+
+
+def test_effective_engine_llm_reads_the_running_process_first(tmp_path: Path):
+    from hal0.memory.extraction_env import effective_engine_llm
+
+    unreadable = tmp_path / "hindsight-llm.env"  # exists, never opened on this path
+    unreadable.write_text("HINDSIGHT_API_LLM_API_KEY=x\n")
+    unreadable.chmod(0)
+    process = {
+        "HINDSIGHT_API_LLM_PROVIDER": "minimax",
+        "HINDSIGHT_API_LLM_BASE_URL": "https://api.minimax.io/v1",
+        "HINDSIGHT_API_LLM_MODEL": "MiniMax-M2.5",
+    }
+    out = effective_engine_llm(
+        env_file=unreadable, unit_env=_UNIT_ENV, read_process_env=lambda: process
+    )
+    assert out["source"] == "process"
+    assert out["model"] == "MiniMax-M2.5"
+    assert out["provider"] == "minimax"
+    assert out["overridden"] is True
+    assert out["override_keys"] == [
+        "HINDSIGHT_API_LLM_BASE_URL",
+        "HINDSIGHT_API_LLM_MODEL",
+        "HINDSIGHT_API_LLM_PROVIDER",
+    ]
+    assert out["override_file"] == str(unreadable)
+
+
+def test_effective_engine_llm_process_drift_without_an_env_file_is_not_blamed_on_it(tmp_path: Path):
+    """The engine still has hal0/utility while the unit already says
+    hal0/memory (a drop-in written but the restart failed, or a daemon-reload
+    without a restart). No env file exists, so the difference must not be
+    reported as an override of it — the "still pinned, save once" advice
+    applies instead."""
+    from hal0.memory.extraction_env import effective_engine_llm
+
+    process = {
+        "HINDSIGHT_API_LLM_PROVIDER": "openai",
+        "HINDSIGHT_API_LLM_BASE_URL": "http://127.0.0.1:8080/v1",
+        "HINDSIGHT_API_LLM_MODEL": "hal0/utility",
+    }
+    out = effective_engine_llm(
+        env_file=tmp_path / "absent.env", unit_env=_UNIT_ENV, read_process_env=lambda: process
+    )
+    assert out["source"] == "process"
+    assert out["model"] == "hal0/utility"
+    assert out["overridden"] is False
+    assert out["override_file"] is None
+    assert out["override_keys"] == []
+
+
+def test_effective_engine_llm_process_matching_the_unit_is_not_an_override(tmp_path: Path):
+    from hal0.memory.extraction_env import effective_engine_llm
+
+    process = {k: v for k, v in _UNIT_ENV.items() if k != "HINDSIGHT_API_LLM_API_KEY"}
+    out = effective_engine_llm(
+        env_file=tmp_path / "x.env", unit_env=_UNIT_ENV, read_process_env=lambda: process
+    )
+    assert out["source"] == "process"
+    assert out["overridden"] is False
+    assert out["override_keys"] == []
+    assert out["override_file"] is None
+
+
+def test_effective_engine_llm_unreadable_file_without_process_is_unknown(tmp_path: Path):
+    """Neither the process nor the file can be read: "can't tell", never
+    "not overridden"."""
+    import os
+
+    import pytest
+
+    from hal0.memory.extraction_env import effective_engine_llm
+
+    if os.geteuid() == 0:
+        pytest.skip("root reads a 0000 file")
+    env_file = tmp_path / "hindsight-llm.env"
+    env_file.write_text("HINDSIGHT_API_LLM_MODEL=MiniMax-M2.5\n")
+    env_file.chmod(0)
+    try:
+        out = effective_engine_llm(
+            env_file=env_file, unit_env=_UNIT_ENV, read_process_env=_no_process
+        )
+    finally:
+        env_file.chmod(0o600)
+    assert out["overridden"] is None
+    assert out["source"] == "unit"
+    assert out["override_file"] == str(env_file)
+    assert out["model"] == "hal0/memory"  # the unit's value, explicitly unverified
+
+
+def test_engine_process_env_keeps_only_the_three_target_keys(tmp_path: Path, monkeypatch):
+    """The raw environ holds the API key and everything else; only the three
+    target keys may come out, and no failure may carry the buffer."""
+    import hal0.memory.extraction_env as ee
+
+    raw = (
+        f"HOME=/var/lib/hal0\0HINDSIGHT_API_LLM_API_KEY={_SECRET}\0"
+        "HINDSIGHT_API_LLM_PROVIDER=minimax\0HINDSIGHT_API_LLM_MODEL=MiniMax-M2.5\0"
+        f"HINDSIGHT_API_RETAIN_LLM_API_KEY={_SECRET}\0garbage-without-equals\0"
+    ).encode()
+    environ = tmp_path / "environ"
+    environ.write_bytes(raw)
+    monkeypatch.setattr(ee, "_engine_main_pid", lambda: 4242)
+    monkeypatch.setattr(ee, "_proc_environ_path", lambda pid: environ)
+    got = ee._read_engine_process_env()
+    assert got == {
+        "HINDSIGHT_API_LLM_PROVIDER": "minimax",
+        "HINDSIGHT_API_LLM_MODEL": "MiniMax-M2.5",
+    }
+    assert _SECRET not in repr(got)
+    payload = ee.effective_engine_llm(
+        env_file=tmp_path / "missing.env",
+        unit_env=_UNIT_ENV,
+        read_process_env=ee._read_engine_process_env,
+    )
+    assert _SECRET not in repr(payload)
+
+
+def test_engine_process_env_failure_never_carries_the_buffer(tmp_path: Path, monkeypatch, caplog):
+    import hal0.memory.extraction_env as ee
+
+    monkeypatch.setattr(ee, "_engine_main_pid", lambda: 4242)
+
+    class _Boom:
+        def read_bytes(self):
+            raise PermissionError(13, f"denied {_SECRET}")
+
+    monkeypatch.setattr(ee, "_proc_environ_path", lambda pid: _Boom())
+    caplog.set_level("DEBUG")
+    assert ee._read_engine_process_env() is None  # unreadable → None, no raise
+    assert _SECRET not in caplog.text
+
+
+def test_engine_process_env_none_when_the_engine_is_not_running(monkeypatch):
+    import hal0.memory.extraction_env as ee
+
+    monkeypatch.setattr(ee, "_engine_main_pid", lambda: None)
+    assert ee._read_engine_process_env() is None
 
 
 def test_parse_systemctl_environment_value():
