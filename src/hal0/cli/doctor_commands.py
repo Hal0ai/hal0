@@ -53,11 +53,11 @@ from rich.console import Console
 from rich.table import Table
 
 import hal0
-from hal0.agents.hermes_layout import (
-    HERMES_PYTHON_ROOT,
-    HERMES_RELEASE_ROOT,
-    HERMES_VENV_PATH,
-    SQLITE_MIN,
+from hal0.agents.hermes_doctor import (
+    check_hermes_ownership,
+    check_hermes_plugins,
+    check_hermes_sqlite,
+    has_ownership_drift,
 )
 from hal0.cli.doctor_diagnosis import Diagnosis, Evidence, NextStep, render_json
 
@@ -208,118 +208,11 @@ def doctor(
     raise typer.Exit(result.returncode)
 
 
-def check_hermes_sqlite(
-    venv: Path | None = None, *, run: Callable[..., Any] = subprocess.run
-) -> dict[str, str]:
-    """The SQLite version the live Hermes interpreter links; ``{status, detail}``.
-
-    ``status`` is ``ok``, ``warn`` (older than 3.51.3, or the probe failed) or
-    ``absent`` (no Hermes venv).
-    """
-    venv = venv if venv is not None else HERMES_VENV_PATH
-    python = venv / "bin" / "python"
-    if not python.exists():
-        return {"status": "absent", "detail": "no Hermes venv"}
-    try:
-        proc = run(
-            [
-                str(python),
-                "-I",
-                "-c",
-                "import sqlite3, sys; print(sys.version.split()[0], sqlite3.sqlite_version)",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=30,
-            check=False,
-        )
-    except (OSError, subprocess.SubprocessError) as exc:
-        return {"status": "warn", "detail": f"could not run {python}: {exc}"}
-    parts = (getattr(proc, "stdout", "") or "").split()
-    if getattr(proc, "returncode", 1) != 0 or len(parts) != 2:
-        return {"status": "warn", "detail": f"could not read the SQLite version from {python}"}
-    py, sqlite = parts
-    try:
-        version = tuple(int(x) for x in sqlite.split("."))
-    except ValueError:
-        return {"status": "warn", "detail": f"unparsable SQLite version {sqlite!r}"}
-    floor = ".".join(map(str, SQLITE_MIN))
-    if version < SQLITE_MIN:
-        return {
-            "status": "warn",
-            "detail": (
-                f"Python {py} links SQLite {sqlite} (< {floor}): Hermes forces DELETE journal "
-                "mode and warns per database. Clear HAL0_HERMES_PYTHON so hal0 uses a "
-                "uv-managed interpreter, then `sudo hal0 agent reprovision hermes --repair`."
-            ),
-        }
-    return {"status": "ok", "detail": f"Python {py}, SQLite {sqlite} (>= {floor})"}
-
-
 def _print_hermes_sqlite_row(row: dict[str, str]) -> None:
     if row["status"] == "absent":
         return
     mark = "[green]✓[/green]" if row["status"] == "ok" else "[yellow]⚠[/yellow]"
     console.print(f"{mark}  hermes interpreter: {row['detail']}")
-
-
-def check_hermes_plugins(
-    hermes_home: Path | None = None, src_root: Path | None = None
-) -> dict[str, str]:
-    """Compare the plugin trees mirrored into HERMES_HOME with the shipped ones.
-
-    ``status`` is ``ok``, ``warn`` (a mirrored tree differs from, or is missing
-    next to, the shipped source, or the required hal0-memory source is itself
-    missing), ``unreadable`` (HERMES_HOME not readable by this user) or
-    ``absent`` (no HERMES_HOME or no shipped source to compare against). A stale manifest makes Hermes downgrade the
-    plugin (#2884).
-    """
-    from hal0.agents.hermes_provision import (
-        REPO_ROOT_FOR_INSTALLER,
-        _dirs_identical,
-    )
-
-    home = hermes_home if hermes_home is not None else _HERMES_HOME
-    src = (
-        src_root
-        if src_root is not None
-        else REPO_ROOT_FOR_INSTALLER / "installer" / "agents" / "hermes" / "plugins"
-    )
-    try:
-        if not home.is_dir() or not src.is_dir():
-            return {"status": "absent", "detail": "no HERMES_HOME or shipped plugins"}
-        pairs = {
-            "hal0-memory": (home / "plugins" / "hal0-memory", False),
-            "hal0-provider": (home / "plugins" / "model-providers" / "hal0", True),
-        }
-        drifted: list[str] = []
-        for name, (dst, optional) in pairs.items():
-            shipped = src / name
-            if not shipped.is_dir():
-                if optional:
-                    continue
-                # hal0-memory is required by the mirror; a release without it
-                # is broken, never "matching".
-                drifted.append(f"{shipped} (shipped source missing)")
-                continue
-            if not dst.is_dir() or not _dirs_identical(shipped, dst):
-                drifted.append(str(dst))
-    except OSError as exc:
-        # HERMES_HOME is hal0:hal0 0700; as a non-root user is_dir() raises
-        # EACCES on Python 3.12. Advisory only: never abort `hal0 doctor`.
-        return {
-            "status": "unreadable",
-            "detail": f"cannot read HERMES_HOME plugin trees ({exc.strerror or exc}); run with sudo",
-        }
-    if drifted:
-        return {
-            "status": "warn",
-            "detail": (
-                f"{', '.join(drifted)} differ from the shipped plugins; Hermes may reject "
-                "the stale manifest. Run `sudo hal0 agent reprovision hermes`."
-            ),
-        }
-    return {"status": "ok", "detail": "plugin trees match the shipped source"}
 
 
 def _print_hermes_plugins_row(row: dict[str, str]) -> None:
@@ -609,88 +502,6 @@ def toolbox_pull(
 
     failures = [r for r in rows if not r["ok"]]
     raise typer.Exit(1 if failures else 0)
-
-
-# ── hal0 doctor perms — Hermes ownership drift (#843) ─────────────────────────
-#
-# Read-only audit for the root-clobber regression: when root runs Hermes it
-# writes a split-brain /root/.hermes tree and/or leaves root:root files the
-# User=hal0 unit can't read (so Hermes silently falls back to the default
-# provider). This surfaces that loudly. It NEVER repairs — reconciliation is the
-# explicit `sudo hal0 agent bootstrap hermes --repair` path.
-
-_HERMES_HOME = Path("/var/lib/hal0/.hermes")
-_HERMES_VENV = HERMES_VENV_PATH
-_HERMES_RELEASES = HERMES_RELEASE_ROOT
-_HERMES_PYTHON = HERMES_PYTHON_ROOT
-_STRAY_ROOT_HOME = Path("/root/.hermes")
-_EXPECTED_OWNER = "hal0"
-
-
-def check_hermes_ownership(
-    *,
-    expected_user: str = _EXPECTED_OWNER,
-    hermes_home: Path = _HERMES_HOME,
-    venv: Path = _HERMES_VENV,
-    release_root: Path = _HERMES_RELEASES,
-    python_root: Path = _HERMES_PYTHON,
-    stray_home: Path = _STRAY_ROOT_HOME,
-    owner_of: Callable[[Path], str | None],
-    exists: Callable[[Path], bool],
-) -> list[dict[str, str]]:
-    """Audit Hermes runtime ownership; return rows ``{path,label,status,detail}``.
-
-    ``status`` is ``ok`` (owned by ``expected_user``), ``drift`` (wrong owner, or
-    a stray /root/.hermes), or ``absent`` (not present — not a problem).
-    """
-    rows: list[dict[str, str]] = []
-    checks = (
-        (hermes_home, "HERMES_HOME tree"),
-        (hermes_home / "config.yaml", "config.yaml"),
-        # Follows the venvs/hermes symlink into the live release, which the
-        # hal0 user built, so a migrated host keeps passing this row.
-        (venv, "hermes venv"),
-        (release_root, "hermes release tree"),
-        # The builder's interpreters, inside the release tree. The pre-layout
-        # /var/lib/hal0/python is not audited: it is root-owned on existing
-        # hosts by design and builds never write it.
-        (python_root, "uv-managed Python"),
-    )
-    for path, label in checks:
-        if not exists(path):
-            rows.append(
-                {"path": str(path), "label": label, "status": "absent", "detail": "not present"}
-            )
-            continue
-        owner = owner_of(path)
-        if owner == expected_user:
-            rows.append(
-                {"path": str(path), "label": label, "status": "ok", "detail": f"owned by {owner}"}
-            )
-        else:
-            rows.append(
-                {
-                    "path": str(path),
-                    "label": label,
-                    "status": "drift",
-                    "detail": f"owned by {owner or '?'} (expected {expected_user})",
-                }
-            )
-    if exists(stray_home):
-        rows.append(
-            {
-                "path": str(stray_home),
-                "label": "split-brain /root/.hermes",
-                "status": "drift",
-                "detail": "root ran Hermes; remove after reconciling",
-            }
-        )
-    return rows
-
-
-def has_ownership_drift(rows: list[dict[str, str]]) -> bool:
-    """True iff any row is in the ``drift`` state."""
-    return any(r["status"] == "drift" for r in rows)
 
 
 def _diagnose_audit_rows(

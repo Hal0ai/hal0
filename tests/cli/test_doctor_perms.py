@@ -252,10 +252,10 @@ def test_hermes_sqlite_row_absent_without_a_venv(tmp_path: Path) -> None:
 
 
 def test_hermes_sqlite_floor_is_defined_once() -> None:
-    from hal0.agents import hermes_layout
+    from hal0.agents import hermes_doctor, hermes_layout
     from hal0.agents import hermes_provision as hp
 
-    assert dc.SQLITE_MIN is hermes_layout.SQLITE_MIN is hp.SQLITE_MIN == (3, 51, 3)
+    assert hermes_doctor.SQLITE_MIN is hermes_layout.SQLITE_MIN is hp.SQLITE_MIN == (3, 51, 3)
 
 
 def test_check_hermes_plugins_flags_a_stale_mirror(tmp_path: Path) -> None:

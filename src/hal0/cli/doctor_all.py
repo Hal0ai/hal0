@@ -2036,64 +2036,6 @@ def check_memory_extraction_throughput(
     return Check(name, title, _PASS if est.get("verdict") == "ok" else _WARN, detail)
 
 
-def _unmanaged_gateways(proc: Path) -> list[str]:
-    """``pid (cgroup)`` for every ``gateway run --idle-exit`` process under ``proc``."""
-    found: list[str] = []
-    try:
-        entries = sorted(proc.iterdir())
-    except OSError:
-        return found
-    for entry in entries:
-        if not entry.name.isdigit():
-            continue
-        try:
-            argv = (entry / "cmdline").read_bytes().split(b"\0")
-        except OSError:
-            continue
-        if b"--idle-exit" not in argv or b"gateway" not in argv or b"run" not in argv:
-            continue
-        cgroup = "unknown cgroup"
-        try:
-            last = (entry / "cgroup").read_text(encoding="utf-8").strip().splitlines()[-1]
-            cgroup = last.rsplit(":", 1)[-1] or cgroup
-        except (OSError, IndexError, UnicodeDecodeError):
-            pass
-        found.append(f"pid {entry.name} ({cgroup})")
-    return found
-
-
-def _unit_present(unit: Path) -> bool:
-    """Presence by lstat, the test Hermes applies (``_exists``,
-    ``hermes_cli/gateway_runtime_service.py:84-90``): a persistently masked
-    unit is a symlink to /dev/null, which ``is_file()`` would call missing,
-    yet a mask is exactly one of the states that blocks the spawn."""
-    try:
-        unit.lstat()
-    except FileNotFoundError:
-        return False
-    except OSError:
-        return True
-    return True
-
-
-def _standalone_profiles(home: Path) -> list[str]:
-    """Profiles whose ``config.yaml`` sets ``gateway.standalone: true``."""
-    from hal0.agents import hermes_api as ha
-    from hal0.agents import hermes_provision as hp
-
-    found: list[str] = []
-    for name in ha.profile_dirs(home):
-        try:
-            text = (home / "profiles" / name / "config.yaml").read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError):
-            continue
-        cfg = hp._parse_yaml_config(text) or {}
-        gateway = cfg.get("gateway") if isinstance(cfg, dict) else None
-        if isinstance(gateway, dict) and gateway.get("standalone") is True:
-            found.append(name)
-    return found
-
-
 def check_hermes_gateway_unit(
     *,
     home: Path | None = None,
@@ -2102,73 +2044,15 @@ def check_hermes_gateway_unit(
 ) -> Check:
     """Hermes installed means the gateway unit file exists and no unmanaged gateway runs.
 
-    From Hermes v0.22.3 a profile-scoped dashboard chat and the ``hermes chat``
-    CLI are gateway clients. With NO gateway unit file installed they start
-    their own ``gateway run --idle-exit`` inside the caller's cgroup, and that
-    gateway runs cron and the kanban dispatcher (upstream
-    ``hermes_cli/gateway_runtime_service.py:92-108`` and
-    ``hermes_cli/gateway_runtime_start.py:35-81`` at ``4d043038``). A unit
-    that is installed but disabled, stopped, masked or failed blocks that
-    start. hal0 only ever ``systemctl disable --now``s the unit and never
-    removes the file, so this row guards the one state that would let a client
-    spawn a gateway where the operator turned it off (ADR-0034 amendment,
-    #2874). Never critical: the row names the fix, it does not block setup.
+    The check lives in :func:`hal0.agents.hermes_doctor.check_hermes_gateway_unit`
+    (the API's agent overview runs it too); this wraps its row as a report-card
+    ``Check``. Never critical: the row names the fix, it does not block setup.
     """
-    from hal0.agents import hermes_api as ha
-    from hal0.agents.hermes_layout import GATEWAY_UNIT_PATH
+    from hal0.agents import hermes_doctor
 
-    key, label = "hermes-gateway-unit", "Hermes gateway unit"
-    root = home if home is not None else ha.hermes_home()
-    unit = unit_path if unit_path is not None else GATEWAY_UNIT_PATH
-    try:
-        (root / "config.yaml").stat()
-    except PermissionError:
-        return Check(key, label, _WARN, f"cannot read {root}; run hal0 doctor as hal0 or root")
-    except OSError:
-        return Check(key, label, _PASS, "no Hermes agent installed")
-    rogue = _unmanaged_gateways(proc)
-    if rogue:
-        return Check(
-            key,
-            label,
-            _FAIL,
-            "unmanaged Hermes gateway running: "
-            + ", ".join(rogue)
-            + "; it runs cron and the kanban dispatcher outside hermes-gateway.service. "
-            "Stop it, then run sudo hal0 agent install hermes so the unit file is installed",
-        )
-    if not _unit_present(unit):
-        return Check(
-            key,
-            label,
-            _FAIL,
-            f"{unit} is missing; a profile-scoped Hermes chat or hermes chat would start an "
-            "unmanaged gateway (Hermes v0.22.3+). Run sudo hal0 agent install hermes; to keep "
-            "the gateway off afterwards, systemctl disable --now hermes-gateway",
-        )
-    # A profile with ``gateway.standalone: true`` is excluded from the
-    # multiplexed gateway and owns its own ``hermes-gateway-<profile>.service``
-    # (``hermes_cli/gateway_runtime_service.py:37-60``): with that suffixed
-    # unit absent, a chat scoped to it spawns its own gateway even though the
-    # default unit is installed.
-    missing = [
-        p
-        for p in _standalone_profiles(root)
-        if not _unit_present(unit.with_name(f"hermes-gateway-{p}.service"))
-    ]
-    if missing:
-        return Check(
-            key,
-            label,
-            _FAIL,
-            "standalone Hermes profile(s) without their own gateway unit: "
-            + ", ".join(f"{p} (hermes-gateway-{p}.service)" for p in missing)
-            + "; a chat scoped to one would start an unmanaged gateway (Hermes v0.22.3+). "
-            "Install the unit (hermes -p <profile> gateway install --system) or unset "
-            "gateway.standalone in that profile's config.yaml",
-        )
-    state = "installed (masked)" if unit.is_symlink() else "installed"
-    return Check(key, label, _PASS, f"{unit.name} {state}; no unmanaged gateway")
+    row = hermes_doctor.check_hermes_gateway_unit(home=home, unit_path=unit_path, proc=proc)
+    status = {"ok": _PASS, "warn": _WARN, "unreadable": _WARN, "fail": _FAIL}[row["status"]]
+    return Check("hermes-gateway-unit", "Hermes gateway unit", status, row["detail"])
 
 
 def check_hermes_anchor_window(

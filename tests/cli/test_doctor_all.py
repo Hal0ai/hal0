@@ -2457,3 +2457,10 @@ def test_gateway_unit_unreadable_home_warns(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(Path, "stat", deny)
     c = da.check_hermes_gateway_unit(home=home, unit_path=tmp_path / "u", proc=_proc(tmp_path, []))
     assert c.status == "warn" and "run hal0 doctor as hal0 or root" in c.detail
+    # The shared check names the state `unreadable`; the report card keeps it a warning.
+    from hal0.agents import hermes_doctor
+
+    row = hermes_doctor.check_hermes_gateway_unit(
+        home=home, unit_path=tmp_path / "u", proc=_proc(tmp_path, [])
+    )
+    assert row["status"] == "unreadable"
