@@ -247,6 +247,16 @@ export interface MemoryGraphStatus {
   slot_resolves: boolean
   // Enabled llm slot names the operator may pick.
   available_slots: string[]
+  // #2919: the upstream model the engine runs on instead of the slot, or null.
+  extraction_model?: string | null
+  // #2919: what the engine's fixed id `hal0/memory` resolves to right now.
+  target?: MemoryEngineTarget
+  // #2919: upstream model ids the operator may pick instead of a slot
+  // (remote, non-pinned upstreams, from the dispatcher's models cache).
+  available_models?: MemoryEngineModel[]
+  // #2918: the LLM hindsight-api really loads, and whether
+  // /etc/hal0/hindsight-llm.env overrides hal0's target.
+  engine_llm?: MemoryEngineLlm
   // Hindsight daemon LLM timeout ([memory.graph].llm_timeout_s) — echoed by
   // the status route so the settings panel can edit it in one round trip.
   llm_timeout_s?: number
@@ -261,6 +271,26 @@ export interface MemoryGraphStatus {
   last_error: string | null
 }
 
+export interface MemoryEngineTarget {
+  kind: 'slot' | 'upstream'
+  model: string
+  alias: string
+}
+
+export interface MemoryEngineModel {
+  id: string
+  owned_by: string
+}
+
+export interface MemoryEngineLlm {
+  provider: string | null
+  base_url: string | null
+  model: string | null
+  overridden: boolean
+  override_file: string | null
+  override_keys: string[]
+}
+
 export interface MemoryExtractionLimits {
   max_concurrent: number
   max_tokens: number
@@ -272,6 +302,8 @@ export interface MemoryExtractionLimits {
 export interface MemoryGraphUpdate {
   enabled?: boolean
   extraction_slot?: string
+  // #2919: an upstream model id, or null to return to the slot.
+  extraction_model?: string | null
   llm_timeout_s?: number
   extraction_max_concurrent?: number
   extraction_max_tokens?: number
@@ -297,6 +329,7 @@ export interface MemoryGraphPropagation {
 export interface MemoryGraphUpdateResponse extends MemoryGraphStatus {
   status: MemoryGraphStatus
   propagation?: MemoryGraphPropagation
+  target?: MemoryEngineTarget
 }
 
 // Per-bank tally returned by POST /api/memory/graph/retry.

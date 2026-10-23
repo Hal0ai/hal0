@@ -60,11 +60,25 @@ import {
   useRetryFailedExtractions,
   useUpdateMemoryGraph,
 } from '@/api/hooks/useMemory'
+import {
+  engineRunningLine,
+  engineTargetOptions,
+  engineTargetPutBody,
+  engineTargetValue,
+} from '@/dash/settings/pages/data/engineTarget.js'
 
 Object.assign(window as unknown as Record<string, unknown>, {
   __hal0UseMemoryEngine: useMemoryEngine,
   __hal0UseMemoryGraphStatus: useMemoryGraphStatus,
   __hal0UseUpdateMemoryGraph: useUpdateMemoryGraph,
+  // #2919: the engine model picker's pure helpers, for the no-ES-imports
+  // agents memory tab (settings/MemoryPage.jsx imports them directly).
+  __hal0MemEngineTarget: {
+    value: engineTargetValue,
+    options: engineTargetOptions,
+    putBody: engineTargetPutBody,
+    runningLine: engineRunningLine,
+  },
   __hal0UseMemoryBanks: useMemoryBanks,
   __hal0UseBankStats: useBankStats,
   __hal0UseAggregateBankStats: useAggregateBankStats,
