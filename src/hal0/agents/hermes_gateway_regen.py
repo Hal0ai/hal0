@@ -476,11 +476,32 @@ def migrate_hashed_units(
     if pre_existing and not masked:
         with contextlib.suppress(OSError, UnicodeDecodeError):
             old_text = unit_path.read_text(encoding="utf-8")
+    # Whose on/off state wins. A canonical unit the operator manages is
+    # enabled, running, or masked. One that exists but is disabled and
+    # stopped while a suffixed unit is still there is what an interrupted
+    # move leaves (killed between the write and the handoff, #2946 review),
+    # so the suffixed unit's state still carries over. Upgraded boxes never
+    # have a suffixed unit, so this never overrides an operator's own off
+    # switch there.
+    canonical_owns_state = masked
+    if pre_existing and not masked:
+        canon_state = _enabled_state(run, GATEWAY_UNIT)
+        if canon_state == "unknown":
+            raise GatewayRegenError(
+                f"cannot read the enablement of {GATEWAY_UNIT}; nothing changed"
+            )
+        canonical_owns_state = canon_state in ("enabled", "enabled-runtime") or _is_active(
+            run, GATEWAY_UNIT
+        )
     result = RegenResult("migrated", "")
     done = result.steps
     runtime_only = False
     for path in hashed:
         state = _enabled_state(run, path.name)
+        if state == "unknown":
+            # A probe that timed out or raised is not "off": carrying it over
+            # as off would disconnect an enabled gateway (#2946 review).
+            raise GatewayRegenError(f"cannot read the enablement of {path.name}; nothing changed")
         if state == "enabled":
             result.was_enabled = True
         elif state == "enabled-runtime":
@@ -532,7 +553,7 @@ def migrate_hashed_units(
             _check(run, ["systemctl", "disable", path.name], f"systemctl disable {path.name}", done)
         if masked:
             done.append(f"{GATEWAY_UNIT} is masked; left off")
-        elif not pre_existing:
+        elif not canonical_owns_state:
             start = result.was_enabled or result.was_active
             if start:
                 linger_error = _ensure_linger(run, linger_dir, which, done)
@@ -573,7 +594,7 @@ def migrate_hashed_units(
         done.append(f"removed {path.name}")
     _check(run, ["systemctl", "daemon-reload"], "systemctl daemon-reload", done)
     if (
-        pre_existing
+        canonical_owns_state
         and not masked
         and old_text is not None
         and unit_stale_reason(old_text) is not None

@@ -2095,3 +2095,21 @@ def test_activation_leaves_a_hal0_unit_alone_without_sudo(tree, monkeypatch) -> 
     assert out.status == "activated", out.error
     assert calls == []
     assert unit.read_text() == regen.render_unit(_GATEWAY_UID)
+
+
+def test_prune_keeps_the_release_a_suffixed_gateway_unit_names(tree) -> None:
+    """#2943: until the gateway is moved off upstream's suffixed unit, the release
+    baked into it must survive the prune, or the gateway cannot restart."""
+    from hal0.agents.hermes_gateway_regen import HASHED_UNIT
+
+    first = _ensure(tree, FakeTools()).release_id
+    layout = rel.Layout.for_venv(tree["venv"])
+    tree["unit"].parent.mkdir(parents=True)
+    (tree["unit"].parent / HASHED_UNIT).write_text(
+        "[Service]\nUser=hal0\n"
+        f"ExecStart={layout.releases / first}/venv/bin/python -m hermes_cli.main gateway run\n"
+        'Environment="HERMES_HOME=/var/lib/hal0/.hermes"\n'
+    )
+    _ensure(tree, FakeTools(), force=True)
+    _ensure(tree, FakeTools(), force=True)
+    assert (layout.releases / first).is_dir()

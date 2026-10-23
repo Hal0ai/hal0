@@ -602,13 +602,34 @@ def test_a_failed_unlink_still_hands_the_gateway_over(tmp_path: Path, monkeypatc
     assert sc.states[CANON] == ("enabled", True)
 
 
-def test_a_canonical_unit_that_already_existed_keeps_its_own_state(tmp_path: Path) -> None:
-    """The operator's off switch (#2807) wins over the suffixed unit's state."""
+def test_a_canonical_unit_the_operator_runs_keeps_its_own_state(tmp_path: Path) -> None:
+    """An enabled or running canonical unit is the operator's; the suffixed
+    unit's state does not override it."""
+    _hashed_unit(tmp_path)
+    _new_unit(tmp_path)
+    sc = UnitSystemctl({HASHED: ("disabled", False), CANON: ("enabled", True)})
+    _migrate(tmp_path, sc)
+    assert sc.states[CANON] == ("enabled", True)
+    assert not [c for c in sc.mutating if c[-1] == CANON and c[1] in ("disable", "stop")]
+
+
+def test_an_interrupted_move_still_carries_the_suffixed_state(tmp_path: Path) -> None:
+    """Killed after writing the canonical unit: it exists, disabled and stopped,
+    while the suffixed unit is still enabled. A retry must not leave the
+    gateway off (#2946 review)."""
     _hashed_unit(tmp_path)
     _new_unit(tmp_path)
     sc = UnitSystemctl({HASHED: ("enabled", True), CANON: ("disabled", False)})
     _migrate(tmp_path, sc)
-    assert not [c for c in sc.mutating if c[-1] == CANON and c[1] in ("enable", "start", "restart")]
+    assert sc.states[CANON] == ("enabled", True)
+
+
+def test_an_unknown_enablement_probe_aborts_before_any_change(tmp_path: Path) -> None:
+    hashed = _hashed_unit(tmp_path)
+    sc = UnitSystemctl({HASHED: ("unknown", False)})
+    with pytest.raises(regen.GatewayRegenError, match="cannot read the enablement"):
+        _migrate(tmp_path, sc)
+    assert hashed.exists() and not (tmp_path / CANON).exists() and sc.mutating == []
 
 
 def test_a_stale_running_canonical_unit_is_restarted_after_the_rewrite(tmp_path: Path) -> None:

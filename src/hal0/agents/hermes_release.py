@@ -1769,14 +1769,24 @@ def prune_releases(
     env = build_env(layout=layout)
     warnings: list[str] = []
     keep = {r for r in (_link_release_id(layout.current), _link_release_id(layout.previous)) if r}
-    unit_text = _read_unit(gateway_unit)
+    # Upstream's suffixed unit (a fresh 1.6.0 nightly install, #2943) bakes a
+    # release path too; until hal0 has moved the gateway off it, that release
+    # must survive or the gateway cannot restart.
+    from hal0.agents.hermes_gateway_regen import hal0_hashed_units
+
+    named_by = [(gateway_unit, _read_unit(gateway_unit))]
+    named_by += [(p, _read_unit(p)) for p in hal0_hashed_units(gateway_unit.parent)]
     if layout.releases.is_dir():
         for rdir in sorted(layout.releases.iterdir()):
             if not rdir.is_dir() or rdir.name in keep:
                 continue
-            if _names_release(unit_text, layout.releases / rdir.name):
+            holder = next(
+                (u for u, text in named_by if _names_release(text, layout.releases / rdir.name)),
+                None,
+            )
+            if holder is not None:
                 warnings.append(
-                    f"kept release {rdir.name}: {gateway_unit} still names it — run "
+                    f"kept release {rdir.name}: {holder} still names it — run "
                     "`sudo hal0 agent install hermes` to regenerate and normalise the unit"
                 )
                 keep.add(rdir.name)
