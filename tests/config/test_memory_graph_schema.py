@@ -44,6 +44,8 @@ class TestMemoryGraphDefaults:
         assert set(dumped) == {
             "enabled",
             "extraction_slot",
+            # #2919: the optional upstream model the hal0/memory alias resolves to
+            "extraction_model",
             "llm_timeout_s",
             # #1834 extraction limits
             "extraction_max_concurrent",
@@ -77,6 +79,46 @@ class TestExtractionSlotGrammar:
         with pytest.raises(ValidationError) as ei:
             MemoryGraphConfig(extraction_slot=slot)
         assert "extraction_slot" in str(ei.value)
+
+
+class TestExtractionModelGrammar:
+    """``extraction_model`` (#2919) names an upstream model id hal0's ``/v1``
+    routes — OpenRouter/MiniMax ids with slashes, dots, colons — and is
+    ``None`` by default (the engine then runs on ``extraction_slot``)."""
+
+    def test_default_is_none(self) -> None:
+        assert MemoryGraphConfig().extraction_model is None
+
+    @pytest.mark.parametrize(
+        "model",
+        ["MiniMax-M2.5", "minimax/minimax-m3", "deepseek/deepseek-v4-pro", "gpt-4.1", "a:b"],
+    )
+    def test_valid_upstream_ids(self, model: str) -> None:
+        assert MemoryGraphConfig(extraction_model=model).extraction_model == model
+
+    @pytest.mark.parametrize(
+        "model",
+        [
+            "hal0/agent",  # a local slot belongs in extraction_slot
+            "hal0/memory",  # the alias itself can never be its own target
+            "has space",
+            "-lead",
+            "x" * 129,
+        ],
+    )
+    def test_invalid_ids_rejected(self, model: str) -> None:
+        with pytest.raises(ValidationError) as ei:
+            MemoryGraphConfig(extraction_model=model)
+        assert "extraction_model" in str(ei.value)
+
+    def test_virtual_id_error_points_at_extraction_slot(self) -> None:
+        with pytest.raises(ValidationError) as ei:
+            MemoryGraphConfig(extraction_model="hal0/utility")
+        assert "extraction_slot" in str(ei.value)
+
+    def test_empty_string_clears_to_none(self) -> None:
+        """The dashboard sends "" when the operator picks a local slot again."""
+        assert MemoryGraphConfig(extraction_model="").extraction_model is None
 
 
 class TestLegacyKeyDrop:

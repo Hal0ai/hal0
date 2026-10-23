@@ -94,6 +94,7 @@ def test_registry_declares_three_apply_classes() -> None:
         # [memory.graph] — ADR-0023: route/upstream replaced by extraction_slot
         ("memory.graph.enabled", "immediate", []),
         ("memory.graph.extraction_slot", "immediate", []),
+        ("memory.graph.extraction_model", "immediate", []),
         ("memory.graph.llm_timeout_s", "immediate", []),
         # [updates] — read once by the post-start image-drift pass (#2096).
         ("updates.auto_restart_image_drift", "service-restart", [SERVICE_HAL0_API]),

@@ -1968,6 +1968,19 @@ class MemoryGraphConfig(BaseModel):
             "against the live enabled-llm-slot set by the API at set-time."
         ),
     )
+    extraction_model: str | None = Field(
+        default=None,
+        description=(
+            "Optional upstream model the memory engine runs on instead of the "
+            "local extraction_slot (#2919): an id hal0's own /v1 already routes to "
+            "a configured upstream, e.g. 'MiniMax-M2.5' or 'minimax/minimax-m3'. "
+            "hindsight-api always calls the fixed virtual id hal0/memory; hal0 "
+            "resolves that to this model when set, else to hal0/<extraction_slot>, "
+            "so switching needs no engine restart. Validated against the live "
+            "upstream catalogs by the API at set-time. Never a hal0/<slot> id — "
+            "a local slot belongs in extraction_slot."
+        ),
+    )
     llm_timeout_s: int = Field(
         default=300,
         ge=30,
@@ -2061,6 +2074,34 @@ class MemoryGraphConfig(BaseModel):
             raise ValueError(
                 "memory.graph.extraction_slot must be a valid slot name "
                 "(lowercase alnum/-/_, ≤32 chars, leading alphanumeric)"
+            )
+        return v
+
+    @field_validator("extraction_model", mode="before")
+    @classmethod
+    def extraction_model_grammar(cls, v: object) -> str | None:
+        # Shape-only: an upstream model id as hal0's /v1 catalog spells it
+        # (OpenRouter 'vendor/model', MiniMax 'MiniMax-M2.5', ':' tags). The
+        # dashboard sends "" to return to the local slot, so blank clears.
+        # Existence in a live upstream catalog is the API's check at set-time.
+        import re as _re
+
+        if v is None:
+            return None
+        if not isinstance(v, str):
+            raise ValueError("memory.graph.extraction_model must be a string or null")
+        v = v.strip()
+        if not v:
+            return None
+        if v.startswith("hal0/"):
+            raise ValueError(
+                "memory.graph.extraction_model names an upstream model id; a local "
+                "slot is set with memory.graph.extraction_slot"
+            )
+        if not _re.match(r"^[A-Za-z0-9][A-Za-z0-9_./:-]{0,127}$", v):
+            raise ValueError(
+                "memory.graph.extraction_model must be a model id "
+                "(alnum/-/_/./:// , ≤128 chars, leading alphanumeric, no spaces)"
             )
         return v
 
