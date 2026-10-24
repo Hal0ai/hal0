@@ -347,8 +347,7 @@ async def test_infer_full_pipeline_returns_png(provider: ComfyUIProvider) -> Non
                 "prompt": "a cat in a hat",
                 "n": 1,
                 "size": "1024x1024",
-                "_hal0_model_class": "sdxl-turbo",
-                "_hal0_ckpt_filename": "sd_xl_turbo_1.0_fp16.safetensors",
+                "_hal0_template": "sdxl_turbo_simple",
             },
         )
 
@@ -360,15 +359,49 @@ async def test_infer_full_pipeline_returns_png(provider: ComfyUIProvider) -> Non
     sent_graph = submitted_prompt["prompt"]
     # Node 6 holds the positive prompt in our SDXL Turbo template.
     assert sent_graph["6"]["inputs"]["text"] == "a cat in a hat"
-    # Node 4 is the CheckpointLoaderSimple — ckpt_filename must be patched.
+    # Node 4 is the CheckpointLoaderSimple — the template's baked checkpoint is kept.
     assert sent_graph["4"]["inputs"]["ckpt_name"] == "sd_xl_turbo_1.0_fp16.safetensors"
 
 
 @pytest.mark.asyncio
-async def test_infer_requires_ckpt_filename(provider: ComfyUIProvider) -> None:
+async def test_infer_requires_template(provider: ComfyUIProvider) -> None:
     with pytest.raises(ComfyUIInferError) as exc:
         await provider.infer(8186, {"prompt": "x"})
-    assert "ckpt_filename" in exc.value.message
+    assert "_hal0_template" in exc.value.message
+
+
+@pytest.mark.asyncio
+async def test_infer_rejects_non_string_ckpt_override(provider: ComfyUIProvider) -> None:
+    with pytest.raises(ComfyUIInferError) as exc:
+        await provider.infer(
+            8186,
+            {"prompt": "x", "_hal0_template": "sdxl_simple", "_hal0_ckpt_override": 7},
+        )
+    assert "_hal0_ckpt_override" in exc.value.message
+
+
+@pytest.mark.asyncio
+async def test_infer_patches_ckpt_override(provider: ComfyUIProvider) -> None:
+    """``_hal0_ckpt_override`` reaches the template's ``ckpt_name`` pointer."""
+    submitted: dict[str, Any] = {}
+
+    async def _fake_post(url: str, json: dict[str, Any]) -> httpx.Response:
+        submitted.update(json)
+        raise ComfyUIInferError("stop after submit")
+
+    with patch("hal0.providers.comfyui.httpx.AsyncClient") as MockClient:
+        client = MockClient.return_value.__aenter__.return_value
+        client.post = _fake_post
+        with pytest.raises(ComfyUIInferError):
+            await provider.infer(
+                8186,
+                {
+                    "prompt": "x",
+                    "_hal0_template": "sdxl_simple",
+                    "_hal0_ckpt_override": "mine.safetensors",
+                },
+            )
+    assert submitted["prompt"]["4"]["inputs"]["ckpt_name"] == "mine.safetensors"
 
 
 @pytest.mark.asyncio
@@ -408,8 +441,7 @@ async def test_infer_surfaces_workflow_error(provider: ComfyUIProvider) -> None:
                 8186,
                 {
                     "prompt": "x",
-                    "_hal0_model_class": "sdxl-turbo",
-                    "_hal0_ckpt_filename": "ghost.safetensors",
+                    "_hal0_template": "sdxl_turbo_simple",
                 },
             )
     assert exc.value.code == "dispatch.upstream_failed"
