@@ -299,3 +299,25 @@ def test_slot_logs_follow_terminates_on_degraded_frame(
 
     assert result.exit_code == 0, result.output
     assert "synthetic composite" in result.output
+
+
+def test_slot_load_with_no_model_reports_not_loaded(monkeypatch: pytest.MonkeyPatch) -> None:
+    """#3023: ``slot load`` on a slot with no model gets an OFFLINE snapshot
+    back (load() parks it, it does not raise). The CLI must not print
+    "Loaded ... state=offline" and exit 0 when nothing was loaded."""
+
+    def fake_post(path: str, *, json: dict[str, Any] | None = None, **kw: Any) -> dict[str, Any]:
+        return {
+            "state": "offline",
+            "model_id": None,
+            "metadata": {"message": "no default model — pick one from the dropdown"},
+        }
+
+    monkeypatch.setattr(slot_commands, "_api_unreachable", lambda _url: False)
+    monkeypatch.setattr(slot_commands, "api_post", fake_post)
+    result = runner.invoke(slot_commands.app, ["load", "flm"])
+    assert result.exit_code == 1, result.output
+    assert "Loaded" not in result.output
+    assert "Not loaded" in result.output
+    assert "no default model" in result.output
+    assert "hal0 slot load flm -m" in result.output

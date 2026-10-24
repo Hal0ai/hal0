@@ -25,6 +25,7 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Any, Protocol
 
+from hal0.providers.flm import FLM_EMBED_TAG
 from hal0.slot_config import slot_scalar_table, write_slot_toml
 from hal0.slots._cfg_helpers import _cfg_to_dict
 from hal0.slots.layout import resolve_slot_stem
@@ -75,7 +76,7 @@ def is_npu_trio_shadow(cfg: SlotConfig | dict[str, Any]) -> bool:
 # never carried a meaningful activation state of their own (#1369).
 _TRIO_SHADOW_SPEC: tuple[tuple[str, str, str], ...] = (
     ("stt", "transcription", "whisper-v3:turbo"),
-    ("embed", "embedding", "embed-gemma:300m"),
+    ("embed", "embedding", FLM_EMBED_TAG),
 )
 
 

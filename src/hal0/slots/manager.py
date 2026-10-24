@@ -1925,7 +1925,9 @@ class SlotManager:
                     # successful load — callers downstream pick READY slots
                     # for routing and IDLE slots for "ready to accept a
                     # model" UX.
-                    resolved_state = await self._await_ready(slot_name, _cfg_port(cfg))
+                    resolved_state = await self._await_ready(
+                        slot_name, _cfg_port(cfg), model_id=resolved_model
+                    )
                     if resolved_state is SlotState.WARMING:
                         # The readiness wait gave up. That is ambiguous on its
                         # own — a huge model can legitimately still be loading —
@@ -4027,12 +4029,19 @@ class SlotManager:
 
     # ── health probe (TIER1 tightened) ───────────────────────────────────────
 
-    async def _await_ready(self, slot_name: str, port: int) -> SlotState:
+    async def _await_ready(
+        self, slot_name: str, port: int, *, model_id: str | None = None
+    ) -> SlotState:
         """Resolve the slot's final readiness state after spawning.
 
         Polls GET /health on the slot's container port until 200, then — for a
         chat-capable (``type=llm``) slot — proves the server can actually
         produce language before it is published as READY (#1922).
+
+        ``model_id`` is the model ``load`` resolved and spawned. The FLM gate
+        probes it, not ``[model].default``: an override load (``slot load -m``,
+        ``POST /load {"model_id"}``) persists the override only after this
+        returns, so the TOML still holds the old model, or none (#3023).
 
         Returns:
             SlotState.READY when the container is serving. On a health-wait
@@ -4101,16 +4110,17 @@ class SlotManager:
             chat_on = npu_cfg.get("chat", True) is not False
             embed_on = bool(npu_cfg.get("embed"))
             if chat_on:
-                # Probe the slot's ASSIGNED model, not FLM's models[0]. FLM's
-                # /v1/models lists the whole installed catalogue, so models[0]
-                # is an arbitrary OTHER model; probing it reloads the wrong
-                # weights onto the single NPU context and deadlocks the load,
-                # wedging the slot in WARMING forever (#1171). Translate the
-                # persisted default to the served colon tag the same way the
-                # serve path does (build_env uses flm_tag), so the expected id
-                # matches what FLM advertises regardless of whether the config
-                # stores the "-FLM" id or the native tag.
-                expected_model = _model_default(cfg)
+                # Probe the model this load SPAWNED, not FLM's models[0] and
+                # not the TOML default. /v1/models lists a catalogue, so
+                # models[0] is an arbitrary OTHER model: probing it reloads the
+                # wrong weights and deadlocks the load (#1171), and on FLM
+                # 1.0.x pulls it into the store if it is not installed (#3023).
+                # The TOML default is stale on an override load, which is only
+                # persisted after this gate. Translate to the served colon tag
+                # the same way the serve path does (_resolve_model_info's
+                # flm_tag), so the expected id matches what FLM advertises
+                # whether the id is the "-FLM" form or the native tag.
+                expected_model = model_id or _model_default(cfg)
                 try:
                     from hal0.providers.flm import flm_id_to_tag_async
 
