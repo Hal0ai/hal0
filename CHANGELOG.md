@@ -34,6 +34,10 @@ applying. Add those subsections to a version's section to surface them; see
 
 - **The installer installs FastFlowLM 1.0.10 on NPU hosts, up from 0.9.44.** The pinned host `.deb` now comes from `ROCm/FastFlowLM`, where the project moved, with new SHA-256 pins for each distro build. FastFlowLM 1.0 drops ffmpeg and fftw and needs `libxrt2` 2.25 or newer. The matching `flm` runner image ships separately as a runner pin.
 
+### Security
+
+- **`hal0-agentenv` and `hal0-benchctl` no longer import Python modules from the caller's working directory.** Both run as root through the `hal0` account's sudo grant and started Python with `-c` but without `-I`. sudo keeps the caller's working directory, and `python -c` puts that directory first on `sys.path`, so a `tempfile.py` or `hal0/` package planted there ran as root: a local privilege escalation from `hal0` to root. Both wrappers now `cd /` and start every Python with `-I`, as `hal0-update` already did. A test now fails if any wrapper under `installer/wrappers/` starts Python without `-I`. ([#3007](https://github.com/Hal0ai/hal0/issues/3007))
+
 ### Fixed
 
 - **The installer no longer reports "Verify FAILED" when the structured-output probe merely times out.** On a CPU-only fresh install the model can take longer than the probe's 120 s to answer, which printed a false failure in the summary box. A curl timeout now prints a distinct warning (model slow or busy) and does not count as a failed probe; an HTTP error or a reply that is not JSON still fails. ([#2952](https://github.com/Hal0ai/hal0/issues/2952))

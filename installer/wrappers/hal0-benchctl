@@ -39,6 +39,12 @@ set -euo pipefail
 # before this script runs (and a caller NOT going through sudo runs this
 # script with their own uid, where an override buys them nothing).
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+# Same for the working directory: sudo keeps the caller's, and a python started
+# from it would put it on sys.path. Run from / and start python with -I, so a
+# planted hal0/ package in the caller's directory is never imported as root
+# (#3007). Every path this script reads is absolute.
+cd /
 PODMAN_BIN="${HAL0_BENCHCTL_PODMAN:-podman}"
 TIMEOUT_BIN="${HAL0_BENCHCTL_TIMEOUT:-timeout}"
 
@@ -53,7 +59,7 @@ _resolve_model_root() {
   local py
   for py in "${HAL0_BENCH_PYTHON:-}" /usr/lib/hal0/venv/bin/python3 "$(command -v python3 2>/dev/null || true)"; do
     [[ -n "$py" && -x "$py" ]] || continue
-    if out="$("$py" -c 'from hal0.config.paths import model_store_root; print(model_store_root())' 2>/dev/null)" \
+    if out="$("$py" -I -c 'from hal0.config.paths import model_store_root; print(model_store_root())' 2>/dev/null)" \
        && [[ "$out" == /* ]]; then
       printf '%s' "$out"; return 0
     fi
