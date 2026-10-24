@@ -17,6 +17,8 @@ import time
 from pathlib import Path
 from unittest.mock import MagicMock
 
+import pytest
+
 from hal0.comfyui.capabilities import CAPABILITIES, default_variant
 from hal0.comfyui.fetch import _fetch_env, _provision_workflow, fetch_model, get_job
 
@@ -111,6 +113,18 @@ def test_fetch_env_mirrors_legacy_token_name(monkeypatch):
 def test_fetch_env_forwards_hf_home(monkeypatch):
     monkeypatch.setenv("HF_HOME", "/mnt/ai-models/hf-cache")
     assert _fetch_env()["HF_HOME"] == "/mnt/ai-models/hf-cache"
+
+
+@pytest.mark.parametrize(
+    "name", ["HF_ENDPOINT", "HF_HUB_CACHE", "HF_XET_CACHE", "HUGGINGFACE_HUB_CACHE", "hf_endpoint"]
+)
+def test_fetch_env_drops_hf_endpoint_and_cache_overrides(monkeypatch, name):
+    """#3017: an endpoint override would carry HF_TOKEN to another host."""
+    monkeypatch.setenv("HF_TOKEN", "hf_secret_abc")
+    monkeypatch.setenv(name, "https://example.invalid")
+    env = _fetch_env()
+    assert name not in env
+    assert env["HF_TOKEN"] == "hf_secret_abc"
 
 
 def test_fetch_subprocess_receives_hf_token(monkeypatch, tmp_path):

@@ -121,8 +121,16 @@ def _fetch_env() -> dict[str, str]:
       and the scripts see it.
     * ``HF_HOME`` — forwarded when set so the persistent cache is shared; the
       scripts default it to ``$HOME/.cache/huggingface`` otherwise.
+
+    Hugging Face endpoint and cache overrides (``HF_ENDPOINT``, ``HF_HUB_*``,
+    see :func:`hal0.api._env_store.is_hf_hub_redirect_env`) are dropped: with
+    ``HF_TOKEN`` in the same environment they would send the token to another
+    host and let it pick the weights (#3017). An entry written to ``api.env``
+    before the Secrets API refused these names still sits in ``os.environ``.
     """
-    env = dict(os.environ)
+    from hal0.api._env_store import is_hf_hub_redirect_env
+
+    env = {k: v for k, v in os.environ.items() if not is_hf_hub_redirect_env(k)}
     token = env.get("HF_TOKEN") or env.get("HUGGING_FACE_HUB_TOKEN")
     if token:
         env["HF_TOKEN"] = token

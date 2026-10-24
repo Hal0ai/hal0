@@ -110,6 +110,27 @@ PROCESS_CONTROL_ENV_PREFIXES = (
 #: sets these by editing ``api.env`` as root; no hal0 writer stores them.
 PROXY_ENV_SUFFIX = "_PROXY"
 
+#: Hugging Face Hub variables that choose where the ``hf`` CLI and
+#: ``huggingface_hub`` send requests, the bearer token with them, or where
+#: they read cached weights (#3017). The ComfyUI fetch runs ``hf download``
+#: with hal0-api's environment plus ``HF_TOKEN``, so ``HF_ENDPOINT`` hands the
+#: token to another host and lets it choose the weights that are later loaded;
+#: a cache directory hal0 does not own serves planted files the same way.
+#: ``HF_TOKEN`` (the credential) and ``HF_HOME`` (documented) stay allowed.
+HF_HUB_REDIRECT_ENV_NAMES = frozenset(
+    {
+        "HF_ENDPOINT",
+        "HF_INFERENCE_ENDPOINT",
+        "HUGGINGFACE_CO_STAGING",
+        "HF_TOKEN_PATH",
+        "HF_ASSETS_CACHE",
+        "HUGGINGFACE_ASSETS_CACHE",
+    }
+)
+#: ``HF_HUB_CACHE``, ``HF_HUB_OFFLINE`` and the rest; the legacy
+#: ``HUGGINGFACE_HUB_CACHE``; the Xet transfer settings (``HF_XET_CACHE``).
+HF_HUB_REDIRECT_ENV_PREFIXES = ("HF_HUB_", "HUGGINGFACE_HUB_", "HF_XET_")
+
 #: Names that choose which CA bundle outbound TLS clients trust (#2941). A
 #: bundle the ``hal0`` user can write lets a man-in-the-middle read every
 #: token hal0 sends upstream (HF, provider keys), so these are stored only as
@@ -144,7 +165,14 @@ def is_process_control_env(key: str) -> bool:
         name in PROCESS_CONTROL_ENV_NAMES
         or name.startswith(PROCESS_CONTROL_ENV_PREFIXES)
         or is_proxy_env(name)
+        or is_hf_hub_redirect_env(name)
     )
+
+
+def is_hf_hub_redirect_env(key: str) -> bool:
+    """True when ``key`` moves Hugging Face Hub traffic or its cache (``HF_ENDPOINT``, ...) (#3017)."""
+    name = key.strip().upper()
+    return name in HF_HUB_REDIRECT_ENV_NAMES or name.startswith(HF_HUB_REDIRECT_ENV_PREFIXES)
 
 
 def is_proxy_env(key: str) -> bool:
@@ -534,6 +562,8 @@ def list_env_keys(api_env: Path) -> list[str]:
 
 
 __all__ = [
+    "HF_HUB_REDIRECT_ENV_NAMES",
+    "HF_HUB_REDIRECT_ENV_PREFIXES",
     "PROCESS_CONTROL_ENV_NAMES",
     "PROCESS_CONTROL_ENV_PREFIXES",
     "PROXY_ENV_SUFFIX",
@@ -541,6 +571,7 @@ __all__ = [
     "TlsTrustError",
     "api_env_lock",
     "delete_env_value",
+    "is_hf_hub_redirect_env",
     "is_process_control_env",
     "is_proxy_env",
     "is_tls_trust_env",
