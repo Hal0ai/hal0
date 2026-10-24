@@ -44,7 +44,7 @@ _OWUI_PLACEHOLDER_PROMPT = "a placeholder prompt"
 #: than hardcoding node ids — a new template needs no changes here.
 #:
 #: There is deliberately no ``model`` row. OWUI writes its configured model id
-#: into that node, and the id (``sd-1.5-pruned-emaonly``, ``ckpt/<stem>``) is
+#: into that node, and the id (``sd-1.5-pruned-emaonly``, ``ckpt/<path>``) is
 #: never a checkpoint filename; the baked graph already carries the checkpoint.
 _OWUI_NODE_TYPES: tuple[tuple[str, str, str], ...] = (
     ("prompt", "positive_prompt", "text"),

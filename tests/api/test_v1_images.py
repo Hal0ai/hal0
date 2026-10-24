@@ -7,7 +7,7 @@ this exercises:
     fallback when no registry binding exists).
   * model resolution (hal0.comfyui.resolve): unknown ids 404, models that are
     not installed 409, models the API cannot render 422, user checkpoints
-    resolve as ``ckpt/<stem>``.
+    resolve as ``ckpt/<path>``.
   * URL response_format → cached PNG + ``/api/images/cache/...`` URL.
   * b64_json response_format → inline base64 PNG.
   * GET /api/images/cache/{name}.png serves the cached bytes.
@@ -226,7 +226,7 @@ def test_v1_images_user_checkpoint_renders_through_the_generic_template(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """``ckpt/<stem>`` loads the operator's file; the override comes from the scan, not the body."""
+    """``ckpt/<path>`` loads the operator's file; the override comes from the scan, not the body."""
     _user_checkpoint("anime/waifu.safetensors")
     _seed_img_upstream(client)
     mock_infer = _mock_png_infer(monkeypatch)
@@ -234,7 +234,7 @@ def test_v1_images_user_checkpoint_renders_through_the_generic_template(
     r = client.post(
         "/v1/images/generations",
         json={
-            "model": "ckpt/waifu",
+            "model": "ckpt/anime/waifu",
             "prompt": "anything",
             "_hal0_ckpt_override": "../../etc/passwd",
         },
@@ -245,20 +245,23 @@ def test_v1_images_user_checkpoint_renders_through_the_generic_template(
     assert sent["_hal0_template"] == "sdxl_simple"
     assert sent["_hal0_ckpt_override"] == "anime/waifu.safetensors"
     assert sent["size"] == "1024x1024"
-    assert r.json()["_hal0"]["model"] == "ckpt/waifu"
+    assert r.json()["_hal0"]["model"] == "ckpt/anime/waifu"
 
 
 def test_v1_images_response_names_the_model_and_template(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """``_hal0`` carries the resolved model id and the template the translator rendered."""
+    """``_hal0`` carries the resolved model id and template, whatever the provider's meta says.
+
+    The provider meta here names no template at all, and ``meta`` stays the provider's own.
+    """
     _install("sdxl-turbo")
     _seed_img_upstream(client)
     mock_infer = AsyncMock(
         return_value={
             "images": [{"png": b"\x89PNG\r\n\x1a\n" + b"q" * 64}],
-            "meta": {"template": "sdxl_turbo_simple", "seed": 7},
+            "meta": {"seed": 7},
             "prompt_id": "p1",
         }
     )
@@ -272,7 +275,21 @@ def test_v1_images_response_names_the_model_and_template(
     meta = r.json()["_hal0"]
     assert meta["model"] == "sdxl-turbo"
     assert meta["template"] == "sdxl_turbo_simple"
-    assert meta["meta"]["seed"] == 7
+    assert meta["meta"] == {"seed": 7}
+
+
+def test_v1_images_response_template_for_a_user_checkpoint(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _user_checkpoint("mine.safetensors", "cond_stage_model.transformer.x")
+    _seed_img_upstream(client)
+    _mock_png_infer(monkeypatch)  # its meta is empty
+
+    r = client.post("/v1/images/generations", json={"model": "ckpt/mine", "prompt": "x"})
+
+    assert r.status_code == 200, r.text
+    assert r.json()["_hal0"]["template"] == "sd15_simple"
 
 
 def test_v1_images_404_unknown_user_ckpt(
@@ -290,6 +307,36 @@ def test_v1_images_404_unknown_user_ckpt(
     assert error["code"] == "image.model_unknown"
     assert error["details"]["model"] == "ckpt/absent"
     assert error["details"]["available"] == ["ckpt/present"]
+    mock_infer.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "crafted",
+    [
+        "ckpt/../present",
+        "ckpt/present.safetensors",
+        "ckpt/",
+        "ckpt//present",
+        "ckpt/sub/../present",
+        "ckpt/sub/absent",
+    ],
+)
+def test_v1_images_404_for_crafted_ckpt_ids(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    crafted: str,
+) -> None:
+    """A ``ckpt/`` id is matched to scanned ids, never joined into a path."""
+    _user_checkpoint("present.safetensors")
+    _user_checkpoint("sub/real.safetensors")
+    _seed_img_upstream(client)
+    mock_infer = _mock_png_infer(monkeypatch)
+
+    r = client.post("/v1/images/generations", json={"model": crafted, "prompt": "x"})
+
+    assert r.status_code == 404, r.text
+    assert r.json()["error"]["code"] == "image.model_unknown"
+    assert r.json()["error"]["details"]["available"] == ["ckpt/present", "ckpt/sub/real"]
     mock_infer.assert_not_called()
 
 

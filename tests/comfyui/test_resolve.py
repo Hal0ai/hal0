@@ -153,14 +153,51 @@ def test_resolve_user_ckpt(key: str, arch: str, size: str) -> None:
     assert resolved.defaults == {**template_defaults, "size": size}
 
 
-def test_resolve_user_ckpt_in_a_subfolder_overrides_with_the_relpath() -> None:
-    """ComfyUI lists a nested checkpoint by its path under ``checkpoints/``; the id keeps the stem."""
+def test_resolve_nested_user_ckpt() -> None:
+    """A nested checkpoint is named by its path under ``checkpoints/`` and loads by that path.
+
+    ``a.safetensors`` and ``sub/a.safetensors`` are different files with different ids, so
+    naming one can never render the other.
+    """
+    _checkpoint("a.safetensors", _SDXL_KEY)
+    _checkpoint("sub/a.safetensors", _SD15_KEY)
     _checkpoint("anime/v2/waifu.safetensors", _SDXL_KEY)
 
-    resolved = resolve_image_model("ckpt/waifu", selection_model=None)
+    top = resolve_image_model("ckpt/a", selection_model=None)
+    nested = resolve_image_model("ckpt/sub/a", selection_model=None)
+    deep = resolve_image_model("ckpt/anime/v2/waifu", selection_model=None)
 
-    assert resolved.id == "ckpt/waifu"
-    assert resolved.ckpt_override == "anime/v2/waifu.safetensors"
+    assert (top.id, top.ckpt_override, top.template) == ("ckpt/a", "a.safetensors", "sdxl_simple")
+    assert (nested.id, nested.ckpt_override, nested.template) == (
+        "ckpt/sub/a",
+        "sub/a.safetensors",
+        "sd15_simple",
+    )
+    assert (deep.id, deep.ckpt_override) == ("ckpt/anime/v2/waifu", "anime/v2/waifu.safetensors")
+
+
+@pytest.mark.parametrize(
+    "crafted",
+    [
+        "ckpt/../present",
+        "ckpt/present.safetensors",
+        "ckpt/",
+        "ckpt//present",
+        "ckpt/sub/../present",
+        "ckpt/sub/absent",
+        "ckpt/waifu",  # the stem alone no longer names a nested file
+        "ckpt/./present",
+        "ckpt/present/",
+    ],
+)
+def test_resolve_crafted_ckpt_ids_are_unknown(crafted: str) -> None:
+    """The id is compared to scanned ids, never turned into a path: anything but an exact id is 404."""
+    _checkpoint("present.safetensors", _SDXL_KEY)
+    _checkpoint("sub/real.safetensors", _SDXL_KEY)
+    _checkpoint("anime/waifu.safetensors", _SDXL_KEY)
+
+    with pytest.raises(ImageModelUnknown):
+        resolve_image_model(crafted, selection_model=None)
 
 
 def test_resolve_user_ckpt_that_is_not_there_is_unknown() -> None:
@@ -245,12 +282,14 @@ def test_renderable_ids_are_installed_catalog_models_then_user_checkpoints() -> 
     base_path.write_bytes(b"x")
     _checkpoint("zeta.safetensors", _SD15_KEY)
     _checkpoint("alpha.safetensors", _SDXL_KEY)
+    _checkpoint("sub/beta.safetensors", _SDXL_KEY)
     _checkpoint("mystery.safetensors", None)
 
     assert renderable_ids() == [
         "sdxl-turbo",
         "sd-1.5-pruned-emaonly",
         "ckpt/alpha",
+        "ckpt/sub/beta",
         "ckpt/zeta",
     ]
 

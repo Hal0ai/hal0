@@ -7,12 +7,14 @@ text encoder under ``conditioner.embedders.1.``, SD 1.5 keeps its only one under
 ``cond_stage_model.transformer.``. Anything else (Flux, a LoRA saved as a checkpoint, a
 corrupt file) is not renderable here and reports ``None``.
 
-Only ``.safetensors`` is read. A ``.ckpt`` is a pickle, and opening one runs arbitrary code.
+Only a regular ``.safetensors`` file is read. A ``.ckpt`` is a pickle, and opening one runs
+arbitrary code; a FIFO or device would block or misbehave on open.
 """
 
 from __future__ import annotations
 
 import json
+import stat
 import struct
 from pathlib import Path
 from typing import Literal
@@ -28,19 +30,24 @@ _SD15_PREFIX = "cond_stage_model.transformer."
 def sniff_checkpoint_arch(path: Path) -> Literal["sdxl", "sd15"] | None:
     """``"sdxl"`` or ``"sd15"`` for a checkpoint of that family, else ``None``.
 
-    ``None`` also covers a file that is not ``.safetensors``, one that cannot be read, and
-    one whose header is truncated, over 100 MiB, not JSON, or not a JSON object. SDXL wins
-    when a header carries both prefixes.
+    ``None`` also covers a file that is not a regular ``.safetensors`` file, one that cannot
+    be read, and one whose header is truncated, over 100 MiB, longer than the file, not JSON,
+    or not a JSON object. SDXL wins when a header carries both prefixes.
     """
     if path.suffix.lower() != ".safetensors":
         return None
     try:
+        st = path.stat()
+        if not stat.S_ISREG(st.st_mode):
+            return None
         with path.open("rb") as fh:
             prefix = fh.read(8)
             if len(prefix) != 8:
                 return None
             (length,) = struct.unpack("<Q", prefix)
-            if length > _MAX_HEADER_BYTES:
+            # A header cannot be longer than what follows its length prefix, so a tiny file
+            # that declares a large one never makes us allocate it.
+            if length > _MAX_HEADER_BYTES or length > st.st_size - 8:
                 return None
             raw = fh.read(length)
     except OSError:

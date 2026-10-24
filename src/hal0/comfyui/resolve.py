@@ -7,13 +7,16 @@ the one place that decides it, in this order:
 * An empty ``model`` means the img capability's selected model.
 * A catalog id renders through its entry's template, provided the entry is API-renderable
   and every weight file is on disk.
-* ``ckpt/<file stem>`` names a checkpoint the operator dropped into ``checkpoints/`` whose
-  family sniffed as SDXL or SD 1.5 (:mod:`hal0.comfyui.inventory`). It renders through the
-  generic template of that family with the file as the checkpoint override.
+* ``ckpt/<path>`` names a checkpoint the operator dropped into ``checkpoints/`` whose
+  family sniffed as SDXL or SD 1.5 (:mod:`hal0.comfyui.inventory`); ``<path>`` is the file's
+  path under ``checkpoints/`` without the ``.safetensors`` suffix (``ckpt/sub/a`` for
+  ``sub/a.safetensors``). It renders through the generic template of that family with the
+  file as the checkpoint override.
 * Anything else is unknown.
 
-The checkpoint override comes from the scan of the models tree, never from the request, so
-a client can pick a model by name but cannot name a path.
+The checkpoint override comes from the scan of the models tree, never from the request: the
+requested id is compared to the scanned ids and never joined into a path, so a client can
+pick a model by name but cannot name a path.
 """
 
 from __future__ import annotations
@@ -70,7 +73,7 @@ class ImageModelRequired(Hal0Error):
 class ResolvedImageModel:
     """What a request renders through.
 
-    ``id`` is the name the request is answered under: the catalog id, or ``ckpt/<stem>``.
+    ``id`` is the name the request is answered under: the catalog id, or ``ckpt/<path>``.
     ``template`` is a workflow stem under ``hal0.providers.workflows`` and ``ckpt_override``
     the checkpoint file (relative to ``checkpoints/``) a user-checkpoint template loads;
     it is ``None`` for a catalog model, whose template names its own weights. ``defaults``
@@ -92,7 +95,7 @@ def renderable_ids() -> list[str]:
     """Every model id a request can name right now.
 
     The installed API-renderable catalog models in catalog order, then the user
-    checkpoints' ``ckpt/<stem>`` ids in scan order.
+    checkpoints' ``ckpt/<path>`` ids in scan order.
     """
     root = paths.models_root()
     ids = [
@@ -100,8 +103,7 @@ def renderable_ids() -> list[str]:
         for m in CATALOG.values()
         if m.api_renderable and install_state(m, root).state == "complete"
     ]
-    # Two files with one stem share an id; the id appears once.
-    ids.extend(dict.fromkeys(f["api_id"] for f in inventory.list_files() if "api_id" in f))
+    ids.extend(f["api_id"] for f in inventory.list_files() if "api_id" in f)
     return ids
 
 
@@ -111,8 +113,7 @@ def resolve_image_model(model_id: str | None, *, selection_model: str | None) ->
     ``selection_model`` is the img capability's selected model, used when ``model_id`` is
     empty. Raises :class:`ImageModelRequired` when both are, :class:`ImageModelNotRenderable`
     for a catalog model the API cannot render, :class:`ImageModelNotInstalled` for one whose
-    weights are not all on disk, and :class:`ImageModelUnknown` for anything else. When two
-    user checkpoints share a stem the first in scan order (by directory, then path) wins.
+    weights are not all on disk, and :class:`ImageModelUnknown` for anything else.
     """
     requested = (model_id or "").strip() or (selection_model or "").strip()
     if not requested:

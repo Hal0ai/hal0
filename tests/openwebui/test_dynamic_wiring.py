@@ -369,7 +369,7 @@ def test_owui_baked_workflow_uses_catalog_template(tmp_hal0_home: str) -> None:
 
 
 def test_owui_baked_workflow_bakes_a_user_checkpoint_override(tmp_hal0_home: str) -> None:
-    """A ``ckpt/<stem>`` selection bakes the operator's file into the generic template."""
+    """A ``ckpt/<path>`` selection bakes the operator's file into the generic template."""
     import struct
 
     from hal0.comfyui.catalog import load_template, parse_pointer
@@ -382,7 +382,7 @@ def test_owui_baked_workflow_bakes_a_user_checkpoint_override(tmp_hal0_home: str
     ckpt.parent.mkdir(parents=True)
     ckpt.write_bytes(struct.pack("<Q", len(raw)) + raw + b"\x00\x00")
 
-    built = _owui_baked_workflow("ckpt/mine")
+    built = _owui_baked_workflow("ckpt/sub/mine")
 
     assert built is not None
     graph = json.loads(built[0])
