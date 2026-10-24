@@ -353,6 +353,14 @@ def test_load_template_keeps_meta() -> None:
     assert template["4"]["class_type"] == "CheckpointLoaderSimple"
 
 
+def test_every_shipped_template_is_an_api_format_graph() -> None:
+    """ComfyUI's /prompt takes ``{node_id: {class_type, inputs}}``; the editor's format differs."""
+    for model in CATALOG.values():
+        graph = {k: v for k, v in load_template(model.template).items() if k != "_meta"}
+        assert graph, model.template
+        assert all("class_type" in node for node in graph.values()), model.template
+
+
 def test_load_template_unknown_stem_raises() -> None:
     with pytest.raises(FileNotFoundError):
         load_template("no-such-template")

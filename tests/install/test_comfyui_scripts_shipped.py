@@ -5,21 +5,19 @@ of ComfyUI on :8188.  The four standalone docker control scripts have been
 retired to eliminate the :8188 port conflict described in #984 / #874.
 
 Assertions:
-  (a) The retired docker scripts do NOT exist in installer/comfyui/scripts/.
+  (a) The retired docker scripts do NOT exist in installer/comfyui/scripts/
+      (the directory itself is gone: downloads run in hal0, not in shell scripts).
   (b) installer/install.sh contains NO reference to ``comfy-up`` or the
       ``installer/comfyui/scripts`` source path (the install block is gone).
   (c) installer/install.sh contains NO comfy-ui sudoers block
       (``packaging/sudoers/hal0-comfyui`` is retired).
   (d) The model-share setup block is still present (COMFYUI_MODELS_ROOT).
-  (e) The remaining non-docker scripts (get_*.sh) still exist and are
-      bash -n clean.
-  (f) No Python source file shells out to any of the retired scripts.
+  (e) No Python source file shells out to any of the retired scripts.
 """
 
 from __future__ import annotations
 
 import re
-import subprocess
 from pathlib import Path
 
 REPO = Path(__file__).parent.parent.parent
@@ -35,16 +33,6 @@ RETIRED_SCRIPTS = [
     "comfy-postinstall.sh",
 ]
 
-# Non-docker helper scripts that must still be present.
-RETAINED_SCRIPTS = [
-    "get_esrgan.sh",
-    "get_hunyuan15.sh",
-    "get_ltx2.sh",
-    "get_qwen_image.sh",
-    "get_sdxl.sh",
-    "get_wan22.sh",
-]
-
 
 # ── (a) retired scripts do not exist ─────────────────────────────────────────
 
@@ -55,6 +43,12 @@ def test_retired_docker_scripts_removed():
     assert not still_present, (
         f"Retired docker scripts still present in {SCRIPTS_DIR}: {still_present}"
     )
+
+
+def test_download_scripts_are_gone():
+    """Model downloads run in hal0 (hal0.comfyui.install); no get_*.sh ships with the installer."""
+    assert not SCRIPTS_DIR.exists()
+    assert not list((REPO / "installer").rglob("get_*.sh"))
 
 
 # ── (b) install.sh no longer contains the docker script install block ────────
@@ -95,32 +89,7 @@ def test_install_sh_still_sets_up_comfyui_model_share():
     )
 
 
-# ── (e) retained scripts exist and are bash-clean ────────────────────────────
-
-
-def test_retained_scripts_still_exist():
-    missing = [s for s in RETAINED_SCRIPTS if not (SCRIPTS_DIR / s).exists()]
-    assert not missing, f"Retained scripts missing from {SCRIPTS_DIR}: {missing}"
-
-
-def test_retained_scripts_bash_syntax_clean():
-    errors = []
-    for name in RETAINED_SCRIPTS:
-        path = SCRIPTS_DIR / name
-        if not path.exists():
-            errors.append(f"{name}: file not found")
-            continue
-        result = subprocess.run(
-            ["bash", "-n", str(path)],
-            capture_output=True,
-            text=True,
-        )
-        if result.returncode != 0:
-            errors.append(f"{name}: {result.stderr.strip()}")
-    assert not errors, "bash -n failures:\n" + "\n".join(errors)
-
-
-# ── (f) no Python src file shells out to retired scripts ─────────────────────
+# ── (e) no Python src file shells out to retired scripts ─────────────────────
 
 
 def test_src_has_no_subprocess_calls_to_retired_scripts():

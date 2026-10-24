@@ -151,10 +151,7 @@ egress — until a DSN is configured. Requires `pip install 'hal0ai[sentry]'` (o
 |---|---|---|
 | `HF_TOKEN`, `HUGGING_FACE_HUB_TOKEN` | unset (first-set wins) | Hugging Face Hub auth, used across install, model routes, and pull jobs. |
 | `COMFYUI_BASE_URL` | `http://127.0.0.1:8188` | — |
-| `COMFYUI_MODELS_DIR` | `/mnt/ai-models/comfyui/models` | — |
-| `COMFYUI_WORKFLOWS_DIR` | `/mnt/ai-models/comfyui/workflows` | — |
-| `COMFYUI_DATA_DIR` | `/mnt/ai-models/comfyui` | — |
-| `HAL0_COMFYUI_DATA_ROOT` | `""` | — |
+| `HAL0_COMFYUI_DATA_ROOT` | `""` (falls back to `<model store>/comfyui`) | Root of ComfyUI's data: its `models/`, `workflows/` and custom nodes. It is the only override; the subdirectories follow it, so they cannot disagree. |
 | `HAL0_CONTAINER_RUNTIME` | unset (auto-detect) | Overrides the podman/container runtime binary. |
 | `HAL0_FLM_BIN` | `/usr/bin/flm` | Host FastFlowLM binary. hal0 uses it only for `flm validate` and as a last-resort `flm list` when the flm runner image cannot be reached. Model pulls never use it: they run inside the flm runner image. |
 | `HAL0_FLM_HOME` | `/var/lib/hal0` | — |
