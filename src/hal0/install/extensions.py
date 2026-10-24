@@ -158,8 +158,8 @@ def install_extension(ext_id: str) -> ExtensionOutcome:
             agent_id = _AGENT_ID_ALIASES.get(ext.id, ext.id)
             _run(["hal0", "agent", "install", agent_id])
         elif ext.id == "comfyui":
-            # ComfyUI is owned by the seeded img slot. The legacy
-            # /opt/comfyui scripts remain manual operator tools only.
+            # ComfyUI is owned by the seeded img slot; its models are installed
+            # with `hal0 comfyui models install`.
             _run(["systemctl", "enable", "--now", "hal0-slot@img.service"])
         return ExtensionOutcome(ext_id=ext_id, installed=True)
     except Exception as exc:  # best-effort

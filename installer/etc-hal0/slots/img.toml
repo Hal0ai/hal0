@@ -8,8 +8,8 @@
 # Clean seed (WS-E, #1107): no `[model].default` pin — filling one in is what
 # activates the slot (#1369) — so a model-less box boots a grey tile: no
 # surprise multi-GB checkpoint download (the previous
-# `sdxl-turbo` pin) and no crash-loop. ComfyUI capability picks land via the
-# guided setup's `comfyui_defaults` sidecar → POST /api/comfyui/models/fetch; the
+# `sdxl-turbo` pin) and no crash-loop. Install image models with
+# `hal0 comfyui models install <id>` or from the dashboard's Image-Gen tab; the
 # operator enables this slot once a checkpoint is present.
 
 name = "img"
@@ -29,5 +29,6 @@ threads = 0
 
 [image]                       # persisted image-gen settings (#599)
 idle_restore_minutes = 60
-default_size = "1024x1024"
+# WxH an image request gets when it names no size; "" means the model's native size.
+default_size = ""
 default_steps = 0
