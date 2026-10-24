@@ -323,7 +323,32 @@ def slot_is_flm(cfg: Any) -> bool:
     device = str(scalars.get("device") or "").strip().lower()
     if BACKEND_TO_DEVICE.get(device, device) == "npu":
         return True
-    return str(scalars.get("provider") or "").strip().lower() == "flm"
+    if str(scalars.get("provider") or "").strip().lower() == "flm":
+        return True
+    return _profile_is_flm(scalars.get("profile"))
+
+
+def _profile_is_flm(profile_name: Any) -> bool:
+    """Whether the slot's profile belongs to the FLM runtime family (read-only).
+
+    The launch path picks FastFlowLM from the profile's runtime family even
+    with no ``device``/``provider`` on the slot (``_spec_provider_for``), so
+    the fit check must too. Reads ``profiles.toml`` directly, never
+    ``ProfileCatalog.resolve`` (which can persist a shipped seed): an unseeded
+    ``flm`` profile is recognised by name, as ``_runtime_family`` does.
+    """
+    if not isinstance(profile_name, str) or not profile_name:
+        return False
+    try:
+        from hal0.config.loader import load_profiles_config
+        from hal0.profiles import runtime_family_of
+
+        prof = load_profiles_config().profile.get(profile_name)
+        if prof is None:
+            return profile_name == "flm"
+        return runtime_family_of(profile_name, prof) == "flm"
+    except Exception:
+        return False
 
 
 def model_is_flm(model_id: str, registry: Any) -> bool | None:

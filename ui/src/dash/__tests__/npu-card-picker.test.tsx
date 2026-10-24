@@ -173,6 +173,17 @@ describe('NPU card model picker', () => {
     expect(trigger(host, 'flm')!.disabled).toBe(true)
   })
 
+  it('a spare model-less NPU LLM slot cannot edit the anchor through its picker', () => {
+    const spare = { name: 'flm-spare', type: 'llm', device: 'npu', device_class: 'npu', state: 'offline' }
+    const host = document.createElement('div')
+    document.body.appendChild(host)
+    act(() => {
+      createRoot(host).render(<NpuOccupancyCard slots={[SLOTS[0], spare]} />)
+    })
+    expect(trigger(host, 'flm')!.disabled).toBe(false)
+    expect(trigger(host, 'flm-spare')!.disabled).toBe(true)
+  })
+
   it('keeps the slot bound to the older <tag>-FLM id selected', () => {
     modelsBox.current = [FLM('qwen3-4b-FLM', ['chat']), CHAT_B]
     const slots = [{ ...SLOTS[0], modelDefault: 'qwen3:4b' }]

@@ -93,6 +93,13 @@ def test_slot_is_flm() -> None:
     assert not slot_is_flm({})
 
 
+def test_slot_is_flm_via_profile_runtime_family() -> None:
+    # Launch dispatch picks FLM from the profile family with no device/provider.
+    assert slot_is_flm({"profile": "flm"})
+    assert not slot_is_flm({"profile": "no-such-profile-xyz"})
+    check_model_fits_slot("flm", {"profile": "flm"}, FLM_ID, None)
+
+
 def test_model_is_flm_unknown_is_none() -> None:
     assert model_is_flm(FLM_ID, None) is True
     assert model_is_flm("who-knows", None) is None

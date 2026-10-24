@@ -383,7 +383,13 @@ function ComboSlot({ slot, occ, owners, hue, handlers, act = 0, anchorNpu, model
           slot={slot}
           models={models}
           role={role}
-          disabled={handlers.modalityBusy || (role === 'chat' && !npuPillOn(slot, anchorNpu, role))}
+          // Only the anchor card may write: a spare model-less NPU LLM slot
+          // would otherwise edit + restart the anchor (applyModel targets it).
+          disabled={
+            handlers.modalityBusy ||
+            (role === 'chat' &&
+              (slot.name !== handlers.anchorName || !npuPillOn(slot, anchorNpu, role)))
+          }
           onPick={handlers.onModel}
         />
       </div>
@@ -587,6 +593,7 @@ export function NpuOccupancyCard({ slots }) {
     },
     onModality: applyModality,
     onModel: applyModel,
+    anchorName: anchorSlot?.name,
     modalityBusy: editMut.isPending || restartMut.isPending,
   }
 
