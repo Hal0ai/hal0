@@ -69,6 +69,29 @@ def test_answers_gen_models_absent_or_empty_means_none(tmp_path: Path) -> None:
     assert load_answers(empty, _hw()).image_models == ()
 
 
+@pytest.mark.parametrize("mode", ["scaffold_only", "off"])
+def test_answers_gen_models_warns_when_the_mode_will_not_download_them(
+    tmp_path: Path, mode: str
+) -> None:
+    """Models named but never fetched would otherwise be dropped without a word (M13a)."""
+    path = _answers(tmp_path, f"{{ mode: {mode}, models: [sdxl-lightning, esrgan-4x] }}")
+
+    with pytest.warns(UserWarning, match=r"gen\.models.*will not be downloaded") as caught:
+        sel = load_answers(path, _hw())
+
+    assert mode in str(caught[0].message)
+    assert "scaffold_and_download" in str(caught[0].message)  # says how to get them
+    assert sel.image_models == ("sdxl-lightning", "esrgan-4x")
+    assert gen_download_requested(path) is False
+
+
+@pytest.mark.parametrize("gen", ["{ mode: scaffold_only }", "{ mode: off, models: [] }"])
+def test_answers_gen_without_models_does_not_warn(tmp_path: Path, gen: str) -> None:
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        load_answers(_answers(tmp_path, gen), _hw())
+
+
 def test_answers_gen_models_repeated_id_installs_once(tmp_path: Path) -> None:
     path = _answers(tmp_path, "{ mode: scaffold_and_download, models: [sdxl-turbo, sdxl-turbo] }")
 
