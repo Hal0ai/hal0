@@ -184,8 +184,11 @@ class ImageGenConfig(BaseModel):
         ),
     )
     default_size: str = Field(
-        default="1024x1024",
-        description="Default output size (WxH) for image generation requests.",
+        default="",
+        description=(
+            "Default output size (WxH) for image generation requests that name none. "
+            "Empty = the model's native size."
+        ),
     )
     default_steps: int = Field(
         default=0,

@@ -54,8 +54,9 @@ def test_port_range_admits_comfyui_stock_port() -> None:
 
 
 def test_image_gen_section_defaults() -> None:
+    # An empty default_size is "the model's native size": the render path falls through to it.
     s = ImageGenConfig()
-    assert (s.idle_restore_minutes, s.default_size, s.default_steps) == (60, "1024x1024", 0)
+    assert (s.idle_restore_minutes, s.default_size, s.default_steps) == (60, "", 0)
 
 
 def test_bare_string_image_is_refused() -> None:
