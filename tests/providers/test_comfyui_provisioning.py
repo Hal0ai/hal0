@@ -8,6 +8,7 @@ from a package asset, both at container launch. The installer does neither.
 from __future__ import annotations
 
 import importlib.resources
+import logging
 import os
 from pathlib import Path
 from typing import Any
@@ -143,28 +144,49 @@ def test_provision_is_idempotent(data_root: Path) -> None:
     assert len(first) == 2  # the model-paths file and the GPU-gate node
 
 
-def test_provision_survives_readonly_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores directory permission bits")
+def test_provision_survives_readonly_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
     locked = tmp_path / "locked"
     locked.mkdir()
     locked.chmod(0o500)
     monkeypatch.setenv("HAL0_COMFYUI_DATA_ROOT", str(locked / "comfyui"))
     try:
-        provision_data_root()  # best-effort: logs, never raises
+        with caplog.at_level(logging.WARNING, logger="hal0.providers.comfyui"):
+            provision_data_root()  # best-effort: logs, never raises
     finally:
         locked.chmod(0o700)
+    assert "comfyui.data_root_provision_failed" in caplog.text
+    assert not (locked / "comfyui").exists()
 
 
-def test_provision_still_syncs_node_when_a_directory_cannot_be_made(
-    data_root: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Each provisioning step fails on its own; one bad step skips none of the others."""
-    comfyui_paths.custom_nodes_dir().mkdir(parents=True)
-    # A file where a model subdirectory belongs makes that mkdir fail.
-    (data_root / "models").mkdir()
-    (data_root / "models" / "vae").write_text("not a directory")
+@pytest.mark.parametrize("blocked", ["models/vae", "output", "user", "custom_nodes"])
+def test_provision_one_failing_directory_skips_nothing_else(data_root: Path, blocked: str) -> None:
+    """A plain file where one directory belongs fails that mkdir only.
+
+    Every other mounted directory still exists afterwards (podman exits 125 on
+    a missing bind-mount source), and the model-paths file and the node are
+    still written when ``custom_nodes`` itself is the one that is blocked.
+    """
+    (data_root / "models").mkdir(parents=True)
+    (data_root / blocked).write_text("not a directory")
     provision_data_root()
-    assert (comfyui_paths.custom_nodes_dir() / _NODE).read_bytes() == _asset_bytes()
+
+    expected = [
+        data_root / "models",
+        *(data_root / "models" / sub for sub in comfyui_paths.SUBDIRS.values()),
+        *(data_root / sub for sub in ("output", "input", "user", "custom_nodes", "workflows")),
+    ]
+    missing = [
+        str(path.relative_to(data_root))
+        for path in expected
+        if not path.is_dir() and path != data_root / blocked
+    ]
+    assert missing == []
     assert comfyui_paths.extra_model_paths_file().read_text() == render_extra_model_paths()
+    if blocked != "custom_nodes":
+        assert (comfyui_paths.custom_nodes_dir() / _NODE).read_bytes() == _asset_bytes()
 
 
 # ── container_spec ────────────────────────────────────────────────────────────
