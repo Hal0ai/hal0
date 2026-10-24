@@ -17,6 +17,7 @@ streams (:func:`require_one_filesystem`); on one filesystem a single free-space 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -342,6 +343,21 @@ def remove_model(model: ImageModel) -> list[str]:
 
 # ── setup path ──────────────────────────────────────────────────────────────
 
+# Seconds between the progress lines a blocking install prints for a model still downloading.
+_PROGRESS_INTERVAL_S = 5.0
+
+
+async def _report_progress(job: PullJob, say: Callable[[str], None]) -> None:
+    """Say how far ``job`` has got once per :data:`_PROGRESS_INTERVAL_S`, until cancelled."""
+    while True:
+        await asyncio.sleep(_PROGRESS_INTERVAL_S)
+        if job.state == "running" and job.bytes_total > 0:
+            pct = int(job.bytes_downloaded * 100 / job.bytes_total)
+            say(
+                f"  {job.model_id}: {pct}% "
+                f"({job.bytes_downloaded / 1e9:.1f}/{job.bytes_total / 1e9:.1f} GB)"
+            )
+
 
 async def _install_each(
     model_ids: Sequence[str], hf_token: str | None, say: Callable[[str], None]
@@ -362,7 +378,13 @@ async def _install_each(
                 continue
             say(f"{model_id}: installing {model.label}")
             job = make_job(model_id)
-            await run_install(job, model, hf_token=hf_token, client=client)
+            progress = asyncio.create_task(_report_progress(job, say))
+            try:
+                await run_install(job, model, hf_token=hf_token, client=client)
+            finally:
+                progress.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await progress
             say(f"{model_id}: {job.state}" + (f" ({job.error})" if job.error else ""))
             results.append((model_id, job.state))
     return results
@@ -378,7 +400,9 @@ def install_models_blocking(
 
     The setup CLI's path: it owns an event loop (``asyncio.run``), so it cannot be called
     from async code. An unknown id or a model that will not fit on disk is reported through
-    ``on_line`` and comes back ``failed``; the rest still run.
+    ``on_line`` and comes back ``failed``; the rest still run. Each model's lines are a
+    start line, ``  <id>: <pct>% (<done>/<total> GB)`` at most every
+    :data:`_PROGRESS_INTERVAL_S` while it downloads, and an end line.
     """
     return asyncio.run(_install_each(model_ids, hf_token, on_line or (lambda _line: None)))
 
