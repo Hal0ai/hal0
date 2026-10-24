@@ -1270,6 +1270,45 @@ def test_create_model_outside_comfyui_tree_still_registers(
     assert r.status_code == 201, r.text
 
 
+def test_update_model_path_under_comfyui_tree_422(
+    inspect_client: TestClient, monkeypatch: pytest.MonkeyPatch, tmp_hal0_home: str
+) -> None:
+    """``PUT /api/models/{id}`` refuses a new ``path`` in the ComfyUI tree and keeps the old one."""
+    data = Path(tmp_hal0_home) / "comfy"
+    monkeypatch.setenv("HAL0_COMFYUI_DATA_ROOT", str(data))
+    original = Path(tmp_hal0_home) / "chat.gguf"
+    original.write_bytes(b"\x00" * 8)
+    inspect_client.post("/api/models", json={"id": "chat-row", "path": str(original)})
+    image = data / "models" / "checkpoints" / "sdxl.safetensors"
+
+    r = inspect_client.put("/api/models/chat-row", json={"path": str(image)})
+
+    assert r.status_code == 422, r.text
+    error = r.json()["error"]
+    assert error["code"] == "model.image_asset"
+    assert error["details"]["path"] == str(image)
+    assert inspect_client.get("/api/models/chat-row").json()["path"] == str(original)
+
+
+def test_update_model_path_outside_comfyui_tree_still_succeeds(
+    inspect_client: TestClient, monkeypatch: pytest.MonkeyPatch, tmp_hal0_home: str
+) -> None:
+    """The refusal is the ComfyUI tree only: a sibling directory is an ordinary path."""
+    data = Path(tmp_hal0_home) / "comfy"
+    monkeypatch.setenv("HAL0_COMFYUI_DATA_ROOT", str(data))
+    original = Path(tmp_hal0_home) / "chat.gguf"
+    original.write_bytes(b"\x00" * 8)
+    inspect_client.post("/api/models", json={"id": "chat-row", "path": str(original)})
+    sibling = Path(tmp_hal0_home) / "comfy-models" / "chat.gguf"
+    sibling.parent.mkdir(parents=True)
+    sibling.write_bytes(b"\x00" * 8)
+
+    r = inspect_client.put("/api/models/chat-row", json={"path": str(sibling)})
+
+    assert r.status_code == 200, r.text
+    assert inspect_client.get("/api/models/chat-row").json()["path"] == str(sibling)
+
+
 def test_add_by_path_under_comfyui_422(
     inspect_client: TestClient, monkeypatch: pytest.MonkeyPatch, tmp_hal0_home: str
 ) -> None:

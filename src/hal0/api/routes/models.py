@@ -382,6 +382,17 @@ async def add_model_from_path(request: Request) -> dict[str, Any]:
     return await _svc.add_from_path(body, registry=registry, event_bus=event_bus)
 
 
+def _refuse_comfyui_path(body: dict[str, Any]) -> None:
+    """Refuse a write body whose ``path`` is in ComfyUI's models tree.
+
+    The tree belongs to the image catalog, never to a registry row: create and
+    update both answer 422 ``model.image_asset``.
+    """
+    raw_path = body.get("path")
+    if isinstance(raw_path, str) and is_comfyui_asset(Path(raw_path).expanduser()):
+        raise ImageAsset(details={"path": raw_path})
+
+
 @router.post("", status_code=201)
 async def create_model(request: Request) -> dict[str, Any]:
     """Register a new model in the local ModelRegistry.
@@ -410,10 +421,7 @@ async def create_model(request: Request) -> dict[str, Any]:
         raise BadRequest("body must be valid JSON", details={"error": str(exc)}) from exc
     if not isinstance(body, dict):
         raise BadRequest("body must be a JSON object")
-    # ComfyUI's models tree belongs to the image catalog, never to a registry row.
-    raw_path = body.get("path")
-    if isinstance(raw_path, str) and is_comfyui_asset(Path(raw_path).expanduser()):
-        raise ImageAsset(details={"path": raw_path})
+    _refuse_comfyui_path(body)
     # Pop ``source`` before validation — it's an event-only tag, not a
     # Model field. Default to "manual" for hand-registered single files.
     source = body.pop("source", "manual")
@@ -812,6 +820,8 @@ async def update_model(model_id: str, request: Request) -> dict[str, Any]:
         missing, is not a drafter, or does not fit this model.
       * ``422 model.draft_kind_readonly`` — the body carries ``draft_kind``;
         it is classified from the file.
+      * ``422 model.image_asset`` — ``path`` is inside ComfyUI's models tree,
+        which the image catalog owns.
       * ``404 model.not_found`` — ``model_id`` not registered.
     """
     registry = request.app.state.model_registry
@@ -821,6 +831,7 @@ async def update_model(model_id: str, request: Request) -> dict[str, Any]:
         raise BadRequest("body must be valid JSON", details={"error": str(exc)}) from exc
     if not isinstance(body, dict):
         raise BadRequest("body must be a JSON object")
+    _refuse_comfyui_path(body)
 
     # Task 3: ``backends`` is retired as an editable/authoritative surface —
     # ``provider`` (screened below) is the write path now. A client-sent

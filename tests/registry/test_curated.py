@@ -123,6 +123,7 @@ def test_curated_has_no_image_entries() -> None:
 
 def test_curated_chat_entries_keep_chat_capability() -> None:
     """The chat picks default ``capability='chat'``."""
-    for m in CURATED_MODELS:
-        if m.recommended_slot == "primary":
-            assert m.capability == "chat", m.id
+    chat_picks = [m for m in CURATED_MODELS if m.recommended_slot == "chat"]
+    assert chat_picks, "no curated entry recommends the chat slot"
+    for m in chat_picks:
+        assert m.capability == "chat", m.id
