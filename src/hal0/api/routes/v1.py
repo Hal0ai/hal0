@@ -1808,8 +1808,10 @@ async def images_generations(request: Request, dispatcher: DispatcherDep) -> Res
 
     Model resolution (:func:`hal0.comfyui.resolve.resolve_image_model`) raises
     404 ``image.model_unknown``, 409 ``image.model_not_installed``, 422
-    ``image.model_not_renderable`` or 422 ``image.model_required``.
+    ``image.model_not_renderable`` or 422 ``image.model_required``; a models tree the hal0 user
+    cannot read answers 409 ``comfyui.models_dir_not_writable``.
     """
+    from hal0.comfyui.install import readable_tree
     from hal0.comfyui.resolve import resolve_image_model
     from hal0.dispatcher.router import NoRouteFound, UpstreamUnavailable
     from hal0.errors import Hal0Error
@@ -1829,10 +1831,12 @@ async def images_generations(request: Request, dispatcher: DispatcherDep) -> Res
     raw_model = body.get("model")
     model_arg = None if raw_model is None else str(raw_model)
     selection_model = None if (model_arg or "").strip() else await _img_selection_model(request)
-    # Resolution scans the models tree (disk reads), so it runs off the event loop.
-    resolved = await asyncio.to_thread(
-        resolve_image_model, model_arg, selection_model=selection_model
-    )
+    # Resolution scans the models tree (disk reads), so it runs off the event loop. A tree
+    # the hal0 user cannot traverse is the same 409 the models routes answer, not a 500.
+    with readable_tree():
+        resolved = await asyncio.to_thread(
+            resolve_image_model, model_arg, selection_model=selection_model
+        )
 
     # 2. GPU arbitration (Phase D, spec §7) — BEFORE dispatch so the img
     #    upstream is registered before resolve_by_capability runs.  When the

@@ -43,7 +43,7 @@ import logging
 import os
 import re
 import shutil
-from collections.abc import Awaitable, Callable, Iterator
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
@@ -623,27 +623,6 @@ def _tree_lock(request: Request) -> asyncio.Lock:
     return lock
 
 
-@contextlib.contextmanager
-def _readable_tree() -> Iterator[None]:
-    """Turn a models tree the hal0 user cannot traverse into a 409 instead of a 500.
-
-    ``install_state`` and the removal stat every component file, which raises
-    ``PermissionError`` below a directory without the execute bit. The fix is the one the
-    install guards already name for an unwritable destination, so it shares their code, with
-    ``details.path`` naming the path the OS refused.
-    """
-    try:
-        yield
-    except PermissionError as exc:
-        path = str(exc.filename or comfyui_paths.models_root())
-        raise comfyui_install.InstallDirNotWritable(
-            f"cannot read the ComfyUI models tree at {path}: {exc.strerror or exc}; make it "
-            "accessible to the hal0 user or group (e.g. chgrp <hal0 group> + chmod 2775), "
-            "then retry",
-            details={"path": path},
-        ) from exc
-
-
 def _require_model(model_id: str) -> ImageModel:
     model = get_model(model_id)
     if model is None:
@@ -705,7 +684,7 @@ async def comfyui_models(request: Request) -> dict[str, Any]:
     jobs = _install_jobs(request)
     recommended = recommended_id()
     root = comfyui_paths.models_root()
-    with _readable_tree():
+    with comfyui_install.readable_tree():
         models = [
             _model_row(model, recommended=recommended, job=jobs.get(model.id), root=root)
             for model in CATALOG.values()
@@ -819,7 +798,7 @@ async def comfyui_model_install(model_id: str, request: Request) -> JSONResponse
         existing = jobs.get(model_id)
         if existing is not None and existing.state in _ACTIVE_JOB_STATES:
             raise _install_running(model, existing)
-        with _readable_tree():
+        with comfyui_install.readable_tree():
             state = install_state(model)
             provisioned = (comfyui_paths.workflows_dir() / model.workflow_filename).is_file()
             if state.state == "complete" and provisioned:
@@ -876,7 +855,7 @@ async def comfyui_model_remove(
                 raise _install_running(CATALOG[job.model_id], job, removing=model)
             # The delete runs off the event loop (hundreds of unlinks on a slow store); the
             # lock keeps an install from starting under it.
-            with _readable_tree():
+            with comfyui_install.readable_tree():
                 result = await asyncio.to_thread(
                     comfyui_install.remove_model, model, include_shared=include_shared
                 )
