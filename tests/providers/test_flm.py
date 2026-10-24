@@ -334,7 +334,7 @@ async def test_verify_inference_requires_round_trip(provider: FLMProvider) -> No
         client = MockClient.return_value.__aenter__.return_value
         client.get = _fake_get
         client.post = _fake_post
-        result = await provider.verify_inference(8086)
+        result = await provider.verify_inference(8086, expected_model="qwen3.5:0.8b")
 
     assert sentinel_was_called["value"], "verify_inference MUST issue the sentinel."
     assert result["ok"] is True
@@ -385,23 +385,24 @@ async def test_verify_inference_probes_expected_model_not_models0(
 
 
 @pytest.mark.asyncio
-async def test_verify_inference_falls_back_to_models0_when_expected_absent(
+async def test_verify_inference_refuses_other_model_when_expected_absent(
     provider: FLMProvider,
 ) -> None:
-    """When the expected tag isn't advertised, fall back to models[0].
+    """Regression (#3023): an unadvertised expected tag fails the gate.
 
-    Keeps a slot whose expected model somehow isn't in /v1/models from being
-    made worse than the pre-fix behaviour.
+    FLM 1.0.x lists models it has not installed in /v1/models and pulls one on
+    the first request that names it. Falling back to ``models[0]`` there
+    downloaded ``deepseek-r1:8b`` (5.4 GB) during a ``gemma3:1b`` load and left
+    the slot in WARMING. The gate must never send a request naming a model the
+    slot was not started with.
     """
     models_payload = {"data": [{"id": "deepseek-r1:8b"}, {"id": "gemma3:1b"}]}
-    chat_payload = {"choices": [{"message": {"content": "x"}}]}
 
     async def _fake_get(url: str) -> httpx.Response:
         return _mock_response(status_code=200, json_payload=models_payload)
 
     async def _fake_post(url: str, json: dict[str, Any]) -> httpx.Response:
-        assert json["model"] == "deepseek-r1:8b"
-        return _mock_response(status_code=200, json_payload=chat_payload)
+        raise AssertionError(f"gate must not POST naming another model; got {json!r}")
 
     with patch("hal0.providers.flm.httpx.AsyncClient") as MockClient:
         client = MockClient.return_value.__aenter__.return_value
@@ -409,8 +410,62 @@ async def test_verify_inference_falls_back_to_models0_when_expected_absent(
         client.post = _fake_post
         result = await provider.verify_inference(8086, expected_model="qwen3:0.6b")
 
+    assert result["ok"] is False
+    assert result["status"] == "expected_model_not_served"
+    assert "qwen3:0.6b" in result["detail"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("expected", [None, ""])
+async def test_verify_inference_refuses_to_guess_without_expected_model(
+    provider: FLMProvider, expected: str | None
+) -> None:
+    """Regression (#3023): no expected tag means no probe, not ``models[0]``."""
+    models_payload = {"data": [{"id": "deepseek-r1:8b"}, {"id": "gemma3:1b"}]}
+
+    async def _fake_get(url: str) -> httpx.Response:
+        return _mock_response(status_code=200, json_payload=models_payload)
+
+    async def _fake_post(url: str, json: dict[str, Any]) -> httpx.Response:
+        raise AssertionError(f"gate must not POST without an expected model; got {json!r}")
+
+    with patch("hal0.providers.flm.httpx.AsyncClient") as MockClient:
+        client = MockClient.return_value.__aenter__.return_value
+        client.get = _fake_get
+        client.post = _fake_post
+        result = await provider.verify_inference(8086, expected_model=expected)
+
+    assert result["ok"] is False
+    assert result["status"] == "expected_model_missing"
+
+
+@pytest.mark.asyncio
+async def test_verify_embed_names_bundled_embed_model_not_models0(
+    provider: FLMProvider,
+) -> None:
+    """Regression (#3023): /v1/models lists chat tags only, so ``models[0]`` is
+    a chat model (on FLM 1.0.x possibly not installed, so naming it starts a
+    pull). The embed sentinel must name the bundled embed model."""
+    models_payload = {"data": [{"id": "deepseek-r1:8b"}, {"id": "gemma3:1b"}]}
+    embed_payload = {"data": [{"embedding": [0.1, 0.2]}]}
+    posted: list[str] = []
+
+    async def _fake_get(url: str) -> httpx.Response:
+        return _mock_response(status_code=200, json_payload=models_payload)
+
+    async def _fake_post(url: str, json: dict[str, Any]) -> httpx.Response:
+        posted.append(json["model"])
+        return _mock_response(status_code=200, json_payload=embed_payload)
+
+    with patch("hal0.providers.flm.httpx.AsyncClient") as MockClient:
+        client = MockClient.return_value.__aenter__.return_value
+        client.get = _fake_get
+        client.post = _fake_post
+        result = await provider.verify_embed(8086)
+
+    assert posted == ["embed-gemma:300m"]
     assert result["ok"] is True
-    assert result["model"] == "deepseek-r1:8b"
+    assert result["model"] == "embed-gemma:300m"
 
 
 @pytest.mark.asyncio
@@ -461,7 +516,7 @@ async def test_verify_inference_rejects_empty_models(provider: FLMProvider) -> N
         client = MockClient.return_value.__aenter__.return_value
         client.get = _fake_get
         client.post = _fake_post
-        result = await provider.verify_inference(8086)
+        result = await provider.verify_inference(8086, expected_model="qwen3.5:0.8b")
 
     assert result["ok"] is False
     assert result["status"] == "models_endpoint_empty"
@@ -484,7 +539,7 @@ async def test_verify_inference_rejects_models_ok_but_inference_failing(
         client = MockClient.return_value.__aenter__.return_value
         client.get = _fake_get
         client.post = _fake_post
-        result = await provider.verify_inference(8086)
+        result = await provider.verify_inference(8086, expected_model="qwen3.5:0.8b")
 
     assert result["ok"] is False
     assert "sentinel_completion_http_500" in result["status"]
@@ -507,7 +562,7 @@ async def test_verify_inference_rejects_response_with_no_choices(
         client = MockClient.return_value.__aenter__.return_value
         client.get = _fake_get
         client.post = _fake_post
-        result = await provider.verify_inference(8086)
+        result = await provider.verify_inference(8086, expected_model="qwen3.5:0.8b")
 
     assert result["ok"] is False
     assert result["status"] == "sentinel_completion_no_choices"
