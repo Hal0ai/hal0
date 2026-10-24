@@ -37,6 +37,11 @@ DENIED: dict[str, int] = {
     "XDG_CONFIG_DIRS": 3000,
     "XDG_DATA_HOME": 3000,
     "XDG_CACHE_HOME": 3000,
+    "HTTP_PROXY": 3006,
+    "HTTPS_PROXY": 3006,
+    "ALL_PROXY": 3006,
+    "NO_PROXY": 3006,
+    "FTP_PROXY": 3006,
 }
 
 

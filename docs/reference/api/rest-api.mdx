@@ -180,7 +180,9 @@ by anyone who can reach the API):
   `OPENSSL_`, which covers `OPENSSL_CONF`, `OPENSSL_MODULES` and `OPENSSL_ENGINES`, or
   `XDG_` (#3000), which covers `XDG_CONFIG_HOME`, `XDG_DATA_HOME` and `XDG_CACHE_HOME`. Since 1.6.1 the same
   answer covers names that change how those processes do TLS, find their configuration
-  or route traffic: `SSLKEYLOGFILE` (#2997), `NODE_TLS_REJECT_UNAUTHORIZED` (#2999). Names are matched in any letter case.
+  or route traffic: `SSLKEYLOGFILE` (#2997), `NODE_TLS_REJECT_UNAUTHORIZED` (#2999), and any name ending in `_PROXY`
+  (#3006: `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, `NO_PROXY`). A box behind a proxy
+  sets the proxy variables by editing `/etc/hal0/api.env` as root. Names are matched in any letter case.
   DELETE still accepts them, so an entry written before the guard can be removed. The provider credentials
   route (`POST /api/providers/{name}/credentials`) refuses the same names and any
   `HAL0_*` name with a 400, and so does an upstream's `auth_value_env` on create or

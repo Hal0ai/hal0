@@ -101,6 +101,15 @@ PROCESS_CONTROL_ENV_PREFIXES = (
     "XDG_",
 )
 
+#: Suffix of the proxy variables (#3006): ``HTTP_PROXY``, ``HTTPS_PROXY``,
+#: ``ALL_PROXY``, ``NO_PROXY`` and their lower-case spellings. httpx, requests,
+#: git, curl, uv and pip all honour them, so an entry routes hal0-api's
+#: outbound traffic, bearer tokens on plain-http upstreams included, through a
+#: proxy chosen by whoever wrote it. requests and urllib read any
+#: ``<scheme>_proxy``, hence a suffix rather than a list. A box behind a proxy
+#: sets these by editing ``api.env`` as root; no hal0 writer stores them.
+PROXY_ENV_SUFFIX = "_PROXY"
+
 #: Names that choose which CA bundle outbound TLS clients trust (#2941). A
 #: bundle the ``hal0`` user can write lets a man-in-the-middle read every
 #: token hal0 sends upstream (HF, provider keys), so these are stored only as
@@ -131,7 +140,16 @@ _ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 def is_process_control_env(key: str) -> bool:
     """True when ``key`` changes how processes run, not what they authenticate with."""
     name = key.strip().upper()
-    return name in PROCESS_CONTROL_ENV_NAMES or name.startswith(PROCESS_CONTROL_ENV_PREFIXES)
+    return (
+        name in PROCESS_CONTROL_ENV_NAMES
+        or name.startswith(PROCESS_CONTROL_ENV_PREFIXES)
+        or is_proxy_env(name)
+    )
+
+
+def is_proxy_env(key: str) -> bool:
+    """True when ``key`` is a proxy variable (``HTTP_PROXY``, ``no_proxy``, ...) (#3006)."""
+    return key.strip().upper().endswith(PROXY_ENV_SUFFIX)
 
 
 def is_tls_trust_env(key: str) -> bool:
@@ -518,11 +536,13 @@ def list_env_keys(api_env: Path) -> list[str]:
 __all__ = [
     "PROCESS_CONTROL_ENV_NAMES",
     "PROCESS_CONTROL_ENV_PREFIXES",
+    "PROXY_ENV_SUFFIX",
     "TLS_TRUST_ENV_NAMES",
     "TlsTrustError",
     "api_env_lock",
     "delete_env_value",
     "is_process_control_env",
+    "is_proxy_env",
     "is_tls_trust_env",
     "list_env_keys",
     "tls_trust_violation",
