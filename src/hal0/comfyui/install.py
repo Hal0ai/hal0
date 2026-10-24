@@ -26,7 +26,7 @@ import os
 import shutil
 import tempfile
 import time
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Iterator, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -91,6 +91,28 @@ class InstallDirNotWritable(Hal0Error):
 
     code = "comfyui.models_dir_not_writable"
     status = 409
+
+
+@contextlib.contextmanager
+def readable_tree() -> Iterator[None]:
+    """Turn a models tree the hal0 user cannot traverse into a 409 instead of a 500.
+
+    ``install_state`` and the removal stat every component file, which raises
+    ``PermissionError`` below a directory without the execute bit. The fix is the one the
+    install guards already name for an unwritable destination, so it shares their error,
+    with ``details.path`` naming the path the OS refused. The models routes and
+    ``/v1/images/generations`` (model resolution) both wrap their tree reads in it.
+    """
+    try:
+        yield
+    except PermissionError as exc:
+        path = str(exc.filename or paths.models_root())
+        raise InstallDirNotWritable(
+            f"cannot read the ComfyUI models tree at {path}: {exc.strerror or exc}; make it "
+            "accessible to the hal0 user or group (e.g. chgrp <hal0 group> + chmod 2775), "
+            "then retry",
+            details={"path": path},
+        ) from exc
 
 
 class RemoveFailed(Hal0Error):

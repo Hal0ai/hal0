@@ -639,6 +639,32 @@ def test_v1_images_resolution_errors_do_not_start_the_gpu(
     assert manager.arbiter.ensured == 0
 
 
+def test_v1_images_unreadable_models_tree_is_a_409_not_a_500(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A tree the hal0 user cannot traverse answers like the models routes do, not 500."""
+    _seed_img_upstream(client)
+    manager = _slot_manager_with_image_section({})
+    client.app.state.slot_manager = manager
+    mock_infer = _mock_png_infer(monkeypatch)
+
+    def denied(*_args: Any, **_kwargs: Any) -> Any:
+        raise PermissionError(13, "Permission denied", "/srv/models/checkpoints")
+
+    monkeypatch.setattr("hal0.comfyui.resolve.install_state", denied)
+
+    r = client.post("/v1/images/generations", json={"model": "sdxl-turbo", "prompt": "x"})
+
+    assert r.status_code == 409, r.text
+    error = r.json()["error"]
+    assert error["code"] == "comfyui.models_dir_not_writable"
+    assert error["details"] == {"path": "/srv/models/checkpoints"}
+    assert "/srv/models/checkpoints" in error["message"]
+    mock_infer.assert_not_called()
+    assert manager.arbiter.ensured == 0  # resolution failed before the GPU was touched
+
+
 def test_v1_images_url_response_format_writes_cache(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
