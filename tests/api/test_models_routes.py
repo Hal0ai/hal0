@@ -1211,26 +1211,50 @@ def test_update_model_ignores_backends_writes(
     assert after == before  # tag writes are dead
 
 
-def test_list_models_self_heals_provider_for_mistagged_comfyui_row(
-    inspect_client: TestClient,
+def test_models_listing_has_no_comfyui_category(
+    inspect_client: TestClient, monkeypatch: pytest.MonkeyPatch, tmp_hal0_home: str
 ) -> None:
-    """The ComfyUI path-derived repair heuristic (models_service.list_all)
-    self-heals ``backends`` for a row an older pull mis-tagged — Task 3 also
-    stamps ``provider`` alongside that self-heal, not just the tag."""
+    """A row whose bytes sit in the ComfyUI tree is listed as it was stored: the
+    registry no longer path-derives ``owned_by``, ``comfyui_category``, a
+    ``comfyui`` backend or a ``comfyui`` provider (the image catalog owns them)."""
+    data = Path(tmp_hal0_home) / "comfyui"
+    monkeypatch.setenv("HAL0_COMFYUI_DATA_ROOT", str(data))
     inspect_client.post(
         "/api/models",
         json={
             "id": "old-sdxl",
-            "path": "/var/lib/hal0/comfyui/models/checkpoints/sdxl.safetensors",
+            "path": str(data / "models" / "checkpoints" / "sdxl.safetensors"),
             "capabilities": ["chat"],
             "backends": [],
         },
     )
     rows = {m["id"]: m for m in inspect_client.get("/api/models").json()["models"]}
     row = rows["old-sdxl"]
-    assert row["owned_by"] == "comfyui"
-    assert "comfyui" in row["backends"]
-    assert row["provider"] == "comfyui"
+    assert "comfyui_category" not in row
+    assert row["owned_by"] != "comfyui"
+    assert "comfyui" not in row["backends"]
+    assert row["provider"] != "comfyui"
+
+
+def test_add_by_path_under_comfyui_422(
+    inspect_client: TestClient, monkeypatch: pytest.MonkeyPatch, tmp_hal0_home: str
+) -> None:
+    """add-from-path refuses a file in the ComfyUI tree and registers nothing."""
+    data = Path(tmp_hal0_home) / "comfy"
+    monkeypatch.setenv("HAL0_COMFYUI_DATA_ROOT", str(data))
+    image = data / "models" / "checkpoints" / "sdxl.safetensors"
+    image.parent.mkdir(parents=True)
+    image.write_bytes(b"\x00" * 8)
+
+    r = inspect_client.post("/api/models/add-from-path", json={"path": str(image)})
+
+    assert r.status_code == 422, r.text
+    error = r.json()["error"]
+    assert error["code"] == "model.image_asset"
+    assert error["details"]["path"] == str(image)
+    assert "Image Gen" in error["message"]
+    ids = {m["id"] for m in inspect_client.get("/api/models").json()["models"]}
+    assert "sdxl" not in ids
 
 
 # ── screen_model_write: the model-facts screen (pure) ─────────────────────────

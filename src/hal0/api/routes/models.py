@@ -72,7 +72,6 @@ _FLM_DISPATCH_TYPE = _svc.FLM_DISPATCH_TYPE
 _MODALITY_TO_SLOT_TYPE = _svc.MODALITY_TO_SLOT_TYPE
 _is_alias = _svc.is_alias
 _dispatch_type = _svc.dispatch_type
-_comfyui_category = _svc.comfyui_category
 _model_to_dict = _svc.model_to_dict
 _lazy_quant = _svc.lazy_quant
 _pull_entry = _svc.pull_entry
@@ -309,7 +308,8 @@ async def scan_models(request: Request) -> dict[str, Any]:
       ``tokenizer_repo`` / ``mtp`` / ``jinja``; a ``defaults`` table skips
       the row as ``model.defaults_removed``); otherwise we fall back to the
       detection output for that path. User overrides always win — that's
-      the whole point of the preview round-trip.
+      the whole point of the preview round-trip. A row whose path is in
+      ComfyUI's model tree is skipped (``image_asset``); the rest still commit.
 
     Returns ``{added, skipped, scanned_roots}`` in both modes (plus
     ``pruned`` / ``missing_referenced`` / ``reconciled`` /

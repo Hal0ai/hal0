@@ -131,6 +131,18 @@ class PullChecksumMismatch(PullError):
     status = 502  # upstream handed us bytes that don't match its own manifest
 
 
+class ImageAsset(Hal0Error):
+    """The path or model is an image-gen asset, which the LLM registry never holds.
+
+    ComfyUI's models tree belongs to the image catalog (``hal0.comfyui``):
+    add-by-path refuses a file inside it with this error. ``details["path"]``
+    carries the offending path when there is one.
+    """
+
+    code = "model.image_asset"
+    status = 422
+
+
 class _PullCancelled(Exception):
     """Internal control-flow: user cancel observed mid-stream.
 

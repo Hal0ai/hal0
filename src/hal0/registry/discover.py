@@ -24,6 +24,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from hal0.comfyui.paths import is_under_models_root
 from hal0.config.schema import ModelsConfig
 from hal0.model_meta import capability_from_filename, derive_model_provider
 from hal0.registry import tombstones
@@ -54,8 +55,9 @@ _SCAN_BUDGET_SECONDS = 30.0
 #   - ComfyUI accessory model directories — the .safetensors there are
 #     auxiliary components (VAEs, text encoders, control nets) used by
 #     a full image-gen workflow, not standalone models the dispatcher
-#     can route to. Once we add a proper image-gen surface these will
-#     come back through that channel.
+#     can route to. ComfyUI's own tree is excluded by path (see
+#     :func:`is_comfyui_asset`); these names also keep diffusers snapshots
+#     and third-party ComfyUI trees under a scan root out of the chat list.
 _SKIP_DIR_NAMES = frozenset(
     {
         "mmproj",
@@ -66,8 +68,7 @@ _SKIP_DIR_NAMES = frozenset(
         # markers that satisfy the existence check but aren't real files.
         ".no_exist",
         # ComfyUI accessory components — pulled in via an image-gen
-        # workflow, not standalone loadable models. Bring back through a
-        # dedicated image-gen surface once one exists.
+        # workflow, not standalone loadable models.
         "vae",
         "vae_approx",
         "clip",
@@ -556,6 +557,9 @@ def find_candidates(
                     shard_abs = candidate.resolve()
                 except OSError:
                     shard_abs = candidate
+                # A symlink farm over ComfyUI's tree: the walk never entered it.
+                if shard_abs != candidate and is_comfyui_asset(shard_abs):
+                    continue
                 idx = _shard_index(candidate)
                 if idx is not None:
                     shard_groups.setdefault(shard_key, {})[idx] = shard_abs
@@ -577,6 +581,9 @@ def find_candidates(
                     )
                 continue
             abs_path = candidate.resolve()
+            # A symlink into ComfyUI's tree: the walk never entered it.
+            if abs_path != candidate and is_comfyui_asset(abs_path):
+                continue
             # Re-check on the resolved path so HF snapshot symlinks that
             # point into a `/blobs/<sha>` cache get skipped — their suffix
             # check passes (the symlink name has the right extension) but
@@ -663,13 +670,6 @@ def find_candidates(
 def register_candidate(registry: ModelRegistry, candidate: CandidateModel) -> Model:
     """Build a :class:`Model` from ``candidate`` and add it to ``registry``."""
     curated = candidate.curated_match
-    # A checkpoint discovered under the ComfyUI models tree is an image-gen
-    # model, not a chat model — tag it capability "image" / backend "comfyui"
-    # so it lands on the dashboard's image-gen surface instead of the llm
-    # bucket (and out of the chat fallback pool). ``checkpoints/`` is the one
-    # ComfyUI subdir the scan walks; the accessory dirs are skip-listed above.
-    is_comfyui = "/comfyui/models/" in str(candidate.path)
-    comfyui_backends = ["comfyui"] if is_comfyui else []
     if curated is not None:
         model = Model(
             id=curated.id,
@@ -677,14 +677,10 @@ def register_candidate(registry: ModelRegistry, candidate: CandidateModel) -> Mo
             path=str(candidate.path),
             size_bytes=candidate.size_bytes,
             license=curated.license,
-            capabilities=[curated.capability]
-            if curated.capability
-            else (["image"] if is_comfyui else ["chat"]),
-            backends=comfyui_backends,
-            # Task 3: stamp provider alongside the tag-era backends tag on a
-            # NEW row — backends stays a vestigial lane hint (non-comfyui
-            # rows carry none), provider is the write-path source of truth.
-            provider=derive_model_provider(comfyui_backends),
+            capabilities=[curated.capability] if curated.capability else ["chat"],
+            # Task 3: stamp provider on a NEW row — the tag-era backends list
+            # stays empty, provider is the write-path source of truth.
+            provider=derive_model_provider([]),
             hf_repo=curated.hf_repo,
             hf_filename=curated.hf_file,
             tags=list(curated.tags),
@@ -702,9 +698,8 @@ def register_candidate(registry: ModelRegistry, candidate: CandidateModel) -> Mo
             name=candidate.path.stem,
             path=str(candidate.path),
             size_bytes=candidate.size_bytes,
-            capabilities=["image"] if is_comfyui else [candidate.capability_guess],
-            backends=comfyui_backends,
-            provider=derive_model_provider(comfyui_backends),
+            capabilities=[candidate.capability_guess],
+            provider=derive_model_provider([]),
             metadata={"discovered": True, "source": "auto-scan"},
         )
     # Carry a discovered mmproj sidecar onto the model so the llama-server
@@ -861,6 +856,20 @@ def _under_skip_dir(path: Path, root: Path) -> bool:
     return any(part in _SKIP_DIR_NAMES for part in path.parent.relative_to(root).parts)
 
 
+def is_comfyui_asset(path: Path) -> bool:
+    """True when ``path`` is, or resolves into, ComfyUI's models tree.
+
+    The tree belongs to the image catalog (``hal0.comfyui``), never the LLM
+    registry. The rule is ``is_under_models_root`` and nothing else: no path
+    substring, so a relocated or symlinked tree is recognised too. A path that
+    cannot be resolved (a symlink loop, an unreadable parent) counts as outside.
+    """
+    try:
+        return is_under_models_root(path)
+    except (OSError, RuntimeError):
+        return False
+
+
 def _inode(path: Path) -> tuple[int, int] | None:
     """``(st_dev, st_ino)`` of ``path``, or ``None`` if it cannot be stat'd."""
     try:
@@ -881,6 +890,8 @@ def _walk_files(root: Path, ignored: set[str] | None = None) -> Iterator[Path]:
     (HF ``snapshots/``) are yielded. The file name itself is covered by
     :func:`_is_skippable`. A directory at or below a tombstoned path
     (``ignored``) is pruned too, so a kept FLM/ONNX model tree costs nothing.
+    ComfyUI's models tree is pruned at its first directory (the root included),
+    so none of its files reach the mmproj and shard branches of the caller.
     """
 
     def _onerror(exc: OSError) -> None:
@@ -888,6 +899,9 @@ def _walk_files(root: Path, ignored: set[str] | None = None) -> Iterator[Path]:
 
     for dirpath, dirnames, filenames in os.walk(root, followlinks=False, onerror=_onerror):
         here = Path(dirpath)
+        if is_comfyui_asset(here):
+            dirnames.clear()
+            continue
         dirnames[:] = [
             d
             for d in dirnames
@@ -960,10 +974,14 @@ def reconcile_skipped_auto_scan(
 
 def _is_reconcilable(m: Model, roots: list[Path]) -> bool:
     """True for an auto-scan row that every scan root containing it would now
-    skip (a skip dir below that root, ``blobs`` excepted)."""
+    skip (a skip dir below that root, ``blobs`` excepted), or that sits in
+    ComfyUI's models tree wherever the scan roots are: those files belong to
+    the image catalog, and a relocated tree has no skip-dir name to match."""
     if (m.metadata or {}).get("source") != _AUTO_SCAN_SOURCE:
         return False
     path = Path(m.path)
+    if is_comfyui_asset(path):
+        return True
     containing = _containing_roots(path, roots)
     if not containing:
         return False
@@ -1435,15 +1453,17 @@ def _scan_and_register_locked(
 
 def is_skippable(p: Path) -> bool:
     """Public wrapper around the internal skip rules (shards, mmproj, hex blobs,
-    HF/ComfyUI accessory dirs). Used by ``scan/preview`` so the preview list
-    obeys the same filters as auto-discovery."""
-    return _is_skippable(p)
+    HF/ComfyUI accessory dirs) plus ComfyUI's models tree itself. Used by
+    ``scan/preview`` so the preview list obeys the same filters as
+    auto-discovery."""
+    return _is_skippable(p) or is_comfyui_asset(p)
 
 
 __all__ = [
     "CandidateModel",
     "backfill_coordless",
     "find_candidates",
+    "is_comfyui_asset",
     "is_runtime_managed",
     "is_skippable",
     "prune_missing",
