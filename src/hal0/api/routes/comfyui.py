@@ -593,7 +593,7 @@ async def comfyui_models_fetch(body: _FetchBody) -> JSONResponse:
 
 def _user_workflows_dir() -> str:
     """ComfyUI's own saved-workflows dir (``user/default/workflows`` under the data root)."""
-    return os.path.join(comfyui_paths.data_root(), "user", "default", "workflows")
+    return str(comfyui_paths.user_dir() / "default" / "workflows")
 
 
 def _find_workflow(name: str) -> str | None:

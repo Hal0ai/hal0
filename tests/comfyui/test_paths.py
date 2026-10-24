@@ -23,6 +23,7 @@ def test_paths_follow_model_store(store: Path) -> None:
     assert comfyui_paths.data_root() == store / "comfyui"
     assert comfyui_paths.models_root() == store / "comfyui" / "models"
     assert comfyui_paths.workflows_dir() == store / "comfyui" / "workflows"
+    assert comfyui_paths.user_dir() == store / "comfyui" / "user"
     assert comfyui_paths.custom_nodes_dir() == store / "comfyui" / "custom_nodes"
     assert comfyui_paths.extra_model_paths_file() == store / "comfyui" / "extra_model_paths.yaml"
 
@@ -35,6 +36,7 @@ def test_data_root_env_override(
     assert comfyui_paths.data_root() == override
     assert comfyui_paths.models_root() == override / "models"
     assert comfyui_paths.workflows_dir() == override / "workflows"
+    assert comfyui_paths.user_dir() == override / "user"
 
 
 @pytest.mark.parametrize("blank", ["", "   "])
