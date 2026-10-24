@@ -57,7 +57,6 @@ hermes` (see the comment on each).
 | `HAL0_BRAIN_MODEL` | unset (hardware-derived pick) | Forces a specific curated model id for the brain-model pull instead of deriving one from detected hardware. |
 | `HAL0_PULL_AGENT_MODEL` | unset (TTY-prompted) | `1` opts into the (optional, bigger) agent tool-caller model pull non-interactively; `0` forces the skip even on a terminal. |
 | `HAL0_AGENT_MODEL` | unset (hardware-derived pick) | Forces a specific curated model id for the agent-model pull instead of the hardware-derived ladder rung. |
-| `HAL0_SKIP_COMFYUI` | unset (`0`) | `1` skips the ComfyUI model-share setup step. |
 | `HAL0_MODELS_DIR` | unset (TTY-prompted, else `<var_lib>/models`) | Pull destination for `hal0 model pull` and the dashboard's pull buttons, written to `hal0.toml` as `[models].store`. Same as `--models-dir`. |
 | `HAL0_PYTHON` | unset → `python3` | Interpreter install.sh uses to build hal0's own venv. Also the fallback the preflight interpreter checks use when `HAL0_PY` (below) is unset. |
 | `HAL0_PY_AUTOINSTALL` | unset | `1` lets the installer install a Python 3.12 (`python3.12` and `python3.12-venv` via apt, `python3.12` via dnf) when the default `python3` is below hal0's 3.12 floor. install.sh sets it itself for that fallback. Arch, openSUSE and Alpine are not auto-installed: point `HAL0_PYTHON` at a 3.12–3.14 interpreter instead. |
