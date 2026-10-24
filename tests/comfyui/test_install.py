@@ -954,6 +954,40 @@ def test_install_models_blocking_emits_throttled_progress(
     assert lines.index(progress[0]) > 0 and lines.index(progress[-1]) < len(lines) - 1
 
 
+def test_install_models_blocking_survives_a_raising_on_line_during_progress(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A progress sink that raises must not lose a finished model's result or skip the rest."""
+    monkeypatch.setattr(install, "_PROGRESS_INTERVAL_S", 0.02)
+    monkeypatch.setattr(install, "preflight_disk", lambda model: None)
+
+    async def fake_run_install(job: PullJob, model: ImageModel, **kwargs: Any) -> None:
+        job.state = "running"
+        job.bytes_total = 8_000_000_000
+        job.bytes_downloaded = 1_000_000_000
+        await asyncio.sleep(0.12)  # several intervals
+        job.state = "completed"
+
+    monkeypatch.setattr(install, "run_install", fake_run_install)
+    progress_calls: list[str] = []
+    other: list[str] = []
+
+    def on_line(line: str) -> None:
+        if line.startswith("  "):
+            progress_calls.append(line)
+            raise BrokenPipeError("terminal went away")
+        other.append(line)
+
+    results = install.install_models_blocking(
+        ["sdxl-turbo", "sd-1.5-pruned-emaonly"], hf_token=None, on_line=on_line
+    )
+
+    assert results == [("sdxl-turbo", "completed"), ("sd-1.5-pruned-emaonly", "completed")]
+    assert len(progress_calls) == 2  # one failed attempt per model, then it stopped reporting
+    assert "sdxl-turbo: completed" in other and "sd-1.5-pruned-emaonly: completed" in other
+    assert any(r.message == "comfyui.install_progress_report_failed" for r in caplog.records)
+
+
 def test_install_models_blocking_is_silent_between_start_and_end_when_install_is_quick(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

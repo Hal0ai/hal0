@@ -313,8 +313,26 @@ def test_cli_install_ctrl_c_leaves_the_install_running(
     result = _run("models", "install", "sdxl-turbo")
 
     assert result.exit_code == 130
-    assert "continues" in result.output
+    assert "continue on the daemon" in result.output
     assert ("DELETE", "/api/comfyui/models/sdxl-turbo") not in api.calls
+
+
+def test_cli_install_ctrl_c_while_starting_leaves_started_installs_running(
+    api: FakeApi, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def second_post_interrupted(path: str, **kw: Any) -> Any:
+        if "qwen-image" in path:
+            raise KeyboardInterrupt
+        return api.post(path, **kw)
+
+    monkeypatch.setattr(comfyui_commands, "api_post", second_post_interrupted)
+
+    result = _run("models", "install", "sdxl-turbo", "qwen-image")
+
+    assert result.exit_code == 130
+    assert "Traceback" not in result.output
+    assert "already started continue on the daemon" in result.output
+    assert api.polls() == 0  # it never reached the follow loop
 
 
 # ── models remove ───────────────────────────────────────────────────────────

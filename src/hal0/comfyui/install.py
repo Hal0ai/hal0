@@ -348,15 +348,25 @@ _PROGRESS_INTERVAL_S = 5.0
 
 
 async def _report_progress(job: PullJob, say: Callable[[str], None]) -> None:
-    """Say how far ``job`` has got once per :data:`_PROGRESS_INTERVAL_S`, until cancelled."""
+    """Say how far ``job`` has got once per :data:`_PROGRESS_INTERVAL_S`, until cancelled.
+
+    A ``say`` that raises ends the reporting for this job (logged), so a broken sink can
+    neither cost a finished install its result nor stop the models after it.
+    """
     while True:
         await asyncio.sleep(_PROGRESS_INTERVAL_S)
         if job.state == "running" and job.bytes_total > 0:
             pct = int(job.bytes_downloaded * 100 / job.bytes_total)
-            say(
-                f"  {job.model_id}: {pct}% "
-                f"({job.bytes_downloaded / 1e9:.1f}/{job.bytes_total / 1e9:.1f} GB)"
-            )
+            try:
+                say(
+                    f"  {job.model_id}: {pct}% "
+                    f"({job.bytes_downloaded / 1e9:.1f}/{job.bytes_total / 1e9:.1f} GB)"
+                )
+            except Exception:
+                log.exception(
+                    "comfyui.install_progress_report_failed", extra={"model_id": job.model_id}
+                )
+                return
 
 
 async def _install_each(
