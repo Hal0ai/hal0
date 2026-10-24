@@ -1084,12 +1084,18 @@ def _gateway_unit_active(unit: str) -> bool:
 def _gateway_left_off_note(unit: str, state: str) -> None:
     """Report that ``unit`` was left off and how to turn it on (install.sh
     ``unit_left_off_note``). A runtime mask lives under /run, so only
-    ``unmask --runtime`` removes it."""
+    ``unmask --runtime`` removes it.
+
+    A masked gateway has no unit file to enable: a persistent mask is the /etc
+    unit path itself, and systemd reports a runtime mask only while there is no
+    /etc file. After the unmask, this command lays the unit down and turns it
+    on, so that is the remedy, not ``systemctl enable --now`` (#3025).
+    """
     turn_on = f"systemctl enable --now {unit}"
     if state == "masked":
-        turn_on = f"systemctl unmask {unit} && {turn_on}"
+        turn_on = f"systemctl unmask {unit} && sudo hal0 agent install hermes"
     elif state == "masked-runtime":
-        turn_on = f"systemctl unmask --runtime {unit} && {turn_on}"
+        turn_on = f"systemctl unmask --runtime {unit} && sudo hal0 agent install hermes"
     console.print(f"[yellow]{unit} is {state}; left as is (run '{turn_on}' to turn it on)[/yellow]")
 
 

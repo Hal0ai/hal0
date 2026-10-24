@@ -124,7 +124,9 @@ def test_disabled_but_active_is_left_running(monkeypatch, tmp_path, capsys) -> N
 @pytest.mark.parametrize(
     ("state", "hint"),
     [
-        ("masked", "systemctl unmask hermes-gateway.service && systemctl enable --now"),
+        # No unit file is left to enable under a mask: the remedy re-runs the
+        # install after the unmask (#3025).
+        ("masked", "systemctl unmask hermes-gateway.service && sudo hal0 agent install hermes"),
     ],
 )
 def test_masked_never_writes_the_unit(monkeypatch, tmp_path, capsys, state, hint) -> None:
@@ -147,7 +149,9 @@ def test_masked_runtime_never_writes_the_unit(monkeypatch, tmp_path, capsys) -> 
     assert not (tmp_path / UNIT).exists()
     out = _out(capsys)
     assert "is masked-runtime; left as is" in out
-    assert "systemctl unmask --runtime hermes-gateway.service && systemctl enable --now" in out
+    assert (
+        "systemctl unmask --runtime hermes-gateway.service && sudo hal0 agent install hermes" in out
+    )
 
 
 def test_a_failed_template_install_keeps_a_disabled_gateway_off(
@@ -478,4 +482,8 @@ def test_a_runtime_mask_with_no_canonical_file_keeps_a_suffixed_gateway_off(
     assert moved == [tmp_path / UNIT]
     assert _installs(calls) == [] and _enables(calls) == []
     assert not (tmp_path / UNIT).exists()
-    assert "is masked-runtime; left as is" in _out(capsys)
+    out = _out(capsys)
+    assert "is masked-runtime; left as is" in out
+    assert (
+        "systemctl unmask --runtime hermes-gateway.service && sudo hal0 agent install hermes" in out
+    )

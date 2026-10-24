@@ -163,9 +163,11 @@ unit_state_off() {
 }
 
 # Report that `unit` (captured `state`) was left off, and how to turn it on.
+# An optional third argument replaces `systemctl enable --now <unit>` as what
+# to run after an unmask, for a unit whose file the mask leaves absent.
 unit_left_off_note() {
     local unit="$1" state="$2"
-    local turn_on="systemctl enable --now ${unit}"
+    local turn_on="${3:-systemctl enable --now ${unit}}"
     # A runtime mask lives under /run; only `unmask --runtime` removes it.
     case "${state}" in
         masked) turn_on="systemctl unmask ${unit} && ${turn_on}" ;;
@@ -4183,7 +4185,11 @@ else
             "${VENV_DIR}/bin/python" -m hal0.agents.hermes_gateway_regen migrate || _gw_rc=$?
             gateway_install_note "${_gw_rc}" \
                 "suffixed hermes-gateway unit not moved off — re-run '${HAL0_BIN} agent install hermes'"
-            unit_left_off_note hermes-gateway.service "${_gateway_state}"
+            # The mask leaves no gateway unit file to enable: after the
+            # unmask, `hal0 agent install hermes` lays it down and turns it
+            # on (#3025).
+            unit_left_off_note hermes-gateway.service "${_gateway_state}" \
+                "${HAL0_BIN} agent install hermes"
         else
             _gw_rc=0
             "${VENV_DIR}/bin/python" -m hal0.agents.hermes_gateway_regen install || _gw_rc=$?
