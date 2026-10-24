@@ -1189,7 +1189,7 @@ def test_preflight_disk_raises_507(monkeypatch: pytest.MonkeyPatch) -> None:
     assert excinfo.value.status == 507
     details = excinfo.value.details
     assert details["free_bytes"] == 1
-    assert details["required_bytes"] == int(model.approx_gb * 1e9)
+    assert details["required_bytes"] == sum(round(c.approx_gb * 1e9) for c in model.components)
     assert Path(details["path"]).exists()  # the ancestor that was measured
 
 
@@ -1245,6 +1245,21 @@ def test_preflight_subtracts_resumable_partial(monkeypatch: pytest.MonkeyPatch) 
         install.preflight_disk(model)
     assert excinfo.value.details["required_bytes"] == 400_000_000  # what is left, not the total
     assert "about 0.4 GB" in excinfo.value.message  # the message names the remainder too
+
+
+def test_preflight_required_bytes_is_the_unrounded_sum_of_the_missing_components(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two 0.04 GB files need 80 MB, not the 100 MB their rounded 0.1 GB total would suggest."""
+    model = _fake_model(components=(replace(_CKPT, approx_gb=0.04), replace(_VAE, approx_gb=0.04)))
+    _free_space(monkeypatch, lambda path: 90_000_000)
+    install.preflight_disk(model)  # 80 MB fits in 90 MB free
+
+    _free_space(monkeypatch, lambda path: 70_000_000)
+    with pytest.raises(install.InstallInsufficientDisk) as excinfo:
+        install.preflight_disk(model)
+    assert excinfo.value.details["required_bytes"] == 80_000_000
+    assert "about 0.08 GB" in excinfo.value.message
 
 
 def test_preflight_ignores_partial_without_sidecar(monkeypatch: pytest.MonkeyPatch) -> None:

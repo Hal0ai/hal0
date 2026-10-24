@@ -139,17 +139,20 @@ def preflight_disk(model: ImageModel) -> None:
     """Raise :class:`InstallInsufficientDisk` when what is still to download cannot fit.
 
     Measures the filesystem under the models tree (its nearest existing ancestor, since a
-    fresh store has no tree yet) against the missing components' size, less the bytes of
-    each already staged and resumable (:func:`_staged_bytes`), which the downloader does
-    not fetch again. The staging dir is on the same filesystem, which :func:`run_install`
-    enforces, so that one check covers both. ``details["path"]`` is the directory measured,
-    ``details["required_bytes"]`` what is still to fetch and ``details["staged_bytes"]`` what
-    was taken off. A filesystem that cannot be measured is skipped, as the downloader's own
-    per-file check does.
+    fresh store has no tree yet) against what is still to fetch: for each missing component
+    its catalog estimate in bytes (``round(approx_gb * 1e9)``, the figure the job's totals
+    start from), less the bytes already staged and resumable (:func:`_staged_bytes`, never
+    more than that estimate), which the downloader does not fetch again. The staging dir is
+    on the same filesystem, which :func:`run_install` enforces, so that one check covers
+    both. ``details["path"]`` is the directory measured, ``details["required_bytes"]`` what
+    is still to fetch and ``details["staged_bytes"]`` what was taken off. A filesystem that
+    cannot be measured is skipped, as the downloader's own per-file check does.
     """
-    state = install_state(model)
-    staged = sum(_staged_bytes(model, component) for component in state.missing)
-    required = max(0, int(state.missing_gb * 1e9) - staged)
+    required = staged = 0
+    for component in install_state(model).missing:
+        resumable = _staged_bytes(model, component)  # already capped at the estimate
+        required += round(component.approx_gb * 1e9) - resumable
+        staged += resumable
     if required <= 0:
         return
     probe = _existing_ancestor(paths.models_root())
