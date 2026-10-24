@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import contextlib
 import logging
-import os
 import re
 from dataclasses import dataclass, field
 from pathlib import PurePosixPath
@@ -29,6 +28,7 @@ import httpx
 
 from hal0.errors import Hal0Error
 from hal0.registry.detect import quant_from_filename
+from hal0.upstreams.huggingface import hf_token_from_env
 
 log = logging.getLogger(__name__)
 
@@ -149,7 +149,7 @@ class FileSetPlan:
 
 def _hf_headers(token: str | None) -> dict[str, str]:
     headers = {"Accept": "application/json", "User-Agent": "hal0/fileset"}
-    tok = token or os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
+    tok = token or hf_token_from_env()
     if tok:
         headers["Authorization"] = f"Bearer {tok}"
     return headers

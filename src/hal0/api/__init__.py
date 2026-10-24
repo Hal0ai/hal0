@@ -156,6 +156,7 @@ from hal0.registry.model import _BLESSED_PREFIX
 from hal0.registry.runner_image_store import RunnerImageStore
 from hal0.registry.store import ModelRegistry
 from hal0.slots.manager import SlotManager
+from hal0.upstreams.huggingface import hf_token_from_env
 from hal0.upstreams.registry import Upstream, UpstreamRegistry, upstream_from_entry
 
 log = structlog.get_logger(__name__)
@@ -975,7 +976,7 @@ def _auto_resume_interrupted_pulls(app: FastAPI) -> None:
 
         from hal0.api.routes.models import _run_pull_with_events, _schedule_pull_task
 
-        hf_token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
+        hf_token = hf_token_from_env()
         _schedule_pull_task(
             app.state,
             model_id,

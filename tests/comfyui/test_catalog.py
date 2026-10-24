@@ -153,8 +153,8 @@ def test_every_recommendation_is_an_api_renderable_catalog_model() -> None:
 
 @pytest.mark.parametrize("model", CATALOG.values(), ids=lambda m: m.id)
 def test_components_are_exactly_template_refs(model: ImageModel) -> None:
-    declared = {Path(c.relpath).name for c in model.components}
-    referenced = {Path(v).name for _cls, v in weight_refs(render_template(model))}
+    declared = {c.relpath for c in model.components}
+    referenced = {value for _cls, value in weight_refs(render_template(model))}
     assert declared == referenced
 
 
@@ -225,15 +225,9 @@ def test_shared_dest_has_one_source(models_root: Path) -> None:
 def test_component_sources_wellformed() -> None:
     for model in CATALOG.values():
         for component in model.components:
-            has_hf = bool(component.hf_repo and component.hf_path)
-            assert has_hf != bool(component.url), (model.id, component.relpath)
+            assert component.hf_repo and component.hf_path, (model.id, component.relpath)
             assert component.approx_gb > 0, (model.id, component.relpath)
-            if component.url:
-                assert component.url.startswith("https://")
-                assert not component.hf_repo
-                assert not component.hf_path
-            else:
-                assert component.source_key == f"hf://{component.hf_repo}/{component.hf_path}"
+            assert component.source_key == f"hf://{component.hf_repo}/{component.hf_path}"
 
 
 def test_component_dest_follows_kind_subdir(models_root: Path) -> None:
