@@ -23,12 +23,16 @@ directory the service account owns is refused just like a link.
 
 from __future__ import annotations
 
+import argparse
 import contextlib
 import errno
+import grp
 import os
+import pwd
 import secrets
 import stat
-from collections.abc import Iterator
+import sys
+from collections.abc import Iterator, Sequence
 from pathlib import Path
 
 __all__ = [
@@ -36,6 +40,7 @@ __all__ = [
     "chmod",
     "chown",
     "chown_tree",
+    "ensure_dir",
     "open_dir",
     "read_text",
     "write_file",
@@ -157,7 +162,12 @@ def read_text(path: Path | str, *, require_trusted_dir: bool = False) -> str | N
                 raise
     except FileNotFoundError:
         return None
-    with os.fdopen(fd, "rb") as fh:
+    try:
+        fh = os.fdopen(fd, "rb")
+    except BaseException:
+        os.close(fd)
+        raise
+    with fh:
         if not stat.S_ISREG(os.fstat(fh.fileno()).st_mode):
             raise UnsafePathError(path, "not a regular file")
         return fh.read().decode("utf-8")
@@ -215,7 +225,12 @@ def write_file(
             dir_fd=dfd,
         )
         try:
-            with os.fdopen(fd, "wb") as fh:
+            try:
+                fh = os.fdopen(fd, "wb")
+            except BaseException:
+                os.close(fd)
+                raise
+            with fh:
                 if owner is not None and os.geteuid() == 0:
                     with contextlib.suppress(*((PermissionError,) if pinned else ())):
                         os.fchown(fh.fileno(), *owner)
@@ -303,3 +318,123 @@ def chown_tree(root: Path | str, uid: int, gid: int) -> None:
                     os.chown(name, uid, gid, dir_fd=dirfd, follow_symlinks=False)
     finally:
         os.close(top)
+
+
+def ensure_dir(
+    path: Path | str,
+    *,
+    mode: int,
+    owner: tuple[int, int] | None = None,
+    create: bool = False,
+    expect: str = "any",
+) -> None:
+    """Give directory ``path`` itself ``owner`` and ``mode``, through its descriptor.
+
+    The parent is walked as :func:`open_dir` does; the directory itself is
+    always opened ``O_DIRECTORY|O_NOFOLLOW`` (made first with ``mkdirat`` when
+    ``create`` and missing), and ``fchown``/``fchmod`` act on that descriptor.
+    ``expect`` is checked on the opened descriptor, so it also covers a
+    directory swapped in between ``mkdirat`` and the open:
+
+    * ``"root"`` — it must already be owned by this process' euid (root on a
+      real host): for root-only directories such as ``secrets/``.
+    * ``"adopt"`` — it must be owned by ``owner``'s uid already, or be an
+      empty directory owned by this euid (one ``mkdir -p`` just made). A
+      root-owned directory with entries, such as ``secrets/`` the service
+      account renamed into a state directory's name, is refused.
+    * ``"any"`` — no ownership precondition.
+
+    ``owner`` is applied only when running as root.
+    """
+    path = Path(path)
+    with _parent(path) as dfd:
+        flags = _DIR_FLAGS | os.O_NOFOLLOW
+        try:
+            fd = os.open(path.name, flags, dir_fd=dfd)
+        except FileNotFoundError:
+            if not create:
+                raise
+            with contextlib.suppress(FileExistsError):
+                os.mkdir(path.name, 0o700, dir_fd=dfd)
+            fd = _open_child(dfd, path.name, path, flags)
+        except OSError as exc:
+            if exc.errno in (errno.ELOOP, errno.ENOTDIR):
+                raise UnsafePathError(path, "a symlink or not a directory") from exc
+            raise
+    try:
+        st = os.fstat(fd)
+        euid = os.geteuid()
+        if expect == "root" and st.st_uid != euid:
+            raise UnsafePathError(path, "directory is not owned by root")
+        if expect == "adopt" and not (
+            (owner is not None and st.st_uid == owner[0])
+            or (st.st_uid == euid and not os.listdir(fd))
+        ):
+            raise UnsafePathError(path, "root-owned and not empty; not adopting it")
+        if owner is not None and euid == 0:
+            os.fchown(fd, *owner)
+        os.fchmod(fd, mode)
+    finally:
+        os.close(fd)
+
+
+def _owner(spec: str) -> tuple[int, int]:
+    user, _, group = spec.partition(":")
+    uid = int(user) if user.isdigit() else pwd.getpwnam(user).pw_uid
+    gid = int(group) if group.isdigit() else grp.getgrnam(group or user).gr_gid
+    return uid, gid
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    """Shell entry point for installer/install.sh (#2975).
+
+    Run it as ``python3 -I <this file> ...`` so neither the caller's cwd nor
+    its environment reaches the interpreter; it imports only the stdlib.
+
+    ``dir [--create] [--owner U:G] --mode OCT [--expect root|adopt|any] PATH...``
+        :func:`ensure_dir` on each path, in order.
+    ``write [--owner U:G] --mode OCT [--require-trusted-dir] PATH``
+        :func:`write_file` with stdin as the content.
+
+    Exit 3 on a refused (unsafe) path, 1 on any other ``OSError``.
+    """
+    parser = argparse.ArgumentParser(prog="nofollow")
+    sub = parser.add_subparsers(dest="verb", required=True)
+    d = sub.add_parser("dir")
+    d.add_argument("--create", action="store_true")
+    d.add_argument("--owner", type=_owner)
+    d.add_argument("--mode", type=lambda v: int(v, 8), required=True)
+    d.add_argument("--expect", choices=("root", "adopt", "any"), default="any")
+    d.add_argument("paths", nargs="+")
+    w = sub.add_parser("write")
+    w.add_argument("--owner", type=_owner)
+    w.add_argument("--mode", type=lambda v: int(v, 8), required=True)
+    w.add_argument("--require-trusted-dir", action="store_true")
+    w.add_argument("path")
+    args = parser.parse_args(argv)
+    try:
+        if args.verb == "dir":
+            for p in args.paths:
+                ensure_dir(
+                    p, mode=args.mode, owner=args.owner, create=args.create, expect=args.expect
+                )
+        else:
+            write_file(
+                args.path,
+                sys.stdin.buffer.read(),
+                mode=args.mode,
+                owner=args.owner,
+                create_dirs=False,
+                require_trusted_dir=args.require_trusted_dir,
+            )
+    except UnsafePathError as exc:
+        sys.stderr.write(f"nofollow: {exc.strerror}\n")
+        return 3
+    except OSError as exc:
+        sys.stderr.write(f"nofollow: {exc}\n")
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

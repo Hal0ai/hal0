@@ -151,36 +151,38 @@ class TestPersistence:
         # Sanity: the two paths must differ.
         assert "HF_SECRETS_ENV" != "API_ENV"
 
-    def test_written_mode_0600(self, persist_block: str) -> None:
-        assert "chmod 0600" in persist_block
+    # The write goes through installer/install.sh's descriptor-based
+    # `nofollow` helper (#2975): ${VAR_DIR} is hal0-owned, so a pathname
+    # install -d / mktemp / mv could follow a swapped-in secrets/.
+    _WRITE = re.compile(
+        r'nofollow write --owner root:root --mode 0600 --require-trusted-dir "\$\{HF_SECRETS_ENV\}" <<EOF'
+    )
+    _DIR = re.compile(
+        r'nofollow dir --create --owner root:root --mode 0700 --expect root "\$\{SECRETS_DIR\}"'
+    )
 
-    def test_owned_root_root(self, persist_block: str) -> None:
-        assert "chown root:root" in persist_block
+    def test_written_mode_0600_root_root(self, persist_block: str) -> None:
+        assert self._WRITE.search(persist_block)
 
-    def test_written_atomically(self, persist_block: str) -> None:
-        # mktemp + mv, not an in-place redirect — avoids a torn read by a
-        # concurrent `systemctl daemon-reload`/restart.
-        assert re.search(r"mktemp \"\$\{HF_SECRETS_ENV\}", persist_block)
-        assert "mv -f" in persist_block
+    def test_written_atomically_without_following_links(self, persist_block: str) -> None:
+        # nofollow.write_file: random O_EXCL temp file renamed through the dir
+        # descriptor, so no torn read and no pathname step.
+        assert self._WRITE.search(persist_block)
+        code = "\n".join(ln for ln in persist_block.splitlines() if not ln.lstrip().startswith("#"))
+        for unsafe in ("mktemp", "mv -f", "install -d", "chmod "):
+            assert unsafe not in code, unsafe
 
     def test_secrets_dir_birth_is_dev_mode_safe(self, persist_block: str) -> None:
-        # #1942 review finding 1: `install -d -m 0700 -o root -g root
-        # "${SECRETS_DIR}"` is NOT inside a DEV_MODE guard (unlike its prod
-        # twin in the "hal0 system user" follow-up). In `--dev`, this block
-        # runs as an ordinary user whenever HF_TOKEN/HUGGING_FACE_HUB_TOKEN is
-        # exported; `install -o root -g root` as non-root exits 1, and
-        # install.sh runs under `set -euo pipefail` (line 17) — a hard
-        # mid-install abort. The birth must drop -o/-g and chown tolerantly,
-        # like the HF_SECRETS_TMP idiom a few lines below.
-        assert re.search(r'install -d -m 0700 "\$\{SECRETS_DIR\}"', persist_block), (
-            "SECRETS_DIR must be created without -o/-g root — `install -o root` "
-            "as an unprivileged --dev user aborts the installer"
-        )
-        assert re.search(
-            r'chown root:root "\$\{SECRETS_DIR\}" 2>/dev/null \|\| true', persist_block
-        ), (
-            "the SECRETS_DIR chown must be the tolerant (best-effort) idiom, not baked into install -d"
-        )
+        # #1942 review finding 1: in --dev this block runs as an ordinary user,
+        # under `set -euo pipefail`. `nofollow dir` applies --owner only when
+        # running as root, so it neither aborts nor needs -o/-g dropped.
+        assert self._DIR.search(persist_block)
+
+    def test_a_refused_write_warns_not_dies(self, persist_block: str) -> None:
+        m = re.search(r"if nofollow dir.*?\n    fi\n", persist_block, re.DOTALL)
+        assert m is not None
+        assert "warn " in m.group(0)
+        assert "die" not in m.group(0)
 
     def test_token_value_written_to_secrets_file_only(self, persist_block: str) -> None:
         # HF_TOKEN=${HF_TOKEN_VAL} must appear inside the persistence

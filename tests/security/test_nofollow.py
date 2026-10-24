@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import os
 import stat
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -206,3 +208,146 @@ def test_chmod_applies_to_a_fifo_without_opening_it(state_root: Path) -> None:
     os.mkfifo(state_root / "pipe", 0o600)
     nofollow.chmod(state_root / "pipe", 0o660)
     assert stat.S_IMODE((state_root / "pipe").stat().st_mode) == 0o660
+
+
+# ── ensure_dir and the shell entry point installer/install.sh calls ──────────
+
+_MODULE = Path(nofollow.__file__)
+
+
+def _cli(*args: str, stdin: str = "") -> subprocess.CompletedProcess[str]:
+    # Exactly how install.sh's nofollow() runs it: by file path, isolated.
+    return subprocess.run(
+        [sys.executable, "-I", str(_MODULE), *args],
+        input=stdin,
+        text=True,
+        capture_output=True,
+        check=False,
+        cwd="/",
+    )
+
+
+def test_ensure_dir_creates_with_exact_mode(state_root: Path) -> None:
+    proc = _cli(
+        "dir", "--create", "--mode", "0700", "--expect", "root", str(state_root / "secrets")
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert stat.S_IMODE((state_root / "secrets").stat().st_mode) == 0o700
+
+
+def test_ensure_dir_refuses_a_symlink_and_leaves_its_target(
+    state_root: Path, elsewhere: Path
+) -> None:
+    elsewhere.chmod(0o755)
+    (state_root / "slots").symlink_to(elsewhere)
+    proc = _cli("dir", "--mode", "2775", "--expect", "adopt", str(state_root / "slots"))
+    assert proc.returncode == 3
+    assert "symlink" in proc.stderr
+    assert stat.S_IMODE(elsewhere.stat().st_mode) == 0o755
+
+
+def test_ensure_dir_refuses_a_symlinked_ancestor(state_root: Path, elsewhere: Path) -> None:
+    (elsewhere / "agents").mkdir()
+    (state_root / "secrets").symlink_to(elsewhere)
+    proc = _cli(
+        "dir",
+        "--create",
+        "--mode",
+        "0700",
+        "--expect",
+        "root",
+        str(state_root / "secrets" / "agents"),
+    )
+    assert proc.returncode == 3
+
+
+def test_expect_root_refuses_a_directory_root_does_not_own(
+    state_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The service account renamed secrets/ away and made its own in its place.
+    (state_root / "secrets").mkdir(mode=0o755)
+    before = (state_root / "secrets").stat().st_mode
+    monkeypatch.setattr(nofollow.os, "geteuid", lambda: 4242)
+    with pytest.raises(nofollow.UnsafePathError):
+        nofollow.ensure_dir(state_root / "secrets", mode=0o700, owner=(0, 0), expect="root")
+    monkeypatch.undo()
+    assert (state_root / "secrets").stat().st_mode == before
+
+
+def test_expect_adopt_refuses_a_root_dir_renamed_into_place(
+    state_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # secrets/ (root-owned, with entries) renamed to slots/: adopting it would
+    # hand the vault directory to the service account.
+    slots = state_root / "slots"
+    slots.mkdir(mode=0o700)
+    (slots / "hermes.env").write_text("K=v\n")
+    before = slots.stat().st_mode
+    me = os.geteuid()
+    with pytest.raises(nofollow.UnsafePathError):
+        nofollow.ensure_dir(slots, mode=0o2775, owner=(me + 1, me + 1), expect="adopt")
+    assert slots.stat().st_mode == before
+
+
+def test_expect_adopt_takes_an_empty_new_dir_or_the_owners_own(state_root: Path) -> None:
+    me = os.geteuid()
+    fresh = state_root / "registry"
+    fresh.mkdir(mode=0o755)
+    nofollow.ensure_dir(fresh, mode=0o2775, owner=(me + 1, me + 1), expect="adopt")
+    assert stat.S_IMODE(fresh.stat().st_mode) == 0o2775
+    owned = state_root / "models"
+    owned.mkdir(mode=0o755)
+    (owned / "m.gguf").write_text("x")
+    nofollow.ensure_dir(owned, mode=0o2775, owner=(me, me), expect="adopt")
+    assert stat.S_IMODE(owned.stat().st_mode) == 0o2775
+
+
+def test_cli_write_requires_a_trusted_dir(state_root: Path) -> None:
+    secrets_dir = state_root / "secrets"
+    assert (
+        _cli("dir", "--create", "--mode", "0700", "--expect", "root", str(secrets_dir)).returncode
+        == 0
+    )
+    proc = _cli(
+        "write",
+        "--mode",
+        "0600",
+        "--require-trusted-dir",
+        str(secrets_dir / "hal0-api.env"),
+        stdin="HF_TOKEN=x\n",
+    )
+    assert proc.returncode == 0, proc.stderr
+    target = secrets_dir / "hal0-api.env"
+    assert target.read_text() == "HF_TOKEN=x\n"
+    assert stat.S_IMODE(target.stat().st_mode) == 0o600
+    # The state root itself (2775) is not trusted: refused, nothing written.
+    proc = _cli(
+        "write", "--mode", "0600", "--require-trusted-dir", str(state_root / "x.env"), stdin="K=v\n"
+    )
+    assert proc.returncode == 3
+    assert not (state_root / "x.env").exists()
+
+
+def test_write_file_closes_the_descriptor_when_fdopen_fails(
+    state_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    opened: list[int] = []
+    real_open = nofollow.os.open
+
+    def tracking_open(*args: object, **kwargs: object) -> int:
+        fd = real_open(*args, **kwargs)  # type: ignore[arg-type]
+        opened.append(fd)
+        return fd
+
+    def broken_fdopen(*_a: object, **_k: object) -> object:
+        raise MemoryError
+
+    monkeypatch.setattr(nofollow.os, "open", tracking_open)
+    monkeypatch.setattr(nofollow.os, "fdopen", broken_fdopen)
+    with pytest.raises(MemoryError):
+        nofollow.write_file(state_root / "f", "v")
+    monkeypatch.undo()
+    for fd in opened:
+        with pytest.raises(OSError):
+            os.fstat(fd)
+    assert [p.name for p in state_root.iterdir()] == []

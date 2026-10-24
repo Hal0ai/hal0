@@ -138,8 +138,18 @@ def test_dir_swapped_in_after_mkdir_is_refused(base: Path, tmp_path: Path) -> No
     attacker.chmod(0o755)
     (attacker / "agents").symlink_to(victim)
     proc = subprocess.run(
-        [sys.executable, "-I", "-c", _RACE_PRELUDE + _program(), "merge", str(base),
-         "secrets agents", "0700", "0600", "hermes.env"],
+        [
+            sys.executable,
+            "-I",
+            "-c",
+            _RACE_PRELUDE + _program(),
+            "merge",
+            str(base),
+            "secrets agents",
+            "0700",
+            "0600",
+            "hermes.env",
+        ],
         input="K=v\n",
         text=True,
         capture_output=True,
@@ -166,7 +176,9 @@ def test_every_python_call_is_isolated() -> None:
     # sudo keeps the caller's cwd; without -I, `python3 -c` imports a planted
     # secrets.py from it as root.
     code = "\n".join(
-        ln for ln in WRAPPER.read_text(encoding="utf-8").splitlines() if not ln.strip().startswith("#")
+        ln
+        for ln in WRAPPER.read_text(encoding="utf-8").splitlines()
+        if not ln.strip().startswith("#")
     )
     calls = [ln for ln in code.splitlines() if "python3 " in ln]
     assert calls
