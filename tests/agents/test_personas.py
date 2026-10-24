@@ -242,20 +242,15 @@ def test_build_prompt_addendum_lists_approval_lists() -> None:
     assert "Default policy: never" in block
 
 
-def test_activate_writes_active_and_returns_payload(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """``activate`` writes active.txt + returns a payload usable as an API
-    response. The reload nudge is best-effort; we stub it to assert no
-    propagation on failure."""
+def test_activate_writes_active_and_returns_payload(tmp_path: Path) -> None:
+    """``activate`` only moves the pointer and returns an API-shaped payload;
+    making it live is persona_live's job (tests/agents/test_persona_live.py)."""
     P.seed_default_personas(agent_id="hermes-agent", root=tmp_path)
-    monkeypatch.setattr(P, "hermes_reload", lambda **_: (False, "unreachable"))
     result = P.activate("hal0-brain", root=tmp_path)
     assert result["persona_id"] == "hal0-brain"
     assert result["display_name"] == "hal0 Brain"
     assert P.get_active(root=tmp_path) == "hal0-brain"
-    assert result["hot_reload"]["ok"] is False
-    assert result["hot_reload"]["error"] == "unreachable"
+    assert "hot_reload" not in result
 
 
 def test_activate_propagates_filenotfound_for_missing_persona(tmp_path: Path) -> None:

@@ -16,6 +16,7 @@ from typing import Any
 import pytest
 from fastapi.testclient import TestClient
 
+from hal0.agents import persona_live
 from hal0.agents import personas as personas_mod
 from hal0.api.agents import personas as personas_route
 
@@ -27,8 +28,7 @@ def personas_root(
 ) -> Iterator[Path]:
     """Redirect the personas store to a tmp dir for the whole test.
 
-    Both the module-level :data:`PERSONAS_ROOT` (used by helpers like
-    :func:`hermes_reload`) and the route module's agent registry are
+    Both the module-level :data:`PERSONAS_ROOT` and the route module's agent registry are
     rewired so the API handlers resolve agent_id="hermes" against the
     tmp dir.
     """
@@ -173,78 +173,71 @@ def test_detail_invalid_persona_returns_400(
 # ── activate ────────────────────────────────────────────────────────────────
 
 
-def test_activate_switches_active_and_invokes_hot_reload(
-    client: TestClient,
-    seeded_personas: Path,
-    monkeypatch: pytest.MonkeyPatch,
+@pytest.fixture
+def refreshes(monkeypatch: pytest.MonkeyPatch) -> list[Path]:
+    """Stub the live-render seam; each call records the personas root it got."""
+    calls: list[Path] = []
+
+    def _fake(root: Path, **_kw: Any) -> dict[str, Any]:
+        calls.append(root)
+        return {
+            "status": "applied",
+            "message": "ok",
+            "changed": True,
+        }
+
+    monkeypatch.setattr(persona_live, "refresh_persona_prompt", _fake)
+    return calls
+
+
+def test_activate_switches_active_and_refreshes_hermes(
+    client: TestClient, seeded_personas: Path, refreshes: list[Path]
 ) -> None:
-    """Default body (no ``reload`` key) triggers the hot-reload helper."""
-    calls: list[dict[str, Any]] = []
-
-    def _fake_reload(**kwargs: Any) -> tuple[bool, str | None]:
-        calls.append(kwargs)
-        return (True, None)
-
-    monkeypatch.setattr(personas_mod, "hermes_reload", _fake_reload)
-
     r = client.post("/api/agents/hermes/personas/hal0-brain/activate", json={})
     assert r.status_code == 200, r.text
     body = r.json()
     assert body["agent_id"] == "hermes"
     assert body["active"] == "hal0-brain"
     assert body["previous"] == "hermes"
-    assert body["reloaded"] is True
-    assert body["reload_error"] is None
-    # The pointer file actually moved.
+    assert body["refresh"]["status"] == "applied"
+    assert "reloaded" not in body
     assert personas_mod.get_active(root=seeded_personas) == "hal0-brain"
-    # And the hot-reload nudge actually fired once.
-    assert len(calls) == 1
+    # The refresh ran after the pointer moved, against the store just edited.
+    assert refreshes == [seeded_personas]
 
 
-def test_activate_reload_false_skips_hot_reload(
-    client: TestClient,
-    seeded_personas: Path,
-    monkeypatch: pytest.MonkeyPatch,
+def test_activate_reload_false_skips_refresh(
+    client: TestClient, seeded_personas: Path, refreshes: list[Path]
 ) -> None:
-    """``reload=false`` writes active.txt but DOESN'T call hermes_reload."""
-    calls: list[dict[str, Any]] = []
-
-    def _fake_reload(**kwargs: Any) -> tuple[bool, str | None]:
-        calls.append(kwargs)
-        return (True, None)
-
-    monkeypatch.setattr(personas_mod, "hermes_reload", _fake_reload)
-
-    r = client.post(
-        "/api/agents/hermes/personas/hal0-brain/activate",
-        json={"reload": False},
-    )
+    r = client.post("/api/agents/hermes/personas/hal0-brain/activate", json={"reload": False})
     assert r.status_code == 200, r.text
     body = r.json()
     assert body["active"] == "hal0-brain"
     assert body["previous"] == "hermes"
-    assert body["reloaded"] is False
-    assert body["reload_error"] is None
-    # Pointer moved …
+    assert body["refresh"] is None
     assert personas_mod.get_active(root=seeded_personas) == "hal0-brain"
-    # … but hermes_reload was NEVER called.
-    assert calls == []
+    assert refreshes == []
 
 
-def test_activate_reports_failed_hot_reload(
-    client: TestClient,
-    seeded_personas: Path,
-    monkeypatch: pytest.MonkeyPatch,
+def test_activate_reports_failed_refresh_honestly(
+    client: TestClient, seeded_personas: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Failed hot-reload is non-fatal; response carries ``reloaded=false``."""
-    monkeypatch.setattr(personas_mod, "hermes_reload", lambda **_: (False, "connection refused"))
-
+    """A refresh failure doesn't undo the activation, and says it isn't live."""
+    monkeypatch.setattr(
+        persona_live,
+        "refresh_persona_prompt",
+        lambda _root, **_kw: {
+            "status": "failed",
+            "message": "Saved, but could not write Hermes's config.yaml: denied.",
+            "changed": False,
+        },
+    )
     r = client.post("/api/agents/hermes/personas/hal0-brain/activate", json={})
     assert r.status_code == 200
     body = r.json()
     assert body["active"] == "hal0-brain"
-    assert body["reloaded"] is False
-    assert body["reload_error"] == "connection refused"
+    assert body["refresh"]["status"] == "failed"
+    assert "could not write" in body["refresh"]["message"]
     assert personas_mod.get_active(root=seeded_personas) == "hal0-brain"
 
 
@@ -253,7 +246,6 @@ def test_activate_unknown_persona_returns_404(
     seeded_personas: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(personas_mod, "hermes_reload", lambda **_: (True, None))
     r = client.post("/api/agents/hermes/personas/ghost/activate", json={})
     assert r.status_code == 404
     body = r.json()
@@ -272,25 +264,14 @@ def test_activate_unknown_agent_returns_404(
     assert body["error"]["code"] == "agent.unknown"
 
 
-def test_activate_no_body_defaults_to_reload_true(
-    client: TestClient,
-    seeded_personas: Path,
-    monkeypatch: pytest.MonkeyPatch,
+def test_activate_no_body_defaults_to_refresh(
+    client: TestClient, seeded_personas: Path, refreshes: list[Path]
 ) -> None:
-    """POSTing with no body still triggers the hot-reload nudge."""
-    calls: list[dict[str, Any]] = []
-
-    monkeypatch.setattr(
-        personas_mod,
-        "hermes_reload",
-        lambda **kwargs: calls.append(kwargs) or (True, None),
-    )
-
+    """POSTing with no body still re-renders the prompt into Hermes."""
     r = client.post("/api/agents/hermes/personas/hal0-brain/activate")
     assert r.status_code == 200, r.text
-    body = r.json()
-    assert body["reloaded"] is True
-    assert len(calls) == 1
+    assert r.json()["refresh"]["status"] == "applied"
+    assert len(refreshes) == 1
 
 
 def test_activate_reload_false_unknown_persona_404(
@@ -306,3 +287,55 @@ def test_activate_reload_false_unknown_persona_404(
     body = r.json()
     assert body["error"]["code"] == "persona.not_found"
     assert personas_mod.get_active(root=seeded_personas) == "hermes"
+
+
+# ── PUT refreshes only the active persona ───────────────────────────────────
+
+
+def test_put_active_persona_prompt_refreshes_hermes(
+    client: TestClient, seeded_personas: Path, refreshes: list[Path]
+) -> None:
+    r = client.put("/api/agents/hermes/personas/hermes", json={"system_prompt": "Be brief."})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["system_prompt"] == "Be brief."
+    assert body["refresh"]["status"] == "applied"
+    assert refreshes == [seeded_personas]
+
+
+def test_put_active_persona_display_name_refreshes_hermes(
+    client: TestClient, seeded_personas: Path, refreshes: list[Path]
+) -> None:
+    r = client.put("/api/agents/hermes/personas/hermes", json={"display_name": "Hermes 2"})
+    assert r.status_code == 200, r.text
+    assert len(refreshes) == 1
+
+
+def test_put_inactive_persona_does_not_refresh(
+    client: TestClient, seeded_personas: Path, refreshes: list[Path]
+) -> None:
+    r = client.put("/api/agents/hermes/personas/hal0-brain", json={"system_prompt": "Steward."})
+    assert r.status_code == 200, r.text
+    assert r.json()["refresh"] is None
+    assert refreshes == []
+
+
+def test_put_active_persona_approval_change_refreshes_hermes(
+    client: TestClient, seeded_personas: Path, refreshes: list[Path]
+) -> None:
+    """The rendered prompt carries the approval policy, so it must re-render."""
+    r = client.put(
+        "/api/agents/hermes/personas/hermes",
+        json={"approval": {"default_policy": "never", "require_approval": ["shell.*"]}},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["refresh"]["status"] == "applied"
+    assert refreshes == [seeded_personas]
+
+
+def test_put_active_persona_memory_namespace_change_refreshes_hermes(
+    client: TestClient, seeded_personas: Path, refreshes: list[Path]
+) -> None:
+    r = client.put("/api/agents/hermes/personas/hermes", json={"memory_namespace": "private:x"})
+    assert r.status_code == 200, r.text
+    assert refreshes == [seeded_personas]

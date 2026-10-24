@@ -8,10 +8,13 @@ one. The provisioner reads the active persona during Phase 7 (system
 prompt injection) and Phase 8 (seed) so the rendered config.yaml
 carries the right prompt + MCP usage block.
 
-Activation: write ``active.txt`` atomically, then a best-effort
-``reload.env`` nudge (:func:`hermes_reload`). The nudge never reaches
-Hermes (#2850), and only a reprovision re-renders the persona prompt
-into ``config.yaml`` (``hermes_provision._phase_config_write``).
+Activation: write ``active.txt`` atomically (:func:`activate`). Making that
+live is :func:`hal0.agents.persona_live.refresh_persona_prompt`, which
+re-renders the prompt into ``config.yaml`` and restarts Hermes (#2850).
+
+``tools_allowed`` and ``preferred_model`` are steward-only: only hal0-brain
+(``hal0.brain.chat``) enforces them. Hermes itself ignores both, so editing
+them on any other persona changes nothing.
 
 See ``docs/agents/hermes/CONFIG.md`` for the full TOML schema + write
 ownership semantics.
@@ -19,7 +22,6 @@ ownership semantics.
 
 from __future__ import annotations
 
-import json
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -35,6 +37,10 @@ log = structlog.get_logger(__name__)
 # ``/var/lib/hal0/state``.
 PERSONAS_ROOT = Path("/var/lib/hal0/.hermes/personas")
 ACTIVE_POINTER = "active.txt"
+
+#: The dashboard steward persona, the only one that enforces ``tools_allowed``
+#: and ``preferred_model`` (``hal0.brain.chat.BRAIN_PERSONA_ID``).
+STEWARD_PERSONA_ID = "hal0-brain"
 
 # The dashboard steward is a first-class Hermes *profile* agent-id, not just a
 # persona overlay: its memory rides its own bank (``private:hermes__hal0-brain``
@@ -89,6 +95,8 @@ class Persona:
     memory_namespace: str = ""
     approval: PersonaApproval = field(default_factory=PersonaApproval)
     preferred_upstream: str = "hal0"
+    # ``tools_allowed`` and ``preferred_model`` are steward-only: enforced for
+    # hal0-brain (``hal0.brain.chat``), ignored by Hermes for every other persona.
     preferred_model: str = ""
 
     @classmethod
@@ -286,81 +294,21 @@ def set_active(persona_id: str, *, root: Path | None = None) -> Path:
     return pointer
 
 
-# Hermes JSON-RPC endpoint used by the hot-reload helper. Defaults to a
-# port that hal0's systemd unit binds; overridable for tests + alt
-# deployments via :func:`hermes_reload`'s ``url`` arg.
-DEFAULT_HERMES_RELOAD_URL = "http://127.0.0.1:8765/api/ws"
+def activate(persona_id: str, *, root: Path | None = None) -> dict[str, Any]:
+    """Point ``active.txt`` at ``persona_id`` and return the status payload.
 
-
-def hermes_reload(
-    *,
-    url: str = DEFAULT_HERMES_RELOAD_URL,
-    method: str = "reload.env",
-    timeout: float = 2.0,
-) -> tuple[bool, str | None]:
-    """Best-effort hot-reload nudge to a running Hermes process.
-
-    Sends a JSON-RPC frame with ``method`` (defaults to ``reload.env``)
-    as an HTTP POST. Re-verified against Hermes v0.22.4 (``4d043038``):
-    ``reload.env`` exists (``tui_gateway/methods_tools.py:267``) but only
-    re-reads ``$HERMES_HOME/.env``, ``/api/ws`` is a token-gated WebSocket
-    on the dashboard port (``hermes_cli/web_routers/chat_ws.py:702``), and
-    nothing listens on 8765. The nudge therefore always fails, which the
-    callers already treat as non-fatal. #2850 tracks replacing it.
-
-    Returns ``(ok, error)`` so the API + CLI can decide how loud to be:
-    a failed nudge is non-fatal — the persona file is on disk and the
-    next service start (or next ``--repair``) picks it up. We DON'T
-    raise here; the caller does.
-    """
-    from urllib.error import HTTPError, URLError
-    from urllib.request import Request
-
-    from hal0.service_identity import open_url
-
-    payload = json.dumps({"jsonrpc": "2.0", "id": 1, "method": method, "params": {}}).encode(
-        "utf-8"
-    )
-    req = Request(
-        url,
-        data=payload,
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-    try:
-        with open_url(req, timeout=timeout) as resp:  # nosec B310 — localhost JSON-RPC
-            resp.read()
-    except (URLError, HTTPError, OSError, TimeoutError) as exc:
-        return (False, str(exc))
-    return (True, None)
-
-
-def activate(
-    persona_id: str,
-    *,
-    root: Path | None = None,
-    reload_url: str | None = None,
-) -> dict[str, Any]:
-    """End-to-end persona switch: write active.txt + nudge hermes.
-
-    This is the function PR-4's ``POST /api/agents/{id}/personas/<pid>/
-    activate`` endpoint will call. The dashboard chat surface (PR-10)
-    can ignore the reload outcome for v0.3 — the operator-visible
-    effect is "next message uses the new prompt", which is achieved by
-    the file write alone (any new session start re-reads active.txt
-    during provision render).
-
-    Returns a status payload the API can return verbatim.
+    This only moves the pointer. Callers that must make the switch live
+    follow it with :func:`hal0.agents.persona_live.refresh_persona_prompt`,
+    which renders the prompt into Hermes's ``config.yaml`` and restarts the
+    consumers; ``POST /api/agents/{id}/personas/<pid>/activate`` and
+    ``hal0 agent personas activate`` both do (#2850).
     """
     set_active(persona_id, root=root)
     persona = load_persona(persona_id, root=root)
-    url = reload_url or DEFAULT_HERMES_RELOAD_URL
-    ok, error = hermes_reload(url=url)
     return {
         "persona_id": persona.id,
         "display_name": persona.display_name,
         "active_path": str(_personas_root(root) / ACTIVE_POINTER),
-        "hot_reload": {"ok": ok, "error": error, "url": url},
     }
 
 

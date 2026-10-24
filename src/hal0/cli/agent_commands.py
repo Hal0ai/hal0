@@ -2472,31 +2472,45 @@ def personas_show(
     except _personas.PersonaError as exc:
         die(f"persona {persona_id!r} is malformed: {exc}")
         return
-    body = tomli_w.dumps(persona.to_dict())
+    data = persona.to_dict()
+    note = ""
+    if persona.id != _personas.STEWARD_PERSONA_ID:
+        # Only the hal0-brain steward enforces these two; Hermes ignores them.
+        data["persona"]["tools"].pop("allowed", None)
+        data["persona"]["model"].pop("preferred_model", None)
+        note = (
+            "\n[dim]tools.allowed and model.preferred_model are steward-only "
+            f"(hal0-brain) and have no effect on {persona.id!r}; hidden.[/dim]"
+        )
+    body = tomli_w.dumps(data)
     console.print(Panel(body, title=f"persona: {persona.id}", border_style="cyan"))
+    if note:
+        console.print(note.strip())
 
 
 @personas_app.command("activate")
 def personas_activate(
     persona_id: str = typer.Argument(..., help="Persona id to make active."),
-    reload_url: str | None = typer.Option(
-        None,
-        "--reload-url",
-        help="Override Hermes JSON-RPC URL for the hot-reload nudge.",
+    no_apply: bool = typer.Option(
+        False,
+        "--no-apply",
+        help="Only move the active pointer; leave Hermes's config.yaml and processes alone.",
     ),
 ) -> None:
-    """Switch the active persona + nudge running Hermes to hot-reload.
+    """Switch the active persona and apply its prompt to Hermes.
 
-    Writes ``active.txt`` atomically; the nudge is best-effort. If
-    Hermes isn't running, the next service start (or next reprovision)
-    picks up the new active persona via the system_prompt prelude
-    render. PR-4 wraps this in
+    Writes ``active.txt`` atomically, renders the persona prompt into
+    Hermes's ``config.yaml`` (``agent.system_prompt``); Hermes re-reads it for new
+    sessions and gateway turns, no restart. The result line says
+    what was and was not applied; an unprivileged caller that cannot write
+    the config is told to run the repair command. Mirrors
     ``POST /api/agents/{id}/personas/{pid}/activate``.
     """
+    from hal0.agents import persona_live
     from hal0.agents import personas as _personas
 
     try:
-        result = _personas.activate(persona_id, reload_url=reload_url)
+        result = _personas.activate(persona_id)
     except FileNotFoundError as exc:
         die(str(exc))
         return
@@ -2508,12 +2522,15 @@ def personas_activate(
         f"([dim]{result['persona_id']}[/dim])\n"
         f"active pointer: {result['active_path']}"
     )
-    hot = result["hot_reload"]
-    if hot["ok"]:
-        panel_body += "\n[dim]Hot-reload nudge: ok[/dim]"
+    if no_apply:
+        panel_body += "\n[dim]Not applied to Hermes (--no-apply).[/dim]"
     else:
-        panel_body += (
-            "\n[yellow]Hot-reload nudge skipped[/yellow] — "
-            f"{hot['error']}. The next Hermes restart will pick up the new persona."
+        refresh = persona_live.refresh_persona_prompt(_personas.PERSONAS_ROOT)
+        good = refresh["status"] in (
+            persona_live.APPLIED,
+            persona_live.UNCHANGED,
+            persona_live.NOT_INSTALLED,
         )
+        colour = "dim" if good else "yellow"
+        panel_body += f"\n[{colour}]{refresh['message']}[/{colour}]"
     console.print(Panel(panel_body, border_style="green"))

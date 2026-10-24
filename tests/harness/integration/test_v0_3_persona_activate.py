@@ -4,12 +4,12 @@ Exercises the persona swap through the real API app:
 
 1. ``GET /api/agents/hermes/personas`` reflects the seeded persona TOMLs.
 2. ``POST /api/agents/hermes/personas/{id}/activate`` writes ``active.txt``
-   and reports whether the hot-reload nudge succeeded (``reloaded``).
+   and reports the Hermes config refresh outcome (``refresh``).
 3. The post-activate persona detail report shows the new ``active`` flag.
 
-The reload nudge's method name and payload are pinned by the unit tests in
+The refresh itself is pinned by ``tests/agents/test_persona_live.py`` and
 ``tests/api/test_agents_personas.py``; no Hermes runs here, so this suite
-pins only that activation persists and answers either way.
+stubs it and pins only that activation persists and reports it.
 """
 
 from __future__ import annotations
@@ -20,8 +20,19 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
+from hal0.agents import persona_live
 from hal0.agents import personas as personas_mod
 from hal0.api.agents import personas as personas_route
+
+
+@pytest.fixture(autouse=True)
+def _stub_refresh(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Never touch a real Hermes config.yaml or unit from this suite."""
+    monkeypatch.setattr(
+        persona_live,
+        "refresh_persona_prompt",
+        lambda _root, **_kw: {"status": "not-installed", "message": "stub"},
+    )
 
 
 @pytest.fixture
@@ -63,7 +74,7 @@ def test_persona_activate_writes_active_txt(
     body = r.json()
     assert body["active"] == "hal0-brain"
     assert body["previous"] == "hermes"
-    assert body["reloaded"] is False  # because we passed reload=false
+    assert body["refresh"] is None  # because we passed reload=false
 
     # On-disk active.txt must reflect the swap.
     active_file = seeded_personas_root / "active.txt"
@@ -71,12 +82,12 @@ def test_persona_activate_writes_active_txt(
     assert active_file.read_text().strip() == "hal0-brain"
 
 
-def test_persona_activate_with_reload_calls_hermes(
+def test_persona_activate_with_reload_reports_refresh(
     harness_client: TestClient,
     seeded_personas_root: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """``reload=true`` (the default) still persists the swap when no hermes answers."""
+    """``reload=true`` (the default) persists the swap and reports the refresh."""
     r = harness_client.post(
         "/api/agents/hermes/personas/hal0-brain/activate",
         json={"reload": True},
@@ -84,9 +95,7 @@ def test_persona_activate_with_reload_calls_hermes(
     assert r.status_code == 200, r.text
     body = r.json()
     assert body["active"] == "hal0-brain"
-    # ``reloaded`` reflects whether the nudge succeeded; the network helper
-    # is pinned by the unit tests, so either outcome is accepted here.
-    assert "reloaded" in body
+    assert body["refresh"]["status"] == "not-installed"
 
 
 def test_persona_activate_unknown_persona_returns_404(

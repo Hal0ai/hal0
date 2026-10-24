@@ -118,6 +118,10 @@ function PersonaEditModal({ open, onClose, personaId }) {
   const pid = personaId || personas.data?.active || null;
   const personaQ = useAgentPersona(AGENT_ID, pid, { enabled: open && !!pid });
   const persona = personaQ.data;
+  // tools_allowed and preferred_model are enforced only for the hal0-brain
+  // steward (brain/chat.py); Hermes ignores them for every other persona, so
+  // the form neither shows nor sends them there.
+  const isSteward = persona?.id === "hal0-brain";
 
   // The form edits exactly the fields PUT /api/agents/{id}/personas/{pid}
   // acts on; every other field of the body is ignored server-side.
@@ -171,7 +175,7 @@ function PersonaEditModal({ open, onClose, personaId }) {
       width={680}
       foot={
         <>
-          <span>Saved to the persona file; Hermes applies prompt changes on its next reprovision.</span>
+          <span>Saved to the persona file. Editing the active persona also updates Hermes's config; new chats use it.</span>
           <span style={{display: "inline-flex", gap: 8}}>
             <button className="btn ghost sm" onClick={onClose} disabled={personaUpdate.isPending}>Cancel</button>
             <button
@@ -179,16 +183,23 @@ function PersonaEditModal({ open, onClose, personaId }) {
               disabled={personaUpdate.isPending || !persona || !displayName.trim()}
               onClick={async () => {
                 try {
-                  await personaUpdate.mutateAsync({
+                  const saved = await personaUpdate.mutateAsync({
                     pid,
                     body: {
                       display_name: displayName.trim(),
                       system_prompt: systemPrompt,
-                      tools_allowed: toolsAllowed(),
-                      preferred_model: slot,
+                      ...(isSteward ? { tools_allowed: toolsAllowed(), preferred_model: slot } : {}),
                     },
                   });
-                  window.__hal0Toast && window.__hal0Toast(`Persona saved`, "ok");
+                  // PUT answers `refresh` when the active persona's prompt
+                  // was pushed to Hermes; a failed or half-applied push says
+                  // so instead of reporting a plain save.
+                  const refresh = saved && saved.refresh;
+                  const live = refresh && (refresh.status === "applied" || refresh.status === "unchanged");
+                  window.__hal0Toast && window.__hal0Toast(
+                    refresh ? `Persona saved — ${refresh.message}` : `Persona saved`,
+                    !refresh || live ? "ok" : "err"
+                  );
                   onClose();
                 } catch (e) {
                   window.__hal0Toast && window.__hal0Toast(
@@ -216,7 +227,7 @@ function PersonaEditModal({ open, onClose, personaId }) {
             </div>
           </div>
 
-          <div className="form-row">
+          {isSteward && (<div className="form-row">
             <div className="form-lbl">
               <span>Routes to slot</span>
               <FieldInfoIcon description="only llm-type slots are eligible" />
@@ -236,7 +247,7 @@ function PersonaEditModal({ open, onClose, personaId }) {
                 )}
               </select>
             </div>
-          </div>
+          </div>)}
 
           <div className="form-row">
             <div className="form-lbl">
@@ -255,6 +266,7 @@ function PersonaEditModal({ open, onClose, personaId }) {
             </div>
           </div>
 
+          {isSteward ? (<>
           <div className="form-section">Tool set</div>
           <div className="form-row">
             <div className="form-lbl">
@@ -271,9 +283,12 @@ function PersonaEditModal({ open, onClose, personaId }) {
                 placeholder="*"
                 style={{resize: "vertical", minHeight: 72}}
               />
-              <div className="hint">One pattern per line, matched against MCP tool names; <span className="mono">*</span> allows every tool. Enforced by the hal0-brain steward; Hermes applies changes on its next reprovision.</div>
+              <div className="hint">One pattern per line, matched against MCP tool names; <span className="mono">*</span> allows every tool. Steward-only: enforced for hal0-brain.</div>
             </div>
           </div>
+          </>) : (
+            <div className="hint">Tool patterns and the model route are steward-only: only the hal0-brain persona enforces them, so they are hidden for this one.</div>
+          )}
         </>
       )}
     </Modal>

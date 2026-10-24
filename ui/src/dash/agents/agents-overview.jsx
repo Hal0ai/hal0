@@ -449,8 +449,14 @@ function AgentsOverview() {
             .mutateAsync(pid)
             // Waits for the refetch, so the chip and the select name the new
             // persona before the busy state clears.
-            .then(() => qc.invalidateQueries({ queryKey: ["agents"] }))
-            .then(() => _toast("Persona activated", "ok"))
+            .then((res) => qc.invalidateQueries({ queryKey: ["agents"] }).then(() => res))
+            .then((res) => {
+              // The API answers `refresh` with whether the prompt reached
+              // Hermes; a failed write must not read as a plain success.
+              const refresh = res && res.refresh;
+              const live = !refresh || refresh.status === "applied" || refresh.status === "unchanged";
+              _toast(refresh ? `Persona activated — ${refresh.message}` : "Persona activated", live ? "ok" : "err");
+            })
             .catch((err) => _toast(`Persona activation failed: ${_errText(err)}`, "err"))
       : null,
     reconcile: reconcile
