@@ -4166,12 +4166,19 @@ else
         # Off switch (#2807, using the capture above the provisioning block):
         #   - masked: the unit file is a /dev/null symlink. Never write through
         #     a mask, so nothing is written at all.
-        #   - disabled (or runtime-masked): refresh the unit file and leave it
-        #     off (the disable below).
-        if [[ "${_gateway_state}" == "masked" ]]; then
-            # Nothing is written through the mask, but a suffixed gateway still
-            # running beside it is moved off: `migrate` keeps the mask and
-            # stops and removes the suffixed unit, so the mask means off (#2950).
+        #   - masked-runtime: a /run mask, which systemd only reports while
+        #     there is no /etc file. Nothing is written either: an /etc file
+        #     would shadow the mask (#3024).
+        #   - disabled: refresh the unit file and leave it off (the disable
+        #     below).
+        if [[ "${_gateway_state}" == masked* ]]; then
+            # Nothing is written through a persistent mask (the /etc unit path
+            # is a /dev/null symlink), nor next to a runtime one: a /run mask
+            # only holds while there is no /etc file, so writing one would
+            # shadow it and turn the gateway back on (#3024). A suffixed
+            # gateway still running beside either mask is moved off: `migrate`
+            # keeps the mask and stops and removes the suffixed unit, so the
+            # mask means off (#2950).
             _gw_rc=0
             "${VENV_DIR}/bin/python" -m hal0.agents.hermes_gateway_regen migrate || _gw_rc=$?
             gateway_install_note "${_gw_rc}" \
@@ -4195,7 +4202,7 @@ else
             fi
         fi
         if unit_state_off "${_gateway_state}"; then
-            if [[ "${_gateway_state}" != "masked" ]]; then
+            if [[ "${_gateway_state}" != masked* ]]; then
                 systemctl daemon-reload
                 # Belt and braces for a generator that enables or starts it
                 # anyway. A gateway that was disabled but running (started by

@@ -137,11 +137,14 @@ def test_masked_never_writes_the_unit(monkeypatch, tmp_path, capsys, state, hint
     assert hint in out
 
 
-def test_masked_runtime_refreshes_unit_without_enabling(monkeypatch, tmp_path, capsys) -> None:
+def test_masked_runtime_never_writes_the_unit(monkeypatch, tmp_path, capsys) -> None:
+    """systemd reports masked-runtime only while there is no /etc file; writing
+    one would shadow the /run mask and turn the gateway back on (#3024)."""
     calls = _setup(monkeypatch, tmp_path, state="masked-runtime")
     ac._install_hermes_gateway()
-    assert _installs(calls) == [INSTALL] and _no_generator(calls)
+    assert _installs(calls) == [] and _no_generator(calls)
     assert _enables(calls) == []
+    assert not (tmp_path / UNIT).exists()
     out = _out(capsys)
     assert "is masked-runtime; left as is" in out
     assert "systemctl unmask --runtime hermes-gateway.service && systemctl enable --now" in out
@@ -276,7 +279,9 @@ def test_a_disabled_suffixed_unit_is_read_as_the_operators_off_switch(
     (tmp_path / HASHED_UNIT).write_text(fixture.read_text())
     ac._install_hermes_gateway()
     probed = [c for c in calls if c[:2] == ["systemctl", "is-enabled"]]
-    assert probed and probed[0][-1] == HASHED_UNIT
+    # The canonical unit is probed for a runtime mask first (#3024); the state
+    # read is the suffixed unit's.
+    assert probed and probed[-1][-1] == HASHED_UNIT
     assert _enables(calls) == []
 
 
@@ -445,3 +450,32 @@ def test_a_cleanup_failure_still_reports_a_failed_linger(monkeypatch, tmp_path, 
     out = _out(capsys)
     assert "could not be removed" in out
     assert "sudo loginctl enable-linger hal0" in out
+
+
+def test_a_runtime_mask_with_no_canonical_file_keeps_a_suffixed_gateway_off(
+    monkeypatch, tmp_path, capsys
+) -> None:
+    """#3024 (CT150 smoke): no /etc hermes-gateway.service, a /run mask
+    (is-enabled = masked-runtime) and an enabled, running suffixed unit. The
+    command must read the mask, move the suffixed gateway off and write nothing."""
+    from hal0.agents import hermes_gateway_regen as regen
+
+    calls = _setup(monkeypatch, tmp_path, state="disabled")
+    (tmp_path / regen.HASHED_UNIT).write_text(_HAL0_SUFFIXED)
+    _per_unit(
+        monkeypatch,
+        calls,
+        {regen.HASHED_UNIT: ("enabled", True), UNIT: ("masked-runtime", False)},
+    )
+    moved: list[Any] = []
+
+    def _fake_migrate(**kw):  # type: ignore[no-untyped-def]
+        moved.append(kw["unit_path"])
+        return regen.RegenResult("migrated", f"{UNIT}: {UNIT} is masked; left off")
+
+    monkeypatch.setattr(regen, "migrate_hashed_units", _fake_migrate)
+    ac._install_hermes_gateway()
+    assert moved == [tmp_path / UNIT]
+    assert _installs(calls) == [] and _enables(calls) == []
+    assert not (tmp_path / UNIT).exists()
+    assert "is masked-runtime; left as is" in _out(capsys)

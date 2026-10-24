@@ -514,3 +514,25 @@ def test_a_failed_install_still_warns_not_installed(tmp_path: Path, monkeypatch)
     res = box.run(HERMES_BLOCK)
     assert res.returncode == 0, res.stderr
     assert "hermes-gateway unit not installed" in res.stdout + res.stderr
+
+
+# ── #3024: a runtime mask with no /etc canonical file ────────────────────────
+
+
+def test_a_runtime_mask_runs_the_move_and_writes_no_unit(tmp_path: Path) -> None:
+    """#3024: is-enabled reports masked-runtime only while there is no /etc file.
+    The installer runs the mask-safe `migrate`, never `install` (whose /etc file
+    would shadow the /run mask), and enables nothing."""
+    box = Box(tmp_path)
+    box.provisioned()
+    box.set_state("hermes-gateway.service", "masked-runtime")
+    res = box.run(HERMES_BLOCK)
+    assert res.returncode == 0, res.stderr
+    log = box.log()
+    assert "python -m hal0.agents.hermes_gateway_regen migrate" in log
+    assert "python -m hal0.agents.hermes_gateway_regen install" not in log
+    assert not (box.unit_dir / "hermes-gateway.service").exists()
+    assert not [
+        c for c in log if "hermes-gateway" in c and c.startswith(("enable", "disable", "start"))
+    ]
+    assert "hermes-gateway.service is masked-runtime; left as is" in res.stdout
