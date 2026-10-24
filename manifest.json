@@ -20,8 +20,8 @@
     },
     "flm": {
       "image": "ghcr.io/hal0ai/hal0-runner-flm",
-      "tag": "0.9.44-re14329d",
-      "digest": "sha256:ba7f7edafc07ae2bb96eb94b519b8ab46a8564cdfb9d77372bef611811aa8643",
+      "tag": "1.0.10-r1c3f49e",
+      "digest": "sha256:e18b4b1111aa217cca68a91302d81342f5d89e17e49b0714feeec8e1cac7fa56",
       "lanes_gated": ["npu"]
     },
     "kokoro": {
