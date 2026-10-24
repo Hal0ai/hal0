@@ -27,7 +27,7 @@ import re
 import stat
 import tempfile
 import threading
-from collections.abc import Iterator
+from collections.abc import Iterator, MutableMapping
 from pathlib import Path
 
 from hal0.config import paths
@@ -304,34 +304,33 @@ def api_env_lock(api_env: Path) -> Iterator[None]:
     sidecar is the lock, not ``api.env`` itself, because every write replaces
     ``api.env``'s inode. If the sidecar cannot be opened the thread lock still
     holds.
+
+    The sidecar lives in ``/etc/hal0``, which the ``hal0`` account can write,
+    while ``hal0 auth reset-key`` takes this lock as root. It is therefore
+    opened through :func:`hal0.config.locking._open_lock_file`: ``O_NOFOLLOW``,
+    an ``S_ISREG`` check on the descriptor, and an ownership fix-up only on the
+    file this call created. A planted symlink or FIFO is refused (and locking
+    degrades to the thread lock) rather than followed and chowned.
     """
+    from hal0.config.locking import _open_lock_file
+
     with _API_ENV_THREAD_LOCK:
-        fd: int | None = None
+        fh = None
         try:
             api_env.parent.mkdir(parents=True, exist_ok=True)
-            fd = os.open(
-                api_env.parent / f".{api_env.name}.lock",
-                os.O_RDWR | os.O_CREAT | getattr(os, "O_CLOEXEC", 0),
-                0o600,
-            )
-            if os.geteuid() == 0:
-                # A root-created sidecar must stay openable by the service user,
-                # or locking silently degrades to the thread lock for hal0-api.
-                with contextlib.suppress(OSError):
-                    st = api_env.stat()
-                    os.fchown(fd, st.st_uid, st.st_gid)
-            fcntl.flock(fd, fcntl.LOCK_EX)
+            fh = _open_lock_file(api_env.parent / f".{api_env.name}.lock", api_env)
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
         except OSError:
-            if fd is not None:
-                os.close(fd)
-            fd = None
+            if fh is not None:
+                fh.close()
+            fh = None
         try:
             yield
         finally:
-            if fd is not None:
+            if fh is not None:
                 with contextlib.suppress(OSError):
-                    fcntl.flock(fd, fcntl.LOCK_UN)
-                os.close(fd)
+                    fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+                fh.close()
 
 
 def _atomic_write(api_env: Path, text: str) -> None:
@@ -364,7 +363,13 @@ def _atomic_write(api_env: Path, text: str) -> None:
         raise
 
 
-def upsert_env_value(api_env: Path, key: str, value: str) -> None:
+def upsert_env_value(
+    api_env: Path,
+    key: str,
+    value: str,
+    *,
+    environ: MutableMapping[str, str] | None = None,
+) -> None:
     """Upsert ``key="<escaped-value>"`` in ``api_env`` atomically.
 
     If a line for ``key`` exists (commented or not) it is replaced in
@@ -388,6 +393,10 @@ def upsert_env_value(api_env: Path, key: str, value: str) -> None:
     line stays allowed, so an existing one can be removed. A TLS trust
     variable (:func:`tls_trust_violation`) is refused unless its value is a
     root-owned path hal0 cannot write (#2941).
+
+    ``environ`` (normally ``os.environ``) is updated inside the same locked
+    section as the write, so a concurrent :func:`delete_env_value` cannot leave
+    the live process env and the persisted file disagreeing.
     """
     if not _ENV_KEY_RE.match(key):
         raise ValueError("env key must be an env-var name (letters, digits, underscores)")
@@ -421,28 +430,42 @@ def upsert_env_value(api_env: Path, key: str, value: str) -> None:
             rewritten.append(new_line)
 
         _atomic_write(api_env, "".join(rewritten))
+        if environ is not None:
+            environ[key] = value
 
 
-def delete_env_value(api_env: Path, key: str) -> bool:
+def delete_env_value(
+    api_env: Path,
+    key: str,
+    *,
+    environ: MutableMapping[str, str] | None = None,
+) -> bool:
     """Remove every line setting ``key`` from ``api_env`` atomically.
 
     Returns ``True`` if at least one line was removed, ``False`` if the
     key wasn't present (so the caller can decide whether that's a 404).
     Missing file → ``False`` (nothing to delete). Raises :class:`OSError`
     only on a genuine write failure.
+
+    ``environ`` (normally ``os.environ``) loses ``key`` inside the same locked
+    section, whether or not the file held it, unless the write fails.
     """
     with api_env_lock(api_env):
         try:
             existing = api_env.read_text(encoding="utf-8")
         except FileNotFoundError:
-            return False
+            existing = None
 
-        lines = existing.splitlines(keepends=True)
-        kept = [line for line in lines if not _line_targets_key(line, key)]
-        if len(kept) == len(lines):
-            return False
-        _atomic_write(api_env, "".join(kept))
-        return True
+        removed = False
+        if existing is not None:
+            lines = existing.splitlines(keepends=True)
+            kept = [line for line in lines if not _line_targets_key(line, key)]
+            if len(kept) != len(lines):
+                _atomic_write(api_env, "".join(kept))
+                removed = True
+        if environ is not None:
+            environ.pop(key, None)
+        return removed
 
 
 def list_env_keys(api_env: Path) -> list[str]:
