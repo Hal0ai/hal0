@@ -203,6 +203,25 @@ def test_other_capabilities_keep_their_row_shape(monkeypatch: pytest.MonkeyPatch
         assert not {"display_name", "license", "recommended"} & set(row)
 
 
+def test_models_for_capability_survives_an_unreadable_models_tree(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One image tree the service user cannot traverse must not fail the whole capabilities build."""
+    _host(monkeypatch)
+
+    def denied(*_a: Any, **_k: Any) -> Any:
+        raise PermissionError(13, "Permission denied", "/srv/models/checkpoints")
+
+    monkeypatch.setattr("hal0.comfyui.picker.install_state", denied)
+    monkeypatch.setattr("hal0.comfyui.picker.inventory.list_files", denied)
+
+    rows = catalog.models_for_capability("image", registry=None)
+
+    renderable = [m.id for m in CATALOG.values() if m.api_renderable]
+    assert [r["id"] for r in rows] == renderable
+    assert not any(r["backends"][0]["downloaded"] for r in rows)
+
+
 def test_image_picker_empty_without_rocm_lane(monkeypatch: pytest.MonkeyPatch) -> None:
     _host(monkeypatch, rocm_lane=False)
     _checkpoint("mine.safetensors")

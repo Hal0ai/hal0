@@ -13,13 +13,16 @@ model and backend id; which backends the host can serve is the caller's decision
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from hal0.comfyui import inventory, paths
-from hal0.comfyui.catalog import CATALOG, install_state, recommended_model_id
+from hal0.comfyui.catalog import CATALOG, ImageModel, install_state, recommended_model_id
 from hal0.config.loader import load_hardware_info
 from hal0.config.schema import HardwareInfo
 from hal0.install.agent_model import pool_gb
+
+log = logging.getLogger(__name__)
 
 _PROVIDER = "comfyui"
 _CAPABILITY = "image"
@@ -53,14 +56,30 @@ def _models() -> list[dict[str, Any]]:
     The API-renderable catalog models in catalog order, then the user checkpoints in scan
     order under the ``api_id`` the inventory gave them. The id is never rebuilt from a file
     name: ``a.safetensors`` and ``sub/a.safetensors`` are different models.
+
+    Never raises for a models tree the service user cannot read: ``GET /api/capabilities``
+    builds every capability's picker in one synchronous pass, so a raise here would be a 500
+    for the voice and embed selections too. A catalog model whose files cannot be checked
+    reads as not downloaded (it stays installable, and the install route names the fix), the
+    user-checkpoint rows are dropped when the scan fails, and one warning per call names the
+    path the OS refused.
     """
     root = paths.models_root()
     recommended = recommended_id()
+    refused: list[OSError] = []
+
+    def downloaded(model: ImageModel) -> bool:
+        try:
+            return install_state(model, root).state == "complete"
+        except OSError as exc:
+            refused.append(exc)
+            return False
+
     models: list[dict[str, Any]] = [
         {
             "id": m.id,
             "size_gb": m.approx_gb,
-            "downloaded": install_state(m, root).state == "complete",
+            "downloaded": downloaded(m),
             "pullable": True,
             "display_name": m.label,
             "license": m.license,
@@ -69,6 +88,11 @@ def _models() -> list[dict[str, Any]]:
         for m in CATALOG.values()
         if m.api_renderable
     ]
+    try:
+        user_files = inventory.list_files()
+    except OSError as exc:
+        refused.append(exc)
+        user_files = []
     models.extend(
         {
             "id": f["api_id"],
@@ -79,9 +103,16 @@ def _models() -> list[dict[str, Any]]:
             "license": "",
             "recommended": False,
         }
-        for f in inventory.list_files()
+        for f in user_files
         if "api_id" in f
     )
+    if refused:
+        first = refused[0]
+        log.warning(
+            "comfyui.picker_models_tree_unreadable path=%s error=%s",
+            first.filename or root,
+            first.strerror or first,
+        )
     return models
 
 
