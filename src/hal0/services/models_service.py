@@ -86,6 +86,21 @@ FLM_DISPATCH_TYPE: dict[str, str] = {
     "image": "image",
 }
 
+
+def flm_dispatch_type(capabilities: Any) -> str:
+    """Dispatcher-vocab slot type for an FLM model, chat first.
+
+    FLM's multimodal chat tags also advertise ``stt`` (``gemma4-it:e4b`` is
+    chat + asr). :func:`dispatch_type` ranks stt above chat, which is right
+    for a GGUF registry row but files an FLM chat model under transcription
+    and drops it out of the NPU chat picker. An FLM tag that can chat is a
+    chat model; only a tag without chat takes its first capability.
+    """
+    caps = [str(c) for c in capabilities] if isinstance(capabilities, (list, tuple)) else []
+    primary = "chat" if "chat" in caps else (caps[0] if caps else "chat")
+    return FLM_DISPATCH_TYPE.get(primary, "llm")
+
+
 # ``classify()`` returns a coarse MODALITY bucket (chat/embed/rerank/stt/tts/
 # img — the ``_TYPE_PRIORITY`` vocab), but every ``type`` we emit on an
 # /api/models row must speak the DISPATCHER vocabulary (llm/embedding/…), the
@@ -1749,9 +1764,9 @@ async def list_all(
     # the NPU slot pickers can select any model on disk, not just the one a slot
     # already defaults to (the composite ``hal0`` upstream advertises only slot
     # defaults, so without this only the configured npu model appeared). The id
-    # uses the ``<tag>-FLM`` convention so the dashboard maps it to the
-    # npu device; ``capabilities`` + an explicit ``device`` let the slot-swap
-    # popover derive type/device without requiring a registry entry.
+    # is FLM's native tag; ``backend``/``device`` map it to the npu device, and
+    # ``capabilities`` + an explicit ``device`` let the slot-swap popover
+    # derive type/device without requiring a registry entry.
     try:
         from hal0.providers.flm import flm_served_models_async
 
@@ -1774,7 +1789,12 @@ async def list_all(
                 probe_caps = list(fm.get("capabilities") or [])
                 if row is not None and probe_caps and row.get("capabilities") != probe_caps:
                     row["capabilities"] = probe_caps
-                    row["type"] = dispatch_type(row.get("id", ""), capabilities=probe_caps)
+                # Type the surviving row chat-first, the same rule the
+                # probe-only rows below follow: a multimodal FLM chat tag
+                # (chat + stt) typed "transcription" vanished from the NPU
+                # chat picker, which only lists llm rows.
+                if row is not None:
+                    row["type"] = flm_dispatch_type(row.get("capabilities"))
                 # #1656: this dedupe skip fires BEFORE the legacy ``<tag>-FLM``
                 # id below is ever computed, so a slot whose persisted model
                 # default is still that pre-#1629 generated id (created
@@ -1790,8 +1810,14 @@ async def list_all(
                     if legacy_id not in aliases:
                         aliases.append(legacy_id)
                 continue
-            mid = fm["tag"].replace(":", "-") + "-FLM"
-            if mid in seen:
+            # The row id is FLM's native colon tag, the same id a registry
+            # row for a pulled FLM model carries, so the picker lists one
+            # naming scheme. The pre-native ``<tag>-FLM`` id stays as an
+            # alias for slots still bound to it (slotModelRow falls back to
+            # ``aliases``); the slot-apply gate accepts either form.
+            mid = fm["tag"]
+            legacy_id = mid.replace(":", "-") + "-FLM"
+            if mid in seen or legacy_id in seen:
                 continue
             seen.add(mid)
             caps = list(fm.get("capabilities") or [])
@@ -1818,10 +1844,15 @@ async def list_all(
                     # are installed host-side — explicitly local (WS-13).
                     "origin": "local",
                     "ns": "pulled",
-                    "type": FLM_DISPATCH_TYPE.get(primary, "llm"),
+                    "type": flm_dispatch_type(caps),
                     "capability": primary,
                     "capabilities": caps,
                     "device": "npu",
+                    # The engine identity registry rows get from model_to_dict:
+                    # the picker's runtime chip and isFlmModel read it.
+                    "provider_effective": "flm",
+                    "runs_on": ["npu"],
+                    "aliases": [legacy_id],
                 }
             )
     except Exception:
