@@ -266,7 +266,7 @@ class TestWorkflowLaunch:
         wf_file = wf_dir / "test_wf.json"
         wf_file.write_text(json.dumps(_SAMPLE_WORKFLOW))
 
-        monkeypatch.setenv("COMFYUI_WORKFLOWS_DIR", str(wf_dir))
+        monkeypatch.setenv("HAL0_COMFYUI_DATA_ROOT", str(tmp_path / "comfyui"))
 
         prompt_id = "abc-123"
 
@@ -292,7 +292,7 @@ class TestWorkflowLaunch:
     ):
         wf_dir = tmp_path / "comfyui" / "workflows"
         wf_dir.mkdir(parents=True)
-        monkeypatch.setenv("COMFYUI_WORKFLOWS_DIR", str(wf_dir))
+        monkeypatch.setenv("HAL0_COMFYUI_DATA_ROOT", str(tmp_path / "comfyui"))
 
         r = client.post("/api/comfyui/workflows/nonexistent/launch")
 
@@ -302,9 +302,9 @@ class TestWorkflowLaunch:
         assert "nonexistent" not in body["error"]["message"]
 
     def test_launch_rejects_invalid_workflow_name_before_filesystem_lookup(
-        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+        self, client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):
-        monkeypatch.setenv("COMFYUI_WORKFLOWS_DIR", "/tmp/hal0-workflows")
+        monkeypatch.setenv("HAL0_COMFYUI_DATA_ROOT", str(tmp_path / "comfyui"))
 
         with patch("hal0.api.routes.comfyui.os.path.isfile") as isfile:
             r = client.post("/api/comfyui/workflows/..secret/launch")
@@ -314,9 +314,9 @@ class TestWorkflowLaunch:
         isfile.assert_not_called()
 
     def test_launch_rejects_slash_workflow_name_without_filesystem_lookup(
-        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+        self, client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):
-        monkeypatch.setenv("COMFYUI_WORKFLOWS_DIR", "/tmp/hal0-workflows")
+        monkeypatch.setenv("HAL0_COMFYUI_DATA_ROOT", str(tmp_path / "comfyui"))
 
         with patch("hal0.api.routes.comfyui.os.path.isfile") as isfile:
             r = client.post("/api/comfyui/workflows/bad%2Fname/launch")
@@ -330,7 +330,7 @@ class TestWorkflowLaunch:
         wf_dir = tmp_path / "comfyui" / "workflows"
         wf_dir.mkdir(parents=True)
         (wf_dir / "broken.json").write_text("{not json")
-        monkeypatch.setenv("COMFYUI_WORKFLOWS_DIR", str(wf_dir))
+        monkeypatch.setenv("HAL0_COMFYUI_DATA_ROOT", str(tmp_path / "comfyui"))
 
         r = client.post("/api/comfyui/workflows/broken/launch")
 
@@ -353,13 +353,8 @@ class TestWorkflowLaunch:
         wf_file = fallback / "fb_wf.json"
         wf_file.write_text(json.dumps(_SAMPLE_WORKFLOW))
 
-        # Point primary to the dir that does NOT have the file
-        monkeypatch.setenv("COMFYUI_WORKFLOWS_DIR", str(primary))
-        # Fallback is derived relative to the workflows dir's parent's parent
-        # The implementation should infer it from COMFYUI_MODELS_DIR base path
-        monkeypatch.setenv("COMFYUI_MODELS_DIR", str(tmp_path / "comfyui" / "models"))
-        # Override to point at the right base
-        monkeypatch.setenv("COMFYUI_DATA_DIR", str(tmp_path / "comfyui"))
+        # The primary dir has no match; the fallback is under the same data root.
+        monkeypatch.setenv("HAL0_COMFYUI_DATA_ROOT", str(tmp_path / "comfyui"))
 
         async def fake_post(url, **kwargs):
             resp = MagicMock()
@@ -387,11 +382,9 @@ class TestWorkflowList:
         (wf_dir / "alpha.json").write_text("{}")
         (wf_dir / "beta.json").write_text("{}")
         (wf_dir / "notes.txt").write_text("ignore me")  # non-json skipped
-        monkeypatch.setenv("COMFYUI_WORKFLOWS_DIR", str(wf_dir))
-        # Isolate the user/default fallback too — otherwise it defaults to the
-        # real /mnt/ai-models/comfyui bind mount on hosts that have one, and
-        # real workflow files leak into the result set.
-        monkeypatch.setenv("COMFYUI_DATA_DIR", str(tmp_path / "comfyui"))
+        # One data root drives both the primary dir and the user/default
+        # fallback, so real workflow files on the host cannot leak in.
+        monkeypatch.setenv("HAL0_COMFYUI_DATA_ROOT", str(tmp_path / "comfyui"))
 
         r = client.get("/api/comfyui/workflows")
         assert r.status_code == 200
@@ -408,8 +401,7 @@ class TestWorkflowList:
         fallback.mkdir(parents=True)
         (fallback / "shared.json").write_text("{}")
         (fallback / "extra.json").write_text("{}")
-        monkeypatch.setenv("COMFYUI_WORKFLOWS_DIR", str(primary))
-        monkeypatch.setenv("COMFYUI_DATA_DIR", str(tmp_path / "comfyui"))
+        monkeypatch.setenv("HAL0_COMFYUI_DATA_ROOT", str(tmp_path / "comfyui"))
 
         r = client.get("/api/comfyui/workflows")
         assert r.status_code == 200
@@ -420,8 +412,7 @@ class TestWorkflowList:
     def test_missing_dir_returns_empty_list_not_error(
         self, client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):
-        monkeypatch.setenv("COMFYUI_WORKFLOWS_DIR", str(tmp_path / "does-not-exist"))
-        monkeypatch.setenv("COMFYUI_DATA_DIR", str(tmp_path / "also-gone"))
+        monkeypatch.setenv("HAL0_COMFYUI_DATA_ROOT", str(tmp_path / "does-not-exist"))
         r = client.get("/api/comfyui/workflows")
         assert r.status_code == 200
         assert r.json() == {"workflows": []}
@@ -434,10 +425,7 @@ class TestWorkflowList:
         (wf_dir / "good.json").write_text("{}")
         # A file whose stem carries a path-ish char must not surface.
         (wf_dir / "a b.json").write_text("{}")  # space fails the name regex
-        monkeypatch.setenv("COMFYUI_WORKFLOWS_DIR", str(wf_dir))
-        # Isolate the user/default fallback too — see comment in
-        # test_lists_json_files_from_primary_dir above.
-        monkeypatch.setenv("COMFYUI_DATA_DIR", str(tmp_path / "comfyui"))
+        monkeypatch.setenv("HAL0_COMFYUI_DATA_ROOT", str(tmp_path / "comfyui"))
 
         r = client.get("/api/comfyui/workflows")
         names = {w["name"] for w in r.json()["workflows"]}
