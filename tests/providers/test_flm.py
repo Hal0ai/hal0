@@ -663,6 +663,44 @@ def test_pull_command_has_no_host_fallback() -> None:
         flm.flm_pull_command("gemma4-it:e4b")
 
 
+def test_pull_command_creates_a_missing_store(tmp_path, monkeypatch) -> None:
+    """A store that does not exist yet is created before the seam checks it."""
+    import hal0.providers.flm as flm
+    from hal0.providers import flm_cli
+
+    store = tmp_path / "fresh" / "flm" / "models"
+    monkeypatch.setenv("HAL0_FLM_MODELS_DIR", str(store))
+    with patch.object(flm_cli, "_launcher", lambda: ["sudo", "-n", flm_cli.SEAM_BIN]):
+        _argv, got = flm.flm_pull_command("qwen3:0.6b")
+    assert got == str(store)
+    assert store.is_dir()
+
+
+def test_pull_command_names_the_fix_when_the_store_cannot_be_made(tmp_path, monkeypatch) -> None:
+    import hal0.providers.flm as flm
+    from hal0.providers import flm_cli
+
+    store = tmp_path / "nope" / "models"
+    monkeypatch.setenv("HAL0_FLM_MODELS_DIR", str(store))
+    monkeypatch.setattr(flm, "_ensure_flm_models_dir", lambda path: None)
+    with (
+        patch.object(flm_cli, "_launcher", lambda: ["sudo", "-n", flm_cli.SEAM_BIN]),
+        pytest.raises(flm.FLMStoreLinkError, match="install -d"),
+    ):
+        flm.flm_pull_command("qwen3:0.6b")
+
+
+def test_pull_stop_command_goes_through_the_seam() -> None:
+    import hal0.providers.flm as flm
+    from hal0.providers import flm_cli
+
+    launcher = ["sudo", "-n", flm_cli.SEAM_BIN]
+    with patch.object(flm_cli, "_launcher", lambda: launcher):
+        assert flm.flm_pull_stop_command("qwen3:0.6b") == [*launcher, "stop-pull", "qwen3:0.6b"]
+    with patch.object(flm_cli, "_launcher", lambda: None):
+        assert flm.flm_pull_stop_command("qwen3:0.6b") is None
+
+
 def test_spawn_kwargs_sets_home_and_skips_user_when_not_root() -> None:
     """As a non-root test runner, HOME is set but user= is omitted (would EPERM)."""
     import hal0.providers.flm as flm

@@ -10,12 +10,17 @@
 #   exec-list <token>               flm list -j in the running hal0-slot-<token>
 #   run-list <image> <store>        flm list -j in a one-shot container
 #   run-pull <image> <store> <tag>  flm pull <tag> in a one-shot container
+#   stop-pull <tag>                 remove that tag's pull container, if any
 #   check-tag <tag>                 side-effect-free validator probe
 #
 # Every podman subcommand, flag and in-container argv word is a literal in the
 # wrapper; each operand is validated ROOT-side before podman is invoked. The
-# one-shot containers get no devices, capabilities or security options, and
-# `--pull=never` means nothing is pulled implicitly.
+# one-shot containers run flm only (pinned entrypoint), as the hal0 account's
+# own uid, gid and groups (resolved root-side), with no devices,
+# --cap-drop=all and --security-opt=no-new-privileges, and `--pull=never`
+# means nothing is pulled implicitly. They can write only what the hal0
+# account can already write; see the wrapper's HONEST BOUNDARY note for what
+# a caller-chosen store mount does and does not add.
 #
 # Install (as root):
 #   install -m 0755 -o root -g root hal0-flmctl /usr/lib/hal0/bin/hal0-flmctl

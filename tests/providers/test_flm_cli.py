@@ -231,3 +231,11 @@ def test_flm_pull_invocation_returns_the_target_store(monkeypatch) -> None:
     inv, store = flm_cli.flm_pull_invocation("qwen3:0.6b", target=TARGET)
     assert store == TARGET.store
     assert inv.argv[-1] == "qwen3:0.6b"
+
+
+def test_stop_pull_needs_a_route_and_a_valid_tag() -> None:
+    launcher = ["sudo", "-n", flm_cli.SEAM_BIN]
+    inv = flm_cli.stop_pull_invocation("qwen3:0.6b", launcher=launcher)
+    assert inv is not None and inv.argv == [*launcher, "stop-pull", "qwen3:0.6b"]
+    assert flm_cli.stop_pull_invocation("qwen3:0.6b", launcher=None) is None
+    assert flm_cli.stop_pull_invocation("-rm:x", launcher=launcher) is None

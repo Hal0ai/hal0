@@ -64,8 +64,10 @@ _NATIVE_FLM_ROOT = "/opt/hal0/flm-ubuntu"
 _CONTAINER_FLM_BIN = f"{_CONTAINER_FLM_ROOT}/bin/flm"
 # Where FLM reads its model cache inside the image: the image runs as the
 # non-root ``hal0`` user (uid 1000, HOME=/var/lib/hal0) and FLM hardcodes
-# ~/.config/flm/models. The serving slot and the one-shot ``flm pull`` /
-# ``flm list`` containers (hal0-flmctl, #2993) all mount the store here.
+# ~/.config/flm/models. The serving slot mounts the store here. The one-shot
+# ``flm pull`` / ``flm list`` containers (hal0-flmctl, #2993) run as the hal0
+# account's uid, which cannot enter this 0700 HOME, so they get a tmpfs HOME
+# and mount the store at the same ``.config/flm/models`` path under it.
 _CONTAINER_FLM_MODELS = "/var/lib/hal0/.config/flm/models"
 # Container env for every FLM container: the serving slot and the one-shot
 # CLI containers (installer/wrappers/hal0-flmctl spells the same two values).
@@ -176,6 +178,25 @@ def _ensure_flm_models_dir(path: str) -> None:
         pass
 
 
+def require_flm_store(store: str) -> None:
+    """Create the FLM store if it is missing; raise if it still is not a directory.
+
+    Run before anything that mounts or writes the store (a pull, the host-cache
+    link), so a store that does not exist yet is created with the shape
+    :func:`_ensure_flm_models_dir` gives it rather than failing later with a
+    less helpful error. Raises :class:`FLMStoreLinkError` naming the command
+    that creates it as root.
+    """
+    _ensure_flm_models_dir(store)
+    if not os.path.isdir(store):
+        raise FLMStoreLinkError(
+            f"FLM store {store} does not exist and this user cannot create it. "
+            f"Create it as root (install -d -o {_FLM_CONTAINER_UID} -g {_HOST_FLM_USER} "
+            f"-m 2775 {store}) or point [models].flm_store at a writable path.",
+            details={"store": store},
+        )
+
+
 def _reconcile_flm_store_link() -> str:
     """Reconcile flm's hardcoded host cache with the resolved store; return the store.
 
@@ -233,14 +254,7 @@ def _reconcile_flm_store_link() -> str:
         return store
 
     try:
-        _ensure_flm_models_dir(store)
-        if not store_p.is_dir():
-            raise FLMStoreLinkError(
-                f"FLM store {store} does not exist and this user cannot create it. "
-                f"Create it as root (install -d -o {_FLM_CONTAINER_UID} -g {_HOST_FLM_USER} "
-                f"-m 2775 {store}) or point [models].flm_store at a writable path.",
-                details=details,
-            )
+        require_flm_store(store)
 
         # Already a symlink → repoint only if it aims elsewhere.
         if default_p.is_symlink():
@@ -1524,13 +1538,29 @@ def flm_pull_command(tag: str) -> tuple[list[str], str]:
     that mount source, which the caller polls for progress and records in the
     registry: the same directory the slot serves from.
 
-    Raises :class:`~hal0.providers.flm_cli.FLMRunnerUnavailableError` when this
-    process cannot reach the image. There is no host-binary fallback.
+    Creates the store first if it does not exist (:func:`require_flm_store`),
+    as the host pull path did, so a fresh or relocated store does not fail the
+    seam's existence check. Raises :class:`FLMStoreLinkError` when it cannot be
+    created, and :class:`~hal0.providers.flm_cli.FLMRunnerUnavailableError`
+    when this process cannot reach the image. There is no host-binary fallback.
     """
     from hal0.providers.flm_cli import flm_pull_invocation
 
     invocation, store = flm_pull_invocation(tag)
+    require_flm_store(store)
     return invocation.argv, store
+
+
+def flm_pull_stop_command(tag: str) -> list[str] | None:
+    """argv that removes ``tag``'s pull container, or ``None`` with no seam route.
+
+    The cancel path's last step (:func:`hal0.registry.pull.run_flm_pull`): if
+    the pull process has to be killed, podman cannot forward SIGKILL, so the
+    container is removed by name through the seam's ``stop-pull`` verb.
+    """
+    from hal0.providers.flm_cli import flm_pull_stop_argv
+
+    return flm_pull_stop_argv(tag)
 
 
 _FLM_PROGRESS_RE = re.compile(

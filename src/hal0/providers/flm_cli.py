@@ -31,8 +31,9 @@ Where each command runs:
 Privilege: slots and their images live in ROOT's podman store, and hal0-api
 runs as the unprivileged ``hal0`` user, so the container commands go through
 the ``hal0-flmctl`` seam (``installer/wrappers/hal0-flmctl``). The wrapper owns
-every podman flag; this side resolves its operands the way the slot launch
-does (:meth:`FLMProvider.image_ref`, :meth:`FLMProvider.models_store`) and
+every podman flag and runs the one-shot containers as the hal0 account's own
+uid, gid and groups, so they write only what the account can already write;
+this side resolves its operands the way the slot launch does (:meth:`FLMProvider.image_ref`, :meth:`FLMProvider.models_store`) and
 mirrors its validators so a bad operand fails before a sudo round-trip. A root
 caller (``sudo hal0 …``) runs the same wrapper without sudo.
 """
@@ -269,6 +270,23 @@ def flm_list_output[T](
     return None
 
 
+def stop_pull_invocation(tag: str, *, launcher: list[str] | None) -> FlmInvocation | None:
+    """``stop-pull <tag>``: remove the tag's pull container, if one exists.
+
+    ``None`` when there is no route to the seam or the tag is not one the seam
+    would accept (then no pull container of that name can exist).
+    """
+    if launcher is None or not is_valid_flm_tag(tag):
+        return None
+    return FlmInvocation("run", [*launcher, "stop-pull", tag])
+
+
+def flm_pull_stop_argv(tag: str) -> list[str] | None:
+    """argv of :func:`stop_pull_invocation` with this process's launcher."""
+    inv = stop_pull_invocation(tag, launcher=_launcher())
+    return inv.argv if inv is not None else None
+
+
 def flm_pull_invocation(tag: str, *, target: FlmTarget | None = None) -> tuple[FlmInvocation, str]:
     """``(invocation, store)`` for pulling ``tag`` into the serving slot's store."""
     tgt = target if target is not None else resolve_target()
@@ -285,8 +303,10 @@ __all__ = [
     "FlmTarget",
     "flm_list_output",
     "flm_pull_invocation",
+    "flm_pull_stop_argv",
     "is_valid_flm_tag",
     "list_invocations",
     "pull_invocation",
     "resolve_target",
+    "stop_pull_invocation",
 ]

@@ -32,20 +32,38 @@
 #     `list -j` / `pull <tag>` argv;
 #   * the host FLM STORE directory (run-*) — absolute, a closed charset with no
 #     ':' or ',' (it is spliced into podman's -v spec), no '..', an existing
-#     directory, and not a system directory once symlinks are resolved. The
-#     RESOLVED path is what gets mounted, so the directory checked is the
-#     directory mounted. It lands at the one fixed container path FLM reads
-#     (/var/lib/hal0/.config/flm/models), exactly as
-#     FLMProvider.container_spec mounts it for the serving slot;
-#   * an FLM model TAG (run-pull) — family:variant, no leading '-'.
+#     directory, not a system directory once symlinks are resolved, and handed
+#     to the hal0 account: owned by its uid, or group-owned by one of its
+#     groups. It is mounted at the relative path FLM reads under the one-shot's
+#     HOME (.config/flm/models), as FLMProvider.container_spec mounts it under
+#     the serving slot's. The store's location is runtime config ([models].flm_store in
+#     hal0.toml, which the hal0 account itself writes), so there is no
+#     root-owned record to pin it to; the boundary below does not rely on it;
+#   * an FLM model TAG (run-pull, stop-pull) — family:variant, no leading '-'.
 #
-# The one-shot containers get NO devices, NO capabilities
-# (--cap-drop=all, no-new-privileges) and run as uid/gid 1000, the runner
-# image's own `hal0` USER, which is also who the serving slot runs as, so the
-# weights are owned by the same uid and the process can write only what that
-# uid could already write through the serving slot's identical mount.
-# FastFlowLM 1.0.10's `flm list` / `flm pull` work without the NPU (verified
-# on Strix Halo, #2993).
+# HONEST BOUNDARY. The one-shot containers run with the hal0 ACCOUNT'S OWN
+# identity, resolved here from the passwd/group databases and never from the
+# caller: its uid, primary gid and supplementary groups, exactly what the old
+# host `flm pull` ran as. They get no devices, --cap-drop=all and
+# --security-opt=no-new-privileges. So the files the container can create or
+# change are the files the hal0 account can already create or change; naming
+# a different store directory buys the caller no write it did not already
+# have. What a mount does add is reach: a bind mount does not re-check the
+# search permission of the source's parent directories, so a directory the
+# account could not walk to by path becomes reachable inside the container.
+# The system-directory denylist and the ownership hand-off above narrow that
+# to directories already handed to the account, and the only program that
+# runs there is flm. The check-then-mount is not atomic: an account that owns
+# a parent of the store can swap it for a symlink after the checks. That
+# changes which directory is mounted, not whose identity writes there, so it
+# reduces to the same reach-only gap. This seam is therefore not a sandbox
+# against a compromised hal0 account; it is a hard boundary against running
+# anything but flm, against running it with more than the account's own
+# write rights, and against any podman flag a caller might want to add.
+#
+# The pull container has a fixed name, hal0-flm-pull-<tag with ':' as '_'>,
+# so `stop-pull <tag>` can remove it if the client process is killed before
+# podman could forward the stop (podman does not proxy SIGKILL).
 #
 # EXIT-CODE CONTRACT:
 #
@@ -75,25 +93,37 @@ set -euo pipefail
 export LC_ALL=C
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
+# sudo keeps the caller's working directory; run from / so nothing here ever
+# resolves against it (#3007). Every path this script uses is absolute.
+cd /
+
 PODMAN=/usr/bin/podman
-# Test-suite override only. Honoured only when NOT running as root, so no
-# sudoers env_keep configuration can ever make root exec a caller-named binary.
-if [[ "${EUID}" -ne 0 && -n "${HAL0_FLMCTL_PODMAN:-}" ]]; then
-  PODMAN="${HAL0_FLMCTL_PODMAN}"
+SVC_USER=hal0
+# Test-suite overrides only. Honoured only when NOT running as root, so no
+# sudoers env_keep configuration can ever make root exec a caller-named binary
+# or run a container as a caller-named account.
+if [[ "${EUID}" -ne 0 ]]; then
+  PODMAN="${HAL0_FLMCTL_PODMAN:-$PODMAN}"
+  SVC_USER="${HAL0_FLMCTL_USER:-$SVC_USER}"
 fi
 
 # Container-side literals. Keep in lock-step with src/hal0/providers/flm.py
-# (_CONTAINER_FLM_MODELS, _CONTAINER_FLM_BIN, _CONTAINER_FLM_ENV); the wrapper
-# test asserts they agree.
-CTR_STORE=/var/lib/hal0/.config/flm/models
+# (_CONTAINER_FLM_BIN, _CONTAINER_FLM_ENV); the wrapper test asserts they agree.
 CTR_FLM=/opt/fastflowlm/bin/flm
 CTR_ENV_CONFIG=FLM_CONFIG_PATH=/opt/fastflowlm/share/flm/model_list.json
 CTR_ENV_LD=LD_LIBRARY_PATH=/opt/fastflowlm/lib:/opt/xilinx/xrt/lib:/usr/lib/x86_64-linux-gnu
-# The runner image's ENTRYPOINT is tini -> /usr/local/bin/flm (a symlink to
-# CTR_FLM) and its USER is hal0, uid/gid 1000 (hal0-runner-images
-# runners/flm/Containerfile). Both are pinned here rather than inherited.
+# The one-shot's HOME. FLM hardcodes its cache as ~/.config/flm/models. The
+# image's own HOME (/var/lib/hal0, where the serving slot mounts the store) is
+# mode 0700 for the image's uid 1000, which the hal0 account's uid usually is
+# not, so the one-shot gets a fresh tmpfs HOME and the store is mounted at the
+# same relative path under it.
+CTR_HOME=/flm-home
+CTR_STORE="${CTR_HOME}/.config/flm/models"
+# The runner image's ENTRYPOINT is tini -> /usr/local/bin/flm, a symlink to
+# CTR_FLM (hal0-runner-images runners/flm/Containerfile). Pinned here rather
+# than inherited, so a caller-named image cannot choose the program.
 CTR_ENTRYPOINT='["/usr/bin/tini","--","/opt/fastflowlm/bin/flm"]'
-CTR_USER=1000:1000
+PULL_NAME_PREFIX=hal0-flm-pull-
 
 die() { echo "hal0-flmctl: $1" >&2; exit 64; }
 
@@ -117,6 +147,8 @@ STORE_RE='^/[A-Za-z0-9._/+@%=-]{1,510}$'
 # and an alphanumeric first byte on both sides, so never a flag.
 FLM_TAG_RE='^[A-Za-z0-9][A-Za-z0-9._-]{0,63}:[A-Za-z0-9][A-Za-z0-9._-]{0,63}$'
 
+NUM_RE='^[0-9]+$'
+
 validate_slot_token() {
   local token="${1-}"
   [[ -n "$token" ]] || die "missing slot token"
@@ -130,28 +162,54 @@ validate_image_ref() {
   [[ "$ref" =~ $IMAGE_REF_RE ]] || die "bad image ref: $ref"
 }
 
-# Sets STORE_REAL, the resolved directory that exec_oneshot mounts.
-validate_store() {
-  local store="${1-}" real
-  [[ -n "$store" ]] || die "missing store dir"
-  [[ "$store" =~ $STORE_RE ]] || die "bad store dir: $store"
-  [[ "$store" != *..* ]] || die "store dir traversal: $store"
-  [[ -d "$store" ]] || die "store dir does not exist: $store"
-  real="$(readlink -f -- "$store")" || die "store dir does not resolve: $store"
-  case "$real" in
-    /|/bin|/bin/*|/boot|/boot/*|/dev|/dev/*|/etc|/etc/*|/lib|/lib/*|/lib64|/lib64/*|\
-    /proc|/proc/*|/root|/root/*|/run|/run/*|/sbin|/sbin/*|/sys|/sys/*|/usr|/usr/*)
-      die "store dir is a system directory: $store" ;;
-  esac
-  [[ "$real" =~ $STORE_RE ]] || die "bad resolved store dir: $real"
-  STORE_REAL="$real"
-}
-
 validate_tag() {
   local tag="${1-}"
   [[ -n "$tag" ]] || die "missing model tag"
   [[ "$tag" =~ $FLM_TAG_RE ]] || die "bad model tag: $tag"
 }
+
+# Sets SVC_UID, SVC_GID and SVC_GROUPS (every gid, primary first) from the
+# account databases. Never from the caller.
+resolve_service_identity() {
+  local g
+  SVC_UID="$(id -u -- "$SVC_USER" 2>/dev/null)" || die "no '$SVC_USER' account on this host"
+  SVC_GID="$(id -g -- "$SVC_USER" 2>/dev/null)" || die "no '$SVC_USER' account on this host"
+  read -r -a SVC_GROUPS <<<"$(id -G -- "$SVC_USER" 2>/dev/null)" || true
+  [[ "$SVC_UID" =~ $NUM_RE && "$SVC_GID" =~ $NUM_RE ]] || die "unreadable '$SVC_USER' account"
+  # The account must not be root, or the whole boundary above is void.
+  [[ "$SVC_UID" -ne 0 ]] || die "'$SVC_USER' resolves to uid 0"
+  for g in "${SVC_GROUPS[@]}"; do
+    [[ "$g" =~ $NUM_RE ]] || die "unreadable '$SVC_USER' groups"
+    [[ "$g" -ne 0 ]] || die "'$SVC_USER' is in group 0"
+  done
+}
+
+# Sets STORE_REAL, the resolved directory that exec_oneshot mounts. Needs
+# resolve_service_identity first.
+validate_store() {
+  local store="${1-}" real owner group g handed=0
+  [[ -n "$store" ]] || die "missing store dir"
+  [[ "$store" =~ $STORE_RE ]] || die "bad store dir: $store"
+  [[ "$store" != *..* ]] || die "store dir traversal: $store"
+  [[ -d "$store" ]] || die "store dir does not exist: $store"
+  real="$(readlink -f -- "$store")" || die "store dir does not resolve: $store"
+  [[ "$real" =~ $STORE_RE ]] || die "bad resolved store dir: $real"
+  case "$real" in
+    /|/bin|/bin/*|/boot|/boot/*|/dev|/dev/*|/etc|/etc/*|/lib|/lib/*|/lib64|/lib64/*|\
+    /proc|/proc/*|/root|/root/*|/run|/run/*|/sbin|/sbin/*|/sys|/sys/*|/usr|/usr/*|\
+    /home|/var|/var/lib|/tmp|/srv|/mnt|/opt|/media)
+      die "store dir is a system directory: $store" ;;
+  esac
+  read -r owner group <<<"$(stat -c '%u %g' -- "$real")" || die "cannot stat store dir: $real"
+  [[ "$owner" == "$SVC_UID" ]] && handed=1
+  for g in "${SVC_GROUPS[@]}"; do
+    [[ "$group" == "$g" ]] && handed=1
+  done
+  [[ "$handed" -eq 1 ]] || die "store dir $real is not owned by the $SVC_USER account or one of its groups (owner $owner:$group)"
+  STORE_REAL="$real"
+}
+
+pull_name() { printf '%s%s' "$PULL_NAME_PREFIX" "${1/:/_}"; }
 
 require_podman() {
   [[ -x "$PODMAN" ]] || { echo "hal0-flmctl: podman not found at $PODMAN" >&2; exit 65; }
@@ -176,17 +234,25 @@ require_image() {   # arg: validated image ref; rc 70 when absent
 }
 
 # One-shot `podman run` — the store mounted where the serving slot mounts it,
-# the same FLM env, a pinned entrypoint and user, no capabilities, and nothing
-# else. exec'd so flm's output streams to the caller and a SIGTERM (pull
-# cancel) reaches podman, whose signal proxy forwards it to tini -> flm; --rm
-# then removes the container.
-exec_oneshot() {   # args: image <flm argv...>; mounts STORE_REAL
-  local image="$1"; shift
-  exec "$PODMAN" run --rm --pull=never \
-    --entrypoint="${CTR_ENTRYPOINT}" --user="${CTR_USER}" \
+# the same FLM env, a pinned entrypoint, the hal0 account's own identity, no
+# capabilities, and nothing else. exec'd so flm's output streams to the
+# caller and a SIGTERM (pull cancel) reaches podman, whose signal proxy
+# forwards it to tini -> flm; --rm then removes the container.
+exec_oneshot() {   # args: image <podman run flags...> -- <flm argv...>
+  local image="$1" g
+  shift
+  local -a extra=() groups=()
+  while [[ $# -gt 0 && "$1" != "--" ]]; do extra+=("$1"); shift; done
+  shift
+  for g in "${SVC_GROUPS[@]}"; do
+    [[ "$g" == "$SVC_GID" ]] || groups+=("--group-add=$g")
+  done
+  exec "$PODMAN" run --rm --pull=never "${extra[@]}" \
+    --entrypoint="${CTR_ENTRYPOINT}" --user="${SVC_UID}:${SVC_GID}" "${groups[@]}" \
     --cap-drop=all --security-opt=no-new-privileges \
+    --tmpfs="${CTR_HOME}:rw,nosuid,nodev,mode=1777" \
     --volume="${STORE_REAL}:${CTR_STORE}" \
-    --env="${CTR_ENV_CONFIG}" --env="${CTR_ENV_LD}" \
+    --env="${CTR_ENV_CONFIG}" --env="${CTR_ENV_LD}" --env="HOME=${CTR_HOME}" \
     -- "$image" "$@"
 }
 
@@ -209,20 +275,31 @@ case "$cmd" in
   run-list)                # args: image store -> one-shot `flm list -j`
     [[ $# -eq 2 ]] || die "run-list takes exactly two arguments"
     validate_image_ref "$1"
+    resolve_service_identity
     validate_store "$2"
     require_podman
     require_image "$1"
-    exec_oneshot "$1" list -j
+    exec_oneshot "$1" -- list -j
     ;;
 
   run-pull)                # args: image store tag -> one-shot `flm pull <tag>`
     [[ $# -eq 3 ]] || die "run-pull takes exactly three arguments"
     validate_image_ref "$1"
-    validate_store "$2"
     validate_tag "$3"
+    resolve_service_identity
+    validate_store "$2"
     require_podman
     require_image "$1"
-    exec_oneshot "$1" pull "$3"
+    # --replace: a container of this name left by a crashed pull of the same
+    # tag is stale; the new pull supersedes it.
+    exec_oneshot "$1" --name="$(pull_name "$3")" --replace -- pull "$3"
+    ;;
+
+  stop-pull)               # arg: tag -> remove hal0-flm-pull-<tag> if present
+    [[ $# -eq 1 ]] || die "stop-pull takes exactly one argument"
+    validate_tag "$1"
+    require_podman
+    exec "$PODMAN" rm --force --ignore --time=10 -- "$(pull_name "$1")"
     ;;
 
   check-tag)               # arg: model tag — side-effect-free validator probe
@@ -237,6 +314,7 @@ usage: hal0-flmctl <command> [args]
   exec-list <token>              flm list -j inside the running hal0-slot-<token>
   run-list <image> <store>       flm list -j in a one-shot container of <image>
   run-pull <image> <store> <tag> flm pull <tag> in a one-shot container of <image>
+  stop-pull <tag>                remove the pull container for <tag>, if any
   check-tag <tag>                validate a model tag only (no podman call)
 
 exit codes:

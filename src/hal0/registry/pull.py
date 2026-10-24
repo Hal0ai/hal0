@@ -2367,9 +2367,12 @@ async def run_flm_pull(
         and refuses to use mismatched weights. Re-hashing would just
         double-read multi-GB files for the same guarantee.
 
-    Cancellation works via SIGTERM on the spawned process: sudo relays it to
-    the ``hal0-flmctl`` seam's exec'd ``podman run``, which stops and removes
-    the container. The partial files are left on disk; FLM's next pull deletes
+    Cancellation sends SIGTERM to the spawned process: sudo relays it to the
+    ``hal0-flmctl`` seam's exec'd ``podman run``, whose signal proxy stops flm,
+    and ``--rm`` removes the container. If the process has not exited after
+    10 s, the seam's ``stop-pull`` verb removes the container by name before
+    the process is killed, because podman cannot forward SIGKILL and the
+    container would otherwise keep writing. The partial files are left on disk; FLM's next pull deletes
     & redownloads them (it checks file sizes against the manifest before
     reusing).
 
@@ -2381,6 +2384,7 @@ async def run_flm_pull(
     # environments without docker).
     from hal0.providers.flm import (
         flm_pull_command,
+        flm_pull_stop_command,
         flm_served_models,
         flm_served_models_async,
         reset_flm_catalog_cache,
@@ -2502,8 +2506,9 @@ async def run_flm_pull(
             if job.cancel_requested:
                 proc.terminate()
                 with contextlib.suppress(asyncio.TimeoutError):
-                    await asyncio.wait_for(proc.wait(), timeout=10.0)
+                    await asyncio.wait_for(proc.wait(), timeout=_FLM_CANCEL_GRACE_S)
                 if proc.returncode is None:
+                    await _stop_flm_pull_container(flm_pull_stop_command(tag), tag)
                     proc.kill()
                     await proc.wait()
                 job.state = "cancelled"
@@ -2657,6 +2662,30 @@ class _FlmInstallPathLookup:
         if not self._models:
             return None
         return _flm_install_path_from(self._models, self.host_models_dir, self.tag)
+
+
+#: Seconds a cancelled ``flm pull`` gets to exit on SIGTERM before its
+#: container is removed by name and the process is killed.
+_FLM_CANCEL_GRACE_S = 10.0
+
+
+async def _stop_flm_pull_container(argv: list[str] | None, tag: str) -> None:
+    """Run the seam's ``stop-pull`` for ``tag``. Best-effort: logs, never raises."""
+    if argv is None:
+        return
+    try:
+        stopper = await asyncio.create_subprocess_exec(
+            *argv,
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        rc = await asyncio.wait_for(stopper.wait(), timeout=30.0)
+    except (OSError, TimeoutError) as exc:
+        log.warning("flm.pull_stop_failed tag=%s error=%s", tag, exc)
+        return
+    if rc != 0:
+        log.warning("flm.pull_stop_failed tag=%s exit_code=%s", tag, rc)
 
 
 def _verify_flm_landing(path: str, host_models_dir: str, tag: str) -> None:
