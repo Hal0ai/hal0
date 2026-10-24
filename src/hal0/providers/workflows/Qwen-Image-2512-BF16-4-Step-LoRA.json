@@ -140,7 +140,7 @@
   },
   "73": {
     "inputs": {
-      "lora_name": "Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors",
+      "lora_name": "Qwen-Image-2512-Lightning-4steps-V1.0-bf16.safetensors",
       "strength_model": 1,
       "model": [
         "37",
