@@ -1115,6 +1115,13 @@ async def test_slot_resolved_and_state_dispatch_get(
     assert (method, url) == ("GET", "http://t/api/slots/agent/state")
 
 
+def test_comfyui_model_remove_description_names_include_shared() -> None:
+    """The REST ``include_shared`` query param is passed as an extra arg; the tool must say so."""
+    description = admin.TOOL_DESCRIPTIONS["comfyui_model_remove"]
+    assert "include_shared" in description
+    assert "affected" in description
+
+
 @pytest.mark.asyncio
 async def test_slot_set_defaults_tool_is_gone(
     queue: ApprovalQueue, mock_transport: dict[str, Any]
