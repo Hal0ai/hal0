@@ -281,6 +281,34 @@ def _write_workflow(model: ImageModel) -> Path:
     return dest
 
 
+def ensure_workflows() -> list[str]:
+    """Write the workflow of every complete catalog model that has none; return the filenames.
+
+    An install writes its model's workflow, but a model whose weights were put on disk by
+    hand reports ``complete`` with no workflow, and the install route then refuses it, so
+    nothing else would ever provision it. This covers those. A workflow file that exists is
+    never replaced, whatever it holds. Best-effort: a model whose state cannot be read or
+    whose workflow cannot be written (a directory the hal0 user cannot write) is logged and
+    skipped, and the models after it are still done.
+    """
+    root = paths.models_root()
+    written: list[str] = []
+    for model in CATALOG.values():
+        try:
+            if install_state(model, root).state != "complete":
+                continue
+            if (paths.workflows_dir() / model.workflow_filename).is_file():
+                continue
+            _write_workflow(model)
+        except OSError as exc:
+            log.warning(
+                "comfyui.ensure_workflow_failed", extra={"model_id": model.id, "error": str(exc)}
+            )
+            continue
+        written.append(model.workflow_filename)
+    return written
+
+
 async def _download_missing(
     job: PullJob,
     missing: tuple[Component, ...],

@@ -1666,3 +1666,76 @@ def test_error_classes_carry_their_codes() -> None:
     assert install.InstallInsufficientDisk.status == 507
     assert install.InstallStagingCrossDevice.code == "comfyui.staging_cross_device"
     assert install.InstallStagingCrossDevice.status == 409
+
+
+# ── ensure_workflows: provisioning for models that did not come through an install ──
+
+
+def _land_weights(model_id: str, *, only: int | None = None) -> ImageModel:
+    """Put the catalog model's weight files on disk, as an operator copying them by hand would."""
+    model = CATALOG[model_id]
+    for component in model.components[:only]:
+        component.dest.parent.mkdir(parents=True, exist_ok=True)
+        component.dest.write_bytes(b"w")
+    return model
+
+
+def test_ensure_workflows_writes_missing_only() -> None:
+    """A complete model without a workflow gets one; an existing file, whatever it holds, stays."""
+    bare = _land_weights("sd-1.5-pruned-emaonly")
+    kept = _land_weights("esrgan-4x")
+    partial = _land_weights("sdxl-lightning", only=1)
+    existing = paths.workflows_dir() / kept.workflow_filename
+    existing.parent.mkdir(parents=True, exist_ok=True)
+    existing.write_text('{"edited": "by hand"}', encoding="utf-8")
+
+    written = install.ensure_workflows()
+
+    assert written == [bare.workflow_filename]
+    assert json.loads((paths.workflows_dir() / bare.workflow_filename).read_text()) == {
+        key: value for key, value in render_template(bare).items() if key != "_meta"
+    }
+    assert existing.read_text(encoding="utf-8") == '{"edited": "by hand"}'
+    assert not (paths.workflows_dir() / partial.workflow_filename).exists()  # not complete
+    assert install.ensure_workflows() == []  # nothing is missing now
+
+
+def test_ensure_workflows_on_an_empty_store_writes_nothing() -> None:
+    assert install.ensure_workflows() == []
+    assert not paths.workflows_dir().exists()
+
+
+def test_ensure_workflows_logs_an_unwritable_workflow_and_carries_on(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Best-effort: one model's failed write neither raises nor stops the models after it."""
+    first = _land_weights("sdxl-turbo")
+    second = _land_weights("sd-1.5-pruned-emaonly")
+    real = install._write_workflow
+
+    def write(model: ImageModel) -> Path:
+        if model.id == first.id:
+            raise PermissionError(13, "Permission denied")
+        return real(model)
+
+    monkeypatch.setattr(install, "_write_workflow", write)
+
+    with caplog.at_level("WARNING", logger=install.log.name):
+        written = install.ensure_workflows()
+
+    assert written == [second.workflow_filename]
+    assert not (paths.workflows_dir() / first.workflow_filename).exists()
+    assert any(r.getMessage() == "comfyui.ensure_workflow_failed" for r in caplog.records)
+
+
+def test_ensure_workflows_survives_a_models_tree_it_cannot_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``install_state`` raises PermissionError on a directory the hal0 user cannot traverse."""
+
+    def denied(model: ImageModel, root: Path | None = None) -> Any:
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(install, "install_state", denied)
+
+    assert install.ensure_workflows() == []
