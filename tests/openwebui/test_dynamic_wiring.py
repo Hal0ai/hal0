@@ -60,6 +60,7 @@ def test_no_gates_nulls_every_dynamic_key() -> None:
         image_model_id=None,
         image_workflow_json=None,
         image_workflow_nodes_json=None,
+        image_size=None,
         search_provider=None,
     )
     assert set(overrides) == set(_DYNAMIC_ENV_KEYS)
@@ -72,6 +73,7 @@ def test_embed_only_renders_rag_block_and_nulls_the_rest() -> None:
         image_model_id=None,
         image_workflow_json=None,
         image_workflow_nodes_json=None,
+        image_size=None,
         search_provider=None,
     )
     assert overrides["RAG_EMBEDDING_ENGINE"] == "openai"
@@ -87,6 +89,7 @@ def test_image_only_renders_comfyui_block_and_nulls_rag() -> None:
         image_model_id="sdxl-turbo",
         image_workflow_json='{"3": {}}',
         image_workflow_nodes_json="[]",
+        image_size="512x512",
         search_provider=None,
     )
     assert overrides["ENABLE_IMAGE_GENERATION"] == "True"
@@ -95,6 +98,8 @@ def test_image_only_renders_comfyui_block_and_nulls_rag() -> None:
     assert overrides["IMAGE_GENERATION_MODEL"] == "sdxl-turbo"
     assert overrides["COMFYUI_WORKFLOW"] == '{"3": {}}'
     assert overrides["COMFYUI_WORKFLOW_NODES"] == "[]"
+    # OWUI's default IMAGE_SIZE is whatever the caller resolved, not a constant.
+    assert overrides["IMAGE_SIZE"] == "512x512"
     assert overrides["RAG_EMBEDDING_ENGINE"] is None
 
 
@@ -107,10 +112,26 @@ def test_image_model_without_both_workflow_strings_is_not_rendered() -> None:
         image_model_id="sdxl-turbo",
         image_workflow_json=None,
         image_workflow_nodes_json=None,
+        image_size=None,
         search_provider=None,
     )
     assert overrides["ENABLE_IMAGE_GENERATION"] is None
     assert overrides["COMFYUI_WORKFLOW"] is None
+
+
+def test_image_model_without_a_size_is_not_rendered() -> None:
+    """The size is part of the resolved block: without it the block is not half-rendered
+    with a made-up IMAGE_SIZE."""
+    overrides = dynamic_env_overrides(
+        embed_model_id=None,
+        image_model_id="sdxl-turbo",
+        image_workflow_json='{"3": {}}',
+        image_workflow_nodes_json="[]",
+        image_size=None,
+        search_provider=None,
+    )
+    assert overrides["ENABLE_IMAGE_GENERATION"] is None
+    assert overrides["IMAGE_SIZE"] is None
 
 
 def test_both_embed_and_image_render_together() -> None:
@@ -119,6 +140,7 @@ def test_both_embed_and_image_render_together() -> None:
         image_model_id="sdxl-turbo",
         image_workflow_json='{"3": {}}',
         image_workflow_nodes_json="[]",
+        image_size="512x512",
         search_provider=None,
     )
     assert overrides["RAG_EMBEDDING_MODEL"] == "nomic-embed-text-v1.5"
@@ -131,6 +153,7 @@ def test_search_provider_renders_web_search_block() -> None:
         image_model_id=None,
         image_workflow_json=None,
         image_workflow_nodes_json=None,
+        image_size=None,
         search_provider={"engine": "searxng", "query_url": "http://searxng:8080/search?q=<query>"},
     )
     assert overrides["ENABLE_WEB_SEARCH"] == "True"
@@ -304,6 +327,8 @@ def test_wiring_comfyui_slot_bakes_the_real_translator_workflow(tmp_hal0_home: s
     assert got_graph["4"]["inputs"]["ckpt_name"] == ckpt_file
     assert ckpt_file != "sdxl_lightning_4step.safetensors"
 
+    assert overrides["IMAGE_SIZE"] == model.sizes[0] == "512x512"
+
     nodes = json.loads(overrides["COMFYUI_WORKFLOW_NODES"])
     node_types = {n["type"] for n in nodes}
     assert {"prompt", "width", "height", "steps", "seed", "n"} <= node_types
@@ -327,6 +352,7 @@ def test_owui_baked_workflow_uses_catalog_template(tmp_hal0_home: str) -> None:
     assert built is not None
     graph = json.loads(built[0])
     nodes = json.loads(built[1])
+    assert built[2] == "512x512"
     params = load_template("sd15_simple")["_meta"]["params"]
     # The sd15 template is the one rendered, at 512x512 rather than the translator's 1024 default.
     width_node, width_field = parse_pointer(params["width"])
@@ -364,6 +390,47 @@ def test_owui_baked_workflow_bakes_a_user_checkpoint_override(tmp_hal0_home: str
     assert graph[node_id]["inputs"][field] == "sub/mine.safetensors"
     # The OWUI "model" node stays out for a user checkpoint too.
     assert "model" not in {n["type"] for n in json.loads(built[1])}
+
+
+def _img_selection(model: str) -> str:
+    return f"""
+schema_version = 2
+[selections.img.img]
+device = "gpu-vulkan"
+provider = "comfyui"
+model = "{model}"
+enabled = true
+"""
+
+
+def test_wiring_image_size_is_the_catalog_models_native_size(tmp_hal0_home: str) -> None:
+    """OWUI's default IMAGE_SIZE follows the resolved model: SD 1.5 is 512, not a hardcoded 1024."""
+    from hal0.openwebui.wiring import resolve_dynamic_env_overrides
+
+    _install("sd-1.5-pruned-emaonly")
+    _write_capabilities_toml(tmp_hal0_home, _img_selection("sd-1.5-pruned-emaonly"))
+
+    assert resolve_dynamic_env_overrides()["IMAGE_SIZE"] == "512x512"
+
+
+def test_wiring_image_size_is_a_user_sdxl_checkpoints_native_size(tmp_hal0_home: str) -> None:
+    import struct
+
+    from hal0.openwebui.wiring import resolve_dynamic_env_overrides
+
+    raw = json.dumps(
+        {"conditioner.embedders.1.x": {"dtype": "F16", "shape": [1], "data_offsets": [0, 2]}}
+    ).encode("utf-8")
+    ckpt = paths.models_root() / "checkpoints" / "mine.safetensors"
+    ckpt.parent.mkdir(parents=True)
+    ckpt.write_bytes(struct.pack("<Q", len(raw)) + raw + b"\x00\x00")
+    _write_capabilities_toml(tmp_hal0_home, _img_selection("ckpt/mine"))
+
+    overrides = resolve_dynamic_env_overrides()
+
+    assert overrides["ENABLE_IMAGE_GENERATION"] == "True"
+    assert overrides["IMAGE_GENERATION_MODEL"] == "ckpt/mine"
+    assert overrides["IMAGE_SIZE"] == "1024x1024"
 
 
 @pytest.mark.parametrize(

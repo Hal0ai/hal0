@@ -68,6 +68,7 @@ def _overrides(*, embed: str | None = None) -> dict[str, str | None]:
         image_model_id=None,
         image_workflow_json=None,
         image_workflow_nodes_json=None,
+        image_size=None,
         search_provider=None,
     )
 
@@ -276,6 +277,7 @@ def test_a_search_provider_claim_is_written_then_cleared_when_it_goes(tmp_path: 
         image_model_id=None,
         image_workflow_json=None,
         image_workflow_nodes_json=None,
+        image_size=None,
         search_provider=provider,
     )
     write_openwebui_env(target, overrides=with_provider, preserve_existing=True)

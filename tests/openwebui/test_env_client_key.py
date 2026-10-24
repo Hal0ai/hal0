@@ -83,6 +83,7 @@ def test_rag_key_follows_client_key_when_rag_block_active(tmp_path: Path) -> Non
         image_model_id=None,
         image_workflow_json=None,
         image_workflow_nodes_json=None,
+        image_size=None,
         search_provider=None,
     )
     write_openwebui_env(target, overrides=overrides, preserve_existing=True)
