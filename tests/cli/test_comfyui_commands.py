@@ -257,6 +257,7 @@ def test_cli_install_unknown_model_exits_1(api: FakeApi) -> None:
 def test_cli_install_waits_for_every_model_and_ignores_other_jobs(api: FakeApi) -> None:
     stale = _job("qwen-image", "failed", error="from an earlier run")
     api.job_polls = [
+        [_job("sdxl-turbo", "completed"), stale],
         [
             _job("sdxl-turbo", "completed"),
             _job("esrgan-4x", "running", done=0.01, total=0.1),
@@ -268,8 +269,54 @@ def test_cli_install_waits_for_every_model_and_ignores_other_jobs(api: FakeApi) 
     result = _run("models", "install", "sdxl-turbo", "esrgan-4x")
 
     assert result.exit_code == 0, result.output  # the other model's failed job is not ours
-    assert api.polls() == 2
+    assert api.polls() == 3
     assert "from an earlier run" not in result.output
+
+
+def test_cli_install_installs_models_one_at_a_time(api: FakeApi) -> None:
+    """The next model is POSTed only after the previous one is terminal (M10).
+
+    Two models that share files, or just two huge ones, must not download side by side.
+    """
+    api.job_polls = [
+        [_job("sdxl-turbo", "running", done=1.0)],
+        [_job("sdxl-turbo", "completed")],
+        [_job("sdxl-turbo", "completed"), _job("esrgan-4x", "completed")],
+    ]
+
+    result = _run("models", "install", "sdxl-turbo", "esrgan-4x")
+
+    assert result.exit_code == 0, result.output
+    assert api.calls == [
+        ("POST", "/api/comfyui/models/sdxl-turbo/install"),
+        ("GET", "/api/comfyui/jobs"),
+        ("GET", "/api/comfyui/jobs"),
+        ("POST", "/api/comfyui/models/esrgan-4x/install"),
+        ("GET", "/api/comfyui/jobs"),
+    ]
+
+
+def test_cli_install_carries_on_to_the_next_model_after_a_failure(api: FakeApi) -> None:
+    api.job_polls = [
+        [_job("sdxl-turbo", "failed", error="HTTP 404")],
+        [_job("sdxl-turbo", "failed", error="HTTP 404"), _job("esrgan-4x", "completed")],
+    ]
+
+    result = _run("models", "install", "sdxl-turbo", "esrgan-4x")
+
+    assert result.exit_code == 1
+    assert "HTTP 404" in result.output
+    assert ("POST", "/api/comfyui/models/esrgan-4x/install") in api.calls
+    assert "installed" in result.output.replace("failed", "")  # esrgan-4x landed
+
+
+def test_cli_install_installs_a_repeated_id_once(api: FakeApi) -> None:
+    api.job_polls = [[_job("sdxl-turbo", "completed")]]
+
+    result = _run("models", "install", "sdxl-turbo", "sdxl-turbo")
+
+    assert result.exit_code == 0, result.output
+    assert api.calls.count(("POST", "/api/comfyui/models/sdxl-turbo/install")) == 1
 
 
 def test_cli_install_reports_one_failure_among_several(api: FakeApi) -> None:
@@ -317,9 +364,30 @@ def test_cli_install_ctrl_c_leaves_the_install_running(
     assert ("DELETE", "/api/comfyui/models/sdxl-turbo") not in api.calls
 
 
+def test_cli_install_ctrl_c_names_the_models_it_never_started(
+    api: FakeApi, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Installs run one at a time, so a Ctrl-C leaves the later models unstarted."""
+
+    def interrupted(_path: str, **_kw: Any) -> Any:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(comfyui_commands, "api_get", interrupted)
+
+    result = _run("models", "install", "sdxl-turbo", "qwen-image", "esrgan-4x")
+
+    assert result.exit_code == 130
+    assert "Not started: qwen-image, esrgan-4x" in result.output
+    assert [path for verb, path in api.calls if verb == "POST"] == [
+        "/api/comfyui/models/sdxl-turbo/install"
+    ]
+
+
 def test_cli_install_ctrl_c_while_starting_leaves_started_installs_running(
     api: FakeApi, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    api.job_polls = [[_job("sdxl-turbo", "completed")]]
+
     def second_post_interrupted(path: str, **kw: Any) -> Any:
         if "qwen-image" in path:
             raise KeyboardInterrupt
@@ -327,12 +395,13 @@ def test_cli_install_ctrl_c_while_starting_leaves_started_installs_running(
 
     monkeypatch.setattr(comfyui_commands, "api_post", second_post_interrupted)
 
-    result = _run("models", "install", "sdxl-turbo", "qwen-image")
+    result = _run("models", "install", "sdxl-turbo", "qwen-image", "esrgan-4x")
 
     assert result.exit_code == 130
     assert "Traceback" not in result.output
     assert "already started continue on the daemon" in result.output
-    assert api.polls() == 0  # it never reached the follow loop
+    assert "Not started: esrgan-4x" in result.output  # the one in flight is not listed
+    assert api.polls() == 1  # only sdxl-turbo was followed
 
 
 # ── models remove ───────────────────────────────────────────────────────────
