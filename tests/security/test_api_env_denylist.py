@@ -29,6 +29,9 @@ from hal0.upstreams.registry import Upstream
 #: name -> the issue that refused it.
 DENIED: dict[str, int] = {
     "SSLKEYLOGFILE": 2997,
+    "OPENSSL_CONF": 2998,
+    "OPENSSL_MODULES": 2998,
+    "OPENSSL_ENGINES": 2998,
 }
 
 

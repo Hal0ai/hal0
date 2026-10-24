@@ -176,7 +176,8 @@ by anyone who can reach the API):
   `SHELL`, `IFS`, `ENV`, `BASH_ENV`, `NODE_OPTIONS`, `NODE_PATH`,
   `PERL5OPT`, `PERL5LIB`, `RUBYOPT`, `GCONV_PATH`,
   `SHELLOPTS`, `BASHOPTS`, `PS4`, `HERMES_HOME`, and any name starting with `LD_`,
-  `DYLD_`, `PYTHON`, `UV_`, `PIP_`, `NPM_CONFIG_` or `GIT_`. Since 1.6.1 the same
+  `DYLD_`, `PYTHON`, `UV_`, `PIP_`, `NPM_CONFIG_`, `GIT_` or (since 1.6.1, #2998)
+  `OPENSSL_`, which covers `OPENSSL_CONF`, `OPENSSL_MODULES` and `OPENSSL_ENGINES`. Since 1.6.1 the same
   answer covers names that change how those processes do TLS, find their configuration
   or route traffic: `SSLKEYLOGFILE` (#2997). Names are matched in any letter case.
   DELETE still accepts them, so an entry written before the guard can be removed. The provider credentials

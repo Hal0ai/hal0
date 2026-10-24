@@ -76,8 +76,20 @@ PROCESS_CONTROL_ENV_NAMES = frozenset(
 #: Prefix families with the same effect: the dynamic loader (``LD_*``,
 #: ``DYLD_*``), the interpreters and installers hal0's children run
 #: (``PYTHON*``, ``UV_*``, ``PIP_*``, ``NPM_CONFIG_*`` for the Hermes web
-#: build's npm) and git (``GIT_SSH_COMMAND`` and the rest).
-PROCESS_CONTROL_ENV_PREFIXES = ("LD_", "DYLD_", "PYTHON", "UV_", "PIP_", "NPM_CONFIG_", "GIT_")
+#: build's npm), git (``GIT_SSH_COMMAND`` and the rest) and OpenSSL
+#: (``OPENSSL_CONF`` and its module and engine directories).
+PROCESS_CONTROL_ENV_PREFIXES = (
+    "LD_",
+    "DYLD_",
+    "PYTHON",
+    "UV_",
+    "PIP_",
+    "NPM_CONFIG_",
+    "GIT_",
+    # OPENSSL_CONF loads an engine or provider shared object into every OpenSSL
+    # user; OPENSSL_MODULES and OPENSSL_ENGINES pick where those load from (#2998).
+    "OPENSSL_",
+)
 
 #: Names that choose which CA bundle outbound TLS clients trust (#2941). A
 #: bundle the ``hal0`` user can write lets a man-in-the-middle read every
