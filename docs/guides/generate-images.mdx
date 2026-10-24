@@ -63,7 +63,8 @@ writes its workflow when the API starts. A removal is remembered: a model you
 removed whose files stay on disk (another model still uses them) does not get
 its workflow back at the next start, and installing it again restores it. After
 an install or a removal hal0 re-renders Open WebUI's image settings, so the
-image button follows the models you have.
+image button follows the models you have. A running Open WebUI restarts to pick
+them up; one you stopped or skipped stays down.
 
 On a box with a ROCm lane, the first image model you install that the API can
 render becomes the `img` selection by itself when nothing is selected, and
